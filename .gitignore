@@ -1,0 +1,31 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+credentials.json
+token.json
+service-account*.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local agent data: WhatsApp session, chats, media, database, backups
+data/
+auth/
+backups/
+*.sqlite
+*.sqlite3
+*.db
+
+# Node / build
+node_modules/
+dist/
+coverage/
+logs/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
