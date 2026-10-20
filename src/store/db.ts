@@ -8,11 +8,16 @@ export type Db = Database.Database;
 export function openDb(file: string): Db {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
   const db = new Database(file);
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-  db.pragma('busy_timeout = 5000');
-  migrate(db);
-  return db;
+  try {
+    db.pragma('journal_mode = WAL');
+    db.pragma('foreign_keys = ON');
+    db.pragma('busy_timeout = 5000');
+    migrate(db);
+    return db;
+  } catch (e) {
+    db.close();
+    throw e;
+  }
 }
 
 /** Applies new migrations in order. Never edits or re-runs an applied one. */

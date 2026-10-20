@@ -10,6 +10,12 @@ describe('openDb', () => {
     ]));
   });
 
+  it('creates the task indexes', () => {
+    const db = openDb(':memory:');
+    const idx = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as { name: string }[]).map((i) => i.name);
+    expect(idx).toEqual(expect.arrayContaining(['tasks_client_status', 'task_events_client_at']));
+  });
+
   it('is safe to migrate twice', () => {
     const db = openDb(':memory:');
     migrate(db);

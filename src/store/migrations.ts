@@ -101,6 +101,8 @@ CREATE TABLE task_events (
   source_ids TEXT NOT NULL DEFAULT '[]',
   at TEXT NOT NULL
 );
+CREATE INDEX tasks_client_status ON tasks (client_id, status);
+CREATE INDEX task_events_client_at ON task_events (client_id, at);
 CREATE TABLE decisions (
   id INTEGER PRIMARY KEY,
   client_id INTEGER NOT NULL REFERENCES clients(id),
