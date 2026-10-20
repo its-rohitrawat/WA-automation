@@ -14,6 +14,9 @@ export interface TokenUsage {
   cacheReadInputTokens: number;
 }
 
+/** Server-side fallback from Opus 5.5 lands on Opus 5 or Opus 4.8, both priced like this (Anthropic pricing page, checked 2026-10-20). */
+export const FALLBACK_PRICES: Prices = { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 };
+
 export function costUsd(u: TokenUsage, p: Prices): number {
   return (
     (u.inputTokens * p.inputPerMTok +
@@ -24,9 +27,9 @@ export function costUsd(u: TokenUsage, p: Prices): number {
   );
 }
 
-/** Hinglish tokenises densely, so assume 3 characters per token and a generous output allowance. */
-export function estimateCostUsd(promptChars: number, p: Prices, expectedOutputTokens = 4_000): number {
-  return (Math.ceil(promptChars / 3) * p.inputPerMTok + expectedOutputTokens * p.outputPerMTok) / 1_000_000;
+/** Ceiling estimate: 2 characters per token covers Hinglish and Devanagari, and the output allowance equals the Claude client's max_tokens (thinking counts as output). */
+export function estimateCostUsd(promptChars: number, p: Prices, expectedOutputTokens = 16_000): number {
+  return (Math.ceil(promptChars / 2) * p.inputPerMTok + expectedOutputTokens * p.outputPerMTok) / 1_000_000;
 }
 
 export function pricesFromEnv(env: Env): Prices {
