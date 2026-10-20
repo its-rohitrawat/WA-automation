@@ -1,5 +1,8 @@
-import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { createHash } from 'node:crypto';
+import { unlinkSync } from 'node:fs';
+import net from 'node:net';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 export class AlreadyRunningError extends Error {
   constructor(message: string) {
@@ -8,40 +11,70 @@ export class AlreadyRunningError extends Error {
   }
 }
 
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === 'EPERM';
-  }
+/** Name of the OS-held lock for a data folder (Windows named pipe, or a unix socket elsewhere). */
+export function lockName(dataDir: string): string {
+  const id = createHash('sha256').update(resolve(dataDir).toLowerCase()).digest('hex').slice(0, 16);
+  return process.platform === 'win32' ? `\\\\.\\pipe\\wa-agent-${id}` : join(tmpdir(), `wa-agent-${id}.sock`);
 }
 
-/** One WA Agent process per data folder: two copies on one WhatsApp session would fight. */
-export function acquireLock(file: string, isAlive: (pid: number) => boolean = pidAlive): { release(): void } {
-  mkdirSync(dirname(file), { recursive: true });
-  for (let attempt = 0; attempt < 2; attempt++) {
+const RUNNING_MSG = 'Another WA Agent process is using this data folder. Stop it first (net stop wa-agent).';
+
+function tryListen(name: string): Promise<net.Server> {
+  return new Promise((resolveP, reject) => {
+    const server = net.createServer();
+    server.once('error', reject);
+    server.listen(name, () => {
+      server.removeListener('error', reject);
+      server.unref();
+      resolveP(server);
+    });
+  });
+}
+
+function socketIsStale(name: string): Promise<boolean> {
+  return new Promise((resolveP) => {
+    const client = net.connect(name);
+    client.once('connect', () => {
+      client.destroy();
+      resolveP(false);
+    });
+    client.once('error', (e) => {
+      const code = (e as NodeJS.ErrnoException).code;
+      resolveP(code === 'ECONNREFUSED' || code === 'ENOENT');
+    });
+  });
+}
+
+/**
+ * One WA Agent process per data folder: two copies on one WhatsApp session would fight.
+ * The lock is held by the OS and released automatically when the process dies.
+ */
+export async function acquireLock(dataDir: string): Promise<{ release(): Promise<void> }> {
+  const name = lockName(dataDir);
+  let server: net.Server;
+  try {
+    server = await tryListen(name);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw e;
+    if (process.platform === 'win32' || !(await socketIsStale(name))) throw new AlreadyRunningError(RUNNING_MSG);
     try {
-      const fd = openSync(file, 'wx');
-      writeSync(fd, String(process.pid));
-      closeSync(fd);
-      return {
-        release: () => {
-          try {
-            if (readFileSync(file, 'utf8') === String(process.pid)) unlinkSync(file);
-          } catch {
-            // already gone
-          }
-        },
-      };
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-      const pid = Number(readFileSync(file, 'utf8'));
-      if (Number.isInteger(pid) && pid > 0 && isAlive(pid)) {
-        throw new AlreadyRunningError(`Another WA Agent process (pid ${pid}) is running. Stop it first (net stop wa-agent).`);
-      }
-      unlinkSync(file); // stale lock from a crashed process
+      unlinkSync(name);
+    } catch {
+      // already gone
+    }
+    try {
+      server = await tryListen(name);
+    } catch (e2) {
+      if ((e2 as NodeJS.ErrnoException).code === 'EADDRINUSE') throw new AlreadyRunningError(RUNNING_MSG);
+      throw e2;
     }
   }
-  throw new AlreadyRunningError('Could not acquire the WA Agent lock');
+  const held = server;
+  let closing: Promise<void> | undefined;
+  return {
+    release: () => {
+      closing ??= new Promise<void>((r) => held.close(() => r()));
+      return closing;
+    },
+  };
 }

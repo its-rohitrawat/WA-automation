@@ -1,14 +1,16 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
-import { acquireLock, AlreadyRunningError } from '../../src/util/lock.ts';
+import { acquireLock, AlreadyRunningError, lockName } from '../../src/util/lock.ts';
 
 const dirs: string[] = [];
-const tmpLock = () => {
+const tmpDir = () => {
   const dir = mkdtempSync(join(tmpdir(), 'wa-lock-'));
   dirs.push(dir);
-  return join(dir, 'agent.lock');
+  return dir;
 };
 
 afterAll(() => {
@@ -16,24 +18,50 @@ afterAll(() => {
 });
 
 describe('acquireLock', () => {
-  it('acquires and releases', () => {
-    const file = tmpLock();
-    const lock = acquireLock(file);
-    expect(existsSync(file)).toBe(true);
-    lock.release();
-    expect(existsSync(file)).toBe(false);
+  it('refuses a second holder and allows re-acquire after release', async () => {
+    const dir = tmpDir();
+    const lock = await acquireLock(dir);
+    await expect(acquireLock(dir)).rejects.toBeInstanceOf(AlreadyRunningError);
+    await lock.release();
+    await lock.release(); // safe twice
+    const again = await acquireLock(dir);
+    await again.release();
   });
 
-  it('refuses while another live process holds it', () => {
-    const file = tmpLock();
-    writeFileSync(file, '424242');
-    expect(() => acquireLock(file, () => true)).toThrowError(AlreadyRunningError);
+  it('locks different folders independently', async () => {
+    const a = await acquireLock(tmpDir());
+    const b = await acquireLock(tmpDir());
+    await a.release();
+    await b.release();
   });
 
-  it('takes over a stale lock', () => {
-    const file = tmpLock();
-    writeFileSync(file, '424242');
-    const lock = acquireLock(file, () => false);
-    lock.release();
+  it('lockName is stable per folder and differs between folders', () => {
+    const a = tmpDir();
+    const b = tmpDir();
+    expect(lockName(a)).toBe(lockName(a));
+    expect(lockName(a)).not.toBe(lockName(b));
+    if (process.platform === 'win32') expect(lockName(a).startsWith('\\\\.\\pipe\\wa-agent-')).toBe(true);
   });
+
+  it('is released when the holding process is killed', async () => {
+    const dir = tmpDir();
+    const url = pathToFileURL(resolve('src/util/lock.ts')).href;
+    const code = `import { acquireLock } from ${JSON.stringify(url)};
+await acquireLock(${JSON.stringify(dir)});
+console.log('locked');
+setInterval(() => {}, 1000);`;
+    const child = spawn(process.execPath, ['--input-type=module', '-e', code], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const exited = new Promise<void>((r) => child.once('exit', () => r()));
+    await new Promise<void>((res, rej) => {
+      child.once('error', rej);
+      child.stdout.on('data', (d) => {
+        if (String(d).includes('locked')) res();
+      });
+    });
+    await expect(acquireLock(dir)).rejects.toBeInstanceOf(AlreadyRunningError);
+    child.kill();
+    await exited;
+    const lock = await acquireLock(dir);
+    await lock.release();
+  }, 20_000);
 });
