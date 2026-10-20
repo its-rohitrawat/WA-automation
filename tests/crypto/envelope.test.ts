@@ -38,4 +38,11 @@ describe('envelope encryption', () => {
       expect(() => decrypt(key, t)).toThrow();
     }
   });
+
+  it('binds ciphertext to the aad', () => {
+    const blob = encrypt(key, Buffer.from('x'), Buffer.from('a'));
+    expect(decrypt(key, blob, Buffer.from('a')).toString()).toBe('x');
+    expect(() => decrypt(key, blob, Buffer.from('b'))).toThrow();
+    expect(() => decrypt(key, blob)).toThrow();
+  });
 });
