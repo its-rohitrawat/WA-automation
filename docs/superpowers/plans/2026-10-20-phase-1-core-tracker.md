@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-19-wa-agent-design.md` (Phases 0 and 1 of §13).
 
+**Amendments:** Code reviews during the build changed some task texts. Those changes are in `docs/superpowers/plans/phase-1-amendments/`, one file per task. Where an amendment and the task text below disagree, the amendment wins. Task 10's lock design is superseded entirely, as its note explains.
+
 ---
 
 ## Ground rules for whoever executes this plan
@@ -2580,6 +2582,8 @@ git commit -m "feat: encrypted Baileys session store"
 ---
 
 ### Task 10: Reconnect backoff and single-instance lock
+
+> **Superseded (lock part).** The PID-file lock below was replaced during review. A PID file can lock the service out after a crash if Windows reuses the PID. The built version, `src/util/lock.ts`, holds a named pipe (`\\.\pipe\wa-agent-<hash of data dir>`) on Windows and a unix socket elsewhere. The OS releases the pipe when the process dies. `acquireLock(dataDir)` is async and resolves to `{ release(): Promise<void> }`. Tasks 23 and 24 below already use that interface. The backoff part is unchanged.
 
 **Files:**
 - Create: `src/wa/backoff.ts`, `src/util/lock.ts`
