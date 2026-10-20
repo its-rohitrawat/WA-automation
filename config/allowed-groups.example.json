@@ -1,0 +1,10 @@
+{
+  "clients": [
+    {
+      "groupId": "120363000000000001@g.us",
+      "name": "Sharma Interiors",
+      "code": "SHA",
+      "phases": ["Discovery", "Design", "Development", "Review", "Launch"]
+    }
+  ]
+}
