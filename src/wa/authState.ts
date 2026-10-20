@@ -8,9 +8,10 @@ import { decrypt, encrypt } from '../crypto/envelope.ts';
 import type { Db } from '../store/db.ts';
 
 export class SessionDecryptError extends Error {
-  constructor() {
+  constructor(options?: ErrorOptions) {
     super(
       'The WhatsApp session could not be decrypted with the current master key. Running "link --reset" discards it and needs a new QR scan.',
+      options,
     );
     this.name = 'SessionDecryptError';
   }
@@ -31,6 +32,13 @@ export function openSessionDb(file: string): Db {
   return db;
 }
 
+/** Discards the stored session (the agent's own key material) so a new QR scan can start fresh. */
+export function resetSession(db: Db): void {
+  db.transaction(() => {
+    db.prepare('DELETE FROM auth').run();
+  })();
+}
+
 export interface EncryptedAuth {
   state: AuthenticationState;
   saveCreds(): Promise<void>;
@@ -38,6 +46,7 @@ export interface EncryptedAuth {
   hasSession: boolean;
 }
 
+/** Writes the canary row when the table is empty. */
 export function useEncryptedAuthState(db: Db, key: Buffer): EncryptedAuth {
   const getStmt = db.prepare('SELECT v FROM auth WHERE k = ?');
   const putStmt = db.prepare('INSERT INTO auth (k, v) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v');
@@ -49,11 +58,24 @@ export function useEncryptedAuthState(db: Db, key: Buffer): EncryptedAuth {
   const valueKey = derive('wa-session-value');
   const rowId = (name: string): string => createHmac('sha256', rowKey).update(name).digest('hex');
 
+  const open = (id: string, blob: Buffer): unknown =>
+    JSON.parse(decrypt(valueKey, blob, Buffer.from(id)).toString('utf8'), BufferJSON.reviver);
   const read = (name: string): unknown => {
     const id = rowId(name);
     const row = getStmt.get(id) as { v: Buffer } | undefined;
     if (!row) return null;
-    return JSON.parse(decrypt(valueKey, row.v, Buffer.from(id)).toString('utf8'), BufferJSON.reviver);
+    return open(id, row.v);
+  };
+  // Like read, but only decrypt/parse failures become SessionDecryptError; SQLite errors pass through.
+  const readChecked = (name: string): unknown => {
+    const id = rowId(name);
+    const row = getStmt.get(id) as { v: Buffer } | undefined;
+    if (!row) return null;
+    try {
+      return open(id, row.v);
+    } catch (cause) {
+      throw new SessionDecryptError({ cause });
+    }
   };
   const write = (name: string, value: unknown): void => {
     const id = rowId(name);
@@ -65,22 +87,22 @@ export function useEncryptedAuthState(db: Db, key: Buffer): EncryptedAuth {
 
   // Row names are keyed hashes, so a wrong master key finds no rows rather than failing to decrypt.
   // A canary row tells "empty database" apart from "database written with another key".
-  let loaded: AuthenticationCreds | null;
-  try {
-    const hasRows = (getCount.get() as { n: number }).n > 0;
-    if (read('canary') === null) {
-      if (hasRows) throw new SessionDecryptError();
-      write('canary', 'ok');
-    }
-    loaded = read('creds') as AuthenticationCreds | null;
-  } catch {
-    throw new SessionDecryptError();
+  const hasRows = (getCount.get() as { n: number }).n > 0;
+  if (readChecked('canary') === null) {
+    if (hasRows) throw new SessionDecryptError();
+    write('canary', 'ok');
   }
+  const loaded = readChecked('creds') as AuthenticationCreds | null;
   const creds = loaded ?? initAuthCreds();
 
   return {
     hasSession: Boolean(creds.me?.id),
-    saveCreds: async () => write('creds', creds),
+    saveCreds: async () => {
+      db.transaction(() => {
+        write('canary', 'ok');
+        write('creds', creds);
+      })();
+    },
     state: {
       creds,
       keys: {

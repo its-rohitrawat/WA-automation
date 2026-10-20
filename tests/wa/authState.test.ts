@@ -2,8 +2,9 @@ import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { proto } from 'baileys';
 import { describe, expect, it } from 'vitest';
-import { SessionDecryptError, openSessionDb, useEncryptedAuthState } from '../../src/wa/authState.ts';
+import { SessionDecryptError, openSessionDb, resetSession, useEncryptedAuthState } from '../../src/wa/authState.ts';
 
 const key = randomBytes(32);
 
@@ -19,8 +20,10 @@ describe('encrypted auth state', () => {
     const a = useEncryptedAuthState(db, key);
     a.state.creds.me = { id: '919800000000:5@s.whatsapp.net', name: 'Founder' };
     await a.saveCreds();
-    const raw = (db.prepare('SELECT v FROM auth').get() as { v: Buffer }).v;
-    expect(raw.toString('latin1')).not.toContain('noiseKey');
+    for (const { v } of db.prepare('SELECT v FROM auth').all() as { v: Buffer }[]) {
+      const text = v.toString('latin1');
+      for (const marker of ['noiseKey', 'Founder', '"type":"Buffer"']) expect(text).not.toContain(marker);
+    }
     const b = useEncryptedAuthState(db, key);
     expect(b.hasSession).toBe(true);
     expect(Buffer.from(b.state.creds.noiseKey.private).equals(Buffer.from(a.state.creds.noiseKey.private))).toBe(true);
@@ -60,8 +63,12 @@ describe('encrypted auth state', () => {
     const db = openSessionDb(':memory:');
     const a = useEncryptedAuthState(db, key);
     await a.state.keys.set({ 'pre-key': { '1': { public: Buffer.from('pub'), private: Buffer.from('priv') } } });
-    const raw = (db.prepare('SELECT v FROM auth').get() as { v: Buffer }).v;
-    expect(raw.toString('latin1')).not.toContain('priv');
+    const rows = db.prepare('SELECT v FROM auth').all() as { v: Buffer }[];
+    expect(rows.length).toBeGreaterThan(1);
+    for (const { v } of rows) {
+      const text = v.toString('latin1');
+      for (const marker of ['priv', '"type":"Buffer"']) expect(text).not.toContain(marker);
+    }
   });
 
   it('round-trips app-state-sync-key as an object with binary keyData', async () => {
@@ -70,6 +77,7 @@ describe('encrypted auth state', () => {
       'app-state-sync-key': { k1: { keyData: Buffer.from('kd'), fingerprint: { rawId: 1, currentIndex: 0 }, timestamp: 5 } },
     });
     const got = await a.state.keys.get('app-state-sync-key', ['k1']);
+    expect(got['k1']).toBeInstanceOf(proto.Message.AppStateSyncKeyData);
     expect(got['k1']!.keyData).toBeInstanceOf(Uint8Array);
     expect(Buffer.from(got['k1']!.keyData!).toString()).toBe('kd');
   });
@@ -111,6 +119,57 @@ describe('encrypted auth state', () => {
       const db = openSessionDb(join(dir, 'session.db'));
       expect(db.pragma('journal_mode', { simple: true })).toBe('wal');
       db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('can be reset and then linked again', async () => {
+    const db = openSessionDb(':memory:');
+    const first = useEncryptedAuthState(db, key);
+    first.state.creds.me = { id: '919800000000:5@s.whatsapp.net', name: 'Founder' };
+    await first.saveCreds();
+    resetSession(db);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n).toBe(0);
+    const second = useEncryptedAuthState(db, key);
+    expect(second.hasSession).toBe(false);
+    second.state.creds.me = { id: '919800000001:5@s.whatsapp.net', name: 'Founder' };
+    await second.saveCreds();
+    expect(useEncryptedAuthState(db, key).hasSession).toBe(true);
+  });
+
+  it('rejects a corrupted canary', async () => {
+    const db = openSessionDb(':memory:');
+    await useEncryptedAuthState(db, key).saveCreds();
+    const first = db.prepare('SELECT k, v FROM auth ORDER BY rowid LIMIT 1').get() as { k: string; v: Buffer };
+    const bad = Buffer.from(first.v);
+    bad[bad.length - 1] = bad[bad.length - 1]! ^ 0xff;
+    db.prepare('UPDATE auth SET v = ? WHERE k = ?').run(bad, first.k);
+    expect(() => useEncryptedAuthState(db, key)).toThrow(SessionDecryptError);
+  });
+
+  it('leaves the database unchanged when opened with the wrong key', async () => {
+    const db = openSessionDb(':memory:');
+    await useEncryptedAuthState(db, key).saveCreds();
+    const count = () => (db.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n;
+    const before = count();
+    expect(() => useEncryptedAuthState(db, randomBytes(32))).toThrow(SessionDecryptError);
+    expect(count()).toBe(before);
+  });
+
+  it('does not relabel SQLite errors as decrypt errors', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wa-sess-'));
+    try {
+      const db = openSessionDb(join(dir, 'session.db'));
+      db.close();
+      let thrown: unknown;
+      try {
+        useEncryptedAuthState(db, key);
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeDefined();
+      expect(thrown).not.toBeInstanceOf(SessionDecryptError);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
