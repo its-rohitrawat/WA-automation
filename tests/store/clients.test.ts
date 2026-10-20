@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { getClient, getClientByCode, getClientByGroupId, listClients, nextTaskCode, setPhase, setStatus, syncClients } from '../../src/store/clients.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
-import { NOW, SHARMA, seededDb } from '../helpers/db.ts';
+import { MEHTA, NOW, SHARMA, seededDb } from '../helpers/db.ts';
 
 describe('clients repository', () => {
   it('syncs clients from config', () => {
@@ -24,6 +24,27 @@ describe('clients repository', () => {
     const db = seededDb();
     syncClients(db, [{ ...SHARMA, name: 'Sharma Interiors Pvt Ltd' }]);
     expect(getClient(db, 1).name).toBe('Sharma Interiors Pvt Ltd');
+  });
+
+  it('refuses to change a client code and writes nothing', () => {
+    const db = seededDb();
+    expect(() => syncClients(db, [{ ...SHARMA, code: 'SHX' }])).toThrow(/permanent/);
+    expect(getClient(db, 1).code).toBe('SHA');
+    expect(getClientByCode(db, 'MEH')?.active).toBe(true);
+  });
+
+  it('refuses to reuse the code of an inactive client for a new group', () => {
+    const db = seededDb();
+    syncClients(db, [SHARMA]);
+    const fresh = { ...MEHTA, groupId: '120363000000000003@g.us' };
+    expect(() => syncClients(db, [SHARMA, fresh])).toThrow(/already used/);
+  });
+
+  it('reactivates a removed client re-added with the same code', () => {
+    const db = seededDb();
+    syncClients(db, [SHARMA]);
+    syncClients(db, [SHARMA, MEHTA]);
+    expect(getClientByCode(db, 'MEH')?.active).toBe(true);
   });
 
   it('issues task codes per client', () => {
