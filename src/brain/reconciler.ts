@@ -77,6 +77,7 @@ export class Reconciler {
   async run(clientId: number): Promise<ReconcileOutcome> {
     const { db, spend, prices, clock, log } = this.#o;
     const client = getClient(db, clientId);
+    if (!client.active) return { status: 'noop' };
     const batch = listUnprocessed(db, clientId);
     if (batch.length === 0) return { status: 'noop' };
 

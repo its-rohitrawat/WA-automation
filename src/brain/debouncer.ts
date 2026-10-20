@@ -9,7 +9,12 @@ interface ClientState {
   queued: boolean;
   running: boolean;
   dirty: boolean;
+  failures: number;
+  cancelled: boolean;
 }
+
+/** After this many failed runs in a row, new messages wait for the hourly retry instead of re-sending the batch. */
+export const FAILURES_BEFORE_BACKOFF = 3;
 
 export interface DebouncerOptions {
   quietMs: number;
@@ -32,6 +37,7 @@ export class GroupDebouncer {
   readonly #queue: number[] = [];
   #active = 0;
   #stopped = false;
+  readonly #drainWaiters: (() => void)[] = [];
 
   constructor(o: DebouncerOptions) {
     this.#quietMs = o.quietMs;
@@ -46,11 +52,13 @@ export class GroupDebouncer {
   notify(clientId: number): void {
     if (this.#stopped) return;
     const s = this.#state(clientId);
+    s.cancelled = false;
     if (s.running) {
       s.dirty = true;
       return;
     }
     if (s.queued) return;
+    if (s.failures >= FAILURES_BEFORE_BACKOFF && s.retry) return;
     clearTimeout(s.quiet);
     s.quiet = setTimeout(() => this.#fire(clientId), this.#quietMs);
     s.max ??= setTimeout(() => this.#fire(clientId), this.#maxWaitMs);
@@ -61,6 +69,37 @@ export class GroupDebouncer {
     const s = this.#states.get(clientId);
     if (s && (s.quiet || s.queued || s.running || s.retry)) return;
     this.notify(clientId);
+  }
+
+  /** The client was removed from the allow-list: drop its timers and queue slot. A run in flight finishes, with no follow-up or retry. */
+  cancel(clientId: number): void {
+    const s = this.#states.get(clientId);
+    if (!s) return;
+    clearTimeout(s.quiet);
+    clearTimeout(s.max);
+    clearTimeout(s.retry);
+    s.quiet = s.max = s.retry = undefined;
+    const i = this.#queue.indexOf(clientId);
+    if (i >= 0) this.#queue.splice(i, 1);
+    s.queued = false;
+    s.dirty = false;
+    s.failures = 0;
+    if (s.running) s.cancelled = true;
+  }
+
+  /** Resolves when no run is in flight, or after timeoutMs. Call after stop(). Starts nothing. */
+  drain(timeoutMs: number): Promise<void> {
+    if (this.#active === 0) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        const i = this.#drainWaiters.indexOf(done);
+        if (i >= 0) this.#drainWaiters.splice(i, 1);
+        resolve();
+      };
+      const timer = setTimeout(done, timeoutMs);
+      this.#drainWaiters.push(done);
+    });
   }
 
   stop(): void {
@@ -75,7 +114,7 @@ export class GroupDebouncer {
   #state(clientId: number): ClientState {
     let s = this.#states.get(clientId);
     if (!s) {
-      s = { queued: false, running: false, dirty: false };
+      s = { queued: false, running: false, dirty: false, failures: 0, cancelled: false };
       this.#states.set(clientId, s);
     }
     return s;
@@ -104,22 +143,36 @@ export class GroupDebouncer {
       s.queued = false;
       s.running = true;
       this.#active++;
-      this.#run(clientId)
+      Promise.resolve()
+        .then(() => this.#run(clientId))
         .then((outcome) => {
+          if (s.cancelled) return;
+          if (outcome.status === 'ok' || outcome.status === 'noop') s.failures = 0;
+          if (outcome.status === 'failed') s.failures++;
           if (outcome.status === 'failed' || outcome.status === 'paused') this.#scheduleRetry(clientId);
         })
         .catch((err: unknown) => {
-          this.#onError?.(clientId, err);
+          if (s.cancelled) return;
+          s.failures++;
           this.#scheduleRetry(clientId);
+          try {
+            this.#onError?.(clientId, err);
+          } catch {
+            /* the callback must not break scheduling */
+          }
         })
         .finally(() => {
           this.#active--;
           s.running = false;
-          if (s.dirty) {
+          if (s.cancelled) {
+            s.cancelled = false;
+            s.dirty = false;
+          } else if (s.dirty) {
             s.dirty = false;
             this.notify(clientId);
           }
           this.#pump();
+          if (this.#active === 0) for (const w of [...this.#drainWaiters]) w();
         });
     }
   }

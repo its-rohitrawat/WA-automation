@@ -63,6 +63,14 @@ function expectNoReservation(spend: SpendGuard): void {
 }
 
 describe('Reconciler', () => {
+  it('skips an inactive client without calling the AI', async () => {
+    const { db, ai, r } = setup([]);
+    store(db, 'A1', 'hello');
+    db.prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
+    expect(await r.run(1)).toEqual({ status: 'noop' });
+    expect(ai.calls).toHaveLength(0);
+  });
+
   it('does nothing when there are no new messages', async () => {
     const { ai, r } = setup([]);
     expect(await r.run(1)).toEqual({ status: 'noop' });
