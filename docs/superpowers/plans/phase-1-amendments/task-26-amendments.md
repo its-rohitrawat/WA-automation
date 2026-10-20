@@ -14,3 +14,8 @@ Add a fourth golden case:
 - **forbid:** `[{ op: 'close_task', taskCode: 'SHA-012' }, { op: 'add_task', side: 'us' }]`
 
 Update the dry-run expectation text: there are now 4 cases.
+
+## Round 2 (from the Task 15 review)
+- Build the client with `prices`: `new ClaudeClient({ apiKey: requireKey(env, 'ANTHROPIC_API_KEY'), model: env.AI_MODEL, effort: env.AI_EFFORT, prices })`.
+- Actual cost: `spent += result.costUsd` (this already includes fallback attempts). Print ` (fallback model used)` after a case's PASS/FAIL line when `result.fallbackUsed`.
+- Estimate: pass `MAX_OUTPUT_TOKENS` (from claudeClient.ts) to `estimateCostUsd`. The printed figure is a ceiling ("up to").

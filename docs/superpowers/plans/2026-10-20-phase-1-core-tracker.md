@@ -17,7 +17,7 @@
 ## Ground rules for whoever executes this plan
 
 1. **Data safety.** Never delete or overwrite anything in WhatsApp, Gmail or Drive files you did not create. The agent never sends a WhatsApp message. If a step would touch real client data, stop and ask.
-2. **Paid calls.** Only Task 26 calls the real Claude API (cost about $0.15–0.30). Ask the user before running it. Every other test uses fakes.
+2. **Paid calls.** Only Task 26 calls the real Claude API (the script prints a ceiling of about $1.35 for 4 cases; the real cost is usually well under half of that). Ask the user before running it. Every other test uses fakes.
 3. **Secrets.** Never print, log or commit `.env` values, OAuth tokens or the WhatsApp session. Logs carry IDs and counts only, never message text.
 4. **Erasable TypeScript only.** Node runs `.ts` files directly, so do not use `enum`, `namespace` or constructor parameter properties (`constructor(private x: T)`). Use `#private` fields. Relative imports must end in `.ts`. Type-only imports must use `import type`.
 5. **Branch.** Work on `feat/phase-1-core-tracker`, never on `main`. Commit after every task.
@@ -7071,7 +7071,7 @@ process.exit(failures > 0 ? 1 : 0);
 Run: `npm run golden`
 Expected: prints the case count and estimated cost, then `Nothing was sent.`
 
-- [ ] **Step 6: Ask the user before the paid run.** State the estimate printed in Step 5 (about $0.15–0.30). Only after they approve, run `npm run golden -- --yes`.
+- [ ] **Step 6: Ask the user before the paid run.** State the ceiling printed in Step 5 (about $1.35 for 4 cases; the real cost is usually well under half). Only after they approve, run `npm run golden -- --yes`.
 Expected: three `PASS` lines and the actual cost. Record that cost in the task notes. If a case fails, adjust `SYSTEM_PROMPT` in `src/brain/prompt.ts`, re-run the unit tests, and ask again before another paid run.
 
 - [ ] **Step 7: Commit**
