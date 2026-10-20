@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export interface KeyProvider {
@@ -24,6 +24,7 @@ export type DpapiRunner = (mode: 'protect' | 'unprotect', inputB64: string) => s
 export const powershellDpapi: DpapiRunner = (mode, inputB64) => {
   const fn = mode === 'protect' ? 'Protect' : 'Unprotect';
   const script =
+    "$ErrorActionPreference = 'Stop'; " +
     'Add-Type -AssemblyName System.Security; ' +
     '$in = [Console]::In.ReadToEnd().Trim(); ' +
     '$bytes = [Convert]::FromBase64String($in); ' +
@@ -33,8 +34,22 @@ export const powershellDpapi: DpapiRunner = (mode, inputB64) => {
     input: inputB64,
     encoding: 'utf8',
     windowsHide: true,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    timeout: 30_000,
   }).trim();
 };
+
+export class MasterKeyError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'MasterKeyError';
+    this.code = code;
+  }
+}
+
+const UNREADABLE_MSG =
+  'The master key file could not be decrypted. It is damaged or was created by a different Windows account; see docs/SETUP.md.';
 
 export class DpapiKeyProvider implements KeyProvider {
   readonly #file: string;
@@ -47,18 +62,33 @@ export class DpapiKeyProvider implements KeyProvider {
   }
 
   getKey(): Buffer {
-    if (this.#cached) return this.#cached;
+    if (this.#cached) return Buffer.from(this.#cached);
     let key: Buffer;
     if (existsSync(this.#file)) {
-      key = Buffer.from(this.#run('unprotect', readFileSync(this.#file, 'utf8').trim()), 'base64');
+      try {
+        key = Buffer.from(this.#run('unprotect', readFileSync(this.#file, 'utf8').trim()), 'base64');
+      } catch {
+        throw new MasterKeyError('MASTER_KEY_UNREADABLE', UNREADABLE_MSG);
+      }
+      if (key.length !== 32) throw new MasterKeyError('MASTER_KEY_UNREADABLE', UNREADABLE_MSG);
     } else {
       key = randomBytes(32);
-      mkdirSync(dirname(this.#file), { recursive: true });
-      // 'wx' refuses to overwrite an existing key file.
-      writeFileSync(this.#file, this.#run('protect', key.toString('base64')), { flag: 'wx' });
+      try {
+        mkdirSync(dirname(this.#file), { recursive: true });
+        const protectedB64 = this.#run('protect', key.toString('base64'));
+        // 'wx' refuses to overwrite an existing key file; fsync makes the write durable.
+        const fd = openSync(this.#file, 'wx');
+        try {
+          writeSync(fd, protectedB64);
+          fsyncSync(fd);
+        } finally {
+          closeSync(fd);
+        }
+      } catch {
+        throw new MasterKeyError('MASTER_KEY_CREATE_FAILED', 'The master key could not be created.');
+      }
     }
-    if (key.length !== 32) throw new Error('Master key file is damaged');
     this.#cached = key;
-    return key;
+    return Buffer.from(key);
   }
 }
