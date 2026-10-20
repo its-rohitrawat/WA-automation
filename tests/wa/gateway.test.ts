@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { proto, WAMessageStubType, type WAMessageUpdate } from 'baileys';
 import { AllowList } from '../../src/wa/allowlist.ts';
 import { openSessionDb, useEncryptedAuthState } from '../../src/wa/authState.ts';
@@ -11,7 +11,7 @@ import { RAHUL_LID, waText } from '../helpers/wa.ts';
 
 const PERSONAL_CHAT = '919811111111@s.whatsapp.net';
 
-function setup(allowIds: string[] = [SHARMA.groupId]) {
+function setup(allowIds: string[] = [SHARMA.groupId], saveCreds?: () => Promise<void>) {
   const sockets: FakeSocket[] = [];
   const scheduled: { fn: () => void; ms: number }[] = [];
   const qr: string[] = [];
@@ -24,7 +24,7 @@ function setup(allowIds: string[] = [SHARMA.groupId]) {
       return s;
     },
     auth: auth.state,
-    saveCreds: auth.saveCreds,
+    saveCreds: saveCreds ?? auth.saveCreds,
     scheduler: (fn, ms) => {
       scheduled.push({ fn, ms });
       return { cancel: () => {} };
@@ -117,5 +117,116 @@ describe('WhatsAppGateway connection', () => {
     await expect(gw.listGroups()).rejects.toThrowError(/not connected/);
     sock.emit('connection.update', { connection: 'open' });
     expect((await gw.listGroups()).map((g) => g.subject)).toEqual(['Family', 'Sharma Interiors x Studio']);
+  });
+});
+
+describe('WhatsAppGateway lifecycle hardening', () => {
+  it('does not reconnect when stop() is called from a status listener', () => {
+    const { gw, sock, sockets, scheduled } = setup();
+    gw.onStatus((st) => {
+      if (st.state === 'closed') void gw.stop();
+    });
+    closeWith(sock, 428);
+    expect(sockets).toHaveLength(1);
+    expect(scheduled).toEqual([]);
+    expect(gw.status().state).toBe('stopped');
+  });
+
+  it('start() twice creates one socket', () => {
+    const { gw, sockets } = setup();
+    gw.start();
+    expect(sockets).toHaveLength(1);
+  });
+
+  it('reconnects at once for the first 515 only', () => {
+    const { sock, sockets, scheduled } = setup();
+    closeWith(sock, 515);
+    expect(scheduled[0]!.ms).toBe(0);
+    scheduled[0]!.fn();
+    closeWith(sockets[1]!, 515);
+    expect(scheduled[1]!.ms).toBeGreaterThanOrEqual(4_000);
+  });
+
+  it('keeps delivering the rest of a batch when a listener throws', () => {
+    const { gw, sock } = setup();
+    const seen: string[] = [];
+    gw.onEvent((e) => {
+      if (e.kind !== 'message') return;
+      if (e.waId === 'a1') throw new Error('boom');
+      seen.push(e.waId);
+    });
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('a1', 'one'), waText('a2', 'two')] });
+    expect(seen).toEqual(['a2']);
+    expect(gw.failedCount()).toBe(1);
+  });
+
+  it('survives a rejecting saveCreds and counts the failure', async () => {
+    const { gw, sock } = setup([SHARMA.groupId], () => Promise.reject(new Error('disk')));
+    expect(() => sock.emit('creds.update', {})).not.toThrow();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(gw.status().credsSaveFailures).toBe(1);
+  });
+
+  it.each([
+    [440, 'replaced'],
+    [403, 'forbidden'],
+  ])('treats %i as terminal (%s) with no reconnect', (code, state) => {
+    const { gw, sock, scheduled } = setup();
+    closeWith(sock, code);
+    expect(gw.status().state).toBe(state);
+    expect(scheduled).toEqual([]);
+  });
+
+  it('keeps the last error code while reconnecting', () => {
+    const { gw, sock, scheduled } = setup();
+    closeWith(sock, 428);
+    scheduled[0]!.fn();
+    expect(gw.status()).toMatchObject({ state: 'connecting', lastErrorCode: 428 });
+  });
+
+  it('emits nothing after stop()', async () => {
+    const { gw, sock, events } = setup();
+    await gw.stop();
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
+    expect(events).toEqual([]);
+  });
+
+  it('resets backoff only after the connection stayed open', () => {
+    const { sock, sockets, scheduled } = setup();
+    closeWith(sock, 428);
+    scheduled[0]!.fn();
+    sockets[1]!.emit('connection.update', { connection: 'open' });
+    expect(scheduled[1]!.ms).toBe(60_000);
+    closeWith(sockets[1]!, 428); // dropped before 60 s: keeps backing off
+    expect(scheduled[2]!.ms).toBeGreaterThanOrEqual(8_000);
+  });
+});
+
+describe('WhatsAppGateway allowed non-message events', () => {
+  it('passes edits, revokes and reactions from an allowed group', () => {
+    const { gw, sock, events } = setup();
+    sock.emit('messages.update', [
+      { key: { remoteJid: SHARMA.groupId, id: 'e1' }, update: { message: { editedMessage: { message: { conversation: 'edited' } } } } } as WAMessageUpdate,
+      { key: { remoteJid: SHARMA.groupId, id: 'r1' }, update: { messageStubType: WAMessageStubType.REVOKE } } as WAMessageUpdate,
+    ]);
+    sock.emit('messages.reaction', [
+      { key: { remoteJid: SHARMA.groupId, id: 'e1' }, reaction: { key: { remoteJid: SHARMA.groupId, participant: RAHUL_LID } as proto.IMessageKey, text: 'ok' } },
+    ]);
+    expect(events.map((e) => e.kind)).toEqual(['edit', 'revoke', 'reaction']);
+    expect(gw.droppedCount()).toBe(0);
+  });
+
+  it('drops a non-allowed message without reading its content', () => {
+    const { gw, sock, events } = setup();
+    const getter = vi.fn(() => {
+      throw new Error('content was read');
+    });
+    const msg = { key: { remoteJid: OTHER_GROUP, id: 'x1', fromMe: false } } as ReturnType<typeof waText>;
+    Object.defineProperty(msg, 'message', { get: getter, enumerable: true });
+    sock.emit('messages.upsert', { type: 'notify', messages: [msg] });
+    expect(getter).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+    expect(gw.droppedCount()).toBe(1);
   });
 });
