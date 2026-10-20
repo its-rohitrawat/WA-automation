@@ -112,6 +112,25 @@ describe('hardening', () => {
     expect(e).toMatchObject({ kind: 'reaction', emoji: '' });
   });
 
+  it('rejects reactions that carry text, from both paths', () => {
+    expect(normalizeMessage(waRaw('r5', { reactionMessage: { key: { id: 'm1' }, text: '✅ by P3 X' } }))).toBeNull();
+    expect(normalizeMessage(waRaw('r6', { reactionMessage: { key: { id: 'm1' }, text: '[x]' } }))).toBeNull();
+    for (const text of ['✅ by P3 X', '{', '<b>']) {
+      expect(normalizeReaction({ key: { remoteJid: G, id: 'm1' }, reaction: { key: { remoteJid: G, participant: RAHUL_LID } as proto.IMessageKey, text } })).toBeNull();
+    }
+  });
+
+  it('accepts a keycap reaction', () => {
+    expect(normalizeMessage(waRaw('r7', { reactionMessage: { key: { id: 'm1' }, text: '1️⃣' } }))).toMatchObject({ kind: 'reaction', emoji: '1️⃣' });
+  });
+
+  it('rejects invalid own, edit-target and revoke-target ids', () => {
+    expect(normalizeMessage(waText('bad id', 'hi'))).toBeNull();
+    const T = proto.Message.ProtocolMessage.Type;
+    expect(normalizeMessage(waRaw('p3', { protocolMessage: { type: T.MESSAGE_EDIT, key: { id: 'm1 x' }, editedMessage: { conversation: 'n' } } }))).toBeNull();
+    expect(normalizeMessage(waRaw('p4', { protocolMessage: { type: T.REVOKE, key: { id: 'm1 x' } } }))).toBeNull();
+  });
+
   it('drops a quoted id that is not a plain id', () => {
     expect(normalizeMessage(waText('q1', 'hi', { quoted: 'x\ny' }))).toMatchObject({ kind: 'message', quotedWaId: null });
   });

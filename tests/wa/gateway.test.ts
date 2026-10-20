@@ -211,7 +211,7 @@ describe('WhatsAppGateway allowed non-message events', () => {
       { key: { remoteJid: SHARMA.groupId, id: 'r1' }, update: { messageStubType: WAMessageStubType.REVOKE } } as WAMessageUpdate,
     ]);
     sock.emit('messages.reaction', [
-      { key: { remoteJid: SHARMA.groupId, id: 'e1' }, reaction: { key: { remoteJid: SHARMA.groupId, participant: RAHUL_LID } as proto.IMessageKey, text: 'ok' } },
+      { key: { remoteJid: SHARMA.groupId, id: 'e1' }, reaction: { key: { remoteJid: SHARMA.groupId, participant: RAHUL_LID } as proto.IMessageKey, text: '👍' } },
     ]);
     expect(events.map((e) => e.kind)).toEqual(['edit', 'revoke', 'reaction']);
     expect(gw.droppedCount()).toBe(0);

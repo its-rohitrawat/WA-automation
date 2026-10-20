@@ -32,7 +32,21 @@ describe('AI_OUTPUT_JSON_SCHEMA', () => {
   });
 });
 
+describe('enums in the JSON schema', () => {
+  it('keeps the field enums, each including ""', () => {
+    const props = (AI_OUTPUT_JSON_SCHEMA.properties as { ops: { items: { properties: Record<string, { enum?: string[] }> } } }).ops.items.properties;
+    for (const f of ['side', 'category', 'priority', 'status', 'role']) {
+      expect(props[f]!.enum, f).toBeDefined();
+      expect(props[f]!.enum).toContain('');
+    }
+  });
+});
+
 describe('parseAiOutput', () => {
+  it('turns a whitespace-only title into null', () => {
+    expect(parseAiOutput(JSON.stringify({ ops: [wireOp({ title: '  ' })] })).output.ops[0]!.title).toBeNull();
+  });
+
   it('turns empty strings into nulls', () => {
     const { output, invalidOps } = parseAiOutput(JSON.stringify({ ops: [wireOp()] }));
     expect(invalidOps).toBe(0);

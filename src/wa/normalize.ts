@@ -43,6 +43,8 @@ const SKIP = new Set(['pollUpdateMessage', 'pinInChatMessage', 'keepInChatMessag
 
 const ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const validId = (id: string | null | undefined): id is string => typeof id === 'string' && ID_RE.test(id);
+/** Real reactions are emoji. Text, brackets or tags mean someone is faking one. */
+const BAD_EMOJI = /[A-Za-z[\]{}<>]/;
 const cleanEmoji = (e: string | null | undefined): string => [...(e ?? '')].slice(0, 16).join('');
 
 function phoneFromJid(jid: string): string | null {
@@ -105,7 +107,9 @@ export function normalizeMessage(msg: WAMessage): NormalizedEvent | null {
   if (content.reactionMessage) {
     const target = content.reactionMessage.key?.id;
     if (!validId(target)) return null;
-    return { kind: 'reaction', groupId, targetWaId: target, reactorJid: senderOf(msg.key).jid, fromMe: Boolean(msg.key.fromMe), emoji: cleanEmoji(content.reactionMessage.text), ts };
+    const emoji = cleanEmoji(content.reactionMessage.text);
+    if (BAD_EMOJI.test(emoji)) return null;
+    return { kind: 'reaction', groupId, targetWaId: target, reactorJid: senderOf(msg.key).jid, fromMe: Boolean(msg.key.fromMe), emoji, ts };
   }
 
   const type = getContentType(content);
@@ -143,6 +147,8 @@ export function normalizeReaction(r: { key: WAMessageKey; reaction: proto.IReact
   const groupId = r.key.remoteJid;
   const target = r.key.id;
   if (!groupId || !validId(target)) return null;
+  const emoji = cleanEmoji(r.reaction.text);
+  if (BAD_EMOJI.test(emoji)) return null;
   const reactorKey = r.reaction.key ?? undefined;
   const msRaw = r.reaction.senderTimestampMs;
   const ms = msRaw === null || msRaw === undefined ? NaN : Number(msRaw);
@@ -152,7 +158,7 @@ export function normalizeReaction(r: { key: WAMessageKey; reaction: proto.IReact
     targetWaId: target,
     reactorJid: reactorKey ? senderOf(reactorKey).jid : 'unknown',
     fromMe: Boolean(reactorKey?.fromMe),
-    emoji: cleanEmoji(r.reaction.text),
+    emoji,
     ts: Number.isFinite(ms) && ms > 0 ? new Date(ms) : new Date(),
   };
 }

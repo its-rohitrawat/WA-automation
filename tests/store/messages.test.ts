@@ -98,6 +98,30 @@ describe('messages repository', () => {
       expect(listUnprocessed(db, 1)).toHaveLength(0);
     });
 
+    it('the same reaction delivered twice re-queues only the first time', () => {
+      const db = processed();
+      upsertReaction(db, rx('✅'));
+      markProcessed(db, [listUnprocessed(db, 1)[0]!.id], NOW);
+      upsertReaction(db, rx('✅'));
+      expect(listUnprocessed(db, 1)).toHaveLength(0);
+      expect(db.prepare("SELECT processed_at AS p FROM messages WHERE wa_id = 'm1'").get()).toEqual({ p: NOW });
+    });
+
+    it('changing a reaction re-queues', () => {
+      const db = processed();
+      upsertReaction(db, rx('✅'));
+      markProcessed(db, [listUnprocessed(db, 1)[0]!.id], NOW);
+      upsertReaction(db, rx('👍'));
+      expect(listUnprocessed(db, 1)[0]).toMatchObject({ requeueReason: 'reaction' });
+    });
+
+    it('an edit after a reaction leaves the marker as edit', () => {
+      const db = processed();
+      upsertReaction(db, rx('✅'));
+      applyEdit(db, 1, 'm1', 'hello edited', '2026-10-10T09:00:00.000Z');
+      expect(listUnprocessed(db, 1)[0]).toMatchObject({ requeueReason: 'edit' });
+    });
+
     it('an edit of a processed message is marked as an edit', () => {
       const db = processed();
       applyEdit(db, 1, 'm1', 'hello edited', '2026-10-10T09:00:00.000Z');

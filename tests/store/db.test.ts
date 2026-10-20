@@ -16,6 +16,11 @@ describe('openDb', () => {
     expect(idx).toEqual(expect.arrayContaining(['tasks_client_status', 'task_events_client_at']));
   });
 
+  it('is at schema version 2 straight after openDb', () => {
+    const db = openDb(':memory:');
+    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(2);
+  });
+
   it('is safe to migrate twice', () => {
     const db = openDb(':memory:');
     migrate(db);

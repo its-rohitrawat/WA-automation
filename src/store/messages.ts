@@ -82,7 +82,7 @@ export function applyEdit(db: Db, clientId: number, waId: string, newText: strin
   if (!row || row.text === newText) return false;
   db.transaction(() => {
     db.prepare('INSERT INTO message_edits (message_id, previous_text, edited_at) VALUES (?, ?, ?)').run(row.id, row.text, editedAt);
-    db.prepare("UPDATE messages SET text = ?, edited_at = ?, requeue_reason = CASE WHEN processed_at IS NOT NULL THEN 'edit' ELSE requeue_reason END, processed_at = NULL WHERE id = ?").run(newText, editedAt, row.id);
+    db.prepare("UPDATE messages SET text = ?, edited_at = ?, requeue_reason = CASE WHEN processed_at IS NOT NULL OR requeue_reason = 'reaction' THEN 'edit' ELSE requeue_reason END, processed_at = NULL WHERE id = ?").run(newText, editedAt, row.id);
   })();
   return true;
 }
@@ -96,12 +96,17 @@ export function applyRevoke(db: Db, clientId: number, waId: string): boolean {
 
 /** An empty emoji means the reaction was removed. The row is kept with emoji ''. */
 export function upsertReaction(db: Db, r: { clientId: number; targetWaId: string; reactorJid: string; emoji: string; ts: string }): void {
-  db.prepare(`INSERT INTO reactions (client_id, target_wa_id, reactor_jid, emoji, ts) VALUES (@clientId, @targetWaId, @reactorJid, @emoji, @ts)
-    ON CONFLICT (client_id, target_wa_id, reactor_jid) DO UPDATE SET emoji = excluded.emoji, ts = excluded.ts`).run(r);
-  if (r.emoji !== '') {
-    db.prepare(`UPDATE messages SET requeue_reason = 'reaction', processed_at = NULL
-      WHERE client_id = ? AND wa_id = ? AND processed_at IS NOT NULL AND revoked = 0`).run(r.clientId, r.targetWaId);
-  }
+  db.transaction(() => {
+    const prev = db.prepare('SELECT emoji FROM reactions WHERE client_id = ? AND target_wa_id = ? AND reactor_jid = ?').get(r.clientId, r.targetWaId, r.reactorJid) as
+      | { emoji: string }
+      | undefined;
+    db.prepare(`INSERT INTO reactions (client_id, target_wa_id, reactor_jid, emoji, ts) VALUES (@clientId, @targetWaId, @reactorJid, @emoji, @ts)
+      ON CONFLICT (client_id, target_wa_id, reactor_jid) DO UPDATE SET emoji = excluded.emoji, ts = excluded.ts`).run(r);
+    if (r.emoji !== '' && (!prev || prev.emoji !== r.emoji)) {
+      db.prepare(`UPDATE messages SET requeue_reason = 'reaction', processed_at = NULL
+        WHERE client_id = ? AND wa_id = ? AND processed_at IS NOT NULL AND revoked = 0`).run(r.clientId, r.targetWaId);
+    }
+  })();
 }
 
 export function listUnprocessed(db: Db, clientId: number, limit = 200): MessageRow[] {
