@@ -138,4 +138,8 @@ CREATE TABLE kv (
 );
 `,
   },
+  {
+    version: 2,
+    sql: "ALTER TABLE messages ADD COLUMN requeue_reason TEXT CHECK (requeue_reason IN ('edit', 'reaction'));",
+  },
 ];

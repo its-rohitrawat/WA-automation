@@ -69,4 +69,46 @@ describe('messages repository', () => {
     expect(resetProcessedSince(db, 1, '2026-10-05T00:00:00.000Z')).toBe(1);
     expect(listUnprocessed(db, 1).map((m) => m.waId)).toEqual(['b']);
   });
+
+  describe('re-check markers', () => {
+    const processed = () => {
+      const db = seededDb();
+      insertMessage(db, msg());
+      markProcessed(db, [listUnprocessed(db, 1)[0]!.id], NOW);
+      return db;
+    };
+    const rx = (emoji: string) => ({ clientId: 1, targetWaId: 'm1', reactorJid: 'r1', emoji, ts: NOW });
+
+    it('a reaction on a processed message queues it again', () => {
+      const db = processed();
+      upsertReaction(db, rx('✅'));
+      expect(listUnprocessed(db, 1)[0]).toMatchObject({ waId: 'm1', requeueReason: 'reaction', processedAt: null });
+    });
+
+    it('a reaction on an unprocessed message adds no marker', () => {
+      const db = seededDb();
+      insertMessage(db, msg());
+      upsertReaction(db, rx('✅'));
+      expect(listUnprocessed(db, 1)[0]).toMatchObject({ requeueReason: null });
+    });
+
+    it('a removed reaction queues nothing', () => {
+      const db = processed();
+      upsertReaction(db, rx(''));
+      expect(listUnprocessed(db, 1)).toHaveLength(0);
+    });
+
+    it('an edit of a processed message is marked as an edit', () => {
+      const db = processed();
+      applyEdit(db, 1, 'm1', 'hello edited', '2026-10-10T09:00:00.000Z');
+      expect(listUnprocessed(db, 1)[0]).toMatchObject({ requeueReason: 'edit' });
+    });
+
+    it('markProcessed clears the marker', () => {
+      const db = processed();
+      upsertReaction(db, rx('✅'));
+      markProcessed(db, [listUnprocessed(db, 1)[0]!.id], NOW);
+      expect(listRecentProcessed(db, 1)[0]).toMatchObject({ requeueReason: null });
+    });
+  });
 });

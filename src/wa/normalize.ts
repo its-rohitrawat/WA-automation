@@ -41,6 +41,10 @@ const MEDIA: Record<string, string> = {
 /** Bookkeeping content types that carry no conversation. */
 const SKIP = new Set(['pollUpdateMessage', 'pinInChatMessage', 'keepInChatMessage', 'encReactionMessage', 'encEventResponseMessage', 'secretEncryptedMessage', 'albumMessage', 'placeholderMessage']);
 
+const ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+const validId = (id: string | null | undefined): id is string => typeof id === 'string' && ID_RE.test(id);
+const cleanEmoji = (e: string | null | undefined): string => [...(e ?? '')].slice(0, 16).join('');
+
 function phoneFromJid(jid: string): string | null {
   const user = jid.split('@')[0]?.split(':')[0];
   return user && /^\d+$/.test(user) ? user : null;
@@ -68,7 +72,8 @@ function textOf(c: proto.IMessage | null | undefined): string | null {
 function quotedOf(c: proto.IMessage, type: string): string | null {
   const inner = (c as Record<string, unknown>)[type];
   if (!inner || typeof inner !== 'object') return null;
-  return (inner as { contextInfo?: proto.IContextInfo | null }).contextInfo?.stanzaId ?? null;
+  const id = (inner as { contextInfo?: proto.IContextInfo | null }).contextInfo?.stanzaId;
+  return validId(id) ? id : null;
 }
 
 function mediaTypeOf(c: proto.IMessage, type: string): string | null {
@@ -80,7 +85,7 @@ function mediaTypeOf(c: proto.IMessage, type: string): string | null {
 export function normalizeMessage(msg: WAMessage): NormalizedEvent | null {
   const groupId = msg.key.remoteJid;
   const waId = msg.key.id;
-  if (!groupId || !waId) return null;
+  if (!groupId || !validId(waId)) return null;
   const content = normalizeMessageContent(msg.message);
   if (!content) return null;
   const ts = toDate(msg.messageTimestamp);
@@ -88,7 +93,7 @@ export function normalizeMessage(msg: WAMessage): NormalizedEvent | null {
   const pm = content.protocolMessage;
   if (pm) {
     const target = pm.key?.id;
-    if (!target) return null;
+    if (!validId(target)) return null;
     if (pm.type === proto.Message.ProtocolMessage.Type.REVOKE) return { kind: 'revoke', groupId, waId: target, ts };
     if (pm.type === proto.Message.ProtocolMessage.Type.MESSAGE_EDIT) {
       const text = textOf(normalizeMessageContent(pm.editedMessage));
@@ -99,8 +104,8 @@ export function normalizeMessage(msg: WAMessage): NormalizedEvent | null {
 
   if (content.reactionMessage) {
     const target = content.reactionMessage.key?.id;
-    if (!target) return null;
-    return { kind: 'reaction', groupId, targetWaId: target, reactorJid: senderOf(msg.key).jid, fromMe: Boolean(msg.key.fromMe), emoji: content.reactionMessage.text ?? '', ts };
+    if (!validId(target)) return null;
+    return { kind: 'reaction', groupId, targetWaId: target, reactorJid: senderOf(msg.key).jid, fromMe: Boolean(msg.key.fromMe), emoji: cleanEmoji(content.reactionMessage.text), ts };
   }
 
   const type = getContentType(content);
@@ -124,7 +129,7 @@ export function normalizeMessage(msg: WAMessage): NormalizedEvent | null {
 export function normalizeUpdate(u: WAMessageUpdate): NormalizedEvent | null {
   const groupId = u.key.remoteJid;
   const waId = u.key.id;
-  if (!groupId || !waId) return null;
+  if (!groupId || !validId(waId)) return null;
   const ts = toDate(u.update.messageTimestamp);
   if (u.update.messageStubType === WAMessageStubType.REVOKE) return { kind: 'revoke', groupId, waId, ts };
   if (u.update.message?.editedMessage) {
@@ -137,7 +142,7 @@ export function normalizeUpdate(u: WAMessageUpdate): NormalizedEvent | null {
 export function normalizeReaction(r: { key: WAMessageKey; reaction: proto.IReaction }): NormalizedEvent | null {
   const groupId = r.key.remoteJid;
   const target = r.key.id;
-  if (!groupId || !target) return null;
+  if (!groupId || !validId(target)) return null;
   const reactorKey = r.reaction.key ?? undefined;
   const msRaw = r.reaction.senderTimestampMs;
   const ms = msRaw === null || msRaw === undefined ? NaN : Number(msRaw);
@@ -147,7 +152,7 @@ export function normalizeReaction(r: { key: WAMessageKey; reaction: proto.IReact
     targetWaId: target,
     reactorJid: reactorKey ? senderOf(reactorKey).jid : 'unknown',
     fromMe: Boolean(reactorKey?.fromMe),
-    emoji: r.reaction.text ?? '',
+    emoji: cleanEmoji(r.reaction.text),
     ts: Number.isFinite(ms) && ms > 0 ? new Date(ms) : new Date(),
   };
 }

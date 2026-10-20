@@ -111,4 +111,17 @@ describe('hardening', () => {
     const e = normalizeMessage(waRaw('r2', { reactionMessage: { key: { id: 'm1' }, text: '' } }));
     expect(e).toMatchObject({ kind: 'reaction', emoji: '' });
   });
+
+  it('drops a quoted id that is not a plain id', () => {
+    expect(normalizeMessage(waText('q1', 'hi', { quoted: 'x\ny' }))).toMatchObject({ kind: 'message', quotedWaId: null });
+  });
+
+  it('drops a reaction whose target id is not a plain id', () => {
+    expect(normalizeMessage(waRaw('r3', { reactionMessage: { key: { id: 'm1 evil' }, text: '✅' } }))).toBeNull();
+  });
+
+  it('cuts a long reaction emoji to 16 code points', () => {
+    const e = normalizeMessage(waRaw('r4', { reactionMessage: { key: { id: 'm1' }, text: '😀'.repeat(40) } }));
+    expect(e).toMatchObject({ kind: 'reaction', emoji: '😀'.repeat(16) });
+  });
 });

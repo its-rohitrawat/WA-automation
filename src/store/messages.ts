@@ -18,6 +18,7 @@ export interface MessageRow extends NewMessage {
   editedAt: string | null;
   revoked: boolean;
   processedAt: string | null;
+  requeueReason: 'edit' | 'reaction' | null;
 }
 
 export interface ReactionRow {
@@ -41,6 +42,7 @@ interface RawMessage {
   edited_at: string | null;
   revoked: number;
   processed_at: string | null;
+  requeue_reason: 'edit' | 'reaction' | null;
 }
 
 function toRow(r: RawMessage): MessageRow {
@@ -59,6 +61,7 @@ function toRow(r: RawMessage): MessageRow {
     editedAt: r.edited_at,
     revoked: r.revoked === 1,
     processedAt: r.processed_at,
+    requeueReason: r.requeue_reason,
   };
 }
 
@@ -79,7 +82,7 @@ export function applyEdit(db: Db, clientId: number, waId: string, newText: strin
   if (!row || row.text === newText) return false;
   db.transaction(() => {
     db.prepare('INSERT INTO message_edits (message_id, previous_text, edited_at) VALUES (?, ?, ?)').run(row.id, row.text, editedAt);
-    db.prepare('UPDATE messages SET text = ?, edited_at = ?, processed_at = NULL WHERE id = ?').run(newText, editedAt, row.id);
+    db.prepare("UPDATE messages SET text = ?, edited_at = ?, requeue_reason = CASE WHEN processed_at IS NOT NULL THEN 'edit' ELSE requeue_reason END, processed_at = NULL WHERE id = ?").run(newText, editedAt, row.id);
   })();
   return true;
 }
@@ -95,6 +98,10 @@ export function applyRevoke(db: Db, clientId: number, waId: string): boolean {
 export function upsertReaction(db: Db, r: { clientId: number; targetWaId: string; reactorJid: string; emoji: string; ts: string }): void {
   db.prepare(`INSERT INTO reactions (client_id, target_wa_id, reactor_jid, emoji, ts) VALUES (@clientId, @targetWaId, @reactorJid, @emoji, @ts)
     ON CONFLICT (client_id, target_wa_id, reactor_jid) DO UPDATE SET emoji = excluded.emoji, ts = excluded.ts`).run(r);
+  if (r.emoji !== '') {
+    db.prepare(`UPDATE messages SET requeue_reason = 'reaction', processed_at = NULL
+      WHERE client_id = ? AND wa_id = ? AND processed_at IS NOT NULL AND revoked = 0`).run(r.clientId, r.targetWaId);
+  }
 }
 
 export function listUnprocessed(db: Db, clientId: number, limit = 200): MessageRow[] {
@@ -114,7 +121,7 @@ export function listRecentProcessed(db: Db, clientId: number, limit = 30): Messa
 }
 
 export function markProcessed(db: Db, ids: number[], at: string): void {
-  const stmt = db.prepare('UPDATE messages SET processed_at = ? WHERE id = ?');
+  const stmt = db.prepare('UPDATE messages SET processed_at = ?, requeue_reason = NULL WHERE id = ?');
   db.transaction(() => {
     for (const id of ids) stmt.run(at, id);
   })();

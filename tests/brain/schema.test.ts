@@ -1,19 +1,53 @@
-import { betaZodOutputFormat } from '@anthropic-ai/sdk/helpers/beta/zod';
 import { describe, expect, it } from 'vitest';
-import { AiOutputSchema } from '../../src/brain/schema.ts';
-import { op } from '../helpers/ai.ts';
+import { AI_OUTPUT_JSON_SCHEMA, AiOutputParseError, OP_NAMES, parseAiOutput } from '../../src/brain/schema.ts';
 
-describe('AiOutputSchema', () => {
-  it('accepts a complete operation', () => {
-    const out = AiOutputSchema.parse({ ops: [op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'high', sourceMessageIds: ['m1'] })] });
-    expect(out.ops).toHaveLength(1);
+const wireOp = (o: Record<string, unknown> = {}) => ({
+  op: 'add_task', taskCode: '', side: '', title: '', category: '', priority: '', assignedTo: '', askedBy: '', deadline: '',
+  latestProgress: '', status: '', text: '', phase: '', personJid: '', role: '', sourceMessageIds: ['m1'], reason: 'test', ...o,
+});
+
+function walk(node: unknown, visit: (n: Record<string, unknown>) => void): void {
+  if (Array.isArray(node)) node.forEach((x) => walk(x, visit));
+  else if (node && typeof node === 'object') {
+    visit(node as Record<string, unknown>);
+    Object.values(node).forEach((x) => walk(x, visit));
+  }
+}
+
+describe('AI_OUTPUT_JSON_SCHEMA', () => {
+  it('has no unions and is strict', () => {
+    walk(AI_OUTPUT_JSON_SCHEMA, (n) => {
+      expect(n).not.toHaveProperty('anyOf');
+      expect(n).not.toHaveProperty('oneOf');
+      if ('type' in n) expect(Array.isArray(n.type)).toBe(false);
+      if (n.type === 'object') expect(n.additionalProperties).toBe(false);
+    });
+    expect(AI_OUTPUT_JSON_SCHEMA).not.toHaveProperty('$schema');
   });
 
-  it('rejects unknown operations', () => {
-    expect(() => AiOutputSchema.parse({ ops: [{ ...op({ op: 'add_task', sourceMessageIds: ['m1'] }), op: 'delete_everything' }] })).toThrow();
+  it('keeps the op enum and requires every field', () => {
+    const props = AI_OUTPUT_JSON_SCHEMA.properties as { ops: { items: { properties: { op: { enum: string[] } }; required: string[] } } };
+    expect(props.ops.items.properties.op.enum).toEqual([...OP_NAMES]);
+    expect(props.ops.items.required).toHaveLength(17);
+  });
+});
+
+describe('parseAiOutput', () => {
+  it('turns empty strings into nulls', () => {
+    const { output, invalidOps } = parseAiOutput(JSON.stringify({ ops: [wireOp()] }));
+    expect(invalidOps).toBe(0);
+    expect(output.ops[0]).toMatchObject({ op: 'add_task', side: null, deadline: null, status: null, sourceMessageIds: ['m1'] });
   });
 
-  it('converts to a structured-output JSON schema', () => {
-    expect(betaZodOutputFormat(AiOutputSchema).type).toBe('json_schema');
+  it('drops an invalid op but keeps the valid ones', () => {
+    const { output, invalidOps } = parseAiOutput(JSON.stringify({ ops: [wireOp({ category: 'Design' }), wireOp({ category: 'design' })] }));
+    expect(invalidOps).toBe(1);
+    expect(output.ops).toHaveLength(1);
+    expect(output.ops[0]!.category).toBe('design');
+  });
+
+  it('throws on non-JSON or a wrong shape', () => {
+    expect(() => parseAiOutput('not json')).toThrow(AiOutputParseError);
+    expect(() => parseAiOutput('{}')).toThrow(AiOutputParseError);
   });
 });
