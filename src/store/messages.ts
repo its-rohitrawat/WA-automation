@@ -19,6 +19,8 @@ export interface MessageRow extends NewMessage {
   revoked: boolean;
   processedAt: string | null;
   requeueReason: 'edit' | 'reaction' | null;
+  /** Bumped by every edit and significant reaction; lets a run see that a message changed during its AI call. */
+  version: number;
 }
 
 export interface ReactionRow {
@@ -43,6 +45,7 @@ interface RawMessage {
   revoked: number;
   processed_at: string | null;
   requeue_reason: 'edit' | 'reaction' | null;
+  version: number;
 }
 
 function toRow(r: RawMessage): MessageRow {
@@ -62,6 +65,7 @@ function toRow(r: RawMessage): MessageRow {
     revoked: r.revoked === 1,
     processedAt: r.processed_at,
     requeueReason: r.requeue_reason,
+    version: r.version,
   };
 }
 
@@ -82,7 +86,9 @@ export function applyEdit(db: Db, clientId: number, waId: string, newText: strin
   if (!row || row.text === newText) return false;
   db.transaction(() => {
     db.prepare('INSERT INTO message_edits (message_id, previous_text, edited_at) VALUES (?, ?, ?)').run(row.id, row.text, editedAt);
-    db.prepare("UPDATE messages SET text = ?, edited_at = ?, requeue_reason = CASE WHEN processed_at IS NOT NULL OR requeue_reason = 'reaction' THEN 'edit' ELSE requeue_reason END, processed_at = NULL WHERE id = ?").run(newText, editedAt, row.id);
+    db.prepare(`UPDATE messages SET text = ?, edited_at = ?,
+      requeue_reason = CASE WHEN processed_at IS NOT NULL OR requeue_reason = 'reaction' THEN 'edit' ELSE requeue_reason END,
+      processed_at = NULL, version = version + 1, touch_reason = 'edit' WHERE id = ?`).run(newText, editedAt, row.id);
   })();
   return true;
 }
@@ -103,6 +109,8 @@ export function upsertReaction(db: Db, r: { clientId: number; targetWaId: string
     db.prepare(`INSERT INTO reactions (client_id, target_wa_id, reactor_jid, emoji, ts) VALUES (@clientId, @targetWaId, @reactorJid, @emoji, @ts)
       ON CONFLICT (client_id, target_wa_id, reactor_jid) DO UPDATE SET emoji = excluded.emoji, ts = excluded.ts`).run(r);
     if (r.emoji !== '' && (!prev || prev.emoji !== r.emoji)) {
+      db.prepare(`UPDATE messages SET version = version + 1, touch_reason = CASE WHEN touch_reason = 'edit' THEN 'edit' ELSE 'reaction' END
+        WHERE client_id = ? AND wa_id = ? AND revoked = 0`).run(r.clientId, r.targetWaId);
       db.prepare(`UPDATE messages SET requeue_reason = 'reaction', processed_at = NULL
         WHERE client_id = ? AND wa_id = ? AND processed_at IS NOT NULL AND revoked = 0`).run(r.clientId, r.targetWaId);
     }
@@ -130,6 +138,32 @@ export function markProcessed(db: Db, ids: number[], at: string): void {
   db.transaction(() => {
     for (const id of ids) stmt.run(at, id);
   })();
+}
+
+/**
+ * Marks messages processed only if they are still at the version the run read. A row that changed in the meantime
+ * stays queued with a re-check marker ('edit' or 'reaction'), because the operations from its old version were applied.
+ * Returns how many rows were skipped. Runs inside the caller's transaction.
+ */
+export function markProcessedIfUnchanged(db: Db, rows: { id: number; version: number }[], at: string): number {
+  const mark = db.prepare('UPDATE messages SET processed_at = @at, requeue_reason = NULL, touch_reason = NULL WHERE id = @id AND version = @version');
+  const requeue = db.prepare('UPDATE messages SET requeue_reason = COALESCE(touch_reason, requeue_reason) WHERE id = ?');
+  let skipped = 0;
+  for (const r of rows) {
+    if (mark.run({ at, id: r.id, version: r.version }).changes === 0) {
+      requeue.run(r.id);
+      skipped++;
+    }
+  }
+  return skipped;
+}
+
+/** Marks tasks whose source message was deleted for everyone (also catches a deletion that landed during an AI call). */
+export function flagRevokedSources(db: Db, clientId: number): number {
+  return db
+    .prepare(`UPDATE tasks SET source_revoked = 1 WHERE client_id = ? AND source_revoked = 0
+      AND source_wa_id IN (SELECT wa_id FROM messages WHERE client_id = ? AND revoked = 1)`)
+    .run(clientId, clientId).changes;
 }
 
 export function reactionsFor(db: Db, clientId: number, waIds: string[]): ReactionRow[] {

@@ -7,13 +7,13 @@ import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { latestBatches } from '../../src/store/batches.ts';
 import { getClient } from '../../src/store/clients.ts';
 import type { Db } from '../../src/store/db.ts';
-import { insertMessage, listUnprocessed, markProcessed, upsertReaction } from '../../src/store/messages.ts';
-import { listPeople, upsertPerson } from '../../src/store/people.ts';
-import { createTask, getTaskByCode, listDecisions, listTasks, setTaskStatus } from '../../src/store/tasks.ts';
+import { applyEdit, applyRevoke, insertMessage, listUnprocessed, markProcessed, upsertReaction } from '../../src/store/messages.ts';
+import { listPeople, setRole, upsertPerson } from '../../src/store/people.ts';
+import { createTask, getTaskByCode, listDecisions, listTasks, setTaskStatus, updateTaskFields } from '../../src/store/tasks.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger, type Logger } from '../../src/util/logger.ts';
 import { FAKE_USAGE, FakeAi, op, type FakeResponse } from '../helpers/ai.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
+import { LATER, NOW, seededDb } from '../helpers/db.ts';
 import { SHARMA_PN } from '../helpers/wa.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
@@ -44,6 +44,17 @@ function banner(db: Db): void {
 function estimateOf(ai: FakeAi): number {
   const c = ai.calls[0]!;
   return estimateCostUsd(c.system.length + c.user.length, P, MAX_OUTPUT_TOKENS);
+}
+
+/** Holds the fake AI call open until the returned function is called; run() has read its batch by then. */
+function hold(ai: FakeAi): () => void {
+  let open!: () => void;
+  ai.gate = new Promise<void>((resolve) => { open = resolve; });
+  return () => open();
+}
+
+function processedAt(db: Db, waId: string): string | null {
+  return (db.prepare('SELECT processed_at AS p FROM messages WHERE wa_id = ?').get(waId) as { p: string | null }).p;
 }
 
 /** Every reservation was settled or released: the whole rest of the cap can be reserved (1e-9 absorbs float rounding). */
@@ -156,6 +167,8 @@ describe('Reconciler', () => {
     expect(listUnprocessed(db, 1)).toHaveLength(1);
     expect(latestBatches(db)[0]).toMatchObject({ status: 'failed', errorCode: 'apply_failed' });
     expect(onChanged).not.toHaveBeenCalled();
+    banner(db);
+    expect(listTasks(db, 1)[0]!.code).toBe('SHA-001'); // the task-code counter rolled back too
   });
 
   it('retries once on unparseable output, then fails and leaves messages queued', async () => {
@@ -179,11 +192,14 @@ describe('Reconciler', () => {
   });
 
   it('pauses without calling the AI when the spend cap would be exceeded', async () => {
-    const { db, ai, r } = setup([], 0.0001);
+    const log = silentLogger();
+    const info = vi.spyOn(log, 'info');
+    const { db, ai, r } = setup([], 0.0001, log);
     store(db, 'm1', 'hello');
     expect(await r.run(1)).toEqual({ status: 'paused' });
     expect(ai.calls).toHaveLength(0);
     expect(listUnprocessed(db, 1)).toHaveLength(1);
+    expect(info).toHaveBeenCalledWith({ clientId: 1 }, 'spend cap: run paused');
   });
 
   it("keeps other clients' chat out of the prompt", async () => {
@@ -197,8 +213,7 @@ describe('Reconciler', () => {
 
   it('lets only one of two parallel runs reserve when the cap fits one estimate', async () => {
     const { db, ai, r } = setup([], OUTPUT_ESTIMATE * 1.5);
-    let open!: () => void;
-    ai.gate = new Promise<void>((resolve) => { open = resolve; });
+    const open = hold(ai);
     store(db, 'm1', 'hello from Sharma');
     store(db, 'z1', 'hello from Mehta', '2026-10-19T07:00:00.000Z', 2);
 
@@ -212,9 +227,12 @@ describe('Reconciler', () => {
   });
 
   it('pauses when the retry no longer fits under the cap', async () => {
-    const { db, ai, r } = setup([new AiInvalidOutputError('bad', FAKE_USAGE, 14.9)]);
+    const log = silentLogger();
+    const info = vi.spyOn(log, 'info');
+    const { db, ai, r } = setup([new AiInvalidOutputError('bad', FAKE_USAGE, 14.9)], 15, log);
     store(db, 'm1', 'hello');
     expect(await r.run(1)).toEqual({ status: 'paused' });
+    expect(info).toHaveBeenCalledWith({ clientId: 1 }, 'spend cap: run paused');
     expect(ai.calls).toHaveLength(1);
     expect(latestBatches(db)[0]).toMatchObject({ status: 'failed', errorCode: 'spend_cap' });
     expect(listUnprocessed(db, 1)).toHaveLength(1);
@@ -263,5 +281,107 @@ describe('Reconciler', () => {
     expect(rows[0]!.usd).toBeCloseTo(0.05, 9);
     expect(rows[0]!.detail).toMatch(/\(fallback\)$/);
     expectNoReservation(spend);
+  });
+
+  it('books an unexpected error at the estimate', async () => {
+    const { db, ai, r, spend } = setup([new Error('boom')]);
+    store(db, 'm1', 'hello');
+    expect(await r.run(1)).toEqual({ status: 'failed', errorCode: 'unknown' });
+    expect(spend.spentToday()).toBeCloseTo(estimateOf(ai), 9);
+    const row = db.prepare('SELECT detail FROM spend').get() as { detail: string };
+    expect(row.detail).toMatch(/\(unknown, estimated\)$/);
+    expectNoReservation(spend);
+  });
+
+  it('uses the processing date when any source is a re-checked message', async () => {
+    const { db, r } = setup([{ ops: [op({ op: 'close_task', taskCode: 'SHA-001', sourceMessageIds: ['m1', 'm2'] })] }]);
+    banner(db);
+    store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
+    markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-12T06:00:00.000Z');
+    upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '✅', ts: '2026-10-19T07:55:00.000Z' });
+    store(db, 'm2', 'Thanks team', '2026-10-18T05:00:00.000Z'); // the latest source is a fresh message from yesterday
+    expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+    expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-19' });
+  });
+
+  it('cuts the source quote by characters, never inside an emoji', async () => {
+    const { db, r } = setup([{ ops: [op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'low', sourceMessageIds: ['m1'] })] }]);
+    store(db, 'm1', '👍'.repeat(130));
+    await r.run(1);
+    expect(getTaskByCode(db, 'SHA-001')!.sourceQuote).toBe('👍'.repeat(120));
+  });
+
+  describe('changes that land while the AI call is in flight', () => {
+    it('keeps a field a human locked during the call', async () => {
+      const { db, ai, r } = setup([{ ops: [op({ op: 'update_task', taskCode: 'SHA-001', title: 'AI title', sourceMessageIds: ['m1'] })] }]);
+      banner(db);
+      store(db, 'm1', 'Banner ka naam badlo');
+      const open = hold(ai);
+      const run = r.run(1);
+      updateTaskFields(db, getTaskByCode(db, 'SHA-001')!.id, { title: 'Human title' }, LATER, 'human');
+      open();
+      expect(await run).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ title: 'Human title', lockedFields: ['title'] });
+    });
+
+    it('keeps a role a human set during the call', async () => {
+      const { db, ai, r } = setup([{ ops: [op({ op: 'set_person_role', personJid: SHARMA_PN, role: 'team', sourceMessageIds: ['m1'] })] }]);
+      store(db, 'm1', 'hello');
+      const open = hold(ai);
+      const run = r.run(1);
+      setRole(db, 1, SHARMA_PN, 'client', 'human');
+      open();
+      expect(await run).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
+      expect(listPeople(db, 1)[0]).toMatchObject({ role: 'client', roleSetBy: 'human' });
+    });
+
+    it('queues a message edited during the call again, marked as an edit', async () => {
+      const log = silentLogger();
+      const info = vi.spyOn(log, 'info');
+      const { db, ai, r } = setup([], 15, log);
+      store(db, 'm1', 'Banner bright karo');
+      store(db, 'm2', 'Aur logo bhi', '2026-10-19T07:01:00.000Z');
+      const open = hold(ai);
+      const run = r.run(1);
+      applyEdit(db, 1, 'm1', 'Banner dark karo', '2026-10-19T08:00:30.000Z');
+      open();
+      expect(await run).toEqual({ status: 'ok', accepted: 0, rejected: 0 });
+      expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: 'edit' })]);
+      expect(processedAt(db, 'm2')).not.toBeNull();
+      expect(info).toHaveBeenCalledWith(expect.objectContaining({ clientId: 1, requeued: 1 }), 'messages changed during the AI call; queued again');
+    });
+
+    it('queues a message that got a reaction during the call again, marked as a reaction', async () => {
+      const { db, ai, r } = setup([]);
+      store(db, 'm1', 'Banner v3 attached');
+      store(db, 'm2', 'Logo bhi bhej diya', '2026-10-19T07:01:00.000Z');
+      const open = hold(ai);
+      const run = r.run(1);
+      upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '✅', ts: '2026-10-19T08:00:30.000Z' });
+      open();
+      expect(await run).toEqual({ status: 'ok', accepted: 0, rejected: 0 });
+      expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: 'reaction' })]);
+      expect(processedAt(db, 'm2')).not.toBeNull();
+    });
+
+    it('processes a message edited before the run normally, with no re-check marker left', async () => {
+      const { db, r } = setup([]);
+      store(db, 'm1', 'Banner bright karo');
+      applyEdit(db, 1, 'm1', 'Banner dark karo', '2026-10-19T07:05:00.000Z');
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 0 });
+      expect(listUnprocessed(db, 1)).toHaveLength(0);
+      expect(db.prepare("SELECT touch_reason AS touch, requeue_reason AS requeue FROM messages WHERE wa_id = 'm1'").get()).toEqual({ touch: null, requeue: null });
+    });
+
+    it('flags a new task whose source message was deleted during the call', async () => {
+      const { db, ai, r } = setup([{ ops: [op({ op: 'add_task', side: 'us', title: 'Revise banner', category: 'design', priority: 'high', sourceMessageIds: ['m1'] })] }]);
+      store(db, 'm1', 'Banner bright karo');
+      const open = hold(ai);
+      const run = r.run(1);
+      applyRevoke(db, 1, 'm1');
+      open();
+      expect(await run).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ sourceWaId: 'm1', sourceRevoked: true });
+    });
   });
 });

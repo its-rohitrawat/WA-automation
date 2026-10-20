@@ -142,4 +142,12 @@ CREATE TABLE kv (
     version: 2,
     sql: "ALTER TABLE messages ADD COLUMN requeue_reason TEXT CHECK (requeue_reason IN ('edit', 'reaction'));",
   },
+  {
+    // version counts edits and significant reactions, so a run can tell that a message changed during its AI call.
+    version: 3,
+    sql: `
+ALTER TABLE messages ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN touch_reason TEXT CHECK (touch_reason IN ('edit', 'reaction'));
+`,
+  },
 ];

@@ -17,7 +17,7 @@ const people = [person(SHARMA_PN, 'Mr. Sharma', 'client'), person(RAHUL_PN, 'Rah
 const peopleMap = new Map(people.map((p) => [p.jid, p]));
 const message = (waId: string, text: string | null, o: Partial<MessageRow> = {}): MessageRow => ({
   id: 1, waId, clientId: 1, senderJid: SHARMA_PN, senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false,
-  ts: '2026-10-17T05:50:00.000Z', text, quotedWaId: null, mediaType: null, editedAt: null, revoked: false, processedAt: null, requeueReason: null, ...o,
+  ts: '2026-10-17T05:50:00.000Z', text, quotedWaId: null, mediaType: null, editedAt: null, revoked: false, processedAt: null, requeueReason: null, version: 0, ...o,
 });
 const task: TaskRow = {
   id: 1, code: 'SHA-012', clientId: 1, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'high',

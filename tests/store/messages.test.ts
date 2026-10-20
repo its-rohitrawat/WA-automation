@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyEdit, applyRevoke, clientIdsWithUnprocessed, insertMessage, lastActivity, listRecentProcessed, listUnprocessed,
-  markProcessed, reactionsFor, resetProcessedSince, upsertReaction, type NewMessage,
+  markProcessed, markProcessedIfUnchanged, reactionsFor, resetProcessedSince, upsertReaction, type NewMessage,
 } from '../../src/store/messages.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
 
@@ -133,6 +133,68 @@ describe('messages repository', () => {
       upsertReaction(db, rx('✅'));
       markProcessed(db, [listUnprocessed(db, 1)[0]!.id], NOW);
       expect(listRecentProcessed(db, 1)[0]).toMatchObject({ requeueReason: null });
+    });
+  });
+
+  describe('versions for changes during an AI call', () => {
+    const rx = (emoji: string, targetWaId = 'm1') => ({ clientId: 1, targetWaId, reactorJid: 'r1', emoji, ts: NOW });
+    const version = (db: ReturnType<typeof seededDb>, waId = 'm1') =>
+      db.prepare('SELECT version, touch_reason AS touch FROM messages WHERE wa_id = ?').get(waId) as { version: number; touch: string | null };
+
+    it('starts at version 0 and an edit bumps it', () => {
+      const db = seededDb();
+      insertMessage(db, msg());
+      expect(listUnprocessed(db, 1)[0]).toMatchObject({ version: 0 });
+      applyEdit(db, 1, 'm1', 'hello edited', '2026-10-10T09:00:00.000Z');
+      expect(listUnprocessed(db, 1)[0]).toMatchObject({ version: 1 });
+      expect(version(db)).toEqual({ version: 1, touch: 'edit' });
+    });
+
+    it('a new reaction bumps the version, a repeated identical one does not', () => {
+      const db = seededDb();
+      insertMessage(db, msg());
+      upsertReaction(db, rx('✅'));
+      expect(version(db)).toEqual({ version: 1, touch: 'reaction' });
+      upsertReaction(db, rx('✅'));
+      expect(version(db)).toEqual({ version: 1, touch: 'reaction' });
+      upsertReaction(db, rx(''));
+      expect(version(db)).toEqual({ version: 1, touch: 'reaction' });
+    });
+
+    it('a reaction after an edit keeps the touch reason as edit', () => {
+      const db = seededDb();
+      insertMessage(db, msg());
+      applyEdit(db, 1, 'm1', 'hello edited', '2026-10-10T09:00:00.000Z');
+      upsertReaction(db, rx('✅'));
+      expect(version(db)).toEqual({ version: 2, touch: 'edit' });
+    });
+
+    it('markProcessedIfUnchanged skips a row that changed and queues it with a re-check marker', () => {
+      const db = seededDb();
+      insertMessage(db, msg({ waId: 'm1' }));
+      insertMessage(db, msg({ waId: 'm2', ts: '2026-10-10T08:01:00.000Z' }));
+      insertMessage(db, msg({ waId: 'm3', ts: '2026-10-10T08:02:00.000Z' }));
+      const seen = listUnprocessed(db, 1).map((m) => ({ id: m.id, version: m.version }));
+      applyEdit(db, 1, 'm1', 'hello edited', '2026-10-10T09:00:00.000Z');
+      upsertReaction(db, rx('✅', 'm2'));
+
+      expect(markProcessedIfUnchanged(db, seen, NOW)).toBe(2);
+      expect(listUnprocessed(db, 1).map((m) => [m.waId, m.requeueReason])).toEqual([['m1', 'edit'], ['m2', 'reaction']]);
+      expect(listRecentProcessed(db, 1).map((m) => m.waId)).toEqual(['m3']);
+    });
+
+    it('markProcessedIfUnchanged returns 1 for one changed row and clears the touch reason of processed ones', () => {
+      const db = seededDb();
+      insertMessage(db, msg({ waId: 'm1' }));
+      insertMessage(db, msg({ waId: 'm2', ts: '2026-10-10T08:01:00.000Z' }));
+      applyEdit(db, 1, 'm2', 'edited before the run', '2026-10-10T08:30:00.000Z');
+      const seen = listUnprocessed(db, 1).map((m) => ({ id: m.id, version: m.version }));
+      applyEdit(db, 1, 'm1', 'hello edited', '2026-10-10T09:00:00.000Z');
+
+      expect(markProcessedIfUnchanged(db, seen, NOW)).toBe(1);
+      expect(listUnprocessed(db, 1)[0]).toMatchObject({ waId: 'm1', requeueReason: 'edit', processedAt: null });
+      expect(version(db, 'm2')).toEqual({ version: 1, touch: null });
+      expect(listRecentProcessed(db, 1)[0]).toMatchObject({ waId: 'm2', requeueReason: null, processedAt: NOW });
     });
   });
 });

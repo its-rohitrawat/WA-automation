@@ -4,7 +4,9 @@ import type { SpendGuard } from '../spend/spendGuard.ts';
 import { finishBatch, startBatch } from '../store/batches.ts';
 import { getClient, setPhase, setStatus, type ClientRow } from '../store/clients.ts';
 import { tx, type Db } from '../store/db.ts';
-import { listRecentProcessed, listUnprocessed, markProcessed, reactionsFor, type MessageRow } from '../store/messages.ts';
+import {
+  flagRevokedSources, listRecentProcessed, listUnprocessed, markProcessedIfUnchanged, reactionsFor, type MessageRow,
+} from '../store/messages.ts';
 import { listPeople, setRole } from '../store/people.ts';
 import {
   addDecision, createTask, getTaskByCode, listDecisions, listTasks, logReminder, recordEvent, setTaskStatus, TASK_FIELDS, updateTaskFields, type TaskField,
@@ -15,7 +17,7 @@ import { istDate } from '../util/time.ts';
 import { AiInvalidOutputError, AiRefusalError, MAX_OUTPUT_TOKENS, SDK_MAX_RETRIES, type AiCallResult, type AiClient } from './claudeClient.ts';
 import { buildUserContent, SYSTEM_PROMPT } from './prompt.ts';
 import type { AiOp, AiOutput } from './schema.ts';
-import { validateOps, type ValidationState } from './validator.ts';
+import { validateOps, type Rejection, type ValidationState } from './validator.ts';
 
 export type ReconcileOutcome =
   | { status: 'noop' }
@@ -90,7 +92,10 @@ export class Reconciler {
     // attempt, then a full fallback attempt at 1.25x rates). settle() books the true cost, so the books stay right;
     // the cap can be overshot only by that gap per call in flight.
     const estimate = estimateCostUsd(SYSTEM_PROMPT.length + user.length, prices, MAX_OUTPUT_TOKENS);
-    if (!spend.canSpend(estimate)) return { status: 'paused' };
+    if (!spend.canSpend(estimate)) {
+      log.info({ clientId }, 'spend cap: run paused');
+      return { status: 'paused' };
+    }
 
     const batchId = startBatch(db, clientId, batch.length, now.toISOString());
     let result: { output: AiOutput; invalidOps: number };
@@ -99,31 +104,45 @@ export class Reconciler {
     } catch (e) {
       const errorCode = errorCodeOf(e);
       finishBatch(db, batchId, { status: 'failed', errorCode, accepted: null, rejected: null, at: clock.now().toISOString() });
-      log.warn({ clientId, batchId, errorCode }, 'reconcile failed; messages stay queued');
       // Hitting the cap mid-run is a pause, not an AI error.
-      return e instanceof SpendCapReachedError ? { status: 'paused' } : { status: 'failed', errorCode };
+      if (e instanceof SpendCapReachedError) {
+        log.info({ clientId }, 'spend cap: run paused');
+        return { status: 'paused' };
+      }
+      log.warn({ clientId, batchId, errorCode }, 'reconcile failed; messages stay queued');
+      return { status: 'failed', errorCode };
     }
     if (result.invalidOps > 0) log.warn({ clientId, batchId, invalidOps: result.invalidOps }, 'model returned invalid operations');
 
+    // Message ids and times come from the rows the AI saw.
     const byWaId = new Map([...recent, ...batch].map((m) => [m.waId, m]));
-    const state: ValidationState = {
-      clientCode: client.code,
-      phases: client.phases,
-      phaseLocked: client.phaseLocked,
-      tasksByCode: new Map(openTasks.map((t) => [t.code, t])),
-      batchIds: new Set(batch.map((m) => m.waId)),
-      contextIds: new Set(recent.map((m) => m.waId)),
-      messageTs: new Map([...byWaId].map(([id, m]) => [id, m.ts])),
-      peopleByJid: new Map(people.map((p) => [p.jid, p])),
-    };
-    const { accepted, rejected } = validateOps(result.output.ops, state);
+    const batchIds = new Set(batch.map((m) => m.waId));
+    const contextIds = new Set(recent.map((m) => m.waId));
+    const messageTs = new Map([...byWaId].map(([id, m]) => [id, m.ts]));
 
     const appliedAt = clock.now();
+    let applied: { accepted: AiOp[]; rejected: Rejection[]; requeued: number };
     try {
-      tx(db, () => {
-        for (const op of accepted) this.#apply(client, op, byWaId, appliedAt);
-        markProcessed(db, batch.map((m) => m.id), appliedAt.toISOString());
+      applied = tx(db, () => {
+        // The call can take minutes and a human can correct the tracker meanwhile, so validate against the
+        // client, tasks and people as they are now. Nothing can interleave inside this synchronous transaction.
+        const fresh = getClient(db, clientId);
+        const state: ValidationState = {
+          clientCode: fresh.code,
+          phases: fresh.phases,
+          phaseLocked: fresh.phaseLocked,
+          tasksByCode: new Map(listTasks(db, clientId, ['open', 'maybe_done']).map((t) => [t.code, t])),
+          batchIds,
+          contextIds,
+          messageTs,
+          peopleByJid: new Map(listPeople(db, clientId).map((p) => [p.jid, p])),
+        };
+        const { accepted, rejected } = validateOps(result.output.ops, state);
+        for (const op of accepted) this.#apply(fresh, op, byWaId, appliedAt);
+        const requeued = markProcessedIfUnchanged(db, batch.map((m) => ({ id: m.id, version: m.version })), appliedAt.toISOString());
+        flagRevokedSources(db, clientId); // a source message deleted during the call
         finishBatch(db, batchId, { status: 'ok', errorCode: null, accepted: accepted.length, rejected: rejected.length, at: appliedAt.toISOString() });
+        return { accepted, rejected, requeued };
       });
     } catch (err) {
       // The transaction rolled back: nothing was applied and the messages stay queued.
@@ -131,7 +150,9 @@ export class Reconciler {
       log.error({ clientId, batchId, err }, 'applying operations failed; messages stay queued');
       return { status: 'failed', errorCode: 'apply_failed' };
     }
+    const { accepted, rejected, requeued } = applied;
     for (const r of rejected) log.info({ clientId, batchId, op: r.op.op, why: r.reason }, 'operation rejected');
+    if (requeued > 0) log.info({ clientId, batchId, requeued }, 'messages changed during the AI call; queued again');
     this.#o.onChanged();
     return { status: 'ok', accepted: accepted.length, rejected: rejected.length };
   }
@@ -181,8 +202,8 @@ export class Reconciler {
     const first = sources[0];
     const last = sources[sources.length - 1];
     const dateOf = (m: MessageRow | undefined) => istDate(m ? new Date(m.ts) : at);
-    // A re-queued message (new reaction or edit) is evidence from today, not from the day it was first sent.
-    const lastDate = last?.requeueReason ? istDate(at) : dateOf(last);
+    // A re-checked message (new reaction or edit) is evidence from today, not from the day it was first sent.
+    const lastDate = sources.some((m) => m.requeueReason !== null) ? istDate(at) : dateOf(last);
     const event = (taskId: number | null, detail: object) =>
       recordEvent(db, { taskId, clientId: client.id, actor: 'ai', op: op.op, detail, reason: op.reason, sourceIds: op.sourceMessageIds, at: nowIso });
     const taskFor = (code: string | null) => {
@@ -204,7 +225,7 @@ export class Reconciler {
           raisedOn: dateOf(first),
           deadline: op.deadline,
           latestProgress: op.latestProgress,
-          sourceQuote: first?.text ? first.text.slice(0, 120) : null,
+          sourceQuote: first?.text ? [...first.text].slice(0, 120).join('') : null,
           sourceDate: first ? dateOf(first) : null,
           sourceWaId: first?.waId ?? null,
           origin: 'whatsapp',
