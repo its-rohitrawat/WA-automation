@@ -1,4 +1,4 @@
-import { getContentType, isPnUser, normalizeMessageContent, proto, WAMessageStubType } from 'baileys';
+import { getContentType, isPnUser, jidNormalizedUser, normalizeMessageContent, proto, WAMessageStubType } from 'baileys';
 import type { WAMessage, WAMessageKey, WAMessageUpdate } from 'baileys';
 
 /** Fixed sender id for the founder's own messages. */
@@ -28,7 +28,18 @@ const MEDIA: Record<string, string> = {
   ptvMessage: 'video',
   documentMessage: 'document',
   stickerMessage: 'sticker',
+  locationMessage: 'location',
+  liveLocationMessage: 'location',
+  contactMessage: 'contact',
+  contactsArrayMessage: 'contact',
+  pollCreationMessage: 'poll',
+  pollCreationMessageV2: 'poll',
+  pollCreationMessageV3: 'poll',
+  eventMessage: 'event',
 };
+
+/** Bookkeeping content types that carry no conversation. */
+const SKIP = new Set(['pollUpdateMessage', 'pinInChatMessage', 'keepInChatMessage', 'encReactionMessage', 'encEventResponseMessage', 'secretEncryptedMessage', 'albumMessage', 'placeholderMessage']);
 
 function phoneFromJid(jid: string): string | null {
   const user = jid.split('@')[0]?.split(':')[0];
@@ -39,13 +50,14 @@ export function senderOf(key: WAMessageKey): { jid: string; number: string | nul
   if (key.fromMe) return { jid: SELF_JID, number: null };
   const candidates = [key.participantAlt, key.participant].filter((j): j is string => typeof j === 'string' && j.length > 0);
   const pn = candidates.find((j) => isPnUser(j) === true);
-  return { jid: pn ?? candidates[0] ?? key.remoteJid ?? 'unknown', number: pn ? phoneFromJid(pn) : null };
+  return { jid: pn ? (jidNormalizedUser(pn) || pn) : (candidates[0] ?? key.remoteJid ?? 'unknown'), number: pn ? phoneFromJid(pn) : null };
 }
 
 function toDate(t: unknown): Date {
-  if (typeof t === 'number') return new Date(t * 1000);
-  if (t && typeof (t as { toNumber?: unknown }).toNumber === 'function') return new Date((t as { toNumber(): number }).toNumber() * 1000);
-  return new Date();
+  let n: number | null = null;
+  if (typeof t === 'number') n = t;
+  else if (t && typeof (t as { toNumber?: unknown }).toNumber === 'function') n = (t as { toNumber(): number }).toNumber();
+  return n !== null && Number.isFinite(n) && n > 0 ? new Date(n * 1000) : new Date();
 }
 
 function textOf(c: proto.IMessage | null | undefined): string | null {
@@ -62,7 +74,7 @@ function quotedOf(c: proto.IMessage, type: string): string | null {
 function mediaTypeOf(c: proto.IMessage, type: string): string | null {
   if (type === 'conversation' || type === 'extendedTextMessage') return null;
   if (type === 'audioMessage') return c.audioMessage?.ptt ? 'voice' : 'audio';
-  return MEDIA[type] ?? type;
+  return MEDIA[type] ?? 'unsupported';
 }
 
 export function normalizeMessage(msg: WAMessage): NormalizedEvent | null {
@@ -92,7 +104,7 @@ export function normalizeMessage(msg: WAMessage): NormalizedEvent | null {
   }
 
   const type = getContentType(content);
-  if (!type) return null;
+  if (!type || SKIP.has(type)) return null;
   const sender = senderOf(msg.key);
   return {
     kind: 'message',
@@ -115,7 +127,7 @@ export function normalizeUpdate(u: WAMessageUpdate): NormalizedEvent | null {
   if (!groupId || !waId) return null;
   const ts = toDate(u.update.messageTimestamp);
   if (u.update.messageStubType === WAMessageStubType.REVOKE) return { kind: 'revoke', groupId, waId, ts };
-  if (u.update.message) {
+  if (u.update.message?.editedMessage) {
     const text = textOf(normalizeMessageContent(u.update.message));
     if (text !== null) return { kind: 'edit', groupId, waId, text, ts };
   }
@@ -127,7 +139,8 @@ export function normalizeReaction(r: { key: WAMessageKey; reaction: proto.IReact
   const target = r.key.id;
   if (!groupId || !target) return null;
   const reactorKey = r.reaction.key ?? undefined;
-  const ms = r.reaction.senderTimestampMs;
+  const msRaw = r.reaction.senderTimestampMs;
+  const ms = msRaw === null || msRaw === undefined ? NaN : Number(msRaw);
   return {
     kind: 'reaction',
     groupId,
@@ -135,6 +148,6 @@ export function normalizeReaction(r: { key: WAMessageKey; reaction: proto.IReact
     reactorJid: reactorKey ? senderOf(reactorKey).jid : 'unknown',
     fromMe: Boolean(reactorKey?.fromMe),
     emoji: r.reaction.text ?? '',
-    ts: ms ? new Date(Number(ms)) : new Date(),
+    ts: Number.isFinite(ms) && ms > 0 ? new Date(ms) : new Date(),
   };
 }

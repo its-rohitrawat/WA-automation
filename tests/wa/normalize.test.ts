@@ -84,3 +84,31 @@ describe('normalizeUpdate and normalizeReaction', () => {
     expect(e).toEqual({ kind: 'reaction', groupId: G, targetWaId: 'm1', reactorJid: RAHUL_PN, fromMe: false, emoji: '👍', ts: at });
   });
 });
+
+describe('hardening', () => {
+  it('ignores plain-text messages.update', () => {
+    expect(normalizeUpdate({ key: { remoteJid: G, id: 'm1' }, update: { message: { conversation: 'x' } } } as WAMessageUpdate)).toBeNull();
+  });
+
+  it('skips bookkeeping types and labels media stably', () => {
+    expect(normalizeMessage(waRaw('b1', { pollUpdateMessage: {} }))).toBeNull();
+    expect(normalizeMessage(waRaw('b2', { locationMessage: {} }))).toMatchObject({ mediaType: 'location' });
+    expect(normalizeMessage(waRaw('b3', { fooBarMessage: {} } as never))).toMatchObject({ mediaType: 'unsupported' });
+  });
+
+  it('strips the device suffix from phone-number senders', () => {
+    expect(normalizeMessage(waText('d1', 'hi', { participantAlt: '919800000001:12@s.whatsapp.net' }))).toMatchObject({
+      senderJid: '919800000001@s.whatsapp.net', senderNumber: '919800000001',
+    });
+  });
+
+  it('does not produce a 1970 date for timestamp 0', () => {
+    const e = normalizeMessage(waText('t1', 'hi', { ts: 0 }));
+    expect(e && e.kind === 'message' ? Math.abs(e.ts.getTime() - Date.now()) : Infinity).toBeLessThan(60_000);
+  });
+
+  it('keeps an empty reaction emoji', () => {
+    const e = normalizeMessage(waRaw('r2', { reactionMessage: { key: { id: 'm1' }, text: '' } }));
+    expect(e).toMatchObject({ kind: 'reaction', emoji: '' });
+  });
+});
