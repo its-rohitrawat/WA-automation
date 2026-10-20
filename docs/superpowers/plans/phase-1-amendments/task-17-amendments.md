@@ -26,6 +26,8 @@ Extra tests (tests/brain/reconciler.test.ts):
 `SpendGuard` now has `reserve(estimate): number | null`, `settle(id, kind, usd, detail)` and `release(id)`, and `canSpend` counts reservations. `ClaudeClient` exports `MAX_OUTPUT_TOKENS` and `SDK_MAX_RETRIES`, and results and AI errors carry `costUsd` (fallback attempts are already priced in). Changes:
 
 6. **Estimate:** `const estimate = estimateCostUsd(SYSTEM_PROMPT.length + user.length, prices, MAX_OUTPUT_TOKENS)`. `run()` keeps the quick `if (!spend.canSpend(estimate)) return { status: 'paused' }` before `startBatch`.
+   - Known and accepted: a call that falls back can cost up to about 2.25× its reservation, because a declined primary attempt is followed by a full fallback attempt at 1.25× rates. `settle` records the true `costUsd`, so the books stay right. The cap can be overshot only by that gap per call in flight.
+   - Put this note in a comment above the estimate line.
 7. **`#callWithRetry(user, batchId, estimate)`:** every attempt, including the retry after invalid output, starts with `const rid = spend.reserve(estimate)`. If that returns null, it throws `new SpendCapReachedError()` (a small exported class in reconciler.ts). Only `await ai.reconcile(...)` sits inside the try. Settling happens outside the classification logic:
    - **success:** `spend.settle(rid, 'ai', r.costUsd, `batch ${batchId}` + (r.fallbackUsed ? ' (fallback)' : ''))`, then return `{ output, invalidOps }`;
    - **AiRefusalError / AiInvalidOutputError:** `settle(rid, 'ai', e.costUsd ?? estimate, `batch ${batchId} (failed)`)`;
