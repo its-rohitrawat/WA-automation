@@ -6392,7 +6392,7 @@ import { unprocessedCounts } from '../store/messages.ts';
 import { acquireLock } from '../util/lock.ts';
 import { silentLogger } from '../util/logger.ts';
 import { AllowList } from '../wa/allowlist.ts';
-import { openSessionDb, useEncryptedAuthState, type EncryptedAuth } from '../wa/authState.ts';
+import { openSessionDb, resetSession, useEncryptedAuthState, type EncryptedAuth } from '../wa/authState.ts';
 import { baileysSocketFactory, WhatsAppGateway } from '../wa/gateway.ts';
 import { Ingestor } from '../wa/ingest.ts';
 import { formatStatus } from './status.ts';
@@ -6468,7 +6468,7 @@ export async function linkCommand(opts: { reset: boolean }): Promise<void> {
   try {
     if (opts.reset) {
       // Only the agent's own dead session is discarded; WhatsApp and chat data are untouched.
-      sessionDb.prepare('DELETE FROM auth').run();
+      resetSession(sessionDb);
       console.log('Old WhatsApp session discarded.');
     }
     const configs = loadGroupsFile(env.GROUPS_FILE);
