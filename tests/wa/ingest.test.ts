@@ -1,0 +1,59 @@
+import { describe, expect, it, vi } from 'vitest';
+import { syncClients } from '../../src/store/clients.ts';
+import { listUnprocessed, reactionsFor } from '../../src/store/messages.ts';
+import { listPeople } from '../../src/store/people.ts';
+import { Ingestor } from '../../src/wa/ingest.ts';
+import type { NormalizedEvent } from '../../src/wa/normalize.ts';
+import { MEHTA, OTHER_GROUP, seededDb, SHARMA } from '../helpers/db.ts';
+import { RAHUL_PN, SHARMA_PN } from '../helpers/wa.ts';
+
+const ts = new Date('2026-10-10T08:00:00Z');
+const message = (o: Partial<Extract<NormalizedEvent, { kind: 'message' }>> = {}): NormalizedEvent => ({
+  kind: 'message', groupId: SHARMA.groupId, waId: 'm1', senderJid: SHARMA_PN, senderNumber: '919800000001', senderName: 'Mr. Sharma',
+  fromMe: false, ts, text: 'hello', quotedWaId: null, mediaType: null, ...o,
+});
+
+function setup() {
+  const db = seededDb();
+  const onNew = vi.fn();
+  return { db, onNew, ing: new Ingestor({ db, onNewMessages: onNew }) };
+}
+
+describe('Ingestor', () => {
+  it('stores a new message, records the sender and signals once', () => {
+    const { db, onNew, ing } = setup();
+    ing.handle(message());
+    ing.handle(message());
+    expect(listUnprocessed(db, 1)).toHaveLength(1);
+    expect(listPeople(db, 1)[0]).toMatchObject({ jid: SHARMA_PN, name: 'Mr. Sharma', role: 'unknown' });
+    expect(onNew).toHaveBeenCalledTimes(1);
+    expect(onNew).toHaveBeenCalledWith(1);
+  });
+
+  it('ignores groups that are not configured clients', () => {
+    const { db, onNew, ing } = setup();
+    ing.handle(message({ groupId: OTHER_GROUP }));
+    expect(db.prepare('SELECT COUNT(*) AS n FROM messages').get()).toEqual({ n: 0 });
+    expect(onNew).not.toHaveBeenCalled();
+  });
+
+  it('ignores clients that were removed from the allow-list', () => {
+    const { db, ing } = setup();
+    syncClients(db, [MEHTA]);
+    ing.handle(message());
+    expect(db.prepare('SELECT COUNT(*) AS n FROM messages').get()).toEqual({ n: 0 });
+  });
+
+  it('applies edits, reactions and revokes', () => {
+    const { db, onNew, ing } = setup();
+    ing.handle(message());
+    onNew.mockClear();
+    ing.handle({ kind: 'edit', groupId: SHARMA.groupId, waId: 'm1', text: 'hello again', ts });
+    expect(onNew).toHaveBeenCalledTimes(1);
+    ing.handle({ kind: 'reaction', groupId: SHARMA.groupId, targetWaId: 'm1', reactorJid: RAHUL_PN, fromMe: false, emoji: '✅', ts });
+    expect(reactionsFor(db, 1, ['m1'])).toHaveLength(1);
+    expect(onNew).toHaveBeenCalledTimes(2);
+    ing.handle({ kind: 'revoke', groupId: SHARMA.groupId, waId: 'm1', ts });
+    expect(listUnprocessed(db, 1)).toHaveLength(0);
+  });
+});
