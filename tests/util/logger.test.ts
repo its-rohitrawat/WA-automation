@@ -42,4 +42,16 @@ describe('logger', () => {
     expect(out()).toContain('"type":"Error"');
     expect(out()).not.toContain('SECRET-IN-ERROR');
   });
+
+  it('keeps error text out of msg when no message string is given', () => {
+    const a = capture();
+    a.log.error({ err: new Error('SECRET-A') });
+    const b = capture();
+    b.log.error(new Error('SECRET-B'));
+    for (const [o, secret] of [[a.out(), 'SECRET-A'], [b.out(), 'SECRET-B']] as const) {
+      expect(o).not.toContain(secret);
+      expect(o).toContain('"msg":"error"');
+      expect(o).toContain('"type":"Error"');
+    }
+  });
 });

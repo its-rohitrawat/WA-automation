@@ -27,7 +27,17 @@ function serializeErr(err: unknown): Record<string, unknown> {
 }
 
 export function createLogger(level: string, destination?: DestinationStream): Logger {
-  const opts = { level, base: undefined, redact: { paths: REDACT, censor: '[REDACTED]' }, serializers: { err: serializeErr } };
+  const opts = { level, base: undefined, redact: { paths: REDACT, censor: '[REDACTED]' }, serializers: { err: serializeErr },
+    hooks: {
+      // pino copies err.message into "msg" when no message string is given; force a fixed one instead.
+      logMethod(this: Logger, args: unknown[], method: (...a: unknown[]) => void) {
+        const first = args[0];
+        const isErr = first instanceof Error || (typeof first === 'object' && first !== null && 'err' in first);
+        if (isErr && typeof args[1] !== 'string') return method.apply(this, [first, 'error']);
+        return method.apply(this, args);
+      },
+    },
+  };
   return destination ? pino(opts, destination) : pino(opts);
 }
 
