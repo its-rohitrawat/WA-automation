@@ -1,12 +1,33 @@
 import { pino, type DestinationStream, type Logger } from 'pino';
 
-/** Field names that could carry chat content. Always censored, even if a caller logs them by mistake. */
-const REDACT = ['text', 'body', 'content', 'message', 'prompt', 'quote', '*.text', '*.body', '*.content', '*.prompt', '*.quote'];
+const CONTENT_NAMES = ['text', 'body', 'content', 'message', 'messages', 'prompt', 'quote', 'caption', 'conversation', 'payload', 'raw', 'transcript', 'response'];
+
+/**
+ * Field names that could carry chat content. Always censored, even if a caller logs them by mistake.
+ * Honest limit: top level and one level deep; call sites must log only ids, counts and error codes, never message objects.
+ */
+const REDACT = [...CONTENT_NAMES, ...CONTENT_NAMES.map((n) => `*.${n}`)];
 
 export type { Logger };
 
+/** Error serializer: type, code and stack frames only. Never the message, which can echo chat or prompt text. */
+function serializeErr(err: unknown): Record<string, unknown> {
+  const e = (err ?? {}) as { name?: string; code?: unknown; stack?: unknown };
+  const out: Record<string, unknown> = { type: e.name ?? 'Error' };
+  if (e.code !== undefined) out.code = e.code;
+  if (typeof e.stack === 'string') {
+    // Keep only real frame lines: drops the first line and any further lines of a multi-line message.
+    out.stack = e.stack
+      .split('\n')
+      .slice(1)
+      .filter((l) => /^\s+at /.test(l))
+      .join('\n');
+  }
+  return out;
+}
+
 export function createLogger(level: string, destination?: DestinationStream): Logger {
-  const opts = { level, base: undefined, redact: { paths: REDACT, censor: '[REDACTED]' } };
+  const opts = { level, base: undefined, redact: { paths: REDACT, censor: '[REDACTED]' }, serializers: { err: serializeErr } };
   return destination ? pino(opts, destination) : pino(opts);
 }
 
