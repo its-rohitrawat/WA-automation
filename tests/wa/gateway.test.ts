@@ -230,3 +230,48 @@ describe('WhatsAppGateway allowed non-message events', () => {
     expect(gw.droppedCount()).toBe(1);
   });
 });
+
+describe('WhatsAppGateway restart throttling and re-entrancy', () => {
+  it('throttles a 515 that follows each open', () => {
+    const { sock, sockets, scheduled } = setup();
+    sock.emit('connection.update', { connection: 'open' });
+    closeWith(sock, 515);
+    const first = scheduled.find((s) => s.ms !== 60_000)!;
+    expect(first.ms).toBe(0);
+    first.fn();
+    sockets[1]!.emit('connection.update', { connection: 'open' });
+    closeWith(sockets[1]!, 515);
+    expect(scheduled[scheduled.length - 1]!.ms).toBeGreaterThanOrEqual(4_000);
+  });
+
+  it('allows an immediate restart again after the stable period', () => {
+    const { sock, sockets, scheduled } = setup();
+    sock.emit('connection.update', { connection: 'open' });
+    scheduled[0]!.fn(); // stable timer fires
+    closeWith(sock, 515);
+    expect(scheduled[scheduled.length - 1]!.ms).toBe(0);
+    expect(sockets).toHaveLength(1);
+  });
+
+  it('leaves one live socket when a listener calls start() re-entrantly', async () => {
+    const { gw, sock, sockets, scheduled } = setup();
+    gw.onStatus((st) => {
+      if (st.state === 'closed' || st.state === 'connecting') gw.start();
+    });
+    closeWith(sock, 428);
+    expect(sockets).toHaveLength(2);
+    expect(scheduled).toEqual([]);
+    await gw.stop();
+    expect(sockets.map((s) => s.end.mock.calls.length)).toEqual([0, 1]);
+  });
+
+  it('re-emits status when saving credentials fails', async () => {
+    const { gw, sock } = setup([SHARMA.groupId], () => Promise.reject(new Error('disk')));
+    const counts: number[] = [];
+    gw.onStatus((st) => counts.push(st.credsSaveFailures));
+    sock.emit('creds.update', {});
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(counts).toEqual([1]);
+  });
+});

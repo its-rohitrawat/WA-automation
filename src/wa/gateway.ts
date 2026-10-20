@@ -80,7 +80,7 @@ export class WhatsAppGateway {
   #restarts = 0;
   #reconnect: { cancel(): void } | undefined;
   #stable: { cancel(): void } | undefined;
-  #status: GatewayStatus;
+  #status: Omit<GatewayStatus, 'credsSaveFailures'>;
   #dropped = 0;
   #failed = 0;
   #credsSaveFailures = 0;
@@ -90,7 +90,7 @@ export class WhatsAppGateway {
     this.#opts = opts;
     this.#clock = opts.clock ?? systemClock;
     this.#schedule = opts.scheduler ?? defaultScheduler;
-    this.#status = { state: 'stopped', since: this.#clock.now().toISOString(), lastErrorCode: null, credsSaveFailures: 0 };
+    this.#status = { state: 'stopped', since: this.#clock.now().toISOString(), lastErrorCode: null };
   }
 
   onEvent(fn: (e: NormalizedEvent) => void): void {
@@ -150,12 +150,13 @@ export class WhatsAppGateway {
   #connect(): void {
     if (this.#stopped) return;
     this.#setStatus('connecting', this.#status.lastErrorCode);
-    if (this.#stopped) return;
+    if (this.#stopped || this.#sock) return; // stopped, or a re-entrant start() already connected
     const sock = this.#opts.factory(this.#opts.auth, async (jid) => this.#groupCache.get(jid));
     this.#sock = sock;
     sock.ev.on('creds.update', () => {
       void this.#opts.saveCreds().catch(() => {
         this.#credsSaveFailures++;
+        this.#emitStatus();
       });
     });
     sock.ev.on('connection.update', (u) => this.#onConnection(sock, u));
@@ -209,13 +210,13 @@ export class WhatsAppGateway {
     if (this.#stopped || sock !== this.#sock) return; // stopped, or event from an old socket
     if (u.qr) this.#opts.onQr?.(u.qr);
     if (u.connection === 'open') {
-      this.#restarts = 0;
       this.#setStatus('open', null);
       if (this.#stopped) return;
       this.#stable?.cancel();
       this.#stable = this.#schedule(() => {
         this.#stable = undefined;
         this.#attempt = 0;
+        this.#restarts = 0;
       }, STABLE_OPEN_MS);
       return;
     }
@@ -235,7 +236,7 @@ export class WhatsAppGateway {
       return;
     }
     this.#setStatus('closed', code);
-    if (this.#stopped) return;
+    if (this.#stopped || this.#sock) return; // stopped, or a listener already started a new connection
     const delay = code === DisconnectReason.restartRequired && this.#restarts++ === 0 ? 0 : backoffMs(this.#attempt++);
     this.#reconnect = this.#schedule(() => {
       this.#reconnect = undefined;
@@ -244,7 +245,11 @@ export class WhatsAppGateway {
   }
 
   #setStatus(state: GatewayState, code: number | null): void {
-    this.#status = { state, since: this.#clock.now().toISOString(), lastErrorCode: code, credsSaveFailures: 0 };
+    this.#status = { state, since: this.#clock.now().toISOString(), lastErrorCode: code };
+    this.#emitStatus();
+  }
+
+  #emitStatus(): void {
     try {
       this.#emitter.emit('status', this.status());
     } catch {
