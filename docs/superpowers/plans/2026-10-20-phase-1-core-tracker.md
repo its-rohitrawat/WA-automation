@@ -42,7 +42,7 @@ src/
   util/clock.ts           injectable clock
   util/time.ts            India-time date helpers
   util/logger.ts          pino logger that censors content fields
-  util/lock.ts            single-instance lock file
+  util/lock.ts            single-instance lock (named pipe, released by the OS)
   store/db.ts             SQLite open + migrations runner
   store/migrations.ts     schema
   store/clients.ts        clients table
@@ -5689,7 +5689,7 @@ function setup(freeBytes: () => number | null = () => 200e9) {
   return { db, clock, spend, h: new Health({ db, clock, spend, freeBytes }) };
 }
 
-const status = (state: GatewayStatus['state'], since = '2026-10-19T08:00:00.000Z'): GatewayStatus => ({ state, since, lastErrorCode: null });
+const status = (state: GatewayStatus['state'], since = '2026-10-19T08:00:00.000Z'): GatewayStatus => ({ state, since, lastErrorCode: null, credsSaveFailures: 0 });
 
 describe('Health', () => {
   it('is green when connected', () => {
@@ -5807,7 +5807,7 @@ export class Health {
     this.#dataDir = o.dataDir ?? '.';
     this.#freeBytes = o.freeBytes ?? defaultFreeBytes;
     const now = this.#clock.now();
-    this.#wa = { state: 'stopped', since: now.toISOString(), lastErrorCode: null };
+    this.#wa = { state: 'stopped', since: now.toISOString(), lastErrorCode: null, credsSaveFailures: 0 };
     this.#downSince = now; // not connected yet
   }
 
@@ -5837,12 +5837,14 @@ export class Health {
 
   line(): HealthLine {
     const now = this.#clock.now();
-    if (this.#wa.state === 'logged_out' || this.#wa.state === 'replaced') {
-      return { ok: false, text: `❌ WhatsApp unlinked since ${stamp(new Date(this.#wa.since))}. Run: npm run cli -- link --reset` };
-    }
+    const since = stamp(new Date(this.#wa.since));
+    if (this.#wa.state === 'logged_out') return { ok: false, text: `❌ WhatsApp unlinked since ${since}. Run: npm run cli -- link --reset` };
+    if (this.#wa.state === 'replaced') return { ok: false, text: `❌ Another copy of WA Agent took over the WhatsApp session at ${since}. Stop the other copy, then restart the service.` };
+    if (this.#wa.state === 'forbidden') return { ok: false, text: `❌ WhatsApp refused this number (403) since ${since}. Check the founder's phone.` };
     if (this.#downSince && now.getTime() - this.#downSince.getTime() > DISCONNECT_GRACE_MS) {
       return { ok: false, text: `❌ Disconnected since ${stamp(this.#downSince)}` };
     }
+    if (this.#wa.credsSaveFailures > 0) return { ok: false, text: '⚠️ The WhatsApp session could not be saved. Check disk space and the data folder permissions.' };
     if (this.#spend.isPaused()) return { ok: false, text: '⚠️ Daily spend cap reached. Paused until midnight IST' };
     if (this.#failed.size > 0) {
       const n = this.#failed.size;
@@ -5977,7 +5979,7 @@ describe('app end to end', () => {
     expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']);
     expect(drive.updated.length).toBeGreaterThanOrEqual(1);
     for (const name of SEND_METHODS) expect(sock[name]).not.toHaveBeenCalled();
-    app.stop();
+    await app.stop();
   });
 
   it('applies a new allow-list without a restart', async () => {
@@ -5985,7 +5987,7 @@ describe('app end to end', () => {
     app.reloadClients([SHARMA]);
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
     expect(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 0 });
-    app.stop();
+    await app.stop();
   });
 
   it('republishes when the CLI requests a rebuild', async () => {
@@ -5995,7 +5997,7 @@ describe('app end to end', () => {
     setKv(db, 'rebuild_requested', new Date().toISOString());
     await vi.advanceTimersByTimeAsync(90_000);
     expect(drive.uploads).toBeGreaterThan(before);
-    app.stop();
+    await app.stop();
   });
 });
 ```
@@ -6049,7 +6051,7 @@ export interface AppDeps {
 
 export interface App {
   start(): void;
-  stop(): void;
+  stop(): Promise<void>;
   reloadClients(configs: ClientConfig[]): void;
   health: Health;
   publisher: DrivePublisher;
@@ -6110,11 +6112,11 @@ export function createApp(d: AppDeps): App {
       poll = setInterval(tick, d.pollMs ?? 30_000);
       publisher.schedule();
     },
-    stop() {
+    async stop() {
       clearInterval(poll);
       debouncer.stop();
       publisher.stop();
-      d.gateway.stop();
+      await d.gateway.stop();
     },
     reloadClients(configs) {
       syncClients(d.db, configs);
@@ -6175,7 +6177,7 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  const lock = acquireLock(join(env.DATA_DIR, 'agent.lock'));
+  const lock = await acquireLock(env.DATA_DIR);
   const key = new DpapiKeyProvider(join(env.DATA_DIR, 'keys', 'master.key.dpapi')).getKey();
   const db = openDb(join(env.DATA_DIR, 'tracker.db'));
   const sessionDb = openSessionDb(join(env.DATA_DIR, 'session.db'));
@@ -6184,7 +6186,7 @@ async function main(): Promise<void> {
     log.error(message);
     db.close();
     sessionDb.close();
-    lock.release();
+    void lock.release();
     process.exit(2);
   }
 
@@ -6235,13 +6237,12 @@ async function main(): Promise<void> {
     stopping = true;
     log.info('WA Agent stopping');
     stopWatching();
-    app.stop();
-    setTimeout(() => {
+    void app.stop().finally(() => {
       db.close();
       sessionDb.close();
-      lock.release();
+      void lock.release();
       process.exit(0);
-    }, 1_000);
+    });
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
@@ -6300,7 +6301,7 @@ import { seededDb } from '../helpers/db.ts';
 const snapshot: HealthSnapshot = {
   at: '2026-10-19T07:58:00.000Z',
   line: { ok: true, text: '✅ Connected · last update 19 Oct 13:25' },
-  whatsapp: { state: 'open', since: '2026-10-19T03:30:00.000Z', lastErrorCode: null },
+  whatsapp: { state: 'open', since: '2026-10-19T03:30:00.000Z', lastErrorCode: null, credsSaveFailures: 0 },
   downSince: null, failed: [], lastSuccessAt: null, lastPublishedAt: null, spentToday: 1.234, capUsd: 15, freeGb: 182.43,
 };
 
@@ -6433,9 +6434,13 @@ async function connectAndIngest(o: {
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Timed out waiting for WhatsApp to connect')), 5 * 60_000);
       gateway.onStatus((s) => {
-        if (s.state === 'logged_out' || s.state === 'replaced') {
+        if (s.state === 'logged_out' || s.state === 'forbidden') {
           clearTimeout(timeout);
           reject(new Error('WhatsApp refused this session. Run: npm run cli -- link --reset'));
+        }
+        if (s.state === 'replaced') {
+          clearTimeout(timeout);
+          reject(new Error('Another copy of WA Agent is using this WhatsApp session. Stop it first (net stop wa-agent).'));
         }
         if (s.state === 'open') {
           clearTimeout(timeout);
@@ -6455,13 +6460,13 @@ async function connectAndIngest(o: {
       }, 2_000);
     });
   } finally {
-    gateway.stop();
+    await gateway.stop();
   }
 }
 
 export async function linkCommand(opts: { reset: boolean }): Promise<void> {
   const env = loadEnv();
-  const lock = acquireLock(join(env.DATA_DIR, 'agent.lock'));
+  const lock = await acquireLock(env.DATA_DIR);
   const key = new DpapiKeyProvider(keyFile(env)).getKey();
   const db = openDb(trackerDb(env));
   const sessionDb = openSessionDb(join(env.DATA_DIR, 'session.db'));
@@ -6486,13 +6491,13 @@ export async function linkCommand(opts: { reset: boolean }): Promise<void> {
   } finally {
     sessionDb.close();
     db.close();
-    lock.release();
+    await lock.release();
   }
 }
 
 export async function listGroupsCommand(): Promise<void> {
   const env = loadEnv();
-  const lock = acquireLock(join(env.DATA_DIR, 'agent.lock'));
+  const lock = await acquireLock(env.DATA_DIR);
   const key = new DpapiKeyProvider(keyFile(env)).getKey();
   const db = openDb(trackerDb(env));
   const sessionDb = openSessionDb(join(env.DATA_DIR, 'session.db'));
@@ -6519,7 +6524,7 @@ export async function listGroupsCommand(): Promise<void> {
   } finally {
     sessionDb.close();
     db.close();
-    lock.release();
+    await lock.release();
   }
 }
 
@@ -7264,7 +7269,7 @@ Expected: only source, test, config-example and docs files; `no secrets found`. 
 - [ ] Chat text reaches Claude only inside labelled data sections with `<`/`>` neutralised. Claude has no tools, and every operation passes `validateOps`.
 - [ ] Google scope is `drive.file` only; the sign-in listener binds to `127.0.0.1` and closes after one redirect.
 - [ ] The spend cap is checked before every AI call, and actual spend is recorded even for failed calls.
-- [ ] Nothing in the code deletes chat data. The only deletions are the agent's own rotated signal keys, the stale lock file, and the dead session on an explicit `link --reset`.
+- [ ] Nothing in the code deletes chat data. The only deletions are the agent's own rotated signal keys, and the dead session on an explicit `link --reset`.
 
 - [ ] **Step 4: Report to the user and ask before pushing.** Summarise the test count, the golden-run result and its actual cost (if it was run), and ask whether to push `feat/phase-1-core-tracker` to GitHub and open a pull request.
 
