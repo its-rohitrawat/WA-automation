@@ -100,4 +100,77 @@ describe('validateOps', () => {
     ], state());
     expect(accepted.map((a) => a.text ?? a.op)).toEqual(['add_task', 'second']);
   });
+
+  const two = (): ValidationState => state({ tasksByCode: new Map([['SHA-001', task({ code: 'SHA-001' })], ['SHA-002', task({ id: 2, code: 'SHA-002' })]]) });
+  const remind = (code: string) => op({ op: 'log_reminder', taskCode: code, sourceMessageIds: ['n1'] });
+
+  it('accepts a log_reminder on an open task', () => {
+    expect(validateOps([remind('SHA-012')], state()).accepted).toHaveLength(1);
+  });
+
+  it('rejects a repeated reminder for the same task in one response', () => {
+    const r = validateOps([remind('SHA-001'), remind('SHA-001'), remind('SHA-002')], two());
+    expect(r.accepted.map((a) => a.taskCode)).toEqual(['SHA-001', 'SHA-002']);
+    expect(r.rejected.map((x) => x.reason)).toEqual(['duplicate reminder in one response']);
+  });
+
+  it('rejects a duplicate add_task by side and normalised title', () => {
+    expect(reasons([addTask({ title: 'Revise  Banner' }), addTask({ title: 'revise banner' })])).toEqual(['duplicate task in one response']);
+    expect(validateOps([addTask({ title: 'Revise Banner' }), addTask({ title: 'revise banner', side: 'client' })], state()).accepted).toHaveLength(2);
+  });
+
+  it('rejects over-long fields', () => {
+    expect(reasons([addTask({ title: 'a'.repeat(201) })])).toEqual(['field too long']);
+    expect(reasons([addTask({ assignedTo: 'a'.repeat(81) })])).toEqual(['field too long']);
+    expect(reasons([op({ op: 'update_task', taskCode: 'SHA-012', title: 'a'.repeat(201), sourceMessageIds: ['n1'] })])).toEqual(['field too long']);
+    expect(reasons([op({ op: 'update_task', taskCode: 'SHA-012', latestProgress: 'a'.repeat(601), sourceMessageIds: ['n1'] })])).toEqual(['field too long']);
+  });
+
+  it('counts code points, not UTF-16 units, for field length', () => {
+    expect(validateOps([addTask({ title: '\u{1F600}'.repeat(200) })], state()).accepted).toHaveLength(1);
+  });
+
+  it('cuts a long reason to 300 code points', () => {
+    expect(validateOps([addTask({ reason: 'r'.repeat(400) })], state()).accepted[0]?.reason).toHaveLength(300);
+  });
+
+  it('keeps only the last status op per task and the last set_status, rejecting the rest', () => {
+    const ops = [
+      op({ op: 'close_task', taskCode: 'SHA-012', sourceMessageIds: ['n1'] }),
+      op({ op: 'mark_maybe_done', taskCode: 'SHA-012', sourceMessageIds: ['n1'] }),
+      op({ op: 'set_status', text: 'first', sourceMessageIds: ['n1'] }),
+      op({ op: 'set_status', text: 'second', sourceMessageIds: ['n2'] }),
+    ];
+    const r = validateOps(ops, state());
+    expect(r.accepted.map((a) => a.text ?? a.op)).toEqual(['mark_maybe_done', 'second']);
+    expect(r.rejected.map((x) => [x.op.text ?? x.op.op, x.reason])).toEqual([
+      ['close_task', 'superseded by a later operation'],
+      ['first', 'superseded by a later operation'],
+    ]);
+    expect(r.accepted.length + r.rejected.length).toBe(ops.length);
+  });
+
+  it('de-duplicates source ids', () => {
+    expect(validateOps([addTask({ sourceMessageIds: ['n1', '[n1]', 'm:n1'] })], state()).accepted[0]?.sourceMessageIds).toEqual(['n1']);
+  });
+
+  it('rejects a task code from another client', () => {
+    expect(reasons([op({ op: 'close_task', taskCode: 'MEH-001', sourceMessageIds: ['n1'] })])).toEqual(['task belongs to another client']);
+  });
+
+  it('rejects mark_maybe_done on a maybe-done task', () => {
+    const s = state({ tasksByCode: new Map([['SHA-012', task({ status: 'maybe_done' })]]) });
+    expect(reasons([op({ op: 'mark_maybe_done', taskCode: 'SHA-012', sourceMessageIds: ['n1'] })], s)).toEqual(['task already maybe done']);
+  });
+
+  it('rejects missing or over-long text', () => {
+    expect(reasons([op({ op: 'add_decision', sourceMessageIds: ['n1'] })])).toEqual(['text missing or too long']);
+    expect(reasons([op({ op: 'set_status', text: 'a'.repeat(601), sourceMessageIds: ['n1'] })])).toEqual(['text missing or too long']);
+  });
+
+  it('rejects unknown persons and human-set roles', () => {
+    expect(reasons([op({ op: 'set_person_role', personJid: 'nobody@x', role: 'client', sourceMessageIds: ['n1'] })])).toEqual(['unknown person or missing role']);
+    const s = state({ peopleByJid: new Map([[SHARMA_PN, person(SHARMA_PN, 'human')]]) });
+    expect(reasons([op({ op: 'set_person_role', personJid: SHARMA_PN, role: 'client', sourceMessageIds: ['n1'] })], s)).toEqual(['role was set by a human or is the founder']);
+  });
 });

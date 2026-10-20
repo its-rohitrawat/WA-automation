@@ -22,6 +22,16 @@ export interface Rejection {
 
 const TASK_OPS = new Set<AiOp['op']>(['update_task', 'close_task', 'mark_maybe_done', 'reopen_task', 'log_reminder']);
 
+const MAX_LEN = { title: 200, assignedTo: 80, askedBy: 80, latestProgress: 600 } as const;
+const MAX_REASON = 300;
+const STATUS_OPS = new Set<AiOp['op']>(['close_task', 'mark_maybe_done', 'reopen_task']);
+const SUPERSEDED = 'superseded by a later operation';
+
+const cp = (s: string): number => [...s].length;
+const tooLong = (op: AiOp): boolean =>
+  (Object.keys(MAX_LEN) as (keyof typeof MAX_LEN)[]).some((f) => op[f] !== null && cp(op[f]) > MAX_LEN[f]);
+const titleKey = (op: AiOp): string => `${op.side}|${(op.title ?? '').toLowerCase().replace(/\s+/g, ' ').trim()}`;
+
 export function normalizeSourceId(id: string): string {
   return id.trim().replace(/^\[/, '').replace(/\]$/, '').replace(/^(m:|id=)/, '');
 }
@@ -29,16 +39,20 @@ export function normalizeSourceId(id: string): string {
 export function validateOps(ops: AiOp[], s: ValidationState): { accepted: AiOp[]; rejected: Rejection[] } {
   const accepted: AiOp[] = [];
   const rejected: Rejection[] = [];
+  const addKeys = new Set<string>();
+  const remindedCodes = new Set<string>();
 
   for (const raw of ops) {
     // Unknown ids (the model sometimes cites an old one) are dropped, not fatal.
-    const ids = raw.sourceMessageIds.map(normalizeSourceId).filter((id) => s.batchIds.has(id) || s.contextIds.has(id));
-    const op: AiOp = { ...raw, sourceMessageIds: ids };
+    const ids = [...new Set(raw.sourceMessageIds.map(normalizeSourceId).filter((id) => s.batchIds.has(id) || s.contextIds.has(id)))];
+    const op: AiOp = { ...raw, sourceMessageIds: ids, reason: [...raw.reason].slice(0, MAX_REASON).join('') };
     const reject = (reason: string) => rejected.push({ op, reason });
 
     if (ids.length === 0) { reject('no source messages'); continue; }
     if (!ids.some((id) => s.batchIds.has(id))) { reject('no evidence from new messages'); continue; }
     if (op.deadline !== null && !isIsoDate(op.deadline)) { reject('deadline is not YYYY-MM-DD'); continue; }
+
+    if (TASK_OPS.has(op.op) && op.taskCode && !op.taskCode.startsWith(`${s.clientCode}-`)) { reject('task belongs to another client'); continue; }
 
     const task = TASK_OPS.has(op.op) && op.taskCode ? s.tasksByCode.get(op.taskCode) : undefined;
     if (TASK_OPS.has(op.op) && !task) { reject('unknown task code for this client'); continue; }
@@ -46,9 +60,12 @@ export function validateOps(ops: AiOp[], s: ValidationState): { accepted: AiOp[]
     switch (op.op) {
       case 'add_task':
         if (!op.side || !op.title || !op.category || !op.priority) { reject('add_task needs side, title, category and priority'); continue; }
-        if (op.title.length > 200) { reject('title too long'); continue; }
+        if (tooLong(op)) { reject('field too long'); continue; }
+        if (addKeys.has(titleKey(op))) { reject('duplicate task in one response'); continue; }
+        addKeys.add(titleKey(op));
         break;
       case 'update_task': {
+        if (tooLong(op)) { reject('field too long'); continue; }
         const locked = new Set(task!.lockedFields);
         const stripped: AiOp = { ...op };
         let changes = 0;
@@ -81,6 +98,8 @@ export function validateOps(ops: AiOp[], s: ValidationState): { accepted: AiOp[]
         break;
       }
       case 'log_reminder':
+        if (remindedCodes.has(op.taskCode!)) { reject('duplicate reminder in one response'); continue; }
+        remindedCodes.add(op.taskCode!);
         break;
       case 'add_decision':
       case 'set_status':
@@ -100,6 +119,17 @@ export function validateOps(ops: AiOp[], s: ValidationState): { accepted: AiOp[]
     accepted.push(op);
   }
 
-  const lastStatus = accepted.map((o) => o.op).lastIndexOf('set_status');
-  return { accepted: accepted.filter((o, i) => o.op !== 'set_status' || i === lastStatus), rejected };
+  // The last status op per task wins, and the last set_status wins.
+  const lastKey = new Map<string, number>();
+  accepted.forEach((o, i) => {
+    if (STATUS_OPS.has(o.op)) lastKey.set(`task:${o.taskCode}`, i);
+    else if (o.op === 'set_status') lastKey.set('set_status', i);
+  });
+  const kept: AiOp[] = [];
+  accepted.forEach((o, i) => {
+    const key = STATUS_OPS.has(o.op) ? `task:${o.taskCode}` : o.op === 'set_status' ? 'set_status' : null;
+    if (key !== null && lastKey.get(key) !== i) rejected.push({ op: o, reason: SUPERSEDED });
+    else kept.push(o);
+  });
+  return { accepted: kept, rejected };
 }
