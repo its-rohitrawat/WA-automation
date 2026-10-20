@@ -93,6 +93,16 @@ describe('SpendGuard', () => {
     expect(guard.reserve(0.75)).not.toBeNull();
   });
 
+  it('stops counting a reservation after 45 minutes', () => {
+    const { clock, guard } = make();
+    expect(guard.reserve(0.6)).not.toBeNull();
+    clock.advance(45 * 60_000);
+    expect(guard.reserve(0.6)).toBeNull();
+    clock.advance(60_000); // T + 46 minutes
+    expect(guard.canSpend(0.6)).toBe(true);
+    expect(guard.reserve(0.6)).not.toBeNull();
+  });
+
   it('records on settle with an unknown id and ignores unknown release', () => {
     const { guard } = make();
     guard.release(999);

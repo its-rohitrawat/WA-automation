@@ -2,12 +2,18 @@ import type { Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import { istDate } from '../util/time.ts';
 
+/**
+ * A reservation older than this no longer counts (600 s timeout x 3 SDK attempts, plus margin).
+ * Safety net only: every caller settles or releases its reservations.
+ */
+const RESERVATION_TTL_MS = 45 * 60_000;
+
 /** Daily cap on AI and transcription spend. The day resets at midnight IST. */
 export class SpendGuard {
   readonly #db: Db;
   readonly #clock: Clock;
   readonly #cap: number;
-  readonly #pending = new Map<number, number>();
+  readonly #pending = new Map<number, { usd: number; at: number }>();
   #nextId = 1;
 
   constructor(opts: { db: Db; clock: Clock; capUsd: number }) {
@@ -25,9 +31,14 @@ export class SpendGuard {
     return r.total;
   }
 
+  /** Sums live reservations and forgets expired ones. */
   #pendingTotal(): number {
+    const now = this.#clock.now().getTime();
     let t = 0;
-    for (const v of this.#pending.values()) t += v;
+    for (const [id, r] of this.#pending) {
+      if (now - r.at > RESERVATION_TTL_MS) this.#pending.delete(id);
+      else t += r.usd;
+    }
     return t;
   }
 
@@ -45,7 +56,7 @@ export class SpendGuard {
   reserve(estimateUsd: number): number | null {
     if (!this.canSpend(estimateUsd)) return null;
     const id = this.#nextId++;
-    this.#pending.set(id, estimateUsd);
+    this.#pending.set(id, { usd: estimateUsd, at: this.#clock.now().getTime() });
     return id;
   }
 
