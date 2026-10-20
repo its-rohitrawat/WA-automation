@@ -69,7 +69,7 @@ export function billOf(
         cacheCreationInputTokens: it.cache_creation_input_tokens ?? 0,
         cacheReadInputTokens: it.cache_read_input_tokens ?? 0,
       };
-      const model: unknown = 'model' in it ? it.model : null;
+      const model = 'model' in it ? it.model : null;
       const isFallback = it.type === 'fallback_message' || (typeof model === 'string' && !model.startsWith(requestedModel));
       if (isFallback) fallbackUsed = true;
       cost += costUsd(usage, isFallback ? FALLBACK_PRICES : prices);
