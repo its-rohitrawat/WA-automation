@@ -48,7 +48,9 @@ icacls C:\wa-agent /inheritance:r /grant:r "Administrators:(OI)(CI)F" "SYSTEM:(O
 
 The last line matters. Folders directly under `C:\` let every Windows user on this PC read and change files. This line removes that, so only administrators, the system and waagent can reach `.env`, the code, `data\` and `backups\`. (`backups\` is created in the recovery steps and inherits this.)
 
-## 4. Keys and settings
+## 4. Keys and settings (admin window or waagent window)
+
+After step 3, only an admin window or the waagent window can write under `C:\wa-agent`. Use one of them for every file edit in this runbook.
 
 ```bat
 copy .env.example .env
@@ -74,7 +76,7 @@ Leave the other lines as they are.
   3. OAuth consent screen > User type **Internal** > app name `WA Agent`. "Internal" exists only for Google Workspace accounts. **If it is greyed out, stop and ask.** A non-Internal app in Testing mode makes Google sign-ins expire every 7 days.
   4. Credentials > Create credentials > OAuth client ID > **Desktop app**. Copy the client ID and secret into `.env` right away: Google shows the secret only once. Do not leave a downloaded JSON file on the PC.
 - Never share `.env` or commit it (it is already git-ignored).
-- Create the allow-list file with Notepad (Explorer can save it as `.json.txt` by mistake):
+- Create the allow-list file with Notepad, in an admin window or the waagent window (Explorer can save it as `.json.txt` by mistake):
 
 ```bat
 notepad C:\wa-agent\config\allowed-groups.json
@@ -106,7 +108,7 @@ npm run cli -- list-groups
 
 1. `google-auth` prints a link. Open it in a browser **on this PC**, signed in as the mailbox account, and allow access. (After you allow, Google sends the answer back to this same PC at 127.0.0.1, so a browser on another computer will not work.)
 2. `link` shows a QR code. On the founder's phone: WhatsApp > Settings > Linked devices > Link a device. With an empty allow-list nothing is stored.
-3. `list-groups` prints every group's id and name on screen only. Open `notepad C:\wa-agent\config\allowed-groups.json` and add the 1-2 pilot groups, like this:
+3. `list-groups` prints every group's id and name on screen only. In an admin window or the waagent window, open `notepad C:\wa-agent\config\allowed-groups.json` and add the 1-2 pilot groups, like this:
 
 ```json
 {
@@ -124,27 +126,30 @@ Replace the `groupId` with the id from `list-groups` (the one shown above is a f
 
 **Optional, to load recent history for the pilot groups:** WhatsApp sends recent history only when a device is first linked. To get it:
 
-1. Stop the service if it is running (see "Stop the service safely" below).
+1. Stop the service if it is running (see "Stop the service safely" below). Do the next commands in an admin window or the waagent window.
 2. Copy the saved session to a backup folder (do not delete it):
 
 ```bat
-mkdir C:\wa-agent\backups\2026-10-21
-copy C:\wa-agent\data\session.db* C:\wa-agent\backups\2026-10-21\
+mkdir C:\wa-agent\backups\2026-10-21-1430
+copy C:\wa-agent\data\session.db* C:\wa-agent\backups\2026-10-21-1430\
 ```
 
-   Use today's date in the folder name.
+   Use today's date and time in the folder name, so a second backup never overwrites the first.
 3. On the founder's phone open Settings > Linked devices and remove the old "WA Agent" device.
 4. Run `npm run cli -- link --reset`. It asks you to type `yes`. It deletes only the saved WhatsApp link, not your tracker data.
 5. Scan the new QR code.
+
+6. If the service is installed, **start the service again** (see *Start the service again* below). If you skip this the tracker silently stops.
 
 This is optional. Without it the tracker starts from today. If you do it, the first service start sends that history to the AI. This costs a little and counts toward the daily spend cap.
 
 ## 6. Install and start the service (admin)
 
-1. Download **WinSW-x64.exe** version 2.12.0 from github.com/winsw/winsw/releases/tag/v2.12.0 and save it as `C:\wa-agent\deploy\winsw\wa-agent.exe`.
-2. Install it:
+1. In your normal browser, download **WinSW-x64.exe** version 2.12.0 from github.com/winsw/winsw/releases/tag/v2.12.0 to your Downloads folder. (A normal browser cannot save into the locked-down `C:\wa-agent`.)
+2. In the admin window, copy it into place and install it:
 
 ```bat
+copy "%USERPROFILE%\Downloads\WinSW-x64.exe" C:\wa-agent\deploy\winsw\wa-agent.exe
 cd /d C:\wa-agent\deploy\winsw
 wa-agent.exe install
 ```
@@ -157,7 +162,7 @@ icacls C:\wa-agent\data /inheritance:r /grant:r "waagent:(OI)(CI)F" "Administrat
 net start wa-agent
 ```
 
-5. **Wait one minute**, then run (from the waagent window) `npm run cli -- status`. You should see `Health: ✅ Connected…`. If it says `no report yet` or `has not reported since`, go to *If the service will not start* below.
+5. **Wait one minute**, then run (from the waagent window) `npm run cli -- status`. You should see `Health: ✅ Connected…` **and** the `WhatsApp:` line saying `open` (for example `WhatsApp:    open since …`). The ✅ can show while WhatsApp is still connecting, so check both. If it says `no report yet` or `has not reported since`, go to *If the service will not start* below.
 6. **After `google-auth` or any change to `.env`, restart the service** so it picks the change up:
 
 ```bat
@@ -169,7 +174,7 @@ net start wa-agent
 
 7. In Google Drive (mailbox account), share the **WA Agent** folder with team members only, never clients. Share the **folder**, not the `Tracker.xlsx` file. If the file is ever re-created, people who have the folder still reach it.
 
-**Log files.** WinSW writes two logs in `C:\wa-agent\deploy\winsw\` (next to `wa-agent.xml`):
+**Log files.** WinSW writes two logs in `C:\wa-agent\deploy\winsw\` (next to `wa-agent.xml`). Read them in an admin window or the waagent window:
 
 - `wa-agent.out.log`: the normal log, and crashes while running.
 - `wa-agent.err.log`: the reason the service refused to start.
@@ -247,18 +252,18 @@ When the agent refuses to start it exits, and WinSW tries again every minute or 
 **Start the service again**
 
 1. `services.msc` > **WA Agent** > Properties > Startup type: **Automatic (Delayed Start)** > Apply > **Start**.
-2. Wait one minute, then run `npm run cli -- status` and expect `Health: ✅ Connected…`.
+2. Wait one minute, then run `npm run cli -- status` and expect `Health: ✅ Connected…` and the `WhatsApp:` line saying `open`.
 
-To find the problem, open `C:\wa-agent\deploy\winsw\wa-agent.err.log` and read the last line. (`status` cannot show it, because the service stops before it writes a report.) Then find it in this table or the sections below.
+To find the problem, open (in an admin window or the waagent window) `C:\wa-agent\deploy\winsw\wa-agent.err.log` and read the last line. (`status` cannot show it, because the service stops before it writes a report.) Config errors there start with `Error: `, for example `Error: allowed-groups.json is not valid JSON`. Then find the problem in this table or the sections below.
 
 | Last line of `wa-agent.err.log` | What it means | What to do |
 |---|---|---|
-| `allowed-groups.json is not valid JSON` or `allowed-groups.json is invalid: ...` | The allow-list file has a typing mistake (a missing comma or quote, a bad group id, or a code that is not 3-4 capital letters). | Stop safely. Open `notepad C:\wa-agent\config\allowed-groups.json`, fix the problem it names, start again. |
+| `allowed-groups.json is not valid JSON` or `allowed-groups.json is invalid: ...` | The allow-list file has a typing mistake (a missing comma or quote, a bad group id, or a code that is not 3-4 capital letters). | Stop safely. In an admin window or the waagent window, open `notepad C:\wa-agent\config\allowed-groups.json`, fix the problem it names, start again. |
 | `allowed-groups.json still contains the example group...` | The example group id was left in. | Replace it with a real id from `list-groups`, or set the file to `{ "clients": [] }`. Stop safely first, start again after. |
 | `Client codes are permanent because task IDs use them. Keep code X for ...` | A client's code was changed in the file. | Stop safely. Put the old code back (the message names it). Start again. |
 | `Code X is already used by ... Pick a different code.` | Two clients share one code. | Stop safely. Give one of them a different code. Start again. |
-| `Allow-list file missing...` | `config\allowed-groups.json` does not exist. | Create it as in step 4 (`{ "clients": [] }`), then follow step 5. |
-| `X is not configured` (X is a name such as ANTHROPIC_API_KEY) | A required setting is empty or missing in `.env`. | Stop safely. Open `notepad C:\wa-agent\.env`, fill in that setting, start again. |
+| `Allow-list file missing...` | `config\allowed-groups.json` does not exist. | Create it as in step 4 (`{ "clients": [] }`), then run `npm run cli -- list-groups` and add your client groups (step 5). |
+| `X is not configured` (X is a name such as ANTHROPIC_API_KEY) | A required setting is empty or missing in `.env`. | Stop safely. In an admin window or the waagent window, open `notepad C:\wa-agent\.env`, fill in that setting, start again. |
 | `Invalid configuration in: ...` | The named settings in `.env` have bad values (for example text where a number is needed). | Stop safely. Fix those settings in `.env` (compare with `.env.example`), start again. |
 | `WhatsApp is not linked. Stop the service and run: npm run cli -- link` | No saved WhatsApp link. | Stop safely, run `npm run cli -- link` in the waagent window, scan the QR code, start again. |
 | `Google Drive is not connected. Run: npm run cli -- google-auth` | No saved Google sign-in. | Run `npm run cli -- google-auth`, then start again. |
@@ -275,16 +280,16 @@ To find the problem, open `C:\wa-agent\deploy\winsw\wa-agent.err.log` and read t
 - **What to do:**
   1. **Stop the service safely** (see above).
   2. Read the last line of `wa-agent.err.log` to confirm the code.
-  3. Only after checking with the person responsible, **move** (do not delete) the key and the session to a dated backup folder. Use today's date. Move all three `session.db` files together:
+  3. (Admin window or waagent window.) Only after checking with the person responsible, **move** (do not delete) the key and the session to a dated backup folder. Use today's date and time. Move all three `session.db` files together:
 
 ```bat
-mkdir C:\wa-agent\backups\2026-10-21
-move C:\wa-agent\data\keys\master.key.dpapi C:\wa-agent\backups\2026-10-21\
-move C:\wa-agent\data\session.db* C:\wa-agent\backups\2026-10-21\
+mkdir C:\wa-agent\backups\2026-10-21-1430
+move C:\wa-agent\data\keys\master.key.dpapi C:\wa-agent\backups\2026-10-21-1430\
+move C:\wa-agent\data\session.db* C:\wa-agent\backups\2026-10-21-1430\
 ```
 
   4. On the founder's phone, remove the old "WA Agent" device first (Settings > Linked devices). After the move, `link --reset` will say "No saved WhatsApp link to reset" and skip its question, so it will not remind you.
-  5. In the waagent window, link WhatsApp again: `npm run cli -- link` (use `--reset` only if it says a link is already saved).
+  5. In the waagent window, link WhatsApp again: `npm run cli -- link` If it says a link is already saved, stop: step 3 did not move the session. Re-check it before going on.
   6. Sign in to Google again: `npm run cli -- google-auth`.
   7. **Start the service again** (see above).
 - **Result:** the tracker database is kept. Only the WhatsApp link and the Google sign-in are recreated.
@@ -294,11 +299,11 @@ move C:\wa-agent\data\session.db* C:\wa-agent\backups\2026-10-21\
 - **Meaning:** the saved WhatsApp session was locked with a different master key.
 - **What to do:** this does **not** mean moving the master key (that would also break the saved Google sign-in).
   1. **Stop the service safely** (see above).
-  2. Back up the old session (copy, do not delete):
+  2. Back up the old session (copy, do not delete), in an admin window or the waagent window:
 
 ```bat
-mkdir C:\wa-agent\backups\2026-10-21
-copy C:\wa-agent\data\session.db* C:\wa-agent\backups\2026-10-21\
+mkdir C:\wa-agent\backups\2026-10-21-1430
+copy C:\wa-agent\data\session.db* C:\wa-agent\backups\2026-10-21-1430\
 ```
 
   3. On the founder's phone, remove the old "WA Agent" device (Settings > Linked devices).
