@@ -56,6 +56,15 @@ describe('media store', () => {
     expect(row).not.toHaveProperty('refEnc');
     expect(getMediaRef(db, id)).toEqual(Buffer.from('sealed'));
     expect(() => insertMedia(db, media(m1))).toThrow(/UNIQUE/);
+    // Files that are never downloaded keep the name, length and reason they were recorded with.
+    const tooBig = insertMedia(db, media(message(db, 'DOC1', { mediaType: 'document' }), {
+      kind: 'document', status: 'unavailable', mimeType: 'application/pdf', fileName: 'site plan.pdf', fileSize: 60_000_000, refEnc: null, errorCode: 'too_large',
+    }));
+    const video = insertMedia(db, media(message(db, 'VID1', { mediaType: 'video' }), { kind: 'video', status: 'metadata', mimeType: 'video/mp4', seconds: 42, refEnc: null }));
+    expect(getMedia(db, tooBig)).toMatchObject({
+      kind: 'document', status: 'unavailable', fileName: 'site plan.pdf', fileSize: 60_000_000, seconds: null, hasRef: false, errorCode: 'too_large',
+    });
+    expect(getMedia(db, video)).toMatchObject({ kind: 'video', status: 'metadata', fileName: null, seconds: 42, hasRef: false, errorCode: null });
   });
 
   it('refuses an unknown kind, status or text kind', () => {
@@ -122,7 +131,7 @@ describe('media store', () => {
     const id = insertMedia(db, media(message(db, 'A')));
     markDownloaded(db, id, { localPath: 'media/SHA/2026-10/A.jpg', sha256: 'ab'.repeat(32), fileSize: 2048, at: NOW });
     expect(getMediaRef(db, id)).toBeNull();
-    expect(getMedia(db, id)).toMatchObject({ status: 'pending', hasRef: false, localPath: 'media/SHA/2026-10/A.jpg', fileSize: 2048 });
+    expect(getMedia(db, id)).toMatchObject({ status: 'pending', hasRef: false, localPath: 'media/SHA/2026-10/A.jpg', sha256: 'ab'.repeat(32), fileSize: 2048 });
     finishMedia(db, id, { textKind: 'description', text: 'A blue banner', pageCount: null, note: null, at: NOW });
     expect(getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'description', text: 'A blue banner', textChars: 13, errorCode: null, nextAttemptAt: null });
   });
@@ -153,6 +162,17 @@ describe('media store', () => {
     expect(getMedia(db, id)).toMatchObject({ status: 'unavailable', errorCode: 'expired', nextAttemptAt: null });
   });
 
+  it('a final failure keeps an original that was already saved', () => {
+    const db = seededDb();
+    const id = insertMedia(db, pdf(message(db, 'A', { mediaType: 'document' })));
+    markDownloaded(db, id, { localPath: 'media/SHA/2026-10/A.pdf', sha256: 'cd'.repeat(32), fileSize: 4096, at: NOW });
+    failMedia(db, id, { status: 'failed', errorCode: 'not_pdf', at: LATER });
+    expect(getMediaRef(db, id)).toBeNull();
+    expect(getMedia(db, id)).toMatchObject({
+      status: 'failed', errorCode: 'not_pdf', hasRef: false, localPath: 'media/SHA/2026-10/A.pdf', sha256: 'cd'.repeat(32), fileSize: 4096, updatedAt: LATER,
+    });
+  });
+
   it('maps files to their messages and gives a job its context', () => {
     const db = seededDb();
     const m1 = message(db, 'A');
@@ -169,15 +189,28 @@ describe('media store', () => {
     expect(mediaJob(db, id)!.revoked).toBe(true);
   });
 
+  it('keys files by message row id, which is not the file row id', () => {
+    const db = seededDb();
+    for (const waId of ['T1', 'T2', 'T3']) message(db, waId, { mediaType: null }); // text messages take the first message row ids
+    const mA = message(db, 'A');
+    const mB = message(db, 'B', { mediaType: 'document' });
+    const fileB = insertMedia(db, pdf(mB)); // B's file is recorded first, so the file row ids run the other way
+    const fileA = insertMedia(db, media(mA));
+    const map = mediaForMessages(db, [mA, mB], 100);
+    expect([...map.keys()].sort((x, y) => x - y)).toEqual([mA, mB]);
+    expect(map.get(mA)).toMatchObject({ id: fileA, messageId: mA, kind: 'image' });
+    expect(map.get(mB)).toMatchObject({ id: fileB, messageId: mB, kind: 'document' });
+  });
+
   it('reads only the start of a long file text for the prompt, with the full length', () => {
     const db = seededDb();
     const m1 = message(db, 'A', { mediaType: 'document' });
     const id = insertMedia(db, pdf(m1));
-    finishMedia(db, id, { textKind: 'extract', text: 'x'.repeat(1_000_000), pageCount: 200, note: null, at: NOW });
+    finishMedia(db, id, { textKind: 'extract', text: 'x'.repeat(1_000_000), pageCount: 250, note: 'first_pages_only', at: NOW });
     const row = mediaForMessages(db, [m1], 20_001).get(m1)!;
     expect(row.text).toHaveLength(20_001);
-    expect(row.textChars).toBe(1_000_000);
-    expect(getMedia(db, id)!.textChars).toBe(1_000_000);
+    expect(row).toMatchObject({ textKind: 'extract', textChars: 1_000_000, pageCount: 250, note: 'first_pages_only' });
+    expect(getMedia(db, id)).toMatchObject({ textChars: 1_000_000, pageCount: 250, note: 'first_pages_only' });
   });
 
   it('cuts and counts file text by characters, so a cut never splits one', () => {
