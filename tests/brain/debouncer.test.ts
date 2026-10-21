@@ -209,12 +209,13 @@ describe('GroupDebouncer', () => {
   });
 
   it('stop() during a gated run followed by a failure leaves 0 timers and no more runs', async () => {
-    const { gates, run } = gated();
+    const gates: ((o: ReconcileOutcome) => void)[] = [];
+    const run = vi.fn((_id: number) => new Promise<ReconcileOutcome>((r) => gates.push(r)));
     const d = mk(run);
     d.notify(1);
     await adv(240_000);
     d.stop();
-    gates[0]!();
+    gates[0]!({ status: 'failed', errorCode: 'x' });
     await settle();
     expect(vi.getTimerCount()).toBe(0);
     await adv(7_200_000);
