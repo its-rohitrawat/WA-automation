@@ -36,5 +36,5 @@ export function migrate(db: Db): void {
 }
 
 export function tx<T>(db: Db, fn: () => T): T {
-  return db.transaction(fn)();
+  return db.transaction(fn).immediate();
 }

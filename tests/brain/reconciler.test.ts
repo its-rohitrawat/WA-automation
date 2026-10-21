@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { describe, expect, it, vi } from 'vitest';
 import { AiInvalidOutputError, AiRefusalError, MAX_OUTPUT_TOKENS, SDK_MAX_RETRIES } from '../../src/brain/claudeClient.ts';
 import { Reconciler } from '../../src/brain/reconciler.ts';
+import { closeTask, requestReprocess } from '../../src/cli/corrections.ts';
 import { estimateCostUsd, type Prices } from '../../src/spend/pricing.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { latestBatches } from '../../src/store/batches.ts';
@@ -391,5 +392,17 @@ describe('Reconciler', () => {
       expect(await run).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
       expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ sourceWaId: 'm1', sourceRevoked: true });
     });
+  });
+
+  it('does not re-create a task a human closed when the message is reprocessed', async () => {
+    const add = op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'high', sourceMessageIds: ['m1'] });
+    const { db, r } = setup([{ ops: [add] }, { ops: [add] }]);
+    store(db, 'm1', 'banner chahiye');
+    expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
+    closeTask(db, 'SHA-001', new Date('2026-10-19T08:30:00Z'));
+    expect(requestReprocess(db, 'SHA', '2026-10-19', new Date('2026-10-19T08:31:00Z'), undefined)).toBe(1);
+    expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 0, rejected: 1 });
+    expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
+    expect(getTaskByCode(db, 'SHA-001')?.status).toBe('done');
   });
 });

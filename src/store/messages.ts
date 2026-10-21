@@ -89,7 +89,7 @@ export function applyEdit(db: Db, clientId: number, waId: string, newText: strin
     db.prepare(`UPDATE messages SET text = ?, edited_at = ?,
       requeue_reason = CASE WHEN processed_at IS NOT NULL OR requeue_reason = 'reaction' THEN 'edit' ELSE requeue_reason END,
       processed_at = NULL, version = version + 1, touch_reason = 'edit' WHERE id = ?`).run(newText, editedAt, row.id);
-  })();
+  }).immediate();
   return true;
 }
 
@@ -114,7 +114,7 @@ export function upsertReaction(db: Db, r: { clientId: number; targetWaId: string
       db.prepare(`UPDATE messages SET requeue_reason = 'reaction', processed_at = NULL
         WHERE client_id = ? AND wa_id = ? AND processed_at IS NOT NULL AND revoked = 0`).run(r.clientId, r.targetWaId);
     }
-  })();
+  }).immediate();
 }
 
 export function listUnprocessed(db: Db, clientId: number, limit = 200): MessageRow[] {
@@ -137,7 +137,7 @@ export function markProcessed(db: Db, ids: number[], at: string): void {
   const stmt = db.prepare('UPDATE messages SET processed_at = ?, requeue_reason = NULL WHERE id = ?');
   db.transaction(() => {
     for (const id of ids) stmt.run(at, id);
-  })();
+  }).immediate();
 }
 
 /**
@@ -188,8 +188,19 @@ export function clientIdsWithUnprocessed(db: Db): number[] {
 }
 
 /** Used by `cli reprocess`: queues messages from a date onward for the AI again. */
-export function resetProcessedSince(db: Db, clientId: number, sinceIso: string): number {
-  return db.prepare('UPDATE messages SET processed_at = NULL WHERE client_id = ? AND ts >= ? AND revoked = 0').run(clientId, sinceIso).changes;
+/** Processed, non-revoked messages from sinceIso (inclusive) up to untilIso (exclusive, optional). */
+export function countProcessedBetween(db: Db, clientId: number, sinceIso: string, untilIso?: string): number {
+  const r = db
+    .prepare('SELECT COUNT(*) AS n FROM messages WHERE client_id = ? AND processed_at IS NOT NULL AND revoked = 0 AND ts >= ? AND ts < ?')
+    .get(clientId, sinceIso, untilIso ?? '9999-12-31T00:00:00.000Z') as { n: number };
+  return r.n;
+}
+
+/** Queues processed messages in the window for the AI again. Returns how many were actually re-queued. */
+export function resetProcessedSince(db: Db, clientId: number, sinceIso: string, untilIso?: string): number {
+  return db
+    .prepare('UPDATE messages SET processed_at = NULL WHERE client_id = ? AND processed_at IS NOT NULL AND revoked = 0 AND ts >= ? AND ts < ?')
+    .run(clientId, sinceIso, untilIso ?? '9999-12-31T00:00:00.000Z').changes;
 }
 
 export function unprocessedCounts(db: Db): Map<number, number> {

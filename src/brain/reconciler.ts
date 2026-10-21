@@ -9,7 +9,7 @@ import {
 } from '../store/messages.ts';
 import { listPeople, setRole } from '../store/people.ts';
 import {
-  addDecision, createTask, getTaskByCode, listDecisions, listTasks, logReminder, recordEvent, setTaskStatus, TASK_FIELDS, updateTaskFields, type TaskField,
+  addDecision, createTask, decisionSourceIds, getTaskByCode, listDecisions, listTasks, logReminder, recordEvent, reminderSourceIds, setTaskStatus, taskSourceIds, TASK_FIELDS, updateTaskFields, type TaskField,
 } from '../store/tasks.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
@@ -137,6 +137,10 @@ export class Reconciler {
           contextIds,
           messageTs,
           peopleByJid: new Map(listPeople(db, clientId).map((p) => [p.jid, p])),
+          taskSourceIds: taskSourceIds(db, clientId),
+          reminderSourceIds: reminderSourceIds(db, clientId),
+          decisionSourceIds: decisionSourceIds(db, clientId),
+          requeuedIds: new Set(batch.filter((m) => m.requeueReason !== null).map((m) => m.waId)),
         };
         const { accepted, rejected } = validateOps(result.output.ops, state);
         for (const op of accepted) this.#apply(fresh, op, byWaId, appliedAt);

@@ -13,6 +13,14 @@ export interface ValidationState {
   contextIds: Set<string>;
   messageTs: Map<string, string>;
   peopleByJid: Map<string, PersonRow>;
+  /** source_wa_id of every task of this client, any status. */
+  taskSourceIds: Set<string>;
+  /** Task code to the message ids already cited by an applied log_reminder. */
+  reminderSourceIds: Map<string, Set<string>>;
+  /** source_wa_id of every decision of this client. */
+  decisionSourceIds: Set<string>;
+  /** Batch messages that are edit or reaction re-checks. */
+  requeuedIds: Set<string>;
 }
 
 export interface Rejection {
@@ -57,8 +65,13 @@ export function validateOps(ops: AiOp[], s: ValidationState): { accepted: AiOp[]
     const task = TASK_OPS.has(op.op) && op.taskCode ? s.tasksByCode.get(op.taskCode) : undefined;
     if (TASK_OPS.has(op.op) && !task) { reject('unknown task code for this client'); continue; }
 
+    // A message that was processed before and comes back without a re-check marker (a reprocess, or a crash before
+    // marking) must not produce the same task, reminder or decision again.
+    const fresh = ids.filter((id) => s.batchIds.has(id) && !s.requeuedIds.has(id));
+
     switch (op.op) {
       case 'add_task':
+        if (fresh.some((id) => s.taskSourceIds.has(id))) { reject('task already exists for this message'); continue; }
         if (!op.side || !op.title || !op.category || !op.priority) { reject('add_task needs side, title, category and priority'); continue; }
         if (tooLong(op)) { reject('field too long'); continue; }
         if (addKeys.has(titleKey(op))) { reject('duplicate task in one response'); continue; }
@@ -98,10 +111,14 @@ export function validateOps(ops: AiOp[], s: ValidationState): { accepted: AiOp[]
         break;
       }
       case 'log_reminder':
+        if (fresh.some((id) => s.reminderSourceIds.get(op.taskCode!)?.has(id))) { reject('reminder already counted for this message'); continue; }
         if (remindedCodes.has(op.taskCode!)) { reject('duplicate reminder in one response'); continue; }
         remindedCodes.add(op.taskCode!);
         break;
       case 'add_decision':
+        if (fresh.some((id) => s.decisionSourceIds.has(id))) { reject('decision already recorded for this message'); continue; }
+        if (!op.text || op.text.length > 600) { reject('text missing or too long'); continue; }
+        break;
       case 'set_status':
         if (!op.text || op.text.length > 600) { reject('text missing or too long'); continue; }
         break;

@@ -61,3 +61,7 @@ export function setRole(db: Db, clientId: number, jid: string, role: Role, by: R
 export function findPeopleByNumber(db: Db, number: string): PersonRow[] {
   return (db.prepare('SELECT * FROM people WHERE number = ? ORDER BY client_id').all(number) as RawPerson[]).map(toRow);
 }
+
+export function findPeopleByJid(db: Db, jid: string): PersonRow[] {
+  return (db.prepare('SELECT * FROM people WHERE jid = ? ORDER BY client_id').all(jid) as RawPerson[]).map(toRow);
+}

@@ -62,7 +62,7 @@ export function syncClients(db: Db, configs: ClientConfig[]): void {
     }
     db.prepare('UPDATE clients SET active = 0').run();
     for (const c of configs) upsert.run({ code: c.code, name: c.name, groupId: c.groupId, phases: JSON.stringify(c.phases) });
-  })();
+  }).immediate();
 }
 
 export function getClient(db: Db, id: number): ClientRow {
@@ -97,6 +97,10 @@ export function nextTaskCode(db: Db, clientId: number): string {
 /** A human-set phase is locked against AI changes until the next human change. */
 export function setPhase(db: Db, clientId: number, phase: string, by: 'ai' | 'human'): void {
   db.prepare('UPDATE clients SET current_phase = ?, phase_locked = ? WHERE id = ?').run(phase, by === 'human' ? 1 : 0, clientId);
+}
+
+export function clearPhaseLock(db: Db, clientId: number): void {
+  db.prepare('UPDATE clients SET phase_locked = 0 WHERE id = ?').run(clientId);
 }
 
 export function setStatus(db: Db, clientId: number, text: string, at: string): void {

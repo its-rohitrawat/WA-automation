@@ -231,3 +231,33 @@ export function listDecisions(db: Db, clientId: number, limit = 1000): DecisionR
       FROM decisions WHERE client_id = ? ORDER BY decided_on DESC, id DESC LIMIT ?`)
     .all(clientId, limit) as DecisionRow[];
 }
+
+/** Every task of this client, any status: the message each one was created from. */
+export function taskSourceIds(db: Db, clientId: number): Set<string> {
+  const rows = db.prepare('SELECT source_wa_id AS id FROM tasks WHERE client_id = ? AND source_wa_id IS NOT NULL').all(clientId) as { id: string }[];
+  return new Set(rows.map((r) => r.id));
+}
+
+/** Task code to the message ids already cited by an applied log_reminder event. */
+export function reminderSourceIds(db: Db, clientId: number): Map<string, Set<string>> {
+  const rows = db
+    .prepare(`SELECT t.code AS code, e.source_ids AS ids FROM task_events e JOIN tasks t ON t.id = e.task_id WHERE e.client_id = ? AND e.op = 'log_reminder'`)
+    .all(clientId) as { code: string; ids: string }[];
+  const out = new Map<string, Set<string>>();
+  for (const r of rows) {
+    const set = out.get(r.code) ?? new Set<string>();
+    for (const id of JSON.parse(r.ids) as string[]) set.add(id);
+    out.set(r.code, set);
+  }
+  return out;
+}
+
+export function decisionSourceIds(db: Db, clientId: number): Set<string> {
+  const rows = db.prepare('SELECT source_wa_id AS id FROM decisions WHERE client_id = ? AND source_wa_id IS NOT NULL').all(clientId) as { id: string }[];
+  return new Set(rows.map((r) => r.id));
+}
+
+/** Hands the task back to the AI: clears the field locks and the status lock. */
+export function clearTaskLocks(db: Db, id: number, now: string): void {
+  db.prepare("UPDATE tasks SET locked_fields = '[]', status_locked_at = NULL, updated_at = ? WHERE id = ?").run(now, id);
+}

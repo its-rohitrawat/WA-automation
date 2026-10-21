@@ -21,6 +21,7 @@ function state(o: Partial<ValidationState> = {}): ValidationState {
     batchIds: new Set(['n1', 'n2']), contextIds: new Set(['c1']),
     messageTs: new Map([['n1', '2026-10-19T08:00:00.000Z'], ['n2', '2026-10-19T10:00:00.000Z'], ['c1', '2026-10-18T08:00:00.000Z']]),
     peopleByJid: new Map([[SHARMA_PN, person(SHARMA_PN, 'ai')], ['self@founder', person('self@founder', 'system')]]),
+    taskSourceIds: new Set(['old1']), reminderSourceIds: new Map([['SHA-012', new Set(['old2'])]]), decisionSourceIds: new Set(['old3']), requeuedIds: new Set(),
     ...o,
   };
 }
@@ -172,5 +173,25 @@ describe('validateOps', () => {
     expect(reasons([op({ op: 'set_person_role', personJid: 'nobody@x', role: 'client', sourceMessageIds: ['n1'] })])).toEqual(['unknown person or missing role']);
     const s = state({ peopleByJid: new Map([[SHARMA_PN, person(SHARMA_PN, 'human')]]) });
     expect(reasons([op({ op: 'set_person_role', personJid: SHARMA_PN, role: 'client', sourceMessageIds: ['n1'] })], s)).toEqual(['role was set by a human or is the founder']);
+  });
+
+  describe('replay guard', () => {
+    const replay = (extra: Partial<ValidationState> = {}) => state({ batchIds: new Set(['n1', 'old1', 'old2', 'old3']), ...extra });
+    it('rejects a second task, reminder or decision from the same message', () => {
+      expect(reasons([addTask({ sourceMessageIds: ['old1'] })], replay())).toEqual(['task already exists for this message']);
+      expect(reasons([op({ op: 'log_reminder', taskCode: 'SHA-012', sourceMessageIds: ['old2'] })], replay())).toEqual(['reminder already counted for this message']);
+      expect(reasons([op({ op: 'add_decision', text: 'Blue', sourceMessageIds: ['old3'] })], replay())).toEqual(['decision already recorded for this message']);
+    });
+    it('accepts brand-new messages', () => {
+      expect(validateOps([addTask({ sourceMessageIds: ['n1'] })], replay()).accepted).toHaveLength(1);
+      expect(validateOps([op({ op: 'log_reminder', taskCode: 'SHA-012', sourceMessageIds: ['n1'] })], replay()).accepted).toHaveLength(1);
+      expect(validateOps([op({ op: 'add_decision', text: 'Blue', sourceMessageIds: ['n1'] })], replay()).accepted).toHaveLength(1);
+    });
+    it('lets re-checked (edit or reaction) messages through', () => {
+      const s = replay({ requeuedIds: new Set(['old1', 'old2', 'old3']) });
+      expect(validateOps([addTask({ sourceMessageIds: ['old1'] })], s).accepted).toHaveLength(1);
+      expect(validateOps([op({ op: 'log_reminder', taskCode: 'SHA-012', sourceMessageIds: ['old2'] })], s).accepted).toHaveLength(1);
+      expect(validateOps([op({ op: 'add_decision', text: 'Blue', sourceMessageIds: ['old3'] })], s).accepted).toHaveLength(1);
+    });
   });
 });
