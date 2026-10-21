@@ -1,8 +1,20 @@
 const TZ = 'Asia/Kolkata';
 
+const formatters = new Map<string, Intl.DateTimeFormat>();
+
+function formatterFor(opts: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
+  const key = JSON.stringify(opts);
+  let f = formatters.get(key);
+  if (!f) {
+    f = new Intl.DateTimeFormat('en-US', { timeZone: TZ, ...opts });
+    formatters.set(key, f);
+  }
+  return f;
+}
+
 function parts(d: Date, opts: Intl.DateTimeFormatOptions): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const p of new Intl.DateTimeFormat('en-US', { timeZone: TZ, ...opts }).formatToParts(d)) out[p.type] = p.value;
+  for (const p of formatterFor(opts).formatToParts(d)) out[p.type] = p.value;
   return out;
 }
 

@@ -3,7 +3,10 @@ import { describe, expect, it } from 'vitest';
 import { loadTrackerView } from '../../src/output/view.ts';
 import { buildWorkbook } from '../../src/output/workbook.ts';
 import { syncClients, setStatus } from '../../src/store/clients.ts';
-import { createTask, logReminder, setTaskStatus, type NewTask } from '../../src/store/tasks.ts';
+import { upsertPerson } from '../../src/store/people.ts';
+import { addDecision, createTask, logReminder, setTaskStatus, type NewTask } from '../../src/store/tasks.ts';
+import { openDb } from '../../src/store/db.ts';
+import type { ClientConfig } from '../../src/config/groups.ts';
 import { MEHTA, NOW, seededDb, SHARMA } from '../helpers/db.ts';
 
 const task = (o: Partial<NewTask> = {}): NewTask => ({
@@ -67,7 +70,10 @@ describe('buildWorkbook', () => {
     expect(ov.getCell('D5').value).toBe(1);
     expect(ov.getCell('F5').value).toBe(1);
     expect(ov.getCell('H5').value).toBe('Homepage approved, building inner pages');
-    expect(ov.getCell('I5').value).toBe('18 Oct');
+    expect(ov.getCell('I5').value).toEqual(new Date(Date.UTC(2026, 9, 18)));
+    expect(ov.getCell('I5').numFmt).toBe('d mmm yyyy');
+    expect(ov.getCell('C5').value).toBe(0.33);
+    expect(ov.getCell('C5').numFmt).toBe('0%');
   });
 
   it('lists tasks with India dates, reminders, status and colour', async () => {
@@ -75,7 +81,9 @@ describe('buildWorkbook', () => {
     const row = findRow(ws, 'SHA-001');
     expect(row.getCell(2).value).toBe('Revise homepage banner');
     expect(row.getCell(3).value).toBe('Design');
-    expect(row.getCell(8).value).toBe('18 Oct');
+    expect(row.getCell(7).value).toEqual(new Date(Date.UTC(2026, 9, 10)));
+    expect(row.getCell(8).value).toEqual(new Date(Date.UTC(2026, 9, 18)));
+    expect(row.getCell(8).numFmt).toBe('d mmm yyyy');
     expect(row.getCell(9).value).toBe(9);
     expect(row.getCell(11).value).toBe('2 (last 17 Oct)');
     expect(row.getCell(12).value).toBe('Open');
