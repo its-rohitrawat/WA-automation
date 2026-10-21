@@ -1,3 +1,4 @@
+import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -24,6 +25,22 @@ describe('acquireLock', () => {
     await expect(acquireLock(dir)).rejects.toBeInstanceOf(AlreadyRunningError);
     await lock.release();
     await lock.release(); // safe twice
+    const again = await acquireLock(dir);
+    await again.release();
+  });
+
+  it('release() is not held up by a connected client', async () => {
+    const dir = tmpDir();
+    const lock = await acquireLock(dir);
+    const client = net.connect(lockName(dir));
+    client.on('error', () => {});
+    await new Promise<void>((r) => client.once('connect', () => r()));
+    const outcome = await Promise.race([
+      lock.release().then(() => 'released'),
+      new Promise<string>((r) => setTimeout(() => r('hung'), 1_000)),
+    ]);
+    client.destroy();
+    expect(outcome).toBe('released');
     const again = await acquireLock(dir);
     await again.release();
   });

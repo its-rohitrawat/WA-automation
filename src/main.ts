@@ -23,6 +23,15 @@ class StartupExit extends Error {}
 async function main(): Promise<void> {
   const env = loadEnv();
   const log = createLogger(env.LOG_LEVEL);
+  // Without these Node prints the raw error (Boom data, gaxios request config), bypassing the logger's redaction.
+  process.on('uncaughtException', (err) => {
+    log.fatal({ err }, 'uncaught exception');
+    process.exit(1);
+  });
+  process.on('unhandledRejection', (reason) => {
+    log.fatal({ err: reason }, 'unhandled rejection');
+    process.exit(1);
+  });
 
   if (!existsSync(env.GROUPS_FILE)) {
     log.error({ file: env.GROUPS_FILE }, 'Allow-list file missing. Copy config/allowed-groups.example.json and fill it in.');
@@ -75,15 +84,12 @@ async function main(): Promise<void> {
       dataDir: env.DATA_DIR,
     });
 
+    // watchGroupsFile catches a throwing onChange (including reloadClients conflicts) and calls onError.
     const stopWatching = watchGroupsFile(
       env.GROUPS_FILE,
       (next) => {
-        try {
-          app.reloadClients(next);
-          log.info({ groups: next.length }, 'allow-list reloaded');
-        } catch (err) {
-          log.error({ problem: err instanceof Error ? err.message : String(err) }, 'allowed-groups.json change rejected; keeping the previous allow-list');
-        }
+        app.reloadClients(next);
+        log.info({ groups: next.length }, 'allow-list reloaded');
       },
       (err) =>
         log.error({ problem: err instanceof Error ? err.message : String(err) }, 'allowed-groups.json change rejected; keeping the previous allow-list'),
@@ -92,27 +98,34 @@ async function main(): Promise<void> {
     app.start();
     log.info({ groups: configs.length }, 'WA Agent started');
 
-    const openDb1 = db;
-    const openDb2 = sessionDb;
-    const heldLock = lock;
+    const trackerDb = db;
+    const sessionStore = sessionDb;
+    const startedLock = lock;
     let stopping = false;
+    let warnedStopping = false;
     const shutdown = () => {
-      if (stopping) return;
+      if (stopping) {
+        if (!warnedStopping) {
+          warnedStopping = true;
+          log.warn('still stopping: waiting for an AI call or upload in flight (up to about 2.5 minutes)');
+        }
+        return;
+      }
       stopping = true;
       log.info('WA Agent stopping');
       stopWatching();
       void app
         .stop()
-        .catch(() => log.error('error while stopping'))
+        .catch((err) => log.error({ err }, 'error while stopping'))
         .finally(() => {
           // Databases are closed only after app.stop() has settled.
           try {
-            openDb1.close();
-            openDb2.close();
+            trackerDb.close();
+            sessionStore.close();
           } catch {
             // best effort
           }
-          void heldLock.release().finally(() => process.exit(0));
+          void startedLock.release().finally(() => process.exit(0));
           setTimeout(() => process.exit(0), 2000).unref();
         });
     };
@@ -132,12 +145,21 @@ async function main(): Promise<void> {
       e instanceof SessionDecryptError ||
       e instanceof TokenDecryptError;
     try {
-      await lock?.release();
+      // Bounded: the OS frees the lock when the process exits anyway.
+      await Promise.race([lock?.release(), new Promise((r) => setTimeout(r, 2000).unref())]);
     } catch {
-      // the OS frees the lock when the process exits
+      // ignore
     }
     if (!known) throw e;
-    log.error(e.message);
+    if (e instanceof MasterKeyError) {
+      log.error({ code: e.code }, e.message);
+      process.stderr.write(`${e.code}: ${e.message}
+`);
+    } else {
+      log.error(e.message);
+      process.stderr.write(`${e.message}
+`);
+    }
     process.exit(2);
   }
 }

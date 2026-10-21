@@ -22,6 +22,8 @@ const RUNNING_MSG = 'Another WA Agent process is using this data folder. Stop it
 function tryListen(name: string): Promise<net.Server> {
   return new Promise((resolveP, reject) => {
     const server = net.createServer();
+    // The lock is the listening endpoint itself. A stray client must never keep release() pending.
+    server.on('connection', (s) => s.destroy());
     server.once('error', reject);
     server.listen(name, () => {
       server.removeListener('error', reject);

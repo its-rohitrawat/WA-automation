@@ -275,6 +275,22 @@ describe('app shutdown', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('waits at most 5 seconds for a gateway that never stops', async () => {
+    const { app, gateway } = setup();
+    const realStop = gateway.stop.bind(gateway);
+    vi.spyOn(gateway, 'stop').mockImplementation(() => {
+      void realStop(); // clears the gateway's own timers; the caller still never sees it finish
+      return new Promise<void>(() => {});
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    const stop = stopping(app);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(stop.state.done).toBe(false);
+    await finish(stop);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('waits at most 10 seconds for a hung Drive upload', async () => {
     const drive = new FakeDrive();
     drive.gate = new Promise<void>(() => {});

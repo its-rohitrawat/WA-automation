@@ -158,7 +158,18 @@ export function createApp(d: AppDeps): App {
       // One last upload, so the workbook includes results applied during the drain. stop() bounds it to 10 s.
       void publisher.publishNow();
       await publisher.stop(10_000);
-      await d.gateway.stop();
+      // A socket that never closes must not eat the rest of WinSW's 150 s (120 + 10 + 5 plus margin).
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          d.gateway.stop(),
+          new Promise<void>((r) => {
+            timer = setTimeout(r, 5_000);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
     },
     reloadClients(configs) {
       const wasActive = listClients(d.db).map((c) => c.id);
