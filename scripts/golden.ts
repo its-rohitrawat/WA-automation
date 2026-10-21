@@ -51,7 +51,10 @@ for (const { c, user } of runs) {
     console.log(`${score.pass ? 'PASS' : 'FAIL'}  ${c.name}${result.fallbackUsed ? ' (fallback model used)' : ''}`);
     for (const m of score.missing) console.log(`      missing:   ${m}`);
     for (const f of score.forbidden) console.log(`      forbidden: ${f}`);
-    for (const r of rejected) console.log(`      rejected: ${r.op.op} (${r.reason})`);
+    for (const r of rejected) console.log(`      rejected: ${r.op.op}${r.op.taskCode ? ` ${r.op.taskCode}` : ''} (${r.reason})`);
+    // A forbidden op the validator happened to drop still shows the model was fooled.
+    const raw = scoreCase(c, result.output.ops);
+    for (const f of raw.forbidden.filter((x) => !score.forbidden.includes(x))) console.log(`      warning:   the model proposed ${f}; the validator dropped it`);
     if (result.invalidOps > 0) console.log(`      invalid ops: ${result.invalidOps}`);
     if (!score.pass) failures++;
   } catch (e) {

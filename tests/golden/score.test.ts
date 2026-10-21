@@ -80,6 +80,7 @@ describe('validationStateFor with the real validator', () => {
     const r = validateOps([bad], validationStateFor(c.input));
     expect(r.accepted).toEqual([]);
     expect(r.rejected).toHaveLength(1);
+    expect(r.rejected[0]?.reason).toBe('deadline is not YYYY-MM-DD');
   });
 
   it('needs evidence from the batch, not only context', () => {
