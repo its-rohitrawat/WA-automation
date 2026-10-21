@@ -274,4 +274,23 @@ describe('WhatsAppGateway restart throttling and re-entrancy', () => {
     await Promise.resolve();
     expect(counts).toEqual([1]);
   });
+
+  it('resets the creds-save counter after a successful save and emits once', async () => {
+    let calls = 0;
+    const { gw, sock } = setup([SHARMA.groupId], () => (calls++ === 0 ? Promise.reject(new Error('disk')) : Promise.resolve()));
+    const counts: number[] = [];
+    gw.onStatus((st) => counts.push(st.credsSaveFailures));
+    sock.emit('creds.update', {});
+    await Promise.resolve();
+    await Promise.resolve();
+    sock.emit('creds.update', {});
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(counts).toEqual([1, 0]);
+    expect(gw.status().credsSaveFailures).toBe(0);
+    sock.emit('creds.update', {});
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(counts).toEqual([1, 0]);
+  });
 });

@@ -154,10 +154,17 @@ export class WhatsAppGateway {
     const sock = this.#opts.factory(this.#opts.auth, async (jid) => this.#groupCache.get(jid));
     this.#sock = sock;
     sock.ev.on('creds.update', () => {
-      void this.#opts.saveCreds().catch(() => {
-        this.#credsSaveFailures++;
-        this.#emitStatus();
-      });
+      void this.#opts.saveCreds().then(
+        () => {
+          if (this.#credsSaveFailures === 0) return;
+          this.#credsSaveFailures = 0;
+          this.#emitStatus();
+        },
+        () => {
+          this.#credsSaveFailures++;
+          this.#emitStatus();
+        },
+      );
     });
     sock.ev.on('connection.update', (u) => this.#onConnection(sock, u));
     sock.ev.on('messages.upsert', ({ messages }) => {

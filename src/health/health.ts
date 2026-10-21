@@ -5,7 +5,7 @@ import type { SpendGuard } from '../spend/spendGuard.ts';
 import type { Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import type { Clock } from '../util/clock.ts';
-import { istShortDate, istTime } from '../util/time.ts';
+import { istDate, istShortDate, istTime } from '../util/time.ts';
 import type { GatewayStatus } from '../wa/gateway.ts';
 
 const LOW_DISK_GB = 10;
@@ -46,7 +46,7 @@ export class Health {
   #wa: GatewayStatus;
   #downSince: Date | null;
   #failed = new Map<number, string>();
-  #paused = new Set<number>();
+  #paused = new Map<number, string>(); // clientId -> IST day
   #publishFailedSince: Date | null = null;
   #publishAuthFailed = false;
   #lastSuccess: Date | null = null;
@@ -71,7 +71,7 @@ export class Health {
   }
 
   recordOutcome(clientId: number, o: ReconcileOutcome): void {
-    if (o.status === 'paused') this.#paused.add(clientId);
+    if (o.status === 'paused') this.#paused.set(clientId, istDate(this.#clock.now()));
     else {
       this.#paused.delete(clientId);
       if (o.status === 'failed') this.#failed.set(clientId, o.errorCode);
@@ -79,6 +79,11 @@ export class Health {
     }
     if (o.status === 'ok') this.#lastSuccess = this.#clock.now();
     this.persist();
+  }
+
+  forget(clientId: number): void {
+    this.#failed.delete(clientId);
+    this.#paused.delete(clientId);
   }
 
   markPublishFailed(f: { step: 'build' | 'drive'; auth: boolean }): void {
@@ -94,12 +99,27 @@ export class Health {
     this.persist();
   }
 
+  #hasPaused(now: Date): boolean {
+    const today = istDate(now);
+    for (const day of this.#paused.values()) if (day === today) return true;
+    return false;
+  }
+
   #freeGb(): number | null {
     const bytes = this.#freeBytes(this.#dataDir);
     return bytes === null ? null : bytes / 1e9;
   }
 
   line(): HealthLine {
+    return this.#compute(true);
+  }
+
+  /** Same as line() but without publish failures: used inside the uploaded workbook. */
+  workbookLine(): HealthLine {
+    return this.#compute(false);
+  }
+
+  #compute(withPublish: boolean): HealthLine {
     const now = this.#clock.now();
     const since = stamp(new Date(this.#wa.since));
     if (this.#wa.state === 'logged_out') return { ok: false, text: `❌ WhatsApp unlinked since ${since}. Run: npm run cli -- link --reset` };
@@ -108,14 +128,13 @@ export class Health {
     if (this.#downSince && now.getTime() - this.#downSince.getTime() > DISCONNECT_GRACE_MS) {
       return { ok: false, text: `❌ Disconnected since ${stamp(this.#downSince)}` };
     }
+    const pubFail = withPublish ? this.#publishFailedSince : null;
+    if (pubFail && this.#publishAuthFailed) return { ok: false, text: '❌ Google sign-in expired. Run: npm run cli -- google-auth' };
     if (this.#wa.credsSaveFailures > 0) return { ok: false, text: '⚠️ The WhatsApp session could not be saved. Check disk space and the data folder permissions.' };
-    if (this.#publishFailedSince) {
-      if (this.#publishAuthFailed) return { ok: false, text: '❌ Google sign-in expired. Run: npm run cli -- google-auth' };
-      if (now.getTime() - this.#publishFailedSince.getTime() > PUBLISH_FAIL_MS) {
-        return { ok: false, text: `⚠️ Tracker update failing since ${stamp(this.#publishFailedSince)}` };
-      }
+    if (pubFail && now.getTime() - pubFail.getTime() > PUBLISH_FAIL_MS) {
+      return { ok: false, text: `⚠️ Tracker update failing since ${stamp(pubFail)}` };
     }
-    if (this.#spend.isPaused() || this.#paused.size > 0) return { ok: false, text: '⚠️ Daily spend cap reached. Paused until midnight IST' };
+    if (this.#spend.isPaused() || this.#hasPaused(now)) return { ok: false, text: '⚠️ Daily spend cap reached. Paused until midnight IST' };
     if (this.#failed.size > 0) {
       const n = this.#failed.size;
       return { ok: false, text: `⚠️ ${n} group${n === 1 ? '' : 's'} waiting (AI error)` };
@@ -148,5 +167,13 @@ export class Health {
 
 export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
   const v = getKv(db, 'health');
-  return v ? (JSON.parse(v) as HealthSnapshot) : undefined;
+  if (!v) return undefined;
+  try {
+    const o = JSON.parse(v) as Partial<HealthSnapshot> | null;
+    if (!o || typeof o !== 'object' || typeof o.at !== 'string') return undefined;
+    if (!o.line || typeof o.line.text !== 'string' || typeof o.line.ok !== 'boolean') return undefined;
+    return o as HealthSnapshot;
+  } catch {
+    return undefined;
+  }
 }

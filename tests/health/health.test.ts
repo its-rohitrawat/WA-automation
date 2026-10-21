@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { setKv } from '../../src/store/kv.ts';
 import { Health, readHealthSnapshot } from '../../src/health/health.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { manualClock } from '../../src/util/clock.ts';
@@ -94,5 +95,83 @@ describe('Health', () => {
     expect(h.line()).toEqual({ ok: false, text: '⚠️ Tracker update failing since 19 Oct 13:30' });
     h.markPublished();
     expect(h.line().ok).toBe(true);
+  });
+
+  it('workbookLine ignores publish failures', () => {
+    const { h, clock } = setup();
+    h.setWhatsApp(status('open'));
+    h.markPublishFailed({ step: 'drive', auth: true });
+    expect(h.line().text).toContain('Google sign-in expired');
+    expect(h.workbookLine().ok).toBe(true);
+    h.markPublished();
+    h.markPublishFailed({ step: 'drive', auth: false });
+    clock.advance(61 * 60_000);
+    expect(h.line().text).toContain('Tracker update failing');
+    expect(h.workbookLine().ok).toBe(true);
+  });
+
+  it('forget clears failed and paused clients', () => {
+    const { h } = setup();
+    h.setWhatsApp(status('open'));
+    h.recordOutcome(1, { status: 'failed', errorCode: 'timeout' });
+    h.forget(1);
+    expect(h.line().ok).toBe(true);
+    h.recordOutcome(1, { status: 'paused' });
+    h.forget(1);
+    expect(h.line().ok).toBe(true);
+  });
+
+  it('puts the sign-in error before the creds-save warning', () => {
+    const { h } = setup();
+    h.setWhatsApp({ ...status('open'), credsSaveFailures: 2 });
+    expect(h.line().text).toContain('could not be saved');
+    h.markPublishFailed({ step: 'drive', auth: true });
+    expect(h.line().text).toBe('❌ Google sign-in expired. Run: npm run cli -- google-auth');
+  });
+
+  it('the latest publish failure decides whether it is an auth problem', () => {
+    const { h } = setup();
+    h.setWhatsApp(status('open'));
+    h.markPublishFailed({ step: 'drive', auth: true });
+    h.markPublishFailed({ step: 'drive', auth: false });
+    expect(h.line().ok).toBe(true);
+  });
+
+  it('paused entries expire at midnight IST', () => {
+    const db = seededDb();
+    const clock = manualClock('2026-10-19T18:20:00Z'); // 23:50 IST
+    const spend = new SpendGuard({ db, clock, capUsd: 1 });
+    const h = new Health({ db, clock, spend, freeBytes: () => 200e9 });
+    h.setWhatsApp(status('open', clock.now().toISOString()));
+    h.recordOutcome(1, { status: 'paused' });
+    expect(h.line().text).toBe('⚠️ Daily spend cap reached. Paused until midnight IST');
+    clock.advance(11 * 60_000); // 00:01 IST
+    expect(h.line().ok).toBe(true);
+    expect(h.snapshot().line.ok).toBe(true);
+  });
+
+  it('keeps failed groups after paused entries expire', () => {
+    const db = seededDb();
+    const clock = manualClock('2026-10-19T18:20:00Z');
+    const spend = new SpendGuard({ db, clock, capUsd: 1 });
+    const h = new Health({ db, clock, spend, freeBytes: () => 200e9 });
+    h.setWhatsApp(status('open', clock.now().toISOString()));
+    h.recordOutcome(1, { status: 'failed', errorCode: 'timeout' });
+    h.recordOutcome(1, { status: 'paused' });
+    clock.advance(11 * 60_000);
+    expect(h.line().text).toBe('⚠️ 1 group waiting (AI error)');
+  });
+
+  it('readHealthSnapshot never throws and round-trips', () => {
+    const { db, h } = setup();
+    setKv(db, 'health', '{not json');
+    expect(readHealthSnapshot(db)).toBeUndefined();
+    setKv(db, 'health', '{}');
+    expect(readHealthSnapshot(db)).toBeUndefined();
+    h.setWhatsApp(status('open'));
+    h.markPublishFailed({ step: 'drive', auth: false });
+    const snap = readHealthSnapshot(db);
+    expect(snap?.publishFailingSince).toBe('2026-10-19T08:00:00.000Z');
+    expect(snap).toEqual(JSON.parse(JSON.stringify(h.snapshot())));
   });
 });
