@@ -82,5 +82,5 @@ describe('DpapiKeyProvider', () => {
     const protectedB64 = powershellDpapi('protect', secret);
     expect(protectedB64).not.toBe(secret);
     expect(powershellDpapi('unprotect', protectedB64)).toBe(secret);
-  });
+  }, 60_000); // two PowerShell starts can take well over 5 s on a busy PC
 });
