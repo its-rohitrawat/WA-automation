@@ -187,8 +187,9 @@ describe('readHealthSnapshot shape checks', () => {
     return readHealthSnapshot(db);
   };
 
-  it('accepts a full snapshot', () => {
+  it('accepts a full snapshot, including freeGb null', () => {
     expect(read(full)).toBeDefined();
+    expect(read({ ...full, freeGb: null })).toBeDefined();
   });
 
   it.each([
@@ -196,6 +197,11 @@ describe('readHealthSnapshot shape checks', () => {
     ['spentToday', { ...full, spentToday: 'a' }],
     ['capUsd', { ...full, capUsd: undefined }],
     ['failed', { ...full, failed: null }],
+    ['at (invalid date)', { ...full, at: 'not a date' }],
+    ['whatsapp.since (missing)', { ...full, whatsapp: { state: 'open' } }],
+    ['whatsapp.since (invalid date)', { ...full, whatsapp: { state: 'open', since: 'x' } }],
+    ['freeGb (string)', { ...full, freeGb: '10' }],
+    ['freeGb (missing)', { ...full, freeGb: undefined }],
   ])('returns undefined when %s is missing or wrong', (_n, v) => {
     expect(read(v)).toBeUndefined();
   });

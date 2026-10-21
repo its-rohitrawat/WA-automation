@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { googleAuthCommand, linkCommand, listGroupsCommand, statusCommand, type CliDeps } from '../../src/cli/commands.ts';
+import { ConfirmCancelled, googleAuthCommand, linkCommand, listGroupsCommand, statusCommand, type CliDeps } from '../../src/cli/commands.ts';
 import { parseEnv } from '../../src/config/env.ts';
 import { masterKeyPath, sessionDbPath, trackerDbPath } from '../../src/config/paths.ts';
 import { StaticKeyProvider } from '../../src/crypto/keyProvider.ts';
@@ -116,9 +116,20 @@ describe('link --reset', () => {
     expect(sessionRows()).toBeGreaterThan(0);
 
     vi.useFakeTimers();
+    // Counted when the socket is created, which is right after the reset and before anything new is saved.
+    let rowsAtConnect = -1;
+    factory.mockImplementation(() => {
+      rowsAtConnect = sessionRows();
+      const s = new FakeSocket();
+      sockets.push(s);
+      return s;
+    });
+    const sessionBefore = sessionRows();
     const p = linkCommand({ reset: true }, deps());
     const rejected = expect(p).rejects.toThrow();
     await vi.waitFor(() => expect(sockets.length).toBe(1));
+    expect(sessionBefore).toBe(2); // canary + creds
+    expect(rowsAtConnect).toBe(1); // creds gone; only the fresh canary row remains
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(confirm.mock.calls[0]![0]).toContain('Type yes to continue');
     closeWith(sockets[0]!, 401); // no point connecting further: end the run
@@ -130,6 +141,17 @@ describe('link --reset', () => {
     expect(getKv(db, 'session_reset_at')).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     db.close();
     expect(out()).toContain('tracker data were NOT touched');
+    await lockIsFree();
+  });
+
+  it('Ctrl+C at the prompt cancels cleanly and releases the lock', async () => {
+    await seedSession();
+    const before = sessionRows();
+    confirm.mockRejectedValue(new ConfirmCancelled());
+    await linkCommand({ reset: true }, deps());
+    expect(out()).toContain('Cancelled. Nothing was changed.');
+    expect(sessionRows()).toBe(before);
+    expect(factory).not.toHaveBeenCalled();
     await lockIsFree();
   });
 
@@ -274,6 +296,30 @@ describe('link connection flow', () => {
     await lockIsFree();
   });
 
+  it('a drop after a successful link says to start the service, not to link again', async () => {
+    const { p } = await start();
+    const r = expect(p).rejects.toThrow('WhatsApp is linked, but the connection dropped while saving recent messages. Start the service (net start wa-agent); it will catch up.');
+    const sock = await openViaQr();
+    sock.emit('connection.update', { connection: 'close', lastDisconnect: { error: Object.assign(new Error('x'), { output: { statusCode: 408 } }), date: new Date() } });
+    await vi.advanceTimersByTimeAsync(11_000);
+    await r;
+    await lockIsFree();
+  });
+
+  it('says plainly when allowed messages could not be saved', async () => {
+    seedTracker();
+    const tdb = openDb(trackerDbPath(dataDir));
+    tdb.exec("CREATE TRIGGER block_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'blocked'); END");
+    tdb.close();
+    const { p } = await start();
+    const sock = await openViaQr();
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('f1', 'hello', { group: MEHTA.groupId })] });
+    await vi.advanceTimersByTimeAsync(9_000);
+    await p;
+    expect(lines).toContain('1 messages could not be saved. They are lost from the tracker; check the log, and add anything important by hand.');
+    await lockIsFree();
+  });
+
   it('reports a connection that is lost during the wait instead of "Linked."', async () => {
     const { p } = await start();
     const r = expect(p).rejects.toThrow(/took over/);
@@ -311,10 +357,13 @@ describe('list-groups', () => {
     sock.emit('connection.update', { connection: 'open' });
     await vi.advanceTimersByTimeAsync(10_000);
     await p;
-    expect(out()).toContain('Connected. Reading your groups');
-    expect(out()).toContain(`${MEHTA.groupId}  Mehta Foods x Studio   [allowed]`);
-    expect(out()).toContain(`${OTHER_GROUP}  Family`);
-    expect(out()).not.toContain('nothing is saved');
+    expect(lines).toEqual([
+      'Connected. Reading your groups…',
+      'Groups on this number (this list is shown only on this screen; messages from allowed groups are still saved):\n',
+      `${OTHER_GROUP}  Family`,
+      `${MEHTA.groupId}  Mehta Foods x Studio   [allowed]`,
+      '\nCopy the ids you want into config/allowed-groups.json. Finishing up...',
+    ]);
     expect(sendCalls().every((n) => n === 0)).toBe(true);
     expect(sock.end).toHaveBeenCalled();
     await lockIsFree();
@@ -365,9 +414,11 @@ describe('google-auth', () => {
 
   it('stores nothing when the code exchange fails', async () => {
     const p = googleAuthCommand(deps({ createConsentClient: consentClient({ failToken: true }) }));
-    const r = expect(p).rejects.toThrow();
+    const caught = p.catch((e: Error) => e);
     await visit();
-    await r;
+    const err = await caught;
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).not.toContain(REFRESH_TOKEN);
     const db = openDb(trackerDbPath(dataDir));
     expect(getKv(db, 'google_refresh_token')).toBeUndefined();
     db.close();

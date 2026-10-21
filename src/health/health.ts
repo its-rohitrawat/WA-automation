@@ -172,7 +172,10 @@ export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
     const o = JSON.parse(v) as Partial<HealthSnapshot> | null;
     if (!o || typeof o !== 'object' || typeof o.at !== 'string') return undefined;
     if (!o.line || typeof o.line.text !== 'string' || typeof o.line.ok !== 'boolean') return undefined;
+    if (Number.isNaN(Date.parse(o.at))) return undefined;
     if (!o.whatsapp || typeof o.whatsapp.state !== 'string') return undefined;
+    if (typeof o.whatsapp.since !== 'string' || Number.isNaN(Date.parse(o.whatsapp.since))) return undefined;
+    if (o.freeGb !== null && typeof o.freeGb !== 'number') return undefined;
     if (typeof o.spentToday !== 'number' || typeof o.capUsd !== 'number' || !Array.isArray(o.failed)) return undefined;
     return o as HealthSnapshot;
   } catch {

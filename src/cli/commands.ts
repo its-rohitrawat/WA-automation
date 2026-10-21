@@ -35,10 +35,21 @@ export interface CliDeps {
   maxIngestMs: { link: number; listGroups: number };
 }
 
+/** The operator abandoned a confirmation prompt (Ctrl+C or closed input). */
+export class ConfirmCancelled extends Error {
+  constructor() {
+    super('Cancelled');
+    this.name = 'ConfirmCancelled';
+  }
+}
+
 async function askYes(question: string): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const closed = new Promise<never>((_, reject) => rl.once('close', () => reject(new ConfirmCancelled())));
   try {
-    return (await rl.question(`${question} `)).trim().toLowerCase() === 'yes';
+    return (await Promise.race([rl.question(`${question} `), closed])).trim().toLowerCase() === 'yes';
+  } catch {
+    throw new ConfirmCancelled();
   } finally {
     rl.close();
   }
@@ -87,6 +98,8 @@ async function connectAndIngest(o: {
   quietMs: number;
   maxIngestMs: number;
   openMessage: string;
+  /** Advice when the connection drops after it opened. */
+  droppedMessage?: string;
   onQr?: (qr: string) => void;
   afterOpen?: (gateway: WhatsAppGateway) => Promise<void>;
 }): Promise<void> {
@@ -133,9 +146,9 @@ async function connectAndIngest(o: {
       }, POLL_MS);
     });
     const failed = gateway.failedCount();
-    if (failed > 0) deps.out(`${failed} messages could not be saved; the service will pick them up later.`);
+    if (failed > 0) deps.out(`${failed} messages could not be saved. They are lost from the tracker; check the log, and add anything important by hand.`);
     const state = gateway.status().state;
-    if (state !== 'open') throw new Error(terminalAdvice(state) ?? ADVICE_DROPPED);
+    if (state !== 'open') throw new Error(terminalAdvice(state) ?? o.droppedMessage ?? ADVICE_DROPPED);
   } finally {
     await gateway.stop();
   }
@@ -164,9 +177,16 @@ export async function linkCommand(opts: { reset: boolean }, deps: CliDeps): Prom
       if (!hasSession) {
         out('No saved WhatsApp link to reset.');
       } else {
-        const yes = await deps.confirm(
+        let yes: boolean;
+        try {
+          yes = await deps.confirm(
           'This removes the saved WhatsApp link. The founder will have to scan a new QR code. First remove the old "WA Agent" device on his phone (Settings → Linked devices). Your tasks and tracker data are not touched. Type yes to continue:',
-        );
+          );
+        } catch (e) {
+          if (!(e instanceof ConfirmCancelled)) throw e;
+          out('Cancelled. Nothing was changed.');
+          return;
+        }
         if (!yes) {
           out('Nothing was changed.');
           return;
@@ -191,6 +211,7 @@ export async function linkCommand(opts: { reset: boolean }, deps: CliDeps): Prom
       configs,
       quietMs: deps.quietMs.link,
       maxIngestMs: deps.maxIngestMs.link,
+      droppedMessage: 'WhatsApp is linked, but the connection dropped while saving recent messages. Start the service (net start wa-agent); it will catch up.',
       openMessage: 'WhatsApp linked. Saving recent messages from the allowed groups (about a minute). Leave this window open.',
       onQr: (qr) => {
         out('');

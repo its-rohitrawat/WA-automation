@@ -1,11 +1,11 @@
 import { readFileSync, unwatchFile, watchFile, type Stats } from 'node:fs';
 import { z } from 'zod';
 
-export const GROUPS_FILE_MISSING_MESSAGE = 'Allow-list file missing. Copy config/allowed-groups.example.json and fill it in.';
+export const GROUPS_FILE_MISSING_MESSAGE = 'Allow-list file missing. Create config/allowed-groups.json containing { "clients": [] }, run: npm run cli -- list-groups, then add your client groups (see docs/SETUP.md).';
 
 const EXAMPLE_GROUP_ID = '120363000000000001@g.us';
 const EXAMPLE_GROUP_MESSAGE =
-  'allowed-groups.json still contains the example group. Replace it with real group ids (run list-groups with an empty list first).';
+  'allowed-groups.json still contains the example group. Replace it with real group ids. To find them, set the file to { "clients": [] } and run: npm run cli -- list-groups';
 
 export const DEFAULT_PHASES = ['Discovery', 'Design', 'Development', 'Review', 'Launch'];
 
