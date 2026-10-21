@@ -31,3 +31,13 @@ Tests to add (tests/app.test.ts):
   - `DrivePublisher.stop()` is async.
   - `TokenStore.load()` can throw `TokenDecryptError`; Task 23 handles it.
   - `DriveAuthError` is exported from src/output/drive.ts.
+
+## From the Task 21 review
+- **Workbook health line:** the publisher's `build` passes `health.workbookLine()` (not `health.line()`) to `loadTrackerView`.
+- **Removed groups:** `reloadClients` calls `health.forget(id)` next to `debouncer.cancel(id)` for every client that became inactive, then `health.persist()`.
+- **Workbook shows failures:** in the debouncer `run` wrapper, after `health.recordOutcome(...)`, call `publisher.schedule()` when the outcome is `failed` or `paused`. The `onError` crash path also calls `publisher.schedule()` after recording its failure. The publisher is throttled, so this is cheap, and the workbook's health line stops showing ✅ while groups fail.
+- **The tick never crashes the process:** wrap the whole tick body in try/catch and log `log.error({ err }, 'tick failed')`. `persist()` can throw on a busy database, and an uncaught throw inside `setInterval` would exit the service.
+- Tests:
+  - a failed reconcile schedules a publish;
+  - a tick whose `persist` throws (make the kv write fail, or stub `health.persist`) logs and keeps running;
+  - after `reloadClients` removes a failed client, `health.line()` is green.
