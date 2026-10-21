@@ -287,6 +287,8 @@ describe('app shutdown', () => {
     const stop = stopping(app);
     await vi.advanceTimersByTimeAsync(3_000);
     expect(stop.state.done).toBe(false);
+    await vi.advanceTimersByTimeAsync(2_500); // the 5 s cap has passed by now
+    expect(stop.state.done).toBe(true);
     await finish(stop);
     expect(vi.getTimerCount()).toBe(0);
   });

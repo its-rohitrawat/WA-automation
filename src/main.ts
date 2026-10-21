@@ -25,16 +25,24 @@ async function main(): Promise<void> {
   const log = createLogger(env.LOG_LEVEL);
   // Without these Node prints the raw error (Boom data, gaxios request config), bypassing the logger's redaction.
   process.on('uncaughtException', (err) => {
-    log.fatal({ err }, 'uncaught exception');
-    process.exit(1);
+    try {
+      log.fatal({ err }, 'uncaught exception');
+    } finally {
+      process.exit(1);
+    }
   });
   process.on('unhandledRejection', (reason) => {
-    log.fatal({ err: reason }, 'unhandled rejection');
-    process.exit(1);
+    try {
+      log.fatal({ err: reason }, 'unhandled rejection');
+    } finally {
+      process.exit(1);
+    }
   });
 
   if (!existsSync(env.GROUPS_FILE)) {
-    log.error({ file: env.GROUPS_FILE }, 'Allow-list file missing. Copy config/allowed-groups.example.json and fill it in.');
+    const message = 'Allow-list file missing. Copy config/allowed-groups.example.json and fill it in.';
+    log.error({ file: env.GROUPS_FILE }, message);
+    process.stderr.write(`${message}\n`);
     process.exit(2);
   }
 
@@ -153,12 +161,10 @@ async function main(): Promise<void> {
     if (!known) throw e;
     if (e instanceof MasterKeyError) {
       log.error({ code: e.code }, e.message);
-      process.stderr.write(`${e.code}: ${e.message}
-`);
+      process.stderr.write(`${e.code}: ${e.message}\n`);
     } else {
       log.error(e.message);
-      process.stderr.write(`${e.message}
-`);
+      process.stderr.write(`${e.message}\n`);
     }
     process.exit(2);
   }
