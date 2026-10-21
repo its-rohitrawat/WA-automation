@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { finishBatch, latestBatches, startBatch } from '../../src/store/batches.ts';
 import {
-  addDecision, createTask, getTaskByCode, listDecisions, listTasks, logReminder, recordEvent, setTaskStatus, updateTaskFields, type NewTask,
+  addDecision, createTask, getTaskByCode, listDecisions, listTasks, logReminder, recordEvent, setTaskStatus, taskSourceIds, updateTaskFields, type NewTask,
 } from '../../src/store/tasks.ts';
 import { LATER, NOW, seededDb } from '../helpers/db.ts';
 
@@ -57,6 +57,24 @@ describe('tasks repository', () => {
     addDecision(db, { clientId: 1, text: 'Launch 1 Nov', decidedOn: '2026-10-15', source: 'whatsapp', sourceWaId: 'm6' }, NOW);
     expect(listDecisions(db, 1).map((d) => d.text)).toEqual(['Launch 1 Nov', 'Blue theme']);
     expect(listDecisions(db, 1, 1)).toHaveLength(1);
+  });
+
+  it('taskSourceIds covers every message any event of a task cited, whatever the op or actor', () => {
+    const db = seededDb();
+    const t = createTask(db, newTask({ sourceWaId: 'm1' }), NOW);
+    const other = createTask(db, newTask({ clientId: 2, sourceWaId: 'z1' }), NOW);
+    const ev = (taskId: number | null, clientId: number, actor: 'ai' | 'human', op: string, sourceIds: string[]) =>
+      recordEvent(db, { taskId, clientId, actor, op, detail: {}, reason: null, sourceIds, at: NOW });
+    ev(t.id, 1, 'ai', 'add_task', ['m1', 'm2']);
+    ev(t.id, 1, 'ai', 'log_reminder', ['m3']);
+    ev(t.id, 1, 'ai', 'update_task', ['m4']);
+    ev(t.id, 1, 'ai', 'mark_maybe_done', ['m5']);
+    ev(t.id, 1, 'ai', 'close_task', ['m6']);
+    ev(t.id, 1, 'human', 'reopen_task', []);
+    ev(null, 1, 'ai', 'add_decision', ['d1']); // not task evidence
+    ev(null, 1, 'ai', 'set_status', ['s1']);
+    ev(other.id, 2, 'ai', 'log_reminder', ['z2']); // another client
+    expect([...taskSourceIds(db, 1)].sort()).toEqual(['m1', 'm2', 'm3', 'm4', 'm5', 'm6']);
   });
 
   it('records batches and reports the latest per client', () => {

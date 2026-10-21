@@ -238,10 +238,18 @@ function eventSourceIds(db: Db, clientId: number, op: string): string[] {
   return rows.flatMap((r) => JSON.parse(r.ids) as string[]);
 }
 
-/** Every message that created a task of this client (any status): each task's source plus every message its add_task cited. */
+/**
+ * Every message already used as evidence for a task of this client (any status): each task's source, every message its
+ * add_task cited, and every message cited by any other event on a task (reminder, update, status change; AI or human).
+ */
 export function taskSourceIds(db: Db, clientId: number): Set<string> {
   const rows = db.prepare('SELECT source_wa_id AS id FROM tasks WHERE client_id = ? AND source_wa_id IS NOT NULL').all(clientId) as { id: string }[];
-  return new Set([...rows.map((r) => r.id), ...eventSourceIds(db, clientId, 'add_task')]);
+  const onTasks = db.prepare('SELECT source_ids AS ids FROM task_events WHERE client_id = ? AND task_id IS NOT NULL').all(clientId) as { ids: string }[];
+  return new Set([
+    ...rows.map((r) => r.id),
+    ...eventSourceIds(db, clientId, 'add_task'),
+    ...onTasks.flatMap((r) => JSON.parse(r.ids) as string[]),
+  ]);
 }
 
 /** Task code to the message ids already cited by an applied log_reminder event. */

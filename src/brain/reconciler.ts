@@ -5,7 +5,7 @@ import { finishBatch, startBatch } from '../store/batches.ts';
 import { getClient, setPhase, setStatus, type ClientRow } from '../store/clients.ts';
 import { tx, type Db } from '../store/db.ts';
 import {
-  flagRevokedSources, listRecentProcessed, listUnprocessed, markProcessedIfUnchanged, reactionsFor, type MessageRow,
+  flagRevokedSources, listRecentProcessed, listUnprocessed, markProcessedIfUnchanged, reactionsFor, type MessageRow, type StoredReactionRow,
 } from '../store/messages.ts';
 import { listPeople, setRole } from '../store/people.ts';
 import {
@@ -57,6 +57,19 @@ function neverSent(e: Error): boolean {
   return false;
 }
 
+/**
+ * When a message became evidence, for the human status-lock check: a reaction re-check counts from its latest reaction,
+ * an edit re-check from its edit, anything else from when it was sent.
+ */
+function evidenceTs(m: MessageRow, reactions: StoredReactionRow[]): string {
+  if (m.requeueReason === 'edit') return m.editedAt ?? m.ts;
+  if (m.requeueReason === 'reaction') {
+    const latest = reactions.filter((r) => r.targetWaId === m.waId).reduce<string | null>((max, r) => (max === null || r.ts > max ? r.ts : max), null);
+    return latest ?? m.ts;
+  }
+  return m.ts;
+}
+
 function errorCodeOf(e: unknown): string {
   if (e instanceof SpendCapReachedError) return 'spend_cap';
   if (e instanceof AiRefusalError) return 'refusal';
@@ -81,7 +94,10 @@ export class Reconciler {
     const batch = listUnprocessed(db, clientId);
     if (batch.length === 0) return { status: 'noop' };
 
-    const recent = listRecentProcessed(db, clientId);
+    // Context comes from before the first new or reprocessed message, so a reprocess window does not see later chat.
+    // Re-checks (edits, reactions) of old messages are skipped here: they must not pull the context back in time.
+    const firstNew = batch.find((m) => m.requeueReason === null);
+    const recent = listRecentProcessed(db, clientId, 30, firstNew?.ts);
     const people = listPeople(db, clientId);
     const openTasks = listTasks(db, clientId, ['open', 'maybe_done']);
     const decisions = listDecisions(db, clientId, 20);
@@ -119,7 +135,7 @@ export class Reconciler {
     const byWaId = new Map([...recent, ...batch].map((m) => [m.waId, m]));
     const batchIds = new Set(batch.map((m) => m.waId));
     const contextIds = new Set(recent.map((m) => m.waId));
-    const messageTs = new Map([...byWaId].map(([id, m]) => [id, m.ts]));
+    const messageTs = new Map([...byWaId].map(([id, m]) => [id, evidenceTs(m, reactions)]));
 
     const appliedAt = clock.now();
     let applied: { accepted: AiOp[]; rejected: Rejection[]; requeued: number };
@@ -140,7 +156,7 @@ export class Reconciler {
           taskSourceIds: taskSourceIds(db, clientId),
           reminderSourceIds: reminderSourceIds(db, clientId),
           decisionSourceIds: decisionSourceIds(db, clientId),
-          requeuedIds: new Set(batch.filter((m) => m.requeueReason !== null).map((m) => m.waId)),
+          editedIds: new Set(batch.filter((m) => m.requeueReason === 'edit').map((m) => m.waId)),
         };
         const { accepted, rejected } = validateOps(result.output.ops, state);
         for (const op of accepted) this.#apply(fresh, op, byWaId, appliedAt);

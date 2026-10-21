@@ -21,7 +21,7 @@ function state(o: Partial<ValidationState> = {}): ValidationState {
     batchIds: new Set(['n1', 'n2']), contextIds: new Set(['c1']),
     messageTs: new Map([['n1', '2026-10-19T08:00:00.000Z'], ['n2', '2026-10-19T10:00:00.000Z'], ['c1', '2026-10-18T08:00:00.000Z']]),
     peopleByJid: new Map([[SHARMA_PN, person(SHARMA_PN, 'ai')], ['self@founder', person('self@founder', 'system')]]),
-    taskSourceIds: new Set(['old1']), reminderSourceIds: new Map([['SHA-012', new Set(['old2'])]]), decisionSourceIds: new Set(['old3']), requeuedIds: new Set(),
+    taskSourceIds: new Set(['old1']), reminderSourceIds: new Map([['SHA-012', new Set(['old2'])]]), decisionSourceIds: new Set(['old3']), editedIds: new Set(),
     ...o,
   };
 }
@@ -192,11 +192,24 @@ describe('validateOps', () => {
       expect(validateOps([op({ op: 'log_reminder', taskCode: 'SHA-012', sourceMessageIds: ['n1'] })], replay()).accepted).toHaveLength(1);
       expect(validateOps([op({ op: 'add_decision', text: 'Blue', sourceMessageIds: ['n1'] })], replay()).accepted).toHaveLength(1);
     });
-    it('lets re-checked (edit or reaction) messages through', () => {
-      const s = replay({ requeuedIds: new Set(['old1', 'old2', 'old3']) });
+    it('lets edit re-checks through', () => {
+      const s = replay({ editedIds: new Set(['old1', 'old2', 'old3']) });
       expect(validateOps([addTask({ sourceMessageIds: ['old1'] })], s).accepted).toHaveLength(1);
       expect(validateOps([op({ op: 'log_reminder', taskCode: 'SHA-012', sourceMessageIds: ['old2'] })], s).accepted).toHaveLength(1);
       expect(validateOps([op({ op: 'add_decision', text: 'Blue', sourceMessageIds: ['old3'] })], s).accepted).toHaveLength(1);
+    });
+    it('judges a reminder only by its guarded (not edited) batch ids', () => {
+      const r = (ids: string[]) => op({ op: 'log_reminder', taskCode: 'SHA-012', sourceMessageIds: ids });
+      const s = replay({ editedIds: new Set(['n1']) });
+      // The edited id is skipped; the only guarded id was already counted.
+      expect(reasons([r(['n1', 'old2'])], s)).toEqual(['reminder already counted for this message']);
+      // No guarded id at all: an edit re-check alone may count.
+      expect(validateOps([r(['n1'])], s).accepted).toHaveLength(1);
+      // A context id is not a batch id, so it never makes a reminder look already counted.
+      expect(validateOps([r(['n1', 'c1'])], s).accepted).toHaveLength(1);
+      // Counted for another task does not count for this one.
+      const other = replay({ reminderSourceIds: new Map([['SHA-999', new Set(['old2'])]]) });
+      expect(validateOps([r(['old2'])], other).accepted).toHaveLength(1);
     });
   });
 });

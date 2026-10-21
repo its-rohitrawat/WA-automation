@@ -49,11 +49,22 @@ describe('messages repository', () => {
     expect(lastActivity(db, 1)).toBe('2026-10-10T10:00:00.000Z');
   });
 
+  it('lists only processed messages sent before a given time, when one is given', () => {
+    const db = seededDb();
+    insertMessage(db, msg({ waId: 'a', ts: '2026-10-10T08:00:00.000Z' }));
+    insertMessage(db, msg({ waId: 'b', ts: '2026-10-10T09:00:00.000Z' }));
+    insertMessage(db, msg({ waId: 'c', ts: '2026-10-10T10:00:00.000Z' }));
+    markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), NOW);
+    expect(listRecentProcessed(db, 1, 30, '2026-10-10T10:00:00.000Z').map((m) => m.waId)).toEqual(['a', 'b']);
+    expect(listRecentProcessed(db, 1, 1, '2026-10-10T10:00:00.000Z').map((m) => m.waId)).toEqual(['b']);
+    expect(listRecentProcessed(db, 1, 30).map((m) => m.waId)).toEqual(['a', 'b', 'c']);
+  });
+
   it('upserts reactions and hides removed ones', () => {
     const db = seededDb();
     upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: 'r1', emoji: '✅', ts: NOW });
     upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: 'r1', emoji: '👍', ts: NOW });
-    expect(reactionsFor(db, 1, ['m1'])).toEqual([{ targetWaId: 'm1', reactorJid: 'r1', emoji: '👍' }]);
+    expect(reactionsFor(db, 1, ['m1'])).toEqual([{ targetWaId: 'm1', reactorJid: 'r1', emoji: '👍', ts: NOW }]);
     upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: 'r1', emoji: '', ts: NOW });
     expect(reactionsFor(db, 1, ['m1'])).toEqual([]);
     expect(reactionsFor(db, 1, [])).toEqual([]);

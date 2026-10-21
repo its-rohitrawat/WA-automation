@@ -29,6 +29,11 @@ export interface ReactionRow {
   emoji: string;
 }
 
+/** A stored reaction with the time it was last set. */
+export interface StoredReactionRow extends ReactionRow {
+  ts: string;
+}
+
 interface RawMessage {
   id: number;
   wa_id: string;
@@ -123,11 +128,12 @@ export function listUnprocessed(db: Db, clientId: number, limit = 200): MessageR
   ).map(toRow);
 }
 
-export function listRecentProcessed(db: Db, clientId: number, limit = 30): MessageRow[] {
+/** The latest processed messages, oldest first. With beforeTs, only those sent before it (ts < beforeTs). */
+export function listRecentProcessed(db: Db, clientId: number, limit = 30, beforeTs?: string): MessageRow[] {
   return (
     db
-      .prepare('SELECT * FROM messages WHERE client_id = ? AND processed_at IS NOT NULL AND revoked = 0 ORDER BY ts DESC, id DESC LIMIT ?')
-      .all(clientId, limit) as RawMessage[]
+      .prepare('SELECT * FROM messages WHERE client_id = ? AND processed_at IS NOT NULL AND revoked = 0 AND ts < ? ORDER BY ts DESC, id DESC LIMIT ?')
+      .all(clientId, beforeTs ?? '9999-12-31T00:00:00.000Z', limit) as RawMessage[]
   )
     .map(toRow)
     .reverse();
@@ -166,12 +172,12 @@ export function flagRevokedSources(db: Db, clientId: number): number {
     .run(clientId, clientId).changes;
 }
 
-export function reactionsFor(db: Db, clientId: number, waIds: string[]): ReactionRow[] {
+export function reactionsFor(db: Db, clientId: number, waIds: string[]): StoredReactionRow[] {
   if (waIds.length === 0) return [];
   return db
-    .prepare(`SELECT target_wa_id AS targetWaId, reactor_jid AS reactorJid, emoji FROM reactions
+    .prepare(`SELECT target_wa_id AS targetWaId, reactor_jid AS reactorJid, emoji, ts FROM reactions
       WHERE client_id = ? AND emoji <> '' AND target_wa_id IN (SELECT value FROM json_each(?)) ORDER BY ts`)
-    .all(clientId, JSON.stringify(waIds)) as ReactionRow[];
+    .all(clientId, JSON.stringify(waIds)) as StoredReactionRow[];
 }
 
 export function lastActivity(db: Db, clientId: number): string | null {

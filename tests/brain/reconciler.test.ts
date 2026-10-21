@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { describe, expect, it, vi } from 'vitest';
 import { AiInvalidOutputError, AiRefusalError, MAX_OUTPUT_TOKENS, SDK_MAX_RETRIES } from '../../src/brain/claudeClient.ts';
 import { Reconciler } from '../../src/brain/reconciler.ts';
-import { closeTask, requestReprocess } from '../../src/cli/corrections.ts';
+import { closeTask, reopenTask, requestReprocess } from '../../src/cli/corrections.ts';
 import { estimateCostUsd, type Prices } from '../../src/spend/pricing.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { latestBatches } from '../../src/store/batches.ts';
@@ -313,6 +313,82 @@ describe('Reconciler', () => {
     expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-19' });
   });
 
+  describe('human status lock and re-checked evidence', () => {
+    const close = () => op({ op: 'close_task', taskCode: 'SHA-001', sourceMessageIds: ['m1'] });
+    /** SHA-001 reopened by a human at 06:00Z; m1 is an old delivery message (sent before that) that was already processed. */
+    function reopenedWithOldDelivery(db: Db): void {
+      banner(db);
+      store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
+      markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-12T06:00:00.000Z');
+      closeTask(db, 'SHA-001', new Date('2026-10-19T05:00:00Z'));
+      reopenTask(db, 'SHA-001', new Date('2026-10-19T06:00:00Z'));
+    }
+
+    it('accepts a close backed by a ✅ reaction made after the human reopened the task', async () => {
+      const { db, r } = setup([{ ops: [close()] }]);
+      reopenedWithOldDelivery(db);
+      upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '✅', ts: '2026-10-19T07:00:00.000Z' });
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done' });
+    });
+
+    it('still rejects a close backed by a reaction made before the human reopened the task', async () => {
+      const { db, r } = setup([{ ops: [close()] }]);
+      banner(db);
+      store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
+      markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-12T06:00:00.000Z');
+      upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '✅', ts: '2026-10-19T04:00:00.000Z' });
+      closeTask(db, 'SHA-001', new Date('2026-10-19T05:00:00Z'));
+      reopenTask(db, 'SHA-001', new Date('2026-10-19T06:00:00Z'));
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open' });
+    });
+
+    it('accepts a close backed by an edit made after the human reopened the task', async () => {
+      const { db, r } = setup([{ ops: [close()] }]);
+      reopenedWithOldDelivery(db);
+      applyEdit(db, 1, 'm1', 'Banner v4 attached, final', '2026-10-19T07:00:00.000Z');
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done' });
+    });
+  });
+
+  describe('context for the AI', () => {
+    /** The <recent_context> section of the prompt the fake AI saw. */
+    const contextOf = (ai: FakeAi): string => ai.calls[0]!.user.split('<recent_context>')[1]!.split('</recent_context>')[0]!;
+
+    it('takes the context of a reprocess window from before the window', async () => {
+      const { db, ai, r } = setup([]);
+      store(db, 'p1', 'before one', '2026-10-14T05:00:00.000Z');
+      store(db, 'p2', 'before two', '2026-10-15T05:00:00.000Z');
+      store(db, 'w1', 'inside the window', '2026-10-16T05:00:00.000Z');
+      store(db, 'p3', 'after the window', '2026-10-17T05:00:00.000Z');
+      markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-17T06:00:00.000Z');
+      expect(requestReprocess(db, 'SHA', '2026-10-16', new Date('2026-10-19T07:00:00Z'), '2026-10-16')).toBe(1);
+
+      expect(await r.run(1)).toMatchObject({ status: 'ok' });
+      const context = contextOf(ai);
+      expect(context).toContain('before one');
+      expect(context).toContain('before two');
+      expect(context).not.toContain('after the window');
+      expect(context).not.toContain('inside the window');
+      expect(ai.calls[0]!.user).toContain('inside the window');
+    });
+
+    it('keeps the latest context when the batch also holds a reaction re-check of an old message', async () => {
+      const { db, ai, r } = setup([]);
+      store(db, 'o1', 'old delivery', '2026-10-12T05:00:00.000Z');
+      store(db, 'p1', 'recent chat', '2026-10-18T05:00:00.000Z');
+      markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-18T06:00:00.000Z');
+      upsertReaction(db, { clientId: 1, targetWaId: 'o1', reactorJid: SHARMA_PN, emoji: '✅', ts: '2026-10-19T06:00:00.000Z' });
+      store(db, 'n1', 'new message', '2026-10-19T07:00:00.000Z');
+      expect(listUnprocessed(db, 1).map((m) => m.waId)).toEqual(['o1', 'n1']);
+
+      expect(await r.run(1)).toMatchObject({ status: 'ok' });
+      expect(contextOf(ai)).toContain('recent chat');
+    });
+  });
+
   it('cuts the source quote by characters, never inside an emoji', async () => {
     const { db, r } = setup([{ ops: [op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'low', sourceMessageIds: ['m1'] })] }]);
     store(db, 'm1', '👍'.repeat(130));
@@ -404,6 +480,52 @@ describe('Reconciler', () => {
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 0, rejected: 1 });
     expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
     expect(getTaskByCode(db, 'SHA-001')?.status).toBe('done');
+  });
+
+  it('does not turn a follow-up that logged a reminder into a new task after the task was closed', async () => {
+    const add = op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'high', sourceMessageIds: ['m1'] });
+    const remind = op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['m2'] });
+    const replay = op({ op: 'add_task', side: 'us', title: 'Banner update', category: 'design', priority: 'high', sourceMessageIds: ['m2'] });
+    const log = silentLogger();
+    const info = vi.spyOn(log, 'info');
+    const { db, r } = setup([{ ops: [add] }, { ops: [remind] }, { ops: [replay] }], 15, log);
+    store(db, 'm1', 'banner chahiye', '2026-10-18T05:00:00.000Z');
+    expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
+    store(db, 'm2', 'banner ka update?', '2026-10-19T05:00:00.000Z');
+    expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
+    expect(getTaskByCode(db, 'SHA-001')?.reminderCount).toBe(1);
+    closeTask(db, 'SHA-001', new Date('2026-10-19T08:30:00Z'));
+    expect(requestReprocess(db, 'SHA', '2026-10-19', new Date('2026-10-19T08:31:00Z'))).toBe(1); // m2 only
+
+    expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 0, rejected: 1 });
+    expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({ op: 'add_task', why: 'task already exists for this message' }), 'operation rejected');
+  });
+
+  it('does not count a chaser again when it later gets a 👍 reaction', async () => {
+    const remind = op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['m1'] });
+    const { db, r } = setup([{ ops: [remind] }, { ops: [remind] }]);
+    banner(db);
+    store(db, 'm1', 'Banner ka update?', '2026-10-19T05:00:00.000Z');
+    expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
+    upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '👍', ts: '2026-10-19T07:30:00.000Z' });
+    expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: 'reaction' })]);
+
+    expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 0, rejected: 1 });
+    expect(getTaskByCode(db, 'SHA-001')!.reminderCount).toBe(1);
+  });
+
+  it('still creates a task from an edit re-check that adds new work', async () => {
+    const banner1 = op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'high', sourceMessageIds: ['m1'] });
+    const logo = op({ op: 'add_task', side: 'us', title: 'Logo', category: 'design', priority: 'medium', sourceMessageIds: ['m1'] });
+    const { db, r } = setup([{ ops: [banner1] }, { ops: [logo] }]);
+    store(db, 'm1', 'Banner bright karo', '2026-10-19T05:00:00.000Z');
+    expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
+    applyEdit(db, 1, 'm1', 'Banner bright karo, aur logo bhi', '2026-10-19T07:30:00.000Z');
+    expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: 'edit' })]);
+
+    expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1, rejected: 0 });
+    expect(getTaskByCode(db, 'SHA-002')).toMatchObject({ title: 'Logo' });
   });
 
   it('blocks a replay that cites only a later message of the original task (GapB)', async () => {

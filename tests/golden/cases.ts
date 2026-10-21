@@ -125,7 +125,7 @@ export function validationStateFor(input: PromptInput): ValidationState {
     taskSourceIds: sourceIds,
     reminderSourceIds: new Map(),
     decisionSourceIds: new Set(),
-    requeuedIds: new Set(input.batch.filter((m) => m.requeueReason !== null).map((m) => m.waId)),
+    editedIds: new Set(input.batch.filter((m) => m.requeueReason === 'edit').map((m) => m.waId)),
   };
 }
 
