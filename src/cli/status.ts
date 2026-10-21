@@ -5,6 +5,13 @@ import { istShortDate, istTime } from '../util/time.ts';
 
 const STALE_MS = 2 * 60_000;
 
+function ageText(ms: number): string {
+  const min = Math.round(ms / 60_000);
+  if (min <= 120) return `${min} min ago`;
+  if (ms <= 48 * 3_600_000) return `${Math.round(ms / 3_600_000)} hours ago`;
+  return `${Math.round(ms / 86_400_000)} days ago`;
+}
+
 const stamp = (iso: string) => `${istShortDate(new Date(iso))} ${istTime(new Date(iso))}`;
 
 export function formatStatus(i: {
@@ -17,18 +24,20 @@ export function formatStatus(i: {
   const lines: string[] = [];
   const s = i.snapshot;
   // The last snapshot can still say "Connected" after the service has stopped.
-  if (s && i.now.getTime() - new Date(s.at).getTime() > STALE_MS) {
+  const ageMs = s ? i.now.getTime() - new Date(s.at).getTime() : 0;
+  const stale = s !== undefined && ageMs > STALE_MS;
+  const lk = stale ? 'last known: ' : '';
+  if (s && stale) {
     lines.push(`⚠️ The service has not reported since ${stamp(s.at)}. Is it running?`);
   }
   lines.push(`WA Agent status (${stamp(i.now.toISOString())} IST)`);
   if (!s) {
     lines.push('Health:      no report yet (is the service running?)');
   } else {
-    const ageMin = Math.round((i.now.getTime() - new Date(s.at).getTime()) / 60_000);
-    lines.push(`Health:      ${s.line.text} (reported ${ageMin} min ago)`);
-    lines.push(`WhatsApp:    ${s.whatsapp.state} since ${stamp(s.whatsapp.since)}`);
+    lines.push(`Health:      ${s.line.text} (reported ${ageText(ageMs)})`);
+    lines.push(`WhatsApp:    ${lk}${s.whatsapp.state} since ${stamp(s.whatsapp.since)}`);
     if (s.publishFailingSince) lines.push(`Drive:       failing since ${stamp(s.publishFailingSince)}`);
-    lines.push(`Spend today: $${s.spentToday.toFixed(2)} of $${s.capUsd.toFixed(2)}`);
+    lines.push(`Spend today: ${lk}$${s.spentToday.toFixed(2)} of $${s.capUsd.toFixed(2)}`);
     lines.push(`Disk free:   ${s.freeGb === null ? 'unknown' : `${s.freeGb.toFixed(1)} GB`}`);
   }
   lines.push('Clients:');

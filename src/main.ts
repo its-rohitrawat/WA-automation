@@ -1,9 +1,9 @@
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
 import { createApp } from './app.ts';
 import { ClaudeClient } from './brain/claudeClient.ts';
 import { loadEnv, requireKey } from './config/env.ts';
-import { loadGroupsFile, watchGroupsFile } from './config/groups.ts';
+import { GROUPS_FILE_MISSING_MESSAGE, loadGroupsFile, watchGroupsFile } from './config/groups.ts';
+import { masterKeyPath, sessionDbPath, trackerDbPath } from './config/paths.ts';
 import { DpapiKeyProvider, MasterKeyError } from './crypto/keyProvider.ts';
 import { googleDriveApi } from './output/drive.ts';
 import { createOAuthClient, TokenDecryptError, TokenStore } from './output/googleAuth.ts';
@@ -40,7 +40,7 @@ async function main(): Promise<void> {
   });
 
   if (!existsSync(env.GROUPS_FILE)) {
-    const message = 'Allow-list file missing. Copy config/allowed-groups.example.json and fill it in.';
+    const message = GROUPS_FILE_MISSING_MESSAGE;
     log.error({ file: env.GROUPS_FILE }, message);
     process.stderr.write(`${message}\n`);
     process.exit(2);
@@ -58,9 +58,9 @@ async function main(): Promise<void> {
   try {
     // The lock comes first: nothing opens a database while another instance may be running.
     lock = await acquireLock(env.DATA_DIR);
-    const key = new DpapiKeyProvider(join(env.DATA_DIR, 'keys', 'master.key.dpapi')).getKey();
-    db = openDb(join(env.DATA_DIR, 'tracker.db'));
-    sessionDb = openSessionDb(join(env.DATA_DIR, 'session.db'));
+    const key = new DpapiKeyProvider(masterKeyPath(env.DATA_DIR)).getKey();
+    db = openDb(trackerDbPath(env.DATA_DIR));
+    sessionDb = openSessionDb(sessionDbPath(env.DATA_DIR));
 
     const configs = loadGroupsFile(env.GROUPS_FILE);
     syncClients(db, configs);

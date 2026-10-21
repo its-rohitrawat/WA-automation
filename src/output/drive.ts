@@ -15,7 +15,7 @@ export class DriveNotFoundError extends Error {
 
 export class DriveAuthError extends Error {
   constructor(cause?: unknown) {
-    super('Google sign-in has expired or was revoked. Run: npm run cli -- google-auth', { cause });
+    super('Google sign-in has expired or was revoked. Run: npm run cli -- google-auth, then restart the service', { cause });
     this.name = 'DriveAuthError';
   }
 }

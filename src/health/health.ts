@@ -129,7 +129,7 @@ export class Health {
       return { ok: false, text: `❌ Disconnected since ${stamp(this.#downSince)}` };
     }
     const pubFail = withPublish ? this.#publishFailedSince : null;
-    if (pubFail && this.#publishAuthFailed) return { ok: false, text: '❌ Google sign-in expired. Run: npm run cli -- google-auth' };
+    if (pubFail && this.#publishAuthFailed) return { ok: false, text: '❌ Google sign-in expired. Run: npm run cli -- google-auth, then restart the service' };
     if (this.#wa.credsSaveFailures > 0) return { ok: false, text: '⚠️ The WhatsApp session could not be saved. Check disk space and the data folder permissions.' };
     if (pubFail && now.getTime() - pubFail.getTime() > PUBLISH_FAIL_MS) {
       return { ok: false, text: `⚠️ Tracker update failing since ${stamp(pubFail)}` };
@@ -172,6 +172,8 @@ export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
     const o = JSON.parse(v) as Partial<HealthSnapshot> | null;
     if (!o || typeof o !== 'object' || typeof o.at !== 'string') return undefined;
     if (!o.line || typeof o.line.text !== 'string' || typeof o.line.ok !== 'boolean') return undefined;
+    if (!o.whatsapp || typeof o.whatsapp.state !== 'string') return undefined;
+    if (typeof o.spentToday !== 'number' || typeof o.capUsd !== 'number' || !Array.isArray(o.failed)) return undefined;
     return o as HealthSnapshot;
   } catch {
     return undefined;

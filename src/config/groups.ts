@@ -1,6 +1,12 @@
 import { readFileSync, unwatchFile, watchFile, type Stats } from 'node:fs';
 import { z } from 'zod';
 
+export const GROUPS_FILE_MISSING_MESSAGE = 'Allow-list file missing. Copy config/allowed-groups.example.json and fill it in.';
+
+const EXAMPLE_GROUP_ID = '120363000000000001@g.us';
+const EXAMPLE_GROUP_MESSAGE =
+  'allowed-groups.json still contains the example group. Replace it with real group ids (run list-groups with an empty list first).';
+
 export const DEFAULT_PHASES = ['Discovery', 'Design', 'Development', 'Review', 'Launch'];
 
 const ClientSchema = z.object({
@@ -38,6 +44,7 @@ export function parseGroupsFile(json: string): ClientConfig[] {
   const groups = new Set<string>();
   const codes = new Set<string>();
   for (const c of parsed.data.clients) {
+    if (c.groupId === EXAMPLE_GROUP_ID) throw new Error(EXAMPLE_GROUP_MESSAGE);
     if (groups.has(c.groupId)) throw new Error(`allowed-groups.json lists group ${c.groupId} twice`);
     if (codes.has(c.code)) throw new Error(`allowed-groups.json uses code ${c.code} twice`);
     groups.add(c.groupId);
@@ -54,7 +61,14 @@ export function parseGroupsFile(json: string): ClientConfig[] {
 }
 
 export function loadGroupsFile(path: string): ClientConfig[] {
-  return parseGroupsFile(readFileSync(path, 'utf8'));
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(GROUPS_FILE_MISSING_MESSAGE);
+    throw e;
+  }
+  return parseGroupsFile(text);
 }
 
 /** Polls the file (reliable on Windows). Returns a function that stops watching. */

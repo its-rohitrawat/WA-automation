@@ -1,15 +1,15 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { DEFAULT_PHASES, parseGroupsFile, watchGroupsFile } from '../../src/config/groups.ts';
+import { DEFAULT_PHASES, GROUPS_FILE_MISSING_MESSAGE, loadGroupsFile, parseGroupsFile, watchGroupsFile } from '../../src/config/groups.ts';
 
-const valid = (extra: object = {}) => JSON.stringify({ clients: [{ groupId: '120363000000000001@g.us', name: 'Sharma Interiors', code: 'SHA', ...extra }] });
+const valid = (extra: object = {}) => JSON.stringify({ clients: [{ groupId: '120363000000000011@g.us', name: 'Sharma Interiors', code: 'SHA', ...extra }] });
 
 describe('parseGroupsFile', () => {
   it('parses a client and fills defaults', () => {
     const [c] = parseGroupsFile(valid());
-    expect(c).toEqual({ groupId: '120363000000000001@g.us', name: 'Sharma Interiors', code: 'SHA', phases: DEFAULT_PHASES, emailDomains: [], meetingKeywords: [] });
+    expect(c).toEqual({ groupId: '120363000000000011@g.us', name: 'Sharma Interiors', code: 'SHA', phases: DEFAULT_PHASES, emailDomains: [], meetingKeywords: [] });
   });
 
   it('rejects a group id that is not a group', () => {
@@ -22,11 +22,11 @@ describe('parseGroupsFile', () => {
 
   it('rejects duplicate groups and codes', () => {
     const dupGroup = JSON.stringify({ clients: [
-      { groupId: '120363000000000001@g.us', name: 'A', code: 'AAA' },
-      { groupId: '120363000000000001@g.us', name: 'B', code: 'BBB' },
+      { groupId: '120363000000000011@g.us', name: 'A', code: 'AAA' },
+      { groupId: '120363000000000011@g.us', name: 'B', code: 'BBB' },
     ] });
     const dupCode = JSON.stringify({ clients: [
-      { groupId: '120363000000000001@g.us', name: 'A', code: 'AAA' },
+      { groupId: '120363000000000011@g.us', name: 'A', code: 'AAA' },
       { groupId: '120363000000000002@g.us', name: 'B', code: 'AAA' },
     ] });
     expect(() => parseGroupsFile(dupGroup)).toThrowError(/twice/);
@@ -50,5 +50,20 @@ describe('watchGroupsFile', () => {
     await vi.waitFor(() => expect(onChange).toHaveBeenCalled(), { timeout: 2000 });
     expect(onChange.mock.calls.at(-1)?.[0][0].name).toBe('Sharma Interiors Pvt Ltd');
     stop();
+  });
+});
+
+describe('example allow-list', () => {
+  it('rejects the example group so it cannot become a real client', () => {
+    const example = readFileSync('config/allowed-groups.example.json', 'utf8');
+    expect(() => parseGroupsFile(example)).toThrowError(/still contains the example group/);
+  });
+
+  it('accepts an empty list so list-groups can run first', () => {
+    expect(parseGroupsFile('{ "clients": [] }')).toEqual([]);
+  });
+
+  it('gives a friendly message when the file is missing', () => {
+    expect(() => loadGroupsFile(join(tmpdir(), 'no-such-dir-xyz', 'groups.json'))).toThrowError(GROUPS_FILE_MISSING_MESSAGE);
   });
 });

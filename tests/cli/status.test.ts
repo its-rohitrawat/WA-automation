@@ -60,4 +60,20 @@ describe('formatStatus', () => {
     const out = formatStatus({ ...base, snapshot: { ...snapshot, at: '2026-10-19T07:59:00.000Z' } });
     expect(out).not.toContain('has not reported');
   });
+
+  it('labels stale data as last known and shows the age in minutes, hours, days', () => {
+    const at = (ms: number) => new Date(now.getTime() - ms).toISOString();
+    const out10 = formatStatus({ ...base, snapshot: { ...snapshot, at: at(10 * 60_000) } });
+    expect(out10).toContain('last known: open since');
+    expect(out10).toContain('last known: $1.23 of $15.00');
+    expect(out10).toContain('reported 10 min ago');
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, at: at(120 * 60_000) } })).toContain('reported 120 min ago');
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, at: at(121 * 60_000) } })).toContain('reported 2 hours ago');
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, at: at(48 * 3_600_000) } })).toContain('reported 48 hours ago');
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, at: at(73 * 3_600_000) } })).toContain('reported 3 days ago');
+  });
+
+  it('does not say last known for fresh data', () => {
+    expect(formatStatus({ ...base, snapshot })).not.toContain('last known');
+  });
 });

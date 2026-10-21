@@ -79,7 +79,7 @@ describe('Health', () => {
     const { h } = setup();
     h.setWhatsApp(status('open'));
     h.markPublishFailed({ step: 'drive', auth: true });
-    expect(h.line()).toEqual({ ok: false, text: '❌ Google sign-in expired. Run: npm run cli -- google-auth' });
+    expect(h.line()).toEqual({ ok: false, text: '❌ Google sign-in expired. Run: npm run cli -- google-auth, then restart the service' });
     h.markPublished();
     expect(h.line().ok).toBe(true);
   });
@@ -126,7 +126,7 @@ describe('Health', () => {
     h.setWhatsApp({ ...status('open'), credsSaveFailures: 2 });
     expect(h.line().text).toContain('could not be saved');
     h.markPublishFailed({ step: 'drive', auth: true });
-    expect(h.line().text).toBe('❌ Google sign-in expired. Run: npm run cli -- google-auth');
+    expect(h.line().text).toBe('❌ Google sign-in expired. Run: npm run cli -- google-auth, then restart the service');
   });
 
   it('the latest publish failure decides whether it is an auth problem', () => {
@@ -173,5 +173,30 @@ describe('Health', () => {
     const snap = readHealthSnapshot(db);
     expect(snap?.publishFailingSince).toBe('2026-10-19T08:00:00.000Z');
     expect(snap).toEqual(JSON.parse(JSON.stringify(h.snapshot())));
+  });
+});
+
+describe('readHealthSnapshot shape checks', () => {
+  const full = {
+    at: '2026-10-19T07:58:00.000Z', line: { ok: true, text: 'x' }, whatsapp: { state: 'open', since: '2026-10-19T03:30:00.000Z', lastErrorCode: null, credsSaveFailures: 0 },
+    downSince: null, failed: [], lastSuccessAt: null, lastPublishedAt: null, spentToday: 1, capUsd: 15, freeGb: 1, publishFailingSince: null,
+  };
+  const read = (v: unknown) => {
+    const db = seededDb();
+    setKv(db, 'health', JSON.stringify(v));
+    return readHealthSnapshot(db);
+  };
+
+  it('accepts a full snapshot', () => {
+    expect(read(full)).toBeDefined();
+  });
+
+  it.each([
+    ['whatsapp.state', { ...full, whatsapp: {} }],
+    ['spentToday', { ...full, spentToday: 'a' }],
+    ['capUsd', { ...full, capUsd: undefined }],
+    ['failed', { ...full, failed: null }],
+  ])('returns undefined when %s is missing or wrong', (_n, v) => {
+    expect(read(v)).toBeUndefined();
   });
 });

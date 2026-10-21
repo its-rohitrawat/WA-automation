@@ -493,7 +493,7 @@ describe('app health and publishing', () => {
     const failed = app.publisher.publishNow();
     await vi.advanceTimersByTimeAsync(1_000);
     await failed;
-    expect(app.health.line()).toEqual({ ok: false, text: '❌ Google sign-in expired. Run: npm run cli -- google-auth' });
+    expect(app.health.line()).toEqual({ ok: false, text: '❌ Google sign-in expired. Run: npm run cli -- google-auth, then restart the service' });
     expect(readHealthSnapshot(db)!.publishFailingSince).not.toBeNull();
 
     drive.failUpdateWith = undefined;
