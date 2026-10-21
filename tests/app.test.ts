@@ -85,7 +85,18 @@ function setup(o: { ai?: FakeAi; drive?: FakeDrive; log?: Logger; drainMs?: numb
   app.start();
   const sock = sockets[0]!;
   sock.emit('connection.update', { connection: 'open' });
-  return { db, ai, drive, app, sock };
+  return { db, ai, drive, app, sock, gateway };
+}
+
+/** A promise the test settles by hand. */
+function gate<T = void>() {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 /** Starts app.stop() and reports whether it has resolved yet. */
@@ -96,6 +107,15 @@ function stopping(app: { stop(): Promise<void> }) {
   });
   return { state, promise };
 }
+
+/** stop() ends with a final upload, and building the workbook runs on (fake) timers: advance until it resolves. */
+async function finish(stop: ReturnType<typeof stopping>): Promise<void> {
+  for (let i = 0; i < 30 && !stop.state.done; i++) await vi.advanceTimersByTimeAsync(1_000);
+  expect(stop.state.done).toBe(true);
+  await stop.promise;
+}
+
+const stopApp = (app: { stop(): Promise<void> }) => finish(stopping(app));
 
 const bannerTask = () =>
   op({ op: 'add_task', side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'high', deadline: '2026-10-18', sourceMessageIds: ['m1'] });
@@ -129,7 +149,7 @@ describe('app end to end', () => {
     expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']);
     expect(drive.updated.length).toBeGreaterThanOrEqual(1);
     for (const name of SEND_METHODS) expect(sock[name]).not.toHaveBeenCalled();
-    await app.stop();
+    await stopApp(app);
     expect(vi.getTimerCount()).toBe(0);
     const logged = JSON.stringify(lines);
     expect(logged).not.toContain('thoda bright');
@@ -142,7 +162,7 @@ describe('app end to end', () => {
     app.reloadClients([SHARMA]);
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
     expect(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 0 });
-    await app.stop();
+    await stopApp(app);
   });
 
   it('republishes when the CLI requests a rebuild', async () => {
@@ -153,7 +173,7 @@ describe('app end to end', () => {
     await vi.advanceTimersByTimeAsync(90_000);
     expect(drive.uploads).toBeGreaterThan(before);
     expect(getKv(db, 'rebuild_requested')).toBe('');
-    await app.stop();
+    await stopApp(app);
   });
 });
 
@@ -179,11 +199,46 @@ describe('app shutdown', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(stop.state.done).toBe(false);
     expect(listTasks(db, 1)).toEqual([]);
+    expect(sock.end).not.toHaveBeenCalled(); // WhatsApp stays connected during the drain
 
     release();
-    await stop.promise;
+    await finish(stop);
     expect(listTasks(db, 1).map((t) => t.code)).toEqual(['SHA-001']);
     expect(db.prepare('SELECT COUNT(*) AS n FROM messages WHERE processed_at IS NULL').get()).toEqual({ n: 0 });
+    expect(sock.end).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('uploads a result applied during the drain before stop resolves', async () => {
+    const ai = new FakeAi([{ ops: [bannerTask()] }]);
+    const g = gate();
+    ai.gate = g.promise;
+    const drive = new CapturingDrive();
+    const { app, sock } = setup({ ai, drive });
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
+    await vi.advanceTimersByTimeAsync(239_000);
+    expect(drive.uploads).toBe(1);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(ai.calls).toHaveLength(1);
+
+    const stop = stopping(app);
+    g.resolve();
+    await finish(stop);
+    expect(drive.uploads).toBe(2);
+    expect(vi.getTimerCount()).toBe(0);
+
+    vi.useRealTimers();
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(drive.last! as unknown as ExcelJS.Buffer);
+    const codes: unknown[] = [];
+    wb.getWorksheet('Sharma Interiors')!.eachRow((row) => codes.push(row.getCell(1).value));
+    expect(codes).toContain('SHA-001');
+  });
+
+  it('starting twice leaves no extra timer behind', async () => {
+    const { app } = setup();
+    app.start();
+    await stopApp(app);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -195,11 +250,12 @@ describe('app shutdown', () => {
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls).toHaveLength(1);
 
+    const t0 = Date.now();
     const stop = stopping(app);
     await vi.advanceTimersByTimeAsync(119_000);
     expect(stop.state.done).toBe(false);
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(stop.state.done).toBe(true);
+    await finish(stop); // the drain gives up at 120 s, then the final upload runs
+    expect(Date.now() - t0).toBeLessThan(125_000);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -210,11 +266,12 @@ describe('app shutdown', () => {
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
     await vi.advanceTimersByTimeAsync(240_000);
 
+    const t0 = Date.now();
     const stop = stopping(app);
     await vi.advanceTimersByTimeAsync(4_900);
     expect(stop.state.done).toBe(false);
-    await vi.advanceTimersByTimeAsync(100);
-    expect(stop.state.done).toBe(true);
+    await finish(stop);
+    expect(Date.now() - t0).toBeLessThan(10_000);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -251,7 +308,7 @@ describe('app allow-list changes', () => {
     await vi.advanceTimersByTimeAsync(1_300_000);
     expect(ai.calls).toEqual([]);
     expect(run).not.toHaveBeenCalled();
-    await app.stop();
+    await stopApp(app);
   });
 
   it('clears the health warning of a failed group once it is removed', async () => {
@@ -263,7 +320,84 @@ describe('app allow-list changes', () => {
     app.reloadClients([SHARMA]);
     expect(app.health.line().ok).toBe(true);
     expect(readHealthSnapshot(db)!.failed).toEqual([]);
-    await app.stop();
+    await stopApp(app);
+  });
+
+  it('ignores the failed outcome of a group removed while its call was running', async () => {
+    const ai = new FakeAi([new Error('boom')]);
+    const g = gate();
+    ai.gate = g.promise;
+    const { db, drive, app, sock } = setup({ ai });
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
+    await vi.advanceTimersByTimeAsync(240_000);
+    expect(ai.calls).toHaveLength(1);
+
+    app.reloadClients([SHARMA]);
+    await vi.advanceTimersByTimeAsync(60_000); // the publish that reloadClients scheduled
+    const uploads = drive.uploads;
+    g.resolve();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(app.health.line().ok).toBe(true);
+    expect(readHealthSnapshot(db)!.failed).toEqual([]);
+    expect(drive.uploads).toBe(uploads); // no publish scheduled for the removed group
+    await stopApp(app);
+  });
+
+  it('ignores the crash of a group removed while its run was in flight', async () => {
+    const g = gate<never>();
+    vi.spyOn(Reconciler.prototype, 'run').mockImplementationOnce(() => g.promise);
+    const { db, app, sock } = setup();
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
+    await vi.advanceTimersByTimeAsync(240_000);
+
+    app.reloadClients([SHARMA]);
+    g.reject(new Error('boom'));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(app.health.line().ok).toBe(true);
+    expect(readHealthSnapshot(db)!.failed).toEqual([]);
+    await stopApp(app);
+  });
+
+  it('keeps the old allow-list when the new config conflicts with the database', async () => {
+    const { db, app, sock } = setup();
+    expect(() => app.reloadClients([SHARMA, { ...MEHTA, code: 'MEX' }])).toThrow(/codes are permanent/);
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 1 });
+    await stopApp(app);
+  });
+
+  it('picks up the waiting messages of a group that is added back', async () => {
+    const { ai, app, sock } = setup();
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
+    app.reloadClients([SHARMA]);
+    await vi.advanceTimersByTimeAsync(1_300_000);
+    expect(ai.calls).toEqual([]);
+
+    app.reloadClients([SHARMA, MEHTA]);
+    await vi.advanceTimersByTimeAsync(30_000 + 240_000); // next tick, then the quiet period
+    expect(ai.calls).toHaveLength(1);
+    expect(ai.calls[0]!.user).toContain('Mehta message');
+    await stopApp(app);
+  });
+});
+
+describe('app ingest failures', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-19T07:00:00Z'));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('logs a failed database write without the chat text and still counts it', async () => {
+    const { lines, log } = capturingLogger();
+    const { db, app, sock, gateway } = setup({ log });
+    db.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store: banner thoda bright'); END");
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
+
+    expect(gateway.failedCount()).toBe(1);
+    expect(lines.find((l) => l.msg === 'ingest failed')).toMatchObject({ err: { type: 'SqliteError' } });
+    expect(JSON.stringify(lines)).not.toContain('thoda bright');
+    await stopApp(app);
   });
 });
 
@@ -284,7 +418,7 @@ describe('app health and publishing', () => {
     await vi.advanceTimersByTimeAsync(2_000); // the reconcile fails at 240 s
     await vi.advanceTimersByTimeAsync(30_000);
     expect(drive.uploads).toBe(2);
-    await app.stop();
+    await stopApp(app);
 
     vi.useRealTimers();
     expect(await overviewTexts(drive.last!)).toContain('⚠️ 1 group waiting (AI error)');
@@ -305,7 +439,7 @@ describe('app health and publishing', () => {
     expect(JSON.stringify(lines)).not.toContain('secret banner text');
     expect(readHealthSnapshot(db)!.failed).toEqual([{ clientId: 1, errorCode: 'crash' }]);
     expect(drive.uploads).toBe(2);
-    await app.stop();
+    await stopApp(app);
   });
 
   it('keeps ticking when saving the health snapshot fails', async () => {
@@ -327,7 +461,7 @@ describe('app health and publishing', () => {
     expect(drive.uploads).toBeGreaterThan(before);
 
     persist.mockRestore();
-    await app.stop();
+    await stopApp(app);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -349,7 +483,7 @@ describe('app health and publishing', () => {
     expect(drive.updated).toHaveLength(1);
     expect(app.health.line().ok).toBe(true);
     expect(readHealthSnapshot(db)!.publishFailingSince).toBeNull();
-    await app.stop();
+    await stopApp(app);
 
     vi.useRealTimers();
     const texts = await overviewTexts(drive.last!);

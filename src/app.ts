@@ -8,7 +8,7 @@ import { loadTrackerView } from './output/view.ts';
 import { buildWorkbook } from './output/workbook.ts';
 import type { Prices } from './spend/pricing.ts';
 import { SpendGuard } from './spend/spendGuard.ts';
-import { listClients, syncClients } from './store/clients.ts';
+import { getClient, listClients, syncClients } from './store/clients.ts';
 import type { Db } from './store/db.ts';
 import { getKv, setKv } from './store/kv.ts';
 import { clientIdsWithUnprocessed } from './store/messages.ts';
@@ -42,7 +42,7 @@ export interface AppDeps {
 
 export interface App {
   start(): void;
-  /** Waits for AI calls in flight (up to drainMs) and a Drive upload in flight (up to 10 s). Leaves no timers. */
+  /** Waits for AI calls in flight (up to drainMs), then makes one final upload (up to 10 s). Leaves no timers. */
   stop(): Promise<void>;
   /** Applies a new allow-list. Throws, leaving the old allow-list in place, if the config conflicts with the DB. */
   reloadClients(configs: ClientConfig[]): void;
@@ -74,7 +74,18 @@ export function createApp(d: AppDeps): App {
       d.log.error({ ...fields, err }, 'health update failed');
     }
   };
+  /** False once reloadClients removed the client. If the lookup itself fails, assume active and record as usual. */
+  const stillActive = (clientId: number): boolean => {
+    try {
+      return getClient(d.db, clientId).active;
+    } catch (err) {
+      d.log.error({ clientId, err }, 'client lookup failed');
+      return true;
+    }
+  };
   const record = (clientId: number, outcome: ReconcileOutcome) => {
+    // Removed while its run was in flight: reloadClients already forgot it, so its warning must not come back.
+    if (!stillActive(clientId)) return;
     safely(() => health.recordOutcome(clientId, outcome), { clientId });
     // The publisher is throttled, so this is cheap, and the workbook stops showing ✅ while groups fail.
     if (outcome.status === 'failed' || outcome.status === 'paused') publisher.schedule();
@@ -99,7 +110,14 @@ export function createApp(d: AppDeps): App {
   // Fires for new messages, edits and non-empty reactions.
   const ingestor = new Ingestor({ db: d.db, onNewMessages: (clientId) => debouncer.notify(clientId) });
 
-  d.gateway.onEvent((e) => ingestor.handle(e));
+  d.gateway.onEvent((e) => {
+    try {
+      ingestor.handle(e);
+    } catch (err) {
+      d.log.error({ err }, 'ingest failed'); // never the event: it holds chat text
+      throw err; // the gateway counts it in failedCount()
+    }
+  });
   d.gateway.onStatus((s) => {
     safely(() => health.setWhatsApp(s));
     publisher.schedule();
@@ -125,6 +143,7 @@ export function createApp(d: AppDeps): App {
     publisher,
     debouncer,
     start() {
+      if (poll) return; // already started: a second interval would outlive stop()
       d.gateway.start();
       tick();
       poll = setInterval(tick, d.pollMs ?? 30_000);
@@ -136,6 +155,8 @@ export function createApp(d: AppDeps): App {
       debouncer.stop();
       // A result we already paid for is applied, not thrown away and paid for again after a restart.
       await debouncer.drain(d.drainMs ?? 120_000);
+      // One last upload, so the workbook includes results applied during the drain. stop() bounds it to 10 s.
+      void publisher.publishNow();
       await publisher.stop(10_000);
       await d.gateway.stop();
     },
