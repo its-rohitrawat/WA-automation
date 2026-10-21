@@ -14,14 +14,14 @@ Add a section "If the service will not start", covering these cases.
   - **What it means:** the DPAPI-protected master key cannot be read. Usually the Windows account or its password was reset by an admin, or the key file was copied from another PC.
   - **What to do:**
     1. Stop the service.
-    2. Run `npm run cli -- status` and check the error.
+    2. Open the service's error log (`wa-agent.err.log` in the WinSW log folder) and check the last line; it shows the code, e.g. `MASTER_KEY_UNREADABLE: ...`. (`status` cannot show this error, because the service stops before it writes a report.)
     3. Only after confirming with the person responsible, move `data/keys/master.key.dpapi` and `data/session.db` to a dated backup folder. Do not delete them.
     4. Re-link WhatsApp: `npm run cli -- link --reset`.
     5. Re-run `npm run cli -- google-auth`.
   - **Consequences:** the tracker database itself is kept. Only the WhatsApp session and the Google token are recreated.
 - **`SessionDecryptError` / "wrong key for this session"**
   - **What it means:** the session store was encrypted with a different master key.
-  - **What to do:** same steps as above.
+  - **What to do:** run `npm run cli -- link --reset` and scan the new QR. Do **not** move the master key: that would also break the saved Google sign-in.
 - **`TokenDecryptError` ("Stored Google sign-in cannot be read")**
   - **What it means:** the saved Google sign-in was encrypted with a different master key.
   - **What to do:** run `npm run cli -- google-auth` again. Nothing else is lost.
@@ -42,3 +42,10 @@ State that the daily cap (DAILY_SPEND_CAP_USD) is a soft cap. In rare cases (cal
 - Tell users not to move the "WA Agent" folder or `Tracker.xlsx` to the Bin in Google Drive. Drive keeps accepting updates to a binned file, so the tracker would look stale without any error.
 - If it happens, restore both from the Bin. If the folder or file was deleted permanently, the agent re-creates it on the next update, and the old shared link stops working.
 - Share the folder, not the file, with the team, so a re-created file stays reachable.
+
+## 6. SETUP.md: first-time allow-list
+- Start with `{ "clients": [] }` in `config/allowed-groups.json`. Then run `npm run cli -- list-groups`, copy the ids of the client groups into the file, and pick a permanent 3-letter code for each.
+- The example file's placeholder group is rejected on purpose: client codes are permanent, so the example must never be synced.
+- After google-auth or any change to `.env`, restart the service (`net stop wa-agent`, then `net start wa-agent`).
+- `link --reset` asks for confirmation. Before confirming, remove the old "WA Agent" device on the founder's phone (Settings → Linked devices).
+- **Replace the copy step:** in the runbook step that currently says `copy config\allowed-groups.example.json config\allowed-groups.json` and then "empty the list", write the file directly instead: create `config\allowed-groups.json` containing `{ "clients": [] }`. The example file stays as reference only, because its placeholder group id is rejected.
