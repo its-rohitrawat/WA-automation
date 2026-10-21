@@ -4,11 +4,11 @@ import { syncClients } from '../../src/store/clients.ts';
 import { migrate, type Db } from '../../src/store/db.ts';
 import {
   deferMedia, dueMediaIds, failMedia, finishMedia, getMedia, getMediaRef, insertMedia, markDownloaded, mediaForMessages, mediaJob, messageRowId,
-  type NewMedia,
+  type MediaKind, type MediaStatus, type NewMedia, type TextKind,
 } from '../../src/store/media.ts';
 import { MIGRATIONS } from '../../src/store/migrations.ts';
-import { insertMessage } from '../../src/store/messages.ts';
-import { MEHTA, NOW, SHARMA, seededDb } from '../helpers/db.ts';
+import { applyRevoke, insertMessage } from '../../src/store/messages.ts';
+import { LATER, MEHTA, NOW, SHARMA, seededDb } from '../helpers/db.ts';
 
 function message(db: Db, waId: string, o: { clientId?: number; mediaType?: string | null; ts?: string } = {}): number {
   const clientId = o.clientId ?? 1;
@@ -56,6 +56,15 @@ describe('media store', () => {
     expect(row).not.toHaveProperty('refEnc');
     expect(getMediaRef(db, id)).toEqual(Buffer.from('sealed'));
     expect(() => insertMedia(db, media(m1))).toThrow(/UNIQUE/);
+  });
+
+  it('refuses an unknown kind, status or text kind', () => {
+    const db = seededDb();
+    expect(() => insertMedia(db, media(message(db, 'K'), { kind: 'gif' as MediaKind }))).toThrow(/CHECK/);
+    expect(() => insertMedia(db, media(message(db, 'S'), { status: 'queued' as MediaStatus }))).toThrow(/CHECK/);
+    const id = insertMedia(db, media(message(db, 'T')));
+    expect(() => finishMedia(db, id, { textKind: 'summary' as TextKind, text: 'x', pageCount: null, note: null, at: NOW })).toThrow(/CHECK/);
+    expect(getMedia(db, id)).toMatchObject({ status: 'pending', textKind: null });
   });
 
   it('keeps whether a file was forwarded', () => {
@@ -118,6 +127,22 @@ describe('media store', () => {
     expect(getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'description', text: 'A blue banner', textChars: 13, errorCode: null, nextAttemptAt: null });
   });
 
+  it('wipes the sealed details when a file is finished without a saved original', () => {
+    const db = seededDb();
+    const id = insertMedia(db, media(message(db, 'A')));
+    finishMedia(db, id, { textKind: null, text: null, pageCount: null, note: null, at: NOW });
+    expect(getMediaRef(db, id)).toBeNull();
+    expect(getMedia(db, id)).toMatchObject({ status: 'done', hasRef: false, localPath: null });
+  });
+
+  it('finishing a file clears an earlier deferral', () => {
+    const db = seededDb();
+    const id = insertMedia(db, media(message(db, 'A')));
+    deferMedia(db, id, { errorCode: 'spend_cap', nextAttemptAt: '2026-10-19T08:10:00.000Z', countAttempt: false, at: NOW });
+    finishMedia(db, id, { textKind: 'description', text: 'A blue banner', pageCount: null, note: null, at: LATER });
+    expect(getMedia(db, id)).toMatchObject({ status: 'done', errorCode: null, nextAttemptAt: null });
+  });
+
   it('a deferral keeps the details; a final failure wipes them', () => {
     const db = seededDb();
     const id = insertMedia(db, media(message(db, 'A')));
@@ -140,6 +165,8 @@ describe('media store', () => {
     expect(map.get(m1)!.id).toBe(id);
     expect(mediaForMessages(db, [], 100)).toEqual(new Map());
     expect(mediaJob(db, id)).toEqual({ clientId: 1, clientCode: 'SHA', waId: 'A', ts: '2026-10-10T08:00:00.000Z', revoked: false });
+    applyRevoke(db, 1, 'A'); // the sender deleted the message for everyone
+    expect(mediaJob(db, id)!.revoked).toBe(true);
   });
 
   it('reads only the start of a long file text for the prompt, with the full length', () => {
@@ -163,12 +190,12 @@ describe('media store', () => {
     expect(mediaForMessages(db, [m1], 100).get(m1)).toMatchObject({ text: 'ab😀cdef', textChars: 7 });
   });
 
-  it('drops NUL characters from stored text, which SQLite would take as the end of the text', () => {
+  it('stores NUL characters, which SQLite would take as the end of the text, as spaces so the words around them stay apart', () => {
     const db = seededDb();
     const m1 = message(db, 'A', { mediaType: 'document' });
     const id = insertMedia(db, pdf(m1));
     finishMedia(db, id, { textKind: 'extract', text: 'Page 1\u0000Total: 42,000', pageCount: 1, note: null, at: NOW });
-    expect(getMedia(db, id)).toMatchObject({ text: 'Page 1Total: 42,000', textChars: 19 });
-    expect(mediaForMessages(db, [m1], 100).get(m1)).toMatchObject({ text: 'Page 1Total: 42,000', textChars: 19 });
+    expect(getMedia(db, id)).toMatchObject({ text: 'Page 1 Total: 42,000', textChars: 20 });
+    expect(mediaForMessages(db, [m1], 100).get(m1)).toMatchObject({ text: 'Page 1 Total: 42,000', textChars: 20 });
   });
 });

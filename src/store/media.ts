@@ -182,12 +182,12 @@ export function markDownloaded(db: Db, id: number, d: { localPath: string; sha25
 }
 
 /**
- * The file has been read. NUL characters are dropped from the text: SQLite's substr() and length() stop at the first one,
- * so mediaForMessages would otherwise cut the text there.
+ * The file has been read. NUL characters in the text are stored as spaces: SQLite's substr() and length() stop at the first one,
+ * so mediaForMessages would otherwise cut the text there. A space rather than nothing keeps the words and numbers on either side apart.
  */
 export function finishMedia(db: Db, id: number, x: { textKind: TextKind | null; text: string | null; pageCount: number | null; note: string | null; at: string }): void {
   db.prepare(`UPDATE media SET status = 'done', text_kind = @textKind, text = @text, page_count = @pageCount, note = @note, error_code = NULL,
-    next_attempt_at = NULL, ref_enc = NULL, updated_at = @at WHERE id = @id`).run({ id, ...x, text: x.text === null ? null : x.text.replaceAll('\u0000', '') });
+    next_attempt_at = NULL, ref_enc = NULL, updated_at = @at WHERE id = @id`).run({ id, ...x, text: x.text === null ? null : x.text.replaceAll('\u0000', ' ') });
 }
 
 /** A final failure. The sealed details are wiped; an original already saved stays on disk. */
