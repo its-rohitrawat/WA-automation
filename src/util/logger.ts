@@ -1,12 +1,18 @@
 import { pino, type DestinationStream, type Logger } from 'pino';
 
 const CONTENT_NAMES = ['text', 'body', 'content', 'message', 'messages', 'prompt', 'quote', 'caption', 'conversation', 'payload', 'raw', 'transcript', 'response'];
+/** Field names that could carry a person's identity or a credential. */
+const IDENTITY_AND_SECRET_NAMES = [
+  'name', 'pushName', 'number', 'phone', 'jid',
+  'token', 'refreshToken', 'refresh_token', 'accessToken', 'access_token', 'apiKey', 'secret', 'password',
+];
 
 /**
- * Field names that could carry chat content. Always censored, even if a caller logs them by mistake.
+ * Field names that could carry chat content, identities or credentials. Always censored, even if a caller logs them by mistake.
  * Honest limit: top level and one level deep; call sites must log only ids, counts and error codes, never message objects.
  */
-const REDACT = [...CONTENT_NAMES, ...CONTENT_NAMES.map((n) => `*.${n}`)];
+const SENSITIVE_NAMES = [...CONTENT_NAMES, ...IDENTITY_AND_SECRET_NAMES];
+const REDACT = [...SENSITIVE_NAMES, ...SENSITIVE_NAMES.map((n) => `*.${n}`)];
 
 export type { Logger };
 

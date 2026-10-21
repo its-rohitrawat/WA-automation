@@ -36,6 +36,25 @@ describe('logger', () => {
     expect(out()).not.toContain('CONV-SECRET');
   });
 
+  it('censors identity and credential fields, and keeps id and count fields', () => {
+    const { log, out } = capture();
+    log.info({ jid: 'x', token: 'y', clientId: 1 }, 'a');
+    const line = JSON.parse(out()) as Record<string, unknown>;
+    expect(line).toMatchObject({ jid: '[REDACTED]', token: '[REDACTED]', clientId: 1 });
+  });
+
+  it.each(['name', 'pushName', 'number', 'phone', 'jid', 'token', 'refreshToken', 'refresh_token', 'accessToken', 'access_token', 'apiKey', 'secret', 'password'])(
+    'censors %s at the top level and one level deep',
+    (key) => {
+      const { log, out } = capture();
+      log.info({ [key]: 'TOP-VALUE', nested: { [key]: 'NESTED-VALUE' }, batchId: 7, count: 2 }, 'k');
+      expect(out()).not.toContain('TOP-VALUE');
+      expect(out()).not.toContain('NESTED-VALUE');
+      expect(out()).toContain('"batchId":7');
+      expect(out()).toContain('"count":2');
+    },
+  );
+
   it('does not leak error message text', () => {
     const { log, out } = capture();
     log.error({ err: new Error('client said SECRET-IN-ERROR') }, 'x');
