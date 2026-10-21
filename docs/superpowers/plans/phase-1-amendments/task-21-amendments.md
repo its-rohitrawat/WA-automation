@@ -17,3 +17,17 @@ Tests to add:
 ## Interface notes (from Tasks 15–17)
 - `ReconcileOutcome` failure codes include 'refusal', 'invalid_output', 'timeout', 'network', 'api_<status>', 'apply_failed' and 'unknown'. 'spend_cap' never reaches Health, because the reconciler returns paused instead.
 - `SpendGuard` has `isPaused()`, `spentToday()` and the `capUsd` getter as before. Reservations are internal to it.
+
+## Drive publishing problems are visible
+If uploads fail, nobody sees a stale workbook as a problem, so Health must say so (the line is shown by `cli status` and in the workbook when it does upload).
+- New methods:
+  - `markPublishFailed(f: { step: 'build' | 'drive'; auth: boolean })` records the first failure time (keep the earliest until a success) and whether the latest failure was an auth problem.
+  - `markPublished()`, which already exists, clears both.
+- `line()` priority: after "unlinked" and "disconnected", before the spend cap:
+  - latest failure was auth → `{ ok: false, text: '❌ Google sign-in expired. Run: npm run cli -- google-auth' }`;
+  - any failure for more than 60 minutes → `{ ok: false, text: '⚠️ Tracker update failing since <istShortDate + istTime of first failure>' }`.
+  - A shorter non-auth failure stays quiet; the publisher's backoff usually recovers.
+- Tests:
+  - an auth failure shows the sign-in line immediately;
+  - a drive failure shows nothing at 59 minutes and the "Tracker update failing since" line at 61 minutes;
+  - `markPublished()` clears it.
