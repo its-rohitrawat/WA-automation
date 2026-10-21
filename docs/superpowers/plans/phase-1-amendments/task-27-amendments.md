@@ -49,3 +49,11 @@ State that the daily cap (DAILY_SPEND_CAP_USD) is a soft cap. In rare cases (cal
 - After google-auth or any change to `.env`, restart the service (`net stop wa-agent`, then `net start wa-agent`).
 - `link --reset` asks for confirmation. Before confirming, remove the old "WA Agent" device on the founder's phone (Settings → Linked devices).
 - **Replace the copy step:** in the runbook step that currently says `copy config\allowed-groups.example.json config\allowed-groups.json` and then "empty the list", write the file directly instead: create `config\allowed-groups.json` containing `{ "clients": [] }`. The example file stays as reference only, because its placeholder group id is rejected.
+
+## 7. SETUP.md: everyday corrections (from the Task 25 review)
+- `reprocess <client> --since <date> [--until <date>]` sends old messages to the AI again, which costs money and counts toward the daily cap. Keep the range short. Above 200 messages it only shows the count and cost until you add `--yes`. It will not re-create tasks you closed.
+- `person set <number> <team|client> [--client <code>]` needs the full number with country code (e.g. 919812345678), or the WhatsApp id shown in the people list.
+- `task unlock <code>` and `phase unlock <client>` hand a field or the phase back to the AI after a manual fix.
+- `rebuild` shows up in Drive within about a minute: a 30 s check plus the 60 s upload throttle.
+- Limits of `reprocess`:
+  - It will not create a second task from a message that already produced one. If the AI missed a second piece of work in an old message, add a note to an existing task with `task edit <code> --latest-progress ...`, or tell the team. There is no "task add" command in Phase 1.

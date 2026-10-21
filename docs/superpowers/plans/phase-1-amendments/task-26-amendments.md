@@ -19,3 +19,12 @@ Update the dry-run expectation text: there are now 4 cases.
 - Build the client with `prices`: `new ClaudeClient({ apiKey: requireKey(env, 'ANTHROPIC_API_KEY'), model: env.AI_MODEL, effort: env.AI_EFFORT, prices })`.
 - Actual cost: `spent += result.costUsd` (this already includes fallback attempts). Print ` (fallback model used)` after a case's PASS/FAIL line when `result.fallbackUsed`.
 - Estimate: pass `MAX_OUTPUT_TOKENS` (from claudeClient.ts) to `estimateCostUsd`. The printed figure is a ceiling ("up to").
+
+## Round 3 (interfaces that changed after Tasks 13–25)
+- `MessageRow` also has `version: number`. Add `version: 0` to the `msg()` factory next to `requeueReason: null`.
+- **Prompt markers (Task 13 round 2):**
+  - The founder's people row should have `roleSetBy: 'system'`; it renders as `[founder]`.
+  - Names cannot contain `[`, `]`, `{` or `}`; they become `(`, `)`, `❴` and `❵`. Don't rely on them in case text.
+- `ClaudeClient` options are `{ apiKey, model, effort, prices }`. Results carry `costUsd`, `fallbackUsed` and `invalidOps`.
+- **Do not run `scripts/golden.ts` at all**, not even the dry run without `--yes`. The dry run calls `loadEnv()`, which reads the real .env. The controller runs the dry run itself when asking the user for approval. Verify the script with `npm run typecheck` only.
+- **The paid run (`--yes`)** happens only after the user approves it explicitly. It is never part of this task's implementation.
