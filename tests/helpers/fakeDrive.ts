@@ -7,6 +7,8 @@ export class FakeDrive implements DriveApi {
   missing = new Set<string>();
   failNext = 0;
   failUpdateWith: unknown;
+  /** When set, createFile and updateFile wait for it (simulates a slow or hung upload). */
+  gate: Promise<void> | undefined;
   #n = 0;
 
   async createFolder(name: string): Promise<string> {
@@ -17,6 +19,7 @@ export class FakeDrive implements DriveApi {
 
   async createFile(name: string, _mime: string, body: Buffer, parentId: string): Promise<string> {
     this.#maybeFail();
+    await this.gate;
     if (this.missing.has(parentId)) throw new DriveNotFoundError(parentId);
     const id = `file-${++this.#n}`;
     this.created.push({ id, name, parentId, bytes: body.length });
@@ -26,6 +29,7 @@ export class FakeDrive implements DriveApi {
   async updateFile(id: string, _mime: string, body: Buffer): Promise<void> {
     if (this.failUpdateWith) throw this.failUpdateWith;
     this.#maybeFail();
+    await this.gate;
     if (this.missing.has(id)) throw new DriveNotFoundError(id);
     this.updated.push({ id, bytes: body.length });
   }

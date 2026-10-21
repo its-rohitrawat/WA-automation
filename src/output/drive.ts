@@ -13,6 +13,23 @@ export class DriveNotFoundError extends Error {
   }
 }
 
+export class DriveAuthError extends Error {
+  constructor(cause?: unknown) {
+    super('Google sign-in has expired or was revoked. Run: npm run cli -- google-auth', { cause });
+    this.name = 'DriveAuthError';
+  }
+}
+
+/** A gaxios error with HTTP 401 or an invalid_grant body, or an error that says invalid_grant. */
+export function isAuthFailure(e: unknown): boolean {
+  const x = e as { code?: unknown; status?: unknown; name?: string; message?: string; response?: { status?: number; data?: { error?: unknown } } } | null;
+  if (!x || typeof x !== 'object') return false;
+  if (x.name === 'DriveAuthError') return true;
+  if (Number(x.code) === 401 || x.status === 401 || x.response?.status === 401) return true;
+  if (x.response?.data?.error === 'invalid_grant') return true;
+  return /invalid_grant/.test(`${x.name ?? ''} ${x.message ?? ''}`);
+}
+
 export interface DriveApi {
   createFolder(name: string): Promise<string>;
   createFile(name: string, mimeType: string, body: Buffer, parentId: string): Promise<string>;
@@ -22,7 +39,7 @@ export interface DriveApi {
 const isNotFound = (e: unknown) => (e as { code?: number }).code === 404;
 
 export function googleDriveApi(client: OAuth2Client): DriveApi {
-  const api = drive({ version: 'v3', auth: client });
+  const api = drive({ version: 'v3', auth: client, timeout: 120_000 });
   return {
     async createFolder(name) {
       const r = await api.files.create({ requestBody: { name, mimeType: 'application/vnd.google-apps.folder' }, fields: 'id' });
@@ -57,14 +74,18 @@ export interface PublisherOptions {
   log: Logger;
   minIntervalMs?: number;
   onPublished?: () => void;
+  /** Called after every failed run. `auth` is true when Google sign-in must be redone. Errors thrown here are logged and ignored. */
+  onFailure?: (f: { step: 'build' | 'drive'; auth: boolean }) => void;
 }
 
 class PublishError extends Error {
   readonly step: 'build' | 'drive';
+  readonly original: unknown;
   constructor(step: 'build' | 'drive', original: unknown) {
     super(`Publish failed at step ${step}`);
-    this.name = (original as Error | undefined)?.name ?? 'Error';
+    this.name = 'PublishError';
     this.step = step;
+    this.original = original;
   }
 }
 
@@ -74,10 +95,10 @@ export class DrivePublisher {
   readonly #minInterval: number;
   #lastRun = Number.NEGATIVE_INFINITY;
   #timer: ReturnType<typeof setTimeout> | undefined;
-  #running = false;
   #pending = false;
   #failures = 0;
   #stopped = false;
+  #current: Promise<void> | undefined;
 
   constructor(o: PublisherOptions) {
     this.#o = o;
@@ -86,7 +107,7 @@ export class DrivePublisher {
 
   schedule(): void {
     if (this.#stopped) return;
-    if (this.#running) {
+    if (this.#current) {
       this.#pending = true;
       return;
     }
@@ -94,50 +115,90 @@ export class DrivePublisher {
     const wait = Math.max(0, this.#lastRun + this.#minInterval - Date.now());
     this.#timer = setTimeout(() => {
       this.#timer = undefined;
-      void this.#run();
+      void this.#start();
     }, wait);
   }
 
+  /**
+   * Runs a publish now. If a run is already in flight, it queues one follow-up run and resolves when the
+   * CURRENT run ends (not the follow-up), so it never starts two uploads at once.
+   */
   async publishNow(): Promise<void> {
+    if (this.#stopped) return;
+    if (this.#current) {
+      this.#pending = true;
+      await this.#current;
+      return;
+    }
     clearTimeout(this.#timer);
     this.#timer = undefined;
-    await this.#run();
+    await this.#start();
   }
 
-  stop(): void {
+  /** Blocks new runs, clears timers, and waits for an in-flight run (up to timeoutMs) so its Drive ids get saved. */
+  async stop(timeoutMs = 30_000): Promise<void> {
     this.#stopped = true;
     clearTimeout(this.#timer);
+    this.#timer = undefined;
+    const current = this.#current;
+    if (!current) return;
+    let t: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([current, new Promise<void>((r) => (t = setTimeout(r, timeoutMs)))]);
+    clearTimeout(t);
+  }
+
+  #start(): Promise<void> {
+    const run = this.#run().finally(() => {
+      if (this.#current === run) this.#current = undefined;
+      // Changes that arrived during the run get exactly one follow-up (after a failure, the backoff retry covers them).
+      if (this.#pending) {
+        this.#pending = false;
+        this.schedule();
+      }
+    });
+    this.#current = run;
+    return run;
   }
 
   async #run(): Promise<void> {
-    this.#running = true;
     this.#lastRun = Date.now();
+    let published = false;
     try {
       await this.#publish();
       this.#failures = 0;
-      this.#o.onPublished?.();
+      published = true;
     } catch (e) {
       this.#failures++;
       const step = e instanceof PublishError ? e.step : 'drive';
-      const fields = { step, err: (e as Error).name, failures: this.#failures };
-      // Never the error message: Google errors can echo request details.
+      let cause: unknown = e instanceof PublishError ? e.original : e;
+      const auth = step === 'drive' && isAuthFailure(cause);
+      if (auth && !(cause instanceof DriveAuthError)) cause = new DriveAuthError(cause);
+      // The logger's err serializer keeps type, code and stack frames, and drops the message.
+      const fields = { step, err: cause, failures: this.#failures };
       if (step === 'build') this.#o.log.error(fields, 'Tracker build failed');
       else this.#o.log.warn(fields, 'Drive publish failed');
-      this.#running = false;
+      this.#pending = false;
+      try {
+        this.#o.onFailure?.({ step, auth });
+      } catch (hookErr) {
+        this.#o.log.error({ err: hookErr }, 'onFailure failed');
+      }
       if (!this.#stopped) {
         const backoff = Math.min(60_000 * 2 ** (this.#failures - 1), 15 * 60_000);
         clearTimeout(this.#timer);
         this.#timer = setTimeout(() => {
           this.#timer = undefined;
-          void this.#run();
+          void this.#start();
         }, backoff);
       }
       return;
     }
-    this.#running = false;
-    if (this.#pending) {
-      this.#pending = false;
-      this.schedule();
+    if (published) {
+      try {
+        this.#o.onPublished?.();
+      } catch (hookErr) {
+        this.#o.log.error({ err: hookErr }, 'onPublished failed');
+      }
     }
   }
 
@@ -166,8 +227,11 @@ export class DrivePublisher {
     try {
       setKv(db, 'drive_tracker_id', await api.createFile('Tracker.xlsx', XLSX_MIME, body, root));
     } catch (e) {
-      if (e instanceof DriveNotFoundError) setKv(db, 'drive_root_id', ''); // folder removed: recreate next time
-      throw e;
+      if (!(e instanceof DriveNotFoundError)) throw e;
+      // The root folder was removed: re-create it and retry once, in the same run.
+      root = await api.createFolder('WA Agent');
+      setKv(db, 'drive_root_id', root);
+      setKv(db, 'drive_tracker_id', await api.createFile('Tracker.xlsx', XLSX_MIME, body, root));
     }
   }
 }
