@@ -12,6 +12,8 @@ export function openDb(file: string): Db {
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
     db.pragma('busy_timeout = 5000');
+    // Deleted content is overwritten, so wiped download details (media.ref_enc) do not stay in free pages.
+    db.pragma('secure_delete = ON');
     migrate(db);
     return db;
   } catch (e) {

@@ -150,4 +150,41 @@ ALTER TABLE messages ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE messages ADD COLUMN touch_reason TEXT CHECK (touch_reason IN ('edit', 'reaction'));
 `,
   },
+  {
+    // Phase 2a: one row per shared file. ref_enc holds the sealed download details only until the download ends.
+    // forwarded: forwarded media is never sent to Claude for a paid description.
+    version: 4,
+    sql: `
+CREATE TABLE media (
+  id INTEGER PRIMARY KEY,
+  message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id),
+  client_id INTEGER NOT NULL REFERENCES clients(id),
+  kind TEXT NOT NULL CHECK (kind IN ('image', 'video', 'document', 'sticker', 'voice', 'audio')),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'done', 'failed', 'unavailable', 'metadata')),
+  mime_type TEXT,
+  file_name TEXT,
+  file_size INTEGER,
+  seconds INTEGER,
+  forwarded INTEGER NOT NULL DEFAULT 0,
+  page_count INTEGER,
+  ref_enc BLOB,
+  local_path TEXT,
+  sha256 TEXT,
+  text_kind TEXT CHECK (text_kind IN ('description', 'extract')),
+  text TEXT,
+  note TEXT,
+  error_code TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  drive_file_id TEXT,
+  drive_failed INTEGER NOT NULL DEFAULT 0,
+  drive_attempts INTEGER NOT NULL DEFAULT 0,
+  drive_next_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX media_due ON media (status, next_attempt_at);
+CREATE INDEX media_client ON media (client_id);
+`,
+  },
 ];

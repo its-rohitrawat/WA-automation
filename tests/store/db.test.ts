@@ -16,15 +16,20 @@ describe('openDb', () => {
     expect(idx).toEqual(expect.arrayContaining(['tasks_client_status', 'task_events_client_at']));
   });
 
-  it('is at schema version 3 straight after openDb', () => {
+  it('is at schema version 4 straight after openDb', () => {
     const db = openDb(':memory:');
-    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(3);
+    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(4);
   });
 
   it('is safe to migrate twice', () => {
     const db = openDb(':memory:');
     migrate(db);
-    expect((db.prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(3);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(4);
+  });
+
+  it('overwrites deleted content, so wiped download details do not stay in free pages', () => {
+    const db = openDb(':memory:');
+    expect(db.pragma('secure_delete', { simple: true })).toBe(1);
   });
 
   it('enforces foreign keys', () => {
