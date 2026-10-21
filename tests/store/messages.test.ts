@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyEdit, applyRevoke, clientIdsWithUnprocessed, insertMessage, lastActivity, listRecentProcessed, listUnprocessed,
-  markProcessed, markProcessedIfUnchanged, reactionsFor, resetProcessedSince, upsertReaction, type NewMessage,
+  markProcessed, markProcessedIfUnchanged, reactionsFor, resetProcessedSince, unprocessedCounts, upsertReaction, type NewMessage,
 } from '../../src/store/messages.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
 
@@ -196,5 +196,18 @@ describe('messages repository', () => {
       expect(version(db, 'm2')).toEqual({ version: 1, touch: null });
       expect(listRecentProcessed(db, 1)[0]).toMatchObject({ waId: 'm2', requeueReason: null, processedAt: NOW });
     });
+  });
+});
+
+describe('unprocessedCounts', () => {
+  it('counts unprocessed, non-revoked messages per client', () => {
+    const db = seededDb();
+    insertMessage(db, msg({ waId: 'a' }));
+    insertMessage(db, msg({ waId: 'b' }));
+    insertMessage(db, msg({ waId: 'c' }));
+    insertMessage(db, msg({ waId: 'd', clientId: 2 }));
+    markProcessed(db, [listUnprocessed(db, 1)[0]!.id], NOW);
+    applyRevoke(db, 1, 'b');
+    expect(unprocessedCounts(db)).toEqual(new Map([[1, 1], [2, 1]]));
   });
 });

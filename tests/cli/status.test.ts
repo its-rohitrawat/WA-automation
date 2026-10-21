@@ -1,0 +1,63 @@
+import { describe, expect, it } from 'vitest';
+import { formatStatus } from '../../src/cli/status.ts';
+import type { HealthSnapshot } from '../../src/health/health.ts';
+import { listClients } from '../../src/store/clients.ts';
+import { seededDb } from '../helpers/db.ts';
+
+const snapshot: HealthSnapshot = {
+  at: '2026-10-19T07:58:00.000Z',
+  line: { ok: true, text: '✅ Connected · last update 19 Oct 13:25' },
+  whatsapp: { state: 'open', since: '2026-10-19T03:30:00.000Z', lastErrorCode: null, credsSaveFailures: 0 },
+  downSince: null, failed: [], lastSuccessAt: null, lastPublishedAt: null, spentToday: 1.234, capUsd: 15, freeGb: 182.43,
+  publishFailingSince: null,
+};
+
+const now = new Date('2026-10-19T08:00:00Z');
+const base = { clients: [], batches: [], unprocessed: new Map<number, number>(), now };
+
+describe('formatStatus', () => {
+  it('summarises health, spend, disk and each client', () => {
+    const out = formatStatus({
+      snapshot,
+      clients: listClients(seededDb(), false),
+      batches: [{ clientId: 2, status: 'failed', errorCode: 'network', finishedAt: '2026-10-19T07:50:00.000Z' }],
+      unprocessed: new Map([[2, 3]]),
+      now,
+    });
+    expect(out).toContain('Health:      ✅ Connected · last update 19 Oct 13:25 (reported 2 min ago)');
+    expect(out).toContain('WhatsApp:    open since 19 Oct 09:00');
+    expect(out).toContain('Spend today: $1.23 of $15.00');
+    expect(out).toContain('Disk free:   182.4 GB');
+    expect(out).not.toContain('Drive:');
+    expect(out).not.toContain('has not reported');
+    expect(out).toMatch(/MEH\s+Mehta Foods\s+queued 3\s+last batch failed \(network\)/);
+    expect(out).toMatch(/SHA\s+Sharma Interiors\s+queued 0\s+no batches yet/);
+  });
+
+  it('says when the service has not reported yet', () => {
+    const out = formatStatus({ ...base, snapshot: undefined });
+    expect(out).toContain('no report yet (is the service running?)');
+  });
+
+  it('prints a Drive row when publishing is failing', () => {
+    const out = formatStatus({ ...base, snapshot: { ...snapshot, publishFailingSince: '2026-10-19T06:30:00.000Z' } });
+    expect(out).toContain('Drive:       failing since 19 Oct 12:00');
+  });
+
+  it('puts a stale-report line first when the report is more than 2 minutes old', () => {
+    const out = formatStatus({ ...base, snapshot: { ...snapshot, at: '2026-10-19T07:57:00.000Z' } });
+    const lines = out.split('\n');
+    expect(lines[0]).toBe('⚠️ The service has not reported since 19 Oct 13:27. Is it running?');
+    expect(lines[1]).toContain('WA Agent status');
+  });
+
+  it('does not flag a report exactly 2 minutes old', () => {
+    const out = formatStatus({ ...base, snapshot: { ...snapshot, at: '2026-10-19T07:58:00.000Z' } });
+    expect(out).not.toContain('has not reported');
+  });
+
+  it('does not flag a 1 minute old report', () => {
+    const out = formatStatus({ ...base, snapshot: { ...snapshot, at: '2026-10-19T07:59:00.000Z' } });
+    expect(out).not.toContain('has not reported');
+  });
+});

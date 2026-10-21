@@ -191,3 +191,10 @@ export function clientIdsWithUnprocessed(db: Db): number[] {
 export function resetProcessedSince(db: Db, clientId: number, sinceIso: string): number {
   return db.prepare('UPDATE messages SET processed_at = NULL WHERE client_id = ? AND ts >= ? AND revoked = 0').run(clientId, sinceIso).changes;
 }
+
+export function unprocessedCounts(db: Db): Map<number, number> {
+  const rows = db
+    .prepare('SELECT client_id AS id, COUNT(*) AS n FROM messages WHERE processed_at IS NULL AND revoked = 0 GROUP BY client_id')
+    .all() as { id: number; n: number }[];
+  return new Map(rows.map((r) => [r.id, r.n]));
+}
