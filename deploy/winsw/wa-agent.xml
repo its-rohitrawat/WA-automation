@@ -1,0 +1,20 @@
+<service>
+  <id>wa-agent</id>
+  <name>WA Agent</name>
+  <description>Reads allowed WhatsApp client groups and keeps the tracker in Google Drive up to date. Never sends messages.</description>
+  <executable>%ProgramFiles%\nodejs\node.exe</executable>
+  <arguments>src\main.ts</arguments>
+  <workingdirectory>%BASE%\..\..</workingdirectory>
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+  <!-- The app waits up to 120 s for an AI call in flight, then up to 10 s for a Drive upload. -->
+  <stoptimeout>150 sec</stoptimeout>
+  <onfailure action="restart" delay="10 sec"/>
+  <onfailure action="restart" delay="30 sec"/>
+  <onfailure action="restart" delay="60 sec"/>
+  <resetfailure>1 hour</resetfailure>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>8</keepFiles>
+  </log>
+</service>
