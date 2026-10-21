@@ -219,8 +219,8 @@ Notes:
 - **`person set <number> <team|client>`**: use the full number with country code and no `+` or spaces (for example `919812345678`). A WhatsApp id (it contains `@`) also works. People who show no number in the People section cannot be fixed with `person set` yet. Add `--client ABC` to change the role in one client group only.
 - **`task unlock`** and **`phase unlock`** let the AI change that task or phase again.
 - **`rebuild`** shows up in Drive within about a minute (a 30-second check, then a 60-second upload wait).
-- **`reprocess <client> --since <date> [--until <date>]`** sends old messages to the AI again. This **costs money** and counts toward the daily cap, so keep the date range short. Above 200 messages it only shows the count and the most it could cost; add `--yes` to run it. It will not re-create tasks you closed.
-- **Limit of `reprocess`:** it will not create a second task from a message that already produced one. If the AI missed a second piece of work in an old message, add a note to an existing task with `task edit <code> --latest-progress "..."`, or tell the team. There is no "task add" command yet.
+- **`reprocess <client> --since <date> [--until <date>]`** sends old messages to the AI again. This **costs money** and counts toward the daily cap, so keep the date range short. Above 200 messages it only shows the count and the most it could cost; add `--yes` to run it. It will not re-create tasks you closed, and it will not count reminders or decisions twice.
+- **Limit of `reprocess`:** it cannot add a missed second task from a message that already produced a task (or that already counted as a reminder or an update on a task). If the AI missed a second piece of work in an old message, add a note to an existing task with `task edit <code> --latest-progress "..."`, or tell the team. There is no "task add" command yet.
 
 ## What the status line means
 
@@ -230,12 +230,13 @@ In `npm run cli -- status` it appears as the `Health:` line. It is also the firs
 |---|---|---|
 | Connected, last update (time) | All good. | Nothing. |
 | Connected, waiting for new messages | All good, no messages processed yet since the start. | Nothing. |
-| WhatsApp unlinked since (time) | The founder removed the linked device, or WhatsApp logged it out. | Follow "Status logged_out" below. |
+| WhatsApp unlinked since (time). Follow docs/SETUP.md → "Status logged_out" | The founder removed the linked device, or WhatsApp logged it out. | Follow "Status logged_out" below: stop the service safely and back up the session before linking again. |
 | Another copy of WA Agent took over the WhatsApp session | Another copy of the agent, or WhatsApp Web on another computer, took the linked-device slot. | Follow "Status replaced" below. Do **not** reset the link. |
 | WhatsApp refused this number (403) | WhatsApp blocked this device. | Look at the founder's phone for a WhatsApp warning. Do not reset the link. |
 | Disconnected since (time) | No WhatsApp connection for over 30 minutes. | Check the PC's internet. The agent keeps trying to reconnect. If it stays down, restart the service. |
 | Google sign-in expired | Drive no longer lets the agent in. | Run `npm run cli -- google-auth`, then restart the service. |
 | The WhatsApp session could not be saved | The agent cannot write its session to disk. | Check free disk space and the permissions on `C:\wa-agent\data`. |
+| (number) incoming messages could not be saved | Some WhatsApp messages from the client groups could not be stored, so they are **lost from the tracker**. The count is since the service last started (a restart clears the warning); `status` also shows `Messages not saved: (number)`. | Read `wa-agent.out.log` (look for `ingest failed`). Check those groups on the founder's phone and add anything important by hand (`task edit`, or tell the team). Then check free disk space and the permissions on `C:\wa-agent\data`. |
 | Tracker update failing since (time) | The Excel file has not reached Drive for over an hour. | Check the PC's internet. If it stays, read `wa-agent.out.log`. |
 | Daily spend cap reached. Paused until midnight IST | The AI budget for today is used up. Messages are saved and processed later. | Wait for midnight India time. Raise `DAILY_SPEND_CAP_USD` in `.env` and restart the service only if the higher spend is intended. |
 | (number) groups waiting (AI error) | The AI call failed for some groups. Nothing is lost. | Wait: failed batches retry every hour. If it persists, read `wa-agent.out.log` and run `status`. |
@@ -244,6 +245,8 @@ In `npm run cli -- status` it appears as the `Health:` line. It is also the firs
 ## If the service will not start
 
 When the agent refuses to start it exits, and WinSW tries again every minute or so. So `net stop` alone may not hold it down. Use the two procedures below around every fix.
+
+A config error (for example a mistake in `allowed-groups.json` or `.env`) exits with code 1. A refusal (for example WhatsApp not linked, Google not connected, or another copy running) exits with code 2. Either way WinSW restarts the service, and `wa-agent.err.log` shows one line saying why.
 
 **Stop the service safely**
 
