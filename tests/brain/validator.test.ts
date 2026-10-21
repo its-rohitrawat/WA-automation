@@ -182,6 +182,11 @@ describe('validateOps', () => {
       expect(reasons([op({ op: 'log_reminder', taskCode: 'SHA-012', sourceMessageIds: ['old2'] })], replay())).toEqual(['reminder already counted for this message']);
       expect(reasons([op({ op: 'add_decision', text: 'Blue', sourceMessageIds: ['old3'] })], replay())).toEqual(['decision already recorded for this message']);
     });
+    it('accepts a reminder when at least one cited message is new', () => {
+      const r = (ids: string[]) => op({ op: 'log_reminder', taskCode: 'SHA-012', sourceMessageIds: ids });
+      expect(validateOps([r(['old2', 'n1'])], replay()).accepted).toHaveLength(1);
+      expect(reasons([r(['old2'])], replay())).toEqual(['reminder already counted for this message']);
+    });
     it('accepts brand-new messages', () => {
       expect(validateOps([addTask({ sourceMessageIds: ['n1'] })], replay()).accepted).toHaveLength(1);
       expect(validateOps([op({ op: 'log_reminder', taskCode: 'SHA-012', sourceMessageIds: ['n1'] })], replay()).accepted).toHaveLength(1);

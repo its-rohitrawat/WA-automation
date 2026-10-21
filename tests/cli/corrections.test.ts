@@ -100,7 +100,7 @@ describe('task unlock', () => {
     editTask(db, 'SHA-001', { deadline: '2026-10-25' }, now);
     closeTask(db, 'SHA-001', now);
     expect(unlockTask(db, 'sha-001', now)).toMatchObject({ lockedFields: [], statusLockedAt: null, status: 'done' });
-    expect(events(db).at(-1)).toMatchObject({ op: 'unlock', task_id: 1, client_id: 1 });
+    expect(events(db).at(-1)).toMatchObject({ op: 'unlock', task_id: 1, client_id: 1, detail: { lockedFields: ['deadline'], statusLocked: true } });
     expect(rebuilt(db)).toBe(true);
     expect(() => unlockTask(db, 'SHA-999', now)).toThrowError(CorrectionError);
   });
@@ -119,7 +119,7 @@ describe('person set', () => {
     expect(setPersonRole(db, '+91 98000-00002', 'Team', undefined, now)).toBe(2);
     expect(listPeople(db, 1)[0]).toMatchObject({ role: 'team', roleSetBy: 'human' });
     expect(listPeople(db, 2)[0]).toMatchObject({ role: 'team', roleSetBy: 'human' });
-    expect(events(db)).toMatchObject([{ op: 'set_person_role', client_id: 1, detail: { role: 'team' } }, { op: 'set_person_role', client_id: 2 }]);
+    expect(events(db)).toMatchObject([{ op: 'set_person_role', client_id: 1, detail: { number: '919800000002', role: 'team' } }, { op: 'set_person_role', client_id: 2, detail: { number: '919800000002', role: 'team' } }]);
     expect(rebuilt(db)).toBe(true);
   });
 
@@ -134,6 +134,8 @@ describe('person set', () => {
     const db = people();
     expect(setPersonRole(db, '919800000002@s.whatsapp.net', 'team', 'SHA', now)).toBe(1);
     expect(listPeople(db, 1)[0]).toMatchObject({ role: 'team' });
+    expect(events(db)[0]).toMatchObject({ detail: { jid: '919800000002@s.whatsapp.net', role: 'team' } });
+    expect(() => setPersonRole(db, 'nobody@lid', 'team', undefined, now)).toThrowError('No one with that WhatsApp id has posted in an allowed group yet');
   });
 
   it('gives clear errors', () => {
@@ -163,7 +165,7 @@ describe('phase set / unlock', () => {
     setClientPhase(db, 'SHA', 'Design', now);
     unlockClientPhase(db, 'sha', now);
     expect(getClient(db, 1)).toMatchObject({ currentPhase: 'Design', phaseLocked: false });
-    expect(events(db).at(-1)).toMatchObject({ op: 'unlock_phase', client_id: 1 });
+    expect(events(db).at(-1)).toMatchObject({ op: 'unlock_phase', client_id: 1, detail: { phase: 'Design' } });
     expect(rebuilt(db)).toBe(true);
   });
 });

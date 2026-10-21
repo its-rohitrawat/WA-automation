@@ -111,7 +111,7 @@ export function validateOps(ops: AiOp[], s: ValidationState): { accepted: AiOp[]
         break;
       }
       case 'log_reminder':
-        if (fresh.some((id) => s.reminderSourceIds.get(op.taskCode!)?.has(id))) { reject('reminder already counted for this message'); continue; }
+        if (fresh.length > 0 && fresh.every((id) => s.reminderSourceIds.get(op.taskCode!)?.has(id))) { reject('reminder already counted for this message'); continue; }
         if (remindedCodes.has(op.taskCode!)) { reject('duplicate reminder in one response'); continue; }
         remindedCodes.add(op.taskCode!);
         break;

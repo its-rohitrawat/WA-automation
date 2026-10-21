@@ -405,4 +405,17 @@ describe('Reconciler', () => {
     expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
     expect(getTaskByCode(db, 'SHA-001')?.status).toBe('done');
   });
+
+  it('blocks a replay that cites only a later message of the original task (GapB)', async () => {
+    const first = op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'high', sourceMessageIds: ['m1', 'm2'] });
+    const replay = op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'high', sourceMessageIds: ['m2'] });
+    const { db, r } = setup([{ ops: [first] }, { ops: [replay] }]);
+    store(db, 'm1', 'banner');
+    store(db, 'm2', 'urgent', '2026-10-19T07:10:00.000Z');
+    expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
+    closeTask(db, 'SHA-001', new Date('2026-10-19T08:30:00Z'));
+    expect(requestReprocess(db, 'SHA', '2026-10-19', new Date('2026-10-19T08:31:00Z'))).toBe(2);
+    expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 0, rejected: 1 });
+    expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
+  });
 });

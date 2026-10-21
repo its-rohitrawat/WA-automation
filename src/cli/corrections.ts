@@ -110,7 +110,7 @@ export function setPersonRole(db: Db, who: string, roleInput: string, clientCode
     people = [...byNumber, ...findPeopleByJid(db, `${digits}@s.whatsapp.net`).filter((p) => !seen.has(p.id))];
     detailKey = { number: digits };
   }
-  if (people.length === 0) throw new CorrectionError('No one with that number has posted in an allowed group yet');
+  if (people.length === 0) throw new CorrectionError(`No one with that ${target.includes('@') ? 'WhatsApp id' : 'number'} has posted in an allowed group yet`);
   if (clientCode) {
     const c = findClient(db, clientCode);
     people = people.filter((p) => p.clientId === c.id);

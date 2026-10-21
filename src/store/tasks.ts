@@ -232,10 +232,16 @@ export function listDecisions(db: Db, clientId: number, limit = 1000): DecisionR
     .all(clientId, limit) as DecisionRow[];
 }
 
-/** Every task of this client, any status: the message each one was created from. */
+/** Every message cited by an applied event of this op (source_ids JSON), for this client. */
+function eventSourceIds(db: Db, clientId: number, op: string): string[] {
+  const rows = db.prepare('SELECT source_ids AS ids FROM task_events WHERE client_id = ? AND op = ?').all(clientId, op) as { ids: string }[];
+  return rows.flatMap((r) => JSON.parse(r.ids) as string[]);
+}
+
+/** Every message that created a task of this client (any status): each task's source plus every message its add_task cited. */
 export function taskSourceIds(db: Db, clientId: number): Set<string> {
   const rows = db.prepare('SELECT source_wa_id AS id FROM tasks WHERE client_id = ? AND source_wa_id IS NOT NULL').all(clientId) as { id: string }[];
-  return new Set(rows.map((r) => r.id));
+  return new Set([...rows.map((r) => r.id), ...eventSourceIds(db, clientId, 'add_task')]);
 }
 
 /** Task code to the message ids already cited by an applied log_reminder event. */
@@ -254,7 +260,7 @@ export function reminderSourceIds(db: Db, clientId: number): Map<string, Set<str
 
 export function decisionSourceIds(db: Db, clientId: number): Set<string> {
   const rows = db.prepare('SELECT source_wa_id AS id FROM decisions WHERE client_id = ? AND source_wa_id IS NOT NULL').all(clientId) as { id: string }[];
-  return new Set(rows.map((r) => r.id));
+  return new Set([...rows.map((r) => r.id), ...eventSourceIds(db, clientId, 'add_decision')]);
 }
 
 /** Hands the task back to the AI: clears the field locks and the status lock. */
