@@ -40,7 +40,7 @@ describe('Health', () => {
   it('reports an unlinked device straight away', () => {
     const { h } = setup();
     h.setWhatsApp(status('logged_out'));
-    expect(h.line()).toEqual({ ok: false, text: '❌ WhatsApp unlinked since 19 Oct 13:30. Run: npm run cli -- link --reset' });
+    expect(h.line()).toEqual({ ok: false, text: '❌ WhatsApp unlinked since 19 Oct 13:30. Follow docs/SETUP.md → "Status logged_out".' });
   });
 
   it('reports the spend cap before failed groups', () => {
@@ -129,6 +129,37 @@ describe('Health', () => {
     expect(h.line().text).toBe('❌ Google sign-in expired. Run: npm run cli -- google-auth, then restart the service');
   });
 
+  it('warns about incoming messages that could not be saved, after the creds-save warning and before the tracker-failing line', () => {
+    const { h, clock } = setup();
+    h.setWhatsApp({ ...status('open'), credsSaveFailures: 1 });
+    h.setIngestFailures(3);
+    h.markPublishFailed({ step: 'drive', auth: false });
+    clock.advance(61 * 60_000);
+    expect(h.line().text).toBe('⚠️ The WhatsApp session could not be saved. Check disk space and the data folder permissions.');
+    h.setWhatsApp(status('open', clock.now().toISOString()));
+    expect(h.line()).toEqual({ ok: false, text: '⚠️ 3 incoming messages could not be saved. See docs/SETUP.md.' });
+    h.setIngestFailures(0);
+    expect(h.line().text).toBe('⚠️ Tracker update failing since 19 Oct 13:30');
+  });
+
+  it('words a single lost message in the singular, and shows it in the workbook too', () => {
+    const { h } = setup();
+    h.setWhatsApp(status('open'));
+    h.setIngestFailures(1);
+    expect(h.line()).toEqual({ ok: false, text: '⚠️ 1 incoming message could not be saved. See docs/SETUP.md.' });
+    expect(h.workbookLine()).toEqual(h.line());
+  });
+
+  it('stores the ingest failure count and persists it with the snapshot', () => {
+    const { db, h } = setup();
+    h.setWhatsApp(status('open'));
+    expect(h.snapshot().ingestFailures).toBe(0);
+    h.setIngestFailures(2);
+    expect(h.snapshot().ingestFailures).toBe(2);
+    h.persist();
+    expect(readHealthSnapshot(db)!.ingestFailures).toBe(2);
+  });
+
   it('the latest publish failure decides whether it is an auth problem', () => {
     const { h } = setup();
     h.setWhatsApp(status('open'));
@@ -192,6 +223,11 @@ describe('readHealthSnapshot shape checks', () => {
     expect(read({ ...full, freeGb: null })).toBeDefined();
   });
 
+  it('reads an older snapshot without ingestFailures as 0', () => {
+    expect(read(full)!.ingestFailures).toBe(0);
+    expect(read({ ...full, ingestFailures: 4 })!.ingestFailures).toBe(4);
+  });
+
   it.each([
     ['whatsapp.state', { ...full, whatsapp: {} }],
     ['spentToday', { ...full, spentToday: 'a' }],
@@ -202,6 +238,7 @@ describe('readHealthSnapshot shape checks', () => {
     ['whatsapp.since (invalid date)', { ...full, whatsapp: { state: 'open', since: 'x' } }],
     ['freeGb (string)', { ...full, freeGb: '10' }],
     ['freeGb (missing)', { ...full, freeGb: undefined }],
+    ['ingestFailures (string)', { ...full, ingestFailures: '2' }],
   ])('returns undefined when %s is missing or wrong', (_n, v) => {
     expect(read(v)).toBeUndefined();
   });

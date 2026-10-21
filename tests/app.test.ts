@@ -1,11 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import { Writable } from 'node:stream';
+import { WAMessageStubType, type WAMessageUpdate } from 'baileys';
 import ExcelJS from 'exceljs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.ts';
+import { MAX_OUTPUT_TOKENS } from '../src/brain/claudeClient.ts';
 import { Reconciler } from '../src/brain/reconciler.ts';
 import { readHealthSnapshot } from '../src/health/health.ts';
-import type { Prices } from '../src/spend/pricing.ts';
+import { estimateCostUsd, type Prices } from '../src/spend/pricing.ts';
 import { getKv, setKv } from '../src/store/kv.ts';
 import { listTasks } from '../src/store/tasks.ts';
 import { systemClock } from '../src/util/clock.ts';
@@ -16,7 +18,7 @@ import { WhatsAppGateway } from '../src/wa/gateway.ts';
 import { FakeAi, op } from './helpers/ai.ts';
 import { MEHTA, OTHER_GROUP, seededDb, SHARMA } from './helpers/db.ts';
 import { FakeDrive } from './helpers/fakeDrive.ts';
-import { FakeSocket, SEND_METHODS } from './helpers/fakeSocket.ts';
+import { closeWith, FakeSocket, SEND_METHODS } from './helpers/fakeSocket.ts';
 import { waText } from './helpers/wa.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
@@ -116,6 +118,19 @@ async function finish(stop: ReturnType<typeof stopping>): Promise<void> {
 }
 
 const stopApp = (app: { stop(): Promise<void> }) => finish(stopping(app));
+
+/** Every row of the Sharma tab as cell texts. Call with real timers. */
+async function sharmaRows(buf: Buffer): Promise<string[][]> {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(buf as unknown as ExcelJS.Buffer);
+  const rows: string[][] = [];
+  wb.getWorksheet('Sharma Interiors')!.eachRow((row) => {
+    const cells: string[] = [];
+    row.eachCell((c) => cells.push(String(c.value ?? '')));
+    rows.push(cells);
+  });
+  return rows;
+}
 
 const bannerTask = () =>
   op({ op: 'add_task', side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'high', deadline: '2026-10-18', sourceMessageIds: ['m1'] });
@@ -233,6 +248,68 @@ describe('app shutdown', () => {
     const codes: unknown[] = [];
     wb.getWorksheet('Sharma Interiors')!.eachRow((row) => codes.push(row.getCell(1).value));
     expect(codes).toContain('SHA-001');
+  });
+
+  it('makes one more upload after an upload in flight, so a result applied during the drain reaches Drive', async () => {
+    const ai = new FakeAi([{ ops: [bannerTask()] }]);
+    const aiCall = gate();
+    ai.gate = aiCall.promise;
+    const drive = new CapturingDrive();
+    const { db, app, sock } = setup({ ai, drive });
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
+    await vi.advanceTimersByTimeAsync(241_000);
+    expect(ai.calls).toHaveLength(1);
+    expect(drive.uploads).toBe(1);
+
+    const upload = gate();
+    drive.gate = upload.promise;
+    app.publisher.schedule();
+    await vi.advanceTimersByTimeAsync(1_000); // an upload of the old state is now in flight
+    const stop = stopping(app);
+    aiCall.resolve();
+    await vi.advanceTimersByTimeAsync(1_000); // the drain applies the paid result
+    expect(listTasks(db, 1).map((t) => t.code)).toEqual(['SHA-001']);
+    expect(drive.uploads).toBe(1);
+    drive.gate = undefined;
+    upload.resolve();
+    await finish(stop);
+    expect(drive.uploads).toBe(3);
+    expect(vi.getTimerCount()).toBe(0);
+
+    vi.useRealTimers();
+    expect((await sharmaRows(drive.last!)).map((r) => r[0])).toContain('SHA-001');
+  });
+
+  it('books a hung AI call at its estimate when stopping', async () => {
+    const ai = new FakeAi();
+    ai.gate = new Promise<void>(() => {});
+    const { lines, log } = capturingLogger();
+    const { db, app, sock } = setup({ ai, drainMs: 5_000, log });
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
+    await vi.advanceTimersByTimeAsync(240_000);
+    expect(ai.calls).toHaveLength(1);
+
+    await stopApp(app);
+    const c = ai.calls[0]!;
+    const rows = db.prepare('SELECT kind, usd, detail FROM spend').all() as { kind: string; usd: number; detail: string }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: 'ai', detail: 'shutdown before the AI call finished (estimated)' });
+    expect(rows[0]!.usd).toBeCloseTo(estimateCostUsd(c.system.length + c.user.length, P, MAX_OUTPUT_TOKENS), 9);
+    expect(lines.find((l) => l.count === 1)).toMatchObject({ level: 40 });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('books nothing extra when the drain finished cleanly', async () => {
+    const ai = new FakeAi([{ ops: [bannerTask()] }]);
+    const aiCall = gate();
+    ai.gate = aiCall.promise;
+    const { db, app, sock } = setup({ ai });
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
+    await vi.advanceTimersByTimeAsync(241_000);
+    const stop = stopping(app);
+    aiCall.resolve();
+    await finish(stop);
+    expect(db.prepare('SELECT detail FROM spend').all()).toEqual([{ detail: 'batch 1' }]);
   });
 
   it('starting twice leaves no extra timer behind', async () => {
@@ -417,6 +494,17 @@ describe('app ingest failures', () => {
     expect(JSON.stringify(lines)).not.toContain('thoda bright');
     await stopApp(app);
   });
+
+  it('records the count of unsaved messages on the next tick and warns in health', async () => {
+    const { db, app, sock, gateway } = setup();
+    db.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
+    expect(gateway.failedCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(readHealthSnapshot(db)!.ingestFailures).toBe(1);
+    expect(app.health.line()).toEqual({ ok: false, text: '⚠️ 1 incoming message could not be saved. See docs/SETUP.md.' });
+    await stopApp(app);
+  });
 });
 
 describe('app health and publishing', () => {
@@ -507,5 +595,31 @@ describe('app health and publishing', () => {
     const texts = await overviewTexts(drive.last!);
     expect(texts.some((t) => t.startsWith('✅'))).toBe(true);
     expect(texts.join('\n')).not.toContain('Google sign-in');
+  });
+
+  it('refreshes the workbook when the source message of a task is deleted', async () => {
+    const drive = new CapturingDrive();
+    const { db, app, sock } = setup({ ai: new FakeAi([{ ops: [bannerTask()] }]), drive });
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
+    await vi.advanceTimersByTimeAsync(300_000); // reconciled at 240 s and uploaded
+    expect(listTasks(db, 1).map((t) => t.code)).toEqual(['SHA-001']);
+    const before = drive.uploads;
+
+    sock.emit('messages.update', [{ key: { remoteJid: SHARMA.groupId, id: 'm1' }, update: { messageStubType: WAMessageStubType.REVOKE } } as WAMessageUpdate]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(drive.uploads).toBe(before + 1);
+    const uploaded = drive.last!;
+    await stopApp(app);
+
+    vi.useRealTimers();
+    const row = (await sharmaRows(uploaded)).find((r) => r[0] === 'SHA-001')!;
+    expect(row.join(' | ')).toContain('source message deleted by sender');
+  });
+
+  it('points to the safe procedure when WhatsApp unlinks the device', async () => {
+    const { app, sock } = setup();
+    closeWith(sock, 401);
+    expect(app.health.line()).toEqual({ ok: false, text: '❌ WhatsApp unlinked since 19 Oct 12:30. Follow docs/SETUP.md → "Status logged_out".' });
+    await stopApp(app);
   });
 });

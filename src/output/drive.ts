@@ -98,7 +98,8 @@ export class DrivePublisher {
   #pending = false;
   #failures = 0;
   #stopped = false;
-  #current: Promise<void> | undefined;
+  /** The run in flight; resolves true when it published. */
+  #current: Promise<boolean> | undefined;
 
   constructor(o: PublisherOptions) {
     this.#o = o;
@@ -135,6 +136,37 @@ export class DrivePublisher {
     await this.#start();
   }
 
+  /**
+   * For shutdown: waits for the upload in flight, then makes exactly one more upload if a publish was pending or
+   * scheduled (a failed in-flight upload counts as scheduled: it would have been retried), all within timeoutMs.
+   * Like stop(), it then blocks new runs and leaves no timer behind.
+   */
+  async flush(timeoutMs = 10_000): Promise<void> {
+    if (this.#stopped) return this.stop(timeoutMs);
+    let wanted = this.#pending || this.#timer !== undefined;
+    this.#stopped = true; // from here schedule(), publishNow() and the failure backoff start nothing
+    clearTimeout(this.#timer);
+    this.#timer = undefined;
+    let expired = false;
+    const work = (async () => {
+      const current = this.#current;
+      if (current) {
+        const published = await current;
+        wanted ||= this.#pending || !published;
+      }
+      if (wanted && !expired) await this.#start();
+    })();
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((r) => {
+      t = setTimeout(() => {
+        expired = true;
+        r();
+      }, timeoutMs);
+    });
+    await Promise.race([work, deadline]);
+    clearTimeout(t);
+  }
+
   /** Blocks new runs, clears timers, and waits for an in-flight run (up to timeoutMs) so its Drive ids get saved. */
   async stop(timeoutMs = 30_000): Promise<void> {
     this.#stopped = true;
@@ -147,11 +179,12 @@ export class DrivePublisher {
     clearTimeout(t);
   }
 
-  #start(): Promise<void> {
+  #start(): Promise<boolean> {
     const run = this.#run().finally(() => {
       if (this.#current === run) this.#current = undefined;
       // Changes that arrived during the run get exactly one follow-up (after a failure, the backoff retry covers them).
-      if (this.#pending) {
+      // Once stopped, the flag is left for flush() to read.
+      if (this.#pending && !this.#stopped) {
         this.#pending = false;
         this.schedule();
       }
@@ -160,7 +193,7 @@ export class DrivePublisher {
     return run;
   }
 
-  async #run(): Promise<void> {
+  async #run(): Promise<boolean> {
     this.#lastRun = Date.now();
     let published = false;
     try {
@@ -191,7 +224,7 @@ export class DrivePublisher {
           void this.#start();
         }, backoff);
       }
-      return;
+      return false;
     }
     if (published) {
       try {
@@ -200,6 +233,7 @@ export class DrivePublisher {
         this.#o.log.error({ err: hookErr }, 'onPublished failed');
       }
     }
+    return published;
   }
 
   async #publish(): Promise<void> {

@@ -179,6 +179,99 @@ describe('DrivePublisher', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  describe('flush()', () => {
+    it('waits for the upload in flight, then makes exactly one more for changes that arrived meanwhile', async () => {
+      vi.useFakeTimers();
+      const { drive, build, p } = setup();
+      let release!: () => void;
+      drive.gate = new Promise<void>((r) => (release = r));
+      p.schedule();
+      await vi.advanceTimersByTimeAsync(0); // upload 1 is in flight
+      p.schedule(); // a change arrives during it
+      p.schedule();
+      let done = false;
+      void p.flush(10_000).then(() => (done = true));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(done).toBe(false);
+      drive.gate = undefined;
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(done).toBe(true);
+      expect(build).toHaveBeenCalledTimes(2);
+      expect(drive.uploads).toBe(2);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('runs a scheduled publish at once instead of waiting for the throttle', async () => {
+      vi.useFakeTimers();
+      const { drive, p } = setup();
+      await p.publishNow();
+      p.schedule(); // throttled: would wait 60 s
+      expect(vi.getTimerCount()).toBe(1);
+      await p.flush(10_000);
+      expect(drive.uploads).toBe(2);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('uploads nothing more when nothing is pending or scheduled', async () => {
+      vi.useFakeTimers();
+      const { drive, p } = setup();
+      await p.publishNow();
+      await p.flush(10_000);
+      expect(drive.uploads).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('retries once, without a backoff timer, when the upload in flight fails', async () => {
+      vi.useFakeTimers();
+      let fail!: () => void;
+      const held = new Promise<void>((r) => (fail = r));
+      const build = vi.fn(async () => Buffer.from('xlsx-bytes'));
+      build.mockImplementationOnce(async () => {
+        await held;
+        throw new Error('x');
+      });
+      const { drive, p } = setup(build);
+      p.schedule();
+      await vi.advanceTimersByTimeAsync(0); // the failing run is in flight
+      let done = false;
+      void p.flush(10_000).then(() => (done = true));
+      fail();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(done).toBe(true);
+      expect(build).toHaveBeenCalledTimes(2);
+      expect(drive.uploads).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('resolves at its timeout when the upload hangs, and leaves no timers', async () => {
+      vi.useFakeTimers();
+      const { drive, p } = setup();
+      drive.gate = new Promise<void>(() => {});
+      p.schedule();
+      await vi.advanceTimersByTimeAsync(0);
+      p.schedule();
+      let done = false;
+      void p.flush(5_000).then(() => (done = true));
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(done).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(done).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('blocks new runs afterwards, like stop()', async () => {
+      vi.useFakeTimers();
+      const { build, p } = setup();
+      await p.flush(10_000);
+      p.schedule();
+      await p.publishNow();
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(build).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+
   it('recovers from a deleted root folder in one run', async () => {
     const { lines, log } = capturingLogger();
     const { drive, p } = setup(undefined, log);

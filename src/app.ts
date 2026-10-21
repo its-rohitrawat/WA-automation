@@ -42,7 +42,10 @@ export interface AppDeps {
 
 export interface App {
   start(): void;
-  /** Waits for AI calls in flight (up to drainMs), then makes one final upload (up to 10 s). Leaves no timers. */
+  /**
+   * Waits for AI calls in flight (up to drainMs) and books any still running at their estimate, then flushes the
+   * publisher: the upload in flight plus one more if anything changed (up to 10 s). Leaves no timers.
+   */
   stop(): Promise<void>;
   /** Applies a new allow-list. Throws, leaving the old allow-list in place, if the config conflicts with the DB. */
   reloadClients(configs: ClientConfig[]): void;
@@ -117,6 +120,8 @@ export function createApp(d: AppDeps): App {
       d.log.error({ err }, 'ingest failed'); // never the event: it holds chat text
       throw err; // the gateway counts it in failedCount()
     }
+    // A deleted source message changes the workbook ("source message deleted by sender") without any AI run.
+    if (e.kind === 'revoke' && d.allow.has(e.groupId)) publisher.schedule();
   });
   d.gateway.onStatus((s) => {
     safely(() => health.setWhatsApp(s));
@@ -132,6 +137,7 @@ export function createApp(d: AppDeps): App {
         publisher.schedule();
       }
       for (const clientId of clientIdsWithUnprocessed(d.db)) debouncer.ensure(clientId);
+      health.setIngestFailures(d.gateway.failedCount());
       health.persist();
     } catch (err) {
       d.log.error({ err }, 'tick failed');
@@ -155,9 +161,15 @@ export function createApp(d: AppDeps): App {
       debouncer.stop();
       // A result we already paid for is applied, not thrown away and paid for again after a restart.
       await debouncer.drain(d.drainMs ?? 120_000);
-      // One last upload, so the workbook includes results applied during the drain. stop() bounds it to 10 s.
-      void publisher.publishNow();
-      await publisher.stop(10_000);
+      // A call still running was probably billed: book it at its estimate. After a clean drain nothing is pending.
+      try {
+        const count = spend.settlePending('shutdown before the AI call finished (estimated)');
+        if (count > 0) d.log.warn({ count }, 'AI calls still running at shutdown; booked at their estimate');
+      } catch (err) {
+        d.log.error({ err }, 'booking unfinished AI calls failed');
+      }
+      // The upload in flight, then one more if results were applied during the drain. Bounded to 10 s.
+      await publisher.flush(10_000);
       // A socket that never closes must not eat the rest of WinSW's 150 s (120 + 10 + 5 plus margin).
       let timer: NodeJS.Timeout | undefined;
       try {

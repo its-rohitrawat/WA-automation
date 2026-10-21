@@ -103,6 +103,41 @@ describe('SpendGuard', () => {
     expect(guard.reserve(0.6)).not.toBeNull();
   });
 
+  it('settlePending books every live reservation at its estimate and frees it', () => {
+    const db = seededDb();
+    const clock = manualClock('2026-10-19T10:00:00Z');
+    const guard = new SpendGuard({ db, clock, capUsd: 1 });
+    expect(guard.reserve(0.1)).not.toBeNull();
+    clock.advance(46 * 60_000); // past the 45-minute expiry: no longer counts, so not booked
+    expect(guard.reserve(0.2)).not.toBeNull();
+    expect(guard.reserve(0.3)).not.toBeNull();
+    expect(guard.settlePending('shutdown (estimated)')).toBe(2);
+    expect(guard.spentToday()).toBeCloseTo(0.5);
+    expect(db.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all()).toEqual([
+      { kind: 'ai', usd: 0.2, detail: 'shutdown (estimated)' },
+      { kind: 'ai', usd: 0.3, detail: 'shutdown (estimated)' },
+    ]);
+    expect(guard.reserve(0.5 - 1e-9)).not.toBeNull(); // nothing held back any more
+  });
+
+  it('settlePending records nothing when nothing is pending', () => {
+    const { guard } = make();
+    const id = guard.reserve(0.2)!;
+    guard.settle(id, 'ai', 0.1, 'batch 1');
+    expect(guard.settlePending('shutdown (estimated)')).toBe(0);
+    expect(guard.spentToday()).toBeCloseTo(0.1);
+  });
+
+  it('a call that finishes after settlePending is not booked twice', () => {
+    const { guard } = make();
+    const a = guard.reserve(0.2)!;
+    const b = guard.reserve(0.3)!;
+    guard.settlePending('shutdown (estimated)');
+    guard.settle(a, 'ai', 0.25, 'batch 1');
+    guard.release(b);
+    expect(guard.spentToday()).toBeCloseTo(0.5);
+  });
+
   it('records on settle with an unknown id and ignores unknown release', () => {
     const { guard } = make();
     guard.release(999);

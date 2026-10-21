@@ -9,7 +9,7 @@ const snapshot: HealthSnapshot = {
   line: { ok: true, text: '✅ Connected · last update 19 Oct 13:25' },
   whatsapp: { state: 'open', since: '2026-10-19T03:30:00.000Z', lastErrorCode: null, credsSaveFailures: 0 },
   downSince: null, failed: [], lastSuccessAt: null, lastPublishedAt: null, spentToday: 1.234, capUsd: 15, freeGb: 182.43,
-  publishFailingSince: null,
+  publishFailingSince: null, ingestFailures: 0,
 };
 
 const now = new Date('2026-10-19T08:00:00Z');
@@ -42,6 +42,12 @@ describe('formatStatus', () => {
   it('prints a Drive row when publishing is failing', () => {
     const out = formatStatus({ ...base, snapshot: { ...snapshot, publishFailingSince: '2026-10-19T06:30:00.000Z' } });
     expect(out).toContain('Drive:       failing since 19 Oct 12:00');
+  });
+
+  it('prints how many incoming messages were not saved, only when there are some', () => {
+    expect(formatStatus({ ...base, snapshot })).not.toContain('Messages not saved');
+    const out = formatStatus({ ...base, snapshot: { ...snapshot, ingestFailures: 2 } });
+    expect(out).toContain('Messages not saved: 2 (see wa-agent.out.log)');
   });
 
   it('puts a stale-report line first when the report is more than 2 minutes old', () => {

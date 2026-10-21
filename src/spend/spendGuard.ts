@@ -14,6 +14,8 @@ export class SpendGuard {
   readonly #clock: Clock;
   readonly #cap: number;
   readonly #pending = new Map<number, { usd: number; at: number }>();
+  /** Reservations already booked at their estimate by settlePending(); a late settle() must not book them again. */
+  readonly #bookedAtEstimate = new Set<number>();
   #nextId = 1;
 
   constructor(opts: { db: Db; clock: Clock; capUsd: number }) {
@@ -62,6 +64,7 @@ export class SpendGuard {
 
   /** Records the actual cost and frees the reservation (the reservation is freed even if recording throws). */
   settle(id: number, kind: 'ai' | 'stt', usd: number, detail: string): void {
+    if (this.#bookedAtEstimate.delete(id)) return;
     try {
       this.record(kind, usd, detail);
     } finally {
@@ -71,7 +74,24 @@ export class SpendGuard {
 
   /** Frees a reservation without recording anything (the call was never billed). */
   release(id: number): void {
+    this.#bookedAtEstimate.delete(id);
     this.#pending.delete(id);
+  }
+
+  /**
+   * At shutdown: books each live reservation (a call still in flight) at its estimate, with `detail`, and frees it.
+   * Reservations are AI calls today, so they are recorded as 'ai'. Returns how many were booked.
+   */
+  settlePending(detail: string): number {
+    this.#pendingTotal(); // forgets expired reservations: they no longer count
+    let n = 0;
+    for (const [id, r] of [...this.#pending]) {
+      this.#pending.delete(id);
+      this.record('ai', r.usd, detail); // if this throws, the id is not marked booked, so a late settle() still records
+      this.#bookedAtEstimate.add(id);
+      n++;
+    }
+    return n;
   }
 
   /**

@@ -37,6 +37,7 @@ export function formatStatus(i: {
     lines.push(`Health:      ${s.line.text} (reported ${ageText(ageMs)})`);
     lines.push(`WhatsApp:    ${lk}${s.whatsapp.state} since ${stamp(s.whatsapp.since)}`);
     if (s.publishFailingSince) lines.push(`Drive:       failing since ${stamp(s.publishFailingSince)}`);
+    if (s.ingestFailures > 0) lines.push(`Messages not saved: ${s.ingestFailures} (see wa-agent.out.log)`);
     lines.push(`Spend today: ${lk}$${s.spentToday.toFixed(2)} of $${s.capUsd.toFixed(2)}`);
     lines.push(`Disk free:   ${s.freeGb === null ? 'unknown' : `${s.freeGb.toFixed(1)} GB`}`);
   }

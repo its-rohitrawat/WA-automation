@@ -24,6 +24,8 @@ export interface HealthSnapshot {
   capUsd: number;
   freeGb: number | null;
   publishFailingSince: string | null;
+  /** Incoming WhatsApp events that could not be saved since the service started (lost from the tracker). */
+  ingestFailures: number;
 }
 
 function defaultFreeBytes(dir: string): number | null {
@@ -51,6 +53,7 @@ export class Health {
   #publishAuthFailed = false;
   #lastSuccess: Date | null = null;
   #lastPublished: Date | null = null;
+  #ingestFailures = 0;
 
   constructor(o: { db: Db; clock: Clock; spend: SpendGuard; dataDir?: string; freeBytes?: (dir: string) => number | null }) {
     this.#db = o.db;
@@ -79,6 +82,11 @@ export class Health {
     }
     if (o.status === 'ok') this.#lastSuccess = this.#clock.now();
     this.persist();
+  }
+
+  /** Stores the count of incoming messages that could not be saved; the next persist() records it. */
+  setIngestFailures(n: number): void {
+    this.#ingestFailures = n;
   }
 
   forget(clientId: number): void {
@@ -122,7 +130,7 @@ export class Health {
   #compute(withPublish: boolean): HealthLine {
     const now = this.#clock.now();
     const since = stamp(new Date(this.#wa.since));
-    if (this.#wa.state === 'logged_out') return { ok: false, text: `❌ WhatsApp unlinked since ${since}. Run: npm run cli -- link --reset` };
+    if (this.#wa.state === 'logged_out') return { ok: false, text: `❌ WhatsApp unlinked since ${since}. Follow docs/SETUP.md → "Status logged_out".` };
     if (this.#wa.state === 'replaced') return { ok: false, text: `❌ Another copy of WA Agent took over the WhatsApp session at ${since}. Stop the other copy, then restart the service.` };
     if (this.#wa.state === 'forbidden') return { ok: false, text: `❌ WhatsApp refused this number (403) since ${since}. Check the founder's phone.` };
     if (this.#downSince && now.getTime() - this.#downSince.getTime() > DISCONNECT_GRACE_MS) {
@@ -131,6 +139,10 @@ export class Health {
     const pubFail = withPublish ? this.#publishFailedSince : null;
     if (pubFail && this.#publishAuthFailed) return { ok: false, text: '❌ Google sign-in expired. Run: npm run cli -- google-auth, then restart the service' };
     if (this.#wa.credsSaveFailures > 0) return { ok: false, text: '⚠️ The WhatsApp session could not be saved. Check disk space and the data folder permissions.' };
+    if (this.#ingestFailures > 0) {
+      const n = this.#ingestFailures;
+      return { ok: false, text: `⚠️ ${n} incoming message${n === 1 ? '' : 's'} could not be saved. See docs/SETUP.md.` };
+    }
     if (pubFail && now.getTime() - pubFail.getTime() > PUBLISH_FAIL_MS) {
       return { ok: false, text: `⚠️ Tracker update failing since ${stamp(pubFail)}` };
     }
@@ -157,6 +169,7 @@ export class Health {
       capUsd: this.#spend.capUsd,
       freeGb: this.#freeGb(),
       publishFailingSince: this.#publishFailedSince?.toISOString() ?? null,
+      ingestFailures: this.#ingestFailures,
     };
   }
 
@@ -177,7 +190,9 @@ export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
     if (typeof o.whatsapp.since !== 'string' || Number.isNaN(Date.parse(o.whatsapp.since))) return undefined;
     if (o.freeGb !== null && typeof o.freeGb !== 'number') return undefined;
     if (typeof o.spentToday !== 'number' || typeof o.capUsd !== 'number' || !Array.isArray(o.failed)) return undefined;
-    return o as HealthSnapshot;
+    // Snapshots written before ingestFailures existed still parse.
+    if (o.ingestFailures !== undefined && typeof o.ingestFailures !== 'number') return undefined;
+    return { ...o, ingestFailures: o.ingestFailures ?? 0 } as HealthSnapshot;
   } catch {
     return undefined;
   }
