@@ -219,7 +219,7 @@ Notes:
 - **`person set <number> <team|client>`**: use the full number with country code and no `+` or spaces (for example `919812345678`). A WhatsApp id (it contains `@`) also works. People who show no number in the People section cannot be fixed with `person set` yet. Add `--client ABC` to change the role in one client group only.
 - **`task unlock`** and **`phase unlock`** let the AI change that task or phase again.
 - **`rebuild`** shows up in Drive within about a minute (a 30-second check, then a 60-second upload wait).
-- **`reprocess <client> --since <date> [--until <date>]`** sends old messages to the AI again. This **costs money** and counts toward the daily cap, so keep the date range short. Above 200 messages it only shows the count and the most it could cost; add `--yes` to run it. It will not re-create tasks you closed, and it will not count reminders or decisions twice.
+- **`reprocess <client> --since <date> [--until <date>]`** sends old messages to the AI again. This **costs money** and counts toward the daily cap, so keep the date range short. Above 200 messages it only shows the count and the most it could cost; add `--yes` to run it. It will not re-create tasks you closed, and it will not count decisions or reminders twice from the same message.
 - **Limit of `reprocess`:** it cannot add a missed second task from a message that already produced a task (or that already counted as a reminder or an update on a task). If the AI missed a second piece of work in an old message, add a note to an existing task with `task edit <code> --latest-progress "..."`, or tell the team. There is no "task add" command yet.
 
 ## What the status line means

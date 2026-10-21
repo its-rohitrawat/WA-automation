@@ -70,7 +70,7 @@ export function defaultDeps(env: Env): CliDeps {
 
 const countMessages = (db: Db) => (db.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n;
 
-const ADVICE_LOGGED_OUT = 'WhatsApp refused this session. Run: npm run cli -- link --reset';
+const ADVICE_LOGGED_OUT = 'WhatsApp refused this session (logged out). Follow docs/SETUP.md → "Status logged_out" before running link --reset.';
 const ADVICE_FORBIDDEN = "WhatsApp refused this device (403). Check the founder's phone for a WhatsApp warning; do not reset the link.";
 const ADVICE_REPLACED = 'Another WhatsApp Web or WA Agent session took over. Find and close it (another PC or browser). Do not reset the link.';
 const ADVICE_TIMEOUT = 'No connection to WhatsApp within 5 minutes. Check the internet connection, then run link again (without --reset).';

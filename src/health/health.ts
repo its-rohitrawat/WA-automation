@@ -139,10 +139,6 @@ export class Health {
     const pubFail = withPublish ? this.#publishFailedSince : null;
     if (pubFail && this.#publishAuthFailed) return { ok: false, text: '❌ Google sign-in expired. Run: npm run cli -- google-auth, then restart the service' };
     if (this.#wa.credsSaveFailures > 0) return { ok: false, text: '⚠️ The WhatsApp session could not be saved. Check disk space and the data folder permissions.' };
-    if (this.#ingestFailures > 0) {
-      const n = this.#ingestFailures;
-      return { ok: false, text: `⚠️ ${n} incoming message${n === 1 ? '' : 's'} could not be saved. See docs/SETUP.md.` };
-    }
     if (pubFail && now.getTime() - pubFail.getTime() > PUBLISH_FAIL_MS) {
       return { ok: false, text: `⚠️ Tracker update failing since ${stamp(pubFail)}` };
     }
@@ -150,6 +146,10 @@ export class Health {
     if (this.#failed.size > 0) {
       const n = this.#failed.size;
       return { ok: false, text: `⚠️ ${n} group${n === 1 ? '' : 's'} waiting (AI error)` };
+    }
+    if (this.#ingestFailures > 0) {
+      const n = this.#ingestFailures;
+      return { ok: false, text: `⚠️ ${n} incoming message${n === 1 ? '' : 's'} could not be saved. See docs/SETUP.md.` };
     }
     const free = this.#freeGb();
     if (free !== null && free < LOW_DISK_GB) return { ok: false, text: `⚠️ Low disk: ${free.toFixed(1)} GB free` };

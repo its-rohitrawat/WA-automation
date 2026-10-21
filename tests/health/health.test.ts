@@ -129,7 +129,7 @@ describe('Health', () => {
     expect(h.line().text).toBe('❌ Google sign-in expired. Run: npm run cli -- google-auth, then restart the service');
   });
 
-  it('warns about incoming messages that could not be saved, after the creds-save warning and before the tracker-failing line', () => {
+  it('warns about incoming messages that could not be saved, after the failed-groups line and before low disk', () => {
     const { h, clock } = setup();
     h.setWhatsApp({ ...status('open'), credsSaveFailures: 1 });
     h.setIngestFailures(3);
@@ -137,9 +137,14 @@ describe('Health', () => {
     clock.advance(61 * 60_000);
     expect(h.line().text).toBe('⚠️ The WhatsApp session could not be saved. Check disk space and the data folder permissions.');
     h.setWhatsApp(status('open', clock.now().toISOString()));
+    expect(h.line().text).toBe('⚠️ Tracker update failing since 19 Oct 13:30');
+    h.markPublished();
+    h.recordOutcome(1, { status: 'failed', errorCode: 'refusal' });
+    expect(h.line().text).toContain('waiting (AI error)');
+    h.forget(1);
     expect(h.line()).toEqual({ ok: false, text: '⚠️ 3 incoming messages could not be saved. See docs/SETUP.md.' });
     h.setIngestFailures(0);
-    expect(h.line().text).toBe('⚠️ Tracker update failing since 19 Oct 13:30');
+    expect(h.line().ok).toBe(true);
   });
 
   it('words a single lost message in the singular, and shows it in the workbook too', () => {

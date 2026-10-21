@@ -17,6 +17,8 @@ export class SpendGuard {
   /** Reservations already booked at their estimate by settlePending(); a late settle() must not book them again. */
   readonly #bookedAtEstimate = new Set<number>();
   #nextId = 1;
+  /** Set by settlePending() at shutdown: no new reservation after that, so a late retry pauses instead of starting a paid call. */
+  #closed = false;
 
   constructor(opts: { db: Db; clock: Clock; capUsd: number }) {
     this.#db = opts.db;
@@ -56,7 +58,7 @@ export class SpendGuard {
 
   /** Holds an estimate while a paid call is in flight. Returns a reservation id, or null if it would pass the cap. */
   reserve(estimateUsd: number): number | null {
-    if (!this.canSpend(estimateUsd)) return null;
+    if (this.#closed || !this.canSpend(estimateUsd)) return null;
     const id = this.#nextId++;
     this.#pending.set(id, { usd: estimateUsd, at: this.#clock.now().getTime() });
     return id;
@@ -83,6 +85,7 @@ export class SpendGuard {
    * Reservations are AI calls today, so they are recorded as 'ai'. Returns how many were booked.
    */
   settlePending(detail: string): number {
+    this.#closed = true;
     this.#pendingTotal(); // forgets expired reservations: they no longer count
     let n = 0;
     for (const [id, r] of [...this.#pending]) {

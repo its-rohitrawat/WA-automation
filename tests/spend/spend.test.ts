@@ -117,7 +117,14 @@ describe('SpendGuard', () => {
       { kind: 'ai', usd: 0.2, detail: 'shutdown (estimated)' },
       { kind: 'ai', usd: 0.3, detail: 'shutdown (estimated)' },
     ]);
-    expect(guard.reserve(0.5 - 1e-9)).not.toBeNull(); // nothing held back any more
+    expect(guard.reserve(0.01)).toBeNull(); // closed after shutdown booking
+  });
+
+  it('reserve returns null after settlePending, so a late retry does not start a paid call', () => {
+    const { guard } = make();
+    expect(guard.reserve(0.01)).not.toBeNull();
+    guard.settlePending('shutdown (estimated)');
+    expect(guard.reserve(0.01)).toBeNull();
   });
 
   it('settlePending records nothing when nothing is pending', () => {
