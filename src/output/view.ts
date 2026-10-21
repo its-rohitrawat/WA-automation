@@ -44,13 +44,13 @@ function byUrgency(a: TaskRow, b: TaskRow): number {
   return (
     PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] ||
     (a.deadline ?? '9999-99-99').localeCompare(b.deadline ?? '9999-99-99') ||
-    a.code.localeCompare(b.code)
+    a.id - b.id
   );
 }
 
 /** Newest closing date first, then task code. */
 function byClosed(a: TaskRow, b: TaskRow): number {
-  return (b.closedOn ?? '').localeCompare(a.closedOn ?? '') || a.code.localeCompare(b.code);
+  return (b.closedOn ?? '').localeCompare(a.closedOn ?? '') || a.id - b.id;
 }
 
 /** Inactive clients stay in the workbook, marked "(inactive)". Tabs are in name order. */

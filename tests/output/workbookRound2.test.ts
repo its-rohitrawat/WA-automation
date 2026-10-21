@@ -105,6 +105,21 @@ describe('workbook round 2', () => {
     for (const w of wb.worksheets) expect(w.name.endsWith("'")).toBe(false);
   });
 
+  it('builds with a backslash in a client name', async () => {
+    const db = openDb(':memory:');
+    syncClients(db, [cfg(1, 'Sharma\\Mehta Designs')]);
+    const wb = await build(db);
+    expect(wb.worksheets.map((w) => w.name)).toEqual(['Overview', 'Sharma Mehta Designs']);
+  });
+
+  it('breaks ties by creation order, not by text of the code', () => {
+    const db = seededDb();
+    for (let i = 0; i < 1000; i++) createTask(db, task({ title: `t${i}`, deadline: null }), NOW);
+    const codes = loadTrackerView(db, now, healthy).clients.find((c) => c.client.code === 'SHA')!.usOpen.map((t) => t.code);
+    expect(codes[998]).toBe('SHA-999');
+    expect(codes[999]).toBe('SHA-1000');
+  });
+
   it('shows the revoked note with or without a quote', async () => {
     const db = seededDb();
     const a = createTask(db, task({ title: 'no quote', sourceQuote: null, sourceDate: null, sourceWaId: 'r1' }), NOW);

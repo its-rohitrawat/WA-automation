@@ -29,7 +29,8 @@ describe('sheet names, round 2', () => {
 
   it('strips ! and returns Client when only forbidden characters remain', () => {
     expect(sanitizeSheetName('Yahoo! Studio')).toBe('Yahoo Studio');
-    expect(sanitizeSheetName(':/\?*[]!')).toBe('Client');
+    expect(sanitizeSheetName(':/\\?*[]!')).toBe('Client');
+    expect(sanitizeSheetName('A\\B')).not.toContain('\\');
   });
 
   it('reserves History as well as Overview, case-insensitively', () => {

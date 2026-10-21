@@ -14,7 +14,7 @@ const edge = (s: string) => s.replace(/^[\s']+|[\s']+$/g, '');
 
 export function sanitizeSheetName(name: string): string {
   // "!" would break exceljs's internal-link detection, so it goes too.
-  const spaced = name.replace(/[[\]:*?/\!]/g, ' ').replace(/\s+/g, ' ');
+  const spaced = name.replace(/[[\]:*?/\\!]/g, ' ').replace(/\s+/g, ' ');
   return edge(cut(spaced)) || 'Client';
 }
 
