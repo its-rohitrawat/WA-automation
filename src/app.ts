@@ -70,9 +70,9 @@ export interface AppDeps {
 export interface App {
   start(): void;
   /**
-   * Waits for AI calls and file reads in flight (up to drainMs) and books any paid call still running at its estimate.
-   * Then flushes the publisher (the upload in flight plus one more if anything changed) and the file uploader, up to
-   * 10 s each in parallel. Leaves no timers.
+   * Starts no new AI run, file read or file upload. Waits for AI calls and file reads in flight (up to drainMs) and
+   * books any paid call still running at its estimate. Then flushes the publisher (the upload in flight plus one more
+   * if anything changed) and waits for the file upload in flight, up to 10 s each in parallel. Leaves no timers.
    */
   stop(): Promise<void>;
   /** Applies a new allow-list. Throws, leaving the old allow-list in place, if the config conflicts with the DB. */
@@ -249,6 +249,9 @@ export function createApp(d: AppDeps): App {
       poll = undefined;
       debouncer.stop();
       mediaQueue?.stop();
+      // No new upload pass or file during the drain: a file still uploading when the database closes would reach Drive
+      // with no saved id and be uploaded again after the restart. The pass in flight stops before its next file.
+      void uploader?.stop(0);
       // A result we already paid for is applied, not thrown away and paid for again after a restart.
       const drainMs = d.drainMs ?? 120_000;
       await Promise.all([debouncer.drain(drainMs), mediaQueue?.drain(drainMs)]);
@@ -259,8 +262,8 @@ export function createApp(d: AppDeps): App {
       } catch (err) {
         d.log.error({ err }, 'booking unfinished AI calls failed');
       }
-      // The upload in flight, then one more if results were applied during the drain; and the file upload in flight,
-      // so its Drive id is saved before the database closes. Bounded to 10 s, in parallel.
+      // The upload in flight, then one more if results were applied during the drain; and the file upload still in
+      // flight, so its Drive id is saved before the database closes. Bounded to 10 s, in parallel.
       await Promise.all([publisher.flush(10_000), uploader?.stop(10_000)]);
       // A socket that never closes must not eat the rest of WinSW's 150 s (120 + 10 + 5 plus margin).
       let timer: NodeJS.Timeout | undefined;

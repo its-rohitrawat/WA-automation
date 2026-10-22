@@ -159,8 +159,9 @@ export class Health {
     if (pubFail && now.getTime() - pubFail.getTime() > PUBLISH_FAIL_MS) {
       return { ok: false, text: `⚠️ Tracker update failing since ${stamp(pubFail)}` };
     }
-    // Shared files deferred by the daily cap wait for the budget like a paused group (amendment 15b).
-    if (this.#spend.isPaused() || this.#hasPaused(now) || this.#media.spendCap > 0) return { ok: false, text: SPEND_CAP_LINE };
+    // Shared files deferred by the daily cap are covered by this line only when the cap is really reached; until then
+    // they get their own line below (amendment 15b, review round 1).
+    if (this.#spend.isPaused() || this.#hasPaused(now)) return { ok: false, text: SPEND_CAP_LINE };
     if (this.#failed.size > 0) {
       const n = this.#failed.size;
       return { ok: false, text: `⚠️ ${n} group${n === 1 ? '' : 's'} waiting (AI error)` };
@@ -176,6 +177,12 @@ export class Health {
     if (this.#media.uploadFailed > 0) {
       const n = this.#media.uploadFailed;
       return { ok: false, text: `⚠️ ${n} file${n === 1 ? '' : 's'} could not be uploaded to Drive. See docs/SETUP.md.` };
+    }
+    // A paid read holds its ceiling (about $4 for a scan) while it runs, so a file can wait for the budget long before
+    // the cap is reached. Nothing is paused and nothing needs the owner, so this comes after the warnings above.
+    if (this.#media.spendCap > 0) {
+      const n = this.#media.spendCap;
+      return { ok: false, text: `⚠️ ${n} shared file${n === 1 ? '' : 's'} waiting for today's AI budget (read after midnight IST)` };
     }
     const free = this.#freeGb();
     if (free !== null && free < LOW_DISK_GB) return { ok: false, text: `⚠️ Low disk: ${free.toFixed(1)} GB free` };

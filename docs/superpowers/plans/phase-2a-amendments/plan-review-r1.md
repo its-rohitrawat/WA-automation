@@ -239,6 +239,19 @@ Every task's implementer applies the items listed under its task, in addition to
     - `onUploaded` schedules a workbook publish;
     - `stop()` at shutdown before the database closes.
   - Tests: the tick kicks the queue and ensures waiting clients; a finished file wakes its client; the uploader runs after a publish and is stopped at shutdown.
+- **15h. Review round 1 (23 Oct 2026). This changes 15b.**
+  - A file is deferred for `spend_cap` whenever its hold does not fit under the cap. Every scanned PDF holds about $4.16 at default prices. So a file can wait for the budget while the cap is not reached and nothing is paused.
+  - Health shows "Daily spend cap reached. Paused until midnight IST" only when the cap is really reached, or a group is paused. Rows waiting for the budget no longer show it on their own.
+  - Otherwise they get their own line: `⚠️ N shared file(s) waiting for today's AI budget (read after midnight IST)`. It ranks after failed groups, lost messages, files waiting over 30 minutes and failed uploads, and before low disk. So a group stuck on AI errors is no longer hidden until midnight.
+  - Task 16's runbook adds this line to the status table in docs/SETUP.md.
+  - At shutdown the file uploader is stopped as soon as `stop()` starts, next to `mediaQueue.stop()`. During the drain no new pass starts, and a pass in flight stops before its next file. The later `stop(10_000)` still waits for the upload in flight. This avoids duplicate Drive copies of files uploaded while the database closes.
+  - New app tests cover:
+    - the real extractor under the app's spend guard (a hold that does not fit; a read still running at shutdown, booked once at its estimate);
+    - `stop()` returning after `drainMs` when a read never finishes;
+    - no new file starting during the drain;
+    - the default concurrency of 2;
+    - the tick retrying a due upload;
+    - `onUploaded` scheduling a publish.
 
 ## Task 16: runbook and final verification
 

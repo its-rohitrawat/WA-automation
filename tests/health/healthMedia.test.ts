@@ -8,12 +8,14 @@ import { seededDb } from '../helpers/db.ts';
 function setup(freeBytes: () => number | null = () => 200e9) {
   const db = seededDb();
   const clock = manualClock('2026-10-19T08:00:00Z');
-  const h = new Health({ db, clock, spend: new SpendGuard({ db, clock, capUsd: 1 }), freeBytes });
+  const spend = new SpendGuard({ db, clock, capUsd: 1 });
+  const h = new Health({ db, clock, spend, freeBytes });
   h.setWhatsApp({ state: 'open', since: '2026-10-19T08:00:00.000Z', lastErrorCode: null, credsSaveFailures: 0 });
-  return { db, h };
+  return { db, h, spend };
 }
 const counts = (o: Partial<MediaHealth> = {}): MediaHealth => ({ pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0, ...o });
 const SPEND_LINE = '⚠️ Daily spend cap reached. Paused until midnight IST';
+const budgetLine = (n: number) => `⚠️ ${n} shared file${n === 1 ? '' : 's'} waiting for today's AI budget (read after midnight IST)`;
 
 describe('Health and shared files', () => {
   it('warns when shared files wait more than 30 minutes', () => {
@@ -46,17 +48,35 @@ describe('Health and shared files', () => {
     expect(h.line().text).toBe('⚠️ 1 group waiting (AI error)');
   });
 
-  it('files waiting for the daily budget show the spend-cap line (15b)', () => {
-    const { h } = setup();
+  it('files waiting for the daily budget get their own line while the cap is not reached (15b, review round 1)', () => {
+    const { h } = setup(() => 5e9);
+    // A scan holds about $4 while it is read, so it can wait for the budget long before the cap is reached.
     h.setMedia(counts({ pending: 1, spendCap: 1 }));
+    expect(h.line()).toEqual({ ok: false, text: budgetLine(1) });
+    expect(h.workbookLine()).toEqual({ ok: false, text: budgetLine(1) });
+    h.setMedia(counts({ pending: 2, spendCap: 2 }));
+    expect(h.line().text).toBe(budgetLine(2));
+    // Nothing is paused, so the problems that need the owner come first: upload failures, long waits,
+    // lost messages and AI errors. Low disk comes after the media warnings, as for the others.
+    h.setMedia(counts({ pending: 2, spendCap: 1, uploadFailed: 1 }));
+    expect(h.line().text).toBe('⚠️ 1 file could not be uploaded to Drive. See docs/SETUP.md.');
+    h.setMedia(counts({ pending: 2, stale: 1, spendCap: 1 }));
+    expect(h.line().text).toBe('⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.');
+    h.setMedia(counts({ pending: 1, spendCap: 1 }));
+    h.setIngestFailures(1);
+    expect(h.line().text).toBe('⚠️ 1 incoming message could not be saved. See docs/SETUP.md.');
+    h.recordOutcome(1, { status: 'failed', errorCode: 'refusal' });
+    expect(h.line().text).toBe('⚠️ 1 group waiting (AI error)');
+  });
+
+  it('files waiting for the budget show the spend-cap line only when the cap is really reached (15b)', () => {
+    const { h, spend } = setup();
+    h.recordOutcome(1, { status: 'failed', errorCode: 'refusal' });
+    h.setMedia(counts({ pending: 1, spendCap: 1 }));
+    expect(h.line().text).toBe('⚠️ 1 group waiting (AI error)');
+    spend.record('ai', 1, 'batch 1');
     expect(h.line()).toEqual({ ok: false, text: SPEND_LINE });
     expect(h.workbookLine()).toEqual({ ok: false, text: SPEND_LINE });
-    // Like a paused group, it outranks AI errors and the other media warnings.
-    h.recordOutcome(1, { status: 'failed', errorCode: 'refusal' });
-    h.setMedia(counts({ pending: 2, stale: 1, spendCap: 1, uploadFailed: 1 }));
-    expect(h.line().text).toBe(SPEND_LINE);
-    h.setMedia(counts({ pending: 1, stale: 1 }));
-    expect(h.line().text).toBe('⚠️ 1 group waiting (AI error)');
   });
 
   it('a waiting run changes nothing in the media warnings (15c)', () => {

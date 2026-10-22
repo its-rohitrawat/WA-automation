@@ -4,18 +4,20 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
 import Anthropic from '@anthropic-ai/sdk';
+import sharp from 'sharp';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp, type AppMediaDeps } from '../src/app.ts';
 import { Reconciler } from '../src/brain/reconciler.ts';
 import { readHealthSnapshot } from '../src/health/health.ts';
-import type { Extractor } from '../src/media/extract.ts';
+import { imageEstimateUsd, type Extractor } from '../src/media/extract.ts';
 import { MediaDownloadError, type MediaFetcher } from '../src/media/fetch.ts';
 import { mediaRefAad, MediaRefSealer } from '../src/media/ref.ts';
 import { DriveFileUploader } from '../src/media/uploader.ts';
 import type { Prices } from '../src/spend/pricing.ts';
+import { SpendGuard } from '../src/spend/spendGuard.ts';
 import type { Db } from '../src/store/db.ts';
 import { finishMedia, getMedia, insertMedia, markDownloaded, markUploadFailed, messageRowId } from '../src/store/media.ts';
-import { insertMessage } from '../src/store/messages.ts';
+import { insertMessage, markProcessed } from '../src/store/messages.ts';
 import { setRole, upsertPerson } from '../src/store/people.ts';
 import { systemClock } from '../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../src/util/logger.ts';
@@ -38,6 +40,7 @@ interface SetupOptions {
   media?: Partial<AppMediaDeps> | null;
   log?: Logger;
   startedAt?: Date;
+  drainMs?: number;
   /** Runs on the database and the data folder before the app is made. */
   prepare?: (db: Db, dataDir: string) => void;
 }
@@ -69,6 +72,7 @@ function setup(o: SetupOptions = {}) {
   const app = createApp({
     db, clock: systemClock, log: o.log ?? silentLogger(), gateway, allow, ai, drive, prices: P, spendCapUsd: 15,
     quietMs: 240_000, maxWaitMs: 1_200_000, maxConcurrent: 3, dataDir, freeBytes: () => 500e9, pollMs: 30_000, media, startedAt: o.startedAt,
+    drainMs: o.drainMs,
   });
   app.start();
   const sock = sockets[0]!;
@@ -76,10 +80,17 @@ function setup(o: SetupOptions = {}) {
   return { db, ai, drive, app, sock, fetcher, extract, dataDir };
 }
 
-const shareImage = (sock: FakeSocket) =>
+const shareImage = (sock: FakeSocket, waId = 'IMG1') =>
   sock.emit('messages.upsert', { type: 'notify', messages: [
-    waRaw('IMG1', { imageMessage: { url: 'https://mmg.whatsapp.net/v/t1', directPath: '/v/t1', mediaKey: MEDIA_KEY, mimetype: 'image/jpeg', caption: 'new banner' } }),
+    waRaw(waId, { imageMessage: { url: 'https://mmg.whatsapp.net/v/t1', directPath: '/v/t1', mediaKey: MEDIA_KEY, mimetype: 'image/jpeg', caption: 'new banner' } }),
   ] });
+
+/** A small real JPEG, so the standard extractor decodes it and goes on to the paid call. */
+const REAL_JPEG_SIZE = { width: 64, height: 48 };
+const realJpeg = () => sharp({ create: { ...REAL_JPEG_SIZE, channels: 3, background: { r: 30, g: 90, b: 200 } } }).jpeg().toBuffer();
+const NOTHING_READ = { textKind: null, text: null, pageCount: null, note: null };
+const ZERO_USAGE = { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
+const BUDGET_LINE = "⚠️ 1 shared file waiting for today's AI budget (read after midnight IST)";
 
 /** stop() ends with a final upload whose workbook build runs on (fake) timers: advance until it resolves. */
 async function stopApp(app: { stop(): Promise<void> }): Promise<void> {
@@ -114,6 +125,29 @@ function storedImage(db: Db, sealer: MediaRefSealer, createdAt: string): void {
     messageId: messageRowId(db, 1, 'IMG0')!, clientId: 1, kind: 'image', status: 'pending', mimeType: 'image/jpeg', fileName: null, fileSize: 10,
     seconds: null, forwarded: false, refEnc: sealer.seal(ref, mediaRefAad(1, 'IMG0')), errorCode: null, createdAt,
   });
+}
+
+/**
+ * A PDF of client SHA's client member, read and saved before the app starts, but not yet in Drive. Its message is
+ * processed, so no reconcile (and no publish after one) runs in the test. Returns the media id.
+ */
+function storedClientDoc(db: Db, dataDir: string): number {
+  insertMessage(db, {
+    waId: 'DOC1', clientId: 1, senderJid: SHARMA_PN, senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false,
+    ts: '2026-10-10T08:00:00.000Z', text: null, quotedWaId: null, mediaType: 'document',
+  });
+  upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
+  setRole(db, 1, SHARMA_PN, 'client', 'human');
+  const id = insertMedia(db, {
+    messageId: messageRowId(db, 1, 'DOC1')!, clientId: 1, kind: 'document', status: 'pending', mimeType: 'application/pdf', fileName: 'brief.pdf',
+    fileSize: 3, seconds: null, forwarded: false, refEnc: null, errorCode: null, createdAt: '2026-10-10T08:00:00.000Z',
+  });
+  mkdirSync(join(dataDir, 'media', 'SHA', '2026-10'), { recursive: true });
+  writeFileSync(join(dataDir, 'media', 'SHA', '2026-10', `DOC1-${id}.pdf`), 'pdf');
+  markDownloaded(db, id, { localPath: `media/SHA/2026-10/DOC1-${id}.pdf`, sha256: 'x', fileSize: 3, at: '2026-10-10T08:00:01.000Z' });
+  finishMedia(db, id, { textKind: null, text: null, pageCount: null, note: null, at: '2026-10-10T08:00:02.000Z' });
+  markProcessed(db, [messageRowId(db, 1, 'DOC1')!], '2026-10-10T08:05:00.000Z');
+  return id;
 }
 
 const minutesBefore = (min: number) => new Date(Date.parse('2026-10-19T07:00:00Z') - min * MINUTE);
@@ -203,6 +237,164 @@ describe('app with shared files', () => {
     expect(getMedia(db, 1)?.status).toBe('done');
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it('stop() gives up on a file read that never finishes once drainMs is over', async () => {
+    const g = gate();
+    const extract = vi.fn<Extractor>(async () => {
+      await g.promise;
+      return NOTHING_READ;
+    });
+    const { db, app, sock } = setup({ media: { extract }, drainMs: 5_000 });
+    shareImage(sock);
+    await vi.waitFor(() => expect(extract).toHaveBeenCalled());
+    let stopped = false;
+    const p = app.stop().then(() => {
+      stopped = true;
+    });
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(stopped).toBe(false);
+    // drainMs, then at most 10 s for the last publish and 5 s for WhatsApp: well inside WinSW's stoptimeout.
+    for (let i = 0; i < 12 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
+    expect(stopped).toBe(true);
+    await p;
+    expect(getMedia(db, 1)?.status).toBe('pending');
+    g.release();
+    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'));
+  });
+
+  it('stop() starts no other file while it waits for the one in flight', async () => {
+    const g = gate();
+    let n = 0;
+    const fetcher = vi.fn<MediaFetcher>(async () => {
+      if (++n === 1) await g.promise;
+      return Buffer.from('jpeg-bytes');
+    });
+    const { db, app, sock } = setup({ media: { fetcher, concurrency: 1 } });
+    shareImage(sock, 'IMG1');
+    shareImage(sock, 'IMG2');
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+    expect(app.mediaQueue!.active).toBe(1);
+    let stopped = false;
+    const p = app.stop().then(() => {
+      stopped = true;
+    });
+    g.release();
+    // Saving the download is real file I/O: wait for it, not for fake time.
+    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'));
+    await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0));
+    for (let i = 0; i < 30 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
+    await p;
+    // The second file is downloaded after the next start, not during the shutdown.
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(getMedia(db, 2)).toMatchObject({ status: 'pending', attempts: 0, localPath: null });
+  });
+
+  it('reads two files at once by default', async () => {
+    const g = gate();
+    const fetcher = vi.fn<MediaFetcher>(async () => {
+      await g.promise;
+      return Buffer.from('jpeg-bytes');
+    });
+    const { db, app, sock } = setup({ media: { fetcher } });
+    for (const id of ['IMG1', 'IMG2', 'IMG3']) shareImage(sock, id);
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(app.mediaQueue!.active).toBe(2);
+    g.release();
+    await vi.waitFor(() => expect([1, 2, 3].map((id) => getMedia(db, id)?.status)).toEqual(['done', 'done', 'done']));
+    await stopApp(app);
+  });
+
+  it('a file that settles during the shutdown drain is not uploaded during the shutdown (it stays due for the next start)', async () => {
+    const g = gate();
+    const extract = vi.fn<Extractor>(async () => {
+      await g.promise;
+      return NOTHING_READ;
+    });
+    const { db, drive, app, sock } = setup({ media: { extract } });
+    await vi.advanceTimersByTimeAsync(1_000); // the first publish creates the Drive root folder
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('T1', 'hello')] });
+    setRole(db, 1, SHARMA_PN, 'client', 'human');
+    shareImage(sock);
+    await vi.waitFor(() => expect(extract).toHaveBeenCalled());
+    let stopped = false;
+    const p = app.stop().then(() => {
+      stopped = true;
+    });
+    g.release();
+    for (let i = 0; i < 30 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
+    await p;
+    expect(getMedia(db, 1)).toMatchObject({ status: 'done', driveFileId: null });
+    expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']);
+    expect(db.prepare('SELECT drive_attempts FROM media').get()).toEqual({ drive_attempts: 0 });
+  });
+});
+
+describe('app media spend (review round 1)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-19T07:00:00Z'));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  const ledger = (db: Db) => db.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
+
+  it('paid file reads use the app’s daily cap: an image whose hold does not fit waits for the budget, and Health says so', async () => {
+    const ai = new FakeMediaAi();
+    const jpeg = await realJpeg();
+    const fetcher = vi.fn<MediaFetcher>(async () => jpeg);
+    const { db, app, sock } = setup({
+      media: { ai, fetcher, extract: undefined }, // the standard extractor
+      // Spent today but under the $15 cap: nothing is paused, yet an image's hold (about $0.10) no longer fits.
+      prepare: (db) => new SpendGuard({ db, clock: systemClock, capUsd: 15 }).record('ai', 14.99, 'batch 1'),
+    });
+    shareImage(sock);
+    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'spend_cap', attempts: 0 }));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(ai.calls).toHaveLength(0);
+    expect(ledger(db)).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(readHealthSnapshot(db)!.media).toMatchObject({ pending: 1, spendCap: 1 });
+    expect(readHealthSnapshot(db)!.line).toEqual({ ok: false, text: BUDGET_LINE });
+    await stopApp(app);
+  });
+
+  it('a paid file read still running at shutdown is given up after drainMs and booked once, at its estimate', async () => {
+    const g = gate();
+    const ai = new FakeMediaAi();
+    const describeImage = vi.spyOn(ai, 'describeImage').mockImplementation(async () => {
+      await g.promise;
+      return { text: 'A blue square', usage: ZERO_USAGE, costUsd: 0.01, fallbackUsed: false };
+    });
+    const jpeg = await realJpeg();
+    const fetcher = vi.fn<MediaFetcher>(async () => jpeg);
+    const { db, app, sock } = setup({ media: { ai, fetcher, extract: undefined }, drainMs: 5_000 });
+    shareImage(sock);
+    await vi.waitFor(() => expect(describeImage).toHaveBeenCalled());
+    expect(ledger(db)).toEqual([]);
+    let stopped = false;
+    const p = app.stop().then(() => {
+      stopped = true;
+    });
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(stopped).toBe(false);
+    for (let i = 0; i < 12 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
+    expect(stopped).toBe(true);
+    await p;
+    const booked = ledger(db);
+    expect(booked).toHaveLength(1);
+    expect(booked[0]).toMatchObject({ kind: 'ai', detail: 'shutdown before the AI call finished (estimated)' });
+    expect(booked[0]!.usd).toBeCloseTo(imageEstimateUsd(REAL_JPEG_SIZE, P), 10);
+    // The answer arrives after all: the call is already booked, so it is not booked again.
+    g.release();
+    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'));
+    expect(ledger(db)).toEqual(booked);
+  });
 });
 
 describe('app media wiring (15g)', () => {
@@ -289,25 +481,37 @@ describe('app media wiring (15g)', () => {
     expect(stop).toHaveBeenCalledWith(10_000);
   });
 
+  it('the tick retries a file upload that is due, and the finished upload publishes the workbook', async () => {
+    const { db, drive, app } = setup({ prepare: (db, dataDir) => void storedClientDoc(db, dataDir) });
+    // Only the client file's first try fails; the tracker uploads go through.
+    const createFile = drive.createFile.bind(drive);
+    let failures = 1;
+    vi.spyOn(drive, 'createFile').mockImplementation(async (name, mime, body, parentId, timeoutMs) => {
+      if (name !== 'Tracker.xlsx' && failures-- > 0) throw new Error('Drive unavailable');
+      return createFile(name, mime, body, parentId, timeoutMs);
+    });
+    // The first publish creates the Drive root, then the uploader tries the file.
+    await vi.waitFor(() =>
+      expect(db.prepare('SELECT drive_file_id, drive_attempts, drive_failed FROM media').get()).toEqual({ drive_file_id: null, drive_attempts: 1, drive_failed: 0 }),
+    );
+    expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']);
+    // Due again 2 minutes later. Nothing else happens meanwhile: no message, no file, no publish.
+    const { nextAt } = db.prepare('SELECT drive_next_at AS nextAt FROM media').get() as { nextAt: string };
+    await vi.advanceTimersByTimeAsync(Date.parse(nextAt) - Date.now() - 1_000);
+    expect(getMedia(db, 1)?.driveFileId).toBeNull();
+    expect(drive.uploads).toBe(1);
+    // The first tick after that retries it.
+    await vi.advanceTimersByTimeAsync(31_000);
+    await vi.waitFor(() => expect(getMedia(db, 1)?.driveFileId).toBeTruthy());
+    expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx', 'brief.pdf']);
+    // onUploaded schedules a publish, so Files received gets the Drive link without waiting for another change.
+    await vi.waitFor(() => expect(drive.updated).toHaveLength(1));
+    await stopApp(app);
+  });
+
   it('a start gives uploads that gave up a fresh set of attempts', async () => {
     const { db, drive, app } = setup({
-      prepare: (db, dataDir) => {
-        insertMessage(db, {
-          waId: 'DOC1', clientId: 1, senderJid: SHARMA_PN, senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false,
-          ts: '2026-10-10T08:00:00.000Z', text: null, quotedWaId: null, mediaType: 'document',
-        });
-        upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
-        setRole(db, 1, SHARMA_PN, 'client', 'human');
-        const id = insertMedia(db, {
-          messageId: messageRowId(db, 1, 'DOC1')!, clientId: 1, kind: 'document', status: 'pending', mimeType: 'application/pdf', fileName: 'brief.pdf',
-          fileSize: 3, seconds: null, forwarded: false, refEnc: null, errorCode: null, createdAt: '2026-10-10T08:00:00.000Z',
-        });
-        mkdirSync(join(dataDir, 'media', 'SHA', '2026-10'), { recursive: true });
-        writeFileSync(join(dataDir, 'media', 'SHA', '2026-10', `DOC1-${id}.pdf`), 'pdf');
-        markDownloaded(db, id, { localPath: `media/SHA/2026-10/DOC1-${id}.pdf`, sha256: 'x', fileSize: 3, at: '2026-10-10T08:00:01.000Z' });
-        finishMedia(db, id, { textKind: null, text: null, pageCount: null, note: null, at: '2026-10-10T08:00:02.000Z' });
-        markUploadFailed(db, id, { failed: true, nextAt: null });
-      },
+      prepare: (db, dataDir) => markUploadFailed(db, storedClientDoc(db, dataDir), { failed: true, nextAt: null }),
     });
     expect(db.prepare('SELECT drive_failed, drive_attempts FROM media').get()).toEqual({ drive_failed: 0, drive_attempts: 0 });
     await vi.advanceTimersByTimeAsync(1_000);
