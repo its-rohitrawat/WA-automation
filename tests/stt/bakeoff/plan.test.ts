@@ -114,6 +114,26 @@ describe('buildPlan', () => {
     expect(formatPlan([lost])).toContain('send again (an earlier attempt may already be billed)');
   });
 
+  it('counts parts from the prepared MP3 when there is one, since that is the file the runner cuts', () => {
+    // The prepared MP3 runs a little longer than the original: 1800 s gives 6 parts of 300 s, 1800.07 s gives 7.
+    const asked: number[] = [];
+    const [resumed] = buildPlan(input({
+      samples: [{ sample: meeting, seconds: 1800, preparedSeconds: 1800.07 }],
+      providers: [PROVIDERS[2]!],
+      stateOf: () => 'unknown',
+      canResume: (_s, _p, parts) => (asked.push(parts), true),
+      retryUnknown: true,
+    }));
+    expect(resumed).toMatchObject({ seconds: 1800, parts: 7, action: 'resume' });
+    expect(asked).toEqual([7]);
+    // The listing and the estimate keep the original's length.
+    const [sent] = buildPlan(input({ samples: [{ sample: meeting, seconds: 1800, preparedSeconds: 1800.07 }], providers: [PROVIDERS[2]!] }));
+    expect(sent!.estimateUsd).toBeCloseTo(0.18, 10);
+    expect(formatPlan([sent!])).toContain(' 30:00  openai     gpt-4o-transcribe-diarize in 7 parts');
+    // Before anything is prepared, the original's length is all there is.
+    expect(buildPlan(input({ samples: [{ sample: meeting, seconds: 1800 }], providers: [PROVIDERS[2]!] }))[0]!.parts).toBe(6);
+  });
+
   it('never asks about resuming a slot that is not unknown', () => {
     let asked = 0;
     buildPlan(input({ retryFailed: true, retryUnknown: true, canResume: () => (asked++, true) }));

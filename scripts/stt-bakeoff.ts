@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -163,7 +163,7 @@ const samples: Sample[] = found.filter((s) => only.length === 0 || only.includes
 
 const ledger = new Ledger(outDir);
 // Every unreadable recording is named at once, before anything is converted or sent.
-const measured: { sample: Sample; seconds: number }[] = [];
+const measured: { sample: Sample; seconds: number; preparedSeconds?: number }[] = [];
 const unreadable: string[] = [];
 for (const sample of samples) {
   try {
@@ -242,6 +242,19 @@ function makeProvider(id: ProviderId): SttProvider {
   }
 }
 const providers = new Map(providerIds.map((id) => [id, makeProvider(id)] as const));
+
+// The runner cuts the prepared MP3, which runs a little longer than the original. Where one exists its length sets the
+// part count, so a free resume is judged on the parts that will really be sent. One that cannot be measured leaves the
+// original's length; a real run that needs it then stops when preparing it.
+for (const m of measured) {
+  const mp3 = join(preparedDir, `${m.sample.id}.mp3`);
+  if (!existsSync(mp3)) continue;
+  try {
+    m.preparedSeconds = await ffmpeg.seconds(mp3);
+  } catch {
+    // See above.
+  }
+}
 
 const items = buildPlan({
   samples: measured,

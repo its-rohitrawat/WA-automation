@@ -22,7 +22,11 @@ export interface PlanItem {
 }
 
 export interface PlanInput {
-  samples: readonly { sample: Sample; seconds: number }[];
+  /**
+   * seconds is the original recording's length, for the listing and the estimate. preparedSeconds is the prepared MP3's,
+   * when one exists: the runner cuts that file, which runs a little longer (0.07-0.13 s), so it sets the part count.
+   */
+  samples: readonly { sample: Sample; seconds: number; preparedSeconds?: number }[];
   providers: readonly { id: ProviderId; maxPartSeconds: number }[];
   stateOf: (sampleId: string, provider: ProviderId) => SlotState;
   /**
@@ -44,12 +48,13 @@ function actionFor(state: SlotState, input: PlanInput, sampleId: string, provide
 /** One item per sample and provider, in sample order. Meetings are sent with speaker labels on. */
 export function buildPlan(input: PlanInput): PlanItem[] {
   const items: PlanItem[] = [];
-  for (const { sample, seconds } of input.samples) {
+  for (const { sample, seconds, preparedSeconds } of input.samples) {
     for (const p of input.providers) {
       const diarize = sample.kind === 'meeting';
       const price = modelFor(p.id, diarize);
       const state = input.stateOf(sample.id, p.id);
-      const parts = Math.max(1, Math.ceil(seconds / p.maxPartSeconds));
+      // As the runner's split counts them, so a free resume is judged on the parts that will really be sent.
+      const parts = Math.max(1, Math.ceil((preparedSeconds ?? seconds) / p.maxPartSeconds));
       const action = actionFor(state, input, sample.id, p.id, parts);
       items.push({
         sample,
