@@ -15,7 +15,8 @@ const PDF_OPTIONS = { verbosity: 0, maxImageSize: 16_000_000 };
  *
  * pageCount is advisory: PDF.js takes it from the file's own /Count entry, which the sender controls. A forged count
  * that is too high is corrected, but one that is too low is not, and the pages past it are never read. Never use it as
- * a ceiling for paid work on the file.
+ * a ceiling for paid work on the file. A count below 1 is refused ('pdf_no_pages'): it would read as a file with no
+ * text, which looks like a scan, while Claude would read every real page.
  *
  * PDF.js takes over (detaches) the buffer it is given and refuses a Node Buffer, so it gets a plain Uint8Array copy and
  * the caller's bytes stay intact. With ownsBytes (the worker, whose bytes are its own and never read again), a plain
@@ -34,6 +35,7 @@ export async function extractPdfText(bytes: Uint8Array, limits: { maxPages: numb
   }
   try {
     const pageCount = pdf.numPages;
+    if (!(pageCount >= 1)) throw new ParseError('pdf_no_pages');
     const pages: string[] = [];
     for (let i = 1; i <= Math.min(pageCount, limits.maxPages); i++) {
       const page = await pdf.getPage(i);

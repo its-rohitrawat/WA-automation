@@ -159,6 +159,16 @@ describe('parseFile (worker thread)', () => {
     expect(JSON.parse(r.text)).toMatchObject({ maxOldGenerationSizeMb: 256, maxYoungGenerationSizeMb: 64, stackSizeMb: 4 });
   });
 
+  it("starts each parser with an empty environment, so the service's secrets are not in the thread that reads untrusted files", async () => {
+    process.env.PARSER_ENV_PROBE = 'set-in-the-service';
+    try {
+      const r = await parseFile({ kind: 'docx', bytes: new Uint8Array(1), ...LIMITS }, { timeoutMs: 15_000, workerUrl: fixture('envWorker.ts') });
+      expect(JSON.parse(r.text)).toEqual({ probe: false, count: 0 });
+    } finally {
+      delete process.env.PARSER_ENV_PROBE;
+    }
+  });
+
   it('stops a parser that runs out of memory, and the service keeps running', async () => {
     await expect(parseFile({ kind: 'docx', bytes: new Uint8Array(1), ...LIMITS }, { timeoutMs: 30_000, workerUrl: fixture('oomWorker.ts') })).rejects.toMatchObject({
       name: 'ParseError',

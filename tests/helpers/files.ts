@@ -23,15 +23,17 @@ export async function tinyDocx(paragraphs: string[]): Promise<Buffer> {
 
 /**
  * A minimal valid PDF, one entry per page. Each page lists its text lines. An empty list draws a line and has no
- * text layer, like a scan.
+ * text layer, like a scan. With `count`, the page tree's /Count entry claims that many pages instead of the real
+ * number, as a forged file can.
  */
-export function tinyPdf(pages: string[][]): Buffer {
+export function tinyPdf(pages: string[][], o: { count?: number } = {}): Buffer {
   const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
   return pdfOfStreams(
     pages.map((lines) => ({
       data: lines.length ? `BT /F1 12 Tf 14 TL 72 720 Td ${lines.map((l) => `(${esc(l)}) Tj T*`).join(' ')} ET` : '0 0 m 200 200 l S',
       filter: '',
     })),
+    o.count,
   );
 }
 
@@ -74,12 +76,15 @@ export function bigDrawingPdf(o: { drawingMb: number; imageMb: number }): Buffer
   return pdfOfObjects(objects);
 }
 
-/** A PDF with one page per content stream. Stream data travels as latin1 text, so binary bytes stay intact. */
-function pdfOfStreams(streams: { data: string; filter: string }[]): Buffer {
+/**
+ * A PDF with one page per content stream, and a /Count of `count` (default: the real number of pages). Stream data
+ * travels as latin1 text, so binary bytes stay intact.
+ */
+function pdfOfStreams(streams: { data: string; filter: string }[], count = streams.length): Buffer {
   const objects: string[] = [];
   const pageIds = streams.map((_, i) => 4 + i * 2);
   objects[1] = '<< /Type /Catalog /Pages 2 0 R >>';
-  objects[2] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${streams.length} >>`;
+  objects[2] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${count} >>`;
   objects[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>';
   streams.forEach(({ data, filter }, i) => {
     const pageId = 4 + i * 2;

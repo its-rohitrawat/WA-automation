@@ -27,7 +27,8 @@ function sendable(bytes: Uint8Array, transfer: boolean): Uint8Array<ArrayBuffer>
 /**
  * Parses one file in a fresh worker thread and kills it after timeoutMs, or as soon as its memory outside the V8 heap
  * passes MEDIA_LIMITS.maxParserExternalBytes ('parse_memory'). terminate() stops even a busy loop.
- * The worker's console output is discarded so parser warnings never reach the service log.
+ * The worker's console output is discarded so parser warnings never reach the service log. The worker starts with an
+ * empty environment: by default it would get a copy of process.env, API keys included, and the parsers need none of it.
  *
  * The caller's bytes stay intact unless `transfer` is true. Then bytes that own their whole memory are moved to the
  * worker instead of copied, and the caller's view is empty (length 0) once this is called. Only a caller that never
@@ -43,6 +44,7 @@ export function parseFile(job: ParseJob, o: { timeoutMs: number; workerUrl?: URL
         workerData: { ...job, bytes },
         transferList: [bytes.buffer],
         resourceLimits: LIMITS,
+        env: {},
         stdout: true,
         stderr: true,
       });

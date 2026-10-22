@@ -126,6 +126,19 @@ Every task's implementer applies the items listed under its task, in addition to
     - readScannedPdf receives the full bytes;
     - the `scan_too_long` byte limit still fires for a scan over `maxScannedPdfBytes`;
     - readDocx asks for `transfer`.
+- **9g. The PDF page count is not a limit (Task 7 review).** `ParseResult.pageCount` comes from the file's own /Count entry, which the sender writes. PDF.js corrects a count that is too high, but not one that is too low: a 5-page text PDF with /Count 1 parses as `{ text: 'Page 1', pageCount: 1 }`, and pages 2–5 are never read. The parser now refuses a count below 1 with `ParseError('pdf_no_pages')`, so a forged /Count 0 can no longer pass as a scan with no text. A lower positive count still looks real, and Claude is sent the whole file and reads every real page. So in readPdf:
+  - **The reservation never comes from `pageCount`.** Add `scannedPdfCeilingUsd(p: Prices)` = `estimateCostUsd(MEDIA_SYSTEM_PROMPT.length + INSTRUCTION_CHARS, p, PDF_MAX_TOKENS) + (MAX_PDF_INPUT_TOKENS * p.inputPerMTok) / 1_000_000`, with `MAX_PDF_INPUT_TOKENS = Math.min(CLAUDE_PDF_MAX_PAGES * PDF_TOKENS_PER_PAGE, 1_000_000)`.
+    - `CLAUDE_PDF_MAX_PAGES = 600` is the most pages Claude reads from one PDF in one request (100 on 200k-context models).
+    - 1,000,000 tokens is the largest context window of a current model; a longer request is refused before it is billed.
+    - readPdf reserves `scannedPdfCeilingUsd(d.prices)`, and 9a's `too_costly` check uses the same figure. Settlement (Task 8) books the real cost, so the rest is held only while the call runs. About $4.2 at claude-opus-5-5 prices, against the default $15 daily cap. Nothing reserves with `scannedPdfEstimateUsd(pages)` any more; remove it or keep it for tests only.
+  - **The page check is not a safety limit.** `pages > maxScannedPdfPages` stays as an early `scan_too_long` for honest files. The limit that holds against a forged file is the byte check (`size > maxScannedPdfBytes`, 9f).
+  - The stored `pageCount` is shown as it is (prompt text, Files received). It is never used as a limit.
+  - A parse that fails with `pdf_no_pages` is an ordinary ParseError: the row fails as "could not be read", and nothing is paid.
+  - Tests (the real parseFile, or a fake `parse` that returns what the parser returns for these files):
+    - a 3-page scan with /Count 1 (`tinyPdf([[], [], []], { count: 1 })` parses as `{ text: '', pageCount: 1 }`): the reservation equals `scannedPdfCeilingUsd(prices)`, not a 1-page estimate, and readScannedPdf receives the full bytes;
+    - the same file with `spend.capUsd` below the ceiling is `too_costly`, and Claude is not called;
+    - a text PDF with /Count 0 (`tinyPdf([['Page 1'], ['Page 2']], { count: 0 })`) makes no paid call and reaches the processor as `ParseError('pdf_no_pages')`.
+  - Runbook (16c): a scanned PDF holds about $4 of the daily cap while Claude reads it.
 
 ## Task 10: media processor
 

@@ -1,3 +1,4 @@
+import type { HeapInfo } from 'node:v8';
 import { Worker } from 'node:worker_threads';
 import { getDocumentProxy } from 'unpdf';
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
@@ -52,8 +53,11 @@ async function spyOnNextDocument(o: { failPage?: number } = {}): Promise<{ destr
   return { destroy: () => destroy, cleanups };
 }
 
-/** The next document opened is a stand-in whose pages hold these text items, as PDF.js reports them. */
-function fakeNextDocument(pages: { str: string; hasEOL: boolean }[][]): void {
+/**
+ * The next document opened is a stand-in whose pages hold these items, as PDF.js reports them: text items, and
+ * marked-content items (`{ type }`, no text).
+ */
+function fakeNextDocument(pages: ({ str: string; hasEOL: boolean } | { type: string })[][]): void {
   const pdf = {
     numPages: pages.length,
     getPage: async (n: number) => ({ getTextContent: async () => ({ items: pages[n - 1] ?? [] }), cleanup: () => true }),
@@ -81,6 +85,30 @@ describe('extractPdfText', () => {
     expect(r.text).toBe('Page 1\n\nPage 2'); // pages are separated by a blank line
   });
 
+  it('corrects a page count that is too high, but takes one that is too low as given and reads only that many pages', async () => {
+    // The count comes from the file's own /Count entry. It is advisory: never a limit for paid work on the file
+    // (plan amendment 9g).
+    const fivePages = [['Page 1'], ['Page 2'], ['Page 3'], ['Page 4'], ['Page 5']];
+    expect(await extractPdfText(tinyPdf(fivePages, { count: 9 }), { maxPages: 200 })).toEqual({
+      text: 'Page 1\n\nPage 2\n\nPage 3\n\nPage 4\n\nPage 5',
+      pageCount: 5,
+    });
+    expect(await extractPdfText(tinyPdf(fivePages, { count: 2 }), { maxPages: 200 })).toEqual({ text: 'Page 1\n\nPage 2', pageCount: 2 });
+    expect(await extractPdfText(tinyPdf(fivePages, { count: 1 }), { maxPages: 200 })).toEqual({ text: 'Page 1', pageCount: 1 });
+  });
+
+  it('refuses a file whose page count is below 1, rather than report it as a scan with no text, and frees the document', async () => {
+    // A forged /Count 0 on a text file would otherwise read as no pages and no text, which looks like a scan.
+    for (const count of [0, -3]) {
+      const spies = await spyOnNextDocument();
+      await expect(extractPdfText(tinyPdf([['Page 1'], ['Page 2'], ['Page 3']], { count }), { maxPages: 200 })).rejects.toMatchObject({
+        name: 'ParseError',
+        code: 'pdf_no_pages',
+      });
+      expect(spies.destroy()).toHaveBeenCalledTimes(1);
+    }
+  });
+
   it('frees the document and each page it read', async () => {
     const spies = await spyOnNextDocument();
     await extractPdfText(tinyPdf([['Page 1'], ['Page 2'], ['Page 3']]), { maxPages: 2 });
@@ -100,11 +128,13 @@ describe('extractPdfText', () => {
     expect(r).toEqual({ text: 'Quote 7\nTotal\nDue\n\nThanks', pageCount: 6 });
   });
 
-  it('removes spaces and tabs at the ends of lines, keeps at most one blank line in a row, and trims the text', async () => {
+  it('removes spaces and tabs at the ends of lines, keeps at most one blank line in a row, trims the text, and skips marked-content items', async () => {
     fakeNextDocument([
       [
         { str: '  Quote 7  ', hasEOL: true },
+        { type: 'beginMarkedContent' }, // no text of its own; PDF.js lists these only with includeMarkedContent
         { str: 'Total \t', hasEOL: true },
+        { type: 'endMarkedContent' },
         { str: '', hasEOL: true },
         { str: '', hasEOL: true },
         { str: 'Due  ', hasEOL: false },
@@ -112,7 +142,9 @@ describe('extractPdfText', () => {
       [{ str: ' \t', hasEOL: true }],
       [{ str: 'Thanks \t ', hasEOL: false }],
     ]);
-    expect((await extractPdfText(tinyPdf([[]]), { maxPages: 200 })).text).toBe('Quote 7\nTotal\n\nDue\n\nThanks');
+    const { text } = await extractPdfText(tinyPdf([[]]), { maxPages: 200 });
+    expect(text).not.toContain('undefined');
+    expect(text).toBe('Quote 7\nTotal\n\nDue\n\nThanks');
   });
 
   it('returns no text for a scan without a text layer', async () => {
@@ -174,6 +206,15 @@ describe('parseFile (worker thread), PDF', () => {
     expect(r).toEqual({ text: 'First page', pageCount: 2 });
   });
 
+  it('refuses a page count below 1 in the worker, and takes a count that is too low as given', async () => {
+    const fivePages = [['Page 1'], ['Page 2'], ['Page 3'], ['Page 4'], ['Page 5']];
+    await expect(parseFile({ kind: 'pdf', bytes: tinyPdf(fivePages, { count: 0 }), maxPages: 200 }, { timeoutMs: 20_000 })).rejects.toMatchObject({
+      name: 'ParseError',
+      code: 'pdf_no_pages',
+    });
+    expect(await parseFile({ kind: 'pdf', bytes: tinyPdf(fivePages, { count: 1 }), maxPages: 200 }, { timeoutMs: 20_000 })).toEqual({ text: 'Page 1', pageCount: 1 });
+  });
+
   it('stops a decompression bomb whose decoded streams outgrow the memory cap outside the JS heap, and the service keeps running', async () => {
     // 200 MB of spaces in one content stream. PDF.js decodes it into buffers outside the V8 heap, which the worker's
     // heap limits do not cover; unchecked, this file reads "ok" after pushing the process up by about 400 MB.
@@ -213,6 +254,27 @@ describe('parseFile (worker thread), PDF', () => {
     });
     expect(memoryChecks.mock.calls.length).toBeGreaterThan(beforeTimeout); // the check was running while the parser was
     expect(await checksInNext300Ms()).toBe(0);
+  });
+
+  it('runs one memory check at a time: a slow answer is not stacked up under more checks every 50 ms', async () => {
+    // Each check answers only when the test releases it, as a busy worker can be slow to answer.
+    const releases: (() => void)[] = [];
+    const memoryChecks = vi
+      .spyOn(Worker.prototype, 'getHeapStatistics')
+      .mockImplementation(() => new Promise<HeapInfo>((resolve) => releases.push(() => resolve({ external_memory: 0 } as HeapInfo))));
+    const hangWorker = new URL('../fixtures/hangWorker.ts', import.meta.url);
+    const parsing = parseFile({ kind: 'pdf', bytes: new Uint8Array(1), maxPages: 200 }, { timeoutMs: 3_000, workerUrl: hangWorker });
+
+    await vi.waitFor(() => expect(memoryChecks).toHaveBeenCalledTimes(1));
+    await sleep(300); // six more ticks
+    expect(memoryChecks).toHaveBeenCalledTimes(1);
+
+    releases[0]?.(); // the first check answers; the next tick starts the second
+    await vi.waitFor(() => expect(memoryChecks).toHaveBeenCalledTimes(2));
+    await sleep(300);
+    expect(memoryChecks).toHaveBeenCalledTimes(2);
+
+    await expect(parsing).rejects.toMatchObject({ name: 'ParseError', code: 'parse_timeout' });
   });
 
   it("passes the PDF reader's error codes back", async () => {
