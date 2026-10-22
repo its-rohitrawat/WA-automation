@@ -29,3 +29,10 @@ logs/
 .DS_Store
 Thumbs.db
 .vscode/
+
+# Real allow-list holds client names and group IDs
+config/allowed-groups.json
+
+# Service binary and logs
+deploy/winsw/*.exe
+deploy/winsw/*.log

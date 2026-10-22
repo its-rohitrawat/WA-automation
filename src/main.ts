@@ -1,0 +1,177 @@
+import { existsSync } from 'node:fs';
+import { createApp } from './app.ts';
+import { ClaudeClient } from './brain/claudeClient.ts';
+import { loadEnv, requireKey } from './config/env.ts';
+import { GROUPS_FILE_MISSING_MESSAGE, loadGroupsFile, watchGroupsFile } from './config/groups.ts';
+import { masterKeyPath, sessionDbPath, trackerDbPath } from './config/paths.ts';
+import { DpapiKeyProvider, MasterKeyError } from './crypto/keyProvider.ts';
+import { googleDriveApi } from './output/drive.ts';
+import { createOAuthClient, TokenDecryptError, TokenStore } from './output/googleAuth.ts';
+import { pricesFromEnv } from './spend/pricing.ts';
+import { syncClients } from './store/clients.ts';
+import { openDb, type Db } from './store/db.ts';
+import { systemClock } from './util/clock.ts';
+import { acquireLock, AlreadyRunningError } from './util/lock.ts';
+import { createLogger, silentLogger } from './util/logger.ts';
+import { AllowList } from './wa/allowlist.ts';
+import { openSessionDb, SessionDecryptError, useEncryptedAuthState } from './wa/authState.ts';
+import { baileysSocketFactory, WhatsAppGateway } from './wa/gateway.ts';
+
+/** Expected startup refusal. The message is safe to print. */
+class StartupExit extends Error {}
+
+async function main(): Promise<void> {
+  const env = loadEnv();
+  const log = createLogger(env.LOG_LEVEL);
+  // Without these Node prints the raw error (Boom data, gaxios request config), bypassing the logger's redaction.
+  process.on('uncaughtException', (err) => {
+    try {
+      log.fatal({ err }, 'uncaught exception');
+    } finally {
+      process.exit(1);
+    }
+  });
+  process.on('unhandledRejection', (reason) => {
+    try {
+      log.fatal({ err: reason }, 'unhandled rejection');
+    } finally {
+      process.exit(1);
+    }
+  });
+
+  if (!existsSync(env.GROUPS_FILE)) {
+    const message = GROUPS_FILE_MISSING_MESSAGE;
+    log.error({ file: env.GROUPS_FILE }, message);
+    process.stderr.write(`${message}\n`);
+    process.exit(2);
+  }
+
+  let lock: { release(): Promise<void> } | undefined;
+  let db: Db | undefined;
+  let sessionDb: Db | undefined;
+
+  /** Stops startup with a one-line message; the catch below cleans up and exits with code 2. */
+  function exitEarly(message: string): never {
+    throw new StartupExit(message);
+  }
+
+  try {
+    // The lock comes first: nothing opens a database while another instance may be running.
+    lock = await acquireLock(env.DATA_DIR);
+    const key = new DpapiKeyProvider(masterKeyPath(env.DATA_DIR)).getKey();
+    db = openDb(trackerDbPath(env.DATA_DIR));
+    sessionDb = openSessionDb(sessionDbPath(env.DATA_DIR));
+
+    const configs = loadGroupsFile(env.GROUPS_FILE);
+    syncClients(db, configs);
+    const allow = new AllowList(configs.map((c) => c.groupId));
+
+    const auth = useEncryptedAuthState(sessionDb, key);
+    if (!auth.hasSession) exitEarly('WhatsApp is not linked. Stop the service and run: npm run cli -- link');
+    const refreshToken = new TokenStore(db, key).load();
+    if (!refreshToken) exitEarly('Google Drive is not connected. Run: npm run cli -- google-auth');
+
+    const google = createOAuthClient(requireKey(env, 'GOOGLE_OAUTH_CLIENT_ID'), requireKey(env, 'GOOGLE_OAUTH_CLIENT_SECRET'));
+    google.setCredentials({ refresh_token: refreshToken });
+
+    const prices = pricesFromEnv(env);
+    const gateway = new WhatsAppGateway({ allow, factory: baileysSocketFactory(silentLogger()), auth: auth.state, saveCreds: auth.saveCreds });
+    const app = createApp({
+      db,
+      clock: systemClock,
+      log,
+      gateway,
+      allow,
+      ai: new ClaudeClient({ apiKey: requireKey(env, 'ANTHROPIC_API_KEY'), model: env.AI_MODEL, effort: env.AI_EFFORT, prices }),
+      drive: googleDriveApi(google),
+      prices,
+      spendCapUsd: env.DAILY_SPEND_CAP_USD,
+      quietMs: env.QUIET_MINUTES * 60_000,
+      maxWaitMs: env.MAX_WAIT_MINUTES * 60_000,
+      maxConcurrent: env.MAX_PARALLEL_CLIENTS,
+      dataDir: env.DATA_DIR,
+    });
+
+    // watchGroupsFile catches a throwing onChange (including reloadClients conflicts) and calls onError.
+    const stopWatching = watchGroupsFile(
+      env.GROUPS_FILE,
+      (next) => {
+        app.reloadClients(next);
+        log.info({ groups: next.length }, 'allow-list reloaded');
+      },
+      (err) =>
+        log.error({ problem: err instanceof Error ? err.message : String(err) }, 'allowed-groups.json change rejected; keeping the previous allow-list'),
+    );
+
+    app.start();
+    log.info({ groups: configs.length }, 'WA Agent started');
+
+    const trackerDb = db;
+    const sessionStore = sessionDb;
+    const startedLock = lock;
+    let stopping = false;
+    let warnedStopping = false;
+    const shutdown = () => {
+      if (stopping) {
+        if (!warnedStopping) {
+          warnedStopping = true;
+          log.warn('still stopping: waiting for an AI call or upload in flight (up to about 2.5 minutes)');
+        }
+        return;
+      }
+      stopping = true;
+      log.info('WA Agent stopping');
+      stopWatching();
+      void app
+        .stop()
+        .catch((err) => log.error({ err }, 'error while stopping'))
+        .finally(() => {
+          // Databases are closed only after app.stop() has settled.
+          try {
+            trackerDb.close();
+            sessionStore.close();
+          } catch {
+            // best effort
+          }
+          void startedLock.release().finally(() => process.exit(0));
+          setTimeout(() => process.exit(0), 2000).unref();
+        });
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+  } catch (e) {
+    try {
+      db?.close();
+      sessionDb?.close();
+    } catch {
+      // best effort
+    }
+    const known =
+      e instanceof StartupExit ||
+      e instanceof AlreadyRunningError ||
+      e instanceof MasterKeyError ||
+      e instanceof SessionDecryptError ||
+      e instanceof TokenDecryptError;
+    try {
+      // Bounded: the OS frees the lock when the process exits anyway.
+      await Promise.race([lock?.release(), new Promise((r) => setTimeout(r, 2000).unref())]);
+    } catch {
+      // ignore
+    }
+    if (!known) throw e;
+    if (e instanceof MasterKeyError) {
+      log.error({ code: e.code }, e.message);
+      process.stderr.write(`${e.code}: ${e.message}\n`);
+    } else {
+      log.error(e.message);
+      process.stderr.write(`${e.message}\n`);
+    }
+    process.exit(2);
+  }
+}
+
+main().catch((e: unknown) => {
+  // Name and message only: never dump objects that might hold config values.
+  console.error(e instanceof Error ? `${e.name}: ${e.message}` : 'Fatal error');
+  process.exit(1);
+});
