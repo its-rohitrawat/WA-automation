@@ -84,8 +84,11 @@ function trimDotsAndSpaces(s: string): string {
   return s.slice(start, end);
 }
 
+/** The most characters (code points) sanitizeFileName keeps by default. The workbook sizes Files received rows to fit it. */
+export const MAX_FILE_NAME_CHARS = 120;
+
 /** A sender's file name made safe to show in the workbook and to use as a Drive name. Null when nothing is left. */
-export function sanitizeFileName(name: string | null, maxLength = 120): string | null {
+export function sanitizeFileName(name: string | null, maxLength = MAX_FILE_NAME_CHARS): string | null {
   if (!name) return null;
   const cleaned = trimDotsAndSpaces(
     name

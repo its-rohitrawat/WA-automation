@@ -1,5 +1,6 @@
 import ExcelJS from 'exceljs';
 import { describe, expect, it } from 'vitest';
+import { MAX_FILE_NAME_CHARS, sanitizeFileName } from '../../src/media/paths.ts';
 import { loadTrackerView } from '../../src/output/view.ts';
 import { buildWorkbook, fileRowHeight } from '../../src/output/workbook.ts';
 import type { Db } from '../../src/store/db.ts';
@@ -132,6 +133,20 @@ describe('Files received', () => {
 
     it('counts characters, not UTF-16 units', () => {
       expect(fileRowHeight({ ...short, description: '😀'.repeat(119) })).toBe(15);
+    });
+
+    it('gives the longest file name sanitizeFileName keeps, 120 characters, all 11 of its lines in column C (T14-14)', () => {
+      expect(MAX_FILE_NAME_CHARS).toBe(120);
+      const longest = sanitizeFileName(`${'a'.repeat(500)}.pdf`)!;
+      expect([...longest]).toHaveLength(MAX_FILE_NAME_CHARS);
+      expect(fileRowHeight({ ...short, name: longest })).toBe(11 * 15);
+      expect(fileRowHeight({ ...short, name: 'a'.repeat(110) })).toBe(10 * 15);
+    });
+
+    it('caps a row at the height of the longest file name, however long the sender name, name or description (T14-14)', () => {
+      expect(fileRowHeight({ ...short, sentBy: 'x'.repeat(5_000) })).toBe(11 * 15);
+      expect(fileRowHeight({ ...short, name: 'a'.repeat(5_000) })).toBe(11 * 15);
+      expect(fileRowHeight({ ...short, description: 'x'.repeat(5_000) })).toBe(11 * 15);
     });
   });
 

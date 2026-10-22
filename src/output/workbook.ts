@@ -1,4 +1,5 @@
 import ExcelJS from 'exceljs';
+import { MAX_FILE_NAME_CHARS } from '../media/paths.ts';
 import type { TaskRow } from '../store/tasks.ts';
 import { daysBetween, displayDate, istDateTime, istShortDate, istTime } from '../util/time.ts';
 import { isOverdue, type ClientView, type FileView, type TrackerView } from './view.ts';
@@ -119,10 +120,11 @@ function lineChars(first: number, last: number): number {
 /** Sent by (B, width 38): 32 characters a line. File name (C, width 13): 11. Description (D to L merged, width 140 in all): 119. */
 const FILE_LINE_CHARS = { sentBy: lineChars(2, 2), name: lineChars(3, 3), description: lineChars(FILE_DESC_FIRST, FILE_DESC_LAST) };
 /**
- * A cap so one odd row cannot take over the tab. The longest description, about 300 characters, needs 3 lines; the longest
- * file name, 120 characters, about 10.
+ * A cap so one odd row cannot take over the tab: as many lines as the longest file name sanitizeFileName keeps (120
+ * characters, 11 lines of 11 in column C), so its end, often the extension, is never hidden (T14-14). The longest
+ * description, about 300 characters, needs 3 lines.
  */
-const MAX_FILE_LINES = 10;
+const MAX_FILE_LINES = Math.ceil(MAX_FILE_NAME_CHARS / FILE_LINE_CHARS.name);
 
 /**
  * Height in points of a Files received row (owner decision D4). Excel and Google Sheets do not auto-fit a row to a merged cell,
@@ -233,8 +235,10 @@ function addClientSheet(wb: ExcelJS.Workbook, c: ClientView, today: string): voi
 
 /**
  * Characters XML 1.0 does not allow: C0 controls other than tab, line feed and carriage return, U+FFFE, U+FFFF and unpaired
- * surrogates. ExcelJS drops the controls but writes the rest as they are, and then neither Excel nor ExcelJS can open the
- * file. Sender names, file names and file text come from WhatsApp, so one such character would break the whole workbook.
+ * surrogates. ExcelJS drops the controls but writes U+FFFE and U+FFFF as they are, and then neither Excel nor ExcelJS can
+ * open the file. Sender names, file names and file text come from WhatsApp, so one such character would break the whole
+ * workbook. Those two are the ones that really break it. Unpaired surrogates are removed only as a precaution (T14-13):
+ * JSZip in Node writes one as U+FFFD, which is valid XML, and text read back from SQLite never holds one anyway.
  */
 const XML_UNSAFE = /[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 
