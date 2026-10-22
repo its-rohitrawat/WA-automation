@@ -89,14 +89,22 @@ export function createApp(d: AppDeps): App {
   const startedAt = d.startedAt ?? d.clock.now();
   const spend = new SpendGuard({ db: d.db, clock: d.clock, capUsd: d.spendCapUsd });
   const health = new Health({ db: d.db, clock: d.clock, spend, dataDir: d.dataDir, freeBytes: d.freeBytes });
+  /** The health line in the workbook being built, and in the last one that reached Drive (the tick compares it). */
+  let buildingLine: string | undefined;
+  let publishedLine: string | undefined;
   const publisher = new DrivePublisher({
     db: d.db,
     api: d.drive,
     log: d.log,
     minIntervalMs: d.publishIntervalMs,
     // workbookLine() leaves out publish failures: if this upload succeeds, they are already over.
-    build: () => buildWorkbook(loadTrackerView(d.db, d.clock.now(), health.workbookLine())),
+    build: () => {
+      const line = health.workbookLine();
+      buildingLine = line.text;
+      return buildWorkbook(loadTrackerView(d.db, d.clock.now(), line));
+    },
     onPublished: () => {
+      publishedLine = buildingLine; // one publish runs at a time, so this is the line of the upload that just succeeded
       // The first publish creates the Drive root the file uploads need. A publish also follows every role change
       // (the reconciler's, and the CLI's through its rebuild request), which can make a sender's files due.
       void uploader?.run();
@@ -113,6 +121,11 @@ export function createApp(d: AppDeps): App {
       d.log.error({ ...fields, err }, 'health update failed');
     }
   };
+  /**
+   * Gives Health the current shared-file counts. Called before a publish that a file change or a client change asked
+   * for, so the workbook's health line does not show counts from the last tick (final review).
+   */
+  const refreshMedia = () => health.setMedia(mediaStats(d.db, d.clock.now(), startedAt, MEDIA_MAX_WAIT_MS));
   /** False once reloadClients removed the client. If the lookup itself fails, assume active and record as usual. */
   const stillActive = (clientId: number): boolean => {
     try {
@@ -175,6 +188,7 @@ export function createApp(d: AppDeps): App {
         // member's file can go to Drive now.
         onSettled: (clientId) => {
           debouncer.notify(clientId);
+          safely(refreshMedia); // a "waiting" warning about this file must not reach the workbook it settles
           publisher.schedule();
           void uploader?.run();
         },
@@ -219,7 +233,10 @@ export function createApp(d: AppDeps): App {
       mediaQueue?.kick(); // retries that are due, and files saved by cli link
       void uploader?.run(); // retries that are due
       health.setIngestFailures(d.gateway.failedCount());
-      health.setMedia(mediaStats(d.db, d.clock.now(), startedAt, MEDIA_MAX_WAIT_MS));
+      refreshMedia();
+      // A line that changes with no other change (a file waiting too long, an upload that gave up, a message that could
+      // not be saved) would otherwise reach the workbook only with an unrelated publish, possibly hours later.
+      if (health.workbookLine().text !== publishedLine) publisher.schedule();
       health.persist();
     } catch (err) {
       d.log.error({ err }, 'tick failed');
@@ -289,6 +306,7 @@ export function createApp(d: AppDeps): App {
         debouncer.cancel(id);
         health.forget(id);
       }
+      safely(refreshMedia); // a removed client's files leave the counts before the publish
       safely(() => health.persist());
       publisher.schedule();
     },

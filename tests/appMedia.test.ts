@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
 import Anthropic from '@anthropic-ai/sdk';
+import ExcelJS from 'exceljs';
 import sharp from 'sharp';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp, type AppMediaDeps } from '../src/app.ts';
@@ -735,6 +736,107 @@ describe('app start time (15a, 15f)', () => {
     // 10 s, not the default 1 s: under a busy full suite the first attempt can take longer to settle. The fake clock
     // moves at most 10 s here, far short of the 5-minute ai_unavailable wait, so the expected state cannot change.
     await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ ...expected, errorCode: 'ai_unavailable' }), { timeout: 10_000 });
+    await stopApp(app);
+  });
+});
+
+describe('app health line with fresh file counts (final review)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-19T07:00:00Z'));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  const STALE_LINE = '⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.';
+
+  /** Collects the body of every workbook upload (never a client file's), in order. */
+  function workbookUploads(drive: FakeDrive): Buffer[] {
+    const bodies: Buffer[] = [];
+    const createFile = drive.createFile.bind(drive);
+    const updateFile = drive.updateFile.bind(drive);
+    vi.spyOn(drive, 'createFile').mockImplementation(async (name, mime, body, parentId, timeoutMs) => {
+      const id = await createFile(name, mime, body, parentId, timeoutMs);
+      if (name === 'Tracker.xlsx') bodies.push(body);
+      return id;
+    });
+    vi.spyOn(drive, 'updateFile').mockImplementation(async (id, mime, body) => {
+      await updateFile(id, mime, body);
+      bodies.push(body);
+    });
+    return bodies;
+  }
+
+  /** Column-A text of the Overview sheet, where the health line lives. Call with real timers. */
+  async function overviewTexts(buf: Buffer): Promise<string[]> {
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf as unknown as ExcelJS.Buffer);
+    const out: string[] = [];
+    wb.getWorksheet('Overview')!.eachRow((row) => {
+      const v = row.getCell(1).value;
+      if (typeof v === 'string') out.push(v);
+    });
+    return out;
+  }
+
+  it('a settled file publishes fresh file counts: its stale warning is gone from the workbook before the next tick', async () => {
+    const sealer = new MediaRefSealer(randomBytes(32));
+    const g = gate();
+    const extract = vi.fn<Extractor>(async () => {
+      await g.promise;
+      return NOTHING_READ; // no text, so its message is not queued again and no reconcile publishes after it
+    });
+    // A file waiting over 30 minutes, whose message was already processed. Its sender is not a client member, so no
+    // upload publishes after it either.
+    const { db, drive, app } = setup({
+      media: { sealer, extract },
+      publishIntervalMs: 1_000,
+      startedAt: minutesBefore(40),
+      prepare: (db) => {
+        storedImage(db, sealer, minutesBefore(40).toISOString());
+        markProcessed(db, [messageRowId(db, 1, 'IMG0')!], minutesBefore(39).toISOString());
+      },
+    });
+    const bodies = workbookUploads(drive);
+    await vi.advanceTimersByTimeAsync(1_000); // the first publish
+    await vi.waitFor(() => expect(extract).toHaveBeenCalled(), SLOW_IO);
+    await vi.advanceTimersByTimeAsync(3_000); // any publish the start scheduled is done
+    expect(bodies.length).toBeGreaterThan(0);
+    const published = bodies.length;
+    g.release();
+    await vi.waitFor(() => expect(bodies).toHaveLength(published + 1), SLOW_IO);
+    expect(Date.now()).toBeLessThan(Date.parse('2026-10-19T07:00:29Z')); // before the first tick after start
+    expect(getMedia(db, 1)).toMatchObject({ status: 'done', textKind: null });
+    const before = bodies[published - 1]!;
+    const after = bodies[published]!;
+    await stopApp(app);
+
+    vi.useRealTimers();
+    expect(await overviewTexts(before)).toContain(STALE_LINE);
+    const texts = await overviewTexts(after);
+    expect(texts).not.toContain(STALE_LINE);
+    expect(texts).toContain('✅ Connected · waiting for new messages');
+  });
+
+  it('removing a client takes its files out of the health counts before the publish', async () => {
+    const sealer = new MediaRefSealer(randomBytes(32));
+    const extract = vi.fn<Extractor>(async () => {
+      throw overloaded(); // the file waits for Claude and stays pending
+    });
+    const { db, app } = setup({
+      media: { sealer, extract },
+      startedAt: minutesBefore(40),
+      prepare: (db) => storedImage(db, sealer, minutesBefore(40).toISOString()),
+    });
+    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable' }), SLOW_IO);
+    expect(app.health.workbookLine().text).toBe(STALE_LINE);
+
+    app.reloadClients([MEHTA]); // Sharma, whose file it is, is removed
+    expect(app.health.workbookLine()).toEqual({ ok: true, text: '✅ Connected · waiting for new messages' });
+    expect(readHealthSnapshot(db)!.media).toMatchObject({ pending: 0, stale: 0 });
     await stopApp(app);
   });
 });

@@ -11,7 +11,7 @@ import type { Db } from '../../src/store/db.ts';
 import { finishMedia, insertMedia, messageRowId } from '../../src/store/media.ts';
 import { applyEdit, applyRevoke, insertMessage, listUnprocessed, markProcessed, upsertReaction } from '../../src/store/messages.ts';
 import { listPeople, setRole, upsertPerson } from '../../src/store/people.ts';
-import { createTask, getTaskByCode, listDecisions, listTasks, setTaskStatus, updateTaskFields } from '../../src/store/tasks.ts';
+import { createTask, getTaskByCode, listDecisions, listTasks, logReminder, setTaskStatus, updateTaskFields } from '../../src/store/tasks.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger, type Logger } from '../../src/util/logger.ts';
 import { FAKE_USAGE, FakeAi, op, type FakeResponse } from '../helpers/ai.ts';
@@ -455,6 +455,19 @@ describe('Reconciler', () => {
       expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: null })]);
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
       expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', raisedOn: '2026-10-15', closedOn: '2026-10-15' });
+    });
+
+    it('a reminder in a file read late counts, but never moves the last reminder date back (12h, final review)', async () => {
+      const { db, r } = setup([{ ops: [op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['m1'] })] }]);
+      banner(db);
+      store(db, 'm1', 'Banner ka kya hua?', '2026-10-12T05:00:00.000Z');
+      const id = fileOf(db);
+      markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-12T06:00:00.000Z'); // the file was still being read
+      logReminder(db, getTaskByCode(db, 'SHA-001')!.id, '2026-10-15', NOW); // a later chase, in text
+      readAt(db, id, '2026-10-19T07:00:00.000Z');
+      expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: null })]);
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ reminderCount: 2, lastReminderOn: '2026-10-15' });
     });
 
     it('still rejects a close backed by a file read before the human reopened the task (12h)', async () => {
