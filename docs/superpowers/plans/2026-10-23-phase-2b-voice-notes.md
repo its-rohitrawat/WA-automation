@@ -2,9 +2,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task by task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >
-> **Status: DRAFT for the owner's review.**
+> **Status: decisions accepted, waiting for the bake-off.**
+> - The owner accepted the recommended default for all of V1–V9 on 2026-10-23.
 > - This is a design-level plan: decisions first, then tasks with exact files, interfaces, behaviour and tests.
-> - Once the owner settles decisions V1–V9 and the bake-off has picked a provider, each task gets its full test-first steps with complete code, in the same format as the Phase 2a plan.
+> - Once the bake-off has picked a provider, each task gets its full test-first steps with complete code, in the same format as the Phase 2a plan.
 > - Nothing here has been built.
 
 **Goal:** Client and team voice notes in WhatsApp are transcribed and the reconciler reads them like any other message. The tracker then picks up tasks, deadlines and payment confirmations that were spoken rather than typed. Cost goes through the daily spend cap, booked as `stt`.
@@ -64,6 +65,8 @@
 ## Decisions for the owner (V1–V9)
 
 Each decision has a recommended default. The tasks are written for the defaults, and a different choice changes only the task named.
+
+**Owner's answer, 2026-10-23: all recommended defaults accepted (V1 A, V2, V3, V4, V5, V6, V7, V8, V9 as written below).**
 
 ### V1. Should the tracker wait for a voice note's transcript? **Recommended: yes, like a picture.**
 - **(A) Recommended.** A voice note holds up its client's update for at most 30 minutes, the same rule as a picture or a document (12a, 12g, 10d). If the transcript comes later, the message is checked again with the transcript (the existing 12h re-check).
