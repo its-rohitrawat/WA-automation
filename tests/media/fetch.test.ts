@@ -17,16 +17,28 @@ const LIMITS = { maxBytes: 1_000, timeoutMs: 200 };
 
 const HKDF_INFO = { imageMessage: 'WhatsApp Image Keys', documentMessage: 'WhatsApp Document Keys', audioMessage: 'WhatsApp Audio Keys' } as const;
 
+interface KeyOptions { key?: Buffer; contentType?: MediaRef['contentType'] }
+
+/** The iv, cipher key and MAC key, expanded from the media key with HKDF-SHA256 as Baileys does it. */
+function keysFor(o: KeyOptions) {
+  const keys = Buffer.from(hkdfSync('sha256', o.key ?? MEDIA_KEY, Buffer.alloc(0), HKDF_INFO[o.contentType ?? 'documentMessage'], 112));
+  return { iv: keys.subarray(0, 16), cipherKey: keys.subarray(16, 48), macKey: keys.subarray(48, 80) };
+}
+
+/** Any bytes followed by a correct MAC: the first 10 bytes of HMAC-SHA256(macKey, iv + bytes). */
+function withMac(cipher: Buffer, o: KeyOptions = {}): Buffer {
+  const { iv, macKey } = keysFor(o);
+  return Buffer.concat([cipher, createHmac('sha256', macKey).update(iv).update(cipher).digest().subarray(0, 10)]);
+}
+
 /**
  * A file as WhatsApp's media servers hold it, built the way Baileys' upload code builds one: AES-256-CBC under keys
- * expanded from the media key with HKDF-SHA256, then the first 10 bytes of HMAC-SHA256(macKey, iv + ciphertext).
+ * expanded from the media key, then the MAC.
  */
-function encrypt(plain: Buffer, o: { key?: Buffer; contentType?: MediaRef['contentType']; padding?: boolean } = {}): Buffer {
-  const keys = Buffer.from(hkdfSync('sha256', o.key ?? MEDIA_KEY, Buffer.alloc(0), HKDF_INFO[o.contentType ?? 'documentMessage'], 112));
-  const iv = keys.subarray(0, 16);
-  const aes = createCipheriv('aes-256-cbc', keys.subarray(16, 48), iv).setAutoPadding(o.padding ?? true);
-  const cipher = Buffer.concat([aes.update(plain), aes.final()]);
-  return Buffer.concat([cipher, createHmac('sha256', keys.subarray(48, 80)).update(iv).update(cipher).digest().subarray(0, 10)]);
+function encrypt(plain: Buffer, o: KeyOptions & { padding?: boolean } = {}): Buffer {
+  const { iv, cipherKey } = keysFor(o);
+  const aes = createCipheriv('aes-256-cbc', cipherKey, iv).setAutoPadding(o.padding ?? true);
+  return withMac(Buffer.concat([aes.update(plain), aes.final()]), o);
 }
 
 function splitAt(bytes: Buffer, cuts: number[]): Buffer[] {
@@ -149,8 +161,13 @@ describe('baileysFetcher', () => {
   it('stops reading a body that grows past the size cap, and cancels it', async () => {
     let pulls = 0;
     let cancelled = false;
-    const endless = new ReadableStream<Uint8Array>({ pull(c) { pulls++; c.enqueue(new Uint8Array(100)); }, cancel() { cancelled = true; } });
-    await expect(baileysFetcher(vi.fn<HttpFetch>(async () => new Response(endless)))(ref, LIMITS)).rejects.toMatchObject({ name: 'MediaUnavailableError', code: 'too_large' });
+    // 20 KB, far past the 1,000-byte cap, then the end. Finite so that a cap checked too late fails these asserts
+    // quickly instead of reading forever (this hand-built answer ignores the abort signal).
+    const growing = new ReadableStream<Uint8Array>({
+      pull(c) { pulls++; c.enqueue(new Uint8Array(100)); if (pulls === 200) c.close(); },
+      cancel() { cancelled = true; },
+    });
+    await expect(baileysFetcher(vi.fn<HttpFetch>(async () => new Response(growing)))(ref, LIMITS)).rejects.toMatchObject({ name: 'MediaUnavailableError', code: 'too_large' });
     expect(cancelled).toBe(true);
     expect(pulls).toBeLessThan(20);
   });
@@ -193,6 +210,9 @@ describe('baileysFetcher', () => {
       'shorter than a block and a MAC': good.subarray(0, 20),
       empty: Buffer.alloc(0),
       'a valid MAC over bad padding': encrypt(Buffer.alloc(32), { padding: false }),
+      // The sender supplies the media key, so a sender can put a valid MAC over any bytes.
+      'a valid MAC over 17 bytes, not a whole number of blocks': withMac(Buffer.alloc(17, 7)),
+      'a valid MAC over no ciphertext (the iv alone)': withMac(Buffer.alloc(0)),
     };
     for (const [name, bytes] of Object.entries(cases)) {
       await expect(baileysFetcher(fakeFetch({ chunks: [bytes] }).fetch)(ref, LIMITS), name).rejects.toMatchObject({ name: 'MediaUnavailableError', code: 'decrypt_failed' });
@@ -252,6 +272,8 @@ describe('baileysFetcher time limit and network errors (review of Task 5)', () =
     expect(result.settled).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(result.error).toMatchObject({ name: 'MediaDownloadError', code: 'timeout' });
+    // The stalled body's connection is released.
+    expect(fetch.mock.calls[0]![1].signal?.aborted).toBe(true);
   });
 
   it('a connection that drops in the middle of the body is a network error at once, and nothing is left uncaught', async () => {
