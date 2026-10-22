@@ -144,6 +144,7 @@ Every task's implementer applies the items listed under its task, in addition to
 
 - **10a. Inactive clients (review I4).** If the row's client is inactive, the processor does nothing and leaves the row pending. Test it.
 - **10b. No tight loop (review M12).** When the processor finds no job for a row (the message was deleted, or the row is missing data), it fails the row with `no_job`. It must not return "skipped" with the row still pending, which would loop.
+- **10c. Local file names (amendment 4a, triage T4-01).** Saved files are named `<waId>-<mediaId>.<ext>` by `mediaRelPath` (src/media/paths.ts). The plan's Task 10 tests still expect the old names: `IMG1.jpg` and `media/SHA/2026-10/IMG1.jpg` (plan lines 3008-3098). Expect `IMG1-<mediaId>.jpg` and `media/SHA/2026-10/IMG1-<mediaId>.jpg`, with the id of the row under test, and build paths only through `mediaRelPath`, never by hand.
 
 ## Task 11: media queue
 
@@ -185,6 +186,7 @@ Every task's implementer applies the items listed under its task, in addition to
 - **15a. Same start time (review I1).** `mediaStats(..., startedAt)` uses the same start time for its "waiting over 30 minutes" count. main.ts/app.ts pass one `startedAt`, captured at start, to both the Reconciler and Health.
 - **15b. Spend-cap rows visible (review I3).** `mediaStats` also counts rows deferred for `spend_cap`, and Health shows them. When there are such rows, reuse the "Daily spend cap reached" line.
 - **15c. Waiting ignored.** Health ignores the `waiting` outcome (12d).
+- **15d. Local file names (10c).** The Task 15 test that expects `media/SHA/2026-10/IMG1.jpg` (plan line 5107) expects `media/SHA/2026-10/IMG1-<mediaId>.jpg` instead.
 
 ## Task 16: runbook and final verification
 
