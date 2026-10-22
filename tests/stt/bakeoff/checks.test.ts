@@ -45,6 +45,16 @@ describe('refusals', () => {
     for (const line of PRIVACY_CHECKLIST) expect(out[0]).toContain(line);
   });
 
+  it("asks for consent to all three providers and for Sarvam's confirmed opt-out and retention", () => {
+    expect(PRIVACY_CHECKLIST).toContain(
+      "Every meeting recording has its participants' consent to be sent to Sarvam, ElevenLabs and OpenAI, and you may share these voice notes with all three.",
+    );
+    expect(PRIVACY_CHECKLIST).toContain(
+      "Sarvam: you opted out of training as the privacy policy describes and have Sarvam's confirmation, and the workspace data retention is set to 0 days (by the workspace Owner).",
+    );
+    expect(PRIVACY_CHECKLIST).toHaveLength(3);
+  });
+
   it('refuses when there is nothing to send', () => {
     expect(refusals([item('sarvam', { action: 'skip', estimateUsd: 0 })], KEYS, ok)[0]).toMatch(/^Nothing to send/);
   });

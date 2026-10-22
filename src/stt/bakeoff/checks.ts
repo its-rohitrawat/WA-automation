@@ -4,8 +4,8 @@ import { planTotalUsd, type PlanItem } from './plan.ts';
 /** What the owner confirms with --confirm-privacy before any recording leaves the PC. */
 export const PRIVACY_CHECKLIST = [
   'ElevenLabs: profile > Terms and privacy > Data use: "Improve the models for everyone" is OFF and saved with "Update your choice".',
-  'Sarvam: training on your data is opted out, and the workspace data retention is set to 0 days (by the workspace Owner).',
-  "Every meeting recording has its participants' consent, and you may share these voice notes with all three providers.",
+  "Sarvam: you opted out of training as the privacy policy describes and have Sarvam's confirmation, and the workspace data retention is set to 0 days (by the workspace Owner).",
+  "Every meeting recording has its participants' consent to be sent to Sarvam, ElevenLabs and OpenAI, and you may share these voice notes with all three.",
 ];
 
 /** Reasons a real run must not start; empty means it may. Keys are only checked for presence, never read out. */
