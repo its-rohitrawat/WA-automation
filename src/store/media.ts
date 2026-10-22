@@ -244,13 +244,35 @@ export function failMedia(db: Db, id: number, f: { status: 'failed' | 'unavailab
   db.prepare('UPDATE media SET status = @status, error_code = @errorCode, next_attempt_at = NULL, ref_enc = NULL, updated_at = @at WHERE id = @id').run({ id, ...f });
 }
 
-/** Try again later. countAttempt is false when nothing was tried (for example the spend cap). */
-export function deferMedia(db: Db, id: number, d: { errorCode: string; nextAttemptAt: string; countAttempt: boolean; at: string }): void {
-  db.prepare('UPDATE media SET error_code = @errorCode, next_attempt_at = @nextAttemptAt, attempts = attempts + @inc, updated_at = @at WHERE id = @id').run({
+/**
+ * Final review FR1: claims a pending file before it is downloaded, decoded or read. In one committed write the attempt
+ * is counted and the next attempt moves to nextAttemptAt (about 15 minutes ahead), so a run that never ends (the process
+ * stopped) leaves the file waiting with one attempt used, and a database that cannot be written stops the run before
+ * anything is paid. The error code is kept: the waits of amendment 10d read the last one back. Returns false when the
+ * file is no longer pending.
+ */
+export function claimMedia(db: Db, id: number, c: { nextAttemptAt: string; at: string }): boolean {
+  return (
+    db.prepare(`UPDATE media SET attempts = attempts + 1, next_attempt_at = @nextAttemptAt, updated_at = @at WHERE id = @id AND status = 'pending'`).run({ id, ...c })
+      .changes === 1
+  );
+}
+
+/**
+ * Try again later. countAttempt is false when nothing was tried (for example the spend cap). `attempts`, when given
+ * instead, is stored as it is: the processor passes the count from before its claim, or that count plus one.
+ */
+export function deferMedia(
+  db: Db,
+  id: number,
+  d: { errorCode: string; nextAttemptAt: string; at: string } & ({ countAttempt: boolean; attempts?: never } | { attempts: number; countAttempt?: never }),
+): void {
+  db.prepare('UPDATE media SET error_code = @errorCode, next_attempt_at = @nextAttemptAt, attempts = COALESCE(@attempts, attempts + @inc), updated_at = @at WHERE id = @id').run({
     id,
     errorCode: d.errorCode,
     nextAttemptAt: d.nextAttemptAt,
     inc: d.countAttempt ? 1 : 0,
+    attempts: d.attempts ?? null,
     at: d.at,
   });
 }

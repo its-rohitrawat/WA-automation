@@ -4,21 +4,28 @@ import { join } from 'node:path';
 import { Writable } from 'node:stream';
 import Anthropic from '@anthropic-ai/sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { MediaAi } from '../../src/brain/mediaClient.ts';
 import { SpendCapReachedError } from '../../src/brain/paidCall.ts';
-import type { Extractor } from '../../src/media/extract.ts';
+import { createExtractor, type Extractor } from '../../src/media/extract.ts';
 import { MediaDownloadError, type MediaFetcher } from '../../src/media/fetch.ts';
+import type { PreparedImage } from '../../src/media/image.ts';
 import { MediaProcessor, type ProcessOutcome, type ProcessResult } from '../../src/media/processor.ts';
 import { MediaQueue } from '../../src/media/queue.ts';
 import { MediaRefSealer } from '../../src/media/ref.ts';
+import type { Prices } from '../../src/spend/pricing.ts';
+import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import type { Db } from '../../src/store/db.ts';
 import { getMedia, insertMedia, messageRowId } from '../../src/store/media.ts';
 import { insertMessage } from '../../src/store/messages.ts';
-import { manualClock } from '../../src/util/clock.ts';
+import { manualClock, type Clock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
 import { Ingestor } from '../../src/wa/ingest.ts';
 import { normalizeMessage } from '../../src/wa/normalize.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
+import { FakeMediaAi } from '../helpers/mediaAi.ts';
 import { waRaw } from '../helpers/wa.ts';
+
+const MINUTE = 60_000;
 
 /** A pending file whose sealed download details are not real: the real processor cannot open them. */
 function pending(db: Db, waId: string): number {
@@ -48,14 +55,15 @@ function setup(o: { log?: Logger; onSettled?: (clientId: number) => void; concur
     })),
   };
   const onSettled = vi.fn(o.onSettled ?? (() => {}));
-  const queue = new MediaQueue({ db, clock: manualClock('2026-10-19T08:00:00Z'), log: o.log ?? silentLogger(), processor, concurrency: o.concurrency ?? 2, onSettled });
+  const clock = manualClock('2026-10-19T08:00:00Z');
+  const queue = new MediaQueue({ db, clock, log: o.log ?? silentLogger(), processor, concurrency: o.concurrency ?? 2, onSettled });
   const finish = async (id: number, outcome: ProcessOutcome, clientId: number | null = 1) => {
     if (outcome === 'deferred') db.prepare("UPDATE media SET next_attempt_at = '2099-01-01T00:00:00.000Z' WHERE id = ?").run(id);
     else db.prepare("UPDATE media SET status = 'done' WHERE id = ?").run(id);
     waiting.get(id)!({ outcome, clientId });
     await flush();
   };
-  return { db, started, processor, onSettled, queue, finish };
+  return { db, clock, started, processor, onSettled, queue, finish };
 }
 
 describe('MediaQueue', () => {
@@ -187,7 +195,7 @@ describe('MediaQueue', () => {
   });
 
   // A crash means a broken database: every other due file would crash too, so nothing more starts until the next tick.
-  it('logs a crash, starts nothing else until the next tick, and does not retry it in a tight loop', async () => {
+  it('logs a crash, starts nothing else until the next tick, and keeps the crashed file back while the others go on', async () => {
     const { log, lines } = logLines();
     const { db, processor, queue, finish } = setup({ log, concurrency: 1 });
     const [a, b] = [pending(db, 'A'), pending(db, 'B')];
@@ -198,11 +206,61 @@ describe('MediaQueue', () => {
     expect(processor.process).toHaveBeenCalledTimes(1);
     expect(queue.active).toBe(0);
     expect(lines.join('')).toContain('media processing crashed');
-    queue.kick(); // the next tick tries again, oldest first
+    queue.kick(); // the next tick goes on with the other files
     await flush();
-    expect(processor.process.mock.calls.map(([id]) => id)).toEqual([a, a]);
-    await finish(a, 'done');
-    expect(processor.process.mock.calls.map(([id]) => id)).toEqual([a, a, b]);
+    expect(processor.process.mock.calls.map(([id]) => id)).toEqual([a, b]);
+    await finish(b, 'done');
+    expect(processor.process.mock.calls.map(([id]) => id)).toEqual([a, b]);
+  });
+
+  // Final review FR1: a crashed run may have paid Claude without booking it, so it must not start again on every tick.
+  it('keeps a crashed file back for 15 minutes, then twice as long after each crash, up to 2 hours', async () => {
+    const { log, lines } = logLines();
+    const { db, clock, processor, queue } = setup({ log, concurrency: 1 });
+    pending(db, 'A');
+    const starts = () => processor.process.mock.calls.length;
+    const tick = async () => {
+      queue.kick();
+      await flush();
+      await flush();
+    };
+    processor.process.mockRejectedValue(new Error('disk full'));
+    await tick();
+    expect(starts()).toBe(1);
+    for (const [run, waitMinutes] of [[2, 15], [3, 30], [4, 60], [5, 120], [6, 120]] as const) {
+      clock.advance(waitMinutes * MINUTE - 1);
+      await tick();
+      expect(starts(), `run ${run}`).toBe(run - 1);
+      clock.advance(1);
+      await tick();
+      expect(starts(), `run ${run}`).toBe(run);
+    }
+    expect(lines.map((l) => (JSON.parse(l) as { waitMinutes: number }).waitMinutes)).toEqual([15, 30, 60, 120, 120, 120]);
+    // A run that ends without a crash forgets the file's crashes: the next crash waits 15 minutes again.
+    processor.process.mockResolvedValueOnce({ outcome: 'deferred', clientId: 1 });
+    clock.advance(120 * MINUTE);
+    await tick();
+    expect(starts()).toBe(7);
+    await tick(); // still due (this fake processor leaves the row as it was): the next tick tries it once more and it crashes
+    expect(starts()).toBe(8);
+    clock.advance(15 * MINUTE - 1);
+    await tick();
+    expect(starts()).toBe(8);
+    clock.advance(1);
+    await tick();
+    expect(starts()).toBe(9);
+  });
+
+  it('a crashed file held back does not keep a due file behind it waiting', async () => {
+    const { db, processor, queue } = setup({ concurrency: 1 });
+    const [a, b] = ['A', 'B'].map((w) => pending(db, w));
+    processor.process.mockRejectedValueOnce(new Error('disk full'));
+    queue.kick();
+    await flush();
+    await flush();
+    queue.kick();
+    await flush();
+    expect(processor.process.mock.calls.map(([id]) => id)).toEqual([a, b]);
   });
 
   it('a throwing onSettled does not break the queue', async () => {
@@ -229,14 +287,13 @@ describe('MediaQueue', () => {
 // Amendment 11a: the refill after a file finishes must never spin on a file that stays pending.
 describe('MediaQueue never retries a file in a loop', () => {
   const MEDIA_KEY = Buffer.alloc(32, 9);
-  const MINUTE = 60_000;
   const dirs: string[] = [];
   afterEach(() => {
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 
   /** The real processor behind the queue, wired as the app wires them: the ingestor kicks the queue for each file it stores. */
-  function withProcessor(o: { fetcher?: MediaFetcher; extract?: Extractor } = {}) {
+  function withProcessor(o: { fetcher?: MediaFetcher; extract?: Extractor; extractFor?: (db: Db, clock: Clock) => Extractor } = {}) {
     const dataDir = mkdtempSync(join(tmpdir(), 'wa-queue-'));
     dirs.push(dataDir);
     const db = seededDb();
@@ -245,7 +302,7 @@ describe('MediaQueue never retries a file in a loop', () => {
     const real = new MediaProcessor({
       db, dataDir, clock, log: silentLogger(), sealer,
       fetcher: o.fetcher ?? (async () => Buffer.from('jpeg-bytes')),
-      extract: o.extract ?? (async () => ({ textKind: 'description', text: 'A blue banner', pageCount: null, note: null })),
+      extract: o.extractFor?.(db, clock) ?? o.extract ?? (async () => ({ textKind: 'description', text: 'A blue banner', pageCount: null, note: null })),
     });
     const processor = { process: vi.fn((id: number) => real.process(id)) };
     const onSettled = vi.fn();
@@ -269,6 +326,43 @@ describe('MediaQueue never retries a file in a loop', () => {
     queue.kick();
     await flush();
     expect(processor.process).toHaveBeenCalledTimes(1);
+  });
+
+  // Final review FR1 (the reviewer's probe): writes start failing while a paid read is in flight, so neither its spend nor
+  // its result can be saved. Before the fix every kick read the image again and paid again, with nothing booked.
+  it('when the database stops taking writes during a paid read, 20 more kicks pay for nothing more', async () => {
+    const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
+    const fake = new FakeMediaAi();
+    const prepareImage = async (): Promise<PreparedImage> => ({ data: Buffer.from('small'), mediaType: 'image/jpeg', width: 10, height: 10 });
+    let spend!: SpendGuard;
+    const { db, clock, processor, queue, share } = withProcessor({
+      extractFor: (db, clock) => {
+        spend = new SpendGuard({ db, clock, capUsd: 15 });
+        const ai: MediaAi = {
+          describeImage: async (img) => {
+            const r = await fake.describeImage(img);
+            // From now on the database refuses every update of a file and every spend booking, as on a full disk.
+            db.exec(`CREATE TRIGGER IF NOT EXISTS refuse_media BEFORE UPDATE ON media BEGIN SELECT RAISE(ABORT, 'disk full'); END;
+              CREATE TRIGGER IF NOT EXISTS refuse_spend BEFORE INSERT ON spend BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
+            return r;
+          },
+          readScannedPdf: (pdf) => fake.readScannedPdf(pdf),
+        };
+        return createExtractor({ ai, spend, prices: P, prepareImage });
+      },
+    });
+    const id = share('IMG1'); // the ingestor kicks the queue
+    await queue.drain(5_000);
+    expect(fake.calls).toHaveLength(1);
+    for (let i = 0; i < 20; i++) {
+      clock.advance(MINUTE);
+      queue.kick();
+      await queue.drain(5_000);
+    }
+    expect(fake.calls).toHaveLength(1);
+    expect(processor.process.mock.calls.length).toBeLessThanOrEqual(2); // the run that paid, and one claim that could not be written
+    expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1 });
+    expect(spend.spentToday()).toBe(0);
   });
 
   it('a refill never restarts a file that stays due; the next kick tries it once more', async () => {

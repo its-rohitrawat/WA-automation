@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { syncClients } from '../../src/store/clients.ts';
 import { migrate, type Db } from '../../src/store/db.ts';
 import {
-  deferMedia, dueMediaIds, failMedia, finishMedia, getMedia, getMediaRef, insertMedia, markDownloaded, mediaForMessages, mediaJob, messageRowId,
+  claimMedia, deferMedia, dueMediaIds, failMedia, finishMedia, getMedia, getMediaRef, insertMedia, markDownloaded, mediaForMessages, mediaJob, messageRowId,
   type MediaKind, type MediaStatus, type NewMedia, type TextKind,
 } from '../../src/store/media.ts';
 import { MIGRATIONS } from '../../src/store/migrations.ts';
@@ -197,6 +197,32 @@ describe('media store', () => {
     failMedia(db, id, { status: 'unavailable', errorCode: 'expired', at: LATER });
     expect(getMediaRef(db, id)).toBeNull();
     expect(getMedia(db, id)).toMatchObject({ status: 'unavailable', errorCode: 'expired', nextAttemptAt: null });
+  });
+
+  // Final review FR1: the processor claims a file in a committed write before anything is decoded or paid for.
+  it('a claim counts the attempt and moves the next attempt ahead, only while the file is pending', () => {
+    const db = seededDb();
+    const id = insertMedia(db, media(message(db, 'A')));
+    deferMedia(db, id, { errorCode: 'ai_unavailable', nextAttemptAt: '2026-10-19T08:05:00.000Z', countAttempt: false, at: NOW });
+    expect(claimMedia(db, id, { nextAttemptAt: '2026-10-19T09:15:00.000Z', at: LATER })).toBe(true);
+    expect(getMedia(db, id)).toMatchObject({
+      status: 'pending', attempts: 1, nextAttemptAt: '2026-10-19T09:15:00.000Z', errorCode: 'ai_unavailable', hasRef: true, updatedAt: LATER,
+    });
+    expect(dueMediaIds(db, '2026-10-19T09:14:59.999Z', 10)).toEqual([]);
+    failMedia(db, id, { status: 'failed', errorCode: 'crashed', at: LATER });
+    expect(claimMedia(db, id, { nextAttemptAt: '2026-10-19T09:30:00.000Z', at: LATER })).toBe(false);
+    expect(getMedia(db, id)).toMatchObject({ status: 'failed', attempts: 1, nextAttemptAt: null });
+  });
+
+  it('a deferral can store the attempts exactly, as they were before a claim', () => {
+    const db = seededDb();
+    const id = insertMedia(db, media(message(db, 'A')));
+    claimMedia(db, id, { nextAttemptAt: '2026-10-19T08:15:00.000Z', at: NOW });
+    claimMedia(db, id, { nextAttemptAt: '2026-10-19T08:15:00.000Z', at: NOW });
+    deferMedia(db, id, { errorCode: 'spend_cap', nextAttemptAt: '2026-10-19T08:10:00.000Z', attempts: 1, at: NOW });
+    expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'spend_cap', nextAttemptAt: '2026-10-19T08:10:00.000Z' });
+    deferMedia(db, id, { errorCode: 'network', nextAttemptAt: '2026-10-19T08:11:00.000Z', countAttempt: true, at: NOW });
+    expect(getMedia(db, id)!.attempts).toBe(2);
   });
 
   it('a final failure keeps an original that was already saved', () => {

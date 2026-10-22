@@ -6,6 +6,9 @@ import type { ProcessOutcome, ProcessResult } from './processor.ts';
 
 /** Outcomes after which the file's message can be reconciled. */
 const SETTLED = new Set<ProcessOutcome>(['done', 'failed', 'unavailable']);
+/** A file whose run crashed is not started again for this long; the wait doubles after each crash, up to CRASH_MAX_WAIT_MS. */
+const CRASH_WAIT_MS = 15 * 60_000;
+const CRASH_MAX_WAIT_MS = 2 * 60 * 60_000;
 
 export interface MediaQueueOptions {
   db: Db;
@@ -24,10 +27,18 @@ export class MediaQueue {
   readonly #inFlight = new Set<number>();
   /**
    * Files started since the last kick(). When a file finishes the queue refills itself, but never with one of these, so
-   * a file that a run leaves pending and due (a crash, or a processor bug) is tried once per kick (every tick and every
-   * stored file), never in a loop (amendment 11a). Every real deferral waits at least a minute, longer than a tick.
+   * a file that a run leaves pending and due (a processor bug) is tried once per kick (every tick and every stored
+   * file), never in a loop (amendment 11a); a crashed one is held back longer (#crashed). Every real deferral waits at
+   * least a minute, longer than a tick.
    */
   readonly #startedSinceKick = new Set<number>();
+  /**
+   * Final review FR1: files whose run crashed (process() rejected, which means the database failed), held back until
+   * `until`. Such a run may have paid Claude without booking it, so it must not start again on every tick. The wait
+   * starts at 15 minutes and doubles after each crash, up to 2 hours. A run that ends without a crash forgets it. In
+   * memory only: across restarts the processor's claim limits the runs instead.
+   */
+  readonly #crashed = new Map<number, { until: number; waitMs: number }>();
   readonly #drainWaiters: (() => void)[] = [];
   #stopped = false;
 
@@ -52,16 +63,18 @@ export class MediaQueue {
     if (this.#stopped) return;
     const free = this.#o.concurrency - this.#inFlight.size;
     if (free <= 0) return;
+    const now = this.#o.clock.now();
+    const held = new Set([...this.#crashed].filter(([, c]) => c.until > now.getTime()).map(([id]) => id));
     let ids: number[];
     try {
-      // Enough rows to fill every free slot even if the first ones are in flight or were started since the kick.
-      const limit = this.#o.concurrency + this.#startedSinceKick.size;
-      ids = dueMediaIds(this.#o.db, this.#o.clock.now().toISOString(), limit);
+      // Enough rows to fill every free slot even if the first ones are in flight, were started since the kick, or are held back.
+      const limit = this.#o.concurrency + this.#startedSinceKick.size + held.size;
+      ids = dueMediaIds(this.#o.db, now.toISOString(), limit);
     } catch (err) {
       this.#o.log.error({ err }, 'media queue read failed');
       return;
     }
-    const startable = ids.filter((i) => !this.#inFlight.has(i) && !this.#startedSinceKick.has(i));
+    const startable = ids.filter((i) => !this.#inFlight.has(i) && !this.#startedSinceKick.has(i) && !held.has(i));
     for (const id of startable.slice(0, free)) this.#start(id);
   }
 
@@ -92,6 +105,7 @@ export class MediaQueue {
     Promise.resolve()
       .then(() => this.#o.processor.process(id))
       .then((r) => {
+        this.#crashed.delete(id);
         if (r.clientId === null || !SETTLED.has(r.outcome)) return;
         try {
           this.#o.onSettled(r.clientId);
@@ -100,9 +114,13 @@ export class MediaQueue {
         }
       })
       .catch((err: unknown) => {
-        // Only a broken database gets here (the processor turns file problems into statuses). The next tick retries.
+        // Only a broken database gets here (the processor turns file problems into statuses). The next tick goes on
+        // with other files; this one waits (FR1).
         crashed = true;
-        this.#o.log.error({ mediaId: id, err }, 'media processing crashed');
+        const last = this.#crashed.get(id)?.waitMs;
+        const waitMs = last === undefined ? CRASH_WAIT_MS : Math.min(last * 2, CRASH_MAX_WAIT_MS);
+        this.#crashed.set(id, { until: this.#o.clock.now().getTime() + waitMs, waitMs });
+        this.#o.log.error({ mediaId: id, waitMinutes: waitMs / 60_000, err }, 'media processing crashed');
       })
       .finally(() => {
         this.#inFlight.delete(id);

@@ -6,12 +6,12 @@ import Anthropic from '@anthropic-ai/sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AiInvalidOutputError, AiRefusalError } from '../../src/brain/claudeClient.ts';
 import { SpendCapReachedError } from '../../src/brain/paidCall.ts';
-import { createExtractor, scannedPdfCeilingUsd, type Extractor } from '../../src/media/extract.ts';
+import { createExtractor, scannedPdfCeilingUsd, type Extraction, type Extractor } from '../../src/media/extract.ts';
 import { MediaDownloadError, MediaUnavailableError, type MediaFetcher } from '../../src/media/fetch.ts';
 import type { PreparedImage } from '../../src/media/image.ts';
 import { ParseError, type ParseResult } from '../../src/media/parse/types.ts';
 import { mediaRelPath } from '../../src/media/paths.ts';
-import { MediaProcessor } from '../../src/media/processor.ts';
+import { MEDIA_MAX_ATTEMPTS, MediaProcessor } from '../../src/media/processor.ts';
 import { MediaRefSealer } from '../../src/media/ref.ts';
 import { MEDIA_LIMITS } from '../../src/media/types.ts';
 import type { Prices } from '../../src/spend/pricing.ts';
@@ -55,7 +55,15 @@ afterEach(() => {
 });
 
 type ImageExtras = { viewOnce?: boolean; contextInfo?: { isForwarded?: boolean; forwardingScore?: number } };
-type SetupOptions = { fetcher?: MediaFetcher; extract?: Extractor; log?: Logger; limits?: { maxBytes: number; timeoutMs: number }; startedAt?: Date };
+type SetupOptions = {
+  fetcher?: MediaFetcher;
+  extract?: Extractor;
+  /** An extractor built on the processor's own database, for example one whose SpendGuard books there. */
+  extractFor?: (db: Db) => Extractor;
+  log?: Logger;
+  limits?: { maxBytes: number; timeoutMs: number };
+  startedAt?: Date;
+};
 
 function setup(o: SetupOptions = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'wa-media-'));
@@ -65,7 +73,7 @@ function setup(o: SetupOptions = {}) {
   const sealer = new MediaRefSealer(Buffer.alloc(32, 5));
   const ing = new Ingestor({ db, onNewMessages: () => {}, clock, media: { sealer } });
   const fetcher = vi.fn<MediaFetcher>(o.fetcher ?? (async () => Buffer.from('jpeg-bytes')));
-  const extract = vi.fn<Extractor>(o.extract ?? (async () => ({ textKind: 'description', text: 'A blue banner with the new logo', pageCount: null, note: null })));
+  const extract = vi.fn<Extractor>(o.extractFor?.(db) ?? o.extract ?? (async () => ({ textKind: 'description', text: 'A blue banner with the new logo', pageCount: null, note: null })));
   const p = new MediaProcessor({ db, dataDir, clock, log: o.log ?? silentLogger(), sealer, fetcher, extract, limits: o.limits, startedAt: o.startedAt });
   const ingest = (waId: string, message: Parameters<typeof waRaw>[1]): number => {
     ing.handle(normalizeMessage(waRaw(waId, message))!);
@@ -76,8 +84,16 @@ function setup(o: SetupOptions = {}) {
   /** A file shared as a document, such as a PDF. */
   const shareFile = (waId: string, mimetype: string, fileName: string): number =>
     ingest(waId, { documentMessage: { url: 'https://mmg.whatsapp.net/v/x', directPath: '/v/x', mediaKey: MEDIA_KEY, mimetype, fileName } });
-  return { db, dataDir, clock, p, fetcher, extract, share, shareFile };
+  /** A fresh processor on the same database and folder, as after a restart of the service. */
+  const restart = (log: Logger = silentLogger()): MediaProcessor => new MediaProcessor({ db, dataDir, clock, log, sealer, fetcher, extract, limits: o.limits, startedAt: o.startedAt });
+  return { db, dataDir, clock, p, fetcher, extract, share, shareFile, restart };
 }
+
+/** From now on the database refuses every update of a file and every spend booking, as on a full disk. Reads still work. */
+const refuseWrites = (db: Db): void => {
+  db.exec(`CREATE TRIGGER IF NOT EXISTS refuse_media BEFORE UPDATE ON media BEGIN SELECT RAISE(ABORT, 'disk full'); END;
+    CREATE TRIGGER IF NOT EXISTS refuse_spend BEFORE INSERT ON spend BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
+};
 
 /** Where a shared file is saved, built only by mediaRelPath. waRaw's default timestamp is 10 Oct 2026, so client SHA's 2026-10 folder. */
 const rel = (mediaId: number, waId = 'IMG1', ext = 'jpg'): string => mediaRelPath({ clientCode: 'SHA', ts: new Date(TS * 1000).toISOString(), waId, mediaId, ext });
@@ -414,7 +430,8 @@ describe('MediaProcessor', () => {
       down = false;
       clock.advance(5 * MINUTE);
       expect((await p.process(id)).outcome).toBe('done');
-      expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'A receipt', errorCode: null, attempts: 0 });
+      // The waits counted nothing; the run that read it counts one attempt.
+      expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'A receipt', errorCode: null, attempts: 1 });
     });
 
     it('starts the waits again at 5 minutes after a different problem', async () => {
@@ -494,7 +511,7 @@ describe('MediaProcessor', () => {
       const { db, dataDir, clock, p, shareFile } = setup({ fetcher: async () => PDF, extract, log });
       const id = shareFile('DOC1', 'application/pdf', 'site-plan-scan.pdf');
       expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: 0, nextAttemptAt: null, localPath: rel(id, 'DOC1', 'pdf') });
+      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: 1, nextAttemptAt: null, localPath: rel(id, 'DOC1', 'pdf') });
       expect(existsSync(saved(dataDir, rel(id, 'DOC1', 'pdf')))).toBe(true);
       clock.advance(10 * MINUTE);
       expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
@@ -541,7 +558,7 @@ describe('MediaProcessor', () => {
         expect(spend.spentToday()).toBe(0);
         s.clock.advance(5 * MINUTE);
         expect((await s.p.process(id)).outcome).toBe('done');
-        expect(getMedia(s.db, id)).toMatchObject({ status: 'done', errorCode: null, attempts: 0 });
+        expect(getMedia(s.db, id)).toMatchObject({ status: 'done', errorCode: null, attempts: 1 }); // the wait counted nothing
         expect(ai.calls.map((c) => c.kind)).toEqual([kind, kind]);
       },
     );
@@ -558,12 +575,83 @@ describe('MediaProcessor', () => {
     });
   });
 
+  // Final review FR1: before a file is downloaded, decoded or paid for, the processor claims it in a committed write: the
+  // attempt is counted and the next attempt moves 15 minutes ahead. A database that cannot be written then stops the run
+  // before anything is paid, and a run that never ends (the process stopped) still uses up one of the file's attempts.
+  describe('claims a file before decoding or paying for it (final review FR1)', () => {
+    const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
+    /** The real extractor with a fake Claude; its SpendGuard books in the processor's database. */
+    const paid = (ai: FakeMediaAi) => {
+      const prepareImage = vi.fn(async (): Promise<PreparedImage> => ({ data: Buffer.from('small'), mediaType: 'image/jpeg', width: 10, height: 10 }));
+      const extractFor = (db: Db) => createExtractor({ ai, spend: new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 15 }), prices: P, prepareImage });
+      return { prepareImage, extractFor };
+    };
+
+    it('when the claim cannot be written, nothing is downloaded, decoded or sent to Claude, and the error propagates', async () => {
+      const ai = new FakeMediaAi([status(529)]);
+      const x = paid(ai);
+      const s = setup({ extractFor: x.extractFor });
+      const saved = s.share('IMG1');
+      expect((await s.p.process(saved)).outcome).toBe('deferred'); // downloaded, then Claude was busy
+      const fresh = s.share('IMG2');
+      refuseWrites(s.db);
+      s.clock.advance(5 * MINUTE);
+      await expect(s.p.process(saved)).rejects.toThrow('disk full');
+      await expect(s.p.process(fresh)).rejects.toThrow('disk full');
+      expect(ai.calls).toHaveLength(1); // the first, busy, call only
+      expect(x.prepareImage).toHaveBeenCalledTimes(1);
+      expect(s.fetcher).toHaveBeenCalledTimes(1); // IMG2 was never downloaded
+      expect(getMedia(s.db, saved)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'ai_unavailable', nextAttemptAt: at(5 * MINUTE) });
+      expect(getMedia(s.db, fresh)).toMatchObject({ status: 'pending', attempts: 0, hasRef: true, localPath: null });
+    });
+
+    it('a run that never ends is tried again 15 minutes later, after a restart too; after 3 such runs the file fails as crashed', async () => {
+      const lines: string[] = [];
+      const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
+      // A decode or read that takes the whole process down never returns.
+      const s = setup({ extract: () => new Promise<Extraction>(() => {}) });
+      const id = s.share();
+      for (let run = 1; run <= MEDIA_MAX_ATTEMPTS; run++) {
+        // Each run is a fresh start of the service: nothing about the earlier runs is kept in memory.
+        void s.restart().process(id);
+        await vi.waitFor(() => expect(s.extract).toHaveBeenCalledTimes(run));
+        expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: run, nextAttemptAt: at(run * 15 * MINUTE), localPath: rel(id) });
+        s.clock.advance(15 * MINUTE);
+      }
+      expect(await s.restart(log).process(id)).toEqual({ outcome: 'failed', clientId: 1 });
+      expect(getMedia(s.db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed', attempts: MEDIA_MAX_ATTEMPTS, nextAttemptAt: null, localPath: rel(id) });
+      expect(s.extract).toHaveBeenCalledTimes(MEDIA_MAX_ATTEMPTS);
+      expect(s.fetcher).toHaveBeenCalledTimes(1);
+      expect(lines.map((l) => JSON.parse(l) as unknown)).toEqual([
+        { level: 40, time: expect.any(Number), msg: expect.any(String), mediaId: id, clientId: 1, errorCode: 'crashed', attempts: MEDIA_MAX_ATTEMPTS },
+      ]);
+    });
+
+    it('waits that count nothing (Claude unavailable, the spend cap) leave the attempts exactly as they were before the claim', async () => {
+      const invalid = () => new AiInvalidOutputError('bad json', null);
+      const errors: Error[] = [invalid(), status(529), new SpendCapReachedError(), status(401), invalid(), new SpendCapReachedError(), invalid()];
+      const { db, clock, p, share } = setup({ extract: async () => { throw errors.shift()!; } });
+      const id = share();
+      const seen: [string | null, number][] = [];
+      while (errors.length > 0) {
+        await p.process(id);
+        const row = getMedia(db, id)!;
+        seen.push([row.errorCode, row.attempts]);
+        clock.advance(60 * MINUTE);
+      }
+      expect(seen).toEqual([
+        ['ai_invalid_output', 1], ['ai_unavailable', 1], ['spend_cap', 1], ['ai_unavailable', 1], ['ai_invalid_output', 2], ['spend_cap', 2], ['ai_invalid_output', 3],
+      ]);
+      expect(getMedia(db, id)!.status).toBe('failed'); // the third counted attempt, not the seventh run
+    });
+  });
+
   it('a refusal from Claude fails for good and is not retried: it was billed', async () => {
     const usage = { inputTokens: 1200, outputTokens: 5, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
     const { db, dataDir, clock, p, fetcher, extract, share } = setup({ extract: async () => { throw new AiRefusalError(null, usage); } });
     const id = share();
     expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-    expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'ai_refusal', attempts: 0, nextAttemptAt: null, localPath: rel(id) });
+    expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'ai_refusal', attempts: 1, nextAttemptAt: null, localPath: rel(id) });
     expect(existsSync(saved(dataDir, rel(id)))).toBe(true);
     clock.advance(10 * MINUTE);
     expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });

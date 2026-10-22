@@ -214,7 +214,8 @@ describe('app with shared files', () => {
     });
     const { db, app, sock } = setup({ log, media: { fetcher } });
     shareImage(sock);
-    await vi.waitFor(() => expect(getMedia(db, 1)?.attempts).toBe(1));
+    // The error code is written when the run ends (the claim before it counts the attempt already).
+    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ attempts: 1, errorCode: 'unknown' }));
     await stopApp(app);
     const out = lines.join('');
     expect(out).toContain('shared file will be retried');

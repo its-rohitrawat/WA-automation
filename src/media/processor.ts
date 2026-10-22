@@ -6,7 +6,7 @@ import { AiInvalidOutputError, AiRefusalError } from '../brain/claudeClient.ts';
 import { neverSent, SpendCapReachedError } from '../brain/paidCall.ts';
 import { getClient } from '../store/clients.ts';
 import type { Db } from '../store/db.ts';
-import { deferMedia, failMedia, finishMedia, getMedia, getMediaRef, markDownloaded, mediaJob, type MediaJob, type MediaRow } from '../store/media.ts';
+import { claimMedia, deferMedia, failMedia, finishMedia, getMedia, getMediaRef, markDownloaded, mediaJob, type MediaJob, type MediaRow } from '../store/media.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { isScanReadError, type Extractor } from './extract.ts';
@@ -24,6 +24,13 @@ export interface ProcessResult {
 }
 
 export const MEDIA_MAX_ATTEMPTS = 3;
+/**
+ * How far the claim before a run moves the file's next attempt (final review FR1): longer than any one run, whose
+ * slowest step, a scan read, gives up after 10 minutes. A run that never ended is tried again after this.
+ */
+export const CLAIM_MS = 15 * 60_000;
+/** A file whose runs never ended MEDIA_MAX_ATTEMPTS times: each one stopped the process, for example in a decoder. */
+const CRASHED = 'crashed';
 /** Wait after the first and the second failed attempt; the third failure is final. */
 const RETRY_DELAYS_MS = [60_000, 5 * 60_000];
 export const SPEND_RETRY_MS = 10 * 60_000;
@@ -142,6 +149,22 @@ export class MediaProcessor {
       this.#o.log.warn({ mediaId: row.id, clientId: row.clientId, errorCode: 'no_job' }, 'shared file has no message');
       return { outcome: 'failed', clientId: row.clientId };
     }
+    if (row.localPath === null && job.revoked) {
+      // Deleted for everyone before we fetched it: do not fetch it now.
+      failMedia(db, row.id, { status: 'unavailable', errorCode: 'revoked', at: this.#now() });
+      return { outcome: 'unavailable', clientId: row.clientId };
+    }
+    if (row.attempts >= MEDIA_MAX_ATTEMPTS) {
+      // Every run that ends in a deferral leaves fewer attempts than this, and the run that reaches it fails the file.
+      // So a pending file with this many was claimed by runs that never ended: each one stopped the process (FR1).
+      failMedia(db, row.id, { status: 'failed', errorCode: CRASHED, at: this.#now() });
+      this.#o.log.warn({ mediaId: row.id, clientId: row.clientId, errorCode: CRASHED, attempts: row.attempts }, 'shared file failed: its runs never ended');
+      return { outcome: 'failed', clientId: row.clientId };
+    }
+    // Final review FR1: claimed in a committed write before anything is downloaded, decoded or paid for. If the write
+    // fails, the error propagates and nothing is tried. Outcomes that count nothing give the attempt back (#settle).
+    const at = this.#now();
+    if (!claimMedia(db, row.id, { nextAttemptAt: new Date(Date.parse(at) + CLAIM_MS).toISOString(), at })) return { outcome: 'skipped', clientId: row.clientId };
     try {
       return { outcome: await this.#run(row, job), clientId: row.clientId };
     } catch (e) {
@@ -159,11 +182,6 @@ export class MediaProcessor {
 
   async #run(row: MediaRow, job: MediaJob): Promise<ProcessOutcome> {
     const { db } = this.#o;
-    if (row.localPath === null && job.revoked) {
-      // Deleted for everyone before we fetched it: do not fetch it now.
-      failMedia(db, row.id, { status: 'unavailable', errorCode: 'revoked', at: this.#now() });
-      return 'unavailable';
-    }
     const bytes = row.localPath === null ? await this.#download(row, job) : await readFile(this.#abs(row.localPath));
     if (job.revoked) {
       finishMedia(db, row.id, { textKind: null, text: null, pageCount: null, note: 'revoked', at: this.#now() });
@@ -196,12 +214,17 @@ export class MediaProcessor {
     return bytes;
   }
 
+  /**
+   * Ends a run that threw. `row` is the file as it was before the claim, so a wait that counts nothing stores its
+   * attempts exactly as they were then (final review FR1), and the waits of 10d read back the last wait from it.
+   * A final failure keeps the attempt the claim counted.
+   */
   #settle(row: MediaRow, e: unknown): ProcessOutcome {
     const { db, log } = this.#o;
     const at = this.#now();
     const ids = { mediaId: row.id, clientId: row.clientId };
     if (e instanceof SpendCapReachedError) {
-      deferMedia(db, row.id, { errorCode: 'spend_cap', nextAttemptAt: new Date(Date.parse(at) + SPEND_RETRY_MS).toISOString(), countAttempt: false, at });
+      deferMedia(db, row.id, { errorCode: 'spend_cap', nextAttemptAt: new Date(Date.parse(at) + SPEND_RETRY_MS).toISOString(), attempts: row.attempts, at });
       log.info(ids, 'spend cap: shared file waits');
       return 'deferred';
     }
@@ -223,7 +246,7 @@ export class MediaProcessor {
         return 'failed';
       }
       const waitMs = nextUnavailableWait(row);
-      deferMedia(db, row.id, { errorCode: AI_UNAVAILABLE, nextAttemptAt: new Date(Date.parse(at) + waitMs).toISOString(), countAttempt: false, at });
+      deferMedia(db, row.id, { errorCode: AI_UNAVAILABLE, nextAttemptAt: new Date(Date.parse(at) + waitMs).toISOString(), attempts: row.attempts, at });
       log.info({ ...ids, errorCode: AI_UNAVAILABLE, waitMinutes: waitMs / 60_000, err: e }, 'Claude unavailable: shared file waits');
       return 'deferred';
     }
@@ -237,14 +260,14 @@ export class MediaProcessor {
       return 'failed';
     }
     const errorCode = retryCode(e);
-    const attempts = row.attempts + 1;
+    const attempts = row.attempts + 1; // the attempt the claim counted
     if (attempts >= MEDIA_MAX_ATTEMPTS) {
       failMedia(db, row.id, { status: 'failed', errorCode, at });
       log.warn({ ...ids, errorCode, attempts, err: e }, 'shared file failed after retries');
       return 'failed';
     }
     const delay = RETRY_DELAYS_MS[attempts - 1] ?? 5 * 60_000;
-    deferMedia(db, row.id, { errorCode, nextAttemptAt: new Date(Date.parse(at) + delay).toISOString(), countAttempt: true, at });
+    deferMedia(db, row.id, { errorCode, nextAttemptAt: new Date(Date.parse(at) + delay).toISOString(), attempts, at });
     log.warn({ ...ids, errorCode, attempts, err: e }, 'shared file will be retried');
     return 'deferred';
   }
