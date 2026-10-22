@@ -190,8 +190,13 @@ export function setTaskStatus(db: Db, id: number, status: Status, today: string,
   });
 }
 
+/**
+ * Counts a reminder. The last reminder date never moves back: a file-only re-check dates its reminder by the day its
+ * message was sent (amendment 12h), which can be before a reminder already logged from a later message.
+ */
 export function logReminder(db: Db, id: number, onDate: string, now: string): void {
-  db.prepare('UPDATE tasks SET reminder_count = reminder_count + 1, last_reminder_on = ?, updated_at = ? WHERE id = ?').run(onDate, now, id);
+  db.prepare(`UPDATE tasks SET reminder_count = reminder_count + 1, last_reminder_on = MAX(COALESCE(last_reminder_on, ''), @onDate),
+      updated_at = @now WHERE id = @id`).run({ onDate, now, id });
 }
 
 export function recordEvent(

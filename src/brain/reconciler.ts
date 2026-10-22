@@ -302,7 +302,8 @@ export class Reconciler {
       case 'close_task': {
         const t = taskFor(op.taskCode);
         // A task cannot close before it was raised. A file-only re-check dates the close by the day its message was sent
-        // (amendment 12h), which can be before the day a later message raised the task. Reminder dates are not clamped.
+        // (amendment 12h), which can be before the day a later message raised the task. logReminder clamps the same way:
+        // the last reminder date never moves back.
         setTaskStatus(db, t.id, 'done', lastDate < t.raisedOn ? t.raisedOn : lastDate, nowIso, 'ai');
         event(t.id, { status: 'done' });
         return;
