@@ -13,7 +13,7 @@ import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import type { Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { seededDb } from '../helpers/db.ts';
-import { tinyPdf } from '../helpers/files.ts';
+import { tinyDocx, tinyPdf } from '../helpers/files.ts';
 import { FakeMediaAi } from '../helpers/mediaAi.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
@@ -57,10 +57,11 @@ describe('createExtractor', () => {
     expect(reserve).toHaveBeenCalledExactlyOnceWith(imageEstimateUsd({ width: 1000, height: 750 }, P));
   });
 
-  it('describes an image that was sent as a document', async () => {
-    const { ai, extract, input } = setup();
-    expect((await extract(input({ kind: 'document', mimeType: 'image/png', fileName: 'homepage-v3.png' }))).textKind).toBe('description');
+  it.each(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'IMAGE/JPEG; charset=x'])('describes an image that was sent as a document (%s)', async (mimeType) => {
+    const { ai, parse, extract, input } = setup();
+    expect((await extract(input({ kind: 'document', mimeType, fileName: 'homepage-v3' }))).textKind).toBe('description');
     expect(ai.calls).toHaveLength(1);
+    expect(parse).not.toHaveBeenCalled();
   });
 
   it('reads a PDF with a text layer locally, without Claude', async () => {
@@ -70,6 +71,17 @@ describe('createExtractor', () => {
     });
     expect(parse.mock.calls[0]![0]).toMatchObject({ kind: 'pdf', maxPages: 200, maxTextChars: 1_000_000 });
     expect(ai.calls).toHaveLength(0);
+  });
+
+  it('counts a PDF with 16 visible characters per page read as text, and one with 15 as a scan', async () => {
+    const pdf = { kind: 'document', mimeType: 'application/pdf', bytes: PDF } as const;
+    const text = setup({ parse: { text: ' abcd efgh\nijkl mnop ', pageCount: 1 } }); // 16 visible, whitespace not counted
+    expect(await text.extract(text.input(pdf))).toEqual({ textKind: 'extract', text: ' abcd efgh\nijkl mnop ', pageCount: 1, note: null });
+    expect(text.ai.calls).toHaveLength(0);
+
+    const scan = setup({ parse: { text: ' abcd efgh\nijkl mno ', pageCount: 1 } }); // 15 visible
+    expect(await scan.extract(scan.input(pdf))).toEqual({ textKind: 'extract', text: 'Quotation No. 17. Total ₹1,20,000', pageCount: 1, note: 'scan_read_by_ai' });
+    expect(scan.ai.calls).toEqual([{ kind: 'pdf', bytes: PDF }]);
   });
 
   it('marks a PDF that was read only up to the page cap', async () => {
@@ -160,7 +172,8 @@ describe('createExtractor', () => {
   it('decodes an image with the full pixel cap when no image preparer is given', async () => {
     const { ai, extract, input } = setup({ realImage: true });
     const side = Math.ceil(Math.sqrt(MEDIA_LIMITS.maxImagePixels)); // 7072 x 7072 is just over the cap
-    const image = (s: number) => sharp({ create: { width: s, height: s, channels: 3, background: { r: 30, g: 90, b: 200 } } });
+    // Grey, one byte per pixel, so the images stay under the decoded-size budget and only the pixel cap decides.
+    const image = (s: number) => sharp({ create: { width: s, height: s, channels: 3, background: { r: 30, g: 90, b: 200 } } }).toColourspace('b-w');
     expect(await extract(input({ bytes: await image(side - 1).jpeg().toBuffer() }))).toMatchObject({ textKind: 'description' });
     expect([...ai.calls[0]!.bytes.subarray(0, 3)]).toEqual([0xff, 0xd8, 0xff]);
     await expect(extract(input({ bytes: await image(side).png().toBuffer() }))).rejects.toMatchObject({ name: 'ParseError', code: 'image_unreadable' });
@@ -194,10 +207,33 @@ describe('createExtractor', () => {
       expect(spendRows(scan.db)).toEqual([]);
     });
 
+    it('still tries an image or a scan when the daily cap equals its ceiling', async () => {
+      const image = setup({ capUsd: imageCeilingUsd(P) });
+      expect(await image.extract(image.input())).toMatchObject({ textKind: 'description', note: null });
+      expect(image.ai.calls).toHaveLength(1);
+
+      const scan = setup({ capUsd: scannedPdfCeilingUsd(P), parse: { text: '', pageCount: 3 } });
+      expect(await scan.extract(scan.input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toMatchObject({ textKind: 'extract', note: 'scan_read_by_ai' });
+      expect(scan.reserve).toHaveBeenCalledExactlyOnceWith(scannedPdfCeilingUsd(P));
+      expect(scan.ai.calls).toHaveLength(1);
+    });
+
     it('does not decode an image when the budget left today cannot hold its ceiling', async () => {
       const { spend, ai, prepareImage, extract, input } = setup();
       spend.record('ai', 14.95, 'batch 1');
       expect(spend.canSpend(imageCeilingUsd(P))).toBe(false);
+      await expect(extract(input())).rejects.toBeInstanceOf(SpendCapReachedError);
+      expect(prepareImage).not.toHaveBeenCalled();
+      expect(ai.calls).toHaveLength(0);
+    });
+
+    it('checks the ceiling before decoding, even when what is left would hold this image', async () => {
+      // What is left today holds the estimate for the 1000 x 750 image the fake returns, but not the ceiling for any
+      // image. The check must use the ceiling, or the image is decoded and then deferred on every retry (amendment 9b).
+      const { spend, ai, prepareImage, extract, input } = setup();
+      spend.record('ai', 15 - (imageCeilingUsd(P) - 0.001), 'batch 1');
+      expect(spend.canSpend(imageCeilingUsd(P))).toBe(false);
+      expect(spend.canSpend(imageEstimateUsd({ width: 1000, height: 750 }, P))).toBe(true);
       await expect(extract(input())).rejects.toBeInstanceOf(SpendCapReachedError);
       expect(prepareImage).not.toHaveBeenCalled();
       expect(ai.calls).toHaveLength(0);
@@ -293,6 +329,14 @@ describe('createExtractor', () => {
       expect(await extract(input({ kind: 'document', mimeType: DOCX_MIME, bytes }))).toMatchObject({ text: 'Scope of work' });
       expect(parse).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ kind: 'docx' }), { transfer: true });
       expect(bytes.length).toBe(0); // moved to the parser, as parseFile does
+    });
+
+    it('moves a DOCX to the real parser without a copy', async () => {
+      // No fake parser: the default wiring must pass { transfer: true } on to parseFile.
+      const { extract, input } = setup({ realParse: true });
+      const bytes = owned(await tinyDocx(['Scope of work']));
+      expect(await extract(input({ kind: 'document', mimeType: DOCX_MIME, bytes }))).toEqual({ textKind: 'extract', text: 'Scope of work', pageCount: null, note: null });
+      expect(bytes.length).toBe(0);
     });
 
     it('keeps the bytes of a PDF, so Claude receives the whole scan', async () => {

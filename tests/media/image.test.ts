@@ -1,9 +1,13 @@
-import sharp, { type JpegOptions, type OutputInfo, type Sharp } from 'sharp';
+import sharp, { type JpegOptions, type Metadata, type OutputInfo, type Sharp } from 'sharp';
 import { describe, expect, it, vi } from 'vitest';
-import { IMAGE_LONG_EDGE, prepareImageForClaude } from '../../src/media/image.ts';
+import { IMAGE_LONG_EDGE, MAX_DECODED_IMAGE_BYTES, MAX_HEIF_IMAGE_PIXELS, MAX_PROGRESSIVE_IMAGE_PIXELS, prepareImageForClaude } from '../../src/media/image.ts';
 import { MEDIA_LIMITS } from '../../src/media/types.ts';
 
-const png = (width: number, height: number) => sharp({ create: { width, height, channels: 3, background: { r: 30, g: 90, b: 200 } } }).png().toBuffer();
+const rgb = (width: number, height: number) => sharp({ create: { width, height, channels: 3, background: { r: 30, g: 90, b: 200 } } });
+const rgba = (width: number, height: number) => sharp({ create: { width, height, channels: 4, background: { r: 30, g: 90, b: 200, alpha: 0.5 } } });
+/** One channel of 8 bits: a pixel takes one byte once decoded. */
+const grey = (width: number, height: number) => rgb(width, height).toColourspace('b-w');
+const png = (width: number, height: number) => rgb(width, height).png().toBuffer();
 const solid = () => sharp({ create: { width: 30, height: 20, channels: 3, background: { r: 200, g: 40, b: 40 } } });
 const isJpeg = (b: Buffer) => [...b.subarray(0, 3)].join(',') === [0xff, 0xd8, 0xff].join(',');
 
@@ -32,11 +36,109 @@ describe('prepareImageForClaude', () => {
   });
 
   it('applies the decompression-bomb pixel cap by default', async () => {
-    // The extractor passes no cap of its own, so this default is what guards every real image.
+    // The extractor passes no cap of its own, so this default is what guards every real image. Both images are grey
+    // (one byte per pixel), so they stay well under the decoded-size budget and only the pixel cap decides.
     const side = Math.ceil(Math.sqrt(MEDIA_LIMITS.maxImagePixels)); // 7072 x 7072 is just over the cap, 7071 x 7071 under
-    await expect(prepareImageForClaude(await png(side, side))).rejects.toMatchObject({ name: 'ParseError', code: 'image_unreadable' });
-    const under = await sharp({ create: { width: side - 1, height: side - 1, channels: 3, background: { r: 30, g: 90, b: 200 } } }).jpeg().toBuffer();
-    expect(await prepareImageForClaude(under)).toMatchObject({ width: IMAGE_LONG_EDGE, height: IMAGE_LONG_EDGE });
+    await expect(prepareImageForClaude(await grey(side, side).png().toBuffer())).rejects.toMatchObject({ name: 'ParseError', code: 'image_unreadable' });
+    expect(await prepareImageForClaude(await grey(side - 1, side - 1).jpeg().toBuffer())).toMatchObject({ width: IMAGE_LONG_EDGE, height: IMAGE_LONG_EDGE });
+  });
+
+  // Review of Task 9: the pixel cap alone ignores bit depth, channels and interlacing, so a small file under it could
+  // still make sharp hold hundreds of MB in the service process.
+  describe('what an image takes to decode', () => {
+    it('sets the budgets: 128 MiB decoded, 16 MiP for a progressive or interlaced image', () => {
+      expect(MAX_DECODED_IMAGE_BYTES).toBe(128 * 1024 * 1024);
+      expect(MAX_PROGRESSIVE_IMAGE_PIXELS).toBe(16 * 1024 * 1024);
+    });
+
+    it('refuses a 16-bit interlaced PNG under the pixel cap', async () => {
+      const input = await rgba(4200, 4200).toColourspace('rgb16').png({ progressive: true }).toBuffer();
+      expect(input.length).toBeLessThan(1_000_000);
+      expect(4200 * 4200).toBeLessThan(MEDIA_LIMITS.maxImagePixels);
+      await expect(prepareImageForClaude(input)).rejects.toMatchObject({ name: 'ParseError', code: 'image_unreadable' });
+    });
+
+    it('counts two bytes per sample for a 16-bit image', async () => {
+      // 4300 x 4300 x 4 channels is 74 MB at 8 bits and 148 MB at 16 bits; neither is interlaced.
+      await expect(prepareImageForClaude(await rgba(4300, 4300).toColourspace('rgb16').png().toBuffer())).rejects.toMatchObject({ code: 'image_unreadable' });
+      expect(await prepareImageForClaude(await rgba(4300, 4300).png().toBuffer())).toMatchObject({ width: IMAGE_LONG_EDGE, height: IMAGE_LONG_EDGE });
+    });
+
+    it('counts every channel, up to the budget exactly', async () => {
+      // 8-bit RGB: 6688 x 6688 x 3 fits in 128 MiB, 6689 x 6689 x 3 does not. Both are under the pixel cap.
+      const side = Math.floor(Math.sqrt(MAX_DECODED_IMAGE_BYTES / 3));
+      expect(side * side * 3).toBeLessThanOrEqual(MAX_DECODED_IMAGE_BYTES);
+      expect((side + 1) * (side + 1) * 3).toBeGreaterThan(MAX_DECODED_IMAGE_BYTES);
+      expect(await prepareImageForClaude(await rgb(side, side).jpeg().toBuffer())).toMatchObject({ width: IMAGE_LONG_EDGE, height: IMAGE_LONG_EDGE });
+      await expect(prepareImageForClaude(await rgb(side + 1, side + 1).jpeg().toBuffer())).rejects.toMatchObject({ code: 'image_unreadable' });
+      // The same pixels in grey take a third of the memory.
+      expect(await prepareImageForClaude(await grey(side + 1, side + 1).jpeg().toBuffer())).toMatchObject({ width: IMAGE_LONG_EDGE });
+    });
+
+    it('holds a progressive JPEG or an interlaced PNG to 16 MiP, since it is decoded whole', async () => {
+      // 4096 x 4096 is exactly 16 MiP; one more row is over. A baseline JPEG of the same size is still read.
+      expect(await prepareImageForClaude(await rgb(4096, 4096).jpeg({ progressive: true }).toBuffer())).toMatchObject({ width: IMAGE_LONG_EDGE });
+      await expect(prepareImageForClaude(await rgb(4096, 4097).jpeg({ progressive: true }).toBuffer())).rejects.toMatchObject({ code: 'image_unreadable' });
+      await expect(prepareImageForClaude(await rgb(4096, 4097).png({ progressive: true }).toBuffer())).rejects.toMatchObject({ code: 'image_unreadable' });
+      expect(await prepareImageForClaude(await rgb(4096, 4097).jpeg().toBuffer())).toMatchObject({ height: IMAGE_LONG_EDGE });
+    });
+
+    it('holds an AVIF image to 8 MiP, since its decoder keeps several whole copies', async () => {
+      // AVIF takes about 19 to 26 bytes per pixel while decoding, whatever the file size: a 1 KB AVIF of 6688 x 6688
+      // in one colour needed 700 MB. 4096 x 2048 is exactly 8 MiP and 4 bytes per pixel or less once decoded.
+      const avif = (width: number, height: number) => rgb(width, height).avif({ effort: 0 }).toBuffer();
+      expect(MAX_HEIF_IMAGE_PIXELS).toBe(8 * 1024 * 1024);
+      expect(await prepareImageForClaude(await avif(4096, 2048))).toMatchObject({ width: IMAGE_LONG_EDGE, height: 1024 });
+      await expect(prepareImageForClaude(await avif(4096, 2049))).rejects.toMatchObject({ code: 'image_unreadable' });
+      expect(await prepareImageForClaude(await rgb(4096, 2049).jpeg().toBuffer())).toMatchObject({ width: IMAGE_LONG_EDGE });
+    });
+
+    it('still reads ordinary phone photos', async () => {
+      // A 12 MP camera photo sent as a document, and a WhatsApp HD photo, which is often progressive.
+      expect(await prepareImageForClaude(await rgb(4000, 3000).jpeg().toBuffer())).toMatchObject({ width: IMAGE_LONG_EDGE, height: 1536 });
+      expect(await prepareImageForClaude(await rgb(4096, 3072).jpeg({ progressive: true }).toBuffer())).toMatchObject({ width: IMAGE_LONG_EDGE, height: 1536 });
+    });
+
+    it('decodes one image at a time, even when two are asked for at once', async () => {
+      // The media queue reads two files at once; two large decodes must never overlap.
+      const inputs = [await png(3000, 1000), await png(1000, 3000)];
+      type Encoded = { data: Buffer; info: OutputInfo };
+      const proto = sharp.prototype as { metadata(): Promise<Metadata>; toBuffer(o: { resolveWithObject: true }): Promise<Encoded> };
+      const events: string[] = [];
+      let active = 0;
+      let most = 0;
+      const track = async <T>(name: string, work: () => Promise<T>): Promise<T> => {
+        events.push(`${name} start`);
+        most = Math.max(most, ++active);
+        try {
+          return await work();
+        } finally {
+          active--;
+          events.push(`${name} end`);
+        }
+      };
+      const metadata = proto.metadata;
+      const toBuffer = proto.toBuffer;
+      vi.spyOn(proto, 'metadata').mockImplementation(function (this: unknown) {
+        return track('metadata', () => metadata.call(this));
+      });
+      vi.spyOn(proto, 'toBuffer').mockImplementation(function (this: unknown, o) {
+        return track('toBuffer', () => toBuffer.call(this, o));
+      });
+      const [wide, tall] = await Promise.all(inputs.map((input) => prepareImageForClaude(input)));
+      expect(wide).toMatchObject({ width: IMAGE_LONG_EDGE, height: 683 });
+      expect(tall).toMatchObject({ width: 683, height: IMAGE_LONG_EDGE });
+      expect(most).toBe(1);
+      const one = ['metadata start', 'metadata end', 'toBuffer start', 'toBuffer end'];
+      expect(events).toEqual([...one, ...one]);
+    });
+
+    it('does not let a refused image hold up the next one', async () => {
+      const small = await png(10, 10);
+      const [bad, good] = await Promise.allSettled([prepareImageForClaude(Buffer.from('not an image')), prepareImageForClaude(small)]);
+      expect(bad).toMatchObject({ status: 'rejected', reason: { name: 'ParseError', code: 'image_unreadable' } });
+      expect(good).toMatchObject({ status: 'fulfilled', value: { width: 10, height: 10 } });
+    });
   });
 
   it('turns a phone photo upright from its EXIF orientation', async () => {
