@@ -23,7 +23,8 @@ export interface ValidationState {
    * Batch messages re-queued because their text was edited. Only these skip the replay guard: a reaction does not
    * change the text, so a reaction re-check is guarded like a fresh message. So is a "file now read" re-check
    * (amendment 12h): the message's text is unchanged, so its tasks, reminders and decisions are not added again.
-   * Its messageTs is when the file was read, so the status lock treats it like a reaction re-check too.
+   * Its messageTs is when the message was sent, not when the file was read: a human status change made after the
+   * message wins. A file re-check that is also an edit re-check is in editedIds and is not guarded.
    */
   editedIds: Set<string>;
 }

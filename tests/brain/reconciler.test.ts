@@ -360,13 +360,37 @@ describe('Reconciler', () => {
     });
     const readAt = (db: Db, id: number, at: string) => finishMedia(db, id, { textKind: 'description', text: 'Banner v3, final colours', pageCount: null, note: null, at });
 
-    it('accepts a close backed by a file read after the human reopened the task, closed on the processing date (12h)', async () => {
+    it('rejects a close backed by a file read after the human reopened the task, when the message was sent before (12h, I2)', async () => {
       const { db, r } = setup([{ ops: [close()] }]);
       reopenedWithOldDelivery(db);
       readAt(db, fileOf(db), '2026-10-19T07:00:00.000Z');
       expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: null })]);
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open' });
+    });
+
+    it('accepts a close backed by a file sent after the human reopened the task and read later, closed on the day it was sent (12h, I2)', async () => {
+      const { db, r } = setup([{ ops: [close()] }]);
+      banner(db);
+      closeTask(db, 'SHA-001', new Date('2026-10-17T05:00:00Z'));
+      reopenTask(db, 'SHA-001', new Date('2026-10-17T06:00:00Z'));
+      store(db, 'm1', 'Banner v3 attached', '2026-10-18T05:00:00.000Z');
+      const id = fileOf(db);
+      markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-18T06:00:00.000Z'); // the file was still being read
+      readAt(db, id, '2026-10-19T07:00:00.000Z');
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
-      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-19' });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-18' });
+    });
+
+    it('closes on the day the message was sent, not the processing date, when its only re-check is a file read late (12h, I2)', async () => {
+      const { db, r } = setup([{ ops: [close()] }]);
+      banner(db);
+      store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
+      const id = fileOf(db);
+      markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-12T06:00:00.000Z');
+      readAt(db, id, '2026-10-19T07:00:00.000Z');
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-12' });
     });
 
     it('still rejects a close backed by a file read before the human reopened the task (12h)', async () => {
@@ -384,16 +408,29 @@ describe('Reconciler', () => {
 
     it.each([
       { fileRead: '2026-10-19T05:30:00.000Z', reacted: '2026-10-19T07:00:00.000Z', accepted: 1 },
-      { fileRead: '2026-10-19T07:00:00.000Z', reacted: '2026-10-19T05:30:00.000Z', accepted: 1 },
+      { fileRead: '2026-10-19T07:00:00.000Z', reacted: '2026-10-19T05:30:00.000Z', accepted: 0 },
       { fileRead: '2026-10-19T05:30:00.000Z', reacted: '2026-10-19T05:45:00.000Z', accepted: 0 },
-    ])('a file re-check that also got a reaction counts from the later of the two (file $fileRead, reaction $reacted) (12h)', async ({ fileRead, reacted, accepted }) => {
+    ])('a file re-check that also got a reaction counts from the reaction, never from the file read (file $fileRead, reaction $reacted) (12h, I2)', async ({ fileRead, reacted, accepted }) => {
       const { db, r } = setup([{ ops: [close()] }]);
       reopenedWithOldDelivery(db); // reopened by a human at 06:00Z
       readAt(db, fileOf(db), fileRead);
       upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '✅', ts: reacted });
       expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: 'reaction' })]);
       expect(await r.run(1)).toEqual({ status: 'ok', accepted, rejected: 1 - accepted });
-      expect(getTaskByCode(db, 'SHA-001')!.status).toBe(accepted ? 'done' : 'open');
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject(accepted ? { status: 'done', closedOn: '2026-10-19' } : { status: 'open' });
+    });
+
+    it.each([
+      { fileRead: '2026-10-19T05:30:00.000Z', edited: '2026-10-19T07:00:00.000Z', accepted: 1 },
+      { fileRead: '2026-10-19T07:00:00.000Z', edited: '2026-10-19T05:30:00.000Z', accepted: 0 },
+    ])('a file re-check that is also an edit re-check counts from the edit, closing on the processing date (file $fileRead, edit $edited) (12h, I2)', async ({ fileRead, edited, accepted }) => {
+      const { db, r } = setup([{ ops: [close()] }]);
+      reopenedWithOldDelivery(db); // reopened by a human at 06:00Z
+      readAt(db, fileOf(db), fileRead);
+      applyEdit(db, 1, 'm1', 'Banner v4 attached, final', edited);
+      expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: 'edit' })]);
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted, rejected: 1 - accepted });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject(accepted ? { status: 'done', closedOn: '2026-10-19' } : { status: 'open' });
     });
   });
 

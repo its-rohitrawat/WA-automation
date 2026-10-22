@@ -2,6 +2,7 @@ import { Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { AiInvalidOutputError } from '../../src/brain/claudeClient.ts';
 import { Reconciler } from '../../src/brain/reconciler.ts';
+import { closeTask, reopenTask } from '../../src/cli/corrections.ts';
 import { mediaForPrompt } from '../../src/media/promptText.ts';
 import type { Prices } from '../../src/spend/pricing.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
@@ -10,7 +11,7 @@ import type { Db } from '../../src/store/db.ts';
 import { deferMedia, failMedia, finishMedia, getMedia, insertMedia, messageRowId, type MediaKind } from '../../src/store/media.ts';
 import { applyEdit, applyRevoke, insertMessage, listUnprocessed, markProcessed, upsertReaction } from '../../src/store/messages.ts';
 import { upsertPerson } from '../../src/store/people.ts';
-import { getTaskByCode } from '../../src/store/tasks.ts';
+import { createTask, getTaskByCode } from '../../src/store/tasks.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
 import { FAKE_USAGE, FakeAi, op, type FakeResponse } from '../helpers/ai.ts';
@@ -439,6 +440,26 @@ describe('Reconciler with shared files', () => {
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 1 });
       expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
       expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done' });
+    });
+
+    it('a late read never re-closes a task the founder closed and then reopened after the file was sent (12h, I2)', async () => {
+      const { db, ai, clock, r } = setup();
+      createTask(db, {
+        clientId: 1, side: 'client', title: 'Send the payment receipt', category: 'payment', priority: 'high', assignedTo: null, askedBy: null, raisedOn: '2026-10-18',
+        deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp',
+      }, NOW);
+      ai.push({ ops: [] }, { ops: [op({ op: 'close_task', taskCode: 'SHA-001', sourceMessageIds: ['I1'] })] });
+      const id = image(db, 'I1', '2026-10-19T07:01:00.000Z', undefined, { createdAt: '2026-10-19T07:20:00.000Z' }); // the client shares the receipt
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 0 }); // still being read: nothing to act on yet
+      closeTask(db, 'SHA-001', new Date('2026-10-19T08:10:00Z'));
+      reopenTask(db, 'SHA-001', new Date('2026-10-19T08:20:00Z')); // the founder checked: not paid after all
+      read(db, id, '2026-10-19T08:30:00.000Z');
+      clock.set('2026-10-19T08:31:00.000Z');
+
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
+      expect(lineOf(newMessages(ai.calls[1]!.user), 'I1')).toContain(' (re-check: file now read): see this {image: A payment receipt');
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open' });
+      expect(processedAt(db, 'I1')).not.toBeNull();
     });
 
     describe('markers when an edit or a reaction meets a file read late (review I1, M2, M6)', () => {

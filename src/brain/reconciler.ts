@@ -53,18 +53,18 @@ export { SpendCapReachedError } from './paidCall.ts';
 
 /**
  * When a message became evidence, for the human status-lock check: a reaction re-check counts from its latest reaction,
- * an edit re-check from its edit, a file re-check (amendment 12h) from when its file was read (fileReadAt), anything
- * else from when it was sent. A file re-check that is also an edit or reaction re-check counts from the later time.
+ * an edit re-check from its edit, anything else from when it was sent. That includes a "file now read" re-check
+ * (amendment 12h): a file is evidence of what the client sent at that moment, so a human close or reopen made after it
+ * wins, however late the file was read. A file re-check that is also an edit or reaction re-check counts from the edit
+ * or reaction.
  */
-function evidenceTs(m: MessageRow, reactions: StoredReactionRow[], fileReadAt?: string): string {
-  let changed: string | null = null;
-  if (m.requeueReason === 'edit') changed = m.editedAt ?? m.ts;
-  else if (m.requeueReason === 'reaction') {
+function evidenceTs(m: MessageRow, reactions: StoredReactionRow[]): string {
+  if (m.requeueReason === 'edit') return m.editedAt ?? m.ts;
+  if (m.requeueReason === 'reaction') {
     const latest = reactions.filter((r) => r.targetWaId === m.waId).reduce<string | null>((max, r) => (max === null || r.ts > max ? r.ts : max), null);
-    changed = latest ?? m.ts;
+    return latest ?? m.ts;
   }
-  if (fileReadAt === undefined) return changed ?? m.ts;
-  return changed !== null && changed > fileReadAt ? changed : fileReadAt;
+  return m.ts;
 }
 
 function errorCodeOf(e: unknown): string {
@@ -112,13 +112,9 @@ export class Reconciler {
     }
 
     // Amendment 12h: a message whose file was read after the message was processed is back as a "file now read"
-    // re-check. Its evidence time is when the file was read: the file row's updatedAt, set when it was finished.
-    const fileReadAt = new Map<number, string>();
-    for (const m of batch) {
-      const f = queuedMedia.get(m.id);
-      if (f?.requeuedForText) fileReadAt.set(m.id, f.updatedAt);
-    }
-    const isRecheck = (m: MessageRow): boolean => m.requeueReason !== null || fileReadAt.has(m.id);
+    // re-check. Its evidence time and dates are still the message's own (evidenceTs, #apply).
+    const fileRechecks = new Set(batch.filter((m) => queuedMedia.get(m.id)?.requeuedForText === true).map((m) => m.id));
+    const isRecheck = (m: MessageRow): boolean => m.requeueReason !== null || fileRechecks.has(m.id);
 
     // Context comes from before the first new or reprocessed message, so a reprocess window does not see later chat.
     // Re-checks (edits, reactions, files read late) of old messages are skipped here: they must not pull the context back in time.
@@ -130,7 +126,7 @@ export class Reconciler {
     const reactions = reactionsFor(db, clientId, [...recent, ...batch].map((m) => m.waId));
     const mediaText = mediaPromptTexts(mediaForPrompt(db, batch, recent), batch, recent);
     const user = buildUserContent({
-      client, people, openTasks, decisions, recent, batch, reactions, today: istDate(now), mediaText, fileRechecks: new Set(fileReadAt.keys()),
+      client, people, openTasks, decisions, recent, batch, reactions, today: istDate(now), mediaText, fileRechecks,
     });
 
     // Known and accepted: a call that falls back can cost up to about 2.25x this reservation (a declined primary
@@ -163,7 +159,7 @@ export class Reconciler {
     const byWaId = new Map([...recent, ...batch].map((m) => [m.waId, m]));
     const batchIds = new Set(batch.map((m) => m.waId));
     const contextIds = new Set(recent.map((m) => m.waId));
-    const messageTs = new Map([...byWaId].map(([id, m]) => [id, evidenceTs(m, reactions, fileReadAt.get(m.id))]));
+    const messageTs = new Map([...byWaId].map(([id, m]) => [id, evidenceTs(m, reactions)]));
 
     const appliedAt = clock.now();
     let applied: { accepted: AiOp[]; rejected: Rejection[]; requeued: number };
@@ -187,12 +183,12 @@ export class Reconciler {
           editedIds: new Set(batch.filter((m) => m.requeueReason === 'edit').map((m) => m.waId)),
         };
         const { accepted, rejected } = validateOps(result.output.ops, state);
-        for (const op of accepted) this.#apply(fresh, op, byWaId, appliedAt, isRecheck);
+        for (const op of accepted) this.#apply(fresh, op, byWaId, appliedAt);
         // fileUnread: the prompt showed the file as still being read. If it was read during the call, the message stays
         // queued as a "file now read" re-check. fileShown: the prompt showed the file's text as a "file now read"
         // re-check, so a message queued again for an edit or a reaction does not show it as one again (amendment 12h).
         const seen = batch.map((m) => ({
-          id: m.id, version: m.version, fileUnread: queuedMedia.get(m.id)?.status === 'pending', fileShown: fileReadAt.has(m.id),
+          id: m.id, version: m.version, fileUnread: queuedMedia.get(m.id)?.status === 'pending', fileShown: fileRechecks.has(m.id),
         }));
         const requeued = markProcessedIfUnchanged(db, seen, appliedAt.toISOString());
         flagRevokedSources(db, clientId); // a source message deleted during the call
@@ -231,7 +227,7 @@ export class Reconciler {
     }
   }
 
-  #apply(client: ClientRow, op: AiOp, byWaId: Map<string, MessageRow>, at: Date, isRecheck: (m: MessageRow) => boolean): void {
+  #apply(client: ClientRow, op: AiOp, byWaId: Map<string, MessageRow>, at: Date): void {
     const { db } = this.#o;
     const nowIso = at.toISOString();
     const sources = op.sourceMessageIds
@@ -241,8 +237,9 @@ export class Reconciler {
     const first = sources[0];
     const last = sources[sources.length - 1];
     const dateOf = (m: MessageRow | undefined) => istDate(m ? new Date(m.ts) : at);
-    // A re-checked message (new reaction, edit, or a file read late) is evidence from today, not from the day it was first sent.
-    const lastDate = sources.some(isRecheck) ? istDate(at) : dateOf(last);
+    // A message re-checked for a new reaction or an edit is evidence from today, not from the day it was first sent. A
+    // "file now read" re-check alone is not (amendment 12h): the file is dated like the message that shared it.
+    const lastDate = sources.some((m) => m.requeueReason !== null) ? istDate(at) : dateOf(last);
     const event = (taskId: number | null, detail: object) =>
       recordEvent(db, { taskId, clientId: client.id, actor: 'ai', op: op.op, detail, reason: op.reason, sourceIds: op.sourceMessageIds, at: nowIso });
     const taskFor = (code: string | null) => {
