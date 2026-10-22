@@ -113,6 +113,15 @@ describe('formatPlan', () => {
     expect(text).toContain('Estimated cost: $1.97 at list prices.');
   });
 
+  it('lines the columns up when a sample id is long', () => {
+    const long: Sample = { id: `meeting-${'x'.repeat(40)}-0123abcd`, kind: 'meeting', path: 'C:\\stt-samples\\meetings\\x.mp4' };
+    const text = formatPlan(buildPlan(input({ samples: [{ sample: voice, seconds: 60 }, { sample: long, seconds: 60 }] })));
+    const lines = text.split('\n').filter((l) => l.includes(' sarvam '));
+    expect(lines).toHaveLength(2);
+    expect(lines[0]!.indexOf(' 1:00 ')).toBe(lines[1]!.indexOf(' 1:00 '));
+    expect(lines[1]).toContain(`${long.id} `);
+  });
+
   it('warns when an unanswered slot would be sent again', () => {
     const text = formatPlan(buildPlan(input({ samples: [{ sample: voice, seconds: 60 }], stateOf: () => 'unknown', retryUnknown: true })));
     expect(text).toContain('send again (an earlier attempt may already be billed)');

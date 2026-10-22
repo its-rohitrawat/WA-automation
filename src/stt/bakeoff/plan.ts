@@ -79,9 +79,11 @@ function actionText(i: PlanItem): string {
 
 /** The dry-run listing: one line per sample and provider, then the files and the total. Never any content. */
 export function formatPlan(items: readonly PlanItem[]): string {
+  // As wide as the longest id (up to 57 characters with the hash), so the columns line up.
+  const idWidth = items.reduce((w, i) => Math.max(w, i.sample.id.length), 0);
   const lines = items.map((i) => {
     const parts = i.parts > 1 ? ` in ${i.parts} parts` : '';
-    return `  ${i.sample.id.padEnd(34)} ${formatClock(i.seconds).padStart(8)}  ${i.provider.padEnd(10)} ${i.model}${parts}  $${i.estimateUsd.toFixed(3)}  ${actionText(i)}`;
+    return `  ${i.sample.id.padEnd(idWidth)} ${formatClock(i.seconds).padStart(8)}  ${i.provider.padEnd(10)} ${i.model}${parts}  $${i.estimateUsd.toFixed(3)}  ${actionText(i)}`;
   });
   const files = [...new Set(items.filter((i) => i.action !== 'skip').map((i) => i.sample.path))];
   const total = planTotalUsd(items);
