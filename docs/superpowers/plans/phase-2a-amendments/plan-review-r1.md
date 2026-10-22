@@ -159,7 +159,10 @@ Every task's implementer applies the items listed under its task, in addition to
 - **16b. Spec drift (review M19).** Add `docs/superpowers/specs/2026-10-19-wa-agent-design-amendments-phase-2a.md`. It records:
   - the dropped `record_file` operation (§6.3), replaced by the deterministic Files received listing;
   - the separate `media` table (§5.5);
-  - the forwarded-media rule (D2).
+  - the forwarded-media rule (D2);
+  - local file names `<message-id>-<media-id>.<ext>` (4a), replacing §5.6's `<message-id>.<ext>`;
+  - the media wait (12a, 12c): a batch waits for its files, but a pending file stops blocking after 30 minutes counted from service start or ingest, whichever is later. A file deferred by the spend cap blocks until 30 minutes after the next IST midnight. This refines §6.1;
+  - the cost of one image description is about 1–4 US cents on the high-resolution tier, correcting §14's "< $0.01".
 - **16c. Runbook.** It covers:
   - the `<message-id>-<media-id>` file names;
   - forwarded media not being described;
