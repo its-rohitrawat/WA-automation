@@ -56,7 +56,7 @@ const USAGE = `STT bake-off (docs/STT-BAKEOFF.md). Without --yes this is a dry r
   node scripts/stt-bakeoff.ts [options]
 
   --samples <dir>       folder with voice-notes\\ and meetings\\ (default STT_SAMPLES_DIR or C:\\stt-samples)
-  --out <dir>           output folder (default <samples>\\bakeoff-out)
+  --out <dir>           output folder (default <samples>\\bakeoff-out); always the same one: a new folder sends and pays for everything again
   --providers <list>    comma list of ${PROVIDER_IDS.join(', ')} (default all)
   --only <sample-id>    only this recording, by its id from the dry-run list; repeat for more
   --yes                 really convert and send

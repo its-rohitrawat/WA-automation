@@ -72,6 +72,8 @@ node scripts/stt-bakeoff.ts --only <id> --yes --confirm-privacy
 node scripts/stt-bakeoff.ts --yes --confirm-privacy
 ```
 
+**Always use the same output folder** (the default `C:\stt-samples\bakeoff-out`, or the same `--out` every time). It holds the record of what was sent and paid for; a new folder means everything is sent and paid again.
+
 Other options: `--providers sarvam,openai`, `--max-usd 5`, `--keep-remote` (keep ElevenLabs' copy of each transcript), `--report-only` (rebuild the report from saved results), and `--help`.
 
 Sarvam and ElevenLabs can take several minutes for a long meeting. The screen shows one line per recording and service, with the processing time and cost, never the words. Ctrl+C stops a run; finished results are kept, and a recording that was being sent shows as `unknown` next time (see below).
@@ -89,7 +91,7 @@ The tool never shows a key or the words of a recording in these messages.
   - `status_http_...`, or `download_http_` followed by another number from 400 to 499 (for example `status_http_404` or `download_http_403`): Sarvam no longer has the job, so its answer can never be fetched. It may still have charged for it: check the Sarvam dashboard. `--retry-unknown` then sends the recording again, which may charge again.
   - Check that service's dashboard first (usage or history). Then run with `--retry-unknown`.
   - Sarvam then waits for the job it already has, with no new charge. ElevenLabs and OpenAI send the file again and may charge again.
-  - With `part_cache_mismatch`, nothing was sent: the long recording was cut differently from last time. Move that recording's part files (`results\<id>\<service>.part-*.json` in the output folder) aside, or run with a fresh output folder (`--out`).
+  - With `part_cache_mismatch`, nothing was sent: the long recording was cut differently from last time. Move that recording's part files (`results\<id>\<service>.part-*.json` in the output folder) aside, then run the dry run again: those parts are then sent again, which may charge again.
   - With `resume_part_without_job` or a code starting `audio_`, nothing was sent this time either. Run again; if it repeats, ask the agent's builder.
 - **`stopped ... cap`**: the next file would pass `--max-usd`. The summary shows how many were not sent. Raise the cap only if you mean to.
 - **`warning ... could not delete the provider's stored copy`**: the transcript is saved here, but ElevenLabs still has its copy. Delete it in your ElevenLabs history.
