@@ -488,7 +488,7 @@ describe('runPlan safety', () => {
     expect(broken.state('voice-a', 'openai')).toBe('unknown');
   });
 
-  it('deletes the provider copy once per fresh part, after saving it', async () => {
+  it('deletes the provider copy once per fresh part, only once the outcome is saved', async () => {
     const p = new ForgetfulProvider('elevenlabs', 300, null, async (_c, part) => {
       return { model: 'm', segments: [], billedSeconds: null, raw: { transcription_id: part.path } };
     });
@@ -496,13 +496,35 @@ describe('runPlan safety', () => {
     ledger.begin({ sampleId: 'meeting-b', provider: 'elevenlabs', model: 'scribe_v2', startedAt: '2026-10-22T10:00:00.000Z', jobIds: {}, sends: [] });
     ledger.savePart('meeting-b', 'elevenlabs', 0, { offset: 0, seconds: 300 }, { model: 'm', segments: [], billedSeconds: null, raw: { transcription_id: 'old' } });
     const original = p.forget.bind(p);
+    // Seen from inside forget, asserted afterwards: a failed expect in here would only be logged as a warning.
+    const seen: { state: string; partSaved: boolean }[] = [];
     p.forget = async (r) => {
-      expect(ledger.part('meeting-b', 'elevenlabs', 1, { offset: 300, seconds: 100 })).not.toBeNull();
+      seen.push({
+        state: ledger.state('meeting-b', 'elevenlabs'),
+        partSaved: ledger.part('meeting-b', 'elevenlabs', 1, { offset: 300, seconds: 100 }) !== null,
+      });
       await original(r);
     };
     await runPlan([item(meeting, 'elevenlabs', { seconds: 400, parts: 2, state: 'unknown' })], deps([p], { partsFor: twoParts }));
     expect(p.forgotten.map((r) => r.raw)).toEqual([{ transcription_id: 'p1.mp3' }]);
-    expect(ledger.state('meeting-b', 'elevenlabs')).toBe('done');
+    expect(seen).toEqual([{ state: 'done', partSaved: true }]);
+    expect(lines.some((l) => l.startsWith('warning'))).toBe(false);
+  });
+
+  it('still deletes the provider copy of a saved part when a later part gets no answer, once the slot is settled', async () => {
+    const p = new ForgetfulProvider('elevenlabs', 300, null, async (call, part) => {
+      if (call === 2) throw new SttNoAnswerError('timeout');
+      return { model: 'm', segments: [], billedSeconds: null, raw: { transcription_id: part.path } };
+    });
+    const original = p.forget.bind(p);
+    const seen: string[] = [];
+    p.forget = async (r) => {
+      seen.push(`${ledger.state('meeting-b', 'elevenlabs')} after ${p.calls.length} requests`);
+      await original(r);
+    };
+    await runPlan([item(meeting, 'elevenlabs', { seconds: 400, parts: 2 })], deps([p], { partsFor: twoParts }));
+    expect(p.forgotten.map((r) => r.raw)).toEqual([{ transcription_id: 'p0.mp3' }]);
+    expect(seen).toEqual(['unknown after 2 requests']);
   });
 
   it('keeps the provider copy when asked to', async () => {

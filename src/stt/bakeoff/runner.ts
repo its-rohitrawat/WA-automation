@@ -160,6 +160,35 @@ async function runSlot(item: PlanItem, provider: SttProvider, deps: RunDeps, now
   let sentSeconds = 0;
   /** The part whose request is in flight, so a lost job's id can be dropped. */
   let sending = -1;
+  /** Answers received in this run, each already saved here. */
+  const fresh: ProviderResult[] = [];
+  /**
+   * Deletes the provider's own copy of each fresh answer, once the slot's record is final: a slow or hanging delete
+   * must never hold up the outcome. Warnings only; the answer is safe here, only the provider's copy stays.
+   */
+  const forgetFresh = async (): Promise<void> => {
+    if (!deps.forgetRemote || !provider.forget) return;
+    for (const result of fresh) {
+      try {
+        await provider.forget(result);
+      } catch (e) {
+        deps.log(`warning  ${label}: could not delete the provider's stored copy (${codeOf(e)})`);
+      }
+    }
+  };
+  /** The slot's result for an error from the provider, with its record written. */
+  const settle = (e: unknown): SlotResult => {
+    if (e instanceof SttJobLostError) {
+      // Started, so maybe billed: unknown. Its id is dropped (kept aside as evidence), so the next plan cannot offer a
+      // free wait on a job that is gone and shows a new, paid send with its warning instead.
+      if (sending >= 0) ledger.dropJobId(sample.id, item.provider, sending);
+      return { kind: 'unknown', code: e.code, sentSeconds };
+    }
+    if (e instanceof SttHttpError) return failed(`http_${e.status}${e.detail ? ` ${e.detail}` : ''}`, e.status, sentSeconds);
+    if (e instanceof SttJobError) return failed(`job_${e.code}`, null, sentSeconds);
+    return { kind: 'unknown', code: e instanceof SttNoAnswerError ? e.code : e instanceof Error ? e.name : 'error', sentSeconds };
+  };
+  let outcome: Outcome;
   try {
     const results: ProviderResult[] = [];
     for (const [n, part] of parts.entries()) {
@@ -190,17 +219,10 @@ async function runSlot(item: PlanItem, provider: SttProvider, deps: RunDeps, now
       });
       ledger.savePart(sample.id, item.provider, n, part, result);
       results.push(result);
-      if (deps.forgetRemote && provider.forget) {
-        try {
-          await provider.forget(result);
-        } catch (e) {
-          // The answer is safe here; only the provider's copy stays. Never a reason to fail the slot.
-          deps.log(`warning  ${label}: could not delete the provider's stored copy (${codeOf(e)})`);
-        }
-      }
+      fresh.push(result);
     }
     const billed = results.every((r) => r.billedSeconds !== null) ? results.reduce((t, r) => t + (r.billedSeconds ?? 0), 0) : null;
-    const outcome: Outcome = {
+    outcome = {
       ...base,
       parts: parts.length,
       status: 'done',
@@ -212,18 +234,14 @@ async function runSlot(item: PlanItem, provider: SttProvider, deps: RunDeps, now
       finishedAt: new Date(now()).toISOString(),
     };
     ledger.finish(outcome);
-    return { kind: 'done', outcome };
   } catch (e) {
     // The ledger is what stops a second payment; when it cannot be written, the run stops (the slot stays unknown on disk).
     if (e instanceof LedgerError) throw e;
-    if (e instanceof SttJobLostError) {
-      // Started, so maybe billed: unknown. Its id is dropped (kept aside as evidence), so the next plan cannot offer a
-      // free wait on a job that is gone and shows a new, paid send with its warning instead.
-      if (sending >= 0) ledger.dropJobId(sample.id, item.provider, sending);
-      return { kind: 'unknown', code: e.code, sentSeconds };
-    }
-    if (e instanceof SttHttpError) return failed(`http_${e.status}${e.detail ? ` ${e.detail}` : ''}`, e.status, sentSeconds);
-    if (e instanceof SttJobError) return failed(`job_${e.code}`, null, sentSeconds);
-    return { kind: 'unknown', code: e instanceof SttNoAnswerError ? e.code : e instanceof Error ? e.name : 'error', sentSeconds };
+    const r = settle(e);
+    await forgetFresh();
+    return r;
   }
+  // Outside the try: nothing that happens now may turn the recorded outcome into a failure.
+  await forgetFresh();
+  return { kind: 'done', outcome };
 }
