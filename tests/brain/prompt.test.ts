@@ -218,6 +218,54 @@ describe('push names cannot fake a marker or a role tag (P1)', () => {
   });
 });
 
+describe('hidden characters in message text and names (F7)', () => {
+  const named = (name: string) => new Map([[SHARMA_PN, person(SHARMA_PN, name, 'client')]]);
+  const HIDDEN = /[\u0000-\u0008\u000E-\u001F\u007F\u00AD\u200B\u200E\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]|[\u{E0000}-\u{E007F}]/u;
+
+  it('removes U+202E, the isolates, a tag character, ZWSP, BOM, the word joiner and control characters from message text', () => {
+    const line = formatMessage(message('m9', 'Pay\u202E now\u{E0041}\u{E007F}\u200B\uFEFF\u2060\u2066 done\u2069\u0007\u0000'), peopleMap, []);
+    expect(line.endsWith('[client]: Pay now done')).toBe(true);
+    expect(line).not.toMatch(HIDDEN);
+  });
+
+  it('removes them from a name, an unknown sender, the people list and a reaction emoji', () => {
+    const map = named('Ra\u202Ehul\u{E0041}\u200B\uFEFF\u2067');
+    expect(formatMessage(message('m9', 'hi'), map, [])).toContain(' · P1 Rahul [client]: hi');
+    expect(formatMessage(message('m9', 'hi', { senderName: '\u202EMr.\u200B Sharma\uFEFF' }), new Map(), [])).toContain(' · ?? Mr. Sharma [unknown]: hi');
+    expect(buildUserContent(input({ people: [...map.values()] }))).toContain(`- P1 · ${SHARMA_PN} · Rahul · role: client`);
+    const rx = formatMessage(message('m9', 'x'), peopleMap, [{ targetWaId: 'm9', reactorJid: RAHUL_PN, emoji: '\u202E✅\u{E0041}\u200B' }]);
+    expect(rx.endsWith('{reactions: ✅ by P2 Rahul [team]}')).toBe(true);
+    expect(rx).not.toMatch(HIDDEN);
+  });
+
+  it('a name of hidden characters only reads as Unknown', () => {
+    expect(formatMessage(message('m9', 'hi'), named('\u202E\u200B\uFEFF\u{E0041}'), [])).toContain(' · P1 Unknown [client]: hi');
+  });
+
+  it('removes them from task fields too', () => {
+    const t: TaskRow = { ...task, title: 'Revise\u202E banner\u200B', sourceQuote: 'banner\u{E0041} bright\uFEFF' };
+    const out = buildUserContent(input({ openTasks: [t] }));
+    expect(out).toContain('"Revise banner"');
+    expect(out).toContain('quote "banner bright"');
+    expect(out).not.toMatch(HIDDEN);
+  });
+
+  it('keeps ZWJ and ZWNJ, so a Devanagari word and a ZWJ family emoji survive in text, names and emoji', () => {
+    const word = 'क्\u200Dष and क्\u200Cष';
+    const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}';
+    expect(formatMessage(message('m9', `${word} ${family}`), peopleMap, []).endsWith(`[client]: ${word} ${family}`)).toBe(true);
+    expect(formatMessage(message('m9', 'hi'), named(`क्\u200Dष ${family}`), [])).toContain(` · P1 क्\u200Dष ${family} [client]: hi`);
+    const rx = formatMessage(message('m9', 'x'), peopleMap, [{ targetWaId: 'm9', reactorJid: RAHUL_PN, emoji: family }]);
+    expect(rx.endsWith(`{reactions: ${family} by P2 Rahul [team]}`)).toBe(true);
+  });
+
+  it('newlines still behave as before: indented in bodies, a space in names, with tabs kept', () => {
+    const body = formatMessage(message('m9', 'ok\r\nnext\u2028third\tcol\r\u200B\nlast'), peopleMap, []);
+    expect(body.endsWith('[client]: ok\n    next\n    third\tcol\n    last')).toBe(true);
+    expect(formatMessage(message('m9', 'hi'), named('Mr.\r\n\u200BSharma'), [])).toContain(' · P1 Mr. Sharma [client]: hi');
+  });
+});
+
 describe('formatMessage', () => {
   it('shows id, India time, sender, reply and reactions', () => {
     const line = formatMessage(message('m9', 'Thoda aur bright', { quotedWaId: 'm1' }), peopleMap, [{ targetWaId: 'm9', reactorJid: RAHUL_PN, emoji: '✅' }]);

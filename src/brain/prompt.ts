@@ -60,11 +60,20 @@ export interface PromptInput {
 }
 
 /**
+ * Control and format characters (direction overrides and isolates such as U+202E, Unicode tag characters, zero-width
+ * marks, the BOM, the word joiner), which can carry text Claude reads but the founder cannot see. Kept: tab, the line
+ * breaks that the sanitisers turn into line breaks or spaces, and ZWNJ/ZWJ (U+200C/U+200D), which Devanagari spelling
+ * and emoji need and which cannot reorder text. One rule for all prompt text: messages, names, emoji, files, tasks (F7).
+ */
+const HIDDEN_CHARS = new RegExp('(?![\\t\\n\\r\\v\\f\\x85\\u200C\\u200D])[\\p{Cc}\\p{Cf}]', 'gu');
+
+/**
  * Chat text cannot open or close our section tags or fake a {reactions: ...} suffix or a file block. Fullwidth and
- * small look-alikes of < > { } get the same treatment, so no typed brace renders where a tracker block sits.
+ * small look-alikes of < > { } get the same treatment, so no typed brace renders where a tracker block sits. Hidden
+ * characters are removed first.
  */
 export function sanitizeForPrompt(s: string): string {
-  return s.replace(/[<＜]/g, '‹').replace(/[>＞]/g, '›').replace(/[{｛﹛]/g, '❴').replace(/[}｝﹜]/g, '❵');
+  return s.replace(HIDDEN_CHARS, '').replace(/[<＜]/g, '‹').replace(/[>＞]/g, '›').replace(/[{｛﹛]/g, '❴').replace(/[}｝﹜]/g, '❵');
 }
 
 const SEP = String.fromCharCode(0x0b, 0x0c, 0x85, 0x2028, 0x2029);
@@ -131,21 +140,12 @@ function personLabel(jid: string, fallbackName: string | null, people: Map<strin
 }
 
 /**
- * Control and format characters (direction overrides such as U+202E, Unicode tag characters, zero-width marks), which
- * can carry text Claude reads but the founder cannot see. Kept: tab, the line breaks that the sanitisers turn into
- * line breaks or spaces, and ZWNJ/ZWJ (U+200C/U+200D), which Devanagari spelling and emoji need and which cannot
- * reorder text.
- */
-const HIDDEN_IN_FILES = /(?![\t\n\r\v\f\x85\u200C\u200D])[\p{Cc}\p{Cf}]/gu;
-
-/**
  * A shared file as {head} or {head: body}. Both parts are untrusted like chat text: braces in them become ❴ ❵, so only
  * the tracker can open or close a block, and the body's continuation lines are indented. Hidden characters are removed
- * (Files received removes them too); message text is not changed here.
+ * as from all prompt text (Files received removes them too).
  */
 function fileBlock(b: MediaBlock): string {
-  const visible = (s: string): string => s.replace(HIDDEN_IN_FILES, '');
-  return `{${sanitizeInline(visible(b.head))}${b.body === null ? '' : `: ${sanitizeBody(visible(b.body))}`}}`;
+  return `{${sanitizeInline(b.head)}${b.body === null ? '' : `: ${sanitizeBody(b.body)}`}}`;
 }
 
 function formatMessageWith(
