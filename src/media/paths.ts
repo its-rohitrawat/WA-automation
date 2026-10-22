@@ -70,6 +70,14 @@ export function extForMime(mime: string | null, kind: MediaKind): string {
  */
 const INVISIBLE = /(?![\u200C\u200D])[\p{Cc}\p{Cf}\p{Cs}\uFFFE\uFFFF]/gu;
 
+/**
+ * Whether text shows anything to a reader: a character other than white space, control and format characters (zero-width
+ * marks, direction marks, and the joiners U+200C and U+200D that INVISIBLE keeps), lone surrogates, U+FFFE and U+FFFF.
+ * The Files received description (src/media/labels.ts) and finishMedia (src/store/media.ts) use it too, so they agree on
+ * what counts as no text. It lives here because labels.ts imports this module.
+ */
+export const showsText = (s: string): boolean => /[^\s\p{Cc}\p{Cf}\p{Cs}\uFFFE\uFFFF]/u.test(s);
+
 const EDGE = /[.\s]/;
 
 /**

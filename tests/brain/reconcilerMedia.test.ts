@@ -368,6 +368,7 @@ describe('Reconciler with shared files', () => {
       ['could not be read', (db: Db, id: number) => failMedia(db, id, { status: 'failed', errorCode: 'bad_image', at: '2026-10-19T08:10:00.000Z' })],
       ['forwarded, not described', (db: Db, id: number) => finishMedia(db, id, { textKind: null, text: null, pageCount: null, note: 'forwarded_not_described', at: '2026-10-19T08:10:00.000Z' })],
       ['an empty description', (db: Db, id: number) => finishMedia(db, id, { textKind: 'description', text: '', pageCount: null, note: null, at: '2026-10-19T08:10:00.000Z' })],
+      ['a description that shows nothing', (db: Db, id: number) => finishMedia(db, id, { textKind: 'description', text: ' \u0000\u200B\u200D ', pageCount: null, note: null, at: '2026-10-19T08:10:00.000Z' })],
     ])('a file that ends without text after its message was processed queues nothing: %s', async (_why, end) => {
       const { db, ai, r } = setup();
       const id = image(db, 'I1', '2026-10-19T07:01:00.000Z', undefined, { createdAt: '2026-10-19T07:20:00.000Z' });

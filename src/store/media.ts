@@ -1,3 +1,4 @@
+import { showsText } from '../media/paths.ts';
 import type { Db } from './db.ts';
 
 export const MEDIA_KINDS = ['image', 'video', 'document', 'sticker', 'voice', 'audio'] as const;
@@ -199,6 +200,8 @@ export function markDownloaded(db: Db, id: number, d: { localPath: string; sha25
  * image or a document with a description or text. Only those two kinds (review M1): voice notes and audio never hold up
  * a message (12e), so text for them, such as a Phase 2b transcript, queues nothing; nor does any other kind.
  * finishMedia and markProcessedIfUnchanged (src/store/messages.ts) share it, so they never disagree about a file.
+ * finishMedia stores text that shows nothing as NULL, so such a file never matches; the prompt then shows it as read
+ * without text (src/media/promptText.ts).
  */
 export const REQUEUING_FILE = `media.kind IN ('image', 'document') AND media.status = 'done' AND media.text_kind IS NOT NULL
   AND media.text IS NOT NULL AND media.text <> ''`;
@@ -206,6 +209,12 @@ export const REQUEUING_FILE = `media.kind IN ('image', 'document') AND media.sta
 /**
  * The file has been read. NUL characters in the text are stored as spaces: SQLite's substr() and length() stop at the first one,
  * so mediaForMessages would otherwise cut the text there. A space rather than nothing keeps the words and numbers on either side apart.
+ * Text that shows nothing (only spaces, NULs or zero-width characters: showsText) is stored as no text (NULL), so the
+ * file is finished without text, like an empty extract: it never queues its message for a paid run that would show an
+ * empty block.
+ *
+ * Only a pending file is finished. A second finish of the same file changes nothing and queues nothing (12h hardening),
+ * so the version never moves by more than 1 for one file.
  *
  * Amendment 12h, in the same transaction, when an image or a document finishes with a description or text
  * (REQUEUING_FILE; never for a message deleted for everyone):
@@ -216,10 +225,12 @@ export const REQUEUING_FILE = `media.kind IN ('image', 'document') AND media.sta
  * A message never processed is not flagged: its next run sees the file like any other.
  */
 export function finishMedia(db: Db, id: number, x: { textKind: TextKind | null; text: string | null; pageCount: number | null; note: string | null; at: string }): void {
-  const text = x.text === null ? null : x.text.replaceAll('\u0000', ' ');
+  const spaced = x.text === null ? null : x.text.replaceAll('\u0000', ' ');
+  const text = spaced !== null && showsText(spaced) ? spaced : null;
   db.transaction(() => {
-    db.prepare(`UPDATE media SET status = 'done', text_kind = @textKind, text = @text, page_count = @pageCount, note = @note, error_code = NULL,
-      next_attempt_at = NULL, ref_enc = NULL, updated_at = @at WHERE id = @id`).run({ id, ...x, text });
+    const finished = db.prepare(`UPDATE media SET status = 'done', text_kind = @textKind, text = @text, page_count = @pageCount, note = @note, error_code = NULL,
+      next_attempt_at = NULL, ref_enc = NULL, updated_at = @at WHERE id = @id AND status = 'pending'`).run({ id, ...x, text }).changes;
+    if (finished === 0) return; // already finished (or failed): nothing to flag or queue again
     // The flag first: it needs processed_at as it was before the message is queued again.
     db.prepare(`UPDATE media SET requeued_for_text = 1 WHERE id = ? AND ${REQUEUING_FILE} AND message_id IN
       (SELECT id FROM messages WHERE revoked = 0 AND (processed_at IS NOT NULL OR requeue_reason IS NOT NULL))`).run(id);

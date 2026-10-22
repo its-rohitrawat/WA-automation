@@ -7,7 +7,7 @@ import {
   type MediaKind, type MediaStatus, type NewMedia, type TextKind,
 } from '../../src/store/media.ts';
 import { MIGRATIONS } from '../../src/store/migrations.ts';
-import { applyRevoke, insertMessage, listUnprocessed, markProcessed, upsertReaction } from '../../src/store/messages.ts';
+import { applyRevoke, insertMessage, listUnprocessed, markProcessed, markProcessedIfUnchanged, upsertReaction } from '../../src/store/messages.ts';
 import { LATER, MEHTA, NOW, SHARMA, seededDb } from '../helpers/db.ts';
 
 function message(db: Db, waId: string, o: { clientId?: number; mediaType?: string | null; ts?: string } = {}): number {
@@ -365,6 +365,45 @@ describe('a file read after its message was processed (12h)', () => {
     const { db, id, messageId } = processedWithFile({ status: 'metadata', errorCode: 'view_once', refEnc: null });
     expect(dueMediaIds(db, LATER, 10)).toEqual([]);
     expect(stateOf(db, messageId, id)).toEqual({ processedAt: NOW, version: 0, requeuedForText: false });
+  });
+
+  it('a second finish of the same file does nothing: the version moves once and the first result stays (12h hardening)', () => {
+    const { db, id, messageId } = processedWithFile();
+    finishMedia(db, id, { textKind: 'description', text: 'A receipt', pageCount: null, note: null, at: LATER });
+    expect(stateOf(db, messageId, id)).toEqual({ processedAt: null, version: 1, requeuedForText: true });
+    finishMedia(db, id, { textKind: 'extract', text: 'Another text', pageCount: 2, note: 'x', at: '2026-10-19T10:00:00.000Z' });
+    expect(stateOf(db, messageId, id)).toEqual({ processedAt: null, version: 1, requeuedForText: true });
+    expect(getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'description', text: 'A receipt', pageCount: null, note: null, updatedAt: LATER });
+  });
+
+  it('a second finish after the re-check was processed queues nothing again (12h hardening)', () => {
+    const { db, id, messageId } = processedWithFile();
+    finishMedia(db, id, { textKind: 'description', text: 'A receipt', pageCount: null, note: null, at: LATER });
+    expect(markProcessedIfUnchanged(db, [{ id: messageId, version: 1, fileShown: true }], LATER)).toBe(0);
+    expect(stateOf(db, messageId, id)).toEqual({ processedAt: LATER, version: 1, requeuedForText: false });
+    finishMedia(db, id, { textKind: 'description', text: 'A receipt', pageCount: null, note: null, at: '2026-10-19T10:00:00.000Z' });
+    expect(stateOf(db, messageId, id)).toEqual({ processedAt: LATER, version: 1, requeuedForText: false });
+    expect(listUnprocessed(db, 1)).toEqual([]);
+  });
+
+  it.each([
+    ['only spaces', '   \n\t '],
+    ['only NULs', '\u0000\u0000\u0000'],
+    ['only zero-width characters', '\u200B\u200C\u200D\u2060\uFEFF'],
+    ['spaces, NULs and zero-width characters', ' \u0000\u200B \u200D\u0000 '],
+  ])('stores text with nothing visible (%s) as no text, and re-queues nothing (12h hardening)', (_why, text) => {
+    const { db, id, messageId } = processedWithFile({ kind: 'document', mimeType: 'application/pdf' });
+    finishMedia(db, id, { textKind: 'extract', text, pageCount: 1, note: null, at: LATER });
+    expect(getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'extract', text: null, textChars: null, pageCount: 1 });
+    expect(stateOf(db, messageId, id)).toEqual({ processedAt: NOW, version: 0, requeuedForText: false });
+    expect(listUnprocessed(db, 1)).toEqual([]);
+  });
+
+  it('keeps text that shows something next to hidden characters, NULs as spaces (12h hardening)', () => {
+    const { db, id, messageId } = processedWithFile({ kind: 'document', mimeType: 'application/pdf' });
+    finishMedia(db, id, { textKind: 'extract', text: '\u200B\u0000Total 42,000\u200D', pageCount: 1, note: null, at: LATER });
+    expect(getMedia(db, id)).toMatchObject({ text: '\u200B Total 42,000\u200D' });
+    expect(stateOf(db, messageId, id)).toEqual({ processedAt: null, version: 1, requeuedForText: true });
   });
 
   it('mediaForMessages carries the flag', () => {

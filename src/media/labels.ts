@@ -1,6 +1,6 @@
 import type { MediaKind, MediaStatus, TextKind } from '../store/media.ts';
 import { istDate, istTime } from '../util/time.ts';
-import { extForMime, sanitizeFileName } from './paths.ts';
+import { extForMime, sanitizeFileName, showsText } from './paths.ts';
 import { MEDIA_LIMITS } from './types.ts';
 
 /** Label by MIME type. A Map, so a declared type such as "constructor" or "__proto__" matches nothing. */
@@ -87,9 +87,6 @@ function oneLine(s: string, max: number): string {
   const cps = [...flat];
   return cps.length <= max ? flat : `${cps.slice(0, max).join('')}…`;
 }
-
-/** Whether cleaned text shows anything: more than spaces and the joiners HIDDEN keeps. */
-const showsText = (s: string): boolean => /[^\s\u200C\u200D]/u.test(s);
 
 /**
  * The Files received description: what the file is, and the start of what was read. Deterministic, no AI.
