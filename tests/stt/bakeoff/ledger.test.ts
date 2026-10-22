@@ -76,12 +76,46 @@ describe('Ledger', () => {
     expect(ledger.part('voice-a', 'openai', 1)).toEqual(part);
   });
 
-  it('moves a failed outcome aside on reopen and keeps it on disk', () => {
-    ledger.begin(attempt());
-    ledger.finish(outcome({ status: 'failed', error: 'http_500', segments: [] }));
+  it('moves a failed outcome and its attempt aside on reopen, keeping both on disk', () => {
+    const l = new Ledger(dir, { now: () => 1_700_000_000_000 });
+    l.begin(attempt({ jobIds: { '0': 'job-1' } }));
+    l.finish(outcome({ status: 'failed', error: 'http_500', segments: [] }));
+    l.reopen('voice-a', 'sarvam');
+    expect(l.state('voice-a', 'sarvam')).toBe('new');
+    expect(readdirSync(join(dir, 'results', 'voice-a')).sort()).toEqual([
+      'sarvam.failed-1700000000000-0.attempt.json',
+      'sarvam.failed-1700000000000-0.json',
+    ]);
+  });
+
+  it('picks a new name for each reopen, even within one millisecond', () => {
+    const l = new Ledger(dir, { now: () => 5 });
+    for (let i = 0; i < 2; i++) {
+      l.begin(attempt());
+      l.finish(outcome({ status: 'failed', error: 'http_500', segments: [] }));
+      l.reopen('voice-a', 'sarvam');
+    }
+    expect(readdirSync(join(dir, 'results', 'voice-a')).sort()).toEqual([
+      'sarvam.failed-5-0.attempt.json',
+      'sarvam.failed-5-0.json',
+      'sarvam.failed-5-1.attempt.json',
+      'sarvam.failed-5-1.json',
+    ]);
+  });
+
+  it('reopens a failed slot that never got an attempt', () => {
+    ledger.finish(outcome({ status: 'failed', error: 'audio_split_failed', segments: [] }));
     ledger.reopen('voice-a', 'sarvam');
-    expect(ledger.outcome('voice-a', 'sarvam')).toBeNull();
-    expect(readdirSync(join(dir, 'results', 'voice-a')).some((f) => f.startsWith('sarvam.failed-'))).toBe(true);
+    expect(ledger.state('voice-a', 'sarvam')).toBe('new');
+  });
+
+  it('refuses to reopen a slot that is not failed', () => {
+    expect(() => ledger.reopen('voice-a', 'sarvam')).toThrow(LedgerError);
+    ledger.begin(attempt());
+    expect(() => ledger.reopen('voice-a', 'sarvam')).toThrow(LedgerError);
+    ledger.finish(outcome());
+    expect(() => ledger.reopen('voice-a', 'sarvam')).toThrow(LedgerError);
+    expect(ledger.state('voice-a', 'sarvam')).toBe('done');
   });
 
   it('lists finished outcomes only', () => {

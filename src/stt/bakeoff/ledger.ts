@@ -48,6 +48,8 @@ export interface LedgerOptions {
   rename?: (from: string, to: string) => void;
   /** Blocks for ms. The ledger is synchronous, so a lock is waited out in place. */
   pause?: (ms: number) => void;
+  /** Clock for the names of moved-aside files. */
+  now?: () => number;
 }
 
 /** Antivirus scanners and the search indexer briefly lock a new file on Windows, which makes a rename fail. */
@@ -91,11 +93,13 @@ export class Ledger {
   readonly #dir: string;
   readonly #rename: (from: string, to: string) => void;
   readonly #pause: (ms: number) => void;
+  readonly #now: () => number;
 
   constructor(outDir: string, opts: LedgerOptions = {}) {
     this.#dir = join(outDir, 'results');
     this.#rename = opts.rename ?? renameSync;
     this.#pause = opts.pause ?? pauseSync;
+    this.#now = opts.now ?? Date.now;
   }
 
   state(sampleId: string, provider: ProviderId): SlotState {
@@ -135,10 +139,21 @@ export class Ledger {
     this.#write(this.#file(outcome.sampleId, outcome.provider, ''), outcome);
   }
 
-  /** Moves a failed outcome aside, kept on disk as a record, so the slot can be sent again. */
+  /**
+   * Moves a failed outcome and its attempt aside as <provider>.failed-<ms>-<n>.json and .attempt.json, kept on disk as a
+   * record, so the slot can be sent again. The attempt goes too: its job ids belong to the failed jobs. Saved part
+   * answers stay, because they were paid for and a retry reuses them.
+   */
   reopen(sampleId: string, provider: ProviderId): void {
-    const path = this.#file(sampleId, provider, '');
-    if (existsSync(path)) this.#move(path, this.#file(sampleId, provider, `.failed-${Date.now()}`));
+    const status = this.outcome(sampleId, provider)?.status;
+    if (status !== 'failed') throw new LedgerError('not_failed', `reopen called on a slot that is ${status ?? 'not finished'}`);
+    const ms = this.#now();
+    let n = 0;
+    while (existsSync(this.#file(sampleId, provider, `.failed-${ms}-${n}`)) || existsSync(this.#file(sampleId, provider, `.failed-${ms}-${n}.attempt`))) n++;
+    // The outcome first: a crash between the two moves leaves the slot unknown, which is never sent again unasked.
+    this.#move(this.#file(sampleId, provider, ''), this.#file(sampleId, provider, `.failed-${ms}-${n}`));
+    const attempt = this.#file(sampleId, provider, '.attempt');
+    if (existsSync(attempt)) this.#move(attempt, this.#file(sampleId, provider, `.failed-${ms}-${n}.attempt`));
   }
 
   outcomes(): Outcome[] {
