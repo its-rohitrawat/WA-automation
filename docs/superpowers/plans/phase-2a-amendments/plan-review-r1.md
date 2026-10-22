@@ -240,3 +240,11 @@ Every task's implementer applies the items listed under its task, in addition to
 ## Owner decisions after Task 14 (22 Oct 2026)
 - D3. A file deleted for everyone shows no description and no Drive link in Files received. The Drive copy is kept.
 - D4. Files received rows get an estimated height so long descriptions show in full (merged cells don't auto-fit).
+
+## Task 14 additions (recorded 22 Oct 2026, triage T14-09)
+Task 14 added these defensive pieces, which are in neither the plan nor the items above. All of them are tested.
+- **xmlSafe and cleanText** (src/output/workbook.ts). Every text cell and link text in the workbook is cleaned of the characters XML 1.0 does not allow: C0 controls other than tab, line feed and carriage return, U+FFFE, U+FFFF and unpaired surrogates. One such character from WhatsApp would otherwise make the whole workbook unreadable.
+- **HIDDEN in oneLine** (src/media/labels.ts). The Files received description drops control and format characters (direction overrides, zero-width marks) and U+FFFE and U+FFFF from file text, so the text cannot be disguised. Since the cleanup of 22 Oct it also drops unpaired surrogates (T4-02) and keeps the zero-width joiner and non-joiner, which emoji and Indic spellings need (T14-12).
+- **INVISIBLE also removes U+FFFE and U+FFFF** (src/media/paths.ts). sanitizeFileName drops them from file names, for the same XML reason. The same two cleanup changes apply to it.
+- **CLIENT_FILES_LIMIT** (src/store/media.ts). A client tab lists at most the newest 500 files. Older files drop out of the tab without notice, but stay in Drive.
+- **"1 page" in the singular.** A one-page document reads "1 page", not "1 pages", in Files received and in the prompt.
