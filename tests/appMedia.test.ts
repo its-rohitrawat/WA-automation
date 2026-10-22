@@ -731,7 +731,9 @@ describe('app start time (15a, 15f)', () => {
       throw overloaded();
     });
     const { db, app } = setup({ startedAt, media: { sealer, extract }, prepare: (db) => storedImage(db, sealer, minutesBefore(26 * 60).toISOString()) });
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ ...expected, errorCode: 'ai_unavailable' }));
+    // 10 s, not the default 1 s: under a busy full suite the first attempt can take longer to settle. The fake clock
+    // moves at most 10 s here, far short of the 5-minute ai_unavailable wait, so the expected state cannot change.
+    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ ...expected, errorCode: 'ai_unavailable' }), { timeout: 10_000 });
     await stopApp(app);
   });
 });

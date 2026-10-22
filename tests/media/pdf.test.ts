@@ -249,8 +249,9 @@ describe('parseFile (worker thread), PDF', () => {
     // heap: under the 256 MiB cap only because the worker gives PDF.js its own bytes instead of a second copy (280 MiB).
     const pdf = bigDrawingPdf({ drawingMb: 85, imageMb: 44 });
     expect(pdf.length).toBeGreaterThan(44 * 1024 * 1024);
-    expect(await parseFile({ kind: 'pdf', bytes: pdf, maxPages: 200 }, { timeoutMs: 60_000 })).toEqual({ text: 'Site plan', pageCount: 1 });
-  }, 90_000);
+    // Generous limits: this parse takes about 15 s alone but over 100 s when the full suite keeps every core busy.
+    expect(await parseFile({ kind: 'pdf', bytes: pdf, maxPages: 200 }, { timeoutMs: 180_000 })).toEqual({ text: 'Site plan', pageCount: 1 });
+  }, 240_000);
 
   it('stops checking the parser memory once the parse has settled: after a reply, an error and a timeout', async () => {
     // A check left running would poll a stopped worker every 50 ms for good, one more timer for each file parsed.
