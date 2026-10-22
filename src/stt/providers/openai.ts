@@ -6,7 +6,8 @@ import type { AudioPart, ProviderResult, SttProvider, TranscribeOptions } from '
 
 const ENDPOINT = 'https://api.openai.com/v1/audio/transcriptions';
 
-const UsageSchema = z.object({ type: z.string(), seconds: z.number().nullish() }).nullish();
+// usage is undocumented for gpt-transcribe: an odd shape only loses billedSeconds, never the paid transcript.
+const UsageSchema = z.object({ type: z.string(), seconds: z.number().nullish() }).nullish().catch(null);
 const TextSchema = z.object({ text: z.string(), usage: UsageSchema });
 const DiarizedSchema = z.object({
   segments: z.array(z.object({ start: z.number(), end: z.number(), text: z.string(), speaker: z.string().nullish() })),

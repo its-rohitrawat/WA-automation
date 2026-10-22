@@ -14,7 +14,8 @@ const ResultSchema = z.object({
       z.object({ text: z.string(), type: z.string(), start: z.number().nullish(), end: z.number().nullish(), speaker_id: z.string().nullish() }),
     )
     .nullish(),
-  audio_duration_secs: z.number().nullish(),
+  // A side field: an odd value only loses billedSeconds, never the paid transcript.
+  audio_duration_secs: z.number().nullish().catch(null),
 });
 type ElevenLabsResult = z.output<typeof ResultSchema>;
 

@@ -79,6 +79,13 @@ describe('ElevenLabsProvider', () => {
     expect(r.billedSeconds).toBeNull();
   });
 
+  it('keeps a paid answer whose audio duration has an unexpected shape', async () => {
+    const { http } = fake(() => Response.json({ ...ANSWER, audio_duration_secs: '4.2s' }));
+    const r = await new ElevenLabsProvider({ apiKey: 'k', http }).transcribe(audio, { diarize: true });
+    expect(r.segments).toHaveLength(2);
+    expect(r.billedSeconds).toBeNull();
+  });
+
   it('throws SttHttpError on an error status and sends only once', async () => {
     const { http, calls } = fake(() => Response.json({ detail: { status: 'invalid_api_key', message: 'Invalid API key' } }, { status: 401 }));
     const err = await new ElevenLabsProvider({ apiKey: 'k', http }).transcribe(audio, { diarize: true }).catch((e: unknown) => e);

@@ -64,6 +64,17 @@ describe('OpenAiProvider', () => {
     ]);
   });
 
+  it('keeps a paid answer whose usage field has an unexpected shape', async () => {
+    const text = fake({ text: 'Theek hai', usage: { seconds: 5 } });
+    const r = await new OpenAiProvider({ apiKey: 'k', http: text.http }).transcribe(audio, { diarize: false });
+    expect(r.segments).toEqual([{ start: 0, end: 42, speaker: null, text: 'Theek hai' }]);
+    expect(r.billedSeconds).toBeNull();
+    const diarized = fake({ segments: [{ start: 0, end: 2, text: 'Haan', speaker: 'A' }], usage: 'duration' });
+    const d = await new OpenAiProvider({ apiKey: 'k', http: diarized.http }).transcribe(audio, { diarize: true });
+    expect(d.segments).toEqual([{ start: 0, end: 2, speaker: 'A', text: 'Haan' }]);
+    expect(d.billedSeconds).toBeNull();
+  });
+
   it('caps each request at 5 minutes of audio', () => {
     expect(new OpenAiProvider({ apiKey: 'k' }).maxPartSeconds).toBe(300);
   });
