@@ -4,6 +4,7 @@ import { requireKey, type Env } from '../config/env.ts';
 import { loadGroupsFile, type ClientConfig } from '../config/groups.ts';
 import { masterKeyPath, sessionDbPath, trackerDbPath } from '../config/paths.ts';
 import { DpapiKeyProvider, type KeyProvider } from '../crypto/keyProvider.ts';
+import { MediaRefSealer } from '../media/ref.ts';
 import { readHealthSnapshot } from '../health/health.ts';
 import { DRIVE_SCOPES, runLoopbackConsent, TokenStore, type ConsentClient } from '../output/googleAuth.ts';
 import { latestBatches } from '../store/batches.ts';
@@ -95,6 +96,8 @@ async function connectAndIngest(o: {
   db: Db;
   auth: EncryptedAuth;
   configs: ClientConfig[];
+  /** Seals the download details of shared files so the service can fetch them later. */
+  mediaRefs: MediaRefSealer;
   quietMs: number;
   maxIngestMs: number;
   openMessage: string;
@@ -111,7 +114,7 @@ async function connectAndIngest(o: {
     saveCreds: o.auth.saveCreds,
     onQr: o.onQr,
   });
-  const ingestor = new Ingestor({ db: o.db, onNewMessages: () => {} });
+  const ingestor = new Ingestor({ db: o.db, onNewMessages: () => {}, media: { sealer: o.mediaRefs } });
   let lastEvent = Date.now();
   gateway.onEvent((e) => {
     ingestor.handle(e);
@@ -209,6 +212,7 @@ export async function linkCommand(opts: { reset: boolean }, deps: CliDeps): Prom
       db,
       auth,
       configs,
+      mediaRefs: new MediaRefSealer(key),
       quietMs: deps.quietMs.link,
       maxIngestMs: deps.maxIngestMs.link,
       droppedMessage: 'WhatsApp is linked, but the connection dropped while saving recent messages. Start the service (net start wa-agent); it will catch up.',
@@ -250,6 +254,7 @@ export async function listGroupsCommand(deps: CliDeps): Promise<void> {
       db,
       auth,
       configs,
+      mediaRefs: new MediaRefSealer(key),
       quietMs: deps.quietMs.listGroups,
       maxIngestMs: deps.maxIngestMs.listGroups,
       openMessage: 'Connected. Reading your groups…',

@@ -65,4 +65,5 @@ for (const { c, user } of runs) {
   }
 }
 console.log(`Actual cost: $${spent.toFixed(3)}`);
-process.exit(failures > 0 ? 1 : 0);
+// exitCode, not process.exit(): exiting while the SDK's keep-alive sockets close can trip a libuv assertion on Windows.
+process.exitCode = failures > 0 ? 1 : 0;

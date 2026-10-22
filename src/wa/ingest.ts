@@ -1,16 +1,52 @@
+import { isSafeMediaAddress, isSafeMediaUrl, mediaRefAad, type MediaRefSealer } from '../media/ref.ts';
+import { MEDIA_LIMITS, type MediaInfo, type MediaRef } from '../media/types.ts';
 import { getClientByGroupId } from '../store/clients.ts';
-import type { Db } from '../store/db.ts';
+import { tx, type Db } from '../store/db.ts';
+import { insertMedia, messageRowId, type MediaStatus } from '../store/media.ts';
 import { applyEdit, applyRevoke, insertMessage, upsertReaction } from '../store/messages.ts';
 import { upsertPerson } from '../store/people.ts';
+import { systemClock, type Clock } from '../util/clock.ts';
 import type { NormalizedEvent } from './normalize.ts';
+
+export interface IngestMediaOptions {
+  /** Seals the download details before they are stored. */
+  sealer: MediaRefSealer;
+  /** A file is waiting to be downloaded. Called after the transaction commits. */
+  onQueued?: (mediaId: number) => void;
+}
+
+export interface MediaPlan {
+  status: MediaStatus;
+  errorCode: string | null;
+  refEnc: Buffer | null;
+}
+
+/** What happens to a shared file on arrival. Only images, documents and audio are downloaded. */
+export function planMedia(info: MediaInfo, seal: ((ref: MediaRef) => Buffer) | null): MediaPlan {
+  // View-once media is meant to be seen once: never kept.
+  if (info.viewOnce) return { status: 'metadata', errorCode: 'view_once', refEnc: null };
+  if (info.kind === 'video' || info.kind === 'sticker') return { status: 'metadata', errorCode: null, refEnc: null };
+  if (info.fileSize !== null && info.fileSize > MEDIA_LIMITS.maxDownloadBytes) return { status: 'unavailable', errorCode: 'too_large', refEnc: null };
+  if (!info.ref) return { status: 'unavailable', errorCode: 'no_ref', refEnc: null };
+  // The address comes from the sender's phone: one that does not point at WhatsApp's media servers is never sealed.
+  if (!isSafeMediaAddress(info.ref)) return { status: 'unavailable', errorCode: 'bad_address', refEnc: null };
+  if (!seal) return { status: 'unavailable', errorCode: 'not_downloaded', refEnc: null };
+  // With a direct path the url is never used, so a url that does not itself point at WhatsApp's media servers is not stored.
+  const ref = info.ref.directPath && !isSafeMediaUrl(info.ref.url) ? { ...info.ref, url: null } : info.ref;
+  return { status: 'pending', errorCode: null, refEnc: seal(ref) };
+}
 
 export class Ingestor {
   readonly #db: Db;
   readonly #onNew: (clientId: number) => void;
+  readonly #clock: Clock;
+  readonly #media: IngestMediaOptions | undefined;
 
-  constructor(opts: { db: Db; onNewMessages: (clientId: number) => void }) {
+  constructor(opts: { db: Db; onNewMessages: (clientId: number) => void; clock?: Clock; media?: IngestMediaOptions }) {
     this.#db = opts.db;
     this.#onNew = opts.onNewMessages;
+    this.#clock = opts.clock ?? systemClock;
+    this.#media = opts.media;
   }
 
   handle(e: NormalizedEvent): void {
@@ -21,20 +57,46 @@ export class Ingestor {
 
     switch (e.kind) {
       case 'message': {
-        const inserted = insertMessage(db, {
-          waId: e.waId,
-          clientId: client.id,
-          senderJid: e.senderJid,
-          senderNumber: e.senderNumber,
-          senderName: e.senderName,
-          fromMe: e.fromMe,
-          ts: e.ts.toISOString(),
-          text: e.text,
-          quotedWaId: e.quotedWaId,
-          mediaType: e.mediaType,
+        // The message and its file row are written together, so a file is never left without its message.
+        const result = tx(db, () => {
+          const isNew = insertMessage(db, {
+            waId: e.waId,
+            clientId: client.id,
+            senderJid: e.senderJid,
+            senderNumber: e.senderNumber,
+            senderName: e.senderName,
+            fromMe: e.fromMe,
+            ts: e.ts.toISOString(),
+            text: e.text,
+            quotedWaId: e.quotedWaId,
+            mediaType: e.mediaType,
+          });
+          let queued: number | null = null;
+          const messageId = isNew && e.media ? messageRowId(db, client.id, e.waId) : undefined;
+          if (e.media && messageId !== undefined) {
+            const sealer = this.#media?.sealer;
+            const plan = planMedia(e.media, sealer ? (ref) => sealer.seal(ref, mediaRefAad(client.id, e.waId)) : null);
+            const id = insertMedia(db, {
+              messageId,
+              clientId: client.id,
+              kind: e.media.kind,
+              status: plan.status,
+              mimeType: e.media.mimeType,
+              fileName: e.media.fileName,
+              fileSize: e.media.fileSize,
+              seconds: e.media.seconds,
+              forwarded: e.media.forwarded,
+              refEnc: plan.refEnc,
+              errorCode: plan.errorCode,
+              createdAt: this.#clock.now().toISOString(),
+            });
+            if (plan.status === 'pending') queued = id;
+          }
+          return { isNew, queued };
         });
         upsertPerson(db, { clientId: client.id, jid: e.senderJid, number: e.senderNumber, name: e.senderName, fromMe: e.fromMe });
-        if (inserted) this.#onNew(client.id);
+        if (result.isNew) this.#onNew(client.id);
+        if (result.queued !== null) this.#media?.onQueued?.(result.queued);
         return;
       }
       case 'edit':

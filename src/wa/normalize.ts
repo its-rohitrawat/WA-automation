@@ -1,5 +1,7 @@
 import { getContentType, isPnUser, jidNormalizedUser, normalizeMessageContent, proto, WAMessageStubType } from 'baileys';
 import type { WAMessage, WAMessageKey, WAMessageUpdate } from 'baileys';
+import type { MediaInfo, MediaKind, MediaRef } from '../media/types.ts';
+import { MEDIA_KINDS } from '../store/media.ts';
 
 /** Fixed sender id for the founder's own messages. */
 export const SELF_JID = 'self@founder';
@@ -17,6 +19,8 @@ export type NormalizedEvent =
       text: string | null;
       quotedWaId: string | null;
       mediaType: string | null;
+      /** Present only for files (image, video, document, sticker, voice, audio). */
+      media?: MediaInfo;
     }
   | { kind: 'edit'; groupId: string; waId: string; text: string; ts: Date }
   | { kind: 'revoke'; groupId: string; waId: string; ts: Date }
@@ -45,7 +49,16 @@ const ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const validId = (id: string | null | undefined): id is string => typeof id === 'string' && ID_RE.test(id);
 /** Real reactions are emoji. Text, brackets or tags mean someone is faking one. */
 const BAD_EMOJI = /[A-Za-z[\]{}<>]/;
-const cleanEmoji = (e: string | null | undefined): string => [...(e ?? '')].slice(0, 16).join('');
+const cleanEmoji = (e: string | null | undefined): string => firstChars(e ?? '', 16);
+
+/**
+ * The first max characters (code points) of v. Only the first 2 × max UTF-16 units are spread, since max code points never
+ * take more: an untrusted string many MB long is never turned into an array of millions of entries (T2-02). A surrogate
+ * pair cut at that point leaves its half after the first max characters, so the result is the same as spreading it all.
+ */
+function firstChars(v: string, max: number): string {
+  return [...v.slice(0, max * 2)].slice(0, max).join('');
+}
 
 function phoneFromJid(jid: string): string | null {
   const user = jid.split('@')[0]?.split(':')[0];
@@ -84,6 +97,93 @@ function mediaTypeOf(c: proto.IMessage, type: string): string | null {
   return MEDIA[type] ?? 'unsupported';
 }
 
+/** Kinds that are files: the store's own list, so the two never drift apart (T2-09). Locations, contacts, polls and events are not. */
+const FILE_KINDS: ReadonlySet<string> = new Set<string>(MEDIA_KINDS);
+const isFileKind = (k: string | null): k is MediaKind => k !== null && FILE_KINDS.has(k);
+/** Content types whose file is downloaded: images, documents, and audio (kept for Phase 2b). Never video or stickers. */
+const DOWNLOADABLE = new Set<string>(['imageMessage', 'documentMessage', 'audioMessage']);
+
+/**
+ * The wrappers Baileys' normalizeMessageContent opens (7.0.0-rc14), in its order. It opens at most UNWRAP_LIMIT of them.
+ * tests/wa/normalizeMedia.test.ts checks this list and its order against the installed Baileys.
+ */
+const WRAPPERS = [
+  'ephemeralMessage',
+  'viewOnceMessage',
+  'documentWithCaptionMessage',
+  'viewOnceMessageV2',
+  'viewOnceMessageV2Extension',
+  'editedMessage',
+  'associatedChildMessage',
+  'groupStatusMessage',
+  'groupStatusMessageV2',
+] as const satisfies readonly (keyof proto.IMessage)[];
+const VIEW_ONCE_WRAPPERS = ['viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension'] as const satisfies readonly (typeof WRAPPERS)[number][];
+const UNWRAP_LIMIT = 5;
+
+interface MediaFields {
+  url?: string | null;
+  directPath?: string | null;
+  mediaKey?: Uint8Array | null;
+  mimetype?: string | null;
+  fileName?: string | null;
+  fileLength?: unknown;
+  seconds?: number | null;
+  viewOnce?: boolean | null;
+  contextInfo?: proto.IContextInfo | null;
+}
+
+/** A non-negative whole number from a number or a protobuf Long. */
+function count(v: unknown): number | null {
+  let n: number | null = null;
+  if (typeof v === 'number') n = v;
+  else if (v && typeof (v as { toNumber?: unknown }).toNumber === 'function') n = (v as { toNumber(): number }).toNumber();
+  return n !== null && Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+}
+
+const short = (v: unknown, max: number): string | null => (typeof v === 'string' && v.length > 0 ? firstChars(v, max) : null);
+
+/**
+ * Whether the file came inside a view-once wrapper. Walks the same path as Baileys' normalizeMessageContent, down to the
+ * content it returns. A view-once wrapper beside the one Baileys opens counts too.
+ */
+function wrappedViewOnce(raw: proto.IMessage | null | undefined): boolean {
+  let m = raw;
+  for (let depth = 0; depth <= UNWRAP_LIMIT && m; depth++) {
+    const level: proto.IMessage = m;
+    if (VIEW_ONCE_WRAPPERS.some((w) => level[w])) return true;
+    const next = WRAPPERS.find((w) => level[w]);
+    m = next ? level[next]?.message : null;
+  }
+  return false;
+}
+
+/** Owner decision D2: forwarded files are never sent to Claude for a paid description. */
+function isForwarded(ctx: proto.IContextInfo | null | undefined): boolean {
+  return ctx?.isForwarded === true || (ctx?.forwardingScore ?? 0) > 0;
+}
+
+function mediaOf(raw: proto.IMessage | null | undefined, c: proto.IMessage, type: string, mediaType: string | null): MediaInfo | undefined {
+  if (!isFileKind(mediaType)) return undefined;
+  const f = ((c as Record<string, unknown>)[type] ?? {}) as MediaFields;
+  const viewOnce = f.viewOnce === true || wrappedViewOnce(raw);
+  const key = f.mediaKey;
+  const ref: MediaRef | null =
+    DOWNLOADABLE.has(type) && !viewOnce && key instanceof Uint8Array && key.length > 0 && (f.url || f.directPath)
+      ? { contentType: type as MediaRef['contentType'], url: f.url ?? null, directPath: f.directPath ?? null, mediaKey: Buffer.from(key).toString('base64') }
+      : null;
+  return {
+    kind: mediaType,
+    mimeType: short(f.mimetype, 100),
+    fileName: short(f.fileName, 255),
+    fileSize: count(f.fileLength),
+    seconds: count(f.seconds),
+    viewOnce,
+    forwarded: isForwarded(f.contextInfo),
+    ref,
+  };
+}
+
 export function normalizeMessage(msg: WAMessage): NormalizedEvent | null {
   const groupId = msg.key.remoteJid;
   const waId = msg.key.id;
@@ -115,6 +215,8 @@ export function normalizeMessage(msg: WAMessage): NormalizedEvent | null {
   const type = getContentType(content);
   if (!type || SKIP.has(type)) return null;
   const sender = senderOf(msg.key);
+  const mediaType = mediaTypeOf(content, type);
+  const media = mediaOf(msg.message, content, type, mediaType);
   return {
     kind: 'message',
     groupId,
@@ -126,7 +228,8 @@ export function normalizeMessage(msg: WAMessage): NormalizedEvent | null {
     ts,
     text: textOf(content),
     quotedWaId: quotedOf(content, type),
-    mediaType: mediaTypeOf(content, type),
+    mediaType,
+    ...(media ? { media } : {}),
   };
 }
 

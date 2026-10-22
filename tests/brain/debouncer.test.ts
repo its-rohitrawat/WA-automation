@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { FAILURES_BEFORE_BACKOFF, GroupDebouncer } from '../../src/brain/debouncer.ts';
+import { BUSY_RETRY_MS, FAILURES_BEFORE_BACKOFF, GroupDebouncer } from '../../src/brain/debouncer.ts';
 import type { ReconcileOutcome } from '../../src/brain/reconciler.ts';
 
 const OK: ReconcileOutcome = { status: 'ok', accepted: 1, rejected: 0 };
@@ -182,6 +182,46 @@ describe('GroupDebouncer', () => {
     d.stop();
   });
 
+  it('retries a busy run (another paid call holds the budget) after ten minutes, not an hour (Task 15 review round 3)', async () => {
+    expect(BUSY_RETRY_MS).toBe(10 * 60_000);
+    const outcomes: ReconcileOutcome[] = [{ status: 'busy' }, OK];
+    const run = vi.fn(async (_id: number): Promise<ReconcileOutcome> => outcomes.shift()!);
+    const d = mk(run);
+    d.notify(1);
+    await adv(240_000);
+    expect(run).toHaveBeenCalledTimes(1);
+    d.ensure(1); // the app tick: the retry is already scheduled, so nothing changes
+    await adv(BUSY_RETRY_MS - 1_000);
+    expect(run).toHaveBeenCalledTimes(1);
+    await adv(1_000);
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+    d.stop();
+  });
+
+  it('a busy run keeps the failure count, like waiting (Task 15 review round 3)', async () => {
+    const outcomes: ReconcileOutcome[] = [];
+    for (let i = 0; i < FAILURES_BEFORE_BACKOFF; i++) outcomes.push({ status: 'failed', errorCode: 'x' });
+    outcomes.push({ status: 'busy' }, { status: 'failed', errorCode: 'x' }, OK);
+    const run = vi.fn(async (_id: number): Promise<ReconcileOutcome> => outcomes.shift()!);
+    const d = mk(run);
+    d.notify(1);
+    await adv(240_000);
+    for (let i = 1; i < FAILURES_BEFORE_BACKOFF; i++) await adv(3_600_000);
+    expect(run).toHaveBeenCalledTimes(FAILURES_BEFORE_BACKOFF);
+    await adv(3_600_000); // the hourly retry is busy
+    expect(run).toHaveBeenCalledTimes(FAILURES_BEFORE_BACKOFF + 1);
+    await adv(BUSY_RETRY_MS); // and its retry fails again
+    expect(run).toHaveBeenCalledTimes(FAILURES_BEFORE_BACKOFF + 2);
+    // Still backed off: a new message waits for the hourly retry instead of re-sending the batch.
+    d.notify(1);
+    await adv(1_500_000);
+    expect(run).toHaveBeenCalledTimes(FAILURES_BEFORE_BACKOFF + 2);
+    await adv(3_600_000 - 1_500_000);
+    expect(run).toHaveBeenCalledTimes(FAILURES_BEFORE_BACKOFF + 3);
+    d.stop();
+  });
+
   it('ensure() while a retry is pending does not run early', async () => {
     const run = vi.fn(async (): Promise<ReconcileOutcome> => ({ status: 'failed', errorCode: 'x' }));
     const d = mk(run);
@@ -321,5 +361,47 @@ describe('GroupDebouncer', () => {
     const d = mk(vi.fn(async () => OK));
     await d.drain(1_000);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a waiting run (files still being read) schedules no retry, like noop; a later notify runs again (12d)', async () => {
+    const run = vi.fn(async (_id: number): Promise<ReconcileOutcome> => ({ status: 'waiting' }));
+    const d = mk(run);
+    d.notify(1);
+    await adv(240_000);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+    await adv(7_200_000);
+    expect(run).toHaveBeenCalledTimes(1);
+    d.notify(1);
+    await adv(240_000);
+    expect(run).toHaveBeenCalledTimes(2);
+    d.stop();
+  });
+
+  it('a waiting run keeps the failure count: unlike noop, it does not lift the backoff (12d)', async () => {
+    /** Failures until the backoff, then `between`, one more failure, and a notify. Returns the runs 25 minutes later. */
+    const runsAfter = async (between: ReconcileOutcome): Promise<number> => {
+      const outcomes: ReconcileOutcome[] = [];
+      for (let i = 0; i < FAILURES_BEFORE_BACKOFF; i++) outcomes.push({ status: 'failed', errorCode: 'x' });
+      outcomes.push(between, { status: 'failed', errorCode: 'x' }, OK, OK);
+      const run = vi.fn(async (_id: number): Promise<ReconcileOutcome> => outcomes.shift()!);
+      const d = mk(run);
+      d.notify(1);
+      await adv(240_000);
+      for (let i = 0; i < FAILURES_BEFORE_BACKOFF; i++) await adv(3_600_000); // the hourly retries; the last one returns `between`
+      expect(run).toHaveBeenCalledTimes(FAILURES_BEFORE_BACKOFF + 1);
+      d.notify(1);
+      await adv(240_000);
+      expect(run).toHaveBeenCalledTimes(FAILURES_BEFORE_BACKOFF + 2);
+      d.notify(1);
+      await adv(1_500_000);
+      const n = run.mock.calls.length;
+      d.stop();
+      return n;
+    };
+    // After noop the count starts again, so the notify runs after the quiet period.
+    expect(await runsAfter({ status: 'noop' })).toBe(FAILURES_BEFORE_BACKOFF + 3);
+    // After waiting the count stays, so the notify waits for the hourly retry.
+    expect(await runsAfter({ status: 'waiting' })).toBe(FAILURES_BEFORE_BACKOFF + 2);
   });
 });

@@ -1,10 +1,13 @@
 import { existsSync } from 'node:fs';
 import { createApp } from './app.ts';
 import { ClaudeClient } from './brain/claudeClient.ts';
+import { ClaudeMediaClient } from './brain/mediaClient.ts';
 import { loadEnv, requireKey } from './config/env.ts';
 import { GROUPS_FILE_MISSING_MESSAGE, loadGroupsFile, watchGroupsFile } from './config/groups.ts';
 import { masterKeyPath, sessionDbPath, trackerDbPath } from './config/paths.ts';
 import { DpapiKeyProvider, MasterKeyError } from './crypto/keyProvider.ts';
+import { baileysFetcher } from './media/fetch.ts';
+import { MediaRefSealer } from './media/ref.ts';
 import { googleDriveApi } from './output/drive.ts';
 import { createOAuthClient, TokenDecryptError, TokenStore } from './output/googleAuth.ts';
 import { pricesFromEnv } from './spend/pricing.ts';
@@ -75,14 +78,18 @@ async function main(): Promise<void> {
     google.setCredentials({ refresh_token: refreshToken });
 
     const prices = pricesFromEnv(env);
+    const apiKey = requireKey(env, 'ANTHROPIC_API_KEY');
     const gateway = new WhatsAppGateway({ allow, factory: baileysSocketFactory(silentLogger()), auth: auth.state, saveCreds: auth.saveCreds });
+    // One start time for every wait that counts from the service start: the reconciler's wait for a file, the
+    // processor's 24 hours of waits for Claude, and Health's long-wait count (amendments 10f, 12a, 15a, 15f).
+    const startedAt = systemClock.now();
     const app = createApp({
       db,
       clock: systemClock,
       log,
       gateway,
       allow,
-      ai: new ClaudeClient({ apiKey: requireKey(env, 'ANTHROPIC_API_KEY'), model: env.AI_MODEL, effort: env.AI_EFFORT, prices }),
+      ai: new ClaudeClient({ apiKey, model: env.AI_MODEL, effort: env.AI_EFFORT, prices }),
       drive: googleDriveApi(google),
       prices,
       spendCapUsd: env.DAILY_SPEND_CAP_USD,
@@ -90,6 +97,9 @@ async function main(): Promise<void> {
       maxWaitMs: env.MAX_WAIT_MINUTES * 60_000,
       maxConcurrent: env.MAX_PARALLEL_CLIENTS,
       dataDir: env.DATA_DIR,
+      startedAt,
+      // Phase 2a: download, keep and read shared images and documents. Voice notes are kept, not transcribed yet.
+      media: { sealer: new MediaRefSealer(key), fetcher: baileysFetcher(), ai: new ClaudeMediaClient({ apiKey, model: env.AI_MODEL, prices }) },
     });
 
     // watchGroupsFile catches a throwing onChange (including reloadClients conflicts) and calls onError.

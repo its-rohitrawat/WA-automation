@@ -21,7 +21,10 @@ export interface ValidationState {
   decisionSourceIds: Set<string>;
   /**
    * Batch messages re-queued because their text was edited. Only these skip the replay guard: a reaction does not
-   * change the text, so a reaction re-check is guarded like a fresh message.
+   * change the text, so a reaction re-check is guarded like a fresh message. So is a "file now read" re-check
+   * (amendment 12h): the message's text is unchanged, so its tasks, reminders and decisions are not added again.
+   * Its messageTs is when the message was sent, not when the file was read: a human status change made after the
+   * message wins. A file re-check that is also an edit re-check is in editedIds and is not guarded.
    */
   editedIds: Set<string>;
 }
@@ -68,8 +71,8 @@ export function validateOps(ops: AiOp[], s: ValidationState): { accepted: AiOp[]
     const task = TASK_OPS.has(op.op) && op.taskCode ? s.tasksByCode.get(op.taskCode) : undefined;
     if (TASK_OPS.has(op.op) && !task) { reject('unknown task code for this client'); continue; }
 
-    // A message that was processed before and comes back without an edit (a reprocess, a reaction re-check, or a crash
-    // before marking) must not produce the same task, reminder or decision again.
+    // A message that was processed before and comes back without an edit (a reprocess, a reaction re-check, a "file now
+    // read" re-check, or a crash before marking) must not produce the same task, reminder or decision again.
     const guarded = ids.filter((id) => s.batchIds.has(id) && !s.editedIds.has(id));
 
     switch (op.op) {

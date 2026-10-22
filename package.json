@@ -21,8 +21,11 @@
     "better-sqlite3": "13.0.3",
     "commander": "15.0.0",
     "exceljs": "4.4.0",
+    "jszip": "3.10.2",
     "pino": "10.4.0",
     "qrcode-terminal": "0.12.0",
+    "sharp": "0.35.5",
+    "unpdf": "1.8.1",
     "zod": "4.6.7"
   },
   "devDependencies": {

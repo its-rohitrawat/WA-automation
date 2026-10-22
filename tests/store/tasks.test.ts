@@ -48,6 +48,14 @@ describe('tasks repository', () => {
     expect(listTasks(db, 1).map((t) => t.code)).toEqual(['SHA-001', 'SHA-002']);
   });
 
+  it('never moves the last reminder date back: a file read late can log an older reminder (final review)', () => {
+    const db = seededDb();
+    const a = createTask(db, newTask(), NOW);
+    logReminder(db, a.id, '2026-10-02', NOW);
+    logReminder(db, a.id, '2026-10-01', LATER);
+    expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ reminderCount: 2, lastReminderOn: '2026-10-02', updatedAt: LATER });
+  });
+
   it('records events and decisions', () => {
     const db = seededDb();
     const t = createTask(db, newTask(), NOW);
