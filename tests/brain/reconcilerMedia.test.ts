@@ -101,6 +101,21 @@ describe('Reconciler with shared files', () => {
     expect(processedAt(db, 'I1')).toBeNull();
   });
 
+  it('a waiting run never checks or holds spend, so a group at the daily cap still reads as waiting, not paused (12d)', async () => {
+    const { db, ai, spend, r } = setup();
+    image(db, 'I1', '2026-10-19T07:01:00.000Z');
+    say(db, 'A2', '2026-10-19T07:02:00.000Z');
+    // The whole day's budget is held, so canSpend is false for any paid call.
+    expect(spend.reserve(15)).not.toBeNull();
+    const canSpend = vi.spyOn(spend, 'canSpend');
+    const reserve = vi.spyOn(spend, 'reserve');
+    expect(await r.run(1)).toEqual({ status: 'waiting' });
+    expect(canSpend).not.toHaveBeenCalled();
+    expect(reserve).not.toHaveBeenCalled();
+    expect(ai.calls).toHaveLength(0);
+    expect(latestBatches(db)).toEqual([]);
+  });
+
   it('logs at info only when a client starts waiting, not on every waiting run', async () => {
     const { lines, log } = capturingLogger();
     const { db, r } = setup({ log });
