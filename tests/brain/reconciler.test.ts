@@ -298,7 +298,7 @@ describe('Reconciler', () => {
     expect(await r.run(1)).toEqual({ status: 'failed', errorCode: 'unknown' });
     expect(spend.spentToday()).toBeCloseTo(estimateOf(ai), 9);
     const row = db.prepare('SELECT detail FROM spend').get() as { detail: string };
-    expect(row.detail).toMatch(/\(unknown, estimated\)$/);
+    expect(row.detail).toMatch(/^batch \d+ \(unknown, estimated\)$/);
     expectNoReservation(spend);
   });
 

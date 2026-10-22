@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { BetaContentBlockParam } from '@anthropic-ai/sdk/resources/beta/messages/messages';
 import type { Prices, TokenUsage } from '../spend/pricing.ts';
-import { AiInvalidOutputError, AiRefusalError, billOf, SDK_MAX_RETRIES } from './claudeClient.ts';
+import { AiInvalidOutputError, AiRefusalError, billOf } from './claudeClient.ts';
 
 export const MEDIA_SYSTEM_PROMPT = `You turn one file that someone shared in a client's WhatsApp group into plain text for a project tracker at a design and development studio. The tracker reads your text later as data.
 
@@ -25,6 +25,14 @@ For a scanned document
 export const IMAGE_MAX_TOKENS = 4_000;
 /** Output allowance for transcribing a scanned PDF of up to 20 pages. */
 export const PDF_MAX_TOKENS = 8_000;
+/**
+ * Media calls make one SDK attempt. A lost connection is booked at the estimate once per attempt, and a scanned PDF
+ * reserves a ceiling of about $4 (amendment 9g), so SDK retries could book several times that from one file. The
+ * media queue retries deferred files later instead. Callers pass `MEDIA_SDK_MAX_RETRIES + 1` to withReservation.
+ */
+export const MEDIA_SDK_MAX_RETRIES = 0;
+/** One attempt of up to 600 s stays well inside the spend reservation's 45-minute lifetime. */
+const MEDIA_TIMEOUT_MS = 600_000;
 /** Image tokens per picture at Claude's high-resolution limit (2576 px long edge). */
 export const IMAGE_TOKEN_CEILING = 4_784;
 /** Ceiling per scanned PDF page: the page image plus its text, on high-resolution models. */
@@ -50,7 +58,7 @@ export class ClaudeMediaClient implements MediaAi {
   readonly #prices: Prices;
 
   constructor(opts: { apiKey: string; model: string; prices: Prices; client?: Anthropic }) {
-    this.#client = opts.client ?? new Anthropic({ apiKey: opts.apiKey, maxRetries: SDK_MAX_RETRIES, timeout: 180_000 });
+    this.#client = opts.client ?? new Anthropic({ apiKey: opts.apiKey, maxRetries: MEDIA_SDK_MAX_RETRIES, timeout: MEDIA_TIMEOUT_MS });
     this.#model = opts.model;
     this.#prices = opts.prices;
   }

@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { describe, expect, it, vi } from 'vitest';
 import { AiInvalidOutputError, AiRefusalError, SDK_MAX_RETRIES } from '../../src/brain/claudeClient.ts';
+import { MEDIA_SDK_MAX_RETRIES } from '../../src/brain/mediaClient.ts';
 import { SpendCapReachedError, withReservation } from '../../src/brain/paidCall.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { manualClock } from '../../src/util/clock.ts';
@@ -54,5 +55,34 @@ describe('withReservation', () => {
       { usd: 0.05, detail: 'media 10 (unknown, estimated)' },
     ]);
     expectNoReservation(spend);
+  });
+
+  it.each(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH'])('books nothing when the request never left (%s)', async (code) => {
+    const { spend, rows } = setup();
+    const e = new Anthropic.APIConnectionError({ message: 'Connection error.', cause: new TypeError('fetch failed', { cause: { code } }) });
+    await expect(withReservation(spend, 0.1, 'media 8', async () => { throw e; })).rejects.toBe(e);
+    expect(rows()).toEqual([]);
+    expectNoReservation(spend);
+  });
+
+  it('books a lost connection once per attempt the caller allows', async () => {
+    const { spend, rows } = setup();
+    const timeout = new Anthropic.APIConnectionTimeoutError();
+    await expect(withReservation(spend, 0.1, 'media 11', async () => { throw timeout; }, 1)).rejects.toBe(timeout);
+    expect(rows()).toEqual([{ usd: 0.1, detail: 'media 11 (connection lost, estimated)' }]);
+    expectNoReservation(spend);
+  });
+
+  // A scanned PDF reserves a ceiling of about $4.2 (amendment 9g). One timed-out media call must not pause the day.
+  it('keeps room for the reconciler after a timed-out scanned PDF at the ceiling', async () => {
+    const { spend } = setup(15);
+    await withReservation(spend, 3, 'batch 1', ok(3));
+    const ceiling = 4.16;
+    expect(spend.canSpend(ceiling)).toBe(true);
+    await expect(withReservation(spend, ceiling, 'media 12', async () => { throw new Anthropic.APIConnectionTimeoutError(); }, MEDIA_SDK_MAX_RETRIES + 1))
+      .rejects.toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
+    expect(spend.spentToday()).toBeCloseTo(3 + ceiling, 9);
+    expect(spend.isPaused()).toBe(false);
+    expect(spend.canSpend(0.4)).toBe(true);
   });
 });

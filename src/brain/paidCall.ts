@@ -28,15 +28,24 @@ export function neverSent(e: Error): boolean {
  * Books a paid call that ended in an error. It books what the server billed (refusal, invalid output); an estimate
  * when the outcome is unknown (once per SDK attempt for a lost connection); nothing when it was never billed.
  * `label`: ids only, never content, for example "batch 12" or "media 7".
+ * `attempts`: how many SDK attempts the client makes (its maxRetries + 1). The default fits a client built with
+ * SDK_MAX_RETRIES; media calls pass MEDIA_SDK_MAX_RETRIES + 1.
  */
-export function settleFailedCall(spend: SpendGuard, rid: number, e: unknown, estimate: number, label: string): void {
+export function settleFailedCall(
+  spend: SpendGuard,
+  rid: number,
+  e: unknown,
+  estimate: number,
+  label: string,
+  attempts: number = SDK_MAX_RETRIES + 1,
+): void {
   if (e instanceof AiRefusalError || e instanceof AiInvalidOutputError) {
     spend.settle(rid, 'ai', e.costUsd ?? estimate, `${label} (failed)`);
   } else if (e instanceof Anthropic.APIConnectionError) {
     // Checked before APIError, its parent class. A timeout or a reset after sending may have been billed,
     // once per SDK attempt.
     if (neverSent(e)) spend.release(rid);
-    else spend.settle(rid, 'ai', estimate * (SDK_MAX_RETRIES + 1), `${label} (connection lost, estimated)`);
+    else spend.settle(rid, 'ai', estimate * attempts, `${label} (connection lost, estimated)`);
   } else if (e instanceof Anthropic.APIError) {
     spend.release(rid); // the server answered with an error status: not billed
   } else {
@@ -47,12 +56,14 @@ export function settleFailedCall(spend: SpendGuard, rid: number, e: unknown, est
 /**
  * Reserves the estimate, makes one paid call, and settles or releases the reservation whatever happens.
  * Throws SpendCapReachedError, without calling, when the estimate does not fit under the daily cap.
+ * `attempts`: SDK attempts the call's client makes, as for settleFailedCall.
  */
 export async function withReservation<T extends { costUsd: number; fallbackUsed: boolean }>(
   spend: SpendGuard,
   estimate: number,
   label: string,
   call: () => Promise<T>,
+  attempts: number = SDK_MAX_RETRIES + 1,
 ): Promise<T> {
   const rid = spend.reserve(estimate);
   if (rid === null) throw new SpendCapReachedError();
@@ -60,7 +71,7 @@ export async function withReservation<T extends { costUsd: number; fallbackUsed:
   try {
     r = await call();
   } catch (e) {
-    settleFailedCall(spend, rid, e, estimate, label);
+    settleFailedCall(spend, rid, e, estimate, label, attempts);
     throw e;
   }
   spend.settle(rid, 'ai', r.costUsd, `${label}${r.fallbackUsed ? ' (fallback)' : ''}`);
