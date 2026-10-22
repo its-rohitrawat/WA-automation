@@ -1,9 +1,11 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { MEDIA_PROMPT_LIMITS, mediaPromptTexts, readyPrefix } from '../media/promptText.ts';
 import { estimateCostUsd, type Prices } from '../spend/pricing.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
 import { finishBatch, startBatch } from '../store/batches.ts';
 import { getClient, setPhase, setStatus, type ClientRow } from '../store/clients.ts';
 import { tx, type Db } from '../store/db.ts';
+import { mediaForMessages } from '../store/media.ts';
 import {
   flagRevokedSources, listRecentProcessed, listUnprocessed, markProcessedIfUnchanged, reactionsFor, type MessageRow, type StoredReactionRow,
 } from '../store/messages.ts';
@@ -20,8 +22,13 @@ import { buildUserContent, SYSTEM_PROMPT } from './prompt.ts';
 import type { AiOp, AiOutput } from './schema.ts';
 import { validateOps, type Rejection, type ValidationState } from './validator.ts';
 
+/**
+ * noop: nothing to do. waiting: messages are queued, but the first one's file is still being read (no AI call, no spend);
+ * it is not a success and not a failure, so the debouncer keeps its failure count and Health ignores it.
+ */
 export type ReconcileOutcome =
   | { status: 'noop' }
+  | { status: 'waiting' }
   | { status: 'paused' }
   | { status: 'ok'; accepted: number; rejected: number }
   | { status: 'failed'; errorCode: string };
@@ -34,6 +41,11 @@ export interface ReconcilerOptions {
   clock: Clock;
   log: Logger;
   onChanged: () => void;
+  /**
+   * When the service started. A file still being read holds up its message for 30 minutes counted from its arrival or
+   * from this time, whichever is later. Default: the clock's time when the Reconciler is made.
+   */
+  startedAt?: Date;
 }
 
 /** Re-exported for existing importers; it lives in paidCall.ts with the other spend helpers. */
@@ -64,17 +76,27 @@ function errorCodeOf(e: unknown): string {
 
 export class Reconciler {
   readonly #o: ReconcilerOptions;
+  readonly #startedAt: Date;
 
   constructor(o: ReconcilerOptions) {
     this.#o = o;
+    this.#startedAt = o.startedAt ?? o.clock.now();
   }
 
   async run(clientId: number): Promise<ReconcileOutcome> {
     const { db, spend, prices, clock, log } = this.#o;
     const client = getClient(db, clientId);
     if (!client.active) return { status: 'noop' };
-    const batch = listUnprocessed(db, clientId);
-    if (batch.length === 0) return { status: 'noop' };
+    const queued = listUnprocessed(db, clientId);
+    if (queued.length === 0) return { status: 'noop' };
+    const now = clock.now();
+    // §6.1: a shared file is read before the AI sees its message. Messages from the first file still being read onward
+    // wait for a later run; the media queue tells the debouncer when that file is done. Blocking needs no text (maxChars 0).
+    const batch = readyPrefix(queued, mediaForMessages(db, queued.map((m) => m.id), 0), now, this.#startedAt);
+    if (batch.length === 0) {
+      log.info({ clientId, waiting: queued.length }, 'waiting for shared files to be read');
+      return { status: 'waiting' };
+    }
 
     // Context comes from before the first new or reprocessed message, so a reprocess window does not see later chat.
     // Re-checks (edits, reactions) of old messages are skipped here: they must not pull the context back in time.
@@ -84,8 +106,9 @@ export class Reconciler {
     const openTasks = listTasks(db, clientId, ['open', 'maybe_done']);
     const decisions = listDecisions(db, clientId, 20);
     const reactions = reactionsFor(db, clientId, [...recent, ...batch].map((m) => m.waId));
-    const now = clock.now();
-    const user = buildUserContent({ client, people, openTasks, decisions, recent, batch, reactions, today: istDate(now) });
+    const files = mediaForMessages(db, [...recent, ...batch].map((m) => m.id), MEDIA_PROMPT_LIMITS.perMessage + 1);
+    const mediaText = mediaPromptTexts(files, batch, recent);
+    const user = buildUserContent({ client, people, openTasks, decisions, recent, batch, reactions, today: istDate(now), mediaText });
 
     // Known and accepted: a call that falls back can cost up to about 2.25x this reservation (a declined primary
     // attempt, then a full fallback attempt at 1.25x rates). settle() books the true cost, so the books stay right;

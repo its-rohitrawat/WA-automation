@@ -147,6 +147,7 @@ export class GroupDebouncer {
         .then(() => this.#run(clientId))
         .then((outcome) => {
           if (s.cancelled) return;
+          // 'waiting' (files still being read) needs no retry, like 'noop', but it proves nothing about the AI, so the failure count stays.
           if (outcome.status === 'ok' || outcome.status === 'noop') s.failures = 0;
           if (outcome.status === 'failed') s.failures++;
           if (outcome.status === 'failed' || outcome.status === 'paused') this.#scheduleRetry(clientId);

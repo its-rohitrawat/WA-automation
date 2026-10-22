@@ -62,7 +62,7 @@ export interface FileFacts {
 }
 
 /** The extractor's note for a forwarded image or scanned PDF that was not sent to Claude (owner decision D2). */
-const FORWARDED_NOT_DESCRIBED = 'forwarded_not_described';
+export const FORWARDED_NOT_DESCRIBED = 'forwarded_not_described';
 
 /** Control and format characters (direction overrides, zero-width marks) and U+FFFE/U+FFFF, which XML does not allow. */
 const HIDDEN = /[\p{Cc}\p{Cf}\uFFFE\uFFFF]/gu;

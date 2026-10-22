@@ -9,6 +9,7 @@ import { Reconciler } from '../src/brain/reconciler.ts';
 import { readHealthSnapshot } from '../src/health/health.ts';
 import { estimateCostUsd, type Prices } from '../src/spend/pricing.ts';
 import { getKv, setKv } from '../src/store/kv.ts';
+import { insertMedia, messageRowId } from '../src/store/media.ts';
 import { listTasks } from '../src/store/tasks.ts';
 import { systemClock } from '../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../src/util/logger.ts';
@@ -528,6 +529,34 @@ describe('app health and publishing', () => {
 
     vi.useRealTimers();
     expect(await overviewTexts(drive.last!)).toContain('⚠️ 1 group waiting (AI error)');
+  });
+
+  it('a run that waits for a shared file calls no AI and publishes nothing, and goes ahead once the file stops blocking (12d)', async () => {
+    const run = vi.spyOn(Reconciler.prototype, 'run');
+    const { db, ai, drive, app, sock } = setup();
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'see this')] });
+    // A file of this message is still being read (the media queue is wired in Task 15).
+    insertMedia(db, {
+      messageId: messageRowId(db, 1, 'm1')!, clientId: 1, kind: 'image', status: 'pending', mimeType: 'image/jpeg', fileName: null, fileSize: 1000,
+      seconds: null, forwarded: false, refEnc: null, errorCode: null, createdAt: new Date().toISOString(),
+    });
+    await vi.advanceTimersByTimeAsync(239_000);
+    expect(drive.uploads).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(2_000); // the run at 240 s waits for the file
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(run).toHaveBeenCalled();
+    await expect(run.mock.results[0]!.value).resolves.toEqual({ status: 'waiting' });
+    expect(ai.calls).toHaveLength(0);
+    expect(drive.uploads).toBe(1);
+    expect(readHealthSnapshot(db)!.failed).toEqual([]);
+
+    // 30 minutes after the file arrived it no longer holds up its message: a later run goes ahead and publishes.
+    await vi.advanceTimersByTimeAsync(40 * 60_000);
+    expect(ai.calls).toHaveLength(1);
+    expect(ai.calls[0]!.user).toContain(': see this {image, still being read}');
+    expect(drive.uploads).toBe(2);
+    await stopApp(app);
   });
 
   it('logs a crashed reconcile without its message, records it and publishes', async () => {

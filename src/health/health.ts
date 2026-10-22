@@ -74,6 +74,8 @@ export class Health {
   }
 
   recordOutcome(clientId: number, o: ReconcileOutcome): void {
+    // Waiting for shared files to be read says nothing about the AI: a failed or paused group stays as it was.
+    if (o.status === 'waiting') return;
     if (o.status === 'paused') this.#paused.set(clientId, istDate(this.#clock.now()));
     else {
       this.#paused.delete(clientId);
