@@ -239,12 +239,72 @@ describe('createExtractor', () => {
       expect(ai.calls).toHaveLength(0);
     });
 
+    // Final review FR3c: when only holds of paid calls in flight are in the way, the error says so (busy), so the file
+    // waits as spend_busy and Health does not say it waits for midnight.
+    it('says whether only paid calls in flight, not the cap, keep an image or a scan from its budget', async () => {
+      const busy = async (run: Promise<unknown>) => (await run.then(() => null, (e: unknown) => e)) as SpendCapReachedError;
+      const image = setup();
+      image.spend.record('ai', 10.8, 'batch 1');
+      const hold = image.spend.reserve(scannedPdfCeilingUsd(P))!; // a scan being read holds about $4.16
+      let e = await busy(image.extract(image.input()));
+      expect(e).toBeInstanceOf(SpendCapReachedError);
+      expect(e.busy).toBe(true);
+      image.spend.settle(hold, 'ai', 4.15, 'media 99');
+      e = await busy(image.extract(image.input()));
+      expect(e).toBeInstanceOf(SpendCapReachedError);
+      expect(e.busy).toBe(false);
+      expect(image.prepareImage).not.toHaveBeenCalled();
+
+      const scan = setup({ parse: { text: '', pageCount: 3 } });
+      scan.spend.record('ai', 8, 'batch 1');
+      const scanHold = scan.spend.reserve(scannedPdfCeilingUsd(P))!;
+      e = await busy(scan.extract(scan.input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF })));
+      expect(e.busy).toBe(true);
+      scan.spend.settle(scanHold, 'ai', 4, 'media 99');
+      e = await busy(scan.extract(scan.input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF })));
+      expect(e.busy).toBe(false);
+      expect(image.ai.calls).toHaveLength(0);
+      expect(scan.ai.calls).toHaveLength(0);
+    });
+
     it('does not call Claude for a scan when the ceiling does not fit under what is left today', async () => {
       const { db, spend, ai, extract, input } = setup({ parse: { text: '', pageCount: 3 } });
       spend.record('ai', 11, 'batch 1');
       await expect(extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).rejects.toBeInstanceOf(SpendCapReachedError);
       expect(ai.calls).toHaveLength(0);
       expect(spendRows(db)).toEqual([{ usd: 11, detail: 'batch 1' }]);
+    });
+  });
+
+  // Final review FR3a: a file deleted for everyone during its download or decode is never sent to Claude.
+  describe('a file deleted for everyone before the paid call', () => {
+    it('an image is decoded but not described, and nothing is reserved or booked', async () => {
+      const { db, ai, prepareImage, extract, input, reserve } = setup();
+      const revoked = vi.fn(() => true);
+      expect(await extract(input({ revoked }))).toEqual({ ...NONE, note: 'revoked' });
+      expect(prepareImage).toHaveBeenCalledTimes(1);
+      expect(revoked).toHaveBeenCalledTimes(1);
+      expect(reserve).not.toHaveBeenCalled();
+      expect(ai.calls).toHaveLength(0);
+      expect(spendRows(db)).toEqual([]);
+    });
+
+    it('a scanned PDF is not read', async () => {
+      const { db, ai, extract, input, reserve } = setup({ parse: { text: '', pageCount: 3 } });
+      expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF, revoked: () => true }))).toEqual({ ...NONE, note: 'revoked' });
+      expect(reserve).not.toHaveBeenCalled();
+      expect(ai.calls).toHaveLength(0);
+      expect(spendRows(db)).toEqual([]);
+    });
+
+    it('a file still wanted is read as usual, and a free read never asks', async () => {
+      const { ai, extract, input } = setup({ parse: { text: 'Quotation 17\nTotal 1,20,000 for the full website build', pageCount: 2 } });
+      const revoked = vi.fn(() => false);
+      expect((await extract(input({ revoked }))).textKind).toBe('description');
+      expect(revoked).toHaveBeenCalledTimes(1);
+      expect((await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF, revoked }))).textKind).toBe('extract');
+      expect(revoked).toHaveBeenCalledTimes(1); // a PDF with a text layer is read locally, at no cost
+      expect(ai.calls).toHaveLength(1);
     });
   });
 

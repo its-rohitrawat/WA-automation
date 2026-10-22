@@ -53,6 +53,9 @@ describe('fileDescription', () => {
 
   it('says plainly what happened to files that were not read', () => {
     expect(fileDescription(facts({ status: 'pending', textKind: null, textStart: null }))).toBe('PDF, being read');
+    for (const errorCode of ['spend_cap', 'spend_busy', 'ai_unavailable', 'network']) {
+      expect(fileDescription(facts({ status: 'pending', errorCode, textKind: null, textStart: null }))).toBe('PDF, being read');
+    }
     expect(fileDescription(facts({ status: 'unavailable', textKind: null, textStart: null }))).toBe('PDF, could not be downloaded from WhatsApp');
     expect(fileDescription(facts({ status: 'failed', textKind: null, textStart: null }))).toBe('PDF, could not be read');
     expect(fileDescription(facts({ kind: 'video', status: 'metadata', mimeType: 'video/mp4', seconds: 42, textKind: null, textStart: null }))).toBe('Video, 0:42 (not downloaded)');

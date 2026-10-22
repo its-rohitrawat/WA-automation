@@ -4,9 +4,15 @@ import { AiInvalidOutputError, AiRefusalError, SDK_MAX_RETRIES } from './claudeC
 
 /** A paid attempt could not reserve its estimate under the daily cap. */
 export class SpendCapReachedError extends Error {
-  constructor() {
+  /**
+   * The estimate would fit if no paid call were in flight (SpendGuard.fitsIgnoringHolds): holds of calls still running,
+   * or the guard closed at shutdown, are in the way, not the cap itself, so it clears within minutes (final review FR3c).
+   */
+  readonly busy: boolean;
+  constructor(o: { busy?: boolean } = {}) {
     super('Daily spend cap reached');
     this.name = 'SpendCapReachedError';
+    this.busy = o.busy ?? false;
   }
 }
 
@@ -58,7 +64,8 @@ export function settleFailedCall(
 
 /**
  * Reserves the estimate, makes one paid call, and settles or releases the reservation whatever happens.
- * Throws SpendCapReachedError, without calling, when the estimate does not fit under the daily cap.
+ * Throws SpendCapReachedError, without calling, when the estimate does not fit under the daily cap; `busy` says whether
+ * only holds of other calls in flight are in the way.
  * `attempts`: SDK attempts the call's client makes, as for settleFailedCall. It has no default, so every caller states
  * its client's count and a one-attempt media call is never booked as three: media calls pass
  * `MEDIA_SDK_MAX_RETRIES + 1` (amendment 9h).
@@ -71,7 +78,7 @@ export async function withReservation<T extends { costUsd: number; fallbackUsed:
   attempts: number,
 ): Promise<T> {
   const rid = spend.reserve(estimate);
-  if (rid === null) throw new SpendCapReachedError();
+  if (rid === null) throw new SpendCapReachedError({ busy: spend.fitsIgnoringHolds(estimate) });
   let r: T;
   try {
     r = await call();

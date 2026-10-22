@@ -28,21 +28,39 @@ import { MEHTA, SHARMA, seededDb } from '../helpers/db.ts';
 import { FakeMediaAi } from '../helpers/mediaAi.ts';
 import { TS, waRaw } from '../helpers/wa.ts';
 
-/** Lets a test make the next file write stop part way, as a full disk or a failing drive would. */
-const disk = vi.hoisted(() => ({ failNextWrite: false }));
+/**
+ * Lets a test make the next file write stop part way, as a full disk or a failing drive would, and see when a file is
+ * synced to disk. The processor writes an original through a file handle from open().
+ */
+const disk = vi.hoisted(() => ({ failNextWrite: false, onSync: undefined as (() => void) | undefined }));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...real,
-    writeFile: async (...args: Parameters<typeof real.writeFile>) => {
-      if (disk.failNextWrite) {
-        disk.failNextWrite = false;
-        const [path, data, opts] = args;
-        const half = (data as Buffer).subarray(0, Math.floor((data as Buffer).length / 2));
-        await real.writeFile(path, half, opts); // the file is created and half written, then the write fails
-        throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
-      }
-      return real.writeFile(...args);
+    open: async (...args: Parameters<typeof real.open>) => {
+      const fh = await real.open(...args);
+      return new Proxy(fh, {
+        get(target, prop) {
+          if (prop === 'writeFile') {
+            return async (data: Buffer) => {
+              if (disk.failNextWrite) {
+                disk.failNextWrite = false;
+                await target.writeFile(data.subarray(0, Math.floor(data.length / 2))); // the file is created and half written, then the write fails
+                throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
+              }
+              return target.writeFile(data);
+            };
+          }
+          if (prop === 'sync') {
+            return async () => {
+              disk.onSync?.();
+              return target.sync();
+            };
+          }
+          const v: unknown = Reflect.get(target, prop, target);
+          return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        },
+      });
     },
   };
 });
@@ -51,6 +69,7 @@ const MEDIA_KEY = Buffer.alloc(32, 9);
 const dirs: string[] = [];
 afterEach(() => {
   disk.failNextWrite = false;
+  disk.onSync = undefined;
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
@@ -117,7 +136,9 @@ describe('MediaProcessor', () => {
       { maxBytes: MEDIA_LIMITS.maxDownloadBytes, timeoutMs: MEDIA_LIMITS.downloadTimeoutMs },
     );
     expect(readFileSync(saved(dataDir, rel(id)), 'utf8')).toBe('jpeg-bytes');
-    expect(extract).toHaveBeenCalledWith({ mediaId: id, kind: 'image', mimeType: 'image/jpeg', fileName: null, forwarded: false, bytes: Buffer.from('jpeg-bytes') });
+    expect(extract).toHaveBeenCalledWith({
+      mediaId: id, kind: 'image', mimeType: 'image/jpeg', fileName: null, forwarded: false, bytes: Buffer.from('jpeg-bytes'), revoked: expect.any(Function),
+    });
     expect(getMediaRef(db, id)).toBeNull();
     expect(getMedia(db, id)).toMatchObject({ status: 'done', localPath: rel(id), fileSize: 10, textKind: 'description', text: 'A blue banner with the new logo' });
     expect(getMedia(db, id)!.sha256).toMatch(/^[0-9a-f]{64}$/);
@@ -145,6 +166,18 @@ describe('MediaProcessor', () => {
     expect(readFileSync(saved(dataDir, rel(id)), 'utf8')).toBe('jpeg-bytes');
     expect(readdirSync(folder)).toEqual([basename(saved(dataDir, rel(id)))]);
     expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  // Final review FR3b: a power cut after markDownloaded must not leave a zero-filled original whose download details are gone.
+  it('syncs the original to disk before it is put in place and its download details are wiped', async () => {
+    const { db, dataDir, p, share } = setup();
+    const id = share();
+    const atSync: { hasRef: boolean; inPlace: boolean }[] = [];
+    disk.onSync = () => atSync.push({ hasRef: getMediaRef(db, id) !== null, inPlace: existsSync(saved(dataDir, rel(id))) });
+    expect((await p.process(id)).outcome).toBe('done');
+    expect(atSync).toEqual([{ hasRef: true, inPlace: false }]);
+    expect(getMediaRef(db, id)).toBeNull();
+    expect(readFileSync(saved(dataDir, rel(id)), 'utf8')).toBe('jpeg-bytes');
   });
 
   it('saves under the row id when the message id is unsafe as a file name', async () => {
@@ -268,6 +301,48 @@ describe('MediaProcessor', () => {
     expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'A receipt', errorCode: null });
   });
 
+  // Final review FR3c: only holds of paid calls still in flight are in the way, not the cap itself.
+  it('waits 10 minutes as spend_busy, without counting an attempt, when only paid calls in flight hold the budget', async () => {
+    let busy = true;
+    const { db, clock, p, share } = setup({
+      extract: async () => {
+        if (busy) throw new SpendCapReachedError({ busy: true });
+        return { textKind: 'description', text: 'A receipt', pageCount: null, note: null };
+      },
+    });
+    const id = share();
+    expect((await p.process(id)).outcome).toBe('deferred');
+    expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'spend_busy', nextAttemptAt: at(10 * MINUTE), localPath: rel(id) });
+    busy = false;
+    clock.advance(10 * MINUTE);
+    expect((await p.process(id)).outcome).toBe('done');
+    expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'A receipt', errorCode: null });
+  });
+
+  it('tells a scan in flight holding the budget (spend_busy) from the daily cap (spend_cap), with the real extractor', async () => {
+    const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
+    const ai = new FakeMediaAi();
+    let spend!: SpendGuard;
+    const prepareImage = async (): Promise<PreparedImage> => ({ data: Buffer.from('small'), mediaType: 'image/jpeg', width: 10, height: 10 });
+    const { db, p, share } = setup({
+      extractFor: (d) => {
+        spend = new SpendGuard({ db: d, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 15 });
+        return createExtractor({ ai, spend, prices: P, prepareImage });
+      },
+    });
+    spend.record('ai', 10.8, 'earlier calls');
+    const hold = spend.reserve(scannedPdfCeilingUsd(P)); // a scan being read holds about $4.16
+    expect(hold).not.toBeNull();
+    const a = share('IMG1');
+    expect((await p.process(a)).outcome).toBe('deferred');
+    expect(getMedia(db, a)).toMatchObject({ errorCode: 'spend_busy', attempts: 0 });
+    spend.settle(hold!, 'ai', 4.15, 'media 99'); // the scan cost about that after all: now the cap itself is in the way
+    const b = share('IMG2');
+    expect((await p.process(b)).outcome).toBe('deferred');
+    expect(getMedia(db, b)).toMatchObject({ errorCode: 'spend_cap', attempts: 0 });
+    expect(ai.calls).toEqual([]);
+  });
+
   it('a file it cannot read fails for good but keeps the original', async () => {
     const { db, dataDir, p, share } = setup({ extract: async () => { throw new ParseError('not_pdf'); } });
     const id = share();
@@ -296,6 +371,58 @@ describe('MediaProcessor', () => {
     expect(extract).toHaveBeenCalledTimes(1);
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(existsSync(saved(dataDir, rel(id)))).toBe(true);
+  });
+
+  // Final review FR3a: the revoke is read again after the download and just before the paid call.
+  describe('a file deleted for everyone while it is downloaded or decoded', () => {
+    const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
+
+    it('is not read when the delete arrives during its download, but its original is kept', async () => {
+      let db!: Db;
+      const s = setup({
+        fetcher: async () => {
+          applyRevoke(db, 1, 'IMG1'); // the client deletes it for everyone while it downloads
+          return Buffer.from('jpeg-bytes');
+        },
+      });
+      db = s.db;
+      const id = s.share();
+      expect(await s.p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
+      expect(getMedia(db, id)).toMatchObject({ status: 'done', note: 'revoked', text: null, textKind: null, localPath: rel(id), hasRef: false });
+      expect(s.extract).not.toHaveBeenCalled();
+      expect(existsSync(saved(s.dataDir, rel(id)))).toBe(true);
+    });
+
+    it.each([
+      ['an image, while it is decoded', 'image'],
+      ['a scanned PDF, while its text layer is checked', 'pdf'],
+    ] as const)('%s, is never sent to Claude', async (_name, kind) => {
+      const ai = new FakeMediaAi();
+      let db!: Db;
+      const revoke = (waId: string) => applyRevoke(db, 1, waId);
+      const prepareImage = async (): Promise<PreparedImage> => {
+        revoke('IMG1');
+        return { data: Buffer.from('small'), mediaType: 'image/jpeg', width: 10, height: 10 };
+      };
+      const parse = async (): Promise<ParseResult> => {
+        revoke('DOC1');
+        return { text: '', pageCount: 2 };
+      };
+      let spend!: SpendGuard;
+      const s = setup({
+        fetcher: async () => (kind === 'pdf' ? Buffer.from('%PDF-1.4 scanned pages') : Buffer.from('jpeg-bytes')),
+        extractFor: (d) => {
+          spend = new SpendGuard({ db: d, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 15 });
+          return createExtractor({ ai, spend, prices: P, prepareImage, parse });
+        },
+      });
+      db = s.db;
+      const id = kind === 'pdf' ? s.shareFile('DOC1', 'application/pdf', 'scan.pdf') : s.share('IMG1');
+      expect(await s.p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
+      expect(getMedia(db, id)).toMatchObject({ status: 'done', note: 'revoked', text: null, textKind: null, pageCount: null });
+      expect(ai.calls).toEqual([]);
+      expect(spend.spentToday()).toBe(0);
+    });
   });
 
   it.each([
@@ -699,9 +826,9 @@ describe('MediaProcessor', () => {
       ]);
     });
 
-    it('waits that count nothing (Claude unavailable, the spend cap) leave the attempts exactly as they were before the claim', async () => {
+    it('waits that count nothing (Claude unavailable, the spend cap, paid calls in flight) leave the attempts exactly as they were before the claim', async () => {
       const invalid = () => new AiInvalidOutputError('bad json', null);
-      const errors: Error[] = [invalid(), status(529), new SpendCapReachedError(), status(401), invalid(), new SpendCapReachedError(), invalid()];
+      const errors: Error[] = [invalid(), status(529), new SpendCapReachedError(), status(401), invalid(), new SpendCapReachedError({ busy: true }), invalid()];
       const { db, clock, p, share } = setup({ extract: async () => { throw errors.shift()!; } });
       const id = share();
       const seen: [string | null, number][] = [];
@@ -712,7 +839,7 @@ describe('MediaProcessor', () => {
         clock.advance(60 * MINUTE);
       }
       expect(seen).toEqual([
-        ['ai_invalid_output', 1], ['ai_unavailable', 1], ['spend_cap', 1], ['ai_unavailable', 1], ['ai_invalid_output', 2], ['spend_cap', 2], ['ai_invalid_output', 3],
+        ['ai_invalid_output', 1], ['ai_unavailable', 1], ['spend_cap', 1], ['ai_unavailable', 1], ['ai_invalid_output', 2], ['spend_busy', 2], ['ai_invalid_output', 3],
       ]);
       expect(getMedia(db, id)!.status).toBe('failed'); // the third counted attempt, not the seventh run
     });

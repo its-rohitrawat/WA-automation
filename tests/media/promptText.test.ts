@@ -253,6 +253,19 @@ describe('waiting for files', () => {
     expect(mediaPromptText(deferred('spend_cap'), 100)).toEqual(mediaPromptText(deferred('ai_unavailable'), 100));
   });
 
+  // Final review FR3c.
+  it('a file waiting only for paid calls in flight (spend_busy) blocks and reads exactly like one waiting for the daily budget', () => {
+    const deferred = (errorCode: string) => pending({ messageId: 2, errorCode, createdAt: '2026-10-19T07:40:00.000Z', updatedAt: '2026-10-19T07:50:00.000Z' });
+    for (const at of ['2026-10-19T08:00:00.000Z', '2026-10-19T08:09:59.999Z', '2026-10-19T08:10:00.000Z', '2026-10-19T12:00:00.000Z']) {
+      const t = new Date(at);
+      expect(isBlocking(deferred('spend_busy'), t, longAgo), at).toBe(isBlocking(deferred('spend_cap'), t, longAgo));
+      const ids = (code: string) => readyPrefix([msg(1), msg(2), msg(3)], new Map([[2, deferred(code)]]), t, longAgo).map((m) => m.id);
+      expect(ids('spend_busy'), at).toEqual(ids('spend_cap'));
+    }
+    expect(isBlocking(deferred('spend_busy'), now, longAgo)).toBe(true);
+    expect(mediaPromptText(deferred('spend_busy'), 100)).toEqual(said('image, still being read'));
+  });
+
   it('a file waiting for Claude to come back blocks only for the usual 30 minutes, then reads as still being read (10d)', () => {
     // The media queue keeps such a file pending for up to 24 hours; its message must not wait that long.
     const unavailable = pending({ errorCode: 'ai_unavailable', attempts: 0, createdAt: '2026-10-19T07:20:00.000Z', updatedAt: '2026-10-19T07:55:00.000Z' });

@@ -26,13 +26,18 @@ export interface ExtractInput {
   forwarded: boolean;
   /** The saved original. A DOCX's bytes are moved to the parser, so the caller must not read them after extract. */
   bytes: Buffer;
+  /**
+   * Asked just before a paid call: true when the file's message was deleted for everyone meanwhile, for example during
+   * the decode. The file is then not sent to Claude and comes back with note 'revoked' (final review FR3a).
+   */
+  revoked?: () => boolean;
 }
 
 export interface Extraction {
   textKind: TextKind | null;
   text: string | null;
   pageCount: number | null;
-  /** 'first_pages_only' | 'scan_too_long' | 'scan_read_by_ai' | 'forwarded_not_described' | 'too_costly' | null */
+  /** 'first_pages_only' | 'scan_too_long' | 'scan_read_by_ai' | 'forwarded_not_described' | 'too_costly' | 'revoked' | null */
   note: string | null;
 }
 
@@ -56,6 +61,8 @@ const NONE: Extraction = { textKind: null, text: null, pageCount: null, note: nu
 const FORWARDED = 'forwarded_not_described';
 /** A paid read whose ceiling is above the whole daily cap could never run, so it is not tried or deferred. */
 const TOO_COSTLY = 'too_costly';
+/** Deleted for everyone before the paid call: not sent to Claude, finished like the processor's own 'revoked' path. */
+const REVOKED: Extraction = { ...NONE, note: 'revoked' };
 const IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 /** A PDF whose text layer has fewer visible characters per page than this is treated as a scan. */
@@ -127,8 +134,9 @@ export function createExtractor(d: ExtractorDeps): Extractor {
     const ceiling = imageCeilingUsd(d.prices);
     if (ceiling > d.spend.capUsd) return { ...NONE, note: TOO_COSTLY };
     // The budget is checked before decoding, so an image deferred by the cap is not decoded again on every retry.
-    if (!d.spend.canSpend(ceiling)) throw new SpendCapReachedError();
+    if (!d.spend.canSpend(ceiling)) throw new SpendCapReachedError({ busy: d.spend.fitsIgnoringHolds(ceiling) });
     const img = await prepareImage(input.bytes);
+    if (input.revoked?.()) return REVOKED;
     const r = await withReservation(d.spend, imageEstimateUsd(img, d.prices), label(input), () => d.ai.describeImage(img), MEDIA_ATTEMPTS);
     return { textKind: 'description', text: capStored(r.text), pageCount: null, note: null };
   };
@@ -153,6 +161,7 @@ export function createExtractor(d: ExtractorDeps): Extractor {
     // Claude reads every real page whatever the file claims, so every scan reserves the same ceiling.
     const ceiling = scannedPdfCeilingUsd(d.prices);
     if (ceiling > d.spend.capUsd) return { ...NONE, pageCount: pages, note: TOO_COSTLY };
+    if (input.revoked?.()) return REVOKED;
     const r = await withReservation(d.spend, ceiling, label(input), () => d.ai.readScannedPdf(input.bytes), MEDIA_ATTEMPTS).catch(scanReadFailed);
     return { textKind: 'extract', text: capStored(r.text), pageCount: pages, note: 'scan_read_by_ai' };
   };

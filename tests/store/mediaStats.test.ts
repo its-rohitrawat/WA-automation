@@ -77,6 +77,15 @@ describe('mediaStats', () => {
     expect(mediaStats(db, new Date(NOW))).toEqual(ZERO);
   });
 
+  // Final review FR3c: a file waiting only for paid calls in flight is read within minutes, not after midnight.
+  it('does not count a file waiting for paid calls in flight (spend_busy) under spendCap', () => {
+    const db = seededDb();
+    const id = add(db, 'A', { createdAt: '2026-10-19T07:55:00.000Z' });
+    deferMedia(db, id, { errorCode: 'spend_busy', nextAttemptAt: '2026-10-19T08:10:00.000Z', countAttempt: false, at: NOW });
+    expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 1 });
+    expect(mediaStats(db, new Date('2026-10-19T08:30:00.000Z'))).toEqual({ ...ZERO, pending: 1, stale: 1 });
+  });
+
   it('does not count an upload that gave up once the file is in Drive', () => {
     const db = seededDb();
     const id = gaveUpUpload(db, 'A');

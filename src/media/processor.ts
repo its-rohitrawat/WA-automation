@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { link, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { link, mkdir, open, readFile, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
 import { AiInvalidOutputError, AiRefusalError } from '../brain/claudeClient.ts';
@@ -33,7 +33,10 @@ export const CLAIM_MS = 15 * 60_000;
 const CRASHED = 'crashed';
 /** Wait after the first and the second failed attempt; the third failure is final. */
 const RETRY_DELAYS_MS = [60_000, 5 * 60_000];
+/** The wait after the spend cap (spend_cap), or after holds of paid calls in flight (spend_busy). Counts no attempt. */
 export const SPEND_RETRY_MS = 10 * 60_000;
+/** Only holds of paid calls in flight, not the cap itself, kept the file from its budget (final review FR3c). */
+const SPEND_BUSY = 'spend_busy';
 /** Claude was busy, down or refused the key, and nothing was billed: waits that grow, then hourly (amendment 10d). */
 const AI_UNAVAILABLE = 'ai_unavailable';
 /**
@@ -131,11 +134,19 @@ const sha256Hex = (bytes: Buffer): string => createHash('sha256').update(bytes).
  * Saves an original at `abs` without ever replacing a file there. The bytes go to a temp file in the same folder,
  * which is then hard-linked into place: a write that stops part way (a full disk, a crash) never leaves a partial
  * original at `abs`, where a later attempt would take it for a different file and fail the row for good.
+ * The bytes are synced to disk before the link (final review FR3b): markDownloaded wipes the download details next, so
+ * after a power cut the original must not be zeros or partial with no way to fetch it again.
  */
 async function saveOriginal(abs: string, bytes: Buffer, sha256: string): Promise<void> {
   const tmp = `${abs}.${randomUUID()}.part`;
   try {
-    await writeFile(tmp, bytes, { flag: 'wx' });
+    const fh = await open(tmp, 'wx');
+    try {
+      await fh.writeFile(bytes);
+      await fh.sync();
+    } finally {
+      await fh.close(); // before the temp file is removed: Windows cannot delete an open file
+    }
     try {
       await link(tmp, abs); // fails with EEXIST, never replaces
       return;
@@ -219,12 +230,16 @@ export class MediaProcessor {
       if (typeof e === 'object' && e !== null) beforeReading.add(e);
       throw e;
     }
-    if (job.revoked) {
+    // Read again, not only from the job: the message may have been deleted for everyone during the download (FR3a).
+    // A message that is gone counts as deleted.
+    const revoked = (): boolean => mediaJob(db, row.id)?.revoked ?? true;
+    if (job.revoked || revoked()) {
       finishMedia(db, row.id, { textKind: null, text: null, pageCount: null, note: 'revoked', at: this.#now() });
       return 'done';
     }
     // The original is saved and hashed already: a DOCX's bytes may be moved to the parser, so nothing reads them after this.
-    const x = await this.#o.extract({ mediaId: row.id, kind: row.kind, mimeType: row.mimeType, fileName: row.fileName, forwarded: row.forwarded, bytes });
+    // The extractor asks `revoked` again just before a paid call, after the decode (FR3a).
+    const x = await this.#o.extract({ mediaId: row.id, kind: row.kind, mimeType: row.mimeType, fileName: row.fileName, forwarded: row.forwarded, bytes, revoked });
     finishMedia(db, row.id, { ...x, at: this.#now() });
     return 'done';
   }
@@ -260,8 +275,11 @@ export class MediaProcessor {
     const at = this.#now();
     const ids = { mediaId: row.id, clientId: row.clientId };
     if (e instanceof SpendCapReachedError) {
-      deferMedia(db, row.id, { errorCode: 'spend_cap', nextAttemptAt: new Date(Date.parse(at) + SPEND_RETRY_MS).toISOString(), attempts: row.attempts, at });
-      log.info(ids, 'spend cap: shared file waits');
+      // Final review FR3c: when only paid calls in flight hold the budget (or the guard closed at shutdown), the file is
+      // read within minutes, so it waits as spend_busy. mediaStats counts only spend_cap as waiting for midnight.
+      const errorCode = e.busy ? SPEND_BUSY : 'spend_cap';
+      deferMedia(db, row.id, { errorCode, nextAttemptAt: new Date(Date.parse(at) + SPEND_RETRY_MS).toISOString(), attempts: row.attempts, at });
+      log.info(ids, e.busy ? 'paid calls in flight hold the budget: shared file waits' : 'spend cap: shared file waits');
       return 'deferred';
     }
     if (e instanceof MediaUnavailableError) {

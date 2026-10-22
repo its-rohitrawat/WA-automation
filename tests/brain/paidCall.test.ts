@@ -38,6 +38,22 @@ describe('withReservation', () => {
     expect(call).not.toHaveBeenCalled();
   });
 
+  // Final review FR3c: the media processor defers such a file as spend_busy, not spend_cap.
+  it('says whether only holds of calls in flight, not the cap itself, kept the call from its budget', async () => {
+    const { spend } = setup(1);
+    const call = vi.fn(ok(0.01));
+    const hold = spend.reserve(0.5)!;
+    const busy = (await withReservation(spend, 0.6, 'media 7', call, MEDIA_ATTEMPTS).catch((e: unknown) => e)) as SpendCapReachedError;
+    expect(busy).toBeInstanceOf(SpendCapReachedError);
+    expect(busy.busy).toBe(true);
+    spend.settle(hold, 'ai', 0.5, 'media 6');
+    const capped = (await withReservation(spend, 0.6, 'media 7', call, MEDIA_ATTEMPTS).catch((e: unknown) => e)) as SpendCapReachedError;
+    expect(capped).toBeInstanceOf(SpendCapReachedError);
+    expect(capped.busy).toBe(false);
+    expect(call).not.toHaveBeenCalled();
+    expect(new SpendCapReachedError().busy).toBe(false);
+  });
+
   it('books what a refusal or an invalid output cost', async () => {
     const { spend, rows } = setup();
     await expect(withReservation(spend, 0.1, 'media 7', async () => { throw new AiRefusalError('cyber', FAKE_USAGE, 0.004); }, MEDIA_ATTEMPTS)).rejects.toBeInstanceOf(AiRefusalError);
