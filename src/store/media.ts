@@ -298,11 +298,10 @@ export function markUploaded(db: Db, id: number, driveFileId: string): void {
   db.prepare('UPDATE media SET drive_file_id = ?, drive_next_at = NULL WHERE id = ?').run(driveFileId, id);
 }
 
-/** failed: stop trying until the next service start. countAttempt false: a sign-in problem, not the file's fault. */
-export function markUploadFailed(db: Db, id: number, f: { failed: boolean; nextAt: string | null; countAttempt: boolean }): void {
-  db.prepare('UPDATE media SET drive_attempts = drive_attempts + @inc, drive_failed = @failed, drive_next_at = @nextAt WHERE id = @id').run({
+/** One failed upload try: counts the attempt. failed: stop trying until the next service start. */
+export function markUploadFailed(db: Db, id: number, f: { failed: boolean; nextAt: string | null }): void {
+  db.prepare('UPDATE media SET drive_attempts = drive_attempts + 1, drive_failed = @failed, drive_next_at = @nextAt WHERE id = @id').run({
     id,
-    inc: f.countAttempt ? 1 : 0,
     failed: f.failed ? 1 : 0,
     nextAt: f.nextAt,
   });

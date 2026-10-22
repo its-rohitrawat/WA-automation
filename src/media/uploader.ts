@@ -132,7 +132,7 @@ export class DriveFileUploader {
           const failed = (e as NodeJS.ErrnoException).code === 'ENOENT' || attempts >= UPLOAD_MAX_ATTEMPTS;
           log.warn({ mediaId: c.id, clientId: c.clientId, step: 'upload', attempts, err: e }, 'file upload to Drive failed');
           if (!this.#save(c.id, c.clientId, 'save_failure', () =>
-            markUploadFailed(db, c.id, { failed, nextAt: failed ? null : new Date(now + retryMs(attempts)).toISOString(), countAttempt: true }))) break;
+            markUploadFailed(db, c.id, { failed, nextAt: failed ? null : new Date(now + retryMs(attempts)).toISOString() }))) break;
           continue;
         }
         if (!this.#save(c.id, c.clientId, 'save_id', () => markUploaded(db, c.id, fileId))) {
