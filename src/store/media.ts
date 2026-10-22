@@ -254,6 +254,13 @@ export interface UploadCandidate {
   driveAttempts: number;
 }
 
+/** The rows uploadCandidates returns, shared with isUploadCandidate so the two never disagree. Its one parameter is now. */
+const UPLOAD_CANDIDATES_FROM = `FROM media m JOIN messages msg ON msg.id = m.message_id JOIN clients c ON c.id = m.client_id
+      JOIN people p ON p.client_id = m.client_id AND p.jid = msg.sender_jid
+      WHERE m.local_path IS NOT NULL AND m.drive_file_id IS NULL AND m.drive_failed = 0
+        AND (m.drive_next_at IS NULL OR m.drive_next_at <= ?)
+        AND m.kind IN ('image', 'document') AND msg.revoked = 0 AND msg.from_me = 0 AND p.role = 'client' AND c.active = 1`;
+
 /**
  * Saved images and documents from people whose role is 'client', not yet in Drive and due for an attempt.
  * Never the founder's own messages, messages deleted for everyone, or inactive clients.
@@ -262,13 +269,14 @@ export function uploadCandidates(db: Db, nowIso: string, limit: number): UploadC
   return db
     .prepare(`SELECT m.id, m.client_id AS clientId, c.name AS clientName, m.kind, m.mime_type AS mimeType, m.file_name AS fileName,
         m.local_path AS localPath, msg.ts, m.drive_attempts AS driveAttempts
-      FROM media m JOIN messages msg ON msg.id = m.message_id JOIN clients c ON c.id = m.client_id
-      JOIN people p ON p.client_id = m.client_id AND p.jid = msg.sender_jid
-      WHERE m.local_path IS NOT NULL AND m.drive_file_id IS NULL AND m.drive_failed = 0
-        AND (m.drive_next_at IS NULL OR m.drive_next_at <= ?)
-        AND m.kind IN ('image', 'document') AND msg.revoked = 0 AND msg.from_me = 0 AND p.role = 'client' AND c.active = 1
+      ${UPLOAD_CANDIDATES_FROM}
       ORDER BY m.id LIMIT ?`)
     .all(nowIso, limit) as UploadCandidate[];
+}
+
+/** Whether one file is still an upload candidate: checked again just before it is uploaded, since a pass can take minutes. */
+export function isUploadCandidate(db: Db, mediaId: number, nowIso: string): boolean {
+  return db.prepare(`SELECT 1 ${UPLOAD_CANDIDATES_FROM} AND m.id = ?`).get(nowIso, mediaId) !== undefined;
 }
 
 export function markUploaded(db: Db, id: number, driveFileId: string): void {

@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { DriveNotFoundError, isAuthFailure, type DriveApi } from '../output/drive.ts';
 import type { Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
-import { markUploaded, markUploadFailed, uploadCandidates, type UploadCandidate } from '../store/media.ts';
+import { isUploadCandidate, markUploaded, markUploadFailed, uploadCandidates, type UploadCandidate } from '../store/media.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { displayName } from './labels.ts';
@@ -106,8 +106,12 @@ export class DriveFileUploader {
       }
       const root = getKv(db, 'drive_root_id');
       if (!root) return; // the publisher creates the root folder on its first upload
-      for (const c of uploadCandidates(db, clock.now().toISOString(), this.#o.batchSize ?? 5)) {
+      const nowIso = clock.now().toISOString();
+      for (const c of uploadCandidates(db, nowIso, this.#o.batchSize ?? 5)) {
         if (this.#stopped) break;
+        // An upload can take minutes: the file may have been deleted for everyone, its sender may no longer be a
+        // client, or its client may be inactive by now. Such a file is skipped without counting an attempt.
+        if (!isUploadCandidate(db, c.id, nowIso)) continue;
         let fileId: string;
         try {
           const bytes = await readFile(join(dataDir, ...c.localPath.split('/')));

@@ -191,6 +191,27 @@ describe('DriveFileUploader', () => {
     expect(drive.created).toHaveLength(0);
   });
 
+  const OTHER = '919811111111@s.whatsapp.net';
+  it.each([
+    ['its message is deleted for everyone', (db: Db) => applyRevoke(db, 1, 'B')],
+    ['its sender is no longer marked client', (db: Db) => setRole(db, 1, OTHER, 'team', 'human')],
+    ['its client is made inactive', (db: Db) => db.prepare('UPDATE clients SET active = 0 WHERE id = 1').run()],
+  ])('checks each file again just before uploading it: skips a file when %s during the pass, counting no attempt', async (_, change) => {
+    const { db, dataDir, drive, up } = setup();
+    const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
+    const b = savedFile(db, dataDir, { waId: 'B', jid: OTHER, role: 'client' });
+    let release!: () => void;
+    drive.gate = new Promise<void>((r) => (release = r));
+    const running = up.run();
+    await vi.waitFor(() => expect(drive.createFileCalls).toBe(1)); // A is uploading; B was read as a candidate
+    change(db);
+    release();
+    await running;
+    expect(drive.created).toHaveLength(1);
+    expect(getMedia(db, a)!.driveFileId).toBe(drive.created[0]!.id);
+    expect(driveState(db, b)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null });
+  });
+
   it('waits until the publisher has created the root folder', async () => {
     const { db, dataDir, drive, up } = setup({ root: false });
     savedFile(db, dataDir, { waId: 'A', role: 'client' });
