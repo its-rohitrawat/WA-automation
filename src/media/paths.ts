@@ -62,8 +62,13 @@ export function extForMime(mime: string | null, kind: MediaKind): string {
 /**
  * Control and format characters (Unicode Cc and Cf): zero-width characters, direction marks, embeddings, overrides and
  * isolates (used to disguise names like "invoice\u202Efdp.exe"), and tag characters, which can hide text from a reader.
+ * Also U+FFFE and U+FFFF, which XML does not allow: one in a name would make the workbook unreadable.
+ * Also lone surrogates (Cs; with the u flag a well-formed pair is one character and never matches), which are half a
+ * character (T4-02).
+ * The zero-width non-joiner and joiner (U+200C, U+200D) are kept (T14-12): emoji sequences and some Indic spellings need
+ * them, and they cannot reorder text.
  */
-const INVISIBLE = /[\p{Cc}\p{Cf}]/gu;
+const INVISIBLE = /(?![\u200C\u200D])[\p{Cc}\p{Cf}\p{Cs}\uFFFE\uFFFF]/gu;
 
 const EDGE = /[.\s]/;
 
@@ -79,8 +84,11 @@ function trimDotsAndSpaces(s: string): string {
   return s.slice(start, end);
 }
 
+/** The most characters (code points) sanitizeFileName keeps by default. The workbook sizes Files received rows to fit it. */
+export const MAX_FILE_NAME_CHARS = 120;
+
 /** A sender's file name made safe to show in the workbook and to use as a Drive name. Null when nothing is left. */
-export function sanitizeFileName(name: string | null, maxLength = 120): string | null {
+export function sanitizeFileName(name: string | null, maxLength = MAX_FILE_NAME_CHARS): string | null {
   if (!name) return null;
   const cleaned = trimDotsAndSpaces(
     name

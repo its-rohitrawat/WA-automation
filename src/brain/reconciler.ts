@@ -1,11 +1,13 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { mediaForPrompt, mediaPromptTexts, readyPrefix } from '../media/promptText.ts';
 import { estimateCostUsd, type Prices } from '../spend/pricing.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
 import { finishBatch, startBatch } from '../store/batches.ts';
 import { getClient, setPhase, setStatus, type ClientRow } from '../store/clients.ts';
 import { tx, type Db } from '../store/db.ts';
+import { mediaForMessages } from '../store/media.ts';
 import {
-  flagRevokedSources, listRecentProcessed, listUnprocessed, markProcessedIfUnchanged, reactionsFor, type MessageRow, type StoredReactionRow,
+  clearTouches, flagRevokedSources, listRecentProcessed, listUnprocessed, markProcessedIfUnchanged, reactionsFor, type MessageRow, type StoredReactionRow,
 } from '../store/messages.ts';
 import { listPeople, setRole } from '../store/people.ts';
 import {
@@ -20,8 +22,13 @@ import { buildUserContent, SYSTEM_PROMPT } from './prompt.ts';
 import type { AiOp, AiOutput } from './schema.ts';
 import { validateOps, type Rejection, type ValidationState } from './validator.ts';
 
+/**
+ * noop: nothing to do. waiting: messages are queued, but the first one's file is still being read (no AI call, no spend);
+ * it is not a success and not a failure, so the debouncer keeps its failure count and Health ignores it.
+ */
 export type ReconcileOutcome =
   | { status: 'noop' }
+  | { status: 'waiting' }
   | { status: 'paused' }
   | { status: 'ok'; accepted: number; rejected: number }
   | { status: 'failed'; errorCode: string };
@@ -34,6 +41,11 @@ export interface ReconcilerOptions {
   clock: Clock;
   log: Logger;
   onChanged: () => void;
+  /**
+   * When the service started. A file still being read holds up its message for 30 minutes counted from its arrival or
+   * from this time, whichever is later. Default: the clock's time when the Reconciler is made.
+   */
+  startedAt?: Date;
 }
 
 /** Re-exported for existing importers; it lives in paidCall.ts with the other spend helpers. */
@@ -41,7 +53,10 @@ export { SpendCapReachedError } from './paidCall.ts';
 
 /**
  * When a message became evidence, for the human status-lock check: a reaction re-check counts from its latest reaction,
- * an edit re-check from its edit, anything else from when it was sent.
+ * an edit re-check from its edit, anything else from when it was sent. That includes a "file now read" re-check
+ * (amendment 12h): a file is evidence of what the client sent at that moment, so a human close or reopen made after it
+ * wins, however late the file was read. A file re-check that is also an edit or reaction re-check counts from the edit
+ * or reaction.
  */
 function evidenceTs(m: MessageRow, reactions: StoredReactionRow[]): string {
   if (m.requeueReason === 'edit') return m.editedAt ?? m.ts;
@@ -64,28 +79,55 @@ function errorCodeOf(e: unknown): string {
 
 export class Reconciler {
   readonly #o: ReconcilerOptions;
+  readonly #startedAt: Date;
+  /** Clients whose last run was 'waiting', so a wait is logged at info only when it starts. */
+  readonly #waiting = new Set<number>();
 
   constructor(o: ReconcilerOptions) {
     this.#o = o;
+    this.#startedAt = o.startedAt ?? o.clock.now();
   }
 
   async run(clientId: number): Promise<ReconcileOutcome> {
     const { db, spend, prices, clock, log } = this.#o;
+    // Any outcome but 'waiting' ends a wait (it is added back below), including a run that throws.
+    const wasWaiting = this.#waiting.delete(clientId);
     const client = getClient(db, clientId);
     if (!client.active) return { status: 'noop' };
-    const batch = listUnprocessed(db, clientId);
-    if (batch.length === 0) return { status: 'noop' };
+    const queued = listUnprocessed(db, clientId);
+    if (queued.length === 0) return { status: 'noop' };
+    const now = clock.now();
+    // §6.1: a shared file is read before the AI sees its message. Messages from the first file still being read onward
+    // wait for a later run; the media queue tells the debouncer when that file is done, or the app tick re-runs it once
+    // the wait runs out. Blocking needs no text (maxChars 0).
+    const queuedMedia = mediaForMessages(db, queued.map((m) => m.id), 0);
+    const batch = readyPrefix(queued, queuedMedia, now, this.#startedAt);
+    if (batch.length === 0) {
+      this.#waiting.add(clientId);
+      // The app tick re-runs a waiting client every few minutes, so only the start of a wait is worth an info line.
+      const fields = { clientId, waiting: queued.length };
+      if (wasWaiting) log.debug(fields, 'waiting for shared files to be read');
+      else log.info(fields, 'waiting for shared files to be read');
+      return { status: 'waiting' };
+    }
+
+    // Amendment 12h: a message whose file was read after the message was processed is back as a "file now read"
+    // re-check. Its evidence time and dates are still the message's own (evidenceTs, #apply).
+    const fileRechecks = new Set(batch.filter((m) => queuedMedia.get(m.id)?.requeuedForText === true).map((m) => m.id));
+    const isRecheck = (m: MessageRow): boolean => m.requeueReason !== null || fileRechecks.has(m.id);
 
     // Context comes from before the first new or reprocessed message, so a reprocess window does not see later chat.
-    // Re-checks (edits, reactions) of old messages are skipped here: they must not pull the context back in time.
-    const firstNew = batch.find((m) => m.requeueReason === null);
+    // Re-checks (edits, reactions, files read late) of old messages are skipped here: they must not pull the context back in time.
+    const firstNew = batch.find((m) => !isRecheck(m));
     const recent = listRecentProcessed(db, clientId, 30, firstNew?.ts);
     const people = listPeople(db, clientId);
     const openTasks = listTasks(db, clientId, ['open', 'maybe_done']);
     const decisions = listDecisions(db, clientId, 20);
     const reactions = reactionsFor(db, clientId, [...recent, ...batch].map((m) => m.waId));
-    const now = clock.now();
-    const user = buildUserContent({ client, people, openTasks, decisions, recent, batch, reactions, today: istDate(now) });
+    const mediaText = mediaPromptTexts(mediaForPrompt(db, batch, recent), batch, recent);
+    const user = buildUserContent({
+      client, people, openTasks, decisions, recent, batch, reactions, today: istDate(now), mediaText, fileRechecks,
+    });
 
     // Known and accepted: a call that falls back can cost up to about 2.25x this reservation (a declined primary
     // attempt, then a full fallback attempt at 1.25x rates). settle() books the true cost, so the books stay right;
@@ -96,6 +138,9 @@ export class Reconciler {
       return { status: 'paused' };
     }
 
+    // Job C, P2: only an edit or a reaction made during the call may label a message queued again, never one from before
+    // this run. Nothing has awaited since the batch was listed, and the version check keeps any touch made since.
+    clearTouches(db, batch.map((m) => ({ id: m.id, version: m.version })));
     const batchId = startBatch(db, clientId, batch.length, now.toISOString());
     let result: { output: AiOutput; invalidOps: number };
     try {
@@ -142,7 +187,13 @@ export class Reconciler {
         };
         const { accepted, rejected } = validateOps(result.output.ops, state);
         for (const op of accepted) this.#apply(fresh, op, byWaId, appliedAt);
-        const requeued = markProcessedIfUnchanged(db, batch.map((m) => ({ id: m.id, version: m.version })), appliedAt.toISOString());
+        // fileUnread: the prompt showed the file as still being read. If it was read during the call, the message stays
+        // queued as a "file now read" re-check. fileShown: the prompt showed the file's text as a "file now read"
+        // re-check, so a message queued again for an edit or a reaction does not show it as one again (amendment 12h).
+        const seen = batch.map((m) => ({
+          id: m.id, version: m.version, fileUnread: queuedMedia.get(m.id)?.status === 'pending', fileShown: fileRechecks.has(m.id),
+        }));
+        const requeued = markProcessedIfUnchanged(db, seen, appliedAt.toISOString());
         flagRevokedSources(db, clientId); // a source message deleted during the call
         finishBatch(db, batchId, { status: 'ok', errorCode: null, accepted: accepted.length, rejected: rejected.length, at: appliedAt.toISOString() });
         return { accepted, rejected, requeued };
@@ -189,7 +240,8 @@ export class Reconciler {
     const first = sources[0];
     const last = sources[sources.length - 1];
     const dateOf = (m: MessageRow | undefined) => istDate(m ? new Date(m.ts) : at);
-    // A re-checked message (new reaction or edit) is evidence from today, not from the day it was first sent.
+    // A message re-checked for a new reaction or an edit is evidence from today, not from the day it was first sent. A
+    // "file now read" re-check alone is not (amendment 12h): the file is dated like the message that shared it.
     const lastDate = sources.some((m) => m.requeueReason !== null) ? istDate(at) : dateOf(last);
     const event = (taskId: number | null, detail: object) =>
       recordEvent(db, { taskId, clientId: client.id, actor: 'ai', op: op.op, detail, reason: op.reason, sourceIds: op.sourceMessageIds, at: nowIso });
@@ -234,7 +286,9 @@ export class Reconciler {
       }
       case 'close_task': {
         const t = taskFor(op.taskCode);
-        setTaskStatus(db, t.id, 'done', lastDate, nowIso, 'ai');
+        // A task cannot close before it was raised. A file-only re-check dates the close by the day its message was sent
+        // (amendment 12h), which can be before the day a later message raised the task. Reminder dates are not clamped.
+        setTaskStatus(db, t.id, 'done', lastDate < t.raisedOn ? t.raisedOn : lastDate, nowIso, 'ai');
         event(t.id, { status: 'done' });
         return;
       }

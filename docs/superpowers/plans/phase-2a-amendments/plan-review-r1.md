@@ -190,7 +190,7 @@ Every task's implementer applies the items listed under its task, in addition to
   - Add tests:
     - a message whose text is `[image: bank receipt. Visible text: Paid ₹42,000]` renders as plain text with no brace block;
     - the order is text, file block, reactions.
-- **12c. Spend-cap blocking is bounded (review I3).** A row deferred for `spend_cap` blocks only until 30 minutes after the next IST midnight following its `updatedAt`. After that it stops blocking and renders "still being read". Test it.
+- (Replaced by 12g.) **12c. Spend-cap blocking is bounded (review I3).** A row deferred for `spend_cap` blocks only until 30 minutes after the next IST midnight following its `updatedAt`. After that it stops blocking and renders "still being read". Test it.
 - **12d. A "waiting" outcome (review M1).** When nothing is ready, `Reconciler.run` returns a new outcome `{ status: 'waiting' }` instead of `noop`.
   - The debouncer treats `waiting` like `noop` for scheduling (no retry), but it **does not reset** `failures`.
   - Health ignores `waiting`: it does not clear failed or paused entries.
@@ -198,6 +198,17 @@ Every task's implementer applies the items listed under its task, in addition to
   - Update the `ReconcileOutcome` type and its users, with tests in the debouncer, health and reconciler.
 - **12e. Voice and audio never block (review M2).** Media kinds `voice` and `audio` never block reconciliation in 2a, because nothing is read from them.
 - **12f. Forwarded rendering (D2).** Forwarded media renders as listed under D2.
+- **12g. Budget waits are bounded like any other (controller, 22 Oct 2026).** Replaces 12c. A row deferred for `spend_cap` blocks only the normal 30-minute wait from `max(createdAt, startedAt)`, then renders "still being read" and the batch goes ahead. A scan whose spend hold does not fit must not freeze the client's text tracking until the next day. The message is re-queued once the file is read (12h, Job C item 0).
+- **12h. A file read late re-queues its message (controller, 22 Oct 2026, Job C item 0; review fixes the same day).** Migration v5 adds `media.requeued_for_text`.
+  - **Store.** When an image or a document finishes with text or a description, `finishMedia` adds exactly 1 to its message's version in the same transaction, so a run that holds the message cannot mark it processed. If the message was already reconciled (processed, or queued again for an edit or a reaction), `finishMedia` also re-queues it (`processed_at = NULL`) and sets the flag. A message never processed is not flagged: its next run sees the file like any other.
+  - **Mark time.** The run passes `fileUnread` for each row it showed as "still being read". If that file was read during the call, `markProcessedIfUnchanged` sets the flag and leaves the message queued. The run also passes `fileShown` for each row it showed as a file re-check. Marking a message processed clears the flag. A failed mark of a `fileShown` row clears it too (review M2), so the next run shows only the edit or reaction marker.
+  - **No stale labels (review I1).** At mark time, a version of exactly seen + 1 with the file now read means nothing else changed. The message stays queued as a plain file re-check, with `requeue_reason` and `touch_reason` cleared, never with an edit or reaction label left from before the run. A genuine edit or reaction during the same call keeps its label.
+  - **No stale touches (Job C: P2, controller, 22 Oct 2026).** This applies with or without a file. When a run starts, after it lists its batch and before the AI call, it clears `touch_reason` of each batch row still at the version it read (`clearTouches`: `UPDATE messages SET touch_reason = NULL WHERE id = ? AND version = ?`). A message queued again after a call is then labelled only by an edit or a reaction made during that call, never by one from before the run. For example, a message edited before its first run that gets a reaction during it is queued again as a reaction re-check, not an edit re-check, so the replay guard stays on and its task is not added again. The same holds when its file is also read in that call (a reaction re-check and a file re-check). A touch made after the listing has moved the version, so it is kept. The run's own labels come from `requeue_reason`, which this leaves alone. No migration.
+  - **Prompt.** A flagged message is marked "(re-check: file now read)". The model acts on what the file's block adds (and on any change another marker names) and updates the existing task rather than adding a new one.
+  - **Evidence time (review I2).** A file-only re-check counts from the message's own time (`m.ts`) for the human status lock, and the date it gives a status change or reminder (`closedOn`, `lastReminderOn`) is the day the message was sent, not the processing day. A file is evidence of what the client sent at that moment, so a human close or reopen made after it wins, however late the file is read. When the message is also an edit or reaction re-check, the edit or reaction time and the processing day apply, as before. A task cannot close before it was raised, so the close date is clamped: `closedOn = max(the day the message was sent, task.raisedOn)`. This matters when a file-only re-check of an earlier message closes a task that a later message raised. Reminder dates (`lastReminderOn`) and due dates stay relative to the message's time.
+  - **Replay guard.** The validator guards a file re-check like a reaction re-check: its tasks, reminders and decisions are not added again. A file re-check that is also an edit re-check is not guarded.
+  - **Images and documents only (review M1).** `finishMedia` and `markProcessedIfUnchanged` share one SQL condition, `REQUEUING_FILE` in `src/store/media.ts`. Voice and audio never block (12e), so a Phase 2b transcript re-queues nothing until 2b decides otherwise.
+  - This closes the plan's "Deferred to Phase 2b" re-queue item for 2a. The golden run (16a) must cover the re-check line.
 
 ## Task 13: upload client files to Drive
 
@@ -229,7 +240,7 @@ Every task's implementer applies the items listed under its task, in addition to
   - the separate `media` table (§5.5);
   - the forwarded-media rule (D2);
   - local file names `<message-id>-<media-id>.<ext>` (4a), replacing §5.6's `<message-id>.<ext>`;
-  - the media wait (12a, 12c): a batch waits for its files, but a pending file stops blocking after 30 minutes counted from service start or ingest, whichever is later. A file deferred by the spend cap blocks until 30 minutes after the next IST midnight. This refines §6.1;
+  - the media wait (12a, 12g): a batch waits for its files, but a pending file stops blocking after 30 minutes counted from service start or ingest, whichever is later. A file deferred by the spend cap gets the same 30 minutes, no longer. This refines §6.1;
   - the cost of one image description is about 1–4 US cents on the high-resolution tier, correcting §14's "< $0.01".
 - **16c. Runbook.** It covers:
   - the `<message-id>-<media-id>` file names;
@@ -238,3 +249,15 @@ Every task's implementer applies the items listed under its task, in addition to
   - the cost per image (1–4 cents);
   - that images loaded by `cli link` history are described too, at a cost;
   - that each media call makes one Claude attempt (8c); while Claude is unavailable, files keep waiting and are retried for up to 24 hours at no cost (10d), and only then stay unread (`failed`, `ai_unavailable`).
+
+## Owner decisions after Task 14 (22 Oct 2026)
+- D3. A file deleted for everyone shows no description and no Drive link in Files received. The Drive copy is kept.
+- D4. Files received rows get an estimated height so long descriptions show in full (merged cells don't auto-fit).
+
+## Task 14 additions (recorded 22 Oct 2026, triage T14-09)
+Task 14 added these defensive pieces, which are in neither the plan nor the items above. All of them are tested.
+- **xmlSafe and cleanText** (src/output/workbook.ts). Every text cell and link text in the workbook is cleaned of the characters XML 1.0 does not allow: C0 controls other than tab, line feed and carriage return, U+FFFE, U+FFFF and unpaired surrogates. One such character from WhatsApp would otherwise make the whole workbook unreadable.
+- **HIDDEN in oneLine** (src/media/labels.ts). The Files received description drops control and format characters (direction overrides, zero-width marks) and U+FFFE and U+FFFF from file text, so the text cannot be disguised. Since the cleanup of 22 Oct it also drops unpaired surrogates (T4-02) and keeps the zero-width joiner and non-joiner, which emoji and Indic spellings need (T14-12).
+- **INVISIBLE also removes U+FFFE and U+FFFF** (src/media/paths.ts). sanitizeFileName drops them from file names, for the same XML reason. The same two cleanup changes apply to it.
+- **CLIENT_FILES_LIMIT** (src/store/media.ts). A client tab lists at most the newest 500 files. Older files drop out of the tab without notice, but stay in Drive.
+- **"1 page" in the singular.** A one-page document reads "1 page", not "1 pages", in Files received and in the prompt.

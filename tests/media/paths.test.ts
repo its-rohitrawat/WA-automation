@@ -103,11 +103,31 @@ describe('sanitizeFileName', () => {
     expect(sanitizeFileName('  ..hidden.pdf.. ')).toBe('hidden.pdf');
   });
 
-  it('also removes the other invisible format characters: direction marks, joiners and tag characters', () => {
+  it('also removes the other invisible format characters: direction marks, the word joiner and tag characters', () => {
     expect(sanitizeFileName('bill\u061C\u2060\u00AD.pdf')).toBe('bill.pdf');
     // Tag characters spell hidden ASCII ("HI" here) that a reader cannot see.
     expect(sanitizeFileName('bill\u{E0001}\u{E0048}\u{E0049}\u{E007F}.pdf')).toBe('bill.pdf');
     expect(sanitizeFileName('\u200B\u2066\uFEFF')).toBeNull();
+  });
+
+  it('removes U+FFFE and U+FFFF, which XML does not allow in the workbook', () => {
+    expect(sanitizeFileName('a\uFFFFb\uFFFE.pdf')).toBe('ab.pdf');
+    expect(sanitizeFileName('\uFFFF')).toBeNull();
+  });
+
+  it('removes lone surrogates, which are half a character, and keeps emoji whole (T4-02)', () => {
+    expect(sanitizeFileName('a\uD800b.pdf')).toBe('ab.pdf');
+    expect(sanitizeFileName('a\uDC00b\uD83D.pdf')).toBe('ab.pdf');
+    expect(sanitizeFileName('site \u{1F3E0} plan.pdf')).toBe('site \u{1F3E0} plan.pdf');
+    expect(sanitizeFileName('\uD800')).toBeNull();
+  });
+
+  it('keeps the zero-width joiner and non-joiner, which emoji and Indic spellings need, and still removes overrides (T14-12)', () => {
+    const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}'; // one family emoji, joined by ZWJ
+    expect(sanitizeFileName(`${family}.jpg`)).toBe(`${family}.jpg`);
+    // Devanagari "ksha" written with a ZWJ (half form) and with a ZWNJ (visible virama).
+    expect(sanitizeFileName('\u0915\u094D\u200D\u0937 \u0915\u094D\u200C\u0937.pdf')).toBe('\u0915\u094D\u200D\u0937 \u0915\u094D\u200C\u0937.pdf');
+    expect(sanitizeFileName('invoice\u200D\u202Efdp.exe')).toBe('invoice\u200Dfdp.exe');
   });
 
   it('turns line separators, no-break spaces and runs of spaces into one plain space', () => {

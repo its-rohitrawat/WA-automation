@@ -1,7 +1,8 @@
 import ExcelJS from 'exceljs';
+import { MAX_FILE_NAME_CHARS } from '../media/paths.ts';
 import type { TaskRow } from '../store/tasks.ts';
 import { daysBetween, displayDate, istDateTime, istShortDate, istTime } from '../util/time.ts';
-import { isOverdue, type ClientView, type TrackerView } from './view.ts';
+import { isOverdue, type ClientView, type FileView, type TrackerView } from './view.ts';
 
 export const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
@@ -93,6 +94,71 @@ function addTaskTable(ws: ExcelJS.Worksheet, title: string, tasks: TaskRow[], to
   ws.addRow([]);
 }
 
+const DRIVE_ID = /^[A-Za-z0-9_-]{1,200}$/;
+/** Client tab column widths, A to N. Excel counts a width in characters: the width of the digit 0 in the default 11 pt Calibri. */
+const CLIENT_COLUMN_WIDTHS = [14, 38, 13, 10, 14, 16, 10, 10, 10, 32, 16, 22, 44, 11];
+/**
+ * Files received columns. Column D alone is narrow (it is the tasks' Priority column), so the description spans D to L and long
+ * descriptions stay a few lines tall instead of a very tall row. The Drive link is in M.
+ */
+const FILE_DESC_FIRST = 4;
+const FILE_DESC_LAST = 12;
+const FILE_LINK = 13;
+/** Excel's normal row height for 11 pt Calibri, in points: one line of text. */
+const LINE_HEIGHT = 15;
+/**
+ * How much of a column's width wrapped text fills, in percent. A width counts digit-sized characters, but capitals, ₹ and emoji
+ * are wider and Excel wraps at spaces, so a line holds fewer. 85% keeps the estimate on the tall side: a row a little too tall
+ * is harmless, one too short hides text.
+ */
+const WRAP_FILL_PERCENT = 85;
+/** Characters that fit on one wrapped line across columns first to last (1-based, inclusive). */
+function lineChars(first: number, last: number): number {
+  const width = CLIENT_COLUMN_WIDTHS.slice(first - 1, last).reduce((sum, w) => sum + w, 0);
+  return Math.floor((width * WRAP_FILL_PERCENT) / 100);
+}
+/** Sent by (B, width 38): 32 characters a line. File name (C, width 13): 11. Description (D to L merged, width 140 in all): 119. */
+const FILE_LINE_CHARS = { sentBy: lineChars(2, 2), name: lineChars(3, 3), description: lineChars(FILE_DESC_FIRST, FILE_DESC_LAST) };
+/**
+ * A cap so one odd row cannot take over the tab: as many lines as the longest file name sanitizeFileName keeps (120
+ * characters, 11 lines of 11 in column C), so its end, often the extension, is never hidden (T14-14). The longest
+ * description, about 300 characters, needs 3 lines.
+ */
+const MAX_FILE_LINES = Math.ceil(MAX_FILE_NAME_CHARS / FILE_LINE_CHARS.name);
+
+/**
+ * Height in points of a Files received row (owner decision D4). Excel and Google Sheets do not auto-fit a row to a merged cell,
+ * so the row gets 15 points per line of its longest wrapped text: the description across D to L, or the sender or file name in
+ * its own column. A row that fits on one line keeps the normal 15 points.
+ */
+export function fileRowHeight(f: Pick<FileView, 'sentBy' | 'name' | 'description'>): number {
+  const lines = (s: string, perLine: number) => Math.ceil([...s].length / perLine);
+  const n = Math.max(lines(f.sentBy, FILE_LINE_CHARS.sentBy), lines(f.name, FILE_LINE_CHARS.name), lines(f.description, FILE_LINE_CHARS.description), 1);
+  return LINE_HEIGHT * Math.min(n, MAX_FILE_LINES);
+}
+
+function addFilesTable(ws: ExcelJS.Worksheet, files: FileView[]): void {
+  sectionTitle(ws, 'Files received');
+  const header = ws.addRow(['Date', 'Sent by', 'File name', 'Description']);
+  header.getCell(FILE_LINK).value = 'Drive link';
+  ws.mergeCells(header.number, FILE_DESC_FIRST, header.number, FILE_DESC_LAST);
+  styleHeader(header);
+  if (files.length === 0) noneRow(ws);
+  for (const f of files) {
+    const row = ws.addRow([isoToDate(f.date), f.sentBy, f.name, f.description]);
+    ws.mergeCells(row.number, FILE_DESC_FIRST, row.number, FILE_DESC_LAST);
+    row.height = fileRowHeight(f);
+    formatDates(row);
+    row.alignment = { wrapText: true, vertical: 'top', horizontal: 'left' };
+    if (f.driveFileId && DRIVE_ID.test(f.driveFileId)) {
+      const link = row.getCell(FILE_LINK);
+      link.value = { text: 'Open', hyperlink: `https://drive.google.com/file/d/${f.driveFileId}/view` };
+      link.font = { color: { argb: 'FF0563C1' }, underline: true };
+    }
+  }
+  ws.addRow([]);
+}
+
 function addOverview(wb: ExcelJS.Workbook, view: TrackerView): void {
   const ws = wb.addWorksheet('Overview', { views: [{ state: 'frozen', ySplit: 3 }] });
   ws.columns = [{ width: 30 }, { width: 14 }, { width: 9 }, { width: 13 }, { width: 16 }, { width: 10 }, { width: 14 }, { width: 60 }, { width: 14 }, { width: 18 }];
@@ -127,7 +193,7 @@ function addOverview(wb: ExcelJS.Workbook, view: TrackerView): void {
 
 function addClientSheet(wb: ExcelJS.Workbook, c: ClientView, today: string): void {
   const ws = wb.addWorksheet(c.sheetName, { views: [{ state: 'frozen', ySplit: 1 }] });
-  ws.columns = [{ width: 14 }, { width: 38 }, { width: 13 }, { width: 10 }, { width: 14 }, { width: 16 }, { width: 10 }, { width: 10 }, { width: 10 }, { width: 32 }, { width: 16 }, { width: 22 }, { width: 44 }, { width: 11 }];
+  ws.columns = CLIENT_COLUMN_WIDTHS.map((width) => ({ width }));
   ws.addRow([`${c.client.name}${c.client.active ? '' : ' (inactive)'} (${c.client.code})`]).font = { bold: true, size: 16 };
   ws.addRow([]);
 
@@ -158,6 +224,7 @@ function addClientSheet(wb: ExcelJS.Workbook, c: ClientView, today: string): voi
   }
   ws.addRow([]);
 
+  addFilesTable(ws, c.files);
   addTaskTable(ws, 'Done', c.done, today, { closedOn: true });
 
   sectionTitle(ws, 'People');
@@ -166,11 +233,44 @@ function addClientSheet(wb: ExcelJS.Workbook, c: ClientView, today: string): voi
   for (const p of c.people) ws.addRow([p.name ?? '', p.number ?? '', cap(p.role), p.roleSetBy === 'system' ? 'Founder' : p.roleSetBy === 'human' ? 'Human' : 'AI']);
 }
 
+/**
+ * Characters XML 1.0 does not allow: C0 controls other than tab, line feed and carriage return, U+FFFE, U+FFFF and unpaired
+ * surrogates. ExcelJS drops the controls but writes U+FFFE and U+FFFF as they are, and then neither Excel nor ExcelJS can
+ * open the file. Sender names, file names and file text come from WhatsApp, so one such character would break the whole
+ * workbook. Those two are the ones that really break it. Unpaired surrogates are removed only as a precaution (T14-13):
+ * JSZip in Node writes one as U+FFFD, which is valid XML, and text read back from SQLite never holds one anyway.
+ */
+const XML_UNSAFE = /[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+export function xmlSafe(s: string): string {
+  return s.replace(XML_UNSAFE, '');
+}
+
+/** Cleans every text cell (and link text) in the workbook with xmlSafe. */
+function cleanText(wb: ExcelJS.Workbook): void {
+  wb.eachSheet((ws) =>
+    ws.eachRow((row) =>
+      row.eachCell((c) => {
+        if (c.type === ExcelJS.ValueType.String) {
+          const v = c.value as string;
+          const safe = xmlSafe(v);
+          if (safe !== v) c.value = safe;
+        } else if (c.type === ExcelJS.ValueType.Hyperlink) {
+          const v = c.value as ExcelJS.CellHyperlinkValue;
+          const safe = xmlSafe(v.text);
+          if (safe !== v.text) c.value = { ...v, text: safe };
+        }
+      }),
+    ),
+  );
+}
+
 export async function buildWorkbook(view: TrackerView): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
   wb.creator = 'WA Agent';
   wb.created = view.generatedAt;
   addOverview(wb, view);
   for (const c of view.clients) addClientSheet(wb, c, view.today);
+  cleanText(wb);
   return Buffer.from((await wb.xlsx.writeBuffer()) as unknown as ArrayBuffer);
 }

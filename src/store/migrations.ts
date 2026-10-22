@@ -187,4 +187,9 @@ CREATE INDEX media_due ON media (status, next_attempt_at);
 CREATE INDEX media_client ON media (client_id);
 `,
   },
+  {
+    // Amendment 12h: 1 while a message is queued again because its file was read after the message was processed.
+    version: 5,
+    sql: 'ALTER TABLE media ADD COLUMN requeued_for_text INTEGER NOT NULL DEFAULT 0;',
+  },
 ];

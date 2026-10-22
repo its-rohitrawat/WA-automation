@@ -1,4 +1,5 @@
 import type { Db } from './db.ts';
+import { REQUEUING_FILE } from './media.ts';
 
 export interface NewMessage {
   waId: string;
@@ -83,6 +84,12 @@ export function insertMessage(db: Db, m: NewMessage): boolean {
   return r.changes === 1;
 }
 
+/**
+ * True for a message queued again because its file was read after the message was processed (amendment 12h). Such a
+ * message was processed before even though processed_at and requeue_reason are both empty.
+ */
+const QUEUED_FOR_FILE = 'EXISTS (SELECT 1 FROM media WHERE media.message_id = messages.id AND media.requeued_for_text = 1)';
+
 /** Keeps the previous text in message_edits and queues the message for the AI again. */
 export function applyEdit(db: Db, clientId: number, waId: string, newText: string, editedAt: string): boolean {
   const row = db.prepare('SELECT id, text FROM messages WHERE client_id = ? AND wa_id = ?').get(clientId, waId) as
@@ -92,7 +99,7 @@ export function applyEdit(db: Db, clientId: number, waId: string, newText: strin
   db.transaction(() => {
     db.prepare('INSERT INTO message_edits (message_id, previous_text, edited_at) VALUES (?, ?, ?)').run(row.id, row.text, editedAt);
     db.prepare(`UPDATE messages SET text = ?, edited_at = ?,
-      requeue_reason = CASE WHEN processed_at IS NOT NULL OR requeue_reason = 'reaction' THEN 'edit' ELSE requeue_reason END,
+      requeue_reason = CASE WHEN processed_at IS NOT NULL OR requeue_reason = 'reaction' OR ${QUEUED_FOR_FILE} THEN 'edit' ELSE requeue_reason END,
       processed_at = NULL, version = version + 1, touch_reason = 'edit' WHERE id = ?`).run(newText, editedAt, row.id);
   }).immediate();
   return true;
@@ -117,7 +124,8 @@ export function upsertReaction(db: Db, r: { clientId: number; targetWaId: string
       db.prepare(`UPDATE messages SET version = version + 1, touch_reason = CASE WHEN touch_reason = 'edit' THEN 'edit' ELSE 'reaction' END
         WHERE client_id = ? AND wa_id = ? AND revoked = 0`).run(r.clientId, r.targetWaId);
       db.prepare(`UPDATE messages SET requeue_reason = 'reaction', processed_at = NULL
-        WHERE client_id = ? AND wa_id = ? AND processed_at IS NOT NULL AND revoked = 0`).run(r.clientId, r.targetWaId);
+        WHERE client_id = ? AND wa_id = ? AND revoked = 0 AND (processed_at IS NOT NULL OR (requeue_reason IS NULL AND ${QUEUED_FOR_FILE}))`)
+        .run(r.clientId, r.targetWaId);
     }
   }).immediate();
 }
@@ -147,19 +155,56 @@ export function markProcessed(db: Db, ids: number[], at: string): void {
 }
 
 /**
+ * Job C, P2: a run calls this when it starts, after listing its batch and before the AI call. It clears touch_reason of
+ * each row still at the version the run read, so markProcessedIfUnchanged labels a message queued again only by an edit
+ * or a reaction made during the call, never by a touch from before the run (an edit before a message's first run,
+ * followed by a reaction during it, is a reaction re-check, and the replay guard stays on). A row touched after the
+ * listing has a higher version and keeps its touch. requeue_reason, the label the run shows, is left alone.
+ */
+export function clearTouches(db: Db, rows: { id: number; version: number }[]): void {
+  const clear = db.prepare('UPDATE messages SET touch_reason = NULL WHERE id = @id AND version = @version AND touch_reason IS NOT NULL');
+  db.transaction(() => {
+    for (const r of rows) clear.run({ id: r.id, version: r.version });
+  }).immediate();
+}
+
+/**
  * Marks messages processed only if they are still at the version the run read. A row that changed in the meantime
  * stays queued with a re-check marker ('edit' or 'reaction'), because the operations from its old version were applied.
- * Returns how many rows were skipped. Runs inside the caller's transaction.
+ * The marker is the touch made during the call (the run cleared older ones when it started, clearTouches), or else the
+ * marker the run showed. Returns how many rows were skipped. Runs inside the caller's transaction.
+ *
+ * Amendment 12h: marking a message processed clears its file's requeued_for_text.
+ * - fileUnread: the run showed the message's file as still being read. If that file was read during the call
+ *   (finishMedia moved the version), the message stays queued with the flag set, so the next run shows the text as a
+ *   "file now read" re-check. finishMedia adds exactly 1 to the version, so a version one past the run's means nothing
+ *   else changed: the message is then a plain file re-check, and an edit or reaction label left from before the run
+ *   (touch_reason, requeue_reason) is cleared rather than shown again (review I1).
+ * - fileShown: the run showed the file's text as a "file now read" re-check. If the mark fails (an edit or a reaction
+ *   during the call), the flag is cleared too: the next run needs only the edit or reaction marker (review M2).
  */
-export function markProcessedIfUnchanged(db: Db, rows: { id: number; version: number }[], at: string): number {
+export function markProcessedIfUnchanged(
+  db: Db,
+  rows: { id: number; version: number; fileUnread?: boolean; fileShown?: boolean }[],
+  at: string,
+): number {
   const mark = db.prepare('UPDATE messages SET processed_at = @at, requeue_reason = NULL, touch_reason = NULL WHERE id = @id AND version = @version');
+  const clearFlag = db.prepare('UPDATE media SET requeued_for_text = 0 WHERE message_id = ? AND requeued_for_text = 1');
   const requeue = db.prepare('UPDATE messages SET requeue_reason = COALESCE(touch_reason, requeue_reason) WHERE id = ?');
+  // The same test as finishMedia's: an image or document read with a description or text, of a message not deleted for everyone.
+  const flagReadFile = db.prepare(`UPDATE media SET requeued_for_text = 1
+    WHERE message_id = ? AND ${REQUEUING_FILE} AND message_id IN (SELECT id FROM messages WHERE revoked = 0)`);
+  const fileOnly = db.prepare('UPDATE messages SET requeue_reason = NULL, touch_reason = NULL WHERE id = @id AND version = @version + 1');
   let skipped = 0;
   for (const r of rows) {
-    if (mark.run({ at, id: r.id, version: r.version }).changes === 0) {
-      requeue.run(r.id);
-      skipped++;
+    if (mark.run({ at, id: r.id, version: r.version }).changes > 0) {
+      clearFlag.run(r.id);
+      continue;
     }
+    skipped++;
+    if (r.fileUnread && flagReadFile.run(r.id).changes > 0 && fileOnly.run({ id: r.id, version: r.version }).changes > 0) continue;
+    requeue.run(r.id);
+    if (r.fileShown) clearFlag.run(r.id);
   }
   return skipped;
 }

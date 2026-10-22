@@ -75,6 +75,23 @@ describe('Health', () => {
     expect(h.line().ok).toBe(true);
   });
 
+  it('ignores a waiting run: it is not an update, and failed or paused groups stay (12d)', () => {
+    const { db, h } = setup();
+    h.setWhatsApp(status('open'));
+    h.recordOutcome(1, { status: 'waiting' });
+    expect(h.line()).toEqual({ ok: true, text: '✅ Connected · waiting for new messages' });
+    h.recordOutcome(1, { status: 'failed', errorCode: 'refusal' });
+    h.recordOutcome(1, { status: 'waiting' });
+    expect(h.line().text).toBe('⚠️ 1 group waiting (AI error)');
+    expect(readHealthSnapshot(db)!.failed).toEqual([{ clientId: 1, errorCode: 'refusal' }]);
+    h.recordOutcome(2, { status: 'paused' });
+    h.recordOutcome(2, { status: 'waiting' });
+    expect(h.line().text).toBe('⚠️ Daily spend cap reached. Paused until midnight IST');
+    h.recordOutcome(2, { status: 'noop' });
+    h.recordOutcome(1, { status: 'noop' });
+    expect(h.line()).toEqual({ ok: true, text: '✅ Connected · waiting for new messages' });
+  });
+
   it('shows an expired Google sign-in straight away', () => {
     const { h } = setup();
     h.setWhatsApp(status('open'));

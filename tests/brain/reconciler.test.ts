@@ -8,6 +8,7 @@ import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { latestBatches } from '../../src/store/batches.ts';
 import { getClient } from '../../src/store/clients.ts';
 import type { Db } from '../../src/store/db.ts';
+import { finishMedia, insertMedia, messageRowId } from '../../src/store/media.ts';
 import { applyEdit, applyRevoke, insertMessage, listUnprocessed, markProcessed, upsertReaction } from '../../src/store/messages.ts';
 import { listPeople, setRole, upsertPerson } from '../../src/store/people.ts';
 import { createTask, getTaskByCode, listDecisions, listTasks, setTaskStatus, updateTaskFields } from '../../src/store/tasks.ts';
@@ -351,6 +352,100 @@ describe('Reconciler', () => {
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
       expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done' });
     });
+
+    /** A shared image of m1, still pending. */
+    const fileOf = (db: Db): number => insertMedia(db, {
+      messageId: messageRowId(db, 1, 'm1')!, clientId: 1, kind: 'image', status: 'pending', mimeType: 'image/jpeg', fileName: null, fileSize: 1000, seconds: null,
+      forwarded: false, refEnc: null, errorCode: null, createdAt: '2026-10-12T05:00:00.000Z',
+    });
+    const readAt = (db: Db, id: number, at: string) => finishMedia(db, id, { textKind: 'description', text: 'Banner v3, final colours', pageCount: null, note: null, at });
+
+    it('rejects a close backed by a file read after the human reopened the task, when the message was sent before (12h, I2)', async () => {
+      const { db, r } = setup([{ ops: [close()] }]);
+      reopenedWithOldDelivery(db);
+      readAt(db, fileOf(db), '2026-10-19T07:00:00.000Z');
+      expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: null })]);
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open' });
+    });
+
+    it('accepts a close backed by a file sent after the human reopened the task and read later, closed on the day it was sent (12h, I2)', async () => {
+      const { db, r } = setup([{ ops: [close()] }]);
+      banner(db);
+      closeTask(db, 'SHA-001', new Date('2026-10-17T05:00:00Z'));
+      reopenTask(db, 'SHA-001', new Date('2026-10-17T06:00:00Z'));
+      store(db, 'm1', 'Banner v3 attached', '2026-10-18T05:00:00.000Z');
+      const id = fileOf(db);
+      markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-18T06:00:00.000Z'); // the file was still being read
+      readAt(db, id, '2026-10-19T07:00:00.000Z');
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-18' });
+    });
+
+    it('closes on the day the message was sent, not the processing date, when its only re-check is a file read late (12h, I2)', async () => {
+      const { db, r } = setup([{ ops: [close()] }]);
+      banner(db);
+      store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
+      const id = fileOf(db);
+      markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-12T06:00:00.000Z');
+      readAt(db, id, '2026-10-19T07:00:00.000Z');
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-12' });
+    });
+
+    it('never closes a task before the day it was raised: a file re-check of an earlier message closes a task raised later on its raised day (12h)', async () => {
+      const { db, r } = setup([{ ops: [close()] }]);
+      store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
+      const id = fileOf(db);
+      store(db, 'm2', 'Homepage banner bhi chahiye', '2026-10-15T05:00:00.000Z');
+      markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-15T06:00:00.000Z'); // m1's file was still being read
+      createTask(db, { clientId: 1, side: 'us', title: 'Homepage banner', category: 'design', priority: 'high', assignedTo: null, askedBy: null, raisedOn: '2026-10-15',
+        deadline: null, latestProgress: null, sourceQuote: null, sourceDate: '2026-10-15', sourceWaId: 'm2', origin: 'whatsapp' }, NOW); // raised by the later m2
+      readAt(db, id, '2026-10-19T07:00:00.000Z');
+      expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: null })]);
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', raisedOn: '2026-10-15', closedOn: '2026-10-15' });
+    });
+
+    it('still rejects a close backed by a file read before the human reopened the task (12h)', async () => {
+      const { db, r } = setup([{ ops: [close()] }]);
+      banner(db);
+      store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
+      const id = fileOf(db);
+      markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-12T06:00:00.000Z');
+      readAt(db, id, '2026-10-19T04:00:00.000Z');
+      closeTask(db, 'SHA-001', new Date('2026-10-19T05:00:00Z'));
+      reopenTask(db, 'SHA-001', new Date('2026-10-19T06:00:00Z'));
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open' });
+    });
+
+    it.each([
+      { fileRead: '2026-10-19T05:30:00.000Z', reacted: '2026-10-19T07:00:00.000Z', accepted: 1 },
+      { fileRead: '2026-10-19T07:00:00.000Z', reacted: '2026-10-19T05:30:00.000Z', accepted: 0 },
+      { fileRead: '2026-10-19T05:30:00.000Z', reacted: '2026-10-19T05:45:00.000Z', accepted: 0 },
+    ])('a file re-check that also got a reaction counts from the reaction, never from the file read (file $fileRead, reaction $reacted) (12h, I2)', async ({ fileRead, reacted, accepted }) => {
+      const { db, r } = setup([{ ops: [close()] }]);
+      reopenedWithOldDelivery(db); // reopened by a human at 06:00Z
+      readAt(db, fileOf(db), fileRead);
+      upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '✅', ts: reacted });
+      expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: 'reaction' })]);
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted, rejected: 1 - accepted });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject(accepted ? { status: 'done', closedOn: '2026-10-19' } : { status: 'open' });
+    });
+
+    it.each([
+      { fileRead: '2026-10-19T05:30:00.000Z', edited: '2026-10-19T07:00:00.000Z', accepted: 1 },
+      { fileRead: '2026-10-19T07:00:00.000Z', edited: '2026-10-19T05:30:00.000Z', accepted: 0 },
+    ])('a file re-check that is also an edit re-check counts from the edit, closing on the processing date (file $fileRead, edit $edited) (12h, I2)', async ({ fileRead, edited, accepted }) => {
+      const { db, r } = setup([{ ops: [close()] }]);
+      reopenedWithOldDelivery(db); // reopened by a human at 06:00Z
+      readAt(db, fileOf(db), fileRead);
+      applyEdit(db, 1, 'm1', 'Banner v4 attached, final', edited);
+      expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: 'edit' })]);
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted, rejected: 1 - accepted });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject(accepted ? { status: 'done', closedOn: '2026-10-19' } : { status: 'open' });
+    });
   });
 
   describe('context for the AI', () => {
@@ -456,6 +551,62 @@ describe('Reconciler', () => {
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 0 });
       expect(listUnprocessed(db, 1)).toHaveLength(0);
       expect(db.prepare("SELECT touch_reason AS touch, requeue_reason AS requeue FROM messages WHERE wa_id = 'm1'").get()).toEqual({ touch: null, requeue: null });
+    });
+
+    describe('a touch from before the run never labels the message queued again (Job C: P2)', () => {
+      const ADD = op({ op: 'add_task', side: 'us', title: 'Print 500 flyers', category: 'design', priority: 'medium', sourceMessageIds: ['m1'] });
+      const MORE = op({ op: 'add_task', side: 'us', title: 'Print 600 flyers', category: 'design', priority: 'medium', sourceMessageIds: ['m1'] });
+      /** m1's line in the prompt of the given call. */
+      const lineOf = (ai: FakeAi, call: number) => ai.calls[call]!.user.split('\n').find((l) => l.startsWith('[m1]')) ?? '';
+      const edit = (db: Db, text: string, at: string) => applyEdit(db, 1, 'm1', text, at);
+      const react = (db: Db, at: string) => upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '👍', ts: at });
+
+      it.each([
+        { why: 'a message edited before its first run', before: (db: Db) => edit(db, 'print 500, A5', '2026-10-19T07:05:00.000Z') },
+        {
+          why: 'an edit re-check',
+          before: (db: Db) => {
+            markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-19T07:01:00.000Z');
+            edit(db, 'print 500, A5', '2026-10-19T07:05:00.000Z');
+          },
+        },
+      ])('$why that gets a reaction during the call is queued again as a reaction re-check, so its task is not added again', async ({ before }) => {
+        const { db, ai, r } = setup([{ ops: [ADD] }, { ops: [ADD] }]);
+        store(db, 'm1', 'print 500');
+        before(db);
+        const open = hold(ai);
+        const run = r.run(1);
+        react(db, '2026-10-19T08:00:10.000Z');
+        open();
+        expect(await run).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+        expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: 'reaction' })]);
+
+        expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 }); // the same add_task again
+        expect(lineOf(ai, 1)).toContain(' (re-check: new reaction): print 500, A5');
+        expect(lineOf(ai, 1)).not.toContain('re-check: edited');
+        expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
+        expect(processedAt(db, 'm1')).not.toBeNull();
+      });
+
+      it.each([
+        { why: 'nothing before the run', before: (_db: Db) => {} },
+        { why: 'an edit before the first run', before: (db: Db) => edit(db, 'print 500, A5', '2026-10-19T07:05:00.000Z') },
+        { why: 'a reaction before the first run', before: (db: Db) => react(db, '2026-10-19T07:05:00.000Z') },
+      ])('a message edited during the call after $why is queued again as an edit re-check, which may add new work', async ({ before }) => {
+        const { db, ai, r } = setup([{ ops: [ADD] }, { ops: [MORE] }]);
+        store(db, 'm1', 'print 500');
+        before(db);
+        const open = hold(ai);
+        const run = r.run(1);
+        edit(db, 'print 600, A5', '2026-10-19T08:00:10.000Z');
+        open();
+        expect(await run).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+        expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: 'edit' })]);
+
+        expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+        expect(lineOf(ai, 1)).toContain(' (re-check: edited): print 600, A5');
+        expect(getTaskByCode(db, 'SHA-002')).toMatchObject({ title: 'Print 600 flyers' });
+      });
     });
 
     it('flags a new task whose source message was deleted during the call', async () => {
