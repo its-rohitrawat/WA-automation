@@ -177,3 +177,7 @@ Every task's implementer applies the items listed under its task, in addition to
   - the 600 s upload timeout;
   - the cost per image (1–4 cents);
   - that images loaded by `cli link` history are described too, at a cost.
+
+## Owner decisions after Task 14 (22 Oct 2026)
+- D3. A file deleted for everyone shows no description and no Drive link in Files received. The Drive copy is kept.
+- D4. Files received rows get an estimated height so long descriptions show in full (merged cells don't auto-fit).

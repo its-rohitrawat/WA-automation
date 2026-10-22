@@ -1,7 +1,7 @@
 import ExcelJS from 'exceljs';
 import { describe, expect, it } from 'vitest';
 import { loadTrackerView } from '../../src/output/view.ts';
-import { buildWorkbook } from '../../src/output/workbook.ts';
+import { buildWorkbook, fileRowHeight } from '../../src/output/workbook.ts';
 import type { Db } from '../../src/store/db.ts';
 import { CLIENT_FILES_LIMIT, finishMedia, insertMedia, listClientFiles, markUploaded, messageRowId, type MediaKind, type MediaStatus } from '../../src/store/media.ts';
 import { applyRevoke, insertMessage } from '../../src/store/messages.ts';
@@ -114,6 +114,45 @@ describe('Files received', () => {
     expect([1, 2, 3].map((i) => ws.getRow(header + i).height)).toEqual([45, 30, 45]);
   });
 
+  describe('fileRowHeight (D4)', () => {
+    const short = { sentBy: 'Mr. Sharma', name: 'brief.pdf', description: 'PDF, 3 pages: Homepage brief' };
+
+    it('keeps a one-line row at the normal height of 15 points', () => {
+      expect(fileRowHeight(short)).toBe(15);
+      expect(fileRowHeight({ ...short, description: '' })).toBe(15);
+    });
+
+    it('adds 15 points per wrapped line of the description, 119 characters to a line across D to L', () => {
+      expect(fileRowHeight({ ...short, description: 'x'.repeat(119) })).toBe(15);
+      expect(fileRowHeight({ ...short, description: 'x'.repeat(120) })).toBe(30);
+      expect(fileRowHeight({ ...short, description: 'word '.repeat(40) })).toBe(30);
+      // 400 characters, the most the store hands over, is 4 lines.
+      expect(fileRowHeight({ ...short, description: 'word '.repeat(80) })).toBe(60);
+    });
+
+    it('counts characters, not UTF-16 units', () => {
+      expect(fileRowHeight({ ...short, description: '😀'.repeat(119) })).toBe(15);
+    });
+  });
+
+  it('gives the workbook row the estimated height, with wrap text on (D4)', async () => {
+    const view = loadTrackerView(seed(), now, healthy);
+    const files = view.clients.find((c) => c.client.code === 'SHA')!.files;
+    const brief = files.find((f) => f.name === 'brief.pdf')!;
+    brief.description = 'word '.repeat(80);
+    const img = files.find((f) => f.name.startsWith('image-'))!;
+    img.name = 'receipt.jpg';
+    img.description = 'A payment receipt';
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load((await buildWorkbook(view)) as unknown as ExcelJS.Buffer);
+    const ws = wb.getWorksheet('Sharma Interiors')!;
+    const long = rowWhere(ws, (r) => r.getCell(3).value === 'brief.pdf');
+    expect(long.height).toBe(60);
+    expect(long.height).toBe(fileRowHeight(brief));
+    expect(long.getCell(4).alignment).toMatchObject({ wrapText: true, vertical: 'top' });
+    expect(rowWhere(ws, (r) => r.getCell(3).value === 'receipt.jpg').height).toBe(15);
+  });
+
   it('does not link a Drive id that is not a plain id', async () => {
     const db = seed();
     markUploaded(db, mediaIdOf(db, 'F1'), 'abc/../evil?x=1');
@@ -127,13 +166,29 @@ describe('Files received', () => {
     expect(ws.getRow(at + 2).getCell(1).value).toBe('(none)');
   });
 
-  it('keeps a file deleted for everyone in the list, with (deleted by sender) instead of its description (amendment 14b)', () => {
+  it('keeps a file deleted for everyone in the list, with (deleted by sender) and no Drive link (amendment 14b, D3)', () => {
     const db = seed();
     applyRevoke(db, 1, 'D1');
     expect(sharmaFiles(db).find((f) => f.name === 'brief.pdf')).toEqual({
-      date: '2026-10-15', sentBy: 'Mr. Sharma', name: 'brief.pdf', description: '(deleted by sender)', driveFileId: 'drivefile123',
+      date: '2026-10-15', sentBy: 'Mr. Sharma', name: 'brief.pdf', description: '(deleted by sender)', driveFileId: null,
     });
     expect(sharmaFiles(db)).toHaveLength(3);
+  });
+
+  it('does not link or describe an uploaded file that was then deleted for everyone, but still links other uploaded files (D3)', async () => {
+    const db = seed();
+    markUploaded(db, mediaIdOf(db, 'I1'), 'driveimage456');
+    applyRevoke(db, 1, 'D1');
+    const ws = await sheet(db, 'Sharma Interiors');
+    const deleted = rowWhere(ws, (r) => r.getCell(3).value === 'brief.pdf');
+    expect(deleted.getCell(4).value).toBe('(deleted by sender)');
+    expect(deleted.getCell(13).value).toBeNull();
+    const kept = rowWhere(ws, (r) => r.getCell(3).value === 'image-2026-10-16-1130-2.jpg');
+    expect(kept.getCell(13).value).toMatchObject({ text: 'Open', hyperlink: 'https://drive.google.com/file/d/driveimage456/view' });
+    // Nothing in the tab points at the deleted file's Drive copy or shows what it said.
+    const texts: string[] = [];
+    ws.eachRow((r) => r.eachCell((c) => texts.push(JSON.stringify(c.value))));
+    expect(texts.filter((t) => t.includes('drivefile123') || t.includes('Homepage'))).toEqual([]);
   });
 
   it('says (forwarded image) and (forwarded scanned PDF) for forwarded files that were not described (D2, amendment 14c)', () => {

@@ -19,6 +19,7 @@ export interface FileView {
   sentBy: string;
   name: string;
   description: string;
+  /** Null when the file is not on Drive, or when its message was deleted for everyone (D3). */
   driveFileId: string | null;
 }
 
@@ -95,7 +96,8 @@ export function loadTrackerView(db: Db, now: Date, health: HealthLine): TrackerV
           sentBy: f.sender ?? 'Unknown',
           name: displayName({ kind: f.kind, fileName: f.fileName, mimeType: f.mimeType, ts: f.ts, mediaId: f.id }),
           description: fileDescription(f),
-          driveFileId: f.driveFileId,
+          // Owner decision D3: a file deleted for everyone loses its Drive link as well as its description. The Drive copy is kept.
+          driveFileId: f.revoked ? null : f.driveFileId,
         })),
         people: listPeople(db, client.id),
         lastActivity: lastActivity(db, client.id),

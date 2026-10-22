@@ -94,6 +94,8 @@ function addTaskTable(ws: ExcelJS.Worksheet, title: string, tasks: TaskRow[], to
 }
 
 const DRIVE_ID = /^[A-Za-z0-9_-]{1,200}$/;
+/** Client tab column widths, A to N. Excel counts a width in characters: the width of the digit 0 in the default 11 pt Calibri. */
+const CLIENT_COLUMN_WIDTHS = [14, 38, 13, 10, 14, 16, 10, 10, 10, 32, 16, 22, 44, 11];
 /**
  * Files received columns. Column D alone is narrow (it is the tasks' Priority column), so the description spans D to L and long
  * descriptions stay a few lines tall instead of a very tall row. The Drive link is in M.
@@ -101,13 +103,33 @@ const DRIVE_ID = /^[A-Za-z0-9_-]{1,200}$/;
 const FILE_DESC_FIRST = 4;
 const FILE_DESC_LAST = 12;
 const FILE_LINK = 13;
-/** Characters per wrapped line: Sent by (B, width 38), File name (C, width 13), Description (D to L, width 140 in all). */
-const FILE_LINE_CHARS = { sentBy: 36, name: 12, description: 120 };
+/** Excel's normal row height for 11 pt Calibri, in points: one line of text. */
 const LINE_HEIGHT = 15;
+/**
+ * How much of a column's width wrapped text fills, in percent. A width counts digit-sized characters, but capitals, ₹ and emoji
+ * are wider and Excel wraps at spaces, so a line holds fewer. 85% keeps the estimate on the tall side: a row a little too tall
+ * is harmless, one too short hides text.
+ */
+const WRAP_FILL_PERCENT = 85;
+/** Characters that fit on one wrapped line across columns first to last (1-based, inclusive). */
+function lineChars(first: number, last: number): number {
+  const width = CLIENT_COLUMN_WIDTHS.slice(first - 1, last).reduce((sum, w) => sum + w, 0);
+  return Math.floor((width * WRAP_FILL_PERCENT) / 100);
+}
+/** Sent by (B, width 38): 32 characters a line. File name (C, width 13): 11. Description (D to L merged, width 140 in all): 119. */
+const FILE_LINE_CHARS = { sentBy: lineChars(2, 2), name: lineChars(3, 3), description: lineChars(FILE_DESC_FIRST, FILE_DESC_LAST) };
+/**
+ * A cap so one odd row cannot take over the tab. The longest description, about 300 characters, needs 3 lines; the longest
+ * file name, 120 characters, about 10.
+ */
 const MAX_FILE_LINES = 10;
 
-/** Excel and Google Sheets do not auto-fit a row to a merged cell, so a file row gets the height of its longest wrapped text. */
-function fileRowHeight(f: FileView): number {
+/**
+ * Height in points of a Files received row (owner decision D4). Excel and Google Sheets do not auto-fit a row to a merged cell,
+ * so the row gets 15 points per line of its longest wrapped text: the description across D to L, or the sender or file name in
+ * its own column. A row that fits on one line keeps the normal 15 points.
+ */
+export function fileRowHeight(f: Pick<FileView, 'sentBy' | 'name' | 'description'>): number {
   const lines = (s: string, perLine: number) => Math.ceil([...s].length / perLine);
   const n = Math.max(lines(f.sentBy, FILE_LINE_CHARS.sentBy), lines(f.name, FILE_LINE_CHARS.name), lines(f.description, FILE_LINE_CHARS.description), 1);
   return LINE_HEIGHT * Math.min(n, MAX_FILE_LINES);
@@ -169,7 +191,7 @@ function addOverview(wb: ExcelJS.Workbook, view: TrackerView): void {
 
 function addClientSheet(wb: ExcelJS.Workbook, c: ClientView, today: string): void {
   const ws = wb.addWorksheet(c.sheetName, { views: [{ state: 'frozen', ySplit: 1 }] });
-  ws.columns = [{ width: 14 }, { width: 38 }, { width: 13 }, { width: 10 }, { width: 14 }, { width: 16 }, { width: 10 }, { width: 10 }, { width: 10 }, { width: 32 }, { width: 16 }, { width: 22 }, { width: 44 }, { width: 11 }];
+  ws.columns = CLIENT_COLUMN_WIDTHS.map((width) => ({ width }));
   ws.addRow([`${c.client.name}${c.client.active ? '' : ' (inactive)'} (${c.client.code})`]).font = { bold: true, size: 16 };
   ws.addRow([]);
 
