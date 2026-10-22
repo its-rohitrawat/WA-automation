@@ -58,7 +58,8 @@ export function googleDriveApi(client: OAuth2Client): DriveApi {
     },
     async createFile(name, mimeType, body, parentId, timeoutMs) {
       try {
-        // Per-request options override the client's. A timeout key set to undefined would remove the 120 s limit, so it is left out.
+        // Per-request options are deep-merged over the client's (undefined values are ignored); without timeoutMs no
+        // per-request timeout is sent, so the client's 120 s applies.
         const r = await api.files.create(
           { requestBody: { name, parents: [parentId] }, media: { mimeType, body: Readable.from(body) }, fields: 'id' },
           timeoutMs === undefined ? {} : { timeout: timeoutMs },

@@ -13,8 +13,8 @@ export const UPLOAD_MAX_ATTEMPTS = 8;
 /** Per-request time limit for one client file (up to 50 MB on a slow line). The tracker upload keeps the client's 120 s. */
 export const FILE_UPLOAD_TIMEOUT_MS = 600_000;
 const AUTH_RETRY_MS = 15 * 60_000;
-/** 2, 4, 8 ... minutes, at most 6 hours. */
-const retryMs = (attempt: number): number => Math.min(60_000 * 2 ** attempt, 6 * 3_600_000);
+/** Delay before the next try after `attempt` failed tries: 2, 4, 8 ... minutes, at most 6 hours. Exported for tests. */
+export const retryMs = (attempt: number): number => Math.min(60_000 * 2 ** attempt, 6 * 3_600_000);
 const MIME = /^[a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*$/;
 
 function safeMime(m: string | null): string {

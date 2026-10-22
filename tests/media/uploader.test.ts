@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DriveFileUploader, FILE_UPLOAD_TIMEOUT_MS, UPLOAD_MAX_ATTEMPTS } from '../../src/media/uploader.ts';
+import { DriveFileUploader, FILE_UPLOAD_TIMEOUT_MS, retryMs, UPLOAD_MAX_ATTEMPTS } from '../../src/media/uploader.ts';
 import type { Db } from '../../src/store/db.ts';
 import { setKv } from '../../src/store/kv.ts';
 import { finishMedia, getMedia, insertMedia, markDownloaded, messageRowId, resetUploadFailures, type MediaKind } from '../../src/store/media.ts';
@@ -20,14 +20,16 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
-function setup(o: { root?: boolean } = {}) {
+function setup(o: { root?: boolean; batchSize?: number } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'wa-up-'));
   dirs.push(dataDir);
   const db = seededDb();
   const drive = new FakeDrive();
   const clock = manualClock('2026-10-19T08:00:00Z');
   const onUploaded = vi.fn();
-  const up = new DriveFileUploader({ db, api: drive, dataDir, clock, log: silentLogger(), onUploaded });
+  const up = new DriveFileUploader({
+    db, api: drive, dataDir, clock, log: silentLogger(), onUploaded, ...(o.batchSize === undefined ? {} : { batchSize: o.batchSize }),
+  });
   if (o.root !== false) setKv(db, 'drive_root_id', 'root-1');
   return { db, dataDir, drive, clock, onUploaded, up };
 }
@@ -149,13 +151,30 @@ describe('DriveFileUploader', () => {
     expect(driveState(db, a)).toEqual({ fileId: null, attempts: 1, failed: 0, nextAt: '2026-10-19T08:02:00.000Z' });
     await up.run(); // not due yet
     expect(driveState(db, a)).toMatchObject({ attempts: 1 });
-    for (let i = 1; i < UPLOAD_MAX_ATTEMPTS; i++) {
+    for (let i = 2; i <= UPLOAD_MAX_ATTEMPTS; i++) {
       clock.advance(7 * 3_600_000);
       await up.run();
+      // After try i fails, the next one waits 2^i minutes; the last try gives up instead.
+      const nextAt = i < UPLOAD_MAX_ATTEMPTS ? new Date(clock.now().getTime() + 2 ** i * 60_000).toISOString() : null;
+      expect(driveState(db, a)).toMatchObject({ attempts: i, failed: i < UPLOAD_MAX_ATTEMPTS ? 0 : 1, nextAt });
     }
-    expect(driveState(db, a)).toMatchObject({ attempts: UPLOAD_MAX_ATTEMPTS, failed: 1, nextAt: null });
+    // A file that gave up is not tried again in later passes, however much time goes by.
+    clock.advance(7 * 3_600_000);
+    await up.run();
+    expect(driveState(db, a)).toEqual({ fileId: null, attempts: UPLOAD_MAX_ATTEMPTS, failed: 1, nextAt: null });
     expect(resetUploadFailures(db)).toBe(1);
     expect(driveState(db, a)).toMatchObject({ attempts: 0, failed: 0 });
+    drive.failNext = 0;
+    await up.run();
+    expect(drive.created).toHaveLength(1);
+    expect(getMedia(db, a)!.driveFileId).toBe(drive.created[0]!.id);
+  });
+
+  it('caps the retry delay at 6 hours', () => {
+    expect(retryMs(1)).toBe(2 * 60_000);
+    expect(retryMs(7)).toBe(128 * 60_000);
+    expect(retryMs(9)).toBe(6 * 3_600_000);
+    expect(retryMs(10)).toBe(6 * 3_600_000);
   });
 
   it('a sign-in problem is not counted against the file and stops the pass', async () => {
@@ -180,6 +199,76 @@ describe('DriveFileUploader', () => {
     expect(getMedia(db, b)!.driveFileId).toBe('file-7');
   });
 
+  it('re-creates the Clients folder too when it was removed in Drive, in the same pass', async () => {
+    const { db, dataDir, drive, up } = setup();
+    savedFile(db, dataDir, { waId: 'A', role: 'client' });
+    await up.run();
+    // Removing WA Agent/Clients in Drive removes everything under it.
+    for (const id of ['folder-1', 'folder-2', 'folder-3']) drive.missing.add(id);
+    const b = savedFile(db, dataDir, { waId: 'B', role: 'client' });
+    await up.run();
+    expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Files', 'Clients', 'Sharma Interiors', 'Files']);
+    expect(drive.folderParents).toEqual(['root-1', 'folder-1', 'folder-2', 'root-1', 'folder-5', 'folder-6']);
+    expect(drive.created[1]).toMatchObject({ parentId: 'folder-7' });
+    expect(getMedia(db, b)!.driveFileId).toBe('file-8');
+  });
+
+  it('counts one failed attempt when the WA Agent folder itself is missing, and creates no folders', async () => {
+    const { db, dataDir, drive, up } = setup();
+    const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
+    drive.missing.add('root-1');
+    await up.run();
+    expect(drive.folders).toEqual([]);
+    expect(driveState(db, a)).toEqual({ fileId: null, attempts: 1, failed: 0, nextAt: '2026-10-19T08:02:00.000Z' });
+  });
+
+  it('rebuilds folders at most twice per file when Drive keeps saying the folder is missing', async () => {
+    const { db, dataDir, drive, up } = setup();
+    const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
+    drive.fileParentsMissing = true;
+    await up.run();
+    expect(drive.createFileCalls).toBe(3);
+    expect(driveState(db, a)).toMatchObject({ fileId: null, attempts: 1, failed: 0 });
+  });
+
+  it('sends Drive a clean MIME type: lower case, no parameters, and octet-stream for anything malformed', async () => {
+    const { db, dataDir, drive, up } = setup();
+    savedFile(db, dataDir, { waId: 'A', role: 'client', mimeType: 'Application/PDF; charset=x' });
+    savedFile(db, dataDir, { waId: 'B', role: 'client', mimeType: 'a/b<script>' });
+    savedFile(db, dataDir, { waId: 'C', role: 'client', mimeType: 'not a mime' });
+    savedFile(db, dataDir, { waId: 'D', role: 'client', mimeType: 'image/svg+xml' });
+    await up.run();
+    expect(drive.createMimes).toEqual(['application/pdf', 'application/octet-stream', 'application/octet-stream', 'image/svg+xml']);
+  });
+
+  it('cleans the client folder name, and falls back to "Client <id>" when nothing is left', async () => {
+    const first = setup();
+    first.db.prepare('UPDATE clients SET name = ? WHERE id = 1').run('A/B:\u202EC');
+    savedFile(first.db, first.dataDir, { waId: 'A', role: 'client' });
+    await first.up.run();
+    expect(first.drive.folders).toEqual(['Clients', 'A_B_C', 'Files']);
+
+    const second = setup();
+    second.db.prepare('UPDATE clients SET name = ? WHERE id = 1').run('\u0001\u200B\u202E');
+    savedFile(second.db, second.dataDir, { waId: 'A', role: 'client' });
+    await second.up.run();
+    expect(second.drive.folders).toEqual(['Clients', 'Client 1', 'Files']);
+  });
+
+  it('uploads at most batchSize files per pass (5 by default)', async () => {
+    const small = setup({ batchSize: 2 });
+    for (const w of ['A', 'B', 'C']) savedFile(small.db, small.dataDir, { waId: w, role: 'client' });
+    await small.up.run();
+    expect(small.drive.created).toHaveLength(2);
+    await small.up.run();
+    expect(small.drive.created).toHaveLength(3);
+
+    const dflt = setup();
+    for (const w of ['A', 'B', 'C', 'D', 'E', 'F']) savedFile(dflt.db, dflt.dataDir, { waId: w, role: 'client' });
+    await dflt.up.run();
+    expect(dflt.drive.created).toHaveLength(5);
+  });
+
   it('runs one pass at a time', async () => {
     const { db, dataDir, drive, up } = setup();
     savedFile(db, dataDir, { waId: 'A', role: 'client' });
@@ -201,5 +290,25 @@ describe('DriveFileUploader', () => {
     await up.stop(1_000);
     await up.run();
     expect(drive.created).toHaveLength(0);
+  });
+
+  it('stop() during a pass waits for the upload in flight and starts no further file', async () => {
+    const { db, dataDir, drive, up } = setup();
+    const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
+    const b = savedFile(db, dataDir, { waId: 'B', role: 'client' });
+    let release!: () => void;
+    drive.gate = new Promise<void>((r) => (release = r));
+    const running = up.run();
+    let stopped = false;
+    const stopping = up.stop(10_000).then(() => {
+      stopped = true;
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(stopped).toBe(false); // the first upload is still held at the gate
+    release();
+    await Promise.all([running, stopping]);
+    expect(drive.created).toHaveLength(1);
+    expect(getMedia(db, a)!.driveFileId).toBe(drive.created[0]!.id);
+    expect(getMedia(db, b)!.driveFileId).toBeNull();
   });
 });

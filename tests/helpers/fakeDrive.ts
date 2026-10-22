@@ -7,6 +7,12 @@ export class FakeDrive implements DriveApi {
   created: { id: string; name: string; parentId: string; bytes: number }[] = [];
   /** Per-request timeout of each created file, in the same order as `created` (undefined: the client's default). */
   createTimeouts: (number | undefined)[] = [];
+  /** MIME type sent with each created file, in the same order as `created`. */
+  createMimes: string[] = [];
+  /** Every createFile call, including the ones that failed. */
+  createFileCalls = 0;
+  /** When true, every createFile throws DriveNotFoundError, as if its parent folder were always missing. */
+  fileParentsMissing = false;
   updated: { id: string; bytes: number }[] = [];
   missing = new Set<string>();
   failNext = 0;
@@ -25,13 +31,15 @@ export class FakeDrive implements DriveApi {
     return `folder-${++this.#n}`;
   }
 
-  async createFile(name: string, _mime: string, body: Buffer, parentId: string, timeoutMs?: number): Promise<string> {
+  async createFile(name: string, mime: string, body: Buffer, parentId: string, timeoutMs?: number): Promise<string> {
+    this.createFileCalls++;
     this.#maybeFail();
     await this.gate;
-    if (this.missing.has(parentId)) throw new DriveNotFoundError(parentId);
+    if (this.fileParentsMissing || this.missing.has(parentId)) throw new DriveNotFoundError(parentId);
     const id = `file-${++this.#n}`;
     this.created.push({ id, name, parentId, bytes: body.length });
     this.createTimeouts.push(timeoutMs);
+    this.createMimes.push(mime);
     return id;
   }
 
