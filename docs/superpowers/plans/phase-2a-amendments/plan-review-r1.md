@@ -225,4 +225,4 @@ Every task's implementer applies the items listed under its task, in addition to
   - the 600 s upload timeout;
   - the cost per image (1–4 cents);
   - that images loaded by `cli link` history are described too, at a cost;
-  - that each media call makes one Claude attempt (8c), and the media queue tries a file 3 times over about 6 minutes, so files shared during a longer Claude outage stay unread (`failed`).
+  - that each media call makes one Claude attempt (8c); while Claude is unavailable, files keep waiting and are retried for up to 24 hours at no cost (10d), and only then stay unread (`failed`, `ai_unavailable`).
