@@ -12,6 +12,15 @@ describe('fileDescription', () => {
     expect(fileDescription(facts({ pageCount: 1 }))).toBe('PDF, 1 page: Homepage brief Hero banner');
   });
 
+  it('falls back to type and pages, or type and size, when the text holds only spaces or hidden characters (T14-02)', () => {
+    // A PDF whose broken font gave only NULs (stored as spaces), or text made only of zero-width characters.
+    expect(fileDescription(facts({ pageCount: 2, textStart: ' '.repeat(400) }))).toBe('PDF, 2 pages');
+    expect(fileDescription(facts({ pageCount: 2, textStart: ' \u200B\u2060 \u200D\u200C\uFEFF ' }))).toBe('PDF, 2 pages');
+    expect(fileDescription(facts({ pageCount: null, textStart: '\n\t \u202E' }))).toBe('PDF, 24 KB');
+    expect(fileDescription(facts({ kind: 'image', mimeType: 'image/jpeg', pageCount: null, textKind: 'description', textStart: '\u200B \u2066\u2069' })))
+      .toBe('Image, 24 KB');
+  });
+
   it('cuts the start of a document text to 200 characters', () => {
     expect(fileDescription(facts({ textStart: 'y'.repeat(400) }))).toBe(`PDF, 3 pages: ${'y'.repeat(200)}…`);
   });

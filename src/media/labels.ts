@@ -78,6 +78,9 @@ function oneLine(s: string, max: number): string {
   return cps.length <= max ? flat : `${cps.slice(0, max).join('')}…`;
 }
 
+/** Whether cleaned text shows anything: more than spaces and the joiners HIDDEN keeps. */
+const showsText = (s: string): boolean => /[^\s\u200C\u200D]/u.test(s);
+
 /**
  * The Files received description: what the file is, and the start of what was read. Deterministic, no AI.
  * A file whose message was deleted for everyone shows only "(deleted by sender)": it stays listed, but what it said is not shown.
@@ -91,8 +94,13 @@ export function fileDescription(f: FileFacts): string {
   if (f.status === 'unavailable') return `${type}, could not be downloaded from WhatsApp`;
   if (f.status === 'failed') return `${type}, could not be read`;
   if (f.note === FORWARDED_NOT_DESCRIBED) return f.kind === 'image' || type === 'Image' ? '(forwarded image)' : '(forwarded scanned PDF)';
-  if (f.textKind === 'description' && f.textStart) return oneLine(f.textStart, 300);
-  if (f.textKind === 'extract' && f.textStart) return `${type}${pages}: ${oneLine(f.textStart, 200)}`;
+  // Cleaned first (T14-02): a start made only of spaces or hidden characters (a PDF whose broken font gave only NULs,
+  // stored as spaces) shows nothing, so it falls through to the type, rather than leaving "PDF, 2 pages: ".
+  const text = f.textStart ? oneLine(f.textStart, f.textKind === 'description' ? 300 : 200) : '';
+  if (showsText(text)) {
+    if (f.textKind === 'description') return text;
+    if (f.textKind === 'extract') return `${type}${pages}: ${text}`;
+  }
   if (f.note === 'scan_too_long') return `${type}${pages}, scanned, too long to read`;
-  return `${type}${f.fileSize ? `, ${formatSize(f.fileSize)}` : ''}`;
+  return `${type}${pages || (f.fileSize ? `, ${formatSize(f.fileSize)}` : '')}`;
 }
