@@ -84,12 +84,14 @@ export function formatPlan(items: readonly PlanItem[]): string {
     return `  ${i.sample.id.padEnd(34)} ${formatClock(i.seconds).padStart(8)}  ${i.provider.padEnd(10)} ${i.model}${parts}  $${i.estimateUsd.toFixed(3)}  ${actionText(i)}`;
   });
   const files = [...new Set(items.filter((i) => i.action !== 'skip').map((i) => i.sample.path))];
+  const total = planTotalUsd(items);
   return [
     ...lines,
     '',
     `Files whose audio would be uploaded (${files.length}):`,
     ...files.map((f) => `  ${f}`),
     '',
-    `Estimated cost: $${planTotalUsd(items).toFixed(2)} at list prices.`,
+    // Three decimals below $1, so a run of a few voice notes never shows as $0.00.
+    `Estimated cost: $${total.toFixed(total < 1 ? 3 : 2)} at list prices.`,
   ].join('\n');
 }

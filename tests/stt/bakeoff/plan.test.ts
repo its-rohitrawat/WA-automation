@@ -103,7 +103,14 @@ describe('formatPlan', () => {
     expect(text).toContain('gpt-4o-transcribe-diarize in 12 parts');
     expect(text).toContain('Files whose audio would be uploaded (2):');
     expect(text).toContain('C:\\stt-samples\\meetings\\b.mp4');
-    expect(text).toMatch(/Estimated cost: \$\d+\.\d{2} at list prices\./);
+    // Below $1 the total keeps three decimals, so a small run never shows as $0.00.
+    expect(text).toContain('Estimated cost: $0.994 at list prices.');
+  });
+
+  it('shows the total with two decimals from $1 up', () => {
+    const text = formatPlan(buildPlan(input({ samples: [{ sample: voice, seconds: 60 }, { sample: meeting, seconds: 7200 }] })));
+    // 60 s voice ≈ $0.014; 2 h meeting: 0.8 + 0.44 + 0.72.
+    expect(text).toContain('Estimated cost: $1.97 at list prices.');
   });
 
   it('warns when an unanswered slot would be sent again', () => {
