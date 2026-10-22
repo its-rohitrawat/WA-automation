@@ -1,3 +1,5 @@
+import { once } from 'node:events';
+import { createDeflate } from 'node:zlib';
 import JSZip from 'jszip';
 
 const CONTENT_TYPES =
@@ -25,16 +27,41 @@ export async function tinyDocx(paragraphs: string[]): Promise<Buffer> {
  */
 export function tinyPdf(pages: string[][]): Buffer {
   const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+  return pdfOfStreams(
+    pages.map((lines) => ({
+      data: lines.length ? `BT /F1 12 Tf 14 TL 72 720 Td ${lines.map((l) => `(${esc(l)}) Tj T*`).join(' ')} ET` : '0 0 m 200 200 l S',
+      filter: '',
+    })),
+  );
+}
+
+/**
+ * A one-page PDF whose content stream is `inflatedMb` MB of spaces and then one line of text, compressed with deflate.
+ * A decompression bomb: spaces compress about 1,000:1, so 200 MB of them fit in about 200 KB.
+ */
+export async function flateBombPdf(inflatedMb: number): Promise<Buffer> {
+  const deflate = createDeflate({ level: 9 });
+  const chunks: Buffer[] = [];
+  deflate.on('data', (chunk: Buffer) => chunks.push(chunk));
+  const ended = once(deflate, 'end');
+  const spaces = Buffer.alloc(1024 * 1024, 0x20);
+  for (let i = 0; i < inflatedMb; i++) if (!deflate.write(spaces)) await once(deflate, 'drain');
+  deflate.end('BT /F1 12 Tf 72 720 Td (Bomb end) Tj ET');
+  await ended;
+  return pdfOfStreams([{ data: Buffer.concat(chunks).toString('latin1'), filter: ' /Filter /FlateDecode' }]);
+}
+
+/** A PDF with one page per content stream. Stream data travels as latin1 text, so binary bytes stay intact. */
+function pdfOfStreams(streams: { data: string; filter: string }[]): Buffer {
   const objects: string[] = [];
-  const pageIds = pages.map((_, i) => 4 + i * 2);
+  const pageIds = streams.map((_, i) => 4 + i * 2);
   objects[1] = '<< /Type /Catalog /Pages 2 0 R >>';
-  objects[2] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pages.length} >>`;
+  objects[2] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${streams.length} >>`;
   objects[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>';
-  pages.forEach((lines, i) => {
+  streams.forEach(({ data, filter }, i) => {
     const pageId = 4 + i * 2;
-    const content = lines.length ? `BT /F1 12 Tf 14 TL 72 720 Td ${lines.map((l) => `(${esc(l)}) Tj T*`).join(' ')} ET` : '0 0 m 200 200 l S';
     objects[pageId] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${pageId + 1} 0 R >>`;
-    objects[pageId + 1] = `<< /Length ${Buffer.byteLength(content, 'latin1')} >>\nstream\n${content}\nendstream`;
+    objects[pageId + 1] = `<< /Length ${Buffer.byteLength(data, 'latin1')}${filter} >>\nstream\n${data}\nendstream`;
   });
   let out = '%PDF-1.4\n';
   const offsets: number[] = [];

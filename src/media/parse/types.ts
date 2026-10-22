@@ -5,7 +5,10 @@ export type ParseJob =
 
 export interface ParseResult {
   text: string;
-  /** Total pages for a PDF (even when only the first pages were read); null for DOCX. */
+  /**
+   * Total pages for a PDF (even when only the first pages were read); null for DOCX. Advisory only: it comes from the
+   * file's own /Count entry, which a sender can set too low. Never use it to cap spend on the file.
+   */
   pageCount: number | null;
 }
 

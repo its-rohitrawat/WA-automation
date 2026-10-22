@@ -2,13 +2,21 @@ import { getDocumentProxy } from 'unpdf';
 import { ParseError, type ParseResult } from './types.ts';
 
 /**
- * PDF.js options for untrusted files. verbosity 0: errors only. maxImageSize: images over 16 megapixels are skipped,
- * so a decompression bomb inside a PDF cannot fill the worker's memory. PDF.js 6 (in unpdf 1.8.1) no longer evaluates
- * font code and has no isEvalSupported option.
+ * PDF.js options for untrusted files. verbosity 0: errors only. maxImageSize: images over 16 megapixels are not
+ * decoded. That covers images only, which text extraction does not decode anyway. Content and font streams have no
+ * size cap in PDF.js, so a decompression bomb in them is stopped by the runner's memory check (parseFile,
+ * MEDIA_LIMITS.maxParserExternalBytes), not here. PDF.js 6 (in unpdf 1.8.1) no longer evaluates font code and has no
+ * isEvalSupported option.
  */
 const PDF_OPTIONS = { verbosity: 0, maxImageSize: 16_000_000 };
 
-/** Runs inside the parser worker. Reads the text layer of the first maxPages pages. */
+/**
+ * Runs inside the parser worker. Reads the text layer of the first maxPages pages.
+ *
+ * pageCount is advisory: PDF.js takes it from the file's own /Count entry, which the sender controls. A forged count
+ * that is too high is corrected, but one that is too low is not, and the pages past it are never read. Never use it as
+ * a ceiling for paid work on the file.
+ */
 export async function extractPdfText(bytes: Uint8Array, limits: { maxPages: number }): Promise<ParseResult> {
   let pdf: Awaited<ReturnType<typeof getDocumentProxy>>;
   try {
