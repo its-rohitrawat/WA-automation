@@ -73,8 +73,23 @@ describe('createExtractor', () => {
   });
 
   it('marks a PDF that was read only up to the page cap', async () => {
-    const { extract, input } = setup({ parse: { text: 'x'.repeat(4_000), pageCount: 250 } });
+    // 3,500 characters is enough for the 200 pages read (16 x 200) but not for the 250 the file states (16 x 250):
+    // the scan check counts only the pages that were read.
+    const { extract, input } = setup({ parse: { text: 'x'.repeat(3_500), pageCount: 250 } });
     expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toMatchObject({ textKind: 'extract', pageCount: 250, note: 'first_pages_only' });
+  });
+
+  it('finds a PDF by its bytes, not by the MIME type the sender gave', async () => {
+    const real = setup({ parse: { text: 'Quotation 17\nTotal 1,20,000 for the full website build', pageCount: 2 } });
+    expect(await real.extract(real.input({ kind: 'document', mimeType: 'application/octet-stream', fileName: 'quote', bytes: PDF }))).toMatchObject({ textKind: 'extract', pageCount: 2 });
+    expect(real.parse).toHaveBeenCalledTimes(1);
+    expect(real.parse.mock.calls[0]![0]).toMatchObject({ kind: 'pdf' });
+
+    const fake = setup();
+    expect(await fake.extract(fake.input({ kind: 'document', mimeType: 'application/pdf', fileName: 'quote.pdf', bytes: Buffer.from('not a pdf') }))).toEqual(NONE);
+    expect(fake.parse).not.toHaveBeenCalled();
+    expect(fake.reserve).not.toHaveBeenCalled();
+    expect(fake.ai.calls).toHaveLength(0);
   });
 
   it('sends a short scan to Claude, reserving the scanned-PDF ceiling', async () => {
@@ -215,6 +230,39 @@ describe('createExtractor', () => {
       expect(reserve).not.toHaveBeenCalled();
       expect(ai.calls).toHaveLength(0);
       expect(spendRows(db)).toEqual([]);
+    });
+
+    it('settles a forwarded image before any budget check, so it is never deferred or listed as too costly', async () => {
+      const spent = setup();
+      spent.spend.record('ai', 14.95, 'batch 1');
+      expect(spent.spend.canSpend(imageCeilingUsd(P))).toBe(false);
+      expect(await spent.extract(spent.input({ forwarded: true }))).toEqual({ ...NONE, note: 'forwarded_not_described' });
+
+      const tiny = setup({ capUsd: 0.001 });
+      expect(imageCeilingUsd(P)).toBeGreaterThan(0.001);
+      expect(await tiny.extract(tiny.input({ forwarded: true }))).toEqual({ ...NONE, note: 'forwarded_not_described' });
+
+      for (const s of [spent, tiny]) {
+        expect(s.prepareImage).not.toHaveBeenCalled();
+        expect(s.reserve).not.toHaveBeenCalled();
+        expect(s.ai.calls).toHaveLength(0);
+      }
+    });
+
+    it('settles a forwarded scan as forwarded when the daily cap is below its ceiling or used up', async () => {
+      const pdf = { forwarded: true, kind: 'document', mimeType: 'application/pdf', bytes: PDF } as const;
+      const low = setup({ capUsd: 4, parse: { text: '', pageCount: 3 } });
+      expect(scannedPdfCeilingUsd(P)).toBeGreaterThan(4);
+      expect(await low.extract(low.input(pdf))).toEqual({ ...NONE, pageCount: 3, note: 'forwarded_not_described' });
+
+      const spent = setup({ parse: { text: '', pageCount: 3 } });
+      spent.spend.record('ai', 11, 'batch 1');
+      expect(await spent.extract(spent.input(pdf))).toEqual({ ...NONE, pageCount: 3, note: 'forwarded_not_described' });
+
+      for (const s of [low, spent]) {
+        expect(s.reserve).not.toHaveBeenCalled();
+        expect(s.ai.calls).toHaveLength(0);
+      }
     });
 
     it('keeps a forwarded scan that is too long to read as too long', async () => {

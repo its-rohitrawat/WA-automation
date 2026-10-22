@@ -77,6 +77,23 @@ describe('prepareImageForClaude', () => {
     }
   });
 
+  it('puts a transparent image on white, so dark text drawn on it stays readable', async () => {
+    const clear = await sharp({ create: { width: 30, height: 20, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } }).png().toBuffer();
+    const out = await prepareImageForClaude(clear);
+    const pixels = await sharp(out.data).raw().toBuffer();
+    expect(Math.min(...pixels.subarray(0, 3))).toBeGreaterThan(240);
+  });
+
+  it('decodes only the first frame of an animated GIF or WebP', async () => {
+    // Three 30 x 20 frames in different colours, stacked into one 30 x 60 strip.
+    const frames = Buffer.concat([[200, 40, 40], [40, 200, 40], [40, 40, 200]].map((rgb) => Buffer.from(Array.from({ length: 30 * 20 }, () => rgb).flat())));
+    const strip = () => sharp(frames, { raw: { width: 30, height: 60, channels: 3, pageHeight: 20 } });
+    for (const animated of [await strip().gif().toBuffer(), await strip().webp().toBuffer()]) {
+      expect((await sharp(animated).metadata()).pages).toBe(3);
+      expect(await prepareImageForClaude(animated)).toMatchObject({ mediaType: 'image/jpeg', width: 30, height: 20 });
+    }
+  });
+
   it('refuses SVG and TIFF input', async () => {
     const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="30" height="20"><rect width="30" height="20" fill="red"/></svg>');
     const tiff = await solid().tiff().toBuffer();
