@@ -31,8 +31,10 @@ export function isAuthFailure(e: unknown): boolean {
 }
 
 export interface DriveApi {
-  createFolder(name: string): Promise<string>;
-  createFile(name: string, mimeType: string, body: Buffer, parentId: string): Promise<string>;
+  /** Creates a folder at the top of My Drive, or inside parentId. */
+  createFolder(name: string, parentId?: string): Promise<string>;
+  /** timeoutMs: a per-request time limit instead of the client's 120 s (large client files need longer). */
+  createFile(name: string, mimeType: string, body: Buffer, parentId: string, timeoutMs?: number): Promise<string>;
   updateFile(fileId: string, mimeType: string, body: Buffer): Promise<void>;
 }
 
@@ -41,14 +43,26 @@ const isNotFound = (e: unknown) => (e as { code?: number }).code === 404;
 export function googleDriveApi(client: OAuth2Client): DriveApi {
   const api = drive({ version: 'v3', auth: client, timeout: 120_000 });
   return {
-    async createFolder(name) {
-      const r = await api.files.create({ requestBody: { name, mimeType: 'application/vnd.google-apps.folder' }, fields: 'id' });
-      if (!r.data.id) throw new Error('Drive returned no folder id');
-      return r.data.id;
-    },
-    async createFile(name, mimeType, body, parentId) {
+    async createFolder(name, parentId) {
       try {
-        const r = await api.files.create({ requestBody: { name, parents: [parentId] }, media: { mimeType, body: Readable.from(body) }, fields: 'id' });
+        const r = await api.files.create({
+          requestBody: { name, mimeType: 'application/vnd.google-apps.folder', ...(parentId ? { parents: [parentId] } : {}) },
+          fields: 'id',
+        });
+        if (!r.data.id) throw new Error('Drive returned no folder id');
+        return r.data.id;
+      } catch (e) {
+        if (parentId && isNotFound(e)) throw new DriveNotFoundError(parentId);
+        throw e;
+      }
+    },
+    async createFile(name, mimeType, body, parentId, timeoutMs) {
+      try {
+        // Per-request options override the client's. A timeout key set to undefined would remove the 120 s limit, so it is left out.
+        const r = await api.files.create(
+          { requestBody: { name, parents: [parentId] }, media: { mimeType, body: Readable.from(body) }, fields: 'id' },
+          timeoutMs === undefined ? {} : { timeout: timeoutMs },
+        );
         if (!r.data.id) throw new Error('Drive returned no file id');
         return r.data.id;
       } catch (e) {

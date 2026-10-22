@@ -218,3 +218,51 @@ export function mediaForMessages(db: Db, messageIds: number[], maxChars: number)
     .all({ maxChars, ids: JSON.stringify(messageIds) }) as RawMedia[];
   return new Map(rows.map((r) => [r.message_id, toRow(r)]));
 }
+
+export interface UploadCandidate {
+  id: number;
+  clientId: number;
+  clientName: string;
+  kind: MediaKind;
+  mimeType: string | null;
+  fileName: string | null;
+  localPath: string;
+  ts: string;
+  driveAttempts: number;
+}
+
+/**
+ * Saved images and documents from people whose role is 'client', not yet in Drive and due for an attempt.
+ * Never the founder's own messages, messages deleted for everyone, or inactive clients.
+ */
+export function uploadCandidates(db: Db, nowIso: string, limit: number): UploadCandidate[] {
+  return db
+    .prepare(`SELECT m.id, m.client_id AS clientId, c.name AS clientName, m.kind, m.mime_type AS mimeType, m.file_name AS fileName,
+        m.local_path AS localPath, msg.ts, m.drive_attempts AS driveAttempts
+      FROM media m JOIN messages msg ON msg.id = m.message_id JOIN clients c ON c.id = m.client_id
+      JOIN people p ON p.client_id = m.client_id AND p.jid = msg.sender_jid
+      WHERE m.local_path IS NOT NULL AND m.drive_file_id IS NULL AND m.drive_failed = 0
+        AND (m.drive_next_at IS NULL OR m.drive_next_at <= ?)
+        AND m.kind IN ('image', 'document') AND msg.revoked = 0 AND msg.from_me = 0 AND p.role = 'client' AND c.active = 1
+      ORDER BY m.id LIMIT ?`)
+    .all(nowIso, limit) as UploadCandidate[];
+}
+
+export function markUploaded(db: Db, id: number, driveFileId: string): void {
+  db.prepare('UPDATE media SET drive_file_id = ?, drive_next_at = NULL WHERE id = ?').run(driveFileId, id);
+}
+
+/** failed: stop trying until the next service start. countAttempt false: a sign-in problem, not the file's fault. */
+export function markUploadFailed(db: Db, id: number, f: { failed: boolean; nextAt: string | null; countAttempt: boolean }): void {
+  db.prepare('UPDATE media SET drive_attempts = drive_attempts + @inc, drive_failed = @failed, drive_next_at = @nextAt WHERE id = @id').run({
+    id,
+    inc: f.countAttempt ? 1 : 0,
+    failed: f.failed ? 1 : 0,
+    nextAt: f.nextAt,
+  });
+}
+
+/** At service start: uploads that gave up get a fresh set of attempts. Returns how many. */
+export function resetUploadFailures(db: Db): number {
+  return db.prepare('UPDATE media SET drive_failed = 0, drive_attempts = 0, drive_next_at = NULL WHERE drive_failed = 1 AND drive_file_id IS NULL').run().changes;
+}
