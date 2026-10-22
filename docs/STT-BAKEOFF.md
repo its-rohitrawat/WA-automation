@@ -99,7 +99,7 @@ The tool never shows a key or the words of a recording in these messages.
 - **`warning ... could not delete the provider's stored copy`**: the transcript is saved here, but ElevenLabs still has its copy. Delete it in your ElevenLabs history.
 - **`Stopped: ...`**: the tool hit a problem it could not work around, such as a full disk. Finished results are kept. Run the same command again, or add `--report-only` to rebuild the report. If the message names a damaged file in `results\`, do not delete it; ask the agent's builder.
 - **`These recordings could not be read`**: a listed file is damaged, still downloading, or not audio. Move it out of the folder or replace it. Nothing was sent.
-- **`The recording ... changed after it was prepared or sent`**: the file is not the one used before. Rename the new file (it then gets a new id), or move the two folders the message names aside. Nothing was sent.
+- **`The recording ... changed after it was prepared or sent`**: the file is not the one used before. Rename the new file (it then gets a new id), or move the two folders the message names aside. Nothing was sent. The dry run and `--report-only` stop too, so the report never shows the old recording's words for the new one.
 - **`Another run is using ...`**: a run is going in another window. If none is, the last one ended abruptly (for example the PC restarted): delete `run.lock` in the output folder.
 - **`.env: ...`** or **`Unknown or misspelt option`**: fix the setting it names in `.env`, or check the option's spelling. Options start with two dashes, for example `--yes`.
 

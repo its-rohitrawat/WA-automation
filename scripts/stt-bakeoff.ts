@@ -5,7 +5,7 @@ import { parseArgs } from 'node:util';
 import { AudioError, Ffmpeg, findFfmpeg } from '../src/stt/audio.ts';
 import { refusals } from '../src/stt/bakeoff/checks.ts';
 import { KEY_NAMES, loadBakeoffEnv, type BakeoffEnv } from '../src/stt/bakeoff/env.ts';
-import { saveSourcePrint, sourceChanged, sourcePrint, takeRunLock, type SourcePrint } from '../src/stt/bakeoff/guards.ts';
+import { checkRecordings, saveSourcePrint, sourcePrint, takeRunLock } from '../src/stt/bakeoff/guards.ts';
 import { Ledger, LedgerError } from '../src/stt/bakeoff/ledger.ts';
 import { buildPlan, formatPlan } from '../src/stt/bakeoff/plan.ts';
 import { buildReport, buildScoreSheet, localTime } from '../src/stt/bakeoff/report.ts';
@@ -179,6 +179,18 @@ if (unreadable.length > 0) {
   );
 }
 
+// Every recording found is checked, in every mode, before any report or plan: a recording replaced under the same name
+// must not get the old one's results, in report.md or in a send, nor a mix of both.
+const preparedDir = join(outDir, 'prepared');
+const { changed, prints } = checkRecordings(found, preparedDir);
+if (changed.length > 0) {
+  stop(
+    changed
+      .map((s) => `The recording ${s.path} changed after it was prepared or sent. Rename the new file (it then gets a new id), or move ${preparedDir} and ${join(outDir, 'results', s.id)} aside.`)
+      .join('\n') + '\nNothing was sent.',
+  );
+}
+
 /** Rebuilds report.md and the transcripts from saved results; writes scores.md only the first time. */
 function writeReport(): { report: string; scores: string } {
   const outcomes = ledger.outcomes().filter((o) => foundIds.has(o.sampleId));
@@ -254,21 +266,9 @@ if (problems.length > 0) stop(`\nNot sending:\n${problems.map((p) => `  - ${p}`)
 lockFile = takeRunLock(outDir, `STT bake-off run started ${localTime(new Date())} (process ${process.pid}).`);
 if (lockFile === null) stop(`Another run is using ${outDir}. If none is running, delete run.lock there.`);
 
-// Local and free: one mono 16 kHz MP3 per sample that has something to send. Every recording is checked first: a
-// recording changed since it was prepared must not get the old one's results or a mix of both.
+// Local and free: one mono 16 kHz MP3 per sample that has something to send. Every recording was checked against its
+// saved print above; the prints read then are saved beside the MP3s.
 const toPrepare = measured.filter(({ sample }) => items.some((i) => i.sample.id === sample.id && i.action !== 'skip'));
-const preparedDir = join(outDir, 'prepared');
-const prints = new Map<string, SourcePrint>();
-for (const { sample } of toPrepare) {
-  const now = sourcePrint(sample.path);
-  if (sourceChanged(join(preparedDir, `${sample.id}.mp3`), now)) {
-    stop(
-      `The recording ${sample.path} changed after it was prepared or sent. Rename the new file (it then gets a new id), ` +
-        `or move ${preparedDir} and ${join(outDir, 'results', sample.id)} aside. Nothing was sent.`,
-    );
-  }
-  prints.set(sample.id, now);
-}
 const prepared = new Map<string, AudioPart>();
 mkdirSync(preparedDir, { recursive: true });
 for (const { sample } of toPrepare) {

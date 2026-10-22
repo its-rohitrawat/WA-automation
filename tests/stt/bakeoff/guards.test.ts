@@ -1,8 +1,8 @@
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { saveSourcePrint, sourceChanged, sourcePrint, takeRunLock } from '../../../src/stt/bakeoff/guards.ts';
+import { checkRecordings, saveSourcePrint, sourceChanged, sourcePrint, takeRunLock } from '../../../src/stt/bakeoff/guards.ts';
 
 let dir: string;
 
@@ -74,5 +74,33 @@ describe('source fingerprint', () => {
     expect(sourceChanged(mp3(), sourcePrint(recording()))).toBe(true);
     writeFileSync(`${mp3()}.source.json`, '{"size":"5"}');
     expect(sourceChanged(mp3(), sourcePrint(recording()))).toBe(true);
+  });
+});
+
+describe('checkRecordings', () => {
+  it('names every recording replaced since it was prepared, whether this run sends it or not, and prints them all', () => {
+    const prepared = join(dir, 'prepared');
+    mkdirSync(prepared);
+    const kept = { id: 'voice-a-11111111', path: join(dir, 'a.ogg') };
+    const replaced = { id: 'voice-b-22222222', path: join(dir, 'b.ogg') };
+    const fresh = { id: 'voice-c-33333333', path: join(dir, 'c.ogg') };
+    for (const r of [kept, replaced, fresh]) writeFileSync(r.path, 'audio');
+    for (const r of [kept, replaced]) {
+      const mp3 = join(prepared, `${r.id}.mp3`);
+      writeFileSync(mp3, 'mp3');
+      saveSourcePrint(mp3, sourcePrint(r.path));
+    }
+    // A new recording saved under the old name: same id, different audio.
+    writeFileSync(replaced.path, 'a longer, different recording');
+    const { changed, prints } = checkRecordings([kept, replaced, fresh], prepared);
+    expect(changed).toEqual([replaced]);
+    expect([...prints.keys()]).toEqual([kept.id, replaced.id, fresh.id]);
+    expect(prints.get(replaced.id)).toEqual(sourcePrint(replaced.path));
+  });
+
+  it('finds nothing changed before anything was prepared', () => {
+    const r = { id: 'voice-a-11111111', path: join(dir, 'a.ogg') };
+    writeFileSync(r.path, 'audio');
+    expect(checkRecordings([r], join(dir, 'prepared')).changed).toEqual([]);
   });
 });

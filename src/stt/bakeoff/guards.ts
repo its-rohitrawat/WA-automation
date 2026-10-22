@@ -36,6 +36,25 @@ export function sourceChanged(mp3: string, now: SourcePrint): boolean {
   return saved === 'unreadable' || saved.size !== now.size || saved.mtimeMs !== now.mtimeMs;
 }
 
+/**
+ * Checks every recording found against what was prepared from it in preparedDir (<id>.mp3), whether or not this run
+ * sends it: one replaced under the same name must get neither the old one's results in the report nor a mix of both.
+ * Returns the changed ones, in the order given, and every recording's print as read now, to be saved after preparing.
+ */
+export function checkRecordings<T extends { id: string; path: string }>(
+  recordings: readonly T[],
+  preparedDir: string,
+): { changed: T[]; prints: Map<string, SourcePrint> } {
+  const prints = new Map<string, SourcePrint>();
+  const changed: T[] = [];
+  for (const r of recordings) {
+    const now = sourcePrint(r.path);
+    prints.set(r.id, now);
+    if (sourceChanged(join(preparedDir, `${r.id}.mp3`), now)) changed.push(r);
+  }
+  return { changed, prints };
+}
+
 /** Written after the MP3 is made. */
 export function saveSourcePrint(mp3: string, print: SourcePrint): void {
   writeFileSync(printFile(mp3), `${JSON.stringify(print)}\n`);
