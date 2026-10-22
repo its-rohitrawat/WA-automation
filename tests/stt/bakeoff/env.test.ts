@@ -10,8 +10,8 @@ describe('parseBakeoffEnv', () => {
   });
 
   it('reads the bake-off settings and ignores everything else', () => {
-    const env = parseBakeoffEnv({ SARVAM_API_KEY: 's', FFMPEG_PATH: 'C:\f.exe', INR_PER_USD: '90', ANTHROPIC_API_KEY: 'other', EMPTY: '' });
-    expect(env).toEqual({ SARVAM_API_KEY: 's', FFMPEG_PATH: 'C:\f.exe', INR_PER_USD: 90 });
+    const env = parseBakeoffEnv({ SARVAM_API_KEY: 's', FFMPEG_PATH: 'C:\\f.exe', INR_PER_USD: '90', ANTHROPIC_API_KEY: 'other', EMPTY: '' });
+    expect(env).toEqual({ SARVAM_API_KEY: 's', FFMPEG_PATH: 'C:\\f.exe', INR_PER_USD: 90 });
   });
 
   it('treats an empty value as unset', () => {

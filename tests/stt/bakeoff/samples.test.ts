@@ -41,8 +41,8 @@ describe('findSamples', () => {
     const dir = join(root, 'voice-notes');
     mkdirSync(dir);
     // The same name in composed and decomposed Unicode: two files on NTFS, one id.
-    writeFileSync(join(dir, 'café.ogg'), 'x');
-    writeFileSync(join(dir, 'café.ogg'), 'x');
+    writeFileSync(join(dir, 'café.ogg'.normalize('NFC')), 'x');
+    writeFileSync(join(dir, 'café.ogg'.normalize('NFD')), 'x');
     if (readdirSync(dir).length < 2) return; // a file system that normalises names keeps only one file
     expect(() => findSamples(root)).toThrow(/same id/);
   });
