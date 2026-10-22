@@ -8,7 +8,8 @@ async function run(job: ParseJob): Promise<ParseReply> {
       const { extractDocxText } = await import('./docx.ts');
       return { ok: true, result: await extractDocxText(job.bytes, job) };
     }
-    return { ok: false, code: 'unsupported' };
+    const { extractPdfText } = await import('./pdf.ts');
+    return { ok: true, result: await extractPdfText(job.bytes, job) };
   } catch (e) {
     return { ok: false, code: e instanceof ParseError ? e.code : 'parse_failed' };
   }

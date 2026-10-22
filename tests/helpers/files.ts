@@ -18,3 +18,33 @@ export async function tinyDocx(paragraphs: string[]): Promise<Buffer> {
   );
   return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
 }
+
+/**
+ * A minimal valid PDF, one entry per page. Each page lists its text lines. An empty list draws a line and has no
+ * text layer, like a scan.
+ */
+export function tinyPdf(pages: string[][]): Buffer {
+  const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+  const objects: string[] = [];
+  const pageIds = pages.map((_, i) => 4 + i * 2);
+  objects[1] = '<< /Type /Catalog /Pages 2 0 R >>';
+  objects[2] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pages.length} >>`;
+  objects[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>';
+  pages.forEach((lines, i) => {
+    const pageId = 4 + i * 2;
+    const content = lines.length ? `BT /F1 12 Tf 14 TL 72 720 Td ${lines.map((l) => `(${esc(l)}) Tj T*`).join(' ')} ET` : '0 0 m 200 200 l S';
+    objects[pageId] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${pageId + 1} 0 R >>`;
+    objects[pageId + 1] = `<< /Length ${Buffer.byteLength(content, 'latin1')} >>\nstream\n${content}\nendstream`;
+  });
+  let out = '%PDF-1.4\n';
+  const offsets: number[] = [];
+  for (let id = 1; id < objects.length; id++) {
+    offsets[id] = Buffer.byteLength(out, 'latin1');
+    out += `${id} 0 obj\n${objects[id]}\nendobj\n`;
+  }
+  const xrefAt = Buffer.byteLength(out, 'latin1');
+  out += `xref\n0 ${objects.length}\n0000000000 65535 f \n`;
+  for (let id = 1; id < objects.length; id++) out += `${String(offsets[id]).padStart(10, '0')} 00000 n \n`;
+  out += `trailer\n<< /Size ${objects.length} /Root 1 0 R >>\nstartxref\n${xrefAt}\n%%EOF\n`;
+  return Buffer.from(out, 'latin1');
+}
