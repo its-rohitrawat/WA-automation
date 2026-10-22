@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { parseEnv } from 'node:util';
 import { z } from 'zod';
 import type { ProviderId } from '../types.ts';
 
@@ -7,7 +9,8 @@ const BakeoffEnvSchema = z.object({
   OPENAI_API_KEY: z.string().min(1).optional(),
   FFMPEG_PATH: z.string().min(1).optional(),
   STT_SAMPLES_DIR: z.string().min(1).optional(),
-  INR_PER_USD: z.coerce.number().positive().default(88),
+  // A sane band: a typo such as 8800 would make every Sarvam estimate 100 times too small.
+  INR_PER_USD: z.coerce.number().finite().min(40).max(200).default(88),
 });
 
 export type BakeoffEnv = z.infer<typeof BakeoffEnvSchema>;
@@ -29,12 +32,19 @@ export function parseBakeoffEnv(source: Record<string, string | undefined>): Bak
   return result.data;
 }
 
-/** The bake-off settings from .env in the current folder (the worktree root), then from the process environment. */
-export function loadBakeoffEnv(file = '.env'): BakeoffEnv {
+/**
+ * The bake-off settings: .env first, then the shell for anything the file does not set. The file wins, even with an
+ * empty value, so a stray key in the shell (another project's account) is never used. The file is parsed here rather
+ * than loaded into process.env, so its keys never reach the environment that ffmpeg inherits.
+ */
+export function loadBakeoffEnv(file = '.env', source: Record<string, string | undefined> = process.env): BakeoffEnv {
+  let fromFile: Record<string, string | undefined> = {};
   try {
-    process.loadEnvFile(file);
+    const text = readFileSync(file, 'utf8');
+    // Notepad can save a byte-order mark (U+FEFF), which would otherwise become part of the first name.
+    fromFile = parseEnv(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
   }
-  return parseBakeoffEnv(process.env);
+  return parseBakeoffEnv({ ...source, ...fromFile });
 }
