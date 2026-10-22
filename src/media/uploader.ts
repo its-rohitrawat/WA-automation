@@ -47,14 +47,21 @@ type PauseReason = 'ledger' | 'auth';
  * dropped connection after the bytes arrived, or a crash before the id is saved. The next try then uploads the file
  * again, leaving a second copy in the Files folder. The app has only the drive.file scope, and checking whether the
  * first copy arrived would need a listing call on every retry, which this uploader does not make. A duplicate is
- * visible to the owner, and nothing is lost.
+ * visible to the owner, and nothing is lost. Drive's files.generateIds would avoid this: save an id on the row before
+ * the first try, reuse it on every retry, and take Drive's 409 "already exists" as success. It is not used because it
+ * has not been verified under the drive.file scope, so it stays a later option.
  *
  * When Drive answers but the database cannot save the id, the id is kept in memory and only the save is retried,
- * never the upload. A restart before it is saved forgets it, so the file is uploaded once more.
+ * never the upload. stop() tries each such save once more. A restart before it is saved forgets it, so the file is
+ * uploaded once more.
  *
  * When the database cannot save a result, or Google sign-in fails, the pass stops and no pass starts for 15 minutes
  * (in memory: a restart also ends the pause). So a file is never uploaded again on every tick, and a sign-in problem
  * does not call Google on every tick.
+ *
+ * A new folder's id is saved right after Drive makes the folder. If that save fails, the folder stays in Drive, empty,
+ * and the next try makes another. A database that cannot write cannot save the failed try either, so the uploader
+ * pauses: this can leave one orphan empty folder per pause.
  */
 export class DriveFileUploader {
   readonly #o: UploaderOptions;
@@ -81,14 +88,27 @@ export class DriveFileUploader {
     return this.#current;
   }
 
-  /** Starts no more passes and waits for the one in flight, up to timeoutMs. Leaves no timer. */
+  /**
+   * Starts no more passes and waits for the one in flight, up to timeoutMs. Leaves no timer. Then tries once more to save
+   * each Drive id still held in memory, even while paused: a restart forgets them, and each such file would be uploaded
+   * again. A save that fails is logged and left; nothing is retried after this.
+   */
   async stop(timeoutMs: number): Promise<void> {
     this.#stopped = true;
     const current = this.#current;
-    if (!current) return;
-    let t: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([current, new Promise<void>((r) => (t = setTimeout(r, timeoutMs)))]);
-    clearTimeout(t);
+    if (current) {
+      let t: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([current, new Promise<void>((r) => (t = setTimeout(r, timeoutMs)))]);
+      clearTimeout(t);
+    }
+    for (const [id, u] of this.#unsaved) {
+      try {
+        markUploaded(this.#o.db, id, u.fileId);
+        this.#unsaved.delete(id);
+      } catch (err) {
+        this.#o.log.warn({ mediaId: id, clientId: u.clientId, step: 'save_id', err }, 'file upload result could not be saved');
+      }
+    }
   }
 
   async #pass(): Promise<void> {
@@ -179,23 +199,31 @@ export class DriveFileUploader {
     // Innermost first: Files, then the client folder, then Clients.
     const levels = [`drive_files_folder:${c.clientId}`, `drive_client_folder:${c.clientId}`, 'drive_clients_folder'];
     for (let step = 0; ; step++) {
+      let freshFiles = false;
       try {
-        return await api.createFile(name, mime, bytes, await this.#filesFolder(root, c), FILE_UPLOAD_TIMEOUT_MS);
+        const files = await this.#filesFolder(root, c);
+        freshFiles = files.created;
+        return await api.createFile(name, mime, bytes, files.id, FILE_UPLOAD_TIMEOUT_MS);
       } catch (e) {
         if (!(e instanceof DriveNotFoundError) || step === levels.length) throw e;
+        // The file was refused in a Files folder made just now, inside folders that were there a moment ago: nothing
+        // is missing to rebuild, and moving up would make a second client folder with the same name. The try fails.
+        if (freshFiles) throw e;
         // A folder was removed in Drive. Rebuild one more level per retry, starting with Files. Creating a folder inside
-        // a removed one fails the same way, so a level is rebuilt only when it is really gone. A rebuilt level gets new
-        // folders inside it too, so the inner keys are cleared again (a retry may have saved a new inner id).
+        // a removed one fails the same way, so a level above Files is rebuilt only when creating a folder in it failed.
+        // A rebuilt level gets new folders inside it too, so the inner keys are cleared again (a retry may have saved a
+        // new inner id).
         for (const key of levels.slice(0, step + 1)) setKv(db, key, '');
       }
     }
   }
 
-  async #filesFolder(root: string, c: UploadCandidate): Promise<string> {
+  /** The client's Files folder, made (with any folder above it that is not saved) when no id is saved. created: made just now. */
+  async #filesFolder(root: string, c: UploadCandidate): Promise<{ id: string; created: boolean }> {
     const { db, api } = this.#o;
     const filesKey = `drive_files_folder:${c.clientId}`;
     const cached = getKv(db, filesKey);
-    if (cached) return cached;
+    if (cached) return { id: cached, created: false };
     let clients = getKv(db, 'drive_clients_folder');
     if (!clients) {
       clients = await api.createFolder('Clients', root);
@@ -209,6 +237,6 @@ export class DriveFileUploader {
     }
     const files = await api.createFolder('Files', client);
     setKv(db, filesKey, files);
-    return files;
+    return { id: files, created: true };
   }
 }
