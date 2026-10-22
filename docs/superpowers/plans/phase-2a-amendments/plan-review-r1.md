@@ -151,6 +151,16 @@ Every task's implementer applies the items listed under its task, in addition to
 
 - **10a. Inactive clients (review I4).** If the row's client is inactive, the processor does nothing and leaves the row pending. Test it.
 - **10b. No tight loop (review M12).** When the processor finds no job for a row (the message was deleted, or the row is missing data), it fails the row with `no_job`. It must not return "skipped" with the row still pending, which would loop.
+- **10d. Claude unavailable is not a failed attempt (controller, after the 8c trade-off).** With one SDK attempt per media call (8c), the plan's 3 attempts over about 6 minutes would leave every image and scan shared during a longer Claude outage `failed` for good.
+  - When the extractor throws an error that was released, not billed: `Anthropic.RateLimitError` (429), an `Anthropic.APIError` with status 500 or above (529 overloaded included), or an `Anthropic.APIConnectionError` that is not an `APIConnectionTimeoutError` and for which `neverSent(e)` (src/brain/paidCall.ts) is true. In that case the processor defers the row with `countAttempt: false` and error code `ai_unavailable`.
+  - The waits grow: 5, 15, 30 and 60 minutes, then 60 minutes each time.
+  - When the row's `createdAt` is more than 24 hours old, it fails with `ai_unavailable` instead.
+  - Everything else keeps the plan's rule: a timeout after sending (`ai_timeout`, which is billed), invalid output, 4xx errors such as 400, 401 and 403, and download errors count an attempt and use `RETRY_DELAYS_MS`.
+  - Tests:
+    - a 529 and a never-sent connection error each defer without counting an attempt, with the growing waits;
+    - the row fails once it is older than 24 hours;
+    - a 401 still counts an attempt;
+    - an APIConnectionTimeoutError still counts an attempt.
 - **10c. Local file names (amendment 4a, triage T4-01).** Saved files are named `<waId>-<mediaId>.<ext>` by `mediaRelPath` (src/media/paths.ts). The plan's Task 10 tests still expect the old names: `IMG1.jpg` and `media/SHA/2026-10/IMG1.jpg` (plan lines 3008-3098). Expect `IMG1-<mediaId>.jpg` and `media/SHA/2026-10/IMG1-<mediaId>.jpg`, with the id of the row under test, and build paths only through `mediaRelPath`, never by hand.
 
 ## Task 11: media queue
