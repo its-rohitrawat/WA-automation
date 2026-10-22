@@ -91,6 +91,17 @@ describe('media store', () => {
     expect(getMedia(db, video)).toMatchObject({ kind: 'video', status: 'metadata', fileName: null, seconds: 42, hasRef: false, errorCode: null });
   });
 
+  it('refuses a file whose client is not its message\'s client, and stores nothing (T1-09)', () => {
+    const db = seededDb();
+    const sharmaMessage = message(db, 'A'); // client 1
+    expect(() => insertMedia(db, media(sharmaMessage, { clientId: 2 }))).toThrow(/not a message of client 2/);
+    expect(() => insertMedia(db, media(9999))).toThrow(/not a message of client 1/); // no such message at all
+    expect(db.prepare('SELECT COUNT(*) AS n FROM media').get()).toEqual({ n: 0 });
+    // The right client still works.
+    const id = insertMedia(db, media(sharmaMessage));
+    expect(getMedia(db, id)).toMatchObject({ messageId: sharmaMessage, clientId: 1 });
+  });
+
   it('refuses an unknown kind, status or text kind', () => {
     const db = seededDb();
     expect(() => insertMedia(db, media(message(db, 'K'), { kind: 'gif' as MediaKind }))).toThrow(/CHECK/);

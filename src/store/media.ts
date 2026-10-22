@@ -127,14 +127,19 @@ function toRow(r: RawMedia): MediaRow {
   };
 }
 
+/**
+ * Records a file of a stored message. The row is written only when messageId is a message of clientId (T1-09): every
+ * later step files the original, the Drive copy and Files received by the row's client, so a mismatch is refused here.
+ */
 export function insertMedia(db: Db, m: NewMedia): number {
-  return Number(
-    db
-      .prepare(`INSERT INTO media (message_id, client_id, kind, status, mime_type, file_name, file_size, seconds, forwarded, ref_enc, error_code,
-          created_at, updated_at)
-        VALUES (@messageId, @clientId, @kind, @status, @mimeType, @fileName, @fileSize, @seconds, @forwarded, @refEnc, @errorCode, @createdAt, @createdAt)`)
-      .run({ ...m, forwarded: m.forwarded ? 1 : 0 }).lastInsertRowid,
-  );
+  const r = db
+    .prepare(`INSERT INTO media (message_id, client_id, kind, status, mime_type, file_name, file_size, seconds, forwarded, ref_enc, error_code,
+        created_at, updated_at)
+      SELECT id, client_id, @kind, @status, @mimeType, @fileName, @fileSize, @seconds, @forwarded, @refEnc, @errorCode, @createdAt, @createdAt
+      FROM messages WHERE id = @messageId AND client_id = @clientId`)
+    .run({ ...m, forwarded: m.forwarded ? 1 : 0 });
+  if (r.changes === 0) throw new Error(`insertMedia: message ${m.messageId} is not a message of client ${m.clientId}`);
+  return Number(r.lastInsertRowid);
 }
 
 export function messageRowId(db: Db, clientId: number, waId: string): number | undefined {
