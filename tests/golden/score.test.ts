@@ -174,12 +174,12 @@ describe('Phase 2a golden cases (16a and the media follow-ups)', () => {
 
   it('(d) marks the late file\'s message "(re-check: file now read)" and shows the file it was waiting for', () => {
     expect(lineOf(late, 'g14')).toBe(
-      '[g14] 2026-10-19 16:00 · P1 Mr. Sharma [client] (re-check: file now read): Signed contract courier kar diya tha, tracking ka screenshot bhej raha hoon. '
-        + '{image: A screenshot of a courier tracking page. Visible text: "Shipment status: Delivered", "Delivered on 19 Oct 2026, 1:20 pm", '
-        + '"Received by: Rahul", "Contents: documents".}',
+      '[g14] 2026-10-19 16:00 · P1 Mr. Sharma [client] (re-check: file now read): Signed contract bhej raha hoon. '
+        + '{document "contract-signed.pdf" (PDF, 3 pages): A scanned 3-page website design contract between Design Studio and Sharma Interiors. '
+        + 'Page 3 is signed by Mr. Sharma and dated 18 Oct 2026, with the company stamp.}',
     );
-    expect(buildUserContent(late.input)).toContain('- SHA-060 [client] [maybe_done] "Signed contract to reach the studio by courier"');
-    expect(buildUserContent(late.input)).toContain(' · source [g14] · quote "Signed contract courier kar diya tha, tracking ka screenshot bhej raha hoon."');
+    expect(buildUserContent(late.input)).toContain('- SHA-060 [client] [maybe_done] "Send the signed contract"');
+    expect(buildUserContent(late.input)).toContain(' · source [g14] · quote "Signed contract bhej raha hoon."');
   });
 
   it('(e) shows the team member\'s ✅ on the client\'s delivery by handle and role only', () => {

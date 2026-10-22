@@ -192,22 +192,23 @@ export const GOLDEN_CASES: GoldenCase[] = [
     forbid: [{ op: 'close_task', taskCode: 'SHA-050' }],
   },
   {
-    // 12h: the first run saw the picture as "still being read" and raised SHA-060 from g14. The tracking screenshot,
-    // read late, shows the contract delivered to the team, so the task closes; it is not raised again.
+    // 12h: the first run saw the PDF as "still being read" and raised SHA-060 from g14 as maybe_done. The scan, read
+    // late, is the signed contract itself: what the client owed visibly arrives, so the task closes and is not raised
+    // again. (A courier tracking screenshot alone would not close it: the owner wants the team to confirm receipt.)
     name: 'a file read late closes the task its message already gave, without a second task',
     input: withFiles(
       base(
         [{
-          ...task('SHA-060', 'Signed contract to reach the studio by courier', 'client', 'maybe_done', 'other'),
-          assignedTo: 'Mr. Sharma', askedBy: null, raisedOn: '2026-10-19', deadline: null, latestProgress: 'Client says the signed contract was couriered.',
-          sourceWaId: 'g14', sourceQuote: 'Signed contract courier kar diya tha, tracking ka screenshot bhej raha hoon.', sourceDate: '2026-10-19',
+          ...task('SHA-060', 'Send the signed contract', 'client', 'maybe_done', 'other'),
+          assignedTo: 'Mr. Sharma', askedBy: null, raisedOn: '2026-10-19', deadline: null, latestProgress: 'Client says the signed contract is attached.',
+          sourceWaId: 'g14', sourceQuote: 'Signed contract bhej raha hoon.', sourceDate: '2026-10-19',
         }],
-        [msg('g14', SHARMA, 'Mr. Sharma', '16:00', 'Signed contract courier kar diya tha, tracking ka screenshot bhej raha hoon.', false, { id: 14, mediaType: 'image', version: 1 })],
+        [msg('g14', SHARMA, 'Mr. Sharma', '16:00', 'Signed contract bhej raha hoon.', false, { id: 14, mediaType: 'document', version: 1 })],
       ),
       [file(14, {
-        requeuedForText: true,
-        text: 'A screenshot of a courier tracking page. Visible text: "Shipment status: Delivered", "Delivered on 19 Oct 2026, 1:20 pm", "Received by: Rahul", '
-          + '"Contents: documents".',
+        kind: 'document', mimeType: 'application/pdf', fileName: 'contract-signed.pdf', pageCount: 3, requeuedForText: true,
+        text: 'A scanned 3-page website design contract between Design Studio and Sharma Interiors. Page 3 is signed by Mr. Sharma '
+          + 'and dated 18 Oct 2026, with the company stamp.',
       })],
     ),
     expect: [{ op: 'close_task', taskCode: 'SHA-060', source: 'g14' }],
