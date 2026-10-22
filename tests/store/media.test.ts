@@ -309,6 +309,22 @@ describe('a file read after its message was processed (12h)', () => {
     expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ id: messageId, requeueReason: null })]);
   });
 
+  it.each(['voice', 'audio', 'video', 'sticker'] as const)('kind %s: a file that finishes with text re-queues nothing, as a Phase 2b transcript would (M1)', (kind) => {
+    const { db, id, messageId } = processedWithFile({ kind, mimeType: null });
+    finishMedia(db, id, { textKind: 'extract', text: 'Payment done, please check', pageCount: null, note: null, at: LATER });
+    expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'Payment done, please check' });
+    expect(stateOf(db, messageId, id)).toEqual({ processedAt: NOW, version: 0, requeuedForText: false });
+    expect(listUnprocessed(db, 1)).toEqual([]);
+  });
+
+  it.each(['voice', 'audio'] as const)('kind %s: a file that finishes with text leaves the version of a message never processed alone (M1)', (kind) => {
+    const db = seededDb();
+    const messageId = message(db, 'A', { mediaType: kind });
+    const id = insertMedia(db, media(messageId, { kind, mimeType: null }));
+    finishMedia(db, id, { textKind: 'extract', text: 'Payment done', pageCount: null, note: null, at: LATER });
+    expect(stateOf(db, messageId, id)).toEqual({ processedAt: null, version: 0, requeuedForText: false });
+  });
+
   it('never re-queues a message deleted for everyone', () => {
     const { db, id, messageId } = processedWithFile();
     applyRevoke(db, 1, 'A');

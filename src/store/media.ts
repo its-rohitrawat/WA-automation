@@ -190,12 +190,22 @@ export function markDownloaded(db: Db, id: number, d: { localPath: string; sha25
 }
 
 /**
+ * Amendment 12h: an SQL condition on the media table, true for a finished file whose text queues its message again: an
+ * image or a document with a description or text. Only those two kinds (review M1): voice notes and audio never hold up
+ * a message (12e), so text for them, such as a Phase 2b transcript, queues nothing; nor does any other kind.
+ * finishMedia and markProcessedIfUnchanged (src/store/messages.ts) share it, so they never disagree about a file.
+ */
+export const REQUEUING_FILE = `media.kind IN ('image', 'document') AND media.status = 'done' AND media.text_kind IS NOT NULL
+  AND media.text IS NOT NULL AND media.text <> ''`;
+
+/**
  * The file has been read. NUL characters in the text are stored as spaces: SQLite's substr() and length() stop at the first one,
  * so mediaForMessages would otherwise cut the text there. A space rather than nothing keeps the words and numbers on either side apart.
  *
- * Amendment 12h, in the same transaction, when the file has a description or text (never for a message deleted for everyone):
- * - its message's version goes up, so a run that holds the message (and showed the file as still being read) does not
- *   mark it processed (markProcessedIfUnchanged);
+ * Amendment 12h, in the same transaction, when an image or a document finishes with a description or text
+ * (REQUEUING_FILE; never for a message deleted for everyone):
+ * - its message's version goes up by exactly 1, so a run that holds the message (and showed the file as still being
+ *   read) does not mark it processed (markProcessedIfUnchanged);
  * - a message that was processed before (processed_at set, or queued again for an edit or a reaction) is queued again,
  *   and the file is flagged requeued_for_text, so the prompt marks the message "(re-check: file now read)".
  * A message never processed is not flagged: its next run sees the file like any other.
@@ -205,11 +215,11 @@ export function finishMedia(db: Db, id: number, x: { textKind: TextKind | null; 
   db.transaction(() => {
     db.prepare(`UPDATE media SET status = 'done', text_kind = @textKind, text = @text, page_count = @pageCount, note = @note, error_code = NULL,
       next_attempt_at = NULL, ref_enc = NULL, updated_at = @at WHERE id = @id`).run({ id, ...x, text });
-    if (x.textKind === null || text === null || text === '') return;
     // The flag first: it needs processed_at as it was before the message is queued again.
-    db.prepare(`UPDATE media SET requeued_for_text = 1 WHERE id = ? AND message_id IN
+    db.prepare(`UPDATE media SET requeued_for_text = 1 WHERE id = ? AND ${REQUEUING_FILE} AND message_id IN
       (SELECT id FROM messages WHERE revoked = 0 AND (processed_at IS NOT NULL OR requeue_reason IS NOT NULL))`).run(id);
-    db.prepare('UPDATE messages SET processed_at = NULL, version = version + 1 WHERE id = (SELECT message_id FROM media WHERE id = ?) AND revoked = 0').run(id);
+    db.prepare(`UPDATE messages SET processed_at = NULL, version = version + 1
+      WHERE revoked = 0 AND id = (SELECT message_id FROM media WHERE id = ? AND ${REQUEUING_FILE})`).run(id);
   }).immediate();
 }
 

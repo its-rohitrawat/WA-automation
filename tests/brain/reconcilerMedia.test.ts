@@ -377,6 +377,18 @@ describe('Reconciler with shared files', () => {
       expect(ai.calls).toHaveLength(1);
     });
 
+    it.each(['voice', 'audio'] as const)('kind %s: a file that gets text after its message was processed queues nothing, as a Phase 2b transcript would (M1)', async (kind) => {
+      const { db, ai, r } = setup();
+      const id = file(db, 'V1', '2026-10-19T07:01:00.000Z', { kind, mimeType: 'audio/ogg' });
+      expect(await r.run(1)).toMatchObject({ status: 'ok' });
+      expect(processedAt(db, 'V1')).not.toBeNull();
+      finishMedia(db, id, { textKind: 'extract', text: 'Payment done, please check', pageCount: null, note: null, at: '2026-10-19T08:10:00.000Z' });
+      expect(flagOf(db, id)).toBe(false);
+      expect(processedAt(db, 'V1')).not.toBeNull();
+      expect(await r.run(1)).toEqual({ status: 'noop' });
+      expect(ai.calls).toHaveLength(1);
+    });
+
     it('a message deleted for everyone is not queued again when its file is read', async () => {
       const { db, ai, r } = setup();
       const id = image(db, 'I1', '2026-10-19T07:01:00.000Z', undefined, { createdAt: '2026-10-19T07:20:00.000Z' });

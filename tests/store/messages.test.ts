@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Db } from '../../src/store/db.ts';
-import { failMedia, finishMedia, getMedia, insertMedia } from '../../src/store/media.ts';
+import { failMedia, finishMedia, getMedia, insertMedia, type MediaKind } from '../../src/store/media.ts';
 import {
   applyEdit, applyRevoke, clientIdsWithUnprocessed, insertMessage, lastActivity, listRecentProcessed, listUnprocessed,
   markProcessed, markProcessedIfUnchanged, reactionsFor, resetProcessedSince, unprocessedCounts, upsertReaction, type NewMessage,
@@ -214,14 +214,14 @@ describe('messages repository', () => {
 
 describe('a file read after its message was processed (12h)', () => {
   const READ = { textKind: 'description' as const, text: 'A payment receipt', pageCount: null, note: null, at: LATER };
-  /** A message with a pending image. */
-  function withFile() {
+  /** A message with a pending file, an image unless kind says otherwise. */
+  function withFile(kind: MediaKind = 'image') {
     const db = seededDb();
-    insertMessage(db, msg({ mediaType: 'image' }));
+    insertMessage(db, msg({ mediaType: kind }));
     const messageId = listUnprocessed(db, 1)[0]!.id;
     const fileId = insertMedia(db, {
-      messageId, clientId: 1, kind: 'image', status: 'pending', mimeType: 'image/jpeg', fileName: null, fileSize: 1000, seconds: null, forwarded: false,
-      refEnc: null, errorCode: null, createdAt: NOW,
+      messageId, clientId: 1, kind, status: 'pending', mimeType: kind === 'image' ? 'image/jpeg' : null, fileName: null, fileSize: 1000, seconds: null,
+      forwarded: false, refEnc: null, errorCode: null, createdAt: NOW,
     });
     return { db, messageId, fileId };
   }
@@ -323,6 +323,29 @@ describe('a file read after its message was processed (12h)', () => {
     applyEdit(db, 1, 'm1', 'hello edited twice', LATER);
     expect(markProcessedIfUnchanged(db, again, LATER)).toBe(1);
     expect(flag(db, fileId)).toBe(false);
+  });
+
+  describe('only images and documents count (M1)', () => {
+    const TRANSCRIPT = { textKind: 'extract' as const, text: 'Payment done, please check', pageCount: null, note: null, at: LATER };
+
+    it.each(['voice', 'audio'] as const)('kind %s: a file that gets text during the call leaves its message to be marked processed', (kind) => {
+      const { db, fileId } = withFile(kind);
+      const seen = seenBy(db, { fileUnread: true });
+      finishMedia(db, fileId, TRANSCRIPT);
+      expect(markProcessedIfUnchanged(db, seen, LATER)).toBe(0);
+      expect(flag(db, fileId)).toBe(false);
+      expect(listUnprocessed(db, 1)).toEqual([]);
+    });
+
+    it.each(['voice', 'audio'] as const)('kind %s: a file that gets text during a call that also saw an edit is not flagged, and the edit keeps its label', (kind) => {
+      const { db, fileId } = withFile(kind);
+      const seen = seenBy(db, { fileUnread: true });
+      applyEdit(db, 1, 'm1', 'hello edited', LATER);
+      finishMedia(db, fileId, TRANSCRIPT);
+      expect(markProcessedIfUnchanged(db, seen, LATER)).toBe(1);
+      expect(flag(db, fileId)).toBe(false);
+      expect(listUnprocessed(db, 1)[0]).toMatchObject({ waId: 'm1', processedAt: null, requeueReason: 'edit' });
+    });
   });
 
   it('a run that showed the file unread marks the message processed when nothing changed', () => {
