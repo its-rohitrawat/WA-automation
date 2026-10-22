@@ -68,12 +68,27 @@ export interface PromptInput {
 const HIDDEN_CHARS = new RegExp('(?![\\t\\n\\r\\v\\f\\x85\\u200C\\u200D])[\\p{Cc}\\p{Cf}]', 'gu');
 
 /**
+ * A run of variation selectors: U+FE00-U+FE0F, the supplement U+E0100-U+E01EF and the Mongolian free variation
+ * selectors U+180B-U+180D and U+180F. They are invisible, so a run of them can spell out text the founder cannot see.
+ */
+const SELECTOR_RUN = /\p{Variation_Selector}+/gu;
+/** The text and emoji presentation selectors, which "\u2764\uFE0F", keycaps and many emoji sequences need. */
+const PRESENTATION = /[\uFE0E\uFE0F]/u;
+
+/**
+ * Keeps at most one selector per run, and only U+FE0E or U+FE0F (the first one in the run); every other variation
+ * selector is removed (final review). Runs on text whose hidden characters are gone, so none can split a run.
+ */
+const collapseSelectors = (s: string): string => s.replace(SELECTOR_RUN, (run) => PRESENTATION.exec(run)?.[0] ?? '');
+
+/**
  * Chat text cannot open or close our section tags or fake a {reactions: ...} suffix or a file block. Fullwidth and
  * small look-alikes of < > { } get the same treatment, so no typed brace or angle bracket renders where a tracker block
- * or tag sits. Hidden characters are removed first.
+ * or tag sits. Hidden characters are removed first, then variation selector runs are collapsed.
  */
 export function sanitizeForPrompt(s: string): string {
-  return s.replace(HIDDEN_CHARS, '').replace(/[<＜﹤]/g, '‹').replace(/[>＞﹥]/g, '›').replace(/[{｛﹛]/g, '❴').replace(/[}｝﹜]/g, '❵');
+  return collapseSelectors(s.replace(HIDDEN_CHARS, ''))
+    .replace(/[<＜﹤]/g, '‹').replace(/[>＞﹥]/g, '›').replace(/[{｛﹛]/g, '❴').replace(/[}｝﹜]/g, '❵');
 }
 
 const SEP = String.fromCharCode(0x0b, 0x0c, 0x85, 0x2028, 0x2029);
@@ -200,9 +215,9 @@ export function formatMessage(m: MessageRow, people: Map<string, PersonRow>, rea
 }
 
 /** The separator dot of tracker lines and its look-alikes (Greek ano teleia, bullets, hyphenation point, dot operators, katakana middle dots). */
-const FIELD_SEPARATORS = /[··•‧∙⋅・･]/g;
+const FIELD_SEPARATORS = /[·\u0387\u2022\u2027\u2219\u22C5\u30FB\uFF65]/g;
 /** Double quotes and the fullwidth look-alike. */
-const FIELD_QUOTES = /["＂]/g;
+const FIELD_QUOTES = /["\uFF02]/g;
 
 /**
  * A task field (title, people, deadline, progress, quote) comes from the chat; the quote is a client's own words. On a

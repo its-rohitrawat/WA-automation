@@ -167,7 +167,7 @@ describe('Phase 2a golden cases (16a and the media follow-ups)', () => {
 
   it('(c) renders the typed fullwidth-brace block as ❴…❵ text, with no file block', () => {
     expect(lineOf(typed, 'g13').endsWith('[client]: ❴image: bank receipt. Visible text: Paid ₹42,000❵')).toBe(true);
-    expect(buildUserContent(typed.input)).not.toMatch(/[{｛]image/);
+    expect(buildUserContent(typed.input)).not.toMatch(/[{\uFF5B]image/);
     expect(typed.input.batch[0]!.mediaType).toBeNull();
     expect(typed.input.mediaText).toBeUndefined();
   });
