@@ -249,3 +249,16 @@ Task 14 added these defensive pieces, which are in neither the plan nor the item
 - **INVISIBLE also removes U+FFFE and U+FFFF** (src/media/paths.ts). sanitizeFileName drops them from file names, for the same XML reason. The same two cleanup changes apply to it.
 - **CLIENT_FILES_LIMIT** (src/store/media.ts). A client tab lists at most the newest 500 files. Older files drop out of the tab without notice, but stay in Drive.
 - **"1 page" in the singular.** A one-page document reads "1 page", not "1 pages", in Files received and in the prompt.
+
+## Task 13 additions (Job C, recorded 22 Oct 2026)
+The plan's Task 13 text describes the older uploader. Where they differ, the code and this list win. All of it is tested (tests/media/uploader.test.ts).
+- **One pause, in memory.** When the database cannot save an upload result (a failed try or a Drive id), the pass stops and no pass starts for 15 minutes. A Google sign-in failure pauses the whole uploader for 15 minutes the same way, instead of deferring one file. There is one pause for both reasons, and a restart ends it.
+- **Unsaved Drive ids.** When Drive took a file but its id cannot be saved, the id is kept in memory. Only the record is retried, at the start of the next pass, never the upload. `stop()` tries each one once more. A restart before it is saved forgets it, so that file is uploaded once more.
+- **Each row is checked again just before its upload** (`isUploadCandidate`, the same conditions as `uploadCandidates`). A file deleted for everyone, a sender no longer marked client, or a client made inactive during the pass is skipped without counting an attempt.
+- **Folders are rebuilt one level per retry** (Files, then the client folder, then Clients). A level above Files is rebuilt only when creating a folder in it gets Drive's "not found". A "not found" for the file right after a fresh Files folder fails the try, so no second client folder with the same name is made.
+- **`countAttempt` is gone from `markUploadFailed`.** Every failed try counts. A sign-in failure saves nothing for the file, because the whole uploader pauses.
+- **Not done: claim-first uploads.** `files.generateIds` with a 409 "already exists" taken as success would remove duplicate copies after a lost answer. It has not been verified under the `drive.file` scope, so it stays a later option. A folder id that cannot be saved can leave one empty folder per pause.
+
+Job C also hardened 12h's store side (`finishMedia`, src/store/media.ts):
+- **A second finish is a no-op.** Only a pending file is finished. A second call for the same file changes nothing and queues nothing, so the version never moves past seen + 1 for one file.
+- **Text that shows nothing is stored as NULL.** Text made only of spaces, NULs or zero-width characters (`showsText`, src/media/paths.ts) counts as no text: the file is finished without text and never re-queues its message.
