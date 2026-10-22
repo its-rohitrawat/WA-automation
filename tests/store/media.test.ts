@@ -164,10 +164,12 @@ describe('media store', () => {
   it('wipes the sealed details once the original is saved', () => {
     const db = seededDb();
     const id = insertMedia(db, media(message(db, 'A')));
-    markDownloaded(db, id, { localPath: 'media/SHA/2026-10/A.jpg', sha256: 'ab'.repeat(32), fileSize: 2048, at: NOW });
+    markDownloaded(db, id, { localPath: 'media/SHA/2026-10/A.jpg', sha256: 'ab'.repeat(32), fileSize: 2048, at: LATER });
     expect(getMediaRef(db, id)).toBeNull();
-    expect(getMedia(db, id)).toMatchObject({ status: 'pending', hasRef: false, localPath: 'media/SHA/2026-10/A.jpg', sha256: 'ab'.repeat(32), fileSize: 2048 });
-    finishMedia(db, id, { textKind: 'description', text: 'A blue banner', pageCount: null, note: null, at: NOW });
+    expect(getMedia(db, id)).toMatchObject({
+      status: 'pending', hasRef: false, localPath: 'media/SHA/2026-10/A.jpg', sha256: 'ab'.repeat(32), fileSize: 2048, createdAt: NOW, updatedAt: LATER,
+    });
+    finishMedia(db, id, { textKind: 'description', text: 'A blue banner', pageCount: null, note: null, at: LATER });
     expect(getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'description', text: 'A blue banner', textChars: 13, errorCode: null, nextAttemptAt: null });
   });
 
@@ -184,15 +186,15 @@ describe('media store', () => {
     const id = insertMedia(db, media(message(db, 'A')));
     deferMedia(db, id, { errorCode: 'spend_cap', nextAttemptAt: '2026-10-19T08:10:00.000Z', countAttempt: false, at: NOW });
     finishMedia(db, id, { textKind: 'description', text: 'A blue banner', pageCount: null, note: null, at: LATER });
-    expect(getMedia(db, id)).toMatchObject({ status: 'done', errorCode: null, nextAttemptAt: null });
+    expect(getMedia(db, id)).toMatchObject({ status: 'done', errorCode: null, nextAttemptAt: null, updatedAt: LATER });
   });
 
   it('a deferral keeps the details; a final failure wipes them', () => {
     const db = seededDb();
     const id = insertMedia(db, media(message(db, 'A')));
-    deferMedia(db, id, { errorCode: 'spend_cap', nextAttemptAt: '2026-10-19T08:10:00.000Z', countAttempt: false, at: NOW });
-    expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'spend_cap', attempts: 0, hasRef: true });
-    failMedia(db, id, { status: 'unavailable', errorCode: 'expired', at: NOW });
+    deferMedia(db, id, { errorCode: 'spend_cap', nextAttemptAt: '2026-10-19T09:10:00.000Z', countAttempt: false, at: LATER });
+    expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'spend_cap', attempts: 0, hasRef: true, createdAt: NOW, updatedAt: LATER });
+    failMedia(db, id, { status: 'unavailable', errorCode: 'expired', at: LATER });
     expect(getMediaRef(db, id)).toBeNull();
     expect(getMedia(db, id)).toMatchObject({ status: 'unavailable', errorCode: 'expired', nextAttemptAt: null });
   });
