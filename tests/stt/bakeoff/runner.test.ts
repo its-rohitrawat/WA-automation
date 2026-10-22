@@ -158,6 +158,21 @@ describe('runPlan', () => {
     await runPlan([item(meeting, 'sarvam', { state: 'unknown', action: 'resume', estimateUsd: 0 })], deps([second]));
     expect(second.calls[0]!.opts.resumeJobId).toBe('job-9');
     expect(ledger.state('meeting-b', 'sarvam')).toBe('done');
+    // Waiting on the saved job is not a paid request: only the first run's send is recorded.
+    expect(ledger.attempt('meeting-b', 'sarvam')?.sends).toEqual(['1970-01-01T00:00:01.000Z']);
+  });
+
+  it('records each paid request on the attempt before making it', async () => {
+    let clock = 1_000;
+    const seen: string[][] = [];
+    const p = new FakeProvider('openai', 300, async () => {
+      seen.push([...(ledger.attempt('meeting-b', 'openai')?.sends ?? [])]);
+      clock += 1_000;
+      return { model: 'm', segments: [], billedSeconds: null, raw: {} };
+    });
+    await runPlan([item(meeting, 'openai', { seconds: 400, parts: 2 })], deps([p], { partsFor: twoParts, now: () => clock }));
+    expect(seen).toEqual([['1970-01-01T00:00:01.000Z'], ['1970-01-01T00:00:01.000Z', '1970-01-01T00:00:02.000Z']]);
+    expect(ledger.attempt('meeting-b', 'openai')?.sends).toHaveLength(2);
   });
 
   it('reuses parts answered in an earlier run', async () => {
@@ -185,7 +200,7 @@ describe('runPlan', () => {
   });
 
   it('sends nothing when a saved part was cut differently, and leaves the slot unknown', async () => {
-    ledger.begin({ sampleId: 'meeting-b', provider: 'openai', model: 'gpt-4o-transcribe-diarize', startedAt: '2026-10-22T10:00:00.000Z', jobIds: {} });
+    ledger.begin({ sampleId: 'meeting-b', provider: 'openai', model: 'gpt-4o-transcribe-diarize', startedAt: '2026-10-22T10:00:00.000Z', jobIds: {}, sends: [] });
     ledger.savePart('meeting-b', 'openai', 1, { offset: 250, seconds: 150 }, { model: 'm', segments: [], billedSeconds: 150, raw: {} });
     const p = new FakeProvider('openai', 300);
     const sum = await runPlan([item(meeting, 'openai', { seconds: 400, parts: 2, state: 'unknown' })], deps([p], { partsFor: twoParts }));

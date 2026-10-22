@@ -109,7 +109,7 @@ async function runSlot(item: PlanItem, provider: SttProvider, deps: RunDeps, now
   }
   // An unanswered slot keeps its attempt, with any saved job ids; anything else starts a fresh one.
   if (item.state !== 'unknown' || !ledger.attempt(sample.id, item.provider)) {
-    ledger.begin({ sampleId: sample.id, provider: item.provider, model: item.model, startedAt: new Date(now()).toISOString(), jobIds: {} });
+    ledger.begin({ sampleId: sample.id, provider: item.provider, model: item.model, startedAt: new Date(now()).toISOString(), jobIds: {}, sends: [] });
   }
   const jobIds = ledger.attempt(sample.id, item.provider)?.jobIds ?? {};
   // Every saved answer is checked against today's cut before anything is sent, so a mismatch sends nothing at all.
@@ -130,7 +130,11 @@ async function runSlot(item: PlanItem, provider: SttProvider, deps: RunDeps, now
         continue;
       }
       const resumeJobId = jobIds[String(n)];
-      if (!resumeJobId) sentSeconds += part.seconds;
+      if (!resumeJobId) {
+        // On disk before the paid request leaves, so the attempt lists every send even when its answer is lost.
+        ledger.noteSend(sample.id, item.provider, new Date(now()).toISOString());
+        sentSeconds += part.seconds;
+      }
       const result = await provider.transcribe(part, {
         diarize: item.diarize,
         resumeJobId,

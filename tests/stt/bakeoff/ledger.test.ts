@@ -19,6 +19,7 @@ const attempt = (over: Partial<Attempt> = {}): Attempt => ({
   model: 'saaras:v4',
   startedAt: '2026-10-22T10:00:00.000Z',
   jobIds: {},
+  sends: [],
   ...over,
 });
 
@@ -67,7 +68,18 @@ describe('Ledger', () => {
   });
 
   it('refuses a job id before the attempt exists', () => {
-    expect(() => ledger.saveJobId('voice-a', 'sarvam', 0, 'job-1')).toThrow();
+    expect(() => ledger.saveJobId('voice-a', 'sarvam', 0, 'job-1')).toThrow(LedgerError);
+  });
+
+  it('records the time of each paid request on the attempt', () => {
+    ledger.begin(attempt({ jobIds: { '0': 'job-1' } }));
+    ledger.noteSend('voice-a', 'sarvam', '2026-10-22T10:00:01.000Z');
+    ledger.noteSend('voice-a', 'sarvam', '2026-10-22T10:05:00.000Z');
+    expect(ledger.attempt('voice-a', 'sarvam')).toEqual(attempt({ jobIds: { '0': 'job-1' }, sends: ['2026-10-22T10:00:01.000Z', '2026-10-22T10:05:00.000Z'] }));
+  });
+
+  it('refuses to record a send before the attempt exists', () => {
+    expect(() => ledger.noteSend('voice-a', 'sarvam', '2026-10-22T10:00:01.000Z')).toThrow(LedgerError);
   });
 
   it('stores and returns each part answer for the same cut, within 0.01 s', () => {

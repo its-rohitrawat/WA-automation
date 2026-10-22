@@ -13,6 +13,8 @@ export interface Attempt {
   startedAt: string;
   /** Provider job ids by part number, so a later run can wait on a job instead of paying twice. */
   jobIds: Record<string, string>;
+  /** ISO time of each paid request, written just before it goes out: the record of what may be billed. */
+  sends: string[];
 }
 
 export interface Outcome {
@@ -138,6 +140,13 @@ export class Ledger {
     if (!attempt) throw new LedgerError('no_attempt', 'saveJobId called before begin');
     attempt.jobIds[String(part)] = jobId;
     this.begin(attempt);
+  }
+
+  /** Appends the time of a paid request to the attempt. Called before the request, so a lost answer still shows it. */
+  noteSend(sampleId: string, provider: ProviderId, at: string): void {
+    const attempt = this.attempt(sampleId, provider);
+    if (!attempt) throw new LedgerError('no_attempt', 'noteSend called before begin');
+    this.begin({ ...attempt, sends: [...(attempt.sends ?? []), at] });
   }
 
   /**
