@@ -64,8 +64,12 @@ export interface FileFacts {
 /** The extractor's note for a forwarded image or scanned PDF that was not sent to Claude (owner decision D2). */
 export const FORWARDED_NOT_DESCRIBED = 'forwarded_not_described';
 
-/** Control and format characters (direction overrides, zero-width marks) and U+FFFE/U+FFFF, which XML does not allow. */
-const HIDDEN = /[\p{Cc}\p{Cf}\uFFFE\uFFFF]/gu;
+/**
+ * Control and format characters (direction overrides, zero-width marks), lone surrogates (T4-02) and U+FFFE/U+FFFF,
+ * which XML does not allow. The zero-width non-joiner and joiner (U+200C, U+200D) are kept (T14-12): emoji sequences
+ * and some Indic spellings need them, and they cannot reorder text.
+ */
+const HIDDEN = /(?![\u200C\u200D])[\p{Cc}\p{Cf}\p{Cs}\uFFFE\uFFFF]/gu;
 
 /** File text on one line, without hidden characters that could disguise it, cut to max characters. */
 function oneLine(s: string, max: number): string {

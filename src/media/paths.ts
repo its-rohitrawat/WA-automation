@@ -63,8 +63,12 @@ export function extForMime(mime: string | null, kind: MediaKind): string {
  * Control and format characters (Unicode Cc and Cf): zero-width characters, direction marks, embeddings, overrides and
  * isolates (used to disguise names like "invoice\u202Efdp.exe"), and tag characters, which can hide text from a reader.
  * Also U+FFFE and U+FFFF, which XML does not allow: one in a name would make the workbook unreadable.
+ * Also lone surrogates (Cs; with the u flag a well-formed pair is one character and never matches), which are half a
+ * character (T4-02).
+ * The zero-width non-joiner and joiner (U+200C, U+200D) are kept (T14-12): emoji sequences and some Indic spellings need
+ * them, and they cannot reorder text.
  */
-const INVISIBLE = /[\p{Cc}\p{Cf}\uFFFE\uFFFF]/gu;
+const INVISIBLE = /(?![\u200C\u200D])[\p{Cc}\p{Cf}\p{Cs}\uFFFE\uFFFF]/gu;
 
 const EDGE = /[.\s]/;
 

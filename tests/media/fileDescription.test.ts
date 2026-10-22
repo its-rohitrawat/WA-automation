@@ -33,6 +33,15 @@ describe('fileDescription', () => {
       .toBe('A receipt txet');
   });
 
+  it('keeps the zero-width joiner and non-joiner in file text, and still drops overrides and lone surrogates (T14-12, T4-02)', () => {
+    const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}'; // one family emoji, joined by ZWJ
+    expect(fileDescription(facts({ kind: 'image', mimeType: 'image/jpeg', pageCount: null, textKind: 'description', textStart: `A ${family} photo\u202E` })))
+      .toBe(`A ${family} photo`);
+    // Devanagari "ksha" written with a ZWJ (half form) and with a ZWNJ (visible virama).
+    expect(fileDescription(facts({ textStart: 'Total \u0915\u094D\u200D\u0937 \u0915\u094D\u200C\u0937\uD800' })))
+      .toBe('PDF, 3 pages: Total \u0915\u094D\u200D\u0937 \u0915\u094D\u200C\u0937');
+  });
+
   it('says plainly what happened to files that were not read', () => {
     expect(fileDescription(facts({ status: 'pending', textKind: null, textStart: null }))).toBe('PDF, being read');
     expect(fileDescription(facts({ status: 'unavailable', textKind: null, textStart: null }))).toBe('PDF, could not be downloaded from WhatsApp');
