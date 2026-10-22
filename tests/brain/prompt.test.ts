@@ -190,9 +190,11 @@ describe('SYSTEM_PROMPT', () => {
   it('explains the file re-check marker right after the other re-check markers, which stay as they were (12h, M3)', () => {
     expect(SYSTEM_PROMPT).toContain(
       '- A message marked "(re-check: edited)" or "(re-check: new reaction)" was processed before. Act only on what changed, the new wording or the new reaction, and do not add its tasks again.\n'
-        + '- A message marked "(re-check: file now read)" was processed before its shared file could be read. Act on what the file\'s block adds (and on any change another marker names), and update the existing task rather than adding a new one.\n',
+        + '- A message marked "(re-check: file now read)" was processed before its shared file could be read. Act on what the file\'s block adds (and on any change another marker names). Do not add again a task, reminder or decision this message already gave; update that task instead.\n',
     );
     expect(SYSTEM_PROMPT).not.toContain("Act only on what the file's block shows");
+    // I-1 (option A): the line must not assume the message already gave a task.
+    expect(SYSTEM_PROMPT).not.toContain('update the existing task rather than adding a new one');
   });
 
   it('says a message header can hold more than one re-check marker (12h, M3)', () => {

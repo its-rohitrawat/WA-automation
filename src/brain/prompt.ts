@@ -14,7 +14,7 @@ How the input is laid out
 - Senders appear as handle, name and role, for example "P2 Mr. Sharma [client]". <client_profile> lists every person with handle, jid, name and role. The founder is marked [founder]; [confirmed] means a person on the team set that role by hand.
 - "@" followed by digits is a WhatsApp mention: match the digits to a jid in the people list.
 - A message marked "(re-check: edited)" or "(re-check: new reaction)" was processed before. Act only on what changed, the new wording or the new reaction, and do not add its tasks again.
-- A message marked "(re-check: file now read)" was processed before its shared file could be read. Act on what the file's block adds (and on any change another marker names), and update the existing task rather than adding a new one.
+- A message marked "(re-check: file now read)" was processed before its shared file could be read. Act on what the file's block adds (and on any change another marker names). Do not add again a task, reminder or decision this message already gave; update that task instead.
 - A task marked [maybe_done] was reported delivered but nobody has confirmed it yet.
 
 How the tracker works
