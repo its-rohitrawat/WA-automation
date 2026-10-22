@@ -1,6 +1,6 @@
 import { openAsBlob } from 'node:fs';
 import { z } from 'zod';
-import { longFetch, parseAnswer, requestJson, type HttpFetch } from '../http.ts';
+import { longFetch, parseAnswer, requestJson, requestOk, type HttpFetch } from '../http.ts';
 import { modelFor } from '../prices.ts';
 import { wordsToSegments, type TimedWord } from '../segments.ts';
 import type { AudioPart, ProviderResult, Segment, SttProvider, TranscribeOptions } from '../types.ts';
@@ -18,6 +18,7 @@ const ResultSchema = z.object({
   audio_duration_secs: z.number().nullish().catch(null),
 });
 type ElevenLabsResult = z.output<typeof ResultSchema>;
+const StoredSchema = z.object({ transcription_id: z.string().min(1) });
 
 export interface ElevenLabsOptions {
   apiKey: string;
@@ -60,6 +61,14 @@ export class ElevenLabsProvider implements SttProvider {
     });
     const r = parseAnswer(ResultSchema, raw, 'unreadable_result');
     return { model, segments: toSegments(r, audio.seconds), billedSeconds: r.audio_duration_secs ?? null, raw };
+  }
+
+  /** ElevenLabs keeps every transcript in the account; once it is saved locally, that copy is deleted. Free. */
+  async forget(result: ProviderResult): Promise<void> {
+    const stored = StoredSchema.safeParse(result.raw);
+    if (!stored.success) return;
+    const url = `${ENDPOINT.replace('/speech-to-text', '/speech-to-text/transcripts')}/${encodeURIComponent(stored.data.transcription_id)}`;
+    await requestOk(this.#http, url, { method: 'DELETE', headers: { 'xi-api-key': this.#key }, signal: AbortSignal.timeout(60_000) });
   }
 }
 

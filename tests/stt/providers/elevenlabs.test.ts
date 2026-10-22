@@ -22,13 +22,15 @@ const ANSWER = {
 };
 
 function fake(res: () => Response) {
-  const calls: { url: string; headers: Headers; form: FormData }[] = [];
+  const calls: { url: string; method: string; headers: Headers; form: FormData; signal: AbortSignal | null }[] = [];
   const http: HttpFetch = async (url, init) => {
-    calls.push({ url, headers: new Headers(init.headers), form: init.body as FormData });
+    calls.push({ url, method: init.method ?? 'GET', headers: new Headers(init.headers), form: init.body as FormData, signal: init.signal ?? null });
     return res();
   };
   return { http, calls };
 }
+
+const saved = (raw: unknown) => ({ model: 'scribe_v2', segments: [], billedSeconds: 4.2, raw });
 
 let audio: AudioPart;
 
@@ -92,5 +94,34 @@ describe('ElevenLabsProvider', () => {
     expect(err).toBeInstanceOf(SttHttpError);
     expect(err).toMatchObject({ status: 401, detail: 'invalid_api_key' });
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe('ElevenLabsProvider.forget', () => {
+  it("deletes the account's stored transcript with the key", async () => {
+    const { http, calls } = fake(() => new Response(null, { status: 200 }));
+    await new ElevenLabsProvider({ apiKey: 'test-key', http }).forget(saved({ ...ANSWER, transcription_id: 'tr/1 x' }));
+    expect(calls).toHaveLength(1);
+    const { url, method, headers, signal } = calls[0]!;
+    expect(url).toBe('https://api.elevenlabs.io/v1/speech-to-text/transcripts/tr%2F1%20x');
+    expect(method).toBe('DELETE');
+    expect(headers.get('xi-api-key')).toBe('test-key');
+    expect(signal).not.toBeNull();
+  });
+
+  it('sends nothing when the answer has no transcription id', async () => {
+    const { http, calls } = fake(() => new Response(null, { status: 200 }));
+    const p = new ElevenLabsProvider({ apiKey: 'k', http });
+    for (const raw of [ANSWER, { ...ANSWER, transcription_id: '' }, { ...ANSWER, transcription_id: 7 }, null, 'text']) {
+      await p.forget(saved(raw));
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it('reports a refused delete as SttHttpError', async () => {
+    const { http } = fake(() => Response.json({ detail: { status: 'not_found' } }, { status: 404 }));
+    const err = await new ElevenLabsProvider({ apiKey: 'k', http }).forget(saved({ transcription_id: 'tr1' })).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SttHttpError);
+    expect(err).toMatchObject({ status: 404, detail: 'not_found' });
   });
 });

@@ -42,4 +42,6 @@ export interface SttProvider {
   /** Longest audio one request may carry. Longer files are split into parts of at most this length. */
   readonly maxPartSeconds: number;
   transcribe(audio: AudioPart, opts: TranscribeOptions): Promise<ProviderResult>;
+  /** Deletes the provider's own stored copy of this answer. Called only after the answer is saved locally. Free. */
+  forget?(result: ProviderResult): Promise<void>;
 }
