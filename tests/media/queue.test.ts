@@ -394,7 +394,8 @@ describe('MediaQueue never retries a file in a loop', () => {
   });
 
   it.each([
-    { why: 'a download error (counted attempt)', o: { fetcher: async () => { throw new MediaDownloadError('network'); } }, waitMs: MINUTE, errorCode: 'network' },
+    { why: 'a download error (counted attempt)', o: { fetcher: async () => { throw new MediaDownloadError('http_503'); } }, waitMs: MINUTE, errorCode: 'http_503' },
+    { why: 'no network (final review FR2)', o: { fetcher: async () => { throw new MediaDownloadError('network'); } }, waitMs: 5 * MINUTE, errorCode: 'network' },
     { why: 'Claude unavailable (529)', o: { extract: async () => { throw Anthropic.APIError.generate(529, undefined, 'overloaded', new Headers()); } }, waitMs: 5 * MINUTE, errorCode: 'ai_unavailable' },
     { why: 'the daily spend cap', o: { extract: async () => { throw new SpendCapReachedError(); } }, waitMs: 10 * MINUTE, errorCode: 'spend_cap' },
   ])('a file deferred for $why is not started again until it is due', async ({ o, waitMs, errorCode }) => {

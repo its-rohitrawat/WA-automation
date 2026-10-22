@@ -36,10 +36,14 @@ const RETRY_DELAYS_MS = [60_000, 5 * 60_000];
 export const SPEND_RETRY_MS = 10 * 60_000;
 /** Claude was busy, down or refused the key, and nothing was billed: waits that grow, then hourly (amendment 10d). */
 const AI_UNAVAILABLE = 'ai_unavailable';
-const AI_UNAVAILABLE_WAITS_MS = [5, 15, 30, 60].map((m) => m * 60_000);
 /**
- * A file still unread because Claude is unavailable this long after it arrived, or after the service started if that
- * is later (amendment 10f), is given up.
+ * The waits that grow, then hourly, of a problem that may pass and costs nothing to try again: Claude unavailable
+ * (amendment 10d), or a download that cannot reach WhatsApp or a disk that refuses the file (final review FR2).
+ */
+const GROWING_WAITS_MS = [5, 15, 30, 60].map((m) => m * 60_000);
+/**
+ * A file still unread because Claude is unavailable, or still not downloaded and saved because of the network or the
+ * disk, this long after it arrived, or after the service started if that is later (amendment 10f), is given up.
  */
 export const AI_UNAVAILABLE_MAX_AGE_MS = 24 * 60 * 60_000;
 
@@ -88,16 +92,37 @@ function claudeUnavailable(e: unknown): boolean {
   return e instanceof Anthropic.APIError && typeof e.status === 'number' && e.status >= 500;
 }
 
+/** Error codes of a download or disk problem that waits without counting an attempt (final review FR2). */
+const isOutageCode = (code: string | null): boolean => code === 'network' || code === 'timeout' || (code?.startsWith('disk_') ?? false);
+
 /**
- * The next wait while Claude stays unavailable. The row keeps no count of these waits, so the last one is read back
- * from the row: deferMedia stores both the time of the deferral (updatedAt) and the next attempt.
+ * Errors met while the original was downloaded, saved, or read back from disk: before anything was decoded or paid
+ * for. Noted, not wrapped, so the error itself still reaches #settle.
  */
-function nextUnavailableWait(row: MediaRow): number {
-  const first = AI_UNAVAILABLE_WAITS_MS[0]!;
-  if (row.errorCode !== AI_UNAVAILABLE || row.nextAttemptAt === null) return first;
+const beforeReading = new WeakSet<object>();
+
+/**
+ * A download that could not reach WhatsApp (no network, or too slow: 'network', 'timeout'), or a disk that would not
+ * take the original or give it back (full, locked by an antivirus: disk_*). Nothing was decoded or paid for, and it may
+ * pass, so it waits without counting an attempt (final review FR2). Other statuses from the media host (http_5xx) keep
+ * the counted retries. A disk error after the read started counts: that read could have been paid for.
+ */
+function outage(e: unknown): boolean {
+  if (typeof e !== 'object' || e === null || !beforeReading.has(e)) return false;
+  return e instanceof MediaDownloadError ? e.code === 'network' || e.code === 'timeout' : retryCode(e).startsWith('disk_');
+}
+
+/**
+ * The next of the growing waits while the same kind of problem lasts (`same` tells it by the row's error code). The row
+ * keeps no count of these waits, so the last one is read back from the row: deferMedia stores both the time of the
+ * deferral (updatedAt) and the next attempt. `row` is the file as it was before the claim.
+ */
+function nextGrowingWait(row: MediaRow, same: (code: string | null) => boolean): number {
+  const first = GROWING_WAITS_MS[0]!;
+  if (!same(row.errorCode) || row.nextAttemptAt === null) return first;
   const last = Date.parse(row.nextAttemptAt) - Date.parse(row.updatedAt);
   if (!Number.isFinite(last)) return first;
-  return AI_UNAVAILABLE_WAITS_MS.find((w) => w > last) ?? AI_UNAVAILABLE_WAITS_MS[AI_UNAVAILABLE_WAITS_MS.length - 1]!;
+  return GROWING_WAITS_MS.find((w) => w > last) ?? GROWING_WAITS_MS[GROWING_WAITS_MS.length - 1]!;
 }
 
 const sha256Hex = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex');
@@ -176,13 +201,24 @@ export class MediaProcessor {
     return this.#o.clock.now().toISOString();
   }
 
+  /** Whether a file's free waits are over: 24 hours from its arrival, or from the service start if later (10d, 10f, FR2). */
+  #waitedTooLong(row: MediaRow, at: string): boolean {
+    return Date.parse(at) - Math.max(Date.parse(row.createdAt), this.#startedMs) > AI_UNAVAILABLE_MAX_AGE_MS;
+  }
+
   #abs(rel: string): string {
     return join(this.#o.dataDir, ...rel.split('/'));
   }
 
   async #run(row: MediaRow, job: MediaJob): Promise<ProcessOutcome> {
     const { db } = this.#o;
-    const bytes = row.localPath === null ? await this.#download(row, job) : await readFile(this.#abs(row.localPath));
+    let bytes: Buffer;
+    try {
+      bytes = row.localPath === null ? await this.#download(row, job) : await readFile(this.#abs(row.localPath));
+    } catch (e) {
+      if (typeof e === 'object' && e !== null) beforeReading.add(e);
+      throw e;
+    }
     if (job.revoked) {
       finishMedia(db, row.id, { textKind: null, text: null, pageCount: null, note: 'revoked', at: this.#now() });
       return 'done';
@@ -240,14 +276,28 @@ export class MediaProcessor {
       return 'failed';
     }
     if (claudeUnavailable(e)) {
-      if (Date.parse(at) - Math.max(Date.parse(row.createdAt), this.#startedMs) > AI_UNAVAILABLE_MAX_AGE_MS) {
+      if (this.#waitedTooLong(row, at)) {
         failMedia(db, row.id, { status: 'failed', errorCode: AI_UNAVAILABLE, at });
         log.warn({ ...ids, errorCode: AI_UNAVAILABLE, err: e }, 'shared file not read: Claude unavailable for 24 hours');
         return 'failed';
       }
-      const waitMs = nextUnavailableWait(row);
+      const waitMs = nextGrowingWait(row, (code) => code === AI_UNAVAILABLE);
       deferMedia(db, row.id, { errorCode: AI_UNAVAILABLE, nextAttemptAt: new Date(Date.parse(at) + waitMs).toISOString(), attempts: row.attempts, at });
       log.info({ ...ids, errorCode: AI_UNAVAILABLE, waitMinutes: waitMs / 60_000, err: e }, 'Claude unavailable: shared file waits');
+      return 'deferred';
+    }
+    // Final review FR2: a short internet outage, or a full or locked disk, must not lose a file still waiting to be
+    // downloaded. It waits like 10d, and the download details are kept until the download has a final answer.
+    if (outage(e)) {
+      const errorCode = retryCode(e);
+      if (this.#waitedTooLong(row, at)) {
+        failMedia(db, row.id, { status: 'failed', errorCode, at });
+        log.warn({ ...ids, errorCode, err: e }, 'shared file not saved: download or disk still failing after 24 hours');
+        return 'failed';
+      }
+      const waitMs = nextGrowingWait(row, isOutageCode);
+      deferMedia(db, row.id, { errorCode, nextAttemptAt: new Date(Date.parse(at) + waitMs).toISOString(), attempts: row.attempts, at });
+      log.info({ ...ids, errorCode, waitMinutes: waitMs / 60_000, err: e }, 'download or disk problem: shared file waits');
       return 'deferred';
     }
     // Amendment 10e: every retry of a failed scan read could book up to the whole scan ceiling (about $4) again, so

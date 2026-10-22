@@ -430,10 +430,10 @@ describe('app media wiring (15g)', () => {
   });
 
   it('the tick retries a file that is due again, with no new message to kick the queue', async () => {
-    const fetcher = vi.fn<MediaFetcher>().mockRejectedValueOnce(new MediaDownloadError('network')).mockResolvedValue(Buffer.from('jpeg-bytes'));
+    const fetcher = vi.fn<MediaFetcher>().mockRejectedValueOnce(new MediaDownloadError('http_503')).mockResolvedValue(Buffer.from('jpeg-bytes'));
     const { db, app, sock } = setup({ media: { fetcher } });
     shareImage(sock);
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'network' }));
+    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'http_503' }));
     // Retried a minute later, on the first tick after that.
     await vi.advanceTimersByTimeAsync(55_000);
     expect(fetcher).toHaveBeenCalledTimes(1);

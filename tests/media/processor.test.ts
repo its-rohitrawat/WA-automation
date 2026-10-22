@@ -18,7 +18,7 @@ import type { Prices } from '../../src/spend/pricing.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { syncClients } from '../../src/store/clients.ts';
 import type { Db } from '../../src/store/db.ts';
-import { getMedia, getMediaRef } from '../../src/store/media.ts';
+import { dueMediaIds, getMedia, getMediaRef } from '../../src/store/media.ts';
 import { applyRevoke } from '../../src/store/messages.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
@@ -136,9 +136,10 @@ describe('MediaProcessor', () => {
     const folder = dirname(saved(dataDir, rel(id)));
     disk.failNextWrite = true;
     expect((await p.process(id)).outcome).toBe('deferred');
-    expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'disk_ENOSPC', localPath: null, hasRef: true });
+    // A full disk may pass: the file waits without counting an attempt (final review FR2).
+    expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'disk_ENOSPC', nextAttemptAt: at(5 * MINUTE), localPath: null, hasRef: true });
     expect(readdirSync(folder)).toEqual([]); // no partial original and no temp file left behind
-    clock.advance(MINUTE);
+    clock.advance(5 * MINUTE);
     expect((await p.process(id)).outcome).toBe('done');
     expect(getMedia(db, id)).toMatchObject({ status: 'done', localPath: rel(id), fileSize: 10, errorCode: null });
     expect(readFileSync(saved(dataDir, rel(id)), 'utf8')).toBe('jpeg-bytes');
@@ -162,18 +163,89 @@ describe('MediaProcessor', () => {
     expect(existsSync(join(dataDir, 'media'))).toBe(false);
   });
 
-  it('retries a network problem after 1 and 5 minutes, then gives up', async () => {
-    const { db, clock, p, fetcher, share } = setup({ fetcher: async () => { throw new MediaDownloadError('network'); } });
+  it('retries a server error from WhatsApp\'s media host after 1 and 5 minutes, then gives up', async () => {
+    const { db, clock, p, fetcher, share } = setup({ fetcher: async () => { throw new MediaDownloadError('http_503'); } });
     const id = share();
     expect((await p.process(id)).outcome).toBe('deferred');
-    expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'network', nextAttemptAt: '2026-10-19T08:01:00.000Z', hasRef: true });
+    expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'http_503', nextAttemptAt: '2026-10-19T08:01:00.000Z', hasRef: true });
     clock.advance(60_000);
     expect((await p.process(id)).outcome).toBe('deferred');
     expect(getMedia(db, id)).toMatchObject({ attempts: 2, nextAttemptAt: '2026-10-19T08:06:00.000Z' });
     clock.advance(300_000);
     expect((await p.process(id)).outcome).toBe('failed');
-    expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'network', hasRef: false });
+    expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'http_503', hasRef: false });
     expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  // Final review FR2: a short internet outage must not lose files still waiting to download. WhatsApp keeps them for
+  // weeks, but a final failure wipes the download details, so they could never be fetched again.
+  describe('while the internet or the disk is out', () => {
+    const locked = () => Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+    it.each([
+      ['no network', () => new MediaDownloadError('network'), 'network'],
+      ['a download that times out', () => new MediaDownloadError('timeout'), 'timeout'],
+      ['a file locked on disk', locked, 'disk_EBUSY'],
+    ])('%s waits 5, 15, 30 and 60 minutes, then hourly, without counting an attempt, and keeps the download details', async (_name, error, code) => {
+      const { db, clock, p, fetcher, extract, share } = setup({ fetcher: async () => { throw error(); } });
+      const id = share();
+      let elapsed = 0;
+      for (const wait of [5, 15, 30, 60, 60, 60]) {
+        expect(await p.process(id)).toEqual({ outcome: 'deferred', clientId: 1 });
+        expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: code, nextAttemptAt: at(elapsed + wait * MINUTE), hasRef: true, localPath: null });
+        elapsed += wait * MINUTE;
+        clock.advance(wait * MINUTE);
+      }
+      expect(fetcher).toHaveBeenCalledTimes(6);
+      expect(extract).not.toHaveBeenCalled();
+    });
+
+    it('a file still failing to download 24 hours after it arrived fails then, and only then loses its download details', async () => {
+      const { db, clock, p, share } = setup({ fetcher: async () => { throw new MediaDownloadError('network'); } });
+      const id = share();
+      clock.advance(24 * 60 * MINUTE); // exactly 24 hours: still waits
+      expect((await p.process(id)).outcome).toBe('deferred');
+      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'network', attempts: 0, hasRef: true });
+      clock.advance(5 * MINUTE);
+      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
+      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'network', nextAttemptAt: null, hasRef: false });
+    });
+
+    it('counts the 24 hours from the service start for a file saved before it (10f)', async () => {
+      const startedAt = new Date(Date.parse('2026-10-19T08:00:00Z') + 3 * 24 * 60 * MINUTE);
+      const { db, clock, p, share } = setup({ fetcher: async () => { throw new MediaDownloadError('timeout'); }, startedAt });
+      const id = share(); // created 3 days before the start
+      clock.set(startedAt.toISOString());
+      expect(await p.process(id)).toEqual({ outcome: 'deferred', clientId: 1 });
+      clock.advance(24 * 60 * MINUTE + 1);
+      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
+      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'timeout', hasRef: false });
+    });
+
+    it('a 7-minute outage during a backlog loses nothing: every file is read once the line is back', async () => {
+      let down = false;
+      const { db, clock, p, fetcher, share } = setup({
+        fetcher: async () => {
+          if (down) throw new MediaDownloadError('network');
+          return Buffer.from('jpeg-bytes');
+        },
+      });
+      const ids = ['F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8'].map((w) => share(w));
+      // As the queue runs: on every 30-second tick, the two oldest due files. The line drops a minute in, for 7 minutes.
+      for (let t = 0; t <= 2 * 60 * MINUTE; t += 30_000) {
+        down = t >= MINUTE && t < 8 * MINUTE;
+        for (const id of dueMediaIds(db, clock.now().toISOString(), 2)) await p.process(id);
+        clock.advance(30_000);
+      }
+      for (const id of ids) expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'A blue banner with the new logo', hasRef: false });
+      expect(fetcher.mock.calls.length).toBeLessThan(30);
+    });
+
+    it('a disk error while reading, after the file was saved, still counts an attempt: a read could have been paid for', async () => {
+      const { db, p, share } = setup({ extract: async () => { throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }); } });
+      const id = share();
+      expect((await p.process(id)).outcome).toBe('deferred');
+      expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'disk_EBUSY', nextAttemptAt: at(MINUTE) });
+    });
   });
 
   it('waits for the daily budget without counting an attempt, and does not download twice', async () => {
