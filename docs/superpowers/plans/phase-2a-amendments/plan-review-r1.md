@@ -88,6 +88,14 @@ Every task's implementer applies the items listed under its task, in addition to
   The tests "reads the paragraphs", "stops a zip bomb" and both worker DOCX tests must pass for real.
 - **6b. No buffer copy (review M18).** Pass the file Buffer to the worker in `transferList`, so it is not copied (up to 50 MB). Test that the worker still parses.
 
+  *(Revised after the Task 6 review: moving the bytes empties the caller's Buffer. Buffers from `fs.promises.readFile`, and larger results of the fetcher's `Buffer.concat`, own their memory, so this would happen to almost every real file, and the plan's readPdf (Task 9) reads `input.bytes` again after parsing. So the move is opt-in:*
+  - *`parseFile(job, { timeoutMs })` sends one private copy, moved to the worker rather than cloned. The caller's bytes stay intact.*
+  - *`parseFile(job, { timeoutMs, transfer: true })` moves a view that owns its whole ArrayBuffer, with no copy. The caller's view is then empty (length 0).*
+  - *A pooled Buffer, or a view into a larger buffer, is always copied.*
+  - *If the bytes cannot be handed to a worker at all (for example they were already moved away), parseFile rejects with `ParseError('parse_failed')`.*
+
+  *See 9f.)*
+
 ## Task 7: PDF text
 
 - **7a. PDF.js hardening (review M9).** Pass `isEvalSupported: false` and a `maxImageSize` (e.g. 16 megapixels) if unpdf 1.8.1's `getDocumentProxy` / `extractText` options accept them. Check the typings in node_modules after install. If they are not accepted, write that down in the report.
@@ -97,6 +105,11 @@ Every task's implementer applies the items listed under its task, in addition to
 
 - **8a. Image output (review M20).** `IMAGE_MAX_TOKENS = 4_000`. Thinking is always on, and 2,048 could end with no text, which means 3 paid retries.
 - **8b. PDF page cost (review M3).** `PDF_TOKENS_PER_PAGE = 5_000`, so the estimate stays a ceiling on high-resolution models.
+- **8c. One SDK attempt per media call (Task 8 review).** The media client is built with `maxRetries: MEDIA_SDK_MAX_RETRIES` (0) and a 600 s timeout, not the plan's `SDK_MAX_RETRIES` (2) and 180 s.
+  - Why: a lost connection or timeout is booked at the estimate once per SDK attempt, and a scanned PDF reserves about $4.2 (9g). Three attempts would book about $12.5 from one file, most of the default $15 daily cap.
+  - One attempt of up to 600 s stays inside the 45-minute reservation lifetime. A non-streaming request with 8,000 output tokens is under the SDK's 10-minute limit.
+  - `withReservation` takes the attempt count as a required 5th argument, `attempts`, with no default, so a caller that leaves it out does not type-check. `settleFailedCall` keeps its default, `SDK_MAX_RETRIES + 1`, for the reconciler.
+  - Trade-off: a transient 429, 529 or 5xx error is released (not billed) but no longer retried inside the call. It uses one of the media queue's 3 attempts (Task 11: retried after 1 minute, then after 5 minutes). A Claude outage of more than about 6 minutes therefore leaves the images and scans shared during it `failed`.
 
 ## Task 9: image preparation and extractor
 
@@ -110,11 +123,45 @@ Every task's implementer applies the items listed under its task, in addition to
   Tests: SVG input is refused; a TIFF input is refused; JPEG and PNG still work.
 - **9d. EXIF wording (review M6).** Say "EXIF/GPS is stripped from what is sent to Claude". The original uploaded to Drive is the client's file, unchanged. Fix the Decisions text and code comments.
 - **9e. Forwarded (D2).** A forwarded image, or a forwarded document that would need the paid scanned-PDF call, is never sent to Claude. Result: note `forwarded_not_described`; the status is final (done), so it never blocks. Local DOCX/PDF text extraction still runs for forwarded documents. Tests for both.
+- **9f. Parser bytes (Task 6 review).** parseFile moves the caller's bytes only when asked (see 6b).
+  - `ExtractorDeps.parse` becomes `parse?: (job: ParseJob, o?: { transfer?: boolean }) => Promise<ParseResult>`. The default is `(job, o) => parseFile(job, { timeoutMs: MEDIA_LIMITS.parseTimeoutMs, ...o })`.
+  - readDocx passes `{ transfer: true }`. Neither it nor the processor reads the bytes after extract, so a DOCX of up to 50 MB is not copied.
+  - readPdf must **not** pass `transfer`. It reads `input.bytes` after parsing: in the `maxScannedPdfBytes` check, and in `d.ai.readScannedPdf(input.bytes)`, a paid call that has already reserved spend. As a guard, save `const size = input.bytes.length` before parsing and use `size` in the scan-size check.
+  - Tests: the fake `parse` behaves like the real one. When `o?.transfer` is true it detaches the bytes: `structuredClone(job.bytes.buffer, { transfer: [job.bytes.buffer] })`. Such a test needs input bytes that own their memory, e.g. `Buffer.from(new Uint8Array([...]).buffer)`, because a pooled Buffer cannot be transferred. Using the real parseFile also works. Assert that:
+    - readScannedPdf receives the full bytes;
+    - the `scan_too_long` byte limit still fires for a scan over `maxScannedPdfBytes`;
+    - readDocx asks for `transfer`.
+- **9g. The PDF page count is not a limit (Task 7 review).** `ParseResult.pageCount` comes from the file's own /Count entry, which the sender writes. PDF.js corrects a count that is too high, but not one that is too low: a 5-page text PDF with /Count 1 parses as `{ text: 'Page 1', pageCount: 1 }`, and pages 2–5 are never read. The parser now refuses a count below 1 with `ParseError('pdf_no_pages')`, so a forged /Count 0 can no longer pass as a scan with no text. A lower positive count still looks real, and Claude is sent the whole file and reads every real page. So in readPdf:
+  - **The reservation never comes from `pageCount`.** Add `scannedPdfCeilingUsd(p: Prices)` = `estimateCostUsd(MEDIA_SYSTEM_PROMPT.length + INSTRUCTION_CHARS, p, PDF_MAX_TOKENS) + (MAX_PDF_INPUT_TOKENS * p.inputPerMTok) / 1_000_000`, with `MAX_PDF_INPUT_TOKENS = Math.min(CLAUDE_PDF_MAX_PAGES * PDF_TOKENS_PER_PAGE, 1_000_000)`.
+    - `CLAUDE_PDF_MAX_PAGES = 600` is the most pages Claude reads from one PDF in one request (100 on 200k-context models).
+    - 1,000,000 tokens is the largest context window of a current model; a longer request is refused before it is billed.
+    - readPdf reserves `scannedPdfCeilingUsd(d.prices)`, and 9a's `too_costly` check uses the same figure. Settlement (Task 8) books the real cost, so the rest is held only while the call runs. About $4.2 at claude-opus-5-5 prices, against the default $15 daily cap. Nothing reserves with `scannedPdfEstimateUsd(pages)` any more; remove it or keep it for tests only.
+  - **The page check is not a safety limit.** `pages > maxScannedPdfPages` stays as an early `scan_too_long` for honest files. The limit that holds against a forged file is the byte check (`size > maxScannedPdfBytes`, 9f).
+  - The stored `pageCount` is shown as it is (prompt text, Files received). It is never used as a limit.
+  - A parse that fails with `pdf_no_pages` is an ordinary ParseError: the row fails as "could not be read", and nothing is paid.
+  - Tests (the real parseFile, or a fake `parse` that returns what the parser returns for these files):
+    - a 3-page scan with /Count 1 (`tinyPdf([[], [], []], { count: 1 })` parses as `{ text: '', pageCount: 1 }`): the reservation equals `scannedPdfCeilingUsd(prices)`, not a 1-page estimate, and readScannedPdf receives the full bytes;
+    - the same file with `spend.capUsd` below the ceiling is `too_costly`, and Claude is not called;
+    - a text PDF with /Count 0 (`tinyPdf([['Page 1'], ['Page 2']], { count: 0 })`) makes no paid call and reaches the processor as `ParseError('pdf_no_pages')`.
+  - Runbook (16c): a scanned PDF holds about $4 of the daily cap while Claude reads it.
+- **9h. Media attempt count (Task 8 review, 8c).** describe and readPdf pass `MEDIA_SDK_MAX_RETRIES + 1` as withReservation's 5th argument, `attempts`: `withReservation(d.spend, estimate, label, call, MEDIA_SDK_MAX_RETRIES + 1)`. The plan's calls (plan lines 2883 and 2898) leave it out, and no longer type-check.
+  - Tests: a describeImage that throws `Anthropic.APIConnectionTimeoutError` books its estimate once, as `media <id> (connection lost, estimated)`, not 3 times. A readScannedPdf that throws it books `scannedPdfCeilingUsd(prices)` once.
 
 ## Task 10: media processor
 
 - **10a. Inactive clients (review I4).** If the row's client is inactive, the processor does nothing and leaves the row pending. Test it.
 - **10b. No tight loop (review M12).** When the processor finds no job for a row (the message was deleted, or the row is missing data), it fails the row with `no_job`. It must not return "skipped" with the row still pending, which would loop.
+- **10d. Claude unavailable is not a failed attempt (controller, after the 8c trade-off).** With one SDK attempt per media call (8c), the plan's 3 attempts over about 6 minutes would leave every image and scan shared during a longer Claude outage `failed` for good.
+  - When the extractor throws an error that was released, not billed: `Anthropic.RateLimitError` (429), an `Anthropic.APIError` with status 500 or above (529 overloaded included), or an `Anthropic.APIConnectionError` that is not an `APIConnectionTimeoutError` and for which `neverSent(e)` (src/brain/paidCall.ts) is true. In that case the processor defers the row with `countAttempt: false` and error code `ai_unavailable`.
+  - The waits grow: 5, 15, 30 and 60 minutes, then 60 minutes each time.
+  - When the row's `createdAt` is more than 24 hours old, it fails with `ai_unavailable` instead.
+  - Everything else keeps the plan's rule: a timeout after sending (`ai_timeout`, which is billed), invalid output, 4xx errors such as 400, 401 and 403, and download errors count an attempt and use `RETRY_DELAYS_MS`.
+  - Tests:
+    - a 529 and a never-sent connection error each defer without counting an attempt, with the growing waits;
+    - the row fails once it is older than 24 hours;
+    - a 401 still counts an attempt;
+    - an APIConnectionTimeoutError still counts an attempt.
+- **10c. Local file names (amendment 4a, triage T4-01).** Saved files are named `<waId>-<mediaId>.<ext>` by `mediaRelPath` (src/media/paths.ts). The plan's Task 10 tests still expect the old names: `IMG1.jpg` and `media/SHA/2026-10/IMG1.jpg` (plan lines 3008-3098). Expect `IMG1-<mediaId>.jpg` and `media/SHA/2026-10/IMG1-<mediaId>.jpg`, with the id of the row under test, and build paths only through `mediaRelPath`, never by hand.
 
 ## Task 11: media queue
 
@@ -156,6 +203,7 @@ Every task's implementer applies the items listed under its task, in addition to
 - **15a. Same start time (review I1).** `mediaStats(..., startedAt)` uses the same start time for its "waiting over 30 minutes" count. main.ts/app.ts pass one `startedAt`, captured at start, to both the Reconciler and Health.
 - **15b. Spend-cap rows visible (review I3).** `mediaStats` also counts rows deferred for `spend_cap`, and Health shows them. When there are such rows, reuse the "Daily spend cap reached" line.
 - **15c. Waiting ignored.** Health ignores the `waiting` outcome (12d).
+- **15d. Local file names (10c).** The Task 15 test that expects `media/SHA/2026-10/IMG1.jpg` (plan line 5107) expects `media/SHA/2026-10/IMG1-<mediaId>.jpg` instead.
 
 ## Task 16: runbook and final verification
 
@@ -176,7 +224,8 @@ Every task's implementer applies the items listed under its task, in addition to
   - forwarded media not being described;
   - the 600 s upload timeout;
   - the cost per image (1–4 cents);
-  - that images loaded by `cli link` history are described too, at a cost.
+  - that images loaded by `cli link` history are described too, at a cost;
+  - that each media call makes one Claude attempt (8c), and the media queue tries a file 3 times over about 6 minutes, so files shared during a longer Claude outage stay unread (`failed`).
 
 ## Owner decisions after Task 14 (22 Oct 2026)
 - D3. A file deleted for everyone shows no description and no Drive link in Files received. The Drive copy is kept.

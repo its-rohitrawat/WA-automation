@@ -10,6 +10,24 @@ export const MAX_OUTPUT_TOKENS = 16_000;
 /** The SDK retries timeouts and connection errors on its own; each attempt may be billed. */
 export const SDK_MAX_RETRIES = 2;
 
+/**
+ * The `fetch` the Anthropic clients use. When undici's connect timer fires, the request never left this machine, but
+ * the SDK sees "Timeout" in the error text and throws APIConnectionTimeoutError with no cause, which settleFailedCall
+ * books at the estimate. This throws it again as a plain fetch failure that keeps only the code, so the SDK throws
+ * APIConnectionError with the code among its causes and the reservation is released. Every other error passes
+ * through unchanged, so a timeout after sending (an AbortError) is still booked.
+ */
+export async function keepConnectTimeoutCode(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, init);
+  } catch (e) {
+    if ((e as { cause?: { code?: unknown } | null } | null | undefined)?.cause?.code === 'UND_ERR_CONNECT_TIMEOUT') {
+      throw new TypeError('fetch failed', { cause: { code: 'UND_ERR_CONNECT_TIMEOUT' } });
+    }
+    throw e;
+  }
+}
+
 export interface AiCallResult {
   output: AiOutput;
   /** Summed over every attempt, fallbacks included. */
@@ -97,7 +115,8 @@ export class ClaudeClient implements AiClient {
 
   constructor(opts: { apiKey: string; model: string; effort?: Effort; prices: Prices; client?: Anthropic }) {
     this.#client =
-      opts.client ?? new Anthropic({ apiKey: opts.apiKey, maxRetries: SDK_MAX_RETRIES, timeout: 600_000 });
+      opts.client ??
+      new Anthropic({ apiKey: opts.apiKey, maxRetries: SDK_MAX_RETRIES, timeout: 600_000, fetch: keepConnectTimeoutCode });
     this.#model = opts.model;
     this.#effort = opts.effort ?? 'medium';
     this.#prices = opts.prices;

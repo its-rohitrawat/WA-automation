@@ -35,6 +35,12 @@ export const MEDIA_LIMITS = {
   downloadTimeoutMs: 120_000,
   /** A parser that runs longer is stopped. */
   parseTimeoutMs: 30_000,
+  /**
+   * A parser whose memory outside the JS heap (decoded buffers, e.g. PDF streams inflated by PDF.js) grows past this is
+   * stopped. The worker's heap limits do not cover that memory. It also holds the file itself, once, and PDF.js holds
+   * an inflated stream about twice while decoding it, so one content stream can inflate to about (cap - file) / 2.
+   */
+  maxParserExternalBytes: 256 * 1024 * 1024,
   /** Local PDF text extraction reads at most this many pages. */
   maxPdfPages: 200,
   /** PDFs without a text layer (scans) go to Claude only up to this many pages and bytes. */
