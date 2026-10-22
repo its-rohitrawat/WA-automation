@@ -22,9 +22,12 @@ export class AudioError extends Error {
   }
 }
 
-/** "Duration: 00:01:02.50" in ffmpeg's input summary -> 62.5 seconds. Null when it is missing or "N/A". */
+/**
+ * "  Duration: 00:01:02.50" in ffmpeg's input summary -> 62.5 seconds. Null when it is missing or "N/A". Anchored to the
+ * summary line's two-space indent, so a metadata tag that contains "Duration: ..." is never read as the length.
+ */
 export function parseDuration(stderr: string): number | null {
-  const m = /Duration: (\d+):(\d{2}):(\d{2}(?:\.\d+)?)/.exec(stderr);
+  const m = /^ {2}Duration: (\d+):(\d{2}):(\d{2}(?:\.\d+)?)/m.exec(stderr);
   if (!m) return null;
   return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
 }
@@ -52,26 +55,33 @@ export class Ffmpeg {
   /**
    * Mono 16 kHz MP3 at 64 kbit/s, the one format all three providers document; the video track of a recording is
    * dropped. An existing output is kept, and a new one appears only when complete (written under a temporary name).
+   * Tags and chapters are dropped too: title, GPS location, device or contact name must not leave the PC.
    */
   async toMp3(input: string, output: string): Promise<void> {
     if (existsSync(output)) return;
     const tmp = `${output}.part.mp3`;
-    const args = [...QUIET, '-y', '-i', input, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'libmp3lame', '-b:a', '64k', tmp];
+    const args = [
+      ...QUIET, '-y', '-i', input, '-vn', '-map_metadata', '-1', '-map_chapters', '-1',
+      '-ac', '1', '-ar', '16000', '-c:a', 'libmp3lame', '-b:a', '64k', tmp,
+    ];
     const { code } = await this.#run(this.#exe, args, 60 * 60_000);
     if (code !== 0 || !existsSync(tmp)) throw new AudioError('convert_failed');
     renameSync(tmp, output);
   }
 
   /**
-   * Cuts a prepared MP3 into parts of at most partSeconds without re-encoding, into its own folder, and measures every
-   * part so the offsets are exact. A folder that was finished before is reused.
+   * Cuts a prepared MP3 into equal parts of at most partSeconds without re-encoding, into its own folder, and measures
+   * every part so the offsets are exact. A folder that was finished before is reused.
    */
   async split(input: AudioPart, dir: string, partSeconds: number): Promise<AudioPart[]> {
     if (input.seconds <= partSeconds) return [input];
     const finished = join(dir, '.done');
     if (!existsSync(finished)) {
       mkdirSync(dir, { recursive: true });
-      const args = [...QUIET, '-y', '-i', input.path, '-f', 'segment', '-segment_time', String(partSeconds), '-c', 'copy', join(dir, 'part-%03d.mp3')];
+      // Equal parts, so there is no tiny, separately paid last part. The count still matches the plan's ceil.
+      const count = Math.ceil(input.seconds / partSeconds);
+      const segmentTime = (input.seconds / count).toFixed(3);
+      const args = [...QUIET, '-y', '-i', input.path, '-f', 'segment', '-segment_time', segmentTime, '-c', 'copy', join(dir, 'part-%03d.mp3')];
       const { code } = await this.#run(this.#exe, args, 30 * 60_000);
       if (code !== 0) throw new AudioError('split_failed');
       writeFileSync(finished, '');

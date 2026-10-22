@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { Ffmpeg, findFfmpeg, parseDuration, type RunFile } from '../../src/stt/audio.ts';
+import { Ffmpeg, findFfmpeg, parseDuration, runFile, type RunFile } from '../../src/stt/audio.ts';
 
 const BANNER =
   "Input #0, ogg, from 'a.ogg':\n  Duration: 00:01:02.50, start: 0.000000, bitrate: 31 kb/s\n" +
@@ -29,6 +29,27 @@ describe('parseDuration', () => {
   it('is null when the duration is missing or N/A', () => {
     expect(parseDuration('  Duration: N/A, bitrate: N/A')).toBeNull();
     expect(parseDuration('')).toBeNull();
+  });
+
+  it('ignores "Duration:" inside a metadata tag and reads the real summary line', () => {
+    const tag = '    comment         : Duration: 00:00:09.00';
+    const stderr = `Input #0, mov,mp4,m4a, from 'a.m4a':\n  Metadata:\n${tag}\n  Duration: 00:01:02.50, start: 0.000000, bitrate: 31 kb/s\n`;
+    expect(parseDuration(stderr)).toBe(62.5);
+    expect(parseDuration(`  Metadata:\r\n${tag}\r\n  Duration: N/A, bitrate: N/A\r\n`)).toBeNull();
+  });
+});
+
+describe('runFile', () => {
+  it('resolves with -1 when the program does not exist', async () => {
+    expect((await runFile('no-such-program-xyz', [], 5000)).code).toBe(-1);
+  });
+
+  it('resolves with -1 when the program is stopped at the timeout', async () => {
+    expect((await runFile(process.execPath, ['-e', 'setTimeout(()=>{},10000)'], 300)).code).toBe(-1);
+  });
+
+  it("resolves with the program's own exit code", async () => {
+    expect((await runFile(process.execPath, ['-e', 'process.exit(3)'], 5000)).code).toBe(3);
   });
 });
 
@@ -58,6 +79,9 @@ describe('Ffmpeg', () => {
     await new Ffmpeg('ffmpeg.exe', run).toMp3('in.mp4', out);
     const args = calls[0]!;
     expect(args).toEqual(expect.arrayContaining(['-i', 'in.mp4', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'libmp3lame', '-b:a', '64k']));
+    // No tags (title, GPS location, device or contact name) or chapters are copied into the uploaded MP3.
+    const vn = args.indexOf('-vn');
+    expect(args.slice(vn, vn + 5)).toEqual(['-vn', '-map_metadata', '-1', '-map_chapters', '-1']);
     expect(lastArg(args)).toBe(`${out}.part.mp3`);
     expect(existsSync(out)).toBe(true);
     expect(existsSync(`${out}.part.mp3`)).toBe(false);
@@ -84,8 +108,8 @@ describe('Ffmpeg', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('splits a long file and measures each part for exact offsets', async () => {
-    const lengths: Record<string, string> = { 'part-000.mp3': '00:05:00.50', 'part-001.mp3': '00:02:10.00' };
+  it('splits a long file into equal parts and measures each part for exact offsets', async () => {
+    const lengths: Record<string, string> = { 'part-000.mp3': '00:03:35.50', 'part-001.mp3': '00:03:34.50' };
     const { run, calls } = fakeRun((args) => {
       if (args.includes('segment')) {
         const pattern = lastArg(args);
@@ -99,10 +123,11 @@ describe('Ffmpeg', () => {
     const partsDir = join(dir, 'parts');
     const long = { path: 'long.mp3', seconds: 430, offset: 0 };
     expect(await ff.split(long, partsDir, 300)).toEqual([
-      { path: join(partsDir, 'part-000.mp3'), seconds: 300.5, offset: 0 },
-      { path: join(partsDir, 'part-001.mp3'), seconds: 130, offset: 300.5 },
+      { path: join(partsDir, 'part-000.mp3'), seconds: 215.5, offset: 0 },
+      { path: join(partsDir, 'part-001.mp3'), seconds: 214.5, offset: 215.5 },
     ]);
-    expect(calls[0]).toEqual(expect.arrayContaining(['-i', 'long.mp3', '-f', 'segment', '-segment_time', '300', '-c', 'copy']));
+    // 430 s in at most 300 s parts: two parts of 215 s, not 300 s and a short, separately paid 130 s.
+    expect(calls[0]).toEqual(expect.arrayContaining(['-i', 'long.mp3', '-f', 'segment', '-segment_time', '215.000', '-c', 'copy']));
     // A second call reuses the finished parts instead of cutting again.
     await ff.split(long, partsDir, 300);
     expect(calls.filter((a) => a.includes('segment'))).toHaveLength(1);
