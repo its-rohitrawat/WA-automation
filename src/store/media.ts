@@ -266,3 +266,38 @@ export function markUploadFailed(db: Db, id: number, f: { failed: boolean; nextA
 export function resetUploadFailures(db: Db): number {
   return db.prepare('UPDATE media SET drive_failed = 0, drive_attempts = 0, drive_next_at = NULL WHERE drive_failed = 1 AND drive_file_id IS NULL').run().changes;
 }
+
+export interface ClientFileRow {
+  id: number;
+  kind: MediaKind;
+  status: MediaStatus;
+  mimeType: string | null;
+  fileName: string | null;
+  fileSize: number | null;
+  seconds: number | null;
+  pageCount: number | null;
+  textKind: TextKind | null;
+  /** The first 400 characters of the stored text. */
+  textStart: string | null;
+  note: string | null;
+  errorCode: string | null;
+  driveFileId: string | null;
+  ts: string;
+  revoked: boolean;
+  sender: string | null;
+}
+
+/** Images, documents and videos sent by people whose role is 'client', newest first. View-once media is never listed. */
+export function listClientFiles(db: Db, clientId: number, limit = 500): ClientFileRow[] {
+  const rows = db
+    .prepare(`SELECT m.id, m.kind, m.status, m.mime_type AS mimeType, m.file_name AS fileName, m.file_size AS fileSize, m.seconds,
+        m.page_count AS pageCount, m.text_kind AS textKind, substr(m.text, 1, 400) AS textStart, m.note, m.error_code AS errorCode,
+        m.drive_file_id AS driveFileId, msg.ts, msg.revoked, COALESCE(p.name, msg.sender_name) AS sender
+      FROM media m JOIN messages msg ON msg.id = m.message_id
+      JOIN people p ON p.client_id = m.client_id AND p.jid = msg.sender_jid
+      WHERE m.client_id = ? AND p.role = 'client' AND msg.from_me = 0 AND m.kind IN ('image', 'document', 'video')
+        AND COALESCE(m.error_code, '') <> 'view_once'
+      ORDER BY msg.ts DESC, m.id DESC LIMIT ?`)
+    .all(clientId, limit) as (Omit<ClientFileRow, 'revoked'> & { revoked: number })[];
+  return rows.map((r) => ({ ...r, revoked: r.revoked === 1 }));
+}

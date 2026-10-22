@@ -1,4 +1,4 @@
-import type { MediaKind } from '../store/media.ts';
+import type { MediaKind, MediaStatus, TextKind } from '../store/media.ts';
 import { istDate, istTime } from '../util/time.ts';
 import { extForMime, sanitizeFileName } from './paths.ts';
 
@@ -46,4 +46,45 @@ export function displayName(o: { kind: MediaKind; fileName: string | null; mimeT
   if (clean) return clean;
   const d = new Date(o.ts);
   return `${o.kind}-${istDate(d)}-${istTime(d).replace(':', '')}-${o.mediaId}.${extForMime(o.mimeType, o.kind)}`;
+}
+
+export interface FileFacts {
+  kind: MediaKind;
+  status: MediaStatus;
+  mimeType: string | null;
+  fileSize: number | null;
+  seconds: number | null;
+  pageCount: number | null;
+  textKind: TextKind | null;
+  textStart: string | null;
+  note: string | null;
+  revoked: boolean;
+}
+
+/** The extractor's note for a forwarded image or scanned PDF that was not sent to Claude (owner decision D2). */
+const FORWARDED_NOT_DESCRIBED = 'forwarded_not_described';
+
+function oneLine(s: string, max: number): string {
+  const flat = s.replace(/\s+/g, ' ').trim();
+  const cps = [...flat];
+  return cps.length <= max ? flat : `${cps.slice(0, max).join('')}…`;
+}
+
+/**
+ * The Files received description: what the file is, and the start of what was read. Deterministic, no AI.
+ * A file whose message was deleted for everyone shows only "(deleted by sender)": it stays listed, but what it said is not shown.
+ */
+export function fileDescription(f: FileFacts): string {
+  if (f.revoked) return '(deleted by sender)';
+  const type = typeLabel(f.mimeType, f.kind);
+  const pages = f.pageCount ? `, ${f.pageCount} ${f.pageCount === 1 ? 'page' : 'pages'}` : '';
+  if (f.kind === 'video') return `Video${f.seconds ? `, ${formatDuration(f.seconds)}` : ''} (not downloaded)`;
+  if (f.status === 'pending') return `${type}, being read`;
+  if (f.status === 'unavailable') return `${type}, could not be downloaded from WhatsApp`;
+  if (f.status === 'failed') return `${type}, could not be read`;
+  if (f.note === FORWARDED_NOT_DESCRIBED) return f.kind === 'image' || type === 'Image' ? '(forwarded image)' : '(forwarded scanned PDF)';
+  if (f.textKind === 'description' && f.textStart) return oneLine(f.textStart, 300);
+  if (f.textKind === 'extract' && f.textStart) return `${type}${pages}: ${oneLine(f.textStart, 200)}`;
+  if (f.note === 'scan_too_long') return `${type}${pages}, scanned, too long to read`;
+  return `${type}${f.fileSize ? `, ${formatSize(f.fileSize)}` : ''}`;
 }

@@ -1,5 +1,7 @@
+import { displayName, fileDescription } from '../media/labels.ts';
 import { listClients, type ClientRow } from '../store/clients.ts';
 import type { Db } from '../store/db.ts';
+import { listClientFiles } from '../store/media.ts';
 import { lastActivity } from '../store/messages.ts';
 import { listPeople, type PersonRow } from '../store/people.ts';
 import { listDecisions, listTasks, type DecisionRow, type TaskRow } from '../store/tasks.ts';
@@ -11,6 +13,15 @@ export interface HealthLine {
   text: string;
 }
 
+export interface FileView {
+  /** IST date, YYYY-MM-DD. */
+  date: string;
+  sentBy: string;
+  name: string;
+  description: string;
+  driveFileId: string | null;
+}
+
 export interface ClientView {
   client: ClientRow;
   sheetName: string;
@@ -18,6 +29,8 @@ export interface ClientView {
   clientOpen: TaskRow[];
   done: TaskRow[];
   decisions: DecisionRow[];
+  /** Files received from client members (spec §8.3), newest first. */
+  files: FileView[];
   people: PersonRow[];
   lastActivity: string | null;
   percentDone: number | null;
@@ -77,6 +90,13 @@ export function loadTrackerView(db: Db, now: Date, health: HealthLine): TrackerV
         clientOpen: notDone.filter((t) => t.side === 'client').sort(byUrgency),
         done: all.filter((t) => t.status === 'done').sort(byClosed),
         decisions: listDecisions(db, client.id),
+        files: listClientFiles(db, client.id).map((f) => ({
+          date: istDate(new Date(f.ts)),
+          sentBy: f.sender ?? 'Unknown',
+          name: displayName({ kind: f.kind, fileName: f.fileName, mimeType: f.mimeType, ts: f.ts, mediaId: f.id }),
+          description: fileDescription(f),
+          driveFileId: f.driveFileId,
+        })),
         people: listPeople(db, client.id),
         lastActivity: lastActivity(db, client.id),
         percentDone: all.length ? Math.floor((100 * (all.length - notDone.length)) / all.length) : null,

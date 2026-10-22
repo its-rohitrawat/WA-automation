@@ -1,7 +1,7 @@
 import ExcelJS from 'exceljs';
 import type { TaskRow } from '../store/tasks.ts';
 import { daysBetween, displayDate, istDateTime, istShortDate, istTime } from '../util/time.ts';
-import { isOverdue, type ClientView, type TrackerView } from './view.ts';
+import { isOverdue, type ClientView, type FileView, type TrackerView } from './view.ts';
 
 export const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
@@ -93,6 +93,36 @@ function addTaskTable(ws: ExcelJS.Worksheet, title: string, tasks: TaskRow[], to
   ws.addRow([]);
 }
 
+const DRIVE_ID = /^[A-Za-z0-9_-]{1,200}$/;
+/**
+ * Files received columns. Column D alone is narrow (it is the tasks' Priority column), so the description spans D to L and long
+ * descriptions stay a few lines tall instead of a very tall row. The Drive link is in M.
+ */
+const FILE_DESC_FIRST = 4;
+const FILE_DESC_LAST = 12;
+const FILE_LINK = 13;
+
+function addFilesTable(ws: ExcelJS.Worksheet, files: FileView[]): void {
+  sectionTitle(ws, 'Files received');
+  const header = ws.addRow(['Date', 'Sent by', 'File name', 'Description']);
+  header.getCell(FILE_LINK).value = 'Drive link';
+  ws.mergeCells(header.number, FILE_DESC_FIRST, header.number, FILE_DESC_LAST);
+  styleHeader(header);
+  if (files.length === 0) noneRow(ws);
+  for (const f of files) {
+    const row = ws.addRow([isoToDate(f.date), f.sentBy, f.name, f.description]);
+    ws.mergeCells(row.number, FILE_DESC_FIRST, row.number, FILE_DESC_LAST);
+    formatDates(row);
+    row.alignment = { wrapText: true, vertical: 'top', horizontal: 'left' };
+    if (f.driveFileId && DRIVE_ID.test(f.driveFileId)) {
+      const link = row.getCell(FILE_LINK);
+      link.value = { text: 'Open', hyperlink: `https://drive.google.com/file/d/${f.driveFileId}/view` };
+      link.font = { color: { argb: 'FF0563C1' }, underline: true };
+    }
+  }
+  ws.addRow([]);
+}
+
 function addOverview(wb: ExcelJS.Workbook, view: TrackerView): void {
   const ws = wb.addWorksheet('Overview', { views: [{ state: 'frozen', ySplit: 3 }] });
   ws.columns = [{ width: 30 }, { width: 14 }, { width: 9 }, { width: 13 }, { width: 16 }, { width: 10 }, { width: 14 }, { width: 60 }, { width: 14 }, { width: 18 }];
@@ -158,6 +188,7 @@ function addClientSheet(wb: ExcelJS.Workbook, c: ClientView, today: string): voi
   }
   ws.addRow([]);
 
+  addFilesTable(ws, c.files);
   addTaskTable(ws, 'Done', c.done, today, { closedOn: true });
 
   sectionTitle(ws, 'People');
