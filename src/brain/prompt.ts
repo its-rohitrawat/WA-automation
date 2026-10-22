@@ -14,6 +14,7 @@ How the input is laid out
 - Senders appear as handle, name and role, for example "P2 Mr. Sharma [client]". <client_profile> lists every person with handle, jid, name and role. The founder is marked [founder]; [confirmed] means a person on the team set that role by hand.
 - "@" followed by digits is a WhatsApp mention: match the digits to a jid in the people list.
 - A message marked "(re-check: edited)" or "(re-check: new reaction)" was processed before. Act only on what changed, the new wording or the new reaction, and do not add its tasks again.
+- A message marked "(re-check: file now read)" was processed before its shared file could be read. Act only on what the file's block shows, and do not add the message's tasks again.
 - A task marked [maybe_done] was reported delivered but nobody has confirmed it yet.
 
 How the tracker works
@@ -54,6 +55,8 @@ export interface PromptInput {
   today: string;
   /** Blocks for shared files, by message row id (src/media/promptText.ts). Messages without one show the plain placeholder. */
   mediaText?: Map<number, MediaBlock>;
+  /** Row ids of messages queued again because their file was read after they were processed (amendment 12h). */
+  fileRechecks?: Set<number>;
 }
 
 /**
@@ -139,16 +142,19 @@ function formatMessageWith(
   handles: Map<string, string>,
   reactions: ReactionRow[],
   mediaText?: Map<number, MediaBlock>,
+  fileRechecks?: Set<number>,
 ): string {
   const reply = m.quotedWaId ? ` ↩ replying to [${idText(m.quotedWaId)}]` : '';
   const marker = m.requeueReason === 'edit' ? ' (re-check: edited)' : m.requeueReason === 'reaction' ? ' (re-check: new reaction)' : m.editedAt ? ' (edited)' : '';
+  // A file read late can come with an edit or a reaction; each re-check keeps its own marker (amendment 12h).
+  const fileMarker = fileRechecks?.has(m.id) ? ' (re-check: file now read)' : '';
   const file = mediaText?.get(m.id);
   const body = [m.text ? sanitizeBody(m.text) : '', file ? fileBlock(file) : placeholderFor(m.mediaType)].filter(Boolean).join(' ');
   const rx = reactions
     .filter((r) => r.targetWaId === m.waId)
     .map((r) => `${nameText(r.emoji)} by ${personLabel(r.reactorJid, null, people, handles)}`);
   const rxText = rx.length ? ` {reactions: ${rx.join(', ')}}` : '';
-  return `[${idText(m.waId)}] ${istDateTime(new Date(m.ts))} · ${personLabel(m.senderJid, m.senderName, people, handles)}${reply}${marker}: ${body}${rxText}`;
+  return `[${idText(m.waId)}] ${istDateTime(new Date(m.ts))} · ${personLabel(m.senderJid, m.senderName, people, handles)}${reply}${marker}${fileMarker}: ${body}${rxText}`;
 }
 
 export function formatMessage(m: MessageRow, people: Map<string, PersonRow>, reactions: ReactionRow[]): string {
@@ -177,7 +183,7 @@ function personLine(p: PersonRow, handle: string): string {
 export function buildUserContent(p: PromptInput): string {
   const people = new Map(p.people.map((x) => [x.jid, x]));
   const handles = handlesOf(people);
-  const line = (m: MessageRow): string => formatMessageWith(m, people, handles, p.reactions, p.mediaText);
+  const line = (m: MessageRow): string => formatMessageWith(m, people, handles, p.reactions, p.mediaText, p.fileRechecks);
   return [
     '<client_profile>',
     `Client: ${sanitizeInline(p.client.name)} (code ${p.client.code})`,

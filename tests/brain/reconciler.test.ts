@@ -8,6 +8,7 @@ import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { latestBatches } from '../../src/store/batches.ts';
 import { getClient } from '../../src/store/clients.ts';
 import type { Db } from '../../src/store/db.ts';
+import { finishMedia, insertMedia, messageRowId } from '../../src/store/media.ts';
 import { applyEdit, applyRevoke, insertMessage, listUnprocessed, markProcessed, upsertReaction } from '../../src/store/messages.ts';
 import { listPeople, setRole, upsertPerson } from '../../src/store/people.ts';
 import { createTask, getTaskByCode, listDecisions, listTasks, setTaskStatus, updateTaskFields } from '../../src/store/tasks.ts';
@@ -350,6 +351,49 @@ describe('Reconciler', () => {
       applyEdit(db, 1, 'm1', 'Banner v4 attached, final', '2026-10-19T07:00:00.000Z');
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
       expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done' });
+    });
+
+    /** A shared image of m1, still pending. */
+    const fileOf = (db: Db): number => insertMedia(db, {
+      messageId: messageRowId(db, 1, 'm1')!, clientId: 1, kind: 'image', status: 'pending', mimeType: 'image/jpeg', fileName: null, fileSize: 1000, seconds: null,
+      forwarded: false, refEnc: null, errorCode: null, createdAt: '2026-10-12T05:00:00.000Z',
+    });
+    const readAt = (db: Db, id: number, at: string) => finishMedia(db, id, { textKind: 'description', text: 'Banner v3, final colours', pageCount: null, note: null, at });
+
+    it('accepts a close backed by a file read after the human reopened the task, closed on the processing date (12h)', async () => {
+      const { db, r } = setup([{ ops: [close()] }]);
+      reopenedWithOldDelivery(db);
+      readAt(db, fileOf(db), '2026-10-19T07:00:00.000Z');
+      expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: null })]);
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-19' });
+    });
+
+    it('still rejects a close backed by a file read before the human reopened the task (12h)', async () => {
+      const { db, r } = setup([{ ops: [close()] }]);
+      banner(db);
+      store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
+      const id = fileOf(db);
+      markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-12T06:00:00.000Z');
+      readAt(db, id, '2026-10-19T04:00:00.000Z');
+      closeTask(db, 'SHA-001', new Date('2026-10-19T05:00:00Z'));
+      reopenTask(db, 'SHA-001', new Date('2026-10-19T06:00:00Z'));
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open' });
+    });
+
+    it.each([
+      { fileRead: '2026-10-19T05:30:00.000Z', reacted: '2026-10-19T07:00:00.000Z', accepted: 1 },
+      { fileRead: '2026-10-19T07:00:00.000Z', reacted: '2026-10-19T05:30:00.000Z', accepted: 1 },
+      { fileRead: '2026-10-19T05:30:00.000Z', reacted: '2026-10-19T05:45:00.000Z', accepted: 0 },
+    ])('a file re-check that also got a reaction counts from the later of the two (file $fileRead, reaction $reacted) (12h)', async ({ fileRead, reacted, accepted }) => {
+      const { db, r } = setup([{ ops: [close()] }]);
+      reopenedWithOldDelivery(db); // reopened by a human at 06:00Z
+      readAt(db, fileOf(db), fileRead);
+      upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '✅', ts: reacted });
+      expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: 'reaction' })]);
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted, rejected: 1 - accepted });
+      expect(getTaskByCode(db, 'SHA-001')!.status).toBe(accepted ? 'done' : 'open');
     });
   });
 

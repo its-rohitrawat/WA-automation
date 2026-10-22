@@ -53,15 +53,18 @@ export { SpendCapReachedError } from './paidCall.ts';
 
 /**
  * When a message became evidence, for the human status-lock check: a reaction re-check counts from its latest reaction,
- * an edit re-check from its edit, anything else from when it was sent.
+ * an edit re-check from its edit, a file re-check (amendment 12h) from when its file was read (fileReadAt), anything
+ * else from when it was sent. A file re-check that is also an edit or reaction re-check counts from the later time.
  */
-function evidenceTs(m: MessageRow, reactions: StoredReactionRow[]): string {
-  if (m.requeueReason === 'edit') return m.editedAt ?? m.ts;
-  if (m.requeueReason === 'reaction') {
+function evidenceTs(m: MessageRow, reactions: StoredReactionRow[], fileReadAt?: string): string {
+  let changed: string | null = null;
+  if (m.requeueReason === 'edit') changed = m.editedAt ?? m.ts;
+  else if (m.requeueReason === 'reaction') {
     const latest = reactions.filter((r) => r.targetWaId === m.waId).reduce<string | null>((max, r) => (max === null || r.ts > max ? r.ts : max), null);
-    return latest ?? m.ts;
+    changed = latest ?? m.ts;
   }
-  return m.ts;
+  if (fileReadAt === undefined) return changed ?? m.ts;
+  return changed !== null && changed > fileReadAt ? changed : fileReadAt;
 }
 
 function errorCodeOf(e: unknown): string {
@@ -97,7 +100,8 @@ export class Reconciler {
     // §6.1: a shared file is read before the AI sees its message. Messages from the first file still being read onward
     // wait for a later run; the media queue tells the debouncer when that file is done, or the app tick re-runs it once
     // the wait runs out. Blocking needs no text (maxChars 0).
-    const batch = readyPrefix(queued, mediaForMessages(db, queued.map((m) => m.id), 0), now, this.#startedAt);
+    const queuedMedia = mediaForMessages(db, queued.map((m) => m.id), 0);
+    const batch = readyPrefix(queued, queuedMedia, now, this.#startedAt);
     if (batch.length === 0) {
       this.#waiting.add(clientId);
       // The app tick re-runs a waiting client every few minutes, so only the start of a wait is worth an info line.
@@ -107,16 +111,27 @@ export class Reconciler {
       return { status: 'waiting' };
     }
 
+    // Amendment 12h: a message whose file was read after the message was processed is back as a "file now read"
+    // re-check. Its evidence time is when the file was read: the file row's updatedAt, set when it was finished.
+    const fileReadAt = new Map<number, string>();
+    for (const m of batch) {
+      const f = queuedMedia.get(m.id);
+      if (f?.requeuedForText) fileReadAt.set(m.id, f.updatedAt);
+    }
+    const isRecheck = (m: MessageRow): boolean => m.requeueReason !== null || fileReadAt.has(m.id);
+
     // Context comes from before the first new or reprocessed message, so a reprocess window does not see later chat.
-    // Re-checks (edits, reactions) of old messages are skipped here: they must not pull the context back in time.
-    const firstNew = batch.find((m) => m.requeueReason === null);
+    // Re-checks (edits, reactions, files read late) of old messages are skipped here: they must not pull the context back in time.
+    const firstNew = batch.find((m) => !isRecheck(m));
     const recent = listRecentProcessed(db, clientId, 30, firstNew?.ts);
     const people = listPeople(db, clientId);
     const openTasks = listTasks(db, clientId, ['open', 'maybe_done']);
     const decisions = listDecisions(db, clientId, 20);
     const reactions = reactionsFor(db, clientId, [...recent, ...batch].map((m) => m.waId));
     const mediaText = mediaPromptTexts(mediaForPrompt(db, batch, recent), batch, recent);
-    const user = buildUserContent({ client, people, openTasks, decisions, recent, batch, reactions, today: istDate(now), mediaText });
+    const user = buildUserContent({
+      client, people, openTasks, decisions, recent, batch, reactions, today: istDate(now), mediaText, fileRechecks: new Set(fileReadAt.keys()),
+    });
 
     // Known and accepted: a call that falls back can cost up to about 2.25x this reservation (a declined primary
     // attempt, then a full fallback attempt at 1.25x rates). settle() books the true cost, so the books stay right;
@@ -148,7 +163,7 @@ export class Reconciler {
     const byWaId = new Map([...recent, ...batch].map((m) => [m.waId, m]));
     const batchIds = new Set(batch.map((m) => m.waId));
     const contextIds = new Set(recent.map((m) => m.waId));
-    const messageTs = new Map([...byWaId].map(([id, m]) => [id, evidenceTs(m, reactions)]));
+    const messageTs = new Map([...byWaId].map(([id, m]) => [id, evidenceTs(m, reactions, fileReadAt.get(m.id))]));
 
     const appliedAt = clock.now();
     let applied: { accepted: AiOp[]; rejected: Rejection[]; requeued: number };
@@ -172,8 +187,11 @@ export class Reconciler {
           editedIds: new Set(batch.filter((m) => m.requeueReason === 'edit').map((m) => m.waId)),
         };
         const { accepted, rejected } = validateOps(result.output.ops, state);
-        for (const op of accepted) this.#apply(fresh, op, byWaId, appliedAt);
-        const requeued = markProcessedIfUnchanged(db, batch.map((m) => ({ id: m.id, version: m.version })), appliedAt.toISOString());
+        for (const op of accepted) this.#apply(fresh, op, byWaId, appliedAt, isRecheck);
+        // fileUnread: the prompt showed the file as still being read. If it was read during the call, the message stays
+        // queued as a "file now read" re-check (amendment 12h).
+        const seen = batch.map((m) => ({ id: m.id, version: m.version, fileUnread: queuedMedia.get(m.id)?.status === 'pending' }));
+        const requeued = markProcessedIfUnchanged(db, seen, appliedAt.toISOString());
         flagRevokedSources(db, clientId); // a source message deleted during the call
         finishBatch(db, batchId, { status: 'ok', errorCode: null, accepted: accepted.length, rejected: rejected.length, at: appliedAt.toISOString() });
         return { accepted, rejected, requeued };
@@ -210,7 +228,7 @@ export class Reconciler {
     }
   }
 
-  #apply(client: ClientRow, op: AiOp, byWaId: Map<string, MessageRow>, at: Date): void {
+  #apply(client: ClientRow, op: AiOp, byWaId: Map<string, MessageRow>, at: Date, isRecheck: (m: MessageRow) => boolean): void {
     const { db } = this.#o;
     const nowIso = at.toISOString();
     const sources = op.sourceMessageIds
@@ -220,8 +238,8 @@ export class Reconciler {
     const first = sources[0];
     const last = sources[sources.length - 1];
     const dateOf = (m: MessageRow | undefined) => istDate(m ? new Date(m.ts) : at);
-    // A re-checked message (new reaction or edit) is evidence from today, not from the day it was first sent.
-    const lastDate = sources.some((m) => m.requeueReason !== null) ? istDate(at) : dateOf(last);
+    // A re-checked message (new reaction, edit, or a file read late) is evidence from today, not from the day it was first sent.
+    const lastDate = sources.some(isRecheck) ? istDate(at) : dateOf(last);
     const event = (taskId: number | null, detail: object) =>
       recordEvent(db, { taskId, clientId: client.id, actor: 'ai', op: op.op, detail, reason: op.reason, sourceIds: op.sourceMessageIds, at: nowIso });
     const taskFor = (code: string | null) => {

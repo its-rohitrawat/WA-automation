@@ -6,12 +6,13 @@ import type { Prices } from '../../src/spend/pricing.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { latestBatches } from '../../src/store/batches.ts';
 import type { Db } from '../../src/store/db.ts';
-import { deferMedia, finishMedia, insertMedia, messageRowId, type MediaKind } from '../../src/store/media.ts';
-import { insertMessage, markProcessed } from '../../src/store/messages.ts';
+import { deferMedia, failMedia, finishMedia, getMedia, insertMedia, messageRowId, type MediaKind } from '../../src/store/media.ts';
+import { applyRevoke, insertMessage, markProcessed } from '../../src/store/messages.ts';
 import { upsertPerson } from '../../src/store/people.ts';
+import { getTaskByCode } from '../../src/store/tasks.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
-import { FakeAi } from '../helpers/ai.ts';
+import { FakeAi, op } from '../helpers/ai.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
 import { SHARMA_PN } from '../helpers/wa.ts';
 
@@ -74,6 +75,13 @@ const image = (db: Db, waId: string, ts: string, description?: string, o: FileOp
   file(db, waId, ts, description === undefined ? o : { ...o, read: { textKind: 'description', text: description } });
 
 const processedAt = (db: Db, waId: string) => (db.prepare('SELECT processed_at AS p FROM messages WHERE wa_id = ?').get(waId) as { p: string | null }).p;
+
+/** Holds the fake AI call open until the returned function is called; run() has read its batch by then. */
+function hold(ai: FakeAi): () => void {
+  let open!: () => void;
+  ai.gate = new Promise<void>((resolve) => { open = resolve; });
+  return () => open();
+}
 
 describe('Reconciler with shared files', () => {
   it('reconciles the messages before a file that is still being read and leaves the rest queued', async () => {
@@ -265,6 +273,160 @@ describe('Reconciler with shared files', () => {
     });
     await r.run(1);
     expect(ai.calls[0]!.user).toContain(': see this {document "x.pdf" (PDF, forwarded), not read}');
+  });
+
+  describe('a file read after its message was processed (12h)', () => {
+    const RECEIPT = 'A payment receipt. Visible text: Paid ₹42,000';
+    const read = (db: Db, id: number, at: string) => finishMedia(db, id, { textKind: 'description', text: RECEIPT, pageCount: null, note: null, at });
+    const version = (db: Db, waId: string) => (db.prepare('SELECT version FROM messages WHERE wa_id = ?').get(waId) as { version: number }).version;
+    const flagOf = (db: Db, id: number) => getMedia(db, id)!.requeuedForText;
+    const newMessages = (user: string) => user.slice(user.indexOf('<new_messages>'));
+    const contextOf = (user: string) => user.slice(user.indexOf('<recent_context>'), user.indexOf('</recent_context>'));
+    const lineOf = (section: string, waId: string) => section.split('\n').find((l) => l.startsWith(`[${waId}]`)) ?? '';
+
+    it.each([
+      { why: 'a long media queue', deferred: undefined },
+      { why: 'an ai_unavailable deferral', deferred: { errorCode: 'ai_unavailable', at: '2026-10-19T07:50:00.000Z' } },
+      { why: 'a spend_cap deferral', deferred: { errorCode: 'spend_cap', at: '2026-10-19T07:50:00.000Z' } },
+    ])('after $why, a file read once its message went ahead as "still being read" queues the message again as a re-check', async ({ deferred }) => {
+      const { db, ai, clock, r } = setup();
+      const id = image(db, 'I1', '2026-10-19T07:45:00.000Z', undefined, { createdAt: '2026-10-19T07:45:00.000Z', deferred });
+      say(db, 'A2', '2026-10-19T07:46:00.000Z', 'fix it');
+      clock.set('2026-10-19T08:15:00.000Z'); // the 30-minute wait is over
+      expect(await r.run(1)).toMatchObject({ status: 'ok' });
+      expect(lineOf(newMessages(ai.calls[0]!.user), 'I1')).toMatch(/[^)]: see this \{image, still being read\}$/);
+      expect(processedAt(db, 'I1')).not.toBeNull();
+      const before = version(db, 'I1');
+
+      read(db, id, '2026-10-19T09:00:00.000Z');
+      expect(processedAt(db, 'I1')).toBeNull();
+      expect(version(db, 'I1')).toBe(before + 1);
+      expect(flagOf(db, id)).toBe(true);
+
+      clock.set('2026-10-19T09:01:00.000Z');
+      expect(await r.run(1)).toMatchObject({ status: 'ok' });
+      const recheck = newMessages(ai.calls[1]!.user);
+      expect(lineOf(recheck, 'I1')).toMatch(/ \(re-check: file now read\): see this \{image: A payment receipt\. Visible text: Paid ₹42,000\}$/);
+      expect(recheck).not.toContain('[A2]');
+      expect(processedAt(db, 'I1')).not.toBeNull();
+      expect(flagOf(db, id)).toBe(false);
+    });
+
+    it('a file read while the AI call is in flight: the re-queue wins, and the next run shows the file as a re-check', async () => {
+      const log = silentLogger();
+      const info = vi.spyOn(log, 'info');
+      const { db, ai, r } = setup({ log });
+      const id = image(db, 'I1', '2026-10-19T07:01:00.000Z', undefined, { createdAt: '2026-10-19T07:20:00.000Z' });
+      say(db, 'A2', '2026-10-19T07:02:00.000Z', 'fix it');
+      const open = hold(ai);
+      const run = r.run(1);
+      read(db, id, '2026-10-19T08:00:30.000Z');
+      open();
+      expect(await run).toMatchObject({ status: 'ok' });
+      expect(lineOf(newMessages(ai.calls[0]!.user), 'I1')).toMatch(/: see this \{image, still being read\}$/);
+      expect(processedAt(db, 'I1')).toBeNull();
+      expect(flagOf(db, id)).toBe(true);
+      expect(processedAt(db, 'A2')).not.toBeNull();
+      expect(info).toHaveBeenCalledWith(expect.objectContaining({ clientId: 1, requeued: 1 }), 'messages changed during the AI call; queued again');
+
+      expect(await r.run(1)).toMatchObject({ status: 'ok' });
+      expect(lineOf(newMessages(ai.calls[1]!.user), 'I1')).toMatch(/ \(re-check: file now read\): see this \{image: A payment receipt/);
+      expect(processedAt(db, 'I1')).not.toBeNull();
+      expect(flagOf(db, id)).toBe(false);
+    });
+
+    it('a file that ends without text while the AI call is in flight leaves its message processed, with no re-check', async () => {
+      const { db, ai, r } = setup();
+      const id = image(db, 'I1', '2026-10-19T07:01:00.000Z', undefined, { createdAt: '2026-10-19T07:20:00.000Z' });
+      const open = hold(ai);
+      const run = r.run(1);
+      failMedia(db, id, { status: 'failed', errorCode: 'bad_image', at: '2026-10-19T08:00:30.000Z' });
+      open();
+      expect(await run).toMatchObject({ status: 'ok' });
+      expect(processedAt(db, 'I1')).not.toBeNull();
+      expect(flagOf(db, id)).toBe(false);
+      expect(await r.run(1)).toEqual({ status: 'noop' });
+    });
+
+    it('a file read before its message was ever processed is picked up normally, with no marker', async () => {
+      const { db, ai, r } = setup();
+      const id = image(db, 'I1', '2026-10-19T07:59:00.000Z'); // still blocking
+      expect(await r.run(1)).toEqual({ status: 'waiting' });
+      read(db, id, '2026-10-19T08:05:00.000Z');
+      expect(flagOf(db, id)).toBe(false);
+      expect(await r.run(1)).toMatchObject({ status: 'ok' });
+      const line = lineOf(newMessages(ai.calls[0]!.user), 'I1');
+      expect(line).toMatch(/\[unknown\]: see this \{image: A payment receipt/);
+      expect(line).not.toContain('re-check');
+      expect(processedAt(db, 'I1')).not.toBeNull();
+      expect(flagOf(db, id)).toBe(false);
+    });
+
+    it.each([
+      ['could not be read', (db: Db, id: number) => failMedia(db, id, { status: 'failed', errorCode: 'bad_image', at: '2026-10-19T08:10:00.000Z' })],
+      ['forwarded, not described', (db: Db, id: number) => finishMedia(db, id, { textKind: null, text: null, pageCount: null, note: 'forwarded_not_described', at: '2026-10-19T08:10:00.000Z' })],
+      ['an empty description', (db: Db, id: number) => finishMedia(db, id, { textKind: 'description', text: '', pageCount: null, note: null, at: '2026-10-19T08:10:00.000Z' })],
+    ])('a file that ends without text after its message was processed queues nothing: %s', async (_why, end) => {
+      const { db, ai, r } = setup();
+      const id = image(db, 'I1', '2026-10-19T07:01:00.000Z', undefined, { createdAt: '2026-10-19T07:20:00.000Z' });
+      expect(await r.run(1)).toMatchObject({ status: 'ok' });
+      end(db, id);
+      expect(flagOf(db, id)).toBe(false);
+      expect(await r.run(1)).toEqual({ status: 'noop' });
+      expect(ai.calls).toHaveLength(1);
+    });
+
+    it('a message deleted for everyone is not queued again when its file is read', async () => {
+      const { db, ai, r } = setup();
+      const id = image(db, 'I1', '2026-10-19T07:01:00.000Z', undefined, { createdAt: '2026-10-19T07:20:00.000Z' });
+      expect(await r.run(1)).toMatchObject({ status: 'ok' });
+      applyRevoke(db, 1, 'I1');
+      read(db, id, '2026-10-19T08:10:00.000Z');
+      expect(flagOf(db, id)).toBe(false);
+      expect(await r.run(1)).toEqual({ status: 'noop' });
+      expect(ai.calls).toHaveLength(1);
+    });
+
+    it('a later, unrelated run shows the message as plain context, with no marker', async () => {
+      const { db, ai, r } = setup();
+      const id = image(db, 'I1', '2026-10-19T07:01:00.000Z', undefined, { createdAt: '2026-10-19T07:20:00.000Z' });
+      expect(await r.run(1)).toMatchObject({ status: 'ok' });
+      read(db, id, '2026-10-19T08:10:00.000Z');
+      expect(await r.run(1)).toMatchObject({ status: 'ok' });
+      expect(ai.calls[1]!.user).toContain('(re-check: file now read)');
+      say(db, 'A3', '2026-10-19T07:30:00.000Z', 'thanks');
+      expect(await r.run(1)).toMatchObject({ status: 'ok' });
+      const third = ai.calls[2]!.user;
+      expect(third).not.toContain('re-check');
+      expect(lineOf(contextOf(third), 'I1')).toMatch(/\[unknown\]: see this \{image: A payment receipt/);
+      expect(lineOf(newMessages(third), 'A3')).toMatch(/: thanks$/);
+    });
+
+    it('keeps the latest context when the batch holds a file re-check of an old message', async () => {
+      const { db, ai, r } = setup();
+      const id = image(db, 'I0', '2026-10-12T05:00:00.000Z', undefined, { createdAt: '2026-10-12T05:00:00.000Z' });
+      say(db, 'P1', '2026-10-18T05:00:00.000Z', 'recent chat');
+      markProcessed(db, [messageRowId(db, 1, 'I0')!, messageRowId(db, 1, 'P1')!], '2026-10-18T06:00:00.000Z');
+      read(db, id, '2026-10-19T07:00:00.000Z');
+      say(db, 'N1', '2026-10-19T07:30:00.000Z', 'new message');
+      expect(await r.run(1)).toMatchObject({ status: 'ok' });
+      const user = ai.calls[0]!.user;
+      expect(contextOf(user)).toContain('recent chat');
+      expect(lineOf(newMessages(user), 'I0')).toContain('(re-check: file now read)');
+    });
+
+    it('guards a file re-check like a reaction re-check: its task is not added again, but it can close a task', async () => {
+      const add = op({ op: 'add_task', side: 'client', title: 'Send the payment', category: 'payment', priority: 'high', sourceMessageIds: ['I1'] });
+      const close = op({ op: 'close_task', taskCode: 'SHA-001', sourceMessageIds: ['I1'] });
+      const { db, ai, r } = setup();
+      ai.push({ ops: [add] }, { ops: [add, close] });
+      const id = image(db, 'I1', '2026-10-19T07:01:00.000Z', undefined, { createdAt: '2026-10-19T07:20:00.000Z' });
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+      read(db, id, '2026-10-19T08:10:00.000Z');
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 1 });
+      expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done' });
+    });
   });
 
   it('file text cannot break out of the new_messages section', async () => {
