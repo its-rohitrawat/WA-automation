@@ -9,7 +9,7 @@ import type { Db } from '../store/db.ts';
 import { deferMedia, failMedia, finishMedia, getMedia, getMediaRef, markDownloaded, mediaJob, type MediaJob, type MediaRow } from '../store/media.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
-import type { Extractor } from './extract.ts';
+import { readAsImage, type Extractor } from './extract.ts';
 import { MediaDownloadError, MediaUnavailableError, type MediaFetcher } from './fetch.ts';
 import { ParseError } from './parse/types.ts';
 import { extForMime, mediaRelPath } from './paths.ts';
@@ -30,7 +30,10 @@ export const SPEND_RETRY_MS = 10 * 60_000;
 /** Claude was busy or down and nothing was billed: waits that grow, then hourly (amendment 10d). */
 const AI_UNAVAILABLE = 'ai_unavailable';
 const AI_UNAVAILABLE_WAITS_MS = [5, 15, 30, 60].map((m) => m * 60_000);
-/** A file still unread because Claude is unavailable this long after it arrived is given up. */
+/**
+ * A file still unread because Claude is unavailable this long after it arrived, or after the service started if that
+ * is later (amendment 10f), is given up.
+ */
 export const AI_UNAVAILABLE_MAX_AGE_MS = 24 * 60 * 60_000;
 
 /** A file that can never be stored safely, for example because a different file already sits at its path. */
@@ -52,6 +55,8 @@ export interface MediaProcessorOptions {
   fetcher: MediaFetcher;
   extract: Extractor;
   limits?: { maxBytes: number; timeoutMs: number };
+  /** When the service started; defaults to the clock's time at construction. Files loaded before it get 24 hours from it. */
+  startedAt?: Date;
 }
 
 function retryCode(e: unknown): string {
@@ -115,9 +120,11 @@ async function saveOriginal(abs: string, bytes: Buffer, sha256: string): Promise
 /** Downloads, saves and reads one pending file. Problems with the file never throw; they end in a status. */
 export class MediaProcessor {
   readonly #o: MediaProcessorOptions;
+  readonly #startedMs: number;
 
   constructor(o: MediaProcessorOptions) {
     this.#o = o;
+    this.#startedMs = (o.startedAt ?? o.clock.now()).getTime();
   }
 
   async process(mediaId: number): Promise<ProcessResult> {
@@ -209,7 +216,7 @@ export class MediaProcessor {
       return 'failed';
     }
     if (claudeUnavailable(e)) {
-      if (Date.parse(at) - Date.parse(row.createdAt) > AI_UNAVAILABLE_MAX_AGE_MS) {
+      if (Date.parse(at) - Math.max(Date.parse(row.createdAt), this.#startedMs) > AI_UNAVAILABLE_MAX_AGE_MS) {
         failMedia(db, row.id, { status: 'failed', errorCode: AI_UNAVAILABLE, at });
         log.warn({ ...ids, errorCode: AI_UNAVAILABLE, err: e }, 'shared file not read: Claude unavailable for 24 hours');
         return 'failed';
@@ -218,6 +225,15 @@ export class MediaProcessor {
       deferMedia(db, row.id, { errorCode: AI_UNAVAILABLE, nextAttemptAt: new Date(Date.parse(at) + waitMs).toISOString(), countAttempt: false, at });
       log.info({ ...ids, errorCode: AI_UNAVAILABLE, waitMinutes: waitMs / 60_000, err: e }, 'Claude unavailable: shared file waits');
       return 'deferred';
+    }
+    // Amendment 10e: a connection lost after sending is booked at the whole estimate. For a scan that is the scan
+    // ceiling (about $4), booked again by every retry, so the scan fails for good; an image keeps its 3 attempts.
+    // A document not read as an image calls Claude only to read a scanned PDF, so this error came from that read.
+    if (e instanceof Anthropic.APIConnectionError && row.kind === 'document' && !readAsImage(row)) {
+      const errorCode = retryCode(e); // ai_timeout or ai_network
+      failMedia(db, row.id, { status: 'failed', errorCode, at });
+      log.warn({ ...ids, errorCode }, 'scanned PDF not read: outcome unknown, not retried');
+      return 'failed';
     }
     const errorCode = retryCode(e);
     const attempts = row.attempts + 1;

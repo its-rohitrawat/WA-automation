@@ -81,6 +81,14 @@ const capStored = (text: string): string => cutText(text, MEDIA_LIMITS.maxStored
 const imageCostUsd = (imageTokens: number, p: Prices): number =>
   estimateCostUsd(MEDIA_SYSTEM_PROMPT.length + INSTRUCTION_CHARS, p, IMAGE_MAX_TOKENS) + (imageTokens * p.inputPerMTok) / 1_000_000;
 
+/**
+ * Whether a file is read as an image (a paid description). For any other document the only paid read is a scanned
+ * PDF's, so the processor can tell a scan from an image without the error saying which (amendment 10e).
+ */
+export function readAsImage(f: { kind: MediaKind; mimeType: string | null }): boolean {
+  return f.kind === 'image' || (f.kind === 'document' && IMAGE_MIMES.has(baseMime(f.mimeType)));
+}
+
 /** Ceiling for one image description: the prompt, the image at its token count (capped), and the full output allowance. */
 export function imageEstimateUsd(img: { width: number; height: number }, p: Prices): number {
   return imageCostUsd(Math.min(IMAGE_TOKEN_CEILING, Math.ceil((img.width * img.height) / 750)), p);
@@ -160,8 +168,8 @@ export function createExtractor(d: ExtractorDeps): Extractor {
       case 'image':
         return describe(input);
       case 'document': {
+        if (readAsImage(input)) return describe(input);
         const mime = baseMime(input.mimeType);
-        if (IMAGE_MIMES.has(mime)) return describe(input);
         if (isPdf(input.bytes)) return readPdf(input);
         if (isZip(input.bytes) && (mime === DOCX_MIME || /\.docx$/i.test(input.fileName ?? ''))) return readDocx(input);
         return NONE; // any other file: the original is kept, nothing is read

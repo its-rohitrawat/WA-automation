@@ -6,10 +6,10 @@ import Anthropic from '@anthropic-ai/sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AiInvalidOutputError, AiRefusalError } from '../../src/brain/claudeClient.ts';
 import { SpendCapReachedError } from '../../src/brain/paidCall.ts';
-import { createExtractor, type Extractor } from '../../src/media/extract.ts';
+import { createExtractor, scannedPdfCeilingUsd, type Extractor } from '../../src/media/extract.ts';
 import { MediaDownloadError, MediaUnavailableError, type MediaFetcher } from '../../src/media/fetch.ts';
 import type { PreparedImage } from '../../src/media/image.ts';
-import { ParseError } from '../../src/media/parse/types.ts';
+import { ParseError, type ParseResult } from '../../src/media/parse/types.ts';
 import { mediaRelPath } from '../../src/media/paths.ts';
 import { MediaProcessor } from '../../src/media/processor.ts';
 import { MediaRefSealer } from '../../src/media/ref.ts';
@@ -55,7 +55,7 @@ afterEach(() => {
 });
 
 type ImageExtras = { viewOnce?: boolean; contextInfo?: { isForwarded?: boolean; forwardingScore?: number } };
-type SetupOptions = { fetcher?: MediaFetcher; extract?: Extractor; log?: Logger; limits?: { maxBytes: number; timeoutMs: number } };
+type SetupOptions = { fetcher?: MediaFetcher; extract?: Extractor; log?: Logger; limits?: { maxBytes: number; timeoutMs: number }; startedAt?: Date };
 
 function setup(o: SetupOptions = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'wa-media-'));
@@ -66,20 +66,21 @@ function setup(o: SetupOptions = {}) {
   const ing = new Ingestor({ db, onNewMessages: () => {}, clock, media: { sealer } });
   const fetcher = vi.fn<MediaFetcher>(o.fetcher ?? (async () => Buffer.from('jpeg-bytes')));
   const extract = vi.fn<Extractor>(o.extract ?? (async () => ({ textKind: 'description', text: 'A blue banner with the new logo', pageCount: null, note: null })));
-  const p = new MediaProcessor({ db, dataDir, clock, log: o.log ?? silentLogger(), sealer, fetcher, extract, limits: o.limits });
-  const share = (waId = 'IMG1', extras: ImageExtras = {}): number => {
-    ing.handle(
-      normalizeMessage(
-        waRaw(waId, { imageMessage: { url: 'https://mmg.whatsapp.net/v/x', directPath: '/v/x', mediaKey: MEDIA_KEY, mimetype: 'image/jpeg', caption: 'new banner', ...extras } }),
-      )!,
-    );
+  const p = new MediaProcessor({ db, dataDir, clock, log: o.log ?? silentLogger(), sealer, fetcher, extract, limits: o.limits, startedAt: o.startedAt });
+  const ingest = (waId: string, message: Parameters<typeof waRaw>[1]): number => {
+    ing.handle(normalizeMessage(waRaw(waId, message))!);
     return (db.prepare('SELECT id FROM media ORDER BY id DESC LIMIT 1').get() as { id: number }).id;
   };
-  return { db, dataDir, clock, p, fetcher, extract, share };
+  const share = (waId = 'IMG1', extras: ImageExtras = {}): number =>
+    ingest(waId, { imageMessage: { url: 'https://mmg.whatsapp.net/v/x', directPath: '/v/x', mediaKey: MEDIA_KEY, mimetype: 'image/jpeg', caption: 'new banner', ...extras } });
+  /** A file shared as a document, such as a PDF. */
+  const shareFile = (waId: string, mimetype: string, fileName: string): number =>
+    ingest(waId, { documentMessage: { url: 'https://mmg.whatsapp.net/v/x', directPath: '/v/x', mediaKey: MEDIA_KEY, mimetype, fileName } });
+  return { db, dataDir, clock, p, fetcher, extract, share, shareFile };
 }
 
-/** Where a shared image is saved, built only by mediaRelPath. waRaw's default timestamp is 10 Oct 2026, so client SHA's 2026-10 folder. */
-const rel = (mediaId: number, waId = 'IMG1'): string => mediaRelPath({ clientCode: 'SHA', ts: new Date(TS * 1000).toISOString(), waId, mediaId, ext: 'jpg' });
+/** Where a shared file is saved, built only by mediaRelPath. waRaw's default timestamp is 10 Oct 2026, so client SHA's 2026-10 folder. */
+const rel = (mediaId: number, waId = 'IMG1', ext = 'jpg'): string => mediaRelPath({ clientCode: 'SHA', ts: new Date(TS * 1000).toISOString(), waId, mediaId, ext });
 const saved = (dataDir: string, relPath: string): string => join(dataDir, ...relPath.split('/'));
 
 /** Claude errors as the SDK throws them. */
@@ -382,6 +383,21 @@ describe('MediaProcessor', () => {
       expect(existsSync(saved(dataDir, rel(id)))).toBe(true);
     });
 
+    // Amendment 10f: a file loaded before the service started (cli link) still gets 24 hours, counted from the start.
+    it('counts the 24 hours from the service start for a file saved before it', async () => {
+      const startedAt = new Date(Date.parse('2026-10-19T08:00:00Z') + 3 * 24 * 60 * MINUTE);
+      const { db, clock, p, share } = setup({ extract: async () => { throw status(529); }, startedAt });
+      const id = share(); // created 3 days before the start
+      clock.set(startedAt.toISOString());
+      expect(await p.process(id)).toEqual({ outcome: 'deferred', clientId: 1 });
+      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0 });
+      clock.advance(24 * 60 * MINUTE); // exactly 24 hours after the start: still waits
+      expect((await p.process(id)).outcome).toBe('deferred');
+      clock.advance(5 * MINUTE);
+      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
+      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'ai_unavailable', nextAttemptAt: null });
+    });
+
     it('reads the file once Claude is back', async () => {
       let down = true;
       const { db, clock, p, share } = setup({
@@ -444,6 +460,62 @@ describe('MediaProcessor', () => {
       expect((await p.process(id)).outcome).toBe('deferred');
       expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
     });
+  });
+
+  // Amendment 10e: a read lost after sending is booked at its whole estimate. For a scan that is the scan ceiling
+  // (about $4), so it is not read again; an image books at most about $0.10 a try, so it keeps its 3 attempts.
+  describe('a paid read whose outcome is unknown', () => {
+    const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
+    const PDF = Buffer.from('%PDF-1.4 scanned pages');
+    /** The real extractor with a fake Claude; the parser finds no text layer, so every PDF is a scan. */
+    const realExtractor = (ai: FakeMediaAi) => {
+      const spend = new SpendGuard({ db: seededDb(), clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 15 });
+      const parse = async (): Promise<ParseResult> => ({ text: '', pageCount: 2 });
+      const prepareImage = async (): Promise<PreparedImage> => ({ data: Buffer.from('small'), mediaType: 'image/jpeg', width: 10, height: 10 });
+      return { spend, extract: createExtractor({ ai, spend, prices: P, parse, prepareImage }) };
+    };
+    const lost: [string, () => Error, string][] = [
+      ['a timeout', () => new Anthropic.APIConnectionTimeoutError(), 'ai_timeout'],
+      ['a connection reset after sending', () => connectionLost('ECONNRESET'), 'ai_network'],
+    ];
+
+    it.each(lost)('a scanned PDF whose read ends in %s fails for good: read once and booked once', async (_name, error, code) => {
+      const ai = new FakeMediaAi([error()]); // a second read would succeed
+      const { spend, extract } = realExtractor(ai);
+      const lines: string[] = [];
+      const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
+      const { db, dataDir, clock, p, shareFile } = setup({ fetcher: async () => PDF, extract, log });
+      const id = shareFile('DOC1', 'application/pdf', 'site-plan-scan.pdf');
+      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
+      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: 0, nextAttemptAt: null, localPath: rel(id, 'DOC1', 'pdf') });
+      expect(existsSync(saved(dataDir, rel(id, 'DOC1', 'pdf')))).toBe(true);
+      clock.advance(10 * MINUTE);
+      expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
+      expect(ai.calls).toEqual([{ kind: 'pdf', bytes: PDF }]);
+      expect(spend.spentToday()).toBeCloseTo(scannedPdfCeilingUsd(P), 9);
+      // One warn line with ids and the code only: no file name, no error text.
+      expect(lines.map((l) => JSON.parse(l) as unknown)).toEqual([{ level: 40, time: expect.any(Number), msg: expect.any(String), mediaId: id, clientId: 1, errorCode: code }]);
+      expect(lines.join('')).not.toContain('site-plan-scan');
+    });
+
+    const images: [string, (s: ReturnType<typeof setup>) => number][] = [
+      ['an image', (s) => s.share()],
+      ['an image shared as a document', (s) => s.shareFile('DOC2', 'image/jpeg', 'photo.jpg')],
+    ];
+    it.each(images.flatMap(([kind, shareIt]) => lost.map(([name, error, code]) => [kind, name, shareIt, error, code] as const)))(
+      '%s whose read ends in %s counts an attempt and is read again',
+      async (_kind, _name, shareIt, error, code) => {
+        const ai = new FakeMediaAi([error()]);
+        const s = setup({ extract: realExtractor(ai).extract });
+        const id = shareIt(s);
+        expect((await s.p.process(id)).outcome).toBe('deferred');
+        expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
+        s.clock.advance(MINUTE);
+        expect((await s.p.process(id)).outcome).toBe('done');
+        expect(getMedia(s.db, id)).toMatchObject({ status: 'done', textKind: 'description', errorCode: null });
+        expect(ai.calls.map((c) => c.kind)).toEqual(['image', 'image']);
+      },
+    );
   });
 
   it('a refusal from Claude fails for good and is not retried: it was billed', async () => {
