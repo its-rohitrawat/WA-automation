@@ -176,15 +176,17 @@ export class DriveFileUploader {
 
   async #upload(root: string, c: UploadCandidate, name: string, mime: string, bytes: Buffer): Promise<string> {
     const { db, api } = this.#o;
+    // Innermost first: Files, then the client folder, then Clients.
+    const levels = [`drive_files_folder:${c.clientId}`, `drive_client_folder:${c.clientId}`, 'drive_clients_folder'];
     for (let step = 0; ; step++) {
       try {
         return await api.createFile(name, mime, bytes, await this.#filesFolder(root, c), FILE_UPLOAD_TIMEOUT_MS);
       } catch (e) {
-        if (!(e instanceof DriveNotFoundError) || step === 2) throw e;
-        // A folder was removed in Drive. First rebuild this client's folders; if the Clients folder is gone too, that as well.
-        setKv(db, `drive_files_folder:${c.clientId}`, '');
-        setKv(db, `drive_client_folder:${c.clientId}`, '');
-        if (step === 1) setKv(db, 'drive_clients_folder', '');
+        if (!(e instanceof DriveNotFoundError) || step === levels.length) throw e;
+        // A folder was removed in Drive. Rebuild one more level per retry, starting with Files. Creating a folder inside
+        // a removed one fails the same way, so a level is rebuilt only when it is really gone. A rebuilt level gets new
+        // folders inside it too, so the inner keys are cleared again (a retry may have saved a new inner id).
+        for (const key of levels.slice(0, step + 1)) setKv(db, key, '');
       }
     }
   }

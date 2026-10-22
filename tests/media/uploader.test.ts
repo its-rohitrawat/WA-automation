@@ -365,14 +365,30 @@ describe('DriveFileUploader', () => {
     expect(lines.filter((l) => l.msg === 'file uploads to Drive resume')).toMatchObject([{ level: 30, reason: 'auth' }]);
   });
 
-  it('re-creates a Files folder that was removed in Drive, in the same pass', async () => {
+  it('re-creates only a Files folder that was removed in Drive, inside the same client folder, in the same pass', async () => {
     const { db, dataDir, drive, up } = setup();
     savedFile(db, dataDir, { waId: 'A', role: 'client' });
     await up.run();
     drive.missing.add('folder-3');
     const b = savedFile(db, dataDir, { waId: 'B', role: 'client' });
     await up.run();
+    // No second "Sharma Interiors" folder: the client folder is still there.
+    expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Files', 'Files']);
+    expect(drive.folderParents).toEqual(['root-1', 'folder-1', 'folder-2', 'folder-2']);
+    expect(drive.created[1]).toMatchObject({ parentId: 'folder-5' });
+    expect(getMedia(db, b)!.driveFileId).toBe('file-6');
+  });
+
+  it('re-creates a client folder that was removed in Drive, and its Files folder, but not the Clients folder', async () => {
+    const { db, dataDir, drive, up } = setup();
+    savedFile(db, dataDir, { waId: 'A', role: 'client' });
+    await up.run();
+    // Removing the client folder in Drive removes its Files folder too.
+    for (const id of ['folder-2', 'folder-3']) drive.missing.add(id);
+    const b = savedFile(db, dataDir, { waId: 'B', role: 'client' });
+    await up.run();
     expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Files', 'Sharma Interiors', 'Files']);
+    expect(drive.folderParents).toEqual(['root-1', 'folder-1', 'folder-2', 'folder-1', 'folder-5']);
     expect(drive.created[1]).toMatchObject({ parentId: 'folder-6' });
     expect(getMedia(db, b)!.driveFileId).toBe('file-7');
   });
@@ -400,12 +416,19 @@ describe('DriveFileUploader', () => {
     expect(driveState(db, a)).toEqual({ fileId: null, attempts: 1, failed: 0, nextAt: '2026-10-19T08:02:00.000Z' });
   });
 
-  it('rebuilds folders at most twice per file when Drive keeps saying the folder is missing', async () => {
+  it('rebuilds one folder level per retry, at most three times per file, when Drive keeps saying the folder is missing', async () => {
     const { db, dataDir, drive, up } = setup();
     const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
     drive.fileParentsMissing = true;
     await up.run();
-    expect(drive.createFileCalls).toBe(3);
+    expect(drive.createFileCalls).toBe(4);
+    // First try, then Files, then the client folder and its Files, then all three.
+    expect(drive.folders).toEqual([
+      'Clients', 'Sharma Interiors', 'Files',
+      'Files',
+      'Sharma Interiors', 'Files',
+      'Clients', 'Sharma Interiors', 'Files',
+    ]);
     expect(driveState(db, a)).toMatchObject({ fileId: null, attempts: 1, failed: 0 });
   });
 
