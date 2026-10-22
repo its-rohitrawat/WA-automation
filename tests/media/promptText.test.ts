@@ -347,12 +347,12 @@ describe('prompt with file text', () => {
 
   it('removes hidden characters from a file block, but keeps the joiners that Devanagari and emoji need', () => {
     const block = {
-      head: 'document "a‮b\u{E0041}.pdf" (PDF), text',
-      body: 'Pay‮ now\u{E0041}\u{E007F}​﻿\u0007 क्‍ष and क्‌ष \u{1F469}‍\u{1F4BB}\tok\r\nnext',
+      head: 'document "a\u202Eb\u{E0041}.pdf" (PDF), text',
+      body: 'Pay\u202E now\u{E0041}\u{E007F}\u200B\uFEFF\u0007 क्\u200Dष and क्\u200Cष \u{1F469}\u200D\u{1F4BB}\tok\r\nnext',
     };
     const out = buildUserContent({ ...base, batch: [msg(1)], mediaText: new Map([[1, block]]) });
-    expect(out).toContain(': see this {document "ab.pdf" (PDF), text: Pay now क्‍ष and क्‌ष \u{1F469}‍\u{1F4BB}\tok\n    next}');
-    expect(out).not.toMatch(/[‮​﻿\u0007\r]|[\u{E0000}-\u{E007F}]/u);
+    expect(out).toContain(': see this {document "ab.pdf" (PDF), text: Pay now क्\u200Dष and क्\u200Cष \u{1F469}\u200D\u{1F4BB}\tok\n    next}');
+    expect(out).not.toMatch(/[\u202E\u200B\uFEFF\u0007\r]|[\u{E0000}-\u{E007F}]/u);
   });
 
   it('orders a line as text, then the file block, then reactions (12b)', () => {
