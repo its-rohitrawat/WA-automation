@@ -124,7 +124,7 @@ function personLabel(jid: string, fallbackName: string | null, people: Map<strin
  * line breaks or spaces, and ZWNJ/ZWJ (U+200C/U+200D), which Devanagari spelling and emoji need and which cannot
  * reorder text.
  */
-const HIDDEN_IN_FILES = /(?![\t\n\r\v\f\x85‌‍])[\p{Cc}\p{Cf}]/gu;
+const HIDDEN_IN_FILES = /(?![\t\n\r\v\f\x85\u200C\u200D])[\p{Cc}\p{Cf}]/gu;
 
 /**
  * A shared file as {head} or {head: body}. Both parts are untrusted like chat text: braces in them become ❴ ❵, so only

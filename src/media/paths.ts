@@ -78,11 +78,12 @@ const INVISIBLE = /(?![\u200C\u200D])[\p{Cc}\p{Cf}\p{Cs}\uFFFE\uFFFF]/gu;
  */
 export const showsText = (s: string): boolean => /[^\s\p{Cc}\p{Cf}\p{Cs}\uFFFE\uFFFF]/u.test(s);
 
-const EDGE = /[.\s]/;
+/** Dropped from both ends of a name: dots, white space, and the joiners INVISIBLE keeps, which join nothing at an edge. */
+const EDGE = /[.\s\u200C\u200D]/;
 
 /**
- * Drops dots and white space from both ends of a name. A loop, not a regex: /[.\s]+$/ backtracks on a long run of dots
- * or spaces inside a name and takes quadratic time.
+ * Drops dots, white space and joiners (EDGE) from both ends of a name. A loop, not a regex: /[.\s]+$/ backtracks on a
+ * long run of dots or spaces inside a name and takes quadratic time.
  */
 function trimDotsAndSpaces(s: string): string {
   let start = 0;
@@ -104,7 +105,7 @@ export function sanitizeFileName(name: string | null, maxLength = MAX_FILE_NAME_
       .replace(/[\\/:*?"<>|]/g, '_')
       .replace(/\s+/g, ' '),
   );
-  // Trimmed again after the cut, which can leave a space or a dot at the end.
+  // Trimmed again after the cut, which can leave a space, a dot or a joiner at the end.
   const cut = trimDotsAndSpaces([...cleaned].slice(0, maxLength).join(''));
-  return cut.length > 0 ? cut : null;
+  return showsText(cut) ? cut : null;
 }

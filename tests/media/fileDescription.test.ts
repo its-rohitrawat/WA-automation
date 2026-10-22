@@ -64,12 +64,12 @@ describe('fileDescription', () => {
 
   it('says a file over the download limit was too large to download, not that WhatsApp failed (T14-03)', () => {
     const tooLarge = { status: 'unavailable', errorCode: 'too_large', textKind: null, textStart: null, pageCount: null } as const;
-    expect(fileDescription(facts({ ...tooLarge, fileSize: 62 * 1024 * 1024 }))).toBe('PDF, 62.0 MB, too large to download (over 50 MB)');
+    expect(fileDescription(facts({ ...tooLarge, fileSize: 62 * 1024 * 1024 }))).toBe('PDF, 62.0 MB, too large to download (over the 50 MB limit)');
     // Found too large during the download: a declared size under the limit is the sender's claim, so it is not shown.
-    expect(fileDescription(facts({ ...tooLarge, fileSize: 24_576 }))).toBe('PDF, too large to download (over 50 MB)');
-    expect(fileDescription(facts({ ...tooLarge, fileSize: null }))).toBe('PDF, too large to download (over 50 MB)');
+    expect(fileDescription(facts({ ...tooLarge, fileSize: 24_576 }))).toBe('PDF, too large to download (over the 50 MB limit)');
+    expect(fileDescription(facts({ ...tooLarge, fileSize: null }))).toBe('PDF, too large to download (over the 50 MB limit)');
     expect(fileDescription(facts({ ...tooLarge, kind: 'image', mimeType: 'image/jpeg', fileSize: 51 * 1024 * 1024 })))
-      .toBe('Image, 51.0 MB, too large to download (over 50 MB)');
+      .toBe('Image, 51.0 MB, too large to download (over the 50 MB limit)');
     expect(fileDescription(facts({ ...tooLarge, errorCode: 'expired' }))).toBe('PDF, could not be downloaded from WhatsApp');
   });
 

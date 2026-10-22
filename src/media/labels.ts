@@ -104,7 +104,7 @@ export function fileDescription(f: FileFacts): string {
     // a file found too large during the download may have declared less.
     const limit = MEDIA_LIMITS.maxDownloadBytes;
     const size = f.fileSize && f.fileSize > limit ? `, ${formatSize(f.fileSize)}` : '';
-    return `${type}${size}, too large to download (over ${Math.round(limit / (1024 * 1024))} MB)`;
+    return `${type}${size}, too large to download (over the ${Math.round(limit / (1024 * 1024))} MB limit)`;
   }
   if (f.status === 'failed') return `${type}, could not be read`;
   if (f.note === FORWARDED_NOT_DESCRIBED) return f.kind === 'image' || type === 'Image' ? '(forwarded image)' : '(forwarded scanned PDF)';

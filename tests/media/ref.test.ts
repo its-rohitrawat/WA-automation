@@ -81,7 +81,7 @@ describe('isSafeMediaAddress (amendment 3a, review C2)', () => {
   it('refuses a bad direct path even next to a good url, because Baileys downloads from the direct path', () => {
     // The premise: Baileys would fetch from a host the sender can own.
     expect(pinnedHost('.evil.example/x')).toBe('mmg.whatsapp.net.evil.example');
-    for (const dp of ['.evil.example/x', '@evil.com/x', 'evil.com/x', ':8443/x', '/a b', '/a\\b', '/a@b', '/a\tb', '/a\nb', '/a b']) {
+    for (const dp of ['.evil.example/x', '@evil.com/x', 'evil.com/x', ':8443/x', '/a b', '/a\\b', '/a@b', '/a\tb', '/a\nb', '/a\u00A0b']) {
       expect(isSafeMediaAddress(at('https://mmg.whatsapp.net/v/t1', dp)), JSON.stringify(dp)).toBe(false);
     }
   });

@@ -237,7 +237,7 @@ describe('Files received', () => {
       status: 'unavailable', errorCode: 'expired',
     });
     expect(sharmaFiles(db).slice(0, 2).map((f) => [f.name, f.description])).toEqual([
-      ['site plan.pdf', 'PDF, too large to download (over 50 MB)'],
+      ['site plan.pdf', 'PDF, too large to download (over the 50 MB limit)'],
       ['old.pdf', 'PDF, could not be downloaded from WhatsApp'],
     ]);
   });
