@@ -393,6 +393,20 @@ describe('Reconciler', () => {
       expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-12' });
     });
 
+    it('never closes a task before the day it was raised: a file re-check of an earlier message closes a task raised later on its raised day (12h)', async () => {
+      const { db, r } = setup([{ ops: [close()] }]);
+      store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
+      const id = fileOf(db);
+      store(db, 'm2', 'Homepage banner bhi chahiye', '2026-10-15T05:00:00.000Z');
+      markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-15T06:00:00.000Z'); // m1's file was still being read
+      createTask(db, { clientId: 1, side: 'us', title: 'Homepage banner', category: 'design', priority: 'high', assignedTo: null, askedBy: null, raisedOn: '2026-10-15',
+        deadline: null, latestProgress: null, sourceQuote: null, sourceDate: '2026-10-15', sourceWaId: 'm2', origin: 'whatsapp' }, NOW); // raised by the later m2
+      readAt(db, id, '2026-10-19T07:00:00.000Z');
+      expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: null })]);
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', raisedOn: '2026-10-15', closedOn: '2026-10-15' });
+    });
+
     it('still rejects a close backed by a file read before the human reopened the task (12h)', async () => {
       const { db, r } = setup([{ ops: [close()] }]);
       banner(db);
