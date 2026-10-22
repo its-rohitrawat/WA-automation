@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { MEDIA_PROMPT_LIMITS, mediaPromptTexts, readyPrefix } from '../media/promptText.ts';
+import { mediaForPrompt, mediaPromptTexts, readyPrefix } from '../media/promptText.ts';
 import { estimateCostUsd, type Prices } from '../spend/pricing.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
 import { finishBatch, startBatch } from '../store/batches.ts';
@@ -77,6 +77,8 @@ function errorCodeOf(e: unknown): string {
 export class Reconciler {
   readonly #o: ReconcilerOptions;
   readonly #startedAt: Date;
+  /** Clients whose last run was 'waiting', so a wait is logged at info only when it starts. */
+  readonly #waiting = new Set<number>();
 
   constructor(o: ReconcilerOptions) {
     this.#o = o;
@@ -85,16 +87,23 @@ export class Reconciler {
 
   async run(clientId: number): Promise<ReconcileOutcome> {
     const { db, spend, prices, clock, log } = this.#o;
+    // Any outcome but 'waiting' ends a wait (it is added back below), including a run that throws.
+    const wasWaiting = this.#waiting.delete(clientId);
     const client = getClient(db, clientId);
     if (!client.active) return { status: 'noop' };
     const queued = listUnprocessed(db, clientId);
     if (queued.length === 0) return { status: 'noop' };
     const now = clock.now();
     // §6.1: a shared file is read before the AI sees its message. Messages from the first file still being read onward
-    // wait for a later run; the media queue tells the debouncer when that file is done. Blocking needs no text (maxChars 0).
+    // wait for a later run; the media queue tells the debouncer when that file is done, or the app tick re-runs it once
+    // the wait runs out. Blocking needs no text (maxChars 0).
     const batch = readyPrefix(queued, mediaForMessages(db, queued.map((m) => m.id), 0), now, this.#startedAt);
     if (batch.length === 0) {
-      log.info({ clientId, waiting: queued.length }, 'waiting for shared files to be read');
+      this.#waiting.add(clientId);
+      // The app tick re-runs a waiting client every few minutes, so only the start of a wait is worth an info line.
+      const fields = { clientId, waiting: queued.length };
+      if (wasWaiting) log.debug(fields, 'waiting for shared files to be read');
+      else log.info(fields, 'waiting for shared files to be read');
       return { status: 'waiting' };
     }
 
@@ -106,8 +115,7 @@ export class Reconciler {
     const openTasks = listTasks(db, clientId, ['open', 'maybe_done']);
     const decisions = listDecisions(db, clientId, 20);
     const reactions = reactionsFor(db, clientId, [...recent, ...batch].map((m) => m.waId));
-    const files = mediaForMessages(db, [...recent, ...batch].map((m) => m.id), MEDIA_PROMPT_LIMITS.perMessage + 1);
-    const mediaText = mediaPromptTexts(files, batch, recent);
+    const mediaText = mediaPromptTexts(mediaForPrompt(db, batch, recent), batch, recent);
     const user = buildUserContent({ client, people, openTasks, decisions, recent, batch, reactions, today: istDate(now), mediaText });
 
     // Known and accepted: a call that falls back can cost up to about 2.25x this reservation (a declined primary

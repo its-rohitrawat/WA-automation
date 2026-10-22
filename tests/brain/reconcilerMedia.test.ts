@@ -1,5 +1,7 @@
+import { Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { Reconciler } from '../../src/brain/reconciler.ts';
+import { mediaForPrompt } from '../../src/media/promptText.ts';
 import type { Prices } from '../../src/spend/pricing.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { latestBatches } from '../../src/store/batches.ts';
@@ -8,7 +10,7 @@ import { deferMedia, finishMedia, insertMedia, messageRowId, type MediaKind } fr
 import { insertMessage, markProcessed } from '../../src/store/messages.ts';
 import { upsertPerson } from '../../src/store/people.ts';
 import { manualClock } from '../../src/util/clock.ts';
-import { silentLogger } from '../../src/util/logger.ts';
+import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
 import { FakeAi } from '../helpers/ai.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
 import { SHARMA_PN } from '../helpers/wa.ts';
@@ -17,13 +19,24 @@ const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, ca
 /** Well before every file in these tests, so only the file's own arrival time counts (amendment 12a is tested on its own). */
 const EARLY_START = '2026-10-19T00:00:00.000Z';
 
-function setup(o: { startedAt?: string | null } = {}) {
+function capturingLogger() {
+  const lines: Record<string, unknown>[] = [];
+  const sink = new Writable({
+    write(chunk, _enc, cb) {
+      lines.push(JSON.parse(String(chunk)) as Record<string, unknown>);
+      cb();
+    },
+  });
+  return { lines, log: createLogger('debug', sink) };
+}
+
+function setup(o: { startedAt?: string | null; log?: Logger } = {}) {
   const db = seededDb();
   const clock = manualClock('2026-10-19T08:00:00Z');
   const spend = new SpendGuard({ db, clock, capUsd: 15 });
   const ai = new FakeAi();
   const startedAt = o.startedAt === null ? undefined : new Date(o.startedAt ?? EARLY_START);
-  const r = new Reconciler({ db, ai, spend, prices: P, clock, log: silentLogger(), onChanged: vi.fn(), startedAt });
+  const r = new Reconciler({ db, ai, spend, prices: P, clock, log: o.log ?? silentLogger(), onChanged: vi.fn(), startedAt });
   upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
   return { db, ai, spend, clock, r };
 }
@@ -88,6 +101,22 @@ describe('Reconciler with shared files', () => {
     expect(processedAt(db, 'I1')).toBeNull();
   });
 
+  it('logs at info only when a client starts waiting, not on every waiting run', async () => {
+    const { lines, log } = capturingLogger();
+    const { db, r } = setup({ log });
+    const waits = (level: number) => lines.filter((l) => l.msg === 'waiting for shared files to be read' && l.level === level).length;
+    const first = image(db, 'I1', '2026-10-19T07:01:00.000Z');
+    expect(await r.run(1)).toEqual({ status: 'waiting' });
+    expect(await r.run(1)).toEqual({ status: 'waiting' });
+    expect(waits(30)).toBe(1); // info
+    expect(waits(20)).toBe(1); // debug
+    finishMedia(db, first, { textKind: 'description', text: 'A receipt', pageCount: null, note: null, at: NOW });
+    expect(await r.run(1)).toMatchObject({ status: 'ok' });
+    image(db, 'I2', '2026-10-19T07:59:30.000Z');
+    expect(await r.run(1)).toEqual({ status: 'waiting' });
+    expect(waits(30)).toBe(2);
+  });
+
   it('still returns noop when nothing is queued', async () => {
     const { r } = setup();
     expect(await r.run(1)).toEqual({ status: 'noop' });
@@ -132,6 +161,18 @@ describe('Reconciler with shared files', () => {
     const user = ai.calls[0]!.user;
     const context = user.slice(user.indexOf('<recent_context>'), user.indexOf('</recent_context>'));
     expect(context).toContain(`{document "old.pdf" (PDF, 1 page), text: ${'y'.repeat(600)} … (400 more characters not shown)}`);
+  });
+
+  it('loads the full per-message text for new messages but only an excerpt for context messages', () => {
+    const { db } = setup();
+    const ctx = file(db, 'D0', '2026-10-19T06:00:00.000Z', { kind: 'document', mimeType: 'application/pdf', read: { textKind: 'extract', text: 'y'.repeat(30_000) } });
+    const neu = file(db, 'D1', '2026-10-19T07:00:00.000Z', { kind: 'document', mimeType: 'application/pdf', read: { textKind: 'extract', text: 'z'.repeat(30_000) } });
+    const rows = mediaForPrompt(db, [{ id: messageRowId(db, 1, 'D1')! }], [{ id: messageRowId(db, 1, 'D0')! }]);
+    const byId = new Map([...rows.values()].map((m) => [m.id, m]));
+    expect(byId.get(neu)).toMatchObject({ textChars: 30_000 });
+    expect(byId.get(neu)!.text).toHaveLength(20_001);
+    expect(byId.get(ctx)).toMatchObject({ textChars: 30_000 });
+    expect(byId.get(ctx)!.text).toHaveLength(601);
   });
 
   it('stops waiting after 30 minutes and says the file is still being read', async () => {

@@ -1,4 +1,5 @@
-import type { MediaKind, MediaRow } from '../store/media.ts';
+import type { Db } from '../store/db.ts';
+import { mediaForMessages, type MediaKind, type MediaRow } from '../store/media.ts';
 import type { MessageRow } from '../store/messages.ts';
 import { fromIstDate, istDate } from '../util/time.ts';
 import { formatDuration, formatSize, FORWARDED_NOT_DESCRIBED, typeLabel } from './labels.ts';
@@ -104,7 +105,7 @@ export function mediaPromptText(row: MediaRow, maxChars: number): MediaBlock | n
  * Blocks for the new messages (sharing one budget) and the context messages (short excerpts), by message row id.
  * Descriptions (a picture's only text, which was paid for) get the first claim on the batch budget; file extracts
  * share what is left, so a receipt sent after long PDFs is still shown whole. The batch never shows more than perBatch.
- * `media` comes from mediaForMessages with maxChars of at least limits.perMessage + 1.
+ * `media` comes from mediaForPrompt with the same limits.
  */
 export function mediaPromptTexts(
   media: Map<number, MediaRow>,
@@ -138,6 +139,23 @@ export function mediaPromptTexts(
     const block = row ? mediaPromptText(row, limits.perContextMessage) : null;
     if (block) out.set(m.id, block);
   }
+  return out;
+}
+
+/**
+ * The files of the new and the context messages, by message row id, for mediaPromptTexts. Each text is loaded only as
+ * far as the prompt can show it, plus one character so a cut is noticed: limits.perMessage for new messages,
+ * limits.perContextMessage for context messages. The full length is in textChars.
+ */
+export function mediaForPrompt(
+  db: Db,
+  batch: Pick<MessageRow, 'id'>[],
+  recent: Pick<MessageRow, 'id'>[],
+  limits: MediaPromptLimits = MEDIA_PROMPT_LIMITS,
+): Map<number, MediaRow> {
+  const out = mediaForMessages(db, recent.map((m) => m.id), limits.perContextMessage + 1);
+  // Set after the context rows, so a message in both lists gets the longer text.
+  for (const [id, row] of mediaForMessages(db, batch.map((m) => m.id), limits.perMessage + 1)) out.set(id, row);
   return out;
 }
 
