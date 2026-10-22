@@ -35,6 +35,8 @@ These steps protect client data. The tool refuses to send anything until you add
    - `C:\stt-samples\meetings\`: 2–3 Google Meet recordings, 30–90 minutes each, with 2–6 speakers (.mp4 as downloaded is fine).
 
    The tool refuses any folder inside a git repository. Wait until every download has finished before running it.
+
+   Do not rename or move recordings between runs: a renamed file counts as a new recording and is sent and paid again.
 2. **Keys.** Open PowerShell and run:
 
    ```powershell
