@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -60,13 +61,23 @@ export function saveSourcePrint(mp3: string, print: SourcePrint): void {
   writeFileSync(printFile(mp3), `${JSON.stringify(print)}\n`);
 }
 
+/** A run's hold on an output folder: the lock file, and the random token this run wrote into it. */
+export interface RunLock {
+  path: string;
+  token: string;
+}
+
+const tokenLine = (token: string): string => `run ${token}`;
+
 /**
- * Takes <dir>\run.lock with an exclusive create, making the folder first. Returns its path, or null when the file is
- * already there: another run is using the folder, or one stopped without removing it.
+ * Takes <dir>\run.lock with an exclusive create, making the folder first, and writes the note and a random token into
+ * it. Returns the lock, or null when the file is already there: another run is using the folder, or one stopped
+ * without removing it.
  */
-export function takeRunLock(dir: string, note: string): string | null {
+export function takeRunLock(dir: string, note: string): RunLock | null {
   mkdirSync(dir, { recursive: true });
   const path = join(dir, 'run.lock');
+  const token = randomUUID();
   let fd: number;
   try {
     fd = openSync(path, 'wx');
@@ -75,7 +86,7 @@ export function takeRunLock(dir: string, note: string): string | null {
     throw e;
   }
   try {
-    writeSync(fd, `${note}\n`);
+    writeSync(fd, `${note}\n${tokenLine(token)}\n`);
   } catch (e) {
     closeSync(fd);
     // Our own file, just made: never leave it behind to block the next run.
@@ -83,5 +94,20 @@ export function takeRunLock(dir: string, note: string): string | null {
     throw e;
   }
   closeSync(fd);
-  return path;
+  return { path, token };
+}
+
+/**
+ * Removes the lock file only while it still holds this run's token. If it was deleted by hand and another run has
+ * taken the folder since, that run's lock stays. Synchronous, for the exit handler.
+ */
+export function releaseRunLock(lock: RunLock): void {
+  let text: string;
+  try {
+    text = readFileSync(lock.path, 'utf8');
+  } catch {
+    // Already gone, or unreadable: nothing of ours to remove.
+    return;
+  }
+  if (text.split(/\r?\n/).includes(tokenLine(lock.token))) rmSync(lock.path, { force: true });
 }

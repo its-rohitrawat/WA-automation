@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { checkRecordings, saveSourcePrint, sourceChanged, sourcePrint, takeRunLock } from '../../../src/stt/bakeoff/guards.ts';
+import { checkRecordings, releaseRunLock, saveSourcePrint, sourceChanged, sourcePrint, takeRunLock } from '../../../src/stt/bakeoff/guards.ts';
 
 let dir: string;
 
@@ -11,17 +11,41 @@ beforeEach(() => {
 });
 
 describe('takeRunLock', () => {
-  it('creates the folder and run.lock, and returns its path', () => {
+  it('creates the folder and run.lock holding the note and a random token, and returns both', () => {
     const out = join(dir, 'bakeoff-out');
     const lock = takeRunLock(out, 'started now');
-    expect(lock).toBe(join(out, 'run.lock'));
-    expect(readFileSync(join(out, 'run.lock'), 'utf8')).toBe('started now\n');
+    expect(lock?.path).toBe(join(out, 'run.lock'));
+    expect(lock?.token).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(readFileSync(join(out, 'run.lock'), 'utf8')).toBe(`started now\nrun ${lock?.token}\n`);
   });
 
   it('returns null while another run holds the lock, and leaves its file alone', () => {
-    expect(takeRunLock(dir, 'first')).not.toBeNull();
+    const first = takeRunLock(dir, 'first');
+    expect(first).not.toBeNull();
     expect(takeRunLock(dir, 'second')).toBeNull();
-    expect(readFileSync(join(dir, 'run.lock'), 'utf8')).toBe('first\n');
+    expect(readFileSync(join(dir, 'run.lock'), 'utf8')).toBe(`first\nrun ${first?.token}\n`);
+  });
+});
+
+describe('releaseRunLock', () => {
+  it('removes the lock file it took', () => {
+    const lock = takeRunLock(dir, 'mine')!;
+    releaseRunLock(lock);
+    expect(existsSync(lock.path)).toBe(false);
+    // Already gone: nothing to do, and no error.
+    releaseRunLock(lock);
+  });
+
+  it("leaves a lock file that is now another run's", () => {
+    const mine = takeRunLock(dir, 'mine')!;
+    // Deleted by hand while this run went on, then taken by a second run.
+    rmSync(mine.path);
+    const theirs = takeRunLock(dir, 'theirs')!;
+    expect(theirs.token).not.toBe(mine.token);
+    releaseRunLock(mine);
+    expect(readFileSync(theirs.path, 'utf8')).toBe(`theirs\nrun ${theirs.token}\n`);
+    releaseRunLock(theirs);
+    expect(existsSync(theirs.path)).toBe(false);
   });
 });
 

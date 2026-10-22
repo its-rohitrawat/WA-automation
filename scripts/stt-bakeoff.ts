@@ -1,11 +1,11 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { AudioError, Ffmpeg, findFfmpeg } from '../src/stt/audio.ts';
 import { refusals } from '../src/stt/bakeoff/checks.ts';
 import { KEY_NAMES, loadBakeoffEnv, type BakeoffEnv } from '../src/stt/bakeoff/env.ts';
-import { checkRecordings, saveSourcePrint, sourcePrint, takeRunLock } from '../src/stt/bakeoff/guards.ts';
+import { checkRecordings, releaseRunLock, saveSourcePrint, sourcePrint, takeRunLock, type RunLock } from '../src/stt/bakeoff/guards.ts';
 import { Ledger, LedgerError } from '../src/stt/bakeoff/ledger.ts';
 import { buildPlan, formatPlan } from '../src/stt/bakeoff/plan.ts';
 import { buildReport, buildScoreSheet, localTime } from '../src/stt/bakeoff/report.ts';
@@ -19,12 +19,12 @@ import { PROVIDER_IDS, type AudioPart, type ProviderId, type SttProvider } from 
 
 const AFTER_STOP = 'Finished results are kept. Run the same command again to continue, or add --report-only to rebuild report.md.';
 
-/** This run's own lock file, once taken. Only this one is ever removed. */
-let lockFile: string | null = null;
+/** This run's own lock, once taken. It is removed only while the file still holds this run's token. */
+let runLock: RunLock | null = null;
 process.on('exit', () => {
-  if (lockFile === null) return;
+  if (runLock === null) return;
   try {
-    rmSync(lockFile, { force: true });
+    releaseRunLock(runLock);
   } catch {
     // Left behind: the next run says where it is and that it may be deleted.
   }
@@ -276,8 +276,8 @@ const problems = refusals(items, env, { maxUsd, confirmedPrivacy: values['confir
 if (problems.length > 0) stop(`\nNot sending:\n${problems.map((p) => `  - ${p}`).join('\n')}`);
 
 // One run at a time per output folder: two runs could both send a slot that neither has finished.
-lockFile = takeRunLock(outDir, `STT bake-off run started ${localTime(new Date())} (process ${process.pid}).`);
-if (lockFile === null) stop(`Another run is using ${outDir}. If none is running, delete run.lock there.`);
+runLock = takeRunLock(outDir, `STT bake-off run started ${localTime(new Date())} (process ${process.pid}).`);
+if (runLock === null) stop(`Another run is using ${outDir}. If none is running, delete run.lock there.`);
 
 // Local and free: one mono 16 kHz MP3 per sample that has something to send. Every recording was checked against its
 // saved print above; the prints read then are saved beside the MP3s.
