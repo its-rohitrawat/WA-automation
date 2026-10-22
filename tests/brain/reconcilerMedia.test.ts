@@ -257,8 +257,8 @@ describe('Reconciler with shared files', () => {
     file(db, 'V1', '2026-10-19T07:01:00.000Z', { kind: 'voice', mimeType: 'audio/ogg' });
     file(db, 'U2', '2026-10-19T07:02:00.000Z', { kind: 'audio', mimeType: 'audio/mpeg' });
     expect(await r.run(1)).toMatchObject({ status: 'ok' });
-    expect(ai.calls[0]!.user).toContain(': [voice note, not transcribed yet]');
-    expect(ai.calls[0]!.user).toContain(': see this [audio file]');
+    expect(ai.calls[0]!.user).toContain(': {voice note, not transcribed yet}');
+    expect(ai.calls[0]!.user).toContain(': see this {audio file}');
   });
 
   it('shows that a forwarded image was not described (12f)', async () => {

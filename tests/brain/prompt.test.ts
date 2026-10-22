@@ -225,7 +225,26 @@ describe('formatMessage', () => {
   });
 
   it('shows a placeholder for media', () => {
-    expect(formatMessage(message('m10', null, { mediaType: 'voice' }), peopleMap, [])).toContain(': [voice note, not transcribed yet]');
+    expect(formatMessage(message('m10', null, { mediaType: 'voice' }), peopleMap, [])).toContain(': {voice note, not transcribed yet}');
+  });
+
+  it.each([
+    ['image', '{image}'], ['video', '{video}'], ['voice', '{voice note, not transcribed yet}'], ['audio', '{audio file}'],
+    ['document', '{document}'], ['sticker', '{sticker}'], ['location', '{location}'], ['unsupported', '{unsupported}'],
+  ])('writes the %s placeholder in plain braces, where a file block sits', (mediaType, placeholder) => {
+    expect(formatMessage(message('m10', null, { mediaType }), peopleMap, []).endsWith(`[client]: ${placeholder}`)).toBe(true);
+    const withText = formatMessage(message('m10', 'see this', { mediaType }), peopleMap, [{ targetWaId: 'm10', reactorJid: RAHUL_PN, emoji: '✅' }]);
+    expect(withText.endsWith(`[client]: see this ${placeholder} {reactions: ✅ by P2 Rahul [team]}`)).toBe(true);
+    expect(withText).not.toContain(`[${placeholder.slice(1, -1)}]`);
+  });
+
+  it('a sender typing [document] or [image] gets plain text, never a placeholder', () => {
+    for (const typed of ['[document]', '[image]', '[sticker] [voice note, not transcribed yet]']) {
+      const line = formatMessage(message('m10', typed), peopleMap, []);
+      expect(line.endsWith(`: ${typed}`)).toBe(true);
+      expect(line).not.toMatch(/[{}]/);
+    }
+    expect(formatMessage(message('m10', '{document}'), peopleMap, []).endsWith(': ❴document❵')).toBe(true);
   });
 });
 
