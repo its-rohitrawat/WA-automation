@@ -34,6 +34,8 @@ import { SHARMA_PN, waRaw, waText } from './helpers/wa.ts';
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
 const MEDIA_KEY = Buffer.alloc(32, 9);
 const MINUTE = 60_000;
+/** For a wait on real work (building the workbook, file I/O): the default 1 s is tight while the whole suite runs. */
+const SLOW_IO = { timeout: 10_000 };
 const dirs: string[] = [];
 
 interface SetupOptions {
@@ -214,6 +216,21 @@ describe('app with shared files', () => {
     const out = lines.join('');
     expect(out).toContain('shared file will be retried');
     for (const s of ['mmg.whatsapp.net', '/v/t1', MEDIA_KEY.toString('base64'), 'new banner']) expect(out).not.toContain(s);
+  });
+
+  it('a shared file that cannot be stored is logged without its caption, address, media key or sender', async () => {
+    const lines: string[] = [];
+    const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
+    const { db, app, sock } = setup({ log });
+    db.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
+    shareImage(sock);
+    await stopApp(app);
+    const out = lines.join('');
+    expect(out).toContain('ingest failed');
+    expect(getMedia(db, 1)).toBeUndefined();
+    for (const s of ['mmg.whatsapp.net', '/v/t1', MEDIA_KEY.toString('base64'), 'new banner', '919800000001', SHARMA.groupId]) {
+      expect(out).not.toContain(s);
+    }
   });
 
   it('stop() waits for a file being read and leaves no timers', async () => {
@@ -479,6 +496,64 @@ describe('app media wiring (15g)', () => {
     expect(stop).not.toHaveBeenCalled();
     await stopApp(app);
     expect(stop).toHaveBeenCalledWith(10_000);
+  });
+
+  /** Holds the client file's upload (never the tracker's) until the test releases it. */
+  function gateClientUpload(drive: FakeDrive) {
+    const g = gate();
+    const state = { inFlight: false, release: g.release };
+    const createFile = drive.createFile.bind(drive);
+    vi.spyOn(drive, 'createFile').mockImplementation(async (name, mime, body, parentId, timeoutMs) => {
+      if (name !== 'Tracker.xlsx') {
+        state.inFlight = true;
+        await g.promise;
+      }
+      return createFile(name, mime, body, parentId, timeoutMs);
+    });
+    return state;
+  }
+
+  it('stop() waits for the file upload in flight, so its Drive id is saved before stop() returns', async () => {
+    let id = 0;
+    const { db, drive, app } = setup({ prepare: (db, dataDir) => void (id = storedClientDoc(db, dataDir)) });
+    const upload = gateClientUpload(drive);
+    // The first publish creates the Drive root, then the uploader starts on the file.
+    await vi.waitFor(() => expect(upload.inFlight).toBe(true), SLOW_IO);
+    let stopped = false;
+    let idWhenStopped: string | null | undefined;
+    const p = app.stop().then(() => {
+      stopped = true;
+      idWhenStopped = getMedia(db, id)?.driveFileId;
+    });
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(stopped).toBe(false);
+    upload.release();
+    for (let i = 0; i < 30 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
+    await p;
+    // Without the wait, the file would reach Drive with no saved id and be uploaded again after the restart.
+    expect(idWhenStopped).toBeTruthy();
+    expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx', 'brief.pdf']);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('stop() gives up on a file upload that never finishes after 10 s', async () => {
+    let id = 0;
+    const { db, drive, app } = setup({ prepare: (db, dataDir) => void (id = storedClientDoc(db, dataDir)) });
+    const upload = gateClientUpload(drive);
+    await vi.waitFor(() => expect(upload.inFlight).toBe(true), SLOW_IO);
+    let stopped = false;
+    const p = app.stop().then(() => {
+      stopped = true;
+    });
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(stopped).toBe(false);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(stopped).toBe(true);
+    await p;
+    expect(getMedia(db, id)?.driveFileId).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+    upload.release(); // the late answer still saves its id (the database is open in this test)
+    await vi.waitFor(() => expect(getMedia(db, id)?.driveFileId).toBeTruthy(), SLOW_IO);
   });
 
   it('the tick retries a file upload that is due, and the finished upload publishes the workbook', async () => {

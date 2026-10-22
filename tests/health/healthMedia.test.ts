@@ -80,10 +80,25 @@ describe('Health and shared files', () => {
   });
 
   it('a waiting run changes nothing in the media warnings (15c)', () => {
-    const { h } = setup();
-    h.setMedia(counts({ stale: 1 }));
+    const { db, h } = setup();
+    h.setMedia(counts({ pending: 1, stale: 1 }));
+    // A group with an AI error stays failed: waiting for a file is not a success that clears it.
+    h.recordOutcome(1, { status: 'failed', errorCode: 'refusal' });
+    const failed = readHealthSnapshot(db)!;
+    expect(failed.line.text).toBe('⚠️ 1 group waiting (AI error)');
     h.recordOutcome(1, { status: 'waiting' });
+    expect(h.line().text).toBe('⚠️ 1 group waiting (AI error)');
+    expect(h.snapshot().media).toEqual(counts({ pending: 1, stale: 1 }));
+    expect(readHealthSnapshot(db)).toEqual(failed);
+    // A paused group stays paused too.
+    h.recordOutcome(2, { status: 'paused' });
+    h.recordOutcome(2, { status: 'waiting' });
+    expect(h.line().text).toBe(SPEND_LINE);
+    // Once the groups recover, the media warning shows again, with the same counts.
+    h.recordOutcome(1, { status: 'noop' });
+    h.recordOutcome(2, { status: 'noop' });
     expect(h.line().text).toBe('⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.');
+    expect(readHealthSnapshot(db)!.media).toEqual(counts({ pending: 1, stale: 1 }));
   });
 
   it('keeps the counts in the snapshot and still reads older snapshots without them', () => {
