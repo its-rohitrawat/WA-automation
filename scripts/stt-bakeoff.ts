@@ -260,7 +260,7 @@ const items = buildPlan({
   samples: measured,
   providers: [...providers.values()],
   stateOf: (s, p) => ledger.state(s, p),
-  canResume: (s, p, parts) => ledger.canResume(s, p, parts),
+  resumeFrom: (s, p, parts) => ledger.resumeFrom(s, p, parts),
   retryFailed: values['retry-failed'],
   retryUnknown: values['retry-unknown'],
   inrPerUsd: env.INR_PER_USD,

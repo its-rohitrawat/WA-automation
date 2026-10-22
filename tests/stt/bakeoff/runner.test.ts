@@ -210,7 +210,7 @@ describe('runPlan', () => {
     expect(attempt.sends).toHaveLength(1);
     expect(ledger.state('meeting-b', 'sarvam')).toBe('unknown');
     // Nothing is left to wait on, so the next plan can only offer a new, paid send.
-    expect(ledger.canResume('meeting-b', 'sarvam', 1)).toBe(false);
+    expect(ledger.resumeFrom('meeting-b', 'sarvam', 1)).toBeNull();
     expect(sum).toMatchObject({ unknown: 1, failed: 0 });
     // The started job may be billed: it counts as spent.
     expect(sum.spentUsd).toBeCloseTo(costUsd(modelFor('sarvam', true), 600, 90), 10);

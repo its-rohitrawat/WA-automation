@@ -317,3 +317,63 @@ Money rule, restated: a slot is **failed** only when the provider definitely ref
 - **B10:** detect OpenAI answers cut short by the 2,000-token output limit. This is noted in the report's timeline note instead: "OpenAI meetings are sent in parts of up to 5 minutes; words at a cut can be lost."
 - **C minor:** a `resumed` marker for processing time. It is rare and only cosmetic.
 - **Test-folder clean-up** in the new tests: the existing suite does not do it either.
+
+---
+
+## Amendment 2: final-review fixes (2026-10-22)
+
+The final review of the whole branch found two important problems (F1, F2) and eight minor ones (M1–M8). All are fixed, one commit each, with tests for every code change. As before: no paid call, no network, no edits outside `C:\Users\Dell\Desktop\WA_agent-stt`.
+
+### F1 A Sarvam job that is gone after it started is "lost", not "failed"
+
+- **Was:** a status check answering a 4xx (not 408/429) was recorded as failed, so `--retry-failed` would quietly pay again for a job that may be billed. A download refused for good (404, 403) stayed "unknown" with its job id, so every `--retry-unknown` resumed, met the same refusal and stayed unknown forever.
+- **Now:**
+  - `http.ts`: `SttJobLostError extends SttNoAnswerError`: the job may be billed but can no longer be waited on or downloaded.
+  - `sarvam.ts`: a 4xx other than 408/429 on the status check gives `SttJobLostError('status_http_<n>')`; on the download (the download-files POST or the storage GET) it gives `SttJobLostError('download_http_<n>')`. 5xx, 408 and 429 on the download stay plain `SttNoAnswerError('download_http_<n>')`, which a saved job id resumes. A 3xx on a status check now counts as a missed check (only 400–499 are "for good"). `Failed` jobs and `no_output_file` stay `SttJobError`.
+  - Ledger: `Attempt.lostJobIds?: Record<string,string>`, and `dropJobId(sampleId, provider, n)` moves `jobIds[n]` there, kept as evidence. A second lost job of the same part is kept as `"<n>-2"`, and so on.
+  - Runner: tracks the part being sent; on `SttJobLostError` it drops that part's job id and returns unknown with the error's code. The next plan with `--retry-unknown` then shows "send again (an earlier attempt may already be billed)" with the full estimate.
+- **Runbook:** explains `status_http_*` and `download_http_*` in plain words. The `http_401` line now says the refused request did no work, and that a refusal while Sarvam is already working shows as `unknown ... status_http_...`.
+
+### F2 No runbook advice that re-pays everything
+
+- Removed "or run with a fresh output folder (`--out`)" from the `part_cache_mismatch` advice. Added "Always use the same output folder; a new folder means everything is sent and paid again", also in the `--out` usage line.
+
+### M1 Free resume wording
+
+- The runbook and the `--retry-unknown` usage line now say a retry is free only where the dry run says "no new charge"; otherwise the recording is sent and paid again.
+
+### M2 Renaming
+
+- The runbook's recordings step: "Do not rename or move recordings between runs: a renamed file counts as a new recording and is sent and paid again."
+
+### M3 Fingerprint for every recording
+
+- `guards.ts`: `checkRecordings(recordings, preparedDir)` returns the changed ones and every recording's print as read now.
+- The script checks **every recording found**, in every mode (dry run, `--report-only`, real run), before any report or plan. A recording replaced under the same name stops with the existing "changed" message, so no report shows old transcripts. The prints read then are the ones saved after preparing.
+
+### M4 ElevenLabs `forget` after the outcome is saved
+
+- The runner collects the fresh answers, writes the outcome, and only then calls `forget` for each, outside the `try`, so nothing after the outcome can turn it into a failure. Warnings only, as before.
+- Also kept: when a slot ends failed or unknown, fresh answers saved before that are still forgotten, once the slot's record is settled. Before this change that happened right after each save.
+
+### M5 Crash-safe ordering
+
+- **Retry of a failed slot:** `ledger.reopen(fresh)` moves the old attempt aside, writes the fresh attempt, then moves the outcome aside. At every crash point the slot reads failed (the outcome is still there) or unknown, never "new". Tested by making each rename fail in turn, in the ledger and in the runner.
+- **New failure over an old one** (audio could not be cut): `ledger.replaceFailed(outcome)` moves the attempt aside, writes a copy of the old outcome aside, then replaces the outcome in one rename. It reads failed throughout.
+- **Part check first:** saved parts are checked against the cut (`part_cache_mismatch`) before `reopen`/`begin`. A mismatch on a failed slot leaves it failed, with every file unchanged and nothing sent; the run logs `failed ... part_cache_mismatch`. The runner's failed result now carries the error code instead of a written outcome.
+
+### M6 Plan part count from the prepared MP3
+
+- **Chosen:** when `prepared/<id>.mp3` exists, the script measures it, and `buildPlan` takes `preparedSeconds` for the part count. The original's length stays for the listing and the estimate.
+- **Why this option:** the runner cuts exactly that file with the same `ceil(length / max)`, so the counts agree. Checked on a 600 s tone: its MP3 is 600.08 s, the plan now says 3 OpenAI parts (2 before), and the real split gives 3. The alternative (treating part indices beyond the plan as sends) cannot work alone: the plan never sees a part it does not know exists, so the slot would stay "resume", be refused by the runner's backstop, and be stuck.
+- **Still true:** on a first run, before any MP3 exists, the listing counts from the original and may show one part fewer than is sent. Cost is by length, so the estimate is unaffected, and nothing can be resumed before a first send. The runner's `resume_part_without_job` backstop still guards any mismatch.
+
+### M7 Lock token
+
+- `takeRunLock` writes the note and `run <randomUUID>` into `run.lock` and returns `{ path, token }`. `releaseRunLock` removes the file only while it still holds that token. The exit handler uses it.
+
+### M8 Cosmetics
+
+- **Listing:** "Files whose audio would be uploaded" lists only `send` items. `Ledger.canResume` became `Ledger.resumeFrom`: `'jobs'`, `'answers'` or null. A resume says "wait for the saved job (no new charge)" when a saved job id is waited on, and "reuse saved answers (no new charge)" when every part already has an answer.
+- **Unused fields:** `ModelPrice.source` is dropped; the price page URLs are now in the comment. `ProviderResult.model` stays: all three providers and about 20 test fakes set it, and saved part files hold it, so removing it is not trivial.
+- **Runbook:** new entries for `failed ... audio_...`, `skip ... its state is now ...` and `warning ... could not save the job id`.

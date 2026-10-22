@@ -1,10 +1,10 @@
 import { costUsd, modelFor } from '../prices.ts';
 import { formatClock } from '../segments.ts';
 import type { ProviderId } from '../types.ts';
-import type { SlotState } from './ledger.ts';
+import type { ResumeFrom, SlotState } from './ledger.ts';
 import type { Sample } from './samples.ts';
 
-/** send: a new paid request. resume: wait on a saved provider job (no new charge). skip: nothing. */
+/** send: a new paid request. resume: wait on a saved provider job or reuse saved answers (no new charge). skip: nothing. */
 export type Action = 'send' | 'resume' | 'skip';
 
 export interface PlanItem {
@@ -17,6 +17,8 @@ export interface PlanItem {
   parts: number;
   state: SlotState;
   action: Action;
+  /** For a resume: what makes it free, so the listing says what will happen. */
+  resumeFrom?: ResumeFrom;
   /** List-price estimate of what this run would send; 0 for skips and resumed jobs. */
   estimateUsd: number;
 }
@@ -30,19 +32,22 @@ export interface PlanInput {
   providers: readonly { id: ProviderId; maxPartSeconds: number }[];
   stateOf: (sampleId: string, provider: ProviderId) => SlotState;
   /**
-   * True when going on with an unanswered slot is free: every part n < parts has a saved provider job id to wait on or
-   * a saved answer. Otherwise it is a new send, estimated in full.
+   * Non-null when going on with an unanswered slot is free: every part n < parts has a saved provider job id to wait on
+   * or a saved answer (see Ledger.resumeFrom). Null makes it a new send, estimated in full.
    */
-  canResume: (sampleId: string, provider: ProviderId, parts: number) => boolean;
+  resumeFrom: (sampleId: string, provider: ProviderId, parts: number) => ResumeFrom | null;
   retryFailed: boolean;
   retryUnknown: boolean;
   inrPerUsd: number;
 }
 
-function actionFor(state: SlotState, input: PlanInput, sampleId: string, provider: ProviderId, parts: number): Action {
-  if (state === 'new' || (state === 'failed' && input.retryFailed)) return 'send';
-  if (state === 'unknown' && input.retryUnknown) return input.canResume(sampleId, provider, parts) ? 'resume' : 'send';
-  return 'skip';
+function actionFor(state: SlotState, input: PlanInput, sampleId: string, provider: ProviderId, parts: number): { action: Action; resumeFrom?: ResumeFrom } {
+  if (state === 'new' || (state === 'failed' && input.retryFailed)) return { action: 'send' };
+  if (state === 'unknown' && input.retryUnknown) {
+    const from = input.resumeFrom(sampleId, provider, parts);
+    return from ? { action: 'resume', resumeFrom: from } : { action: 'send' };
+  }
+  return { action: 'skip' };
 }
 
 /** One item per sample and provider, in sample order. Meetings are sent with speaker labels on. */
@@ -55,7 +60,7 @@ export function buildPlan(input: PlanInput): PlanItem[] {
       const state = input.stateOf(sample.id, p.id);
       // As the runner's split counts them, so a free resume is judged on the parts that will really be sent.
       const parts = Math.max(1, Math.ceil((preparedSeconds ?? seconds) / p.maxPartSeconds));
-      const action = actionFor(state, input, sample.id, p.id, parts);
+      const { action, resumeFrom } = actionFor(state, input, sample.id, p.id, parts);
       items.push({
         sample,
         seconds,
@@ -65,6 +70,7 @@ export function buildPlan(input: PlanInput): PlanItem[] {
         parts,
         state,
         action,
+        ...(resumeFrom ? { resumeFrom } : {}),
         estimateUsd: action === 'send' ? costUsd(price, seconds, input.inrPerUsd) : 0,
       });
     }
@@ -78,7 +84,7 @@ export function planTotalUsd(items: readonly PlanItem[]): number {
 
 function actionText(i: PlanItem): string {
   if (i.action === 'skip') return `skip (${i.state})`;
-  if (i.action === 'resume') return 'wait for the saved job (no new charge)';
+  if (i.action === 'resume') return i.resumeFrom === 'answers' ? 'reuse saved answers (no new charge)' : 'wait for the saved job (no new charge)';
   return i.state === 'unknown' ? 'send again (an earlier attempt may already be billed)' : 'send';
 }
 
@@ -90,7 +96,8 @@ export function formatPlan(items: readonly PlanItem[]): string {
     const parts = i.parts > 1 ? ` in ${i.parts} parts` : '';
     return `  ${i.sample.id.padEnd(idWidth)} ${formatClock(i.seconds).padStart(8)}  ${i.provider.padEnd(10)} ${i.model}${parts}  $${i.estimateUsd.toFixed(3)}  ${actionText(i)}`;
   });
-  const files = [...new Set(items.filter((i) => i.action !== 'skip').map((i) => i.sample.path))];
+  // A resume uploads nothing: it waits on a job or reuses answers already here.
+  const files = [...new Set(items.filter((i) => i.action === 'send').map((i) => i.sample.path))];
   const total = planTotalUsd(items);
   return [
     ...lines,

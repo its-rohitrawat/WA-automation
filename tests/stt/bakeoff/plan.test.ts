@@ -22,7 +22,7 @@ function input(over: Partial<PlanInput> = {}): PlanInput {
     ],
     providers: PROVIDERS,
     stateOf: () => 'new',
-    canResume: () => false,
+    resumeFrom: () => null,
     retryFailed: false,
     retryUnknown: false,
     inrPerUsd: 90,
@@ -71,13 +71,13 @@ describe('buildPlan', () => {
     const items = buildPlan(input({
       samples: [{ sample: meeting, seconds: 3600 }],
       stateOf: () => 'unknown',
-      canResume: (s, p, parts) => {
+      resumeFrom: (s, p, parts) => {
         asked.push([s, p, parts]);
-        return p === 'sarvam';
+        return p === 'sarvam' ? 'jobs' : null;
       },
       retryUnknown: true,
     }));
-    expect(items[0]).toMatchObject({ provider: 'sarvam', action: 'resume', estimateUsd: 0 });
+    expect(items[0]).toMatchObject({ provider: 'sarvam', action: 'resume', resumeFrom: 'jobs', estimateUsd: 0 });
     expect(asked).toEqual([
       ['meeting-b', 'sarvam', 1],
       ['meeting-b', 'elevenlabs', 1],
@@ -103,10 +103,10 @@ describe('buildPlan', () => {
         samples: [{ sample: meeting, seconds: 3600 }],
         providers: [PROVIDERS[0]!],
         stateOf: (s, p) => ledger.state(s, p),
-        canResume: (s, p, parts) => ledger.canResume(s, p, parts),
+        resumeFrom: (s, p, parts) => ledger.resumeFrom(s, p, parts),
         retryUnknown: true,
       }));
-    expect(plan()[0]).toMatchObject({ action: 'resume', estimateUsd: 0 });
+    expect(plan()[0]).toMatchObject({ action: 'resume', resumeFrom: 'jobs', estimateUsd: 0 });
     ledger.dropJobId('meeting-b', 'sarvam', 0);
     const lost = plan()[0]!;
     expect(lost).toMatchObject({ state: 'unknown', action: 'send' });
@@ -121,7 +121,7 @@ describe('buildPlan', () => {
       samples: [{ sample: meeting, seconds: 1800, preparedSeconds: 1800.07 }],
       providers: [PROVIDERS[2]!],
       stateOf: () => 'unknown',
-      canResume: (_s, _p, parts) => (asked.push(parts), true),
+      resumeFrom: (_s, _p, parts) => (asked.push(parts), 'jobs'),
       retryUnknown: true,
     }));
     expect(resumed).toMatchObject({ seconds: 1800, parts: 7, action: 'resume' });
@@ -136,7 +136,7 @@ describe('buildPlan', () => {
 
   it('never asks about resuming a slot that is not unknown', () => {
     let asked = 0;
-    buildPlan(input({ retryFailed: true, retryUnknown: true, canResume: () => (asked++, true) }));
+    buildPlan(input({ retryFailed: true, retryUnknown: true, resumeFrom: () => (asked++, 'jobs') }));
     expect(asked).toBe(0);
   });
 });
@@ -170,5 +170,30 @@ describe('formatPlan', () => {
   it('warns when an unanswered slot would be sent again', () => {
     const text = formatPlan(buildPlan(input({ samples: [{ sample: voice, seconds: 60 }], stateOf: () => 'unknown', retryUnknown: true })));
     expect(text).toContain('send again (an earlier attempt may already be billed)');
+  });
+
+  it('says what a free resume does: wait for a saved job, or only reuse saved answers', () => {
+    const text = formatPlan(buildPlan(input({
+      samples: [{ sample: meeting, seconds: 3600 }],
+      stateOf: () => 'unknown',
+      resumeFrom: (_s, p) => (p === 'sarvam' ? 'jobs' : p === 'openai' ? 'answers' : null),
+      retryUnknown: true,
+    })));
+    const line = (p: string): string => text.split('\n').find((l) => l.includes(` ${p} `))!;
+    expect(line('sarvam')).toContain('wait for the saved job (no new charge)');
+    expect(line('openai')).toContain('reuse saved answers (no new charge)');
+    expect(line('openai')).not.toContain('wait for the saved job');
+    expect(line('elevenlabs')).toContain('send again (an earlier attempt may already be billed)');
+  });
+
+  it('lists as uploaded only the files that have a send, never one that only resumes', () => {
+    const text = formatPlan(buildPlan(input({
+      stateOf: (s) => (s === 'meeting-b' ? 'unknown' : 'new'),
+      resumeFrom: () => 'jobs',
+      retryUnknown: true,
+    })));
+    expect(text).toContain('Files whose audio would be uploaded (1):');
+    expect(text).toContain('C:\\stt-samples\\voice-notes\\a.ogg');
+    expect(text).not.toContain('C:\\stt-samples\\meetings\\b.mp4');
   });
 });

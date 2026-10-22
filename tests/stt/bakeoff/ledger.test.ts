@@ -77,7 +77,7 @@ describe('Ledger', () => {
     expect(ledger.attempt('voice-a', 'sarvam')).toEqual(
       attempt({ jobIds: { '1': 'job-2' }, lostJobIds: { '0': 'job-1' }, sends: ['2026-10-22T10:00:01.000Z'] }),
     );
-    expect(ledger.canResume('voice-a', 'sarvam', 2)).toBe(false);
+    expect(ledger.resumeFrom('voice-a', 'sarvam', 2)).toBeNull();
     // Sent again and lost again: the second id is kept beside the first.
     ledger.saveJobId('voice-a', 'sarvam', 0, 'job-3');
     ledger.dropJobId('voice-a', 'sarvam', 0);
@@ -99,16 +99,19 @@ describe('Ledger', () => {
     expect(ledger.attempt('voice-a', 'sarvam')).toEqual(attempt({ jobIds: { '0': 'job-1' }, sends: ['2026-10-22T10:00:01.000Z', '2026-10-22T10:05:00.000Z'] }));
   });
 
-  it('can resume for free only when every part has a job id or a saved answer', () => {
+  it('can resume for free only when every part has a job id or a saved answer, and says which', () => {
     const answer = { model: 'm', segments: [], billedSeconds: null, raw: {} };
-    expect(ledger.canResume('meeting-b', 'openai', 1)).toBe(false);
+    expect(ledger.resumeFrom('meeting-b', 'openai', 1)).toBeNull();
     ledger.begin(attempt({ sampleId: 'meeting-b', provider: 'openai', jobIds: { '0': 'job-0' } }));
-    expect(ledger.canResume('meeting-b', 'openai', 1)).toBe(true);
-    expect(ledger.canResume('meeting-b', 'openai', 2)).toBe(false);
+    expect(ledger.resumeFrom('meeting-b', 'openai', 1)).toBe('jobs');
+    expect(ledger.resumeFrom('meeting-b', 'openai', 2)).toBeNull();
     ledger.savePart('meeting-b', 'openai', 1, { offset: 300, seconds: 100 }, answer);
-    expect(ledger.canResume('meeting-b', 'openai', 2)).toBe(true);
-    expect(ledger.canResume('meeting-b', 'openai', 3)).toBe(false);
-    expect(ledger.canResume('meeting-b', 'openai', 0)).toBe(false);
+    expect(ledger.resumeFrom('meeting-b', 'openai', 2)).toBe('jobs');
+    expect(ledger.resumeFrom('meeting-b', 'openai', 3)).toBeNull();
+    expect(ledger.resumeFrom('meeting-b', 'openai', 0)).toBeNull();
+    // Part 0 answered too: its job id is no longer waited on, only the saved answers are reused.
+    ledger.savePart('meeting-b', 'openai', 0, { offset: 0, seconds: 300 }, answer);
+    expect(ledger.resumeFrom('meeting-b', 'openai', 2)).toBe('answers');
   });
 
   it('refuses to record a send before the attempt exists', () => {

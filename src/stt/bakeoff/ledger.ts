@@ -5,6 +5,9 @@ import { PROVIDER_IDS, type ProviderId, type ProviderResult, type SampleKind, ty
 /** new: never sent. unknown: sent, and no outcome was recorded. done / failed: the outcome. */
 export type SlotState = 'new' | 'done' | 'failed' | 'unknown';
 
+/** What makes going on with an unanswered slot free: a saved provider job to wait on, or only saved answers to reuse. */
+export type ResumeFrom = 'jobs' | 'answers';
+
 /** Written before the first paid request of a slot, so a crash or a lost answer leaves evidence. */
 export interface Attempt {
   sampleId: string;
@@ -190,16 +193,22 @@ export class Ledger {
   }
 
   /**
-   * True when every part n < parts has a saved job id to wait on or a saved answer, so going on costs nothing. Whether a
-   * saved answer fits today's cut is only known once the audio is split; the runner checks that before sending.
+   * How going on with an unanswered slot is free, judged on parts n < parts: 'answers' when every part has a saved
+   * answer, 'jobs' when some part has only a saved job id to wait on. Null when some part has neither: going on would be
+   * a new paid send. Whether a saved answer fits today's cut is only known once the audio is split; the runner checks
+   * that before sending.
    */
-  canResume(sampleId: string, provider: ProviderId, parts: number): boolean {
-    if (parts < 1) return false;
+  resumeFrom(sampleId: string, provider: ProviderId, parts: number): ResumeFrom | null {
+    if (parts < 1) return null;
     const jobIds = this.attempt(sampleId, provider)?.jobIds ?? {};
+    let waits = false;
     for (let n = 0; n < parts; n++) {
-      if (!jobIds[String(n)] && !existsSync(this.#file(sampleId, provider, `.part-${n}`))) return false;
+      // A saved answer is reused before any job id is waited on (as the runner does).
+      if (existsSync(this.#file(sampleId, provider, `.part-${n}`))) continue;
+      if (!jobIds[String(n)]) return null;
+      waits = true;
     }
-    return true;
+    return waits ? 'jobs' : 'answers';
   }
 
   savePart(sampleId: string, provider: ProviderId, n: number, cut: PartCut, result: ProviderResult): void {

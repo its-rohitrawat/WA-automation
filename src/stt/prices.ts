@@ -7,23 +7,22 @@ export interface ModelPrice {
   model: string;
   perHour: number;
   currency: 'USD' | 'INR';
-  source: string;
 }
 
 /**
  * The model each provider is tested with, and its list price per hour of audio. Sarvam bills in rupees only.
  * OpenAI's only model with speaker labels, gpt-4o-transcribe-diarize, shuts down on 2027-02-26.
+ * Sources: https://docs.sarvam.ai/api/getting-started/pricing, https://elevenlabs.io/pricing/api and
+ * https://developers.openai.com/api/docs/pricing.
  */
 export function modelFor(provider: ProviderId, diarize: boolean): ModelPrice {
   switch (provider) {
     case 'sarvam':
-      return { model: 'saaras:v4', perHour: diarize ? 36 : 30, currency: 'INR', source: 'https://docs.sarvam.ai/api/getting-started/pricing' };
+      return { model: 'saaras:v4', perHour: diarize ? 36 : 30, currency: 'INR' };
     case 'elevenlabs':
-      return { model: 'scribe_v2', perHour: 0.22, currency: 'USD', source: 'https://elevenlabs.io/pricing/api' };
+      return { model: 'scribe_v2', perHour: 0.22, currency: 'USD' };
     case 'openai':
-      return diarize
-        ? { model: 'gpt-4o-transcribe-diarize', perHour: 0.36, currency: 'USD', source: 'https://developers.openai.com/api/docs/pricing' }
-        : { model: 'gpt-transcribe', perHour: 0.27, currency: 'USD', source: 'https://developers.openai.com/api/docs/pricing' };
+      return diarize ? { model: 'gpt-4o-transcribe-diarize', perHour: 0.36, currency: 'USD' } : { model: 'gpt-transcribe', perHour: 0.27, currency: 'USD' };
   }
 }
 
