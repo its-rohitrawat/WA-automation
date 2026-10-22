@@ -16,7 +16,8 @@ export function wordsToSegments(words: readonly TimedWord[], maxGapSeconds = 1.5
   let cur: Segment | undefined;
   for (const w of words) {
     if (cur && w.speaker === cur.speaker && w.start - cur.end <= maxGapSeconds && w.end - cur.start <= maxSegmentSeconds) {
-      cur.end = w.end;
+      // Providers can list words slightly out of order; the end must never move backwards past the start.
+      cur.end = Math.max(cur.end, w.end);
       cur.text += ` ${w.text}`;
     } else {
       cur = { start: w.start, end: w.end, speaker: w.speaker, text: w.text };

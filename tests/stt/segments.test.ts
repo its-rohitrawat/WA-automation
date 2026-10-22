@@ -33,6 +33,19 @@ describe('wordsToSegments', () => {
   it('returns nothing for no words', () => {
     expect(wordsToSegments([])).toEqual([]);
   });
+
+  it('never moves a segment end backwards when words arrive out of order', () => {
+    const segs = wordsToSegments([w('a', 5, 6), w('b', 4, 4.5), w('c', 6.2, 6.4)]);
+    expect(segs).toEqual([{ start: 5, end: 6.4, speaker: 'speaker_0', text: 'a b c' }]);
+    expect(wordsToSegments([w('a', 5, 6), w('b', 4, 4.5)])).toEqual([{ start: 5, end: 6, speaker: 'speaker_0', text: 'a b' }]);
+    expect(segs.every((s) => s.end >= s.start)).toBe(true);
+  });
+
+  it('groups words without a speaker together, as for voice notes', () => {
+    expect(wordsToSegments([w('Kal', 0, 0.4, null), w('milte', 0.5, 0.9, null), w('hain', 1, 1.2, null)])).toEqual([
+      { start: 0, end: 1.2, speaker: null, text: 'Kal milte hain' },
+    ]);
+  });
 });
 
 describe('mergeParts', () => {
