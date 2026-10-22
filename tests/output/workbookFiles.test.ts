@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { loadTrackerView } from '../../src/output/view.ts';
 import { buildWorkbook } from '../../src/output/workbook.ts';
 import type { Db } from '../../src/store/db.ts';
-import { finishMedia, insertMedia, listClientFiles, markUploaded, messageRowId, type MediaKind, type MediaStatus } from '../../src/store/media.ts';
+import { CLIENT_FILES_LIMIT, finishMedia, insertMedia, listClientFiles, markUploaded, messageRowId, type MediaKind, type MediaStatus } from '../../src/store/media.ts';
 import { applyRevoke, insertMessage } from '../../src/store/messages.ts';
 import { setRole, upsertPerson } from '../../src/store/people.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
@@ -31,7 +31,8 @@ function seed(): Db {
   setRole(db, 1, SHARMA_PN, 'client', 'human');
   upsertPerson(db, { clientId: 1, jid: RAHUL_PN, number: '919800000002', name: 'Rahul', fromMe: false });
   setRole(db, 1, RAHUL_PN, 'team', 'human');
-  const pdf = file(db, { waId: 'D1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'brief.pdf', mimeType: 'application/pdf', ts: '2026-10-15T06:00:00.000Z' });
+  // The message carries the sender's own WhatsApp name; the workbook shows the name in People instead.
+  const pdf = file(db, { waId: 'D1', jid: SHARMA_PN, name: 'Sharma ji', kind: 'document', fileName: 'brief.pdf', mimeType: 'application/pdf', ts: '2026-10-15T06:00:00.000Z' });
   finishMedia(db, pdf, { textKind: 'extract', text: 'Homepage brief\nHero banner with the new logo', pageCount: 3, note: null, at: NOW });
   markUploaded(db, pdf, 'drivefile123');
   const img = file(db, { waId: 'I1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'image', fileName: null, mimeType: 'image/jpeg', ts: '2026-10-16T06:00:00.000Z' });
@@ -104,6 +105,15 @@ describe('Files received', () => {
     expect(merges.filter((m) => m.startsWith('D'))).toHaveLength(4);
   });
 
+  it('sets each file row tall enough for its wrapped name and description, since merged cells do not auto-fit', async () => {
+    const db = seed();
+    finishMedia(db, mediaIdOf(db, 'D1'), { textKind: 'extract', text: 'word '.repeat(80), pageCount: 3, note: null, at: NOW });
+    const ws = await sheet(db, 'Sharma Interiors');
+    const header = rowWhere(ws, (r) => r.getCell(1).value === 'Files received').number + 1;
+    // image-2026-10-16-1130-2.jpg and =HYPERLINK(_http___evil_) wrap to 3 lines in column C; the long description to 2 lines.
+    expect([1, 2, 3].map((i) => ws.getRow(header + i).height)).toEqual([45, 30, 45]);
+  });
+
   it('does not link a Drive id that is not a plain id', async () => {
     const db = seed();
     markUploaded(db, mediaIdOf(db, 'F1'), 'abc/../evil?x=1');
@@ -144,6 +154,8 @@ describe('Files received', () => {
   it('never lists view-once media, the founder’s own files, stickers, voice notes or audio, but lists videos', () => {
     const db = seed();
     upsertPerson(db, { clientId: 1, jid: FOUNDER, number: '919800000099', name: 'Founder', fromMe: true });
+    // Even if the founder's own number is marked client, what the founder sent is never listed.
+    setRole(db, 1, FOUNDER, 'client', 'human');
     file(db, { waId: 'VO1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'image', fileName: null, mimeType: 'image/jpeg', ts: '2026-10-18T06:00:00.000Z', status: 'metadata', errorCode: 'view_once' });
     file(db, { waId: 'ME1', jid: FOUNDER, name: 'Founder', kind: 'document', fileName: 'mine.pdf', mimeType: 'application/pdf', ts: '2026-10-18T06:00:00.000Z', fromMe: true });
     file(db, { waId: 'ST1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'sticker', fileName: null, mimeType: 'image/webp', ts: '2026-10-18T06:00:00.000Z', status: 'metadata' });
@@ -153,6 +165,38 @@ describe('Files received', () => {
     const files = sharmaFiles(db);
     expect(files.map((f) => f.name)).toEqual([`video-2026-10-18-1230-${video}.mp4`, 'image-2026-10-16-1130-2.jpg', 'brief.pdf', '=HYPERLINK(_http___evil_)']);
     expect(files[0]!.description).toBe('Video, 0:42 (not downloaded)');
+  });
+
+  it('uses a person’s role in the file’s own client only', () => {
+    const db = seed();
+    // Rahul is team in Sharma but a client in Mehta; Mr. Sharma is a client in both.
+    upsertPerson(db, { clientId: 2, jid: RAHUL_PN, number: '919800000002', name: 'Rahul', fromMe: false });
+    setRole(db, 2, RAHUL_PN, 'client', 'human');
+    upsertPerson(db, { clientId: 2, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
+    setRole(db, 2, SHARMA_PN, 'client', 'human');
+    const files = sharmaFiles(db);
+    expect(files.some((f) => f.name === 'team-only.pdf')).toBe(false);
+    expect(files.map((f) => f.name)).toEqual(['image-2026-10-16-1130-2.jpg', 'brief.pdf', '=HYPERLINK(_http___evil_)']);
+  });
+
+  it('lists files sent at the same moment with the later one first', () => {
+    const db = seed();
+    const ts = '2026-10-18T06:00:00.000Z';
+    const first = file(db, { waId: 'S1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'first.pdf', mimeType: 'application/pdf', ts });
+    const second = file(db, { waId: 'S2', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'second.pdf', mimeType: 'application/pdf', ts });
+    expect(second).toBeGreaterThan(first);
+    expect(sharmaFiles(db).slice(0, 2).map((f) => f.name)).toEqual(['second.pdf', 'first.pdf']);
+  });
+
+  it('shows at most the newest CLIENT_FILES_LIMIT files in the client tab', () => {
+    const db = seed();
+    for (let i = 0; i < CLIENT_FILES_LIMIT - 2; i++) {
+      const ts = new Date(Date.UTC(2026, 9, 18, 0, 0, i)).toISOString();
+      file(db, { waId: `N${i}`, jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: `n${i}.pdf`, mimeType: 'application/pdf', ts });
+    }
+    const files = sharmaFiles(db);
+    expect(files).toHaveLength(CLIENT_FILES_LIMIT);
+    expect(files.at(-1)!.name).toBe('brief.pdf');
   });
 
   it('includes earlier files of someone who becomes a client', () => {
@@ -172,5 +216,21 @@ describe('Files received', () => {
 
   it('limits the list to the newest files', () => {
     expect(listClientFiles(seed(), 1, 2).map((f) => f.fileName)).toEqual([null, 'brief.pdf']);
+  });
+
+  it('keeps the workbook readable when a file name, file text or sender name holds characters XML does not allow', async () => {
+    const db = seed();
+    upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: null, name: 'Mr.\uFFFF Sharma', fromMe: false });
+    const id = file(db, { waId: 'X1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'a\uFFFF.pdf', mimeType: 'application/pdf', ts: '2026-10-18T06:00:00.000Z' });
+    finishMedia(db, id, { textKind: 'extract', text: 'Paid\uFFFE amount \u202E000,24', pageCount: 1, note: null, at: NOW });
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load((await buildWorkbook(loadTrackerView(db, now, healthy))) as unknown as ExcelJS.Buffer);
+    const ws = wb.getWorksheet('Sharma Interiors')!;
+    const row = rowWhere(ws, (r) => r.getCell(3).value === 'a.pdf');
+    expect(row.getCell(2).value).toBe('Mr. Sharma');
+    expect(row.getCell(4).value).toBe('PDF, 1 page: Paid amount 000,24');
+    const strings: string[] = [];
+    wb.eachSheet((s) => s.eachRow((r) => r.eachCell((c) => strings.push(String(c.text)))));
+    expect(strings.filter((t) => /[\uFFFE\uFFFF]/.test(t))).toEqual([]);
   });
 });

@@ -287,8 +287,11 @@ export interface ClientFileRow {
   sender: string | null;
 }
 
+/** How many files the client tab lists at most (the newest). */
+export const CLIENT_FILES_LIMIT = 500;
+
 /** Images, documents and videos sent by people whose role is 'client', newest first. View-once media is never listed. */
-export function listClientFiles(db: Db, clientId: number, limit = 500): ClientFileRow[] {
+export function listClientFiles(db: Db, clientId: number, limit = CLIENT_FILES_LIMIT): ClientFileRow[] {
   const rows = db
     .prepare(`SELECT m.id, m.kind, m.status, m.mime_type AS mimeType, m.file_name AS fileName, m.file_size AS fileSize, m.seconds,
         m.page_count AS pageCount, m.text_kind AS textKind, substr(m.text, 1, 400) AS textStart, m.note, m.error_code AS errorCode,

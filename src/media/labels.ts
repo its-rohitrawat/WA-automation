@@ -64,8 +64,12 @@ export interface FileFacts {
 /** The extractor's note for a forwarded image or scanned PDF that was not sent to Claude (owner decision D2). */
 const FORWARDED_NOT_DESCRIBED = 'forwarded_not_described';
 
+/** Control and format characters (direction overrides, zero-width marks) and U+FFFE/U+FFFF, which XML does not allow. */
+const HIDDEN = /[\p{Cc}\p{Cf}\uFFFE\uFFFF]/gu;
+
+/** File text on one line, without hidden characters that could disguise it, cut to max characters. */
 function oneLine(s: string, max: number): string {
-  const flat = s.replace(/\s+/g, ' ').trim();
+  const flat = s.replace(/\s+/g, ' ').replace(HIDDEN, '').replace(/ {2,}/g, ' ').trim();
   const cps = [...flat];
   return cps.length <= max ? flat : `${cps.slice(0, max).join('')}…`;
 }

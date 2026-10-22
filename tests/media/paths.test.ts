@@ -110,6 +110,11 @@ describe('sanitizeFileName', () => {
     expect(sanitizeFileName('\u200B\u2066\uFEFF')).toBeNull();
   });
 
+  it('removes U+FFFE and U+FFFF, which XML does not allow in the workbook', () => {
+    expect(sanitizeFileName('a\uFFFFb\uFFFE.pdf')).toBe('ab.pdf');
+    expect(sanitizeFileName('\uFFFF')).toBeNull();
+  });
+
   it('turns line separators, no-break spaces and runs of spaces into one plain space', () => {
     expect(sanitizeFileName('a\u2028b   c.pdf')).toBe('a b c.pdf');
     expect(sanitizeFileName('a\u00A0\u2029b.pdf')).toBe('a b.pdf');

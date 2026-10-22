@@ -27,6 +27,12 @@ describe('fileDescription', () => {
     expect(fileDescription(facts({ kind: 'image', textKind: 'description', textStart: emoji }))).toBe(`${'😀'.repeat(300)}…`);
   });
 
+  it('drops control and format characters from the text, so direction overrides cannot disguise it', () => {
+    expect(fileDescription(facts({ textStart: 'Paid\u202E 000,24\u200B amount\uFFFE\uFFFF \u0007end' }))).toBe('PDF, 3 pages: Paid 000,24 amount end');
+    expect(fileDescription(facts({ kind: 'image', mimeType: 'image/jpeg', textKind: 'description', textStart: '\u2066A receipt\u2069 \u202Etxet' })))
+      .toBe('A receipt txet');
+  });
+
   it('says plainly what happened to files that were not read', () => {
     expect(fileDescription(facts({ status: 'pending', textKind: null, textStart: null }))).toBe('PDF, being read');
     expect(fileDescription(facts({ status: 'unavailable', textKind: null, textStart: null }))).toBe('PDF, could not be downloaded from WhatsApp');

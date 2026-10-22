@@ -101,6 +101,17 @@ const DRIVE_ID = /^[A-Za-z0-9_-]{1,200}$/;
 const FILE_DESC_FIRST = 4;
 const FILE_DESC_LAST = 12;
 const FILE_LINK = 13;
+/** Characters per wrapped line: Sent by (B, width 38), File name (C, width 13), Description (D to L, width 140 in all). */
+const FILE_LINE_CHARS = { sentBy: 36, name: 12, description: 120 };
+const LINE_HEIGHT = 15;
+const MAX_FILE_LINES = 10;
+
+/** Excel and Google Sheets do not auto-fit a row to a merged cell, so a file row gets the height of its longest wrapped text. */
+function fileRowHeight(f: FileView): number {
+  const lines = (s: string, perLine: number) => Math.ceil([...s].length / perLine);
+  const n = Math.max(lines(f.sentBy, FILE_LINE_CHARS.sentBy), lines(f.name, FILE_LINE_CHARS.name), lines(f.description, FILE_LINE_CHARS.description), 1);
+  return LINE_HEIGHT * Math.min(n, MAX_FILE_LINES);
+}
 
 function addFilesTable(ws: ExcelJS.Worksheet, files: FileView[]): void {
   sectionTitle(ws, 'Files received');
@@ -112,6 +123,7 @@ function addFilesTable(ws: ExcelJS.Worksheet, files: FileView[]): void {
   for (const f of files) {
     const row = ws.addRow([isoToDate(f.date), f.sentBy, f.name, f.description]);
     ws.mergeCells(row.number, FILE_DESC_FIRST, row.number, FILE_DESC_LAST);
+    row.height = fileRowHeight(f);
     formatDates(row);
     row.alignment = { wrapText: true, vertical: 'top', horizontal: 'left' };
     if (f.driveFileId && DRIVE_ID.test(f.driveFileId)) {
@@ -197,11 +209,42 @@ function addClientSheet(wb: ExcelJS.Workbook, c: ClientView, today: string): voi
   for (const p of c.people) ws.addRow([p.name ?? '', p.number ?? '', cap(p.role), p.roleSetBy === 'system' ? 'Founder' : p.roleSetBy === 'human' ? 'Human' : 'AI']);
 }
 
+/**
+ * Characters XML 1.0 does not allow: C0 controls other than tab, line feed and carriage return, U+FFFE, U+FFFF and unpaired
+ * surrogates. ExcelJS drops the controls but writes the rest as they are, and then neither Excel nor ExcelJS can open the
+ * file. Sender names, file names and file text come from WhatsApp, so one such character would break the whole workbook.
+ */
+const XML_UNSAFE = /[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+export function xmlSafe(s: string): string {
+  return s.replace(XML_UNSAFE, '');
+}
+
+/** Cleans every text cell (and link text) in the workbook with xmlSafe. */
+function cleanText(wb: ExcelJS.Workbook): void {
+  wb.eachSheet((ws) =>
+    ws.eachRow((row) =>
+      row.eachCell((c) => {
+        if (c.type === ExcelJS.ValueType.String) {
+          const v = c.value as string;
+          const safe = xmlSafe(v);
+          if (safe !== v) c.value = safe;
+        } else if (c.type === ExcelJS.ValueType.Hyperlink) {
+          const v = c.value as ExcelJS.CellHyperlinkValue;
+          const safe = xmlSafe(v.text);
+          if (safe !== v.text) c.value = { ...v, text: safe };
+        }
+      }),
+    ),
+  );
+}
+
 export async function buildWorkbook(view: TrackerView): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
   wb.creator = 'WA Agent';
   wb.created = view.generatedAt;
   addOverview(wb, view);
   for (const c of view.clients) addClientSheet(wb, c, view.today);
+  cleanText(wb);
   return Buffer.from((await wb.xlsx.writeBuffer()) as unknown as ArrayBuffer);
 }

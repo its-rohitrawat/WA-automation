@@ -62,8 +62,9 @@ export function extForMime(mime: string | null, kind: MediaKind): string {
 /**
  * Control and format characters (Unicode Cc and Cf): zero-width characters, direction marks, embeddings, overrides and
  * isolates (used to disguise names like "invoice\u202Efdp.exe"), and tag characters, which can hide text from a reader.
+ * Also U+FFFE and U+FFFF, which XML does not allow: one in a name would make the workbook unreadable.
  */
-const INVISIBLE = /[\p{Cc}\p{Cf}]/gu;
+const INVISIBLE = /[\p{Cc}\p{Cf}\uFFFE\uFFFF]/gu;
 
 const EDGE = /[.\s]/;
 
