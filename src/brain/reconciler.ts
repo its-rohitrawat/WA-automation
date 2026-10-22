@@ -14,7 +14,8 @@ import {
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { istDate } from '../util/time.ts';
-import { AiInvalidOutputError, AiRefusalError, MAX_OUTPUT_TOKENS, SDK_MAX_RETRIES, type AiCallResult, type AiClient } from './claudeClient.ts';
+import { AiInvalidOutputError, AiRefusalError, MAX_OUTPUT_TOKENS, type AiCallResult, type AiClient } from './claudeClient.ts';
+import { SpendCapReachedError, settleFailedCall } from './paidCall.ts';
 import { buildUserContent, SYSTEM_PROMPT } from './prompt.ts';
 import type { AiOp, AiOutput } from './schema.ts';
 import { validateOps, type Rejection, type ValidationState } from './validator.ts';
@@ -35,27 +36,8 @@ export interface ReconcilerOptions {
   onChanged: () => void;
 }
 
-/** A paid attempt could not reserve its estimate under the daily cap. */
-export class SpendCapReachedError extends Error {
-  constructor() {
-    super('Daily spend cap reached');
-    this.name = 'SpendCapReachedError';
-  }
-}
-
-/** Socket error codes that mean the request never left this machine, so nothing was billed. */
-const NEVER_SENT = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH']);
-
-/** Node's fetch nests the socket error: APIConnectionError -> TypeError('fetch failed') -> { code }. */
-function neverSent(e: Error): boolean {
-  let c: unknown = e.cause;
-  for (let depth = 0; depth < 4 && typeof c === 'object' && c !== null; depth++) {
-    const code = (c as { code?: unknown }).code;
-    if (typeof code === 'string' && NEVER_SENT.has(code)) return true;
-    c = (c as { cause?: unknown }).cause;
-  }
-  return false;
-}
+/** Re-exported for existing importers; it lives in paidCall.ts with the other spend helpers. */
+export { SpendCapReachedError } from './paidCall.ts';
 
 /**
  * When a message became evidence, for the human status-lock check: a reaction re-check counts from its latest reaction,
@@ -188,28 +170,12 @@ export class Reconciler {
       try {
         r = await ai.reconcile(SYSTEM_PROMPT, user);
       } catch (e) {
-        this.#settleFailed(rid, e, batchId, estimate);
+        settleFailedCall(spend, rid, e, estimate, `batch ${batchId}`);
         if (e instanceof AiInvalidOutputError && attempt === 0) continue;
         throw e;
       }
       spend.settle(rid, 'ai', r.costUsd, `batch ${batchId}${r.fallbackUsed ? ' (fallback)' : ''}`);
       return { output: r.output, invalidOps: r.invalidOps };
-    }
-  }
-
-  #settleFailed(rid: number, e: unknown, batchId: number, estimate: number): void {
-    const { spend } = this.#o;
-    if (e instanceof AiRefusalError || e instanceof AiInvalidOutputError) {
-      spend.settle(rid, 'ai', e.costUsd ?? estimate, `batch ${batchId} (failed)`);
-    } else if (e instanceof Anthropic.APIConnectionError) {
-      // Checked before APIError, its parent class. A timeout or a reset after sending may have been billed,
-      // once per SDK attempt.
-      if (neverSent(e)) spend.release(rid);
-      else spend.settle(rid, 'ai', estimate * (SDK_MAX_RETRIES + 1), `batch ${batchId} (connection lost, estimated)`);
-    } else if (e instanceof Anthropic.APIError) {
-      spend.release(rid); // the server answered with an error status: not billed
-    } else {
-      spend.settle(rid, 'ai', estimate, `batch ${batchId} (unknown, estimated)`);
     }
   }
 
