@@ -1,7 +1,10 @@
-/** One file to parse. The limits travel with the job so the worker needs no configuration. */
+/**
+ * One file to parse. The limits travel with the job so the worker needs no configuration. maxTextChars caps the text
+ * returned, so a huge text layer is never posted to the service (no cap when absent).
+ */
 export type ParseJob =
-  | { kind: 'docx'; bytes: Uint8Array; maxXmlBytes: number; maxEntries: number }
-  | { kind: 'pdf'; bytes: Uint8Array; maxPages: number };
+  | { kind: 'docx'; bytes: Uint8Array; maxXmlBytes: number; maxEntries: number; maxTextChars?: number }
+  | { kind: 'pdf'; bytes: Uint8Array; maxPages: number; maxTextChars?: number };
 
 export interface ParseResult {
   text: string;

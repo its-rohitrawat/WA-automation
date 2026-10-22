@@ -77,6 +77,13 @@ describe('docxXmlToText', () => {
       '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Cell A</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Cell B</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body>';
     expect(docxXmlToText(xml)).toBe('Logo\t final & approved\nLine one\nLine two ✓ म\n\nCell A\nCell B');
   });
+
+  it('keeps at most the text cap, counting only characters that are not spaces while it reads', () => {
+    const run = (t: string) => `<w:p><w:r><w:t xml:space="preserve">${t}</w:t></w:r></w:p>`;
+    const xml = run(' '.repeat(50)) + run('Logo final') + run('Payment due');
+    expect(docxXmlToText(xml, 14)).toBe('Logo final\nPay');
+    expect(docxXmlToText(xml, 6)).toBe('Logo f');
+  });
 });
 
 describe('extractDocxText', () => {
@@ -121,6 +128,11 @@ describe('parseFile (worker thread)', () => {
   it('reads a Word file in a worker', async () => {
     const bytes = await tinyDocx(['Hello from the worker']);
     expect(await parseFile({ kind: 'docx', bytes, ...LIMITS }, { timeoutMs: 15_000 })).toEqual({ text: 'Hello from the worker', pageCount: null });
+  });
+
+  it('applies the text cap in the worker', async () => {
+    const bytes = await tinyDocx(['Hello from the worker']);
+    expect(await parseFile({ kind: 'docx', bytes, ...LIMITS, maxTextChars: 5 }, { timeoutMs: 15_000 })).toEqual({ text: 'Hello', pageCount: null });
   });
 
   it("passes the reader's error code back", async () => {

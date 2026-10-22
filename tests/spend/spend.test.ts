@@ -145,6 +145,22 @@ describe('SpendGuard', () => {
     expect(guard.spentToday()).toBeCloseTo(0.5);
   });
 
+  it('tells a cap that is reached apart from holds of calls still in flight (Task 15 review round 3)', () => {
+    const { guard } = make();
+    guard.record('ai', 0.4, 'batch 1');
+    const rid = guard.reserve(0.5)!; // a scan read in flight
+    expect(guard.canSpend(0.2)).toBe(false);
+    expect(guard.fitsIgnoringHolds(0.2)).toBe(true); // only the hold is in the way
+    expect(guard.fitsIgnoringHolds(0.6)).toBe(true); // exactly at the cap
+    expect(guard.fitsIgnoringHolds(0.61)).toBe(false); // the cap itself is the reason
+    expect(guard.fitsIgnoringHolds(NaN)).toBe(false);
+    expect(guard.fitsIgnoringHolds(-1)).toBe(false);
+    guard.release(rid);
+    guard.record('ai', 0.6, 'batch 2');
+    expect(guard.isPaused()).toBe(true);
+    expect(guard.fitsIgnoringHolds(0)).toBe(false);
+  });
+
   it('records on settle with an unknown id and ignores unknown release', () => {
     const { guard } = make();
     guard.release(999);

@@ -280,12 +280,19 @@ export interface UploadCandidate {
   driveAttempts: number;
 }
 
+/**
+ * A file that belongs in Drive, whatever its upload attempts: a saved image or document, not yet in Drive, sent by a
+ * client member in a message not deleted for everyone. Needs m (media), msg (its message) and p (its sender in people).
+ * Shared by the uploader's queries and mediaStats, so Health never counts a file the uploader would not try.
+ */
+const UPLOADABLE = `m.local_path IS NOT NULL AND m.drive_file_id IS NULL AND m.kind IN ('image', 'document')
+        AND msg.revoked = 0 AND msg.from_me = 0 AND p.role = 'client'`;
+
 /** The rows uploadCandidates returns, shared with isUploadCandidate so the two never disagree. Its one parameter is now. */
 const UPLOAD_CANDIDATES_FROM = `FROM media m JOIN messages msg ON msg.id = m.message_id JOIN clients c ON c.id = m.client_id
       JOIN people p ON p.client_id = m.client_id AND p.jid = msg.sender_jid
-      WHERE m.local_path IS NOT NULL AND m.drive_file_id IS NULL AND m.drive_failed = 0
-        AND (m.drive_next_at IS NULL OR m.drive_next_at <= ?)
-        AND m.kind IN ('image', 'document') AND msg.revoked = 0 AND msg.from_me = 0 AND p.role = 'client' AND c.active = 1`;
+      WHERE ${UPLOADABLE} AND m.drive_failed = 0
+        AND (m.drive_next_at IS NULL OR m.drive_next_at <= ?) AND c.active = 1`;
 
 /**
  * Saved images and documents from people whose role is 'client', not yet in Drive and due for an attempt.
@@ -359,4 +366,43 @@ export function listClientFiles(db: Db, clientId: number, limit = CLIENT_FILES_L
       ORDER BY msg.ts DESC, m.id DESC LIMIT ?`)
     .all(clientId, limit) as (Omit<ClientFileRow, 'revoked'> & { revoked: number })[];
   return rows.map((r) => ({ ...r, revoked: r.revoked === 1 }));
+}
+
+export interface MediaStats {
+  /** Files waiting to be downloaded or read. */
+  pending: number;
+  /**
+   * Pending longer than staleMs, counted from the file's arrival or from the service start, whichever is later
+   * (amendment 15a, the same clock as the reconciler's wait). Files waiting for the daily budget are counted in spendCap instead.
+   */
+  stale: number;
+  /** Pending files deferred by the daily spend cap (amendment 15b). */
+  spendCap: number;
+  /** Files that could not be read in the last 24 hours. */
+  failedRecent: number;
+  /**
+   * Drive uploads that gave up and are still not in Drive. Only files the uploader would try again after a restart:
+   * not once the message is deleted for everyone or its sender is no longer a client member.
+   */
+  uploadFailed: number;
+}
+
+/**
+ * Counts for Health and `cli status`. Files of clients no longer on the allow-list are left out: they wait untouched
+ * until the client is back (dueMediaIds), and Health forgets a removed client's warnings too.
+ */
+export function mediaStats(db: Db, now: Date, startedAt: Date = new Date(0), staleMs = 30 * 60_000): MediaStats {
+  const staleBefore = new Date(now.getTime() - staleMs).toISOString();
+  return db
+    .prepare(`SELECT
+        COALESCE(SUM(m.status = 'pending'), 0) AS pending,
+        COALESCE(SUM(m.status = 'pending' AND m.created_at < @staleBefore AND @startedAt < @staleBefore
+          AND COALESCE(m.error_code, '') <> 'spend_cap'), 0) AS stale,
+        COALESCE(SUM(m.status = 'pending' AND m.error_code = 'spend_cap'), 0) AS spendCap,
+        COALESCE(SUM(m.status = 'failed' AND m.updated_at >= @dayAgo), 0) AS failedRecent,
+        COALESCE(SUM(m.drive_failed = 1 AND EXISTS (SELECT 1 FROM messages msg
+          JOIN people p ON p.client_id = m.client_id AND p.jid = msg.sender_jid
+          WHERE msg.id = m.message_id AND ${UPLOADABLE})), 0) AS uploadFailed
+      FROM media m JOIN clients c ON c.id = m.client_id AND c.active = 1`)
+    .get({ staleBefore, startedAt: startedAt.toISOString(), dayAgo: new Date(now.getTime() - 86_400_000).toISOString() }) as MediaStats;
 }

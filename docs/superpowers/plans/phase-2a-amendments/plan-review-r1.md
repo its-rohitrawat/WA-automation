@@ -152,15 +152,27 @@ Every task's implementer applies the items listed under its task, in addition to
 - **10a. Inactive clients (review I4).** If the row's client is inactive, the processor does nothing and leaves the row pending. Test it.
 - **10b. No tight loop (review M12).** When the processor finds no job for a row (the message was deleted, or the row is missing data), it fails the row with `no_job`. It must not return "skipped" with the row still pending, which would loop.
 - **10d. Claude unavailable is not a failed attempt (controller, after the 8c trade-off).** With one SDK attempt per media call (8c), the plan's 3 attempts over about 6 minutes would leave every image and scan shared during a longer Claude outage `failed` for good.
-  - When the extractor throws an error that was released, not billed: `Anthropic.RateLimitError` (429), an `Anthropic.APIError` with status 500 or above (529 overloaded included), or an `Anthropic.APIConnectionError` that is not an `APIConnectionTimeoutError` and for which `neverSent(e)` (src/brain/paidCall.ts) is true. In that case the processor defers the row with `countAttempt: false` and error code `ai_unavailable`.
+  - When the extractor throws an error that was released, not billed: `Anthropic.RateLimitError` (429), an `Anthropic.APIError` with status 500 or above (529 overloaded included), an `Anthropic.AuthenticationError` (401) or `Anthropic.PermissionDeniedError` (403), or an `Anthropic.APIConnectionError` that is not an `APIConnectionTimeoutError` and for which `neverSent(e)` (src/brain/paidCall.ts) is true. In that case the processor defers the row with `countAttempt: false` and error code `ai_unavailable`. This applies to images and scans alike.
+  - A 401 or 403 (a bad or revoked key) is unbilled, and the owner can fix it; the files shared meanwhile should still be read afterwards (controller, after the Task 10 review).
   - The waits grow: 5, 15, 30 and 60 minutes, then 60 minutes each time.
-  - When the row's `createdAt` is more than 24 hours old, it fails with `ai_unavailable` instead.
-  - Everything else keeps the plan's rule: a timeout after sending (`ai_timeout`, which is billed), invalid output, 4xx errors such as 400, 401 and 403, and download errors count an attempt and use `RETRY_DELAYS_MS`.
+  - When the row's `createdAt` is more than 24 hours old, it fails with `ai_unavailable` instead (counted from the service start if that is later: 10f).
+  - Everything else keeps the plan's rule: a timeout after sending (`ai_timeout`, which is billed), invalid output, other 4xx errors such as 400 and 404, and download errors count an attempt and use `RETRY_DELAYS_MS` (for a scan, 10e makes a failed paid read final instead).
   - Tests:
-    - a 529 and a never-sent connection error each defer without counting an attempt, with the growing waits;
+    - a 529, a 401, a 403 and a never-sent connection error each defer without counting an attempt, with the growing waits;
+    - a scan and an image hitting a 401 or a 403 both defer, book nothing, and are read once the key works;
     - the row fails once it is older than 24 hours;
-    - a 401 still counts an attempt;
+    - a 400 still counts an attempt;
     - an APIConnectionTimeoutError still counts an attempt.
+- **10e. A failed scan read is not retried (controller, Task 10 review; widened after review round 1).** When the scanned-PDF read fails, the row fails for good with the error's code. Two failures keep their own handling: "Claude unavailable" under 10d (released, not billed: deferred as `ai_unavailable`) and `SpendCapReachedError` (deferred as `spend_cap`). Everything else is final:
+  - a connection lost after sending: `ai_timeout`, or `ai_network`. A timeout whose cause looks never sent is final too, though the spend code releases it.
+  - invalid output (`ai_invalid_output`), a refusal (`ai_refusal`, as before), other API errors such as 400 or 404 (`ai_<status>`; a 401 or 403 waits under 10d), and unknown errors (`unknown`).
+
+  Each retry could book up to the whole scan ceiling (about $4–5) again; two tries took about 69% of the default $15 cap within a minute. Images keep the plan's 3 attempts, because each booking is at most the image ceiling (about $0.10). Failures before the paid read (download, disk, parsing) keep their own handling. The extractor notes each error of a scan's paid read (`isScanReadError` in src/media/extract.ts) without wrapping it, so the processor can tell it apart from other failures of the same PDF. Log a warn line with ids and the code only. Tests:
+  - a scanned PDF whose read throws APIConnectionTimeoutError fails as `ai_timeout`: readScannedPdf is called once and spentToday equals scannedPdfCeilingUsd once;
+  - the same for a connection reset after sending (`ai_network`), AiInvalidOutputError (`ai_invalid_output`) and a plain Error (`unknown`);
+  - an image with the same errors still counts an attempt and is retried;
+  - a scanned PDF still waits on a 529, a 401 or a 403 (unbilled) and on the spend cap.
+- **10f. The 24 hours count from the service start too (controller, Task 10 review).** The 10d limit counts from `max(createdAt, startedAt)`, where `startedAt` is the service start time (the same value as 12a, passed in by Task 15; default `clock.now()` at construction). Files loaded by `cli link` days before go-live then still get 24 hours of waits. Test: a row created 3 days before `startedAt` defers on a 529 instead of failing.
 - **10c. Local file names (amendment 4a, triage T4-01).** Saved files are named `<waId>-<mediaId>.<ext>` by `mediaRelPath` (src/media/paths.ts). The plan's Task 10 tests still expect the old names: `IMG1.jpg` and `media/SHA/2026-10/IMG1.jpg` (plan lines 3008-3098). Expect `IMG1-<mediaId>.jpg` and `media/SHA/2026-10/IMG1-<mediaId>.jpg`, with the id of the row under test, and build paths only through `mediaRelPath`, never by hand.
 
 ## Task 11: media queue
@@ -216,6 +228,31 @@ Every task's implementer applies the items listed under its task, in addition to
 - **15b. Spend-cap rows visible (review I3).** `mediaStats` also counts rows deferred for `spend_cap`, and Health shows them. When there are such rows, reuse the "Daily spend cap reached" line.
 - **15c. Waiting ignored.** Health ignores the `waiting` outcome (12d).
 - **15d. Local file names (10c).** The Task 15 test that expects `media/SHA/2026-10/IMG1.jpg` (plan line 5107) expects `media/SHA/2026-10/IMG1-<mediaId>.jpg` instead.
+- **15e. Upload failures always count (Job C, T13-03).** `markUploadFailed` has no `countAttempt` option any more; a sign-in failure now pauses the whole uploader instead. The plan's Task 15 test that passes `{ ..., countAttempt: true }` (near plan line 4934) drops that field.
+- **15f. One start time everywhere (10f, 12a, 15a).** main.ts captures `startedAt` once and passes the same value to the MediaProcessor (10f), the Reconciler (12a), Health and `mediaStats` (15a).
+- **15g. Wiring the side-branch pieces (Tasks 12-14, Job C).**
+  - The app's 30 s tick keeps calling `debouncer.ensure` for `clientIdsWithUnprocessed`. Files deferred for `ai_unavailable` or `spend_cap` never notify, so this tick is what re-runs a waiting client after the 30-minute wait (12a/12g). It also re-runs a message re-queued by a file read late (12h).
+  - The tick also calls `mediaQueue.kick()`. A file left pending and due is retried only on an outside kick (Task 11).
+  - The queue's `onSettled(clientId)` wakes that client's reconcile.
+  - DriveFileUploader:
+    - call `resetUploadFailures(db)` once at service start;
+    - call `run()` after each workbook publish, after a file finishes, and after a role change;
+    - `onUploaded` schedules a workbook publish;
+    - `stop()` at shutdown before the database closes.
+  - Tests: the tick kicks the queue and ensures waiting clients; a finished file wakes its client; the uploader runs after a publish and is stopped at shutdown.
+- **15h. Review round 1 (23 Oct 2026). This changes 15b.**
+  - A file is deferred for `spend_cap` whenever its hold does not fit under the cap. Every scanned PDF holds about $4.16 at default prices. So a file can wait for the budget while the cap is not reached and nothing is paused.
+  - Health shows "Daily spend cap reached. Paused until midnight IST" only when the cap is really reached, or a group is paused. Rows waiting for the budget no longer show it on their own.
+  - Otherwise they get their own line: `⚠️ N shared file(s) waiting for today's AI budget (read after midnight IST)`. It ranks after failed groups, lost messages, files waiting over 30 minutes and failed uploads, and before low disk. So a group stuck on AI errors is no longer hidden until midnight.
+  - Task 16's runbook adds this line to the status table in docs/SETUP.md.
+  - At shutdown the file uploader is stopped as soon as `stop()` starts, next to `mediaQueue.stop()`. During the drain no new pass starts, and a pass in flight stops before its next file. The later `stop(10_000)` still waits for the upload in flight. This avoids duplicate Drive copies of files uploaded while the database closes.
+  - New app tests cover:
+    - the real extractor under the app's spend guard (a hold that does not fit; a read still running at shutdown, booked once at its estimate);
+    - `stop()` returning after `drainMs` when a read never finishes;
+    - no new file starting during the drain;
+    - the default concurrency of 2;
+    - the tick retrying a due upload;
+    - `onUploaded` scheduling a publish.
 
 ## Task 16: runbook and final verification
 
@@ -237,7 +274,7 @@ Every task's implementer applies the items listed under its task, in addition to
   - the 600 s upload timeout;
   - the cost per image (1–4 cents);
   - that images loaded by `cli link` history are described too, at a cost;
-  - that each media call makes one Claude attempt (8c), and the media queue tries a file 3 times over about 6 minutes, so files shared during a longer Claude outage stay unread (`failed`);
+  - that each media call makes one Claude attempt (8c); while Claude is unavailable, files keep waiting and are retried for up to 24 hours at no cost (10d), and only then stay unread (`failed`, `ai_unavailable`);
   - the I-1 limit from 12h, in plain words. When a picture or document is read late (after the 30-minute wait, during an outage or a spend-cap hold) and the tracker already made a task from its message, new work that appears only in that file is not added as a new task. If a client sends a list or brief as a photo or scan during an outage, check the tracker afterwards and add any missing tasks by hand.
 
 ## Owner decisions after Task 14 (22 Oct 2026)

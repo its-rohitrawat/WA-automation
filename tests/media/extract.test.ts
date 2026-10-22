@@ -1,0 +1,420 @@
+import Anthropic from '@anthropic-ai/sdk';
+import { isMarkedAsUntransferable } from 'node:worker_threads';
+import sharp from 'sharp';
+import { describe, expect, it, vi } from 'vitest';
+import { IMAGE_MAX_TOKENS, IMAGE_TOKEN_CEILING, MEDIA_SYSTEM_PROMPT, PDF_MAX_TOKENS, PDF_TOKENS_PER_PAGE } from '../../src/brain/mediaClient.ts';
+import { SpendCapReachedError } from '../../src/brain/paidCall.ts';
+import { createExtractor, imageCeilingUsd, imageEstimateUsd, scannedPdfCeilingUsd, type ExtractInput } from '../../src/media/extract.ts';
+import type { PreparedImage } from '../../src/media/image.ts';
+import type { ParseJob, ParseResult } from '../../src/media/parse/types.ts';
+import { MEDIA_LIMITS } from '../../src/media/types.ts';
+import { estimateCostUsd, type Prices } from '../../src/spend/pricing.ts';
+import { SpendGuard } from '../../src/spend/spendGuard.ts';
+import type { Db } from '../../src/store/db.ts';
+import { manualClock } from '../../src/util/clock.ts';
+import { seededDb } from '../helpers/db.ts';
+import { tinyDocx, tinyPdf } from '../helpers/files.ts';
+import { FakeMediaAi } from '../helpers/mediaAi.ts';
+
+const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
+const PDF = Buffer.from('%PDF-1.4 fake');
+const ZIP = Buffer.from([0x50, 0x4b, 0x03, 0x04, 1, 2, 3]);
+const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+const NONE = { textKind: null, text: null, pageCount: null, note: null };
+
+/** A Buffer that owns its whole memory, as files read from disk do, so a transfer really moves it. */
+const owned = (b: Uint8Array): Buffer => Buffer.from(new Uint8Array(b).buffer);
+
+function setup(o: { parse?: ParseResult; capUsd?: number; ai?: FakeMediaAi; realParse?: boolean; realImage?: boolean } = {}) {
+  const db = seededDb();
+  const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: o.capUsd ?? 15 });
+  const ai = o.ai ?? new FakeMediaAi();
+  // Behaves like parseFile: with transfer, bytes that own their memory are moved away and the caller's view is
+  // emptied. Bytes that share memory (a pooled Buffer) are copied instead, so they stay intact.
+  const parse = vi.fn(async (job: ParseJob, opts?: { transfer?: boolean }): Promise<ParseResult> => {
+    const buf = job.bytes.buffer;
+    const movable = buf instanceof ArrayBuffer && !isMarkedAsUntransferable(buf) && job.bytes.byteOffset === 0 && job.bytes.byteLength === buf.byteLength;
+    if (opts?.transfer && movable) structuredClone(buf, { transfer: [buf] });
+    return o.parse ?? { text: '', pageCount: 1 };
+  });
+  const prepareImage = vi.fn(async (bytes: Buffer): Promise<PreparedImage> => ({ data: Buffer.concat([bytes, Buffer.from('-small')]), mediaType: 'image/jpeg', width: 1000, height: 750 }));
+  const extract = createExtractor({ ai, spend, prices: P, parse: o.realParse ? undefined : parse, prepareImage: o.realImage ? undefined : prepareImage });
+  const input = (i: Partial<ExtractInput> = {}): ExtractInput => ({
+    mediaId: 7, kind: 'image', mimeType: 'image/jpeg', fileName: null, forwarded: false, bytes: Buffer.from('img'), ...i,
+  });
+  const reserve = vi.spyOn(spend, 'reserve');
+  return { db, spend, ai, parse, prepareImage, extract, input, reserve };
+}
+const spendRows = (db: Db) => db.prepare('SELECT usd, detail FROM spend').all() as { usd: number; detail: string }[];
+
+describe('createExtractor', () => {
+  it('describes an image through Claude and books the actual cost', async () => {
+    const { db, ai, prepareImage, extract, input, reserve } = setup();
+    expect(await extract(input())).toEqual({ textKind: 'description', text: 'A screenshot of a payment receipt. Visible text: Paid ₹42,000', pageCount: null, note: null });
+    expect(prepareImage).toHaveBeenCalledWith(Buffer.from('img'));
+    expect(ai.calls).toEqual([{ kind: 'image', bytes: Buffer.from('img-small') }]);
+    expect(spendRows(db)).toEqual([{ usd: 0.01, detail: 'media 7' }]);
+    expect(reserve).toHaveBeenCalledExactlyOnceWith(imageEstimateUsd({ width: 1000, height: 750 }, P));
+  });
+
+  it.each(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'IMAGE/JPEG; charset=x'])('describes an image that was sent as a document (%s)', async (mimeType) => {
+    const { ai, parse, extract, input } = setup();
+    expect((await extract(input({ kind: 'document', mimeType, fileName: 'homepage-v3' }))).textKind).toBe('description');
+    expect(ai.calls).toHaveLength(1);
+    expect(parse).not.toHaveBeenCalled();
+  });
+
+  it('reads a PDF with a text layer locally, without Claude', async () => {
+    const { ai, parse, extract, input } = setup({ parse: { text: 'Quotation 17\nTotal 1,20,000 for the full website build', pageCount: 2 } });
+    expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', fileName: 'quote.pdf', bytes: PDF }))).toEqual({
+      textKind: 'extract', text: 'Quotation 17\nTotal 1,20,000 for the full website build', pageCount: 2, note: null,
+    });
+    expect(parse.mock.calls[0]![0]).toMatchObject({ kind: 'pdf', maxPages: 200, maxTextChars: 1_000_000 });
+    expect(ai.calls).toHaveLength(0);
+  });
+
+  it('counts a PDF with 16 visible characters per page read as text, and one with 15 as a scan', async () => {
+    const pdf = { kind: 'document', mimeType: 'application/pdf', bytes: PDF } as const;
+    const text = setup({ parse: { text: ' abcd efgh\nijkl mnop ', pageCount: 1 } }); // 16 visible, whitespace not counted
+    expect(await text.extract(text.input(pdf))).toEqual({ textKind: 'extract', text: ' abcd efgh\nijkl mnop ', pageCount: 1, note: null });
+    expect(text.ai.calls).toHaveLength(0);
+
+    const scan = setup({ parse: { text: ' abcd efgh\nijkl mno ', pageCount: 1 } }); // 15 visible
+    expect(await scan.extract(scan.input(pdf))).toEqual({ textKind: 'extract', text: 'Quotation No. 17. Total ₹1,20,000', pageCount: 1, note: 'scan_read_by_ai' });
+    expect(scan.ai.calls).toEqual([{ kind: 'pdf', bytes: PDF }]);
+  });
+
+  it('marks a PDF that was read only up to the page cap', async () => {
+    // 3,500 characters is enough for the 200 pages read (16 x 200) but not for the 250 the file states (16 x 250):
+    // the scan check counts only the pages that were read.
+    const { extract, input } = setup({ parse: { text: 'x'.repeat(3_500), pageCount: 250 } });
+    expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toMatchObject({ textKind: 'extract', pageCount: 250, note: 'first_pages_only' });
+  });
+
+  it('finds a PDF by its bytes, not by the MIME type the sender gave', async () => {
+    const real = setup({ parse: { text: 'Quotation 17\nTotal 1,20,000 for the full website build', pageCount: 2 } });
+    expect(await real.extract(real.input({ kind: 'document', mimeType: 'application/octet-stream', fileName: 'quote', bytes: PDF }))).toMatchObject({ textKind: 'extract', pageCount: 2 });
+    expect(real.parse).toHaveBeenCalledTimes(1);
+    expect(real.parse.mock.calls[0]![0]).toMatchObject({ kind: 'pdf' });
+
+    const fake = setup();
+    expect(await fake.extract(fake.input({ kind: 'document', mimeType: 'application/pdf', fileName: 'quote.pdf', bytes: Buffer.from('not a pdf') }))).toEqual(NONE);
+    expect(fake.parse).not.toHaveBeenCalled();
+    expect(fake.reserve).not.toHaveBeenCalled();
+    expect(fake.ai.calls).toHaveLength(0);
+  });
+
+  it('sends a short scan to Claude, reserving the scanned-PDF ceiling', async () => {
+    const { db, ai, extract, input, reserve } = setup({ parse: { text: '  ', pageCount: 3 } });
+    expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toEqual({
+      textKind: 'extract', text: 'Quotation No. 17. Total ₹1,20,000', pageCount: 3, note: 'scan_read_by_ai',
+    });
+    expect(ai.calls).toEqual([{ kind: 'pdf', bytes: PDF }]);
+    expect(spendRows(db)).toEqual([{ usd: 0.01, detail: 'media 7' }]);
+    expect(reserve).toHaveBeenCalledExactlyOnceWith(scannedPdfCeilingUsd(P));
+  });
+
+  it('lists a long scan with its page count only', async () => {
+    const { ai, extract, input } = setup({ parse: { text: '', pageCount: 30 } });
+    expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toEqual({ textKind: null, text: null, pageCount: 30, note: 'scan_too_long' });
+    expect(ai.calls).toHaveLength(0);
+  });
+
+  it('reads DOCX text in the parser, by MIME type or by the .docx name', async () => {
+    const { parse, extract, input } = setup({ parse: { text: 'Scope of work', pageCount: null } });
+    expect(await extract(input({ kind: 'document', mimeType: DOCX_MIME, bytes: ZIP }))).toEqual({ textKind: 'extract', text: 'Scope of work', pageCount: null, note: null });
+    expect(await extract(input({ kind: 'document', mimeType: 'application/octet-stream', fileName: 'Scope.DOCX', bytes: ZIP }))).toMatchObject({ text: 'Scope of work' });
+    expect(parse.mock.calls[0]![0]).toMatchObject({ kind: 'docx', maxXmlBytes: 20 * 1024 * 1024, maxEntries: 2_000, maxTextChars: 1_000_000 });
+  });
+
+  it('keeps other files as originals only, and reads nothing for voice notes yet', async () => {
+    const { ai, parse, extract, input } = setup();
+    expect(await extract(input({ kind: 'document', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', fileName: 'budget.xlsx', bytes: ZIP }))).toEqual(NONE);
+    expect(await extract(input({ kind: 'document', mimeType: 'text/plain', bytes: Buffer.from('hello') }))).toEqual(NONE);
+    // A DOCX name or MIME type is not enough: the bytes must be a ZIP.
+    expect(await extract(input({ kind: 'document', mimeType: DOCX_MIME, fileName: 'x.docx', bytes: Buffer.from('not a zip') }))).toEqual(NONE);
+    expect(await extract(input({ kind: 'voice', mimeType: 'audio/ogg', bytes: Buffer.from('ogg') }))).toEqual(NONE);
+    expect(parse).not.toHaveBeenCalled();
+    expect(ai.calls).toHaveLength(0);
+  });
+
+  describe('the stored-text cap', () => {
+    const MAX = MEDIA_LIMITS.maxStoredTextChars;
+    const pdf = { kind: 'document', mimeType: 'application/pdf', bytes: PDF } as const;
+
+    it.each([
+      { path: 'a PDF text layer', parse: { text: 'a'.repeat(MAX + 10), pageCount: 1 }, file: pdf },
+      { path: 'DOCX text', parse: { text: 'a'.repeat(MAX + 10), pageCount: null }, file: { kind: 'document', mimeType: DOCX_MIME, bytes: ZIP } as const },
+      { path: 'a scan read by Claude', parse: { text: '', pageCount: 3 }, claude: 'a'.repeat(MAX + 10), file: pdf },
+      { path: 'an image description', claude: 'a'.repeat(MAX + 10), file: {} },
+    ])('caps $path at maxStoredTextChars', async ({ parse, claude, file }) => {
+      const { extract, input } = setup({ parse, ai: new FakeMediaAi(claude === undefined ? [] : [{ text: claude }]) });
+      expect((await extract(input(file))).text).toHaveLength(MAX);
+    });
+
+    it('cuts a huge text layer without stalling the service', async () => {
+      // A tiny hostile PDF can make the parser return tens of millions of characters (review of Task 9).
+      const { extract, input } = setup({ parse: { text: 'क'.repeat(5_000_000), pageCount: 1 } });
+      const started = performance.now();
+      const { text } = await extract(input(pdf));
+      expect(performance.now() - started).toBeLessThan(250);
+      expect(text).toHaveLength(MAX);
+    });
+
+    it('never ends the stored text with half of a character', async () => {
+      const halfway = setup({ parse: { text: `${'a'.repeat(MAX - 1)}${'😀'.repeat(5)}`, pageCount: 1 } });
+      expect((await halfway.extract(halfway.input(pdf))).text).toBe('a'.repeat(MAX - 1));
+      const whole = setup({ parse: { text: `${'a'.repeat(MAX - 2)}${'😀'.repeat(5)}`, pageCount: 1 } });
+      expect((await whole.extract(whole.input(pdf))).text).toBe(`${'a'.repeat(MAX - 2)}😀`);
+    });
+  });
+
+  it('decodes an image with the full pixel cap when no image preparer is given', async () => {
+    const { ai, extract, input } = setup({ realImage: true });
+    const side = Math.ceil(Math.sqrt(MEDIA_LIMITS.maxImagePixels)); // 7072 x 7072 is just over the cap
+    // Grey, one byte per pixel, so the images stay under the decoded-size budget and only the pixel cap decides.
+    const image = (s: number) => sharp({ create: { width: s, height: s, channels: 3, background: { r: 30, g: 90, b: 200 } } }).toColourspace('b-w');
+    expect(await extract(input({ bytes: await image(side - 1).jpeg().toBuffer() }))).toMatchObject({ textKind: 'description' });
+    expect([...ai.calls[0]!.bytes.subarray(0, 3)]).toEqual([0xff, 0xd8, 0xff]);
+    await expect(extract(input({ bytes: await image(side).png().toBuffer() }))).rejects.toMatchObject({ name: 'ParseError', code: 'image_unreadable' });
+    expect(ai.calls).toHaveLength(1);
+  });
+
+  it('estimates are ceilings that include the image or the pages', () => {
+    const base = (maxTokens: number) => estimateCostUsd(MEDIA_SYSTEM_PROMPT.length + 200, P, maxTokens);
+    expect(imageEstimateUsd({ width: 1000, height: 750 }, P)).toBeCloseTo(base(IMAGE_MAX_TOKENS) + (1000 * 4) / 1e6);
+    expect(imageEstimateUsd({ width: 10_000, height: 10_000 }, P)).toBeCloseTo(base(IMAGE_MAX_TOKENS) + (4784 * 4) / 1e6);
+    expect(imageCeilingUsd(P)).toBeCloseTo(base(IMAGE_MAX_TOKENS) + (IMAGE_TOKEN_CEILING * 4) / 1e6);
+    // Amendment 9g: every page Claude may read from one PDF (600), capped at the largest context window (1M tokens).
+    expect(scannedPdfCeilingUsd(P)).toBeCloseTo(base(PDF_MAX_TOKENS) + (Math.min(600 * PDF_TOKENS_PER_PAGE, 1_000_000) * 4) / 1e6);
+    expect(scannedPdfCeilingUsd(P)).toBeCloseTo(4.16, 1);
+  });
+
+  // Amendments 9a and 9b.
+  describe('the daily cap', () => {
+    it('lists a file whose ceiling is above the whole daily cap as too costly, without trying or deferring it', async () => {
+      const image = setup({ capUsd: 0.001 });
+      expect(await image.extract(image.input())).toEqual({ ...NONE, note: 'too_costly' });
+      expect(image.prepareImage).not.toHaveBeenCalled();
+      expect(image.reserve).not.toHaveBeenCalled();
+      expect(image.ai.calls).toHaveLength(0);
+
+      const scan = setup({ capUsd: 4, parse: { text: '', pageCount: 3 } });
+      expect(scannedPdfCeilingUsd(P)).toBeGreaterThan(4);
+      expect(await scan.extract(scan.input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toEqual({ ...NONE, pageCount: 3, note: 'too_costly' });
+      expect(scan.reserve).not.toHaveBeenCalled();
+      expect(scan.ai.calls).toHaveLength(0);
+      expect(spendRows(scan.db)).toEqual([]);
+    });
+
+    it('still tries an image or a scan when the daily cap equals its ceiling', async () => {
+      const image = setup({ capUsd: imageCeilingUsd(P) });
+      expect(await image.extract(image.input())).toMatchObject({ textKind: 'description', note: null });
+      expect(image.ai.calls).toHaveLength(1);
+
+      const scan = setup({ capUsd: scannedPdfCeilingUsd(P), parse: { text: '', pageCount: 3 } });
+      expect(await scan.extract(scan.input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toMatchObject({ textKind: 'extract', note: 'scan_read_by_ai' });
+      expect(scan.reserve).toHaveBeenCalledExactlyOnceWith(scannedPdfCeilingUsd(P));
+      expect(scan.ai.calls).toHaveLength(1);
+    });
+
+    it('does not decode an image when the budget left today cannot hold its ceiling', async () => {
+      const { spend, ai, prepareImage, extract, input } = setup();
+      spend.record('ai', 14.95, 'batch 1');
+      expect(spend.canSpend(imageCeilingUsd(P))).toBe(false);
+      await expect(extract(input())).rejects.toBeInstanceOf(SpendCapReachedError);
+      expect(prepareImage).not.toHaveBeenCalled();
+      expect(ai.calls).toHaveLength(0);
+    });
+
+    it('checks the ceiling before decoding, even when what is left would hold this image', async () => {
+      // What is left today holds the estimate for the 1000 x 750 image the fake returns, but not the ceiling for any
+      // image. The check must use the ceiling, or the image is decoded and then deferred on every retry (amendment 9b).
+      const { spend, ai, prepareImage, extract, input } = setup();
+      spend.record('ai', 15 - (imageCeilingUsd(P) - 0.001), 'batch 1');
+      expect(spend.canSpend(imageCeilingUsd(P))).toBe(false);
+      expect(spend.canSpend(imageEstimateUsd({ width: 1000, height: 750 }, P))).toBe(true);
+      await expect(extract(input())).rejects.toBeInstanceOf(SpendCapReachedError);
+      expect(prepareImage).not.toHaveBeenCalled();
+      expect(ai.calls).toHaveLength(0);
+    });
+
+    it('does not call Claude for a scan when the ceiling does not fit under what is left today', async () => {
+      const { db, spend, ai, extract, input } = setup({ parse: { text: '', pageCount: 3 } });
+      spend.record('ai', 11, 'batch 1');
+      await expect(extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).rejects.toBeInstanceOf(SpendCapReachedError);
+      expect(ai.calls).toHaveLength(0);
+      expect(spendRows(db)).toEqual([{ usd: 11, detail: 'batch 1' }]);
+    });
+  });
+
+  // Owner decision D2, amendment 9e.
+  describe('forwarded files', () => {
+    it('never sends a forwarded image to Claude, also one sent as a document', async () => {
+      const { db, ai, prepareImage, extract, input, reserve } = setup();
+      expect(await extract(input({ forwarded: true }))).toEqual({ ...NONE, note: 'forwarded_not_described' });
+      expect(await extract(input({ forwarded: true, kind: 'document', mimeType: 'image/png', fileName: 'meme.png' }))).toEqual({ ...NONE, note: 'forwarded_not_described' });
+      expect(prepareImage).not.toHaveBeenCalled();
+      expect(reserve).not.toHaveBeenCalled();
+      expect(ai.calls).toHaveLength(0);
+      expect(spendRows(db)).toEqual([]);
+    });
+
+    it('never sends a forwarded scan to Claude', async () => {
+      const { db, ai, extract, input, reserve } = setup({ parse: { text: '', pageCount: 3 } });
+      expect(await extract(input({ forwarded: true, kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toEqual({ ...NONE, pageCount: 3, note: 'forwarded_not_described' });
+      expect(reserve).not.toHaveBeenCalled();
+      expect(ai.calls).toHaveLength(0);
+      expect(spendRows(db)).toEqual([]);
+    });
+
+    it('settles a forwarded image before any budget check, so it is never deferred or listed as too costly', async () => {
+      const spent = setup();
+      spent.spend.record('ai', 14.95, 'batch 1');
+      expect(spent.spend.canSpend(imageCeilingUsd(P))).toBe(false);
+      expect(await spent.extract(spent.input({ forwarded: true }))).toEqual({ ...NONE, note: 'forwarded_not_described' });
+
+      const tiny = setup({ capUsd: 0.001 });
+      expect(imageCeilingUsd(P)).toBeGreaterThan(0.001);
+      expect(await tiny.extract(tiny.input({ forwarded: true }))).toEqual({ ...NONE, note: 'forwarded_not_described' });
+
+      for (const s of [spent, tiny]) {
+        expect(s.prepareImage).not.toHaveBeenCalled();
+        expect(s.reserve).not.toHaveBeenCalled();
+        expect(s.ai.calls).toHaveLength(0);
+      }
+    });
+
+    it('settles a forwarded scan as forwarded when the daily cap is below its ceiling or used up', async () => {
+      const pdf = { forwarded: true, kind: 'document', mimeType: 'application/pdf', bytes: PDF } as const;
+      const low = setup({ capUsd: 4, parse: { text: '', pageCount: 3 } });
+      expect(scannedPdfCeilingUsd(P)).toBeGreaterThan(4);
+      expect(await low.extract(low.input(pdf))).toEqual({ ...NONE, pageCount: 3, note: 'forwarded_not_described' });
+
+      const spent = setup({ parse: { text: '', pageCount: 3 } });
+      spent.spend.record('ai', 11, 'batch 1');
+      expect(await spent.extract(spent.input(pdf))).toEqual({ ...NONE, pageCount: 3, note: 'forwarded_not_described' });
+
+      for (const s of [low, spent]) {
+        expect(s.reserve).not.toHaveBeenCalled();
+        expect(s.ai.calls).toHaveLength(0);
+      }
+    });
+
+    it('keeps a forwarded scan that is too long to read as too long', async () => {
+      const { ai, extract, input } = setup({ parse: { text: '', pageCount: 30 } });
+      expect(await extract(input({ forwarded: true, kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toEqual({ ...NONE, pageCount: 30, note: 'scan_too_long' });
+      expect(ai.calls).toHaveLength(0);
+    });
+
+    it('still reads the text of a forwarded PDF or DOCX locally', async () => {
+      const pdf = setup({ parse: { text: 'Quotation 17\nTotal 1,20,000 for the full website build', pageCount: 2 } });
+      expect(await pdf.extract(pdf.input({ forwarded: true, kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toEqual({
+        textKind: 'extract', text: 'Quotation 17\nTotal 1,20,000 for the full website build', pageCount: 2, note: null,
+      });
+      const docx = setup({ parse: { text: 'Scope of work', pageCount: null } });
+      expect(await docx.extract(docx.input({ forwarded: true, kind: 'document', mimeType: DOCX_MIME, bytes: ZIP }))).toEqual({
+        textKind: 'extract', text: 'Scope of work', pageCount: null, note: null,
+      });
+      expect(pdf.ai.calls).toHaveLength(0);
+      expect(docx.ai.calls).toHaveLength(0);
+    });
+  });
+
+  // Amendment 9f: parseFile moves the caller's bytes only when asked.
+  describe('file bytes and the parser', () => {
+    it('lets the DOCX parser take the bytes without a copy', async () => {
+      const { parse, extract, input } = setup({ parse: { text: 'Scope of work', pageCount: null } });
+      const bytes = owned(ZIP);
+      expect(await extract(input({ kind: 'document', mimeType: DOCX_MIME, bytes }))).toMatchObject({ text: 'Scope of work' });
+      expect(parse).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ kind: 'docx' }), { transfer: true });
+      expect(bytes.length).toBe(0); // moved to the parser, as parseFile does
+    });
+
+    it('moves a DOCX to the real parser without a copy', async () => {
+      // No fake parser: the default wiring must pass { transfer: true } on to parseFile.
+      const { extract, input } = setup({ realParse: true });
+      const bytes = owned(await tinyDocx(['Scope of work']));
+      expect(await extract(input({ kind: 'document', mimeType: DOCX_MIME, bytes }))).toEqual({ textKind: 'extract', text: 'Scope of work', pageCount: null, note: null });
+      expect(bytes.length).toBe(0);
+    });
+
+    it('keeps the bytes of a PDF, so Claude receives the whole scan', async () => {
+      const { ai, parse, extract, input } = setup({ parse: { text: '', pageCount: 3 } });
+      const bytes = owned(PDF);
+      await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes }));
+      expect(parse.mock.calls[0]![1]?.transfer).toBeUndefined();
+      expect(bytes).toEqual(PDF);
+      expect(ai.calls).toEqual([{ kind: 'pdf', bytes: PDF }]);
+    });
+
+    it('reads a scan of up to the byte limit, and lists a larger one as too long', async () => {
+      const scan = (size: number) => {
+        const b = Buffer.alloc(size);
+        b.write('%PDF-1.4', 0, 'latin1');
+        return b;
+      };
+      const atLimit = setup({ parse: { text: '', pageCount: 3 } });
+      const full = scan(MEDIA_LIMITS.maxScannedPdfBytes);
+      expect((await atLimit.extract(atLimit.input({ kind: 'document', mimeType: 'application/pdf', bytes: full }))).note).toBe('scan_read_by_ai');
+      expect(atLimit.ai.calls[0]!.bytes.length).toBe(MEDIA_LIMITS.maxScannedPdfBytes);
+
+      const over = setup({ parse: { text: '', pageCount: 3 } });
+      const big = scan(MEDIA_LIMITS.maxScannedPdfBytes + 1);
+      expect(await over.extract(over.input({ kind: 'document', mimeType: 'application/pdf', bytes: big }))).toEqual({ ...NONE, pageCount: 3, note: 'scan_too_long' });
+      expect(over.ai.calls).toHaveLength(0);
+      expect(big.length).toBe(MEDIA_LIMITS.maxScannedPdfBytes + 1);
+    });
+  });
+
+  // Amendment 9g: the page count comes from the file itself and is never a spend limit. These use the real parser.
+  describe('a PDF whose page count is forged', () => {
+    const forgedScan = () => tinyPdf([[], [], []], { count: 1 });
+
+    it('reserves the scanned-PDF ceiling for a 3-page scan that claims 1 page, and sends Claude every byte', async () => {
+      const { ai, extract, input, reserve } = setup({ realParse: true });
+      const bytes = forgedScan();
+      expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes }))).toEqual({
+        textKind: 'extract', text: 'Quotation No. 17. Total ₹1,20,000', pageCount: 1, note: 'scan_read_by_ai',
+      });
+      expect(reserve).toHaveBeenCalledExactlyOnceWith(scannedPdfCeilingUsd(P));
+      expect(ai.calls).toEqual([{ kind: 'pdf', bytes: forgedScan() }]);
+    });
+
+    it('lists the same scan as too costly when the daily cap is below the ceiling', async () => {
+      const { ai, extract, input, reserve } = setup({ realParse: true, capUsd: 4 });
+      expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: forgedScan() }))).toEqual({ ...NONE, pageCount: 1, note: 'too_costly' });
+      expect(reserve).not.toHaveBeenCalled();
+      expect(ai.calls).toHaveLength(0);
+    });
+
+    it('fails a text PDF that claims no pages as unreadable, without a paid call', async () => {
+      const { db, ai, extract, input } = setup({ realParse: true });
+      const bytes = tinyPdf([['Page 1'], ['Page 2']], { count: 0 });
+      await expect(extract(input({ kind: 'document', mimeType: 'application/pdf', bytes }))).rejects.toMatchObject({ name: 'ParseError', code: 'pdf_no_pages' });
+      expect(ai.calls).toHaveLength(0);
+      expect(spendRows(db)).toEqual([]);
+    });
+  });
+
+  // Amendment 9h: media calls make one SDK attempt, so a lost connection is booked once.
+  describe('a connection lost during a paid call', () => {
+    it('books an image estimate once', async () => {
+      const { db, extract, input } = setup({ ai: new FakeMediaAi([new Anthropic.APIConnectionTimeoutError()]) });
+      await expect(extract(input())).rejects.toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
+      const rows = spendRows(db);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.detail).toBe('media 7 (connection lost, estimated)');
+      expect(rows[0]!.usd).toBeCloseTo(imageEstimateUsd({ width: 1000, height: 750 }, P), 12);
+    });
+
+    it('books the scanned-PDF ceiling once', async () => {
+      const { db, extract, input } = setup({ ai: new FakeMediaAi([new Anthropic.APIConnectionTimeoutError()]), parse: { text: '', pageCount: 3 } });
+      await expect(extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).rejects.toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
+      const rows = spendRows(db);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.detail).toBe('media 7 (connection lost, estimated)');
+      expect(rows[0]!.usd).toBeCloseTo(scannedPdfCeilingUsd(P), 12);
+    });
+  });
+});
