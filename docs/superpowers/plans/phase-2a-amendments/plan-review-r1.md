@@ -161,6 +161,11 @@ Every task's implementer applies the items listed under its task, in addition to
     - the row fails once it is older than 24 hours;
     - a 401 still counts an attempt;
     - an APIConnectionTimeoutError still counts an attempt.
+- **10e. A scan whose Claude outcome is unknown is not retried (controller, Task 10 review).** When the scanned-PDF read throws an error whose cost is booked at the estimate, the row fails for good with that code (`ai_timeout`, or `ai_network` for a connection lost after sending). These are an `Anthropic.APIConnectionError` that is not "Claude unavailable" under 10d. Each retry would book the whole scan ceiling (about $4–5) again; two tries took about 69% of the default $15 cap within a minute. Images keep the plan's 3 attempts, because each booking is at most the image ceiling (about $0.10). Log a warn line with ids and the code only. Tests:
+  - a scanned PDF whose read throws APIConnectionTimeoutError fails as `ai_timeout`: readScannedPdf is called once and spentToday equals scannedPdfCeilingUsd once;
+  - the same for a connection reset after sending (`ai_network`);
+  - an image with the same errors still counts an attempt and is retried.
+- **10f. The 24 hours count from the service start too (controller, Task 10 review).** The 10d limit counts from `max(createdAt, startedAt)`, where `startedAt` is the service start time (the same value as 12a, passed in by Task 15; default `clock.now()` at construction). Files loaded by `cli link` days before go-live then still get 24 hours of waits. Test: a row created 3 days before `startedAt` defers on a 529 instead of failing.
 - **10c. Local file names (amendment 4a, triage T4-01).** Saved files are named `<waId>-<mediaId>.<ext>` by `mediaRelPath` (src/media/paths.ts). The plan's Task 10 tests still expect the old names: `IMG1.jpg` and `media/SHA/2026-10/IMG1.jpg` (plan lines 3008-3098). Expect `IMG1-<mediaId>.jpg` and `media/SHA/2026-10/IMG1-<mediaId>.jpg`, with the id of the row under test, and build paths only through `mediaRelPath`, never by hand.
 
 ## Task 11: media queue
