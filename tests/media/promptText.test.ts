@@ -359,7 +359,7 @@ describe('prompt with file text', () => {
     const out = buildUserContent({
       ...base, batch: [msg(1)], mediaText: new Map([[1, { head: 'image', body: 'A blue banner' }]]), reactions: [{ targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '✅' }],
     });
-    expect(lineOf(out, 'm1').endsWith(': see this {image: A blue banner} {reactions: ✅ by ?? Unknown [unknown]}')).toBe(true);
+    expect(lineOf(out, 'm1').endsWith(': see this {image: A blue banner} {reactions: ✅ by ?? [unknown]}')).toBe(true);
   });
 
   it('gives context messages their file block too', () => {
@@ -375,7 +375,7 @@ describe('prompt with file text', () => {
 
   it('a placeholder sits where a file block sits: after the text, before the reactions', () => {
     const out = buildUserContent({ ...base, batch: [msg(1, { mediaType: 'sticker' })], reactions: [{ targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '✅' }] });
-    expect(lineOf(out, 'm1').endsWith(': see this {sticker} {reactions: ✅ by ?? Unknown [unknown]}')).toBe(true);
+    expect(lineOf(out, 'm1').endsWith(': see this {sticker} {reactions: ✅ by ?? [unknown]}')).toBe(true);
   });
 
   it('a sender typing a bracketed placeholder gets plain text, never a placeholder', () => {
