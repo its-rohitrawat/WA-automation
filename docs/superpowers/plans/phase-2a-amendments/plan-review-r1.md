@@ -227,6 +227,18 @@ Every task's implementer applies the items listed under its task, in addition to
 - **15b. Spend-cap rows visible (review I3).** `mediaStats` also counts rows deferred for `spend_cap`, and Health shows them. When there are such rows, reuse the "Daily spend cap reached" line.
 - **15c. Waiting ignored.** Health ignores the `waiting` outcome (12d).
 - **15d. Local file names (10c).** The Task 15 test that expects `media/SHA/2026-10/IMG1.jpg` (plan line 5107) expects `media/SHA/2026-10/IMG1-<mediaId>.jpg` instead.
+- **15e. Upload failures always count (Job C, T13-03).** `markUploadFailed` has no `countAttempt` option any more; a sign-in failure now pauses the whole uploader instead. The plan's Task 15 test that passes `{ ..., countAttempt: true }` (near plan line 4934) drops that field.
+- **15f. One start time everywhere (10f, 12a, 15a).** main.ts captures `startedAt` once and passes the same value to the MediaProcessor (10f), the Reconciler (12a), Health and `mediaStats` (15a).
+- **15g. Wiring the side-branch pieces (Tasks 12-14, Job C).**
+  - The app's 30 s tick keeps calling `debouncer.ensure` for `clientIdsWithUnprocessed`. Files deferred for `ai_unavailable` or `spend_cap` never notify, so this tick is what re-runs a waiting client after the 30-minute wait (12a/12g). It also re-runs a message re-queued by a file read late (12h).
+  - The tick also calls `mediaQueue.kick()`. A file left pending and due is retried only on an outside kick (Task 11).
+  - The queue's `onSettled(clientId)` wakes that client's reconcile.
+  - DriveFileUploader:
+    - call `resetUploadFailures(db)` once at service start;
+    - call `run()` after each workbook publish, after a file finishes, and after a role change;
+    - `onUploaded` schedules a workbook publish;
+    - `stop()` at shutdown before the database closes.
+  - Tests: the tick kicks the queue and ensures waiting clients; a finished file wakes its client; the uploader runs after a publish and is stopped at shutdown.
 
 ## Task 16: runbook and final verification
 
