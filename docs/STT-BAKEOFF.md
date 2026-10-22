@@ -89,8 +89,8 @@ The tool never shows a key or the words of a recording in these messages.
   - `status_unavailable` or `job_wait_timeout`: Sarvam stopped answering while the job ran.
   - `download_http_` followed by a number from 500 up, or `download_http_408` or `download_http_429`: Sarvam finished, but its answer could not be fetched this time. The tool keeps the job, so it can be fetched again later.
   - `status_http_...`, or `download_http_` followed by another number from 400 to 499 (for example `status_http_404` or `download_http_403`): Sarvam no longer has the job, so its answer can never be fetched. It may still have charged for it: check the Sarvam dashboard. `--retry-unknown` then sends the recording again, which may charge again.
-  - Check that service's dashboard first (usage or history). Then run with `--retry-unknown`.
-  - Sarvam then waits for the job it already has, with no new charge. ElevenLabs and OpenAI send the file again and may charge again.
+  - Check that service's dashboard first (usage or history). Then run the dry run with `--retry-unknown` (no `--yes`) and read each line before sending.
+  - Only a line that says "wait for the saved job (no new charge)" is free: Sarvam then waits for the job it already has. A line that says "send again (an earlier attempt may already be billed)" sends the recording again and may charge again.
   - With `part_cache_mismatch`, nothing was sent: the long recording was cut differently from last time. Move that recording's part files (`results\<id>\<service>.part-*.json` in the output folder) aside, then run the dry run again: those parts are then sent again, which may charge again.
   - With `resume_part_without_job` or a code starting `audio_`, nothing was sent this time either. Run again; if it repeats, ask the agent's builder.
 - **`stopped ... cap`**: the next file would pass `--max-usd`. The summary shows how many were not sent. Raise the cap only if you mean to.

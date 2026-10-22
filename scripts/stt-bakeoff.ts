@@ -63,7 +63,7 @@ const USAGE = `STT bake-off (docs/STT-BAKEOFF.md). Without --yes this is a dry r
   --confirm-privacy     you completed the privacy checklist (required with --yes)
   --max-usd <n>         spending cap for this run in dollars (default 8)
   --retry-failed        send slots that failed before again
-  --retry-unknown       retry slots that got no answer (Sarvam waits on the saved job; others send again)
+  --retry-unknown       retry slots that got no answer; free only where the dry run says "no new charge", otherwise sent and paid again
   --keep-remote         keep ElevenLabs' stored copy of each transcript (by default it is deleted once saved here)
   --report-only         rebuild report.md and the transcripts from saved results
 `;
