@@ -29,7 +29,7 @@
    - **jszip 3.10.2** plus a small regex text extractor for DOCX. jszip is already installed through exceljs. `JSZipObject.nodeStream()` lets the reader count inflated bytes and stop at a cap, which guards against zip bombs.
      - Rejected: mammoth, which adds about five more packages (bluebird, xmldom, underscore and others) for formatting we do not use.
    - **sharp 0.35.5**, already installed as Baileys' peer, with the prebuilt `@img/sharp-win32-x64`.
-     - It auto-orients images, downscales them to Claude's resolution, and re-encodes them as JPEG. Re-encoding drops EXIF metadata, so GPS coordinates never leave the PC.
+     - It auto-orients images, downscales them to Claude's resolution, and re-encodes them as JPEG. Re-encoding drops EXIF metadata, so EXIF/GPS is stripped from what is sent to Claude. The original saved on the PC and uploaded to Drive is the client's file, unchanged (amendment 9d).
      - `limitInputPixels` guards against decompression bombs, and `.timeout()` limits processing time.
    - **file-type** is not used. The two checks needed (`%PDF-` and the ZIP signature) are one line each.
    - jszip and sharp are added to `package.json` with exact pins equal to the installed versions, so no new download happens.

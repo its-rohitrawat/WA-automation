@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AiInvalidOutputError, AiRefusalError, ClaudeClient, SDK_MAX_RETRIES } from '../../src/brain/claudeClient.ts';
 import { ClaudeMediaClient, MEDIA_SDK_MAX_RETRIES } from '../../src/brain/mediaClient.ts';
 import { SpendCapReachedError, withReservation } from '../../src/brain/paidCall.ts';
+import { scannedPdfCeilingUsd } from '../../src/media/extract.ts';
 import type { Prices } from '../../src/spend/pricing.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { manualClock } from '../../src/util/clock.ts';
@@ -108,7 +109,8 @@ describe('withReservation', () => {
   it('keeps room for the reconciler after a timed-out scanned PDF at the ceiling', async () => {
     const { spend } = setup(15);
     await withReservation(spend, 3, 'batch 1', ok(3), MEDIA_ATTEMPTS);
-    const ceiling = 4.16;
+    const ceiling = scannedPdfCeilingUsd(prices);
+    expect(ceiling).toBeCloseTo(4.16, 1);
     expect(spend.canSpend(ceiling)).toBe(true);
     await expect(withReservation(spend, ceiling, 'media 12', async () => { throw new Anthropic.APIConnectionTimeoutError(); }, MEDIA_ATTEMPTS))
       .rejects.toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
