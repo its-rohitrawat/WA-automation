@@ -68,6 +68,10 @@ beforeEach(() => {
 });
 
 const wholeFile = async (i: PlanItem): Promise<AudioPart[]> => [{ path: `${i.sample.id}.mp3`, seconds: i.seconds, offset: 0 }];
+const twoParts = async (): Promise<AudioPart[]> => [
+  { path: 'p0.mp3', seconds: 300, offset: 0 },
+  { path: 'p1.mp3', seconds: 100, offset: 300 },
+];
 
 function deps(providers: SttProvider[], over: Partial<RunDeps> = {}): RunDeps {
   return {
@@ -157,10 +161,6 @@ describe('runPlan', () => {
   });
 
   it('reuses parts answered in an earlier run', async () => {
-    const twoParts = async (): Promise<AudioPart[]> => [
-      { path: 'p0.mp3', seconds: 300, offset: 0 },
-      { path: 'p1.mp3', seconds: 100, offset: 300 },
-    ];
     const first = new FakeProvider('openai', 300, async (call, part) => {
       if (call === 2) throw new SttNoAnswerError('timeout');
       return { model: 'm', segments: [{ start: 1, end: 2, speaker: 'A', text: part.path }], billedSeconds: 300, raw: {} };
@@ -182,6 +182,18 @@ describe('runPlan', () => {
       { start: 1, end: 2, speaker: 'p1:A', text: 'p0.mp3' },
       { start: 301, end: 302, speaker: 'p2:A', text: 'p1.mp3' },
     ]);
+  });
+
+  it('sends nothing when a saved part was cut differently, and leaves the slot unknown', async () => {
+    ledger.begin({ sampleId: 'meeting-b', provider: 'openai', model: 'gpt-4o-transcribe-diarize', startedAt: '2026-10-22T10:00:00.000Z', jobIds: {} });
+    ledger.savePart('meeting-b', 'openai', 1, { offset: 250, seconds: 150 }, { model: 'm', segments: [], billedSeconds: 150, raw: {} });
+    const p = new FakeProvider('openai', 300);
+    const sum = await runPlan([item(meeting, 'openai', { seconds: 400, parts: 2, state: 'unknown' })], deps([p], { partsFor: twoParts }));
+    // Part 0 has no saved answer, yet it is not sent either: the mismatch on part 1 is found first.
+    expect(p.calls).toHaveLength(0);
+    expect(ledger.state('meeting-b', 'openai')).toBe('unknown');
+    expect(sum).toMatchObject({ unknown: 1, spentUsd: 0 });
+    expect(lines.some((l) => l.includes('part_cache_mismatch'))).toBe(true);
   });
 
   it('fails a slot without sending when the audio cannot be split', async () => {

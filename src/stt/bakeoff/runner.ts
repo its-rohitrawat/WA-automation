@@ -3,7 +3,7 @@ import { SttHttpError, SttJobError, SttNoAnswerError } from '../http.ts';
 import { costUsd, modelFor } from '../prices.ts';
 import { formatClock, mergeParts } from '../segments.ts';
 import type { AudioPart, ProviderId, ProviderResult, SttProvider } from '../types.ts';
-import type { Ledger, Outcome } from './ledger.ts';
+import { LedgerError, type Ledger, type Outcome } from './ledger.ts';
 import type { PlanItem } from './plan.ts';
 
 export interface RunDeps {
@@ -112,13 +112,21 @@ async function runSlot(item: PlanItem, provider: SttProvider, deps: RunDeps, now
     ledger.begin({ sampleId: sample.id, provider: item.provider, model: item.model, startedAt: new Date(now()).toISOString(), jobIds: {} });
   }
   const jobIds = ledger.attempt(sample.id, item.provider)?.jobIds ?? {};
+  // Every saved answer is checked against today's cut before anything is sent, so a mismatch sends nothing at all.
+  let cached: (ProviderResult | null)[];
+  try {
+    cached = parts.map((part, n) => ledger.part(sample.id, item.provider, n, part));
+  } catch (e) {
+    if (e instanceof LedgerError && e.code === 'part_cache_mismatch') return { kind: 'unknown', code: e.code, sentSeconds: 0 };
+    throw e;
+  }
   let sentSeconds = 0;
   try {
     const results: ProviderResult[] = [];
     for (const [n, part] of parts.entries()) {
-      const cached = ledger.part(sample.id, item.provider, n);
-      if (cached) {
-        results.push(cached);
+      const saved = cached[n];
+      if (saved) {
+        results.push(saved);
         continue;
       }
       const resumeJobId = jobIds[String(n)];
@@ -128,7 +136,7 @@ async function runSlot(item: PlanItem, provider: SttProvider, deps: RunDeps, now
         resumeJobId,
         onJobId: (id) => ledger.saveJobId(sample.id, item.provider, n, id),
       });
-      ledger.savePart(sample.id, item.provider, n, result);
+      ledger.savePart(sample.id, item.provider, n, part, result);
       results.push(result);
     }
     const billed = results.every((r) => r.billedSeconds !== null) ? results.reduce((t, r) => t + (r.billedSeconds ?? 0), 0) : null;

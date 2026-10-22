@@ -33,6 +33,19 @@ export interface Outcome {
   finishedAt: string;
 }
 
+/** Where a part sits in the prepared audio. A saved answer is reused only for the same cut. */
+export interface PartCut {
+  offset: number;
+  seconds: number;
+}
+
+interface SavedPart extends PartCut {
+  result: ProviderResult;
+}
+
+/** A saved answer matches a cut when its offset and length agree within this many seconds. */
+const CUT_TOLERANCE_S = 0.01;
+
 /** The ledger could not be read or written. The run stops: sending on without a record could pay twice. */
 export class LedgerError extends Error {
   readonly code: string;
@@ -85,7 +98,7 @@ function readJson(path: string): unknown {
 /**
  * The bake-off's state on disk, all inside the private output folder:
  * - results/<sample>/<provider>.attempt.json: written before sending;
- * - results/<sample>/<provider>.part-<n>.json: each part's answer, reused by a retry;
+ * - results/<sample>/<provider>.part-<n>.json: each part's answer with its cut, reused by a retry;
  * - results/<sample>/<provider>.json: the outcome.
  * Every failure to read or write it is a LedgerError.
  */
@@ -127,12 +140,24 @@ export class Ledger {
     this.begin(attempt);
   }
 
-  part(sampleId: string, provider: ProviderId, n: number): ProviderResult | null {
-    return readJson(this.#file(sampleId, provider, `.part-${n}`)) as ProviderResult | null;
+  /**
+   * The saved answer for part n, or null when there is none. One saved for another cut (the audio was split differently
+   * since) is a LedgerError part_cache_mismatch: reusing it would put words at the wrong times, or miss some.
+   */
+  part(sampleId: string, provider: ProviderId, n: number, expect: PartCut): ProviderResult | null {
+    const path = this.#file(sampleId, provider, `.part-${n}`);
+    const saved = readJson(path) as Partial<SavedPart> | null;
+    if (saved === null) return null;
+    const near = (a: unknown, b: number): boolean => typeof a === 'number' && Math.abs(a - b) <= CUT_TOLERANCE_S;
+    if (!near(saved.offset, expect.offset) || !near(saved.seconds, expect.seconds) || !saved.result) {
+      throw new LedgerError('part_cache_mismatch', `The saved answer ${path} was cut differently from the audio now being sent`);
+    }
+    return saved.result;
   }
 
-  savePart(sampleId: string, provider: ProviderId, n: number, result: ProviderResult): void {
-    this.#write(this.#file(sampleId, provider, `.part-${n}`), result);
+  savePart(sampleId: string, provider: ProviderId, n: number, cut: PartCut, result: ProviderResult): void {
+    const saved: SavedPart = { offset: cut.offset, seconds: cut.seconds, result };
+    this.#write(this.#file(sampleId, provider, `.part-${n}`), saved);
   }
 
   finish(outcome: Outcome): void {

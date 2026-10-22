@@ -1,8 +1,9 @@
-import { mkdirSync, mkdtempSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { Ledger, LedgerError, type Attempt, type Outcome } from '../../../src/stt/bakeoff/ledger.ts';
+import type { AudioPart } from '../../../src/stt/types.ts';
 
 let dir: string;
 let ledger: Ledger;
@@ -69,11 +70,37 @@ describe('Ledger', () => {
     expect(() => ledger.saveJobId('voice-a', 'sarvam', 0, 'job-1')).toThrow();
   });
 
-  it('stores and returns each part answer', () => {
+  it('stores and returns each part answer for the same cut, within 0.01 s', () => {
     const part = { model: 'm', segments: [], billedSeconds: 30, raw: { ok: true } };
-    expect(ledger.part('voice-a', 'openai', 1)).toBeNull();
-    ledger.savePart('voice-a', 'openai', 1, part);
-    expect(ledger.part('voice-a', 'openai', 1)).toEqual(part);
+    const cut = { offset: 300, seconds: 100 };
+    expect(ledger.part('voice-a', 'openai', 1, cut)).toBeNull();
+    const audio: AudioPart = { ...cut, path: 'C:\\out\\p1.mp3' };
+    ledger.savePart('voice-a', 'openai', 1, audio, part);
+    expect(ledger.part('voice-a', 'openai', 1, cut)).toEqual(part);
+    expect(ledger.part('voice-a', 'openai', 1, { offset: 300.009, seconds: 99.991 })).toEqual(part);
+    // Only the cut is stored with the answer, never the local path.
+    expect(JSON.parse(readFileSync(join(dir, 'results', 'voice-a', 'openai.part-1.json'), 'utf8'))).toEqual({ ...cut, result: part });
+  });
+
+  it('refuses a saved answer for a part that is now cut differently', () => {
+    const part = { model: 'm', segments: [], billedSeconds: 30, raw: {} };
+    ledger.savePart('voice-a', 'openai', 1, { offset: 300, seconds: 100 }, part);
+    for (const cut of [{ offset: 300, seconds: 90 }, { offset: 290, seconds: 100 }]) {
+      let caught: unknown;
+      try {
+        ledger.part('voice-a', 'openai', 1, cut);
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(LedgerError);
+      expect((caught as LedgerError).code).toBe('part_cache_mismatch');
+    }
+  });
+
+  it('refuses a saved part that records no cut', () => {
+    mkdirSync(join(dir, 'results', 'voice-a'), { recursive: true });
+    writeFileSync(join(dir, 'results', 'voice-a', 'openai.part-0.json'), JSON.stringify({ model: 'm', segments: [], billedSeconds: 1, raw: {} }));
+    expect(() => ledger.part('voice-a', 'openai', 0, { offset: 0, seconds: 1 })).toThrow(/cut differently|no cut/);
   });
 
   it('moves a failed outcome and its attempt aside on reopen, keeping both on disk', () => {
@@ -122,7 +149,7 @@ describe('Ledger', () => {
     ledger.begin(attempt());
     ledger.finish(outcome());
     ledger.begin(attempt({ sampleId: 'meeting-b', provider: 'openai' }));
-    ledger.savePart('meeting-b', 'openai', 0, { model: 'm', segments: [], billedSeconds: null, raw: {} });
+    ledger.savePart('meeting-b', 'openai', 0, { offset: 0, seconds: 300 }, { model: 'm', segments: [], billedSeconds: null, raw: {} });
     expect(ledger.outcomes()).toEqual([outcome()]);
   });
 
@@ -186,7 +213,7 @@ describe('Ledger writes', () => {
   it('wraps every write failure in a LedgerError', () => {
     writeFileSync(join(dir, 'results'), 'a file where the folder should be');
     expect(() => ledger.begin(attempt())).toThrow(LedgerError);
-    expect(() => ledger.savePart('voice-a', 'openai', 0, { model: 'm', segments: [], billedSeconds: null, raw: {} })).toThrow(LedgerError);
+    expect(() => ledger.savePart('voice-a', 'openai', 0, { offset: 0, seconds: 1 }, { model: 'm', segments: [], billedSeconds: null, raw: {} })).toThrow(LedgerError);
     expect(() => ledger.saveJobId('voice-a', 'sarvam', 0, 'job-1')).toThrow(LedgerError);
   });
 
