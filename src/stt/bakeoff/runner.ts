@@ -13,6 +13,8 @@ export interface RunDeps {
   partsFor: (item: PlanItem, maxSeconds: number) => Promise<AudioPart[]>;
   inrPerUsd: number;
   maxUsd: number;
+  /** Delete the provider's own stored copy of each answer once it is saved here (providers that offer forget). */
+  forgetRemote: boolean;
   log: (line: string) => void;
   now?: () => number;
 }
@@ -24,41 +26,62 @@ export interface RunSummary {
   unknown: number;
   skipped: number;
   stoppedAtCap: boolean;
+  /** Slots still to be sent when the cap stopped the run. */
+  unsent: number;
 }
 
-/** Statuses that show the key or account cannot be used: that provider gets nothing more in this run. */
-const ACCOUNT_REFUSED = new Set([401, 402, 403]);
+/**
+ * Statuses that show the key or account cannot be used: that provider gets nothing more in this run. 429 is one: OpenAI
+ * answers it for an empty balance (insufficient_quota) as well as for rate limits, and nothing is retried anyway.
+ */
+const ACCOUNT_REFUSED = new Set([401, 402, 403, 429]);
 
 type SlotResult =
   | { kind: 'done'; outcome: Outcome }
   | { kind: 'failed'; outcome: Outcome; status: number | null; sentSeconds: number }
   | { kind: 'unknown'; code: string; sentSeconds: number };
 
+/** A short code for a log line. Never the error's message: it can carry provider text. */
+function codeOf(e: unknown): string {
+  if (e instanceof SttHttpError) return `http_${e.status}`;
+  if (e instanceof SttNoAnswerError || e instanceof SttJobError || e instanceof LedgerError || e instanceof AudioError) return e.code;
+  return e instanceof Error ? e.name : 'error';
+}
+
 /**
  * Sends the plan one slot at a time. No paid request is retried here. Before each slot the cap is checked against what
  * this run has spent plus the slot's estimate. Lines logged carry ids, durations, costs and codes, never transcript text.
+ * A LedgerError stops the whole run: without a record on disk, going on could pay twice.
  */
 export async function runPlan(items: readonly PlanItem[], deps: RunDeps): Promise<RunSummary> {
   const now = deps.now ?? Date.now;
   const refused = new Set<ProviderId>();
-  const sum: RunSummary = { spentUsd: 0, done: 0, failed: 0, unknown: 0, skipped: 0, stoppedAtCap: false };
-  for (const item of items) {
+  const sum: RunSummary = { spentUsd: 0, done: 0, failed: 0, unknown: 0, skipped: 0, stoppedAtCap: false, unsent: 0 };
+  for (const [index, item] of items.entries()) {
     if (item.action === 'skip') continue;
     const label = `${item.sample.id} ${item.provider}`;
     if (refused.has(item.provider)) {
       sum.skipped++;
-      deps.log(`skip     ${label}: the provider refused the key earlier in this run`);
+      deps.log(`skip     ${label}: the provider refused the key or account earlier in this run`);
+      continue;
+    }
+    // The plan may be out of date (another run, or files moved by hand): a slot is acted on only in the state it was planned in.
+    const state = deps.ledger.state(item.sample.id, item.provider);
+    if (state !== item.state) {
+      sum.skipped++;
+      deps.log(`skip     ${label}: its state is now ${state}; make a new plan`);
       continue;
     }
     if (sum.spentUsd + item.estimateUsd > deps.maxUsd) {
       sum.stoppedAtCap = true;
+      sum.unsent = items.slice(index).filter((i) => i.action !== 'skip' && !refused.has(i.provider)).length;
       deps.log(`stopped  the next file would pass the $${deps.maxUsd.toFixed(2)} cap; nothing more was sent`);
       break;
     }
     const provider = deps.providers.get(item.provider);
     if (!provider) throw new Error(`No provider set up for ${item.provider}`);
     deps.log(`send     ${label} (${formatClock(item.seconds)}${item.parts > 1 ? `, ${item.parts} parts` : ''})`);
-    const r = await runSlot(item, provider, deps, now);
+    const r = await runSlot(item, provider, deps, now, label);
     const price = modelFor(item.provider, item.diarize);
     if (r.kind === 'done') {
       sum.done++;
@@ -79,7 +102,7 @@ export async function runPlan(items: readonly PlanItem[], deps: RunDeps): Promis
   return sum;
 }
 
-async function runSlot(item: PlanItem, provider: SttProvider, deps: RunDeps, now: () => number): Promise<SlotResult> {
+async function runSlot(item: PlanItem, provider: SttProvider, deps: RunDeps, now: () => number, label: string): Promise<SlotResult> {
   const { ledger } = deps;
   const { sample } = item;
   const started = now();
@@ -99,14 +122,24 @@ async function runSlot(item: PlanItem, provider: SttProvider, deps: RunDeps, now
     ledger.finish(outcome);
     return { kind: 'failed', outcome, status, sentSeconds };
   };
+  /** The audio could not be cut, so nothing is sent for this slot in this run. */
+  const noAudio = (code: string): SlotResult => {
+    // An unanswered slot may already be billed: it stays unknown, with its attempt and job ids.
+    if (item.state === 'unknown') return { kind: 'unknown', code, sentSeconds: 0 };
+    // The earlier failure goes aside, kept on disk, before the new one is written over it.
+    if (item.state === 'failed') ledger.reopen(sample.id, item.provider);
+    return failed(code, null, 0);
+  };
 
-  if (item.state === 'failed') ledger.reopen(sample.id, item.provider);
+  // Local work first, so a slot whose audio cannot be cut keeps its record as it was.
   let parts: AudioPart[];
   try {
     parts = await deps.partsFor(item, provider.maxPartSeconds);
   } catch (e) {
-    return failed(e instanceof AudioError ? `audio_${e.code}` : 'audio_error', null, 0);
+    return noAudio(e instanceof AudioError ? `audio_${e.code}` : 'audio_error');
   }
+  if (parts.length === 0) return noAudio('audio_no_parts');
+  if (item.state === 'failed') ledger.reopen(sample.id, item.provider);
   // An unanswered slot keeps its attempt, with any saved job ids; anything else starts a fresh one.
   if (item.state !== 'unknown' || !ledger.attempt(sample.id, item.provider)) {
     ledger.begin({ sampleId: sample.id, provider: item.provider, model: item.model, startedAt: new Date(now()).toISOString(), jobIds: {}, sends: [] });
@@ -142,10 +175,26 @@ async function runSlot(item: PlanItem, provider: SttProvider, deps: RunDeps, now
       const result = await provider.transcribe(part, {
         diarize: item.diarize,
         resumeJobId,
-        onJobId: (id) => ledger.saveJobId(sample.id, item.provider, n, id),
+        onJobId: (id) => {
+          try {
+            ledger.saveJobId(sample.id, item.provider, n, id);
+          } catch (e) {
+            // The job is accepted and will be billed; giving up now would only lose its answer. Without the saved id a
+            // lost answer cannot be fetched for free later, and the next plan shows that slot as a new send.
+            deps.log(`warning  ${label}: could not save the job id (${codeOf(e)}); still waiting`);
+          }
+        },
       });
       ledger.savePart(sample.id, item.provider, n, part, result);
       results.push(result);
+      if (deps.forgetRemote && provider.forget) {
+        try {
+          await provider.forget(result);
+        } catch (e) {
+          // The answer is safe here; only the provider's copy stays. Never a reason to fail the slot.
+          deps.log(`warning  ${label}: could not delete the provider's stored copy (${codeOf(e)})`);
+        }
+      }
     }
     const billed = results.every((r) => r.billedSeconds !== null) ? results.reduce((t, r) => t + (r.billedSeconds ?? 0), 0) : null;
     const outcome: Outcome = {
@@ -162,6 +211,8 @@ async function runSlot(item: PlanItem, provider: SttProvider, deps: RunDeps, now
     ledger.finish(outcome);
     return { kind: 'done', outcome };
   } catch (e) {
+    // The ledger is what stops a second payment; when it cannot be written, the run stops (the slot stays unknown on disk).
+    if (e instanceof LedgerError) throw e;
     if (e instanceof SttHttpError) return failed(`http_${e.status}${e.detail ? ` ${e.detail}` : ''}`, e.status, sentSeconds);
     if (e instanceof SttJobError) return failed(`job_${e.code}`, null, sentSeconds);
     return { kind: 'unknown', code: e instanceof SttNoAnswerError ? e.code : e instanceof Error ? e.name : 'error', sentSeconds };

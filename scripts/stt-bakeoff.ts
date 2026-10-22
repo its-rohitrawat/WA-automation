@@ -167,6 +167,7 @@ const summary = await runPlan(items, {
   ledger,
   inrPerUsd: env.INR_PER_USD,
   maxUsd,
+  forgetRemote: true,
   log: (line) => console.log(line),
   partsFor: async (item, maxSeconds) => {
     const audio = prepared.get(item.sample.id);
