@@ -411,6 +411,44 @@ describe('runPlan safety', () => {
     expect(ledger.state('voice-a', 'sarvam')).toBe('done');
   });
 
+  it('leaves a failed slot exactly as it was, sending nothing, when a saved part was cut differently', async () => {
+    const before = { ...failedOutcome(meeting, 'openai', 'http_400 invalid_value'), audioSeconds: 400, parts: 2 };
+    const attempt = { sampleId: 'meeting-b', provider: 'openai' as const, model: 'gpt-4o-transcribe-diarize', startedAt: '2026-10-22T10:00:00.000Z', jobIds: {}, sends: ['2026-10-22T10:00:01.000Z'] };
+    ledger.begin(attempt);
+    ledger.savePart('meeting-b', 'openai', 0, { offset: 0, seconds: 250 }, { model: 'm', segments: [], billedSeconds: 250, raw: {} });
+    ledger.finish(before);
+    const files = readdirSync(join(dir, 'results', 'meeting-b')).sort();
+    const p = new FakeProvider('openai', 300);
+    const sum = await runPlan([item(meeting, 'openai', { seconds: 400, parts: 2, state: 'failed' })], deps([p], { partsFor: twoParts }));
+    expect(p.calls).toHaveLength(0);
+    expect(ledger.outcome('meeting-b', 'openai')).toEqual(before);
+    expect(ledger.attempt('meeting-b', 'openai')).toEqual(attempt);
+    expect(readdirSync(join(dir, 'results', 'meeting-b')).sort()).toEqual(files);
+    expect(sum).toMatchObject({ failed: 1, unknown: 0, spentUsd: 0 });
+    expect(lines).toContain('failed   meeting-b openai: part_cache_mismatch');
+  });
+
+  it('never leaves a failed slot reading new when the ledger stops part way through its retry', async () => {
+    // Each of the first three renames of the retry fails in turn, as a crash or a full disk would.
+    for (let k = 1; k <= 3; k++) {
+      dir = mkdtempSync(join(tmpdir(), 'stt-run-'));
+      const setup = new Ledger(dir);
+      setup.begin({ sampleId: 'voice-a', provider: 'sarvam', model: 'saaras:v4', startedAt: '2026-10-22T10:00:00.000Z', jobIds: { '0': 'job-1' }, sends: ['2026-10-22T10:00:01.000Z'] });
+      setup.finish(failedOutcome(voice, 'sarvam', 'http_500'));
+      let renames = 0;
+      const crashing = new Ledger(dir, {
+        rename: (from, to) => {
+          if (++renames === k) throw errno('ENOSPC');
+          renameSync(from, to);
+        },
+      });
+      const p = new FakeProvider('sarvam', 7_200);
+      await expect(runPlan([item(voice, 'sarvam', { state: 'failed' })], deps([p], { ledger: crashing }))).rejects.toBeInstanceOf(LedgerError);
+      expect(p.calls).toHaveLength(0);
+      expect(['failed', 'unknown']).toContain(new Ledger(dir).state('voice-a', 'sarvam'));
+    }
+  });
+
   it('keeps an unknown slot unknown, with its attempt, when its audio cannot be cut', async () => {
     const before = { sampleId: 'voice-a', provider: 'openai' as const, model: 'gpt-transcribe', startedAt: '2026-10-22T10:00:00.000Z', jobIds: {}, sends: ['2026-10-22T10:00:01.000Z'] };
     ledger.begin(before);

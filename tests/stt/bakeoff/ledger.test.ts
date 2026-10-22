@@ -148,16 +148,21 @@ describe('Ledger', () => {
     expect(() => ledger.part('voice-a', 'openai', 0, { offset: 0, seconds: 1 })).toThrow(/cut differently|no cut/);
   });
 
-  it('moves a failed outcome and its attempt aside on reopen, keeping both on disk', () => {
+  it('reopens a failed slot with a fresh attempt, keeping the old outcome and attempt on disk', () => {
     const l = new Ledger(dir, { now: () => 1_700_000_000_000 });
     l.begin(attempt({ jobIds: { '0': 'job-1' } }));
     l.finish(outcome({ status: 'failed', error: 'http_500', segments: [] }));
-    l.reopen('voice-a', 'sarvam');
-    expect(l.state('voice-a', 'sarvam')).toBe('new');
+    const fresh = attempt({ startedAt: '2026-10-22T11:00:00.000Z' });
+    l.reopen(fresh);
+    // Sent from here on, so it reads unknown until the new outcome is written; never new.
+    expect(l.state('voice-a', 'sarvam')).toBe('unknown');
+    expect(l.attempt('voice-a', 'sarvam')).toEqual(fresh);
     expect(readdirSync(join(dir, 'results', 'voice-a')).sort()).toEqual([
+      'sarvam.attempt.json',
       'sarvam.failed-1700000000000-0.attempt.json',
       'sarvam.failed-1700000000000-0.json',
     ]);
+    expect(JSON.parse(readFileSync(join(dir, 'results', 'voice-a', 'sarvam.failed-1700000000000-0.attempt.json'), 'utf8'))).toEqual(attempt({ jobIds: { '0': 'job-1' } }));
   });
 
   it('picks a new name for each reopen, even within one millisecond', () => {
@@ -165,9 +170,10 @@ describe('Ledger', () => {
     for (let i = 0; i < 2; i++) {
       l.begin(attempt());
       l.finish(outcome({ status: 'failed', error: 'http_500', segments: [] }));
-      l.reopen('voice-a', 'sarvam');
+      l.reopen(attempt());
     }
     expect(readdirSync(join(dir, 'results', 'voice-a')).sort()).toEqual([
+      'sarvam.attempt.json',
       'sarvam.failed-5-0.attempt.json',
       'sarvam.failed-5-0.json',
       'sarvam.failed-5-1.attempt.json',
@@ -177,17 +183,34 @@ describe('Ledger', () => {
 
   it('reopens a failed slot that never got an attempt', () => {
     ledger.finish(outcome({ status: 'failed', error: 'audio_split_failed', segments: [] }));
-    ledger.reopen('voice-a', 'sarvam');
-    expect(ledger.state('voice-a', 'sarvam')).toBe('new');
+    ledger.reopen(attempt());
+    expect(ledger.state('voice-a', 'sarvam')).toBe('unknown');
   });
 
-  it('refuses to reopen a slot that is not failed', () => {
-    expect(() => ledger.reopen('voice-a', 'sarvam')).toThrow(LedgerError);
-    ledger.begin(attempt());
-    expect(() => ledger.reopen('voice-a', 'sarvam')).toThrow(LedgerError);
+  it('refuses to reopen a slot that is not failed, and writes nothing', () => {
+    expect(() => ledger.reopen(attempt())).toThrow(LedgerError);
+    expect(ledger.state('voice-a', 'sarvam')).toBe('new');
+    ledger.begin(attempt({ jobIds: { '0': 'job-1' } }));
+    expect(() => ledger.reopen(attempt())).toThrow(LedgerError);
+    expect(ledger.attempt('voice-a', 'sarvam')?.jobIds).toEqual({ '0': 'job-1' });
     ledger.finish(outcome());
-    expect(() => ledger.reopen('voice-a', 'sarvam')).toThrow(LedgerError);
+    expect(() => ledger.reopen(attempt())).toThrow(LedgerError);
     expect(ledger.state('voice-a', 'sarvam')).toBe('done');
+  });
+
+  it('records a new failure over an old one, keeping the old outcome and attempt aside', () => {
+    const l = new Ledger(dir, { now: () => 7 });
+    l.begin(attempt({ jobIds: { '0': 'job-1' } }));
+    l.finish(outcome({ status: 'failed', error: 'http_500', segments: [] }));
+    l.replaceFailed(outcome({ status: 'failed', error: 'audio_split_failed', segments: [] }));
+    expect(l.outcome('voice-a', 'sarvam')).toMatchObject({ status: 'failed', error: 'audio_split_failed' });
+    expect(l.attempt('voice-a', 'sarvam')).toBeNull();
+    expect(readdirSync(join(dir, 'results', 'voice-a')).sort()).toEqual(['sarvam.failed-7-0.attempt.json', 'sarvam.failed-7-0.json', 'sarvam.json']);
+    expect(JSON.parse(readFileSync(join(dir, 'results', 'voice-a', 'sarvam.failed-7-0.json'), 'utf8'))).toMatchObject({ error: 'http_500' });
+    // Only a failure replaces a failure, and only on a failed slot.
+    expect(() => l.replaceFailed(outcome())).toThrow(LedgerError);
+    expect(() => l.replaceFailed(outcome({ sampleId: 'voice-z', status: 'failed', error: 'x', segments: [] }))).toThrow(LedgerError);
+    expect(l.state('voice-z', 'sarvam')).toBe('new');
   });
 
   it('lists finished outcomes only', () => {
@@ -200,6 +223,46 @@ describe('Ledger', () => {
 
   it('lists nothing before the first run', () => {
     expect(ledger.outcomes()).toEqual([]);
+  });
+});
+
+describe('Ledger retry order', () => {
+  /** A ledger whose k-th rename fails as a full disk would: a crash at that point. */
+  function crashingAt(k: number): Ledger {
+    let renames = 0;
+    return new Ledger(dir, {
+      rename: (from, to) => {
+        if (++renames === k) throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+        renameSync(from, to);
+      },
+    });
+  }
+
+  function failedSlot(): void {
+    dir = mkdtempSync(join(tmpdir(), 'stt-ledger-'));
+    const l = new Ledger(dir);
+    l.begin(attempt({ jobIds: { '0': 'job-1' }, sends: ['2026-10-22T10:00:01.000Z'] }));
+    l.finish(outcome({ status: 'failed', error: 'http_500', segments: [] }));
+  }
+
+  it('never reads new at any point of a reopen, so a plain run cannot send the slot unasked', () => {
+    // The three steps of a reopen: the old attempt aside, the fresh attempt written, the old outcome aside.
+    for (let k = 1; k <= 3; k++) {
+      failedSlot();
+      expect(() => crashingAt(k).reopen(attempt({ startedAt: '2026-10-22T11:00:00.000Z' }))).toThrow(LedgerError);
+      expect(new Ledger(dir).state('voice-a', 'sarvam')).toBe('failed');
+    }
+    failedSlot();
+    crashingAt(4).reopen(attempt({ startedAt: '2026-10-22T11:00:00.000Z' }));
+    expect(new Ledger(dir).state('voice-a', 'sarvam')).toBe('unknown');
+  });
+
+  it('reads failed at every point of replacing one failure by another', () => {
+    for (let k = 1; k <= 3; k++) {
+      failedSlot();
+      expect(() => crashingAt(k).replaceFailed(outcome({ status: 'failed', error: 'audio_split_failed', segments: [] }))).toThrow(LedgerError);
+      expect(new Ledger(dir).state('voice-a', 'sarvam')).toBe('failed');
+    }
   });
 });
 

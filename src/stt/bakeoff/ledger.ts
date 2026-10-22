@@ -212,20 +212,47 @@ export class Ledger {
   }
 
   /**
-   * Moves a failed outcome and its attempt aside as <provider>.failed-<ms>-<n>.json and .attempt.json, kept on disk as a
-   * record, so the slot can be sent again. The attempt goes too: its job ids belong to the failed jobs. Saved part
-   * answers stay, because they were paid for and a retry reuses them.
+   * Starts sending a failed slot again (--retry-failed) with the fresh attempt. The old outcome and attempt are kept on
+   * disk as <provider>.failed-<ms>-<n>.json and .attempt.json; the attempt goes too, since its job ids belong to the
+   * failed jobs. Saved part answers stay: they were paid for and the retry reuses them.
+   *
+   * The order keeps the slot from ever reading "new", which a plain run would send unasked: the old attempt goes aside
+   * and the fresh one is written while the failed outcome still makes the slot read failed; only then does the outcome
+   * go aside, and the fresh attempt makes it read unknown. A crash or a LedgerError at any step leaves failed or unknown.
    */
-  reopen(sampleId: string, provider: ProviderId): void {
+  reopen(fresh: Attempt): void {
+    const { sampleId, provider } = fresh;
+    const aside = this.#asideFailure(sampleId, provider);
+    this.begin(fresh);
+    this.#move(this.#file(sampleId, provider, ''), this.#file(sampleId, provider, aside));
+  }
+
+  /**
+   * Records a new failure over an old one, keeping the old outcome and attempt on disk as for reopen. The slot reads
+   * failed at every step: the old outcome is copied aside and then replaced in one rename, never removed first.
+   */
+  replaceFailed(outcome: Outcome): void {
+    if (outcome.status !== 'failed') throw new LedgerError('not_failed', 'replaceFailed called with an outcome that is not a failure');
+    const { sampleId, provider } = outcome;
+    const old = this.outcome(sampleId, provider);
+    const aside = this.#asideFailure(sampleId, provider);
+    this.#write(this.#file(sampleId, provider, aside), old);
+    this.finish(outcome);
+  }
+
+  /**
+   * For a failed slot: picks a free name <provider>.failed-<ms>-<n> and moves the attempt, if any, aside under it, so
+   * the slot still reads failed. Returns the name's suffix for the outcome. Throws when the slot is not failed.
+   */
+  #asideFailure(sampleId: string, provider: ProviderId): string {
     const status = this.outcome(sampleId, provider)?.status;
-    if (status !== 'failed') throw new LedgerError('not_failed', `reopen called on a slot that is ${status ?? 'not finished'}`);
+    if (status !== 'failed') throw new LedgerError('not_failed', `A failed slot was expected, but this one is ${status ?? 'not finished'}`);
     const ms = this.#now();
     let n = 0;
     while (existsSync(this.#file(sampleId, provider, `.failed-${ms}-${n}`)) || existsSync(this.#file(sampleId, provider, `.failed-${ms}-${n}.attempt`))) n++;
-    // The outcome first: a crash between the two moves leaves the slot unknown, which is never sent again unasked.
-    this.#move(this.#file(sampleId, provider, ''), this.#file(sampleId, provider, `.failed-${ms}-${n}`));
     const attempt = this.#file(sampleId, provider, '.attempt');
     if (existsSync(attempt)) this.#move(attempt, this.#file(sampleId, provider, `.failed-${ms}-${n}.attempt`));
+    return `.failed-${ms}-${n}`;
   }
 
   outcomes(): Outcome[] {

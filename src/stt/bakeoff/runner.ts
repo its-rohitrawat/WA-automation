@@ -3,7 +3,7 @@ import { SttHttpError, SttJobError, SttJobLostError, SttNoAnswerError } from '..
 import { costUsd, modelFor } from '../prices.ts';
 import { formatClock, mergeParts } from '../segments.ts';
 import type { AudioPart, ProviderId, ProviderResult, SttProvider } from '../types.ts';
-import { LedgerError, type Ledger, type Outcome } from './ledger.ts';
+import { LedgerError, type Attempt, type Ledger, type Outcome } from './ledger.ts';
 import type { PlanItem } from './plan.ts';
 
 export interface RunDeps {
@@ -38,7 +38,7 @@ const ACCOUNT_REFUSED = new Set([401, 402, 403, 429]);
 
 type SlotResult =
   | { kind: 'done'; outcome: Outcome }
-  | { kind: 'failed'; outcome: Outcome; status: number | null; sentSeconds: number }
+  | { kind: 'failed'; error: string; status: number | null; sentSeconds: number }
   | { kind: 'unknown'; code: string; sentSeconds: number };
 
 /** A short code for a log line. Never the error's message: it can carry provider text. */
@@ -91,7 +91,7 @@ export async function runPlan(items: readonly PlanItem[], deps: RunDeps): Promis
       sum.failed++;
       sum.spentUsd += costUsd(price, r.sentSeconds, deps.inrPerUsd);
       if (r.status !== null && ACCOUNT_REFUSED.has(r.status)) refused.add(item.provider);
-      deps.log(`failed   ${label}: ${r.outcome.error ?? 'error'}`);
+      deps.log(`failed   ${label}: ${r.error}`);
     } else {
       sum.unknown++;
       // Counted as spent: the provider may have done and billed the work.
@@ -117,21 +117,28 @@ async function runSlot(item: PlanItem, provider: SttProvider, deps: RunDeps, now
     parts: item.parts,
     segments: [],
   };
+  const failedOutcome = (error: string): Outcome => ({
+    ...base, status: 'failed', processingSeconds: (now() - started) / 1000, error, finishedAt: new Date(now()).toISOString(),
+  });
   const failed = (error: string, status: number | null, sentSeconds: number): SlotResult => {
-    const outcome: Outcome = { ...base, status: 'failed', processingSeconds: (now() - started) / 1000, error, finishedAt: new Date(now()).toISOString() };
-    ledger.finish(outcome);
-    return { kind: 'failed', outcome, status, sentSeconds };
+    ledger.finish(failedOutcome(error));
+    return { kind: 'failed', error, status, sentSeconds };
   };
+  /** Nothing is sent and the slot's record is left exactly as it was: still failed, unknown or new. */
+  const unchanged = (code: string): SlotResult =>
+    item.state === 'failed' ? { kind: 'failed', error: code, status: null, sentSeconds: 0 } : { kind: 'unknown', code, sentSeconds: 0 };
   /** The audio could not be cut, so nothing is sent for this slot in this run. */
   const noAudio = (code: string): SlotResult => {
     // An unanswered slot may already be billed: it stays unknown, with its attempt and job ids.
     if (item.state === 'unknown') return { kind: 'unknown', code, sentSeconds: 0 };
-    // The earlier failure goes aside, kept on disk, before the new one is written over it.
-    if (item.state === 'failed') ledger.reopen(sample.id, item.provider);
-    return failed(code, null, 0);
+    // A failed slot gets the new failure, with the earlier one kept aside on disk; it reads failed throughout.
+    if (item.state === 'failed') ledger.replaceFailed(failedOutcome(code));
+    else ledger.finish(failedOutcome(code));
+    return { kind: 'failed', error: code, status: null, sentSeconds: 0 };
   };
 
-  // Local work first, so a slot whose audio cannot be cut keeps its record as it was.
+  // Local work and checks first, so a slot whose audio cannot be cut, or whose saved answers do not fit the cut, keeps
+  // its record as it was until something is really sent.
   let parts: AudioPart[];
   try {
     parts = await deps.partsFor(item, provider.maxPartSeconds);
@@ -139,23 +146,26 @@ async function runSlot(item: PlanItem, provider: SttProvider, deps: RunDeps, now
     return noAudio(e instanceof AudioError ? `audio_${e.code}` : 'audio_error');
   }
   if (parts.length === 0) return noAudio('audio_no_parts');
-  if (item.state === 'failed') ledger.reopen(sample.id, item.provider);
-  // An unanswered slot keeps its attempt, with any saved job ids; anything else starts a fresh one.
-  if (item.state !== 'unknown' || !ledger.attempt(sample.id, item.provider)) {
-    ledger.begin({ sampleId: sample.id, provider: item.provider, model: item.model, startedAt: new Date(now()).toISOString(), jobIds: {}, sends: [] });
-  }
-  const jobIds = ledger.attempt(sample.id, item.provider)?.jobIds ?? {};
-  // Every saved answer is checked against today's cut before anything is sent, so a mismatch sends nothing at all.
+  // Every saved answer is checked against today's cut before anything is written or sent: a mismatch changes nothing.
   let cached: (ProviderResult | null)[];
   try {
     cached = parts.map((part, n) => ledger.part(sample.id, item.provider, n, part));
   } catch (e) {
-    if (e instanceof LedgerError && e.code === 'part_cache_mismatch') return { kind: 'unknown', code: e.code, sentSeconds: 0 };
+    if (e instanceof LedgerError && e.code === 'part_cache_mismatch') return unchanged(e.code);
     throw e;
   }
+  // An unanswered slot keeps its attempt, with any saved job ids; anything else starts a fresh one.
+  const kept = item.state === 'unknown' ? ledger.attempt(sample.id, item.provider) : null;
+  const jobIds = kept?.jobIds ?? {};
   // The plan promised a free resume. If a part would need a new paid request after all, send nothing and say so.
   if (item.action === 'resume' && parts.some((_p, n) => !cached[n] && !jobIds[String(n)])) {
     return { kind: 'unknown', code: 'resume_part_without_job', sentSeconds: 0 };
+  }
+  if (!kept) {
+    const attempt: Attempt = { sampleId: sample.id, provider: item.provider, model: item.model, startedAt: new Date(now()).toISOString(), jobIds: {}, sends: [] };
+    // A failed slot is reopened in an order that never lets it read "new" part way (see Ledger.reopen).
+    if (item.state === 'failed') ledger.reopen(attempt);
+    else ledger.begin(attempt);
   }
   let sentSeconds = 0;
   /** The part whose request is in flight, so a lost job's id can be dropped. */
