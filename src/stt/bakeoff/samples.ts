@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, extname, join, parse, resolve } from 'node:path';
 import type { SampleKind } from '../types.ts';
 
@@ -51,13 +51,34 @@ export function findSamples(root: string): Sample[] {
   return out;
 }
 
-/** True when dir, or a folder above it, holds a .git entry: a repository, or a worktree (where .git is a file). */
-export function insideGitRepo(dir: string): boolean {
-  let p = resolve(dir);
+function gitAbove(start: string): boolean {
+  let p = start;
   for (;;) {
     if (existsSync(join(p, '.git'))) return true;
     const parent = dirname(p);
     if (parent === p) return false;
     p = parent;
   }
+}
+
+function nearestExisting(start: string): string | null {
+  let p = start;
+  for (;;) {
+    if (existsSync(p)) return p;
+    const parent = dirname(p);
+    if (parent === p) return null;
+    p = parent;
+  }
+}
+
+/**
+ * True when dir, or a folder above it, holds a .git entry: a repository, or a worktree (where .git is a file). The real
+ * path is checked too, so a junction or link that leads into a repository is refused as well.
+ */
+export function insideGitRepo(dir: string): boolean {
+  const plain = resolve(dir);
+  if (gitAbove(plain)) return true;
+  // dir itself may not exist yet (the output folder); its nearest existing folder decides where it will really be.
+  const existing = nearestExisting(plain);
+  return existing !== null && gitAbove(realpathSync.native(existing));
 }
