@@ -338,8 +338,31 @@ describe('DriveFileUploader', () => {
     const b = savedFile(db, dataDir, { waId: 'B', role: 'client' });
     drive.failNextWith = Object.assign(new Error('unauthorized'), { code: 401 });
     await up.run();
-    expect(driveState(db, a)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: '2026-10-19T08:15:00.000Z' });
+    // The whole uploader pauses instead (next test), so the file's row is left as it was.
+    expect(driveState(db, a)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null });
     expect(driveState(db, b)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null });
+    expect(drive.created).toHaveLength(0);
+  });
+
+  it('pauses all uploads for 15 minutes after a sign-in failure, then tries again', async () => {
+    const { lines, log } = capturingLogger();
+    const { db, dataDir, drive, clock, up } = setup({ log });
+    const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
+    const b = savedFile(db, dataDir, { waId: 'B', role: 'client' });
+    const folder = vi.spyOn(drive, 'createFolder');
+    const file = vi.spyOn(drive, 'createFile');
+    const driveCalls = () => folder.mock.calls.length + file.mock.calls.length;
+    drive.failNextWith = Object.assign(new Error('unauthorized'), { code: 401 });
+    await up.run();
+    expect(driveCalls()).toBe(1);
+    await ticks(clock, up, 14.5);
+    expect(driveCalls()).toBe(1); // no call to Google while paused, for this file or any other
+    await ticks(clock, up, 0.5);
+    expect(drive.created).toHaveLength(2);
+    expect(getMedia(db, a)!.driveFileId).toBe(drive.created[0]!.id);
+    expect(getMedia(db, b)!.driveFileId).toBe(drive.created[1]!.id);
+    expect(lines.filter((l) => l.msg === 'file uploads to Drive paused')).toMatchObject([{ level: 40, reason: 'auth', until: '2026-10-19T08:15:00.000Z' }]);
+    expect(lines.filter((l) => l.msg === 'file uploads to Drive resume')).toMatchObject([{ level: 30, reason: 'auth' }]);
   });
 
   it('re-creates a Files folder that was removed in Drive, in the same pass', async () => {

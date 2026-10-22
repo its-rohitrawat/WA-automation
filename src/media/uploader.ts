@@ -12,6 +12,7 @@ import { sanitizeFileName } from './paths.ts';
 export const UPLOAD_MAX_ATTEMPTS = 8;
 /** Per-request time limit for one client file (up to 50 MB on a slow line). The tracker upload keeps the client's 120 s. */
 export const FILE_UPLOAD_TIMEOUT_MS = 600_000;
+/** How long the uploader pauses after a Google sign-in failure. */
 const AUTH_RETRY_MS = 15 * 60_000;
 /** How long the uploader pauses when the database cannot save an upload result. */
 const LEDGER_RETRY_MS = 15 * 60_000;
@@ -35,8 +36,8 @@ export interface UploaderOptions {
   batchSize?: number;
 }
 
-/** Why the uploader is paused. */
-type PauseReason = 'ledger';
+/** Why the uploader is paused: the database cannot save results, or Google sign-in failed. */
+type PauseReason = 'ledger' | 'auth';
 
 /**
  * Uploads files shared by client members to WA Agent/Clients/<Client>/Files/ in Drive. One pass at a time; never
@@ -51,8 +52,9 @@ type PauseReason = 'ledger';
  * When Drive answers but the database cannot save the id, the id is kept in memory and only the save is retried,
  * never the upload. A restart before it is saved forgets it, so the file is uploaded once more.
  *
- * When the database cannot save a result, the pass stops and no pass starts for 15 minutes (in memory: a restart
- * also ends the pause), so a file is never uploaded again on every tick.
+ * When the database cannot save a result, or Google sign-in fails, the pass stops and no pass starts for 15 minutes
+ * (in memory: a restart also ends the pause). So a file is never uploaded again on every tick, and a sign-in problem
+ * does not call Google on every tick.
  */
 export class DriveFileUploader {
   readonly #o: UploaderOptions;
@@ -118,14 +120,14 @@ export class DriveFileUploader {
           const name = displayName({ kind: c.kind, fileName: c.fileName, mimeType: c.mimeType, ts: c.ts, mediaId: c.id });
           fileId = await this.#upload(root, c, name, safeMime(c.mimeType), bytes);
         } catch (e) {
-          const now = clock.now().getTime();
           if (isAuthFailure(e)) {
-            // Not the file's fault. The publisher reports the sign-in problem; the rest would fail the same way.
+            // Not the file's fault, and every other file would fail the same way: nothing is saved for the file, and the
+            // whole uploader pauses so it does not call Google on every tick. The publisher reports the sign-in problem.
             log.warn({ mediaId: c.id, clientId: c.clientId, step: 'upload', err: e }, 'file upload to Drive needs Google sign-in');
-            this.#save(c.id, c.clientId, 'save_failure', () =>
-              markUploadFailed(db, c.id, { failed: false, nextAt: new Date(now + AUTH_RETRY_MS).toISOString(), countAttempt: false }));
+            this.#pause('auth', AUTH_RETRY_MS);
             break;
           }
+          const now = clock.now().getTime();
           const attempts = c.driveAttempts + 1;
           const failed = (e as NodeJS.ErrnoException).code === 'ENOENT' || attempts >= UPLOAD_MAX_ATTEMPTS;
           log.warn({ mediaId: c.id, clientId: c.clientId, step: 'upload', attempts, err: e }, 'file upload to Drive failed');
