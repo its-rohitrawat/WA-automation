@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Db } from '../../src/store/db.ts';
 import { failMedia, finishMedia, getMedia, insertMedia, type MediaKind } from '../../src/store/media.ts';
 import {
-  applyEdit, applyRevoke, clientIdsWithUnprocessed, insertMessage, lastActivity, listRecentProcessed, listUnprocessed,
+  applyEdit, applyRevoke, clearTouches, clientIdsWithUnprocessed, insertMessage, lastActivity, listRecentProcessed, listUnprocessed,
   markProcessed, markProcessedIfUnchanged, reactionsFor, resetProcessedSince, unprocessedCounts, upsertReaction, type NewMessage,
 } from '../../src/store/messages.ts';
 import { LATER, NOW, seededDb } from '../helpers/db.ts';
@@ -209,6 +209,73 @@ describe('messages repository', () => {
       expect(version(db, 'm2')).toEqual({ version: 1, touch: null });
       expect(listRecentProcessed(db, 1)[0]).toMatchObject({ waId: 'm2', requeueReason: null, processedAt: NOW });
     });
+
+    describe('a touch from before the run never labels the message queued again (Job C: P2)', () => {
+      const EDITED = '2026-10-10T09:00:00.000Z';
+      /** What a run does when it starts: it lists its batch, then clears the touches at the versions it read. */
+      const startRun = (db: Db) => {
+        const seen = listUnprocessed(db, 1).map((m) => ({ id: m.id, version: m.version }));
+        clearTouches(db, seen);
+        return seen;
+      };
+      const unprocessed = () => {
+        const db = seededDb();
+        insertMessage(db, msg());
+        return db;
+      };
+      const editBefore = (db: Db) => applyEdit(db, 1, 'm1', 'hello edited', EDITED);
+      const editRecheck = (db: Db) => {
+        markProcessed(db, [listUnprocessed(db, 1)[0]!.id], NOW);
+        applyEdit(db, 1, 'm1', 'hello edited', EDITED);
+      };
+
+      it.each([
+        { why: 'an edit before the first run', before: editBefore },
+        { why: 'an edit re-check in flight', before: editRecheck },
+      ])('$why, then a reaction during the run: queued again as a reaction re-check', ({ before }) => {
+        const db = unprocessed();
+        before(db);
+        const seen = startRun(db);
+        upsertReaction(db, rx('✅'));
+        expect(markProcessedIfUnchanged(db, seen, NOW)).toBe(1);
+        expect(listUnprocessed(db, 1)[0]).toMatchObject({ waId: 'm1', requeueReason: 'reaction', processedAt: null });
+      });
+
+      it.each([
+        { why: 'nothing before the run', before: (_db: Db) => {} },
+        { why: 'an edit before the first run', before: editBefore },
+        { why: 'a reaction before the first run', before: (db: Db) => upsertReaction(db, rx('👍')) },
+      ])('$why, then an edit during the run: queued again as an edit re-check', ({ before }) => {
+        const db = unprocessed();
+        before(db);
+        const seen = startRun(db);
+        applyEdit(db, 1, 'm1', 'hello edited again', LATER);
+        expect(markProcessedIfUnchanged(db, seen, NOW)).toBe(1);
+        expect(listUnprocessed(db, 1)[0]).toMatchObject({ waId: 'm1', requeueReason: 'edit', processedAt: null });
+      });
+
+      it('clears a touch only at the version the run read, so a touch made after the listing is kept', () => {
+        const db = unprocessed();
+        const seen = listUnprocessed(db, 1).map((m) => ({ id: m.id, version: m.version }));
+        applyEdit(db, 1, 'm1', 'hello edited', EDITED); // between the listing and the clearing
+        clearTouches(db, seen);
+        expect(version(db)).toEqual({ version: 1, touch: 'edit' });
+        expect(markProcessedIfUnchanged(db, seen, NOW)).toBe(1);
+        expect(listUnprocessed(db, 1)[0]).toMatchObject({ waId: 'm1', requeueReason: 'edit' });
+      });
+
+      it('leaves the re-check marker the run shows alone, and touches no other row', () => {
+        const db = unprocessed();
+        insertMessage(db, msg({ waId: 'm2', ts: '2026-10-10T08:01:00.000Z' }));
+        editRecheck(db);
+        upsertReaction(db, rx('✅', 'm2'));
+        const m1 = listUnprocessed(db, 1).find((m) => m.waId === 'm1')!;
+        clearTouches(db, [{ id: m1.id, version: m1.version }]);
+        expect(version(db)).toEqual({ version: 1, touch: null });
+        expect(listUnprocessed(db, 1)[0]).toMatchObject({ waId: 'm1', requeueReason: 'edit', processedAt: null });
+        expect(version(db, 'm2')).toEqual({ version: 1, touch: 'reaction' });
+      });
+    });
   });
 });
 
@@ -299,6 +366,18 @@ describe('a file read after its message was processed (12h)', () => {
       expect(markProcessedIfUnchanged(db, seen, LATER)).toBe(1);
       expect(flag(db, fileId)).toBe(true);
       expect(listUnprocessed(db, 1)[0]).toMatchObject({ waId: 'm1', processedAt: null, requeueReason: reason });
+    });
+
+    it('an edit before the first run, then a reaction and the file read during it: a reaction re-check with the flag, never an edit (Job C: P2)', () => {
+      const { db, fileId } = withFile();
+      applyEdit(db, 1, 'm1', 'hello edited', NOW);
+      const seen = seenBy(db, { fileUnread: true });
+      clearTouches(db, seen); // the run starts
+      react(db, LATER);
+      finishMedia(db, fileId, READ);
+      expect(markProcessedIfUnchanged(db, seen, LATER)).toBe(1);
+      expect(flag(db, fileId)).toBe(true);
+      expect(listUnprocessed(db, 1)[0]).toMatchObject({ waId: 'm1', processedAt: null, requeueReason: 'reaction' });
     });
   });
 

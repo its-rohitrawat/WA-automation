@@ -7,7 +7,7 @@ import { getClient, setPhase, setStatus, type ClientRow } from '../store/clients
 import { tx, type Db } from '../store/db.ts';
 import { mediaForMessages } from '../store/media.ts';
 import {
-  flagRevokedSources, listRecentProcessed, listUnprocessed, markProcessedIfUnchanged, reactionsFor, type MessageRow, type StoredReactionRow,
+  clearTouches, flagRevokedSources, listRecentProcessed, listUnprocessed, markProcessedIfUnchanged, reactionsFor, type MessageRow, type StoredReactionRow,
 } from '../store/messages.ts';
 import { listPeople, setRole } from '../store/people.ts';
 import {
@@ -138,6 +138,9 @@ export class Reconciler {
       return { status: 'paused' };
     }
 
+    // Job C, P2: only an edit or a reaction made during the call may label a message queued again, never one from before
+    // this run. Nothing has awaited since the batch was listed, and the version check keeps any touch made since.
+    clearTouches(db, batch.map((m) => ({ id: m.id, version: m.version })));
     const batchId = startBatch(db, clientId, batch.length, now.toISOString());
     let result: { output: AiOutput; invalidOps: number };
     try {

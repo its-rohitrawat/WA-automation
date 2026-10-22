@@ -522,6 +522,29 @@ describe('Reconciler with shared files', () => {
         expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
       });
 
+      it('an edit before the first run, then a reaction and the file read during it: the next run is a reaction and file re-check, still guarded (Job C: P2)', async () => {
+        const { db, ai, r } = setup();
+        ai.push({ ops: [ADD] }, { ops: [ADD] });
+        const id = lateImage(db);
+        edit(db, '2026-10-19T07:05:00.000Z');
+        const open = hold(ai);
+        const run = r.run(1);
+        react(db, '2026-10-19T08:00:10.000Z');
+        read(db, id, '2026-10-19T08:00:30.000Z');
+        open();
+        expect(await run).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+        expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: 'reaction' })]);
+        expect(flagOf(db, id)).toBe(true);
+
+        expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 }); // the same add_task again
+        const line = lineOf(newMessages(ai.calls[1]!.user), 'I1');
+        expect(line).toContain(' (re-check: new reaction) (re-check: file now read): see this, 600 copies {image: A payment receipt');
+        expect(line).not.toContain('re-check: edited');
+        expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
+        expect(processedAt(db, 'I1')).not.toBeNull();
+        expect(flagOf(db, id)).toBe(false);
+      });
+
       it('a genuine edit during the call, with the file read in the same call, stays an edit re-check: a new task is allowed (I1)', async () => {
         const { db, ai, r } = setup();
         ai.push({ ops: [ADD] }, { ops: [MORE] });

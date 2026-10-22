@@ -155,9 +155,24 @@ export function markProcessed(db: Db, ids: number[], at: string): void {
 }
 
 /**
+ * Job C, P2: a run calls this when it starts, after listing its batch and before the AI call. It clears touch_reason of
+ * each row still at the version the run read, so markProcessedIfUnchanged labels a message queued again only by an edit
+ * or a reaction made during the call, never by a touch from before the run (an edit before a message's first run,
+ * followed by a reaction during it, is a reaction re-check, and the replay guard stays on). A row touched after the
+ * listing has a higher version and keeps its touch. requeue_reason, the label the run shows, is left alone.
+ */
+export function clearTouches(db: Db, rows: { id: number; version: number }[]): void {
+  const clear = db.prepare('UPDATE messages SET touch_reason = NULL WHERE id = @id AND version = @version AND touch_reason IS NOT NULL');
+  db.transaction(() => {
+    for (const r of rows) clear.run({ id: r.id, version: r.version });
+  }).immediate();
+}
+
+/**
  * Marks messages processed only if they are still at the version the run read. A row that changed in the meantime
  * stays queued with a re-check marker ('edit' or 'reaction'), because the operations from its old version were applied.
- * Returns how many rows were skipped. Runs inside the caller's transaction.
+ * The marker is the touch made during the call (the run cleared older ones when it started, clearTouches), or else the
+ * marker the run showed. Returns how many rows were skipped. Runs inside the caller's transaction.
  *
  * Amendment 12h: marking a message processed clears its file's requeued_for_text.
  * - fileUnread: the run showed the message's file as still being read. If that file was read during the call

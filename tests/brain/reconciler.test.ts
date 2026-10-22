@@ -539,6 +539,62 @@ describe('Reconciler', () => {
       expect(db.prepare("SELECT touch_reason AS touch, requeue_reason AS requeue FROM messages WHERE wa_id = 'm1'").get()).toEqual({ touch: null, requeue: null });
     });
 
+    describe('a touch from before the run never labels the message queued again (Job C: P2)', () => {
+      const ADD = op({ op: 'add_task', side: 'us', title: 'Print 500 flyers', category: 'design', priority: 'medium', sourceMessageIds: ['m1'] });
+      const MORE = op({ op: 'add_task', side: 'us', title: 'Print 600 flyers', category: 'design', priority: 'medium', sourceMessageIds: ['m1'] });
+      /** m1's line in the prompt of the given call. */
+      const lineOf = (ai: FakeAi, call: number) => ai.calls[call]!.user.split('\n').find((l) => l.startsWith('[m1]')) ?? '';
+      const edit = (db: Db, text: string, at: string) => applyEdit(db, 1, 'm1', text, at);
+      const react = (db: Db, at: string) => upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '👍', ts: at });
+
+      it.each([
+        { why: 'a message edited before its first run', before: (db: Db) => edit(db, 'print 500, A5', '2026-10-19T07:05:00.000Z') },
+        {
+          why: 'an edit re-check',
+          before: (db: Db) => {
+            markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-19T07:01:00.000Z');
+            edit(db, 'print 500, A5', '2026-10-19T07:05:00.000Z');
+          },
+        },
+      ])('$why that gets a reaction during the call is queued again as a reaction re-check, so its task is not added again', async ({ before }) => {
+        const { db, ai, r } = setup([{ ops: [ADD] }, { ops: [ADD] }]);
+        store(db, 'm1', 'print 500');
+        before(db);
+        const open = hold(ai);
+        const run = r.run(1);
+        react(db, '2026-10-19T08:00:10.000Z');
+        open();
+        expect(await run).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+        expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: 'reaction' })]);
+
+        expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 }); // the same add_task again
+        expect(lineOf(ai, 1)).toContain(' (re-check: new reaction): print 500, A5');
+        expect(lineOf(ai, 1)).not.toContain('re-check: edited');
+        expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
+        expect(processedAt(db, 'm1')).not.toBeNull();
+      });
+
+      it.each([
+        { why: 'nothing before the run', before: (_db: Db) => {} },
+        { why: 'an edit before the first run', before: (db: Db) => edit(db, 'print 500, A5', '2026-10-19T07:05:00.000Z') },
+        { why: 'a reaction before the first run', before: (db: Db) => react(db, '2026-10-19T07:05:00.000Z') },
+      ])('a message edited during the call after $why is queued again as an edit re-check, which may add new work', async ({ before }) => {
+        const { db, ai, r } = setup([{ ops: [ADD] }, { ops: [MORE] }]);
+        store(db, 'm1', 'print 500');
+        before(db);
+        const open = hold(ai);
+        const run = r.run(1);
+        edit(db, 'print 600, A5', '2026-10-19T08:00:10.000Z');
+        open();
+        expect(await run).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+        expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: 'edit' })]);
+
+        expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+        expect(lineOf(ai, 1)).toContain(' (re-check: edited): print 600, A5');
+        expect(getTaskByCode(db, 'SHA-002')).toMatchObject({ title: 'Print 600 flyers' });
+      });
+    });
+
     it('flags a new task whose source message was deleted during the call', async () => {
       const { db, ai, r } = setup([{ ops: [op({ op: 'add_task', side: 'us', title: 'Revise banner', category: 'design', priority: 'high', sourceMessageIds: ['m1'] })] }]);
       store(db, 'm1', 'Banner bright karo');
