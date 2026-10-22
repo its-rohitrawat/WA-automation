@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fileDescription, type FileFacts } from '../../src/media/labels.ts';
+import { fileDescription, TOO_COSTLY, type FileFacts } from '../../src/media/labels.ts';
 
 const facts = (o: Partial<FileFacts> = {}): FileFacts => ({
   kind: 'document', status: 'done', mimeType: 'application/pdf', fileSize: 24_576, seconds: null, pageCount: 3, textKind: 'extract',
@@ -71,6 +71,13 @@ describe('fileDescription', () => {
     expect(fileDescription(facts({ ...tooLarge, kind: 'image', mimeType: 'image/jpeg', fileSize: 51 * 1024 * 1024 })))
       .toBe('Image, 51.0 MB, too large to download (over 50 MB)');
     expect(fileDescription(facts({ ...tooLarge, errorCode: 'expired' }))).toBe('PDF, could not be downloaded from WhatsApp');
+  });
+
+  it('says a file was not read when reading it would cost more than the whole daily limit (9a)', () => {
+    const costly = { textKind: null, textStart: null, note: TOO_COSTLY } as const;
+    expect(fileDescription(facts({ ...costly, kind: 'image', mimeType: 'image/jpeg', pageCount: null }))).toBe('Image (not read: too costly for the daily limit)');
+    expect(fileDescription(facts({ ...costly, pageCount: 3 }))).toBe('PDF, 3 pages (not read: too costly for the daily limit)');
+    expect(fileDescription(facts({ ...costly, pageCount: null }))).toBe('PDF (not read: too costly for the daily limit)');
   });
 
   it('shows (deleted by sender) instead of the description when the message was deleted for everyone (amendment 14b)', () => {

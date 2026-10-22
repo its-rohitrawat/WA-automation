@@ -1,7 +1,7 @@
 import type { Db } from '../store/db.ts';
 import { mediaForMessages, type MediaKind, type MediaRow } from '../store/media.ts';
 import type { MessageRow } from '../store/messages.ts';
-import { formatDuration, formatSize, FORWARDED_NOT_DESCRIBED, typeLabel } from './labels.ts';
+import { formatDuration, formatSize, FORWARDED_NOT_DESCRIBED, TOO_COSTLY, typeLabel } from './labels.ts';
 import { sanitizeFileName } from './paths.ts';
 import { MEDIA_LIMITS } from './types.ts';
 
@@ -86,6 +86,9 @@ export function mediaPromptText(row: MediaRow, maxChars: number): MediaBlock | n
       if (row.note === FORWARDED_NOT_DESCRIBED) return just(row.kind === 'image' || typeLabel(row.mimeType, row.kind) === 'Image' ? 'not described' : 'not read');
       if (!row.text) {
         if (row.note === 'scan_too_long') return just('scanned, too long to read');
+        // Amendment 9a: reading it could cost more than the whole daily cap, so it was never sent. Without this a finished
+        // image with no text would read as a plain {image}.
+        if (row.note === TOO_COSTLY) return just('not read: too costly for the daily limit');
         return row.kind === 'document' ? just(`${row.fileSize ? `${formatSize(row.fileSize)}, ` : ''}contents not read`) : { head, body: null };
       }
       const body = cut(row.text, row.textChars, maxChars);

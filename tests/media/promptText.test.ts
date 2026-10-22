@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildUserContent, SYSTEM_PROMPT } from '../../src/brain/prompt.ts';
+import { TOO_COSTLY } from '../../src/media/labels.ts';
 import { isBlocking, MEDIA_MAX_WAIT_MS, mediaPromptText, mediaPromptTexts, readyPrefix, type MediaBlock } from '../../src/media/promptText.ts';
 import type { ClientRow } from '../../src/store/clients.ts';
 import type { MediaRow } from '../../src/store/media.ts';
@@ -73,6 +74,15 @@ describe('mediaPromptText', () => {
       kind: 'document', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', fileName: 'budget.xlsx', fileSize: 24_576, text: null, textKind: null,
     }), 100)).toEqual(said('document "budget.xlsx" (Excel sheet), 24 KB, contents not read'));
     expect(mediaPromptText(row({ text: null, textKind: null }), 100)).toEqual(said('image'));
+  });
+
+  it('says a file was not read when reading it would cost more than the whole daily limit (9a)', () => {
+    const costly = { text: null, textKind: null, note: TOO_COSTLY } as const;
+    expect(TOO_COSTLY).toBe('too_costly');
+    expect(mediaPromptText(row(costly), 100)).toEqual(said('image, not read: too costly for the daily limit'));
+    expect(mediaPromptText(pdf({ ...costly, fileName: 'x.pdf', pageCount: 3 }), 100)).toEqual(said('document "x.pdf" (PDF, 3 pages), not read: too costly for the daily limit'));
+    expect(mediaPromptText(row({ ...costly, kind: 'document', fileName: 'photo.jpg' }), 100))
+      .toEqual(said('document "photo.jpg" (Image), not read: too costly for the daily limit'));
   });
 
   it('leaves stickers, voice notes and audio to the plain placeholder', () => {
@@ -249,6 +259,15 @@ describe('waiting for files', () => {
     expect(isBlocking(unavailable, now, longAgo)).toBe(false);
     expect(mediaPromptText(unavailable, 100)).toEqual(said('image, still being read'));
     expect(isBlocking(pending({ errorCode: 'ai_unavailable', createdAt: '2026-10-19T07:45:00.000Z' }), now, longAgo)).toBe(true);
+  });
+
+  it('a file too costly to read never blocks: it is finished, and the messages after it go ahead (9a)', () => {
+    const image = row({ messageId: 2, text: null, textKind: null, note: TOO_COSTLY, createdAt: '2026-10-19T07:59:00.000Z' });
+    const scan = pdf({ messageId: 2, text: null, textKind: null, note: TOO_COSTLY, createdAt: '2026-10-19T07:59:00.000Z' });
+    for (const file of [image, scan]) {
+      expect(isBlocking(file, now, longAgo)).toBe(false);
+      expect(readyPrefix([msg(1), msg(2), msg(3)], new Map([[2, file]]), now, longAgo).map((m) => m.id)).toEqual([1, 2, 3]);
+    }
   });
 
   it('voice notes and audio files never block (12e)', () => {

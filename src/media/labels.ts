@@ -68,6 +68,13 @@ export interface FileFacts {
 export const FORWARDED_NOT_DESCRIBED = 'forwarded_not_described';
 
 /**
+ * The extractor's note for an image or scanned PDF that was not read because the paid read's ceiling is above the whole
+ * daily spend cap (amendment 9a): only a DAILY_SPEND_CAP_USD below about $0.10 (images) or $4.16 (scans) does that.
+ * The file is finished (done), so it never blocks its message.
+ */
+export const TOO_COSTLY = 'too_costly';
+
+/**
  * Control and format characters (direction overrides, zero-width marks), lone surrogates (T4-02) and U+FFFE/U+FFFF,
  * which XML does not allow. The zero-width non-joiner and joiner (U+200C, U+200D) are kept (T14-12): emoji sequences
  * and some Indic spellings need them, and they cannot reorder text.
@@ -112,5 +119,6 @@ export function fileDescription(f: FileFacts): string {
     if (f.textKind === 'extract') return `${type}${pages}: ${text}`;
   }
   if (f.note === 'scan_too_long') return `${type}${pages}, scanned, too long to read`;
+  if (f.note === TOO_COSTLY) return `${type}${pages} (not read: too costly for the daily limit)`;
   return `${type}${pages || (f.fileSize ? `, ${formatSize(f.fileSize)}` : '')}`;
 }
