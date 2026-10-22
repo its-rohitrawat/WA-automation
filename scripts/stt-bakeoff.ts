@@ -6,7 +6,7 @@ import { refusals } from '../src/stt/bakeoff/checks.ts';
 import { KEY_NAMES, loadBakeoffEnv } from '../src/stt/bakeoff/env.ts';
 import { Ledger } from '../src/stt/bakeoff/ledger.ts';
 import { buildPlan, formatPlan } from '../src/stt/bakeoff/plan.ts';
-import { buildReport } from '../src/stt/bakeoff/report.ts';
+import { buildReport, buildScoreSheet, localTime } from '../src/stt/bakeoff/report.ts';
 import { runPlan } from '../src/stt/bakeoff/runner.ts';
 import { findSamples, insideGitRepo, type Sample } from '../src/stt/bakeoff/samples.ts';
 import { ElevenLabsProvider } from '../src/stt/providers/elevenlabs.ts';
@@ -102,9 +102,15 @@ function writeReport(): string {
     if (o.status === 'done') writeFileSync(join(outDir, 'transcripts', `${o.sampleId}.${o.provider}.txt`), segmentsToText(o.segments));
   }
   const unknown = samples.flatMap((s) => PROVIDER_IDS.filter((p) => ledger.state(s.id, p) === 'unknown').map((p) => ({ sampleId: s.id, provider: p })));
+  // Written once and never overwritten: it holds the owner's own scores.
+  try {
+    writeFileSync(join(outDir, 'scores.md'), buildScoreSheet(), { flag: 'wx' });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+  }
   const path = join(outDir, 'report.md');
   writeFileSync(path, buildReport({
-    generatedAt: new Date().toISOString(),
+    generatedAt: localTime(new Date()),
     inrPerUsd: env.INR_PER_USD,
     samples: measured.map((m) => ({ id: m.sample.id, kind: m.sample.kind, seconds: m.seconds })),
     outcomes,
