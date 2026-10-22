@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { BetaContentBlockParam } from '@anthropic-ai/sdk/resources/beta/messages/messages';
 import type { Prices, TokenUsage } from '../spend/pricing.ts';
-import { AiInvalidOutputError, AiRefusalError, billOf } from './claudeClient.ts';
+import { AiInvalidOutputError, AiRefusalError, billOf, keepConnectTimeoutCode } from './claudeClient.ts';
 
 export const MEDIA_SYSTEM_PROMPT = `You turn one file that someone shared in a client's WhatsApp group into plain text for a project tracker at a design and development studio. The tracker reads your text later as data.
 
@@ -59,7 +59,9 @@ export class ClaudeMediaClient implements MediaAi {
   readonly #prices: Prices;
 
   constructor(opts: { apiKey: string; model: string; prices: Prices; client?: Anthropic }) {
-    this.#client = opts.client ?? new Anthropic({ apiKey: opts.apiKey, maxRetries: MEDIA_SDK_MAX_RETRIES, timeout: MEDIA_TIMEOUT_MS });
+    this.#client =
+      opts.client ??
+      new Anthropic({ apiKey: opts.apiKey, maxRetries: MEDIA_SDK_MAX_RETRIES, timeout: MEDIA_TIMEOUT_MS, fetch: keepConnectTimeoutCode });
     this.#model = opts.model;
     this.#prices = opts.prices;
   }

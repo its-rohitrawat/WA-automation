@@ -1,8 +1,9 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { describe, expect, it, vi } from 'vitest';
-import { AiInvalidOutputError, AiRefusalError, SDK_MAX_RETRIES } from '../../src/brain/claudeClient.ts';
-import { MEDIA_SDK_MAX_RETRIES } from '../../src/brain/mediaClient.ts';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { AiInvalidOutputError, AiRefusalError, ClaudeClient, SDK_MAX_RETRIES } from '../../src/brain/claudeClient.ts';
+import { ClaudeMediaClient, MEDIA_SDK_MAX_RETRIES } from '../../src/brain/mediaClient.ts';
 import { SpendCapReachedError, withReservation } from '../../src/brain/paidCall.ts';
+import type { Prices } from '../../src/spend/pricing.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { FAKE_USAGE } from '../helpers/ai.ts';
@@ -60,7 +61,7 @@ describe('withReservation', () => {
     expectNoReservation(spend);
   });
 
-  it.each(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH'])('books nothing when the request never left (%s)', async (code) => {
+  it.each(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'UND_ERR_CONNECT_TIMEOUT'])('books nothing when the request never left (%s)', async (code) => {
     const { spend, rows } = setup();
     const e = lostConnection(new TypeError('fetch failed', { cause: { code } }));
     await expect(withReservation(spend, 0.1, 'media 8', async () => { throw e; }, MEDIA_ATTEMPTS)).rejects.toBe(e);
@@ -98,7 +99,8 @@ describe('withReservation', () => {
     const { spend } = setup();
     // @ts-expect-error `attempts` has no default
     const missing = () => withReservation(spend, 0.1, 'media 7', ok(0.02));
-    expect(missing).toBeTypeOf('function');
+    // That check runs under `npm run typecheck`. At run time a default would stop Function.length counting at it.
+    void missing;
     expect(withReservation.length).toBe(5);
   });
 
@@ -113,5 +115,62 @@ describe('withReservation', () => {
     expect(spend.spentToday()).toBeCloseTo(3 + ceiling, 9);
     expect(spend.isPaused()).toBe(false);
     expect(spend.canSpend(0.4)).toBe(true);
+  });
+});
+
+/** What Node's fetch throws when undici's connect timer fires: the request never left this machine. */
+const connectTimeout = () => new TypeError('fetch failed', {
+  cause: Object.assign(new Error('Connect Timeout Error (attempted address: api.anthropic.com:443, timeout: 10000ms)'), {
+    name: 'ConnectTimeoutError', code: 'UND_ERR_CONNECT_TIMEOUT',
+  }),
+});
+const prices: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
+
+// The SDK reports undici's connect timeout as a timeout with no cause, which would be booked at the estimate. The
+// clients' own fetch keeps the code, so a scanned PDF that never left is not booked at its ceiling of about $4.2.
+// These tests run the real SDK against a stubbed global fetch; nothing reaches the network.
+describe('a connection that timed out before the request was sent', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('books nothing for the media client', async () => {
+    const { spend, rows } = setup(15);
+    const fetch = vi.fn(async () => { throw connectTimeout(); });
+    vi.stubGlobal('fetch', fetch);
+    const media = new ClaudeMediaClient({ apiKey: 'test-only', model: 'claude-opus-5-5', prices });
+    const err = await withReservation(spend, 4.2, 'media 12', () => media.readScannedPdf(Buffer.from('%PDF')), MEDIA_ATTEMPTS)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Anthropic.APIConnectionError);
+    expect(err).not.toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
+    expect(fetch).toHaveBeenCalledTimes(MEDIA_ATTEMPTS);
+    expect(rows()).toEqual([]);
+    expectNoReservation(spend);
+  });
+
+  it('books nothing for the reconciler client, after its SDK retries', async () => {
+    const { spend, rows } = setup();
+    const fetch = vi.fn(async () => { throw connectTimeout(); });
+    vi.stubGlobal('fetch', fetch);
+    const ai = new ClaudeClient({ apiKey: 'test-only', model: 'claude-opus-5-5', prices });
+    const err = await withReservation(spend, 0.1, 'batch 1', () => ai.reconcile('system', 'user'), SDK_MAX_RETRIES + 1)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Anthropic.APIConnectionError);
+    expect(err).not.toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
+    expect(fetch).toHaveBeenCalledTimes(SDK_MAX_RETRIES + 1);
+    expect(rows()).toEqual([]);
+    expectNoReservation(spend);
+  });
+
+  // A timeout after the request was sent (the SDK aborts it) may have been billed, so it still books the estimate.
+  it('still books the estimate for a request that timed out after it was sent', async () => {
+    const { spend, rows } = setup(15);
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new DOMException('This operation was aborted', 'AbortError'); }));
+    const media = new ClaudeMediaClient({ apiKey: 'test-only', model: 'claude-opus-5-5', prices });
+    const err = await withReservation(spend, 4.2, 'media 13', () => media.readScannedPdf(Buffer.from('%PDF')), MEDIA_ATTEMPTS)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
+    expect(rows()).toEqual([{ usd: 4.2, detail: 'media 13 (connection lost, estimated)' }]);
+    expectNoReservation(spend);
   });
 });

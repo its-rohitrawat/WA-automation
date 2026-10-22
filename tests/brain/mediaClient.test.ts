@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { describe, expect, it, vi } from 'vitest';
-import { AiInvalidOutputError, AiRefusalError, billOf } from '../../src/brain/claudeClient.ts';
+import { AiInvalidOutputError, AiRefusalError, billOf, keepConnectTimeoutCode } from '../../src/brain/claudeClient.ts';
 import {
   ClaudeMediaClient, IMAGE_MAX_TOKENS, MEDIA_SDK_MAX_RETRIES, MEDIA_SYSTEM_PROMPT, PDF_MAX_TOKENS, PDF_TOKENS_PER_PAGE,
 } from '../../src/brain/mediaClient.ts';
@@ -116,12 +116,29 @@ describe('ClaudeMediaClient', () => {
     expect(r.fallbackUsed).toBe(true);
   });
 
+  // billOf also spots a fallback by a step whose model is not the one requested. The reply's own model names the
+  // fallback, so the client must price by the model it asked for, not by res.model.
+  it('prices by the model it requested when a fallback model served the reply', async () => {
+    const iterations = [
+      { type: 'message', model: 'claude-opus-5', input_tokens: 1000, output_tokens: 300, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    ];
+    const servedByFallback = { ...usage, iterations };
+    const { client } = fakeAnthropic(async () => reply([{ type: 'text', text: 'A site photo.' }], { usage: servedByFallback, model: 'claude-opus-5' }));
+    const r = await make(client).describeImage(IMG);
+    const asked = billOf(servedByFallback as unknown as Parameters<typeof billOf>[0], 'claude-opus-5-5', prices);
+    const asServed = billOf(servedByFallback as unknown as Parameters<typeof billOf>[0], 'claude-opus-5', prices);
+    expect(r.fallbackUsed).toBe(true);
+    expect(r.costUsd).toBeCloseTo(asked.costUsd, 9);
+    expect(asked.costUsd).not.toBeCloseTo(asServed.costUsd, 6);
+  });
+
   // A lost connection is booked once per SDK attempt, so media calls (with a large PDF ceiling) make exactly one.
-  it('builds its own client with a single attempt and a 600 s timeout', () => {
+  // The fetch keeps a connect timeout's code, so a request that never left is not booked (tests/brain/paidCall.test.ts).
+  it('builds its own client with a single attempt, a 600 s timeout and the connect-timeout fetch', () => {
     expect(MEDIA_SDK_MAX_RETRIES).toBe(0);
     sdk.options.length = 0;
     new ClaudeMediaClient({ apiKey: 'test-only', model: 'claude-opus-5-5', prices });
-    expect(sdk.options).toEqual([{ apiKey: 'test-only', maxRetries: MEDIA_SDK_MAX_RETRIES, timeout: 600_000 }]);
+    expect(sdk.options).toEqual([{ apiKey: 'test-only', maxRetries: MEDIA_SDK_MAX_RETRIES, timeout: 600_000, fetch: keepConnectTimeoutCode }]);
   });
 
   it('raises AiInvalidOutputError with the cost when no text came back', async () => {

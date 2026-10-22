@@ -10,8 +10,11 @@ export class SpendCapReachedError extends Error {
   }
 }
 
-/** Socket error codes that mean the request never left this machine, so nothing was billed. */
-const NEVER_SENT = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH']);
+/**
+ * Socket error codes that mean the request never left this machine, so nothing was billed. The SDK hides undici's
+ * connect timeout (UND_ERR_CONNECT_TIMEOUT) unless the client is built with keepConnectTimeoutCode as its fetch.
+ */
+const NEVER_SENT = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'UND_ERR_CONNECT_TIMEOUT']);
 
 /** Node's fetch nests the socket error: APIConnectionError -> TypeError('fetch failed') -> { code }. */
 export function neverSent(e: Error): boolean {
