@@ -1,9 +1,10 @@
+import { createHash } from 'node:crypto';
 import { existsSync, readdirSync } from 'node:fs';
 import { dirname, extname, join, parse, resolve } from 'node:path';
 import type { SampleKind } from '../types.ts';
 
 export interface Sample {
-  /** Stable id built from the file name; names the sample's files in the output folder. */
+  /** Built from the file's own name only, so other files coming or going never move it; names its files in the output folder. */
   id: string;
   kind: SampleKind;
   path: string;
@@ -18,6 +19,16 @@ function slug(name: string): string {
   return s || 'file';
 }
 
+/**
+ * <kind>-<slug>-<hash>, where hash is the first 8 hex characters of sha256 of the NFC file name. The slug keeps the id
+ * readable; the hash keeps names that slug alike apart without depending on which other files exist. NFC, so a name
+ * copied from a Mac (decomposed accents) keeps its id.
+ */
+function sampleId(kind: SampleKind, name: string): string {
+  const nfc = name.normalize('NFC');
+  return `${kind}-${slug(parse(nfc).name)}-${createHash('sha256').update(nfc).digest('hex').slice(0, 8)}`;
+}
+
 /** Audio and video files directly inside <root>\voice-notes and <root>\meetings, sorted by name. Sub-folders are ignored. */
 export function findSamples(root: string): Sample[] {
   const out: Sample[] = [];
@@ -30,9 +41,9 @@ export function findSamples(root: string): Sample[] {
       .map((e) => e.name)
       .sort();
     for (const name of names) {
-      const base = `${kind}-${slug(parse(name).name)}`;
-      let id = base;
-      for (let n = 2; used.has(id); n++) id = `${base}-${n}`;
+      const id = sampleId(kind, name);
+      // The ledger is keyed by id: two recordings sharing one would share results, so stop instead.
+      if (used.has(id)) throw Object.assign(new Error(`Two recordings get the same id ${id}; rename one of them.`), { code: 'duplicate_sample_id' });
       used.add(id);
       out.push({ id, kind, path: join(dir, name) });
     }
