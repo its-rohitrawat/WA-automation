@@ -34,28 +34,38 @@ function setup(o: { root?: boolean; batchSize?: number } = {}) {
   return { db, dataDir, drive, clock, onUploaded, up };
 }
 
-/** A file that a person shared, saved on disk and read. */
+/**
+ * A file that a person shared in a client group (Sharma, id 1, unless clientId says otherwise), saved on disk and read.
+ * saved: false leaves it pending download, with no local_path.
+ */
 function savedFile(
   db: Db,
   dataDir: string,
-  o: { waId: string; jid?: string; role?: Role; kind?: MediaKind; fileName?: string | null; mimeType?: string; fromMe?: boolean },
+  o: { waId: string; clientId?: number; jid?: string; role?: Role; kind?: MediaKind; fileName?: string | null; mimeType?: string; fromMe?: boolean; saved?: boolean },
 ): number {
+  const clientId = o.clientId ?? 1;
   const jid = o.jid ?? SHARMA_PN;
   const kind = o.kind ?? 'document';
   const fromMe = o.fromMe ?? false;
-  insertMessage(db, { waId: o.waId, clientId: 1, senderJid: jid, senderNumber: null, senderName: 'Mr. Sharma', fromMe, ts: '2026-10-10T08:00:00.000Z', text: null, quotedWaId: null, mediaType: kind });
-  upsertPerson(db, { clientId: 1, jid, number: null, name: 'Mr. Sharma', fromMe });
-  if (o.role) setRole(db, 1, jid, o.role, 'human');
+  insertMessage(db, { waId: o.waId, clientId, senderJid: jid, senderNumber: null, senderName: 'Mr. Sharma', fromMe, ts: '2026-10-10T08:00:00.000Z', text: null, quotedWaId: null, mediaType: kind });
+  upsertPerson(db, { clientId, jid, number: null, name: 'Mr. Sharma', fromMe });
+  if (o.role) setRole(db, clientId, jid, o.role, 'human');
   const id = insertMedia(db, {
-    messageId: messageRowId(db, 1, o.waId)!, clientId: 1, kind, status: 'pending', mimeType: o.mimeType ?? 'application/pdf',
+    messageId: messageRowId(db, clientId, o.waId)!, clientId, kind, status: 'pending', mimeType: o.mimeType ?? 'application/pdf',
     fileName: o.fileName === undefined ? 'brief.pdf' : o.fileName, fileSize: 9, seconds: null, forwarded: false, refEnc: null, errorCode: null, createdAt: NOW,
   });
-  const rel = `media/SHA/2026-10/${o.waId}.bin`;
-  mkdirSync(join(dataDir, 'media', 'SHA', '2026-10'), { recursive: true });
+  if (o.saved !== false) saveOriginal(db, dataDir, id, clientId, o.waId);
+  return id;
+}
+
+/** The download finished: the original is on disk and the file has been read. */
+function saveOriginal(db: Db, dataDir: string, id: number, clientId: number, waId: string): void {
+  const code = clientId === 1 ? 'SHA' : 'MEH';
+  const rel = `media/${code}/2026-10/${waId}.bin`;
+  mkdirSync(join(dataDir, 'media', code, '2026-10'), { recursive: true });
   writeFileSync(join(dataDir, ...rel.split('/')), 'pdf-bytes');
   markDownloaded(db, id, { localPath: rel, sha256: 'x', fileSize: 9, at: NOW });
   finishMedia(db, id, { textKind: 'extract', text: 'Brief', pageCount: 1, note: null, at: NOW });
-  return id;
 }
 
 const driveState = (db: Db, id: number) =>
@@ -99,6 +109,38 @@ describe('DriveFileUploader', () => {
     await up.run();
     expect(drive.created).toHaveLength(1);
     expect(getMedia(db, u)!.driveFileId).not.toBeNull();
+  });
+
+  it("checks the sender's role in the file's own client group, and files each client's uploads in its own folder", async () => {
+    const { db, dataDir, drive, up } = setup();
+    const both = '919811111111@s.whatsapp.net'; // team in Sharma's group, client in Mehta's
+    const s = savedFile(db, dataDir, { waId: 'S', role: 'client' });
+    const t = savedFile(db, dataDir, { waId: 'T', jid: both, role: 'team' });
+    const m = savedFile(db, dataDir, { waId: 'M', clientId: 2, jid: both, role: 'client' });
+    await up.run();
+    await up.run();
+    expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Files', 'Mehta Foods', 'Files']);
+    expect(drive.folderParents).toEqual(['root-1', 'folder-1', 'folder-2', 'folder-1', 'folder-5']);
+    expect(drive.created).toEqual([
+      { id: 'file-4', name: 'brief.pdf', parentId: 'folder-3', bytes: 9 },
+      { id: 'file-7', name: 'brief.pdf', parentId: 'folder-6', bytes: 9 },
+    ]);
+    expect(getMedia(db, s)!.driveFileId).toBe('file-4');
+    expect(getMedia(db, m)!.driveFileId).toBe('file-7');
+    expect(driveState(db, t)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null });
+  });
+
+  it('leaves out files whose original is not saved yet, and uploads them once saved', async () => {
+    const { db, dataDir, drive, up } = setup();
+    const a = savedFile(db, dataDir, { waId: 'A', role: 'client', saved: false });
+    await up.run();
+    expect(drive.createFileCalls).toBe(0);
+    expect(drive.folders).toEqual([]);
+    expect(driveState(db, a)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null });
+    saveOriginal(db, dataDir, a, 1, 'A');
+    await up.run();
+    expect(drive.created).toHaveLength(1);
+    expect(getMedia(db, a)!.driveFileId).toBe(drive.created[0]!.id);
   });
 
   it("never uploads the founder's own files, voice notes, or files of an inactive client", async () => {
@@ -168,6 +210,17 @@ describe('DriveFileUploader', () => {
     await up.run();
     expect(drive.created).toHaveLength(1);
     expect(getMedia(db, a)!.driveFileId).toBe(drive.created[0]!.id);
+  });
+
+  it('clears the next-try time once a retried file reaches Drive', async () => {
+    const { db, dataDir, drive, clock, up } = setup();
+    const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
+    drive.failNext = 1;
+    await up.run();
+    expect(driveState(db, a)).toEqual({ fileId: null, attempts: 1, failed: 0, nextAt: '2026-10-19T08:02:00.000Z' });
+    clock.advance(3 * 60_000);
+    await up.run();
+    expect(driveState(db, a)).toMatchObject({ fileId: 'file-4', failed: 0, nextAt: null });
   });
 
   it('caps the retry delay at 6 hours', () => {
@@ -269,6 +322,19 @@ describe('DriveFileUploader', () => {
     expect(dflt.drive.created).toHaveLength(5);
   });
 
+  it('run() resolves even when the pass itself fails, and the next run() starts a new pass', async () => {
+    const { db, dataDir, drive, up } = setup();
+    savedFile(db, dataDir, { waId: 'A', role: 'client' });
+    const prepare = vi.spyOn(db, 'prepare').mockImplementation(() => {
+      throw new Error('database unavailable');
+    });
+    await expect(up.run()).resolves.toBeUndefined();
+    expect(prepare).toHaveBeenCalled();
+    prepare.mockRestore();
+    await up.run();
+    expect(drive.created).toHaveLength(1);
+  });
+
   it('runs one pass at a time', async () => {
     const { db, dataDir, drive, up } = setup();
     savedFile(db, dataDir, { waId: 'A', role: 'client' });
@@ -310,5 +376,22 @@ describe('DriveFileUploader', () => {
     expect(drive.created).toHaveLength(1);
     expect(getMedia(db, a)!.driveFileId).toBe(drive.created[0]!.id);
     expect(getMedia(db, b)!.driveFileId).toBeNull();
+  });
+
+  it('stop() returns after its time limit when an upload never finishes', async () => {
+    const { db, dataDir, drive, up } = setup();
+    savedFile(db, dataDir, { waId: 'A', role: 'client' });
+    let release!: () => void;
+    drive.gate = new Promise<void>((r) => (release = r));
+    const running = up.run();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      up.stop(50).then(() => 'stopped'),
+      new Promise<string>((r) => (timer = setTimeout(() => r('still waiting'), 1_000))),
+    ]);
+    clearTimeout(timer);
+    expect(outcome).toBe('stopped');
+    release(); // let the held upload finish so the test leaves nothing running
+    await running;
   });
 });
