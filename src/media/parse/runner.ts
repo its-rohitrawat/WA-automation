@@ -6,33 +6,45 @@ const WORKER = new URL('./worker.ts', import.meta.url);
 const LIMITS = { maxOldGenerationSizeMb: 256, maxYoungGenerationSizeMb: 64, stackSizeMb: 4 };
 
 /**
- * The file bytes as a view that owns its whole ArrayBuffer, so the worker can take that memory without a copy (files
- * are up to 50 MB). A Buffer from Node's shared pool, or a view into a larger buffer, shares its memory with other
- * data and cannot be moved, so it is copied once and the copy is moved.
+ * The file bytes in memory the worker can take over, so they are never cloned (files are up to 50 MB).
+ *
+ * By default this is one private copy, and the caller's bytes stay intact. With transfer, a view that owns its whole
+ * ArrayBuffer is handed over as it is, with no copy at all. A Buffer from Node's shared pool, or a view into a larger
+ * buffer, shares its memory with other data and cannot be moved, so it is copied even then.
  */
-function movable(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+function sendable(bytes: Uint8Array, transfer: boolean): Uint8Array<ArrayBuffer> {
   const buf = bytes.buffer;
   const owned = buf instanceof ArrayBuffer && !isMarkedAsUntransferable(buf) && bytes.byteOffset === 0 && bytes.byteLength === buf.byteLength;
-  return owned ? (bytes as Uint8Array<ArrayBuffer>) : new Uint8Array(bytes);
+  return transfer && owned ? (bytes as Uint8Array<ArrayBuffer>) : new Uint8Array(bytes);
 }
 
 /**
  * Parses one file in a fresh worker thread and kills it after timeoutMs. terminate() stops even a busy loop.
  * The worker's console output is discarded so parser warnings never reach the service log.
  *
- * The bytes are moved to the worker, not copied: when job.bytes owns its whole memory, the caller's view is empty
- * (length 0) once this is called. A caller that still needs the bytes afterwards must pass a copy.
+ * The caller's bytes stay intact unless `transfer` is true. Then bytes that own their whole memory are moved to the
+ * worker instead of copied, and the caller's view is empty (length 0) once this is called. Only a caller that never
+ * reads the bytes again may pass `transfer`. Buffers from fs.promises.readFile, and large results of Buffer.concat,
+ * own their memory.
  */
-export function parseFile(job: ParseJob, o: { timeoutMs: number; workerUrl?: URL }): Promise<ParseResult> {
+export function parseFile(job: ParseJob, o: { timeoutMs: number; workerUrl?: URL; transfer?: boolean }): Promise<ParseResult> {
   return new Promise<ParseResult>((resolve, reject) => {
-    const bytes = movable(job.bytes);
-    const worker = new Worker(o.workerUrl ?? WORKER, {
-      workerData: { ...job, bytes },
-      transferList: [bytes.buffer],
-      resourceLimits: LIMITS,
-      stdout: true,
-      stderr: true,
-    });
+    let worker: Worker;
+    try {
+      const bytes = sendable(job.bytes, o.transfer === true);
+      worker = new Worker(o.workerUrl ?? WORKER, {
+        workerData: { ...job, bytes },
+        transferList: [bytes.buffer],
+        resourceLimits: LIMITS,
+        stdout: true,
+        stderr: true,
+      });
+    } catch {
+      // The bytes could not be handed to a worker, for example because they were already moved away (a detached
+      // buffer). Still a ParseError, so the file is not retried.
+      reject(new ParseError('parse_failed'));
+      return;
+    }
     worker.stdout.resume();
     worker.stderr.resume();
     let settled = false;

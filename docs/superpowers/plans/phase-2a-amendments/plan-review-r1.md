@@ -88,6 +88,14 @@ Every task's implementer applies the items listed under its task, in addition to
   The tests "reads the paragraphs", "stops a zip bomb" and both worker DOCX tests must pass for real.
 - **6b. No buffer copy (review M18).** Pass the file Buffer to the worker in `transferList`, so it is not copied (up to 50 MB). Test that the worker still parses.
 
+  *(Revised after the Task 6 review: moving the bytes empties the caller's Buffer. Buffers from `fs.promises.readFile`, and larger results of the fetcher's `Buffer.concat`, own their memory, so this would happen to almost every real file, and the plan's readPdf (Task 9) reads `input.bytes` again after parsing. So the move is opt-in:*
+  - *`parseFile(job, { timeoutMs })` sends one private copy, moved to the worker rather than cloned. The caller's bytes stay intact.*
+  - *`parseFile(job, { timeoutMs, transfer: true })` moves a view that owns its whole ArrayBuffer, with no copy. The caller's view is then empty (length 0).*
+  - *A pooled Buffer, or a view into a larger buffer, is always copied.*
+  - *If the bytes cannot be handed to a worker at all (for example they were already moved away), parseFile rejects with `ParseError('parse_failed')`.*
+
+  *See 9f.)*
+
 ## Task 7: PDF text
 
 - **7a. PDF.js hardening (review M9).** Pass `isEvalSupported: false` and a `maxImageSize` (e.g. 16 megapixels) if unpdf 1.8.1's `getDocumentProxy` / `extractText` options accept them. Check the typings in node_modules after install. If they are not accepted, write that down in the report.
@@ -110,6 +118,14 @@ Every task's implementer applies the items listed under its task, in addition to
   Tests: SVG input is refused; a TIFF input is refused; JPEG and PNG still work.
 - **9d. EXIF wording (review M6).** Say "EXIF/GPS is stripped from what is sent to Claude". The original uploaded to Drive is the client's file, unchanged. Fix the Decisions text and code comments.
 - **9e. Forwarded (D2).** A forwarded image, or a forwarded document that would need the paid scanned-PDF call, is never sent to Claude. Result: note `forwarded_not_described`; the status is final (done), so it never blocks. Local DOCX/PDF text extraction still runs for forwarded documents. Tests for both.
+- **9f. Parser bytes (Task 6 review).** parseFile moves the caller's bytes only when asked (see 6b).
+  - `ExtractorDeps.parse` becomes `parse?: (job: ParseJob, o?: { transfer?: boolean }) => Promise<ParseResult>`. The default is `(job, o) => parseFile(job, { timeoutMs: MEDIA_LIMITS.parseTimeoutMs, ...o })`.
+  - readDocx passes `{ transfer: true }`. Neither it nor the processor reads the bytes after extract, so a DOCX of up to 50 MB is not copied.
+  - readPdf must **not** pass `transfer`. It reads `input.bytes` after parsing: in the `maxScannedPdfBytes` check, and in `d.ai.readScannedPdf(input.bytes)`, a paid call that has already reserved spend. As a guard, save `const size = input.bytes.length` before parsing and use `size` in the scan-size check.
+  - Tests: the fake `parse` behaves like the real one. When `o?.transfer` is true it detaches the bytes: `structuredClone(job.bytes.buffer, { transfer: [job.bytes.buffer] })`. Such a test needs input bytes that own their memory, e.g. `Buffer.from(new Uint8Array([...]).buffer)`, because a pooled Buffer cannot be transferred. Using the real parseFile also works. Assert that:
+    - readScannedPdf receives the full bytes;
+    - the `scan_too_long` byte limit still fires for a scan over `maxScannedPdfBytes`;
+    - readDocx asks for `transfer`.
 
 ## Task 10: media processor
 
