@@ -84,8 +84,10 @@ export class Health {
   }
 
   recordOutcome(clientId: number, o: ReconcileOutcome): void {
-    // Waiting for shared files to be read says nothing about the AI: a failed or paused group stays as it was.
-    if (o.status === 'waiting') return;
+    // Waiting for shared files to be read says nothing about the AI: a failed or paused group stays as it was. Nor does a
+    // run kept out only by holds of paid calls in flight (busy): the cap is not reached, so it must not show the
+    // spend-cap line, and it clears nothing (Task 15 review round 3).
+    if (o.status === 'waiting' || o.status === 'busy') return;
     if (o.status === 'paused') this.#paused.set(clientId, istDate(this.#clock.now()));
     else {
       this.#paused.delete(clientId);

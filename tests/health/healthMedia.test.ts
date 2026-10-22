@@ -40,6 +40,13 @@ describe('Health and shared files', () => {
     expect(h.line().text).toBe('⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.');
   });
 
+  it('lost messages outrank files waiting over 30 minutes and uploads that gave up (15h)', () => {
+    const { h } = setup();
+    h.setMedia(counts({ stale: 1, uploadFailed: 1 }));
+    h.setIngestFailures(1);
+    expect(h.line().text).toBe('⚠️ 1 incoming message could not be saved. See docs/SETUP.md.');
+  });
+
   it('an AI error outranks the media warnings, which outrank low disk', () => {
     const { h } = setup(() => 5e9);
     h.setMedia(counts({ stale: 1 }));
@@ -99,6 +106,19 @@ describe('Health and shared files', () => {
     h.recordOutcome(2, { status: 'noop' });
     expect(h.line().text).toBe('⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.');
     expect(readHealthSnapshot(db)!.media).toEqual(counts({ pending: 1, stale: 1 }));
+  });
+
+  it('a run kept out only by another paid call’s hold is ignored, like waiting: no spend-cap line (Task 15 review round 3)', () => {
+    const { h } = setup();
+    h.recordOutcome(1, { status: 'busy' });
+    expect(h.line()).toEqual({ ok: true, text: '✅ Connected · waiting for new messages' });
+    // It clears nothing either: a failed group stays failed, a paused one stays paused.
+    h.recordOutcome(1, { status: 'failed', errorCode: 'refusal' });
+    h.recordOutcome(1, { status: 'busy' });
+    expect(h.line().text).toBe('⚠️ 1 group waiting (AI error)');
+    h.recordOutcome(2, { status: 'paused' });
+    h.recordOutcome(2, { status: 'busy' });
+    expect(h.line().text).toBe(SPEND_LINE);
   });
 
   it('keeps the counts in the snapshot and still reads older snapshots without them', () => {

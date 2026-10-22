@@ -16,6 +16,12 @@ interface ClientState {
 /** After this many failed runs in a row, new messages wait for the hourly retry instead of re-sending the batch. */
 export const FAILURES_BEFORE_BACKOFF = 3;
 
+/**
+ * How soon a busy run (other paid calls held the budget) tries again. Holds clear when those calls end, so this is the
+ * media queue's budget retry (SPEND_RETRY_MS), not the hour a paused run waits.
+ */
+export const BUSY_RETRY_MS = 10 * 60_000;
+
 export interface DebouncerOptions {
   quietMs: number;
   maxWaitMs: number;
@@ -148,14 +154,16 @@ export class GroupDebouncer {
         .then((outcome) => {
           if (s.cancelled) return;
           // 'waiting' (files still being read) needs no retry, like 'noop', but it proves nothing about the AI, so the failure count stays.
+          // 'busy' (other paid calls held the budget) proves nothing either; it is retried soon, since the holds clear.
           if (outcome.status === 'ok' || outcome.status === 'noop') s.failures = 0;
           if (outcome.status === 'failed') s.failures++;
-          if (outcome.status === 'failed' || outcome.status === 'paused') this.#scheduleRetry(clientId);
+          if (outcome.status === 'failed' || outcome.status === 'paused') this.#scheduleRetry(clientId, this.#retryMs);
+          if (outcome.status === 'busy') this.#scheduleRetry(clientId, BUSY_RETRY_MS);
         })
         .catch((err: unknown) => {
           if (s.cancelled) return;
           s.failures++;
-          this.#scheduleRetry(clientId);
+          this.#scheduleRetry(clientId, this.#retryMs);
           try {
             this.#onError?.(clientId, err);
           } catch {
@@ -178,10 +186,10 @@ export class GroupDebouncer {
     }
   }
 
-  #scheduleRetry(clientId: number): void {
+  #scheduleRetry(clientId: number, ms: number): void {
     if (this.#stopped) return;
     const s = this.#state(clientId);
     clearTimeout(s.retry);
-    s.retry = setTimeout(() => this.#fire(clientId), this.#retryMs);
+    s.retry = setTimeout(() => this.#fire(clientId), ms);
   }
 }

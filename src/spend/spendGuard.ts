@@ -56,6 +56,17 @@ export class SpendGuard {
     return this.spentToday() >= this.#cap;
   }
 
+  /**
+   * Whether the estimate would fit under the cap if no paid call were in flight. When canSpend() is false but this is
+   * true, the cap is not the reason: holds of calls still running are (a scanned PDF holds about $4 while it is read),
+   * and they clear when those calls end.
+   */
+  fitsIgnoringHolds(estimateUsd: number): boolean {
+    if (this.isPaused()) return false;
+    if (!Number.isFinite(estimateUsd) || estimateUsd < 0) return false;
+    return this.spentToday() + estimateUsd <= this.#cap;
+  }
+
   /** Holds an estimate while a paid call is in flight. Returns a reservation id, or null if it would pass the cap. */
   reserve(estimateUsd: number): number | null {
     if (this.#closed || !this.canSpend(estimateUsd)) return null;

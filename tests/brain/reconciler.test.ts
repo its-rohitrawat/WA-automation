@@ -229,11 +229,60 @@ describe('Reconciler', () => {
 
     const first = r.run(1);
     const second = r.run(2);
-    expect(await second).toEqual({ status: 'paused' });
+    // Only the first run's hold keeps the second out, not the cap itself: busy, not paused (Task 15 review round 3).
+    expect(await second).toEqual({ status: 'busy' });
     open();
     expect(await first).toEqual({ status: 'ok', accepted: 0, rejected: 0 });
     expect(ai.calls).toHaveLength(1);
     expect(listUnprocessed(db, 2)).toHaveLength(1);
+  });
+
+  describe('another paid call holding the budget (Task 15 review round 3)', () => {
+    it('is busy, not paused, when only a hold of a call in flight keeps it out', async () => {
+      const log = silentLogger();
+      const info = vi.spyOn(log, 'info');
+      const { db, ai, r, spend } = setup([], 15, log);
+      spend.record('ai', 10, 'earlier runs');
+      const scan = spend.reserve(4.9)!; // a scanned PDF being read
+      store(db, 'm1', 'hello');
+      expect(await r.run(1)).toEqual({ status: 'busy' });
+      expect(ai.calls).toHaveLength(0);
+      expect(latestBatches(db)).toEqual([]);
+      expect(listUnprocessed(db, 1)).toHaveLength(1);
+      expect(info).toHaveBeenCalledWith({ clientId: 1 }, 'other paid calls in flight: run deferred');
+      expect(info).not.toHaveBeenCalledWith({ clientId: 1 }, 'spend cap: run paused');
+      spend.release(scan);
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 0 });
+    });
+
+    it('is paused when what is spent today leaves no room for it, hold or not', async () => {
+      const { db, ai, r, spend } = setup([], 15);
+      spend.record('ai', 14.8, 'earlier runs');
+      spend.reserve(0.1);
+      store(db, 'm1', 'hello');
+      expect(await r.run(1)).toEqual({ status: 'paused' });
+      expect(ai.calls).toHaveLength(0);
+    });
+
+    it('a retry kept out only by a hold is busy, and its batch says so', async () => {
+      const log = silentLogger();
+      const info = vi.spyOn(log, 'info');
+      // The invalid first answer costs about what it reserved, so the retry needs a fresh reservation.
+      const { db, ai, r, spend } = setup([new AiInvalidOutputError('bad', FAKE_USAGE, OUTPUT_ESTIMATE)], 5, log);
+      store(db, 'm1', 'hello');
+      const open = hold(ai);
+      const run = r.run(1);
+      expect(ai.calls).toHaveLength(1);
+      // A scanned PDF read starts during the call. It fits next to this call's hold, but not next to the retry's.
+      expect(spend.reserve(5 - estimateOf(ai) - OUTPUT_ESTIMATE / 2)).not.toBeNull();
+      open();
+      expect(await run).toEqual({ status: 'busy' });
+      expect(spend.isPaused()).toBe(false);
+      expect(ai.calls).toHaveLength(1);
+      expect(latestBatches(db)[0]).toMatchObject({ status: 'failed', errorCode: 'spend_busy' });
+      expect(listUnprocessed(db, 1)).toHaveLength(1);
+      expect(info).toHaveBeenCalledWith({ clientId: 1 }, 'other paid calls in flight: run deferred');
+    });
   });
 
   it('pauses when the retry no longer fits under the cap', async () => {

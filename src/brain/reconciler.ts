@@ -25,11 +25,16 @@ import { validateOps, type Rejection, type ValidationState } from './validator.t
 /**
  * noop: nothing to do. waiting: messages are queued, but the first one's file is still being read (no AI call, no spend);
  * it is not a success and not a failure, so the debouncer keeps its failure count and Health ignores it.
+ * paused: today's spend leaves no room for the run (the daily cap is the reason).
+ * busy: the run fits under the cap, but not next to the holds of paid calls still in flight, such as a scanned PDF
+ * being read. Like waiting, the debouncer keeps its failure count and Health ignores it; the debouncer tries again
+ * after BUSY_RETRY_MS, not after the hour a pause waits (Task 15 review round 3).
  */
 export type ReconcileOutcome =
   | { status: 'noop' }
   | { status: 'waiting' }
   | { status: 'paused' }
+  | { status: 'busy' }
   | { status: 'ok'; accepted: number; rejected: number }
   | { status: 'failed'; errorCode: string };
 
@@ -133,10 +138,7 @@ export class Reconciler {
     // attempt, then a full fallback attempt at 1.25x rates). settle() books the true cost, so the books stay right;
     // the cap can be overshot only by that gap per call in flight.
     const estimate = estimateCostUsd(SYSTEM_PROMPT.length + user.length, prices, MAX_OUTPUT_TOKENS);
-    if (!spend.canSpend(estimate)) {
-      log.info({ clientId }, 'spend cap: run paused');
-      return { status: 'paused' };
-    }
+    if (!spend.canSpend(estimate)) return this.#spendBlocked(clientId, estimate);
 
     // Job C, P2: only an edit or a reaction made during the call may label a message queued again, never one from before
     // this run. Nothing has awaited since the batch was listed, and the version check keeps any touch made since.
@@ -146,13 +148,11 @@ export class Reconciler {
     try {
       result = await this.#callWithRetry(user, batchId, estimate);
     } catch (e) {
-      const errorCode = errorCodeOf(e);
+      // A retry that cannot reserve is not an AI error: a pause when the cap is the reason, busy when holds are.
+      const blocked = e instanceof SpendCapReachedError ? this.#spendBlocked(clientId, estimate) : undefined;
+      const errorCode = blocked?.status === 'busy' ? 'spend_busy' : errorCodeOf(e);
       finishBatch(db, batchId, { status: 'failed', errorCode, accepted: null, rejected: null, at: clock.now().toISOString() });
-      // Hitting the cap mid-run is a pause, not an AI error.
-      if (e instanceof SpendCapReachedError) {
-        log.info({ clientId }, 'spend cap: run paused');
-        return { status: 'paused' };
-      }
+      if (blocked) return blocked;
       log.warn({ clientId, batchId, errorCode }, 'reconcile failed; messages stay queued');
       return { status: 'failed', errorCode };
     }
@@ -209,6 +209,21 @@ export class Reconciler {
     if (requeued > 0) log.info({ clientId, batchId, requeued }, 'messages changed during the AI call; queued again');
     this.#o.onChanged();
     return { status: 'ok', accepted: accepted.length, rejected: rejected.length };
+  }
+
+  /**
+   * The estimate could not be reserved. Paused only when today's spend leaves no room for it. Otherwise holds of paid
+   * calls still in flight are in the way and clear within minutes, so the run is busy: Health must not say the cap is
+   * reached, and the retry must not wait the hour a pause waits (Task 15 review round 3).
+   */
+  #spendBlocked(clientId: number, estimate: number): { status: 'paused' } | { status: 'busy' } {
+    const { spend, log } = this.#o;
+    if (spend.fitsIgnoringHolds(estimate)) {
+      log.info({ clientId }, 'other paid calls in flight: run deferred');
+      return { status: 'busy' };
+    }
+    log.info({ clientId }, 'spend cap: run paused');
+    return { status: 'paused' };
   }
 
   /** Every attempt reserves its estimate first, and every outcome settles or releases that reservation. */

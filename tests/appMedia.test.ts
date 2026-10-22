@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp, type AppMediaDeps } from '../src/app.ts';
 import { Reconciler } from '../src/brain/reconciler.ts';
 import { readHealthSnapshot } from '../src/health/health.ts';
-import { imageEstimateUsd, type Extractor } from '../src/media/extract.ts';
+import { imageEstimateUsd, scannedPdfCeilingUsd, type Extractor } from '../src/media/extract.ts';
 import { MediaDownloadError, type MediaFetcher } from '../src/media/fetch.ts';
 import { mediaRefAad, MediaRefSealer } from '../src/media/ref.ts';
 import { DriveFileUploader } from '../src/media/uploader.ts';
@@ -17,7 +17,7 @@ import type { Prices } from '../src/spend/pricing.ts';
 import { SpendGuard } from '../src/spend/spendGuard.ts';
 import type { Db } from '../src/store/db.ts';
 import { finishMedia, getMedia, insertMedia, markDownloaded, markUploadFailed, messageRowId } from '../src/store/media.ts';
-import { insertMessage, markProcessed } from '../src/store/messages.ts';
+import { insertMessage, listUnprocessed, markProcessed } from '../src/store/messages.ts';
 import { setRole, upsertPerson } from '../src/store/people.ts';
 import { systemClock } from '../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../src/util/logger.ts';
@@ -27,6 +27,7 @@ import { WhatsAppGateway } from '../src/wa/gateway.ts';
 import { FakeAi } from './helpers/ai.ts';
 import { MEHTA, seededDb, SHARMA } from './helpers/db.ts';
 import { FakeDrive } from './helpers/fakeDrive.ts';
+import { tinyPdf } from './helpers/files.ts';
 import { FakeMediaAi } from './helpers/mediaAi.ts';
 import { FakeSocket, SEND_METHODS } from './helpers/fakeSocket.ts';
 import { SHARMA_PN, waRaw, waText } from './helpers/wa.ts';
@@ -43,6 +44,8 @@ interface SetupOptions {
   log?: Logger;
   startedAt?: Date;
   drainMs?: number;
+  /** The workbook publish throttle. Default: the publisher's (60 s). */
+  publishIntervalMs?: number;
   /** Runs on the database and the data folder before the app is made. */
   prepare?: (db: Db, dataDir: string) => void;
 }
@@ -74,7 +77,7 @@ function setup(o: SetupOptions = {}) {
   const app = createApp({
     db, clock: systemClock, log: o.log ?? silentLogger(), gateway, allow, ai, drive, prices: P, spendCapUsd: 15,
     quietMs: 240_000, maxWaitMs: 1_200_000, maxConcurrent: 3, dataDir, freeBytes: () => 500e9, pollMs: 30_000, media, startedAt: o.startedAt,
-    drainMs: o.drainMs,
+    drainMs: o.drainMs, publishIntervalMs: o.publishIntervalMs,
   });
   app.start();
   const sock = sockets[0]!;
@@ -472,6 +475,40 @@ describe('app media wiring (15g)', () => {
     await stopApp(app);
   });
 
+  it('a file that settles with no reconcile and no upload to follow still republishes the workbook, for Files received (review round 3)', async () => {
+    const sealer = new MediaRefSealer(randomBytes(32));
+    const g = gate();
+    const extract = vi.fn<Extractor>(async () => {
+      await g.promise;
+      return NOTHING_READ; // no text, so its message is not queued again
+    });
+    const run = vi.spyOn(Reconciler.prototype, 'run');
+    // A processed message whose file is still pending. Its sender is not a client member, so the file is not uploaded.
+    const { db, ai, drive, app } = setup({
+      media: { sealer, extract },
+      publishIntervalMs: 1_000,
+      prepare: (db) => {
+        storedImage(db, sealer, '2026-10-19T06:55:00.000Z');
+        markProcessed(db, [messageRowId(db, 1, 'IMG0')!], '2026-10-19T06:56:00.000Z');
+      },
+    });
+    await vi.advanceTimersByTimeAsync(1_000); // the first publish
+    await vi.waitFor(() => expect(extract).toHaveBeenCalled(), SLOW_IO);
+    await vi.advanceTimersByTimeAsync(3_000); // any publish the start scheduled is done
+    expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']);
+    const published = drive.updated.length;
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(drive.updated).toHaveLength(published); // nothing else is publishing
+    g.release();
+    await vi.waitFor(() => expect(drive.updated).toHaveLength(published + 1), SLOW_IO);
+    expect(Date.now()).toBeLessThan(Date.parse('2026-10-19T07:00:29Z')); // before the first tick after start
+    expect(getMedia(db, 1)).toMatchObject({ status: 'done', textKind: null, driveFileId: null });
+    expect(listUnprocessed(db, 1)).toEqual([]);
+    expect(run).not.toHaveBeenCalled();
+    expect(ai.calls).toHaveLength(0);
+    await stopApp(app);
+  });
+
   it('a finished file from a client member is uploaded straight away, without waiting for a tick', async () => {
     const { db, drive, app, sock } = setup();
     await vi.advanceTimersByTimeAsync(1_000); // the first publish creates the Drive root folder
@@ -592,6 +629,63 @@ describe('app media wiring (15g)', () => {
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => expect(getMedia(db, 1)?.driveFileId).toBeTruthy());
     expect(drive.created.map((f) => f.name)).toContain('brief.pdf');
+    await stopApp(app);
+  });
+});
+
+describe('app spend holds (Task 15 review round 3)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-19T07:00:00Z'));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  const SPEND_LINE = '⚠️ Daily spend cap reached. Paused until midnight IST';
+
+  const sharePdf = (sock: FakeSocket) =>
+    sock.emit('messages.upsert', { type: 'notify', messages: [
+      waRaw('PDF1', { documentMessage: { url: 'https://mmg.whatsapp.net/v/t2', directPath: '/v/t2', mediaKey: MEDIA_KEY, mimetype: 'application/pdf', fileName: 'quote.pdf' } }),
+    ] });
+
+  it('a scan read holding the budget delays another client’s run without the spend-cap line; the run follows within 10 minutes', async () => {
+    const g = gate();
+    const mediaAi = new FakeMediaAi();
+    const readScan = vi.spyOn(mediaAi, 'readScannedPdf').mockImplementation(async () => {
+      await g.promise;
+      return { text: 'Quotation No. 17', usage: ZERO_USAGE, costUsd: 0.05, fallbackUsed: false };
+    });
+    const fetcher = vi.fn<MediaFetcher>(async () => tinyPdf([[]])); // one page with no text layer: a scan
+    const run = vi.spyOn(Reconciler.prototype, 'run');
+    // Under the $15 cap, the scan's hold (about $4.16) fits and leaves $0.10: less than a run's estimate (over $0.32),
+    // though what is spent today leaves plenty of room for the run.
+    const { db, ai, app, sock } = setup({
+      media: { ai: mediaAi, fetcher, extract: undefined }, // the standard extractor
+      prepare: (db) => new SpendGuard({ db, clock: systemClock, capUsd: 15 }).record('ai', 15 - scannedPdfCeilingUsd(P) - 0.1, 'earlier runs'),
+    });
+    sharePdf(sock);
+    await vi.waitFor(() => expect(readScan).toHaveBeenCalled(), SLOW_IO);
+    // Another client writes. Its run is due four minutes later, while the scan is still being read.
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('M1', 'please send the quote', { group: MEHTA.groupId })] });
+    await vi.advanceTimersByTimeAsync(241_000);
+    const mehta = run.mock.calls.findIndex(([clientId]) => clientId === 2);
+    expect(mehta).toBeGreaterThanOrEqual(0);
+    await expect(run.mock.results[mehta]!.value).resolves.toEqual({ status: 'busy' });
+    expect(ai.calls).toHaveLength(0);
+    expect(app.health.line()).toEqual({ ok: true, text: '✅ Connected · waiting for new messages' });
+    await vi.advanceTimersByTimeAsync(30_000); // a tick saves the health report
+    expect(readHealthSnapshot(db)!.line.text).not.toBe(SPEND_LINE);
+    // The read finishes and frees its hold.
+    g.release();
+    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'));
+    expect(app.health.line().text).not.toBe(SPEND_LINE);
+    await vi.advanceTimersByTimeAsync(10 * MINUTE);
+    expect(ai.calls.filter((c) => c.user.includes('please send the quote'))).toHaveLength(1);
+    expect(listUnprocessed(db, 2)).toEqual([]);
+    expect(app.health.line().text).not.toBe(SPEND_LINE);
     await stopApp(app);
   });
 });

@@ -127,7 +127,8 @@ export function createApp(d: AppDeps): App {
     if (!stillActive(clientId)) return;
     safely(() => health.recordOutcome(clientId, outcome), { clientId });
     // The publisher is throttled, so this is cheap, and the workbook stops showing ✅ while groups fail.
-    // A run that is waiting for shared files changed nothing, so it publishes nothing.
+    // A run that is waiting for shared files, or kept out by other paid calls in flight (busy), changed nothing, so it
+    // publishes nothing.
     if (outcome.status === 'failed' || outcome.status === 'paused') publisher.schedule();
   };
 
