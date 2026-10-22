@@ -171,7 +171,7 @@ describe('round 2 hardening', () => {
   });
 
   it('documents the line layout and the reactions suffix in the system prompt', () => {
-    expect(SYSTEM_PROMPT).toContain('ends at the first ": "');
+    expect(SYSTEM_PROMPT).toContain('ends at the first ": " outside ( ) markers');
     expect(SYSTEM_PROMPT).toContain('[confirmed] means a person on the team set that role by hand');
   });
 });
@@ -363,6 +363,27 @@ describe('SYSTEM_PROMPT', () => {
   });
 
   it('says a message header can hold more than one re-check marker (12h, M3)', () => {
-    expect(SYSTEM_PROMPT).toContain('- On a message line the header (id, time, sender, "↩ replying to", re-check markers) ends at the first ": ".');
+    expect(SYSTEM_PROMPT).toContain(
+      '- On a message line the header (id, time, sender, "↩ replying to", re-check markers) ends at the first ": " outside ( ) markers.',
+    );
+  });
+
+  it('a re-check line splits as the system prompt says: the header ends at the first ": " outside ( ) markers', () => {
+    // The rule as written in SYSTEM_PROMPT; the tracker's own "(re-check: edited)" holds a ": " inside ( ).
+    const splitHeader = (line: string): [string, string] => {
+      let depth = 0;
+      for (let i = 0; i < line.length - 1; i++) {
+        if (line[i] === '(') depth++;
+        else if (line[i] === ')') depth = Math.max(0, depth - 1);
+        else if (depth === 0 && line[i] === ':' && line[i + 1] === ' ') return [line.slice(0, i), line.slice(i + 2)];
+      }
+      return [line, ''];
+    };
+    const line = formatMessage(message('m9', 'fix the logo: blue', { requeueReason: 'edit' }), peopleMap, []);
+    const [header, text] = splitHeader(line);
+    expect(header).toContain('(re-check: edited)');
+    expect(text).toBe('fix the logo: blue');
+    // The old rule, the first ": " anywhere, would have cut the header inside the marker.
+    expect(line.indexOf(': ')).toBeLessThan(line.indexOf('(re-check: edited)') + '(re-check: edited)'.length);
   });
 });
