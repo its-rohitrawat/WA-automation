@@ -1,8 +1,8 @@
-import { mkdtempSync, readdirSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { Ledger, type Attempt, type Outcome } from '../../../src/stt/bakeoff/ledger.ts';
+import { Ledger, LedgerError, type Attempt, type Outcome } from '../../../src/stt/bakeoff/ledger.ts';
 
 let dir: string;
 let ledger: Ledger;
@@ -94,5 +94,86 @@ describe('Ledger', () => {
 
   it('lists nothing before the first run', () => {
     expect(ledger.outcomes()).toEqual([]);
+  });
+});
+
+const errno = (code: string): Error => Object.assign(new Error(code), { code });
+
+describe('Ledger writes', () => {
+  it('waits out a file lock on the rename, 100 ms at a time', () => {
+    let locked = 3;
+    const pauses: number[] = [];
+    const l = new Ledger(dir, {
+      rename: (from, to) => {
+        if (locked-- > 0) throw errno('EPERM');
+        renameSync(from, to);
+      },
+      pause: (ms) => pauses.push(ms),
+    });
+    l.begin(attempt());
+    expect(l.attempt('voice-a', 'sarvam')).toEqual(attempt());
+    expect(pauses).toEqual([100, 100, 100]);
+  });
+
+  it('gives up after 20 retries with a LedgerError carrying the lock code', () => {
+    let tries = 0;
+    const pauses: number[] = [];
+    const l = new Ledger(dir, {
+      rename: () => {
+        tries++;
+        throw errno('EBUSY');
+      },
+      pause: (ms) => pauses.push(ms),
+    });
+    let caught: unknown;
+    try {
+      l.begin(attempt());
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(LedgerError);
+    expect((caught as LedgerError).code).toBe('EBUSY');
+    expect(tries).toBe(21);
+    expect(pauses).toHaveLength(20);
+  });
+
+  it('does not wait on errors that are not locks', () => {
+    const pauses: number[] = [];
+    const l = new Ledger(dir, {
+      rename: () => {
+        throw errno('ENOSPC');
+      },
+      pause: (ms) => pauses.push(ms),
+    });
+    expect(() => l.finish(outcome())).toThrow(LedgerError);
+    expect(pauses).toEqual([]);
+  });
+
+  it('wraps every write failure in a LedgerError', () => {
+    writeFileSync(join(dir, 'results'), 'a file where the folder should be');
+    expect(() => ledger.begin(attempt())).toThrow(LedgerError);
+    expect(() => ledger.savePart('voice-a', 'openai', 0, { model: 'm', segments: [], billedSeconds: null, raw: {} })).toThrow(LedgerError);
+    expect(() => ledger.saveJobId('voice-a', 'sarvam', 0, 'job-1')).toThrow(LedgerError);
+  });
+
+  it('leaves no temporary file behind', () => {
+    ledger.begin(attempt());
+    ledger.finish(outcome());
+    expect(readdirSync(join(dir, 'results', 'voice-a')).sort()).toEqual(['sarvam.attempt.json', 'sarvam.json']);
+  });
+
+  it('names a damaged ledger file instead of guessing its state', () => {
+    mkdirSync(join(dir, 'results', 'voice-a'), { recursive: true });
+    const path = join(dir, 'results', 'voice-a', 'sarvam.json');
+    writeFileSync(path, '{"status": "do');
+    let caught: unknown;
+    try {
+      ledger.state('voice-a', 'sarvam');
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(LedgerError);
+    expect((caught as LedgerError).code).toBe('damaged_file');
+    expect((caught as Error).message).toContain(path);
   });
 });
