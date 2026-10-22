@@ -1,6 +1,6 @@
 import { openAsBlob } from 'node:fs';
 import { z } from 'zod';
-import { longFetch, parseAnswer, requestJson, requestOk, SttJobError, SttNoAnswerError, type HttpFetch } from '../http.ts';
+import { longFetch, parseAnswer, requestJson, requestOk, SttHttpError, SttJobError, SttNoAnswerError, type HttpFetch } from '../http.ts';
 import { modelFor } from '../prices.ts';
 import type { AudioPart, ProviderResult, Segment, SttProvider, TranscribeOptions } from '../types.ts';
 
@@ -89,7 +89,14 @@ export class SarvamProvider implements SttProvider {
       opts.onJobId?.(jobId);
     }
     const outputName = await this.#waitForOutput(jobId);
-    const raw = await this.#download(jobId, outputName);
+    let raw: unknown;
+    try {
+      raw = await this.#download(jobId, outputName);
+    } catch (e) {
+      // The job ran and is billed. As "no answer", the saved job id lets --retry-unknown fetch it again for free.
+      if (e instanceof SttHttpError) throw new SttNoAnswerError(`download_http_${e.status}`);
+      throw e;
+    }
     return { model, segments: toSegments(parseAnswer(ResultSchema, raw, 'unreadable_result'), audio.seconds), billedSeconds: null, raw };
   }
 
@@ -116,16 +123,23 @@ export class SarvamProvider implements SttProvider {
       try {
         status = parseAnswer(StatusSchema, await this.#get(`/${jobId}/status`), 'unreadable_status');
         misses = 0;
-      } catch {
+      } catch (e) {
+        // A definite refusal of the status check will not pass by asking again, so polling stops. It stays "no answer":
+        // the job has started and may still run and bill, and its saved id lets --retry-unknown wait on it for free.
+        if (e instanceof SttHttpError && e.status < 500 && e.status !== 408 && e.status !== 429) {
+          throw new SttNoAnswerError(`status_http_${e.status}`);
+        }
         // A status check is free, so a few failures in a row are tolerated.
         if (++misses >= MAX_STATUS_MISSES) throw new SttNoAnswerError('status_unavailable');
       }
       if (status && FINISHED.has(status.job_state)) {
         const detail = status.job_details?.[0];
         const name = detail?.outputs?.[0]?.file_name;
-        if (status.job_state === 'Failed' || detail?.state !== 'Success' || !name) {
-          throw new SttJobError(codeOf(detail?.state ?? status.job_state));
-        }
+        // A completed job may list its file without a state of its own; only a state other than Success is a failure.
+        const fileFailed = detail?.state != null && detail.state !== 'Success';
+        if (status.job_state === 'Failed' || fileFailed) throw new SttJobError(codeOf(detail?.state ?? status.job_state));
+        // Finished, not failed, yet no result named: the work ran and is billed, so this is no answer, not a failure.
+        if (!name) throw new SttNoAnswerError('no_output_file');
         return name;
       }
       if (this.#now() >= deadline) throw new SttNoAnswerError('job_wait_timeout');
@@ -182,7 +196,8 @@ function toSegments(r: SarvamResult, seconds: number): Segment[] {
       .filter((s) => s.text !== '');
   }
   const t = r.timestamps;
-  const texts = t?.words ?? t?.chunks ?? [];
+  // An empty word list falls through to the chunks.
+  const texts = t?.words?.length ? t.words : (t?.chunks ?? []);
   if (t && texts.length > 0) {
     return texts
       .map((text, i) => ({ start: t.start_time_seconds[i] ?? 0, end: t.end_time_seconds[i] ?? seconds, speaker: null, text: text.trim() }))
