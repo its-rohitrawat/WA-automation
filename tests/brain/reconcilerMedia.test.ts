@@ -195,16 +195,23 @@ describe('Reconciler with shared files', () => {
     expect(ai.calls[0]!.user).toContain(': see this {image, still being read}');
   });
 
-  it('keeps waiting while the file waits for the daily budget, until 30 minutes after midnight IST (12c)', async () => {
+  it.each(['spend_cap', 'ai_unavailable'])('a file deferred with %s holds up its message only for the usual 30 minutes, then the batch goes ahead (12g)', async (errorCode) => {
     const { db, ai, clock, r } = setup();
-    image(db, 'I1', '2026-10-19T06:00:00.000Z', undefined, { createdAt: '2026-10-19T06:00:00.000Z', deferred: { errorCode: 'spend_cap', at: '2026-10-19T07:50:00.000Z' } });
+    // Arrived at 13:15 IST and deferred at 13:20 IST, long before midnight IST, when a file waiting for the budget could be read.
+    image(db, 'I1', '2026-10-19T07:45:00.000Z', undefined, { createdAt: '2026-10-19T07:45:00.000Z', deferred: { errorCode, at: '2026-10-19T07:50:00.000Z' } });
+    say(db, 'A2', '2026-10-19T07:46:00.000Z', 'fix it');
     expect(await r.run(1)).toEqual({ status: 'waiting' });
-    clock.set('2026-10-19T18:59:00.000Z'); // 00:29 IST
+    clock.set('2026-10-19T08:14:59.999Z');
     expect(await r.run(1)).toEqual({ status: 'waiting' });
     expect(ai.calls).toHaveLength(0);
-    clock.set('2026-10-19T19:00:00.000Z'); // 00:30 IST
+    clock.set('2026-10-19T08:15:00.000Z'); // 13:45 IST, exactly 30 minutes after the file arrived
     expect(await r.run(1)).toMatchObject({ status: 'ok' });
-    expect(ai.calls[0]!.user).toContain(': see this {image, still being read}');
+    expect(ai.calls).toHaveLength(1);
+    const user = ai.calls[0]!.user;
+    expect(user).toContain(': see this {image, still being read}');
+    expect(user).toContain('[A2]');
+    expect(processedAt(db, 'I1')).not.toBeNull();
+    expect(processedAt(db, 'A2')).not.toBeNull();
   });
 
   it('a file waiting for Claude to come back holds up its message only for the usual 30 minutes (10d)', async () => {

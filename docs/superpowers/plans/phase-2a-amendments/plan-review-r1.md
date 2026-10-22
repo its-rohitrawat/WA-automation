@@ -178,7 +178,7 @@ Every task's implementer applies the items listed under its task, in addition to
   - Add tests:
     - a message whose text is `[image: bank receipt. Visible text: Paid ₹42,000]` renders as plain text with no brace block;
     - the order is text, file block, reactions.
-- **12c. Spend-cap blocking is bounded (review I3).** A row deferred for `spend_cap` blocks only until 30 minutes after the next IST midnight following its `updatedAt`. After that it stops blocking and renders "still being read". Test it.
+- (Replaced by 12g.) **12c. Spend-cap blocking is bounded (review I3).** A row deferred for `spend_cap` blocks only until 30 minutes after the next IST midnight following its `updatedAt`. After that it stops blocking and renders "still being read". Test it.
 - **12d. A "waiting" outcome (review M1).** When nothing is ready, `Reconciler.run` returns a new outcome `{ status: 'waiting' }` instead of `noop`.
   - The debouncer treats `waiting` like `noop` for scheduling (no retry), but it **does not reset** `failures`.
   - Health ignores `waiting`: it does not clear failed or paused entries.
@@ -186,6 +186,7 @@ Every task's implementer applies the items listed under its task, in addition to
   - Update the `ReconcileOutcome` type and its users, with tests in the debouncer, health and reconciler.
 - **12e. Voice and audio never block (review M2).** Media kinds `voice` and `audio` never block reconciliation in 2a, because nothing is read from them.
 - **12f. Forwarded rendering (D2).** Forwarded media renders as listed under D2.
+- **12g. Budget waits are bounded like any other (controller, 22 Oct 2026).** Replaces 12c. A row deferred for `spend_cap` blocks only the normal 30-minute wait from `max(createdAt, startedAt)`, then renders "still being read" and the batch goes ahead. A scan whose spend hold does not fit must not freeze the client's text tracking until the next day. The message is re-queued once the file is read (12h, Job C item 0).
 
 ## Task 13: upload client files to Drive
 
@@ -217,7 +218,7 @@ Every task's implementer applies the items listed under its task, in addition to
   - the separate `media` table (§5.5);
   - the forwarded-media rule (D2);
   - local file names `<message-id>-<media-id>.<ext>` (4a), replacing §5.6's `<message-id>.<ext>`;
-  - the media wait (12a, 12c): a batch waits for its files, but a pending file stops blocking after 30 minutes counted from service start or ingest, whichever is later. A file deferred by the spend cap blocks until 30 minutes after the next IST midnight. This refines §6.1;
+  - the media wait (12a, 12g): a batch waits for its files, but a pending file stops blocking after 30 minutes counted from service start or ingest, whichever is later. A file deferred by the spend cap gets the same 30 minutes, no longer. This refines §6.1;
   - the cost of one image description is about 1–4 US cents on the high-resolution tier, correcting §14's "< $0.01".
 - **16c. Runbook.** It covers:
   - the `<message-id>-<media-id>` file names;

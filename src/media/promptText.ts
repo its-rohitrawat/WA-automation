@@ -1,7 +1,6 @@
 import type { Db } from '../store/db.ts';
 import { mediaForMessages, type MediaKind, type MediaRow } from '../store/media.ts';
 import type { MessageRow } from '../store/messages.ts';
-import { fromIstDate, istDate } from '../util/time.ts';
 import { formatDuration, formatSize, FORWARDED_NOT_DESCRIBED, typeLabel } from './labels.ts';
 import { sanitizeFileName } from './paths.ts';
 import { MEDIA_LIMITS } from './types.ts';
@@ -22,10 +21,6 @@ export const MEDIA_PROMPT_LIMITS: MediaPromptLimits = { perMessage: 20_000, perB
  * from the service start, whichever is later, so files saved by `cli link` or left pending at shutdown still get it.
  */
 export const MEDIA_MAX_WAIT_MS = 30 * 60_000;
-
-/** A file waiting for the daily budget blocks until this long after the next midnight IST, when the budget is back. */
-const AFTER_MIDNIGHT_MS = 30 * 60_000;
-const DAY_MS = 86_400_000;
 
 /**
  * A shared file's block on its message line, which prompt.ts renders as {head} or {head: body}.
@@ -159,26 +154,19 @@ export function mediaForPrompt(
   return out;
 }
 
-/** The first midnight IST after the given time, in ms. IST has no daylight saving, so a day is always 24 hours. */
-function nextIstMidnight(iso: string): number {
-  return fromIstDate(istDate(new Date(iso))).getTime() + DAY_MS;
-}
-
 /**
- * True while the reconciler should wait for this file (spec §6.1, amendments 12a, 12c, 12e, 10d).
+ * True while the reconciler should wait for this file (spec §6.1, amendments 12a, 12e, 12g, 10d).
  * - Only images and documents that are still pending can block: nothing is read from voice notes or audio files in Phase 2a.
  * - A pending file blocks for MEDIA_MAX_WAIT_MS, counted from its arrival or from startedAt (the service start), whichever is later.
- *   This includes a file the media queue keeps retrying because Claude is unavailable (error code ai_unavailable), for up to 24 hours.
- * - A file deferred by the daily spend cap blocks until 30 minutes after the next midnight IST after it was deferred,
- *   when the budget is back; the reconciler could not run before then either. A service start still gives it the 30 minutes above.
+ *   This includes a file the media queue keeps retrying because Claude is unavailable (error code ai_unavailable), for up to
+ *   24 hours, and a file deferred by the daily spend cap (spend_cap) whose spend hold does not fit (12g): the client's text
+ *   tracking must not stop until the next day.
  * A file that no longer blocks shows as "still being read".
  */
 export function isBlocking(row: MediaRow | undefined, now: Date, startedAt: Date, maxWaitMs = MEDIA_MAX_WAIT_MS): boolean {
   if (!row || row.status !== 'pending') return false;
   if (row.kind !== 'image' && row.kind !== 'document') return false;
-  let until = Math.max(Date.parse(row.createdAt), startedAt.getTime()) + maxWaitMs;
-  if (row.errorCode === 'spend_cap') until = Math.max(until, nextIstMidnight(row.updatedAt) + AFTER_MIDNIGHT_MS);
-  return now.getTime() < until;
+  return now.getTime() < Math.max(Date.parse(row.createdAt), startedAt.getTime()) + maxWaitMs;
 }
 
 /** The queued messages before the first one whose file is still being read. Order is kept. */

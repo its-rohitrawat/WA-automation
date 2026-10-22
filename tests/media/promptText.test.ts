@@ -199,26 +199,48 @@ describe('waiting for files', () => {
     expect(isBlocking(fresh, new Date('2026-10-19T08:28:00.000Z'), startedAt)).toBe(false);
   });
 
-  it('a file waiting for the daily budget blocks until 30 minutes after the next midnight IST, then reads as still being read (12c)', () => {
-    // Deferred at 22:30 IST: the budget comes back at midnight IST (18:30 UTC), and the file stops blocking at 00:30 IST.
-    const capped = pending({ errorCode: 'spend_cap', createdAt: '2026-10-19T05:00:00.000Z', updatedAt: '2026-10-19T17:00:00.000Z' });
+  it('a file waiting for the daily budget blocks only the usual 30 minutes, even when they end before midnight IST (12g)', () => {
+    // Deferred at 13:20 IST. The budget is back only at midnight IST, but the wait ends at 13:40 IST, 30 minutes after arrival.
+    const capped = pending({ errorCode: 'spend_cap', createdAt: '2026-10-19T07:40:00.000Z', updatedAt: '2026-10-19T07:50:00.000Z' });
     expect(isBlocking(capped, now, longAgo)).toBe(true);
-    expect(isBlocking(capped, new Date('2026-10-19T18:59:59.999Z'), longAgo)).toBe(true);
-    expect(isBlocking(capped, new Date('2026-10-19T19:00:00.000Z'), longAgo)).toBe(false);
-    expect(mediaPromptText(capped, 100)).toEqual(said('image, still being read'));
-    // Deferred in the morning: still the same night.
-    expect(isBlocking(pending({ errorCode: 'spend_cap', createdAt: NOW, updatedAt: '2026-10-19T03:00:00.000Z' }), new Date('2026-10-19T19:00:00.000Z'), longAgo)).toBe(false);
-    // Deferred exactly at midnight IST: the next midnight is a day later.
-    const atMidnight = pending({ errorCode: 'spend_cap', createdAt: '2026-10-19T18:00:00.000Z', updatedAt: '2026-10-19T18:30:00.000Z' });
-    expect(isBlocking(atMidnight, new Date('2026-10-20T18:59:00.000Z'), longAgo)).toBe(true);
-    expect(isBlocking(atMidnight, new Date('2026-10-20T19:00:00.000Z'), longAgo)).toBe(false);
+    expect(isBlocking(capped, new Date('2026-10-19T08:09:59.999Z'), longAgo)).toBe(true);
+    expect(isBlocking(capped, new Date('2026-10-19T08:10:00.000Z'), longAgo)).toBe(false);
+    expect(isBlocking(capped, new Date('2026-10-19T08:11:00.000Z'), longAgo)).toBe(false);
+    // Counted from the service start when that is later: started at 22:40 IST, so the wait ends at 23:10 IST.
+    const startedAt = new Date('2026-10-19T17:10:00.000Z');
+    expect(isBlocking(capped, new Date('2026-10-19T17:39:59.999Z'), startedAt)).toBe(true);
+    expect(isBlocking(capped, new Date('2026-10-19T17:40:00.000Z'), startedAt)).toBe(false);
+    expect(isBlocking(capped, new Date('2026-10-19T17:41:00.000Z'), startedAt)).toBe(false);
   });
 
-  it('a file waiting for the budget still gets the 30 minutes after a service start, like any other file', () => {
-    const capped = pending({ errorCode: 'spend_cap', createdAt: '2026-10-19T05:00:00.000Z', updatedAt: '2026-10-19T17:00:00.000Z' });
-    const startedAt = new Date('2026-10-20T09:00:00.000Z');
-    expect(isBlocking(capped, new Date('2026-10-20T09:10:00.000Z'), startedAt)).toBe(true);
-    expect(isBlocking(capped, new Date('2026-10-20T09:30:00.000Z'), startedAt)).toBe(false);
+  it('after the wait a file waiting for the daily budget reads as still being read, and the messages after it go ahead (12g)', () => {
+    const capped = pending({ messageId: 2, errorCode: 'spend_cap', createdAt: '2026-10-19T07:40:00.000Z', updatedAt: '2026-10-19T07:50:00.000Z' });
+    const media = new Map([[2, capped]]);
+    expect(readyPrefix([msg(1), msg(2), msg(3)], media, now, longAgo).map((m) => m.id)).toEqual([1]);
+    expect(readyPrefix([msg(1), msg(2), msg(3)], media, new Date('2026-10-19T08:10:00.000Z'), longAgo).map((m) => m.id)).toEqual([1, 2, 3]);
+    expect(mediaPromptTexts(media, [msg(1), msg(2), msg(3)], []).get(2)).toEqual(said('image, still being read'));
+  });
+
+  it('a file waiting for the daily budget blocks exactly like a file waiting for Claude to come back (12g, 10d)', () => {
+    const deferred = (errorCode: string) => pending({ messageId: 2, errorCode, createdAt: '2026-10-19T07:40:00.000Z', updatedAt: '2026-10-19T07:50:00.000Z' });
+    const lateStart = new Date('2026-10-19T17:10:00.000Z');
+    const cases: [string, Date][] = [
+      ['2026-10-19T08:00:00.000Z', longAgo],
+      ['2026-10-19T08:10:00.000Z', longAgo],
+      ['2026-10-19T12:00:00.000Z', longAgo],
+      ['2026-10-19T18:59:00.000Z', longAgo],
+      ['2026-10-19T19:00:00.000Z', longAgo],
+      ['2026-10-19T17:39:00.000Z', lateStart],
+      ['2026-10-19T17:40:00.000Z', lateStart],
+      ['2026-10-19T18:59:00.000Z', lateStart],
+    ];
+    for (const [at, startedAt] of cases) {
+      const t = new Date(at);
+      expect(isBlocking(deferred('spend_cap'), t, startedAt), at).toBe(isBlocking(deferred('ai_unavailable'), t, startedAt));
+      const ids = (code: string) => readyPrefix([msg(1), msg(2), msg(3)], new Map([[2, deferred(code)]]), t, startedAt).map((m) => m.id);
+      expect(ids('spend_cap'), at).toEqual(ids('ai_unavailable'));
+    }
+    expect(mediaPromptText(deferred('spend_cap'), 100)).toEqual(mediaPromptText(deferred('ai_unavailable'), 100));
   });
 
   it('a file waiting for Claude to come back blocks only for the usual 30 minutes, then reads as still being read (10d)', () => {
