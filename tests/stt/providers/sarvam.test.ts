@@ -233,6 +233,14 @@ describe('SarvamProvider', () => {
     expect(calls.filter((c) => c.url.endsWith('/status'))).toHaveLength(1);
   });
 
+  it('keeps the job when a status check is refused for a bad key, so it can be fetched once the key is fixed', async () => {
+    const { http } = fakeSarvam({ statusMisses: [401, 401, 401, 401, 401], states: ['Completed'] });
+    const err = await provider(http).transcribe(audio, { diarize: true }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SttNoAnswerError);
+    expect(err).not.toBeInstanceOf(SttJobLostError);
+    expect((err as SttNoAnswerError).code).toBe('status_unavailable');
+  });
+
   it('counts a redirect on a status check as a missed check, not as a lost job', async () => {
     const { http } = fakeSarvam({ statusMisses: [302], states: ['Completed'] });
     const r = await provider(http).transcribe(audio, { diarize: true });
@@ -242,8 +250,8 @@ describe('SarvamProvider', () => {
   it('reports a download refused for good as a lost job', async () => {
     const cases = [
       [{ blobStatus: 404 }, 'download_http_404'],
-      [{ blobStatus: 403 }, 'download_http_403'],
       [{ downloadStatus: 404 }, 'download_http_404'],
+      [{ downloadStatus: 403 }, 'download_http_403'],
     ] as const;
     for (const [opts, code] of cases) {
       const { http } = fakeSarvam(opts);
@@ -259,6 +267,9 @@ describe('SarvamProvider', () => {
       [{ blobStatus: 500 }, 'download_http_500'],
       [{ blobStatus: 429 }, 'download_http_429'],
       [{ downloadStatus: 408 }, 'download_http_408'],
+      // A bad or revoked key passes once it is fixed; an expired signed link is replaced on the next resume.
+      [{ downloadStatus: 401 }, 'download_http_401'],
+      [{ blobStatus: 403 }, 'download_http_403'],
     ] as const;
     for (const [opts, code] of cases) {
       const { http } = fakeSarvam(opts);

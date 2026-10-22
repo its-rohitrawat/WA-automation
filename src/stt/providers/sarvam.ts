@@ -151,7 +151,13 @@ export class SarvamProvider implements SttProvider {
 
   async #download(jobId: string, name: string): Promise<unknown> {
     const urls = parseAnswer(DownloadSchema, await this.#post('/download-files', { job_id: jobId, files: [name] }), 'unreadable_download_urls');
-    return await requestJson(this.#http, storageUrl(urls.download_urls[name]?.file_url), { method: 'GET', signal: AbortSignal.timeout(5 * 60_000) });
+    try {
+      return await requestJson(this.#http, storageUrl(urls.download_urls[name]?.file_url), { method: 'GET', signal: AbortSignal.timeout(5 * 60_000) });
+    } catch (e) {
+      // A 403 from the signed link usually means it expired; a later resume asks Sarvam for a fresh one.
+      if (e instanceof SttHttpError && e.status === 403) throw new SttNoAnswerError('download_http_403');
+      throw e;
+    }
   }
 
   #headers(json: boolean): Record<string, string> {
@@ -172,9 +178,12 @@ export class SarvamProvider implements SttProvider {
   }
 }
 
-/** A 4xx that asking again will not change. 408 (request timeout) and 429 (too many requests) pass with time. */
+/**
+ * A 4xx that asking again will not change. 401 (a bad or revoked key) passes once the key is fixed, so the job stays
+ * waitable; 408 (request timeout) and 429 (too many requests) pass with time.
+ */
 function refusedForGood(e: SttHttpError): boolean {
-  return e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429;
+  return e.status >= 400 && e.status < 500 && e.status !== 401 && e.status !== 408 && e.status !== 429;
 }
 
 /** Storage links come from Sarvam's answer; only https links are followed. */
