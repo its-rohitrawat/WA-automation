@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { SttJobError, SttNoAnswerError, type HttpFetch } from '../../../src/stt/http.ts';
+import { SttHttpError, SttJobError, SttNoAnswerError, type HttpFetch } from '../../../src/stt/http.ts';
 import { SarvamProvider } from '../../../src/stt/providers/sarvam.ts';
 import type { AudioPart } from '../../../src/stt/types.ts';
 
@@ -202,11 +202,11 @@ describe('SarvamProvider', () => {
     });
   });
 
-  it('reports a finished job without an output file as no answer: it ran and is billed', async () => {
+  it('fails a finished job that names no output file, since waiting again would get the same answer', async () => {
     const { http } = fakeSarvam({ states: ['Completed'], detail: { state: 'Success', outputs: [] } });
     const err = await provider(http).transcribe(audio, { diarize: true }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(SttNoAnswerError);
-    expect((err as SttNoAnswerError).code).toBe('no_output_file');
+    expect(err).toBeInstanceOf(SttJobError);
+    expect((err as SttJobError).code).toBe('no_output_file');
   });
 
   it('tolerates four failed status checks in a row', async () => {
@@ -223,11 +223,11 @@ describe('SarvamProvider', () => {
     expect((err as SttNoAnswerError).code).toBe('status_unavailable');
   });
 
-  it('stops polling at a definite refusal, but as no answer: the started job may still run and bill', async () => {
+  it('stops polling at a definite refusal and reports it as an error status', async () => {
     const { http, calls } = fakeSarvam({ statusMisses: [404], states: ['Completed'] });
     const err = await provider(http).transcribe(audio, { diarize: true }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(SttNoAnswerError);
-    expect((err as SttNoAnswerError).code).toBe('status_http_404');
+    expect(err).toBeInstanceOf(SttHttpError);
+    expect((err as SttHttpError).status).toBe(404);
     expect(calls.filter((c) => c.url.endsWith('/status'))).toHaveLength(1);
   });
 

@@ -124,11 +124,9 @@ export class SarvamProvider implements SttProvider {
         status = parseAnswer(StatusSchema, await this.#get(`/${jobId}/status`), 'unreadable_status');
         misses = 0;
       } catch (e) {
-        // A definite refusal of the status check will not pass by asking again, so polling stops. It stays "no answer":
-        // the job has started and may still run and bill, and its saved id lets --retry-unknown wait on it for free.
-        if (e instanceof SttHttpError && e.status < 500 && e.status !== 408 && e.status !== 429) {
-          throw new SttNoAnswerError(`status_http_${e.status}`);
-        }
+        // A definite refusal (bad key, a job Sarvam no longer knows) will not pass by asking again. It is "failed", not
+        // "unknown": waiting on the same job id would only meet the same refusal, so --retry-failed is the way forward.
+        if (e instanceof SttHttpError && e.status < 500 && e.status !== 408 && e.status !== 429) throw e;
         // A status check is free, so a few failures in a row are tolerated.
         if (++misses >= MAX_STATUS_MISSES) throw new SttNoAnswerError('status_unavailable');
       }
@@ -138,8 +136,8 @@ export class SarvamProvider implements SttProvider {
         // A completed job may list its file without a state of its own; only a state other than Success is a failure.
         const fileFailed = detail?.state != null && detail.state !== 'Success';
         if (status.job_state === 'Failed' || fileFailed) throw new SttJobError(codeOf(detail?.state ?? status.job_state));
-        // Finished, not failed, yet no result named: the work ran and is billed, so this is no answer, not a failure.
-        if (!name) throw new SttNoAnswerError('no_output_file');
+        // Finished yet naming no result: the same job would answer the same way, so this is a failure of the job.
+        if (!name) throw new SttJobError('no_output_file');
         return name;
       }
       if (this.#now() >= deadline) throw new SttNoAnswerError('job_wait_timeout');
