@@ -1,4 +1,4 @@
-import { isSafeMediaAddress, mediaRefAad, type MediaRefSealer } from '../media/ref.ts';
+import { isSafeMediaAddress, isSafeMediaUrl, mediaRefAad, type MediaRefSealer } from '../media/ref.ts';
 import { MEDIA_LIMITS, type MediaInfo, type MediaRef } from '../media/types.ts';
 import { getClientByGroupId } from '../store/clients.ts';
 import { tx, type Db } from '../store/db.ts';
@@ -31,7 +31,9 @@ export function planMedia(info: MediaInfo, seal: ((ref: MediaRef) => Buffer) | n
   // The address comes from the sender's phone: one that does not point at WhatsApp's media servers is never sealed.
   if (!isSafeMediaAddress(info.ref)) return { status: 'unavailable', errorCode: 'bad_address', refEnc: null };
   if (!seal) return { status: 'unavailable', errorCode: 'not_downloaded', refEnc: null };
-  return { status: 'pending', errorCode: null, refEnc: seal(info.ref) };
+  // With a direct path the url is never used, so a url that does not itself point at WhatsApp's media servers is not stored.
+  const ref = info.ref.directPath && !isSafeMediaUrl(info.ref.url) ? { ...info.ref, url: null } : info.ref;
+  return { status: 'pending', errorCode: null, refEnc: seal(ref) };
 }
 
 export class Ingestor {

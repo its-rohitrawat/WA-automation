@@ -137,6 +137,47 @@ describe('Ingestor with shared files', () => {
     expect(onQueued).not.toHaveBeenCalled();
   });
 
+  it('tells the listener about a queued file only after the commit, so a failing listener cannot undo the stored rows', () => {
+    const { db, onNew, onQueued, ing } = setup();
+    let inTransaction: boolean | undefined;
+    onQueued.mockImplementation(() => {
+      inTransaction = db.inTransaction;
+      throw new Error('listener failed');
+    });
+    expect(() => ing.handle(image('IMG1'))).toThrow('listener failed');
+    expect(inTransaction).toBe(false);
+    expect(messageCount(db)).toBe(1);
+    expect(getMedia(db, mediaIds(db)[0]!)).toMatchObject({ status: 'pending', hasRef: true });
+    expect(onNew).toHaveBeenCalledTimes(1);
+  });
+
+  it('seals only addresses that pass the check: beside a direct path, a url that is not on WhatsApp is dropped, not stored', () => {
+    const { db, sealer, ing } = setup();
+    ing.handle(image('U1'));
+    ing.handle(image('U2', { url: 'https://evil.example/steal' }));
+    ing.handle(image('U3', { url: 'https://10.0.0.5:8443/x' }));
+    ing.handle(image('U4', { url: `https://mmg.whatsapp.net/${'a'.repeat(3_000)}` }));
+    const opened = mediaIds(db).map((id, i) => sealer.open(getMediaRef(db, id)!, mediaRefAad(1, `U${i + 1}`)));
+    const mediaKey = MEDIA_KEY.toString('base64');
+    expect(opened).toEqual([
+      // What WhatsApp sends is kept as it is.
+      { contentType: 'imageMessage', url: 'https://mmg.whatsapp.net/v/t1', directPath: '/v/t1', mediaKey },
+      { contentType: 'imageMessage', url: null, directPath: '/v/t1', mediaKey },
+      { contentType: 'imageMessage', url: null, directPath: '/v/t1', mediaKey },
+      { contentType: 'imageMessage', url: null, directPath: '/v/t1', mediaKey },
+    ]);
+    // The file is still downloaded from the direct path.
+    expect(mediaIds(db).map((id) => getMedia(db, id)!.status)).toEqual(['pending', 'pending', 'pending', 'pending']);
+  });
+
+  it('refuses an overlong direct path and never seals it', () => {
+    const { db, seal, onQueued, ing } = setup();
+    ing.handle(image('L1', { directPath: `/${'a'.repeat(10_000)}` }));
+    expect(db.prepare('SELECT status, error_code AS e, ref_enc AS r FROM media').get()).toEqual({ status: 'unavailable', e: 'bad_address', r: null });
+    expect(seal).not.toHaveBeenCalled();
+    expect(onQueued).not.toHaveBeenCalled();
+  });
+
   it('planMedia decides from the details alone', () => {
     const seal = vi.fn(() => Buffer.from('sealed'));
     const ref: MediaRef = { contentType: 'documentMessage', url: 'https://mmg.whatsapp.net/d/f', directPath: null, mediaKey: 'k' };
@@ -152,5 +193,34 @@ describe('Ingestor with shared files', () => {
     expect(planMedia(bad, seal)).toEqual({ status: 'unavailable', errorCode: 'bad_address', refEnc: null });
     expect(planMedia(bad, null)).toEqual({ status: 'unavailable', errorCode: 'bad_address', refEnc: null });
     expect(seal).not.toHaveBeenCalled();
+  });
+
+  it('planMedia downloads a file of exactly 50 MiB, and refuses one byte more without sealing it', () => {
+    const seal = vi.fn(() => Buffer.from('sealed'));
+    const sized = (fileSize: number): MediaInfo => ({
+      kind: 'image', mimeType: 'image/jpeg', fileName: null, fileSize, seconds: null, viewOnce: false, forwarded: false,
+      ref: { contentType: 'imageMessage', url: null, directPath: '/v/t1', mediaKey: 'k' },
+    });
+    expect(planMedia(sized(50 * 1024 * 1024), seal)).toEqual({ status: 'pending', errorCode: null, refEnc: Buffer.from('sealed') });
+    expect(seal).toHaveBeenCalledTimes(1);
+    seal.mockClear();
+    expect(planMedia(sized(50 * 1024 * 1024 + 1), seal)).toEqual({ status: 'unavailable', errorCode: 'too_large', refEnc: null });
+    expect(seal).not.toHaveBeenCalled();
+  });
+
+  it('planMedia keeps a url beside a direct path only when the url is itself on WhatsApp, and keeps a url used alone', () => {
+    const seal = vi.fn((_ref: MediaRef) => Buffer.from('sealed'));
+    const ref: MediaRef = { contentType: 'imageMessage', url: 'https://mmg.whatsapp.net/v/t1', directPath: '/v/t1', mediaKey: 'k' };
+    const info: MediaInfo = { kind: 'image', mimeType: 'image/jpeg', fileName: null, fileSize: 10, seconds: null, viewOnce: false, forwarded: false, ref };
+    for (const r of [ref, { ...ref, url: 'https://evil.example/steal' }, { ...ref, url: '' }, { ...ref, directPath: null }, { ...ref, directPath: '' }]) {
+      expect(planMedia({ ...info, ref: r }, seal)).toMatchObject({ status: 'pending' });
+    }
+    expect(seal.mock.calls.map(([sealed]) => sealed)).toEqual([
+      ref,
+      { ...ref, url: null },
+      { ...ref, url: null },
+      { ...ref, directPath: null },
+      { ...ref, directPath: '' },
+    ]);
   });
 });

@@ -18,7 +18,17 @@ function isRef(x: unknown): x is MediaRef {
 /** Starts with '/', and has no whitespace, backslash or '@', so it cannot change the host it is appended to. */
 const DIRECT_PATH = /^\/[^\s\\@]*$/;
 
+/** Longer download addresses are refused. The ones WhatsApp sends are a few hundred characters. */
+const MAX_ADDRESS_CHARS = 2_048;
+
 const isWhatsAppMediaHost = (hostname: string): boolean => hostname === 'mmg.whatsapp.net' || hostname.endsWith('.whatsapp.net');
+
+/** Whether a url is a plain https address on WhatsApp's media servers, as a url used without a direct path must be. */
+export function isSafeMediaUrl(url: string | null): boolean {
+  if (!url || url.length > MAX_ADDRESS_CHARS) return false;
+  const u = URL.parse(url);
+  return u !== null && u.protocol === 'https:' && isWhatsAppMediaHost(u.hostname) && u.port === '' && u.username === '' && u.password === '';
+}
 
 /**
  * Whether a file's download address points at WhatsApp's media servers. The address comes from the sender's phone, so
@@ -26,14 +36,13 @@ const isWhatsAppMediaHost = (hostname: string): boolean => hostname === 'mmg.wha
  *
  * Baileys downloads from `https://<host><directPath>` whenever there is a direct path, so a direct path must be safe on
  * its own, whatever the url says. The url is then never used: the downloader must fetch from mmg.whatsapp.net plus the
- * direct path and never let the url choose the host. Only without a direct path is the url used, and then it must be a
- * plain https address on WhatsApp's media servers. An empty string counts as absent, as it does for Baileys.
+ * direct path and never let the url choose the host (ingest does not even store a url that fails isSafeMediaUrl). Only
+ * without a direct path is the url used, and then it must pass isSafeMediaUrl. An empty string counts as absent, as it
+ * does for Baileys. Addresses longer than MAX_ADDRESS_CHARS are refused.
  */
 export function isSafeMediaAddress(ref: Pick<MediaRef, 'url' | 'directPath'>): boolean {
-  if (ref.directPath) return DIRECT_PATH.test(ref.directPath);
-  if (!ref.url) return false;
-  const u = URL.parse(ref.url);
-  return u !== null && u.protocol === 'https:' && isWhatsAppMediaHost(u.hostname) && u.port === '' && u.username === '' && u.password === '';
+  if (ref.directPath) return ref.directPath.length <= MAX_ADDRESS_CHARS && DIRECT_PATH.test(ref.directPath);
+  return isSafeMediaUrl(ref.url);
 }
 
 /** Binds a sealed value to its client and message, so it cannot be moved to another row. */

@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { getUrlFromDirectPath } from 'baileys';
 import { describe, expect, it } from 'vitest';
 import { decrypt } from '../../src/crypto/envelope.ts';
-import { isSafeMediaAddress, mediaRefAad, MediaRefSealer } from '../../src/media/ref.ts';
+import { isSafeMediaAddress, isSafeMediaUrl, mediaRefAad, MediaRefSealer } from '../../src/media/ref.ts';
 import type { MediaRef } from '../../src/media/types.ts';
 
 const MEDIA_KEY = Buffer.alloc(32, 9);
@@ -36,6 +36,26 @@ describe('MediaRefSealer', () => {
     const master = randomBytes(32);
     const blob = new MediaRefSealer(master).seal(ref, 'aad');
     expect(() => decrypt(master, blob, Buffer.from('aad', 'utf8'))).toThrow();
+  });
+
+  it('refuses a value of the wrong shape, even one sealed with the same key for the same message', () => {
+    const s = new MediaRefSealer(randomBytes(32));
+    const aad = mediaRefAad(1, 'IMG1');
+    const wrong: [string, unknown][] = [
+      ['null', null],
+      ['a string', 'imageMessage'],
+      ['a video', { ...ref, contentType: 'videoMessage' }],
+      ['no content type', { ...ref, contentType: undefined }],
+      ['a numeric media key', { ...ref, mediaKey: 42 }],
+      ['no media key', { ...ref, mediaKey: undefined }],
+      ['no url', { ...ref, url: undefined }],
+      ['a numeric url', { ...ref, url: 42 }],
+      ['no direct path', { ...ref, directPath: undefined }],
+      ['a numeric direct path', { ...ref, directPath: 42 }],
+    ];
+    for (const [label, value] of wrong) {
+      expect(() => s.open(s.seal(value as MediaRef, aad), aad), label).toThrow('Sealed media details have the wrong shape');
+    }
   });
 });
 
@@ -85,6 +105,26 @@ describe('isSafeMediaAddress (amendment 3a, review C2)', () => {
       'http://mmg.whatsapp.net/x', 'ftp://mmg.whatsapp.net/x', 'https://[::1]/x', 'mmg.whatsapp.net/x', 'u',
     ]) {
       expect(isSafeMediaAddress(at(url, null)), url).toBe(false);
+    }
+  });
+
+  it('refuses addresses longer than 2,048 characters', () => {
+    const path = (chars: number) => `/${'a'.repeat(chars - 1)}`;
+    const url = (chars: number) => `https://mmg.whatsapp.net/${'a'.repeat(chars - 'https://mmg.whatsapp.net/'.length)}`;
+    expect([path(2_048).length, url(2_048).length]).toEqual([2_048, 2_048]);
+    expect(isSafeMediaAddress(at(null, path(2_048)))).toBe(true);
+    expect(isSafeMediaAddress(at(null, path(2_049)))).toBe(false);
+    expect(isSafeMediaAddress(at('https://mmg.whatsapp.net/v/t1', path(2_049))), 'a good url does not rescue a long direct path').toBe(false);
+    expect(isSafeMediaAddress(at(null, path(5 * 1024 * 1024)))).toBe(false);
+    expect(isSafeMediaAddress(at(url(2_048), null))).toBe(true);
+    expect(isSafeMediaAddress(at(url(2_049), null))).toBe(false);
+  });
+
+  it('isSafeMediaUrl checks a url on its own, the way a url used without a direct path is checked', () => {
+    expect(isSafeMediaUrl('https://mmg.whatsapp.net/v/t1')).toBe(true);
+    expect(isSafeMediaUrl('https://media-bom1-1.cdn.whatsapp.net/v/t1?x=1')).toBe(true);
+    for (const u of [null, '', 'https://evil.com/x', 'https://10.0.0.5:8443/x', 'http://mmg.whatsapp.net/x', 'https://mmg.whatsapp.net:8443/x', '/v/t1']) {
+      expect(isSafeMediaUrl(u), String(u)).toBe(false);
     }
   });
 

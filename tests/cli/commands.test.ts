@@ -393,6 +393,32 @@ describe('list-groups', () => {
     await lockIsFree();
   });
 
+  it('saves the download details of a shared image sealed under the master key, for the service to fetch later', async () => {
+    await seedSession();
+    vi.useFakeTimers();
+    const p = listGroupsCommand(deps());
+    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    const sock = sockets[0]!;
+    sock.emit('connection.update', { connection: 'open' });
+    const mediaKey = Buffer.alloc(32, 9);
+    sock.emit('messages.upsert', { type: 'notify', messages: [
+      waRaw('img1', { imageMessage: { url: 'https://mmg.whatsapp.net/v/x', directPath: '/v/x', mediaKey, mimetype: 'image/jpeg' } }, { group: MEHTA.groupId }),
+    ] });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await p;
+    const db = openDb(trackerDbPath(dataDir));
+    try {
+      const row = db.prepare('SELECT status, ref_enc, client_id FROM media').get() as { status: string; ref_enc: Buffer; client_id: number };
+      expect(row.status).toBe('pending');
+      expect(row.ref_enc.includes(mediaKey)).toBe(false);
+      expect(new MediaRefSealer(KEY).open(row.ref_enc, mediaRefAad(row.client_id, 'img1'))).toMatchObject({ directPath: '/v/x', mediaKey: mediaKey.toString('base64') });
+    } finally {
+      db.close();
+    }
+    expect(sendCalls().every((n) => n === 0)).toBe(true);
+    await lockIsFree();
+  });
+
   it('works with an empty allow-list', async () => {
     writeFileSync(groupsFile, '{ "clients": [] }');
     await seedSession();
