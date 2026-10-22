@@ -50,6 +50,22 @@ describe('normalizeMessage media details', () => {
   it('has no download details without a media key or an address', () => {
     expect(media(normalizeMessage(waRaw('n1', { imageMessage: { url: 'u' } })))!.ref).toBeNull();
     expect(media(normalizeMessage(waRaw('n2', { imageMessage: { mediaKey: KEY } })))!.ref).toBeNull();
+    // An empty key can never decrypt the file.
+    expect(media(normalizeMessage(waRaw('n3', { imageMessage: { url: 'https://mmg.whatsapp.net/a', mediaKey: new Uint8Array(0) } })))!.ref).toBeNull();
+  });
+
+  it('keeps download details with a direct path and no url', () => {
+    expect(media(normalizeMessage(waRaw('dp1', { imageMessage: { directPath: '/v/t1', mediaKey: KEY } })))!.ref)
+      .toEqual({ contentType: 'imageMessage', url: null, directPath: '/v/t1', mediaKey: KEY.toString('base64') });
+  });
+
+  it('drops a declared size or length that is negative or not a finite number', () => {
+    const size = (fileLength: unknown) => media(normalizeMessage(waRaw('s1', { documentMessage: { url: 'u', mediaKey: KEY, fileLength: fileLength as never } })))!.fileSize;
+    for (const [label, v] of [['-5', -5], ['NaN', NaN], ['Infinity', Infinity], ['Long -1', { toNumber: () => -1 }]] as const) expect(size(v), label).toBeNull();
+    expect(size(10.7)).toBe(10);
+    const seconds = (s: number) => media(normalizeMessage(waRaw('s2', { audioMessage: { url: 'u', mediaKey: KEY, ptt: true, seconds: s } })))!.seconds;
+    for (const v of [-1, NaN, Infinity]) expect(seconds(v), String(v)).toBeNull();
+    expect(seconds(3.9)).toBe(3);
   });
 
   it('caps the untrusted file name and adds nothing to other messages', () => {
@@ -57,6 +73,13 @@ describe('normalizeMessage media details', () => {
     expect(media(normalizeMessage(waRaw('d2', { documentMessage: { url: 'u', mediaKey: KEY, fileName: long } })))!.fileName).toHaveLength(255);
     expect(normalizeMessage(waText('t1', 'hello'))).not.toHaveProperty('media');
     expect(media(normalizeMessage(waRaw('loc', { locationMessage: {} })))).toBeUndefined();
+  });
+
+  it('caps the untrusted file type, and cuts by whole characters', () => {
+    expect(media(normalizeMessage(waRaw('d3', { documentMessage: { url: 'u', mediaKey: KEY, mimetype: 'x'.repeat(500) } })))!.mimeType).toHaveLength(100);
+    // An emoji is two UTF-16 units; the cut must not leave half of one at the end.
+    expect(media(normalizeMessage(waRaw('d4', { documentMessage: { url: 'u', mediaKey: KEY, fileName: '\u{1F600}'.repeat(300) } })))!.fileName)
+      .toBe('\u{1F600}'.repeat(255));
   });
 });
 
@@ -75,6 +98,21 @@ describe('view-once detection follows Baileys unwrapping (amendment 2a)', () => 
       'ephemeralMessage', 'viewOnceMessage', 'documentWithCaptionMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension',
       'editedMessage', 'associatedChildMessage', 'groupStatusMessage', 'groupStatusMessageV2',
     ]));
+  });
+
+  it('sees a file wrapped directly in each view-once wrapper (owner decision D1)', () => {
+    const VIEW_ONCE = ['viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension'];
+    // Baileys opens no other view-once wrapper.
+    expect(OPENED.filter((w) => w.startsWith('viewOnce')).sort()).toEqual(VIEW_ONCE);
+    // WhatsApp sends a view-once voice note in viewOnceMessageV2Extension, with no other view-once layer inside it.
+    const voice = (): proto.IMessage => ({ audioMessage: { url: 'https://mmg.whatsapp.net/a', mediaKey: KEY, ptt: true } });
+    for (const w of VIEW_ONCE) {
+      for (const [file, kind] of [[plainImage(), 'image'], [voice(), 'voice']] as const) {
+        expect(media(normalizeMessage(waRaw('vo9', wrap(w, file)))), `${kind} in ${w}`).toMatchObject({ kind, viewOnce: true, ref: null });
+        expect(media(normalizeMessage(waRaw('vo10', wrap('ephemeralMessage', wrap(w, file))))), `${kind} in ephemeral ${w}`)
+          .toMatchObject({ kind, viewOnce: true, ref: null });
+      }
+    }
   });
 
   it('sees view-once media inside every wrapper Baileys opens', () => {
@@ -138,5 +176,34 @@ describe('forwarded files (owner decision D2, amendment 2b)', () => {
       documentWithCaptionMessage: { message: { documentMessage: { url: 'u', mediaKey: KEY, fileName: 'a.pdf', caption: 'see', contextInfo: { forwardingScore: 1 } } } },
     }));
     expect(media(e)).toMatchObject({ kind: 'document', forwarded: true });
+  });
+
+  it('reads the flag on voice notes, videos and view-once media', () => {
+    const voice = normalizeMessage(waRaw('f7', { audioMessage: { url: 'https://mmg.whatsapp.net/a', mediaKey: KEY, ptt: true, contextInfo: { isForwarded: true } } }));
+    expect(media(voice)).toMatchObject({ kind: 'voice', forwarded: true, ref: { contentType: 'audioMessage' } });
+    const video = normalizeMessage(waRaw('f8', { videoMessage: { url: 'u', mediaKey: KEY, contextInfo: { forwardingScore: 2 } } }));
+    expect(media(video)).toMatchObject({ kind: 'video', forwarded: true, ref: null });
+    const once = normalizeMessage(waRaw('f9', wrap('viewOnceMessageV2', { imageMessage: { ...plainImage().imageMessage, contextInfo: { isForwarded: true } } })));
+    expect(media(once)).toMatchObject({ kind: 'image', viewOnce: true, forwarded: true, ref: null });
+  });
+});
+
+/** Real messages are decoded protobufs: unset fields are null on the prototype and 64-bit numbers are Longs. */
+const decoded = (m: proto.IMessage): proto.IMessage => proto.Message.decode(proto.Message.encode(proto.Message.fromObject(m)).finish());
+
+describe('decoded protobuf messages, as WhatsApp delivers them', () => {
+  it('reads a Long file size above 2^32 and the forwarding score', () => {
+    const size = 5_000_000_000;
+    const message = decoded({ imageMessage: { ...plainImage().imageMessage, fileLength: size, contextInfo: { forwardingScore: 2 } } });
+    expect(typeof message.imageMessage?.fileLength).toBe('object'); // the test's premise: a Long, not a number
+    expect(media(normalizeMessage(waRaw('p1', message)))).toEqual({
+      kind: 'image', mimeType: 'image/jpeg', fileName: null, fileSize: size, seconds: null, viewOnce: false, forwarded: true,
+      ref: { contentType: 'imageMessage', url: 'https://mmg.whatsapp.net/v/t1', directPath: '/v/t1', mediaKey: KEY.toString('base64') },
+    });
+  });
+
+  it('sees a view-once voice note inside a disappearing-message wrapper', () => {
+    const message = decoded(wrap('ephemeralMessage', wrap('viewOnceMessageV2Extension', { audioMessage: { url: 'https://mmg.whatsapp.net/a', mediaKey: KEY, ptt: true, seconds: 9 } })));
+    expect(media(normalizeMessage(waRaw('p2', message)))).toMatchObject({ kind: 'voice', seconds: 9, viewOnce: true, forwarded: false, ref: null });
   });
 });
