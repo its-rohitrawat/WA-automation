@@ -136,7 +136,7 @@ const items = buildPlan({
   samples: measured,
   providers: [...providers.values()],
   stateOf: (s, p) => ledger.state(s, p),
-  hasJobId: (s, p) => Object.keys(ledger.attempt(s, p)?.jobIds ?? {}).length > 0,
+  canResume: (s, p, parts) => ledger.canResume(s, p, parts),
   retryFailed: values['retry-failed'],
   retryUnknown: values['retry-unknown'],
   inrPerUsd: env.INR_PER_USD,

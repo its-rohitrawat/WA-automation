@@ -164,6 +164,19 @@ export class Ledger {
     return saved.result;
   }
 
+  /**
+   * True when every part n < parts has a saved job id to wait on or a saved answer, so going on costs nothing. Whether a
+   * saved answer fits today's cut is only known once the audio is split; the runner checks that before sending.
+   */
+  canResume(sampleId: string, provider: ProviderId, parts: number): boolean {
+    if (parts < 1) return false;
+    const jobIds = this.attempt(sampleId, provider)?.jobIds ?? {};
+    for (let n = 0; n < parts; n++) {
+      if (!jobIds[String(n)] && !existsSync(this.#file(sampleId, provider, `.part-${n}`))) return false;
+    }
+    return true;
+  }
+
   savePart(sampleId: string, provider: ProviderId, n: number, cut: PartCut, result: ProviderResult): void {
     const saved: SavedPart = { offset: cut.offset, seconds: cut.seconds, result };
     this.#write(this.#file(sampleId, provider, `.part-${n}`), saved);

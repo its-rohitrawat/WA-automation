@@ -25,16 +25,19 @@ export interface PlanInput {
   samples: readonly { sample: Sample; seconds: number }[];
   providers: readonly { id: ProviderId; maxPartSeconds: number }[];
   stateOf: (sampleId: string, provider: ProviderId) => SlotState;
-  /** True when an unanswered slot has a saved provider job id to wait on. */
-  hasJobId: (sampleId: string, provider: ProviderId) => boolean;
+  /**
+   * True when going on with an unanswered slot is free: every part n < parts has a saved provider job id to wait on or
+   * a saved answer. Otherwise it is a new send, estimated in full.
+   */
+  canResume: (sampleId: string, provider: ProviderId, parts: number) => boolean;
   retryFailed: boolean;
   retryUnknown: boolean;
   inrPerUsd: number;
 }
 
-function actionFor(state: SlotState, input: PlanInput, sampleId: string, provider: ProviderId): Action {
+function actionFor(state: SlotState, input: PlanInput, sampleId: string, provider: ProviderId, parts: number): Action {
   if (state === 'new' || (state === 'failed' && input.retryFailed)) return 'send';
-  if (state === 'unknown' && input.retryUnknown) return input.hasJobId(sampleId, provider) ? 'resume' : 'send';
+  if (state === 'unknown' && input.retryUnknown) return input.canResume(sampleId, provider, parts) ? 'resume' : 'send';
   return 'skip';
 }
 
@@ -46,14 +49,15 @@ export function buildPlan(input: PlanInput): PlanItem[] {
       const diarize = sample.kind === 'meeting';
       const price = modelFor(p.id, diarize);
       const state = input.stateOf(sample.id, p.id);
-      const action = actionFor(state, input, sample.id, p.id);
+      const parts = Math.max(1, Math.ceil(seconds / p.maxPartSeconds));
+      const action = actionFor(state, input, sample.id, p.id, parts);
       items.push({
         sample,
         seconds,
         provider: p.id,
         model: price.model,
         diarize,
-        parts: Math.max(1, Math.ceil(seconds / p.maxPartSeconds)),
+        parts,
         state,
         action,
         estimateUsd: action === 'send' ? costUsd(price, seconds, input.inrPerUsd) : 0,

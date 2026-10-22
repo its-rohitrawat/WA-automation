@@ -211,6 +211,20 @@ describe('runPlan', () => {
     expect(lines.some((l) => l.includes('part_cache_mismatch'))).toBe(true);
   });
 
+  it('sends nothing for a resume when a part has neither a job id nor a saved answer', async () => {
+    ledger.begin({ sampleId: 'meeting-b', provider: 'openai', model: 'gpt-4o-transcribe-diarize', startedAt: '2026-10-22T10:00:00.000Z', jobIds: { '0': 'job-0' }, sends: [] });
+    const p = new FakeProvider('openai', 300);
+    const sum = await runPlan(
+      [item(meeting, 'openai', { seconds: 400, parts: 2, state: 'unknown', action: 'resume', estimateUsd: 0 })],
+      deps([p], { partsFor: twoParts }),
+    );
+    expect(p.calls).toHaveLength(0);
+    expect(ledger.state('meeting-b', 'openai')).toBe('unknown');
+    expect(ledger.attempt('meeting-b', 'openai')?.sends).toEqual([]);
+    expect(sum).toMatchObject({ unknown: 1, spentUsd: 0 });
+    expect(lines.some((l) => l.includes('resume_part_without_job'))).toBe(true);
+  });
+
   it('fails a slot without sending when the audio cannot be split', async () => {
     const p = new FakeProvider('openai', 300);
     const partsFor = async (): Promise<AudioPart[]> => {

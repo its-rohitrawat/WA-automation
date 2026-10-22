@@ -19,7 +19,7 @@ function input(over: Partial<PlanInput> = {}): PlanInput {
     ],
     providers: PROVIDERS,
     stateOf: () => 'new',
-    hasJobId: () => false,
+    canResume: () => false,
     retryFailed: false,
     retryUnknown: false,
     inrPerUsd: 90,
@@ -56,14 +56,43 @@ describe('buildPlan', () => {
     expect(buildPlan(input(only)).every((i) => i.estimateUsd === 0)).toBe(true);
   });
 
-  it('waits on a saved job for free instead of sending again', () => {
+  it('keeps --retry-failed and --retry-unknown apart', () => {
+    const states: Record<string, SlotState> = { sarvam: 'done', elevenlabs: 'failed', openai: 'unknown' };
+    const only = { samples: [{ sample: voice, seconds: 60 }], stateOf: (_s: string, p: string) => states[p]! };
+    expect(buildPlan(input({ ...only, retryFailed: true })).map((i) => i.action)).toEqual(['skip', 'send', 'skip']);
+    expect(buildPlan(input({ ...only, retryUnknown: true })).map((i) => i.action)).toEqual(['skip', 'skip', 'send']);
+  });
+
+  it('waits on saved jobs for free when they cover every part', () => {
+    const asked: [string, string, number][] = [];
     const items = buildPlan(input({
       samples: [{ sample: meeting, seconds: 3600 }],
-      stateOf: (_s, p) => (p === 'sarvam' ? 'unknown' : 'done'),
-      hasJobId: (_s, p) => p === 'sarvam',
+      stateOf: () => 'unknown',
+      canResume: (s, p, parts) => {
+        asked.push([s, p, parts]);
+        return p === 'sarvam';
+      },
       retryUnknown: true,
     }));
     expect(items[0]).toMatchObject({ provider: 'sarvam', action: 'resume', estimateUsd: 0 });
+    expect(asked).toEqual([
+      ['meeting-b', 'sarvam', 1],
+      ['meeting-b', 'elevenlabs', 1],
+      ['meeting-b', 'openai', 12],
+    ]);
+  });
+
+  it('sends again with the full estimate when saved jobs and answers do not cover every part', () => {
+    const items = buildPlan(input({ samples: [{ sample: meeting, seconds: 3600 }], stateOf: () => 'unknown', retryUnknown: true }));
+    const openai = items.find((i) => i.provider === 'openai')!;
+    expect(openai).toMatchObject({ action: 'send', state: 'unknown' });
+    expect(openai.estimateUsd).toBeCloseTo(0.36, 10);
+  });
+
+  it('never asks about resuming a slot that is not unknown', () => {
+    let asked = 0;
+    buildPlan(input({ retryFailed: true, retryUnknown: true, canResume: () => (asked++, true) }));
+    expect(asked).toBe(0);
   });
 });
 

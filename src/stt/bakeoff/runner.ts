@@ -120,6 +120,10 @@ async function runSlot(item: PlanItem, provider: SttProvider, deps: RunDeps, now
     if (e instanceof LedgerError && e.code === 'part_cache_mismatch') return { kind: 'unknown', code: e.code, sentSeconds: 0 };
     throw e;
   }
+  // The plan promised a free resume. If a part would need a new paid request after all, send nothing and say so.
+  if (item.action === 'resume' && parts.some((_p, n) => !cached[n] && !jobIds[String(n)])) {
+    return { kind: 'unknown', code: 'resume_part_without_job', sentSeconds: 0 };
+  }
   let sentSeconds = 0;
   try {
     const results: ProviderResult[] = [];

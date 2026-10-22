@@ -78,6 +78,18 @@ describe('Ledger', () => {
     expect(ledger.attempt('voice-a', 'sarvam')).toEqual(attempt({ jobIds: { '0': 'job-1' }, sends: ['2026-10-22T10:00:01.000Z', '2026-10-22T10:05:00.000Z'] }));
   });
 
+  it('can resume for free only when every part has a job id or a saved answer', () => {
+    const answer = { model: 'm', segments: [], billedSeconds: null, raw: {} };
+    expect(ledger.canResume('meeting-b', 'openai', 1)).toBe(false);
+    ledger.begin(attempt({ sampleId: 'meeting-b', provider: 'openai', jobIds: { '0': 'job-0' } }));
+    expect(ledger.canResume('meeting-b', 'openai', 1)).toBe(true);
+    expect(ledger.canResume('meeting-b', 'openai', 2)).toBe(false);
+    ledger.savePart('meeting-b', 'openai', 1, { offset: 300, seconds: 100 }, answer);
+    expect(ledger.canResume('meeting-b', 'openai', 2)).toBe(true);
+    expect(ledger.canResume('meeting-b', 'openai', 3)).toBe(false);
+    expect(ledger.canResume('meeting-b', 'openai', 0)).toBe(false);
+  });
+
   it('refuses to record a send before the attempt exists', () => {
     expect(() => ledger.noteSend('voice-a', 'sarvam', '2026-10-22T10:00:01.000Z')).toThrow(LedgerError);
   });
