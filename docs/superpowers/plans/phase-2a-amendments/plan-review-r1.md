@@ -61,11 +61,19 @@ Every task's implementer applies the items listed under its task, in addition to
 
   Call `download(msg, 'stream', { host: 'mmg.whatsapp.net' })`. **Still exactly three arguments: never a reuploadRequest context.** Update the test that checks the arguments.
 
+  *(Superseded in part by 5b after the Task 5 review: there is no Baileys download call any more. The request goes straight to `https://mmg.whatsapp.net` + `path`. The address checks and tests (a)–(c) still apply.)*
+
   New tests:
   - (a) an `http://192.168.1.1/...` url with no directPath is refused, and the downloader is not called;
   - (b) a directPath of `@evil.com` is refused;
   - (c) a url on `evil.com` with a valid directPath still downloads from mmg.whatsapp.net. Assert the options and the url passed to the downloader.
-- **5b. Note on network errors (review M17).** Add a code comment: Baileys pipes the HTTP body without forwarding its errors, so a network error in the middle of a download shows up as the timeout.
+- **5b. Network errors in the middle of a download (review M17; revised after the Task 5 review).** This item first said such an error "shows up as the timeout". That was wrong. Baileys' streaming download pipes the HTTP body into its decrypt stream, and nothing listens for errors on the body. A dropped connection is therefore an uncaught exception, and main.ts then stops the service. So `fetch.ts` does not use Baileys' download at all:
+  - It sends its own HTTPS GET to `https://mmg.whatsapp.net<path>` with Node's fetch. One AbortSignal covers the whole time limit (connect, answer and body). Redirects are never followed (a 3xx fails as `http_3xx`). The `Origin: https://web.whatsapp.com` header matches Baileys. Every exit aborts the request, so the connection is released.
+  - It reads the body as a web stream. A dropped connection is then an ordinary rejection, `MediaDownloadError('network')`. The time limit gives `MediaDownloadError('timeout')`.
+  - It checks WhatsApp's MAC: the first 10 bytes of HMAC-SHA256(macKey, iv + ciphertext). It decrypts with AES-256-CBC, using keys from Baileys' `getMediaKeys`. A bad MAC or bad padding gives `MediaUnavailableError('decrypt_failed')`.
+  - The size cap counts decrypted bytes, so a file of exactly the cap is kept.
+  - The WhatsApp connection is never used, so nothing can be sent to WhatsApp and no re-upload can be asked for.
+  - A source scan forbids Baileys' streaming download functions in `src/`. Tests cover a body that fails part-way (no uncaught exception) and a server that never answers (aborted at the time limit).
 
 ## Task 6: sandboxed parser worker and DOCX
 

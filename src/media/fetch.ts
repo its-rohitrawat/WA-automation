@@ -1,5 +1,5 @@
-import { Readable } from 'node:stream';
-import { downloadMediaMessage, type MediaDownloadOptions, type WAMessage } from 'baileys';
+import { createDecipheriv, createHmac, timingSafeEqual, type Decipheriv, type Hmac } from 'node:crypto';
+import { DEFAULT_ORIGIN, getMediaKeys, type MediaType } from 'baileys';
 import { isSafeMediaAddress } from './ref.ts';
 import type { MediaRef } from './types.ts';
 
@@ -29,13 +29,8 @@ export interface FetchLimits {
 }
 
 export type MediaFetcher = (ref: MediaRef, limits: FetchLimits) => Promise<Buffer>;
-export type Downloader = (message: WAMessage, type: 'stream', options: MediaDownloadOptions) => Promise<Readable>;
-
-/**
- * Exactly three arguments, never a fourth. Without that context object Baileys cannot ask the sender's phone to upload
- * an expired file again (that request is an outbound message). An expired file is simply marked unavailable.
- */
-const passiveDownload: Downloader = (message, type, options) => downloadMediaMessage(message, type, options);
+/** The HTTP request, replaceable in tests. The default is Node's own fetch. */
+export type HttpFetch = (url: string, init: RequestInit) => Promise<Response>;
 
 /** Every file is downloaded from this host. The sender's url never chooses it (amendment 5a). */
 const MEDIA_HOST = 'mmg.whatsapp.net';
@@ -43,14 +38,21 @@ const MEDIA_HOST = 'mmg.whatsapp.net';
 /** HTTP statuses that mean the file is gone for good. */
 const GONE = new Set([400, 401, 403, 404, 410]);
 
+/** The key derivation each kind of file uses, as Baileys picks it from the content type. */
+const KEY_TYPES: Record<MediaRef['contentType'], MediaType> = { imageMessage: 'image', documentMessage: 'document', audioMessage: 'audio' };
+
+const BLOCK_BYTES = 16;
+const MAC_BYTES = 10;
+
 function classify(e: unknown): Error {
   if (e instanceof MediaUnavailableError || e instanceof MediaDownloadError) return e;
-  const status = (e as { output?: { statusCode?: unknown } } | null)?.output?.statusCode;
-  if (typeof status === 'number') return GONE.has(status) ? new MediaUnavailableError('expired') : new MediaDownloadError(`http_${status}`);
   const code = (e as { code?: unknown } | null)?.code;
   if (typeof code === 'string' && code.startsWith('ERR_OSSL')) return new MediaUnavailableError('decrypt_failed');
   return new MediaDownloadError('network');
 }
+
+const statusError = (status: number): Error =>
+  GONE.has(status) ? new MediaUnavailableError('expired') : new MediaDownloadError(`http_${status}`);
 
 /**
  * The path to fetch from MEDIA_HOST, or null when the address is unsafe. The address comes from the sender's phone:
@@ -64,95 +66,92 @@ function downloadPath(ref: MediaRef): string | null {
   return url ? url.pathname + url.search : null;
 }
 
-/** A message carrying only what Baileys needs to fetch and decrypt the file from MEDIA_HOST. */
-function toMessage(ref: MediaRef, path: string): WAMessage {
-  // Baileys checks for a url key before downloading, so there is one, on MEDIA_HOST too. With a direct path Baileys
-  // fetches from the host option plus the direct path.
-  const content = { url: `https://${MEDIA_HOST}${path}`, directPath: path, mediaKey: Buffer.from(ref.mediaKey, 'base64') };
-  return { key: { remoteJid: 'media@download', id: 'download', fromMe: false }, message: { [ref.contentType]: content } } as unknown as WAMessage;
-}
-
 /**
- * Baileys pipes the HTTP body into its decrypt stream and returns only the decrypt stream. When reading stops early
- * (time limit, size cap), Node unpipes the body but leaves it open and paused, and an error on it later, such as the
- * server dropping the idle connection, has no listener: an uncaught exception, which stops the service. The body is
- * the stream that unpipes, so it is closed here and its late errors are ignored.
+ * WhatsApp's media encryption: AES-256-CBC, followed by the first 10 bytes of HMAC-SHA256(macKey, iv + ciphertext).
+ * Decrypts as the body arrives and holds back the last 10 bytes seen, which may be the MAC. Nothing decrypted may be
+ * used until final() has checked the MAC.
  */
-function closeBodyOnUnpipe(stream: Readable): Readable {
-  stream.once('unpipe', (body: unknown) => {
-    if (body instanceof Readable) {
-      body.on('error', () => {});
-      body.destroy();
-    }
-  });
-  return stream;
-}
+class Decrypter {
+  readonly #decipher: Decipheriv;
+  readonly #hmac: Hmac;
+  #held = Buffer.alloc(0);
+  #cipherBytes = 0;
 
-function withTimeout<T>(p: Promise<T>, ms: number, onLate: (value: T) => void): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    let done = false;
-    const timer = setTimeout(() => {
-      done = true;
-      reject(new MediaDownloadError('timeout'));
-    }, ms);
-    p.then(
-      (v) => {
-        if (done) return onLate(v);
-        done = true;
-        clearTimeout(timer);
-        resolve(v);
-      },
-      (e: unknown) => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        reject(e);
-      },
-    );
-  });
-}
-
-async function collect(stream: Readable, maxBytes: number, timeoutMs: number): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  // Baileys pipes the HTTP body without forwarding its errors (review M17), so a network error in the middle of a
-  // download never reaches this stream and shows up here as the timeout. Node raises that error on the body itself,
-  // which has no listener while it is piped (an uncaught exception); Baileys gives no handle on the body to prevent it.
-  const timer = setTimeout(() => stream.destroy(new MediaDownloadError('timeout')), timeoutMs);
-  try {
-    for await (const chunk of stream) {
-      const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
-      total += b.length;
-      if (total > maxBytes) {
-        stream.destroy();
-        throw new MediaUnavailableError('too_large');
-      }
-      chunks.push(b);
-    }
-  } catch (e) {
-    throw classify(e);
-  } finally {
-    clearTimeout(timer);
+  constructor(iv: Uint8Array, cipherKey: Uint8Array, macKey: Uint8Array) {
+    this.#decipher = createDecipheriv('aes-256-cbc', cipherKey, iv);
+    this.#hmac = createHmac('sha256', macKey).update(iv);
   }
-  return Buffer.concat(chunks);
+
+  update(chunk: Uint8Array): Buffer {
+    const data = Buffer.concat([this.#held, chunk]);
+    const cut = data.length - MAC_BYTES;
+    if (cut <= 0) {
+      this.#held = data;
+      return Buffer.alloc(0);
+    }
+    this.#held = data.subarray(cut);
+    const cipher = data.subarray(0, cut);
+    this.#cipherBytes += cipher.length;
+    this.#hmac.update(cipher);
+    return this.#decipher.update(cipher);
+  }
+
+  /** The last bytes of the file. A file cut short, changed, or encrypted with other keys is decrypt_failed. */
+  final(): Buffer {
+    const whole = this.#held.length === MAC_BYTES && this.#cipherBytes > 0 && this.#cipherBytes % BLOCK_BYTES === 0;
+    if (!whole || !timingSafeEqual(this.#hmac.digest().subarray(0, MAC_BYTES), this.#held)) throw new MediaUnavailableError('decrypt_failed');
+    return this.#decipher.final(); // bad padding: ERR_OSSL_BAD_DECRYPT, which classify() makes decrypt_failed
+  }
+}
+
+/** The file's keys, expanded from its media key as Baileys does it for this kind of file. */
+async function decrypterFor(ref: MediaRef): Promise<Decrypter> {
+  const keys = await getMediaKeys(Buffer.from(ref.mediaKey, 'base64'), KEY_TYPES[ref.contentType]);
+  if (!keys.macKey) throw new MediaUnavailableError('decrypt_failed');
+  return new Decrypter(keys.iv, keys.cipherKey, keys.macKey);
 }
 
 /**
- * Downloads and decrypts one file with a size cap and an overall time limit, always from MEDIA_HOST. An unsafe address
- * is refused without a download. Errors carry codes only, never the URL.
+ * Downloads and decrypts one file, always from MEDIA_HOST, with a size cap on the decrypted bytes and one time limit for
+ * the whole download (connecting, waiting for the answer, reading the body). An unsafe address is refused without a
+ * download. Errors carry codes only, never the URL.
+ *
+ * Passive: this is a plain HTTPS GET. The WhatsApp connection is never used, so nothing is sent to WhatsApp and no phone
+ * can be asked to upload an expired file again. An expired file is simply marked unavailable.
+ *
+ * Baileys' own streaming download is not used (review of Task 5, amendment 5b). It pipes the HTTP body into its decrypt
+ * stream with nothing listening for errors on the body, so a connection that drops in the middle of a download is an
+ * uncaught exception, which stops the service. Here the body is read as a web stream: such an error, or the time limit
+ * aborting the request, is an ordinary rejection of this download only.
  */
-export function baileysFetcher(download: Downloader = passiveDownload): MediaFetcher {
+export function baileysFetcher(httpFetch: HttpFetch = (url, init) => fetch(url, init)): MediaFetcher {
   return async (ref, limits) => {
     const path = downloadPath(ref);
     if (path === null) throw new MediaUnavailableError('bad_address');
-    const deadline = Date.now() + limits.timeoutMs;
-    let stream: Readable;
+    const request = new AbortController();
+    const timer = setTimeout(() => request.abort(new MediaDownloadError('timeout')), limits.timeoutMs);
     try {
-      const started = download(toMessage(ref, path), 'stream', { host: MEDIA_HOST }).then(closeBodyOnUnpipe);
-      stream = await withTimeout(started, limits.timeoutMs, (late) => late.destroy());
+      const decrypter = await decrypterFor(ref);
+      // A redirect is never followed, so the request cannot leave MEDIA_HOST; it fails as http_3xx.
+      const res = await httpFetch(`https://${MEDIA_HOST}${path}`, { signal: request.signal, redirect: 'manual', headers: { Origin: DEFAULT_ORIGIN } });
+      if (!res.ok) throw statusError(res.status);
+      const chunks: Buffer[] = [];
+      let total = 0;
+      const keep = (plain: Buffer): void => {
+        total += plain.length;
+        if (total > limits.maxBytes) throw new MediaUnavailableError('too_large');
+        chunks.push(plain);
+      };
+      // Leaving the loop early (size cap) cancels the body.
+      if (res.body) for await (const chunk of res.body) keep(decrypter.update(chunk));
+      keep(decrypter.final());
+      return Buffer.concat(chunks, total);
     } catch (e) {
       throw classify(e);
+    } finally {
+      clearTimeout(timer);
+      // Releases the connection whatever happened, such as the unread body of an error answer. A no-op after a full read.
+      request.abort();
     }
-    return collect(stream, limits.maxBytes, Math.max(1, deadline - Date.now()));
   };
 }
