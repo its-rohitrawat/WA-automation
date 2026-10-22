@@ -67,7 +67,10 @@ async function ticks(clock: ReturnType<typeof manualClock>, up: DriveFileUploade
 function savedFile(
   db: Db,
   dataDir: string,
-  o: { waId: string; clientId?: number; jid?: string; role?: Role; kind?: MediaKind; fileName?: string | null; mimeType?: string; fromMe?: boolean; saved?: boolean },
+  o: {
+    waId: string; clientId?: number; jid?: string; role?: Role; kind?: MediaKind; fileName?: string | null; mimeType?: string; fromMe?: boolean; saved?: boolean;
+    forwarded?: boolean;
+  },
 ): number {
   const clientId = o.clientId ?? 1;
   const jid = o.jid ?? SHARMA_PN;
@@ -78,7 +81,8 @@ function savedFile(
   if (o.role) setRole(db, clientId, jid, o.role, 'human');
   const id = insertMedia(db, {
     messageId: messageRowId(db, clientId, o.waId)!, clientId, kind, status: 'pending', mimeType: o.mimeType ?? 'application/pdf',
-    fileName: o.fileName === undefined ? 'brief.pdf' : o.fileName, fileSize: 9, seconds: null, forwarded: false, refEnc: null, errorCode: null, createdAt: NOW,
+    fileName: o.fileName === undefined ? 'brief.pdf' : o.fileName, fileSize: 9, seconds: null, forwarded: o.forwarded ?? false, refEnc: null, errorCode: null,
+    createdAt: NOW,
   });
   if (o.saved !== false) saveOriginal(db, dataDir, id, clientId, o.waId);
   return id;
@@ -183,6 +187,17 @@ describe('DriveFileUploader', () => {
     expect(getMedia(db, a)!.driveFileId).toBe(drive.created[0]!.id);
   });
 
+  it('uploads forwarded client images and documents too: being forwarded only skips the paid description (D2)', async () => {
+    const { db, dataDir, drive, up } = setup();
+    const doc = savedFile(db, dataDir, { waId: 'A', role: 'client', forwarded: true });
+    const img = savedFile(db, dataDir, { waId: 'B', role: 'client', kind: 'image', fileName: null, mimeType: 'image/jpeg', forwarded: true });
+    expect([getMedia(db, doc)!.forwarded, getMedia(db, img)!.forwarded]).toEqual([true, true]);
+    await up.run();
+    expect(drive.created).toHaveLength(2);
+    expect(getMedia(db, doc)!.driveFileId).toBe(drive.created[0]!.id);
+    expect(getMedia(db, img)!.driveFileId).toBe(drive.created[1]!.id);
+  });
+
   it('skips files whose message was deleted for everyone', async () => {
     const { db, dataDir, drive, up } = setup();
     savedFile(db, dataDir, { waId: 'R', role: 'client' });
@@ -251,8 +266,14 @@ describe('DriveFileUploader', () => {
     clock.advance(7 * 3_600_000);
     await up.run();
     expect(driveState(db, a)).toEqual({ fileId: null, attempts: UPLOAD_MAX_ATTEMPTS, failed: 1, nextAt: null });
+    // A second file is still retrying: the reset leaves its count and next-try time alone (T13-20).
+    const b = savedFile(db, dataDir, { waId: 'B', role: 'client' });
+    await up.run();
+    const retrying = { fileId: null, attempts: 1, failed: 0, nextAt: new Date(clock.now().getTime() + 2 * 60_000).toISOString() };
+    expect(driveState(db, b)).toEqual(retrying);
     expect(resetUploadFailures(db)).toBe(1);
     expect(driveState(db, a)).toMatchObject({ attempts: 0, failed: 0 });
+    expect(driveState(db, b)).toEqual(retrying);
     drive.failNext = 0;
     await up.run();
     expect(drive.created).toHaveLength(1);
