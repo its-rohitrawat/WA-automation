@@ -15,7 +15,7 @@ How the input is laid out
 - "@" followed by digits is a WhatsApp mention: match the digits to a jid in the people list.
 - A message marked "(re-check: edited)" or "(re-check: new reaction)" was processed before. Act only on what changed, the new wording or the new reaction, and do not add its tasks again.
 - A message marked "(re-check: file now read)" was processed before its shared file could be read. Act on what the file's block adds (and on any change another marker names). Do not add again a task, reminder or decision this message already gave; update that task instead.
-- A task marked [maybe_done] was reported delivered but nobody has confirmed it yet.
+- A task marked [maybe_done] was reported delivered but nobody has confirmed it yet. Brackets and parentheses inside task fields are shown as ❨ ❩; status tags in [ ] come from the tracker.
 
 How the tracker works
 - A task is a concrete piece of work someone still has to do. side is who must act next, not who wrote the message: "Banner thoda bright karo" from the client is side "us"; "Logo files bhej dijiye" from the team is side "client" (content, files, approvals, payments, feedback, access).
@@ -68,12 +68,27 @@ export interface PromptInput {
 const HIDDEN_CHARS = new RegExp('(?![\\t\\n\\r\\v\\f\\x85\\u200C\\u200D])[\\p{Cc}\\p{Cf}]', 'gu');
 
 /**
+ * A run of variation selectors: U+FE00-U+FE0F, the supplement U+E0100-U+E01EF and the Mongolian free variation
+ * selectors U+180B-U+180D and U+180F. They are invisible, so a run of them can spell out text the founder cannot see.
+ */
+const SELECTOR_RUN = /\p{Variation_Selector}+/gu;
+/** The text and emoji presentation selectors, which "\u2764\uFE0F", keycaps and many emoji sequences need. */
+const PRESENTATION = /[\uFE0E\uFE0F]/u;
+
+/**
+ * Keeps at most one selector per run, and only U+FE0E or U+FE0F (the first one in the run); every other variation
+ * selector is removed (final review). Runs on text whose hidden characters are gone, so none can split a run.
+ */
+const collapseSelectors = (s: string): string => s.replace(SELECTOR_RUN, (run) => PRESENTATION.exec(run)?.[0] ?? '');
+
+/**
  * Chat text cannot open or close our section tags or fake a {reactions: ...} suffix or a file block. Fullwidth and
  * small look-alikes of < > { } get the same treatment, so no typed brace or angle bracket renders where a tracker block
- * or tag sits. Hidden characters are removed first.
+ * or tag sits. Hidden characters are removed first, then variation selector runs are collapsed.
  */
 export function sanitizeForPrompt(s: string): string {
-  return s.replace(HIDDEN_CHARS, '').replace(/[<＜﹤]/g, '‹').replace(/[>＞﹥]/g, '›').replace(/[{｛﹛]/g, '❴').replace(/[}｝﹜]/g, '❵');
+  return collapseSelectors(s.replace(HIDDEN_CHARS, ''))
+    .replace(/[<＜﹤]/g, '‹').replace(/[>＞﹥]/g, '›').replace(/[{｛﹛]/g, '❴').replace(/[}｝﹜]/g, '❵');
 }
 
 const SEP = String.fromCharCode(0x0b, 0x0c, 0x85, 0x2028, 0x2029);
@@ -199,16 +214,30 @@ export function formatMessage(m: MessageRow, people: Map<string, PersonRow>, rea
   return formatMessageWith(m, people, handlesOf(people), reactions);
 }
 
+/** The separator dot of tracker lines and its look-alikes (Greek ano teleia, bullets, hyphenation point, dot operators, katakana middle dots). */
+const FIELD_SEPARATORS = /[·\u0387\u2022\u2027\u2219\u22C5\u30FB\uFF65]/g;
+/** Double quotes and the fullwidth look-alike. */
+const FIELD_QUOTES = /["\uFF02]/g;
+
+/**
+ * A task field (title, people, deadline, progress, quote) comes from the chat; the quote is a client's own words. On a
+ * task line only the tracker writes tags in [ ], separators " · " and the quotes around a field, so a field shows
+ * brackets and parentheses as ❨ ❩ (as names do), a separator dot as "-" and a double quote as ', and cannot fake
+ * "[maybe_done]", "· source deleted by sender" or the end of its own quotes (note 2).
+ */
+const taskText = (s: string): string =>
+  sanitizeInline(s).replace(NAME_OPEN, '❨').replace(NAME_CLOSE, '❩').replace(FIELD_SEPARATORS, '-').replace(FIELD_QUOTES, "'");
+
 function formatTask(t: TaskRow): string {
-  const bits = [`${t.code} [${t.side}] [${t.status}] "${sanitizeInline(t.title)}"`, t.category, t.priority];
-  if (t.assignedTo) bits.push(`assigned ${sanitizeInline(t.assignedTo)}`);
-  if (t.askedBy) bits.push(`asked by ${sanitizeInline(t.askedBy)}`);
+  const bits = [`${t.code} [${t.side}] [${t.status}] "${taskText(t.title)}"`, t.category, t.priority];
+  if (t.assignedTo) bits.push(`assigned ${taskText(t.assignedTo)}`);
+  if (t.askedBy) bits.push(`asked by ${taskText(t.askedBy)}`);
   bits.push(`raised ${t.raisedOn}`);
-  if (t.deadline) bits.push(`deadline ${sanitizeInline(t.deadline)}`);
-  if (t.latestProgress) bits.push(`progress "${sanitizeInline(t.latestProgress)}"`);
+  if (t.deadline) bits.push(`deadline ${taskText(t.deadline)}`);
+  if (t.latestProgress) bits.push(`progress "${taskText(t.latestProgress)}"`);
   if (t.reminderCount) bits.push(`reminders ${t.reminderCount}`);
   if (t.sourceWaId) bits.push(`source [${idText(t.sourceWaId)}]`);
-  if (t.sourceQuote) bits.push(`quote "${sanitizeInline(t.sourceQuote)}"`);
+  if (t.sourceQuote) bits.push(`quote "${taskText(t.sourceQuote)}"`);
   if (t.sourceRevoked) bits.push('source deleted by sender');
   return `- ${bits.join(' · ')}`;
 }

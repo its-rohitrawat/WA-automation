@@ -2,7 +2,7 @@
 
 Do the steps once, in order. Commands run in **Command Prompt**. "Admin" means: right-click Command Prompt and choose *Run as administrator*.
 
-What WA Agent does: it quietly reads the WhatsApp client groups you allow, keeps a task tracker, and updates an Excel file in Google Drive. It never sends a WhatsApp message.
+What WA Agent does: it quietly reads the WhatsApp client groups you allow, keeps a task tracker, and updates an Excel file in Google Drive. It also saves the images and documents shared in those groups, reads them for the tracker, and puts the files that clients send into Drive. It never sends a WhatsApp message.
 
 ## 1. Prepare the PC (admin)
 
@@ -48,6 +48,8 @@ icacls C:\wa-agent /inheritance:r /grant:r "Administrators:(OI)(CI)F" "SYSTEM:(O
 
 The last line matters. Folders directly under `C:\` let every Windows user on this PC read and change files. This line removes that, so only administrators, the system and waagent can reach `.env`, the code, `data\` and `backups\`. (`backups\` is created in the recovery steps and inherits this.)
 
+**If `npm ci` fails** with an error that mentions `node-gyp` or Visual Studio, run `npm ci --ignore-scripts` instead (still in `C:\wa-agent`), then the `icacls` line. Nothing needs to be built on this PC: the database library (better-sqlite3 13.0.3) comes with a ready-made Windows version.
+
 ## 4. Keys and settings (admin window or waagent window)
 
 After step 3, only an admin window or the waagent window can write under `C:\wa-agent`. Use one of them for every file edit in this runbook.
@@ -68,8 +70,10 @@ DAILY_SPEND_CAP_USD=15
 
 Leave the other lines as they are.
 
+Reading shared files needs no extra settings: it uses the same Anthropic key and Google sign-in.
+
 - **ANTHROPIC_API_KEY**: console.anthropic.com > API keys > Create key, named `wa-agent-office-pc`.
-- **Spend limits.** `DAILY_SPEND_CAP_USD` is a *soft* cap. In rare cases (a request already running, or a backup model) the agent can go over it by a few dollars. So also set a **monthly spend limit in the Anthropic console**. That limit is the hard stop.
+- **Spend limits.** `DAILY_SPEND_CAP_USD` covers the tracker's AI calls and the reading of shared images and scans. It is a *soft* cap. In rare cases (a request already running, or a backup model) the agent can go over it by a few dollars. So also set a **monthly spend limit in the Anthropic console**. That limit is the hard stop.
 - **Google OAuth client** (signed in as the **mailbox** Google account):
   1. console.cloud.google.com > New project `WA Agent`.
   2. APIs & Services > Library > enable **Google Drive API**.
@@ -141,7 +145,7 @@ copy C:\wa-agent\data\session.db* C:\wa-agent\backups\2026-10-21-1430\
 
 6. If the service is installed, **start the service again** (see *Start the service again* below). If you skip this the tracker silently stops.
 
-This is optional. Without it the tracker starts from today. If you do it, the first service start sends that history to the AI. This costs a little and counts toward the daily spend cap.
+This is optional. Without it the tracker starts from today. If you do it, the first service start sends that history to the AI. This costs a little and counts toward the daily spend cap. It also downloads the images and documents in that history (old ones may no longer be available on WhatsApp) and has them read: each image is described at about 1–4 US cents, and scanned PDFs are read too (see "Cost of reading files" below).
 
 ## 6. Install and start the service (admin)
 
@@ -170,7 +174,7 @@ net stop wa-agent
 net start wa-agent
 ```
 
-   Stopping can take up to 2.5 minutes if the agent is finishing an AI call. That is normal. Wait for it.
+   Stopping can take up to 2.5 minutes if the agent is finishing an AI call or reading a shared file. That is normal. Wait for it.
 
 7. In Google Drive (mailbox account), share the **WA Agent** folder with team members only, never clients. Share the **folder**, not the `Tracker.xlsx` file. If the file is ever re-created, people who have the folder still reach it.
 
@@ -188,21 +192,137 @@ Do not move the "WA Agent" folder or `Tracker.xlsx` to the Bin (trash). Drive ke
 
 ## 7. Pilot week
 
+**Before the pilot starts: run the golden check again.** It sends a fixed set of sample conversations to the AI and checks its answers. It must be run again because the AI's instructions changed for shared files.
+
+- It costs money on the Anthropic account (it does not count toward `DAILY_SPEND_CAP_USD`), so it needs the owner's approval first.
+- It needs `ANTHROPIC_API_KEY` in `.env`. Run it in the waagent window or an admin window, in `C:\wa-agent`:
+
+```bat
+npm run golden
+npm run golden -- --yes
+```
+
+1. The first command sends nothing. It shows how many cases there are and the most they could cost.
+2. With the owner's approval, the second command runs them. It prints `PASS` or `FAIL` for each case, then the actual cost.
+3. Send the output to the developer before the pilot starts.
+
+During the pilot:
+
 - Keep only 1-2 groups in the allow-list.
 - Every day:
   - Run `npm run cli -- status`. Expect `✅` and no group with a failed batch.
   - Open `Tracker.xlsx` in Drive. Check the Overview's "Built ... IST" time is recent.
   - Check spend in the Anthropic console.
   - Compare the tracker with what the team knows. Write every mistake in a simple list: date, client, what was wrong. Send the list to the developer.
+  - Open **Files received** on each pilot client's tab and check a few descriptions against the real files.
 - Fix mistakes with the commands below. If the same kind of mistake repeats, report it to the developer.
 - **Check that the founder never looks "online" because of the agent.** From another phone, look at the founder's WhatsApp contact while his own phone is locked. He must not show "online". If he does, stop the service and report it. The cause would be a presence update sent by the WhatsApp library (Baileys, when its credentials change); the fix is a small patch to it. This check means nothing if the founder has hidden his online status in WhatsApp privacy settings.
 - A **clean week** means: no wrongly closed tasks and no missed client requests. After a clean week, add the remaining groups to `config\allowed-groups.json`. The service picks up the change within seconds; no restart needed. Run `status` and check each new client appears.
+
+## Shared files (images and documents)
+
+The agent saves the images and documents shared in the allowed groups and reads them, so a screenshot, a payment receipt or a PDF counts in the tracker like a message. It downloads each file once, straight from WhatsApp's servers, and never asks a phone to send a file again.
+
+### Where the files are on this PC
+
+In `C:\wa-agent\data\media\<CODE>\<year-month>\`, for example `C:\wa-agent\data\media\ABC\2026-10\3EB0C4F2A1-17.jpg`.
+
+- The name is the WhatsApp message id, a dash, and the agent's own number for the file (here `17`). The number keeps every name unique. A file is never named after the name the sender gave it.
+- The month is the month the message was sent, in India time.
+- The agent never deletes or replaces anything in this folder.
+- Do not rename, move, edit or delete files in `data\media`. The tracker records where each file is.
+- To look at a file, copy it to your desktop first.
+- `data\media` inherits the locked-down permissions of `data` (step 6), so there is nothing to set.
+
+### What is read, and how
+
+| File | What happens | Cost |
+|---|---|---|
+| Image or screenshot (also a JPEG, PNG, WebP or GIF photo sent "as document") | Claude writes a short English description that includes the visible text. The copy sent to Claude is shrunk, and its location data (EXIF/GPS) is removed. The saved original is unchanged. | About 1–4 US cents each |
+| PDF with text | The text is read on this PC (first 200 pages). | Free |
+| Scanned PDF (no text inside) | Claude reads it if it has 20 pages or fewer and is 20 MB or smaller. Longer scans are listed with their page count only. | Up to about 60 US cents for 20 pages (an estimate from the limits, not from real bills; usually less) |
+| Word file (.docx) | The text is read on this PC. | Free |
+| Other files (Excel, old .doc, ZIP, HEIC photos sent as a document, ...) | Saved. Only the name, type and size are used. | Free |
+| Voice notes and audio files | Saved on this PC for a later update. Not transcribed, listed or uploaded yet. The AI only learns that one was sent. | Free |
+| Videos | Not downloaded. The AI and Files received get the length only. | Free |
+| Stickers | Not saved. | Free |
+| View-once photos and videos | Never saved, listed or uploaded. | Free |
+
+- Files larger than 50 MB are not downloaded.
+- WhatsApp keeps files for a limited time. A file the agent could not fetch in time shows as "could not be downloaded from WhatsApp".
+- **Forwarded files are not described.** A photo or a scanned PDF that the sender forwarded from another chat is saved, uploaded and listed, but never sent to Claude. Files received shows `(forwarded image)` or `(forwarded scanned PDF)` instead of a description. A forwarded PDF with text, or a forwarded Word file, is still read on this PC, for free.
+- **Very large photos.** A very large photo sent as a document (for example a full-size photo from a 48- or 50-megapixel camera) is too big to read safely on this PC. It is saved, uploaded and listed, but not described: Files received shows `Image, could not be read`.
+- Text inside files is treated like chat text: the AI is told never to follow instructions written in a file.
+- Hidden characters are removed from everything the AI reads, because they can hide text. One side effect: the England, Scotland and Wales flag emoji reach the AI as a plain black flag (🏴).
+
+### How the tracker waits for files
+
+- The tracker reads a message together with its file. While a file is still being read, the tracker waits for it, but for 30 minutes at most, counted from when the file arrived (or from the service start, if that is later).
+- After 30 minutes it goes ahead without the file. When the file is read later, the tracker looks at that message once more, now with the file, and updates the tracker from what the file adds.
+- Voice notes and audio files never hold the tracker up.
+- **Known limit.** If a client sends a list or brief as a photo or scan during a Claude outage or a spend-limit hold, and it is read late, new work that appears only in that file is not added as a new task. (This happens when the tracker had already made a task from that message before the file was read.) Check the tracker afterwards and add any missing work by hand. There is no `task add` command yet, so note it on the related task with `task edit <code> --latest-progress "..."`, or tell the team.
+
+### Drive and the Files received list
+
+- Files from people marked **Client** in the People section are uploaded to Drive, into `WA Agent > Clients > <client name> > Files`, usually within a minute or two.
+  - Only images and documents are uploaded.
+  - Videos are listed but not uploaded (they are not downloaded).
+  - Voice notes and audio files are not listed or uploaded yet.
+  - Files from the team, and from the founder's own phone, stay on this PC only.
+- Each client tab lists these files under **Files received**: date, sent by, file name, description and a Drive link (`Open`). The tab shows the newest 500 files. Older ones drop off the tab but stay in Drive.
+- The agent writes the description from what it read; the AI does not choose which files to list. So every client file is listed, a meme too.
+- A photo without a name gets one like `image-2026-10-19-1405-17.jpg` (the date, the time and the file's number).
+- If someone's role is wrong, fix it with `person set`. Their earlier files then follow the new role: once someone is a Client, their files are uploaded and listed.
+- **Deleted for everyone.** A file whose message the sender deleted for everyone stays listed as `(deleted by sender)`, with no description and no Drive link. A copy already in Drive is kept. A file deleted before it reached Drive is not uploaded.
+- The agent never deletes anything in Drive.
+- Do not move the Files folders to the Bin. If one is deleted for good, the agent creates it again on the next upload.
+- Rarely, a file shows twice in a Files folder: Drive took it, but its answer was lost on the way, so the agent uploaded it again. Nothing is lost. Leave both: the `Open` link points to one of them.
+
+Besides a description or the start of the text, the description column can say:
+
+| Description | Meaning |
+|---|---|
+| `Image, being read` | Not read yet. |
+| `Image, could not be read` | Reading failed, or the photo is too large to read. The file is saved. |
+| `PDF, could not be downloaded from WhatsApp` | WhatsApp no longer had the file, or refused it. |
+| `PDF, 62.0 MB, too large to download (over the 50 MB limit)` | Not downloaded. |
+| `PDF, 34 pages, scanned, too long to read` | A scan over 20 pages or 20 MB. Saved and uploaded, but not read. |
+| `(forwarded image)`, `(forwarded scanned PDF)` | Forwarded: not sent to Claude. |
+| `Image (not read: too costly for the daily limit)` | See "A very low cap" below. |
+| `Video, 0:42 (not downloaded)` | Videos are listed only. |
+| `(deleted by sender)` | Deleted for everyone. |
+
+### Uploads to Drive
+
+- One file upload may take up to 10 minutes (600 seconds), so a 50 MB file on a slow line can finish.
+- A failed upload is tried again after 2, 4, 8, ... minutes, at most 6 hours apart. After 8 failed tries (about 4 hours) the agent stops trying that file until the next service start, and the status line says so. A file missing from `data\media` is given up at once.
+- After a Google sign-in failure, or when the agent cannot write to its database, all uploads pause for 15 minutes, then resume by themselves. These pauses do not use up a file's tries.
+- A restart gives every upload that gave up a fresh set of 8 tries, and ends a pause.
+
+### Cost of reading files
+
+- Reading images and scans counts toward `DAILY_SPEND_CAP_USD`, like the tracker's own AI calls.
+- **Images:** about 1–4 US cents each.
+- **Scanned PDFs:** while Claude reads one, it holds about $4 of today's budget. When the read ends, only its real cost is booked and the rest is freed. With the default cap of $15, a scan waits for the budget once less than about $4 is left today.
+- **History from `cli link`:** the images and scans in loaded history are read too, at the same cost, after the next service start.
+- **One Claude call per try.** The agent never repeats a Claude call by itself within a try, so a lost connection is paid for at most once per try. An image whose read fails is tried 3 times over about 6 minutes, then shows "could not be read". A scanned PDF whose read fails is not tried again, because a second try could be paid again.
+- **Claude unavailable.** When Claude is overloaded, down, or refuses the API key, nothing is paid. The files wait and are tried again after 5, 15, 30 and 60 minutes, then every hour, for up to 24 hours (from when the file arrived, or from the service start if that is later). Only then are they given up ("could not be read").
+- **Budget waits.** A file whose read does not fit in what is left of today's budget waits, and is tried again every 10 minutes. If no room opens up today, it is read after midnight India time. The tracker does not wait for it longer than the usual 30 minutes.
+- **A very low cap.** If `DAILY_SPEND_CAP_USD` is below about $0.10, images are never described. Below about $4.16, scanned PDFs are never read. Such files show "not read: too costly for the daily limit", and they are not read later, even after you raise the cap.
+- **A short wait for the tracker.** A tracker update can be held back while a scanned PDF is being read, because the scan's hold leaves no room for it in today's budget. It tries again after 10 minutes by itself. The status line does not change, nothing is lost, and nothing needs doing. In `status`, that client's line may show `last batch failed (spend_busy)`: this is the same short wait, not an AI error.
+- **Restarting during a scan.** If the service is stopped while a scanned PDF is being read, that unfinished read is booked at its full hold (about $4) for today, and the scan is read again after the start.
+
+### Disk space
+
+- Expect roughly 1–3 GB per busy group per year.
+- `status` shows free space, and the status line warns below 10 GB.
+- Ask the developer before freeing space by moving old month folders elsewhere: the tracker records where each file is.
 
 ## Everyday commands (run in the waagent window)
 
 | Command | What it does |
 |---|---|
-| `npm run cli -- status` | Connection, queued messages, failures, spend, disk |
+| `npm run cli -- status` | Connection, queued messages, failures, spend, disk, shared files |
 | `npm run cli -- task close ABC-012` | Mark a task done |
 | `npm run cli -- task reopen ABC-012` | Reopen a task |
 | `npm run cli -- task unlock ABC-012` | Hand the task back to the AI after a manual fix |
@@ -215,6 +335,16 @@ Do not move the "WA Agent" folder or `Tracker.xlsx` to the Bin (trash). Drive ke
 
 Notes:
 
+- **`status`** also prints a `Files:` line, for example:
+
+  ```text
+  Files:       2 waiting to be read · 1 could not be read (24 h) · 0 not uploaded to Drive
+  ```
+
+  - *waiting to be read*: files not read yet (still downloading, waiting for Claude, or waiting for the daily budget).
+  - *could not be read (24 h)*: files given up in the last 24 hours. Files received shows them as "could not be read". Files that could not be downloaded from WhatsApp are not counted here.
+  - *not uploaded to Drive*: uploads that gave up (see "Status "files could not be uploaded to Drive"" below).
+  - The counts leave out clients removed from the allow-list. Their files wait, untouched, until the client is added back.
 - **`task edit`** options: `--title`, `--side` (us or client), `--category` (design, development, content, payment, approval, other), `--priority` (high, medium, low), `--assigned-to`, `--asked-by`, `--deadline` (YYYY-MM-DD or `none`), `--latest-progress`. Fields you fix by hand stay fixed until you run `task unlock`.
 - **`person set <number> <team|client>`**: use the full number with country code and no `+` or spaces (for example `919812345678`). A WhatsApp id (it contains `@`) also works. People who show no number in the People section cannot be fixed with `person set` yet. Add `--client ABC` to change the role in one client group only.
 - **`task unlock`** and **`phase unlock`** let the AI change that task or phase again.
@@ -224,7 +354,7 @@ Notes:
 
 ## What the status line means
 
-In `npm run cli -- status` it appears as the `Health:` line. It is also the first line on the Overview tab. The Google sign-in and Tracker update lines are never shown in the workbook, because the workbook cannot upload while those are failing; look at `status` instead.
+In `npm run cli -- status` it appears as the `Health:` line. It is also the first line on the Overview tab. The Google sign-in and Tracker update lines are never shown in the workbook, because the workbook cannot upload while those are failing; look at `status` instead. If several things are wrong at once, the line shows the most serious one.
 
 | What you see | What it means | What to do |
 |---|---|---|
@@ -234,13 +364,51 @@ In `npm run cli -- status` it appears as the `Health:` line. It is also the firs
 | Another copy of WA Agent took over the WhatsApp session | Another copy of the agent, or WhatsApp Web on another computer, took the linked-device slot. | Follow "Status replaced" below. Do **not** reset the link. |
 | WhatsApp refused this number (403) | WhatsApp blocked this device. | Look at the founder's phone for a WhatsApp warning. Do not reset the link. |
 | Disconnected since (time) | No WhatsApp connection for over 30 minutes. | Check the PC's internet. The agent keeps trying to reconnect. If it stays down, restart the service. |
-| Google sign-in expired | Drive no longer lets the agent in. | Run `npm run cli -- google-auth`, then restart the service. |
+| Google sign-in expired | Drive no longer lets the agent in. File uploads to Drive pause too. | Run `npm run cli -- google-auth`, then restart the service. |
 | The WhatsApp session could not be saved | The agent cannot write its session to disk. | Check free disk space and the permissions on `C:\wa-agent\data`. |
 | (number) incoming messages could not be saved | Some WhatsApp messages from the client groups could not be stored, so they are **lost from the tracker**. The count is since the service last started (a restart clears the warning); `status` also shows `Messages not saved: (number)`. | Read `wa-agent.out.log` (look for `ingest failed`). Check those groups on the founder's phone and add anything important by hand (`task edit`, or tell the team). Then check free disk space and the permissions on `C:\wa-agent\data`. |
 | Tracker update failing since (time) | The Excel file has not reached Drive for over an hour. | Check the PC's internet. If it stays, read `wa-agent.out.log`. |
-| Daily spend cap reached. Paused until midnight IST | The AI budget for today is used up. Messages are saved and processed later. | Wait for midnight India time. Raise `DAILY_SPEND_CAP_USD` in `.env` and restart the service only if the higher spend is intended. |
+| Daily spend cap reached. Paused until midnight IST | The AI budget for today is used up. Messages and shared files are saved and processed later. | Wait for midnight India time. Raise `DAILY_SPEND_CAP_USD` in `.env` and restart the service only if the higher spend is intended. |
 | (number) groups waiting (AI error) | The AI call failed for some groups. Nothing is lost. | Wait: failed batches retry every hour. If it persists, read `wa-agent.out.log` and run `status`. |
+| (number) shared files waiting over 30 minutes to be read. See docs/SETUP.md. | Images or documents are still not read 30 minutes after they arrived. The tracker went ahead without them. Nothing is lost. | See "Status "shared files waiting over 30 minutes to be read"" below. |
+| (number) files could not be uploaded to Drive. See docs/SETUP.md. | Files from clients failed to upload many times, and the agent stopped trying. They are safe on this PC. | See "Status "files could not be uploaded to Drive"" below. |
+| (number) shared files waiting for today's AI budget (read after midnight IST) | Images or scans that need Claude do not fit in what is left of today's budget (a scan needs about $4 of room). The cap is not reached, and the tracker keeps working. | Nothing: they are tried every 10 minutes and read once there is room, at the latest after midnight India time. See "Spend cap and shared files" below. |
 | Low disk: (number) GB free | Under 10 GB left. | Free up disk space. |
+
+### Status "shared files waiting over 30 minutes to be read"
+
+The line reads, for example, `⚠️ 3 shared files waiting over 30 minutes to be read. See docs/SETUP.md.` (or `1 shared file` for one).
+
+- **Meaning:** some images or documents from the client groups are still not read 30 minutes after they arrived (or after the service started). The tracker did not wait for them. It went ahead with the messages, and it looks at those messages again once their files are read. Nothing is lost.
+- **Usual causes:** Claude is overloaded or down, or refuses the API key; the PC's internet is down; or many files arrived at once (for example right after loading history).
+- **What to check:**
+  1. The PC's internet.
+  2. `wa-agent.out.log` (in an admin window or the waagent window): look at the recent lines with `shared file`. `Claude unavailable: shared file waits` means Claude is busy or down, or refused the key. Check that the key still exists in console.anthropic.com > API keys.
+  3. `npm run cli -- status`: the `Files:` line shows how many are still waiting.
+- **When it clears:** by itself, once the files are read. While Claude is unavailable, the files are tried again for up to 24 hours, at no cost. After that they are given up, `status` counts them under "could not be read", and the warning clears.
+- A restart starts the 30 minutes again, so it hides the warning for 30 minutes but fixes nothing.
+- If Claude itself is down, the line usually shows `groups waiting (AI error)` instead, because that one ranks higher.
+- For a file that was given up, Files received says "could not be read". Copy the original from `data\media` to your desktop, look at it, and add what matters by hand.
+
+### Status "files could not be uploaded to Drive"
+
+The line reads, for example, `⚠️ 2 files could not be uploaded to Drive. See docs/SETUP.md.` (or `1 file` for one).
+
+- **Meaning:** some files that clients sent failed to upload to Drive 8 times (over about 4 hours), or the saved file is missing from `data\media`, and the agent stopped trying. The files are safe on this PC. Files received lists them without a Drive link.
+- **What to check:**
+  1. The PC's internet.
+  2. The Google sign-in: run `npm run cli -- status`. If it shows `Google sign-in expired` or a `Drive:` line saying `failing since`, run `npm run cli -- google-auth`.
+  3. `wa-agent.out.log`: look for lines with `file upload`.
+  4. That the **WA Agent** folder and the client's **Files** folder are not in the Drive Bin.
+  5. That nobody moved or deleted files in `C:\wa-agent\data\media`.
+- **When it clears:** restart the service after the fix (`net stop wa-agent`, then `net start wa-agent`). A restart gives these files a fresh set of 8 tries, so the warning clears at once. It comes back only if they fail again.
+- The warning also stops counting a file whose sender is no longer marked Client, or whose message was deleted for everyone: such a file is not uploaded.
+
+### Spend cap and shared files
+
+- When today's spend reaches `DAILY_SPEND_CAP_USD`, the line says `Daily spend cap reached. Paused until midnight IST`. This covers shared files too: the files that need Claude wait, and are read after midnight India time.
+- A file can wait for the budget before the cap is reached, because a scanned PDF needs about $4 of room. The line then says `(number) shared files waiting for today's AI budget (read after midnight IST)`. It ranks below the other file and group warnings, so it never hides a more urgent problem.
+- Either way, the tracker does not wait more than 30 minutes for a file, and it keeps reading messages as long as there is budget for them.
 
 ## If the service will not start
 
