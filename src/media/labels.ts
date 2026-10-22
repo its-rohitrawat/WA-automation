@@ -1,6 +1,7 @@
 import type { MediaKind, MediaStatus, TextKind } from '../store/media.ts';
 import { istDate, istTime } from '../util/time.ts';
 import { extForMime, sanitizeFileName } from './paths.ts';
+import { MEDIA_LIMITS } from './types.ts';
 
 /** Label by MIME type. A Map, so a declared type such as "constructor" or "__proto__" matches nothing. */
 const TYPE_BY_MIME = new Map<string, string>(
@@ -58,6 +59,8 @@ export interface FileFacts {
   textKind: TextKind | null;
   textStart: string | null;
   note: string | null;
+  /** Why a file was not downloaded or read, e.g. 'too_large' (ClientFileRow.errorCode). */
+  errorCode: string | null;
   revoked: boolean;
 }
 
@@ -91,7 +94,14 @@ export function fileDescription(f: FileFacts): string {
   const pages = f.pageCount ? `, ${f.pageCount} ${f.pageCount === 1 ? 'page' : 'pages'}` : '';
   if (f.kind === 'video') return `Video${f.seconds ? `, ${formatDuration(f.seconds)}` : ''} (not downloaded)`;
   if (f.status === 'pending') return `${type}, being read`;
-  if (f.status === 'unavailable') return `${type}, could not be downloaded from WhatsApp`;
+  if (f.status === 'unavailable') {
+    if (f.errorCode !== 'too_large') return `${type}, could not be downloaded from WhatsApp`;
+    // The agent chose not to download it (T14-03). The size is the sender's claim, shown only when it is over the limit:
+    // a file found too large during the download may have declared less.
+    const limit = MEDIA_LIMITS.maxDownloadBytes;
+    const size = f.fileSize && f.fileSize > limit ? `, ${formatSize(f.fileSize)}` : '';
+    return `${type}${size}, too large to download (over ${Math.round(limit / (1024 * 1024))} MB)`;
+  }
   if (f.status === 'failed') return `${type}, could not be read`;
   if (f.note === FORWARDED_NOT_DESCRIBED) return f.kind === 'image' || type === 'Image' ? '(forwarded image)' : '(forwarded scanned PDF)';
   // Cleaned first (T14-02): a start made only of spaces or hidden characters (a PDF whose broken font gave only NULs,

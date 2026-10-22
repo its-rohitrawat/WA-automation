@@ -206,6 +206,22 @@ describe('Files received', () => {
     ]);
   });
 
+  it('says a file over the download limit was too large to download, from the stored error code (T14-03)', () => {
+    const db = seed();
+    file(db, {
+      waId: 'BIG', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'site plan.pdf', mimeType: 'application/pdf', ts: '2026-10-18T06:00:00.000Z',
+      status: 'unavailable', errorCode: 'too_large',
+    });
+    file(db, {
+      waId: 'OLD', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'old.pdf', mimeType: 'application/pdf', ts: '2026-10-18T05:00:00.000Z',
+      status: 'unavailable', errorCode: 'expired',
+    });
+    expect(sharmaFiles(db).slice(0, 2).map((f) => [f.name, f.description])).toEqual([
+      ['site plan.pdf', 'PDF, too large to download (over 50 MB)'],
+      ['old.pdf', 'PDF, could not be downloaded from WhatsApp'],
+    ]);
+  });
+
   it('never lists view-once media, the founder’s own files, stickers, voice notes or audio, but lists videos', () => {
     const db = seed();
     upsertPerson(db, { clientId: 1, jid: FOUNDER, number: '919800000099', name: 'Founder', fromMe: true });

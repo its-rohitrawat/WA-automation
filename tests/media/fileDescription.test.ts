@@ -3,7 +3,7 @@ import { fileDescription, type FileFacts } from '../../src/media/labels.ts';
 
 const facts = (o: Partial<FileFacts> = {}): FileFacts => ({
   kind: 'document', status: 'done', mimeType: 'application/pdf', fileSize: 24_576, seconds: null, pageCount: 3, textKind: 'extract',
-  textStart: 'Homepage brief\nHero banner', note: null, revoked: false, ...o,
+  textStart: 'Homepage brief\nHero banner', note: null, errorCode: null, revoked: false, ...o,
 });
 
 describe('fileDescription', () => {
@@ -60,6 +60,17 @@ describe('fileDescription', () => {
     expect(fileDescription(facts({ textKind: null, textStart: null, pageCount: 87, note: 'scan_too_long' }))).toBe('PDF, 87 pages, scanned, too long to read');
     expect(fileDescription(facts({ mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', pageCount: null, textKind: null, textStart: null })))
       .toBe('Excel sheet, 24 KB');
+  });
+
+  it('says a file over the download limit was too large to download, not that WhatsApp failed (T14-03)', () => {
+    const tooLarge = { status: 'unavailable', errorCode: 'too_large', textKind: null, textStart: null, pageCount: null } as const;
+    expect(fileDescription(facts({ ...tooLarge, fileSize: 62 * 1024 * 1024 }))).toBe('PDF, 62.0 MB, too large to download (over 50 MB)');
+    // Found too large during the download: a declared size under the limit is the sender's claim, so it is not shown.
+    expect(fileDescription(facts({ ...tooLarge, fileSize: 24_576 }))).toBe('PDF, too large to download (over 50 MB)');
+    expect(fileDescription(facts({ ...tooLarge, fileSize: null }))).toBe('PDF, too large to download (over 50 MB)');
+    expect(fileDescription(facts({ ...tooLarge, kind: 'image', mimeType: 'image/jpeg', fileSize: 51 * 1024 * 1024 })))
+      .toBe('Image, 51.0 MB, too large to download (over 50 MB)');
+    expect(fileDescription(facts({ ...tooLarge, errorCode: 'expired' }))).toBe('PDF, could not be downloaded from WhatsApp');
   });
 
   it('shows (deleted by sender) instead of the description when the message was deleted for everyone (amendment 14b)', () => {
