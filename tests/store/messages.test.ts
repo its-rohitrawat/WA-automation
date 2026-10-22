@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import type { Db } from '../../src/store/db.ts';
+import { failMedia, finishMedia, getMedia, insertMedia } from '../../src/store/media.ts';
 import {
   applyEdit, applyRevoke, clientIdsWithUnprocessed, insertMessage, lastActivity, listRecentProcessed, listUnprocessed,
   markProcessed, markProcessedIfUnchanged, reactionsFor, resetProcessedSince, unprocessedCounts, upsertReaction, type NewMessage,
 } from '../../src/store/messages.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
+import { LATER, NOW, seededDb } from '../helpers/db.ts';
 
 const msg = (o: Partial<NewMessage> = {}): NewMessage => ({
   waId: 'm1', clientId: 1, senderJid: '919800000001@s.whatsapp.net', senderNumber: '919800000001', senderName: 'Mr. Sharma',
@@ -207,6 +209,99 @@ describe('messages repository', () => {
       expect(version(db, 'm2')).toEqual({ version: 1, touch: null });
       expect(listRecentProcessed(db, 1)[0]).toMatchObject({ waId: 'm2', requeueReason: null, processedAt: NOW });
     });
+  });
+});
+
+describe('a file read after its message was processed (12h)', () => {
+  const READ = { textKind: 'description' as const, text: 'A payment receipt', pageCount: null, note: null, at: LATER };
+  /** A message with a pending image. */
+  function withFile() {
+    const db = seededDb();
+    insertMessage(db, msg({ mediaType: 'image' }));
+    const messageId = listUnprocessed(db, 1)[0]!.id;
+    const fileId = insertMedia(db, {
+      messageId, clientId: 1, kind: 'image', status: 'pending', mimeType: 'image/jpeg', fileName: null, fileSize: 1000, seconds: null, forwarded: false,
+      refEnc: null, errorCode: null, createdAt: NOW,
+    });
+    return { db, messageId, fileId };
+  }
+  /** Processed with the file unread, then the file is read: the message is queued again with the flag. */
+  function requeuedForFile() {
+    const s = withFile();
+    markProcessed(s.db, [s.messageId], NOW);
+    finishMedia(s.db, s.fileId, READ);
+    return s;
+  }
+  const flag = (db: Db, fileId: number) => getMedia(db, fileId)!.requeuedForText;
+  const seenBy = (db: Db, fileUnread?: boolean) => listUnprocessed(db, 1).map((m) => ({ id: m.id, version: m.version, fileUnread }));
+
+  it('markProcessedIfUnchanged clears the flag when it marks the message processed', () => {
+    const { db, fileId } = requeuedForFile();
+    expect(flag(db, fileId)).toBe(true);
+    expect(markProcessedIfUnchanged(db, seenBy(db), LATER)).toBe(0);
+    expect(flag(db, fileId)).toBe(false);
+    expect(listRecentProcessed(db, 1)[0]).toMatchObject({ waId: 'm1', processedAt: LATER, requeueReason: null });
+  });
+
+  it('markProcessedIfUnchanged keeps the flag when the message changed during the call', () => {
+    const { db, fileId } = requeuedForFile();
+    const seen = seenBy(db);
+    upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: 'r1', emoji: '✅', ts: LATER });
+    expect(markProcessedIfUnchanged(db, seen, LATER)).toBe(1);
+    expect(flag(db, fileId)).toBe(true);
+    expect(listUnprocessed(db, 1)[0]).toMatchObject({ waId: 'm1', processedAt: null, requeueReason: 'reaction' });
+  });
+
+  it('a file read during the call wins: the run that showed it unread leaves the message queued and flagged', () => {
+    const { db, fileId } = withFile();
+    const seen = seenBy(db, true);
+    finishMedia(db, fileId, READ);
+    expect(flag(db, fileId)).toBe(false); // the message was not processed yet
+    expect(markProcessedIfUnchanged(db, seen, LATER)).toBe(1);
+    expect(flag(db, fileId)).toBe(true);
+    expect(listUnprocessed(db, 1)[0]).toMatchObject({ waId: 'm1', processedAt: null, requeueReason: null });
+  });
+
+  it('a run that showed the file unread flags nothing when the message changed but the file has no text yet', () => {
+    const { db, fileId } = withFile();
+    const seen = seenBy(db, true);
+    applyEdit(db, 1, 'm1', 'hello edited', LATER);
+    expect(markProcessedIfUnchanged(db, seen, LATER)).toBe(1);
+    expect(flag(db, fileId)).toBe(false);
+    failMedia(db, fileId, { status: 'failed', errorCode: 'not_pdf', at: LATER });
+    const again = seenBy(db, true);
+    applyEdit(db, 1, 'm1', 'hello edited twice', LATER);
+    expect(markProcessedIfUnchanged(db, again, LATER)).toBe(1);
+    expect(flag(db, fileId)).toBe(false);
+  });
+
+  it('a run that showed the file unread marks the message processed when nothing changed', () => {
+    const { db, fileId } = withFile();
+    expect(markProcessedIfUnchanged(db, seenBy(db, true), LATER)).toBe(0);
+    expect(flag(db, fileId)).toBe(false);
+    expect(listUnprocessed(db, 1)).toEqual([]);
+  });
+
+  it('an edit of a message queued again for its file is marked as an edit', () => {
+    const { db, fileId } = requeuedForFile();
+    applyEdit(db, 1, 'm1', 'hello edited', LATER);
+    expect(listUnprocessed(db, 1)[0]).toMatchObject({ waId: 'm1', requeueReason: 'edit' });
+    expect(flag(db, fileId)).toBe(true);
+  });
+
+  it('a reaction to a message queued again for its file is marked as a reaction', () => {
+    const { db, fileId } = requeuedForFile();
+    upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: 'r1', emoji: '✅', ts: LATER });
+    expect(listUnprocessed(db, 1)[0]).toMatchObject({ waId: 'm1', requeueReason: 'reaction' });
+    expect(flag(db, fileId)).toBe(true);
+  });
+
+  it('an edit or a reaction of a message never processed is still not a re-check, file or not', () => {
+    const { db, fileId } = withFile();
+    upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: 'r1', emoji: '✅', ts: LATER });
+    applyEdit(db, 1, 'm1', 'hello edited', LATER);
+    expect(listUnprocessed(db, 1)[0]).toMatchObject({ waId: 'm1', requeueReason: null });
+    expect(flag(db, fileId)).toBe(false);
   });
 });
 

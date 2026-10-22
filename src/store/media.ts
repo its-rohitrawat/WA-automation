@@ -50,7 +50,13 @@ export interface MediaRow {
   attempts: number;
   nextAttemptAt: string | null;
   driveFileId: string | null;
+  /**
+   * Amendment 12h: the file was read after its message was processed, so the message is queued again as a re-check.
+   * markProcessedIfUnchanged clears it once that re-check is processed.
+   */
+  requeuedForText: boolean;
   createdAt: string;
+  /** For a finished file, when it was finished (nothing changes it afterwards; uploads never touch it). */
   updatedAt: string;
 }
 
@@ -77,6 +83,7 @@ interface RawMedia {
   attempts: number;
   next_attempt_at: string | null;
   drive_file_id: string | null;
+  requeued_for_text: number;
   created_at: string;
   updated_at: string;
 }
@@ -85,7 +92,7 @@ interface RawMedia {
 function columns(textSql: string): string {
   return `id, message_id, client_id, kind, status, mime_type, file_name, file_size, seconds, forwarded, page_count, ref_enc IS NOT NULL AS has_ref,
   local_path, sha256, text_kind, ${textSql} AS text, length(text) AS text_chars, note, error_code, attempts, next_attempt_at, drive_file_id,
-  created_at, updated_at`;
+  requeued_for_text, created_at, updated_at`;
 }
 
 const COLUMNS = columns('text');
@@ -114,6 +121,7 @@ function toRow(r: RawMedia): MediaRow {
     attempts: r.attempts,
     nextAttemptAt: r.next_attempt_at,
     driveFileId: r.drive_file_id,
+    requeuedForText: r.requeued_for_text === 1,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -184,10 +192,25 @@ export function markDownloaded(db: Db, id: number, d: { localPath: string; sha25
 /**
  * The file has been read. NUL characters in the text are stored as spaces: SQLite's substr() and length() stop at the first one,
  * so mediaForMessages would otherwise cut the text there. A space rather than nothing keeps the words and numbers on either side apart.
+ *
+ * Amendment 12h, in the same transaction, when the file has a description or text (never for a message deleted for everyone):
+ * - its message's version goes up, so a run that holds the message (and showed the file as still being read) does not
+ *   mark it processed (markProcessedIfUnchanged);
+ * - a message that was processed before (processed_at set, or queued again for an edit or a reaction) is queued again,
+ *   and the file is flagged requeued_for_text, so the prompt marks the message "(re-check: file now read)".
+ * A message never processed is not flagged: its next run sees the file like any other.
  */
 export function finishMedia(db: Db, id: number, x: { textKind: TextKind | null; text: string | null; pageCount: number | null; note: string | null; at: string }): void {
-  db.prepare(`UPDATE media SET status = 'done', text_kind = @textKind, text = @text, page_count = @pageCount, note = @note, error_code = NULL,
-    next_attempt_at = NULL, ref_enc = NULL, updated_at = @at WHERE id = @id`).run({ id, ...x, text: x.text === null ? null : x.text.replaceAll('\u0000', ' ') });
+  const text = x.text === null ? null : x.text.replaceAll('\u0000', ' ');
+  db.transaction(() => {
+    db.prepare(`UPDATE media SET status = 'done', text_kind = @textKind, text = @text, page_count = @pageCount, note = @note, error_code = NULL,
+      next_attempt_at = NULL, ref_enc = NULL, updated_at = @at WHERE id = @id`).run({ id, ...x, text });
+    if (x.textKind === null || text === null || text === '') return;
+    // The flag first: it needs processed_at as it was before the message is queued again.
+    db.prepare(`UPDATE media SET requeued_for_text = 1 WHERE id = ? AND message_id IN
+      (SELECT id FROM messages WHERE revoked = 0 AND (processed_at IS NOT NULL OR requeue_reason IS NOT NULL))`).run(id);
+    db.prepare('UPDATE messages SET processed_at = NULL, version = version + 1 WHERE id = (SELECT message_id FROM media WHERE id = ?) AND revoked = 0').run(id);
+  }).immediate();
 }
 
 /** A final failure. The sealed details are wiped; an original already saved stays on disk. */
