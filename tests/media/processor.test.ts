@@ -462,9 +462,10 @@ describe('MediaProcessor', () => {
     });
   });
 
-  // Amendment 10e: a read lost after sending is booked at its whole estimate. For a scan that is the scan ceiling
-  // (about $4), so it is not read again; an image books at most about $0.10 a try, so it keeps its 3 attempts.
-  describe('a paid read whose outcome is unknown', () => {
+  // Amendment 10e: a failed paid read can be booked at up to its whole estimate, and so can each retry. For a scan that
+  // is the scan ceiling (about $4), so a scan is not read again; an image books at most about $0.10 a try, so it keeps
+  // its 3 attempts. Only Claude unavailable (10d) and the spend cap still wait.
+  describe('a paid read that fails', () => {
     const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
     const PDF = Buffer.from('%PDF-1.4 scanned pages');
     /** The real extractor with a fake Claude; the parser finds no text layer, so every PDF is a scan. */
@@ -474,12 +475,15 @@ describe('MediaProcessor', () => {
       const prepareImage = async (): Promise<PreparedImage> => ({ data: Buffer.from('small'), mediaType: 'image/jpeg', width: 10, height: 10 });
       return { spend, extract: createExtractor({ ai, spend, prices: P, parse, prepareImage }) };
     };
-    const lost: [string, () => Error, string][] = [
+    /** Each is booked at the whole estimate: the outcome is unknown, or invalid output that carries no cost. */
+    const failures: [string, () => Error, string][] = [
       ['a timeout', () => new Anthropic.APIConnectionTimeoutError(), 'ai_timeout'],
       ['a connection reset after sending', () => connectionLost('ECONNRESET'), 'ai_network'],
+      ['invalid output', () => new AiInvalidOutputError('bad json', null), 'ai_invalid_output'],
+      ['an unknown error', () => new Error('something broke'), 'unknown'],
     ];
 
-    it.each(lost)('a scanned PDF whose read ends in %s fails for good: read once and booked once', async (_name, error, code) => {
+    it.each(failures)('a scanned PDF whose read ends in %s fails for good: read once and booked once', async (_name, error, code) => {
       const ai = new FakeMediaAi([error()]); // a second read would succeed
       const { spend, extract } = realExtractor(ai);
       const lines: string[] = [];
@@ -502,7 +506,7 @@ describe('MediaProcessor', () => {
       ['an image', (s) => s.share()],
       ['an image shared as a document', (s) => s.shareFile('DOC2', 'image/jpeg', 'photo.jpg')],
     ];
-    it.each(images.flatMap(([kind, shareIt]) => lost.map(([name, error, code]) => [kind, name, shareIt, error, code] as const)))(
+    it.each(images.flatMap(([kind, shareIt]) => failures.map(([name, error, code]) => [kind, name, shareIt, error, code] as const)))(
       '%s whose read ends in %s counts an attempt and is read again',
       async (_kind, _name, shareIt, error, code) => {
         const ai = new FakeMediaAi([error()]);
@@ -516,6 +520,30 @@ describe('MediaProcessor', () => {
         expect(ai.calls.map((c) => c.kind)).toEqual(['image', 'image']);
       },
     );
+
+    it('a scanned PDF still waits, unbilled, while Claude is unavailable, and is read once it is back', async () => {
+      const ai = new FakeMediaAi([status(529)]);
+      const { spend, extract } = realExtractor(ai);
+      const { db, clock, p, shareFile } = setup({ fetcher: async () => PDF, extract });
+      const id = shareFile('DOC1', 'application/pdf', 'scan.pdf');
+      expect((await p.process(id)).outcome).toBe('deferred');
+      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0 });
+      expect(spend.spentToday()).toBe(0);
+      clock.advance(5 * MINUTE);
+      expect((await p.process(id)).outcome).toBe('done');
+      expect(getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'extract', note: 'scan_read_by_ai' });
+    });
+
+    it('a scanned PDF still waits for the daily budget, without calling Claude', async () => {
+      const ai = new FakeMediaAi();
+      const { spend, extract } = realExtractor(ai);
+      spend.record('ai', 12, 'earlier calls'); // the scan ceiling (about $4) no longer fits under the $15 cap
+      const { db, p, shareFile } = setup({ fetcher: async () => PDF, extract });
+      const id = shareFile('DOC1', 'application/pdf', 'scan.pdf');
+      expect((await p.process(id)).outcome).toBe('deferred');
+      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'spend_cap', attempts: 0 });
+      expect(ai.calls).toEqual([]);
+    });
   });
 
   it('a refusal from Claude fails for good and is not retried: it was billed', async () => {

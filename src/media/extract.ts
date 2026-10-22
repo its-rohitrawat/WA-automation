@@ -82,11 +82,20 @@ const imageCostUsd = (imageTokens: number, p: Prices): number =>
   estimateCostUsd(MEDIA_SYSTEM_PROMPT.length + INSTRUCTION_CHARS, p, IMAGE_MAX_TOKENS) + (imageTokens * p.inputPerMTok) / 1_000_000;
 
 /**
- * Whether a file is read as an image (a paid description). For any other document the only paid read is a scanned
- * PDF's, so the processor can tell a scan from an image without the error saying which (amendment 10e).
+ * Errors of a scanned PDF's paid read. A retry could book up to the whole scan ceiling again, so the processor does
+ * not retry them (amendment 10e). They are noted here, not wrapped, so the error itself still reaches the caller.
  */
-export function readAsImage(f: { kind: MediaKind; mimeType: string | null }): boolean {
-  return f.kind === 'image' || (f.kind === 'document' && IMAGE_MIMES.has(baseMime(f.mimeType)));
+const scanReadErrors = new WeakSet<object>();
+
+/** Notes a failed scan read and rethrows. The spend cap is not one of these: nothing was tried. */
+function scanReadFailed(e: unknown): never {
+  if (!(e instanceof SpendCapReachedError) && typeof e === 'object' && e !== null) scanReadErrors.add(e);
+  throw e;
+}
+
+/** Whether an error came from a scanned PDF's paid read (amendment 10e). */
+export function isScanReadError(e: unknown): boolean {
+  return typeof e === 'object' && e !== null && scanReadErrors.has(e);
 }
 
 /** Ceiling for one image description: the prompt, the image at its token count (capped), and the full output allowance. */
@@ -144,7 +153,7 @@ export function createExtractor(d: ExtractorDeps): Extractor {
     // Claude reads every real page whatever the file claims, so every scan reserves the same ceiling.
     const ceiling = scannedPdfCeilingUsd(d.prices);
     if (ceiling > d.spend.capUsd) return { ...NONE, pageCount: pages, note: TOO_COSTLY };
-    const r = await withReservation(d.spend, ceiling, label(input), () => d.ai.readScannedPdf(input.bytes), MEDIA_ATTEMPTS);
+    const r = await withReservation(d.spend, ceiling, label(input), () => d.ai.readScannedPdf(input.bytes), MEDIA_ATTEMPTS).catch(scanReadFailed);
     return { textKind: 'extract', text: capStored(r.text), pageCount: pages, note: 'scan_read_by_ai' };
   };
 
@@ -168,8 +177,8 @@ export function createExtractor(d: ExtractorDeps): Extractor {
       case 'image':
         return describe(input);
       case 'document': {
-        if (readAsImage(input)) return describe(input);
         const mime = baseMime(input.mimeType);
+        if (IMAGE_MIMES.has(mime)) return describe(input);
         if (isPdf(input.bytes)) return readPdf(input);
         if (isZip(input.bytes) && (mime === DOCX_MIME || /\.docx$/i.test(input.fileName ?? ''))) return readDocx(input);
         return NONE; // any other file: the original is kept, nothing is read

@@ -9,7 +9,7 @@ import type { Db } from '../store/db.ts';
 import { deferMedia, failMedia, finishMedia, getMedia, getMediaRef, markDownloaded, mediaJob, type MediaJob, type MediaRow } from '../store/media.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
-import { readAsImage, type Extractor } from './extract.ts';
+import { isScanReadError, type Extractor } from './extract.ts';
 import { MediaDownloadError, MediaUnavailableError, type MediaFetcher } from './fetch.ts';
 import { ParseError } from './parse/types.ts';
 import { extForMime, mediaRelPath } from './paths.ts';
@@ -226,13 +226,13 @@ export class MediaProcessor {
       log.info({ ...ids, errorCode: AI_UNAVAILABLE, waitMinutes: waitMs / 60_000, err: e }, 'Claude unavailable: shared file waits');
       return 'deferred';
     }
-    // Amendment 10e: a connection lost after sending is booked at the whole estimate. For a scan that is the scan
-    // ceiling (about $4), booked again by every retry, so the scan fails for good; an image keeps its 3 attempts.
-    // A document not read as an image calls Claude only to read a scanned PDF, so this error came from that read.
-    if (e instanceof Anthropic.APIConnectionError && row.kind === 'document' && !readAsImage(row)) {
-      const errorCode = retryCode(e); // ai_timeout or ai_network
+    // Amendment 10e: every retry of a failed scan read could book up to the whole scan ceiling (about $4) again, so
+    // the scan fails for good. Only the spend cap and Claude unavailable (both above) wait. An image keeps its
+    // 3 attempts: it books at most about $0.10 a try.
+    if (isScanReadError(e)) {
+      const errorCode = retryCode(e);
       failMedia(db, row.id, { status: 'failed', errorCode, at });
-      log.warn({ ...ids, errorCode }, 'scanned PDF not read: outcome unknown, not retried');
+      log.warn({ ...ids, errorCode }, 'scanned PDF not read: not retried, a retry could pay again');
       return 'failed';
     }
     const errorCode = retryCode(e);
