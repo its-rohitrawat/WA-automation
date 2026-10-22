@@ -349,3 +349,37 @@ export function listClientFiles(db: Db, clientId: number, limit = CLIENT_FILES_L
     .all(clientId, limit) as (Omit<ClientFileRow, 'revoked'> & { revoked: number })[];
   return rows.map((r) => ({ ...r, revoked: r.revoked === 1 }));
 }
+
+export interface MediaStats {
+  /** Files waiting to be downloaded or read. */
+  pending: number;
+  /**
+   * Pending longer than staleMs, counted from the file's arrival or from the service start, whichever is later
+   * (amendment 15a, the same clock as the reconciler's wait). Files waiting for the daily budget are counted in spendCap instead.
+   */
+  stale: number;
+  /** Pending files deferred by the daily spend cap (amendment 15b). */
+  spendCap: number;
+  /** Files that could not be read in the last 24 hours. */
+  failedRecent: number;
+  /** Drive uploads that gave up and are still not in Drive. */
+  uploadFailed: number;
+}
+
+/**
+ * Counts for Health and `cli status`. Files of clients no longer on the allow-list are left out: they wait untouched
+ * until the client is back (dueMediaIds), and Health forgets a removed client's warnings too.
+ */
+export function mediaStats(db: Db, now: Date, startedAt: Date = new Date(0), staleMs = 30 * 60_000): MediaStats {
+  const staleBefore = new Date(now.getTime() - staleMs).toISOString();
+  return db
+    .prepare(`SELECT
+        COALESCE(SUM(m.status = 'pending'), 0) AS pending,
+        COALESCE(SUM(m.status = 'pending' AND m.created_at < @staleBefore AND @startedAt < @staleBefore
+          AND COALESCE(m.error_code, '') <> 'spend_cap'), 0) AS stale,
+        COALESCE(SUM(m.status = 'pending' AND m.error_code = 'spend_cap'), 0) AS spendCap,
+        COALESCE(SUM(m.status = 'failed' AND m.updated_at >= @dayAgo), 0) AS failedRecent,
+        COALESCE(SUM(m.drive_failed = 1 AND m.drive_file_id IS NULL), 0) AS uploadFailed
+      FROM media m JOIN clients c ON c.id = m.client_id AND c.active = 1`)
+    .get({ staleBefore, startedAt: startedAt.toISOString(), dayAgo: new Date(now.getTime() - 86_400_000).toISOString() }) as MediaStats;
+}

@@ -4,6 +4,7 @@ import type { HealthLine } from '../output/view.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
 import type { Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
+import type { MediaStats } from '../store/media.ts';
 import type { Clock } from '../util/clock.ts';
 import { istDate, istShortDate, istTime } from '../util/time.ts';
 import type { GatewayStatus } from '../wa/gateway.ts';
@@ -11,6 +12,9 @@ import type { GatewayStatus } from '../wa/gateway.ts';
 const LOW_DISK_GB = 10;
 const DISCONNECT_GRACE_MS = 30 * 60_000;
 const PUBLISH_FAIL_MS = 60 * 60_000;
+const SPEND_CAP_LINE = '⚠️ Daily spend cap reached. Paused until midnight IST';
+
+export type MediaHealth = MediaStats;
 
 export interface HealthSnapshot {
   at: string;
@@ -26,6 +30,11 @@ export interface HealthSnapshot {
   publishFailingSince: string | null;
   /** Incoming WhatsApp events that could not be saved since the service started (lost from the tracker). */
   ingestFailures: number;
+  /**
+   * Shared files: waiting, waiting too long, waiting for the daily budget, failed in the last 24 h, Drive uploads that
+   * gave up. Missing in older snapshots.
+   */
+  media?: MediaHealth;
 }
 
 function defaultFreeBytes(dir: string): number | null {
@@ -54,6 +63,7 @@ export class Health {
   #lastSuccess: Date | null = null;
   #lastPublished: Date | null = null;
   #ingestFailures = 0;
+  #media: MediaHealth = { pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0 };
 
   constructor(o: { db: Db; clock: Clock; spend: SpendGuard; dataDir?: string; freeBytes?: (dir: string) => number | null }) {
     this.#db = o.db;
@@ -89,6 +99,11 @@ export class Health {
   /** Stores the count of incoming messages that could not be saved; the next persist() records it. */
   setIngestFailures(n: number): void {
     this.#ingestFailures = n;
+  }
+
+  /** Stores the shared-file counts; the next persist() records them. */
+  setMedia(m: MediaHealth): void {
+    this.#media = m;
   }
 
   forget(clientId: number): void {
@@ -144,7 +159,8 @@ export class Health {
     if (pubFail && now.getTime() - pubFail.getTime() > PUBLISH_FAIL_MS) {
       return { ok: false, text: `⚠️ Tracker update failing since ${stamp(pubFail)}` };
     }
-    if (this.#spend.isPaused() || this.#hasPaused(now)) return { ok: false, text: '⚠️ Daily spend cap reached. Paused until midnight IST' };
+    // Shared files deferred by the daily cap wait for the budget like a paused group (amendment 15b).
+    if (this.#spend.isPaused() || this.#hasPaused(now) || this.#media.spendCap > 0) return { ok: false, text: SPEND_CAP_LINE };
     if (this.#failed.size > 0) {
       const n = this.#failed.size;
       return { ok: false, text: `⚠️ ${n} group${n === 1 ? '' : 's'} waiting (AI error)` };
@@ -152,6 +168,14 @@ export class Health {
     if (this.#ingestFailures > 0) {
       const n = this.#ingestFailures;
       return { ok: false, text: `⚠️ ${n} incoming message${n === 1 ? '' : 's'} could not be saved. See docs/SETUP.md.` };
+    }
+    if (this.#media.stale > 0) {
+      const n = this.#media.stale;
+      return { ok: false, text: `⚠️ ${n} shared file${n === 1 ? '' : 's'} waiting over 30 minutes to be read. See docs/SETUP.md.` };
+    }
+    if (this.#media.uploadFailed > 0) {
+      const n = this.#media.uploadFailed;
+      return { ok: false, text: `⚠️ ${n} file${n === 1 ? '' : 's'} could not be uploaded to Drive. See docs/SETUP.md.` };
     }
     const free = this.#freeGb();
     if (free !== null && free < LOW_DISK_GB) return { ok: false, text: `⚠️ Low disk: ${free.toFixed(1)} GB free` };
@@ -172,6 +196,7 @@ export class Health {
       freeGb: this.#freeGb(),
       publishFailingSince: this.#publishFailedSince?.toISOString() ?? null,
       ingestFailures: this.#ingestFailures,
+      media: { ...this.#media },
     };
   }
 
@@ -179,6 +204,13 @@ export class Health {
     setKv(this.#db, 'health', JSON.stringify(this.snapshot()));
   }
 }
+
+const MEDIA_COUNTS = ['pending', 'stale', 'spendCap', 'failedRecent', 'uploadFailed'] as const;
+
+const isMediaHealth = (m: unknown): m is MediaHealth => {
+  const x = m as Record<string, unknown> | null;
+  return typeof x === 'object' && x !== null && MEDIA_COUNTS.every((k) => typeof x[k] === 'number');
+};
 
 export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
   const v = getKv(db, 'health');
@@ -194,6 +226,8 @@ export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
     if (typeof o.spentToday !== 'number' || typeof o.capUsd !== 'number' || !Array.isArray(o.failed)) return undefined;
     // Snapshots written before ingestFailures existed still parse.
     if (o.ingestFailures !== undefined && typeof o.ingestFailures !== 'number') return undefined;
+    // Snapshots written before media counts existed still parse.
+    if (o.media !== undefined && !isMediaHealth(o.media)) return undefined;
     return { ...o, ingestFailures: o.ingestFailures ?? 0 } as HealthSnapshot;
   } catch {
     return undefined;
