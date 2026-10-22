@@ -33,14 +33,48 @@ describe('mediaRelPath', () => {
     }
   });
 
+  it('keeps a message id of up to 100 characters and leaves out a longer one, so the path stays short', () => {
+    const at = { clientCode: 'SHA', ts: OCT, mediaId: 7, ext: 'pdf' };
+    const id100 = '3EB0C4F2A1'.repeat(10);
+    expect(mediaRelPath({ ...at, waId: id100 })).toBe(`media/SHA/2026-10/${id100}-7.pdf`);
+    expect(mediaRelPath({ ...at, waId: `${id100}B` })).toBe('media/SHA/2026-10/m7.pdf');
+  });
+
   it('never uses a device name as the client folder, or an odd extension', () => {
     expect(mediaRelPath({ clientCode: 'CON', ts: OCT, waId: 'A1', mediaId: 7, ext: 'exe;rm' })).toBe('media/_CON/2026-10/A1-7.bin');
+  });
+
+  it('builds a fallback client folder from letters and digits only, so it never leaves the media folder', () => {
+    const at = { ts: OCT, waId: 'A1', mediaId: 7, ext: 'pdf' };
+    expect(mediaRelPath({ ...at, clientCode: '../x' })).toBe('media/_x/2026-10/A1-7.pdf');
+    expect(mediaRelPath({ ...at, clientCode: 'a/../../etc/passwd' })).toBe('media/_aetcpass/2026-10/A1-7.pdf');
+    for (const clientCode of ['', '..', '../', '..\\', ':*?']) {
+      expect(mediaRelPath({ ...at, clientCode })).toBe('media/_client/2026-10/A1-7.pdf');
+    }
+    for (const clientCode of ['..\\..\\Windows', 'C:\\Users', 'x.y', 'a b']) {
+      expect(mediaRelPath({ ...at, clientCode }).split('/')[1]).toMatch(/^_[A-Za-z0-9]{1,8}$/);
+    }
+  });
+
+  it('keeps an extension of up to 5 lower-case letters or digits, and uses bin for anything else', () => {
+    const at = { clientCode: 'SHA', ts: OCT, waId: 'A1', mediaId: 7 };
+    expect(mediaRelPath({ ...at, ext: 'abcde' })).toBe('media/SHA/2026-10/A1-7.abcde');
+    expect(mediaRelPath({ ...at, ext: 'abcdef' })).toBe('media/SHA/2026-10/A1-7.bin');
+    expect(mediaRelPath({ ...at, ext: 'JPG' })).toBe('media/SHA/2026-10/A1-7.bin');
+    expect(mediaRelPath({ ...at, ext: '' })).toBe('media/SHA/2026-10/A1-7.bin');
   });
 
   it('safeSegment keeps plain names and replaces device names', () => {
     expect(safeSegment('SHA', 'x')).toBe('SHA');
     expect(safeSegment('nul', 'x')).toBe('x');
     expect(safeSegment('COM3', 'x')).toBe('x');
+    expect(safeSegment('com0', 'x')).toBe('x');
+    expect(safeSegment('LPT0', 'x')).toBe('x');
+  });
+
+  it('safeSegment keeps a name of up to 100 characters and replaces a longer one', () => {
+    expect(safeSegment('A'.repeat(100), 'x')).toBe('A'.repeat(100));
+    expect(safeSegment('A'.repeat(101), 'x')).toBe('x');
   });
 });
 
@@ -76,11 +110,30 @@ describe('sanitizeFileName', () => {
     expect(sanitizeFileName('\u200B\u2066\uFEFF')).toBeNull();
   });
 
+  it('turns line separators, no-break spaces and runs of spaces into one plain space', () => {
+    expect(sanitizeFileName('a\u2028b   c.pdf')).toBe('a b c.pdf');
+    expect(sanitizeFileName('a\u00A0\u2029b.pdf')).toBe('a b.pdf');
+  });
+
   it('returns null for nothing left, and cuts long names by code points', () => {
     expect(sanitizeFileName('...')).toBeNull();
     expect(sanitizeFileName(null)).toBeNull();
     expect(sanitizeFileName(`${'é'.repeat(130)}.pdf`)).toHaveLength(120);
     expect([...(sanitizeFileName('😀'.repeat(130)) ?? '')]).toHaveLength(120);
+  });
+
+  it('drops a space or a dot that the cut leaves at the end', () => {
+    expect(sanitizeFileName(`${'a'.repeat(119)} b.pdf`)).toBe('a'.repeat(119));
+    expect(sanitizeFileName(`${'a'.repeat(119)}.b.pdf`)).toBe('a'.repeat(119));
+    expect(sanitizeFileName(`${'a'.repeat(118)}. b.pdf`)).toBe('a'.repeat(118));
+  });
+
+  it('cleans a name with a very long run of dots and spaces quickly', () => {
+    // An end-trimming regex such as /[.\s]+$/ takes quadratic time on this name: about 20 seconds.
+    const name = `report${'. '.repeat(50_000)}final.pdf`;
+    const started = performance.now();
+    expect(sanitizeFileName(name)).toBe('report');
+    expect(performance.now() - started).toBeLessThan(1_000);
   });
 });
 
@@ -104,6 +157,7 @@ describe('labels', () => {
     expect(formatSize(3_355_443)).toBe('3.2 MB');
     expect(formatDuration(42)).toBe('0:42');
     expect(formatDuration(125)).toBe('2:05');
+    expect(formatDuration(-5)).toBe('0:00');
   });
 
   it('shows the sanitised name, or a dated name for a file without one', () => {

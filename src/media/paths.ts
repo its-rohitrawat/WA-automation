@@ -65,15 +65,30 @@ export function extForMime(mime: string | null, kind: MediaKind): string {
  */
 const INVISIBLE = /[\p{Cc}\p{Cf}]/gu;
 
+const EDGE = /[.\s]/;
+
+/**
+ * Drops dots and white space from both ends of a name. A loop, not a regex: /[.\s]+$/ backtracks on a long run of dots
+ * or spaces inside a name and takes quadratic time.
+ */
+function trimDotsAndSpaces(s: string): string {
+  let start = 0;
+  let end = s.length;
+  while (start < end && EDGE.test(s.charAt(start))) start++;
+  while (end > start && EDGE.test(s.charAt(end - 1))) end--;
+  return s.slice(start, end);
+}
+
 /** A sender's file name made safe to show in the workbook and to use as a Drive name. Null when nothing is left. */
 export function sanitizeFileName(name: string | null, maxLength = 120): string | null {
   if (!name) return null;
-  const cleaned = name
-    .replace(INVISIBLE, '')
-    .replace(/[\\/:*?"<>|]/g, '_')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/^[.\s]+|[.\s]+$/g, '');
-  const cut = [...cleaned].slice(0, maxLength).join('').trim();
+  const cleaned = trimDotsAndSpaces(
+    name
+      .replace(INVISIBLE, '')
+      .replace(/[\\/:*?"<>|]/g, '_')
+      .replace(/\s+/g, ' '),
+  );
+  // Trimmed again after the cut, which can leave a space or a dot at the end.
+  const cut = trimDotsAndSpaces([...cleaned].slice(0, maxLength).join(''));
   return cut.length > 0 ? cut : null;
 }
