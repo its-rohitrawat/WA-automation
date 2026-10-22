@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { SttHttpError, SttJobError, SttNoAnswerError, type HttpFetch } from '../../../src/stt/http.ts';
+import { SttHttpError, SttJobError, SttJobLostError, SttNoAnswerError, type HttpFetch } from '../../../src/stt/http.ts';
 import { SarvamProvider } from '../../../src/stt/providers/sarvam.ts';
 import type { AudioPart } from '../../../src/stt/types.ts';
 
@@ -223,19 +223,48 @@ describe('SarvamProvider', () => {
     expect((err as SttNoAnswerError).code).toBe('status_unavailable');
   });
 
-  it('stops polling at a definite refusal and reports it as an error status', async () => {
+  it('stops polling at a definite refusal: the started job is lost, not failed, since it may be billed', async () => {
     const { http, calls } = fakeSarvam({ statusMisses: [404], states: ['Completed'] });
     const err = await provider(http).transcribe(audio, { diarize: true }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(SttHttpError);
-    expect((err as SttHttpError).status).toBe(404);
+    expect(err).toBeInstanceOf(SttJobLostError);
+    expect(err).toBeInstanceOf(SttNoAnswerError);
+    expect(err).not.toBeInstanceOf(SttHttpError);
+    expect((err as SttJobLostError).code).toBe('status_http_404');
     expect(calls.filter((c) => c.url.endsWith('/status'))).toHaveLength(1);
   });
 
-  it('reports a lost download of a finished job as no answer, so the saved job id can fetch it again for free', async () => {
-    for (const [opts, code] of [[{ downloadStatus: 503 }, 'download_http_503'], [{ blobStatus: 403 }, 'download_http_403']] as const) {
+  it('counts a redirect on a status check as a missed check, not as a lost job', async () => {
+    const { http } = fakeSarvam({ statusMisses: [302], states: ['Completed'] });
+    const r = await provider(http).transcribe(audio, { diarize: true });
+    expect(r.segments).toHaveLength(2);
+  });
+
+  it('reports a download refused for good as a lost job', async () => {
+    const cases = [
+      [{ blobStatus: 404 }, 'download_http_404'],
+      [{ blobStatus: 403 }, 'download_http_403'],
+      [{ downloadStatus: 404 }, 'download_http_404'],
+    ] as const;
+    for (const [opts, code] of cases) {
+      const { http } = fakeSarvam(opts);
+      const err = await provider(http).transcribe(audio, { diarize: true }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(SttJobLostError);
+      expect((err as SttJobLostError).code).toBe(code);
+    }
+  });
+
+  it('reports a passing download problem as plain no answer, so the saved job id can fetch it again for free', async () => {
+    const cases = [
+      [{ downloadStatus: 503 }, 'download_http_503'],
+      [{ blobStatus: 500 }, 'download_http_500'],
+      [{ blobStatus: 429 }, 'download_http_429'],
+      [{ downloadStatus: 408 }, 'download_http_408'],
+    ] as const;
+    for (const [opts, code] of cases) {
       const { http } = fakeSarvam(opts);
       const err = await provider(http).transcribe(audio, { diarize: true }).catch((e: unknown) => e);
       expect(err).toBeInstanceOf(SttNoAnswerError);
+      expect(err).not.toBeInstanceOf(SttJobLostError);
       expect((err as SttNoAnswerError).code).toBe(code);
     }
   });

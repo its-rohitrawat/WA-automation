@@ -13,6 +13,11 @@ export interface Attempt {
   startedAt: string;
   /** Provider job ids by part number, so a later run can wait on a job instead of paying twice. */
   jobIds: Record<string, string>;
+  /**
+   * Job ids the provider no longer has (see SttJobLostError), by part number: "1", or "1-2" for the second lost job of
+   * part 1. They cannot be waited on, but the jobs may be billed, so they are kept as evidence for the dashboard check.
+   */
+  lostJobIds?: Record<string, string>;
   /** ISO time of each paid request, written just before it goes out: the record of what may be billed. */
   sends: string[];
 }
@@ -140,6 +145,26 @@ export class Ledger {
     if (!attempt) throw new LedgerError('no_attempt', 'saveJobId called before begin');
     attempt.jobIds[String(part)] = jobId;
     this.begin(attempt);
+  }
+
+  /**
+   * Moves part n's job id to lostJobIds: the provider no longer has that job, so nothing is left to wait on and the next
+   * plan shows a new, paid send. A part without a saved job id is left as it is.
+   */
+  dropJobId(sampleId: string, provider: ProviderId, part: number): void {
+    const attempt = this.attempt(sampleId, provider);
+    if (!attempt) throw new LedgerError('no_attempt', 'dropJobId called before begin');
+    const key = String(part);
+    const id = attempt.jobIds[key];
+    if (id === undefined) return;
+    const jobIds = { ...attempt.jobIds };
+    delete jobIds[key];
+    const lost = { ...(attempt.lostJobIds ?? {}) };
+    // An earlier lost job of the same part keeps its entry; this one takes the next free name.
+    let name = key;
+    for (let k = 2; Object.hasOwn(lost, name); k++) name = `${key}-${k}`;
+    lost[name] = id;
+    this.begin({ ...attempt, jobIds, lostJobIds: lost });
   }
 
   /** Appends the time of a paid request to the attempt. Called before the request, so a lost answer still shows it. */

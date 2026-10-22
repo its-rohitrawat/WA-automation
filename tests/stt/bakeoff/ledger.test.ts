@@ -71,6 +71,27 @@ describe('Ledger', () => {
     expect(() => ledger.saveJobId('voice-a', 'sarvam', 0, 'job-1')).toThrow(LedgerError);
   });
 
+  it('moves the job id of a lost job to lostJobIds, keeping every earlier one', () => {
+    ledger.begin(attempt({ jobIds: { '0': 'job-1', '1': 'job-2' }, sends: ['2026-10-22T10:00:01.000Z'] }));
+    ledger.dropJobId('voice-a', 'sarvam', 0);
+    expect(ledger.attempt('voice-a', 'sarvam')).toEqual(
+      attempt({ jobIds: { '1': 'job-2' }, lostJobIds: { '0': 'job-1' }, sends: ['2026-10-22T10:00:01.000Z'] }),
+    );
+    expect(ledger.canResume('voice-a', 'sarvam', 2)).toBe(false);
+    // Sent again and lost again: the second id is kept beside the first.
+    ledger.saveJobId('voice-a', 'sarvam', 0, 'job-3');
+    ledger.dropJobId('voice-a', 'sarvam', 0);
+    expect(ledger.attempt('voice-a', 'sarvam')?.lostJobIds).toEqual({ '0': 'job-1', '0-2': 'job-3' });
+    expect(ledger.attempt('voice-a', 'sarvam')?.jobIds).toEqual({ '1': 'job-2' });
+  });
+
+  it('drops nothing for a part without a saved job id, and refuses before the attempt exists', () => {
+    expect(() => ledger.dropJobId('voice-a', 'sarvam', 0)).toThrow(LedgerError);
+    ledger.begin(attempt({ jobIds: { '1': 'job-2' } }));
+    ledger.dropJobId('voice-a', 'sarvam', 0);
+    expect(ledger.attempt('voice-a', 'sarvam')).toEqual(attempt({ jobIds: { '1': 'job-2' } }));
+  });
+
   it('records the time of each paid request on the attempt', () => {
     ledger.begin(attempt({ jobIds: { '0': 'job-1' } }));
     ledger.noteSend('voice-a', 'sarvam', '2026-10-22T10:00:01.000Z');

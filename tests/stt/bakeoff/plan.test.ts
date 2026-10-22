@@ -1,5 +1,8 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import type { SlotState } from '../../../src/stt/bakeoff/ledger.ts';
+import { Ledger, type SlotState } from '../../../src/stt/bakeoff/ledger.ts';
 import { buildPlan, formatPlan, planTotalUsd, type PlanInput } from '../../../src/stt/bakeoff/plan.ts';
 import type { Sample } from '../../../src/stt/bakeoff/samples.ts';
 
@@ -87,6 +90,28 @@ describe('buildPlan', () => {
     const openai = items.find((i) => i.provider === 'openai')!;
     expect(openai).toMatchObject({ action: 'send', state: 'unknown' });
     expect(openai.estimateUsd).toBeCloseTo(0.36, 10);
+  });
+
+  it('plans a new paid send, with the warning, for a Sarvam job the provider no longer has', () => {
+    const ledger = new Ledger(mkdtempSync(join(tmpdir(), 'stt-plan-')));
+    ledger.begin({
+      sampleId: 'meeting-b', provider: 'sarvam', model: 'saaras:v4', startedAt: '2026-10-22T10:00:00.000Z',
+      jobIds: { '0': 'job-9' }, sends: ['2026-10-22T10:00:01.000Z'],
+    });
+    const plan = () =>
+      buildPlan(input({
+        samples: [{ sample: meeting, seconds: 3600 }],
+        providers: [PROVIDERS[0]!],
+        stateOf: (s, p) => ledger.state(s, p),
+        canResume: (s, p, parts) => ledger.canResume(s, p, parts),
+        retryUnknown: true,
+      }));
+    expect(plan()[0]).toMatchObject({ action: 'resume', estimateUsd: 0 });
+    ledger.dropJobId('meeting-b', 'sarvam', 0);
+    const lost = plan()[0]!;
+    expect(lost).toMatchObject({ state: 'unknown', action: 'send' });
+    expect(lost.estimateUsd).toBeCloseTo(0.4, 10);
+    expect(formatPlan([lost])).toContain('send again (an earlier attempt may already be billed)');
   });
 
   it('never asks about resuming a slot that is not unknown', () => {

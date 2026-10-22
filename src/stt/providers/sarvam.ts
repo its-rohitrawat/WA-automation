@@ -1,6 +1,6 @@
 import { openAsBlob } from 'node:fs';
 import { z } from 'zod';
-import { longFetch, parseAnswer, requestJson, requestOk, SttHttpError, SttJobError, SttNoAnswerError, type HttpFetch } from '../http.ts';
+import { longFetch, parseAnswer, requestJson, requestOk, SttHttpError, SttJobError, SttJobLostError, SttNoAnswerError, type HttpFetch } from '../http.ts';
 import { modelFor } from '../prices.ts';
 import type { AudioPart, ProviderResult, Segment, SttProvider, TranscribeOptions } from '../types.ts';
 
@@ -93,8 +93,12 @@ export class SarvamProvider implements SttProvider {
     try {
       raw = await this.#download(jobId, outputName);
     } catch (e) {
-      // The job ran and is billed. As "no answer", the saved job id lets --retry-unknown fetch it again for free.
-      if (e instanceof SttHttpError) throw new SttNoAnswerError(`download_http_${e.status}`);
+      if (e instanceof SttHttpError) {
+        // The job ran and is billed. Refused for good, its result is gone: waiting on the job again would meet the
+        // same refusal. Anything else passes: as plain "no answer", the saved job id lets --retry-unknown fetch it again.
+        if (refusedForGood(e)) throw new SttJobLostError(`download_http_${e.status}`);
+        throw new SttNoAnswerError(`download_http_${e.status}`);
+      }
       throw e;
     }
     return { model, segments: toSegments(parseAnswer(ResultSchema, raw, 'unreadable_result'), audio.seconds), billedSeconds: null, raw };
@@ -124,9 +128,9 @@ export class SarvamProvider implements SttProvider {
         status = parseAnswer(StatusSchema, await this.#get(`/${jobId}/status`), 'unreadable_status');
         misses = 0;
       } catch (e) {
-        // A definite refusal (bad key, a job Sarvam no longer knows) will not pass by asking again. It is "failed", not
-        // "unknown": waiting on the same job id would only meet the same refusal, so --retry-failed is the way forward.
-        if (e instanceof SttHttpError && e.status < 500 && e.status !== 408 && e.status !== 429) throw e;
+        // A definite refusal (a job Sarvam no longer knows) will not pass by asking again. The job was started and may
+        // be billed, so it is never "failed": it is a lost job, whose id is dropped so the next plan warns of a new send.
+        if (e instanceof SttHttpError && refusedForGood(e)) throw new SttJobLostError(`status_http_${e.status}`);
         // A status check is free, so a few failures in a row are tolerated.
         if (++misses >= MAX_STATUS_MISSES) throw new SttNoAnswerError('status_unavailable');
       }
@@ -166,6 +170,11 @@ export class SarvamProvider implements SttProvider {
   async #get(path: string): Promise<unknown> {
     return await requestJson(this.#http, `${JOBS}${path}`, { method: 'GET', headers: this.#headers(false), signal: AbortSignal.timeout(60_000) });
   }
+}
+
+/** A 4xx that asking again will not change. 408 (request timeout) and 429 (too many requests) pass with time. */
+function refusedForGood(e: SttHttpError): boolean {
+  return e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429;
 }
 
 /** Storage links come from Sarvam's answer; only https links are followed. */

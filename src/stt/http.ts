@@ -38,6 +38,18 @@ export class SttNoAnswerError extends Error {
   }
 }
 
+/**
+ * The provider started a job, which may have been billed, but the job can no longer be waited on or downloaded: its
+ * status or its result is refused for good (a 4xx such as 404 or 403). Asking again with the same job id would only
+ * meet the same refusal, so the saved id is dropped and a later run can only send again.
+ */
+export class SttJobLostError extends SttNoAnswerError {
+  constructor(code: string) {
+    super(code);
+    this.name = 'SttJobLostError';
+  }
+}
+
 /** A short machine code ("invalid_api_key"); key-shaped or long hex/numeric strings are dropped, so a key can never be echoed. */
 const isCode = (v: string): boolean => /^[A-Za-z][A-Za-z0-9_.-]{0,39}$/.test(v) && !/^sk[-_]|[0-9]{5,}|[0-9a-f]{16,}/i.test(v);
 

@@ -80,9 +80,13 @@ Sarvam and ElevenLabs can take several minutes for a long meeting. The screen sh
 
 The tool never shows a key or the words of a recording in these messages.
 
-- **`failed ... http_401`**: the key is wrong or has no credit. That service is skipped for the rest of the run. Fix `.env`, then run again with `--retry-failed`.
+- **`failed ... http_401`** (or `http_402`, `http_403`): the service refused the key or the account (a wrong key, or no credit), so it did no work on that request. That service is skipped for the rest of the run. Fix `.env` or add credit, then run again with `--retry-failed`. If Sarvam refuses while it is already working on a recording, that shows as `unknown ... status_http_...` instead (see below).
 - **`failed ... http_429 insufficient_quota`**: OpenAI has no credit left. Add prepaid credit on the OpenAI platform, then run again with `--retry-failed`.
-- **`unknown ... no answer (<code>)`**: the recording was sent, but no answer came back. The code says why: `timeout`, `http_504` and similar mean the connection gave up; `status_unavailable` or `job_wait_timeout` mean Sarvam stopped answering while the job ran; `download_http_...` means Sarvam finished but its answer could not be fetched. The service may still have done the work and charged for it, so the tool does not send it again by itself.
+- **`unknown ... no answer (<code>)`**: the recording was sent, but no answer came back. The service may still have done the work and charged for it, so the tool does not send it again by itself. The code says why:
+  - `timeout`, `http_504` and similar: the connection gave up.
+  - `status_unavailable` or `job_wait_timeout`: Sarvam stopped answering while the job ran.
+  - `download_http_` followed by a number from 500 up, or `download_http_408` or `download_http_429`: Sarvam finished, but its answer could not be fetched this time. The tool keeps the job, so it can be fetched again later.
+  - `status_http_...`, or `download_http_` followed by another number from 400 to 499 (for example `status_http_404` or `download_http_403`): Sarvam no longer has the job, so its answer can never be fetched. It may still have charged for it: check the Sarvam dashboard. `--retry-unknown` then sends the recording again, which may charge again.
   - Check that service's dashboard first (usage or history). Then run with `--retry-unknown`.
   - Sarvam then waits for the job it already has, with no new charge. ElevenLabs and OpenAI send the file again and may charge again.
   - With `part_cache_mismatch`, nothing was sent: the long recording was cut differently from last time. Move that recording's part files (`results\<id>\<service>.part-*.json` in the output folder) aside, or run with a fresh output folder (`--out`).

@@ -7,8 +7,8 @@ import { Ledger, LedgerError, type Outcome } from '../../../src/stt/bakeoff/ledg
 import type { PlanItem } from '../../../src/stt/bakeoff/plan.ts';
 import { runPlan, type RunDeps } from '../../../src/stt/bakeoff/runner.ts';
 import type { Sample } from '../../../src/stt/bakeoff/samples.ts';
-import { SttHttpError, SttJobError, SttNoAnswerError } from '../../../src/stt/http.ts';
-import { modelFor } from '../../../src/stt/prices.ts';
+import { SttHttpError, SttJobError, SttJobLostError, SttNoAnswerError } from '../../../src/stt/http.ts';
+import { costUsd, modelFor } from '../../../src/stt/prices.ts';
 import type { AudioPart, ProviderId, ProviderResult, SttProvider, TranscribeOptions } from '../../../src/stt/types.ts';
 
 type Answer = (call: number, part: AudioPart, opts: TranscribeOptions) => Promise<ProviderResult>;
@@ -196,6 +196,37 @@ describe('runPlan', () => {
     expect(ledger.state('meeting-b', 'sarvam')).toBe('done');
     // Waiting on the saved job is not a paid request: only the first run's send is recorded.
     expect(ledger.attempt('meeting-b', 'sarvam')?.sends).toEqual(['1970-01-01T00:00:01.000Z']);
+  });
+
+  it('drops the job id of a job the provider no longer has, keeps it as evidence, and leaves the slot unknown', async () => {
+    const p = new FakeProvider('sarvam', 7_200, async (_c, _p, opts) => {
+      opts.onJobId?.('job-9');
+      throw new SttJobLostError('status_http_404');
+    });
+    const sum = await runPlan([item(meeting, 'sarvam')], deps([p]));
+    const attempt = ledger.attempt('meeting-b', 'sarvam')!;
+    expect(attempt.jobIds).toEqual({});
+    expect(attempt.lostJobIds).toEqual({ '0': 'job-9' });
+    expect(attempt.sends).toHaveLength(1);
+    expect(ledger.state('meeting-b', 'sarvam')).toBe('unknown');
+    // Nothing is left to wait on, so the next plan can only offer a new, paid send.
+    expect(ledger.canResume('meeting-b', 'sarvam', 1)).toBe(false);
+    expect(sum).toMatchObject({ unknown: 1, failed: 0 });
+    // The started job may be billed: it counts as spent.
+    expect(sum.spentUsd).toBeCloseTo(costUsd(modelFor('sarvam', true), 600, 90), 10);
+    expect(lines.some((l) => l.includes('no answer (status_http_404)'))).toBe(true);
+  });
+
+  it('drops a saved job id that cannot be downloaded any more, without a new send', async () => {
+    ledger.begin({ sampleId: 'meeting-b', provider: 'sarvam', model: 'saaras:v4', startedAt: '2026-10-22T10:00:00.000Z', jobIds: { '0': 'job-9' }, sends: ['2026-10-22T10:00:01.000Z'] });
+    const p = new FakeProvider('sarvam', 7_200, async (_c, _p, opts) => {
+      expect(opts.resumeJobId).toBe('job-9');
+      throw new SttJobLostError('download_http_404');
+    });
+    const sum = await runPlan([item(meeting, 'sarvam', { state: 'unknown', action: 'resume', estimateUsd: 0 })], deps([p]));
+    expect(ledger.attempt('meeting-b', 'sarvam')).toMatchObject({ jobIds: {}, lostJobIds: { '0': 'job-9' }, sends: ['2026-10-22T10:00:01.000Z'] });
+    expect(ledger.state('meeting-b', 'sarvam')).toBe('unknown');
+    expect(sum).toMatchObject({ unknown: 1, spentUsd: 0 });
   });
 
   it('records each paid request on the attempt before making it', async () => {

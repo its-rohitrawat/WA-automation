@@ -1,5 +1,5 @@
 import { AudioError } from '../audio.ts';
-import { SttHttpError, SttJobError, SttNoAnswerError } from '../http.ts';
+import { SttHttpError, SttJobError, SttJobLostError, SttNoAnswerError } from '../http.ts';
 import { costUsd, modelFor } from '../prices.ts';
 import { formatClock, mergeParts } from '../segments.ts';
 import type { AudioPart, ProviderId, ProviderResult, SttProvider } from '../types.ts';
@@ -158,6 +158,8 @@ async function runSlot(item: PlanItem, provider: SttProvider, deps: RunDeps, now
     return { kind: 'unknown', code: 'resume_part_without_job', sentSeconds: 0 };
   }
   let sentSeconds = 0;
+  /** The part whose request is in flight, so a lost job's id can be dropped. */
+  let sending = -1;
   try {
     const results: ProviderResult[] = [];
     for (const [n, part] of parts.entries()) {
@@ -166,6 +168,7 @@ async function runSlot(item: PlanItem, provider: SttProvider, deps: RunDeps, now
         results.push(saved);
         continue;
       }
+      sending = n;
       const resumeJobId = jobIds[String(n)];
       if (!resumeJobId) {
         // On disk before the paid request leaves, so the attempt lists every send even when its answer is lost.
@@ -213,6 +216,12 @@ async function runSlot(item: PlanItem, provider: SttProvider, deps: RunDeps, now
   } catch (e) {
     // The ledger is what stops a second payment; when it cannot be written, the run stops (the slot stays unknown on disk).
     if (e instanceof LedgerError) throw e;
+    if (e instanceof SttJobLostError) {
+      // Started, so maybe billed: unknown. Its id is dropped (kept aside as evidence), so the next plan cannot offer a
+      // free wait on a job that is gone and shows a new, paid send with its warning instead.
+      if (sending >= 0) ledger.dropJobId(sample.id, item.provider, sending);
+      return { kind: 'unknown', code: e.code, sentSeconds };
+    }
     if (e instanceof SttHttpError) return failed(`http_${e.status}${e.detail ? ` ${e.detail}` : ''}`, e.status, sentSeconds);
     if (e instanceof SttJobError) return failed(`job_${e.code}`, null, sentSeconds);
     return { kind: 'unknown', code: e instanceof SttNoAnswerError ? e.code : e instanceof Error ? e.name : 'error', sentSeconds };
