@@ -152,24 +152,26 @@ Every task's implementer applies the items listed under its task, in addition to
 - **10a. Inactive clients (review I4).** If the row's client is inactive, the processor does nothing and leaves the row pending. Test it.
 - **10b. No tight loop (review M12).** When the processor finds no job for a row (the message was deleted, or the row is missing data), it fails the row with `no_job`. It must not return "skipped" with the row still pending, which would loop.
 - **10d. Claude unavailable is not a failed attempt (controller, after the 8c trade-off).** With one SDK attempt per media call (8c), the plan's 3 attempts over about 6 minutes would leave every image and scan shared during a longer Claude outage `failed` for good.
-  - When the extractor throws an error that was released, not billed: `Anthropic.RateLimitError` (429), an `Anthropic.APIError` with status 500 or above (529 overloaded included), or an `Anthropic.APIConnectionError` that is not an `APIConnectionTimeoutError` and for which `neverSent(e)` (src/brain/paidCall.ts) is true. In that case the processor defers the row with `countAttempt: false` and error code `ai_unavailable`.
+  - When the extractor throws an error that was released, not billed: `Anthropic.RateLimitError` (429), an `Anthropic.APIError` with status 500 or above (529 overloaded included), an `Anthropic.AuthenticationError` (401) or `Anthropic.PermissionDeniedError` (403), or an `Anthropic.APIConnectionError` that is not an `APIConnectionTimeoutError` and for which `neverSent(e)` (src/brain/paidCall.ts) is true. In that case the processor defers the row with `countAttempt: false` and error code `ai_unavailable`. This applies to images and scans alike.
+  - A 401 or 403 (a bad or revoked key) is unbilled, and the owner can fix it; the files shared meanwhile should still be read afterwards (controller, after the Task 10 review).
   - The waits grow: 5, 15, 30 and 60 minutes, then 60 minutes each time.
-  - When the row's `createdAt` is more than 24 hours old, it fails with `ai_unavailable` instead.
-  - Everything else keeps the plan's rule: a timeout after sending (`ai_timeout`, which is billed), invalid output, 4xx errors such as 400, 401 and 403, and download errors count an attempt and use `RETRY_DELAYS_MS`.
+  - When the row's `createdAt` is more than 24 hours old, it fails with `ai_unavailable` instead (counted from the service start if that is later: 10f).
+  - Everything else keeps the plan's rule: a timeout after sending (`ai_timeout`, which is billed), invalid output, other 4xx errors such as 400 and 404, and download errors count an attempt and use `RETRY_DELAYS_MS` (for a scan, 10e makes a failed paid read final instead).
   - Tests:
-    - a 529 and a never-sent connection error each defer without counting an attempt, with the growing waits;
+    - a 529, a 401, a 403 and a never-sent connection error each defer without counting an attempt, with the growing waits;
+    - a scan and an image hitting a 401 or a 403 both defer, book nothing, and are read once the key works;
     - the row fails once it is older than 24 hours;
-    - a 401 still counts an attempt;
+    - a 400 still counts an attempt;
     - an APIConnectionTimeoutError still counts an attempt.
 - **10e. A failed scan read is not retried (controller, Task 10 review; widened after review round 1).** When the scanned-PDF read fails, the row fails for good with the error's code. Two failures keep their own handling: "Claude unavailable" under 10d (released, not billed: deferred as `ai_unavailable`) and `SpendCapReachedError` (deferred as `spend_cap`). Everything else is final:
   - a connection lost after sending: `ai_timeout`, or `ai_network`. A timeout whose cause looks never sent is final too, though the spend code releases it.
-  - invalid output (`ai_invalid_output`), a refusal (`ai_refusal`, as before), other API errors such as 400 or 401 (`ai_<status>`), and unknown errors (`unknown`).
+  - invalid output (`ai_invalid_output`), a refusal (`ai_refusal`, as before), other API errors such as 400 or 404 (`ai_<status>`; a 401 or 403 waits under 10d), and unknown errors (`unknown`).
 
   Each retry could book up to the whole scan ceiling (about $4–5) again; two tries took about 69% of the default $15 cap within a minute. Images keep the plan's 3 attempts, because each booking is at most the image ceiling (about $0.10). Failures before the paid read (download, disk, parsing) keep their own handling. The extractor notes each error of a scan's paid read (`isScanReadError` in src/media/extract.ts) without wrapping it, so the processor can tell it apart from other failures of the same PDF. Log a warn line with ids and the code only. Tests:
   - a scanned PDF whose read throws APIConnectionTimeoutError fails as `ai_timeout`: readScannedPdf is called once and spentToday equals scannedPdfCeilingUsd once;
   - the same for a connection reset after sending (`ai_network`), AiInvalidOutputError (`ai_invalid_output`) and a plain Error (`unknown`);
   - an image with the same errors still counts an attempt and is retried;
-  - a scanned PDF still waits on a 529 (unbilled) and on the spend cap.
+  - a scanned PDF still waits on a 529, a 401 or a 403 (unbilled) and on the spend cap.
 - **10f. The 24 hours count from the service start too (controller, Task 10 review).** The 10d limit counts from `max(createdAt, startedAt)`, where `startedAt` is the service start time (the same value as 12a, passed in by Task 15; default `clock.now()` at construction). Files loaded by `cli link` days before go-live then still get 24 hours of waits. Test: a row created 3 days before `startedAt` defers on a 529 instead of failing.
 - **10c. Local file names (amendment 4a, triage T4-01).** Saved files are named `<waId>-<mediaId>.<ext>` by `mediaRelPath` (src/media/paths.ts). The plan's Task 10 tests still expect the old names: `IMG1.jpg` and `media/SHA/2026-10/IMG1.jpg` (plan lines 3008-3098). Expect `IMG1-<mediaId>.jpg` and `media/SHA/2026-10/IMG1-<mediaId>.jpg`, with the id of the row under test, and build paths only through `mediaRelPath`, never by hand.
 

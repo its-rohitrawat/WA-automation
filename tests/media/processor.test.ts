@@ -356,6 +356,9 @@ describe('MediaProcessor', () => {
       ['529 overloaded', () => status(529)],
       ['500 server error', () => status(500)],
       ['429 rate limit', () => status(429)],
+      // A rejected or revoked key: unbilled, and the owner can fix it, after which the file is still read.
+      ['401 rejected key', () => status(401)],
+      ['403 permission denied', () => status(403)],
       ['connection refused before sending', () => connectionLost('ECONNREFUSED')],
     ])('a %s waits 5, 15, 30 and 60 minutes, then hourly, without counting an attempt', async (_name, error) => {
       const { db, clock, p, fetcher, extract, share } = setup({ extract: async () => { throw error(); } });
@@ -447,8 +450,8 @@ describe('MediaProcessor', () => {
 
   describe('Claude errors that count an attempt', () => {
     it.each([
-      ['401 bad key', () => status(401), 'ai_401'],
       ['400 bad request', () => status(400), 'ai_400'],
+      ['404 not found', () => status(404), 'ai_404'],
       ['timeout after sending', () => new Anthropic.APIConnectionTimeoutError(), 'ai_timeout'],
       // A timeout may have been billed whatever its cause says (amendment 10d).
       ['timeout whose cause looks never sent', () => Object.assign(new Anthropic.APIConnectionTimeoutError(), { cause: Object.assign(new Error('socket'), { code: 'ECONNREFUSED' }) }), 'ai_timeout'],
@@ -521,18 +524,27 @@ describe('MediaProcessor', () => {
       },
     );
 
-    it('a scanned PDF still waits, unbilled, while Claude is unavailable, and is read once it is back', async () => {
-      const ai = new FakeMediaAi([status(529)]);
-      const { spend, extract } = realExtractor(ai);
-      const { db, clock, p, shareFile } = setup({ fetcher: async () => PDF, extract });
-      const id = shareFile('DOC1', 'application/pdf', 'scan.pdf');
-      expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0 });
-      expect(spend.spentToday()).toBe(0);
-      clock.advance(5 * MINUTE);
-      expect((await p.process(id)).outcome).toBe('done');
-      expect(getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'extract', note: 'scan_read_by_ai' });
-    });
+    const files: [string, (s: ReturnType<typeof setup>) => number, 'pdf' | 'image'][] = [
+      ['a scanned PDF', (s) => s.shareFile('DOC1', 'application/pdf', 'scan.pdf'), 'pdf'],
+      ['an image', (s) => s.share(), 'image'],
+    ];
+    const unbilled: [string, number][] = [['a 529', 529], ['a 401 (rejected key)', 401], ['a 403 (permission denied)', 403]];
+    it.each(files.flatMap(([file, shareIt, kind]) => unbilled.map(([name, code]) => [file, name, shareIt, kind, code] as const)))(
+      '%s still waits, unbilled, on %s, and is read once Claude accepts the call',
+      async (_file, _name, shareIt, kind, code) => {
+        const ai = new FakeMediaAi([status(code)]);
+        const { spend, extract } = realExtractor(ai);
+        const s = setup({ fetcher: async () => (kind === 'pdf' ? PDF : Buffer.from('jpeg-bytes')), extract });
+        const id = shareIt(s);
+        expect((await s.p.process(id)).outcome).toBe('deferred');
+        expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0, nextAttemptAt: at(5 * MINUTE) });
+        expect(spend.spentToday()).toBe(0);
+        s.clock.advance(5 * MINUTE);
+        expect((await s.p.process(id)).outcome).toBe('done');
+        expect(getMedia(s.db, id)).toMatchObject({ status: 'done', errorCode: null, attempts: 0 });
+        expect(ai.calls.map((c) => c.kind)).toEqual([kind, kind]);
+      },
+    );
 
     it('a scanned PDF still waits for the daily budget, without calling Claude', async () => {
       const ai = new FakeMediaAi();

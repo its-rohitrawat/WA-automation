@@ -27,7 +27,7 @@ export const MEDIA_MAX_ATTEMPTS = 3;
 /** Wait after the first and the second failed attempt; the third failure is final. */
 const RETRY_DELAYS_MS = [60_000, 5 * 60_000];
 export const SPEND_RETRY_MS = 10 * 60_000;
-/** Claude was busy or down and nothing was billed: waits that grow, then hourly (amendment 10d). */
+/** Claude was busy, down or refused the key, and nothing was billed: waits that grow, then hourly (amendment 10d). */
 const AI_UNAVAILABLE = 'ai_unavailable';
 const AI_UNAVAILABLE_WAITS_MS = [5, 15, 30, 60].map((m) => m * 60_000);
 /**
@@ -70,13 +70,14 @@ function retryCode(e: unknown): string {
 }
 
 /**
- * A Claude error that was released, not billed: rate limited, a server error or overload, or a request that never
- * left this machine. Such a wait does not use up one of the file's attempts (amendment 10d). A timeout after sending
- * may have been billed, so it is not one of these.
+ * A Claude error that was released, not billed: rate limited, a server error or overload, a rejected or revoked key
+ * (401, 403: the owner can fix it, and the file should still be read then), or a request that never left this machine.
+ * Such a wait does not use up one of the file's attempts (amendment 10d). A timeout after sending may have been billed,
+ * so it is not one of these.
  */
 function claudeUnavailable(e: unknown): boolean {
   if (e instanceof Anthropic.APIConnectionError) return !(e instanceof Anthropic.APIConnectionTimeoutError) && neverSent(e);
-  if (e instanceof Anthropic.RateLimitError) return true;
+  if (e instanceof Anthropic.RateLimitError || e instanceof Anthropic.AuthenticationError || e instanceof Anthropic.PermissionDeniedError) return true;
   return e instanceof Anthropic.APIError && typeof e.status === 'number' && e.status >= 500;
 }
 
