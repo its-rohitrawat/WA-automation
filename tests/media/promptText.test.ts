@@ -81,6 +81,20 @@ describe('mediaPromptText', () => {
     expect(mediaPromptText(row({ kind: 'audio', mimeType: 'audio/mpeg', status: 'pending', text: null, textKind: null }), 100)).toBeNull();
   });
 
+  it('shows a view-once voice note or audio file as not saved, not as waiting for a transcript', () => {
+    const viewOnce = { status: 'metadata', errorCode: 'view_once', text: null, textKind: null } as const;
+    expect(mediaPromptText(row({ ...viewOnce, kind: 'voice', mimeType: 'audio/ogg' }), 100)).toEqual(said('view-once voice note, not saved'));
+    expect(mediaPromptText(row({ ...viewOnce, kind: 'audio', mimeType: 'audio/mpeg' }), 100)).toEqual(said('view-once audio file, not saved'));
+    const out = buildUserContent({
+      client: { id: 1, code: 'SHA', name: 'Sharma Interiors', groupId: SHARMA.groupId, phases: SHARMA.phases, currentPhase: null, phaseLocked: false, statusText: null, statusUpdatedAt: null, active: true },
+      people: [], openTasks: [], decisions: [], recent: [], reactions: [], today: '2026-10-19',
+      batch: [msg(1, { text: null, mediaType: 'voice' })],
+      mediaText: mediaPromptTexts(new Map([[1, row({ ...viewOnce, kind: 'voice', mimeType: 'audio/ogg' })]]), [msg(1, { text: null, mediaType: 'voice' })], []),
+    });
+    expect(out).toContain(': {view-once voice note, not saved}');
+    expect(out).not.toContain('not transcribed yet');
+  });
+
   it('notes when only the first pages of a long PDF were read', () => {
     expect(mediaPromptText(pdf({ pageCount: 250, note: 'first_pages_only' }), 100))
       .toEqual({ head: 'document "brief.pdf" (PDF, 250 pages), first 200 pages only, text', body: 'Line one\nLine two' });
@@ -89,8 +103,9 @@ describe('mediaPromptText', () => {
   it('marks forwarded files, and says when a forwarded file was not described or read (D2)', () => {
     const fwd = { forwarded: true, text: null, textKind: null, note: 'forwarded_not_described' } as const;
     expect(mediaPromptText(row(fwd), 100)).toEqual(said('image (forwarded), not described'));
+    // The extractor stores the page count of a forwarded scan, but D2's text leaves it out.
+    expect(mediaPromptText(pdf({ ...fwd, fileName: 'x.pdf', pageCount: 3 }), 100)).toEqual(said('document "x.pdf" (PDF, forwarded), not read'));
     expect(mediaPromptText(pdf({ ...fwd, fileName: 'x.pdf', pageCount: null }), 100)).toEqual(said('document "x.pdf" (PDF, forwarded), not read'));
-    expect(mediaPromptText(pdf({ ...fwd, fileName: 'x.pdf' }), 100)).toEqual(said('document "x.pdf" (PDF, 3 pages, forwarded), not read'));
     expect(mediaPromptText(row({ ...fwd, kind: 'document', fileName: 'photo.jpg' }), 100)).toEqual(said('document "photo.jpg" (Image, forwarded), not described'));
     // Free local text extraction still runs for forwarded documents.
     expect(mediaPromptText(pdf({ forwarded: true }), 100)).toEqual({ head: 'document "brief.pdf" (PDF, 3 pages, forwarded), text', body: 'Line one\nLine two' });
@@ -122,6 +137,24 @@ describe('mediaPromptTexts', () => {
     expect(out.get(1)?.body).toBe('aaaaa');
     expect(out.get(2)?.body).toBe(`${'b'.repeat(20)} … (10 more characters not shown)`);
     expect(out.get(3)?.body).toBe('(30 characters not shown)');
+  });
+
+  it('gives image descriptions the first claim on the batch budget, so a receipt after long PDFs is shown whole', () => {
+    const receipt = 'Bank receipt. Visible text: Paid ₹42,000 to Studio X';
+    const media = new Map([
+      [1, pdf({ id: 1, messageId: 1, text: 'a'.repeat(30_000) })],
+      [2, pdf({ id: 2, messageId: 2, text: 'b'.repeat(30_000) })],
+      [3, pdf({ id: 3, messageId: 3, text: 'c'.repeat(30_000) })],
+      [4, row({ id: 4, messageId: 4, text: receipt })],
+    ]);
+    const out = mediaPromptTexts(media, [msg(1), msg(2), msg(3), msg(4)], []);
+    expect(out.get(4)).toEqual({ head: 'image', body: receipt });
+    expect(out.get(1)?.body).toBe(`${'a'.repeat(20_000)} … (10000 more characters not shown)`);
+    expect(out.get(2)?.body).toBe(`${'b'.repeat(20_000)} … (10000 more characters not shown)`);
+    // The PDFs share what the receipt left, so the batch still shows at most perBatch (60,000) characters.
+    const shown = 60_000 - 40_000 - [...receipt].length;
+    expect(out.get(3)?.body).toBe(`${'c'.repeat(shown)} … (${30_000 - shown} more characters not shown)`);
+    expect([...out.keys()]).toEqual([1, 2, 3, 4]);
   });
 
   it('a file that was not read uses none of the budget, and placeholder kinds get no block', () => {

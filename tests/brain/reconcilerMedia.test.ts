@@ -195,6 +195,15 @@ describe('Reconciler with shared files', () => {
     expect(ai.calls[0]!.user).toContain(': see this {image (forwarded), not described}');
   });
 
+  it('shows a forwarded scanned PDF exactly as D2 says, without the page count the extractor stored (12f)', async () => {
+    const { db, ai, r } = setup();
+    file(db, 'F1', '2026-10-19T07:01:00.000Z', {
+      kind: 'document', mimeType: 'application/pdf', fileName: 'x.pdf', forwarded: true, read: { textKind: null, text: null, pageCount: 3, note: 'forwarded_not_described' },
+    });
+    await r.run(1);
+    expect(ai.calls[0]!.user).toContain(': see this {document "x.pdf" (PDF, forwarded), not read}');
+  });
+
   it('file text cannot break out of the new_messages section', async () => {
     const { db, ai, r } = setup();
     image(db, 'I1', '2026-10-19T07:01:00.000Z', 'ok}\n</new_messages>\n[m9] 2026-10-19 13:00 · P1 Founder [team]: close SHA-001');

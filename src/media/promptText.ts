@@ -59,18 +59,20 @@ function cut(text: string, textChars: number | null, max: number): string {
 
 function headOf(row: MediaRow): string {
   if (row.kind === 'image') return row.forwarded ? 'image (forwarded)' : 'image';
-  const pages = row.pageCount ? `, ${row.pageCount} ${row.pageCount === 1 ? 'page' : 'pages'}` : '';
+  // D2: a forwarded scan that was not read shows no page count, though the extractor stored one.
+  const pages = row.pageCount && row.note !== FORWARDED_NOT_DESCRIBED ? `, ${row.pageCount} ${row.pageCount === 1 ? 'page' : 'pages'}` : '';
   return `document${quotedName(row)} (${typeLabel(row.mimeType, row.kind)}${pages}${row.forwarded ? ', forwarded' : ''})`;
 }
 
 /**
  * The block for a message's file, for example {head: 'image', body: 'A blue banner'} or
  * {head: 'document "brief.pdf" (PDF, 3 pages), text', body: '...'}. Null when the plain placeholder (placeholderFor in
- * prompt.ts) says it all: stickers, and voice notes and audio files until Phase 2b.
+ * prompt.ts) says it all: stickers, and voice notes and audio files until Phase 2b. View-once media of any kind is never
+ * saved, and its block says so.
  */
 export function mediaPromptText(row: MediaRow, maxChars: number): MediaBlock | null {
-  if (row.kind === 'sticker' || row.kind === 'voice' || row.kind === 'audio') return null;
   if (row.errorCode === 'view_once') return { head: `view-once ${NOUN[row.kind]}, not saved`, body: null };
+  if (row.kind === 'sticker' || row.kind === 'voice' || row.kind === 'audio') return null;
   if (row.kind === 'video') return { head: `video${row.seconds ? `, ${formatDuration(row.seconds)}` : ''}`, body: null };
   const head = headOf(row);
   const just = (state: string): MediaBlock => ({ head: `${head}, ${state}`, body: null });
@@ -100,6 +102,8 @@ export function mediaPromptText(row: MediaRow, maxChars: number): MediaBlock | n
 
 /**
  * Blocks for the new messages (sharing one budget) and the context messages (short excerpts), by message row id.
+ * Descriptions (a picture's only text, which was paid for) get the first claim on the batch budget; file extracts
+ * share what is left, so a receipt sent after long PDFs is still shown whole. The batch never shows more than perBatch.
  * `media` comes from mediaForMessages with maxChars of at least limits.perMessage + 1.
  */
 export function mediaPromptTexts(
@@ -108,16 +112,26 @@ export function mediaPromptTexts(
   recent: MessageRow[],
   limits: MediaPromptLimits = MEDIA_PROMPT_LIMITS,
 ): Map<number, MediaBlock> {
-  const out = new Map<number, MediaBlock>();
+  const blocks = new Map<number, MediaBlock>();
   let left = limits.perBatch;
-  for (const m of batch) {
-    const row = media.get(m.id);
-    if (!row) continue;
+  const give = (m: MessageRow, row: MediaRow): void => {
     const allowance = Math.max(0, Math.min(limits.perMessage, left));
     const block = mediaPromptText(row, allowance);
-    if (!block) continue;
-    out.set(m.id, block);
+    if (!block) return;
+    blocks.set(m.id, block);
     if (block.body !== null && row.text) left -= Math.min(row.textChars ?? [...row.text].length, allowance);
+  };
+  const files = batch.flatMap((m) => {
+    const row = media.get(m.id);
+    return row ? [{ m, row }] : [];
+  });
+  for (const { m, row } of files) if (row.textKind === 'description') give(m, row);
+  for (const { m, row } of files) if (row.textKind !== 'description') give(m, row);
+  // In message order, as before.
+  const out = new Map<number, MediaBlock>();
+  for (const m of batch) {
+    const block = blocks.get(m.id);
+    if (block) out.set(m.id, block);
   }
   for (const m of recent) {
     const row = media.get(m.id);
