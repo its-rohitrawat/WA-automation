@@ -1,4 +1,5 @@
 import { getDocumentProxy } from 'unpdf';
+import { countVisible, cutText } from './text.ts';
 import { ParseError, type ParseResult } from './types.ts';
 
 /**
@@ -23,8 +24,16 @@ const PDF_OPTIONS = { verbosity: 0, maxImageSize: 16_000_000 };
  * Uint8Array that owns its whole buffer is handed over as it is: a second copy of a 50 MB file would use a large part
  * of the worker's memory cap outside the heap (MEDIA_LIMITS.maxParserExternalBytes) and stop real files. The bytes may
  * be emptied then.
+ *
+ * With maxTextChars, reading stops once the pages read hold that many characters that are not whitespace, and the text
+ * is cut there. Only whitespace is tidied away afterwards, so the cut text is the same as a cut of the whole text.
  */
-export async function extractPdfText(bytes: Uint8Array, limits: { maxPages: number }, o: { ownsBytes?: boolean } = {}): Promise<ParseResult> {
+export async function extractPdfText(
+  bytes: Uint8Array,
+  limits: { maxPages: number; maxTextChars?: number },
+  o: { ownsBytes?: boolean } = {},
+): Promise<ParseResult> {
+  const maxText = limits.maxTextChars ?? Number.POSITIVE_INFINITY;
   const whole = bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength;
   const data = o.ownsBytes === true && whole && !Buffer.isBuffer(bytes) ? bytes : new Uint8Array(bytes);
   let pdf: Awaited<ReturnType<typeof getDocumentProxy>>;
@@ -37,14 +46,18 @@ export async function extractPdfText(bytes: Uint8Array, limits: { maxPages: numb
     const pageCount = pdf.numPages;
     if (!(pageCount >= 1)) throw new ParseError('pdf_no_pages');
     const pages: string[] = [];
+    let visible = 0;
     for (let i = 1; i <= Math.min(pageCount, limits.maxPages); i++) {
       const page = await pdf.getPage(i);
       const content = await page.getTextContent();
-      pages.push(content.items.map((it) => ('str' in it ? `${it.str}${it.hasEOL ? '\n' : ''}` : '')).join(''));
+      const pageText = content.items.map((it) => ('str' in it ? `${it.str}${it.hasEOL ? '\n' : ''}` : '')).join('');
+      pages.push(pageText);
       page.cleanup();
+      visible += countVisible(pageText, maxText - visible);
+      if (visible >= maxText) break; // the text is cut there anyway
     }
     const text = pages.join('\n\n').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-    return { text, pageCount };
+    return { text: cutText(text, maxText), pageCount };
   } finally {
     // PDF.js 6 has no PDFDocumentProxy.destroy(); destroying the loading task frees the document.
     await pdf.loadingTask.destroy();

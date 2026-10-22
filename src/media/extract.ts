@@ -13,6 +13,7 @@ import type { SpendGuard } from '../spend/spendGuard.ts';
 import type { MediaKind, TextKind } from '../store/media.ts';
 import { prepareImageForClaude, type PreparedImage } from './image.ts';
 import { parseFile } from './parse/runner.ts';
+import { countVisible, cutText } from './parse/text.ts';
 import type { ParseJob, ParseResult } from './parse/types.ts';
 import { MEDIA_LIMITS } from './types.ts';
 
@@ -71,11 +72,11 @@ const MEDIA_ATTEMPTS = MEDIA_SDK_MAX_RETRIES + 1;
 const baseMime = (m: string | null): string => ((m ?? '').toLowerCase().split(';')[0] ?? '').trim();
 const isPdf = (b: Buffer): boolean => b.subarray(0, 5).toString('latin1') === '%PDF-';
 const isZip = (b: Buffer): boolean => b.length >= 4 && b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04;
-const visibleChars = (s: string): number => s.replace(/\s/g, '').length;
-
-function capStored(text: string): string {
-  return text.length <= MEDIA_LIMITS.maxStoredTextChars ? text : [...text].slice(0, MEDIA_LIMITS.maxStoredTextChars).join('');
-}
+/**
+ * Text kept per file. The parsers already stop at this cap; Claude's text is cut here. The cut is O(1), so a huge text
+ * never stalls the service (review of Task 9).
+ */
+const capStored = (text: string): string => cutText(text, MEDIA_LIMITS.maxStoredTextChars);
 
 const imageCostUsd = (imageTokens: number, p: Prices): number =>
   estimateCostUsd(MEDIA_SYSTEM_PROMPT.length + INSTRUCTION_CHARS, p, IMAGE_MAX_TOKENS) + (imageTokens * p.inputPerMTok) / 1_000_000;
@@ -118,11 +119,12 @@ export function createExtractor(d: ExtractorDeps): Extractor {
   const readPdf = async (input: ExtractInput): Promise<Extraction> => {
     // No transfer: the bytes are still needed for a scan, by the size check and by the paid call (amendment 9f).
     const size = input.bytes.length;
-    const parsed = await parse({ kind: 'pdf', bytes: input.bytes, maxPages: MEDIA_LIMITS.maxPdfPages });
+    const parsed = await parse({ kind: 'pdf', bytes: input.bytes, maxPages: MEDIA_LIMITS.maxPdfPages, maxTextChars: MEDIA_LIMITS.maxStoredTextChars });
     // From the file's own /Count entry: shown as it is, never a limit on spend (amendment 9g).
     const pages = parsed.pageCount ?? 1;
     const read = Math.min(pages, MEDIA_LIMITS.maxPdfPages);
-    if (visibleChars(parsed.text) >= MIN_CHARS_PER_PAGE * Math.max(1, read)) {
+    const needed = MIN_CHARS_PER_PAGE * Math.max(1, read);
+    if (countVisible(parsed.text, needed) >= needed) {
       return { textKind: 'extract', text: capStored(parsed.text), pageCount: pages, note: pages > read ? 'first_pages_only' : null };
     }
     // No usable text layer: a scan. Claude reads short scans; longer ones are listed with their page count only.
@@ -141,7 +143,13 @@ export function createExtractor(d: ExtractorDeps): Extractor {
   const readDocx = async (input: ExtractInput): Promise<Extraction> => {
     // Moved to the parser without a copy: nothing reads a DOCX's bytes after this (amendment 9f).
     const parsed = await parse(
-      { kind: 'docx', bytes: input.bytes, maxXmlBytes: MEDIA_LIMITS.maxDocxXmlBytes, maxEntries: MEDIA_LIMITS.maxZipEntries },
+      {
+        kind: 'docx',
+        bytes: input.bytes,
+        maxXmlBytes: MEDIA_LIMITS.maxDocxXmlBytes,
+        maxEntries: MEDIA_LIMITS.maxZipEntries,
+        maxTextChars: MEDIA_LIMITS.maxStoredTextChars,
+      },
       { transfer: true },
     );
     return parsed.text ? { textKind: 'extract', text: capStored(parsed.text), pageCount: null, note: null } : NONE;

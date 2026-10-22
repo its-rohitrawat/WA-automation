@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { isMarkedAsUntransferable } from 'node:worker_threads';
+import sharp from 'sharp';
 import { describe, expect, it, vi } from 'vitest';
 import { IMAGE_MAX_TOKENS, IMAGE_TOKEN_CEILING, MEDIA_SYSTEM_PROMPT, PDF_MAX_TOKENS, PDF_TOKENS_PER_PAGE } from '../../src/brain/mediaClient.ts';
 import { SpendCapReachedError } from '../../src/brain/paidCall.ts';
@@ -24,7 +25,7 @@ const NONE = { textKind: null, text: null, pageCount: null, note: null };
 /** A Buffer that owns its whole memory, as files read from disk do, so a transfer really moves it. */
 const owned = (b: Uint8Array): Buffer => Buffer.from(new Uint8Array(b).buffer);
 
-function setup(o: { parse?: ParseResult; capUsd?: number; ai?: FakeMediaAi; realParse?: boolean } = {}) {
+function setup(o: { parse?: ParseResult; capUsd?: number; ai?: FakeMediaAi; realParse?: boolean; realImage?: boolean } = {}) {
   const db = seededDb();
   const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: o.capUsd ?? 15 });
   const ai = o.ai ?? new FakeMediaAi();
@@ -37,7 +38,7 @@ function setup(o: { parse?: ParseResult; capUsd?: number; ai?: FakeMediaAi; real
     return o.parse ?? { text: '', pageCount: 1 };
   });
   const prepareImage = vi.fn(async (bytes: Buffer): Promise<PreparedImage> => ({ data: Buffer.concat([bytes, Buffer.from('-small')]), mediaType: 'image/jpeg', width: 1000, height: 750 }));
-  const extract = createExtractor({ ai, spend, prices: P, parse: o.realParse ? undefined : parse, prepareImage });
+  const extract = createExtractor({ ai, spend, prices: P, parse: o.realParse ? undefined : parse, prepareImage: o.realImage ? undefined : prepareImage });
   const input = (i: Partial<ExtractInput> = {}): ExtractInput => ({
     mediaId: 7, kind: 'image', mimeType: 'image/jpeg', fileName: null, forwarded: false, bytes: Buffer.from('img'), ...i,
   });
@@ -67,7 +68,7 @@ describe('createExtractor', () => {
     expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', fileName: 'quote.pdf', bytes: PDF }))).toEqual({
       textKind: 'extract', text: 'Quotation 17\nTotal 1,20,000 for the full website build', pageCount: 2, note: null,
     });
-    expect(parse.mock.calls[0]![0]).toMatchObject({ kind: 'pdf', maxPages: 200 });
+    expect(parse.mock.calls[0]![0]).toMatchObject({ kind: 'pdf', maxPages: 200, maxTextChars: 1_000_000 });
     expect(ai.calls).toHaveLength(0);
   });
 
@@ -96,21 +97,59 @@ describe('createExtractor', () => {
     const { parse, extract, input } = setup({ parse: { text: 'Scope of work', pageCount: null } });
     expect(await extract(input({ kind: 'document', mimeType: DOCX_MIME, bytes: ZIP }))).toEqual({ textKind: 'extract', text: 'Scope of work', pageCount: null, note: null });
     expect(await extract(input({ kind: 'document', mimeType: 'application/octet-stream', fileName: 'Scope.DOCX', bytes: ZIP }))).toMatchObject({ text: 'Scope of work' });
-    expect(parse.mock.calls[0]![0]).toMatchObject({ kind: 'docx', maxXmlBytes: 20 * 1024 * 1024, maxEntries: 2_000 });
+    expect(parse.mock.calls[0]![0]).toMatchObject({ kind: 'docx', maxXmlBytes: 20 * 1024 * 1024, maxEntries: 2_000, maxTextChars: 1_000_000 });
   });
 
   it('keeps other files as originals only, and reads nothing for voice notes yet', async () => {
     const { ai, parse, extract, input } = setup();
     expect(await extract(input({ kind: 'document', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', fileName: 'budget.xlsx', bytes: ZIP }))).toEqual(NONE);
     expect(await extract(input({ kind: 'document', mimeType: 'text/plain', bytes: Buffer.from('hello') }))).toEqual(NONE);
+    // A DOCX name or MIME type is not enough: the bytes must be a ZIP.
+    expect(await extract(input({ kind: 'document', mimeType: DOCX_MIME, fileName: 'x.docx', bytes: Buffer.from('not a zip') }))).toEqual(NONE);
     expect(await extract(input({ kind: 'voice', mimeType: 'audio/ogg', bytes: Buffer.from('ogg') }))).toEqual(NONE);
     expect(parse).not.toHaveBeenCalled();
     expect(ai.calls).toHaveLength(0);
   });
 
-  it('caps the stored text', async () => {
-    const { extract, input } = setup({ parse: { text: 'a'.repeat(1_000_010), pageCount: 1 } });
-    expect((await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).text).toHaveLength(1_000_000);
+  describe('the stored-text cap', () => {
+    const MAX = MEDIA_LIMITS.maxStoredTextChars;
+    const pdf = { kind: 'document', mimeType: 'application/pdf', bytes: PDF } as const;
+
+    it.each([
+      { path: 'a PDF text layer', parse: { text: 'a'.repeat(MAX + 10), pageCount: 1 }, file: pdf },
+      { path: 'DOCX text', parse: { text: 'a'.repeat(MAX + 10), pageCount: null }, file: { kind: 'document', mimeType: DOCX_MIME, bytes: ZIP } as const },
+      { path: 'a scan read by Claude', parse: { text: '', pageCount: 3 }, claude: 'a'.repeat(MAX + 10), file: pdf },
+      { path: 'an image description', claude: 'a'.repeat(MAX + 10), file: {} },
+    ])('caps $path at maxStoredTextChars', async ({ parse, claude, file }) => {
+      const { extract, input } = setup({ parse, ai: new FakeMediaAi(claude === undefined ? [] : [{ text: claude }]) });
+      expect((await extract(input(file))).text).toHaveLength(MAX);
+    });
+
+    it('cuts a huge text layer without stalling the service', async () => {
+      // A tiny hostile PDF can make the parser return tens of millions of characters (review of Task 9).
+      const { extract, input } = setup({ parse: { text: 'क'.repeat(5_000_000), pageCount: 1 } });
+      const started = performance.now();
+      const { text } = await extract(input(pdf));
+      expect(performance.now() - started).toBeLessThan(250);
+      expect(text).toHaveLength(MAX);
+    });
+
+    it('never ends the stored text with half of a character', async () => {
+      const halfway = setup({ parse: { text: `${'a'.repeat(MAX - 1)}${'😀'.repeat(5)}`, pageCount: 1 } });
+      expect((await halfway.extract(halfway.input(pdf))).text).toBe('a'.repeat(MAX - 1));
+      const whole = setup({ parse: { text: `${'a'.repeat(MAX - 2)}${'😀'.repeat(5)}`, pageCount: 1 } });
+      expect((await whole.extract(whole.input(pdf))).text).toBe(`${'a'.repeat(MAX - 2)}😀`);
+    });
+  });
+
+  it('decodes an image with the full pixel cap when no image preparer is given', async () => {
+    const { ai, extract, input } = setup({ realImage: true });
+    const side = Math.ceil(Math.sqrt(MEDIA_LIMITS.maxImagePixels)); // 7072 x 7072 is just over the cap
+    const image = (s: number) => sharp({ create: { width: s, height: s, channels: 3, background: { r: 30, g: 90, b: 200 } } });
+    expect(await extract(input({ bytes: await image(side - 1).jpeg().toBuffer() }))).toMatchObject({ textKind: 'description' });
+    expect([...ai.calls[0]!.bytes.subarray(0, 3)]).toEqual([0xff, 0xd8, 0xff]);
+    await expect(extract(input({ bytes: await image(side).png().toBuffer() }))).rejects.toMatchObject({ name: 'ParseError', code: 'image_unreadable' });
+    expect(ai.calls).toHaveLength(1);
   });
 
   it('estimates are ceilings that include the image or the pages', () => {

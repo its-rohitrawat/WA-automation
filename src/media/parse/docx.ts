@@ -1,5 +1,6 @@
 import { Readable } from 'node:stream';
 import JSZip from 'jszip';
+import { countVisible, cutText } from './text.ts';
 import { ParseError, type ParseResult } from './types.ts';
 
 /** Paragraph ends, empty paragraphs, tabs, breaks and text runs of word/document.xml, in document order. */
@@ -15,19 +16,28 @@ function decodeXml(s: string): string {
   });
 }
 
-/** Plain text of word/document.xml: one line per paragraph, tabs kept. */
-export function docxXmlToText(xml: string): string {
+/**
+ * Plain text of word/document.xml: one line per paragraph, tabs kept. Reading stops once the text holds maxChars
+ * characters that are not whitespace, and the text is cut there. Only whitespace is tidied away afterwards, so the cut
+ * text is the same as a cut of the whole text.
+ */
+export function docxXmlToText(xml: string, maxChars = Number.POSITIVE_INFINITY): string {
   let out = '';
+  let visible = 0;
   for (const m of xml.matchAll(TOKENS)) {
-    if (m[1] !== undefined) out += decodeXml(m[1]);
-    else if (m[0].startsWith('<w:tab')) out += '\t';
+    if (m[1] !== undefined) {
+      const run = decodeXml(m[1]);
+      out += run;
+      visible += countVisible(run, maxChars - visible);
+      if (visible >= maxChars) break; // the text is cut there anyway
+    } else if (m[0].startsWith('<w:tab')) out += '\t';
     else out += '\n';
   }
-  return out.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  return cutText(out.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim(), maxChars);
 }
 
 /** Runs inside the parser worker. */
-export async function extractDocxText(bytes: Uint8Array, limits: { maxXmlBytes: number; maxEntries: number }): Promise<ParseResult> {
+export async function extractDocxText(bytes: Uint8Array, limits: { maxXmlBytes: number; maxEntries: number; maxTextChars?: number }): Promise<ParseResult> {
   let zip: JSZip;
   try {
     zip = await JSZip.loadAsync(bytes);
@@ -52,5 +62,5 @@ export async function extractDocxText(bytes: Uint8Array, limits: { maxXmlBytes: 
   } finally {
     stream.destroy();
   }
-  return { text: docxXmlToText(Buffer.concat(chunks).toString('utf8')), pageCount: null };
+  return { text: docxXmlToText(Buffer.concat(chunks).toString('utf8'), limits.maxTextChars), pageCount: null };
 }

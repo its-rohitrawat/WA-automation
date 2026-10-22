@@ -1,6 +1,7 @@
-import sharp from 'sharp';
-import { describe, expect, it } from 'vitest';
+import sharp, { type JpegOptions, type OutputInfo, type Sharp } from 'sharp';
+import { describe, expect, it, vi } from 'vitest';
 import { IMAGE_LONG_EDGE, prepareImageForClaude } from '../../src/media/image.ts';
+import { MEDIA_LIMITS } from '../../src/media/types.ts';
 
 const png = (width: number, height: number) => sharp({ create: { width, height, channels: 3, background: { r: 30, g: 90, b: 200 } } }).png().toBuffer();
 const solid = () => sharp({ create: { width: 30, height: 20, channels: 3, background: { r: 200, g: 40, b: 40 } } });
@@ -28,6 +29,42 @@ describe('prepareImageForClaude', () => {
   it('refuses bytes that are not an image, and images over the pixel cap', async () => {
     await expect(prepareImageForClaude(Buffer.from('not an image'))).rejects.toMatchObject({ name: 'ParseError', code: 'image_unreadable' });
     await expect(prepareImageForClaude(await png(20, 20), 100)).rejects.toMatchObject({ code: 'image_unreadable' });
+  });
+
+  it('applies the decompression-bomb pixel cap by default', async () => {
+    // The extractor passes no cap of its own, so this default is what guards every real image.
+    const side = Math.ceil(Math.sqrt(MEDIA_LIMITS.maxImagePixels)); // 7072 x 7072 is just over the cap, 7071 x 7071 under
+    await expect(prepareImageForClaude(await png(side, side))).rejects.toMatchObject({ name: 'ParseError', code: 'image_unreadable' });
+    const under = await sharp({ create: { width: side - 1, height: side - 1, channels: 3, background: { r: 30, g: 90, b: 200 } } }).jpeg().toBuffer();
+    expect(await prepareImageForClaude(under)).toMatchObject({ width: IMAGE_LONG_EDGE, height: IMAGE_LONG_EDGE });
+  });
+
+  it('turns a phone photo upright from its EXIF orientation', async () => {
+    const sideways = await solid().jpeg().withMetadata({ orientation: 6 }).toBuffer(); // stored 30 x 20, shown turned 90°
+    expect(await prepareImageForClaude(sideways)).toMatchObject({ width: 20, height: 30 });
+  });
+
+  it('gives sharp at most 30 seconds per image', async () => {
+    const timeout = vi.spyOn(sharp.prototype as Sharp, 'timeout');
+    await prepareImageForClaude(await png(10, 10));
+    expect(timeout).toHaveBeenCalledWith({ seconds: 30 });
+  });
+
+  it('re-encodes smaller and at lower quality when the first JPEG is over the API image limit', async () => {
+    // Even random noise at 2048 px stays under 3.75 MB as a quality-85 JPEG, so the first encode is made to look too big.
+    const input = await png(4000, 3000);
+    type Encoded = { data: Buffer; info: OutputInfo };
+    const proto = sharp.prototype as { toBuffer(o: { resolveWithObject: true }): Promise<Encoded>; jpeg(o?: JpegOptions): Sharp };
+    const toBuffer = proto.toBuffer;
+    vi.spyOn(proto, 'toBuffer').mockImplementationOnce(async function (this: unknown, o) {
+      const first = await toBuffer.call(this, o);
+      return { ...first, data: Buffer.concat([first.data, Buffer.alloc(3_750_001)]) };
+    });
+    const jpeg = vi.spyOn(proto, 'jpeg');
+    const out = await prepareImageForClaude(input);
+    expect(jpeg.mock.calls.map(([o]) => o?.quality)).toEqual([85, 70]);
+    expect(out).toMatchObject({ mediaType: 'image/jpeg', width: 1568, height: 1176 });
+    expect(out.data.length).toBeLessThanOrEqual(3_750_000);
   });
 
   // Amendment 9c: sharp decodes untrusted images in the service process, so only the common photo formats may load.

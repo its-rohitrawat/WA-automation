@@ -117,6 +117,18 @@ describe('extractPdfText', () => {
     for (const cleanup of spies.cleanups) expect(cleanup).toHaveBeenCalledTimes(1);
   });
 
+  it('stops reading pages once it holds as much text as is kept, and cuts the text there', async () => {
+    const spies = await spyOnNextDocument();
+    // 'Page 1' and 'Page 2' have 5 characters each that are not spaces, so the cap of 10 is reached on page 2.
+    expect(await extractPdfText(tinyPdf([['Page 1'], ['Page 2'], ['Page 3']]), { maxPages: 200, maxTextChars: 10 })).toEqual({ text: 'Page 1\n\nPa', pageCount: 3 });
+    expect(spies.cleanups).toHaveLength(2);
+  });
+
+  it('counts only characters that are not spaces towards the text cap, since spaces are tidied away', async () => {
+    fakeNextDocument([[{ str: ' '.repeat(50), hasEOL: true }], [{ str: 'Quote 7', hasEOL: false }], [{ str: 'Total', hasEOL: false }]]);
+    expect(await extractPdfText(tinyPdf([[]]), { maxPages: 200, maxTextChars: 10 })).toEqual({ text: 'Quote 7\n\nT', pageCount: 3 });
+  });
+
   it('frees the document when a page cannot be read, and still fails', async () => {
     const spies = await spyOnNextDocument({ failPage: 2 });
     await expect(extractPdfText(tinyPdf([['Page 1'], ['Page 2'], ['Page 3']]), { maxPages: 200 })).rejects.toThrow('damaged page');
@@ -204,6 +216,11 @@ describe('parseFile (worker thread), PDF', () => {
   it('applies the page cap in the worker', async () => {
     const r = await parseFile({ kind: 'pdf', bytes: tinyPdf([['First page'], ['Second page']]), maxPages: 1 }, { timeoutMs: 20_000 });
     expect(r).toEqual({ text: 'First page', pageCount: 2 });
+  });
+
+  it('applies the text cap in the worker', async () => {
+    const r = await parseFile({ kind: 'pdf', bytes: tinyPdf([['First page'], ['Second page']]), maxPages: 200, maxTextChars: 5 }, { timeoutMs: 20_000 });
+    expect(r).toEqual({ text: 'First', pageCount: 2 });
   });
 
   it('refuses a page count below 1 in the worker, and takes a count that is too low as given', async () => {
