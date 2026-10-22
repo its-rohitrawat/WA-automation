@@ -220,9 +220,11 @@ describe('parseFile (worker thread), PDF', () => {
     // heap limits do not cover; unchecked, this file reads "ok" after pushing the process up by about 400 MB.
     const bomb = await flateBombPdf(200);
     expect(bomb.length).toBeLessThan(300_000);
-    await expect(parseFile({ kind: 'pdf', bytes: bomb, maxPages: 200 }, { timeoutMs: 20_000 })).rejects.toMatchObject({ name: 'ParseError', code: 'parse_memory' });
+    // The long parse timeout lets the memory stop win even when the full suite keeps every core busy: with 20 s the
+    // decode was too slow to reach the cap and the file ended as parse_timeout instead.
+    await expect(parseFile({ kind: 'pdf', bytes: bomb, maxPages: 200 }, { timeoutMs: 90_000 })).rejects.toMatchObject({ name: 'ParseError', code: 'parse_memory' });
     expect(await parseFile({ kind: 'pdf', bytes: tinyPdf([['Still here']]), maxPages: 200 }, { timeoutMs: 20_000 })).toEqual({ text: 'Still here', pageCount: 1 });
-  }, 40_000);
+  }, 150_000);
 
   it('reads a large drawing whose content stream inflates to tens of MB, without a false memory stop', async () => {
     // About 46 MB on disk, mostly a scan that text extraction never decodes, and 85 MiB of line-drawing commands once
