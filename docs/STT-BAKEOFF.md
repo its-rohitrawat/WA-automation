@@ -4,41 +4,53 @@ A one-off test that sends the same recordings to three speech-to-text services (
 
 ## What it costs
 
-About **$3** for 10 voice notes and 3 one-hour meetings, and about $5 at most. The tool prints its estimate before sending anything. It stops before passing `--max-usd` (default $8), and it never sends the same file to the same service twice unless you ask.
+About **$3** for 10 voice notes and 3 one-hour meetings, and about $5 at most. The tool prints its estimate before sending anything. It stops before passing `--max-usd` (default $8), and it never sends the same file to the same service twice unless you ask. The cap is **per run**: each new run can spend up to it again.
 
 | Service | Model | List price per audio hour |
 |---|---|---|
-| Sarvam | saaras:v4, codemix | ₹30, or ₹36 with speaker labels. ₹100 free credit on sign-up |
-| ElevenLabs | Scribe v2 | $0.22. The free plan includes 4.5 hours |
+| Sarvam | saaras:v4, codemix | ₹30, or ₹36 with speaker labels. The ₹100 sign-up credit covers about 2½ hours of meetings; the full test needs about ₹115–180, so add credit before the full run. |
+| ElevenLabs | Scribe v2 | $0.22. The free plan includes 4.5 hours, less than three 90-minute meetings plus voice notes. |
 | OpenAI | gpt-transcribe (voice notes), gpt-4o-transcribe-diarize (meetings) | $0.27 / $0.36. Needs prepaid credit |
 
 Note: OpenAI's model with speaker labels shuts down on 26 February 2027. OpenAI can therefore only be a long-term choice for voice notes.
 
 ## Must do before the first upload
 
-These steps protect client data. The tool refuses to send anything until you add `--confirm-privacy`, which means you have done all four.
+These steps protect client data. The tool refuses to send anything until you add `--confirm-privacy`, which means the three things below are true. OpenAI needs nothing: it does not train on API audio, and its "Your data" page lists no retention for the transcription endpoint.
 
 1. **ElevenLabs:** turn off model training.
-   - Click your profile icon (top right) and go to **Terms and privacy** > **Data use**.
+   - Click your profile icon and go to **Terms and privacy** > **Data use**.
    - Switch **"Improve the models for everyone"** OFF, then click **"Update your choice"**.
    - The switch only covers audio sent after the change, so do it before any upload.
+   - This stops training only. ElevenLabs also stores the audio and transcripts on your account (only Enterprise accounts can turn storage off). The tool deletes each transcript from your ElevenLabs account right after saving it here, unless you add `--keep-remote`. Check your ElevenLabs history after the test, and tell participants about this when asking for consent.
 2. **Sarvam:** opt out of training and set retention to 0 days.
-   - Sarvam's privacy policy says it trains on uploaded content **unless you opt out**. Opt out in your account settings, or by email as the policy describes: https://sarvam.ai/privacy-policy
+   - Sarvam's privacy policy says it trains on uploaded content **unless you opt out**. Opt out the way the privacy policy describes (https://sarvam.ai/privacy-policy) and **wait for Sarvam's confirmation before the first upload**; keep the reply.
    - As the workspace Owner, set data retention to **No retention (0 days)**: https://docs.sarvam.ai/api/platform/data-retention. Until an Owner sets it, Sarvam keeps data indefinitely.
-3. **OpenAI:** nothing to switch. OpenAI does not train on API audio, and its "Your data" page lists no retention for the transcription endpoint.
-4. **Consent:** every meeting recording has its participants' consent, and you are allowed to share the voice notes with these three services.
+3. **Consent:** every meeting recording has its participants' consent to be sent to Sarvam, ElevenLabs and OpenAI, and you may share these voice notes with all three.
 
 ## One-time setup
 
-1. **Recordings.** Put them in a folder **outside** any project folder:
+1. **Recordings.** Put them in a folder **outside** any project folder, and not in a folder that OneDrive or Google Drive syncs:
    - `C:\stt-samples\voice-notes\`: 5–10 WhatsApp voice notes in Hinglish, 5 seconds to 3 minutes each (.ogg or .opus as exported).
    - `C:\stt-samples\meetings\`: 2–3 Google Meet recordings, 30–90 minutes each, with 2–6 speakers (.mp4 as downloaded is fine).
 
-   The tool refuses any folder inside a git repository.
-2. **Keys.** Copy `.env.example` to `.env` in `C:\Users\Dell\Desktop\WA_agent-stt`. Open `.env` in Notepad and type in the three keys yourself. Never paste a key into a chat.
+   The tool refuses any folder inside a git repository. Wait until every download has finished before running it.
+2. **Keys.** Open PowerShell and run:
+
+   ```powershell
+   Set-Location C:\Users\Dell\Desktop\WA_agent-stt
+   Copy-Item .env.example .env
+   notepad .env
+   ```
+
+   Run the `Copy-Item` line only once: a second time, it would replace your `.env`, keys and all.
+
+   Near the end of the file are `SARVAM_API_KEY=`, `ELEVENLABS_API_KEY=` and `OPENAI_API_KEY=`. Type each key straight after its `=`, no spaces or quotes, then press Ctrl+S. Never paste a key into a chat.
    - `SARVAM_API_KEY`: from the Sarvam dashboard.
    - `ELEVENLABS_API_KEY`: from ElevenLabs > Developers > API keys.
    - `OPENAI_API_KEY`: from the OpenAI platform > API keys (add prepaid credit first).
+
+   Watch for the `.env.txt` trap: the file must be called `.env`, not `.env.txt`. `Get-ChildItem -Force .env*` should list `.env` and `.env.example` only. If you see `.env.txt`, rename it with `Rename-Item .env.txt .env`.
 3. **ffmpeg.** Already on this PC, so nothing needs installing. In the same `.env`, set:
    `FFMPEG_PATH=C:\Users\Dell\AppData\Local\Programs\Python\Python312\Lib\site-packages\imageio_ffmpeg\binaries\ffmpeg-win-x86_64-v7.1.exe`
 4. Optional: `INR_PER_USD` (default 88) sets the rupee rate used for Sarvam's costs.
@@ -50,40 +62,56 @@ Open PowerShell:
 ```powershell
 Set-Location C:\Users\Dell\Desktop\WA_agent-stt
 
-# 1. Dry run: lists every file, service, model and the estimate. Sends nothing.
+# 1. Dry run: lists every recording with its id, each service, model and the estimate. Sends nothing.
 node scripts/stt-bakeoff.ts
 
-# 2. Try one short voice note first (use an id from the dry-run list).
-node scripts/stt-bakeoff.ts --only voice-<name> --yes --confirm-privacy
+# 2. Try one short voice note first. Use an id from the dry-run list; it looks like voice-<name>-<8 letters and digits>.
+node scripts/stt-bakeoff.ts --only <id> --yes --confirm-privacy
 
 # 3. Everything else. Finished results are never sent again.
 node scripts/stt-bakeoff.ts --yes --confirm-privacy
 ```
 
-Other options: `--providers sarvam,openai`, `--max-usd 5`, `--report-only` (rebuild the report from saved results), and `--help`.
+Other options: `--providers sarvam,openai`, `--max-usd 5`, `--keep-remote` (keep ElevenLabs' copy of each transcript), `--report-only` (rebuild the report from saved results), and `--help`.
 
-Sarvam and ElevenLabs can take several minutes for a long meeting. The screen shows one line per file and service, with the processing time and cost, never the words.
+Sarvam and ElevenLabs can take several minutes for a long meeting. The screen shows one line per recording and service, with the processing time and cost, never the words. Ctrl+C stops a run; finished results are kept, and a recording that was being sent shows as `unknown` next time (see below).
 
 ## If something goes wrong
 
+The tool never shows a key or the words of a recording in these messages.
+
 - **`failed ... http_401`**: the key is wrong or has no credit. That service is skipped for the rest of the run. Fix `.env`, then run again with `--retry-failed`.
-- **`unknown ... no answer`**: the request was sent, but no answer came back (timeout or network). The service may still have charged for it.
-  - Check that service's dashboard first, then run with `--retry-unknown`.
+- **`failed ... http_429 insufficient_quota`**: OpenAI has no credit left. Add prepaid credit on the OpenAI platform, then run again with `--retry-failed`.
+- **`unknown ... no answer (<code>)`**: the recording was sent, but no answer came back. The code says why: `timeout`, `http_504` and similar mean the connection gave up; `status_unavailable` or `job_wait_timeout` mean Sarvam stopped answering while the job ran; `download_http_...` means Sarvam finished but its answer could not be fetched. The service may still have done the work and charged for it, so the tool does not send it again by itself.
+  - Check that service's dashboard first (usage or history). Then run with `--retry-unknown`.
   - Sarvam then waits for the job it already has, with no new charge. ElevenLabs and OpenAI send the file again and may charge again.
-- **`stopped ... cap`**: the next file would pass `--max-usd`. Raise the cap only if you mean to.
+  - With `part_cache_mismatch`, nothing was sent: the long recording was cut differently from last time. Move that recording's part files (`results\<id>\<service>.part-*.json` in the output folder) aside, or run with a fresh output folder (`--out`).
+  - With `resume_part_without_job` or a code starting `audio_`, nothing was sent this time either. Run again; if it repeats, ask the agent's builder.
+- **`stopped ... cap`**: the next file would pass `--max-usd`. The summary shows how many were not sent. Raise the cap only if you mean to.
+- **`warning ... could not delete the provider's stored copy`**: the transcript is saved here, but ElevenLabs still has its copy. Delete it in your ElevenLabs history.
+- **`Stopped: ...`**: the tool hit a problem it could not work around, such as a full disk. Finished results are kept. Run the same command again, or add `--report-only` to rebuild the report. If the message names a damaged file in `results\`, do not delete it; ask the agent's builder.
+- **`These recordings could not be read`**: a listed file is damaged, still downloading, or not audio. Move it out of the folder or replace it. Nothing was sent.
+- **`The recording ... changed after it was prepared or sent`**: the file is not the one used before. Rename the new file (it then gets a new id), or move the two folders the message names aside. Nothing was sent.
+- **`Another run is using ...`**: a run is going in another window. If none is, the last one ended abruptly (for example the PC restarted): delete `run.lock` in the output folder.
+- **`.env: ...`** or **`Unknown or misspelt option`**: fix the setting it names in `.env`, or check the option's spelling. Options start with two dashes, for example `--yes`.
 
 ## Reading and scoring
 
-Open `C:\stt-samples\bakeoff-out\report.md`, for example in VS Code, using the Markdown preview.
+Open `C:\stt-samples\bakeoff-out\report.md` in VS Code and press Ctrl+Shift+V for the Markdown preview.
 - **Summary:** the cost per audio hour and the speed of each service.
-- **Score sheet:** fill it in yourself, scoring 1–5 for Hinglish accuracy (names, numbers, dates, amounts and task words) and for speaker separation in meetings.
 - **Voice notes:** the three transcripts of each voice note, side by side.
 - **Meetings:** a minute-by-minute timeline per service. Full transcripts are in `transcripts\`.
+- **Scores:** write them in `scores.md` in the same folder, 1–5 for Hinglish accuracy (names, numbers, dates, amounts and task words) and for speaker separation in meetings. The tool never overwrites `scores.md`; `report.md` is rebuilt on every run.
 
 Compare the costs with each service's dashboard. The report uses list prices.
+
+The transcripts are client conversations. Do not paste them into an AI assistant, and keep `C:\stt-samples` out of OneDrive or Google Drive synced folders.
+
+The output folder also holds `results\` (the tool's record of what was sent and paid for; do not edit it) and `prepared\` (the converted audio).
 
 ## Afterwards
 
 - Tell the agent's builder which service won and why. Phase 2b then sets `STT_PROVIDER`.
+- Remove the three keys from `.env` (`notepad .env`, delete the text after each `=`, Ctrl+S), and revoke the API keys of the services you did not choose.
+- Check that your ElevenLabs history is empty.
 - `C:\stt-samples\bakeoff-out` holds client conversations. Delete it, and the recordings, once the decision is made. Never copy it into a project folder.
-- Revoke the API keys of the services you did not choose.
