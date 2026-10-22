@@ -551,11 +551,12 @@ describe('app health and publishing', () => {
     expect(drive.uploads).toBe(1);
     expect(readHealthSnapshot(db)!.failed).toEqual([]);
 
-    // 30 minutes after the file arrived it no longer holds up its message: a later run goes ahead and publishes.
+    // 30 minutes after the file arrived it no longer holds up its message: a later run goes ahead and publishes. The
+    // file, still pending, now counts as waiting too long, and that change to the health line publishes too (final review).
     await vi.advanceTimersByTimeAsync(40 * 60_000);
     expect(ai.calls).toHaveLength(1);
     expect(ai.calls[0]!.user).toContain(': see this {image, still being read}');
-    expect(drive.uploads).toBe(2);
+    expect(drive.uploads).toBe(3);
     await stopApp(app);
   });
 
@@ -643,6 +644,28 @@ describe('app health and publishing', () => {
     vi.useRealTimers();
     const row = (await sharmaRows(uploaded)).find((r) => r[0] === 'SHA-001')!;
     expect(row.join(' | ')).toContain('source message deleted by sender');
+  });
+
+  it('publishes once when only the workbook health line changes, and not again while it stays the same (final review)', async () => {
+    const drive = new CapturingDrive();
+    const { db, app, sock } = setup({ drive });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(drive.uploads).toBe(1); // the start publish
+    await vi.advanceTimersByTimeAsync(60_000); // two ticks with the same line publish nothing
+    expect(drive.uploads).toBe(1);
+
+    // A message that cannot be saved changes only the health line: no reconcile, no file, no other publish.
+    db.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
+    await vi.advanceTimersByTimeAsync(31_000); // the next tick sees the new line
+    expect(drive.uploads).toBe(2);
+    const uploaded = drive.last!;
+    await vi.advanceTimersByTimeAsync(5 * 60_000); // ten more ticks, same line
+    expect(drive.uploads).toBe(2);
+    await stopApp(app);
+
+    vi.useRealTimers();
+    expect(await overviewTexts(uploaded)).toContain('⚠️ 1 incoming message could not be saved. See docs/SETUP.md.');
   });
 
   it('points to the safe procedure when WhatsApp unlinks the device', async () => {
