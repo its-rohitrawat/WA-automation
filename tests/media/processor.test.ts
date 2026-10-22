@@ -1,9 +1,10 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { Writable } from 'node:stream';
 import Anthropic from '@anthropic-ai/sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { AiInvalidOutputError, AiRefusalError } from '../../src/brain/claudeClient.ts';
 import { SpendCapReachedError } from '../../src/brain/paidCall.ts';
 import { createExtractor, type Extractor } from '../../src/media/extract.ts';
 import { MediaDownloadError, MediaUnavailableError, type MediaFetcher } from '../../src/media/fetch.ts';
@@ -16,6 +17,7 @@ import { MEDIA_LIMITS } from '../../src/media/types.ts';
 import type { Prices } from '../../src/spend/pricing.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { syncClients } from '../../src/store/clients.ts';
+import type { Db } from '../../src/store/db.ts';
 import { getMedia, getMediaRef } from '../../src/store/media.ts';
 import { applyRevoke } from '../../src/store/messages.ts';
 import { manualClock } from '../../src/util/clock.ts';
@@ -26,15 +28,36 @@ import { MEHTA, SHARMA, seededDb } from '../helpers/db.ts';
 import { FakeMediaAi } from '../helpers/mediaAi.ts';
 import { TS, waRaw } from '../helpers/wa.ts';
 
+/** Lets a test make the next file write stop part way, as a full disk or a failing drive would. */
+const disk = vi.hoisted(() => ({ failNextWrite: false }));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...real,
+    writeFile: async (...args: Parameters<typeof real.writeFile>) => {
+      if (disk.failNextWrite) {
+        disk.failNextWrite = false;
+        const [path, data, opts] = args;
+        const half = (data as Buffer).subarray(0, Math.floor((data as Buffer).length / 2));
+        await real.writeFile(path, half, opts); // the file is created and half written, then the write fails
+        throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
+      }
+      return real.writeFile(...args);
+    },
+  };
+});
+
 const MEDIA_KEY = Buffer.alloc(32, 9);
 const dirs: string[] = [];
 afterEach(() => {
+  disk.failNextWrite = false;
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
 type ImageExtras = { viewOnce?: boolean; contextInfo?: { isForwarded?: boolean; forwardingScore?: number } };
+type SetupOptions = { fetcher?: MediaFetcher; extract?: Extractor; log?: Logger; limits?: { maxBytes: number; timeoutMs: number } };
 
-function setup(o: { fetcher?: MediaFetcher; extract?: Extractor; log?: Logger } = {}) {
+function setup(o: SetupOptions = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'wa-media-'));
   dirs.push(dataDir);
   const db = seededDb();
@@ -43,7 +66,7 @@ function setup(o: { fetcher?: MediaFetcher; extract?: Extractor; log?: Logger } 
   const ing = new Ingestor({ db, onNewMessages: () => {}, clock, media: { sealer } });
   const fetcher = vi.fn<MediaFetcher>(o.fetcher ?? (async () => Buffer.from('jpeg-bytes')));
   const extract = vi.fn<Extractor>(o.extract ?? (async () => ({ textKind: 'description', text: 'A blue banner with the new logo', pageCount: null, note: null })));
-  const p = new MediaProcessor({ db, dataDir, clock, log: o.log ?? silentLogger(), sealer, fetcher, extract });
+  const p = new MediaProcessor({ db, dataDir, clock, log: o.log ?? silentLogger(), sealer, fetcher, extract, limits: o.limits });
   const share = (waId = 'IMG1', extras: ImageExtras = {}): number => {
     ing.handle(
       normalizeMessage(
@@ -82,6 +105,28 @@ describe('MediaProcessor', () => {
     expect(getMedia(db, id)).toMatchObject({ status: 'done', localPath: rel(id), fileSize: 10, textKind: 'description', text: 'A blue banner with the new logo' });
     expect(getMedia(db, id)!.sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
+  });
+
+  it('downloads within the limits it was given', async () => {
+    const { p, fetcher, share } = setup({ limits: { maxBytes: 1234, timeoutMs: 5678 } });
+    await p.process(share());
+    expect(fetcher).toHaveBeenCalledWith(expect.anything(), { maxBytes: 1234, timeoutMs: 5678 });
+  });
+
+  it('a save that stops part way leaves nothing at the path, and the next attempt saves the whole file', async () => {
+    const { db, dataDir, clock, p, fetcher, share } = setup();
+    const id = share();
+    const folder = dirname(saved(dataDir, rel(id)));
+    disk.failNextWrite = true;
+    expect((await p.process(id)).outcome).toBe('deferred');
+    expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'disk_ENOSPC', localPath: null, hasRef: true });
+    expect(readdirSync(folder)).toEqual([]); // no partial original and no temp file left behind
+    clock.advance(MINUTE);
+    expect((await p.process(id)).outcome).toBe('done');
+    expect(getMedia(db, id)).toMatchObject({ status: 'done', localPath: rel(id), fileSize: 10, errorCode: null });
+    expect(readFileSync(saved(dataDir, rel(id)), 'utf8')).toBe('jpeg-bytes');
+    expect(readdirSync(folder)).toEqual([basename(saved(dataDir, rel(id)))]);
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
   it('saves under the row id when the message id is unsafe as a file name', async () => {
@@ -151,6 +196,35 @@ describe('MediaProcessor', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it('does not read a saved file whose message was deleted for everyone while it waited, but keeps the original', async () => {
+    const { db, dataDir, clock, p, fetcher, extract, share } = setup({ extract: async () => { throw new SpendCapReachedError(); } });
+    const id = share();
+    expect((await p.process(id)).outcome).toBe('deferred');
+    applyRevoke(db, 1, 'IMG1');
+    clock.advance(10 * MINUTE);
+    expect(await p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
+    expect(getMedia(db, id)).toMatchObject({ status: 'done', note: 'revoked', text: null, textKind: null, localPath: rel(id) });
+    expect(extract).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(existsSync(saved(dataDir, rel(id)))).toBe(true);
+  });
+
+  it.each([
+    ['cannot be opened', 'ref_unreadable', (db: Db, id: number) => {
+      const blob = getMediaRef(db, id)!;
+      blob.writeUInt8(blob.readUInt8(blob.length - 1) ^ 1, blob.length - 1); // one flipped bit: the seal no longer opens
+      db.prepare('UPDATE media SET ref_enc = ? WHERE id = ?').run(blob, id);
+    }],
+    ['is missing', 'no_ref', (db: Db, id: number) => db.prepare('UPDATE media SET ref_enc = NULL WHERE id = ?').run(id)],
+  ])('marks a file unavailable when its download details %s', async (_name, code, spoil) => {
+    const { db, p, fetcher, share } = setup();
+    const id = share();
+    spoil(db, id);
+    expect(await p.process(id)).toEqual({ outcome: 'unavailable', clientId: 1 });
+    expect(getMedia(db, id)).toMatchObject({ status: 'unavailable', errorCode: code, hasRef: false, localPath: null });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it('never overwrites a different file at the same path, but reuses an identical one', async () => {
     const a = setup();
     const idA = a.share();
@@ -168,26 +242,49 @@ describe('MediaProcessor', () => {
     expect(getMedia(b.db, idB)).toMatchObject({ status: 'done', localPath: rel(idB) });
   });
 
-  it('logs ids and codes only: no description, caption, address or key', async () => {
-    const lines: string[] = [];
-    const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
-    let fail = true;
-    const { p, share } = setup({
-      log,
-      fetcher: async () => {
-        if (fail) {
-          fail = false;
-          throw new MediaDownloadError('network');
-        }
-        return Buffer.from('jpeg-bytes');
-      },
+  describe('logs ids and codes only: no description, caption, address, key or error text', () => {
+    /** Error text that echoes the caption, as an API error could. */
+    const ERROR_TEXT = 'the model saw: new banner';
+    const fails = (e: () => Error) => async (): Promise<never> => { throw e(); };
+    let downloadFailed = false;
+    const failsOnce: MediaFetcher = async () => {
+      if (!downloadFailed) {
+        downloadFailed = true;
+        throw new MediaDownloadError('network');
+      }
+      return Buffer.from('jpeg-bytes');
+    };
+    const cases: [string, Omit<SetupOptions, 'log'>, number[], string][] = [
+      ['a download retried, then read', { fetcher: failsOnce }, [0, MINUTE], 'done'],
+      ['an expired file', { fetcher: fails(() => new MediaUnavailableError('expired')) }, [0], 'unavailable'],
+      ['a file it cannot read', { extract: fails(() => new ParseError('not_pdf')) }, [0], 'failed'],
+      ['a refusal', { extract: fails(() => new AiRefusalError(null, { inputTokens: 1, outputTokens: 1, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 })) }, [0], 'failed'],
+      ['the spend cap', { extract: fails(() => new SpendCapReachedError()) }, [0], 'deferred'],
+      ['Claude unavailable', { extract: fails(() => Anthropic.APIError.generate(529, undefined, ERROR_TEXT, new Headers())) }, [0], 'deferred'],
+      ['Claude unavailable for 24 hours', { extract: fails(() => Anthropic.APIError.generate(529, undefined, ERROR_TEXT, new Headers())) }, [25 * 60 * MINUTE], 'failed'],
+      ['the last of 3 attempts', { extract: fails(() => new AiInvalidOutputError(ERROR_TEXT, null)) }, [0, MINUTE, 5 * MINUTE], 'failed'],
+    ];
+    it.each(cases)('%s', async (_name, o, waits, outcome) => {
+      downloadFailed = false;
+      const lines: string[] = [];
+      const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
+      const { clock, p, share } = setup({ ...o, log });
+      const id = share();
+      let last = '';
+      for (const wait of waits) {
+        clock.advance(wait);
+        last = (await p.process(id)).outcome;
+      }
+      expect(last).toBe(outcome);
+      const out = lines.join('');
+      expect(out).toContain(`"mediaId":${id}`);
+      for (const secret of ['A blue banner', 'new banner', ERROR_TEXT, 'mmg.whatsapp.net', '/v/x', MEDIA_KEY.toString('base64')]) expect(out).not.toContain(secret);
+      for (const line of lines) {
+        const entry = JSON.parse(line) as Record<string, unknown>;
+        for (const key of Object.keys(entry)) expect(['level', 'time', 'msg', 'mediaId', 'clientId', 'errorCode', 'attempts', 'waitMinutes', 'err']).toContain(key);
+        if (entry.err !== undefined) for (const key of Object.keys(entry.err as object)) expect(['type', 'code', 'stack']).toContain(key);
+      }
     });
-    const id = share();
-    await p.process(id);
-    await p.process(id);
-    const out = lines.join('');
-    expect(out).toContain(`"mediaId":${id}`);
-    for (const secret of ['A blue banner', 'new banner', 'mmg.whatsapp.net', MEDIA_KEY.toString('base64')]) expect(out).not.toContain(secret);
   });
 
   // Amendment 10a.
@@ -337,12 +434,28 @@ describe('MediaProcessor', () => {
       ['401 bad key', () => status(401), 'ai_401'],
       ['400 bad request', () => status(400), 'ai_400'],
       ['timeout after sending', () => new Anthropic.APIConnectionTimeoutError(), 'ai_timeout'],
+      // A timeout may have been billed whatever its cause says (amendment 10d).
+      ['timeout whose cause looks never sent', () => Object.assign(new Anthropic.APIConnectionTimeoutError(), { cause: Object.assign(new Error('socket'), { code: 'ECONNREFUSED' }) }), 'ai_timeout'],
       ['connection reset after sending', () => connectionLost('ECONNRESET'), 'ai_network'],
+      ['invalid output', () => new AiInvalidOutputError('bad json', null), 'ai_invalid_output'],
     ])('a %s is retried after 1 minute and counts an attempt', async (_name, error, code) => {
       const { db, p, share } = setup({ extract: async () => { throw error(); } });
       const id = share();
       expect((await p.process(id)).outcome).toBe('deferred');
       expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
     });
+  });
+
+  it('a refusal from Claude fails for good and is not retried: it was billed', async () => {
+    const usage = { inputTokens: 1200, outputTokens: 5, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
+    const { db, dataDir, clock, p, fetcher, extract, share } = setup({ extract: async () => { throw new AiRefusalError(null, usage); } });
+    const id = share();
+    expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
+    expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'ai_refusal', attempts: 0, nextAttemptAt: null, localPath: rel(id) });
+    expect(existsSync(saved(dataDir, rel(id)))).toBe(true);
+    clock.advance(10 * MINUTE);
+    expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
+    expect(extract).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 });

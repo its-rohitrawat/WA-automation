@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { link, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
 import { AiInvalidOutputError, AiRefusalError } from '../brain/claudeClient.ts';
@@ -87,6 +87,31 @@ function nextUnavailableWait(row: MediaRow): number {
   return AI_UNAVAILABLE_WAITS_MS.find((w) => w > last) ?? AI_UNAVAILABLE_WAITS_MS[AI_UNAVAILABLE_WAITS_MS.length - 1]!;
 }
 
+const sha256Hex = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex');
+
+/**
+ * Saves an original at `abs` without ever replacing a file there. The bytes go to a temp file in the same folder,
+ * which is then hard-linked into place: a write that stops part way (a full disk, a crash) never leaves a partial
+ * original at `abs`, where a later attempt would take it for a different file and fail the row for good.
+ */
+async function saveOriginal(abs: string, bytes: Buffer, sha256: string): Promise<void> {
+  const tmp = `${abs}.${randomUUID()}.part`;
+  try {
+    await writeFile(tmp, bytes, { flag: 'wx' });
+    try {
+      await link(tmp, abs); // fails with EEXIST, never replaces
+      return;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+    }
+  } finally {
+    // Best effort: a temp file left behind is never read, and must not turn a saved original into a failure.
+    await rm(tmp, { force: true }).catch(() => undefined);
+  }
+  // Left complete by an earlier attempt that stopped before saving its row: reuse it only if it is the same file.
+  if (sha256Hex(await readFile(abs)) !== sha256) throw new MediaFailedError('path_conflict');
+}
+
 /** Downloads, saves and reads one pending file. Problems with the file never throw; they end in a status. */
 export class MediaProcessor {
   readonly #o: MediaProcessorOptions;
@@ -156,16 +181,9 @@ export class MediaProcessor {
     const bytes = await fetcher(ref, limits);
     const rel = mediaRelPath({ clientCode: job.clientCode, ts: job.ts, waId: job.waId, mediaId: row.id, ext: extForMime(row.mimeType, row.kind) });
     const abs = this.#abs(rel);
-    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    const sha256 = sha256Hex(bytes);
     await mkdir(dirname(abs), { recursive: true });
-    try {
-      await writeFile(abs, bytes, { flag: 'wx' }); // 'wx': never overwrite an existing file
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-      // Left by an earlier attempt that stopped before saving its row: reuse it only if it is the same file.
-      const existing = await readFile(abs);
-      if (createHash('sha256').update(existing).digest('hex') !== sha256) throw new MediaFailedError('path_conflict');
-    }
+    await saveOriginal(abs, bytes, sha256);
     markDownloaded(db, row.id, { localPath: rel, sha256, fileSize: bytes.length, at: this.#now() });
     return bytes;
   }
