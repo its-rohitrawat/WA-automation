@@ -1,5 +1,6 @@
 import { Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
+import { AiInvalidOutputError } from '../../src/brain/claudeClient.ts';
 import { Reconciler } from '../../src/brain/reconciler.ts';
 import { mediaForPrompt } from '../../src/media/promptText.ts';
 import type { Prices } from '../../src/spend/pricing.ts';
@@ -7,12 +8,12 @@ import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { latestBatches } from '../../src/store/batches.ts';
 import type { Db } from '../../src/store/db.ts';
 import { deferMedia, failMedia, finishMedia, getMedia, insertMedia, messageRowId, type MediaKind } from '../../src/store/media.ts';
-import { applyRevoke, insertMessage, markProcessed } from '../../src/store/messages.ts';
+import { applyEdit, applyRevoke, insertMessage, listUnprocessed, markProcessed, upsertReaction } from '../../src/store/messages.ts';
 import { upsertPerson } from '../../src/store/people.ts';
 import { getTaskByCode } from '../../src/store/tasks.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
-import { FakeAi, op } from '../helpers/ai.ts';
+import { FAKE_USAGE, FakeAi, op, type FakeResponse } from '../helpers/ai.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
 import { SHARMA_PN } from '../helpers/wa.ts';
 
@@ -426,6 +427,171 @@ describe('Reconciler with shared files', () => {
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 1 });
       expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
       expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done' });
+    });
+
+    describe('markers when an edit or a reaction meets a file read late (review I1, M2, M6)', () => {
+      const ADD = op({ op: 'add_task', side: 'us', title: 'Print 500 flyers', category: 'design', priority: 'medium', sourceMessageIds: ['I1'] });
+      const MORE = op({ op: 'add_task', side: 'us', title: 'Print 600 flyers', category: 'design', priority: 'medium', sourceMessageIds: ['I1'] });
+      /** An image of I1 whose 30-minute wait ran out at 07:50, so a run at 08:00 shows it as still being read. */
+      const lateImage = (db: Db) => image(db, 'I1', '2026-10-19T07:01:00.000Z', undefined, { createdAt: '2026-10-19T07:20:00.000Z' });
+      const edit = (db: Db, at: string) => applyEdit(db, 1, 'I1', 'see this, 600 copies', at);
+      const react = (db: Db, at: string) => upsertReaction(db, { clientId: 1, targetWaId: 'I1', reactorJid: SHARMA_PN, emoji: '👍', ts: at });
+      const OTHER_MARKERS = /re-check: (edited|new reaction)/;
+
+      it.each([
+        { why: 'an edit', before: (db: Db) => edit(db, '2026-10-19T07:05:00.000Z') },
+        { why: 'a reaction', before: (db: Db) => react(db, '2026-10-19T07:06:00.000Z') },
+      ])('$why before the first run, then the file read during that run: the next run is a plain file re-check, still guarded (I1)', async ({ before }) => {
+        const { db, ai, r } = setup();
+        ai.push({ ops: [ADD] }, { ops: [ADD] });
+        const id = lateImage(db);
+        before(db);
+        const open = hold(ai);
+        const run = r.run(1);
+        read(db, id, '2026-10-19T08:00:30.000Z');
+        open();
+        expect(await run).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+        expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: null })]);
+
+        expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 }); // the same add_task again
+        const line = lineOf(newMessages(ai.calls[1]!.user), 'I1');
+        expect(line).toContain(' (re-check: file now read): see this');
+        expect(line).toContain('{image: A payment receipt');
+        expect(line).not.toMatch(OTHER_MARKERS);
+        expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
+        expect(processedAt(db, 'I1')).not.toBeNull();
+      });
+
+      it.each([
+        { why: 'an edit', change: (db: Db) => edit(db, '2026-10-19T08:00:10.000Z'), marker: '(re-check: edited)' },
+        { why: 'a reaction', change: (db: Db) => react(db, '2026-10-19T08:00:10.000Z'), marker: '(re-check: new reaction)' },
+      ])('a file read while $why re-check is in flight: the next run is a plain file re-check, still guarded (I1, M6)', async ({ change, marker }) => {
+        const { db, ai, r } = setup();
+        ai.push({ ops: [ADD] }, { ops: [] }, { ops: [ADD] });
+        const id = lateImage(db);
+        expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 }); // the file is still being read
+        change(db);
+        const open = hold(ai);
+        const run = r.run(1);
+        read(db, id, '2026-10-19T08:00:30.000Z');
+        open();
+        expect(await run).toMatchObject({ status: 'ok' });
+        const during = lineOf(newMessages(ai.calls[1]!.user), 'I1');
+        expect(during).toContain(` ${marker}: see this`);
+        expect(during).toContain('{image, still being read}');
+        expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: null })]);
+
+        expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
+        const after = lineOf(newMessages(ai.calls[2]!.user), 'I1');
+        expect(after).toContain(' (re-check: file now read): see this');
+        expect(after).toContain('{image: A payment receipt');
+        expect(after).not.toMatch(OTHER_MARKERS);
+        expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
+      });
+
+      it('a genuine edit during the call, with the file read in the same call, stays an edit re-check: a new task is allowed (I1)', async () => {
+        const { db, ai, r } = setup();
+        ai.push({ ops: [ADD] }, { ops: [MORE] });
+        const id = lateImage(db);
+        const open = hold(ai);
+        const run = r.run(1);
+        edit(db, '2026-10-19T08:00:10.000Z');
+        read(db, id, '2026-10-19T08:00:30.000Z');
+        open();
+        expect(await run).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+        expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: 'edit' })]);
+
+        expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+        expect(lineOf(newMessages(ai.calls[1]!.user), 'I1')).toContain(' (re-check: edited) (re-check: file now read): see this, 600 copies {image: A payment receipt');
+        expect(getTaskByCode(db, 'SHA-002')).toMatchObject({ title: 'Print 600 flyers' });
+      });
+
+      it('an edit of a message queued as a file re-check shows both markers, and the edit wins: a new task is allowed (M6)', async () => {
+        const { db, ai, r } = setup();
+        ai.push({ ops: [ADD] }, { ops: [MORE] });
+        const id = lateImage(db);
+        expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 }); // the file is still being read
+        read(db, id, '2026-10-19T08:10:00.000Z');
+        edit(db, '2026-10-19T08:11:00.000Z');
+        expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: 'edit' })]);
+
+        expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+        expect(lineOf(newMessages(ai.calls[1]!.user), 'I1')).toContain(' (re-check: edited) (re-check: file now read): see this, 600 copies {image: A payment receipt');
+        expect(getTaskByCode(db, 'SHA-002')).toMatchObject({ title: 'Print 600 flyers' });
+        expect(flagOf(db, id)).toBe(false);
+      });
+
+      it.each([
+        { why: 'a reaction', change: (db: Db) => react(db, '2026-10-19T08:10:30.000Z'), marker: '(re-check: new reaction)' },
+        { why: 'an edit', change: (db: Db) => edit(db, '2026-10-19T08:10:30.000Z'), marker: '(re-check: edited)' },
+      ])('$why during a file re-check: the next run shows only that marker, since the file was already shown (M2)', async ({ change, marker }) => {
+        const { db, ai, r } = setup();
+        const id = lateImage(db);
+        expect(await r.run(1)).toMatchObject({ status: 'ok' }); // the file is still being read
+        read(db, id, '2026-10-19T08:10:00.000Z');
+        const open = hold(ai);
+        const run = r.run(1);
+        change(db);
+        open();
+        expect(await run).toMatchObject({ status: 'ok' });
+        expect(lineOf(newMessages(ai.calls[1]!.user), 'I1')).toContain(' (re-check: file now read): see this {image: A payment receipt');
+        expect(flagOf(db, id)).toBe(false);
+
+        expect(await r.run(1)).toMatchObject({ status: 'ok' });
+        const line = lineOf(newMessages(ai.calls[2]!.user), 'I1');
+        expect(line).toContain(` ${marker}: see this`);
+        expect(line).toContain('{image: A payment receipt');
+        expect(line).not.toContain('file now read');
+        expect(processedAt(db, 'I1')).not.toBeNull();
+      });
+
+      describe('a run that fails or pauses while the file is read (M6)', () => {
+        const outcomes: { why: string; response: () => FakeResponse; outcome: object }[] = [
+          { why: 'fails (AI error)', response: () => new Error('boom'), outcome: { status: 'failed', errorCode: 'unknown' } },
+          // Booked at 14.9 of the 15 cap, so the retry no longer fits.
+          { why: 'pauses (spend cap)', response: () => new AiInvalidOutputError('bad', FAKE_USAGE, 14.9), outcome: { status: 'paused' } },
+        ];
+        const NEXT_IST_DAY = '2026-10-19T19:00:00.000Z'; // a fresh budget
+
+        it.each(outcomes)('a message never processed: the next run shows the file with no marker, when the run $why', async ({ response, outcome }) => {
+          const { db, ai, clock, r } = setup();
+          ai.push(response());
+          const id = lateImage(db);
+          const open = hold(ai);
+          const run = r.run(1);
+          read(db, id, '2026-10-19T08:00:30.000Z');
+          open();
+          expect(await run).toEqual(outcome);
+          expect(flagOf(db, id)).toBe(false);
+
+          clock.set(NEXT_IST_DAY);
+          expect(await r.run(1)).toMatchObject({ status: 'ok' });
+          const line = lineOf(newMessages(ai.calls.at(-1)!.user), 'I1');
+          expect(line).toMatch(/\[unknown\]: see this \{image: A payment receipt/);
+          expect(line).not.toContain('re-check');
+          expect(processedAt(db, 'I1')).not.toBeNull();
+        });
+
+        it.each(outcomes)('a message processed before: the next run shows the file as a re-check, when the run $why', async ({ response, outcome }) => {
+          const { db, ai, clock, r } = setup();
+          ai.push({ ops: [] }, response());
+          const id = lateImage(db);
+          expect(await r.run(1)).toMatchObject({ status: 'ok' }); // the file is still being read
+          react(db, '2026-10-19T08:00:10.000Z');
+          const open = hold(ai);
+          const run = r.run(1);
+          read(db, id, '2026-10-19T08:00:30.000Z');
+          open();
+          expect(await run).toEqual(outcome);
+          expect(flagOf(db, id)).toBe(true);
+
+          clock.set(NEXT_IST_DAY);
+          expect(await r.run(1)).toMatchObject({ status: 'ok' });
+          expect(lineOf(newMessages(ai.calls.at(-1)!.user), 'I1')).toContain(' (re-check: new reaction) (re-check: file now read): see this {image: A payment receipt');
+          expect(processedAt(db, 'I1')).not.toBeNull();
+          expect(flagOf(db, id)).toBe(false);
+        });
+      });
     });
   });
 

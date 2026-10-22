@@ -189,8 +189,11 @@ export class Reconciler {
         const { accepted, rejected } = validateOps(result.output.ops, state);
         for (const op of accepted) this.#apply(fresh, op, byWaId, appliedAt, isRecheck);
         // fileUnread: the prompt showed the file as still being read. If it was read during the call, the message stays
-        // queued as a "file now read" re-check (amendment 12h).
-        const seen = batch.map((m) => ({ id: m.id, version: m.version, fileUnread: queuedMedia.get(m.id)?.status === 'pending' }));
+        // queued as a "file now read" re-check. fileShown: the prompt showed the file's text as a "file now read"
+        // re-check, so a message queued again for an edit or a reaction does not show it as one again (amendment 12h).
+        const seen = batch.map((m) => ({
+          id: m.id, version: m.version, fileUnread: queuedMedia.get(m.id)?.status === 'pending', fileShown: fileReadAt.has(m.id),
+        }));
         const requeued = markProcessedIfUnchanged(db, seen, appliedAt.toISOString());
         flagRevokedSources(db, clientId); // a source message deleted during the call
         finishBatch(db, batchId, { status: 'ok', errorCode: null, accepted: accepted.length, rejected: rejected.length, at: appliedAt.toISOString() });

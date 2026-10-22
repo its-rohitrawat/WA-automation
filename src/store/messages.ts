@@ -158,11 +158,20 @@ export function markProcessed(db: Db, ids: number[], at: string): void {
  * stays queued with a re-check marker ('edit' or 'reaction'), because the operations from its old version were applied.
  * Returns how many rows were skipped. Runs inside the caller's transaction.
  *
- * Amendment 12h: marking a message processed clears its file's requeued_for_text. fileUnread says the run showed the
- * message's file as still being read; if that file was read during the call (finishMedia moved the version), the
- * message stays queued with the flag set, so the next run shows the text as a "file now read" re-check.
+ * Amendment 12h: marking a message processed clears its file's requeued_for_text.
+ * - fileUnread: the run showed the message's file as still being read. If that file was read during the call
+ *   (finishMedia moved the version), the message stays queued with the flag set, so the next run shows the text as a
+ *   "file now read" re-check. finishMedia adds exactly 1 to the version, so a version one past the run's means nothing
+ *   else changed: the message is then a plain file re-check, and an edit or reaction label left from before the run
+ *   (touch_reason, requeue_reason) is cleared rather than shown again (review I1).
+ * - fileShown: the run showed the file's text as a "file now read" re-check. If the mark fails (an edit or a reaction
+ *   during the call), the flag is cleared too: the next run needs only the edit or reaction marker (review M2).
  */
-export function markProcessedIfUnchanged(db: Db, rows: { id: number; version: number; fileUnread?: boolean }[], at: string): number {
+export function markProcessedIfUnchanged(
+  db: Db,
+  rows: { id: number; version: number; fileUnread?: boolean; fileShown?: boolean }[],
+  at: string,
+): number {
   const mark = db.prepare('UPDATE messages SET processed_at = @at, requeue_reason = NULL, touch_reason = NULL WHERE id = @id AND version = @version');
   const clearFlag = db.prepare('UPDATE media SET requeued_for_text = 0 WHERE message_id = ? AND requeued_for_text = 1');
   const requeue = db.prepare('UPDATE messages SET requeue_reason = COALESCE(touch_reason, requeue_reason) WHERE id = ?');
@@ -170,15 +179,17 @@ export function markProcessedIfUnchanged(db: Db, rows: { id: number; version: nu
   const flagReadFile = db.prepare(`UPDATE media SET requeued_for_text = 1
     WHERE message_id = ? AND status = 'done' AND text_kind IS NOT NULL AND text IS NOT NULL AND text <> ''
       AND message_id IN (SELECT id FROM messages WHERE revoked = 0)`);
+  const fileOnly = db.prepare('UPDATE messages SET requeue_reason = NULL, touch_reason = NULL WHERE id = @id AND version = @version + 1');
   let skipped = 0;
   for (const r of rows) {
-    if (mark.run({ at, id: r.id, version: r.version }).changes === 0) {
-      requeue.run(r.id);
-      if (r.fileUnread) flagReadFile.run(r.id);
-      skipped++;
-    } else {
+    if (mark.run({ at, id: r.id, version: r.version }).changes > 0) {
       clearFlag.run(r.id);
+      continue;
     }
+    skipped++;
+    if (r.fileUnread && flagReadFile.run(r.id).changes > 0 && fileOnly.run({ id: r.id, version: r.version }).changes > 0) continue;
+    requeue.run(r.id);
+    if (r.fileShown) clearFlag.run(r.id);
   }
   return skipped;
 }
