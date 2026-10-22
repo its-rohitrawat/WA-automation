@@ -69,11 +69,11 @@ const HIDDEN_CHARS = new RegExp('(?![\\t\\n\\r\\v\\f\\x85\\u200C\\u200D])[\\p{Cc
 
 /**
  * Chat text cannot open or close our section tags or fake a {reactions: ...} suffix or a file block. Fullwidth and
- * small look-alikes of < > { } get the same treatment, so no typed brace renders where a tracker block sits. Hidden
- * characters are removed first.
+ * small look-alikes of < > { } get the same treatment, so no typed brace or angle bracket renders where a tracker block
+ * or tag sits. Hidden characters are removed first.
  */
 export function sanitizeForPrompt(s: string): string {
-  return s.replace(HIDDEN_CHARS, '').replace(/[<＜]/g, '‹').replace(/[>＞]/g, '›').replace(/[{｛﹛]/g, '❴').replace(/[}｝﹜]/g, '❵');
+  return s.replace(HIDDEN_CHARS, '').replace(/[<＜﹤]/g, '‹').replace(/[>＞﹥]/g, '›').replace(/[{｛﹛]/g, '❴').replace(/[}｝﹜]/g, '❵');
 }
 
 const SEP = String.fromCharCode(0x0b, 0x0c, 0x85, 0x2028, 0x2029);
@@ -124,9 +124,11 @@ export function placeholderFor(mediaType: string | null): string {
  */
 const NAME_OPEN = /[[(（﹙［]/g;
 const NAME_CLOSE = /[\])）﹚］]/g;
+/** A header ends at the first ": ", so a colon in a name (or its fullwidth or small look-alike) is shown as "-", like "·". */
+const NAME_SEPARATORS = /[·:：﹕]/g;
 
 const nameText = (s: string): string =>
-  [...sanitizeInline(s).replace(NAME_OPEN, '❨').replace(NAME_CLOSE, '❩').replace(/·/g, '-')].slice(0, 60).join('');
+  [...sanitizeInline(s).replace(NAME_OPEN, '❨').replace(NAME_CLOSE, '❩').replace(NAME_SEPARATORS, '-')].slice(0, 60).join('');
 
 /** People get handles P1, P2, ... in map order. */
 function handlesOf(people: Map<string, PersonRow>): Map<string, string> {
