@@ -15,7 +15,7 @@ How the input is laid out
 - "@" followed by digits is a WhatsApp mention: match the digits to a jid in the people list.
 - A message marked "(re-check: edited)" or "(re-check: new reaction)" was processed before. Act only on what changed, the new wording or the new reaction, and do not add its tasks again.
 - A message marked "(re-check: file now read)" was processed before its shared file could be read. Act on what the file's block adds (and on any change another marker names). Do not add again a task, reminder or decision this message already gave; update that task instead.
-- A task marked [maybe_done] was reported delivered but nobody has confirmed it yet.
+- A task marked [maybe_done] was reported delivered but nobody has confirmed it yet. Brackets and parentheses inside task fields are shown as ❨ ❩; status tags in [ ] come from the tracker.
 
 How the tracker works
 - A task is a concrete piece of work someone still has to do. side is who must act next, not who wrote the message: "Banner thoda bright karo" from the client is side "us"; "Logo files bhej dijiye" from the team is side "client" (content, files, approvals, payments, feedback, access).
@@ -199,16 +199,30 @@ export function formatMessage(m: MessageRow, people: Map<string, PersonRow>, rea
   return formatMessageWith(m, people, handlesOf(people), reactions);
 }
 
+/** The separator dot of tracker lines and its look-alikes (Greek ano teleia, bullets, hyphenation point, dot operators, katakana middle dots). */
+const FIELD_SEPARATORS = /[··•‧∙⋅・･]/g;
+/** Double quotes and the fullwidth look-alike. */
+const FIELD_QUOTES = /["＂]/g;
+
+/**
+ * A task field (title, people, deadline, progress, quote) comes from the chat; the quote is a client's own words. On a
+ * task line only the tracker writes tags in [ ], separators " · " and the quotes around a field, so a field shows
+ * brackets and parentheses as ❨ ❩ (as names do), a separator dot as "-" and a double quote as ', and cannot fake
+ * "[maybe_done]", "· source deleted by sender" or the end of its own quotes (note 2).
+ */
+const taskText = (s: string): string =>
+  sanitizeInline(s).replace(NAME_OPEN, '❨').replace(NAME_CLOSE, '❩').replace(FIELD_SEPARATORS, '-').replace(FIELD_QUOTES, "'");
+
 function formatTask(t: TaskRow): string {
-  const bits = [`${t.code} [${t.side}] [${t.status}] "${sanitizeInline(t.title)}"`, t.category, t.priority];
-  if (t.assignedTo) bits.push(`assigned ${sanitizeInline(t.assignedTo)}`);
-  if (t.askedBy) bits.push(`asked by ${sanitizeInline(t.askedBy)}`);
+  const bits = [`${t.code} [${t.side}] [${t.status}] "${taskText(t.title)}"`, t.category, t.priority];
+  if (t.assignedTo) bits.push(`assigned ${taskText(t.assignedTo)}`);
+  if (t.askedBy) bits.push(`asked by ${taskText(t.askedBy)}`);
   bits.push(`raised ${t.raisedOn}`);
-  if (t.deadline) bits.push(`deadline ${sanitizeInline(t.deadline)}`);
-  if (t.latestProgress) bits.push(`progress "${sanitizeInline(t.latestProgress)}"`);
+  if (t.deadline) bits.push(`deadline ${taskText(t.deadline)}`);
+  if (t.latestProgress) bits.push(`progress "${taskText(t.latestProgress)}"`);
   if (t.reminderCount) bits.push(`reminders ${t.reminderCount}`);
   if (t.sourceWaId) bits.push(`source [${idText(t.sourceWaId)}]`);
-  if (t.sourceQuote) bits.push(`quote "${sanitizeInline(t.sourceQuote)}"`);
+  if (t.sourceQuote) bits.push(`quote "${taskText(t.sourceQuote)}"`);
   if (t.sourceRevoked) bits.push('source deleted by sender');
   return `- ${bits.join(' · ')}`;
 }
