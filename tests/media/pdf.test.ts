@@ -1,8 +1,11 @@
+import { Worker } from 'node:worker_threads';
 import { getDocumentProxy } from 'unpdf';
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { extractPdfText } from '../../src/media/parse/pdf.ts';
 import { parseFile } from '../../src/media/parse/runner.ts';
-import { flateBombPdf, tinyPdf } from '../helpers/files.ts';
+import { bigDrawingPdf, flateBombPdf, tinyPdf } from '../helpers/files.ts';
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 // The real unpdf, with a spy around getDocumentProxy so a test can see the options the reader passes.
 vi.mock('unpdf', async (importOriginal) => {
@@ -49,6 +52,16 @@ async function spyOnNextDocument(o: { failPage?: number } = {}): Promise<{ destr
   return { destroy: () => destroy, cleanups };
 }
 
+/** The next document opened is a stand-in whose pages hold these text items, as PDF.js reports them. */
+function fakeNextDocument(pages: { str: string; hasEOL: boolean }[][]): void {
+  const pdf = {
+    numPages: pages.length,
+    getPage: async (n: number) => ({ getTextContent: async () => ({ items: pages[n - 1] ?? [] }), cleanup: () => true }),
+    loadingTask: { destroy: async () => {} },
+  };
+  vi.mocked(getDocumentProxy).mockResolvedValueOnce(pdf as unknown as Awaited<ReturnType<typeof getDocumentProxy>>);
+}
+
 describe('extractPdfText', () => {
   it('reads the text layer', async () => {
     const r = await extractPdfText(tinyPdf([['Quotation 17', 'Total 1,20,000']]), { maxPages: 200 });
@@ -82,6 +95,26 @@ describe('extractPdfText', () => {
     expect(spies.destroy()).toHaveBeenCalledTimes(1);
   });
 
+  it('drops blank pages and the blank lines they leave at the start, in the middle and at the end', async () => {
+    const r = await extractPdfText(tinyPdf([[], ['Quote 7', 'Total', 'Due'], [], [], ['Thanks'], []]), { maxPages: 200 });
+    expect(r).toEqual({ text: 'Quote 7\nTotal\nDue\n\nThanks', pageCount: 6 });
+  });
+
+  it('removes spaces and tabs at the ends of lines, keeps at most one blank line in a row, and trims the text', async () => {
+    fakeNextDocument([
+      [
+        { str: '  Quote 7  ', hasEOL: true },
+        { str: 'Total \t', hasEOL: true },
+        { str: '', hasEOL: true },
+        { str: '', hasEOL: true },
+        { str: 'Due  ', hasEOL: false },
+      ],
+      [{ str: ' \t', hasEOL: true }],
+      [{ str: 'Thanks \t ', hasEOL: false }],
+    ]);
+    expect((await extractPdfText(tinyPdf([[]]), { maxPages: 200 })).text).toBe('Quote 7\nTotal\n\nDue\n\nThanks');
+  });
+
   it('returns no text for a scan without a text layer', async () => {
     expect(await extractPdfText(tinyPdf([[]]), { maxPages: 200 })).toEqual({ text: '', pageCount: 1 });
   });
@@ -108,6 +141,25 @@ describe('extractPdfText', () => {
     expect(bytes.byteLength).toBe(pdf.length);
     expect(Buffer.from(bytes).equals(pdf)).toBe(true);
   });
+
+  it('hands bytes it owns (the worker) to PDF.js without a copy, but still copies a Buffer or a view into shared memory', async () => {
+    const pdf = tinyPdf([['Owned']]);
+    const owned = new Uint8Array(pdf);
+    expect((await extractPdfText(owned, { maxPages: 200 }, { ownsBytes: true })).text).toBe('Owned');
+    expect(vi.mocked(getDocumentProxy).mock.calls[0]?.[0] === owned).toBe(true);
+
+    const buffer = Buffer.alloc(pdf.length); // owns its whole ArrayBuffer, but PDF.js refuses a Node Buffer
+    pdf.copy(buffer);
+    const wider = new Uint8Array(pdf.length + 8);
+    wider.set(pdf, 8);
+    const view = wider.subarray(8); // shares its ArrayBuffer with other bytes
+    for (const [i, bytes] of [buffer, view].entries()) {
+      expect((await extractPdfText(bytes, { maxPages: 200 }, { ownsBytes: true })).text).toBe('Owned');
+      const given = vi.mocked(getDocumentProxy).mock.calls[i + 1]?.[0];
+      expect(given === bytes || Buffer.isBuffer(given)).toBe(false);
+      expect(Buffer.from(bytes).equals(pdf)).toBe(true);
+    }
+  });
 });
 
 describe('parseFile (worker thread), PDF', () => {
@@ -130,6 +182,38 @@ describe('parseFile (worker thread), PDF', () => {
     await expect(parseFile({ kind: 'pdf', bytes: bomb, maxPages: 200 }, { timeoutMs: 20_000 })).rejects.toMatchObject({ name: 'ParseError', code: 'parse_memory' });
     expect(await parseFile({ kind: 'pdf', bytes: tinyPdf([['Still here']]), maxPages: 200 }, { timeoutMs: 20_000 })).toEqual({ text: 'Still here', pageCount: 1 });
   }, 40_000);
+
+  it('reads a large drawing whose content stream inflates to tens of MB, without a false memory stop', async () => {
+    // About 46 MB on disk, mostly a scan that text extraction never decodes, and 85 MiB of line-drawing commands once
+    // inflated. PDF.js holds an inflated stream twice while decoding it, so this file needs about 230 MiB outside the
+    // heap: under the 256 MiB cap only because the worker gives PDF.js its own bytes instead of a second copy (280 MiB).
+    const pdf = bigDrawingPdf({ drawingMb: 85, imageMb: 44 });
+    expect(pdf.length).toBeGreaterThan(44 * 1024 * 1024);
+    expect(await parseFile({ kind: 'pdf', bytes: pdf, maxPages: 200 }, { timeoutMs: 60_000 })).toEqual({ text: 'Site plan', pageCount: 1 });
+  }, 90_000);
+
+  it('stops checking the parser memory once the parse has settled: after a reply, an error and a timeout', async () => {
+    // A check left running would poll a stopped worker every 50 ms for good, one more timer for each file parsed.
+    const memoryChecks = vi.spyOn(Worker.prototype, 'getHeapStatistics');
+    const checksInNext300Ms = async (): Promise<number> => {
+      const before = memoryChecks.mock.calls.length;
+      await sleep(300);
+      return memoryChecks.mock.calls.length - before;
+    };
+    expect(await parseFile({ kind: 'pdf', bytes: tinyPdf([['Settled']]), maxPages: 200 }, { timeoutMs: 20_000 })).toEqual({ text: 'Settled', pageCount: 1 });
+    expect(await checksInNext300Ms()).toBe(0);
+
+    await expect(parseFile({ kind: 'pdf', bytes: Buffer.from('this is not a pdf'), maxPages: 200 }, { timeoutMs: 20_000 })).rejects.toMatchObject({ code: 'not_pdf' });
+    expect(await checksInNext300Ms()).toBe(0);
+
+    const beforeTimeout = memoryChecks.mock.calls.length;
+    const hangWorker = new URL('../fixtures/hangWorker.ts', import.meta.url);
+    await expect(parseFile({ kind: 'pdf', bytes: new Uint8Array(1), maxPages: 200 }, { timeoutMs: 300, workerUrl: hangWorker })).rejects.toMatchObject({
+      code: 'parse_timeout',
+    });
+    expect(memoryChecks.mock.calls.length).toBeGreaterThan(beforeTimeout); // the check was running while the parser was
+    expect(await checksInNext300Ms()).toBe(0);
+  });
 
   it("passes the PDF reader's error codes back", async () => {
     await expect(parseFile({ kind: 'pdf', bytes: Buffer.from('this is not a pdf'), maxPages: 200 }, { timeoutMs: 20_000 })).rejects.toMatchObject({

@@ -16,12 +16,19 @@ const PDF_OPTIONS = { verbosity: 0, maxImageSize: 16_000_000 };
  * pageCount is advisory: PDF.js takes it from the file's own /Count entry, which the sender controls. A forged count
  * that is too high is corrected, but one that is too low is not, and the pages past it are never read. Never use it as
  * a ceiling for paid work on the file.
+ *
+ * PDF.js takes over (detaches) the buffer it is given and refuses a Node Buffer, so it gets a plain Uint8Array copy and
+ * the caller's bytes stay intact. With ownsBytes (the worker, whose bytes are its own and never read again), a plain
+ * Uint8Array that owns its whole buffer is handed over as it is: a second copy of a 50 MB file would use a large part
+ * of the worker's memory cap outside the heap (MEDIA_LIMITS.maxParserExternalBytes) and stop real files. The bytes may
+ * be emptied then.
  */
-export async function extractPdfText(bytes: Uint8Array, limits: { maxPages: number }): Promise<ParseResult> {
+export async function extractPdfText(bytes: Uint8Array, limits: { maxPages: number }, o: { ownsBytes?: boolean } = {}): Promise<ParseResult> {
+  const whole = bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength;
+  const data = o.ownsBytes === true && whole && !Buffer.isBuffer(bytes) ? bytes : new Uint8Array(bytes);
   let pdf: Awaited<ReturnType<typeof getDocumentProxy>>;
   try {
-    // A plain Uint8Array copy: PDF.js takes over (detaches) the buffer it is given, and refuses a Node Buffer.
-    pdf = await getDocumentProxy(new Uint8Array(bytes), PDF_OPTIONS);
+    pdf = await getDocumentProxy(data, PDF_OPTIONS);
   } catch (e) {
     throw new ParseError((e as { name?: string } | null)?.name === 'PasswordException' ? 'pdf_password' : 'not_pdf');
   }

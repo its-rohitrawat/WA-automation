@@ -1,5 +1,5 @@
 import { once } from 'node:events';
-import { createDeflate } from 'node:zlib';
+import { createDeflate, deflateSync } from 'node:zlib';
 import JSZip from 'jszip';
 
 const CONTENT_TYPES =
@@ -51,6 +51,29 @@ export async function flateBombPdf(inflatedMb: number): Promise<Buffer> {
   return pdfOfStreams([{ data: Buffer.concat(chunks).toString('latin1'), filter: ' /Filter /FlateDecode' }]);
 }
 
+/**
+ * A one-page drawing like a CAD export, as a real file can be: a content stream of `drawingMb` MiB of line-drawing
+ * commands (compressed with deflate) after one line of text, plus an uncompressed `imageMb` MiB scan on the same
+ * page. Text extraction never decodes the scan; it only makes the file itself large.
+ */
+export function bigDrawingPdf(o: { drawingMb: number; imageMb: number }): Buffer {
+  const MiB = 1024 * 1024;
+  const drawing = Buffer.concat([Buffer.from('q 612 0 0 792 0 0 cm /Im1 Do Q\nBT /F1 12 Tf 72 720 Td (Site plan) Tj ET\n'), Buffer.alloc(o.drawingMb * MiB, '72 72 m 540 720 l S\n')]);
+  const content = deflateSync(drawing, { level: 1 }).toString('latin1');
+  const width = 4096;
+  const scan = Buffer.alloc(o.imageMb * MiB, 0x7f).toString('latin1');
+  const objects: string[] = [];
+  objects[1] = '<< /Type /Catalog /Pages 2 0 R >>';
+  objects[2] = '<< /Type /Pages /Kids [4 0 R] /Count 1 >>';
+  objects[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>';
+  objects[4] = '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> /XObject << /Im1 6 0 R >> >> /Contents 5 0 R >>';
+  objects[5] = `<< /Length ${content.length} /Filter /FlateDecode >>\nstream\n${content}\nendstream`;
+  objects[6] =
+    `<< /Type /XObject /Subtype /Image /Width ${width} /Height ${scan.length / width} /ColorSpace /DeviceGray /BitsPerComponent 8 ` +
+    `/Length ${scan.length} >>\nstream\n${scan}\nendstream`;
+  return pdfOfObjects(objects);
+}
+
 /** A PDF with one page per content stream. Stream data travels as latin1 text, so binary bytes stay intact. */
 function pdfOfStreams(streams: { data: string; filter: string }[]): Buffer {
   const objects: string[] = [];
@@ -63,6 +86,11 @@ function pdfOfStreams(streams: { data: string; filter: string }[]): Buffer {
     objects[pageId] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${pageId + 1} 0 R >>`;
     objects[pageId + 1] = `<< /Length ${Buffer.byteLength(data, 'latin1')}${filter} >>\nstream\n${data}\nendstream`;
   });
+  return pdfOfObjects(objects);
+}
+
+/** A PDF of the given objects (numbered from 1, object 1 the catalog), with its cross-reference table. Latin1 text. */
+function pdfOfObjects(objects: string[]): Buffer {
   let out = '%PDF-1.4\n';
   const offsets: number[] = [];
   for (let id = 1; id < objects.length; id++) {

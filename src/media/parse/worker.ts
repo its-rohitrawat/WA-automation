@@ -9,7 +9,8 @@ async function run(job: ParseJob): Promise<ParseReply> {
       return { ok: true, result: await extractDocxText(job.bytes, job) };
     }
     const { extractPdfText } = await import('./pdf.ts');
-    return { ok: true, result: await extractPdfText(job.bytes, job) };
+    // job.bytes is this worker's own copy (moved or cloned here by parseFile), so PDF.js may take it over.
+    return { ok: true, result: await extractPdfText(job.bytes, job, { ownsBytes: true }) };
   } catch (e) {
     return { ok: false, code: e instanceof ParseError ? e.code : 'parse_failed' };
   }
