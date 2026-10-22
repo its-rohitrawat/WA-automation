@@ -81,6 +81,13 @@ describe('normalizeMessage media details', () => {
     expect(media(normalizeMessage(waRaw('d4', { documentMessage: { url: 'u', mediaKey: KEY, fileName: '\u{1F600}'.repeat(300) } })))!.fileName)
       .toBe('\u{1F600}'.repeat(255));
   });
+
+  it('caps a file name several MB long the same way, and a cut inside an emoji never leaves half of it (T2-02)', () => {
+    const name = (fileName: string) => media(normalizeMessage(waRaw('d5', { documentMessage: { url: 'u', mediaKey: KEY, fileName } })))!.fileName;
+    expect(name(`${'b'.repeat(2_000_000)}.pdf`)).toBe('b'.repeat(255));
+    // One letter first: the first 510 units end in the middle of the 255th emoji, which is past the 255 characters kept.
+    expect(name(`a${'\u{1F600}'.repeat(300)}`)).toBe(`a${'\u{1F600}'.repeat(254)}`);
+  });
 });
 
 /** Every wrapper Baileys' normalizeMessageContent opens, found by asking it about each field of proto.Message. */
