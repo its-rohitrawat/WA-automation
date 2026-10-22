@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { markAsUntransferable } from 'node:worker_threads';
 import JSZip from 'jszip';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { docxXmlToText, extractDocxText } from '../../src/media/parse/docx.ts';
@@ -11,6 +12,42 @@ import { tinyDocx } from '../helpers/files.ts';
 const LIMITS = { maxXmlBytes: 1_000_000, maxEntries: 50 };
 const fixture = (name: string): URL => new URL(`../fixtures/${name}`, import.meta.url);
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * About `size` characters of random words. They compress only about 7:1, so each 16 KB block of compressed data
+ * inflates to about 100 KB, and a reader that stops early has inflated only a small part of the text.
+ */
+function randomWords(size: number): string {
+  const words = ['logo', 'final', 'payment', 'brief', 'draft', 'invoice', 'client', 'review', 'banner', 'poster', 'video', 'reel', 'deck', 'copy', 'edit', 'print'];
+  const out: string[] = [];
+  let seed = 0x2545f491; // xorshift32, so the text is the same on every run
+  for (let n = 0; n < size; ) {
+    seed ^= seed << 13;
+    seed ^= seed >>> 17;
+    seed ^= seed << 5;
+    const word = words[seed >>> 28] ?? '';
+    out.push(word);
+    n += word.length + 1;
+  }
+  return out.join(' ');
+}
+
+/** Counts every inflated byte jszip hands to the stream of a file in a zip, that is, what the reader may hold in memory. */
+function countInflatedBytes(): () => number {
+  let bytes = 0;
+  const zipObject = Object.getPrototypeOf(new JSZip().file('probe.txt', '').file('probe.txt')) as JSZip.JSZipObject;
+  const nodeStream = zipObject.nodeStream;
+  vi.spyOn(zipObject, 'nodeStream').mockImplementation(function (this: JSZip.JSZipObject, ...args) {
+    const stream = nodeStream.apply(this, args) as NodeJS.ReadableStream & { push(chunk: Uint8Array | null): boolean };
+    const push = stream.push.bind(stream);
+    stream.push = (chunk) => {
+      bytes += chunk?.length ?? 0;
+      return push(chunk);
+    };
+    return stream;
+  });
+  return () => bytes;
+}
 
 /**
  * A Word file whose compressed word/document.xml is damaged. 'block type': the first deflate block has the reserved
@@ -49,6 +86,18 @@ describe('extractDocxText', () => {
 
   it('stops a zip bomb at the inflated-size cap', async () => {
     await expect(extractDocxText(await tinyDocx(['x'.repeat(2_000_000)]), LIMITS)).rejects.toMatchObject({ name: 'ParseError', code: 'too_large_uncompressed' });
+  });
+
+  it('stops inflating a zip bomb soon after the cap, without inflating the whole text', async () => {
+    const docx = await tinyDocx([randomWords(4_000_000)]); // about 600 KB compressed
+    const inflated = countInflatedBytes();
+    await expect(extractDocxText(docx, { maxXmlBytes: 10_000, maxEntries: 50 })).rejects.toMatchObject({ name: 'ParseError', code: 'too_large_uncompressed' });
+    const atRejection = inflated();
+    expect(atRejection).toBeGreaterThan(10_000); // the counter saw the stream
+    expect(atRejection).toBeLessThan(1_000_000);
+    // Inflating that was already under way may finish, but it must not carry on through the rest of the file.
+    await sleep(300);
+    expect(inflated()).toBeLessThan(1_000_000);
   });
 
   it('refuses archives with too many entries, bytes that are not a zip, and zips without a document', async () => {
@@ -127,6 +176,13 @@ describe('parseFile (worker thread)', () => {
     expect(Date.now() - started).toBeLessThan(10_000);
   });
 
+  it("reads and discards the parser's console output, so a parser that waits for its output to be written still finishes", async () => {
+    expect(await parseFile({ kind: 'docx', bytes: new Uint8Array(1), ...LIMITS }, { timeoutMs: 15_000, workerUrl: fixture('floodWorker.ts') })).toEqual({
+      text: 'replied after flushing',
+      pageCount: null,
+    });
+  });
+
   it("keeps the parser's console output out of the service's output", async () => {
     const out = vi.spyOn(process.stdout, 'write');
     const err = vi.spyOn(process.stderr, 'write');
@@ -173,14 +229,27 @@ describe('parseFile (worker thread)', () => {
 
   it('with transfer, copies a view into a larger buffer, so the bytes around it stay usable', async () => {
     const docx = await tinyDocx(['Inside a larger buffer']);
-    const big = new Uint8Array(docx.length + 20);
-    big.fill(7);
-    big.set(docx, 10);
-    const view = big.subarray(10, 10 + docx.length);
-    expect(await parseFile({ kind: 'docx', bytes: view, ...LIMITS }, { timeoutMs: 15_000, transfer: true })).toEqual({ text: 'Inside a larger buffer', pageCount: null });
-    expect(big.byteLength).toBe(docx.length + 20);
-    expect(big[0]).toBe(7);
-    expect(Buffer.from(view).equals(docx)).toBe(true);
+    // In the middle of the buffer, and at its start (offset 0, but shorter than the buffer).
+    for (const offset of [10, 0]) {
+      const big = new Uint8Array(docx.length + 20);
+      big.fill(7);
+      big.set(docx, offset);
+      const view = big.subarray(offset, offset + docx.length);
+      expect(await parseFile({ kind: 'docx', bytes: view, ...LIMITS }, { timeoutMs: 15_000, transfer: true })).toEqual({ text: 'Inside a larger buffer', pageCount: null });
+      expect(big.byteLength).toBe(docx.length + 20);
+      expect(big[offset === 0 ? big.length - 1 : 0]).toBe(7);
+      expect(Buffer.from(view).equals(docx)).toBe(true);
+    }
+  });
+
+  it('with transfer, copies bytes whose memory is marked untransferable, and leaves them intact', async () => {
+    const docx = await tinyDocx(['Marked untransferable']);
+    const memory = new ArrayBuffer(docx.length);
+    const bytes = new Uint8Array(memory);
+    bytes.set(docx);
+    markAsUntransferable(memory);
+    expect(await parseFile({ kind: 'docx', bytes, ...LIMITS }, { timeoutMs: 15_000, transfer: true })).toEqual({ text: 'Marked untransferable', pageCount: null });
+    expect(Buffer.from(bytes).equals(docx)).toBe(true);
   });
 
   it('turns bytes that were already moved away into a ParseError', async () => {
