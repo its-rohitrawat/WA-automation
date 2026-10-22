@@ -346,6 +346,44 @@ describe('DriveFileUploader', () => {
     expect(lines.filter((l) => l.msg === 'file uploads to Drive paused').map((l) => l.reason)).toEqual(['ledger', 'ledger']);
   });
 
+  it('tells the workbook about an id saved at the start of a pass, even when that pass then stops early', async () => {
+    const { db, dataDir, drive, clock, onUploaded, up } = setup();
+    const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
+    const restore = failWritesTo(db, 'drive_file_id');
+    await up.run();
+    restore();
+    expect(onUploaded).not.toHaveBeenCalled();
+    setKv(db, 'drive_root_id', ''); // the pass that saves the id returns right after it, before any upload
+    await ticks(clock, up, 15);
+    expect(getMedia(db, a)!.driveFileId).toBe('file-4');
+    expect(drive.createFileCalls).toBe(1);
+    expect(onUploaded).toHaveBeenCalledTimes(1);
+  });
+
+  it('stop() saves a Drive id that a pass could not save, so a restart does not upload the file again', async () => {
+    const { db, dataDir, drive, up } = setup();
+    const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
+    const restore = failWritesTo(db, 'drive_file_id');
+    await up.run();
+    expect(getMedia(db, a)!.driveFileId).toBeNull();
+    restore();
+    await up.stop(1_000); // the uploader is still paused, so no pass would have saved it
+    expect(getMedia(db, a)!.driveFileId).toBe('file-4');
+    expect(drive.createFileCalls).toBe(1);
+  });
+
+  it('stop() tries an unsaved Drive id once and ignores a failure', async () => {
+    const { lines, log } = capturingLogger();
+    const { db, dataDir, up } = setup({ log });
+    const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
+    failWritesTo(db, 'drive_file_id');
+    await up.run();
+    await expect(up.stop(1_000)).resolves.toBeUndefined();
+    expect(getMedia(db, a)!.driveFileId).toBeNull();
+    expect(lines.filter((l) => l.msg === 'file upload result could not be saved').map((l) => l.step)).toEqual(['save_id', 'save_id']);
+    expect(lines.filter((l) => l.msg === 'file uploads to Drive paused')).toHaveLength(1); // stopping does not pause again
+  });
+
   it('caps the retry delay at 6 hours', () => {
     expect(retryMs(1)).toBe(2 * 60_000);
     expect(retryMs(7)).toBe(128 * 60_000);
@@ -437,19 +475,28 @@ describe('DriveFileUploader', () => {
     expect(driveState(db, a)).toEqual({ fileId: null, attempts: 1, failed: 0, nextAt: '2026-10-19T08:02:00.000Z' });
   });
 
-  it('rebuilds one folder level per retry, at most three times per file, when Drive keeps saying the folder is missing', async () => {
+  it('moves up a folder level only when creating a folder fails: a missing-folder answer for the file in a fresh Files folder fails the try', async () => {
+    const { db, dataDir, drive, up } = setup();
+    savedFile(db, dataDir, { waId: 'A', role: 'client' });
+    await up.run(); // the folders exist from here
+    const before = drive.createFileCalls;
+    const b = savedFile(db, dataDir, { waId: 'B', role: 'client' });
+    drive.fileParentsMissing = true;
+    await up.run();
+    // In the saved Files folder, then in one new Files folder. Its parents were just there, so no second client folder or Clients folder.
+    expect(drive.createFileCalls - before).toBe(2);
+    expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Files', 'Files']);
+    expect(drive.folderParents).toEqual(['root-1', 'folder-1', 'folder-2', 'folder-2']);
+    expect(driveState(db, b)).toMatchObject({ fileId: null, attempts: 1, failed: 0 });
+  });
+
+  it('fails the try without rebuilding anything when the file is refused right after its folders were first made', async () => {
     const { db, dataDir, drive, up } = setup();
     const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
     drive.fileParentsMissing = true;
     await up.run();
-    expect(drive.createFileCalls).toBe(4);
-    // First try, then Files, then the client folder and its Files, then all three.
-    expect(drive.folders).toEqual([
-      'Clients', 'Sharma Interiors', 'Files',
-      'Files',
-      'Sharma Interiors', 'Files',
-      'Clients', 'Sharma Interiors', 'Files',
-    ]);
+    expect(drive.createFileCalls).toBe(1);
+    expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Files']);
     expect(driveState(db, a)).toMatchObject({ fileId: null, attempts: 1, failed: 0 });
   });
 

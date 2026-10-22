@@ -130,6 +130,18 @@ describe('sanitizeFileName', () => {
     expect(sanitizeFileName('invoice\u200D\u202Efdp.exe')).toBe('invoice\u200Dfdp.exe');
   });
 
+  it('drops the joiners at either end with the dots and spaces, so a name of joiners only is nothing (T14-12)', () => {
+    expect(sanitizeFileName('\u200D')).toBeNull();
+    expect(sanitizeFileName('\u200C\u200D \u200C')).toBeNull();
+    expect(sanitizeFileName('\u200D..a.pdf')).toBe('a.pdf');
+    expect(sanitizeFileName('a.pdf\u200C. \u200D')).toBe('a.pdf');
+    // The cut can end inside an emoji sequence, on its joiner.
+    expect(sanitizeFileName(`${'a'.repeat(119)}\u200D\u{1F469}.jpg`)).toBe('a'.repeat(119));
+    const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}';
+    expect(sanitizeFileName(family)).toBe(family);
+    expect(sanitizeFileName(`${family}.jpg`)).toBe(`${family}.jpg`);
+  });
+
   it('turns line separators, no-break spaces and runs of spaces into one plain space', () => {
     expect(sanitizeFileName('a\u2028b   c.pdf')).toBe('a b c.pdf');
     expect(sanitizeFileName('a\u00A0\u2029b.pdf')).toBe('a b.pdf');

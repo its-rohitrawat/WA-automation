@@ -32,8 +32,8 @@ function setup(responses: FakeResponse[], capUsd = 15, log: Logger = silentLogge
   return { db, spend, ai, onChanged, r };
 }
 
-function store(db: Db, waId: string, text: string, ts = '2026-10-19T07:00:00.000Z', clientId = 1): void {
-  insertMessage(db, { waId, clientId, senderJid: SHARMA_PN, senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false, ts, text, quotedWaId: null, mediaType: null });
+function store(db: Db, waId: string, text: string | null, ts = '2026-10-19T07:00:00.000Z', clientId = 1, mediaType: string | null = null): void {
+  insertMessage(db, { waId, clientId, senderJid: SHARMA_PN, senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false, ts, text, quotedWaId: null, mediaType });
   upsertPerson(db, { clientId, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
 }
 
@@ -121,12 +121,13 @@ describe('Reconciler', () => {
   });
 
   it('creates a task that is already done, closed on the date of its last source message', async () => {
-    const { db, r } = setup([{ ops: [
+    const { db, ai, r } = setup([{ ops: [
       op({ op: 'add_task', side: 'client', title: 'Send logo files', category: 'content', priority: 'medium', status: 'done', sourceMessageIds: ['m1', 'm2'] }),
     ] }]);
     store(db, 'm1', 'Logo files bhej dijiye', '2026-10-17T05:00:00.000Z');
-    store(db, 'm2', '[document]', '2026-10-18T05:00:00.000Z');
+    store(db, 'm2', null, '2026-10-18T05:00:00.000Z', 1, 'document');
     expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+    expect(ai.calls[0]!.user).toMatch(/^\[m2\] .*\]: \{document\}$/m);
     expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', raisedOn: '2026-10-17', closedOn: '2026-10-18' });
     const ev = db.prepare('SELECT detail FROM task_events').get() as { detail: string };
     expect(JSON.parse(ev.detail)).toMatchObject({ code: 'SHA-001', status: 'done' });

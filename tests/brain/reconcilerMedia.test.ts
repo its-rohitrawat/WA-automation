@@ -2,7 +2,7 @@ import { Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { AiInvalidOutputError } from '../../src/brain/claudeClient.ts';
 import { Reconciler } from '../../src/brain/reconciler.ts';
-import { closeTask, reopenTask } from '../../src/cli/corrections.ts';
+import { closeTask, reopenTask, requestReprocess } from '../../src/cli/corrections.ts';
 import { mediaForPrompt } from '../../src/media/promptText.ts';
 import type { Prices } from '../../src/spend/pricing.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
@@ -257,8 +257,8 @@ describe('Reconciler with shared files', () => {
     file(db, 'V1', '2026-10-19T07:01:00.000Z', { kind: 'voice', mimeType: 'audio/ogg' });
     file(db, 'U2', '2026-10-19T07:02:00.000Z', { kind: 'audio', mimeType: 'audio/mpeg' });
     expect(await r.run(1)).toMatchObject({ status: 'ok' });
-    expect(ai.calls[0]!.user).toContain(': [voice note, not transcribed yet]');
-    expect(ai.calls[0]!.user).toContain(': see this [audio file]');
+    expect(ai.calls[0]!.user).toContain(': {voice note, not transcribed yet}');
+    expect(ai.calls[0]!.user).toContain(': see this {audio file}');
   });
 
   it('shows that a forwarded image was not described (12f)', async () => {
@@ -368,6 +368,7 @@ describe('Reconciler with shared files', () => {
       ['could not be read', (db: Db, id: number) => failMedia(db, id, { status: 'failed', errorCode: 'bad_image', at: '2026-10-19T08:10:00.000Z' })],
       ['forwarded, not described', (db: Db, id: number) => finishMedia(db, id, { textKind: null, text: null, pageCount: null, note: 'forwarded_not_described', at: '2026-10-19T08:10:00.000Z' })],
       ['an empty description', (db: Db, id: number) => finishMedia(db, id, { textKind: 'description', text: '', pageCount: null, note: null, at: '2026-10-19T08:10:00.000Z' })],
+      ['a description that shows nothing', (db: Db, id: number) => finishMedia(db, id, { textKind: 'description', text: ' \u0000\u200B\u200D ', pageCount: null, note: null, at: '2026-10-19T08:10:00.000Z' })],
     ])('a file that ends without text after its message was processed queues nothing: %s', async (_why, end) => {
       const { db, ai, r } = setup();
       const id = image(db, 'I1', '2026-10-19T07:01:00.000Z', undefined, { createdAt: '2026-10-19T07:20:00.000Z' });
@@ -427,6 +428,91 @@ describe('Reconciler with shared files', () => {
       const user = ai.calls[0]!.user;
       expect(contextOf(user)).toContain('recent chat');
       expect(lineOf(newMessages(user), 'I0')).toContain('(re-check: file now read)');
+    });
+
+    it('a context message whose file is read during the call is not marked by that run, and comes back as a file re-check', async () => {
+      const { db, ai, r } = setup();
+      const id = image(db, 'I1', '2026-10-19T07:01:00.000Z', undefined, { createdAt: '2026-10-19T07:20:00.000Z' });
+      expect(await r.run(1)).toMatchObject({ status: 'ok' }); // the file is still being read
+      say(db, 'N1', '2026-10-19T07:30:00.000Z', 'any update?');
+      const open = hold(ai);
+      const run = r.run(1);
+      read(db, id, '2026-10-19T08:00:30.000Z');
+      open();
+      expect(await run).toMatchObject({ status: 'ok' });
+      const during = ai.calls[1]!.user;
+      expect(lineOf(contextOf(during), 'I1')).toMatch(/: see this \{image, still being read\}$/);
+      expect(lineOf(newMessages(during), 'I1')).toBe('');
+      expect(processedAt(db, 'N1')).not.toBeNull();
+      expect(processedAt(db, 'I1')).toBeNull();
+      expect(flagOf(db, id)).toBe(true);
+      expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: null })]);
+
+      expect(await r.run(1)).toMatchObject({ status: 'ok' });
+      expect(lineOf(newMessages(ai.calls[2]!.user), 'I1')).toContain(' (re-check: file now read): see this {image: A payment receipt');
+      expect(processedAt(db, 'I1')).not.toBeNull();
+      expect(flagOf(db, id)).toBe(false);
+    });
+
+    describe('cli reprocess of a message whose file was still being read (12h)', () => {
+      const ADD = op({ op: 'add_task', side: 'client', title: 'Send the payment', category: 'payment', priority: 'high', sourceMessageIds: ['I1'] });
+
+      /**
+       * P0 before the reprocess window, I1 inside it and P2 after it. A first run went ahead with I1's file still being
+       * read and added a task from I1; then `cli reprocess` queued I1 again (requestReprocess, the store's resetProcessedSince).
+       */
+      async function reprocessedWindow() {
+        const s = setup();
+        s.ai.push({ ops: [ADD] }, { ops: [ADD] }, { ops: [ADD] });
+        say(s.db, 'P0', '2026-10-17T05:00:00.000Z', 'before the window');
+        const id = image(s.db, 'I1', '2026-10-18T05:00:00.000Z', undefined, { createdAt: '2026-10-18T05:00:00.000Z' });
+        say(s.db, 'P2', '2026-10-19T05:00:00.000Z', 'after the window');
+        expect(await s.r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+        expect(lineOf(newMessages(s.ai.calls[0]!.user), 'I1')).toContain('{image, still being read}');
+        expect(requestReprocess(s.db, 'SHA', '2026-10-18', new Date('2026-10-19T08:05:00Z'), '2026-10-18')).toBe(1);
+        expect(listUnprocessed(s.db, 1).map((m) => m.waId)).toEqual(['I1']);
+        return { ...s, id };
+      }
+
+      it('the file read before the reprocess run: no flag and no marker, the same task is not added again, and the context is from before the window', async () => {
+        const { db, ai, r, id } = await reprocessedWindow();
+        read(db, id, '2026-10-19T08:10:00.000Z');
+        expect(flagOf(db, id)).toBe(false);
+        expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: null })]);
+
+        expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 }); // the same add_task again
+        const user = ai.calls[1]!.user;
+        const line = lineOf(newMessages(user), 'I1');
+        expect(line).toMatch(/\[unknown\]: see this \{image: A payment receipt/);
+        expect(line).not.toContain('re-check');
+        expect(contextOf(user)).toContain('before the window');
+        expect(contextOf(user)).not.toContain('after the window');
+        expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
+        expect(processedAt(db, 'I1')).not.toBeNull();
+        expect(flagOf(db, id)).toBe(false);
+      });
+
+      it('the file read during the reprocess run: that run marks nothing, and the next run is a guarded file re-check', async () => {
+        const { db, ai, r, id } = await reprocessedWindow();
+        const open = hold(ai);
+        const run = r.run(1);
+        read(db, id, '2026-10-19T08:10:00.000Z');
+        open();
+        expect(await run).toEqual({ status: 'ok', accepted: 0, rejected: 1 }); // the same add_task again
+        const during = ai.calls[1]!.user;
+        expect(lineOf(newMessages(during), 'I1')).toMatch(/\[unknown\]: see this \{image, still being read\}$/);
+        expect(contextOf(during)).toContain('before the window');
+        expect(contextOf(during)).not.toContain('after the window');
+        expect(processedAt(db, 'I1')).toBeNull();
+        expect(flagOf(db, id)).toBe(true);
+        expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: null })]);
+
+        expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 }); // guarded: the same add_task again
+        expect(lineOf(newMessages(ai.calls[2]!.user), 'I1')).toContain(' (re-check: file now read): see this {image: A payment receipt');
+        expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
+        expect(processedAt(db, 'I1')).not.toBeNull();
+        expect(flagOf(db, id)).toBe(false);
+      });
     });
 
     it('guards a file re-check like a reaction re-check: its task is not added again, but it can close a task', async () => {

@@ -1,6 +1,6 @@
 import type { MediaKind, MediaStatus, TextKind } from '../store/media.ts';
 import { istDate, istTime } from '../util/time.ts';
-import { extForMime, sanitizeFileName } from './paths.ts';
+import { extForMime, sanitizeFileName, showsText } from './paths.ts';
 import { MEDIA_LIMITS } from './types.ts';
 
 /** Label by MIME type. A Map, so a declared type such as "constructor" or "__proto__" matches nothing. */
@@ -88,9 +88,6 @@ function oneLine(s: string, max: number): string {
   return cps.length <= max ? flat : `${cps.slice(0, max).join('')}…`;
 }
 
-/** Whether cleaned text shows anything: more than spaces and the joiners HIDDEN keeps. */
-const showsText = (s: string): boolean => /[^\s\u200C\u200D]/u.test(s);
-
 /**
  * The Files received description: what the file is, and the start of what was read. Deterministic, no AI.
  * A file whose message was deleted for everyone shows only "(deleted by sender)": it stays listed, but what it said is not shown.
@@ -107,7 +104,7 @@ export function fileDescription(f: FileFacts): string {
     // a file found too large during the download may have declared less.
     const limit = MEDIA_LIMITS.maxDownloadBytes;
     const size = f.fileSize && f.fileSize > limit ? `, ${formatSize(f.fileSize)}` : '';
-    return `${type}${size}, too large to download (over ${Math.round(limit / (1024 * 1024))} MB)`;
+    return `${type}${size}, too large to download (over the ${Math.round(limit / (1024 * 1024))} MB limit)`;
   }
   if (f.status === 'failed') return `${type}, could not be read`;
   if (f.note === FORWARDED_NOT_DESCRIBED) return f.kind === 'image' || type === 'Image' ? '(forwarded image)' : '(forwarded scanned PDF)';

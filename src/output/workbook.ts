@@ -121,7 +121,7 @@ function lineChars(first: number, last: number): number {
 const FILE_LINE_CHARS = { sentBy: lineChars(2, 2), name: lineChars(3, 3), description: lineChars(FILE_DESC_FIRST, FILE_DESC_LAST) };
 /**
  * A cap so one odd row cannot take over the tab: as many lines as the longest file name sanitizeFileName keeps (120
- * characters, 11 lines of 11 in column C), so its end, often the extension, is never hidden (T14-14). The longest
+ * characters, 11 lines of 11 in column C), so its end, often the extension, fits by the estimate (T14-14). The longest
  * description, about 300 characters, needs 3 lines.
  */
 const MAX_FILE_LINES = Math.ceil(MAX_FILE_NAME_CHARS / FILE_LINE_CHARS.name);

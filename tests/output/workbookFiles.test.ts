@@ -64,6 +64,11 @@ function rowWhere(ws: ExcelJS.Worksheet, pred: (r: ExcelJS.Row) => boolean): Exc
 const mediaIdOf = (db: Db, waId: string): number =>
   (db.prepare('SELECT m.id FROM media m JOIN messages msg ON msg.id = m.message_id WHERE msg.wa_id = ?').get(waId) as { id: number }).id;
 
+/** Gives a file that seed() already finished another text. finishMedia finishes a file only once, so this writes the row directly. */
+const replaceText = (db: Db, waId: string, text: string): void => {
+  db.prepare('UPDATE media SET text = ? WHERE id = ?').run(text, mediaIdOf(db, waId));
+};
+
 const sharmaFiles = (db: Db) => loadTrackerView(db, now, healthy).clients.find((c) => c.client.code === 'SHA')!.files;
 
 describe('Files received', () => {
@@ -108,7 +113,7 @@ describe('Files received', () => {
 
   it('sets each file row tall enough for its wrapped name and description, since merged cells do not auto-fit', async () => {
     const db = seed();
-    finishMedia(db, mediaIdOf(db, 'D1'), { textKind: 'extract', text: 'word '.repeat(80), pageCount: 3, note: null, at: NOW });
+    replaceText(db, 'D1', 'word '.repeat(80));
     const ws = await sheet(db, 'Sharma Interiors');
     const header = rowWhere(ws, (r) => r.getCell(1).value === 'Files received').number + 1;
     // image-2026-10-16-1130-2.jpg and =HYPERLINK(_http___evil_) wrap to 3 lines in column C; the long description to 2 lines.
@@ -232,7 +237,7 @@ describe('Files received', () => {
       status: 'unavailable', errorCode: 'expired',
     });
     expect(sharmaFiles(db).slice(0, 2).map((f) => [f.name, f.description])).toEqual([
-      ['site plan.pdf', 'PDF, too large to download (over 50 MB)'],
+      ['site plan.pdf', 'PDF, too large to download (over the 50 MB limit)'],
       ['old.pdf', 'PDF, could not be downloaded from WhatsApp'],
     ]);
   });
@@ -294,7 +299,7 @@ describe('Files received', () => {
 
   it('reads only the start of a long text from the store', () => {
     const db = seed();
-    finishMedia(db, mediaIdOf(db, 'D1'), { textKind: 'extract', text: 'z'.repeat(5_000), pageCount: 3, note: null, at: NOW });
+    replaceText(db, 'D1', 'z'.repeat(5_000));
     const row = listClientFiles(db, 1).find((f) => f.fileName === 'brief.pdf')!;
     expect(row.textStart).toBe('z'.repeat(400));
     expect(row.revoked).toBe(false);
