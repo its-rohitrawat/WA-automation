@@ -6,6 +6,7 @@ import { ConfirmCancelled, googleAuthCommand, linkCommand, listGroupsCommand, st
 import { parseEnv } from '../../src/config/env.ts';
 import { masterKeyPath, sessionDbPath, trackerDbPath } from '../../src/config/paths.ts';
 import { StaticKeyProvider } from '../../src/crypto/keyProvider.ts';
+import { mediaRefAad, MediaRefSealer } from '../../src/media/ref.ts';
 import { DRIVE_SCOPES, TokenStore, type ConsentClient } from '../../src/output/googleAuth.ts';
 import { syncClients } from '../../src/store/clients.ts';
 import { openDb } from '../../src/store/db.ts';
@@ -16,7 +17,7 @@ import { openSessionDb, useEncryptedAuthState } from '../../src/wa/authState.ts'
 import type { GroupMetadata } from 'baileys';
 import { MEHTA, OTHER_GROUP } from '../helpers/db.ts';
 import { closeWith, FakeSocket, SEND_METHODS } from '../helpers/fakeSocket.ts';
-import { waText } from '../helpers/wa.ts';
+import { waRaw, waText } from '../helpers/wa.ts';
 
 const KEY = Buffer.alloc(32, 7);
 const REFRESH_TOKEN = 'rt-very-secret-token';
@@ -261,6 +262,29 @@ describe('link connection flow', () => {
     expect(done).toBe(true);
     expect(trackerMessages()).toBeGreaterThan(5);
     await p;
+    await lockIsFree();
+  });
+
+  it('saves the download details of a shared image sealed, for the service to fetch later', async () => {
+    const { p } = await start();
+    const sock = await openViaQr();
+    const mediaKey = Buffer.alloc(32, 9);
+    sock.emit('messages.upsert', { type: 'notify', messages: [
+      waRaw('img1', { imageMessage: { url: 'https://mmg.whatsapp.net/v/x', directPath: '/v/x', mediaKey, mimetype: 'image/jpeg' } }, { group: MEHTA.groupId }),
+    ] });
+    await vi.advanceTimersByTimeAsync(9_000);
+    await p;
+    const db = openDb(trackerDbPath(dataDir));
+    try {
+      const row = db.prepare('SELECT status, ref_enc, client_id FROM media').get() as { status: string; ref_enc: Buffer; client_id: number };
+      expect(row.status).toBe('pending');
+      expect(row.ref_enc.includes(mediaKey)).toBe(false);
+      expect(row.ref_enc.toString('latin1')).not.toContain('mmg.whatsapp.net');
+      // Sealed under the master key, so the service can open it.
+      expect(new MediaRefSealer(KEY).open(row.ref_enc, mediaRefAad(row.client_id, 'img1'))).toMatchObject({ directPath: '/v/x', mediaKey: mediaKey.toString('base64') });
+    } finally {
+      db.close();
+    }
     await lockIsFree();
   });
 
