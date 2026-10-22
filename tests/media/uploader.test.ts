@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DriveFileUploader, FILE_UPLOAD_TIMEOUT_MS, retryMs, UPLOAD_MAX_ATTEMPTS } from '../../src/media/uploader.ts';
@@ -10,7 +11,7 @@ import { finishMedia, getMedia, insertMedia, markDownloaded, messageRowId, reset
 import { applyRevoke, insertMessage } from '../../src/store/messages.ts';
 import { setRole, upsertPerson, type Role } from '../../src/store/people.ts';
 import { manualClock } from '../../src/util/clock.ts';
-import { silentLogger } from '../../src/util/logger.ts';
+import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
 import { FakeDrive } from '../helpers/fakeDrive.ts';
 import { RAHUL_PN, SHARMA_PN } from '../helpers/wa.ts';
@@ -20,7 +21,7 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
-function setup(o: { root?: boolean; batchSize?: number } = {}) {
+function setup(o: { root?: boolean; batchSize?: number; log?: Logger } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'wa-up-'));
   dirs.push(dataDir);
   const db = seededDb();
@@ -28,10 +29,35 @@ function setup(o: { root?: boolean; batchSize?: number } = {}) {
   const clock = manualClock('2026-10-19T08:00:00Z');
   const onUploaded = vi.fn();
   const up = new DriveFileUploader({
-    db, api: drive, dataDir, clock, log: silentLogger(), onUploaded, ...(o.batchSize === undefined ? {} : { batchSize: o.batchSize }),
+    db, api: drive, dataDir, clock, log: o.log ?? silentLogger(), onUploaded, ...(o.batchSize === undefined ? {} : { batchSize: o.batchSize }),
   });
   if (o.root !== false) setKv(db, 'drive_root_id', 'root-1');
   return { db, dataDir, drive, clock, onUploaded, up };
+}
+
+function capturingLogger() {
+  const lines: Record<string, unknown>[] = [];
+  const sink = new Writable({
+    write(chunk, _enc, cb) {
+      lines.push(JSON.parse(String(chunk)) as Record<string, unknown>);
+      cb();
+    },
+  });
+  return { lines, log: createLogger('info', sink) };
+}
+
+/** Makes every write to the given media column fail, as when the database cannot write (disk full, a lock held too long). */
+function failWritesTo(db: Db, column: 'drive_file_id' | 'drive_attempts'): () => void {
+  db.exec(`CREATE TRIGGER fail_${column} BEFORE UPDATE OF ${column} ON media BEGIN SELECT RAISE(ABORT, 'database cannot write'); END`);
+  return () => db.exec(`DROP TRIGGER fail_${column}`);
+}
+
+/** 30 s ticks, as the service runs the uploader, for the given number of minutes. */
+async function ticks(clock: ReturnType<typeof manualClock>, up: DriveFileUploader, minutes: number): Promise<void> {
+  for (let i = 0; i < minutes * 2; i++) {
+    clock.advance(30_000);
+    await up.run();
+  }
 }
 
 /**
@@ -221,6 +247,61 @@ describe('DriveFileUploader', () => {
     clock.advance(3 * 60_000);
     await up.run();
     expect(driveState(db, a)).toMatchObject({ fileId: 'file-4', failed: 0, nextAt: null });
+  });
+
+  it('pauses all uploads for 15 minutes when a failed try cannot be saved, instead of uploading the file again every tick', async () => {
+    const { lines, log } = capturingLogger();
+    const { db, dataDir, drive, clock, up } = setup({ log });
+    savedFile(db, dataDir, { waId: 'A', role: 'client' });
+    await up.run(); // the folders exist from here, so the next failure is the file upload itself
+    const b = savedFile(db, dataDir, { waId: 'B', role: 'client' });
+    const c = savedFile(db, dataDir, { waId: 'C', role: 'client' });
+    const restore = failWritesTo(db, 'drive_attempts');
+    drive.failNext = 1;
+    await up.run();
+    expect(drive.createFileCalls).toBe(2); // B was tried and failed; the pass stopped before C
+    expect(driveState(db, b)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null }); // nothing could be saved
+    await ticks(clock, up, 14.5);
+    expect(drive.createFileCalls).toBe(2);
+    restore();
+    await ticks(clock, up, 0.5); // 15 minutes after the failure
+    expect(drive.createFileCalls).toBe(4);
+    expect(getMedia(db, b)!.driveFileId).not.toBeNull();
+    expect(getMedia(db, c)!.driveFileId).not.toBeNull();
+    expect(lines.find((l) => l.msg === 'file upload result could not be saved')).toMatchObject({ level: 40, mediaId: b, clientId: 1, step: 'save_failure' });
+    expect(lines.find((l) => l.msg === 'file uploads to Drive paused')).toMatchObject({ level: 40, reason: 'ledger', until: '2026-10-19T08:15:00.000Z' });
+    expect(JSON.stringify(lines)).not.toMatch(/brief|Sharma/);
+  });
+
+  it('when Drive took a file but its id cannot be saved, pauses, then saves that id and never uploads the file again', async () => {
+    const { lines, log } = capturingLogger();
+    const { db, dataDir, drive, clock, onUploaded, up } = setup({ log });
+    const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
+    const b = savedFile(db, dataDir, { waId: 'B', role: 'client' });
+    let restore = failWritesTo(db, 'drive_file_id');
+    await up.run();
+    expect(drive.created.map((f) => f.id)).toEqual(['file-4']); // A reached Drive; the pass stopped before B
+    expect(driveState(db, a)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null }); // not counted as a failed try
+    expect(onUploaded).not.toHaveBeenCalled();
+    restore();
+    await ticks(clock, up, 14.5);
+    expect(drive.createFileCalls).toBe(1);
+    expect(getMedia(db, a)!.driveFileId).toBeNull();
+    // After the pause the id is saved first. While it still cannot be saved, the uploader pauses again and uploads nothing.
+    restore = failWritesTo(db, 'drive_file_id');
+    await ticks(clock, up, 0.5);
+    expect(drive.createFileCalls).toBe(1);
+    restore();
+    await ticks(clock, up, 15);
+    expect(drive.createFileCalls).toBe(2); // only B: A was never uploaded again
+    expect(getMedia(db, a)!.driveFileId).toBe('file-4');
+    expect(getMedia(db, b)!.driveFileId).toBe('file-5');
+    expect(onUploaded).toHaveBeenCalledTimes(1);
+    expect(lines.filter((l) => l.msg === 'file upload result could not be saved')).toMatchObject([
+      { level: 40, mediaId: a, clientId: 1, step: 'save_id' },
+      { level: 40, mediaId: a, clientId: 1, step: 'save_id' },
+    ]);
+    expect(lines.filter((l) => l.msg === 'file uploads to Drive paused').map((l) => l.reason)).toEqual(['ledger', 'ledger']);
   });
 
   it('caps the retry delay at 6 hours', () => {

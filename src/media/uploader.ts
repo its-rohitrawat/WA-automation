@@ -13,6 +13,8 @@ export const UPLOAD_MAX_ATTEMPTS = 8;
 /** Per-request time limit for one client file (up to 50 MB on a slow line). The tracker upload keeps the client's 120 s. */
 export const FILE_UPLOAD_TIMEOUT_MS = 600_000;
 const AUTH_RETRY_MS = 15 * 60_000;
+/** How long the uploader pauses when the database cannot save an upload result. */
+const LEDGER_RETRY_MS = 15 * 60_000;
 /** Delay before the next try after `attempt` failed tries: 2, 4, 8 ... minutes, at most 6 hours. Exported for tests. */
 export const retryMs = (attempt: number): number => Math.min(60_000 * 2 ** attempt, 6 * 3_600_000);
 const MIME = /^[a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*$/;
@@ -33,21 +35,38 @@ export interface UploaderOptions {
   batchSize?: number;
 }
 
+/** Why the uploader is paused. */
+type PauseReason = 'ledger';
+
 /**
  * Uploads files shared by client members to WA Agent/Clients/<Client>/Files/ in Drive. One pass at a time; never
- * deletes or replaces anything in Drive. A crash between Drive accepting a file and its id being saved can leave one
- * duplicate copy in the Files folder; nothing is lost.
+ * deletes or replaces anything in Drive.
+ *
+ * Duplicate copies are possible, and accepted. Drive can store a file while its answer never arrives: a timeout or a
+ * dropped connection after the bytes arrived, or a crash before the id is saved. The next try then uploads the file
+ * again, leaving a second copy in the Files folder. The app has only the drive.file scope, and checking whether the
+ * first copy arrived would need a listing call on every retry, which this uploader does not make. A duplicate is
+ * visible to the owner, and nothing is lost.
+ *
+ * When Drive answers but the database cannot save the id, the id is kept in memory and only the save is retried,
+ * never the upload. A restart before it is saved forgets it, so the file is uploaded once more.
+ *
+ * When the database cannot save a result, the pass stops and no pass starts for 15 minutes (in memory: a restart
+ * also ends the pause), so a file is never uploaded again on every tick.
  */
 export class DriveFileUploader {
   readonly #o: UploaderOptions;
   #current: Promise<void> | undefined;
   #stopped = false;
+  #paused: { until: number; reason: PauseReason } | undefined;
+  /** Files that reached Drive but whose id could not be saved, by media id. */
+  readonly #unsaved = new Map<number, { clientId: number; fileId: string }>();
 
   constructor(o: UploaderOptions) {
     this.#o = o;
   }
 
-  /** One pass over the files that are due. A pass already running is shared. Never rejects. */
+  /** One pass over the files that are due. A pass already running is shared. Does nothing while paused. Never rejects. */
   run(): Promise<void> {
     if (this.#stopped) return Promise.resolve();
     if (!this.#current) {
@@ -72,37 +91,81 @@ export class DriveFileUploader {
 
   async #pass(): Promise<void> {
     const { db, dataDir, clock, log } = this.#o;
-    const root = getKv(db, 'drive_root_id');
-    if (!root) return; // the publisher creates the root folder on its first upload
+    if (this.#paused) {
+      if (clock.now().getTime() < this.#paused.until) return;
+      log.info({ reason: this.#paused.reason }, 'file uploads to Drive resume');
+      this.#paused = undefined;
+    }
     let uploaded = 0;
-    for (const c of uploadCandidates(db, clock.now().toISOString(), this.#o.batchSize ?? 5)) {
-      if (this.#stopped) break;
-      try {
-        const bytes = await readFile(join(dataDir, ...c.localPath.split('/')));
-        const name = displayName({ kind: c.kind, fileName: c.fileName, mimeType: c.mimeType, ts: c.ts, mediaId: c.id });
-        markUploaded(db, c.id, await this.#upload(root, c, name, safeMime(c.mimeType), bytes));
+    try {
+      // First the ids that could not be saved last time. Those files are already in Drive and are never uploaded again.
+      for (const [id, u] of this.#unsaved) {
+        if (!this.#save(id, u.clientId, 'save_id', () => markUploaded(db, id, u.fileId))) return;
+        this.#unsaved.delete(id);
         uploaded++;
-      } catch (e) {
-        const now = clock.now().getTime();
-        if (isAuthFailure(e)) {
-          // Not the file's fault. The publisher reports the sign-in problem; the rest would fail the same way.
-          markUploadFailed(db, c.id, { failed: false, nextAt: new Date(now + AUTH_RETRY_MS).toISOString(), countAttempt: false });
-          log.warn({ mediaId: c.id, clientId: c.clientId, step: 'upload', err: e }, 'file upload to Drive needs Google sign-in');
+      }
+      const root = getKv(db, 'drive_root_id');
+      if (!root) return; // the publisher creates the root folder on its first upload
+      for (const c of uploadCandidates(db, clock.now().toISOString(), this.#o.batchSize ?? 5)) {
+        if (this.#stopped) break;
+        let fileId: string;
+        try {
+          const bytes = await readFile(join(dataDir, ...c.localPath.split('/')));
+          const name = displayName({ kind: c.kind, fileName: c.fileName, mimeType: c.mimeType, ts: c.ts, mediaId: c.id });
+          fileId = await this.#upload(root, c, name, safeMime(c.mimeType), bytes);
+        } catch (e) {
+          const now = clock.now().getTime();
+          if (isAuthFailure(e)) {
+            // Not the file's fault. The publisher reports the sign-in problem; the rest would fail the same way.
+            log.warn({ mediaId: c.id, clientId: c.clientId, step: 'upload', err: e }, 'file upload to Drive needs Google sign-in');
+            this.#save(c.id, c.clientId, 'save_failure', () =>
+              markUploadFailed(db, c.id, { failed: false, nextAt: new Date(now + AUTH_RETRY_MS).toISOString(), countAttempt: false }));
+            break;
+          }
+          const attempts = c.driveAttempts + 1;
+          const failed = (e as NodeJS.ErrnoException).code === 'ENOENT' || attempts >= UPLOAD_MAX_ATTEMPTS;
+          log.warn({ mediaId: c.id, clientId: c.clientId, step: 'upload', attempts, err: e }, 'file upload to Drive failed');
+          if (!this.#save(c.id, c.clientId, 'save_failure', () =>
+            markUploadFailed(db, c.id, { failed, nextAt: failed ? null : new Date(now + retryMs(attempts)).toISOString(), countAttempt: true }))) break;
+          continue;
+        }
+        if (!this.#save(c.id, c.clientId, 'save_id', () => markUploaded(db, c.id, fileId))) {
+          this.#unsaved.set(c.id, { clientId: c.clientId, fileId });
           break;
         }
-        const attempts = c.driveAttempts + 1;
-        const failed = (e as NodeJS.ErrnoException).code === 'ENOENT' || attempts >= UPLOAD_MAX_ATTEMPTS;
-        markUploadFailed(db, c.id, { failed, nextAt: failed ? null : new Date(now + retryMs(attempts)).toISOString(), countAttempt: true });
-        log.warn({ mediaId: c.id, clientId: c.clientId, step: 'upload', attempts, err: e }, 'file upload to Drive failed');
+        uploaded++;
+      }
+    } finally {
+      if (uploaded > 0) {
+        try {
+          this.#o.onUploaded();
+        } catch (err) {
+          log.error({ err }, 'onUploaded failed');
+        }
       }
     }
-    if (uploaded > 0) {
-      try {
-        this.#o.onUploaded();
-      } catch (err) {
-        log.error({ err }, 'onUploaded failed');
-      }
+  }
+
+  /**
+   * Saves one upload result. When the database cannot write, it logs ids and the error (the logger keeps its type and
+   * code, never its message), pauses the uploader and returns false: the pass must stop.
+   */
+  #save(mediaId: number, clientId: number, step: 'save_id' | 'save_failure', write: () => void): boolean {
+    try {
+      write();
+      return true;
+    } catch (err) {
+      this.#o.log.warn({ mediaId, clientId, step, err }, 'file upload result could not be saved');
+      this.#pause('ledger', LEDGER_RETRY_MS);
+      return false;
     }
+  }
+
+  /** The one pause for every reason: no pass starts until ms from now. In memory only, so a restart ends it too. */
+  #pause(reason: PauseReason, ms: number): void {
+    const until = this.#o.clock.now().getTime() + ms;
+    this.#paused = { until, reason };
+    this.#o.log.warn({ reason, until: new Date(until).toISOString() }, 'file uploads to Drive paused');
   }
 
   async #upload(root: string, c: UploadCandidate, name: string, mime: string, bytes: Buffer): Promise<string> {
