@@ -51,11 +51,18 @@ describe('ClaudeMediaClient', () => {
     ] }]);
   });
 
-  it('sends a scanned PDF as a document block', async () => {
+  // A scanned PDF is third-party input read in full, so it gets the same data-only system prompt and no tools.
+  it('sends a scanned PDF as a document block, as data, and offers no tools', async () => {
     const { client, create } = fakeAnthropic(async () => reply([{ type: 'text', text: 'Quotation No. 17' }]));
     expect((await make(client).readScannedPdf(Buffer.from('%PDF-1.4'))).text).toBe('Quotation No. 17');
     const params = create.mock.calls[0]![0] as Record<string, unknown>;
-    expect(params.max_tokens).toBe(PDF_MAX_TOKENS);
+    expect(params).toMatchObject({
+      model: 'claude-opus-5-5', max_tokens: PDF_MAX_TOKENS, betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default',
+      system: MEDIA_SYSTEM_PROMPT, output_config: { effort: 'low' },
+    });
+    expect(params).not.toHaveProperty('tools');
+    expect(params).not.toHaveProperty('tool_choice');
+    expect(params.output_config).not.toHaveProperty('format');
     expect(params.messages).toEqual([{ role: 'user', content: [
       { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: Buffer.from('%PDF-1.4').toString('base64') } },
       { type: 'text', text: 'Transcribe this scanned document for the tracker.' },

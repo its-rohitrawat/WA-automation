@@ -28,8 +28,8 @@ export function neverSent(e: Error): boolean {
  * Books a paid call that ended in an error. It books what the server billed (refusal, invalid output); an estimate
  * when the outcome is unknown (once per SDK attempt for a lost connection); nothing when it was never billed.
  * `label`: ids only, never content, for example "batch 12" or "media 7".
- * `attempts`: how many SDK attempts the client makes (its maxRetries + 1). The default fits a client built with
- * SDK_MAX_RETRIES; media calls pass MEDIA_SDK_MAX_RETRIES + 1.
+ * `attempts`: how many SDK attempts the client makes (its maxRetries + 1). The default fits the reconciler's client,
+ * built with SDK_MAX_RETRIES.
  */
 export function settleFailedCall(
   spend: SpendGuard,
@@ -56,14 +56,16 @@ export function settleFailedCall(
 /**
  * Reserves the estimate, makes one paid call, and settles or releases the reservation whatever happens.
  * Throws SpendCapReachedError, without calling, when the estimate does not fit under the daily cap.
- * `attempts`: SDK attempts the call's client makes, as for settleFailedCall.
+ * `attempts`: SDK attempts the call's client makes, as for settleFailedCall. It has no default, so every caller states
+ * its client's count and a one-attempt media call is never booked as three: media calls pass
+ * `MEDIA_SDK_MAX_RETRIES + 1` (amendment 9h).
  */
 export async function withReservation<T extends { costUsd: number; fallbackUsed: boolean }>(
   spend: SpendGuard,
   estimate: number,
   label: string,
   call: () => Promise<T>,
-  attempts: number = SDK_MAX_RETRIES + 1,
+  attempts: number,
 ): Promise<T> {
   const rid = spend.reserve(estimate);
   if (rid === null) throw new SpendCapReachedError();

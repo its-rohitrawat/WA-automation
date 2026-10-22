@@ -105,6 +105,11 @@ Every task's implementer applies the items listed under its task, in addition to
 
 - **8a. Image output (review M20).** `IMAGE_MAX_TOKENS = 4_000`. Thinking is always on, and 2,048 could end with no text, which means 3 paid retries.
 - **8b. PDF page cost (review M3).** `PDF_TOKENS_PER_PAGE = 5_000`, so the estimate stays a ceiling on high-resolution models.
+- **8c. One SDK attempt per media call (Task 8 review).** The media client is built with `maxRetries: MEDIA_SDK_MAX_RETRIES` (0) and a 600 s timeout, not the plan's `SDK_MAX_RETRIES` (2) and 180 s.
+  - Why: a lost connection or timeout is booked at the estimate once per SDK attempt, and a scanned PDF reserves about $4.2 (9g). Three attempts would book about $12.5 from one file, most of the default $15 daily cap.
+  - One attempt of up to 600 s stays inside the 45-minute reservation lifetime. A non-streaming request with 8,000 output tokens is under the SDK's 10-minute limit.
+  - `withReservation` takes the attempt count as a required 5th argument, `attempts`, with no default, so a caller that leaves it out does not type-check. `settleFailedCall` keeps its default, `SDK_MAX_RETRIES + 1`, for the reconciler.
+  - Trade-off: a transient 429, 529 or 5xx error is released (not billed) but no longer retried inside the call. It uses one of the media queue's 3 attempts (Task 11: retried after 1 minute, then after 5 minutes). A Claude outage of more than about 6 minutes therefore leaves the images and scans shared during it `failed`.
 
 ## Task 9: image preparation and extractor
 
@@ -139,6 +144,8 @@ Every task's implementer applies the items listed under its task, in addition to
     - the same file with `spend.capUsd` below the ceiling is `too_costly`, and Claude is not called;
     - a text PDF with /Count 0 (`tinyPdf([['Page 1'], ['Page 2']], { count: 0 })`) makes no paid call and reaches the processor as `ParseError('pdf_no_pages')`.
   - Runbook (16c): a scanned PDF holds about $4 of the daily cap while Claude reads it.
+- **9h. Media attempt count (Task 8 review, 8c).** describe and readPdf pass `MEDIA_SDK_MAX_RETRIES + 1` as withReservation's 5th argument, `attempts`: `withReservation(d.spend, estimate, label, call, MEDIA_SDK_MAX_RETRIES + 1)`. The plan's calls (plan lines 2883 and 2898) leave it out, and no longer type-check.
+  - Tests: a describeImage that throws `Anthropic.APIConnectionTimeoutError` books its estimate once, as `media <id> (connection lost, estimated)`, not 3 times. A readScannedPdf that throws it books `scannedPdfCeilingUsd(prices)` once.
 
 ## Task 10: media processor
 
@@ -207,4 +214,5 @@ Every task's implementer applies the items listed under its task, in addition to
   - forwarded media not being described;
   - the 600 s upload timeout;
   - the cost per image (1–4 cents);
-  - that images loaded by `cli link` history are described too, at a cost.
+  - that images loaded by `cli link` history are described too, at a cost;
+  - that each media call makes one Claude attempt (8c), and the media queue tries a file 3 times over about 6 minutes, so files shared during a longer Claude outage stay unread (`failed`).

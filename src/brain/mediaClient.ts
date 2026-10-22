@@ -28,7 +28,8 @@ export const PDF_MAX_TOKENS = 8_000;
 /**
  * Media calls make one SDK attempt. A lost connection is booked at the estimate once per attempt, and a scanned PDF
  * reserves a ceiling of about $4 (amendment 9g), so SDK retries could book several times that from one file. The
- * media queue retries deferred files later instead. Callers pass `MEDIA_SDK_MAX_RETRIES + 1` to withReservation.
+ * media queue retries deferred files later instead (amendment 8c). Callers pass `MEDIA_SDK_MAX_RETRIES + 1` as
+ * withReservation's `attempts` (amendment 9h).
  */
 export const MEDIA_SDK_MAX_RETRIES = 0;
 /** One attempt of up to 600 s stays well inside the spend reservation's 45-minute lifetime. */
