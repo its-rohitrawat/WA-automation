@@ -187,6 +187,7 @@ Every task's implementer applies the items listed under its task, in addition to
 - **12e. Voice and audio never block (review M2).** Media kinds `voice` and `audio` never block reconciliation in 2a, because nothing is read from them.
 - **12f. Forwarded rendering (D2).** Forwarded media renders as listed under D2.
 - **12g. Budget waits are bounded like any other (controller, 22 Oct 2026).** Replaces 12c. A row deferred for `spend_cap` blocks only the normal 30-minute wait from `max(createdAt, startedAt)`, then renders "still being read" and the batch goes ahead. A scan whose spend hold does not fit must not freeze the client's text tracking until the next day. The message is re-queued once the file is read (12h, Job C item 0).
+- **12h. A file read late re-queues its message (controller, 22 Oct 2026, Job C item 0).** Migration v5 adds `media.requeued_for_text`. When a file finishes with text or a description after its message was already reconciled, `finishMedia` re-queues the message in the same transaction (`processed_at = NULL`, `version + 1`, flag set). The prompt marks it "(re-check: file now read)", and the model acts only on the file's content. `markProcessedIfUnchanged` clears the flag. The validator and status-lock treat it like a reaction re-check. This closes the plan's "Deferred to Phase 2b" re-queue item for 2a. The golden run (16a) must cover the re-check line.
 
 ## Task 13: upload client files to Drive
 
