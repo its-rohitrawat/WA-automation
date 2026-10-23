@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { describeReport, ReportScheduler, retryWaitMs, UNKNOWN_WARNING, type ReportPayload } from '../../src/report/scheduler.ts';
 import type { ReportSettings, SendResult } from '../../src/report/types.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
-import { claimReport, finishReport, REPORT_REQUEST_KEY, reportFor, type ReportRow } from '../../src/store/reports.ts';
+import { claimReport, finishReport, REPORT_REQUEST_KEY, reportFor, retryReport, type ReportRow } from '../../src/store/reports.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { seededDb } from '../helpers/db.ts';
@@ -34,6 +34,9 @@ function gate() {
   const promise = new Promise<void>((r) => (release = r));
   return { promise, release };
 }
+
+/** Lets pending promise callbacks run, so a step that would happen at once has happened. */
+const settle = () => new Promise<void>((r) => setImmediate(r));
 
 describe('ReportScheduler', () => {
   it('sends once at 06:00, with the tracker attached', async () => {
@@ -128,16 +131,23 @@ describe('ReportScheduler', () => {
   });
 
   it('runs one send at a time', async () => {
-    const { clock, sender, s } = setup();
+    const { db, clock, sender, s } = setup();
     const g = gate();
     sender.gate = g.promise;
     clock.set(IST('06:00'));
     const first = s.tick(clock.now());
     await vi.waitFor(() => expect(sender.calls).toHaveLength(1));
+    setKv(db, REPORT_REQUEST_KEY, DAY);
     await s.tick(clock.now());
     expect(sender.calls).toHaveLength(1);
+    expect(getKv(db, REPORT_REQUEST_KEY)).toBe(DAY); // the second tick returned before reading the request
+    const stopping = s.stop(5_000);
+    await settle();
+    expect(sender.stopped).toBe(0); // the first send is still tracked, so stop waits for it
     g.release();
+    await stopping;
     await first;
+    expect(sender.stopped).toBe(1);
   });
 
   it('records a sender crash as unknown and a build failure as a retry', async () => {
@@ -182,14 +192,69 @@ describe('ReportScheduler', () => {
     const first = s.tick(clock.now());
     await vi.waitFor(() => expect(sender.calls).toHaveLength(1));
     const stopping = s.stop(5_000);
+    await settle();
+    expect(sender.stopped).toBe(0); // the sender is not stopped while the send is going out
     g.release();
     await stopping;
-    await first;
     expect(sender.stopped).toBe(1);
+    await first;
     expect(reportFor(db, DAY)!.status).toBe('sent');
     setKv(db, REPORT_REQUEST_KEY, DAY);
     await at('06:30');
     expect(sender.calls).toHaveLength(1);
+  });
+
+  it('starts no new send once stopped, also on a send-now request', async () => {
+    const { db, sender, s, at } = setup();
+    await s.stop(1_000);
+    expect(sender.stopped).toBe(1);
+    setKv(db, REPORT_REQUEST_KEY, DAY);
+    await at('06:00');
+    await at('07:00');
+    expect(sender.calls).toHaveLength(0);
+    expect(reportFor(db, DAY)).toBeUndefined();
+  });
+
+  it('stop gives up on a hung send after waitMs and still stops the sender', async () => {
+    const { clock, sender, s } = setup();
+    sender.gate = new Promise<void>(() => {}); // never settles
+    clock.set(IST('06:00'));
+    void s.tick(clock.now());
+    await vi.waitFor(() => expect(sender.calls).toHaveLength(1));
+    const t0 = Date.now();
+    await s.stop(100);
+    expect(Date.now() - t0).toBeLessThan(2_000);
+    expect(sender.stopped).toBe(1);
+  });
+
+  it("closes an earlier day's retry row as skipped and keeps its reason", async () => {
+    const { db, at } = setup();
+    const before = '2026-10-22T06:00:00.000Z';
+    claimReport(db, '2026-10-22', before);
+    retryReport(db, '2026-10-22', 'connect_timeout', '2026-10-22T06:02:00.000Z', before);
+    await at('05:00');
+    expect(reportFor(db, '2026-10-22')).toMatchObject({ status: 'skipped', detail: 'connect_timeout', nextAttemptAt: null });
+  });
+
+  it('never throws from tick, and the next tick still runs', async () => {
+    const { db, sender, s, clock } = setup();
+    const prepare = vi.spyOn(db, 'prepare').mockImplementationOnce(() => {
+      throw new Error('database is locked');
+    });
+    clock.set(IST('06:00'));
+    await expect(s.tick(clock.now())).resolves.toBeUndefined();
+    expect(sender.calls).toHaveLength(0);
+    prepare.mockRestore();
+    await s.tick(clock.now());
+    expect(sender.calls).toHaveLength(1);
+    expect(reportFor(db, DAY)!.status).toBe('sent');
+  });
+
+  it('never throws from tick when the database is closed', async () => {
+    const { db, s, clock } = setup();
+    db.close();
+    clock.set(IST('06:00'));
+    await expect(s.tick(clock.now())).resolves.toBeUndefined();
   });
 });
 
@@ -215,6 +280,8 @@ describe('describeReport', () => {
     expect(describeReport(undefined, now, ON, 'not_linked').warning).toContain('npm run cli -- link-sender');
     expect(describeReport(undefined, now, ON, 'logged_out').warning).toContain('link-sender --reset');
     expect(describeReport(undefined, now, ON, 'forbidden').warning).toContain('(403)');
+    expect(describeReport(undefined, now, ON, 'replaced').warning).toContain('another session');
+    expect(describeReport(row({ status: 'unknown' }), now, ON, 'not_linked').warning).toBe(UNKNOWN_WARNING);
     expect(describeReport(row({}), now, ON, 'idle').warning).toBeNull();
   });
 
