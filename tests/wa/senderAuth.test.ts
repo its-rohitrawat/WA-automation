@@ -1,4 +1,6 @@
-import { randomBytes } from 'node:crypto';
+import { hkdfSync, randomBytes } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { senderSessionDbPath, sessionDbPath } from '../../src/config/paths.ts';
@@ -20,9 +22,17 @@ describe('sender session store', () => {
     const sub = deriveSubkey(MASTER, SENDER_SESSION_INFO);
     expect(sub).toHaveLength(32);
     expect(sub.equals(MASTER)).toBe(false);
-    expect(sub.equals(deriveSubkey(MASTER, 'media-ref'))).toBe(false);
+    expect(sub.equals(deriveSubkey(MASTER, 'whatsapp-media-ref'))).toBe(false);
     expect(deriveSubkey(MASTER, SENDER_SESSION_INFO).equals(sub)).toBe(true);
-    expect(() => deriveSubkey(Buffer.alloc(16), SENDER_SESSION_INFO)).toThrow('Master key must be 32 bytes');
+    for (const size of [0, 16, 31, 33, 64]) {
+      expect(() => deriveSubkey(Buffer.alloc(size), SENDER_SESSION_INFO)).toThrow('Master key must be 32 bytes');
+    }
+  });
+
+  it('derives the subkey as HKDF-SHA256 with an empty salt (pinned, so existing sessions keep opening)', () => {
+    const fixedMaster = Buffer.alloc(32, 7);
+    const expected = Buffer.from(hkdfSync('sha256', fixedMaster, Buffer.alloc(0), 'whatsapp-sender-session', 32));
+    expect(deriveSubkey(fixedMaster, SENDER_SESSION_INFO).equals(expected)).toBe(true);
   });
 
   it('persists the spare number session and restores it with the same master key', async () => {
@@ -42,7 +52,34 @@ describe('sender session store', () => {
 
     const founderDb = openSessionDb(':memory:');
     await useEncryptedAuthState(founderDb, MASTER).saveCreds();
-    expect(() => useSenderAuthState(founderDb, MASTER)).toThrow(SenderSessionDecryptError);
+    let thrown: unknown;
+    try {
+      useSenderAuthState(founderDb, MASTER);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(SenderSessionDecryptError);
+    expect((thrown as Error).name).toBe('SenderSessionDecryptError');
+    expect((thrown as Error).cause).toBeInstanceOf(SessionDecryptError);
+  });
+
+  it('does not relabel SQLite errors as decrypt errors', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wa-sender-sess-'));
+    try {
+      const db = openSessionDb(join(dir, 'sender-session.db'));
+      db.close();
+      let thrown: unknown;
+      try {
+        useSenderAuthState(db, MASTER);
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeDefined();
+      expect(thrown).not.toBeInstanceOf(SenderSessionDecryptError);
+      expect(thrown).not.toBeInstanceOf(SessionDecryptError);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('names link-sender --reset when another master key wrote the file', async () => {
