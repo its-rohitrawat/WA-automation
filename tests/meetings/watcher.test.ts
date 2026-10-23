@@ -117,7 +117,7 @@ describe('cleanEmail', () => {
   });
   it('drops anything that is not one plain address', () => {
     for (const e of [
-      'ravi@sharma.in\nx@evil.com', 'ra​vi@sharma.in', 'ravi @sharma.in', ' ravi@sharma.in', 'ravi@sharma.in\u0000', '@sharma.in',
+      'ravi@sharma.in\nx@evil.com', 'ra\u200bvi@sharma.in', 'ravi @sharma.in', ' ravi@sharma.in', 'ravi@sharma.in\u0000', '@sharma.in',
       'a@b@sharma.in', 'ravi', 'ravi@', 'ravi@sharma', 'ravi@.sharma.in', 'ravi@sharma..in', `${'a'.repeat(250)}@x.in`,
     ]) {
       expect(cleanEmail(e)).toBeNull();
@@ -165,7 +165,7 @@ describe('MeetingWatcher.discover', () => {
         title: 'Weekly',
         attendees: [
           { email: 'om@mehtafoods.com\nx@sharma.in', name: 'A', self: false },
-          { email: 'ra​vi@sharma.in', name: 'B', self: false },
+          { email: 'ra\u200bvi@sharma.in', name: 'B', self: false },
           { email: 'asha@studio.in', name: 'C', self: false },
           { email: 'x@elsewhere.com', name: 'D', self: false },
         ],
@@ -250,7 +250,7 @@ describe('MeetingWatcher.discover', () => {
     addConference(api, {
       id: 'c1',
       start: ago(3),
-      invite: { title: longTitle, attendees: [{ email: 'Ravi@Sharma.in', name: `Ra​vi\n${'y'.repeat(150)}`, self: false }, { email: 'board-room', name: 'Board', self: false }] },
+      invite: { title: longTitle, attendees: [{ email: 'Ravi@Sharma.in', name: `Ra\u200bvi\n${'y'.repeat(150)}`, self: false }, { email: 'board-room', name: 'Board', self: false }] },
       names: ['  ', 'Ravi\tS', 'z'.repeat(150)],
     });
     await watcher().discover(signal);

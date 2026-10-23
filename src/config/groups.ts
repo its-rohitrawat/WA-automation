@@ -1,7 +1,7 @@
 import { readFileSync, unwatchFile, watchFile, type Stats } from 'node:fs';
 import { z } from 'zod';
 import { DomainSchema } from './domains.ts';
-import { isMatchablePhrase, MIN_PHRASE_CHARS } from '../meetings/match.ts';
+import { isMatchablePhrase, MIN_PHRASE_CHARS } from '../util/text.ts';
 
 export const GROUPS_FILE_MISSING_MESSAGE = 'Allow-list file missing. Create config/allowed-groups.json containing { "clients": [] }, run: npm run cli -- list-groups, then add your client groups (see docs/SETUP.md).';
 
@@ -31,6 +31,11 @@ export interface ClientConfig {
   meetingKeywords: string[];
 }
 
+/**
+ * Reads and checks allowed-groups.json. A meeting keyword shorter than MIN_PHRASE_CHARS once normalised is refused. A
+ * client name that short (for example "AB") is allowed, but it never matches a meeting title: such a client is matched
+ * to meetings only by its keywords or email domains.
+ */
 export function parseGroupsFile(json: string): ClientConfig[] {
   let raw: unknown;
   try {

@@ -98,7 +98,7 @@ describe('meeting matching rules', () => {
   });
 
   it('refuses a meetingKeyword with fewer than 3 characters once punctuation is removed, naming the client code', () => {
-    for (const k of ['c++', 'a-b', '...', 'ab​​']) {
+    for (const k of ['c++', 'a-b', '...', 'ab\u200b\u200b']) {
       expect(() => parseGroupsFile(valid({ meetingKeywords: ['Sharma', k] }))).toThrowError(/client SHA has a meeting keyword with fewer than 3 letters/);
     }
     expect(parseGroupsFile(valid({ meetingKeywords: ['R&D team'] }))[0]!.meetingKeywords).toEqual(['R&D team']);
