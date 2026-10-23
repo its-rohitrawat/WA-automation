@@ -80,6 +80,30 @@ describe('buildMorningText', () => {
     expect(text(db)).toBe(['Morning report · 23 Oct', '', 'No active clients.', '', 'Total: 0 open, 0 overdue · Built 23 Oct 06:00 IST'].join('\n'));
   });
 
+  it('breaks a full tie by task id, whichever side each task is on', () => {
+    const db = seededDb();
+    createTask(db, task({ side: 'client', title: 'Client first' }), NOW.toISOString()); // SHA-001
+    createTask(db, task({ title: 'Us second' }), NOW.toISOString()); // SHA-002
+    createTask(db, task({ title: 'Us third' }), NOW.toISOString()); // SHA-003
+    expect(text(db)).toContain(
+      ['*Sharma Interiors*: 3 open, 0 overdue', '• [client] SHA-001 Client first', '• [us] SHA-002 Us second', '• [us] SHA-003 Us third'].join('\n'),
+    );
+  });
+
+  it('leaves the tracker view it is given unchanged', () => {
+    const db = seededDb();
+    createTask(db, task({ title: 'Us high', priority: 'high' }), NOW.toISOString());
+    createTask(db, task({ title: 'Us overdue', deadline: '2026-10-20' }), NOW.toISOString());
+    createTask(db, task({ side: 'client', title: 'Client high', priority: 'high' }), NOW.toISOString());
+    createTask(db, task({ side: 'client', title: 'Client overdue', priority: 'low', deadline: '2026-10-21' }), NOW.toISOString());
+    const view = loadTrackerView(db, NOW, OK);
+    const codes = () => view.clients.map((c) => [c.usOpen.map((t) => t.code), c.clientOpen.map((t) => t.code)]);
+    const before = codes();
+    expect(before.flat(2)).toHaveLength(4);
+    buildMorningText(view, TODAY);
+    expect(codes()).toEqual(before);
+  });
+
   it('cuts long titles cleanly to one line', () => {
     const db = seededDb();
     createTask(db, task({ title: 'Revise the homepage banner so that it matches the new brand colours and the approved moodboard' }), NOW.toISOString());
@@ -97,6 +121,15 @@ describe('shortTitle', () => {
     expect(Array.from(cut).length).toBeLessThanOrEqual(MAX_TITLE_CHARS);
     expect(cut.endsWith('word…')).toBe(true);
     expect(shortTitle('x'.repeat(100))).toBe(`${'x'.repeat(MAX_TITLE_CHARS - 1)}…`);
+  });
+
+  it('keeps a title of exactly the limit and cuts one a character longer', () => {
+    expect(shortTitle('x'.repeat(MAX_TITLE_CHARS))).toBe('x'.repeat(MAX_TITLE_CHARS));
+    expect(shortTitle('x'.repeat(MAX_TITLE_CHARS + 1))).toBe(`${'x'.repeat(MAX_TITLE_CHARS - 1)}…`);
+  });
+
+  it('cuts mid-word rather than at a space in the first half', () => {
+    expect(shortTitle(`Hi ${'x'.repeat(100)}`)).toBe(`Hi ${'x'.repeat(MAX_TITLE_CHARS - 4)}…`);
   });
 
   it('never splits an emoji', () => {
