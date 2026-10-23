@@ -162,7 +162,7 @@ export interface SenderGatewayOptions {
   /** REPORT_RECIPIENT: the founder's number, digits only. The only chat this sender ever writes to. */
   recipient: string;
   factory: SenderSocketFactory;
-  /** The spare number's session. Undefined when the stored session could not be read. */
+  /** The spare number's session. Undefined when the stored session could not be read (state 'unreadable'). */
   auth: EncryptedAuth | undefined;
   clock?: Clock;
   /** How long to wait for the connection to open. Default 60 s. */
@@ -190,7 +190,8 @@ export class SenderGateway implements ReportSender {
     this.#jid = recipientJid(opts.recipient);
     this.#opts = opts;
     this.#clock = opts.clock ?? systemClock;
-    this.#status = { state: opts.auth?.hasSession ? 'idle' : 'not_linked', since: this.#clock.now().toISOString(), lastErrorCode: null };
+    const state: SenderState = !opts.auth ? 'unreadable' : opts.auth.hasSession ? 'idle' : 'not_linked';
+    this.#status = { state, since: this.#clock.now().toISOString(), lastErrorCode: null };
   }
 
   status(): SenderStatus {
@@ -201,7 +202,9 @@ export class SenderGateway implements ReportSender {
     const auth = this.#opts.auth;
     if (this.#stopped) return { status: 'failed', code: 'stopped' };
     if (this.#busy) return { status: 'failed', code: 'busy' };
-    if (!auth?.hasSession) {
+    // The stored session could not be read: only link-sender --reset fixes it, so the state stays 'unreadable'.
+    if (!auth) return { status: 'failed', code: 'session_unreadable' };
+    if (!auth.hasSession) {
       this.#setState('not_linked', null);
       return { status: 'failed', code: 'not_linked' };
     }

@@ -23,6 +23,7 @@ export function retryWaitMs(attempts: number): number {
 export const REASON_TEXT: Record<string, string> = {
   not_running: 'the service was not running in time',
   not_linked: 'the spare number is not linked',
+  session_unreadable: "the spare number's saved session cannot be read",
   connect_timeout: 'could not connect to WhatsApp',
   closed: 'the WhatsApp connection closed before sending',
   restart_required: 'WhatsApp asked for a reconnect',
@@ -44,6 +45,7 @@ export const UNKNOWN_WARNING = '⚠️ Morning report: unknown, check WhatsApp. 
 
 const SENDER_WARNINGS: Partial<Record<SenderState, string>> = {
   not_linked: '⚠️ Morning report: the spare number is not linked. Stop the service and run: npm run cli -- link-sender',
+  unreadable: "⚠️ Morning report: the spare number's saved session cannot be read. Stop the service and run: npm run cli -- link-sender --reset",
   logged_out: '⚠️ Morning report: the spare number was logged out. Stop the service and run: npm run cli -- link-sender --reset',
   forbidden: '⚠️ Morning report: WhatsApp refused the spare number (403). Check the spare phone.',
   replaced: '⚠️ Morning report: another session took over the spare number. Restart the service.',

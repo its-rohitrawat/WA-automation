@@ -1,10 +1,10 @@
 import { existsSync } from 'node:fs';
-import { createApp } from './app.ts';
+import { createApp, type AppReportDeps } from './app.ts';
 import { ClaudeClient } from './brain/claudeClient.ts';
 import { ClaudeMediaClient } from './brain/mediaClient.ts';
-import { loadEnv, requireKey } from './config/env.ts';
+import { loadEnv, maskNumber, reportRecipient, reportSettings, requireKey } from './config/env.ts';
 import { GROUPS_FILE_MISSING_MESSAGE, loadGroupsFile, watchGroupsFile } from './config/groups.ts';
-import { masterKeyPath, sessionDbPath, trackerDbPath } from './config/paths.ts';
+import { masterKeyPath, senderSessionDbPath, sessionDbPath, trackerDbPath } from './config/paths.ts';
 import { DpapiKeyProvider, MasterKeyError } from './crypto/keyProvider.ts';
 import { baileysFetcher } from './media/fetch.ts';
 import { MediaRefSealer } from './media/ref.ts';
@@ -17,8 +17,9 @@ import { systemClock } from './util/clock.ts';
 import { acquireLock, AlreadyRunningError } from './util/lock.ts';
 import { createLogger, silentLogger } from './util/logger.ts';
 import { AllowList } from './wa/allowlist.ts';
-import { openSessionDb, SessionDecryptError, useEncryptedAuthState } from './wa/authState.ts';
+import { openSenderSession, openSessionDb, SessionDecryptError, useEncryptedAuthState } from './wa/authState.ts';
 import { baileysSocketFactory, WhatsAppGateway } from './wa/gateway.ts';
+import { baileysSenderSocketFactory, SenderGateway } from './wa/senderGateway.ts';
 
 /** Expected startup refusal. The message is safe to print. */
 class StartupExit extends Error {}
@@ -52,6 +53,7 @@ async function main(): Promise<void> {
   let lock: { release(): Promise<void> } | undefined;
   let db: Db | undefined;
   let sessionDb: Db | undefined;
+  let senderDb: Db | undefined;
 
   /** Stops startup with a one-line message; the catch below cleans up and exits with code 2. */
   function exitEarly(message: string): never {
@@ -77,6 +79,23 @@ async function main(): Promise<void> {
     const google = createOAuthClient(requireKey(env, 'GOOGLE_OAUTH_CLIENT_ID'), requireKey(env, 'GOOGLE_OAUTH_CLIENT_SECRET'));
     google.setCredentials({ refresh_token: refreshToken });
 
+    // Phase 2c: the morning report from the spare number. A missing, damaged or undecryptable spare-number session never
+    // stops the service: the founder-number reader runs as usual, each day's report fails until the deadline and is then
+    // skipped, and Health says to run link-sender (or link-sender --reset).
+    let report: AppReportDeps | undefined;
+    if (env.REPORT_ENABLED) {
+      const recipient = reportRecipient(env);
+      const opened = openSenderSession(senderSessionDbPath(env.DATA_DIR), key);
+      if (opened.ok) senderDb = opened.db;
+      else log.error({ reason: 'session_unreadable', code: opened.code }, 'morning report: the spare number session cannot be read');
+      const senderAuth = opened.ok ? opened.auth : undefined;
+      report = {
+        settings: reportSettings(env),
+        sender: new SenderGateway({ recipient, factory: baileysSenderSocketFactory(silentLogger()), auth: senderAuth }),
+      };
+      log.info({ recipient: maskNumber(recipient), linked: senderAuth?.hasSession ?? false }, 'morning report enabled');
+    }
+
     const prices = pricesFromEnv(env);
     const apiKey = requireKey(env, 'ANTHROPIC_API_KEY');
     const gateway = new WhatsAppGateway({ allow, factory: baileysSocketFactory(silentLogger()), auth: auth.state, saveCreds: auth.saveCreds });
@@ -100,6 +119,7 @@ async function main(): Promise<void> {
       startedAt,
       // Phase 2a: download, keep and read shared images and documents. Voice notes are kept, not transcribed yet.
       media: { sealer: new MediaRefSealer(key), fetcher: baileysFetcher(), ai: new ClaudeMediaClient({ apiKey, model: env.AI_MODEL, prices }) },
+      report,
     });
 
     // watchGroupsFile catches a throwing onChange (including reloadClients conflicts) and calls onError.
@@ -118,6 +138,7 @@ async function main(): Promise<void> {
 
     const trackerDb = db;
     const sessionStore = sessionDb;
+    const senderStore = senderDb;
     const startedLock = lock;
     let stopping = false;
     let warnedStopping = false;
@@ -136,10 +157,11 @@ async function main(): Promise<void> {
         .stop()
         .catch((err) => log.error({ err }, 'error while stopping'))
         .finally(() => {
-          // Databases are closed only after app.stop() has settled.
+          // Databases are closed only after app.stop() has settled, so after the morning report's stop() has returned.
           try {
             trackerDb.close();
             sessionStore.close();
+            senderStore?.close();
           } catch {
             // best effort
           }
@@ -153,6 +175,7 @@ async function main(): Promise<void> {
     try {
       db?.close();
       sessionDb?.close();
+      senderDb?.close();
     } catch {
       // best effort
     }

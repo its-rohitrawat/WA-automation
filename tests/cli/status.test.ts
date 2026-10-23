@@ -89,3 +89,11 @@ describe('formatStatus', () => {
     expect(formatStatus({ ...base, snapshot })).not.toContain('Files:');
   });
 });
+
+describe('formatStatus and the morning report', () => {
+  it('prints the report line when the service reports one', () => {
+    expect(formatStatus({ ...base, snapshot })).not.toContain('Report:');
+    const out = formatStatus({ ...base, snapshot: { ...snapshot, report: { text: 'Morning report: sent at 06:00 IST', warning: null } } });
+    expect(out).toContain('Report:      Morning report: sent at 06:00 IST');
+  });
+});

@@ -158,3 +158,28 @@ export function useSenderAuthState(db: Db, masterKey: Buffer): EncryptedAuth {
     throw cause;
   }
 }
+
+/** code is a reason code safe to log: 'decrypt_failed', or the SQLite error code (such as SQLITE_NOTADB). */
+export type SenderSession = { ok: true; db: Db; auth: EncryptedAuth } | { ok: false; code: string };
+
+/**
+ * Opens the spare number's session at service start. A file that is damaged, not a database, or written with another
+ * master key is reported, not thrown, and left as it is: a bad spare-number session never stops the service (only
+ * link-sender --reset replaces it). Any other error is thrown.
+ */
+export function openSenderSession(file: string, masterKey: Buffer): SenderSession {
+  let db: Db | undefined;
+  try {
+    db = openSessionDb(file);
+    return { ok: true, db, auth: useSenderAuthState(db, masterKey) };
+  } catch (err) {
+    try {
+      db?.close();
+    } catch {
+      // best effort
+    }
+    if (err instanceof SenderSessionDecryptError) return { ok: false, code: 'decrypt_failed' };
+    if (err instanceof Database.SqliteError) return { ok: false, code: err.code };
+    throw err;
+  }
+}

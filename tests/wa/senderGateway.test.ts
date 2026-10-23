@@ -127,12 +127,18 @@ describe('SenderGateway', () => {
   });
 
   it('fails definitely, without connecting, when the spare number is not linked', async () => {
-    for (const o of [{ noAuth: true }, { auth: senderAuth(false) }]) {
-      const { gw, sockets } = setup(o);
-      expect(gw.status().state).toBe('not_linked');
-      expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'not_linked' });
-      expect(sockets).toHaveLength(0);
-    }
+    const { gw, sockets } = setup({ auth: senderAuth(false) });
+    expect(gw.status().state).toBe('not_linked');
+    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'not_linked' });
+    expect(sockets).toHaveLength(0);
+  });
+
+  it('fails definitely, without connecting, when the stored session could not be read (no auth)', async () => {
+    const { gw, sockets } = setup({ noAuth: true });
+    expect(gw.status().state).toBe('unreadable');
+    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'session_unreadable' });
+    expect(gw.status().state).toBe('unreadable');
+    expect(sockets).toHaveLength(0);
   });
 
   it('fails definitely when WhatsApp shows a QR code, refuses the session or never connects', async () => {

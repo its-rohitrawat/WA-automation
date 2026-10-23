@@ -14,6 +14,8 @@ import { DriveFileUploader } from './media/uploader.ts';
 import { DrivePublisher, type DriveApi } from './output/drive.ts';
 import { loadTrackerView } from './output/view.ts';
 import { buildWorkbook } from './output/workbook.ts';
+import { ReportScheduler } from './report/scheduler.ts';
+import type { ReportSender, ReportSettings } from './report/types.ts';
 import type { Prices } from './spend/pricing.ts';
 import { SpendGuard } from './spend/spendGuard.ts';
 import { getClient, listClients, syncClients } from './store/clients.ts';
@@ -35,6 +37,12 @@ export interface AppMediaDeps {
   extract?: Extractor;
   /** Files downloaded and read at once. Default 2. */
   concurrency?: number;
+}
+
+/** The Phase 2c morning report. Only the spare-number sender can send; the founder-number gateway still cannot. */
+export interface AppReportDeps {
+  sender: ReportSender;
+  settings: ReportSettings;
 }
 
 export interface AppDeps {
@@ -65,6 +73,8 @@ export interface AppDeps {
   startedAt?: Date;
   /** The Phase 2a media pipeline. Without it, shared files are recorded as not downloaded. */
   media?: AppMediaDeps;
+  /** The Phase 2c morning report. Without it, no report is sent and Health has no report line. */
+  report?: AppReportDeps;
 }
 
 export interface App {
@@ -82,13 +92,23 @@ export interface App {
   debouncer: GroupDebouncer;
   /** Undefined without media dependencies. */
   mediaQueue: MediaQueue | undefined;
+  /** Undefined without report dependencies. */
+  report: ReportScheduler | undefined;
 }
 
-/** Wires gateway -> ingestor -> media queue / debouncer -> reconciler -> publisher. Never sends anything to WhatsApp. */
+/**
+ * Wires gateway -> ingestor -> media queue / debouncer -> reconciler -> publisher. The founder-number gateway never sends
+ * anything. The only sender is the optional morning report's, on the spare number, to REPORT_RECIPIENT only.
+ */
 export function createApp(d: AppDeps): App {
   const startedAt = d.startedAt ?? d.clock.now();
   const spend = new SpendGuard({ db: d.db, clock: d.clock, capUsd: d.spendCapUsd });
   const health = new Health({ db: d.db, clock: d.clock, spend, dataDir: d.dataDir, freeBytes: d.freeBytes });
+  const reportScheduler = d.report
+    ? new ReportScheduler({
+        db: d.db, clock: d.clock, log: d.log, sender: d.report.sender, settings: d.report.settings, healthLine: () => health.workbookLine(),
+      })
+    : undefined;
   /** The health line in the workbook being built, and in the last one that reached Drive (the tick compares it). */
   let buildingLine: string | undefined;
   let publishedLine: string | undefined;
@@ -234,6 +254,11 @@ export function createApp(d: AppDeps): App {
       void uploader?.run(); // retries that are due
       health.setIngestFailures(d.gateway.failedCount());
       refreshMedia();
+      if (reportScheduler) {
+        // tick() never throws. A send runs on in the background; the claim is already written when it returns.
+        void reportScheduler.tick(d.clock.now());
+        health.setReport(reportScheduler.health(d.clock.now()));
+      }
       // A line that changes with no other change (a file waiting too long, an upload that gave up, a message that could
       // not be saved) would otherwise reach the workbook only with an unrelated publish, possibly hours later.
       if (health.workbookLine().text !== publishedLine) publisher.schedule();
@@ -248,8 +273,16 @@ export function createApp(d: AppDeps): App {
     publisher,
     debouncer,
     mediaQueue,
+    report: reportScheduler,
     start() {
       if (poll) return; // already started: a second interval would outlive stop()
+      if (reportScheduler) {
+        try {
+          reportScheduler.recover(d.clock.now()); // a send cut off by a crash becomes unknown, never sent again by itself
+        } catch (err) {
+          d.log.error({ err }, 'morning report recovery failed');
+        }
+      }
       if (uploader) {
         try {
           resetUploadFailures(d.db); // a restart gives uploads that gave up a fresh set of attempts
@@ -282,7 +315,9 @@ export function createApp(d: AppDeps): App {
       }
       // The upload in flight, then one more if results were applied during the drain; and the file upload still in
       // flight, so its Drive id is saved before the database closes. Bounded to 10 s, in parallel.
-      await Promise.all([publisher.flush(10_000), uploader?.stop(10_000)]);
+      // A morning report still sending gets the same 10 s; if it is cut off, the next start marks it unknown. main.ts
+      // closes the databases only after stop() resolves, so after the scheduler's stop() has returned.
+      await Promise.all([publisher.flush(10_000), uploader?.stop(10_000), reportScheduler?.stop(10_000)]);
       // A socket that never closes must not eat the rest of WinSW's 150 s (120 + 10 + 5 plus margin).
       let timer: NodeJS.Timeout | undefined;
       try {

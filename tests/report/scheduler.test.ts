@@ -557,6 +557,10 @@ describe('describeReport', () => {
     expect(describeReport(row({ status: 'unknown' }), now, ON, 'idle').warning).toBe(UNKNOWN_WARNING);
     expect(describeReport(undefined, now, ON, 'not_linked').warning).toContain('npm run cli -- link-sender');
     expect(describeReport(undefined, now, ON, 'logged_out').warning).toContain('link-sender --reset');
+    expect(describeReport(undefined, now, ON, 'unreadable').warning).toContain('npm run cli -- link-sender --reset');
+    expect(describeReport(row({ status: 'retry', detail: 'session_unreadable' }), now, ON, 'unreadable').text).toContain(
+      "not sent yet (the spare number's saved session cannot be read)",
+    );
     expect(describeReport(undefined, now, ON, 'forbidden').warning).toContain('(403)');
     expect(describeReport(undefined, now, ON, 'replaced').warning).toContain('another session');
     expect(describeReport(row({ status: 'unknown' }), now, ON, 'not_linked').warning).toBe(UNKNOWN_WARNING);

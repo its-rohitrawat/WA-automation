@@ -1,6 +1,7 @@
 import { statfsSync } from 'node:fs';
 import type { ReconcileOutcome } from '../brain/reconciler.ts';
 import type { HealthLine } from '../output/view.ts';
+import type { ReportHealth } from '../report/types.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
 import type { Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
@@ -35,6 +36,8 @@ export interface HealthSnapshot {
    * gave up. Missing in older snapshots.
    */
   media?: MediaHealth;
+  /** The morning report's line (Phase 2c). Missing when the report is off, and in older snapshots. */
+  report?: ReportHealth;
 }
 
 function defaultFreeBytes(dir: string): number | null {
@@ -64,6 +67,7 @@ export class Health {
   #lastPublished: Date | null = null;
   #ingestFailures = 0;
   #media: MediaHealth = { pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0 };
+  #report: ReportHealth | null = null;
 
   constructor(o: { db: Db; clock: Clock; spend: SpendGuard; dataDir?: string; freeBytes?: (dir: string) => number | null }) {
     this.#db = o.db;
@@ -106,6 +110,11 @@ export class Health {
   /** Stores the shared-file counts; the next persist() records them. */
   setMedia(m: MediaHealth): void {
     this.#media = m;
+  }
+
+  /** Stores the morning report's line; the next persist() records it. Null when the report is off. */
+  setReport(r: ReportHealth | null): void {
+    this.#report = r;
   }
 
   forget(clientId: number): void {
@@ -186,6 +195,8 @@ export class Health {
       const n = this.#media.spendCap;
       return { ok: false, text: `⚠️ ${n} shared file${n === 1 ? '' : 's'} waiting for today's AI budget (read after midnight IST)` };
     }
+    // The morning report warns only when the owner must act: an unknown outcome, or a spare number that is unlinked.
+    if (this.#report?.warning) return { ok: false, text: this.#report.warning };
     const free = this.#freeGb();
     if (free !== null && free < LOW_DISK_GB) return { ok: false, text: `⚠️ Low disk: ${free.toFixed(1)} GB free` };
     return { ok: true, text: this.#lastSuccess ? `✅ Connected · last update ${stamp(this.#lastSuccess)}` : '✅ Connected · waiting for new messages' };
@@ -206,6 +217,7 @@ export class Health {
       publishFailingSince: this.#publishFailedSince?.toISOString() ?? null,
       ingestFailures: this.#ingestFailures,
       media: { ...this.#media },
+      ...(this.#report ? { report: { ...this.#report } } : {}),
     };
   }
 
@@ -219,6 +231,11 @@ const MEDIA_COUNTS = ['pending', 'stale', 'spendCap', 'failedRecent', 'uploadFai
 const isMediaHealth = (m: unknown): m is MediaHealth => {
   const x = m as Record<string, unknown> | null;
   return typeof x === 'object' && x !== null && MEDIA_COUNTS.every((k) => typeof x[k] === 'number');
+};
+
+const isReportHealth = (r: unknown): r is ReportHealth => {
+  const x = r as Record<string, unknown> | null;
+  return typeof x === 'object' && x !== null && typeof x.text === 'string' && (x.warning === null || typeof x.warning === 'string');
 };
 
 export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
@@ -237,6 +254,8 @@ export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
     if (o.ingestFailures !== undefined && typeof o.ingestFailures !== 'number') return undefined;
     // Snapshots written before media counts existed still parse.
     if (o.media !== undefined && !isMediaHealth(o.media)) return undefined;
+    // Snapshots written before the morning report existed, or with it off, have no report line.
+    if (o.report !== undefined && !isReportHealth(o.report)) return undefined;
     return { ...o, ingestFailures: o.ingestFailures ?? 0 } as HealthSnapshot;
   } catch {
     return undefined;
