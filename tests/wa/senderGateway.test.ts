@@ -229,6 +229,64 @@ describe('SenderGateway', () => {
     expect(sockets[0]!.end).toHaveBeenCalled();
   });
 
+  it('is free for the next send after a send that went out', async () => {
+    const { gw, sockets } = setup();
+    expect(await gw.sendReport('day 1', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(await gw.sendReport('day 2', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(sockets).toHaveLength(2);
+    for (const s of sockets) expect(s.end).toHaveBeenCalled();
+    expect(gw.status().state).toBe('idle');
+  });
+
+  it('is free for the next send after a definite failure or an unknown result', async () => {
+    const qr: Script = (s) => s.emit('connection.update', { qr: 'QR-1' });
+    const afterFailure = setup({ scripts: [qr, open] });
+    expect(await afterFailure.gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'not_linked' });
+    expect(await afterFailure.gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(afterFailure.sockets).toHaveLength(2);
+
+    const afterUnknown = setup({ scripts: [hang, open], sendTimeoutMs: 20 });
+    expect(await afterUnknown.gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'unknown', code: 'timeout' });
+    expect(await afterUnknown.gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(afterUnknown.sockets).toHaveLength(2);
+  });
+
+  it('keeps the sent result and frees the gateway when closing the socket throws or rejects', async () => {
+    const endThrows: Script = (s) => {
+      s.end.mockImplementation(() => {
+        throw new Error('dead');
+      });
+      open(s);
+    };
+    const endRejects: Script = (s) => {
+      s.end.mockImplementation(() => Promise.reject(new Error('dead')));
+      open(s);
+    };
+    for (const script of [endThrows, endRejects]) {
+      const { gw, sockets } = setup({ scripts: [script, script] });
+      expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+      expect(sockets[0]!.end).toHaveBeenCalled();
+      expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+      await expect(gw.stop()).resolves.toBeUndefined();
+    }
+  });
+
+  it('shows connecting while the socket opens, open while sending, and idle afterwards', async () => {
+    const connecting = setup({ scripts: [() => {}], connectTimeoutMs: 50 });
+    const p = connecting.gw.sendReport('hi', XLSX, FILE);
+    await vi.waitFor(() => expect(connecting.sockets).toHaveLength(1));
+    expect(connecting.gw.status().state).toBe('connecting');
+    expect(await p).toEqual({ status: 'failed', code: 'connect_timeout' });
+    expect(connecting.gw.status().state).toBe('idle');
+
+    const sending = setup({ scripts: [hang], sendTimeoutMs: 50 });
+    const q = sending.gw.sendReport('hi', XLSX, FILE);
+    await vi.waitFor(() => expect(sending.sockets[0]?.sendMessage).toHaveBeenCalled());
+    expect(sending.gw.status().state).toBe('open');
+    expect(await q).toEqual({ status: 'unknown', code: 'timeout' });
+    expect(sending.gw.status().state).toBe('idle');
+  });
+
   it('a failed credential save does not become an unhandled rejection', async () => {
     const unhandled = vi.fn();
     process.on('unhandledRejection', unhandled);
@@ -288,6 +346,28 @@ describe('SenderGateway default timings', () => {
     expect(sockets[0]!.end).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(200);
     expect(await p).toEqual({ status: 'failed', code: 'connect_timeout' });
+  });
+
+  it('leaves no timer running after a send that went out', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { gw } = defaultGateway([open]);
+    let result: unknown;
+    const p = gw.sendReport('hi', XLSX, FILE).then((r) => (result = r));
+    await vi.advanceTimersByTimeAsync(15_000);
+    await p;
+    expect(result).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('leaves no timer running after WhatsApp refuses the connection', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { gw } = defaultGateway([(s) => closeWith(s, 401)]);
+    let result: unknown;
+    const p = gw.sendReport('hi', XLSX, FILE).then((r) => (result = r));
+    await vi.advanceTimersByTimeAsync(0);
+    await p;
+    expect(result).toEqual({ status: 'failed', code: 'logged_out' });
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('gives each message 120 s before reporting unknown', async () => {

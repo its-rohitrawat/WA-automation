@@ -4,8 +4,19 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const SRC = fileURLToPath(new URL('../../src/', import.meta.url));
-/** Baileys socket methods that send something to WhatsApp: a message, a receipt, presence, or a chat change. */
-const SEND_NAMES = /\b(sendMessage|relayMessage|sendPresenceUpdate|readMessages|sendReceipt|sendReceipts|chatModify|sendMessageAck)\b/;
+/**
+ * Baileys socket methods, other than sendMessage, that put traffic on WhatsApp in the account's name: a receipt, presence,
+ * a chat or profile change, a call rejection, a group or newsletter action, or a retry or analytics packet.
+ * (updateMediaMessage and reuploadRequest are checked by tests/media/fetch.test.ts.)
+ */
+const OUTBOUND = [
+  'relayMessage', 'sendPresenceUpdate', 'presenceSubscribe', 'readMessages', 'sendReceipt', 'sendReceipts', 'chatModify',
+  'sendMessageAck', 'sendPeerDataOperationMessage', 'sendRetryRequest', 'rejectCall', 'updateProfile\\w*',
+  'group(?:Create|Leave|ParticipantsUpdate|Update\\w*)', 'newsletter\\w*', 'sendWAMBuffer',
+].join('|');
+/** Every Baileys method that sends something to WhatsApp. */
+const SEND_NAMES = new RegExp(`\\b(sendMessage|${OUTBOUND})\\b`);
+const OTHER_OUTBOUND = new RegExp(`\\b(${OUTBOUND})\\b`);
 
 function sources(): { file: string; text: string }[] {
   return readdirSync(SRC, { recursive: true, encoding: 'utf8' })
@@ -25,7 +36,7 @@ describe('who may send on WhatsApp', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('senderGateway calls sendMessage in one place, and never receipts, presence or chat changes', () => {
+  it('senderGateway calls sendMessage in one place, and no other outbound method', () => {
     const text = readFileSync(join(SRC, 'wa', 'senderGateway.ts'), 'utf8');
     expect(text.match(/\.sendMessage\(/g)).toHaveLength(1);
     // Every mention, with or without a dot: the interface declaration and the one call in #send. Nothing else.
@@ -34,7 +45,22 @@ describe('who may send on WhatsApp', () => {
     expect(lines[0]).toMatch(/^sendMessage\(jid: string, content: AnyMessageContent\): Promise</);
     expect(lines[1]).toMatch(/^sock\.sendMessage\(jid, content\),$/);
     expect(text.match(/\bsendMessage\b/g)).toHaveLength(2);
-    expect(text).not.toMatch(/\b(relayMessage|sendPresenceUpdate|readMessages|sendReceipt|sendReceipts|chatModify|sendMessageAck)\b/);
+    expect(text).not.toMatch(OTHER_OUTBOUND);
+  });
+
+  it('the outbound list catches every method it names, and not read-only ones', () => {
+    for (const name of [
+      'sendMessage', 'relayMessage', 'sendPresenceUpdate', 'presenceSubscribe', 'readMessages', 'sendReceipt', 'sendReceipts',
+      'chatModify', 'sendMessageAck', 'sendPeerDataOperationMessage', 'sendRetryRequest', 'rejectCall', 'updateProfileStatus',
+      'updateProfileName', 'updateProfilePicture', 'groupCreate', 'groupLeave', 'groupParticipantsUpdate', 'groupUpdateSubject',
+      'newsletterCreate', 'newsletterFollow', 'sendWAMBuffer',
+    ]) {
+      expect(`sock.${name}(x)`).toMatch(SEND_NAMES);
+      if (name !== 'sendMessage') expect(`sock.${name}(x)`).toMatch(OTHER_OUTBOUND);
+    }
+    for (const read of ['groupMetadata', 'groupFetchAllParticipating', 'onWhatsApp', 'profilePictureUrl']) {
+      expect(`sock.${read}(x)`).not.toMatch(SEND_NAMES);
+    }
   });
 
   it('#send checks the recipient before it calls sendMessage', () => {
