@@ -53,6 +53,7 @@ Status: approved by the owner on 2026-10-23. It amends the main design (`2026-10
 - `REPORT_TIME=06:00`, IST
 - `REPORT_DEADLINE=12:00`
 - `REPORT_RECIPIENT=<founder's number with country code, digits only>`. This is personal data, kept out of code and logs; logs show only the last 4 digits.
+  - Owner decision (2026-10-23): only an Indian mobile is accepted, `91` then 10 digits starting 6-9. Logs show only the last 4 digits, so a number typed without `91` would look the same there but go to a foreign number; refusing it at startup stops that.
 
 ## 6. Setup (owner, about 15 minutes)
 

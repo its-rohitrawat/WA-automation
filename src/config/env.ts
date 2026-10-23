@@ -2,6 +2,8 @@ import { z } from 'zod';
 import type { ReportSettings } from '../report/types.ts';
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+/** 91, then a 10-digit Indian mobile (starts 6-9). The owner's decision: the report goes only to an Indian number. */
+export const INDIAN_MOBILE = /^91[6-9]\d{9}$/;
 
 const EnvSchema = z.object({
   ANTHROPIC_API_KEY: z.string().min(1).optional(),
@@ -24,8 +26,8 @@ const EnvSchema = z.object({
   REPORT_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   REPORT_TIME: z.string().regex(HHMM).default('06:00'),
   REPORT_DEADLINE: z.string().regex(HHMM).default('12:00'),
-  /** The founder's number with country code, digits only. Personal data: never logged in full. */
-  REPORT_RECIPIENT: z.string().regex(/^\d{8,15}$/).optional(),
+  /** The founder's number: 91 and the 10-digit mobile, digits only. Personal data: never logged in full. */
+  REPORT_RECIPIENT: z.string().regex(INDIAN_MOBILE).optional(),
 }).superRefine((env, ctx) => {
   if (env.REPORT_ENABLED && !env.REPORT_RECIPIENT) {
     ctx.addIssue({ code: 'custom', path: ['REPORT_RECIPIENT'], message: 'required when REPORT_ENABLED is true' });

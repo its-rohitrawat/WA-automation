@@ -52,7 +52,9 @@ describe('morning report settings', () => {
 
   it('refuses a recipient that is not digits only, without echoing it', () => {
     const startsValidBreaksLater = ['919800000000@g.us', '919800000000 ', '919800000000x', '1234567890123456'];
-    for (const bad of ['+919800000000', '98000 00000', '1234', ...startsValidBreaksLater]) {
+    // Without the 91, a 10-digit mobile reads as a foreign number (9812345678 would be +98, Iran).
+    const notIndianMobile = ['9812345678', '09812345678', '0919812345678', '915812345678', '91981234567', '9198123456789', '12345678', '123456789012345', '449812345678'];
+    for (const bad of ['+919800000000', '98000 00000', '1234', ...startsValidBreaksLater, ...notIndianMobile]) {
       try {
         parseEnv({ REPORT_RECIPIENT: bad });
         expect.unreachable();
@@ -63,9 +65,10 @@ describe('morning report settings', () => {
     }
   });
 
-  it('accepts a recipient of 8 to 15 digits', () => {
-    expect(parseEnv({ REPORT_RECIPIENT: '12345678' }).REPORT_RECIPIENT).toBe('12345678');
-    expect(parseEnv({ REPORT_RECIPIENT: '123456789012345' }).REPORT_RECIPIENT).toBe('123456789012345');
+  it('accepts only 91 and a 10-digit Indian mobile', () => {
+    for (const good of ['919812345678', '916000000000', '917000000000', '918999999999']) {
+      expect(parseEnv({ REPORT_RECIPIENT: good }).REPORT_RECIPIENT).toBe(good);
+    }
   });
 
   it('refuses bad times, and a deadline that is not after the start', () => {
