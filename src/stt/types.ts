@@ -44,4 +44,8 @@ export interface SttProvider {
   transcribe(audio: AudioPart, opts: TranscribeOptions): Promise<ProviderResult>;
   /** Deletes the provider's own stored copy of this answer. Called only after the answer is saved locally. Free. */
   forget?(result: ProviderResult): Promise<void>;
+  /** The provider's id for its stored copy of this answer (an id only, never content), or null when there is none. */
+  forgetRef?(result: ProviderResult): string | null;
+  /** Deletes the provider's stored copy named by forgetRef, so it can be done later from a stored id. Free. */
+  forgetById?(ref: string): Promise<void>;
 }

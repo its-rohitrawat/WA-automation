@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { SpendCapReachedError } from '../../src/brain/paidCall.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
+import { tx } from '../../src/store/db.ts';
 import { SttHttpError, SttJobError, SttJobLostError, SttNoAnswerError } from '../../src/stt/http.ts';
 import { withSttHold, type SttBooking } from '../../src/stt/paidStt.ts';
 import { manualClock } from '../../src/util/clock.ts';
@@ -83,5 +84,32 @@ describe('withSttHold', () => {
     finish({ result: 'late', costUsd: 0.05 });
     expect((await p).result).toBe('late');
     expect(rows()).toEqual([{ kind: 'stt', usd: 0.2, detail: 'shutdown (estimated)' }]);
+  });
+
+  it('writes the booking and the owner record in one step: a failing owner write takes the booking with it', async () => {
+    const db = seededDb();
+    const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 1 });
+    const ownerFailed = new Error('part write refused');
+    const err = await withSttHold(spend, 0.2, 'meeting 4 part 1', async () => ({ result: 'x', costUsd: 0.05 }), {
+      atomically: (fn) => tx(db, fn),
+      onBooked: (_b, r) => {
+        expect(r).toBe('x');
+        throw ownerFailed;
+      },
+    }).catch((e: unknown) => e);
+    expect(err).toBe(ownerFailed);
+    expect(db.prepare('SELECT COUNT(*) AS n FROM spend').get()).toEqual({ n: 0 }); // the owner's record still says "sent, nothing booked"
+    expectNoHold(spend);
+  });
+
+  it('a spend write that throws is thrown, and the owner is not told anything was booked', async () => {
+    const { spend } = setup();
+    const broken = new Error('disk I/O error');
+    vi.spyOn(spend, 'record').mockImplementationOnce(() => {
+      throw broken;
+    });
+    const onBooked = vi.fn();
+    await expect(withSttHold(spend, 0.2, 'meeting 4 part 1', async () => ({ result: 'x', costUsd: 0.05 }), { onBooked })).rejects.toBe(broken);
+    expect(onBooked).not.toHaveBeenCalled();
   });
 });

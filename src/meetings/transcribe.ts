@@ -1,14 +1,17 @@
-import { lstatSync } from 'node:fs';
+import { lstatSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { SpendCapReachedError } from '../brain/paidCall.ts';
 import { requireKey, type Env } from '../config/env.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
 import type { Db } from '../store/db.ts';
 import { tx } from '../store/db.ts';
-import { advanceStage, getMeeting, queuedMeetingIdsWithSttParts, setSttParts, type SttPartRow } from '../store/meetings.ts';
+import {
+  addSttForget, advanceStage, countSttForgetAttempt, deleteSttForget, getMeeting, pendingSttForgets, queuedMeetingIdsWithSttParts, setSttParts,
+  type SttPartRow,
+} from '../store/meetings.ts';
 import { AudioError, type Ffmpeg } from '../stt/audio.ts';
 import { SttHttpError, SttJobError, SttJobLostError, type HttpFetch } from '../stt/http.ts';
-import { withSttHold, type SttBooking } from '../stt/paidStt.ts';
+import { withSttHold } from '../stt/paidStt.ts';
 import { costUsd, modelFor } from '../stt/prices.ts';
 import { ElevenLabsProvider } from '../stt/providers/elevenlabs.ts';
 import { OpenAiProvider } from '../stt/providers/openai.ts';
@@ -23,6 +26,10 @@ import { MeetingDeferral, meetingsTmpDir, removePartsFolder } from './audio.ts';
 // and shutdowns, through the durable part records in meetings.stt_parts (see the plan's behaviour notes):
 // - ElevenLabs and OpenAI: the part is set inflight, then the ceiling is held (withSttHold) and settled at the reported
 //   cost, or at the ceiling when the outcome is unknown. A hold that shutdown books (settlePending) marks the part booked.
+// - A booking and the part state it goes with are written in one transaction; if that fails, the part is left inflight
+//   with nothing booked, and bookStuckParts books it at the ceiling before anything is sent again.
+// - A provider copy of an answer (ElevenLabs) is noted in stt_forget with the finished part and deleted once the
+//   transcript is stored (M7); forgetPending tries again later.
 // - Sarvam: the ceiling is held while the job is sent and booked, durably with the job id, when the job is accepted. The
 //   list price for the measured length is exactly the ceiling, so nothing more is booked when the answer comes; no
 //   in-memory hold has to outlive a batch job of up to 3 hours.
@@ -46,12 +53,22 @@ export interface MeetingTranscriber {
   partCeilingUsd(seconds: number): number;
   /** What a part cost: the billed seconds when the provider reports them, otherwise the measured length. */
   partCostUsd(seconds: number, billedSeconds: number | null): number;
-  /** One part. Never aborted. forget() deletes the provider's copy and is called after the transcript is stored. */
+  /**
+   * One part. Never aborted. forgetRef: the provider's id for its stored copy of the answer (an id only), stored with the
+   * finished part and deleted through forget() once the transcript is stored; null when the provider keeps none.
+   */
   transcribePart(
     part: AudioPart,
     o: { resumeJobId?: string; onJobId?: (id: string) => void },
-  ): Promise<{ model: string; segments: Segment[]; billedSeconds: number | null; forget?: () => Promise<void> }>;
+  ): Promise<{ model: string; segments: Segment[]; billedSeconds: number | null; forgetRef: string | null }>;
+  /** Whether this provider keeps copies that forget() deletes. */
+  readonly canForget: boolean;
+  /** Deletes the provider's stored copy named by a forgetRef. Free. */
+  forget(ref: string): Promise<void>;
 }
+
+/** The longest provider id for a stored copy that is kept (the stt_forget CHECK); a longer one is not an id. */
+const MAX_REF_LENGTH = 200;
 
 /** A MeetingTranscriber over any provider, with speaker labels on. Exported for tests (a fake provider). */
 export function meetingTranscriber(provider: SttProvider, inrPerUsd: number): MeetingTranscriber {
@@ -70,9 +87,14 @@ export function meetingTranscriber(provider: SttProvider, inrPerUsd: number): Me
         ...(o.resumeJobId !== undefined ? { resumeJobId: o.resumeJobId } : {}),
         ...(o.onJobId ? { onJobId: o.onJobId } : {}),
       });
-      const out = { model: r.model, segments: r.segments, billedSeconds: r.billedSeconds };
-      // The provider's own answer (raw) stays inside this closure: it is never stored or logged.
-      return provider.forget ? { ...out, forget: () => provider.forget!(r) } : out;
+      // The provider's own answer (raw) is never stored or logged: only the id of its stored copy is kept.
+      const ref = provider.forgetRef?.(r) ?? null;
+      const forgetRef = ref !== null && ref.length >= 1 && ref.length <= MAX_REF_LENGTH ? ref : null;
+      return { model: r.model, segments: r.segments, billedSeconds: r.billedSeconds, forgetRef };
+    },
+    canForget: provider.forgetById !== undefined,
+    async forget(ref) {
+      await provider.forgetById?.(ref);
     },
   };
 }
@@ -127,7 +149,8 @@ const KEY_REFUSED = new Set([401, 403]);
  * 2. Parts already done are skipped; every state change of a part is stored at once (see the header for the booking).
  * 3. With every part done: mergeParts (times moved by each part's offset, speakers labelled per part when there are
  *    several) -> advanceStage('transcribed'), with the note no_speech and an empty transcript when nothing was said;
- *    then forget() for this run's answers (failures logged by id only); then the parts folder is removed, best-effort.
+ *    then forgetPending for this meeting (the provider copies noted in stt_forget, with each finished part); then the
+ *    parts folder is removed, best-effort.
  *
  * Outcomes the processor maps:
  * - returns: stage transcribed;
@@ -181,11 +204,8 @@ async function runParts(id: number, t: MeetingTranscriber, deps: TranscribeMeeti
   if (bookStuckParts(db, deps.spend, t, id, parts, deps.clock.now().toISOString()) > 0) {
     log.info({ meetingId: id, provider: t.provider }, 'meeting speech parts left in flight booked at their ceiling');
   }
-  const save = () => setSttParts(db, id, parts, deps.clock.now().toISOString());
-  const put = (i: number, patch: Partial<SttPartRow>) => {
-    parts[i] = { ...parts[i]!, ...patch };
-    save();
-  };
+  const ctx = partContext(id, parts, t, deps);
+  const { save } = ctx;
 
   let paths: string[];
   if (parts.length === 0) {
@@ -204,14 +224,13 @@ async function runParts(id: number, t: MeetingTranscriber, deps: TranscribeMeeti
     paths = [];
   }
 
-  const forgets: { part: number; forget: () => Promise<void> }[] = [];
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i]!;
     if (part.state === 'done') continue;
     signal?.throwIfAborted();
     const audio: AudioPart = { path: paths[i]!, seconds: part.seconds, offset: part.offset };
-    const r = t.provider === 'sarvam' ? await sarvamPart(id, i, audio, parts, put, t, deps) : await heldPart(id, i, audio, parts, put, t, deps);
-    if (r.forget) forgets.push({ part: part.index, forget: r.forget });
+    if (t.provider === 'sarvam') await sarvamPart(ctx, i, audio);
+    else await heldPart(ctx, i, audio);
   }
 
   const merged = mergeParts(parts.map((p) => ({ offset: p.offset, segments: p.segments ?? [] })));
@@ -220,13 +239,12 @@ async function runParts(id: number, t: MeetingTranscriber, deps: TranscribeMeeti
   advanceStage(db, id, 'transcribed', noSpeech ? { transcript, note: 'no_speech' } : { transcript }, deps.clock.now().toISOString());
   log.info({ meetingId: id, parts: parts.length, segments: transcript.length, noSpeech }, 'meeting transcribed');
 
-  // Only now that the transcript is stored: the provider's own copies go.
-  for (const f of forgets) {
-    try {
-      await f.forget();
-    } catch (e) {
-      log.warn({ meetingId: id, part: f.part, provider: t.provider, code: errorCode(e) }, 'meeting speech copy could not be deleted at the provider');
-    }
+  // Only now that the transcript is stored: the provider's own copies go. What fails stays noted in stt_forget, and
+  // forgetPending tries again at the next processor start.
+  try {
+    await forgetPending(db, t, log, { meetingId: id });
+  } catch (e) {
+    log.warn({ meetingId: id, code: errorCode(e) }, 'meeting speech copies could not be deleted at the provider');
   }
   removeParts(id, partsDir, log);
   return { parts: parts.length, segments: transcript.length, note: noSpeech ? 'no_speech' : null };
@@ -244,81 +262,134 @@ function removeParts(id: number, dir: string, log: Logger): void {
 }
 
 type PartAnswer = Awaited<ReturnType<MeetingTranscriber['transcribePart']>>;
-type Put = (i: number, patch: Partial<SttPartRow>) => void;
 
-/** For a callback that must not throw (settlePending's): the part record is written, or the failure logged. */
-function putQuietly(put: Put, i: number, patch: Partial<SttPartRow>, id: number, log: Logger): void {
-  try {
-    put(i, patch);
-  } catch (e) {
-    log.warn({ meetingId: id, part: i + 1, code: errorCode(e) }, 'meeting speech part record could not be written');
-  }
+/** One meeting's parts, as stored, and the writes on them. */
+interface PartContext {
+  id: number;
+  parts: SttPartRow[];
+  t: MeetingTranscriber;
+  deps: TranscribeMeetingDeps;
+  save(): void;
+  /** Changes part i and stores the parts at once; on a failed write the part stays as it was. */
+  put(i: number, patch: Partial<SttPartRow>): void;
+  /**
+   * Runs fn in one transaction (a savepoint inside another). A booking and the part state it goes with are written here,
+   * so they are kept or lost together; on a failure the parts in memory go back to what is stored.
+   */
+  atomically(fn: () => void): void;
+  /** Part i is done: its answer and, when the provider keeps a copy, that copy's id in stt_forget. Inside atomically. */
+  markDone(i: number, r: PartAnswer, booked?: SttPartRow['booked']): void;
 }
 
-/** ElevenLabs and OpenAI: one synchronous call, held and settled by withSttHold. */
-async function heldPart(id: number, i: number, audio: AudioPart, parts: SttPartRow[], put: Put, t: MeetingTranscriber, deps: TranscribeMeetingDeps): Promise<PartAnswer> {
+function partContext(id: number, parts: SttPartRow[], t: MeetingTranscriber, deps: TranscribeMeetingDeps): PartContext {
+  const { db, clock } = deps;
+  const save = () => setSttParts(db, id, parts, clock.now().toISOString());
+  const put = (i: number, patch: Partial<SttPartRow>) => {
+    const prev = parts[i]!;
+    parts[i] = { ...prev, ...patch };
+    try {
+      save();
+    } catch (e) {
+      parts[i] = prev;
+      throw e;
+    }
+  };
+  const atomically = (fn: () => void) => {
+    const stored = [...parts];
+    try {
+      tx(db, fn);
+    } catch (e) {
+      parts.splice(0, parts.length, ...stored);
+      throw e;
+    }
+  };
+  const markDone = (i: number, r: PartAnswer, booked?: SttPartRow['booked']) => {
+    put(i, { state: 'done', segments: r.segments, billedSeconds: r.billedSeconds, ...(booked ? { booked } : {}) });
+    if (r.forgetRef !== null) addSttForget(db, { meetingId: id, provider: t.provider, ref: r.forgetRef, at: clock.now().toISOString() });
+  };
+  return { id, parts, t, deps, save, put, atomically, markDone };
+}
+
+/**
+ * Before a new send: the part's file must be there. A local failure here is thrown as it is (retryable): nothing was
+ * sent, so nothing is booked.
+ */
+function checkPartFile(path: string): void {
+  if (!statSync(path).isFile()) throw new AudioError('part_missing');
+}
+
+/**
+ * ElevenLabs and OpenAI: one synchronous call, held and settled by withSttHold, which writes the booking and the part's
+ * outcome in one transaction. If that write fails, the part stays inflight with nothing booked, and bookStuckParts books
+ * it at the ceiling before it is sent again.
+ */
+async function heldPart(ctx: PartContext, i: number, audio: AudioPart): Promise<void> {
+  const { id, parts, t, deps, put } = ctx;
   const before = parts[i]!;
   const label = `meeting ${id} part ${before.index}`;
   const ceiling = t.partCeilingUsd(before.seconds);
+  checkPartFile(audio.path);
   // A part sent again is a new call: what was booked before belongs to the earlier call.
   put(i, { state: 'inflight', booked: 'none', jobId: null });
-  let booking: SttBooking | null = null;
+  let sent = false;
+  let cost = 0;
   try {
-    const { result, costUsd: cost } = await withSttHold(
+    ({ costUsd: cost } = await withSttHold<PartAnswer>(
       deps.spend,
       ceiling,
       label,
       async () => {
+        sent = true;
         const r = await t.transcribePart(audio, {});
         return { result: r, costUsd: t.partCostUsd(before.seconds, r.billedSeconds) };
       },
       {
-        onBooked: (b) => (booking = b),
-        onBookedAtShutdown: () => putQuietly(put, i, { state: 'unknown', booked: 'ceiling' }, id, deps.log),
+        atomically: ctx.atomically,
+        onBooked: (b, r) => {
+          if (r !== undefined) ctx.markDone(i, r, 'actual');
+          else if (b.outcome === 'none') put(i, { state: 'todo', booked: 'none' });
+          else put(i, { state: 'unknown', booked: 'ceiling' });
+        },
+        onBookedAtShutdown: () => put(i, { state: 'unknown', booked: 'ceiling' }),
       },
-    );
-    put(i, { state: 'done', booked: 'actual', segments: result.segments, billedSeconds: result.billedSeconds });
-    deps.log.info({ meetingId: id, part: before.index, provider: t.provider, seconds: Math.round(before.seconds), costUsd: cost }, 'meeting speech part transcribed');
-    return result;
+    ));
   } catch (e) {
-    const b = booking as SttBooking | null;
-    if (b === null) put(i, before); // never sent (no room under the cap): as it was
-    else if (b.outcome === 'none') put(i, { state: 'todo', booked: 'none' });
-    else put(i, { state: 'unknown', booked: 'ceiling' });
-    deps.log.warn({ meetingId: id, part: before.index, provider: t.provider, code: errorCode(e), bookedUsd: b?.usd ?? 0 }, 'meeting speech part failed');
+    // Never sent (no room under the cap): as it was. Anything else is already written with its booking, or left
+    // inflight with nothing booked for bookStuckParts.
+    if (e instanceof SpendCapReachedError && !sent) put(i, before);
+    deps.log.warn({ meetingId: id, part: before.index, provider: t.provider, code: errorCode(e), state: parts[i]!.state }, 'meeting speech part failed');
     throw e;
   }
+  deps.log.info({ meetingId: id, part: before.index, provider: t.provider, seconds: Math.round(before.seconds), costUsd: cost }, 'meeting speech part transcribed');
 }
 
 /**
  * Sarvam: a batch job. A stored job id is waited on again, booking nothing more. A new job holds the ceiling while it is
- * sent; when Sarvam accepts it, the ceiling is booked and the job id stored in one transaction, and the hold freed.
+ * sent; when Sarvam accepts it, the hold is settled at the ceiling and the job id stored in one transaction.
  */
-async function sarvamPart(id: number, i: number, audio: AudioPart, parts: SttPartRow[], put: Put, t: MeetingTranscriber, deps: TranscribeMeetingDeps): Promise<PartAnswer> {
-  const { db, spend, log } = deps;
+async function sarvamPart(ctx: PartContext, i: number, audio: AudioPart): Promise<void> {
+  const { id, parts, t, deps, put, atomically } = ctx;
+  const { spend, log } = deps;
   const before = parts[i]!;
   const label = `meeting ${id} part ${before.index}`;
   const ceiling = t.partCeilingUsd(before.seconds);
   const resumeJobId = before.jobId ?? undefined;
   let hold: number | null = null;
-  let bookedAtShutdown = false;
 
   if (resumeJobId !== undefined) {
     if (before.booked === 'none') {
       // Never written this way (the id and the booking are stored together), but a job id means a job was started.
-      tx(db, () => {
+      atomically(() => {
         spend.record('stt', ceiling, label);
         put(i, { booked: 'ceiling' });
       });
     }
     put(i, { state: 'inflight' });
   } else {
+    checkPartFile(audio.path);
     // A new job: what was booked before belongs to an earlier job.
     put(i, { state: 'inflight', booked: 'none' });
-    hold = spend.reserve(ceiling, 'stt', () => {
-      bookedAtShutdown = true;
-      putQuietly(put, i, { state: 'unknown', booked: 'ceiling' }, id, log);
-    });
+    hold = spend.reserve(ceiling, 'stt', () => put(i, { state: 'unknown', booked: 'ceiling' }));
     if (hold === null) {
       put(i, before);
       throw new SpendCapReachedError({ busy: spend.fitsIgnoringHolds(ceiling) });
@@ -327,54 +398,81 @@ async function sarvamPart(id: number, i: number, audio: AudioPart, parts: SttPar
 
   let seenJobId: string | null = resumeJobId ?? null;
   const onJobId = (jobId: string): void => {
-    if (hold === null) return; // only a new job is booked here
+    const h = hold;
+    if (h === null) return; // only a new job is booked here
     seenJobId = jobId;
-    if (!bookedAtShutdown) {
-      tx(db, () => {
-        spend.record('stt', ceiling, label);
-        put(i, { jobId, booked: 'ceiling' });
-      });
-    } else {
+    // settle books nothing when shutdown already booked the hold.
+    atomically(() => {
+      spend.settle(h, 'stt', ceiling, label);
       put(i, { jobId, booked: 'ceiling' });
-    }
-    spend.release(hold);
+    });
     hold = null;
     log.info({ meetingId: id, part: before.index, provider: t.provider, seconds: Math.round(before.seconds), costUsd: ceiling }, 'meeting speech job accepted');
   };
 
   try {
     const r = await t.transcribePart(audio, resumeJobId !== undefined ? { resumeJobId } : { onJobId });
-    if (hold !== null) {
-      // An answer without a job id first: book it now, at the ceiling.
-      spend.settle(hold, 'stt', ceiling, label);
-      hold = null;
-      put(i, { booked: 'ceiling' });
-    }
-    put(i, { state: 'done', segments: r.segments, billedSeconds: r.billedSeconds });
+    const h = hold;
+    atomically(() => {
+      if (h !== null) spend.settle(h, 'stt', ceiling, label); // an answer without a job id first: booked now
+      ctx.markDone(i, r, h !== null ? 'ceiling' : undefined);
+    });
+    hold = null;
     log.info({ meetingId: id, part: before.index, provider: t.provider, seconds: Math.round(before.seconds) }, 'meeting speech part transcribed');
-    return r;
   } catch (e) {
-    let bookedUsd = 0;
-    if (hold !== null) {
-      // The job was never accepted, or its booking failed to be written.
+    const h = hold;
+    hold = null;
+    if (h !== null) {
+      // The job was never accepted, or its booking could not be written.
       if (e instanceof SttHttpError) {
-        spend.release(hold);
-        hold = null;
+        spend.release(h);
         put(i, { state: 'todo', booked: 'none', jobId: null });
       } else {
-        spend.settle(hold, 'stt', ceiling, `${label} (unknown, estimated)`);
-        hold = null;
-        bookedUsd = ceiling;
-        put(i, { state: 'unknown', booked: 'ceiling', jobId: seenJobId });
+        atomically(() => {
+          spend.settle(h, 'stt', ceiling, `${label} (unknown, estimated)`);
+          put(i, { state: 'unknown', booked: 'ceiling', jobId: seenJobId });
+        });
       }
     } else {
       // The job is booked. A lost or failed job cannot be waited on again: its id goes, and a retry sends a new job.
       const gone = e instanceof SttJobLostError || e instanceof SttJobError;
       put(i, gone ? { state: 'unknown', jobId: null } : { state: 'unknown' });
     }
-    log.warn({ meetingId: id, part: before.index, provider: t.provider, code: errorCode(e), bookedUsd }, 'meeting speech part failed');
+    log.warn({ meetingId: id, part: before.index, provider: t.provider, code: errorCode(e) }, 'meeting speech part failed');
     throw e;
   }
+}
+
+/** Tries per stt_forget row; then it is left, logged, for a person to look at. */
+export const MAX_FORGET_ATTEMPTS = 5;
+
+/**
+ * Deletes the provider copies noted in stt_forget (M7), for the transcriber's provider: each try is counted first, and
+ * a row is removed only once the provider has deleted the copy (a 404: it is already gone). Run right after a meeting's
+ * transcript is stored (that meeting only) and at processor start next to recoverInflightParts (all). After
+ * MAX_FORGET_ATTEMPTS tries a row is left alone. Logs the meeting id and a code only. Returns how many were deleted.
+ */
+export async function forgetPending(db: Db, transcriber: MeetingTranscriber, log: Logger, o: { meetingId?: number } = {}): Promise<number> {
+  if (!transcriber.canForget) return 0;
+  const rows = pendingSttForgets(db, { provider: transcriber.provider, maxAttempts: MAX_FORGET_ATTEMPTS, ...(o.meetingId !== undefined ? { meetingId: o.meetingId } : {}) });
+  let deleted = 0;
+  for (const f of rows) {
+    countSttForgetAttempt(db, f.id);
+    try {
+      await transcriber.forget(f.ref);
+    } catch (e) {
+      if (!(e instanceof SttHttpError && e.status === 404)) {
+        const attempts = f.attempts + 1;
+        const fields = { meetingId: f.meetingId, provider: f.provider, code: errorCode(e), attempts };
+        if (attempts >= MAX_FORGET_ATTEMPTS) log.warn(fields, 'meeting speech copy could not be deleted at the provider; no more tries');
+        else log.warn(fields, 'meeting speech copy could not be deleted at the provider; tried again later');
+        continue;
+      }
+    }
+    deleteSttForget(db, f.id);
+    deleted++;
+  }
+  return deleted;
 }
 
 /**

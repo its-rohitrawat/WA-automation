@@ -369,6 +369,39 @@ export function queuedMeetingIdsWithSttParts(db: Db): number[] {
   return (db.prepare("SELECT id FROM meetings WHERE status = 'queued' AND stt_parts <> '[]' ORDER BY id").all() as { id: number }[]).map((r) => r.id);
 }
 
+/** A provider copy of a speech answer still to delete (M7). ref is the provider's id for the copy, never content. */
+export interface SttForgetRow {
+  id: number;
+  meetingId: number;
+  provider: 'sarvam' | 'elevenlabs' | 'openai';
+  ref: string;
+  attempts: number;
+}
+
+/** Notes a provider copy to delete. A copy already noted is kept as it is. */
+export function addSttForget(db: Db, f: { meetingId: number; provider: SttForgetRow['provider']; ref: string; at: string }): void {
+  db.prepare('INSERT OR IGNORE INTO stt_forget (meeting_id, provider, ref, created_at) VALUES (?, ?, ?, ?)')
+    .run(f.meetingId, f.provider, f.ref, canonical('addSttForget', 'at', f.at));
+}
+
+/** Copies still to delete with fewer than maxAttempts tries, oldest first; optionally one meeting's only. */
+export function pendingSttForgets(db: Db, o: { provider: SttForgetRow['provider']; maxAttempts: number; meetingId?: number }): SttForgetRow[] {
+  return db
+    .prepare(`SELECT id, meeting_id AS meetingId, provider, ref, attempts FROM stt_forget
+      WHERE provider = ? AND attempts < ? AND (? IS NULL OR meeting_id = ?) ORDER BY id`)
+    .all(o.provider, o.maxAttempts, o.meetingId ?? null, o.meetingId ?? null) as SttForgetRow[];
+}
+
+/** Counts one try, before the provider is asked, so a try cut off by a crash still counts. */
+export function countSttForgetAttempt(db: Db, id: number): void {
+  db.prepare('UPDATE stt_forget SET attempts = attempts + 1 WHERE id = ?').run(id);
+}
+
+/** The provider has deleted its copy. */
+export function deleteSttForget(db: Db, id: number): void {
+  db.prepare('DELETE FROM stt_forget WHERE id = ?').run(id);
+}
+
 /** Stores a queued meeting's speech-part bookkeeping as it is now (written before and after every part's call). Throws when not queued. */
 export function setSttParts(db: Db, id: number, parts: SttPartRow[], at: string): void {
   const json = toJson('setSttParts', 'stt_parts', SttPartsSchema, parts);

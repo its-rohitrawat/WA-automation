@@ -189,6 +189,19 @@ describe('SpendGuard', () => {
     expect((db.prepare('SELECT COUNT(*) AS n FROM spend').get() as { n: number }).n).toBe(2);
   });
 
+  it('settlePending writes the booking and the owner record in one transaction; a failing owner write is rolled back', () => {
+    const db = seededDb();
+    const guard = new SpendGuard({ db, clock: manualClock('2026-10-19T10:00:00Z'), capUsd: 1 });
+    guard.reserve(0.1, 'stt', () => db.prepare("INSERT INTO kv (k, v) VALUES ('ok', 'x')").run());
+    guard.reserve(0.2, 'stt', () => {
+      db.prepare("INSERT INTO kv (k, v) VALUES ('half', 'x')").run();
+      throw new Error('owner write failed');
+    });
+    guard.settlePending('shutdown (estimated)');
+    expect(db.prepare("SELECT k FROM kv WHERE k IN ('ok', 'half') ORDER BY k").all()).toEqual([{ k: 'ok' }]); // the half-done owner write is gone
+    expect(db.prepare('SELECT usd FROM spend ORDER BY id').all()).toEqual([{ usd: 0.1 }, { usd: 0.2 }]); // both still booked
+  });
+
   it('records on settle with an unknown id and ignores unknown release', () => {
     const { guard } = make();
     guard.release(999);

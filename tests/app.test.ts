@@ -294,7 +294,7 @@ describe('app shutdown', () => {
     const c = ai.calls[0]!;
     const rows = db.prepare('SELECT kind, usd, detail FROM spend').all() as { kind: string; usd: number; detail: string }[];
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ kind: 'ai', detail: 'shutdown before the AI call finished (estimated)' });
+    expect(rows[0]).toMatchObject({ kind: 'ai', detail: 'shutdown before the paid call finished (estimated)' });
     expect(rows[0]!.usd).toBeCloseTo(estimateCostUsd(c.system.length + c.user.length, P, MAX_OUTPUT_TOKENS), 9);
     expect(lines.find((l) => l.count === 1)).toMatchObject({ level: 40 });
     expect(vi.getTimerCount()).toBe(0);

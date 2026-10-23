@@ -8,8 +8,8 @@ describe('openDb', () => {
     const db = openDb(':memory:');
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]).map((t) => t.name);
     expect(tables).toEqual(expect.arrayContaining([
-      'batches', 'clients', 'decisions', 'kv', 'media', 'meetings', 'message_edits', 'messages', 'people', 'reactions', 'schema_version', 'spend', 'task_events',
-      'tasks',
+      'batches', 'clients', 'decisions', 'kv', 'media', 'meetings', 'message_edits', 'messages', 'people', 'reactions', 'schema_version', 'spend', 'stt_forget',
+      'task_events', 'tasks',
     ]));
   });
 

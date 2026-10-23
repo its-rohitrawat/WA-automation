@@ -1,4 +1,4 @@
-import type { Db } from '../store/db.ts';
+import { tx, type Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import { istDate } from '../util/time.ts';
 
@@ -80,9 +80,10 @@ export class SpendGuard {
   /**
    * Holds an estimate while a paid call is in flight. Returns a reservation id, or null if it would pass the cap.
    * `kind`: what settlePending books the hold as if the call is still running at shutdown.
-   * `onBookedAtShutdown`: called right after settlePending has booked this hold, so the owner can note durably that the
-   * call is paid for (a meeting's speech part is marked booked, and is not booked again after the restart). It must not
-   * throw; if it does, the error is dropped and the other holds are still booked.
+   * `onBookedAtShutdown`: called by settlePending inside the transaction that books this hold, so the owner can note
+   * durably that the call is paid for (a meeting's speech part is marked booked, and is not booked again after the
+   * restart). If it throws, its writes and the booking roll back, the hold is booked alone, and the other holds are
+   * still booked.
    */
   reserve(estimateUsd: number, kind: SpendKind = 'ai', onBookedAtShutdown?: () => void): number | null {
     if (this.#closed || !this.canSpend(estimateUsd)) return null;
@@ -117,14 +118,25 @@ export class SpendGuard {
     let n = 0;
     for (const [id, r] of [...this.#pending]) {
       this.#pending.delete(id);
-      this.record(r.kind, r.usd, detail); // if this throws, the id is not marked booked, so a late settle() still records
+      const owner = r.onBookedAtShutdown;
+      if (owner) {
+        try {
+          // The booking and the owner's own record of it (a meeting's speech part) are written together.
+          tx(this.#db, () => {
+            this.record(r.kind, r.usd, detail);
+            owner();
+          });
+        } catch {
+          // The owner's write failed and took the booking with it: book alone. The owner's record still says nothing is
+          // booked, so its recovery books the call once more (the safe side). If this throws too, the id is not marked
+          // booked, so a late settle() still records.
+          this.record(r.kind, r.usd, detail);
+        }
+      } else {
+        this.record(r.kind, r.usd, detail); // if this throws, the id is not marked booked, so a late settle() still records
+      }
       this.#bookedAtEstimate.add(id);
       n++;
-      try {
-        r.onBookedAtShutdown?.();
-      } catch {
-        // The owner's own bookkeeping failed; the booking above stands, and the other holds are still booked.
-      }
     }
     return n;
   }

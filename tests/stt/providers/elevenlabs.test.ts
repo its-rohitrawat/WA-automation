@@ -118,6 +118,15 @@ describe('ElevenLabsProvider.forget', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('forgetRef gives the transcription id only, and forgetById deletes by it later', async () => {
+    const { http, calls } = fake(() => new Response(null, { status: 200 }));
+    const p = new ElevenLabsProvider({ apiKey: 'k', http });
+    expect(p.forgetRef(saved({ ...ANSWER, transcription_id: 'tr9' }))).toBe('tr9');
+    expect(p.forgetRef(saved(ANSWER))).toBeNull();
+    await p.forgetById('tr9');
+    expect(calls.map((c) => [c.method, c.url])).toEqual([['DELETE', 'https://api.elevenlabs.io/v1/speech-to-text/transcripts/tr9']]);
+  });
+
   it('reports a refused delete as SttHttpError', async () => {
     const { http } = fake(() => Response.json({ detail: { status: 'not_found' } }, { status: 404 }));
     const err = await new ElevenLabsProvider({ apiKey: 'k', http }).forget(saved({ transcription_id: 'tr1' })).catch((e: unknown) => e);

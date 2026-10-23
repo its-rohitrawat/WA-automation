@@ -197,7 +197,8 @@ CREATE INDEX media_client ON media (client_id);
     // Phase 3: one row per Google Meet recording. JSON columns: attendees [{email, name, team}], participants [name],
     // stt_parts SttPart[], transcript Segment[], summary MeetingSummary. Internal meetings keep no title, attendees or names
     // (the CHECK makes sure of it).
-    // A claim counts an attempt and moves next_attempt_at ahead, as media's does.
+    // A claim counts an attempt and moves next_attempt_at ahead, as media's does. stt_forget: the provider copies of
+    // speech answers still to delete.
     version: 7,
     sql: `
 CREATE TABLE meetings (
@@ -233,6 +234,17 @@ ALTER TABLE tasks ADD COLUMN meeting_id INTEGER REFERENCES meetings(id);
 ALTER TABLE decisions ADD COLUMN meeting_id INTEGER REFERENCES meetings(id);
 CREATE INDEX tasks_meeting ON tasks(meeting_id);
 CREATE INDEX decisions_meeting ON decisions(meeting_id);
+-- Provider copies of speech answers still to delete (M7): the provider's own id for the copy only, never what was said.
+-- A row is removed only once the provider has deleted its copy; attempts caps the retries.
+CREATE TABLE stt_forget (
+  id INTEGER PRIMARY KEY,
+  meeting_id INTEGER NOT NULL REFERENCES meetings(id),
+  provider TEXT NOT NULL CHECK (provider IN ('sarvam', 'elevenlabs', 'openai')),
+  ref TEXT NOT NULL CHECK (length(ref) BETWEEN 1 AND 200),
+  created_at TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (provider, ref)
+);
 `,
   },
 ];

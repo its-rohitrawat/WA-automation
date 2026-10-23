@@ -275,7 +275,7 @@ export function createApp(d: AppDeps): App {
       await Promise.all([debouncer.drain(drainMs), mediaQueue?.drain(drainMs)]);
       // A call still running was probably billed: book it at its estimate. After a clean drain nothing is pending.
       try {
-        const count = spend.settlePending('shutdown before the AI call finished (estimated)');
+        const count = spend.settlePending('shutdown before the paid call finished (estimated)');
         if (count > 0) d.log.warn({ count }, 'AI calls still running at shutdown; booked at their estimate');
       } catch (err) {
         d.log.error({ err }, 'booking unfinished AI calls failed');

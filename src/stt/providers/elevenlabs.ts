@@ -65,9 +65,18 @@ export class ElevenLabsProvider implements SttProvider {
 
   /** ElevenLabs keeps every transcript in the account; once it is saved locally, that copy is deleted. Free. */
   async forget(result: ProviderResult): Promise<void> {
+    const ref = this.forgetRef(result);
+    if (ref !== null) await this.forgetById(ref);
+  }
+
+  /** The transcription id ElevenLabs gives its stored copy. */
+  forgetRef(result: ProviderResult): string | null {
     const stored = StoredSchema.safeParse(result.raw);
-    if (!stored.success) return;
-    const url = `${ENDPOINT.replace('/speech-to-text', '/speech-to-text/transcripts')}/${encodeURIComponent(stored.data.transcription_id)}`;
+    return stored.success ? stored.data.transcription_id : null;
+  }
+
+  async forgetById(ref: string): Promise<void> {
+    const url = `${ENDPOINT.replace('/speech-to-text', '/speech-to-text/transcripts')}/${encodeURIComponent(ref)}`;
     await requestOk(this.#http, url, { method: 'DELETE', headers: { 'xi-api-key': this.#key }, signal: AbortSignal.timeout(60_000) });
   }
 }

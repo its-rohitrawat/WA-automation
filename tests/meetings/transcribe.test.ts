@@ -2,11 +2,12 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { Writable } from 'node:stream';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseEnv } from '../../src/config/env.ts';
 import { MeetingDeferral } from '../../src/meetings/audio.ts';
 import {
-  createMeetingTranscriber, meetingTranscriber, recoverInflightParts, transcribeMeeting, type MeetingTranscriber, type TranscribeMeetingDeps,
+  createMeetingTranscriber, forgetPending, MAX_FORGET_ATTEMPTS, meetingTranscriber, recoverInflightParts, transcribeMeeting, type MeetingTranscriber,
+  type TranscribeMeetingDeps,
 } from '../../src/meetings/transcribe.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { Ffmpeg, type RunFile } from '../../src/stt/audio.ts';
@@ -35,7 +36,9 @@ const newMeeting = (): NewMeeting => ({
 });
 
 type Script = (audio: AudioPart, opts: TranscribeOptions) => Promise<ProviderResult>;
-const result = (segments: Segment[], billedSeconds: number | null = null): ProviderResult => ({ model: 'm', segments, billedSeconds, raw: { segments } });
+let refSeq = 0;
+/** The answer keeps a copy at the provider, named by ref (as ElevenLabs does). */
+const result = (segments: Segment[], billedSeconds: number | null = null): ProviderResult => ({ model: 'm', segments, billedSeconds, raw: { segments, ref: `tr-${++refSeq}` } });
 const said = (text: string, speaker: string | null = 'A'): Segment[] => [{ start: 1, end: 2, speaker, text }];
 const ok = (text = 'namaste', billed: number | null = null): Script => async () => result(said(text), billed);
 const fail = (e: Error): Script => async () => {
@@ -52,7 +55,7 @@ class FakeProvider implements SttProvider {
   readonly maxPartSeconds: number;
   readonly calls: { audio: AudioPart; opts: TranscribeOptions }[] = [];
   script: Script[] = [];
-  forgetImpl: (r: ProviderResult) => Promise<void> = async () => {};
+  forgetImpl: (ref: string) => Promise<void> = async () => {};
   readonly forgotten: unknown[] = [];
   constructor(id: ProviderId, maxPartSeconds: number) {
     this.id = id;
@@ -63,9 +66,12 @@ class FakeProvider implements SttProvider {
     const next = this.script.shift() ?? ok();
     return await next(audio, opts);
   }
-  async forget(r: ProviderResult): Promise<void> {
-    this.forgotten.push(r.raw);
-    await this.forgetImpl(r);
+  forgetRef(r: ProviderResult): string | null {
+    return (r.raw as { ref?: string }).ref ?? null;
+  }
+  async forgetById(ref: string): Promise<void> {
+    this.forgotten.push(ref);
+    await this.forgetImpl(ref);
   }
 }
 
@@ -103,6 +109,7 @@ describe('transcribeMeeting', () => {
   const clock = manualClock('2026-11-01T10:00:00.000Z');
   const rows = () => db.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
   const parts = () => getMeeting(db, id)!.sttParts;
+  const forgets = () => db.prepare('SELECT * FROM stt_forget ORDER BY id').all() as { id: number; meeting_id: number; provider: string; ref: string; attempts: number }[];
   const partsDir = () => join(dataDir, 'meetings', 'tmp', `${id}-parts`);
 
   const prepare = (audioSeconds: number) => {
@@ -444,6 +451,103 @@ describe('transcribeMeeting', () => {
     expect(p.forgotten).toHaveLength(3);
     expect(getMeeting(db, id)!.stage).toBe('transcribed');
     expect(lines.some((l) => l.includes('could not be deleted'))).toBe(true);
+    // The failed one stays noted, and is deleted by a later forgetPending.
+    expect(forgets()).toEqual([expect.objectContaining({ meeting_id: id, provider: 'openai', attempts: 1 })]);
+    expect(await forgetPending(db, meetingTranscriber(p, INR), silentLogger())).toBe(1);
+    expect(forgets()).toEqual([]);
+    expect(p.forgotten).toHaveLength(4);
+  });
+
+  it('the copy id is stored with the finished part, holds no transcript text, and a crash before forget is caught up later', async () => {
+    prepare(1200);
+    const p = new FakeProvider('elevenlabs', 36_000);
+    p.script = [ok('gopniya baat', 1200)];
+    let forgetStarted: () => void = () => {};
+    const inForget = new Promise<void>((r) => (forgetStarted = r));
+    p.forgetImpl = async () => {
+      forgetStarted();
+      await new Promise<void>(() => {}); // the process exits during the DELETE
+    };
+    void transcribeMeeting(id, deps(p));
+    await inForget;
+    expect(getMeeting(db, id)!.stage).toBe('transcribed');
+    const stored = forgets();
+    expect(stored).toHaveLength(1);
+    expect(Object.keys(stored[0]!).sort()).toEqual(['attempts', 'created_at', 'id', 'meeting_id', 'provider', 'ref']);
+    expect(JSON.stringify(stored)).not.toContain('gopniya');
+
+    // The restart: forgetPending at processor start deletes it.
+    const p2 = new FakeProvider('elevenlabs', 36_000);
+    expect(await forgetPending(db, meetingTranscriber(p2, INR), silentLogger())).toBe(1);
+    expect(p2.forgotten).toEqual([stored[0]!.ref]);
+    expect(forgets()).toEqual([]);
+  });
+
+  it('forgetPending: a 404 counts as deleted; other failures are tried at most MAX_FORGET_ATTEMPTS times', async () => {
+    prepare(1200);
+    const p = new FakeProvider('elevenlabs', 36_000);
+    p.forgetImpl = async () => {
+      throw new SttNoAnswerError('timeout');
+    };
+    await transcribeMeeting(id, deps(p));
+    const { lines, log } = capturingLogger();
+    for (let k = 0; k < MAX_FORGET_ATTEMPTS + 2; k++) await forgetPending(db, meetingTranscriber(p, INR), log);
+    expect(p.forgotten).toHaveLength(MAX_FORGET_ATTEMPTS);
+    expect(forgets()[0]).toMatchObject({ attempts: MAX_FORGET_ATTEMPTS });
+    expect(lines.some((l) => l.includes('no more tries') && l.includes(`"meetingId":${id}`) && l.includes('"code":"timeout"'))).toBe(true);
+
+    db.prepare('UPDATE stt_forget SET attempts = 0').run();
+    p.forgetImpl = async () => {
+      throw new SttHttpError(404);
+    };
+    expect(await forgetPending(db, meetingTranscriber(p, INR), silentLogger())).toBe(1);
+    expect(forgets()).toEqual([]);
+  });
+
+  it('a spend write that fails after the call leaves the part inflight with nothing booked; the next run books it once', async () => {
+    prepare(1200);
+    const p = new FakeProvider('elevenlabs', 36_000);
+    p.script = [ok('x', 1200)];
+    const broken = new Error('disk I/O error');
+    const record = vi.spyOn(spend, 'record').mockImplementationOnce(() => {
+      throw broken;
+    });
+    await expect(transcribeMeeting(id, deps(p))).rejects.toBe(broken);
+    record.mockRestore();
+    expect(parts()[0]).toMatchObject({ state: 'inflight', booked: 'none' });
+    expect(rows()).toEqual([]);
+    expect(forgets()).toEqual([]); // the done write went with it
+
+    p.script = [ok('x', 1200)];
+    await transcribeMeeting(id, deps(p));
+    expect(rows().map((r) => r.detail)).toEqual([`meeting ${id} part 1 (unknown, estimated)`, `meeting ${id} part 1`]);
+  });
+
+  it('a part write that fails inside the booking transaction takes the booking with it', async () => {
+    prepare(1200);
+    const p = new FakeProvider('openai', 36_000);
+    p.script = [
+      async () => {
+        db.prepare("UPDATE meetings SET status = 'failed' WHERE id = ?").run(id); // the part write will be refused
+        return result(said('x'), 1200);
+      },
+    ];
+    await expect(transcribeMeeting(id, deps(p))).rejects.toThrow();
+    expect(rows()).toEqual([]);
+    db.prepare("UPDATE meetings SET status = 'queued' WHERE id = ?").run(id);
+    expect(parts()[0]).toMatchObject({ state: 'inflight', booked: 'none' });
+    expect(recoverInflightParts(db, spend, meetingTranscriber(p, INR), silentLogger())).toBe(1);
+  });
+
+  it('a part file that is missing before the send is thrown as it is, with nothing sent or booked', async () => {
+    prepare(1200);
+    rmSync(audioAbs);
+    const p = new FakeProvider('elevenlabs', 36_000);
+    const err = await transcribeMeeting(id, deps(p)).catch((e: unknown) => e);
+    expect((err as NodeJS.ErrnoException).code).toBe('ENOENT');
+    expect(p.calls).toHaveLength(0);
+    expect(rows()).toEqual([]);
+    expect(parts()[0]).toMatchObject({ state: 'todo', booked: 'none' });
   });
 
   it.each([
