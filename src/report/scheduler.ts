@@ -182,6 +182,10 @@ export class ReportScheduler {
       this.#retry(date, 'build_failed');
       return;
     }
+    if (this.#stopped) {
+      this.#retry(date, 'stopped'); // stop() arrived during the build: nothing has been sent yet, so start no send
+      return;
+    }
     let result: SendResult;
     try {
       result = await sender.sendReport(payload.text, payload.xlsx, payload.fileName);

@@ -1,11 +1,14 @@
+import { Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { describeReport, ReportScheduler, retryWaitMs, UNKNOWN_WARNING, type ReportPayload } from '../../src/report/scheduler.ts';
 import type { ReportSettings, SendResult } from '../../src/report/types.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
-import { claimReport, finishReport, REPORT_REQUEST_KEY, reportFor, retryReport, type ReportRow } from '../../src/store/reports.ts';
+import {
+  claimReport, finishReport, markInterruptedReports, REPORT_REQUEST_KEY, reportFor, retryReport, type ReportRow,
+} from '../../src/store/reports.ts';
 import { manualClock } from '../../src/util/clock.ts';
-import { silentLogger } from '../../src/util/logger.ts';
-import { seededDb } from '../helpers/db.ts';
+import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
+import { MEHTA, seededDb, SHARMA } from '../helpers/db.ts';
 import { FakeReportSender } from '../helpers/fakeReportSender.ts';
 
 const DAY = '2026-10-23';
@@ -14,12 +17,12 @@ const iso = (hm: string) => new Date(IST(hm)).toISOString();
 const ON: ReportSettings = { enabled: true, time: '06:00', deadline: '12:00' };
 const failed = (code: string): SendResult => ({ status: 'failed', code });
 
-function setup(o: { settings?: ReportSettings; build?: (now: Date) => Promise<ReportPayload> } = {}) {
+function setup(o: { settings?: ReportSettings; build?: (now: Date) => Promise<ReportPayload>; log?: Logger } = {}) {
   const db = seededDb();
   const clock = manualClock(IST('05:00'));
   const sender = new FakeReportSender();
   const s = new ReportScheduler({
-    db, clock, log: silentLogger(), sender, settings: o.settings ?? ON, healthLine: () => ({ ok: true, text: '✅ Connected' }), build: o.build,
+    db, clock, log: o.log ?? silentLogger(), sender, settings: o.settings ?? ON, healthLine: () => ({ ok: true, text: '✅ Connected' }), build: o.build,
   });
   /** Moves the clock to an IST time today and runs one tick. */
   const at = async (hm: string) => {
@@ -33,6 +36,18 @@ function gate() {
   let release!: () => void;
   const promise = new Promise<void>((r) => (release = r));
   return { promise, release };
+}
+
+/** A logger that keeps every line it writes, as raw JSON text. */
+function capturingLogger() {
+  const lines: string[] = [];
+  const sink = new Writable({
+    write(chunk, _enc, cb) {
+      lines.push(String(chunk));
+      cb();
+    },
+  });
+  return { lines, log: createLogger('debug', sink) };
 }
 
 /** Lets pending promise callbacks run, so a step that would happen at once has happened. */
@@ -227,6 +242,117 @@ describe('ReportScheduler', () => {
     expect(sender.stopped).toBe(1);
   });
 
+  it('claims the row before the send goes out', async () => {
+    const { db, sender, at } = setup();
+    const seen: (ReportRow | undefined)[] = [];
+    const send = sender.sendReport.bind(sender);
+    sender.sendReport = async (text, xlsx, fileName) => {
+      seen.push(reportFor(db, DAY));
+      return send(text, xlsx, fileName);
+    };
+    await at('06:00');
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ status: 'sending', attempts: 1 });
+  });
+
+  it('a crash and restart during a send leaves the day unknown, and it is not sent again', async () => {
+    const { db, clock, sender, s, at } = setup();
+    const g = gate();
+    sender.gate = g.promise;
+    clock.set(IST('06:00'));
+    const first = s.tick(clock.now());
+    await vi.waitFor(() => expect(sender.calls).toHaveLength(1));
+    expect(markInterruptedReports(db, iso('06:01'))).toBe(1); // what a restart finds while the send is out
+    g.release();
+    await first;
+    await at('06:30');
+    expect(sender.calls).toHaveLength(1);
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'interrupted' });
+  });
+
+  it('stop during the build starts no send and leaves the day to retry', async () => {
+    const g = gate();
+    let built = false;
+    const build = async (): Promise<ReportPayload> => {
+      await g.promise;
+      built = true;
+      return { text: 'report text', xlsx: Buffer.from('PK'), fileName: 'Tracker-2026-10-23.xlsx' };
+    };
+    const { db, clock, sender, s } = setup({ build });
+    clock.set(IST('06:00'));
+    const first = s.tick(clock.now());
+    await settle();
+    expect(reportFor(db, DAY)!.status).toBe('sending');
+    const stopping = s.stop(5_000);
+    await settle();
+    g.release();
+    await Promise.all([stopping, first]);
+    expect(built).toBe(true);
+    expect(sender.calls).toHaveLength(0);
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'stopped' });
+    expect(sender.stopped).toBe(1);
+  });
+
+  it('stop resolves even when stopping the sender fails', async () => {
+    const { sender, s } = setup();
+    sender.stop = async () => {
+      throw new Error('socket already closed');
+    };
+    await expect(s.stop(100)).resolves.toBeUndefined();
+  });
+
+  it("health shows the sender's warning when the owner has to act", () => {
+    const { sender, s, clock } = setup();
+    clock.set(IST('07:00'));
+    sender.state = { ...sender.state, state: 'not_linked' };
+    expect(s.health().warning).toContain('npm run cli -- link-sender');
+    sender.state = { ...sender.state, state: 'logged_out' };
+    expect(s.health().warning).toContain('link-sender --reset');
+    sender.state = { ...sender.state, state: 'idle' };
+    expect(s.health().warning).toBeNull();
+  });
+
+  it('logs only dates, codes, times and counts: never the report text, a client name or the file name', async () => {
+    const { lines, log } = capturingLogger();
+    const allowed = new Set(['level', 'time', 'msg', 'date', 'code', 'nextAttemptAt', 'count', 'reason', 'err']);
+    const texts: string[] = [];
+    const check = () => {
+      expect(lines.length).toBeGreaterThan(0);
+      for (const line of lines) {
+        for (const t of texts) expect(line).not.toContain(t);
+        for (const bad of [SHARMA.name, MEHTA.name, 'Sharma', 'Mehta', 'Tracker-', 'Morning report ·', 'msg-1']) expect(line).not.toContain(bad);
+        for (const key of Object.keys(JSON.parse(line) as object)) expect(allowed).toContain(key);
+      }
+    };
+
+    // sent, then failed (retry), then unknown, then a sender crash
+    for (const results of [[], [failed('connect_timeout')], [{ status: 'unknown', code: 'timeout' } as SendResult]]) {
+      const one = setup({ log });
+      one.sender.results = results;
+      await one.at('06:00');
+      texts.push(...one.sender.calls.map((c) => c.text));
+    }
+    const crash = setup({ log });
+    crash.sender.throwNext = true;
+    await crash.at('06:00');
+    texts.push(...crash.sender.calls.map((c) => c.text));
+
+    // a build failure whose error message names a client and the file
+    const broken = setup({ log, build: async () => Promise.reject(new Error(`Sharma Interiors Tracker-${DAY}.xlsx`)) });
+    await broken.at('06:00');
+
+    // skipped after the deadline, and a crash mid-send found at start
+    const late = setup({ log });
+    await late.at('12:00');
+    const cut = setup({ log });
+    claimReport(cut.db, DAY, iso('06:00'));
+    cut.s.recover(new Date(IST('06:20')));
+
+    expect(texts.length).toBeGreaterThan(0);
+    expect(lines.length).toBeGreaterThanOrEqual(7);
+    check();
+  });
+
   it("closes an earlier day's retry row as skipped and keeps its reason", async () => {
     const { db, at } = setup();
     const before = '2026-10-22T06:00:00.000Z';
@@ -286,6 +412,6 @@ describe('describeReport', () => {
   });
 
   it('waits 2, 5, then 10 minutes', () => {
-    expect([1, 2, 3, 4, 9].map(retryWaitMs)).toEqual([120_000, 300_000, 600_000, 600_000, 600_000]);
+    expect([0, 1, 2, 3, 4, 9].map(retryWaitMs)).toEqual([120_000, 120_000, 300_000, 600_000, 600_000, 600_000]);
   });
 });
