@@ -3,6 +3,7 @@ import { drive } from '@googleapis/drive';
 import type { Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import type { Logger } from '../util/logger.ts';
+import { isAuthFailure } from './authFailure.ts';
 import type { OAuth2Client } from './googleAuth.ts';
 import { XLSX_MIME } from './workbook.ts';
 
@@ -20,15 +21,8 @@ export class DriveAuthError extends Error {
   }
 }
 
-/** A gaxios error with HTTP 401 or an invalid_grant body, or an error that says invalid_grant. */
-export function isAuthFailure(e: unknown): boolean {
-  const x = e as { code?: unknown; status?: unknown; name?: string; message?: string; response?: { status?: number; data?: { error?: unknown } } } | null;
-  if (!x || typeof x !== 'object') return false;
-  if (x.name === 'DriveAuthError') return true;
-  if (Number(x.code) === 401 || x.status === 401 || x.response?.status === 401) return true;
-  if (x.response?.data?.error === 'invalid_grant') return true;
-  return /invalid_grant/.test(`${x.name ?? ''} ${x.message ?? ''}`);
-}
+// In its own module so the meetings client can use it without loading this one (and, through it, the workbook).
+export { isAuthFailure };
 
 export interface DriveApi {
   /** Creates a folder at the top of My Drive, or inside parentId. */

@@ -9,6 +9,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // driveApi.test.ts). These tests check what googleMeetingsApi asks for and how it reads the answers.
 const files = vi.hoisted(() => ({ get: vi.fn() }));
 vi.mock('@googleapis/drive', () => ({ drive: vi.fn(() => ({ files })) }));
+// The real open, wrapped so one test can hand out a file handle whose close fails.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...real, open: vi.fn(real.open) };
+});
 
 import { drive } from '@googleapis/drive';
 import {
@@ -97,6 +102,32 @@ describe('googleMeetingsApi: requests', () => {
     expect(request.mock.calls[19]![0].params.pageToken).toBe('t19');
   });
 
+  it('paging stops when a page token repeats, so no page comes twice', async () => {
+    let n = 0;
+    request.mockImplementation(async () => ({ data: { conferenceRecords: [conf(`c${++n}`)], nextPageToken: n === 1 ? 'a' : n === 2 ? 'b' : 'a' } }));
+    const out = await api().listConferences('2026-10-20T00:00:00Z', '2026-10-21T00:00:00Z', signal);
+    expect(request.mock.calls.map((c) => c[0].params.pageToken)).toEqual([undefined, 'a', 'b']);
+    expect(out.map((c) => c.name)).toEqual(['conferenceRecords/c1', 'conferenceRecords/c2', 'conferenceRecords/c3']);
+  });
+
+  it('listConferences skips a malformed record and keeps the rest of the page', async () => {
+    request.mockResolvedValueOnce({
+      data: {
+        conferenceRecords: [
+          conf('good'),
+          { ...conf('dots'), name: 'conferenceRecords/..' },
+          { ...conf('sp'), space: 'spaces/.' },
+          { name: 'conferenceRecords/nostart', space: 'spaces/x' },
+          { ...conf('badtime'), startTime: 'tomorrow' },
+          'not an object',
+          null,
+        ],
+      },
+    });
+    const out = await api().listConferences('2026-10-20T00:00:00Z', '2026-10-21T00:00:00Z', signal);
+    expect(out.map((c) => c.name)).toEqual(['conferenceRecords/good']);
+  });
+
   it('refuses times that are not ISO timestamps without calling Google', async () => {
     await expect(api().listConferences('2026-10-20" OR x="', '2026-10-21T00:00:00Z', signal)).rejects.toBeInstanceOf(TypeError);
     await expect(api().findInvite('abc-defg-hij', 'yesterday', signal)).rejects.toBeInstanceOf(TypeError);
@@ -121,6 +152,7 @@ describe('googleMeetingsApi: requests', () => {
             { name: 'conferenceRecords/a/recordings/r4', state: 'STATE_UNSPECIFIED' },
             { name: 'conferenceRecords/a/recordings/r5', state: 'SOMETHING_NEW', driveDestination: { file: 'file-5' } },
             { name: 'conferenceRecords/a/recordings/r6', state: 'FILE_GENERATED' },
+            { name: 'conferenceRecords/a/recordings/r7', state: 'FILE_GENERATED', driveDestination: { file: '../x' } },
           ],
         },
       });
@@ -130,6 +162,8 @@ describe('googleMeetingsApi: requests', () => {
       { name: 'conferenceRecords/a/recordings/r2', state: 'ENDED', driveFileId: null, startTime: '2026-10-23T11:00:00Z', endTime: null },
       { name: 'conferenceRecords/a/recordings/r3', state: 'STARTED', driveFileId: null, startTime: null, endTime: null },
       { name: 'conferenceRecords/a/recordings/r6', state: 'FILE_GENERATED', driveFileId: null, startTime: null, endTime: null },
+      // A file id without Drive's shape is never used.
+      { name: 'conferenceRecords/a/recordings/r7', state: 'FILE_GENERATED', driveFileId: null, startTime: null, endTime: null },
     ]);
     expect(request.mock.calls[0]![0]).toEqual({
       url: 'https://meet.googleapis.com/v2/conferenceRecords/a/recordings',
@@ -172,6 +206,10 @@ describe('googleMeetingsApi: requests', () => {
 
   it('refuses resource names that are not Meet names without calling Google', async () => {
     await expect(api().listRecordings('conferenceRecords/../spaces', signal)).rejects.toBeInstanceOf(TypeError);
+    await expect(api().listRecordings('conferenceRecords/..', signal)).rejects.toBeInstanceOf(TypeError);
+    await expect(api().listSignedInNames('conferenceRecords/.', signal)).rejects.toBeInstanceOf(TypeError);
+    await expect(api().meetingCode('spaces/.', signal)).rejects.toBeInstanceOf(TypeError);
+    await expect(api().meetingCode('spaces/..', signal)).rejects.toBeInstanceOf(TypeError);
     await expect(api().listSignedInNames('spaces/x', signal)).rejects.toBeInstanceOf(TypeError);
     await expect(api().meetingCode('conferenceRecords/a', signal)).rejects.toBeInstanceOf(TypeError);
     await expect(api().videoInfo('a/b', signal)).rejects.toBeInstanceOf(TypeError);
@@ -210,11 +248,39 @@ describe('googleMeetingsApi: requests', () => {
     expect(request.mock.calls[0]![0]).toEqual({
       url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
       method: 'GET',
-      params: { timeMin: '2026-10-23T07:00:00.000Z', timeMax: '2026-10-23T13:00:00.000Z', singleEvents: 'true', maxResults: '250' },
+      params: {
+        timeMin: '2026-10-23T07:00:00.000Z',
+        timeMax: '2026-10-23T13:00:00.000Z',
+        singleEvents: 'true',
+        maxResults: '250',
+        fields: 'items(summary,start,conferenceData/conferenceId,attendees(email,displayName,self,resource)),nextPageToken',
+      },
       signal,
       timeout: 60_000,
       responseType: 'json',
     });
+  });
+
+  it('findInvite follows pages (a page can be empty) and picks the match whose start is closest', async () => {
+    request
+      .mockResolvedValueOnce({ data: { items: [], nextPageToken: 'e2' } })
+      .mockResolvedValueOnce({
+        data: {
+          items: [
+            { summary: 'Two hours early', start: { dateTime: '2026-10-23T08:00:00Z' }, conferenceData: { conferenceId: 'abc-defg-hij' } },
+            { summary: 'All day', start: { date: '2026-10-23' }, conferenceData: { conferenceId: 'abc-defg-hij' } },
+          ],
+          nextPageToken: 'e3',
+        },
+      })
+      .mockResolvedValueOnce({
+        data: { items: [{ summary: 'Half an hour late', start: { dateTime: '2026-10-23T15:30:00+05:00' }, conferenceData: { conferenceId: 'abc-defg-hij' } }] },
+      });
+    const invite = await api().findInvite('abc-defg-hij', '2026-10-23T10:00:00Z', signal);
+    expect(invite?.title).toBe('Half an hour late');
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(request.mock.calls[1]![0].params).toMatchObject({ pageToken: 'e2', singleEvents: 'true', maxResults: '250' });
+    expect(request.mock.calls[2]![0].params.pageToken).toBe('e3');
   });
 
   it('findInvite: no matching event is null; an event without summary or attendees gives an empty title and list', async () => {
@@ -231,7 +297,7 @@ describe('googleMeetingsApi: requests', () => {
     expect(await api().videoInfo('file-1', signal)).toEqual({ name: 'Weekly sync (2026-10-23 10:00 GMT+5:30)', size: 123456789, mimeType: 'video/mp4', durationMs: 3600000 });
     expect(files.get.mock.calls[0]).toEqual([
       { fileId: 'file-1', fields: 'name,size,mimeType,videoMediaMetadata(durationMillis)', supportsAllDrives: true },
-      { signal, timeout: 60_000 },
+      { signal, timeout: 60_000, retry: false },
     ]);
   });
 
@@ -256,6 +322,8 @@ describe('googleMeetingsApi: error mapping', () => {
     ['rateLimitExceeded', [T, 'http_403_rate']],
     ['userRateLimitExceeded', [T, 'http_403_rate']],
     ['downloadQuotaExceeded', [T, 'http_403_rate']],
+    ['quotaExceeded', [T, 'http_403_rate']],
+    ['dailyLimitExceeded', [T, 'http_403_rate']],
     ['forbidden', [N, 'http_403']],
     ['appNotAuthorizedToFile', [N, 'http_403']],
     ['cannotDownloadFile', [N, 'http_403']],
@@ -288,14 +356,13 @@ describe('googleMeetingsApi: error mapping', () => {
     files.get.mockRejectedValueOnce(rejection);
     const e = await api().videoInfo('file-1', signal).catch((x: unknown) => x);
     expect(e).toBeInstanceOf(cls);
-    expect(e).toMatchObject({ code });
+    expect(e).toMatchObject({ code, name: cls.name });
+    expect((e as Error).message).not.toMatch(/alice|Weekly|example/);
   });
 
   it('a bad answer is transient bad_answer', async () => {
     request.mockResolvedValueOnce({ data: { conferenceRecords: 'nope' } });
     await expect(api().listConferences('2026-10-20T00:00:00Z', '2026-10-21T00:00:00Z', signal)).rejects.toMatchObject({ name: 'GoogleTransientError', code: 'bad_answer' });
-    request.mockResolvedValueOnce({ data: { conferenceRecords: [{ ...conf('a'), name: 'conferenceRecords/../x' }] } });
-    await expect(api().listConferences('2026-10-20T00:00:00Z', '2026-10-21T00:00:00Z', signal)).rejects.toMatchObject({ code: 'bad_answer' });
     request.mockResolvedValueOnce({ data: '<html>' });
     await expect(api().meetingCode('spaces/sp-a', signal)).rejects.toMatchObject({ code: 'bad_answer' });
     request.mockResolvedValueOnce({ data: { items: [{ attendees: 'x' }] } });
@@ -330,7 +397,10 @@ describe('googleMeetingsApi: download', () => {
     const dest = join(dir, 'm.mp4.part');
     expect(await api().download('file-1', dest, 11, signal)).toBe(11);
     expect(readFileSync(dest, 'utf8')).toBe('hello world');
-    expect(files.get.mock.calls[0]).toEqual([{ fileId: 'file-1', alt: 'media', supportsAllDrives: true }, { responseType: 'stream', signal, timeout: 1_800_000 }]);
+    expect(files.get.mock.calls[0]).toEqual([
+      { fileId: 'file-1', alt: 'media', supportsAllDrives: true },
+      { responseType: 'stream', signal, timeout: 1_800_000, retry: false },
+    ]);
     expect(sync).toHaveBeenCalledTimes(1);
     // Closed: Windows cannot remove a file that is still open.
     rmSync(dest);
@@ -390,6 +460,61 @@ describe('googleMeetingsApi: download', () => {
     expect(existsSync(dest)).toBe(false);
     files.get.mockResolvedValueOnce({ data: { not: 'a stream' } });
     await expect(api().download('file-1', dest, 1000, signal)).rejects.toMatchObject({ code: 'bad_answer' });
+    expect(existsSync(dest)).toBe(false);
+  });
+
+  it('a byte limit that is not a whole non-negative number is a TypeError, before any file or request', async () => {
+    const dest = join(dir, 'limit.mp4.part');
+    for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53]) {
+      await expect(api().download('file-1', dest, bad, signal)).rejects.toBeInstanceOf(TypeError);
+    }
+    expect(existsSync(dest)).toBe(false);
+    expect(files.get).not.toHaveBeenCalled();
+  });
+
+  it('a timeout while the body is read (an abort not from the caller) is transient timeout and leaves no file', async () => {
+    for (const name of ['AbortError', 'TimeoutError']) {
+      let reads = 0;
+      const body = new Readable({
+        read() {
+          if (reads++ === 0) this.push(Buffer.from('first part'));
+          else this.destroy(new DOMException('This operation was aborted', name));
+        },
+      });
+      files.get.mockResolvedValueOnce({ data: body });
+      const dest = join(dir, `${name}.mp4.part`);
+      await expect(api().download('file-1', dest, 1000, signal)).rejects.toMatchObject({ name: 'GoogleTransientError', code: 'timeout' });
+      expect(existsSync(dest)).toBe(false);
+    }
+  });
+
+  it('a failing fsync gives the raw disk error back and leaves no file', async () => {
+    const probe = await open(join(dir, 'probe'), 'w');
+    const proto = Object.getPrototypeOf(probe) as { sync: () => Promise<void> };
+    await probe.close();
+    const diskError = Object.assign(new Error('i/o error'), { code: 'EIO', syscall: 'fsync' });
+    vi.spyOn(proto, 'sync').mockRejectedValueOnce(diskError);
+    files.get.mockResolvedValueOnce(streamOf('video'));
+    const dest = join(dir, 'sync.mp4.part');
+    await expect(api().download('file-1', dest, 1000, signal)).rejects.toBe(diskError);
+    expect(existsSync(dest)).toBe(false);
+  });
+
+  it('a failing close gives the raw disk error back and leaves no file', async () => {
+    const real = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    const diskError = Object.assign(new Error('i/o error'), { code: 'EIO', syscall: 'close' });
+    vi.mocked(open).mockImplementationOnce(async (path, flags, mode) => {
+      const fh = await real.open(path, flags, mode);
+      const close = fh.close.bind(fh);
+      fh.close = async () => {
+        await close(); // the handle is released, as an OS close that reports an error still releases it
+        throw diskError;
+      };
+      return fh;
+    });
+    files.get.mockResolvedValueOnce(streamOf('video'));
+    const dest = join(dir, 'close.mp4.part');
+    await expect(api().download('file-1', dest, 1000, signal)).rejects.toBe(diskError);
     expect(existsSync(dest)).toBe(false);
   });
 

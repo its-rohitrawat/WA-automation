@@ -1,8 +1,8 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { DownloadTooBigError, GoogleNoAccessError, GoogleTransientError } from '../../src/meetings/googleApi.ts';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DownloadTooBigError, GoogleNoAccessError, GoogleTransientError } from '../../src/meetings/googleErrors.ts';
 import { FakeMeetingsApi } from '../helpers/fakeMeetings.ts';
 
 const signal = new AbortController().signal;
@@ -40,8 +40,7 @@ describe('FakeMeetingsApi', () => {
     const stop = new AbortController();
     const reason = new Error('stopping');
     const pending = fake.download('f1', dest, 100, stop.signal);
-    await new Promise((r) => setTimeout(r, 10));
-    expect(existsSync(dest)).toBe(true); // in progress
+    await vi.waitFor(() => expect(existsSync(dest)).toBe(true)); // in progress
     stop.abort(reason);
     await expect(pending).rejects.toBe(reason);
     expect(existsSync(dest)).toBe(false);
@@ -77,7 +76,8 @@ describe('FakeMeetingsApi', () => {
     fake.gate = new Promise<void>((r) => (openGate = r));
     let done = false;
     const pending = fake.listConferences('2026-10-23T09:00:00Z', '2026-10-23T12:00:00Z', signal).then((v) => ((done = true), v));
-    await new Promise((r) => setTimeout(r, 10));
+    await vi.waitFor(() => expect(fake.calls).toHaveLength(1));
+    await new Promise((r) => setImmediate(r)); // every pending callback has run; the gate is still shut
     expect(done).toBe(false);
     openGate();
     // [from, to): the conference starting exactly at `to` is left out.
@@ -87,5 +87,20 @@ describe('FakeMeetingsApi', () => {
     const reason = new Error('stopping');
     stop.abort(reason);
     await expect(fake.listRecordings('conferenceRecords/a', stop.signal)).rejects.toBe(reason);
+  });
+
+  it('runs the same input checks as the real client, before logging the call', async () => {
+    const fake = new FakeMeetingsApi();
+    fake.files.set('f1', { info, bytes: Buffer.from('video') });
+    await expect(fake.listConferences('yesterday', '2026-10-23T12:00:00Z', signal)).rejects.toBeInstanceOf(TypeError);
+    await expect(fake.listRecordings('conferenceRecords/..', signal)).rejects.toBeInstanceOf(TypeError);
+    await expect(fake.listSignedInNames('spaces/a', signal)).rejects.toBeInstanceOf(TypeError);
+    await expect(fake.meetingCode('spaces/.', signal)).rejects.toBeInstanceOf(TypeError);
+    await expect(fake.findInvite('abc-defg-hij', 'soon', signal)).rejects.toBeInstanceOf(TypeError);
+    await expect(fake.videoInfo('a/b', signal)).rejects.toBeInstanceOf(TypeError);
+    await expect(fake.download('f1', join(dir, 'x.part'), -1, signal)).rejects.toBeInstanceOf(TypeError);
+    await expect(fake.download('f1', join(dir, 'x.part'), 1.5, signal)).rejects.toBeInstanceOf(TypeError);
+    expect(fake.calls).toEqual([]);
+    expect(existsSync(join(dir, 'x.part'))).toBe(false);
   });
 });

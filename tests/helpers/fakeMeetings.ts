@@ -1,13 +1,17 @@
 import { open, rm } from 'node:fs/promises';
 import {
-  DownloadTooBigError,
-  GoogleNoAccessError,
+  checkConferenceName,
+  checkFileId,
+  checkIsoTime,
+  checkMaxBytes,
+  checkSpaceName,
   type ConferenceRef,
   type DriveVideoInfo,
   type InviteInfo,
   type MeetingsGoogleApi,
   type RecordingRef,
 } from '../../src/meetings/googleApi.ts';
+import { DownloadTooBigError, GoogleNoAccessError } from '../../src/meetings/googleErrors.ts';
 
 export type MeetingsMethod = keyof MeetingsGoogleApi;
 
@@ -18,8 +22,9 @@ export interface FakeMeetingFile {
 
 /**
  * Meet, Calendar and Drive in memory. Answers are copies, so a caller cannot change the stored state. Like the real
- * client, a call on a stopped signal throws the signal's reason, and download writes real bytes with 'wx', stops at
- * maxBytes and leaves no file behind on any failure.
+ * client: the same input checks run first (TypeError, and the call is not logged), a call on a stopped signal throws
+ * the signal's reason, and download writes real bytes with 'wx' (an existing dest: raw EEXIST, file left alone), stops
+ * at maxBytes and removes dest on any later failure.
  */
 export class FakeMeetingsApi implements MeetingsGoogleApi {
   /** listConferences returns those whose startTime is in [from, to), in this order. */
@@ -34,7 +39,7 @@ export class FakeMeetingsApi implements MeetingsGoogleApi {
   invites = new Map<string, InviteInfo>();
   /** Drive file id → its info and bytes (missing: GoogleNoAccessError http_404). */
   files = new Map<string, FakeMeetingFile>();
-  /** Every call in order, including the ones that failed. args leave out the signal. */
+  /** Every call that passed the input checks, in order, including the ones that failed later. args leave out the signal. */
   calls: { method: MeetingsMethod; args: unknown[] }[] = [];
   /** When set, the next call (any method) throws this once. */
   failNextWith: unknown;
@@ -49,6 +54,8 @@ export class FakeMeetingsApi implements MeetingsGoogleApi {
   }
 
   async listConferences(fromIso: string, toIso: string, signal: AbortSignal): Promise<ConferenceRef[]> {
+    checkIsoTime(fromIso);
+    checkIsoTime(toIso);
     await this.#enter('listConferences', [fromIso, toIso], signal);
     const from = Date.parse(fromIso);
     const to = Date.parse(toIso);
@@ -56,27 +63,32 @@ export class FakeMeetingsApi implements MeetingsGoogleApi {
   }
 
   async listRecordings(conference: string, signal: AbortSignal): Promise<RecordingRef[]> {
+    checkConferenceName(conference);
     await this.#enter('listRecordings', [conference], signal);
     return (this.recordings.get(conference) ?? []).map((r) => ({ ...r }));
   }
 
   async listSignedInNames(conference: string, signal: AbortSignal): Promise<string[]> {
+    checkConferenceName(conference);
     await this.#enter('listSignedInNames', [conference], signal);
     return [...(this.signedInNames.get(conference) ?? [])];
   }
 
   async meetingCode(space: string, signal: AbortSignal): Promise<string | null> {
+    checkSpaceName(space);
     await this.#enter('meetingCode', [space], signal);
     return this.codes.get(space) ?? null;
   }
 
   async findInvite(code: string, startIso: string, signal: AbortSignal): Promise<InviteInfo | null> {
+    checkIsoTime(startIso);
     await this.#enter('findInvite', [code, startIso], signal);
     const invite = this.invites.get(code);
     return invite ? { title: invite.title, attendees: invite.attendees.map((a) => ({ ...a })) } : null;
   }
 
   async videoInfo(fileId: string, signal: AbortSignal): Promise<DriveVideoInfo> {
+    checkFileId(fileId);
     await this.#enter('videoInfo', [fileId], signal);
     const file = this.files.get(fileId);
     if (!file) throw new GoogleNoAccessError('http_404');
@@ -84,6 +96,8 @@ export class FakeMeetingsApi implements MeetingsGoogleApi {
   }
 
   async download(fileId: string, dest: string, maxBytes: number, signal: AbortSignal): Promise<number> {
+    checkFileId(fileId);
+    checkMaxBytes(maxBytes);
     await this.#enter('download', [fileId, dest, maxBytes], signal, false);
     const fh = await open(dest, 'wx'); // an existing dest: EEXIST, and it is left alone
     let written = 0;
