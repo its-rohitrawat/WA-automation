@@ -51,7 +51,8 @@ describe('morning report settings', () => {
   });
 
   it('refuses a recipient that is not digits only, without echoing it', () => {
-    for (const bad of ['+919800000000', '98000 00000', '1234']) {
+    const startsValidBreaksLater = ['919800000000@g.us', '919800000000 ', '919800000000x', '1234567890123456'];
+    for (const bad of ['+919800000000', '98000 00000', '1234', ...startsValidBreaksLater]) {
       try {
         parseEnv({ REPORT_RECIPIENT: bad });
         expect.unreachable();
@@ -62,8 +63,19 @@ describe('morning report settings', () => {
     }
   });
 
+  it('accepts a recipient of 8 to 15 digits', () => {
+    expect(parseEnv({ REPORT_RECIPIENT: '12345678' }).REPORT_RECIPIENT).toBe('12345678');
+    expect(parseEnv({ REPORT_RECIPIENT: '123456789012345' }).REPORT_RECIPIENT).toBe('123456789012345');
+  });
+
   it('refuses bad times, and a deadline that is not after the start', () => {
-    expect(() => parseEnv({ REPORT_TIME: '6:00' })).toThrowError(/REPORT_TIME/);
+    for (const bad of ['6:00', '24:00', '23:60', '06:000', 'x06:00', ' 06:00']) {
+      expect(() => parseEnv({ REPORT_TIME: bad, REPORT_DEADLINE: '23:59' }), bad).toThrowError(/REPORT_TIME/);
+    }
+    for (const bad of ['9:00', '24:00', '12:60']) {
+      expect(() => parseEnv({ REPORT_TIME: '00:00', REPORT_DEADLINE: bad }), bad).toThrowError(/REPORT_DEADLINE/);
+    }
+    expect(reportSettings(parseEnv({ REPORT_TIME: '00:00', REPORT_DEADLINE: '23:59' }))).toEqual({ enabled: false, time: '00:00', deadline: '23:59' });
     expect(() => parseEnv({ REPORT_ENABLED: 'yes' })).toThrowError(/REPORT_ENABLED/);
     expect(() => parseEnv({ REPORT_TIME: '12:00', REPORT_DEADLINE: '12:00' })).toThrowError('Invalid configuration in: REPORT_DEADLINE');
   });
