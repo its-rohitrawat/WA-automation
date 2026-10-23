@@ -1,12 +1,12 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import { Writable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseEnv } from '../../src/config/env.ts';
 import { MeetingDeferral } from '../../src/meetings/audio.ts';
 import {
-  createMeetingTranscriber, forgetPending, MAX_FORGET_ATTEMPTS, meetingTranscriber, recoverInflightParts, transcribeMeeting, type MeetingTranscriber,
+  bookStuckParts, createMeetingTranscriber, forgetPending, MAX_FORGET_ATTEMPTS, meetingTranscriber, recoverInflightParts, transcribeMeeting, type MeetingTranscriber,
   type TranscribeMeetingDeps,
 } from '../../src/meetings/transcribe.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
@@ -15,7 +15,7 @@ import { SttHttpError, SttJobLostError, SttNoAnswerError, type HttpFetch } from 
 import { costUsd, modelFor } from '../../src/stt/prices.ts';
 import type { AudioPart, ProviderId, ProviderResult, Segment, SttProvider, TranscribeOptions } from '../../src/stt/types.ts';
 import type { Db } from '../../src/store/db.ts';
-import { advanceStage, getMeeting, insertFound, setSttParts, type NewMeeting, type SttPartRow } from '../../src/store/meetings.ts';
+import { advanceStage, failMeeting, getMeeting, insertFound, setSttParts, type NewMeeting, type SttPartRow } from '../../src/store/meetings.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
@@ -78,19 +78,28 @@ class FakeProvider implements SttProvider {
 const banner = (s: number) =>
   `  Duration: ${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}:${(s % 60).toFixed(2).padStart(5, '0')}, start: 0\n`;
 
-/** ffmpeg for split: the segment run writes one file per length; measuring a part returns its length. */
-function splitter(lengths: number[]): { run: RunFile; segmentRuns: () => number } {
+/**
+ * ffmpeg for split: segment run n writes one file per length in lengths[n] (the last list again after that); measuring
+ * a part returns the length it was written with.
+ */
+function splitter(lengths: number[], ...later: number[][]): { run: RunFile; segmentRuns: () => number } {
+  const runs = [lengths, ...later];
+  const written = new Map<string, number>();
   let segments = 0;
   const run: RunFile = async (_file, args) => {
     const last = args[args.length - 1]!;
     if (args.includes('segment')) {
+      const these = runs[Math.min(segments, runs.length - 1)]!;
       segments++;
-      lengths.forEach((_, i) => writeFileSync(last.replace('%03d', String(i).padStart(3, '0')), 'part'));
+      these.forEach((s, i) => {
+        const path = last.replace('%03d', String(i).padStart(3, '0'));
+        writeFileSync(path, 'part');
+        written.set(path, s);
+      });
       return { code: 0, stderr: '' };
     }
     const input = args[args.indexOf('-i') + 1]!;
-    const m = /^part-(\d{3})\.mp3$/.exec(basename(input));
-    return { code: 1, stderr: banner(m ? lengths[Number(m[1])]! : 0) };
+    return { code: 1, stderr: banner(written.get(input) ?? 0) };
   };
   return { run, segmentRuns: () => segments };
 }
@@ -109,6 +118,7 @@ describe('transcribeMeeting', () => {
   const clock = manualClock('2026-11-01T10:00:00.000Z');
   const rows = () => db.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
   const parts = () => getMeeting(db, id)!.sttParts;
+  const later = (ms: number) => manualClock(new Date(clock.now().getTime() + ms).toISOString());
   const forgets = () => db.prepare('SELECT * FROM stt_forget ORDER BY id').all() as { id: number; meeting_id: number; provider: string; ref: string; attempts: number }[];
   const partsDir = () => join(dataDir, 'meetings', 'tmp', `${id}-parts`);
 
@@ -144,7 +154,7 @@ describe('transcribeMeeting', () => {
     expect(m.stage).toBe('transcribed');
     expect(m.transcript).toEqual([{ start: 1, end: 2, speaker: 'A', text: 'namaste' }]);
     expect(m.note).toBeNull();
-    expect(m.sttParts).toEqual([{ index: 1, offset: 0, seconds: 1200, state: 'done', jobId: null, booked: 'actual', segments: said('namaste'), billedSeconds: 1201 }]);
+    expect(m.sttParts).toEqual([{ index: 1, provider: 'elevenlabs', file: null, offset: 0, seconds: 1200, state: 'done', jobId: null, booked: 'actual', segments: said('namaste'), billedSeconds: 1201 }]);
     expect(rows()).toEqual([{ kind: 'stt', usd: ceiling('elevenlabs', 1201), detail: `meeting ${id} part 1` }]);
   });
 
@@ -191,11 +201,10 @@ describe('transcribeMeeting', () => {
   it('crash with an ElevenLabs/OpenAI part in flight: recovery books it once at the ceiling, and the retry sends it again', async () => {
     prepare(1200);
     const p = new FakeProvider('elevenlabs', 36_000);
-    const t = meetingTranscriber(p, INR);
-    const inflight: SttPartRow = { index: 1, offset: 0, seconds: 1200, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null };
+    const inflight: SttPartRow = { index: 1, provider: 'elevenlabs', file: null, offset: 0, seconds: 1200, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null };
     setSttParts(db, id, [inflight], NOW);
-    expect(recoverInflightParts(db, spend, t, silentLogger())).toBe(1);
-    expect(recoverInflightParts(db, spend, t, silentLogger())).toBe(0); // never twice
+    expect(recoverInflightParts(db, spend, INR, silentLogger())).toBe(1);
+    expect(recoverInflightParts(db, spend, INR, silentLogger())).toBe(0); // never twice
     expect(rows()).toEqual([{ kind: 'stt', usd: ceiling('elevenlabs', 1200), detail: `meeting ${id} part 1 (unknown, estimated)` }]);
     expect(parts()[0]).toMatchObject({ state: 'unknown', booked: 'ceiling' });
 
@@ -211,7 +220,7 @@ describe('transcribeMeeting', () => {
   it('a part left in flight is booked once by transcribeMeeting itself when recovery did not run for it', async () => {
     prepare(1200);
     const p = new FakeProvider('openai', 36_000);
-    setSttParts(db, id, [{ index: 1, offset: 0, seconds: 1200, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
+    setSttParts(db, id, [{ index: 1, provider: 'openai', file: null, offset: 0, seconds: 1200, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
     p.script = [ok('x', 1200)];
     await transcribeMeeting(id, deps(p));
     expect(rows().map((r) => r.detail)).toEqual([`meeting ${id} part 1 (unknown, estimated)`, `meeting ${id} part 1`]);
@@ -221,10 +230,9 @@ describe('transcribeMeeting', () => {
   it('crash with a Sarvam job in flight: resumed by its job id with no second booking', async () => {
     prepare(3600);
     const p = new FakeProvider('sarvam', 7200);
-    const t = meetingTranscriber(p, INR);
     spend.record('stt', ceiling('sarvam', 3600), `meeting ${id} part 1`); // booked at acceptance before the crash
-    setSttParts(db, id, [{ index: 1, offset: 0, seconds: 3600, state: 'inflight', jobId: 'job-7', booked: 'ceiling', segments: null, billedSeconds: null }], NOW);
-    expect(recoverInflightParts(db, spend, t, silentLogger())).toBe(0);
+    setSttParts(db, id, [{ index: 1, provider: 'sarvam', file: null, offset: 0, seconds: 3600, state: 'inflight', jobId: 'job-7', booked: 'ceiling', segments: null, billedSeconds: null }], NOW);
+    expect(recoverInflightParts(db, spend, INR, silentLogger())).toBe(0);
     p.script = [job('never-used')];
     await transcribeMeeting(id, deps(p));
     expect(p.calls[0]!.opts.resumeJobId).toBe('job-7');
@@ -368,7 +376,7 @@ describe('transcribeMeeting', () => {
     expect(parts()[0]).toMatchObject({ state: 'unknown', booked: 'ceiling' });
 
     spend = new SpendGuard({ db, clock, capUsd: 5 }); // the restart
-    expect(recoverInflightParts(db, spend, meetingTranscriber(p, INR), silentLogger())).toBe(0);
+    expect(recoverInflightParts(db, spend, INR, silentLogger())).toBe(0);
     p.script = [ok('x', 1200)];
     await transcribeMeeting(id, deps(p));
     expect(rows().map((r) => [r.kind, r.detail])).toEqual([['stt', 'shutdown (estimated)'], ['stt', `meeting ${id} part 1`]]);
@@ -392,8 +400,131 @@ describe('transcribeMeeting', () => {
     answer(result(said('late'), 1200));
     await run;
     expect(rows()).toHaveLength(1);
-    expect(parts()[0]).toMatchObject({ state: 'done' });
+    expect(parts()[0]).toMatchObject({ state: 'done', booked: 'ceiling' }); // what was booked: the ceiling, at shutdown
     expect(getMeeting(db, id)!.stage).toBe('transcribed');
+  });
+
+  it('the last attempt fails with a part stuck, the meeting fails, then the part is booked exactly once', async () => {
+    prepare(1200);
+    const p = new FakeProvider('elevenlabs', 36_000);
+    p.script = [
+      async () => {
+        db.prepare("UPDATE meetings SET status = 'failed' WHERE id = ?").run(id); // the part write after the call is refused
+        return result(said('x'), 1200);
+      },
+    ];
+    await expect(transcribeMeeting(id, deps(p))).rejects.toThrow();
+    expect(getMeeting(db, id)!.status).toBe('failed');
+    expect(parts()[0]).toMatchObject({ state: 'inflight', booked: 'none' });
+    expect(rows()).toEqual([]);
+    // The processor, before failMeeting (here the meeting is already failed): booked once, whatever the status.
+    expect(bookStuckParts(db, spend, id, { inrPerUsd: INR, clock })).toBe(1);
+    expect(bookStuckParts(db, spend, id, { inrPerUsd: INR, clock })).toBe(0);
+    expect(recoverInflightParts(db, spend, INR, silentLogger())).toBe(0);
+    expect(rows()).toEqual([{ kind: 'stt', usd: ceiling('elevenlabs', 1200), detail: `meeting ${id} part 1 (unknown, estimated)` }]);
+    expect(parts()[0]).toMatchObject({ state: 'unknown', booked: 'ceiling' });
+  });
+
+  it('recovery at start books a part stuck in a meeting that has since failed', () => {
+    prepare(1200);
+    setSttParts(db, id, [{ index: 1, provider: 'openai', file: null, offset: 0, seconds: 1200, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
+    failMeeting(db, id, { status: 'failed', errorCode: 'attempts', at: NOW });
+    expect(recoverInflightParts(db, spend, INR, silentLogger())).toBe(1);
+    expect(recoverInflightParts(db, spend, INR, silentLogger())).toBe(0);
+    expect(rows()).toEqual([{ kind: 'stt', usd: ceiling('openai', 1200), detail: `meeting ${id} part 1 (unknown, estimated)` }]);
+  });
+
+  it('a stuck part is booked at the price of the provider it was sent to, not the one set up now', async () => {
+    prepare(3600);
+    setSttParts(db, id, [{ index: 1, provider: 'sarvam', file: null, offset: 0, seconds: 3600, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
+    const p = new FakeProvider('elevenlabs', 36_000);
+    p.script = [ok('x', 3600)];
+    await transcribeMeeting(id, deps(p));
+    expect(rows()).toEqual([
+      { kind: 'stt', usd: ceiling('sarvam', 3600), detail: `meeting ${id} part 1 (unknown, estimated)` },
+      { kind: 'stt', usd: ceiling('elevenlabs', 3600), detail: `meeting ${id} part 1` },
+    ]);
+    expect(parts()[0]).toMatchObject({ provider: 'elevenlabs', state: 'done' });
+  });
+
+  it('a new provider with longer parts: done parts are kept, the others go as they are', async () => {
+    prepare(900);
+    const ff = splitter([300, 300, 300]);
+    const openai = new FakeProvider('openai', 300);
+    openai.script = [ok('one'), fail(new SttHttpError(503))];
+    await expect(transcribeMeeting(id, deps(openai, { ffmpeg: new Ffmpeg('ffmpeg.exe', ff.run) }))).rejects.toBeInstanceOf(SttHttpError);
+    const el = new FakeProvider('elevenlabs', 36_000);
+    el.script = [ok('two'), ok('three')];
+    await transcribeMeeting(id, deps(el, { ffmpeg: new Ffmpeg('ffmpeg.exe', ff.run) }));
+    expect(el.calls.map((c) => c.audio)).toEqual([
+      { path: join(partsDir(), 'part-001.mp3'), seconds: 300, offset: 300 },
+      { path: join(partsDir(), 'part-002.mp3'), seconds: 300, offset: 600 },
+    ]);
+    expect(parts().map((x) => [x.index, x.provider, x.state])).toEqual([[1, 'openai', 'done'], [2, 'elevenlabs', 'done'], [3, 'elevenlabs', 'done']]);
+    expect(getMeeting(db, id)!.transcript!.map((s) => [s.start, s.text])).toEqual([[1, 'one'], [301, 'two'], [601, 'three']]);
+    expect(ff.segmentRuns()).toBe(1);
+  });
+
+  it('a new provider with shorter parts: a part that is too long is cut again into its own folder', async () => {
+    prepare(1200);
+    const ff = splitter([600, 600], [300, 300]);
+    const sarvam = new FakeProvider('sarvam', 600);
+    sarvam.script = [job('job-1'), job('job-2', fail(new SttNoAnswerError('job_wait_timeout')))];
+    await expect(transcribeMeeting(id, deps(sarvam, { ffmpeg: new Ffmpeg('ffmpeg.exe', ff.run) }))).rejects.toBeInstanceOf(SttNoAnswerError);
+    expect(parts().map((x) => [x.state, x.jobId])).toEqual([['done', 'job-1'], ['unknown', 'job-2']]);
+
+    const openai = new FakeProvider('openai', 300);
+    openai.script = [ok('b'), ok('c')];
+    await transcribeMeeting(id, deps(openai, { ffmpeg: new Ffmpeg('ffmpeg.exe', ff.run) }));
+    const again = join(dataDir, 'meetings', 'tmp', `${id}-parts-1`);
+    expect(openai.calls.map((c) => c.audio)).toEqual([
+      { path: join(again, 'part-000.mp3'), seconds: 300, offset: 600 },
+      { path: join(again, 'part-001.mp3'), seconds: 300, offset: 900 },
+    ]);
+    expect(parts().map((x) => [x.index, x.provider, x.offset, x.file])).toEqual([
+      [1, 'sarvam', 0, `${id}-parts/part-000.mp3`],
+      [2, 'openai', 600, `${id}-parts-1/part-000.mp3`],
+      [3, 'openai', 900, `${id}-parts-1/part-001.mp3`],
+    ]);
+    expect(rows()).toHaveLength(4); // two Sarvam jobs at acceptance, two OpenAI parts
+    expect(existsSync(again)).toBe(false);
+    expect(existsSync(partsDir())).toBe(false);
+  });
+
+  it('forgetPending uses each row\'s own provider and skips, without a try, one that is not set up now', async () => {
+    prepare(1200);
+    const el = new FakeProvider('elevenlabs', 36_000);
+    el.forgetImpl = async () => {
+      throw new SttNoAnswerError('timeout');
+    };
+    await transcribeMeeting(id, deps(el));
+    db.prepare('UPDATE stt_forget SET attempts = 0, next_try_at = NULL').run();
+    const { lines, log } = capturingLogger();
+    const openai = new FakeProvider('openai', 300);
+    expect(await forgetPending(db, meetingTranscriber(openai, INR), log, { clock })).toBe(0);
+    expect(await forgetPending(db, null, log, { clock })).toBe(0);
+    expect(openai.forgotten).toEqual([]);
+    expect(forgets()[0]).toMatchObject({ provider: 'elevenlabs', attempts: 0 });
+    expect(lines.filter((l) => l.includes('"code":"provider_unavailable"') && l.includes(`"meetingId":${id}`))).toHaveLength(2);
+    el.forgetImpl = async () => {};
+    expect(await forgetPending(db, meetingTranscriber(el, INR), log, { clock })).toBe(1);
+  });
+
+  it('a refused key wins over a part record that could not be written after it (stt_unavailable)', async () => {
+    prepare(1200);
+    const p = new FakeProvider('elevenlabs', 36_000);
+    p.script = [
+      async () => {
+        db.prepare("UPDATE meetings SET status = 'failed' WHERE id = ?").run(id);
+        throw new SttHttpError(401);
+      },
+    ];
+    const { lines, log } = capturingLogger();
+    const err = await transcribeMeeting(id, deps(p, { log })).catch((e: unknown) => e);
+    expect((err as MeetingDeferral).code).toBe('stt_unavailable');
+    expect(lines.some((l) => l.includes('"code":"http_401"') && l.includes('"writeCode"'))).toBe(true);
+    db.prepare("UPDATE meetings SET status = 'queued' WHERE id = ?").run(id);
+    expect(parts()[0]).toMatchObject({ state: 'inflight', booked: 'none' }); // left for bookStuckParts (the safe side)
   });
 
   it('with no speech-to-text provider the meeting waits (stt_none) and nothing is touched', async () => {
@@ -453,7 +584,8 @@ describe('transcribeMeeting', () => {
     expect(lines.some((l) => l.includes('could not be deleted'))).toBe(true);
     // The failed one stays noted, and is deleted by a later forgetPending.
     expect(forgets()).toEqual([expect.objectContaining({ meeting_id: id, provider: 'openai', attempts: 1 })]);
-    expect(await forgetPending(db, meetingTranscriber(p, INR), silentLogger())).toBe(1);
+    expect(await forgetPending(db, meetingTranscriber(p, INR), silentLogger(), { clock })).toBe(0); // not before its next try
+    expect(await forgetPending(db, meetingTranscriber(p, INR), silentLogger(), { clock: later(16 * 60_000) })).toBe(1);
     expect(forgets()).toEqual([]);
     expect(p.forgotten).toHaveLength(4);
   });
@@ -473,12 +605,12 @@ describe('transcribeMeeting', () => {
     expect(getMeeting(db, id)!.stage).toBe('transcribed');
     const stored = forgets();
     expect(stored).toHaveLength(1);
-    expect(Object.keys(stored[0]!).sort()).toEqual(['attempts', 'created_at', 'id', 'meeting_id', 'provider', 'ref']);
+    expect(Object.keys(stored[0]!).sort()).toEqual(['attempts', 'created_at', 'id', 'meeting_id', 'next_try_at', 'provider', 'ref']);
     expect(JSON.stringify(stored)).not.toContain('gopniya');
 
     // The restart: forgetPending at processor start deletes it.
     const p2 = new FakeProvider('elevenlabs', 36_000);
-    expect(await forgetPending(db, meetingTranscriber(p2, INR), silentLogger())).toBe(1);
+    expect(await forgetPending(db, meetingTranscriber(p2, INR), silentLogger(), { clock: later(16 * 60_000) })).toBe(1);
     expect(p2.forgotten).toEqual([stored[0]!.ref]);
     expect(forgets()).toEqual([]);
   });
@@ -491,12 +623,18 @@ describe('transcribeMeeting', () => {
     };
     await transcribeMeeting(id, deps(p));
     const { lines, log } = capturingLogger();
-    for (let k = 0; k < MAX_FORGET_ATTEMPTS + 2; k++) await forgetPending(db, meetingTranscriber(p, INR), log);
+    const c = manualClock(clock.now().toISOString());
+    await forgetPending(db, meetingTranscriber(p, INR), log, { clock: c }); // a restart soon after does not use up a try
+    expect(p.forgotten).toHaveLength(1);
+    for (let k = 0; k < MAX_FORGET_ATTEMPTS + 2; k++) {
+      c.advance(25 * 3_600_000);
+      await forgetPending(db, meetingTranscriber(p, INR), log, { clock: c });
+    }
     expect(p.forgotten).toHaveLength(MAX_FORGET_ATTEMPTS);
     expect(forgets()[0]).toMatchObject({ attempts: MAX_FORGET_ATTEMPTS });
     expect(lines.some((l) => l.includes('no more tries') && l.includes(`"meetingId":${id}`) && l.includes('"code":"timeout"'))).toBe(true);
 
-    db.prepare('UPDATE stt_forget SET attempts = 0').run();
+    db.prepare('UPDATE stt_forget SET attempts = 0, next_try_at = NULL').run();
     p.forgetImpl = async () => {
       throw new SttHttpError(404);
     };
@@ -536,7 +674,7 @@ describe('transcribeMeeting', () => {
     expect(rows()).toEqual([]);
     db.prepare("UPDATE meetings SET status = 'queued' WHERE id = ?").run(id);
     expect(parts()[0]).toMatchObject({ state: 'inflight', booked: 'none' });
-    expect(recoverInflightParts(db, spend, meetingTranscriber(p, INR), silentLogger())).toBe(1);
+    expect(recoverInflightParts(db, spend, INR, silentLogger())).toBe(1);
   });
 
   it('a part file that is missing before the send is thrown as it is, with nothing sent or booked', async () => {

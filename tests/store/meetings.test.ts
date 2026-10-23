@@ -49,7 +49,7 @@ const summary = (actions: number): MeetingSummary => ({
 });
 
 const part = (index: number, o: Partial<SttPartRow> = {}): SttPartRow => ({
-  index, offset: index * 600, seconds: 600, state: 'todo', jobId: null, booked: 'none', segments: null, billedSeconds: null, ...o,
+  index, provider: 'elevenlabs', file: null, offset: index * 600, seconds: 600, state: 'todo', jobId: null, booked: 'none', segments: null, billedSeconds: null, ...o,
 });
 
 function withStatus(db: Db, status: MeetingStatus, o: Partial<NewMeeting> = {}): number {

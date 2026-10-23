@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { MeetingSummarySchema, type MeetingSummary } from '../brain/meetingSchema.ts';
-import type { Segment } from '../stt/types.ts';
+import type { ProviderId, Segment } from '../stt/types.ts';
 import { tx, type Db } from './db.ts';
 
 export const MEETING_STATUSES = ['unassigned', 'internal', 'queued', 'done', 'skipped', 'too_long', 'no_access', 'failed'] as const;
@@ -20,6 +20,10 @@ export interface MeetingAttendee {
 /** One speech part's durable bookkeeping (see src/meetings/transcribe.ts). */
 export interface SttPartRow {
   index: number;
+  /** The provider the part is planned for, and sent to: a stuck part is booked at this provider's price. */
+  provider: ProviderId;
+  /** The part's MP3 under data/meetings/tmp/ ("12-parts/part-000.mp3", forward slashes); null: the whole kept MP3. */
+  file: string | null;
   offset: number;
   seconds: number;
   state: 'todo' | 'inflight' | 'done' | 'unknown';
@@ -118,9 +122,13 @@ interface RawMeeting {
 const SegmentSchema = z.strictObject({ start: z.number(), end: z.number(), speaker: z.string().nullable(), text: z.string() });
 const AttendeesSchema = z.array(z.strictObject({ email: z.string(), name: z.string().nullable(), team: z.boolean() }));
 const ParticipantsSchema = z.array(z.string());
+/** <id>-parts/part-NNN.mp3 or <id>-parts-<n>/part-NNN.mp3: nothing else is ever read as a part's file. */
+export const PART_FILE = /^[1-9]\d{0,14}-parts(?:-[1-9]\d{0,3})?\/part-\d{3}\.mp3$/;
 const SttPartsSchema = z.array(
   z.strictObject({
     index: z.number().int(),
+    provider: z.enum(['sarvam', 'elevenlabs', 'openai']),
+    file: z.string().regex(PART_FILE).nullable(),
     offset: z.number(),
     seconds: z.number(),
     state: z.enum(['todo', 'inflight', 'done', 'unknown']),
@@ -364,37 +372,53 @@ export function advanceStage(db: Db, id: number, stage: MeetingStage, fields: Pa
   });
 }
 
-/** Queued meetings with speech-part bookkeeping, for the speech recovery at processor start. Reads no JSON. */
-export function queuedMeetingIdsWithSttParts(db: Db): number[] {
-  return (db.prepare("SELECT id FROM meetings WHERE status = 'queued' AND stt_parts <> '[]' ORDER BY id").all() as { id: number }[]).map((r) => r.id);
+/**
+ * Meetings of any status whose speech parts may include one left inflight, for the speech recovery at processor start.
+ * A text match, so it reads no JSON; the caller checks the parts.
+ */
+export function meetingIdsWithInflightParts(db: Db): number[] {
+  return (db.prepare(`SELECT id FROM meetings WHERE instr(stt_parts, '"inflight"') > 0 ORDER BY id`).all() as { id: number }[]).map((r) => r.id);
+}
+
+/**
+ * Stores speech-part bookkeeping whatever the meeting's status. Only for booking parts left inflight (bookStuckParts),
+ * which must happen even after the meeting has failed. Throws when the meeting is missing.
+ */
+export function writeStuckSttParts(db: Db, id: number, parts: SttPartRow[], at: string): void {
+  const json = toJson('writeStuckSttParts', 'stt_parts', SttPartsSchema, parts);
+  const n = db.prepare('UPDATE meetings SET stt_parts = ?, updated_at = ? WHERE id = ?').run(json, canonical('writeStuckSttParts', 'at', at), id).changes;
+  if (n === 0) throw new Error(`writeStuckSttParts: no meeting ${id}`);
 }
 
 /** A provider copy of a speech answer still to delete (M7). ref is the provider's id for the copy, never content. */
 export interface SttForgetRow {
   id: number;
   meetingId: number;
-  provider: 'sarvam' | 'elevenlabs' | 'openai';
+  provider: ProviderId;
   ref: string;
   attempts: number;
 }
 
 /** Notes a provider copy to delete. A copy already noted is kept as it is. */
-export function addSttForget(db: Db, f: { meetingId: number; provider: SttForgetRow['provider']; ref: string; at: string }): void {
+export function addSttForget(db: Db, f: { meetingId: number; provider: ProviderId; ref: string; at: string }): void {
   db.prepare('INSERT OR IGNORE INTO stt_forget (meeting_id, provider, ref, created_at) VALUES (?, ?, ?, ?)')
     .run(f.meetingId, f.provider, f.ref, canonical('addSttForget', 'at', f.at));
 }
 
-/** Copies still to delete with fewer than maxAttempts tries, oldest first; optionally one meeting's only. */
-export function pendingSttForgets(db: Db, o: { provider: SttForgetRow['provider']; maxAttempts: number; meetingId?: number }): SttForgetRow[] {
+/** Copies due for a try at nowIso with fewer than maxAttempts tries, oldest first; optionally one meeting's only. */
+export function pendingSttForgets(db: Db, o: { nowIso: string; maxAttempts: number; meetingId?: number }): SttForgetRow[] {
   return db
     .prepare(`SELECT id, meeting_id AS meetingId, provider, ref, attempts FROM stt_forget
-      WHERE provider = ? AND attempts < ? AND (? IS NULL OR meeting_id = ?) ORDER BY id`)
-    .all(o.provider, o.maxAttempts, o.meetingId ?? null, o.meetingId ?? null) as SttForgetRow[];
+      WHERE attempts < ? AND (next_try_at IS NULL OR next_try_at <= ?) AND (? IS NULL OR meeting_id = ?) ORDER BY id`)
+    .all(o.maxAttempts, canonical('pendingSttForgets', 'nowIso', o.nowIso), o.meetingId ?? null, o.meetingId ?? null) as SttForgetRow[];
 }
 
-/** Counts one try, before the provider is asked, so a try cut off by a crash still counts. */
-export function countSttForgetAttempt(db: Db, id: number): void {
-  db.prepare('UPDATE stt_forget SET attempts = attempts + 1 WHERE id = ?').run(id);
+/**
+ * Counts one try and sets when the next may start, before the provider is asked: a try cut off by a crash still counts,
+ * and a restart does not try again before nextTryAt.
+ */
+export function countSttForgetAttempt(db: Db, id: number, nextTryAt: string): void {
+  db.prepare('UPDATE stt_forget SET attempts = attempts + 1, next_try_at = ? WHERE id = ?').run(canonical('countSttForgetAttempt', 'nextTryAt', nextTryAt), id);
 }
 
 /** The provider has deleted its copy. */

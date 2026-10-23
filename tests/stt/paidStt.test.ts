@@ -3,7 +3,7 @@ import { SpendCapReachedError } from '../../src/brain/paidCall.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { tx } from '../../src/store/db.ts';
 import { SttHttpError, SttJobError, SttJobLostError, SttNoAnswerError } from '../../src/stt/http.ts';
-import { withSttHold, type SttBooking } from '../../src/stt/paidStt.ts';
+import { SttBookingError, withSttHold, type SttBooking } from '../../src/stt/paidStt.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { seededDb } from '../helpers/db.ts';
 
@@ -111,5 +111,21 @@ describe('withSttHold', () => {
     const onBooked = vi.fn();
     await expect(withSttHold(spend, 0.2, 'meeting 4 part 1', async () => ({ result: 'x', costUsd: 0.05 }), { onBooked })).rejects.toBe(broken);
     expect(onBooked).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a refusal', new SttHttpError(401)],
+    ['no answer', new SttNoAnswerError('timeout')],
+  ])('after %s, a booking write that throws is an SttBookingError whose cause is the call error', async (_name, callErr) => {
+    const { spend } = setup();
+    const writeErr = new Error('part write refused');
+    const err = await withSttHold(spend, 0.2, 'meeting 4 part 1', () => Promise.reject(callErr), {
+      onBooked: () => {
+        throw writeErr;
+      },
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SttBookingError);
+    expect((err as SttBookingError).cause).toBe(callErr);
+    expect((err as SttBookingError).writeError).toBe(writeErr);
   });
 });

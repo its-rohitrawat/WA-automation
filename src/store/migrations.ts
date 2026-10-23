@@ -235,7 +235,7 @@ ALTER TABLE decisions ADD COLUMN meeting_id INTEGER REFERENCES meetings(id);
 CREATE INDEX tasks_meeting ON tasks(meeting_id);
 CREATE INDEX decisions_meeting ON decisions(meeting_id);
 -- Provider copies of speech answers still to delete (M7): the provider's own id for the copy only, never what was said.
--- A row is removed only once the provider has deleted its copy; attempts caps the retries.
+-- A row is removed only once the provider has deleted its copy; attempts caps the retries, next_try_at spaces them.
 CREATE TABLE stt_forget (
   id INTEGER PRIMARY KEY,
   meeting_id INTEGER NOT NULL REFERENCES meetings(id),
@@ -243,6 +243,7 @@ CREATE TABLE stt_forget (
   ref TEXT NOT NULL CHECK (length(ref) BETWEEN 1 AND 200),
   created_at TEXT NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0,
+  next_try_at TEXT,
   UNIQUE (provider, ref)
 );
 `,

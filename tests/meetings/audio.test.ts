@@ -408,4 +408,17 @@ describe('cleanupTemp', () => {
     expect(text).not.toContain('notes.txt');
     expect(text).not.toContain(dataDir.replace(/\\/g, '\\\\'));
   });
+
+  it('removes the folders of parts cut again for another provider (<id>-parts-<n>) once transcribed, and only then', () => {
+    const working = meetingAt('queued', 'audio');
+    const transcribed = meetingAt('queued', 'transcribed');
+    for (const id of [working, transcribed]) {
+      mkdirSync(join(tmp(), `${id}-parts-2`));
+      writeFileSync(join(tmp(), `${id}-parts-2`, 'part-000.mp3'), 'p');
+    }
+    mkdirSync(join(tmp(), `${transcribed}-parts-0`)); // not a name the agent makes
+    const r = cleanupTemp(db, dataDir, silentLogger());
+    expect(r.removed).toBe(1);
+    expect(readdirSync(tmp()).sort()).toEqual([`${transcribed}-parts-0`, `${working}-parts-2`].sort());
+  });
 });

@@ -244,14 +244,15 @@ export async function prepareAudio(
 
 const TERMINAL: ReadonlySet<MeetingStatus> = new Set(['done', 'skipped', 'internal', 'too_long', 'no_access', 'failed']);
 /** Ids are written without leading zeros, so "012.mp3" is never taken for meeting 12's file. */
-const WORK_NAME = /^([1-9]\d{0,14})(\.mp4\.part|\.mp3|\.mp3\.part\.mp3|-parts)$/;
+const WORK_NAME = /^([1-9]\d{0,14})(\.mp4\.part|\.mp3|\.mp3\.part\.mp3|-parts(?:-[1-9]\d{0,3})?)$/;
 const PART_NAME = /^(part-\d{3}\.mp3|\.done)$/;
 const stageAtLeast = (stage: MeetingStage, min: MeetingStage): boolean => MEETING_STAGES.indexOf(stage) >= MEETING_STAGES.indexOf(min);
 
 /**
  * At startup: removes the work files in data/meetings/tmp/ that are no longer needed, and nothing else. An entry is
  * removed only when all of these hold:
- * - it sits directly in tmp and its name matches <id>.mp4.part, <id>.mp3, <id>.mp3.part.mp3 or <id>-parts;
+ * - it sits directly in tmp and its name matches <id>.mp4.part, <id>.mp3, <id>.mp3.part.mp3, <id>-parts or
+ *   <id>-parts-<n> (a part cut again for another provider, see src/meetings/sttParts.ts);
  * - the meeting exists and is terminal, or has finished the stage the file is for (audio for the video and MP3 files,
  *   transcribed for the parts folder);
  * - a file is a plain file; a parts folder is a plain folder holding only plain files named part-NNN.mp3 or .done
@@ -272,7 +273,7 @@ export function cleanupTemp(db: Db, dataDir: string, log: Logger): { removed: nu
   for (const entry of entries) {
     const m = WORK_NAME.exec(entry.name);
     const state = m ? getMeetingState(db, Number(m[1])) : undefined;
-    const isParts = m?.[2] === '-parts';
+    const isParts = m?.[2]?.startsWith('-parts') ?? false;
     const finished = state !== undefined && (TERMINAL.has(state.status) || stageAtLeast(state.stage, isParts ? 'transcribed' : 'audio'));
     if (!m || !state || !finished) {
       kept++;
