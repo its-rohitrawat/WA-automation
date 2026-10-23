@@ -2,4 +2,6 @@ import { join } from 'node:path';
 
 export const trackerDbPath = (dataDir: string): string => join(dataDir, 'tracker.db');
 export const sessionDbPath = (dataDir: string): string => join(dataDir, 'session.db');
+/** The spare number's WhatsApp session (Phase 2c morning report). Never the founder's session. */
+export const senderSessionDbPath = (dataDir: string): string => join(dataDir, 'sender-session.db');
 export const masterKeyPath = (dataDir: string): string => join(dataDir, 'keys', 'master.key.dpapi');

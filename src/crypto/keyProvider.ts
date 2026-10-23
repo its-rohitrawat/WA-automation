@@ -1,10 +1,16 @@
 import { execFileSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { hkdfSync, randomBytes } from 'node:crypto';
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export interface KeyProvider {
   getKey(): Buffer;
+}
+
+/** A 32-byte HKDF-SHA256 subkey of the master key. Each use gets its own `info` label, so one subkey never opens another's data. */
+export function deriveSubkey(masterKey: Buffer, info: string): Buffer {
+  if (masterKey.length !== 32) throw new Error('Master key must be 32 bytes');
+  return Buffer.from(hkdfSync('sha256', masterKey, Buffer.alloc(0), info, 32));
 }
 
 export class StaticKeyProvider implements KeyProvider {

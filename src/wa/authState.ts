@@ -5,6 +5,7 @@ import Database from 'better-sqlite3';
 import { BufferJSON, initAuthCreds, proto } from 'baileys';
 import type { AuthenticationCreds, AuthenticationState, SignalDataSet, SignalDataTypeMap } from 'baileys';
 import { decrypt, encrypt } from '../crypto/envelope.ts';
+import { deriveSubkey } from '../crypto/keyProvider.ts';
 import type { Db } from '../store/db.ts';
 
 export class SessionDecryptError extends Error {
@@ -14,6 +15,19 @@ export class SessionDecryptError extends Error {
       options,
     );
     this.name = 'SessionDecryptError';
+  }
+}
+
+/** HKDF label of the spare number's session key (spec §3, "Sender isolation"). */
+export const SENDER_SESSION_INFO = 'whatsapp-sender-session';
+
+export class SenderSessionDecryptError extends Error {
+  constructor(options?: ErrorOptions) {
+    super(
+      `The spare number's WhatsApp session could not be decrypted with the current master key. Running "link-sender --reset" discards it and needs a new QR scan from the spare phone.`,
+      options,
+    );
+    this.name = 'SenderSessionDecryptError';
   }
 }
 
@@ -130,4 +144,17 @@ export function useEncryptedAuthState(db: Db, key: Buffer): EncryptedAuth {
       },
     },
   };
+}
+
+/**
+ * The spare number's session: the same encrypted store, keyed by its own HKDF subkey of the master key, in its own file
+ * (data/sender-session.db). The founder's session key cannot open it, and this key cannot open the founder's session.
+ */
+export function useSenderAuthState(db: Db, masterKey: Buffer): EncryptedAuth {
+  try {
+    return useEncryptedAuthState(db, deriveSubkey(masterKey, SENDER_SESSION_INFO));
+  } catch (cause) {
+    if (cause instanceof SessionDecryptError) throw new SenderSessionDecryptError({ cause });
+    throw cause;
+  }
 }
