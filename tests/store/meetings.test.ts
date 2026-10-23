@@ -3,14 +3,15 @@ import { describe, expect, it } from 'vitest';
 import type { MeetingSummary } from '../../src/brain/meetingSchema.ts';
 import { migrate, type Db } from '../../src/store/db.ts';
 import {
-  advanceStage, assignMeeting, claimMeeting, deferMeeting, dueMeetingIds, failMeeting, finishMeeting, getMeeting, insertFound, knownRecordings,
-  lastMeetingByClient, listClientMeetings, listUnassigned, meetingStats, retryMeeting, setSttParts, skipMeeting,
+  advanceStage, assignMeeting, claimMeeting, deferMeeting, dueMeetingIds, failMeeting, finishMeeting, getMeeting, getMeetingState, insertFound,
+  knownRecordings, lastMeetingByClient, listClientMeetings, listUnassigned, meetingStats, retryMeeting, setSttParts, skipMeeting,
   type MeetingStatus, type NewMeeting, type SttPartRow,
 } from '../../src/store/meetings.ts';
 import { MIGRATIONS } from '../../src/store/migrations.ts';
 import { LATER, NOW, seededDb } from '../helpers/db.ts';
 
 const CONF = 'conferenceRecords/c1';
+const LATEST = '2026-10-19T10:00:00.000Z';
 
 let seq = 0;
 const meeting = (o: Partial<NewMeeting> = {}): NewMeeting => ({
@@ -31,6 +32,12 @@ const meeting = (o: Partial<NewMeeting> = {}): NewMeeting => ({
   ...o,
 });
 
+/** Unassigned and internal meetings have no client; internal ones also keep no title, attendees or names. */
+const noClient = (status: 'unassigned' | 'internal' | 'skipped'): Partial<NewMeeting> =>
+  status === 'internal'
+    ? { status, clientId: null, matchKind: null, title: '', attendees: [], participants: [] }
+    : { status, clientId: null, matchKind: null };
+
 const summary = (actions: number): MeetingSummary => ({
   whatHappened: 'We met.',
   discussion: [],
@@ -46,7 +53,16 @@ const part = (index: number, o: Partial<SttPartRow> = {}): SttPartRow => ({
 });
 
 function withStatus(db: Db, status: MeetingStatus, o: Partial<NewMeeting> = {}): number {
-  return insertFound(db, meeting({ status, ...o }))!;
+  const base = status === 'unassigned' || status === 'internal' || status === 'skipped' ? noClient(status) : { status };
+  return insertFound(db, meeting({ ...base, ...o }))!;
+}
+
+/** A queued meeting taken to stage doc and finished, as the processor would. */
+function doneMeeting(db: Db, o: Partial<NewMeeting> = {}, fields: Parameters<typeof advanceStage>[3] = {}): number {
+  const id = withStatus(db, 'queued', o);
+  advanceStage(db, id, 'doc', fields, NOW);
+  finishMeeting(db, id, { at: NOW });
+  return id;
 }
 
 describe('meetings store', () => {
@@ -90,23 +106,78 @@ describe('meetings store', () => {
     expect(dueMeetingIds(db, LATER, 10)).toEqual([deferred, early, late]);
   });
 
-  it('claims a due meeting once, and never one that is not due or not queued', () => {
+  it('stores Google times in canonical form, so an offset or a fraction of a second sorts by time', () => {
     const db = seededDb();
-    const id = withStatus(db, 'queued');
-    expect(claimMeeting(db, id, { nextAttemptAt: LATER, at: NOW })).toBe(true);
-    expect(claimMeeting(db, id, { nextAttemptAt: LATER, at: NOW })).toBe(false);
-    expect(getMeeting(db, id)).toMatchObject({ nextAttemptAt: LATER, updatedAt: NOW, attempts: 0 });
-    expect(dueMeetingIds(db, NOW, 10)).toEqual([]);
-    expect(claimMeeting(db, id, { nextAttemptAt: '2026-10-19T10:00:00.000Z', at: LATER })).toBe(true);
-    expect(claimMeeting(db, withStatus(db, 'unassigned'), { nextAttemptAt: LATER, at: NOW })).toBe(false);
+    // As text, each pair sorts the wrong way round: "10:00:00+05:30" after "05:00:00Z", "00.5Z" before "00Z".
+    const ist = withStatus(db, 'queued', { startedAt: '2026-10-18T10:00:00+05:30', endedAt: '2026-10-18T10:45:00+05:30' }); // 04:30Z
+    const utc = withStatus(db, 'queued', { startedAt: '2026-10-18T05:00:00Z', endedAt: null });
+    const half = withStatus(db, 'queued', { startedAt: '2026-10-18T03:00:00.5Z' });
+    const whole = withStatus(db, 'queued', { startedAt: '2026-10-18T03:00:00Z' });
+    const nanos = withStatus(db, 'queued', { startedAt: '2026-10-18T03:00:00.123456789Z' });
+    expect(getMeeting(db, ist)).toMatchObject({ startedAt: '2026-10-18T04:30:00.000Z', endedAt: '2026-10-18T05:15:00.000Z' });
+    expect(getMeeting(db, utc)).toMatchObject({ startedAt: '2026-10-18T05:00:00.000Z', endedAt: null });
+    expect(getMeeting(db, nanos)!.startedAt).toBe('2026-10-18T03:00:00.123Z');
+    expect(dueMeetingIds(db, NOW, 10)).toEqual([whole, nanos, half, ist, utc]);
+    expect(() => insertFound(db, meeting({ startedAt: 'yesterday' }))).toThrow(/startedAt is not a time/);
+    expect(() => insertFound(db, meeting({ endedAt: '' }))).toThrow(/endedAt is not a time/);
+    expect(() => insertFound(db, meeting({ createdAt: '2026-10-19T08:00:00Z' }))).toThrow(/createdAt is not a canonical ISO time/);
   });
 
-  it('defers with or without counting an attempt, and fails with a final status', () => {
+  it('refuses times that are not canonical where they are compared as text', () => {
     const db = seededDb();
     const id = withStatus(db, 'queued');
-    deferMeeting(db, id, { errorCode: 'google_transient', nextAttemptAt: LATER, at: NOW, countAttempt: true });
-    deferMeeting(db, id, { errorCode: 'spend_cap', nextAttemptAt: LATER, at: NOW });
-    expect(getMeeting(db, id)).toMatchObject({ status: 'queued', errorCode: 'spend_cap', attempts: 1, nextAttemptAt: LATER });
+    expect(() => claimMeeting(db, id, { nextAttemptAt: '2026-10-19T09:00:00Z', at: NOW })).toThrow(/nextAttemptAt is not a canonical ISO time/);
+    expect(() => claimMeeting(db, id, { nextAttemptAt: LATER, at: '2026-10-19T13:30:00+05:30' })).toThrow(/at is not a canonical ISO time/);
+    expect(() => deferMeeting(db, id, { errorCode: 'spend_cap', nextAttemptAt: '2026-10-19 09:00:00', at: NOW })).toThrow(/nextAttemptAt/);
+    expect(() => deferMeeting(db, id, { errorCode: 'spend_cap', nextAttemptAt: LATER, at: 'now' })).toThrow(/at is not a canonical/);
+    expect(() => dueMeetingIds(db, '2026-10-19T08:00:00Z', 10)).toThrow(/nowIso/);
+    expect(() => meetingStats(db, '2026-10-19T08:00Z')).toThrow(/nowIso/);
+    expect(getMeetingState(db, id)).toMatchObject({ attempts: 0, errorCode: null, nextAttemptAt: null, updatedAt: NOW });
+  });
+
+  it('claims a due meeting once, counting the attempt and clearing the error code; never one not due or not queued', () => {
+    const db = seededDb();
+    const id = withStatus(db, 'queued');
+    deferMeeting(db, id, { errorCode: 'spend_cap', nextAttemptAt: NOW, at: NOW });
+    expect(claimMeeting(db, id, { nextAttemptAt: LATER, at: NOW })).toBe(true);
+    expect(claimMeeting(db, id, { nextAttemptAt: LATER, at: NOW })).toBe(false);
+    expect(getMeetingState(db, id)).toEqual({
+      id, status: 'queued', stage: 'found', attempts: 1, errorCode: null, nextAttemptAt: LATER, clientId: 1, updatedAt: NOW,
+    });
+    expect(dueMeetingIds(db, NOW, 10)).toEqual([]);
+    expect(claimMeeting(db, id, { nextAttemptAt: LATEST, at: LATER })).toBe(true);
+    expect(claimMeeting(db, withStatus(db, 'unassigned'), { nextAttemptAt: LATER, at: NOW })).toBe(false);
+    expect(getMeetingState(db, 999)).toBeUndefined();
+  });
+
+  it('a stage that never finishes runs up the attempt count, claim after claim', () => {
+    const db = seededDb();
+    const id = withStatus(db, 'queued');
+    const FAIL_AT = 3;
+    let at = Date.parse(NOW);
+    for (let i = 0; i < FAIL_AT; i++) {
+      // Each run claims and then stops (no defer, finish or fail); the next one starts once the claim has run out.
+      expect(claimMeeting(db, id, { nextAttemptAt: new Date(at + 15 * 60_000).toISOString(), at: new Date(at).toISOString() })).toBe(true);
+      at += 16 * 60_000;
+    }
+    expect(getMeetingState(db, id)).toMatchObject({ status: 'queued', attempts: FAIL_AT });
+    // What the processor then does with it.
+    failMeeting(db, id, { status: 'failed', errorCode: 'crashed', at: new Date(at).toISOString() });
+    expect(getMeetingState(db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed' });
+  });
+
+  it('defers counting an attempt, keeping the claim’s count, or putting the count back; fails with a final status', () => {
+    const db = seededDb();
+    const id = withStatus(db, 'queued');
+    expect(claimMeeting(db, id, { nextAttemptAt: LATER, at: NOW })).toBe(true); // attempts 1
+    deferMeeting(db, id, { errorCode: 'google_transient', nextAttemptAt: NOW, at: NOW });
+    expect(getMeetingState(db, id)).toMatchObject({ errorCode: 'google_transient', attempts: 1 });
+    deferMeeting(db, id, { errorCode: 'google_transient', nextAttemptAt: NOW, at: NOW, countAttempt: true });
+    expect(getMeetingState(db, id)).toMatchObject({ attempts: 2 });
+    expect(claimMeeting(db, id, { nextAttemptAt: LATER, at: NOW })).toBe(true); // attempts 3
+    // A spend-cap deferral doesn't count: the processor passes back the count from before its claim.
+    deferMeeting(db, id, { errorCode: 'spend_cap', nextAttemptAt: LATER, at: NOW, attempts: 2 });
+    expect(getMeeting(db, id)).toMatchObject({ status: 'queued', errorCode: 'spend_cap', attempts: 2, nextAttemptAt: LATER });
     failMeeting(db, id, { status: 'no_access', errorCode: 'drive_404', at: LATER });
     expect(getMeeting(db, id)).toMatchObject({ status: 'no_access', errorCode: 'drive_404', nextAttemptAt: null, updatedAt: LATER });
   });
@@ -132,6 +203,16 @@ describe('meetings store', () => {
     expect(() => advanceStage(db, 999, 'audio', {}, LATER)).toThrow(/999/);
   });
 
+  it('stores only a summary of the shared shape: unknown fields fail loudly', () => {
+    const db = seededDb();
+    const id = withStatus(db, 'queued');
+    const extra = { ...summary(1), mood: 'happy' } as unknown as MeetingSummary;
+    expect(() => advanceStage(db, id, 'summarised', { summary: extra }, NOW)).toThrow(/summary value does not have the stored shape/);
+    expect(getMeeting(db, id)).toMatchObject({ stage: 'found', summary: null });
+    db.prepare('UPDATE meetings SET summary = ? WHERE id = ?').run(JSON.stringify(extra), id);
+    expect(() => getMeeting(db, id)).toThrow(new RegExp(`meeting ${id}.*summary`));
+  });
+
   it('stores the speech parts and reads them back', () => {
     const db = seededDb();
     const id = withStatus(db, 'queued');
@@ -144,27 +225,45 @@ describe('meetings store', () => {
     expect(getMeeting(db, id)).toMatchObject({ sttParts: parts, updatedAt: LATER, stage: 'found' });
   });
 
-  it('finishes a meeting as done and tracked', () => {
+  it('finishes a queued meeting at stage doc or later as done and tracked', () => {
     const db = seededDb();
     const id = withStatus(db, 'queued');
+    expect(() => finishMeeting(db, id, { at: LATER })).toThrow(new RegExp(`meeting ${id} is not queued at stage doc or later`));
+    advanceStage(db, id, 'doc', { docFileId: 'doc1' }, NOW);
     deferMeeting(db, id, { errorCode: 'client_busy', nextAttemptAt: LATER, at: NOW });
     finishMeeting(db, id, { note: 'client_inactive', at: LATER });
     expect(getMeeting(db, id)).toMatchObject({ status: 'done', stage: 'tracked', note: 'client_inactive', errorCode: null, nextAttemptAt: null, updatedAt: LATER });
     const other = withStatus(db, 'queued');
     advanceStage(db, other, 'audio', { note: 'kept' }, NOW);
+    advanceStage(db, other, 'doc', {}, NOW);
     finishMeeting(db, other, { at: LATER });
     expect(getMeeting(db, other)).toMatchObject({ status: 'done', stage: 'tracked', note: 'kept' });
   });
 
+  it('processor writes throw on a meeting that is not queued, and change nothing', () => {
+    const db = seededDb();
+    const done = doneMeeting(db);
+    const un = withStatus(db, 'unassigned');
+    const before = getMeeting(db, done);
+    expect(() => advanceStage(db, un, 'audio', { audioSeconds: 5 }, LATER)).toThrow(new RegExp(`advanceStage: meeting ${un} is not queued`));
+    expect(() => deferMeeting(db, un, { errorCode: 'spend_cap', nextAttemptAt: LATER, at: LATER })).toThrow(new RegExp(`deferMeeting: meeting ${un} is not queued`));
+    expect(() => deferMeeting(db, 999, { errorCode: 'spend_cap', nextAttemptAt: LATER, at: LATER })).toThrow(/meeting 999 is not queued/);
+    expect(() => finishMeeting(db, done, { at: LATER })).toThrow(/is not queued/);
+    expect(() => failMeeting(db, done, { status: 'failed', errorCode: 'x', at: LATER })).toThrow(/is not queued/);
+    expect(() => setSttParts(db, done, [part(0)], LATER)).toThrow(/is not queued/);
+    expect(getMeeting(db, done)).toEqual(before);
+    expect(getMeeting(db, un)).toMatchObject({ status: 'unassigned', stage: 'found', audioSeconds: null, errorCode: null, updatedAt: NOW });
+  });
+
   it('assigns only unassigned or internal meetings', () => {
     const db = seededDb();
-    const un = withStatus(db, 'unassigned', { clientId: null, matchKind: null });
-    const internal = withStatus(db, 'internal', { clientId: null, matchKind: null });
+    const un = withStatus(db, 'unassigned');
+    const internal = withStatus(db, 'internal');
     const done = withStatus(db, 'done');
     expect(assignMeeting(db, un, 2, LATER)).toBe(true);
     expect(getMeeting(db, un)).toMatchObject({ status: 'queued', clientId: 2, matchKind: 'human', updatedAt: LATER });
     expect(assignMeeting(db, internal, 1, LATER)).toBe(true);
-    expect(getMeeting(db, internal)).toMatchObject({ status: 'queued', clientId: 1, matchKind: 'human' });
+    expect(getMeeting(db, internal)).toMatchObject({ status: 'queued', clientId: 1, matchKind: 'human', title: '', attendees: [] });
     expect(assignMeeting(db, done, 2, LATER)).toBe(false);
     expect(assignMeeting(db, un, 1, LATER)).toBe(false); // now queued
     expect(getMeeting(db, done)).toMatchObject({ status: 'done', clientId: 1, matchKind: 'title' });
@@ -172,7 +271,7 @@ describe('meetings store', () => {
 
   it('skips only unassigned meetings', () => {
     const db = seededDb();
-    const un = withStatus(db, 'unassigned', { clientId: null, matchKind: null });
+    const un = withStatus(db, 'unassigned');
     const queued = withStatus(db, 'queued');
     expect(skipMeeting(db, queued, LATER)).toBe(false);
     expect(skipMeeting(db, un, LATER)).toBe(true);
@@ -199,10 +298,10 @@ describe('meetings store', () => {
 
   it('lists unassigned meetings newest first, with no title or attendees', () => {
     const db = seededDb();
-    const old = withStatus(db, 'unassigned', { clientId: null, matchKind: null, startedAt: '2026-10-10T10:00:00.000Z', driveSeconds: 100 });
-    const recent = withStatus(db, 'unassigned', { clientId: null, matchKind: null, startedAt: '2026-10-12T10:00:00.000Z', driveSeconds: null });
-    withStatus(db, 'internal', { clientId: null, matchKind: null });
-    advanceStage(db, old, 'audio', { audioSeconds: 95.5 }, NOW);
+    const old = withStatus(db, 'unassigned', { startedAt: '2026-10-10T10:00:00.000Z', driveSeconds: 100 });
+    const recent = withStatus(db, 'unassigned', { startedAt: '2026-10-12T10:00:00.000Z', driveSeconds: null });
+    withStatus(db, 'internal');
+    db.prepare('UPDATE meetings SET audio_seconds = 95.5 WHERE id = ?').run(old); // the audio's length wins over Drive's
     const rows = listUnassigned(db, 10);
     expect(rows).toEqual([
       { id: recent, startedAt: '2026-10-12T10:00:00.000Z', seconds: null },
@@ -214,14 +313,10 @@ describe('meetings store', () => {
 
   it('lists a client’s done meetings newest first with their action item counts', () => {
     const db = seededDb();
-    const a = withStatus(db, 'queued', { startedAt: '2026-10-10T10:00:00.000Z', title: 'First' });
-    const b = withStatus(db, 'queued', { startedAt: '2026-10-12T10:00:00.000Z', title: 'Second', driveSeconds: null });
+    const a = doneMeeting(db, { startedAt: '2026-10-10T10:00:00.000Z', title: 'First' }, { summary: summary(3), docFileId: 'docA' });
+    const b = doneMeeting(db, { startedAt: '2026-10-12T10:00:00.000Z', title: 'Second', driveSeconds: null }, { audioSeconds: 600 });
     withStatus(db, 'queued', { startedAt: '2026-10-13T10:00:00.000Z' }); // not done
     withStatus(db, 'done', { clientId: 2, startedAt: '2026-10-14T10:00:00.000Z' }); // other client
-    advanceStage(db, a, 'doc', { summary: summary(3), docFileId: 'docA' }, NOW);
-    finishMeeting(db, a, { at: NOW });
-    advanceStage(db, b, 'audio', { audioSeconds: 600 }, NOW);
-    finishMeeting(db, b, { at: NOW });
     expect(listClientMeetings(db, 1, 10)).toEqual([
       { id: b, startedAt: '2026-10-12T10:00:00.000Z', title: 'Second', seconds: 600, docFileId: null, actionItemCount: 0 },
       { id: a, startedAt: '2026-10-10T10:00:00.000Z', title: 'First', seconds: 2700, docFileId: 'docA', actionItemCount: 3 },
@@ -235,54 +330,59 @@ describe('meetings store', () => {
     withStatus(db, 'done', { startedAt: '2026-10-12T10:00:00.000Z' });
     withStatus(db, 'queued', { startedAt: '2026-10-15T10:00:00.000Z' });
     withStatus(db, 'done', { clientId: 2, startedAt: '2026-10-11T10:00:00.000Z' });
-    withStatus(db, 'skipped', { clientId: null, matchKind: null, startedAt: '2026-10-16T10:00:00.000Z' });
+    withStatus(db, 'skipped', { startedAt: '2026-10-16T10:00:00.000Z' });
     expect(lastMeetingByClient(db)).toEqual(new Map([[1, '2026-10-12T10:00:00.000Z'], [2, '2026-10-11T10:00:00.000Z']]));
   });
 
-  it('counts meetings by status, and waiting deferrals by code', () => {
+  it('counts meetings by status, and waiting deferrals by code, never a claimed one', () => {
     const db = seededDb();
     withStatus(db, 'done');
     withStatus(db, 'done');
     withStatus(db, 'queued');
     const capped = [withStatus(db, 'queued'), withStatus(db, 'queued')];
     const busy = withStatus(db, 'queued');
+    const claimed = withStatus(db, 'queued');
     for (const id of capped) deferMeeting(db, id, { errorCode: 'spend_cap', nextAttemptAt: LATER, at: NOW });
     deferMeeting(db, busy, { errorCode: 'client_busy', nextAttemptAt: LATER, at: NOW });
-    withStatus(db, 'unassigned', { clientId: null, matchKind: null });
+    deferMeeting(db, claimed, { errorCode: 'client_busy', nextAttemptAt: NOW, at: NOW });
+    expect(claimMeeting(db, claimed, { nextAttemptAt: LATER, at: NOW })).toBe(true); // running now, not deferred
+    withStatus(db, 'unassigned');
     withStatus(db, 'failed');
     withStatus(db, 'no_access');
     withStatus(db, 'too_long');
-    withStatus(db, 'internal', { clientId: null, matchKind: null });
-    withStatus(db, 'skipped', { clientId: null, matchKind: null });
-    expect(meetingStats(db, new Date(NOW))).toEqual({
-      done: 2, waiting: 4, unassigned: 1, failed: 1, noAccess: 1, tooLong: 1, internal: 1, deferred: { spend_cap: 2, client_busy: 1 },
+    withStatus(db, 'internal');
+    withStatus(db, 'skipped');
+    expect(meetingStats(db, NOW)).toEqual({
+      done: 2, waiting: 5, unassigned: 1, failed: 1, noAccess: 1, tooLong: 1, internal: 1, deferred: { spend_cap: 2, client_busy: 1 },
     });
     // Once their time has come they are no longer waiting on a deferral.
-    expect(meetingStats(db, new Date(LATER)).deferred).toEqual({});
-    expect(meetingStats(seededDb(), new Date(NOW))).toEqual({
+    expect(meetingStats(db, LATER).deferred).toEqual({});
+    expect(meetingStats(seededDb(), NOW)).toEqual({
       done: 0, waiting: 0, unassigned: 0, failed: 0, noAccess: 0, tooLong: 0, internal: 0, deferred: {},
     });
   });
 
   it('a bad JSON value fails only its own row, naming the meeting and column but not the content', () => {
     const db = seededDb();
-    const good = withStatus(db, 'queued', { startedAt: '2026-10-10T10:00:00.000Z' });
-    const bad = withStatus(db, 'queued', { startedAt: '2026-10-11T10:00:00.000Z' });
-    const badSummary = withStatus(db, 'queued', { startedAt: '2026-10-12T10:00:00.000Z' });
-    for (const id of [good, bad, badSummary]) {
-      advanceStage(db, id, 'doc', { summary: summary(1) }, NOW);
-      finishMeeting(db, id, { at: NOW });
-    }
+    const good = doneMeeting(db, { startedAt: '2026-10-10T10:00:00.000Z' }, { summary: summary(1) });
+    const bad = doneMeeting(db, { startedAt: '2026-10-11T10:00:00.000Z' }, { summary: summary(1) });
+    const badSummary = doneMeeting(db, { startedAt: '2026-10-12T10:00:00.000Z' }, { summary: summary(1) });
+    const noList = doneMeeting(db, { startedAt: '2026-10-13T10:00:00.000Z' }, { summary: summary(1) });
     db.prepare("UPDATE meetings SET attendees = '[{\"email\": 42, \"secret\": \"Mr Sharma private\"}]' WHERE id = ?").run(bad);
     db.prepare("UPDATE meetings SET summary = '{not json: private words' WHERE id = ?").run(badSummary);
+    db.prepare(`UPDATE meetings SET summary = '{"actionItems": "private"}' WHERE id = ?`).run(noList);
     expect(() => getMeeting(db, bad)).toThrow(new RegExp(`meeting ${bad}.*attendees`));
     expect(() => getMeeting(db, bad)).not.toThrow(/private/);
     expect(() => getMeeting(db, badSummary)).toThrow(new RegExp(`meeting ${badSummary}.*summary`));
     expect(() => getMeeting(db, badSummary)).not.toThrow(/private/);
     expect(getMeeting(db, good)).toMatchObject({ id: good });
-    // The list reads only the summary, so the bad attendees row is still listed; the bad summary row is skipped.
+    // The light state reads no JSON, so the processor loop still sees every row.
+    expect(getMeetingState(db, badSummary)).toMatchObject({ id: badSummary, status: 'done', stage: 'tracked' });
+    // The list reads only the summary's action items, so the bad attendees row is still listed; the bad summaries are
+    // skipped, and the limit counts only listed rows.
     expect(listClientMeetings(db, 1, 10).map((m) => m.id)).toEqual([bad, good]);
-    expect(lastMeetingByClient(db).get(1)).toBe('2026-10-12T10:00:00.000Z');
+    expect(listClientMeetings(db, 1, 1).map((m) => m.id)).toEqual([bad]);
+    expect(lastMeetingByClient(db).get(1)).toBe('2026-10-13T10:00:00.000Z');
   });
 });
 
@@ -332,15 +432,31 @@ describe('migration 7', () => {
     expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
   });
 
-  it('a fresh database migrates to 7, and the table refuses unknown statuses and stages', () => {
+  it('a fresh database migrates to 7, with its indexes, and the table refuses unknown statuses and stages', () => {
     const db = seededDb();
     expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(7);
     expect(MIGRATIONS.map((m) => m.version).at(-1)).toBe(7);
-    const idx = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'meetings'").all() as { name: string }[]).map((i) => i.name);
-    expect(idx).toEqual(expect.arrayContaining(['meetings_due', 'meetings_conference']));
+    const idx = (db.prepare("SELECT tbl_name || '.' || name AS n FROM sqlite_master WHERE type = 'index'").all() as { n: string }[]).map((i) => i.n);
+    expect(idx).toEqual(expect.arrayContaining([
+      'meetings.meetings_due', 'meetings.meetings_conference', 'meetings.meetings_client', 'tasks.tasks_meeting', 'decisions.decisions_meeting',
+    ]));
+    expect(db.prepare("SELECT name FROM pragma_index_info('meetings_client') ORDER BY seqno").all()).toEqual([
+      { name: 'client_id' }, { name: 'status' }, { name: 'started_at' },
+    ]);
     expect(() => insertFound(db, meeting({ status: 'pending' as MeetingStatus }))).toThrow(/CHECK/);
     const id = withStatus(db, 'queued');
     expect(() => db.prepare("UPDATE meetings SET stage = 'uploaded' WHERE id = ?").run(id)).toThrow(/CHECK/);
     expect(() => insertFound(db, meeting({ clientId: 999 }))).toThrow(/FOREIGN KEY/);
+  });
+
+  it('an internal meeting keeps no title, attendees or names', () => {
+    const db = seededDb();
+    const internal = { status: 'internal' as const, clientId: null, matchKind: null, title: '', attendees: [], participants: [] };
+    expect(insertFound(db, meeting(internal))).toBeTypeOf('number');
+    expect(() => insertFound(db, meeting({ ...internal, title: 'Team sync' }))).toThrow(/CHECK/);
+    expect(() => insertFound(db, meeting({ ...internal, attendees: [{ email: 'r@us.in', name: null, team: true }] }))).toThrow(/CHECK/);
+    expect(() => insertFound(db, meeting({ ...internal, participants: ['Rohit'] }))).toThrow(/CHECK/);
+    const queued = withStatus(db, 'queued');
+    expect(() => db.prepare("UPDATE meetings SET status = 'internal' WHERE id = ?").run(queued)).toThrow(/CHECK/);
   });
 });

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { MeetingSummary } from '../brain/meetingSchema.ts';
+import { MeetingSummarySchema, type MeetingSummary } from '../brain/meetingSchema.ts';
 import type { Segment } from '../stt/types.ts';
 import { tx, type Db } from './db.ts';
 
@@ -113,11 +113,11 @@ interface RawMeeting {
   updated_at: string;
 }
 
-const SegmentSchema = z.object({ start: z.number(), end: z.number(), speaker: z.string().nullable(), text: z.string() });
-const AttendeesSchema = z.array(z.object({ email: z.string(), name: z.string().nullable(), team: z.boolean() }));
+const SegmentSchema = z.strictObject({ start: z.number(), end: z.number(), speaker: z.string().nullable(), text: z.string() });
+const AttendeesSchema = z.array(z.strictObject({ email: z.string(), name: z.string().nullable(), team: z.boolean() }));
 const ParticipantsSchema = z.array(z.string());
 const SttPartsSchema = z.array(
-  z.object({
+  z.strictObject({
     index: z.number().int(),
     offset: z.number(),
     seconds: z.number(),
@@ -129,23 +129,6 @@ const SttPartsSchema = z.array(
   }),
 );
 const TranscriptSchema = z.array(SegmentSchema);
-const SummarySchema: z.ZodType<MeetingSummary> = z.object({
-  whatHappened: z.string(),
-  discussion: z.array(z.object({ topic: z.string(), summary: z.string() })),
-  decisions: z.array(z.object({ text: z.string(), segmentIds: z.array(z.string()) })),
-  actionItems: z.array(
-    z.object({
-      side: z.enum(['us', 'client']),
-      task: z.string(),
-      owner: z.string().nullable(),
-      deadline: z.string().nullable(),
-      segmentIds: z.array(z.string()),
-    }),
-  ),
-  openQuestions: z.array(z.string()),
-  conclusion: z.string(),
-  speakers: z.array(z.object({ label: z.string(), name: z.string().nullable() })),
-});
 
 /**
  * A stored JSON value that cannot be read. The message names the meeting and the column, never the content (it may hold
@@ -209,7 +192,7 @@ function toRow(r: RawMeeting): MeetingRow {
     audioSeconds: r.audio_seconds,
     sttParts: parseColumn(r.id, 'stt_parts', SttPartsSchema, r.stt_parts),
     transcript: parseNullable(r.id, 'transcript', TranscriptSchema, r.transcript),
-    summary: parseNullable(r.id, 'summary', SummarySchema, r.summary),
+    summary: parseNullable(r.id, 'summary', MeetingSummarySchema, r.summary),
     docFileId: r.doc_file_id,
     note: r.note,
     errorCode: r.error_code,
@@ -220,7 +203,36 @@ function toRow(r: RawMeeting): MeetingRow {
   };
 }
 
-/** Records a recording found in Meet. Returns the new row's id, or null when the recording is already known (nothing changes). */
+/**
+ * Every time this module takes or stores is an ISO string in the canonical form `new Date(x).toISOString()` gives
+ * (YYYY-MM-DDTHH:MM:SS.sssZ), because SQLite compares them as text. insertFound normalises the meeting's own start and
+ * end, which come from Google with offsets or other precisions; every other time must already be canonical, or the call
+ * throws before writing anything.
+ */
+function canonical(what: string, name: string, x: string): string {
+  const ms = Date.parse(x);
+  if (Number.isNaN(ms) || new Date(ms).toISOString() !== x) throw new Error(`${what}: ${name} is not a canonical ISO time`);
+  return x;
+}
+
+function normalised(what: string, name: string, x: string): string {
+  const ms = Date.parse(x);
+  if (Number.isNaN(ms)) throw new Error(`${what}: ${name} is not a time`);
+  return new Date(ms).toISOString();
+}
+
+/**
+ * A processor write found the meeting not queued (or not at the stage it needs). Only the processor moves a queued
+ * meeting, so this is a bug: processor writes throw, while claims and a person's commands return false.
+ */
+function notQueued(what: string, id: number, extra = ''): never {
+  throw new Error(`${what}: meeting ${id} is not queued${extra}`);
+}
+
+/**
+ * Records a recording found in Meet. Returns the new row's id, or null when the recording is already known (nothing
+ * changes). startedAt and endedAt are stored in canonical form; an unreadable time throws.
+ */
 export function insertFound(db: Db, m: NewMeeting): number | null {
   const r = db
     .prepare(`INSERT INTO meetings (recording, conference, drive_file_id, meeting_code, title, started_at, ended_at, attendees, participants, client_id,
@@ -230,6 +242,9 @@ export function insertFound(db: Db, m: NewMeeting): number | null {
       ON CONFLICT (recording) DO NOTHING`)
     .run({
       ...m,
+      startedAt: normalised('insertFound', 'startedAt', m.startedAt),
+      endedAt: m.endedAt === null ? null : normalised('insertFound', 'endedAt', m.endedAt),
+      createdAt: canonical('insertFound', 'createdAt', m.createdAt),
       attendees: toJson('insertFound', 'attendees', AttendeesSchema, m.attendees),
       participants: toJson('insertFound', 'participants', ParticipantsSchema, m.participants),
     });
@@ -247,26 +262,53 @@ export function getMeeting(db: Db, id: number): MeetingRow | undefined {
   return r ? toRow(r) : undefined;
 }
 
+/** What the processor loop needs to decide on a meeting. Reads no JSON, so it never fails on a bad stored value. */
+export interface MeetingState {
+  id: number;
+  status: MeetingStatus;
+  stage: MeetingStage;
+  attempts: number;
+  errorCode: string | null;
+  nextAttemptAt: string | null;
+  clientId: number | null;
+  /** When the row last changed: with nextAttemptAt, the length of the last deferral (the growing waits read it back). */
+  updatedAt: string;
+}
+
+export function getMeetingState(db: Db, id: number): MeetingState | undefined {
+  return db
+    .prepare(`SELECT id, status, stage, attempts, error_code AS errorCode, next_attempt_at AS nextAttemptAt, client_id AS clientId, updated_at AS updatedAt
+      FROM meetings WHERE id = ?`)
+    .get(id) as MeetingState | undefined;
+}
+
 /** Queued meetings whose next attempt is due, oldest meeting first. */
 export function dueMeetingIds(db: Db, nowIso: string, limit: number): number[] {
   return (
     db
       .prepare(`SELECT id FROM meetings WHERE status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
         ORDER BY started_at, id LIMIT ?`)
-      .all(nowIso, limit) as { id: number }[]
+      .all(canonical('dueMeetingIds', 'nowIso', nowIso), limit) as { id: number }[]
   ).map((r) => r.id);
 }
 
 /**
- * Claims a queued meeting that is due (at `at`) before a stage runs: in one committed write the next attempt moves to
- * nextAttemptAt, so a run that never ends (the process stopped) leaves the meeting waiting until then, and a second
- * claim fails. No attempt is counted here: deferrals don't count (see deferMeeting). The error code is kept.
+ * Claims a queued meeting that is due (at `at`) before a stage runs, as claimMedia does. In one committed write:
+ * - the attempt is counted, so a stage that never ends (the process stops, again and again) runs up the count the
+ *   processor fails it at;
+ * - the next attempt moves to nextAttemptAt, so a second claim fails and a run that never ends leaves the meeting waiting
+ *   until then;
+ * - the error code is cleared, so meetingStats never counts a claimed meeting as deferred. The processor reads the
+ *   meeting (getMeetingState) before it claims, so its growing waits still see the last code; only a crash right after a
+ *   claim loses it.
+ * A deferral that should not count passes the pre-claim count back to deferMeeting as `attempts`.
  * Returns false when the meeting is not queued or not due.
  */
 export function claimMeeting(db: Db, id: number, c: { nextAttemptAt: string; at: string }): boolean {
+  const params = { id, nextAttemptAt: canonical('claimMeeting', 'nextAttemptAt', c.nextAttemptAt), at: canonical('claimMeeting', 'at', c.at) };
   return (
-    db.prepare(`UPDATE meetings SET next_attempt_at = @nextAttemptAt, updated_at = @at
-      WHERE id = @id AND status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= @at)`).run({ id, ...c }).changes === 1
+    db.prepare(`UPDATE meetings SET attempts = attempts + 1, next_attempt_at = @nextAttemptAt, error_code = NULL, updated_at = @at
+      WHERE id = @id AND status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= @at)`).run(params).changes === 1
   );
 }
 
@@ -283,19 +325,21 @@ export interface StageFields {
 }
 
 /**
- * A stage is finished: stores its results and moves the stage forward. Fields not given keep their stored values. The
- * retry state (error code, attempts, next attempt) is cleared. A move to the same or an earlier stage throws.
+ * A stage of a queued meeting is finished: stores its results and moves the stage forward (stages may be skipped).
+ * Fields not given keep their stored values; no field can be cleared this way (to null, or back to '' or []). The retry
+ * state (error code, attempts, next attempt) is cleared. Throws, writing nothing, when the meeting is missing or not
+ * queued, or the move is to the same or an earlier stage.
  */
 export function advanceStage(db: Db, id: number, stage: MeetingStage, fields: Partial<StageFields>, at: string): void {
   const f = fields;
   const params = {
     id,
     stage,
-    at,
+    at: canonical('advanceStage', 'at', at),
     audioPath: f.audioPath ?? null,
     audioSeconds: f.audioSeconds ?? null,
     transcript: f.transcript === undefined ? null : toJson('advanceStage', 'transcript', TranscriptSchema, f.transcript),
-    summary: f.summary === undefined ? null : toJson('advanceStage', 'summary', SummarySchema, f.summary),
+    summary: f.summary === undefined ? null : toJson('advanceStage', 'summary', MeetingSummarySchema, f.summary),
     docFileId: f.docFileId ?? null,
     note: f.note ?? null,
     title: f.title ?? null,
@@ -303,9 +347,12 @@ export function advanceStage(db: Db, id: number, stage: MeetingStage, fields: Pa
     participants: f.participants === undefined ? null : toJson('advanceStage', 'participants', ParticipantsSchema, f.participants),
   };
   tx(db, () => {
-    const cur = (db.prepare('SELECT stage FROM meetings WHERE id = ?').get(id) as { stage: MeetingStage } | undefined)?.stage;
+    const cur = db.prepare('SELECT status, stage FROM meetings WHERE id = ?').get(id) as { status: MeetingStatus; stage: MeetingStage } | undefined;
     if (cur === undefined) throw new Error(`advanceStage: no meeting ${id}`);
-    if (MEETING_STAGES.indexOf(stage) <= MEETING_STAGES.indexOf(cur)) throw new Error(`advanceStage: meeting ${id} cannot move from ${cur} to ${stage}`);
+    if (cur.status !== 'queued') notQueued('advanceStage', id);
+    if (MEETING_STAGES.indexOf(stage) <= MEETING_STAGES.indexOf(cur.stage)) {
+      throw new Error(`advanceStage: meeting ${id} cannot move from ${cur.stage} to ${stage}`);
+    }
     db.prepare(`UPDATE meetings SET stage = @stage, audio_path = COALESCE(@audioPath, audio_path), audio_seconds = COALESCE(@audioSeconds, audio_seconds),
         transcript = COALESCE(@transcript, transcript), summary = COALESCE(@summary, summary), doc_file_id = COALESCE(@docFileId, doc_file_id),
         note = COALESCE(@note, note), title = COALESCE(@title, title), attendees = COALESCE(@attendees, attendees),
@@ -314,51 +361,76 @@ export function advanceStage(db: Db, id: number, stage: MeetingStage, fields: Pa
   });
 }
 
-/** Stores the speech parts' bookkeeping as it is now (written before and after every part's call). */
+/** Stores a queued meeting's speech-part bookkeeping as it is now (written before and after every part's call). Throws when not queued. */
 export function setSttParts(db: Db, id: number, parts: SttPartRow[], at: string): void {
-  db.prepare('UPDATE meetings SET stt_parts = ?, updated_at = ? WHERE id = ?').run(toJson('setSttParts', 'stt_parts', SttPartsSchema, parts), at, id);
+  const json = toJson('setSttParts', 'stt_parts', SttPartsSchema, parts);
+  const n = db.prepare("UPDATE meetings SET stt_parts = ?, updated_at = ? WHERE id = ? AND status = 'queued'").run(json, canonical('setSttParts', 'at', at), id).changes;
+  if (n === 0) notQueued('setSttParts', id);
 }
 
-/** Try again later. countAttempt is true only for a retried error; deferrals (spend cap, busy, settings) don't count. */
-export function deferMeeting(db: Db, id: number, d: { errorCode: string; nextAttemptAt: string; at: string; countAttempt?: boolean }): void {
-  db.prepare(`UPDATE meetings SET error_code = @errorCode, next_attempt_at = @nextAttemptAt, attempts = attempts + @inc, updated_at = @at WHERE id = @id`).run({
-    id,
-    errorCode: d.errorCode,
-    nextAttemptAt: d.nextAttemptAt,
-    inc: d.countAttempt ? 1 : 0,
-    at: d.at,
-  });
+/**
+ * A queued meeting tries again later. countAttempt counts one more attempt; `attempts`, when given instead, is stored as
+ * it is: a deferral that doesn't count (spend cap, busy, settings) passes the count from before its claim. With neither,
+ * the count is left as the claim made it. Throws when the meeting is not queued.
+ */
+export function deferMeeting(
+  db: Db,
+  id: number,
+  d: { errorCode: string; nextAttemptAt: string; at: string } & ({ countAttempt?: boolean; attempts?: never } | { attempts: number; countAttempt?: never }),
+): void {
+  const n = db
+    .prepare(`UPDATE meetings SET error_code = @errorCode, next_attempt_at = @nextAttemptAt, attempts = COALESCE(@attempts, attempts + @inc), updated_at = @at
+      WHERE id = @id AND status = 'queued'`)
+    .run({
+      id,
+      errorCode: d.errorCode,
+      nextAttemptAt: canonical('deferMeeting', 'nextAttemptAt', d.nextAttemptAt),
+      inc: d.countAttempt ? 1 : 0,
+      attempts: d.attempts ?? null,
+      at: canonical('deferMeeting', 'at', d.at),
+    }).changes;
+  if (n === 0) notQueued('deferMeeting', id);
 }
 
-/** A final failure. The stage is kept, so `meeting retry` starts again after the last finished stage. */
+/** A final failure of a queued meeting. The stage is kept, so `meeting retry` starts again after the last finished stage. Throws when not queued. */
 export function failMeeting(db: Db, id: number, f: { status: 'failed' | 'no_access' | 'too_long'; errorCode: string; at: string }): void {
-  db.prepare('UPDATE meetings SET status = @status, error_code = @errorCode, next_attempt_at = NULL, updated_at = @at WHERE id = @id').run({ id, ...f });
+  const n = db
+    .prepare("UPDATE meetings SET status = @status, error_code = @errorCode, next_attempt_at = NULL, updated_at = @at WHERE id = @id AND status = 'queued'")
+    .run({ id, status: f.status, errorCode: f.errorCode, at: canonical('failMeeting', 'at', f.at) }).changes;
+  if (n === 0) notQueued('failMeeting', id);
 }
 
-/** The meeting is in the tracker: done. A note, when given, replaces the stored one. */
+/**
+ * A queued meeting at stage doc or later is in the tracker: done, stage tracked. A note, when given, replaces the stored
+ * one. Throws when the meeting is not queued or not yet at stage doc.
+ */
 export function finishMeeting(db: Db, id: number, f: { note?: string; at: string }): void {
-  db.prepare(`UPDATE meetings SET status = 'done', stage = 'tracked', note = COALESCE(@note, note), error_code = NULL, next_attempt_at = NULL,
-    updated_at = @at WHERE id = @id`).run({ id, note: f.note ?? null, at: f.at });
+  const n = db
+    .prepare(`UPDATE meetings SET status = 'done', stage = 'tracked', note = COALESCE(@note, note), error_code = NULL, next_attempt_at = NULL,
+      updated_at = @at WHERE id = @id AND status = 'queued' AND stage IN ('doc', 'tracked')`)
+    .run({ id, note: f.note ?? null, at: canonical('finishMeeting', 'at', f.at) }).changes;
+  if (n === 0) notQueued('finishMeeting', id, ' at stage doc or later');
 }
 
 /** A person assigns an unassigned or internal meeting to a client; it is queued. Returns false for any other status. */
 export function assignMeeting(db: Db, id: number, clientId: number, at: string): boolean {
   return (
     db.prepare(`UPDATE meetings SET status = 'queued', client_id = @clientId, match_kind = 'human', error_code = NULL, next_attempt_at = NULL, updated_at = @at
-      WHERE id = @id AND status IN ('unassigned', 'internal')`).run({ id, clientId, at }).changes === 1
+      WHERE id = @id AND status IN ('unassigned', 'internal')`).run({ id, clientId, at: canonical('assignMeeting', 'at', at) }).changes === 1
   );
 }
 
 /** A person decides an unassigned meeting is not processed. Returns false for any other status. */
 export function skipMeeting(db: Db, id: number, at: string): boolean {
-  return db.prepare("UPDATE meetings SET status = 'skipped', updated_at = ? WHERE id = ? AND status = 'unassigned'").run(at, id).changes === 1;
+  return db.prepare("UPDATE meetings SET status = 'skipped', updated_at = ? WHERE id = ? AND status = 'unassigned'").run(canonical('skipMeeting', 'at', at), id)
+    .changes === 1;
 }
 
-/** `meeting retry`: a failed or no-access meeting is queued again at its last finished stage, with fresh attempts. */
+/** `meeting retry`: a failed or no-access meeting is queued again at its last finished stage, with fresh attempts. Returns false for any other status. */
 export function retryMeeting(db: Db, id: number, at: string): boolean {
   return (
     db.prepare(`UPDATE meetings SET status = 'queued', attempts = 0, next_attempt_at = NULL, error_code = NULL, updated_at = ?
-      WHERE id = ? AND status IN ('failed', 'no_access')`).run(at, id).changes === 1
+      WHERE id = ? AND status IN ('failed', 'no_access')`).run(canonical('retryMeeting', 'at', at), id).changes === 1
   );
 }
 
@@ -387,24 +459,19 @@ export interface ClientMeeting {
   actionItemCount: number;
 }
 
-/** A client's done meetings, newest first. A meeting whose stored summary cannot be read is left out. */
+/**
+ * A client's done meetings, newest first. A meeting whose stored summary is not JSON, or has no actionItems list, is
+ * left out, in SQL, so the limit counts only listed meetings. The summary itself is not read here.
+ */
 export function listClientMeetings(db: Db, clientId: number, limit: number): ClientMeeting[] {
-  const rows = db
-    .prepare(`SELECT id, started_at AS startedAt, title, COALESCE(audio_seconds, drive_seconds) AS seconds, doc_file_id AS docFileId, summary
-      FROM meetings WHERE client_id = ? AND status = 'done' ORDER BY started_at DESC, id DESC LIMIT ?`)
-    .all(clientId, limit) as (Omit<ClientMeeting, 'actionItemCount'> & { summary: string | null })[];
-  const out: ClientMeeting[] = [];
-  for (const { summary, ...r } of rows) {
-    let actionItemCount: number;
-    try {
-      actionItemCount = parseNullable(r.id, 'summary', SummarySchema, summary)?.actionItems.length ?? 0;
-    } catch (e) {
-      if (e instanceof MeetingRowError) continue;
-      throw e;
-    }
-    out.push({ ...r, actionItemCount });
-  }
-  return out;
+  return db
+    .prepare(`SELECT id, started_at AS startedAt, title, COALESCE(audio_seconds, drive_seconds) AS seconds, doc_file_id AS docFileId,
+        CASE WHEN summary IS NULL THEN 0 ELSE json_array_length(summary, '$.actionItems') END AS actionItemCount
+      FROM meetings
+      WHERE client_id = ? AND status = 'done'
+        AND CASE WHEN summary IS NULL THEN 1 WHEN json_valid(summary) THEN json_type(summary, '$.actionItems') = 'array' ELSE 0 END
+      ORDER BY started_at DESC, id DESC LIMIT ?`)
+    .all(clientId, limit) as ClientMeeting[];
 }
 
 /** Each client's latest done meeting: client id → its start. */
@@ -424,12 +491,15 @@ export interface MeetingStats {
   noAccess: number;
   tooLong: number;
   internal: number;
-  /** Queued meetings still waiting out a deferral at `now`, by error code. */
+  /**
+   * Queued meetings still waiting out a deferral at nowIso, by error code: an error code and a next attempt still ahead.
+   * A claimed meeting has no error code (claimMeeting clears it), so it is never counted.
+   */
   deferred: Record<string, number>;
 }
 
 /** Counts for Health and `cli status`. */
-export function meetingStats(db: Db, now: Date): MeetingStats {
+export function meetingStats(db: Db, nowIso: string): MeetingStats {
   const counts = db
     .prepare(`SELECT
         COALESCE(SUM(status = 'done'), 0) AS done,
@@ -444,6 +514,6 @@ export function meetingStats(db: Db, now: Date): MeetingStats {
   const deferred = db
     .prepare(`SELECT error_code AS code, COUNT(*) AS n FROM meetings
       WHERE status = 'queued' AND error_code IS NOT NULL AND next_attempt_at > ? GROUP BY error_code ORDER BY error_code`)
-    .all(now.toISOString()) as { code: string; n: number }[];
+    .all(canonical('meetingStats', 'nowIso', nowIso)) as { code: string; n: number }[];
   return { ...counts, deferred: Object.fromEntries(deferred.map((d) => [d.code, d.n])) };
 }

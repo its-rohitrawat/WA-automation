@@ -48,24 +48,31 @@ export const MEETING_SUMMARY_JSON_SCHEMA: Record<string, unknown> = (() => {
   return schema;
 })();
 
-/** A validated summary: texts trimmed and capped, segment ids that exist, names only from the allowed list. */
-export interface MeetingSummary {
-  whatHappened: string;
-  discussion: { topic: string; summary: string }[];
-  decisions: { text: string; segmentIds: string[] }[];
-  actionItems: {
-    side: (typeof SIDE)[number];
-    task: string;
-    owner: string | null;
-    /** YYYY-MM-DD. */
-    deadline: string | null;
-    segmentIds: string[];
-  }[];
-  openQuestions: string[];
-  conclusion: string;
+/**
+ * A validated summary: texts trimmed and capped, segment ids that exist, names only from the allowed list. Also the shape
+ * the meetings table stores and reads back (src/store/meetings.ts). Strict, so a stored summary with fields this code
+ * does not know fails loudly instead of being read without them.
+ */
+export const MeetingSummarySchema = z.strictObject({
+  whatHappened: z.string(),
+  discussion: z.array(z.strictObject({ topic: z.string(), summary: z.string() })),
+  decisions: z.array(z.strictObject({ text: z.string(), segmentIds: z.array(z.string()) })),
+  actionItems: z.array(
+    z.strictObject({
+      side: z.enum(SIDE),
+      task: z.string(),
+      owner: z.string().nullable(),
+      /** YYYY-MM-DD. */
+      deadline: z.string().nullable(),
+      segmentIds: z.array(z.string()),
+    }),
+  ),
+  openQuestions: z.array(z.string()),
+  conclusion: z.string(),
   /** Labels as the transcript shows them (speakerLabel); name null when the label stays unnamed. */
-  speakers: { label: string; name: string | null }[];
-}
+  speakers: z.array(z.strictObject({ label: z.string(), name: z.string().nullable() })),
+});
+export type MeetingSummary = z.infer<typeof MeetingSummarySchema>;
 
 /** Trimmed and cut to at most `max` code points, so an emoji is never split in half. */
 const clip = (s: string, max: number): string => [...s.trim()].slice(0, max).join('').trimEnd();

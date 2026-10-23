@@ -195,8 +195,9 @@ CREATE INDEX media_client ON media (client_id);
   // Version 6 is Phase 2c's reports table: it reaches this branch from main, and goes before this one.
   {
     // Phase 3: one row per Google Meet recording. JSON columns: attendees [{email, name, team}], participants [name],
-    // stt_parts SttPart[], transcript Segment[], summary MeetingSummary. Internal meetings keep no title, attendees or names.
-    // A claim moves next_attempt_at ahead, as media's does.
+    // stt_parts SttPart[], transcript Segment[], summary MeetingSummary. Internal meetings keep no title, attendees or names
+    // (the CHECK makes sure of it).
+    // A claim counts an attempt and moves next_attempt_at ahead, as media's does.
     version: 7,
     sql: `
 CREATE TABLE meetings (
@@ -222,12 +223,16 @@ CREATE TABLE meetings (
   doc_file_id TEXT,
   note TEXT,
   error_code TEXT, attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT,
-  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  CHECK (status <> 'internal' OR (title = '' AND attendees = '[]' AND participants = '[]'))
 );
 CREATE INDEX meetings_due ON meetings(status, next_attempt_at);
 CREATE INDEX meetings_conference ON meetings(conference);
+CREATE INDEX meetings_client ON meetings(client_id, status, started_at);
 ALTER TABLE tasks ADD COLUMN meeting_id INTEGER REFERENCES meetings(id);
 ALTER TABLE decisions ADD COLUMN meeting_id INTEGER REFERENCES meetings(id);
+CREATE INDEX tasks_meeting ON tasks(meeting_id);
+CREATE INDEX decisions_meeting ON decisions(meeting_id);
 `,
   },
 ];
