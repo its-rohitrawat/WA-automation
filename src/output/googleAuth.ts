@@ -1,12 +1,50 @@
 import { hkdfSync, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { auth } from '@googleapis/drive';
+import type { Env } from '../config/env.ts';
 import { decrypt, encrypt } from '../crypto/envelope.ts';
 import type { Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 
-/** Only files this app creates. Gmail/Calendar read-only scopes are added in Phase 3. */
+/** Only files this app creates. */
 export const DRIVE_SCOPES = ['https://www.googleapis.com/auth/drive.file'];
+
+/** Phase 3, read only: Meet recordings, the Calendar invite behind each, and the recording files Meet put in Drive. No Gmail. */
+export const MEETING_SCOPES = [
+  'https://www.googleapis.com/auth/meetings.space.readonly',
+  'https://www.googleapis.com/auth/calendar.events.readonly',
+  'https://www.googleapis.com/auth/drive.meet.readonly',
+];
+
+const SCOPE_NAMES: Record<string, string> = {
+  'https://www.googleapis.com/auth/drive.file': 'Google Drive (only the files WA Agent creates)',
+  'https://www.googleapis.com/auth/meetings.space.readonly': 'Google Meet recordings list (read only)',
+  'https://www.googleapis.com/auth/calendar.events.readonly': 'Calendar invites (read only)',
+  'https://www.googleapis.com/auth/drive.meet.readonly': 'Meet files in Drive (read only)',
+};
+
+/** A scope in plain words, for the operator. */
+export function scopeName(scope: string): string {
+  return SCOPE_NAMES[scope] ?? scope;
+}
+
+/** What google-auth asks for: Drive always, the meeting scopes only when meetings are on. */
+export function requestedScopes(env: Pick<Env, 'MEETINGS_ENABLED'>): string[] {
+  return env.MEETINGS_ENABLED ? [...DRIVE_SCOPES, ...MEETING_SCOPES] : [...DRIVE_SCOPES];
+}
+
+// The scopes Google granted with the stored token, as Google wrote them. Not a secret.
+const SCOPES_KEY = 'google_scopes';
+
+export function saveGrantedScopes(db: Db, scope: string): void {
+  setKv(db, SCOPES_KEY, scope);
+}
+
+/** True only when the stored sign-in recorded every meeting scope. A token from before Phase 3 has none recorded: Drive only. */
+export function hasMeetingScopes(db: Db): boolean {
+  const granted = new Set((getKv(db, SCOPES_KEY) ?? '').split(' '));
+  return MEETING_SCOPES.every((s) => granted.has(s));
+}
 
 export type OAuth2Client = InstanceType<typeof auth.OAuth2>;
 
@@ -67,6 +105,17 @@ export function parseCallback(requestUrl: string, expectedState: string): string
 
 const NO_DRIVE_SCOPE = 'Drive access was not granted. Run google-auth again and keep the Google Drive box ticked.';
 const NO_REFRESH = 'Google returned no refresh token. Remove WA Agent at myaccount.google.com/permissions and try again.';
+const noMeetingScope = (missing: string[]) =>
+  `Some meeting permissions were not granted: ${missing.map(scopeName).join(', ')}. Run google-auth again and tick every box Google shows.`;
+
+/** A refusal written here, safe to show, as opposed to Google's own error text. */
+class ConsentRefused extends Error {}
+
+export interface ConsentResult {
+  refreshToken: string;
+  /** The scopes Google granted, space-separated, as Google wrote them. */
+  scope: string;
+}
 
 /** The part of the OAuth client the sign-in uses (so tests can inject a fake). */
 export interface ConsentClient {
@@ -84,10 +133,10 @@ export async function runLoopbackConsent(o: {
   timeoutMs?: number;
   /** Test seam: build the OAuth client for the given redirect URI. */
   createClient?: (redirectUri: string) => ConsentClient;
-}): Promise<string> {
+}): Promise<ConsentResult> {
   const state = randomBytes(16).toString('hex');
   const makeClient = o.createClient ?? ((uri: string) => createOAuthClient(o.clientId, o.clientSecret, uri) as unknown as ConsentClient);
-  return await new Promise<string>((resolve, reject) => {
+  return await new Promise<ConsentResult>((resolve, reject) => {
     let client: ConsentClient | undefined;
     let codeVerifier: string | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -116,21 +165,26 @@ export async function runLoopbackConsent(o: {
       client!
         .getToken({ code, codeVerifier })
         .then(({ tokens }) => {
-          if (!tokens.refresh_token) throw new Error(NO_REFRESH);
-          if (!tokens.scope?.split(' ').includes(DRIVE_SCOPES[0]!)) throw new Error(NO_DRIVE_SCOPE);
-          finish(null, tokens.refresh_token);
+          if (!tokens.refresh_token) throw new ConsentRefused(NO_REFRESH);
+          const scope = tokens.scope ?? '';
+          const granted = new Set(scope.split(' '));
+          if (!granted.has(DRIVE_SCOPES[0]!)) throw new ConsentRefused(NO_DRIVE_SCOPE);
+          // Every requested scope, or no result at all (so the caller saves nothing).
+          const missing = o.scopes.filter((s) => !granted.has(s));
+          if (missing.length > 0) throw new ConsentRefused(noMeetingScope(missing));
+          finish(null, { refreshToken: tokens.refresh_token, scope });
         })
         // Google's own error text can echo request details, so replace it.
-        .catch((e: Error) => finish(e.message === NO_REFRESH || e.message === NO_DRIVE_SCOPE ? e : new Error('Google would not exchange the sign-in code')));
+        .catch((e: Error) => finish(e instanceof ConsentRefused ? e : new Error('Google would not exchange the sign-in code')));
     });
-    function finish(err: Error | null, token?: string): void {
+    function finish(err: Error | null, result?: ConsentResult): void {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       server.close();
       server.closeAllConnections();
       if (err) reject(err);
-      else resolve(token!);
+      else resolve(result!);
     }
     server.on('error', (e) => finish(e));
     timer = setTimeout(() => finish(new Error('Timed out waiting for Google sign-in')), o.timeoutMs ?? 300_000);

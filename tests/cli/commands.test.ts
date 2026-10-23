@@ -7,7 +7,7 @@ import { parseEnv } from '../../src/config/env.ts';
 import { masterKeyPath, sessionDbPath, trackerDbPath } from '../../src/config/paths.ts';
 import { StaticKeyProvider } from '../../src/crypto/keyProvider.ts';
 import { mediaRefAad, MediaRefSealer } from '../../src/media/ref.ts';
-import { DRIVE_SCOPES, TokenStore, type ConsentClient } from '../../src/output/googleAuth.ts';
+import { DRIVE_SCOPES, hasMeetingScopes, MEETING_SCOPES, TokenStore, type ConsentClient } from '../../src/output/googleAuth.ts';
 import { syncClients } from '../../src/store/clients.ts';
 import { openDb } from '../../src/store/db.ts';
 import { getKv } from '../../src/store/kv.ts';
@@ -433,19 +433,41 @@ describe('list-groups', () => {
 });
 
 describe('google-auth', () => {
-  function consentClient(opts: { failToken?: boolean } = {}): (uri: string) => ConsentClient {
+  const ALL_SCOPES = [...DRIVE_SCOPES, ...MEETING_SCOPES];
+  const meetingsOn = () =>
+    parseEnv({
+      DATA_DIR: dataDir,
+      GROUPS_FILE: groupsFile,
+      GOOGLE_OAUTH_CLIENT_ID: 'test-id',
+      GOOGLE_OAUTH_CLIENT_SECRET: 'test-secret',
+      MEETINGS_ENABLED: 'true',
+      TEAM_EMAIL_DOMAINS: 'ourstudio.in',
+    });
+  function consentClient(opts: { failToken?: boolean; scope?: string; asked?: string[][] } = {}): (uri: string) => ConsentClient {
     return (redirectUri) => ({
       generateCodeVerifierAsync: async () => ({ codeVerifier: 'v', codeChallenge: 'c' }),
-      generateAuthUrl: (o) => `${redirectUri}/?state=${o.state}&code=abc`,
+      generateAuthUrl: (o) => {
+        opts.asked?.push(o.scope);
+        return `${redirectUri}/?state=${o.state}&code=abc`;
+      },
       getToken: async () => {
         if (opts.failToken) throw new Error(`boom ${REFRESH_TOKEN}`);
-        return { tokens: { refresh_token: REFRESH_TOKEN, scope: DRIVE_SCOPES[0] } };
+        return { tokens: { refresh_token: REFRESH_TOKEN, scope: opts.scope ?? DRIVE_SCOPES[0] } };
       },
     });
   }
+  const urlIndex = () => lines.findIndex((l) => l.startsWith('http://127.0.0.1'));
   const visit = async () => {
     await vi.waitFor(() => expect(lines.some((l) => l.startsWith('http://127.0.0.1'))).toBe(true));
     await fetch(lines.find((l) => l.startsWith('http://127.0.0.1'))!);
+  };
+  const kv = (k: string) => {
+    const db = openDb(trackerDbPath(dataDir));
+    try {
+      return getKv(db, k);
+    } finally {
+      db.close();
+    }
   };
 
   it('stores the token encrypted, never prints it, and says to restart the service', async () => {
@@ -460,6 +482,71 @@ describe('google-auth', () => {
     db.close();
     expect(out()).not.toContain(REFRESH_TOKEN);
     expect(out()).toContain('Google Drive connected. If the WA Agent service is running, restart it so it uses the new sign-in: net stop wa-agent, then net start wa-agent');
+  });
+
+  it('with meetings off asks for Drive only, says so before the link, and records the granted scope', async () => {
+    const asked: string[][] = [];
+    const p = googleAuthCommand(deps({ createConsentClient: consentClient({ asked }) }));
+    await visit();
+    await p;
+    expect(asked).toEqual([DRIVE_SCOPES]);
+    const perm = lines.findIndex((l) => l.includes('Google Drive (only the files WA Agent creates)'));
+    expect(perm).toBeGreaterThanOrEqual(0);
+    expect(perm).toBeLessThan(urlIndex());
+    expect(out()).not.toContain('Calendar invites');
+    expect(kv('google_scopes')).toBe(DRIVE_SCOPES[0]);
+    const db = openDb(trackerDbPath(dataDir));
+    expect(hasMeetingScopes(db)).toBe(false);
+    db.close();
+  });
+
+  it('with meetings on asks for the meeting permissions too, in plain words, and saves token and scopes', async () => {
+    const asked: string[][] = [];
+    const granted = ALL_SCOPES.join(' ');
+    const p = googleAuthCommand(deps({ env: meetingsOn(), createConsentClient: consentClient({ asked, scope: granted }) }));
+    await visit();
+    await p;
+    expect(asked).toEqual([ALL_SCOPES]);
+    for (const words of ['Google Drive (only the files WA Agent creates)', 'Google Meet recordings list (read only)', 'Calendar invites (read only)', 'Meet files in Drive (read only)']) {
+      const i = lines.findIndex((l) => l.includes(words));
+      expect(i).toBeGreaterThanOrEqual(0);
+      expect(i).toBeLessThan(urlIndex());
+    }
+    expect(out()).not.toContain('googleapis.com/auth');
+    expect(kv('google_scopes')).toBe(granted);
+    const db = openDb(trackerDbPath(dataDir));
+    expect(new TokenStore(db, KEY).load()).toBe(REFRESH_TOKEN);
+    expect(hasMeetingScopes(db)).toBe(true);
+    db.close();
+    expect(out()).not.toContain(REFRESH_TOKEN);
+  });
+
+  it('a consent missing one meeting scope is rejected and saves neither the token nor the scopes', async () => {
+    const granted = ALL_SCOPES.filter((s) => !s.endsWith('drive.meet.readonly')).join(' ');
+    const p = googleAuthCommand(deps({ env: meetingsOn(), createConsentClient: consentClient({ scope: granted }) }));
+    const caught = p.catch((e: Error) => e);
+    await visit();
+    const err = (await caught) as Error;
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain('Meet files in Drive');
+    expect(err.message).not.toContain(REFRESH_TOKEN);
+    expect(kv('google_refresh_token')).toBeUndefined();
+    expect(kv('google_scopes')).toBeUndefined();
+    expect(out()).not.toContain(REFRESH_TOKEN);
+    expect(out()).not.toContain('connected');
+  });
+
+  it('a rejected consent leaves an earlier sign-in and its scopes as they were', async () => {
+    const first = googleAuthCommand(deps({ createConsentClient: consentClient() }));
+    await visit();
+    await first;
+    const before = { token: kv('google_refresh_token'), scopes: kv('google_scopes') };
+    lines = [];
+    const p = googleAuthCommand(deps({ env: meetingsOn(), createConsentClient: consentClient({ scope: DRIVE_SCOPES[0] }) }));
+    const caught = p.catch((e: Error) => e);
+    await visit();
+    expect(await caught).toBeInstanceOf(Error);
+    expect({ token: kv('google_refresh_token'), scopes: kv('google_scopes') }).toEqual(before);
   });
 
   it('stores nothing when the code exchange fails', async () => {

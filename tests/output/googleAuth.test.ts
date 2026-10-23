@@ -1,7 +1,19 @@
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { parseEnv } from '../../src/config/env.ts';
 import { decrypt } from '../../src/crypto/envelope.ts';
-import { DRIVE_SCOPES, parseCallback, runLoopbackConsent, TokenDecryptError, TokenStore } from '../../src/output/googleAuth.ts';
+import {
+  DRIVE_SCOPES,
+  hasMeetingScopes,
+  MEETING_SCOPES,
+  parseCallback,
+  requestedScopes,
+  runLoopbackConsent,
+  saveGrantedScopes,
+  scopeName,
+  TokenDecryptError,
+  TokenStore,
+} from '../../src/output/googleAuth.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
 import { seededDb } from '../helpers/db.ts';
 
@@ -74,6 +86,62 @@ describe('parseCallback', () => {
   });
 });
 
+const ALL_SCOPES = [...DRIVE_SCOPES, ...MEETING_SCOPES];
+
+describe('scopes', () => {
+  it('lists the three read-only meeting scopes', () => {
+    expect(MEETING_SCOPES).toEqual([
+      'https://www.googleapis.com/auth/meetings.space.readonly',
+      'https://www.googleapis.com/auth/calendar.events.readonly',
+      'https://www.googleapis.com/auth/drive.meet.readonly',
+    ]);
+  });
+
+  it('asks for Drive only when meetings are off', () => {
+    expect(requestedScopes(parseEnv({}))).toEqual(['https://www.googleapis.com/auth/drive.file']);
+    expect(requestedScopes(parseEnv({ MEETINGS_ENABLED: 'false' }))).toEqual(DRIVE_SCOPES);
+  });
+
+  it('adds the meeting scopes when meetings are on', () => {
+    expect(requestedScopes(parseEnv({ MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'ourstudio.in' }))).toEqual(ALL_SCOPES);
+  });
+
+  it('names every scope in plain words', () => {
+    expect(ALL_SCOPES.map(scopeName)).toEqual([
+      'Google Drive (only the files WA Agent creates)',
+      'Google Meet recordings list (read only)',
+      'Calendar invites (read only)',
+      'Meet files in Drive (read only)',
+    ]);
+  });
+});
+
+describe('granted scopes', () => {
+  it('an old token with nothing recorded counts as Drive only', () => {
+    const db = seededDb();
+    new TokenStore(db, randomBytes(32)).save(TOKEN);
+    expect(getKv(db, 'google_scopes')).toBeUndefined();
+    expect(hasMeetingScopes(db)).toBe(false);
+  });
+
+  it('stores the granted scope string and reads it back', () => {
+    const db = seededDb();
+    saveGrantedScopes(db, ALL_SCOPES.join(' '));
+    expect(getKv(db, 'google_scopes')).toBe(ALL_SCOPES.join(' '));
+    expect(hasMeetingScopes(db)).toBe(true);
+  });
+
+  it('is true only when every meeting scope is recorded', () => {
+    const db = seededDb();
+    saveGrantedScopes(db, DRIVE_SCOPES.join(' '));
+    expect(hasMeetingScopes(db)).toBe(false);
+    saveGrantedScopes(db, [...DRIVE_SCOPES, MEETING_SCOPES[0], MEETING_SCOPES[2]].join(' '));
+    expect(hasMeetingScopes(db)).toBe(false);
+    saveGrantedScopes(db, ['openid', ...MEETING_SCOPES.toReversed(), ...DRIVE_SCOPES].join(' '));
+    expect(hasMeetingScopes(db)).toBe(true);
+  });
+});
+
 function fakeClient(over: { scope?: string; tokenFails?: boolean } = {}) {
   const calls: { redirectUri?: string; authUrlOpts?: Record<string, unknown>; getTokenArg?: unknown } = {};
   const createClient = (redirectUri: string) => {
@@ -94,14 +162,14 @@ function fakeClient(over: { scope?: string; tokenFails?: boolean } = {}) {
   return { calls, createClient: createClient as never };
 }
 
-async function startConsent(f: ReturnType<typeof fakeClient>, timeoutMs?: number) {
+async function startConsent(f: ReturnType<typeof fakeClient>, timeoutMs?: number, scopes: string[] = DRIVE_SCOPES) {
   let url = '';
   let ready!: () => void;
   const urlReady = new Promise<void>((r) => (ready = r));
   const promise = runLoopbackConsent({
     clientId: 'id',
     clientSecret: 'secret',
-    scopes: DRIVE_SCOPES,
+    scopes,
     createClient: f.createClient,
     showUrl: (u) => {
       url = u;
@@ -127,7 +195,7 @@ describe('runLoopbackConsent', () => {
     expect(o.scope).toEqual(['https://www.googleapis.com/auth/drive.file']);
     const res = await fetch(`${base}/?state=${state}&code=abc`);
     expect(await res.text()).toBe('Sign-in received. Return to the terminal.');
-    expect(await promise).toBe('rt-1');
+    expect(await promise).toEqual({ refreshToken: 'rt-1', scope: 'https://www.googleapis.com/auth/drive.file' });
     expect(f.calls.getTokenArg).toEqual({ code: 'abc', codeVerifier: 'verifier-123' });
   });
 
@@ -137,7 +205,7 @@ describe('runLoopbackConsent', () => {
     expect((await fetch(`${base}/`)).status).toBe(404);
     expect((await fetch(`${base}/favicon.ico`)).status).toBe(404);
     await fetch(`${base}/?state=${state}&code=abc`);
-    expect(await promise).toBe('rt-1');
+    expect((await promise).refreshToken).toBe('rt-1');
   });
 
   it('a wrong state gets 400 and rejects', async () => {
@@ -166,6 +234,46 @@ describe('runLoopbackConsent', () => {
   it('rejects when drive.file was not granted', async () => {
     const f = fakeClient({ scope: 'openid email' });
     const { promise, base, state } = await startConsent(f);
+    await fetch(`${base}/?state=${state}&code=abc`);
+    await expect(promise).rejects.toThrow(/Drive access was not granted/);
+  });
+
+  it('asks for the meeting scopes and returns the granted scope string', async () => {
+    const granted = [...ALL_SCOPES, 'openid'].join(' ');
+    const f = fakeClient({ scope: granted });
+    const { promise, base, state } = await startConsent(f, undefined, ALL_SCOPES);
+    expect(f.calls.authUrlOpts!.scope).toEqual(ALL_SCOPES);
+    await fetch(`${base}/?state=${state}&code=abc`);
+    expect(await promise).toEqual({ refreshToken: 'rt-1', scope: granted });
+  });
+
+  it('rejects a consent missing one meeting scope, naming it in plain words', async () => {
+    const f = fakeClient({ scope: ALL_SCOPES.filter((s) => !s.endsWith('calendar.events.readonly')).join(' ') });
+    const { promise, base, state } = await startConsent(f, undefined, ALL_SCOPES);
+    await fetch(`${base}/?state=${state}&code=abc`);
+    const err = (await promise.catch((e: Error) => e)) as Error;
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/meeting permissions were not granted/);
+    expect(err.message).toContain('Calendar invites');
+    expect(err.message).not.toContain('Meet files in Drive');
+    expect(err.message).not.toContain('recordings list');
+    expect(err.message).not.toContain('rt-1');
+    expect(err.message).not.toContain('googleapis.com');
+  });
+
+  it('names every missing meeting scope', async () => {
+    const f = fakeClient({ scope: DRIVE_SCOPES.join(' ') });
+    const { promise, base, state } = await startConsent(f, undefined, ALL_SCOPES);
+    await fetch(`${base}/?state=${state}&code=abc`);
+    const err = (await promise.catch((e: Error) => e)) as Error;
+    expect(err.message).toContain('Google Meet recordings list');
+    expect(err.message).toContain('Calendar invites');
+    expect(err.message).toContain('Meet files in Drive');
+  });
+
+  it('reports a missing Drive scope first, even when meeting scopes are missing too', async () => {
+    const f = fakeClient({ scope: MEETING_SCOPES[0] });
+    const { promise, base, state } = await startConsent(f, undefined, ALL_SCOPES);
     await fetch(`${base}/?state=${state}&code=abc`);
     await expect(promise).rejects.toThrow(/Drive access was not granted/);
   });

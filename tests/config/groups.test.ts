@@ -67,3 +67,39 @@ describe('example allow-list', () => {
     expect(() => loadGroupsFile(join(tmpdir(), 'no-such-dir-xyz', 'groups.json'))).toThrowError(GROUPS_FILE_MISSING_MESSAGE);
   });
 });
+
+describe('meeting matching rules', () => {
+  it('lower-cases and trims emailDomains', () => {
+    const [c] = parseGroupsFile(valid({ emailDomains: [' SharmaInteriors.IN ', 'sharma.co.in'] }));
+    expect(c!.emailDomains).toEqual(['sharmainteriors.in', 'sharma.co.in']);
+  });
+
+  it('refuses an emailDomains entry that is not a domain, naming where it is', () => {
+    for (const d of ['sharma', 'ops@sharma.in', '', 'https://sharma.in']) {
+      expect(() => parseGroupsFile(valid({ emailDomains: ['sharma.in', d] }))).toThrowError(/clients\.0\.emailDomains\.1 must look like a domain/);
+    }
+  });
+
+  it('refuses public mail domains, which would match everyone', () => {
+    expect(() => parseGroupsFile(valid({ emailDomains: ['Gmail.com'] }))).toThrowError(/emailDomains\.0 must not be a public mail domain/);
+    expect(() => parseGroupsFile(valid({ emailDomains: ['yahoo.co.in'] }))).toThrowError(/public mail domain/);
+  });
+
+  it('trims meetingKeywords and keeps them otherwise as written', () => {
+    const [c] = parseGroupsFile(valid({ meetingKeywords: ['  Sharma ', 'Kitchen Fit-out'] }));
+    expect(c!.meetingKeywords).toEqual(['Sharma', 'Kitchen Fit-out']);
+  });
+
+  it('refuses empty or short meetingKeywords', () => {
+    for (const k of ['', '   ', 'ab', ' ab ']) {
+      expect(() => parseGroupsFile(valid({ meetingKeywords: ['Sharma', k] }))).toThrowError(/meetingKeywords\.1 must be at least 3 characters/);
+    }
+    expect(parseGroupsFile(valid({ meetingKeywords: ['abc'] }))[0]!.meetingKeywords).toEqual(['abc']);
+  });
+
+  it('allows at most 20 meetingKeywords per client', () => {
+    const words = (n: number) => Array.from({ length: n }, (_, i) => `word${i}`);
+    expect(parseGroupsFile(valid({ meetingKeywords: words(20) }))[0]!.meetingKeywords).toHaveLength(20);
+    expect(() => parseGroupsFile(valid({ meetingKeywords: words(21) }))).toThrowError(/meetingKeywords at most 20 per client/);
+  });
+});

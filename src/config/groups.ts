@@ -1,5 +1,6 @@
 import { readFileSync, unwatchFile, watchFile, type Stats } from 'node:fs';
 import { z } from 'zod';
+import { DomainSchema } from './domains.ts';
 
 export const GROUPS_FILE_MISSING_MESSAGE = 'Allow-list file missing. Create config/allowed-groups.json containing { "clients": [] }, run: npm run cli -- list-groups, then add your client groups (see docs/SETUP.md).';
 
@@ -14,8 +15,8 @@ const ClientSchema = z.object({
   name: z.string().trim().min(1).max(80),
   code: z.string().regex(/^[A-Z]{3,4}$/, 'must be 3-4 capital letters'),
   phases: z.array(z.string().trim().min(1)).min(1).optional(),
-  emailDomains: z.array(z.string()).optional(),
-  meetingKeywords: z.array(z.string()).optional(),
+  emailDomains: z.array(DomainSchema).optional(),
+  meetingKeywords: z.array(z.string().trim().min(3, 'must be at least 3 characters')).max(20, 'at most 20 per client').optional(),
 });
 
 const FileSchema = z.object({ clients: z.array(ClientSchema) });
