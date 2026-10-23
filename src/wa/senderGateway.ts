@@ -219,7 +219,8 @@ export class SenderGateway implements ReportSender {
       this.#setState('open', null);
       // From here on a failure may hide a message that reached the founder: the outcome is unknown, never retried.
       try {
-        const ids = [await this.#send(opened.sock, this.#jid, { text })];
+        // linkPreview: null stops Baileys fetching a preview of a URL that a task title copied from a chat.
+        const ids = [await this.#send(opened.sock, this.#jid, { text, linkPreview: null })];
         ids.push(await this.#send(opened.sock, this.#jid, { document: xlsx, mimetype: XLSX_MIME, fileName }));
         await delay(this.#opts.lingerMs ?? 15_000);
         return { status: 'sent', messageIds: ids };

@@ -76,7 +76,7 @@ describe('SenderGateway', () => {
     expect(await gw.sendReport('Morning report · 23 Oct', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
     const sock = sockets[0]!;
     expect(sock.sendMessage.mock.calls).toEqual([
-      [JID, { text: 'Morning report · 23 Oct' }],
+      [JID, { text: 'Morning report · 23 Oct', linkPreview: null }],
       [JID, { document: XLSX, mimetype: XLSX_MIME, fileName: FILE }],
     ]);
     expect(sock.end).toHaveBeenCalled();
