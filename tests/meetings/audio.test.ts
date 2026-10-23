@@ -1,10 +1,10 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, type PathLike } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  cleanupTemp, MEETING_DISK_HEADROOM_BYTES, MEETING_MAX_BYTES, MeetingDeferral, MeetingFailure, meetingFfmpeg, prepareAudio, type PrepareAudioDeps,
+  cleanupTemp, MEETING_DISK_HEADROOM_BYTES, MEETING_MAX_BYTES, MeetingDeferral, MeetingFailure, prepareAudio, type PrepareAudioDeps,
 } from '../../src/meetings/audio.ts';
 import { DownloadTooBigError } from '../../src/meetings/googleErrors.ts';
 import { AudioError, Ffmpeg, type RunFile, type RunOptions } from '../../src/stt/audio.ts';
@@ -14,6 +14,39 @@ import { manualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger } from '../../src/util/logger.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
 import { FakeMeetingsApi } from '../helpers/fakeMeetings.ts';
+
+// Hooks into the fs calls src/meetings/audio.ts makes, so a test can make one fail (EPERM, EXDEV) as Windows can.
+const fsHooks = vi.hoisted(() => ({
+  unlink: undefined as ((path: string) => void) | undefined,
+  rename: undefined as ((from: string, to: string) => void) | undefined,
+}));
+vi.mock('node:fs', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...real,
+    unlinkSync: (path: PathLike) => {
+      fsHooks.unlink?.(String(path));
+      real.unlinkSync(path);
+    },
+    renameSync: (from: PathLike, to: PathLike) => {
+      fsHooks.rename?.(String(from), String(to));
+      real.renameSync(from, to);
+    },
+  };
+});
+const fsError = (code: string) => Object.assign(new Error(`fake ${code}`), { code });
+
+const dirs: string[] = [];
+const tempDir = (prefix: string): string => {
+  const d = mkdtempSync(join(tmpdir(), prefix));
+  dirs.push(d);
+  return d;
+};
+afterEach(() => {
+  fsHooks.unlink = undefined;
+  fsHooks.rename = undefined;
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
 
 const FILE_ID = 'fileAbc123';
 // 20:00 UTC on 31 Oct is 01:30 on 1 Nov in India: the folder is the India month.
@@ -95,7 +128,7 @@ describe('prepareAudio', () => {
   const row = () => getMeeting(db, id)!;
 
   beforeEach(() => {
-    dataDir = mkdtempSync(join(tmpdir(), 'meet-audio-'));
+    dataDir = tempDir('meet-audio-');
     db = seededDb();
     api = new FakeMeetingsApi();
     api.files.set(FILE_ID, { info: { name: 'rec.mp4', size: 4000, mimeType: 'video/mp4', durationMs: 2_700_000 }, bytes: Buffer.from('video-bytes') });
@@ -138,7 +171,7 @@ describe('prepareAudio', () => {
     const ac = new AbortController();
     const reason = new Error('stopping');
     const p = prepareAudio(row(), deps(), ac.signal);
-    await vi.waitFor(() => expect(existsSync(join(tmp(), `${id}.mp4.part`))).toBe(true));
+    await vi.waitFor(() => expect(existsSync(join(tmp(), `${id}.mp4.part`))).toBe(true), { timeout: 5000 });
     ac.abort(reason);
     await expect(p).rejects.toBe(reason);
     expect(readdirSync(tmp())).toEqual([]);
@@ -210,11 +243,84 @@ describe('prepareAudio', () => {
     expect(readdirSync(tmp())).toEqual([]);
   });
 
-  it('production ffmpeg calls get none of the parent environment', async () => {
+  it('a kept MP3 that cannot be measured is failed (bad_audio) and kept', async () => {
+    mkdirSync(join(dataDir, 'meetings', 'SHA', '2026-11'), { recursive: true });
+    writeFileSync(finalAbs(), 'not audio');
+    ff.run = async (_f, _a, o) => {
+      ff.opts.push(o);
+      return { code: 1, stderr: 'Invalid data found when processing input' };
+    };
+    const err = await prepareAudio(row(), deps(), new AbortController().signal).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MeetingFailure);
+    expect(err).toMatchObject({ status: 'failed', code: 'bad_audio' });
+    expect(existsSync(finalAbs())).toBe(true);
+    expect(api.calls).toHaveLength(0);
+  });
+
+  it('a video that cannot be removed after a good conversion is left for cleanupTemp; the MP3 is kept', async () => {
+    const video = join(tmp(), `${id}.mp4.part`);
+    fsHooks.unlink = (path) => {
+      if (path === video) throw fsError('EPERM');
+    };
+    const lines: string[] = [];
+    const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
+    await expect(prepareAudio(row(), deps({ log }), new AbortController().signal)).resolves.toMatchObject({ outcome: 'audio' });
+    expect(readFileSync(finalAbs(), 'utf8')).toBe('mp3-bytes');
+    expect(readdirSync(tmp())).toEqual([`${id}.mp4.part`]);
+    expect(row()).toMatchObject({ stage: 'audio' });
+    const warning = lines.find((l) => l.includes('could not be removed'))!;
+    expect(warning).toContain(`"meetingId":${id}`);
+    expect(warning).toContain('"code":"EPERM"');
+    expect(warning).not.toContain('mp4');
+    fsHooks.unlink = undefined;
+    expect(cleanupTemp(db, dataDir, silentLogger())).toEqual({ removed: 1, kept: 0 });
+    expect(readdirSync(tmp())).toEqual([]);
+  });
+
+  it('a leftover that cannot be removed defers disk_busy without downloading', async () => {
+    mkdirSync(tmp(), { recursive: true });
+    writeFileSync(join(tmp(), `${id}.mp4.part`), 'half');
+    fsHooks.unlink = () => {
+      throw fsError('EPERM');
+    };
+    const err = await prepareAudio(row(), deps(), new AbortController().signal).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MeetingDeferral);
+    expect(err).toMatchObject({ code: 'disk_busy' });
+    expect(api.callsOf('download')).toHaveLength(0);
+  });
+
+  it('a move that fails defers disk_busy, with tmp emptied and no final MP3', async () => {
+    fsHooks.rename = (from) => {
+      if (from === join(tmp(), `${id}.mp3`)) throw fsError('EBUSY');
+    };
+    const err = await prepareAudio(row(), deps(), new AbortController().signal).catch((e: unknown) => e);
+    expect(err).toMatchObject({ name: 'MeetingDeferral', code: 'disk_busy' });
+    expect(readdirSync(tmp())).toEqual([]);
+    expect(existsSync(finalAbs())).toBe(false);
+    expect(row()).toMatchObject({ status: 'queued', stage: 'found' });
+  });
+
+  it('a move across volumes (EXDEV) copies, then removes the source', async () => {
+    fsHooks.rename = (from) => {
+      if (from === join(tmp(), `${id}.mp3`)) throw fsError('EXDEV');
+    };
+    await expect(prepareAudio(row(), deps(), new AbortController().signal)).resolves.toMatchObject({ outcome: 'audio' });
+    expect(readFileSync(finalAbs(), 'utf8')).toBe('mp3-bytes');
+    expect(readdirSync(tmp())).toEqual([]);
+  });
+
+  it('a full disk during the download defers disk_full', async () => {
+    api.failWith.set('download', fsError('ENOSPC'));
+    const err = await prepareAudio(row(), deps(), new AbortController().signal).catch((e: unknown) => e);
+    expect(err).toMatchObject({ name: 'MeetingDeferral', code: 'disk_full' });
+    expect(readdirSync(tmp())).toEqual([]);
+  });
+
+  it('ffmpeg calls get none of the parent environment by default', async () => {
     const saved = process.env.ANTHROPIC_API_KEY;
     process.env.ANTHROPIC_API_KEY = 'dummy-test-value';
     try {
-      await prepareAudio(row(), deps({ ffmpeg: meetingFfmpeg('ffmpeg.exe', ff.run) }), new AbortController().signal);
+      await prepareAudio(row(), deps(), new AbortController().signal);
       expect(ff.opts).toHaveLength(2);
       for (const o of ff.opts) {
         expect(o.env).toBeDefined();
@@ -245,13 +351,13 @@ describe('cleanupTemp', () => {
   };
 
   beforeEach(() => {
-    dataDir = mkdtempSync(join(tmpdir(), 'meet-clean-'));
+    dataDir = tempDir('meet-clean-');
     db = seededDb();
     mkdirSync(tmp(), { recursive: true });
   });
 
   it('does nothing when there is no tmp folder', () => {
-    const empty = mkdtempSync(join(tmpdir(), 'meet-clean-none-'));
+    const empty = tempDir('meet-clean-none-');
     expect(cleanupTemp(db, empty, silentLogger())).toEqual({ removed: 0, kept: 0 });
   });
 
@@ -268,6 +374,7 @@ describe('cleanupTemp', () => {
     partsDir(failed, ['part-000.mp3', 'notes.txt']); // an unexpected file: the folder is left alone
     partsDir(done, []);
     put('999.mp3'); // no such meeting
+    put('1234567890123456.mp3'); // 16 digits: longer than any id
     put(`0${failed}.mp3`); // a leading zero: not the agent's name for meeting failed's file
     put(`${failed}.mp4`); // name does not match
     put(`${failed}.mp3.bak`);
@@ -287,7 +394,7 @@ describe('cleanupTemp', () => {
         `${audioDone}-parts`,
         `${failed}-parts`, `${failed}.mp4`, `${failed}.mp3.bak`,
         `${done}.mp3`,
-        '999.mp3', `0${failed}.mp3`, 'notes.txt',
+        '999.mp3', '1234567890123456.mp3', `0${failed}.mp3`, 'notes.txt',
       ].sort(),
     );
     expect(readdirSync(join(tmp(), `${failed}-parts`)).sort()).toEqual(['notes.txt', 'part-000.mp3']);

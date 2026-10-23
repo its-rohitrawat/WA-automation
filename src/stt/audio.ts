@@ -3,12 +3,16 @@ import { existsSync, mkdirSync, readdirSync, renameSync, writeFileSync } from 'n
 import { join } from 'node:path';
 import type { AudioPart } from './types.ts';
 
-export interface RunOptions {
-  timeoutMs: number;
-  /** An abort kills the program; the call then resolves with code -1. */
-  signal?: AbortSignal;
-  /** The program's whole environment. Missing: the parent's is inherited (the bake-off script only). */
+/** Which environment a program gets: env when given, else minimalEnv(); the parent's whole env only with inheritEnv (nothing uses it). */
+export interface EnvChoice {
   env?: NodeJS.ProcessEnv;
+  inheritEnv?: true;
+}
+
+export interface RunOptions extends EnvChoice {
+  timeoutMs: number;
+  /** An abort kills the program; the call resolves with code -1 once it has exited and released its files. */
+  signal?: AbortSignal;
 }
 
 /** Runs a program without a shell. Resolves with its exit code (-1 when it could not start or was stopped) and stderr. */
@@ -18,18 +22,27 @@ export const runFile: RunFile = (file, args, opts) =>
   new Promise((resolve) => {
     const options = {
       timeout: opts.timeoutMs, windowsHide: true, maxBuffer: 16 * 1024 * 1024, encoding: 'utf8' as const,
-      ...(opts.signal ? { signal: opts.signal } : {}), ...(opts.env ? { env: opts.env } : {}),
+      env: opts.inheritEnv ? process.env : (opts.env ?? minimalEnv()),
+      ...(opts.signal ? { signal: opts.signal } : {}),
     };
-    execFile(file, [...args], options, (err, _stdout, stderr) => {
-      resolve({ code: err === null ? 0 : typeof err.code === 'number' ? err.code : -1, stderr });
+    let closed = false;
+    const child = execFile(file, [...args], options, (err, _stdout, stderr) => {
+      const result = { code: err === null ? 0 : typeof err.code === 'number' ? err.code : -1, stderr };
+      // On an abort the callback comes as soon as the kill is sent. Wait for 'close' (the program has exited and its
+      // pipes are shut), so a caller that then removes the program's files does not race it.
+      if (opts.signal?.aborted && child.pid !== undefined && !closed) child.once('close', () => resolve(result));
+      else resolve(result);
+    });
+    child.once('close', () => {
+      closed = true;
     });
   });
 
 const MINIMAL_ENV_NAMES = ['SystemRoot', 'TEMP', 'TMP', 'PATH'] as const;
 
 /**
- * Only what ffmpeg needs to start on Windows: SystemRoot, TEMP, TMP and PATH, those that are set. Production passes this,
- * so no key or other setting of the agent's own environment reaches a child program.
+ * Only what ffmpeg needs to start on Windows: SystemRoot, TEMP, TMP and PATH, those that are set. The default for every
+ * program run here, so no key or other setting of the agent's own environment reaches a child program.
  */
 export function minimalEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
@@ -39,6 +52,9 @@ export function minimalEnv(): NodeJS.ProcessEnv {
   }
   return env;
 }
+
+/** The env a call is given, resolved now, so a runner always sees the env it must use. */
+const resolveEnv = (c: EnvChoice): EnvChoice => (c.inheritEnv ? { inheritEnv: true } : { env: c.env ?? minimalEnv() });
 
 export class AudioError extends Error {
   readonly code: string;
@@ -64,19 +80,19 @@ const QUIET = ['-hide_banner', '-nostdin', '-loglevel', 'error'];
 export class Ffmpeg {
   readonly #exe: string;
   readonly #run: RunFile;
-  readonly #env: NodeJS.ProcessEnv | undefined;
+  readonly #env: EnvChoice;
 
-  /** opts.env: the env every call runs with (production passes minimalEnv()); missing, the parent's is inherited. */
-  constructor(exe: string, run: RunFile = runFile, opts: { env?: NodeJS.ProcessEnv } = {}) {
+  /** opts: the env every call runs with; by default minimalEnv(). */
+  constructor(exe: string, run: RunFile = runFile, opts: EnvChoice = {}) {
     this.#exe = exe;
     this.#run = run;
-    this.#env = opts.env;
+    this.#env = opts;
   }
 
   /** Runs ffmpeg. A stop through the signal throws its reason, never an AudioError, so callers can tell the two apart. */
   async #ffmpeg(args: readonly string[], timeoutMs: number, signal: AbortSignal | undefined): Promise<{ code: number; stderr: string }> {
     signal?.throwIfAborted();
-    const r = await this.#run(this.#exe, args, { timeoutMs, ...(signal ? { signal } : {}), ...(this.#env ? { env: this.#env } : {}) });
+    const r = await this.#run(this.#exe, args, { timeoutMs, ...(signal ? { signal } : {}), ...resolveEnv(this.#env) });
     signal?.throwIfAborted();
     return r;
   }
@@ -138,12 +154,9 @@ export class Ffmpeg {
   }
 }
 
-/**
- * The ffmpeg to use: FFMPEG_PATH when set, otherwise "ffmpeg" on PATH. Null when it does not start. env as for Ffmpeg
- * (production passes minimalEnv()).
- */
-export async function findFfmpeg(configured: string | undefined, run: RunFile = runFile, env?: NodeJS.ProcessEnv): Promise<string | null> {
+/** The ffmpeg to use: FFMPEG_PATH when set, otherwise "ffmpeg" on PATH. Null when it does not start. env as for Ffmpeg. */
+export async function findFfmpeg(configured: string | undefined, run: RunFile = runFile, env: EnvChoice = {}): Promise<string | null> {
   const exe = configured ?? 'ffmpeg';
-  const { code } = await run(exe, ['-hide_banner', '-version'], { timeoutMs: 15_000, ...(env ? { env } : {}) });
+  const { code } = await run(exe, ['-hide_banner', '-version'], { timeoutMs: 15_000, ...resolveEnv(env) });
   return code === 0 ? exe : null;
 }

@@ -1,10 +1,10 @@
-import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmdirSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { closeSync, constants, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, renameSync, rmdirSync, unlinkSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { clientFolder } from '../media/paths.ts';
 import { getClient } from '../store/clients.ts';
 import type { Db } from '../store/db.ts';
 import { advanceStage, failMeeting, getMeetingState, MEETING_STAGES, type MeetingRow, type MeetingStage, type MeetingStatus } from '../store/meetings.ts';
-import { Ffmpeg, findFfmpeg, minimalEnv, runFile, type RunFile } from '../stt/audio.ts';
+import { AudioError, type Ffmpeg } from '../stt/audio.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { istDate } from '../util/time.ts';
@@ -43,20 +43,10 @@ export class MeetingFailure extends Error {
   }
 }
 
-/** The ffmpeg production uses: every call runs with minimalEnv(), so no key in the agent's environment reaches it. */
-export function meetingFfmpeg(exe: string, run: RunFile = runFile): Ffmpeg {
-  return new Ffmpeg(exe, run, { env: minimalEnv() });
-}
-
-/** findFfmpeg with minimalEnv(), for the app's startup check. */
-export function findMeetingFfmpeg(configured: string | undefined, run: RunFile = runFile): Promise<string | null> {
-  return findFfmpeg(configured, run, minimalEnv());
-}
-
 export interface PrepareAudioDeps {
   db: Db;
   api: MeetingsGoogleApi;
-  /** Built with meetingFfmpeg in production. */
+  /** Runs with minimalEnv() by default, so no key in the agent's environment reaches ffmpeg. */
   ffmpeg: Ffmpeg;
   dataDir: string;
   clock: Clock;
@@ -95,18 +85,79 @@ function removeOwnFile(path: string): void {
   if (isFile) unlinkSync(path);
 }
 
+const errno = (e: unknown): unknown => (e as NodeJS.ErrnoException | null)?.code;
+const DISK_BUSY: ReadonlySet<unknown> = new Set(['EPERM', 'EBUSY', 'EACCES', 'EXDEV']);
+
+/**
+ * A local disk error as a deferral: ENOSPC is disk_full; EPERM, EBUSY, EACCES and EXDEV (a file held by another
+ * program, such as a virus scanner, or a folder that cannot be written) are disk_busy. Anything else is returned as it is.
+ */
+function asDiskError(e: unknown): unknown {
+  const code = errno(e);
+  if (code === 'ENOSPC') return new MeetingDeferral('disk_full');
+  return DISK_BUSY.has(code) ? new MeetingDeferral('disk_busy') : e;
+}
+
+/**
+ * Moves our MP3 to its kept place. Both are under DATA_DIR, so a rename; if they are on different volumes after all
+ * (EXDEV, for example a folder linked elsewhere), the file is copied (never over an existing one), synced to disk, and
+ * only then the source removed. A copy that fails is removed: it is the file this call just created. Removing the source
+ * after a good copy is best-effort (cleanupTemp removes it at the next start).
+ */
+function moveFile(from: string, to: string, warn: (code: unknown) => void): void {
+  try {
+    renameSync(from, to);
+    return;
+  } catch (e) {
+    if (errno(e) !== 'EXDEV') throw e;
+  }
+  let created = false;
+  try {
+    copyFileSync(from, to, constants.COPYFILE_EXCL);
+    created = true;
+    const fd = openSync(to, 'r+');
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  } catch (e) {
+    if (created) {
+      try {
+        removeOwnFile(to);
+      } catch (removeErr) {
+        warn(errno(removeErr));
+      }
+    }
+    throw e;
+  }
+  try {
+    removeOwnFile(from);
+  } catch (e) {
+    warn(errno(e));
+  }
+}
+
 /**
  * Takes a queued meeting at stage found to stage audio:
  * 1. an MP3 already kept for the meeting is reused (measured only);
- * 2. otherwise free space must be at least Drive's size (0 when unknown) plus 10 GB, else MeetingDeferral('low_disk');
+ * 2. otherwise free space must be at least Drive's size (0 when unknown) plus 10 GB;
  * 3. the recording is downloaded to tmp/<id>.mp4.part (a leftover from a crash is removed first), at most
- *    MEETING_MAX_BYTES, else MeetingFailure('too_long', 'too_big');
- * 4. converted to tmp/<id>.mp3 and measured; the video is deleted; the MP3 is moved to meetingAudioRelPath;
- * 5. a measured length over maxMinutes is stored as too_long (too_long_measured) with the MP3 kept; otherwise
- *    advanceStage('audio').
- * Google errors and AudioError are rethrown as they are (the processor retries them); an abort rethrows the signal's
- * reason. On any failure every work file of this meeting in tmp is removed, so a retry starts with a fresh download:
- * simpler and safer than keeping a large half-processed video between attempts.
+ *    MEETING_MAX_BYTES;
+ * 4. converted to tmp/<id>.mp3 and measured; the video is deleted (best-effort); the MP3 is moved to meetingAudioRelPath;
+ * 5. a measured length over maxMinutes is stored as too_long (too_long_measured) with the MP3 and its length kept;
+ *    otherwise advanceStage('audio').
+ *
+ * Outcomes the processor maps:
+ * - returns: stage audio, or too_long already stored;
+ * - MeetingDeferral (no attempt counted): low_disk (not enough free space), disk_full (ENOSPC while writing), disk_busy
+ *   (a local file or folder could not be removed, created or moved: EPERM, EBUSY, EACCES, EXDEV);
+ * - MeetingFailure (final): too_long/too_big (over the download cap), failed/bad_audio (a kept MP3 that cannot be measured);
+ * - AudioError (ffmpeg failed) and Google errors from videoInfo or download: rethrown as they are, the processor retries;
+ * - an abort: the signal's reason, rethrown once ffmpeg has exited.
+ * On any failure after the download starts, every work file of this meeting in tmp is removed, so a retry starts with a
+ * fresh download: simpler and safer than keeping a large half-processed video between attempts. A kept MP3 is never
+ * removed.
  */
 export async function prepareAudio(
   meeting: Pick<MeetingRow, 'id' | 'clientId' | 'startedAt' | 'driveFileId'>,
@@ -118,10 +169,17 @@ export async function prepareAudio(
   if (meeting.clientId === null) throw new Error(`prepareAudio: meeting ${id} has no client`);
   const audioPath = meetingAudioRelPath({ clientCode: getClient(deps.db, meeting.clientId).code, startedAt: meeting.startedAt, id });
   const finalAbs = join(deps.dataDir, ...audioPath.split('/'));
+  const warn = (code: unknown) => deps.log.warn({ meetingId: id, code }, 'meeting work file could not be removed');
 
   let audioSeconds: number;
   if (existsSync(finalAbs)) {
-    audioSeconds = await deps.ffmpeg.seconds(finalAbs, signal);
+    try {
+      audioSeconds = await deps.ffmpeg.seconds(finalAbs, signal);
+    } catch (e) {
+      // Kept, never removed: a person can look at it. `meeting retry` measures it again.
+      if (e instanceof AudioError) throw new MeetingFailure('failed', 'bad_audio');
+      throw e;
+    }
   } else {
     const tmp = meetingsTmpDir(deps.dataDir);
     const video = join(tmp, `${id}.mp4.part`);
@@ -132,7 +190,7 @@ export async function prepareAudio(
         try {
           removeOwnFile(f);
         } catch (e) {
-          deps.log.warn({ meetingId: id, code: (e as NodeJS.ErrnoException).code }, 'meeting work file could not be removed');
+          warn(errno(e));
         }
       }
     };
@@ -141,8 +199,8 @@ export async function prepareAudio(
     const need = (info.size ?? 0) + MEETING_DISK_HEADROOM_BYTES;
     if ((await deps.freeBytes(deps.dataDir)) < need) throw new MeetingDeferral('low_disk');
 
-    mkdirSync(tmp, { recursive: true });
     try {
+      mkdirSync(tmp, { recursive: true });
       removeOwnFile(video);
       removeOwnFile(ffmpegPart);
       removeOwnFile(mp3);
@@ -154,12 +212,22 @@ export async function prepareAudio(
       }
       await deps.ffmpeg.toMp3(video, mp3, signal);
       audioSeconds = await deps.ffmpeg.seconds(mp3, signal);
-      removeOwnFile(video);
-      mkdirSync(join(finalAbs, '..'), { recursive: true });
-      renameSync(mp3, finalAbs); // same volume: both are under DATA_DIR
     } catch (e) {
       removeWorkFiles();
-      throw e;
+      throw asDiskError(e);
+    }
+    // The MP3 is good: failing to remove the video must not cost it (cleanupTemp removes the video at the next start).
+    try {
+      removeOwnFile(video);
+    } catch (e) {
+      warn(errno(e));
+    }
+    try {
+      mkdirSync(dirname(finalAbs), { recursive: true });
+      moveFile(mp3, finalAbs, warn);
+    } catch (e) {
+      removeWorkFiles();
+      throw asDiskError(e);
     }
   }
 
@@ -176,7 +244,7 @@ export async function prepareAudio(
 
 const TERMINAL: ReadonlySet<MeetingStatus> = new Set(['done', 'skipped', 'internal', 'too_long', 'no_access', 'failed']);
 /** Ids are written without leading zeros, so "012.mp3" is never taken for meeting 12's file. */
-const WORK_NAME = /^([1-9]\d*)(\.mp4\.part|\.mp3|\.mp3\.part\.mp3|-parts)$/;
+const WORK_NAME = /^([1-9]\d{0,14})(\.mp4\.part|\.mp3|\.mp3\.part\.mp3|-parts)$/;
 const PART_NAME = /^(part-\d{3}\.mp3|\.done)$/;
 const stageAtLeast = (stage: MeetingStage, min: MeetingStage): boolean => MEETING_STAGES.indexOf(stage) >= MEETING_STAGES.indexOf(min);
 

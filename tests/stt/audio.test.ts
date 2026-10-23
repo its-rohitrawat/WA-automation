@@ -1,7 +1,7 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Ffmpeg, findFfmpeg, minimalEnv, parseDuration, runFile, type RunFile, type RunOptions } from '../../src/stt/audio.ts';
 
 const BANNER =
@@ -63,16 +63,31 @@ describe('runFile', () => {
     expect(Date.now() - started).toBeLessThan(10_000);
   });
 
-  it('gives the program only the env it is passed', async () => {
+  it('resolves on an abort only after the program has exited', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'stt-run-'));
+    try {
+      const pidFile = join(dir, 'pid');
+      const script = `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000)`;
+      const ac = new AbortController();
+      const p = runFile(process.execPath, ['-e', script], { timeoutMs: 30_000, signal: ac.signal });
+      await vi.waitFor(() => expect(existsSync(pidFile)).toBe(true), { timeout: 5000 });
+      const pid = Number(readFileSync(pidFile, 'utf8'));
+      ac.abort();
+      expect((await p).code).toBe(-1);
+      expect(() => process.kill(pid, 0)).toThrow(); // gone, not merely told to stop
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('gives the program only the minimal env by default, or the env it is passed', async () => {
     const saved = process.env.ANTHROPIC_API_KEY;
     process.env.ANTHROPIC_API_KEY = 'dummy-test-value';
     try {
       const script = "process.stderr.write(String(process.env.ANTHROPIC_API_KEY === undefined) + ' ' + String(process.env.SystemRoot !== undefined || process.platform !== 'win32'))";
-      const r = await runFile(process.execPath, ['-e', script], { timeoutMs: 10_000, env: minimalEnv() });
-      expect(r).toEqual({ code: 0, stderr: 'true true' });
-      // Without an env the parent's is inherited (the bake-off script relies on this).
-      const inherited = await runFile(process.execPath, ['-e', 'process.stderr.write(String(process.env.ANTHROPIC_API_KEY))'], { timeoutMs: 10_000 });
-      expect(inherited.stderr).toBe('dummy-test-value');
+      expect(await runFile(process.execPath, ['-e', script], { timeoutMs: 10_000 })).toEqual({ code: 0, stderr: 'true true' });
+      const given = await runFile(process.execPath, ['-e', 'process.stderr.write(String(process.env.X_ONLY))'], { timeoutMs: 10_000, env: { ...minimalEnv(), X_ONLY: 'x' } });
+      expect(given.stderr).toBe('x');
     } finally {
       if (saved === undefined) delete process.env.ANTHROPIC_API_KEY;
       else process.env.ANTHROPIC_API_KEY = saved;
@@ -100,6 +115,9 @@ describe('Ffmpeg', () => {
   let dir: string;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'stt-audio-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it('measures a file from the input summary', async () => {
@@ -149,7 +167,7 @@ describe('Ffmpeg', () => {
       if (args.includes('libmp3lame')) writeFileSync(lastArg(args), 'mp3');
       return { code: args.includes('libmp3lame') ? 0 : 1, stderr: BANNER };
     });
-    const env = { PATH: 'C:\bin' };
+    const env = { PATH: 'C:\\bin' };
     const ac = new AbortController();
     const ff = new Ffmpeg('ffmpeg.exe', run, { env });
     await ff.toMp3('in.mp4', join(dir, 'z.mp3'), ac.signal);
@@ -158,10 +176,10 @@ describe('Ffmpeg', () => {
       { timeoutMs: 60 * 60_000, signal: ac.signal, env },
       { timeoutMs: 60_000, signal: ac.signal, env },
     ]);
-    // Without an env or signal none is passed (the bake-off keeps inheriting the parent env).
+    // Without an env the minimal one is passed; without a signal none is.
     const plain = fakeRun(() => ({ code: 1, stderr: BANNER }));
     await new Ffmpeg('ffmpeg.exe', plain.run).seconds('a.ogg');
-    expect(plain.opts).toEqual([{ timeoutMs: 60_000 }]);
+    expect(plain.opts).toEqual([{ timeoutMs: 60_000, env: minimalEnv() }]);
   });
 
   it('throws the abort, not an AudioError, when the signal stopped ffmpeg', async () => {
@@ -222,10 +240,11 @@ describe('findFfmpeg', () => {
     expect(await findFfmpeg(undefined, run)).toBe('ffmpeg');
   });
 
-  it('passes an env when given one', async () => {
+  it('passes the minimal env by default, or the env it is given', async () => {
     const { run, opts } = fakeRun(() => ({ code: 0 }));
-    await findFfmpeg(undefined, run, { PATH: 'x' });
-    expect(opts[0]).toEqual({ timeoutMs: 15_000, env: { PATH: 'x' } });
+    await findFfmpeg(undefined, run);
+    await findFfmpeg(undefined, run, { env: { PATH: 'x' } });
+    expect(opts).toEqual([{ timeoutMs: 15_000, env: minimalEnv() }, { timeoutMs: 15_000, env: { PATH: 'x' } }]);
   });
 
   it('is null when ffmpeg does not start', async () => {
