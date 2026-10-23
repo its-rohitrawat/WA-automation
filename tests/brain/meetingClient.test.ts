@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { describe, expect, it, vi } from 'vitest';
 import { AiInvalidOutputError, AiRefusalError, keepConnectTimeoutCode } from '../../src/brain/claudeClient.ts';
 import {
-  ClaudeMeetingClient, MEETING_MAX_TOKENS, MEETING_SDK_MAX_RETRIES, summarizeMeeting,
+  ClaudeMeetingClient, MEETING_MAX_TOKENS, MEETING_SDK_MAX_RETRIES, estimateMeetingTokens, meetingEstimateUsd, summarizeMeeting,
   type MeetingAi, type MeetingAiResult, type SummarizeInput,
 } from '../../src/brain/meetingClient.ts';
 import { MEETING_SYSTEM_PROMPT, buildMeetingPrompt } from '../../src/brain/meetingPrompt.ts';
@@ -143,7 +143,13 @@ const input: SummarizeInput = {
   ],
 };
 const prompt = buildMeetingPrompt(input);
-const estimate = estimateCostUsd(prompt.system.length + prompt.user.length, prices, 16_000);
+/** Devanagari at 1 token per character, other text at 0.5; estimateCostUsd counts 2 characters per token. */
+const tokensOf = (t: string): number => {
+  const d = [...t].filter((c) => c >= 'ऀ' && c <= 'ॿ').length;
+  return d + Math.ceil((t.length - d) / 2);
+};
+const estimateFor = (p: { system: string; user: string }) => estimateCostUsd(2 * (tokensOf(p.system) + tokensOf(p.user)), prices, 16_000);
+const estimate = estimateFor(prompt);
 
 function setup(capUsd = 5) {
   const db = seededDb();
@@ -170,7 +176,75 @@ describe('summarizeMeeting', () => {
     expect(r.dropped).toBe(1);
     expect(r.cut).toBe(false);
     expect(r.costUsd).toBeCloseTo(0.12, 9);
+    expect(r.skipped).toBeNull();
+    expect(r.model).toBe('fake');
+    expect(r.fallbackUsed).toBe(false);
+    expect(r.usage).toEqual(FAKE_USAGE);
     expect(rows()).toEqual([{ kind: 'ai', usd: 0.12, detail: 'meeting 7' }]);
+  });
+
+  it('reports the model and a fallback of the call that gave the summary', async () => {
+    const { spend, rows } = setup();
+    const usage = { inputTokens: 5, outputTokens: 6, cacheCreationInputTokens: 0, cacheReadInputTokens: 7 };
+    const ai = new FakeMeetingAi([invalid(0.01), { costUsd: 0.1, fallbackUsed: true, model: 'claude-opus-5', usage }]);
+    const r = await summarizeMeeting({ ai, spend, prices }, input);
+    expect(r).toMatchObject({ model: 'claude-opus-5', fallbackUsed: true, usage, skipped: null });
+    expect(r.costUsd).toBeCloseTo(0.11, 9);
+    expect(rows().map((x) => x.detail)).toEqual(['meeting 7 (failed)', 'meeting 7 (fallback)']);
+  });
+
+  // A blank summary would become an empty Doc and a meeting marked done with nothing in it.
+  it('treats a summary that is empty after validation as invalid output and tries once more', async () => {
+    const { spend, rows } = setup();
+    const ai = new FakeMeetingAi([{ costUsd: 0.05, output: wire({ whatHappened: '   ' }) }, { costUsd: 0.1 }]);
+    const r = await summarizeMeeting({ ai, spend, prices }, input);
+    expect(ai.calls).toHaveLength(2);
+    expect(r.summary.whatHappened).toBe('The client approved the logo.');
+    expect(r.costUsd).toBeCloseTo(0.15, 9);
+    expect(rows()).toEqual([{ kind: 'ai', usd: 0.05, detail: 'meeting 7 (failed)' }, { kind: 'ai', usd: 0.1, detail: 'meeting 7' }]);
+  });
+
+  it('never returns a blank summary: two empty answers fail', async () => {
+    const { spend, rows } = setup();
+    const ai = new FakeMeetingAi([{ costUsd: 0.05, output: wire({ whatHappened: '' }) }, { costUsd: 0.06, output: {} }, { costUsd: 0.1 }]);
+    await expect(summarizeMeeting({ ai, spend, prices }, input)).rejects.toBeInstanceOf(AiInvalidOutputError);
+    expect(ai.calls).toHaveLength(2);
+    expect(rows()).toEqual([{ kind: 'ai', usd: 0.05, detail: 'meeting 7 (failed)' }, { kind: 'ai', usd: 0.06, detail: 'meeting 7 (failed)' }]);
+  });
+
+  it('calls nothing when no transcript line can be sent', async () => {
+    for (const segments of [[], [{ start: 0, end: 9, speaker: 'A', text: 'x'.repeat(400_000) }]]) {
+      const { spend, rows } = setup();
+      const ai = new FakeMeetingAi([]);
+      const r = await summarizeMeeting({ ai, spend, prices }, { ...input, segments });
+      expect(ai.calls).toHaveLength(0);
+      expect(rows()).toEqual([]);
+      expect(r).toEqual({
+        summary: { whatHappened: '', discussion: [], decisions: [], actionItems: [], openQuestions: [], conclusion: '', speakers: [] },
+        skipped: 'no_lines',
+        cut: segments.length > 0,
+        dropped: 0,
+        costUsd: 0,
+        model: null,
+        fallbackUsed: false,
+        usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+      });
+    }
+  });
+
+  it('estimates Devanagari at about one token per character', async () => {
+    expect(estimateMeetingTokens('नमस्ते ab')).toBe(6 + 2);
+    expect(estimateMeetingTokens('abcd')).toBe(2);
+    const hindi: SummarizeInput = { ...input, segments: [{ start: 0, end: 3, speaker: 'A', text: 'लोगो फाइनल है, कल फाइलें भेज देंगे। '.repeat(3_000) }] };
+    const p = buildMeetingPrompt(hindi);
+    const devanagariEstimate = estimateFor(p);
+    expect(meetingEstimateUsd(p.system, p.user, prices)).toBeCloseTo(devanagariEstimate, 12);
+    // Counting every character as half a token would reserve much less than the call can cost.
+    expect(devanagariEstimate).toBeGreaterThan(estimateCostUsd(p.system.length + p.user.length, prices, 16_000) * 1.1);
+    const tight = setup(devanagariEstimate * 0.999);
+    await expect(summarizeMeeting({ ai: new FakeMeetingAi([]), spend: tight.spend, prices }, hindi)).rejects.toBeInstanceOf(SpendCapReachedError);
+    const fits = setup(devanagariEstimate);
+    await expect(summarizeMeeting({ ai: new FakeMeetingAi([{ costUsd: 0 }]), spend: fits.spend, prices }, hindi)).resolves.toMatchObject({ skipped: null });
   });
 
   it('reserves the estimate for the prompt and a 16,000-token answer, and calls nothing past the cap', async () => {

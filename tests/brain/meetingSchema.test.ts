@@ -93,7 +93,7 @@ describe('validateSummary', () => {
     const { summary, dropped } = check(wire({
       decisions: [
         { text: 'Kept', segmentIds: ['s99', 's2', ' s1 ', 's2'] },
-        { text: 'Gone', segmentIds: ['s99', 'S2', '[s2'] },
+        { text: 'Gone', segmentIds: ['s99', '[s2', 's2x', 'S99'] },
       ],
       actionItems: [
         { side: 'us', task: 'Gone too', owner: '', deadline: '', segmentIds: ['s0', 's5'] },
@@ -103,6 +103,16 @@ describe('validateSummary', () => {
     expect(summary.decisions).toEqual([{ text: 'Kept', segmentIds: ['s2', 's1'] }]);
     expect(summary.actionItems.map((a) => a.task)).toEqual(['Kept']);
     expect(dropped).toBe(2);
+  });
+
+  it('reads "S2", "2" and "s02" as segment s2', () => {
+    const { summary, dropped } = check(wire({
+      decisions: [{ text: 'Kept', segmentIds: ['S2', '2', ' s02 ', '4', '0', 's'] }],
+      actionItems: [{ side: 'us', task: 'Kept', owner: '', deadline: '', segmentIds: ['3'] }],
+    }));
+    expect(summary.decisions).toEqual([{ text: 'Kept', segmentIds: ['s2', 's4'] }]);
+    expect(summary.actionItems[0]!.segmentIds).toEqual(['s3']);
+    expect(dropped).toBe(0);
   });
 
   it('drops invalid items one by one and counts them', () => {

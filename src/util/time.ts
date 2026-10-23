@@ -36,6 +36,11 @@ export function istTime(d: Date): string {
   return `${p.hour}:${p.minute}`;
 }
 
+/** "Monday": the weekday in India. */
+export function istWeekday(d: Date): string {
+  return parts(d, { weekday: 'long' }).weekday ?? '';
+}
+
 /** "2026-10-19 14:05", used in AI prompts. */
 export function istDateTime(d: Date): string {
   return `${istDate(d)} ${istTime(d)}`;

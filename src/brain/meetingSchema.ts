@@ -73,7 +73,8 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 
 /**
  * Checks a model's summary against the prompt it was given. Invalid items are dropped one by one and counted, never fatal:
- * - decisions and action items keep only segment ids in `segmentIds` and are dropped when none is left;
+ * - decisions and action items keep only segment ids in `segmentIds` ("S12" and "12" read as "s12") and are dropped
+ *   when none is left;
  * - a deadline is kept only as a real YYYY-MM-DD date;
  * - texts are trimmed and capped, and lists cut at MEETING_LIMITS; an item with no text is dropped;
  * - a speaker's label must be one of `labels`, once; a name not in `allowedNames` (trimmed, without case) becomes null,
@@ -114,7 +115,12 @@ export function validateSummary(
     }
     return out;
   }
-  const cited = (ids: string[]): string[] => [...new Set(ids.map((id) => id.trim()).filter((id) => known.has(id)))];
+  // "s12", "S12" and "12" all mean segment s12.
+  const normalId = (id: string): string => {
+    const m = /^[sS]?(\d{1,7})$/.exec(id.trim());
+    return m ? `s${Number(m[1])}` : id.trim();
+  };
+  const cited = (ids: string[]): string[] => [...new Set(ids.map(normalId).filter((id) => known.has(id)))];
 
   const seenLabels = new Set<string>();
   const summary: MeetingSummary = {

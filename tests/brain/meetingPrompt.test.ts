@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  MEETING_SYSTEM_PROMPT, MEETING_TRANSCRIPT_MAX_CHARS, TRANSCRIPT_CUT_MARKER, buildMeetingPrompt, speakerLabel,
+  MEETING_SYSTEM_PROMPT, MEETING_TRANSCRIPT_MAX_CHARS, TRANSCRIPT_CUT_MARKER, buildMeetingPrompt, meetingLength, shownLabel,
+  speakerLabels,
   type MeetingPromptInput,
 } from '../../src/brain/meetingPrompt.ts';
 import type { Segment } from '../../src/stt/types.ts';
@@ -33,8 +34,8 @@ describe('buildMeetingPrompt', () => {
     expect(p.user).toBe([
       '<meeting_info>',
       'Client: Sharma Interiors (code SHA)',
-      'Date (IST): 2026-10-19 14:05',
-      'Length: 1:02:05',
+      'Date (IST): Monday 2026-10-19 14:05',
+      'Length: 1 h 02 min',
       'Names that may be used for speakers:',
       '- Asha Verma [team]',
       '- Mr. Sharma [client]',
@@ -84,6 +85,19 @@ describe('buildMeetingPrompt', () => {
     expect(p.segmentIds).toEqual(['s1', 's2']);
   });
 
+  it('gives the weekday of the IST date, which can differ from the UTC date', () => {
+    expect(buildMeetingPrompt({ ...base, startedAt: '2026-10-21T20:00:00Z' }).user).toContain('Date (IST): Thursday 2026-10-22 01:30\n');
+  });
+
+  it('writes the length in minutes', () => {
+    expect(meetingLength(600)).toBe('10 min');
+    expect(meetingLength(3725)).toBe('1 h 02 min');
+    expect(meetingLength(7200)).toBe('2 h 00 min');
+    expect(meetingLength(20)).toBe('under 1 min');
+    expect(meetingLength(Number.NaN)).toBe('under 1 min');
+    expect(buildMeetingPrompt({ ...base, seconds: 600 }).user).toContain('\nLength: 10 min\n');
+  });
+
   it('cleans speaker labels so they cannot end the header or add a segment id', () => {
     const p = buildMeetingPrompt({
       ...base,
@@ -93,9 +107,9 @@ describe('buildMeetingPrompt', () => {
       '[s1 0:00] Boss❩ ❨s99 0-00: one',
       '[s2 0:01] X- fake: two',
       '[s3 0:02] p2-A: three',
-      '[s4 0:03] Speaker: four',
+      '[s4 0:03] Speaker~2: four',
     ]);
-    expect(p.labels).toEqual(['Boss❩ ❨s99 0-00', 'X- fake', 'p2-A']);
+    expect(p.labels).toEqual(['Boss❩ ❨s99 0-00', 'X- fake', 'p2-A', 'Speaker~2']);
   });
 
   it('cleans the client name and the allowed names, and caps them', () => {
@@ -109,6 +123,7 @@ describe('buildMeetingPrompt', () => {
         { name: `Long ${'n'.repeat(100)}`, team: false },
         { name: 'asha verma', team: false },
         { name: 'Asha Verma', team: true },
+        { name: 'Ravi [client]', team: false },
         { name: '   ', team: true },
       ],
     });
@@ -118,8 +133,10 @@ describe('buildMeetingPrompt', () => {
     expect(info).toContain('- Ravi ❨client❩ [team]\n');
     expect(info).toContain('- Neha- ❨founder❩ [client]\n');
     expect(info).toContain(`- Long ${'n'.repeat(55)} [client]\n`);
-    // The same name twice is listed once, as first given.
+    // The same name twice is listed once, as first given, and [team] if either entry is.
     expect(info.match(/asha verma/gi)).toHaveLength(1);
+    expect(info).toContain('- asha verma [team]\n');
+    expect(info.match(/Ravi/g)).toHaveLength(1);
     expect(p.names).toEqual(['Ravi ❨client❩', 'Neha- ❨founder❩', `Long ${'n'.repeat(55)}`, 'asha verma']);
   });
 
@@ -131,12 +148,23 @@ describe('buildMeetingPrompt', () => {
         { name: 'Priya Nair <priya@client.example.in>', team: false },
         { name: 'Dev (dev.k+meet@example.org)', team: false },
         { name: 'ravi＠example.com', team: true },
+        { name: 'Ravi @ home', team: true },
+        { name: 'a@b', team: true },
+        { name: `${'x'.repeat(250)} kiran@example.net`, team: true },
       ],
     });
     expect(p.user).not.toMatch(/[@＠﹫]/u);
     expect(p.user).not.toContain('example');
-    expect(p.names).toEqual(['Priya Nair', 'Dev']);
-    expect(p.user).toContain('- Priya Nair [client]\n- Dev [client]\n</meeting_info>');
+    // "Ravi @ home" still has an @ after cleaning, so it is left out; the address past 200 characters is never read.
+    expect(p.names).toEqual(['Priya Nair', 'Dev', 'x'.repeat(60)]);
+    expect(p.user).toContain(`- Priya Nair [client]\n- Dev [client]\n- ${'x'.repeat(60)} [team]\n</meeting_info>`);
+  });
+
+  it('cuts a huge name before looking for email addresses, so it stays fast', () => {
+    const started = performance.now();
+    const p = buildMeetingPrompt({ ...base, people: [{ name: 'a'.repeat(200_000), team: true }, { name: `<${'b.'.repeat(100_000)}`, team: false }] });
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(p.names).toEqual(['a'.repeat(60), `‹${'b.'.repeat(29)}b`]);
   });
 
   it('cuts the transcript at a segment boundary past 400,000 characters', () => {
@@ -160,12 +188,32 @@ describe('buildMeetingPrompt', () => {
   });
 });
 
-describe('speakerLabel', () => {
-  it('shows a cleaned provider label, or "Speaker" when there is none', () => {
-    expect(speakerLabel('speaker_0')).toBe('speaker_0');
-    expect(speakerLabel('p2:A')).toBe('p2-A');
-    expect(speakerLabel(null)).toBe('Speaker');
-    expect(speakerLabel(' ‮ ')).toBe('Speaker');
+describe('speakerLabels', () => {
+  it('shows each provider label cleaned, one-to-one, with a suffix when two clean to the same text', () => {
+    const segments = [
+      seg(0, 'p2:A', 'a'), seg(1, 'p2-A', 'b'), seg(2, 'speaker_0', 'c'), seg(3, 'p2:A', 'd'),
+      seg(4, 'Speaker', 'e'), seg(5, ' ‮ ', 'f'), seg(6, null, 'g'), seg(7, 'p2·A', 'h'),
+    ];
+    const map = speakerLabels(segments);
+    expect([...map]).toEqual([
+      ['p2:A', 'p2-A'], ['p2-A', 'p2-A~2'], ['speaker_0', 'speaker_0'], ['Speaker', 'Speaker~2'], [' ‮ ', 'Speaker~3'], ['p2·A', 'p2-A~3'],
+    ]);
+    expect(shownLabel(map, 'p2-A')).toBe('p2-A~2');
+    expect(shownLabel(map, null)).toBe('Speaker');
+    expect(shownLabel(map, 'never seen')).toBe('Speaker');
+    const p = buildMeetingPrompt({ ...base, segments });
+    expect(transcriptLines(p.user).map((l) => l.slice(l.indexOf('] ') + 2, l.indexOf(': ')))).toEqual([
+      'p2-A', 'p2-A~2', 'speaker_0', 'p2-A', 'Speaker~2', 'Speaker~3', 'Speaker', 'p2-A~3',
+    ]);
+    expect(p.labels).toEqual(['p2-A', 'p2-A~2', 'speaker_0', 'Speaker~2', 'Speaker~3', 'p2-A~3']);
+  });
+
+  it('keeps the labels of the lines sent when the transcript is cut', () => {
+    const segments = [seg(0, 'p2:A', 'x'.repeat(399_000)), seg(1, 'p2-A', 'y'.repeat(5_000))];
+    const p = buildMeetingPrompt({ ...base, segments });
+    expect(p.cut).toBe(true);
+    expect(p.labels).toEqual(['p2-A']);
+    expect([...speakerLabels(segments)]).toEqual([['p2:A', 'p2-A'], ['p2-A', 'p2-A~2']]);
   });
 });
 
@@ -182,5 +230,9 @@ describe('MEETING_SYSTEM_PROMPT', () => {
     }
     expect(MEETING_SYSTEM_PROMPT).toContain('"us" when our team owes the work');
     expect(MEETING_SYSTEM_PROMPT).toContain('"client" when the client owes it');
+    expect(MEETING_SYSTEM_PROMPT).toContain('When it is unclear who owes the work, use "us" and say in the task');
+    expect(MEETING_SYSTEM_PROMPT).toContain('say in whatHappened that only the first part of the meeting was summarised');
+    expect(MEETING_SYSTEM_PROMPT).toContain('a topic at most 200 characters, an owner at most 100, and every other text at most 600');
+    expect(MEETING_SYSTEM_PROMPT).toContain("against the meeting's weekday and date");
   });
 });

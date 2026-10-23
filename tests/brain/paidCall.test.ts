@@ -134,6 +134,20 @@ describe('withReservation', () => {
     expect(spend.isPaused()).toBe(false);
     expect(spend.canSpend(0.4)).toBe(true);
   });
+
+  it('tells the caller what a failed call booked, and nothing on success', async () => {
+    const { spend, rows } = setup(5);
+    const booked: number[] = [];
+    const fail = (e: Error) => withReservation(spend, 0.1, 'meeting 1', async () => { throw e; }, 1, (usd) => booked.push(usd)).catch(() => null);
+    await fail(new AiRefusalError('cyber', FAKE_USAGE, 0.004));
+    await fail(new AiInvalidOutputError('no text', FAKE_USAGE, null));
+    await fail(new Anthropic.APIError(500, undefined, 'server error', new Headers()));
+    await fail(lostConnection(new TypeError('fetch failed', { cause: { code: 'ENOTFOUND' } })));
+    await fail(new Anthropic.APIConnectionTimeoutError());
+    await withReservation(spend, 0.1, 'meeting 2', ok(0.02), 1, (usd) => booked.push(usd));
+    expect(booked).toEqual([0.004, 0.1, 0, 0, 0.1]);
+    expect(rows().map((r) => r.usd)).toEqual([0.004, 0.1, 0.1, 0.02]);
+  });
 });
 
 /** What Node's fetch throws when undici's connect timer fires: the request never left this machine. */
