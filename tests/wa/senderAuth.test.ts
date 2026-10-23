@@ -35,6 +35,31 @@ describe('sender session store', () => {
     expect(deriveSubkey(fixedMaster, SENDER_SESSION_INFO).equals(expected)).toBe(true);
   });
 
+  it('encrypts the stored rows with exactly HKDF-SHA256(master, empty salt, "whatsapp-sender-session")', async () => {
+    const fixedMaster = Buffer.alloc(32, 7);
+    const expected = Buffer.from(hkdfSync('sha256', fixedMaster, Buffer.alloc(0), 'whatsapp-sender-session', 32));
+
+    // Written by useSenderAuthState, readable with the pinned subkey.
+    const db = openSessionDb(':memory:');
+    const a = useSenderAuthState(db, fixedMaster);
+    a.state.creds.me = { id: '919800000099:3@s.whatsapp.net', name: 'S' };
+    await a.saveCreds();
+    const viaExpected = useEncryptedAuthState(db, expected);
+    expect(viaExpected.hasSession).toBe(true);
+    expect(viaExpected.state.creds.me?.id).toBe('919800000099:3@s.whatsapp.net');
+    // Not the media-ref key: the two subsystems never share a key.
+    expect(() => useEncryptedAuthState(db, deriveSubkey(fixedMaster, 'whatsapp-media-ref'))).toThrow(SessionDecryptError);
+
+    // Written with the pinned subkey, readable by useSenderAuthState.
+    const db2 = openSessionDb(':memory:');
+    const b = useEncryptedAuthState(db2, expected);
+    b.state.creds.me = { id: '919800000099:3@s.whatsapp.net', name: 'S' };
+    await b.saveCreds();
+    const viaSender = useSenderAuthState(db2, fixedMaster);
+    expect(viaSender.hasSession).toBe(true);
+    expect(viaSender.state.creds.me?.id).toBe('919800000099:3@s.whatsapp.net');
+  });
+
   it('persists the spare number session and restores it with the same master key', async () => {
     const db = openSessionDb(':memory:');
     const a = useSenderAuthState(db, MASTER);
