@@ -3,13 +3,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // A fake execFile: runFile's own seam. The real one is exercised in audio.test.ts.
 type Callback = (err: { code?: unknown } | null, stdout: string, stderr: string) => void;
+type FakeChild = EventEmitter & { pid?: number; exitCode: number | null; signalCode: string | null };
 const fake = vi.hoisted(() => ({
-  calls: [] as { file: string; args: string[]; options: Record<string, unknown>; callback: Callback; child: EventEmitter & { pid?: number } }[],
+  calls: [] as { file: string; args: string[]; options: Record<string, unknown>; callback: Callback; child: FakeChild }[],
 }));
 
 vi.mock('node:child_process', () => ({
   execFile: (file: string, args: string[], options: Record<string, unknown>, callback: Callback) => {
-    const child = Object.assign(new EventEmitter(), { pid: 4242 });
+    const child: FakeChild = Object.assign(new EventEmitter(), { pid: 4242, exitCode: null, signalCode: null });
     fake.calls.push({ file, args, options, callback, child });
     return child;
   },
@@ -22,7 +23,7 @@ describe('runFile with a fake execFile', () => {
     fake.calls.length = 0;
   });
 
-  it('on an abort, resolves only once the child has closed', async () => {
+  it('on an abort, resolves only once the running child has exited', async () => {
     const ac = new AbortController();
     let settled = false;
     const p = runFile('ffmpeg.exe', ['-i', 'x'], { timeoutMs: 1000, signal: ac.signal }).then((r) => {
@@ -35,8 +36,23 @@ describe('runFile with a fake execFile', () => {
     call.callback({ code: 'ABORT_ERR' }, '', ''); // Node calls back as soon as the kill is sent
     await new Promise((r) => setTimeout(r, 20));
     expect(settled).toBe(false);
-    call.child.emit('close', null, 'SIGTERM');
+    call.child.signalCode = 'SIGTERM';
+    call.child.emit('exit', null, 'SIGTERM');
     expect(await p).toEqual({ code: -1, stderr: '' });
+  });
+
+  it('an abort after the child exited, before its pipes closed, resolves at once (no event is left to wait for)', async () => {
+    const ac = new AbortController();
+    const p = runFile('ffmpeg.exe', ['-i', 'x'], { timeoutMs: 1000, signal: ac.signal });
+    const call = fake.calls[0]!;
+    call.child.exitCode = 0;
+    call.child.emit('exit', 0, null);
+    ac.abort();
+    // Node runs the callback inside 'close' itself, before other listeners; no further 'exit' or 'close' follows.
+    call.child.prependListener('close', () => call.callback({ code: 'ABORT_ERR' }, '', ''));
+    call.child.emit('close', 0, null);
+    const timeout = new Promise((r) => setTimeout(() => r('hung'), 1000));
+    expect(await Promise.race([p, timeout])).toEqual({ code: -1, stderr: '' });
   });
 
   it('without an abort, resolves from the callback', async () => {

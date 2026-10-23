@@ -25,16 +25,17 @@ export const runFile: RunFile = (file, args, opts) =>
       env: opts.inheritEnv ? process.env : (opts.env ?? minimalEnv()),
       ...(opts.signal ? { signal: opts.signal } : {}),
     };
-    let closed = false;
     const child = execFile(file, [...args], options, (err, _stdout, stderr) => {
       const result = { code: err === null ? 0 : typeof err.code === 'number' ? err.code : -1, stderr };
-      // On an abort the callback comes as soon as the kill is sent. Wait for 'close' (the program has exited and its
-      // pipes are shut), so a caller that then removes the program's files does not race it.
-      if (opts.signal?.aborted && child.pid !== undefined && !closed) child.once('close', () => resolve(result));
-      else resolve(result);
-    });
-    child.once('close', () => {
-      closed = true;
+      // On an abort the callback comes as soon as the kill is sent, maybe before the program has exited. Wait for its
+      // 'exit' only while it is still running, so a caller that then removes the program's files does not race it. Once
+      // it has exited (the abort came after the exit, before its pipes closed) there is nothing to wait for: an event
+      // that has already fired would never come, and the call would hang.
+      if (opts.signal?.aborted && child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+        child.once('exit', () => resolve(result));
+      } else {
+        resolve(result);
+      }
     });
   });
 
