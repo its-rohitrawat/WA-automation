@@ -7,10 +7,10 @@ import type { Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 
 /** Only files this app creates. */
-export const DRIVE_SCOPES = ['https://www.googleapis.com/auth/drive.file'];
+export const DRIVE_SCOPES: readonly string[] = ['https://www.googleapis.com/auth/drive.file'];
 
 /** Phase 3, read only: Meet recordings, the Calendar invite behind each, and the recording files Meet put in Drive. No Gmail. */
-export const MEETING_SCOPES = [
+export const MEETING_SCOPES: readonly string[] = [
   'https://www.googleapis.com/auth/meetings.space.readonly',
   'https://www.googleapis.com/auth/calendar.events.readonly',
   'https://www.googleapis.com/auth/drive.meet.readonly',
@@ -109,7 +109,12 @@ const noMeetingScope = (missing: string[]) =>
   `Some meeting permissions were not granted: ${missing.map(scopeName).join(', ')}. Run google-auth again and tick every box Google shows.`;
 
 /** A refusal written here, safe to show, as opposed to Google's own error text. */
-class ConsentRefused extends Error {}
+class ConsentRefused extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConsentRefused';
+  }
+}
 
 export interface ConsentResult {
   refreshToken: string;
@@ -128,7 +133,7 @@ export interface ConsentClient {
 export async function runLoopbackConsent(o: {
   clientId: string;
   clientSecret: string;
-  scopes: string[];
+  scopes: readonly string[];
   showUrl: (url: string) => void;
   timeoutMs?: number;
   /** Test seam: build the OAuth client for the given redirect URI. */
@@ -199,7 +204,7 @@ export async function runLoopbackConsent(o: {
           client.generateAuthUrl({
             access_type: 'offline',
             prompt: 'consent',
-            scope: o.scopes,
+            scope: [...o.scopes],
             state,
             code_challenge_method: 'S256',
             code_challenge: pkce.codeChallenge,

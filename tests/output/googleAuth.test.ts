@@ -87,6 +87,8 @@ describe('parseCallback', () => {
 });
 
 const ALL_SCOPES = [...DRIVE_SCOPES, ...MEETING_SCOPES];
+// drive.meet.readonly only as a longer, different scope: a prefix match must not pass for it.
+const NEAR_MISS = ALL_SCOPES.map((s) => (s.endsWith('drive.meet.readonly') ? `${s}.extra` : s)).join(' ');
 
 describe('scopes', () => {
   it('lists the three read-only meeting scopes', () => {
@@ -140,6 +142,12 @@ describe('granted scopes', () => {
     saveGrantedScopes(db, ['openid', ...MEETING_SCOPES.toReversed(), ...DRIVE_SCOPES].join(' '));
     expect(hasMeetingScopes(db)).toBe(true);
   });
+
+  it('a near-miss scope does not count', () => {
+    const db = seededDb();
+    saveGrantedScopes(db, NEAR_MISS);
+    expect(hasMeetingScopes(db)).toBe(false);
+  });
 });
 
 function fakeClient(over: { scope?: string; tokenFails?: boolean } = {}) {
@@ -162,7 +170,7 @@ function fakeClient(over: { scope?: string; tokenFails?: boolean } = {}) {
   return { calls, createClient: createClient as never };
 }
 
-async function startConsent(f: ReturnType<typeof fakeClient>, timeoutMs?: number, scopes: string[] = DRIVE_SCOPES) {
+async function startConsent(f: ReturnType<typeof fakeClient>, timeoutMs?: number, scopes: readonly string[] = DRIVE_SCOPES) {
   let url = '';
   let ready!: () => void;
   const urlReady = new Promise<void>((r) => (ready = r));
@@ -259,6 +267,16 @@ describe('runLoopbackConsent', () => {
     expect(err.message).not.toContain('recordings list');
     expect(err.message).not.toContain('rt-1');
     expect(err.message).not.toContain('googleapis.com');
+  });
+
+  it('rejects a near-miss scope in place of drive.meet.readonly', async () => {
+    const f = fakeClient({ scope: NEAR_MISS });
+    const { promise, base, state } = await startConsent(f, undefined, ALL_SCOPES);
+    await fetch(`${base}/?state=${state}&code=abc`);
+    const err = (await promise.catch((e: Error) => e)) as Error;
+    expect(err.message).toMatch(/meeting permissions were not granted/);
+    expect(err.message).toContain('Meet files in Drive');
+    expect(err.name).toBe('ConsentRefused');
   });
 
   it('names every missing meeting scope', async () => {

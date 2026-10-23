@@ -519,6 +519,7 @@ describe('google-auth', () => {
     expect(hasMeetingScopes(db)).toBe(true);
     db.close();
     expect(out()).not.toContain(REFRESH_TOKEN);
+    expect(out()).toContain('Google Drive, Meet and Calendar connected. If the WA Agent service is running, restart it so it uses the new sign-in: net stop wa-agent, then net start wa-agent');
   });
 
   it('a consent missing one meeting scope is rejected and saves neither the token nor the scopes', async () => {

@@ -34,6 +34,7 @@ const EnvSchema = z.object({
     .string()
     .transform((s) => s.split(',').map((d) => d.trim()).filter((d) => d !== ''))
     .pipe(z.array(DomainSchema).min(1))
+    .transform((ds) => [...new Set(ds)])
     .default([]),
   MEETING_POLL_MINUTES: z.coerce.number().int().min(2).max(60).default(5),
   MEETING_MAX_MINUTES: z.coerce.number().int().min(10).max(300).default(180),
@@ -42,8 +43,8 @@ const EnvSchema = z.object({
   // Speech-to-text, shared by voice notes (Phase 2b) and meetings.
   STT_PROVIDER: z.enum(['sarvam', 'elevenlabs', 'openai', 'none']).default('none'),
   STT_API_KEY: z.string().min(1).optional(),
-  // A sane band: a typo such as 8800 would make every Sarvam estimate 100 times too small.
-  INR_PER_USD: z.coerce.number().finite().min(40).max(200).default(88),
+  // A sane band: a typo such as 8800 would make every Sarvam estimate 100 times too small. Zod 4 numbers refuse Infinity.
+  INR_PER_USD: z.coerce.number().min(40).max(200).default(88),
 }).superRefine((env, ctx) => {
   if (env.MEETINGS_ENABLED && env.TEAM_EMAIL_DOMAINS.length === 0) {
     ctx.addIssue({ code: 'custom', path: ['TEAM_EMAIL_DOMAINS'], message: 'is required when MEETINGS_ENABLED is true' });

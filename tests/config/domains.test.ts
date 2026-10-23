@@ -22,6 +22,7 @@ describe('DomainSchema', () => {
     expect(PUBLIC_MAIL_DOMAINS).toEqual([
       'gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 'live.com', 'yahoo.com', 'yahoo.co.in',
       'icloud.com', 'me.com', 'rediffmail.com', 'proton.me', 'protonmail.com', 'zoho.com', 'aol.com',
+      'yahoo.in', 'ymail.com', 'msn.com', 'live.in', 'hotmail.co.uk', 'pm.me', 'gmx.com', 'mail.com', 'yandex.com',
     ]);
     for (const d of PUBLIC_MAIL_DOMAINS) {
       const r = DomainSchema.safeParse(d.toUpperCase());

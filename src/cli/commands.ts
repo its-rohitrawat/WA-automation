@@ -9,7 +9,7 @@ import { readHealthSnapshot } from '../health/health.ts';
 import { requestedScopes, runLoopbackConsent, saveGrantedScopes, scopeName, TokenStore, type ConsentClient } from '../output/googleAuth.ts';
 import { latestBatches } from '../store/batches.ts';
 import { listClients, syncClients } from '../store/clients.ts';
-import { openDb, type Db } from '../store/db.ts';
+import { openDb, tx, type Db } from '../store/db.ts';
 import { setKv } from '../store/kv.ts';
 import { unprocessedCounts } from '../store/messages.ts';
 import { acquireLock } from '../util/lock.ts';
@@ -311,10 +311,10 @@ export async function googleAuthCommand(deps: CliDeps): Promise<void> {
     });
     const tokens = new TokenStore(db, key);
     // Both or neither: the scope record must describe the token beside it.
-    db.transaction(() => {
+    tx(db, () => {
       tokens.save(refreshToken);
       saveGrantedScopes(db, scope);
-    })();
+    });
     out(`${env.MEETINGS_ENABLED ? 'Google Drive, Meet and Calendar' : 'Google Drive'} connected. If the WA Agent service is running, restart it so it uses the new sign-in: net stop wa-agent, then net start wa-agent`);
   } finally {
     db.close();

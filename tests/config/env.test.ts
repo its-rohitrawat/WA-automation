@@ -67,6 +67,10 @@ describe('meeting settings', () => {
     expect(parseEnv({ TEAM_EMAIL_DOMAINS: ' OurStudio.in , ourstudio.co.uk,' }).TEAM_EMAIL_DOMAINS).toEqual(['ourstudio.in', 'ourstudio.co.uk']);
   });
 
+  it('TEAM_EMAIL_DOMAINS drops repeats after lower-casing', () => {
+    expect(parseEnv({ TEAM_EMAIL_DOMAINS: 'ourstudio.in,OURSTUDIO.IN, ourstudio.co.uk ,OurStudio.in' }).TEAM_EMAIL_DOMAINS).toEqual(['ourstudio.in', 'ourstudio.co.uk']);
+  });
+
   it('TEAM_EMAIL_DOMAINS is required when meetings are on, and the error names it', () => {
     const msg = envError({ MEETINGS_ENABLED: 'true' });
     expect(msg).toMatch(/TEAM_EMAIL_DOMAINS/);
@@ -76,11 +80,10 @@ describe('meeting settings', () => {
   });
 
   it('TEAM_EMAIL_DOMAINS refuses public mail domains and bad shapes without echoing them', () => {
-    const pub = envError({ TEAM_EMAIL_DOMAINS: 'ourstudio.in,Gmail.com' });
+    const pub = envError({ TEAM_EMAIL_DOMAINS: 'zz-ourstudio-zz.in,Gmail.com' });
     expect(pub).toMatch(/TEAM_EMAIL_DOMAINS/);
     expect(pub).toMatch(/public mail domain/);
-    expect(pub).not.toContain('Gmail.com');
-    expect(pub).not.toContain('ourstudio');
+    expect(pub).not.toContain('zz-ourstudio-zz');
     const bad = envError({ TEAM_EMAIL_DOMAINS: 'zz-distinctive-value-zz' });
     expect(bad).toMatch(/TEAM_EMAIL_DOMAINS/);
     expect(bad).not.toContain('zz-distinctive-value-zz');
@@ -107,7 +110,8 @@ describe('meeting settings', () => {
   });
 
   it('FFMPEG_PATH is kept as given', () => {
-    expect(parseEnv({ FFMPEG_PATH: 'C:\ffmpeg\bin\ffmpeg.exe' }).FFMPEG_PATH).toBe('C:\ffmpeg\bin\ffmpeg.exe');
+    const path = String.raw`C:\ffmpeg\bin\ffmpeg.exe`;
+    expect(parseEnv({ FFMPEG_PATH: path }).FFMPEG_PATH).toBe(path);
   });
 });
 

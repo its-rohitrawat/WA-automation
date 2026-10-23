@@ -19,6 +19,15 @@ export const PUBLIC_MAIL_DOMAINS: readonly string[] = [
   'protonmail.com',
   'zoho.com',
   'aol.com',
+  'yahoo.in',
+  'ymail.com',
+  'msn.com',
+  'live.in',
+  'hotmail.co.uk',
+  'pm.me',
+  'gmx.com',
+  'mail.com',
+  'yandex.com',
 ];
 
 const PUBLIC = new Set(PUBLIC_MAIL_DOMAINS);
