@@ -364,6 +364,11 @@ export function advanceStage(db: Db, id: number, stage: MeetingStage, fields: Pa
   });
 }
 
+/** Queued meetings with speech-part bookkeeping, for the speech recovery at processor start. Reads no JSON. */
+export function queuedMeetingIdsWithSttParts(db: Db): number[] {
+  return (db.prepare("SELECT id FROM meetings WHERE status = 'queued' AND stt_parts <> '[]' ORDER BY id").all() as { id: number }[]).map((r) => r.id);
+}
+
 /** Stores a queued meeting's speech-part bookkeeping as it is now (written before and after every part's call). Throws when not queued. */
 export function setSttParts(db: Db, id: number, parts: SttPartRow[], at: string): void {
   const json = toJson('setSttParts', 'stt_parts', SttPartsSchema, parts);

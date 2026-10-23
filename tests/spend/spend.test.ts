@@ -161,6 +161,34 @@ describe('SpendGuard', () => {
     expect(guard.fitsIgnoringHolds(0)).toBe(false);
   });
 
+  it('a hold keeps its kind: settlePending books a speech hold as stt and an AI hold as ai (Phase 3 Task 6)', () => {
+    const db = seededDb();
+    const guard = new SpendGuard({ db, clock: manualClock('2026-10-19T10:00:00Z'), capUsd: 1 });
+    expect(guard.reserve(0.1)).not.toBeNull(); // the default kind stays 'ai'
+    expect(guard.reserve(0.2, 'stt')).not.toBeNull();
+    expect(guard.reserve(0.3, 'ai')).not.toBeNull();
+    expect(guard.settlePending('shutdown (estimated)')).toBe(3);
+    expect(db.prepare('SELECT kind, usd FROM spend ORDER BY id').all()).toEqual([
+      { kind: 'ai', usd: 0.1 },
+      { kind: 'stt', usd: 0.2 },
+      { kind: 'ai', usd: 0.3 },
+    ]);
+  });
+
+  it('settlePending tells a hold its owner booked it; a failing owner does not stop the other bookings', () => {
+    const db = seededDb();
+    const guard = new SpendGuard({ db, clock: manualClock('2026-10-19T10:00:00Z'), capUsd: 1 });
+    const told: string[] = [];
+    guard.reserve(0.1, 'stt', () => {
+      told.push('a');
+      throw new Error('owner write failed');
+    });
+    guard.reserve(0.2, 'stt', () => told.push('b'));
+    expect(guard.settlePending('shutdown (estimated)')).toBe(2);
+    expect(told).toEqual(['a', 'b']);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM spend').get() as { n: number }).n).toBe(2);
+  });
+
   it('records on settle with an unknown id and ignores unknown release', () => {
     const { guard } = make();
     guard.release(999);

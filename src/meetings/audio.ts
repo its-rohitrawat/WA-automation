@@ -298,8 +298,11 @@ export function cleanupTemp(db: Db, dataDir: string, log: Logger): { removed: nu
   return { removed, kept };
 }
 
-/** Removes a parts folder only when every entry is a plain file named part-NNN.mp3 or .done. False: left as it is. */
-function removePartsFolder(dir: string): boolean {
+/**
+ * Removes a parts folder only when every entry is a plain file named part-NNN.mp3 or .done. False: left as it is.
+ * Throws the fs error (ENOENT when the folder is not there).
+ */
+export function removePartsFolder(dir: string): boolean {
   const inside = readdirSync(dir, { withFileTypes: true });
   if (!inside.every((e) => e.isFile() && PART_NAME.test(e.name))) return false;
   for (const e of inside) unlinkSync(join(dir, e.name));
