@@ -37,7 +37,10 @@ export interface HealthSnapshot {
   media?: MediaHealth;
 }
 
-/** Free bytes for this process on the volume of dir; null when it cannot be read. */
+/**
+ * Free bytes for this process on the volume of dir; null when it cannot be read. Meeting audio (src/meetings/audio.ts)
+ * must treat a null as 0, so an unreadable disk defers the meeting low_disk.
+ */
 export function defaultFreeBytes(dir: string): number | null {
   try {
     const s = statfsSync(dir);

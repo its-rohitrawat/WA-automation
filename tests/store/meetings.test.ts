@@ -186,6 +186,14 @@ describe('meetings store', () => {
     expect(getMeeting(db, id)).toMatchObject({ status: 'queued', errorCode: 'spend_cap', attempts: 2, nextAttemptAt: LATER });
     failMeeting(db, id, { status: 'no_access', errorCode: 'drive_404', at: LATER });
     expect(getMeeting(db, id)).toMatchObject({ status: 'no_access', errorCode: 'drive_404', nextAttemptAt: null, updatedAt: LATER });
+    expect(getMeeting(db, id)).toMatchObject({ audioPath: null, audioSeconds: null });
+  });
+
+  it('a failure can store the audio it keeps', () => {
+    const db = seededDb();
+    const id = insertFound(db, meeting())!;
+    failMeeting(db, id, { status: 'too_long', errorCode: 'too_long_measured', at: LATER, audioPath: 'meetings/SHA/2026-10/1.mp3', audioSeconds: 660 });
+    expect(getMeeting(db, id)).toMatchObject({ status: 'too_long', stage: 'found', audioPath: 'meetings/SHA/2026-10/1.mp3', audioSeconds: 660 });
   });
 
   it('advances the stage forward only, keeping earlier results and clearing the retry state', () => {

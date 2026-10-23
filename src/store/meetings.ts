@@ -395,11 +395,23 @@ export function deferMeeting(
   if (n === 0) notQueued('deferMeeting', id);
 }
 
-/** A final failure of a queued meeting. The stage is kept, so `meeting retry` starts again after the last finished stage. Throws when not queued. */
-export function failMeeting(db: Db, id: number, f: { status: 'failed' | 'no_access' | 'too_long'; errorCode: string; at: string }): void {
+/**
+ * A final failure of a queued meeting. The stage is kept, so `meeting retry` starts again after the last finished stage.
+ * audioPath and audioSeconds, when given, are stored in the same write (a measured too_long keeps its audio); not given,
+ * the stored values stay. Throws when not queued.
+ */
+export function failMeeting(
+  db: Db,
+  id: number,
+  f: { status: 'failed' | 'no_access' | 'too_long'; errorCode: string; at: string; audioPath?: string; audioSeconds?: number },
+): void {
   const n = db
-    .prepare("UPDATE meetings SET status = @status, error_code = @errorCode, next_attempt_at = NULL, updated_at = @at WHERE id = @id AND status = 'queued'")
-    .run({ id, status: f.status, errorCode: f.errorCode, at: canonical('failMeeting', 'at', f.at) }).changes;
+    .prepare(`UPDATE meetings SET status = @status, error_code = @errorCode, next_attempt_at = NULL, audio_path = COALESCE(@audioPath, audio_path),
+        audio_seconds = COALESCE(@audioSeconds, audio_seconds), updated_at = @at WHERE id = @id AND status = 'queued'`)
+    .run({
+      id, status: f.status, errorCode: f.errorCode, audioPath: f.audioPath ?? null, audioSeconds: f.audioSeconds ?? null,
+      at: canonical('failMeeting', 'at', f.at),
+    }).changes;
   if (n === 0) notQueued('failMeeting', id);
 }
 

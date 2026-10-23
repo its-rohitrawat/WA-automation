@@ -63,7 +63,10 @@ export interface PrepareAudioDeps {
   log: Logger;
   /** MEETING_MAX_MINUTES. */
   maxMinutes: number;
-  /** Free bytes on the volume of a folder. */
+  /**
+   * Free bytes on the volume of a folder. The caller (Task 10) wraps Health's defaultFreeBytes, whose null (space cannot
+   * be read) must be passed on as 0, so the meeting is deferred low_disk rather than downloaded blind.
+   */
   freeBytes: (dir: string) => Promise<number>;
 }
 
@@ -162,7 +165,7 @@ export async function prepareAudio(
 
   const at = deps.clock.now().toISOString();
   if (audioSeconds > deps.maxMinutes * 60) {
-    failMeeting(deps.db, id, { status: 'too_long', errorCode: 'too_long_measured', at });
+    failMeeting(deps.db, id, { status: 'too_long', errorCode: 'too_long_measured', at, audioPath, audioSeconds });
     deps.log.info({ meetingId: id, seconds: Math.round(audioSeconds) }, 'meeting too long by measured length; audio kept');
     return { outcome: 'too_long', audioPath, audioSeconds };
   }
@@ -172,7 +175,8 @@ export async function prepareAudio(
 }
 
 const TERMINAL: ReadonlySet<MeetingStatus> = new Set(['done', 'skipped', 'internal', 'too_long', 'no_access', 'failed']);
-const WORK_NAME = /^(\d+)(\.mp4\.part|\.mp3|\.mp3\.part\.mp3|-parts)$/;
+/** Ids are written without leading zeros, so "012.mp3" is never taken for meeting 12's file. */
+const WORK_NAME = /^([1-9]\d*)(\.mp4\.part|\.mp3|\.mp3\.part\.mp3|-parts)$/;
 const PART_NAME = /^(part-\d{3}\.mp3|\.done)$/;
 const stageAtLeast = (stage: MeetingStage, min: MeetingStage): boolean => MEETING_STAGES.indexOf(stage) >= MEETING_STAGES.indexOf(min);
 

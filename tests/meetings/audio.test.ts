@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFil
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   cleanupTemp, MEETING_DISK_HEADROOM_BYTES, MEETING_MAX_BYTES, MeetingDeferral, MeetingFailure, meetingFfmpeg, prepareAudio, type PrepareAudioDeps,
 } from '../../src/meetings/audio.ts';
@@ -138,8 +138,7 @@ describe('prepareAudio', () => {
     const ac = new AbortController();
     const reason = new Error('stopping');
     const p = prepareAudio(row(), deps(), ac.signal);
-    while (api.callsOf('download').length === 0) await new Promise((r) => setTimeout(r, 5));
-    expect(existsSync(join(tmp(), `${id}.mp4.part`))).toBe(true);
+    await vi.waitFor(() => expect(existsSync(join(tmp(), `${id}.mp4.part`))).toBe(true));
     ac.abort(reason);
     await expect(p).rejects.toBe(reason);
     expect(readdirSync(tmp())).toEqual([]);
@@ -204,7 +203,9 @@ describe('prepareAudio', () => {
     ff.seconds = 11 * 60;
     const r = await prepareAudio(row(), deps({ maxMinutes: 10 }), new AbortController().signal);
     expect(r).toEqual({ outcome: 'too_long', audioPath: `meetings/SHA/2026-11/${id}.mp3`, audioSeconds: 660 });
-    expect(row()).toMatchObject({ status: 'too_long', errorCode: 'too_long_measured', stage: 'found' });
+    expect(row()).toMatchObject({
+      status: 'too_long', errorCode: 'too_long_measured', stage: 'found', audioPath: `meetings/SHA/2026-11/${id}.mp3`, audioSeconds: 660,
+    });
     expect(existsSync(finalAbs())).toBe(true);
     expect(readdirSync(tmp())).toEqual([]);
   });
@@ -267,6 +268,7 @@ describe('cleanupTemp', () => {
     partsDir(failed, ['part-000.mp3', 'notes.txt']); // an unexpected file: the folder is left alone
     partsDir(done, []);
     put('999.mp3'); // no such meeting
+    put(`0${failed}.mp3`); // a leading zero: not the agent's name for meeting failed's file
     put(`${failed}.mp4`); // name does not match
     put(`${failed}.mp3.bak`);
     put('notes.txt');
@@ -285,7 +287,7 @@ describe('cleanupTemp', () => {
         `${audioDone}-parts`,
         `${failed}-parts`, `${failed}.mp4`, `${failed}.mp3.bak`,
         `${done}.mp3`,
-        '999.mp3', 'notes.txt',
+        '999.mp3', `0${failed}.mp3`, 'notes.txt',
       ].sort(),
     );
     expect(readdirSync(join(tmp(), `${failed}-parts`)).sort()).toEqual(['notes.txt', 'part-000.mp3']);
