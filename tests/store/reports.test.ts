@@ -69,6 +69,23 @@ describe('reports store', () => {
     expect(claimReport(db, DAY, T2, { force: true })).toBe(false);
   });
 
+  it('a normal claim never takes an unknown, skipped or sent row, at any later time', () => {
+    const db = openDb(':memory:');
+    claimReport(db, '2026-10-20', T0);
+    finishReport(db, '2026-10-20', 'unknown', 'timeout', T0);
+    skipReport(db, '2026-10-21', 'not_running', T0);
+    claimReport(db, '2026-10-22', T0);
+    finishReport(db, '2026-10-22', 'sent', 'msg-1', T0);
+    const before = ['2026-10-20', '2026-10-21', '2026-10-22'].map((date) => reportFor(db, date));
+    for (const date of ['2026-10-20', '2026-10-21', '2026-10-22']) {
+      for (const at of [T1, T2, '2026-10-24T06:00:00.000Z']) expect(claimReport(db, date, at)).toBe(false);
+    }
+    expect(['2026-10-20', '2026-10-21', '2026-10-22'].map((date) => reportFor(db, date))).toEqual(before);
+    expect(reportFor(db, '2026-10-20')).toMatchObject({ status: 'unknown', detail: 'timeout', attempts: 1, forced: false });
+    expect(reportFor(db, '2026-10-21')).toMatchObject({ status: 'skipped', detail: 'not_running', attempts: 0, forced: false });
+    expect(reportFor(db, '2026-10-22')).toMatchObject({ status: 'sent', detail: 'msg-1', attempts: 1, forced: false });
+  });
+
   it('a forced claim takes unknown, skipped and waiting retry rows, but never a row that is sending', () => {
     const db = openDb(':memory:');
     claimReport(db, '2026-10-20', T0);
@@ -84,7 +101,23 @@ describe('reports store', () => {
     expect(claimReport(db, DAY, T1, { force: true })).toBe(false);
   });
 
-  it('skips a day with no row or a retry row, and leaves unknown and sent rows alone', () => {
+  it('never skips a sent row or a row that is still sending', () => {
+    const db = openDb(':memory:');
+    claimReport(db, '2026-10-21', T0);
+    finishReport(db, '2026-10-21', 'sent', 'msg-1', T0);
+    claimReport(db, '2026-10-22', T0);
+    const sent = reportFor(db, '2026-10-21');
+    const sending = reportFor(db, '2026-10-22');
+    expect(skipReport(db, '2026-10-21', 'deadline', T2)).toBe(false);
+    expect(skipReport(db, '2026-10-22', 'deadline', T2)).toBe(false);
+    expect(reportFor(db, '2026-10-21')).toEqual(sent);
+    expect(reportFor(db, '2026-10-22')).toEqual(sending);
+    expect(reportFor(db, '2026-10-21')).toMatchObject({ status: 'sent', detail: 'msg-1' });
+    expect(reportFor(db, '2026-10-22')).toMatchObject({ status: 'sending', detail: null });
+    expect(finishReport(db, '2026-10-22', 'sent', 'msg-2', T2)).toBe(true);
+  });
+
+  it('skips a day with no row or a retry row, and leaves unknown and skipped rows alone', () => {
     const db = openDb(':memory:');
     expect(skipReport(db, '2026-10-20', 'not_running', T0)).toBe(true);
     expect(reportFor(db, '2026-10-20')).toMatchObject({ status: 'skipped', detail: 'not_running', attempts: 0 });
@@ -100,25 +133,45 @@ describe('reports store', () => {
     expect(reportFor(db, '2026-10-20')!.detail).toBe('not_running');
   });
 
-  it('turns rows left sending into unknown at start', () => {
+  it('turns rows left sending into unknown at start, and leaves every other status alone', () => {
     const db = openDb(':memory:');
     claimReport(db, '2026-10-22', T0);
     claimReport(db, DAY, T0);
     finishReport(db, DAY, 'sent', 'msg-1', T0);
+    claimReport(db, '2026-10-19', T0);
+    retryReport(db, '2026-10-19', 'connect_timeout', T2, T0);
+    skipReport(db, '2026-10-20', 'not_running', T0);
+    claimReport(db, '2026-10-21', T0);
+    finishReport(db, '2026-10-21', 'unknown', 'timeout', T0);
+    const others = ['2026-10-19', '2026-10-20', '2026-10-21', DAY].map((date) => reportFor(db, date));
     expect(markInterruptedReports(db, T1)).toBe(1);
     expect(reportFor(db, '2026-10-22')).toMatchObject({ status: 'unknown', detail: 'interrupted', updatedAt: T1 });
-    expect(reportFor(db, DAY)!.status).toBe('sent');
+    expect(['2026-10-19', '2026-10-20', '2026-10-21', DAY].map((date) => reportFor(db, date))).toEqual(others);
+    expect(reportFor(db, '2026-10-19')).toMatchObject({ status: 'retry', detail: 'connect_timeout', updatedAt: T0 });
+    expect(reportFor(db, '2026-10-20')).toMatchObject({ status: 'skipped', detail: 'not_running', updatedAt: T0 });
+    expect(reportFor(db, '2026-10-21')).toMatchObject({ status: 'unknown', detail: 'timeout', updatedAt: T0 });
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'sent', detail: 'msg-1', updatedAt: T0 });
   });
 
-  it('closes retry rows of earlier dates and keeps their reason', () => {
+  it('closes retry rows of earlier dates and keeps their reason, and leaves other earlier rows alone', () => {
     const db = openDb(':memory:');
     for (const date of ['2026-10-22', DAY]) {
       claimReport(db, date, T0);
       retryReport(db, date, 'connect_timeout', T1, T0);
     }
+    claimReport(db, '2026-10-18', T0);
+    claimReport(db, '2026-10-19', T0);
+    finishReport(db, '2026-10-19', 'unknown', 'timeout', T0);
+    claimReport(db, '2026-10-20', T0);
+    finishReport(db, '2026-10-20', 'sent', 'msg-1', T0);
+    skipReport(db, '2026-10-21', 'not_running', T0);
+    const earlier = ['2026-10-18', '2026-10-19', '2026-10-20', '2026-10-21'];
+    const before = earlier.map((date) => reportFor(db, date));
     expect(closeOldRetries(db, DAY, T2)).toBe(1);
     expect(reportFor(db, '2026-10-22')).toMatchObject({ status: 'skipped', detail: 'connect_timeout', nextAttemptAt: null });
     expect(reportFor(db, DAY)!.status).toBe('retry');
+    expect(earlier.map((date) => reportFor(db, date))).toEqual(before);
+    expect(earlier.map((date) => reportFor(db, date)!.status)).toEqual(['sending', 'unknown', 'sent', 'skipped']);
   });
 
   it('lists recent reports newest first', () => {
