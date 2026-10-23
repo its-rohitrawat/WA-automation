@@ -6,7 +6,7 @@ describe('openDb', () => {
     const db = openDb(':memory:');
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]).map((t) => t.name);
     expect(tables).toEqual(expect.arrayContaining([
-      'batches', 'clients', 'decisions', 'kv', 'media', 'message_edits', 'messages', 'people', 'reactions', 'schema_version', 'spend', 'task_events',
+      'batches', 'clients', 'decisions', 'kv', 'media', 'message_edits', 'messages', 'people', 'reactions', 'reports', 'schema_version', 'spend', 'task_events',
       'tasks',
     ]));
   });
@@ -17,15 +17,15 @@ describe('openDb', () => {
     expect(idx).toEqual(expect.arrayContaining(['tasks_client_status', 'task_events_client_at', 'media_due', 'media_client']));
   });
 
-  it('is at schema version 5 straight after openDb', () => {
+  it('is at schema version 6 straight after openDb', () => {
     const db = openDb(':memory:');
-    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(5);
+    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(6);
   });
 
   it('is safe to migrate twice', () => {
     const db = openDb(':memory:');
     migrate(db);
-    expect((db.prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(5);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(6);
   });
 
   it('overwrites deleted content, so wiped download details do not stay in free pages', () => {
