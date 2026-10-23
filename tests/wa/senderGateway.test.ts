@@ -37,7 +37,9 @@ function senderAuth(linked: boolean): EncryptedAuth {
   return { ...auth, hasSession: linked };
 }
 
-function setup(o: { scripts?: Script[]; auth?: EncryptedAuth; noAuth?: boolean; connectTimeoutMs?: number; sendTimeoutMs?: number } = {}) {
+function setup(
+  o: { scripts?: Script[]; auth?: EncryptedAuth; noAuth?: boolean; connectTimeoutMs?: number; sendTimeoutMs?: number; lingerMs?: number } = {},
+) {
   const { factory, sockets } = scriptedFactory(o.scripts);
   const gw = new SenderGateway({
     recipient: RECIPIENT,
@@ -45,7 +47,7 @@ function setup(o: { scripts?: Script[]; auth?: EncryptedAuth; noAuth?: boolean; 
     auth: o.noAuth ? undefined : (o.auth ?? senderAuth(true)),
     connectTimeoutMs: o.connectTimeoutMs ?? 1_000,
     sendTimeoutMs: o.sendTimeoutMs ?? 1_000,
-    lingerMs: 0,
+    lingerMs: o.lingerMs ?? 0,
   });
   return { gw, sockets };
 }
@@ -149,6 +151,76 @@ describe('SenderGateway', () => {
     expect(await p).toEqual({ status: 'unknown', code: 'timeout' });
     expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'stopped' });
   });
+
+  it('sends nothing when stop comes while the socket is still connecting', async () => {
+    const { gw, sockets } = setup({ scripts: [() => {}] });
+    const p = gw.sendReport('hi', XLSX, FILE);
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    await gw.stop();
+    open(sockets[0]!); // WhatsApp reports open after the service stopped
+    expect(await p).toEqual({ status: 'failed', code: 'stopped' });
+    expect(sockets[0]!.sendMessage).not.toHaveBeenCalled();
+    expect(sockets[0]!.end).toHaveBeenCalled();
+  });
+
+  it('listens only to creds.update and connection.update: it never reads chats', async () => {
+    const { gw, sockets } = setup();
+    await gw.sendReport('hi', XLSX, FILE);
+    expect(sockets[0]!.subscribedEvents().sort()).toEqual(['connection.update', 'creds.update']);
+  });
+
+  it('reports unknown, never sent, when WhatsApp returns no message id', async () => {
+    const noId: Script[] = [
+      (s) => {
+        s.sendMessage.mockResolvedValueOnce(undefined);
+        open(s);
+      },
+      (s) => {
+        s.sendMessage.mockResolvedValueOnce({ key: { id: 'msg-1' } }).mockResolvedValueOnce({ key: {} });
+        open(s);
+      },
+    ];
+    for (const script of noId) {
+      const { gw, sockets } = setup({ scripts: [script] });
+      expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'unknown', code: 'send_error' });
+      expect(sockets[0]!.end).toHaveBeenCalled();
+    }
+  });
+
+  it('keeps the socket open for the linger time after both messages left', async () => {
+    const { gw, sockets } = setup({ lingerMs: 400 });
+    const p = gw.sendReport('hi', XLSX, FILE);
+    await vi.waitFor(() => expect(sockets[0]?.sendMessage).toHaveBeenCalledTimes(2), { interval: 5 });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sockets[0]!.end).not.toHaveBeenCalled();
+    expect(await p).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(sockets[0]!.end).toHaveBeenCalled();
+  });
+
+  it('a failed credential save does not become an unhandled rejection', async () => {
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      // A plain function, not vi.fn: a mock attaches its own handler to the promises it returns, which would hide the bug.
+      let saves = 0;
+      const saveCreds = (): Promise<void> => {
+        saves++;
+        return Promise.reject(new Error('disk'));
+      };
+      const auth = { ...senderAuth(true), saveCreds };
+      const credsThenOpen: Script = (s) => {
+        s.emit('creds.update', {});
+        open(s);
+      };
+      const { gw } = setup({ auth, scripts: [credsThenOpen] });
+      expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+      expect(saves).toBeGreaterThan(0);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
 });
 
 describe('linkSender', () => {
@@ -168,6 +240,7 @@ describe('linkSender', () => {
     expect(saveCreds).toHaveBeenCalled();
     expect(sockets).toHaveLength(2);
     for (const s of sockets) {
+      expect(s.subscribedEvents().sort()).toEqual(['connection.update', 'creds.update']);
       expect(s.end).toHaveBeenCalled();
       for (const name of SEND_METHODS) expect(s[name]).not.toHaveBeenCalled();
     }

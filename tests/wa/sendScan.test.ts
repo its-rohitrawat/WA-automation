@@ -28,7 +28,23 @@ describe('who may send on WhatsApp', () => {
   it('senderGateway calls sendMessage in one place, and never receipts, presence or chat changes', () => {
     const text = readFileSync(join(SRC, 'wa', 'senderGateway.ts'), 'utf8');
     expect(text.match(/\.sendMessage\(/g)).toHaveLength(1);
+    // Every mention, with or without a dot: the interface declaration and the one call in #send. Nothing else.
+    const lines = text.split('\n').filter((l) => /\bsendMessage\b/.test(l)).map((l) => l.trim());
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/^sendMessage\(jid: string, content: AnyMessageContent\): Promise</);
+    expect(lines[1]).toMatch(/^sock\.sendMessage\(jid, content\),$/);
+    expect(text.match(/\bsendMessage\b/g)).toHaveLength(2);
     expect(text).not.toMatch(/\b(relayMessage|sendPresenceUpdate|readMessages|sendReceipt|sendReceipts|chatModify|sendMessageAck)\b/);
+  });
+
+  it('#send checks the recipient before it calls sendMessage', () => {
+    const text = readFileSync(join(SRC, 'wa', 'senderGateway.ts'), 'utf8');
+    const start = text.indexOf('async #send(');
+    expect(start).toBeGreaterThan(-1);
+    const body = text.slice(start);
+    const check = body.indexOf('checkRecipient(jid, this.#jid);');
+    expect(check).toBeGreaterThan(-1);
+    expect(check).toBeLessThan(body.indexOf('sock.sendMessage('));
   });
 
   it('only the two gateways create a Baileys socket', () => {
