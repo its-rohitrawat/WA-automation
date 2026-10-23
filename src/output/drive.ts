@@ -41,6 +41,16 @@ export const GOOGLE_DOC_MIME = 'application/vnd.google-apps.document';
 
 const isNotFound = (e: unknown) => (e as { code?: number }).code === 404;
 
+/**
+ * The error to throw for a failed create in parentId: a 404 means the parent folder is gone (DriveNotFoundError). With
+ * wrapAuth (createDoc only), a Google sign-in failure becomes DriveAuthError. Anything else is returned as it came.
+ */
+function mapCreateError(e: unknown, parentId: string, wrapAuth = false): unknown {
+  if (isNotFound(e)) return new DriveNotFoundError(parentId);
+  if (wrapAuth && isAuthFailure(e) && !(e instanceof DriveAuthError)) return new DriveAuthError(e);
+  return e;
+}
+
 export function googleDriveApi(client: OAuth2Client): DriveApi {
   const api = drive({ version: 'v3', auth: client, timeout: 120_000 });
   return {
@@ -68,8 +78,7 @@ export function googleDriveApi(client: OAuth2Client): DriveApi {
         if (!r.data.id) throw new Error('Drive returned no file id');
         return r.data.id;
       } catch (e) {
-        if (isNotFound(e)) throw new DriveNotFoundError(parentId);
-        throw e;
+        throw mapCreateError(e, parentId);
       }
     },
     async createDoc(name, html, parentId) {
@@ -82,9 +91,7 @@ export function googleDriveApi(client: OAuth2Client): DriveApi {
         if (!r.data.id) throw new Error('Drive returned no document id');
         return r.data.id;
       } catch (e) {
-        if (isNotFound(e)) throw new DriveNotFoundError(parentId);
-        if (isAuthFailure(e) && !(e instanceof DriveAuthError)) throw new DriveAuthError(e);
-        throw e;
+        throw mapCreateError(e, parentId, true);
       }
     },
     async updateFile(fileId, mimeType, body) {

@@ -118,6 +118,14 @@ function istWhen(iso: string): string {
   return Number.isNaN(d.getTime()) ? 'unknown' : `${istWeekday(d)} ${istDateTime(d)}`;
 }
 
+/** A name cut to RAW_NAME_MAX characters, with each email address in it (and the brackets around it) made a space. */
+export function withoutEmails(name: string): string {
+  return [...name].slice(0, RAW_NAME_MAX).join('').replace(EMAIL_IN_NAME, ' ');
+}
+
+/** Whether text has an @ sign, or its fullwidth or small look-alike: what is left of an email address. */
+export const hasAtSign = (s: string): boolean => AT_SIGN.test(s);
+
 /**
  * Cleaned names without email addresses, each once (compared without case), in the order given. A name listed twice is
  * [team] if either entry is. A name that still has an @ after cleaning is left out. The summary Doc lists its attendees
@@ -126,9 +134,8 @@ function istWhen(iso: string): string {
 export function listedPeople(people: readonly MeetingPerson[]): { name: string; team: boolean }[] {
   const byKey = new Map<string, { name: string; team: boolean }>();
   for (const p of people) {
-    const raw = [...p.name].slice(0, RAW_NAME_MAX).join('');
-    const name = nameText(raw.replace(EMAIL_IN_NAME, ' '));
-    if (!name || AT_SIGN.test(name)) continue;
+    const name = nameText(withoutEmails(p.name));
+    if (!name || hasAtSign(name)) continue;
     const seen = byKey.get(name.toLowerCase());
     if (seen) seen.team ||= p.team;
     else byKey.set(name.toLowerCase(), { name, team: p.team });

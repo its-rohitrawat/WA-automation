@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { MeetingSummary } from '../../src/brain/meetingSchema.ts';
 import {
-  DOC_NAME_MAX_CHARS, DOC_TRANSCRIPT_MAX_CHARS, SUMMARY_CUT_NOTE, TRANSCRIPT_REST_NOTE, docText, meetingDocName, renderMeetingDoc,
+  DOC_NAME_MAX_CHARS, DOC_TRANSCRIPT_MAX_CHARS, SUMMARY_CUT_NOTE, TRANSCRIPT_REST_NOTE, docText, meetingDocHeading, meetingDocName,
+  renderMeetingDoc,
   type MeetingDocInput,
 } from '../../src/meetings/doc.ts';
 import type { Segment } from '../../src/stt/types.ts';
@@ -122,7 +123,7 @@ describe('renderMeetingDoc', () => {
   it('maps names through the shown labels, including a "~2" label for a raw label that cleans to the same text', () => {
     const b = body(renderMeetingDoc({
       ...base,
-      segments: [seg(0, 'A', 'first'), seg(5, 'A​', 'second'), seg(9, 'A', 'third')],
+      segments: [seg(0, 'A', 'first'), seg(5, 'A\u200B', 'second'), seg(9, 'A', 'third')],
       summary: { ...emptySummary, speakers: [{ label: 'A~2', name: 'Mr. Sharma' }, { label: 'A', name: 'Asha Verma' }] },
     }));
     expect(b).toContain('<p>0:00 Asha Verma: first</p><p>0:05 Mr. Sharma: second</p><p>0:09 Asha Verma: third</p>');
@@ -151,12 +152,12 @@ describe('renderMeetingDoc', () => {
     const html = renderMeetingDoc({
       clientId: 1,
       clientName: `Sharma ${evil}`,
-      title: `Kickoff ${evil}‮gnp.exe`,
+      title: `Kickoff ${evil}\u202Egnp.exe`,
       startedAt: base.startedAt,
       seconds: 60,
       attendees: [{ name: `Asha ${evil}`, team: true }, { name: `Raj ${evil}`, team: false }],
       summary: {
-        whatHappened: `wh ${evil}\n\nnext\u0007line‮`,
+        whatHappened: `wh ${evil}\n\nnext\u0007line\u202E`,
         discussion: [{ topic: `t ${evil}`, summary: `s ${evil}` }],
         decisions: [{ text: `d ${evil}`, segmentIds: ['s1'] }],
         actionItems: [
@@ -164,7 +165,7 @@ describe('renderMeetingDoc', () => {
           { side: 'client', task: `c ${evil}`, owner: null, deadline: null, segmentIds: ['s1'] },
         ],
         openQuestions: [`q ${evil}`],
-        conclusion: `c ${evil}￿\uD800`,
+        conclusion: `c ${evil}\uFFFF\uD800`,
         speakers: [{ label: 'A', name: `Asha ${evil}` }],
       },
       segments: [seg(0, 'A', `hello ${evil}\r\nbye\u0000`), seg(3, `<b>"x"</b>`, `t ${evil}`)],
@@ -175,10 +176,73 @@ describe('renderMeetingDoc', () => {
     expect(html).not.toMatch(/<script|<a |<\/?b>|href="|javascript:1"/);
     expect(html).toContain('&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; &amp; &#39;q&#39; &lt;/p&gt;&lt;a href=&quot;javascript:1&quot;&gt;');
     // Control, format and XML-invalid characters are gone; content newlines become spaces.
-    expect(html).not.toMatch(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F‮￿\n\r]|[\uD800-\uDFFF]/);
+    expect(html).not.toMatch(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u202E\uFFFF\n\r]|[\uD800-\uDFFF]/);
     expect(html).toContain('&gt; nextline');
     expect(html).toContain('hello ');
     expect(html).toContain('&gt; bye</p>');
+  });
+
+  it('writes the title and heading as given, with ":" and "/" kept, while the Drive name replaces them', () => {
+    const m = { ...base, clientName: 'A/B: Studio', title: 'Kickoff: Phase 2/3' };
+    const heading = '2026-10-19 – A/B: Studio – Kickoff: Phase 2/3';
+    expect(meetingDocHeading(m)).toBe(heading);
+    expect(meetingDocName(m)).toBe('2026-10-19 – A_B_ Studio – Kickoff_ Phase 2_3');
+    expect(renderMeetingDoc(m)).toContain(`<title>${heading}</title></head><body><h1>${heading}</h1>`);
+  });
+
+  it('caps the heading like the name, cutting the title first, and uses "Meeting" for a title with no text', () => {
+    const long = meetingDocHeading({ ...base, title: 'T'.repeat(400) });
+    expect([...long].length).toBe(DOC_NAME_MAX_CHARS);
+    expect(meetingDocHeading({ ...base, clientName: 'C'.repeat(300), title: 'x' }).startsWith(`2026-10-19 – ${'C'.repeat(120)} – x`)).toBe(true);
+    expect(meetingDocHeading({ ...base, title: ' \u200B\u202E ' })).toBe('2026-10-19 – Sharma Interiors – Meeting');
+    expect(meetingDocHeading({ ...base, clientName: '\u200B' })).toBe('2026-10-19 – Client 1 – Logo review');
+  });
+
+  it('shows names as given: "Priya (PM)" in attendees, in the transcript and as an owner', () => {
+    const html = renderMeetingDoc({
+      ...base,
+      attendees: [{ name: 'Priya (PM) <priya@x.in>', team: true }, { name: 'Mr. Sharma', team: false }],
+      summary: {
+        ...emptySummary,
+        actionItems: [
+          { side: 'us', task: 'Send the files.', owner: 'Priya ❨PM❩', deadline: null, segmentIds: ['s1'] },
+          { side: 'client', task: 'Pay the invoice.', owner: 'Someone ❨else❩', deadline: null, segmentIds: ['s1'] },
+        ],
+        speakers: [{ label: 'A', name: 'Priya ❨PM❩' }],
+      },
+      segments: [seg(0, 'A', 'Hello'), seg(4, 'B(1)', 'Hi')],
+    });
+    expect(html).toContain('<li>Attendees from our team: Priya (PM)</li>');
+    expect(html).toContain('<li>Send the files. Owner: Priya (PM).</li>');
+    expect(html).toContain('<p>0:00 Priya (PM): Hello</p>');
+    // An owner that is not exactly an attendee's name, and a raw label, keep their cleaned form.
+    expect(html).toContain('<li>Pay the invoice. Owner: Someone ❨else❩.</li>');
+    expect(html).toContain('<p>0:04 B❨1❩: Hi</p>');
+    expect(html).not.toMatch(/@|x\.in/);
+  });
+
+  it('shows a long attendee name in full, not cut at 60 characters', () => {
+    const name = `Dr. ${'Long'.repeat(20)} Name`;
+    expect(renderMeetingDoc({ ...base, attendees: [{ name, team: true }] })).toContain(`<li>Attendees from our team: ${name}</li>`);
+  });
+
+  it('skips an action item whose task has no text, and drops an owner that is an email address', () => {
+    const b = body(renderMeetingDoc({
+      ...base,
+      summary: {
+        ...emptySummary,
+        actionItems: [
+          { side: 'us', task: '\u200B', owner: 'Asha Verma', deadline: null, segmentIds: ['s1'] },
+          { side: 'us', task: 'Call back.', owner: 'asha@studio.in', deadline: null, segmentIds: ['s1'] },
+          { side: 'client', task: ' \u200B\u202E ', owner: null, deadline: null, segmentIds: ['s1'] },
+          { side: 'client', task: 'Sign.', owner: 'Raj ＠ client', deadline: '2026-10-25', segmentIds: ['s1'] },
+        ],
+      },
+    }));
+    expect(b).toContain('<h3>Our team</h3><ul><li>Call back.</li></ul><h3>Client</h3><ul><li>Sign. Deadline: Sunday 2026-10-25.</li></ul>');
+    expect(b).not.toMatch(/@|＠|studio\.in/);
+    const none = body(renderMeetingDoc({ ...base, summary: { ...emptySummary, actionItems: [{ side: 'us', task: '\u200B', owner: null, deadline: null, segmentIds: ['s1'] }] } }));
+    expect(none).toContain('<h3>Our team</h3><p>None</p>');
   });
 
   it('builds the date from IST and says "unknown" for a start time that does not parse', () => {
@@ -189,7 +253,7 @@ describe('renderMeetingDoc', () => {
 
 describe('docText', () => {
   it('drops control and format characters except the joiners, and folds white space to single spaces', () => {
-    expect(docText(' a\r\n\tb\u0085c d  ‮e​f‍g\u0000 ')).toBe('a b c d ef‍g');
+    expect(docText(' a\r\n\tb\u0085c d  \u202Ee\u200Bf\u200Dg\u0000 ')).toBe('a b c d ef\u200Dg');
   });
 });
 
@@ -202,12 +266,12 @@ describe('meetingDocName', () => {
 
   it('uses "Meeting" for an empty or invisible title, and "Client <id>" for a client name with nothing to show', () => {
     expect(meetingDocName({ ...m, title: '' })).toBe('2026-10-20 – Sharma Interiors – Meeting');
-    expect(meetingDocName({ ...m, title: ' ‮​ ' })).toBe('2026-10-20 – Sharma Interiors – Meeting');
+    expect(meetingDocName({ ...m, title: ' \u202E\u200B ' })).toBe('2026-10-20 – Sharma Interiors – Meeting');
     expect(meetingDocName({ ...m, clientName: '...' })).toBe('2026-10-20 – Client 1 – Logo review');
   });
 
   it('sanitises each part: Drive-unsafe characters become "_", hidden characters go, white space folds', () => {
-    expect(meetingDocName({ ...m, clientName: 'A/B', title: 'Review: "v2" <final>‮txt.exe\n  done' }))
+    expect(meetingDocName({ ...m, clientName: 'A/B', title: 'Review: "v2" <final>\u202Etxt.exe\n  done' }))
       .toBe('2026-10-20 – A_B – Review_ _v2_ _final_txt.exe done');
   });
 

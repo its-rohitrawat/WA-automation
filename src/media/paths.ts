@@ -68,7 +68,7 @@ export function extForMime(mime: string | null, kind: MediaKind): string {
  * The zero-width non-joiner and joiner (U+200C, U+200D) are kept (T14-12): emoji sequences and some Indic spellings need
  * them, and they cannot reorder text.
  */
-const INVISIBLE = /(?![\u200C\u200D])[\p{Cc}\p{Cf}\p{Cs}\uFFFE\uFFFF]/gu;
+export const INVISIBLE = /(?![\u200C\u200D])[\p{Cc}\p{Cf}\p{Cs}\uFFFE\uFFFF]/gu;
 
 /**
  * Whether text shows anything to a reader: a character other than white space, control and format characters (zero-width

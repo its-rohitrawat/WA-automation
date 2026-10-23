@@ -50,13 +50,9 @@ async function subfolder(db: Db, api: DriveApi, c: FolderClient, kind: ClientSub
   return { id, created: true };
 }
 
-/** The id of WA Agent/Clients/<Client>/<kind>/ in Drive, made once and saved in kv. See subfolder. */
-export async function ensureClientSubfolder(db: Db, api: DriveApi, client: FolderClient, kind: ClientSubfolder): Promise<string> {
-  return (await subfolder(db, api, client, kind)).id;
-}
-
 /**
- * Runs put(folderId) in the client's Files or Meetings folder. When Drive says a folder is gone (DriveNotFoundError), a
+ * Runs put(folderId) in the client's Files or Meetings folder, WA Agent/Clients/<Client>/<kind>/, made once and saved in
+ * kv (see subfolder). When Drive says a folder is gone (DriveNotFoundError), a
  * folder was removed in Drive: one more level is rebuilt per retry, the subfolder first, then the client folder, then
  * Clients, and put runs again. Creating a folder inside a removed one fails the same way, so a level above the subfolder
  * is rebuilt only when creating a folder in it failed. A rebuilt level gets new folders inside it too, so the inner keys
