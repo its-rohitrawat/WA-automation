@@ -103,6 +103,12 @@ describe('titleFromFileName', () => {
     expect(titleFromFileName('abc-defg-hij (2026-10-23 10:00 GMT)')).toBe('abc-defg-hij');
     expect(titleFromFileName('Plan (v2) review')).toBe('Plan (v2) review');
   });
+  it("drops Meet's newer ' - YYYY/MM/DD HH:MM GMT±hh:mm - Recording' suffix", () => {
+    expect(titleFromFileName('Sharma Interiors sync - 2026/10/23 10:00 GMT+05:30 - Recording')).toBe('Sharma Interiors sync');
+    expect(titleFromFileName('Sharma Interiors sync - 2026/10/23 10:00 GMT+05:30 - Recording.mp4')).toBe('Sharma Interiors sync');
+    expect(titleFromFileName('abc-defg-hij - 2026/10/23 04:30 GMT-04:00 - Recording')).toBe('abc-defg-hij');
+    expect(titleFromFileName('Weekly - Recording notes')).toBe('Weekly - Recording notes');
+  });
 });
 
 describe('MeetingWatcher.discover', () => {
@@ -267,25 +273,71 @@ describe('MeetingWatcher.discover', () => {
     expect(api.callsOf('listRecordings')).toEqual([['conferenceRecords/c1'], ['conferenceRecords/c2']]);
   });
 
-  it('skips only the conference with a transient or no-access error, logging its id and code only', async () => {
+  it('skips only the conference with a transient error, and stores an unreadable file as no_access, logging ids and codes only', async () => {
     addConference(api, { id: 'c1', start: ago(5) });
     addConference(api, { id: 'c2', start: ago(4) });
-    addConference(api, { id: 'c3', start: ago(3) });
-    api.files.delete('filec3r1'); // GoogleNoAccessError http_404
+    addConference(api, { id: 'c3', start: ago(3), recordings: [{ id: 'a' }, { id: 'b' }] });
+    api.files.delete('filea'); // GoogleNoAccessError http_404
     const real = api.findInvite.bind(api);
     api.findInvite = async (code, start, s) => {
       if (code === 'code-c1') throw new GoogleTransientError('http_503');
       return real(code, start, s);
     };
     const { lines, log } = capture();
-    expect(await watcher({ log }).discover(signal)).toEqual({ added: 1, skipped: 0, errors: 2 });
-    expect(allRows(db).map((r) => r.conference)).toEqual(['conferenceRecords/c2']);
+    expect(await watcher({ log }).discover(signal)).toEqual({ added: 3, skipped: 0, errors: 1 });
+    const rows = allRows(db);
+    expect(rows.map((r) => [r.recording, r.status])).toEqual([
+      ['conferenceRecords/c2/recordings/c2r1', 'queued'],
+      ['conferenceRecords/c3/recordings/a', 'no_access'],
+      ['conferenceRecords/c3/recordings/b', 'queued'],
+    ]);
+    expect(rows[1]).toMatchObject({ title: 'Sharma Interiors review', clientId: 1, matchKind: 'title', driveSeconds: null, errorCode: 'http_404' });
+    expect(rows[2]!.errorCode).toBeNull();
     const text = lines.join('');
     expect(text).toContain('conferenceRecords/c1');
     expect(text).toContain('http_503');
-    expect(text).toContain('conferenceRecords/c3');
+    expect(text).toContain('conferenceRecords/c3/recordings/a');
     expect(text).toContain('http_404');
     for (const secret of ['Sharma Interiors review', 'sharma.in', 'Ravi', 'Owner']) expect(text).not.toContain(secret);
+
+    api.findInvite = real;
+    clock.advance(5 * 60_000);
+    expect(await watcher().discover(signal)).toMatchObject({ added: 1, errors: 0 }); // c1 only: the no_access row is not retried
+    expect(api.callsOf('videoInfo').filter((c) => c[0] === 'filea')).toHaveLength(1);
+  });
+
+  it('stores an unreadable internal recording as no_access with the minimal data only', async () => {
+    const invite: InviteInfo = { title: 'Team standup', attendees: [{ email: 'asha@studio.in', name: 'Asha', self: false }] };
+    addConference(api, { id: 'c1', start: ago(3), invite, names: ['Asha'] });
+    api.files.delete('filec1r1');
+    await watcher().discover(signal);
+    expect(allRows(db)[0]).toMatchObject({
+      status: 'no_access', errorCode: 'http_404', title: '', attendees: [], participants: [], clientId: null, matchKind: null, endedAt: null, driveSeconds: null,
+    });
+  });
+
+  it('gives an unreadable file with no invite an empty title', async () => {
+    addConference(api, { id: 'c1', start: ago(3), code: null });
+    api.files.delete('filec1r1');
+    await watcher().discover(signal);
+    expect(allRows(db)[0]).toMatchObject({ status: 'no_access', title: '', clientId: null, errorCode: 'http_404' });
+  });
+
+  it('ignores a client email domain that is, or is under, a team domain, logging the client code only', async () => {
+    const clash: ClientConfig = { ...MEHTA, emailDomains: ['mehtafoods.com', 'studio.in', 'eng.studio.in'] };
+    const { lines, log } = capture();
+    const w = watcher({ log, clients: [SHARMA, clash] });
+    addConference(api, { id: 'c1', start: ago(4), invite: { title: 'Weekly', attendees: [{ email: 'x@elsewhere.com', name: null, self: false }, { email: 'dev@eng.studio.in', name: null, self: false }] } });
+    addConference(api, { id: 'c2', start: ago(3), invite: { title: 'Weekly', attendees: [{ email: 'om@mehtafoods.com', name: null, self: false }] } });
+    await w.discover(signal);
+    expect(allRows(db).map((r) => [r.status, r.clientId])).toEqual([['unassigned', null], ['queued', 2]]);
+    const text = lines.join('');
+    expect(text).toContain('MEH');
+    expect(text).not.toContain('studio.in');
+
+    lines.length = 0;
+    w.setClients([SHARMA, clash]);
+    expect(lines.join('')).toContain('MEH');
   });
 
   it('rethrows a stop and stores nothing', async () => {

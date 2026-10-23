@@ -82,6 +82,12 @@ describe('meetings store', () => {
     expect(getMeeting(db, 999)).toBeUndefined();
   });
 
+  it('stores an error code given at insert', () => {
+    const db = seededDb();
+    const id = insertFound(db, meeting({ status: 'no_access', errorCode: 'http_404' }))!;
+    expect(getMeeting(db, id)).toMatchObject({ status: 'no_access', errorCode: 'http_404' });
+  });
+
   it('lists the recordings known for a conference', () => {
     const db = seededDb();
     const a = meeting();

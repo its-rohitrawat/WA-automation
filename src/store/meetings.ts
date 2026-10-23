@@ -48,6 +48,8 @@ export interface NewMeeting {
   status: MeetingStatus;
   /** Drive's own length, when given. */
   driveSeconds: number | null;
+  /** Why it was stored as no_access (for example http_404); missing means none. */
+  errorCode?: string | null;
   createdAt: string;
 }
 
@@ -236,12 +238,13 @@ function notQueued(what: string, id: number, extra = ''): never {
 export function insertFound(db: Db, m: NewMeeting): number | null {
   const r = db
     .prepare(`INSERT INTO meetings (recording, conference, drive_file_id, meeting_code, title, started_at, ended_at, attendees, participants, client_id,
-        match_kind, status, drive_seconds, created_at, updated_at)
+        match_kind, status, drive_seconds, error_code, created_at, updated_at)
       VALUES (@recording, @conference, @driveFileId, @meetingCode, @title, @startedAt, @endedAt, @attendees, @participants, @clientId,
-        @matchKind, @status, @driveSeconds, @createdAt, @createdAt)
+        @matchKind, @status, @driveSeconds, @errorCode, @createdAt, @createdAt)
       ON CONFLICT (recording) DO NOTHING`)
     .run({
       ...m,
+      errorCode: m.errorCode ?? null,
       startedAt: normalised('insertFound', 'startedAt', m.startedAt),
       endedAt: m.endedAt === null ? null : normalised('insertFound', 'endedAt', m.endedAt),
       createdAt: canonical('insertFound', 'createdAt', m.createdAt),
