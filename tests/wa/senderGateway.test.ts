@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { XLSX_MIME } from '../../src/output/workbook.ts';
 import { openSessionDb, useSenderAuthState, type EncryptedAuth } from '../../src/wa/authState.ts';
 import { checkRecipient, linkSender, recipientJid, RecipientRefusedError, SenderGateway } from '../../src/wa/senderGateway.ts';
@@ -35,6 +35,24 @@ function scriptedFactory(scripts: Script[] = []) {
 function senderAuth(linked: boolean): EncryptedAuth {
   const auth = useSenderAuthState(openSessionDb(':memory:'), randomBytes(32));
   return { ...auth, hasSession: linked };
+}
+
+/** Runs fn, which must throw, and checks its message holds none of the given values, nor any run of 5 or more digits. */
+function expectNoLeak(fn: () => unknown, values: string[]): void {
+  let message: string | undefined;
+  try {
+    fn();
+  } catch (e) {
+    message = (e as Error).message;
+  }
+  expect(message).toBeDefined();
+  for (const v of values) {
+    expect(message).not.toContain(v);
+    for (const run of v.match(/\d{5,}/g) ?? []) {
+      for (let i = 0; i + 5 <= run.length; i++) expect(message).not.toContain(run.slice(i, i + 5));
+    }
+  }
+  expect(message).not.toMatch(/\d{5,}/);
 }
 
 function setup(
@@ -86,6 +104,20 @@ describe('SenderGateway', () => {
     expect(recipientJid('919812345678')).toBe('919812345678@s.whatsapp.net');
     for (const bad of ['9812345678', '919812345', '9198123456789', '915812345678', '449812345678']) {
       expect(() => recipientJid(bad)).toThrow('REPORT_RECIPIENT must be 91 and the 10-digit Indian mobile, digits only');
+    }
+  });
+
+  it('never puts the refused number or JID in an error message', () => {
+    const badRecipients = [
+      '+919800000000', '91 98000 00000', '120363000000000001@g.us',
+      '9812345678', '919812345', '9198123456789', '915812345678', '449812345678',
+    ];
+    for (const bad of badRecipients) {
+      expectNoLeak(() => recipientJid(bad), [bad]);
+      expectNoLeak(() => new SenderGateway({ recipient: bad, factory: scriptedFactory().factory, auth: senderAuth(true) }), [bad]);
+    }
+    for (const refused of ['919811111111@s.whatsapp.net', '120363000000000001@g.us']) {
+      expectNoLeak(() => checkRecipient(refused, JID), [refused, JID]);
     }
   });
 
@@ -223,6 +255,55 @@ describe('SenderGateway', () => {
   });
 });
 
+describe('SenderGateway default timings', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function defaultGateway(scripts: Script[]) {
+    const { factory, sockets } = scriptedFactory(scripts);
+    // No connectTimeoutMs, sendTimeoutMs or lingerMs: the production defaults apply.
+    const gw = new SenderGateway({ recipient: RECIPIENT, factory, auth: senderAuth(true) });
+    return { gw, sockets };
+  }
+
+  it('lingers 15 s after both messages left before closing the socket', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { gw, sockets } = defaultGateway([open]);
+    const p = gw.sendReport('hi', XLSX, FILE);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(14_900);
+    expect(sockets[0]!.end).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(await p).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(sockets[0]!.end).toHaveBeenCalled();
+  });
+
+  it('waits 60 s for the connection to open', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { gw, sockets } = defaultGateway([() => {}]);
+    const p = gw.sendReport('hi', XLSX, FILE);
+    await vi.advanceTimersByTimeAsync(59_900);
+    expect(sockets[0]!.end).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(await p).toEqual({ status: 'failed', code: 'connect_timeout' });
+  });
+
+  it('gives each message 120 s before reporting unknown', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { gw, sockets } = defaultGateway([hang]);
+    let result: unknown;
+    const p = gw.sendReport('hi', XLSX, FILE).then((r) => (result = r));
+    await vi.advanceTimersByTimeAsync(119_900);
+    expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(1);
+    expect(result).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(200);
+    await p;
+    expect(result).toEqual({ status: 'unknown', code: 'timeout' });
+  });
+});
+
 describe('linkSender', () => {
   it('shows the QR code, reconnects once after the scan, saves the session and sends nothing', async () => {
     const { factory, sockets } = scriptedFactory([
@@ -244,6 +325,28 @@ describe('linkSender', () => {
       expect(s.end).toHaveBeenCalled();
       for (const name of SEND_METHODS) expect(s[name]).not.toHaveBeenCalled();
     }
+  });
+
+  it('opens at most 3 sockets when WhatsApp keeps asking for a restart', async () => {
+    const restart: Script = (s) => closeWith(s, 515);
+    const { factory, sockets } = scriptedFactory([restart, restart, restart, restart, restart, restart]);
+    expect(await linkSender({ factory, auth: senderAuth(false), onQr: () => {}, timeoutMs: 1_000, settleMs: 0 })).toEqual({ ok: false, code: 'closed' });
+    expect(sockets).toHaveLength(3);
+    for (const s of sockets) expect(s.end).toHaveBeenCalled();
+  });
+
+  it('keeps the linked socket open for the settle time before saving and closing', async () => {
+    const { factory, sockets } = scriptedFactory([(s) => closeWith(s, 515), open]);
+    const auth = senderAuth(false);
+    const saveCreds = vi.fn(auth.saveCreds);
+    const p = linkSender({ factory, auth: { ...auth, saveCreds }, onQr: () => {}, timeoutMs: 1_000, settleMs: 200 });
+    await vi.waitFor(() => expect(sockets).toHaveLength(2), { interval: 5 });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(sockets[1]!.end).not.toHaveBeenCalled();
+    expect(saveCreds).not.toHaveBeenCalled();
+    expect(await p).toEqual({ ok: true });
+    expect(saveCreds).toHaveBeenCalled();
+    expect(sockets[1]!.end).toHaveBeenCalled();
   });
 
   it('stops when WhatsApp refuses the link', async () => {
