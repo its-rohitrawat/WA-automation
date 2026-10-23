@@ -1,4 +1,7 @@
 import { z } from 'zod';
+import type { ReportSettings } from '../report/types.ts';
+
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 const EnvSchema = z.object({
   ANTHROPIC_API_KEY: z.string().min(1).optional(),
@@ -17,6 +20,19 @@ const EnvSchema = z.object({
   DATA_DIR: z.string().default('data'),
   GROUPS_FILE: z.string().default('config/allowed-groups.json'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
+  // Phase 2c morning report. Off unless REPORT_ENABLED is exactly "true".
+  REPORT_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  REPORT_TIME: z.string().regex(HHMM).default('06:00'),
+  REPORT_DEADLINE: z.string().regex(HHMM).default('12:00'),
+  /** The founder's number with country code, digits only. Personal data: never logged in full. */
+  REPORT_RECIPIENT: z.string().regex(/^\d{8,15}$/).optional(),
+}).superRefine((env, ctx) => {
+  if (env.REPORT_ENABLED && !env.REPORT_RECIPIENT) {
+    ctx.addIssue({ code: 'custom', path: ['REPORT_RECIPIENT'], message: 'required when REPORT_ENABLED is true' });
+  }
+  if (env.REPORT_TIME >= env.REPORT_DEADLINE) {
+    ctx.addIssue({ code: 'custom', path: ['REPORT_DEADLINE'], message: 'must be later than REPORT_TIME' });
+  }
 });
 
 export type Env = z.infer<typeof EnvSchema>;
@@ -45,4 +61,19 @@ export function requireKey(env: Env, name: 'ANTHROPIC_API_KEY' | 'GOOGLE_OAUTH_C
   const value = env[name];
   if (!value) throw new Error(`${name} is not configured`);
   return value;
+}
+
+export function reportSettings(env: Env): ReportSettings {
+  return { enabled: env.REPORT_ENABLED, time: env.REPORT_TIME, deadline: env.REPORT_DEADLINE };
+}
+
+/** The founder's number (digits only). parseEnv already refuses REPORT_ENABLED=true without it. */
+export function reportRecipient(env: Env): string {
+  if (!env.REPORT_RECIPIENT) throw new Error('REPORT_RECIPIENT is not configured');
+  return env.REPORT_RECIPIENT;
+}
+
+/** For logs and screens: only the last 4 digits of a phone number. */
+export function maskNumber(digits: string): string {
+  return `…${digits.slice(-4)}`;
 }
