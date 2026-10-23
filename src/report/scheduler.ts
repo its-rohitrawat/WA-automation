@@ -1,9 +1,10 @@
 import { loadTrackerView, type HealthLine } from '../output/view.ts';
 import { buildWorkbook } from '../output/workbook.ts';
-import type { Db } from '../store/db.ts';
+import { tx, type Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import {
-  claimReport, closeOldRetries, finishReport, markInterruptedReports, REPORT_REQUEST_KEY, reportFor, retryReport, skipReport, type ReportRow,
+  claimReport, closeOldRetries, finishReport, markInterruptedReports, REPORT_REQUEST_KEY, reportFor, reportRequestValue, retryReport, skipReport,
+  type ReportRow,
 } from '../store/reports.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
@@ -149,15 +150,26 @@ export class ReportScheduler {
     try {
       const date = istDate(now);
       const at = now.toISOString();
-      const requested = getKv(db, REPORT_REQUEST_KEY);
-      if (requested) setKv(db, REPORT_REQUEST_KEY, ''); // a request is used once, whatever happens next
-      if (!settings.enabled) return;
-      closeOldRetries(db, date, at);
-      if (requested === date) {
-        if (claimReport(db, date, at, { force: true })) await this.#send(date, now);
-        else log.info({ date }, 'send-now request ignored: today is already sent or being sent');
-        return;
-      }
+      // Taking the request, checking it and the forced claim are one transaction, so a request written meanwhile is
+      // never wiped unread, and the row cannot change between the check and the claim. The send comes after it.
+      const step = tx(db, (): 'send' | 'done' | 'schedule' => {
+        const requested = getKv(db, REPORT_REQUEST_KEY);
+        if (requested) setKv(db, REPORT_REQUEST_KEY, ''); // a request is used once, whatever happens next
+        if (!settings.enabled) return 'done';
+        closeOldRetries(db, date, at);
+        if (!requested) return 'schedule';
+        // Honoured only while today's row is exactly what the owner confirmed: a send that started after the
+        // confirmation and ended unknown changes the row, and must never be followed by a second report.
+        if (requested !== reportRequestValue(date, reportFor(db, date))) {
+          log.info({ date }, 'send-now request ignored: it is not for today, or today changed since it was confirmed');
+          return 'schedule';
+        }
+        if (claimReport(db, date, at, { force: true })) return 'send';
+        log.info({ date }, 'send-now request ignored: today is already sent or being sent');
+        return 'done';
+      });
+      if (step === 'send') await this.#send(date, now);
+      if (step !== 'schedule') return;
       const hm = istTime(now);
       if (hm < settings.time) return;
       if (hm >= settings.deadline) {

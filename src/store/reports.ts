@@ -2,8 +2,20 @@ import type { Db } from './db.ts';
 
 export type ReportStatus = 'sending' | 'sent' | 'retry' | 'unknown' | 'skipped';
 
-/** kv key: `report send-now` stores today's IST date here, and the service's next tick takes it. */
+/**
+ * kv key: `report send-now` stores a request here (see reportRequestValue), and the service's next tick takes it. An
+ * empty value means no request.
+ */
 export const REPORT_REQUEST_KEY = 'report_send_requested';
+
+/**
+ * The send-now request value: the IST date plus the row state the owner saw when confirming
+ * (`date|status|updatedAt`, `date|none|` when there was no row). The service honours it only while today's row is still
+ * exactly that state, so a request confirmed before a send whose outcome became unknown can never send a second report.
+ */
+export function reportRequestValue(date: string, row: ReportRow | undefined): string {
+  return `${date}|${row?.status ?? 'none'}|${row?.updatedAt ?? ''}`;
+}
 
 export interface ReportRow {
   /** IST date, YYYY-MM-DD. */

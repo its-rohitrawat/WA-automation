@@ -1,10 +1,13 @@
+import ExcelJS from 'exceljs';
 import { Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
+import type { HealthLine } from '../../src/output/view.ts';
 import { describeReport, ReportScheduler, retryWaitMs, UNKNOWN_WARNING, type ReportPayload } from '../../src/report/scheduler.ts';
 import type { ReportSettings, SendResult } from '../../src/report/types.ts';
+import type { Db } from '../../src/store/db.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
 import {
-  claimReport, finishReport, markInterruptedReports, REPORT_REQUEST_KEY, reportFor, retryReport, type ReportRow,
+  claimReport, finishReport, markInterruptedReports, REPORT_REQUEST_KEY, reportFor, reportRequestValue, retryReport, type ReportRow,
 } from '../../src/store/reports.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
@@ -17,12 +20,15 @@ const iso = (hm: string) => new Date(IST(hm)).toISOString();
 const ON: ReportSettings = { enabled: true, time: '06:00', deadline: '12:00' };
 const failed = (code: string): SendResult => ({ status: 'failed', code });
 
-function setup(o: { settings?: ReportSettings; build?: (now: Date) => Promise<ReportPayload>; log?: Logger } = {}) {
+function setup(
+  o: { settings?: ReportSettings; build?: (now: Date) => Promise<ReportPayload>; log?: Logger; healthLine?: () => HealthLine } = {},
+) {
   const db = seededDb();
   const clock = manualClock(IST('05:00'));
   const sender = new FakeReportSender();
   const s = new ReportScheduler({
-    db, clock, log: o.log ?? silentLogger(), sender, settings: o.settings ?? ON, healthLine: () => ({ ok: true, text: '✅ Connected' }), build: o.build,
+    db, clock, log: o.log ?? silentLogger(), sender, settings: o.settings ?? ON, healthLine: o.healthLine ?? (() => ({ ok: true, text: '✅ Connected' })),
+    build: o.build,
   });
   /** Moves the clock to an IST time today and runs one tick. */
   const at = async (hm: string) => {
@@ -48,6 +54,11 @@ function capturingLogger() {
     },
   });
   return { lines, log: createLogger('debug', sink) };
+}
+
+/** Writes a send-now request the way `report send-now` does: the date and the row state the owner confirmed. */
+function request(db: Db, date = DAY): void {
+  setKv(db, REPORT_REQUEST_KEY, reportRequestValue(date, reportFor(db, date)));
 }
 
 /** Lets pending promise callbacks run, so a step that would happen at once has happened. */
@@ -137,7 +148,7 @@ describe('ReportScheduler', () => {
 
   it('does nothing when disabled, and drops a send-now request', async () => {
     const { db, sender, s, at } = setup({ settings: { ...ON, enabled: false } });
-    setKv(db, REPORT_REQUEST_KEY, DAY);
+    request(db);
     await at('06:00');
     expect(sender.calls).toHaveLength(0);
     expect(reportFor(db, DAY)).toBeUndefined();
@@ -152,10 +163,10 @@ describe('ReportScheduler', () => {
     clock.set(IST('06:00'));
     const first = s.tick(clock.now());
     await vi.waitFor(() => expect(sender.calls).toHaveLength(1));
-    setKv(db, REPORT_REQUEST_KEY, DAY);
+    setKv(db, REPORT_REQUEST_KEY, `${DAY}|none|`);
     await s.tick(clock.now());
     expect(sender.calls).toHaveLength(1);
-    expect(getKv(db, REPORT_REQUEST_KEY)).toBe(DAY); // the second tick returned before reading the request
+    expect(getKv(db, REPORT_REQUEST_KEY)).toBe(`${DAY}|none|`); // the second tick returned before reading the request
     const stopping = s.stop(5_000);
     await settle();
     expect(sender.stopped).toBe(0); // the first send is still tracked, so stop waits for it
@@ -181,19 +192,140 @@ describe('ReportScheduler', () => {
     const { db, sender, at } = setup();
     claimReport(db, DAY, iso('06:00'));
     finishReport(db, DAY, 'unknown', 'timeout', iso('06:01'));
-    setKv(db, REPORT_REQUEST_KEY, DAY);
+    request(db);
     await at('15:00');
     expect(sender.calls).toHaveLength(1);
     expect(reportFor(db, DAY)).toMatchObject({ status: 'sent', forced: true, attempts: 2 });
     expect(getKv(db, REPORT_REQUEST_KEY)).toBe('');
-    setKv(db, REPORT_REQUEST_KEY, DAY);
+    request(db);
     await at('15:01');
     expect(sender.calls).toHaveLength(1);
   });
 
+  it('a send-now request confirmed before a scheduled send that ends unknown is not used: nothing is sent twice', async () => {
+    const { db, clock, sender, s, at } = setup();
+    const g = gate();
+    sender.gate = g.promise;
+    sender.results = [{ status: 'unknown', code: 'timeout' }];
+    clock.set(IST('06:00'));
+    const first = s.tick(clock.now());
+    await vi.waitFor(() => expect(sender.calls).toHaveLength(1));
+    // the owner confirmed while the CLI saw no row, and the request lands while the scheduled send is out
+    setKv(db, REPORT_REQUEST_KEY, reportRequestValue(DAY, undefined));
+    g.release();
+    await first;
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'timeout' });
+    await at('06:01');
+    expect(sender.calls).toHaveLength(1);
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'timeout', attempts: 1, forced: false });
+    expect(getKv(db, REPORT_REQUEST_KEY)).toBe('');
+  });
+
+  it('ignores a send-now request whose confirmed state no longer matches the row, and the old date-only form', async () => {
+    const { db, sender, at } = setup();
+    claimReport(db, DAY, iso('06:00'));
+    retryReport(db, DAY, 'closed', iso('06:02'), iso('06:00'));
+    request(db); // confirmed while the row was 'retry'
+    claimReport(db, DAY, iso('06:02'));
+    finishReport(db, DAY, 'unknown', 'timeout', iso('06:03')); // the scheduler tried again and the outcome is unknown
+    await at('06:04');
+    expect(sender.calls).toHaveLength(0);
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'unknown', attempts: 2 });
+    setKv(db, REPORT_REQUEST_KEY, DAY);
+    await at('06:05');
+    expect(sender.calls).toHaveLength(0);
+    expect(getKv(db, REPORT_REQUEST_KEY)).toBe('');
+  });
+
+  it('clears a send-now request exactly once, as it takes it', async () => {
+    const { db, sender, at } = setup();
+    request(db);
+    const writes: string[] = [];
+    const prepare = db.prepare.bind(db);
+    const spy = vi.spyOn(db, 'prepare').mockImplementation(((sql: string) => {
+      if (/INSERT INTO kv/.test(sql)) writes.push(sql);
+      return prepare(sql);
+    }) as typeof db.prepare);
+    try {
+      await at('05:00');
+      await at('05:01');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(sender.calls).toHaveLength(1);
+    expect(writes).toHaveLength(1);
+    expect(getKv(db, REPORT_REQUEST_KEY)).toBe('');
+  });
+
+  it('a send-now request after the deadline that fails gets one try, then the day is skipped with that reason', async () => {
+    const { db, clock, sender, s } = setup();
+    sender.results = [failed('connect_timeout')];
+    request(db);
+    clock.set(IST('15:00'));
+    await s.tick(clock.now());
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'connect_timeout' });
+    clock.set(new Date(clock.now().getTime() + 30_000).toISOString());
+    await s.tick(clock.now());
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'skipped', detail: 'connect_timeout' });
+    expect(sender.calls).toHaveLength(1);
+  });
+
+  it('a send-now request before the report time that fails waits for the report time', async () => {
+    const { db, sender, at } = setup();
+    sender.results = [failed('closed')];
+    request(db);
+    await at('05:00');
+    expect(sender.calls).toHaveLength(1);
+    await at('05:02');
+    await at('05:59');
+    expect(sender.calls).toHaveLength(1);
+    await at('06:00');
+    expect(sender.calls).toHaveLength(2);
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'sent', attempts: 2, forced: false });
+  });
+
+  it('uses the IST date between 00:00 and 05:30 IST, for health and for a send-now request', async () => {
+    const { db, clock, sender, s } = setup();
+    claimReport(db, '2026-10-22', '2026-10-22T00:30:00.000Z');
+    finishReport(db, '2026-10-22', 'sent', 'msg-0', '2026-10-22T00:31:00.000Z');
+    clock.set(IST('02:00'));
+    expect(s.health().text).toBe('Morning report: due at 06:00 IST');
+    request(db);
+    await s.tick(clock.now());
+    expect(sender.calls).toHaveLength(1);
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'sent', forced: true });
+  });
+
+  it('puts the real health line in the attached workbook', async () => {
+    const healthLine = vi.fn((): HealthLine => ({ ok: false, text: 'HEALTH-MARKER' }));
+    const { sender, at } = setup({ healthLine });
+    await at('06:00');
+    expect(healthLine).toHaveBeenCalled();
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(sender.calls[0]!.xlsx as unknown as ExcelJS.Buffer);
+    expect(wb.getWorksheet('Overview')!.getCell('A1').value).toBe('HEALTH-MARKER');
+  });
+
+  it('records the time the send finished, not the time it started', async () => {
+    for (const fails of [false, true]) {
+      const one = setup();
+      one.sender.results = fails ? [failed('connect_timeout')] : [];
+      const send = one.sender.sendReport.bind(one.sender);
+      one.sender.sendReport = async (text, xlsx, fileName) => {
+        one.clock.set(IST('06:03')); // a slow connect
+        return send(text, xlsx, fileName);
+      };
+      await one.at('06:00');
+      const row = reportFor(one.db, DAY)!;
+      expect(row.updatedAt).toBe(iso('06:03'));
+      if (fails) expect(row).toMatchObject({ status: 'retry', nextAttemptAt: iso('06:05') });
+      else expect(row.status).toBe('sent');
+    }
+  });
+
   it('ignores a send-now request left from an earlier day', async () => {
     const { db, sender, at } = setup();
-    setKv(db, REPORT_REQUEST_KEY, '2026-10-22');
+    setKv(db, REPORT_REQUEST_KEY, reportRequestValue('2026-10-22', undefined));
     await at('15:00');
     expect(sender.calls).toHaveLength(0);
     expect(getKv(db, REPORT_REQUEST_KEY)).toBe('');
@@ -214,7 +346,7 @@ describe('ReportScheduler', () => {
     expect(sender.stopped).toBe(1);
     await first;
     expect(reportFor(db, DAY)!.status).toBe('sent');
-    setKv(db, REPORT_REQUEST_KEY, DAY);
+    request(db);
     await at('06:30');
     expect(sender.calls).toHaveLength(1);
   });
@@ -223,11 +355,31 @@ describe('ReportScheduler', () => {
     const { db, sender, s, at } = setup();
     await s.stop(1_000);
     expect(sender.stopped).toBe(1);
-    setKv(db, REPORT_REQUEST_KEY, DAY);
+    request(db);
     await at('06:00');
     await at('07:00');
     expect(sender.calls).toHaveLength(0);
     expect(reportFor(db, DAY)).toBeUndefined();
+  });
+
+  it('stop leaves no timer once the send in flight has finished', async () => {
+    const { clock, sender, s } = setup();
+    const g = gate();
+    sender.gate = g.promise;
+    clock.set(IST('06:00'));
+    const first = s.tick(clock.now());
+    await vi.waitFor(() => expect(sender.calls).toHaveLength(1));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const stopping = s.stop(5_000);
+      expect(vi.getTimerCount()).toBe(1);
+      g.release();
+      await stopping;
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+    await first;
   });
 
   it('stop gives up on a hung send after waitMs and still stops the sender', async () => {
