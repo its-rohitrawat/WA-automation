@@ -27,6 +27,11 @@ export interface ValidationState {
    * message wins. A file re-check that is also an edit re-check is in editedIds and is not guarded.
    */
   editedIds: Set<string>;
+  /**
+   * Where the batch comes from. For a meeting run, batchIds are the meeting item ids, contextIds the WhatsApp context and
+   * messageTs gives every item the meeting's start; a meeting never changes roles. Default 'whatsapp'.
+   */
+  source?: 'whatsapp' | 'meeting';
 }
 
 export interface Rejection {
@@ -136,6 +141,7 @@ export function validateOps(ops: AiOp[], s: ValidationState): { accepted: AiOp[]
         if (s.phaseLocked) { reject('phase was set by a human'); continue; }
         break;
       case 'set_person_role': {
+        if (s.source === 'meeting') { reject('a meeting never changes roles'); continue; }
         const person = op.personJid ? s.peopleByJid.get(op.personJid) : undefined;
         if (!person || !op.role) { reject('unknown person or missing role'); continue; }
         if (person.roleSetBy !== 'ai') { reject('role was set by a human or is the founder'); continue; }

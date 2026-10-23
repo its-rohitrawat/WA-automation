@@ -57,6 +57,11 @@ export interface PromptInput {
   mediaText?: Map<number, MediaBlock>;
   /** Row ids of messages queued again because their file was read after they were processed (amendment 12h). */
   fileRechecks?: Set<number>;
+  /**
+   * A meeting run (src/brain/meetingTracker.ts): these lines go in <meeting_items> in place of <new_messages>. Each is
+   * already cleaned to one line.
+   */
+  meetingLines?: readonly string[];
 }
 
 /**
@@ -271,8 +276,6 @@ export function buildUserContent(p: PromptInput): string {
     '<recent_context>',
     ...(p.recent.length ? p.recent.map(line) : ['(none)']),
     '</recent_context>',
-    '<new_messages>',
-    ...p.batch.map(line),
-    '</new_messages>',
+    ...(p.meetingLines ? ['<meeting_items>', ...p.meetingLines, '</meeting_items>'] : ['<new_messages>', ...p.batch.map(line), '</new_messages>']),
   ].join('\n');
 }

@@ -93,6 +93,30 @@ export class GroupDebouncer {
     if (s.running) s.cancelled = true;
   }
 
+  /**
+   * Runs fn while holding this client's run flag, so no reconcile of the client starts meanwhile (a meeting's tracker
+   * step). Returns 'busy' without running fn when the client is already running. A run that came due meanwhile (the
+   * client got dirty) is scheduled afterwards as a normal run, after the quiet wait. The exclusive run does not take one
+   * of the maxConcurrent slots, and drain() does not wait for it.
+   */
+  async runExclusive<T>(clientId: number, fn: () => Promise<T>): Promise<T | 'busy'> {
+    const s = this.#state(clientId);
+    if (s.running) return 'busy';
+    s.running = true;
+    try {
+      return await fn();
+    } finally {
+      s.running = false;
+      if (s.cancelled) {
+        s.cancelled = false;
+        s.dirty = false;
+      } else if (s.dirty) {
+        s.dirty = false;
+        this.notify(clientId);
+      }
+    }
+  }
+
   /** Resolves when no run is in flight, or after timeoutMs. Call after stop(). Starts nothing. */
   drain(timeoutMs: number): Promise<void> {
     if (this.#active === 0) return Promise.resolve();
@@ -147,6 +171,11 @@ export class GroupDebouncer {
       const clientId = this.#queue.shift()!;
       const s = this.#state(clientId);
       s.queued = false;
+      // Held by runExclusive: the run is scheduled again when that ends.
+      if (s.running) {
+        s.dirty = true;
+        continue;
+      }
       s.running = true;
       this.#active++;
       Promise.resolve()

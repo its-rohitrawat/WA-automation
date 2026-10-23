@@ -147,6 +147,8 @@ export function createApp(d: AppDeps): App {
 
   const reconciler = new Reconciler({
     db: d.db, ai: d.ai, spend, prices: d.prices, clock: d.clock, log: d.log, startedAt, onChanged: () => publisher.schedule(),
+    // A meeting's tracker step holds the client's run flag, so it never interleaves with a WhatsApp run (Task 9).
+    exclusive: (clientId, fn) => debouncer.runExclusive(clientId, fn),
   });
   const debouncer = new GroupDebouncer({
     quietMs: d.quietMs,

@@ -67,6 +67,8 @@ export interface NewTask {
   sourceDate: string | null;
   sourceWaId: string | null;
   origin: string;
+  /** The meeting a task came from (origin 'meeting'). */
+  meetingId?: number | null;
 }
 
 export interface DecisionRow {
@@ -151,10 +153,10 @@ export function createTask(db: Db, t: NewTask, now: string): TaskRow {
   const code = nextTaskCode(db, t.clientId);
   const info = db
     .prepare(`INSERT INTO tasks (code, client_id, side, title, category, priority, assigned_to, asked_by, raised_on, deadline, latest_progress,
-        source_quote, source_date, source_wa_id, origin, created_at, updated_at)
+        source_quote, source_date, source_wa_id, origin, meeting_id, created_at, updated_at)
       VALUES (@code, @clientId, @side, @title, @category, @priority, @assignedTo, @askedBy, @raisedOn, @deadline, @latestProgress,
-        @sourceQuote, @sourceDate, @sourceWaId, @origin, @now, @now)`)
-    .run({ ...t, code, now });
+        @sourceQuote, @sourceDate, @sourceWaId, @origin, @meetingId, @now, @now)`)
+    .run({ ...t, meetingId: t.meetingId ?? null, code, now });
   return getTaskById(db, Number(info.lastInsertRowid));
 }
 
@@ -217,15 +219,16 @@ export function recordEvent(
 
 export function addDecision(
   db: Db,
-  d: { clientId: number; text: string; decidedOn: string; source: DecisionRow['source']; sourceWaId: string | null },
+  d: { clientId: number; text: string; decidedOn: string; source: DecisionRow['source']; sourceWaId: string | null; meetingId?: number | null },
   now: string,
 ): void {
-  db.prepare('INSERT INTO decisions (client_id, text, decided_on, source, source_wa_id, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+  db.prepare('INSERT INTO decisions (client_id, text, decided_on, source, source_wa_id, meeting_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
     d.clientId,
     d.text,
     d.decidedOn,
     d.source,
     d.sourceWaId,
+    d.meetingId ?? null,
     now,
   );
 }
