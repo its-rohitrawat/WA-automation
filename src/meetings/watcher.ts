@@ -1,4 +1,5 @@
 import { sanitizeInline } from '../brain/prompt.ts';
+import { isDomain } from '../config/domains.ts';
 import type { ClientConfig } from '../config/groups.ts';
 import { getClientByGroupId } from '../store/clients.ts';
 import { tx, type Db } from '../store/db.ts';
@@ -8,7 +9,7 @@ import type { Logger } from '../util/logger.ts';
 import { fromIstDate } from '../util/time.ts';
 import type { ConferenceRef, DriveVideoInfo, InviteInfo, MeetingsGoogleApi } from './googleApi.ts';
 import { GoogleNoAccessError, GoogleTransientError } from './googleErrors.ts';
-import { domainOf, inDomains, matchClient, type MatchableClient } from './match.ts';
+import { domainOf, inDomains, matchClient, type MatchableClient, type MatchResult } from './match.ts';
 
 // Discovery (Task 4): finds new Meet recordings and records each once, matched to a client before anything is
 // downloaded (M2). Nothing is downloaded or sent here. Logs carry ids, counts and codes only, never titles, names or emails.
@@ -84,6 +85,75 @@ export function titleFromFileName(name: string): string {
   return name.trim().replace(VIDEO_EXTENSION, '').replace(MEET_DATE_SUFFIX, '').replace(MEET_RECORDING_SUFFIX, '').trim();
 }
 
+const EMAIL_MAX = 254;
+const HIDDEN_OR_CONTROL = /[\p{Cc}\p{Cf}]/u;
+
+/**
+ * A plain address, lower-cased, or null. Kept only when it is one line with no spaces, hidden or control characters, at
+ * most 254 characters, with exactly one '@', a non-empty local part and a valid domain.
+ */
+export function cleanEmail(raw: string): string | null {
+  const e = raw.toLowerCase();
+  if (e.length === 0 || e.length > EMAIL_MAX || /\s/u.test(e) || HIDDEN_OR_CONTROL.test(e)) return null;
+  const parts = e.split('@');
+  if (parts.length !== 2) return null;
+  const [local, domain] = parts as [string, string];
+  return local !== '' && isDomain(domain) ? e : null;
+}
+
+/** Everything known about one recording when its row is built. Title, names and attendees are already cleaned. */
+export interface RowFacts {
+  recording: string;
+  conference: string;
+  driveFileId: string;
+  meetingCode: string | null;
+  startedAt: string;
+  endedAt: string | null;
+  createdAt: string;
+  title: string;
+  attendees: MeetingAttendee[];
+  participants: string[];
+  match: MatchResult;
+  /** Drive's length; null when Drive gives none (left to ffmpeg) or the file could not be read. */
+  durationMs: number | null;
+  /** Set when videoInfo refused the file (GoogleNoAccessError's code). */
+  noAccessCode: string | null;
+  maxMinutes: number;
+}
+
+/**
+ * The row for one recording. Status, in order:
+ * 1. internal match: ids, start time and status only (M7); no_access when the file could not be read, else internal;
+ * 2. the file could not be read: no_access, with the client match kept;
+ * 3. longer than maxMinutes by Drive's length: too_long, with the client match kept;
+ * 4. queued for a client match, else unassigned.
+ */
+export function buildRow(f: RowFacts): NewMeeting {
+  const base = {
+    recording: f.recording,
+    conference: f.conference,
+    driveFileId: f.driveFileId,
+    meetingCode: f.meetingCode,
+    startedAt: f.startedAt,
+    createdAt: f.createdAt,
+    errorCode: f.noAccessCode,
+  };
+  if (f.match.kind === 'internal') {
+    return {
+      ...base, title: '', endedAt: null, attendees: [], participants: [], clientId: null, matchKind: null,
+      status: f.noAccessCode === null ? 'internal' : 'no_access', driveSeconds: null,
+    };
+  }
+  const client = f.match.kind === 'client' ? { clientId: f.match.clientId, matchKind: f.match.by } : { clientId: null, matchKind: null };
+  const tooLong = f.durationMs !== null && f.durationMs > f.maxMinutes * 60_000;
+  const status: MeetingStatus =
+    f.noAccessCode !== null ? 'no_access' : tooLong ? 'too_long' : f.match.kind === 'client' ? 'queued' : 'unassigned';
+  return {
+    ...base, ...client, title: f.title, endedAt: f.endedAt, attendees: f.attendees, participants: f.participants, status,
+    driveSeconds: f.durationMs === null ? null : f.durationMs / 1000,
+  };
+}
+
 const isConferenceError = (e: unknown): e is GoogleTransientError | GoogleNoAccessError =>
   e instanceof GoogleTransientError || e instanceof GoogleNoAccessError;
 
@@ -110,12 +180,13 @@ export class MeetingWatcher {
   }
 
   /**
-   * A client emailDomains entry equal to or under a team domain would claim our own people's meetings, so it is ignored
-   * for matching, with a warning naming the client code only (never the domain).
+   * A client emailDomains entry that overlaps a team domain (equal, under it, or above it) would claim our own people's
+   * meetings, so it is ignored for matching, with a warning naming the client code only (never the domain).
    */
   #withoutTeamDomains(clients: readonly ClientConfigLike[]): ClientConfigLike[] {
+    const team = this.#settings.teamDomains;
     return clients.map((c) => {
-      const kept = c.emailDomains.filter((d) => !inDomains(d, this.#settings.teamDomains));
+      const kept = c.emailDomains.filter((d) => !inDomains(d, team) && !team.some((t) => inDomains(t, [d])));
       if (kept.length === c.emailDomains.length) return c;
       this.#log.warn({ client: c.code, ignored: c.emailDomains.length - kept.length }, 'client email domain is a team domain; ignored for matching');
       return { ...c, emailDomains: kept };
@@ -155,7 +226,8 @@ export class MeetingWatcher {
       signal.throwIfAborted();
       const known = knownRecordings(this.#db, c.name);
       // A conference with no row (no recording yet, or none at all) is listed again every pass while it is inside the
-      // 72-hour window: accepted, as it costs one listRecordings call per pass.
+      // 72-hour window: accepted, as it costs one listRecordings call per pass. A conference with a row is settled 24 h
+      // after it ended, so a second recording whose file appears later than that is not found: accepted (rare).
       if (known.size > 0 && c.endTime !== null && Date.parse(c.endTime) < nowMs - SETTLED_MS) {
         skipped += known.size;
         continue;
@@ -223,59 +295,58 @@ export class MeetingWatcher {
 
     const code = await this.#api.meetingCode(c.space, signal);
     const invite: InviteInfo | null = code === null ? null : await this.#api.findInvite(code, c.startTime, signal);
-    const names = await this.#api.listSignedInNames(c.name, signal);
     const teamDomains = this.#settings.teamDomains;
-    const attendees: MeetingAttendee[] = [];
+    // Addresses are untrusted: one that is not a plain address is dropped, for matching and for storing alike.
+    const invited: { email: string; name: string | null; self: boolean }[] = [];
     for (const a of invite?.attendees ?? []) {
-      const domain = domainOf(a.email);
-      if (domain === null) continue;
-      const name = a.name === null ? '' : cleanLine(a.name, NAME_MAX);
-      attendees.push({ email: a.email.trim().toLowerCase(), name: name === '' ? null : name, team: inDomains(domain, teamDomains) });
+      const email = cleanEmail(a.email);
+      if (email !== null) invited.push({ email, name: a.name, self: a.self });
     }
-    const participants = [...new Set(names.map((n) => cleanLine(n, NAME_MAX)).filter((n) => n !== ''))];
+    const attendees: MeetingAttendee[] = invited.map((a) => {
+      const name = a.name === null ? '' : cleanLine(a.name, NAME_MAX);
+      return { email: a.email, name: name === '' ? null : name, team: inDomains(domainOf(a.email) ?? '', teamDomains) };
+    });
     const inviteTitle = invite === null ? '' : cleanLine(invite.title, TITLE_MAX);
+    // Signed-in names are read only for a meeting that is not internal, once per conference.
+    let participants: string[] | undefined;
 
     for (const r of fresh) {
       const fileId = r.driveFileId!;
       let video: DriveVideoInfo | null = null;
-      let noAccess: string | null = null;
+      let noAccessCode: string | null = null;
       try {
         video = await this.#api.videoInfo(fileId, signal);
       } catch (e) {
         if (signal.aborted || !(e instanceof GoogleNoAccessError)) throw e;
         // This file only: stored as no_access, so it is visible and not asked about again; the other recordings go on.
-        noAccess = e.code;
+        noAccessCode = e.code;
         this.#log.warn({ recording: r.name, code: e.code }, 'meeting recording not readable');
       }
       const fileTitle = video === null ? '' : cleanLine(titleFromFileName(video.name), TITLE_MAX);
       const title = inviteTitle !== '' ? inviteTitle : fileTitle;
-      const match = matchClient(
-        { title, attendees: (invite?.attendees ?? []).map((a) => ({ email: a.email, self: a.self })), hasInvite: invite !== null },
-        clients,
-        teamDomains,
-      );
-      const base = {
-        recording: r.name,
-        conference: c.name,
-        driveFileId: fileId,
-        meetingCode: code,
-        startedAt: r.startTime ?? c.startTime,
-        createdAt,
-      };
-      if (match.kind === 'internal') {
-        // M7: ids, start time and status only.
-        rows.push({
-          ...base, title: '', endedAt: null, attendees: [], participants: [], clientId: null, matchKind: null,
-          status: noAccess === null ? 'internal' : 'no_access', driveSeconds: null, errorCode: noAccess,
-        });
-        continue;
+      const match = matchClient({ title, attendees: invited, hasInvite: invite !== null }, clients, teamDomains);
+      if (match.kind !== 'internal' && participants === undefined) {
+        const names = await this.#api.listSignedInNames(c.name, signal);
+        participants = [...new Set(names.map((n) => cleanLine(n, NAME_MAX)).filter((n) => n !== ''))];
       }
-      const durationMs = video?.durationMs ?? null;
-      const driveSeconds = durationMs === null ? null : durationMs / 1000;
-      const tooLong = durationMs !== null && durationMs > this.#settings.maxMinutes * 60_000;
-      const client = match.kind === 'client' ? { clientId: match.clientId, matchKind: match.by } : { clientId: null, matchKind: null };
-      const status: MeetingStatus = noAccess !== null ? 'no_access' : tooLong ? 'too_long' : match.kind === 'client' ? 'queued' : 'unassigned';
-      rows.push({ ...base, ...client, title, endedAt: r.endTime ?? c.endTime, attendees, participants, status, driveSeconds, errorCode: noAccess });
+      rows.push(
+        buildRow({
+          recording: r.name,
+          conference: c.name,
+          driveFileId: fileId,
+          meetingCode: code,
+          startedAt: r.startTime ?? c.startTime,
+          endedAt: r.endTime ?? c.endTime,
+          createdAt,
+          title,
+          attendees,
+          participants: participants ?? [],
+          match,
+          durationMs: video?.durationMs ?? null,
+          noAccessCode,
+          maxMinutes: this.#settings.maxMinutes,
+        }),
+      );
     }
     return { rows, skipped };
   }

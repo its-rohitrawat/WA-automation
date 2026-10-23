@@ -1,6 +1,7 @@
 import { readFileSync, unwatchFile, watchFile, type Stats } from 'node:fs';
 import { z } from 'zod';
 import { DomainSchema } from './domains.ts';
+import { isMatchablePhrase, MIN_PHRASE_CHARS } from '../meetings/match.ts';
 
 export const GROUPS_FILE_MISSING_MESSAGE = 'Allow-list file missing. Create config/allowed-groups.json containing { "clients": [] }, run: npm run cli -- list-groups, then add your client groups (see docs/SETUP.md).';
 
@@ -48,6 +49,10 @@ export function parseGroupsFile(json: string): ClientConfig[] {
     if (c.groupId === EXAMPLE_GROUP_ID) throw new Error(EXAMPLE_GROUP_MESSAGE);
     if (groups.has(c.groupId)) throw new Error(`allowed-groups.json lists group ${c.groupId} twice`);
     if (codes.has(c.code)) throw new Error(`allowed-groups.json uses code ${c.code} twice`);
+    // The matcher ignores such a keyword ('c++' is 'c' once punctuation is removed), so it is refused here instead.
+    if ((c.meetingKeywords ?? []).some((k) => !isMatchablePhrase(k))) {
+      throw new Error(`allowed-groups.json: client ${c.code} has a meeting keyword with fewer than ${MIN_PHRASE_CHARS} letters once punctuation is removed`);
+    }
     groups.add(c.groupId);
     codes.add(c.code);
   }

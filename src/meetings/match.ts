@@ -21,28 +21,41 @@ export type MatchResult =
   | { kind: 'unassigned'; reason: 'none' | 'ambiguous' };
 
 const PUNCTUATION_AND_SYMBOLS = /[\p{P}\p{S}]/gu;
+/**
+ * Format characters (zero-width space, joiners, direction marks...). Removed from both the title and the phrases, so one
+ * hidden inside a word neither breaks a match nor makes a new one. ZWJ and ZWNJ go too: they only change how Devanagari
+ * is drawn, and both sides lose them alike.
+ */
+const FORMAT_CHARS = /\p{Cf}/gu;
+/** A phrase shorter than this once normalised (spaces not counted) never matches: 'c++' would become 'c'. */
+export const MIN_PHRASE_CHARS = 3;
 
 /**
- * NFKC, lower case, punctuation and symbols to spaces, single spaces, trimmed. Letters and combining marks are kept, so
- * Devanagari and accented words stay as they are ('café' is not 'cafe').
+ * NFKC, format characters removed, lower case, punctuation and symbols to spaces, single spaces, trimmed. Letters and
+ * combining marks are kept, so Devanagari and accented words stay as they are ('café' is not 'cafe').
  */
 export function normaliseText(s: string): string {
-  return s.normalize('NFKC').toLowerCase().replace(PUNCTUATION_AND_SYMBOLS, ' ').replace(/\s+/g, ' ').trim();
+  return s.normalize('NFKC').replace(FORMAT_CHARS, '').toLowerCase().replace(PUNCTUATION_AND_SYMBOLS, ' ').replace(/\s+/g, ' ').trim();
 }
 
-/** True when the normalised phrase appears in the normalised text as whole words. */
+/** True when a name or keyword still has at least MIN_PHRASE_CHARS characters (spaces not counted) once normalised. */
+export function isMatchablePhrase(phrase: string): boolean {
+  return [...normaliseText(phrase).replace(/ /g, '')].length >= MIN_PHRASE_CHARS;
+}
+
+/** True when the normalised phrase appears in the normalised text as whole words. Too-short phrases never match. */
 function hasPhrase(paddedText: string, phrase: string): boolean {
-  const p = normaliseText(phrase);
-  return p !== '' && paddedText.includes(` ${p} `);
+  return isMatchablePhrase(phrase) && paddedText.includes(` ${normaliseText(phrase)} `);
 }
 
-/** The lower-cased part after the last '@', or null for anything that is not an address. */
+/** The lower-cased part after the last '@', or null for anything that is not an address or has an empty label. */
 export function domainOf(email: string): string | null {
   const e = email.trim().toLowerCase();
   const at = e.lastIndexOf('@');
   if (at <= 0) return null;
   const domain = e.slice(at + 1).replace(/\.+$/, '');
-  return domain === '' ? null : domain;
+  if (domain === '' || domain.startsWith('.') || domain.includes('..')) return null;
+  return domain;
 }
 
 /** The domain equals one of the entries or is a subdomain of one. Entries are compared lower-cased. */

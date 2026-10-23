@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { domainOf, inDomains, matchClient, normaliseText, type MatchableClient, type MatchInput } from '../../src/meetings/match.ts';
+import { domainOf, inDomains, isMatchablePhrase, matchClient, normaliseText, type MatchableClient, type MatchInput } from '../../src/meetings/match.ts';
 
 const SHARMA: MatchableClient = { clientId: 1, name: 'Sharma Interiors', emailDomains: ['sharma.in'], meetingKeywords: ['villa project'] };
 const MEHTA: MatchableClient = { clientId: 2, name: 'Mehta Foods', emailDomains: ['mehtafoods.com'], meetingKeywords: ['mft'] };
@@ -20,6 +20,16 @@ describe('normaliseText', () => {
     expect(normaliseText('Café ☕ meet')).toBe('café meet');
     expect(normaliseText('शर्मा जी, नमस्ते')).toBe('शर्मा जी नमस्ते');
   });
+  it('removes format characters such as the zero-width space', () => {
+    expect(normaliseText('Shar​ma‍ In⁠teriors')).toBe('sharma interiors');
+  });
+  it('counts a phrase as matchable only with 3 or more characters once normalised', () => {
+    expect(isMatchablePhrase('c++')).toBe(false);
+    expect(isMatchablePhrase('a-b')).toBe(false);
+    expect(isMatchablePhrase('​ab​')).toBe(false);
+    expect(isMatchablePhrase('abc')).toBe(true);
+    expect(isMatchablePhrase('गुप्ता')).toBe(true);
+  });
 });
 
 describe('domains', () => {
@@ -27,6 +37,8 @@ describe('domains', () => {
     expect(domainOf(' Asha@Sharma.IN ')).toBe('sharma.in');
     expect(domainOf('conference-room')).toBeNull();
     expect(domainOf('a@')).toBeNull();
+    expect(domainOf('a@.sharma.in')).toBeNull();
+    expect(domainOf('a@sharma..in')).toBeNull();
   });
   it('matches equal domains and subdomains only', () => {
     expect(inDomains('sharma.in', ['sharma.in'])).toBe(true);
@@ -48,6 +60,15 @@ describe('matchClient by title', () => {
     expect(matchClient(input('MFTX planning'), CLIENTS, TEAM)).toEqual({ kind: 'unassigned', reason: 'none' });
     const sharmaji: MatchableClient = { clientId: 3, name: 'Sharma', emailDomains: [], meetingKeywords: [] };
     expect(matchClient(input('Sharmaji call'), [sharmaji], TEAM)).toEqual({ kind: 'unassigned', reason: 'none' });
+  });
+  it('never matches a phrase too short once normalised', () => {
+    const cpp: MatchableClient = { clientId: 6, name: 'Zed', emailDomains: [], meetingKeywords: ['c++'] };
+    expect(matchClient(input('C sharp review'), [cpp], TEAM)).toEqual({ kind: 'unassigned', reason: 'none' });
+    expect(matchClient(input('c++ review'), [cpp], TEAM)).toEqual({ kind: 'unassigned', reason: 'none' });
+  });
+  it('is neither blocked nor faked by a zero-width space inside a word', () => {
+    expect(matchClient(input('Shar​ma Interiors review'), CLIENTS, TEAM)).toEqual({ kind: 'client', clientId: 1, by: 'title' });
+    expect(matchClient(input('MFT​X planning'), CLIENTS, TEAM)).toEqual({ kind: 'unassigned', reason: 'none' });
   });
   it('is ambiguous when the title names two clients', () => {
     expect(matchClient(input('Sharma Interiors and Mehta Foods intro'), CLIENTS, TEAM)).toEqual({ kind: 'unassigned', reason: 'ambiguous' });

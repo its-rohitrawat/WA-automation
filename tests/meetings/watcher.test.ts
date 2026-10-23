@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { ClientConfig } from '../../src/config/groups.ts';
 import type { DriveVideoInfo, InviteInfo, RecordingRef } from '../../src/meetings/googleApi.ts';
 import { GoogleAccessError, GoogleTransientError } from '../../src/meetings/googleErrors.ts';
-import { MeetingWatcher, titleFromFileName, type WatcherSettings } from '../../src/meetings/watcher.ts';
+import { buildRow, cleanEmail, MeetingWatcher, titleFromFileName, type RowFacts, type WatcherSettings } from '../../src/meetings/watcher.ts';
 import { syncClients } from '../../src/store/clients.ts';
 import { openDb, type Db } from '../../src/store/db.ts';
 import { getMeeting, insertFound } from '../../src/store/meetings.ts';
@@ -111,7 +111,85 @@ describe('titleFromFileName', () => {
   });
 });
 
+describe('cleanEmail', () => {
+  it('keeps a plain address, lower-cased', () => {
+    expect(cleanEmail('Ravi.K+x@Mail.Sharma.IN')).toBe('ravi.k+x@mail.sharma.in');
+  });
+  it('drops anything that is not one plain address', () => {
+    for (const e of [
+      'ravi@sharma.in\nx@evil.com', 'ra​vi@sharma.in', 'ravi @sharma.in', ' ravi@sharma.in', 'ravi@sharma.in\u0000', '@sharma.in',
+      'a@b@sharma.in', 'ravi', 'ravi@', 'ravi@sharma', 'ravi@.sharma.in', 'ravi@sharma..in', `${'a'.repeat(250)}@x.in`,
+    ]) {
+      expect(cleanEmail(e)).toBeNull();
+    }
+  });
+});
+
+const facts = (o: Partial<RowFacts> = {}): RowFacts => ({
+  recording: 'conferenceRecords/c1/recordings/r1', conference: 'conferenceRecords/c1', driveFileId: 'f1', meetingCode: 'abc-defg-hij',
+  startedAt: ago(3), endedAt: ago(2), createdAt: NOW, title: 'Sharma Interiors review',
+  attendees: [{ email: 'ravi@sharma.in', name: 'Ravi', team: false }], participants: ['Ravi'],
+  match: { kind: 'client', clientId: 1, by: 'title' }, durationMs: 45 * 60_000, noAccessCode: null, maxMinutes: 180, ...o,
+});
+const LONG = 181 * 60_000;
+const INTERNAL = { kind: 'internal' } as const;
+const NONE = { kind: 'unassigned', reason: 'none' } as const;
+
+describe('buildRow status order', () => {
+  it('internal first: minimal data, no_access when the file was refused, even when too long', () => {
+    const minimal = { title: '', endedAt: null, attendees: [], participants: [], clientId: null, matchKind: null, driveSeconds: null };
+    expect(buildRow(facts({ match: INTERNAL, durationMs: LONG }))).toMatchObject({ ...minimal, status: 'internal', errorCode: null });
+    expect(buildRow(facts({ match: INTERNAL, durationMs: null, noAccessCode: 'http_404' }))).toMatchObject({ ...minimal, status: 'no_access', errorCode: 'http_404' });
+  });
+  it('then no_access, keeping the client match', () => {
+    expect(buildRow(facts({ durationMs: null, noAccessCode: 'http_403' }))).toMatchObject({ status: 'no_access', clientId: 1, matchKind: 'title', errorCode: 'http_403', driveSeconds: null });
+    expect(buildRow(facts({ match: NONE, durationMs: null, noAccessCode: 'http_404' }))).toMatchObject({ status: 'no_access', clientId: null });
+  });
+  it('then too_long by Drive length, keeping the client match', () => {
+    expect(buildRow(facts({ durationMs: LONG }))).toMatchObject({ status: 'too_long', clientId: 1, driveSeconds: 181 * 60, errorCode: null });
+    expect(buildRow(facts({ match: NONE, durationMs: LONG }))).toMatchObject({ status: 'too_long', clientId: null });
+  });
+  it('then queued for a client, else unassigned; no Drive length is never too long', () => {
+    expect(buildRow(facts())).toMatchObject({ status: 'queued', clientId: 1, matchKind: 'title', title: 'Sharma Interiors review', endedAt: ago(2) });
+    expect(buildRow(facts({ durationMs: null }))).toMatchObject({ status: 'queued', driveSeconds: null });
+    expect(buildRow(facts({ match: { kind: 'unassigned', reason: 'ambiguous' } }))).toMatchObject({ status: 'unassigned', clientId: null, matchKind: null });
+  });
+});
+
 describe('MeetingWatcher.discover', () => {
+  it('drops attendee addresses that are not plain, for storing and for matching', async () => {
+    addConference(api, {
+      id: 'c1',
+      start: ago(3),
+      invite: {
+        title: 'Weekly',
+        attendees: [
+          { email: 'om@mehtafoods.com\nx@sharma.in', name: 'A', self: false },
+          { email: 'ra​vi@sharma.in', name: 'B', self: false },
+          { email: 'asha@studio.in', name: 'C', self: false },
+          { email: 'x@elsewhere.com', name: 'D', self: false },
+        ],
+      },
+    });
+    await watcher().discover(signal);
+    const [row] = allRows(db);
+    expect(row!.attendees).toEqual([{ email: 'asha@studio.in', name: 'C', team: true }, { email: 'x@elsewhere.com', name: 'D', team: false }]);
+    expect(row).toMatchObject({ status: 'unassigned', clientId: null }); // the dropped addresses match no client
+  });
+
+  it('ignores a client email domain that has a team domain under it, logging the client code only', async () => {
+    const clash: ClientConfig = { ...MEHTA, emailDomains: ['mehtafoods.com', 'studio.in'] };
+    const { lines, log } = capture();
+    const w = watcher({ log, clients: [SHARMA, clash], settings: { teamDomains: ['eng.studio.in'] } });
+    addConference(api, { id: 'c1', start: ago(3), invite: { title: 'Weekly', attendees: [{ email: 'x@studio.in', name: null, self: false }] } });
+    await w.discover(signal);
+    expect(allRows(db)[0]).toMatchObject({ status: 'unassigned', clientId: null });
+    const text = lines.join('');
+    expect(text).toContain('MEH');
+    expect(text).not.toContain('studio.in');
+  });
+
+
   it('stores a matched meeting once, with its title, attendees and participants', async () => {
     addConference(api, { id: 'c1', start: ago(3), names: ['Ravi Sharma', ' Owner '] });
     const w = watcher();
@@ -215,6 +293,7 @@ describe('MeetingWatcher.discover', () => {
       expect(row).toMatchObject({ status: 'internal', title: '', attendees: [], participants: [], clientId: null, matchKind: null, endedAt: null, driveSeconds: null });
     }
     expect(rowCount(db)).toBe(2);
+    expect(api.callsOf('listSignedInNames')).toEqual([]); // names are never read for an internal meeting
   });
 
   it('lists conferences from now − 72 h when the since date is older', async () => {

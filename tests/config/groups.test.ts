@@ -97,6 +97,13 @@ describe('meeting matching rules', () => {
     expect(parseGroupsFile(valid({ meetingKeywords: ['abc'] }))[0]!.meetingKeywords).toEqual(['abc']);
   });
 
+  it('refuses a meetingKeyword with fewer than 3 characters once punctuation is removed, naming the client code', () => {
+    for (const k of ['c++', 'a-b', '...', 'ab​​']) {
+      expect(() => parseGroupsFile(valid({ meetingKeywords: ['Sharma', k] }))).toThrowError(/client SHA has a meeting keyword with fewer than 3 letters/);
+    }
+    expect(parseGroupsFile(valid({ meetingKeywords: ['R&D team'] }))[0]!.meetingKeywords).toEqual(['R&D team']);
+  });
+
   it('allows at most 20 meetingKeywords per client', () => {
     const words = (n: number) => Array.from({ length: n }, (_, i) => `word${i}`);
     expect(parseGroupsFile(valid({ meetingKeywords: words(20) }))[0]!.meetingKeywords).toHaveLength(20);
