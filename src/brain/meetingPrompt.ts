@@ -120,9 +120,10 @@ function istWhen(iso: string): string {
 
 /**
  * Cleaned names without email addresses, each once (compared without case), in the order given. A name listed twice is
- * [team] if either entry is. A name that still has an @ after cleaning is left out.
+ * [team] if either entry is. A name that still has an @ after cleaning is left out. The summary Doc lists its attendees
+ * through this too, so the Doc shows the same names the summary may use.
  */
-function listedPeople(people: readonly MeetingPerson[]): { name: string; team: boolean }[] {
+export function listedPeople(people: readonly MeetingPerson[]): { name: string; team: boolean }[] {
   const byKey = new Map<string, { name: string; team: boolean }>();
   for (const p of people) {
     const raw = [...p.name].slice(0, RAW_NAME_MAX).join('');

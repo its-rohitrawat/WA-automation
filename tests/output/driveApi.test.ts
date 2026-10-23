@@ -5,7 +5,8 @@ const files = vi.hoisted(() => ({ create: vi.fn(), update: vi.fn() }));
 vi.mock('@googleapis/drive', () => ({ drive: vi.fn(() => ({ files })) }));
 
 import { drive } from '@googleapis/drive';
-import { DriveNotFoundError, googleDriveApi } from '../../src/output/drive.ts';
+import { Readable } from 'node:stream';
+import { DriveAuthError, DriveNotFoundError, googleDriveApi } from '../../src/output/drive.ts';
 import type { OAuth2Client } from '../../src/output/googleAuth.ts';
 
 const client = {} as unknown as OAuth2Client;
@@ -48,5 +49,37 @@ describe('googleDriveApi', () => {
     await expect(api.createFolder('Files', 'gone')).rejects.toBeInstanceOf(DriveNotFoundError);
     files.create.mockRejectedValueOnce(Object.assign(new Error('not found'), { code: 404 }));
     await expect(api.createFolder('WA Agent')).rejects.not.toBeInstanceOf(DriveNotFoundError);
+  });
+  it('createDoc uploads the HTML as text/html and asks Drive to convert it to a Google Doc in the parent', async () => {
+    const api = googleDriveApi(client);
+    expect(await api.createDoc('2026-10-19 – Sharma – Kickoff', '<p>Hé</p>', 'meetings-1')).toBe('new-id');
+    const [params, options] = files.create.mock.calls[0]!;
+    expect(params).toMatchObject({
+      requestBody: { name: '2026-10-19 – Sharma – Kickoff', mimeType: 'application/vnd.google-apps.document', parents: ['meetings-1'] },
+      media: { mimeType: 'text/html' },
+      fields: 'id',
+    });
+    expect(Object.keys(params as object).sort()).toEqual(['fields', 'media', 'requestBody']);
+    const body = (params as { media: { body: Readable } }).media.body;
+    expect(body).toBeInstanceOf(Readable);
+    const chunks: Buffer[] = [];
+    for await (const c of body) chunks.push(Buffer.from(c as Buffer));
+    expect(Buffer.concat(chunks).toString('utf8')).toBe('<p>Hé</p>');
+    expect(options).toBeUndefined();
+  });
+
+  it('createDoc turns a 404 into DriveNotFoundError and a sign-in failure into DriveAuthError', async () => {
+    const api = googleDriveApi(client);
+    files.create.mockRejectedValueOnce(Object.assign(new Error('not found'), { code: 404 }));
+    await expect(api.createDoc('N', '<p></p>', 'gone')).rejects.toBeInstanceOf(DriveNotFoundError);
+    files.create.mockRejectedValueOnce(Object.assign(new Error('unauthorized'), { code: 401 }));
+    await expect(api.createDoc('N', '<p></p>', 'p')).rejects.toBeInstanceOf(DriveAuthError);
+    files.create.mockRejectedValueOnce(Object.assign(new Error('x'), { response: { status: 400, data: { error: 'invalid_grant' } } }));
+    await expect(api.createDoc('N', '<p></p>', 'p')).rejects.toBeInstanceOf(DriveAuthError);
+    const other = Object.assign(new Error('server'), { code: 500 });
+    files.create.mockRejectedValueOnce(other);
+    await expect(api.createDoc('N', '<p></p>', 'p')).rejects.toBe(other);
+    files.create.mockResolvedValueOnce({ data: {} });
+    await expect(api.createDoc('N', '<p></p>', 'p')).rejects.toThrow('Drive returned no document id');
   });
 });

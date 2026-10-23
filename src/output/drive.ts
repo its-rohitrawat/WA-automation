@@ -30,7 +30,14 @@ export interface DriveApi {
   /** timeoutMs: a per-request time limit instead of the client's 120 s (large client files need longer). */
   createFile(name: string, mimeType: string, body: Buffer, parentId: string, timeoutMs?: number): Promise<string>;
   updateFile(fileId: string, mimeType: string, body: Buffer): Promise<void>;
+  /**
+   * Uploads HTML that Drive converts into a Google Doc inside parentId; returns the Doc id. A missing parent throws
+   * DriveNotFoundError and a Google sign-in failure DriveAuthError.
+   */
+  createDoc(name: string, html: string, parentId: string): Promise<string>;
 }
+
+export const GOOGLE_DOC_MIME = 'application/vnd.google-apps.document';
 
 const isNotFound = (e: unknown) => (e as { code?: number }).code === 404;
 
@@ -62,6 +69,21 @@ export function googleDriveApi(client: OAuth2Client): DriveApi {
         return r.data.id;
       } catch (e) {
         if (isNotFound(e)) throw new DriveNotFoundError(parentId);
+        throw e;
+      }
+    },
+    async createDoc(name, html, parentId) {
+      try {
+        const r = await api.files.create({
+          requestBody: { name, mimeType: GOOGLE_DOC_MIME, parents: [parentId] },
+          media: { mimeType: 'text/html', body: Readable.from(Buffer.from(html, 'utf8')) },
+          fields: 'id',
+        });
+        if (!r.data.id) throw new Error('Drive returned no document id');
+        return r.data.id;
+      } catch (e) {
+        if (isNotFound(e)) throw new DriveNotFoundError(parentId);
+        if (isAuthFailure(e) && !(e instanceof DriveAuthError)) throw new DriveAuthError(e);
         throw e;
       }
     },
