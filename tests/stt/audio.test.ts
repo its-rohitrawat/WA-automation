@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { Ffmpeg, findFfmpeg, parseDuration, runFile, type RunFile } from '../../src/stt/audio.ts';
+import { Ffmpeg, findFfmpeg, minimalEnv, parseDuration, runFile, type RunFile, type RunOptions } from '../../src/stt/audio.ts';
 
 const BANNER =
   "Input #0, ogg, from 'a.ogg':\n  Duration: 00:01:02.50, start: 0.000000, bitrate: 31 kb/s\n" +
@@ -10,12 +10,14 @@ const BANNER =
 
 function fakeRun(handler: (args: readonly string[]) => { code: number; stderr?: string }) {
   const calls: (readonly string[])[] = [];
-  const run: RunFile = async (_file, args) => {
+  const opts: RunOptions[] = [];
+  const run: RunFile = async (_file, args, o) => {
     calls.push(args);
+    opts.push(o);
     const r = handler(args);
     return { code: r.code, stderr: r.stderr ?? '' };
   };
-  return { run, calls };
+  return { run, calls, opts };
 }
 
 const lastArg = (args: readonly string[]): string => args[args.length - 1]!;
@@ -41,15 +43,56 @@ describe('parseDuration', () => {
 
 describe('runFile', () => {
   it('resolves with -1 when the program does not exist', async () => {
-    expect((await runFile('no-such-program-xyz', [], 5000)).code).toBe(-1);
+    expect((await runFile('no-such-program-xyz', [], { timeoutMs: 5000 })).code).toBe(-1);
   });
 
   it('resolves with -1 when the program is stopped at the timeout', async () => {
-    expect((await runFile(process.execPath, ['-e', 'setTimeout(()=>{},10000)'], 300)).code).toBe(-1);
+    expect((await runFile(process.execPath, ['-e', 'setTimeout(()=>{},10000)'], { timeoutMs: 300 })).code).toBe(-1);
   });
 
   it("resolves with the program's own exit code", async () => {
-    expect((await runFile(process.execPath, ['-e', 'process.exit(3)'], 5000)).code).toBe(3);
+    expect((await runFile(process.execPath, ['-e', 'process.exit(3)'], { timeoutMs: 5000 })).code).toBe(3);
+  });
+
+  it('stops the program when the signal is aborted and resolves with -1', async () => {
+    const ac = new AbortController();
+    const started = Date.now();
+    setTimeout(() => ac.abort(), 200);
+    const r = await runFile(process.execPath, ['-e', 'setTimeout(()=>{},20000)'], { timeoutMs: 30_000, signal: ac.signal });
+    expect(r.code).toBe(-1);
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
+  it('gives the program only the env it is passed', async () => {
+    const saved = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'dummy-test-value';
+    try {
+      const script = "process.stderr.write(String(process.env.ANTHROPIC_API_KEY === undefined) + ' ' + String(process.env.SystemRoot !== undefined || process.platform !== 'win32'))";
+      const r = await runFile(process.execPath, ['-e', script], { timeoutMs: 10_000, env: minimalEnv() });
+      expect(r).toEqual({ code: 0, stderr: 'true true' });
+      // Without an env the parent's is inherited (the bake-off script relies on this).
+      const inherited = await runFile(process.execPath, ['-e', 'process.stderr.write(String(process.env.ANTHROPIC_API_KEY))'], { timeoutMs: 10_000 });
+      expect(inherited.stderr).toBe('dummy-test-value');
+    } finally {
+      if (saved === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = saved;
+    }
+  });
+});
+
+describe('minimalEnv', () => {
+  it('keeps only SystemRoot, TEMP, TMP and PATH', () => {
+    const saved = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'dummy-test-value';
+    try {
+      const env = minimalEnv();
+      expect(Object.keys(env).every((k) => ['SystemRoot', 'TEMP', 'TMP', 'PATH'].includes(k))).toBe(true);
+      expect(Object.values(env)).not.toContain('dummy-test-value');
+      expect(env.PATH).toBe(process.env.PATH);
+    } finally {
+      if (saved === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = saved;
+    }
   });
 });
 
@@ -101,6 +144,39 @@ describe('Ffmpeg', () => {
     await expect(new Ffmpeg('ffmpeg.exe', run).toMp3('in.mp4', join(dir, 'y.mp3'))).rejects.toMatchObject({ code: 'convert_failed' });
   });
 
+  it('passes the signal, the env and each step timeout to the runner', async () => {
+    const { run, opts } = fakeRun((args) => {
+      if (args.includes('libmp3lame')) writeFileSync(lastArg(args), 'mp3');
+      return { code: args.includes('libmp3lame') ? 0 : 1, stderr: BANNER };
+    });
+    const env = { PATH: 'C:\bin' };
+    const ac = new AbortController();
+    const ff = new Ffmpeg('ffmpeg.exe', run, { env });
+    await ff.toMp3('in.mp4', join(dir, 'z.mp3'), ac.signal);
+    await ff.seconds('a.ogg', ac.signal);
+    expect(opts).toEqual([
+      { timeoutMs: 60 * 60_000, signal: ac.signal, env },
+      { timeoutMs: 60_000, signal: ac.signal, env },
+    ]);
+    // Without an env or signal none is passed (the bake-off keeps inheriting the parent env).
+    const plain = fakeRun(() => ({ code: 1, stderr: BANNER }));
+    await new Ffmpeg('ffmpeg.exe', plain.run).seconds('a.ogg');
+    expect(plain.opts).toEqual([{ timeoutMs: 60_000 }]);
+  });
+
+  it('throws the abort, not an AudioError, when the signal stopped ffmpeg', async () => {
+    const ac = new AbortController();
+    const reason = new Error('stop');
+    const { run } = fakeRun(() => {
+      ac.abort(reason);
+      return { code: -1 };
+    });
+    const ff = new Ffmpeg('ffmpeg.exe', run);
+    await expect(ff.toMp3('in.mp4', join(dir, 'w.mp3'), ac.signal)).rejects.toBe(reason);
+    await expect(ff.seconds('a.ogg', ac.signal)).rejects.toBe(reason);
+    await expect(ff.split({ path: 'long.mp3', seconds: 900, offset: 0 }, join(dir, 'p2'), 300, ac.signal)).rejects.toBe(reason);
+  });
+
   it('returns a short file as one part without running ffmpeg', async () => {
     const { run, calls } = fakeRun(() => ({ code: 0 }));
     const input = { path: 'a.mp3', seconds: 200, offset: 0 };
@@ -144,6 +220,12 @@ describe('findFfmpeg', () => {
   it('falls back to ffmpeg on PATH', async () => {
     const { run } = fakeRun(() => ({ code: 0 }));
     expect(await findFfmpeg(undefined, run)).toBe('ffmpeg');
+  });
+
+  it('passes an env when given one', async () => {
+    const { run, opts } = fakeRun(() => ({ code: 0 }));
+    await findFfmpeg(undefined, run, { PATH: 'x' });
+    expect(opts[0]).toEqual({ timeoutMs: 15_000, env: { PATH: 'x' } });
   });
 
   it('is null when ffmpeg does not start', async () => {

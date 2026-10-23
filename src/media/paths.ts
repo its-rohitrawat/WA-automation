@@ -12,6 +12,11 @@ export function safeSegment(s: string, fallback: string): string {
   return isSafeSegment(s) ? s : fallback;
 }
 
+/** A client's folder name: its code when that is a safe segment, else "_" and up to 8 of its letters and digits. */
+export function clientFolder(clientCode: string): string {
+  return safeSegment(clientCode, `_${clientCode.replace(/[^A-Za-z0-9]/g, '').slice(0, 8) || 'client'}`);
+}
+
 /**
  * Where an original is saved, relative to DATA_DIR, with forward slashes: "media/SHA/2026-10/3EB0C4F2A1-17.jpg".
  * Built from the client code, the India month, the WhatsApp message id and the media row id; never from the sender's file name.
@@ -19,7 +24,7 @@ export function safeSegment(s: string, fallback: string): string {
  * A message id that is not safe in a file name is left out: "m17.jpg".
  */
 export function mediaRelPath(o: { clientCode: string; ts: string; waId: string; mediaId: number; ext: string }): string {
-  const folder = safeSegment(o.clientCode, `_${o.clientCode.replace(/[^A-Za-z0-9]/g, '').slice(0, 8) || 'client'}`);
+  const folder = clientFolder(o.clientCode);
   const month = istDate(new Date(o.ts)).slice(0, 7);
   const ext = /^[a-z0-9]{1,5}$/.test(o.ext) ? o.ext : 'bin';
   const stem = isSafeSegment(o.waId) ? `${o.waId}-${o.mediaId}` : `m${o.mediaId}`;

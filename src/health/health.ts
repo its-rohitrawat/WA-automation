@@ -37,7 +37,8 @@ export interface HealthSnapshot {
   media?: MediaHealth;
 }
 
-function defaultFreeBytes(dir: string): number | null {
+/** Free bytes for this process on the volume of dir; null when it cannot be read. */
+export function defaultFreeBytes(dir: string): number | null {
   try {
     const s = statfsSync(dir);
     return s.bavail * s.bsize;
