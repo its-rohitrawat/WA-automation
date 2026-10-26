@@ -52,11 +52,19 @@ describe('mediaStats', () => {
     add(db, 'B', { errorCode: 'stt_unavailable' });
     add(db, 'C', { errorCode: 'ai_unavailable' });
     add(db, 'D', { clientId: 2, errorCode: 'stt_unavailable' });
-    expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 4, sttRefused: 3 });
+    failMedia(db, add(db, 'E'), { status: 'failed', errorCode: 'stt_unavailable', at: NOW }); // given up: no longer waiting for the key (review G)
+    expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 4, failedRecent: 1, sttRefused: 3 });
     finishMedia(db, a, { textKind: 'extract', text: 'Payment done', pageCount: null, note: null, at: NOW });
-    expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 3, sttRefused: 2 });
+    expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 3, failedRecent: 1, sttRefused: 2 });
     syncClients(db, [SHARMA]);
-    expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 2, sttRefused: 1 });
+    expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 2, failedRecent: 1, sttRefused: 1 });
+  });
+
+  it('counts a file waiting for the speech-to-text key under sttRefused, not as waiting too long, so Health shows the key line (review E)', () => {
+    const db = seededDb();
+    add(db, 'A', { createdAt: '2026-10-19T06:00:00.000Z', errorCode: 'stt_unavailable' });
+    add(db, 'B', { createdAt: '2026-10-19T06:00:00.000Z', errorCode: 'ai_unavailable' });
+    expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 2, stale: 1, sttRefused: 1 });
   });
 
   it('is all zeros on an empty table', () => {

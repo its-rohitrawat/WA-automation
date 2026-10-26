@@ -46,7 +46,8 @@ const AI_UNAVAILABLE = 'ai_unavailable';
 const GROWING_WAITS_MS = [5, 15, 30, 60].map((m) => m * 60_000);
 /**
  * A file still unread because Claude is unavailable, or still not downloaded and saved because of the network or the
- * disk, this long after it arrived, or after the service started if that is later (amendment 10f), is given up.
+ * disk, this long after it arrived (or was queued by `cli transcribe-voice`), or after the service started if that is
+ * later (amendment 10f), is given up.
  */
 export const AI_UNAVAILABLE_MAX_AGE_MS = 24 * 60 * 60_000;
 
@@ -212,7 +213,10 @@ export class MediaProcessor {
     return this.#o.clock.now().toISOString();
   }
 
-  /** Whether a file's free waits are over: 24 hours from its arrival, or from the service start if later (10d, 10f, FR2). */
+  /**
+   * Whether a file's free waits are over: 24 hours from its arrival (or its queueing by `cli transcribe-voice`), or from
+   * the service start if later (10d, 10f, FR2).
+   */
   #waitedTooLong(row: MediaRow, at: string): boolean {
     return Date.parse(at) - Math.max(Date.parse(row.createdAt), this.#startedMs) > AI_UNAVAILABLE_MAX_AGE_MS;
   }

@@ -57,7 +57,10 @@ export interface MediaRow {
    * markProcessedIfUnchanged clears it once that re-check is processed.
    */
   requeuedForText: boolean;
-  /** A 2a voice note queued by `cli transcribe-voice` (V6): its transcript is stored for the record and never queues its message again. */
+  /**
+   * A 2a voice note queued by `cli transcribe-voice` (V6) after its message was processed: its transcript is stored for the
+   * record and never queues its message again.
+   */
   backlog: boolean;
   createdAt: string;
   /** For a finished file, when it was finished (nothing changes it afterwards; uploads never touch it). */
@@ -164,7 +167,8 @@ export function getMediaRef(db: Db, id: number): Buffer | null {
 
 /**
  * Pending files whose next attempt is due, in the order their messages were sent (history often arrives out of order).
- * Files of inactive clients wait until the client is active again.
+ * Live files come before backlog files (`cli transcribe-voice`, V6), so a long backlog never holds up a new voice note
+ * its message is waiting for. Files of inactive clients wait until the client is active again.
  */
 export function dueMediaIds(db: Db, nowIso: string, limit: number): number[] {
   return (
@@ -173,7 +177,7 @@ export function dueMediaIds(db: Db, nowIso: string, limit: number): number[] {
         JOIN clients c ON c.id = m.client_id AND c.active = 1
         JOIN messages msg ON msg.id = m.message_id
         WHERE m.status = 'pending' AND (m.next_attempt_at IS NULL OR m.next_attempt_at <= ?)
-        ORDER BY msg.ts, m.id LIMIT ?`)
+        ORDER BY m.backlog, msg.ts, m.id LIMIT ?`)
       .all(nowIso, limit) as { id: number }[]
   ).map((r) => r.id);
 }
@@ -232,7 +236,9 @@ export const REQUEUING_FILE = `media.kind IN ('image', 'document', 'voice', 'aud
  * A message never processed is not flagged: its next run sees the file like any other.
  *
  * forget (N1): the speech provider kept a copy of the transcript. It is noted in media_stt_forget in the same
- * transaction, so a transcript is never stored without its copy noted for deletion; a second finish notes nothing.
+ * transaction, so a transcript is never stored without its copy noted for deletion. The copy is noted whether or not
+ * this finish stored the transcript (the file already finished or failed): the provider holds it either way. A copy
+ * already noted (the same provider and ref) is noted once.
  */
 export function finishMedia(
   db: Db,
@@ -252,13 +258,13 @@ export function finishMedia(
   db.transaction(() => {
     const finished = db.prepare(`UPDATE media SET status = 'done', text_kind = @textKind, text = @text, page_count = @pageCount, note = @note, error_code = NULL,
       next_attempt_at = NULL, ref_enc = NULL, updated_at = @at WHERE id = @id AND status = 'pending'`).run({ id, ...fields, text }).changes;
-    if (finished === 0) return; // already finished (or failed): nothing to flag, queue again or note
     if (forget) {
       // ON CONFLICT rather than OR IGNORE: a copy already noted is kept, but a ref the CHECK refuses still throws, so the
       // finish is undone instead of a transcript stored with its copy silently never deleted.
       db.prepare(`INSERT INTO media_stt_forget (media_id, provider, ref, created_at) VALUES (@id, @provider, @ref, @at)
         ON CONFLICT (provider, ref) DO NOTHING`).run({ id, provider: forget.provider, ref: forget.ref, at: fields.at });
     }
+    if (finished === 0) return; // already finished (or failed): nothing to flag or queue again
     // The flag first: it needs processed_at as it was before the message is queued again.
     db.prepare(`UPDATE media SET requeued_for_text = 1 WHERE id = ? AND ${REQUEUING_FILE} AND message_id IN
       (SELECT id FROM messages WHERE revoked = 0 AND (processed_at IS NOT NULL OR requeue_reason IS NOT NULL))`).run(id);
@@ -323,36 +329,45 @@ export interface VoiceBacklogRow {
   clientId: number;
   /** Bytes on disk: `cli transcribe-voice` works out the longest each file can be from it (V5, N4). */
   fileSize: number | null;
+  /** As WhatsApp declared it: `cli transcribe-voice` skips, and counts, files that need ffmpeg when it is missing (canSend, N2). */
+  mimeType: string | null;
 }
 
 /**
  * The 2a backlog (V6), shared by voiceBacklog and queueVoiceBacklog so the listing and the queueing never disagree: a
  * saved voice note or audio file that was finished without a transcript and without an error, its message not deleted
  * for everyone, its client active, and not queued as backlog before. A file noted format_not_supported (no ffmpeg then,
- * N2) is included, so installing ffmpeg lets the command pick it up; any other note (too long, forwarded) is final.
+ * N2) is included, so installing ffmpeg lets the command pick it up; any other note (too long, forwarded) is final. It
+ * is included even when it was queued as backlog before and finished format_not_supported again, so it is never stuck.
  */
 const VOICE_BACKLOG_FROM = `FROM media m JOIN messages msg ON msg.id = m.message_id JOIN clients c ON c.id = m.client_id AND c.active = 1
       WHERE m.kind IN ('voice', 'audio') AND m.status = 'done' AND m.text IS NULL AND (m.note IS NULL OR m.note = 'format_not_supported')
-        AND m.error_code IS NULL AND m.local_path IS NOT NULL AND m.backlog = 0 AND msg.revoked = 0`;
+        AND m.error_code IS NULL AND m.local_path IS NOT NULL AND (m.backlog = 0 OR m.note = 'format_not_supported') AND msg.revoked = 0`;
 
 /** The 2a voice notes and audio files `cli transcribe-voice` can transcribe, oldest first; optionally one client's only. */
 export function voiceBacklog(db: Db, o: { clientId?: number } = {}): VoiceBacklogRow[] {
   return db
-    .prepare(`SELECT m.id, m.client_id AS clientId, m.file_size AS fileSize ${VOICE_BACKLOG_FROM} AND (@clientId IS NULL OR m.client_id = @clientId) ORDER BY m.id`)
+    .prepare(`SELECT m.id, m.client_id AS clientId, m.file_size AS fileSize, m.mime_type AS mimeType ${VOICE_BACKLOG_FROM}
+      AND (@clientId IS NULL OR m.client_id = @clientId) ORDER BY m.id`)
     .all({ clientId: o.clientId ?? null }) as VoiceBacklogRow[];
 }
 
 /**
- * Queues the given backlog files for transcription, for the record only (V6): pending again with a fresh set of
- * attempts, and backlog = 1 so their transcripts never queue their messages (REQUEUING_FILE). Each file is checked
- * against the backlog conditions again, so one that changed since it was listed (now transcribed, its message deleted
- * for everyone, its client inactive) is left alone. One statement, so the files are queued all together or not at all.
- * Returns how many were queued.
+ * Queues the given backlog files for transcription (V6): pending again with a fresh set of attempts and no note.
+ * - backlog = 1 when the file's message is already processed: its transcript is stored for the record only and never
+ *   queues the message again (REQUEUING_FILE). A message not processed yet (still queued, or queued again for an edit or
+ *   a reaction) gets backlog = 0: its next run reads the transcript like a live file's.
+ * - created_at moves to the queueing: the file's waits (Health's stale count, the processor's 24 hours, the
+ *   reconciler's 30 minutes) count from now, not from an arrival days or weeks before.
+ * Each file is checked against the backlog conditions again, so one that changed since it was listed (now transcribed,
+ * its message deleted for everyone, its client inactive) is left alone. One statement, so the files are queued all
+ * together or not at all. Returns how many were queued.
  */
 export function queueVoiceBacklog(db: Db, ids: number[], at: string): number {
   if (ids.length === 0) return 0;
   return db
-    .prepare(`UPDATE media SET status = 'pending', backlog = 1, attempts = 0, next_attempt_at = NULL, error_code = NULL, updated_at = @at
+    .prepare(`UPDATE media SET status = 'pending', attempts = 0, next_attempt_at = NULL, error_code = NULL, note = NULL, created_at = @at, updated_at = @at,
+        backlog = (SELECT msg.processed_at IS NOT NULL AND msg.requeue_reason IS NULL FROM messages msg WHERE msg.id = media.message_id)
       WHERE id IN (SELECT value FROM json_each(@ids)) AND id IN (SELECT m.id ${VOICE_BACKLOG_FROM})`)
     .run({ ids: JSON.stringify(ids), at }).changes;
 }
@@ -491,8 +506,9 @@ export interface MediaStats {
   /** Files waiting to be downloaded or read. */
   pending: number;
   /**
-   * Pending longer than staleMs, counted from the file's arrival or from the service start, whichever is later
-   * (amendment 15a, the same clock as the reconciler's wait). Files waiting for the daily budget are counted in spendCap instead.
+   * Pending longer than staleMs, counted from the file's arrival (or its queueing by `cli transcribe-voice`) or from the
+   * service start, whichever is later (amendment 15a, the same clock as the reconciler's wait). Files waiting for the
+   * daily budget are counted in spendCap instead, and files waiting for a speech-to-text key in sttRefused.
    */
   stale: number;
   /** Pending files deferred by the daily spend cap (amendment 15b). */
@@ -518,7 +534,7 @@ export function mediaStats(db: Db, now: Date, startedAt: Date = new Date(0), sta
     .prepare(`SELECT
         COALESCE(SUM(m.status = 'pending'), 0) AS pending,
         COALESCE(SUM(m.status = 'pending' AND m.created_at < @staleBefore AND @startedAt < @staleBefore
-          AND COALESCE(m.error_code, '') <> 'spend_cap'), 0) AS stale,
+          AND COALESCE(m.error_code, '') NOT IN ('spend_cap', 'stt_unavailable')), 0) AS stale,
         COALESCE(SUM(m.status = 'pending' AND m.error_code = 'spend_cap'), 0) AS spendCap,
         COALESCE(SUM(m.status = 'failed' AND m.updated_at >= @dayAgo), 0) AS failedRecent,
         COALESCE(SUM(m.drive_failed = 1 AND EXISTS (SELECT 1 FROM messages msg

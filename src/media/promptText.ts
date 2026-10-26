@@ -29,8 +29,9 @@ function contextChars(row: MediaRow, limits: MediaPromptLimits): number {
 }
 
 /**
- * A file still pending after this long no longer holds up its message. The time counts from when the file arrived or
- * from the service start, whichever is later, so files saved by `cli link` or left pending at shutdown still get it.
+ * A file still pending after this long no longer holds up its message. The time counts from when the file arrived (or
+ * was queued by `cli transcribe-voice`) or from the service start, whichever is later, so files saved by `cli link` or
+ * left pending at shutdown still get it.
  */
 export const MEDIA_MAX_WAIT_MS = 30 * 60_000;
 
@@ -206,7 +207,8 @@ export function mediaForPrompt(
  * True while the reconciler should wait for this file (spec §6.1, amendments 12a, 12e, 12g, 10d; 2b decision V1).
  * - Only images, documents, voice notes and audio files that are still pending can block (V1: a voice note waits for its
  *   transcript like a picture for its description). Videos and stickers are never read.
- * - A pending file blocks for MEDIA_MAX_WAIT_MS, counted from its arrival or from startedAt (the service start), whichever is later.
+ * - A pending file blocks for MEDIA_MAX_WAIT_MS, counted from its arrival (or its queueing by `cli transcribe-voice`) or
+ *   from startedAt (the service start), whichever is later.
  *   This includes a file the media queue keeps retrying because Claude or the speech provider is unavailable (error code
  *   ai_unavailable or stt_unavailable), for up to 24 hours, and a file deferred by the daily spend cap (spend_cap) whose
  *   spend hold does not fit (12g): the client's text tracking must not stop until the next day.
