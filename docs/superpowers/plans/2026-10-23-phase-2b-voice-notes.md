@@ -2,12 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task by task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >
-> **Status: revised 2026-10-26 against the real code, waiting for the owner's OK.**
+> **Status: revised 2026-10-26 against the real code; approved, ready to build.**
+> - The owner approved this plan and accepted the recommended option for all of N1–N4 on 2026-10-26.
 > - The owner accepted the recommended default for all of V1–V9 on 2026-10-23. They stand unchanged.
 > - This revision rebases the plan on Phase 3 (`feat/phase-3-meetings` at 26705dd). Phase 3 already built part of the old plan. Every task below names the real files, functions and tests as they are today.
 > - **Built provider-agnostic.** The voice test (bake-off) has not run, and the build does not wait for it. All three adapters are wired behind `STT_PROVIDER`, every provider is faked in tests, and with `STT_PROVIDER=none` (the default) voice notes stay off exactly as in 2a. The bake-off result later only decides which provider goes in `.env`.
-> - Four small new decisions (N1–N4) need the owner's OK. They are marked **New** below.
-> - Nothing here has been built.
+> - Four small new decisions (N1–N4) are marked **New** below.
 
 **Goal:** Client and team voice notes in WhatsApp are transcribed, and the reconciler reads them like any other message. The tracker then picks up tasks, deadlines and payment confirmations that were spoken rather than typed. Cost goes through the daily spend cap, booked as `stt`.
 
@@ -117,7 +117,9 @@ Each decision has a recommended default. The tasks are written for the defaults.
 - Prices stay in code (`src/stt/prices.ts`, checked 2026-10-22).
 - **Task:** 1.
 
-## New decisions (N1–N4): the owner's OK is needed
+## New decisions (N1–N4)
+
+**Owner's answer, 2026-10-26: the recommended option for N1, N2, N3 and N4, as written below.**
 
 ### N1. ElevenLabs' stored copies of voice transcripts. **Recommended: delete each copy, and try again later if that fails.**
 - ElevenLabs keeps every transcript on the account (only Enterprise can turn that off). Right after a transcript is saved here, its copy is deleted.
