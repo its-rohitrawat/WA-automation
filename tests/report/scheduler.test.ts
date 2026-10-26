@@ -128,6 +128,44 @@ describe('ReportScheduler', () => {
     expect(reportFor(db, DAY)).toMatchObject({ status: 'skipped', detail: 'not_linked' });
   });
 
+  it("a send whose outcome could not be recorded reads unknown after 10 minutes, and at the deadline becomes unknown, never skipped or sent again", async () => {
+    const { db, clock, sender, s, at } = setup();
+    await at('05:00'); // recovered: nothing was cut off
+    const prepare = db.prepare.bind(db);
+    const spy = vi.spyOn(db, 'prepare').mockImplementation(((sql: string) => {
+      if (/SET status = @status/.test(sql)) throw new Error('disk I/O error'); // finishReport fails
+      return prepare(sql);
+    }) as typeof db.prepare);
+    try {
+      await at('06:00');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(sender.calls).toHaveLength(1);
+    expect(reportFor(db, DAY)!.status).toBe('sending');
+    clock.set(IST('06:05'));
+    expect(s.health().text).toBe('Morning report: sending now');
+    for (const hm of ['06:11', '09:00', '11:59']) await at(hm);
+    expect(s.health()).toEqual({ text: 'Morning report: unknown, check WhatsApp', warning: UNKNOWN_WARNING });
+    expect(reportFor(db, DAY)!.status).toBe('sending');
+    await at('12:00');
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'not_recorded', attempts: 1 });
+    expect(reasonText('not_recorded')).toBe('the outcome could not be recorded');
+    await at('12:30');
+    expect(sender.calls).toHaveLength(1);
+    expect(reportFor(db, DAY)!.status).toBe('unknown');
+  });
+
+  it("leaves a 'sending' row that is not yet 10 minutes old at the deadline as it is", async () => {
+    const { db, at } = setup();
+    await at('05:00');
+    claimReport(db, DAY, iso('11:55'));
+    await at('12:00');
+    expect(reportFor(db, DAY)!.status).toBe('sending');
+    await at('12:06');
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'not_recorded' });
+  });
+
   it('never retries an unknown outcome', async () => {
     const { db, sender, s, at } = setup();
     sender.results = [{ status: 'unknown', code: 'timeout' }];
@@ -587,11 +625,28 @@ describe('describeReport', () => {
     expect(describeReport(undefined, new Date(IST('05:00')), ON, 'idle').text).toBe('Morning report: due at 06:00 IST');
     expect(describeReport(undefined, now, ON, 'idle').text).toBe('Morning report: due now');
     expect(describeReport(row({}), now, ON, 'idle')).toEqual({ text: 'Morning report: sent at 06:01 IST', warning: null });
-    expect(describeReport(row({ status: 'sending' }), now, ON, 'idle').text).toBe('Morning report: sending now');
+    expect(describeReport(row({ status: 'sending', updatedAt: iso('06:59') }), now, ON, 'idle')).toEqual({ text: 'Morning report: sending now', warning: null });
     expect(describeReport(row({ status: 'skipped', detail: 'logged_out' }), now, ON, 'idle').text).toBe(
       'Morning report skipped today (the spare number was logged out)',
     );
     expect(describeReport(row({ status: 'skipped', detail: 'something_new' }), now, ON, 'idle').text).toBe('Morning report skipped today (something_new)');
+  });
+
+  it("a row left 'sending' for more than 10 minutes (its outcome was never recorded) reads unknown, with the warning", () => {
+    expect(describeReport(row({ status: 'sending', updatedAt: iso('06:50') }), now, ON, 'idle')).toEqual({ text: 'Morning report: sending now', warning: null });
+    const stale = { text: 'Morning report: unknown, check WhatsApp', warning: UNKNOWN_WARNING };
+    expect(describeReport(row({ status: 'sending', updatedAt: iso('06:49') }), now, ON, 'idle')).toEqual(stale);
+    expect(describeReport(row({ status: 'sending', updatedAt: iso('06:01') }), now, ON, 'not_linked')).toEqual(stale);
+  });
+
+  it('a retry whose next try would be at or after the deadline says the day will be skipped, never a next try', () => {
+    const late = new Date(IST('11:55'));
+    const r = (next: string) => describeReport(row({ status: 'retry', detail: 'connect_timeout', nextAttemptAt: next }), late, ON, 'idle').text;
+    expect(r(iso('11:59'))).toBe('Morning report: not sent yet (could not connect to WhatsApp), next try 11:59 IST');
+    const skipped = 'Morning report: not sent yet (could not connect to WhatsApp); no more tries today, it will be skipped at 12:00 IST';
+    expect(r(iso('12:00'))).toBe(skipped);
+    expect(r(iso('12:05'))).toBe(skipped);
+    expect(r('2026-10-23T18:35:00.000Z')).toBe(skipped); // 00:05 IST the next day: after the deadline, though its time reads earlier
   });
 
   it('warns when the owner has to act: unknown outcome, or a spare number that is unlinked or refused', () => {

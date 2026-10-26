@@ -40,7 +40,19 @@ export const REASON_TEXT: Record<string, string> = {
   send_error: 'the send failed part-way',
   crash: 'the sender crashed',
   interrupted: 'the service stopped mid-send',
+  not_recorded: 'the outcome could not be recorded',
 };
+
+/**
+ * A send takes at most about 5.5 minutes (60 s to connect, 120 s per message, 15 s linger). A row still 'sending' after
+ * this long had its outcome lost (recording it failed), so it reads unknown and is never retried.
+ */
+export const STALE_SENDING_MS = 10 * 60_000;
+
+/** True for a 'sending' row last changed more than STALE_SENDING_MS before now. */
+export function isStaleSending(row: ReportRow | undefined, now: Date): boolean {
+  return row?.status === 'sending' && now.getTime() - Date.parse(row.updatedAt) > STALE_SENDING_MS;
+}
 
 export const reasonText = (code: string | null): string => (code ? (REASON_TEXT[code] ?? code) : 'no reason recorded');
 
@@ -60,7 +72,9 @@ export const SENDER_WARNINGS: Partial<Record<SenderState, string>> = {
 
 /** The Health and `cli status` line for one day. Pure: reads nothing. */
 export function describeReport(row: ReportRow | undefined, now: Date, settings: ReportSettings, sender: SenderState): ReportHealth {
+  const unknown = row?.status === 'unknown' || isStaleSending(row, now);
   const text = ((): string => {
+    if (unknown) return 'Morning report: unknown, check WhatsApp';
     if (!row) {
       const hm = istTime(now);
       if (hm < settings.time) return `Morning report: due at ${settings.time} IST`;
@@ -72,15 +86,21 @@ export function describeReport(row: ReportRow | undefined, now: Date, settings: 
         return `Morning report: sent at ${istTime(new Date(row.updatedAt))} IST`;
       case 'sending':
         return 'Morning report: sending now';
-      case 'retry':
-        return `Morning report: not sent yet (${reasonText(row.detail)}), next try ${istTime(new Date(row.nextAttemptAt ?? row.updatedAt))} IST`;
+      case 'retry': {
+        const next = new Date(row.nextAttemptAt ?? row.updatedAt);
+        // A try due at or after the deadline (or on a later IST date) never comes: the deadline skips the day first.
+        if (istDate(next) !== row.date || istTime(next) >= settings.deadline) {
+          return `Morning report: not sent yet (${reasonText(row.detail)}); no more tries today, it will be skipped at ${settings.deadline} IST`;
+        }
+        return `Morning report: not sent yet (${reasonText(row.detail)}), next try ${istTime(next)} IST`;
+      }
       case 'unknown':
         return 'Morning report: unknown, check WhatsApp';
       case 'skipped':
         return `Morning report skipped today (${reasonText(row.detail)})`;
     }
   })();
-  return { text, warning: row?.status === 'unknown' ? UNKNOWN_WARNING : (SENDER_WARNINGS[sender] ?? null) };
+  return { text, warning: unknown ? UNKNOWN_WARNING : (SENDER_WARNINGS[sender] ?? null) };
 }
 
 export interface ReportPayload {
@@ -216,6 +236,12 @@ export class ReportScheduler {
       if (hm < settings.time) return;
       if (hm >= settings.deadline) {
         const row = reportFor(db, date);
+        // No send is in flight here (tick returns while one is), so a stale 'sending' row is a send whose outcome could
+        // not be recorded. It may have gone out: unknown, never skipped and never retried.
+        if (isStaleSending(row, now)) {
+          if (finishReport(db, date, 'unknown', 'not_recorded', at)) log.warn({ date }, 'morning report outcome was never recorded; marked unknown, not retried');
+          return;
+        }
         const reason = row?.detail ?? 'not_running';
         if ((!row || row.status === 'retry') && skipReport(db, date, reason, at)) log.warn({ date, reason }, 'morning report skipped today');
         return;
