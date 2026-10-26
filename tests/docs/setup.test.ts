@@ -183,7 +183,7 @@ describe('morning report documentation: safety statements', () => {
 
   it('the Health table has a row for every morning-report warning the code can show', () => {
     const warnings = [UNKNOWN_WARNING, ...Object.values(SENDER_WARNINGS)];
-    expect(warnings.length).toBe(6);
+    expect(warnings.length).toBe(7);
     for (const warning of warnings) {
       const core = coreOf(warning);
       expect(core.startsWith('Morning report: '), warning).toBe(true);

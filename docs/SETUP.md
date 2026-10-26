@@ -374,7 +374,7 @@ The send started but did not finish cleanly (a timeout, or the service stopped m
 2. If today's report is not there, run `npm run cli -- report send-now` and type `yes`.
 3. If it is there, do nothing. The warning clears the next day.
 
-### Status "Morning report: the spare number is not linked" (or logged out, refused, taken over, or its session cannot be read)
+### Status "Morning report: the spare number is not linked" (or logged out, refused, taken over, or its session cannot be read or opened)
 
 - **Not linked:** stop the service safely, run `npm run cli -- link-sender` in the waagent window, scan from the spare phone, then start the service again (both steps are under "If the service will not start" below).
 - **Logged out** (the device was removed on the spare phone, or the phone was not opened for weeks):
@@ -416,6 +416,7 @@ The send started but did not finish cleanly (a timeout, or the service stopped m
      ```
 
   3. Repeat the setup from step 1 with the new SIM, but run `npm run cli -- link-sender --reset` (type `yes`) instead of `link-sender`, and scan from the new spare phone.
+- **"the spare number's session file could not be opened"** (a lock, a permissions problem or a disk error when the service started; the file is not known to be damaged): restart the service. Do **not** run `link-sender --reset` for this. If it keeps happening, check that the disk has free space and that no other program has `C:\wa-agent\data\sender-session.db` open, then ask the developer.
 - **Replaced:** ("another session took over the spare number") restart the service. If it keeps happening, make sure no other copy of the agent (another PC, or a copy of the data folder) uses the spare number, and that no WhatsApp Web session of the spare number is open elsewhere.
 
 The tracker keeps working in every case; only the morning report is skipped.
@@ -485,6 +486,7 @@ In `npm run cli -- status` it appears as the `Health:` line. It is also the firs
 | Morning report: unknown, check WhatsApp | The morning report's send started but did not finish cleanly. It may have reached the founder. The agent does not resend it by itself. | See "Morning report" above, under its own status heading. |
 | Morning report: the spare number is not linked | The spare number cannot send the morning report. The tracker is not affected. | See "Morning report" above, under "the spare number is not linked". |
 | Morning report: the spare number's saved session cannot be read | The spare number's saved session (`sender-session.db`) was written with a different master key, or is damaged. The tracker is not affected. | See "Morning report" above, under "the spare number is not linked". |
+| Morning report: the spare number's session file could not be opened (disk, permissions or a lock) | The service could not open `sender-session.db` when it started (a lock, permissions or a disk error). The file is not known to be damaged. The tracker is not affected. | Restart the service. Do not run `link-sender --reset` for this. See "Morning report" above. |
 | Morning report: the spare number was logged out | The linked device was removed on the spare phone, or the phone was not opened for weeks. The tracker is not affected. | See "Morning report" above, under "the spare number is not linked". |
 | Morning report: WhatsApp refused the spare number (403) | WhatsApp blocked the spare number's device. The tracker is not affected. | Check the spare phone. See "Morning report" above. |
 | Morning report: another session took over the spare number | Another copy of the agent, or another WhatsApp Web session, took the spare number's linked device. The tracker is not affected. | Restart the service. See "Morning report" above. |
