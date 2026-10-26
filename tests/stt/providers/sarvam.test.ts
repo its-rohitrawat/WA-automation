@@ -47,7 +47,10 @@ function fakeSarvam(opts: FakeOptions = {}) {
     calls.push({ url, method: init.method ?? 'GET', headers: new Headers(init.headers), body });
     if (url === JOBS) return Response.json({ job_id: 'job-1', job_state: 'Accepted' }, { status: 202 });
     if (url === `${JOBS}/upload-files`) {
-      return Response.json({ job_id: 'job-1', upload_urls: { 'audio.mp3': { file_url: opts.uploadUrl ?? 'https://blob.example/up?sig=1' } } });
+      // Like Sarvam, a link for each file name asked for, so a lookup under any other name finds nothing.
+      const names = (body as { files: string[] }).files;
+      const links = Object.fromEntries(names.map((n) => [n, { file_url: opts.uploadUrl ?? 'https://blob.example/up?sig=1' }]));
+      return Response.json({ job_id: 'job-1', upload_urls: links });
     }
     if (url.startsWith('https://blob.example/up')) return new Response(null, { status: 201 });
     if (url === `${JOBS}/job-1/start`) return Response.json({ job_id: 'job-1', job_state: 'Pending' });
@@ -73,12 +76,16 @@ function fakeSarvam(opts: FakeOptions = {}) {
 }
 
 let audio: AudioPart;
+let voiceNote: AudioPart;
 
 beforeAll(() => {
   const dir = mkdtempSync(join(tmpdir(), 'stt-sarvam-'));
   const path = join(dir, 'a.mp3');
   writeFileSync(path, 'fake mp3 bytes');
   audio = { path, seconds: 4.2, offset: 0 };
+  const ogg = join(dir, 'a.ogg');
+  writeFileSync(ogg, 'fake ogg bytes');
+  voiceNote = { path: ogg, seconds: 4.2, offset: 0, format: 'ogg' };
 });
 
 function provider(http: HttpFetch): SarvamProvider {
@@ -136,6 +143,28 @@ describe('SarvamProvider', () => {
     expect(put.headers.get('x-ms-blob-type')).toBe('BlockBlob');
     expect(put.headers.get('content-type')).toBe('audio/mpeg');
     expect(await (put.body as Blob).text()).toBe('fake mp3 bytes');
+  });
+
+  it('names the file audio.mp3 and uploads it as MP3 when the part names no format', async () => {
+    const { http, calls } = fakeSarvam();
+    await provider(http).transcribe(audio, { diarize: false });
+    expect(calls.find((c) => c.url === `${JOBS}/upload-files`)!.body).toEqual({ job_id: 'job-1', files: ['audio.mp3'] });
+    const put = calls.find((c) => c.method === 'PUT')!;
+    expect(put.headers.get('content-type')).toBe('audio/mpeg');
+    expect((put.body as Blob).type).toBe('audio/mpeg');
+  });
+
+  it("names and uploads a voice note in the part's own format, Ogg", async () => {
+    const { http, calls } = fakeSarvam();
+    const r = await provider(http).transcribe(voiceNote, { diarize: false });
+    expect(calls.find((c) => c.url === `${JOBS}/upload-files`)!.body).toEqual({ job_id: 'job-1', files: ['voice.ogg'] });
+    // The fake gives a link under voice.ogg only, so reaching the PUT means the lookup used that name.
+    const put = calls.find((c) => c.method === 'PUT')!;
+    expect(put.url).toBe('https://blob.example/up?sig=1');
+    expect(put.headers.get('content-type')).toBe('audio/ogg');
+    expect((put.body as Blob).type).toBe('audio/ogg');
+    expect(await (put.body as Blob).text()).toBe('fake ogg bytes');
+    expect(r.segments).not.toEqual([]);
   });
 
   it('uses the timestamps when speaker labels are off', async () => {
