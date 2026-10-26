@@ -1,11 +1,16 @@
 import { Command } from 'commander';
 import { addReportCommands, defaultDeps, googleAuthCommand, linkCommand, listGroupsCommand, statusCommand } from './cli/commands.ts';
 import { loadEnv } from './config/env.ts';
-import { trackerDbPath } from './config/paths.ts';
+import { masterKeyPath, trackerDbPath } from './config/paths.ts';
+import { DpapiKeyProvider } from './crypto/keyProvider.ts';
+import { systemClock } from './util/clock.ts';
 import { openDb, type Db } from './store/db.ts';
 import {
   closeTask, editTask, reopenTask, reprocess, requestRebuild, setClientPhase, setPersonRole, unlockClientPhase, unlockTask, type EditOptions,
 } from './cli/corrections.ts';
+import {
+  assignMeetingToClient, defaultMeetingDeps, meetingBackfillCommand, meetingCheckCommand, meetingListLines, retryLine, retryMeetingById, skipMeetingById,
+} from './cli/meetings.ts';
 
 // Without these Node prints the raw error (Boom data, gaxios request config), bypassing any redaction.
 function fatal(err: unknown): void {
@@ -121,6 +126,39 @@ program
       console.log('The running service will now make new AI calls for them. This costs money and counts toward the daily spend cap.');
     }
   });
+
+const meeting = program.command('meeting').description('Fix and check recorded meetings');
+meeting
+  .command('list')
+  .description('Meetings that need you (titles are shown on this screen only)')
+  .option('--all', 'every meeting, done and skipped included')
+  .action((opts: { all?: boolean }) => {
+    for (const l of withDb((db) => meetingListLines(db, opts.all === true))) console.log(l);
+  });
+meeting.command('assign <id> <client>').description('Give an unassigned, internal or client-less no-access meeting to a client; it is then processed').action((id: string, client: string) => {
+  const r = withDb((db) => assignMeetingToClient(db, id, client, new Date()));
+  console.log(`Meeting ${r.id} assigned to ${r.code}; the service processes it next (this costs money).`);
+});
+meeting.command('skip <id>').description('Do not process an unassigned meeting').action((id: string) => {
+  console.log(`Meeting ${withDb((db) => skipMeetingById(db, id, new Date()))} skipped.`);
+});
+meeting.command('retry <id>').description('Try a failed or no-access meeting again (one without a client goes back to unassigned)').action((id: string) => {
+  console.log(retryLine(withDb((db) => retryMeetingById(db, id, new Date()))));
+});
+const meetingDeps = () => {
+  const env = loadEnv();
+  return defaultMeetingDeps(env, new DpapiKeyProvider(masterKeyPath(env.DATA_DIR)), systemClock);
+};
+meeting
+  .command('backfill')
+  .description('Find older recordings (stop the service first). Without --yes only shows the count and cost')
+  .requiredOption('--since <YYYY-MM-DD>')
+  .option('--yes', 'store them, so the service processes the client ones (costs money)')
+  .action(async (opts: { since: string; yes?: boolean }) => meetingBackfillCommand({ since: opts.since, yes: opts.yes === true }, meetingDeps()));
+meeting
+  .command('check')
+  .description("Read-only: the last 7 days' recordings, their client match and whether each file opens")
+  .action(async () => meetingCheckCommand(meetingDeps()));
 
 program.parseAsync(process.argv).catch((e: unknown) => {
   console.error(e instanceof Error ? e.message : 'Command failed');

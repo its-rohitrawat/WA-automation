@@ -410,7 +410,7 @@ describe('app media spend (review round 1)', () => {
     await p;
     const booked = ledger(db);
     expect(booked).toHaveLength(1);
-    expect(booked[0]).toMatchObject({ kind: 'ai', detail: 'shutdown before the AI call finished (estimated)' });
+    expect(booked[0]).toMatchObject({ kind: 'ai', detail: 'shutdown before the paid call finished (estimated)' });
     expect(booked[0]!.usd).toBeCloseTo(imageEstimateUsd(REAL_JPEG_SIZE, P), 10);
     // The answer arrives after all: the call is already booked, so it is not booked again.
     g.release();

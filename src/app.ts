@@ -1,9 +1,11 @@
 import type { AiClient } from './brain/claudeClient.ts';
 import { GroupDebouncer } from './brain/debouncer.ts';
 import type { MediaAi } from './brain/mediaClient.ts';
+import type { MeetingAi } from './brain/meetingClient.ts';
 import { Reconciler, type ReconcileOutcome } from './brain/reconciler.ts';
 import type { ClientConfig } from './config/groups.ts';
 import { Health } from './health/health.ts';
+import { defaultFreeBytes } from './health/health.ts';
 import { createExtractor, type Extractor } from './media/extract.ts';
 import type { MediaFetcher } from './media/fetch.ts';
 import { MediaProcessor } from './media/processor.ts';
@@ -11,7 +13,13 @@ import { MEDIA_MAX_WAIT_MS } from './media/promptText.ts';
 import { MediaQueue } from './media/queue.ts';
 import type { MediaRefSealer } from './media/ref.ts';
 import { DriveFileUploader } from './media/uploader.ts';
+import type { MeetingsGoogleApi } from './meetings/googleApi.ts';
+import type { MeetingsHealth } from './meetings/healthTypes.ts';
+import { MeetingService, type MeetingSettings } from './meetings/service.ts';
+import type { MeetingTranscriber } from './meetings/transcribe.ts';
+import type { ClientConfigLike } from './meetings/watcher.ts';
 import { DrivePublisher, type DriveApi } from './output/drive.ts';
+import { hasMeetingScopes } from './output/googleAuth.ts';
 import { loadTrackerView } from './output/view.ts';
 import { buildWorkbook } from './output/workbook.ts';
 import { ReportScheduler } from './report/scheduler.ts';
@@ -23,6 +31,7 @@ import type { Db } from './store/db.ts';
 import { getKv, setKv } from './store/kv.ts';
 import { mediaStats, resetUploadFailures } from './store/media.ts';
 import { clientIdsWithUnprocessed } from './store/messages.ts';
+import type { Ffmpeg } from './stt/audio.ts';
 import type { Clock } from './util/clock.ts';
 import type { Logger } from './util/logger.ts';
 import type { AllowList } from './wa/allowlist.ts';
@@ -37,6 +46,19 @@ export interface AppMediaDeps {
   extract?: Extractor;
   /** Files downloaded and read at once. Default 2. */
   concurrency?: number;
+}
+
+/** Phase 3 meetings. Built only when MEETINGS_ENABLED is true; without the meeting scopes nothing calls Google's meeting APIs. */
+export interface AppMeetingsDeps {
+  api: MeetingsGoogleApi;
+  ai: MeetingAi;
+  /** null: STT_PROVIDER none; meetings are found and matched but wait (stt_none). */
+  transcriber: MeetingTranscriber | null;
+  /** null: ffmpeg not found; meetings are paused (no_ffmpeg). */
+  ffmpeg: Ffmpeg | null;
+  settings: MeetingSettings;
+  /** The configs at start; reloadClients passes later ones on. */
+  clients: readonly ClientConfigLike[];
 }
 
 /** The Phase 2c morning report. Only the spare-number sender can send; the founder-number gateway still cannot. */
@@ -73,6 +95,10 @@ export interface AppDeps {
   startedAt?: Date;
   /** The Phase 2a media pipeline. Without it, shared files are recorded as not downloaded. */
   media?: AppMediaDeps;
+  /** Phase 3 meetings. Without it, no meeting call of any kind is made. */
+  meetings?: AppMeetingsDeps;
+  /** Also gets the meetings' health on every tick (null when meetings are off); the health line gets it either way. */
+  onMeetingsHealth?: (m: MeetingsHealth | null) => void;
   /** The Phase 2c morning report. Without it, no report is sent and Health has no report line. */
   report?: AppReportDeps;
 }
@@ -92,6 +118,8 @@ export interface App {
   debouncer: GroupDebouncer;
   /** Undefined without media dependencies. */
   mediaQueue: MediaQueue | undefined;
+  /** Undefined without meeting dependencies. */
+  meetings: MeetingService | undefined;
   /** Undefined without report dependencies. */
   report: ReportScheduler | undefined;
 }
@@ -166,7 +194,14 @@ export function createApp(d: AppDeps): App {
   };
 
   const reconciler = new Reconciler({
-    db: d.db, ai: d.ai, spend, prices: d.prices, clock: d.clock, log: d.log, startedAt, onChanged: () => publisher.schedule(),
+    db: d.db, ai: d.ai, spend, prices: d.prices, clock: d.clock, log: d.log, startedAt,
+    // A meeting's tracker step finishes the meeting here: the rebuild gets the meeting counts of now.
+    onChanged: () => {
+      safely(refreshMeetings);
+      publisher.schedule();
+    },
+    // A meeting's tracker step holds the client's run flag, so it never interleaves with a WhatsApp run (Task 9).
+    exclusive: (clientId, fn) => debouncer.runExclusive(clientId, fn),
   });
   const debouncer = new GroupDebouncer({
     quietMs: d.quietMs,
@@ -215,6 +250,29 @@ export function createApp(d: AppDeps): App {
       })
     : undefined;
 
+  const mt = d.meetings;
+  const meetings = mt
+    ? new MeetingService({
+        db: d.db, clock: d.clock, log: d.log, dataDir: d.dataDir, spend, prices: d.prices, drive: d.drive, api: mt.api, ai: mt.ai,
+        transcriber: mt.transcriber, ffmpeg: mt.ffmpeg, settings: mt.settings, clients: mt.clients, freeBytes: d.freeBytes ?? defaultFreeBytes,
+        // The tracker step holds the client's run flag through the reconciler's exclusive (debouncer.runExclusive).
+        track: (clientId, meeting) => reconciler.runMeeting(clientId, meeting),
+        hasMeetingScopes: () => hasMeetingScopes(d.db),
+        // A finished or failed meeting, or new rows: the workbook is rebuilt, with the meeting counts of now (not the
+        // last tick's), as refreshMedia does for files.
+        onChanged: () => {
+          safely(refreshMeetings);
+          publisher.schedule();
+        },
+      })
+    : undefined;
+  /** Gives the meetings' health to the health line and to the optional callback (null when meetings are off). */
+  const refreshMeetings = () => {
+    const m = meetings ? meetings.health() : null;
+    health.setMeetings(m);
+    d.onMeetingsHealth?.(m);
+  };
+
   // Fires for new messages, edits and non-empty reactions. A shared file is queued for download as soon as it is stored.
   const ingestor = new Ingestor({
     db: d.db,
@@ -252,6 +310,8 @@ export function createApp(d: AppDeps): App {
       for (const clientId of clientIdsWithUnprocessed(d.db)) debouncer.ensure(clientId);
       mediaQueue?.kick(); // retries that are due, and files saved by cli link
       void uploader?.run(); // retries that are due
+      meetings?.tick(); // discovery when due (MEETING_POLL_MINUTES), then the next due meeting
+      safely(refreshMeetings);
       health.setIngestFailures(d.gateway.failedCount());
       refreshMedia();
       if (reportScheduler) {
@@ -273,6 +333,7 @@ export function createApp(d: AppDeps): App {
     publisher,
     debouncer,
     mediaQueue,
+    meetings,
     report: reportScheduler,
     start() {
       if (poll) return; // already started: a second interval would outlive stop()
@@ -291,6 +352,7 @@ export function createApp(d: AppDeps): App {
         }
       }
       d.gateway.start();
+      meetings?.start(); // books speech parts left in flight and cleans work files before any meeting runs
       tick();
       poll = setInterval(tick, d.pollMs ?? 30_000);
       publisher.schedule();
@@ -300,15 +362,17 @@ export function createApp(d: AppDeps): App {
       poll = undefined;
       debouncer.stop();
       mediaQueue?.stop();
+      // No new meeting or discovery pass; a download or ffmpeg run is aborted. Speech and Claude calls run on.
+      meetings?.stop();
       // No new upload pass or file during the drain: a file still uploading when the database closes would reach Drive
       // with no saved id and be uploaded again after the restart. The pass in flight stops before its next file.
       void uploader?.stop(0);
       // A result we already paid for is applied, not thrown away and paid for again after a restart.
       const drainMs = d.drainMs ?? 120_000;
-      await Promise.all([debouncer.drain(drainMs), mediaQueue?.drain(drainMs)]);
+      await Promise.all([debouncer.drain(drainMs), mediaQueue?.drain(drainMs), meetings?.drain(drainMs)]);
       // A call still running was probably billed: book it at its estimate. After a clean drain nothing is pending.
       try {
-        const count = spend.settlePending('shutdown before the AI call finished (estimated)');
+        const count = spend.settlePending('shutdown before the paid call finished (estimated)');
         if (count > 0) d.log.warn({ count }, 'AI calls still running at shutdown; booked at their estimate');
       } catch (err) {
         d.log.error({ err }, 'booking unfinished AI calls failed');
@@ -338,6 +402,7 @@ export function createApp(d: AppDeps): App {
       const wasActive = listClients(d.db).map((c) => c.id);
       syncClients(d.db, configs); // throws on a code conflict, before anything else changes
       d.allow.replace(configs.map((c) => c.groupId));
+      meetings?.setClients(configs);
       const active = new Set(listClients(d.db).map((c) => c.id));
       for (const id of wasActive) {
         if (active.has(id)) continue;

@@ -11,8 +11,12 @@ export class FakeDrive implements DriveApi {
   createMimes: string[] = [];
   /** Every createFile call, including the ones that failed. */
   createFileCalls = 0;
-  /** When true, every createFile throws DriveNotFoundError, as if its parent folder were always missing. */
+  /** When true, every createFile (and createDoc) throws DriveNotFoundError, as if its parent folder were always missing. */
   fileParentsMissing = false;
+  /** Every Google Doc created by createDoc, in order. */
+  docs: { id: string; name: string; parentId: string; html: string }[] = [];
+  /** Every createDoc call, including the ones that failed. */
+  createDocCalls = 0;
   updated: { id: string; bytes: number }[] = [];
   missing = new Set<string>();
   failNext = 0;
@@ -40,6 +44,17 @@ export class FakeDrive implements DriveApi {
     this.created.push({ id, name, parentId, bytes: body.length });
     this.createTimeouts.push(timeoutMs);
     this.createMimes.push(mime);
+    return id;
+  }
+
+  /** Fails like createFile: failNext / failNextWith, a missing parent, fileParentsMissing; waits for gate. */
+  async createDoc(name: string, html: string, parentId: string): Promise<string> {
+    this.createDocCalls++;
+    this.#maybeFail();
+    await this.gate;
+    if (this.fileParentsMissing || this.missing.has(parentId)) throw new DriveNotFoundError(parentId);
+    const id = `doc-${++this.#n}`;
+    this.docs.push({ id, name, parentId, html });
     return id;
   }
 

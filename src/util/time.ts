@@ -36,6 +36,11 @@ export function istTime(d: Date): string {
   return `${p.hour}:${p.minute}`;
 }
 
+/** "Monday": the weekday in India. */
+export function istWeekday(d: Date): string {
+  return parts(d, { weekday: 'long' }).weekday ?? '';
+}
+
 /** "2026-10-19 14:05", used in AI prompts. */
 export function istDateTime(d: Date): string {
   return `${istDate(d)} ${istTime(d)}`;
@@ -60,4 +65,11 @@ export function isIsoDate(s: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
   const d = new Date(`${s}T00:00:00Z`);
   return !Number.isNaN(d.getTime()) && d.toISOString().startsWith(s);
+}
+
+/** "10 min", "1 h 02 min", "under 1 min". */
+export function meetingLength(seconds: number): string {
+  const minutes = Math.round(Number.isFinite(seconds) && seconds > 0 ? seconds / 60 : 0);
+  if (minutes === 0) return 'under 1 min';
+  return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, '0')} min`;
 }

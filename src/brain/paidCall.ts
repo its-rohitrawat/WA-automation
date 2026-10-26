@@ -39,6 +39,7 @@ export function neverSent(e: Error): boolean {
  * `label`: ids only, never content, for example "batch 12" or "media 7".
  * `attempts`: how many SDK attempts the client makes (its maxRetries + 1). The default fits the reconciler's client,
  * built with SDK_MAX_RETRIES.
+ * Returns the dollars booked (0 when the reservation was released).
  */
 export function settleFailedCall(
   spend: SpendGuard,
@@ -47,19 +48,24 @@ export function settleFailedCall(
   estimate: number,
   label: string,
   attempts: number = SDK_MAX_RETRIES + 1,
-): void {
+): number {
+  const book = (usd: number, detail: string): number => {
+    spend.settle(rid, 'ai', usd, detail);
+    return usd;
+  };
   if (e instanceof AiRefusalError || e instanceof AiInvalidOutputError) {
-    spend.settle(rid, 'ai', e.costUsd ?? estimate, `${label} (failed)`);
+    return book(e.costUsd ?? estimate, `${label} (failed)`);
   } else if (e instanceof Anthropic.APIConnectionError) {
     // Checked before APIError, its parent class. A timeout or a reset after sending may have been billed,
     // once per SDK attempt.
-    if (neverSent(e)) spend.release(rid);
-    else spend.settle(rid, 'ai', estimate * attempts, `${label} (connection lost, estimated)`);
+    if (!neverSent(e)) return book(estimate * attempts, `${label} (connection lost, estimated)`);
+    spend.release(rid);
+    return 0;
   } else if (e instanceof Anthropic.APIError) {
     spend.release(rid); // the server answered with an error status: not billed
-  } else {
-    spend.settle(rid, 'ai', estimate, `${label} (unknown, estimated)`);
+    return 0;
   }
+  return book(estimate, `${label} (unknown, estimated)`);
 }
 
 /**
@@ -69,6 +75,7 @@ export function settleFailedCall(
  * `attempts`: SDK attempts the call's client makes, as for settleFailedCall. It has no default, so every caller states
  * its client's count and a one-attempt media call is never booked as three: media calls pass
  * `MEDIA_SDK_MAX_RETRIES + 1` (amendment 9h).
+ * `onFailureBooked`: told what a failed call booked (settleFailedCall's amount) before the error is thrown again.
  */
 export async function withReservation<T extends { costUsd: number; fallbackUsed: boolean }>(
   spend: SpendGuard,
@@ -76,6 +83,7 @@ export async function withReservation<T extends { costUsd: number; fallbackUsed:
   label: string,
   call: () => Promise<T>,
   attempts: number,
+  onFailureBooked: (usd: number) => void = () => {},
 ): Promise<T> {
   const rid = spend.reserve(estimate);
   if (rid === null) throw new SpendCapReachedError({ busy: spend.fitsIgnoringHolds(estimate) });
@@ -83,7 +91,8 @@ export async function withReservation<T extends { costUsd: number; fallbackUsed:
   try {
     r = await call();
   } catch (e) {
-    settleFailedCall(spend, rid, e, estimate, label, attempts);
+    const booked = settleFailedCall(spend, rid, e, estimate, label, attempts);
+    onFailureBooked(booked);
     throw e;
   }
   spend.settle(rid, 'ai', r.costUsd, `${label}${r.fallbackUsed ? ' (fallback)' : ''}`);

@@ -8,12 +8,14 @@ import { masterKeyPath, senderSessionDbPath, sessionDbPath, trackerDbPath } from
 import { DpapiKeyProvider, type KeyProvider } from '../crypto/keyProvider.ts';
 import { MediaRefSealer } from '../media/ref.ts';
 import { readHealthSnapshot } from '../health/health.ts';
-import { DRIVE_SCOPES, runLoopbackConsent, TokenStore, type ConsentClient } from '../output/googleAuth.ts';
+import { MAX_FORGET_ATTEMPTS } from '../meetings/sttForget.ts';
+import { requestedScopes, runLoopbackConsent, saveGrantedScopes, scopeName, TokenStore, type ConsentClient } from '../output/googleAuth.ts';
 import { describeReport, isStaleSending, reasonText } from '../report/scheduler.ts';
 import { latestBatches } from '../store/batches.ts';
 import { listClients, syncClients } from '../store/clients.ts';
 import { openDb, tx, type Db } from '../store/db.ts';
 import { setKv } from '../store/kv.ts';
+import { sttForgetsGivenUp } from '../store/meetings.ts';
 import { unprocessedCounts } from '../store/messages.ts';
 import { recentReports, REPORT_REQUEST_KEY, reportFor, reportRequest, type ReportRow } from '../store/reports.ts';
 import { acquireLock } from '../util/lock.ts';
@@ -295,6 +297,7 @@ export function statusCommand(deps: CliDeps): void {
         batches: latestBatches(db),
         unprocessed: unprocessedCounts(db),
         now: new Date(),
+        sttCopiesLeft: sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: deps.env.STT_PROVIDER }),
       }),
     );
   } finally {
@@ -307,18 +310,29 @@ export async function googleAuthCommand(deps: CliDeps): Promise<void> {
   const key = deps.keyProvider.getKey();
   const db = openDb(trackerDbPath(env.DATA_DIR));
   try {
-    const refreshToken = await runLoopbackConsent({
-      clientId: requireKey(env, 'GOOGLE_OAUTH_CLIENT_ID'),
-      clientSecret: requireKey(env, 'GOOGLE_OAUTH_CLIENT_SECRET'),
-      scopes: DRIVE_SCOPES,
+    const clientId = requireKey(env, 'GOOGLE_OAUTH_CLIENT_ID');
+    const clientSecret = requireKey(env, 'GOOGLE_OAUTH_CLIENT_SECRET');
+    const scopes = requestedScopes(env);
+    out('Google will ask you to allow:');
+    for (const s of scopes) out(`  - ${scopeName(s)}`);
+    out('Keep every box ticked.\n');
+    const { refreshToken, scope } = await runLoopbackConsent({
+      clientId,
+      clientSecret,
+      scopes,
       createClient: deps.createConsentClient,
       showUrl: (url) => {
         out('Open this link in a browser where the mailbox Google account is signed in:\n');
         out(url);
       },
     });
-    new TokenStore(db, key).save(refreshToken);
-    out('Google Drive connected. If the WA Agent service is running, restart it so it uses the new sign-in: net stop wa-agent, then net start wa-agent');
+    const tokens = new TokenStore(db, key);
+    // Both or neither: the scope record must describe the token beside it.
+    tx(db, () => {
+      tokens.save(refreshToken);
+      saveGrantedScopes(db, scope);
+    });
+    out(`${env.MEETINGS_ENABLED ? 'Google Drive, Meet and Calendar' : 'Google Drive'} connected. If the WA Agent service is running, restart it so it uses the new sign-in: net stop wa-agent, then net start wa-agent`);
   } finally {
     db.close();
   }

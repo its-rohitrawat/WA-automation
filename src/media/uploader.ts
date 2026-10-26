@@ -1,13 +1,13 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { DriveNotFoundError, isAuthFailure, type DriveApi } from '../output/drive.ts';
+import { isAuthFailure, type DriveApi } from '../output/drive.ts';
+import { withClientSubfolder } from '../output/folders.ts';
 import type { Db } from '../store/db.ts';
-import { getKv, setKv } from '../store/kv.ts';
+import { getKv } from '../store/kv.ts';
 import { isUploadCandidate, markUploaded, markUploadFailed, uploadCandidates, type UploadCandidate } from '../store/media.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { displayName } from './labels.ts';
-import { sanitizeFileName } from './paths.ts';
 
 export const UPLOAD_MAX_ATTEMPTS = 8;
 /** Per-request time limit for one client file (up to 50 MB on a slow line). The tracker upload keeps the client's 120 s. */
@@ -138,7 +138,7 @@ export class DriveFileUploader {
         try {
           const bytes = await readFile(join(dataDir, ...c.localPath.split('/')));
           const name = displayName({ kind: c.kind, fileName: c.fileName, mimeType: c.mimeType, ts: c.ts, mediaId: c.id });
-          fileId = await this.#upload(root, c, name, safeMime(c.mimeType), bytes);
+          fileId = await this.#upload(c, name, safeMime(c.mimeType), bytes);
         } catch (e) {
           if (isAuthFailure(e)) {
             // Not the file's fault, and every other file would fail the same way: nothing is saved for the file, and the
@@ -194,49 +194,10 @@ export class DriveFileUploader {
     this.#o.log.warn({ reason, until: new Date(until).toISOString() }, 'file uploads to Drive paused');
   }
 
-  async #upload(root: string, c: UploadCandidate, name: string, mime: string, bytes: Buffer): Promise<string> {
+  /** Into the client's Files folder; folders removed in Drive are rebuilt as withClientSubfolder describes. */
+  #upload(c: UploadCandidate, name: string, mime: string, bytes: Buffer): Promise<string> {
     const { db, api } = this.#o;
-    // Innermost first: Files, then the client folder, then Clients.
-    const levels = [`drive_files_folder:${c.clientId}`, `drive_client_folder:${c.clientId}`, 'drive_clients_folder'];
-    for (let step = 0; ; step++) {
-      let freshFiles = false;
-      try {
-        const files = await this.#filesFolder(root, c);
-        freshFiles = files.created;
-        return await api.createFile(name, mime, bytes, files.id, FILE_UPLOAD_TIMEOUT_MS);
-      } catch (e) {
-        if (!(e instanceof DriveNotFoundError) || step === levels.length) throw e;
-        // The file was refused in a Files folder made just now, inside folders that were there a moment ago: nothing
-        // is missing to rebuild, and moving up would make a second client folder with the same name. The try fails.
-        if (freshFiles) throw e;
-        // A folder was removed in Drive. Rebuild one more level per retry, starting with Files. Creating a folder inside
-        // a removed one fails the same way, so a level above Files is rebuilt only when creating a folder in it failed.
-        // A rebuilt level gets new folders inside it too, so the inner keys are cleared again (a retry may have saved a
-        // new inner id).
-        for (const key of levels.slice(0, step + 1)) setKv(db, key, '');
-      }
-    }
-  }
-
-  /** The client's Files folder, made (with any folder above it that is not saved) when no id is saved. created: made just now. */
-  async #filesFolder(root: string, c: UploadCandidate): Promise<{ id: string; created: boolean }> {
-    const { db, api } = this.#o;
-    const filesKey = `drive_files_folder:${c.clientId}`;
-    const cached = getKv(db, filesKey);
-    if (cached) return { id: cached, created: false };
-    let clients = getKv(db, 'drive_clients_folder');
-    if (!clients) {
-      clients = await api.createFolder('Clients', root);
-      setKv(db, 'drive_clients_folder', clients);
-    }
-    const clientKey = `drive_client_folder:${c.clientId}`;
-    let client = getKv(db, clientKey);
-    if (!client) {
-      client = await api.createFolder(sanitizeFileName(c.clientName) ?? `Client ${c.clientId}`, clients);
-      setKv(db, clientKey, client);
-    }
-    const files = await api.createFolder('Files', client);
-    setKv(db, filesKey, files);
-    return { id: files, created: true };
+    return withClientSubfolder(db, api, { clientId: c.clientId, clientName: c.clientName }, 'Files', (folderId) =>
+      api.createFile(name, mime, bytes, folderId, FILE_UPLOAD_TIMEOUT_MS));
   }
 }

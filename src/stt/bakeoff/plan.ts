@@ -1,0 +1,111 @@
+import { costUsd, modelFor } from '../prices.ts';
+import { formatClock } from '../segments.ts';
+import type { ProviderId } from '../types.ts';
+import type { ResumeFrom, SlotState } from './ledger.ts';
+import type { Sample } from './samples.ts';
+
+/** send: a new paid request. resume: wait on a saved provider job or reuse saved answers (no new charge). skip: nothing. */
+export type Action = 'send' | 'resume' | 'skip';
+
+export interface PlanItem {
+  sample: Sample;
+  /** Length of the original recording. */
+  seconds: number;
+  provider: ProviderId;
+  model: string;
+  diarize: boolean;
+  parts: number;
+  state: SlotState;
+  action: Action;
+  /** For a resume: what makes it free, so the listing says what will happen. */
+  resumeFrom?: ResumeFrom;
+  /** List-price estimate of what this run would send; 0 for skips and resumed jobs. */
+  estimateUsd: number;
+}
+
+export interface PlanInput {
+  /**
+   * seconds is the original recording's length, for the listing and the estimate. preparedSeconds is the prepared MP3's,
+   * when one exists: the runner cuts that file, which runs a little longer (0.07-0.13 s), so it sets the part count.
+   */
+  samples: readonly { sample: Sample; seconds: number; preparedSeconds?: number }[];
+  providers: readonly { id: ProviderId; maxPartSeconds: number }[];
+  stateOf: (sampleId: string, provider: ProviderId) => SlotState;
+  /**
+   * Non-null when going on with an unanswered slot is free: every part n < parts has a saved provider job id to wait on
+   * or a saved answer (see Ledger.resumeFrom). Null makes it a new send, estimated in full.
+   */
+  resumeFrom: (sampleId: string, provider: ProviderId, parts: number) => ResumeFrom | null;
+  retryFailed: boolean;
+  retryUnknown: boolean;
+  inrPerUsd: number;
+}
+
+function actionFor(state: SlotState, input: PlanInput, sampleId: string, provider: ProviderId, parts: number): { action: Action; resumeFrom?: ResumeFrom } {
+  if (state === 'new' || (state === 'failed' && input.retryFailed)) return { action: 'send' };
+  if (state === 'unknown' && input.retryUnknown) {
+    const from = input.resumeFrom(sampleId, provider, parts);
+    return from ? { action: 'resume', resumeFrom: from } : { action: 'send' };
+  }
+  return { action: 'skip' };
+}
+
+/** One item per sample and provider, in sample order. Meetings are sent with speaker labels on. */
+export function buildPlan(input: PlanInput): PlanItem[] {
+  const items: PlanItem[] = [];
+  for (const { sample, seconds, preparedSeconds } of input.samples) {
+    for (const p of input.providers) {
+      const diarize = sample.kind === 'meeting';
+      const price = modelFor(p.id, diarize);
+      const state = input.stateOf(sample.id, p.id);
+      // As the runner's split counts them, so a free resume is judged on the parts that will really be sent.
+      const parts = Math.max(1, Math.ceil((preparedSeconds ?? seconds) / p.maxPartSeconds));
+      const { action, resumeFrom } = actionFor(state, input, sample.id, p.id, parts);
+      items.push({
+        sample,
+        seconds,
+        provider: p.id,
+        model: price.model,
+        diarize,
+        parts,
+        state,
+        action,
+        ...(resumeFrom ? { resumeFrom } : {}),
+        estimateUsd: action === 'send' ? costUsd(price, seconds, input.inrPerUsd) : 0,
+      });
+    }
+  }
+  return items;
+}
+
+export function planTotalUsd(items: readonly PlanItem[]): number {
+  return items.reduce((sum, i) => sum + i.estimateUsd, 0);
+}
+
+function actionText(i: PlanItem): string {
+  if (i.action === 'skip') return `skip (${i.state})`;
+  if (i.action === 'resume') return i.resumeFrom === 'answers' ? 'reuse saved answers (no new charge)' : 'wait for the saved job (no new charge)';
+  return i.state === 'unknown' ? 'send again (an earlier attempt may already be billed)' : 'send';
+}
+
+/** The dry-run listing: one line per sample and provider, then the files and the total. Never any content. */
+export function formatPlan(items: readonly PlanItem[]): string {
+  // As wide as the longest id (up to 57 characters with the hash), so the columns line up.
+  const idWidth = items.reduce((w, i) => Math.max(w, i.sample.id.length), 0);
+  const lines = items.map((i) => {
+    const parts = i.parts > 1 ? ` in ${i.parts} parts` : '';
+    return `  ${i.sample.id.padEnd(idWidth)} ${formatClock(i.seconds).padStart(8)}  ${i.provider.padEnd(10)} ${i.model}${parts}  $${i.estimateUsd.toFixed(3)}  ${actionText(i)}`;
+  });
+  // A resume uploads nothing: it waits on a job or reuses answers already here.
+  const files = [...new Set(items.filter((i) => i.action === 'send').map((i) => i.sample.path))];
+  const total = planTotalUsd(items);
+  return [
+    ...lines,
+    '',
+    `Files whose audio would be uploaded (${files.length}):`,
+    ...files.map((f) => `  ${f}`),
+    '',
+    // Three decimals below $1, so a run of a few voice notes never shows as $0.00.
+    `Estimated cost: $${total.toFixed(total < 1 ? 3 : 2)} at list prices.`,
+  ].join('\n');
+}

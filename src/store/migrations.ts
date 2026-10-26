@@ -208,4 +208,60 @@ CREATE TABLE reports (
 );
 `,
   },
+  // Version 6 is Phase 2c's reports table: it reaches this branch from main, and goes before this one.
+  {
+    // Phase 3: one row per Google Meet recording. JSON columns: attendees [{email, name, team}], participants [name],
+    // stt_parts SttPart[], transcript Segment[], summary MeetingSummary. Internal meetings keep no title, attendees or names
+    // (the CHECK makes sure of it).
+    // A claim counts an attempt and moves next_attempt_at ahead, as media's does. stt_forget: the provider copies of
+    // speech answers still to delete.
+    version: 7,
+    sql: `
+CREATE TABLE meetings (
+  id INTEGER PRIMARY KEY,
+  recording TEXT NOT NULL UNIQUE,
+  conference TEXT NOT NULL,
+  drive_file_id TEXT NOT NULL,
+  meeting_code TEXT,
+  title TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  attendees TEXT NOT NULL DEFAULT '[]',
+  participants TEXT NOT NULL DEFAULT '[]',
+  client_id INTEGER REFERENCES clients(id),
+  match_kind TEXT CHECK (match_kind IN ('title', 'domain', 'human')),
+  status TEXT NOT NULL CHECK (status IN ('unassigned', 'internal', 'queued', 'done', 'skipped', 'too_long', 'no_access', 'failed')),
+  stage TEXT NOT NULL DEFAULT 'found' CHECK (stage IN ('found', 'audio', 'transcribed', 'summarised', 'doc', 'tracked')),
+  drive_seconds REAL,
+  audio_path TEXT, audio_seconds REAL,
+  stt_parts TEXT NOT NULL DEFAULT '[]',
+  transcript TEXT,
+  summary TEXT,
+  doc_file_id TEXT,
+  note TEXT,
+  error_code TEXT, attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  CHECK (status <> 'internal' OR (title = '' AND attendees = '[]' AND participants = '[]'))
+);
+CREATE INDEX meetings_due ON meetings(status, next_attempt_at);
+CREATE INDEX meetings_conference ON meetings(conference);
+CREATE INDEX meetings_client ON meetings(client_id, status, started_at);
+ALTER TABLE tasks ADD COLUMN meeting_id INTEGER REFERENCES meetings(id);
+ALTER TABLE decisions ADD COLUMN meeting_id INTEGER REFERENCES meetings(id);
+CREATE INDEX tasks_meeting ON tasks(meeting_id);
+CREATE INDEX decisions_meeting ON decisions(meeting_id);
+-- Provider copies of speech answers still to delete (M7): the provider's own id for the copy only, never what was said.
+-- A row is removed only once the provider has deleted its copy; attempts caps the retries, next_try_at spaces them.
+CREATE TABLE stt_forget (
+  id INTEGER PRIMARY KEY,
+  meeting_id INTEGER NOT NULL REFERENCES meetings(id),
+  provider TEXT NOT NULL CHECK (provider IN ('sarvam', 'elevenlabs', 'openai')),
+  ref TEXT NOT NULL CHECK (length(ref) BETWEEN 1 AND 200),
+  created_at TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_try_at TEXT,
+  UNIQUE (provider, ref)
+);
+`,
+  },
 ];

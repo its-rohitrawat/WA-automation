@@ -1,11 +1,13 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { mediaForPrompt, mediaPromptTexts, readyPrefix } from '../media/promptText.ts';
+import { MeetingDeferral } from '../meetings/audio.ts';
 import { estimateCostUsd, type Prices } from '../spend/pricing.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
 import { finishBatch, startBatch } from '../store/batches.ts';
 import { getClient, setPhase, setStatus, type ClientRow } from '../store/clients.ts';
 import { tx, type Db } from '../store/db.ts';
 import { mediaForMessages } from '../store/media.ts';
+import { finishMeeting } from '../store/meetings.ts';
 import {
   clearTouches, flagRevokedSources, listRecentProcessed, listUnprocessed, markProcessedIfUnchanged, reactionsFor, type MessageRow, type StoredReactionRow,
 } from '../store/messages.ts';
@@ -13,10 +15,13 @@ import { listPeople, setRole } from '../store/people.ts';
 import {
   addDecision, createTask, decisionSourceIds, getTaskByCode, listDecisions, listTasks, logReminder, recordEvent, reminderSourceIds, setTaskStatus, taskSourceIds, TASK_FIELDS, updateTaskFields, type TaskField,
 } from '../store/tasks.ts';
+import type { Segment } from '../stt/types.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { istDate } from '../util/time.ts';
 import { AiInvalidOutputError, AiRefusalError, MAX_OUTPUT_TOKENS, type AiCallResult, type AiClient } from './claudeClient.ts';
+import type { MeetingSummary } from './meetingSchema.ts';
+import { MEETING_TRACKER_PROMPT, meetingItemLines, meetingItems, type MeetingItem } from './meetingTracker.ts';
 import { SpendCapReachedError, settleFailedCall } from './paidCall.ts';
 import { buildUserContent, SYSTEM_PROMPT } from './prompt.ts';
 import type { AiOp, AiOutput } from './schema.ts';
@@ -51,6 +56,85 @@ export interface ReconcilerOptions {
    * from this time, whichever is later. Default: the clock's time when the Reconciler is made.
    */
   startedAt?: Date;
+  /**
+   * Holds the client's run flag for a meeting run (GroupDebouncer.runExclusive), so a WhatsApp run of the same client
+   * cannot interleave with it and add the same task twice. Returns 'busy' when the client is running. Default: no lock.
+   */
+  exclusive?: <T>(clientId: number, fn: () => Promise<T>) => Promise<T | 'busy'>;
+}
+
+/** A meeting at stage doc, as the tracker step needs it. */
+export interface MeetingForTracker {
+  id: number;
+  /** When the meeting started (ISO): the evidence time of every item. */
+  startedAt: string;
+  title?: string | null;
+  summary: MeetingSummary;
+  segments: readonly Segment[];
+}
+
+/**
+ * The tracker step of a meeting finished, and the meeting is done (stage tracked). note: client_inactive when the client
+ * was inactive and nothing was sent. Spend and a busy client throw MeetingDeferral; any other failure is rethrown.
+ */
+export interface MeetingTrackOutcome {
+  status: 'done';
+  accepted: number;
+  rejected: number;
+  note?: 'client_inactive';
+}
+
+/** What every piece of evidence has: two times, which differ for a message re-checked for an edit or a reaction. */
+interface EvidenceTimes {
+  /** A message's send time; a meeting item's meeting start. Task and decision dates come from this. */
+  dateTs: string;
+  /** When it became evidence, for the human status lock (ValidationState.messageTs): evidenceTs for a message, the meeting start for an item. */
+  lockTs: string;
+}
+
+/** A WhatsApp message, from the batch or the context. */
+interface MessageEvidence extends EvidenceTimes {
+  kind: 'message';
+  /** What a new task keeps as its source quote: the text's first MESSAGE_QUOTE_MAX code points. */
+  quote: string | null;
+  waId: string;
+  senderName: string | null;
+  /** A message re-checked for an edit or a reaction: evidence from today, not from the day it was sent. */
+  recheck: boolean;
+}
+
+/** A meeting item: no sender and no WhatsApp id. */
+interface MeetingEvidence extends EvidenceTimes {
+  kind: 'meeting';
+  /** The first cited segment's words, already cut to MEETING_ITEM_MAX_QUOTE (meetingTracker.ts). */
+  quote: string | null;
+  meetingId: number;
+}
+
+/** What an op cites, for #apply and the validator. Shared by WhatsApp and meeting runs; a WhatsApp run only ever has messages. */
+type Evidence = MessageEvidence | MeetingEvidence;
+
+/**
+ * Longest source quote a task keeps from a WhatsApp message (code points), as before meetings. A meeting item keeps up
+ * to MEETING_ITEM_MAX_QUOTE (200) instead: its quote is a transcript segment, spoken words that run longer than a
+ * typical chat line.
+ */
+const MESSAGE_QUOTE_MAX = 120;
+
+function messageEvidence(m: MessageRow, reactions: StoredReactionRow[]): MessageEvidence {
+  return {
+    kind: 'message',
+    dateTs: m.ts,
+    lockTs: evidenceTs(m, reactions),
+    quote: m.text ? [...m.text].slice(0, MESSAGE_QUOTE_MAX).join('') : null,
+    waId: m.waId,
+    senderName: m.senderName,
+    recheck: m.requeueReason !== null,
+  };
+}
+
+function itemEvidence(meetingId: number, it: MeetingItem): MeetingEvidence {
+  return { kind: 'meeting', dateTs: it.ts, lockTs: it.ts, quote: it.quote, meetingId };
 }
 
 /** Re-exported for existing importers; it lives in paidCall.ts with the other spend helpers. */
@@ -146,7 +230,7 @@ export class Reconciler {
     const batchId = startBatch(db, clientId, batch.length, now.toISOString());
     let result: { output: AiOutput; invalidOps: number };
     try {
-      result = await this.#callWithRetry(user, batchId, estimate);
+      result = await this.#callWithRetry(SYSTEM_PROMPT, user, `batch ${batchId}`, estimate);
     } catch (e) {
       // A retry that cannot reserve is not an AI error: a pause when the cap is the reason, busy when holds are.
       const blocked = e instanceof SpendCapReachedError ? this.#spendBlocked(clientId, estimate) : undefined;
@@ -159,10 +243,10 @@ export class Reconciler {
     if (result.invalidOps > 0) log.warn({ clientId, batchId, invalidOps: result.invalidOps }, 'model returned invalid operations');
 
     // Message ids and times come from the rows the AI saw.
-    const byWaId = new Map([...recent, ...batch].map((m) => [m.waId, m]));
+    const { evidence, messageTs } = this.#evidenceMaps([...recent, ...batch], reactions);
     const batchIds = new Set(batch.map((m) => m.waId));
     const contextIds = new Set(recent.map((m) => m.waId));
-    const messageTs = new Map([...byWaId].map(([id, m]) => [id, evidenceTs(m, reactions)]));
+    const editedIds = new Set(batch.filter((m) => m.requeueReason === 'edit').map((m) => m.waId));
 
     const appliedAt = clock.now();
     let applied: { accepted: AiOp[]; rejected: Rejection[]; requeued: number };
@@ -171,22 +255,9 @@ export class Reconciler {
         // The call can take minutes and a human can correct the tracker meanwhile, so validate against the
         // client, tasks and people as they are now. Nothing can interleave inside this synchronous transaction.
         const fresh = getClient(db, clientId);
-        const state: ValidationState = {
-          clientCode: fresh.code,
-          phases: fresh.phases,
-          phaseLocked: fresh.phaseLocked,
-          tasksByCode: new Map(listTasks(db, clientId, ['open', 'maybe_done']).map((t) => [t.code, t])),
-          batchIds,
-          contextIds,
-          messageTs,
-          peopleByJid: new Map(listPeople(db, clientId).map((p) => [p.jid, p])),
-          taskSourceIds: taskSourceIds(db, clientId),
-          reminderSourceIds: reminderSourceIds(db, clientId),
-          decisionSourceIds: decisionSourceIds(db, clientId),
-          editedIds: new Set(batch.filter((m) => m.requeueReason === 'edit').map((m) => m.waId)),
-        };
+        const state = this.#validationState(fresh, clientId, { batchIds, contextIds, messageTs, editedIds, source: 'whatsapp' });
         const { accepted, rejected } = validateOps(result.output.ops, state);
-        for (const op of accepted) this.#apply(fresh, op, byWaId, appliedAt);
+        for (const op of accepted) this.#apply(fresh, op, evidence, appliedAt);
         // fileUnread: the prompt showed the file as still being read. If it was read during the call, the message stays
         // queued as a "file now read" re-check. fileShown: the prompt showed the file's text as a "file now read"
         // re-check, so a message queued again for an edit or a reaction does not show it as one again (amendment 12h).
@@ -212,52 +283,189 @@ export class Reconciler {
   }
 
   /**
+   * A meeting's tracker step (M5 B): its action items and decisions are evidence items, applied with the chat rules
+   * except roles, and the meeting is finished (done, stage tracked) in the same transaction as the ops. No items, or an
+   * inactive client, finish it without an AI call. Spend that does not fit throws MeetingDeferral spend_cap or
+   * spend_busy, a client whose WhatsApp run is in flight throws MeetingDeferral client_busy, and any other failure is
+   * rethrown with nothing applied.
+   */
+  async runMeeting(clientId: number, meeting: MeetingForTracker): Promise<MeetingTrackOutcome> {
+    const { db, clock } = this.#o;
+    const items = meetingItems(meeting.id, meeting.summary, meeting.segments, meeting.startedAt);
+    if (items.length === 0) {
+      finishMeeting(db, meeting.id, { at: clock.now().toISOString() });
+      return { status: 'done', accepted: 0, rejected: 0 };
+    }
+    if (!getClient(db, clientId).active) {
+      finishMeeting(db, meeting.id, { note: 'client_inactive', at: clock.now().toISOString() });
+      return { status: 'done', accepted: 0, rejected: 0, note: 'client_inactive' };
+    }
+    const exclusive = this.#o.exclusive ?? (<T>(_id: number, fn: () => Promise<T>): Promise<T | 'busy'> => fn());
+    const r = await exclusive(clientId, () => this.#trackMeeting(clientId, meeting, items));
+    if (r === 'busy') {
+      this.#o.log.info({ clientId, meetingId: meeting.id }, 'client run in flight: meeting deferred');
+      throw new MeetingDeferral('client_busy');
+    }
+    return r;
+  }
+
+  async #trackMeeting(clientId: number, meeting: MeetingForTracker, items: MeetingItem[]): Promise<MeetingTrackOutcome> {
+    const { db, spend, prices, clock, log } = this.#o;
+    const client = getClient(db, clientId);
+    const now = clock.now();
+    // Only processed messages: one still queued is the next WhatsApp run's evidence, and that run sees this one's tasks.
+    const recent = listRecentProcessed(db, clientId, 30);
+    const reactions = reactionsFor(db, clientId, recent.map((m) => m.waId));
+    const user = buildUserContent({
+      client,
+      people: listPeople(db, clientId),
+      openTasks: listTasks(db, clientId, ['open', 'maybe_done']),
+      decisions: listDecisions(db, clientId, 20),
+      recent,
+      batch: [],
+      reactions,
+      today: istDate(now),
+      mediaText: mediaPromptTexts(mediaForPrompt(db, [], recent), [], recent),
+      meetingLines: meetingItemLines(items, meeting.startedAt, meeting.title),
+    });
+
+    const estimate = estimateCostUsd(MEETING_TRACKER_PROMPT.length + user.length, prices, MAX_OUTPUT_TOKENS);
+    const deferral = (): MeetingDeferral =>
+      new MeetingDeferral(this.#spendBlocked(clientId, estimate, meeting.id).status === 'busy' ? 'spend_busy' : 'spend_cap');
+    if (!spend.canSpend(estimate)) throw deferral();
+    let result: { output: AiOutput; invalidOps: number };
+    try {
+      result = await this.#callWithRetry(MEETING_TRACKER_PROMPT, user, `meeting ${meeting.id}`, estimate);
+    } catch (e) {
+      if (e instanceof SpendCapReachedError) throw deferral();
+      log.warn({ clientId, meetingId: meeting.id, errorCode: errorCodeOf(e) }, 'meeting tracker step failed');
+      throw e;
+    }
+    if (result.invalidOps > 0) log.warn({ clientId, meetingId: meeting.id, invalidOps: result.invalidOps }, 'model returned invalid operations');
+
+    // Every item's evidence time is the meeting's start, so a task a human reopened after it started is not closed.
+    const { evidence, messageTs } = this.#evidenceMaps(recent, reactions, { id: meeting.id, items });
+    const appliedAt = clock.now();
+    let applied: { accepted: AiOp[]; rejected: Rejection[] };
+    try {
+      applied = tx(db, () => {
+        const fresh = getClient(db, clientId);
+        const state = this.#validationState(fresh, clientId, {
+          batchIds: new Set(items.map((it) => it.id)),
+          contextIds: new Set(recent.map((m) => m.waId)),
+          messageTs,
+          editedIds: new Set(),
+          source: 'meeting',
+        });
+        const { accepted, rejected } = validateOps(result.output.ops, state);
+        for (const op of accepted) this.#apply(fresh, op, evidence, appliedAt);
+        finishMeeting(db, meeting.id, { at: appliedAt.toISOString() });
+        return { accepted, rejected };
+      });
+    } catch (err) {
+      // The transaction rolled back: nothing was applied and the meeting stays at stage doc.
+      log.error({ clientId, meetingId: meeting.id, err }, 'applying meeting operations failed');
+      throw err;
+    }
+    for (const r of applied.rejected) log.info({ clientId, meetingId: meeting.id, op: r.op.op, why: r.reason }, 'operation rejected');
+    this.#o.onChanged();
+    return { status: 'done', accepted: applied.accepted.length, rejected: applied.rejected.length };
+  }
+
+  /**
    * The estimate could not be reserved. Paused only when today's spend leaves no room for it. Otherwise holds of paid
    * calls still in flight are in the way and clear within minutes, so the run is busy: Health must not say the cap is
    * reached, and the retry must not wait the hour a pause waits (Task 15 review round 3).
    */
-  #spendBlocked(clientId: number, estimate: number): { status: 'paused' } | { status: 'busy' } {
+  #spendBlocked(clientId: number, estimate: number, meetingId?: number): { status: 'paused' } | { status: 'busy' } {
     const { spend, log } = this.#o;
-    if (spend.fitsIgnoringHolds(estimate)) {
-      log.info({ clientId }, 'other paid calls in flight: run deferred');
-      return { status: 'busy' };
+    const busy = spend.fitsIgnoringHolds(estimate);
+    // A meeting's tracker step logs its meeting id, and a meeting is deferred (MeetingDeferral), never paused. A
+    // WhatsApp run's lines stay as they were; its batch id, once there is one, is on the batch row (errorCode spend_*).
+    if (meetingId !== undefined) {
+      log.info({ clientId, meetingId }, busy ? 'other paid calls in flight: meeting deferred' : 'spend cap: meeting deferred');
+    } else {
+      log.info({ clientId }, busy ? 'other paid calls in flight: run deferred' : 'spend cap: run paused');
     }
-    log.info({ clientId }, 'spend cap: run paused');
-    return { status: 'paused' };
+    return busy ? { status: 'busy' } : { status: 'paused' };
+  }
+
+  /**
+   * The validator's view, read inside the apply transaction: the client, its open tasks, people and replay sources as
+   * they are now, plus what this run's AI saw. Shared by WhatsApp and meeting runs.
+   */
+  #validationState(
+    fresh: ClientRow,
+    clientId: number,
+    run: Pick<ValidationState, 'batchIds' | 'contextIds' | 'messageTs' | 'editedIds' | 'source'>,
+  ): ValidationState {
+    const { db } = this.#o;
+    return {
+      clientCode: fresh.code,
+      phases: fresh.phases,
+      phaseLocked: fresh.phaseLocked,
+      tasksByCode: new Map(listTasks(db, clientId, ['open', 'maybe_done']).map((t) => [t.code, t])),
+      batchIds: run.batchIds,
+      contextIds: run.contextIds,
+      messageTs: run.messageTs,
+      peopleByJid: new Map(listPeople(db, clientId).map((p) => [p.jid, p])),
+      taskSourceIds: taskSourceIds(db, clientId),
+      reminderSourceIds: reminderSourceIds(db, clientId),
+      decisionSourceIds: decisionSourceIds(db, clientId),
+      editedIds: run.editedIds,
+      source: run.source,
+    };
+  }
+
+  /**
+   * Evidence by id for #apply, and each id's lock time for the validator (messageTs), from the messages the AI saw and,
+   * for a meeting run, its items. A later entry with the same id wins, as before (a batch message over a context one).
+   */
+  #evidenceMaps(
+    messages: readonly MessageRow[],
+    reactions: StoredReactionRow[],
+    meeting?: { id: number; items: readonly MeetingItem[] },
+  ): { evidence: Map<string, Evidence>; messageTs: Map<string, string> } {
+    const evidence = new Map<string, Evidence>(messages.map((m) => [m.waId, messageEvidence(m, reactions)]));
+    for (const it of meeting?.items ?? []) evidence.set(it.id, itemEvidence(meeting!.id, it));
+    const messageTs = new Map([...evidence].map(([id, e]) => [id, e.lockTs]));
+    return { evidence, messageTs };
   }
 
   /** Every attempt reserves its estimate first, and every outcome settles or releases that reservation. */
-  async #callWithRetry(user: string, batchId: number, estimate: number): Promise<{ output: AiOutput; invalidOps: number }> {
+  async #callWithRetry(system: string, user: string, label: string, estimate: number): Promise<{ output: AiOutput; invalidOps: number }> {
     const { ai, spend } = this.#o;
     for (let attempt = 0; ; attempt++) {
       const rid = spend.reserve(estimate);
       if (rid === null) throw new SpendCapReachedError();
       let r: AiCallResult;
       try {
-        r = await ai.reconcile(SYSTEM_PROMPT, user);
+        r = await ai.reconcile(system, user);
       } catch (e) {
-        settleFailedCall(spend, rid, e, estimate, `batch ${batchId}`);
+        settleFailedCall(spend, rid, e, estimate, label);
         if (e instanceof AiInvalidOutputError && attempt === 0) continue;
         throw e;
       }
-      spend.settle(rid, 'ai', r.costUsd, `batch ${batchId}${r.fallbackUsed ? ' (fallback)' : ''}`);
+      spend.settle(rid, 'ai', r.costUsd, `${label}${r.fallbackUsed ? ' (fallback)' : ''}`);
       return { output: r.output, invalidOps: r.invalidOps };
     }
   }
 
-  #apply(client: ClientRow, op: AiOp, byWaId: Map<string, MessageRow>, at: Date): void {
+  #apply(client: ClientRow, op: AiOp, evidence: Map<string, Evidence>, at: Date): void {
     const { db } = this.#o;
     const nowIso = at.toISOString();
-    const sources = op.sourceMessageIds
-      .map((id) => byWaId.get(id))
-      .filter((m): m is MessageRow => m !== undefined)
-      .sort((a, b) => a.ts.localeCompare(b.ts));
+    const cited = op.sourceMessageIds.map((id) => evidence.get(id)).filter((e): e is Evidence => e !== undefined);
+    // An op of a meeting run that also cites WhatsApp context is sourced and dated by its first cited meeting item.
+    const item = cited.find((e): e is MeetingEvidence => e.kind === 'meeting');
+    const sources = item ? [item] : cited.sort((a, b) => a.dateTs.localeCompare(b.dateTs));
     const first = sources[0];
     const last = sources[sources.length - 1];
-    const dateOf = (m: MessageRow | undefined) => istDate(m ? new Date(m.ts) : at);
+    // Sender and message id come only from a message: an op sourced by a meeting item has neither.
+    const firstMessage = first?.kind === 'message' ? first : undefined;
+    const dateOf = (e: Evidence | undefined) => istDate(e ? new Date(e.dateTs) : at);
     // A message re-checked for a new reaction or an edit is evidence from today, not from the day it was first sent. A
     // "file now read" re-check alone is not (amendment 12h): the file is dated like the message that shared it.
-    const lastDate = sources.some((m) => m.requeueReason !== null) ? istDate(at) : dateOf(last);
+    const lastDate = sources.some((e) => e.kind === 'message' && e.recheck) ? istDate(at) : dateOf(last);
     const event = (taskId: number | null, detail: object) =>
       recordEvent(db, { taskId, clientId: client.id, actor: 'ai', op: op.op, detail, reason: op.reason, sourceIds: op.sourceMessageIds, at: nowIso });
     const taskFor = (code: string | null) => {
@@ -275,14 +483,15 @@ export class Reconciler {
           category: op.category!,
           priority: op.priority!,
           assignedTo: op.assignedTo,
-          askedBy: op.askedBy ?? first?.senderName ?? null,
+          askedBy: op.askedBy ?? firstMessage?.senderName ?? null,
           raisedOn: dateOf(first),
           deadline: op.deadline,
           latestProgress: op.latestProgress,
-          sourceQuote: first?.text ? [...first.text].slice(0, 120).join('') : null,
+          sourceQuote: first?.quote ?? null,
           sourceDate: first ? dateOf(first) : null,
-          sourceWaId: first?.waId ?? null,
-          origin: 'whatsapp',
+          sourceWaId: firstMessage?.waId ?? null,
+          origin: item ? 'meeting' : 'whatsapp',
+          meetingId: item?.meetingId ?? null,
         }, nowIso);
         if (op.status) setTaskStatus(db, t.id, op.status, lastDate, nowIso, 'ai');
         event(t.id, { code: t.code, title: t.title, side: t.side, status: op.status ?? 'open' });
@@ -327,7 +536,10 @@ export class Reconciler {
         return;
       }
       case 'add_decision':
-        addDecision(db, { clientId: client.id, text: op.text!, decidedOn: dateOf(first), source: 'whatsapp', sourceWaId: first?.waId ?? null }, nowIso);
+        addDecision(db, {
+          clientId: client.id, text: op.text!, decidedOn: dateOf(first), source: item ? 'meeting' : 'whatsapp', sourceWaId: firstMessage?.waId ?? null,
+          meetingId: item?.meetingId ?? null,
+        }, nowIso);
         event(null, { decision: op.text });
         return;
       case 'set_phase':

@@ -57,6 +57,11 @@ export interface PromptInput {
   mediaText?: Map<number, MediaBlock>;
   /** Row ids of messages queued again because their file was read after they were processed (amendment 12h). */
   fileRechecks?: Set<number>;
+  /**
+   * A meeting run (src/brain/meetingTracker.ts): these lines go in <meeting_items> in place of <new_messages>. Each is
+   * already cleaned to one line.
+   */
+  meetingLines?: readonly string[];
 }
 
 /**
@@ -145,8 +150,12 @@ const NAME_CLOSE = /[\])）﹚］]/g;
  */
 const NAME_SEPARATORS = /[·:：﹕]/g;
 
-const nameText = (s: string): string =>
-  [...sanitizeInline(s).replace(NAME_OPEN, '❨').replace(NAME_CLOSE, '❩').replace(NAME_SEPARATORS, '-')].slice(0, 60).join('');
+/**
+ * A person's name for a prompt: one cleaned line, brackets as ❨ ❩, ":" and "·" as "-", at most 60 characters. max lets
+ * a meeting title use the same cleaning with a longer cap (meetingTracker.ts titleText).
+ */
+export const nameText = (s: string, max = 60): string =>
+  [...sanitizeInline(s).replace(NAME_OPEN, '❨').replace(NAME_CLOSE, '❩').replace(NAME_SEPARATORS, '-')].slice(0, max).join('');
 
 /** People get handles P1, P2, ... in map order. */
 function handlesOf(people: Map<string, PersonRow>): Map<string, string> {
@@ -270,8 +279,6 @@ export function buildUserContent(p: PromptInput): string {
     '<recent_context>',
     ...(p.recent.length ? p.recent.map(line) : ['(none)']),
     '</recent_context>',
-    '<new_messages>',
-    ...p.batch.map(line),
-    '</new_messages>',
+    ...(p.meetingLines ? ['<meeting_items>', ...p.meetingLines, '</meeting_items>'] : ['<new_messages>', ...p.batch.map(line), '</new_messages>']),
   ].join('\n');
 }

@@ -3,6 +3,7 @@ import { drive } from '@googleapis/drive';
 import type { Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import type { Logger } from '../util/logger.ts';
+import { isAuthFailure } from './authFailure.ts';
 import type { OAuth2Client } from './googleAuth.ts';
 import { XLSX_MIME } from './workbook.ts';
 
@@ -20,15 +21,8 @@ export class DriveAuthError extends Error {
   }
 }
 
-/** A gaxios error with HTTP 401 or an invalid_grant body, or an error that says invalid_grant. */
-export function isAuthFailure(e: unknown): boolean {
-  const x = e as { code?: unknown; status?: unknown; name?: string; message?: string; response?: { status?: number; data?: { error?: unknown } } } | null;
-  if (!x || typeof x !== 'object') return false;
-  if (x.name === 'DriveAuthError') return true;
-  if (Number(x.code) === 401 || x.status === 401 || x.response?.status === 401) return true;
-  if (x.response?.data?.error === 'invalid_grant') return true;
-  return /invalid_grant/.test(`${x.name ?? ''} ${x.message ?? ''}`);
-}
+// In its own module so the meetings client can use it without loading this one (and, through it, the workbook).
+export { isAuthFailure };
 
 export interface DriveApi {
   /** Creates a folder at the top of My Drive, or inside parentId. */
@@ -36,9 +30,26 @@ export interface DriveApi {
   /** timeoutMs: a per-request time limit instead of the client's 120 s (large client files need longer). */
   createFile(name: string, mimeType: string, body: Buffer, parentId: string, timeoutMs?: number): Promise<string>;
   updateFile(fileId: string, mimeType: string, body: Buffer): Promise<void>;
+  /**
+   * Uploads HTML that Drive converts into a Google Doc inside parentId; returns the Doc id. A missing parent throws
+   * DriveNotFoundError and a Google sign-in failure DriveAuthError.
+   */
+  createDoc(name: string, html: string, parentId: string): Promise<string>;
 }
 
+export const GOOGLE_DOC_MIME = 'application/vnd.google-apps.document';
+
 const isNotFound = (e: unknown) => (e as { code?: number }).code === 404;
+
+/**
+ * The error to throw for a failed create in parentId: a 404 means the parent folder is gone (DriveNotFoundError). With
+ * wrapAuth (createDoc only), a Google sign-in failure becomes DriveAuthError. Anything else is returned as it came.
+ */
+function mapCreateError(e: unknown, parentId: string, wrapAuth = false): unknown {
+  if (isNotFound(e)) return new DriveNotFoundError(parentId);
+  if (wrapAuth && isAuthFailure(e) && !(e instanceof DriveAuthError)) return new DriveAuthError(e);
+  return e;
+}
 
 export function googleDriveApi(client: OAuth2Client): DriveApi {
   const api = drive({ version: 'v3', auth: client, timeout: 120_000 });
@@ -67,8 +78,20 @@ export function googleDriveApi(client: OAuth2Client): DriveApi {
         if (!r.data.id) throw new Error('Drive returned no file id');
         return r.data.id;
       } catch (e) {
-        if (isNotFound(e)) throw new DriveNotFoundError(parentId);
-        throw e;
+        throw mapCreateError(e, parentId);
+      }
+    },
+    async createDoc(name, html, parentId) {
+      try {
+        const r = await api.files.create({
+          requestBody: { name, mimeType: GOOGLE_DOC_MIME, parents: [parentId] },
+          media: { mimeType: 'text/html', body: Readable.from(Buffer.from(html, 'utf8')) },
+          fields: 'id',
+        });
+        if (!r.data.id) throw new Error('Drive returned no document id');
+        return r.data.id;
+      } catch (e) {
+        throw mapCreateError(e, parentId, true);
       }
     },
     async updateFile(fileId, mimeType, body) {

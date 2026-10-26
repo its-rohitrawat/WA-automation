@@ -1,5 +1,7 @@
 import { readFileSync, unwatchFile, watchFile, type Stats } from 'node:fs';
 import { z } from 'zod';
+import { DomainSchema } from './domains.ts';
+import { isMatchablePhrase, MIN_PHRASE_CHARS } from '../util/text.ts';
 
 export const GROUPS_FILE_MISSING_MESSAGE = 'Allow-list file missing. Create config/allowed-groups.json containing { "clients": [] }, run: npm run cli -- list-groups, then add your client groups (see docs/SETUP.md).';
 
@@ -14,8 +16,8 @@ const ClientSchema = z.object({
   name: z.string().trim().min(1).max(80),
   code: z.string().regex(/^[A-Z]{3,4}$/, 'must be 3-4 capital letters'),
   phases: z.array(z.string().trim().min(1)).min(1).optional(),
-  emailDomains: z.array(z.string()).optional(),
-  meetingKeywords: z.array(z.string()).optional(),
+  emailDomains: z.array(DomainSchema).optional(),
+  meetingKeywords: z.array(z.string().trim().min(3, 'must be at least 3 characters')).max(20, 'at most 20 per client').optional(),
 });
 
 const FileSchema = z.object({ clients: z.array(ClientSchema) });
@@ -29,6 +31,11 @@ export interface ClientConfig {
   meetingKeywords: string[];
 }
 
+/**
+ * Reads and checks allowed-groups.json. A meeting keyword shorter than MIN_PHRASE_CHARS once normalised is refused. A
+ * client name that short (for example "AB") is allowed, but it never matches a meeting title: such a client is matched
+ * to meetings only by its keywords or email domains.
+ */
 export function parseGroupsFile(json: string): ClientConfig[] {
   let raw: unknown;
   try {
@@ -47,6 +54,10 @@ export function parseGroupsFile(json: string): ClientConfig[] {
     if (c.groupId === EXAMPLE_GROUP_ID) throw new Error(EXAMPLE_GROUP_MESSAGE);
     if (groups.has(c.groupId)) throw new Error(`allowed-groups.json lists group ${c.groupId} twice`);
     if (codes.has(c.code)) throw new Error(`allowed-groups.json uses code ${c.code} twice`);
+    // The matcher ignores such a keyword ('c++' is 'c' once punctuation is removed), so it is refused here instead.
+    if ((c.meetingKeywords ?? []).some((k) => !isMatchablePhrase(k))) {
+      throw new Error(`allowed-groups.json: client ${c.code} has a meeting keyword with fewer than ${MIN_PHRASE_CHARS} letters once punctuation is removed`);
+    }
     groups.add(c.groupId);
     codes.add(c.code);
   }

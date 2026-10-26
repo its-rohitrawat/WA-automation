@@ -67,6 +67,8 @@ export interface NewTask {
   sourceDate: string | null;
   sourceWaId: string | null;
   origin: string;
+  /** The meeting a task came from (origin 'meeting'). */
+  meetingId?: number | null;
 }
 
 export interface DecisionRow {
@@ -76,6 +78,8 @@ export interface DecisionRow {
   decidedOn: string;
   source: 'whatsapp' | 'meeting' | 'human';
   sourceWaId: string | null;
+  /** The Doc of the meeting the decision was taken in; null when it is not from a meeting, or the meeting has no Doc. */
+  docFileId: string | null;
 }
 
 interface RawTask {
@@ -151,10 +155,10 @@ export function createTask(db: Db, t: NewTask, now: string): TaskRow {
   const code = nextTaskCode(db, t.clientId);
   const info = db
     .prepare(`INSERT INTO tasks (code, client_id, side, title, category, priority, assigned_to, asked_by, raised_on, deadline, latest_progress,
-        source_quote, source_date, source_wa_id, origin, created_at, updated_at)
+        source_quote, source_date, source_wa_id, origin, meeting_id, created_at, updated_at)
       VALUES (@code, @clientId, @side, @title, @category, @priority, @assignedTo, @askedBy, @raisedOn, @deadline, @latestProgress,
-        @sourceQuote, @sourceDate, @sourceWaId, @origin, @now, @now)`)
-    .run({ ...t, code, now });
+        @sourceQuote, @sourceDate, @sourceWaId, @origin, @meetingId, @now, @now)`)
+    .run({ ...t, meetingId: t.meetingId ?? null, code, now });
   return getTaskById(db, Number(info.lastInsertRowid));
 }
 
@@ -217,23 +221,25 @@ export function recordEvent(
 
 export function addDecision(
   db: Db,
-  d: { clientId: number; text: string; decidedOn: string; source: DecisionRow['source']; sourceWaId: string | null },
+  d: { clientId: number; text: string; decidedOn: string; source: DecisionRow['source']; sourceWaId: string | null; meetingId?: number | null },
   now: string,
 ): void {
-  db.prepare('INSERT INTO decisions (client_id, text, decided_on, source, source_wa_id, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+  db.prepare('INSERT INTO decisions (client_id, text, decided_on, source, source_wa_id, meeting_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
     d.clientId,
     d.text,
     d.decidedOn,
     d.source,
     d.sourceWaId,
+    d.meetingId ?? null,
     now,
   );
 }
 
 export function listDecisions(db: Db, clientId: number, limit = 1000): DecisionRow[] {
   return db
-    .prepare(`SELECT id, client_id AS clientId, text, decided_on AS decidedOn, source, source_wa_id AS sourceWaId
-      FROM decisions WHERE client_id = ? ORDER BY decided_on DESC, id DESC LIMIT ?`)
+    .prepare(`SELECT d.id, d.client_id AS clientId, d.text, d.decided_on AS decidedOn, d.source, d.source_wa_id AS sourceWaId,
+        m.doc_file_id AS docFileId
+      FROM decisions d LEFT JOIN meetings m ON m.id = d.meeting_id WHERE d.client_id = ? ORDER BY d.decided_on DESC, d.id DESC LIMIT ?`)
     .all(clientId, limit) as DecisionRow[];
 }
 

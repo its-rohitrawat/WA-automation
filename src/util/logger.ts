@@ -1,9 +1,13 @@
 import { pino, type DestinationStream, type Logger } from 'pino';
 
-const CONTENT_NAMES = ['text', 'body', 'content', 'message', 'messages', 'prompt', 'quote', 'caption', 'conversation', 'payload', 'raw', 'transcript', 'response'];
+const CONTENT_NAMES = [
+  'text', 'body', 'content', 'message', 'messages', 'prompt', 'quote', 'caption', 'conversation', 'payload', 'raw', 'transcript', 'response',
+  // Meetings: what was said and the meeting's own facts.
+  'title', 'summary', 'segments',
+];
 /** Field names that could carry a person's identity, a credential, or the address and key of a WhatsApp file. */
 const IDENTITY_AND_SECRET_NAMES = [
-  'name', 'pushName', 'number', 'phone', 'jid', 'recipient',
+  'name', 'pushName', 'number', 'phone', 'jid', 'recipient', 'email', 'emails', 'attendees', 'participants',
   'token', 'refreshToken', 'refresh_token', 'accessToken', 'access_token', 'apiKey', 'secret', 'password',
   'mediaKey', 'directPath', 'url', 'ref', 'fileName',
 ];

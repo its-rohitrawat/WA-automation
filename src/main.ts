@@ -1,22 +1,32 @@
 import { existsSync } from 'node:fs';
 import { createApp, type AppReportDeps } from './app.ts';
+import type { AppMeetingsDeps } from './app.ts';
 import { ClaudeClient } from './brain/claudeClient.ts';
 import { ClaudeMediaClient } from './brain/mediaClient.ts';
+import { ClaudeMeetingClient } from './brain/meetingClient.ts';
 import { loadEnv, requireKey } from './config/env.ts';
+import type { Env } from './config/env.ts';
 import { GROUPS_FILE_MISSING_MESSAGE, loadGroupsFile, watchGroupsFile } from './config/groups.ts';
+import type { ClientConfig } from './config/groups.ts';
 import { masterKeyPath, sessionDbPath, trackerDbPath } from './config/paths.ts';
 import { DpapiKeyProvider, MasterKeyError } from './crypto/keyProvider.ts';
 import { baileysFetcher } from './media/fetch.ts';
 import { MediaRefSealer } from './media/ref.ts';
+import { googleMeetingsApi } from './meetings/googleApi.ts';
+import { createMeetingTranscriber } from './meetings/transcribe.ts';
 import { googleDriveApi } from './output/drive.ts';
 import { createOAuthClient, TokenDecryptError, TokenStore } from './output/googleAuth.ts';
+import { hasMeetingScopes, type OAuth2Client } from './output/googleAuth.ts';
 import { openMorningReport } from './report/start.ts';
 import { pricesFromEnv } from './spend/pricing.ts';
+import type { Prices } from './spend/pricing.ts';
 import { syncClients } from './store/clients.ts';
 import { openDb, type Db } from './store/db.ts';
+import { Ffmpeg, findFfmpeg } from './stt/audio.ts';
 import { systemClock } from './util/clock.ts';
 import { acquireLock, AlreadyRunningError } from './util/lock.ts';
 import { createLogger, silentLogger } from './util/logger.ts';
+import type { Logger } from './util/logger.ts';
 import { AllowList } from './wa/allowlist.ts';
 import { openSessionDb, SessionDecryptError, useEncryptedAuthState } from './wa/authState.ts';
 import { baileysSocketFactory, WhatsAppGateway } from './wa/gateway.ts';
@@ -24,6 +34,37 @@ import { baileysSenderSocketFactory, linkedNumber } from './wa/senderGateway.ts'
 
 /** Expected startup refusal. The message is safe to print. */
 class StartupExit extends Error {}
+
+/**
+ * The meeting dependencies (Phase 3), built only when MEETINGS_ENABLED is true. Nothing here calls Google: without the
+ * meeting scopes the app keeps meetings paused (google_scopes) and makes no Google meeting call. Logs codes only.
+ */
+async function meetingDeps(
+  o: { env: Env; db: Db; google: OAuth2Client; apiKey: string; prices: Prices; configs: ClientConfig[]; log: Logger },
+): Promise<AppMeetingsDeps> {
+  const { env, log } = o;
+  if (!hasMeetingScopes(o.db)) log.warn({ code: 'google_scopes' }, 'meetings paused: Google sign-in needs meeting access. Run: npm run cli -- google-auth');
+  let exe: string | null = null;
+  try {
+    exe = await findFfmpeg(env.FFMPEG_PATH);
+  } catch {
+    exe = null;
+  }
+  if (exe === null) log.warn({ code: 'no_ffmpeg' }, 'meetings paused: ffmpeg not found');
+  const transcriber = createMeetingTranscriber(env); // STT_API_KEY goes to the provider only
+  if (transcriber === null) log.warn({ code: 'stt_none' }, 'meetings wait: speech-to-text is not set up');
+  return {
+    api: googleMeetingsApi(o.google),
+    ai: new ClaudeMeetingClient({ apiKey: o.apiKey, model: env.AI_MODEL, prices: o.prices }),
+    transcriber,
+    ffmpeg: exe === null ? null : new Ffmpeg(exe),
+    settings: {
+      teamDomains: env.TEAM_EMAIL_DOMAINS, pollMinutes: env.MEETING_POLL_MINUTES, maxMinutes: env.MEETING_MAX_MINUTES,
+      ...(env.MEETINGS_SINCE !== undefined ? { since: env.MEETINGS_SINCE } : {}), inrPerUsd: env.INR_PER_USD,
+    },
+    clients: o.configs,
+  };
+}
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -101,6 +142,8 @@ async function main(): Promise<void> {
     // One start time for every wait that counts from the service start: the reconciler's wait for a file, the
     // processor's 24 hours of waits for Claude, and Health's long-wait count (amendments 10f, 12a, 15a, 15f).
     const startedAt = systemClock.now();
+    // Phase 3: off (the default) means no meeting dependency is built and no meeting call of any kind is made.
+    const meetings = env.MEETINGS_ENABLED ? await meetingDeps({ env, db, google, apiKey, prices, configs, log }) : undefined;
     const app = createApp({
       db,
       clock: systemClock,
@@ -118,6 +161,7 @@ async function main(): Promise<void> {
       startedAt,
       // Phase 2a: download, keep and read shared images and documents. Voice notes are kept, not transcribed yet.
       media: { sealer: new MediaRefSealer(key), fetcher: baileysFetcher(), ai: new ClaudeMediaClient({ apiKey, model: env.AI_MODEL, prices }) },
+      ...(meetings ? { meetings } : {}),
       report,
     });
 

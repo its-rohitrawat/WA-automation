@@ -34,6 +34,15 @@ describe('formatStatus', () => {
     expect(out).toMatch(/SHA\s+Sharma Interiors\s+queued 0\s+no batches yet/);
   });
 
+  it('shows the speech-to-text copies that could not be deleted, on a status line of their own, even with no report', () => {
+    expect(formatStatus({ ...base, snapshot })).not.toContain('Speech copies');
+    expect(formatStatus({ ...base, snapshot, sttCopiesLeft: 0 })).not.toContain('Speech copies');
+    const one = formatStatus({ ...base, snapshot, sttCopiesLeft: 1 });
+    expect(one).toContain('Speech copies: 1 speech-to-text copy could not be deleted from the provider; see SETUP (Meeting summaries)');
+    expect(one).toContain('Health:      ✅ Connected · last update 19 Oct 13:25'); // the health line is unchanged
+    expect(formatStatus({ ...base, snapshot: undefined, sttCopiesLeft: 3 })).toContain('Speech copies: 3 speech-to-text copies could not be deleted');
+  });
+
   it('says when the service has not reported yet', () => {
     const out = formatStatus({ ...base, snapshot: undefined });
     expect(out).toContain('no report yet (is the service running?)');
@@ -87,6 +96,32 @@ describe('formatStatus', () => {
     const out = formatStatus({ ...base, snapshot: { ...snapshot, media: { pending: 2, stale: 0, spendCap: 0, failedRecent: 1, uploadFailed: 0 } } });
     expect(out).toContain('Files:       2 waiting to be read · 1 could not be read (24 h) · 0 not uploaded to Drive');
     expect(formatStatus({ ...base, snapshot })).not.toContain('Files:');
+  });
+});
+
+describe('formatStatus meetings and spend split', () => {
+  const stats = { done: 4, waiting: 1, unassigned: 2, failed: 0, noAccess: 0, tooLong: 0, internal: 3, deferred: {} };
+
+  it('prints a meetings line when the snapshot has meetings, and none otherwise', () => {
+    expect(formatStatus({ ...base, snapshot })).not.toContain('Meetings:');
+    const out = formatStatus({ ...base, snapshot: { ...snapshot, meetings: { stats, paused: null, sttProvider: 'sarvam' } } });
+    expect(out).toContain('Meetings:    4 done, 1 waiting, 2 unassigned, 0 failed');
+    expect(out).not.toContain('no access');
+  });
+
+  it('adds no-access and too-long counts only when there are some', () => {
+    const out = formatStatus({ ...base, snapshot: { ...snapshot, meetings: { stats: { ...stats, noAccess: 1, tooLong: 2 }, paused: null, sttProvider: 'none' } } });
+    expect(out).toContain('Meetings:    4 done, 1 waiting, 2 unassigned, 0 failed, 1 no access, 2 too long');
+  });
+
+  it('splits spend today into AI and speech only when the snapshot has meetings and the split', () => {
+    const split = { ai: 1.0, stt: 0.234 };
+    const out = formatStatus({ ...base, snapshot: { ...snapshot, spendByKind: split, meetings: { stats, paused: null, sttProvider: 'sarvam' } } });
+    expect(out).toContain('Spend today: $1.23 of $15.00 (AI $1.00, speech $0.23)');
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, spendByKind: split } })).toMatch(/Spend today: \$1\.23 of \$15\.00$/m);
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, meetings: { stats, paused: null, sttProvider: 'sarvam' } } })).toMatch(
+      /Spend today: \$1\.23 of \$15\.00$/m,
+    );
   });
 });
 

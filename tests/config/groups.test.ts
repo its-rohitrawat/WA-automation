@@ -67,3 +67,46 @@ describe('example allow-list', () => {
     expect(() => loadGroupsFile(join(tmpdir(), 'no-such-dir-xyz', 'groups.json'))).toThrowError(GROUPS_FILE_MISSING_MESSAGE);
   });
 });
+
+describe('meeting matching rules', () => {
+  it('lower-cases and trims emailDomains', () => {
+    const [c] = parseGroupsFile(valid({ emailDomains: [' SharmaInteriors.EXAMPLE ', 'sharma.co.example'] }));
+    expect(c!.emailDomains).toEqual(['sharmainteriors.example', 'sharma.co.example']);
+  });
+
+  it('refuses an emailDomains entry that is not a domain, naming where it is', () => {
+    for (const d of ['sharma', 'ops@sharma.example', '', 'https://sharma.example']) {
+      expect(() => parseGroupsFile(valid({ emailDomains: ['sharma.example', d] }))).toThrowError(/clients\.0\.emailDomains\.1 must look like a domain/);
+    }
+  });
+
+  it('refuses public mail domains, which would match everyone', () => {
+    expect(() => parseGroupsFile(valid({ emailDomains: ['Gmail.com'] }))).toThrowError(/emailDomains\.0 must not be a public mail domain/);
+    expect(() => parseGroupsFile(valid({ emailDomains: ['yahoo.co.in'] }))).toThrowError(/public mail domain/);
+  });
+
+  it('trims meetingKeywords and keeps them otherwise as written', () => {
+    const [c] = parseGroupsFile(valid({ meetingKeywords: ['  Sharma ', 'Kitchen Fit-out'] }));
+    expect(c!.meetingKeywords).toEqual(['Sharma', 'Kitchen Fit-out']);
+  });
+
+  it('refuses empty or short meetingKeywords', () => {
+    for (const k of ['', '   ', 'ab', ' ab ']) {
+      expect(() => parseGroupsFile(valid({ meetingKeywords: ['Sharma', k] }))).toThrowError(/meetingKeywords\.1 must be at least 3 characters/);
+    }
+    expect(parseGroupsFile(valid({ meetingKeywords: ['abc'] }))[0]!.meetingKeywords).toEqual(['abc']);
+  });
+
+  it('refuses a meetingKeyword with fewer than 3 characters once punctuation is removed, naming the client code', () => {
+    for (const k of ['c++', 'a-b', '...', 'ab\u200b\u200b']) {
+      expect(() => parseGroupsFile(valid({ meetingKeywords: ['Sharma', k] }))).toThrowError(/client SHA has a meeting keyword with fewer than 3 letters/);
+    }
+    expect(parseGroupsFile(valid({ meetingKeywords: ['R&D team'] }))[0]!.meetingKeywords).toEqual(['R&D team']);
+  });
+
+  it('allows at most 20 meetingKeywords per client', () => {
+    const words = (n: number) => Array.from({ length: n }, (_, i) => `word${i}`);
+    expect(parseGroupsFile(valid({ meetingKeywords: words(20) }))[0]!.meetingKeywords).toHaveLength(20);
+    expect(() => parseGroupsFile(valid({ meetingKeywords: words(21) }))).toThrowError(/meetingKeywords at most 20 per client/);
+  });
+});
