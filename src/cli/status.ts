@@ -22,6 +22,8 @@ export function formatStatus(i: {
   now: Date;
   /** Speech-to-text copies the agent gave up deleting at the provider (sttForgetsGivenUp); missing or 0: no line. */
   sttCopiesLeft?: number;
+  /** Voice-note speech-to-text copies the agent gave up deleting at the provider (mediaSttForgetsGivenUp); missing or 0: no line. */
+  voiceCopiesLeft?: number;
 }): string {
   const lines: string[] = [];
   const s = i.snapshot;
@@ -41,15 +43,19 @@ export function formatStatus(i: {
     if (s.publishFailingSince) lines.push(`Drive:       failing since ${stamp(s.publishFailingSince)}`);
     if (s.ingestFailures > 0) lines.push(`Messages not saved: ${s.ingestFailures} (see wa-agent.out.log)`);
     if (s.media) {
-      lines.push(`Files:       ${s.media.pending} waiting to be read · ${s.media.failedRecent} could not be read (24 h) · ${s.media.uploadFailed} not uploaded to Drive`);
+      // Missing in snapshots written before Phase 2b.
+      const refused = s.media.sttRefused ?? 0;
+      // "including": these are part of the files waiting, not more of them.
+      const voice = refused > 0 ? ` · including ${refused} voice note${refused === 1 ? '' : 's'} waiting (speech key refused)` : '';
+      lines.push(`Files:       ${s.media.pending} waiting to be read · ${s.media.failedRecent} could not be read (24 h) · ${s.media.uploadFailed} not uploaded to Drive${voice}`);
     }
     if (s.meetings) {
       const m = s.meetings.stats;
       const extra = `${m.noAccess > 0 ? `, ${m.noAccess} no access` : ''}${m.tooLong > 0 ? `, ${m.tooLong} too long` : ''}`;
       lines.push(`Meetings:    ${m.done} done, ${m.waiting} waiting, ${m.unassigned} unassigned, ${m.failed} failed${extra}`);
     }
-    // The split is shown only with meetings, where speech-to-text spend matters.
-    const split = s.meetings && s.spendByKind ? ` (AI $${s.spendByKind.ai.toFixed(2)}, speech $${s.spendByKind.stt.toFixed(2)})` : '';
+    // The split is shown with meetings, where speech-to-text spend matters, and once voice notes have cost speech spend.
+    const split = s.spendByKind && (s.meetings || s.spendByKind.stt > 0) ? ` (AI $${s.spendByKind.ai.toFixed(2)}, speech $${s.spendByKind.stt.toFixed(2)})` : '';
     lines.push(`Spend today: ${lk}$${s.spentToday.toFixed(2)} of $${s.capUsd.toFixed(2)}${split}`);
     lines.push(`Disk free:   ${s.freeGb === null ? 'unknown' : `${s.freeGb.toFixed(1)} GB`}`);
   }
@@ -57,6 +63,12 @@ export function formatStatus(i: {
   const left = i.sttCopiesLeft ?? 0;
   if (left > 0) {
     lines.push(`Speech copies: ${left} speech-to-text ${left === 1 ? 'copy' : 'copies'} could not be deleted from the provider; see SETUP (Meeting summaries)`);
+  }
+  const voiceLeft = i.voiceCopiesLeft ?? 0;
+  if (voiceLeft > 0) {
+    lines.push(
+      `Voice copies: ${voiceLeft} speech-to-text ${voiceLeft === 1 ? 'copy' : 'copies'} of voice notes could not be deleted from the provider; see SETUP (Voice notes)`,
+    );
   }
   lines.push('Clients:');
   const batches = new Map(i.batches.map((b) => [b.clientId, b]));
