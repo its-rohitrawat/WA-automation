@@ -101,8 +101,8 @@ describe('formatStatus', () => {
   it('adds the voice notes waiting for a refused speech key to the Files line, only when there are some (Phase 2b)', () => {
     const files = { pending: 3, stale: 0, spendCap: 0, failedRecent: 1, uploadFailed: 0 };
     const three = formatStatus({ ...base, snapshot: { ...snapshot, media: { ...files, sttRefused: 2 } } });
-    expect(three).toMatch(/^Files: {7}3 waiting to be read · 1 could not be read \(24 h\) · 0 not uploaded to Drive · 2 voice notes waiting \(speech key refused\)$/m);
-    expect(formatStatus({ ...base, snapshot: { ...snapshot, media: { ...files, sttRefused: 1 } } })).toContain(' · 1 voice note waiting (speech key refused)');
+    expect(three).toMatch(/^Files: {7}3 waiting to be read · 1 could not be read \(24 h\) · 0 not uploaded to Drive · including 2 voice notes waiting \(speech key refused\)$/m);
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, media: { ...files, sttRefused: 1 } } })).toContain(' · including 1 voice note waiting (speech key refused)');
     const none = /^Files: {7}3 waiting to be read · 1 could not be read \(24 h\) · 0 not uploaded to Drive$/m;
     expect(formatStatus({ ...base, snapshot: { ...snapshot, media: { ...files, sttRefused: 0 } } })).toMatch(none);
     // A snapshot written before Phase 2b has no sttRefused.

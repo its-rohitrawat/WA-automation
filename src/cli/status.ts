@@ -45,7 +45,8 @@ export function formatStatus(i: {
     if (s.media) {
       // Missing in snapshots written before Phase 2b.
       const refused = s.media.sttRefused ?? 0;
-      const voice = refused > 0 ? ` · ${refused} voice note${refused === 1 ? '' : 's'} waiting (speech key refused)` : '';
+      // "including": these are part of the files waiting, not more of them.
+      const voice = refused > 0 ? ` · including ${refused} voice note${refused === 1 ? '' : 's'} waiting (speech key refused)` : '';
       lines.push(`Files:       ${s.media.pending} waiting to be read · ${s.media.failedRecent} could not be read (24 h) · ${s.media.uploadFailed} not uploaded to Drive${voice}`);
     }
     if (s.meetings) {
