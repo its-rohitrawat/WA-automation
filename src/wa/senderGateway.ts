@@ -184,6 +184,11 @@ const FAILURE_STATE: Partial<Record<OpenFailure, SenderState>> = {
 export interface SenderGatewayOptions {
   /** REPORT_RECIPIENT: the founder's number, digits only. The only chat this sender ever writes to. */
   recipient: string;
+  /**
+   * The number the founder-number reader is linked to (digits of its creds.me.id), which may differ from recipient. Like
+   * recipient, it never sends: a spare-number link to it is refused ('self_send').
+   */
+  founderNumber?: string;
   factory: SenderSocketFactory;
   /** The spare number's session. Undefined when the stored session could not be opened or read. */
   auth: EncryptedAuth | undefined;
@@ -225,7 +230,7 @@ export class SenderGateway implements ReportSender {
       ? (opts.authProblem ?? 'unreadable')
       : !opts.auth.hasSession
         ? 'not_linked'
-        : this.#linkedToRecipient(opts.auth)
+        : this.#linkedToFounder(opts.auth)
           ? 'self_send'
           : 'idle';
     this.#status = { state, since: this.#clock.now().toISOString(), lastErrorCode: null };
@@ -246,8 +251,9 @@ export class SenderGateway implements ReportSender {
       this.#setState('not_linked', null);
       return { status: 'failed', code: 'not_linked' };
     }
-    // The link-sender QR code was scanned with the founder's phone: sending would come from the founder's own number.
-    if (this.#linkedToRecipient(auth)) {
+    // The link-sender QR code was scanned with the founder's phone (the recipient's, or the one the reader is linked to):
+    // sending would come from the founder's own number.
+    if (this.#linkedToFounder(auth)) {
       this.#setState('self_send', null);
       return { status: 'failed', code: 'self_send' };
     }
@@ -335,9 +341,10 @@ export class SenderGateway implements ReportSender {
     });
   }
 
-  /** True when the saved link is the recipient's own number. The founder's number never sends. */
-  #linkedToRecipient(auth: EncryptedAuth): boolean {
-    return linkedNumber(auth) === this.#opts.recipient;
+  /** True when the saved link is the recipient's number or the founder reader's number. The founder's number never sends. */
+  #linkedToFounder(auth: EncryptedAuth): boolean {
+    const linked = linkedNumber(auth);
+    return linked !== undefined && (linked === this.#opts.recipient || linked === this.#opts.founderNumber);
   }
 
   #setState(state: SenderState, code: number | null): void {

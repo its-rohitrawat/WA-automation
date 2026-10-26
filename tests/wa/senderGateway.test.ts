@@ -145,6 +145,40 @@ describe('SenderGateway', () => {
     }
   });
 
+  it("fails definitely, without connecting, when the saved link is the founder reader's own number, also when it is not REPORT_RECIPIENT", async () => {
+    const FOUNDER = '919811112222';
+    for (const id of [`${FOUNDER}:7@s.whatsapp.net`, `${FOUNDER}@s.whatsapp.net`]) {
+      const auth = senderAuth(true);
+      auth.state.creds.me = { id, name: 'Founder' };
+      const { factory, sockets } = scriptedFactory();
+      const gw = new SenderGateway({ recipient: RECIPIENT, founderNumber: FOUNDER, factory, auth, connectTimeoutMs: 1_000, lingerMs: 0 });
+      expect(gw.status().state).toBe('self_send');
+      expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'self_send' });
+      expect(gw.status().state).toBe('self_send');
+      expect(sockets).toHaveLength(0);
+    }
+    // sendReport checks again at send time, not only at construction.
+    const auth = senderAuth(true);
+    auth.state.creds.me = { id: '919800000099:2@s.whatsapp.net', name: 'Spare' };
+    const { factory, sockets } = scriptedFactory();
+    const gw = new SenderGateway({ recipient: RECIPIENT, founderNumber: FOUNDER, factory, auth, connectTimeoutMs: 1_000, lingerMs: 0 });
+    expect(gw.status().state).toBe('idle');
+    auth.state.creds.me = { id: `${FOUNDER}:7@s.whatsapp.net`, name: 'Founder' };
+    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'self_send' });
+    expect(gw.status().state).toBe('self_send');
+    expect(sockets).toHaveLength(0);
+  });
+
+  it('sends normally with a founder number set when the saved link is a third number', async () => {
+    const auth = senderAuth(true);
+    auth.state.creds.me = { id: '919800000099:2@s.whatsapp.net', name: 'Spare' };
+    const { factory, sockets } = scriptedFactory();
+    const gw = new SenderGateway({ recipient: RECIPIENT, founderNumber: '919811112222', factory, auth, connectTimeoutMs: 1_000, lingerMs: 0 });
+    expect(gw.status().state).toBe('idle');
+    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(sockets).toHaveLength(1);
+  });
+
   it('sends normally when the saved link is another number', async () => {
     const auth = senderAuth(true);
     auth.state.creds.me = { id: '919800000099:2@s.whatsapp.net', name: 'Spare' };

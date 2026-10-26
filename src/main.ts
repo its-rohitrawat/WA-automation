@@ -20,7 +20,7 @@ import { createLogger, silentLogger } from './util/logger.ts';
 import { AllowList } from './wa/allowlist.ts';
 import { openSessionDb, SessionDecryptError, useEncryptedAuthState } from './wa/authState.ts';
 import { baileysSocketFactory, WhatsAppGateway } from './wa/gateway.ts';
-import { baileysSenderSocketFactory } from './wa/senderGateway.ts';
+import { baileysSenderSocketFactory, linkedNumber } from './wa/senderGateway.ts';
 
 /** Expected startup refusal. The message is safe to print. */
 class StartupExit extends Error {}
@@ -84,9 +84,13 @@ async function main(): Promise<void> {
     // stops the service: the founder-number reader runs as usual, each day's report fails until the deadline and is then
     // skipped, and Health says to run link-sender (or link-sender --reset).
     // openMorningReport (tested) opens data/sender-session.db only, and logs only the recipient's last 4 digits.
+    // founderNumber: the founder reader's own linked number. A spare-number link to it never sends, even when it is
+    // not REPORT_RECIPIENT.
     let report: AppReportDeps | undefined;
     if (env.REPORT_ENABLED) {
-      const started = openMorningReport({ env, masterKey: key, log, factory: baileysSenderSocketFactory(silentLogger()) });
+      const started = openMorningReport({
+        env, masterKey: key, log, factory: baileysSenderSocketFactory(silentLogger()), founderNumber: linkedNumber(auth),
+      });
       senderDb = started.senderDb;
       report = started.report;
     }

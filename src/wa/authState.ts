@@ -1,5 +1,5 @@
 import { createHmac, hkdfSync } from 'node:crypto';
-import { closeSync, mkdirSync, openSync, readSync, statSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
 import { BufferJSON, initAuthCreds, proto } from 'baileys';
@@ -60,6 +60,18 @@ export interface EncryptedAuth {
   hasSession: boolean;
 }
 
+/** How a session's rows are named and sealed: keyed-hash row names, and values encrypted with the row name bound in. */
+function sessionCodec(key: Buffer) {
+  const derive = (info: string): Buffer => Buffer.from(hkdfSync('sha256', key, Buffer.alloc(0), info, 32));
+  const rowKey = derive('wa-session-row');
+  const valueKey = derive('wa-session-value');
+  return {
+    valueKey,
+    rowId: (name: string): string => createHmac('sha256', rowKey).update(name).digest('hex'),
+    open: (id: string, blob: Buffer): unknown => JSON.parse(decrypt(valueKey, blob, Buffer.from(id)).toString('utf8'), BufferJSON.reviver),
+  };
+}
+
 /** Writes the canary row when the table is empty. */
 export function useEncryptedAuthState(db: Db, key: Buffer): EncryptedAuth {
   const getStmt = db.prepare('SELECT v FROM auth WHERE k = ?');
@@ -67,13 +79,7 @@ export function useEncryptedAuthState(db: Db, key: Buffer): EncryptedAuth {
   const getCount = db.prepare('SELECT COUNT(*) AS n FROM auth');
   const delStmt = db.prepare('DELETE FROM auth WHERE k = ?');
 
-  const derive = (info: string): Buffer => Buffer.from(hkdfSync('sha256', key, Buffer.alloc(0), info, 32));
-  const rowKey = derive('wa-session-row');
-  const valueKey = derive('wa-session-value');
-  const rowId = (name: string): string => createHmac('sha256', rowKey).update(name).digest('hex');
-
-  const open = (id: string, blob: Buffer): unknown =>
-    JSON.parse(decrypt(valueKey, blob, Buffer.from(id)).toString('utf8'), BufferJSON.reviver);
+  const { valueKey, rowId, open } = sessionCodec(key);
   const read = (name: string): unknown => {
     const id = rowId(name);
     const row = getStmt.get(id) as { v: Buffer } | undefined;
@@ -156,6 +162,47 @@ export function useSenderAuthState(db: Db, masterKey: Buffer): EncryptedAuth {
   } catch (cause) {
     if (cause instanceof SessionDecryptError) throw new SenderSessionDecryptError({ cause });
     throw cause;
+  }
+}
+
+/**
+ * The phone number the founder's saved link (data/session.db, sealed with the master key itself) belongs to: the digits
+ * of creds.me.id before the device part (":7") or "@". It only reads, and writes nothing beside the file: the file's
+ * bytes are opened as an in-memory copy (a read-only SQLite connection would leave new -wal and -shm files next to it).
+ * Only when a -wal file with data is already there (the service did not stop cleanly) is the file opened read-only, so
+ * the newest rows are seen. No table is created and no canary written. Undefined when there is no file, no link, or the
+ * session cannot be read (another master key, a damaged file, a lock): link-sender then cannot compare, and the service
+ * compares again at every start, where it reads the founder's session anyway.
+ */
+export function readFounderNumber(file: string, key: Buffer): string | undefined {
+  if (!existsSync(file)) return undefined;
+  let db: Db | undefined;
+  try {
+    const wal = `${file}-wal`;
+    if (existsSync(wal) && statSync(wal).size > 0) {
+      db = new Database(file, { readonly: true, fileMustExist: true });
+    } else {
+      const bytes = readFileSync(file);
+      // Bytes 18 and 19 mark a WAL-mode file. SQLite opens an in-memory copy only with the legacy (rollback) marks; the
+      // copy is changed, never the file.
+      if (bytes.length >= 20 && bytes[18] === 2 && bytes[19] === 2) bytes[18] = bytes[19] = 1;
+      db = new Database(bytes, { readonly: true });
+    }
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'auth'").get()) return undefined;
+    const { rowId, open } = sessionCodec(key);
+    const id = rowId('creds');
+    const row = db.prepare('SELECT v FROM auth WHERE k = ?').get(id) as { v: Buffer } | undefined;
+    if (!row) return undefined;
+    const me = (open(id, row.v) as AuthenticationCreds | null)?.me?.id;
+    return me ? me.split(/[:@]/)[0] : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // best effort
+    }
   }
 }
 

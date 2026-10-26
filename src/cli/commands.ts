@@ -21,8 +21,8 @@ import { silentLogger } from '../util/logger.ts';
 import { istDate, istShortDate, istTime } from '../util/time.ts';
 import { AllowList } from '../wa/allowlist.ts';
 import {
-  openSenderSession, openSessionDb, resetSession, SenderSessionDecryptError, SessionDecryptError, useEncryptedAuthState, useSenderAuthState,
-  type EncryptedAuth,
+  openSenderSession, openSessionDb, readFounderNumber, resetSession, SenderSessionDecryptError, SessionDecryptError, useEncryptedAuthState,
+  useSenderAuthState, type EncryptedAuth,
 } from '../wa/authState.ts';
 import { baileysSocketFactory, WhatsAppGateway, type GatewayState, type SocketFactory } from '../wa/gateway.ts';
 import { Ingestor } from '../wa/ingest.ts';
@@ -371,7 +371,8 @@ async function confirmChange(deps: CliDeps, question: string): Promise<boolean> 
 
 /**
  * Links the spare number that sends the morning report. Only data/sender-session.db is written (with --reset, a damaged
- * file is renamed aside, never deleted); the founder's session and the tracker are not opened. It sends nothing.
+ * file is renamed aside, never deleted). The founder's session is only read, read-only, to refuse a link from the
+ * founder's own number; the tracker is not opened. It sends nothing.
  */
 export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps): Promise<void> {
   const { env, out } = deps;
@@ -437,8 +438,12 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
       },
     });
     if (!result.ok) throw new Error(SENDER_ADVICE[result.code]);
-    // The founder's number must never send. REPORT_RECIPIENT may not be set yet; SenderGateway checks again at send time.
-    if (env.REPORT_RECIPIENT && linkedNumber(auth) === env.REPORT_RECIPIENT) {
+    // The founder's number must never send: neither REPORT_RECIPIENT (which may not be set yet) nor the number the
+    // founder reader is linked to (session.db, only read here). SenderGateway checks both again at service start and at
+    // send time.
+    const linked = linkedNumber(auth);
+    const founder = readFounderNumber(sessionDbPath(env.DATA_DIR), key);
+    if (linked !== undefined && ((env.REPORT_RECIPIENT && linked === env.REPORT_RECIPIENT) || linked === founder)) {
       resetSession(senderDb!); // the spare number's session rows only: this link is never used
       throw new Error(
         "That QR code was scanned with the founder's phone. On the founder's phone remove the new 'WA Agent' linked device (the one linked just now, not the older one the tracker uses), then run link-sender again and scan with the SPARE phone.",

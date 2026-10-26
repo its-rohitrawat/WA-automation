@@ -29,11 +29,11 @@ function capture() {
   return { log: createLogger('info', dest), out: () => lines.join(''), records: () => lines.map((l) => JSON.parse(l) as Record<string, unknown>) };
 }
 
-function start(dir: string, master: Buffer) {
+function start(dir: string, master: Buffer, founderNumber?: string) {
   const env = parseEnv({ DATA_DIR: dir, REPORT_ENABLED: 'true', REPORT_RECIPIENT: RECIPIENT });
   const c = capture();
   const factory = vi.fn(() => new FakeSocket());
-  const r = openMorningReport({ env, masterKey: master, log: c.log, factory });
+  const r = openMorningReport({ env, masterKey: master, log: c.log, factory, founderNumber });
   return { ...r, ...c, factory, env };
 }
 
@@ -81,6 +81,34 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
     } finally {
       r.senderDb?.close();
     }
+  });
+
+  it("refuses to send when the spare-number link is the founder reader's own number, and never logs that number", async () => {
+    const dir = tempDir();
+    const master = randomBytes(32);
+    await linkedFile(senderSessionDbPath(dir), master, useSenderAuthState); // linked as 919800000099
+    const r = start(dir, master, '919800000099');
+    try {
+      expect(r.report.sender.status().state).toBe('self_send');
+      expect(await r.report.sender.sendReport('hi', Buffer.from('x'), 'f.xlsx')).toEqual({ status: 'failed', code: 'self_send' });
+      expect(r.factory).not.toHaveBeenCalled();
+      for (let i = 0; i + 5 <= 12; i++) expect(r.out()).not.toContain('919800000099'.slice(i, i + 5));
+    } finally {
+      r.senderDb?.close();
+    }
+    const other = start(tempDir(), master, '919800000099');
+    other.senderDb?.close();
+    expect(other.report.sender.status().state).toBe('not_linked');
+  });
+
+  it("main.ts passes the founder reader's linked number to openMorningReport as a forbidden sender", () => {
+    const src = readFileSync(join(import.meta.dirname, '../../src/main.ts'), 'utf8');
+    const call = /openMorningReport\(\{([^}]*)\}\)/.exec(src);
+    expect(call).not.toBeNull();
+    expect(call![1]).toMatch(/(?:^|[\s,{])founderNumber: linkedNumber\(auth\)/);
+    // auth is the founder's session (session.db), opened before the report starts.
+    expect(src).toMatch(/const auth = useEncryptedAuthState\(sessionDb, key\);/);
+    expect(src.indexOf('const auth = useEncryptedAuthState(sessionDb, key);')).toBeLessThan(src.indexOf('openMorningReport('));
   });
 
   it("never uses the founder's session: a linked session.db leaves the spare number unlinked", async () => {

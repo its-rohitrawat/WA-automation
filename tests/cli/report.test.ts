@@ -14,7 +14,7 @@ import { openDb, type Db } from '../../src/store/db.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
 import { claimReport, finishReport, REPORT_REQUEST_KEY, reportFor, reportRequest, retryReport, skipReport } from '../../src/store/reports.ts';
 import { acquireLock } from '../../src/util/lock.ts';
-import { openSessionDb, SenderSessionDecryptError, useSenderAuthState } from '../../src/wa/authState.ts';
+import { openSessionDb, SenderSessionDecryptError, useEncryptedAuthState, useSenderAuthState } from '../../src/wa/authState.ts';
 import type { SenderSocketFactory } from '../../src/wa/senderGateway.ts';
 import { closeWith, FakeSocket, SEND_METHODS } from '../helpers/fakeSocket.ts';
 
@@ -101,6 +101,33 @@ async function seedSender(key: Buffer = KEY): Promise<void> {
   auth.state.creds.me = { id: '919800000099:2@s.whatsapp.net', name: 'Spare' };
   await auth.saveCreds();
   sdb.close();
+}
+
+/** The founder reader's own number (session.db), deliberately not REPORT_RECIPIENT. */
+const FOUNDER = '919811112222';
+
+/** Writes the founder's linked session (data/session.db, the master key itself), as `cli link` does. */
+async function seedFounder(key: Buffer = KEY): Promise<void> {
+  const db = openSessionDb(sessionDbPath(dataDir));
+  const auth = useEncryptedAuthState(db, key);
+  auth.state.creds.me = { id: `${FOUNDER}:7@s.whatsapp.net`, name: 'Founder' };
+  await auth.saveCreds();
+  db.close();
+}
+
+/** A spare-number socket factory whose QR code is scanned by the phone with this number. */
+function scannedBy(number: string): SenderSocketFactory {
+  return (auth) => {
+    const s = new FakeSocket();
+    sockets.push(s);
+    queueMicrotask(() => {
+      s.emit('connection.update', { qr: 'QR-1' });
+      auth.creds.me = { id: `${number}:5@s.whatsapp.net`, name: 'Phone' };
+      s.emit('creds.update', { me: auth.creds.me });
+      open(s);
+    });
+    return s;
+  };
 }
 
 const senderLinked = (): boolean => {
@@ -251,6 +278,49 @@ describe('cli link-sender', () => {
     for (const s of sockets) for (const name of SEND_METHODS) expect(s[name]).not.toHaveBeenCalled();
     const lock = await acquireLock(dataDir); // released after the failure
     await lock.release();
+  });
+
+  it("refuses a link made with the founder reader's phone even when it is not REPORT_RECIPIENT, also with REPORT_RECIPIENT unset", async () => {
+    await seedFounder();
+    const founderFile = readFileSync(sessionDbPath(dataDir));
+    const envs: Record<string, string>[] = [{}, { REPORT_ENABLED: 'false', REPORT_RECIPIENT: '' }];
+    for (const env of envs) {
+      lines = [];
+      sockets = [];
+      const err = await linkSenderCommand({ reset: false }, { ...deps(env), senderSocketFactory: scannedBy(FOUNDER) }).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(Error);
+      const message = (err as Error).message;
+      expect(message).toContain("scanned with the founder's phone");
+      expect(message).toContain('SPARE phone');
+      expect(message).not.toContain(FOUNDER);
+      expect(out()).not.toContain('Spare number linked.');
+      expect(senderLinked()).toBe(false); // the spare number's session rows were cleared
+      for (const s of sockets) for (const name of SEND_METHODS) expect(s[name]).not.toHaveBeenCalled();
+      // The founder's session was only read: the file is byte for byte the same, with no -wal or -shm left beside it.
+      expect(readFileSync(sessionDbPath(dataDir)).equals(founderFile)).toBe(true);
+      expect(readdirSync(dataDir).filter((f) => f.startsWith('session.db'))).toEqual(['session.db']);
+    }
+  });
+
+  it("links a third number while the founder's session exists, and leaves the founder's session unchanged", async () => {
+    await seedFounder();
+    const founderFile = readFileSync(sessionDbPath(dataDir));
+    await linkSenderCommand({ reset: false }, { ...deps(), senderSocketFactory: scannedBy('919800000099') });
+    expect(out()).toContain('Spare number linked.');
+    expect(senderLinked()).toBe(true);
+    expect(readFileSync(sessionDbPath(dataDir)).equals(founderFile)).toBe(true);
+    expect(readdirSync(dataDir).filter((f) => f.startsWith('session.db'))).toEqual(['session.db']);
+  });
+
+  it("a founder session that this key cannot read does not block linking (the service checks again at start)", async () => {
+    await seedFounder(OTHER_KEY);
+    const founderFile = readFileSync(sessionDbPath(dataDir));
+    await linkSenderCommand({ reset: false }, { ...deps(), senderSocketFactory: scannedBy('919800000099') });
+    expect(out()).toContain('Spare number linked.');
+    expect(readFileSync(sessionDbPath(dataDir)).equals(founderFile)).toBe(true);
   });
 
   it('a session written with another master key: without --reset it says to reset and changes nothing', async () => {

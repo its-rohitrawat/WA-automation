@@ -406,7 +406,7 @@ The send started but did not finish cleanly (a timeout, or the service stopped m
   5. **Start the service again** (see "If the service will not start" below). The founder's link and the tracker are not touched.
 
   The `sender-session.db.damaged-…` files in `C:\wa-agent\data` can be deleted (or moved to the backup folder) once the new link works and `report status` is clean.
-- **"the sender is linked to the founder's own number"** (the `link-sender` QR code was scanned with the founder's phone; the agent never sends from the founder's number):
+- **"the sender is linked to the founder's own number"** (the `link-sender` QR code was scanned with the founder's phone: the number in `REPORT_RECIPIENT`, or the number the tracker reads; the agent never sends from either):
   1. **Stop the service safely** (see "If the service will not start" below).
   2. Remove the "WA Agent" device that was linked last from the founder's phone (Settings > Linked devices). Keep the older one, which the tracker uses.
   3. In the waagent window, run `npm run cli -- link-sender --reset` (type `yes`), and scan from the **spare** phone.
