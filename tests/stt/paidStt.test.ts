@@ -73,6 +73,26 @@ describe('withSttHold', () => {
     expectNoHold(spend);
   });
 
+  // Callers without hooks (Phase 2b's voice notes) must get the same booking as callers with them.
+  it('releases the hold on an SttHttpError when no hooks are given', async () => {
+    const { spend, rows } = setup();
+    const err = new SttHttpError(401);
+    await expect(withSttHold(spend, 0.2, 'media 7', () => Promise.reject(err))).rejects.toBe(err);
+    expect(rows()).toEqual([]);
+    expectNoHold(spend);
+  });
+
+  it.each([
+    ['no answer', new SttNoAnswerError('timeout'), 'media 7 (unknown, estimated)'],
+    ['a failed job', new SttJobError('failed'), 'media 7 (job failed, estimated)'],
+    ['anything else', new TypeError('boom'), 'media 7 (unknown, estimated)'],
+  ])('books the ceiling on %s when no hooks are given', async (_name, err, detail) => {
+    const { spend, rows } = setup();
+    await expect(withSttHold(spend, 0.2, 'media 7', () => Promise.reject(err))).rejects.toBe(err);
+    expect(rows()).toEqual([{ kind: 'stt', usd: 0.2, detail }]);
+    expectNoHold(spend);
+  });
+
   it('a hold booked at shutdown is booked as stt, its owner is told, and the late answer is not booked again', async () => {
     const { spend, rows } = setup();
     let finish: (v: { result: string; costUsd: number }) => void = () => {};
