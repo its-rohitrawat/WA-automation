@@ -589,10 +589,12 @@ CREATE TABLE media_stt_forget (
 
 - [ ] **Step 1: Write the failing tests** against a seeded database (no service, no network):
   - `STT_PROVIDER none`: prints "Speech-to-text is not set up (STT_PROVIDER is none). Nothing changed." and changes nothing.
-  - **Dry run** (no `--yes`): prints the count, the minutes at most (from file sizes) and the cost ceiling (`voiceCeilingUsd` per file, summed); nothing changes.
+  - **Dry run** (no `--yes`): prints the count, the minutes and two cost figures; nothing changes. The cost never understates: the service holds and books each note at up to `max(bound, measured)` seconds, and prepare lets a measured length run to `STT_MAX_SECONDS + VOICE_LENGTH_TOLERANCE_S`. So the line is "Cost: about $X from the file sizes (speech, <provider> list price); at most $Y if every file runs to the STT_MAX_SECONDS limit (N seconds)." X sums `voiceCeilingUsd(provider, bound + VOICE_LENGTH_TOLERANCE_S, inr)` per sendable file; Y is the sendable count × `voiceCeilingUsd(provider, STT_MAX_SECONDS + VOICE_LENGTH_TOLERANCE_S, inr)`; both are rounded up to the cent. The minutes line says "about M minutes" (the bounds plus the tolerance, rounded up). A test pins X and Y for a known set of files.
   - Files whose size implies more than `STT_MAX_SECONDS` are counted as "too long, skipped" and never queued (N4).
-  - Files the configured transcriber cannot send (`canSend(row.mimeType)` false: ffmpeg missing, N2) are counted as "needs ffmpeg, skipped" and never queued, so no file is queued only to finish `format_not_supported` again. They stay listed (`VoiceBacklogRow.mimeType`, Task 4 review C), so installing ffmpeg and running the command again picks them up.
-  - `--client CODE` limits to that client; an unknown code is refused by name.
+  - Files the configured transcriber cannot send (`canSend(row.mimeType)` false: ffmpeg missing, N2) are counted as "needs ffmpeg, skipped" and never queued, so no file is queued only to finish `format_not_supported` again. They stay listed (`VoiceBacklogRow.mimeType`, Task 4 review C), so installing ffmpeg and running the command again picks them up. The service finds ffmpeg only at startup, so the skip line says "after installing ffmpeg, restart the service, then run this again".
+  - `--client CODE` limits to that client (spaces around the code and any case work); an unknown code is refused by name.
+  - A backlog row with no file size is counted as too long and never queued.
+  - A counted row that changes between the listing and the queueing (a note set, its message deleted for everyone) is left alone: "N queued" and "1 changed since they were counted and were left alone."
   - **`--yes`:** the rows become pending with `backlog = 1`; after a fake extractor finishes them, no message is re-queued and no flag is set.
   - Rows with a note or text are untouched; nothing is printed that comes from a transcript, a file name or a key.
 - [ ] **Step 2: Run** the file. Expected: FAIL.
@@ -658,7 +660,7 @@ program
   - (e) `{voice note, being transcribed}` → no task invented.
   - (f) A late transcript re-check → the task is added once.
   - The scorer tests (`tests/golden/score.test.ts`) keep passing; they do not call the AI.
-- [ ] **`docs/SETUP.md`:** replace the "Voice notes and audio files … not transcribed" rows and lines (around lines 246, 262 and 270) with the 2b behaviour. Add a "Voice notes" section: the settings (V9, `STT_MAX_SECONDS`), the privacy steps on the winning account including telling clients (V7, N1), the cost per minute, the limits (V2, V5), the formats and ffmpeg (N2), the backlog command (V6, N4), and the health line.
+- [ ] **`docs/SETUP.md`:** replace the "Voice notes and audio files … not transcribed" rows and lines (around lines 246, 262 and 270) with the 2b behaviour. Add a "Voice notes" section: the settings (V9, `STT_MAX_SECONDS`), the privacy steps on the winning account including telling clients (V7, N1), the cost per minute, the limits (V2, V5), the formats and ffmpeg (N2), the backlog command (V6, N4), and the health line. Also the `cli status` additions: the "including N voice notes waiting (speech key refused)" part of the Files line, and the "Voice copies:" line. For "Voice copies:", copy Phase 3's "Speech copies" paragraph (SETUP.md, around line 604): what it means, what to do (delete the copies by hand in the provider's history), and that the count does not go down after a manual deletion.
 - [ ] **Spec amendments file:** blocking (V1), the transcript block format, storage as `extract`, forwarded (V4), the backlog (V6), N1–N4, and `VoiceTranscriber` replacing the §7.4 / old `types.ts` shapes.
 - [ ] **Commit.**
 

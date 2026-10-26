@@ -12,6 +12,7 @@ import { DRIVE_SCOPES, hasMeetingScopes, MEETING_SCOPES, TokenStore, type Consen
 import { syncClients } from '../../src/store/clients.ts';
 import { openDb } from '../../src/store/db.ts';
 import { getKv } from '../../src/store/kv.ts';
+import { insertMedia, mediaSttForgetsGivenUp, messageRowId } from '../../src/store/media.ts';
 import { insertFound, sttForgetsGivenUp } from '../../src/store/meetings.ts';
 import { insertMessage } from '../../src/store/messages.ts';
 import { acquireLock } from '../../src/util/lock.ts';
@@ -590,5 +591,28 @@ describe('status command', () => {
     db.close();
     statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
     expect(out()).toContain('Speech copies: 2 speech-to-text copies could not be deleted from the provider; see SETUP (Meeting summaries)');
+  });
+
+  it('counts the voice-note copies given up the same way, on a line of their own (Phase 2b)', () => {
+    statusCommand(deps());
+    expect(out()).not.toContain('Voice copies');
+    lines.length = 0;
+    const db = openDb(trackerDbPath(dataDir));
+    syncClients(db, [MEHTA]);
+    insertMessage(db, { waId: 'v1', clientId: 1, senderJid: 'a@s.whatsapp.net', senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T08:00:00.000Z', text: null, quotedWaId: null, mediaType: 'voice' });
+    const mediaId = insertMedia(db, {
+      messageId: messageRowId(db, 1, 'v1')!, clientId: 1, kind: 'voice', status: 'done', mimeType: 'audio/ogg; codecs=opus', fileName: null, fileSize: 9000, seconds: 12,
+      forwarded: false, refEnc: null, errorCode: null, createdAt: '2026-10-19T08:00:00.000Z',
+    });
+    const add = (provider: 'elevenlabs' | 'openai', ref: string, attempts: number) =>
+      db.prepare('INSERT INTO media_stt_forget (media_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, ?)').run(mediaId, provider, ref, '2026-10-19T08:00:00.000Z', attempts);
+    add('elevenlabs', 'tr-1', MAX_FORGET_ATTEMPTS); // last try used
+    add('elevenlabs', 'tr-2', 1); // still being tried
+    add('openai', 'tr-3', 0); // not the provider set up now
+    expect(mediaSttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'elevenlabs' })).toBe(2);
+    db.close();
+    statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
+    expect(out()).toContain('Voice copies: 2 speech-to-text copies of voice notes could not be deleted from the provider; see SETUP (Voice notes)');
+    expect(out()).not.toContain('Speech copies');
   });
 });

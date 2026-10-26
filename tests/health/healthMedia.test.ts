@@ -15,6 +15,7 @@ function setup(freeBytes: () => number | null = () => 200e9) {
 }
 const counts = (o: Partial<MediaHealth> = {}): MediaHealth => ({ pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, ...o });
 const SPEND_LINE = '⚠️ Daily spend cap reached. Paused until midnight IST';
+const STT_REFUSED_LINE = '⚠️ Voice notes are not being transcribed: the speech-to-text key was refused.';
 const budgetLine = (n: number) => `⚠️ ${n} shared file${n === 1 ? '' : 's'} waiting for today's AI budget (read after midnight IST)`;
 
 describe('Health and shared files', () => {
@@ -119,6 +120,58 @@ describe('Health and shared files', () => {
     h.recordOutcome(2, { status: 'paused' });
     h.recordOutcome(2, { status: 'busy' });
     expect(h.line().text).toBe(SPEND_LINE);
+  });
+
+  it('warns when voice notes wait because the speech-to-text key was refused (Phase 2b)', () => {
+    const { h } = setup();
+    h.setMedia(counts({ pending: 2, sttRefused: 2 }));
+    expect(h.line()).toEqual({ ok: false, text: STT_REFUSED_LINE });
+    expect(h.workbookLine()).toEqual({ ok: false, text: STT_REFUSED_LINE });
+    h.setMedia(counts({ pending: 1, sttRefused: 1 }));
+    expect(h.line().text).toBe(STT_REFUSED_LINE);
+    h.setMedia(counts({ pending: 2 }));
+    expect(h.line().ok).toBe(true);
+  });
+
+  it('the key-refused line comes after the long-wait and upload lines and before the budget line (Phase 2b)', () => {
+    const { h } = setup(() => 5e9);
+    h.setMedia(counts({ pending: 3, stale: 1, sttRefused: 1, spendCap: 1 }));
+    expect(h.line().text).toBe('⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.');
+    h.setMedia(counts({ pending: 2, uploadFailed: 1, sttRefused: 1, spendCap: 1 }));
+    expect(h.line().text).toBe('⚠️ 1 file could not be uploaded to Drive. See docs/SETUP.md.');
+    h.setMedia(counts({ pending: 2, sttRefused: 1, spendCap: 1 }));
+    expect(h.line().text).toBe(STT_REFUSED_LINE);
+    h.setMedia(counts({ pending: 1, spendCap: 1 }));
+    expect(h.line().text).toBe(budgetLine(1));
+    // It outranks low disk, as the other media lines do.
+    h.setMedia(counts({ pending: 1, sttRefused: 1 }));
+    expect(h.line().text).toBe(STT_REFUSED_LINE);
+    h.setMedia(counts());
+    expect(h.line().text).toBe('⚠️ Low disk: 5.0 GB free');
+  });
+
+  it('the key-refused line yields to the spend-cap line when the cap is reached (Phase 2b)', () => {
+    const { h, spend } = setup();
+    h.setMedia(counts({ pending: 1, sttRefused: 1 }));
+    spend.record('ai', 1, 'batch 1');
+    expect(h.line().text).toBe(SPEND_LINE);
+  });
+
+  it('reads older snapshots whose media counts have no sttRefused, and refuses one that is not a number (Phase 2b)', () => {
+    const { db, h } = setup();
+    h.setMedia(counts({ pending: 2, sttRefused: 1 }));
+    h.persist();
+    expect(readHealthSnapshot(db)!.media).toEqual(counts({ pending: 2, sttRefused: 1 }));
+    const old = JSON.parse(JSON.stringify(h.snapshot())) as Record<string, unknown>;
+    const { sttRefused: _gone, ...before2b } = counts({ pending: 2 });
+    setKv(db, 'health', JSON.stringify({ ...old, media: before2b }));
+    expect(readHealthSnapshot(db)).toBeDefined();
+    expect(readHealthSnapshot(db)!.media).toEqual(before2b);
+    expect(readHealthSnapshot(db)!.media!.sttRefused).toBeUndefined();
+    for (const bad of ['1', null, true, {}]) {
+      setKv(db, 'health', JSON.stringify({ ...old, media: { ...before2b, sttRefused: bad } }));
+      expect(readHealthSnapshot(db)).toBeUndefined();
+    }
   });
 
   it('keeps the counts in the snapshot and still reads older snapshots without them', () => {

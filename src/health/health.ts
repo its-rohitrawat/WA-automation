@@ -14,8 +14,11 @@ const LOW_DISK_GB = 10;
 const DISCONNECT_GRACE_MS = 30 * 60_000;
 const PUBLISH_FAIL_MS = 60 * 60_000;
 const SPEND_CAP_LINE = '⚠️ Daily spend cap reached. Paused until midnight IST';
+const STT_REFUSED_LINE = '⚠️ Voice notes are not being transcribed: the speech-to-text key was refused.';
 
 export type MediaHealth = MediaStats;
+/** The shared-file counts as a snapshot stores them: snapshots written before Phase 2b have no sttRefused. */
+export type MediaSnapshot = Omit<MediaStats, 'sttRefused'> & { sttRefused?: number };
 export type { MeetingsHealth } from '../meetings/healthTypes.ts';
 
 export interface HealthSnapshot {
@@ -34,9 +37,10 @@ export interface HealthSnapshot {
   ingestFailures: number;
   /**
    * Shared files: waiting, waiting too long, waiting for the daily budget, failed in the last 24 h, Drive uploads that
-   * gave up. Missing in older snapshots.
+   * gave up, voice notes waiting for a refused speech-to-text key. Missing in older snapshots; sttRefused missing in
+   * snapshots written before Phase 2b.
    */
-  media?: MediaHealth;
+  media?: MediaSnapshot;
   /** Meeting counts and pauses; missing while meetings are switched off, and in older snapshots. */
   meetings?: MeetingsHealth;
   /** spentToday split by kind: AI calls and speech-to-text. Missing in older snapshots. */
@@ -196,6 +200,9 @@ export class Health {
       const n = this.#media.uploadFailed;
       return { ok: false, text: `⚠️ ${n} file${n === 1 ? '' : 's'} could not be uploaded to Drive. See docs/SETUP.md.` };
     }
+    // Voice notes wait for a speech-to-text key that was refused: the owner must fix STT_API_KEY. They are not counted
+    // as waiting too long (mediaStats.stale), so this line is not hidden by the one above.
+    if (this.#media.sttRefused > 0) return { ok: false, text: STT_REFUSED_LINE };
     // A paid read holds its ceiling (about $4 for a scan) while it runs, so a file can wait for the budget long before
     // the cap is reached. Nothing is paused and nothing needs the owner, so this comes after the warnings above.
     if (this.#media.spendCap > 0) {
@@ -253,9 +260,12 @@ export class Health {
 
 const MEDIA_COUNTS = ['pending', 'stale', 'spendCap', 'failedRecent', 'uploadFailed'] as const;
 
-const isMediaHealth = (m: unknown): m is MediaHealth => {
+/** sttRefused is checked separately: snapshots written before Phase 2b lack it. */
+const isMediaSnapshot = (m: unknown): m is MediaSnapshot => {
   const x = m as Record<string, unknown> | null;
-  return typeof x === 'object' && x !== null && MEDIA_COUNTS.every((k) => typeof x[k] === 'number');
+  return (
+    typeof x === 'object' && x !== null && MEDIA_COUNTS.every((k) => typeof x[k] === 'number') && (x.sttRefused === undefined || typeof x.sttRefused === 'number')
+  );
 };
 
 const MEETING_COUNTS = ['done', 'waiting', 'unassigned', 'failed', 'noAccess', 'tooLong', 'internal'] as const;
@@ -294,7 +304,7 @@ export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
     // Snapshots written before ingestFailures existed still parse.
     if (o.ingestFailures !== undefined && typeof o.ingestFailures !== 'number') return undefined;
     // Snapshots written before media counts existed still parse.
-    if (o.media !== undefined && !isMediaHealth(o.media)) return undefined;
+    if (o.media !== undefined && !isMediaSnapshot(o.media)) return undefined;
     // Snapshots written before meetings, or with meetings off, have no meetings; older ones no spend split.
     if (o.meetings !== undefined && !isMeetingsHealth(o.meetings)) return undefined;
     if (o.spendByKind !== undefined && !isSpendByKind(o.spendByKind)) return undefined;

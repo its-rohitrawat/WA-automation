@@ -44,6 +44,26 @@ const baseMime = (m: string | null): string => ((m ?? '').toLowerCase().split(';
 const OGG = new Set(['audio/ogg', 'audio/opus']);
 const MP3 = new Set(['audio/mpeg', 'audio/mp3']);
 
+/**
+ * The format a file goes in as it is, or null when it must be converted with ffmpeg first. OpenAI always gets a
+ * conversion; Sarvam and ElevenLabs take Ogg and MP3 as they are (V3, N2).
+ */
+function sendAsIs(provider: ProviderId, mimeType: string | null): AudioFormat | null {
+  if (provider === 'openai') return null;
+  const base = baseMime(mimeType);
+  if (OGG.has(base)) return 'ogg';
+  if (MP3.has(base)) return 'mp3';
+  return null;
+}
+
+/**
+ * Whether a file can be sent: as it is, or converted because ffmpeg is there (N2). The rule behind every transcriber's
+ * canSend, exported so `cli transcribe-voice` can apply it without a key or a provider.
+ */
+export function canSendVoice(provider: ProviderId, mimeType: string | null, hasFfmpeg: boolean): boolean {
+  return sendAsIs(provider, mimeType) !== null || hasFfmpeg;
+}
+
 /** The longest provider id for a stored copy that is kept (as for meetings); a longer one is not an id. */
 const MAX_REF_LENGTH = 200;
 
@@ -158,14 +178,7 @@ function folderRemover(dir: string): () => void {
 /** A VoiceTranscriber over any provider, with speaker labels off. Exported for tests (a fake provider and ffmpeg). */
 export function voiceTranscriber(provider: SttProvider, o: { inrPerUsd: number; ffmpeg: Ffmpeg | null; tmpDir: string }): VoiceTranscriber {
   const price = modelFor(provider.id, false);
-  /** The format a file is sent in as it is, or null when it must be converted first. OpenAI always gets a conversion. */
-  const asIs = (mimeType: string | null): AudioFormat | null => {
-    if (provider.id === 'openai') return null;
-    const base = baseMime(mimeType);
-    if (OGG.has(base)) return 'ogg';
-    if (MP3.has(base)) return 'mp3';
-    return null;
-  };
+  const asIs = (mimeType: string | null): AudioFormat | null => sendAsIs(provider.id, mimeType);
   const send = (part: AudioPart): Promise<ProviderResult> =>
     provider.transcribe({ path: part.path, seconds: part.seconds, offset: part.offset, format: part.format ?? 'mp3' }, { diarize: false });
   const tooLong = (measured: number | null, input: VoiceInput): boolean =>
@@ -182,7 +195,7 @@ export function voiceTranscriber(provider: SttProvider, o: { inrPerUsd: number; 
           : usable(declaredSeconds) ? Math.min(maxSeconds, declaredSeconds) : maxSeconds;
       return costUsd(price, seconds, o.inrPerUsd);
     },
-    canSend: (mimeType) => asIs(mimeType) !== null || o.ffmpeg !== null,
+    canSend: (mimeType) => canSendVoice(provider.id, mimeType, o.ffmpeg !== null),
     async prepare(input) {
       // The folder is named from the numeric id only, never from a path or name the sender gave.
       if (!Number.isSafeInteger(input.mediaId) || input.mediaId < 1) throw new Error('voice prepare: the media id is not a positive whole number');

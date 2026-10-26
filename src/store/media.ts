@@ -402,6 +402,17 @@ export function deleteMediaForget(db: Db, id: number): void {
   db.prepare('DELETE FROM media_stt_forget WHERE id = ?').run(id);
 }
 
+/**
+ * Voice-note copies the agent gave up deleting at the provider: the last try is used, or the provider that kept the copy
+ * is not the one set up now (`provider`; 'none' when speech-to-text is off), so the forget queue skips it. A count only,
+ * for `cli status`, as sttForgetsGivenUp is for meetings.
+ */
+export function mediaSttForgetsGivenUp(db: Db, o: { maxAttempts: number; provider: ProviderId | 'none' }): number {
+  return (
+    db.prepare('SELECT COUNT(*) AS n FROM media_stt_forget WHERE attempts >= ? OR provider <> ?').get(o.maxAttempts, o.provider) as { n: number }
+  ).n;
+}
+
 export interface UploadCandidate {
   id: number;
   clientId: number;

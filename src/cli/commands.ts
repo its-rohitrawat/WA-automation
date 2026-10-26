@@ -12,6 +12,7 @@ import { latestBatches } from '../store/batches.ts';
 import { listClients, syncClients } from '../store/clients.ts';
 import { openDb, tx, type Db } from '../store/db.ts';
 import { setKv } from '../store/kv.ts';
+import { mediaSttForgetsGivenUp } from '../store/media.ts';
 import { sttForgetsGivenUp } from '../store/meetings.ts';
 import { unprocessedCounts } from '../store/messages.ts';
 import { acquireLock } from '../util/lock.ts';
@@ -284,6 +285,7 @@ export function statusCommand(deps: CliDeps): void {
         unprocessed: unprocessedCounts(db),
         now: new Date(),
         sttCopiesLeft: sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: deps.env.STT_PROVIDER }),
+        voiceCopiesLeft: mediaSttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: deps.env.STT_PROVIDER }),
       }),
     );
   } finally {
