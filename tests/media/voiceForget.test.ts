@@ -167,8 +167,11 @@ describe('forgetVoiceCopies (N1)', () => {
     for (const line of lines) {
       const entry = JSON.parse(line) as Record<string, unknown>;
       expect(entry).toMatchObject({ mediaId: id, provider: 'elevenlabs' });
-      for (const key of Object.keys(entry)) expect(['level', 'time', 'msg', 'mediaId', 'provider', 'code']).toContain(key);
+      for (const key of Object.keys(entry)) expect(['level', 'time', 'msg', 'mediaId', 'provider', 'code', 'attempts']).toContain(key);
     }
     expect(out).toContain('"code":"http_500"');
+    // Each failed try says which try it was, as the meeting version does.
+    const tries = lines.map((l) => (JSON.parse(l) as { attempts?: number }).attempts).filter((a) => a !== undefined);
+    expect(tries).toEqual(Array.from({ length: MAX_FORGET_ATTEMPTS }, (_, i) => i + 1));
   });
 });

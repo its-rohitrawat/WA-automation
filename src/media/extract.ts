@@ -12,7 +12,7 @@ import { estimateCostUsd, type Prices } from '../spend/pricing.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
 import type { MediaKind, TextKind } from '../store/media.ts';
 import { AudioError } from '../stt/audio.ts';
-import { SttNoAnswerError } from '../stt/http.ts';
+import { SttHttpError, SttNoAnswerError } from '../stt/http.ts';
 import { SttBookingError, withSttHold } from '../stt/paidStt.ts';
 import type { ProviderId } from '../stt/types.ts';
 import { sizeBoundSeconds, SttPartialError, VOICE_LENGTH_TOLERANCE_S, type PreparedVoice, type VoiceResult, type VoiceTranscriber } from '../stt/voice.ts';
@@ -129,8 +129,9 @@ export function isScanReadError(e: unknown): boolean {
 }
 
 /**
- * Errors thrown after a voice note's paid call was answered, when its booking failed (Task 5 review round 1, Fix 3).
- * The provider has billed it, so a retry would pay again: the processor fails the file at once. Noted, not wrapped, as
+ * Errors thrown after a voice note's paid call was answered, when its booking failed (Task 5 review round 1, Fix 3), or
+ * after a failed call that may have been billed, when its ceiling booking failed (Task 6 review round 1, fix 1). The
+ * provider may have billed it, so a retry could pay again: the processor fails the file at once. Noted, not wrapped, as
  * scanReadErrors are.
  */
 const paidVoiceErrors = new WeakSet<object>();
@@ -267,6 +268,28 @@ export function createExtractor(d: ExtractorDeps): Extractor {
     return parsed.text ? { textKind: 'extract', text: capStored(parsed.text), pageCount: null, note: null } : NONE;
   };
 
+  /** Books a paid voice call's cost late, best effort: a failure is ignored, the first error is the one thrown. */
+  const bookLate = (usd: number, input: ExtractInput): void => {
+    try {
+      d.spend.record('stt', usd, `${label(input)} (booked late)`);
+    } catch {
+      // the first error is the one thrown
+    }
+  };
+
+  /**
+   * A voice call that failed without an answer, whose booking then failed too (Task 6 review round 1, fix 1): withSttHold
+   * threw an SttBookingError, and nothing is booked. Unless its cause is an SttHttpError (the provider refused the work:
+   * never billed, the hold was only to be freed), the call may have been billed: no answer, a failed job, a later part,
+   * or anything unknown, each of which withSttHold books at the ceiling. So the ceiling is booked late, best effort, and
+   * the error marked paid: the processor fails the file at once as stt_paid_unbooked instead of paying again.
+   */
+  const failedAndUnbooked = (e: unknown, ceiling: number, input: ExtractInput): unknown => {
+    if (!(e instanceof SttBookingError) || e.cause instanceof SttHttpError) return e;
+    bookLate(ceiling, input);
+    return paidVoiceError(e);
+  };
+
   /**
    * After a voice note's paid call was answered, its booking failed (Fix 3): withSttHold threw from settle or record,
    * or, if costUsd threw, from booking the ceiling. Best effort, each failure ignored: the cost is booked late (the
@@ -275,13 +298,7 @@ export function createExtractor(d: ExtractorDeps): Extractor {
    */
   const paidButUnbooked = async (e: unknown, paid: { result: VoiceResult; costUsd?: number }, ceiling: number, input: ExtractInput): Promise<object> => {
     const lateUsd = paid.costUsd ?? (e instanceof SttBookingError ? ceiling : null);
-    if (lateUsd !== null) {
-      try {
-        d.spend.record('stt', lateUsd, `${label(input)} (booked late)`);
-      } catch {
-        // the first error is the one thrown
-      }
-    }
+    if (lateUsd !== null) bookLate(lateUsd, input);
     const ref = paid.result.forgetRef;
     if (ref !== null && d.voice) {
       try {
@@ -334,8 +351,9 @@ export function createExtractor(d: ExtractorDeps): Extractor {
           return { result: r, costUsd };
         }));
       } catch (e) {
-        // The call failed: withSttHold booked it by its outcome. A copy its error names is noted for the processor.
-        if (paid.result === undefined) throw noteUnansweredCopy(e, v.provider);
+        // The call failed: withSttHold booked it by its outcome. A copy its error names is noted for the processor. If
+        // that booking failed too, the ceiling is booked late and the error marked paid (fix 1).
+        if (paid.result === undefined) throw failedAndUnbooked(noteUnansweredCopy(e, v.provider), ceiling, input);
         throw await paidButUnbooked(e, { ...paid, result: paid.result }, ceiling, input);
       }
       const forget = result.forgetRef === null ? null : { provider: result.provider, ref: result.forgetRef };

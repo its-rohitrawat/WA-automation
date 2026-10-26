@@ -964,6 +964,62 @@ describe('voice and audio', () => {
     });
   });
 
+  // Task 6 review round 1, fix 1: the call failed in a way that may have been billed (no answer, a failed job, a later
+  // part, anything unknown), and then withSttHold could not write its ceiling booking. The extractor books the ceiling
+  // late and marks the error paid, so the processor fails the file at once instead of paying again.
+  describe('a booking that fails after a failed call that may have been billed', () => {
+    const lateDetail = 'media 7 (booked late)';
+    const breakSettle = (spend: SpendGuard) =>
+      vi.spyOn(spend, 'settle').mockImplementationOnce((id) => {
+        spend.release(id); // as the real settle does when its write throws: the hold is freed first
+        throw new Error('database is locked');
+      });
+
+    it.each([
+      ['no answer', () => new SttNoAnswerError('timeout')],
+      ['a failed job', () => new SttJobError('failed')],
+      ['a later part failing', () => new SttPartialError(1, 2, new SttHttpError(500))],
+      ['an unknown error', () => new Error('socket hang up')],
+    ])('%s: the ceiling is booked late, once, and the error is marked paid', async (_name, error) => {
+      const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [error()] });
+      const { db, spend, extract, input } = voiceSetup(v);
+      breakSettle(spend);
+      const err = await caught(extract(input(note())));
+      expect(err).toBeInstanceOf(SttBookingError);
+      expect(isPaidVoiceError(err)).toBe(true);
+      expect(sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail: lateDetail }]);
+      expect(v.transcribed).toBe(1);
+      expect(v.disposals).toBe(1);
+    });
+
+    it('a late booking that fails too still throws the booking error, marked paid', async () => {
+      const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [new SttNoAnswerError('timeout')] });
+      const { db, spend, extract, input } = voiceSetup(v);
+      breakSettle(spend);
+      vi.spyOn(spend, 'record').mockImplementation(() => {
+        throw new Error('disk full');
+      });
+      const err = await caught(extract(input(note())));
+      expect(err).toBeInstanceOf(SttBookingError);
+      expect(isPaidVoiceError(err)).toBe(true);
+      expect(sttRows(db)).toEqual([]);
+    });
+
+    it('a refused key (SttHttpError 401) was never billed: nothing is booked late and the error is not marked paid', async () => {
+      const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [new SttHttpError(401)] });
+      const { db, spend, extract, input } = voiceSetup(v);
+      // An HTTP refusal frees the hold: here that step is what fails.
+      vi.spyOn(spend, 'release').mockImplementationOnce(() => {
+        throw new Error('database is locked');
+      });
+      const err = await caught(extract(input(note())));
+      expect(err).toBeInstanceOf(SttBookingError);
+      expect((err as Error).cause).toBeInstanceOf(SttHttpError);
+      expect(isPaidVoiceError(err)).toBe(false);
+      expect(sttRows(db)).toEqual([]);
+    });
+  });
+
   // N1 with Phase 3's M7: an ElevenLabs answer that could not be read may still name the copy it stored (the
   // SttNoAnswerError's forgetRef). The extractor has no database: it notes the copy on the error, with its own
   // transcriber's provider, and the processor writes it to media_stt_forget (Task 6).
@@ -991,7 +1047,7 @@ describe('voice and audio', () => {
       expect(voiceCopyOf(err)).toEqual({ provider: 'elevenlabs', ref: 'tr_9' });
     });
 
-    it('finds it as the cause of a booking that could not be written', async () => {
+    it('finds it as the cause of a booking that could not be written (booked late and marked paid, review round 1)', async () => {
       const { spend, extract, input } = voiceSetup(new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable('tr_9')] }));
       vi.spyOn(spend, 'settle').mockImplementationOnce((id) => {
         spend.release(id);
@@ -1000,7 +1056,20 @@ describe('voice and audio', () => {
       const err = await caught(extract(input(note())));
       expect(err).toBeInstanceOf(SttBookingError);
       expect(voiceCopyOf(err)).toEqual({ provider: 'elevenlabs', ref: 'tr_9' });
-      expect(isPaidVoiceError(err)).toBe(false);
+      expect(isPaidVoiceError(err)).toBe(true);
+    });
+
+    it('finds it two causes deep: a booking that failed after a later part failed after an unreadable answer', async () => {
+      const { spend, extract, input } = voiceSetup(new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [new SttPartialError(1, 2, unreadable('tr_9'))] }));
+      vi.spyOn(spend, 'settle').mockImplementationOnce((id) => {
+        spend.release(id);
+        throw new Error('database is locked');
+      });
+      const err = await caught(extract(input(note())));
+      expect(err).toBeInstanceOf(SttBookingError);
+      expect((err as Error).cause).toBeInstanceOf(SttPartialError);
+      expect(voiceCopyOf(err)).toEqual({ provider: 'elevenlabs', ref: 'tr_9' });
+      expect(isPaidVoiceError(err)).toBe(true);
     });
 
     it.each([

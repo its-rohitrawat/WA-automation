@@ -88,7 +88,7 @@ type SetupOptions = {
   limits?: { maxBytes: number; timeoutMs: number };
   startedAt?: Date;
   voice?: VoiceTranscriber | null;
-  afterFinish?: (mediaId: number, x: Extraction) => void;
+  afterFinish?: (mediaId: number, x: Extraction) => void | Promise<void>;
 };
 
 function setup(o: SetupOptions = {}) {
@@ -114,9 +114,12 @@ function setup(o: SetupOptions = {}) {
   /** A WhatsApp voice note (an audioMessage with ptt). */
   const shareVoice = (waId = 'PTT1'): number =>
     ingest(waId, { audioMessage: { url: 'https://mmg.whatsapp.net/v/x', directPath: '/v/x', mediaKey: MEDIA_KEY, mimetype: 'audio/ogg; codecs=opus', ptt: true, seconds: 14 } });
+  /** An audio file that is not a voice note (an audioMessage without ptt). */
+  const shareAudio = (waId = 'AUD1'): number =>
+    ingest(waId, { audioMessage: { url: 'https://mmg.whatsapp.net/v/x', directPath: '/v/x', mediaKey: MEDIA_KEY, mimetype: 'audio/mpeg', ptt: false, seconds: 40 } });
   /** A fresh processor on the same database and folder, as after a restart of the service. */
   const restart = (log: Logger = silentLogger()): MediaProcessor => new MediaProcessor({ db, dataDir, clock, log, sealer, fetcher, extract, ...more });
-  return { db, dataDir, clock, p, fetcher, extract, share, shareFile, shareVoice, restart };
+  return { db, dataDir, clock, p, fetcher, extract, share, shareFile, shareVoice, shareAudio, restart };
 }
 
 /** From now on the database refuses every update of a file and every spend booking, as on a full disk. Reads still work. */
@@ -944,6 +947,142 @@ describe('MediaProcessor: voice notes', () => {
       expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1 });
       expect(v.transcribed).toBe(1);
     });
+
+    // Review round 1, 6a: the paid rule is checked before the spend rules too.
+    it.each([false, true])('wins over the spend rules when the error is itself a SpendCapReachedError (busy: %s)', async (busy) => {
+      class PricingCapped extends FakeVoiceTranscriber {
+        override costUsd(): number {
+          throw new SpendCapReachedError({ busy });
+        }
+      }
+      const v = new PricingCapped({ provider: 'elevenlabs' });
+      const { db, p, shareVoice } = setup({ extract: realExtractor(v).extract });
+      const id = shareVoice();
+      expect((await p.process(id)).outcome).toBe('failed');
+      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1, nextAttemptAt: null });
+      expect(v.transcribed).toBe(1);
+    });
+
+    // Review round 1, fix 1: the call failed in a way that may have been billed, then its booking failed.
+    it.each([
+      ['no answer', () => new SttNoAnswerError('timeout')],
+      ['a failed job', () => new SttJobError('failed')],
+      ['a later part failing', () => new SttPartialError(1, 2, new SttHttpError(500))],
+    ])('a booking that failed after %s is booked late and fails at once', async (_name, error) => {
+      const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [error(), error()] });
+      const { spend, extract } = realExtractor(v);
+      vi.spyOn(spend, 'settle').mockImplementationOnce((rid) => {
+        spend.release(rid);
+        throw new Error('database is locked');
+      });
+      const record = vi.spyOn(spend, 'record');
+      const { db, clock, p, shareVoice } = setup({ extract });
+      const id = shareVoice();
+      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
+      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1, nextAttemptAt: null });
+      expect(record).toHaveBeenCalledExactlyOnceWith('stt', v.ceilingUsd(50), `media ${id} (booked late)`);
+      clock.advance(60 * MINUTE);
+      expect((await p.process(id)).outcome).toBe('skipped');
+      expect(v.transcribed).toBe(1);
+    });
+
+    it('a booking that failed after a refused key (401) is unchanged: never billed, it waits as stt_unavailable', async () => {
+      const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [new SttHttpError(401)] });
+      const { spend, extract } = realExtractor(v);
+      vi.spyOn(spend, 'release').mockImplementationOnce(() => {
+        throw new Error('database is locked');
+      });
+      const record = vi.spyOn(spend, 'record');
+      const { db, p, shareVoice } = setup({ extract });
+      const id = shareVoice();
+      expect((await p.process(id)).outcome).toBe('deferred');
+      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_unavailable', attempts: 0 });
+      expect(record).not.toHaveBeenCalled();
+    });
+  });
+
+  // Review round 1, fix 2: when the final failure itself cannot be written, the row is still pending in the database,
+  // but this processor never runs it again: every such run could pay the provider again.
+  describe('a never-retry failure that cannot be written', () => {
+    const refuseFail = (db: Db): void => {
+      db.exec(`CREATE TRIGGER refuse_fail BEFORE UPDATE OF status ON media WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
+    };
+
+    it('stt_paid_unbooked: the error propagates, and the next run of the file makes no extractor call', async () => {
+      const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ billedSeconds: 12 }] });
+      const { spend, extract } = realExtractor(v);
+      vi.spyOn(spend, 'settle').mockImplementation((rid) => {
+        spend.release(rid);
+        throw new Error('database is locked');
+      });
+      const s = setup({ extract });
+      const id = s.shareVoice();
+      refuseFail(s.db);
+      await expect(s.p.process(id)).rejects.toThrow('disk full');
+      expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: 1 });
+      s.clock.advance(60 * MINUTE);
+      expect(await s.p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
+      expect(s.extract).toHaveBeenCalledTimes(1);
+      expect(v.transcribed).toBe(1);
+      expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: 1 }); // not claimed again
+    });
+
+    it.each([
+      ['stt_partial', () => new SttPartialError(1, 2, new SttHttpError(500))],
+      ['stt_job_failed', () => new SttJobError('failed')],
+    ])('%s: the next run makes no extractor call', async (_code, error) => {
+      const s = setup({ extract: throwing(error) });
+      const id = s.shareVoice();
+      refuseFail(s.db);
+      await expect(s.p.process(id)).rejects.toThrow('disk full');
+      s.clock.advance(60 * MINUTE);
+      expect((await s.p.process(id)).outcome).toBe('skipped');
+      expect(s.extract).toHaveBeenCalledTimes(1);
+    });
+
+    it('the final no-answer: the next run makes no extractor call', async () => {
+      const s = setup({ extract: throwing(() => new SttNoAnswerError('timeout')) });
+      const id = s.shareVoice();
+      expect((await s.p.process(id)).outcome).toBe('deferred'); // the one retry
+      refuseFail(s.db);
+      s.clock.advance(MINUTE);
+      await expect(s.p.process(id)).rejects.toThrow('disk full');
+      s.clock.advance(60 * MINUTE);
+      expect((await s.p.process(id)).outcome).toBe('skipped');
+      expect(s.extract).toHaveBeenCalledTimes(2);
+    });
+
+    it('a failure that may be retried is not held back', async () => {
+      const s = setup({ extract: throwing(() => new SttHttpError(500)) });
+      const id = s.shareVoice();
+      refuseFail(s.db); // a deferral is not a status change, so it is still written
+      expect((await s.p.process(id)).outcome).toBe('deferred');
+      s.clock.advance(MINUTE);
+      await expect(s.p.process(id)).rejects.toThrow('disk full'); // the final stt_http_500
+      s.clock.advance(60 * MINUTE);
+      await expect(s.p.process(id)).rejects.toThrow('disk full'); // the crash rule's failure: not skipped
+      expect(s.extract).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // Review round 1, fix 3: a run that never ended may have been paid for, so a voice note or audio file gets
+  // STT_NO_ANSWER_MAX_ATTEMPTS runs in all, crashed or not. Images and documents keep MEDIA_MAX_ATTEMPTS.
+  it.each([
+    ['a voice note', 'voice'],
+    ['an audio file', 'audio'],
+  ] as const)('%s whose runs never end fails as crashed after 2 runs, not 3', async (_name, kind) => {
+    const s = setup({ extract: () => new Promise<Extraction>(() => {}) });
+    const id = kind === 'voice' ? s.shareVoice() : s.shareAudio();
+    expect(getMedia(s.db, id)!.kind).toBe(kind);
+    for (let run = 1; run <= STT_NO_ANSWER_MAX_ATTEMPTS; run++) {
+      void s.restart().process(id);
+      await vi.waitFor(() => expect(s.extract).toHaveBeenCalledTimes(run));
+      expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: run });
+      s.clock.advance(15 * MINUTE);
+    }
+    expect(await s.restart().process(id)).toEqual({ outcome: 'failed', clientId: 1 });
+    expect(getMedia(s.db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed', attempts: STT_NO_ANSWER_MAX_ATTEMPTS });
+    expect(s.extract).toHaveBeenCalledTimes(STT_NO_ANSWER_MAX_ATTEMPTS);
   });
 
   describe('finishMedia throws after a transcript that has a copy to delete', () => {
@@ -975,6 +1114,60 @@ describe('MediaProcessor: voice notes', () => {
       expect((await p.process(id)).outcome).toBe('failed');
       expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
       expect(v?.forgotten ?? null).toEqual(forgotten);
+    });
+
+    // Review round 1, fix 5: noted first, then deleted, so a failed delete leaves a row for the sweep.
+    describe('when the copy can still be noted', () => {
+      const refuseFinish = (db: Db): void => {
+        db.exec(`CREATE TRIGGER refuse_finish BEFORE UPDATE OF status ON media WHEN NEW.status = 'done' BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
+      };
+
+      it('notes the copy, deletes it and removes its row', async () => {
+        const v = new FakeVoiceTranscriber({ provider: 'elevenlabs' });
+        const { db, p, shareVoice } = setup({ extract: async () => TRANSCRIPT, voice: v });
+        const id = shareVoice();
+        refuseFinish(db);
+        expect((await p.process(id)).outcome).toBe('failed');
+        expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
+        expect(v.forgotten).toEqual(['tr_1']);
+        expect(forgetRows(db)).toEqual([]);
+      });
+
+      it('a delete that fails leaves the row, counted, for the sweep', async () => {
+        const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', forgetError: new SttHttpError(500) });
+        const { db, p, shareVoice } = setup({ extract: async () => TRANSCRIPT, voice: v });
+        const id = shareVoice();
+        refuseFinish(db);
+        expect((await p.process(id)).outcome).toBe('failed');
+        expect(v.forgotten).toEqual(['tr_1']);
+        expect(forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_1', attempts: 1 }]);
+      });
+
+      // Review round 1, 6b.
+      it('a transcriber that keeps no copies is never asked; the file still fails as stt_paid_unbooked', async () => {
+        const v = new FakeVoiceTranscriber({ provider: 'elevenlabs' });
+        Object.defineProperty(v, 'canForget', { value: false });
+        const forget = vi.spyOn(v, 'forget');
+        const { db, p, shareVoice } = setup({ extract: async () => TRANSCRIPT, voice: v });
+        const id = shareVoice();
+        refuseFinish(db);
+        expect((await p.process(id)).outcome).toBe('failed');
+        expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
+        expect(forget).not.toHaveBeenCalled();
+        expect(forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_1', attempts: 0 }]);
+      });
+
+      it('with copies refused too, a transcriber that keeps no copies is never asked', async () => {
+        const v = new FakeVoiceTranscriber({ provider: 'elevenlabs' });
+        Object.defineProperty(v, 'canForget', { value: false });
+        const forget = vi.spyOn(v, 'forget');
+        const { db, p, shareVoice } = setup({ extract: async () => TRANSCRIPT, voice: v });
+        const id = shareVoice();
+        refuseCopies(db);
+        expect((await p.process(id)).outcome).toBe('failed');
+        expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
+        expect(forget).not.toHaveBeenCalled();
+      });
     });
 
     it('a finish without a copy that throws keeps the old rule (a counted retry)', async () => {
@@ -1092,7 +1285,7 @@ describe('MediaProcessor: voice notes', () => {
       expect(forgetRows(db)).toHaveLength(1);
     });
 
-    it('notes the copy of a booking that failed after an unreadable answer, retried as stt_booking', async () => {
+    it('notes the copy of a booking that failed after an unreadable answer, and fails at once as stt_paid_unbooked', async () => {
       const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable('tr_9')] });
       const { spend, extract } = realExtractor(v);
       vi.spyOn(spend, 'settle').mockImplementationOnce((rid) => {
@@ -1101,8 +1294,54 @@ describe('MediaProcessor: voice notes', () => {
       });
       const { db, p, shareVoice } = setup({ extract });
       const id = shareVoice();
+      expect((await p.process(id)).outcome).toBe('failed');
+      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1 });
+      expect(forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_9', attempts: 0 }]);
+    });
+
+    // Review round 1, 6c: the id is found two causes deep, noted, and (fix 5) deleted at once through the transcriber.
+    it('notes and deletes the copy of a booking that failed after a later part failed after an unreadable answer', async () => {
+      const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [new SttPartialError(1, 2, unreadable('tr_9'))] });
+      const { spend, extract } = realExtractor(v);
+      vi.spyOn(spend, 'settle').mockImplementationOnce((rid) => {
+        spend.release(rid);
+        throw new Error('database is locked');
+      });
+      const { db, p, shareVoice } = setup({ extract, voice: v });
+      const id = shareVoice();
+      expect((await p.process(id)).outcome).toBe('failed');
+      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1 });
+      await vi.waitFor(() => expect(forgetRows(db)).toEqual([]));
+      expect(v.forgotten).toEqual(['tr_9']);
+    });
+
+    // Review round 1, fix 5: a noted copy is deleted promptly, not only by the sweep.
+    it('deletes a noted copy at once when the transcriber is set up, without waiting for it', async () => {
+      const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable('tr_9')] });
+      const { db, p, shareVoice } = setup({ extract: realExtractor(v).extract, voice: v });
+      const id = shareVoice();
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_booking', attempts: 1 });
+      await vi.waitFor(() => expect(v.forgotten).toEqual(['tr_9']));
+      await vi.waitFor(() => expect(forgetRows(db)).toEqual([]));
+    });
+
+    it('a deletion that fails leaves the row, counted, for the sweep; the outcome is the same', async () => {
+      const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable('tr_9')], forgetError: new SttHttpError(500) });
+      const { db, p, shareVoice } = setup({ extract: realExtractor(v).extract, voice: v });
+      const id = shareVoice();
+      expect((await p.process(id)).outcome).toBe('deferred');
+      await vi.waitFor(() => expect(forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_9', attempts: 1 }]));
+      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_no_answer_unreadable_body', attempts: 1 });
+    });
+
+    it('a transcriber that keeps no copies is not asked: the row waits for one that does', async () => {
+      const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable('tr_9')] });
+      Object.defineProperty(v, 'canForget', { value: false });
+      const { db, p, shareVoice } = setup({ extract: realExtractor(v).extract, voice: v });
+      const id = shareVoice();
+      expect((await p.process(id)).outcome).toBe('deferred');
+      await new Promise((r) => setTimeout(r, 20));
+      expect(v.forgotten).toEqual([]);
       expect(forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_9', attempts: 0 }]);
     });
 
@@ -1124,18 +1363,15 @@ describe('MediaProcessor: voice notes', () => {
       ['400', () => new SttHttpError(400, 'bad_request'), 'stt_http_400'],
       ['a booking that failed after no answer', () => new SttBookingError(new Error('database is locked'), new SttNoAnswerError('timeout')), 'stt_booking'],
       ['a booking that failed after a failed job', () => new SttBookingError(new Error('database is locked'), new SttJobError('failed')), 'stt_booking'],
-    ])('%s is retried after 1 and 5 minutes, then fails', async (_name, error, code) => {
+    ])('%s is retried once after 1 minute, then fails: a voice note gets 2 runs in all (review round 1, fix 3)', async (_name, error, code) => {
       const { db, clock, p, extract, shareVoice } = setup({ extract: throwing(error) });
       const id = shareVoice();
       expect((await p.process(id)).outcome).toBe('deferred');
       expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
       clock.advance(MINUTE);
-      expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ attempts: 2, errorCode: code, nextAttemptAt: at(6 * MINUTE) });
-      clock.advance(5 * MINUTE);
       expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: MEDIA_MAX_ATTEMPTS });
-      expect(extract).toHaveBeenCalledTimes(3);
+      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: STT_NO_ANSWER_MAX_ATTEMPTS });
+      expect(extract).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -1173,6 +1409,34 @@ describe('MediaProcessor: voice notes', () => {
       const id = shareVoice();
       expect(await p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
       expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'payment bhej diya', errorCode: null });
+    });
+
+    // Review round 1, fix 4: it may be async; neither a sync throw nor a rejection escapes, and both are logged.
+    it.each([
+      ['throws', (): void => {
+        throw new Error('forget run failed');
+      }],
+      ['rejects', async (): Promise<void> => {
+        throw new Error('forget run failed');
+      }],
+    ] as const)('one that %s is logged with codes only and never changes the outcome', async (_name, afterFinish) => {
+      const lines: string[] = [];
+      const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
+      const { db, p, shareVoice } = setup({ extract: async () => TRANSCRIPT, afterFinish, log });
+      const id = shareVoice();
+      expect(await p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
+      await vi.waitFor(() => expect(lines.some((l) => l.includes('"errorCode":"after_finish"'))).toBe(true));
+      expect(getMedia(db, id)).toMatchObject({ status: 'done', errorCode: null });
+      expect(lines.join('')).not.toContain('forget run failed');
+    });
+
+    it('is not waited for', async () => {
+      let release: (() => void) | undefined;
+      const afterFinish = vi.fn(() => new Promise<void>((r) => (release = r)));
+      const { p, shareVoice } = setup({ extract: async () => TRANSCRIPT, afterFinish });
+      expect((await p.process(shareVoice())).outcome).toBe('done');
+      await vi.waitFor(() => expect(afterFinish).toHaveBeenCalledTimes(1));
+      release?.();
     });
   });
 

@@ -17,9 +17,11 @@ import type { Logger } from '../util/logger.ts';
  * whose provider is not that one (or keeps no copies), or every row when `voice` is null, is skipped and logged with the
  * code provider_unavailable, without counting a try. Each try is counted, with the time of the next one from
  * FORGET_WAITS_MS, before the provider is asked; a row is removed once the provider has deleted the copy (a 404: it is
- * already gone). After MAX_FORGET_ATTEMPTS tries a row is left alone. Run after a voice note's transcript is stored
- * (o.mediaId: that file only, through the processor's afterFinish) and at service start (all). Logs the media id,
- * provider and a code only, never the copy's id. Returns how many were deleted.
+ * already gone). After MAX_FORGET_ATTEMPTS tries a row is left alone. Run for one file (o.mediaId) after its
+ * transcript is stored (the processor's afterFinish) and by the processor itself once it has noted a copy (Task 6
+ * review round 1, fix 5); and for all rows at service start and hourly (the sweep, Task 10). Logs the media id,
+ * provider, a code and, for a failed try, which try it was (attempts), never the copy's id. Returns how many were
+ * deleted.
  */
 export async function forgetVoiceCopies(
   db: Db,
@@ -46,7 +48,7 @@ export async function forgetVoiceCopies(
       await voice.forget(f.ref);
     } catch (e) {
       if (!(e instanceof SttHttpError && e.status === 404)) {
-        const fields = { mediaId: f.mediaId, provider: f.provider, code: errorCode(e) };
+        const fields = { mediaId: f.mediaId, provider: f.provider, code: errorCode(e), attempts };
         if (attempts >= MAX_FORGET_ATTEMPTS) log.warn(fields, 'voice note speech copy could not be deleted at the provider; no more tries');
         else log.warn(fields, 'voice note speech copy could not be deleted at the provider; tried again later');
         continue;
