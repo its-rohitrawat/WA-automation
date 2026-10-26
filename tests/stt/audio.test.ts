@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Ffmpeg, findFfmpeg, minimalEnv, parseDuration, runFile, type RunFile, type RunOptions } from '../../src/stt/audio.ts';
+import { Ffmpeg, findFfmpeg, minimalEnv, parseDuration, runFile, SAFE_INPUT, type RunFile, type RunOptions } from '../../src/stt/audio.ts';
 
 const BANNER =
   "Input #0, ogg, from 'a.ogg':\n  Duration: 00:01:02.50, start: 0.000000, bitrate: 31 kb/s\n" +
@@ -123,7 +123,36 @@ describe('Ffmpeg', () => {
   it('measures a file from the input summary', async () => {
     const { run, calls } = fakeRun(() => ({ code: 1, stderr: BANNER }));
     expect(await new Ffmpeg('ffmpeg.exe', run).seconds('a.ogg')).toBe(62.5);
-    expect(calls[0]).toEqual(['-hide_banner', '-nostdin', '-i', 'a.ogg']);
+    expect(calls[0]).toEqual(['-hide_banner', '-nostdin', ...SAFE_INPUT, '-i', 'a.ogg']);
+  });
+
+  it('reads every input as a local file in an allowed format only', async () => {
+    const { run, calls } = fakeRun((args) => {
+      if (args.includes('segment')) {
+        writeFileSync(lastArg(args).replace('%03d', '000'), 'a');
+        return { code: 0 };
+      }
+      if (args.includes('libmp3lame')) {
+        writeFileSync(lastArg(args), 'mp3');
+        return { code: 0 };
+      }
+      return { code: 1, stderr: BANNER };
+    });
+    const ff = new Ffmpeg('ffmpeg.exe', run);
+    await ff.seconds('a.ogg');
+    await ff.toMp3('in.mp4', join(dir, 'safe.mp3'));
+    await ff.split({ path: 'long.mp3', seconds: 430, offset: 0 }, join(dir, 'safe-parts'), 300);
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+    for (const args of calls) {
+      const i = args.indexOf('-i');
+      expect(i).toBeGreaterThan(SAFE_INPUT.length - 1);
+      // The whitelist sits right before -i, so it applies to the input, never to an output.
+      expect(args.slice(i - SAFE_INPUT.length, i)).toEqual([...SAFE_INPUT]);
+    }
+    // No playlist, concat or dash demuxer, and no network protocol.
+    const formats = SAFE_INPUT[SAFE_INPUT.indexOf('-format_whitelist') + 1]!.split(',');
+    for (const bad of ['hls', 'concat', 'dash', 'm3u8']) expect(formats).not.toContain(bad);
+    expect(SAFE_INPUT[SAFE_INPUT.indexOf('-protocol_whitelist') + 1]).toBe('file');
   });
 
   it('throws AudioError when there is no duration', async () => {
