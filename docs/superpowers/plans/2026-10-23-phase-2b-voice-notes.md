@@ -482,6 +482,7 @@ CREATE TABLE media_stt_forget (
     - pending: `{voice note, 0:42, being transcribed}`;
     - failed: `{voice note, 0:42, could not be transcribed}`;
     - unavailable: `{voice note, could not be downloaded}`;
+    - unavailable with error too_large: `{voice note, too large to download}`;
     - note `no_speech`: `{voice note, 0:42, no speech}`;
     - note `too_long`: `{voice note, 14:05, too long to transcribe}`;
     - note `too_costly`: `{voice note, 0:42, not transcribed: too costly for the daily limit}`;

@@ -21,7 +21,7 @@ import type { Logger } from '../util/logger.ts';
 import { istDate } from '../util/time.ts';
 import { AiInvalidOutputError, AiRefusalError, MAX_OUTPUT_TOKENS, type AiCallResult, type AiClient } from './claudeClient.ts';
 import type { MeetingSummary } from './meetingSchema.ts';
-import { MEETING_TRACKER_PROMPT, meetingItemLines, meetingItems, type MeetingItem } from './meetingTracker.ts';
+import { MEETING_ITEM_MAX_QUOTE, MEETING_TRACKER_PROMPT, meetingItemLines, meetingItems, type MeetingItem } from './meetingTracker.ts';
 import { SpendCapReachedError, settleFailedCall } from './paidCall.ts';
 import { buildUserContent, SYSTEM_PROMPT } from './prompt.ts';
 import type { AiOp, AiOutput } from './schema.ts';
@@ -95,7 +95,10 @@ interface EvidenceTimes {
 /** A WhatsApp message, from the batch or the context. */
 interface MessageEvidence extends EvidenceTimes {
   kind: 'message';
-  /** What a new task keeps as its source quote: the text's first MESSAGE_QUOTE_MAX code points. */
+  /**
+   * What a new task keeps as its source quote: the text's first MESSAGE_QUOTE_MAX code points, or for a voice note or
+   * audio file sent without text, its transcript's first MEETING_ITEM_MAX_QUOTE.
+   */
   quote: string | null;
   waId: string;
   senderName: string | null;
@@ -117,16 +120,22 @@ type Evidence = MessageEvidence | MeetingEvidence;
 /**
  * Longest source quote a task keeps from a WhatsApp message (code points), as before meetings. A meeting item keeps up
  * to MEETING_ITEM_MAX_QUOTE (200) instead: its quote is a transcript segment, spoken words that run longer than a
- * typical chat line.
+ * typical chat line. A voice note sent without text keeps the same 200 of its transcript, for the same reason.
  */
 const MESSAGE_QUOTE_MAX = 120;
 
-function messageEvidence(m: MessageRow, reactions: StoredReactionRow[]): MessageEvidence {
+/** transcript: the stored transcript of the message's voice note or audio file, if it has one. The typed text wins. */
+function messageEvidence(m: MessageRow, reactions: StoredReactionRow[], transcript?: string): MessageEvidence {
+  const quote = m.text
+    ? [...m.text].slice(0, MESSAGE_QUOTE_MAX).join('')
+    : transcript
+      ? [...transcript].slice(0, MEETING_ITEM_MAX_QUOTE).join('')
+      : null;
   return {
     kind: 'message',
     dateTs: m.ts,
     lockTs: evidenceTs(m, reactions),
-    quote: m.text ? [...m.text].slice(0, MESSAGE_QUOTE_MAX).join('') : null,
+    quote,
     waId: m.waId,
     senderName: m.senderName,
     recheck: m.requeueReason !== null,
@@ -213,7 +222,8 @@ export class Reconciler {
     const openTasks = listTasks(db, clientId, ['open', 'maybe_done']);
     const decisions = listDecisions(db, clientId, 20);
     const reactions = reactionsFor(db, clientId, [...recent, ...batch].map((m) => m.waId));
-    const mediaText = mediaPromptTexts(mediaForPrompt(db, batch, recent), batch, recent);
+    const media = mediaForPrompt(db, batch, recent);
+    const mediaText = mediaPromptTexts(media, batch, recent);
     const user = buildUserContent({
       client, people, openTasks, decisions, recent, batch, reactions, today: istDate(now), mediaText, fileRechecks,
     });
@@ -243,7 +253,10 @@ export class Reconciler {
     if (result.invalidOps > 0) log.warn({ clientId, batchId, invalidOps: result.invalidOps }, 'model returned invalid operations');
 
     // Message ids and times come from the rows the AI saw.
-    const { evidence, messageTs } = this.#evidenceMaps([...recent, ...batch], reactions);
+    // A voice note's transcript can be a task's source quote; the rows were loaded with enough text for it above.
+    const transcripts = new Map<number, string>();
+    for (const [id, f] of media) if ((f.kind === 'voice' || f.kind === 'audio') && f.text) transcripts.set(id, f.text);
+    const { evidence, messageTs } = this.#evidenceMaps([...recent, ...batch], reactions, undefined, transcripts);
     const batchIds = new Set(batch.map((m) => m.waId));
     const contextIds = new Set(recent.map((m) => m.waId));
     const editedIds = new Set(batch.filter((m) => m.requeueReason === 'edit').map((m) => m.waId));
@@ -420,13 +433,15 @@ export class Reconciler {
   /**
    * Evidence by id for #apply, and each id's lock time for the validator (messageTs), from the messages the AI saw and,
    * for a meeting run, its items. A later entry with the same id wins, as before (a batch message over a context one).
+   * transcripts: voice note and audio file transcripts by message row id, for the source quote.
    */
   #evidenceMaps(
     messages: readonly MessageRow[],
     reactions: StoredReactionRow[],
     meeting?: { id: number; items: readonly MeetingItem[] },
+    transcripts?: ReadonlyMap<number, string>,
   ): { evidence: Map<string, Evidence>; messageTs: Map<string, string> } {
-    const evidence = new Map<string, Evidence>(messages.map((m) => [m.waId, messageEvidence(m, reactions)]));
+    const evidence = new Map<string, Evidence>(messages.map((m) => [m.waId, messageEvidence(m, reactions, transcripts?.get(m.id))]));
     for (const it of meeting?.items ?? []) evidence.set(it.id, itemEvidence(meeting!.id, it));
     const messageTs = new Map([...evidence].map(([id, e]) => [id, e.lockTs]));
     return { evidence, messageTs };
