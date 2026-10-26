@@ -4,19 +4,24 @@ import { getClientByCode } from '../store/clients.ts';
 import { openDb, type Db } from '../store/db.ts';
 import { queueVoiceBacklog, voiceBacklog } from '../store/media.ts';
 import { findFfmpeg } from '../stt/audio.ts';
-import { canSendVoice, sizeBoundSeconds, voiceCeilingUsd } from '../stt/voice.ts';
+import { canSendVoice, sizeBoundSeconds, VOICE_LENGTH_TOLERANCE_S, voiceCeilingUsd } from '../stt/voice.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
 import { CorrectionError } from './corrections.ts';
 
 /*
  * `cli transcribe-voice` (Phase 2b Task 8, V6, N2, N4): the voice notes and audio files saved before Phase 2b, still
- * without a transcript. Without --yes it only counts them and prints the minutes and the cost ceiling; with --yes it
- * queues them, and the running service transcribes them (each counts toward the daily spend cap).
+ * without a transcript. Without --yes it only counts them and prints the minutes and the cost; with --yes it queues
+ * them, and the running service transcribes them (each counts toward the daily spend cap).
+ * - The cost never understates. The service holds and books each note at up to max(size bound, measured length), and
+ *   prepare lets a measured length run to STT_MAX_SECONDS + VOICE_LENGTH_TOLERANCE_S, so two figures are printed: about
+ *   $X from the file sizes (each bound plus the tolerance), and at most $Y if every file runs to that limit. Both are
+ *   rounded up to the cent; the minutes are the bounds plus the tolerance, rounded up.
  * - No key, no provider and no network: the rules and prices come from src/stt/voice.ts (canSendVoice,
  *   sizeBoundSeconds, voiceCeilingUsd). STT_API_KEY is never read here.
  * - A file whose size allows more than STT_MAX_SECONDS is too long and never queued (N4), as the extractor would refuse
  *   it. A file the transcriber could not send (it needs ffmpeg, which is missing, N2) is never queued either, so it does
  *   not finish format_not_supported again; it stays listed, and running this again once ffmpeg is there picks it up.
+ *   The service looks for ffmpeg only when it starts, so the line says to restart it after installing ffmpeg.
  * - The output is counts, minutes, dollars and the setting names only: never a file name, a path, a transcript or a key.
  */
 
@@ -36,7 +41,7 @@ const NOTHING = 'No saved voice notes or audio files are waiting for a transcrip
 
 const files = (n: number) => `${n} voice note${n === 1 ? '' : 's'} or audio file${n === 1 ? '' : 's'}`;
 const minutes = (n: number) => `${n} minute${n === 1 ? '' : 's'}`;
-/** A ceiling is rounded up to the cent, so a few seconds never print as $0.00. */
+/** A cost is rounded up to the cent, so a few seconds never print as $0.00. */
 const dollarsUp = (usd: number) => (Math.ceil(usd * 100 - 1e-9) / 100).toFixed(2);
 
 async function hasFfmpeg(deps: TranscribeVoiceDeps): Promise<boolean> {
@@ -79,13 +84,20 @@ export async function transcribeVoiceCommand(opts: { client?: string; yes: boole
     const send = fits.filter((r) => canSendVoice(provider, r.mimeType, ffmpeg));
     const needsFfmpeg = fits.length - send.length;
 
-    const seconds = send.reduce((a, r) => a + r.seconds, 0);
-    const ceiling = send.reduce((a, r) => a + voiceCeilingUsd(provider, r.seconds, env.INR_PER_USD), 0);
-    out(`To transcribe: ${files(send.length)} saved before Phase 2b${send.length > 0 ? `, ${minutes(Math.ceil(seconds / 60))} at most` : ''}.`);
-    if (send.length > 0) out(`Cost ceiling: up to $${dollarsUp(ceiling)} (speech, ${provider} list price).`);
+    // Each file may measure up to VOICE_LENGTH_TOLERANCE_S over its bound, and up to STT_MAX_SECONDS plus it at most.
+    const seconds = send.reduce((a, r) => a + r.seconds + VOICE_LENGTH_TOLERANCE_S, 0);
+    const about = send.reduce((a, r) => a + voiceCeilingUsd(provider, r.seconds + VOICE_LENGTH_TOLERANCE_S, env.INR_PER_USD), 0);
+    const most = send.length * voiceCeilingUsd(provider, env.STT_MAX_SECONDS + VOICE_LENGTH_TOLERANCE_S, env.INR_PER_USD);
+    out(`To transcribe: ${files(send.length)} saved before Phase 2b${send.length > 0 ? `, about ${minutes(Math.ceil(seconds / 60))}` : ''}.`);
+    if (send.length > 0) {
+      out(
+        `Cost: about $${dollarsUp(about)} from the file sizes (speech, ${provider} list price); ` +
+          `at most $${dollarsUp(most)} if every file runs to the STT_MAX_SECONDS limit (${env.STT_MAX_SECONDS} seconds).`,
+      );
+    }
     if (tooLong > 0) out(`${tooLong} too long, skipped (by file size, over STT_MAX_SECONDS: ${env.STT_MAX_SECONDS} seconds).`);
     if (needsFfmpeg > 0) {
-      out(`${needsFfmpeg} need${needsFfmpeg === 1 ? 's' : ''} ffmpeg, skipped (install ffmpeg, or set FFMPEG_PATH, then run this again).`);
+      out(`${needsFfmpeg} need${needsFfmpeg === 1 ? 's' : ''} ffmpeg, skipped (install ffmpeg, or set FFMPEG_PATH; after installing ffmpeg, restart the service, then run this again).`);
     }
     const cap = `This costs money and counts toward the daily spend cap ($${env.DAILY_SPEND_CAP_USD.toFixed(2)}).`;
     if (send.length === 0) {
