@@ -67,7 +67,11 @@ export async function withSttHold<T>(
     r = await call();
   } catch (e) {
     try {
-      atomically(() => hooks.onBooked?.(settleFailedSttCall(spend, rid, e, ceilingUsd, label), undefined));
+      // Booked as its own statement: inside `hooks.onBooked?.(…)` the booking would be skipped when there is no hook.
+      atomically(() => {
+        const booked = settleFailedSttCall(spend, rid, e, ceilingUsd, label);
+        hooks.onBooked?.(booked, undefined);
+      });
     } catch (writeErr) {
       throw new SttBookingError(writeErr, e);
     }
