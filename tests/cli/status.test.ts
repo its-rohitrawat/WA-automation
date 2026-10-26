@@ -105,9 +105,13 @@ describe('formatStatus meetings and spend split', () => {
     expect(out).toContain('Meetings:    4 done, 1 waiting, 2 unassigned, 0 failed, 1 no access, 2 too long');
   });
 
-  it('splits spend today into AI and speech when the snapshot has the split', () => {
-    const out = formatStatus({ ...base, snapshot: { ...snapshot, spendByKind: { ai: 1.0, stt: 0.234 } } });
+  it('splits spend today into AI and speech only when the snapshot has meetings and the split', () => {
+    const split = { ai: 1.0, stt: 0.234 };
+    const out = formatStatus({ ...base, snapshot: { ...snapshot, spendByKind: split, meetings: { stats, paused: null, sttProvider: 'sarvam' } } });
     expect(out).toContain('Spend today: $1.23 of $15.00 (AI $1.00, speech $0.23)');
-    expect(formatStatus({ ...base, snapshot })).toMatch(/Spend today: \$1\.23 of \$15\.00$/m);
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, spendByKind: split } })).toMatch(/Spend today: \$1\.23 of \$15\.00$/m);
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, meetings: { stats, paused: null, sttProvider: 'sarvam' } } })).toMatch(
+      /Spend today: \$1\.23 of \$15\.00$/m,
+    );
   });
 });

@@ -7,15 +7,15 @@ import { loadGroupsFile, type ClientConfig } from '../config/groups.ts';
 import { trackerDbPath } from '../config/paths.ts';
 import type { KeyProvider } from '../crypto/keyProvider.ts';
 import { googleMeetingsApi, type MeetingsGoogleApi } from '../meetings/googleApi.ts';
-import { createMeetingTranscriber } from '../meetings/transcribe.ts';
 import { MeetingWatcher, type FoundMeeting } from '../meetings/watcher.ts';
 import { createOAuthClient, hasMeetingScopes, TokenStore } from '../output/googleAuth.ts';
 import { estimateCostUsd, pricesFromEnv, type Prices } from '../spend/pricing.ts';
-import { getClientByCode, listClients, syncClients } from '../store/clients.ts';
+import { getClientByCode, getClientByGroupId, listClients, syncClients } from '../store/clients.ts';
 import { openDb, tx, type Db } from '../store/db.ts';
 import {
   assignMeeting, getMeetingState, listMeetingsByStatus, retryMeeting, skipMeeting, type MeetingStatus, type MeetingState,
 } from '../store/meetings.ts';
+import { costUsd, modelFor } from '../stt/prices.ts';
 import type { Clock } from '../util/clock.ts';
 import { acquireLock } from '../util/lock.ts';
 import { silentLogger } from '../util/logger.ts';
@@ -94,7 +94,10 @@ export function skipMeetingById(db: Db, rawId: string, now: Date): number {
   return m.id;
 }
 
-/** `meeting retry`: a failed or no-access meeting is queued again. */
+/**
+ * `meeting retry`: a failed or no-access meeting is queued again. No rebuild is requested: the workbook lists only
+ * unassigned and done meetings, and a retry changes neither (the meeting's own finish requests one later).
+ */
 export function retryMeetingById(db: Db, rawId: string, now: Date): number {
   const m = findMeeting(db, rawId);
   if (m.status !== 'failed' && m.status !== 'no_access') {
@@ -113,22 +116,25 @@ export interface MeetingCliDeps {
   clock: Clock;
   /** Builds the Meet, Calendar and Drive client; tests pass a FakeMeetingsApi. */
   googleApi: (db: Db, key: Buffer) => MeetingsGoogleApi;
-  /** The speech list price of one meeting of this length; null when STT_PROVIDER is none. */
-  speechCeilingUsd: ((seconds: number) => number) | null;
+  /**
+   * The speech list price of one meeting of this length; null when STT_PROVIDER is none. Not given: built from the
+   * env's prices by backfill only (speechCeilingFromEnv), so no command needs STT_API_KEY.
+   */
+  speechCeilingUsd?: ((seconds: number) => number) | null;
   signal?: AbortSignal;
 }
 
-/** The real Google client, signed in with the stored token. STT_API_KEY goes only to the provider (for its prices). */
+/** The real Google client, signed in with the stored token. */
 export function defaultMeetingDeps(env: Env, keyProvider: KeyProvider, clock: Clock): MeetingCliDeps {
-  const transcriber = createMeetingTranscriber(env);
-  return {
-    env,
-    keyProvider,
-    out: (l) => console.log(l),
-    clock,
-    googleApi: storedGoogleApi(env),
-    speechCeilingUsd: transcriber === null ? null : (s) => transcriber.partCeilingUsd(s),
-  };
+  return { env, keyProvider, out: (l) => console.log(l), clock, googleApi: storedGoogleApi(env) };
+}
+
+/** The list price, with speaker labels, of STT_PROVIDER for a meeting of this length; null when none. Prices only: no provider, no key. */
+export function speechCeilingFromEnv(env: Pick<Env, 'STT_PROVIDER' | 'INR_PER_USD'>): ((seconds: number) => number) | null {
+  const provider = env.STT_PROVIDER;
+  if (provider === 'none') return null;
+  const price = modelFor(provider, true);
+  return (seconds) => costUsd(price, seconds, env.INR_PER_USD);
 }
 
 export function storedGoogleApi(env: Env): (db: Db, key: Buffer) => MeetingsGoogleApi {
@@ -187,7 +193,7 @@ function costLines(deps: MeetingCliDeps, found: readonly FoundMeeting[]): string
     `To be processed: ${queued.length} meeting${queued.length === 1 ? '' : 's'}, about ${hours.toFixed(1)} hours` +
       (unknown > 0 ? ` (${unknown} without a length from Drive, counted at ${deps.env.MEETING_MAX_MINUTES} minutes)` : ''),
   ];
-  const speech = deps.speechCeilingUsd;
+  const speech = deps.speechCeilingUsd === undefined ? speechCeilingFromEnv(deps.env) : deps.speechCeilingUsd;
   if (speech === null) {
     lines.push(`Cost ceiling: AI up to $${ai.toFixed(2)}; speech: speech-to-text not set up (they wait until STT_PROVIDER is set)`);
   } else {
@@ -210,7 +216,7 @@ export async function meetingBackfillCommand(opts: { since: string; yes: boolean
   if (!isIsoDate(opts.since)) throw new CorrectionError('--since must be YYYY-MM-DD');
   const now = deps.clock.now();
   const from = fromIstDate(opts.since);
-  if (from.getTime() >= now.getTime()) throw new CorrectionError('--since must be a day before now');
+  if (from.getTime() >= now.getTime()) throw new CorrectionError('--since must be in the past');
   const lock = await acquireLock(env.DATA_DIR);
   let db: Db | undefined;
   try {
@@ -218,12 +224,27 @@ export async function meetingBackfillCommand(opts: { since: string; yes: boolean
     const configs = loadGroupsFile(env.GROUPS_FILE);
     db = openDb(trackerDbPath(env.DATA_DIR));
     if (!hasMeetingScopes(db)) throw new CorrectionError(NO_SCOPES);
-    // Only a real run writes: the dry run matches against the clients as stored (the service syncs them at start).
-    if (opts.yes) syncClients(db, configs);
     const api = deps.googleApi(db, key);
-    const r = await watcherFor(deps, db, api, configs).backfill(from.toISOString(), now.toISOString(), deps.signal ?? new AbortController().signal, {
-      dryRun: !opts.yes,
-    });
+    const run = () => {
+      // The groups file's clients are synced first, so a newly added client matches in the preview as in the real run.
+      syncClients(db!, configs);
+      return watcherFor(deps, db!, api, configs).backfill(from.toISOString(), now.toISOString(), deps.signal ?? new AbortController().signal, {
+        dryRun: !opts.yes,
+      });
+    };
+    let r: Awaited<ReturnType<typeof run>>;
+    if (opts.yes) {
+      r = await run();
+    } else {
+      // The preview syncs inside a transaction that is always rolled back, so it stores nothing. The lock is held (the
+      // service is stopped), so no other writer waits on it.
+      db.exec('BEGIN');
+      try {
+        r = await run();
+      } finally {
+        db.exec('ROLLBACK');
+      }
+    }
     const f = r.found;
     out(`${opts.yes ? 'Stored' : 'Found'} ${f.length} recording${f.length === 1 ? '' : 's'} from ${opts.since} (IST) not stored before` +
       (r.skipped > 0 ? `; ${r.skipped} already stored` : '') + '.');
@@ -267,6 +288,11 @@ export async function meetingCheckCommand(deps: MeetingCliDeps): Promise<void> {
       dryRun: true,
     });
     const codes = new Map(listClients(db, false).map((c) => [c.id, c.code]));
+    // Read only, with the service possibly running: clients are matched as stored, not synced from the groups file.
+    const unsynced = configs.filter((c) => getClientByGroupId(db, c.groupId)?.active !== true).length;
+    if (unsynced > 0) {
+      out(`${unsynced} client${unsynced === 1 ? '' : 's'} in the groups file ${unsynced === 1 ? 'is' : 'are'} not stored yet; their meetings show as unassigned until the service restarts.`);
+    }
     out(`Recordings in the last ${CHECK_DAYS} days not stored yet: ${r.found.length}` + (r.skipped > 0 ? ` (${r.skipped} already stored)` : ''));
     for (const f of [...r.found].sort((a, b) => a.startedAt.localeCompare(b.startedAt))) {
       const who = f.match === 'client' && f.clientId !== null ? (codes.get(f.clientId) ?? 'client') : f.match;

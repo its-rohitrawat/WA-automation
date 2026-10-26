@@ -140,8 +140,6 @@ describe('Health and meetings', () => {
     expect(readHealthSnapshot(db)!.meetings).toBeUndefined();
     const bad: unknown[] = [
       null,
-      { ...meetings(), paused: 'other' },
-      { ...meetings(), sttProvider: 'whisper' },
       { ...meetings(), stats: { ...stats(), done: '1' } },
       { ...meetings(), stats: { ...stats(), deferred: { stt_none: 'x' } } },
       { ...meetings(), stats: { ...stats(), deferred: null } },
@@ -150,6 +148,20 @@ describe('Health and meetings', () => {
     for (const m of bad) {
       setKv(db, 'health', JSON.stringify({ ...old, meetings: m }));
       expect(readHealthSnapshot(db)).toBeUndefined();
+    }
+  });
+
+  it('drops only the meetings when their pause reason or provider is unknown', () => {
+    const { db, h } = setup();
+    h.setMeetings(meetings());
+    const snap = JSON.parse(JSON.stringify(h.snapshot())) as Record<string, unknown>;
+    for (const m of [{ ...meetings(), paused: 'other' }, { ...meetings(), sttProvider: 'whisper' }]) {
+      setKv(db, 'health', JSON.stringify({ ...snap, meetings: m }));
+      const read = readHealthSnapshot(db);
+      expect(read).toBeDefined();
+      expect(read!.meetings).toBeUndefined();
+      expect('meetings' in read!).toBe(false);
+      expect(read!.line).toEqual(h.snapshot().line);
     }
   });
 

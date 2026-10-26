@@ -262,14 +262,17 @@ const MEETING_COUNTS = ['done', 'waiting', 'unassigned', 'failed', 'noAccess', '
 const MEETING_PAUSES = new Set<unknown>([null, 'google_scopes', 'google_auth', 'no_ffmpeg']);
 const STT_PROVIDERS = new Set<unknown>(['sarvam', 'elevenlabs', 'openai', 'none']);
 
+/** The counts' shape; the pause and provider values are checked separately (isKnownMeetingsState). */
 const isMeetingsHealth = (m: unknown): m is MeetingsHealth => {
   const x = m as Record<string, unknown> | null;
-  if (typeof x !== 'object' || x === null || !MEETING_PAUSES.has(x.paused) || !STT_PROVIDERS.has(x.sttProvider)) return false;
+  if (typeof x !== 'object' || x === null) return false;
   const s = x.stats as Record<string, unknown> | null;
   if (typeof s !== 'object' || s === null || !MEETING_COUNTS.every((k) => typeof s[k] === 'number')) return false;
   const d = s.deferred as Record<string, unknown> | null;
   return typeof d === 'object' && d !== null && !Array.isArray(d) && Object.values(d).every((n) => typeof n === 'number');
 };
+
+const isKnownMeetingsState = (m: MeetingsHealth): boolean => MEETING_PAUSES.has(m.paused) && STT_PROVIDERS.has(m.sttProvider);
 
 const isSpendByKind = (v: unknown): v is Record<SpendKind, number> => {
   const x = v as Record<string, unknown> | null;
@@ -295,7 +298,10 @@ export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
     // Snapshots written before meetings, or with meetings off, have no meetings; older ones no spend split.
     if (o.meetings !== undefined && !isMeetingsHealth(o.meetings)) return undefined;
     if (o.spendByKind !== undefined && !isSpendByKind(o.spendByKind)) return undefined;
-    return { ...o, ingestFailures: o.ingestFailures ?? 0 } as HealthSnapshot;
+    // A pause reason or provider this version does not know (a newer writer) drops only the meetings, not the snapshot.
+    const { meetings, ...rest } = o;
+    const keep = meetings !== undefined && isKnownMeetingsState(meetings) ? { meetings } : {};
+    return { ...rest, ...keep, ingestFailures: o.ingestFailures ?? 0 } as HealthSnapshot;
   } catch {
     return undefined;
   }

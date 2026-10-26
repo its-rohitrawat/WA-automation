@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CorrectionError } from '../../src/cli/corrections.ts';
 import {
   assignMeetingToClient, meetingAiCeilingUsd, meetingBackfillCommand, meetingCheckCommand, meetingListLines, retryMeetingById, skipMeetingById,
-  storedGoogleApi, type MeetingCliDeps,
+  defaultMeetingDeps, speechCeilingFromEnv, storedGoogleApi, type MeetingCliDeps,
 } from '../../src/cli/meetings.ts';
 import { parseEnv } from '../../src/config/env.ts';
 import { trackerDbPath } from '../../src/config/paths.ts';
@@ -207,6 +207,8 @@ describe('meeting skip and retry', () => {
     expect(retryMeetingById(db, String(n), now)).toBe(n);
     expect(getMeeting(db, f)).toMatchObject({ status: 'queued', attempts: 0, errorCode: null });
     expect(getMeeting(db, n)!.status).toBe('queued');
+    // The workbook lists only unassigned and done meetings, so a retry asks for no rebuild.
+    expect(getKv(db, 'rebuild_requested')).toBeUndefined();
     for (const s of ['unassigned', 'internal', 'queued', 'done', 'skipped', 'too_long'] as const) {
       const other = meeting(s);
       expect(() => retryMeetingById(db, String(other), now)).toThrow(/only failed or no-access meetings can be retried/);
@@ -265,7 +267,7 @@ describe('meeting backfill', () => {
       /Meetings are switched off/,
     );
     await expect(meetingBackfillCommand({ since: '2026-13-01', yes: true }, deps())).rejects.toThrow('--since must be YYYY-MM-DD');
-    await expect(meetingBackfillCommand({ since: '2026-10-24', yes: true }, deps())).rejects.toThrow('--since must be a day before now');
+    await expect(meetingBackfillCommand({ since: '2026-10-24', yes: true }, deps())).rejects.toThrow('--since must be in the past');
     saveGrantedScopes(db, DRIVE_SCOPES.join(' '));
     await expect(meetingBackfillCommand({ since: '2026-10-01', yes: true }, deps())).rejects.toThrow(
       'Google sign-in needs meeting access. Run: npm run cli -- google-auth',
@@ -279,6 +281,29 @@ describe('meeting backfill', () => {
     }
     expect(api.calls).toEqual([]);
     expect(rows()).toEqual([]);
+  });
+
+  it('matches a client newly added to the groups file in the preview and in --yes; the preview stores nothing', async () => {
+    const GUPTA = { groupId: '120363000000000013@g.us', name: 'Gupta Traders', code: 'GUP', emailDomains: ['gupta.com'] };
+    writeFileSync(groupsFile, JSON.stringify({ clients: [SHARMA, MEHTA, GUPTA] }));
+    conference('e', { start: '2026-10-09T05:00:00.000Z', attendees: ['x@gupta.com'] });
+    const before = dump(db);
+    await meetingBackfillCommand({ since: '2026-10-01', yes: false }, deps());
+    expect(dump(db)).toBe(before);
+    expect(lines[1]).toBe('  3 for a client, 1 unassigned, 1 internal, 0 no access, 0 too long');
+    lines = [];
+    await meetingBackfillCommand({ since: '2026-10-01', yes: true }, deps());
+    expect(lines[1]).toBe('  3 for a client, 1 unassigned, 1 internal, 0 no access, 0 too long');
+    const gupta = db.prepare("SELECT id FROM clients WHERE code = 'GUP'").get() as { id: number };
+    expect(rows().at(-1)).toMatchObject({ status: 'queued', clientId: gupta.id, matchKind: 'domain' });
+  });
+
+  it('works with STT_PROVIDER set, using its list price and no provider', async () => {
+    const e = env({ STT_PROVIDER: 'openai', STT_API_KEY: 'test-stt-key' });
+    const { speechCeilingUsd: _s, ...noSpeech } = deps({ env: e });
+    await meetingBackfillCommand({ since: '2026-10-01', yes: false }, noSpeech);
+    // 1 hour and 3 hours (no length) at $0.36 an hour.
+    expect(lines.find((l) => l.startsWith('Cost ceiling'))).toMatch(/speech \$1\.44\)$/);
   });
 
   it('passes a Google sign-in failure on and stores nothing', async () => {
@@ -308,6 +333,24 @@ describe('meeting check', () => {
     ]);
   });
 
+  it('notes clients in the groups file that are not stored yet, and matches them as unassigned', async () => {
+    const GUPTA = { groupId: '120363000000000013@g.us', name: 'Gupta Traders', code: 'GUP', emailDomains: ['gupta.com'] };
+    writeFileSync(groupsFile, JSON.stringify({ clients: [SHARMA, MEHTA, GUPTA] }));
+    conference('e', { start: ago(10), attendees: ['x@gupta.com'] });
+    const before = dump(db);
+    await meetingCheckCommand(deps());
+    expect(dump(db)).toBe(before);
+    expect(lines[0]).toBe('1 client in the groups file is not stored yet; their meetings show as unassigned until the service restarts.');
+    expect(lines[2]).toMatch(/unassigned file opens/);
+  });
+
+  it('builds no speech provider: the default deps carry no speech price, which only backfill reads from the env', async () => {
+    const d = defaultMeetingDeps(env({ STT_PROVIDER: 'openai', STT_API_KEY: 'test-stt-key' }), new StaticKeyProvider(KEY), manualClock(NOW));
+    expect(d).not.toHaveProperty('speechCeilingUsd');
+    await meetingCheckCommand({ ...d, googleApi: () => api, out: (l) => void lines.push(l) });
+    expect(lines.at(-1)).toBe('Nothing was downloaded or stored.');
+  });
+
   it('prints no title, attendee or name', async () => {
     conference('a', { start: ago(30), attendees: ['ravi@sharma.in'], title: 'Sharma Interiors secret plan' });
     api.signedInNames.set('conferenceRecords/a', ['Ravi Kumar']);
@@ -331,6 +374,14 @@ describe('storedGoogleApi', () => {
     new TokenStore(db, KEY).save('rt-test');
     const client = storedGoogleApi(e)(db, KEY);
     expect(typeof client.listConferences).toBe('function');
+  });
+});
+
+describe('speechCeilingFromEnv', () => {
+  it('is null for none, and the list price with speaker labels otherwise (Sarvam in rupees)', () => {
+    expect(speechCeilingFromEnv({ STT_PROVIDER: 'none', INR_PER_USD: 88 })).toBeNull();
+    expect(speechCeilingFromEnv({ STT_PROVIDER: 'openai', INR_PER_USD: 88 })!(3600)).toBeCloseTo(0.36);
+    expect(speechCeilingFromEnv({ STT_PROVIDER: 'sarvam', INR_PER_USD: 90 })!(3600)).toBeCloseTo(0.4);
   });
 });
 

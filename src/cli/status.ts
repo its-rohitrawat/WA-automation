@@ -46,7 +46,8 @@ export function formatStatus(i: {
       const extra = `${m.noAccess > 0 ? `, ${m.noAccess} no access` : ''}${m.tooLong > 0 ? `, ${m.tooLong} too long` : ''}`;
       lines.push(`Meetings:    ${m.done} done, ${m.waiting} waiting, ${m.unassigned} unassigned, ${m.failed} failed${extra}`);
     }
-    const split = s.spendByKind ? ` (AI $${s.spendByKind.ai.toFixed(2)}, speech $${s.spendByKind.stt.toFixed(2)})` : '';
+    // The split is shown only with meetings, where speech-to-text spend matters.
+    const split = s.meetings && s.spendByKind ? ` (AI $${s.spendByKind.ai.toFixed(2)}, speech $${s.spendByKind.stt.toFixed(2)})` : '';
     lines.push(`Spend today: ${lk}$${s.spentToday.toFixed(2)} of $${s.capUsd.toFixed(2)}${split}`);
     lines.push(`Disk free:   ${s.freeGb === null ? 'unknown' : `${s.freeGb.toFixed(1)} GB`}`);
   }
