@@ -228,21 +228,25 @@ STT_LOCAL_MODEL=/opt/stt/models/Voxtral-Mini-3B-2507-Q4_K_M.gguf
 
 ### Test it on real notes (waagent window)
 
-The engine takes a 16 kHz mono WAV file. Make a private folder for the test notes, outside the code folder:
+The check takes any audio file: a WhatsApp voice note (`.opus` or `.ogg`), `.mp3`, `.m4a` and so on. It converts the file with ffmpeg to the 16 kHz mono WAV the engine takes, in a temporary folder of its own that it removes afterwards, as the service will. It uses `FFMPEG_PATH` from `.env` when set, otherwise the `ffmpeg` on the PATH. A 16 kHz mono WAV is used as it is.
+
+Make a private folder for the test notes, outside the code folder:
 
 ```sh
 mkdir -m 700 ~/stt-check
 ```
 
-Copy 2–3 real Hinglish voice notes (`.opus` or `.ogg` files) into it. From a normal Terminal window, for a note in your Downloads folder: `sudo cp ~/Downloads/note1.opus /Users/waagent/stt-check/` then `sudo chown waagent /Users/waagent/stt-check/note1.opus`. Then, waagent window, for each note:
+Copy 2–3 real Hinglish voice notes into it. From a normal Terminal window, for a note in your Downloads folder: `sudo cp ~/Downloads/note1.opus /Users/waagent/stt-check/` then `sudo chown waagent /Users/waagent/stt-check/note1.opus`. Then, waagent window, for each note:
 
 ```sh
 cd /opt/wa-agent
-ffmpeg -i ~/stt-check/note1.opus -ar 16000 -ac 1 -c:a pcm_s16le ~/stt-check/note1.wav
-npm run stt:local-check -- ~/stt-check/note1.wav
+npm run stt:local-check -- ~/stt-check/note1.opus
 ```
 
-The check prints the engine, the audio length, the time it took, the realtime factor (under 1 means faster than the note itself) and the transcript, in this window only. Nothing is saved or sent.
+The check prints the engine, the audio length, the mean volume, the time it took, the realtime factor (under 1 means faster than the note itself) and the transcript, in this window only. Nothing is saved or sent.
+
+- **Mean volume:** -50 dB or lower counts as silence. An empty transcript of a note that is not silent is shown as "the service would retry this note": the service never takes it as "no speech", it tries the note again (3 tries in all). A very quiet note (around -40 dB) can come back empty; if real notes do, tell us.
+- If the check says ffmpeg was not found, install it from a normal Terminal window with `brew install ffmpeg`, or set `FFMPEG_PATH` to its full path in `.env`.
 
 Run the same notes with `STT_LOCAL_ENGINE=voxtral` and then with `STT_LOCAL_ENGINE=qwen3-asr` (change `STT_LOCAL_MODEL` to the matching file each time). Compare:
 

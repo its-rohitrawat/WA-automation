@@ -15,7 +15,9 @@ import { AudioError } from '../stt/audio.ts';
 import { SttHttpError, SttNoAnswerError } from '../stt/http.ts';
 import { SttBookingError, withSttHold } from '../stt/paidStt.ts';
 import type { ProviderId } from '../stt/types.ts';
-import { sizeBoundSeconds, SttPartialError, VOICE_LENGTH_TOLERANCE_S, type PreparedVoice, type VoiceResult, type VoiceTranscriber } from '../stt/voice.ts';
+import {
+  sizeBoundSeconds, SttPartialError, VOICE_LENGTH_TOLERANCE_S, type LocalVoiceTranscriber, type PreparedVoice, type VoiceResult, type VoiceTranscriber,
+} from '../stt/voice.ts';
 import { prepareImageForClaude, type PreparedImage } from './image.ts';
 import { FORMAT_NOT_SUPPORTED, FORWARDED_NOT_TRANSCRIBED, NO_SPEECH, TOO_LONG } from './labels.ts';
 import { parseFile } from './parse/runner.ts';
@@ -54,7 +56,10 @@ export interface Extraction {
    * 'forwarded_not_transcribed' | 'too_long' | 'no_speech' | 'format_not_supported' | null
    */
   note: string | null;
-  /** The speech provider kept a copy of this transcript (ElevenLabs), to be deleted (N1). finishMedia notes it. */
+  /**
+   * The speech provider kept a copy of this transcript (ElevenLabs), to be deleted (N1). finishMedia notes it. Never set
+   * for the local engine, which keeps no copies.
+   */
   forget?: { provider: ProviderId; ref: string } | null;
 }
 
@@ -71,10 +76,15 @@ export interface ExtractorDeps {
    */
   parse?: (job: ParseJob, o?: { transfer?: boolean }) => Promise<ParseResult>;
   prepareImage?: (bytes: Buffer) => Promise<PreparedImage>;
-  /** The voice transcriber STT_PROVIDER names; null or absent with 'none', when voice notes are kept as in 2a. */
+  /** The voice transcriber VOICE_STT_PROVIDER names; null or absent with 'none', when voice notes are kept as in 2a. */
   voice?: VoiceTranscriber | null;
   /** STT_MAX_SECONDS: the hard cap on one voice note or audio file (V2, V5). Default 600. */
   maxVoiceSeconds?: number;
+  /**
+   * The service's stop signal (Task 10): it stops a local engine run in flight (LocalEngineError('aborted'), and the
+   * processor gives the attempt back). A paid call is never aborted, so it is not passed there.
+   */
+  signal?: AbortSignal;
 }
 
 const NONE: Extraction = { textKind: null, text: null, pageCount: null, note: null };
@@ -317,10 +327,11 @@ export function createExtractor(d: ExtractorDeps): Extractor {
    * and the sender's declared length is never used. The hold is the measured length plus the tolerance. Without ffmpeg
    * nothing can be converted, so canSend is false and the note is format_not_supported, for transcribe-voice later. The
    * transcript is stored as an 'extract': the media kind already says it is a transcript.
+   * The local engine (Phase 2b amendment L2) costs nothing: no hold, no too_costly and no spend row (transcribeFree).
    */
   const transcribe = async (input: ExtractInput): Promise<Extraction> => {
     const v = d.voice ?? null;
-    if (v === null) return NONE; // STT_PROVIDER none: kept as in 2a, transcribed later with cli transcribe-voice
+    if (v === null) return NONE; // VOICE_STT_PROVIDER none: kept as in 2a, transcribed later with cli transcribe-voice
     if (input.forwarded) return { ...NONE, note: FORWARDED_NOT_TRANSCRIBED };
     const maxSeconds = d.maxVoiceSeconds ?? DEFAULT_MAX_VOICE_SECONDS;
     if (!v.canSend(input.mimeType)) return { ...NONE, note: FORMAT_NOT_SUPPORTED }; // no ffmpeg
@@ -333,6 +344,7 @@ export function createExtractor(d: ExtractorDeps): Extractor {
       throw e;
     }
     try {
+      if (v.costsNothing) return await transcribeFree(v, prepared, input);
       // The measured length is trusted and capped by prepare; the tolerance is headroom over a provider's billed rounding.
       const ceiling = v.ceilingUsd(prepared.measuredSeconds + VOICE_LENGTH_TOLERANCE_S);
       if (ceiling > d.spend.capUsd) return { ...NONE, note: TOO_COSTLY };
@@ -356,12 +368,27 @@ export function createExtractor(d: ExtractorDeps): Extractor {
         if (paid.result === undefined) throw failedAndUnbooked(noteUnansweredCopy(e, v.provider), ceiling, input);
         throw await paidButUnbooked(e, { ...paid, result: paid.result }, ceiling, input);
       }
-      const forget = result.forgetRef === null ? null : { provider: result.provider, ref: result.forgetRef };
+      // The copy is named by the result's provider (its own answer). A local transcriber never reaches here (it took
+      // transcribeFree above); the 'local' check is kept (review round 1, fix 6) because the result's type allows it, and
+      // media_stt_forget refuses any provider but a paid one, so such a result must never become a forget.
+      const forget = result.forgetRef === null || result.provider === 'local' ? null : { provider: result.provider, ref: result.forgetRef };
       if (result.text === '') return { ...NONE, note: NO_SPEECH, forget };
       return { textKind: 'extract', text: capStored(result.text), pageCount: null, note: null, forget };
     } finally {
       prepared.dispose(); // transcribe disposes too; this covers too_costly, revoked and a refused hold. Safe twice.
     }
+  };
+
+  /**
+   * The local engine's run (Phase 2b amendment L2): free, so no hold, no too_costly and no spend row, and no forget (it
+   * keeps no copies). Revoked is still asked just before the run. A LocalEngineError (empty_output, timeout, exit_<n>,
+   * aborted, ...) goes to the processor unchanged, which retries it at no cost. The caller disposes.
+   */
+  const transcribeFree = async (v: LocalVoiceTranscriber, prepared: PreparedVoice, input: ExtractInput): Promise<Extraction> => {
+    if (input.revoked?.()) return REVOKED;
+    const result = await v.transcribe(prepared, d.signal);
+    if (result.text === '') return { ...NONE, note: NO_SPEECH };
+    return { textKind: 'extract', text: capStored(result.text), pageCount: null, note: null };
   };
 
   return async (input) => {
