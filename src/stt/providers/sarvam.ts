@@ -2,11 +2,9 @@ import { openAsBlob } from 'node:fs';
 import { z } from 'zod';
 import { longFetch, parseAnswer, requestJson, requestOk, SttHttpError, SttJobError, SttJobLostError, SttNoAnswerError, type HttpFetch } from '../http.ts';
 import { modelFor } from '../prices.ts';
-import type { AudioPart, ProviderResult, Segment, SttProvider, TranscribeOptions } from '../types.ts';
+import { AUDIO_FORMATS, type AudioPart, type ProviderResult, type Segment, type SttProvider, type TranscribeOptions } from '../types.ts';
 
 const JOBS = 'https://api.sarvam.ai/speech-to-text/job/v1';
-/** The audio's name inside a job. Sarvam names the result after the input's position ("0.json"). */
-const FILE_NAME = 'audio.mp3';
 
 const JobSchema = z.object({ job_id: z.string().min(1) });
 const SignedUrls = z.record(z.string(), z.object({ file_url: z.string() }));
@@ -105,14 +103,16 @@ export class SarvamProvider implements SttProvider {
   }
 
   async #submit(audio: AudioPart, model: string, diarize: boolean): Promise<string> {
+    // The format's file name is the audio's name inside the job. Sarvam names the result after the input's position ("0.json").
+    const f = AUDIO_FORMATS[audio.format ?? 'mp3'];
     const params = { model, mode: 'codemix', language_code: 'hi-IN', with_timestamps: true, with_diarization: diarize };
     const { job_id: jobId } = parseAnswer(JobSchema, await this.#post('', { job_parameters: params }), 'unreadable_job');
-    const urls = parseAnswer(UploadSchema, await this.#post('/upload-files', { job_id: jobId, files: [FILE_NAME] }), 'unreadable_upload_urls');
+    const urls = parseAnswer(UploadSchema, await this.#post('/upload-files', { job_id: jobId, files: [f.fileName] }), 'unreadable_upload_urls');
     // The signed storage link carries its own permission; the API key is never sent there.
-    await requestOk(this.#http, storageUrl(urls.upload_urls[FILE_NAME]?.file_url), {
+    await requestOk(this.#http, storageUrl(urls.upload_urls[f.fileName]?.file_url), {
       method: 'PUT',
-      headers: { 'x-ms-blob-type': 'BlockBlob', 'content-type': 'audio/mpeg' },
-      body: await openAsBlob(audio.path, { type: 'audio/mpeg' }),
+      headers: { 'x-ms-blob-type': 'BlockBlob', 'content-type': f.mimeType },
+      body: await openAsBlob(audio.path, { type: f.mimeType }),
       signal: AbortSignal.timeout(15 * 60_000),
     });
     await requestOk(this.#http, `${JOBS}/${jobId}/start`, { method: 'POST', headers: this.#headers(false), signal: AbortSignal.timeout(60_000) });

@@ -45,6 +45,8 @@ const EnvSchema = z.object({
   STT_API_KEY: z.string().min(1).optional(),
   // A sane band: a typo such as 8800 would make every Sarvam estimate 100 times too small. Zod 4 numbers refuse Infinity.
   INR_PER_USD: z.coerce.number().min(40).max(200).default(88),
+  /** Longest voice note or audio file sent to speech-to-text, in seconds, measured from the file size (Phase 2b V5, N3). */
+  STT_MAX_SECONDS: z.coerce.number().int().min(30).max(900).default(600),
 }).superRefine((env, ctx) => {
   if (env.MEETINGS_ENABLED && env.TEAM_EMAIL_DOMAINS.length === 0) {
     ctx.addIssue({ code: 'custom', path: ['TEAM_EMAIL_DOMAINS'], message: 'is required when MEETINGS_ENABLED is true' });

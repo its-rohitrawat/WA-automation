@@ -12,11 +12,23 @@ export interface Segment {
   text: string;
 }
 
-/** Audio as sent to a provider: a mono 16 kHz MP3 made by src/stt/audio.ts. offset is where it starts in the whole file. */
+/** How a part's file is sent: its MIME type and the name given to the provider. Never the sender's file name. */
+export const AUDIO_FORMATS = {
+  mp3: { mimeType: 'audio/mpeg', fileName: 'audio.mp3' },
+  ogg: { mimeType: 'audio/ogg', fileName: 'voice.ogg' },
+} as const;
+export type AudioFormat = keyof typeof AUDIO_FORMATS;
+
+/**
+ * Audio as sent to a provider: a mono 16 kHz MP3 made by src/stt/audio.ts, unless format says otherwise. offset is
+ * where it starts in the whole file.
+ */
 export interface AudioPart {
   path: string;
   seconds: number;
   offset: number;
+  /** Default 'mp3': the mono 16 kHz MP3 that src/stt/audio.ts makes. 'ogg': a WhatsApp voice note sent as it was saved. */
+  format?: AudioFormat;
 }
 
 export interface TranscribeOptions {
