@@ -445,7 +445,8 @@ describe('Reconciler with shared files', () => {
 
     it.each(['voice', 'audio'] as const)('kind %s: a backlog transcript after its message was processed queues nothing (V6)', async (kind) => {
       const { db, ai, r } = setup();
-      const id = file(db, 'V1', '2026-10-19T07:01:00.000Z', { kind, mimeType: 'audio/ogg' });
+      // Past its 30-minute wait (V1), so the message goes ahead while the file is still pending.
+      const id = file(db, 'V1', '2026-10-19T07:01:00.000Z', { kind, mimeType: 'audio/ogg', createdAt: '2026-10-19T07:01:00.000Z' });
       expect(await r.run(1)).toMatchObject({ status: 'ok' });
       expect(processedAt(db, 'V1')).not.toBeNull();
       db.prepare('UPDATE media SET backlog = 1 WHERE id = ?').run(id); // queued by `cli transcribe-voice`
