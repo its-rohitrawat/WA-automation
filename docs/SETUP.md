@@ -419,13 +419,14 @@ When this is on, the agent finds the Google Meet recordings of client meetings a
 - It only reads. Nothing in the founder's Drive is changed, moved or deleted.
 - A meeting is processed only when it clearly belongs to one client (see "Which meetings are processed" below). The rest wait for you, or are ignored as internal.
 - Only meetings from the day it is switched on are picked up. Older ones need `meeting backfill` (see the commands below).
+- Each check looks back 72 hours. If the service was stopped for more than 3 days, run `meeting backfill --since <the day it stopped>`.
 
 Do the steps below once, in order.
 
 ### 1. Before you start
 
 - **Speech-to-text.** The speech-to-text test (bake-off, `docs/STT-BAKEOFF.md`) has picked a provider. Meetings and voice notes share the same provider and key.
-- **Internal Google app.** The OAuth consent screen is **Internal** (step 4). One of the new permissions (Meet files in Drive) is a "restricted" one. **If the app is not Internal, stop and ask.**
+- **Internal Google app.** The OAuth consent screen is **Internal** (section 4 of this guide). One of the new permissions (Meet files in Drive) is a "restricted" one. **If the app is not Internal, stop and ask.**
 - **Privacy steps done** (step 6 below). Do them before the first real meeting is sent.
 
 ### 2. Install ffmpeg (admin)
@@ -455,7 +456,7 @@ icacls C:\Tools\ffmpeg /inheritance:r /grant:r "Administrators:(OI)(CI)F" "SYSTE
 C:\Tools\ffmpeg\bin\ffmpeg.exe -version
 ```
 
-5. Put the full path in `.env` (step 5): `FFMPEG_PATH=C:\Tools\ffmpeg\bin\ffmpeg.exe`. Without `FFMPEG_PATH` the agent looks for `ffmpeg` on the PATH.
+5. Put the full path in `.env` (step 4): `FFMPEG_PATH=C:\Tools\ffmpeg\bin\ffmpeg.exe`. Without `FFMPEG_PATH` the agent looks for `ffmpeg` on the PATH.
 
 Only `ffmpeg.exe` is used; `ffprobe` is not needed. If ffmpeg cannot be found, meetings pause and the status line says so.
 
@@ -466,7 +467,7 @@ Signed in as the **mailbox** Google account, in console.cloud.google.com, projec
 1. APIs & Services > Library > enable **Google Meet API** (it may be listed as "Google Meet REST API").
 2. APIs & Services > Library > enable **Google Calendar API**.
 
-The Google Drive API is already on (step 4).
+The Google Drive API is already on (section 4 of this guide).
 
 ### 4. Settings
 
@@ -478,7 +479,7 @@ In an admin window or the waagent window, open `notepad C:\wa-agent\.env` and fi
 | `TEAM_EMAIL_DOMAINS` | Our own email domains, comma-separated, for example `ourstudio.in`. Required when meetings are on. Public mail domains such as gmail.com are refused. |
 | `MEETING_POLL_MINUTES` | How often to look for new recordings. Default 5, allowed 2–60. |
 | `MEETING_MAX_MINUTES` | Longer meetings are listed as "too long" and not transcribed. Default 180 (3 hours), allowed 10–300. |
-| `MEETINGS_SINCE` | Optional, `YYYY-MM-DD`: only meetings from this day on. Empty means from the day meetings were first switched on. |
+| `MEETINGS_SINCE` | Optional, `YYYY-MM-DD`: only meetings from this day on. Empty means from the day the service first ran with meetings on (stored, so a restart does not move it). |
 | `FFMPEG_PATH` | Full path to `ffmpeg.exe` (step 2). |
 | `STT_PROVIDER` | `sarvam`, `elevenlabs`, `openai` or `none`. Default `none`: meetings are found and matched, but wait. |
 | `STT_API_KEY` | The speech-to-text provider's key. Required when `STT_PROVIDER` is not `none`. Type it into `.env` yourself, never into chat or code. |
@@ -523,8 +524,8 @@ Tick every box Google shows. If one is missing, `google-auth` says which, saves 
    - the meeting's audio, in `C:\wa-agent\data\meetings\<CODE>\<year-month>\` (about 28 MB per hour of meeting);
    - the downloaded video and audio parts only while they are needed, in `data\meetings\tmp\`. The agent deletes only its own files there;
    - the logs hold ids, counts and error codes only, never titles, names, emails or what was said.
-4. **Internal meetings** (only our team) are never downloaded, transcribed or summarised. Only their id, start time and status are kept.
-5. **In Drive** the agent only adds the summary Docs. It never changes, moves or deletes the founder's recordings or any other file. Share the Meetings folders with the team only, never clients (they are inside the **WA Agent** folder, step 6).
+4. **Internal meetings** (only our team) are never downloaded, transcribed or summarised. Only ids (meeting, recording, Drive file, Meet code), the start time and status are kept.
+5. **In Drive** the agent only adds the summary Docs. It never changes, moves or deletes the founder's recordings or any other file. Share the Meetings folders with the team only, never clients (they are inside the **WA Agent** folder, section 6 of this guide).
 
 ### 7. Check first, then start
 
@@ -534,8 +535,8 @@ Before the service starts processing meetings, see what it would do. In the waag
 npm run cli -- meeting check
 ```
 
-- It lists the last 7 days' recordings, which client each one matches (or "unassigned"), and whether each file opens.
-- It only reads: it downloads nothing and stores nothing.
+- It lists the last 7 days' recordings not stored yet (stored ones are only counted), which client each one matches (or "unassigned" or "internal"), and whether each file opens.
+- It only reads: it downloads nothing and stores nothing. The service may keep running.
 - A recording marked as not opening usually belongs to a meeting recorded by someone else. The agent cannot open it, and lists it as "no access".
 - If a client meeting shows as unassigned, add a keyword or domain for that client (step 4) and run the check again.
 
@@ -550,7 +551,7 @@ The client is chosen **before** anything is downloaded or sent anywhere:
 
 - **Exactly one client found:** the meeting is processed.
 - **None, or more than one:** it waits as **Unassigned** until you assign it (`meeting assign`). The Overview tab lists unassigned meetings by number, date and length only. Titles and attendees are shown only by `meeting list`, on this PC.
-- **Internal:** an invite with at least one other attendee, every attendee from `TEAM_EMAIL_DOMAINS`, and no client name in the title. A meeting with no invite or no attendees is never internal.
+- **Internal:** an invite with at least one other attendee, every attendee from `TEAM_EMAIL_DOMAINS`, and no client name or keyword in the title. A meeting with no invite or no attendees is never internal.
 - **Too long:** over `MEETING_MAX_MINUTES`. It is listed, not transcribed.
 
 ### What a meeting does
@@ -591,14 +592,16 @@ npm run golden -- --meetings --yes
 
 | Command | What it does |
 |---|---|
-| `npm run cli -- meeting list` | Lists meetings: number, date, client or "unassigned", status and title. On screen only. Add `--all` to see every meeting. |
-| `npm run cli -- meeting assign 12 ABC` | Gives meeting 12 to client ABC and queues it. Works for unassigned and internal meetings. |
+| `npm run cli -- meeting list` | Lists meetings: number, date, client (or "unassigned" or "internal"), status and title. On screen only. Without `--all`, only meetings that need you: unassigned, queued, failed and no access. Internal meetings show no title. Add `--all` to see every meeting. |
+| `npm run cli -- meeting assign 12 ABC` | Gives meeting 12 to client ABC and queues it. Works for unassigned and internal meetings, and for a "no access" meeting without a client (its download is tried again for that client). |
 | `npm run cli -- meeting skip 12` | An unassigned meeting is never processed. |
-| `npm run cli -- meeting retry 12` | Puts a failed or "no access" meeting back in the queue, at the step it reached. |
-| `npm run cli -- meeting backfill --since 2026-10-01` | For older meetings: shows how many it would process, their total hours and the most they could cost, and changes nothing. Add `--yes` to queue them. Needs the service stopped. |
-| `npm run cli -- meeting check` | Read only: the last 7 days' recordings, their client match, and whether each file opens. |
+| `npm run cli -- meeting retry 12` | Puts a failed or "no access" meeting back in the queue, at the step it reached. A meeting without a client (found as unassigned or internal) cannot be processed: it goes back to unassigned, and the command says to assign it with `meeting assign 12 <CODE>`. |
+| `npm run cli -- meeting backfill --since 2026-10-01` | For older meetings: shows the recordings it would store (for a client, unassigned, internal, no access, too long), the hours of the client ones and the most they could cost, and changes nothing. Add `--yes` to store them; the client ones are queued. Needs the service stopped, with or without `--yes`. |
+| `npm run cli -- meeting check` | Read only: the last 7 days' recordings not stored yet (stored ones are only counted), their client match, and whether each file opens. The service may keep running. |
 
-`status` also prints a `Meetings:` line, for example `Meetings: 4 done, 1 waiting, 2 unassigned, 0 failed`, and today's spend split as `AI $x, speech $y`.
+`status` also prints a `Meetings:` line, for example `Meetings: 4 done, 1 waiting, 2 unassigned, 0 failed`, with `, N no access` and `, N too long` added when not 0, and today's spend split as `(AI $x, speech $y)`.
+
+If `status` shows `Speech copies: N speech-to-text copies could not be deleted from the provider`, the agent has given up deleting its copies of those transcripts in the provider's account (ElevenLabs). It tries each copy at most 5 times (when the meeting's transcript is stored, then at later service starts, at least 15 minutes, 1 hour, 6 hours and 24 hours apart); a copy made by a provider that is no longer `STT_PROVIDER` is not tried at all. This line is on `status` only, not on the Health line. What to do: delete those transcripts in the provider's account yourself. If `STT_PROVIDER` was changed, setting it back lets the agent try the copies it has not tried 5 times yet. The count is a reminder: it does not go down when you delete copies by hand.
 
 ### Meeting status lines
 
@@ -608,9 +611,9 @@ These appear on the `Health:` line, after the shared-file lines and before low d
 |---|---|---|
 | Meetings paused: Google sign-in needs meeting access. Run: npm run cli -- google-auth | The three meeting permissions are not all granted. | Run `npm run cli -- google-auth` in the waagent window (step 5), tick every box, then restart the service. |
 | Meetings paused: ffmpeg not found | `FFMPEG_PATH` is wrong, or ffmpeg is not on the PATH. | Check step 2, fix `FFMPEG_PATH` in `.env`, restart the service. |
-| (number) meetings could not be processed | Meetings failed after their retries, or the agent cannot open the recording ("no access"). | Run `npm run cli -- meeting list`. Read `wa-agent.out.log` (look for lines with `meeting`). After a fix, run `meeting retry <number>`. |
+| (number) meetings could not be processed | Meetings failed after their retries (for example the speech-to-text key was refused for 24 hours). Meetings the agent cannot open are not counted here: `status` lists them as `no access`. | Run `npm run cli -- meeting list`. Read `wa-agent.out.log` (look for lines with `meeting`). After a fix, run `meeting retry <number>`. |
 | Meetings waiting: speech-to-text is not set up | `STT_PROVIDER` is `none`. Meetings are found and matched, but not transcribed. | Set `STT_PROVIDER` and `STT_API_KEY` in `.env`, then restart the service. |
-| Meetings waiting: the speech-to-text key was refused | The provider refused `STT_API_KEY`. The agent tries again every hour. | Check the key in the provider's console. Put a working key in `.env`, then restart the service. |
+| Meetings waiting: the speech-to-text key was refused | The provider refused `STT_API_KEY`. The agent tries again every hour. After 24 hours of refusals in one service run the meeting fails; run `meeting retry <number>` after fixing the key. | Check the key in the provider's console. Put a working key in `.env`, then restart the service. |
 
 ### Turning meetings off
 
