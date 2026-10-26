@@ -6,15 +6,23 @@ import { AiInvalidOutputError, AiRefusalError } from '../brain/claudeClient.ts';
 import { neverSent, SpendCapReachedError } from '../brain/paidCall.ts';
 import { getClient } from '../store/clients.ts';
 import type { Db } from '../store/db.ts';
-import { claimMedia, deferMedia, failMedia, finishMedia, getMedia, getMediaRef, markDownloaded, mediaJob, type MediaJob, type MediaRow } from '../store/media.ts';
+import {
+  claimMedia, deferMedia, failMedia, finishMedia, getMedia, getMediaRef, markDownloaded, mediaJob, noteMediaForget, type MediaJob, type MediaKind, type MediaRow,
+} from '../store/media.ts';
+import { AudioError } from '../stt/audio.ts';
+import { SttHttpError, SttJobError, SttNoAnswerError } from '../stt/http.ts';
+import { SttBookingError } from '../stt/paidStt.ts';
+import type { ProviderId } from '../stt/types.ts';
+import { SttPartialError, type VoiceTranscriber } from '../stt/voice.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
-import { isScanReadError, type Extractor } from './extract.ts';
+import { isPaidVoiceError, isScanReadError, voiceCopyOf, type Extraction, type Extractor } from './extract.ts';
 import { MediaDownloadError, MediaUnavailableError, type MediaFetcher } from './fetch.ts';
 import { ParseError } from './parse/types.ts';
 import { extForMime, mediaRelPath } from './paths.ts';
 import { mediaRefAad, type MediaRefSealer } from './ref.ts';
 import { MEDIA_LIMITS, type MediaRef } from './types.ts';
+import { forgetVoiceCopies } from './voiceForget.ts';
 
 export type ProcessOutcome = 'done' | 'failed' | 'unavailable' | 'deferred' | 'skipped';
 
@@ -25,11 +33,18 @@ export interface ProcessResult {
 
 export const MEDIA_MAX_ATTEMPTS = 3;
 /**
- * How far the claim before a run moves the file's next attempt (final review FR1): longer than any one run, whose
- * slowest step, a scan read, gives up after 10 minutes. A run that never ended is tried again after this.
+ * How far the claim before a run moves the file's next attempt (final review FR1). A run that never ended (the process
+ * stopped) is tried again after this. It is longer than most runs, but not every one: a scan read gives up after 10
+ * minutes, while a Sarvam voice run can take the ffmpeg conversion (up to 5 minutes, VOICE_CONVERT_TIMEOUT_MS), the
+ * upload, up to 10 minutes of waiting (VOICE_STT_TIMEOUTS.sarvamWaitMs) and the download: more than 15 minutes. That is
+ * safe within one process: the queue keeps the ids it is running in its in-flight set and never starts a second run of
+ * one of them, however long the first takes. The claim only matters after a restart, when no run is left in flight.
  */
 export const CLAIM_MS = 15 * 60_000;
-/** A file whose runs never ended MEDIA_MAX_ATTEMPTS times: each one stopped the process, for example in a decoder. */
+/**
+ * A file whose runs never ended as many times as it may run (maxRuns): each one stopped the process, for example in a
+ * decoder.
+ */
 const CRASHED = 'crashed';
 /** Wait after the first and the second failed attempt; the third failure is final. */
 const RETRY_DELAYS_MS = [60_000, 5 * 60_000];
@@ -50,6 +65,35 @@ const GROWING_WAITS_MS = [5, 15, 30, 60].map((m) => m * 60_000);
  * later (amendment 10f), is given up.
  */
 export const AI_UNAVAILABLE_MAX_AGE_MS = 24 * 60 * 60_000;
+
+/**
+ * The speech provider refused the key (401 or 403): nothing was billed, and only the owner can fix it. Waits like
+ * ai_unavailable (10d): the growing waits, no attempt counted, and given up after 24 hours.
+ */
+const STT_UNAVAILABLE = 'stt_unavailable';
+/**
+ * A voice note's paid call was answered (and billed) but could not be booked or stored (Task 5 review round 1, Fix 3;
+ * or finishMedia failing after it). Failed at once: a retry would pay the provider again.
+ */
+const STT_PAID_UNBOOKED = 'stt_paid_unbooked';
+/** A later part failed after earlier parts were answered and billed: failed at once, a retry would pay for them again. */
+const STT_PARTIAL = 'stt_partial';
+/**
+ * Tries of a voice note that got no usable answer (SttNoAnswerError, SttJobLostError): each may have been billed, and is
+ * booked at the ceiling by withSttHold, so only one more try.
+ */
+export const STT_NO_ANSWER_MAX_ATTEMPTS = 2;
+
+/**
+ * How many runs a file gets in all, counted by its claims: the counted retries stop there, and a pending file claimed
+ * this many times by runs that never ended fails as crashed. A voice note or an audio file gets
+ * STT_NO_ANSWER_MAX_ATTEMPTS (Task 6 review round 1, fix 3): a run that never ended may have been billed (the paid call
+ * was sent, and the process stopped before anything was booked), so it gets the same one more try as a call that got no
+ * usable answer. Its counted retries (stt_http_<status>, stt_booking, a download error) stop there too, so a run that
+ * ends in a deferral always leaves fewer attempts than this, and the crash rule only ever sees runs that never ended.
+ * Images and documents keep MEDIA_MAX_ATTEMPTS.
+ */
+const maxRuns = (kind: MediaKind): number => (kind === 'voice' || kind === 'audio' ? STT_NO_ANSWER_MAX_ATTEMPTS : MEDIA_MAX_ATTEMPTS);
 
 /** A file that can never be stored safely, for example because a different file already sits at its path. */
 export class MediaFailedError extends Error {
@@ -72,10 +116,25 @@ export interface MediaProcessorOptions {
   limits?: { maxBytes: number; timeoutMs: number };
   /** When the service started; defaults to the clock's time at construction. Files loaded before it get 24 hours from it. */
   startedAt?: Date;
+  /**
+   * The voice transcriber STT_PROVIDER names, if any: only to delete provider copies promptly, a copy noted for a failed
+   * call (forgetVoiceCopies, started without waiting) and one finishMedia could not store (below). Never used to
+   * transcribe; the extractor holds its own. Without it, noted copies wait for the app's sweep.
+   */
+  voice?: VoiceTranscriber | null;
+  /**
+   * Told after finishMedia has stored a file's extraction (and noted its provider copy, if any). The app passes one that
+   * runs forgetVoiceCopies for that file when x.forget is set. Called without waiting, and may be async: a sync throw
+   * and a rejection are both logged (codes only) and never change the outcome.
+   */
+  afterFinish?: (mediaId: number, x: Extraction) => void | Promise<void>;
 }
 
 function retryCode(e: unknown): string {
   if (e instanceof MediaDownloadError) return e.code;
+  if (e instanceof SttHttpError) return `stt_http_${e.status}`;
+  if (e instanceof SttNoAnswerError) return `stt_no_answer_${e.code}`; // its SttJobLostError too
+  if (e instanceof SttBookingError) return 'stt_booking';
   if (e instanceof AiInvalidOutputError) return 'ai_invalid_output';
   if (e instanceof Anthropic.APIConnectionTimeoutError) return 'ai_timeout';
   if (e instanceof Anthropic.APIConnectionError) return 'ai_network';
@@ -95,6 +154,22 @@ function claudeUnavailable(e: unknown): boolean {
   if (e instanceof Anthropic.RateLimitError || e instanceof Anthropic.AuthenticationError || e instanceof Anthropic.PermissionDeniedError) return true;
   return e instanceof Anthropic.APIError && typeof e.status === 'number' && e.status >= 500;
 }
+
+/**
+ * finishMedia errors after an extraction whose provider copy could then not be noted: the call was paid and booked, so
+ * the file fails at once as stt_paid_unbooked, as isPaidVoiceError's do. Noted, not wrapped, as beforeReading is.
+ */
+const paidAfterFinish = new WeakSet<object>();
+
+/** Notes a finishMedia error as one after a paid voice call; an error that is not an object is wrapped first. */
+function paidFinishFailed(e: unknown): object {
+  const err = typeof e === 'object' && e !== null ? e : new Error('A paid voice transcript could not be stored');
+  paidAfterFinish.add(err);
+  return err;
+}
+
+/** Whether a voice note's paid call was answered but its booking or its storing failed: never retried. */
+const paidButUnstored = (e: unknown): boolean => isPaidVoiceError(e) || (typeof e === 'object' && e !== null && paidAfterFinish.has(e));
 
 /** Error codes of a download or disk problem that waits without counting an attempt (final review FR2). */
 const isOutageCode = (code: string | null): boolean => code === 'network' || code === 'timeout' || (code?.startsWith('disk_') ?? false);
@@ -166,6 +241,13 @@ async function saveOriginal(abs: string, bytes: Buffer, sha256: string): Promise
 export class MediaProcessor {
   readonly #o: MediaProcessorOptions;
   readonly #startedMs: number;
+  /**
+   * Ids of files that must never be paid for again (Task 6 review round 1, fix 2): added before the failMedia of
+   * stt_paid_unbooked, stt_partial, stt_job_<code> and the final stt_no_answer_<code>. If that write fails, the row stays
+   * pending in the database, but this processor never runs it again. Kept in memory only: after a restart the row's
+   * claims still count (maxRuns).
+   */
+  readonly #neverPayAgain = new Set<number>();
 
   constructor(o: MediaProcessorOptions) {
     this.#o = o;
@@ -175,6 +257,8 @@ export class MediaProcessor {
   async process(mediaId: number): Promise<ProcessResult> {
     const { db } = this.#o;
     const row = getMedia(db, mediaId);
+    // Before the claim: a file whose final failure could not be written is never claimed or paid for again (fix 2).
+    if (this.#neverPayAgain.has(mediaId)) return { outcome: 'skipped', clientId: row?.clientId ?? null };
     if (!row || row.status !== 'pending') return { outcome: 'skipped', clientId: row?.clientId ?? null };
     // A client taken off the allow-list: its files wait, untouched, until it is active again (amendment 10a).
     // The queue does not pick them up meanwhile (dueMediaIds), so this cannot loop.
@@ -191,9 +275,10 @@ export class MediaProcessor {
       failMedia(db, row.id, { status: 'unavailable', errorCode: 'revoked', at: this.#now() });
       return { outcome: 'unavailable', clientId: row.clientId };
     }
-    if (row.attempts >= MEDIA_MAX_ATTEMPTS) {
+    if (row.attempts >= maxRuns(row.kind)) {
       // Every run that ends in a deferral leaves fewer attempts than this, and the run that reaches it fails the file.
-      // So a pending file with this many was claimed by runs that never ended: each one stopped the process (FR1).
+      // So a pending file with this many was claimed by runs that never ended: each one stopped the process (FR1). A
+      // voice note or audio file gets fewer: such a run may have been billed (maxRuns, review round 1 fix 3).
       failMedia(db, row.id, { status: 'failed', errorCode: CRASHED, at: this.#now() });
       this.#o.log.warn({ mediaId: row.id, clientId: row.clientId, errorCode: CRASHED, attempts: row.attempts }, 'shared file failed: its runs never ended');
       return { outcome: 'failed', clientId: row.clientId };
@@ -228,8 +313,13 @@ export class MediaProcessor {
   async #run(row: MediaRow, job: MediaJob): Promise<ProcessOutcome> {
     const { db } = this.#o;
     let bytes: Buffer;
+    let rel: string;
     try {
-      bytes = row.localPath === null ? await this.#download(row, job) : await readFile(this.#abs(row.localPath));
+      if (row.localPath === null) ({ bytes, rel } = await this.#download(row, job));
+      else {
+        rel = row.localPath;
+        bytes = await readFile(this.#abs(rel));
+      }
     } catch (e) {
       if (typeof e === 'object' && e !== null) beforeReading.add(e);
       throw e;
@@ -243,12 +333,69 @@ export class MediaProcessor {
     }
     // The original is saved and hashed already: a DOCX's bytes may be moved to the parser, so nothing reads them after this.
     // The extractor asks `revoked` again just before a paid call, after the decode (FR3a).
-    const x = await this.#o.extract({ mediaId: row.id, kind: row.kind, mimeType: row.mimeType, fileName: row.fileName, forwarded: row.forwarded, bytes, revoked });
-    finishMedia(db, row.id, { ...x, at: this.#now() });
+    // A voice note is read from its path by the voice transcriber. Its declared length (row.seconds) is the sender's
+    // claim, so it is not passed: it stays on the row for display only (V5, Task 5 review round 1).
+    const x = await this.#o.extract({
+      mediaId: row.id, kind: row.kind, mimeType: row.mimeType, fileName: row.fileName, forwarded: row.forwarded, bytes, path: this.#abs(rel), revoked,
+    });
+    try {
+      finishMedia(db, row.id, { ...x, at: this.#now() });
+    } catch (e) {
+      if (!x.forget) throw e;
+      // A paid, booked transcript whose provider copy finishMedia could not note in media_stt_forget: a retry would pay
+      // again. The copy is noted on its own and deleted now, best effort, and the file fails at once (#settle).
+      await this.#forgetNow(row, x.forget);
+      throw paidFinishFailed(e);
+    }
+    const afterFinish = this.#o.afterFinish;
+    if (afterFinish) {
+      // Not waited for. Run in a promise, so neither a sync throw nor a rejection can escape (review round 1, fix 4).
+      void Promise.resolve()
+        .then(() => afterFinish(row.id, x))
+        .catch((err: unknown) => {
+          this.#o.log.warn({ mediaId: row.id, clientId: row.clientId, errorCode: 'after_finish', err }, 'shared file read; the step after it failed');
+        });
+    }
     return 'done';
   }
 
-  async #download(row: MediaRow, job: MediaJob): Promise<Buffer> {
+  /**
+   * A provider copy finishMedia could not note (review round 1, fix 5). Noted first, on its own, best effort: then a
+   * delete that fails leaves a row for the sweep. It is then deleted through the voice transcriber, if it is the
+   * provider's and keeps copies: by forgetVoiceCopies for that file when the row was noted (which removes the row once
+   * deleted), else directly. Every failure is logged with codes only, or ignored. Free.
+   */
+  async #forgetNow(row: MediaRow, copy: { provider: ProviderId; ref: string }): Promise<void> {
+    const { db, log, clock } = this.#o;
+    const noted = this.#noteCopy(row, copy, this.#now());
+    const voice = this.#o.voice ?? null;
+    if (voice === null || voice.provider !== copy.provider || !voice.canForget) return;
+    if (noted) {
+      await forgetVoiceCopies(db, voice, log, { mediaId: row.id, clock }).catch((err: unknown) => {
+        log.warn({ mediaId: row.id, clientId: row.clientId, provider: copy.provider, errorCode: 'forget_failed', err }, 'voice note speech copy not deleted yet: left for the sweep');
+      });
+      return;
+    }
+    try {
+      await voice.forget(copy.ref);
+    } catch {
+      // the copy stays on the provider's account; the file still fails at once
+    }
+  }
+
+  /** Notes a provider copy in media_stt_forget (N1), best effort: a failure is logged (codes only). Returns whether it was noted. */
+  #noteCopy(row: MediaRow, copy: { provider: ProviderId; ref: string }, at: string): boolean {
+    try {
+      noteMediaForget(this.#o.db, row.id, { ...copy, at });
+      return true;
+    } catch (err) {
+      this.#o.log.warn({ mediaId: row.id, clientId: row.clientId, provider: copy.provider, errorCode: 'forget_not_noted', err }, 'voice note speech copy could not be noted for deletion');
+      return false;
+    }
+  }
+
+  /** Downloads and saves the original; returns its bytes and its path relative to the data folder. */
+  async #download(row: MediaRow, job: MediaJob): Promise<{ bytes: Buffer; rel: string }> {
     const { db, sealer, fetcher } = this.#o;
     const blob = getMediaRef(db, row.id);
     if (!blob) throw new MediaUnavailableError('no_ref');
@@ -266,18 +413,40 @@ export class MediaProcessor {
     await mkdir(dirname(abs), { recursive: true });
     await saveOriginal(abs, bytes, sha256);
     markDownloaded(db, row.id, { localPath: rel, sha256, fileSize: bytes.length, at: this.#now() });
-    return bytes;
+    return { bytes, rel };
   }
 
   /**
    * Ends a run that threw. `row` is the file as it was before the claim, so a wait that counts nothing stores its
    * attempts exactly as they were then (final review FR1), and the waits of 10d read back the last wait from it.
    * A final failure keeps the attempt the claim counted.
+   *
+   * A voice note's speech errors (Phase 2b), each already booked by withSttHold (or freed, for an HTTP refusal):
+   * - paid but not booked or not stored (isPaidVoiceError, or finishMedia failing after it): failed at once,
+   *   stt_paid_unbooked. Checked first of all: the error itself may be anything, even a 401 or a spend error;
+   * - a later part failed (SttPartialError, also as the cause of an SttBookingError): failed at once, stt_partial.
+   *   Checked before the key rule, so a 401 on part 2 does not wait;
+   * - the key refused (SttHttpError 401 or 403, also as the cause of an SttBookingError): stt_unavailable, the growing
+   *   waits without an attempt, given up after 24 hours (as ai_unavailable, 10d);
+   * - a failed job (SttJobError) or ffmpeg failing (AudioError): failed at once, stt_job_<code> or audio_<code>;
+   * - no usable answer (SttNoAnswerError, SttJobLostError): one more try, then failed, stt_no_answer_<code>;
+   * - any other SttHttpError (stt_http_<status>) or SttBookingError (stt_booking): the counted retries, which for a
+   *   voice note or audio file stop at maxRuns (2).
+   * A copy the provider kept although its answer could not be read (voiceCopyOf) is noted first, best effort, and its
+   * deletion started without waiting. The never-retry speech failures add the file to #neverPayAgain before failMedia.
    */
   #settle(row: MediaRow, e: unknown): ProcessOutcome {
     const { db, log } = this.#o;
     const at = this.#now();
     const ids = { mediaId: row.id, clientId: row.clientId };
+    this.#noteUnansweredCopy(row, e, at);
+    if (paidButUnstored(e)) {
+      // The late booking and the copy deletion were already tried (by the extractor, or by #run).
+      this.#neverPayAgain.add(row.id);
+      failMedia(db, row.id, { status: 'failed', errorCode: STT_PAID_UNBOOKED, at });
+      log.warn({ ...ids, errorCode: STT_PAID_UNBOOKED }, 'voice note paid but not booked: not retried');
+      return 'failed';
+    }
     if (e instanceof SpendCapReachedError) {
       // Final review FR3c: when only paid calls in flight hold the budget (or the guard closed at shutdown), the file is
       // read within minutes, so it waits as spend_busy. mediaStats counts only spend_cap as waiting for midnight.
@@ -297,43 +466,97 @@ export class MediaProcessor {
       log.warn({ ...ids, errorCode }, 'shared file could not be read');
       return 'failed';
     }
+    // Speech: an SttBookingError carries the call's own error as its cause, so a refused key stays a refused key.
+    const sttCause = e instanceof SttBookingError ? e.cause : e;
+    if (sttCause instanceof SttPartialError) return this.#failAtOnce(row, at, STT_PARTIAL, 'voice note part failed after others were answered: not retried', { neverPayAgain: true });
+    if (sttCause instanceof SttHttpError && (sttCause.status === 401 || sttCause.status === 403)) {
+      return this.#growingWait(row, at, e, {
+        errorCode: STT_UNAVAILABLE, waits: 'speech-to-text key refused: voice note waits', gaveUp: 'voice note not transcribed: speech-to-text key refused for 24 hours',
+      });
+    }
+    if (e instanceof SttJobError) return this.#failAtOnce(row, at, `stt_job_${e.code}`, 'voice note job failed at the provider: not retried', { neverPayAgain: true });
+    if (e instanceof AudioError) return this.#failAtOnce(row, at, `audio_${e.code}`, 'voice note could not be converted: not retried');
+    if (e instanceof SttNoAnswerError) return this.#countedRetry(row, at, e, STT_NO_ANSWER_MAX_ATTEMPTS, { neverPayAgain: true });
     if (claudeUnavailable(e)) {
-      if (this.#waitedTooLong(row, at)) {
-        failMedia(db, row.id, { status: 'failed', errorCode: AI_UNAVAILABLE, at });
-        log.warn({ ...ids, errorCode: AI_UNAVAILABLE, err: e }, 'shared file not read: Claude unavailable for 24 hours');
-        return 'failed';
-      }
-      const waitMs = nextGrowingWait(row, (code) => code === AI_UNAVAILABLE);
-      deferMedia(db, row.id, { errorCode: AI_UNAVAILABLE, nextAttemptAt: new Date(Date.parse(at) + waitMs).toISOString(), attempts: row.attempts, at });
-      log.info({ ...ids, errorCode: AI_UNAVAILABLE, waitMinutes: waitMs / 60_000, err: e }, 'Claude unavailable: shared file waits');
-      return 'deferred';
+      return this.#growingWait(row, at, e, {
+        errorCode: AI_UNAVAILABLE, waits: 'Claude unavailable: shared file waits', gaveUp: 'shared file not read: Claude unavailable for 24 hours',
+      });
     }
     // Final review FR2: a short internet outage, or a full or locked disk, must not lose a file still waiting to be
     // downloaded. It waits like 10d, and the download details are kept until the download has a final answer.
     if (outage(e)) {
-      const errorCode = retryCode(e);
-      if (this.#waitedTooLong(row, at)) {
-        failMedia(db, row.id, { status: 'failed', errorCode, at });
-        log.warn({ ...ids, errorCode, err: e }, 'shared file not saved: download or disk still failing after 24 hours');
-        return 'failed';
-      }
-      const waitMs = nextGrowingWait(row, isOutageCode);
-      deferMedia(db, row.id, { errorCode, nextAttemptAt: new Date(Date.parse(at) + waitMs).toISOString(), attempts: row.attempts, at });
-      log.info({ ...ids, errorCode, waitMinutes: waitMs / 60_000, err: e }, 'download or disk problem: shared file waits');
-      return 'deferred';
+      return this.#growingWait(row, at, e, {
+        errorCode: retryCode(e), same: isOutageCode,
+        waits: 'download or disk problem: shared file waits', gaveUp: 'shared file not saved: download or disk still failing after 24 hours',
+      });
     }
     // Amendment 10e: every retry of a failed scan read could book up to the whole scan ceiling (about $4) again, so
     // the scan fails for good. Only the spend cap and Claude unavailable (both above) wait. An image keeps its
     // 3 attempts: it books at most about $0.10 a try.
-    if (isScanReadError(e)) {
-      const errorCode = retryCode(e);
-      failMedia(db, row.id, { status: 'failed', errorCode, at });
-      log.warn({ ...ids, errorCode }, 'scanned PDF not read: not retried, a retry could pay again');
+    if (isScanReadError(e)) return this.#failAtOnce(row, at, retryCode(e), 'scanned PDF not read: not retried, a retry could pay again');
+    return this.#countedRetry(row, at, e, maxRuns(row.kind));
+  }
+
+  /**
+   * The copy a voice call's provider kept although its answer could not be read (Phase 3's M7, voiceCopyOf), noted in
+   * media_stt_forget so forgetVoiceCopies deletes it (N1). Best effort: a failure is logged (codes only) and changes
+   * nothing else. Once noted, it is deleted promptly (review round 1, fix 5): forgetVoiceCopies for this file is started
+   * without waiting, when a transcriber that keeps copies is set up (the sweep deletes it otherwise). Its failure is
+   * logged with codes only.
+   */
+  #noteUnansweredCopy(row: MediaRow, e: unknown, at: string): void {
+    const copy = voiceCopyOf(e);
+    if (copy === null || !this.#noteCopy(row, copy, at)) return;
+    const { db, log, clock } = this.#o;
+    const voice = this.#o.voice ?? null;
+    if (voice === null || !voice.canForget) return;
+    void forgetVoiceCopies(db, voice, log, { mediaId: row.id, clock }).catch((err: unknown) => {
+      log.warn({ mediaId: row.id, clientId: row.clientId, provider: copy.provider, errorCode: 'forget_failed', err }, 'voice note speech copy not deleted yet: left for the sweep');
+    });
+  }
+
+  /**
+   * Fails the file for good, keeping the attempt the claim counted. With neverPayAgain, the file is first added to
+   * #neverPayAgain, so a failMedia that throws still never lets this processor run it again (fix 2).
+   */
+  #failAtOnce(row: MediaRow, at: string, errorCode: string, message: string, o: { neverPayAgain?: boolean } = {}): ProcessOutcome {
+    if (o.neverPayAgain) this.#neverPayAgain.add(row.id);
+    failMedia(this.#o.db, row.id, { status: 'failed', errorCode, at });
+    this.#o.log.warn({ mediaId: row.id, clientId: row.clientId, errorCode }, message);
+    return 'failed';
+  }
+
+  /**
+   * The waits that grow, then hourly, without counting an attempt, for a problem that may pass and bills nothing:
+   * Claude unavailable (10d), a speech key refused (stt_unavailable), a download or disk outage (FR2). One rule for all:
+   * given up once the file has waited 24 hours (#waitedTooLong). `same` tells the same problem by the row's error code
+   * (by default: the same code), so a different problem starts the waits again.
+   */
+  #growingWait(row: MediaRow, at: string, e: unknown, o: { errorCode: string; same?: (code: string | null) => boolean; waits: string; gaveUp: string }): ProcessOutcome {
+    const { db, log } = this.#o;
+    const ids = { mediaId: row.id, clientId: row.clientId };
+    if (this.#waitedTooLong(row, at)) {
+      failMedia(db, row.id, { status: 'failed', errorCode: o.errorCode, at });
+      log.warn({ ...ids, errorCode: o.errorCode, err: e }, o.gaveUp);
       return 'failed';
     }
+    const waitMs = nextGrowingWait(row, o.same ?? ((code) => code === o.errorCode));
+    deferMedia(db, row.id, { errorCode: o.errorCode, nextAttemptAt: new Date(Date.parse(at) + waitMs).toISOString(), attempts: row.attempts, at });
+    log.info({ ...ids, errorCode: o.errorCode, waitMinutes: waitMs / 60_000, err: e }, o.waits);
+    return 'deferred';
+  }
+
+  /**
+   * A counted retry after 1, then 5 minutes; failed once the attempts (the claim's included) reach maxAttempts. With
+   * neverPayAgain, that final failure first adds the file to #neverPayAgain (fix 2).
+   */
+  #countedRetry(row: MediaRow, at: string, e: unknown, maxAttempts: number, o: { neverPayAgain?: boolean } = {}): ProcessOutcome {
+    const { db, log } = this.#o;
+    const ids = { mediaId: row.id, clientId: row.clientId };
     const errorCode = retryCode(e);
     const attempts = row.attempts + 1; // the attempt the claim counted
-    if (attempts >= MEDIA_MAX_ATTEMPTS) {
+    if (attempts >= maxAttempts) {
+      if (o.neverPayAgain) this.#neverPayAgain.add(row.id);
       failMedia(db, row.id, { status: 'failed', errorCode, at });
       log.warn({ ...ids, errorCode, attempts, err: e }, 'shared file failed after retries');
       return 'failed';

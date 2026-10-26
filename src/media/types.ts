@@ -55,10 +55,3 @@ export const MEDIA_LIMITS = {
   maxStoredTextChars: 1_000_000,
 } as const;
 
-/**
- * Phase 2b seam, not implemented in 2a: speech-to-text for voice notes and audio files. extract.ts will call it for the
- * kinds 'voice' and 'audio' (2a already saves their originals) and book the cost as 'stt' spend.
- */
-export interface Transcriber {
-  transcribe(audio: Buffer, opts: { mimeType: string | null; languageHint: 'hi-en' }): Promise<{ text: string; costUsd: number }>;
-}

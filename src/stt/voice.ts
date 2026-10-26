@@ -7,61 +7,58 @@ import { costUsd, modelFor } from './prices.ts';
 import { ElevenLabsProvider } from './providers/elevenlabs.ts';
 import { OpenAiProvider } from './providers/openai.ts';
 import { SarvamProvider } from './providers/sarvam.ts';
-import type { AudioFormat, AudioPart, ProviderId, ProviderResult, SttProvider } from './types.ts';
+import type { AudioPart, ProviderId, ProviderResult, SttProvider } from './types.ts';
 
 /*
  * Voice notes and audio files (Phase 2b), the voice-note sibling of the meeting transcriber in src/meetings/transcribe.ts.
  * Same adapters, picked by the same STT_PROVIDER, with speaker labels off and short timeouts.
- * - WhatsApp voice notes (Ogg Opus) and MP3 files go to Sarvam and ElevenLabs as they are (V3).
- * - Any other audio, and every file when OpenAI is chosen, is converted to MP3 with ffmpeg first (N2), in a folder of
- *   its own named after the media id; OpenAI notes longer than its 5-minute limit are split there.
+ * - Every voice note and audio file is converted to MP3 on this PC with ffmpeg first, for every provider (owner decision
+ *   in Task 5's review round 1, amending V3 and N2), in a folder of its own named after the media id. The conversion
+ *   stops a little past the cap (ffmpeg's -t) and the MP3 ffmpeg wrote is measured, so the note's true length is known
+ *   before any money is held. Without ffmpeg nothing is sent. OpenAI notes longer than its 5-minute limit are split there.
  * - Two steps. prepare is free and local: it converts, measures and splits, and refuses a note that measures longer
  *   than allowed (V5), so a low-bitrate file never becomes many paid parts and a local failure books nothing. transcribe
  *   is the paid step, run by the extractor inside one spend hold (withSttHold).
  * - One provider call per part. Nothing is retried and no call is aborted: each call is billed, and the spend hold
  *   books by its outcome. Once a part has been answered, a later part's failure is an SttPartialError, so the hold
  *   books the ceiling for the parts already billed.
- * The sender's MIME type is only compared, as a lower-cased base type, with the fixed sets below. It never reaches a
- * provider: the format sent is always one of the literals 'ogg' or 'mp3' chosen here.
+ * The sender's MIME type is not used: the format sent is always the literal 'mp3'.
  * Logs: none here. The extractor logs ids, provider, seconds and cost.
  */
 
 /** Voice notes are short: these stay well inside SpendGuard's 45-minute hold and the media queue's 15-minute claim. */
 export const VOICE_STT_TIMEOUTS = { elevenlabsMs: 5 * 60_000, openaiMs: 5 * 60_000, sarvamWaitMs: 10 * 60_000 };
 
-/** The lowest bitrate assumed for the spend hold (V5): a file of n bytes holds at most n × 8 / 12,000 seconds. */
+/**
+ * How long ffmpeg may take to convert one voice note (Task 5 review round 2), instead of toMp3's 60 minutes for meetings.
+ * It stays inside the media queue's 15-minute claim (CLAIM_MS in src/media/processor.ts), and the conversion stops at
+ * maxSeconds + VOICE_LENGTH_TOLERANCE_S + 1 seconds (at most 606 s of audio decoded with the default cap), so a slow PC
+ * still finishes well inside it.
+ */
+export const VOICE_CONVERT_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * The lowest bitrate assumed from a file's size: a file of n bytes holds at most about n × 8 / 12,000 seconds. Since
+ * Task 5's review round 2 it never refuses a file and never sets the hold: it is costUsd's last fallback (when no length
+ * was billed or measured) and the CLI's estimate.
+ */
 const MIN_BITRATE_BPS = 12_000;
 export const sizeBoundSeconds = (bytes: number): number => Math.ceil((bytes * 8) / MIN_BITRATE_BPS);
 
 /**
- * How far a measured length may exceed VoiceInput.maxSeconds before prepare refuses the note as too_long. ffmpeg's
- * summary and the size bound round differently, and a conversion can add a few frames of padding.
+ * How far a measured length may exceed VoiceInput.maxSeconds (the cap) before prepare refuses the note as too_long.
+ * ffmpeg's summary rounds, and a conversion can add a few frames of padding.
  */
 export const VOICE_LENGTH_TOLERANCE_S = 5;
 
-/** 'Audio/Ogg; codecs=opus' -> 'audio/ogg'. Only ever compared with the sets below. */
-const baseMime = (m: string | null): string => ((m ?? '').toLowerCase().split(';')[0] ?? '').trim();
-const OGG = new Set(['audio/ogg', 'audio/opus']);
-const MP3 = new Set(['audio/mpeg', 'audio/mp3']);
-
 /**
- * The format a file goes in as it is, or null when it must be converted with ffmpeg first. OpenAI always gets a
- * conversion; Sarvam and ElevenLabs take Ogg and MP3 as they are (V3, N2).
+ * Whether a file can be sent: only when ffmpeg is there, for every provider and every format, since every file is
+ * converted first (Task 5 review round 1, amending V3 and N2). The rule behind every transcriber's canSend, exported so
+ * `cli transcribe-voice` can apply it without a key or a provider. The provider and MIME type stay as arguments so a
+ * caller says what it asks about; neither changes the answer.
  */
-function sendAsIs(provider: ProviderId, mimeType: string | null): AudioFormat | null {
-  if (provider === 'openai') return null;
-  const base = baseMime(mimeType);
-  if (OGG.has(base)) return 'ogg';
-  if (MP3.has(base)) return 'mp3';
-  return null;
-}
-
-/**
- * Whether a file can be sent: as it is, or converted because ffmpeg is there (N2). The rule behind every transcriber's
- * canSend, exported so `cli transcribe-voice` can apply it without a key or a provider.
- */
-export function canSendVoice(provider: ProviderId, mimeType: string | null, hasFfmpeg: boolean): boolean {
-  return sendAsIs(provider, mimeType) !== null || hasFfmpeg;
+export function canSendVoice(_provider: ProviderId, _mimeType: string | null, hasFfmpeg: boolean): boolean {
+  return hasFfmpeg;
 }
 
 /** The longest provider id for a stored copy that is kept (as for meetings); a longer one is not an id. */
@@ -73,21 +70,21 @@ export interface VoiceInput {
   mediaId: number;
   /** Absolute path of the saved original (DATA_DIR/media/...). */
   path: string;
-  /** From the row, e.g. 'audio/ogg; codecs=opus'. Untrusted: only its base type is compared with a fixed list. */
-  mimeType: string | null;
   /**
-   * Upper bound in seconds, from the file size (V5). Never the sender's declared length. A note ffmpeg measures longer
-   * than this (plus VOICE_LENGTH_TOLERANCE_S) is refused by prepare.
+   * The cap in seconds (STT_MAX_SECONDS, V5), not the size bound and never the sender's declared length. The conversion
+   * stops at this plus VOICE_LENGTH_TOLERANCE_S plus 1 second, and a note ffmpeg measures longer than this plus
+   * VOICE_LENGTH_TOLERANCE_S is refused by prepare: the only too_long check (Task 5 review round 2; the file's size
+   * refuses nothing). The caller holds the measured length plus VOICE_LENGTH_TOLERANCE_S.
    */
   maxSeconds: number;
 }
 
 /** A note made ready to send by prepare, for one transcribe. */
 export interface PreparedVoice {
-  /** The parts to send, in order: the original as it is, or MP3 files in the note's temporary folder. */
+  /** The parts to send, in order: MP3 files in the note's temporary folder. */
   readonly parts: readonly AudioPart[];
-  /** The length ffmpeg measured; null when the file goes as it is and ffmpeg is absent or could not measure it. */
-  readonly measuredSeconds: number | null;
+  /** The length ffmpeg measured on the MP3 it wrote: trusted, unlike the original's header. */
+  readonly measuredSeconds: number;
   /** Removes the note's temporary folder. Safe to call twice; never throws. */
   dispose(): void;
 }
@@ -123,20 +120,22 @@ export interface VoiceTranscriber {
   readonly provider: ProviderId;
   /**
    * List-price ceiling for this many seconds of audio, without speaker labels, in US dollars (the spend hold). The caller
-   * holds ceilingUsd(Math.max(bound, prepared.measuredSeconds ?? 0)), so a measured length up to the tolerance is covered.
+   * holds ceilingUsd(prepared.measuredSeconds + VOICE_LENGTH_TOLERANCE_S): the tolerance is headroom over a provider's
+   * billed rounding (Task 5 review round 2).
    */
   ceilingUsd(seconds: number): number;
   /**
-   * List-price cost of a finished note (V5): the billed seconds when reported, else the measured length, else
-   * min(maxSeconds, declared), else maxSeconds. A negative, NaN or infinite length is ignored.
+   * List-price cost of a finished note (V5): the billed seconds when reported, else the measured length, else maxSeconds
+   * (the bound). Never the sender's declared length, so a declared 0 cannot lower the booking (Task 5 review round 1).
+   * A negative, NaN or infinite length is ignored.
    */
-  costUsd(o: { maxSeconds: number; billedSeconds: number | null; declaredSeconds: number | null; measuredSeconds: number | null }): number;
-  /** Whether this file can be sent: as it is, or converted because ffmpeg is there (N2). */
+  costUsd(o: { maxSeconds: number; billedSeconds: number | null; measuredSeconds: number | null }): number;
+  /** Whether this file can be sent: whether ffmpeg is there, whatever the format (canSendVoice). */
   canSend(mimeType: string | null): boolean;
   /**
-   * The free, local step: no provider call. Picks the format, converts, measures and splits for OpenAI. Throws
-   * AudioError('too_long') when the measured length exceeds input.maxSeconds + VOICE_LENGTH_TOLERANCE_S, AudioError
-   * ('no_ffmpeg') when a conversion is needed without ffmpeg, and ffmpeg's own AudioError; the folder is removed first.
+   * The free, local step: no provider call. Converts, measures and splits for OpenAI. Throws AudioError('too_long') when
+   * the measured length exceeds input.maxSeconds + VOICE_LENGTH_TOLERANCE_S (a conversion stopped by -t does too),
+   * AudioError('no_ffmpeg') without ffmpeg, and ffmpeg's own AudioError; the folder is removed first.
    * Run it outside the spend hold.
    */
   prepare(input: VoiceInput): Promise<PreparedVoice>;
@@ -177,46 +176,23 @@ function folderRemover(dir: string): () => void {
 /** A VoiceTranscriber over any provider, with speaker labels off. Exported for tests (a fake provider and ffmpeg). */
 export function voiceTranscriber(provider: SttProvider, o: { inrPerUsd: number; ffmpeg: Ffmpeg | null; tmpDir: string }): VoiceTranscriber {
   const price = modelFor(provider.id, false);
-  const asIs = (mimeType: string | null): AudioFormat | null => sendAsIs(provider.id, mimeType);
   const send = (part: AudioPart): Promise<ProviderResult> =>
-    provider.transcribe({ path: part.path, seconds: part.seconds, offset: part.offset, format: part.format ?? 'mp3' }, { diarize: false });
-  const tooLong = (measured: number | null, input: VoiceInput): boolean =>
-    measured !== null && measured > input.maxSeconds + VOICE_LENGTH_TOLERANCE_S;
+    provider.transcribe({ path: part.path, seconds: part.seconds, offset: part.offset, format: 'mp3' }, { diarize: false });
 
   return {
     provider: provider.id,
     ceilingUsd: (seconds) => voiceCeilingUsd(provider.id, seconds, o.inrPerUsd),
-    costUsd: ({ maxSeconds, billedSeconds, declaredSeconds, measuredSeconds }) => {
-      const seconds = usable(billedSeconds)
-        ? billedSeconds
-        : usable(measuredSeconds)
-          ? measuredSeconds
-          : usable(declaredSeconds) ? Math.min(maxSeconds, declaredSeconds) : maxSeconds;
+    costUsd: ({ maxSeconds, billedSeconds, measuredSeconds }) => {
+      const seconds = usable(billedSeconds) ? billedSeconds : usable(measuredSeconds) ? measuredSeconds : maxSeconds;
       return costUsd(price, seconds, o.inrPerUsd);
     },
     canSend: (mimeType) => canSendVoice(provider.id, mimeType, o.ffmpeg !== null),
     async prepare(input) {
       // The folder is named from the numeric id only, never from a path or name the sender gave.
       if (!Number.isSafeInteger(input.mediaId) || input.mediaId < 1) throw new Error('voice prepare: the media id is not a positive whole number');
-      const format = asIs(input.mimeType);
-      if (format !== null) {
-        // Sent as it is, with no folder. ffmpeg, when there, only measures the original: a file it cannot measure
-        // still goes (V3), held at the size bound.
-        let measured: number | null = null;
-        if (o.ffmpeg !== null) {
-          try {
-            const s = await o.ffmpeg.seconds(input.path);
-            measured = measurable(s) ? s : null;
-          } catch {
-            measured = null;
-          }
-        }
-        if (tooLong(measured, input)) throw new AudioError('too_long');
-        const part: AudioPart = { path: input.path, seconds: measured ?? input.maxSeconds, offset: 0, format };
-        return { parts: [part], measuredSeconds: measured, dispose: () => {} };
-      }
       if (o.ffmpeg === null) throw new AudioError('no_ffmpeg');
       const ffmpeg = o.ffmpeg;
+      const allowed = input.maxSeconds + VOICE_LENGTH_TOLERANCE_S;
       const dir = join(o.tmpDir, `voice-${input.mediaId}`);
       const dispose = folderRemover(dir);
       try {
@@ -224,10 +200,13 @@ export function voiceTranscriber(provider: SttProvider, o: { inrPerUsd: number; 
         rmSync(dir, { recursive: true, force: true });
         mkdirSync(dir, { recursive: true });
         const mp3 = join(dir, 'audio.mp3');
-        await ffmpeg.toMp3(input.path, mp3);
+        // Stopped one second past what is allowed: a longer note is never converted whole, whatever its header claims.
+        await ffmpeg.toMp3(input.path, mp3, undefined, { maxSeconds: allowed + 1, timeoutMs: VOICE_CONVERT_TIMEOUT_MS });
+        // The MP3 ffmpeg wrote, so its length can be trusted; the original's header is the sender's.
         const measured = await ffmpeg.seconds(mp3);
         if (!measurable(measured)) throw new AudioError('no_duration');
-        if (tooLong(measured, input)) throw new AudioError('too_long');
+        // Also refuses a conversion that reached the -t limit: it measures about allowed + 1.
+        if (measured > allowed) throw new AudioError('too_long');
         const whole: AudioPart = { path: mp3, seconds: measured, offset: 0, format: 'mp3' };
         const parts = measured > provider.maxPartSeconds ? await ffmpeg.split(whole, join(dir, 'parts'), provider.maxPartSeconds) : [whole];
         return { parts: parts.map((p) => ({ path: p.path, seconds: p.seconds, offset: p.offset, format: 'mp3' })), measuredSeconds: measured, dispose };
@@ -277,7 +256,7 @@ function combine(provider: SttProvider, results: ProviderResult[]): VoiceResult 
 
 /**
  * The voice transcriber STT_PROVIDER names, or null when it is 'none'. STT_API_KEY goes to the provider's constructor
- * and nowhere else. deps.ffmpeg is null when there is none (then only Ogg and MP3 go, to Sarvam or ElevenLabs);
+ * and nowhere else. deps.ffmpeg is null when there is none (then nothing is sent: canSend is false for every file);
  * deps.tmpDir holds the conversion folders; deps.http replaces the network in tests.
  */
 export function createVoiceTranscriber(env: Env, deps: { ffmpeg: Ffmpeg | null; tmpDir: string; http?: HttpFetch }): VoiceTranscriber | null {

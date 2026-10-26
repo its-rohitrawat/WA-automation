@@ -4,7 +4,7 @@ import { syncClients } from '../../src/store/clients.ts';
 import { migrate, type Db } from '../../src/store/db.ts';
 import {
   claimMedia, countMediaForgetAttempt, deferMedia, deleteMediaForget, dueMediaIds, failMedia, finishMedia, getMedia, getMediaRef, insertMedia, markDownloaded,
-  mediaForMessages, mediaJob, mediaStats, mediaSttForgetsGivenUp, messageRowId, pendingMediaForgets, queueVoiceBacklog, voiceBacklog, type MediaKind, type MediaStatus, type NewMedia, type TextKind,
+  mediaForMessages, mediaJob, mediaStats, mediaSttForgetsGivenUp, messageRowId, noteMediaForget, pendingMediaForgets, queueVoiceBacklog, voiceBacklog, type MediaKind, type MediaStatus, type NewMedia, type TextKind,
 } from '../../src/store/media.ts';
 import { MIGRATIONS } from '../../src/store/migrations.ts';
 import { applyRevoke, insertMessage, listUnprocessed, markProcessed, markProcessedIfUnchanged, upsertReaction } from '../../src/store/messages.ts';
@@ -509,6 +509,17 @@ const forgets = (db: Db) =>
   db.prepare('SELECT media_id AS mediaId, provider, ref, created_at AS createdAt, attempts, next_try_at AS nextTryAt FROM media_stt_forget ORDER BY id').all();
 
 describe('finishMedia: the speech provider\'s stored copy of a transcript (N1)', () => {
+  // Task 6: the copy an unreadable answer named (Phase 3's M7), noted by the processor when the error ends a run.
+  it('noteMediaForget notes a copy without finishing the file, once per provider and ref', () => {
+    const db = seededDb();
+    const id = savedVoice(db, 'A');
+    noteMediaForget(db, id, { provider: 'elevenlabs', ref: 'tr_9', at: NOW });
+    noteMediaForget(db, id, { provider: 'elevenlabs', ref: 'tr_9', at: LATER });
+    expect(getMedia(db, id)).toMatchObject({ status: 'pending' });
+    expect(forgets(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_9', createdAt: NOW, attempts: 0, nextTryAt: null }]);
+    expect(() => noteMediaForget(db, id, { provider: 'elevenlabs', ref: '', at: NOW })).toThrow();
+  });
+
   it('notes the copy to delete in the same write as the finish', () => {
     const db = seededDb();
     const id = savedVoice(db, 'A');

@@ -77,6 +77,8 @@ export function parseDuration(stderr: string): number | null {
 }
 
 const QUIET = ['-hide_banner', '-nostdin', '-loglevel', 'error'];
+/** toMp3's default timeout: a whole meeting recording. */
+const CONVERT_TIMEOUT_MS = 60 * 60_000;
 
 /**
  * The demuxers an input may be read with. ffmpeg picks the input format from the file's content, so without a list a
@@ -120,15 +122,23 @@ export class Ffmpeg {
    * Mono 16 kHz MP3 at 64 kbit/s, the one format all three providers document; the video track of a recording is
    * dropped. An existing output is kept, and a new one appears only when complete (written under a temporary name).
    * Tags and chapters are dropped too: title, GPS location, device or contact name must not leave the PC.
+   * opts.maxSeconds (Phase 2b voice notes): the output stops there (`-t`, an output option), so no file, whatever its
+   * header claims, is converted past it. Without it the arguments are exactly those meetings have always used.
+   * opts.timeoutMs: how long the conversion may run, 60 minutes by default (meetings); voice notes pass a shorter one.
+   * It changes no argument.
    */
-  async toMp3(input: string, output: string, signal?: AbortSignal): Promise<void> {
+  async toMp3(input: string, output: string, signal?: AbortSignal, opts: { maxSeconds?: number; timeoutMs?: number } = {}): Promise<void> {
+    const max = opts.maxSeconds;
+    if (max !== undefined && !(Number.isFinite(max) && max > 0)) throw new Error('toMp3: maxSeconds must be a positive number');
+    const timeoutMs = opts.timeoutMs ?? CONVERT_TIMEOUT_MS;
+    if (!(Number.isFinite(timeoutMs) && timeoutMs > 0)) throw new Error('toMp3: timeoutMs must be a positive number');
     if (existsSync(output)) return;
     const tmp = `${output}.part.mp3`;
     const args = [
       ...QUIET, '-y', ...SAFE_INPUT, '-i', input, '-vn', '-map_metadata', '-1', '-map_chapters', '-1',
-      '-ac', '1', '-ar', '16000', '-c:a', 'libmp3lame', '-b:a', '64k', tmp,
+      '-ac', '1', '-ar', '16000', '-c:a', 'libmp3lame', '-b:a', '64k', ...(max === undefined ? [] : ['-t', String(max)]), tmp,
     ];
-    const { code } = await this.#ffmpeg(args, 60 * 60_000, signal);
+    const { code } = await this.#ffmpeg(args, timeoutMs, signal);
     if (code !== 0 || !existsSync(tmp)) throw new AudioError('convert_failed');
     renameSync(tmp, output);
   }

@@ -78,8 +78,9 @@ export const TOO_COSTLY = 'too_costly';
 export const FORWARDED_NOT_TRANSCRIBED = 'forwarded_not_transcribed';
 
 /**
- * The extractor's note for a voice note or audio file whose size allows more than STT_MAX_SECONDS of audio (V2, V5).
- * It is not sent, and the file is finished, so it never blocks its message.
+ * The extractor's note for a voice note or audio file whose converted MP3 measures longer than STT_MAX_SECONDS plus
+ * VOICE_LENGTH_TOLERANCE_S (V2, V5); the file's size refuses nothing (Task 5 review round 2). It is not sent, and the
+ * file is finished, so it never blocks its message.
  */
 export const TOO_LONG = 'too_long';
 
@@ -87,8 +88,10 @@ export const TOO_LONG = 'too_long';
 export const NO_SPEECH = 'no_speech';
 
 /**
- * The extractor's note for an audio format the speech provider does not take as it is, when ffmpeg is not there to
- * convert it (N2). cli transcribe-voice picks the file up once ffmpeg is installed.
+ * The extractor's note for a voice note or audio file not transcribed because ffmpeg is not there: every file is
+ * converted on this PC first, whatever its format and provider (N2, as amended in Task 5's review round 1). The name
+ * is kept from before. The file is finished and listed by the backlog query, so `cli transcribe-voice` picks it up
+ * once ffmpeg is installed (and the service restarted).
  */
 export const FORMAT_NOT_SUPPORTED = 'format_not_supported';
 

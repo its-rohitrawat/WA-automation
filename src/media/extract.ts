@@ -11,7 +11,13 @@ import { SpendCapReachedError, withReservation } from '../brain/paidCall.ts';
 import { estimateCostUsd, type Prices } from '../spend/pricing.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
 import type { MediaKind, TextKind } from '../store/media.ts';
+import { AudioError } from '../stt/audio.ts';
+import { SttHttpError, SttNoAnswerError } from '../stt/http.ts';
+import { SttBookingError, withSttHold } from '../stt/paidStt.ts';
+import type { ProviderId } from '../stt/types.ts';
+import { sizeBoundSeconds, SttPartialError, VOICE_LENGTH_TOLERANCE_S, type PreparedVoice, type VoiceResult, type VoiceTranscriber } from '../stt/voice.ts';
 import { prepareImageForClaude, type PreparedImage } from './image.ts';
+import { FORMAT_NOT_SUPPORTED, FORWARDED_NOT_TRANSCRIBED, NO_SPEECH, TOO_LONG } from './labels.ts';
 import { parseFile } from './parse/runner.ts';
 import { countVisible, cutText } from './parse/text.ts';
 import type { ParseJob, ParseResult } from './parse/types.ts';
@@ -27,6 +33,12 @@ export interface ExtractInput {
   /** The saved original. A DOCX's bytes are moved to the parser, so the caller must not read them after extract. */
   bytes: Buffer;
   /**
+   * Absolute path of the saved original: a voice note or audio file is read from it by the voice transcriber. Its
+   * declared length (the row's seconds) is not passed: the sender sets it, so it is shown only, never used for length or
+   * spend (V5, Task 5 review round 1).
+   */
+  path: string;
+  /**
    * Asked just before a paid call: true when the file's message was deleted for everyone meanwhile, for example during
    * the decode. The file is then not sent to Claude and comes back with note 'revoked' (final review FR3a).
    */
@@ -37,11 +49,16 @@ export interface Extraction {
   textKind: TextKind | null;
   text: string | null;
   pageCount: number | null;
-  /** 'first_pages_only' | 'scan_too_long' | 'scan_read_by_ai' | 'forwarded_not_described' | 'too_costly' | 'revoked' | null */
+  /**
+   * 'first_pages_only' | 'scan_too_long' | 'scan_read_by_ai' | 'forwarded_not_described' | 'too_costly' | 'revoked' |
+   * 'forwarded_not_transcribed' | 'too_long' | 'no_speech' | 'format_not_supported' | null
+   */
   note: string | null;
+  /** The speech provider kept a copy of this transcript (ElevenLabs), to be deleted (N1). finishMedia notes it. */
+  forget?: { provider: ProviderId; ref: string } | null;
 }
 
-/** Reads one saved original. This is the seam where Phase 2b adds voice-note transcription. */
+/** Reads one saved original: describes images, reads PDFs and DOCX files, and transcribes voice notes and audio files. */
 export type Extractor = (input: ExtractInput) => Promise<Extraction>;
 
 export interface ExtractorDeps {
@@ -54,6 +71,10 @@ export interface ExtractorDeps {
    */
   parse?: (job: ParseJob, o?: { transfer?: boolean }) => Promise<ParseResult>;
   prepareImage?: (bytes: Buffer) => Promise<PreparedImage>;
+  /** The voice transcriber STT_PROVIDER names; null or absent with 'none', when voice notes are kept as in 2a. */
+  voice?: VoiceTranscriber | null;
+  /** STT_MAX_SECONDS: the hard cap on one voice note or audio file (V2, V5). Default 600. */
+  maxVoiceSeconds?: number;
 }
 
 const NONE: Extraction = { textKind: null, text: null, pageCount: null, note: null };
@@ -75,6 +96,8 @@ const CLAUDE_PDF_MAX_PAGES = 600;
 const MAX_PDF_INPUT_TOKENS = Math.min(CLAUDE_PDF_MAX_PAGES * PDF_TOKENS_PER_PAGE, 1_000_000);
 /** The media client makes one SDK attempt per call, so a lost connection is booked once (amendment 9h). */
 const MEDIA_ATTEMPTS = MEDIA_SDK_MAX_RETRIES + 1;
+/** STT_MAX_SECONDS' default (N3). */
+const DEFAULT_MAX_VOICE_SECONDS = 600;
 
 const baseMime = (m: string | null): string => ((m ?? '').toLowerCase().split(';')[0] ?? '').trim();
 const isPdf = (b: Buffer): boolean => b.subarray(0, 5).toString('latin1') === '%PDF-';
@@ -103,6 +126,70 @@ function scanReadFailed(e: unknown): never {
 /** Whether an error came from a scanned PDF's paid read (amendment 10e). */
 export function isScanReadError(e: unknown): boolean {
   return typeof e === 'object' && e !== null && scanReadErrors.has(e);
+}
+
+/**
+ * Errors thrown after a voice note's paid call was answered, when its booking failed (Task 5 review round 1, Fix 3), or
+ * after a failed call that may have been billed, when its ceiling booking failed (Task 6 review round 1, fix 1). The
+ * provider may have billed it, so a retry could pay again: the processor fails the file at once. Noted, not wrapped, as
+ * scanReadErrors are.
+ */
+const paidVoiceErrors = new WeakSet<object>();
+
+/** Notes an error as one that came after a paid, answered voice call; an error that is not an object is wrapped first. */
+function paidVoiceError(e: unknown): object {
+  const err = typeof e === 'object' && e !== null ? e : new Error('A paid speech call could not be booked');
+  paidVoiceErrors.add(err);
+  return err;
+}
+
+/** Whether an error came after a voice note's paid call was answered: never retried, it would pay again. */
+export function isPaidVoiceError(e: unknown): boolean {
+  return typeof e === 'object' && e !== null && paidVoiceErrors.has(e);
+}
+
+/**
+ * Provider copies named by a voice call that got no usable answer (Phase 3's M7: an ElevenLabs reply that could not be
+ * read may still carry the id of the transcript it stored, as SttNoAnswerError.forgetRef). The extractor has no
+ * database, so it notes the copy on the error it throws, with its own transcriber's provider, and the processor writes
+ * it to media_stt_forget (N1), from where forgetVoiceCopies deletes it. Noted, not wrapped, as scanReadErrors are, so
+ * the error itself still reaches the processor's rules.
+ */
+const unansweredCopies = new WeakMap<object, { provider: ProviderId; ref: string }>();
+
+/** The longest id kept for a stored copy: media_stt_forget's CHECK, and MAX_REF_LENGTH in src/stt/voice.ts. */
+const MAX_COPY_REF_LENGTH = 200;
+
+/**
+ * The copy id an SttNoAnswerError carries, itself or as the cause of an SttPartialError or an SttBookingError (or both).
+ * Read by shape: forgetRef is optional on SttNoAnswerError, and only an id of 1 to 200 characters is kept.
+ */
+function unansweredRef(e: unknown): string | null {
+  let cur: unknown = e;
+  for (let depth = 0; depth < 3; depth++) {
+    if (cur instanceof SttNoAnswerError) {
+      const ref = (cur as { forgetRef?: unknown }).forgetRef;
+      return typeof ref === 'string' && ref.length >= 1 && ref.length <= MAX_COPY_REF_LENGTH ? ref : null;
+    }
+    if (!(cur instanceof SttBookingError || cur instanceof SttPartialError)) return null;
+    cur = cur.cause;
+  }
+  return null;
+}
+
+/** Notes the copy a failed voice call names, if any, on the error, and returns the error as it is. */
+function noteUnansweredCopy(e: unknown, provider: ProviderId): unknown {
+  const ref = unansweredRef(e);
+  if (ref !== null && typeof e === 'object' && e !== null) unansweredCopies.set(e, { provider, ref });
+  return e;
+}
+
+/**
+ * The provider copy a voice call that failed without a usable answer still named, for the processor to note in
+ * media_stt_forget; null for any other error. An id only, never what was said.
+ */
+export function voiceCopyOf(e: unknown): { provider: ProviderId; ref: string } | null {
+  return typeof e === 'object' && e !== null ? (unansweredCopies.get(e) ?? null) : null;
 }
 
 /** Ceiling for one image description: the prompt, the image at its token count (capped), and the full output allowance. */
@@ -181,6 +268,102 @@ export function createExtractor(d: ExtractorDeps): Extractor {
     return parsed.text ? { textKind: 'extract', text: capStored(parsed.text), pageCount: null, note: null } : NONE;
   };
 
+  /** Books a paid voice call's cost late, best effort: a failure is ignored, the first error is the one thrown. */
+  const bookLate = (usd: number, input: ExtractInput): void => {
+    try {
+      d.spend.record('stt', usd, `${label(input)} (booked late)`);
+    } catch {
+      // the first error is the one thrown
+    }
+  };
+
+  /**
+   * A voice call that failed without an answer, whose booking then failed too (Task 6 review round 1, fix 1): withSttHold
+   * threw an SttBookingError, and nothing is booked. Unless its cause is an SttHttpError (the provider refused the work:
+   * never billed, the hold was only to be freed), the call may have been billed: no answer, a failed job, a later part,
+   * or anything unknown, each of which withSttHold books at the ceiling. So the ceiling is booked late, best effort, and
+   * the error marked paid: the processor fails the file at once as stt_paid_unbooked instead of paying again.
+   */
+  const failedAndUnbooked = (e: unknown, ceiling: number, input: ExtractInput): unknown => {
+    if (!(e instanceof SttBookingError) || e.cause instanceof SttHttpError) return e;
+    bookLate(ceiling, input);
+    return paidVoiceError(e);
+  };
+
+  /**
+   * After a voice note's paid call was answered, its booking failed (Fix 3): withSttHold threw from settle or record,
+   * or, if costUsd threw, from booking the ceiling. Best effort, each failure ignored: the cost is booked late (the
+   * ceiling when nothing was priced and withSttHold could not book it), and the provider's copy is deleted (free), since
+   * finishMedia never notes it. The error is then marked paid, so the processor fails the file instead of paying again.
+   */
+  const paidButUnbooked = async (e: unknown, paid: { result: VoiceResult; costUsd?: number }, ceiling: number, input: ExtractInput): Promise<object> => {
+    const lateUsd = paid.costUsd ?? (e instanceof SttBookingError ? ceiling : null);
+    if (lateUsd !== null) bookLate(lateUsd, input);
+    const ref = paid.result.forgetRef;
+    if (ref !== null && d.voice) {
+      try {
+        await d.voice.forget(ref);
+      } catch {
+        // the copy stays on the provider's account; the first error is the one thrown
+      }
+    }
+    return paidVoiceError(e);
+  };
+
+  /**
+   * A voice note or audio file (V2, V4, V5, N2). The cap goes to prepare, which converts the note (stopped just past the
+   * cap) and refuses it when measured longer than the cap plus VOICE_LENGTH_TOLERANCE_S: the only too_long check. The
+   * file's size refuses nothing (Task 5 review round 2: a 1-minute 128 kbit/s MP3 is about 960 KB, a size bound of 640 s),
+   * and the sender's declared length is never used. The hold is the measured length plus the tolerance. Without ffmpeg
+   * nothing can be converted, so canSend is false and the note is format_not_supported, for transcribe-voice later. The
+   * transcript is stored as an 'extract': the media kind already says it is a transcript.
+   */
+  const transcribe = async (input: ExtractInput): Promise<Extraction> => {
+    const v = d.voice ?? null;
+    if (v === null) return NONE; // STT_PROVIDER none: kept as in 2a, transcribed later with cli transcribe-voice
+    if (input.forwarded) return { ...NONE, note: FORWARDED_NOT_TRANSCRIBED };
+    const maxSeconds = d.maxVoiceSeconds ?? DEFAULT_MAX_VOICE_SECONDS;
+    if (!v.canSend(input.mimeType)) return { ...NONE, note: FORMAT_NOT_SUPPORTED }; // no ffmpeg
+    // Free and local, outside the hold: a conversion or measuring failure books nothing.
+    let prepared: PreparedVoice;
+    try {
+      prepared = await v.prepare({ mediaId: input.mediaId, path: input.path, maxSeconds });
+    } catch (e) {
+      if (e instanceof AudioError && e.code === 'too_long') return { ...NONE, note: TOO_LONG };
+      throw e;
+    }
+    try {
+      // The measured length is trusted and capped by prepare; the tolerance is headroom over a provider's billed rounding.
+      const ceiling = v.ceilingUsd(prepared.measuredSeconds + VOICE_LENGTH_TOLERANCE_S);
+      if (ceiling > d.spend.capUsd) return { ...NONE, note: TOO_COSTLY };
+      if (input.revoked?.()) return REVOKED;
+      // Kept outside the hold, so a booking that fails after the provider answered is still known to be paid (Fix 3).
+      const paid: { result?: VoiceResult; costUsd?: number } = {};
+      let result: VoiceResult;
+      try {
+        ({ result } = await withSttHold(d.spend, ceiling, label(input), async () => {
+          const r = await v.transcribe(prepared);
+          paid.result = r;
+          // Billed, else measured, else the size bound as the last fallback: never the declared length (Fix 2).
+          const bound = sizeBoundSeconds(input.bytes.length);
+          const costUsd = v.costUsd({ maxSeconds: bound, billedSeconds: r.billedSeconds, measuredSeconds: prepared.measuredSeconds });
+          paid.costUsd = costUsd;
+          return { result: r, costUsd };
+        }));
+      } catch (e) {
+        // The call failed: withSttHold booked it by its outcome. A copy its error names is noted for the processor. If
+        // that booking failed too, the ceiling is booked late and the error marked paid (fix 1).
+        if (paid.result === undefined) throw failedAndUnbooked(noteUnansweredCopy(e, v.provider), ceiling, input);
+        throw await paidButUnbooked(e, { ...paid, result: paid.result }, ceiling, input);
+      }
+      const forget = result.forgetRef === null ? null : { provider: result.provider, ref: result.forgetRef };
+      if (result.text === '') return { ...NONE, note: NO_SPEECH, forget };
+      return { textKind: 'extract', text: capStored(result.text), pageCount: null, note: null, forget };
+    } finally {
+      prepared.dispose(); // transcribe disposes too; this covers too_costly, revoked and a refused hold. Safe twice.
+    }
+  };
+
   return async (input) => {
     switch (input.kind) {
       case 'image':
@@ -192,8 +375,10 @@ export function createExtractor(d: ExtractorDeps): Extractor {
         if (isZip(input.bytes) && (mime === DOCX_MIME || /\.docx$/i.test(input.fileName ?? ''))) return readDocx(input);
         return NONE; // any other file: the original is kept, nothing is read
       }
+      case 'voice':
+      case 'audio':
+        return transcribe(input);
       default:
-        // voice and audio: Phase 2b plugs a Transcriber in here; 2a already saves their originals.
         // video and sticker are never downloaded, so they never get here.
         return NONE;
     }

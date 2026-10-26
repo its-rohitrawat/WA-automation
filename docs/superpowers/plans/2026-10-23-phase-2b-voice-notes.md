@@ -16,8 +16,7 @@
 **Architecture:**
 - **Reused from Phase 3, not rebuilt:** the bake-off adapters in `src/stt/providers/*` (Sarvam, ElevenLabs, OpenAI), `src/stt/http.ts` and its error classes, `src/stt/prices.ts`, `withSttHold` in `src/stt/paidStt.ts`, SpendGuard's spend kinds (`reserve(estimate, 'stt')`, `settlePending` books by kind), the settings `STT_PROVIDER`, `STT_API_KEY` and `INR_PER_USD`, `Ffmpeg` / `findFfmpeg` in `src/stt/audio.ts`, and the "spend split" line in `cli status`.
 - **New `VoiceTranscriber`** (`src/stt/voice.ts`), the voice-note sibling of Phase 3's `MeetingTranscriber`. It sits on the same `SttProvider` adapters, picked by the same `STT_PROVIDER`, with speaker labels off and short timeouts.
-  - WhatsApp voice notes (Ogg Opus) and MP3 files go to Sarvam and ElevenLabs as they are (V3).
-  - Other audio formats, and every file when OpenAI is chosen, are first converted on this PC with ffmpeg (N2). OpenAI notes over 5 minutes are split.
+  - *Amended in Task 5's review round 1 (owner decision):* every voice note and audio file is first converted on this PC to MP3 with ffmpeg, for every provider, so its true length is known before any money is held (V3, N2). Nothing is sent as it is, and without ffmpeg nothing is transcribed. OpenAI notes over 5 minutes are split.
 - **The media extractor** gains a `voice`/`audio` case: size and length limits, forwarded, the spend hold as `stt` through `withSttHold`, then the transcript stored as the file's text (`text_kind 'extract'`).
 - **The reconciler** treats a voice note like an image: it waits up to 30 minutes for the transcript, renders it as `{voice note, 0:42, transcript: …}`, and re-checks the message if the transcript arrives late (12h).
 - **The 2a backlog** (voice notes saved before 2b) is transcribed on request through `cli transcribe-voice`, which is a dry run without `--yes`, and never re-queues old messages (V6).
@@ -37,7 +36,7 @@
 - **To switch voice notes on (later, by the owner, not part of this build):**
   1. The bake-off has picked a provider; `STT_PROVIDER` and `STT_API_KEY` are set in `.env` (shared with meetings).
   2. The privacy steps are done on the winning account (V7).
-  3. If OpenAI wins: a system ffmpeg the service account can run, and `FFMPEG_PATH` (also needed by meetings).
+  3. A system ffmpeg the service account can run, and `FFMPEG_PATH` when it is not on PATH (also needed by meetings). Required for every provider since Task 5's review round 1 (V3, N2).
 
 ---
 
@@ -77,21 +76,24 @@ Each decision has a recommended default. The tasks are written for the defaults.
 - Audio up to `STT_MAX_SECONDS` (default 10 minutes, measured safely, see V5) is transcribed like a voice note. Longer audio is not transcribed: it is marked "too long to transcribe" and never holds anything up.
 - **Task:** 5.
 
-### V3. File format, and whether ffmpeg is needed. **Accepted: send the original voice note as it is.**
-- WhatsApp voice notes are Ogg Opus. Sarvam and ElevenLabs list Ogg/Opus as accepted, so the saved original is sent unchanged, and no ffmpeg is needed for them.
-- Caveat: the bake-off scored MP3s converted from these files, not the Ogg files themselves. Watch the first week of real use.
-- **If OpenAI wins:** its docs disagree about Ogg, so every note is converted to MP3 with ffmpeg first. See N2.
-- **Tasks:** 2, 3.
+### V3. File format, and whether ffmpeg is needed. **Accepted: send the original voice note as it is.** **Amended (owner decision, Task 5 review round 1): convert every note first; ffmpeg is required.**
+- *As first accepted:* WhatsApp voice notes are Ogg Opus. Sarvam and ElevenLabs list Ogg/Opus as accepted, so the saved original was to be sent unchanged, with no ffmpeg needed for them; OpenAI's docs disagree about Ogg, so for OpenAI every note was converted.
+- **As amended:** every voice note and audio file is converted on this PC to mono 16 kHz MP3 with ffmpeg before it is sent, for every provider. The conversion stops at `STT_MAX_SECONDS + VOICE_LENGTH_TOLERANCE_S + 1` seconds (ffmpeg's `-t`), and the MP3 ffmpeg wrote is measured. Its length can be trusted, unlike the original's header, which the sender controls. So the true length is known before any money is held.
+- **ffmpeg is required for voice transcription.** Without it nothing is sent: every note is kept with the note `format_not_supported` and picked up later by `cli transcribe-voice` once ffmpeg is installed (N2, Task 8).
+- The bake-off also scored MP3s converted from these files, so the format sent now matches what was measured.
+- **Tasks:** 2, 3, 5, 8.
 
 ### V4. Forwarded voice notes. **Accepted: do not transcribe, as with forwarded pictures (D2).**
 - A forwarded voice note shows as `{voice note (forwarded), not transcribed}`.
 - **Tasks:** 5, 7.
 
-### V5. Length and cost limits. **Accepted: a hard cap, with the cost ceiling worked out from the file size.**
+### V5. Length and cost limits. **Accepted: a hard cap, with the cost ceiling worked out from the file size.** **Amended (Task 5 review round 2): the hold comes from the measured length; the file size refuses nothing.**
 - The length WhatsApp reports is set by the sender's phone, so it cannot be trusted for spend (the same rule as PDF page counts, 9g).
-- The hold before each call covers at most `ceil(bytes × 8 / 12_000)` seconds, capped at `STT_MAX_SECONDS`. A file whose size implies more than the cap is not sent and gets the note `too_long`.
-- Settlement uses the seconds the provider bills when it reports them (ElevenLabs, OpenAI). Otherwise it uses the length ffmpeg measured, when there is one, else the lower of the size bound and the declared length (Sarvam).
-- When ffmpeg is there, the file is measured before the hold (free, local). A note measured longer than the size bound plus 5 seconds (`VOICE_LENGTH_TOLERANCE_S`) is not sent and gets `too_long` too, so a low-bitrate file cannot become many paid parts. The hold covers the larger of the bound and the measured length.
+- *As first accepted:* the hold before each call covered at most `ceil(bytes × 8 / 12_000)` seconds (the size bound), capped at `STT_MAX_SECONDS`, and a file whose size implied more than the cap was not sent and got the note `too_long`.
+- **As amended (Task 5 review round 2):** there is no size refusal. It wrongly refused short high-bitrate files: a 1-minute 128 kbit/s MP3 is about 960 KB, a size bound of 640 s. Every file is converted and measured first (below), so the measured length is what counts. The hold before each call is `ceilingUsd(measuredSeconds + VOICE_LENGTH_TOLERANCE_S)`, with no size-bound floor; the 5 seconds are headroom over a provider's billed rounding. `too_long` comes only from the measured check below. The size bound is kept only as the booking's last fallback (below) and as the backlog command's estimate (Task 8).
+- Settlement (the booking) uses the seconds the provider bills when it reports them (ElevenLabs, OpenAI), else the length ffmpeg measured, else the size bound. **Never the declared length** (*amended in Task 5's review round 1*: the old "lower of the bound and the declared length" let a sender's declared 0 book $0). The declared length stays on the row for display only, and is not passed to the extractor.
+- The file is converted and measured before the hold (free, local; V3 as amended). A note measured longer than the cap (`STT_MAX_SECONDS`) plus 5 seconds (`VOICE_LENGTH_TOLERANCE_S`), or whose conversion reached the `-t` limit, is not sent and gets `too_long`, so a low-bitrate file cannot become many paid parts. The hold is the measured length plus the tolerance (*amended in round 2*; round 1 held the larger of the bound and the measured length).
+  - *Amended in Task 5's review:* the measured length is compared with the cap, not the size bound. Compared with the bound, an honest short note recorded below 12 kbit/s (whose size bound is too low) would be refused as `too_long`.
 - Expected cost at list prices: about $0.004–0.006 per voice-note minute. 100 notes a day of 45 seconds each cost about $0.3–0.45 a day.
 - **Tasks:** 3, 5.
 
@@ -128,11 +130,11 @@ Each decision has a recommended default. The tasks are written for the defaults.
 - Only matters if ElevenLabs is chosen. Alternative: delete once and only log a failure (no table).
 - **Tasks:** 4, 6.
 
-### N2. Audio formats other than WhatsApp voice notes. **Recommended: convert them with ffmpeg; without ffmpeg, keep them untranscribed.**
-- Voice notes (Ogg) and MP3 files go as they are to Sarvam and ElevenLabs.
-- Any other audio (m4a, aac, amr, `.bin`), and every file when OpenAI is chosen, is converted on this PC to MP3 with ffmpeg first. ffmpeg is the one meetings already need.
-- Without ffmpeg, such a file is kept, shown as `{audio file, not transcribed}`, and never holds anything up. Once ffmpeg is installed, `transcribe-voice` picks it up like the 2a backlog (Task 8).
-- **Tasks:** 3, 5.
+### N2. Audio formats other than WhatsApp voice notes. **Recommended: convert them with ffmpeg; without ffmpeg, keep them untranscribed.** **Amended (owner decision, Task 5 review round 1): convert every file, voice notes included.**
+- *As first recommended:* voice notes (Ogg) and MP3 files went as they are to Sarvam and ElevenLabs; only other audio, and every file for OpenAI, was converted.
+- **As amended:** every voice note and audio file (Ogg, MP3, m4a, aac, amr, `.bin`) is converted on this PC to MP3 with ffmpeg first, for every provider (V3). ffmpeg is the one meetings already need. `canSendVoice(provider, mime, hasFfmpeg)` is simply `hasFfmpeg`.
+- **ffmpeg is required for voice transcription.** Without it, every voice note and audio file is kept with the note `format_not_supported` (the name is kept: it means "not transcribed; pick it up later"), shown as `{voice note, not transcribed}` or `{audio file, not transcribed}`, and never holds anything up. Once ffmpeg is installed (and the service restarted), `transcribe-voice` picks it up like the 2a backlog (Task 8).
+- **Tasks:** 3, 5, 8.
 
 ### N3. The range of `STT_MAX_SECONDS`. **Recommended: 30 to 900 seconds, default 600.**
 - Above 15 minutes, one note could outlast the media queue's 15-minute claim (`CLAIM_MS`) with OpenAI's 5-minute parts.
@@ -140,6 +142,7 @@ Each decision has a recommended default. The tasks are written for the defaults.
 
 ### N4. The backlog command and long files. **Recommended: skip files too long to transcribe, and say how many.**
 - `transcribe-voice` only queues files whose size fits under `STT_MAX_SECONDS`, and prints how many it skipped as too long.
+- *Amended in Task 5's review round 2:* the size refuses nothing any more (V5), so the command skips no file as too long and prints no such line; the service refuses a note measured too long (`too_long`) when it gets to it.
 - **Task:** 8.
 
 ---
@@ -151,13 +154,14 @@ Each decision has a recommended default. The tasks are written for the defaults.
 | `src/config/env.ts`, `.env.example` | `STT_MAX_SECONDS` | yes (tell wa-agent-cf) |
 | `src/stt/types.ts` | `AudioPart.format?: 'mp3' \| 'ogg'` and `AUDIO_FORMATS` | yes |
 | `src/stt/providers/{sarvam,elevenlabs,openai}.ts` | send the part's format instead of always MP3 | yes |
-| `src/stt/voice.ts` (new) | `VoiceTranscriber`, `createVoiceTranscriber`, `voiceCeilingUsd`, `VOICE_STT_TIMEOUTS`, `sizeBoundSeconds` | new |
+| `src/stt/audio.ts` | `Ffmpeg.toMp3(input, output, signal?, opts?: { maxSeconds, timeoutMs })`: `-t` before the output path; `timeoutMs` (default 60 minutes) replaces the conversion timeout; without opts the arguments and the timeout are as today (Task 5 review rounds 1 and 2) | yes (additive) |
+| `src/stt/voice.ts` (new) | `VoiceTranscriber`, `createVoiceTranscriber`, `voiceCeilingUsd`, `VOICE_STT_TIMEOUTS`, `VOICE_CONVERT_TIMEOUT_MS`, `sizeBoundSeconds`, `canSendVoice` | new |
 | `src/store/migrations.ts` | v8: `media.backlog`, `media_stt_forget` | yes (append only) |
 | `src/store/media.ts` | `backlog` on `MediaRow`; `REQUEUING_FILE` gains voice/audio and `backlog = 0`; `finishMedia` notes a provider copy; backlog and forget queries; `mediaStats.sttRefused` | no |
 | `src/media/types.ts` | remove the placeholder `Transcriber` | no |
 | `src/media/labels.ts` | the new note names | no |
 | `src/media/extract.ts` | the `voice`/`audio` case | no |
-| `src/media/processor.ts` | the path and declared length for the extractor; speech error classes; the copy deletion after a finish | no |
+| `src/media/processor.ts` | the path for the extractor (not the declared length); speech error classes; `isPaidVoiceError`; the copy deletion after a finish | no |
 | `src/media/voiceForget.ts` (new) | `forgetVoiceCopies` | new |
 | `src/media/promptText.ts` | voice blocks, `isBlocking`, a longer context excerpt for transcripts | no |
 | `src/brain/prompt.ts` | SYSTEM_PROMPT bullets | yes (2 lines) |
@@ -177,21 +181,20 @@ export interface VoiceInput {
   mediaId: number;
   /** Absolute path of the saved original (DATA_DIR/media/...). */
   path: string;
-  /** From the row, e.g. 'audio/ogg; codecs=opus'. Untrusted: only its base type is compared with a fixed list. */
-  mimeType: string | null;
   /**
-   * Upper bound in seconds, from the file size (V5). Never the sender's declared length. A note ffmpeg measures longer
-   * than this (plus VOICE_LENGTH_TOLERANCE_S) is refused by prepare.
+   * The cap in seconds (STT_MAX_SECONDS, V5), not the size bound and never the sender's declared length. The conversion
+   * stops at this plus VOICE_LENGTH_TOLERANCE_S plus 1 second; a note ffmpeg measures longer than this plus
+   * VOICE_LENGTH_TOLERANCE_S is refused by prepare.
    */
   maxSeconds: number;
 }
 
 /** A note made ready to send by prepare, for one transcribe. */
 export interface PreparedVoice {
-  /** The parts to send, in order: the original as it is, or MP3 files in the note's temporary folder. */
+  /** The parts to send, in order: MP3 files in the note's temporary folder. */
   readonly parts: readonly AudioPart[];
-  /** The length ffmpeg measured; null when the file goes as it is and ffmpeg is absent or could not measure it. */
-  readonly measuredSeconds: number | null;
+  /** The length ffmpeg measured on the MP3 it wrote: trusted, unlike the original's header. */
+  readonly measuredSeconds: number;
   /** Removes the note's temporary folder. Safe to call twice; never throws. */
   dispose(): void;
 }
@@ -223,17 +226,20 @@ export interface VoiceTranscriber {
   readonly provider: ProviderId;
   /**
    * List-price ceiling for this many seconds of audio, without speaker labels, in US dollars (the spend hold). The caller
-   * holds ceilingUsd(Math.max(bound, prepared.measuredSeconds ?? 0)).
+   * holds ceilingUsd(prepared.measuredSeconds + VOICE_LENGTH_TOLERANCE_S) (Task 5 review round 2).
    */
   ceilingUsd(seconds: number): number;
-  /** List-price cost of a finished note (V5): billed when valid, else measured when valid, else min(maxSeconds, declared). */
-  costUsd(o: { maxSeconds: number; billedSeconds: number | null; declaredSeconds: number | null; measuredSeconds: number | null }): number;
-  /** Whether this file can be sent: as it is, or converted because ffmpeg is there (N2). */
+  /**
+   * List-price cost of a finished note (V5): billed when valid, else measured when valid, else maxSeconds (the bound).
+   * Never the declared length (Task 5 review round 1).
+   */
+  costUsd(o: { maxSeconds: number; billedSeconds: number | null; measuredSeconds: number | null }): number;
+  /** Whether this file can be sent: whether ffmpeg is there, for every format and provider (V3, N2 as amended). */
   canSend(mimeType: string | null): boolean;
   /**
-   * The free, local step, no provider call: picks the format, converts (only this path uses the temporary folder),
-   * measures, splits for OpenAI. Throws AudioError('too_long') past the tolerance, AudioError('no_ffmpeg'), or ffmpeg's
-   * own AudioError, removing the folder first. Run outside the spend hold.
+   * The free, local step, no provider call: converts (stopped by -t at maxSeconds + tolerance + 1), measures the MP3,
+   * splits for OpenAI. Throws AudioError('too_long') past the tolerance, AudioError('no_ffmpeg'), or ffmpeg's own
+   * AudioError, removing the folder first. Run outside the spend hold.
    */
   prepare(input: VoiceInput): Promise<PreparedVoice>;
   /**
@@ -321,32 +327,34 @@ export interface AudioPart {
 
 ### Task 3: The voice transcriber (1 day)
 
-**Files:** create `src/stt/voice.ts`; test `tests/stt/voice.test.ts`.
+**Files:** create `src/stt/voice.ts`; modify `src/stt/audio.ts` (review round 1 of Task 5); tests `tests/stt/voice.test.ts`, `tests/stt/audio.test.ts`.
 
-- [ ] **Step 1: Write the failing tests**, with a fake `SttProvider` (records each `AudioPart` and options and returns set results) and a fake `Ffmpeg` (`toMp3` writes a file; `split` returns set parts):
-  - **Choosing the format:**
-    - Sarvam or ElevenLabs, mime `audio/ogg; codecs=opus`, `audio/ogg ; codecs=opus` or `audio/opus`: the provider gets `{ path: input.path, seconds: <measured, else maxSeconds>, offset: 0, format: 'ogg' }` and `diarize: false`; ffmpeg only measures it, never converts.
-    - Sarvam or ElevenLabs, mime `audio/mpeg` or `audio/mp3`: sent as it is, format `mp3`.
-    - Sarvam or ElevenLabs, mime `audio/mp4`, `audio/aac`, `audio/amr`, `application/octet-stream` or `null`: converted with `toMp3(input.path, <tmp>/voice-<mediaId>/audio.mp3)`, then sent as `mp3`.
-    - OpenAI, any mime (including Ogg and MP3): converted first.
-    - `canSend` is true for every case above while ffmpeg is there; without ffmpeg it is true only for the as-is cases (Ogg and MP3 to Sarvam/ElevenLabs), and always false for OpenAI.
+*Amended in Task 5's review round 1 (owner decision, V3 and N2):* every file is converted first, for every provider. The as-is path (Ogg and MP3 sent unchanged to Sarvam and ElevenLabs) is removed. `AUDIO_FORMATS` and `AudioPart.format` (Task 2) stay; the part is always `'mp3'`.
+
+*Amended in Task 5's review round 2:* a voice note's conversion has its own timeout. `toMp3` gains `opts.timeoutMs`, defaulting to today's 60 minutes, so meetings are unchanged; `prepare` passes `VOICE_CONVERT_TIMEOUT_MS = 5 * 60_000` (exported from `src/stt/voice.ts`): it stays inside the media queue's 15-minute claim, and at most 606 s of audio (the cap + 5 + 1 with the default cap) is decoded.
+
+- [ ] **Step 1: Write the failing tests**, with a fake `SttProvider` (records each `AudioPart` and options and returns set results) and a fake `Ffmpeg` (`toMp3` writes a file and, like the real `-t`, stops at its `maxSeconds`; `split` returns set parts):
+  - **`Ffmpeg.toMp3` (`tests/stt/audio.test.ts`):** without opts, or with opts but no `maxSeconds`, the arguments are exactly today's (meetings depend on them); with `{ maxSeconds: 606 }` they are today's with `-t 606` just before the output path (an output option, after `-i`); a `maxSeconds` of 0, negative, NaN or infinite is refused without running ffmpeg. Phase 3's `SAFE_INPUT` test keeps passing.
+  - **The conversion timeout (review round 2):** without opts, with `{}` and with `{ maxSeconds }` alone the runner gets 60 minutes (meetings unchanged); `{ timeoutMs: 300_000 }` gives it 5 minutes and changes no argument; a `timeoutMs` of 0, negative, NaN or infinite is refused without running ffmpeg. Every provider's `prepare` passes `VOICE_CONVERT_TIMEOUT_MS` (5 minutes, below the 15-minute `CLAIM_MS`).
+  - **Every file is converted first:**
+    - Sarvam, ElevenLabs and OpenAI, any mime (Ogg, MP3, m4a, aac, amr, `application/octet-stream`, `null`): converted with `toMp3(input.path, <tmp>/voice-<mediaId>/audio.mp3, undefined, { maxSeconds: input.maxSeconds + VOICE_LENGTH_TOLERANCE_S + 1, timeoutMs: VOICE_CONVERT_TIMEOUT_MS })`; only the MP3 is measured (never the original); the provider gets `{ path: <the MP3>, seconds: <measured>, offset: 0, format: 'mp3' }` and `diarize: false`.
+    - `canSend` is true for every file while ffmpeg is there, and false for every file without it, for every provider. `canSendVoice(provider, mime, hasFfmpeg)` is `hasFfmpeg` and agrees with every transcriber.
+    - Without ffmpeg, `prepare` refuses every file with `AudioError('no_ffmpeg')`, touching no folder.
   - **prepare (free):**
-    - no provider call on any path;
-    - the as-is path is measured with `Ffmpeg.seconds(input.path)` when ffmpeg is there, and not when it is absent (`measuredSeconds` null, the part `maxSeconds` long);
-    - a measuring failure on the as-is path is not fatal (`measuredSeconds` null); on the conversion path it is, and the folder is removed; a non-finite or non-positive length counts as not measured;
-    - measured 2,000 s with `maxSeconds` 600 throws `AudioError('too_long')` with no provider call and no split, and the folder is removed (converted, converted for OpenAI, and as it is);
-    - 604 s and 605 s pass with `maxSeconds` 600, 606 s throws (`VOICE_LENGTH_TOLERANCE_S` is 5);
-    - without ffmpeg, a file that needs converting is refused with `AudioError('no_ffmpeg')`.
+    - no provider call, for every provider;
+    - a measuring failure is fatal, and the folder is removed; an MP3 measured as NaN, infinite, 0 or negative is refused as `no_duration`;
+    - measured 2,000 s with `maxSeconds` 600 throws `AudioError('too_long')` with no provider call and no split, and the folder is removed; the conversion was stopped at 606 s (every provider);
+    - 604 s and 605 s pass with `maxSeconds` 600, 606 s (where the conversion stops) throws (`VOICE_LENGTH_TOLERANCE_S` is 5); 605.01 s throws too.
   - **OpenAI parts:** a converted note of 420 s (from `Ffmpeg.seconds`) is split with `split(part, <tmp>/voice-<id>/parts, 300)`; both parts are sent in order; the text is joined; `billedSeconds` is the sum when both report, `null` when one does not. 300 s is sent whole; 301 s is split.
   - **A failing later part:** part 1 answered, part 2 throws `SttHttpError(503)`: an `SttPartialError` (`code 'partial'`, `partsDone` 1, `cause` the 503), not an `SttHttpError`; nothing is retried. With a real SpendGuard (`seededDb`) and `withSttHold`: exactly one spend row of kind `stt` at the ceiling, "(unknown, estimated)". A failure of part 1 reaches the caller unchanged and books nothing.
   - **Text:** segments are joined with single spaces and trimmed; no segments, or only blank ones, give `''`; Devanagari and Latin words come through unchanged (`'पेमेंट ₹42,000 bhej diya'`).
   - **Cost:**
     - `ceilingUsd(600)` equals `costUsd(modelFor(p, false), 600, inrPerUsd)` for each provider; Sarvam's is in rupees converted at `INR_PER_USD`.
-    - `costUsd({ maxSeconds, billedSeconds, declaredSeconds, measuredSeconds })`: billed first (600, 45, 50, 47 uses 45), then measured (600, null, 50, 47 uses 47; 40, null, 50, 47 uses 47 too), then the lower of the bound and the declared (600, null, 50, null uses 50; 40, null, 50, null uses 40), else the bound; a negative, NaN or infinite billed, measured or declared value is ignored.
+    - `costUsd({ maxSeconds, billedSeconds, measuredSeconds })`: billed first (600, 45, 47 uses 45), then measured (600, null, 47 uses 47; 40, null, 47 uses 47 too), else `maxSeconds`, the bound (40, null, null uses 40); a negative, NaN or infinite billed or measured value is ignored. *Amended in Task 5's review round 1:* there is no declared length any more; a caller passing `declaredSeconds: 0` with no billed or measured length still books the whole bound.
   - **forgetRef:** taken from `provider.forgetRef(result)` when it is 1 to 200 characters, else `null`; `canForget` mirrors `provider.forgetById`.
-  - **Temporary files:** the `voice-<mediaId>` folder is removed after success and after a failure; a leftover folder from an earlier crash is removed before the conversion; a note sent as it is touches no folder; `dispose` may be called twice; `transcribe` disposes once on success and once on failure.
+  - **Temporary files:** the `voice-<mediaId>` folder is removed after success and after a failure; a leftover folder from an earlier crash is removed before the conversion; `dispose` may be called twice; `transcribe` disposes once on success and once on failure (every provider).
   - **Errors** from the provider (first part) and `AudioError` from ffmpeg (from `prepare`) reach the caller unchanged (no retry: the provider is called exactly once per part).
-  - **`createVoiceTranscriber(env, deps)`:** `null` for `none`; for each provider, the adapter is built with `VOICE_STT_TIMEOUTS` (ElevenLabs `timeoutMs` 5 min, OpenAI 5 min, Sarvam `maxWaitMs` 10 min) and the key from `requireKey(env, 'STT_API_KEY')`; `deps.ffmpeg` is passed on (`canSend('audio/aac')` is true for ElevenLabs with ffmpeg, `canSend('audio/ogg')` for OpenAI with ffmpeg).
+  - **`createVoiceTranscriber(env, deps)`:** `null` for `none`; for each provider, the adapter is built with `VOICE_STT_TIMEOUTS` (ElevenLabs `timeoutMs` 5 min, OpenAI 5 min, Sarvam `maxWaitMs` 10 min) and the key from `requireKey(env, 'STT_API_KEY')`; `deps.ffmpeg` is passed on (with it every file can be sent, without it none, for each provider); through `deps.http`, ElevenLabs gets the voice note as `audio.mp3` / `audio/mpeg`.
   - **`sizeBoundSeconds(bytes)`:** `ceil(bytes × 8 / 12_000)`; 0 bytes gives 0; 900,000 bytes gives 600.
   - **`voiceCeilingUsd(provider, seconds, inrPerUsd)`** (for the CLI, needs no key) equals the transcriber's `ceilingUsd`.
 - [ ] **Step 2: Run** `npx vitest run tests/stt/voice.test.ts`. Expected: FAIL, no module.
@@ -355,13 +363,16 @@ export interface AudioPart {
 ```ts
 /** Voice notes are short: these stay well inside SpendGuard's 45-minute hold and the media queue's 15-minute claim. */
 export const VOICE_STT_TIMEOUTS = { elevenlabsMs: 5 * 60_000, openaiMs: 5 * 60_000, sarvamWaitMs: 10 * 60_000 };
-/** The lowest bitrate assumed for the spend hold (V5): a file of n bytes holds at most n × 8 / 12,000 seconds. */
+/** One voice note's conversion (review round 2): inside the 15-minute claim; at most 606 s of audio is decoded. */
+export const VOICE_CONVERT_TIMEOUT_MS = 5 * 60_000;
+/** The lowest bitrate assumed from a file's size: costUsd's last fallback and the CLI's estimate (V5 as amended). */
 const MIN_BITRATE_BPS = 12_000;
 export const sizeBoundSeconds = (bytes: number): number => Math.ceil((bytes * 8) / MIN_BITRATE_BPS);
 
-const baseMime = (m: string | null): string => ((m ?? '').toLowerCase().split(';')[0] ?? '').trim();
-const OGG = new Set(['audio/ogg', 'audio/opus']);
-const MP3 = new Set(['audio/mpeg', 'audio/mp3']);
+/** Every file is converted first (V3, N2 as amended): a file can be sent only when ffmpeg is there. */
+export function canSendVoice(_provider: ProviderId, _mimeType: string | null, hasFfmpeg: boolean): boolean {
+  return hasFfmpeg;
+}
 
 export function voiceCeilingUsd(provider: ProviderId, seconds: number, inrPerUsd: number): number {
   return costUsd(modelFor(provider, false), seconds, inrPerUsd);
@@ -371,9 +382,10 @@ export function createVoiceTranscriber(env: Env, deps: { ffmpeg: Ffmpeg | null; 
 export function voiceTranscriber(provider: SttProvider, o: { inrPerUsd: number; ffmpeg: Ffmpeg | null; tmpDir: string }): VoiceTranscriber;
 ```
 
-  - The as-is format is `'ogg'` for `OGG`, `'mp3'` for `MP3`, and only when the provider is not OpenAI. Anything else needs ffmpeg.
+  - `prepare`: without ffmpeg, `AudioError('no_ffmpeg')`. Otherwise `toMp3(input.path, voice-<id>/audio.mp3, undefined, { maxSeconds: input.maxSeconds + VOICE_LENGTH_TOLERANCE_S + 1, timeoutMs: VOICE_CONVERT_TIMEOUT_MS })`, then `ffmpeg.seconds(mp3)`: the MP3 is ffmpeg-written, so its length can be trusted. A measured length above `input.maxSeconds + VOICE_LENGTH_TOLERANCE_S` (which also catches a conversion that reached the `-t` limit) gives `AudioError('too_long')` after disposing. Split for OpenAI as before; every part is format `'mp3'`.
+  - In `src/stt/audio.ts`: `toMp3(input, output, signal?, opts: { maxSeconds?: number; timeoutMs?: number } = {})` adds `-t <maxSeconds>` as an output option, just before the output path, only when `maxSeconds` is set, and runs ffmpeg with `opts.timeoutMs ?? 60 * 60_000` (additive: meetings call it without opts).
   - The folder `join(tmpDir, `voice-${mediaId}`)` is built from the numeric id only.
-  - `seconds` of a converted file comes from `ffmpeg.seconds(mp3)`; of a file sent as it is, from `ffmpeg.seconds(input.path)` when ffmpeg is there. It splits, refuses `too_long`, raises the hold and prices Sarvam (see `PreparedVoice`).
+  - The measured length splits, refuses `too_long`, sets the hold (plus the tolerance) and prices Sarvam (see `PreparedVoice`).
   - Logs: none here. The extractor logs ids, provider, seconds and cost.
 - [ ] **Step 4: Run** the file, the suite and the type-check. Expected: PASS.
 - [ ] **Step 5: Commit.**
@@ -441,14 +453,17 @@ CREATE TABLE media_stt_forget (
 - [ ] **Step 1: Write the failing tests**, in a new `describe('voice and audio')` block (the `setup` helper gains `voice` and `maxVoiceSeconds`):
   - **No transcriber** (`voice: null`): `{ textKind: null, text: null, pageCount: null, note: null }` (2a behaviour), and no spend row.
   - **Forwarded:** note `forwarded_not_transcribed`, no call, no hold.
-  - **Too long:** a 900,001-byte file with the cap 600 gives note `too_long`, no call. A 900,000-byte one is sent. The declared length (`declaredSeconds: 5`) never changes this. `prepare` throwing `AudioError('too_long')` (measured too long) gives note `too_long` too, with no hold and no spend row.
+  - **Too long** (*amended in review round 2: only measured, never by size*): `prepare` throwing `AudioError('too_long')` (measured too long) gives note `too_long`, with no hold and no spend row. A 960 KB file (bound 640 s) measured at 60 s with the cap 600 is sent and held at `ceilingUsd(65)`; a 1 MB file measured at 700 s with the cap 600 is `too_long` through prepare (converted, stopped at 606 s). A large file that cannot be sent is `format_not_supported`, not `too_long`. A declared length (a caller still passing `declaredSeconds: 5`) never changes the cap, the hold or the booking.
   - **Local failures book nothing:** `prepare` throwing any other `AudioError` reaches the caller with no hold and no spend row.
-  - **Format the transcriber cannot send** (`canSend` false): note `format_not_supported`, no call.
-  - **Too costly:** a ceiling above the whole daily cap gives note `too_costly` (9a), no call, and the prepared note is disposed.
+  - **No ffmpeg** (`canSend` false): note `format_not_supported`, no call. With the real transcriber and `ffmpeg: null`, a WhatsApp voice note, an MP3 and an m4a all get it, with no hold (review round 1). With ffmpeg, a WhatsApp voice note is converted (stopped at 606 s) and sent as `mp3`.
+  - **Too costly:** a ceiling above the whole daily cap gives note `too_costly` (9a), no call, and the prepared note is disposed. A ceiling exactly equal to the cap is still sent (`>`, not `>=`).
   - **Revoked** just before the call: note `revoked`, no call, and the prepared note is disposed.
-  - **The hold** is `ceilingUsd(Math.max(bound, measuredSeconds ?? 0))`: a note measured at 603 s with a bound of 600 holds 603 s.
-  - **Success:** `prepare` gets `{ mediaId, path, mimeType, maxSeconds: sizeBoundSeconds(bytes) }`; the result is `{ textKind: 'extract', text, pageCount: null, note: null, forget: null }`; one spend row of kind `stt` with the cost from `costUsd({ maxSeconds: bound, billedSeconds, declaredSeconds, measuredSeconds })` and detail `media 7`; the hold was as above, as `stt`.
-  - **forgetRef** `'tr_1'` from ElevenLabs gives `forget: { provider: 'elevenlabs', ref: 'tr_1' }`.
+  - **The hold** is `ceilingUsd(measuredSeconds + VOICE_LENGTH_TOLERANCE_S)`, whatever the size bound (*amended in review round 2*; it was `max(bound, measured)`): measured 20, 603, 60 (a 960 KB file) and 600 (a 60,000-byte file) hold 25, 608, 65 and 605 s.
+  - **The cap goes to prepare** (review override), with the real `voiceTranscriber` over a fake provider and a fake ffmpeg that writes the MP3 and measures it (cut at `-t`): measured 700 s with a bound of 600 and the cap 900 is sent, holds `ceilingUsd(705)` and books `ceilingUsd(700)`; measured 906 s with the cap 900 gives note `too_long` with no provider call; an honest 60 s note of 60,000 bytes (bound 40, 8 kbit/s) is sent and holds 65 s.
+  - **Success:** `prepare` gets `{ mediaId, path, maxSeconds: <the cap> }`; the result is `{ textKind: 'extract', text, pageCount: null, note: null, forget: null }`; one spend row of kind `stt` with the cost from `costUsd({ maxSeconds: bound, billedSeconds, measuredSeconds })` (the bound only as the last fallback) and detail `media 7`; the hold was as above, as `stt`.
+  - **The declared length never lowers the booking** (review round 1): with the real transcriber over a Sarvam-like provider (`billedSeconds` null) and an input that still carries `declaredSeconds: 0`, the booking is the measured length's cost, above $0. The test fake's `costUsd` ignores negative, NaN and infinite lengths like the real one.
+  - **forgetRef** `'tr_1'` from ElevenLabs gives `forget: { provider: 'elevenlabs', ref: 'tr_1' }`. The provider comes from the result, not the transcriber (a fake whose result names another provider).
+  - **A booking that fails after a successful paid call** (review round 1, Fix 3): an ElevenLabs answer with `forgetRef 'tr_1'`, then SpendGuard's `settle` or `record` throws once. The provider was called once; the late booking `record('stt', cost, 'media 7 (booked late)')` was made; `forget('tr_1')` was called; `isPaidVoiceError(err)` is true; nothing secret (transcript, ref) is in the error. A late booking and a forget that fail too still throw the first error, marked paid. `costUsd` throwing after the answer: `withSttHold` books the ceiling once, nothing late; if that booking also fails (`SttBookingError`), the ceiling is booked late. A failed call (`SttHttpError`, `SttNoAnswerError`), the spend cap and a non-error are not paid voice errors.
   - **No speech** (`text: ''`): `{ textKind: null, text: null, note: 'no_speech' }`; the cost is still booked.
   - **A long transcript** is cut by `capStored`.
   - **Spend cap:** no room gives `SpendCapReachedError` (busy when only holds are in the way) and no call.
@@ -458,7 +473,7 @@ CREATE TABLE media_stt_forget (
   - Existing image, PDF and DOCX tests pass with the new input fields.
 - [ ] **Step 2: Run** `npx vitest run tests/media/extract.test.ts`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
-  - `ExtractInput` gains `path: string` (absolute path of the saved original) and `declaredSeconds: number | null` (the row's `seconds`, as the sender's phone reported it: display and Sarvam settlement only).
+  - `ExtractInput` gains `path: string` (absolute path of the saved original). *Amended in review round 1:* no `declaredSeconds`. The row's `seconds` is the sender's claim and stays on the row for display only.
   - `Extraction` gains `forget?: { provider: ProviderId; ref: string } | null`.
   - `ExtractorDeps` gains `voice?: VoiceTranscriber | null` and `maxVoiceSeconds?: number` (default 600).
   - In `labels.ts`: `FORWARDED_NOT_TRANSCRIBED = 'forwarded_not_transcribed'`, `TOO_LONG = 'too_long'`, `NO_SPEECH = 'no_speech'`, `FORMAT_NOT_SUPPORTED = 'format_not_supported'`.
@@ -469,27 +484,43 @@ CREATE TABLE media_stt_forget (
     const v = d.voice ?? null;
     if (v === null) return NONE; // STT_PROVIDER none: kept as in 2a, transcribed later with cli transcribe-voice
     if (input.forwarded) return { ...NONE, note: FORWARDED_NOT_TRANSCRIBED };
-    const bound = sizeBoundSeconds(input.bytes.length);
+    // No size refusal (review round 2): too_long comes only from prepare's measured check.
     const maxSeconds = d.maxVoiceSeconds ?? 600;
-    if (bound > maxSeconds) return { ...NONE, note: TOO_LONG };
-    if (!v.canSend(input.mimeType)) return { ...NONE, note: FORMAT_NOT_SUPPORTED };
+    if (!v.canSend(input.mimeType)) return { ...NONE, note: FORMAT_NOT_SUPPORTED }; // no ffmpeg
     // Free and local, outside the hold: a conversion or measuring failure books nothing.
     let prepared: PreparedVoice;
     try {
-      prepared = await v.prepare({ mediaId: input.mediaId, path: input.path, mimeType: input.mimeType, maxSeconds: bound });
+      // The cap, not the bound: an honest note below 12 kbit/s measures longer than its bound (review override).
+      prepared = await v.prepare({ mediaId: input.mediaId, path: input.path, maxSeconds });
     } catch (e) {
       if (e instanceof AudioError && e.code === 'too_long') return { ...NONE, note: TOO_LONG };
       throw e;
     }
     try {
-      const ceiling = v.ceilingUsd(Math.max(bound, prepared.measuredSeconds ?? 0));
+      // The measured length is trusted and capped; the tolerance is headroom over a provider's billed rounding.
+      const ceiling = v.ceilingUsd(prepared.measuredSeconds + VOICE_LENGTH_TOLERANCE_S);
       if (ceiling > d.spend.capUsd) return { ...NONE, note: TOO_COSTLY };
       if (input.revoked?.()) return REVOKED;
-      const { result } = await withSttHold(d.spend, ceiling, label(input), async () => {
-        const r = await v.transcribe(prepared);
-        const costUsd = v.costUsd({ maxSeconds: bound, billedSeconds: r.billedSeconds, declaredSeconds: input.declaredSeconds, measuredSeconds: prepared.measuredSeconds });
-        return { result: r, costUsd };
-      });
+      // Kept outside the hold, so a booking that fails after the provider answered is still known to be paid (Fix 3).
+      const paid: { result?: VoiceResult; costUsd?: number } = {};
+      let result: VoiceResult;
+      try {
+        ({ result } = await withSttHold(d.spend, ceiling, label(input), async () => {
+          const r = await v.transcribe(prepared);
+          paid.result = r;
+          // Billed, else measured, else the size bound as the last fallback.
+          const bound = sizeBoundSeconds(input.bytes.length);
+          const costUsd = v.costUsd({ maxSeconds: bound, billedSeconds: r.billedSeconds, measuredSeconds: prepared.measuredSeconds });
+          paid.costUsd = costUsd;
+          return { result: r, costUsd };
+        }));
+      } catch (e) {
+        if (paid.result === undefined) throw e; // the call failed: withSttHold booked it by its outcome
+        // Best effort, each failure ignored: record('stt', cost, '<label> (booked late)') (the ceiling when nothing was
+        // priced and the ceiling booking failed too), then forget(ref) when there is one; the error is added to a
+        // module WeakSet (as scanReadErrors) read by the exported isPaidVoiceError(e), and rethrown.
+        throw await paidButUnbooked(e, { ...paid, result: paid.result }, ceiling, input);
+      }
       const forget = result.forgetRef === null ? null : { provider: result.provider, ref: result.forgetRef };
       if (result.text === '') return { ...NONE, note: NO_SPEECH, forget };
       return { textKind: 'extract', text: capStored(result.text), pageCount: null, note: null, forget };
@@ -505,12 +536,29 @@ CREATE TABLE media_stt_forget (
 - [ ] **Step 4: Run** the file, the suite and the type-check. Expected: PASS.
 - [ ] **Step 5: Commit.**
 
+**Review round 1 amendments (done; also touch `src/stt/audio.ts`, `src/stt/voice.ts`, `src/media/processor.ts`, `src/media/labels.ts`, `src/cli/transcribeVoice.ts` and their tests):**
+- **Fix 1, convert first (owner decision, V3 and N2 amended):** `toMp3` gains `opts.maxSeconds` (`-t`); `prepare` always converts, stopped at the cap + 5 + 1 seconds, and measures the MP3; `canSendVoice` is `hasFfmpeg`; the as-is path is removed. Without ffmpeg a note is `format_not_supported` (comment in `labels.ts` updated). Task 8's CLI: every file needs ffmpeg.
+- **Fix 2, the declared length never lowers the booking:** `costUsd` takes `{ maxSeconds, billedSeconds, measuredSeconds }`; `declaredSeconds` is gone from `ExtractInput` and the processor's call.
+- **Fix 3, a booking that fails after a successful paid call:** booked late, the copy deleted, the error marked for `isPaidVoiceError` (Task 6 fails it at once).
+- **Test gaps:** a ceiling exactly equal to the cap is sent; `forget.provider` comes from the result. The test fake's `costUsd` ignores bad lengths like the real one.
+
+**Review round 2 amendments (done; also touch `src/stt/audio.ts`, `src/stt/voice.ts`, `src/media/labels.ts`, `src/cli/transcribeVoice.ts` and their tests):**
+- **The size refuses nothing:** the pre-check `bound > maxSeconds → too_long` is removed; it refused short high-bitrate files (a 1-minute 128 kbit/s MP3 is about 960 KB, a bound of 640 s). `too_long` comes only from prepare's measured check (`labels.ts` comment updated).
+- **The hold is `ceilingUsd(measuredSeconds + VOICE_LENGTH_TOLERANCE_S)`**, with no bound floor: headroom over a provider's billed rounding. `costUsd` keeps the bound only as its last fallback.
+- **Tests:** a 960 KB file measured 60 s is sent, held at `ceilingUsd(65)` (with the fake and with the real transcriber); a 1 MB file measured 700 s with the cap 600 is `too_long` through prepare; the hold is measured + 5 for several sizes; the size-based `too_long` tests are removed or rewritten (kind `audio` included); the hold amounts in the cap, booking and failure tests follow (45 s measured: 50 s held).
+- **A conversion timeout for voice** (Task 3): `toMp3`'s `opts.timeoutMs`, and `VOICE_CONVERT_TIMEOUT_MS` (5 minutes) passed by `prepare`.
+- **Task 8's CLI** estimates each file at `min(size bound, STT_MAX_SECONDS + tolerance)` and skips nothing by size (Task 8).
+
 ### Task 6: Processor, queue and copy deletion (¾ day)
 
 **Files:** modify `src/media/processor.ts`; create `src/media/voiceForget.ts`; tests `tests/media/processor.test.ts`, `tests/media/voiceForget.test.ts` (new).
 
+Task 6 must merge together with Task 5: without it a paid-unbooked error is retried.
+
 - [ ] **Step 1: Write the failing tests:**
-  - **Input:** the extractor gets `path` = the absolute saved path (after a download, and for a row with `local_path`) and `declaredSeconds` = the row's `seconds`.
+  - **Input:** the extractor gets `path` = the absolute saved path (after a download, and for a row with `local_path`), and no declared length (Task 5 review round 1: the row's `seconds` is display only).
+  - **A paid voice call left unbooked** (`isPaidVoiceError(e)` from `src/media/extract.ts`, Task 5 review round 1): `failed` at once with `error_code` `stt_paid_unbooked`, no retry and no attempt waits (a retry would pay the provider again). Checked first among the speech rules, before the key-refused rule, since the error itself may be anything (a database error from the booking). The late booking and the copy deletion were already tried by the extractor.
+  - **`finishMedia` throws after a successful extraction that has a `forget`:** best effort, `voice.forget(ref)` is called for that ref (free; its failure is ignored), and the file fails at once with `stt_paid_unbooked`, no retry: the call was paid and booked, and a retry would pay again; the copy would otherwise never be noted in `media_stt_forget`.
   - **Key refused:** an `SttHttpError` 401 or 403, or an `SttBookingError` whose cause is one, defers as `stt_unavailable` with the growing waits (5, 15, 30, then 60 minutes), counts no attempt, and fails the file as `stt_unavailable` after 24 hours from arrival or service start (the `ai_unavailable` rules, 10d).
   - **Other HTTP errors** (429, 500, 400): a counted retry, `error_code` `stt_http_<status>`, failed after 3 attempts.
   - **No answer** (`SttNoAnswerError`, `SttJobLostError`): one retry, then `failed` with `stt_no_answer_<code>`; the spend for each try is already booked by `withSttHold`.
@@ -523,7 +571,9 @@ CREATE TABLE media_stt_forget (
   - **`forgetVoiceCopies(db, voice, log, { mediaId?, clock })`:** deletes due rows through the transcriber; removes a row on success and on a 404; counts each try first with the next try time from `FORGET_WAITS_MS`; stops after `MAX_FORGET_ATTEMPTS`; skips (without counting) rows whose provider is not the one set up now, or when `voice` is null; logs media id, provider and code only.
 - [ ] **Step 2: Run** both files. Expected: FAIL.
 - [ ] **Step 3: Implement.**
-  - `#download` returns `{ bytes, rel }`; `#run` passes `path: this.#abs(rel ?? row.localPath)` and `declaredSeconds: row.seconds` to the extractor.
+  - `#download` returns `{ bytes, rel }`; `#run` passes `path: this.#abs(rel ?? row.localPath)` to the extractor (no declared length: done in Task 5's review round 1).
+  - In `#settle`, first among the speech rules: `if (isPaidVoiceError(e)) { failMedia(…, { status: 'failed', errorCode: 'stt_paid_unbooked' }); log.warn(ids and code only, 'voice note paid but not booked: not retried'); return 'failed'; }`.
+  - Around `finishMedia` after an extraction with `x.forget`: on a throw, `await voice.forget(x.forget.ref)` (caught), then fail the file at once as `stt_paid_unbooked`, as above.
   - `MediaProcessorOptions` gains `afterFinish?: (mediaId: number, x: Extraction) => void`. The app passes one that calls `forgetVoiceCopies` for that id when `x.forget` is set (void, errors logged).
   - In `#settle`, before the Claude checks:
 
@@ -544,6 +594,15 @@ CREATE TABLE media_stt_forget (
   - `src/media/voiceForget.ts`: the meeting loop (`src/meetings/sttForget.ts`) with the media store functions from Task 4, importing `FORGET_WAITS_MS` and `MAX_FORGET_ATTEMPTS` from there.
 - [ ] **Step 4: Run** the files, the suite and the type-check. Expected: PASS.
 - [ ] **Step 5: Commit.**
+
+**Review round 1 amendments (done; also touch `src/media/extract.ts` and its tests). The free local engine (Voxtral) is now the default; these make the paid path safe if it is switched on:**
+- **Fix 1, a booking that fails after a failed call that may have been billed:** where `withSttHold` rethrows a failed call, an `SttBookingError` whose cause is not an `SttHttpError` (no answer, a failed job, a later part, anything unknown) is booked late at the ceiling (`spend.record('stt', ceiling, '<label> (booked late)')`, best effort) and marked for `isPaidVoiceError`, so the processor fails it at once as `stt_paid_unbooked`. One caused by an `SttHttpError` (401: never billed) is unchanged (`stt_unavailable`). This replaces the `stt_booking` counted retry for those causes; `stt_booking` remains only for an `SttBookingError` caused by another HTTP status.
+- **Fix 2, a database failure on a never-retry path:** `MediaProcessor` keeps an in-memory set of media ids never to be paid again, added before `failMedia` of `stt_paid_unbooked`, `stt_partial`, `stt_job_<code>` and the final `stt_no_answer_<code>`. `process()` returns `skipped` for such an id before the claim.
+- **Fix 3, a crash during a paid call:** a voice note or audio file gets `STT_NO_ANSWER_MAX_ATTEMPTS` (2) runs in all (`maxRuns(kind)`): the crash rule (`crashed`) applies at 2, because a run that never ended may have been billed. Its counted retries (`stt_http_<status>`, `stt_booking`, a download error) stop at 2 as well, so a run that ends in a deferral always leaves fewer attempts than the crash limit (otherwise a deferral after the second counted try would be taken for a crash). This supersedes "failed after 3 attempts" above for voice and audio. Images and documents keep 3.
+- **Fix 4, `afterFinish` may be async:** typed `(mediaId, x) => void | Promise<void>`, called as `Promise.resolve().then(() => afterFinish(id, x)).catch(log codes only)`: neither a sync throw nor a rejection escapes, and it is not waited for.
+- **Fix 5, a noted copy is deleted promptly:** after `#settle` notes a copy (`voiceCopyOf`), `forgetVoiceCopies(db, voice, log, { mediaId, clock })` is started without waiting when `voice` is set and `voice.canForget`; a failure is logged with codes only. When `finishMedia` throws after a transcript with a copy, the copy is noted on its own first (best effort), then deleted through `forgetVoiceCopies` for that file (which removes the row), or directly when it could not be noted; a failed delete leaves the row for the sweep. A transcriber that keeps no copies is never asked.
+- **Tests added:** the three causes booked late and failed at once, and the 401 cause unchanged (extractor and processor); a paid error that is itself a `SpendCapReachedError` fails as `stt_paid_unbooked`; `failMedia` throwing on each never-retry path, then no second extractor call; 2 crash runs for voice and audio; `afterFinish` throwing and rejecting; a `finishMedia` throw with `canForget` false (no forget call, `stt_paid_unbooked`); `voiceCopyOf` through `SttBookingError` → `SttPartialError` → `SttNoAnswerError`, noted and deleted by the processor; the prompt deletion and a failed one leaving a counted row.
+- **Small fixes:** the `CLAIM_MS` comment now says a Sarvam voice run (ffmpeg up to 5 minutes, the upload, up to 10 minutes of waiting, the download) can outlast it, and that the queue's in-flight set prevents a second run in one process; `forgetVoiceCopies` logs `attempts` on a failed try, as the meeting version does.
 
 ### Task 7: The tracker reads transcripts (1 day)
 
@@ -586,11 +645,12 @@ CREATE TABLE media_stt_forget (
 
 - [ ] **Step 1: Write the failing tests** against a seeded database (no service, no network):
   - `STT_PROVIDER none`: prints "Speech-to-text is not set up (STT_PROVIDER is none). Nothing changed." and changes nothing.
-  - **Dry run** (no `--yes`): prints the count, the minutes and two cost figures; nothing changes. The cost never understates: the service holds and books each note at up to `max(bound, measured)` seconds, and prepare lets a measured length run to `STT_MAX_SECONDS + VOICE_LENGTH_TOLERANCE_S`. So the line is "Cost: about $X from the file sizes (speech, <provider> list price); at most $Y if every file runs to the STT_MAX_SECONDS limit (N seconds)." X sums `voiceCeilingUsd(provider, bound + VOICE_LENGTH_TOLERANCE_S, inr)` per sendable file; Y is the sendable count × `voiceCeilingUsd(provider, STT_MAX_SECONDS + VOICE_LENGTH_TOLERANCE_S, inr)`; both are rounded up to the cent. The minutes line says "about M minutes" (the bounds plus the tolerance, rounded up). A test pins X and Y for a known set of files.
-  - Files whose size implies more than `STT_MAX_SECONDS` are counted as "too long, skipped" and never queued (N4).
-  - Files the configured transcriber cannot send (`canSend(row.mimeType)` false: ffmpeg missing, N2) are counted as "needs ffmpeg, skipped" and never queued, so no file is queued only to finish `format_not_supported` again. They stay listed (`VoiceBacklogRow.mimeType`, Task 4 review C), so installing ffmpeg and running the command again picks them up. The service finds ffmpeg only at startup, so the skip line says "after installing ffmpeg, restart the service, then run this again".
+  - **Dry run** (no `--yes`): prints the count, the minutes and two cost figures; nothing changes. The service measures each note, refuses one measured longer than `STT_MAX_SECONDS + VOICE_LENGTH_TOLERANCE_S`, and holds the measured length plus the tolerance; the length is not known here. So the line is "Cost: about $X from the file sizes (speech, <provider> list price); at most $Y if every file runs to the STT_MAX_SECONDS limit (N seconds)." *Amended in Task 5's review round 2:* X sums `voiceCeilingUsd(provider, min(sizeBound, STT_MAX_SECONDS + VOICE_LENGTH_TOLERANCE_S), inr)` per sendable file (a file with no size is estimated at `STT_MAX_SECONDS + VOICE_LENGTH_TOLERANCE_S`); Y, which never understates, stays the sendable count × `voiceCeilingUsd(provider, STT_MAX_SECONDS + VOICE_LENGTH_TOLERANCE_S, inr)`; both are rounded up to the cent. The minutes line says "about M minutes" (the same per-file estimates, rounded up). A test pins X and Y for a known set of files, a 5 MB file among them (estimated at the limit).
+  - *As first written (N4):* files whose size implied more than `STT_MAX_SECONDS` were counted as "too long, skipped" and never queued. *Amended in Task 5's review round 2:* the size refuses nothing, so there is no "too long, skipped" line and no such count; a large high-bitrate file (960 KB, a bound of 640 s) is queued, estimated at no more than the limit. The service refuses a note measured too long.
+  - Files the configured transcriber cannot send (`canSendVoice(provider, row.mimeType, hasFfmpeg)` false: ffmpeg missing, N2) are counted as "needs ffmpeg, skipped" and never queued, so no file is queued only to finish `format_not_supported` again. They stay listed (`VoiceBacklogRow.mimeType`, Task 4 review C), so installing ffmpeg and running the command again picks them up. The service finds ffmpeg only at startup, so the skip line says "after installing ffmpeg, restart the service, then run this again".
+  - *Amended in Task 5's review round 1:* **every file needs ffmpeg** (V3, N2: every file is converted first), so without ffmpeg every file, a WhatsApp voice note too, is "needs ffmpeg, skipped", for every provider; with ffmpeg all of them are counted and queued. ffmpeg is looked for once, whenever any file is waiting (not when none is), a large one too. The logic still goes through `canSendVoice`, so it follows the rule wherever it is set.
   - `--client CODE` limits to that client (spaces around the code and any case work); an unknown code is refused by name.
-  - A backlog row with no file size is counted as too long and never queued.
+  - A backlog row with no file size is estimated at `STT_MAX_SECONDS + VOICE_LENGTH_TOLERANCE_S` and queued (*amended in Task 5's review round 2*; it was counted as too long).
   - A counted row that changes between the listing and the queueing (a note set, its message deleted for everyone) is left alone: "N queued" and "1 changed since they were counted and were left alone."
   - **`--yes`:** the rows become pending with `backlog = 1`; after a fake extractor finishes them, no message is re-queued and no flag is set.
   - Rows with a note or text are untouched; nothing is printed that comes from a transcript, a file name or a key.
@@ -633,15 +693,19 @@ program
 - [ ] **Step 1: Write the failing tests** in `tests/appMedia.test.ts`, with a fake voice transcriber:
   - A voice note from a client flows end to end: ingested, downloaded (fake fetcher), transcribed, and the reconciler's prompt holds `{voice note, 0:14, transcript: …}`; the spend row is `stt`.
   - The media queue runs 3 files at once by default.
-  - `start()` runs `forgetVoiceCopies` once for all due rows, and its failure is logged, not thrown.
+  - `start()` runs `forgetVoiceCopies` once for all due rows, and its failure is logged, not thrown; it runs again every hour (the sweep), and `stop()` ends that timer.
+  - The `MediaProcessor` is given `voice` too; an `afterFinish` whose `forgetVoiceCopies` fails is logged, never thrown.
+  - `start()` removes leftover `voice-<id>` folders in `DATA_DIR/tmp/voice` (Task 5 review round 1): only entries named `voice-<digits>`, only inside that folder; anything else there is left; a failure is logged (code only), not thrown.
   - Without `voice` in the media deps, voice notes finish without text, as in 2a.
 - [ ] **Step 2: Run** the file. Expected: FAIL.
 - [ ] **Step 3: Implement.**
   - `AppMediaDeps` gains `voice?: VoiceTranscriber | null` and `maxVoiceSeconds?: number`, passed to `createExtractor`; `concurrency` defaults to 3 (a slow Sarvam job must not hold every slot while pictures wait).
   - `start()` calls `forgetVoiceCopies(d.db, m.voice ?? null, d.log)` (void, caught), next to `meetings?.start()`.
-  - The processor's `afterFinish` calls `forgetVoiceCopies` for that media id when `x.forget` is set.
-  - `main.ts`: when `env.STT_PROVIDER !== 'none'`, find ffmpeg once (`findFfmpeg(env.FFMPEG_PATH)`, caught), build `createVoiceTranscriber(env, { ffmpeg, tmpDir: join(env.DATA_DIR, 'tmp', 'voice') })`, and log codes only: `stt_none` (info), `no_ffmpeg_voice` (warn: "voice notes in other formats are not transcribed" and, for OpenAI, "no voice notes are transcribed"). Pass `voice` and `maxVoiceSeconds: env.STT_MAX_SECONDS` into `media`. Update the comment "Voice notes are kept, not transcribed yet". `meetingDeps` is not changed.
-  - The temporary folder `DATA_DIR/tmp/voice` is created on demand. Leftover `voice-<id>` folders are removed by the next try of the same file (Task 3).
+  - A periodic sweep: `forgetVoiceCopies` for all due rows every hour as well (Task 6 review round 1), on a timer that `stop()` clears; each run's failure is logged with codes only, never thrown; a run is skipped while the previous one is still going.
+  - Pass `voice` to the `MediaProcessor` too (Task 6 review round 1), not only to `createExtractor`: the processor deletes noted copies promptly through it.
+  - The processor's `afterFinish` calls `forgetVoiceCopies` for that media id when `x.forget` is set, and must catch its own errors: return the promise with a `.catch` that logs codes only (the processor also catches, but the wiring must not rely on it).
+  - `main.ts`: when `env.STT_PROVIDER !== 'none'`, find ffmpeg once (`findFfmpeg(env.FFMPEG_PATH)`, caught), build `createVoiceTranscriber(env, { ffmpeg, tmpDir: join(env.DATA_DIR, 'tmp', 'voice') })`, and log codes only: `stt_none` (info), `no_ffmpeg_voice` (warn: "no voice notes are transcribed until ffmpeg is installed"; since Task 5's review round 1 this holds for every provider). Pass `voice` and `maxVoiceSeconds: env.STT_MAX_SECONDS` into `media`. Update the comment "Voice notes are kept, not transcribed yet". `meetingDeps` is not changed.
+  - The temporary folder `DATA_DIR/tmp/voice` is created on demand. Leftover `voice-<id>` folders are removed by the next try of the same file (Task 3), and, since every file is now converted there, swept at start (above): a file that never comes back (failed, revoked, too long) would otherwise leave its folder.
 - [ ] **Step 4: Run** the file, the suite and the type-check. Expected: PASS.
 - [ ] **Step 5: Commit**, and tell wa-agent-cf about the `app.ts` and `main.ts` lines.
 
@@ -657,7 +721,7 @@ program
   - (e) `{voice note, being transcribed}` → no task invented.
   - (f) A late transcript re-check → the task is added once.
   - The scorer tests (`tests/golden/score.test.ts`) keep passing; they do not call the AI.
-- [ ] **`docs/SETUP.md`:** replace the "Voice notes and audio files … not transcribed" rows and lines (around lines 246, 262 and 270) with the 2b behaviour. Add a "Voice notes" section: the settings (V9, `STT_MAX_SECONDS`), the privacy steps on the winning account including telling clients (V7, N1), the cost per minute, the limits (V2, V5), the formats and ffmpeg (N2), the backlog command (V6, N4), and the health line. Also the `cli status` additions: the "including N voice notes waiting (speech key refused)" part of the Files line, and the "Voice copies:" line. For "Voice copies:", copy Phase 3's "Speech copies" paragraph (SETUP.md, around line 604): what it means, what to do (delete the copies by hand in the provider's history), and that the count does not go down after a manual deletion.
+- [ ] **`docs/SETUP.md`:** replace the "Voice notes and audio files … not transcribed" rows and lines (around lines 246, 262 and 270) with the 2b behaviour. Add a "Voice notes" section: the settings (V9, `STT_MAX_SECONDS`), the privacy steps on the winning account including telling clients (V7, N1), the cost per minute, the limits (V2, V5), ffmpeg (required for every voice note since Task 5's review round 1: without it nothing is transcribed, V3, N2), the backlog command (V6, N4), and the health line. Also the `cli status` additions: the "including N voice notes waiting (speech key refused)" part of the Files line, and the "Voice copies:" line. For "Voice copies:", copy Phase 3's "Speech copies" paragraph (SETUP.md, around line 604): what it means, what to do (delete the copies by hand in the provider's history), and that the count does not go down after a manual deletion.
 - [ ] **Spec amendments file:** blocking (V1), the transcript block format, storage as `extract`, forwarded (V4), the backlog (V6), N1–N4, and `VoiceTranscriber` replacing the §7.4 / old `types.ts` shapes.
 - [ ] **Commit.**
 
@@ -685,9 +749,10 @@ program
 
 - **No bake-off result yet.** Built provider-agnostic, so nothing waits on it. The default stays `none` until the owner sets the winner.
 - **Migration order.** 2b's v8 sits on a branch without 2c's v6. The runner skips every version at or below the database's current one, so a database moved to v8 by this branch would never get v6. **Never run this branch's service or CLI on the real database.** Tests use fresh databases only. After the 2c and Phase 3 merges this is no longer an issue.
-- **Ogg sent directly versus MP3 in the bake-off (V3).** Accuracy on raw Ogg is assumed, not measured. Watch the first week, and compare a few transcripts with the bake-off report.
+- **ffmpeg is required (V3, N2 as amended).** Every note is converted first, so without ffmpeg nothing is sent: every voice note is kept as `format_not_supported` until ffmpeg is installed, the service restarted and `cli transcribe-voice` run. The warning at start (`no_ffmpeg_voice`) says so. Conversion is MP3, the format the bake-off scored, so the earlier "raw Ogg not measured" risk is gone.
 - **Sarvam latency.** Sarvam's batch API for short notes is unmeasured. A slow job holds up a client's update for at most 30 minutes (V1), and media concurrency 3 keeps a slot free for pictures.
-- **The size bound (V5)** assumes at least 12 kbit/s. A file encoded below that holds less than it costs. Providers that report billed seconds book the right amount anyway; for Sarvam the booking can be a few cents low. The cap can be overshot by that gap only.
+- **The converted length (V5, Task 5 review round 1)** replaces the old size-bound risk. Every note is converted with `-t` at `STT_MAX_SECONDS + 6` seconds and the MP3 ffmpeg wrote is measured before the hold, so a low-bitrate file (whose size bound is too low) is held and booked at its true length, and nothing past the cap plus the tolerance is ever sent. The size bound is now only the booking's last fallback and the backlog command's estimate (*review round 2*: it no longer refuses a file, nor sets a floor under the hold, which is the measured length plus 5 seconds); the declared length is never used. What is left: a provider that bills more than the measured length (padding, rounding) with no billed seconds reported (Sarvam) is booked a fraction of a second low.
+- **A booking that fails after a paid call** (a database error in `settle` or `record`, Task 5 review round 1). The extractor books the cost late (best effort), deletes the provider's copy, and marks the error so the processor fails the file instead of paying again (Task 6). If the late booking fails too, that call is unbooked (cents).
 - **A crash during a call** (power cut, not a clean stop) loses the in-memory hold, so a call that was billed may go unbooked (cents), and the retry after restart may be billed again. A clean stop books it at the ceiling (`settlePending`).
 - **Mishearing.** Names, numbers and amounts may be wrong. The SYSTEM_PROMPT tells the model to prefer the chat text, and the owner checks the tracker as usual.
 - **Privacy.** Client voice notes leave the PC (V7). Clients should be told.
