@@ -136,6 +136,122 @@ Every day at 06:00 IST the founder gets one WhatsApp message from a spare number
 
 Details and every status message: "Morning report" in [SETUP.md](SETUP.md).
 
+## 8. Voice notes: local speech-to-text
+
+Voice notes can be turned into text by an open-source model that runs on this Mac, on its processor only. No audio leaves the Mac, there is no key and it costs nothing. It is **off** until you set `VOICE_STT_PROVIDER=local`.
+
+**In this version the service does not use it yet.** These steps build the engine and let you test it on real notes with a check command. Wiring it into the service comes in a later update; until then, voice notes are not transcribed.
+
+Two models are offered; you choose one with the check below:
+
+- **Voxtral** (`voxtral`): the most accurate on Hindi in published tests, but it may be slower than the note itself (a 10-minute note can take 10–20 minutes).
+- **Qwen3-ASR** (`qwen3-asr`): about 2–3 times faster than the note, less accurate on Hindi in published tests.
+
+How well either handles Hinglish, and whether English words come out in English or Devanagari letters, is not published. Your check on real notes decides.
+
+### Build the engine (about 15 minutes)
+
+Normal Terminal window, once:
+
+```sh
+brew install cmake
+sudo mkdir -p /opt/stt/models
+sudo chown -R waagent:staff /opt/stt
+```
+
+Waagent window. Always this exact version (v0.4.1): the program is young and its options changed in earlier versions.
+
+```sh
+cd /opt/stt
+git clone --branch v0.4.1 --depth 1 https://github.com/handy-computer/transcribe.cpp.git
+cd transcribe.cpp
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+find "$PWD/build" -name transcribe-cli -type f
+```
+
+The last line prints the full path of the program. Note it for `STT_LOCAL_BIN`. The build uses the processor's fastest instructions by itself; nothing else needs to be set.
+
+Optional, only if you also want to try Whisper (`whisper`). Waagent window:
+
+```sh
+cd /opt/stt
+git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git
+cd whisper.cpp
+cmake -B build -DGGML_METAL=OFF
+cmake --build build -j --config Release
+find "$PWD/build" -name whisper-cli -type f
+```
+
+### Download a model and check it
+
+Download only from these addresses. Waagent window, for Voxtral (3 GB):
+
+```sh
+cd /opt/stt/models
+curl -L --fail -o Voxtral-Mini-3B-2507-Q4_K_M.gguf https://huggingface.co/handy-computer/Voxtral-Mini-3B-2507-gguf/resolve/main/Voxtral-Mini-3B-2507-Q4_K_M.gguf
+shasum -a 256 Voxtral-Mini-3B-2507-Q4_K_M.gguf
+```
+
+The long number `shasum` prints must be **exactly** the one in the table. If it is not, the file is damaged or not the real one: delete it (`rm` and the file name) and download it again. Never use a file whose number does not match.
+
+| Engine | File | Address | Size | `shasum -a 256` |
+|---|---|---|---|---|
+| `voxtral` | `Voxtral-Mini-3B-2507-Q4_K_M.gguf` | `https://huggingface.co/handy-computer/Voxtral-Mini-3B-2507-gguf/resolve/main/Voxtral-Mini-3B-2507-Q4_K_M.gguf` | 2.98 GB | `3a6717aa8f8989108d260cbd237584289eec43cc987e10133c33643515936205` |
+| `qwen3-asr` | `Qwen3-ASR-1.7B-Q8_0.gguf` | `https://huggingface.co/handy-computer/Qwen3-ASR-1.7B-gguf/resolve/main/Qwen3-ASR-1.7B-Q8_0.gguf` | 2.19 GB | `9a0d81792dfea2d5f278b8a63deb3ea6e02139ce42c2301f32ea19c4f77526b7` |
+| `qwen3-asr` (smaller) | `Qwen3-ASR-1.7B-Q4_K_M.gguf` | `https://huggingface.co/handy-computer/Qwen3-ASR-1.7B-gguf/resolve/main/Qwen3-ASR-1.7B-Q4_K_M.gguf` | 1.32 GB | `b7afe3674f653fa84f712ed2440353c6e7cf7f93697fef76b05a26538b24844e` |
+| `whisper` | `ggml-large-v3-turbo.bin` | `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin` | 1.62 GB | `1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69` |
+| `whisper` (smaller) | `ggml-large-v3-turbo-q8_0.bin` | `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q8_0.bin` | 0.87 GB | `317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1` |
+
+To compare Voxtral with Qwen3-ASR, download the Qwen3-ASR file too, the same way (`curl` with its address, then `shasum`). Whisper's own download script does not check these numbers, so always download with `curl` as above.
+
+### Settings (waagent window)
+
+`nano .env` and set, with the paths `find` printed and the model you downloaded:
+
+```sh
+VOICE_STT_PROVIDER=local
+STT_LOCAL_ENGINE=voxtral
+STT_LOCAL_BIN=/opt/stt/transcribe.cpp/build/bin/transcribe-cli
+STT_LOCAL_MODEL=/opt/stt/models/Voxtral-Mini-3B-2507-Q4_K_M.gguf
+```
+
+- `STT_LOCAL_BIN` and `STT_LOCAL_MODEL` must be full paths starting with `/`. The `transcribe-cli` path above is an example: use the one `find` printed.
+- For Qwen3-ASR: `STT_LOCAL_ENGINE=qwen3-asr` and the Qwen3-ASR model file. For Whisper: `STT_LOCAL_ENGINE=whisper`, the `whisper-cli` path and a Whisper model file.
+- Leave the others empty unless needed: `STT_LOCAL_THREADS` (default 8, one per core), `STT_LOCAL_TIMEOUT_SECONDS` (default 1800: a note that takes longer is given up), `STT_LOCAL_LANGUAGE` (default `hi`; `en` or `auto`; Qwen3-ASR always finds the language itself).
+- `VOICE_STT_PROVIDER` must be `local` or `none` (or the same paid service as `STT_PROVIDER`). Meetings keep using `STT_PROVIDER`, unchanged.
+
+### Test it on real notes (waagent window)
+
+The engine takes a 16 kHz mono WAV file. Make a private folder for the test notes, outside the code folder:
+
+```sh
+mkdir -m 700 ~/stt-check
+```
+
+Copy 2–3 real Hinglish voice notes (`.opus` or `.ogg` files) into it. From a normal Terminal window, for a note in your Downloads folder: `sudo cp ~/Downloads/note1.opus /Users/waagent/stt-check/` then `sudo chown waagent /Users/waagent/stt-check/note1.opus`. Then, waagent window, for each note:
+
+```sh
+ffmpeg -i ~/stt-check/note1.opus -ar 16000 -ac 1 -c:a pcm_s16le ~/stt-check/note1.wav
+npm run stt:local-check -- ~/stt-check/note1.wav
+```
+
+The check prints the engine, the audio length, the time it took, the realtime factor (under 1 means faster than the note itself) and the transcript, in this window only. Nothing is saved or sent.
+
+Run the same notes with `STT_LOCAL_ENGINE=voxtral` and then with `STT_LOCAL_ENGINE=qwen3-asr` (change `STT_LOCAL_MODEL` to the matching file each time). Compare:
+
+- Are names, sites, dates and amounts right?
+- Do English words come out in English letters?
+- Is the time acceptable for your longest notes?
+
+Keep the settings of the one you choose. When you are done, remove the test copies: `rm -r ~/stt-check`.
+
+If the check says `Failed (...)`, it also says what to look at. `no_output` usually means a different program version: build exactly v0.4.1 as above.
+
+### Then restart the service
+
+Normal Terminal window: `sudo launchctl kickstart -k system/com.wa-agent`. Wait one minute, then run `npm run cli -- status` in the waagent window. As said above, the service starts transcribing voice notes only after the later update.
+
 ## Reading SETUP.md on a Mac
 
 | SETUP.md (Windows) | On the Mac |

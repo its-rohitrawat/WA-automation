@@ -1,3 +1,4 @@
+import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { DomainSchema } from './domains.ts';
 import type { ReportSettings } from '../report/types.ts';
@@ -52,6 +53,20 @@ const EnvSchema = z.object({
   INR_PER_USD: z.coerce.number().min(40).max(200).default(88),
   /** Longest voice note or audio file sent to speech-to-text, in seconds, measured from the file size (Phase 2b V5, N3). */
   STT_MAX_SECONDS: z.coerce.number().int().min(30).max(900).default(600),
+  // Voice notes only (Phase 2b amendment, local speech-to-text). Meetings keep STT_PROVIDER. A paid value here must be
+  // the same as STT_PROVIDER, since both use the one STT_API_KEY; local needs no key.
+  VOICE_STT_PROVIDER: z.enum(['local', 'sarvam', 'elevenlabs', 'openai', 'none']).default('none'),
+  /** The open-source model run on this machine: voxtral and qwen3-asr through transcribe.cpp, whisper through whisper.cpp. */
+  STT_LOCAL_ENGINE: z.enum(['voxtral', 'qwen3-asr', 'whisper']).default('voxtral'),
+  /** Absolute path to transcribe-cli (voxtral, qwen3-asr) or whisper-cli (whisper). Required for local. */
+  STT_LOCAL_BIN: z.string().min(1).optional(),
+  /** Absolute path to the model file. Required for local. */
+  STT_LOCAL_MODEL: z.string().min(1).optional(),
+  STT_LOCAL_THREADS: z.coerce.number().int().min(1).max(64).default(8),
+  /** Longest one run of the engine may take, in seconds. */
+  STT_LOCAL_TIMEOUT_SECONDS: z.coerce.number().int().min(60).max(7200).default(1800),
+  /** Passed to voxtral (not for auto) and whisper; qwen3-asr always detects the language itself. */
+  STT_LOCAL_LANGUAGE: z.enum(['hi', 'en', 'auto']).default('hi'),
   // Phase 2c morning report. Off unless REPORT_ENABLED is exactly "true".
   REPORT_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   REPORT_TIME: z.string().regex(HHMM).default('06:00'),
@@ -64,6 +79,17 @@ const EnvSchema = z.object({
   }
   if (env.STT_PROVIDER !== 'none' && !env.STT_API_KEY) {
     ctx.addIssue({ code: 'custom', path: ['STT_API_KEY'], message: 'is required when STT_PROVIDER is not none' });
+  }
+  if (env.VOICE_STT_PROVIDER !== 'local' && env.VOICE_STT_PROVIDER !== 'none' && env.VOICE_STT_PROVIDER !== env.STT_PROVIDER) {
+    ctx.addIssue({ code: 'custom', path: ['VOICE_STT_PROVIDER'], message: 'must be local, none or the same as STT_PROVIDER' });
+  }
+  for (const name of ['STT_LOCAL_BIN', 'STT_LOCAL_MODEL'] as const) {
+    const path = env[name];
+    if (path === undefined) {
+      if (env.VOICE_STT_PROVIDER === 'local') ctx.addIssue({ code: 'custom', path: [name], message: 'is required when VOICE_STT_PROVIDER is local' });
+    } else if (!isAbsolute(path)) {
+      ctx.addIssue({ code: 'custom', path: [name], message: 'must be an absolute path' });
+    }
   }
   if (env.REPORT_ENABLED && !env.REPORT_RECIPIENT) {
     ctx.addIssue({ code: 'custom', path: ['REPORT_RECIPIENT'], message: 'required when REPORT_ENABLED is true' });
