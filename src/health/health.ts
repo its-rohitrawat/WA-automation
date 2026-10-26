@@ -1,7 +1,8 @@
 import { statfsSync } from 'node:fs';
 import type { ReconcileOutcome } from '../brain/reconciler.ts';
+import type { MeetingsHealth } from '../meetings/healthTypes.ts';
 import type { HealthLine } from '../output/view.ts';
-import type { SpendGuard } from '../spend/spendGuard.ts';
+import type { SpendGuard, SpendKind } from '../spend/spendGuard.ts';
 import type { Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import type { MediaStats } from '../store/media.ts';
@@ -15,6 +16,7 @@ const PUBLISH_FAIL_MS = 60 * 60_000;
 const SPEND_CAP_LINE = '⚠️ Daily spend cap reached. Paused until midnight IST';
 
 export type MediaHealth = MediaStats;
+export type { MeetingsHealth } from '../meetings/healthTypes.ts';
 
 export interface HealthSnapshot {
   at: string;
@@ -35,6 +37,10 @@ export interface HealthSnapshot {
    * gave up. Missing in older snapshots.
    */
   media?: MediaHealth;
+  /** Meeting counts and pauses; missing while meetings are switched off, and in older snapshots. */
+  meetings?: MeetingsHealth;
+  /** spentToday split by kind: AI calls and speech-to-text. Missing in older snapshots. */
+  spendByKind?: Record<SpendKind, number>;
 }
 
 /**
@@ -68,6 +74,7 @@ export class Health {
   #lastPublished: Date | null = null;
   #ingestFailures = 0;
   #media: MediaHealth = { pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0 };
+  #meetings: MeetingsHealth | null = null;
 
   constructor(o: { db: Db; clock: Clock; spend: SpendGuard; dataDir?: string; freeBytes?: (dir: string) => number | null }) {
     this.#db = o.db;
@@ -110,6 +117,11 @@ export class Health {
   /** Stores the shared-file counts; the next persist() records them. */
   setMedia(m: MediaHealth): void {
     this.#media = m;
+  }
+
+  /** Stores the meeting counts and pauses (a copy); null: meetings are switched off (no lines). The next persist() records them. */
+  setMeetings(m: MeetingsHealth | null): void {
+    this.#meetings = m === null ? null : { ...m, stats: { ...m.stats, deferred: { ...m.stats.deferred } } };
   }
 
   forget(clientId: number): void {
@@ -190,9 +202,28 @@ export class Health {
       const n = this.#media.spendCap;
       return { ok: false, text: `⚠️ ${n} shared file${n === 1 ? '' : 's'} waiting for today's AI budget (read after midnight IST)` };
     }
+    const meeting = this.#meetingLine();
+    if (meeting !== null) return { ok: false, text: meeting };
     const free = this.#freeGb();
     if (free !== null && free < LOW_DISK_GB) return { ok: false, text: `⚠️ Low disk: ${free.toFixed(1)} GB free` };
     return { ok: true, text: this.#lastSuccess ? `✅ Connected · last update ${stamp(this.#lastSuccess)}` : '✅ Connected · waiting for new messages' };
+  }
+
+  /** The meeting warning, if any, in this order (after the media lines, before low disk). Null while meetings are off. */
+  #meetingLine(): string | null {
+    const m = this.#meetings;
+    if (m === null) return null;
+    if (m.paused === 'google_scopes' || m.paused === 'google_auth') {
+      return '⚠️ Meetings paused: Google sign-in needs meeting access. Run: npm run cli -- google-auth';
+    }
+    if (m.paused === 'no_ffmpeg') return '⚠️ Meetings paused: ffmpeg not found';
+    if (m.stats.failed > 0) {
+      const n = m.stats.failed;
+      return `⚠️ ${n} meeting${n === 1 ? '' : 's'} could not be processed`;
+    }
+    if (m.sttProvider === 'none' && m.stats.waiting > 0) return '⚠️ Meetings waiting: speech-to-text is not set up';
+    if ((m.stats.deferred.stt_unavailable ?? 0) > 0) return '⚠️ Meetings waiting: the speech-to-text key was refused';
+    return null;
   }
 
   snapshot(): HealthSnapshot {
@@ -210,6 +241,8 @@ export class Health {
       publishFailingSince: this.#publishFailedSince?.toISOString() ?? null,
       ingestFailures: this.#ingestFailures,
       media: { ...this.#media },
+      ...(this.#meetings === null ? {} : { meetings: { ...this.#meetings, stats: { ...this.#meetings.stats, deferred: { ...this.#meetings.stats.deferred } } } }),
+      spendByKind: this.#spend.spentTodayByKind(),
     };
   }
 
@@ -223,6 +256,27 @@ const MEDIA_COUNTS = ['pending', 'stale', 'spendCap', 'failedRecent', 'uploadFai
 const isMediaHealth = (m: unknown): m is MediaHealth => {
   const x = m as Record<string, unknown> | null;
   return typeof x === 'object' && x !== null && MEDIA_COUNTS.every((k) => typeof x[k] === 'number');
+};
+
+const MEETING_COUNTS = ['done', 'waiting', 'unassigned', 'failed', 'noAccess', 'tooLong', 'internal'] as const;
+const MEETING_PAUSES = new Set<unknown>([null, 'google_scopes', 'google_auth', 'no_ffmpeg']);
+const STT_PROVIDERS = new Set<unknown>(['sarvam', 'elevenlabs', 'openai', 'none']);
+
+/** The counts' shape; the pause and provider values are checked separately (isKnownMeetingsState). */
+const isMeetingsHealth = (m: unknown): m is MeetingsHealth => {
+  const x = m as Record<string, unknown> | null;
+  if (typeof x !== 'object' || x === null) return false;
+  const s = x.stats as Record<string, unknown> | null;
+  if (typeof s !== 'object' || s === null || !MEETING_COUNTS.every((k) => typeof s[k] === 'number')) return false;
+  const d = s.deferred as Record<string, unknown> | null;
+  return typeof d === 'object' && d !== null && !Array.isArray(d) && Object.values(d).every((n) => typeof n === 'number');
+};
+
+const isKnownMeetingsState = (m: MeetingsHealth): boolean => MEETING_PAUSES.has(m.paused) && STT_PROVIDERS.has(m.sttProvider);
+
+const isSpendByKind = (v: unknown): v is Record<SpendKind, number> => {
+  const x = v as Record<string, unknown> | null;
+  return typeof x === 'object' && x !== null && typeof x.ai === 'number' && typeof x.stt === 'number';
 };
 
 export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
@@ -241,7 +295,13 @@ export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
     if (o.ingestFailures !== undefined && typeof o.ingestFailures !== 'number') return undefined;
     // Snapshots written before media counts existed still parse.
     if (o.media !== undefined && !isMediaHealth(o.media)) return undefined;
-    return { ...o, ingestFailures: o.ingestFailures ?? 0 } as HealthSnapshot;
+    // Snapshots written before meetings, or with meetings off, have no meetings; older ones no spend split.
+    if (o.meetings !== undefined && !isMeetingsHealth(o.meetings)) return undefined;
+    if (o.spendByKind !== undefined && !isSpendByKind(o.spendByKind)) return undefined;
+    // A pause reason or provider this version does not know (a newer writer) drops only the meetings, not the snapshot.
+    const { meetings, ...rest } = o;
+    const keep = meetings !== undefined && isKnownMeetingsState(meetings) ? { meetings } : {};
+    return { ...rest, ...keep, ingestFailures: o.ingestFailures ?? 0 } as HealthSnapshot;
   } catch {
     return undefined;
   }

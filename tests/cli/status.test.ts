@@ -89,3 +89,29 @@ describe('formatStatus', () => {
     expect(formatStatus({ ...base, snapshot })).not.toContain('Files:');
   });
 });
+
+describe('formatStatus meetings and spend split', () => {
+  const stats = { done: 4, waiting: 1, unassigned: 2, failed: 0, noAccess: 0, tooLong: 0, internal: 3, deferred: {} };
+
+  it('prints a meetings line when the snapshot has meetings, and none otherwise', () => {
+    expect(formatStatus({ ...base, snapshot })).not.toContain('Meetings:');
+    const out = formatStatus({ ...base, snapshot: { ...snapshot, meetings: { stats, paused: null, sttProvider: 'sarvam' } } });
+    expect(out).toContain('Meetings:    4 done, 1 waiting, 2 unassigned, 0 failed');
+    expect(out).not.toContain('no access');
+  });
+
+  it('adds no-access and too-long counts only when there are some', () => {
+    const out = formatStatus({ ...base, snapshot: { ...snapshot, meetings: { stats: { ...stats, noAccess: 1, tooLong: 2 }, paused: null, sttProvider: 'none' } } });
+    expect(out).toContain('Meetings:    4 done, 1 waiting, 2 unassigned, 0 failed, 1 no access, 2 too long');
+  });
+
+  it('splits spend today into AI and speech only when the snapshot has meetings and the split', () => {
+    const split = { ai: 1.0, stt: 0.234 };
+    const out = formatStatus({ ...base, snapshot: { ...snapshot, spendByKind: split, meetings: { stats, paused: null, sttProvider: 'sarvam' } } });
+    expect(out).toContain('Spend today: $1.23 of $15.00 (AI $1.00, speech $0.23)');
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, spendByKind: split } })).toMatch(/Spend today: \$1\.23 of \$15\.00$/m);
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, meetings: { stats, paused: null, sttProvider: 'sarvam' } } })).toMatch(
+      /Spend today: \$1\.23 of \$15\.00$/m,
+    );
+  });
+});

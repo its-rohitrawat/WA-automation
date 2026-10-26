@@ -627,3 +627,23 @@ export function meetingStats(db: Db, nowIso: string): MeetingStats {
     .all(canonical('meetingStats', 'nowIso', nowIso)) as { code: string; n: number }[];
   return { ...counts, deferred: Object.fromEntries(deferred.map((d) => [d.code, d.n])) };
 }
+
+/** One line of `meeting list`. Reads no JSON, so a bad stored value never hides the list. */
+export interface MeetingListRow {
+  id: number;
+  startedAt: string;
+  clientId: number | null;
+  status: MeetingStatus;
+  /** '' for internal meetings. Shown on the operator's console only. */
+  title: string;
+  errorCode: string | null;
+}
+
+/** Meetings with one of these statuses, newest first. */
+export function listMeetingsByStatus(db: Db, statuses: readonly MeetingStatus[]): MeetingListRow[] {
+  if (statuses.length === 0) return [];
+  return db
+    .prepare(`SELECT id, started_at AS startedAt, client_id AS clientId, status, title, error_code AS errorCode FROM meetings
+      WHERE status IN (${statuses.map(() => '?').join(', ')}) ORDER BY started_at DESC, id DESC`)
+    .all(...statuses) as MeetingListRow[];
+}
