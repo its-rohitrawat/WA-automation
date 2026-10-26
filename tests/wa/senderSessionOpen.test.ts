@@ -66,6 +66,17 @@ describe('openSenderSession (service start)', () => {
     rmSync(file);
   });
 
+  it('throws an error that is neither a SQLite nor a decrypt error, instead of calling the session unreadable', () => {
+    const dir = tempDir();
+    const notADir = join(dir, 'a-file');
+    writeFileSync(notADir, 'x');
+    // The parent of the session file is a regular file: opening it fails with a file-system error, not a SQLite one.
+    expect(() => openSenderSession(join(notADir, 'sender-session.db'), randomBytes(32))).toThrow();
+    // A master key of the wrong type is a programming error: it must surface, not become 'unreadable'.
+    const fresh = senderSessionDbPath(tempDir());
+    expect(() => openSenderSession(fresh, 'not a key' as unknown as Buffer)).toThrow();
+  });
+
   it('never opens or touches the founder session', async () => {
     const dir = tempDir();
     const master = randomBytes(32);

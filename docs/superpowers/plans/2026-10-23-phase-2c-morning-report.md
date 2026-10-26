@@ -2859,6 +2859,13 @@ git commit -m "feat: wire the morning report into the app, the service start, He
 
 The two new `CliDeps` fields are optional, so the existing `deps()` helper in `tests/cli/commands.test.ts` needs no change.
 
+**Amendment (Task 7 review round 1; overrides the `linkSenderCommand` code below).** Since Task 7, Health and `cli status` tell the owner to run `npm run cli -- link-sender --reset` whenever `data/sender-session.db` cannot be read, and that includes a file that is damaged or not a SQLite database (`openSenderSession` returns a `SQLITE_*` code such as `SQLITE_NOTADB` or `SQLITE_CORRUPT`). The code below opens the file with `openSessionDb` first, even with `--reset`, and `openSessionDb` throws a `Database.SqliteError` on such a file, so `--reset` would crash and the report would be skipped every day. Change it so that:
+- With `--reset`, a `Database.SqliteError` from `openSessionDb(senderSessionDbPath(...))` asks for the same typed confirmation (the text says the damaged spare-number session file is moved aside, not deleted; the founder's link and the tracker are not touched). On yes, the file and any `-wal` / `-shm` files next to it are renamed to `sender-session.db.damaged-<timestamp>` (and `-wal` / `-shm` with the same suffix; timestamp safe for Windows file names, for example `20261026T061500`), never deleted. A fresh `sender-session.db` is then opened and linking continues as usual. On no or Ctrl+C, nothing is changed.
+- Without `--reset`, the same error prints one line saying the spare-number session file is damaged and to run `npm run cli -- link-sender --reset`, and exits without a stack trace.
+- Any other error is still thrown.
+- Test in `tests/cli/report.test.ts`: a junk 4096-byte `sender-session.db` (`Buffer.alloc(4096, 0x41)`); `link-sender --reset` with confirmation yes keeps the junk bytes unchanged under the new `.damaged-` name, creates a fresh `sender-session.db`, and starts a QR link through the fake sender socket factory. Also: with confirmation no the junk file is unchanged at its old name; without `--reset` the one-line message is printed and the file is unchanged.
+- Task 9 (SETUP.md) mentions the `.damaged-<timestamp>` file: it can be deleted once the new link works.
+
 - [ ] **Step 1: Write the failing tests**
 
 Create `tests/cli/report.test.ts`:

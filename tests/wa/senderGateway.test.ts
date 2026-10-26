@@ -235,6 +235,16 @@ describe('SenderGateway', () => {
     expect(sockets[0]!.end).toHaveBeenCalled();
   });
 
+  it('stop() during the linger ends it at once and keeps the sent result: both message ids are already back', async () => {
+    const { gw, sockets } = setup({ lingerMs: 60_000 });
+    const p = gw.sendReport('hi', XLSX, FILE);
+    await vi.waitFor(() => expect(sockets[0]?.sendMessage).toHaveBeenCalledTimes(2), { interval: 5 });
+    await new Promise((r) => setTimeout(r, 10)); // now in the linger
+    await gw.stop();
+    expect(await p).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(sockets[0]!.end).toHaveBeenCalledTimes(1);
+  });
+
   it('is free for the next send after a send that went out', async () => {
     const { gw, sockets } = setup();
     expect(await gw.sendReport('day 1', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });

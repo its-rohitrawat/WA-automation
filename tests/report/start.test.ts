@@ -1,0 +1,130 @@
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { DestinationStream } from 'pino';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { parseEnv, reportSettings } from '../../src/config/env.ts';
+import { senderSessionDbPath, sessionDbPath } from '../../src/config/paths.ts';
+import { openMorningReport } from '../../src/report/start.ts';
+import { createLogger } from '../../src/util/logger.ts';
+import { openSessionDb, useEncryptedAuthState, useSenderAuthState } from '../../src/wa/authState.ts';
+import { FakeSocket } from '../helpers/fakeSocket.ts';
+
+const RECIPIENT = '919800001234';
+
+const dirs: string[] = [];
+function tempDir(): string {
+  const d = mkdtempSync(join(tmpdir(), 'wa-report-start-'));
+  dirs.push(d);
+  return d;
+}
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+function capture() {
+  const lines: string[] = [];
+  const dest = { write: (s: string) => { lines.push(s); } } as unknown as DestinationStream;
+  return { log: createLogger('info', dest), out: () => lines.join(''), records: () => lines.map((l) => JSON.parse(l) as Record<string, unknown>) };
+}
+
+function start(dir: string, master: Buffer) {
+  const env = parseEnv({ DATA_DIR: dir, REPORT_ENABLED: 'true', REPORT_RECIPIENT: RECIPIENT });
+  const c = capture();
+  const factory = vi.fn(() => new FakeSocket());
+  const r = openMorningReport({ env, masterKey: master, log: c.log, factory });
+  return { ...r, ...c, factory, env };
+}
+
+/** Writes a linked session into file with the founder's (open = useEncryptedAuthState) or the spare number's key. */
+async function linkedFile(file: string, master: Buffer, open: typeof useSenderAuthState): Promise<void> {
+  const db = openSessionDb(file);
+  const a = open(db, master);
+  a.state.creds.me = { id: '919800000099:3@s.whatsapp.net', name: 'S' };
+  await a.saveCreds();
+  db.close();
+}
+
+/** The full number, or any 5 of its digits in a row, must not reach the log. */
+function expectNoNumber(out: string): void {
+  for (let i = 0; i + 5 <= RECIPIENT.length; i++) expect(out).not.toContain(RECIPIENT.slice(i, i + 5));
+}
+
+describe('openMorningReport (service start, REPORT_ENABLED)', () => {
+  it('opens data/sender-session.db only, logs the last 4 digits of the recipient, and connects nothing yet', () => {
+    const dir = tempDir();
+    const r = start(dir, randomBytes(32));
+    try {
+      expect(r.senderDb).toBeDefined();
+      expect(existsSync(senderSessionDbPath(dir))).toBe(true);
+      expect(existsSync(sessionDbPath(dir))).toBe(false); // the founder's session is never opened
+      expect(r.report.settings).toEqual(reportSettings(r.env));
+      expect(r.report.sender.status().state).toBe('not_linked');
+      expect(r.factory).not.toHaveBeenCalled();
+      const line = r.records().find((l) => l.msg === 'morning report enabled');
+      expect(line).toMatchObject({ recipientLast4: '…1234', linked: false });
+      expectNoNumber(r.out());
+    } finally {
+      r.senderDb?.close();
+    }
+  });
+
+  it('reads a linked spare-number session with the spare number key', async () => {
+    const dir = tempDir();
+    const master = randomBytes(32);
+    await linkedFile(senderSessionDbPath(dir), master, useSenderAuthState);
+    const r = start(dir, master);
+    try {
+      expect(r.report.sender.status().state).toBe('idle');
+      expect(r.records().find((l) => l.msg === 'morning report enabled')).toMatchObject({ linked: true });
+    } finally {
+      r.senderDb?.close();
+    }
+  });
+
+  it("never uses the founder's session: a linked session.db leaves the spare number unlinked", async () => {
+    const dir = tempDir();
+    const master = randomBytes(32);
+    await linkedFile(sessionDbPath(dir), master, useEncryptedAuthState);
+    const before = readFileSync(sessionDbPath(dir));
+    const r = start(dir, master);
+    try {
+      expect(r.report.sender.status().state).toBe('not_linked');
+      expect(readFileSync(sessionDbPath(dir)).equals(before)).toBe(true);
+    } finally {
+      r.senderDb?.close();
+    }
+  });
+
+  it('a sender session written with the founder session key is unreadable (the spare number has its own key)', async () => {
+    const dir = tempDir();
+    const master = randomBytes(32);
+    await linkedFile(senderSessionDbPath(dir), master, useEncryptedAuthState);
+    const r = start(dir, master);
+    expect(r.senderDb).toBeUndefined();
+    expect(r.report.sender.status().state).toBe('unreadable');
+  });
+
+  it('a damaged sender session never stops the service: it is logged without the number, and left as it is', () => {
+    const dir = tempDir();
+    const junk = Buffer.alloc(4096, 0x41);
+    writeFileSync(senderSessionDbPath(dir), junk);
+    const r = start(dir, randomBytes(32));
+    expect(r.senderDb).toBeUndefined();
+    expect(r.report.sender.status().state).toBe('unreadable');
+    const err = r.records().find((l) => l.reason === 'session_unreadable');
+    expect(err?.level).toBe(50);
+    expect(String(err?.code)).toMatch(/^SQLITE_/);
+    expect(r.records().find((l) => l.msg === 'morning report enabled')).toMatchObject({ recipientLast4: '…1234', linked: false });
+    expectNoNumber(r.out());
+    expect(readFileSync(senderSessionDbPath(dir)).equals(junk)).toBe(true);
+  });
+
+  it('main.ts opens the spare number only through openMorningReport, and logs no recipient field itself', () => {
+    const src = readFileSync(join(import.meta.dirname, '../../src/main.ts'), 'utf8');
+    expect(src).toContain('openMorningReport(');
+    expect(src).not.toMatch(/openSenderSession|useSenderAuthState|new SenderGateway|senderSessionDbPath\(/);
+    expect(src).not.toMatch(/\brecipient\b\s*:/);
+  });
+});

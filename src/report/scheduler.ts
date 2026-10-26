@@ -131,7 +131,10 @@ export class ReportScheduler {
     return describeReport(reportFor(this.#o.db, istDate(now)), now, this.#o.settings, this.#o.sender.status().state);
   }
 
-  /** Starts no new send, waits up to waitMs for the send in flight, then stops the sender. Leaves no timers. */
+  /**
+   * Starts no new send, waits up to waitMs for the send in flight, stops the sender, then waits up to 2 s more (never
+   * more than waitMs) for that send to record its outcome. Leaves no timers.
+   */
   async stop(waitMs: number): Promise<void> {
     this.#stopped = true;
     const inFlight = this.#inFlight;
@@ -144,6 +147,13 @@ export class ReportScheduler {
       await this.#o.sender.stop();
     } catch (err) {
       this.#o.log.error({ err }, 'stopping the report sender failed');
+    }
+    // Stopping the sender ends a send in its linger (both ids already back) or cuts one off. Give it up to 2 s more to
+    // record its outcome, so a report that went out is 'sent' before main.ts closes the database.
+    if (inFlight) {
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([inFlight, new Promise<void>((resolve) => (timer = setTimeout(resolve, Math.min(2_000, waitMs))))]);
+      clearTimeout(timer);
     }
   }
 

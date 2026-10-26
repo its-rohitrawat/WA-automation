@@ -394,6 +394,25 @@ describe('ReportScheduler', () => {
     expect(sender.stopped).toBe(1);
   });
 
+  it('after stopping the sender, waits briefly for the send it ended, so a report in its linger is recorded as sent', async () => {
+    const { db, clock, sender, s } = setup();
+    let release!: () => void;
+    sender.gate = new Promise<void>((r) => {
+      release = r;
+    });
+    // Like SenderGateway: stop() ends the linger, and the send resolves 'sent' a moment later.
+    sender.stop = async () => {
+      sender.stopped++;
+      setTimeout(release, 30);
+    };
+    clock.set(IST('06:00'));
+    void s.tick(clock.now());
+    await vi.waitFor(() => expect(sender.calls).toHaveLength(1));
+    await s.stop(50);
+    expect(sender.stopped).toBe(1);
+    expect(reportFor(db, DAY)?.status).toBe('sent');
+  });
+
   it('claims the row before the send goes out', async () => {
     const { db, sender, at } = setup();
     const seen: (ReportRow | undefined)[] = [];

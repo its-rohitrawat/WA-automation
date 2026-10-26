@@ -1,16 +1,18 @@
 import { randomBytes } from 'node:crypto';
+import ExcelJS from 'exceljs';
+import type { DestinationStream } from 'pino';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp, type App, type AppReportDeps } from '../src/app.ts';
 import { formatStatus } from '../src/cli/status.ts';
 import { readHealthSnapshot } from '../src/health/health.ts';
-import { UNKNOWN_WARNING } from '../src/report/scheduler.ts';
+import { ReportScheduler, UNKNOWN_WARNING } from '../src/report/scheduler.ts';
 import type { Prices } from '../src/spend/pricing.ts';
 import type { Db } from '../src/store/db.ts';
 import { claimReport, reportFor } from '../src/store/reports.ts';
 import { systemClock } from '../src/util/clock.ts';
-import { silentLogger } from '../src/util/logger.ts';
+import { createLogger, silentLogger, type Logger } from '../src/util/logger.ts';
 import { AllowList } from '../src/wa/allowlist.ts';
-import { openSessionDb, useEncryptedAuthState } from '../src/wa/authState.ts';
+import { openSessionDb, useEncryptedAuthState, useSenderAuthState } from '../src/wa/authState.ts';
 import { WhatsAppGateway } from '../src/wa/gateway.ts';
 import { SenderGateway } from '../src/wa/senderGateway.ts';
 import { FakeAi } from './helpers/ai.ts';
@@ -23,7 +25,7 @@ const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, ca
 const DAY = '2026-10-23';
 const ON = { enabled: true, time: '06:00', deadline: '12:00' };
 
-function setup(report?: AppReportDeps, db: Db = seededDb()) {
+function setup(report?: AppReportDeps, db: Db = seededDb(), o: { log?: Logger; freeBytes?: () => number } = {}) {
   const sockets: FakeSocket[] = [];
   const auth = useEncryptedAuthState(openSessionDb(':memory:'), randomBytes(32));
   const allow = new AllowList([SHARMA.groupId, MEHTA.groupId]);
@@ -38,8 +40,8 @@ function setup(report?: AppReportDeps, db: Db = seededDb()) {
     saveCreds: auth.saveCreds,
   });
   const app = createApp({
-    db, clock: systemClock, log: silentLogger(), gateway, allow, ai: new FakeAi(), drive: new FakeDrive(), prices: P, spendCapUsd: 15,
-    quietMs: 240_000, maxWaitMs: 1_200_000, maxConcurrent: 3, dataDir: '.', freeBytes: () => 500e9, pollMs: 30_000, report,
+    db, clock: systemClock, log: o.log ?? silentLogger(), gateway, allow, ai: new FakeAi(), drive: new FakeDrive(), prices: P, spendCapUsd: 15,
+    quietMs: 240_000, maxWaitMs: 1_200_000, maxConcurrent: 3, dataDir: '.', freeBytes: o.freeBytes ?? (() => 500e9), pollMs: 30_000, report,
   });
   app.start();
   sockets[0]!.emit('connection.update', { connection: 'open' });
@@ -61,7 +63,10 @@ describe('app and the morning report', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-23T00:30:00.000Z')); // 06:00 IST
   });
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
 
   it('sends the report from the tick at 06:00, shows it in Health, and the founder-number gateway still sends nothing', async () => {
     const sender = new FakeReportSender();
@@ -121,5 +126,112 @@ describe('app and the morning report', () => {
     for (const name of SEND_METHODS) expect(sockets[0]![name]).not.toHaveBeenCalled();
     await stopApp(app);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('stop() waits for a report still being sent, so the row is sent before main.ts closes the databases', async () => {
+    const sender = new FakeReportSender();
+    let release!: () => void;
+    sender.gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const { db, app } = setup({ sender, settings: ON });
+    for (let i = 0; i < 30 && sender.calls.length === 0; i++) await vi.advanceTimersByTimeAsync(1_000);
+    expect(sender.calls).toHaveLength(1);
+    let done = false;
+    let statusAtStop: string | undefined;
+    const p = app.stop().then(() => {
+      statusAtStop = reportFor(db, DAY)?.status; // main.ts closes the tracker database right here
+      done = true;
+    });
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(done).toBe(false);
+    expect(reportFor(db, DAY)?.status).toBe('sending');
+    release();
+    for (let i = 0; i < 30 && !done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    await p;
+    expect(statusAtStop).toBe('sent');
+    expect(sender.stopped).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('stop() gives a send that never ends a bounded wait, then resolves with the row still sending', async () => {
+    const sender = new FakeReportSender();
+    sender.gate = new Promise<void>(() => {});
+    const { db, app } = setup({ sender, settings: ON });
+    for (let i = 0; i < 30 && sender.calls.length === 0; i++) await vi.advanceTimersByTimeAsync(1_000);
+    expect(sender.calls).toHaveLength(1);
+    let done = false;
+    const t0 = Date.now();
+    let elapsed = 0;
+    const p = app.stop().then(() => {
+      elapsed = Date.now() - t0;
+      done = true;
+    });
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(done).toBe(false);
+    for (let i = 0; i < 30 && !done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    await p;
+    expect(elapsed).toBeGreaterThanOrEqual(10_000);
+    expect(elapsed).toBeLessThanOrEqual(13_000);
+    expect(reportFor(db, DAY)?.status).toBe('sending'); // the next start marks it unknown, never sent again
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a real sender stopped during its 15 s linger still records the report as sent before stop() resolves', async () => {
+    const sockets: FakeSocket[] = [];
+    const factory = () => {
+      const s = new FakeSocket();
+      let n = 0;
+      s.sendMessage.mockImplementation(async () => ({ key: { id: `msg-${++n}` } }));
+      sockets.push(s);
+      queueMicrotask(() => s.emit('connection.update', { connection: 'open' }));
+      return s;
+    };
+    const auth = { ...useSenderAuthState(openSessionDb(':memory:'), randomBytes(32)), hasSession: true };
+    const sender = new SenderGateway({ recipient: '919800000000', factory, auth }); // production timeouts and linger
+    const { db, app } = setup({ sender, settings: ON });
+    for (let i = 0; i < 30 && (sockets[0]?.sendMessage.mock.calls.length ?? 0) < 2; i++) await vi.advanceTimersByTimeAsync(1_000);
+    expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(2);
+    let done = false;
+    let statusAtStop: string | undefined;
+    const p = app.stop().then(() => {
+      statusAtStop = reportFor(db, DAY)?.status;
+      done = true;
+    });
+    for (let i = 0; i < 30 && !done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    await p;
+    expect(statusAtStop).toBe('sent');
+    expect(sockets[0]!.end).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("the report's workbook carries the live Health line", async () => {
+    const sender = new FakeReportSender();
+    const { db, app } = setup({ sender, settings: ON }, seededDb(), { freeBytes: () => 2e9 });
+    for (let i = 0; i < 30 && reportFor(db, DAY)?.status !== 'sent'; i++) await vi.advanceTimersByTimeAsync(1_000);
+    expect(sender.calls).toHaveLength(1);
+    const live = app.health.workbookLine().text;
+    await stopApp(app);
+    vi.useRealTimers(); // reading the xlsx back needs real timers
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(sender.calls[0]!.xlsx as unknown as ExcelJS.Buffer);
+    const cell = wb.getWorksheet('Overview')!.getRow(1).getCell(1).value;
+    expect(cell).toBe('⚠️ Low disk: 2.0 GB free');
+    expect(cell).toBe(live);
+  });
+
+  it('a failed recovery at start is logged and the founder-number reader still connects', async () => {
+    vi.spyOn(ReportScheduler.prototype, 'recover').mockImplementation(() => {
+      throw new Error('database is locked');
+    });
+    const lines: string[] = [];
+    const log = createLogger('info', { write: (s: string) => { lines.push(s); } } as unknown as DestinationStream);
+    const sender = new FakeReportSender();
+    const { app, sockets } = setup({ sender, settings: ON }, seededDb(), { log }); // start() did not throw
+    expect(sockets).toHaveLength(1);
+    expect(app.health.workbookLine().ok).toBe(true); // connected
+    const errors = lines.map((l) => JSON.parse(l) as { level: number; msg: string }).filter((l) => l.level === 50);
+    expect(errors.map((l) => l.msg)).toContain('morning report recovery failed');
+    await stopApp(app);
   });
 });

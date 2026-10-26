@@ -2,14 +2,15 @@ import { existsSync } from 'node:fs';
 import { createApp, type AppReportDeps } from './app.ts';
 import { ClaudeClient } from './brain/claudeClient.ts';
 import { ClaudeMediaClient } from './brain/mediaClient.ts';
-import { loadEnv, maskNumber, reportRecipient, reportSettings, requireKey } from './config/env.ts';
+import { loadEnv, requireKey } from './config/env.ts';
 import { GROUPS_FILE_MISSING_MESSAGE, loadGroupsFile, watchGroupsFile } from './config/groups.ts';
-import { masterKeyPath, senderSessionDbPath, sessionDbPath, trackerDbPath } from './config/paths.ts';
+import { masterKeyPath, sessionDbPath, trackerDbPath } from './config/paths.ts';
 import { DpapiKeyProvider, MasterKeyError } from './crypto/keyProvider.ts';
 import { baileysFetcher } from './media/fetch.ts';
 import { MediaRefSealer } from './media/ref.ts';
 import { googleDriveApi } from './output/drive.ts';
 import { createOAuthClient, TokenDecryptError, TokenStore } from './output/googleAuth.ts';
+import { openMorningReport } from './report/start.ts';
 import { pricesFromEnv } from './spend/pricing.ts';
 import { syncClients } from './store/clients.ts';
 import { openDb, type Db } from './store/db.ts';
@@ -17,9 +18,9 @@ import { systemClock } from './util/clock.ts';
 import { acquireLock, AlreadyRunningError } from './util/lock.ts';
 import { createLogger, silentLogger } from './util/logger.ts';
 import { AllowList } from './wa/allowlist.ts';
-import { openSenderSession, openSessionDb, SessionDecryptError, useEncryptedAuthState } from './wa/authState.ts';
+import { openSessionDb, SessionDecryptError, useEncryptedAuthState } from './wa/authState.ts';
 import { baileysSocketFactory, WhatsAppGateway } from './wa/gateway.ts';
-import { baileysSenderSocketFactory, SenderGateway } from './wa/senderGateway.ts';
+import { baileysSenderSocketFactory } from './wa/senderGateway.ts';
 
 /** Expected startup refusal. The message is safe to print. */
 class StartupExit extends Error {}
@@ -82,18 +83,12 @@ async function main(): Promise<void> {
     // Phase 2c: the morning report from the spare number. A missing, damaged or undecryptable spare-number session never
     // stops the service: the founder-number reader runs as usual, each day's report fails until the deadline and is then
     // skipped, and Health says to run link-sender (or link-sender --reset).
+    // openMorningReport (tested) opens data/sender-session.db only, and logs only the recipient's last 4 digits.
     let report: AppReportDeps | undefined;
     if (env.REPORT_ENABLED) {
-      const recipient = reportRecipient(env);
-      const opened = openSenderSession(senderSessionDbPath(env.DATA_DIR), key);
-      if (opened.ok) senderDb = opened.db;
-      else log.error({ reason: 'session_unreadable', code: opened.code }, 'morning report: the spare number session cannot be read');
-      const senderAuth = opened.ok ? opened.auth : undefined;
-      report = {
-        settings: reportSettings(env),
-        sender: new SenderGateway({ recipient, factory: baileysSenderSocketFactory(silentLogger()), auth: senderAuth }),
-      };
-      log.info({ recipient: maskNumber(recipient), linked: senderAuth?.hasSession ?? false }, 'morning report enabled');
+      const started = openMorningReport({ env, masterKey: key, log, factory: baileysSenderSocketFactory(silentLogger()) });
+      senderDb = started.senderDb;
+      report = started.report;
     }
 
     const prices = pricesFromEnv(env);

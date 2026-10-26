@@ -185,6 +185,8 @@ export class SenderGateway implements ReportSender {
   #sock: SenderSocketLike | undefined;
   #busy = false;
   #stopped = false;
+  /** Set while a sent report lingers; stop() calls it to end the linger early. */
+  #endLinger: (() => void) | undefined;
 
   constructor(opts: SenderGatewayOptions) {
     this.#jid = recipientJid(opts.recipient);
@@ -225,7 +227,8 @@ export class SenderGateway implements ReportSender {
         // linkPreview: null stops Baileys fetching a preview of a URL that a task title copied from a chat.
         const ids = [await this.#send(opened.sock, this.#jid, { text, linkPreview: null })];
         ids.push(await this.#send(opened.sock, this.#jid, { document: xlsx, mimetype: XLSX_MIME, fileName }));
-        await delay(this.#opts.lingerMs ?? 15_000);
+        // stop() ends the linger early: both ids are back, so the result is still 'sent'.
+        await this.#linger(this.#opts.lingerMs ?? 15_000);
         return { status: 'sent', messageIds: ids };
       } catch (err) {
         return { status: 'unknown', code: err instanceof SendTimeoutError ? 'timeout' : 'send_error' };
@@ -239,9 +242,13 @@ export class SenderGateway implements ReportSender {
     }
   }
 
-  /** Ends a connection in progress. A send cut off this way comes back as unknown. Later sends are refused. */
+  /**
+   * Ends a connection in progress. A send cut off before both message ids came back is unknown; one in its linger is
+   * still sent, and returns at once. Later sends are refused.
+   */
   async stop(): Promise<void> {
     this.#stopped = true;
+    this.#endLinger?.();
     const sock = this.#sock;
     this.#sock = undefined;
     if (sock) await endQuietly(sock);
@@ -264,6 +271,20 @@ export class SenderGateway implements ReportSender {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /** Waits ms, or until stop() ends the wait. Leaves no timer either way. */
+  #linger(ms: number): Promise<void> {
+    if (this.#stopped) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const end = () => {
+        clearTimeout(timer);
+        this.#endLinger = undefined;
+        resolve();
+      };
+      const timer = setTimeout(end, ms);
+      this.#endLinger = end;
+    });
   }
 
   #setState(state: SenderState, code: number | null): void {
