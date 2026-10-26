@@ -218,6 +218,13 @@ export const REQUEUING_FILE = `media.kind IN ('image', 'document', 'voice', 'aud
   AND media.text_kind IS NOT NULL AND media.text IS NOT NULL AND media.text <> ''`;
 
 /**
+ * Notes a speech provider's stored copy for deletion (N1), shared by finishMedia and noteMediaForget. ON CONFLICT rather
+ * than OR IGNORE: a copy already noted is kept, but a ref the CHECK refuses still throws.
+ */
+const NOTE_FORGET = `INSERT INTO media_stt_forget (media_id, provider, ref, created_at) VALUES (@id, @provider, @ref, @at)
+  ON CONFLICT (provider, ref) DO NOTHING`;
+
+/**
  * The file has been read. NUL characters in the text are stored as spaces: SQLite's substr() and length() stop at the first one,
  * so mediaForMessages would otherwise cut the text there. A space rather than nothing keeps the words and numbers on either side apart.
  * Text that shows nothing (only spaces, NULs or zero-width characters: showsText) is stored as no text (NULL), so the
@@ -261,8 +268,7 @@ export function finishMedia(
     if (forget) {
       // ON CONFLICT rather than OR IGNORE: a copy already noted is kept, but a ref the CHECK refuses still throws, so the
       // finish is undone instead of a transcript stored with its copy silently never deleted.
-      db.prepare(`INSERT INTO media_stt_forget (media_id, provider, ref, created_at) VALUES (@id, @provider, @ref, @at)
-        ON CONFLICT (provider, ref) DO NOTHING`).run({ id, provider: forget.provider, ref: forget.ref, at: fields.at });
+      db.prepare(NOTE_FORGET).run({ id, provider: forget.provider, ref: forget.ref, at: fields.at });
     }
     if (finished === 0) return; // already finished (or failed): nothing to flag or queue again
     // The flag first: it needs processed_at as it was before the message is queued again.
@@ -271,6 +277,15 @@ export function finishMedia(
     db.prepare(`UPDATE messages SET processed_at = NULL, version = version + 1
       WHERE revoked = 0 AND id = (SELECT message_id FROM media WHERE id = ? AND ${REQUEUING_FILE})`).run(id);
   }).immediate();
+}
+
+/**
+ * Notes a speech provider's stored copy of a voice transcript for deletion (N1) outside a finish: the copy an unreadable
+ * answer still named (Phase 3's M7), written by the processor when that error ends a run. A copy already noted (the
+ * same provider and ref) is noted once; a ref the CHECK refuses throws.
+ */
+export function noteMediaForget(db: Db, id: number, f: { provider: ProviderId; ref: string; at: string }): void {
+  db.prepare(NOTE_FORGET).run({ id, ...f });
 }
 
 /** A final failure. The sealed details are wiped; an original already saved stays on disk. */

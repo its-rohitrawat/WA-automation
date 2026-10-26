@@ -7,7 +7,7 @@ import sharp from 'sharp';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { IMAGE_MAX_TOKENS, IMAGE_TOKEN_CEILING, MEDIA_SYSTEM_PROMPT, PDF_MAX_TOKENS, PDF_TOKENS_PER_PAGE } from '../../src/brain/mediaClient.ts';
 import { SpendCapReachedError } from '../../src/brain/paidCall.ts';
-import { createExtractor, imageCeilingUsd, imageEstimateUsd, isPaidVoiceError, scannedPdfCeilingUsd, type ExtractInput } from '../../src/media/extract.ts';
+import { createExtractor, imageCeilingUsd, imageEstimateUsd, isPaidVoiceError, scannedPdfCeilingUsd, voiceCopyOf, type ExtractInput } from '../../src/media/extract.ts';
 import type { PreparedImage } from '../../src/media/image.ts';
 import type { ParseJob, ParseResult } from '../../src/media/parse/types.ts';
 import { MEDIA_LIMITS } from '../../src/media/types.ts';
@@ -961,6 +961,68 @@ describe('voice and audio', () => {
       expect(await caught(extract(input(note())))).toBe(error);
       expect(sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail }]);
       expect(v.disposals).toBe(1);
+    });
+  });
+
+  // N1 with Phase 3's M7: an ElevenLabs answer that could not be read may still name the copy it stored (the
+  // SttNoAnswerError's forgetRef). The extractor has no database: it notes the copy on the error, with its own
+  // transcriber's provider, and the processor writes it to media_stt_forget (Task 6).
+  describe('a no-answer error that names the provider copy', () => {
+    /** As src/stt/http.ts throws it with Phase 3's M7: an SttNoAnswerError carrying forgetRef. */
+    const unreadable = (ref: unknown): SttNoAnswerError => Object.assign(new SttNoAnswerError('unreadable_body'), { forgetRef: ref });
+
+    it("notes the copy with this transcriber's provider and throws the same error, booked at the ceiling", async () => {
+      const error = unreadable('tr_9');
+      const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [error] });
+      const { db, extract, input } = voiceSetup(v);
+      const err = await caught(extract(input(note())));
+      expect(err).toBe(error);
+      expect(voiceCopyOf(err)).toEqual({ provider: 'elevenlabs', ref: 'tr_9' });
+      expect(isPaidVoiceError(err)).toBe(false);
+      expect(sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail: 'media 7 (unknown, estimated)' }]);
+      expect(v.forgotten).toEqual([]); // noted by the processor, deleted by forgetVoiceCopies
+    });
+
+    it('finds it as the cause of a later part failing', async () => {
+      const error = new SttPartialError(1, 2, unreadable('tr_9'));
+      const { extract, input } = voiceSetup(new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [error] }));
+      const err = await caught(extract(input(note())));
+      expect(err).toBe(error);
+      expect(voiceCopyOf(err)).toEqual({ provider: 'elevenlabs', ref: 'tr_9' });
+    });
+
+    it('finds it as the cause of a booking that could not be written', async () => {
+      const { spend, extract, input } = voiceSetup(new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable('tr_9')] }));
+      vi.spyOn(spend, 'settle').mockImplementationOnce((id) => {
+        spend.release(id);
+        throw new Error('database is locked');
+      });
+      const err = await caught(extract(input(note())));
+      expect(err).toBeInstanceOf(SttBookingError);
+      expect(voiceCopyOf(err)).toEqual({ provider: 'elevenlabs', ref: 'tr_9' });
+      expect(isPaidVoiceError(err)).toBe(false);
+    });
+
+    it.each([
+      ['a no answer without a copy', () => new SttNoAnswerError('timeout')],
+      ['an empty ref', () => unreadable('')],
+      ['a ref longer than an id', () => unreadable('x'.repeat(201))],
+      ['a ref that is not text', () => unreadable(42)],
+      ['an HTTP error', () => new SttHttpError(500)],
+      ['a failed job', () => new SttJobError('failed')],
+    ])('notes nothing for %s', async (_name, error) => {
+      const { extract, input } = voiceSetup(new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [error()] }));
+      expect(voiceCopyOf(await caught(extract(input(note()))))).toBeNull();
+    });
+
+    it('a ref of 200 characters is still an id', async () => {
+      const ref = 'x'.repeat(200);
+      const { extract, input } = voiceSetup(new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable(ref)] }));
+      expect(voiceCopyOf(await caught(extract(input(note()))))).toEqual({ provider: 'elevenlabs', ref });
+    });
+
+    it('knows nothing of values that are not errors from the extractor', () => {
+      for (const x of [null, undefined, 'x', 3, new Error('other'), unreadable('tr_9')]) expect(voiceCopyOf(x)).toBeNull();
     });
   });
 

@@ -12,9 +12,10 @@ import { estimateCostUsd, type Prices } from '../spend/pricing.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
 import type { MediaKind, TextKind } from '../store/media.ts';
 import { AudioError } from '../stt/audio.ts';
+import { SttNoAnswerError } from '../stt/http.ts';
 import { SttBookingError, withSttHold } from '../stt/paidStt.ts';
 import type { ProviderId } from '../stt/types.ts';
-import { sizeBoundSeconds, VOICE_LENGTH_TOLERANCE_S, type PreparedVoice, type VoiceResult, type VoiceTranscriber } from '../stt/voice.ts';
+import { sizeBoundSeconds, SttPartialError, VOICE_LENGTH_TOLERANCE_S, type PreparedVoice, type VoiceResult, type VoiceTranscriber } from '../stt/voice.ts';
 import { prepareImageForClaude, type PreparedImage } from './image.ts';
 import { FORMAT_NOT_SUPPORTED, FORWARDED_NOT_TRANSCRIBED, NO_SPEECH, TOO_LONG } from './labels.ts';
 import { parseFile } from './parse/runner.ts';
@@ -144,6 +145,50 @@ function paidVoiceError(e: unknown): object {
 /** Whether an error came after a voice note's paid call was answered: never retried, it would pay again. */
 export function isPaidVoiceError(e: unknown): boolean {
   return typeof e === 'object' && e !== null && paidVoiceErrors.has(e);
+}
+
+/**
+ * Provider copies named by a voice call that got no usable answer (Phase 3's M7: an ElevenLabs reply that could not be
+ * read may still carry the id of the transcript it stored, as SttNoAnswerError.forgetRef). The extractor has no
+ * database, so it notes the copy on the error it throws, with its own transcriber's provider, and the processor writes
+ * it to media_stt_forget (N1), from where forgetVoiceCopies deletes it. Noted, not wrapped, as scanReadErrors are, so
+ * the error itself still reaches the processor's rules.
+ */
+const unansweredCopies = new WeakMap<object, { provider: ProviderId; ref: string }>();
+
+/** The longest id kept for a stored copy: media_stt_forget's CHECK, and MAX_REF_LENGTH in src/stt/voice.ts. */
+const MAX_COPY_REF_LENGTH = 200;
+
+/**
+ * The copy id an SttNoAnswerError carries, itself or as the cause of an SttPartialError or an SttBookingError (or both).
+ * Read by shape: forgetRef is optional on SttNoAnswerError, and only an id of 1 to 200 characters is kept.
+ */
+function unansweredRef(e: unknown): string | null {
+  let cur: unknown = e;
+  for (let depth = 0; depth < 3; depth++) {
+    if (cur instanceof SttNoAnswerError) {
+      const ref = (cur as { forgetRef?: unknown }).forgetRef;
+      return typeof ref === 'string' && ref.length >= 1 && ref.length <= MAX_COPY_REF_LENGTH ? ref : null;
+    }
+    if (!(cur instanceof SttBookingError || cur instanceof SttPartialError)) return null;
+    cur = cur.cause;
+  }
+  return null;
+}
+
+/** Notes the copy a failed voice call names, if any, on the error, and returns the error as it is. */
+function noteUnansweredCopy(e: unknown, provider: ProviderId): unknown {
+  const ref = unansweredRef(e);
+  if (ref !== null && typeof e === 'object' && e !== null) unansweredCopies.set(e, { provider, ref });
+  return e;
+}
+
+/**
+ * The provider copy a voice call that failed without a usable answer still named, for the processor to note in
+ * media_stt_forget; null for any other error. An id only, never what was said.
+ */
+export function voiceCopyOf(e: unknown): { provider: ProviderId; ref: string } | null {
+  return typeof e === 'object' && e !== null ? (unansweredCopies.get(e) ?? null) : null;
 }
 
 /** Ceiling for one image description: the prompt, the image at its token count (capped), and the full output allowance. */
@@ -289,7 +334,8 @@ export function createExtractor(d: ExtractorDeps): Extractor {
           return { result: r, costUsd };
         }));
       } catch (e) {
-        if (paid.result === undefined) throw e; // the call failed: withSttHold booked it by its outcome
+        // The call failed: withSttHold booked it by its outcome. A copy its error names is noted for the processor.
+        if (paid.result === undefined) throw noteUnansweredCopy(e, v.provider);
         throw await paidButUnbooked(e, { ...paid, result: paid.result }, ceiling, input);
       }
       const forget = result.forgetRef === null ? null : { provider: result.provider, ref: result.forgetRef };
