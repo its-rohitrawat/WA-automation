@@ -118,7 +118,7 @@ export class ReportScheduler {
   /** At service start: a row still 'sending' was cut off by a crash or a stop mid-send, so its outcome is unknown. */
   recover(now: Date = this.#o.clock.now()): void {
     const count = markInterruptedReports(this.#o.db, now.toISOString());
-    this.#recovered = true;
+    this.#recovered = true; // only after the rows are marked (tests/report/scheduler.test.ts)
     if (count > 0) this.#o.log.warn({ count }, 'morning report was cut off mid-send; marked unknown, not retried');
   }
 

@@ -2,7 +2,9 @@ import ExcelJS from 'exceljs';
 import { Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import type { HealthLine } from '../../src/output/view.ts';
-import { describeReport, ReportScheduler, retryWaitMs, UNKNOWN_WARNING, type ReportPayload } from '../../src/report/scheduler.ts';
+import {
+  describeReport, reasonText, ReportScheduler, retryWaitMs, SENDER_WARNINGS, UNKNOWN_WARNING, type ReportPayload,
+} from '../../src/report/scheduler.ts';
 import type { ReportSettings, SendResult } from '../../src/report/types.ts';
 import type { Db } from '../../src/store/db.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
@@ -143,6 +145,26 @@ describe('ReportScheduler', () => {
     s.recover(clock.now());
     expect(reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'interrupted' });
     await at('06:30');
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it('counts as recovered only once the cut-off row is marked unknown: a recovery that failed runs again at the next tick', async () => {
+    const { db, clock, sender, s, at } = setup();
+    claimReport(db, DAY, iso('06:00')); // the previous run died while sending
+    const prepare = db.prepare.bind(db);
+    const spy = vi.spyOn(db, 'prepare').mockImplementation(((sql: string) => {
+      if (/detail = 'interrupted'/.test(sql)) throw new Error('database is locked'); // markInterruptedReports fails
+      return prepare(sql);
+    }) as typeof db.prepare);
+    clock.set(IST('06:20'));
+    try {
+      expect(() => s.recover(clock.now())).toThrow('database is locked');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(reportFor(db, DAY)!.status).toBe('sending');
+    await at('06:30');
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'interrupted' });
     expect(sender.calls).toHaveLength(0);
   });
 
@@ -588,6 +610,22 @@ describe('describeReport', () => {
     expect(describeReport(undefined, now, ON, 'replaced').warning).toContain('another session');
     expect(describeReport(row({ status: 'unknown' }), now, ON, 'not_linked').warning).toBe(UNKNOWN_WARNING);
     expect(describeReport(row({}), now, ON, 'idle').warning).toBeNull();
+  });
+
+  it("warns and explains when the sender is linked to the founder's own number (self_send)", () => {
+    const h = describeReport(undefined, now, ON, 'self_send');
+    expect(h.warning).toBe(SENDER_WARNINGS.self_send);
+    expect(h.warning).toBe(
+      "⚠️ Morning report: the sender is linked to the founder's own number. Stop the service and run: npm run cli -- link-sender --reset, then scan with the SPARE phone",
+    );
+    expect(reasonText('self_send')).toBe("the sender is linked to the founder's own number; re-link with the spare phone");
+    expect(describeReport(row({ status: 'retry', detail: 'self_send', nextAttemptAt: iso('07:02') }), now, ON, 'self_send')).toEqual({
+      text: "Morning report: not sent yet (the sender is linked to the founder's own number; re-link with the spare phone), next try 07:02 IST",
+      warning: SENDER_WARNINGS.self_send,
+    });
+    expect(describeReport(row({ status: 'skipped', detail: 'self_send' }), now, ON, 'self_send').text).toBe(
+      "Morning report skipped today (the sender is linked to the founder's own number; re-link with the spare phone)",
+    );
   });
 
   it('waits 2, 5, then 10 minutes', () => {
