@@ -67,6 +67,14 @@ describe('mediaStats', () => {
     expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 2, stale: 1, sttRefused: 1 });
   });
 
+  it('never counts a queued backlog file as waiting too long: a long backlog run is not a fault (review round 2)', () => {
+    const db = seededDb();
+    const id = add(db, 'A', { createdAt: '2026-10-19T06:00:00.000Z' });
+    db.prepare('UPDATE media SET backlog = 1 WHERE id = ?').run(id);
+    add(db, 'B', { createdAt: '2026-10-19T06:00:00.000Z' });
+    expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 2, stale: 1 });
+  });
+
   it('is all zeros on an empty table', () => {
     expect(mediaStats(seededDb(), new Date(NOW))).toEqual(ZERO);
   });

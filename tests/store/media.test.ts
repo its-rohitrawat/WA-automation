@@ -649,15 +649,15 @@ describe('the 2a voice backlog (V6, N2)', () => {
     expect(mediaForMessages(db, [messageId], 10).get(messageId)!.backlog).toBe(true);
   });
 
-  it('a queued file counts its waits from the queueing, not from its arrival days before, so it is not stale at once (review A)', () => {
+  it('a queued file counts its waits from the queueing, not from its arrival days before, and is never stale (review A, round 2)', () => {
     const db = seededDb();
     const id = backlogVoice(db, 'A'); // arrived at NOW
     const queuedAt = '2026-10-22T08:00:00.000Z';
     expect(queueVoiceBacklog(db, [id], queuedAt)).toBe(1);
     expect(getMedia(db, id)).toMatchObject({ status: 'pending', createdAt: queuedAt, updatedAt: queuedAt });
     expect(mediaStats(db, new Date(queuedAt))).toMatchObject({ pending: 1, stale: 0 });
-    expect(mediaStats(db, new Date('2026-10-22T08:29:00.000Z'))).toMatchObject({ pending: 1, stale: 0 });
-    expect(mediaStats(db, new Date('2026-10-22T08:31:00.000Z'))).toMatchObject({ pending: 1, stale: 1 });
+    // A long backlog run is not a fault: the file never counts as waiting too long, however long the queue takes.
+    expect(mediaStats(db, new Date('2026-10-22T08:31:00.000Z'))).toMatchObject({ pending: 1, stale: 0 });
   });
 
   it('a file that finished format_not_supported after it was queued is listed again, and can be queued again (review C)', () => {

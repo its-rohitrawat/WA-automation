@@ -506,9 +506,10 @@ export interface MediaStats {
   /** Files waiting to be downloaded or read. */
   pending: number;
   /**
-   * Pending longer than staleMs, counted from the file's arrival (or its queueing by `cli transcribe-voice`) or from the
-   * service start, whichever is later (amendment 15a, the same clock as the reconciler's wait). Files waiting for the
-   * daily budget are counted in spendCap instead, and files waiting for a speech-to-text key in sttRefused.
+   * Pending longer than staleMs, counted from the file's arrival or from the service start, whichever is later
+   * (amendment 15a, the same clock as the reconciler's wait). Files waiting for the daily budget are counted in spendCap
+   * instead, and files waiting for a speech-to-text key in sttRefused. Backlog files (`cli transcribe-voice`) are never
+   * counted: a long backlog run holds nothing up and is not a fault.
    */
   stale: number;
   /** Pending files deferred by the daily spend cap (amendment 15b). */
@@ -533,7 +534,7 @@ export function mediaStats(db: Db, now: Date, startedAt: Date = new Date(0), sta
   return db
     .prepare(`SELECT
         COALESCE(SUM(m.status = 'pending'), 0) AS pending,
-        COALESCE(SUM(m.status = 'pending' AND m.created_at < @staleBefore AND @startedAt < @staleBefore
+        COALESCE(SUM(m.status = 'pending' AND m.backlog = 0 AND m.created_at < @staleBefore AND @startedAt < @staleBefore
           AND COALESCE(m.error_code, '') NOT IN ('spend_cap', 'stt_unavailable')), 0) AS stale,
         COALESCE(SUM(m.status = 'pending' AND m.error_code = 'spend_cap'), 0) AS spendCap,
         COALESCE(SUM(m.status = 'failed' AND m.updated_at >= @dayAgo), 0) AS failedRecent,
