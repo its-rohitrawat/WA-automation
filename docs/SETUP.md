@@ -350,6 +350,7 @@ Every day at 06:00 IST, Sundays included, the founder gets one WhatsApp message 
    `REPORT_RECIPIENT` is the founder's Indian mobile: `91` then the 10-digit mobile number (12 digits in all), digits only, for example `919812345678`, with no `+` or spaces. The service refuses to start with any other form. Leave `REPORT_TIME` and `REPORT_DEADLINE` empty for 06:00 and 12:00 IST.
 5. **Start the service again** (see "Start the service again" under "If the service will not start" below), wait one minute, and check `npm run cli -- report status`.
 6. Send one test report: `npm run cli -- report send-now`, then type `yes`. It works only while the service is running, and it refuses if today's report was already sent. Check the founder's phone.
+   If you change `REPORT_RECIPIENT` later, restart the service: until then `report status` warns that the running service still sends to the old number, and `report send-now` refuses.
 7. Open WhatsApp on the spare phone at least every 14 days, so the linked device stays valid.
 
 The spare number's session is in `C:\wa-agent\data\sender-session.db`. It is encrypted with its own key, derived from the same master key. Back it up with the rest of `data`.
@@ -370,7 +371,7 @@ Last days:
 
 ### Status "Morning report: unknown, check WhatsApp"
 
-The send started but did not finish cleanly (a timeout, or the service stopped mid-send). The report may or may not have reached the founder, so the agent does **not** try again by itself.
+The send started but did not finish cleanly (a timeout, the service stopped mid-send, or the result could not be saved and the send has said nothing for over 10 minutes). The report may or may not have reached the founder, so the agent does **not** try again by itself.
 
 1. Look at the founder's WhatsApp, in the chat with the spare number.
 2. If today's report is not there, run `npm run cli -- report send-now` and type `yes`.
@@ -408,6 +409,11 @@ The send started but did not finish cleanly (a timeout, or the service stopped m
   5. **Start the service again** (see "If the service will not start" below). The founder's link and the tracker are not touched.
 
   The `sender-session.db.damaged-…` files in `C:\wa-agent\data` can be deleted (or moved to the backup folder) once the new link works and `report status` is clean.
+- **"the sender is linked to the founder's own number"** (the `link-sender` QR code was scanned with the founder's phone: the number in `REPORT_RECIPIENT`, or the number the tracker reads; the agent never sends from either):
+  1. **Stop the service safely** (see "If the service will not start" below).
+  2. Remove the "WA Agent" device that was linked last from the founder's phone (Settings > Linked devices). Keep the older one, which the tracker uses.
+  3. In the waagent window, run `npm run cli -- link-sender --reset` (type `yes`), and scan from the **spare** phone.
+  4. **Start the service again**. The founder's tracker link and the tracker data are not touched.
 - **Refused (403) or banned:** check the spare phone for a WhatsApp warning. A 403 can be a temporary restriction. To move to a new spare number:
   1. **Stop the service safely** (see "If the service will not start" below).
   2. Copy (do not delete) the spare number's session to a dated backup folder (use today's date and time):
@@ -493,6 +499,7 @@ In `npm run cli -- status` it appears as the `Health:` line. It is also the firs
 | Morning report: the spare number is not linked | The spare number cannot send the morning report. The tracker is not affected. | See "Morning report" above, under "the spare number is not linked". |
 | Morning report: the spare number's saved session cannot be read | The spare number's saved session (`sender-session.db`) was written with a different master key, or is damaged. The tracker is not affected. | See "Morning report" above, under "the spare number is not linked". |
 | Morning report: the spare number's session file could not be opened (disk, permissions or a lock) | The service could not open `sender-session.db` when it started (a lock, permissions or a disk error). The file is not known to be damaged. The tracker is not affected. | Restart the service. Do not run `link-sender --reset` for this. See "Morning report" above. |
+| Morning report: the sender is linked to the founder's own number | The `link-sender` QR code was scanned with the founder's phone, so the saved sender link is the founder's own number. The agent refuses to send from it. The tracker is not affected. | See "Morning report" above, under "the spare number is not linked". |
 | Morning report: the spare number was logged out | The linked device was removed on the spare phone, or the phone was not opened for weeks. The tracker is not affected. | See "Morning report" above, under "the spare number is not linked". |
 | Morning report: WhatsApp refused the spare number (403) | WhatsApp blocked the spare number's device. The tracker is not affected. | Check the spare phone. See "Morning report" above. |
 | Morning report: another session took over the spare number | Another copy of the agent, or another WhatsApp Web session, took the spare number's linked device. The tracker is not affected. | Restart the service. See "Morning report" above. |

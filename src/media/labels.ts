@@ -90,7 +90,7 @@ export const NO_SPEECH = 'no_speech';
 /**
  * The extractor's note for a voice note or audio file not transcribed because ffmpeg is not there: every file is
  * converted on this PC first, whatever its format and provider (N2, as amended in Task 5's review round 1). The name
- * is kept from before. The file is finished and listed by the backlog query, so `cli transcribe-voice` picks it up
+ * is kept from before. The file is finished and listed by the backlog listing, so `cli transcribe-voice` picks it up
  * once ffmpeg is installed (and the service restarted).
  */
 export const FORMAT_NOT_SUPPORTED = 'format_not_supported';

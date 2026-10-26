@@ -187,7 +187,7 @@ export function mediaPromptTexts(
 /**
  * The files of the new and the context messages, by message row id, for mediaPromptTexts. Each text is loaded only as
  * far as the prompt can show it, plus one character so a cut is noticed: limits.perMessage for new messages, and the
- * longer of perContextMessage and perContextVoice for context messages (one query loads every kind). The full length
+ * longer of perContextMessage and perContextVoice for context messages (one database read loads every kind). The full length
  * is in textChars.
  */
 export function mediaForPrompt(

@@ -89,6 +89,8 @@ describe('morning report documentation: safety statements', () => {
     expect(unknown).toContain('report send-now');
     expect(unknown).toContain("If today's report is not there, run `npm run cli -- report send-now`");
     expect(unknown).toContain('If it is there, do nothing');
+    // send-now works for a result that could not be saved too (it is not refused as "being sent right now")
+    expect(unknown).toContain('the result could not be saved and the send has said nothing for over 10 minutes');
     expect(unknown).not.toMatch(/even if/i);
     expect(unknown).not.toMatch(/tries again by itself|retries/);
     expect(unknown.indexOf("Look at the founder's WhatsApp")).toBeLessThan(unknown.indexOf('report send-now'));
@@ -183,7 +185,7 @@ describe('morning report documentation: safety statements', () => {
 
   it('the Health table has a row for every morning-report warning the code can show', () => {
     const warnings = [UNKNOWN_WARNING, ...Object.values(SENDER_WARNINGS)];
-    expect(warnings.length).toBe(7);
+    expect(warnings.length).toBe(8);
     for (const warning of warnings) {
       const core = coreOf(warning);
       expect(core.startsWith('Morning report: '), warning).toBe(true);

@@ -76,7 +76,7 @@ describe('app and the morning report', () => {
     expect(sender.calls[0]!.fileName).toBe('Tracker-2026-10-23.xlsx');
     expect(app.report).toBeDefined();
     await vi.advanceTimersByTimeAsync(30_000); // the next tick records the line
-    expect(readHealthSnapshot(db)!.report).toEqual({ text: 'Morning report: sent at 06:00 IST', warning: null });
+    expect(readHealthSnapshot(db)!.report).toEqual({ text: 'Morning report: sent at 06:00 IST', warning: null, recipientMasked: '…1234' });
     for (const name of SEND_METHODS) expect(sockets[0]![name]).not.toHaveBeenCalled();
     await stopApp(app);
     expect(sender.stopped).toBe(1);

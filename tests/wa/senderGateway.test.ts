@@ -121,6 +121,12 @@ describe('SenderGateway', () => {
     }
   });
 
+  it('tells the masked recipient it sends to: the last 4 digits only', () => {
+    const { gw } = setup();
+    expect(gw.maskedRecipient()).toBe('…0000');
+    expect(gw.maskedRecipient()).not.toMatch(/\d{5,}/);
+  });
+
   it('has exactly one send method', () => {
     const names = Object.getOwnPropertyNames(SenderGateway.prototype);
     expect(names.filter((n) => /send|read|presence|react|receipt|chatmodify|delete/i.test(n))).toEqual(['sendReport']);
@@ -131,6 +137,61 @@ describe('SenderGateway', () => {
     expect(gw.status().state).toBe('not_linked');
     expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'not_linked' });
     expect(sockets).toHaveLength(0);
+  });
+
+  it("fails definitely, without connecting, when the saved link is the recipient's own number (scanned with the founder's phone)", async () => {
+    for (const id of [`${RECIPIENT}:5@s.whatsapp.net`, `${RECIPIENT}@s.whatsapp.net`]) {
+      const auth = senderAuth(true);
+      auth.state.creds.me = { id, name: 'Founder' };
+      const { gw, sockets } = setup({ auth });
+      expect(gw.status().state).toBe('self_send');
+      expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'self_send' });
+      expect(gw.status().state).toBe('self_send');
+      expect(sockets).toHaveLength(0);
+    }
+  });
+
+  it("fails definitely, without connecting, when the saved link is the founder reader's own number, also when it is not REPORT_RECIPIENT", async () => {
+    const FOUNDER = '919811112222';
+    for (const id of [`${FOUNDER}:7@s.whatsapp.net`, `${FOUNDER}@s.whatsapp.net`]) {
+      const auth = senderAuth(true);
+      auth.state.creds.me = { id, name: 'Founder' };
+      const { factory, sockets } = scriptedFactory();
+      const gw = new SenderGateway({ recipient: RECIPIENT, founderNumber: FOUNDER, factory, auth, connectTimeoutMs: 1_000, lingerMs: 0 });
+      expect(gw.status().state).toBe('self_send');
+      expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'self_send' });
+      expect(gw.status().state).toBe('self_send');
+      expect(sockets).toHaveLength(0);
+    }
+    // sendReport checks again at send time, not only at construction.
+    const auth = senderAuth(true);
+    auth.state.creds.me = { id: '919800000099:2@s.whatsapp.net', name: 'Spare' };
+    const { factory, sockets } = scriptedFactory();
+    const gw = new SenderGateway({ recipient: RECIPIENT, founderNumber: FOUNDER, factory, auth, connectTimeoutMs: 1_000, lingerMs: 0 });
+    expect(gw.status().state).toBe('idle');
+    auth.state.creds.me = { id: `${FOUNDER}:7@s.whatsapp.net`, name: 'Founder' };
+    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'self_send' });
+    expect(gw.status().state).toBe('self_send');
+    expect(sockets).toHaveLength(0);
+  });
+
+  it('sends normally with a founder number set when the saved link is a third number', async () => {
+    const auth = senderAuth(true);
+    auth.state.creds.me = { id: '919800000099:2@s.whatsapp.net', name: 'Spare' };
+    const { factory, sockets } = scriptedFactory();
+    const gw = new SenderGateway({ recipient: RECIPIENT, founderNumber: '919811112222', factory, auth, connectTimeoutMs: 1_000, lingerMs: 0 });
+    expect(gw.status().state).toBe('idle');
+    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(sockets).toHaveLength(1);
+  });
+
+  it('sends normally when the saved link is another number', async () => {
+    const auth = senderAuth(true);
+    auth.state.creds.me = { id: '919800000099:2@s.whatsapp.net', name: 'Spare' };
+    const { gw, sockets } = setup({ auth });
+    expect(gw.status().state).toBe('idle');
+    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(sockets).toHaveLength(1);
   });
 
   it('fails definitely, without connecting, when the stored session could not be read (no auth)', async () => {
@@ -180,6 +241,36 @@ describe('SenderGateway', () => {
     expect(await failed.gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'unknown', code: 'send_error' });
     expect(failed.sockets[0]!.sendMessage).toHaveBeenCalledTimes(2);
     expect(failed.sockets[0]!.end).toHaveBeenCalled();
+  });
+
+  it('fails definitely (connect_error, retried by the scheduler) when making or opening the socket throws: nothing was sent', async () => {
+    // The factory throws before any socket exists.
+    let made = 0;
+    const throwing = new SenderGateway({
+      recipient: RECIPIENT,
+      factory: () => {
+        made++;
+        throw new Error('bad socket options');
+      },
+      auth: senderAuth(true),
+      connectTimeoutMs: 1_000,
+      lingerMs: 0,
+    });
+    expect(await throwing.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'connect_error' });
+    expect(throwing.status().state).toBe('idle');
+    expect(await throwing.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'connect_error' }); // not stuck busy
+    expect(made).toBe(2);
+
+    // The socket exists but throws while the gateway listens for it to open: it is closed, and nothing was sent.
+    const sock = new FakeSocket();
+    sock.ev.on = () => {
+      throw new Error('listener failed');
+    };
+    const broken = new SenderGateway({ recipient: RECIPIENT, factory: () => sock, auth: senderAuth(true), connectTimeoutMs: 1_000, lingerMs: 0 });
+    expect(await broken.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'connect_error' });
+    expect(sock.sendMessage).not.toHaveBeenCalled();
+    expect(sock.end).toHaveBeenCalled();
+    expect(broken.status().state).toBe('idle');
   });
 
   it('sends one report at a time', async () => {
@@ -361,6 +452,20 @@ describe('SenderGateway default timings', () => {
     await vi.advanceTimersByTimeAsync(200);
     expect(await p).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
     expect(sockets[0]!.end).toHaveBeenCalled();
+  });
+
+  it('leaves no connect timer when adding the connection listener throws, and fails definitely', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const sock = new FakeSocket();
+    const on = sock.ev.on;
+    sock.ev.on = ((event: string, listener: never) => {
+      if (event === 'connection.update') throw new Error('listener failed');
+      on(event as 'creds.update', listener);
+    }) as typeof sock.ev.on;
+    const gw = new SenderGateway({ recipient: RECIPIENT, factory: () => sock, auth: senderAuth(true) });
+    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'connect_error' });
+    expect(sock.end).toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('waits 60 s for the connection to open', async () => {
