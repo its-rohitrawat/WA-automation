@@ -150,9 +150,12 @@ const NAME_CLOSE = /[\])）﹚］]/g;
  */
 const NAME_SEPARATORS = /[·:：﹕]/g;
 
-/** A person's name for a prompt: one cleaned line, brackets as ❨ ❩, ":" and "·" as "-", at most 60 characters. */
-export const nameText = (s: string): string =>
-  [...sanitizeInline(s).replace(NAME_OPEN, '❨').replace(NAME_CLOSE, '❩').replace(NAME_SEPARATORS, '-')].slice(0, 60).join('');
+/**
+ * A person's name for a prompt: one cleaned line, brackets as ❨ ❩, ":" and "·" as "-", at most 60 characters. max lets
+ * a meeting title use the same cleaning with a longer cap (meetingTracker.ts titleText).
+ */
+export const nameText = (s: string, max = 60): string =>
+  [...sanitizeInline(s).replace(NAME_OPEN, '❨').replace(NAME_CLOSE, '❩').replace(NAME_SEPARATORS, '-')].slice(0, max).join('');
 
 /** People get handles P1, P2, ... in map order. */
 function handlesOf(people: Map<string, PersonRow>): Map<string, string> {
