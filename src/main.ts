@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { createApp } from './app.ts';
+import { createApp, type AppReportDeps } from './app.ts';
 import type { AppMeetingsDeps } from './app.ts';
 import { ClaudeClient } from './brain/claudeClient.ts';
 import { ClaudeMediaClient } from './brain/mediaClient.ts';
@@ -17,6 +17,7 @@ import { createMeetingTranscriber } from './meetings/transcribe.ts';
 import { googleDriveApi } from './output/drive.ts';
 import { createOAuthClient, TokenDecryptError, TokenStore } from './output/googleAuth.ts';
 import { hasMeetingScopes, type OAuth2Client } from './output/googleAuth.ts';
+import { openMorningReport } from './report/start.ts';
 import { pricesFromEnv } from './spend/pricing.ts';
 import type { Prices } from './spend/pricing.ts';
 import { syncClients } from './store/clients.ts';
@@ -29,6 +30,7 @@ import type { Logger } from './util/logger.ts';
 import { AllowList } from './wa/allowlist.ts';
 import { openSessionDb, SessionDecryptError, useEncryptedAuthState } from './wa/authState.ts';
 import { baileysSocketFactory, WhatsAppGateway } from './wa/gateway.ts';
+import { baileysSenderSocketFactory } from './wa/senderGateway.ts';
 
 /** Expected startup refusal. The message is safe to print. */
 class StartupExit extends Error {}
@@ -93,6 +95,7 @@ async function main(): Promise<void> {
   let lock: { release(): Promise<void> } | undefined;
   let db: Db | undefined;
   let sessionDb: Db | undefined;
+  let senderDb: Db | undefined;
 
   /** Stops startup with a one-line message; the catch below cleans up and exits with code 2. */
   function exitEarly(message: string): never {
@@ -117,6 +120,17 @@ async function main(): Promise<void> {
 
     const google = createOAuthClient(requireKey(env, 'GOOGLE_OAUTH_CLIENT_ID'), requireKey(env, 'GOOGLE_OAUTH_CLIENT_SECRET'));
     google.setCredentials({ refresh_token: refreshToken });
+
+    // Phase 2c: the morning report from the spare number. A missing, damaged or undecryptable spare-number session never
+    // stops the service: the founder-number reader runs as usual, each day's report fails until the deadline and is then
+    // skipped, and Health says to run link-sender (or link-sender --reset).
+    // openMorningReport (tested) opens data/sender-session.db only, and logs only the recipient's last 4 digits.
+    let report: AppReportDeps | undefined;
+    if (env.REPORT_ENABLED) {
+      const started = openMorningReport({ env, masterKey: key, log, factory: baileysSenderSocketFactory(silentLogger()) });
+      senderDb = started.senderDb;
+      report = started.report;
+    }
 
     const prices = pricesFromEnv(env);
     const apiKey = requireKey(env, 'ANTHROPIC_API_KEY');
@@ -144,6 +158,7 @@ async function main(): Promise<void> {
       // Phase 2a: download, keep and read shared images and documents. Voice notes are kept, not transcribed yet.
       media: { sealer: new MediaRefSealer(key), fetcher: baileysFetcher(), ai: new ClaudeMediaClient({ apiKey, model: env.AI_MODEL, prices }) },
       ...(meetings ? { meetings } : {}),
+      report,
     });
 
     // watchGroupsFile catches a throwing onChange (including reloadClients conflicts) and calls onError.
@@ -162,6 +177,7 @@ async function main(): Promise<void> {
 
     const trackerDb = db;
     const sessionStore = sessionDb;
+    const senderStore = senderDb;
     const startedLock = lock;
     let stopping = false;
     let warnedStopping = false;
@@ -180,10 +196,11 @@ async function main(): Promise<void> {
         .stop()
         .catch((err) => log.error({ err }, 'error while stopping'))
         .finally(() => {
-          // Databases are closed only after app.stop() has settled.
+          // Databases are closed only after app.stop() has settled, so after the morning report's stop() has returned.
           try {
             trackerDb.close();
             sessionStore.close();
+            senderStore?.close();
           } catch {
             // best effort
           }
@@ -197,6 +214,7 @@ async function main(): Promise<void> {
     try {
       db?.close();
       sessionDb?.close();
+      senderDb?.close();
     } catch {
       // best effort
     }

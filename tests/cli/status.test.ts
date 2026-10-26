@@ -166,3 +166,17 @@ describe('formatStatus meetings and spend split', () => {
     );
   });
 });
+
+describe('formatStatus and the morning report', () => {
+  it('prints the report line when the service reports one', () => {
+    expect(formatStatus({ ...base, snapshot })).not.toContain('Report:');
+    const out = formatStatus({ ...base, snapshot: { ...snapshot, report: { text: 'Morning report: sent at 06:00 IST', warning: null } } });
+    expect(out).toContain('Report:      Morning report: sent at 06:00 IST');
+  });
+
+  it('marks the report line as last known when the service has not reported for a while', () => {
+    const stale = { ...snapshot, at: new Date(now.getTime() - 10 * 60_000).toISOString() };
+    const out = formatStatus({ ...base, snapshot: { ...stale, report: { text: 'Morning report: sent at 06:00 IST', warning: null } } });
+    expect(out).toContain('Report:      last known: Morning report: sent at 06:00 IST');
+  });
+});

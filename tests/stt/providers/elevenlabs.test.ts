@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { SttHttpError, type HttpFetch } from '../../../src/stt/http.ts';
+import { SttHttpError, SttNoAnswerError, type HttpFetch } from '../../../src/stt/http.ts';
 import { ElevenLabsProvider } from '../../../src/stt/providers/elevenlabs.ts';
 import type { AudioPart } from '../../../src/stt/types.ts';
 
@@ -107,6 +107,17 @@ describe('ElevenLabsProvider', () => {
     const r = await new ElevenLabsProvider({ apiKey: 'k', http }).transcribe(audio, { diarize: true });
     expect(r.segments).toHaveLength(2);
     expect(r.billedSeconds).toBeNull();
+  });
+
+  it('an unreadable answer still names the stored copy to delete', async () => {
+    const { http } = fake(() => Response.json({ text: 7, words: 'not a list', transcription_id: 'tr-odd' }));
+    const err = await new ElevenLabsProvider({ apiKey: 'k', http }).transcribe(audio, { diarize: true }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SttNoAnswerError);
+    expect(err).toMatchObject({ code: 'unreadable_result', forgetRef: 'tr-odd' });
+    const none = await new ElevenLabsProvider({ apiKey: 'k', http: fake(() => Response.json({ text: 7 })).http })
+      .transcribe(audio, { diarize: true })
+      .catch((e: unknown) => e);
+    expect(none).toMatchObject({ code: 'unreadable_result', forgetRef: null });
   });
 
   it('throws SttHttpError on an error status and sends only once', async () => {

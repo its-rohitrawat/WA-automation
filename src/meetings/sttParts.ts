@@ -5,7 +5,7 @@ import type { SpendGuard } from '../spend/spendGuard.ts';
 import { tx, type Db } from '../store/db.ts';
 import { addSttForget, getMeeting, PART_FILE, setSttParts, writeStuckSttParts, type SttPartRow } from '../store/meetings.ts';
 import { AudioError } from '../stt/audio.ts';
-import { SttHttpError, SttJobError, SttJobLostError } from '../stt/http.ts';
+import { SttHttpError, SttJobError, SttJobLostError, SttNoAnswerError } from '../stt/http.ts';
 import { SttBookingError, withSttHold } from '../stt/paidStt.ts';
 import { costUsd, modelFor } from '../stt/prices.ts';
 import type { AudioPart, ProviderId } from '../stt/types.ts';
@@ -76,6 +76,8 @@ export interface PartContext {
   atomically(fn: () => void): void;
   /** Part i is done: its answer and, when the provider keeps a copy, that copy's id in stt_forget. Inside atomically. */
   markDone(i: number, r: PartAnswer, booked?: SttPartRow['booked']): void;
+  /** Notes a provider copy to delete in stt_forget (an id of 1 to 200 characters; anything else is ignored). */
+  forget(ref: string | null): void;
   /** The absolute path of a part's MP3. Throws for a stored name that is not one of this meeting's part files. */
   pathOf(p: SttPartRow): string;
 }
@@ -103,16 +105,19 @@ export function partContext(id: number, parts: SttPartRow[], t: MeetingTranscrib
       throw e;
     }
   };
+  const forget = (ref: string | null) => {
+    if (ref !== null && ref.length >= 1 && ref.length <= 200) addSttForget(db, { meetingId: id, provider: t.provider, ref, at: clock.now().toISOString() });
+  };
   const markDone = (i: number, r: PartAnswer, booked?: SttPartRow['booked']) => {
     put(i, { state: 'done', segments: r.segments, billedSeconds: r.billedSeconds, ...(booked ? { booked } : {}) });
-    if (r.forgetRef !== null) addSttForget(db, { meetingId: id, provider: t.provider, ref: r.forgetRef, at: clock.now().toISOString() });
+    forget(r.forgetRef);
   };
   const pathOf = (p: SttPartRow) => {
     if (p.file === null) return whole.path;
     if (!PART_FILE.test(p.file) || !p.file.startsWith(`${id}-parts`)) throw new Error(`meeting ${id}: a stored part file name is not valid`);
     return join(tmp, ...p.file.split('/'));
   };
-  return { id, parts, t, deps, whole, save, put, atomically, markDone, pathOf };
+  return { id, parts, t, deps, whole, save, put, atomically, markDone, forget, pathOf };
 }
 
 const todo = (index: number, provider: ProviderId, offset: number, seconds: number, file: string | null): SttPartRow => ({
@@ -208,6 +213,8 @@ export async function heldPart(ctx: PartContext, i: number): Promise<void> {
   let sent = false;
   let bookedAtShutdown = false;
   let cost = 0;
+  // An unreadable answer can still name the copy the provider stored: it is deleted like any other (privacy, M7).
+  let lostRef: string | null = null;
   try {
     ({ costUsd: cost } = await withSttHold<PartAnswer>(
       deps.spend,
@@ -215,8 +222,13 @@ export async function heldPart(ctx: PartContext, i: number): Promise<void> {
       label,
       async () => {
         sent = true;
-        const r = await t.transcribePart(audio, {});
-        return { result: r, costUsd: t.partCostUsd(before.seconds, r.billedSeconds) };
+        try {
+          const r = await t.transcribePart(audio, {});
+          return { result: r, costUsd: t.partCostUsd(before.seconds, r.billedSeconds) };
+        } catch (e) {
+          if (e instanceof SttNoAnswerError) lostRef = e.forgetRef;
+          throw e;
+        }
       },
       {
         atomically: ctx.atomically,
@@ -224,7 +236,10 @@ export async function heldPart(ctx: PartContext, i: number): Promise<void> {
           // An answer after shutdown booked the hold stays booked at the ceiling: that is what was recorded.
           if (r !== undefined) ctx.markDone(i, r, bookedAtShutdown ? 'ceiling' : 'actual');
           else if (b.outcome === 'none') put(i, { state: 'todo', booked: 'none' });
-          else put(i, { state: 'unknown', booked: 'ceiling' });
+          else {
+            put(i, { state: 'unknown', booked: 'ceiling' });
+            ctx.forget(lostRef);
+          }
         },
         onBookedAtShutdown: () => {
           bookedAtShutdown = true; // booked even when the write below fails (settlePending then books the hold alone)

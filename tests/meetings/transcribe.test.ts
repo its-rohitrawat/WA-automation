@@ -394,6 +394,19 @@ describe('transcribeMeeting', () => {
     expect(parts()[0]).toMatchObject({ state: 'done', booked: 'actual' });
   });
 
+  it('ElevenLabs: an unreadable answer that names its stored copy still gets that copy deleted later', async () => {
+    prepare(1200);
+    const p = new FakeProvider('elevenlabs', 36_000);
+    p.script = [fail(new SttNoAnswerError('unreadable_result', 'tr-lost'))];
+    await expect(transcribeMeeting(id, deps(p))).rejects.toBeInstanceOf(SttNoAnswerError);
+    expect(parts()[0]).toMatchObject({ state: 'unknown', booked: 'ceiling' });
+    expect(forgets()).toMatchObject([{ meeting_id: id, provider: 'elevenlabs', ref: 'tr-lost' }]);
+    // A no-answer that names no copy writes no row.
+    p.script = [fail(new SttNoAnswerError('timeout'))];
+    await expect(transcribeMeeting(id, deps(p))).rejects.toBeInstanceOf(SttNoAnswerError);
+    expect(forgets()).toHaveLength(1);
+  });
+
   it('a shutdown during an ElevenLabs call books its hold once as stt; after the restart it is sent again, booked once more', async () => {
     prepare(1200);
     const p = new FakeProvider('elevenlabs', 36_000);

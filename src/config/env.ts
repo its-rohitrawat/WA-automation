@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { DomainSchema } from './domains.ts';
+import type { ReportSettings } from '../report/types.ts';
 
 const Flag = z.enum(['true', 'false', '1', '0']).transform((v) => v === 'true' || v === '1');
 
@@ -9,6 +10,10 @@ function isRealDate(s: string): boolean {
   const t = Date.parse(`${s}T00:00:00Z`);
   return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === s;
 }
+
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+/** 91, then a 10-digit Indian mobile (starts 6-9). The owner's decision: the report goes only to an Indian number. */
+export const INDIAN_MOBILE = /^91[6-9]\d{9}$/;
 
 const EnvSchema = z.object({
   ANTHROPIC_API_KEY: z.string().min(1).optional(),
@@ -47,12 +52,24 @@ const EnvSchema = z.object({
   INR_PER_USD: z.coerce.number().min(40).max(200).default(88),
   /** Longest voice note or audio file sent to speech-to-text, in seconds, measured from the file size (Phase 2b V5, N3). */
   STT_MAX_SECONDS: z.coerce.number().int().min(30).max(900).default(600),
+  // Phase 2c morning report. Off unless REPORT_ENABLED is exactly "true".
+  REPORT_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  REPORT_TIME: z.string().regex(HHMM).default('06:00'),
+  REPORT_DEADLINE: z.string().regex(HHMM).default('12:00'),
+  /** The founder's number: 91 and the 10-digit mobile, digits only. Personal data: never logged in full. */
+  REPORT_RECIPIENT: z.string().regex(INDIAN_MOBILE).optional(),
 }).superRefine((env, ctx) => {
   if (env.MEETINGS_ENABLED && env.TEAM_EMAIL_DOMAINS.length === 0) {
     ctx.addIssue({ code: 'custom', path: ['TEAM_EMAIL_DOMAINS'], message: 'is required when MEETINGS_ENABLED is true' });
   }
   if (env.STT_PROVIDER !== 'none' && !env.STT_API_KEY) {
     ctx.addIssue({ code: 'custom', path: ['STT_API_KEY'], message: 'is required when STT_PROVIDER is not none' });
+  }
+  if (env.REPORT_ENABLED && !env.REPORT_RECIPIENT) {
+    ctx.addIssue({ code: 'custom', path: ['REPORT_RECIPIENT'], message: 'required when REPORT_ENABLED is true' });
+  }
+  if (env.REPORT_TIME >= env.REPORT_DEADLINE) {
+    ctx.addIssue({ code: 'custom', path: ['REPORT_DEADLINE'], message: 'must be later than REPORT_TIME' });
   }
 });
 
@@ -84,4 +101,19 @@ export function requireKey(env: Env, name: 'ANTHROPIC_API_KEY' | 'GOOGLE_OAUTH_C
   const value = env[name];
   if (!value) throw new Error(`${name} is not configured`);
   return value;
+}
+
+export function reportSettings(env: Env): ReportSettings {
+  return { enabled: env.REPORT_ENABLED, time: env.REPORT_TIME, deadline: env.REPORT_DEADLINE };
+}
+
+/** The founder's number (digits only). parseEnv already refuses REPORT_ENABLED=true without it. */
+export function reportRecipient(env: Env): string {
+  if (!env.REPORT_RECIPIENT) throw new Error('REPORT_RECIPIENT is not configured');
+  return env.REPORT_RECIPIENT;
+}
+
+/** For logs and screens: only the last 4 digits of a phone number. */
+export function maskNumber(digits: string): string {
+  return `…${digits.slice(-4)}`;
 }

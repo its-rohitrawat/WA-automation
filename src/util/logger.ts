@@ -7,7 +7,7 @@ const CONTENT_NAMES = [
 ];
 /** Field names that could carry a person's identity, a credential, or the address and key of a WhatsApp file. */
 const IDENTITY_AND_SECRET_NAMES = [
-  'name', 'pushName', 'number', 'phone', 'jid', 'email', 'emails', 'attendees', 'participants',
+  'name', 'pushName', 'number', 'phone', 'jid', 'recipient', 'email', 'emails', 'attendees', 'participants',
   'token', 'refreshToken', 'refresh_token', 'accessToken', 'access_token', 'apiKey', 'secret', 'password',
   'mediaKey', 'directPath', 'url', 'ref', 'fileName',
 ];

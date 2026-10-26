@@ -28,13 +28,19 @@ export class SttJobError extends Error {
   }
 }
 
-/** No usable answer (timeout, lost connection, unreadable reply). The provider may still have done, and billed, the work. */
+/**
+ * No usable answer (timeout, lost connection, unreadable reply). The provider may still have done, and billed, the work.
+ * forgetRef: the id of the copy the provider stored, when the reply named one but could not be read otherwise, so that
+ * copy can still be deleted (an id only, never the reply).
+ */
 export class SttNoAnswerError extends Error {
   readonly code: string;
-  constructor(code: string) {
+  readonly forgetRef: string | null;
+  constructor(code: string, forgetRef: string | null = null) {
     super(`No usable answer from the provider (${code})`);
     this.name = 'SttNoAnswerError';
     this.code = code;
+    this.forgetRef = forgetRef;
   }
 }
 

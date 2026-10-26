@@ -49,6 +49,8 @@ export function formatStatus(i: {
       const voice = refused > 0 ? ` · including ${refused} voice note${refused === 1 ? '' : 's'} waiting (speech key refused)` : '';
       lines.push(`Files:       ${s.media.pending} waiting to be read · ${s.media.failedRecent} could not be read (24 h) · ${s.media.uploadFailed} not uploaded to Drive${voice}`);
     }
+    // The morning report line first, then the meetings line (the health line's order).
+    if (s.report) lines.push(`Report:      ${lk}${s.report.text}`);
     if (s.meetings) {
       const m = s.meetings.stats;
       const extra = `${m.noAccess > 0 ? `, ${m.noAccess} no access` : ''}${m.tooLong > 0 ? `, ${m.tooLong} too long` : ''}`;

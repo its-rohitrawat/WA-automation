@@ -1,6 +1,6 @@
 import { openAsBlob } from 'node:fs';
 import { z } from 'zod';
-import { longFetch, parseAnswer, requestJson, requestOk, type HttpFetch } from '../http.ts';
+import { longFetch, requestJson, requestOk, SttNoAnswerError, type HttpFetch } from '../http.ts';
 import { modelFor } from '../prices.ts';
 import { wordsToSegments, type TimedWord } from '../segments.ts';
 import { AUDIO_FORMATS, type AudioPart, type ProviderResult, type Segment, type SttProvider, type TranscribeOptions } from '../types.ts';
@@ -60,7 +60,10 @@ export class ElevenLabsProvider implements SttProvider {
       body: form,
       signal: AbortSignal.timeout(this.#timeoutMs),
     });
-    const r = parseAnswer(ResultSchema, raw, 'unreadable_result');
+    // The stored copy's id is read first, so an answer that cannot be read otherwise can still have its copy deleted.
+    const parsed = ResultSchema.safeParse(raw);
+    if (!parsed.success) throw new SttNoAnswerError('unreadable_result', storedRef(raw));
+    const r = parsed.data;
     return { model, segments: toSegments(r, audio.seconds), billedSeconds: r.audio_duration_secs ?? null, raw };
   }
 
@@ -72,14 +75,19 @@ export class ElevenLabsProvider implements SttProvider {
 
   /** The transcription id ElevenLabs gives its stored copy. */
   forgetRef(result: ProviderResult): string | null {
-    const stored = StoredSchema.safeParse(result.raw);
-    return stored.success ? stored.data.transcription_id : null;
+    return storedRef(result.raw);
   }
 
   async forgetById(ref: string): Promise<void> {
     const url = `${ENDPOINT.replace('/speech-to-text', '/speech-to-text/transcripts')}/${encodeURIComponent(ref)}`;
     await requestOk(this.#http, url, { method: 'DELETE', headers: { 'xi-api-key': this.#key }, signal: AbortSignal.timeout(60_000) });
   }
+}
+
+/** The transcription id ElevenLabs gives its stored copy, from its raw reply, or null. */
+function storedRef(raw: unknown): string | null {
+  const stored = StoredSchema.safeParse(raw);
+  return stored.success ? stored.data.transcription_id : null;
 }
 
 function toSegments(r: ElevenLabsResult, seconds: number): Segment[] {

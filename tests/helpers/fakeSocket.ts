@@ -18,6 +18,11 @@ export class FakeSocket implements SocketLike {
     },
   };
 
+  /** The event names something subscribed to, in first-subscription order. */
+  subscribedEvents(): string[] {
+    return [...this.#handlers.keys()];
+  }
+
   emit<T extends keyof BaileysEventMap>(event: T, arg: BaileysEventMap[T]): void {
     for (const listener of this.#handlers.get(event) ?? []) listener(arg);
   }

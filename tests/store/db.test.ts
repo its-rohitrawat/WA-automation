@@ -8,8 +8,8 @@ describe('openDb', () => {
     const db = openDb(':memory:');
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]).map((t) => t.name);
     expect(tables).toEqual(expect.arrayContaining([
-      'batches', 'clients', 'decisions', 'kv', 'media', 'media_stt_forget', 'meetings', 'message_edits', 'messages', 'people', 'reactions', 'schema_version',
-      'spend', 'stt_forget', 'task_events', 'tasks',
+      'batches', 'clients', 'decisions', 'kv', 'media', 'media_stt_forget', 'meetings', 'message_edits', 'messages', 'people', 'reactions', 'reports', 'schema_version', 'spend',
+      'stt_forget', 'task_events', 'tasks',
     ]));
   });
 
@@ -19,7 +19,7 @@ describe('openDb', () => {
     expect(idx).toEqual(expect.arrayContaining(['tasks_client_status', 'task_events_client_at', 'media_due', 'media_client', 'meetings_due', 'meetings_conference']));
   });
 
-  it('is at schema version 8 straight after openDb', () => {
+  it('is at schema version 7 straight after openDb', () => {
     const db = openDb(':memory:');
     expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(8);
   });
@@ -27,7 +27,7 @@ describe('openDb', () => {
   it('is safe to migrate twice', () => {
     const db = openDb(':memory:');
     migrate(db);
-    expect((db.prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(7); // 1 to 5, 7 and 8: version 6 is Phase 2c's reports table, arriving from main
+    expect((db.prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(8);
   });
 
   it('overwrites deleted content, so wiped download details do not stay in free pages', () => {
@@ -44,33 +44,37 @@ describe('openDb', () => {
 });
 
 describe('migrate: a skipped migration', () => {
-  const FAKE_V6: Migration = { version: 6, sql: 'CREATE TABLE fake_reports (id INTEGER PRIMARY KEY);' };
-  const withV6 = [...MIGRATIONS.filter((m) => m.version < 6), FAKE_V6, ...MIGRATIONS.filter((m) => m.version > 6)];
+  // A database made before main's v6 (the reports table) reached this branch is recorded at 1 to 5, 7 and 8.
+  const withoutV6 = MIGRATIONS.filter((m) => m.version !== 6);
+  const FAKE_V9: Migration = { version: 9, sql: 'CREATE TABLE fake_later (id INTEGER PRIMARY KEY);' };
   const versions = (db: Database.Database) =>
     (db.prepare('SELECT version FROM schema_version ORDER BY version').all() as { version: number }[]).map((r) => r.version);
 
   it('throws, naming only the version numbers, and applies nothing when the code knows a version the database skipped', () => {
     const db = new Database(':memory:');
-    migrate(db); // this branch: 1 to 5, 7 and 8
+    migrate(db, withoutV6);
     expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7, 8]);
-    expect(() => migrate(db, withV6)).toThrow('database is at v8 but v6 was never applied; restore a backup or contact the developer');
+    expect(() => migrate(db)).toThrow('database is at v8 but v6 was never applied; restore a backup or contact the developer');
     expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7, 8]);
-    expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'fake_reports'").get()).toBeUndefined();
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'reports'").get()).toBeUndefined();
   });
 
   it('names every skipped version', () => {
     const db = new Database(':memory:');
-    migrate(db, withV6);
+    migrate(db);
     db.prepare('DELETE FROM schema_version WHERE version IN (2, 6)').run();
-    expect(() => migrate(db, withV6)).toThrow('database is at v8 but v2, v6 were never applied');
+    expect(() => migrate(db)).toThrow('database is at v8 but v2, v6 were never applied');
   });
 
-  it('applies the fake v6 in order on a fresh database, and a database with every version recorded migrates as before', () => {
+  it('applies every version in order on a fresh database, a later one after them, and a database with every version recorded migrates as before', () => {
     const db = new Database(':memory:');
-    migrate(db, withV6);
+    migrate(db);
     expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
-    migrate(db, withV6);
+    migrate(db);
     expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    migrate(db, [...MIGRATIONS, FAKE_V9]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'fake_later'").get()).toEqual({ name: 'fake_later' });
   });
 
   it('upgrades an older database without complaint, and the branch’s own migrations never throw', () => {
@@ -78,7 +82,7 @@ describe('migrate: a skipped migration', () => {
     migrate(db, MIGRATIONS.filter((m) => m.version <= 4));
     expect(versions(db)).toEqual([1, 2, 3, 4]);
     migrate(db);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7, 8]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(() => migrate(db)).not.toThrow();
     expect(() => openDb(':memory:')).not.toThrow();
   });
@@ -103,9 +107,9 @@ describe('migration v8 (Phase 2b: voice notes)', () => {
 
   it('migrates a v7 database to v8: media gains backlog, 0 for the files already there', () => {
     const db = atV7();
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     migrate(db);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7, 8]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(db.prepare(`SELECT "notnull" AS required, dflt_value AS dflt FROM pragma_table_info('media') WHERE name = 'backlog'`).get())
       .toEqual({ required: 1, dflt: '0' });
     expect(db.prepare('SELECT kind, status, local_path AS localPath, backlog FROM media').all())
@@ -135,7 +139,7 @@ describe('migration v8 (Phase 2b: voice notes)', () => {
     db.prepare('UPDATE media SET backlog = 1').run();
     const schema = db.prepare("SELECT name, sql FROM sqlite_master ORDER BY name").all();
     migrate(db);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7, 8]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(db.prepare("SELECT name, sql FROM sqlite_master ORDER BY name").all()).toEqual(schema);
     expect(db.prepare('SELECT backlog FROM media').get()).toEqual({ backlog: 1 });
     expect((db.prepare('SELECT COUNT(*) AS n FROM media_stt_forget').get() as { n: number }).n).toBe(1);

@@ -1,10 +1,16 @@
 import { execFileSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { hkdfSync, randomBytes } from 'node:crypto';
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export interface KeyProvider {
   getKey(): Buffer;
+}
+
+/** A 32-byte HKDF-SHA256 subkey of the master key. Each use gets its own `info` label, so one subkey never opens another's data. */
+export function deriveSubkey(masterKey: Buffer, info: string): Buffer {
+  if (masterKey.length !== 32) throw new Error('Master key must be 32 bytes');
+  return Buffer.from(hkdfSync('sha256', masterKey, Buffer.alloc(0), info, 32));
 }
 
 export class StaticKeyProvider implements KeyProvider {
@@ -39,6 +45,14 @@ export const powershellDpapi: DpapiRunner = (mode, inputB64) => {
   }).trim();
 };
 
+/**
+ * macOS and Linux: no DPAPI, so the key is stored as is. Only its owner can read it (the file is 0600 in a 0700 folder),
+ * and FileVault (or full-disk encryption) protects it at rest. See docs/SETUP-mac.md.
+ */
+export const ownerOnlyFile: DpapiRunner = (_mode, inputB64) => inputB64;
+
+const IS_WINDOWS = process.platform === 'win32';
+
 export class MasterKeyError extends Error {
   readonly code: string;
   constructor(code: string, message: string) {
@@ -48,15 +62,16 @@ export class MasterKeyError extends Error {
   }
 }
 
-const UNREADABLE_MSG =
-  'The master key file could not be decrypted. It is damaged or was created by a different Windows account; see docs/SETUP.md.';
+const UNREADABLE_MSG = IS_WINDOWS
+  ? 'The master key file could not be decrypted. It is damaged or was created by a different Windows account; see docs/SETUP.md.'
+  : 'The master key file could not be read. It is damaged or belongs to a different account; see docs/SETUP-mac.md.';
 
 export class DpapiKeyProvider implements KeyProvider {
   readonly #file: string;
   readonly #run: DpapiRunner;
   #cached: Buffer | undefined;
 
-  constructor(file: string, run: DpapiRunner = powershellDpapi) {
+  constructor(file: string, run: DpapiRunner = IS_WINDOWS ? powershellDpapi : ownerOnlyFile) {
     this.#file = file;
     this.#run = run;
   }
@@ -74,10 +89,11 @@ export class DpapiKeyProvider implements KeyProvider {
     } else {
       key = randomBytes(32);
       try {
-        mkdirSync(dirname(this.#file), { recursive: true });
+        // The modes matter on macOS and Linux only; Windows ignores them and relies on DPAPI and the folder's ACL.
+        mkdirSync(dirname(this.#file), { recursive: true, mode: 0o700 });
         const protectedB64 = this.#run('protect', key.toString('base64'));
         // 'wx' refuses to overwrite an existing key file; fsync makes the write durable.
-        const fd = openSync(this.#file, 'wx');
+        const fd = openSync(this.#file, 'wx', 0o600);
         try {
           writeSync(fd, protectedB64);
           fsyncSync(fd);
