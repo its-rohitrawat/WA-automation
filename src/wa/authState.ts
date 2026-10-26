@@ -1,5 +1,5 @@
 import { createHmac, hkdfSync } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
 import { BufferJSON, initAuthCreds, proto } from 'baileys';
@@ -171,6 +171,51 @@ function isDamage(code: string): boolean {
   return code === 'SQLITE_NOTADB' || code.startsWith('SQLITE_CORRUPT');
 }
 
+/** The first 16 bytes of every SQLite database file. */
+const SQLITE_HEADER = Buffer.from('SQLite format 3\0', 'latin1');
+
+/**
+ * Checks an existing file for damage before any read-write open. A read-write open of a damaged file (journal_mode =
+ * WAL) makes SQLite delete the -wal and -shm files next to it when it is closed, so link-sender --reset could not move
+ * them aside with the file. A file that does not start with the SQLite header is not a database (SQLite itself answers
+ * SQLITE_NOTADB): that is told from its first bytes, with no SQLite connection at all. Damage further in is found with a
+ * read-only connection, which never deletes the -wal file (it may rebuild the -shm file, SQLite's index of the -wal,
+ * which holds no data of its own). Returns the SQLite damage code, or undefined. Any other error is left to the normal
+ * open: a read-only open of a healthy WAL file can fail for harmless reasons (such as a missing -shm file).
+ */
+function probeDamage(file: string): string | undefined {
+  if (file === ':memory:') return undefined;
+  try {
+    if (!statSync(file).isFile()) return undefined;
+    const head = Buffer.alloc(SQLITE_HEADER.length);
+    const fd = openSync(file, 'r');
+    let n: number;
+    try {
+      n = readSync(fd, head, 0, head.length, 0);
+    } finally {
+      closeSync(fd);
+    }
+    // An empty file is a new, empty database. Any other file, however short, must start with the header.
+    if (n > 0 && !(n === head.length && head.equals(SQLITE_HEADER))) return 'SQLITE_NOTADB';
+  } catch {
+    return undefined; // missing, a folder, no permission: the normal open reports it
+  }
+  let probe: Db | undefined;
+  try {
+    probe = new Database(file, { readonly: true, fileMustExist: true });
+    probe.prepare('SELECT 1 FROM sqlite_master').get();
+    return undefined;
+  } catch (err) {
+    return err instanceof Database.SqliteError && isDamage(err.code) ? err.code : undefined;
+  } finally {
+    try {
+      probe?.close();
+    } catch {
+      // best effort
+    }
+  }
+}
+
 /**
  * Opens the spare number's session at service start. A file that is damaged, not a database, or written with another
  * master key is reported, not thrown, and left as it is: a bad spare-number session never stops the service (only
@@ -178,6 +223,8 @@ function isDamage(code: string): boolean {
  * transient. Any other error is thrown.
  */
 export function openSenderSession(file: string, masterKey: Buffer): SenderSession {
+  const damage = probeDamage(file);
+  if (damage) return { ok: false, code: damage };
   let db: Db | undefined;
   try {
     db = openSessionDb(file);

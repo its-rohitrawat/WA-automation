@@ -189,6 +189,15 @@ describe('cli link-sender', () => {
     expect(confirm).not.toHaveBeenCalled();
   });
 
+  it('gives up after its link timeout when no QR code ever comes, and releases the lock', async () => {
+    scripts = [() => {}]; // the connection never opens and never shows a QR code
+    await expect(linkSenderCommand({ reset: false }, deps())).rejects.toThrow(/not scanned within 5 minutes/);
+    expect(sockets).toHaveLength(1);
+    for (const s of sockets) for (const name of SEND_METHODS) expect(s[name]).not.toHaveBeenCalled();
+    const lock = await acquireLock(dataDir); // released after the failure
+    await lock.release();
+  });
+
   it('explains a refused link', async () => {
     scripts = [(s) => closeWith(s, 401)];
     await expect(linkSenderCommand({ reset: false }, deps())).rejects.toThrow(/link-sender --reset/);
@@ -238,6 +247,7 @@ describe('cli link-sender', () => {
     expect(out()).toContain('Spare number linked.');
     expect(sockets).toHaveLength(1);
     expect(existsSync(sessionDbPath(dataDir))).toBe(false);
+    expect(senderLinked()).toBe(false); // the fresh file is readable with the spare number's own key
   });
 
   it('a damaged session file: its -wal and -shm files move with it, and an earlier damaged copy is never overwritten', async () => {
@@ -245,19 +255,15 @@ describe('cli link-sender', () => {
     const earlier = Buffer.from('earlier damaged copy');
     writeFileSync(`${file}.damaged-20261023T090000`, earlier);
     writeFileSync(file, JUNK);
-    // SQLite itself discards -wal and -shm files it cannot use when it opens and closes the damaged file to check it, so
-    // they are written while the owner is answering: whatever is next to the file at the rename moves with it.
-    confirm.mockImplementation(async () => {
-      writeFileSync(`${file}-wal`, Buffer.from('wal bytes'));
-      writeFileSync(`${file}-shm`, Buffer.from('shm bytes'));
-      return true;
-    });
+    writeFileSync(`${file}-wal`, Buffer.from('wal bytes'));
+    writeFileSync(`${file}-shm`, Buffer.from('shm bytes'));
     await linkSenderCommand({ reset: true }, deps());
     expect(readFileSync(`${file}.damaged-20261023T090000`).equals(earlier)).toBe(true);
     expect(readFileSync(`${file}.damaged-20261023T090000-2`).equals(JUNK)).toBe(true);
     expect(readFileSync(`${file}-wal.damaged-20261023T090000-2`).toString()).toBe('wal bytes');
     expect(readFileSync(`${file}-shm.damaged-20261023T090000-2`).toString()).toBe('shm bytes');
     expect(out()).toContain('Spare number linked.');
+    expect(senderLinked()).toBe(false);
   });
 
   it('a damaged session file: an earlier damaged -wal copy is never overwritten, even with no earlier main-file copy', async () => {
@@ -265,10 +271,7 @@ describe('cli link-sender', () => {
     const earlierWal = Buffer.from('earlier damaged wal copy');
     writeFileSync(`${file}-wal.damaged-20261023T090000`, earlierWal);
     writeFileSync(file, JUNK);
-    confirm.mockImplementation(async () => {
-      writeFileSync(`${file}-wal`, Buffer.from('new wal bytes'));
-      return true;
-    });
+    writeFileSync(`${file}-wal`, Buffer.from('new wal bytes'));
     await linkSenderCommand({ reset: true }, deps());
     expect(readFileSync(`${file}-wal.damaged-20261023T090000`).equals(earlierWal)).toBe(true);
     expect(existsSync(`${file}.damaged-20261023T090000`)).toBe(false);
@@ -278,21 +281,26 @@ describe('cli link-sender', () => {
     expect(out()).toContain('Spare number linked.');
   });
 
-  it('a damaged session file: "no" or Ctrl+C leaves it unchanged at its name', async () => {
+  it('a damaged session file: "no" or Ctrl+C leaves it and its -wal and -shm files unchanged at their names', async () => {
     const file = senderSessionDbPath(dataDir);
     writeFileSync(file, JUNK);
+    writeFileSync(`${file}-wal`, Buffer.from('wal bytes'));
+    writeFileSync(`${file}-shm`, Buffer.from('shm bytes'));
     confirm.mockResolvedValueOnce(false).mockRejectedValueOnce(new ConfirmCancelled());
     await linkSenderCommand({ reset: true }, deps());
     await linkSenderCommand({ reset: true }, deps());
     expect(lines).toEqual(['Nothing was changed.', 'Cancelled. Nothing was changed.']);
-    expect(senderFiles()).toEqual(['sender-session.db']);
+    expect(senderFiles()).toEqual(['sender-session.db', 'sender-session.db-shm', 'sender-session.db-wal']);
     expect(readFileSync(file).equals(JUNK)).toBe(true);
+    expect(readFileSync(`${file}-wal`).toString()).toBe('wal bytes');
+    expect(readFileSync(`${file}-shm`).toString()).toBe('shm bytes');
     expect(sockets).toHaveLength(0);
   });
 
   it('a damaged session file without --reset: one line saying to run --reset, and the file is unchanged', async () => {
     const file = senderSessionDbPath(dataDir);
     writeFileSync(file, JUNK);
+    writeFileSync(`${file}-wal`, Buffer.from('wal bytes'));
     const err = await linkSenderCommand({ reset: false }, deps()).then(
       () => undefined,
       (e: unknown) => e,
@@ -303,8 +311,9 @@ describe('cli link-sender', () => {
     expect(message).toContain('damaged');
     expect(message).toContain('npm run cli -- link-sender --reset');
     expect(confirm).not.toHaveBeenCalled();
-    expect(senderFiles()).toEqual(['sender-session.db']);
+    expect(senderFiles()).toEqual(['sender-session.db', 'sender-session.db-wal']);
     expect(readFileSync(file).equals(JUNK)).toBe(true);
+    expect(readFileSync(`${file}-wal`).toString()).toBe('wal bytes');
     expect(sockets).toHaveLength(0);
   });
 
@@ -359,6 +368,22 @@ describe('cli report status', () => {
       'Morning report: on, 06:00 to 12:00 IST, to the number ending …5678',
       'Today (2026-10-23): Morning report: due now',
       '⚠️ Morning report: the spare number is not linked.',
+    ]);
+  });
+
+  it("does not repeat an old snapshot's warning: says the service has not reported since then", () => {
+    const at = new Date(NOW.getTime() - 3 * 60_000);
+    const snap = {
+      at: at.toISOString(), line: { ok: false, text: 'x' }, whatsapp: { state: 'open', since: at.toISOString(), lastErrorCode: null, credsSaveFailures: 0 },
+      downSince: null, failed: [], lastSuccessAt: null, lastPublishedAt: null, spentToday: 0, capUsd: 15, freeGb: 100, publishFailingSince: null,
+      ingestFailures: 0, report: { text: 'Morning report: due now', warning: '⚠️ Morning report: the spare number is not linked.' },
+    };
+    withTracker((db) => setKv(db, 'health', JSON.stringify(snap)));
+    reportStatusCommand(deps());
+    expect(lines).toEqual([
+      'Morning report: on, 06:00 to 12:00 IST, to the number ending …5678',
+      'Today (2026-10-23): Morning report: due now',
+      '⚠️ The service has not reported since 23 Oct 08:57. Is it running?',
     ]);
   });
 

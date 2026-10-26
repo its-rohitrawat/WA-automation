@@ -17,7 +17,7 @@ import { unprocessedCounts } from '../store/messages.ts';
 import { recentReports, REPORT_REQUEST_KEY, reportFor, reportRequestValue, type ReportRow } from '../store/reports.ts';
 import { acquireLock } from '../util/lock.ts';
 import { silentLogger } from '../util/logger.ts';
-import { istDate, istTime } from '../util/time.ts';
+import { istDate, istShortDate, istTime } from '../util/time.ts';
 import { AllowList } from '../wa/allowlist.ts';
 import {
   openSenderSession, openSessionDb, resetSession, SenderSessionDecryptError, SessionDecryptError, useEncryptedAuthState, useSenderAuthState,
@@ -463,8 +463,14 @@ export function reportStatusCommand(deps: CliDeps): void {
       out('Last days:');
       for (const r of past) out(`  ${r.date}  ${r.status.padEnd(8)}${r.status === 'sent' ? `at ${istTime(new Date(r.updatedAt))} IST` : reasonText(r.detail)}`);
     }
-    const warning = readHealthSnapshot(db)?.report?.warning;
-    if (warning) out(warning);
+    // An old snapshot's warning may no longer hold (the owner may have fixed it since the service stopped).
+    const snap = readHealthSnapshot(db);
+    if (snap && now.getTime() - Date.parse(snap.at) > SERVICE_FRESH_MS) {
+      const at = new Date(snap.at);
+      out(`⚠️ The service has not reported since ${istShortDate(at)} ${istTime(at)}. Is it running?`);
+    } else if (snap?.report?.warning) {
+      out(snap.report.warning);
+    }
   } finally {
     db.close();
   }
