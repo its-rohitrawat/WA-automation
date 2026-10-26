@@ -55,6 +55,22 @@ vi.mock('../src/media/voiceForget.ts', async (importOriginal) => {
   };
 });
 
+/**
+ * rmSync from node:fs runs as it is, unless a test sets `fsHook.rmFails`: then a path it returns true for throws
+ * EBUSY instead (Task 10 review round 1: the folder sweep's delete that fails on one entry).
+ */
+const fsHook = vi.hoisted(() => ({ rmFails: null as null | ((path: string) => boolean) }));
+vi.mock('node:fs', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...real,
+    rmSync: (...args: Parameters<typeof real.rmSync>) => {
+      if (fsHook.rmFails?.(String(args[0]))) throw Object.assign(new Error(`EBUSY: resource busy or locked, rm '${String(args[0])}'`), { code: 'EBUSY' });
+      return real.rmSync(...args);
+    },
+  };
+});
+
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
 const MEDIA_KEY = Buffer.alloc(32, 9);
 const MINUTE = 60_000;
@@ -911,6 +927,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
   });
   afterEach(() => {
     forgetHook.impl = null;
+    fsHook.rmFails = null;
     vi.useRealTimers();
     vi.restoreAllMocks();
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -963,7 +980,9 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'failed', attempts: 3, errorCode: 'local_timeout' }), SLOW_IO);
     expect(voice.transcribed).toBe(3);
     await stopApp(app);
-  });
+    // Three runs, each awaited by a vi.waitFor of up to 10 s (SLOW_IO) on real file I/O, plus stopApp: on a busy PC
+    // during the whole suite the stages add up past the 20 s default before any one of them times out.
+  }, 30_000);
 
   it('a paid transcriber keeps the paid path’s 2 runs (voicePaid true)', async () => {
     const voice = new FakeVoiceTranscriber({ provider: 'sarvam', results: [new LocalEngineError('exit_1'), new LocalEngineError('exit_1'), new LocalEngineError('exit_1')] });
@@ -974,7 +993,8 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'failed', attempts: 2 }), SLOW_IO);
     expect(voice.transcribed).toBe(2);
     await stopApp(app);
-  });
+    // Two runs, each awaited by a vi.waitFor of up to 10 s (SLOW_IO), plus stopApp: see the test above.
+  }, 30_000);
 
   it('with the local engine, one voice note at a time takes a media slot: images use the others', async () => {
     const g = gate();
@@ -1154,7 +1174,10 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const { dataDir, app } = setup({
       prepare: (_db, dataDir) => {
         const voiceDir = join(dataDir, 'tmp', 'voice');
-        for (const d of ['voice-12', 'voice-7', 'voice-12x', 'voice-', 'other', join('other', 'voice-4')]) mkdirSync(join(voiceDir, d), { recursive: true });
+        // xvoice-12 and voice-12-old: the name must be voice-<digits> from its first character to its last.
+        for (const d of ['voice-12', 'voice-7', 'voice-12x', 'xvoice-12', 'voice-12-old', 'voice-', 'other', join('other', 'voice-4')]) {
+          mkdirSync(join(voiceDir, d), { recursive: true });
+        }
         writeFileSync(join(voiceDir, 'voice-12', 'audio.wav'), 'client audio');
         writeFileSync(join(voiceDir, 'voice-99'), 'a file, not a folder');
         writeFileSync(join(voiceDir, 'notes.txt'), 'x');
@@ -1164,7 +1187,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     });
     // Synchronously inside start(), so before the first tick starts any file.
     const voiceDir = join(dataDir, 'tmp', 'voice');
-    expect(readdirSync(voiceDir).sort()).toEqual(['notes.txt', 'other', 'voice-', 'voice-12x', 'voice-55', 'voice-99']);
+    expect(readdirSync(voiceDir).sort()).toEqual(['notes.txt', 'other', 'voice-', 'voice-12-old', 'voice-12x', 'voice-55', 'voice-99', 'xvoice-12']);
     expect(existsSync(join(voiceDir, 'other', 'voice-4'))).toBe(true);
     expect(existsSync(join(dataDir, 'tmp', 'meetings', 'voice-3'))).toBe(true);
     expect(existsSync(join(outside, 'keep.txt'))).toBe(true);
@@ -1189,6 +1212,46 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const second = setup({ log: quiet.log });
     expect(quiet.out()).not.toContain('leftover voice folders not removed');
     await stopApp(second.app);
+  });
+
+  it('a folder delete that fails is logged with a code only: start() goes on, and the other folders are still removed', async () => {
+    const { log, out } = capture();
+    fsHook.rmFails = (path) => path.endsWith('voice-2');
+    const { dataDir, app } = setup({
+      log,
+      prepare: (_db, dataDir) => {
+        for (const d of ['voice-1', 'voice-2', 'voice-3']) {
+          mkdirSync(join(dataDir, 'tmp', 'voice', d), { recursive: true });
+          writeFileSync(join(dataDir, 'tmp', 'voice', d, 'audio.wav'), 'client audio');
+        }
+      },
+    }); // setup() runs start(): it did not throw
+    expect(readdirSync(join(dataDir, 'tmp', 'voice'))).toEqual(['voice-2']);
+    expect(out().match(/leftover voice folders not removed/g)?.length).toBe(1);
+    expect(out()).toContain('"code":"EBUSY"');
+    expect(out()).not.toContain('resource busy');
+    expect(out()).not.toContain(dataDir.replaceAll('\\', '\\\\'));
+    expect(sweeps()).toBe(1); // start() went on to the copy sweep
+    fsHook.rmFails = null;
+    await stopApp(app);
+  });
+
+  it('a paid transcript finishMedia cannot store: the processor deletes its copy now through the transcriber, not at the hourly sweep', async () => {
+    const voice = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ text: 'theek hai', forgetRef: 'tr-1' }] });
+    const { db, app, sock } = setup({
+      media: { voice, extract: undefined },
+      // finishMedia's UPDATE to done fails for voice notes, as a full or locked database would.
+      prepare: (db) => db.exec(`CREATE TRIGGER refuse_voice_done BEFORE UPDATE OF status ON media
+        WHEN NEW.status = 'done' AND NEW.kind = 'voice' BEGIN SELECT RAISE(ABORT, 'finish refused'); END`),
+    });
+    shareVoice(sock);
+    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('failed'), SLOW_IO);
+    await vi.waitFor(() => expect(voice.forgotten).toEqual(['tr-1']));
+    expect(voice.transcribed).toBe(1); // never paid again
+    expect(forgetHook.calls.some((o) => o?.mediaId === 1)).toBe(true);
+    expect(sweeps()).toBe(1); // only the start's, before the note: no hourly sweep did it
+    expect(db.prepare('SELECT COUNT(*) AS n FROM media_stt_forget').get()).toEqual({ n: 0 });
+    await stopApp(app);
   });
 
   it('the voice problem found at start reaches the health line', async () => {

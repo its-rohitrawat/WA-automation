@@ -1,12 +1,25 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { Writable } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseEnv } from '../src/config/env.ts';
 import { checkLocalEngineFiles } from '../src/stt/local.ts';
 import { createLogger } from '../src/util/logger.ts';
 import { buildVoiceDeps } from '../src/voiceDeps.ts';
+
+/** Every deps argument buildVoiceDeps hands createVoiceTranscriber, which still runs as it is (mutation review). */
+const created = vi.hoisted(() => ({ deps: [] as { tmpDir: string }[] }));
+vi.mock('../src/stt/voice.ts', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/stt/voice.ts')>();
+  return {
+    ...real,
+    createVoiceTranscriber: (...args: Parameters<typeof real.createVoiceTranscriber>) => {
+      created.deps.push(args[1]);
+      return real.createVoiceTranscriber(...args);
+    },
+  };
+});
 
 const dirs: string[] = [];
 const KEY = 'test-voice-key-value';
@@ -36,6 +49,7 @@ function local(files: { bin: boolean; model: boolean }) {
 }
 
 afterEach(() => {
+  created.deps.length = 0;
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
@@ -138,5 +152,39 @@ describe('buildVoiceDeps (Phase 2b Task 10)', () => {
     expect(d.voiceProblem).toBe('no_ffmpeg');
     expect(d.voice).toMatchObject({ provider: 'sarvam', costsNothing: false });
     expect(out()).not.toContain(KEY);
+  });
+  // Mutation review (Task 10 review round 1): without `check`, the real checkLocalEngineFiles runs on the real files.
+  it('without a check seam, the real file check runs: a missing STT_LOCAL_BIN turns voice off', async () => {
+    const { env, log, out, findFfmpeg } = local({ bin: false, model: true });
+    const d = await buildVoiceDeps(env, { findFfmpeg, log });
+    expect(d).toEqual({ voice: null, maxVoiceSeconds: 600, voiceProblem: 'local_not_set_up_bin' });
+    expect(out()).toContain('"setting":"STT_LOCAL_BIN"');
+    expect(findFfmpeg).not.toHaveBeenCalled();
+  });
+
+  it('without a check seam, both files present on disk give a local transcriber', async () => {
+    const { env, log, findFfmpeg } = local({ bin: true, model: true });
+    const d = await buildVoiceDeps(env, { findFfmpeg, log });
+    expect(d.voiceProblem).toBeNull();
+    expect(d.voice).toMatchObject({ provider: 'local', costsNothing: true });
+  });
+
+  it.each([
+    ['local', (bin: string, model: string) => ({ VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: bin, STT_LOCAL_MODEL: model })],
+    ['a paid provider', () => ({ STT_PROVIDER: 'elevenlabs', VOICE_STT_PROVIDER: 'elevenlabs', STT_API_KEY: KEY })],
+  ] as const)('%s: the transcriber works in DATA_DIR/tmp/voice as an absolute path, even when DATA_DIR is relative', async (_label, vars) => {
+    const { dir, log, findFfmpeg } = setup({});
+    const bin = join(dir, 'transcribe-cli');
+    const model = join(dir, 'model.gguf');
+    writeFileSync(bin, 'bin');
+    writeFileSync(model, 'model');
+    const rel = relative(process.cwd(), dir);
+    expect(isAbsolute(rel)).toBe(false);
+    const env = parseEnv({ DATA_DIR: rel, GROUPS_FILE: join(dir, 'g.json'), ...vars(bin, model) });
+    const d = await buildVoiceDeps(env, { findFfmpeg, log });
+    expect(d.voice).not.toBeNull();
+    expect(created.deps).toHaveLength(1);
+    expect(created.deps[0]!.tmpDir).toBe(join(dir, 'tmp', 'voice'));
+    expect(isAbsolute(created.deps[0]!.tmpDir)).toBe(true);
   });
 });

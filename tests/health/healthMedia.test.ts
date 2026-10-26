@@ -267,7 +267,8 @@ describe('Health and voice notes that cannot be transcribed (Phase 2b Task 10)',
     expect(readHealthSnapshot(db)!.voiceProblem).toBeUndefined();
     // A value this version does not know (a newer writer) drops only that field, not the snapshot.
     // 'local_not_set_up' is the value written before the problem named its setting: dropped the same way.
-    for (const unknown of ['engine_on_fire', 'local_not_set_up', 1, null, {}]) {
+    // So are the names every object inherits ("toString", "__proto__"): only the table's own keys count.
+    for (const unknown of ['engine_on_fire', 'local_not_set_up', 'toString', '__proto__', 'constructor', 'hasOwnProperty', 1, null, {}]) {
       setKv(db, 'health', JSON.stringify({ ...old, voiceProblem: unknown }));
       expect(readHealthSnapshot(db)).toBeDefined();
       expect(readHealthSnapshot(db)!.voiceProblem).toBeUndefined();

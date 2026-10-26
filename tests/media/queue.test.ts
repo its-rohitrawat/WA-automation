@@ -37,8 +37,8 @@ function pending(db: Db, waId: string): number {
 }
 
 /** A pending file of this kind (voice notes and audio files are the local engine's lane, Task 10). */
-function pendingOf(db: Db, waId: string, kind: 'image' | 'document' | 'voice' | 'audio'): number {
-  insertMessage(db, { waId, clientId: 1, senderJid: 'x@s.whatsapp.net', senderNumber: null, senderName: null, fromMe: false, ts: NOW, text: null, quotedWaId: null, mediaType: kind });
+function pendingOf(db: Db, waId: string, kind: 'image' | 'document' | 'voice' | 'audio', ts: string = NOW): number {
+  insertMessage(db, { waId, clientId: 1, senderJid: 'x@s.whatsapp.net', senderNumber: null, senderName: null, fromMe: false, ts, text: null, quotedWaId: null, mediaType: kind });
   return insertMedia(db, {
     messageId: messageRowId(db, 1, waId)!, clientId: 1, kind, status: 'pending', mimeType: null, fileName: null, fileSize: 1, seconds: null,
     forwarded: false, refEnc: Buffer.from('s'), errorCode: null, createdAt: NOW,
@@ -460,6 +460,42 @@ describe('MediaQueue voice lane (Phase 2b Task 10)', () => {
     await flush();
     expect(started).toEqual([v1, i1]);
     expect(queue.active).toBe(2);
+  });
+
+  it('the lane never takes the queue past its concurrency: one voice note and three images due, concurrency 3, run 3', async () => {
+    const { db, started, queue, finish } = setup({ concurrency: 3, voiceLane: 1 });
+    const v1 = pendingOf(db, 'V1', 'voice');
+    const [i1, i2, i3] = [pendingOf(db, 'I1', 'image'), pendingOf(db, 'I2', 'image'), pendingOf(db, 'I3', 'image')];
+    queue.kick();
+    await flush();
+    expect(started).toEqual([v1, i1, i2]); // 1 voice note, 2 images: never 4
+    expect(queue.active).toBe(3);
+    queue.kick();
+    await flush();
+    expect(started).toEqual([v1, i1, i2]);
+    // A slot frees: the third image takes it, and the queue is at 3 again.
+    await finish(i1!, 'done');
+    expect(started).toEqual([v1, i1, i2, i3]);
+    expect(queue.active).toBe(3);
+  });
+
+  it('the lane takes only voice notes and audio files: an image due before them does not take it', async () => {
+    const { db, started, queue, finish } = setup({ concurrency: 3, voiceLane: 1 });
+    const early = '2026-10-19T07:00:00.000Z';
+    const i0 = pendingOf(db, 'I0', 'image', early); // due first, in time and in order
+    const [v1, v2] = [pendingOf(db, 'V1', 'voice'), pendingOf(db, 'V2', 'audio')];
+    const [i1, i2] = [pendingOf(db, 'I1', 'image'), pendingOf(db, 'I2', 'image')];
+    queue.kick();
+    await flush();
+    // The voice note runs in the lane; the image runs in one of the other slots, not in the lane.
+    expect(started).toEqual([v1, i0, i1]);
+    expect(queue.active).toBe(3);
+    // The early image finishing frees an image slot, not the lane: the next image starts, not the second note.
+    await finish(i0!, 'done');
+    expect(started).toEqual([v1, i0, i1, i2]);
+    await finish(v1!, 'done');
+    expect(started).toEqual([v1, i0, i1, i2, v2]);
+    expect(queue.active).toBe(3);
   });
 
   it('without a lane, voice notes take every slot as before', async () => {
