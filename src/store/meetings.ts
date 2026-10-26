@@ -553,6 +553,13 @@ export function listUnassigned(db: Db, limit: number): UnassignedMeeting[] {
     .all(limit) as UnassignedMeeting[];
 }
 
+/**
+ * The done meetings a client tab lists: a meeting whose stored summary is not JSON, or has no actionItems list, is left
+ * out. Shared by listClientMeetings and lastMeetingByClient, so "Last meeting" never names a meeting the tab hides.
+ */
+const LISTED_DONE = `status = 'done'
+        AND CASE WHEN summary IS NULL THEN 1 WHEN json_valid(summary) THEN json_type(summary, '$.actionItems') = 'array' ELSE 0 END`;
+
 export interface ClientMeeting {
   id: number;
   startedAt: string;
@@ -571,16 +578,16 @@ export function listClientMeetings(db: Db, clientId: number, limit: number): Cli
     .prepare(`SELECT id, started_at AS startedAt, title, COALESCE(audio_seconds, drive_seconds) AS seconds, doc_file_id AS docFileId,
         CASE WHEN summary IS NULL THEN 0 ELSE json_array_length(summary, '$.actionItems') END AS actionItemCount
       FROM meetings
-      WHERE client_id = ? AND status = 'done'
-        AND CASE WHEN summary IS NULL THEN 1 WHEN json_valid(summary) THEN json_type(summary, '$.actionItems') = 'array' ELSE 0 END
+      WHERE client_id = ? AND ${LISTED_DONE}
       ORDER BY started_at DESC, id DESC LIMIT ?`)
     .all(clientId, limit) as ClientMeeting[];
 }
 
-/** Each client's latest done meeting: client id → its start. */
+/** Each client's latest done meeting that its tab lists: client id → its start. */
 export function lastMeetingByClient(db: Db): Map<number, string> {
   const rows = db
-    .prepare(`SELECT client_id AS clientId, MAX(started_at) AS startedAt FROM meetings WHERE status = 'done' AND client_id IS NOT NULL GROUP BY client_id`)
+    .prepare(`SELECT client_id AS clientId, MAX(started_at) AS startedAt FROM meetings WHERE client_id IS NOT NULL AND ${LISTED_DONE}
+      GROUP BY client_id`)
     .all() as { clientId: number; startedAt: string }[];
   return new Map(rows.map((r) => [r.clientId, r.startedAt]));
 }

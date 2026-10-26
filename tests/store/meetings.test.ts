@@ -396,7 +396,8 @@ describe('meetings store', () => {
     // skipped, and the limit counts only listed rows.
     expect(listClientMeetings(db, 1, 10).map((m) => m.id)).toEqual([bad, good]);
     expect(listClientMeetings(db, 1, 1).map((m) => m.id)).toEqual([bad]);
-    expect(lastMeetingByClient(db).get(1)).toBe('2026-10-13T10:00:00.000Z');
+    // The last meeting is the newest listed one, not the hidden ones of the 12th and 13th.
+    expect(lastMeetingByClient(db).get(1)).toBe('2026-10-11T10:00:00.000Z');
   });
 });
 

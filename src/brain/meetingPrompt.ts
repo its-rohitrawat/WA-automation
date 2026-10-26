@@ -1,7 +1,10 @@
 import { formatClock } from '../stt/segments.ts';
 import type { Segment } from '../stt/types.ts';
-import { istDateTime, istWeekday } from '../util/time.ts';
+import { istDateTime, istWeekday, meetingLength } from '../util/time.ts';
 import { nameText, sanitizeInline } from './prompt.ts';
+
+/** Moved to util/time.ts so the workbook can use it; kept here for existing imports. */
+export { meetingLength };
 
 /**
  * Transcript lines past this many characters are cut at a segment boundary. That is about 200,000 tokens for text in
@@ -104,13 +107,6 @@ const EMAIL_IN_NAME = /[<(\[（［＜]?\s*[^\s@＠﹫<>()[\]{},;:"']+[@＠﹫][^
 const AT_SIGN = /[@＠﹫]/u;
 
 const clockOf = (seconds: number): string => formatClock(Number.isFinite(seconds) ? seconds : 0);
-
-/** "10 min", "1 h 02 min", "under 1 min". */
-export function meetingLength(seconds: number): string {
-  const minutes = Math.round(Number.isFinite(seconds) && seconds > 0 ? seconds / 60 : 0);
-  if (minutes === 0) return 'under 1 min';
-  return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, '0')} min`;
-}
 
 /** "Monday 2026-10-19 14:05" in India time, or "unknown". */
 function istWhen(iso: string): string {
