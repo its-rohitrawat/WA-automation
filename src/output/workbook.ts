@@ -1,8 +1,9 @@
 import ExcelJS from 'exceljs';
 import { MAX_FILE_NAME_CHARS } from '../media/paths.ts';
+import { formatClock } from '../stt/segments.ts';
 import type { TaskRow } from '../store/tasks.ts';
 import { daysBetween, displayDate, istDateTime, istShortDate, istTime } from '../util/time.ts';
-import { isOverdue, type ClientView, type FileView, type TrackerView } from './view.ts';
+import { isOverdue, type ClientView, type FileView, type MeetingView, type TrackerView } from './view.ts';
 
 export const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
@@ -53,6 +54,16 @@ function noneRow(ws: ExcelJS.Worksheet): void {
   ws.addRow(['(none)']).font = { italic: true, color: { argb: GREY } };
 }
 
+const LINK_FONT: Partial<ExcelJS.Font> = { color: { argb: 'FF0563C1' }, underline: true };
+
+function setLink(cell: ExcelJS.Cell, text: string, hyperlink: string): void {
+  cell.value = { text, hyperlink };
+  cell.font = LINK_FONT;
+}
+
+/** "0:47", "1:02:05"; blank when the length is not known. */
+const lengthText = (seconds: number | null): string => (seconds === null ? '' : formatClock(seconds));
+
 function fillRow(row: ExcelJS.Row, argb: string, columns: number): void {
   for (let i = 1; i <= columns; i++) row.getCell(i).fill = solid(argb);
 }
@@ -95,6 +106,8 @@ function addTaskTable(ws: ExcelJS.Worksheet, title: string, tasks: TaskRow[], to
 }
 
 const DRIVE_ID = /^[A-Za-z0-9_-]{1,200}$/;
+/** A Google Doc's link, or null when the id is missing or not a plain Drive id. */
+const docUrl = (id: string | null): string | null => (id !== null && DRIVE_ID.test(id) ? `https://docs.google.com/document/d/${id}/edit` : null);
 /** Client tab column widths, A to N. Excel counts a width in characters: the width of the digit 0 in the default 11 pt Calibri. */
 const CLIENT_COLUMN_WIDTHS = [14, 38, 13, 10, 14, 16, 10, 10, 10, 32, 16, 22, 44, 11];
 /**
@@ -159,13 +172,48 @@ function addFilesTable(ws: ExcelJS.Worksheet, files: FileView[]): void {
   ws.addRow([]);
 }
 
+const MEETING_DOC = 5;
+
+function addMeetingsTable(ws: ExcelJS.Worksheet, meetings: MeetingView[]): void {
+  sectionTitle(ws, 'Meetings');
+  styleHeader(ws.addRow(['Date', 'Meeting', 'Length', 'Action items', 'Doc']));
+  if (meetings.length === 0) noneRow(ws);
+  for (const m of meetings) {
+    const row = ws.addRow([isoToDate(m.date), m.title, lengthText(m.seconds), m.actionItemCount]);
+    formatDates(row);
+    row.alignment = { wrapText: true, vertical: 'top', horizontal: 'left' };
+    const url = docUrl(m.docFileId);
+    if (url) setLink(row.getCell(MEETING_DOC), 'Open', url);
+  }
+  ws.addRow([]);
+}
+
+const ASSIGN_HINT = 'On the office PC: npm run cli -- meeting list, then meeting assign <id> <CODE>';
+const OVERVIEW_COLUMNS = 11;
+
+/**
+ * Unassigned meetings under the health line: id, India date and length only. The title and attendees are left out on
+ * purpose: everyone who opens the workbook sees the Overview.
+ */
+function addUnassigned(ws: ExcelJS.Worksheet, view: TrackerView): void {
+  if (view.unassigned.length === 0) return;
+  sectionTitle(ws, 'Unassigned meetings');
+  for (const m of view.unassigned) ws.addRow([[`#${m.id}`, displayDate(m.date), lengthText(m.seconds)].filter((s) => s !== '').join(' · ')]);
+  ws.addRow([ASSIGN_HINT]).font = { italic: true, color: { argb: GREY } };
+  ws.addRow([]);
+}
+
 function addOverview(wb: ExcelJS.Workbook, view: TrackerView): void {
-  const ws = wb.addWorksheet('Overview', { views: [{ state: 'frozen', ySplit: 3 }] });
-  ws.columns = [{ width: 30 }, { width: 14 }, { width: 9 }, { width: 13 }, { width: 16 }, { width: 10 }, { width: 14 }, { width: 60 }, { width: 14 }, { width: 18 }];
+  const ws = wb.addWorksheet('Overview');
+  ws.columns = [{ width: 30 }, { width: 14 }, { width: 9 }, { width: 13 }, { width: 16 }, { width: 10 }, { width: 14 }, { width: 60 }, { width: 14 }, { width: 18 }, { width: 14 }];
   ws.addRow([view.health.text]).font = { bold: true, size: 12, color: { argb: view.health.ok ? 'FF1F7A3D' : 'FFB42318' } };
-  ws.mergeCells(1, 1, 1, 10);
+  ws.mergeCells(1, 1, 1, OVERVIEW_COLUMNS);
+  addUnassigned(ws, view);
   ws.addRow([`Built ${istDateTime(view.generatedAt)} IST`]).font = { italic: true, color: { argb: GREY } };
-  styleHeader(ws.addRow(['Client', 'Phase', '% done', 'Our open tasks', 'Waiting on client', 'Overdue', 'Maybe done (check)', 'Where we are', 'Next deadline', 'Last activity']));
+  const header = ws.addRow(['Client', 'Phase', '% done', 'Our open tasks', 'Waiting on client', 'Overdue', 'Maybe done (check)', 'Where we are', 'Next deadline', 'Last activity', 'Last meeting']);
+  styleHeader(header);
+  // The rows down to the header stay in view. With an Unassigned block (up to 50 rows) frozen rows could fill the screen, so then none are.
+  if (view.unassigned.length === 0) ws.views = [{ state: 'frozen', ySplit: header.number }];
   for (const c of view.clients) {
     const last = c.lastActivity ? new Date(c.lastActivity) : null;
     const name = c.client.name + (c.client.active ? '' : ' (inactive)');
@@ -180,6 +228,7 @@ function addOverview(wb: ExcelJS.Workbook, view: TrackerView): void {
       c.client.statusText ?? '',
       c.nextDeadline ? isoToDate(c.nextDeadline) : '',
       last ? `${istShortDate(last)} ${istTime(last)}` : '',
+      c.lastMeeting ? isoToDate(c.lastMeeting) : '',
     ]);
     formatDates(row);
     if (c.percentDone !== null) row.getCell(3).numFmt = '0%';
@@ -221,11 +270,14 @@ function addClientSheet(wb: ExcelJS.Workbook, c: ClientView, today: string): voi
     const row = ws.addRow([isoToDate(d.decidedOn), d.text, sourceLabel(d.source)]);
     formatDates(row);
     row.alignment = { wrapText: true, vertical: 'top', horizontal: 'left' };
+    const url = d.source === 'meeting' ? docUrl(d.docFileId) : null;
+    if (url) setLink(row.getCell(3), sourceLabel(d.source), url);
   }
   ws.addRow([]);
 
   addFilesTable(ws, c.files);
   addTaskTable(ws, 'Done', c.done, today, { closedOn: true });
+  addMeetingsTable(ws, c.meetings);
 
   sectionTitle(ws, 'People');
   styleHeader(ws.addRow(['Name', 'Number', 'Role', 'Set by']));

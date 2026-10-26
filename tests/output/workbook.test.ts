@@ -66,6 +66,7 @@ describe('buildWorkbook', () => {
     expect(ov.getCell('A1').value).toBe('✅ Connected · waiting for new messages');
     expect(ov.getCell('A3').value).toBe('Client');
     expect(ov.getCell('H3').value).toBe('Where we are');
+    expect(ov.getCell('K3').value).toBe('Last meeting');
     expect(JSON.stringify(ov.getCell('A5').value)).toContain("Sharma Interiors'!A1");
     expect(ov.getCell('D5').value).toBe(1);
     expect(ov.getCell('F5').value).toBe(1);

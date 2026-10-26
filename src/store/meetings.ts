@@ -551,6 +551,15 @@ export function listClientMeetings(db: Db, clientId: number, limit: number): Cli
     .all(clientId, limit) as ClientMeeting[];
 }
 
+/** A client's decisions taken in a meeting that has a Doc: decision id → the meeting's Doc id. */
+export function decisionDocIds(db: Db, clientId: number): Map<number, string> {
+  const rows = db
+    .prepare(`SELECT d.id AS id, m.doc_file_id AS docFileId FROM decisions d JOIN meetings m ON m.id = d.meeting_id
+      WHERE d.client_id = ? AND m.doc_file_id IS NOT NULL`)
+    .all(clientId) as { id: number; docFileId: string }[];
+  return new Map(rows.map((r) => [r.id, r.docFileId]));
+}
+
 /** Each client's latest done meeting: client id → its start. */
 export function lastMeetingByClient(db: Db): Map<number, string> {
   const rows = db

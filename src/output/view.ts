@@ -2,6 +2,7 @@ import { displayName, fileDescription } from '../media/labels.ts';
 import { listClients, type ClientRow } from '../store/clients.ts';
 import type { Db } from '../store/db.ts';
 import { listClientFiles } from '../store/media.ts';
+import { decisionDocIds, lastMeetingByClient, listClientMeetings, listUnassigned } from '../store/meetings.ts';
 import { lastActivity } from '../store/messages.ts';
 import { listPeople, type PersonRow } from '../store/people.ts';
 import { listDecisions, listTasks, type DecisionRow, type TaskRow } from '../store/tasks.ts';
@@ -23,17 +24,49 @@ export interface FileView {
   driveFileId: string | null;
 }
 
+/** At most this many meetings in a client tab, and unassigned meetings on the Overview. */
+export const CLIENT_MEETINGS_LIMIT = 100;
+export const UNASSIGNED_LIMIT = 50;
+
+/** A done meeting of a client. */
+export interface MeetingView {
+  id: number;
+  /** IST date, YYYY-MM-DD. */
+  date: string;
+  title: string;
+  seconds: number | null;
+  docFileId: string | null;
+  actionItemCount: number;
+}
+
+/** Deliberately without title or attendees: everyone who opens the workbook sees the Overview. */
+export interface UnassignedView {
+  id: number;
+  /** IST date, YYYY-MM-DD. */
+  date: string;
+  seconds: number | null;
+}
+
+export interface DecisionView extends DecisionRow {
+  /** The Doc of the meeting the decision was taken in; null when it is not from a meeting with a Doc. */
+  docFileId: string | null;
+}
+
 export interface ClientView {
   client: ClientRow;
   sheetName: string;
   usOpen: TaskRow[];
   clientOpen: TaskRow[];
   done: TaskRow[];
-  decisions: DecisionRow[];
+  decisions: DecisionView[];
   /** Files received from client members (spec §8.3), newest first. */
   files: FileView[];
+  /** Done meetings, newest first. */
+  meetings: MeetingView[];
   people: PersonRow[];
   lastActivity: string | null;
+  /** IST date (YYYY-MM-DD) of the latest done meeting. */
+  lastMeeting: string | null;
   percentDone: number | null;
   overdue: number;
   maybeDone: number;
@@ -44,6 +77,8 @@ export interface TrackerView {
   generatedAt: Date;
   today: string;
   health: HealthLine;
+  /** Unassigned meetings, newest first; internal meetings are never listed. */
+  unassigned: UnassignedView[];
   clients: ClientView[];
 }
 
@@ -75,14 +110,18 @@ export function loadTrackerView(db: Db, now: Date, health: HealthLine): TrackerV
   const byId = [...clients].sort((a, b) => a.id - b.id);
   const assigned = uniqueSheetNames(byId.map((c) => c.name));
   const sheetNames = new Map(byId.map((c, i) => [c.id, assigned[i]!]));
+  const lastMeetings = lastMeetingByClient(db);
   const ordered = [...clients].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.id - b.id);
   return {
     generatedAt: now,
     today,
     health,
+    unassigned: listUnassigned(db, UNASSIGNED_LIMIT).map((m) => ({ id: m.id, date: istDate(new Date(m.startedAt)), seconds: m.seconds })),
     clients: ordered.map((client) => {
       const all = listTasks(db, client.id);
       const notDone = all.filter((t) => t.status !== 'done');
+      const docs = decisionDocIds(db, client.id);
+      const last = lastMeetings.get(client.id);
       const deadlines = notDone.map((t) => t.deadline).filter((d): d is string => d !== null).sort();
       return {
         client,
@@ -90,7 +129,7 @@ export function loadTrackerView(db: Db, now: Date, health: HealthLine): TrackerV
         usOpen: notDone.filter((t) => t.side === 'us').sort(byUrgency),
         clientOpen: notDone.filter((t) => t.side === 'client').sort(byUrgency),
         done: all.filter((t) => t.status === 'done').sort(byClosed),
-        decisions: listDecisions(db, client.id),
+        decisions: listDecisions(db, client.id).map((d) => ({ ...d, docFileId: docs.get(d.id) ?? null })),
         files: listClientFiles(db, client.id).map((f) => ({
           date: istDate(new Date(f.ts)),
           sentBy: f.sender ?? 'Unknown',
@@ -99,8 +138,17 @@ export function loadTrackerView(db: Db, now: Date, health: HealthLine): TrackerV
           // Owner decision D3: a file deleted for everyone loses its Drive link as well as its description. The Drive copy is kept.
           driveFileId: f.revoked ? null : f.driveFileId,
         })),
+        meetings: listClientMeetings(db, client.id, CLIENT_MEETINGS_LIMIT).map((m) => ({
+          id: m.id,
+          date: istDate(new Date(m.startedAt)),
+          title: m.title,
+          seconds: m.seconds,
+          docFileId: m.docFileId,
+          actionItemCount: m.actionItemCount,
+        })),
         people: listPeople(db, client.id),
         lastActivity: lastActivity(db, client.id),
+        lastMeeting: last === undefined ? null : istDate(new Date(last)),
         percentDone: all.length ? Math.floor((100 * (all.length - notDone.length)) / all.length) : null,
         overdue: notDone.filter((t) => isOverdue(t, today)).length,
         maybeDone: notDone.filter((t) => t.status === 'maybe_done').length,
