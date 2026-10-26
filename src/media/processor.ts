@@ -248,10 +248,10 @@ export class MediaProcessor {
     }
     // The original is saved and hashed already: a DOCX's bytes may be moved to the parser, so nothing reads them after this.
     // The extractor asks `revoked` again just before a paid call, after the decode (FR3a).
-    // A voice note is read from its path by the voice transcriber; its declared length is the sender's claim (V5).
+    // A voice note is read from its path by the voice transcriber. Its declared length (row.seconds) is the sender's
+    // claim, so it is not passed: it stays on the row for display only (V5, Task 5 review round 1).
     const x = await this.#o.extract({
-      mediaId: row.id, kind: row.kind, mimeType: row.mimeType, fileName: row.fileName, forwarded: row.forwarded, bytes, path: this.#abs(rel),
-      declaredSeconds: row.seconds, revoked,
+      mediaId: row.id, kind: row.kind, mimeType: row.mimeType, fileName: row.fileName, forwarded: row.forwarded, bytes, path: this.#abs(rel), revoked,
     });
     finishMedia(db, row.id, { ...x, at: this.#now() });
     return 'done';

@@ -39,8 +39,9 @@ const finder = (found: boolean) => async (configured: string | undefined): Promi
   return found ? (configured ?? 'ffmpeg') : null;
 };
 
+/** ffmpeg is there unless a test says otherwise: every file needs it (Task 5 review round 1). */
 function deps(over: Partial<TranscribeVoiceDeps> = {}): TranscribeVoiceDeps {
-  return { env: env(), out: (l) => void lines.push(l), db, clock: manualClock(QUEUED_AT), findFfmpeg: finder(false), ...over };
+  return { env: env(), out: (l) => void lines.push(l), db, clock: manualClock(QUEUED_AT), findFfmpeg: finder(true), ...over };
 }
 
 const run = (opts: { client?: string; yes?: boolean } = {}, over: Partial<TranscribeVoiceDeps> = {}) =>
@@ -131,7 +132,6 @@ describe('transcribe-voice: the dry run', () => {
     backlogVoice({ fileSize: 150_000, clientId: 2 });
     backlogVoice({ fileSize: 1_350_000, kind: 'audio', mimeType: 'audio/mpeg' });
     backlogVoice({ fileSize: 1_350_001 }); // 901 s: too long, in neither figure
-    backlogVoice({ mimeType: 'audio/aac' }); // needs ffmpeg, which is missing: in neither figure
     await run({}, { env: env({ STT_MAX_SECONDS: '900' }) });
     // Sarvam: ₹30 an hour at ₹88 to the dollar.
     const about = [10, 100, 900].reduce((a, s) => a + voiceCeilingUsd('sarvam', s + VOICE_LENGTH_TOLERANCE_S, 88), 0);
@@ -142,7 +142,6 @@ describe('transcribe-voice: the dry run', () => {
       'To transcribe: 3 voice notes or audio files saved before Phase 2b, about 18 minutes.',
       costLine('0.10', '0.26', 'sarvam', 900),
       '1 too long, skipped (by file size, over STT_MAX_SECONDS: 900 seconds).',
-      `1 needs ${NEEDS_FFMPEG}`,
       'With --yes the running service transcribes them, for the record. This costs money and counts toward the daily spend cap ($15.00).',
       'Nothing was changed. Re-run with --yes to queue them.',
     ]);
@@ -192,42 +191,52 @@ describe('transcribe-voice: the dry run', () => {
     expect(statusOf(long).status).toBe('done');
   });
 
-  it('a file the transcriber cannot send without ffmpeg is counted as needing ffmpeg; with ffmpeg the same file is counted (N2)', async () => {
-    backlogVoice({ fileSize: 90_000 }); // Ogg: goes as it is to Sarvam
+  // Task 5 review round 1: every file is converted first, so every file needs ffmpeg, a WhatsApp voice note too.
+  it('without ffmpeg every file is counted as needing it, a voice note too; with ffmpeg the same files are counted (N2)', async () => {
+    const ogg = backlogVoice({ fileSize: 90_000 });
     const m4a = backlogVoice({ fileSize: 90_000, kind: 'audio', mimeType: 'audio/mp4', note: 'format_not_supported' });
     await run({}, { env: env({ FFMPEG_PATH: 'C:\\tools\\ffmpeg.exe' }), findFfmpeg: finder(false) });
     expect(ffmpegAsked).toEqual(['C:\\tools\\ffmpeg.exe']);
-    expect(lines.slice(0, 3)).toEqual([
-      'To transcribe: 1 voice note or audio file saved before Phase 2b, about 2 minutes.',
-      costLine('0.01', '0.06'),
-      `1 needs ${NEEDS_FFMPEG}`,
+    expect(lines).toEqual([
+      'To transcribe: 0 voice notes or audio files saved before Phase 2b.',
+      `2 need ${NEEDS_FFMPEG}`,
+      'Nothing was changed.',
     ]);
     lines = [];
     await run({}, { findFfmpeg: finder(true) });
-    expect(lines[0]).toBe('To transcribe: 2 voice notes or audio files saved before Phase 2b, about 3 minutes.');
+    expect(lines.slice(0, 2)).toEqual([
+      'To transcribe: 2 voice notes or audio files saved before Phase 2b, about 3 minutes.',
+      costLine('0.02', '0.12'),
+    ]);
     expect(output()).not.toContain('ffmpeg, skipped');
 
-    // --yes without ffmpeg leaves it listed, untouched; with ffmpeg it is queued.
+    // --yes without ffmpeg leaves both listed, untouched; with ffmpeg both are queued.
     await run({ yes: true }, { findFfmpeg: finder(false) });
+    expect(statusOf(ogg)).toMatchObject({ status: 'done', note: null, backlog: false });
     expect(statusOf(m4a)).toMatchObject({ status: 'done', note: 'format_not_supported', backlog: false });
     await run({ yes: true }, { findFfmpeg: finder(true) });
+    expect(statusOf(ogg)).toMatchObject({ status: 'pending', note: null, backlog: true });
     expect(statusOf(m4a)).toMatchObject({ status: 'pending', note: null, backlog: true });
   });
 
-  it('openai converts every file, so without ffmpeg every file needs it', async () => {
+  it.each(['sarvam', 'elevenlabs', 'openai'])('%s: without ffmpeg every file needs it, whatever its format', async (provider) => {
     backlogVoice();
     backlogVoice({ mimeType: 'audio/mpeg' });
-    await run({}, { env: env({ STT_PROVIDER: 'openai' }) });
+    backlogVoice({ mimeType: 'audio/aac' });
+    await run({}, { env: env({ STT_PROVIDER: provider }), findFfmpeg: finder(false) });
     expect(lines.slice(0, 2)).toEqual([
       'To transcribe: 0 voice notes or audio files saved before Phase 2b.',
-      `2 need ${NEEDS_FFMPEG}`,
+      `3 need ${NEEDS_FFMPEG}`,
     ]);
   });
 
-  it('does not look for ffmpeg when every file can go as it is', async () => {
-    backlogVoice();
+  it('looks for ffmpeg once when a file fits, and not when none does', async () => {
+    backlogVoice({ fileSize: 900_001 }); // too long
     await run();
     expect(ffmpegAsked).toEqual([]);
+    backlogVoice();
+    await run();
+    expect(ffmpegAsked).toEqual([undefined]);
   });
 
   it('an ffmpeg finder that throws counts as no ffmpeg', async () => {
@@ -272,32 +281,34 @@ describe('transcribe-voice --yes', () => {
     const a = backlogVoice({ fileSize: 90_000 });
     const b = backlogVoice({ fileSize: 90_000, clientId: 2, kind: 'audio', mimeType: 'audio/mpeg' });
     const long = backlogVoice({ fileSize: 900_001 });
-    const needsFfmpeg = backlogVoice({ mimeType: 'audio/amr' });
+    const amr = backlogVoice({ mimeType: 'audio/amr' }); // converted like the others, ffmpeg being there
     await run({ yes: true });
     expect(lines).toEqual([
-      'To transcribe: 2 voice notes or audio files saved before Phase 2b, about 3 minutes.',
-      costLine('0.02', '0.12'), // 130 s: $0.012; 2 x 605 s: $0.115
+      'To transcribe: 3 voice notes or audio files saved before Phase 2b, about 4 minutes.',
+      costLine('0.02', '0.18'), // 195 s: $0.018; 3 x 605 s: $0.172
       '1 too long, skipped (by file size, over STT_MAX_SECONDS: 600 seconds).',
-      `1 needs ${NEEDS_FFMPEG}`,
-      '2 queued. The running service now transcribes them, for the record. This costs money and counts toward the daily spend cap ($15.00).',
+      '3 queued. The running service now transcribes them, for the record. This costs money and counts toward the daily spend cap ($15.00).',
     ]);
     const queued = { status: 'pending', backlog: true, note: null, text: null, attempts: 0, createdAt: QUEUED_AT };
     expect(statusOf(a)).toEqual(queued);
     expect(statusOf(b)).toEqual(queued);
+    expect(statusOf(amr)).toEqual(queued);
     expect(statusOf(long)).toMatchObject({ status: 'done', backlog: false });
-    expect(statusOf(needsFfmpeg)).toMatchObject({ status: 'done', backlog: false });
 
     // A fake extractor finishes them: the transcripts are stored and no message is queued or flagged again.
-    for (const id of [a, b]) finishMedia(db, id, { textKind: 'extract', text: TRANSCRIPT, pageCount: null, note: null, at: LATER });
+    for (const id of [a, b, amr]) finishMedia(db, id, { textKind: 'extract', text: TRANSCRIPT, pageCount: null, note: null, at: LATER });
     expect(listUnprocessed(db, 1)).toEqual([]);
     expect(listUnprocessed(db, 2)).toEqual([]);
     expect(db.prepare('SELECT COUNT(*) AS n FROM messages WHERE processed_at IS NULL').get()).toEqual({ n: 0 });
     expect(db.prepare('SELECT COUNT(*) AS n FROM media WHERE requeued_for_text = 1').get()).toEqual({ n: 0 });
     // Once transcribed, nothing is left to queue.
     lines = [];
-    await run({ yes: true }, { findFfmpeg: finder(true) });
-    expect(lines[0]).toBe('To transcribe: 1 voice note or audio file saved before Phase 2b, about 2 minutes.');
-    expect(statusOf(needsFfmpeg)).toMatchObject({ status: 'pending', backlog: true });
+    await run({ yes: true });
+    expect(lines).toEqual([
+      'To transcribe: 0 voice notes or audio files saved before Phase 2b.',
+      '1 too long, skipped (by file size, over STT_MAX_SECONDS: 600 seconds).',
+      'Nothing was changed.',
+    ]);
   });
 
   it.each([
@@ -307,7 +318,7 @@ describe('transcribe-voice --yes', () => {
   ])('a counted file that %s before it is queued is left alone and said so', async (_what, change) => {
     const a = backlogVoice({ fileSize: 90_000 });
     const b = backlogVoice({ fileSize: 90_000 });
-    const aac = backlogVoice({ fileSize: 90_000, mimeType: 'audio/aac' }); // needs ffmpeg, so the finder is asked
+    const aac = backlogVoice({ fileSize: 90_000, mimeType: 'audio/aac' }); // every file needs ffmpeg, so the finder is asked
     // The finder runs after the files are listed and counted, before they are queued.
     const findFfmpeg = async (): Promise<string | null> => {
       change(b);

@@ -177,6 +177,43 @@ describe('Ffmpeg', () => {
     expect(existsSync(`${out}.part.mp3`)).toBe(false);
   });
 
+  // Phase 3's meetings call toMp3 without opts: their arguments must stay exactly these.
+  const MP3_ARGS = (out: string) => [
+    '-hide_banner', '-nostdin', '-loglevel', 'error', '-y', ...SAFE_INPUT, '-i', 'in.ogg', '-vn', '-map_metadata', '-1', '-map_chapters', '-1',
+    '-ac', '1', '-ar', '16000', '-c:a', 'libmp3lame', '-b:a', '64k', `${out}.part.mp3`,
+  ];
+  const writing = () =>
+    fakeRun((args) => {
+      writeFileSync(lastArg(args), 'mp3');
+      return { code: 0 };
+    });
+
+  it('without opts, or without maxSeconds, the arguments are exactly the meetings ones', async () => {
+    for (const opts of [undefined, {}]) {
+      const { run, calls } = writing();
+      const out = join(dir, `plain-${opts === undefined ? 'a' : 'b'}.mp3`);
+      await new Ffmpeg('ffmpeg.exe', run).toMp3('in.ogg', out, undefined, opts);
+      expect(calls).toEqual([MP3_ARGS(out)]);
+    }
+  });
+
+  it('with maxSeconds, stops the output there: -t just before the output path, nothing else changed', async () => {
+    const { run, calls } = writing();
+    const out = join(dir, 'capped.mp3');
+    await new Ffmpeg('ffmpeg.exe', run).toMp3('in.ogg', out, undefined, { maxSeconds: 606 });
+    const plain = MP3_ARGS(out);
+    expect(calls).toEqual([[...plain.slice(0, -1), '-t', '606', `${out}.part.mp3`]]);
+    // An output option: after -i, so it limits what is written, never how the input is read.
+    expect(calls[0]!.indexOf('-t')).toBeGreaterThan(calls[0]!.indexOf('-i'));
+    expect(existsSync(out)).toBe(true);
+  });
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])('refuses a maxSeconds of %s without running ffmpeg', async (maxSeconds) => {
+    const { run, calls } = writing();
+    await expect(new Ffmpeg('ffmpeg.exe', run).toMp3('in.ogg', join(dir, 'bad.mp3'), undefined, { maxSeconds })).rejects.toThrow(/maxSeconds/);
+    expect(calls).toEqual([]);
+  });
+
   it('keeps an existing MP3 without running ffmpeg', async () => {
     const out = join(dir, 'x.mp3');
     writeFileSync(out, 'old');

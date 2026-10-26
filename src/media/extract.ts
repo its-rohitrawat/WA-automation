@@ -12,9 +12,9 @@ import { estimateCostUsd, type Prices } from '../spend/pricing.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
 import type { MediaKind, TextKind } from '../store/media.ts';
 import { AudioError } from '../stt/audio.ts';
-import { withSttHold } from '../stt/paidStt.ts';
+import { SttBookingError, withSttHold } from '../stt/paidStt.ts';
 import type { ProviderId } from '../stt/types.ts';
-import { sizeBoundSeconds, type PreparedVoice, type VoiceTranscriber } from '../stt/voice.ts';
+import { sizeBoundSeconds, type PreparedVoice, type VoiceResult, type VoiceTranscriber } from '../stt/voice.ts';
 import { prepareImageForClaude, type PreparedImage } from './image.ts';
 import { FORMAT_NOT_SUPPORTED, FORWARDED_NOT_TRANSCRIBED, NO_SPEECH, TOO_LONG } from './labels.ts';
 import { parseFile } from './parse/runner.ts';
@@ -31,13 +31,12 @@ export interface ExtractInput {
   forwarded: boolean;
   /** The saved original. A DOCX's bytes are moved to the parser, so the caller must not read them after extract. */
   bytes: Buffer;
-  /** Absolute path of the saved original: a voice note or audio file is read from it by the voice transcriber. */
-  path: string;
   /**
-   * The length the sender's phone reported (the row's seconds). Untrusted: never a limit on length or spend (V5), only
-   * shown and used to price a Sarvam note that ffmpeg could not measure.
+   * Absolute path of the saved original: a voice note or audio file is read from it by the voice transcriber. Its
+   * declared length (the row's seconds) is not passed: the sender sets it, so it is shown only, never used for length or
+   * spend (V5, Task 5 review round 1).
    */
-  declaredSeconds: number | null;
+  path: string;
   /**
    * Asked just before a paid call: true when the file's message was deleted for everyone meanwhile, for example during
    * the decode. The file is then not sent to Claude and comes back with note 'revoked' (final review FR3a).
@@ -128,6 +127,25 @@ export function isScanReadError(e: unknown): boolean {
   return typeof e === 'object' && e !== null && scanReadErrors.has(e);
 }
 
+/**
+ * Errors thrown after a voice note's paid call was answered, when its booking failed (Task 5 review round 1, Fix 3).
+ * The provider has billed it, so a retry would pay again: the processor fails the file at once. Noted, not wrapped, as
+ * scanReadErrors are.
+ */
+const paidVoiceErrors = new WeakSet<object>();
+
+/** Notes an error as one that came after a paid, answered voice call; an error that is not an object is wrapped first. */
+function paidVoiceError(e: unknown): object {
+  const err = typeof e === 'object' && e !== null ? e : new Error('A paid speech call could not be booked');
+  paidVoiceErrors.add(err);
+  return err;
+}
+
+/** Whether an error came after a voice note's paid call was answered: never retried, it would pay again. */
+export function isPaidVoiceError(e: unknown): boolean {
+  return typeof e === 'object' && e !== null && paidVoiceErrors.has(e);
+}
+
 /** Ceiling for one image description: the prompt, the image at its token count (capped), and the full output allowance. */
 export function imageEstimateUsd(img: { width: number; height: number }, p: Prices): number {
   return imageCostUsd(Math.min(IMAGE_TOKEN_CEILING, Math.ceil((img.width * img.height) / 750)), p);
@@ -205,10 +223,37 @@ export function createExtractor(d: ExtractorDeps): Extractor {
   };
 
   /**
+   * After a voice note's paid call was answered, its booking failed (Fix 3): withSttHold threw from settle or record,
+   * or, if costUsd threw, from booking the ceiling. Best effort, each failure ignored: the cost is booked late (the
+   * ceiling when nothing was priced and withSttHold could not book it), and the provider's copy is deleted (free), since
+   * finishMedia never notes it. The error is then marked paid, so the processor fails the file instead of paying again.
+   */
+  const paidButUnbooked = async (e: unknown, paid: { result: VoiceResult; costUsd?: number }, ceiling: number, input: ExtractInput): Promise<object> => {
+    const lateUsd = paid.costUsd ?? (e instanceof SttBookingError ? ceiling : null);
+    if (lateUsd !== null) {
+      try {
+        d.spend.record('stt', lateUsd, `${label(input)} (booked late)`);
+      } catch {
+        // the first error is the one thrown
+      }
+    }
+    const ref = paid.result.forgetRef;
+    if (ref !== null && d.voice) {
+      try {
+        await d.voice.forget(ref);
+      } catch {
+        // the copy stays on the provider's account; the first error is the one thrown
+      }
+    }
+    return paidVoiceError(e);
+  };
+
+  /**
    * A voice note or audio file (V2, V4, V5, N2). The size bound, never the sender's declared length, limits what is
-   * held; the cap goes to prepare, which refuses a note measured longer than it (so an honest note recorded below
-   * 12 kbit/s, whose size bound is too low, is still sent). The transcript is stored as an 'extract': the media kind
-   * already says it is a transcript.
+   * held; the cap goes to prepare, which converts the note and refuses it when measured longer than the cap (so an
+   * honest note recorded below 12 kbit/s, whose size bound is too low, is still sent). Without ffmpeg nothing can be
+   * converted, so canSend is false and the note is format_not_supported, for transcribe-voice later. The transcript is
+   * stored as an 'extract': the media kind already says it is a transcript.
    */
   const transcribe = async (input: ExtractInput): Promise<Extraction> => {
     const v = d.voice ?? null;
@@ -217,27 +262,36 @@ export function createExtractor(d: ExtractorDeps): Extractor {
     const bound = sizeBoundSeconds(input.bytes.length);
     const maxSeconds = d.maxVoiceSeconds ?? DEFAULT_MAX_VOICE_SECONDS;
     if (bound > maxSeconds) return { ...NONE, note: TOO_LONG };
-    if (!v.canSend(input.mimeType)) return { ...NONE, note: FORMAT_NOT_SUPPORTED };
+    if (!v.canSend(input.mimeType)) return { ...NONE, note: FORMAT_NOT_SUPPORTED }; // no ffmpeg
     // Free and local, outside the hold: a conversion or measuring failure books nothing.
     let prepared: PreparedVoice;
     try {
-      prepared = await v.prepare({ mediaId: input.mediaId, path: input.path, mimeType: input.mimeType, maxSeconds });
+      prepared = await v.prepare({ mediaId: input.mediaId, path: input.path, maxSeconds });
     } catch (e) {
       if (e instanceof AudioError && e.code === 'too_long') return { ...NONE, note: TOO_LONG };
       throw e;
     }
     try {
       // The measured length may pass the bound (a low bitrate) up to the cap and its tolerance: the hold covers it.
-      const ceiling = v.ceilingUsd(Math.max(bound, prepared.measuredSeconds ?? 0));
+      const ceiling = v.ceilingUsd(Math.max(bound, prepared.measuredSeconds));
       if (ceiling > d.spend.capUsd) return { ...NONE, note: TOO_COSTLY };
       if (input.revoked?.()) return REVOKED;
-      const { result } = await withSttHold(d.spend, ceiling, label(input), async () => {
-        const r = await v.transcribe(prepared);
-        const costUsd = v.costUsd({
-          maxSeconds: bound, billedSeconds: r.billedSeconds, declaredSeconds: input.declaredSeconds, measuredSeconds: prepared.measuredSeconds,
-        });
-        return { result: r, costUsd };
-      });
+      // Kept outside the hold, so a booking that fails after the provider answered is still known to be paid (Fix 3).
+      const paid: { result?: VoiceResult; costUsd?: number } = {};
+      let result: VoiceResult;
+      try {
+        ({ result } = await withSttHold(d.spend, ceiling, label(input), async () => {
+          const r = await v.transcribe(prepared);
+          paid.result = r;
+          // Billed, else measured, else the bound: never the declared length (Fix 2).
+          const costUsd = v.costUsd({ maxSeconds: bound, billedSeconds: r.billedSeconds, measuredSeconds: prepared.measuredSeconds });
+          paid.costUsd = costUsd;
+          return { result: r, costUsd };
+        }));
+      } catch (e) {
+        if (paid.result === undefined) throw e; // the call failed: withSttHold booked it by its outcome
+        throw await paidButUnbooked(e, { ...paid, result: paid.result }, ceiling, input);
+      }
       const forget = result.forgetRef === null ? null : { provider: result.provider, ref: result.forgetRef };
       if (result.text === '') return { ...NONE, note: NO_SPEECH, forget };
       return { textKind: 'extract', text: capStored(result.text), pageCount: null, note: null, forget };

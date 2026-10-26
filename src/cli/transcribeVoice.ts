@@ -19,9 +19,10 @@ import { CorrectionError } from './corrections.ts';
  * - No key, no provider and no network: the rules and prices come from src/stt/voice.ts (canSendVoice,
  *   sizeBoundSeconds, voiceCeilingUsd). STT_API_KEY is never read here.
  * - A file whose size allows more than STT_MAX_SECONDS is too long and never queued (N4), as the extractor would refuse
- *   it. A file the transcriber could not send (it needs ffmpeg, which is missing, N2) is never queued either, so it does
- *   not finish format_not_supported again; it stays listed, and running this again once ffmpeg is there picks it up.
- *   The service looks for ffmpeg only when it starts, so the line says to restart it after installing ffmpeg.
+ *   it. Every file is converted with ffmpeg first, whatever its format and provider (Task 5 review round 1), so without
+ *   ffmpeg no file is queued (canSendVoice), and none finishes format_not_supported again; they stay listed, and
+ *   running this again once ffmpeg is there picks them up. The service looks for ffmpeg only when it starts, so the
+ *   line says to restart it after installing ffmpeg.
  * - The output is counts, minutes, dollars and the setting names only: never a file name, a path, a transcript or a key.
  */
 
@@ -79,7 +80,7 @@ export async function transcribeVoiceCommand(opts: { client?: string; yes: boole
     const bounded = rows.map((r) => ({ ...r, seconds: r.fileSize === null ? Infinity : sizeBoundSeconds(r.fileSize) }));
     const fits = bounded.filter((r) => r.seconds <= env.STT_MAX_SECONDS);
     const tooLong = bounded.length - fits.length;
-    // ffmpeg is looked for only when a file cannot go as it is.
+    // ffmpeg is looked for only when a file that fits would need it: since every file is converted, any file.
     const ffmpeg = fits.some((r) => !canSendVoice(provider, r.mimeType, false)) ? await hasFfmpeg(deps) : false;
     const send = fits.filter((r) => canSendVoice(provider, r.mimeType, ffmpeg));
     const needsFfmpeg = fits.length - send.length;
