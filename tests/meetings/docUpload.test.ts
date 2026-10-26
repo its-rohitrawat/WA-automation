@@ -12,7 +12,7 @@ const meeting: MeetingDocInput = {
   title: 'Logo review',
   startedAt: '2026-10-19T08:35:00Z',
   seconds: 600,
-  attendees: [{ name: 'Asha Verma', email: 'asha@studio.in', team: true }],
+  attendees: [{ name: 'Asha Verma', email: 'asha@studio.example', team: true }],
   summary: { whatHappened: 'Done.', discussion: [], decisions: [], actionItems: [], openQuestions: [], conclusion: '', speakers: [] },
   segments: [{ start: 0, end: 2, speaker: 'A', text: 'Hello' }],
   transcriptCut: false,

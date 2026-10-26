@@ -54,8 +54,16 @@ export interface NewMeeting {
   driveSeconds: number | null;
   /** Why it was stored as no_access (for example http_404); missing means none. */
   errorCode?: string | null;
+  /**
+   * A no_access meeting matched as internal (it then has no title, attendees or names): stored as the note
+   * FOUND_INTERNAL_NOTE, so `meeting list` labels it internal. Missing means false.
+   */
+  foundInternal?: boolean;
   createdAt: string;
 }
+
+/** The note of a no_access meeting that was matched as internal (see NewMeeting.foundInternal). */
+export const FOUND_INTERNAL_NOTE = 'found_internal';
 
 export interface MeetingRow {
   id: number;
@@ -246,13 +254,15 @@ function notQueued(what: string, id: number, extra = ''): never {
 export function insertFound(db: Db, m: NewMeeting): number | null {
   const r = db
     .prepare(`INSERT INTO meetings (recording, conference, drive_file_id, meeting_code, title, started_at, ended_at, attendees, participants, client_id,
-        match_kind, status, drive_seconds, error_code, created_at, updated_at)
+        match_kind, status, drive_seconds, error_code, note, created_at, updated_at)
       VALUES (@recording, @conference, @driveFileId, @meetingCode, @title, @startedAt, @endedAt, @attendees, @participants, @clientId,
-        @matchKind, @status, @driveSeconds, @errorCode, @createdAt, @createdAt)
+        @matchKind, @status, @driveSeconds, @errorCode, @note, @createdAt, @createdAt)
       ON CONFLICT (recording) DO NOTHING`)
     .run({
-      ...m,
+      recording: m.recording, conference: m.conference, driveFileId: m.driveFileId, meetingCode: m.meetingCode, title: m.title,
+      clientId: m.clientId, matchKind: m.matchKind, status: m.status, driveSeconds: m.driveSeconds,
       errorCode: m.errorCode ?? null,
+      note: m.foundInternal === true ? FOUND_INTERNAL_NOTE : null,
       startedAt: normalised('insertFound', 'startedAt', m.startedAt),
       endedAt: m.endedAt === null ? null : normalised('insertFound', 'endedAt', m.endedAt),
       createdAt: canonical('insertFound', 'createdAt', m.createdAt),
@@ -452,6 +462,17 @@ export function deleteSttForget(db: Db, id: number): void {
   db.prepare('DELETE FROM stt_forget WHERE id = ?').run(id);
 }
 
+/**
+ * Provider copies the agent has given up deleting for now: the last try is used (maxAttempts), or the copy's provider
+ * is not the one set up now (`provider`; 'none' when speech-to-text is off), so forgetPending skips it. A count only,
+ * for `cli status`.
+ */
+export function sttForgetsGivenUp(db: Db, o: { maxAttempts: number; provider: ProviderId | 'none' }): number {
+  return (
+    db.prepare('SELECT COUNT(*) AS n FROM stt_forget WHERE attempts >= ? OR provider <> ?').get(o.maxAttempts, o.provider) as { n: number }
+  ).n;
+}
+
 /** Stores a queued meeting's speech-part bookkeeping as it is now (written before and after every part's call). Throws when not queued. */
 export function setSttParts(db: Db, id: number, parts: SttPartRow[], at: string): void {
   const json = toJson('setSttParts', 'stt_parts', SttPartsSchema, parts);
@@ -515,11 +536,17 @@ export function finishMeeting(db: Db, id: number, f: { note?: string; at: string
   if (n === 0) notQueued('finishMeeting', id, ' at stage doc or later');
 }
 
-/** A person assigns an unassigned or internal meeting to a client; it is queued. Returns false for any other status. */
+/**
+ * A person assigns an unassigned or internal meeting to a client; it is queued with fresh attempts. A no_access meeting
+ * without a client (found as unassigned or internal) can be assigned too: the download is tried again for that client.
+ * Returns false for any other meeting.
+ */
 export function assignMeeting(db: Db, id: number, clientId: number, at: string): boolean {
   return (
-    db.prepare(`UPDATE meetings SET status = 'queued', client_id = @clientId, match_kind = 'human', error_code = NULL, next_attempt_at = NULL, updated_at = @at
-      WHERE id = @id AND status IN ('unassigned', 'internal')`).run({ id, clientId, at: canonical('assignMeeting', 'at', at) }).changes === 1
+    db.prepare(`UPDATE meetings SET status = 'queued', client_id = @clientId, match_kind = 'human', error_code = NULL, attempts = 0, next_attempt_at = NULL,
+        note = CASE WHEN note = '${FOUND_INTERNAL_NOTE}' THEN NULL ELSE note END, updated_at = @at
+      WHERE id = @id AND (status IN ('unassigned', 'internal') OR (status = 'no_access' AND client_id IS NULL))`)
+      .run({ id, clientId, at: canonical('assignMeeting', 'at', at) }).changes === 1
   );
 }
 
@@ -529,12 +556,18 @@ export function skipMeeting(db: Db, id: number, at: string): boolean {
     .changes === 1;
 }
 
-/** `meeting retry`: a failed or no-access meeting is queued again at its last finished stage, with fresh attempts. Returns false for any other status. */
-export function retryMeeting(db: Db, id: number, at: string): boolean {
-  return (
-    db.prepare(`UPDATE meetings SET status = 'queued', attempts = 0, next_attempt_at = NULL, error_code = NULL, updated_at = ?
-      WHERE id = ? AND status IN ('failed', 'no_access')`).run(canonical('retryMeeting', 'at', at), id).changes === 1
-  );
+/**
+ * `meeting retry`: a failed or no-access meeting with a client is queued again at its last finished stage, with fresh
+ * attempts. One without a client (found as unassigned or internal) cannot be processed: it goes back to unassigned, for
+ * `meeting assign`. Returns the new status, or null for any other meeting.
+ */
+export function retryMeeting(db: Db, id: number, at: string): 'queued' | 'unassigned' | null {
+  const r = db
+    .prepare(`UPDATE meetings SET status = CASE WHEN client_id IS NULL THEN 'unassigned' ELSE 'queued' END, attempts = 0, next_attempt_at = NULL,
+        error_code = NULL, note = CASE WHEN client_id IS NULL AND note = '${FOUND_INTERNAL_NOTE}' THEN NULL ELSE note END, updated_at = ?
+      WHERE id = ? AND status IN ('failed', 'no_access') RETURNING status`)
+    .get(canonical('retryMeeting', 'at', at), id) as { status: 'queued' | 'unassigned' } | undefined;
+  return r?.status ?? null;
 }
 
 /** Deliberately without title, attendees or names: the workbook shows unassigned meetings to everyone who opens it. */
@@ -637,13 +670,17 @@ export interface MeetingListRow {
   /** '' for internal meetings. Shown on the operator's console only. */
   title: string;
   errorCode: string | null;
+  /** A no_access meeting matched as internal (FOUND_INTERNAL_NOTE). */
+  foundInternal: boolean;
 }
 
 /** Meetings with one of these statuses, newest first. */
 export function listMeetingsByStatus(db: Db, statuses: readonly MeetingStatus[]): MeetingListRow[] {
   if (statuses.length === 0) return [];
-  return db
-    .prepare(`SELECT id, started_at AS startedAt, client_id AS clientId, status, title, error_code AS errorCode FROM meetings
+  const rows = db
+    .prepare(`SELECT id, started_at AS startedAt, client_id AS clientId, status, title, error_code AS errorCode,
+        COALESCE(note = '${FOUND_INTERNAL_NOTE}', 0) AS foundInternal FROM meetings
       WHERE status IN (${statuses.map(() => '?').join(', ')}) ORDER BY started_at DESC, id DESC`)
-    .all(...statuses) as MeetingListRow[];
+    .all(...statuses) as (Omit<MeetingListRow, 'foundInternal'> & { foundInternal: number })[];
+  return rows.map((r) => ({ ...r, foundInternal: r.foundInternal === 1 }));
 }

@@ -190,6 +190,30 @@ describe('app with meetings', () => {
     await stopApp(app);
   });
 
+  it.each([
+    ['with action items (the tracker step asks)', false],
+    ['with nothing said (only the meeting service asks)', true],
+  ])('a finished meeting’s rebuild carries the meeting counts of now, not those of the last tick: %s', async (_name, silent) => {
+    const stt = new FakeSttProvider();
+    if (silent) stt.transcribe = async () => ({ model: 'scribe', segments: [], billedSeconds: null, raw: {} });
+    const { app, db } = setup({ stt });
+    // At each rebuild request: the meeting's status, and the done count the workbook's health would be built with.
+    const seen: { status: string | undefined; done: number | undefined }[] = [];
+    const schedule = app.publisher.schedule.bind(app.publisher);
+    vi.spyOn(app.publisher, 'schedule').mockImplementation(() => {
+      seen.push({ status: getMeeting(db, 1)?.status, done: app.health.snapshot().meetings?.stats.done });
+      schedule();
+    });
+    await vi.waitFor(() => expect(['summarised', 'tracked']).toContain(getMeeting(db, 1)?.stage), SLOW_IO);
+    await vi.advanceTimersByTimeAsync(6 * MINUTE);
+    await vi.waitFor(() => expect(getMeeting(db, 1)?.status).toBe('done'), SLOW_IO);
+    // Every request after the finish (the tracker step's, the service's) comes before any tick could refresh the counts.
+    const afterDone = seen.filter((x) => x.status === 'done');
+    expect(afterDone.length).toBeGreaterThanOrEqual(1);
+    expect(afterDone.every((x) => x.done === 1)).toBe(true);
+    await stopApp(app);
+  });
+
   it('a meeting with nothing said is done without a tracker call, and still asks for a rebuild', async () => {
     const stt = new FakeSttProvider();
     stt.transcribe = async () => ({ model: 'scribe', segments: [], billedSeconds: null, raw: {} });

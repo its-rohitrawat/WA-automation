@@ -3,11 +3,11 @@ import { DomainSchema, isDomain, PUBLIC_MAIL_DOMAINS } from '../../src/config/do
 
 describe('isDomain', () => {
   it('accepts ordinary domains', () => {
-    for (const d of ['client.com', 'sharma-interiors.in', 'mail.client.co.in', 'a1.io']) expect(isDomain(d)).toBe(true);
+    for (const d of ['client.example', 'sharma-interiors.example', 'mail.client.co.example', 'a1.example']) expect(isDomain(d)).toBe(true);
   });
 
   it('refuses things that are not domains', () => {
-    for (const d of ['', 'client', 'client.', '.client.com', 'a@client.com', 'client..com', '-client.com', 'client-.com', 'cli ent.com', 'client.c', 'client.123', 'Client.com', 'http://client.com']) {
+    for (const d of ['', 'client', 'client.', '.client.example', 'a@client.example', 'client..example', '-client.example', 'client-.example', 'cli ent.example', 'client.c', 'client.123', 'Client.example', 'http://client.example']) {
       expect(isDomain(d)).toBe(false);
     }
   });
@@ -15,7 +15,7 @@ describe('isDomain', () => {
 
 describe('DomainSchema', () => {
   it('trims and lower-cases', () => {
-    expect(DomainSchema.parse('  Client.COM ')).toBe('client.com');
+    expect(DomainSchema.parse('  Client.EXAMPLE ')).toBe('client.example');
   });
 
   it('refuses every public mail domain, in any case', () => {

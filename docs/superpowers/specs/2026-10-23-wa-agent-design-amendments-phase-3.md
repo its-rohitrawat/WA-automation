@@ -20,7 +20,8 @@ Phase 3 (meeting summaries) changed or refined the spec as listed below. Where t
 - Only the agent's own temporary files are deleted: the downloaded video once the audio exists, and the split parts once the transcript is stored. Deletion is limited to the agent's names inside `data/meetings/tmp/`.
 - Nothing in the founder's Drive is changed, moved or deleted.
 - Logs hold ids, counts and error codes only, never titles, names, emails or transcript text.
-- **Provider copies.** Where the provider keeps a copy of a transcript (ElevenLabs), the agent deletes it once the transcript is stored on the PC, and keeps a durable to-do list of copies still to delete (the `stt_forget` table, below), so a restart does not forget one.
+- Internal meetings keep only ids (meeting, recording, Drive file, Meet code), the start time and status.
+- **Provider copies.** Where the provider keeps a copy of a transcript (ElevenLabs), the agent deletes it once the transcript is stored on the PC, and keeps a durable to-do list of copies still to delete (the `stt_forget` table, below), so a restart does not forget one. Each copy is tried at most 5 times; copies given up (last try used, or made by a provider that is no longer `STT_PROVIDER`) are counted on a line of their own in `cli status`, not on the Health line.
 - **Before the first real meeting** clients are told (§11.4), and the provider account's privacy settings are set as for voice notes: Sarvam opted out of training with 0-day retention; ElevenLabs "Improve the models for everyone" off.
 
 ## §6.4 Validation, §7.7 Into the tracker (M5: B)
@@ -50,7 +51,8 @@ Replaces the Gmail polling.
 
 - Every `MEETING_POLL_MINUTES` (default 5), list Meet conferences that started in the last 72 hours, and take each recording whose file is ready, with its Drive file id. Attendees come from the Calendar invite with the same Meet code, not from a guess by title and time.
 - Each recording is recorded once in `meetings` (below).
-- **Older recordings (M3).** Only conferences on or after `MEETINGS_SINCE` are picked up; the default is the day meetings are first switched on, stored so a restart does not move it. Older ones only through `meeting backfill`, which shows the count and cost ceiling and queues nothing without `--yes`.
+- Each check looks back 72 hours. If the service was stopped for more than 3 days, run `meeting backfill --since <the day it stopped>`.
+- **Older recordings (M3).** Only conferences on or after `MEETINGS_SINCE` are picked up; empty means from the day the service first ran with meetings on, stored so a restart does not move it. Older ones only through `meeting backfill`, which shows the count and cost ceiling and stores nothing without `--yes`; with `--yes` it stores them and the client ones are queued. It needs the service stopped, with or without `--yes`.
 - **Length (M4).** `MEETING_MAX_MINUTES` (default 180, range 10–300). Longer meetings are marked too long and not transcribed. Drive's own length is checked first, so a too-long recording is not downloaded; ffmpeg then measures the local copy, which is trusted.
 - A recording the agent cannot open (for example one in someone else's Drive) becomes "no access"; `meeting check` shows this on day one.
 
@@ -77,7 +79,7 @@ Replaces the list.
 - Matching happens before anything is downloaded or sent anywhere. Only active clients count.
 - Exactly one client: processed. None, or more than one (including title and domain pointing at different clients): **Unassigned**, until `meeting assign`.
 - **The transcript guess is dropped** (old step 3): Claude never picks the client.
-- **Internal meetings:** an invite, at least one attendee besides the mailbox, every attendee in `TEAM_EMAIL_DOMAINS`, and no client name in the title. They are counted, never downloaded, transcribed, summarised or listed in the workbook, and keep only their id, start time and status. A meeting with no invite or no attendees is never internal.
+- **Internal meetings:** an invite, at least one attendee besides the mailbox, every attendee in `TEAM_EMAIL_DOMAINS`, and no client name or keyword in the title. They are counted, never downloaded, transcribed, summarised or listed in the workbook, and keep only ids (meeting, recording, Drive file, Meet code), the start time and status. A meeting with no invite or no attendees is never internal.
 - **Config rules (M8).** `emailDomains` must look like domains and public mail domains are refused (also in `TEAM_EMAIL_DOMAINS`); `meetingKeywords` are at least 3 characters once normalised, at most 20 per client. A client name too short to match (for example "AB") is allowed, but such a client is matched only by keyword or domain.
 
 ## §7.6 Summary
@@ -94,7 +96,7 @@ Replaces the list.
 ## §9.3 Spend cap (M4)
 
 - Speech is booked as `stt` and the summary as `ai`, both under `DAILY_SPEND_CAP_USD`. A spend hold keeps its kind, and holds still open at shutdown are booked by their kind.
-- Speech holds the list price for the measured length; the summary holds the usual estimate; the tracker update is as today.
+- Speech holds the list price for the measured length; the summary holds an estimate that counts Devanagari at one token per character (other text at two characters per token), plus a full answer; the tracker update is as today.
 - Expected cost of a 1-hour meeting at list prices: speech $0.22 (ElevenLabs) to about $0.41 (Sarvam), summary about $0.15–0.25, tracker update about $0.05–0.08; **about $0.45–0.70 in all**. This replaces the §14 line "~$0.10–0.20 + transcription".
 
 ## §9.4 Alerts
@@ -104,10 +106,13 @@ Replaces the list.
 ## §10 Correction CLI
 
 - New: `meeting list [--all]`, `meeting assign <id> <CODE>`, `meeting skip <id>`, `meeting retry <id>`, `meeting backfill --since YYYY-MM-DD [--yes]`, and the read-only `meeting check` (Task 12).
+- `meeting list` without `--all` shows only meetings that need a person: unassigned, queued, failed and no access. Internal meetings show no title; a no-access meeting found as internal is labelled internal.
+- `meeting retry` of a failed or no-access meeting without a client (found as unassigned or internal) cannot queue it, since there is no client to process it for: it goes back to unassigned (a workbook rebuild is requested) and the command says to use `meeting assign`. `meeting assign` also takes a no-access meeting without a client, and queues it for that client with fresh attempts.
+- `meeting check` lists the last 7 days' recordings not stored yet (stored ones are only counted); the service may keep running.
 
 ## Store: schema v7
 
-- **`meetings`**, one row per recording: its conference, Drive file id and Meet code; title, start and end; attendees and signed-in participants; the client and how it was matched (title, domain or human); status and last finished stage; lengths, audio path, speech part records, transcript, summary and Doc id; note, error code, attempts and next attempt. A check forbids titles, attendees or participants on internal rows. `tasks` and `decisions` gain an additive `meeting_id` (plan "The `meetings` table (v7)").
+- **`meetings`**, one row per recording: its conference, Drive file id and Meet code; title, start and end; attendees and signed-in participants; the client and how it was matched (title, domain or human); status and last finished stage; lengths, audio path, speech part records, transcript, summary and Doc id; note, error code, attempts and next attempt. A check forbids titles, attendees or participants on internal rows. A no-access row found as internal has the note `found_internal`, so `meeting list` can label it. `tasks` and `decisions` gain an additive `meeting_id` (plan "The `meetings` table (v7)").
 - **`stt_forget`**: provider copies of speech answers still to delete, by the provider's own id for the copy only, never what was said. A row is removed once the provider has deleted its copy; tries are capped and spaced.
 - **Migration order.** v6 is Phase 2c's reports table and lands first; meetings take v7. Migrations now fail loudly at startup when a database is at a version above one that was never applied, instead of silently skipping it. Applied migrations are never edited.
 

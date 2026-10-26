@@ -258,7 +258,7 @@ export class MeetingProcessor {
       return;
     }
     refreshMeetingFacts(d.db, m.id, { title, attendees: facts.attendees, participants }, this.#now());
-    d.log.info({ meetingId: m.id, attendees: facts.attendees.length, participants: participants.length }, 'meeting attendees read again');
+    d.log.info({ meetingId: m.id, attendeeCount: facts.attendees.length, participantCount: participants.length }, 'meeting attendees read again');
   }
 
   /** audio -> transcribed. The signal stops it only before a new part starts or while splitting. */

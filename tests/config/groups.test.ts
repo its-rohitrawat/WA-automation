@@ -70,13 +70,13 @@ describe('example allow-list', () => {
 
 describe('meeting matching rules', () => {
   it('lower-cases and trims emailDomains', () => {
-    const [c] = parseGroupsFile(valid({ emailDomains: [' SharmaInteriors.IN ', 'sharma.co.in'] }));
-    expect(c!.emailDomains).toEqual(['sharmainteriors.in', 'sharma.co.in']);
+    const [c] = parseGroupsFile(valid({ emailDomains: [' SharmaInteriors.EXAMPLE ', 'sharma.co.example'] }));
+    expect(c!.emailDomains).toEqual(['sharmainteriors.example', 'sharma.co.example']);
   });
 
   it('refuses an emailDomains entry that is not a domain, naming where it is', () => {
-    for (const d of ['sharma', 'ops@sharma.in', '', 'https://sharma.in']) {
-      expect(() => parseGroupsFile(valid({ emailDomains: ['sharma.in', d] }))).toThrowError(/clients\.0\.emailDomains\.1 must look like a domain/);
+    for (const d of ['sharma', 'ops@sharma.example', '', 'https://sharma.example']) {
+      expect(() => parseGroupsFile(valid({ emailDomains: ['sharma.example', d] }))).toThrowError(/clients\.0\.emailDomains\.1 must look like a domain/);
     }
   });
 

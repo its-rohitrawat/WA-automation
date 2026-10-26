@@ -34,6 +34,15 @@ describe('formatStatus', () => {
     expect(out).toMatch(/SHA\s+Sharma Interiors\s+queued 0\s+no batches yet/);
   });
 
+  it('shows the speech-to-text copies that could not be deleted, on a status line of their own, even with no report', () => {
+    expect(formatStatus({ ...base, snapshot })).not.toContain('Speech copies');
+    expect(formatStatus({ ...base, snapshot, sttCopiesLeft: 0 })).not.toContain('Speech copies');
+    const one = formatStatus({ ...base, snapshot, sttCopiesLeft: 1 });
+    expect(one).toContain('Speech copies: 1 speech-to-text copy could not be deleted from the provider; see SETUP (Meeting summaries)');
+    expect(one).toContain('Health:      ✅ Connected · last update 19 Oct 13:25'); // the health line is unchanged
+    expect(formatStatus({ ...base, snapshot: undefined, sttCopiesLeft: 3 })).toContain('Speech copies: 3 speech-to-text copies could not be deleted');
+  });
+
   it('says when the service has not reported yet', () => {
     const out = formatStatus({ ...base, snapshot: undefined });
     expect(out).toContain('no report yet (is the service running?)');

@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { domainOf, inDomains, matchClient, type MatchableClient, type MatchInput } from '../../src/meetings/match.ts';
 
-const SHARMA: MatchableClient = { clientId: 1, name: 'Sharma Interiors', emailDomains: ['sharma.in'], meetingKeywords: ['villa project'] };
-const MEHTA: MatchableClient = { clientId: 2, name: 'Mehta Foods', emailDomains: ['mehtafoods.com'], meetingKeywords: ['mft'] };
+const SHARMA: MatchableClient = { clientId: 1, name: 'Sharma Interiors', emailDomains: ['sharma.example'], meetingKeywords: ['villa project'] };
+const MEHTA: MatchableClient = { clientId: 2, name: 'Mehta Foods', emailDomains: ['mehtafoods.example'], meetingKeywords: ['mft'] };
 const CLIENTS = [SHARMA, MEHTA];
-const TEAM = ['studio.in'];
+const TEAM = ['studio.example'];
 
-const me = { email: 'owner@studio.in', self: true };
+const me = { email: 'owner@studio.example', self: true };
 const input = (title: string, emails: string[] = [], hasInvite = true, withSelf = true): MatchInput => ({
   title,
   hasInvite,
@@ -15,17 +15,17 @@ const input = (title: string, emails: string[] = [], hasInvite = true, withSelf 
 
 describe('domains', () => {
   it('reads the domain after the last @, lower-cased', () => {
-    expect(domainOf(' Asha@Sharma.IN ')).toBe('sharma.in');
+    expect(domainOf(' Asha@Sharma.EXAMPLE ')).toBe('sharma.example');
     expect(domainOf('conference-room')).toBeNull();
     expect(domainOf('a@')).toBeNull();
-    expect(domainOf('a@.sharma.in')).toBeNull();
-    expect(domainOf('a@sharma..in')).toBeNull();
+    expect(domainOf('a@.sharma.example')).toBeNull();
+    expect(domainOf('a@sharma..example')).toBeNull();
   });
   it('matches equal domains and subdomains only', () => {
-    expect(inDomains('sharma.in', ['sharma.in'])).toBe(true);
-    expect(inDomains('mail.sharma.in', ['sharma.in'])).toBe(true);
-    expect(inDomains('notsharma.in', ['sharma.in'])).toBe(false);
-    expect(inDomains('sharma.in.evil.com', ['sharma.in'])).toBe(false);
+    expect(inDomains('sharma.example', ['sharma.example'])).toBe(true);
+    expect(inDomains('mail.sharma.example', ['sharma.example'])).toBe(true);
+    expect(inDomains('notsharma.example', ['sharma.example'])).toBe(false);
+    expect(inDomains('sharma.example.evil.example', ['sharma.example'])).toBe(false);
   });
 });
 
@@ -55,10 +55,10 @@ describe('matchClient by title', () => {
     expect(matchClient(input('Sharma Interiors and Mehta Foods intro'), CLIENTS, TEAM)).toEqual({ kind: 'unassigned', reason: 'ambiguous' });
   });
   it('keeps the title match when the domain points at the same client', () => {
-    expect(matchClient(input('Sharma Interiors review', ['ravi@sharma.in']), CLIENTS, TEAM)).toEqual({ kind: 'client', clientId: 1, by: 'title' });
+    expect(matchClient(input('Sharma Interiors review', ['ravi@sharma.example']), CLIENTS, TEAM)).toEqual({ kind: 'client', clientId: 1, by: 'title' });
   });
   it('is ambiguous when title and domain point at different clients', () => {
-    expect(matchClient(input('Sharma Interiors review', ['ravi@mehtafoods.com']), CLIENTS, TEAM)).toEqual({ kind: 'unassigned', reason: 'ambiguous' });
+    expect(matchClient(input('Sharma Interiors review', ['ravi@mehtafoods.example']), CLIENTS, TEAM)).toEqual({ kind: 'unassigned', reason: 'ambiguous' });
   });
   it('matches Devanagari titles and keywords', () => {
     const c: MatchableClient = { clientId: 4, name: 'Gupta Traders', emailDomains: [], meetingKeywords: ['गुप्ता जी'] };
@@ -73,37 +73,37 @@ describe('matchClient by title', () => {
   });
   it('ignores inactive clients', () => {
     const inactive = { ...SHARMA, active: false };
-    expect(matchClient(input('Sharma Interiors review', ['ravi@sharma.in']), [inactive, MEHTA], TEAM)).toEqual({ kind: 'unassigned', reason: 'none' });
+    expect(matchClient(input('Sharma Interiors review', ['ravi@sharma.example']), [inactive, MEHTA], TEAM)).toEqual({ kind: 'unassigned', reason: 'none' });
   });
 });
 
 describe('matchClient by domain', () => {
   it('matches an exact domain', () => {
-    expect(matchClient(input('Weekly call', ['ravi@sharma.in']), CLIENTS, TEAM)).toEqual({ kind: 'client', clientId: 1, by: 'domain' });
+    expect(matchClient(input('Weekly call', ['ravi@sharma.example']), CLIENTS, TEAM)).toEqual({ kind: 'client', clientId: 1, by: 'domain' });
   });
   it('matches a subdomain, case-insensitively', () => {
-    expect(matchClient(input('Weekly call', ['Ravi@Mail.Sharma.IN']), CLIENTS, TEAM)).toEqual({ kind: 'client', clientId: 1, by: 'domain' });
+    expect(matchClient(input('Weekly call', ['Ravi@Mail.Sharma.EXAMPLE']), CLIENTS, TEAM)).toEqual({ kind: 'client', clientId: 1, by: 'domain' });
   });
   it('is ambiguous when attendees come from two clients', () => {
-    expect(matchClient(input('Weekly call', ['ravi@sharma.in', 'om@mehtafoods.com']), CLIENTS, TEAM)).toEqual({ kind: 'unassigned', reason: 'ambiguous' });
+    expect(matchClient(input('Weekly call', ['ravi@sharma.example', 'om@mehtafoods.example']), CLIENTS, TEAM)).toEqual({ kind: 'unassigned', reason: 'ambiguous' });
   });
   it('ignores attendees without an @', () => {
-    expect(matchClient(input('Weekly call', ['sharma.in']), CLIENTS, TEAM)).toEqual({ kind: 'unassigned', reason: 'none' });
+    expect(matchClient(input('Weekly call', ['sharma.example']), CLIENTS, TEAM)).toEqual({ kind: 'unassigned', reason: 'none' });
   });
   it('is unassigned when nothing matches', () => {
-    expect(matchClient(input('Weekly call', ['someone@elsewhere.com']), CLIENTS, TEAM)).toEqual({ kind: 'unassigned', reason: 'none' });
+    expect(matchClient(input('Weekly call', ['someone@elsewhere.example']), CLIENTS, TEAM)).toEqual({ kind: 'unassigned', reason: 'none' });
   });
 });
 
 describe('matchClient internal', () => {
   it('is internal when every other attendee is on the team', () => {
-    expect(matchClient(input('Team standup', ['asha@studio.in', 'dev@eng.studio.in']), CLIENTS, TEAM)).toEqual({ kind: 'internal' });
+    expect(matchClient(input('Team standup', ['asha@studio.example', 'dev@eng.studio.example']), CLIENTS, TEAM)).toEqual({ kind: 'internal' });
   });
   it('reads the team domain list case-insensitively', () => {
-    expect(matchClient(input('Team standup', ['asha@STUDIO.in']), CLIENTS, ['Studio.IN'])).toEqual({ kind: 'internal' });
+    expect(matchClient(input('Team standup', ['asha@STUDIO.example']), CLIENTS, ['Studio.EXAMPLE'])).toEqual({ kind: 'internal' });
   });
   it('is never internal without an invite', () => {
-    expect(matchClient(input('Team standup', ['asha@studio.in'], false), CLIENTS, TEAM)).toEqual({ kind: 'unassigned', reason: 'none' });
+    expect(matchClient(input('Team standup', ['asha@studio.example'], false), CLIENTS, TEAM)).toEqual({ kind: 'unassigned', reason: 'none' });
   });
   it('is not internal with no attendees, or only the mailbox itself', () => {
     expect(matchClient(input('Team standup', [], true, false), CLIENTS, TEAM)).toEqual({ kind: 'unassigned', reason: 'none' });
@@ -113,9 +113,9 @@ describe('matchClient internal', () => {
     expect(matchClient(input('Team standup', ['Board room']), CLIENTS, TEAM)).toEqual({ kind: 'unassigned', reason: 'none' });
   });
   it('is not internal when one attendee is outside the team', () => {
-    expect(matchClient(input('Team standup', ['asha@studio.in', 'x@elsewhere.com']), CLIENTS, TEAM)).toEqual({ kind: 'unassigned', reason: 'none' });
+    expect(matchClient(input('Team standup', ['asha@studio.example', 'x@elsewhere.example']), CLIENTS, TEAM)).toEqual({ kind: 'unassigned', reason: 'none' });
   });
   it('is not internal when the title names a client', () => {
-    expect(matchClient(input('Sharma Interiors prep', ['asha@studio.in']), CLIENTS, TEAM)).toEqual({ kind: 'client', clientId: 1, by: 'title' });
+    expect(matchClient(input('Sharma Interiors prep', ['asha@studio.example']), CLIENTS, TEAM)).toEqual({ kind: 'client', clientId: 1, by: 'title' });
   });
 });

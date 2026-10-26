@@ -16,10 +16,10 @@ import { FakeMeetingsApi } from '../helpers/fakeMeetings.ts';
 
 const PHASES = ['Discovery', 'Design', 'Development', 'Review', 'Launch'];
 const SHARMA: ClientConfig = {
-  groupId: '120363000000000001@g.us', name: 'Sharma Interiors', code: 'SHA', phases: PHASES, emailDomains: ['sharma.in'], meetingKeywords: ['villa project'],
+  groupId: '120363000000000001@g.us', name: 'Sharma Interiors', code: 'SHA', phases: PHASES, emailDomains: ['sharma.example'], meetingKeywords: ['villa project'],
 };
 const MEHTA: ClientConfig = {
-  groupId: '120363000000000002@g.us', name: 'Mehta Foods', code: 'MEH', phases: PHASES, emailDomains: ['mehtafoods.com'], meetingKeywords: [],
+  groupId: '120363000000000002@g.us', name: 'Mehta Foods', code: 'MEH', phases: PHASES, emailDomains: ['mehtafoods.example'], meetingKeywords: [],
 };
 const GUPTA: ClientConfig = {
   groupId: '120363000000000003@g.us', name: 'Gupta Traders', code: 'GUP', phases: PHASES, emailDomains: [], meetingKeywords: [],
@@ -28,7 +28,7 @@ const GUPTA: ClientConfig = {
 const NOW = '2026-10-23T06:00:00.000Z';
 const HOUR = 3_600_000;
 const ago = (hours: number): string => new Date(Date.parse(NOW) - hours * HOUR).toISOString();
-const SETTINGS: WatcherSettings = { teamDomains: ['studio.in'], maxMinutes: 180, since: '2026-10-01' };
+const SETTINGS: WatcherSettings = { teamDomains: ['studio.example'], maxMinutes: 180, since: '2026-10-01' };
 
 interface ConfSpec {
   id: string;
@@ -60,7 +60,7 @@ function addConference(api: FakeMeetingsApi, s: ConfSpec): void {
   const code = s.code === undefined ? `code-${s.id}` : s.code;
   api.codes.set(space, code);
   if (code !== null && s.invite !== null) {
-    api.invites.set(code, s.invite ?? { title: 'Sharma Interiors review', attendees: [{ email: 'owner@studio.in', name: 'Owner', self: true }, { email: 'Ravi@Sharma.in', name: 'Ravi', self: false }] });
+    api.invites.set(code, s.invite ?? { title: 'Sharma Interiors review', attendees: [{ email: 'owner@studio.example', name: 'Owner', self: true }, { email: 'Ravi@Sharma.example', name: 'Ravi', self: false }] });
   }
   if (s.names) api.signedInNames.set(name, s.names);
   for (const r of recs) {
@@ -116,12 +116,12 @@ describe('titleFromFileName', () => {
 
 describe('cleanEmail', () => {
   it('keeps a plain address, lower-cased', () => {
-    expect(cleanEmail('Ravi.K+x@Mail.Sharma.IN')).toBe('ravi.k+x@mail.sharma.in');
+    expect(cleanEmail('Ravi.K+x@Mail.Sharma.EXAMPLE')).toBe('ravi.k+x@mail.sharma.example');
   });
   it('drops anything that is not one plain address', () => {
     for (const e of [
-      'ravi@sharma.in\nx@evil.com', 'ra\u200bvi@sharma.in', 'ravi @sharma.in', ' ravi@sharma.in', 'ravi@sharma.in\u0000', '@sharma.in',
-      'a@b@sharma.in', 'ravi', 'ravi@', 'ravi@sharma', 'ravi@.sharma.in', 'ravi@sharma..in', `${'a'.repeat(250)}@x.in`,
+      'ravi@sharma.example\nx@evil.example', 'ra\u200bvi@sharma.example', 'ravi @sharma.example', ' ravi@sharma.example', 'ravi@sharma.example\u0000', '@sharma.example',
+      'a@b@sharma.example', 'ravi', 'ravi@', 'ravi@sharma', 'ravi@.sharma.example', 'ravi@sharma..example', `${'a'.repeat(250)}@x.example`,
     ]) {
       expect(cleanEmail(e)).toBeNull();
     }
@@ -131,7 +131,7 @@ describe('cleanEmail', () => {
 const facts = (o: Partial<RowFacts> = {}): RowFacts => ({
   recording: 'conferenceRecords/c1/recordings/r1', conference: 'conferenceRecords/c1', driveFileId: 'f1', meetingCode: 'abc-defg-hij',
   startedAt: ago(3), endedAt: ago(2), createdAt: NOW, title: 'Sharma Interiors review',
-  attendees: [{ email: 'ravi@sharma.in', name: 'Ravi', team: false }], participants: ['Ravi'],
+  attendees: [{ email: 'ravi@sharma.example', name: 'Ravi', team: false }], participants: ['Ravi'],
   match: { kind: 'client', clientId: 1, by: 'title' }, durationMs: 45 * 60_000, noAccessCode: null, maxMinutes: 180, ...o,
 });
 const LONG = 181 * 60_000;
@@ -142,11 +142,15 @@ describe('buildRow status order', () => {
   it('internal first: minimal data, no_access when the file was refused, even when too long', () => {
     const minimal = { title: '', endedAt: null, attendees: [], participants: [], clientId: null, matchKind: null, driveSeconds: null };
     expect(buildRow(facts({ match: INTERNAL, durationMs: LONG }))).toMatchObject({ ...minimal, status: 'internal', errorCode: null });
-    expect(buildRow(facts({ match: INTERNAL, durationMs: null, noAccessCode: 'http_404' }))).toMatchObject({ ...minimal, status: 'no_access', errorCode: 'http_404' });
+    expect(buildRow(facts({ match: INTERNAL, durationMs: LONG })).foundInternal).toBeUndefined();
+    expect(buildRow(facts({ match: INTERNAL, durationMs: null, noAccessCode: 'http_404' }))).toMatchObject({
+      ...minimal, status: 'no_access', errorCode: 'http_404', foundInternal: true,
+    });
   });
   it('then no_access, keeping the client match', () => {
     expect(buildRow(facts({ durationMs: null, noAccessCode: 'http_403' }))).toMatchObject({ status: 'no_access', clientId: 1, matchKind: 'title', errorCode: 'http_403', driveSeconds: null });
     expect(buildRow(facts({ match: NONE, durationMs: null, noAccessCode: 'http_404' }))).toMatchObject({ status: 'no_access', clientId: null });
+    expect(buildRow(facts({ match: NONE, durationMs: null, noAccessCode: 'http_404' })).foundInternal).toBeUndefined();
   });
   it('then too_long by Drive length, keeping the client match', () => {
     expect(buildRow(facts({ durationMs: LONG }))).toMatchObject({ status: 'too_long', clientId: 1, driveSeconds: 181 * 60, errorCode: null });
@@ -167,29 +171,29 @@ describe('MeetingWatcher.discover', () => {
       invite: {
         title: 'Weekly',
         attendees: [
-          { email: 'om@mehtafoods.com\nx@sharma.in', name: 'A', self: false },
-          { email: 'ra\u200bvi@sharma.in', name: 'B', self: false },
-          { email: 'asha@studio.in', name: 'C', self: false },
-          { email: 'x@elsewhere.com', name: 'D', self: false },
+          { email: 'om@mehtafoods.example\nx@sharma.example', name: 'A', self: false },
+          { email: 'ra\u200bvi@sharma.example', name: 'B', self: false },
+          { email: 'asha@studio.example', name: 'C', self: false },
+          { email: 'x@elsewhere.example', name: 'D', self: false },
         ],
       },
     });
     await watcher().discover(signal);
     const [row] = allRows(db);
-    expect(row!.attendees).toEqual([{ email: 'asha@studio.in', name: 'C', team: true }, { email: 'x@elsewhere.com', name: 'D', team: false }]);
+    expect(row!.attendees).toEqual([{ email: 'asha@studio.example', name: 'C', team: true }, { email: 'x@elsewhere.example', name: 'D', team: false }]);
     expect(row).toMatchObject({ status: 'unassigned', clientId: null }); // the dropped addresses match no client
   });
 
   it('ignores a client email domain that has a team domain under it, logging the client code only', async () => {
-    const clash: ClientConfig = { ...MEHTA, emailDomains: ['mehtafoods.com', 'studio.in'] };
+    const clash: ClientConfig = { ...MEHTA, emailDomains: ['mehtafoods.example', 'studio.example'] };
     const { lines, log } = capture();
-    const w = watcher({ log, clients: [SHARMA, clash], settings: { teamDomains: ['eng.studio.in'] } });
-    addConference(api, { id: 'c1', start: ago(3), invite: { title: 'Weekly', attendees: [{ email: 'x@studio.in', name: null, self: false }] } });
+    const w = watcher({ log, clients: [SHARMA, clash], settings: { teamDomains: ['eng.studio.example'] } });
+    addConference(api, { id: 'c1', start: ago(3), invite: { title: 'Weekly', attendees: [{ email: 'x@studio.example', name: null, self: false }] } });
     await w.discover(signal);
     expect(allRows(db)[0]).toMatchObject({ status: 'unassigned', clientId: null });
     const text = lines.join('');
     expect(text).toContain('MEH');
-    expect(text).not.toContain('studio.in');
+    expect(text).not.toContain('studio.example');
   });
 
 
@@ -205,7 +209,7 @@ describe('MeetingWatcher.discover', () => {
       meetingCode: 'code-c1',
       title: 'Sharma Interiors review',
       startedAt: ago(3),
-      attendees: [{ email: 'owner@studio.in', name: 'Owner', team: true }, { email: 'ravi@sharma.in', name: 'Ravi', team: false }],
+      attendees: [{ email: 'owner@studio.example', name: 'Owner', team: true }, { email: 'ravi@sharma.example', name: 'Ravi', team: false }],
       participants: ['Ravi Sharma', 'Owner'],
       clientId: 1,
       matchKind: 'title',
@@ -253,7 +257,7 @@ describe('MeetingWatcher.discover', () => {
     addConference(api, {
       id: 'c1',
       start: ago(3),
-      invite: { title: longTitle, attendees: [{ email: 'Ravi@Sharma.in', name: `Ra\u200bvi\n${'y'.repeat(150)}`, self: false }, { email: 'board-room', name: 'Board', self: false }] },
+      invite: { title: longTitle, attendees: [{ email: 'Ravi@Sharma.example', name: `Ra\u200bvi\n${'y'.repeat(150)}`, self: false }, { email: 'board-room', name: 'Board', self: false }] },
       names: ['  ', 'Ravi\tS', 'z'.repeat(150)],
     });
     await watcher().discover(signal);
@@ -261,15 +265,15 @@ describe('MeetingWatcher.discover', () => {
     expect(row!.title.startsWith('Sharma Interiors x')).toBe(true);
     expect([...row!.title]).toHaveLength(200);
     expect(row!.attendees).toHaveLength(1);
-    expect(row!.attendees[0]!.email).toBe('ravi@sharma.in');
+    expect(row!.attendees[0]!.email).toBe('ravi@sharma.example');
     expect(row!.attendees[0]!.name!.startsWith('Ravi y')).toBe(true);
     expect([...row!.attendees[0]!.name!]).toHaveLength(100);
     expect(row!.participants).toEqual(['Ravi S', 'z'.repeat(100)]);
   });
 
   it('matches by domain, and leaves unmatched meetings unassigned', async () => {
-    addConference(api, { id: 'c1', start: ago(3), invite: { title: 'Weekly', attendees: [{ email: 'om@mail.mehtafoods.com', name: null, self: false }] } });
-    addConference(api, { id: 'c2', start: ago(2), invite: { title: 'Weekly', attendees: [{ email: 'x@elsewhere.com', name: null, self: false }] } });
+    addConference(api, { id: 'c1', start: ago(3), invite: { title: 'Weekly', attendees: [{ email: 'om@mail.mehtafoods.example', name: null, self: false }] } });
+    addConference(api, { id: 'c2', start: ago(2), invite: { title: 'Weekly', attendees: [{ email: 'x@elsewhere.example', name: null, self: false }] } });
     await watcher().discover(signal);
     const [a, b] = allRows(db);
     expect(a).toMatchObject({ clientId: 2, matchKind: 'domain', status: 'queued' });
@@ -288,7 +292,7 @@ describe('MeetingWatcher.discover', () => {
   });
 
   it('stores internal meetings with ids, start time and status only', async () => {
-    const invite: InviteInfo = { title: 'Team standup', attendees: [{ email: 'owner@studio.in', name: 'Owner', self: true }, { email: 'asha@studio.in', name: 'Asha', self: false }] };
+    const invite: InviteInfo = { title: 'Team standup', attendees: [{ email: 'owner@studio.example', name: 'Owner', self: true }, { email: 'asha@studio.example', name: 'Asha', self: false }] };
     addConference(api, { id: 'c1', start: ago(3), invite, names: ['Asha'] });
     addConference(api, { id: 'c2', start: ago(2), invite, files: { filec2r1: { durationMs: 400 * 60_000 } } });
     await watcher().discover(signal);
@@ -380,7 +384,7 @@ describe('MeetingWatcher.discover', () => {
     expect(text).toContain('http_503');
     expect(text).toContain('conferenceRecords/c3/recordings/a');
     expect(text).toContain('http_404');
-    for (const secret of ['Sharma Interiors review', 'sharma.in', 'Ravi', 'Owner']) expect(text).not.toContain(secret);
+    for (const secret of ['Sharma Interiors review', 'sharma.example', 'Ravi', 'Owner']) expect(text).not.toContain(secret);
 
     api.findInvite = real;
     clock.advance(5 * 60_000);
@@ -389,7 +393,7 @@ describe('MeetingWatcher.discover', () => {
   });
 
   it('stores an unreadable internal recording as no_access with the minimal data only', async () => {
-    const invite: InviteInfo = { title: 'Team standup', attendees: [{ email: 'asha@studio.in', name: 'Asha', self: false }] };
+    const invite: InviteInfo = { title: 'Team standup', attendees: [{ email: 'asha@studio.example', name: 'Asha', self: false }] };
     addConference(api, { id: 'c1', start: ago(3), invite, names: ['Asha'] });
     api.files.delete('filec1r1');
     await watcher().discover(signal);
@@ -406,16 +410,16 @@ describe('MeetingWatcher.discover', () => {
   });
 
   it('ignores a client email domain that is, or is under, a team domain, logging the client code only', async () => {
-    const clash: ClientConfig = { ...MEHTA, emailDomains: ['mehtafoods.com', 'studio.in', 'eng.studio.in'] };
+    const clash: ClientConfig = { ...MEHTA, emailDomains: ['mehtafoods.example', 'studio.example', 'eng.studio.example'] };
     const { lines, log } = capture();
     const w = watcher({ log, clients: [SHARMA, clash] });
-    addConference(api, { id: 'c1', start: ago(4), invite: { title: 'Weekly', attendees: [{ email: 'x@elsewhere.com', name: null, self: false }, { email: 'dev@eng.studio.in', name: null, self: false }] } });
-    addConference(api, { id: 'c2', start: ago(3), invite: { title: 'Weekly', attendees: [{ email: 'om@mehtafoods.com', name: null, self: false }] } });
+    addConference(api, { id: 'c1', start: ago(4), invite: { title: 'Weekly', attendees: [{ email: 'x@elsewhere.example', name: null, self: false }, { email: 'dev@eng.studio.example', name: null, self: false }] } });
+    addConference(api, { id: 'c2', start: ago(3), invite: { title: 'Weekly', attendees: [{ email: 'om@mehtafoods.example', name: null, self: false }] } });
     await w.discover(signal);
     expect(allRows(db).map((r) => [r.status, r.clientId])).toEqual([['unassigned', null], ['queued', 2]]);
     const text = lines.join('');
     expect(text).toContain('MEH');
-    expect(text).not.toContain('studio.in');
+    expect(text).not.toContain('studio.example');
 
     lines.length = 0;
     w.setClients([SHARMA, clash]);
@@ -490,10 +494,10 @@ describe('meetingsSince (M3)', () => {
 
 describe('inviteFacts and cleanNames', () => {
   it('clean an invite and names as discovery stores them', () => {
-    const f = inviteFacts({ title: '  Brand\nreview\u202e ', attendees: [{ email: 'A@Sharma.in', name: ' Asha ', self: false }, { email: 'not an email', name: 'X', self: false }] }, ['studio.in']);
+    const f = inviteFacts({ title: '  Brand\nreview\u202e ', attendees: [{ email: 'A@Sharma.example', name: ' Asha ', self: false }, { email: 'not an email', name: 'X', self: false }] }, ['studio.example']);
     expect(f.title).toBe('Brand review');
-    expect(f.attendees).toEqual([{ email: 'a@sharma.in', name: 'Asha', team: false }]);
-    expect(f.invited).toEqual([{ email: 'a@sharma.in', name: ' Asha ', self: false }]);
+    expect(f.attendees).toEqual([{ email: 'a@sharma.example', name: 'Asha', team: false }]);
+    expect(f.invited).toEqual([{ email: 'a@sharma.example', name: ' Asha ', self: false }]);
     expect(inviteFacts(null, [])).toEqual({ invited: [], attendees: [], title: '' });
     expect(cleanNames(['Asha', ' Asha ', '', 'Ravi'])).toEqual(['Asha', 'Ravi']);
   });

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, type PathLike } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, type PathLike } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
@@ -224,6 +224,23 @@ describe('prepareAudio', () => {
     expect(readdirSync(tmp())).toEqual([]);
   });
 
+  // A junction (a directory link, which Windows lets any user make) stands in for a file at a work file's name.
+  it('prepareAudio leaves a link at tmp/<id>.mp4.part alone', async () => {
+    const outside = tempDir('meet-audio-outside-');
+    writeFileSync(join(outside, 'keep.txt'), 'not ours');
+    mkdirSync(tmp(), { recursive: true });
+    const link = join(tmp(), `${id}.mp4.part`);
+    symlinkSync(outside, link, 'junction');
+    const err = await prepareAudio(row(), deps(), new AbortController().signal).catch((e: unknown) => e);
+    // The download cannot write over the link (EEXIST): an error for the processor to retry, or a deferral.
+    expect(err).toBeInstanceOf(Error);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readFileSync(join(outside, 'keep.txt'), 'utf8')).toBe('not ours');
+    expect(readdirSync(outside)).toEqual(['keep.txt']);
+    expect(existsSync(finalAbs())).toBe(false);
+    expect(row()).toMatchObject({ status: 'queued', stage: 'found' });
+  });
+
   it('a file over the download cap is too_long (too_big), with nothing left in tmp', async () => {
     api.failWith.set('download', new DownloadTooBigError());
     const err = await prepareAudio(row(), deps(), new AbortController().signal).catch((e: unknown) => e);
@@ -407,6 +424,35 @@ describe('cleanupTemp', () => {
     expect(text).toContain(`"meetingId":${failed}`);
     expect(text).not.toContain('notes.txt');
     expect(text).not.toContain(dataDir.replace(/\\/g, '\\\\'));
+  });
+
+  // Junctions (directory links, which Windows lets any user make without admin rights) stand in for the files.
+  it('cleanupTemp never follows or removes links', () => {
+    const done = meetingAt('done');
+    const outside = tempDir('meet-clean-outside-');
+    writeFileSync(join(outside, 'keep.txt'), 'not ours');
+    const fileLink = join(tmp(), `${done}.mp3`);
+    symlinkSync(outside, fileLink, 'junction');
+    mkdirSync(join(tmp(), `${done}-parts`));
+    const partLink = join(tmp(), `${done}-parts`, 'part-001.mp3');
+    symlinkSync(outside, partLink, 'junction');
+    writeFileSync(join(tmp(), `${done}-parts`, 'part-000.mp3'), 'p');
+
+    const lines: string[] = [];
+    const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
+    const r = cleanupTemp(db, dataDir, log);
+
+    expect(lstatSync(fileLink).isSymbolicLink()).toBe(true);
+    expect(lstatSync(partLink).isSymbolicLink()).toBe(true);
+    expect(readdirSync(join(tmp(), `${done}-parts`)).sort()).toEqual(['part-000.mp3', 'part-001.mp3']);
+    expect(readdirSync(outside)).toEqual(['keep.txt']);
+    expect(readFileSync(join(outside, 'keep.txt'), 'utf8')).toBe('not ours');
+    expect(r.removed).toBe(0);
+    expect(r.kept).toBeGreaterThanOrEqual(2);
+    const text = lines.join('');
+    expect(text).toContain('meeting parts folder holds unexpected entries; left alone');
+    expect(text).toContain(`"meetingId":${done}`);
+    expect(text).not.toContain('keep.txt');
   });
 
   it('removes the folders of parts cut again for another provider (<id>-parts-<n>) once transcribed, and only then', () => {

@@ -59,21 +59,28 @@ export function meetingListLines(db: Db, all: boolean): string[] {
   if (rows.length === 0) return [all ? 'No meetings yet.' : 'No meetings need you. (npm run cli -- meeting list --all shows every meeting.)'];
   const codes = new Map(listClients(db, false).map((c) => [c.id, c.code]));
   return rows.map((r) => {
-    const internal = r.status === 'internal';
+    // A no_access meeting matched as internal keeps no title either, and is labelled internal.
+    const internal = r.status === 'internal' || (r.clientId === null && r.foundInternal);
     const who = internal ? 'internal' : r.clientId === null ? 'unassigned' : (codes.get(r.clientId) ?? 'unassigned');
     const status = `${LABELS[r.status]}${(r.status === 'failed' || r.status === 'no_access') && r.errorCode ? ` (${r.errorCode})` : ''}`;
     return `${String(r.id).padStart(5)}  ${stamp(r.startedAt)}  ${who.padEnd(11)}${status.padEnd(26)}${internal ? '' : r.title}`.trimEnd();
   });
 }
 
-/** `meeting assign`: an unassigned or internal meeting goes to a client and is queued (match kind human). */
+/**
+ * `meeting assign`: an unassigned or internal meeting goes to a client and is queued (match kind human). So does a
+ * no-access meeting without a client (found as unassigned or internal): its download is tried again for that client.
+ */
 export function assignMeetingToClient(db: Db, rawId: string, clientCode: string, now: Date): { id: number; code: string } {
   const m = findMeeting(db, rawId);
   const c = getClientByCode(db, clientCode.trim().toUpperCase());
   if (!c) throw new CorrectionError(`No client with code ${clientCode}`);
   if (!c.active) throw new CorrectionError(`Client ${c.code} is not in the allow-list`);
-  if (m.status !== 'unassigned' && m.status !== 'internal') {
-    throw new CorrectionError(`Meeting ${m.id} is ${LABELS[m.status]}; only unassigned or internal meetings can be assigned`);
+  const clientlessNoAccess = m.status === 'no_access' && m.clientId === null;
+  if (m.status !== 'unassigned' && m.status !== 'internal' && !clientlessNoAccess) {
+    throw new CorrectionError(
+      `Meeting ${m.id} is ${LABELS[m.status]}; only unassigned or internal meetings can be assigned (and no-access ones without a client)`,
+    );
   }
   tx(db, () => {
     if (!assignMeeting(db, m.id, c.id, now.toISOString())) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
@@ -95,16 +102,30 @@ export function skipMeetingById(db: Db, rawId: string, now: Date): number {
 }
 
 /**
- * `meeting retry`: a failed or no-access meeting is queued again. No rebuild is requested: the workbook lists only
- * unassigned and done meetings, and a retry changes neither (the meeting's own finish requests one later).
+ * `meeting retry`: a failed or no-access meeting is queued again. No rebuild is requested for that: the workbook lists
+ * only unassigned and done meetings, and a retry changes neither (the meeting's own finish requests one later).
+ * One without a client (found as unassigned or internal) cannot be processed: it goes back to unassigned, which the
+ * workbook lists (a rebuild is requested), and the person assigns it with `meeting assign`.
  */
-export function retryMeetingById(db: Db, rawId: string, now: Date): number {
+export function retryMeetingById(db: Db, rawId: string, now: Date): { id: number; status: 'queued' | 'unassigned' } {
   const m = findMeeting(db, rawId);
   if (m.status !== 'failed' && m.status !== 'no_access') {
     throw new CorrectionError(`Meeting ${m.id} is ${LABELS[m.status]}; only failed or no-access meetings can be retried`);
   }
-  if (!retryMeeting(db, m.id, now.toISOString())) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
-  return m.id;
+  const status = tx(db, () => {
+    const s = retryMeeting(db, m.id, now.toISOString());
+    if (s === null) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
+    if (s === 'unassigned') requestRebuild(db, now);
+    return s;
+  });
+  return { id: m.id, status };
+}
+
+/** What `meeting retry` prints. */
+export function retryLine(r: { id: number; status: 'queued' | 'unassigned' }): string {
+  return r.status === 'queued'
+    ? `Meeting ${r.id} queued again.`
+    : `Meeting ${r.id} has no client, so it cannot be processed; it is unassigned again. Assign it to a client with: npm run cli -- meeting assign ${r.id} <CODE>`;
 }
 
 // ---- Commands that need Google ----
