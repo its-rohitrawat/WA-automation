@@ -140,7 +140,7 @@ Details and every status message: "Morning report" in [SETUP.md](SETUP.md).
 
 Voice notes can be turned into text by an open-source model that runs on this Mac, on its processor only. No audio leaves the Mac, there is no key and it costs nothing. It is **off** until you set `VOICE_STT_PROVIDER=local`.
 
-**In this version the service does not use it yet.** These steps build the engine and let you test it on real notes with a check command. Wiring it into the service comes in a later update; until then, voice notes are not transcribed.
+**The service transcribes voice notes once `VOICE_STT_PROVIDER=local` is set and the service is restarted.** These steps build the engine, let you test it on real notes with a check command, then switch it on.
 
 Two models are offered; you choose one with the check below:
 
@@ -228,7 +228,7 @@ STT_LOCAL_MODEL=/opt/stt/models/Voxtral-Mini-3B-2507-Q4_K_M.gguf
 
 ### Test it on real notes (waagent window)
 
-The check takes any audio file: a WhatsApp voice note (`.opus` or `.ogg`), `.mp3`, `.m4a` and so on. It converts the file with ffmpeg to the 16 kHz mono WAV the engine takes, in a temporary folder of its own that it removes afterwards, as the service will. It uses `FFMPEG_PATH` from `.env` when set, otherwise the `ffmpeg` on the PATH. A 16 kHz mono WAV is used as it is.
+The check takes any audio file: a WhatsApp voice note (`.opus` or `.ogg`), `.mp3`, `.m4a` and so on. It converts the file with ffmpeg to the 16 kHz mono WAV the engine takes, in a temporary folder of its own that it removes afterwards, as the service does. It uses `FFMPEG_PATH` from `.env` when set, otherwise the `ffmpeg` on the PATH. A 16 kHz mono WAV is used as it is.
 
 Make a private folder for the test notes, outside the code folder:
 
@@ -260,7 +260,7 @@ If the check says `Failed (...)`, it also says what to look at. `no_output` usua
 
 ### Then restart the service
 
-Normal Terminal window: `sudo launchctl kickstart -k system/com.wa-agent`. Wait one minute, then run `npm run cli -- status` in the waagent window. As said above, the service starts transcribing voice notes only after the later update.
+Normal Terminal window: `sudo launchctl kickstart -k system/com.wa-agent`. Wait one minute. After the restart, new voice notes are transcribed. For older ones, run `npm run cli -- transcribe-voice` in the waagent window (a dry run that only counts them), then `npm run cli -- transcribe-voice --yes`, which queues them for the running service. Run `npm run cli -- status`: if its Health line says the local speech engine is not set up, or ffmpeg not found, see "Voice note status lines" in SETUP.md.
 
 ## Reading SETUP.md on a Mac
 

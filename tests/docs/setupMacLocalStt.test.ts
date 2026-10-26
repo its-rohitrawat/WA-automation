@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parseEnv } from '../../src/config/env.ts';
+import { VOICE_PROBLEM_LINES } from '../../src/health/health.ts';
 
 const read = (path: string) => readFileSync(fileURLToPath(new URL(`../../${path}`, import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
 
@@ -37,10 +38,23 @@ describe('SETUP-mac.md: voice notes, local speech-to-text', () => {
     expect(end).toBeGreaterThan(start);
   });
 
-  it('says it is off until VOICE_STT_PROVIDER=local, and that the service does not use it yet', () => {
+  it('says it is off until VOICE_STT_PROVIDER=local, and that the service then transcribes voice notes after a restart', () => {
     expect(section).toMatch(/\*\*off\*\*[^\n]*`VOICE_STT_PROVIDER=local`/);
-    expect(section).toMatch(/does not use it yet/);
+    expect(section).toContain('The service transcribes voice notes once `VOICE_STT_PROVIDER=local` is set and the service is restarted.');
+    for (const stale of ['does not use it yet', 'later update', 'as the service will']) expect(section).not.toContain(stale);
+    expect(section).toContain('as the service does.');
     expect(parseEnv({}).VOICE_STT_PROVIDER).toBe('none');
+  });
+
+  it('after the restart: new notes are transcribed, transcribe-voice (dry run, then --yes) for older ones, status for the Health line', () => {
+    const restart = sub('Then restart the service');
+    expect(restart).toContain('new voice notes are transcribed');
+    expect(restart).toContain('`npm run cli -- transcribe-voice`');
+    expect(restart).toContain('a dry run');
+    expect(restart).toContain('`npm run cli -- transcribe-voice --yes`');
+    expect(restart).toContain('`npm run cli -- status`');
+    expect(restart).toContain('the local speech engine is not set up');
+    expect(restart).toContain('ffmpeg not found');
   });
 
   it('pins transcribe.cpp v0.4.1 and a whisper.cpp release, and builds both with cmake on all cores', () => {
@@ -95,5 +109,20 @@ describe('SETUP-mac.md: voice notes, local speech-to-text', () => {
 
   it('sets the four settings', () => {
     for (const s of ['VOICE_STT_PROVIDER=local', 'STT_LOCAL_ENGINE=voxtral', 'STT_LOCAL_BIN=/', 'STT_LOCAL_MODEL=/']) expect(section).toContain(s);
+  });
+});
+
+describe('SETUP.md: the voice-note Health lines match the code', () => {
+  it('lists every voice problem line exactly (without the ⚠️), each in its own row of "Voice note status lines"', () => {
+    const setup = read('docs/SETUP.md');
+    const start = setup.indexOf('\n### Voice note status lines\n');
+    expect(start).toBeGreaterThanOrEqual(0);
+    const section = setup.slice(start, setup.indexOf('\n#', start + 1));
+    const rows = section.split('\n').filter((l) => l.startsWith('| Voice notes are not being transcribed: '));
+    const lines = Object.values(VOICE_PROBLEM_LINES).map((l) => l.replace(/^⚠️ /, ''));
+    expect(lines).toHaveLength(3);
+    for (const line of lines) expect(rows.filter((r) => r.startsWith(`| ${line} |`)), line).toHaveLength(1);
+    // Plus the key-refused line, which is not a start-up problem.
+    expect(rows).toHaveLength(lines.length + 1);
   });
 });

@@ -193,3 +193,85 @@ describe('Health and shared files', () => {
     expect(readHealthSnapshot(db)).toBeUndefined();
   });
 });
+
+describe('Health and voice notes that cannot be transcribed (Phase 2b Task 10)', () => {
+  const NOT_SET_UP = '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_BIN)';
+  const NOT_SET_UP_MODEL = '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_MODEL)';
+  const NO_FFMPEG = '⚠️ Voice notes are not being transcribed: ffmpeg not found';
+
+  it('says the local speech engine is not set up, naming the setting, or that ffmpeg is missing', () => {
+    const { h } = setup();
+    h.setVoiceProblem('local_not_set_up_bin');
+    expect(h.line()).toEqual({ ok: false, text: NOT_SET_UP });
+    expect(h.workbookLine()).toEqual({ ok: false, text: NOT_SET_UP });
+    h.setVoiceProblem('local_not_set_up_model');
+    expect(h.line()).toEqual({ ok: false, text: NOT_SET_UP_MODEL });
+    expect(h.workbookLine()).toEqual({ ok: false, text: NOT_SET_UP_MODEL });
+    h.setVoiceProblem('no_ffmpeg');
+    expect(h.line()).toEqual({ ok: false, text: NO_FFMPEG });
+    expect(h.workbookLine()).toEqual({ ok: false, text: NO_FFMPEG });
+    h.setVoiceProblem(null);
+    expect(h.line().ok).toBe(true);
+  });
+
+  it('the lines sit with the key-refused line: after the long-wait and upload lines, before it, the budget line and low disk', () => {
+    const { h } = setup(() => 5e9);
+    h.setVoiceProblem('local_not_set_up_bin');
+    h.setMedia(counts({ pending: 3, stale: 1, sttRefused: 1, spendCap: 1 }));
+    expect(h.line().text).toBe('⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.');
+    h.setMedia(counts({ pending: 2, uploadFailed: 1, sttRefused: 1, spendCap: 1 }));
+    expect(h.line().text).toBe('⚠️ 1 file could not be uploaded to Drive. See docs/SETUP.md.');
+    h.setMedia(counts({ pending: 2, sttRefused: 1, spendCap: 1 }));
+    expect(h.line().text).toBe(NOT_SET_UP);
+    h.setVoiceProblem('no_ffmpeg');
+    expect(h.line().text).toBe(NO_FFMPEG);
+    h.setVoiceProblem(null);
+    expect(h.line().text).toBe(STT_REFUSED_LINE);
+    h.setVoiceProblem('no_ffmpeg');
+    h.setMedia(counts({ pending: 1, spendCap: 1 }));
+    expect(h.line().text).toBe(NO_FFMPEG);
+    h.setMedia(counts());
+    expect(h.line().text).toBe(NO_FFMPEG);
+    h.setVoiceProblem(null);
+    expect(h.line().text).toBe('⚠️ Low disk: 5.0 GB free');
+  });
+
+  it('yields to the spend-cap line when the cap is reached', () => {
+    const { h, spend } = setup();
+    h.setVoiceProblem('no_ffmpeg');
+    spend.record('ai', 1, 'batch 1');
+    expect(h.line().text).toBe(SPEND_LINE);
+  });
+
+  it('keeps the problem in the snapshot only when there is one, and reads snapshots without it', () => {
+    const { db, h } = setup();
+    h.persist();
+    expect(readHealthSnapshot(db)).toBeDefined();
+    expect('voiceProblem' in readHealthSnapshot(db)!).toBe(false);
+    h.setVoiceProblem('local_not_set_up_bin');
+    h.persist();
+    expect(readHealthSnapshot(db)!.voiceProblem).toBe('local_not_set_up_bin');
+    expect(readHealthSnapshot(db)!.line.text).toBe(NOT_SET_UP);
+    h.setVoiceProblem('local_not_set_up_model');
+    h.persist();
+    expect(readHealthSnapshot(db)!.voiceProblem).toBe('local_not_set_up_model');
+    expect(readHealthSnapshot(db)!.line.text).toBe(NOT_SET_UP_MODEL);
+    h.setVoiceProblem('no_ffmpeg');
+    h.persist();
+    expect(readHealthSnapshot(db)!.voiceProblem).toBe('no_ffmpeg');
+    // An older snapshot (before Task 10) has no voiceProblem and still reads.
+    const old = JSON.parse(JSON.stringify(h.snapshot())) as Record<string, unknown>;
+    delete old.voiceProblem;
+    setKv(db, 'health', JSON.stringify(old));
+    expect(readHealthSnapshot(db)).toBeDefined();
+    expect(readHealthSnapshot(db)!.voiceProblem).toBeUndefined();
+    // A value this version does not know (a newer writer) drops only that field, not the snapshot.
+    // 'local_not_set_up' is the value written before the problem named its setting: dropped the same way.
+    // So are the names every object inherits ("toString", "__proto__"): only the table's own keys count.
+    for (const unknown of ['engine_on_fire', 'local_not_set_up', 'toString', '__proto__', 'constructor', 'hasOwnProperty', 1, null, {}]) {
+      setKv(db, 'health', JSON.stringify({ ...old, voiceProblem: unknown }));
+      expect(readHealthSnapshot(db)).toBeDefined();
+      expect(readHealthSnapshot(db)!.voiceProblem).toBeUndefined();
+    }
+  });
+});

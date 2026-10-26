@@ -611,8 +611,19 @@ describe('status command', () => {
     add('openai', 'tr-3', 0); // not the provider set up now
     expect(mediaSttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'elevenlabs' })).toBe(2);
     db.close();
-    statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
+    statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', VOICE_STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
     expect(out()).toContain('Voice copies: 2 speech-to-text copies of voice notes could not be deleted from the provider; see SETUP (Voice notes)');
     expect(out()).not.toContain('Speech copies');
+    // VOICE_STT_PROVIDER decides, not STT_PROVIDER (Task 10): with voice notes off, or on the local engine (which keeps no
+    // copies), no copy can be deleted now, so all three are counted, though meetings still use elevenlabs.
+    for (const voice of ['none', 'local'] as const) {
+      lines.length = 0;
+      const env = parseEnv({
+        DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', VOICE_STT_PROVIDER: voice, STT_API_KEY: 'test-key',
+        ...(voice === 'local' ? { STT_LOCAL_BIN: join(dataDir, 'transcribe-cli'), STT_LOCAL_MODEL: join(dataDir, 'model.gguf') } : {}),
+      });
+      statusCommand(deps({ env }));
+      expect(out()).toContain('Voice copies: 3 speech-to-text copies of voice notes could not be deleted from the provider; see SETUP (Voice notes)');
+    }
   });
 });

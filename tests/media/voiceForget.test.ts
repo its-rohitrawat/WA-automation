@@ -149,6 +149,30 @@ describe('forgetVoiceCopies (N1)', () => {
     expect(await forgetVoiceCopies(db, el, log, { clock: manualClock(NOW) })).toBe(1);
   });
 
+  it('with a warned set (the service\'s), warns provider_unavailable once per row, still skipping it each time without counting', async () => {
+    const db = seededDb();
+    const a = copied(db, 'A', 'tr_1');
+    const { lines, log } = capturingLogger();
+    const warned = new Set<number>();
+    const openai = new FakeVoiceTranscriber({ provider: 'openai' });
+    const clock = manualClock(NOW);
+    expect(await forgetVoiceCopies(db, openai, log, { clock, warned })).toBe(0);
+    expect(await forgetVoiceCopies(db, openai, log, { clock, warned })).toBe(0);
+    expect(await forgetVoiceCopies(db, null, log, { clock, warned })).toBe(0);
+    const unavailable = (id: number) => lines.filter((l) => l.includes('"code":"provider_unavailable"') && l.includes(`"mediaId":${id}`));
+    expect(unavailable(a)).toHaveLength(1);
+    // A row noted later is warned about once too.
+    const b = copied(db, 'B', 'tr_2');
+    expect(await forgetVoiceCopies(db, openai, log, { clock, warned })).toBe(0);
+    expect(await forgetVoiceCopies(db, openai, log, { clock, warned })).toBe(0);
+    expect(unavailable(a)).toHaveLength(1);
+    expect(unavailable(b)).toHaveLength(1);
+    expect(rows(db).map((r) => r.attempts)).toEqual([0, 0]); // never counted
+    expect(openai.forgotten).toEqual([]);
+    // Set up again: both are deleted.
+    expect(await forgetVoiceCopies(db, new FakeVoiceTranscriber({ provider: 'elevenlabs' }), log, { clock, warned })).toBe(2);
+  });
+
   it('logs the media id, provider and a code only: never the copy\'s id', async () => {
     const db = seededDb();
     const id = copied(db, 'A', 'tr_secret_1');
