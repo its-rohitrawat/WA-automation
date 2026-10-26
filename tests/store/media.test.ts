@@ -4,7 +4,7 @@ import { syncClients } from '../../src/store/clients.ts';
 import { migrate, type Db } from '../../src/store/db.ts';
 import {
   claimMedia, countMediaForgetAttempt, deferMedia, deleteMediaForget, dueMediaIds, failMedia, finishMedia, getMedia, getMediaRef, insertMedia, markDownloaded,
-  mediaForMessages, mediaJob, mediaStats, messageRowId, pendingMediaForgets, queueVoiceBacklog, voiceBacklog, type MediaKind, type MediaStatus, type NewMedia, type TextKind,
+  mediaForMessages, mediaJob, mediaStats, mediaSttForgetsGivenUp, messageRowId, pendingMediaForgets, queueVoiceBacklog, voiceBacklog, type MediaKind, type MediaStatus, type NewMedia, type TextKind,
 } from '../../src/store/media.ts';
 import { MIGRATIONS } from '../../src/store/migrations.ts';
 import { applyRevoke, insertMessage, listUnprocessed, markProcessed, markProcessedIfUnchanged, upsertReaction } from '../../src/store/messages.ts';
@@ -731,5 +731,25 @@ describe('the queue of provider copies to delete (N1)', () => {
     deleteMediaForget(db, 2);
     expect(pendingMediaForgets(db, { nowIso: T0, maxAttempts: 5 }).map((f) => f.id)).toEqual([1, 3]);
     expect(forgets(db)).toHaveLength(2);
+  });
+  it('counts the copies given up: last try used, or a provider that is not set up now (status, Task 9)', () => {
+    const db = seededDb();
+    const add = (waId: string, provider: 'elevenlabs' | 'openai', ref: string) => {
+      const id = savedVoice(db, waId);
+      finishMedia(db, id, { ...TRANSCRIPT, forget: { provider, ref } });
+    };
+    expect(mediaSttForgetsGivenUp(db, { maxAttempts: 5, provider: 'elevenlabs' })).toBe(0);
+    add('A', 'elevenlabs', 'tr_1'); // last try used
+    add('B', 'elevenlabs', 'tr_2'); // still being tried
+    add('C', 'openai', 'tr_3'); // not the provider set up now
+    for (let i = 0; i < 5; i++) countMediaForgetAttempt(db, 1, T0);
+    countMediaForgetAttempt(db, 2, T0);
+    expect(mediaSttForgetsGivenUp(db, { maxAttempts: 5, provider: 'elevenlabs' })).toBe(2);
+    expect(mediaSttForgetsGivenUp(db, { maxAttempts: 6, provider: 'elevenlabs' })).toBe(1);
+    expect(mediaSttForgetsGivenUp(db, { maxAttempts: 5, provider: 'openai' })).toBe(2);
+    expect(mediaSttForgetsGivenUp(db, { maxAttempts: 5, provider: 'none' })).toBe(3);
+    // A copy the provider deleted is no longer counted; meeting copies (stt_forget) never are.
+    deleteMediaForget(db, 1);
+    expect(mediaSttForgetsGivenUp(db, { maxAttempts: 5, provider: 'elevenlabs' })).toBe(1);
   });
 });
