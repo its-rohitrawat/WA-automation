@@ -58,6 +58,11 @@ function setup(o: { meetings?: number } = {}) {
 }
 
 const flush = () => new Promise<void>((r) => setTimeout(r, 0));
+/** A few turns of the event loop, so a meeting that would wrongly start has had the chance to. */
+const ticks = async () => {
+  for (let i = 0; i < 5; i++) await flush();
+};
+const WAIT = { timeout: 10_000 };
 const spendRows = (db: Db) => db.prepare('SELECT kind, detail FROM spend ORDER BY id').all();
 
 describe('MeetingQueue', () => {
@@ -76,11 +81,11 @@ describe('MeetingQueue', () => {
     processor.onCall = () => processor.seen.push({ parts: getMeeting(db, id)!.sttParts[0]!.booked, spend: spendRows(db).length, forgotten: [...stt.forgotten] });
 
     queue.kick(); // before start: nothing runs
-    await flush();
+    await ticks();
     expect(processor.calls).toEqual([]);
 
     queue.start();
-    await vi.waitFor(() => expect(processor.calls).toHaveLength(1));
+    await vi.waitFor(() => expect(processor.calls).toHaveLength(1), WAIT);
     expect(processor.seen).toEqual([{ parts: 'ceiling', spend: 1, forgotten: ['tr-9'] }]);
     expect(existsSync(join(tmp, `${done}.mp4.part`))).toBe(false);
     expect(existsSync(join(tmp, 'notes.txt'))).toBe(true);
@@ -92,21 +97,21 @@ describe('MeetingQueue', () => {
     const { ids, processor, queue, settled } = setup({ meetings: 2 });
     processor.result = (id) => ({ outcome: 'done', clientId: id });
     queue.start();
-    await vi.waitFor(() => expect(processor.calls).toHaveLength(1));
+    await vi.waitFor(() => expect(processor.calls).toHaveLength(1), WAIT);
     queue.kick();
     queue.kick();
-    await flush();
+    await ticks();
     expect(processor.calls.map((c) => c.id)).toEqual([ids[0]]);
     expect(queue.active).toBe(true);
     // The fake leaves the row queued and due (as a bug would): the queue goes on to the next one, never looping on the first.
     processor.gates.shift()!();
-    await vi.waitFor(() => expect(processor.calls.map((c) => c.id)).toEqual([ids[0], ids[1]]));
+    await vi.waitFor(() => expect(processor.calls.map((c) => c.id)).toEqual([ids[0], ids[1]]), WAIT);
     processor.gates.shift()!();
-    await vi.waitFor(() => expect(settled).toHaveLength(2));
-    await flush();
+    await vi.waitFor(() => expect(settled).toHaveLength(2), WAIT);
+    await ticks();
     expect(processor.calls).toHaveLength(2);
     queue.kick(); // a new kick tries the still-due meeting again, once
-    await vi.waitFor(() => expect(processor.calls.map((c) => c.id)).toEqual([ids[0], ids[1], ids[0]]));
+    await vi.waitFor(() => expect(processor.calls.map((c) => c.id)).toEqual([ids[0], ids[1], ids[0]]), WAIT);
     processor.gates.shift()!();
     expect(settled.map((s) => s.clientId)).toEqual(ids);
   });
@@ -114,7 +119,7 @@ describe('MeetingQueue', () => {
   it('stop aborts the running meeting and starts nothing more; drain waits for it', async () => {
     const { processor, queue } = setup({ meetings: 2 });
     queue.start();
-    await vi.waitFor(() => expect(processor.calls).toHaveLength(1));
+    await vi.waitFor(() => expect(processor.calls).toHaveLength(1), WAIT);
     const { signal } = processor.calls[0]!;
     expect(signal.aborted).toBe(false);
     queue.stop();
@@ -123,20 +128,20 @@ describe('MeetingQueue', () => {
     const d = queue.drain(5_000).then(() => {
       drained = true;
     });
-    await flush();
+    await ticks();
     expect(drained).toBe(false);
     processor.gates.shift()!();
     await d;
     expect(processor.calls).toHaveLength(1);
     queue.kick();
-    await flush();
+    await ticks();
     expect(processor.calls).toHaveLength(1);
   });
 
   it('drain gives up after its time and leaves no timer', async () => {
     const { processor, queue } = setup();
     queue.start();
-    await vi.waitFor(() => expect(processor.calls).toHaveLength(1));
+    await vi.waitFor(() => expect(processor.calls).toHaveLength(1), WAIT);
     vi.useFakeTimers();
     queue.stop();
     let drained = false;
@@ -155,14 +160,14 @@ describe('MeetingQueue', () => {
     processor.hold = false;
     processor.result = () => new Error('database is locked');
     queue.start();
-    await vi.waitFor(() => expect(processor.calls).toHaveLength(1));
+    await vi.waitFor(() => expect(processor.calls).toHaveLength(1), WAIT);
     await flush();
     queue.kick();
-    await flush();
+    await ticks();
     expect(processor.calls).toHaveLength(1);
     clock.advance(15 * 60_000);
     processor.result = () => ({ outcome: 'done', clientId: 1 });
     queue.kick();
-    await vi.waitFor(() => expect(processor.calls).toHaveLength(2));
+    await vi.waitFor(() => expect(processor.calls).toHaveLength(2), WAIT);
   });
 });

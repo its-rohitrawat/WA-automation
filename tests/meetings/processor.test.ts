@@ -2,12 +2,12 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AiRefusalError } from '../../src/brain/claudeClient.ts';
+import { AiInvalidOutputError, AiRefusalError } from '../../src/brain/claudeClient.ts';
 import type { MeetingAi } from '../../src/brain/meetingClient.ts';
 import type { MeetingSummary } from '../../src/brain/meetingSchema.ts';
 import { Reconciler, type ReconcilerOptions } from '../../src/brain/reconciler.ts';
 import { MeetingDeferral } from '../../src/meetings/audio.ts';
-import { GoogleAccessError, GoogleNoAccessError } from '../../src/meetings/googleErrors.ts';
+import { GoogleAccessError, GoogleNoAccessError, GoogleTransientError } from '../../src/meetings/googleErrors.ts';
 import {
   deferralDueAt, MEETING_CLAIM_MS, MEETING_MAX_ATTEMPTS, MeetingProcessor, STT_UNAVAILABLE_MAX_MS, type MeetingProcessorDeps,
 } from '../../src/meetings/processor.ts';
@@ -179,6 +179,60 @@ describe('MeetingProcessor: found to done', () => {
     expect(m.participants).toEqual(['Asha Verma', 'Guest Person']);
     expect(w.api.callsOf('findInvite')).toEqual([['abc-defg-hij', w.api.callsOf('findInvite')[0]![1]]]);
     expect(w.drive.docs[0]!.name).toContain('Brand review');
+  });
+
+  it.each([
+    ['a no-access error on the invite', 'findInvite', new GoogleNoAccessError('http_404'), 'http_404'],
+    ['a transient error on the names', 'listSignedInNames', new GoogleTransientError('http_503'), 'http_503'],
+    ['a transient error on the file name', 'videoInfo', new GoogleTransientError('timeout'), 'timeout'],
+  ] as const)('%s while reading an assigned meeting again: logged, and the meeting goes on with the stored facts', async (_what, method, error, code) => {
+    const w = world({ meeting: { title: '', attendees: [], participants: [], matchKind: 'human' } });
+    w.api.invites.set('abc-defg-hij', { title: '', attendees: [{ email: 'asha@sharma.example', name: 'Asha Verma', self: false }] });
+    if (method === 'videoInfo') {
+      // Only the first file-name read fails; prepareAudio's own read then works.
+      const real = w.api.videoInfo.bind(w.api);
+      let n = 0;
+      w.api.videoInfo = async (id, sig) => {
+        if (n++ === 0) throw error;
+        return await real(id, sig);
+      };
+    } else {
+      w.api.failWith.set(method, error);
+    }
+    const warned: unknown[] = [];
+    const log = hookLogger((l) => l.msg.startsWith('meeting attendees could not be read again') && warned.push(l));
+    expect((await processor(w, { log }).process(w.id, signal())).outcome).toBe('done');
+    expect(row(w)).toMatchObject({ status: 'done', title: '', attendees: [], participants: [] });
+    expect(warned).toEqual([expect.objectContaining({ meetingId: w.id, code })]);
+  });
+
+  it('a stop or a sign-in refusal while reading again is not swallowed', async () => {
+    const w = world({ meeting: { attendees: [], matchKind: 'human' } });
+    w.api.failWith.set('findInvite', new GoogleAccessError('http_401'));
+    expect((await processor(w).process(w.id, signal())).outcome).toBe('deferred');
+    expect(row(w)).toMatchObject({ errorCode: 'google_auth', stage: 'found' });
+  });
+
+  it('reads an assigned meeting again at most once per service run', async () => {
+    const w = world({ meeting: { attendees: [], matchKind: 'human' } });
+    w.ff.convert = 'fail'; // the audio step fails, so the meeting stays at stage found
+    const p = processor(w);
+    await p.process(w.id, signal());
+    later(w, MINUTE);
+    await p.process(w.id, signal());
+    expect(w.api.callsOf('findInvite')).toHaveLength(1);
+    later(w, 5 * MINUTE);
+    await processor(w).process(w.id, signal()); // a restart reads it again
+    expect(w.api.callsOf('findInvite')).toHaveLength(2);
+  });
+
+  it('a queued meeting at stage tracked is finished as done', async () => {
+    const w = world();
+    advanceStage(w.db, w.id, 'tracked', { docFileId: 'doc-old' }, NOW);
+    expect((await processor(w).process(w.id, signal())).outcome).toBe('done');
+    expect(row(w)).toMatchObject({ status: 'done', stage: 'tracked' });
+    expect(w.api.calls).toEqual([]);
+    expect(w.trackerAi.calls).toEqual([]);
   });
 
   it('a meeting with attendees is not read again', async () => {
@@ -412,6 +466,41 @@ describe('MeetingProcessor: failures', () => {
     expect((await processor(w2).process(w2.id, signal())).outcome).toBe('failed');
     expect(row(w2)).toMatchObject({ status: 'too_long', errorCode: 'too_long_measured', audioSeconds: 12_000 });
     expect(w2.stt.calls).toEqual([]);
+  });
+
+  it('an invalid summary twice (summarizeMeeting tried once more) fails at once after exactly 2 booked calls', async () => {
+    const w = world();
+    at(w, 'transcribed');
+    const invalid = () => new AiInvalidOutputError('bad', { inputTokens: 1, outputTokens: 1, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }, 0.03);
+    const ai = new FakeMeetingAi([invalid(), invalid(), {}]);
+    expect((await processor(w, { ai }).process(w.id, signal())).outcome).toBe('failed');
+    expect(row(w)).toMatchObject({ status: 'failed', errorCode: 'ai_invalid_output', stage: 'transcribed' });
+    expect(ai.calls).toHaveLength(2);
+    expect(spendRows(w).map((r) => r.kind)).toEqual(['ai', 'ai']);
+  });
+
+  it('an invalid tracker answer twice fails at once after exactly 2 booked calls', async () => {
+    const w = world();
+    at(w, 'doc');
+    const invalid = () => new AiInvalidOutputError('bad', { inputTokens: 1, outputTokens: 1, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }, 0.02);
+    w.trackerAi = new FakeAi([invalid(), invalid(), addTask(w.id)]);
+    expect((await processor(w).process(w.id, signal())).outcome).toBe('failed');
+    expect(row(w)).toMatchObject({ status: 'failed', errorCode: 'ai_invalid_output', stage: 'doc' });
+    expect(w.trackerAi.calls).toHaveLength(2);
+    expect(spendRows(w).map((r) => r.kind)).toEqual(['ai', 'ai']);
+    expect(listTasks(w.db, 1)).toEqual([]);
+  });
+
+  it('a row missing what its stage needs is retried with a real code, and a plain Error is stored as unknown', async () => {
+    const w = world();
+    advanceStage(w.db, w.id, 'doc', { docFileId: 'doc-old' }, NOW); // no summary stored
+    expect((await processor(w).process(w.id, signal())).outcome).toBe('deferred');
+    expect(row(w)).toMatchObject({ errorCode: 'no_summary', attempts: 1 });
+
+    const w2 = world();
+    at(w2, 'doc');
+    expect((await processor(w2, { track: async () => { throw new Error('boom'); } }).process(w2.id, signal())).outcome).toBe('deferred');
+    expect(row(w2)).toMatchObject({ errorCode: 'unknown', attempts: 1 });
   });
 
   it('a refused summary fails at once: a retry would pay again', async () => {

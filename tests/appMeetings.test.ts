@@ -154,6 +154,13 @@ describe('app with meetings', () => {
     await stopApp(app);
   });
 
+  it('without the meeting scopes the health line shows the meeting access warning', async () => {
+    const { app } = setup({ scopes: false });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(app.health.line().text).toContain('Meetings paused: Google sign-in needs meeting access');
+    await stopApp(app);
+  });
+
   it('finds a recording, takes it to done, updates the tracker and republishes the workbook', async () => {
     const { app, api, db, drive, stt, meetingAi, ai, health } = setup();
     const statusAtSchedule = watchSchedules(app, db);
@@ -218,9 +225,14 @@ describe('app with meetings', () => {
       return r;
     };
     await vi.waitFor(() => expect(api.callsOf('download')).toHaveLength(1), SLOW_IO);
-    const before = Date.now();
-    await stopApp(app);
-    expect(Date.now() - before).toBeLessThan(200_000); // the drain did not wait out its 600 s
+    // Stop finishes within advances adding up to 60 s, far under the 600 s drain: the download was aborted.
+    let done = false;
+    const stop = app.stop().then(() => {
+      done = true;
+    });
+    for (let i = 0; i < 60 && !done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    expect(done).toBe(true);
+    await stop;
     expect(getMeeting(db, 1)).toMatchObject({ status: 'queued', stage: 'found', errorCode: 'stopped', attempts: 0 });
     expect(spendRows(db)).toEqual([]);
   });

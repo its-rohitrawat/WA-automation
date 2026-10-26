@@ -95,7 +95,8 @@ export class MeetingQueue {
   #fill(): void {
     if (this.#stopped || !this.#ready || this.#running) return;
     const now = this.#o.clock.now();
-    const held = new Set([...this.#crashed].filter(([, until]) => until > now.getTime()).map(([id]) => id));
+    for (const [id, until] of this.#crashed) if (until <= now.getTime()) this.#crashed.delete(id);
+    const held = new Set(this.#crashed.keys());
     let ids: number[];
     try {
       ids = dueMeetingIds(this.#o.db, now.toISOString(), 1 + this.#startedSinceKick.size + held.size);

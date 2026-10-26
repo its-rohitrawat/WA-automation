@@ -164,14 +164,7 @@ export class MeetingService {
 
   /** Waits for the running meeting (its tracker step included), the queue's start-up and a discovery pass, up to ms. */
   async drain(timeoutMs: number): Promise<void> {
-    let timer: NodeJS.Timeout | undefined;
-    try {
-      await Promise.race([
-        Promise.all([this.#queue.drain(timeoutMs), this.#discovering]),
-        new Promise<void>((r) => (timer = setTimeout(r, timeoutMs))),
-      ]);
-    } finally {
-      clearTimeout(timer);
-    }
+    // The queue's drain is bounded by timeoutMs; a discovery pass ends soon after stop() aborted it.
+    await Promise.all([this.#queue.drain(timeoutMs), this.#discovering]);
   }
 }

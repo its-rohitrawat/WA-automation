@@ -1,4 +1,4 @@
-import { AiRefusalError } from '../brain/claudeClient.ts';
+import { AiInvalidOutputError, AiRefusalError } from '../brain/claudeClient.ts';
 import { summarizeMeeting, type MeetingAi } from '../brain/meetingClient.ts';
 import type { MeetingPerson } from '../brain/meetingPrompt.ts';
 import { SpendCapReachedError } from '../brain/paidCall.ts';
@@ -20,7 +20,7 @@ import { fromIstDate, istDate } from '../util/time.ts';
 import { MeetingDeferral, MeetingFailure, prepareAudio } from './audio.ts';
 import { uploadMeetingDoc } from './docUpload.ts';
 import type { MeetingsGoogleApi } from './googleApi.ts';
-import { GoogleAccessError, GoogleNoAccessError } from './googleErrors.ts';
+import { GoogleAccessError, GoogleNoAccessError, GoogleTransientError } from './googleErrors.ts';
 import { errorCode } from './sttParts.ts';
 import { bookStuckParts, transcribeMeeting, type MeetingTranscriber } from './transcribe.ts';
 import { cleanNames, fileNameTitle, inviteFacts } from './watcher.ts';
@@ -120,6 +120,22 @@ export interface MeetingProcessResult {
   clientId: number | null;
 }
 
+/** A meeting row that does not hold what its stage needs (a bug, or a row changed by hand). Retried, then failed with its code. */
+export class MeetingRowStateError extends Error {
+  readonly code: 'missing_row' | 'no_client' | 'no_summary';
+  constructor(code: 'missing_row' | 'no_client' | 'no_summary', meetingId: number) {
+    super(`meeting processor: meeting ${meetingId} (${code})`);
+    this.name = 'MeetingRowStateError';
+    this.code = code;
+  }
+}
+
+/** The error code stored for a failed step: a plain Error (no code of its own) is 'unknown', never 'Error'. */
+function stepCode(e: unknown): string {
+  const code = errorCode(e);
+  return code === 'Error' ? 'unknown' : code;
+}
+
 /** What a stage run ended in: the next stage may start, the meeting is done, or a final status is already stored. */
 type StageResult = 'next' | 'done' | 'final';
 
@@ -127,6 +143,8 @@ export class MeetingProcessor {
   readonly #d: MeetingProcessorDeps;
   /** When a meeting's current run of stt_unavailable deferrals began, in this service run (ms). */
   readonly #sttRefusedSince = new Map<number, number>();
+  /** Meetings whose invite and names were read again in this service run: at most once each. */
+  readonly #refreshed = new Set<number>();
 
   constructor(d: MeetingProcessorDeps) {
     this.#d = d;
@@ -188,8 +206,8 @@ export class MeetingProcessor {
 
   #meeting(id: number): MeetingRow & { clientId: number } {
     const m = getMeeting(this.#d.db, id);
-    if (m === undefined) throw new Error(`meeting processor: no meeting ${id}`);
-    if (m.clientId === null) throw new Error(`meeting processor: meeting ${id} has no client`);
+    if (m === undefined) throw new MeetingRowStateError('missing_row', id);
+    if (m.clientId === null) throw new MeetingRowStateError('no_client', id);
     return m as MeetingRow & { clientId: number };
   }
 
@@ -200,7 +218,8 @@ export class MeetingProcessor {
     if (d.ffmpeg === null) throw new MeetingDeferral('no_ffmpeg');
     if (d.transcriber === null) throw new MeetingDeferral('stt_none');
     let m = this.#meeting(id);
-    if (m.matchKind === 'human' && m.attendees.length === 0) {
+    if (m.matchKind === 'human' && m.attendees.length === 0 && !this.#refreshed.has(id)) {
+      this.#refreshed.add(id);
       await this.#refreshFacts(m, signal);
       m = this.#meeting(id);
     }
@@ -218,15 +237,26 @@ export class MeetingProcessor {
 
   /**
    * An assigned meeting stored without attendees (taken for internal, or unassigned without an invite) gets its invite
-   * title, attendees and signed-in names read again, so the summary can name speakers and the Doc list attendees.
+   * title, attendees and signed-in names read again, so the summary can name speakers and the Doc list attendees. Once
+   * per service run. These facts are a nicety: when Google will not give them (a no-access or transient error), the
+   * meeting goes on with what is stored. A stop and a sign-in or scope refusal (GoogleAccessError) are thrown.
    */
   async #refreshFacts(m: MeetingRow, signal: AbortSignal): Promise<void> {
     const d = this.#d;
-    const invite = m.meetingCode === null ? null : await d.api.findInvite(m.meetingCode, m.startedAt, signal);
-    const facts = inviteFacts(invite, d.teamDomains);
-    const participants = cleanNames(await d.api.listSignedInNames(m.conference, signal));
-    let title = facts.title;
-    if (title === '' && m.title === '') title = fileNameTitle((await d.api.videoInfo(m.driveFileId, signal)).name);
+    let facts: ReturnType<typeof inviteFacts>;
+    let participants: string[];
+    let title: string;
+    try {
+      const invite = m.meetingCode === null ? null : await d.api.findInvite(m.meetingCode, m.startedAt, signal);
+      facts = inviteFacts(invite, d.teamDomains);
+      participants = cleanNames(await d.api.listSignedInNames(m.conference, signal));
+      title = facts.title;
+      if (title === '' && m.title === '') title = fileNameTitle((await d.api.videoInfo(m.driveFileId, signal)).name);
+    } catch (e) {
+      if (signal.aborted || !(e instanceof GoogleNoAccessError || e instanceof GoogleTransientError)) throw e;
+      d.log.warn({ meetingId: m.id, code: e.code }, 'meeting attendees could not be read again; going on with the stored ones');
+      return;
+    }
     refreshMeetingFacts(d.db, m.id, { title, attendees: facts.attendees, participants }, this.#now());
     d.log.info({ meetingId: m.id, attendees: facts.attendees.length, participants: participants.length }, 'meeting attendees read again');
   }
@@ -268,7 +298,7 @@ export class MeetingProcessor {
   async #doc(id: number): Promise<StageResult> {
     const d = this.#d;
     const m = this.#meeting(id);
-    if (m.summary === null) throw new Error(`meeting processor: meeting ${id} has no summary`);
+    if (m.summary === null) throw new MeetingRowStateError('no_summary', id);
     const client = getClient(d.db, m.clientId);
     const docFileId = await uploadMeetingDoc(
       { db: d.db, api: d.drive },
@@ -286,7 +316,7 @@ export class MeetingProcessor {
   async #track(id: number): Promise<StageResult> {
     const d = this.#d;
     const m = this.#meeting(id);
-    if (m.summary === null) throw new Error(`meeting processor: meeting ${id} has no summary`);
+    if (m.summary === null) throw new MeetingRowStateError('no_summary', id);
     const r = await d.track(m.clientId, { id, startedAt: m.startedAt, title: m.title, summary: m.summary, segments: m.transcript ?? [] });
     d.log.info({ meetingId: id, clientId: m.clientId, accepted: r.accepted, rejected: r.rejected, note: r.note ?? null }, 'meeting done');
     return 'done';
@@ -303,7 +333,7 @@ export class MeetingProcessor {
     const ids = { meetingId: id, clientId: before.clientId, stage: before.stage };
     const now = getMeetingState(db, id);
     if (now === undefined || now.status !== 'queued') {
-      log.warn({ ...ids, code: errorCode(e), status: now?.status ?? null }, 'meeting step ended, but the meeting is no longer queued; left as it is');
+      log.warn({ ...ids, code: stepCode(e), status: now?.status ?? null }, 'meeting step ended, but the meeting is no longer queued; left as it is');
       return 'skipped';
     }
     if (signal.aborted && (e === signal.reason || (e as { name?: unknown } | null)?.name === 'AbortError')) {
@@ -341,7 +371,12 @@ export class MeetingProcessor {
       this.#fail(before, 'failed', 'ai_refusal', at);
       return 'failed';
     }
-    const code = errorCode(e);
+    if (e instanceof AiInvalidOutputError) {
+      // summarizeMeeting and the tracker step each tried once more already, and both calls were booked.
+      this.#fail(before, 'failed', 'ai_invalid_output', at);
+      return 'failed';
+    }
+    const code = stepCode(e);
     const attempts = before.attempts + 1; // the attempt the claim counted
     if (attempts >= MEETING_MAX_ATTEMPTS) {
       this.#fail(before, 'failed', code, at);
@@ -368,6 +403,7 @@ export class MeetingProcessor {
     const { db, spend, inrPerUsd, clock, log } = this.#d;
     bookStuckParts(db, spend, before.id, { inrPerUsd, clock, log });
     failMeeting(db, before.id, { status, errorCode: code, at });
+    this.#sttRefusedSince.delete(before.id);
     log.warn({ meetingId: before.id, clientId: before.clientId, stage: before.stage, status, code }, 'meeting could not be processed');
   }
 }
