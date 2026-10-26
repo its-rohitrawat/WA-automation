@@ -374,12 +374,25 @@ The send started but did not finish cleanly (a timeout, or the service stopped m
 2. If today's report is not there, run `npm run cli -- report send-now` and type `yes`.
 3. If it is there, do nothing. The warning clears the next day.
 
-### Status "Morning report: the spare number is not linked" (or "was logged out")
+### Status "Morning report: the spare number is not linked" (or logged out, refused, taken over, or its session cannot be read)
 
 - **Not linked:** stop the service, run `npm run cli -- link-sender`, scan from the spare phone, then start the service.
 - **Logged out** (the device was removed on the spare phone, or the phone was not opened for weeks): on the spare phone remove any old "WA Agent" device. Stop the service, run `npm run cli -- link-sender --reset` (type `yes`), scan, then start the service. The founder's link and the tracker are not touched.
-- **"the spare number's saved session cannot be read"** (the file `sender-session.db` is damaged, or was written with a different master key): stop the service, run `npm run cli -- link-sender --reset` (type `yes`), scan from the spare phone, then start the service. The founder's link and the tracker are not touched.
+- **"the spare number's saved session cannot be read"**: the file `sender-session.db` was written with a different master key, or it is damaged.
+  1. **Stop the service safely** (see "If the service will not start" below).
+  2. In the waagent window, run `npm run cli -- link-sender --reset`. If it asks you to type `yes` (a different master key), type it, scan from the spare phone, and go to step 4.
+  3. If instead it stops with an error and does not ask for `yes`, the file is damaged. **Move** (do not delete) the spare number's session files to a dated backup folder (use today's date and time), then link again:
+
+     ```bat
+     mkdir C:\wa-agent\backups\2026-10-21-1430
+     move C:\wa-agent\data\sender-session.db* C:\wa-agent\backups\2026-10-21-1430\
+     npm run cli -- link-sender
+     ```
+
+     Scan from the spare phone. Move only the `sender-session.db` files: the founder's `session.db` files stay where they are.
+  4. **Start the service again** (see "If the service will not start" below). The founder's link and the tracker are not touched.
 - **Refused (403) or banned:** check the spare phone for a WhatsApp warning. To move to a new spare number, repeat the setup with `link-sender --reset`.
+- **Replaced:** ("another session took over the spare number") restart the service. If it keeps happening, make sure `link-sender` is not running in another window and that the spare number is not linked to another copy of the agent.
 
 The tracker keeps working in every case; only the morning report is skipped.
 
@@ -446,7 +459,11 @@ In `npm run cli -- status` it appears as the `Health:` line. It is also the firs
 | (number) files could not be uploaded to Drive. See docs/SETUP.md. | Files from clients failed to upload many times, and the agent stopped trying. They are safe on this PC. | See "Status "files could not be uploaded to Drive"" below. |
 | (number) shared files waiting for today's AI budget (read after midnight IST) | Images or scans that need Claude do not fit in what is left of today's budget (a scan needs about $4 of room). The cap is not reached, and the tracker keeps working. | Nothing: they are tried every 10 minutes and read once there is room, at the latest after midnight India time. See "Spend cap and shared files" below. |
 | Morning report: unknown, check WhatsApp | The morning report's send started but did not finish cleanly. It may have reached the founder. The agent does not resend it by itself. | See "Morning report" above, under its own status heading. |
-| Morning report: the spare number is not linked (or was logged out, or was refused, or its saved session cannot be read) | The spare number cannot send the morning report. The tracker is not affected. | See "Morning report" above. |
+| Morning report: the spare number is not linked | The spare number cannot send the morning report. The tracker is not affected. | See "Morning report" above, under "the spare number is not linked". |
+| Morning report: the spare number's saved session cannot be read | The spare number's saved session (`sender-session.db`) was written with a different master key, or is damaged. The tracker is not affected. | See "Morning report" above, under "the spare number is not linked". |
+| Morning report: the spare number was logged out | The linked device was removed on the spare phone, or the phone was not opened for weeks. The tracker is not affected. | See "Morning report" above, under "the spare number is not linked". |
+| Morning report: WhatsApp refused the spare number (403) | WhatsApp blocked the spare number's device. The tracker is not affected. | Check the spare phone. See "Morning report" above. |
+| Morning report: another session took over the spare number | Another session (for example `link-sender`, or another copy of the agent) took the spare number's linked device. The tracker is not affected. | Restart the service. See "Morning report" above. |
 | Low disk: (number) GB free | Under 10 GB left. | Free up disk space. |
 
 ### Status "shared files waiting over 30 minutes to be read"
