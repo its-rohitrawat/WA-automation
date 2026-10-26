@@ -5,46 +5,80 @@ import { parseEnv } from '../../src/config/env.ts';
 
 const read = (path: string) => readFileSync(fileURLToPath(new URL(`../../${path}`, import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
 
+/** The model rows of the amendment's table: repo, file and SHA-256, with "same repo" read as the row above's. */
+function amendmentModels(amendment: string): { repo: string; file: string; sha: string }[] {
+  const rows: { repo: string; file: string; sha: string }[] = [];
+  let repo = '';
+  for (const m of amendment.matchAll(/^\| \S+(?: \(smaller\))? \| (?:`([^`]+)`|same repo) \/ `([^`]+)` \| [^|]+ \| `([0-9a-f]{64})` \|$/gm)) {
+    repo = m[1] ?? repo;
+    rows.push({ repo, file: m[2]!, sha: m[3]! });
+  }
+  return rows;
+}
+
+/** The fenced sh blocks of a text, in order. */
+const shBlocks = (text: string): string[] => [...text.matchAll(/^```sh\n([\s\S]*?)^```$/gm)].map((m) => m[1]!);
+
 describe('SETUP-mac.md: voice notes, local speech-to-text', () => {
   const setup = read('docs/SETUP-mac.md');
   const start = setup.indexOf('\n## 8. Voice notes: local speech-to-text\n');
   const end = setup.indexOf('\n## ', start + 1);
   const section = setup.slice(start, end);
   const amendment = read('docs/superpowers/plans/phase-2b-amendments/2026-10-26-local-stt.md');
+  const sub = (heading: string): string => {
+    const at = section.indexOf(`\n### ${heading}\n`);
+    expect(at, heading).toBeGreaterThanOrEqual(0);
+    const next = section.indexOf('\n### ', at + 1);
+    return section.slice(at, next < 0 ? undefined : next);
+  };
 
   it('has the section', () => {
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
   });
 
-  it('says it is off until VOICE_STT_PROVIDER=local, and that the service wiring comes later', () => {
-    expect(section).toContain('It is **off** until you set `VOICE_STT_PROVIDER=local`.');
-    expect(section).toContain('**In this version the service does not use it yet.**');
+  it('says it is off until VOICE_STT_PROVIDER=local, and that the service does not use it yet', () => {
+    expect(section).toMatch(/\*\*off\*\*[^\n]*`VOICE_STT_PROVIDER=local`/);
+    expect(section).toMatch(/does not use it yet/);
     expect(parseEnv({}).VOICE_STT_PROVIDER).toBe('none');
   });
 
-  it('pins transcribe.cpp v0.4.1, builds with cmake, and Whisper without Metal', () => {
-    expect(section).toContain('git clone --branch v0.4.1 --depth 1 https://github.com/handy-computer/transcribe.cpp.git');
-    expect(section).toContain('cmake -B build -DCMAKE_BUILD_TYPE=Release');
-    expect(section).toContain('cmake -B build -DGGML_METAL=OFF');
-    expect(section).toContain('cmake --build build -j --config Release');
+  it('pins transcribe.cpp v0.4.1 and a whisper.cpp release, and builds both with cmake on all cores', () => {
+    const build = shBlocks(sub('Build the engine (about 15 minutes)'));
+    const transcribe = build.find((b) => b.includes('transcribe.cpp.git'));
+    const whisper = build.find((b) => b.includes('whisper.cpp.git'));
+    expect(transcribe).toMatch(/git clone --branch v0\.4\.1 /);
+    expect(transcribe).toContain('-DCMAKE_BUILD_TYPE=Release');
+    expect(transcribe).toMatch(/^cmake --build build -j$/m);
+    expect(whisper).toMatch(/git clone --branch v\d+\.\d+\.\d+ /);
+    expect(whisper).toContain('-DGGML_METAL=OFF');
+    expect(whisper).toMatch(/^cmake --build build -j --config Release$/m);
+    // The amendment names the same builds.
+    const tag = /--branch (v\d+\.\d+\.\d+)/.exec(whisper!)![1]!;
+    expect(amendment).toContain(`--branch ${tag}`);
+    expect(amendment).toContain('cmake --build build -j`');
   });
 
-  it('lists every model file of the amendment with its address and SHA-256, and checks it with shasum', () => {
-    const rows = [...amendment.matchAll(/^\| \S+(?: \(smaller\))? \| `([^`]+)` \/ `([^`]+)` \| [^|]+ \| `([0-9a-f]{64})` \|$/gm)];
-    // The repeated repos are written "same repo" there.
-    const sameRepo = [...amendment.matchAll(/^\| \S+ \(smaller\) \| same repo \/ `([^`]+)` \| [^|]+ \| `([0-9a-f]{64})` \|$/gm)];
-    expect(rows.length).toBe(3);
-    expect(sameRepo.length).toBe(2);
-    for (const [, repo, file, sha] of rows) {
-      expect(section).toContain(`https://huggingface.co/${repo!}/resolve/main/${file!}`);
-      expect(section).toContain(`\`${sha!}\``);
-    }
-    for (const [, file, sha] of sameRepo) {
-      expect(section).toContain(`/resolve/main/${file!}`);
-      expect(section).toContain(`\`${sha!}\``);
+  it('lists every model file of the amendment in one row with its address and SHA-256, and checks it with shasum', () => {
+    const models = amendmentModels(amendment);
+    expect(models).toHaveLength(5);
+    const tableRows = section.split('\n').filter((l) => /^\| `[^`]+` (?:\(smaller\) )?\| `[^`]+\.(?:gguf|bin)` \|/.test(l));
+    expect(tableRows).toHaveLength(models.length);
+    for (const { repo, file, sha } of models) {
+      const row = tableRows.find((l) => l.includes(`| \`${file}\` |`));
+      expect(row, file).toBeDefined();
+      expect(row).toContain(`| \`https://huggingface.co/${repo}/resolve/main/${file}\` |`);
+      expect(row).toContain(`| \`${sha}\` |`);
     }
     expect(section).toContain('shasum -a 256');
+  });
+
+  it('opens .env and runs the check from the app folder', () => {
+    const settings = shBlocks(sub('Settings (waagent window)'));
+    expect(settings[0]!.split('\n')[0]).toBe('cd /opt/wa-agent');
+    expect(settings[0]).toContain('nano .env');
+    const check = shBlocks(sub('Test it on real notes (waagent window)')).find((b) => b.includes('npm run stt:local-check'));
+    expect(check!.split('\n')[0]).toBe('cd /opt/wa-agent');
   });
 
   it('makes the test WAV with ffmpeg and runs the check, then restarts the service', () => {

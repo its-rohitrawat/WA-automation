@@ -166,17 +166,17 @@ cd /opt/stt
 git clone --branch v0.4.1 --depth 1 https://github.com/handy-computer/transcribe.cpp.git
 cd transcribe.cpp
 cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
+cmake --build build -j
 find "$PWD/build" -name transcribe-cli -type f
 ```
 
 The last line prints the full path of the program. Note it for `STT_LOCAL_BIN`. The build uses the processor's fastest instructions by itself; nothing else needs to be set.
 
-Optional, only if you also want to try Whisper (`whisper`). Waagent window:
+Optional, only if you also want to try Whisper (`whisper`). Waagent window, this exact version (v1.9.5):
 
 ```sh
 cd /opt/stt
-git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git
+git clone --branch v1.9.5 --depth 1 https://github.com/ggml-org/whisper.cpp.git
 cd whisper.cpp
 cmake -B build -DGGML_METAL=OFF
 cmake --build build -j --config Release
@@ -207,7 +207,12 @@ To compare Voxtral with Qwen3-ASR, download the Qwen3-ASR file too, the same way
 
 ### Settings (waagent window)
 
-`nano .env` and set, with the paths `find` printed and the model you downloaded:
+In the app folder, open the settings with `nano .env` and set, with the paths `find` printed and the model you downloaded:
+
+```sh
+cd /opt/wa-agent
+nano .env
+```
 
 ```sh
 VOICE_STT_PROVIDER=local
@@ -232,6 +237,7 @@ mkdir -m 700 ~/stt-check
 Copy 2–3 real Hinglish voice notes (`.opus` or `.ogg` files) into it. From a normal Terminal window, for a note in your Downloads folder: `sudo cp ~/Downloads/note1.opus /Users/waagent/stt-check/` then `sudo chown waagent /Users/waagent/stt-check/note1.opus`. Then, waagent window, for each note:
 
 ```sh
+cd /opt/wa-agent
 ffmpeg -i ~/stt-check/note1.opus -ar 16000 -ac 1 -c:a pcm_s16le ~/stt-check/note1.wav
 npm run stt:local-check -- ~/stt-check/note1.wav
 ```

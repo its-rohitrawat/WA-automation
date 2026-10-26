@@ -83,12 +83,15 @@ const EnvSchema = z.object({
   if (env.VOICE_STT_PROVIDER !== 'local' && env.VOICE_STT_PROVIDER !== 'none' && env.VOICE_STT_PROVIDER !== env.STT_PROVIDER) {
     ctx.addIssue({ code: 'custom', path: ['VOICE_STT_PROVIDER'], message: 'must be local, none or the same as STT_PROVIDER' });
   }
-  for (const name of ['STT_LOCAL_BIN', 'STT_LOCAL_MODEL'] as const) {
-    const path = env[name];
-    if (path === undefined) {
-      if (env.VOICE_STT_PROVIDER === 'local') ctx.addIssue({ code: 'custom', path: [name], message: 'is required when VOICE_STT_PROVIDER is local' });
-    } else if (!isAbsolute(path)) {
-      ctx.addIssue({ code: 'custom', path: [name], message: 'must be an absolute path' });
+  // Checked only for local: a stray path while voice notes are off or paid must not stop the service.
+  if (env.VOICE_STT_PROVIDER === 'local') {
+    for (const name of ['STT_LOCAL_BIN', 'STT_LOCAL_MODEL'] as const) {
+      const path = env[name];
+      if (path === undefined) {
+        ctx.addIssue({ code: 'custom', path: [name], message: 'is required when VOICE_STT_PROVIDER is local' });
+      } else if (!isAbsolute(path)) {
+        ctx.addIssue({ code: 'custom', path: [name], message: 'must be an absolute path when VOICE_STT_PROVIDER is local' });
+      }
     }
   }
   if (env.REPORT_ENABLED && !env.REPORT_RECIPIENT) {

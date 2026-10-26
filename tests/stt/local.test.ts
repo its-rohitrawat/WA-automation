@@ -1,9 +1,12 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, parse } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { minimalEnv, type RunFile, type RunOptions } from '../../src/stt/audio.ts';
-import { checkLocalEngineFiles, LocalEngine, LocalEngineError, localEngineArgs, type LocalEngineOptions } from '../../src/stt/local.ts';
+import { minimalEnv } from '../../src/stt/audio.ts';
+import {
+  checkLocalEngineFiles, LocalEngine, LocalEngineError, localEngineArgs, runLocalEngine,
+  type LocalEngineOptions, type LocalRunFile as RunFile, type LocalRunOptions as RunOptions,
+} from '../../src/stt/local.ts';
 
 const BIN = '/opt/stt/transcribe.cpp/build/bin/transcribe-cli';
 const MODEL = '/opt/stt/models/Voxtral-Mini-3B-2507-Q4_K_M.gguf';
@@ -139,6 +142,25 @@ describe('LocalEngine.transcribe', () => {
     expect(call!.opts.timeoutMs).toBe(90_000);
     expect(call!.opts.env).toEqual(minimalEnv());
     expect(call!.opts.inheritEnv).toBeUndefined();
+    // A stopped program has 5 s after SIGTERM before SIGKILL.
+    expect(call!.opts.killGraceMs).toBe(5_000);
+  });
+
+  it('passes its own kill grace time to the runner', async () => {
+    const { run, calls } = fakeRun();
+    await engine({ run, killGraceMs: 250 }).transcribe(join(workDir, 'note.wav'), { workDir });
+    expect(calls[0]!.opts.killGraceMs).toBe(250);
+  });
+
+  it('refuses a WAV path that is not absolute, before running anything, without echoing it', async () => {
+    const { run, calls } = fakeRun();
+    for (const wav of ['note.wav', 'zz-rel-zz/note.wav', './note.wav', '-h', '--threads', '-zz-rel-zz.wav', '-', '']) {
+      const e = await engine({ run }).transcribe(wav, { workDir }).then(() => null, (err: unknown) => err);
+      expect(e).toBeInstanceOf(Error);
+      expect((e as Error).message).toMatch(/WAV path must be absolute/);
+      expect((e as Error).message).not.toContain('zz-rel-zz');
+    }
+    expect(calls).toHaveLength(0);
   });
 
   it('uses the env it is given instead of minimalEnv', async () => {
@@ -222,8 +244,28 @@ describe('LocalEngine.transcribe', () => {
       return { code: -1, stderr: '' };
     };
     // A RunFile that ignores the signal still stops at its own timeout.
-    const ignoring: RunFile = (f, a, o) => run(f, a, { timeoutMs: o.timeoutMs });
+    const ignoring: RunFile = (f, a, o) => run(f, a, { timeoutMs: o.timeoutMs, killGraceMs: o.killGraceMs });
     expect((await engineError(engine({ run: ignoring, timeoutMs: 40 }).transcribe(join(workDir, 'note.wav'), { workDir }))).code).toBe('timeout');
+  });
+
+  it('a -1 after timeoutMs is timeout even when its own timer could not fire first', async () => {
+    // The runner holds the thread past the timeout and returns at once, so the engine's own timer never runs.
+    const run: RunFile = (_f, _a, opts) => {
+      const until = Date.now() + opts.timeoutMs + 15;
+      while (Date.now() < until) {
+        // busy
+      }
+      return Promise.resolve({ code: -1, stderr: '' });
+    };
+    expect((await engineError(engine({ run, timeoutMs: 20 }).transcribe(join(workDir, 'note.wav'), { workDir }))).code).toBe('timeout');
+  });
+
+  it('a runner that answers its stop with a real exit code is still timeout, through its own timer', async () => {
+    const run: RunFile = (_f, _a, opts) =>
+      new Promise((resolve) => {
+        opts.signal?.addEventListener('abort', () => resolve({ code: 143, stderr: '' }), { once: true });
+      });
+    expect((await engineError(engine({ run, timeoutMs: 30 }).transcribe(join(workDir, 'note.wav'), { workDir }))).code).toBe('timeout');
   });
 
   it('an abort stops the run: aborted', async () => {
@@ -281,11 +323,22 @@ describe('LocalEngine.transcribe', () => {
     try {
       await expect(engine({ run }).transcribe(join(outside, 'note.wav'), { workDir: outside })).rejects.toThrow(/temporary folder/);
       await expect(engine({ run }).transcribe(join(root, 'note.wav'), { workDir: join(root, '..') })).rejects.toThrow(/temporary folder/);
+      // The temporary folder itself is not a note's own folder.
+      await expect(engine({ run }).transcribe(join(root, 'note.wav'), { workDir: root })).rejects.toThrow(/temporary folder/);
+      await expect(engine({ run }).transcribe(join(root, 'note.wav'), { workDir: join(root, '.') })).rejects.toThrow(/temporary folder/);
       expect(calls).toHaveLength(0);
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
   });
+});
+
+it.skipIf(process.platform !== 'win32')('(Windows) refuses a work folder on another drive', async () => {
+  const { run, calls } = fakeRun();
+  const drive = parse(root).root.slice(0, 1).toUpperCase() === 'Z' ? 'Y' : 'Z';
+  const other = `${drive}:\\local-stt\\note-1`;
+  await expect(engine({ run }).transcribe(`${other}\\note.wav`, { workDir: other })).rejects.toThrow(/temporary folder/);
+  expect(calls).toHaveLength(0);
 });
 
 describe('LocalEngine: one run at a time', () => {
@@ -358,6 +411,77 @@ describe('LocalEngine: one run at a time', () => {
     expect(started).toEqual([join(workDir, 'a.wav'), join(workDir, 'c.wav')]);
     finish(join(workDir, 'c.wav'), { code: 0, text: 'c' });
     expect(await c).toEqual({ text: 'c' });
+  });
+});
+
+describe('LocalEngine: a call waiting in line is answered at once when aborted', () => {
+  function gated() {
+    const started: string[] = [];
+    let release: (() => void) | undefined;
+    const run: RunFile = (_f, args) =>
+      new Promise((resolve) => {
+        started.push(args[args.length - 1]!);
+        release = () => {
+          writeFileSync(outputOf(args), 'a');
+          resolve({ code: 0, stderr: '' });
+        };
+      });
+    return { run, started, release: () => release!() };
+  }
+
+  it('a later abort rejects b with aborted while a is still running', async () => {
+    const { run, started, release } = gated();
+    const e = engine({ run });
+    const a = e.transcribe(join(workDir, 'a.wav'), { workDir });
+    let aDone = false;
+    void a.then(() => {
+      aDone = true;
+    });
+    const ac = new AbortController();
+    const b = e.transcribe(join(workDir, 'b.wav'), { workDir, signal: ac.signal });
+    await new Promise((r) => setTimeout(r, 10));
+    ac.abort();
+    expect((await engineError(b)).code).toBe('aborted');
+    expect(aDone).toBe(false);
+    expect(started).toEqual([join(workDir, 'a.wav')]);
+    release();
+    expect(await a).toEqual({ text: 'a' });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(started).toEqual([join(workDir, 'a.wav')]);
+  });
+
+  it('an already-aborted signal rejects b with aborted while a is still running', async () => {
+    const { run, started, release } = gated();
+    const e = engine({ run });
+    const a = e.transcribe(join(workDir, 'a.wav'), { workDir });
+    let aDone = false;
+    void a.then(() => {
+      aDone = true;
+    });
+    const ac = new AbortController();
+    ac.abort();
+    expect((await engineError(e.transcribe(join(workDir, 'b.wav'), { workDir, signal: ac.signal }))).code).toBe('aborted');
+    expect(aDone).toBe(false);
+    release();
+    expect(await a).toEqual({ text: 'a' });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(started).toEqual([join(workDir, 'a.wav')]);
+  });
+});
+
+describe('runLocalEngine with a real program', () => {
+  // On Windows a kill always ends the program at once, so a program cannot ignore the first one there.
+  it.skipIf(process.platform === 'win32')('a program that ignores SIGTERM is killed with SIGKILL after the grace time', async () => {
+    const script = join(root, 'stubborn.mjs');
+    writeFileSync(script, "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);\n");
+    const ac = new AbortController();
+    const p = runLocalEngine(process.execPath, [script], { timeoutMs: 30_000, killGraceMs: 400, signal: ac.signal });
+    // Time for node to start and set its SIGTERM handler.
+    await new Promise((r) => setTimeout(r, 1000));
+    const stoppedAt = Date.now();
+    ac.abort();
+    expect(await p).toEqual({ code: -1, stderr: '' });
+    expect(Date.now() - stoppedAt).toBeGreaterThanOrEqual(350);
   });
 });
 

@@ -96,6 +96,39 @@ describe('readWavInfo', () => {
     expect(readWavInfo(Buffer.from('RIFF'), 4)).toBeNull();
   });
 
+  it('a data size smaller than the bytes after it (a trailing LIST chunk) is the length', () => {
+    const tail: Chunk = { id: 'LIST', body: Buffer.alloc(64_000) };
+    const file = wav([fmtChunk(), data(32_000), tail]);
+    expect(readWavInfo(file, file.length)?.seconds).toBe(1);
+  });
+
+  it('is null for a format chunk under 16 bytes, or a head cut inside the format chunk', () => {
+    const short: Chunk = { id: 'fmt ', body: fmtChunk().body.subarray(0, 14) };
+    const tooShort = wav([short, data(32_000)]);
+    expect(readWavInfo(tooShort, tooShort.length)).toBeNull();
+    const file = wav([fmtChunk(), data(32_000)]);
+    // RIFF header (12), the format chunk's header (8), then only 10 of its 16 bytes.
+    expect(readWavInfo(file.subarray(0, 30), file.length)).toBeNull();
+    expect(readWavInfo(file.subarray(0, 20), file.length)).toBeNull();
+  });
+
+  it('is null for another RIFF-like magic', () => {
+    for (const magic of ['RIFX', 'RF64', 'riff', 'FORM']) {
+      const file = wav([fmtChunk(), data(32_000)]);
+      file.write(magic, 0, 'latin1');
+      expect(readWavInfo(file, file.length)).toBeNull();
+    }
+  });
+
+  it('reads sample rates of 65536 and more in full', () => {
+    for (const sampleRate of [65_536, 96_000, 192_000]) {
+      const file = wav([fmtChunk({ sampleRate }), data(sampleRate * 2)]);
+      const info = readWavInfo(file, file.length);
+      expect(info).toEqual({ format: 1, channels: 1, sampleRate, bitsPerSample: 16, seconds: 1 });
+      expect(isEngineWav(info!)).toBe(false);
+    }
+  });
+
   it('an empty data chunk is 0 seconds', () => {
     const file = wav([fmtChunk(), data(0)]);
     expect(readWavInfo(file, file.length)?.seconds).toBe(0);
@@ -123,6 +156,18 @@ describe('readWavFile', () => {
       const bad = join(dir, 'note.ogg');
       writeFileSync(bad, 'OggS not a wav');
       expect(readWavFile(bad)).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads past a metadata chunk of more than 44 bytes before the data, as ffmpeg can write', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wav-'));
+    try {
+      const path = join(dir, 'note.wav');
+      const list: Chunk = { id: 'LIST', body: Buffer.alloc(2_000, 0x41) };
+      writeFileSync(path, wav([fmtChunk(), list, data(64_000)]));
+      expect(readWavFile(path)).toEqual({ format: 1, channels: 1, sampleRate: 16000, bitsPerSample: 16, seconds: 2 });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

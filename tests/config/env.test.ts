@@ -208,18 +208,31 @@ describe('voice-note speech-to-text settings (local engine)', () => {
     expect(neither).toMatch(/STT_LOCAL_MODEL/);
   });
 
-  it('both paths must be absolute when set, whatever the provider, refused without echoing them', () => {
+  it('both paths must be absolute, only for local, refused without echoing them', () => {
     for (const name of ['STT_LOCAL_BIN', 'STT_LOCAL_MODEL']) {
-      for (const rel of ['zz-relative-zz/transcribe-cli', './zz-relative-zz', 'zz-relative-zz']) {
-        for (const base of [local, {}]) {
-          const msg = envError({ ...base, [name]: rel });
-          expect(msg).toMatch(new RegExp(name));
-          expect(msg).not.toContain('zz-relative-zz');
-        }
+      for (const rel of ['zz-relative-zz/transcribe-cli', './zz-relative-zz', 'zz-relative-zz', '-zz-relative-zz']) {
+        const msg = envError({ ...local, [name]: rel });
+        expect(msg).toMatch(new RegExp(`${name} must be an absolute path`));
+        expect(msg).not.toContain('zz-relative-zz');
       }
+    }
+  });
+
+  it('a stray relative path while voice notes are not local never stops the service', () => {
+    for (const provider of [{}, { VOICE_STT_PROVIDER: 'none' }, { VOICE_STT_PROVIDER: 'openai', STT_PROVIDER: 'openai', STT_API_KEY: 'k' }]) {
+      const env = parseEnv({ ...provider, STT_LOCAL_BIN: 'zz-relative-zz/transcribe-cli', STT_LOCAL_MODEL: './model.gguf' });
+      expect(env.STT_LOCAL_BIN).toBe('zz-relative-zz/transcribe-cli');
     }
     // Paths outside local are kept, so a later switch to local needs no other change.
     expect(parseEnv({ STT_LOCAL_BIN: BIN }).STT_LOCAL_BIN).toBe(BIN);
+  });
+
+  it('refuses an unknown VOICE_STT_PROVIDER by name, without echoing it', () => {
+    for (const v of ['whisper', 'Local', 'LOCAL', 'voxtral', 'zz-unknown-zz', 'local ']) {
+      const msg = envError({ VOICE_STT_PROVIDER: v, STT_LOCAL_BIN: BIN, STT_LOCAL_MODEL: MODEL });
+      expect(msg).toMatch(/VOICE_STT_PROVIDER/);
+      expect(msg).not.toContain('zz-unknown-zz');
+    }
   });
 
   it('accepts each engine and language, and refuses others by name', () => {
@@ -274,8 +287,8 @@ describe('setting values never appear in errors', () => {
       { VOICE_STT_PROVIDER: SECRET },
       { VOICE_STT_PROVIDER: 'openai', STT_PROVIDER: 'sarvam', STT_API_KEY: SECRET },
       { STT_LOCAL_ENGINE: SECRET },
-      { STT_LOCAL_BIN: SECRET },
-      { STT_LOCAL_MODEL: SECRET },
+      { VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: SECRET, STT_LOCAL_MODEL: '/opt/stt/models/m.gguf' },
+      { VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: '/opt/stt/bin/transcribe-cli', STT_LOCAL_MODEL: SECRET },
       { VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: SECRET, STT_LOCAL_MODEL: `${SECRET}/model.gguf` },
       { VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: `/opt/${SECRET}/transcribe-cli` },
       { STT_LOCAL_THREADS: SECRET },
