@@ -15,7 +15,7 @@ import { listClients, syncClients } from '../store/clients.ts';
 import { openDb, tx, type Db } from '../store/db.ts';
 import { setKv } from '../store/kv.ts';
 import { unprocessedCounts } from '../store/messages.ts';
-import { recentReports, REPORT_REQUEST_KEY, reportFor, reportRequestValue, type ReportRow } from '../store/reports.ts';
+import { recentReports, REPORT_REQUEST_KEY, reportFor, reportRequest, type ReportRow } from '../store/reports.ts';
 import { acquireLock } from '../util/lock.ts';
 import { silentLogger } from '../util/logger.ts';
 import { istDate, istShortDate, istTime } from '../util/time.ts';
@@ -557,7 +557,8 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
         const nowText = describeReport(current, at, reportSettings(env), 'idle').text;
         return `Today's report changed while you were answering (now: ${nowText}). Nothing was sent. Check with: npm run cli -- report status, then run this again if it is still needed.`;
       }
-      setKv(db, REPORT_REQUEST_KEY, reportRequestValue(today, current));
+      // Stamped with the time of the yes: the service drops a request older than 5 minutes.
+      setKv(db, REPORT_REQUEST_KEY, reportRequest(today, current, at));
       return undefined;
     });
     out(answer ?? 'Requested. The service sends it within about a minute. Check with: npm run cli -- report status');

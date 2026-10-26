@@ -3,8 +3,8 @@ import { buildWorkbook } from '../output/workbook.ts';
 import { tx, type Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import {
-  claimReport, closeOldRetries, finishReport, markInterruptedReports, REPORT_REQUEST_KEY, reportFor, reportRequestValue, retryReport, skipReport,
-  type ReportRow,
+  claimReport, closeOldRetries, finishReport, markInterruptedReports, parseReportRequest, REPORT_REQUEST_KEY, REPORT_REQUEST_MAX_AGE_MS, reportFor,
+  reportRequestValue, retryReport, skipReport, type ReportRow,
 } from '../store/reports.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
@@ -220,9 +220,16 @@ export class ReportScheduler {
         if (!settings.enabled) return 'done';
         closeOldRetries(db, date, at);
         if (!requested) return 'schedule';
+        // A request lives 5 minutes. An older one (left behind by a service that was stopping, then started much later)
+        // or one without its time is dropped: the owner asked for a report then, not now.
+        const request = parseReportRequest(requested);
+        if (!request || Math.abs(now.getTime() - request.requestedAt.getTime()) > REPORT_REQUEST_MAX_AGE_MS) {
+          log.info({ date }, 'send-now request ignored: it expired (older than 5 minutes) or has no request time');
+          return 'schedule';
+        }
         // Honoured only while today's row is exactly what the owner confirmed: a send that started after the
         // confirmation and ended unknown changes the row, and must never be followed by a second report.
-        if (requested !== reportRequestValue(date, reportFor(db, date))) {
+        if (request.confirmed !== reportRequestValue(date, reportFor(db, date))) {
           log.info({ date }, 'send-now request ignored: it is not for today, or today changed since it was confirmed');
           return 'schedule';
         }

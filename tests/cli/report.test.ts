@@ -12,7 +12,7 @@ import { StaticKeyProvider } from '../../src/crypto/keyProvider.ts';
 import type { HealthSnapshot } from '../../src/health/health.ts';
 import { openDb, type Db } from '../../src/store/db.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
-import { claimReport, finishReport, REPORT_REQUEST_KEY, reportFor, reportRequestValue, retryReport, skipReport } from '../../src/store/reports.ts';
+import { claimReport, finishReport, REPORT_REQUEST_KEY, reportFor, reportRequest, retryReport, skipReport } from '../../src/store/reports.ts';
 import { acquireLock } from '../../src/util/lock.ts';
 import { openSessionDb, SenderSessionDecryptError, useSenderAuthState } from '../../src/wa/authState.ts';
 import type { SenderSocketFactory } from '../../src/wa/senderGateway.ts';
@@ -497,14 +497,19 @@ describe('cli report status', () => {
 });
 
 describe('cli report send-now', () => {
-  it('asks, then hands the request to the running service', async () => {
+  it('asks, then hands the request to the running service, stamped with the time of the yes', async () => {
     writeSnapshot(NOW);
+    const answeredAt = new Date(NOW.getTime() + 30_000);
+    confirm.mockImplementation(async () => {
+      vi.setSystemTime(answeredAt); // the owner took 30 s to answer
+      return true;
+    });
     await reportSendNowCommand(deps());
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(confirm.mock.calls[0]![0]).toContain('the number ending …5678');
     expect(confirm.mock.calls[0]![0]).not.toContain(NUMBER);
-    expect(request()).toBe(reportRequestValue(DAY, undefined));
-    expect(request()).toBe(`${DAY}|none|`);
+    expect(request()).toBe(reportRequest(DAY, undefined, answeredAt));
+    expect(request()).toBe(`${DAY}|none||2026-10-23T03:30:30.000Z`);
     expect(out()).toContain('Requested.');
   });
 
@@ -516,8 +521,8 @@ describe('cli report send-now', () => {
     });
     await reportSendNowCommand(deps());
     const row = withTracker((db) => reportFor(db, DAY));
-    expect(request()).toBe(reportRequestValue(DAY, row));
-    expect(request()).toBe(`${DAY}|retry|2026-10-23T00:30:30.000Z`);
+    expect(request()).toBe(reportRequest(DAY, row, NOW));
+    expect(request()).toBe(`${DAY}|retry|2026-10-23T00:30:30.000Z|${NOW.toISOString()}`);
   });
 
   it('refuses without asking when today was already sent', async () => {
@@ -560,7 +565,7 @@ describe('cli report send-now', () => {
     });
     await reportSendNowCommand(deps());
     expect(confirm.mock.calls[0]![0]).toContain("may already be on the founder's phone");
-    expect(request()).toBe(`${DAY}|unknown|2026-10-23T00:33:00.000Z`);
+    expect(request()).toBe(`${DAY}|unknown|2026-10-23T00:33:00.000Z|${NOW.toISOString()}`);
   });
 
   it('changes nothing when declined or cancelled', async () => {
