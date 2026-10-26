@@ -2,7 +2,7 @@ import { displayName, fileDescription } from '../media/labels.ts';
 import { listClients, type ClientRow } from '../store/clients.ts';
 import type { Db } from '../store/db.ts';
 import { listClientFiles } from '../store/media.ts';
-import { decisionDocIds, lastMeetingByClient, listClientMeetings, listUnassigned } from '../store/meetings.ts';
+import { lastMeetingByClient, listClientMeetings, listUnassigned, meetingStats } from '../store/meetings.ts';
 import { lastActivity } from '../store/messages.ts';
 import { listPeople, type PersonRow } from '../store/people.ts';
 import { listDecisions, listTasks, type DecisionRow, type TaskRow } from '../store/tasks.ts';
@@ -47,18 +47,13 @@ export interface UnassignedView {
   seconds: number | null;
 }
 
-export interface DecisionView extends DecisionRow {
-  /** The Doc of the meeting the decision was taken in; null when it is not from a meeting with a Doc. */
-  docFileId: string | null;
-}
-
 export interface ClientView {
   client: ClientRow;
   sheetName: string;
   usOpen: TaskRow[];
   clientOpen: TaskRow[];
   done: TaskRow[];
-  decisions: DecisionView[];
+  decisions: DecisionRow[];
   /** Files received from client members (spec §8.3), newest first. */
   files: FileView[];
   /** Done meetings, newest first. */
@@ -79,6 +74,8 @@ export interface TrackerView {
   health: HealthLine;
   /** Unassigned meetings, newest first; internal meetings are never listed. */
   unassigned: UnassignedView[];
+  /** All unassigned meetings; more than unassigned holds past UNASSIGNED_LIMIT. */
+  unassignedTotal: number;
   clients: ClientView[];
 }
 
@@ -117,10 +114,10 @@ export function loadTrackerView(db: Db, now: Date, health: HealthLine): TrackerV
     today,
     health,
     unassigned: listUnassigned(db, UNASSIGNED_LIMIT).map((m) => ({ id: m.id, date: istDate(new Date(m.startedAt)), seconds: m.seconds })),
+    unassignedTotal: meetingStats(db, now.toISOString()).unassigned,
     clients: ordered.map((client) => {
       const all = listTasks(db, client.id);
       const notDone = all.filter((t) => t.status !== 'done');
-      const docs = decisionDocIds(db, client.id);
       const last = lastMeetings.get(client.id);
       const deadlines = notDone.map((t) => t.deadline).filter((d): d is string => d !== null).sort();
       return {
@@ -129,7 +126,7 @@ export function loadTrackerView(db: Db, now: Date, health: HealthLine): TrackerV
         usOpen: notDone.filter((t) => t.side === 'us').sort(byUrgency),
         clientOpen: notDone.filter((t) => t.side === 'client').sort(byUrgency),
         done: all.filter((t) => t.status === 'done').sort(byClosed),
-        decisions: listDecisions(db, client.id).map((d) => ({ ...d, docFileId: docs.get(d.id) ?? null })),
+        decisions: listDecisions(db, client.id),
         files: listClientFiles(db, client.id).map((f) => ({
           date: istDate(new Date(f.ts)),
           sentBy: f.sender ?? 'Unknown',

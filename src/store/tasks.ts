@@ -78,6 +78,8 @@ export interface DecisionRow {
   decidedOn: string;
   source: 'whatsapp' | 'meeting' | 'human';
   sourceWaId: string | null;
+  /** The Doc of the meeting the decision was taken in; null when it is not from a meeting, or the meeting has no Doc. */
+  docFileId: string | null;
 }
 
 interface RawTask {
@@ -235,8 +237,9 @@ export function addDecision(
 
 export function listDecisions(db: Db, clientId: number, limit = 1000): DecisionRow[] {
   return db
-    .prepare(`SELECT id, client_id AS clientId, text, decided_on AS decidedOn, source, source_wa_id AS sourceWaId
-      FROM decisions WHERE client_id = ? ORDER BY decided_on DESC, id DESC LIMIT ?`)
+    .prepare(`SELECT d.id, d.client_id AS clientId, d.text, d.decided_on AS decidedOn, d.source, d.source_wa_id AS sourceWaId,
+        m.doc_file_id AS docFileId
+      FROM decisions d LEFT JOIN meetings m ON m.id = d.meeting_id WHERE d.client_id = ? ORDER BY d.decided_on DESC, d.id DESC LIMIT ?`)
     .all(clientId, limit) as DecisionRow[];
 }
 

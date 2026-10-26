@@ -66,3 +66,10 @@ export function isIsoDate(s: string): boolean {
   const d = new Date(`${s}T00:00:00Z`);
   return !Number.isNaN(d.getTime()) && d.toISOString().startsWith(s);
 }
+
+/** "10 min", "1 h 02 min", "under 1 min". */
+export function meetingLength(seconds: number): string {
+  const minutes = Math.round(Number.isFinite(seconds) && seconds > 0 ? seconds / 60 : 0);
+  if (minutes === 0) return 'under 1 min';
+  return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, '0')} min`;
+}

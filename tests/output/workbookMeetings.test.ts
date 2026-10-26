@@ -87,6 +87,15 @@ describe('meetings in the view', () => {
     expect(sharma(db)).toMatchObject({ meetings: [], lastMeeting: null });
   });
 
+  it('never gives as Last meeting a meeting the client tab hides', () => {
+    const db = seededDb();
+    done(db, { startedAt: '2026-10-20T06:00:00.000Z' });
+    const hidden = done(db, { startedAt: '2026-10-22T06:00:00.000Z' });
+    db.prepare("UPDATE meetings SET summary = '{not json' WHERE id = ?").run(hidden);
+    expect(sharma(db).meetings).toHaveLength(1);
+    expect(sharma(db).lastMeeting).toBe('2026-10-20');
+  });
+
   it('shows at most CLIENT_MEETINGS_LIMIT meetings', () => {
     const db = seededDb();
     for (let i = 0; i <= CLIENT_MEETINGS_LIMIT; i++) done(db, { startedAt: new Date(Date.UTC(2026, 5, 1) + i * 86_400_000).toISOString() });
@@ -112,6 +121,7 @@ describe('Overview', () => {
     done(db, { startedAt: '2026-10-22T06:00:00.000Z' });
     found(db, { startedAt: '2026-10-24T06:00:00.000Z', status: 'internal', title: '', clientId: null });
     const ov = (await book(db)).getWorksheet('Overview')!;
+    expect(ov.getCell('A2').text).toMatch(/^Built [\d-]+ [\d:]+ IST$/);
     expect(ov.getCell('A3').value).toBe('Client');
     expect(ov.getCell('K3').value).toBe('Last meeting');
     expect(ov.getCell('L3').value).toBeNull();
@@ -119,40 +129,64 @@ describe('Overview', () => {
     expect(ov.getCell('K4').value).toBe('');
     expect(ov.getCell('K5').value).toEqual(new Date(Date.UTC(2026, 9, 22)));
     expect(ov.getCell('K5').numFmt).toBe('d mmm yyyy');
-    expect(allText(ov)).not.toContain('Unassigned');
+    expect(allText(ov)).not.toContain('nassigned');
+    expect(ov.rowCount).toBe(5);
     expect(ov.views[0]).toMatchObject({ state: 'frozen', ySplit: 3 });
   });
 
-  it('shows an Unassigned meetings block under the health line: id, IST short date and length, no titles', async () => {
+  it('shows an Unassigned meetings block below the client table: id, IST short date and length, no titles', async () => {
     const db = seededDb();
-    const a = found(db, { startedAt: '2026-10-23T06:00:00.000Z', status: 'unassigned', title: 'Secret pitch to Acme', clientId: null, seconds: 47 });
+    const a = found(db, { startedAt: '2026-10-23T06:00:00.000Z', status: 'unassigned', title: 'Secret pitch to Acme', clientId: null, seconds: 2820 });
     const b = found(db, { startedAt: '2026-10-24T18:45:00.000Z', status: 'unassigned', title: 'Another secret', clientId: null, seconds: 3725 });
     const c = found(db, { startedAt: '2026-10-25T06:00:00.000Z', status: 'unassigned', title: 'Third secret', clientId: null, seconds: null });
     const ov = (await book(db)).getWorksheet('Overview')!;
     expect(ov.getCell('A1').value).toBe(healthy.text);
-    expect(ov.getCell('A2').value).toBe('Unassigned meetings');
-    expect(ov.getCell('A3').value).toBe(`#${c} · 25 Oct`);
+    expect(ov.getCell('A2').text).toMatch(/^Built .* IST · 3 unassigned meetings \(see below\)$/);
+    // The header stays frozen at row 3, with the clients under it as before.
+    expect(ov.getCell('A3').value).toBe('Client');
+    expect(ov.getCell('A4').text).toBe('Mehta Foods');
+    expect(JSON.stringify(ov.getCell('A5').value)).toContain("Sharma Interiors'!A1");
+    expect(ov.views[0]).toMatchObject({ state: 'frozen', ySplit: 3 });
+    expect(ov.getRow(6).cellCount).toBe(0);
+    expect(ov.getCell('A7').value).toBe('Unassigned meetings');
+    expect(ov.getCell('A8').value).toBe(`#${c} · 25 Oct`);
     // 18:45 UTC on the 24th is 00:15 IST on the 25th.
-    expect(ov.getCell('A4').value).toBe(`#${b} · 25 Oct · 1:02:05`);
-    expect(ov.getCell('A5').value).toBe(`#${a} · 23 Oct · 0:47`);
-    expect(ov.getCell('A6').value).toBe(HINT);
-    // Up to 50 rows could fill the screen if frozen, so with the block nothing is frozen.
-    expect((ov.views ?? []).some((v) => v.state === 'frozen')).toBe(false);
-    const header = rowOf(ov, 'Client');
-    expect(header.getCell(11).value).toBe('Last meeting');
-    expect(ov.getRow(header.number + 1).getCell(1).text).toBe('Mehta Foods');
-    expect(ov.getRow(header.number - 1).getCell(1).text).toMatch(/^Built /);
+    expect(ov.getCell('A9').value).toBe(`#${b} · 25 Oct · 1 h 02 min`);
+    expect(ov.getCell('A10').value).toBe(`#${a} · 23 Oct · 47 min`);
+    expect(ov.getCell('A11').value).toBe(HINT);
+    expect(ov.rowCount).toBe(11);
     const text = allText(ov);
     expect(text).not.toContain('secret');
     expect(text).not.toContain('Secret');
+  });
+
+  it('says 1 unassigned meeting in the singular, and under 1 min for a very short one', async () => {
+    const db = seededDb();
+    const id = found(db, { startedAt: '2026-10-23T06:00:00.000Z', status: 'unassigned', clientId: null, seconds: 20 });
+    const ov = (await book(db)).getWorksheet('Overview')!;
+    expect(ov.getCell('A2').text).toMatch(/ IST · 1 unassigned meeting \(see below\)$/);
+    expect(ov.getCell('A8').value).toBe(`#${id} · 23 Oct · under 1 min`);
+  });
+
+  it('adds a +N more row past UNASSIGNED_LIMIT, and counts them all on the Built line', async () => {
+    const db = seededDb();
+    for (let i = 0; i < UNASSIGNED_LIMIT + 3; i++) found(db, { startedAt: new Date(Date.UTC(2026, 6, 1) + i * 86_400_000).toISOString(), status: 'unassigned', clientId: null });
+    const view = loadTrackerView(db, now, healthy);
+    expect(view.unassigned).toHaveLength(50);
+    expect(view.unassignedTotal).toBe(53);
+    const ov = (await book(db)).getWorksheet('Overview')!;
+    expect(ov.getCell('A2').text).toMatch(/ IST · 53 unassigned meetings \(see below\)$/);
+    const more = rowWhere(ov, (r) => r.getCell(1).value === '+3 more');
+    expect(more.number).toBe(8 + 50);
+    expect(ov.getRow(more.number + 1).getCell(1).value).toBe(HINT);
   });
 
   it('keeps the unassigned rows as plain text', async () => {
     const db = seededDb();
     found(db, { startedAt: '2026-10-23T06:00:00.000Z', status: 'unassigned', clientId: null, seconds: 47 });
     const ov = (await book(db)).getWorksheet('Overview')!;
-    expect(ov.getCell('A3').type).toBe(ExcelJS.ValueType.String);
-    expect(ov.getCell('A3').formula).toBeUndefined();
+    expect(ov.getCell('A8').type).toBe(ExcelJS.ValueType.String);
+    expect(ov.getCell('A8').formula).toBeUndefined();
   });
 });
 
@@ -160,7 +194,7 @@ describe('Meetings section on the client tab', () => {
   it('comes after Done and before People, with date, title, length, action items and a Doc link', async () => {
     const db = seededDb();
     done(db, { startedAt: '2026-10-20T06:00:00.000Z', title: 'Kickoff', seconds: 3725, docFileId: 'docA_1-x', actionItems: 3 });
-    done(db, { startedAt: '2026-10-22T06:00:00.000Z', title: '=HYPERLINK("http://evil")', seconds: 47, docFileId: 'docB', actionItems: 0 });
+    done(db, { startedAt: '2026-10-22T06:00:00.000Z', title: '=HYPERLINK("http://evil")', seconds: 2820, docFileId: 'docB', actionItems: 0 });
     const ws = (await book(db)).getWorksheet('Sharma Interiors')!;
     const doneAt = rowOf(ws, 'Done').number;
     const title = rowOf(ws, 'Meetings').number;
@@ -173,12 +207,12 @@ describe('Meetings section on the client tab', () => {
     expect(first.getCell(2).value).toBe('=HYPERLINK("http://evil")');
     expect(first.getCell(2).type).toBe(ExcelJS.ValueType.String);
     expect(first.getCell(2).formula).toBeUndefined();
-    expect(first.getCell(3).value).toBe('0:47');
+    expect(first.getCell(3).value).toBe('47 min');
     expect(first.getCell(4).value).toBe(0);
     expect(first.getCell(5).value).toEqual({ text: 'Open', hyperlink: 'https://docs.google.com/document/d/docB/edit' });
     const second = ws.getRow(title + 3);
     expect(second.getCell(2).value).toBe('Kickoff');
-    expect(second.getCell(3).value).toBe('1:02:05');
+    expect(second.getCell(3).value).toBe('1 h 02 min');
     expect(second.getCell(4).value).toBe(3);
     expect(second.getCell(5).value).toEqual({ text: 'Open', hyperlink: 'https://docs.google.com/document/d/docA_1-x/edit' });
   });
