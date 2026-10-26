@@ -1,5 +1,7 @@
 import { Command } from 'commander';
-import { defaultDeps, googleAuthCommand, linkCommand, listGroupsCommand, statusCommand } from './cli/commands.ts';
+import {
+  defaultDeps, googleAuthCommand, linkCommand, linkSenderCommand, listGroupsCommand, reportSendNowCommand, reportStatusCommand, statusCommand,
+} from './cli/commands.ts';
 import { loadEnv } from './config/env.ts';
 import { trackerDbPath } from './config/paths.ts';
 import { openDb, type Db } from './store/db.ts';
@@ -33,6 +35,19 @@ program
   .action(async () => listGroupsCommand(deps()));
 program.command('status').description('Connection, backlog, failures, spend and disk').action(() => statusCommand(deps()));
 program.command('google-auth').description('Connect Google Drive through a browser sign-in').action(async () => googleAuthCommand(deps()));
+
+program
+  .command('link-sender')
+  .description('Link the spare number that sends the morning report (stop the service first)')
+  .option('--reset', 'discard the saved spare-number session only, or move a damaged one aside (the founder link and tracker data are kept); asks first')
+  .action(async (opts: { reset?: boolean }) => linkSenderCommand({ reset: opts.reset === true }, deps()));
+
+const report = program.command('report').description('Morning report');
+report.command('status').description("Today's morning report and the last 7 days").action(() => reportStatusCommand(deps()));
+report
+  .command('send-now')
+  .description("Ask the running service to send today's report now (asks first; refuses if already sent)")
+  .action(async () => reportSendNowCommand(deps()));
 
 // No single-instance lock: the service and the CLI share the DB through WAL with a busy timeout.
 function withDb<T>(fn: (db: Db) => T): T {
