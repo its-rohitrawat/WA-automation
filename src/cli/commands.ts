@@ -481,8 +481,8 @@ function sendNowRefusal(row: ReportRow | undefined): string | undefined {
 }
 
 /**
- * Asks the running service to send today's report now. It refuses if today was already sent or is being sent, and if the
- * service is not running. It sends nothing itself: only the service uses the spare number's session. The request records
+ * Asks the running service to send today's report now. It refuses if today was already sent or is being sent, if the
+ * service is not running, and if the running service has the report off. It sends nothing itself: only the service uses the spare number's session. The request records
  * the row the owner confirmed, and the service honours it only while today's row is still exactly that.
  */
 export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
@@ -504,6 +504,14 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
     const snap = readHealthSnapshot(db);
     if (!snap || now.getTime() - Date.parse(snap.at) > SERVICE_FRESH_MS) {
       out('The service is not running, so nothing can be sent. Start it first (net start wa-agent), then run this again.');
+      return;
+    }
+    // The service writes a report line only when it was started with the report on. Without one, nothing would pick the
+    // request up now, and a later restart with the report on would send it at once, outside the window.
+    if (!snap.report) {
+      out(
+        'The running service has the morning report off (it was started before REPORT_ENABLED=true was set). Restart it (net stop wa-agent, then net start wa-agent), wait a minute, then run this again.',
+      );
       return;
     }
     const caution =

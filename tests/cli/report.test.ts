@@ -65,11 +65,13 @@ function withTracker<T>(fn: (db: Db) => T): T {
   }
 }
 
-function writeSnapshot(at: Date): void {
+/** A health snapshot of a running service. `reportOn: false` is a service started with the report off (no report line). */
+function writeSnapshot(at: Date, opts: { reportOn?: boolean } = {}): void {
   const snap: HealthSnapshot = {
     at: at.toISOString(), line: { ok: true, text: '✅ Connected' }, whatsapp: { state: 'open', since: at.toISOString(), lastErrorCode: null, credsSaveFailures: 0 },
     downSince: null, failed: [], lastSuccessAt: null, lastPublishedAt: null, spentToday: 0, capUsd: 15, freeGb: 100, publishFailingSince: null,
     ingestFailures: 0,
+    ...(opts.reportOn === false ? {} : { report: { text: 'Morning report: due now', warning: null } }),
   };
   withTracker((db) => setKv(db, 'health', JSON.stringify(snap)));
 }
@@ -258,6 +260,24 @@ describe('cli link-sender', () => {
     expect(out()).toContain('Spare number linked.');
   });
 
+  it('a damaged session file: an earlier damaged -wal copy is never overwritten, even with no earlier main-file copy', async () => {
+    const file = senderSessionDbPath(dataDir);
+    const earlierWal = Buffer.from('earlier damaged wal copy');
+    writeFileSync(`${file}-wal.damaged-20261023T090000`, earlierWal);
+    writeFileSync(file, JUNK);
+    confirm.mockImplementation(async () => {
+      writeFileSync(`${file}-wal`, Buffer.from('new wal bytes'));
+      return true;
+    });
+    await linkSenderCommand({ reset: true }, deps());
+    expect(readFileSync(`${file}-wal.damaged-20261023T090000`).equals(earlierWal)).toBe(true);
+    expect(existsSync(`${file}.damaged-20261023T090000`)).toBe(false);
+    expect(readFileSync(`${file}.damaged-20261023T090000-2`).equals(JUNK)).toBe(true);
+    expect(readFileSync(`${file}-wal.damaged-20261023T090000-2`).toString()).toBe('new wal bytes');
+    expect(out()).toContain('sender-session.db.damaged-20261023T090000-2');
+    expect(out()).toContain('Spare number linked.');
+  });
+
   it('a damaged session file: "no" or Ctrl+C leaves it unchanged at its name', async () => {
     const file = senderSessionDbPath(dataDir);
     writeFileSync(file, JUNK);
@@ -345,6 +365,26 @@ describe('cli report status', () => {
   it('says when the report is off', () => {
     reportStatusCommand(deps({ REPORT_ENABLED: 'false' }));
     expect(lines).toEqual(['Morning report: off (set REPORT_ENABLED=true and REPORT_RECIPIENT in .env, then restart the service)']);
+  });
+
+  it("still shows today's row when the report is off", () => {
+    withTracker((db) => {
+      claimReport(db, DAY, '2026-10-23T00:30:00.000Z');
+      finishReport(db, DAY, 'sent', 'msg-1,msg-2', '2026-10-23T00:31:00.000Z');
+    });
+    reportStatusCommand(deps({ REPORT_ENABLED: 'false' }));
+    expect(lines[0]).toBe('Morning report: off (set REPORT_ENABLED=true and REPORT_RECIPIENT in .env, then restart the service)');
+    expect(lines[1]).toMatch(/^Today \(2026-10-23\): /);
+    expect(lines).toHaveLength(2);
+  });
+
+  it('lists at most the last 7 days, newest first', () => {
+    withTracker((db) => {
+      for (let d = 14; d <= 22; d++) skipReport(db, `2026-10-${d}`, 'connect_timeout', `2026-10-${d}T06:30:00.000Z`);
+    });
+    reportStatusCommand(deps());
+    const history = lines.filter((l) => l.startsWith('  2026-'));
+    expect(history.map((l) => l.slice(2, 12))).toEqual(['2026-10-22', '2026-10-21', '2026-10-20', '2026-10-19', '2026-10-18', '2026-10-17', '2026-10-16']);
   });
 });
 
@@ -462,6 +502,48 @@ describe('cli report send-now', () => {
     expect(out()).toContain('changed while you were answering');
     expect(out()).toContain('Morning report: unknown, check WhatsApp');
     expect(out()).toContain('Nothing was sent.');
+    expect(request()).toBeUndefined();
+  });
+
+  it('refuses after the yes when the same status was written again meanwhile (a newer try)', async () => {
+    writeSnapshot(NOW);
+    withTracker((db) => {
+      claimReport(db, DAY, '2026-10-23T00:30:00.000Z');
+      retryReport(db, DAY, 'connect_timeout', '2026-10-23T00:32:00.000Z', '2026-10-23T00:30:30.000Z');
+    });
+    confirm.mockImplementation(async () => {
+      withTracker((db) => {
+        expect(claimReport(db, DAY, '2026-10-23T03:30:00.000Z')).toBe(true);
+        expect(retryReport(db, DAY, 'connect_timeout', '2026-10-23T03:32:00.000Z', '2026-10-23T03:30:30.000Z')).toBe(true);
+      });
+      return true;
+    });
+    await reportSendNowCommand(deps());
+    expect(withTracker((db) => reportFor(db, DAY))?.status).toBe('retry');
+    expect(out()).toContain('changed while you were answering');
+    expect(out()).toContain('Nothing was sent.');
+    expect(request()).toBeUndefined();
+  });
+
+  it('refuses after the yes when the IST date changed meanwhile', async () => {
+    writeSnapshot(NOW);
+    confirm.mockImplementation(async () => {
+      vi.setSystemTime(new Date('2026-10-23T18:31:00.000Z')); // 00:01 IST on 24 Oct
+      return true;
+    });
+    await reportSendNowCommand(deps());
+    expect(out()).toContain('The date changed while you were answering');
+    expect(out()).toContain('Nothing was sent.');
+    expect(request()).toBeUndefined();
+  });
+
+  it('refuses without asking when the running service was started with the report off', async () => {
+    writeSnapshot(NOW, { reportOn: false });
+    await reportSendNowCommand(deps());
+    expect(lines).toEqual([
+      'The running service has the morning report off (it was started before REPORT_ENABLED=true was set). Restart it (net stop wa-agent, then net start wa-agent), wait a minute, then run this again.',
+    ]);
+    expect(confirm).not.toHaveBeenCalled();
     expect(request()).toBeUndefined();
   });
 
