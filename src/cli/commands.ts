@@ -1,5 +1,6 @@
 import { existsSync, renameSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
+import type { Command } from 'commander';
 import qrcode from 'qrcode-terminal';
 import { maskNumber, reportRecipient, reportSettings, requireKey, type Env } from '../config/env.ts';
 import { loadGroupsFile, type ClientConfig } from '../config/groups.ts';
@@ -8,24 +9,24 @@ import { DpapiKeyProvider, type KeyProvider } from '../crypto/keyProvider.ts';
 import { MediaRefSealer } from '../media/ref.ts';
 import { readHealthSnapshot } from '../health/health.ts';
 import { DRIVE_SCOPES, runLoopbackConsent, TokenStore, type ConsentClient } from '../output/googleAuth.ts';
-import { describeReport, reasonText } from '../report/scheduler.ts';
+import { describeReport, isStaleSending, reasonText } from '../report/scheduler.ts';
 import { latestBatches } from '../store/batches.ts';
 import { listClients, syncClients } from '../store/clients.ts';
 import { openDb, tx, type Db } from '../store/db.ts';
 import { setKv } from '../store/kv.ts';
 import { unprocessedCounts } from '../store/messages.ts';
-import { recentReports, REPORT_REQUEST_KEY, reportFor, reportRequestValue, type ReportRow } from '../store/reports.ts';
+import { recentReports, REPORT_REQUEST_KEY, reportFor, reportRequest, type ReportRow } from '../store/reports.ts';
 import { acquireLock } from '../util/lock.ts';
 import { silentLogger } from '../util/logger.ts';
-import { istDate, istTime } from '../util/time.ts';
+import { istDate, istShortDate, istTime } from '../util/time.ts';
 import { AllowList } from '../wa/allowlist.ts';
 import {
-  openSenderSession, openSessionDb, resetSession, SenderSessionDecryptError, SessionDecryptError, useEncryptedAuthState, useSenderAuthState,
-  type EncryptedAuth,
+  openSenderSession, openSessionDb, readFounderNumber, resetSession, SenderSessionDecryptError, SessionDecryptError, useEncryptedAuthState,
+  useSenderAuthState, type EncryptedAuth,
 } from '../wa/authState.ts';
 import { baileysSocketFactory, WhatsAppGateway, type GatewayState, type SocketFactory } from '../wa/gateway.ts';
 import { Ingestor } from '../wa/ingest.ts';
-import { baileysSenderSocketFactory, linkSender, type OpenFailure, type SenderSocketFactory } from '../wa/senderGateway.ts';
+import { baileysSenderSocketFactory, linkedNumber, linkSender, type OpenFailure, type SenderSocketFactory } from '../wa/senderGateway.ts';
 import { formatStatus } from './status.ts';
 
 export interface CliDeps {
@@ -370,7 +371,8 @@ async function confirmChange(deps: CliDeps, question: string): Promise<boolean> 
 
 /**
  * Links the spare number that sends the morning report. Only data/sender-session.db is written (with --reset, a damaged
- * file is renamed aside, never deleted); the founder's session and the tracker are not opened. It sends nothing.
+ * file is renamed aside, never deleted). The founder's session is only read, read-only, to refuse a link from the
+ * founder's own number; the tracker is not opened. It sends nothing.
  */
 export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps): Promise<void> {
   const { env, out } = deps;
@@ -436,6 +438,17 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
       },
     });
     if (!result.ok) throw new Error(SENDER_ADVICE[result.code]);
+    // The founder's number must never send: neither REPORT_RECIPIENT (which may not be set yet) nor the number the
+    // founder reader is linked to (session.db, only read here). SenderGateway checks both again at service start and at
+    // send time.
+    const linked = linkedNumber(auth);
+    const founder = readFounderNumber(sessionDbPath(env.DATA_DIR), key);
+    if (linked !== undefined && ((env.REPORT_RECIPIENT && linked === env.REPORT_RECIPIENT) || linked === founder)) {
+      resetSession(senderDb!); // the spare number's session rows only: this link is never used
+      throw new Error(
+        "That QR code was scanned with the founder's phone. On the founder's phone remove the new 'WA Agent' linked device (the one linked just now, not the older one the tracker uses), then run link-sender again and scan with the SPARE phone.",
+      );
+    }
     out('Spare number linked. Next: set REPORT_RECIPIENT and REPORT_ENABLED=true in .env, then start the service (net start wa-agent).');
   } finally {
     senderDb?.close();
@@ -451,11 +464,21 @@ export function reportStatusCommand(deps: CliDeps): void {
   const today = istDate(now);
   const db = openDb(trackerDbPath(env.DATA_DIR));
   try {
-    out(
-      settings.enabled
-        ? `Morning report: on, ${settings.time} to ${settings.deadline} IST, to the number ending ${maskNumber(reportRecipient(env))}`
-        : 'Morning report: off (set REPORT_ENABLED=true and REPORT_RECIPIENT in .env, then restart the service)',
-    );
+    const snap = readHealthSnapshot(db);
+    const fresh = snap !== undefined && now.getTime() - Date.parse(snap.at) <= SERVICE_FRESH_MS;
+    if (settings.enabled) {
+      // A running service sends to the number it was started with; .env may name another one since.
+      const envMasked = maskNumber(reportRecipient(env));
+      const serviceMasked = fresh ? snap.report?.recipientMasked : undefined;
+      out(`Morning report: on, ${settings.time} to ${settings.deadline} IST, to the number ending ${serviceMasked ?? envMasked}`);
+      if (serviceMasked && serviceMasked !== envMasked) {
+        out(
+          `⚠️ REPORT_RECIPIENT in .env now ends ${envMasked}, but the running service still sends to the number ending ${serviceMasked}. Restart the service (net stop wa-agent, then net start wa-agent) to use it.`,
+        );
+      }
+    } else {
+      out('Morning report: off (set REPORT_ENABLED=true and REPORT_RECIPIENT in .env, then restart the service)');
+    }
     const row = reportFor(db, today);
     if (settings.enabled || row) out(`Today (${today}): ${describeReport(row, now, settings, 'idle').text}`);
     const past = recentReports(db, 8).filter((r) => r.date !== today).slice(0, 7);
@@ -463,8 +486,13 @@ export function reportStatusCommand(deps: CliDeps): void {
       out('Last days:');
       for (const r of past) out(`  ${r.date}  ${r.status.padEnd(8)}${r.status === 'sent' ? `at ${istTime(new Date(r.updatedAt))} IST` : reasonText(r.detail)}`);
     }
-    const warning = readHealthSnapshot(db)?.report?.warning;
-    if (warning) out(warning);
+    // An old snapshot's warning may no longer hold (the owner may have fixed it since the service stopped).
+    if (settings.enabled && snap && !fresh) {
+      const at = new Date(snap.at);
+      out(`⚠️ The service has not reported since ${istShortDate(at)} ${istTime(at)}. Is it running?`);
+    } else if (snap?.report?.warning) {
+      out(snap.report.warning);
+    }
   } finally {
     db.close();
   }
@@ -473,17 +501,23 @@ export function reportStatusCommand(deps: CliDeps): void {
 /** A health snapshot younger than this means the service is running (cli status uses the same 2 minutes). */
 const SERVICE_FRESH_MS = 2 * 60_000;
 
-/** Why send-now must not ask for a send while today's row is in this state, or undefined when it may. */
-function sendNowRefusal(row: ReportRow | undefined): string | undefined {
+/**
+ * Why send-now must not ask for a send while today's row is in this state, or undefined when it may. A 'sending' row
+ * older than 10 minutes is not a send in progress: its outcome could not be recorded, status reads it as unknown, and
+ * it is treated like an unknown row (the service marks it unknown before it takes the request).
+ */
+function sendNowRefusal(row: ReportRow | undefined, now: Date): string | undefined {
   if (row?.status === 'sent') return `Today's report was already sent at ${istTime(new Date(row.updatedAt))} IST. Nothing was sent.`;
-  if (row?.status === 'sending') return "Today's report is being sent right now. Check with: npm run cli -- report status";
+  if (row?.status === 'sending' && !isStaleSending(row, now)) return "Today's report is being sent right now. Check with: npm run cli -- report status";
   return undefined;
 }
 
 /**
- * Asks the running service to send today's report now. It refuses if today was already sent or is being sent, and if the
- * service is not running. It sends nothing itself: only the service uses the spare number's session. The request records
- * the row the owner confirmed, and the service honours it only while today's row is still exactly that.
+ * Asks the running service to send today's report now. It refuses if today was already sent or is being sent, if the
+ * service is not running, if the running service has the report off, and if the running service sends to another
+ * number than REPORT_RECIPIENT in .env now names (compared by last 4 digits). It sends nothing itself: only the service
+ * uses the spare number's session. The request records the row the owner confirmed and the time of the yes, and the
+ * service honours it only while today's row is still exactly that, for 5 minutes.
  */
 export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
   const { env, out } = deps;
@@ -496,7 +530,7 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
   const db = openDb(trackerDbPath(env.DATA_DIR));
   try {
     const row = reportFor(db, today);
-    const refusal = sendNowRefusal(row);
+    const refusal = sendNowRefusal(row, now);
     if (refusal) {
       out(refusal);
       return;
@@ -506,13 +540,34 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
       out('The service is not running, so nothing can be sent. Start it first (net start wa-agent), then run this again.');
       return;
     }
+    // The service writes a report line only when it was started with the report on. Without one, nothing would pick the
+    // request up now, and a later restart with the report on would send it at once, outside the window.
+    if (!snap.report) {
+      out(
+        'The running service has the morning report off (it was started before REPORT_ENABLED=true was set). Restart it (net stop wa-agent, then net start wa-agent), wait a minute, then run this again.',
+      );
+      return;
+    }
+    // The running service sends to the number it was started with. If .env names another one now, the owner would
+    // confirm one number and the report would go to the other.
+    const restart = 'Nothing was sent. Restart the service (net stop wa-agent, then net start wa-agent), wait a minute, then run this again.';
+    const envMasked = maskNumber(reportRecipient(env));
+    const serviceMasked = snap.report.recipientMasked;
+    if (!serviceMasked) {
+      out(`The running service does not say which number it sends to (it was started before an update). ${restart}`);
+      return;
+    }
+    if (serviceMasked !== envMasked) {
+      out(`The running service sends to the number ending ${serviceMasked}, but REPORT_RECIPIENT in .env now ends ${envMasked}. ${restart}`);
+      return;
+    }
     const caution =
-      row?.status === 'unknown'
+      row?.status === 'unknown' || isStaleSending(row, now)
         ? "The last try ended without a clear answer, so today's report may already be on the founder's phone. Check the founder's WhatsApp first. "
         : '';
     let yes: boolean;
     try {
-      yes = await deps.confirm(`${caution}This sends today's morning report to the number ending ${maskNumber(reportRecipient(env))} now. Type yes to continue:`);
+      yes = await deps.confirm(`${caution}This sends today's morning report to the number ending ${serviceMasked} now. Type yes to continue:`);
     } catch (e) {
       if (!(e instanceof ConfirmCancelled)) throw e;
       out('Cancelled. Nothing was sent.');
@@ -528,17 +583,46 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
       const at = new Date();
       if (istDate(at) !== today) return 'The date changed while you were answering. Nothing was sent. Run this again.';
       const current = reportFor(db, today);
-      const late = sendNowRefusal(current);
+      const late = sendNowRefusal(current, at);
       if (late) return late;
       if (current?.status !== row?.status || current?.updatedAt !== row?.updatedAt) {
         const nowText = describeReport(current, at, reportSettings(env), 'idle').text;
         return `Today's report changed while you were answering (now: ${nowText}). Nothing was sent. Check with: npm run cli -- report status, then run this again if it is still needed.`;
       }
-      setKv(db, REPORT_REQUEST_KEY, reportRequestValue(today, current));
+      // Stamped with the time of the yes: the service drops a request older than 5 minutes.
+      setKv(db, REPORT_REQUEST_KEY, reportRequest(today, current, at));
       return undefined;
     });
     out(answer ?? 'Requested. The service sends it within about a minute. Check with: npm run cli -- report status');
   } finally {
     db.close();
   }
+}
+
+export interface ReportCommandHandlers {
+  linkSender: (opts: { reset: boolean }, deps: CliDeps) => Promise<void>;
+  reportStatus: (deps: CliDeps) => void;
+  reportSendNow: (deps: CliDeps) => Promise<void>;
+}
+
+const REPORT_HANDLERS: ReportCommandHandlers = {
+  linkSender: linkSenderCommand,
+  reportStatus: reportStatusCommand,
+  reportSendNow: reportSendNowCommand,
+};
+
+/** Adds link-sender, report status and report send-now to the CLI. deps is called only when a command runs. */
+export function addReportCommands(program: Command, deps: () => CliDeps, h: ReportCommandHandlers = REPORT_HANDLERS): void {
+  program
+    .command('link-sender')
+    .description('Link the spare number that sends the morning report (stop the service first)')
+    .option('--reset', 'discard the saved spare-number session only, or move a damaged one aside (the founder link and tracker data are kept); asks first')
+    .action(async (opts: { reset?: boolean }) => h.linkSender({ reset: opts.reset === true }, deps()));
+
+  const report = program.command('report').description('Morning report');
+  report.command('status').description("Today's morning report and the last 7 days").action(() => h.reportStatus(deps()));
+  report
+    .command('send-now')
+    .description("Ask the running service to send today's report now (asks first; refuses if already sent)")
+    .action(async () => h.reportSendNow(deps()));
 }

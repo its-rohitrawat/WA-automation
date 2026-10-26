@@ -18,9 +18,17 @@ export interface MorningReportStart {
  * the founder's session.db) and makes its sender. Connects nothing yet. A damaged or undecryptable session never stops
  * the service: it is logged, the sender reports 'unreadable', and Health tells the owner what to run. A file that could
  * not be opened (a lock, permissions, a disk error) is 'unavailable' instead, and Health says to restart the service.
- * The log shows only the last 4 digits of REPORT_RECIPIENT.
+ * The log shows only the last 4 digits of REPORT_RECIPIENT, and never founderNumber.
+ * founderNumber: the number the founder-number reader is linked to (main.ts reads it from session.db). A spare-number
+ * link to it, or to REPORT_RECIPIENT, never sends ('self_send').
  */
-export function openMorningReport(o: { env: Env; masterKey: Buffer; log: Logger; factory: SenderSocketFactory }): MorningReportStart {
+export function openMorningReport(o: {
+  env: Env;
+  masterKey: Buffer;
+  log: Logger;
+  factory: SenderSocketFactory;
+  founderNumber?: string;
+}): MorningReportStart {
   const recipient = reportRecipient(o.env);
   const opened = openSenderSession(senderSessionDbPath(o.env.DATA_DIR), o.masterKey);
   let authProblem: 'unreadable' | 'unavailable' | undefined;
@@ -32,7 +40,7 @@ export function openMorningReport(o: { env: Env; masterKey: Buffer; log: Logger;
   const auth = opened.ok ? opened.auth : undefined;
   let sender: SenderGateway;
   try {
-    sender = new SenderGateway({ recipient, factory: o.factory, auth, authProblem });
+    sender = new SenderGateway({ recipient, founderNumber: o.founderNumber, factory: o.factory, auth, authProblem });
   } catch (err) {
     if (opened.ok) opened.db.close(); // the caller never receives the handle
     throw err;

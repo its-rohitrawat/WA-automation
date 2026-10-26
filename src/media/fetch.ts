@@ -57,7 +57,7 @@ const statusError = (status: number): Error =>
 /**
  * The path to fetch from MEDIA_HOST, or null when the address is unsafe. The address comes from the sender's phone:
  * ingest checked it before sealing, and it is checked again here. A checked direct path is used as it is. Without one,
- * only the path and query of the checked url are used, never its host. An empty string counts as absent.
+ * only the path and search string of the checked url are used, never its host. An empty string counts as absent.
  */
 function downloadPath(ref: MediaRef): string | null {
   if (!isSafeMediaAddress(ref)) return null;

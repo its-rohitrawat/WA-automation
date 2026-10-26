@@ -9,7 +9,8 @@ export interface ReportSettings {
 
 /**
  * sent: both messages left, with their WhatsApp ids.
- * failed: a definite failure before anything was sent (not linked, no connection, session refused). Safe to retry.
+ * failed: a definite failure before anything was sent (not linked, no connection, session refused, or an error while the
+ * socket was made or opening). Safe to retry.
  * unknown: the send started and did not finish cleanly. It may have reached the founder, so it is never retried automatically.
  */
 export type SendResult =
@@ -20,9 +21,11 @@ export type SendResult =
 /**
  * unreadable: data/sender-session.db is damaged or was written with another master key (fixed by link-sender --reset).
  * unavailable: the file could not be opened at service start (disk, permissions or a lock); a restart opens it again.
+ * self_send: the saved link is the recipient's own number (the QR code was scanned with the founder's phone), so it
+ * never sends (fixed by link-sender --reset, scanning with the spare phone).
  */
 export type SenderState =
-  | 'idle' | 'not_linked' | 'unreadable' | 'unavailable' | 'connecting' | 'open' | 'logged_out' | 'forbidden' | 'replaced';
+  | 'idle' | 'not_linked' | 'unreadable' | 'unavailable' | 'self_send' | 'connecting' | 'open' | 'logged_out' | 'forbidden' | 'replaced';
 
 export interface SenderStatus {
   state: SenderState;
@@ -38,10 +41,20 @@ export interface ReportSender {
   sendReport(text: string, xlsx: Buffer, fileName: string): Promise<SendResult>;
   status(): SenderStatus;
   stop(): Promise<void>;
+  /** The fixed recipient, masked to its last 4 digits ("…5678"). Never the full number. */
+  maskedRecipient(): string;
 }
 
 /** The morning report's line in Health and `cli status`. warning is set only when the owner has to act. */
 export interface ReportHealth {
   text: string;
   warning: string | null;
+  /**
+   * The number the running service sends to, masked to its last 4 digits ("…5678"), so the CLI can tell when .env now
+   * names another number. Set by the scheduler; missing in snapshots of an older service.
+   */
+  recipientMasked?: string;
 }
+
+/** The only form recipientMasked may take: "…" and 4 digits. */
+export const MASKED_NUMBER = /^…\d{4}$/;

@@ -1,10 +1,10 @@
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { proto } from 'baileys';
 import { describe, expect, it } from 'vitest';
-import { SessionDecryptError, openSessionDb, resetSession, useEncryptedAuthState } from '../../src/wa/authState.ts';
+import { SessionDecryptError, openSessionDb, readFounderNumber, resetSession, useEncryptedAuthState } from '../../src/wa/authState.ts';
 
 const key = randomBytes(32);
 
@@ -170,6 +170,49 @@ describe('encrypted auth state', () => {
       }
       expect(thrown).toBeDefined();
       expect(thrown).not.toBeInstanceOf(SessionDecryptError);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("readFounderNumber (link-sender's read of the founder's session)", () => {
+  const files = (dir: string) => readdirSync(dir).sort();
+
+  it('reads the linked number without changing session.db or leaving any file beside it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wa-founder-'));
+    try {
+      const file = join(dir, 'session.db');
+      expect(readFounderNumber(file, key)).toBeUndefined(); // no file: nothing is created
+      expect(files(dir)).toEqual([]);
+      const db = openSessionDb(file);
+      const a = useEncryptedAuthState(db, key);
+      expect(readFounderNumber(file, key)).toBeUndefined(); // not linked yet
+      a.state.creds.me = { id: '919811112222:7@s.whatsapp.net', name: 'Founder' };
+      await a.saveCreds();
+      // While the writer is open its rows are in the -wal file, and are read from there.
+      expect(readFounderNumber(file, key)).toBe('919811112222');
+      db.close();
+      const before = readFileSync(file);
+      expect(files(dir)).toEqual(['session.db']);
+      expect(readFounderNumber(file, key)).toBe('919811112222');
+      expect(readFounderNumber(file, randomBytes(32))).toBeUndefined(); // another master key cannot read it
+      expect(readFileSync(file).equals(before)).toBe(true);
+      expect(files(dir)).toEqual(['session.db']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns undefined for a damaged file, and leaves it as it is', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wa-founder-'));
+    try {
+      const file = join(dir, 'session.db');
+      const junk = Buffer.alloc(4096, 0x41);
+      writeFileSync(file, junk);
+      expect(readFounderNumber(file, key)).toBeUndefined();
+      expect(readFileSync(file).equals(junk)).toBe(true);
+      expect(files(dir)).toEqual(['session.db']);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

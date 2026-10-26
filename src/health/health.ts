@@ -1,7 +1,7 @@
 import { statfsSync } from 'node:fs';
 import type { ReconcileOutcome } from '../brain/reconciler.ts';
 import type { HealthLine } from '../output/view.ts';
-import type { ReportHealth } from '../report/types.ts';
+import { MASKED_NUMBER, type ReportHealth } from '../report/types.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
 import type { Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
@@ -235,7 +235,11 @@ const isMediaHealth = (m: unknown): m is MediaHealth => {
 
 const isReportHealth = (r: unknown): r is ReportHealth => {
   const x = r as Record<string, unknown> | null;
-  return typeof x === 'object' && x !== null && typeof x.text === 'string' && (x.warning === null || typeof x.warning === 'string');
+  return (
+    typeof x === 'object' && x !== null && typeof x.text === 'string' && (x.warning === null || typeof x.warning === 'string') &&
+    // Missing in snapshots of an older service; otherwise only a last-4-digits mask, never a full number.
+    (x.recipientMasked === undefined || (typeof x.recipientMasked === 'string' && MASKED_NUMBER.test(x.recipientMasked)))
+  );
 };
 
 export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
