@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { INDIAN_MOBILE } from '../../src/config/env.ts';
+import { INDIAN_MOBILE, parseEnv, reportSettings } from '../../src/config/env.ts';
 import { SENDER_WARNINGS, UNKNOWN_WARNING } from '../../src/report/scheduler.ts';
 
 const read = (path: string) => readFileSync(fileURLToPath(new URL(`../../${path}`, import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
@@ -63,6 +63,8 @@ describe('morning report documentation: safety statements', () => {
     expect(report).toContain('never sends from it');
     expect(report).toContain('The spare number sends only to `REPORT_RECIPIENT`');
     expect(report).not.toMatch(/also sends|any chat/);
+    expect(report).toContain('It reads no chats, sends no read receipts, and is online only for the minute it takes to send.');
+    expect(report).not.toMatch(/sends read receipts|stays online/);
     expect(report).toContain('only until 12:00 IST');
     expect(report).toContain('never sent twice on one day');
     expect(report).toContain('the number ending …');
@@ -75,6 +77,9 @@ describe('morning report documentation: safety statements', () => {
     expect(unknown).toContain('does **not** try again by itself');
     expect(unknown).toContain("Look at the founder's WhatsApp");
     expect(unknown).toContain('report send-now');
+    expect(unknown).toContain("If today's report is not there, run `npm run cli -- report send-now`");
+    expect(unknown).toContain('If it is there, do nothing');
+    expect(unknown).not.toMatch(/even if/i);
     expect(unknown).not.toMatch(/tries again by itself|retries/);
     const row = healthLines.find((line) => line.startsWith('| Morning report: unknown, check WhatsApp |'));
     expect(row).toBeDefined();
@@ -88,6 +93,9 @@ describe('morning report documentation: safety statements', () => {
     expect(step3).toContain('Stop the service safely');
     expect(step3.indexOf('Stop the service safely')).toBeLessThan(step3.indexOf('link-sender'));
     expect(step3).not.toMatch(/keep the service running/i);
+    expect(step3).toContain('from the **spare** phone');
+    expect(step3).toContain("not from the founder's phone");
+    expect(step3).not.toMatch(/from the \*\*founder/);
     const step6 = step(6);
     expect(step6).toContain('only while the service is running');
     expect(step6).toContain("refuses if today's report was already sent");
@@ -97,8 +105,22 @@ describe('morning report documentation: safety statements', () => {
   });
 
   it('the documented recipient example matches the validation', () => {
-    expect(INDIAN_MOBILE.test('919812345678')).toBe(true);
-    for (const bad of ['+919812345678', '91 9812345678', '9812345678']) expect(INDIAN_MOBILE.test(bad)).toBe(false);
+    const example = report.match(/for example `(\d+)`/);
+    expect(example).not.toBeNull();
+    expect(INDIAN_MOBILE.test(example![1]!)).toBe(true);
+  });
+
+  it('the documented times are the code defaults', () => {
+    const { time, deadline } = reportSettings(parseEnv({}));
+    expect(report).toContain(`Every day at ${time} IST`);
+    expect(report).toContain(`empty for ${time} and ${deadline} IST`);
+    expect(report).toContain(`only until ${deadline} IST`);
+  });
+
+  it('turning the report off is a setting, never deleting the session', () => {
+    const off = sectionOf('### Turning it off');
+    expect(off).toContain('REPORT_ENABLED=false');
+    expect(off).not.toMatch(/delete|\bdel\b|sender-session\.db/i);
   });
 
   it('the command table lists the three report commands', () => {
@@ -128,5 +150,50 @@ describe('morning report documentation: safety statements', () => {
     expect(notLinked).toContain('mkdir C:\\wa-agent\\backups\\');
     expect(notLinked).toContain('**Replaced:**');
     expect(notLinked).not.toMatch(/\bdel\b|delete the/i);
+    expect(notLinked).toContain("the founder's `session.db` files stay where they are");
+    expect(notLinked).not.toMatch(/(move|copy) C:\\wa-agent\\data\\(\*|session\.db)/i);
+  });
+
+  it('each spare-number recovery bullet stops the service, links from the spare phone and copies before a reset', () => {
+    const notLinked = sectionOf('### Status "Morning report: the spare number is not linked"');
+    expect(notLinked).not.toMatch(/keep the service running/i);
+    expect(notLinked).not.toMatch(/scan from the founder|on the founder's phone/i);
+    const bullet = (label: string): string => {
+      const start = notLinked.indexOf(`\n- **${label}`);
+      expect(start, label).toBeGreaterThanOrEqual(0);
+      const end = notLinked.indexOf('\n- **', start + 1);
+      return notLinked.slice(start, end >= 0 ? end : undefined);
+    };
+    const copy = 'copy C:\\wa-agent\\data\\sender-session.db* C:\\wa-agent\\backups\\';
+
+    const notLinkedBullet = bullet('Not linked:**');
+    const stop = notLinkedBullet.toLowerCase().indexOf('stop the service');
+    expect(stop).toBeGreaterThanOrEqual(0);
+    expect(stop).toBeLessThan(notLinkedBullet.indexOf('link-sender'));
+    expect(notLinkedBullet).toContain('scan from the spare phone');
+
+    const loggedOut = bullet('Logged out**');
+    expect(loggedOut).toContain('Stop the service');
+    expect(loggedOut).toContain('link-sender --reset');
+    expect(loggedOut).toContain('scan from the spare phone');
+    expect(loggedOut).toContain(copy);
+    expect(loggedOut.indexOf(copy)).toBeLessThan(loggedOut.indexOf('link-sender --reset'));
+
+    const unreadable = bullet(`"the spare number's saved session cannot be read"**`);
+    expect(unreadable).toContain('Stop the service safely');
+    expect(unreadable).toContain(copy);
+    expect(unreadable.indexOf(copy)).toBeLessThan(unreadable.indexOf('link-sender --reset'));
+    expect(unreadable).toContain('move C:\\wa-agent\\data\\sender-session.db* ');
+  });
+
+  it('a takeover of the spare number points at another copy of the agent, not link-sender', () => {
+    const notLinked = sectionOf('### Status "Morning report: the spare number is not linked"');
+    const replaced = notLinked.slice(notLinked.indexOf('\n- **Replaced:**'));
+    expect(replaced).toContain('no other copy of the agent');
+    expect(replaced).not.toContain('link-sender');
+    const row = healthLines.find((line) => line.startsWith('| Morning report: another session took over the spare number |'));
+    expect(row).toBeDefined();
+    expect(row).toContain('Another copy of the agent');
+    expect(row).not.toContain('link-sender');
   });
 });
