@@ -319,7 +319,7 @@ export function createApp(d: AppDeps): App {
       // (a report in its linger is still 'sent'); one cut off is marked unknown at the next start. main.ts closes the
       // databases only after stop() resolves, so after the scheduler's stop() has returned (tests/appReport.test.ts).
       await Promise.all([publisher.flush(10_000), uploader?.stop(10_000), reportScheduler?.stop(10_000)]);
-      // A socket that never closes must not eat the rest of WinSW's 150 s (120 + 10 + 5 plus margin).
+      // A socket that never closes must not eat the rest of WinSW's 150 s (120 + 12 + 5 plus margin: the morning report may take 10 s + 2 s).
       let timer: NodeJS.Timeout | undefined;
       try {
         await Promise.race([

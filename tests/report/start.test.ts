@@ -127,4 +127,18 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
     expect(src).not.toMatch(/openSenderSession|useSenderAuthState|new SenderGateway|senderSessionDbPath\(/);
     expect(src).not.toMatch(/\brecipient\b\s*:/);
   });
+
+  it('main.ts passes the report to createApp when REPORT_ENABLED, and closes the spare-number database on shutdown', () => {
+    const src = readFileSync(join(import.meta.dirname, '../../src/main.ts'), 'utf8');
+    // The report is built only under REPORT_ENABLED, and the openMorningReport result is what reaches createApp.
+    expect(src).toMatch(/if \(env\.REPORT_ENABLED\) \{/);
+    expect(src).toMatch(/const (\w+) = openMorningReport\([\s\S]*?\breport = \1\.report;/);
+    expect(src).toMatch(/\bsenderDb = (\w+)\.senderDb;/);
+    const call = /createApp\(\{([\s\S]*?)\n\s*\}\);/.exec(src);
+    expect(call).not.toBeNull();
+    expect(call![1]).toMatch(/^\s*report,?\s*$/m);
+    // The spare-number session is closed after app.stop(), and on the startup-failure path.
+    expect(src).toContain('senderStore?.close()');
+    expect(src).toContain('senderDb?.close()');
+  });
 });

@@ -375,6 +375,28 @@ describe('SenderGateway default timings', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('stop() while the document send is in flight: a send that then returns its id is sent, with no linger and no timer', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let release: (msg: { key: { id: string } }) => void = () => {};
+    const gated: Script = (s) => {
+      s.sendMessage
+        .mockImplementationOnce(async () => ({ key: { id: 'msg-1' } }))
+        .mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+      open(s);
+    };
+    const { gw, sockets } = defaultGateway([gated]);
+    let result: unknown;
+    const p = gw.sendReport('hi', XLSX, FILE).then((r) => (result = r));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(2); // the xlsx is on its way
+    await gw.stop();
+    release({ key: { id: 'msg-2' } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(result).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    await p;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('leaves no timer running after WhatsApp refuses the connection', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const { gw } = defaultGateway([(s) => closeWith(s, 401)]);
