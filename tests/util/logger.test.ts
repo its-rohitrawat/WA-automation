@@ -55,6 +55,18 @@ describe('logger', () => {
     },
   );
 
+  it.each(['title', 'email', 'emails', 'attendees', 'participants', 'summary', 'segments'])(
+    'censors the meeting field %s at the top level and one level deep',
+    (key) => {
+      const { log, out } = capture();
+      log.info({ [key]: 'TOP-VALUE', nested: { [key]: ['NESTED-VALUE'] }, meetingId: 12, segmentCount: 3 }, 'k');
+      expect(out()).not.toContain('TOP-VALUE');
+      expect(out()).not.toContain('NESTED-VALUE');
+      expect(out()).toContain('"meetingId":12');
+      expect(out()).toContain('"segmentCount":3');
+    },
+  );
+
   it('does not leak error message text', () => {
     const { log, out } = capture();
     log.error({ err: new Error('client said SECRET-IN-ERROR') }, 'x');

@@ -6,11 +6,13 @@ import { masterKeyPath, sessionDbPath, trackerDbPath } from '../config/paths.ts'
 import { DpapiKeyProvider, type KeyProvider } from '../crypto/keyProvider.ts';
 import { MediaRefSealer } from '../media/ref.ts';
 import { readHealthSnapshot } from '../health/health.ts';
+import { MAX_FORGET_ATTEMPTS } from '../meetings/sttForget.ts';
 import { requestedScopes, runLoopbackConsent, saveGrantedScopes, scopeName, TokenStore, type ConsentClient } from '../output/googleAuth.ts';
 import { latestBatches } from '../store/batches.ts';
 import { listClients, syncClients } from '../store/clients.ts';
 import { openDb, tx, type Db } from '../store/db.ts';
 import { setKv } from '../store/kv.ts';
+import { sttForgetsGivenUp } from '../store/meetings.ts';
 import { unprocessedCounts } from '../store/messages.ts';
 import { acquireLock } from '../util/lock.ts';
 import { silentLogger } from '../util/logger.ts';
@@ -281,6 +283,7 @@ export function statusCommand(deps: CliDeps): void {
         batches: latestBatches(db),
         unprocessed: unprocessedCounts(db),
         now: new Date(),
+        sttCopiesLeft: sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: deps.env.STT_PROVIDER }),
       }),
     );
   } finally {

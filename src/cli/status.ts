@@ -20,6 +20,8 @@ export function formatStatus(i: {
   batches: BatchSummary[];
   unprocessed: Map<number, number>;
   now: Date;
+  /** Speech-to-text copies the agent gave up deleting at the provider (sttForgetsGivenUp); missing or 0: no line. */
+  sttCopiesLeft?: number;
 }): string {
   const lines: string[] = [];
   const s = i.snapshot;
@@ -50,6 +52,11 @@ export function formatStatus(i: {
     const split = s.meetings && s.spendByKind ? ` (AI $${s.spendByKind.ai.toFixed(2)}, speech $${s.spendByKind.stt.toFixed(2)})` : '';
     lines.push(`Spend today: ${lk}$${s.spentToday.toFixed(2)} of $${s.capUsd.toFixed(2)}${split}`);
     lines.push(`Disk free:   ${s.freeGb === null ? 'unknown' : `${s.freeGb.toFixed(1)} GB`}`);
+  }
+  // Read from the database, not the service's report: shown even when the service is stopped. Not on the health line.
+  const left = i.sttCopiesLeft ?? 0;
+  if (left > 0) {
+    lines.push(`Speech copies: ${left} speech-to-text ${left === 1 ? 'copy' : 'copies'} could not be deleted from the provider; see SETUP (Meeting summaries)`);
   }
   lines.push('Clients:');
   const batches = new Map(i.batches.map((b) => [b.clientId, b]));

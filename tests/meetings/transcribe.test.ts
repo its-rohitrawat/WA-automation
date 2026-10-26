@@ -258,6 +258,41 @@ describe('transcribeMeeting', () => {
     expect(parts()[0]).toMatchObject({ state: 'done', booked: 'ceiling' });
   });
 
+  it('Sarvam: a part with a job id but nothing booked is booked once at the ceiling before it is resumed', async () => {
+    prepare(3600);
+    const p = new FakeProvider('sarvam', 7200);
+    setSttParts(db, id, [{ index: 1, provider: 'sarvam', file: null, offset: 0, seconds: 3600, state: 'unknown', jobId: 'J1', booked: 'none', segments: null, billedSeconds: null }], NOW);
+    let atCall: unknown[] | undefined;
+    p.script = [
+      async (_a, opts) => {
+        atCall = rows(); // booked before the provider is asked
+        expect(opts.onJobId).toBeUndefined();
+        return result(said('namaste'));
+      },
+    ];
+    await transcribeMeeting(id, deps(p));
+    expect(p.calls).toHaveLength(1);
+    expect(p.calls[0]!.opts.resumeJobId).toBe('J1');
+    expect(atCall).toEqual([{ kind: 'stt', usd: ceiling('sarvam', 3600), detail: `meeting ${id} part 1` }]);
+    expect(rows()).toEqual([{ kind: 'stt', usd: ceiling('sarvam', 3600), detail: `meeting ${id} part 1` }]);
+    expect(parts()[0]).toMatchObject({ state: 'done', booked: 'ceiling', jobId: 'J1' });
+  });
+
+  it('Sarvam: a second onJobId for the same job books nothing more', async () => {
+    prepare(3600);
+    const p = new FakeProvider('sarvam', 7200);
+    p.script = [
+      async (_a, opts) => {
+        opts.onJobId!('J1');
+        opts.onJobId!('J1');
+        return result(said('namaste'));
+      },
+    ];
+    await transcribeMeeting(id, deps(p));
+    expect(rows()).toEqual([{ kind: 'stt', usd: ceiling('sarvam', 3600), detail: `meeting ${id} part 1` }]);
+    expect(parts()[0]).toMatchObject({ state: 'done', booked: 'ceiling', jobId: 'J1' });
+  });
+
   it('Sarvam: the cap is checked before a new job is sent', async () => {
     prepare(3600); // ceiling about $0.41
     spend = new SpendGuard({ db, clock, capUsd: 0.3 });

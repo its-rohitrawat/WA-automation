@@ -224,7 +224,7 @@ async function runParts(id: number, t: MeetingTranscriber, deps: TranscribeMeeti
   const noSpeech = merged.every((s) => s.text.trim() === '');
   const transcript = noSpeech ? [] : merged;
   advanceStage(db, id, 'transcribed', noSpeech ? { transcript, note: 'no_speech' } : { transcript }, deps.clock.now().toISOString());
-  log.info({ meetingId: id, parts: parts.length, segments: transcript.length, noSpeech }, 'meeting transcribed');
+  log.info({ meetingId: id, parts: parts.length, segmentCount: transcript.length, noSpeech }, 'meeting transcribed');
 
   // Only now that the transcript is stored: the provider's own copies go. What fails stays noted in stt_forget, and
   // forgetPending tries again at the next processor start.

@@ -7,10 +7,12 @@ import { parseEnv } from '../../src/config/env.ts';
 import { masterKeyPath, sessionDbPath, trackerDbPath } from '../../src/config/paths.ts';
 import { StaticKeyProvider } from '../../src/crypto/keyProvider.ts';
 import { mediaRefAad, MediaRefSealer } from '../../src/media/ref.ts';
+import { MAX_FORGET_ATTEMPTS } from '../../src/meetings/sttForget.ts';
 import { DRIVE_SCOPES, hasMeetingScopes, MEETING_SCOPES, TokenStore, type ConsentClient } from '../../src/output/googleAuth.ts';
 import { syncClients } from '../../src/store/clients.ts';
 import { openDb } from '../../src/store/db.ts';
 import { getKv } from '../../src/store/kv.ts';
+import { insertFound, sttForgetsGivenUp } from '../../src/store/meetings.ts';
 import { insertMessage } from '../../src/store/messages.ts';
 import { acquireLock } from '../../src/util/lock.ts';
 import { openSessionDb, useEncryptedAuthState } from '../../src/wa/authState.ts';
@@ -441,7 +443,7 @@ describe('google-auth', () => {
       GOOGLE_OAUTH_CLIENT_ID: 'test-id',
       GOOGLE_OAUTH_CLIENT_SECRET: 'test-secret',
       MEETINGS_ENABLED: 'true',
-      TEAM_EMAIL_DOMAINS: 'ourstudio.in',
+      TEAM_EMAIL_DOMAINS: 'ourstudio.example',
     });
   function consentClient(opts: { failToken?: boolean; scope?: string; asked?: string[][] } = {}): (uri: string) => ConsentClient {
     return (redirectUri) => ({
@@ -568,5 +570,25 @@ describe('status command', () => {
   it('prints no report yet on a fresh database', () => {
     statusCommand(deps());
     expect(out()).toContain('no report yet');
+    expect(out()).not.toContain('Speech copies');
+  });
+
+  it('counts the speech copies given up: last try used, or a provider that is not set up now', () => {
+    const db = openDb(trackerDbPath(dataDir));
+    const id = insertFound(db, {
+      recording: 'conferenceRecords/c1/recordings/r1', conference: 'conferenceRecords/c1', driveFileId: 'file1', meetingCode: null, title: 'Weekly',
+      startedAt: '2026-10-18T10:00:00.000Z', endedAt: null, attendees: [], participants: [], clientId: null, matchKind: null, status: 'unassigned',
+      driveSeconds: null, createdAt: '2026-10-18T11:00:00.000Z',
+    })!;
+    const add = (provider: 'elevenlabs' | 'openai', ref: string, attempts: number) =>
+      db.prepare('INSERT INTO stt_forget (meeting_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, ?)').run(id, provider, ref, '2026-10-18T11:00:00.000Z', attempts);
+    add('elevenlabs', 'tr-1', MAX_FORGET_ATTEMPTS); // last try used
+    add('elevenlabs', 'tr-2', 1); // still being tried
+    add('openai', 'tr-3', 0); // not the provider set up now
+    expect(sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'elevenlabs' })).toBe(2);
+    expect(sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'none' })).toBe(3);
+    db.close();
+    statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
+    expect(out()).toContain('Speech copies: 2 speech-to-text copies could not be deleted from the provider; see SETUP (Meeting summaries)');
   });
 });

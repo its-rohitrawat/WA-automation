@@ -33,8 +33,8 @@ const base: MeetingDocInput = {
   startedAt: '2026-10-19T08:35:00Z',
   seconds: 3725,
   attendees: [
-    { name: 'Asha Verma', email: 'asha@studio.in', team: true },
-    { name: 'Mr. Sharma', email: 'sharma@client.in', team: false },
+    { name: 'Asha Verma', email: 'asha@studio.example', team: true },
+    { name: 'Mr. Sharma', email: 'sharma@client.example', team: false },
   ],
   summary,
   segments: [seg(0, 'A', 'Namaste, shall we start?'), seg(75.4, 'B', 'Haan, logo final kar dete hain.'), seg(3725, null, 'Thank you.')],
@@ -74,9 +74,9 @@ describe('renderMeetingDoc', () => {
     const html = renderMeetingDoc({
       ...base,
       attendees: [
-        { name: 'Priya <priya@x.in>', email: 'priya@x.in', team: true },
-        { name: 'rahul@client.in', team: false },
-        { name: null, email: 'ghost@x.in', team: false },
+        { name: 'Priya <priya@x.example>', email: 'priya@x.example', team: true },
+        { name: 'rahul@client.example', team: false },
+        { name: null, email: 'ghost@x.example', team: false },
       ],
     });
     expect(html).toContain('<li>Attendees from our team: Priya</li>');
@@ -201,7 +201,7 @@ describe('renderMeetingDoc', () => {
   it('shows names as given: "Priya (PM)" in attendees, in the transcript and as an owner', () => {
     const html = renderMeetingDoc({
       ...base,
-      attendees: [{ name: 'Priya (PM) <priya@x.in>', team: true }, { name: 'Mr. Sharma', team: false }],
+      attendees: [{ name: 'Priya (PM) <priya@x.example>', team: true }, { name: 'Mr. Sharma', team: false }],
       summary: {
         ...emptySummary,
         actionItems: [
@@ -233,7 +233,7 @@ describe('renderMeetingDoc', () => {
         ...emptySummary,
         actionItems: [
           { side: 'us', task: '\u200B', owner: 'Asha Verma', deadline: null, segmentIds: ['s1'] },
-          { side: 'us', task: 'Call back.', owner: 'asha@studio.in', deadline: null, segmentIds: ['s1'] },
+          { side: 'us', task: 'Call back.', owner: 'asha@studio.example', deadline: null, segmentIds: ['s1'] },
           { side: 'client', task: ' \u200B\u202E ', owner: null, deadline: null, segmentIds: ['s1'] },
           { side: 'client', task: 'Sign.', owner: 'Raj ＠ client', deadline: '2026-10-25', segmentIds: ['s1'] },
         ],

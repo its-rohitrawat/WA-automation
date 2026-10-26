@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CorrectionError } from '../../src/cli/corrections.ts';
 import {
-  assignMeetingToClient, meetingAiCeilingUsd, meetingBackfillCommand, meetingCheckCommand, meetingListLines, retryMeetingById, skipMeetingById,
+  assignMeetingToClient, meetingAiCeilingUsd, meetingBackfillCommand, meetingCheckCommand, meetingListLines, retryLine, retryMeetingById, skipMeetingById,
   defaultMeetingDeps, speechCeilingFromEnv, storedGoogleApi, type MeetingCliDeps,
 } from '../../src/cli/meetings.ts';
 import { parseEnv } from '../../src/config/env.ts';
@@ -25,8 +25,8 @@ const KEY = Buffer.alloc(32, 7);
 const NOW = '2026-10-23T06:00:00.000Z';
 const HOUR = 3_600_000;
 const ago = (hours: number): string => new Date(Date.parse(NOW) - hours * HOUR).toISOString();
-const SHARMA = { groupId: '120363000000000011@g.us', name: 'Sharma Interiors', code: 'SHA', emailDomains: ['sharma.in'] };
-const MEHTA = { groupId: '120363000000000012@g.us', name: 'Mehta Foods', code: 'MEH', emailDomains: ['mehtafoods.com'] };
+const SHARMA = { groupId: '120363000000000011@g.us', name: 'Sharma Interiors', code: 'SHA', emailDomains: ['sharma.example'] };
+const MEHTA = { groupId: '120363000000000012@g.us', name: 'Mehta Foods', code: 'MEH', emailDomains: ['mehtafoods.example'] };
 const PHASES = ['Discovery', 'Design', 'Development', 'Review', 'Launch'];
 
 let dir: string;
@@ -37,7 +37,7 @@ let api: FakeMeetingsApi;
 let db: Db;
 
 function env(over: Record<string, string> = {}) {
-  return parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'studio.in', ...over });
+  return parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'studio.example', ...over });
 }
 
 function deps(over: Partial<MeetingCliDeps> = {}): MeetingCliDeps {
@@ -73,7 +73,7 @@ function conference(id: string, o: { start: string; attendees?: string[] | null;
   if (o.attendees !== null) {
     api.invites.set(`code-${id}`, {
       title: o.title ?? 'Weekly call',
-      attendees: [{ email: 'owner@studio.in', name: 'Owner', self: true }, ...(o.attendees ?? []).map((email) => ({ email, name: null, self: false }))],
+      attendees: [{ email: 'owner@studio.example', name: 'Owner', self: true }, ...(o.attendees ?? []).map((email) => ({ email, name: null, self: false }))],
     });
   }
   if (!o.fileMissing) {
@@ -143,6 +143,14 @@ describe('meeting list', () => {
     expect(out.join('\n')).toContain('too long');
   });
 
+  it('labels a no-access meeting by how it was found: internal (no title) or unassigned', () => {
+    const i = meeting('no_access', { clientId: null, matchKind: null, title: '', errorCode: 'http_404', foundInternal: true });
+    const u = meeting('no_access', { clientId: null, matchKind: null, errorCode: 'http_403' });
+    const out = meetingListLines(db, false);
+    expect(out.find((l) => l.trimStart().startsWith(`${i} `))).toMatch(/internal\s+no access \(http_404\)$/);
+    expect(out.find((l) => l.trimStart().startsWith(`${u} `))).toMatch(/unassigned\s+no access \(http_403\)\s+Sharma weekly 2$/);
+  });
+
   it('says when nothing needs the owner', () => {
     expect(meetingListLines(db, false)).toEqual(['No meetings need you. (npm run cli -- meeting list --all shows every meeting.)']);
     expect(meetingListLines(db, true)).toEqual(['No meetings yet.']);
@@ -162,6 +170,16 @@ describe('meeting assign', () => {
     const id = meeting('internal', { clientId: null, matchKind: null, title: '' });
     assignMeetingToClient(db, String(id), 'SHA', now);
     expect(getMeeting(db, id)).toMatchObject({ status: 'queued', clientId: 1, matchKind: 'human' });
+  });
+
+  it('queues a no-access meeting without a client (found as internal or unassigned), with fresh attempts', () => {
+    const i = meeting('no_access', { clientId: null, matchKind: null, title: '', errorCode: 'http_404', foundInternal: true });
+    const u = meeting('no_access', { clientId: null, matchKind: null, errorCode: 'http_403' });
+    db.prepare('UPDATE meetings SET attempts = 2 WHERE id = ?').run(u);
+    expect(assignMeetingToClient(db, String(i), 'SHA', now)).toEqual({ id: i, code: 'SHA' });
+    expect(assignMeetingToClient(db, String(u), 'MEH', now)).toEqual({ id: u, code: 'MEH' });
+    expect(getMeeting(db, i)).toMatchObject({ status: 'queued', clientId: 1, matchKind: 'human', errorCode: null, attempts: 0, note: null });
+    expect(getMeeting(db, u)).toMatchObject({ status: 'queued', clientId: 2, matchKind: 'human', errorCode: null, attempts: 0 });
   });
 
   it.each(['queued', 'done', 'skipped', 'too_long', 'no_access', 'failed'] as const)('refuses a %s meeting and changes nothing', (status) => {
@@ -203,8 +221,9 @@ describe('meeting skip and retry', () => {
   it('retries a failed or no-access meeting and refuses every other status', () => {
     const f = meeting('failed', { errorCode: 'x' });
     const n = meeting('no_access', { errorCode: 'http_404' });
-    expect(retryMeetingById(db, String(f), now)).toBe(f);
-    expect(retryMeetingById(db, String(n), now)).toBe(n);
+    expect(retryMeetingById(db, String(f), now)).toEqual({ id: f, status: 'queued' });
+    expect(retryMeetingById(db, String(n), now)).toEqual({ id: n, status: 'queued' });
+    expect(retryLine({ id: f, status: 'queued' })).toBe(`Meeting ${f} queued again.`);
     expect(getMeeting(db, f)).toMatchObject({ status: 'queued', attempts: 0, errorCode: null });
     expect(getMeeting(db, n)!.status).toBe('queued');
     // The workbook lists only unassigned and done meetings, so a retry asks for no rebuild.
@@ -217,12 +236,37 @@ describe('meeting skip and retry', () => {
   });
 });
 
+describe('meeting retry of a meeting without a client', () => {
+  it('puts a no-access meeting found as internal or unassigned back to unassigned, asks for a rebuild and says to assign it', () => {
+    const i = meeting('no_access', { clientId: null, matchKind: null, title: '', errorCode: 'http_404', foundInternal: true });
+    const u = meeting('no_access', { clientId: null, matchKind: null, errorCode: 'http_403' });
+    const r = retryMeetingById(db, String(i), now);
+    expect(r).toEqual({ id: i, status: 'unassigned' });
+    expect(retryMeetingById(db, String(u), now)).toEqual({ id: u, status: 'unassigned' });
+    expect(getMeeting(db, i)).toMatchObject({ status: 'unassigned', clientId: null, errorCode: null, attempts: 0, note: null, title: '' });
+    expect(getMeeting(db, u)).toMatchObject({ status: 'unassigned', clientId: null, errorCode: null });
+    expect(getKv(db, 'rebuild_requested')).toBe(NOW); // the workbook lists unassigned meetings
+    expect(retryLine(r)).toBe(
+      `Meeting ${i} has no client, so it cannot be processed; it is unassigned again. Assign it to a client with: npm run cli -- meeting assign ${i} <CODE>`,
+    );
+    // Then it can be assigned, and is processed for that client.
+    assignMeetingToClient(db, String(i), 'SHA', now);
+    expect(getMeeting(db, i)).toMatchObject({ status: 'queued', clientId: 1 });
+  });
+
+  it('a failed meeting without a client goes back to unassigned too, never to queued', () => {
+    const f = meeting('failed', { clientId: null, matchKind: null, errorCode: 'no_client' });
+    expect(retryMeetingById(db, String(f), now)).toEqual({ id: f, status: 'unassigned' });
+    expect(getMeeting(db, f)).toMatchObject({ status: 'unassigned', errorCode: null });
+  });
+});
+
 describe('meeting backfill', () => {
   beforeEach(() => {
-    conference('a', { start: '2026-10-05T05:00:00.000Z', attendees: ['ravi@sharma.in'] }); // Sharma by domain, 60 min
-    conference('b', { start: '2026-10-06T05:00:00.000Z', attendees: ['dev@studio.in'] }); // internal
+    conference('a', { start: '2026-10-05T05:00:00.000Z', attendees: ['ravi@sharma.example'] }); // Sharma by domain, 60 min
+    conference('b', { start: '2026-10-06T05:00:00.000Z', attendees: ['dev@studio.example'] }); // internal
     conference('c', { start: '2026-10-07T05:00:00.000Z', attendees: null, durationMs: null }); // unassigned
-    conference('d', { start: '2026-10-08T05:00:00.000Z', attendees: ['a@mehtafoods.com'], durationMs: null }); // Mehta, no length
+    conference('d', { start: '2026-10-08T05:00:00.000Z', attendees: ['a@mehtafoods.example'], durationMs: null }); // Mehta, no length
   });
 
   it('without --yes prints the count, hours and cost ceiling and changes nothing', async () => {
@@ -284,9 +328,9 @@ describe('meeting backfill', () => {
   });
 
   it('matches a client newly added to the groups file in the preview and in --yes; the preview stores nothing', async () => {
-    const GUPTA = { groupId: '120363000000000013@g.us', name: 'Gupta Traders', code: 'GUP', emailDomains: ['gupta.com'] };
+    const GUPTA = { groupId: '120363000000000013@g.us', name: 'Gupta Traders', code: 'GUP', emailDomains: ['gupta.example'] };
     writeFileSync(groupsFile, JSON.stringify({ clients: [SHARMA, MEHTA, GUPTA] }));
-    conference('e', { start: '2026-10-09T05:00:00.000Z', attendees: ['x@gupta.com'] });
+    conference('e', { start: '2026-10-09T05:00:00.000Z', attendees: ['x@gupta.example'] });
     const before = dump(db);
     await meetingBackfillCommand({ since: '2026-10-01', yes: false }, deps());
     expect(dump(db)).toBe(before);
@@ -315,10 +359,10 @@ describe('meeting backfill', () => {
 
 describe('meeting check', () => {
   it('lists the last 7 days with the match and whether each file opens, downloading and storing nothing', async () => {
-    conference('a', { start: ago(30), attendees: ['ravi@sharma.in'] });
-    conference('b', { start: ago(26), attendees: ['dev@studio.in'], fileMissing: true });
+    conference('a', { start: ago(30), attendees: ['ravi@sharma.example'] });
+    conference('b', { start: ago(26), attendees: ['dev@studio.example'], fileMissing: true });
     conference('c', { start: ago(20), attendees: null, durationMs: 200 * 60_000 });
-    conference('old', { start: ago(8 * 24), attendees: ['ravi@sharma.in'] });
+    conference('old', { start: ago(8 * 24), attendees: ['ravi@sharma.example'] });
     const before = dump(db);
     await meetingCheckCommand(deps());
     expect(dump(db)).toBe(before);
@@ -334,9 +378,9 @@ describe('meeting check', () => {
   });
 
   it('notes clients in the groups file that are not stored yet, and matches them as unassigned', async () => {
-    const GUPTA = { groupId: '120363000000000013@g.us', name: 'Gupta Traders', code: 'GUP', emailDomains: ['gupta.com'] };
+    const GUPTA = { groupId: '120363000000000013@g.us', name: 'Gupta Traders', code: 'GUP', emailDomains: ['gupta.example'] };
     writeFileSync(groupsFile, JSON.stringify({ clients: [SHARMA, MEHTA, GUPTA] }));
-    conference('e', { start: ago(10), attendees: ['x@gupta.com'] });
+    conference('e', { start: ago(10), attendees: ['x@gupta.example'] });
     const before = dump(db);
     await meetingCheckCommand(deps());
     expect(dump(db)).toBe(before);
@@ -352,7 +396,7 @@ describe('meeting check', () => {
   });
 
   it('prints no title, attendee or name', async () => {
-    conference('a', { start: ago(30), attendees: ['ravi@sharma.in'], title: 'Sharma Interiors secret plan' });
+    conference('a', { start: ago(30), attendees: ['ravi@sharma.example'], title: 'Sharma Interiors secret plan' });
     api.signedInNames.set('conferenceRecords/a', ['Ravi Kumar']);
     await meetingCheckCommand(deps());
     const text = lines.join('\n');

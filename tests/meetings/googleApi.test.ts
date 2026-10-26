@@ -221,14 +221,14 @@ describe('googleMeetingsApi: requests', () => {
     request.mockResolvedValueOnce({
       data: {
         items: [
-          { summary: 'Other', conferenceData: { conferenceId: 'zzz-zzzz-zzz' }, attendees: [{ email: 'x@y.com' }] },
+          { summary: 'Other', conferenceData: { conferenceId: 'zzz-zzzz-zzz' }, attendees: [{ email: 'x@y.example' }] },
           { summary: 'No conference' },
           {
             summary: 'Weekly sync',
             conferenceData: { conferenceId: 'abc-defg-hij', conferenceSolution: { key: { type: 'hangoutsMeet' } } },
             attendees: [
-              { email: 'me@team.com', self: true, responseStatus: 'accepted' },
-              { email: 'asha@client.com', displayName: 'Asha Rao' },
+              { email: 'me@team.example', self: true, responseStatus: 'accepted' },
+              { email: 'asha@client.example', displayName: 'Asha Rao' },
               { email: 'room-1@resource.calendar.google.com', displayName: 'Room 1', resource: true },
               { displayName: 'No email' },
             ],
@@ -241,8 +241,8 @@ describe('googleMeetingsApi: requests', () => {
     expect(invite).toEqual({
       title: 'Weekly sync',
       attendees: [
-        { email: 'me@team.com', name: null, self: true },
-        { email: 'asha@client.com', name: 'Asha Rao', self: false },
+        { email: 'me@team.example', name: null, self: true },
+        { email: 'asha@client.example', name: 'Asha Rao', self: false },
       ],
     });
     expect(request.mock.calls[0]![0]).toEqual({

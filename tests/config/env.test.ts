@@ -55,7 +55,7 @@ describe('meeting settings', () => {
   });
 
   it('MEETINGS_ENABLED accepts true, false, 1 and 0 only', () => {
-    const on = { TEAM_EMAIL_DOMAINS: 'ourstudio.in' };
+    const on = { TEAM_EMAIL_DOMAINS: 'ourstudio.example' };
     expect(parseEnv({ ...on, MEETINGS_ENABLED: 'true' }).MEETINGS_ENABLED).toBe(true);
     expect(parseEnv({ ...on, MEETINGS_ENABLED: '1' }).MEETINGS_ENABLED).toBe(true);
     expect(parseEnv({ MEETINGS_ENABLED: 'false' }).MEETINGS_ENABLED).toBe(false);
@@ -64,11 +64,11 @@ describe('meeting settings', () => {
   });
 
   it('TEAM_EMAIL_DOMAINS is a trimmed, lower-cased, comma-separated list', () => {
-    expect(parseEnv({ TEAM_EMAIL_DOMAINS: ' OurStudio.in , ourstudio.co.uk,' }).TEAM_EMAIL_DOMAINS).toEqual(['ourstudio.in', 'ourstudio.co.uk']);
+    expect(parseEnv({ TEAM_EMAIL_DOMAINS: ' OurStudio.example , ourstudio.co.example,' }).TEAM_EMAIL_DOMAINS).toEqual(['ourstudio.example', 'ourstudio.co.example']);
   });
 
   it('TEAM_EMAIL_DOMAINS drops repeats after lower-casing', () => {
-    expect(parseEnv({ TEAM_EMAIL_DOMAINS: 'ourstudio.in,OURSTUDIO.IN, ourstudio.co.uk ,OurStudio.in' }).TEAM_EMAIL_DOMAINS).toEqual(['ourstudio.in', 'ourstudio.co.uk']);
+    expect(parseEnv({ TEAM_EMAIL_DOMAINS: 'ourstudio.example,OURSTUDIO.EXAMPLE, ourstudio.co.example ,OurStudio.example' }).TEAM_EMAIL_DOMAINS).toEqual(['ourstudio.example', 'ourstudio.co.example']);
   });
 
   it('TEAM_EMAIL_DOMAINS is required when meetings are on, and the error names it', () => {
@@ -76,11 +76,11 @@ describe('meeting settings', () => {
     expect(msg).toMatch(/TEAM_EMAIL_DOMAINS/);
     expect(msg).toMatch(/MEETINGS_ENABLED/);
     expect(envError({ MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: ' , ' })).toMatch(/TEAM_EMAIL_DOMAINS/);
-    expect(parseEnv({ MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'ourstudio.in' }).TEAM_EMAIL_DOMAINS).toEqual(['ourstudio.in']);
+    expect(parseEnv({ MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'ourstudio.example' }).TEAM_EMAIL_DOMAINS).toEqual(['ourstudio.example']);
   });
 
   it('TEAM_EMAIL_DOMAINS refuses public mail domains and bad shapes without echoing them', () => {
-    const pub = envError({ TEAM_EMAIL_DOMAINS: 'zz-ourstudio-zz.in,Gmail.com' });
+    const pub = envError({ TEAM_EMAIL_DOMAINS: 'zz-ourstudio-zz.example,Gmail.com' });
     expect(pub).toMatch(/TEAM_EMAIL_DOMAINS/);
     expect(pub).toMatch(/public mail domain/);
     expect(pub).not.toContain('zz-ourstudio-zz');

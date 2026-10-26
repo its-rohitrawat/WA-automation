@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest';
 import type { MeetingSummary } from '../../src/brain/meetingSchema.ts';
 import { migrate, type Db } from '../../src/store/db.ts';
 import {
-  advanceStage, assignMeeting, claimMeeting, deferMeeting, dueMeetingIds, failMeeting, finishMeeting, getMeeting, getMeetingState, insertFound,
-  knownRecordings, lastMeetingByClient, listClientMeetings, listUnassigned, meetingStats, refreshMeetingFacts, retryMeeting, setSttParts, skipMeeting,
+  advanceStage, assignMeeting, claimMeeting, deferMeeting, dueMeetingIds, failMeeting, finishMeeting, FOUND_INTERNAL_NOTE, getMeeting, getMeetingState,
+  insertFound, knownRecordings, lastMeetingByClient, listClientMeetings, listMeetingsByStatus, listUnassigned, meetingStats, refreshMeetingFacts, retryMeeting, setSttParts, skipMeeting,
   type MeetingStatus, type NewMeeting, type SttPartRow,
 } from '../../src/store/meetings.ts';
 import { MIGRATIONS } from '../../src/store/migrations.ts';
@@ -22,7 +22,7 @@ const meeting = (o: Partial<NewMeeting> = {}): NewMeeting => ({
   title: 'Sharma weekly',
   startedAt: '2026-10-18T10:00:00.000Z',
   endedAt: '2026-10-18T10:45:00.000Z',
-  attendees: [{ email: 'a@sharma.in', name: 'Mr. Sharma', team: false }],
+  attendees: [{ email: 'a@sharma.example', name: 'Mr. Sharma', team: false }],
   participants: ['Mr. Sharma'],
   clientId: 1,
   matchKind: 'title',
@@ -302,12 +302,51 @@ describe('meetings store', () => {
     const noAccess = withStatus(db, 'no_access');
     const tooLong = withStatus(db, 'too_long');
     const queued = withStatus(db, 'queued');
-    expect(retryMeeting(db, failed, LATER)).toBe(true);
+    expect(retryMeeting(db, failed, LATER)).toBe('queued');
     expect(getMeeting(db, failed)).toMatchObject({ status: 'queued', stage: 'transcribed', attempts: 0, nextAttemptAt: null, errorCode: null, updatedAt: LATER });
-    expect(retryMeeting(db, noAccess, LATER)).toBe(true);
-    expect(retryMeeting(db, tooLong, LATER)).toBe(false);
-    expect(retryMeeting(db, queued, LATER)).toBe(false);
+    expect(retryMeeting(db, noAccess, LATER)).toBe('queued');
+    expect(retryMeeting(db, tooLong, LATER)).toBeNull();
+    expect(retryMeeting(db, queued, LATER)).toBeNull();
     expect(getMeeting(db, tooLong)).toMatchObject({ status: 'too_long' });
+  });
+
+  it('retry puts a no-access or failed meeting without a client back to unassigned, never queued', () => {
+    const db = seededDb();
+    const internal = withStatus(db, 'no_access', {
+      clientId: null, matchKind: null, title: '', attendees: [], participants: [], errorCode: 'http_404', foundInternal: true,
+    });
+    const un = withStatus(db, 'no_access', { clientId: null, matchKind: null, errorCode: 'http_403' });
+    const failed = withStatus(db, 'failed', { clientId: null, matchKind: null, errorCode: 'no_client' });
+    expect(getMeeting(db, internal)!.note).toBe(FOUND_INTERNAL_NOTE);
+    for (const id of [internal, un, failed]) {
+      expect(retryMeeting(db, id, LATER)).toBe('unassigned');
+      expect(getMeeting(db, id)).toMatchObject({ status: 'unassigned', clientId: null, attempts: 0, errorCode: null, nextAttemptAt: null, updatedAt: LATER });
+    }
+    expect(getMeeting(db, internal)).toMatchObject({ note: null, title: '', attendees: [] });
+    expect(retryMeeting(db, un, LATER)).toBeNull(); // now unassigned
+  });
+
+  it('assigns a no-access meeting only when it has no client, clearing the found-internal note', () => {
+    const db = seededDb();
+    const internal = withStatus(db, 'no_access', {
+      clientId: null, matchKind: null, title: '', attendees: [], participants: [], errorCode: 'http_404', foundInternal: true,
+    });
+    const withClient = withStatus(db, 'no_access', { errorCode: 'http_404' });
+    expect(assignMeeting(db, withClient, 2, LATER)).toBe(false);
+    expect(assignMeeting(db, internal, 2, LATER)).toBe(true);
+    expect(getMeeting(db, internal)).toMatchObject({ status: 'queued', clientId: 2, matchKind: 'human', errorCode: null, attempts: 0, note: null });
+    expect(getMeeting(db, withClient)).toMatchObject({ status: 'no_access', clientId: 1 });
+  });
+
+  it('lists a no-access meeting found as internal with foundInternal', () => {
+    const db = seededDb();
+    const internal = withStatus(db, 'no_access', {
+      clientId: null, matchKind: null, title: '', attendees: [], participants: [], errorCode: 'http_404', foundInternal: true,
+    });
+    const other = withStatus(db, 'no_access', { errorCode: 'http_404' });
+    const rows = listMeetingsByStatus(db, ['no_access']);
+    expect(rows.find((r) => r.id === internal)).toMatchObject({ foundInternal: true, title: '' });
+    expect(rows.find((r) => r.id === other)).toMatchObject({ foundInternal: false });
   });
 
   it('lists unassigned meetings newest first, with no title or attendees', () => {
@@ -469,7 +508,7 @@ describe('migration 7', () => {
     const internal = { status: 'internal' as const, clientId: null, matchKind: null, title: '', attendees: [], participants: [] };
     expect(insertFound(db, meeting(internal))).toBeTypeOf('number');
     expect(() => insertFound(db, meeting({ ...internal, title: 'Team sync' }))).toThrow(/CHECK/);
-    expect(() => insertFound(db, meeting({ ...internal, attendees: [{ email: 'r@us.in', name: null, team: true }] }))).toThrow(/CHECK/);
+    expect(() => insertFound(db, meeting({ ...internal, attendees: [{ email: 'r@us.example', name: null, team: true }] }))).toThrow(/CHECK/);
     expect(() => insertFound(db, meeting({ ...internal, participants: ['Rohit'] }))).toThrow(/CHECK/);
     const queued = withStatus(db, 'queued');
     expect(() => db.prepare("UPDATE meetings SET status = 'internal' WHERE id = ?").run(queued)).toThrow(/CHECK/);
@@ -480,8 +519,8 @@ describe('refreshMeetingFacts', () => {
   it('stores the facts read again for a queued meeting at stage found; empty values keep the stored ones', () => {
     const db = seededDb();
     const id = withStatus(db, 'queued', { title: '', attendees: [], participants: [] });
-    refreshMeetingFacts(db, id, { title: 'Brand review', attendees: [{ email: 'a@sharma.in', name: 'Asha', team: false }], participants: [] }, LATER);
-    expect(getMeeting(db, id)).toMatchObject({ title: 'Brand review', attendees: [{ email: 'a@sharma.in', name: 'Asha', team: false }], participants: [], updatedAt: LATER });
+    refreshMeetingFacts(db, id, { title: 'Brand review', attendees: [{ email: 'a@sharma.example', name: 'Asha', team: false }], participants: [] }, LATER);
+    expect(getMeeting(db, id)).toMatchObject({ title: 'Brand review', attendees: [{ email: 'a@sharma.example', name: 'Asha', team: false }], participants: [], updatedAt: LATER });
     refreshMeetingFacts(db, id, { title: '', attendees: [], participants: ['Asha'] }, LATER);
     expect(getMeeting(db, id)).toMatchObject({ title: 'Brand review', attendees: [{ name: 'Asha' }], participants: ['Asha'] });
   });

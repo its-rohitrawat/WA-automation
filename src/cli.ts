@@ -9,7 +9,7 @@ import {
   closeTask, editTask, reopenTask, reprocess, requestRebuild, setClientPhase, setPersonRole, unlockClientPhase, unlockTask, type EditOptions,
 } from './cli/corrections.ts';
 import {
-  assignMeetingToClient, defaultMeetingDeps, meetingBackfillCommand, meetingCheckCommand, meetingListLines, retryMeetingById, skipMeetingById,
+  assignMeetingToClient, defaultMeetingDeps, meetingBackfillCommand, meetingCheckCommand, meetingListLines, retryLine, retryMeetingById, skipMeetingById,
 } from './cli/meetings.ts';
 
 // Without these Node prints the raw error (Boom data, gaxios request config), bypassing any redaction.
@@ -133,15 +133,15 @@ meeting
   .action((opts: { all?: boolean }) => {
     for (const l of withDb((db) => meetingListLines(db, opts.all === true))) console.log(l);
   });
-meeting.command('assign <id> <client>').description('Give an unassigned or internal meeting to a client; it is then processed').action((id: string, client: string) => {
+meeting.command('assign <id> <client>').description('Give an unassigned, internal or client-less no-access meeting to a client; it is then processed').action((id: string, client: string) => {
   const r = withDb((db) => assignMeetingToClient(db, id, client, new Date()));
   console.log(`Meeting ${r.id} assigned to ${r.code}; the service processes it next (this costs money).`);
 });
 meeting.command('skip <id>').description('Do not process an unassigned meeting').action((id: string) => {
   console.log(`Meeting ${withDb((db) => skipMeetingById(db, id, new Date()))} skipped.`);
 });
-meeting.command('retry <id>').description('Try a failed or no-access meeting again').action((id: string) => {
-  console.log(`Meeting ${withDb((db) => retryMeetingById(db, id, new Date()))} queued again.`);
+meeting.command('retry <id>').description('Try a failed or no-access meeting again (one without a client goes back to unassigned)').action((id: string) => {
+  console.log(retryLine(withDb((db) => retryMeetingById(db, id, new Date()))));
 });
 const meetingDeps = () => {
   const env = loadEnv();

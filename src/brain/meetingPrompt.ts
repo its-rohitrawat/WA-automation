@@ -100,7 +100,7 @@ export function shownLabel(labels: ReadonlyMap<string, string>, speaker: string 
 }
 
 /**
- * An email address, with the brackets around it, in a name: "Priya <priya@x.in>" lists as "Priya", and a name that is only
+ * An email address, with the brackets around it, in a name: "Priya <priya@x.example>" lists as "Priya", and a name that is only
  * an address is not listed. Fullwidth and small @ count too.
  */
 const EMAIL_IN_NAME = /[<(\[（［＜]?\s*[^\s@＠﹫<>()[\]{},;:"']+[@＠﹫][^\s@＠﹫<>()[\]{},;:"']+\s*[>)\]）］＞]?/gu;

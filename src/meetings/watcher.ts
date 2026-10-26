@@ -173,7 +173,8 @@ export interface RowFacts {
 
 /**
  * The row for one recording. Status, in order:
- * 1. internal match: ids, start time and status only (M7); no_access when the file could not be read, else internal;
+ * 1. internal match: ids, start time and status only (M7); no_access (noted as found internal) when the file could not be
+ *    read, else internal;
  * 2. the file could not be read: no_access, with the client match kept;
  * 3. longer than maxMinutes by Drive's length: too_long, with the client match kept;
  * 4. queued for a client match, else unassigned.
@@ -192,6 +193,8 @@ export function buildRow(f: RowFacts): NewMeeting {
     return {
       ...base, title: '', endedAt: null, attendees: [], participants: [], clientId: null, matchKind: null,
       status: f.noAccessCode === null ? 'internal' : 'no_access', driveSeconds: null,
+      // A no_access row keeps that it was internal, so `meeting list` labels it so.
+      ...(f.noAccessCode === null ? {} : { foundInternal: true }),
     };
   }
   const client = f.match.kind === 'client' ? { clientId: f.match.clientId, matchKind: f.match.by } : { clientId: null, matchKind: null };

@@ -174,7 +174,12 @@ export function createApp(d: AppDeps): App {
   };
 
   const reconciler = new Reconciler({
-    db: d.db, ai: d.ai, spend, prices: d.prices, clock: d.clock, log: d.log, startedAt, onChanged: () => publisher.schedule(),
+    db: d.db, ai: d.ai, spend, prices: d.prices, clock: d.clock, log: d.log, startedAt,
+    // A meeting's tracker step finishes the meeting here: the rebuild gets the meeting counts of now.
+    onChanged: () => {
+      safely(refreshMeetings);
+      publisher.schedule();
+    },
     // A meeting's tracker step holds the client's run flag, so it never interleaves with a WhatsApp run (Task 9).
     exclusive: (clientId, fn) => debouncer.runExclusive(clientId, fn),
   });
@@ -233,7 +238,12 @@ export function createApp(d: AppDeps): App {
         // The tracker step holds the client's run flag through the reconciler's exclusive (debouncer.runExclusive).
         track: (clientId, meeting) => reconciler.runMeeting(clientId, meeting),
         hasMeetingScopes: () => hasMeetingScopes(d.db),
-        onChanged: () => publisher.schedule(), // a finished or failed meeting, or new rows: the workbook is rebuilt
+        // A finished or failed meeting, or new rows: the workbook is rebuilt, with the meeting counts of now (not the
+        // last tick's), as refreshMedia does for files.
+        onChanged: () => {
+          safely(refreshMeetings);
+          publisher.schedule();
+        },
       })
     : undefined;
   /** Gives the meetings' health to the health line and to the optional callback (null when meetings are off). */
