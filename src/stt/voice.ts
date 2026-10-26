@@ -15,8 +15,12 @@ import type { AudioFormat, AudioPart, ProviderId, ProviderResult, SttProvider } 
  * - WhatsApp voice notes (Ogg Opus) and MP3 files go to Sarvam and ElevenLabs as they are (V3).
  * - Any other audio, and every file when OpenAI is chosen, is converted to MP3 with ffmpeg first (N2), in a folder of
  *   its own named after the media id; OpenAI notes longer than its 5-minute limit are split there.
+ * - Two steps. prepare is free and local: it converts, measures and splits, and refuses a note that measures longer
+ *   than allowed (V5), so a low-bitrate file never becomes many paid parts and a local failure books nothing. transcribe
+ *   is the paid step, run by the extractor inside one spend hold (withSttHold).
  * - One provider call per part. Nothing is retried and no call is aborted: each call is billed, and the spend hold
- *   (withSttHold, in the extractor) books by its outcome.
+ *   books by its outcome. Once a part has been answered, a later part's failure is an SttPartialError, so the hold
+ *   books the ceiling for the parts already billed.
  * The sender's MIME type is only compared, as a lower-cased base type, with the fixed sets below. It never reaches a
  * provider: the format sent is always one of the literals 'ogg' or 'mp3' chosen here.
  * Logs: none here. The extractor logs ids, provider, seconds and cost.
@@ -28,6 +32,12 @@ export const VOICE_STT_TIMEOUTS = { elevenlabsMs: 5 * 60_000, openaiMs: 5 * 60_0
 /** The lowest bitrate assumed for the spend hold (V5): a file of n bytes holds at most n × 8 / 12,000 seconds. */
 const MIN_BITRATE_BPS = 12_000;
 export const sizeBoundSeconds = (bytes: number): number => Math.ceil((bytes * 8) / MIN_BITRATE_BPS);
+
+/**
+ * How far a measured length may exceed VoiceInput.maxSeconds before prepare refuses the note as too_long. ffmpeg's
+ * summary and the size bound round differently, and a conversion can add a few frames of padding.
+ */
+export const VOICE_LENGTH_TOLERANCE_S = 5;
 
 /** 'Audio/Ogg; codecs=opus' -> 'audio/ogg'. Only ever compared with the sets below. */
 const baseMime = (m: string | null): string => ((m ?? '').toLowerCase().split(';')[0] ?? '').trim();
@@ -45,8 +55,21 @@ export interface VoiceInput {
   path: string;
   /** From the row, e.g. 'audio/ogg; codecs=opus'. Untrusted: only its base type is compared with a fixed list. */
   mimeType: string | null;
-  /** Upper bound in seconds, from the file size (V5). Never the sender's declared length. */
+  /**
+   * Upper bound in seconds, from the file size (V5). Never the sender's declared length. A note ffmpeg measures longer
+   * than this (plus VOICE_LENGTH_TOLERANCE_S) is refused by prepare.
+   */
   maxSeconds: number;
+}
+
+/** A note made ready to send by prepare, for one transcribe. */
+export interface PreparedVoice {
+  /** The parts to send, in order: the original as it is, or MP3 files in the note's temporary folder. */
+  readonly parts: readonly AudioPart[];
+  /** The length ffmpeg measured; null when the file goes as it is and ffmpeg is absent or could not measure it. */
+  readonly measuredSeconds: number | null;
+  /** Removes the note's temporary folder. Safe to call twice; never throws. */
+  dispose(): void;
 }
 
 export interface VoiceResult {
@@ -60,16 +83,48 @@ export interface VoiceResult {
   forgetRef: string | null;
 }
 
+/**
+ * A later part failed after at least one part was answered (and so billed). It is deliberately not an SttHttpError, even
+ * when the cause is one: withSttHold then books the ceiling instead of freeing the hold. `cause` is the part's own error.
+ * Not retried: a retry would pay for the answered parts again.
+ */
+export class SttPartialError extends Error {
+  readonly code = 'partial';
+  /** How many parts were answered before the failure. */
+  readonly partsDone: number;
+  constructor(partsDone: number, partCount: number, cause: unknown) {
+    super(`A speech part failed after ${partsDone} of ${partCount} parts were answered`, { cause });
+    this.name = 'SttPartialError';
+    this.partsDone = partsDone;
+  }
+}
+
 export interface VoiceTranscriber {
   readonly provider: ProviderId;
-  /** List-price ceiling for maxSeconds of audio, without speaker labels, in US dollars (the spend hold). */
-  ceilingUsd(maxSeconds: number): number;
-  /** List-price cost of a finished note (V5): billed seconds when reported, else min(maxSeconds, declared). */
-  costUsd(maxSeconds: number, billedSeconds: number | null, declaredSeconds: number | null): number;
+  /**
+   * List-price ceiling for this many seconds of audio, without speaker labels, in US dollars (the spend hold). The caller
+   * holds ceilingUsd(Math.max(bound, prepared.measuredSeconds ?? 0)), so a measured length up to the tolerance is covered.
+   */
+  ceilingUsd(seconds: number): number;
+  /**
+   * List-price cost of a finished note (V5): the billed seconds when reported, else the measured length, else
+   * min(maxSeconds, declared), else maxSeconds. A negative, NaN or infinite length is ignored.
+   */
+  costUsd(o: { maxSeconds: number; billedSeconds: number | null; declaredSeconds: number | null; measuredSeconds: number | null }): number;
   /** Whether this file can be sent: as it is, or converted because ffmpeg is there (N2). */
   canSend(mimeType: string | null): boolean;
-  /** One note: one provider call, or one per part for OpenAI notes over 300 s. Never retried, never aborted. */
-  transcribe(input: VoiceInput): Promise<VoiceResult>;
+  /**
+   * The free, local step: no provider call. Picks the format, converts, measures and splits for OpenAI. Throws
+   * AudioError('too_long') when the measured length exceeds input.maxSeconds + VOICE_LENGTH_TOLERANCE_S, AudioError
+   * ('no_ffmpeg') when a conversion is needed without ffmpeg, and ffmpeg's own AudioError; the folder is removed first.
+   * Run it outside the spend hold.
+   */
+  prepare(input: VoiceInput): Promise<PreparedVoice>;
+  /**
+   * The paid step: one provider call per part, in order. Never retried, never aborted. A failure of the first part
+   * reaches the caller unchanged; a later one is an SttPartialError. Always disposes the prepared note.
+   */
+  transcribe(prepared: PreparedVoice): Promise<VoiceResult>;
   readonly canForget: boolean;
   /** Deletes the provider's stored copy named by a forgetRef. Free. */
   forget(ref: string): Promise<void>;
@@ -82,6 +137,22 @@ export function voiceCeilingUsd(provider: ProviderId, seconds: number, inrPerUsd
 
 /** A length that may be priced: a finite number, not negative. */
 const usable = (s: number | null): s is number => s !== null && Number.isFinite(s) && s >= 0;
+/** A length ffmpeg may report: a finite number above zero. */
+const measurable = (s: number): boolean => Number.isFinite(s) && s > 0;
+
+/** Removes a folder once it is gone; a failure is left for the next call or the next try of the note, never thrown. */
+function folderRemover(dir: string): () => void {
+  let removed = false;
+  return () => {
+    if (removed) return;
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      removed = true;
+    } catch {
+      // left for the next call, or removed before this note is tried again
+    }
+  };
+}
 
 /** A VoiceTranscriber over any provider, with speaker labels off. Exported for tests (a fake provider and ffmpeg). */
 export function voiceTranscriber(provider: SttProvider, o: { inrPerUsd: number; ffmpeg: Ffmpeg | null; tmpDir: string }): VoiceTranscriber {
@@ -94,43 +165,81 @@ export function voiceTranscriber(provider: SttProvider, o: { inrPerUsd: number; 
     if (MP3.has(base)) return 'mp3';
     return null;
   };
-  const send = (part: AudioPart): Promise<ProviderResult> => provider.transcribe(part, { diarize: false });
+  const send = (part: AudioPart): Promise<ProviderResult> =>
+    provider.transcribe({ path: part.path, seconds: part.seconds, offset: part.offset, format: part.format ?? 'mp3' }, { diarize: false });
+  const tooLong = (measured: number | null, input: VoiceInput): boolean =>
+    measured !== null && measured > input.maxSeconds + VOICE_LENGTH_TOLERANCE_S;
 
   return {
     provider: provider.id,
-    ceilingUsd: (maxSeconds) => voiceCeilingUsd(provider.id, maxSeconds, o.inrPerUsd),
-    costUsd: (maxSeconds, billedSeconds, declaredSeconds) => {
-      const seconds = usable(billedSeconds) ? billedSeconds : usable(declaredSeconds) ? Math.min(maxSeconds, declaredSeconds) : maxSeconds;
+    ceilingUsd: (seconds) => voiceCeilingUsd(provider.id, seconds, o.inrPerUsd),
+    costUsd: ({ maxSeconds, billedSeconds, declaredSeconds, measuredSeconds }) => {
+      const seconds = usable(billedSeconds)
+        ? billedSeconds
+        : usable(measuredSeconds)
+          ? measuredSeconds
+          : usable(declaredSeconds) ? Math.min(maxSeconds, declaredSeconds) : maxSeconds;
       return costUsd(price, seconds, o.inrPerUsd);
     },
     canSend: (mimeType) => asIs(mimeType) !== null || o.ffmpeg !== null,
-    async transcribe(input) {
+    async prepare(input) {
       // The folder is named from the numeric id only, never from a path or name the sender gave.
-      if (!Number.isSafeInteger(input.mediaId) || input.mediaId < 1) throw new Error('voice transcribe: the media id is not a positive whole number');
-      const dir = join(o.tmpDir, `voice-${input.mediaId}`);
-      // A folder left by an earlier crash goes first, so no stale conversion or parts are reused.
-      rmSync(dir, { recursive: true, force: true });
+      if (!Number.isSafeInteger(input.mediaId) || input.mediaId < 1) throw new Error('voice prepare: the media id is not a positive whole number');
       const format = asIs(input.mimeType);
-      if (format !== null) return combine(provider, [await send({ path: input.path, seconds: input.maxSeconds, offset: 0, format })]);
+      if (format !== null) {
+        // Sent as it is, with no folder. ffmpeg, when there, only measures the original: a file it cannot measure
+        // still goes (V3), held at the size bound.
+        let measured: number | null = null;
+        if (o.ffmpeg !== null) {
+          try {
+            const s = await o.ffmpeg.seconds(input.path);
+            measured = measurable(s) ? s : null;
+          } catch {
+            measured = null;
+          }
+        }
+        if (tooLong(measured, input)) throw new AudioError('too_long');
+        const part: AudioPart = { path: input.path, seconds: measured ?? input.maxSeconds, offset: 0, format };
+        return { parts: [part], measuredSeconds: measured, dispose: () => {} };
+      }
       if (o.ffmpeg === null) throw new AudioError('no_ffmpeg');
+      const ffmpeg = o.ffmpeg;
+      const dir = join(o.tmpDir, `voice-${input.mediaId}`);
+      const dispose = folderRemover(dir);
       try {
+        // A folder left by an earlier crash goes first, so no stale conversion or parts are reused.
+        rmSync(dir, { recursive: true, force: true });
         mkdirSync(dir, { recursive: true });
         const mp3 = join(dir, 'audio.mp3');
-        await o.ffmpeg.toMp3(input.path, mp3);
-        // The measured length is used only to split. Spend still uses maxSeconds.
-        const whole: AudioPart = { path: mp3, seconds: await o.ffmpeg.seconds(mp3), offset: 0, format: 'mp3' };
-        const parts = whole.seconds > provider.maxPartSeconds ? await o.ffmpeg.split(whole, join(dir, 'parts'), provider.maxPartSeconds) : [whole];
+        await ffmpeg.toMp3(input.path, mp3);
+        const measured = await ffmpeg.seconds(mp3);
+        if (!measurable(measured)) throw new AudioError('no_duration');
+        if (tooLong(measured, input)) throw new AudioError('too_long');
+        const whole: AudioPart = { path: mp3, seconds: measured, offset: 0, format: 'mp3' };
+        const parts = measured > provider.maxPartSeconds ? await ffmpeg.split(whole, join(dir, 'parts'), provider.maxPartSeconds) : [whole];
+        return { parts: parts.map((p) => ({ path: p.path, seconds: p.seconds, offset: p.offset, format: 'mp3' })), measuredSeconds: measured, dispose };
+      } catch (e) {
+        dispose();
+        throw e;
+      }
+    },
+    async transcribe(prepared) {
+      try {
         const results: ProviderResult[] = [];
-        for (const p of parts) results.push(await send({ path: p.path, seconds: p.seconds, offset: p.offset, format: 'mp3' }));
+        for (const part of prepared.parts) {
+          try {
+            results.push(await send(part));
+          } catch (e) {
+            // Nothing answered yet: the error as it is, so an HTTP refusal still frees the hold. Otherwise parts were
+            // billed, and the hold must book them.
+            if (results.length === 0) throw e;
+            throw new SttPartialError(results.length, prepared.parts.length, e);
+          }
+        }
         return combine(provider, results);
       } finally {
-        // Best-effort: a folder that cannot be removed now is removed before this note is tried again, and a failure
-        // here must not hide the outcome of a paid call.
-        try {
-          rmSync(dir, { recursive: true, force: true });
-        } catch {
-          // left for the next try
-        }
+        // Never throws, so it cannot hide the outcome of a paid call.
+        prepared.dispose();
       }
     },
     canForget: provider.forgetById !== undefined,
