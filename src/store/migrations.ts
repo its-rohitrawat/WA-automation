@@ -192,6 +192,22 @@ CREATE INDEX media_client ON media (client_id);
     version: 5,
     sql: 'ALTER TABLE media ADD COLUMN requeued_for_text INTEGER NOT NULL DEFAULT 0;',
   },
+  {
+    // Phase 2c: one row per IST date for the morning report. The row is claimed ('sending') before anything is sent.
+    version: 6,
+    sql: `
+CREATE TABLE reports (
+  date TEXT PRIMARY KEY,
+  status TEXT NOT NULL CHECK (status IN ('sending', 'sent', 'retry', 'unknown', 'skipped')),
+  detail TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  forced INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`,
+  },
   // Version 6 is Phase 2c's reports table: it reaches this branch from main, and goes before this one.
   {
     // Phase 3: one row per Google Meet recording. JSON columns: attendees [{email, name, team}], participants [name],

@@ -64,8 +64,7 @@ describe('media store', () => {
   });
 
   it('adds version 5 as a new migration after version 4', () => {
-    // Version 6 is Phase 2c's reports table, arriving from main.
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 7]);
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect(MIGRATIONS[4]!.sql.trim()).toBe('ALTER TABLE media ADD COLUMN requeued_for_text INTEGER NOT NULL DEFAULT 0;');
   });
 

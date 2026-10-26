@@ -8,8 +8,8 @@ describe('openDb', () => {
     const db = openDb(':memory:');
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]).map((t) => t.name);
     expect(tables).toEqual(expect.arrayContaining([
-      'batches', 'clients', 'decisions', 'kv', 'media', 'meetings', 'message_edits', 'messages', 'people', 'reactions', 'schema_version', 'spend', 'stt_forget',
-      'task_events', 'tasks',
+      'batches', 'clients', 'decisions', 'kv', 'media', 'meetings', 'message_edits', 'messages', 'people', 'reactions', 'reports', 'schema_version', 'spend',
+      'stt_forget', 'task_events', 'tasks',
     ]));
   });
 
@@ -27,7 +27,7 @@ describe('openDb', () => {
   it('is safe to migrate twice', () => {
     const db = openDb(':memory:');
     migrate(db);
-    expect((db.prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(6); // 1 to 5 and 7: version 6 is Phase 2c's reports table, arriving from main
+    expect((db.prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(7);
   });
 
   it('overwrites deleted content, so wiped download details do not stay in free pages', () => {
@@ -44,33 +44,37 @@ describe('openDb', () => {
 });
 
 describe('migrate: a skipped migration', () => {
-  const FAKE_V6: Migration = { version: 6, sql: 'CREATE TABLE fake_reports (id INTEGER PRIMARY KEY);' };
-  const withV6 = [...MIGRATIONS.filter((m) => m.version < 6), FAKE_V6, ...MIGRATIONS.filter((m) => m.version > 6)];
+  // A database made before main's v6 (the reports table) reached this branch is recorded at 1 to 5 and 7.
+  const withoutV6 = MIGRATIONS.filter((m) => m.version !== 6);
+  const FAKE_V8: Migration = { version: 8, sql: 'CREATE TABLE fake_later (id INTEGER PRIMARY KEY);' };
   const versions = (db: Database.Database) =>
     (db.prepare('SELECT version FROM schema_version ORDER BY version').all() as { version: number }[]).map((r) => r.version);
 
   it('throws, naming only the version numbers, and applies nothing when the code knows a version the database skipped', () => {
     const db = new Database(':memory:');
-    migrate(db); // this branch: 1 to 5 and 7
+    migrate(db, withoutV6);
     expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7]);
-    expect(() => migrate(db, withV6)).toThrow('database is at v7 but v6 was never applied; restore a backup or contact the developer');
+    expect(() => migrate(db)).toThrow('database is at v7 but v6 was never applied; restore a backup or contact the developer');
     expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7]);
-    expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'fake_reports'").get()).toBeUndefined();
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'reports'").get()).toBeUndefined();
   });
 
   it('names every skipped version', () => {
     const db = new Database(':memory:');
-    migrate(db, withV6);
+    migrate(db);
     db.prepare('DELETE FROM schema_version WHERE version IN (2, 6)').run();
-    expect(() => migrate(db, withV6)).toThrow('database is at v7 but v2, v6 were never applied');
+    expect(() => migrate(db)).toThrow('database is at v7 but v2, v6 were never applied');
   });
 
-  it('applies the fake v6 in order on a fresh database, and a database with every version recorded migrates as before', () => {
+  it('applies every version in order on a fresh database, a later one after them, and a database with every version recorded migrates as before', () => {
     const db = new Database(':memory:');
-    migrate(db, withV6);
+    migrate(db);
     expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
-    migrate(db, withV6);
+    migrate(db);
     expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    migrate(db, [...MIGRATIONS, FAKE_V8]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'fake_later'").get()).toEqual({ name: 'fake_later' });
   });
 
   it('upgrades an older database without complaint, and the branch’s own migrations never throw', () => {
@@ -78,7 +82,7 @@ describe('migrate: a skipped migration', () => {
     migrate(db, MIGRATIONS.filter((m) => m.version <= 4));
     expect(versions(db)).toEqual([1, 2, 3, 4]);
     migrate(db);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect(() => migrate(db)).not.toThrow();
     expect(() => openDb(':memory:')).not.toThrow();
   });

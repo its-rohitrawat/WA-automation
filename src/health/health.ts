@@ -2,6 +2,7 @@ import { statfsSync } from 'node:fs';
 import type { ReconcileOutcome } from '../brain/reconciler.ts';
 import type { MeetingsHealth } from '../meetings/healthTypes.ts';
 import type { HealthLine } from '../output/view.ts';
+import type { ReportHealth } from '../report/types.ts';
 import type { SpendGuard, SpendKind } from '../spend/spendGuard.ts';
 import type { Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
@@ -41,6 +42,8 @@ export interface HealthSnapshot {
   meetings?: MeetingsHealth;
   /** spentToday split by kind: AI calls and speech-to-text. Missing in older snapshots. */
   spendByKind?: Record<SpendKind, number>;
+  /** The morning report's line (Phase 2c). Missing when the report is off, and in older snapshots. */
+  report?: ReportHealth;
 }
 
 /**
@@ -75,6 +78,7 @@ export class Health {
   #ingestFailures = 0;
   #media: MediaHealth = { pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0 };
   #meetings: MeetingsHealth | null = null;
+  #report: ReportHealth | null = null;
 
   constructor(o: { db: Db; clock: Clock; spend: SpendGuard; dataDir?: string; freeBytes?: (dir: string) => number | null }) {
     this.#db = o.db;
@@ -122,6 +126,11 @@ export class Health {
   /** Stores the meeting counts and pauses (a copy); null: meetings are switched off (no lines). The next persist() records them. */
   setMeetings(m: MeetingsHealth | null): void {
     this.#meetings = m === null ? null : { ...m, stats: { ...m.stats, deferred: { ...m.stats.deferred } } };
+  }
+
+  /** Stores the morning report's line; the next persist() records it. Null when the report is off. */
+  setReport(r: ReportHealth | null): void {
+    this.#report = r;
   }
 
   forget(clientId: number): void {
@@ -202,6 +211,9 @@ export class Health {
       const n = this.#media.spendCap;
       return { ok: false, text: `⚠️ ${n} shared file${n === 1 ? '' : 's'} waiting for today's AI budget (read after midnight IST)` };
     }
+    // After the media lines and before low disk: the morning report's warning first, then the meeting lines.
+    // The morning report warns only when the owner must act: an unknown outcome, or a spare number that is unlinked.
+    if (this.#report?.warning) return { ok: false, text: this.#report.warning };
     const meeting = this.#meetingLine();
     if (meeting !== null) return { ok: false, text: meeting };
     const free = this.#freeGb();
@@ -243,6 +255,7 @@ export class Health {
       media: { ...this.#media },
       ...(this.#meetings === null ? {} : { meetings: { ...this.#meetings, stats: { ...this.#meetings.stats, deferred: { ...this.#meetings.stats.deferred } } } }),
       spendByKind: this.#spend.spentTodayByKind(),
+      ...(this.#report ? { report: { ...this.#report } } : {}),
     };
   }
 
@@ -279,6 +292,11 @@ const isSpendByKind = (v: unknown): v is Record<SpendKind, number> => {
   return typeof x === 'object' && x !== null && typeof x.ai === 'number' && typeof x.stt === 'number';
 };
 
+const isReportHealth = (r: unknown): r is ReportHealth => {
+  const x = r as Record<string, unknown> | null;
+  return typeof x === 'object' && x !== null && typeof x.text === 'string' && (x.warning === null || typeof x.warning === 'string');
+};
+
 export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
   const v = getKv(db, 'health');
   if (!v) return undefined;
@@ -298,6 +316,8 @@ export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
     // Snapshots written before meetings, or with meetings off, have no meetings; older ones no spend split.
     if (o.meetings !== undefined && !isMeetingsHealth(o.meetings)) return undefined;
     if (o.spendByKind !== undefined && !isSpendByKind(o.spendByKind)) return undefined;
+    // Snapshots written before the morning report existed, or with it off, have no report line.
+    if (o.report !== undefined && !isReportHealth(o.report)) return undefined;
     // A pause reason or provider this version does not know (a newer writer) drops only the meetings, not the snapshot.
     const { meetings, ...rest } = o;
     const keep = meetings !== undefined && isKnownMeetingsState(meetings) ? { meetings } : {};

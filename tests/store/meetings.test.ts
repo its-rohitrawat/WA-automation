@@ -441,11 +441,11 @@ describe('meetings store', () => {
 });
 
 describe('migration 7', () => {
-  it('upgrades a version-5 database with data in it: old rows unchanged, new columns null, links valid', () => {
+  it('upgrades a version-6 database with data in it: old rows unchanged, new columns null, links valid', () => {
     const db = new Database(':memory:');
     db.pragma('foreign_keys = ON');
     db.exec('CREATE TABLE schema_version (version INTEGER NOT NULL)');
-    for (const m of MIGRATIONS.filter((x) => x.version <= 5)) {
+    for (const m of MIGRATIONS.filter((x) => x.version <= 6)) {
       db.exec(m.sql);
       db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(m.version);
     }
@@ -457,11 +457,14 @@ describe('migration 7', () => {
       VALUES ('SHA-001', 1, 'us', 'Send logo', 'design', 'high', '2026-10-10', '2026-10-10T00:00:00Z', '2026-10-10T00:00:00Z')`).run();
     db.prepare(`INSERT INTO decisions (client_id, text, decided_on, source, created_at)
       VALUES (1, 'Blue theme', '2026-10-10', 'whatsapp', '2026-10-10T00:00:00Z')`).run();
+    db.prepare(`INSERT INTO reports (date, status, attempts, created_at, updated_at)
+      VALUES ('2026-10-10', 'sent', 1, '2026-10-10T00:30:00Z', '2026-10-10T00:31:00Z')`).run();
     const before = {
       tasks: db.prepare('SELECT * FROM tasks').all(),
       decisions: db.prepare('SELECT * FROM decisions').all(),
       media: db.prepare('SELECT * FROM media').all(),
       clients: db.prepare('SELECT * FROM clients').all(),
+      reports: db.prepare('SELECT * FROM reports').all(),
     };
     migrate(db);
     expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(7);
@@ -473,6 +476,7 @@ describe('migration 7', () => {
     expect(strip(db.prepare('SELECT * FROM decisions').all())).toEqual(before.decisions);
     expect(db.prepare('SELECT * FROM media').all()).toEqual(before.media);
     expect(db.prepare('SELECT * FROM clients').all()).toEqual(before.clients);
+    expect(db.prepare('SELECT * FROM reports').all()).toEqual(before.reports);
     expect(db.prepare('SELECT meeting_id FROM tasks').get()).toEqual({ meeting_id: null });
     expect(db.prepare('SELECT meeting_id FROM decisions').get()).toEqual({ meeting_id: null });
     expect((db.prepare('SELECT COUNT(*) AS n FROM meetings').get() as { n: number }).n).toBe(0);

@@ -119,6 +119,32 @@ describe('Health and meetings', () => {
     expect(h.line().text).toBe('⚠️ Low disk: 5.0 GB free');
   });
 
+  it('with the morning report (Phase 2c): after the media lines, its warning first, then the meeting lines, then low disk', () => {
+    const { db, h } = setup(() => 5e9);
+    const report = { text: 'Morning report: unknown, check WhatsApp', warning: '⚠️ Morning report: unknown, check WhatsApp.' };
+    h.setMeetings(meetings({ paused: 'google_scopes' }));
+    h.setReport(report);
+    expect(h.line().text).toBe(report.warning);
+    h.setMedia(media({ spendCap: 1 }));
+    expect(h.line().text).toBe("⚠️ 1 shared file waiting for today's AI budget (read after midnight IST)");
+    h.setMedia(media());
+    h.setReport({ text: 'Morning report: sent at 06:00 IST', warning: null });
+    expect(h.line().text).toBe(SCOPES);
+    h.setMeetings(null);
+    expect(h.line().text).toBe('⚠️ Low disk: 5.0 GB free');
+    // Both live side by side in the snapshot; a meeting state this version does not know drops only the meetings.
+    h.setMeetings(meetings({ paused: 'google_scopes' }));
+    h.setReport(report);
+    h.persist();
+    const read = readHealthSnapshot(db)!;
+    expect(read.meetings).toEqual(meetings({ paused: 'google_scopes' }));
+    expect(read.report).toEqual(report);
+    setKv(db, 'health', JSON.stringify({ ...read, meetings: { ...meetings(), paused: 'some_new_reason' } }));
+    const again = readHealthSnapshot(db)!;
+    expect(again.meetings).toBeUndefined();
+    expect(again.report).toEqual(report);
+  });
+
   it('keeps the meetings in the snapshot and reads them back', () => {
     const { db, h } = setup();
     const m = meetings({ paused: 'no_ffmpeg', sttProvider: 'none' }, { done: 4, waiting: 1, unassigned: 2, deferred: { stt_none: 1 } });
