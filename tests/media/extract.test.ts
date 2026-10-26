@@ -749,7 +749,8 @@ describe('voice and audio', () => {
       const x = await extract(input(note()));
       expect(x).toEqual({ ...TRANSCRIPT, text: 'payment bhej diya' });
       expect(Object.keys(x)).not.toContain('forget');
-      expect(v.prepared).toEqual([{ mediaId: 7, path: NOTE_PATH, maxSeconds: 600 }]);
+      // Phase 2b final review: the conversion gets the stop signal too.
+      expect(v.prepared).toEqual([{ mediaId: 7, path: NOTE_PATH, maxSeconds: 600, signal: ac.signal }]);
       expect(v.transcribed).toBe(1);
       expect(v.signals).toEqual([ac.signal]);
       expect(v.priced).toBe(0);
@@ -759,11 +760,30 @@ describe('voice and audio', () => {
       expect(v.disposals).toBe(1);
     });
 
-    it('without a signal set up, transcribe is given none', async () => {
+    it('without a signal set up, prepare and transcribe are given none', async () => {
       const v = new FakeLocalVoiceTranscriber();
       const { extract, input } = voiceSetup(v);
       await extract(input(note()));
       expect(v.signals).toEqual([undefined]);
+      expect(v.prepared).toEqual([{ mediaId: 7, path: NOTE_PATH, maxSeconds: 600 }]);
+    });
+
+    it('a paid prepare is never given the signal (a paid note is never stopped)', async () => {
+      const v = new FakeVoiceTranscriber();
+      const { extract, input } = voiceSetup(v, { signal: new AbortController().signal });
+      await extract(input(note()));
+      expect(v.prepared).toEqual([{ mediaId: 7, path: NOTE_PATH, maxSeconds: 600 }]);
+    });
+
+    // Phase 2b final review: a stop during the conversion is a stopped run (local_aborted, the attempt given back).
+    it('a conversion stopped by the signal reaches the processor as LocalEngineError aborted, and the engine never runs', async () => {
+      const aborted = new LocalEngineError('aborted');
+      const v = new FakeLocalVoiceTranscriber({ prepareError: aborted });
+      const ac = new AbortController();
+      const { extract, input, db } = voiceSetup(v, { signal: ac.signal });
+      await expect(extract(input(note()))).rejects.toBe(aborted);
+      expect(v.transcribed).toBe(0);
+      expect(spendRows(db)).toEqual([]);
     });
 
     it('is never too costly, and never waits for the spend cap: a tiny cap, or a cap used up', async () => {

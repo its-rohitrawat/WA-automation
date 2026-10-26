@@ -33,7 +33,7 @@ describe('Health and the morning report', () => {
     const { h } = setup(() => 5e9);
     h.setReport(UNKNOWN);
     expect(h.line().text).toBe(UNKNOWN.warning);
-    h.setMedia({ pending: 1, stale: 1, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0 });
+    h.setMedia({ pending: 1, stale: 1, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0 });
     expect(h.line().text).toBe('⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.');
   });
 

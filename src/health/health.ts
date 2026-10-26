@@ -16,6 +16,8 @@ const DISCONNECT_GRACE_MS = 30 * 60_000;
 const PUBLISH_FAIL_MS = 60 * 60_000;
 const SPEND_CAP_LINE = '⚠️ Daily spend cap reached. Paused until midnight IST';
 const STT_REFUSED_LINE = '⚠️ Voice notes are not being transcribed: the speech-to-text key was refused.';
+/** Voice notes that failed on this computer in the last 24 hours (mediaStats.voiceFailed); docs/SETUP.md lists the line. */
+export const voiceFailedLine = (n: number) => `⚠️ ${n} voice note${n === 1 ? '' : 's'} could not be transcribed by the local engine. See docs/SETUP.md, Voice notes`;
 
 /**
  * Why voice notes are not transcribed at all, found when the service starts (Phase 2b Task 10, src/voiceDeps.ts):
@@ -31,8 +33,11 @@ export const VOICE_PROBLEM_LINES: Readonly<Record<VoiceProblem, string>> = {
 };
 
 export type MediaHealth = MediaStats;
-/** The shared-file counts as a snapshot stores them: snapshots written before Phase 2b have no sttRefused. */
-export type MediaSnapshot = Omit<MediaStats, 'sttRefused'> & { sttRefused?: number };
+/**
+ * The shared-file counts as a snapshot stores them: snapshots written before Phase 2b have no sttRefused, and those
+ * written before the Phase 2b final review no voiceFailed.
+ */
+export type MediaSnapshot = Omit<MediaStats, 'sttRefused' | 'voiceFailed'> & { sttRefused?: number; voiceFailed?: number };
 export type { MeetingsHealth } from '../meetings/healthTypes.ts';
 
 export interface HealthSnapshot {
@@ -51,8 +56,9 @@ export interface HealthSnapshot {
   ingestFailures: number;
   /**
    * Shared files: waiting, waiting too long, waiting for the daily budget, failed in the last 24 h, Drive uploads that
-   * gave up, voice notes waiting for a refused speech-to-text key. Missing in older snapshots; sttRefused missing in
-   * snapshots written before Phase 2b.
+   * gave up, voice notes waiting for a refused speech-to-text key, voice notes that failed on this computer in the last
+   * 24 hours. Missing in older snapshots; sttRefused missing in snapshots written before Phase 2b, voiceFailed in those
+   * written before its final review.
    */
   media?: MediaSnapshot;
   /** Meeting counts and pauses; missing while meetings are switched off, and in older snapshots. */
@@ -95,7 +101,7 @@ export class Health {
   #lastSuccess: Date | null = null;
   #lastPublished: Date | null = null;
   #ingestFailures = 0;
-  #media: MediaHealth = { pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0 };
+  #media: MediaHealth = { pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0 };
   #meetings: MeetingsHealth | null = null;
   #report: ReportHealth | null = null;
   #voiceProblem: VoiceProblem | null = null;
@@ -230,29 +236,36 @@ export class Health {
       const n = this.#media.uploadFailed;
       return { ok: false, text: `⚠️ ${n} file${n === 1 ? '' : 's'} could not be uploaded to Drive. See docs/SETUP.md.` };
     }
-    // Voice notes are not transcribed at all: the local engine's files or ffmpeg were missing at start. The owner must
-    // set them up and restart; the notes are kept meanwhile. Next to the key-refused line, and before it.
-    if (this.#voiceProblem !== null) return { ok: false, text: VOICE_PROBLEM_LINES[this.#voiceProblem] };
-    // Voice notes wait for a speech-to-text key that was refused: the owner must fix STT_API_KEY. They are not counted
-    // as waiting too long (mediaStats.stale), so this line is not hidden by the one above.
-    if (this.#media.sttRefused > 0) return { ok: false, text: STT_REFUSED_LINE };
     // A paid read holds its ceiling (about $4 for a scan) while it runs, so a file can wait for the budget long before
     // the cap is reached. Nothing is paused and nothing needs the owner, so this comes after the warnings above.
     if (this.#media.spendCap > 0) {
       const n = this.#media.spendCap;
       return { ok: false, text: `⚠️ ${n} shared file${n === 1 ? '' : 's'} waiting for today's AI budget (read after midnight IST)` };
     }
-    // After the media lines and before low disk: the morning report's warning first, then the meeting lines.
+    // After the file lines and before low disk: the morning report's warning first, then the meeting lines.
     // The morning report warns only when the owner must act: an unknown outcome, or a spare number that is unlinked.
     if (this.#report?.warning) return { ok: false, text: this.#report.warning };
     const meeting = this.#meetingLine();
     if (meeting !== null) return { ok: false, text: meeting };
     const free = this.#freeGb();
     if (free !== null && free < LOW_DISK_GB) return { ok: false, text: `⚠️ Low disk: ${free.toFixed(1)} GB free` };
+    // The voice lines come last (Phase 2b final review), so they never hide the morning report's warning, a meeting
+    // line or low disk. The tracker keeps working without the notes (it waits 30 minutes for one at most), and the notes
+    // are kept, to be transcribed once the cause is fixed. The key-refused line moved down with the others: a refused
+    // key is a voice-only fault like them, while a report that may not have reached the founder, a paused meeting and a
+    // filling disk each need the owner sooner; and every "Voice notes ..." line then follows one rule in docs/SETUP.md.
+    // Among them, the most basic cause first:
+    // - not transcribed at all: the local engine's files or ffmpeg were missing at start (set up, then restart);
+    // - waiting for a speech-to-text key that was refused (fix STT_API_KEY). Those notes are not counted as waiting too
+    //   long (mediaStats.stale), so the long-wait line never hides this one for them;
+    // - notes the local engine or ffmpeg could not transcribe after their tries (`cli transcribe-voice --failed`).
+    if (this.#voiceProblem !== null) return { ok: false, text: VOICE_PROBLEM_LINES[this.#voiceProblem] };
+    if (this.#media.sttRefused > 0) return { ok: false, text: STT_REFUSED_LINE };
+    if (this.#media.voiceFailed > 0) return { ok: false, text: voiceFailedLine(this.#media.voiceFailed) };
     return { ok: true, text: this.#lastSuccess ? `✅ Connected · last update ${stamp(this.#lastSuccess)}` : '✅ Connected · waiting for new messages' };
   }
 
-  /** The meeting warning, if any, in this order (after the media lines, before low disk). Null while meetings are off. */
+  /** The meeting warning, if any, in this order (after the file lines, before low disk). Null while meetings are off. */
   #meetingLine(): string | null {
     const m = this.#meetings;
     if (m === null) return null;
@@ -298,11 +311,13 @@ export class Health {
 
 const MEDIA_COUNTS = ['pending', 'stale', 'spendCap', 'failedRecent', 'uploadFailed'] as const;
 
-/** sttRefused is checked separately: snapshots written before Phase 2b lack it. */
+/** sttRefused and voiceFailed are checked separately: snapshots written before Phase 2b (or its final review) lack them. */
+const OPTIONAL_MEDIA_COUNTS = ['sttRefused', 'voiceFailed'] as const;
 const isMediaSnapshot = (m: unknown): m is MediaSnapshot => {
   const x = m as Record<string, unknown> | null;
   return (
-    typeof x === 'object' && x !== null && MEDIA_COUNTS.every((k) => typeof x[k] === 'number') && (x.sttRefused === undefined || typeof x.sttRefused === 'number')
+    typeof x === 'object' && x !== null && MEDIA_COUNTS.every((k) => typeof x[k] === 'number') &&
+    OPTIONAL_MEDIA_COUNTS.every((k) => x[k] === undefined || typeof x[k] === 'number')
   );
 };
 

@@ -218,6 +218,9 @@ export function createApp(d: AppDeps): App {
 
   const reconciler = new Reconciler({
     db: d.db, ai: d.ai, spend, prices: d.prices, clock: d.clock, log: d.log, startedAt,
+    // Phase 2b final review: voice notes hold up their messages (30 minutes at most) only while a transcriber is set up.
+    // With VOICE_STT_PROVIDER none, or the local engine not set up, no transcript is coming: they never wait, as in 2a.
+    voiceTranscriptionOn: (d.media?.voice ?? null) !== null,
     // A meeting's tracker step finishes the meeting here: the rebuild gets the meeting counts of now.
     onChanged: () => {
       safely(refreshMeetings);

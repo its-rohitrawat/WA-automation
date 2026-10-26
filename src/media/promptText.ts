@@ -212,16 +212,23 @@ export function mediaForPrompt(
  *   This includes a file the media queue keeps retrying because Claude or the speech provider is unavailable (error code
  *   ai_unavailable or stt_unavailable), for up to 24 hours, and a file deferred by the daily spend cap (spend_cap) whose
  *   spend hold does not fit (12g): the client's text tracking must not stop until the next day.
+ * - o.voiceOn (Phase 2b final review): whether voice notes are transcribed at all (a voice transcriber is set up). When
+ *   false (VOICE_STT_PROVIDER none, or the local engine not set up), voice notes and audio files never block, as in 2a:
+ *   no transcript is coming. On unless said otherwise, the safe side; images and documents are unchanged either way.
  * A file that no longer blocks shows as "still being read" ("being transcribed" for a voice note).
  */
-export function isBlocking(row: MediaRow | undefined, now: Date, startedAt: Date, maxWaitMs = MEDIA_MAX_WAIT_MS): boolean {
+export function isBlocking(row: MediaRow | undefined, now: Date, startedAt: Date, maxWaitMs = MEDIA_MAX_WAIT_MS, o: { voiceOn?: boolean } = {}): boolean {
   if (!row || row.status !== 'pending') return false;
-  if (row.kind !== 'image' && row.kind !== 'document' && !isSound(row)) return false;
+  if (isSound(row)) {
+    if (o.voiceOn === false) return false;
+  } else if (row.kind !== 'image' && row.kind !== 'document') {
+    return false;
+  }
   return now.getTime() < Math.max(Date.parse(row.createdAt), startedAt.getTime()) + maxWaitMs;
 }
 
-/** The queued messages before the first one whose file is still being read. Order is kept. */
-export function readyPrefix(batch: MessageRow[], media: Map<number, MediaRow>, now: Date, startedAt: Date): MessageRow[] {
-  const i = batch.findIndex((m) => isBlocking(media.get(m.id), now, startedAt));
+/** The queued messages before the first one whose file is still being read. Order is kept. o.voiceOn as for isBlocking. */
+export function readyPrefix(batch: MessageRow[], media: Map<number, MediaRow>, now: Date, startedAt: Date, o: { voiceOn?: boolean } = {}): MessageRow[] {
+  const i = batch.findIndex((m) => isBlocking(media.get(m.id), now, startedAt, MEDIA_MAX_WAIT_MS, o));
   return i < 0 ? batch : batch.slice(0, i);
 }

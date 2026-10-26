@@ -4,7 +4,7 @@ import { isAbsolute, join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseEnv } from '../../src/config/env.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
-import { AudioError, Ffmpeg } from '../../src/stt/audio.ts';
+import { AudioError, Ffmpeg, type RunFile } from '../../src/stt/audio.ts';
 import { SttHttpError, type HttpFetch } from '../../src/stt/http.ts';
 import { LocalEngineError, type LocalRunFile } from '../../src/stt/local.ts';
 import { withSttHold, type SttBooking } from '../../src/stt/paidStt.ts';
@@ -126,18 +126,23 @@ class FakeFfmpeg extends Ffmpeg {
   /** The mean volume meanVolumeDb reports. */
   volume: number | null = -23;
   toWavError: Error | null = null;
-  override async toWav(input: string, output: string, _signal?: AbortSignal, opts: { maxSeconds?: number; timeoutMs?: number } = {}): Promise<void> {
+  /** The signal of every toWav, seconds and meanVolumeDb call, in order, named by the step (Phase 2b final review). */
+  readonly signals: { step: 'toMp3' | 'toWav' | 'seconds' | 'meanVolumeDb'; signal: AbortSignal | undefined }[] = [];
+  override async toWav(input: string, output: string, signal?: AbortSignal, opts: { maxSeconds?: number; timeoutMs?: number } = {}): Promise<void> {
     this.onToMp3();
+    this.signals.push({ step: 'toWav', signal });
     this.wavs.push({ input, output, maxSeconds: opts.maxSeconds, timeoutMs: opts.timeoutMs });
     if (this.toWavError) throw this.toWavError;
     this.#cutAt = opts.maxSeconds ?? Number.POSITIVE_INFINITY;
     writeFileSync(output, 'wav');
   }
-  override async meanVolumeDb(input: string): Promise<number | null> {
+  override async meanVolumeDb(input: string, signal?: AbortSignal): Promise<number | null> {
+    this.signals.push({ step: 'meanVolumeDb', signal });
     this.volumed.push(input);
     return this.volume;
   }
-  override async seconds(input: string): Promise<number> {
+  override async seconds(input: string, signal?: AbortSignal): Promise<number> {
+    this.signals.push({ step: 'seconds', signal });
     this.measured.push(input);
     if (this.secondsError) throw this.secondsError;
     return Number.isFinite(this.length) ? Math.min(this.length, this.#cutAt) : this.length;
@@ -851,6 +856,81 @@ describe('localVoiceTranscriber', () => {
     noLength.ffmpeg!.length = 0;
     expect(codeOf(await noLength.t.prepare(input()).catch((x: unknown) => x))).toBe('no_duration');
     expect(existsSync(voiceDir())).toBe(false);
+  });
+
+  // Phase 2b final review: stop() reaches the conversion too, so a note being converted never holds up the shutdown,
+  // and the stop is a stopped run (LocalEngineError('aborted'): the processor gives the attempt back).
+  describe('the stop signal during prepare', () => {
+    it('is passed to the conversion, the measuring and the mean volume', async () => {
+      const { t, ffmpeg } = makeLocal();
+      const ac = new AbortController();
+      const prepared = await t.prepare(input({ signal: ac.signal }));
+      expect(ffmpeg!.signals).toEqual([
+        { step: 'toWav', signal: ac.signal },
+        { step: 'seconds', signal: ac.signal },
+        { step: 'meanVolumeDb', signal: ac.signal },
+      ]);
+      prepared.dispose();
+    });
+
+    it('without one, none is passed', async () => {
+      const { t, ffmpeg } = makeLocal();
+      (await t.prepare(input())).dispose();
+      expect(ffmpeg!.signals.map((s) => s.signal)).toEqual([undefined, undefined, undefined]);
+    });
+
+    /** The real Ffmpeg over a fake runner that aborts the signal during the given step, as stop() would. */
+    const abortingFfmpeg = (ac: AbortController, during: 'toWav' | 'seconds' | 'meanVolumeDb') => {
+      const runs: { args: readonly string[]; signal: AbortSignal | undefined }[] = [];
+      const run: RunFile = async (_file, args, opts) => {
+        runs.push({ args, signal: opts.signal });
+        const step = args.includes('volumedetect') ? 'meanVolumeDb' : args.includes('pcm_s16le') ? 'toWav' : 'seconds';
+        if (step === during) {
+          ac.abort();
+          return { code: -1, stderr: '' }; // as runFile resolves once the stopped program has exited
+        }
+        if (step === 'toWav') writeFileSync(args.at(-1)!, 'wav');
+        return { code: step === 'toWav' ? 0 : 1, stderr: '  Duration: 00:00:42.00, start: 0.000000, bitrate: 256 kb/s\nmean_volume: -23.0 dB' };
+      };
+      return { ffmpeg: new Ffmpeg('ffmpeg', run), runs };
+    };
+
+    it.each(['toWav', 'seconds', 'meanVolumeDb'] as const)('a stop during %s is LocalEngineError aborted, the folder is removed and the engine never runs', async (during) => {
+      const ac = new AbortController();
+      const { ffmpeg, runs } = abortingFfmpeg(ac, during);
+      const engine = new FakeEngine();
+      const t = localVoiceTranscriber(engine, { engine: 'voxtral', ffmpeg, tmpDir: join(tmp, 'work') });
+      const e = await t.prepare(input({ signal: ac.signal })).catch((x: unknown) => x);
+      expect(e).toBeInstanceOf(LocalEngineError);
+      expect((e as LocalEngineError).code).toBe('aborted');
+      expect(runs.every((r) => r.signal === ac.signal)).toBe(true);
+      expect(engine.runs).toEqual([]);
+      expect(existsSync(voiceDir())).toBe(false);
+    });
+
+    it('a signal stopped before prepare starts converts nothing', async () => {
+      const ac = new AbortController();
+      ac.abort();
+      const { ffmpeg, runs } = abortingFfmpeg(new AbortController(), 'toWav');
+      const t = localVoiceTranscriber(new FakeEngine(), { engine: 'voxtral', ffmpeg, tmpDir: join(tmp, 'work') });
+      const e = await t.prepare(input({ signal: ac.signal })).catch((x: unknown) => x);
+      expect((e as LocalEngineError).code).toBe('aborted');
+      expect(runs).toEqual([]);
+      expect(existsSync(voiceDir())).toBe(false);
+    });
+
+    it('ffmpeg failing while the signal is not stopped is still its own AudioError', async () => {
+      const { t, ffmpeg } = makeLocal();
+      ffmpeg!.toWavError = new AudioError('convert_failed');
+      const e = await t.prepare(input({ signal: new AbortController().signal })).catch((x: unknown) => x);
+      expect(codeOf(e)).toBe('convert_failed');
+    });
+
+    it('a paid prepare given no signal runs as before (the extractor never stops a paid note)', async () => {
+      const ffmpeg = new FakeFfmpeg();
+      (await make(new FakeProvider('sarvam'), ffmpeg).prepare(input())).dispose();
+      expect(ffmpeg.signals.map((s) => s.signal)).toEqual([undefined]);
+    });
   });
 
   it.each([Number.NaN, -1, 1.5, 0])('refuses a media id of %s before touching any folder', async (mediaId) => {

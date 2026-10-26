@@ -223,7 +223,7 @@ STT_LOCAL_MODEL=/opt/stt/models/Voxtral-Mini-3B-2507-Q4_K_M.gguf
 
 - `STT_LOCAL_BIN` and `STT_LOCAL_MODEL` must be full paths starting with `/`. The `transcribe-cli` path above is an example: use the one `find` printed.
 - For Qwen3-ASR: `STT_LOCAL_ENGINE=qwen3-asr` and the Qwen3-ASR model file. For Whisper: `STT_LOCAL_ENGINE=whisper`, the `whisper-cli` path and a Whisper model file.
-- Leave the others empty unless needed: `STT_LOCAL_THREADS` (default 8, one per core), `STT_LOCAL_TIMEOUT_SECONDS` (default 1800: a note that takes longer is given up), `STT_LOCAL_LANGUAGE` (default `hi`; `en` or `auto`; Qwen3-ASR always finds the language itself).
+- Leave the others empty unless needed: `STT_LOCAL_THREADS` (default 8, one per core), `STT_LOCAL_TIMEOUT_SECONDS` (default 1800: a note that takes longer is stopped and tried again, 3 tries in all), `STT_LOCAL_LANGUAGE` (default `hi`; `en` or `auto`; Qwen3-ASR always finds the language itself).
 - `VOICE_STT_PROVIDER` must be `local` or `none` (or the same paid service as `STT_PROVIDER`). Meetings keep using `STT_PROVIDER`, unchanged.
 
 ### Test it on real notes (waagent window)
@@ -260,7 +260,7 @@ If the check says `Failed (...)`, it also says what to look at. `no_output` usua
 
 ### Then restart the service
 
-Normal Terminal window: `sudo launchctl kickstart -k system/com.wa-agent`. Wait one minute. After the restart, new voice notes are transcribed. For older ones, run `npm run cli -- transcribe-voice` in the waagent window (a dry run that only counts them), then `npm run cli -- transcribe-voice --yes`, which queues them for the running service. Run `npm run cli -- status`: if its Health line says the local speech engine is not set up, or ffmpeg not found, see "Voice note status lines" in SETUP.md.
+Normal Terminal window: `sudo launchctl kickstart -k system/com.wa-agent`. Wait one minute. After the restart, new voice notes are transcribed. For older ones, run `npm run cli -- transcribe-voice` in the waagent window (a dry run that only counts them), then `npm run cli -- transcribe-voice --yes`, which queues them for the running service. Run `npm run cli -- status`: if its Health line says the local speech engine is not set up, or ffmpeg not found, see "Voice note status lines" in SETUP.md. If it says voice notes could not be transcribed by the local engine, see the same place: `npm run cli -- transcribe-voice --failed` tries them again.
 
 ## Reading SETUP.md on a Mac
 

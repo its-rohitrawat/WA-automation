@@ -61,6 +61,12 @@ export interface ReconcilerOptions {
    * cannot interleave with it and add the same task twice. Returns 'busy' when the client is running. Default: no lock.
    */
   exclusive?: <T>(clientId: number, fn: () => Promise<T>) => Promise<T | 'busy'>;
+  /**
+   * Whether voice notes are transcribed (Phase 2b final review): true when a voice transcriber is set up (src/app.ts).
+   * When false (VOICE_STT_PROVIDER none, or the local engine not set up), a pending voice note or audio file holds up
+   * nothing, as in 2a: no transcript is coming. Images and documents are unchanged. Default true, the safe side.
+   */
+  voiceTranscriptionOn?: boolean;
 }
 
 /** A meeting at stage doc, as the tracker step needs it. */
@@ -199,7 +205,7 @@ export class Reconciler {
     // wait for a later run; the media queue tells the debouncer when that file is done, or the app tick re-runs it once
     // the wait runs out. Blocking needs no text (maxChars 0).
     const queuedMedia = mediaForMessages(db, queued.map((m) => m.id), 0);
-    const batch = readyPrefix(queued, queuedMedia, now, this.#startedAt);
+    const batch = readyPrefix(queued, queuedMedia, now, this.#startedAt, { voiceOn: this.#o.voiceTranscriptionOn ?? true });
     if (batch.length === 0) {
       this.#waiting.add(clientId);
       // The app tick re-runs a waiting client every few minutes, so only the start of a wait is worth an info line.

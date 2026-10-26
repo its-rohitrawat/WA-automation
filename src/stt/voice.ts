@@ -83,6 +83,12 @@ export interface VoiceInput {
    * refuses nothing). The caller holds the measured length plus VOICE_LENGTH_TOLERANCE_S.
    */
   maxSeconds: number;
+  /**
+   * Stops the conversion and measuring (Phase 2b final review). The extractor passes the service's stop signal for the
+   * local engine only, which turns a stop into LocalEngineError('aborted'): the processor gives the attempt back. A paid
+   * note is never given one.
+   */
+  signal?: AbortSignal;
 }
 
 /** A note made ready to send by prepare, for one transcribe. */
@@ -241,10 +247,11 @@ async function convertNote(
     const path = join(dir, `audio.${to}`);
     // Stopped one second past what is allowed: a longer note is never converted whole, whatever its header claims.
     const opts = { maxSeconds: allowed + 1, timeoutMs: VOICE_CONVERT_TIMEOUT_MS };
-    if (to === 'mp3') await ffmpeg.toMp3(input.path, path, undefined, opts);
-    else await ffmpeg.toWav(input.path, path, undefined, opts);
+    // input.signal stops ffmpeg (only the local engine's notes are given one, Phase 2b final review).
+    if (to === 'mp3') await ffmpeg.toMp3(input.path, path, input.signal, opts);
+    else await ffmpeg.toWav(input.path, path, input.signal, opts);
     // The file ffmpeg wrote, so its length can be trusted; the original's header is the sender's.
-    const measured = await ffmpeg.seconds(path);
+    const measured = await ffmpeg.seconds(path, input.signal);
     if (!measurable(measured)) throw new AudioError('no_duration');
     // Also refuses a conversion that reached the -t limit: it measures about allowed + 1.
     if (measured > allowed) throw new AudioError('too_long');
@@ -336,7 +343,8 @@ const ONLY_MARKERS = /^\s*(?:(?:\[[^[\]]*\]|\([^()]*\))\s*)+$/;
  * the extractor holds no money for it. It keeps no copies, so forget does nothing. canSend is whether ffmpeg is there
  * (the engine's files are checked when the service starts, Task 10).
  * - prepare converts the note to a 16 kHz mono WAV (voice-<id>/audio.wav), stopped and measured as for the paid path,
- *   with the same too_long rule, then measures its mean volume.
+ *   with the same too_long rule, then measures its mean volume. input.signal stops each ffmpeg step; a stop is
+ *   LocalEngineError('aborted') (Phase 2b final review).
  * - tmpDir is resolved to an absolute path first (review round 1), as the engine takes absolute paths only.
  * - transcribe runs the engine once, in the note's folder, stopped by the signal. For whisper, a transcript made only of
  *   its non-speech markers ([BLANK_AUDIO], [ Silence ], (silence), [MUSIC], ...) counts as empty (review round 1).
@@ -356,11 +364,20 @@ export function localVoiceTranscriber(
     ceilingUsd: () => 0,
     costUsd: () => 0,
     canSend: (mimeType) => canSendVoice('local', mimeType, o.ffmpeg !== null),
-    prepare: (input) =>
-      convertNote(o, input, 'wav', async ({ ffmpeg, path, measured, dispose }) => {
-        const meanVolumeDb = await ffmpeg.meanVolumeDb(path);
-        return { parts: [], wav: { path, meanVolumeDb }, measuredSeconds: measured, dispose };
-      }),
+    // The stop signal (input.signal) stops the conversion and the measuring too (Phase 2b final review), so a note being
+    // converted never holds up the shutdown. A stop is LocalEngineError('aborted'), as for a stopped run: free, so the
+    // processor gives the attempt back. Any other failure is thrown as it is (convertNote removed the folder).
+    async prepare(input) {
+      try {
+        return await convertNote(o, input, 'wav', async ({ ffmpeg, path, measured, dispose }) => {
+          const meanVolumeDb = await ffmpeg.meanVolumeDb(path, input.signal);
+          return { parts: [], wav: { path, meanVolumeDb }, measuredSeconds: measured, dispose };
+        });
+      } catch (e) {
+        if (input.signal?.aborted) throw new LocalEngineError('aborted');
+        throw e;
+      }
+    },
     async transcribe(prepared, signal) {
       try {
         const wav = prepared.wav;

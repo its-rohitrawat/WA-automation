@@ -81,8 +81,9 @@ export interface ExtractorDeps {
   /** STT_MAX_SECONDS: the hard cap on one voice note or audio file (V2, V5). Default 600. */
   maxVoiceSeconds?: number;
   /**
-   * The service's stop signal (Task 10): it stops a local engine run in flight (LocalEngineError('aborted'), and the
-   * processor gives the attempt back). A paid call is never aborted, so it is not passed there.
+   * The service's stop signal (Task 10): it stops a local engine run in flight, and since the Phase 2b final review the
+   * local conversion before it (LocalEngineError('aborted'), and the processor gives the attempt back). A paid call is
+   * never aborted, so it is not passed there.
    */
   signal?: AbortSignal;
 }
@@ -338,7 +339,10 @@ export function createExtractor(d: ExtractorDeps): Extractor {
     // Free and local, outside the hold: a conversion or measuring failure books nothing.
     let prepared: PreparedVoice;
     try {
-      prepared = await v.prepare({ mediaId: input.mediaId, path: input.path, maxSeconds });
+      // The stop signal reaches the local conversion too (Phase 2b final review): a stop there is
+      // LocalEngineError('aborted'), the attempt given back. A paid note is never stopped, so it gets none.
+      const stop = v.costsNothing && d.signal ? { signal: d.signal } : {};
+      prepared = await v.prepare({ mediaId: input.mediaId, path: input.path, maxSeconds, ...stop });
     } catch (e) {
       if (e instanceof AudioError && e.code === 'too_long') return { ...NONE, note: TOO_LONG };
       throw e;

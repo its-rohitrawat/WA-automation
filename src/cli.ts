@@ -143,10 +143,15 @@ program
 
 program
   .command('transcribe-voice')
-  .description('Transcribe voice notes saved before Phase 2b, for the record (costs money). Without --yes only shows the count and cost')
+  .description(
+    'Transcribe voice notes saved before Phase 2b, for the record (costs money only with a paid provider). Without --yes only shows the count and cost',
+  )
   .option('--client <code>', 'only this client')
+  .option('--failed', 'instead, the notes the local engine could not transcribe (VOICE_STT_PROVIDER=local only)')
   .option('--yes', 'queue them; the running service transcribes them')
-  .action((opts: { client?: string; yes?: boolean }) => transcribeVoiceCommand({ ...opts, yes: opts.yes === true }, deps()));
+  .action((opts: { client?: string; yes?: boolean; failed?: boolean }) =>
+    transcribeVoiceCommand({ ...opts, yes: opts.yes === true, failed: opts.failed === true }, deps()),
+  );
 
 const meeting = program.command('meeting').description('Fix and check recorded meetings');
 meeting

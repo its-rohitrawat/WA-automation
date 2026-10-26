@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parseEnv } from '../../src/config/env.ts';
-import { VOICE_PROBLEM_LINES } from '../../src/health/health.ts';
+import { VOICE_PROBLEM_LINES, voiceFailedLine } from '../../src/health/health.ts';
 
 const read = (path: string) => readFileSync(fileURLToPath(new URL(`../../${path}`, import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
 
@@ -124,5 +124,57 @@ describe('SETUP.md: the voice-note Health lines match the code', () => {
     for (const line of lines) expect(rows.filter((r) => r.startsWith(`| ${line} |`)), line).toHaveLength(1);
     // Plus the key-refused line, which is not a start-up problem.
     expect(rows).toHaveLength(lines.length + 1);
+  });
+
+  // Phase 2b final review: failed local notes are visible (the Health line) and recoverable (--failed).
+  const setup = read('docs/SETUP.md');
+  const between = (from: string, to: string) => setup.slice(setup.indexOf(from), setup.indexOf(to, setup.indexOf(from) + 1));
+
+  it('lists the could-not-transcribe line as the code writes it, in both tables, after low disk in the main one', () => {
+    const core = voiceFailedLine(2).replace(/^⚠️ 2 /, '(number) ');
+    expect(core).toBe('(number) voice notes could not be transcribed by the local engine. See docs/SETUP.md, Voice notes');
+    const statusLines = between('\n### Voice note status lines\n', '\n## ');
+    expect(statusLines.split('\n').filter((l) => l.startsWith(`| ${core} |`))).toHaveLength(1);
+    const main = between('\n## What the status line means\n', '\n### ').split('\n');
+    const lowDisk = main.findIndex((l) => l.startsWith('| Low disk: '));
+    const voiceRows = main.map((l, i) => [l, i] as const).filter(([l]) => l.startsWith('| Voice notes are not being transcribed: ') || l.startsWith(`| ${core} |`));
+    expect(voiceRows).toHaveLength(2);
+    for (const [, i] of voiceRows) expect(i).toBeGreaterThan(lowDisk);
+    const report = main.findIndex((l) => l.startsWith('| Morning report: '));
+    expect(report).toBeGreaterThan(0);
+    expect(report).toBeLessThan(voiceRows[0]![1]);
+  });
+
+  it('documents transcribe-voice --failed: the dry run, --yes, local only, never paid failures', () => {
+    const failed = between('\n### Voice notes the local engine could not transcribe\n', '\n### ');
+    expect(failed).toContain('npm run cli -- transcribe-voice --failed');
+    expect(failed).toContain('npm run cli -- transcribe-voice --failed --yes');
+    expect(failed).toContain('`Cost: $0 (local engine on this computer).`');
+    expect(failed).toContain('only with `VOICE_STT_PROVIDER=local`');
+    expect(failed).toContain('never queued again');
+    const commands = between('\n## Everyday commands (run in the waagent window)\n', '\n## ');
+    expect(commands).toContain('| `npm run cli -- transcribe-voice --failed` |');
+  });
+
+  it('says a running backlog note can delay a new one by up to STT_LOCAL_TIMEOUT_SECONDS, and no longer "after any new files"', () => {
+    const earlier = between('\n### Voice notes saved earlier\n', '\n### ');
+    expect(earlier).not.toContain('after any new files');
+    expect(earlier).toContain('up to `STT_LOCAL_TIMEOUT_SECONDS`');
+    expect(earlier).toContain('naming the setting');
+  });
+
+  it('SETUP-mac says a note over the timeout is stopped and tried again, never given up', () => {
+    const mac = read('docs/SETUP-mac.md');
+    const line = mac.split('\n').find((l) => l.includes('`STT_LOCAL_TIMEOUT_SECONDS` (default 1800'))!;
+    expect(line).toContain('is stopped and tried again, 3 tries in all');
+    expect(line).not.toContain('given up');
+    expect(mac).toContain('transcribe-voice --failed');
+  });
+
+  it('the amendment no longer claims a health line that did not exist: it names the line and --failed', () => {
+    const amendment = read('docs/superpowers/plans/phase-2b-amendments/2026-10-26-local-stt.md');
+    expect(amendment).not.toContain('After the 3 attempts the file fails and the health line shows it.');
+    expect(amendment).toContain('could not be transcribed by the local engine');
+    expect(amendment).toContain('transcribe-voice --failed');
   });
 });

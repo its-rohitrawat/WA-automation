@@ -33,13 +33,16 @@ function capturingLogger() {
   return { lines, log: createLogger('debug', sink) };
 }
 
-function setup(o: { startedAt?: string | null; log?: Logger } = {}) {
+function setup(o: { startedAt?: string | null; log?: Logger; voiceTranscriptionOn?: boolean } = {}) {
   const db = seededDb();
   const clock = manualClock('2026-10-19T08:00:00Z');
   const spend = new SpendGuard({ db, clock, capUsd: 15 });
   const ai = new FakeAi();
   const startedAt = o.startedAt === null ? undefined : new Date(o.startedAt ?? EARLY_START);
-  const r = new Reconciler({ db, ai, spend, prices: P, clock, log: o.log ?? silentLogger(), onChanged: vi.fn(), startedAt });
+  const r = new Reconciler({
+    db, ai, spend, prices: P, clock, log: o.log ?? silentLogger(), onChanged: vi.fn(), startedAt,
+    ...(o.voiceTranscriptionOn === undefined ? {} : { voiceTranscriptionOn: o.voiceTranscriptionOn }),
+  });
   upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
   return { db, ai, spend, clock, r };
 }
@@ -300,6 +303,35 @@ describe('Reconciler with shared files', () => {
     expect(ai.calls[2]!.user).toContain(': see this {audio file, 1:05, being transcribed}');
     expect(processedAt(db, 'V1')).not.toBeNull();
     expect(processedAt(db, 'U2')).not.toBeNull();
+  });
+
+  // Phase 2b final review: with VOICE_STT_PROVIDER=none, voice notes never hold up the tracker (as in 2a).
+  it('with voice transcription off, a pending voice note or audio file holds up nothing; a picture still does', async () => {
+    const { db, ai, r } = setup({ voiceTranscriptionOn: false });
+    say(db, 'A0', '2026-10-19T07:44:00.000Z');
+    file(db, 'V1', '2026-10-19T07:59:00.000Z', { kind: 'voice', mimeType: 'audio/ogg', seconds: 42, createdAt: '2026-10-19T07:59:00.000Z' });
+    file(db, 'U2', '2026-10-19T07:59:10.000Z', { kind: 'audio', mimeType: 'audio/mpeg', seconds: 65, createdAt: '2026-10-19T07:59:10.000Z' });
+    file(db, 'I3', '2026-10-19T07:59:20.000Z', { createdAt: '2026-10-19T07:59:20.000Z' });
+    expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 0 });
+    expect(ai.calls[0]!.user).toContain('[A0]');
+    expect(ai.calls[0]!.user).toContain(': {voice note, 0:42, being transcribed}');
+    expect(ai.calls[0]!.user).toContain(': see this {audio file, 1:05, being transcribed}');
+    expect(ai.calls[0]!.user).not.toContain('[I3]'); // the picture still holds its message
+    expect(processedAt(db, 'V1')).not.toBeNull();
+    expect(processedAt(db, 'U2')).not.toBeNull();
+    expect(processedAt(db, 'I3')).toBeNull();
+  });
+
+  it('with voice transcription on (the local engine), a pending voice note holds up its message for 30 minutes', async () => {
+    const { db, ai, clock, r } = setup({ voiceTranscriptionOn: true });
+    file(db, 'V1', '2026-10-19T07:59:00.000Z', { kind: 'voice', mimeType: 'audio/ogg', seconds: 42, createdAt: '2026-10-19T07:59:00.000Z' });
+    expect(await r.run(1)).toEqual({ status: 'waiting' });
+    clock.set('2026-10-19T08:28:59.999Z');
+    expect(await r.run(1)).toEqual({ status: 'waiting' });
+    expect(ai.calls).toHaveLength(0);
+    clock.set('2026-10-19T08:29:00.000Z');
+    expect(await r.run(1)).toMatchObject({ status: 'ok' });
+    expect(ai.calls[0]!.user).toContain(': {voice note, 0:42, being transcribed}');
   });
 
   it('shows a voice note transcript once it is read, and never the old placeholder', async () => {
