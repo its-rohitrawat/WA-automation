@@ -346,7 +346,7 @@ Every day at 06:00 IST, Sundays included, the founder gets one WhatsApp message 
    ```
 
    `REPORT_RECIPIENT` is the founder's Indian mobile: `91` then the 10-digit mobile number (12 digits in all), digits only, for example `919812345678`, with no `+` or spaces. The service refuses to start with any other form. Leave `REPORT_TIME` and `REPORT_DEADLINE` empty for 06:00 and 12:00 IST.
-5. Start the service again.
+5. **Start the service again** (see "Start the service again" under "If the service will not start" below), wait one minute, and check `npm run cli -- report status`.
 6. Send one test report: `npm run cli -- report send-now`, then type `yes`. It works only while the service is running, and it refuses if today's report was already sent. Check the founder's phone.
 7. Open WhatsApp on the spare phone at least every 14 days, so the linked device stays valid.
 
@@ -376,7 +376,7 @@ The send started but did not finish cleanly (a timeout, or the service stopped m
 
 ### Status "Morning report: the spare number is not linked" (or logged out, refused, taken over, or its session cannot be read)
 
-- **Not linked:** stop the service, run `npm run cli -- link-sender`, scan from the spare phone, then start the service.
+- **Not linked:** stop the service safely, run `npm run cli -- link-sender` in the waagent window, scan from the spare phone, then start the service again (both steps are under "If the service will not start" below).
 - **Logged out** (the device was removed on the spare phone, or the phone was not opened for weeks):
   1. **Stop the service safely** (see "If the service will not start" below).
   2. Copy (do not delete) the spare number's old session to a dated backup folder (use today's date and time):
@@ -398,18 +398,24 @@ The send started but did not finish cleanly (a timeout, or the service stopped m
      copy C:\wa-agent\data\sender-session.db* C:\wa-agent\backups\2026-10-21-1430\
      ```
 
-  3. In the waagent window, run `npm run cli -- link-sender --reset`. If it asks you to type `yes` (a different master key), type it, scan from the spare phone, and go to step 5.
-  4. If instead it stops with an error and does not ask for `yes`, the file is damaged. **Move** (do not delete) the spare number's session files into a `moved` folder inside the same backup folder, then link again:
+  3. In the waagent window, run `npm run cli -- link-sender --reset`. It asks you to type `yes`, both when the file was written with a different master key and when it is damaged. Type it, then scan from the spare phone. A damaged file is renamed to `sender-session.db.damaged-<date-time>` (with its `-wal` and `-shm` files), not deleted. Only the `sender-session.db` files are touched: the founder's `session.db` files stay where they are.
+  4. If it stops without asking for `yes`, nothing is wrong with the session file. Do not move any files in any of these cases:
+     - `Another WA Agent process is using this data folder...`: the service is still running. Go back to step 1.
+     - A `MASTER_KEY_...` error: run it in the waagent window, not an admin window. If it still appears there, see "MASTER_KEY_UNREADABLE" below.
+     - Any other error: write down the message and ask the developer.
+  5. **Start the service again** (see "If the service will not start" below). The founder's link and the tracker are not touched.
+
+  The `sender-session.db.damaged-…` files in `C:\wa-agent\data` can be deleted (or moved to the backup folder) once the new link works and `report status` is clean.
+- **Refused (403) or banned:** check the spare phone for a WhatsApp warning. A 403 can be a temporary restriction. To move to a new spare number:
+  1. **Stop the service safely** (see "If the service will not start" below).
+  2. Copy (do not delete) the spare number's session to a dated backup folder (use today's date and time):
 
      ```bat
-     mkdir C:\wa-agent\backups\2026-10-21-1430\moved
-     move C:\wa-agent\data\sender-session.db* C:\wa-agent\backups\2026-10-21-1430\moved\
-     npm run cli -- link-sender
+     mkdir C:\wa-agent\backups\2026-10-21-1430
+     copy C:\wa-agent\data\sender-session.db* C:\wa-agent\backups\2026-10-21-1430\
      ```
 
-     Scan from the spare phone. Copy and move only the `sender-session.db` files: the founder's `session.db` files stay where they are.
-  5. **Start the service again** (see "If the service will not start" below). The founder's link and the tracker are not touched.
-- **Refused (403) or banned:** check the spare phone for a WhatsApp warning. To move to a new spare number, repeat the setup with `link-sender --reset`.
+  3. Repeat the setup from step 1 with the new SIM, but run `npm run cli -- link-sender --reset` (type `yes`) instead of `link-sender`, and scan from the new spare phone.
 - **Replaced:** ("another session took over the spare number") restart the service. If it keeps happening, make sure no other copy of the agent (another PC, or a copy of the data folder) uses the spare number, and that no WhatsApp Web session of the spare number is open elsewhere.
 
 The tracker keeps working in every case; only the morning report is skipped.

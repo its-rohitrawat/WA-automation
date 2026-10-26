@@ -58,6 +58,16 @@ describe('morning report documentation: safety statements', () => {
   const healthTable = sectionOf('## What the status line means');
   const healthLines = healthTable.split('\n');
   const coreOf = (warning: string): string => warning.replace(/^⚠️ /, '').split(/\. (?=Stop the service|Check|Restart|See)/)[0]!;
+  /** The one sentence allowed to say a file can be deleted: the renamed damaged copies, once the new link works. */
+  const damagedMayGo = /`sender-session\.db\.damaged-…` files in `C:\\wa-agent\\data` can be deleted/g;
+  /** True when the text tells the owner to delete a file, in any wording, outside "do not delete" and the damaged-copy sentence. */
+  const deletesSomething = (text: string): boolean =>
+    /\b(del|erase|rd|rmdir|remove-item|rm|delete|deleted|deleting)\b/i.test(text.replace(damagedMayGo, '').replace(/\b(do not|never|not) deleted?\b/gi, ''));
+  /** Every move or copy of something under C:\wa-agent\data that is not exactly the spare number's sender-session.db* files. */
+  const unsafeDataMoves = (text: string): string[] =>
+    [...text.matchAll(/\b(move|copy|xcopy|robocopy|move-item|copy-item) "?C:\\wa-agent\\data\S*/gi)]
+      .map((m) => m[0])
+      .filter((cmd) => !/^(move|copy) C:\\wa-agent\\data\\sender-session\.db\*$/i.test(cmd));
 
   it('says the founder number never sends, the spare number only sends to the recipient, once a day, until the deadline', () => {
     expect(report).toContain('never sends from it');
@@ -81,14 +91,26 @@ describe('morning report documentation: safety statements', () => {
     expect(unknown).toContain('If it is there, do nothing');
     expect(unknown).not.toMatch(/even if/i);
     expect(unknown).not.toMatch(/tries again by itself|retries/);
+    expect(unknown.indexOf("Look at the founder's WhatsApp")).toBeLessThan(unknown.indexOf('report send-now'));
+    for (const line of unknown.split('\n').filter((l) => l.includes('send-now'))) expect(line).toContain("If today's report is not there");
     const row = healthLines.find((line) => line.startsWith('| Morning report: unknown, check WhatsApp |'));
     expect(row).toBeDefined();
     expect(row).toContain('does not resend it by itself');
+    expect(row).toContain('It may have reached the founder');
+    expect(row).not.toMatch(/did not reach|run .*send-now/i);
   });
 
   it('setup stops the service before link-sender, send-now needs the running service and refuses a second send', () => {
     const steps = sectionOf('### Setup (about 15 minutes)');
-    const step = (n: number) => steps.slice(steps.indexOf(`\n${n}. `), steps.indexOf(`\n${n + 1}. `));
+    const step = (n: number) => {
+      const start = steps.indexOf(`\n${n}. `);
+      expect(start, `step ${n}`).toBeGreaterThanOrEqual(0);
+      const end = steps.indexOf(`\n${n + 1}. `);
+      return steps.slice(start, end >= 0 ? end : undefined);
+    };
+    const step2 = step(2);
+    expect(step2).toContain("From the founder's phone");
+    expect(step2).toContain('("hi")');
     const step3 = step(3);
     expect(step3).toContain('Stop the service safely');
     expect(step3.indexOf('Stop the service safely')).toBeLessThan(step3.indexOf('link-sender'));
@@ -102,6 +124,8 @@ describe('morning report documentation: safety statements', () => {
     const step4 = step(4);
     expect(step4).toContain('with no `+` or spaces');
     expect(step4).toContain('refuses to start');
+    expect(step(5)).toContain('If the service will not start');
+    expect(step(7)).toContain('at least every 14 days');
   });
 
   it('the documented recipient example matches the validation', () => {
@@ -120,13 +144,38 @@ describe('morning report documentation: safety statements', () => {
   it('turning the report off is a setting, never deleting the session', () => {
     const off = sectionOf('### Turning it off');
     expect(off).toContain('REPORT_ENABLED=false');
-    expect(off).not.toMatch(/delete|\bdel\b|sender-session\.db/i);
+    expect(deletesSomething(off)).toBe(false);
+    expect(off).not.toContain('sender-session.db');
+  });
+
+  it('the guards catch a delete in any wording and any move of more than the spare-number files', () => {
+    for (const bad of [
+      'erase C:\\wa-agent\\data\\sender-session.db*',
+      'del C:\\wa-agent\\data\\sender-session.db*',
+      'delete C:\\wa-agent\\data\\sender-session.db*',
+      'rd /s C:\\wa-agent\\data',
+      'rmdir C:\\wa-agent\\data',
+      'Remove-Item C:\\wa-agent\\data\\sender-session.db',
+      'the sender-session.db files can be deleted',
+    ]) expect(deletesSomething(bad), bad).toBe(true);
+    expect(deletesSomething('Copy (do not delete) the session')).toBe(false);
+    expect(deletesSomething('The `sender-session.db.damaged-…` files in `C:\\wa-agent\\data` can be deleted')).toBe(false);
+    for (const bad of [
+      'move C:\\wa-agent\\data C:\\wa-agent\\backups\\2026-10-21-1430\\moved\\',
+      'move C:\\wa-agent\\data\\s*.db* C:\\wa-agent\\backups\\x\\',
+      'copy C:\\wa-agent\\data\\* C:\\wa-agent\\backups\\x\\',
+      'move C:\\wa-agent\\data\\session.db* C:\\wa-agent\\backups\\x\\',
+    ]) expect(unsafeDataMoves(bad), bad).toHaveLength(1);
+    expect(unsafeDataMoves('copy C:\\wa-agent\\data\\sender-session.db* C:\\wa-agent\\backups\\x\\')).toEqual([]);
   });
 
   it('the command table lists the three report commands', () => {
     const commands = sectionOf('## Everyday commands (run in the waagent window)');
     expect(commands).toContain('| `npm run cli -- report status` |');
-    expect(commands).toContain('| `npm run cli -- report send-now` |');
+    const sendNowRow = commands.split('\n').find((line) => line.startsWith('| `npm run cli -- report send-now` |'));
+    expect(sendNowRow).toBeDefined();
+    expect(sendNowRow).toContain('asks first');
+    expect(sendNowRow).toContain('refuses if already sent');
     const linkRow = commands.split('\n').find((line) => line.startsWith('| `npm run cli -- link-sender` |'));
     expect(linkRow).toBeDefined();
     expect(linkRow).toContain('(stop the service first)');
@@ -142,16 +191,18 @@ describe('morning report documentation: safety statements', () => {
     }
   });
 
-  it('a damaged spare-number session is moved aside, not only reset', () => {
+  it('a damaged spare-number session is renamed aside by link-sender --reset; nothing is deleted or moved by hand', () => {
     const notLinked = sectionOf('### Status "Morning report: the spare number is not linked"');
     expect(notLinked).toContain('npm run cli -- link-sender --reset');
     expect(notLinked).toContain('different master key');
-    expect(notLinked).toContain('move C:\\wa-agent\\data\\sender-session.db* ');
+    expect(notLinked).toContain('sender-session.db.damaged-');
     expect(notLinked).toContain('mkdir C:\\wa-agent\\backups\\');
     expect(notLinked).toContain('**Replaced:**');
-    expect(notLinked).not.toMatch(/\bdel\b|delete the/i);
     expect(notLinked).toContain("the founder's `session.db` files stay where they are");
-    expect(notLinked).not.toMatch(/(move|copy) C:\\wa-agent\\data\\(\*|session\.db)/i);
+    expect(notLinked).not.toMatch(/\bmove C:\\wa-agent\\data/i);
+    expect(deletesSomething(report)).toBe(false);
+    expect(unsafeDataMoves(report)).toEqual([]);
+    expect(report.match(/\bcopy C:\\wa-agent\\data\S*/gi)?.length).toBeGreaterThanOrEqual(3);
   });
 
   it('each spare-number recovery bullet stops the service, links from the spare phone and copies before a reset', () => {
@@ -167,10 +218,12 @@ describe('morning report documentation: safety statements', () => {
     const copy = 'copy C:\\wa-agent\\data\\sender-session.db* C:\\wa-agent\\backups\\';
 
     const notLinkedBullet = bullet('Not linked:**');
-    const stop = notLinkedBullet.toLowerCase().indexOf('stop the service');
+    const stop = notLinkedBullet.indexOf('stop the service safely');
     expect(stop).toBeGreaterThanOrEqual(0);
     expect(stop).toBeLessThan(notLinkedBullet.indexOf('link-sender'));
     expect(notLinkedBullet).toContain('scan from the spare phone');
+    expect(notLinkedBullet).toContain('start the service again');
+    expect(notLinkedBullet).toContain('If the service will not start');
 
     const loggedOut = bullet('Logged out**');
     expect(loggedOut).toContain('Stop the service');
@@ -183,7 +236,20 @@ describe('morning report documentation: safety statements', () => {
     expect(unreadable).toContain('Stop the service safely');
     expect(unreadable).toContain(copy);
     expect(unreadable.indexOf(copy)).toBeLessThan(unreadable.indexOf('link-sender --reset'));
-    expect(unreadable).toContain('move C:\\wa-agent\\data\\sender-session.db* ');
+    expect(unreadable).toContain('sender-session.db.damaged-');
+    expect(unreadable).toContain('Another WA Agent process is using this data folder');
+    expect(unreadable).toContain('the service is still running. Go back to step 1');
+    expect(unreadable).toContain('MASTER_KEY');
+    expect(unreadable).toContain('Do not move any files');
+    expect(unreadable).toContain('`report status` is clean');
+
+    const refused = bullet('Refused (403) or banned:**');
+    expect(refused).toContain('check the spare phone');
+    const refusedStop = refused.indexOf('Stop the service safely');
+    expect(refusedStop).toBeGreaterThanOrEqual(0);
+    expect(refusedStop).toBeLessThan(refused.indexOf(copy));
+    expect(refused.indexOf(copy)).toBeLessThan(refused.indexOf('link-sender --reset'));
+    expect(refused).toContain('scan from the new spare phone');
   });
 
   it('a takeover of the spare number points at another copy of the agent, not link-sender', () => {
