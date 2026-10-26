@@ -132,17 +132,53 @@ describe('SETUP.md: the voice-note Health lines match the code', () => {
 
   it('lists the could-not-transcribe line as the code writes it, in both tables, after low disk in the main one', () => {
     const core = voiceFailedLine(2).replace(/^⚠️ 2 /, '(number) ');
-    expect(core).toBe('(number) voice notes could not be transcribed by the local engine. See docs/SETUP.md, Voice notes');
+    expect(core).toBe('(number) voice notes could not be transcribed on this computer. See docs/SETUP.md, Voice notes');
+    expect(voiceFailedLine(1)).toBe('⚠️ 1 voice note could not be transcribed on this computer. See docs/SETUP.md, Voice notes');
+    expect(setup).not.toContain('could not be transcribed by the local engine');
     const statusLines = between('\n### Voice note status lines\n', '\n## ');
     expect(statusLines.split('\n').filter((l) => l.startsWith(`| ${core} |`))).toHaveLength(1);
     const main = between('\n## What the status line means\n', '\n### ').split('\n');
     const lowDisk = main.findIndex((l) => l.startsWith('| Low disk: '));
-    const voiceRows = main.map((l, i) => [l, i] as const).filter(([l]) => l.startsWith('| Voice notes are not being transcribed: ') || l.startsWith(`| ${core} |`));
+    const voiceRows = main.map((l, i) => [l, i] as const).filter(([l]) => l.startsWith('| Voice notes are not being transcribed: (reason) |') || l.startsWith(`| ${core} |`));
     expect(voiceRows).toHaveLength(2);
     for (const [, i] of voiceRows) expect(i).toBeGreaterThan(lowDisk);
     const report = main.findIndex((l) => l.startsWith('| Morning report: '));
     expect(report).toBeGreaterThan(0);
     expect(report).toBeLessThan(voiceRows[0]![1]);
+  });
+
+  // Phase 2b final polish: notes waiting on a refused key give up after 24 hours, so that line sits above the budget line.
+  it('lists the key-refused line in the main table after the file lines and before the budget line, and says so', () => {
+    const main = between('\n## What the status line means\n', '\n### ');
+    const rows = main.split('\n');
+    const refused = rows.findIndex((l) => l.startsWith('| Voice notes are not being transcribed: the speech-to-text key was refused. |'));
+    const upload = rows.findIndex((l) => l.startsWith('| (number) files could not be uploaded to Drive.'));
+    const budget = rows.findIndex((l) => l.startsWith("| (number) shared files waiting for today's AI budget"));
+    expect(upload).toBeGreaterThan(0);
+    expect(refused).toBe(upload + 1);
+    expect(budget).toBe(refused + 1);
+    expect(rows.find((l) => l.startsWith('| Voice notes are not being transcribed: (reason) |'))).not.toContain('key was refused');
+    expect(main).toContain('The key-refused line comes before the budget line');
+    const statusLines = between('\n### Voice note status lines\n', '\n## ');
+    expect(statusLines).toContain('The key-refused line comes before the budget line');
+    expect(statusLines).toContain('then the not-set-up and ffmpeg lines, then the could-not-transcribe line');
+  });
+
+  // Phase 2b final polish: the tries as the code makes them, in plain words.
+  it('describes the tries as the code makes them: 3 for the engine, none for ffmpeg, 24 hours for stops', () => {
+    const main = between('\n## What the status line means\n', '\n### ');
+    const failed = between('\n### Voice notes the local engine could not transcribe\n', '\n### ');
+    const statusLines = between('\n### Voice note status lines\n', '\n## ');
+    for (const text of [main, failed, statusLines]) {
+      expect(text).not.toContain('failed every try in the local engine (or in ffmpeg)');
+      expect(text).not.toContain('after its 3 tries');
+      expect(text).not.toContain('failed all 3 tries');
+    }
+    for (const text of [failed, statusLines]) {
+      expect(text).toContain('3 tries');
+      expect(text).toContain('not tried again');
+      expect(text).toContain('24 hours');
+    }
   });
 
   it('documents transcribe-voice --failed: the dry run, --yes, local only, never paid failures', () => {
@@ -151,9 +187,16 @@ describe('SETUP.md: the voice-note Health lines match the code', () => {
     expect(failed).toContain('npm run cli -- transcribe-voice --failed --yes');
     expect(failed).toContain('`Cost: $0 (local engine on this computer).`');
     expect(failed).toContain('only with `VOICE_STT_PROVIDER=local`');
+    expect(failed).toContain('With a paid provider, these notes stay failed');
     expect(failed).toContain('never queued again');
     const commands = between('\n## Everyday commands (run in the waagent window)\n', '\n## ');
     expect(commands).toContain('| `npm run cli -- transcribe-voice --failed` |');
+  });
+
+  it('says to restart the service after changing the voice settings, next to transcribe-voice and --failed (final polish)', () => {
+    const restart = 'After changing `VOICE_STT_PROVIDER` or the `STT_LOCAL_*` settings, restart the service before running this command.';
+    expect(between('\n### Voice notes saved earlier\n', '\n### ')).toContain(restart);
+    expect(between('\n### Voice notes the local engine could not transcribe\n', '\n### ')).toContain(restart);
   });
 
   it('says a running backlog note can delay a new one by up to STT_LOCAL_TIMEOUT_SECONDS, and no longer "after any new files"', () => {
@@ -174,7 +217,8 @@ describe('SETUP.md: the voice-note Health lines match the code', () => {
   it('the amendment no longer claims a health line that did not exist: it names the line and --failed', () => {
     const amendment = read('docs/superpowers/plans/phase-2b-amendments/2026-10-26-local-stt.md');
     expect(amendment).not.toContain('After the 3 attempts the file fails and the health line shows it.');
-    expect(amendment).toContain('could not be transcribed by the local engine');
+    expect(amendment).toContain('could not be transcribed on this computer');
     expect(amendment).toContain('transcribe-voice --failed');
+    expect(amendment).toContain('### Final polish');
   });
 });

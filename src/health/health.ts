@@ -16,8 +16,11 @@ const DISCONNECT_GRACE_MS = 30 * 60_000;
 const PUBLISH_FAIL_MS = 60 * 60_000;
 const SPEND_CAP_LINE = '⚠️ Daily spend cap reached. Paused until midnight IST';
 const STT_REFUSED_LINE = '⚠️ Voice notes are not being transcribed: the speech-to-text key was refused.';
-/** Voice notes that failed on this computer in the last 24 hours (mediaStats.voiceFailed); docs/SETUP.md lists the line. */
-export const voiceFailedLine = (n: number) => `⚠️ ${n} voice note${n === 1 ? '' : 's'} could not be transcribed by the local engine. See docs/SETUP.md, Voice notes`;
+/**
+ * Voice notes that failed on this computer in the last 24 hours (mediaStats.voiceFailed); docs/SETUP.md lists the line.
+ * "On this computer", not "by the local engine" (Phase 2b final polish): an ffmpeg failure counts too, with any provider.
+ */
+export const voiceFailedLine = (n: number) => `⚠️ ${n} voice note${n === 1 ? '' : 's'} could not be transcribed on this computer. See docs/SETUP.md, Voice notes`;
 
 /**
  * Why voice notes are not transcribed at all, found when the service starts (Phase 2b Task 10, src/voiceDeps.ts):
@@ -236,6 +239,10 @@ export class Health {
       const n = this.#media.uploadFailed;
       return { ok: false, text: `⚠️ ${n} file${n === 1 ? '' : 's'} could not be uploaded to Drive. See docs/SETUP.md.` };
     }
+    // Voice notes wait for a speech-to-text key that was refused: the owner must fix STT_API_KEY. Above the budget line
+    // (Phase 2b final polish, as in Task 9), because those notes give up after 24 hours: the owner must see it in time.
+    // They are not counted as waiting too long (mediaStats.stale), so the long-wait line above never hides this one.
+    if (this.#media.sttRefused > 0) return { ok: false, text: STT_REFUSED_LINE };
     // A paid read holds its ceiling (about $4 for a scan) while it runs, so a file can wait for the budget long before
     // the cap is reached. Nothing is paused and nothing needs the owner, so this comes after the warnings above.
     if (this.#media.spendCap > 0) {
@@ -249,18 +256,14 @@ export class Health {
     if (meeting !== null) return { ok: false, text: meeting };
     const free = this.#freeGb();
     if (free !== null && free < LOW_DISK_GB) return { ok: false, text: `⚠️ Low disk: ${free.toFixed(1)} GB free` };
-    // The voice lines come last (Phase 2b final review), so they never hide the morning report's warning, a meeting
+    // The other voice lines come last (Phase 2b final review), so they never hide the morning report's warning, a meeting
     // line or low disk. The tracker keeps working without the notes (it waits 30 minutes for one at most), and the notes
-    // are kept, to be transcribed once the cause is fixed. The key-refused line moved down with the others: a refused
-    // key is a voice-only fault like them, while a report that may not have reached the founder, a paused meeting and a
-    // filling disk each need the owner sooner; and every "Voice notes ..." line then follows one rule in docs/SETUP.md.
-    // Among them, the most basic cause first:
+    // are kept, to be transcribed once the cause is fixed. The key-refused line is not among them (final polish): it sits
+    // above the budget line, since notes waiting on a refused key give up after 24 hours. Among these, the most basic
+    // cause first:
     // - not transcribed at all: the local engine's files or ffmpeg were missing at start (set up, then restart);
-    // - waiting for a speech-to-text key that was refused (fix STT_API_KEY). Those notes are not counted as waiting too
-    //   long (mediaStats.stale), so the long-wait line never hides this one for them;
-    // - notes the local engine or ffmpeg could not transcribe after their tries (`cli transcribe-voice --failed`).
+    // - notes that could not be transcribed on this computer (`cli transcribe-voice --failed`, local engine only).
     if (this.#voiceProblem !== null) return { ok: false, text: VOICE_PROBLEM_LINES[this.#voiceProblem] };
-    if (this.#media.sttRefused > 0) return { ok: false, text: STT_REFUSED_LINE };
     if (this.#media.voiceFailed > 0) return { ok: false, text: voiceFailedLine(this.#media.voiceFailed) };
     return { ok: true, text: this.#lastSuccess ? `✅ Connected · last update ${stamp(this.#lastSuccess)}` : '✅ Connected · waiting for new messages' };
   }

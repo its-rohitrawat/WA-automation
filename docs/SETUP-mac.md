@@ -260,7 +260,7 @@ If the check says `Failed (...)`, it also says what to look at. `no_output` usua
 
 ### Then restart the service
 
-Normal Terminal window: `sudo launchctl kickstart -k system/com.wa-agent`. Wait one minute. After the restart, new voice notes are transcribed. For older ones, run `npm run cli -- transcribe-voice` in the waagent window (a dry run that only counts them), then `npm run cli -- transcribe-voice --yes`, which queues them for the running service. Run `npm run cli -- status`: if its Health line says the local speech engine is not set up, or ffmpeg not found, see "Voice note status lines" in SETUP.md. If it says voice notes could not be transcribed by the local engine, see the same place: `npm run cli -- transcribe-voice --failed` tries them again.
+Normal Terminal window: `sudo launchctl kickstart -k system/com.wa-agent`. Wait one minute. After the restart, new voice notes are transcribed. For older ones, run `npm run cli -- transcribe-voice` in the waagent window (a dry run that only counts them), then `npm run cli -- transcribe-voice --yes`, which queues them for the running service. Run `npm run cli -- status`: if its Health line says the local speech engine is not set up, or ffmpeg not found, see "Voice note status lines" in SETUP.md. If it says voice notes could not be transcribed on this computer, see the same place: `npm run cli -- transcribe-voice --failed` tries them again.
 
 ## Reading SETUP.md on a Mac
 

@@ -18,7 +18,7 @@ const SPEND_LINE = '⚠️ Daily spend cap reached. Paused until midnight IST';
 const STT_REFUSED_LINE = '⚠️ Voice notes are not being transcribed: the speech-to-text key was refused.';
 const budgetLine = (n: number) => `⚠️ ${n} shared file${n === 1 ? '' : 's'} waiting for today's AI budget (read after midnight IST)`;
 const voiceFailedLine = (n: number) =>
-  `⚠️ ${n} voice note${n === 1 ? '' : 's'} could not be transcribed by the local engine. See docs/SETUP.md, Voice notes`;
+  `⚠️ ${n} voice note${n === 1 ? '' : 's'} could not be transcribed on this computer. See docs/SETUP.md, Voice notes`;
 const REPORT_UNKNOWN = { text: 'Morning report: unknown, check WhatsApp', warning: '⚠️ Morning report: unknown, check WhatsApp. See docs/SETUP.md → "Morning report".' };
 const MEETINGS_FAILED = {
   stats: { done: 0, waiting: 0, unassigned: 0, failed: 1, noAccess: 0, tooLong: 0, internal: 0, deferred: {} }, paused: null, sttProvider: 'sarvam' as const,
@@ -139,25 +139,31 @@ describe('Health and shared files', () => {
     expect(h.line().ok).toBe(true);
   });
 
-  // Phase 2b final review: the voice lines come last, so they never hide the morning report, a meeting or low disk.
-  it('the key-refused line comes after the file lines, the budget line and low disk (Phase 2b final review)', () => {
+  // Phase 2b final polish: notes waiting on a refused key give up after 24 hours, so the key-refused line sits above the
+  // budget line (as in Task 9), and so above the morning report, the meeting lines, low disk and the other voice lines.
+  it('the key-refused line comes after the file lines and before the budget line, the report, meetings and low disk (Phase 2b final polish)', () => {
     const { h } = setup(() => 5e9);
     h.setMedia(counts({ pending: 3, stale: 1, sttRefused: 1, spendCap: 1 }));
     expect(h.line().text).toBe('⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.');
     h.setMedia(counts({ pending: 2, uploadFailed: 1, sttRefused: 1, spendCap: 1 }));
     expect(h.line().text).toBe('⚠️ 1 file could not be uploaded to Drive. See docs/SETUP.md.');
     h.setMedia(counts({ pending: 2, sttRefused: 1, spendCap: 1 }));
-    expect(h.line().text).toBe(budgetLine(1));
-    h.setMedia(counts({ pending: 1, sttRefused: 1 }));
-    expect(h.line().text).toBe('⚠️ Low disk: 5.0 GB free');
-  });
-
-  it('the key-refused line shows once nothing above it is wrong (Phase 2b)', () => {
-    const { h } = setup();
-    h.setMedia(counts({ pending: 2, sttRefused: 1, spendCap: 1 }));
-    expect(h.line().text).toBe(budgetLine(1));
+    expect(h.line().text).toBe(STT_REFUSED_LINE);
+    h.setReport(REPORT_UNKNOWN);
+    h.setMeetings(MEETINGS_FAILED);
+    expect(h.line().text).toBe(STT_REFUSED_LINE);
     h.setMedia(counts({ pending: 1, sttRefused: 1 }));
     expect(h.line().text).toBe(STT_REFUSED_LINE);
+    h.setMedia(counts({ pending: 1 }));
+    expect(h.line().text).toBe(REPORT_UNKNOWN.warning);
+  });
+
+  it('the budget line shows once the key is no longer refused (Phase 2b final polish)', () => {
+    const { h } = setup();
+    h.setMedia(counts({ pending: 2, sttRefused: 1, spendCap: 1 }));
+    expect(h.line().text).toBe(STT_REFUSED_LINE);
+    h.setMedia(counts({ pending: 1, spendCap: 1 }));
+    expect(h.line().text).toBe(budgetLine(1));
   });
 
   it('the key-refused line yields to the spend-cap line when the cap is reached (Phase 2b)', () => {
@@ -224,18 +230,19 @@ describe('Health and voice notes that cannot be transcribed (Phase 2b Task 10)',
     expect(h.line().ok).toBe(true);
   });
 
-  // Phase 2b final review: the voice lines come last, below the morning report, the meeting lines and low disk, so
-  // they never hide those. Among themselves: not set up, then the key refused, then notes that failed.
+  // Phase 2b final review: these voice lines come last, below the morning report, the meeting lines and low disk, so
+  // they never hide those. Among themselves: not set up, then notes that failed. The key-refused line is not among them
+  // (final polish): it sits above the budget line.
   it('the lines come after the file lines, the budget line, the morning report, the meeting lines and low disk', () => {
     const { h } = setup(() => 5e9);
     h.setVoiceProblem('local_not_set_up_bin');
-    h.setMedia(counts({ pending: 3, stale: 1, sttRefused: 1, spendCap: 1, voiceFailed: 1 }));
+    h.setMedia(counts({ pending: 3, stale: 1, spendCap: 1, voiceFailed: 1 }));
     expect(h.line().text).toBe('⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.');
-    h.setMedia(counts({ pending: 2, uploadFailed: 1, sttRefused: 1, spendCap: 1, voiceFailed: 1 }));
+    h.setMedia(counts({ pending: 2, uploadFailed: 1, spendCap: 1, voiceFailed: 1 }));
     expect(h.line().text).toBe('⚠️ 1 file could not be uploaded to Drive. See docs/SETUP.md.');
-    h.setMedia(counts({ pending: 2, sttRefused: 1, spendCap: 1, voiceFailed: 1 }));
+    h.setMedia(counts({ pending: 2, spendCap: 1, voiceFailed: 1 }));
     expect(h.line().text).toBe(budgetLine(1));
-    h.setMedia(counts({ sttRefused: 1, voiceFailed: 1 }));
+    h.setMedia(counts({ voiceFailed: 1 }));
     h.setReport(REPORT_UNKNOWN);
     expect(h.line().text).toBe(REPORT_UNKNOWN.warning);
     h.setReport(null);
@@ -245,16 +252,16 @@ describe('Health and voice notes that cannot be transcribed (Phase 2b Task 10)',
     expect(h.line().text).toBe('⚠️ Low disk: 5.0 GB free');
   });
 
-  it('among the voice lines: not set up first, then the key refused, then notes that failed', () => {
+  it('among the voice lines: the key refused first (above the budget line), then not set up, then notes that failed', () => {
     const { h } = setup();
-    h.setVoiceProblem('local_not_set_up_bin');
-    h.setMedia(counts({ sttRefused: 1, voiceFailed: 2 }));
-    expect(h.line().text).toBe(NOT_SET_UP);
     h.setVoiceProblem('no_ffmpeg');
-    expect(h.line().text).toBe(NO_FFMPEG);
-    h.setVoiceProblem(null);
+    h.setMedia(counts({ sttRefused: 1, voiceFailed: 2 }));
     expect(h.line().text).toBe(STT_REFUSED_LINE);
     h.setMedia(counts({ voiceFailed: 2 }));
+    expect(h.line().text).toBe(NO_FFMPEG);
+    h.setVoiceProblem('local_not_set_up_bin');
+    expect(h.line().text).toBe(NOT_SET_UP);
+    h.setVoiceProblem(null);
     expect(h.line().text).toBe(voiceFailedLine(2));
     h.setMedia(counts());
     expect(h.line().ok).toBe(true);
@@ -269,14 +276,14 @@ describe('Health and voice notes that cannot be transcribed (Phase 2b Task 10)',
     expect(h.line().text).toBe('⚠️ Low disk: 5.0 GB free');
   });
 
-  // Phase 2b final review: a note the local engine (or ffmpeg) could not transcribe after its tries is visible.
-  it('says how many voice notes the local engine could not transcribe in the last 24 hours, one or many', () => {
+  // Phase 2b final review: a note that could not be transcribed on this computer is visible (final polish: the wording).
+  it('says how many voice notes could not be transcribed on this computer in the last 24 hours, one or many', () => {
     const { h } = setup();
     h.setMedia(counts({ failedRecent: 1, voiceFailed: 1 }));
-    expect(h.line()).toEqual({ ok: false, text: '⚠️ 1 voice note could not be transcribed by the local engine. See docs/SETUP.md, Voice notes' });
+    expect(h.line()).toEqual({ ok: false, text: '⚠️ 1 voice note could not be transcribed on this computer. See docs/SETUP.md, Voice notes' });
     expect(h.workbookLine()).toEqual({ ok: false, text: voiceFailedLine(1) });
     h.setMedia(counts({ failedRecent: 3, voiceFailed: 3 }));
-    expect(h.line().text).toBe('⚠️ 3 voice notes could not be transcribed by the local engine. See docs/SETUP.md, Voice notes');
+    expect(h.line().text).toBe('⚠️ 3 voice notes could not be transcribed on this computer. See docs/SETUP.md, Voice notes');
     // Other failed files say nothing on the line (status counts them), as before.
     h.setMedia(counts({ failedRecent: 3 }));
     expect(h.line().ok).toBe(true);
