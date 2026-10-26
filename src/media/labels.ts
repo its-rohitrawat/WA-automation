@@ -78,9 +78,9 @@ export const TOO_COSTLY = 'too_costly';
 export const FORWARDED_NOT_TRANSCRIBED = 'forwarded_not_transcribed';
 
 /**
- * The extractor's note for a voice note or audio file whose size allows more than STT_MAX_SECONDS of audio, or whose
- * converted MP3 measures longer than that plus VOICE_LENGTH_TOLERANCE_S (V2, V5). It is not sent, and the file is
- * finished, so it never blocks its message.
+ * The extractor's note for a voice note or audio file whose converted MP3 measures longer than STT_MAX_SECONDS plus
+ * VOICE_LENGTH_TOLERANCE_S (V2, V5); the file's size refuses nothing (Task 5 review round 2). It is not sent, and the
+ * file is finished, so it never blocks its message.
  */
 export const TOO_LONG = 'too_long';
 

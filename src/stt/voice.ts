@@ -29,7 +29,19 @@ import type { AudioPart, ProviderId, ProviderResult, SttProvider } from './types
 /** Voice notes are short: these stay well inside SpendGuard's 45-minute hold and the media queue's 15-minute claim. */
 export const VOICE_STT_TIMEOUTS = { elevenlabsMs: 5 * 60_000, openaiMs: 5 * 60_000, sarvamWaitMs: 10 * 60_000 };
 
-/** The lowest bitrate assumed for the spend hold (V5): a file of n bytes holds at most n × 8 / 12,000 seconds. */
+/**
+ * How long ffmpeg may take to convert one voice note (Task 5 review round 2), instead of toMp3's 60 minutes for meetings.
+ * It stays inside the media queue's 15-minute claim (CLAIM_MS in src/media/processor.ts), and the conversion stops at
+ * maxSeconds + VOICE_LENGTH_TOLERANCE_S + 1 seconds (at most 606 s of audio decoded with the default cap), so a slow PC
+ * still finishes well inside it.
+ */
+export const VOICE_CONVERT_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * The lowest bitrate assumed from a file's size: a file of n bytes holds at most about n × 8 / 12,000 seconds. Since
+ * Task 5's review round 2 it never refuses a file and never sets the hold: it is costUsd's last fallback (when no length
+ * was billed or measured) and the CLI's estimate.
+ */
 const MIN_BITRATE_BPS = 12_000;
 export const sizeBoundSeconds = (bytes: number): number => Math.ceil((bytes * 8) / MIN_BITRATE_BPS);
 
@@ -61,8 +73,8 @@ export interface VoiceInput {
   /**
    * The cap in seconds (STT_MAX_SECONDS, V5), not the size bound and never the sender's declared length. The conversion
    * stops at this plus VOICE_LENGTH_TOLERANCE_S plus 1 second, and a note ffmpeg measures longer than this plus
-   * VOICE_LENGTH_TOLERANCE_S is refused by prepare. The caller refuses a file whose size bound is above the cap before
-   * preparing it, and holds the larger of the bound and the measured length.
+   * VOICE_LENGTH_TOLERANCE_S is refused by prepare: the only too_long check (Task 5 review round 2; the file's size
+   * refuses nothing). The caller holds the measured length plus VOICE_LENGTH_TOLERANCE_S.
    */
   maxSeconds: number;
 }
@@ -108,7 +120,8 @@ export interface VoiceTranscriber {
   readonly provider: ProviderId;
   /**
    * List-price ceiling for this many seconds of audio, without speaker labels, in US dollars (the spend hold). The caller
-   * holds ceilingUsd(Math.max(bound, prepared.measuredSeconds)), so a measured length up to the tolerance is covered.
+   * holds ceilingUsd(prepared.measuredSeconds + VOICE_LENGTH_TOLERANCE_S): the tolerance is headroom over a provider's
+   * billed rounding (Task 5 review round 2).
    */
   ceilingUsd(seconds: number): number;
   /**
@@ -188,7 +201,7 @@ export function voiceTranscriber(provider: SttProvider, o: { inrPerUsd: number; 
         mkdirSync(dir, { recursive: true });
         const mp3 = join(dir, 'audio.mp3');
         // Stopped one second past what is allowed: a longer note is never converted whole, whatever its header claims.
-        await ffmpeg.toMp3(input.path, mp3, undefined, { maxSeconds: allowed + 1 });
+        await ffmpeg.toMp3(input.path, mp3, undefined, { maxSeconds: allowed + 1, timeoutMs: VOICE_CONVERT_TIMEOUT_MS });
         // The MP3 ffmpeg wrote, so its length can be trusted; the original's header is the sender's.
         const measured = await ffmpeg.seconds(mp3);
         if (!measurable(measured)) throw new AudioError('no_duration');

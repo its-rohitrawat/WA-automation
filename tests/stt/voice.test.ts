@@ -10,7 +10,8 @@ import { withSttHold, type SttBooking } from '../../src/stt/paidStt.ts';
 import { costUsd, modelFor } from '../../src/stt/prices.ts';
 import type { AudioPart, ProviderId, ProviderResult, Segment, SttProvider, TranscribeOptions } from '../../src/stt/types.ts';
 import {
-  canSendVoice, createVoiceTranscriber, sizeBoundSeconds, SttPartialError, VOICE_LENGTH_TOLERANCE_S, VOICE_STT_TIMEOUTS, voiceCeilingUsd,
+  canSendVoice, createVoiceTranscriber, sizeBoundSeconds, SttPartialError, VOICE_CONVERT_TIMEOUT_MS, VOICE_LENGTH_TOLERANCE_S, VOICE_STT_TIMEOUTS,
+  voiceCeilingUsd,
   voiceTranscriber, type VoiceInput, type VoiceResult, type VoiceTranscriber,
 } from '../../src/stt/voice.ts';
 import { manualClock } from '../../src/util/clock.ts';
@@ -91,6 +92,8 @@ class CopyingProvider extends FakeProvider {
  */
 class FakeFfmpeg extends Ffmpeg {
   readonly conversions: { input: string; output: string; maxSeconds: number | undefined }[] = [];
+  /** The timeoutMs of every conversion. */
+  readonly timeouts: (number | undefined)[] = [];
   readonly splits: { part: AudioPart; dir: string; partSeconds: number }[] = [];
   /** Every file measured, in order. */
   readonly measured: string[] = [];
@@ -107,9 +110,10 @@ class FakeFfmpeg extends Ffmpeg {
       throw new Error('no program is run in these tests');
     });
   }
-  override async toMp3(input: string, output: string, _signal?: AbortSignal, opts: { maxSeconds?: number } = {}): Promise<void> {
+  override async toMp3(input: string, output: string, _signal?: AbortSignal, opts: { maxSeconds?: number; timeoutMs?: number } = {}): Promise<void> {
     this.onToMp3();
     this.conversions.push({ input, output, maxSeconds: opts.maxSeconds });
+    this.timeouts.push(opts.timeoutMs);
     if (this.toMp3Error) throw this.toMp3Error;
     this.#cutAt = opts.maxSeconds ?? Number.POSITIVE_INFINITY;
     writeFileSync(output, 'mp3');
@@ -163,6 +167,18 @@ describe('voiceTranscriber: every file is converted first', () => {
     expect(ff.measured).toEqual([mp3]);
     expect(p.calls).toEqual([{ audio: { path: mp3, seconds: 42, offset: 0, format: 'mp3' }, opts: { diarize: false } }]);
     expect(ff.splits).toEqual([]);
+  });
+
+  // Task 5 review round 2: a voice note's conversion has its own, shorter timeout; meetings keep toMp3's 60 minutes.
+  it.each(PROVIDERS)('%s: the conversion is given VOICE_CONVERT_TIMEOUT_MS, 5 minutes', async (id) => {
+    const ff = new FakeFfmpeg();
+    await run(make(new FakeProvider(id), ff), input());
+    expect(ff.timeouts).toEqual([5 * 60_000]);
+  });
+
+  it("VOICE_CONVERT_TIMEOUT_MS is 5 minutes, inside the media queue's 15-minute claim", () => {
+    expect(VOICE_CONVERT_TIMEOUT_MS).toBe(300_000);
+    expect(VOICE_CONVERT_TIMEOUT_MS).toBeLessThan(15 * 60_000);
   });
 
   it.each(PROVIDERS)('%s: canSend is true for every file while ffmpeg is there, and false for every file without it', (id) => {

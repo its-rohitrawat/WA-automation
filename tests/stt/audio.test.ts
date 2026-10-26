@@ -208,6 +208,29 @@ describe('Ffmpeg', () => {
     expect(existsSync(out)).toBe(true);
   });
 
+  // Task 5 review round 2: voice notes get a shorter conversion timeout; meetings keep the 60 minutes.
+  it('the conversion timeout is 60 minutes without opts, without timeoutMs, and with maxSeconds alone', async () => {
+    for (const [name, opts] of [['a', undefined], ['b', {}], ['c', { maxSeconds: 606 }]] as const) {
+      const { run, opts: given } = writing();
+      await new Ffmpeg('ffmpeg.exe', run).toMp3('in.ogg', join(dir, `timeout-${name}.mp3`), undefined, opts);
+      expect(given.map((o) => o.timeoutMs)).toEqual([60 * 60_000]);
+    }
+  });
+
+  it('opts.timeoutMs replaces the conversion timeout, and changes no argument', async () => {
+    const { run, calls, opts } = writing();
+    const out = join(dir, 'short.mp3');
+    await new Ffmpeg('ffmpeg.exe', run).toMp3('in.ogg', out, undefined, { timeoutMs: 5 * 60_000 });
+    expect(opts.map((o) => o.timeoutMs)).toEqual([5 * 60_000]);
+    expect(calls).toEqual([MP3_ARGS(out)]);
+  });
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])('refuses a timeoutMs of %s without running ffmpeg', async (timeoutMs) => {
+    const { run, calls } = writing();
+    await expect(new Ffmpeg('ffmpeg.exe', run).toMp3('in.ogg', join(dir, 'bad-t.mp3'), undefined, { timeoutMs })).rejects.toThrow(/timeoutMs/);
+    expect(calls).toEqual([]);
+  });
+
   it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])('refuses a maxSeconds of %s without running ffmpeg', async (maxSeconds) => {
     const { run, calls } = writing();
     await expect(new Ffmpeg('ffmpeg.exe', run).toMp3('in.ogg', join(dir, 'bad.mp3'), undefined, { maxSeconds })).rejects.toThrow(/maxSeconds/);

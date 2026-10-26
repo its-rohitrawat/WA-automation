@@ -12,17 +12,18 @@ import { CorrectionError } from './corrections.ts';
  * `cli transcribe-voice` (Phase 2b Task 8, V6, N2, N4): the voice notes and audio files saved before Phase 2b, still
  * without a transcript. Without --yes it only counts them and prints the minutes and the cost; with --yes it queues
  * them, and the running service transcribes them (each counts toward the daily spend cap).
- * - The cost never understates. The service holds and books each note at up to max(size bound, measured length), and
- *   prepare lets a measured length run to STT_MAX_SECONDS + VOICE_LENGTH_TOLERANCE_S, so two figures are printed: about
- *   $X from the file sizes (each bound plus the tolerance), and at most $Y if every file runs to that limit. Both are
- *   rounded up to the cent; the minutes are the bounds plus the tolerance, rounded up.
+ * - Two cost figures. The service measures each note after converting it, refuses one measured longer than
+ *   STT_MAX_SECONDS + VOICE_LENGTH_TOLERANCE_S, and holds the measured length plus the tolerance. The length is not
+ *   known here, so: about $X, each file estimated from its size at min(size bound, STT_MAX_SECONDS + tolerance)
+ *   seconds (a file with no size at that limit), and at most $Y if every file runs to that limit, which never
+ *   understates. Both are rounded up to the cent; the minutes are the estimates, rounded up.
  * - No key, no provider and no network: the rules and prices come from src/stt/voice.ts (canSendVoice,
  *   sizeBoundSeconds, voiceCeilingUsd). STT_API_KEY is never read here.
- * - A file whose size allows more than STT_MAX_SECONDS is too long and never queued (N4), as the extractor would refuse
- *   it. Every file is converted with ffmpeg first, whatever its format and provider (Task 5 review round 1), so without
- *   ffmpeg no file is queued (canSendVoice), and none finishes format_not_supported again; they stay listed, and
- *   running this again once ffmpeg is there picks them up. The service looks for ffmpeg only when it starts, so the
- *   line says to restart it after installing ffmpeg.
+ * - The size never refuses a file (Task 5 review round 2: a 1-minute 128 kbit/s MP3 is about 960 KB, a size bound of
+ *   640 s); the service refuses only a note measured too long. Every file is converted with ffmpeg first, whatever its
+ *   format and provider (Task 5 review round 1), so without ffmpeg no file is queued (canSendVoice), and none finishes
+ *   format_not_supported again; they stay listed, and running this again once ffmpeg is there picks them up. The
+ *   service looks for ffmpeg only when it starts, so the line says to restart it after installing ffmpeg.
  * - The output is counts, minutes, dollars and the setting names only: never a file name, a path, a transcript or a key.
  */
 
@@ -76,19 +77,18 @@ export async function transcribeVoiceCommand(opts: { client?: string; yes: boole
       out(NOTHING);
       return;
     }
-    // A saved file always has its size; one without is counted as too long, since nothing shows it fits.
-    const bounded = rows.map((r) => ({ ...r, seconds: r.fileSize === null ? Infinity : sizeBoundSeconds(r.fileSize) }));
-    const fits = bounded.filter((r) => r.seconds <= env.STT_MAX_SECONDS);
-    const tooLong = bounded.length - fits.length;
-    // ffmpeg is looked for only when a file that fits would need it: since every file is converted, any file.
-    const ffmpeg = fits.some((r) => !canSendVoice(provider, r.mimeType, false)) ? await hasFfmpeg(deps) : false;
-    const send = fits.filter((r) => canSendVoice(provider, r.mimeType, ffmpeg));
-    const needsFfmpeg = fits.length - send.length;
+    // The longest a note may measure and still be sent. Each file is estimated at its size bound, no higher than that;
+    // a saved file always has its size, and one without is estimated at the limit.
+    const limit = env.STT_MAX_SECONDS + VOICE_LENGTH_TOLERANCE_S;
+    const estimated = rows.map((r) => ({ ...r, seconds: r.fileSize === null ? limit : Math.min(sizeBoundSeconds(r.fileSize), limit) }));
+    // ffmpeg is looked for only when a file would need it: since every file is converted, any file.
+    const ffmpeg = estimated.some((r) => !canSendVoice(provider, r.mimeType, false)) ? await hasFfmpeg(deps) : false;
+    const send = estimated.filter((r) => canSendVoice(provider, r.mimeType, ffmpeg));
+    const needsFfmpeg = estimated.length - send.length;
 
-    // Each file may measure up to VOICE_LENGTH_TOLERANCE_S over its bound, and up to STT_MAX_SECONDS plus it at most.
-    const seconds = send.reduce((a, r) => a + r.seconds + VOICE_LENGTH_TOLERANCE_S, 0);
-    const about = send.reduce((a, r) => a + voiceCeilingUsd(provider, r.seconds + VOICE_LENGTH_TOLERANCE_S, env.INR_PER_USD), 0);
-    const most = send.length * voiceCeilingUsd(provider, env.STT_MAX_SECONDS + VOICE_LENGTH_TOLERANCE_S, env.INR_PER_USD);
+    const seconds = send.reduce((a, r) => a + r.seconds, 0);
+    const about = send.reduce((a, r) => a + voiceCeilingUsd(provider, r.seconds, env.INR_PER_USD), 0);
+    const most = send.length * voiceCeilingUsd(provider, limit, env.INR_PER_USD);
     out(`To transcribe: ${files(send.length)} saved before Phase 2b${send.length > 0 ? `, about ${minutes(Math.ceil(seconds / 60))}` : ''}.`);
     if (send.length > 0) {
       out(
@@ -96,7 +96,6 @@ export async function transcribeVoiceCommand(opts: { client?: string; yes: boole
           `at most $${dollarsUp(most)} if every file runs to the STT_MAX_SECONDS limit (${env.STT_MAX_SECONDS} seconds).`,
       );
     }
-    if (tooLong > 0) out(`${tooLong} too long, skipped (by file size, over STT_MAX_SECONDS: ${env.STT_MAX_SECONDS} seconds).`);
     if (needsFfmpeg > 0) {
       out(`${needsFfmpeg} need${needsFfmpeg === 1 ? 's' : ''} ffmpeg, skipped (install ffmpeg, or set FFMPEG_PATH; after installing ffmpeg, restart the service, then run this again).`);
     }

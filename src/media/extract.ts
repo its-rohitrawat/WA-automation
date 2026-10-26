@@ -14,7 +14,7 @@ import type { MediaKind, TextKind } from '../store/media.ts';
 import { AudioError } from '../stt/audio.ts';
 import { SttBookingError, withSttHold } from '../stt/paidStt.ts';
 import type { ProviderId } from '../stt/types.ts';
-import { sizeBoundSeconds, type PreparedVoice, type VoiceResult, type VoiceTranscriber } from '../stt/voice.ts';
+import { sizeBoundSeconds, VOICE_LENGTH_TOLERANCE_S, type PreparedVoice, type VoiceResult, type VoiceTranscriber } from '../stt/voice.ts';
 import { prepareImageForClaude, type PreparedImage } from './image.ts';
 import { FORMAT_NOT_SUPPORTED, FORWARDED_NOT_TRANSCRIBED, NO_SPEECH, TOO_LONG } from './labels.ts';
 import { parseFile } from './parse/runner.ts';
@@ -249,19 +249,18 @@ export function createExtractor(d: ExtractorDeps): Extractor {
   };
 
   /**
-   * A voice note or audio file (V2, V4, V5, N2). The size bound, never the sender's declared length, limits what is
-   * held; the cap goes to prepare, which converts the note and refuses it when measured longer than the cap (so an
-   * honest note recorded below 12 kbit/s, whose size bound is too low, is still sent). Without ffmpeg nothing can be
-   * converted, so canSend is false and the note is format_not_supported, for transcribe-voice later. The transcript is
-   * stored as an 'extract': the media kind already says it is a transcript.
+   * A voice note or audio file (V2, V4, V5, N2). The cap goes to prepare, which converts the note (stopped just past the
+   * cap) and refuses it when measured longer than the cap plus VOICE_LENGTH_TOLERANCE_S: the only too_long check. The
+   * file's size refuses nothing (Task 5 review round 2: a 1-minute 128 kbit/s MP3 is about 960 KB, a size bound of 640 s),
+   * and the sender's declared length is never used. The hold is the measured length plus the tolerance. Without ffmpeg
+   * nothing can be converted, so canSend is false and the note is format_not_supported, for transcribe-voice later. The
+   * transcript is stored as an 'extract': the media kind already says it is a transcript.
    */
   const transcribe = async (input: ExtractInput): Promise<Extraction> => {
     const v = d.voice ?? null;
     if (v === null) return NONE; // STT_PROVIDER none: kept as in 2a, transcribed later with cli transcribe-voice
     if (input.forwarded) return { ...NONE, note: FORWARDED_NOT_TRANSCRIBED };
-    const bound = sizeBoundSeconds(input.bytes.length);
     const maxSeconds = d.maxVoiceSeconds ?? DEFAULT_MAX_VOICE_SECONDS;
-    if (bound > maxSeconds) return { ...NONE, note: TOO_LONG };
     if (!v.canSend(input.mimeType)) return { ...NONE, note: FORMAT_NOT_SUPPORTED }; // no ffmpeg
     // Free and local, outside the hold: a conversion or measuring failure books nothing.
     let prepared: PreparedVoice;
@@ -272,8 +271,8 @@ export function createExtractor(d: ExtractorDeps): Extractor {
       throw e;
     }
     try {
-      // The measured length may pass the bound (a low bitrate) up to the cap and its tolerance: the hold covers it.
-      const ceiling = v.ceilingUsd(Math.max(bound, prepared.measuredSeconds));
+      // The measured length is trusted and capped by prepare; the tolerance is headroom over a provider's billed rounding.
+      const ceiling = v.ceilingUsd(prepared.measuredSeconds + VOICE_LENGTH_TOLERANCE_S);
       if (ceiling > d.spend.capUsd) return { ...NONE, note: TOO_COSTLY };
       if (input.revoked?.()) return REVOKED;
       // Kept outside the hold, so a booking that fails after the provider answered is still known to be paid (Fix 3).
@@ -283,7 +282,8 @@ export function createExtractor(d: ExtractorDeps): Extractor {
         ({ result } = await withSttHold(d.spend, ceiling, label(input), async () => {
           const r = await v.transcribe(prepared);
           paid.result = r;
-          // Billed, else measured, else the bound: never the declared length (Fix 2).
+          // Billed, else measured, else the size bound as the last fallback: never the declared length (Fix 2).
+          const bound = sizeBoundSeconds(input.bytes.length);
           const costUsd = v.costUsd({ maxSeconds: bound, billedSeconds: r.billedSeconds, measuredSeconds: prepared.measuredSeconds });
           paid.costUsd = costUsd;
           return { result: r, costUsd };
