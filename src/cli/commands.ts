@@ -464,11 +464,21 @@ export function reportStatusCommand(deps: CliDeps): void {
   const today = istDate(now);
   const db = openDb(trackerDbPath(env.DATA_DIR));
   try {
-    out(
-      settings.enabled
-        ? `Morning report: on, ${settings.time} to ${settings.deadline} IST, to the number ending ${maskNumber(reportRecipient(env))}`
-        : 'Morning report: off (set REPORT_ENABLED=true and REPORT_RECIPIENT in .env, then restart the service)',
-    );
+    const snap = readHealthSnapshot(db);
+    const fresh = snap !== undefined && now.getTime() - Date.parse(snap.at) <= SERVICE_FRESH_MS;
+    if (settings.enabled) {
+      // A running service sends to the number it was started with; .env may name another one since.
+      const envMasked = maskNumber(reportRecipient(env));
+      const serviceMasked = fresh ? snap.report?.recipientMasked : undefined;
+      out(`Morning report: on, ${settings.time} to ${settings.deadline} IST, to the number ending ${serviceMasked ?? envMasked}`);
+      if (serviceMasked && serviceMasked !== envMasked) {
+        out(
+          `⚠️ REPORT_RECIPIENT in .env now ends ${envMasked}, but the running service still sends to the number ending ${serviceMasked}. Restart the service (net stop wa-agent, then net start wa-agent) to use it.`,
+        );
+      }
+    } else {
+      out('Morning report: off (set REPORT_ENABLED=true and REPORT_RECIPIENT in .env, then restart the service)');
+    }
     const row = reportFor(db, today);
     if (settings.enabled || row) out(`Today (${today}): ${describeReport(row, now, settings, 'idle').text}`);
     const past = recentReports(db, 8).filter((r) => r.date !== today).slice(0, 7);
@@ -477,8 +487,7 @@ export function reportStatusCommand(deps: CliDeps): void {
       for (const r of past) out(`  ${r.date}  ${r.status.padEnd(8)}${r.status === 'sent' ? `at ${istTime(new Date(r.updatedAt))} IST` : reasonText(r.detail)}`);
     }
     // An old snapshot's warning may no longer hold (the owner may have fixed it since the service stopped).
-    const snap = readHealthSnapshot(db);
-    if (settings.enabled && snap && now.getTime() - Date.parse(snap.at) > SERVICE_FRESH_MS) {
+    if (settings.enabled && snap && !fresh) {
       const at = new Date(snap.at);
       out(`⚠️ The service has not reported since ${istShortDate(at)} ${istTime(at)}. Is it running?`);
     } else if (snap?.report?.warning) {
@@ -501,9 +510,10 @@ function sendNowRefusal(row: ReportRow | undefined): string | undefined {
 
 /**
  * Asks the running service to send today's report now. It refuses if today was already sent or is being sent, if the
- * service is not running, and if the running service has the report off. It sends nothing itself: only the service
- * uses the spare number's session. The request records the row the owner confirmed, and the service honours it only
- * while today's row is still exactly that.
+ * service is not running, if the running service has the report off, and if the running service sends to another
+ * number than REPORT_RECIPIENT in .env now names (compared by last 4 digits). It sends nothing itself: only the service
+ * uses the spare number's session. The request records the row the owner confirmed and the time of the yes, and the
+ * service honours it only while today's row is still exactly that, for 5 minutes.
  */
 export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
   const { env, out } = deps;
@@ -534,13 +544,26 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
       );
       return;
     }
+    // The running service sends to the number it was started with. If .env names another one now, the owner would
+    // confirm one number and the report would go to the other.
+    const restart = 'Nothing was sent. Restart the service (net stop wa-agent, then net start wa-agent), wait a minute, then run this again.';
+    const envMasked = maskNumber(reportRecipient(env));
+    const serviceMasked = snap.report.recipientMasked;
+    if (!serviceMasked) {
+      out(`The running service does not say which number it sends to (it was started before an update). ${restart}`);
+      return;
+    }
+    if (serviceMasked !== envMasked) {
+      out(`The running service sends to the number ending ${serviceMasked}, but REPORT_RECIPIENT in .env now ends ${envMasked}. ${restart}`);
+      return;
+    }
     const caution =
       row?.status === 'unknown'
         ? "The last try ended without a clear answer, so today's report may already be on the founder's phone. Check the founder's WhatsApp first. "
         : '';
     let yes: boolean;
     try {
-      yes = await deps.confirm(`${caution}This sends today's morning report to the number ending ${maskNumber(reportRecipient(env))} now. Type yes to continue:`);
+      yes = await deps.confirm(`${caution}This sends today's morning report to the number ending ${serviceMasked} now. Type yes to continue:`);
     } catch (e) {
       if (!(e instanceof ConfirmCancelled)) throw e;
       out('Cancelled. Nothing was sent.');

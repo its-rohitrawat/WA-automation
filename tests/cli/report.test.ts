@@ -84,13 +84,20 @@ function withTracker<T>(fn: (db: Db) => T): T {
   }
 }
 
-/** A health snapshot of a running service. `reportOn: false` is a service started with the report off (no report line). */
-function writeSnapshot(at: Date, opts: { reportOn?: boolean } = {}): void {
+/**
+ * A health snapshot of a running service. `reportOn: false` is a service started with the report off (no report line).
+ * recipientMasked is the number the service sends to (default …5678, the .env REPORT_RECIPIENT); null leaves it out, as a
+ * service started before the field existed does.
+ */
+function writeSnapshot(at: Date, opts: { reportOn?: boolean; recipientMasked?: string | null } = {}): void {
+  const masked = opts.recipientMasked === undefined ? '…5678' : opts.recipientMasked;
   const snap: HealthSnapshot = {
     at: at.toISOString(), line: { ok: true, text: '✅ Connected' }, whatsapp: { state: 'open', since: at.toISOString(), lastErrorCode: null, credsSaveFailures: 0 },
     downSince: null, failed: [], lastSuccessAt: null, lastPublishedAt: null, spentToday: 0, capUsd: 15, freeGb: 100, publishFailingSince: null,
     ingestFailures: 0,
-    ...(opts.reportOn === false ? {} : { report: { text: 'Morning report: due now', warning: null } }),
+    ...(opts.reportOn === false
+      ? {}
+      : { report: { text: 'Morning report: due now', warning: null, ...(masked === null ? {} : { recipientMasked: masked }) } }),
   };
   withTracker((db) => setKv(db, 'health', JSON.stringify(snap)));
 }
@@ -556,6 +563,29 @@ describe('cli report status', () => {
     expect(lines).toHaveLength(2);
   });
 
+  it('shows the number the running service sends to, and says to restart when .env now names another', () => {
+    writeSnapshot(NOW, { recipientMasked: '…1111' });
+    reportStatusCommand(deps());
+    expect(lines).toEqual([
+      'Morning report: on, 06:00 to 12:00 IST, to the number ending …1111',
+      '⚠️ REPORT_RECIPIENT in .env now ends …5678, but the running service still sends to the number ending …1111. Restart the service (net stop wa-agent, then net start wa-agent) to use it.',
+      'Today (2026-10-23): Morning report: due now',
+    ]);
+    expect(out()).not.toContain(NUMBER);
+
+    lines = [];
+    writeSnapshot(NOW);
+    reportStatusCommand(deps());
+    expect(lines).toEqual(['Morning report: on, 06:00 to 12:00 IST, to the number ending …5678', 'Today (2026-10-23): Morning report: due now']);
+
+    // A service that has stopped reporting sends nothing now: the .env number is what the next start uses.
+    lines = [];
+    writeSnapshot(new Date(NOW.getTime() - 3 * 60_000), { recipientMasked: '…1111' });
+    reportStatusCommand(deps());
+    expect(lines[0]).toBe('Morning report: on, 06:00 to 12:00 IST, to the number ending …5678');
+    expect(out()).not.toContain('…1111');
+  });
+
   it('lists at most the last 7 days, newest first', () => {
     withTracker((db) => {
       for (let d = 14; d <= 22; d++) skipReport(db, `2026-10-${d}`, 'connect_timeout', `2026-10-${d}T06:30:00.000Z`);
@@ -725,6 +755,27 @@ describe('cli report send-now', () => {
     await reportSendNowCommand(deps());
     expect(lines).toEqual([
       'The running service has the morning report off (it was started before REPORT_ENABLED=true was set). Restart it (net stop wa-agent, then net start wa-agent), wait a minute, then run this again.',
+    ]);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(request()).toBeUndefined();
+  });
+
+  it('refuses without asking when the running service sends to another number than REPORT_RECIPIENT in .env now names', async () => {
+    writeSnapshot(NOW, { recipientMasked: '…1111' });
+    await reportSendNowCommand(deps());
+    expect(lines).toEqual([
+      'The running service sends to the number ending …1111, but REPORT_RECIPIENT in .env now ends …5678. Nothing was sent. Restart the service (net stop wa-agent, then net start wa-agent), wait a minute, then run this again.',
+    ]);
+    expect(out()).not.toContain(NUMBER);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(request()).toBeUndefined();
+  });
+
+  it('refuses without asking when the running service does not say which number it sends to (started before this update)', async () => {
+    writeSnapshot(NOW, { recipientMasked: null });
+    await reportSendNowCommand(deps());
+    expect(lines).toEqual([
+      'The running service does not say which number it sends to (it was started before an update). Nothing was sent. Restart the service (net stop wa-agent, then net start wa-agent), wait a minute, then run this again.',
     ]);
     expect(confirm).not.toHaveBeenCalled();
     expect(request()).toBeUndefined();

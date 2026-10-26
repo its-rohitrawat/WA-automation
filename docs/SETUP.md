@@ -348,6 +348,7 @@ Every day at 06:00 IST, Sundays included, the founder gets one WhatsApp message 
    `REPORT_RECIPIENT` is the founder's Indian mobile: `91` then the 10-digit mobile number (12 digits in all), digits only, for example `919812345678`, with no `+` or spaces. The service refuses to start with any other form. Leave `REPORT_TIME` and `REPORT_DEADLINE` empty for 06:00 and 12:00 IST.
 5. **Start the service again** (see "Start the service again" under "If the service will not start" below), wait one minute, and check `npm run cli -- report status`.
 6. Send one test report: `npm run cli -- report send-now`, then type `yes`. It works only while the service is running, and it refuses if today's report was already sent. Check the founder's phone.
+   If you change `REPORT_RECIPIENT` later, restart the service: until then `report status` warns that the running service still sends to the old number, and `report send-now` refuses.
 7. Open WhatsApp on the spare phone at least every 14 days, so the linked device stays valid.
 
 The spare number's session is in `C:\wa-agent\data\sender-session.db`. It is encrypted with its own key, derived from the same master key. Back it up with the rest of `data`.

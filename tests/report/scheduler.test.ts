@@ -21,6 +21,8 @@ const IST = (hm: string) => `${DAY}T${hm}:00.000+05:30`;
 const iso = (hm: string) => new Date(IST(hm)).toISOString();
 const ON: ReportSettings = { enabled: true, time: '06:00', deadline: '12:00' };
 const failed = (code: string): SendResult => ({ status: 'failed', code });
+/** health() also carries the masked number the sender sends to (FakeReportSender: …1234). */
+const TO = { recipientMasked: '…1234' };
 
 function setup(
   o: { settings?: ReportSettings; build?: (now: Date) => Promise<ReportPayload>; log?: Logger; healthLine?: () => HealthLine } = {},
@@ -98,7 +100,7 @@ describe('ReportScheduler', () => {
     await at('12:00');
     expect(sender.calls).toHaveLength(0);
     expect(reportFor(db, DAY)).toMatchObject({ status: 'skipped', detail: 'not_running' });
-    expect(s.health()).toEqual({ text: 'Morning report skipped today (the service was not running in time)', warning: null });
+    expect(s.health()).toEqual({ text: 'Morning report skipped today (the service was not running in time)', warning: null, ...TO });
   });
 
   it('retries a definite failure after 2, 5, then 10 minutes', async () => {
@@ -149,7 +151,7 @@ describe('ReportScheduler', () => {
     clock.set(IST('06:05'));
     expect(s.health().text).toBe('Morning report: sending now');
     for (const hm of ['06:11', '09:00', '11:59']) await at(hm);
-    expect(s.health()).toEqual({ text: 'Morning report: unknown, check WhatsApp', warning: UNKNOWN_WARNING });
+    expect(s.health()).toEqual({ text: 'Morning report: unknown, check WhatsApp', warning: UNKNOWN_WARNING, ...TO });
     expect(reportFor(db, DAY)!.status).toBe('sending');
     await at('12:00');
     expect(reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'not_recorded', attempts: 1 });
@@ -176,7 +178,7 @@ describe('ReportScheduler', () => {
     for (const hm of ['06:30', '11:00', '12:30']) await at(hm);
     expect(sender.calls).toHaveLength(1);
     expect(reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'timeout' });
-    expect(s.health()).toEqual({ text: 'Morning report: unknown, check WhatsApp', warning: UNKNOWN_WARNING });
+    expect(s.health()).toEqual({ text: 'Morning report: unknown, check WhatsApp', warning: UNKNOWN_WARNING, ...TO });
   });
 
   it('turns a crash mid-send into unknown at start, and does not send that day again', async () => {
@@ -216,7 +218,7 @@ describe('ReportScheduler', () => {
     expect(sender.calls).toHaveLength(0);
     expect(reportFor(db, DAY)).toBeUndefined();
     expect(getKv(db, REPORT_REQUEST_KEY)).toBe('');
-    expect(s.health()).toEqual({ text: 'Morning report: off', warning: null });
+    expect(s.health()).toEqual({ text: 'Morning report: off', warning: null, ...TO });
   });
 
   it('runs one send at a time', async () => {
@@ -570,6 +572,12 @@ describe('ReportScheduler', () => {
     expect(s.health().warning).toContain('link-sender --reset');
     sender.state = { ...sender.state, state: 'idle' };
     expect(s.health().warning).toBeNull();
+  });
+
+  it("health carries the sender's masked recipient (last 4 digits only), so the CLI can compare it with .env", () => {
+    const { sender, s } = setup();
+    sender.recipientMasked = '…9876';
+    expect(s.health().recipientMasked).toBe('…9876');
   });
 
   it('logs only dates, codes, times and counts: never the report text, a client name or the file name', async () => {

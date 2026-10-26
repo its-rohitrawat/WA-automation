@@ -52,4 +52,19 @@ describe('Health and the morning report', () => {
     setKv(db, 'health', JSON.stringify({ ...stored, report: { text: 'ok' } })); // warning missing
     expect(readHealthSnapshot(db)).toBeUndefined();
   });
+
+  it("records the masked recipient the service sends to, and reads back only a last-4-digits mask", () => {
+    const { db, h } = setup();
+    h.setReport({ ...SENT, recipientMasked: '…5678' });
+    h.persist();
+    expect(readHealthSnapshot(db)!.report).toEqual({ ...SENT, recipientMasked: '…5678' });
+    const stored = JSON.parse(getKv(db, 'health')!) as Record<string, unknown>;
+    for (const bad of ['919812345678', '5678', '…56789', '…56a8', 5678, null]) {
+      setKv(db, 'health', JSON.stringify({ ...stored, report: { ...SENT, recipientMasked: bad } }));
+      expect(readHealthSnapshot(db), String(bad)).toBeUndefined();
+    }
+    // A snapshot from a service started before the field existed still parses, without it.
+    setKv(db, 'health', JSON.stringify({ ...stored, report: SENT }));
+    expect(readHealthSnapshot(db)!.report).toEqual(SENT);
+  });
 });

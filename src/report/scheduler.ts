@@ -167,8 +167,9 @@ export class ReportScheduler {
 
   /** Today's line for Health. */
   health(now: Date = this.#o.clock.now()): ReportHealth {
-    if (!this.#o.settings.enabled) return { text: 'Morning report: off', warning: null };
-    return describeReport(reportFor(this.#o.db, istDate(now)), now, this.#o.settings, this.#o.sender.status().state);
+    const recipientMasked = this.#o.sender.maskedRecipient();
+    if (!this.#o.settings.enabled) return { text: 'Morning report: off', warning: null, recipientMasked };
+    return { ...describeReport(reportFor(this.#o.db, istDate(now)), now, this.#o.settings, this.#o.sender.status().state), recipientMasked };
   }
 
   /**

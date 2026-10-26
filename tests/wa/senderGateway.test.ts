@@ -121,6 +121,12 @@ describe('SenderGateway', () => {
     }
   });
 
+  it('tells the masked recipient it sends to: the last 4 digits only', () => {
+    const { gw } = setup();
+    expect(gw.maskedRecipient()).toBe('…0000');
+    expect(gw.maskedRecipient()).not.toMatch(/\d{5,}/);
+  });
+
   it('has exactly one send method', () => {
     const names = Object.getOwnPropertyNames(SenderGateway.prototype);
     expect(names.filter((n) => /send|read|presence|react|receipt|chatmodify|delete/i.test(n))).toEqual(['sendReport']);

@@ -1,6 +1,6 @@
 import makeWASocket, { Browsers, DisconnectReason, makeCacheableSignalKeyStore } from 'baileys';
 import type { AnyMessageContent, AuthenticationState, BaileysEventMap, WAMessage } from 'baileys';
-import { INDIAN_MOBILE } from '../config/env.ts';
+import { INDIAN_MOBILE, maskNumber } from '../config/env.ts';
 import { XLSX_MIME } from '../output/workbook.ts';
 import type { ReportSender, SenderState, SenderStatus, SendResult } from '../report/types.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
@@ -238,6 +238,10 @@ export class SenderGateway implements ReportSender {
 
   status(): SenderStatus {
     return { ...this.#status };
+  }
+
+  maskedRecipient(): string {
+    return maskNumber(this.#opts.recipient);
   }
 
   async sendReport(text: string, xlsx: Buffer, fileName: string): Promise<SendResult> {

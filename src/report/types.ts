@@ -41,10 +41,20 @@ export interface ReportSender {
   sendReport(text: string, xlsx: Buffer, fileName: string): Promise<SendResult>;
   status(): SenderStatus;
   stop(): Promise<void>;
+  /** The fixed recipient, masked to its last 4 digits ("…5678"). Never the full number. */
+  maskedRecipient(): string;
 }
 
 /** The morning report's line in Health and `cli status`. warning is set only when the owner has to act. */
 export interface ReportHealth {
   text: string;
   warning: string | null;
+  /**
+   * The number the running service sends to, masked to its last 4 digits ("…5678"), so the CLI can tell when .env now
+   * names another number. Set by the scheduler; missing in snapshots of an older service.
+   */
+  recipientMasked?: string;
 }
+
+/** The only form recipientMasked may take: "…" and 4 digits. */
+export const MASKED_NUMBER = /^…\d{4}$/;
