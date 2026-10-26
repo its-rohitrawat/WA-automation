@@ -44,7 +44,7 @@ export const reasonText = (code: string | null): string => (code ? (REASON_TEXT[
 
 export const UNKNOWN_WARNING = '⚠️ Morning report: unknown, check WhatsApp. See docs/SETUP.md → "Morning report".';
 
-const SENDER_WARNINGS: Partial<Record<SenderState, string>> = {
+export const SENDER_WARNINGS: Partial<Record<SenderState, string>> = {
   not_linked: '⚠️ Morning report: the spare number is not linked. Stop the service and run: npm run cli -- link-sender',
   unreadable: "⚠️ Morning report: the spare number's saved session cannot be read. Stop the service and run: npm run cli -- link-sender --reset",
   unavailable:
