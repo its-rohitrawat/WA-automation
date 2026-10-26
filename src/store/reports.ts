@@ -3,18 +3,36 @@ import type { Db } from './db.ts';
 export type ReportStatus = 'sending' | 'sent' | 'retry' | 'unknown' | 'skipped';
 
 /**
- * kv key: `report send-now` stores a request here (see reportRequestValue), and the service's next tick takes it. An
- * empty value means no request.
+ * kv key: `report send-now` stores a request here (see reportRequest), and the service's next tick takes it. An empty
+ * value means no request.
  */
 export const REPORT_REQUEST_KEY = 'report_send_requested';
 
+/** How long a send-now request stays valid. An older one (for example left behind by a stopping service) is ignored. */
+export const REPORT_REQUEST_MAX_AGE_MS = 5 * 60_000;
+
 /**
- * The send-now request value: the IST date plus the row state the owner saw when confirming
- * (`date|status|updatedAt`, `date|none|` when there was no row). The service honours it only while today's row is still
- * exactly that state, so a request confirmed before a send whose outcome became unknown can never send a second report.
+ * The confirmed part of a send-now request: the IST date plus the row state the owner saw when confirming
+ * (`date|status|updatedAt`, `date|none|` when there was no row). The service honours a request only while today's row is
+ * still exactly that state, so a request confirmed before a send whose outcome became unknown can never send a second
+ * report.
  */
 export function reportRequestValue(date: string, row: ReportRow | undefined): string {
   return `${date}|${row?.status ?? 'none'}|${row?.updatedAt ?? ''}`;
+}
+
+/** The stored send-now request: reportRequestValue plus the time of the request, `date|status|updatedAt|requestedAt`. */
+export function reportRequest(date: string, row: ReportRow | undefined, requestedAt: Date): string {
+  return `${reportRequestValue(date, row)}|${requestedAt.toISOString()}`;
+}
+
+/** Splits a stored request into its confirmed part and its time. Undefined for any other form (such as one without a time). */
+export function parseReportRequest(value: string): { confirmed: string; requestedAt: Date } | undefined {
+  const parts = value.split('|');
+  if (parts.length !== 4) return undefined;
+  const requestedAt = new Date(parts[3]!);
+  if (Number.isNaN(requestedAt.getTime())) return undefined;
+  return { confirmed: parts.slice(0, 3).join('|'), requestedAt };
 }
 
 export interface ReportRow {

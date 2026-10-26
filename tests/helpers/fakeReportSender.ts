@@ -10,6 +10,8 @@ export class FakeReportSender implements ReportSender {
   /** When true, the next sendReport throws. */
   throwNext = false;
   stopped = 0;
+  /** What maskedRecipient() returns. */
+  recipientMasked = '…1234';
 
   async sendReport(text: string, xlsx: Buffer, fileName: string): Promise<SendResult> {
     this.calls.push({ text, xlsx, fileName });
@@ -23,6 +25,10 @@ export class FakeReportSender implements ReportSender {
 
   status(): SenderStatus {
     return this.state;
+  }
+
+  maskedRecipient(): string {
+    return this.recipientMasked;
   }
 
   async stop(): Promise<void> {

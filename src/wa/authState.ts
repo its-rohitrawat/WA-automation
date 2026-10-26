@@ -1,5 +1,5 @@
 import { createHmac, hkdfSync } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
 import { BufferJSON, initAuthCreds, proto } from 'baileys';
@@ -60,6 +60,18 @@ export interface EncryptedAuth {
   hasSession: boolean;
 }
 
+/** How a session's rows are named and sealed: keyed-hash row names, and values encrypted with the row name bound in. */
+function sessionCodec(key: Buffer) {
+  const derive = (info: string): Buffer => Buffer.from(hkdfSync('sha256', key, Buffer.alloc(0), info, 32));
+  const rowKey = derive('wa-session-row');
+  const valueKey = derive('wa-session-value');
+  return {
+    valueKey,
+    rowId: (name: string): string => createHmac('sha256', rowKey).update(name).digest('hex'),
+    open: (id: string, blob: Buffer): unknown => JSON.parse(decrypt(valueKey, blob, Buffer.from(id)).toString('utf8'), BufferJSON.reviver),
+  };
+}
+
 /** Writes the canary row when the table is empty. */
 export function useEncryptedAuthState(db: Db, key: Buffer): EncryptedAuth {
   const getStmt = db.prepare('SELECT v FROM auth WHERE k = ?');
@@ -67,13 +79,7 @@ export function useEncryptedAuthState(db: Db, key: Buffer): EncryptedAuth {
   const getCount = db.prepare('SELECT COUNT(*) AS n FROM auth');
   const delStmt = db.prepare('DELETE FROM auth WHERE k = ?');
 
-  const derive = (info: string): Buffer => Buffer.from(hkdfSync('sha256', key, Buffer.alloc(0), info, 32));
-  const rowKey = derive('wa-session-row');
-  const valueKey = derive('wa-session-value');
-  const rowId = (name: string): string => createHmac('sha256', rowKey).update(name).digest('hex');
-
-  const open = (id: string, blob: Buffer): unknown =>
-    JSON.parse(decrypt(valueKey, blob, Buffer.from(id)).toString('utf8'), BufferJSON.reviver);
+  const { valueKey, rowId, open } = sessionCodec(key);
   const read = (name: string): unknown => {
     const id = rowId(name);
     const row = getStmt.get(id) as { v: Buffer } | undefined;
@@ -160,6 +166,47 @@ export function useSenderAuthState(db: Db, masterKey: Buffer): EncryptedAuth {
 }
 
 /**
+ * The phone number the founder's saved link (data/session.db, sealed with the master key itself) belongs to: the digits
+ * of creds.me.id before the device part (":7") or "@". It only reads, and writes nothing beside the file: the file's
+ * bytes are opened as an in-memory copy (a read-only SQLite connection would leave new -wal and -shm files next to it).
+ * Only when a -wal file with data is already there (the service did not stop cleanly) is the file opened read-only, so
+ * the newest rows are seen. No table is created and no canary written. Undefined when there is no file, no link, or the
+ * session cannot be read (another master key, a damaged file, a lock): link-sender then cannot compare, and the service
+ * compares again at every start, where it reads the founder's session anyway.
+ */
+export function readFounderNumber(file: string, key: Buffer): string | undefined {
+  if (!existsSync(file)) return undefined;
+  let db: Db | undefined;
+  try {
+    const wal = `${file}-wal`;
+    if (existsSync(wal) && statSync(wal).size > 0) {
+      db = new Database(file, { readonly: true, fileMustExist: true });
+    } else {
+      const bytes = readFileSync(file);
+      // Bytes 18 and 19 mark a WAL-mode file. SQLite opens an in-memory copy only with the legacy (rollback) marks; the
+      // copy is changed, never the file.
+      if (bytes.length >= 20 && bytes[18] === 2 && bytes[19] === 2) bytes[18] = bytes[19] = 1;
+      db = new Database(bytes, { readonly: true });
+    }
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'auth'").get()) return undefined;
+    const { rowId, open } = sessionCodec(key);
+    const id = rowId('creds');
+    const row = db.prepare('SELECT v FROM auth WHERE k = ?').get(id) as { v: Buffer } | undefined;
+    if (!row) return undefined;
+    const me = (open(id, row.v) as AuthenticationCreds | null)?.me?.id;
+    return me ? me.split(/[:@]/)[0] : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // best effort
+    }
+  }
+}
+
+/**
  * code is a reason code safe to log: 'decrypt_failed', or the SQLite error code (such as SQLITE_NOTADB). transient is
  * set when the file could not be opened but is not known to be damaged (a lock, permissions, a disk error): moving it
  * aside with link-sender --reset would be the wrong fix.
@@ -171,6 +218,51 @@ function isDamage(code: string): boolean {
   return code === 'SQLITE_NOTADB' || code.startsWith('SQLITE_CORRUPT');
 }
 
+/** The first 16 bytes of every SQLite database file. */
+const SQLITE_HEADER = Buffer.from('SQLite format 3\0', 'latin1');
+
+/**
+ * Checks an existing file for damage before any read-write open. A read-write open of a damaged file (journal_mode =
+ * WAL) makes SQLite delete the -wal and -shm files next to it when it is closed, so link-sender --reset could not move
+ * them aside with the file. A file that does not start with the SQLite header is not a database (SQLite itself answers
+ * SQLITE_NOTADB): that is told from its first bytes, with no SQLite connection at all. Damage further in is found with a
+ * read-only connection, which never deletes the -wal file (it may rebuild the -shm file, SQLite's index of the -wal,
+ * which holds no data of its own). Returns the SQLite damage code, or undefined. Any other error is left to the normal
+ * open: a read-only open of a healthy WAL file can fail for harmless reasons (such as a missing -shm file).
+ */
+function probeDamage(file: string): string | undefined {
+  if (file === ':memory:') return undefined;
+  try {
+    if (!statSync(file).isFile()) return undefined;
+    const head = Buffer.alloc(SQLITE_HEADER.length);
+    const fd = openSync(file, 'r');
+    let n: number;
+    try {
+      n = readSync(fd, head, 0, head.length, 0);
+    } finally {
+      closeSync(fd);
+    }
+    // An empty file is a new, empty database. Any other file, however short, must start with the header.
+    if (n > 0 && !(n === head.length && head.equals(SQLITE_HEADER))) return 'SQLITE_NOTADB';
+  } catch {
+    return undefined; // missing, a folder, no permission: the normal open reports it
+  }
+  let probe: Db | undefined;
+  try {
+    probe = new Database(file, { readonly: true, fileMustExist: true });
+    probe.prepare('SELECT 1 FROM sqlite_master').get();
+    return undefined;
+  } catch (err) {
+    return err instanceof Database.SqliteError && isDamage(err.code) ? err.code : undefined;
+  } finally {
+    try {
+      probe?.close();
+    } catch {
+      // best effort
+    }
+  }
+}
+
 /**
  * Opens the spare number's session at service start. A file that is damaged, not a database, or written with another
  * master key is reported, not thrown, and left as it is: a bad spare-number session never stops the service (only
@@ -178,6 +270,8 @@ function isDamage(code: string): boolean {
  * transient. Any other error is thrown.
  */
 export function openSenderSession(file: string, masterKey: Buffer): SenderSession {
+  const damage = probeDamage(file);
+  if (damage) return { ok: false, code: damage };
   let db: Db | undefined;
   try {
     db = openSessionDb(file);

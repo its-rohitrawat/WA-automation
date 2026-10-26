@@ -1,6 +1,6 @@
 import makeWASocket, { Browsers, DisconnectReason, makeCacheableSignalKeyStore } from 'baileys';
 import type { AnyMessageContent, AuthenticationState, BaileysEventMap, WAMessage } from 'baileys';
-import { INDIAN_MOBILE } from '../config/env.ts';
+import { INDIAN_MOBILE, maskNumber } from '../config/env.ts';
 import { XLSX_MIME } from '../output/workbook.ts';
 import type { ReportSender, SenderState, SenderStatus, SendResult } from '../report/types.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
@@ -40,6 +40,15 @@ export function baileysSenderSocketFactory(logger: BaileysLogger): SenderSocketF
 export function recipientJid(digits: string): string {
   if (!INDIAN_MOBILE.test(digits)) throw new Error('REPORT_RECIPIENT must be 91 and the 10-digit Indian mobile, digits only');
   return `${digits}@s.whatsapp.net`;
+}
+
+/**
+ * The phone number a saved link belongs to: the digits of creds.me.id before the device part (":5") or "@".
+ * Undefined while nothing is linked.
+ */
+export function linkedNumber(auth: EncryptedAuth): string | undefined {
+  const id = auth.state.creds.me?.id;
+  return id ? id.split(/[:@]/)[0] : undefined;
 }
 
 export class RecipientRefusedError extends Error {
@@ -107,6 +116,7 @@ function openSocket(
   });
   return new Promise<Opened>((resolve) => {
     let settled = false;
+    let timer: NodeJS.Timeout | undefined;
     const finish = (r: Opened) => {
       if (settled) return;
       settled = true;
@@ -114,7 +124,7 @@ function openSocket(
       if ('code' in r) void endQuietly(sock);
       resolve(r);
     };
-    const timer = setTimeout(() => finish({ code: 'connect_timeout', statusCode: null }), timeoutMs);
+    // The timer starts after the listener is added: a listener that throws rejects this promise and leaves no timer.
     sock.ev.on('connection.update', (u) => {
       if (u.qr) {
         if (onQr) onQr(u.qr);
@@ -126,6 +136,7 @@ function openSocket(
         finish({ code: closeCode(statusCode), statusCode });
       }
     });
+    if (!settled) timer = setTimeout(() => finish({ code: 'connect_timeout', statusCode: null }), timeoutMs);
   });
 }
 
@@ -173,6 +184,11 @@ const FAILURE_STATE: Partial<Record<OpenFailure, SenderState>> = {
 export interface SenderGatewayOptions {
   /** REPORT_RECIPIENT: the founder's number, digits only. The only chat this sender ever writes to. */
   recipient: string;
+  /**
+   * The number the founder-number reader is linked to (digits of its creds.me.id), which may differ from recipient. Like
+   * recipient, it never sends: a spare-number link to it is refused ('self_send').
+   */
+  founderNumber?: string;
   factory: SenderSocketFactory;
   /** The spare number's session. Undefined when the stored session could not be opened or read. */
   auth: EncryptedAuth | undefined;
@@ -210,12 +226,22 @@ export class SenderGateway implements ReportSender {
     this.#jid = recipientJid(opts.recipient);
     this.#opts = opts;
     this.#clock = opts.clock ?? systemClock;
-    const state: SenderState = !opts.auth ? (opts.authProblem ?? 'unreadable') : opts.auth.hasSession ? 'idle' : 'not_linked';
+    const state: SenderState = !opts.auth
+      ? (opts.authProblem ?? 'unreadable')
+      : !opts.auth.hasSession
+        ? 'not_linked'
+        : this.#linkedToFounder(opts.auth)
+          ? 'self_send'
+          : 'idle';
     this.#status = { state, since: this.#clock.now().toISOString(), lastErrorCode: null };
   }
 
   status(): SenderStatus {
     return { ...this.#status };
+  }
+
+  maskedRecipient(): string {
+    return maskNumber(this.#opts.recipient);
   }
 
   async sendReport(text: string, xlsx: Buffer, fileName: string): Promise<SendResult> {
@@ -229,12 +255,25 @@ export class SenderGateway implements ReportSender {
       this.#setState('not_linked', null);
       return { status: 'failed', code: 'not_linked' };
     }
+    // The link-sender QR code was scanned with the founder's phone (the recipient's, or the one the reader is linked to):
+    // sending would come from the founder's own number.
+    if (this.#linkedToFounder(auth)) {
+      this.#setState('self_send', null);
+      return { status: 'failed', code: 'self_send' };
+    }
     this.#busy = true;
     this.#setState('connecting', null);
     try {
-      const opened = await openSocket(this.#opts.factory, auth, this.#opts.connectTimeoutMs ?? 60_000, undefined, (s) => {
-        this.#sock = s;
-      });
+      let opened: Opened;
+      try {
+        opened = await openSocket(this.#opts.factory, auth, this.#opts.connectTimeoutMs ?? 60_000, undefined, (s) => {
+          this.#sock = s;
+        });
+      } catch {
+        // Thrown while making the socket or before it opened (the factory, or adding a listener): no message can have
+        // left, so this is a definite failure the scheduler retries. The finally below closes a socket that was made.
+        return { status: 'failed', code: 'connect_error' };
+      }
       if ('code' in opened) {
         this.#setState(FAILURE_STATE[opened.code] ?? 'idle', opened.statusCode);
         return { status: 'failed', code: opened.code };
@@ -304,6 +343,12 @@ export class SenderGateway implements ReportSender {
       const timer = setTimeout(end, ms);
       this.#endLinger = end;
     });
+  }
+
+  /** True when the saved link is the recipient's number or the founder reader's number. The founder's number never sends. */
+  #linkedToFounder(auth: EncryptedAuth): boolean {
+    const linked = linkedNumber(auth);
+    return linked !== undefined && (linked === this.#opts.recipient || linked === this.#opts.founderNumber);
   }
 
   #setState(state: SenderState, code: number | null): void {

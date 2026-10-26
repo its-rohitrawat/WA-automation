@@ -74,6 +74,39 @@ describe('openSenderSession (service start)', () => {
     rmSync(file);
   });
 
+  it('a file that is not a database: its -wal and -shm files are left exactly as they are', () => {
+    const file = senderSessionDbPath(tempDir());
+    writeFileSync(file, Buffer.alloc(4096, 0x41));
+    writeFileSync(`${file}-wal`, 'wal bytes');
+    writeFileSync(`${file}-shm`, 'shm bytes');
+    expect(openSenderSession(file, randomBytes(32))).toEqual({ ok: false, code: 'SQLITE_NOTADB' });
+    expect(readFileSync(`${file}-wal`, 'utf8')).toBe('wal bytes');
+    expect(readFileSync(`${file}-shm`, 'utf8')).toBe('shm bytes');
+  });
+
+  it('a short file without the SQLite header is not a database either', () => {
+    const file = senderSessionDbPath(tempDir());
+    writeFileSync(file, 'SQLite');
+    expect(openSenderSession(file, randomBytes(32))).toEqual({ ok: false, code: 'SQLITE_NOTADB' });
+    expect(readFileSync(file, 'utf8')).toBe('SQLite');
+  });
+
+  it('a file damaged past its header is reported as damaged, and its -wal file is not deleted', async () => {
+    const file = await linkedSenderFile(tempDir(), randomBytes(32));
+    const bytes = readFileSync(file);
+    bytes.fill(0x41, 100, 4096); // keep the 100-byte database header, break page 1 (the schema)
+    writeFileSync(file, bytes);
+    writeFileSync(`${file}-wal`, 'wal bytes');
+    const r = openSenderSession(file, randomBytes(32));
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toMatch(/^SQLITE_(CORRUPT|NOTADB)/);
+      expect(r.transient).toBeUndefined();
+    }
+    expect(readFileSync(`${file}-wal`, 'utf8')).toBe('wal bytes');
+    expect(readFileSync(file).equals(bytes)).toBe(true);
+  });
+
   it('reports a read-only file as transient, not damaged, and leaves it as it is', () => {
     const file = senderSessionDbPath(tempDir());
     writeFileSync(file, '');
