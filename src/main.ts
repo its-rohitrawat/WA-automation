@@ -138,7 +138,6 @@ async function main(): Promise<void> {
       // Phase 2a: download, keep and read shared images and documents. Voice notes are kept, not transcribed yet.
       media: { sealer: new MediaRefSealer(key), fetcher: baileysFetcher(), ai: new ClaudeMediaClient({ apiKey, model: env.AI_MODEL, prices }) },
       ...(meetings ? { meetings } : {}),
-      // onMeetingsHealth: wired to Health.setMeetings at merge (Task 12): `onMeetingsHealth: (m) => app.health.setMeetings(m)`.
     });
 
     // watchGroupsFile catches a throwing onChange (including reloadClients conflicts) and calls onError.

@@ -88,10 +88,7 @@ export interface AppDeps {
   media?: AppMediaDeps;
   /** Phase 3 meetings. Without it, no meeting call of any kind is made. */
   meetings?: AppMeetingsDeps;
-  /**
-   * Gets the meetings' health on every tick: null when meetings are off. Wired to Health.setMeetings at merge (Task 12):
-   * `onMeetingsHealth: (m) => health.setMeetings(m)`.
-   */
+  /** Also gets the meetings' health on every tick (null when meetings are off); the health line gets it either way. */
   onMeetingsHealth?: (m: MeetingsHealth | null) => void;
 }
 
@@ -238,8 +235,12 @@ export function createApp(d: AppDeps): App {
         onChanged: () => publisher.schedule(), // a finished or failed meeting, or new rows: the workbook is rebuilt
       })
     : undefined;
-  /** Gives the meetings' health to the callback (null when meetings are off). Wired to Health.setMeetings at merge (Task 12). */
-  const refreshMeetings = () => d.onMeetingsHealth?.(meetings ? meetings.health() : null);
+  /** Gives the meetings' health to the health line and to the optional callback (null when meetings are off). */
+  const refreshMeetings = () => {
+    const m = meetings ? meetings.health() : null;
+    health.setMeetings(m);
+    d.onMeetingsHealth?.(m);
+  };
 
   // Fires for new messages, edits and non-empty reactions. A shared file is queued for download as soon as it is stored.
   const ingestor = new Ingestor({
