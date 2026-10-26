@@ -11,7 +11,12 @@ import { SpendCapReachedError, withReservation } from '../brain/paidCall.ts';
 import { estimateCostUsd, type Prices } from '../spend/pricing.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
 import type { MediaKind, TextKind } from '../store/media.ts';
+import { AudioError } from '../stt/audio.ts';
+import { withSttHold } from '../stt/paidStt.ts';
+import type { ProviderId } from '../stt/types.ts';
+import { sizeBoundSeconds, type PreparedVoice, type VoiceTranscriber } from '../stt/voice.ts';
 import { prepareImageForClaude, type PreparedImage } from './image.ts';
+import { FORMAT_NOT_SUPPORTED, FORWARDED_NOT_TRANSCRIBED, NO_SPEECH, TOO_LONG } from './labels.ts';
 import { parseFile } from './parse/runner.ts';
 import { countVisible, cutText } from './parse/text.ts';
 import type { ParseJob, ParseResult } from './parse/types.ts';
@@ -26,6 +31,13 @@ export interface ExtractInput {
   forwarded: boolean;
   /** The saved original. A DOCX's bytes are moved to the parser, so the caller must not read them after extract. */
   bytes: Buffer;
+  /** Absolute path of the saved original: a voice note or audio file is read from it by the voice transcriber. */
+  path: string;
+  /**
+   * The length the sender's phone reported (the row's seconds). Untrusted: never a limit on length or spend (V5), only
+   * shown and used to price a Sarvam note that ffmpeg could not measure.
+   */
+  declaredSeconds: number | null;
   /**
    * Asked just before a paid call: true when the file's message was deleted for everyone meanwhile, for example during
    * the decode. The file is then not sent to Claude and comes back with note 'revoked' (final review FR3a).
@@ -37,11 +49,16 @@ export interface Extraction {
   textKind: TextKind | null;
   text: string | null;
   pageCount: number | null;
-  /** 'first_pages_only' | 'scan_too_long' | 'scan_read_by_ai' | 'forwarded_not_described' | 'too_costly' | 'revoked' | null */
+  /**
+   * 'first_pages_only' | 'scan_too_long' | 'scan_read_by_ai' | 'forwarded_not_described' | 'too_costly' | 'revoked' |
+   * 'forwarded_not_transcribed' | 'too_long' | 'no_speech' | 'format_not_supported' | null
+   */
   note: string | null;
+  /** The speech provider kept a copy of this transcript (ElevenLabs), to be deleted (N1). finishMedia notes it. */
+  forget?: { provider: ProviderId; ref: string } | null;
 }
 
-/** Reads one saved original. This is the seam where Phase 2b adds voice-note transcription. */
+/** Reads one saved original: describes images, reads PDFs and DOCX files, and transcribes voice notes and audio files. */
 export type Extractor = (input: ExtractInput) => Promise<Extraction>;
 
 export interface ExtractorDeps {
@@ -54,6 +71,10 @@ export interface ExtractorDeps {
    */
   parse?: (job: ParseJob, o?: { transfer?: boolean }) => Promise<ParseResult>;
   prepareImage?: (bytes: Buffer) => Promise<PreparedImage>;
+  /** The voice transcriber STT_PROVIDER names; null or absent with 'none', when voice notes are kept as in 2a. */
+  voice?: VoiceTranscriber | null;
+  /** STT_MAX_SECONDS: the hard cap on one voice note or audio file (V2, V5). Default 600. */
+  maxVoiceSeconds?: number;
 }
 
 const NONE: Extraction = { textKind: null, text: null, pageCount: null, note: null };
@@ -75,6 +96,8 @@ const CLAUDE_PDF_MAX_PAGES = 600;
 const MAX_PDF_INPUT_TOKENS = Math.min(CLAUDE_PDF_MAX_PAGES * PDF_TOKENS_PER_PAGE, 1_000_000);
 /** The media client makes one SDK attempt per call, so a lost connection is booked once (amendment 9h). */
 const MEDIA_ATTEMPTS = MEDIA_SDK_MAX_RETRIES + 1;
+/** STT_MAX_SECONDS' default (N3). */
+const DEFAULT_MAX_VOICE_SECONDS = 600;
 
 const baseMime = (m: string | null): string => ((m ?? '').toLowerCase().split(';')[0] ?? '').trim();
 const isPdf = (b: Buffer): boolean => b.subarray(0, 5).toString('latin1') === '%PDF-';
@@ -181,6 +204,48 @@ export function createExtractor(d: ExtractorDeps): Extractor {
     return parsed.text ? { textKind: 'extract', text: capStored(parsed.text), pageCount: null, note: null } : NONE;
   };
 
+  /**
+   * A voice note or audio file (V2, V4, V5, N2). The size bound, never the sender's declared length, limits what is
+   * held; the cap goes to prepare, which refuses a note measured longer than it (so an honest note recorded below
+   * 12 kbit/s, whose size bound is too low, is still sent). The transcript is stored as an 'extract': the media kind
+   * already says it is a transcript.
+   */
+  const transcribe = async (input: ExtractInput): Promise<Extraction> => {
+    const v = d.voice ?? null;
+    if (v === null) return NONE; // STT_PROVIDER none: kept as in 2a, transcribed later with cli transcribe-voice
+    if (input.forwarded) return { ...NONE, note: FORWARDED_NOT_TRANSCRIBED };
+    const bound = sizeBoundSeconds(input.bytes.length);
+    const maxSeconds = d.maxVoiceSeconds ?? DEFAULT_MAX_VOICE_SECONDS;
+    if (bound > maxSeconds) return { ...NONE, note: TOO_LONG };
+    if (!v.canSend(input.mimeType)) return { ...NONE, note: FORMAT_NOT_SUPPORTED };
+    // Free and local, outside the hold: a conversion or measuring failure books nothing.
+    let prepared: PreparedVoice;
+    try {
+      prepared = await v.prepare({ mediaId: input.mediaId, path: input.path, mimeType: input.mimeType, maxSeconds });
+    } catch (e) {
+      if (e instanceof AudioError && e.code === 'too_long') return { ...NONE, note: TOO_LONG };
+      throw e;
+    }
+    try {
+      // The measured length may pass the bound (a low bitrate) up to the cap and its tolerance: the hold covers it.
+      const ceiling = v.ceilingUsd(Math.max(bound, prepared.measuredSeconds ?? 0));
+      if (ceiling > d.spend.capUsd) return { ...NONE, note: TOO_COSTLY };
+      if (input.revoked?.()) return REVOKED;
+      const { result } = await withSttHold(d.spend, ceiling, label(input), async () => {
+        const r = await v.transcribe(prepared);
+        const costUsd = v.costUsd({
+          maxSeconds: bound, billedSeconds: r.billedSeconds, declaredSeconds: input.declaredSeconds, measuredSeconds: prepared.measuredSeconds,
+        });
+        return { result: r, costUsd };
+      });
+      const forget = result.forgetRef === null ? null : { provider: result.provider, ref: result.forgetRef };
+      if (result.text === '') return { ...NONE, note: NO_SPEECH, forget };
+      return { textKind: 'extract', text: capStored(result.text), pageCount: null, note: null, forget };
+    } finally {
+      prepared.dispose(); // transcribe disposes too; this covers too_costly, revoked and a refused hold. Safe twice.
+    }
+  };
+
   return async (input) => {
     switch (input.kind) {
       case 'image':
@@ -192,8 +257,10 @@ export function createExtractor(d: ExtractorDeps): Extractor {
         if (isZip(input.bytes) && (mime === DOCX_MIME || /\.docx$/i.test(input.fileName ?? ''))) return readDocx(input);
         return NONE; // any other file: the original is kept, nothing is read
       }
+      case 'voice':
+      case 'audio':
+        return transcribe(input);
       default:
-        // voice and audio: Phase 2b plugs a Transcriber in here; 2a already saves their originals.
         // video and sticker are never downloaded, so they never get here.
         return NONE;
     }

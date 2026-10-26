@@ -137,7 +137,8 @@ describe('MediaProcessor', () => {
     );
     expect(readFileSync(saved(dataDir, rel(id)), 'utf8')).toBe('jpeg-bytes');
     expect(extract).toHaveBeenCalledWith({
-      mediaId: id, kind: 'image', mimeType: 'image/jpeg', fileName: null, forwarded: false, bytes: Buffer.from('jpeg-bytes'), revoked: expect.any(Function),
+      mediaId: id, kind: 'image', mimeType: 'image/jpeg', fileName: null, forwarded: false, bytes: Buffer.from('jpeg-bytes'), path: saved(dataDir, rel(id)),
+      declaredSeconds: null, revoked: expect.any(Function),
     });
     expect(getMediaRef(db, id)).toBeNull();
     expect(getMedia(db, id)).toMatchObject({ status: 'done', localPath: rel(id), fileSize: 10, textKind: 'description', text: 'A blue banner with the new logo' });

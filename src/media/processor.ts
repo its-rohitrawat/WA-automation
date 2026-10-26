@@ -228,8 +228,13 @@ export class MediaProcessor {
   async #run(row: MediaRow, job: MediaJob): Promise<ProcessOutcome> {
     const { db } = this.#o;
     let bytes: Buffer;
+    let rel: string;
     try {
-      bytes = row.localPath === null ? await this.#download(row, job) : await readFile(this.#abs(row.localPath));
+      if (row.localPath === null) ({ bytes, rel } = await this.#download(row, job));
+      else {
+        rel = row.localPath;
+        bytes = await readFile(this.#abs(rel));
+      }
     } catch (e) {
       if (typeof e === 'object' && e !== null) beforeReading.add(e);
       throw e;
@@ -243,12 +248,17 @@ export class MediaProcessor {
     }
     // The original is saved and hashed already: a DOCX's bytes may be moved to the parser, so nothing reads them after this.
     // The extractor asks `revoked` again just before a paid call, after the decode (FR3a).
-    const x = await this.#o.extract({ mediaId: row.id, kind: row.kind, mimeType: row.mimeType, fileName: row.fileName, forwarded: row.forwarded, bytes, revoked });
+    // A voice note is read from its path by the voice transcriber; its declared length is the sender's claim (V5).
+    const x = await this.#o.extract({
+      mediaId: row.id, kind: row.kind, mimeType: row.mimeType, fileName: row.fileName, forwarded: row.forwarded, bytes, path: this.#abs(rel),
+      declaredSeconds: row.seconds, revoked,
+    });
     finishMedia(db, row.id, { ...x, at: this.#now() });
     return 'done';
   }
 
-  async #download(row: MediaRow, job: MediaJob): Promise<Buffer> {
+  /** Downloads and saves the original; returns its bytes and its path relative to the data folder. */
+  async #download(row: MediaRow, job: MediaJob): Promise<{ bytes: Buffer; rel: string }> {
     const { db, sealer, fetcher } = this.#o;
     const blob = getMediaRef(db, row.id);
     if (!blob) throw new MediaUnavailableError('no_ref');
@@ -266,7 +276,7 @@ export class MediaProcessor {
     await mkdir(dirname(abs), { recursive: true });
     await saveOriginal(abs, bytes, sha256);
     markDownloaded(db, row.id, { localPath: rel, sha256, fileSize: bytes.length, at: this.#now() });
-    return bytes;
+    return { bytes, rel };
   }
 
   /**

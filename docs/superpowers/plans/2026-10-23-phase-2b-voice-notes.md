@@ -91,7 +91,8 @@ Each decision has a recommended default. The tasks are written for the defaults.
 - The length WhatsApp reports is set by the sender's phone, so it cannot be trusted for spend (the same rule as PDF page counts, 9g).
 - The hold before each call covers at most `ceil(bytes × 8 / 12_000)` seconds, capped at `STT_MAX_SECONDS`. A file whose size implies more than the cap is not sent and gets the note `too_long`.
 - Settlement uses the seconds the provider bills when it reports them (ElevenLabs, OpenAI). Otherwise it uses the length ffmpeg measured, when there is one, else the lower of the size bound and the declared length (Sarvam).
-- When ffmpeg is there, the file is measured before the hold (free, local). A note measured longer than the size bound plus 5 seconds (`VOICE_LENGTH_TOLERANCE_S`) is not sent and gets `too_long` too, so a low-bitrate file cannot become many paid parts. The hold covers the larger of the bound and the measured length.
+- When ffmpeg is there, the file is measured before the hold (free, local). A note measured longer than the cap (`STT_MAX_SECONDS`) plus 5 seconds (`VOICE_LENGTH_TOLERANCE_S`) is not sent and gets `too_long` too, so a low-bitrate file cannot become many paid parts. The hold covers the larger of the bound and the measured length.
+  - *Amended in Task 5's review:* the measured length is compared with the cap, not the size bound. Compared with the bound, an honest short note recorded below 12 kbit/s (whose size bound is too low) would be refused as `too_long`.
 - Expected cost at list prices: about $0.004–0.006 per voice-note minute. 100 notes a day of 45 seconds each cost about $0.3–0.45 a day.
 - **Tasks:** 3, 5.
 
@@ -180,8 +181,8 @@ export interface VoiceInput {
   /** From the row, e.g. 'audio/ogg; codecs=opus'. Untrusted: only its base type is compared with a fixed list. */
   mimeType: string | null;
   /**
-   * Upper bound in seconds, from the file size (V5). Never the sender's declared length. A note ffmpeg measures longer
-   * than this (plus VOICE_LENGTH_TOLERANCE_S) is refused by prepare.
+   * The cap in seconds (STT_MAX_SECONDS, V5), not the size bound and never the sender's declared length. A note ffmpeg
+   * measures longer than this (plus VOICE_LENGTH_TOLERANCE_S) is refused by prepare.
    */
   maxSeconds: number;
 }
@@ -447,7 +448,8 @@ CREATE TABLE media_stt_forget (
   - **Too costly:** a ceiling above the whole daily cap gives note `too_costly` (9a), no call, and the prepared note is disposed.
   - **Revoked** just before the call: note `revoked`, no call, and the prepared note is disposed.
   - **The hold** is `ceilingUsd(Math.max(bound, measuredSeconds ?? 0))`: a note measured at 603 s with a bound of 600 holds 603 s.
-  - **Success:** `prepare` gets `{ mediaId, path, mimeType, maxSeconds: sizeBoundSeconds(bytes) }`; the result is `{ textKind: 'extract', text, pageCount: null, note: null, forget: null }`; one spend row of kind `stt` with the cost from `costUsd({ maxSeconds: bound, billedSeconds, declaredSeconds, measuredSeconds })` and detail `media 7`; the hold was as above, as `stt`.
+  - **The cap goes to prepare** (review override), with the real `voiceTranscriber` over a fake provider and a measuring-only ffmpeg: measured 700 s with a bound of 600 and the cap 900 is sent and holds `ceilingUsd(700)`; measured 906 s with the cap 900 gives note `too_long` with no provider call; an honest 60 s note of 60,000 bytes (bound 40, 8 kbit/s) is sent.
+  - **Success:** `prepare` gets `{ mediaId, path, mimeType, maxSeconds: <the cap> }`; the result is `{ textKind: 'extract', text, pageCount: null, note: null, forget: null }`; one spend row of kind `stt` with the cost from `costUsd({ maxSeconds: bound, billedSeconds, declaredSeconds, measuredSeconds })` and detail `media 7`; the hold was as above, as `stt`.
   - **forgetRef** `'tr_1'` from ElevenLabs gives `forget: { provider: 'elevenlabs', ref: 'tr_1' }`.
   - **No speech** (`text: ''`): `{ textKind: null, text: null, note: 'no_speech' }`; the cost is still booked.
   - **A long transcript** is cut by `capStored`.
@@ -476,7 +478,8 @@ CREATE TABLE media_stt_forget (
     // Free and local, outside the hold: a conversion or measuring failure books nothing.
     let prepared: PreparedVoice;
     try {
-      prepared = await v.prepare({ mediaId: input.mediaId, path: input.path, mimeType: input.mimeType, maxSeconds: bound });
+      // The cap, not the bound: an honest note below 12 kbit/s measures longer than its bound (review override).
+      prepared = await v.prepare({ mediaId: input.mediaId, path: input.path, mimeType: input.mimeType, maxSeconds });
     } catch (e) {
       if (e instanceof AudioError && e.code === 'too_long') return { ...NONE, note: TOO_LONG };
       throw e;

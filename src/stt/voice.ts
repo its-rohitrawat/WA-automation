@@ -34,8 +34,8 @@ const MIN_BITRATE_BPS = 12_000;
 export const sizeBoundSeconds = (bytes: number): number => Math.ceil((bytes * 8) / MIN_BITRATE_BPS);
 
 /**
- * How far a measured length may exceed VoiceInput.maxSeconds before prepare refuses the note as too_long. ffmpeg's
- * summary and the size bound round differently, and a conversion can add a few frames of padding.
+ * How far a measured length may exceed VoiceInput.maxSeconds (the cap) before prepare refuses the note as too_long.
+ * ffmpeg's summary rounds, and a conversion can add a few frames of padding.
  */
 export const VOICE_LENGTH_TOLERANCE_S = 5;
 
@@ -56,8 +56,9 @@ export interface VoiceInput {
   /** From the row, e.g. 'audio/ogg; codecs=opus'. Untrusted: only its base type is compared with a fixed list. */
   mimeType: string | null;
   /**
-   * Upper bound in seconds, from the file size (V5). Never the sender's declared length. A note ffmpeg measures longer
-   * than this (plus VOICE_LENGTH_TOLERANCE_S) is refused by prepare.
+   * The cap in seconds (STT_MAX_SECONDS, V5), not the size bound and never the sender's declared length. A note ffmpeg
+   * measures longer than this (plus VOICE_LENGTH_TOLERANCE_S) is refused by prepare. The caller refuses a file whose size
+   * bound is above the cap before preparing it, and holds the larger of the bound and the measured length.
    */
   maxSeconds: number;
 }
