@@ -4,7 +4,7 @@ import type { MeetingSummary } from '../../src/brain/meetingSchema.ts';
 import { migrate, type Db } from '../../src/store/db.ts';
 import {
   advanceStage, assignMeeting, claimMeeting, deferMeeting, dueMeetingIds, failMeeting, finishMeeting, getMeeting, getMeetingState, insertFound,
-  knownRecordings, lastMeetingByClient, listClientMeetings, listUnassigned, meetingStats, retryMeeting, setSttParts, skipMeeting,
+  knownRecordings, lastMeetingByClient, listClientMeetings, listUnassigned, meetingStats, refreshMeetingFacts, retryMeeting, setSttParts, skipMeeting,
   type MeetingStatus, type NewMeeting, type SttPartRow,
 } from '../../src/store/meetings.ts';
 import { MIGRATIONS } from '../../src/store/migrations.ts';
@@ -472,5 +472,26 @@ describe('migration 7', () => {
     expect(() => insertFound(db, meeting({ ...internal, participants: ['Rohit'] }))).toThrow(/CHECK/);
     const queued = withStatus(db, 'queued');
     expect(() => db.prepare("UPDATE meetings SET status = 'internal' WHERE id = ?").run(queued)).toThrow(/CHECK/);
+  });
+});
+
+describe('refreshMeetingFacts', () => {
+  it('stores the facts read again for a queued meeting at stage found; empty values keep the stored ones', () => {
+    const db = seededDb();
+    const id = withStatus(db, 'queued', { title: '', attendees: [], participants: [] });
+    refreshMeetingFacts(db, id, { title: 'Brand review', attendees: [{ email: 'a@sharma.in', name: 'Asha', team: false }], participants: [] }, LATER);
+    expect(getMeeting(db, id)).toMatchObject({ title: 'Brand review', attendees: [{ email: 'a@sharma.in', name: 'Asha', team: false }], participants: [], updatedAt: LATER });
+    refreshMeetingFacts(db, id, { title: '', attendees: [], participants: ['Asha'] }, LATER);
+    expect(getMeeting(db, id)).toMatchObject({ title: 'Brand review', attendees: [{ name: 'Asha' }], participants: ['Asha'] });
+  });
+
+  it('throws, writing nothing, past stage found or when not queued', () => {
+    const db = seededDb();
+    const id = withStatus(db, 'queued');
+    advanceStage(db, id, 'audio', { audioPath: 'meetings/1.mp3', audioSeconds: 60 }, NOW);
+    expect(() => refreshMeetingFacts(db, id, { title: 'x', attendees: [], participants: [] }, LATER)).toThrow(/not queued at stage found/);
+    const un = withStatus(db, 'unassigned');
+    expect(() => refreshMeetingFacts(db, un, { title: 'x', attendees: [], participants: [] }, LATER)).toThrow(/not queued/);
+    expect(getMeeting(db, id)!.title).toBe('Sharma weekly');
   });
 });

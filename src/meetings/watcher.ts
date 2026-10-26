@@ -3,10 +3,11 @@ import { isDomain } from '../config/domains.ts';
 import type { ClientConfig } from '../config/groups.ts';
 import { getClientByGroupId } from '../store/clients.ts';
 import { tx, type Db } from '../store/db.ts';
+import { getKv, setKv } from '../store/kv.ts';
 import { insertFound, knownRecordings, type MeetingAttendee, type MeetingStatus, type NewMeeting } from '../store/meetings.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
-import { fromIstDate } from '../util/time.ts';
+import { fromIstDate, istDate } from '../util/time.ts';
 import type { ConferenceRef, DriveVideoInfo, InviteInfo, MeetingsGoogleApi } from './googleApi.ts';
 import { GoogleNoAccessError, GoogleTransientError } from './googleErrors.ts';
 import { domainOf, inDomains, matchClient, type MatchableClient, type MatchResult } from './match.ts';
@@ -99,6 +100,53 @@ export function cleanEmail(raw: string): string | null {
   if (parts.length !== 2) return null;
   const [local, domain] = parts as [string, string];
   return local !== '' && isDomain(domain) ? e : null;
+}
+
+/**
+ * An invite's facts, cleaned as they are stored: addresses that are not plain addresses dropped (for matching and for
+ * storing alike), names and the title as one clean line. `invited` is what matching reads; `attendees` what is stored.
+ * No invite: no attendees and the title ''.
+ */
+export function inviteFacts(
+  invite: InviteInfo | null,
+  teamDomains: readonly string[],
+): { invited: { email: string; name: string | null; self: boolean }[]; attendees: MeetingAttendee[]; title: string } {
+  const invited: { email: string; name: string | null; self: boolean }[] = [];
+  for (const a of invite?.attendees ?? []) {
+    const email = cleanEmail(a.email);
+    if (email !== null) invited.push({ email, name: a.name, self: a.self });
+  }
+  const attendees: MeetingAttendee[] = invited.map((a) => {
+    const name = a.name === null ? '' : cleanLine(a.name, NAME_MAX);
+    return { email: a.email, name: name === '' ? null : name, team: inDomains(domainOf(a.email) ?? '', teamDomains) };
+  });
+  return { invited, attendees, title: invite === null ? '' : cleanLine(invite.title, TITLE_MAX) };
+}
+
+/** Signed-in display names as stored: each a clean line, empty ones dropped, each once. */
+export function cleanNames(names: readonly string[]): string[] {
+  return [...new Set(names.map((n) => cleanLine(n, NAME_MAX)).filter((n) => n !== ''))];
+}
+
+/** A recording's title from its Drive file name, cleaned as stored. */
+export function fileNameTitle(name: string): string {
+  return cleanLine(titleFromFileName(name), TITLE_MAX);
+}
+
+/** kv key of the day meetings were first switched on (M3), so a restart does not move it. */
+const SINCE_KEY = 'meetings_since';
+
+/**
+ * MEETINGS_SINCE when it is set; otherwise the day (IST) meetings were first seen switched on, stored in kv
+ * 'meetings_since' the first time this runs, so a restart does not move it (M3).
+ */
+export function meetingsSince(db: Db, configured: string | undefined, now: Date): string {
+  if (configured !== undefined) return configured;
+  const stored = getKv(db, SINCE_KEY);
+  if (stored) return stored;
+  const today = istDate(now);
+  setKv(db, SINCE_KEY, today);
+  return today;
 }
 
 /** Everything known about one recording when its row is built. Title, names and attendees are already cleaned. */
@@ -296,17 +344,7 @@ export class MeetingWatcher {
     const code = await this.#api.meetingCode(c.space, signal);
     const invite: InviteInfo | null = code === null ? null : await this.#api.findInvite(code, c.startTime, signal);
     const teamDomains = this.#settings.teamDomains;
-    // Addresses are untrusted: one that is not a plain address is dropped, for matching and for storing alike.
-    const invited: { email: string; name: string | null; self: boolean }[] = [];
-    for (const a of invite?.attendees ?? []) {
-      const email = cleanEmail(a.email);
-      if (email !== null) invited.push({ email, name: a.name, self: a.self });
-    }
-    const attendees: MeetingAttendee[] = invited.map((a) => {
-      const name = a.name === null ? '' : cleanLine(a.name, NAME_MAX);
-      return { email: a.email, name: name === '' ? null : name, team: inDomains(domainOf(a.email) ?? '', teamDomains) };
-    });
-    const inviteTitle = invite === null ? '' : cleanLine(invite.title, TITLE_MAX);
+    const { invited, attendees, title: inviteTitle } = inviteFacts(invite, teamDomains);
     // Signed-in names are read only for a meeting that is not internal, once per conference.
     let participants: string[] | undefined;
 
@@ -322,12 +360,11 @@ export class MeetingWatcher {
         noAccessCode = e.code;
         this.#log.warn({ recording: r.name, code: e.code }, 'meeting recording not readable');
       }
-      const fileTitle = video === null ? '' : cleanLine(titleFromFileName(video.name), TITLE_MAX);
+      const fileTitle = video === null ? '' : fileNameTitle(video.name);
       const title = inviteTitle !== '' ? inviteTitle : fileTitle;
       const match = matchClient({ title, attendees: invited, hasInvite: invite !== null }, clients, teamDomains);
       if (match.kind !== 'internal' && participants === undefined) {
-        const names = await this.#api.listSignedInNames(c.name, signal);
-        participants = [...new Set(names.map((n) => cleanLine(n, NAME_MAX)).filter((n) => n !== ''))];
+        participants = cleanNames(await this.#api.listSignedInNames(c.name, signal));
       }
       rows.push(
         buildRow({

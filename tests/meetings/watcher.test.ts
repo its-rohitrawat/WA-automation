@@ -3,7 +3,10 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { ClientConfig } from '../../src/config/groups.ts';
 import type { DriveVideoInfo, InviteInfo, RecordingRef } from '../../src/meetings/googleApi.ts';
 import { GoogleAccessError, GoogleTransientError } from '../../src/meetings/googleErrors.ts';
-import { buildRow, cleanEmail, MeetingWatcher, titleFromFileName, type RowFacts, type WatcherSettings } from '../../src/meetings/watcher.ts';
+import {
+  buildRow, cleanEmail, cleanNames, inviteFacts, meetingsSince, MeetingWatcher, titleFromFileName, type RowFacts, type WatcherSettings,
+} from '../../src/meetings/watcher.ts';
+import { getKv } from '../../src/store/kv.ts';
 import { syncClients } from '../../src/store/clients.ts';
 import { openDb, type Db } from '../../src/store/db.ts';
 import { getMeeting, insertFound } from '../../src/store/meetings.ts';
@@ -471,5 +474,27 @@ describe('MeetingWatcher.backfill', () => {
     expect(real.added).toBe(2);
     expect(real.ids).toEqual(allRows(db).map((r) => r.id));
     expect(await w.backfill('2026-09-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z', signal)).toMatchObject({ added: 0, skipped: 2, ids: [] });
+  });
+});
+
+describe('meetingsSince (M3)', () => {
+  it('is MEETINGS_SINCE when set, else the IST day meetings were first seen on, kept across restarts', () => {
+    const db = openDb(':memory:');
+    expect(meetingsSince(db, '2026-09-01', new Date('2026-10-23T06:00:00.000Z'))).toBe('2026-09-01');
+    expect(getKv(db, 'meetings_since')).toBeUndefined();
+    // 20:00 UTC on 23 Oct is 01:30 on 24 Oct in India.
+    expect(meetingsSince(db, undefined, new Date('2026-10-23T20:00:00.000Z'))).toBe('2026-10-24');
+    expect(meetingsSince(db, undefined, new Date('2026-11-05T06:00:00.000Z'))).toBe('2026-10-24');
+  });
+});
+
+describe('inviteFacts and cleanNames', () => {
+  it('clean an invite and names as discovery stores them', () => {
+    const f = inviteFacts({ title: '  Brand\nreview\u202e ', attendees: [{ email: 'A@Sharma.in', name: ' Asha ', self: false }, { email: 'not an email', name: 'X', self: false }] }, ['studio.in']);
+    expect(f.title).toBe('Brand review');
+    expect(f.attendees).toEqual([{ email: 'a@sharma.in', name: 'Asha', team: false }]);
+    expect(f.invited).toEqual([{ email: 'a@sharma.in', name: ' Asha ', self: false }]);
+    expect(inviteFacts(null, [])).toEqual({ invited: [], attendees: [], title: '' });
+    expect(cleanNames(['Asha', ' Asha ', '', 'Ravi'])).toEqual(['Asha', 'Ravi']);
   });
 });

@@ -373,6 +373,32 @@ export function advanceStage(db: Db, id: number, stage: MeetingStage, fields: Pa
 }
 
 /**
+ * A queued meeting at stage found gets its invite title, attendees and signed-in names read again (an assigned meeting
+ * that was stored without them, such as one first taken for internal, M7). A title of '' and empty lists keep the
+ * stored values. The retry state is left as it is. Throws, writing nothing, when the meeting is missing, not queued or
+ * past stage found.
+ */
+export function refreshMeetingFacts(
+  db: Db,
+  id: number,
+  f: { title: string; attendees: MeetingAttendee[]; participants: string[] },
+  at: string,
+): void {
+  const params = {
+    id,
+    at: canonical('refreshMeetingFacts', 'at', at),
+    title: f.title === '' ? null : f.title,
+    attendees: f.attendees.length === 0 ? null : toJson('refreshMeetingFacts', 'attendees', AttendeesSchema, f.attendees),
+    participants: f.participants.length === 0 ? null : toJson('refreshMeetingFacts', 'participants', ParticipantsSchema, f.participants),
+  };
+  const n = db
+    .prepare(`UPDATE meetings SET title = COALESCE(@title, title), attendees = COALESCE(@attendees, attendees),
+        participants = COALESCE(@participants, participants), updated_at = @at WHERE id = @id AND status = 'queued' AND stage = 'found'`)
+    .run(params).changes;
+  if (n === 0) notQueued('refreshMeetingFacts', id, ' at stage found');
+}
+
+/**
  * Meetings of any status whose speech parts may include one left inflight, for the speech recovery at processor start.
  * A text match, so it reads no JSON; the caller checks the parts.
  */
