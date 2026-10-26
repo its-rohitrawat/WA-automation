@@ -20,7 +20,7 @@ const stats = (o: Partial<MeetingStats> = {}): MeetingStats => ({
 const meetings = (o: Partial<MeetingsHealth> = {}, s: Partial<MeetingStats> = {}): MeetingsHealth => ({
   stats: stats(s), paused: null, sttProvider: 'sarvam', ...o,
 });
-const media = (o: Partial<MediaHealth> = {}): MediaHealth => ({ pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, ...o });
+const media = (o: Partial<MediaHealth> = {}): MediaHealth => ({ pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0, ...o });
 
 const SCOPES = '⚠️ Meetings paused: Google sign-in needs meeting access. Run: npm run cli -- google-auth';
 const FFMPEG = '⚠️ Meetings paused: ffmpeg not found';

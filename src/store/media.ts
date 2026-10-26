@@ -354,13 +354,42 @@ export interface VoiceBacklogRow {
 /**
  * The 2a backlog (V6), shared by voiceBacklog and queueVoiceBacklog so the listing and the queueing never disagree: a
  * saved voice note or audio file that was finished without a transcript and without an error, its message not deleted
- * for everyone, its client active, and not queued as backlog before. A file noted format_not_supported (no ffmpeg then,
- * N2) is included, so installing ffmpeg lets the command pick it up; any other note (too long, forwarded) is final. It
- * is included even when it was queued as backlog before and finished format_not_supported again, so it is never stuck.
+ * for everyone, its client active. A file noted format_not_supported (no ffmpeg then, N2) is included, so installing
+ * ffmpeg lets the command pick it up; any other note (too_long, forwarded_not_transcribed, no_speech, too_costly,
+ * revoked) is final.
+ * Whether it was queued as backlog before does not matter (Phase 2b final review): a backlog file that finished again
+ * with no transcriber (voice notes switched off while it waited) has no text and no note, so it is listed again rather
+ * than stuck. A transcript always sets text_kind, even one stored as no text (finishMedia stores text that shows nothing
+ * as NULL), so `text_kind IS NULL` keeps every file that was transcribed out, backlog or not.
  */
 const VOICE_BACKLOG_FROM = `FROM media m JOIN messages msg ON msg.id = m.message_id JOIN clients c ON c.id = m.client_id AND c.active = 1
-      WHERE m.kind IN ('voice', 'audio') AND m.status = 'done' AND m.text IS NULL AND (m.note IS NULL OR m.note = 'format_not_supported')
-        AND m.error_code IS NULL AND m.local_path IS NOT NULL AND (m.backlog = 0 OR m.note = 'format_not_supported') AND msg.revoked = 0`;
+      WHERE m.kind IN ('voice', 'audio') AND m.status = 'done' AND m.text IS NULL AND m.text_kind IS NULL
+        AND (m.note IS NULL OR m.note = 'format_not_supported') AND m.error_code IS NULL AND m.local_path IS NOT NULL AND msg.revoked = 0`;
+
+/**
+ * The error codes of a voice note or audio file that failed on this computer, never at a paid provider (Phase 2b final
+ * review): the local engine's own (local_<code>: local_empty_output, local_timeout, local_exit_<n>, local_no_output,
+ * local_aborted after 24 hours) and ffmpeg's (audio_convert_failed, audio_no_duration, audio_split_failed). An SQL
+ * condition on m (media). The underscore is escaped: in LIKE it matches any one character. Never an stt_* code: those
+ * failed at a paid provider and may have been paid. Shared by mediaStats (voiceFailed) and the --failed listing.
+ */
+const LOCAL_FAILURE = `(m.error_code LIKE 'local\\_%' ESCAPE '\\' OR m.error_code IN ('audio_convert_failed', 'audio_no_duration', 'audio_split_failed'))`;
+
+/**
+ * Failed voice notes and audio files `cli transcribe-voice --failed` can queue again, shared by failedLocalVoice and
+ * queueFailedLocalVoice as the backlog's FROM is: failed on this computer (LOCAL_FAILURE), the original still saved, its
+ * message not deleted for everyone, its client active.
+ */
+const FAILED_LOCAL_VOICE_FROM = `FROM media m JOIN messages msg ON msg.id = m.message_id JOIN clients c ON c.id = m.client_id AND c.active = 1
+      WHERE m.kind IN ('voice', 'audio') AND m.status = 'failed' AND ${LOCAL_FAILURE} AND m.local_path IS NOT NULL AND msg.revoked = 0`;
+
+/**
+ * The fields a file queued again by `cli transcribe-voice` gets (V6), shared by queueVoiceBacklog and
+ * queueFailedLocalVoice: pending with a fresh set of attempts, no error, no note, created now; backlog = 1 only when
+ * its message is processed and not queued again for an edit or a reaction.
+ */
+const REQUEUE_SET = `status = 'pending', attempts = 0, next_attempt_at = NULL, error_code = NULL, note = NULL, created_at = @at, updated_at = @at,
+        backlog = (SELECT msg.processed_at IS NOT NULL AND msg.requeue_reason IS NULL FROM messages msg WHERE msg.id = media.message_id)`;
 
 /** The 2a voice notes and audio files `cli transcribe-voice` can transcribe, oldest first; optionally one client's only. */
 export function voiceBacklog(db: Db, o: { clientId?: number } = {}): VoiceBacklogRow[] {
@@ -384,9 +413,33 @@ export function voiceBacklog(db: Db, o: { clientId?: number } = {}): VoiceBacklo
 export function queueVoiceBacklog(db: Db, ids: number[], at: string): number {
   if (ids.length === 0) return 0;
   return db
-    .prepare(`UPDATE media SET status = 'pending', attempts = 0, next_attempt_at = NULL, error_code = NULL, note = NULL, created_at = @at, updated_at = @at,
-        backlog = (SELECT msg.processed_at IS NOT NULL AND msg.requeue_reason IS NULL FROM messages msg WHERE msg.id = media.message_id)
+    .prepare(`UPDATE media SET ${REQUEUE_SET}
       WHERE id IN (SELECT value FROM json_each(@ids)) AND id IN (SELECT m.id ${VOICE_BACKLOG_FROM})`)
+    .run({ ids: JSON.stringify(ids), at }).changes;
+}
+
+/**
+ * Voice notes and audio files that failed on this computer (the local engine or ffmpeg, never a paid provider), which
+ * `cli transcribe-voice --failed` can queue again; oldest first, optionally one client's only. Same shape as the backlog.
+ */
+export function failedLocalVoice(db: Db, o: { clientId?: number } = {}): VoiceBacklogRow[] {
+  return db
+    .prepare(`SELECT m.id, m.client_id AS clientId, m.file_size AS fileSize, m.mime_type AS mimeType ${FAILED_LOCAL_VOICE_FROM}
+      AND (@clientId IS NULL OR m.client_id = @clientId) ORDER BY m.id`)
+    .all({ clientId: o.clientId ?? null }) as VoiceBacklogRow[];
+}
+
+/**
+ * Queues the given failed files again (`cli transcribe-voice --failed`), exactly as queueVoiceBacklog queues the backlog:
+ * pending, attempts 0, no error, no next attempt, no note, created now, backlog by the same rule. Each file is checked
+ * against FAILED_LOCAL_VOICE_FROM again, so one that changed since it was listed, or that failed at a paid provider, is
+ * left alone. One statement. Returns how many were queued.
+ */
+export function queueFailedLocalVoice(db: Db, ids: number[], at: string): number {
+  if (ids.length === 0) return 0;
+  return db
+    .prepare(`UPDATE media SET ${REQUEUE_SET}
+      WHERE id IN (SELECT value FROM json_each(@ids)) AND id IN (SELECT m.id ${FAILED_LOCAL_VOICE_FROM})`)
     .run({ ids: JSON.stringify(ids), at }).changes;
 }
 
@@ -553,6 +606,12 @@ export interface MediaStats {
   uploadFailed: number;
   /** Pending voice notes and audio files waiting because the speech-to-text provider refused the key (stt_unavailable). */
   sttRefused: number;
+  /**
+   * Voice notes and audio files that failed on this computer in the last 24 hours: the local engine's errors (local_*)
+   * or ffmpeg's (audio_convert_failed, audio_no_duration, audio_split_failed), never a paid provider's (Phase 2b final
+   * review). `cli transcribe-voice --failed` queues them again.
+   */
+  voiceFailed: number;
 }
 
 /**
@@ -571,7 +630,8 @@ export function mediaStats(db: Db, now: Date, startedAt: Date = new Date(0), sta
         COALESCE(SUM(m.drive_failed = 1 AND EXISTS (SELECT 1 FROM messages msg
           JOIN people p ON p.client_id = m.client_id AND p.jid = msg.sender_jid
           WHERE msg.id = m.message_id AND ${UPLOADABLE})), 0) AS uploadFailed,
-        COALESCE(SUM(m.status = 'pending' AND m.error_code = 'stt_unavailable'), 0) AS sttRefused
+        COALESCE(SUM(m.status = 'pending' AND m.error_code = 'stt_unavailable'), 0) AS sttRefused,
+        COALESCE(SUM(m.kind IN ('voice', 'audio') AND m.status = 'failed' AND m.updated_at >= @dayAgo AND ${LOCAL_FAILURE}), 0) AS voiceFailed
       FROM media m JOIN clients c ON c.id = m.client_id AND c.active = 1`)
     .get({ staleBefore, startedAt: startedAt.toISOString(), dayAgo: new Date(now.getTime() - 86_400_000).toISOString() }) as MediaStats;
 }

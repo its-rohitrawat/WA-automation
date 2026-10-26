@@ -308,6 +308,25 @@ describe('waiting for files', () => {
     }
   });
 
+  // Phase 2b final review: with VOICE_STT_PROVIDER=none (no transcriber) voice notes never hold the tracker up, as in
+  // 2a and as SETUP says; images and documents are unchanged.
+  it('with voice transcription off, a pending voice note or audio file never blocks; images and documents still do', () => {
+    const off = { voiceOn: false };
+    for (const kind of ['voice', 'audio'] as const) {
+      const sound = pending({ kind, mimeType: 'audio/ogg', seconds: 42, createdAt: '2026-10-19T07:59:00.000Z' });
+      expect(isBlocking(sound, now, longAgo, MEDIA_MAX_WAIT_MS, off), kind).toBe(false);
+      expect(isBlocking(sound, now, longAgo, MEDIA_MAX_WAIT_MS, { voiceOn: true }), kind).toBe(true);
+      expect(isBlocking(sound, now, longAgo), kind).toBe(true); // on unless said otherwise
+      expect(readyPrefix([msg(1), msg(2), msg(3)], new Map([[2, { ...sound, messageId: 2 }]]), now, longAgo, off).map((m) => m.id), kind).toEqual([1, 2, 3]);
+    }
+    const image = pending({ createdAt: '2026-10-19T07:59:00.000Z' });
+    const doc = pending({ kind: 'document', mimeType: 'application/pdf', createdAt: '2026-10-19T07:59:00.000Z' });
+    for (const file of [image, doc]) {
+      expect(isBlocking(file, now, longAgo, MEDIA_MAX_WAIT_MS, off)).toBe(true);
+      expect(readyPrefix([msg(1), msg(2), msg(3)], new Map([[2, { ...file, messageId: 2 }]]), now, longAgo, off).map((m) => m.id)).toEqual([1]);
+    }
+  });
+
   it('readyPrefix stops at a voice note being transcribed, and lets it go after the wait (V1)', () => {
     const media = new Map([[2, pending({ messageId: 2, kind: 'voice', mimeType: 'audio/ogg', seconds: 42, createdAt: '2026-10-19T07:59:00.000Z' })]]);
     const batch = [msg(1), msg(2, { text: null, mediaType: 'voice' }), msg(3)];

@@ -21,7 +21,7 @@ import { finishMedia, getMedia, insertMedia, markDownloaded, markUploadFailed, m
 import { insertMessage, listUnprocessed, markProcessed } from '../src/store/messages.ts';
 import { setRole, upsertPerson } from '../src/store/people.ts';
 import { LocalEngineError } from '../src/stt/local.ts';
-import type { PreparedVoice, VoiceResult } from '../src/stt/voice.ts';
+import type { PreparedVoice, VoiceInput, VoiceResult, VoiceTranscriber } from '../src/stt/voice.ts';
 import { systemClock } from '../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../src/util/logger.ts';
 import { AllowList } from '../src/wa/allowlist.ts';
@@ -500,7 +500,7 @@ describe('app media wiring (15g)', () => {
     await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0));
     expect(getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable' });
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(readHealthSnapshot(db)!.media).toEqual({ pending: 1, stale: 1, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0 });
+    expect(readHealthSnapshot(db)!.media).toEqual({ pending: 1, stale: 1, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0 });
     expect(readHealthSnapshot(db)!.line).toEqual({ ok: false, text: '⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.' });
     await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0));
     await stopApp(app);
@@ -753,7 +753,7 @@ describe('app start time (15a, 15f)', () => {
     });
     const { db, ai, app } = setup({ startedAt, media: { sealer, fetcher }, prepare: (db) => storedImage(db, sealer, minutesBefore(120).toISOString()) });
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalled());
-    expect(readHealthSnapshot(db)!.media).toEqual({ pending: 1, stale: expected.stale, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0 });
+    expect(readHealthSnapshot(db)!.media).toEqual({ pending: 1, stale: expected.stale, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0 });
     await vi.advanceTimersByTimeAsync(241_000);
     if (expected.blocks) expect(ai.calls).toHaveLength(0);
     else expect(ai.calls[0]!.user).toContain(': old banner {image, still being read}');
@@ -896,6 +896,23 @@ class GatedLocalVoice extends FakeLocalVoiceTranscriber {
   }
 }
 
+/**
+ * A local transcriber whose conversion (prepare) lasts until the stop signal, then ends as the real one now does
+ * (Phase 2b final review): LocalEngineError('aborted'). Without a signal it would never end.
+ */
+class UntilAbortedConversion extends FakeLocalVoiceTranscriber {
+  entered = 0;
+  readonly prepareSignals: (AbortSignal | undefined)[] = [];
+  override prepare(input: VoiceInput): Promise<PreparedVoice> {
+    this.entered++;
+    this.prepared.push(input);
+    this.prepareSignals.push(input.signal);
+    return new Promise<never>((_resolve, reject) => {
+      input.signal?.addEventListener('abort', () => reject(new LocalEngineError('aborted')), { once: true });
+    });
+  }
+}
+
 /** A local transcriber whose run lasts until the stop signal, then ends as the real engine does (LocalEngineError('aborted')). */
 class UntilAbortedLocalVoice extends FakeLocalVoiceTranscriber {
   entered = 0;
@@ -969,13 +986,69 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     await stopApp(app);
   });
 
+  // Phase 2b final review: voice notes hold up their messages only while a transcriber is set up.
+  describe('whether a voice note still being read holds up its message', () => {
+    /** A voice note whose download never ends while the test runs, so it stays pending. */
+    const stuckVoice = (voice: VoiceTranscriber | null) => {
+      const g = gate();
+      const fetcher = vi.fn<MediaFetcher>(async () => {
+        await g.promise;
+        return Buffer.from('bytes');
+      });
+      const s = setup({ media: { voice, fetcher, extract: undefined } });
+      shareVoice(s.sock);
+      return { ...s, fetcher, release: () => g.release() };
+    };
+
+    it('with no transcriber (VOICE_STT_PROVIDER none), it holds up nothing, as in 2a', async () => {
+      const { db, ai, app, fetcher, release } = stuckVoice(null);
+      await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce(), SLOW_IO);
+      await vi.advanceTimersByTimeAsync(240_000);
+      expect(getMedia(db, 1)).toMatchObject({ status: 'pending' });
+      expect(ai.calls).toHaveLength(1);
+      expect(ai.calls[0]!.user).toContain('{voice note, 0:14, being transcribed}');
+      release();
+      await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0), SLOW_IO);
+      await stopApp(app);
+    });
+
+    it('with the local engine, it holds up its message for 30 minutes', async () => {
+      const { db, ai, app, fetcher, release } = stuckVoice(new FakeLocalVoiceTranscriber());
+      await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce(), SLOW_IO);
+      await vi.advanceTimersByTimeAsync(240_000);
+      expect(ai.calls).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(20 * MINUTE);
+      expect(getMedia(db, 1)).toMatchObject({ status: 'pending' });
+      expect(ai.calls).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(12 * MINUTE); // past 30 minutes, the next tick and the quiet time
+      expect(ai.calls).toHaveLength(1);
+      expect(ai.calls[0]!.user).toContain('{voice note, 0:14, being transcribed}');
+      release();
+      await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0), SLOW_IO);
+      await stopApp(app);
+    });
+  });
+
+  /**
+   * The run's deferral itself has been written: `runs` runs made, and the row deferred after the last one (its next
+   * attempt `delayMs` after the deferral, which the claim's 15 minutes never match). Waiting only for the claim (attempts
+   * counted) let the fake clock move before the run ended: the deferral then counted from the moved clock, and the next
+   * run never came within the test's advance (Phase 2b final review, the flaky tests).
+   */
+  const deferredAfter = (db: Db, transcribed: () => number, runs: number, delayMs: number, errorCode: string) => {
+    expect(transcribed()).toBe(runs);
+    const m = getMedia(db, 1)!;
+    expect(m).toMatchObject({ status: 'pending', attempts: runs, errorCode });
+    expect(Date.parse(m.nextAttemptAt!) - Date.parse(m.updatedAt)).toBe(delayMs);
+  };
+
   it('the local engine gets 3 runs (voicePaid false): a note whose runs all fail fails after the third', async () => {
     const voice = new FakeLocalVoiceTranscriber({ results: [new LocalEngineError('timeout'), new LocalEngineError('timeout'), new LocalEngineError('timeout')] });
     const { db, app, sock } = setup({ media: { voice, extract: undefined } });
     shareVoice(sock);
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'local_timeout' }), SLOW_IO);
+    await vi.waitFor(() => deferredAfter(db, () => voice.transcribed, 1, MINUTE, 'local_timeout'), SLOW_IO);
     await vi.advanceTimersByTimeAsync(2 * MINUTE);
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 2 }), SLOW_IO);
+    await vi.waitFor(() => deferredAfter(db, () => voice.transcribed, 2, 5 * MINUTE, 'local_timeout'), SLOW_IO);
     await vi.advanceTimersByTimeAsync(6 * MINUTE);
     await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'failed', attempts: 3, errorCode: 'local_timeout' }), SLOW_IO);
     expect(voice.transcribed).toBe(3);
@@ -988,7 +1061,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const voice = new FakeVoiceTranscriber({ provider: 'sarvam', results: [new LocalEngineError('exit_1'), new LocalEngineError('exit_1'), new LocalEngineError('exit_1')] });
     const { db, app, sock } = setup({ media: { voice, extract: undefined } });
     shareVoice(sock);
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 1 }), SLOW_IO);
+    await vi.waitFor(() => deferredAfter(db, () => voice.transcribed, 1, MINUTE, 'local_exit_1'), SLOW_IO);
     await vi.advanceTimersByTimeAsync(2 * MINUTE);
     await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'failed', attempts: 2 }), SLOW_IO);
     expect(voice.transcribed).toBe(2);
@@ -1047,6 +1120,27 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     for (let i = 0; i < 20 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
     expect(stopped).toBe(true);
     await p;
+    expect(getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'local_aborted' });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  // Phase 2b final review: a stop during the conversion stops ffmpeg too, and gives the attempt back like a stopped run.
+  it('stop() during the local conversion stops it: the note waits for the restart as local_aborted, its attempt given back', async () => {
+    const voice = new UntilAbortedConversion();
+    const { db, app, sock } = setup({ media: { voice, extract: undefined }, drainMs: 60_000 });
+    shareVoice(sock);
+    await vi.waitFor(() => expect(voice.entered).toBe(1), SLOW_IO);
+    expect(voice.prepareSignals[0]).toBeInstanceOf(AbortSignal);
+    expect(voice.prepareSignals[0]!.aborted).toBe(false);
+    let stopped = false;
+    const p = app.stop().then(() => {
+      stopped = true;
+    });
+    expect(voice.prepareSignals[0]!.aborted).toBe(true);
+    for (let i = 0; i < 20 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
+    expect(stopped).toBe(true);
+    await p;
+    expect(voice.transcribed).toBe(0);
     expect(getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'local_aborted' });
     expect(vi.getTimerCount()).toBe(0);
   });

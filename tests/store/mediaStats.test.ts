@@ -32,7 +32,7 @@ function gaveUpUpload(db: Db, waId: string, clientId = 1): number {
   return id;
 }
 
-const ZERO = { pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0 };
+const ZERO = { pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0 };
 
 describe('mediaStats', () => {
   it('counts waiting, long-waiting, budget-waiting and recently failed files and uploads that gave up', () => {
@@ -43,7 +43,7 @@ describe('mediaStats', () => {
     failMedia(db, add(db, 'D'), { status: 'failed', errorCode: 'not_pdf', at: '2026-10-19T07:30:00.000Z' });
     failMedia(db, add(db, 'E'), { status: 'failed', errorCode: 'not_pdf', at: '2026-10-17T07:30:00.000Z' });
     gaveUpUpload(db, 'F');
-    expect(mediaStats(db, new Date('2026-10-19T08:00:00.000Z'))).toEqual({ pending: 3, stale: 1, spendCap: 1, failedRecent: 1, uploadFailed: 1, sttRefused: 0 });
+    expect(mediaStats(db, new Date('2026-10-19T08:00:00.000Z'))).toEqual({ pending: 3, stale: 1, spendCap: 1, failedRecent: 1, uploadFailed: 1, sttRefused: 0, voiceFailed: 0 });
   });
 
   it('counts pending files waiting because the speech-to-text key was refused (sttRefused), of active clients only', () => {

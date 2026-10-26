@@ -4,7 +4,7 @@ import { transcribeVoiceCommand, type TranscribeVoiceDeps } from '../../src/cli/
 import { parseEnv } from '../../src/config/env.ts';
 import { syncClients } from '../../src/store/clients.ts';
 import type { Db } from '../../src/store/db.ts';
-import { claimMedia, finishMedia, getMedia, insertMedia, markDownloaded, messageRowId, type MediaKind, type NewMedia } from '../../src/store/media.ts';
+import { claimMedia, failMedia, finishMedia, getMedia, insertMedia, markDownloaded, messageRowId, type MediaKind, type NewMedia } from '../../src/store/media.ts';
 import { insertMessage, listUnprocessed, markProcessed } from '../../src/store/messages.ts';
 import { VOICE_LENGTH_TOLERANCE_S, voiceCeilingUsd } from '../../src/stt/voice.ts';
 import { manualClock } from '../../src/util/clock.ts';
@@ -43,13 +43,16 @@ const finder = (found: boolean) => async (configured: string | undefined): Promi
   return found ? (configured ?? 'ffmpeg') : null;
 };
 
-/** ffmpeg is there unless a test says otherwise: every file needs it (Task 5 review round 1). */
+/**
+ * ffmpeg is there unless a test says otherwise: every file needs it (Task 5 review round 1). The local engine's files
+ * are there too (the paths in localEnv are not real files); the tests of that check pass their own.
+ */
 function deps(over: Partial<TranscribeVoiceDeps> = {}): TranscribeVoiceDeps {
-  return { env: env(), out: (l) => void lines.push(l), db, clock: manualClock(QUEUED_AT), findFfmpeg: finder(true), ...over };
+  return { env: env(), out: (l) => void lines.push(l), db, clock: manualClock(QUEUED_AT), findFfmpeg: finder(true), checkLocalEngine: () => null, ...over };
 }
 
-const run = (opts: { client?: string; yes?: boolean } = {}, over: Partial<TranscribeVoiceDeps> = {}) =>
-  transcribeVoiceCommand({ ...opts, yes: opts.yes === true }, deps(over));
+const run = (opts: { client?: string; yes?: boolean; failed?: boolean } = {}, over: Partial<TranscribeVoiceDeps> = {}) =>
+  transcribeVoiceCommand({ ...opts, yes: opts.yes === true, failed: opts.failed === true }, deps(over));
 
 let seq = 0;
 /** A 2a voice note: saved on disk, finished without a transcript, its message processed. */
@@ -72,6 +75,27 @@ function backlogVoice(o: { clientId?: number; kind?: MediaKind; fileSize?: numbe
   finishMedia(db, id, {
     textKind: o.text === undefined ? null : 'extract', text: o.text ?? null, pageCount: null, note: o.note ?? null, at: NOW,
   });
+  markProcessed(db, [messageId], NOW);
+  return id;
+}
+
+/** A saved voice note that failed with errorCode after its tries (its message processed: the tracker went ahead). */
+function failedVoice(errorCode: string, o: { clientId?: number; kind?: MediaKind; fileSize?: number } = {}): number {
+  const clientId = o.clientId ?? 1;
+  const kind = o.kind ?? 'voice';
+  const waId = `F${++seq}`;
+  insertMessage(db, {
+    waId, clientId, senderJid: '919800000001@s.whatsapp.net', senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false,
+    ts: '2026-10-25T08:00:00.000Z', text: null, quotedWaId: null, mediaType: kind,
+  });
+  const messageId = messageRowId(db, clientId, waId)!;
+  const id = insertMedia(db, {
+    messageId, clientId, kind, status: 'pending', mimeType: OGG, fileName: FILE_NAME, fileSize: 1000, seconds: 5, forwarded: false,
+    refEnc: Buffer.from('sealed'), errorCode: null, createdAt: NOW,
+  });
+  markDownloaded(db, id, { localPath: `media/SHA/2026-10/${waId}-${id}.ogg`, sha256: 'x', fileSize: o.fileSize ?? 90_000, at: NOW });
+  claimMedia(db, id, { nextAttemptAt: LATER, at: NOW });
+  failMedia(db, id, { status: 'failed', errorCode, at: NOW });
   markProcessed(db, [messageId], NOW);
   return id;
 }
@@ -425,5 +449,186 @@ describe('transcribe-voice --yes', () => {
     await run({ client: 'SHA' });
     const all = output();
     for (const secret of [FILE_NAME, 'Secret', TRANSCRIPT, 'Payment', KEY, '.ogg', 'media/SHA']) expect(all).not.toContain(secret);
+  });
+});
+
+// Phase 2b final review: with the local engine, the command checks the engine's files first, as the service does when
+// it starts, so it never queues notes that would only finish "not transcribed" again.
+describe('transcribe-voice: the local engine not set up', () => {
+  const notSetUp = (name: string) =>
+    `The local speech engine is not set up (${name}). Fix ${name} in .env (docs/SETUP-mac.md, section 8), restart the service, then run this again. Nothing changed.`;
+
+  it.each([['STT_LOCAL_BIN'], ['STT_LOCAL_MODEL']] as const)('refuses the dry run and --yes when %s is not a file, naming the setting only', async (name) => {
+    const id = backlogVoice();
+    const failed = failedVoice('local_timeout');
+    const before = allMedia();
+    for (const opts of [{}, { yes: true }, { failed: true }, { failed: true, yes: true }]) {
+      await run(opts, { env: localEnv(), checkLocalEngine: () => name });
+    }
+    expect(lines).toEqual([notSetUp(name), notSetUp(name), notSetUp(name), notSetUp(name)]);
+    expect(allMedia()).toEqual(before);
+    expect(statusOf(id).status).toBe('done');
+    expect(statusOf(failed).status).toBe('failed');
+    expect(ffmpegAsked).toEqual([]);
+  });
+
+  it('with the real check, the example paths (not files on this computer) are refused, and no path is printed', async () => {
+    backlogVoice();
+    const { checkLocalEngine: _seam, ...rest } = deps({ env: localEnv() });
+    await transcribeVoiceCommand({ yes: true, failed: false }, rest);
+    expect(lines).toEqual([notSetUp('STT_LOCAL_BIN')]);
+    for (const secret of ['/opt/stt', 'transcribe-cli', 'voxtral.gguf']) expect(output()).not.toContain(secret);
+  });
+
+  it('a check that throws counts as STT_LOCAL_BIN not set up', async () => {
+    backlogVoice();
+    const throws = (): never => {
+      throw new Error('/opt/stt/transcribe-cli: EACCES');
+    };
+    await run({ yes: true }, { env: localEnv(), checkLocalEngine: throws });
+    expect(lines).toEqual([notSetUp('STT_LOCAL_BIN')]);
+    expect(output()).not.toContain('/opt/stt');
+  });
+
+  it('is not asked for a paid provider', async () => {
+    backlogVoice({ fileSize: 90_000 });
+    let asked = 0;
+    const check = (): 'STT_LOCAL_BIN' => {
+      asked++;
+      return 'STT_LOCAL_BIN';
+    };
+    await run({}, { checkLocalEngine: check });
+    expect(asked).toBe(0);
+    expect(lines[0]).toBe('To transcribe: 1 voice note or audio file saved before Phase 2b, about 1 minute.');
+  });
+});
+
+// Phase 2b final review: a backlog note queued, then finished while voice notes were off, is listed again.
+describe('transcribe-voice: a queued note finished with no transcriber', () => {
+  it('round trip: queued, finished with no transcriber, listed and queued again', async () => {
+    const id = backlogVoice({ fileSize: 90_000 });
+    await run({ yes: true }, { env: localEnv() });
+    expect(statusOf(id)).toMatchObject({ status: 'pending', backlog: true });
+    // The service ran with VOICE_STT_PROVIDER=none meanwhile: the note finished without a transcript, as in 2a.
+    finishMedia(db, id, { textKind: null, text: null, pageCount: null, note: null, at: LATER });
+    lines = [];
+    await run({}, { env: localEnv() });
+    expect(lines[0]).toBe('To transcribe: 1 voice note or audio file saved before Phase 2b, about 1 minute.');
+    lines = [];
+    await run({ yes: true }, { env: localEnv(), clock: manualClock('2026-10-26T09:00:00.000Z') });
+    expect(lines.at(-1)).toBe('1 queued. The running service now transcribes them, for the record. It costs nothing and does not count toward the daily spend cap.');
+    expect(statusOf(id)).toMatchObject({ status: 'pending', backlog: true, createdAt: '2026-10-26T09:00:00.000Z' });
+  });
+});
+
+// Phase 2b final review: notes the local engine (or ffmpeg) could not transcribe after their tries can be tried again.
+describe('transcribe-voice --failed', () => {
+  const LOCAL_COST = 'Cost: $0 (local engine on this computer).';
+  const FREE = 'It costs nothing and does not count toward the daily spend cap.';
+  const NEEDS_LOCAL =
+    'transcribe-voice --failed tries again notes the local engine could not transcribe: it works only with VOICE_STT_PROVIDER=local. Nothing changed.';
+  const NONE_FAILED = 'No voice notes or audio files failed in the local engine. Nothing changed.';
+
+  it('the dry run counts the failed notes and the minutes, says the cost is $0, and changes nothing', async () => {
+    failedVoice('local_empty_output', { fileSize: 900_000 });
+    failedVoice('audio_convert_failed', { fileSize: 450_000, clientId: 2, kind: 'audio' });
+    failedVoice('stt_partial'); // failed at a paid provider: never counted
+    backlogVoice(); // the backlog is another listing
+    const before = allMedia();
+    await run({ failed: true }, { env: localEnv() });
+    expect(lines).toEqual([
+      'To try again: 2 voice notes or audio files the local engine could not transcribe, about 15 minutes.',
+      LOCAL_COST,
+      `With --yes the running service tries them again (3 tries each). ${FREE}`,
+      'Nothing was changed. Re-run with --yes to queue them again.',
+    ]);
+    expect(allMedia()).toEqual(before);
+  });
+
+  it('--yes queues them again: pending, attempts 0, no error, no note, created now, backlog by the same rule as the backlog', async () => {
+    const a = failedVoice('local_timeout');
+    const b = failedVoice('audio_no_duration', { kind: 'audio' });
+    const unprocessed = failedVoice('local_exit_1');
+    db.prepare('UPDATE messages SET processed_at = NULL WHERE id = ?').run(getMedia(db, unprocessed)!.messageId);
+    const paid = failedVoice('stt_paid_unbooked');
+    const backlog = backlogVoice();
+    await run({ failed: true, yes: true }, { env: localEnv() });
+    expect(lines).toEqual([
+      'To try again: 3 voice notes or audio files the local engine could not transcribe, about 3 minutes.',
+      LOCAL_COST,
+      `3 queued again. The running service now tries them again (3 tries each). ${FREE}`,
+    ]);
+    const fresh = { status: 'pending', note: null, text: null, attempts: 0, createdAt: QUEUED_AT };
+    expect(statusOf(a)).toEqual({ ...fresh, backlog: true });
+    expect(statusOf(b)).toEqual({ ...fresh, backlog: true });
+    expect(statusOf(unprocessed)).toEqual({ ...fresh, backlog: false });
+    for (const id of [a, b, unprocessed]) expect(getMedia(db, id)).toMatchObject({ errorCode: null, nextAttemptAt: null });
+    expect(getMedia(db, paid)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1 });
+    expect(statusOf(backlog)).toMatchObject({ status: 'done' }); // --failed queues only failed notes
+    lines = [];
+    await run({ failed: true, yes: true }, { env: localEnv() });
+    expect(lines).toEqual([NONE_FAILED]);
+  });
+
+  it.each(['sarvam', 'elevenlabs', 'openai'])('is refused with VOICE_STT_PROVIDER=%s: those failures may have been paid', async (provider) => {
+    const id = failedVoice('local_timeout');
+    const before = allMedia();
+    await run({ failed: true, yes: true }, { env: env({ STT_PROVIDER: provider, VOICE_STT_PROVIDER: provider }) });
+    expect(lines).toEqual([NEEDS_LOCAL]);
+    expect(allMedia()).toEqual(before);
+    expect(statusOf(id).status).toBe('failed');
+    expect(ffmpegAsked).toEqual([]);
+  });
+
+  it('with VOICE_STT_PROVIDER=none it says voice notes are off', async () => {
+    failedVoice('local_timeout');
+    await run({ failed: true, yes: true }, { env: parseEnv({}) });
+    expect(lines).toEqual(['Speech-to-text for voice notes is not set up (VOICE_STT_PROVIDER is none). Nothing changed.']);
+  });
+
+  it('says when nothing failed', async () => {
+    failedVoice('stt_partial');
+    backlogVoice();
+    await run({ failed: true }, { env: localEnv() });
+    expect(lines).toEqual([NONE_FAILED]);
+  });
+
+  it('without ffmpeg they are skipped as needing it, and nothing is queued', async () => {
+    const id = failedVoice('audio_convert_failed');
+    await run({ failed: true, yes: true }, { env: localEnv(), findFfmpeg: finder(false) });
+    expect(lines).toEqual([
+      'To try again: 0 voice notes or audio files the local engine could not transcribe.',
+      `1 needs ${NEEDS_FFMPEG}`,
+      'Nothing was changed.',
+    ]);
+    expect(statusOf(id).status).toBe('failed');
+  });
+
+  it('--client limits it to that client', async () => {
+    failedVoice('local_timeout');
+    const mehta = failedVoice('local_timeout', { clientId: 2 });
+    await run({ failed: true, yes: true, client: 'meh' }, { env: localEnv() });
+    expect(lines[0]).toBe('To try again: 1 voice note or audio file the local engine could not transcribe, about 1 minute.');
+    expect(db.prepare("SELECT id FROM media WHERE status = 'pending'").all()).toEqual([{ id: mehta }]);
+  });
+
+  it('a note that changed since it was counted is left alone and said so', async () => {
+    const a = failedVoice('local_timeout');
+    const b = failedVoice('local_timeout');
+    const findFfmpeg = async (): Promise<string | null> => {
+      db.prepare('UPDATE messages SET revoked = 1 WHERE id = (SELECT message_id FROM media WHERE id = ?)').run(b);
+      return 'ffmpeg';
+    };
+    await run({ failed: true, yes: true }, { env: localEnv(), findFfmpeg });
+    expect(lines.slice(2)).toEqual([`1 queued again. The running service now tries them again (3 tries each). ${FREE}`, '1 changed since they were counted and were left alone.']);
+    expect(statusOf(a).status).toBe('pending');
+    expect(statusOf(b).status).toBe('failed');
+  });
+
+  it('never prints a file name, a path or a setting value', async () => {
+    failedVoice('local_timeout');
+    await run({ failed: true }, { env: localEnv() });
+    await run({ failed: true, yes: true }, { env: localEnv() });
+    for (const secret of [FILE_NAME, '/opt/stt', 'voxtral.gguf', '.ogg', 'media/SHA']) expect(output()).not.toContain(secret);
   });
 });
