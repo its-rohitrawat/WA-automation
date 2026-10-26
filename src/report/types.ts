@@ -9,7 +9,8 @@ export interface ReportSettings {
 
 /**
  * sent: both messages left, with their WhatsApp ids.
- * failed: a definite failure before anything was sent (not linked, no connection, session refused). Safe to retry.
+ * failed: a definite failure before anything was sent (not linked, no connection, session refused, or an error while the
+ * socket was made or opening). Safe to retry.
  * unknown: the send started and did not finish cleanly. It may have reached the founder, so it is never retried automatically.
  */
 export type SendResult =

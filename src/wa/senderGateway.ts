@@ -116,6 +116,7 @@ function openSocket(
   });
   return new Promise<Opened>((resolve) => {
     let settled = false;
+    let timer: NodeJS.Timeout | undefined;
     const finish = (r: Opened) => {
       if (settled) return;
       settled = true;
@@ -123,7 +124,7 @@ function openSocket(
       if ('code' in r) void endQuietly(sock);
       resolve(r);
     };
-    const timer = setTimeout(() => finish({ code: 'connect_timeout', statusCode: null }), timeoutMs);
+    // The timer starts after the listener is added: a listener that throws rejects this promise and leaves no timer.
     sock.ev.on('connection.update', (u) => {
       if (u.qr) {
         if (onQr) onQr(u.qr);
@@ -135,6 +136,7 @@ function openSocket(
         finish({ code: closeCode(statusCode), statusCode });
       }
     });
+    if (!settled) timer = setTimeout(() => finish({ code: 'connect_timeout', statusCode: null }), timeoutMs);
   });
 }
 
@@ -252,9 +254,16 @@ export class SenderGateway implements ReportSender {
     this.#busy = true;
     this.#setState('connecting', null);
     try {
-      const opened = await openSocket(this.#opts.factory, auth, this.#opts.connectTimeoutMs ?? 60_000, undefined, (s) => {
-        this.#sock = s;
-      });
+      let opened: Opened;
+      try {
+        opened = await openSocket(this.#opts.factory, auth, this.#opts.connectTimeoutMs ?? 60_000, undefined, (s) => {
+          this.#sock = s;
+        });
+      } catch {
+        // Thrown while making the socket or before it opened (the factory, or adding a listener): no message can have
+        // left, so this is a definite failure the scheduler retries. The finally below closes a socket that was made.
+        return { status: 'failed', code: 'connect_error' };
+      }
       if ('code' in opened) {
         this.#setState(FAILURE_STATE[opened.code] ?? 'idle', opened.statusCode);
         return { status: 'failed', code: opened.code };

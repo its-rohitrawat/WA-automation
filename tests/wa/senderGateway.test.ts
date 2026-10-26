@@ -203,6 +203,36 @@ describe('SenderGateway', () => {
     expect(failed.sockets[0]!.end).toHaveBeenCalled();
   });
 
+  it('fails definitely (connect_error, retried by the scheduler) when making or opening the socket throws: nothing was sent', async () => {
+    // The factory throws before any socket exists.
+    let made = 0;
+    const throwing = new SenderGateway({
+      recipient: RECIPIENT,
+      factory: () => {
+        made++;
+        throw new Error('bad socket options');
+      },
+      auth: senderAuth(true),
+      connectTimeoutMs: 1_000,
+      lingerMs: 0,
+    });
+    expect(await throwing.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'connect_error' });
+    expect(throwing.status().state).toBe('idle');
+    expect(await throwing.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'connect_error' }); // not stuck busy
+    expect(made).toBe(2);
+
+    // The socket exists but throws while the gateway listens for it to open: it is closed, and nothing was sent.
+    const sock = new FakeSocket();
+    sock.ev.on = () => {
+      throw new Error('listener failed');
+    };
+    const broken = new SenderGateway({ recipient: RECIPIENT, factory: () => sock, auth: senderAuth(true), connectTimeoutMs: 1_000, lingerMs: 0 });
+    expect(await broken.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'connect_error' });
+    expect(sock.sendMessage).not.toHaveBeenCalled();
+    expect(sock.end).toHaveBeenCalled();
+    expect(broken.status().state).toBe('idle');
+  });
+
   it('sends one report at a time', async () => {
     const { gw } = setup({ scripts: [hang], sendTimeoutMs: 50 });
     const first = gw.sendReport('hi', XLSX, FILE);
@@ -382,6 +412,20 @@ describe('SenderGateway default timings', () => {
     await vi.advanceTimersByTimeAsync(200);
     expect(await p).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
     expect(sockets[0]!.end).toHaveBeenCalled();
+  });
+
+  it('leaves no connect timer when adding the connection listener throws, and fails definitely', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const sock = new FakeSocket();
+    const on = sock.ev.on;
+    sock.ev.on = ((event: string, listener: never) => {
+      if (event === 'connection.update') throw new Error('listener failed');
+      on(event as 'creds.update', listener);
+    }) as typeof sock.ev.on;
+    const gw = new SenderGateway({ recipient: RECIPIENT, factory: () => sock, auth: senderAuth(true) });
+    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'connect_error' });
+    expect(sock.end).toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('waits 60 s for the connection to open', async () => {

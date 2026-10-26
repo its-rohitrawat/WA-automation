@@ -27,6 +27,7 @@ export const REASON_TEXT: Record<string, string> = {
   session_unavailable: "the spare number's session file could not be opened",
   self_send: "the sender is linked to the founder's own number; re-link with the spare phone",
   connect_timeout: 'could not connect to WhatsApp',
+  connect_error: 'the WhatsApp connection could not be started',
   closed: 'the WhatsApp connection closed before sending',
   restart_required: 'WhatsApp asked for a reconnect',
   logged_out: 'the spare number was logged out',

@@ -628,6 +628,10 @@ describe('describeReport', () => {
     );
   });
 
+  it('explains a connection that could not be started in plain words', () => {
+    expect(reasonText('connect_error')).toBe('the WhatsApp connection could not be started');
+  });
+
   it('waits 2, 5, then 10 minutes', () => {
     expect([0, 1, 2, 3, 4, 9].map(retryWaitMs)).toEqual([120_000, 120_000, 300_000, 600_000, 600_000, 600_000]);
   });
