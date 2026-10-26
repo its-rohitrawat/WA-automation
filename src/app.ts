@@ -1,10 +1,12 @@
+import { lstatSync, readdirSync, rmSync, type Dirent } from 'node:fs';
+import { join } from 'node:path';
 import type { AiClient } from './brain/claudeClient.ts';
 import { GroupDebouncer } from './brain/debouncer.ts';
 import type { MediaAi } from './brain/mediaClient.ts';
 import type { MeetingAi } from './brain/meetingClient.ts';
 import { Reconciler, type ReconcileOutcome } from './brain/reconciler.ts';
 import type { ClientConfig } from './config/groups.ts';
-import { Health } from './health/health.ts';
+import { Health, type VoiceProblem } from './health/health.ts';
 import { defaultFreeBytes } from './health/health.ts';
 import { createExtractor, type Extractor } from './media/extract.ts';
 import type { MediaFetcher } from './media/fetch.ts';
@@ -13,9 +15,11 @@ import { MEDIA_MAX_WAIT_MS } from './media/promptText.ts';
 import { MediaQueue } from './media/queue.ts';
 import type { MediaRefSealer } from './media/ref.ts';
 import { DriveFileUploader } from './media/uploader.ts';
+import { forgetVoiceCopies } from './media/voiceForget.ts';
 import type { MeetingsGoogleApi } from './meetings/googleApi.ts';
 import type { MeetingsHealth } from './meetings/healthTypes.ts';
 import { MeetingService, type MeetingSettings } from './meetings/service.ts';
+import { errorCode } from './meetings/sttParts.ts';
 import type { MeetingTranscriber } from './meetings/transcribe.ts';
 import type { ClientConfigLike } from './meetings/watcher.ts';
 import { DrivePublisher, type DriveApi } from './output/drive.ts';
@@ -32,6 +36,7 @@ import { getKv, setKv } from './store/kv.ts';
 import { mediaStats, resetUploadFailures } from './store/media.ts';
 import { clientIdsWithUnprocessed } from './store/messages.ts';
 import type { Ffmpeg } from './stt/audio.ts';
+import type { VoiceTranscriber } from './stt/voice.ts';
 import type { Clock } from './util/clock.ts';
 import type { Logger } from './util/logger.ts';
 import type { AllowList } from './wa/allowlist.ts';
@@ -44,8 +49,20 @@ export interface AppMediaDeps {
   ai: MediaAi;
   /** Test seam: replaces the standard extractor (Claude vision, PDF and DOCX readers). */
   extract?: Extractor;
-  /** Files downloaded and read at once. Default 2. */
+  /**
+   * Files downloaded and read at once. Default 3 (Phase 2b Task 10): a slow voice note must not hold every slot while
+   * pictures wait. With the local engine, at most one of them is a voice note or audio file (the queue's voice lane).
+   */
   concurrency?: number;
+  /**
+   * The voice transcriber VOICE_STT_PROVIDER names (Phase 2b, src/voiceDeps.ts). Null or absent: voice notes are kept,
+   * not transcribed, as in 2a.
+   */
+  voice?: VoiceTranscriber | null;
+  /** STT_MAX_SECONDS: the longest voice note or audio file transcribed. Default: the extractor's (600). */
+  maxVoiceSeconds?: number;
+  /** Why voice notes are not transcribed, found at start; shown in the health line. */
+  voiceProblem?: VoiceProblem | null;
 }
 
 /** Phase 3 meetings. Built only when MEETINGS_ENABLED is true; without the meeting scopes nothing calls Google's meeting APIs. */
@@ -104,9 +121,15 @@ export interface AppDeps {
 }
 
 export interface App {
+  /**
+   * Starts the service. With the media pipeline it first removes leftover voice-<digits> conversion folders in
+   * DATA_DIR/tmp/voice (before any file starts), then deletes the voice-note copies due at the speech provider, and
+   * again every hour.
+   */
   start(): void;
   /**
-   * Starts no new AI run, file read or file upload. Waits for AI calls and file reads in flight (up to drainMs) and
+   * Starts no new AI run, file read or file upload, and stops a local speech engine run in flight (free: the voice note
+   * is tried again after the restart). Waits for AI calls and file reads in flight (up to drainMs) and
    * books any paid call still running at its estimate. Then flushes the publisher (the upload in flight plus one more
    * if anything changed) and waits for the file upload in flight, up to 10 s each in parallel. Leaves no timers.
    */
@@ -220,6 +243,14 @@ export function createApp(d: AppDeps): App {
   });
 
   const m = d.media;
+  /** The voice transcriber, if any (Phase 2b). Only with the media pipeline. */
+  const voice = m?.voice ?? null;
+  safely(() => health.setVoiceProblem(m?.voiceProblem ?? null));
+  /**
+   * Aborted by stop(): ends a local engine run in flight (LocalEngineError('aborted')), which is free, so the processor
+   * gives the attempt back and the note is tried again after the restart. A paid call is never aborted.
+   */
+  const stopping = new AbortController();
   const uploader = m
     ? new DriveFileUploader({ db: d.db, api: d.drive, dataDir: d.dataDir, clock: d.clock, log: d.log, onUploaded: () => publisher.schedule() })
     : undefined;
@@ -228,7 +259,9 @@ export function createApp(d: AppDeps): App {
         db: d.db,
         clock: d.clock,
         log: d.log,
-        concurrency: m.concurrency ?? 2,
+        concurrency: m.concurrency ?? 3,
+        // The local engine runs one note at a time: notes waiting for it must not hold the slots images need.
+        voiceLane: voice?.costsNothing ? 1 : undefined,
         processor: new MediaProcessor({
           db: d.db,
           dataDir: d.dataDir,
@@ -236,8 +269,25 @@ export function createApp(d: AppDeps): App {
           log: d.log,
           sealer: m.sealer,
           fetcher: m.fetcher,
-          extract: m.extract ?? createExtractor({ ai: m.ai, spend, prices: d.prices }),
+          extract: m.extract ?? createExtractor({ ai: m.ai, spend, prices: d.prices, voice, maxVoiceSeconds: m.maxVoiceSeconds, signal: stopping.signal }),
           startedAt,
+          // For deleting provider copies promptly; the extractor holds its own.
+          voice,
+          // Required: the processor's default (true) would give a free local note the paid path's 2 runs instead of 3.
+          voicePaid: voice ? !voice.costsNothing : false,
+          // A paid transcript's provider copy, noted by finishMedia, is deleted now (N1). Never thrown: a failure is
+          // logged with a code, and the row waits for the hourly sweep.
+          afterFinish: (mediaId, x) => {
+            if (!x.forget) return;
+            return Promise.resolve()
+              .then(() => forgetVoiceCopies(d.db, voice, d.log, { mediaId, clock: d.clock }))
+              .then(
+                () => undefined,
+                (err: unknown) => {
+                  d.log.warn({ mediaId, code: errorCode(err) }, 'voice note speech copy not deleted yet: left for the sweep');
+                },
+              );
+          },
         }),
         // §6.1: a run that waited for this file can go ahead. The Files received list may change, and a client
         // member's file can go to Drive now.
@@ -297,6 +347,56 @@ export function createApp(d: AppDeps): App {
     publisher.schedule();
   });
 
+  /**
+   * Deletes the voice-note copies due at the speech provider, for every file (N1): at start and every hour. Skipped while
+   * the previous sweep still runs. Never throws, sync or async: a failure is logged with a code only.
+   */
+  let forgetTimer: ReturnType<typeof setInterval> | undefined;
+  let sweeping = false;
+  const sweepVoiceCopies = () => {
+    if (sweeping) return;
+    sweeping = true;
+    let run: Promise<unknown>;
+    try {
+      run = forgetVoiceCopies(d.db, voice, d.log, { clock: d.clock });
+    } catch (err) {
+      run = Promise.reject(err);
+    }
+    void run
+      .catch((err: unknown) => {
+        d.log.warn({ code: errorCode(err) }, 'voice copy sweep failed');
+      })
+      .finally(() => {
+        sweeping = false;
+      });
+  };
+  /**
+   * Removes the conversion folders a voice note left in DATA_DIR/tmp/voice (Task 5 review round 1): a note that failed,
+   * was revoked or was too long, or one whose conversion a stop cut off, never comes back to remove its own. Only
+   * folders directly inside it named voice-<digits>; a link or junction is never followed or removed, and nothing else
+   * is touched. Best effort: a failure is logged with a code only. Run in start() before the queue starts any file.
+   */
+  const sweepVoiceFolders = () => {
+    const dir = join(d.dataDir, 'tmp', 'voice');
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException | null)?.code !== 'ENOENT') d.log.warn({ code: errorCode(err) }, 'leftover voice folders not removed');
+      return;
+    }
+    for (const e of entries) {
+      if (!/^voice-\d+$/.test(e.name) || !e.isDirectory()) continue;
+      const path = join(dir, e.name);
+      try {
+        if (!lstatSync(path).isDirectory()) continue; // a link or junction: never followed
+        rmSync(path, { recursive: true, force: true });
+      } catch (err) {
+        d.log.warn({ code: errorCode(err) }, 'leftover voice folders not removed');
+      }
+    }
+  };
+
   let poll: ReturnType<typeof setInterval> | undefined;
   const tick = () => {
     // An uncaught throw inside setInterval would exit the service.
@@ -351,6 +451,12 @@ export function createApp(d: AppDeps): App {
           d.log.error({ err }, 'upload reset failed');
         }
       }
+      if (m) {
+        // Before the first tick, so no voice note being converted now can lose its folder.
+        sweepVoiceFolders();
+        sweepVoiceCopies();
+        forgetTimer = setInterval(sweepVoiceCopies, 60 * 60_000);
+      }
       d.gateway.start();
       meetings?.start(); // books speech parts left in flight and cleans work files before any meeting runs
       tick();
@@ -360,8 +466,13 @@ export function createApp(d: AppDeps): App {
     async stop() {
       clearInterval(poll);
       poll = undefined;
+      clearInterval(forgetTimer);
+      forgetTimer = undefined;
       debouncer.stop();
       mediaQueue?.stop();
+      // Before the drain: a local engine run in flight ends now, instead of holding the drain for up to 30 minutes.
+      // Its conversion (prepare) is not stopped; a folder it leaves is removed at the next start.
+      stopping.abort();
       // No new meeting or discovery pass; a download or ffmpeg run is aborted. Speech and Claude calls run on.
       meetings?.stop();
       // No new upload pass or file during the drain: a file still uploading when the database closes would reach Drive

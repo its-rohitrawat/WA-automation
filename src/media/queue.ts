@@ -19,12 +19,20 @@ export interface MediaQueueOptions {
   concurrency: number;
   /** A file reached a final state: the reconciler that waited for it can run. */
   onSettled: (clientId: number) => void;
+  /**
+   * The voice lane (Phase 2b Task 10): at most this many voice notes and audio files in flight at once, the rest of the
+   * slots for images and documents. Set to 1 for the local engine, which runs one note at a time anyway: notes waiting
+   * for it would otherwise hold every slot while pictures wait. Absent: no lane, any file takes any slot.
+   */
+  voiceLane?: number;
 }
 
 /** Works through due pending files from the database, at most `concurrency` at a time. The database is the queue. */
 export class MediaQueue {
   readonly #o: MediaQueueOptions;
   readonly #inFlight = new Set<number>();
+  /** The voice notes and audio files among #inFlight, started through the voice lane. */
+  readonly #voiceInFlight = new Set<number>();
   /**
    * Files started since the last kick(). When a file finishes the queue refills itself, but never with one of these, so
    * a file that a run leaves pending and due (a processor bug) is tried once per kick (every tick and every stored
@@ -65,17 +73,26 @@ export class MediaQueue {
     if (free <= 0) return;
     const now = this.#o.clock.now();
     const held = new Set([...this.#crashed].filter(([, c]) => c.until > now.getTime()).map(([id]) => id));
-    let ids: number[];
+    const startable = (ids: number[]) => ids.filter((i) => !this.#inFlight.has(i) && !this.#startedSinceKick.has(i) && !held.has(i));
+    // Enough rows to fill every free slot even if the first ones are in flight, were started since the kick, or are held back.
+    const limit = this.#o.concurrency + this.#startedSinceKick.size + held.size;
+    const lane = this.#o.voiceLane;
     try {
-      // Enough rows to fill every free slot even if the first ones are in flight, were started since the kick, or are held back.
-      const limit = this.#o.concurrency + this.#startedSinceKick.size + held.size;
-      ids = dueMediaIds(this.#o.db, now.toISOString(), limit);
+      if (lane === undefined) {
+        for (const id of startable(dueMediaIds(this.#o.db, now.toISOString(), limit)).slice(0, free)) this.#start(id, false);
+        return;
+      }
+      // The voice lane: voice notes and audio files first (a client's update may wait for one, V1), up to the lane's free
+      // places, then the other files in the slots left. Each list is read on its own, so a long run of due voice notes
+      // never hides the images behind them.
+      const laneFree = Math.max(0, lane - this.#voiceInFlight.size);
+      const voice = laneFree > 0 ? startable(dueMediaIds(this.#o.db, now.toISOString(), limit, { audio: true })).slice(0, Math.min(laneFree, free)) : [];
+      const others = free > voice.length ? startable(dueMediaIds(this.#o.db, now.toISOString(), limit, { audio: false })).slice(0, free - voice.length) : [];
+      for (const id of voice) this.#start(id, true);
+      for (const id of others) this.#start(id, false);
     } catch (err) {
       this.#o.log.error({ err }, 'media queue read failed');
-      return;
     }
-    const startable = ids.filter((i) => !this.#inFlight.has(i) && !this.#startedSinceKick.has(i) && !held.has(i));
-    for (const id of startable.slice(0, free)) this.#start(id);
   }
 
   /** No new files start. Files in flight finish. */
@@ -98,8 +115,9 @@ export class MediaQueue {
     });
   }
 
-  #start(id: number): void {
+  #start(id: number, voice: boolean): void {
     this.#inFlight.add(id);
+    if (voice) this.#voiceInFlight.add(id);
     this.#startedSinceKick.add(id);
     let crashed = false;
     Promise.resolve()
@@ -124,6 +142,7 @@ export class MediaQueue {
       })
       .finally(() => {
         this.#inFlight.delete(id);
+        this.#voiceInFlight.delete(id);
         if (!crashed) this.#fill();
         if (this.#inFlight.size === 0) for (const w of [...this.#drainWaiters]) w();
       });

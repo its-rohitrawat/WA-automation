@@ -691,6 +691,18 @@ describe('the 2a voice backlog (V6, N2)', () => {
     expect(dueMediaIds(db, LATER, 1)).toEqual([live]);
     expect(dueMediaIds(db, LATER, 10)).toEqual([live, old1, old2]);
   });
+
+  it('lists only voice notes and audio files, or only the other files, when asked (the voice lane, Task 10)', () => {
+    const db = seededDb();
+    const voice = savedVoice(db, 'V', { ts: '2026-10-19T07:00:00.000Z' });
+    const image = insertMedia(db, media(message(db, 'I', { mediaType: 'image', ts: '2026-10-19T07:01:00.000Z' })));
+    const audio = savedVoice(db, 'A', { kind: 'audio', mimeType: 'audio/mpeg', ts: '2026-10-19T07:02:00.000Z' });
+    const doc = insertMedia(db, pdf(message(db, 'D', { mediaType: 'document', ts: '2026-10-19T07:03:00.000Z' })));
+    expect(dueMediaIds(db, LATER, 10)).toEqual([voice, image, audio, doc]);
+    expect(dueMediaIds(db, LATER, 10, { audio: true })).toEqual([voice, audio]);
+    expect(dueMediaIds(db, LATER, 1, { audio: true })).toEqual([voice]);
+    expect(dueMediaIds(db, LATER, 10, { audio: false })).toEqual([image, doc]);
+  });
 });
 
 describe('the queue of provider copies to delete (N1)', () => {

@@ -17,6 +17,17 @@ const PUBLISH_FAIL_MS = 60 * 60_000;
 const SPEND_CAP_LINE = '⚠️ Daily spend cap reached. Paused until midnight IST';
 const STT_REFUSED_LINE = '⚠️ Voice notes are not being transcribed: the speech-to-text key was refused.';
 
+/**
+ * Why voice notes are not transcribed at all, found when the service starts (Phase 2b Task 10, src/voiceDeps.ts):
+ * VOICE_STT_PROVIDER is local but STT_LOCAL_BIN or STT_LOCAL_MODEL is not a file, or ffmpeg was not found. The notes are
+ * kept; the service runs on.
+ */
+export type VoiceProblem = 'local_not_set_up' | 'no_ffmpeg';
+const VOICE_PROBLEM_LINES: Record<VoiceProblem, string> = {
+  local_not_set_up: '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (see SETUP-mac, Voice notes)',
+  no_ffmpeg: '⚠️ Voice notes are not being transcribed: ffmpeg not found',
+};
+
 export type MediaHealth = MediaStats;
 /** The shared-file counts as a snapshot stores them: snapshots written before Phase 2b have no sttRefused. */
 export type MediaSnapshot = Omit<MediaStats, 'sttRefused'> & { sttRefused?: number };
@@ -48,6 +59,8 @@ export interface HealthSnapshot {
   spendByKind?: Record<SpendKind, number>;
   /** The morning report's line (Phase 2c). Missing when the report is off, and in older snapshots. */
   report?: ReportHealth;
+  /** Why voice notes are not transcribed (Phase 2b Task 10). Missing when they are (or are off), and in older snapshots. */
+  voiceProblem?: VoiceProblem;
 }
 
 /**
@@ -83,6 +96,7 @@ export class Health {
   #media: MediaHealth = { pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0 };
   #meetings: MeetingsHealth | null = null;
   #report: ReportHealth | null = null;
+  #voiceProblem: VoiceProblem | null = null;
 
   constructor(o: { db: Db; clock: Clock; spend: SpendGuard; dataDir?: string; freeBytes?: (dir: string) => number | null }) {
     this.#db = o.db;
@@ -135,6 +149,11 @@ export class Health {
   /** Stores the morning report's line; the next persist() records it. Null when the report is off. */
   setReport(r: ReportHealth | null): void {
     this.#report = r;
+  }
+
+  /** Stores why voice notes are not transcribed (null: nothing wrong, or voice notes are off); the next persist() records it. */
+  setVoiceProblem(p: VoiceProblem | null): void {
+    this.#voiceProblem = p;
   }
 
   forget(clientId: number): void {
@@ -209,6 +228,9 @@ export class Health {
       const n = this.#media.uploadFailed;
       return { ok: false, text: `⚠️ ${n} file${n === 1 ? '' : 's'} could not be uploaded to Drive. See docs/SETUP.md.` };
     }
+    // Voice notes are not transcribed at all: the local engine's files or ffmpeg were missing at start. The owner must
+    // set them up and restart; the notes are kept meanwhile. Next to the key-refused line, and before it.
+    if (this.#voiceProblem !== null) return { ok: false, text: VOICE_PROBLEM_LINES[this.#voiceProblem] };
     // Voice notes wait for a speech-to-text key that was refused: the owner must fix STT_API_KEY. They are not counted
     // as waiting too long (mediaStats.stale), so this line is not hidden by the one above.
     if (this.#media.sttRefused > 0) return { ok: false, text: STT_REFUSED_LINE };
@@ -263,6 +285,7 @@ export class Health {
       ...(this.#meetings === null ? {} : { meetings: { ...this.#meetings, stats: { ...this.#meetings.stats, deferred: { ...this.#meetings.stats.deferred } } } }),
       spendByKind: this.#spend.spentTodayByKind(),
       ...(this.#report ? { report: { ...this.#report } } : {}),
+      ...(this.#voiceProblem === null ? {} : { voiceProblem: this.#voiceProblem }),
     };
   }
 
@@ -307,6 +330,8 @@ const isReportHealth = (r: unknown): r is ReportHealth => {
   return typeof x === 'object' && x !== null && typeof x.text === 'string' && (x.warning === null || typeof x.warning === 'string');
 };
 
+const isVoiceProblem = (p: unknown): p is VoiceProblem => typeof p === 'string' && Object.hasOwn(VOICE_PROBLEM_LINES, p);
+
 export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
   const v = getKv(db, 'health');
   if (!v) return undefined;
@@ -329,9 +354,11 @@ export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
     // Snapshots written before the morning report existed, or with it off, have no report line.
     if (o.report !== undefined && !isReportHealth(o.report)) return undefined;
     // A pause reason or provider this version does not know (a newer writer) drops only the meetings, not the snapshot.
-    const { meetings, ...rest } = o;
+    // So does a voice problem it does not know: only that field is dropped. Snapshots before Task 10 have none.
+    const { meetings, voiceProblem, ...rest } = o;
     const keep = meetings !== undefined && isKnownMeetingsState(meetings) ? { meetings } : {};
-    return { ...rest, ...keep, ingestFailures: o.ingestFailures ?? 0 } as HealthSnapshot;
+    const voice = isVoiceProblem(voiceProblem) ? { voiceProblem } : {};
+    return { ...rest, ...keep, ...voice, ingestFailures: o.ingestFailures ?? 0 } as HealthSnapshot;
   } catch {
     return undefined;
   }

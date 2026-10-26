@@ -169,14 +169,17 @@ export function getMediaRef(db: Db, id: number): Buffer | null {
  * Pending files whose next attempt is due, in the order their messages were sent (history often arrives out of order).
  * Live files come before backlog files (`cli transcribe-voice`, V6), so a long backlog never holds up a new voice note
  * its message is waiting for. Files of inactive clients wait until the client is active again.
+ * `o.audio` (the media queue's voice lane, Phase 2b Task 10): true lists only voice notes and audio files, false only the
+ * other files; absent, every file.
  */
-export function dueMediaIds(db: Db, nowIso: string, limit: number): number[] {
+export function dueMediaIds(db: Db, nowIso: string, limit: number, o: { audio?: boolean } = {}): number[] {
+  const kinds = o.audio === undefined ? '' : o.audio ? "AND m.kind IN ('voice', 'audio')" : "AND m.kind NOT IN ('voice', 'audio')";
   return (
     db
       .prepare(`SELECT m.id FROM media m
         JOIN clients c ON c.id = m.client_id AND c.active = 1
         JOIN messages msg ON msg.id = m.message_id
-        WHERE m.status = 'pending' AND (m.next_attempt_at IS NULL OR m.next_attempt_at <= ?)
+        WHERE m.status = 'pending' AND (m.next_attempt_at IS NULL OR m.next_attempt_at <= ?) ${kinds}
         ORDER BY m.backlog, msg.ts, m.id LIMIT ?`)
       .all(nowIso, limit) as { id: number }[]
   ).map((r) => r.id);
@@ -419,10 +422,11 @@ export function deleteMediaForget(db: Db, id: number): void {
 
 /**
  * Voice-note copies the agent gave up deleting at the provider: the last try is used, or the provider that kept the copy
- * is not the one set up now (`provider`; 'none' when speech-to-text is off), so the forget queue skips it. A count only,
- * for `cli status`, as sttForgetsGivenUp is for meetings.
+ * is not the one set up now (`provider`: VOICE_STT_PROVIDER; 'none' when voice notes are off, 'local' for the engine on
+ * this machine, which keeps no copies), so the forget queue skips it. A count only, for `cli status`, as
+ * sttForgetsGivenUp is for meetings.
  */
-export function mediaSttForgetsGivenUp(db: Db, o: { maxAttempts: number; provider: ProviderId | 'none' }): number {
+export function mediaSttForgetsGivenUp(db: Db, o: { maxAttempts: number; provider: ProviderId | 'local' | 'none' }): number {
   return (
     db.prepare('SELECT COUNT(*) AS n FROM media_stt_forget WHERE attempts >= ? OR provider <> ?').get(o.maxAttempts, o.provider) as { n: number }
   ).n;
