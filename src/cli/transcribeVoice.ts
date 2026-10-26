@@ -17,8 +17,11 @@ import { CorrectionError } from './corrections.ts';
  *   known here, so: about $X, each file estimated from its size at min(size bound, STT_MAX_SECONDS + tolerance)
  *   seconds (a file with no size at that limit), and at most $Y if every file runs to that limit, which never
  *   understates. Both are rounded up to the cent; the minutes are the estimates, rounded up.
+ * - VOICE_STT_PROVIDER decides (Phase 2b amendment L2; STT_PROVIDER is the meetings' setting). With 'local' the engine
+ *   on this computer transcribes them: the cost lines say $0 and nothing counts toward the spend cap. Every file still
+ *   needs ffmpeg (it is converted to the engine's WAV).
  * - No key, no provider and no network: the rules and prices come from src/stt/voice.ts (canSendVoice,
- *   sizeBoundSeconds, voiceCeilingUsd). STT_API_KEY is never read here.
+ *   sizeBoundSeconds, voiceCeilingUsd). STT_API_KEY is never read here, and no STT_LOCAL_* value is shown.
  * - The size never refuses a file (Task 5 review round 2: a 1-minute 128 kbit/s MP3 is about 960 KB, a size bound of
  *   640 s); the service refuses only a note measured too long. Every file is converted with ffmpeg first, whatever its
  *   format and provider (Task 5 review round 1), so without ffmpeg no file is queued (canSendVoice), and none finishes
@@ -38,7 +41,9 @@ export interface TranscribeVoiceDeps {
   findFfmpeg?: (configured: string | undefined) => Promise<string | null>;
 }
 
-const NOT_SET_UP = 'Speech-to-text is not set up (STT_PROVIDER is none). Nothing changed.';
+const NOT_SET_UP = 'Speech-to-text for voice notes is not set up (VOICE_STT_PROVIDER is none). Nothing changed.';
+const LOCAL_COST = 'Cost: $0 (local engine on this computer).';
+const FREE = 'It costs nothing and does not count toward the daily spend cap.';
 const NOTHING = 'No saved voice notes or audio files are waiting for a transcript. Nothing changed.';
 
 const files = (n: number) => `${n} voice note${n === 1 ? '' : 's'} or audio file${n === 1 ? '' : 's'}`;
@@ -57,7 +62,7 @@ async function hasFfmpeg(deps: TranscribeVoiceDeps): Promise<boolean> {
 /** `cli transcribe-voice [--client CODE] [--yes]`. */
 export async function transcribeVoiceCommand(opts: { client?: string; yes: boolean }, deps: TranscribeVoiceDeps): Promise<void> {
   const { env, out } = deps;
-  const provider = env.STT_PROVIDER;
+  const provider = env.VOICE_STT_PROVIDER;
   if (provider === 'none') {
     out(NOT_SET_UP);
     return;
@@ -87,19 +92,23 @@ export async function transcribeVoiceCommand(opts: { client?: string; yes: boole
     const needsFfmpeg = estimated.length - send.length;
 
     const seconds = send.reduce((a, r) => a + r.seconds, 0);
-    const about = send.reduce((a, r) => a + voiceCeilingUsd(provider, r.seconds, env.INR_PER_USD), 0);
-    const most = send.length * voiceCeilingUsd(provider, limit, env.INR_PER_USD);
     out(`To transcribe: ${files(send.length)} saved before Phase 2b${send.length > 0 ? `, about ${minutes(Math.ceil(seconds / 60))}` : ''}.`);
     if (send.length > 0) {
-      out(
-        `Cost: about $${dollarsUp(about)} from the file sizes (speech, ${provider} list price); ` +
-          `at most $${dollarsUp(most)} if every file runs to the STT_MAX_SECONDS limit (${env.STT_MAX_SECONDS} seconds).`,
-      );
+      if (provider === 'local') {
+        out(LOCAL_COST);
+      } else {
+        const about = send.reduce((a, r) => a + voiceCeilingUsd(provider, r.seconds, env.INR_PER_USD), 0);
+        const most = send.length * voiceCeilingUsd(provider, limit, env.INR_PER_USD);
+        out(
+          `Cost: about $${dollarsUp(about)} from the file sizes (speech, ${provider} list price); ` +
+            `at most $${dollarsUp(most)} if every file runs to the STT_MAX_SECONDS limit (${env.STT_MAX_SECONDS} seconds).`,
+        );
+      }
     }
     if (needsFfmpeg > 0) {
       out(`${needsFfmpeg} need${needsFfmpeg === 1 ? 's' : ''} ffmpeg, skipped (install ffmpeg, or set FFMPEG_PATH; after installing ffmpeg, restart the service, then run this again).`);
     }
-    const cap = `This costs money and counts toward the daily spend cap ($${env.DAILY_SPEND_CAP_USD.toFixed(2)}).`;
+    const cap = provider === 'local' ? FREE : `This costs money and counts toward the daily spend cap ($${env.DAILY_SPEND_CAP_USD.toFixed(2)}).`;
     if (send.length === 0) {
       out('Nothing was changed.');
       return;

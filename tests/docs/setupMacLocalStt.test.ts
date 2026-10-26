@@ -81,9 +81,13 @@ describe('SETUP-mac.md: voice notes, local speech-to-text', () => {
     expect(check!.split('\n')[0]).toBe('cd /opt/wa-agent');
   });
 
-  it('makes the test WAV with ffmpeg and runs the check, then restarts the service', () => {
-    expect(section).toContain('-ar 16000 -ac 1 -c:a pcm_s16le');
-    expect(section).toContain('npm run stt:local-check -- ');
+  // Amendment L2: the check takes any audio file and converts it itself, as the service does.
+  it('runs the check on the voice note itself, which the check converts with ffmpeg, then restarts the service', () => {
+    expect(section).toMatch(/The check takes any audio file/);
+    expect(section).toMatch(/converts the file with ffmpeg to the 16 kHz mono WAV/);
+    expect(section).toContain('npm run stt:local-check -- ~/stt-check/note1.opus');
+    expect(section).not.toContain('ffmpeg -i ');
+    expect(section).toContain('Mean volume');
     expect(section).toContain('sudo launchctl kickstart -k system/com.wa-agent');
     const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string> };
     expect(pkg.scripts['stt:local-check']).toBe('node scripts/stt-local-check.ts');

@@ -29,9 +29,13 @@ beforeEach(() => {
   ffmpegAsked = [];
 });
 
+/** Sarvam for meetings and voice notes, unless a test says otherwise. Voice notes follow VOICE_STT_PROVIDER (amendment L2). */
 function env(over: Record<string, string> = {}) {
-  return parseEnv({ STT_PROVIDER: 'sarvam', STT_API_KEY: KEY, INR_PER_USD: '88', STT_MAX_SECONDS: '600', ...over });
+  return parseEnv({ STT_PROVIDER: 'sarvam', VOICE_STT_PROVIDER: 'sarvam', STT_API_KEY: KEY, INR_PER_USD: '88', STT_MAX_SECONDS: '600', ...over });
 }
+/** The local engine for voice notes: no key, no paid provider (Phase 2b amendment L2). */
+const localEnv = (over: Record<string, string> = {}) =>
+  parseEnv({ VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: '/opt/stt/transcribe-cli', STT_LOCAL_MODEL: '/opt/stt/voxtral.gguf', STT_MAX_SECONDS: '600', ...over });
 
 /** A fake ffmpeg finder: present (its path) or absent (null); records what it was asked. */
 const finder = (found: boolean) => async (configured: string | undefined): Promise<string | null> => {
@@ -84,15 +88,80 @@ const costLine = (about: string, most: string, provider = 'sarvam', maxSeconds =
   `Cost: about $${about} from the file sizes (speech, ${provider} list price); at most $${most} if every file runs to the STT_MAX_SECONDS limit (${maxSeconds} seconds).`;
 
 describe('transcribe-voice: speech-to-text off', () => {
+  const OFF = 'Speech-to-text for voice notes is not set up (VOICE_STT_PROVIDER is none). Nothing changed.';
+
   it('says so and changes nothing', async () => {
     const id = backlogVoice();
     const before = allMedia();
     await run({}, { env: parseEnv({}) });
-    expect(lines).toEqual(['Speech-to-text is not set up (STT_PROVIDER is none). Nothing changed.']);
+    expect(lines).toEqual([OFF]);
     expect(allMedia()).toEqual(before);
     await run({ yes: true }, { env: parseEnv({}) });
     expect(statusOf(id).status).toBe('done');
     expect(ffmpegAsked).toEqual([]);
+  });
+
+  // Phase 2b amendment L2: STT_PROVIDER is the meetings' setting; VOICE_STT_PROVIDER decides voice notes.
+  it('is off when VOICE_STT_PROVIDER is none, even with a paid STT_PROVIDER and its key', async () => {
+    const id = backlogVoice();
+    await run({ yes: true }, { env: env({ VOICE_STT_PROVIDER: 'none' }) });
+    expect(lines).toEqual([OFF]);
+    expect(statusOf(id).status).toBe('done');
+  });
+});
+
+// Phase 2b amendment L2: the local engine costs nothing, but every file still needs ffmpeg.
+describe('transcribe-voice: the local engine', () => {
+  const LOCAL_COST = 'Cost: $0 (local engine on this computer).';
+  const FREE = 'It costs nothing and does not count toward the daily spend cap.';
+
+  it('the dry run counts the files and the minutes, and says the cost is $0, with no key and no paid provider', async () => {
+    backlogVoice({ fileSize: 900_000 });
+    backlogVoice({ fileSize: 450_000, clientId: 2 });
+    const before = allMedia();
+    await run({}, { env: localEnv() });
+    expect(lines).toEqual([
+      'To transcribe: 2 voice notes or audio files saved before Phase 2b, about 15 minutes.',
+      LOCAL_COST,
+      `With --yes the running service transcribes them, for the record. ${FREE}`,
+      'Nothing was changed. Re-run with --yes to queue them.',
+    ]);
+    expect(output()).not.toContain('list price');
+    expect(output()).not.toContain('spend cap ($');
+    expect(allMedia()).toEqual(before);
+  });
+
+  it('--yes queues them, saying the cost is $0', async () => {
+    const a = backlogVoice({ fileSize: 90_000 });
+    const b = backlogVoice({ fileSize: 90_000, kind: 'audio', mimeType: 'audio/mpeg' });
+    await run({ yes: true }, { env: localEnv() });
+    expect(lines).toEqual([
+      'To transcribe: 2 voice notes or audio files saved before Phase 2b, about 2 minutes.',
+      LOCAL_COST,
+      `2 queued. The running service now transcribes them, for the record. ${FREE}`,
+    ]);
+    expect(statusOf(a)).toMatchObject({ status: 'pending', backlog: true });
+    expect(statusOf(b)).toMatchObject({ status: 'pending', backlog: true });
+  });
+
+  it('without ffmpeg every file is skipped as needing it, and nothing is queued', async () => {
+    const id = backlogVoice();
+    await run({ yes: true }, { env: localEnv({ FFMPEG_PATH: '/opt/ffmpeg' }), findFfmpeg: finder(false) });
+    expect(ffmpegAsked).toEqual(['/opt/ffmpeg']);
+    expect(lines).toEqual([
+      'To transcribe: 0 voice notes or audio files saved before Phase 2b.',
+      `1 needs ${NEEDS_FFMPEG}`,
+      'Nothing was changed.',
+    ]);
+    expect(statusOf(id)).toMatchObject({ status: 'done', backlog: false });
+  });
+
+  it('never prints a file name, a transcript or a setting value', async () => {
+    backlogVoice({ text: TRANSCRIPT });
+    backlogVoice({ fileSize: 90_000 });
+    await run({}, { env: localEnv() });
+    await run({ yes: true }, { env: localEnv() });
+    for (const secret of [FILE_NAME, TRANSCRIPT, '/opt/stt', 'voxtral.gguf', '.ogg', 'media/SHA']) expect(output()).not.toContain(secret);
   });
 });
 
@@ -119,7 +188,7 @@ describe('transcribe-voice: the dry run', () => {
 
   it('counts the minutes up to a whole minute and the cost up to a whole cent', async () => {
     backlogVoice({ fileSize: 15_000 }); // 10 s: $0.0006; 605 s at the limit: $0.037
-    await run({}, { env: env({ STT_PROVIDER: 'elevenlabs' }) });
+    await run({}, { env: env({ STT_PROVIDER: 'elevenlabs', VOICE_STT_PROVIDER: 'elevenlabs' }) });
     expect(lines.slice(0, 2)).toEqual([
       'To transcribe: 1 voice note or audio file saved before Phase 2b, about 1 minute.',
       costLine('0.01', '0.04', 'elevenlabs'),
@@ -227,7 +296,7 @@ describe('transcribe-voice: the dry run', () => {
     backlogVoice();
     backlogVoice({ mimeType: 'audio/mpeg' });
     backlogVoice({ mimeType: 'audio/aac' });
-    await run({}, { env: env({ STT_PROVIDER: provider }), findFfmpeg: finder(false) });
+    await run({}, { env: env({ STT_PROVIDER: provider, VOICE_STT_PROVIDER: provider }), findFfmpeg: finder(false) });
     expect(lines.slice(0, 2)).toEqual([
       'To transcribe: 0 voice notes or audio files saved before Phase 2b.',
       `3 need ${NEEDS_FFMPEG}`,

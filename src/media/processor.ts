@@ -11,6 +11,7 @@ import {
 } from '../store/media.ts';
 import { AudioError } from '../stt/audio.ts';
 import { SttHttpError, SttJobError, SttNoAnswerError } from '../stt/http.ts';
+import { LocalEngineError } from '../stt/local.ts';
 import { SttBookingError } from '../stt/paidStt.ts';
 import type { ProviderId } from '../stt/types.ts';
 import { SttPartialError, type VoiceTranscriber } from '../stt/voice.ts';
@@ -87,13 +88,23 @@ export const STT_NO_ANSWER_MAX_ATTEMPTS = 2;
 /**
  * How many runs a file gets in all, counted by its claims: the counted retries stop there, and a pending file claimed
  * this many times by runs that never ended fails as crashed. A voice note or an audio file gets
- * STT_NO_ANSWER_MAX_ATTEMPTS (Task 6 review round 1, fix 3): a run that never ended may have been billed (the paid call
- * was sent, and the process stopped before anything was booked), so it gets the same one more try as a call that got no
- * usable answer. Its counted retries (stt_http_<status>, stt_booking, a download error) stop there too, so a run that
- * ends in a deferral always leaves fewer attempts than this, and the crash rule only ever sees runs that never ended.
- * Images and documents keep MEDIA_MAX_ATTEMPTS.
+ * STT_NO_ANSWER_MAX_ATTEMPTS when the voice transcriber is paid (Task 6 review round 1, fix 3): a run that never ended
+ * may have been billed (the paid call was sent, and the process stopped before anything was booked), so it gets the same
+ * one more try as a call that got no usable answer. Its counted retries (stt_http_<status>, stt_booking, a download
+ * error) stop there too, so a run that ends in a deferral always leaves fewer attempts than this, and the crash rule
+ * only ever sees runs that never ended. With the local engine, or none (voicePaid false, Phase 2b amendment L2), nothing
+ * can be billed, so voice notes and audio files get MEDIA_MAX_ATTEMPTS, as images and documents always do.
  */
-const maxRuns = (kind: MediaKind): number => (kind === 'voice' || kind === 'audio' ? STT_NO_ANSWER_MAX_ATTEMPTS : MEDIA_MAX_ATTEMPTS);
+const maxRuns = (kind: MediaKind, voicePaid: boolean): number =>
+  voicePaid && (kind === 'voice' || kind === 'audio') ? STT_NO_ANSWER_MAX_ATTEMPTS : MEDIA_MAX_ATTEMPTS;
+
+/**
+ * The local engine was stopped by the service's stop signal (LocalEngineError('aborted')): free, so the attempt is
+ * given back, and the note is tried again this long after (after the restart). At least a minute, longer than a tick,
+ * as every real deferral (src/media/queue.ts).
+ */
+const LOCAL_ABORTED = 'local_aborted';
+const LOCAL_ABORTED_RETRY_MS = 60_000;
 
 /** A file that can never be stored safely, for example because a different file already sits at its path. */
 export class MediaFailedError extends Error {
@@ -117,8 +128,8 @@ export interface MediaProcessorOptions {
   /** When the service started; defaults to the clock's time at construction. Files loaded before it get 24 hours from it. */
   startedAt?: Date;
   /**
-   * The voice transcriber STT_PROVIDER names, if any: only to delete provider copies promptly, a copy noted for a failed
-   * call (forgetVoiceCopies, started without waiting) and one finishMedia could not store (below). Never used to
+   * The voice transcriber VOICE_STT_PROVIDER names, if any: only to delete provider copies promptly, a copy noted for a
+   * failed call (forgetVoiceCopies, started without waiting) and one finishMedia could not store (below). Never used to
    * transcribe; the extractor holds its own. Without it, noted copies wait for the app's sweep.
    */
   voice?: VoiceTranscriber | null;
@@ -128,10 +139,16 @@ export interface MediaProcessorOptions {
    * and a rejection are both logged (codes only) and never change the outcome.
    */
   afterFinish?: (mediaId: number, x: Extraction) => void | Promise<void>;
+  /**
+   * Whether the voice transcriber set up is a paid one (Phase 2b amendment L2). True by default, the safe setting: voice
+   * notes and audio files then get 2 runs in all (maxRuns). False for the local engine or none (Task 10 sets it): 3.
+   */
+  voicePaid?: boolean;
 }
 
 function retryCode(e: unknown): string {
   if (e instanceof MediaDownloadError) return e.code;
+  if (e instanceof LocalEngineError) return `local_${e.code}`;
   if (e instanceof SttHttpError) return `stt_http_${e.status}`;
   if (e instanceof SttNoAnswerError) return `stt_no_answer_${e.code}`; // its SttJobLostError too
   if (e instanceof SttBookingError) return 'stt_booking';
@@ -275,10 +292,11 @@ export class MediaProcessor {
       failMedia(db, row.id, { status: 'unavailable', errorCode: 'revoked', at: this.#now() });
       return { outcome: 'unavailable', clientId: row.clientId };
     }
-    if (row.attempts >= maxRuns(row.kind)) {
+    if (row.attempts >= this.#maxRuns(row.kind)) {
       // Every run that ends in a deferral leaves fewer attempts than this, and the run that reaches it fails the file.
       // So a pending file with this many was claimed by runs that never ended: each one stopped the process (FR1). A
-      // voice note or audio file gets fewer: such a run may have been billed (maxRuns, review round 1 fix 3).
+      // voice note or audio file gets fewer when its transcriber is paid: such a run may have been billed (maxRuns,
+      // review round 1 fix 3).
       failMedia(db, row.id, { status: 'failed', errorCode: CRASHED, at: this.#now() });
       this.#o.log.warn({ mediaId: row.id, clientId: row.clientId, errorCode: CRASHED, attempts: row.attempts }, 'shared file failed: its runs never ended');
       return { outcome: 'failed', clientId: row.clientId };
@@ -296,6 +314,10 @@ export class MediaProcessor {
 
   #now(): string {
     return this.#o.clock.now().toISOString();
+  }
+
+  #maxRuns(kind: MediaKind): number {
+    return maxRuns(kind, this.#o.voicePaid ?? true);
   }
 
   /**
@@ -432,6 +454,11 @@ export class MediaProcessor {
    * - no usable answer (SttNoAnswerError, SttJobLostError): one more try, then failed, stt_no_answer_<code>;
    * - any other SttHttpError (stt_http_<status>) or SttBookingError (stt_booking): the counted retries, which for a
    *   voice note or audio file stop at maxRuns (2).
+   * The local engine's errors (Phase 2b amendment L2), each free:
+   * - stopped by the service's stop signal (LocalEngineError 'aborted'): local_aborted, the attempt given back, tried
+   *   again a minute later;
+   * - any other (empty_output, timeout, exit_<n>, no_output): the counted retries, local_<code>, which stop at maxRuns
+   *   (3 with voicePaid false).
    * A copy the provider kept although its answer could not be read (voiceCopyOf) is noted first, best effort, and its
    * deletion started without waiting. The never-retry speech failures add the file to #neverPayAgain before failMedia.
    */
@@ -476,6 +503,12 @@ export class MediaProcessor {
     }
     if (e instanceof SttJobError) return this.#failAtOnce(row, at, `stt_job_${e.code}`, 'voice note job failed at the provider: not retried', { neverPayAgain: true });
     if (e instanceof AudioError) return this.#failAtOnce(row, at, `audio_${e.code}`, 'voice note could not be converted: not retried');
+    if (e instanceof LocalEngineError && e.code === 'aborted') {
+      // The service is stopping: the free run is simply tried again after the restart, counting nothing.
+      deferMedia(db, row.id, { errorCode: LOCAL_ABORTED, nextAttemptAt: new Date(Date.parse(at) + LOCAL_ABORTED_RETRY_MS).toISOString(), attempts: row.attempts, at });
+      log.info({ ...ids, errorCode: LOCAL_ABORTED }, 'local speech engine stopped: voice note waits');
+      return 'deferred';
+    }
     if (e instanceof SttNoAnswerError) return this.#countedRetry(row, at, e, STT_NO_ANSWER_MAX_ATTEMPTS, { neverPayAgain: true });
     if (claudeUnavailable(e)) {
       return this.#growingWait(row, at, e, {
@@ -494,7 +527,7 @@ export class MediaProcessor {
     // the scan fails for good. Only the spend cap and Claude unavailable (both above) wait. An image keeps its
     // 3 attempts: it books at most about $0.10 a try.
     if (isScanReadError(e)) return this.#failAtOnce(row, at, retryCode(e), 'scanned PDF not read: not retried, a retry could pay again');
-    return this.#countedRetry(row, at, e, maxRuns(row.kind));
+    return this.#countedRetry(row, at, e, this.#maxRuns(row.kind));
   }
 
   /**

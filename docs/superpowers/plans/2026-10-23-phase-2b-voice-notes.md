@@ -81,6 +81,7 @@ Each decision has a recommended default. The tasks are written for the defaults.
 - **As amended:** every voice note and audio file is converted on this PC to mono 16 kHz MP3 with ffmpeg before it is sent, for every provider. The conversion stops at `STT_MAX_SECONDS + VOICE_LENGTH_TOLERANCE_S + 1` seconds (ffmpeg's `-t`), and the MP3 ffmpeg wrote is measured. Its length can be trusted, unlike the original's header, which the sender controls. So the true length is known before any money is held.
 - **ffmpeg is required for voice transcription.** Without it nothing is sent: every note is kept with the note `format_not_supported` and picked up later by `cli transcribe-voice` once ffmpeg is installed (N2, Task 8).
 - The bake-off also scored MP3s converted from these files, so the format sent now matches what was measured.
+- *Amended (local speech-to-text, amendment L2, `phase-2b-amendments/2026-10-26-local-stt.md`):* the MP3 conversion is for the **paid** providers only. With `VOICE_STT_PROVIDER=local` every note is converted to a 16 kHz mono WAV instead (`Ffmpeg.toWav`), with the same `-t` stop and measurement, for the engine on this machine. ffmpeg stays required either way.
 - **Tasks:** 2, 3, 5, 8.
 
 ### V4. Forwarded voice notes. **Accepted: do not transcribe, as with forwarded pictures (D2).**
@@ -95,6 +96,7 @@ Each decision has a recommended default. The tasks are written for the defaults.
 - The file is converted and measured before the hold (free, local; V3 as amended). A note measured longer than the cap (`STT_MAX_SECONDS`) plus 5 seconds (`VOICE_LENGTH_TOLERANCE_S`), or whose conversion reached the `-t` limit, is not sent and gets `too_long`, so a low-bitrate file cannot become many paid parts. The hold is the measured length plus the tolerance (*amended in round 2*; round 1 held the larger of the bound and the measured length).
   - *Amended in Task 5's review:* the measured length is compared with the cap, not the size bound. Compared with the bound, an honest short note recorded below 12 kbit/s (whose size bound is too low) would be refused as `too_long`.
 - Expected cost at list prices: about $0.004–0.006 per voice-note minute. 100 notes a day of 45 seconds each cost about $0.3–0.45 a day.
+- *Amended (local speech-to-text, amendment L2):* the hold, the `too_costly` check, the booking and the spend row apply to the **paid** providers only. The local engine costs nothing (`costsNothing`, `ceilingUsd() = 0`), so the extractor runs it with no hold and books nothing. The cap and the `too_long` rule apply to both: a note measured longer than `STT_MAX_SECONDS + VOICE_LENGTH_TOLERANCE_S` is not transcribed.
 - **Tasks:** 3, 5.
 
 ### V6. The 2a backlog. **Accepted: transcribe it on request, for the record only.**

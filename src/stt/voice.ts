@@ -1,8 +1,9 @@
 import { mkdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { requireKey, type Env } from '../config/env.ts';
 import { AudioError, type Ffmpeg } from './audio.ts';
 import type { HttpFetch } from './http.ts';
+import { LocalEngine, LocalEngineError, type LocalEngineName, type LocalRunFile } from './local.ts';
 import { costUsd, modelFor } from './prices.ts';
 import { ElevenLabsProvider } from './providers/elevenlabs.ts';
 import { OpenAiProvider } from './providers/openai.ts';
@@ -11,7 +12,9 @@ import type { AudioPart, ProviderId, ProviderResult, SttProvider } from './types
 
 /*
  * Voice notes and audio files (Phase 2b), the voice-note sibling of the meeting transcriber in src/meetings/transcribe.ts.
- * Same adapters, picked by the same STT_PROVIDER, with speaker labels off and short timeouts.
+ * VOICE_STT_PROVIDER picks the transcriber (Phase 2b amendment, 2026-10-26-local-stt.md): 'local', the free engine on
+ * this machine (localVoiceTranscriber, below), or a paid adapter, the one STT_PROVIDER names for meetings (the env rule
+ * makes them equal: both use STT_API_KEY), with speaker labels off and short timeouts. What follows is the paid path.
  * - Every voice note and audio file is converted to MP3 on this PC with ffmpeg first, for every provider (owner decision
  *   in Task 5's review round 1, amending V3 and N2), in a folder of its own named after the media id. The conversion
  *   stops a little past the cap (ffmpeg's -t) and the MP3 ffmpeg wrote is measured, so the note's true length is known
@@ -51,13 +54,16 @@ export const sizeBoundSeconds = (bytes: number): number => Math.ceil((bytes * 8)
  */
 export const VOICE_LENGTH_TOLERANCE_S = 5;
 
+/** The voice transcriber's provider: a paid adapter's id, or 'local' for the engine on this machine. Meetings keep ProviderId. */
+export type VoiceProviderId = ProviderId | 'local';
+
 /**
  * Whether a file can be sent: only when ffmpeg is there, for every provider and every format, since every file is
- * converted first (Task 5 review round 1, amending V3 and N2). The rule behind every transcriber's canSend, exported so
- * `cli transcribe-voice` can apply it without a key or a provider. The provider and MIME type stay as arguments so a
- * caller says what it asks about; neither changes the answer.
+ * converted first (Task 5 review round 1, amending V3 and N2; for 'local', to the engine's WAV). The rule behind every
+ * transcriber's canSend, exported so `cli transcribe-voice` can apply it without a key or a provider. The provider and
+ * MIME type stay as arguments so a caller says what it asks about; neither changes the answer.
  */
-export function canSendVoice(_provider: ProviderId, _mimeType: string | null, hasFfmpeg: boolean): boolean {
+export function canSendVoice(_provider: VoiceProviderId, _mimeType: string | null, hasFfmpeg: boolean): boolean {
   return hasFfmpeg;
 }
 
@@ -81,22 +87,29 @@ export interface VoiceInput {
 
 /** A note made ready to send by prepare, for one transcribe. */
 export interface PreparedVoice {
-  /** The parts to send, in order: MP3 files in the note's temporary folder. */
+  /** The parts to send, in order: MP3 files in the note's temporary folder. Empty for the local engine, which reads wav. */
   readonly parts: readonly AudioPart[];
-  /** The length ffmpeg measured on the MP3 it wrote: trusted, unlike the original's header. */
+  /**
+   * The local engine's input only (absent for a paid provider): the 16 kHz mono WAV in the note's temporary folder, and
+   * its mean volume in dB (null when ffmpeg reported none), for the empty-output rule.
+   */
+  readonly wav?: { readonly path: string; readonly meanVolumeDb: number | null };
+  /** The length ffmpeg measured on the MP3 (or WAV) it wrote: trusted, unlike the original's header. */
   readonly measuredSeconds: number;
   /** Removes the note's temporary folder. Safe to call twice; never throws. */
   dispose(): void;
 }
 
 export interface VoiceResult {
-  provider: ProviderId;
+  /** 'local' for the engine on this machine. */
+  provider: VoiceProviderId;
+  /** For 'local', the engine's name (STT_LOCAL_ENGINE). */
   model: string;
   /** The segments' text joined with spaces, trimmed. Empty when no speech was heard. */
   text: string;
-  /** Seconds the provider says it billed, summed over parts; null when any part did not say. */
+  /** Seconds the provider says it billed, summed over parts; null when any part did not say (always null for 'local'). */
   billedSeconds: number | null;
-  /** The provider's id for its stored copy (ElevenLabs), for N1; null when it keeps none. */
+  /** The provider's id for its stored copy (ElevenLabs), for N1; null when it keeps none (always null for 'local'). */
   forgetRef: string | null;
 }
 
@@ -116,38 +129,59 @@ export class SttPartialError extends Error {
   }
 }
 
-export interface VoiceTranscriber {
-  readonly provider: ProviderId;
+/** What every voice transcriber does; VoiceTranscriber says whether it is paid or free. */
+interface VoiceTranscriberSteps {
   /**
    * List-price ceiling for this many seconds of audio, without speaker labels, in US dollars (the spend hold). The caller
    * holds ceilingUsd(prepared.measuredSeconds + VOICE_LENGTH_TOLERANCE_S): the tolerance is headroom over a provider's
-   * billed rounding (Task 5 review round 2).
+   * billed rounding (Task 5 review round 2). 0 for 'local'.
    */
   ceilingUsd(seconds: number): number;
   /**
    * List-price cost of a finished note (V5): the billed seconds when reported, else the measured length, else maxSeconds
    * (the bound). Never the sender's declared length, so a declared 0 cannot lower the booking (Task 5 review round 1).
-   * A negative, NaN or infinite length is ignored.
+   * A negative, NaN or infinite length is ignored. 0 for 'local'.
    */
   costUsd(o: { maxSeconds: number; billedSeconds: number | null; measuredSeconds: number | null }): number;
   /** Whether this file can be sent: whether ffmpeg is there, whatever the format (canSendVoice). */
   canSend(mimeType: string | null): boolean;
   /**
-   * The free, local step: no provider call. Converts, measures and splits for OpenAI. Throws AudioError('too_long') when
-   * the measured length exceeds input.maxSeconds + VOICE_LENGTH_TOLERANCE_S (a conversion stopped by -t does too),
-   * AudioError('no_ffmpeg') without ffmpeg, and ffmpeg's own AudioError; the folder is removed first.
-   * Run it outside the spend hold.
+   * The free, local step: no provider call. Converts, measures and splits for OpenAI (for 'local': converts to the
+   * engine's WAV, measures it and its mean volume). Throws AudioError('too_long') when the measured length exceeds
+   * input.maxSeconds + VOICE_LENGTH_TOLERANCE_S (a conversion stopped by -t does too), AudioError('no_ffmpeg') without
+   * ffmpeg, and ffmpeg's own AudioError; the folder is removed first. Run it outside the spend hold.
    */
   prepare(input: VoiceInput): Promise<PreparedVoice>;
   /**
-   * The paid step: one provider call per part, in order. Never retried, never aborted. A failure of the first part
-   * reaches the caller unchanged; a later one is an SttPartialError. Always disposes the prepared note.
+   * Paid: one provider call per part, in order. Never retried, never aborted (the signal is ignored). A failure of the
+   * first part reaches the caller unchanged; a later one is an SttPartialError.
+   * 'local': one engine run, which the signal stops (LocalEngineError('aborted')); every other failure is a
+   * LocalEngineError too, empty_output included (localVoiceTranscriber).
+   * Always disposes the prepared note.
    */
-  transcribe(prepared: PreparedVoice): Promise<VoiceResult>;
+  transcribe(prepared: PreparedVoice, signal?: AbortSignal): Promise<VoiceResult>;
   readonly canForget: boolean;
-  /** Deletes the provider's stored copy named by a forgetRef. Free. */
+  /** Deletes the provider's stored copy named by a forgetRef. Free. Does nothing for 'local'. */
   forget(ref: string): Promise<void>;
 }
+
+/** A paid provider: the extractor runs transcribe inside one spend hold (withSttHold). */
+export interface PaidVoiceTranscriber extends VoiceTranscriberSteps {
+  readonly provider: ProviderId;
+  readonly costsNothing: false;
+}
+
+/**
+ * The local engine on this machine (Phase 2b amendment L2): it costs nothing, so the extractor runs it with no hold, no
+ * too_costly and no spend row. It keeps no copies.
+ */
+export interface LocalVoiceTranscriber extends VoiceTranscriberSteps {
+  readonly provider: 'local';
+  readonly costsNothing: true;
+  readonly canForget: false;
+}
+
+export type VoiceTranscriber = PaidVoiceTranscriber | LocalVoiceTranscriber;
 
 /** The list-price hold for a voice note of this many seconds, without speaker labels. Needs no key (for the CLI). */
 export function voiceCeilingUsd(provider: ProviderId, seconds: number, inrPerUsd: number): number {
@@ -173,48 +207,75 @@ function folderRemover(dir: string): () => void {
   };
 }
 
+/** What convertNote hands on: the note's folder, the converted file, its measured length, and how to remove the folder. */
+interface ConvertedNote {
+  ffmpeg: Ffmpeg;
+  dir: string;
+  path: string;
+  measured: number;
+  dispose: () => void;
+}
+
+/**
+ * The first half of every prepare, paid or local: converts the note in a folder of its own named after the media id,
+ * stopped one second past what is allowed, measures what ffmpeg wrote, and applies the too_long rule. `next` finishes
+ * the note from there. On any failure, the folder is removed and the error rethrown.
+ */
+async function convertNote(
+  o: { ffmpeg: Ffmpeg | null; tmpDir: string },
+  input: VoiceInput,
+  to: 'mp3' | 'wav',
+  next: (c: ConvertedNote) => Promise<PreparedVoice>,
+): Promise<PreparedVoice> {
+  // The folder is named from the numeric id only, never from a path or name the sender gave.
+  if (!Number.isSafeInteger(input.mediaId) || input.mediaId < 1) throw new Error('voice prepare: the media id is not a positive whole number');
+  if (o.ffmpeg === null) throw new AudioError('no_ffmpeg');
+  const ffmpeg = o.ffmpeg;
+  const allowed = input.maxSeconds + VOICE_LENGTH_TOLERANCE_S;
+  const dir = join(o.tmpDir, `voice-${input.mediaId}`);
+  const dispose = folderRemover(dir);
+  try {
+    // A folder left by an earlier crash goes first, so no stale conversion or parts are reused.
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, `audio.${to}`);
+    // Stopped one second past what is allowed: a longer note is never converted whole, whatever its header claims.
+    const opts = { maxSeconds: allowed + 1, timeoutMs: VOICE_CONVERT_TIMEOUT_MS };
+    if (to === 'mp3') await ffmpeg.toMp3(input.path, path, undefined, opts);
+    else await ffmpeg.toWav(input.path, path, undefined, opts);
+    // The file ffmpeg wrote, so its length can be trusted; the original's header is the sender's.
+    const measured = await ffmpeg.seconds(path);
+    if (!measurable(measured)) throw new AudioError('no_duration');
+    // Also refuses a conversion that reached the -t limit: it measures about allowed + 1.
+    if (measured > allowed) throw new AudioError('too_long');
+    return await next({ ffmpeg, dir, path, measured, dispose });
+  } catch (e) {
+    dispose();
+    throw e;
+  }
+}
+
 /** A VoiceTranscriber over any provider, with speaker labels off. Exported for tests (a fake provider and ffmpeg). */
-export function voiceTranscriber(provider: SttProvider, o: { inrPerUsd: number; ffmpeg: Ffmpeg | null; tmpDir: string }): VoiceTranscriber {
+export function voiceTranscriber(provider: SttProvider, o: { inrPerUsd: number; ffmpeg: Ffmpeg | null; tmpDir: string }): PaidVoiceTranscriber {
   const price = modelFor(provider.id, false);
   const send = (part: AudioPart): Promise<ProviderResult> =>
     provider.transcribe({ path: part.path, seconds: part.seconds, offset: part.offset, format: 'mp3' }, { diarize: false });
 
   return {
     provider: provider.id,
+    costsNothing: false,
     ceilingUsd: (seconds) => voiceCeilingUsd(provider.id, seconds, o.inrPerUsd),
     costUsd: ({ maxSeconds, billedSeconds, measuredSeconds }) => {
       const seconds = usable(billedSeconds) ? billedSeconds : usable(measuredSeconds) ? measuredSeconds : maxSeconds;
       return costUsd(price, seconds, o.inrPerUsd);
     },
     canSend: (mimeType) => canSendVoice(provider.id, mimeType, o.ffmpeg !== null),
-    async prepare(input) {
-      // The folder is named from the numeric id only, never from a path or name the sender gave.
-      if (!Number.isSafeInteger(input.mediaId) || input.mediaId < 1) throw new Error('voice prepare: the media id is not a positive whole number');
-      if (o.ffmpeg === null) throw new AudioError('no_ffmpeg');
-      const ffmpeg = o.ffmpeg;
-      const allowed = input.maxSeconds + VOICE_LENGTH_TOLERANCE_S;
-      const dir = join(o.tmpDir, `voice-${input.mediaId}`);
-      const dispose = folderRemover(dir);
-      try {
-        // A folder left by an earlier crash goes first, so no stale conversion or parts are reused.
-        rmSync(dir, { recursive: true, force: true });
-        mkdirSync(dir, { recursive: true });
-        const mp3 = join(dir, 'audio.mp3');
-        // Stopped one second past what is allowed: a longer note is never converted whole, whatever its header claims.
-        await ffmpeg.toMp3(input.path, mp3, undefined, { maxSeconds: allowed + 1, timeoutMs: VOICE_CONVERT_TIMEOUT_MS });
-        // The MP3 ffmpeg wrote, so its length can be trusted; the original's header is the sender's.
-        const measured = await ffmpeg.seconds(mp3);
-        if (!measurable(measured)) throw new AudioError('no_duration');
-        // Also refuses a conversion that reached the -t limit: it measures about allowed + 1.
-        if (measured > allowed) throw new AudioError('too_long');
+    prepare: (input) =>
+      convertNote(o, input, 'mp3', async ({ ffmpeg, dir, path: mp3, measured, dispose }) => {
         const whole: AudioPart = { path: mp3, seconds: measured, offset: 0, format: 'mp3' };
         const parts = measured > provider.maxPartSeconds ? await ffmpeg.split(whole, join(dir, 'parts'), provider.maxPartSeconds) : [whole];
         return { parts: parts.map((p) => ({ path: p.path, seconds: p.seconds, offset: p.offset, format: 'mp3' })), measuredSeconds: measured, dispose };
-      } catch (e) {
-        dispose();
-        throw e;
-      }
-    },
+      }),
     async transcribe(prepared) {
       try {
         const results: ProviderResult[] = [];
@@ -255,16 +316,96 @@ function combine(provider: SttProvider, results: ProviderResult[]): VoiceResult 
 }
 
 /**
- * The voice transcriber STT_PROVIDER names, or null when it is 'none'. STT_API_KEY goes to the provider's constructor
- * and nowhere else. deps.ffmpeg is null when there is none (then nothing is sent: canSend is false for every file);
- * deps.tmpDir holds the conversion folders; deps.http replaces the network in tests.
+ * A mean volume at or below this is silence (Phase 2b amendment, PC test): an empty transcript of it is "no speech".
+ * Above it, or unknown, an empty transcript is the engine's failure (empty_output), retried: a note is never lost quietly.
  */
-export function createVoiceTranscriber(env: Env, deps: { ffmpeg: Ffmpeg | null; tmpDir: string; http?: HttpFetch }): VoiceTranscriber | null {
-  if (env.STT_PROVIDER === 'none') return null;
+export const LOCAL_SILENCE_DB = -50;
+
+/** Whether a note's mean volume is silence. Unknown (null) is not: the note is retried rather than lost. */
+const silent = (meanVolumeDb: number | null): boolean => meanVolumeDb !== null && meanVolumeDb <= LOCAL_SILENCE_DB;
+
+/**
+ * The local engine as a VoiceTranscriber (Phase 2b amendment L2). It costs nothing: ceilingUsd and costUsd are 0, and
+ * the extractor holds no money for it. It keeps no copies, so forget does nothing. canSend is whether ffmpeg is there
+ * (the engine's files are checked when the service starts, Task 10).
+ * - prepare converts the note to a 16 kHz mono WAV (voice-<id>/audio.wav), stopped and measured as for the paid path,
+ *   with the same too_long rule, then measures its mean volume.
+ * - transcribe runs the engine once, in the note's folder, stopped by the signal. EMPTY-OUTPUT RULE: an empty
+ *   transcript of a note that is not silent (mean volume above LOCAL_SILENCE_DB, or unknown) is
+ *   LocalEngineError('empty_output'), retried by the processor; of a silent note it is '' (no speech).
+ * Nothing is logged here. Exported for tests (a fake engine and ffmpeg).
+ */
+export function localVoiceTranscriber(
+  engine: Pick<LocalEngine, 'transcribe'>,
+  o: { engine: LocalEngineName; ffmpeg: Ffmpeg | null; tmpDir: string },
+): LocalVoiceTranscriber {
+  return {
+    provider: 'local',
+    costsNothing: true,
+    ceilingUsd: () => 0,
+    costUsd: () => 0,
+    canSend: (mimeType) => canSendVoice('local', mimeType, o.ffmpeg !== null),
+    prepare: (input) =>
+      convertNote(o, input, 'wav', async ({ ffmpeg, path, measured, dispose }) => {
+        const meanVolumeDb = await ffmpeg.meanVolumeDb(path);
+        return { parts: [], wav: { path, meanVolumeDb }, measuredSeconds: measured, dispose };
+      }),
+    async transcribe(prepared, signal) {
+      try {
+        const wav = prepared.wav;
+        if (wav === undefined) throw new Error('local voice transcribe: the note was not prepared for the local engine');
+        const { text } = await engine.transcribe(wav.path, { workDir: dirname(wav.path), ...(signal ? { signal } : {}) });
+        if (text === '' && !silent(wav.meanVolumeDb)) throw new LocalEngineError('empty_output');
+        return { provider: 'local', model: o.engine, text, billedSeconds: null, forgetRef: null };
+      } finally {
+        prepared.dispose();
+      }
+    },
+    canForget: false,
+    async forget() {
+      // The local engine keeps no copies.
+    },
+  };
+}
+
+/**
+ * The voice transcriber VOICE_STT_PROVIDER names, or null when it is 'none' (STT_PROVIDER no longer decides voice
+ * notes; it stays the meetings' setting).
+ * - 'local': the engine STT_LOCAL_ENGINE, STT_LOCAL_BIN, STT_LOCAL_MODEL, STT_LOCAL_THREADS, STT_LOCAL_TIMEOUT_SECONDS
+ *   and STT_LOCAL_LANGUAGE set, working inside deps.tmpDir; deps.localRun replaces its runner in tests. No key.
+ * - a paid provider: the env rule makes it equal STT_PROVIDER, whose key STT_API_KEY goes to the provider's constructor
+ *   and nowhere else; deps.http replaces the network in tests.
+ * deps.ffmpeg is null when there is none (then nothing is sent: canSend is false for every file); deps.tmpDir holds the
+ * conversion folders.
+ */
+export function createVoiceTranscriber(
+  env: Env,
+  deps: { ffmpeg: Ffmpeg | null; tmpDir: string; http?: HttpFetch; localRun?: LocalRunFile },
+): VoiceTranscriber | null {
+  const choice = env.VOICE_STT_PROVIDER;
+  if (choice === 'none') return null;
+  if (choice === 'local') {
+    const bin = env.STT_LOCAL_BIN;
+    const model = env.STT_LOCAL_MODEL;
+    if (bin === undefined || model === undefined) throw new Error('STT_LOCAL_BIN and STT_LOCAL_MODEL are required when VOICE_STT_PROVIDER is local');
+    const engine = new LocalEngine({
+      engine: env.STT_LOCAL_ENGINE,
+      bin,
+      model,
+      threads: env.STT_LOCAL_THREADS,
+      timeoutMs: env.STT_LOCAL_TIMEOUT_SECONDS * 1000,
+      language: env.STT_LOCAL_LANGUAGE,
+      tmpDir: deps.tmpDir,
+      ...(deps.localRun ? { run: deps.localRun } : {}),
+    });
+    return localVoiceTranscriber(engine, { engine: env.STT_LOCAL_ENGINE, ffmpeg: deps.ffmpeg, tmpDir: deps.tmpDir });
+  }
+  // parseEnv refuses this already; checked again because STT_API_KEY is the meetings' provider's key.
+  if (choice !== env.STT_PROVIDER) throw new Error('VOICE_STT_PROVIDER must be local, none or the same as STT_PROVIDER');
   const apiKey = requireKey(env, 'STT_API_KEY');
   const http = deps.http ? { http: deps.http } : {};
   let provider: SttProvider;
-  switch (env.STT_PROVIDER) {
+  switch (choice) {
     case 'sarvam':
       provider = new SarvamProvider({ apiKey, ...http, maxWaitMs: VOICE_STT_TIMEOUTS.sarvamWaitMs });
       break;

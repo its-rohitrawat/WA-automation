@@ -76,9 +76,29 @@ export function parseDuration(stderr: string): number | null {
   return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
 }
 
+/**
+ * "[Parsed_volumedetect_0 @ 0x...] mean_volume: -23.5 dB" in ffmpeg's volumedetect report -> -23.5. "-inf" is
+ * -Infinity. Null when it is missing. Anchored to the filter's own log prefix, so a metadata tag that contains
+ * "mean_volume: ..." is never read as the volume.
+ */
+export function parseMeanVolume(stderr: string): number | null {
+  const m = /^\[Parsed_volumedetect_\d+ @ [^\]]+\] mean_volume: (-?(?:\d+(?:\.\d+)?|inf)) dB/m.exec(stderr);
+  if (!m) return null;
+  return m[1] === '-inf' || m[1] === 'inf' ? Number.NEGATIVE_INFINITY : Number(m[1]);
+}
+
 const QUIET = ['-hide_banner', '-nostdin', '-loglevel', 'error'];
-/** toMp3's default timeout: a whole meeting recording. */
+/** toMp3's and toWav's default timeout: a whole meeting recording. */
 const CONVERT_TIMEOUT_MS = 60 * 60_000;
+
+/** The checked opts of a conversion: maxSeconds (-t) when given, and the timeout. Throws on a value that is not positive. */
+function conversionOpts(name: string, opts: { maxSeconds?: number; timeoutMs?: number }): { max: number | undefined; timeoutMs: number } {
+  const max = opts.maxSeconds;
+  if (max !== undefined && !(Number.isFinite(max) && max > 0)) throw new Error(`${name}: maxSeconds must be a positive number`);
+  const timeoutMs = opts.timeoutMs ?? CONVERT_TIMEOUT_MS;
+  if (!(Number.isFinite(timeoutMs) && timeoutMs > 0)) throw new Error(`${name}: timeoutMs must be a positive number`);
+  return { max, timeoutMs };
+}
 
 /**
  * The demuxers an input may be read with. ffmpeg picks the input format from the file's content, so without a list a
@@ -128,10 +148,7 @@ export class Ffmpeg {
    * It changes no argument.
    */
   async toMp3(input: string, output: string, signal?: AbortSignal, opts: { maxSeconds?: number; timeoutMs?: number } = {}): Promise<void> {
-    const max = opts.maxSeconds;
-    if (max !== undefined && !(Number.isFinite(max) && max > 0)) throw new Error('toMp3: maxSeconds must be a positive number');
-    const timeoutMs = opts.timeoutMs ?? CONVERT_TIMEOUT_MS;
-    if (!(Number.isFinite(timeoutMs) && timeoutMs > 0)) throw new Error('toMp3: timeoutMs must be a positive number');
+    const { max, timeoutMs } = conversionOpts('toMp3', opts);
     if (existsSync(output)) return;
     const tmp = `${output}.part.mp3`;
     const args = [
@@ -141,6 +158,36 @@ export class Ffmpeg {
     const { code } = await this.#ffmpeg(args, timeoutMs, signal);
     if (code !== 0 || !existsSync(tmp)) throw new AudioError('convert_failed');
     renameSync(tmp, output);
+  }
+
+  /**
+   * Mono 16 kHz 16-bit PCM WAV, what the local speech engine takes (Phase 2b amendment L2). Like toMp3: SAFE_INPUT, the
+   * video track, tags and chapters dropped, an existing output kept, a new one written under a temporary name, and
+   * opts.maxSeconds as the output's -t, just before the output path. opts.timeoutMs as for toMp3.
+   */
+  async toWav(input: string, output: string, signal?: AbortSignal, opts: { maxSeconds?: number; timeoutMs?: number } = {}): Promise<void> {
+    const { max, timeoutMs } = conversionOpts('toWav', opts);
+    if (existsSync(output)) return;
+    const tmp = `${output}.part.wav`;
+    const args = [
+      ...QUIET, '-y', ...SAFE_INPUT, '-i', input, '-vn', '-map_metadata', '-1', '-map_chapters', '-1',
+      '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', ...(max === undefined ? [] : ['-t', String(max)]), tmp,
+    ];
+    const { code } = await this.#ffmpeg(args, timeoutMs, signal);
+    if (code !== 0 || !existsSync(tmp)) throw new AudioError('convert_failed');
+    renameSync(tmp, output);
+  }
+
+  /**
+   * The mean volume of a file in dB, from ffmpeg's volumedetect filter (decoded into the null muxer, nothing written).
+   * -Infinity or about -91 for digital silence. Null when ffmpeg printed none (no audio, or it failed). The local
+   * engine's empty-output rule tells silence from sound with it (Phase 2b amendment L2).
+   */
+  async meanVolumeDb(input: string, signal?: AbortSignal): Promise<number | null> {
+    // Not QUIET: volumedetect reports at the info level. -nostats keeps the progress lines out.
+    const args = ['-hide_banner', '-nostdin', '-nostats', ...SAFE_INPUT, '-i', input, '-vn', '-af', 'volumedetect', '-f', 'null', '-'];
+    const { stderr } = await this.#ffmpeg(args, 60_000, signal);
+    return parseMeanVolume(stderr);
   }
 
   /**

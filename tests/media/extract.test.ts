@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isMarkedAsUntransferable } from 'node:worker_threads';
@@ -7,6 +7,7 @@ import sharp from 'sharp';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { IMAGE_MAX_TOKENS, IMAGE_TOKEN_CEILING, MEDIA_SYSTEM_PROMPT, PDF_MAX_TOKENS, PDF_TOKENS_PER_PAGE } from '../../src/brain/mediaClient.ts';
 import { SpendCapReachedError } from '../../src/brain/paidCall.ts';
+import { parseEnv } from '../../src/config/env.ts';
 import { createExtractor, imageCeilingUsd, imageEstimateUsd, isPaidVoiceError, scannedPdfCeilingUsd, voiceCopyOf, type ExtractInput } from '../../src/media/extract.ts';
 import type { PreparedImage } from '../../src/media/image.ts';
 import type { ParseJob, ParseResult } from '../../src/media/parse/types.ts';
@@ -16,13 +17,16 @@ import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import type { Db } from '../../src/store/db.ts';
 import { AudioError } from '../../src/stt/audio.ts';
 import { SttHttpError, SttJobError, SttNoAnswerError } from '../../src/stt/http.ts';
+import { LocalEngineError, type LocalRunFile } from '../../src/stt/local.ts';
 import { SttBookingError } from '../../src/stt/paidStt.ts';
-import { sizeBoundSeconds, SttPartialError, VOICE_LENGTH_TOLERANCE_S, voiceCeilingUsd, voiceTranscriber, type VoiceTranscriber } from '../../src/stt/voice.ts';
+import {
+  createVoiceTranscriber, sizeBoundSeconds, SttPartialError, VOICE_LENGTH_TOLERANCE_S, voiceCeilingUsd, voiceTranscriber, type VoiceTranscriber,
+} from '../../src/stt/voice.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { seededDb } from '../helpers/db.ts';
 import { tinyDocx, tinyPdf } from '../helpers/files.ts';
 import { FakeMediaAi } from '../helpers/mediaAi.ts';
-import { FakeVoiceTranscriber, HearingProvider, MeasuringFfmpeg } from '../helpers/voice.ts';
+import { FakeLocalVoiceTranscriber, FakeVoiceTranscriber, HearingProvider, MeasuringFfmpeg } from '../helpers/voice.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
 const PDF = Buffer.from('%PDF-1.4 fake');
@@ -36,7 +40,10 @@ const NOTE_PATH = '/data/media/acme/2026-10/wa1-7.ogg';
 const owned = (b: Uint8Array): Buffer => Buffer.from(new Uint8Array(b).buffer);
 
 function setup(
-  o: { parse?: ParseResult; capUsd?: number; ai?: FakeMediaAi; realParse?: boolean; realImage?: boolean; voice?: VoiceTranscriber | null; maxVoiceSeconds?: number } = {},
+  o: {
+    parse?: ParseResult; capUsd?: number; ai?: FakeMediaAi; realParse?: boolean; realImage?: boolean; voice?: VoiceTranscriber | null; maxVoiceSeconds?: number;
+    signal?: AbortSignal;
+  } = {},
 ) {
   const db = seededDb();
   const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: o.capUsd ?? 15 });
@@ -53,6 +60,7 @@ function setup(
   const extract = createExtractor({
     ai, spend, prices: P, parse: o.realParse ? undefined : parse, prepareImage: o.realImage ? undefined : prepareImage,
     ...(o.voice === undefined ? {} : { voice: o.voice }), ...(o.maxVoiceSeconds === undefined ? {} : { maxVoiceSeconds: o.maxVoiceSeconds }),
+    ...(o.signal === undefined ? {} : { signal: o.signal }),
   });
   const input = (i: Partial<ExtractInput> = {}): ExtractInput => ({
     mediaId: 7, kind: 'image', mimeType: 'image/jpeg', fileName: null, forwarded: false, bytes: Buffer.from('img'), path: NOTE_PATH, ...i,
@@ -499,7 +507,7 @@ describe('voice and audio', () => {
   const OGG = 'audio/ogg; codecs=opus';
   /** 90,000 bytes: a size bound of 60 seconds. */
   const note = (i: Partial<ExtractInput> = {}): Partial<ExtractInput> => ({ kind: 'voice', mimeType: OGG, bytes: Buffer.alloc(90_000), ...i });
-  const voiceSetup = (v: VoiceTranscriber | null = new FakeVoiceTranscriber(), o: { capUsd?: number; maxVoiceSeconds?: number } = {}) => setup({ voice: v, ...o });
+  const voiceSetup = (v: VoiceTranscriber | null = new FakeVoiceTranscriber(), o: { capUsd?: number; maxVoiceSeconds?: number; signal?: AbortSignal } = {}) => setup({ voice: v, ...o });
   const sttRows = (db: Db) => db.prepare('SELECT kind, usd, detail FROM spend').all() as { kind: string; usd: number; detail: string }[];
   const caught = async (run: Promise<unknown>): Promise<unknown> => run.then(() => null, (e: unknown) => e);
   /** A folder of its own for the real transcriber's conversions, removed after each test. */
@@ -726,6 +734,175 @@ describe('voice and audio', () => {
     expect(ffmpeg.limits).toEqual([600 + 5 + 1]);
     expect(provider.calls.map((c) => [c.format, c.seconds])).toEqual([['mp3', 42]]);
     expect(provider.calls[0]!.path).not.toBe(NOTE_PATH);
+  });
+
+  // Phase 2b amendment L2: the local engine costs nothing, so there is no hold, no too_costly and no spend row. The
+  // other rules stay: forwarded (V4), canSend, too_long (measured), revoked, dispose and no_speech.
+  describe('the local engine: the free path', () => {
+    const TRANSCRIPT = { textKind: 'extract', text: 'namaste', pageCount: null, note: null };
+
+    it('transcribes with no hold, no pricing and no spend row, passes the signal, carries no forget, and disposes', async () => {
+      const v = new FakeLocalVoiceTranscriber({ results: [{ text: 'payment bhej diya' }] });
+      const ac = new AbortController();
+      const { db, spend, extract, input, reserve } = voiceSetup(v, { signal: ac.signal });
+      const canSpend = vi.spyOn(spend, 'canSpend');
+      const x = await extract(input(note()));
+      expect(x).toEqual({ ...TRANSCRIPT, text: 'payment bhej diya' });
+      expect(Object.keys(x)).not.toContain('forget');
+      expect(v.prepared).toEqual([{ mediaId: 7, path: NOTE_PATH, maxSeconds: 600 }]);
+      expect(v.transcribed).toBe(1);
+      expect(v.signals).toEqual([ac.signal]);
+      expect(v.priced).toBe(0);
+      expect(reserve).not.toHaveBeenCalled();
+      expect(canSpend).not.toHaveBeenCalled();
+      expect(spendRows(db)).toEqual([]);
+      expect(v.disposals).toBe(1);
+    });
+
+    it('without a signal set up, transcribe is given none', async () => {
+      const v = new FakeLocalVoiceTranscriber();
+      const { extract, input } = voiceSetup(v);
+      await extract(input(note()));
+      expect(v.signals).toEqual([undefined]);
+    });
+
+    it('is never too costly, and never waits for the spend cap: a tiny cap, or a cap used up', async () => {
+      const tiny = voiceSetup(new FakeLocalVoiceTranscriber(), { capUsd: 0.000_001 });
+      expect(await tiny.extract(tiny.input(note()))).toEqual(TRANSCRIPT);
+      const used = voiceSetup(new FakeLocalVoiceTranscriber(), { capUsd: 1 });
+      used.spend.record('ai', 1, 'earlier calls');
+      expect(used.spend.canSpend(0.01)).toBe(false);
+      expect(await used.extract(used.input(note()))).toEqual(TRANSCRIPT);
+      expect(spendRows(used.db)).toEqual([{ usd: 1, detail: 'earlier calls' }]);
+    });
+
+    it('never transcribes a forwarded voice note (V4), before preparing it', async () => {
+      const v = new FakeLocalVoiceTranscriber();
+      const { extract, input } = voiceSetup(v);
+      expect(await extract(input(note({ forwarded: true })))).toEqual({ ...NONE, note: 'forwarded_not_transcribed' });
+      expect(v.prepared).toEqual([]);
+      expect(v.transcribed).toBe(0);
+    });
+
+    it('a file it cannot send (no ffmpeg) is format_not_supported, without preparing it', async () => {
+      const v = new FakeLocalVoiceTranscriber({ canSend: () => false });
+      const { extract, input } = voiceSetup(v);
+      expect(await extract(input(note()))).toEqual({ ...NONE, note: 'format_not_supported' });
+      expect(v.prepared).toEqual([]);
+    });
+
+    it('a note measured too long is too_long, and the engine never runs', async () => {
+      const v = new FakeLocalVoiceTranscriber({ measuredSeconds: 700 });
+      const { extract, input } = voiceSetup(v, { maxVoiceSeconds: 600 });
+      expect(await extract(input(note()))).toEqual({ ...NONE, note: 'too_long' });
+      expect(v.transcribed).toBe(0);
+    });
+
+    it('a note deleted for everyone before the run is revoked, not transcribed, and disposed', async () => {
+      const v = new FakeLocalVoiceTranscriber();
+      const { extract, input } = voiceSetup(v);
+      const revoked = vi.fn(() => true);
+      expect(await extract(input(note({ revoked })))).toEqual({ ...NONE, note: 'revoked' });
+      expect(revoked).toHaveBeenCalledTimes(1);
+      expect(v.transcribed).toBe(0);
+      expect(v.disposals).toBe(1);
+    });
+
+    it('an empty transcript is no_speech, with no forget', async () => {
+      const v = new FakeLocalVoiceTranscriber({ results: [{ text: '' }] });
+      const { extract, input } = voiceSetup(v);
+      const x = await extract(input(note()));
+      expect(x).toEqual({ ...NONE, note: 'no_speech' });
+      expect(Object.keys(x)).not.toContain('forget');
+    });
+
+    it.each(['empty_output', 'timeout', 'exit_1', 'aborted', 'no_output'])(
+      'a LocalEngineError (%s) reaches the processor unchanged: not a paid error, no copy, nothing booked, disposed',
+      async (code) => {
+        const err = new LocalEngineError(code);
+        const v = new FakeLocalVoiceTranscriber({ results: [err] });
+        const { db, extract, input, reserve } = voiceSetup(v);
+        const e = await caught(extract(input(note())));
+        expect(e).toBe(err);
+        expect(isPaidVoiceError(e)).toBe(false);
+        expect(voiceCopyOf(e)).toBeNull();
+        expect(reserve).not.toHaveBeenCalled();
+        expect(spendRows(db)).toEqual([]);
+        expect(v.disposals).toBe(1);
+      },
+    );
+
+    it('a prepare failure reaches the caller, with nothing run or booked', async () => {
+      const err = new AudioError('convert_failed');
+      const v = new FakeLocalVoiceTranscriber({ prepareError: err });
+      const { db, extract, input } = voiceSetup(v);
+      expect(await caught(extract(input(note())))).toBe(err);
+      expect(v.transcribed).toBe(0);
+      expect(spendRows(db)).toEqual([]);
+    });
+
+    it('follows the same rules for kind audio', async () => {
+      const v = new FakeLocalVoiceTranscriber({ results: [{ text: 'audio file' }] });
+      const { db, extract, input } = voiceSetup(v);
+      expect(await extract(input(note({ kind: 'audio', mimeType: 'audio/mpeg' })))).toEqual({ ...TRANSCRIPT, text: 'audio file' });
+      expect(spendRows(db)).toEqual([]);
+    });
+
+    describe('with the real local transcriber, over the real LocalEngine with a fake runner and a fake ffmpeg', () => {
+      const localEnv = (tmp: string) =>
+        parseEnv({ VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: join(tmp, 'transcribe-cli'), STT_LOCAL_MODEL: join(tmp, 'model.gguf') });
+      /** Writes `text` to transcribe-cli's -o file; records each run's arguments. */
+      const realLocal = (text: string, ffmpeg = new MeasuringFfmpeg(42)) => {
+        const tmp = workDir();
+        const runs: (readonly string[])[] = [];
+        const run: LocalRunFile = async (_file, args) => {
+          runs.push(args);
+          writeFileSync(args[args.indexOf('-o') + 1]!, text);
+          return { code: 0, stderr: '' };
+        };
+        const v = createVoiceTranscriber(localEnv(tmp), { ffmpeg, tmpDir: join(tmp, 'voice'), localRun: run })!;
+        return { v, runs, ffmpeg, tmp };
+      };
+
+      it('converts to WAV stopped past the cap, runs the engine once on it, stores the text, and books nothing', async () => {
+        const { v, runs, ffmpeg, tmp } = realLocal('Site visit kal\n');
+        const { db, extract, input, reserve } = voiceSetup(v);
+        expect(await extract(input(note()))).toEqual({ ...TRANSCRIPT, text: 'Site visit kal' });
+        expect(ffmpeg.formats).toEqual(['wav']);
+        expect(ffmpeg.limits).toEqual([600 + 5 + 1]);
+        expect(runs).toHaveLength(1);
+        expect(runs[0]!.at(-1)).toBe(join(tmp, 'voice', 'voice-7', 'audio.wav'));
+        expect(reserve).not.toHaveBeenCalled();
+        expect(spendRows(db)).toEqual([]);
+        expect(existsSync(join(tmp, 'voice', 'voice-7'))).toBe(false);
+      });
+
+      it('an empty transcript of sound is LocalEngineError empty_output, thrown to the processor; of silence, no_speech', async () => {
+        const loud = realLocal('');
+        const a = voiceSetup(loud.v);
+        expect(await caught(a.extract(a.input(note())))).toMatchObject({ name: 'LocalEngineError', code: 'empty_output' });
+        const quiet = realLocal('\n', new MeasuringFfmpeg(42, -75));
+        const b = voiceSetup(quiet.v);
+        expect(await b.extract(b.input(note()))).toEqual({ ...NONE, note: 'no_speech' });
+      });
+
+      it('an engine that exits with an error is LocalEngineError exit_<n>, its stderr kept out', async () => {
+        const tmp = workDir();
+        const run: LocalRunFile = async () => ({ code: 2, stderr: 'said something' });
+        const v = createVoiceTranscriber(localEnv(tmp), { ffmpeg: new MeasuringFfmpeg(42), tmpDir: join(tmp, 'voice'), localRun: run })!;
+        const { extract, input } = voiceSetup(v);
+        const e = await caught(extract(input(note())));
+        expect(e).toMatchObject({ name: 'LocalEngineError', code: 'exit_2' });
+        expect((e as Error).message).not.toContain('said something');
+      });
+
+      it('a note measured too long is too_long, and the engine never runs', async () => {
+        const { v, runs } = realLocal('never', new MeasuringFfmpeg(2000));
+        const { extract, input } = voiceSetup(v);
+        expect(await extract(input(note()))).toEqual({ ...NONE, note: 'too_long' });
+        expect(runs).toEqual([]);
+      });
+    });
   });
 
   describe('local failures in prepare book nothing', () => {
