@@ -19,12 +19,14 @@ const STT_REFUSED_LINE = '⚠️ Voice notes are not being transcribed: the spee
 
 /**
  * Why voice notes are not transcribed at all, found when the service starts (Phase 2b Task 10, src/voiceDeps.ts):
- * VOICE_STT_PROVIDER is local but STT_LOCAL_BIN or STT_LOCAL_MODEL is not a file, or ffmpeg was not found. The notes are
- * kept; the service runs on.
+ * VOICE_STT_PROVIDER is local but STT_LOCAL_BIN (local_not_set_up_bin) or STT_LOCAL_MODEL (local_not_set_up_model) is
+ * not a file, or ffmpeg was not found. The notes are kept; the service runs on. The line names the setting, never its path.
  */
-export type VoiceProblem = 'local_not_set_up' | 'no_ffmpeg';
-const VOICE_PROBLEM_LINES: Record<VoiceProblem, string> = {
-  local_not_set_up: '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (see SETUP-mac, Voice notes)',
+export type VoiceProblem = 'local_not_set_up_bin' | 'local_not_set_up_model' | 'no_ffmpeg';
+/** The Health line for each problem; docs/SETUP.md ("Voice note status lines") lists each one, without the ⚠️. */
+export const VOICE_PROBLEM_LINES: Readonly<Record<VoiceProblem, string>> = {
+  local_not_set_up_bin: '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_BIN)',
+  local_not_set_up_model: '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_MODEL)',
   no_ffmpeg: '⚠️ Voice notes are not being transcribed: ffmpeg not found',
 };
 
@@ -354,7 +356,8 @@ export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
     // Snapshots written before the morning report existed, or with it off, have no report line.
     if (o.report !== undefined && !isReportHealth(o.report)) return undefined;
     // A pause reason or provider this version does not know (a newer writer) drops only the meetings, not the snapshot.
-    // So does a voice problem it does not know: only that field is dropped. Snapshots before Task 10 have none.
+    // So does a voice problem it does not know (including the earlier 'local_not_set_up', written before the problem
+    // named its setting): only that field is dropped. Snapshots before Task 10 have none.
     const { meetings, voiceProblem, ...rest } = o;
     const keep = meetings !== undefined && isKnownMeetingsState(meetings) ? { meetings } : {};
     const voice = isVoiceProblem(voiceProblem) ? { voiceProblem } : {};

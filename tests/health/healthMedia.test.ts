@@ -195,14 +195,18 @@ describe('Health and shared files', () => {
 });
 
 describe('Health and voice notes that cannot be transcribed (Phase 2b Task 10)', () => {
-  const NOT_SET_UP = '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (see SETUP-mac, Voice notes)';
+  const NOT_SET_UP = '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_BIN)';
+  const NOT_SET_UP_MODEL = '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_MODEL)';
   const NO_FFMPEG = '⚠️ Voice notes are not being transcribed: ffmpeg not found';
 
-  it('says the local speech engine is not set up, or that ffmpeg is missing', () => {
+  it('says the local speech engine is not set up, naming the setting, or that ffmpeg is missing', () => {
     const { h } = setup();
-    h.setVoiceProblem('local_not_set_up');
+    h.setVoiceProblem('local_not_set_up_bin');
     expect(h.line()).toEqual({ ok: false, text: NOT_SET_UP });
     expect(h.workbookLine()).toEqual({ ok: false, text: NOT_SET_UP });
+    h.setVoiceProblem('local_not_set_up_model');
+    expect(h.line()).toEqual({ ok: false, text: NOT_SET_UP_MODEL });
+    expect(h.workbookLine()).toEqual({ ok: false, text: NOT_SET_UP_MODEL });
     h.setVoiceProblem('no_ffmpeg');
     expect(h.line()).toEqual({ ok: false, text: NO_FFMPEG });
     expect(h.workbookLine()).toEqual({ ok: false, text: NO_FFMPEG });
@@ -212,7 +216,7 @@ describe('Health and voice notes that cannot be transcribed (Phase 2b Task 10)',
 
   it('the lines sit with the key-refused line: after the long-wait and upload lines, before it, the budget line and low disk', () => {
     const { h } = setup(() => 5e9);
-    h.setVoiceProblem('local_not_set_up');
+    h.setVoiceProblem('local_not_set_up_bin');
     h.setMedia(counts({ pending: 3, stale: 1, sttRefused: 1, spendCap: 1 }));
     expect(h.line().text).toBe('⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.');
     h.setMedia(counts({ pending: 2, uploadFailed: 1, sttRefused: 1, spendCap: 1 }));
@@ -244,10 +248,14 @@ describe('Health and voice notes that cannot be transcribed (Phase 2b Task 10)',
     h.persist();
     expect(readHealthSnapshot(db)).toBeDefined();
     expect('voiceProblem' in readHealthSnapshot(db)!).toBe(false);
-    h.setVoiceProblem('local_not_set_up');
+    h.setVoiceProblem('local_not_set_up_bin');
     h.persist();
-    expect(readHealthSnapshot(db)!.voiceProblem).toBe('local_not_set_up');
+    expect(readHealthSnapshot(db)!.voiceProblem).toBe('local_not_set_up_bin');
     expect(readHealthSnapshot(db)!.line.text).toBe(NOT_SET_UP);
+    h.setVoiceProblem('local_not_set_up_model');
+    h.persist();
+    expect(readHealthSnapshot(db)!.voiceProblem).toBe('local_not_set_up_model');
+    expect(readHealthSnapshot(db)!.line.text).toBe(NOT_SET_UP_MODEL);
     h.setVoiceProblem('no_ffmpeg');
     h.persist();
     expect(readHealthSnapshot(db)!.voiceProblem).toBe('no_ffmpeg');
@@ -258,7 +266,8 @@ describe('Health and voice notes that cannot be transcribed (Phase 2b Task 10)',
     expect(readHealthSnapshot(db)).toBeDefined();
     expect(readHealthSnapshot(db)!.voiceProblem).toBeUndefined();
     // A value this version does not know (a newer writer) drops only that field, not the snapshot.
-    for (const unknown of ['engine_on_fire', 1, null, {}]) {
+    // 'local_not_set_up' is the value written before the problem named its setting: dropped the same way.
+    for (const unknown of ['engine_on_fire', 'local_not_set_up', 1, null, {}]) {
       setKv(db, 'health', JSON.stringify({ ...old, voiceProblem: unknown }));
       expect(readHealthSnapshot(db)).toBeDefined();
       expect(readHealthSnapshot(db)!.voiceProblem).toBeUndefined();

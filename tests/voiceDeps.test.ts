@@ -75,12 +75,12 @@ describe('buildVoiceDeps (Phase 2b Task 10)', () => {
   });
 
   it.each([
-    ['STT_LOCAL_BIN', { bin: false, model: true }],
-    ['STT_LOCAL_MODEL', { bin: true, model: false }],
-  ] as const)('local with %s missing: voice is off, the problem is local_not_set_up, and the warning names the setting only', async (name, files) => {
+    ['STT_LOCAL_BIN', { bin: false, model: true }, 'local_not_set_up_bin'],
+    ['STT_LOCAL_MODEL', { bin: true, model: false }, 'local_not_set_up_model'],
+  ] as const)('local with %s missing: voice is off, the problem names the setting, and so does the warning (never its path)', async (name, files, problem) => {
     const { env, log, out, findFfmpeg, bin, model } = local(files);
     const d = await buildVoiceDeps(env, { findFfmpeg, check: checkLocalEngineFiles, log });
-    expect(d).toEqual({ voice: null, maxVoiceSeconds: 600, voiceProblem: 'local_not_set_up' });
+    expect(d).toEqual({ voice: null, maxVoiceSeconds: 600, voiceProblem: problem });
     expect(out()).toContain('"code":"local_not_set_up"');
     expect(out()).toContain(`"setting":"${name}"`);
     expect(out()).toContain('"level":40'); // warn
@@ -95,7 +95,8 @@ describe('buildVoiceDeps (Phase 2b Task 10)', () => {
       throw new Error('stat exploded');
     });
     const d = await buildVoiceDeps(env, { findFfmpeg, check, log });
-    expect(d).toEqual({ voice: null, maxVoiceSeconds: 600, voiceProblem: 'local_not_set_up' });
+    expect(d).toEqual({ voice: null, maxVoiceSeconds: 600, voiceProblem: 'local_not_set_up_bin' });
+    expect(out()).toContain('"setting":"STT_LOCAL_BIN"');
     expect(out()).not.toContain('stat exploded');
   });
 

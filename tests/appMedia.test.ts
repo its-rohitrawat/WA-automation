@@ -901,7 +901,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
     return { log, out: () => lines.join('') };
   };
-  const NOT_SET_UP = '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (see SETUP-mac, Voice notes)';
+  const NOT_SET_UP = '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_BIN)';
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -1172,9 +1172,9 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     await stopApp(app);
   });
 
-  it('a folder sweep that fails is logged with a code only; a missing folder is not a failure', async () => {
+  it('a folder sweep that cannot run is logged with a code only; a missing folder is not a failure', async () => {
     const { log, out } = capture();
-    const { app } = setup({
+    const { app, dataDir } = setup({
       log,
       prepare: (_db, dataDir) => {
         mkdirSync(join(dataDir, 'tmp'), { recursive: true });
@@ -1182,7 +1182,8 @@ describe('app voice notes (Phase 2b Task 10)', () => {
       },
     });
     expect(out()).toContain('leftover voice folders not removed');
-    expect(out()).toMatch(/"code":"E[A-Z]+"/);
+    expect(out()).toContain('"code":"voice_tmp_not_plain_folder"');
+    expect(out()).not.toContain(dataDir.replaceAll('\\', '\\\\'));
     await stopApp(app);
     const quiet = capture();
     const second = setup({ log: quiet.log });
@@ -1191,13 +1192,162 @@ describe('app voice notes (Phase 2b Task 10)', () => {
   });
 
   it('the voice problem found at start reaches the health line', async () => {
-    const { db, app } = setup({ media: { voiceProblem: 'local_not_set_up' } });
-    expect(readHealthSnapshot(db)!.voiceProblem).toBe('local_not_set_up');
+    const { db, app } = setup({ media: { voiceProblem: 'local_not_set_up_bin' } });
+    expect(readHealthSnapshot(db)!.voiceProblem).toBe('local_not_set_up_bin');
     expect(readHealthSnapshot(db)!.line.text).toBe(NOT_SET_UP);
     await stopApp(app);
     const other = setup({ media: { voiceProblem: 'no_ffmpeg' } });
     expect(readHealthSnapshot(other.db)!.line.text).toBe('⚠️ Voice notes are not being transcribed: ffmpeg not found');
     await stopApp(other.app);
+  });
+
+  /** Makes `link` a junction (Windows) or symlink to `target`; false where links cannot be made here. */
+  const tryLink = (target: string, link: string): boolean => {
+    try {
+      symlinkSync(target, link, 'junction');
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  it.for([
+    ['DATA_DIR/tmp', ['tmp']],
+    ['DATA_DIR/tmp/voice', ['tmp', 'voice']],
+  ] as const)('the folder sweep is skipped, logging a code, when %s is a link or junction: nothing behind it is touched', async ([, parts], ctx) => {
+    const outside = mkdtempSync(join(tmpdir(), 'wa-app-media-outside-'));
+    dirs.push(outside);
+    // The link's target, laid out as the part of DATA_DIR/tmp/voice it stands for.
+    const behind = parts.length === 1 ? join(outside, 'voice') : outside;
+    mkdirSync(join(behind, 'voice-1'), { recursive: true });
+    writeFileSync(join(behind, 'voice-1', 'audio.wav'), 'someone else’s audio');
+    const { log, out } = capture();
+    let linked = false;
+    let link = '';
+    const { app } = setup({
+      log,
+      prepare: (_db, dataDir) => {
+        if (parts.length === 2) mkdirSync(join(dataDir, 'tmp'), { recursive: true });
+        link = join(dataDir, ...parts);
+        linked = tryLink(outside, link);
+      },
+    });
+    if (!linked) {
+      await stopApp(app);
+      ctx.skip();
+      return;
+    }
+    expect(existsSync(join(behind, 'voice-1', 'audio.wav'))).toBe(true);
+    expect(out()).toContain('leftover voice folders not removed');
+    expect(out()).toContain('"code":"voice_tmp_not_plain_folder"');
+    expect(out()).not.toContain('outside');
+    unlinkSync(link); // the link only, before the folders are cleaned up
+    await stopApp(app);
+    expect(existsSync(join(behind, 'voice-1', 'audio.wav'))).toBe(true);
+  });
+
+  it('without a voice transcriber (VOICE_STT_PROVIDER none), a voice note gets 3 runs, as in 2a', async () => {
+    const fetcher = vi.fn<MediaFetcher>(async () => {
+      throw new MediaDownloadError('http_503');
+    });
+    const { db, app, sock } = setup({ media: { voice: null, fetcher, extract: undefined } });
+    shareVoice(sock);
+    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'http_503' }), SLOW_IO);
+    await vi.advanceTimersByTimeAsync(2 * MINUTE);
+    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 2 }), SLOW_IO);
+    await vi.advanceTimersByTimeAsync(6 * MINUTE);
+    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'failed', attempts: 3, errorCode: 'http_503' }), SLOW_IO);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    await stopApp(app);
+  });
+
+  it('the hourly sweep warns provider_unavailable once per leftover copy, not every hour', async () => {
+    const { log, out } = capture();
+    const { app } = setup({
+      log,
+      media: { voice: new FakeLocalVoiceTranscriber() }, // switched to local: the elevenlabs copy cannot be deleted now
+      prepare: (db) => {
+        insertMessage(db, {
+          waId: 'V0', clientId: 1, senderJid: SHARMA_PN, senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T06:00:00.000Z', text: null,
+          quotedWaId: null, mediaType: 'voice',
+        });
+        const mediaId = insertMedia(db, {
+          messageId: messageRowId(db, 1, 'V0')!, clientId: 1, kind: 'voice', status: 'done', mimeType: 'audio/ogg', fileName: null, fileSize: 9000, seconds: 12,
+          forwarded: false, refEnc: null, errorCode: null, createdAt: '2026-10-19T06:00:00.000Z',
+        });
+        db.prepare('INSERT INTO media_stt_forget (media_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, 0)').run(mediaId, 'elevenlabs', 'tr-old', '2026-10-19T06:00:00.000Z');
+      },
+    });
+    await vi.advanceTimersByTimeAsync(3 * HOUR);
+    expect(sweeps()).toBe(4);
+    expect(out().match(/"code":"provider_unavailable"/g)?.length).toBe(1);
+    await stopApp(app);
+  });
+
+  /** Runs app.stop() and reports whether it has resolved. */
+  const stopping = (app: { stop(): Promise<void> }) => {
+    const s = { done: false, p: Promise.resolve() };
+    s.p = app.stop().then(() => {
+      s.done = true;
+    });
+    return s;
+  };
+
+  it('stop() waits for a copy sweep in flight before it returns (so before the database closes)', async () => {
+    const g = gate();
+    let sweepDone = false;
+    forgetHook.impl = async () => {
+      await g.promise;
+      sweepDone = true;
+      return 0;
+    };
+    const { app } = setup();
+    const s = stopping(app);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(s.done).toBe(false);
+    g.release();
+    for (let i = 0; i < 30 && !s.done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    await s.p;
+    expect(sweepDone).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('stop() waits for an afterFinish delete in flight', async () => {
+    const g = gate();
+    let deleteDone = false;
+    forgetHook.impl = async (...a: unknown[]) => {
+      if ((a[3] as { mediaId?: number } | undefined)?.mediaId === undefined) return 0;
+      await g.promise;
+      deleteDone = true;
+      return 1;
+    };
+    const voice = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ text: 'theek hai', forgetRef: 'tr-1' }] });
+    const { db, app, sock } = setup({ media: { voice, extract: undefined } });
+    shareVoice(sock);
+    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'), SLOW_IO);
+    await vi.waitFor(() => expect(forgetHook.calls.some((o) => o?.mediaId === 1)).toBe(true));
+    const s = stopping(app);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(s.done).toBe(false);
+    g.release();
+    for (let i = 0; i < 30 && !s.done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    await s.p;
+    expect(deleteDone).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('stop() waits for a copy deletion at most 5 s, then logs a code and goes on', async () => {
+    const { log, out } = capture();
+    forgetHook.impl = () => new Promise<number>(() => {}); // never ends
+    const { app } = setup({ log });
+    const s = stopping(app);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(s.done).toBe(false);
+    for (let i = 0; i < 30 && !s.done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    await s.p;
+    expect(s.done).toBe(true);
+    expect(out()).toContain('"code":"forget_in_flight"');
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('a late transcript (12h): a note still being transcribed when its message was processed re-queues the message as a re-check', async () => {

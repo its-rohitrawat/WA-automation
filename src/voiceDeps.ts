@@ -28,7 +28,8 @@ export interface VoiceDepsSeams {
  * Builds the voice transcriber VOICE_STT_PROVIDER names, once, when the service starts. Never stops the service:
  * - none: no transcriber (stt_none, info). Nothing is searched or checked.
  * - local: STT_LOCAL_BIN and STT_LOCAL_MODEL must each be a file. If one is not, voice notes are kept but not
- *   transcribed (local_not_set_up), and the warning names the setting, never its path.
+ *   transcribed (local_not_set_up_bin or local_not_set_up_model; a check that throws counts as STT_LOCAL_BIN), and the
+ *   warning and the health line name the setting, never its path.
  * - local or paid: ffmpeg is looked for (FFMPEG_PATH, else the PATH). Without it the transcriber is still built, but
  *   sends nothing: every note is kept as format_not_supported for `cli transcribe-voice` later (no_ffmpeg).
  * The conversion folders go in DATA_DIR/tmp/voice, as an absolute path. Logs codes and setting names only: never a
@@ -51,7 +52,7 @@ export async function buildVoiceDeps(env: Env, s: VoiceDepsSeams): Promise<Voice
     }
     if (missing !== null) {
       log.warn({ code: 'local_not_set_up', setting: missing }, 'voice notes are kept but not transcribed: the local speech engine is not set up');
-      return { voice: null, maxVoiceSeconds, voiceProblem: 'local_not_set_up' };
+      return { voice: null, maxVoiceSeconds, voiceProblem: missing === 'STT_LOCAL_MODEL' ? 'local_not_set_up_model' : 'local_not_set_up_bin' };
     }
   }
   let exe: string | null;

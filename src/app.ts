@@ -251,6 +251,18 @@ export function createApp(d: AppDeps): App {
    * gives the attempt back and the note is tried again after the restart. A paid call is never aborted.
    */
   const stopping = new AbortController();
+  /**
+   * Copy deletions in flight (the sweep's, and afterFinish's), each a promise that never rejects: stop() waits for them,
+   * up to 5 s, so none is cut off by the database closing (Task 10 review round 1, fix 6).
+   */
+  const forgetsInFlight = new Set<Promise<void>>();
+  const trackForget = (p: Promise<void>): Promise<void> => {
+    forgetsInFlight.add(p);
+    void p.finally(() => forgetsInFlight.delete(p));
+    return p;
+  };
+  /** Rows already warned about as provider_unavailable while this service runs: once each, not every hour (fix 4). */
+  const warnedUnavailable = new Set<number>();
   const uploader = m
     ? new DriveFileUploader({ db: d.db, api: d.drive, dataDir: d.dataDir, clock: d.clock, log: d.log, onUploaded: () => publisher.schedule() })
     : undefined;
@@ -273,20 +285,23 @@ export function createApp(d: AppDeps): App {
           startedAt,
           // For deleting provider copies promptly; the extractor holds its own.
           voice,
-          // Required: the processor's default (true) would give a free local note the paid path's 2 runs instead of 3.
+          // Explicit: none keeps 2a's 3 runs; local 3, paid 2. (The processor's own default, with no transcriber, is
+          // the paid 2.)
           voicePaid: voice ? !voice.costsNothing : false,
           // A paid transcript's provider copy, noted by finishMedia, is deleted now (N1). Never thrown: a failure is
-          // logged with a code, and the row waits for the hourly sweep.
+          // logged with a code, and the row waits for the hourly sweep. stop() waits for it (up to 5 s).
           afterFinish: (mediaId, x) => {
             if (!x.forget) return;
-            return Promise.resolve()
-              .then(() => forgetVoiceCopies(d.db, voice, d.log, { mediaId, clock: d.clock }))
-              .then(
-                () => undefined,
-                (err: unknown) => {
-                  d.log.warn({ mediaId, code: errorCode(err) }, 'voice note speech copy not deleted yet: left for the sweep');
-                },
-              );
+            return trackForget(
+              Promise.resolve()
+                .then(() => forgetVoiceCopies(d.db, voice, d.log, { mediaId, clock: d.clock, warned: warnedUnavailable }))
+                .then(
+                  () => undefined,
+                  (err: unknown) => {
+                    d.log.warn({ mediaId, code: errorCode(err) }, 'voice note speech copy not deleted yet: left for the sweep');
+                  },
+                ),
+            );
           },
         }),
         // §6.1: a run that waited for this file can go ahead. The Files received list may change, and a client
@@ -349,7 +364,9 @@ export function createApp(d: AppDeps): App {
 
   /**
    * Deletes the voice-note copies due at the speech provider, for every file (N1): at start and every hour. Skipped while
-   * the previous sweep still runs. Never throws, sync or async: a failure is logged with a code only.
+   * the previous sweep still runs. Never throws, sync or async: a failure is logged with a code only. A copy whose
+   * provider is not set up now is warned about once per row while the service runs, not every hour. stop() waits for a
+   * sweep in flight (up to 5 s).
    */
   let forgetTimer: ReturnType<typeof setInterval> | undefined;
   let sweeping = false;
@@ -358,26 +375,71 @@ export function createApp(d: AppDeps): App {
     sweeping = true;
     let run: Promise<unknown>;
     try {
-      run = forgetVoiceCopies(d.db, voice, d.log, { clock: d.clock });
+      run = forgetVoiceCopies(d.db, voice, d.log, { clock: d.clock, warned: warnedUnavailable });
     } catch (err) {
       run = Promise.reject(err);
     }
-    void run
-      .catch((err: unknown) => {
-        d.log.warn({ code: errorCode(err) }, 'voice copy sweep failed');
-      })
-      .finally(() => {
-        sweeping = false;
-      });
+    void trackForget(
+      run
+        .then(
+          () => undefined,
+          (err: unknown) => {
+            d.log.warn({ code: errorCode(err) }, 'voice copy sweep failed');
+          },
+        )
+        .finally(() => {
+          sweeping = false;
+        }),
+    );
+  };
+  /**
+   * Waits for the copy deletions in flight, up to `ms`. One still running then is left: it may fail on the closed
+   * database, which leaves its row for the next start (logged with a code only).
+   */
+  const waitForForgets = async (ms: number): Promise<void> => {
+    if (forgetsInFlight.size === 0) return;
+    let timer: NodeJS.Timeout | undefined;
+    let timedOut = false;
+    try {
+      await Promise.race([
+        Promise.all([...forgetsInFlight]),
+        new Promise<void>((r) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            r();
+          }, ms);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (timedOut) d.log.warn({ code: 'forget_in_flight' }, 'voice copy deletion still running at shutdown: left for the next start');
   };
   /**
    * Removes the conversion folders a voice note left in DATA_DIR/tmp/voice (Task 5 review round 1): a note that failed,
    * was revoked or was too long, or one whose conversion a stop cut off, never comes back to remove its own. Only
    * folders directly inside it named voice-<digits>; a link or junction is never followed or removed, and nothing else
-   * is touched. Best effort: a failure is logged with a code only. Run in start() before the queue starts any file.
+   * is touched. DATA_DIR/tmp and DATA_DIR/tmp/voice must each be a plain folder: if either is a link, a junction or
+   * not a folder, nothing is listed or removed (voice_tmp_not_plain_folder; review round 1, fix 5). Best effort: a
+   * failure is logged with a code only, never a path. Run in start() before the queue starts any file.
    */
   const sweepVoiceFolders = () => {
-    const dir = join(d.dataDir, 'tmp', 'voice');
+    const tmp = join(d.dataDir, 'tmp');
+    const dir = join(tmp, 'voice');
+    for (const path of [tmp, dir]) {
+      let plain: boolean;
+      try {
+        const st = lstatSync(path); // a junction shows as a link here, as a symlink does
+        plain = st.isDirectory() && !st.isSymbolicLink();
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException | null)?.code !== 'ENOENT') d.log.warn({ code: errorCode(err) }, 'leftover voice folders not removed');
+        return;
+      }
+      if (!plain) {
+        d.log.warn({ code: 'voice_tmp_not_plain_folder' }, 'leftover voice folders not removed: the voice work folder is a link or not a folder');
+        return;
+      }
+    }
     let entries: Dirent[];
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -493,10 +555,11 @@ export function createApp(d: AppDeps): App {
       // A morning report still sending gets the same 10 s, then up to 3 s to close its socket, then up to 2 s to record
       // its outcome (a report in its linger is still 'sent'); one cut off is marked unknown at the next start. main.ts
       // closes the databases only after stop() resolves, so after the scheduler's stop() has returned
-      // (tests/appReport.test.ts).
-      await Promise.all([publisher.flush(10_000), uploader?.stop(10_000), reportScheduler?.stop(10_000)]);
+      // (tests/appReport.test.ts). A voice-copy deletion in flight (the sweep's, or one a finished note started during
+      // the drain) gets up to 5 s alongside, so the database is not closed under it.
+      await Promise.all([publisher.flush(10_000), uploader?.stop(10_000), reportScheduler?.stop(10_000), waitForForgets(5_000)]);
       // A socket that never closes must not eat the rest of WinSW's 150 s: 120 s drain + 15 s (the morning report's
-      // 10 + 3 + 2; the uploads take at most 10) + 5 s here = 140 s, plus margin.
+      // 10 + 3 + 2; the uploads take at most 10; the copy deletions at most 5) + 5 s here = 140 s, plus margin.
       let timer: NodeJS.Timeout | undefined;
       try {
         await Promise.race([

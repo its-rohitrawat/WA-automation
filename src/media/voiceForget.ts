@@ -15,7 +15,8 @@ import type { Logger } from '../util/logger.ts';
 /**
  * Deletes the voice-note copies noted in media_stt_forget that are due, each through the transcriber set up now: a row
  * whose provider is not that one (or keeps no copies), or every row when `voice` is null, is skipped and logged with the
- * code provider_unavailable, without counting a try. Each try is counted, with the time of the next one from
+ * code provider_unavailable, without counting a try. With o.warned (the service's own set of row ids, kept while it
+ * runs), that warning is logged once per row, not at every hourly sweep (Task 10 review round 1, fix 4). Each try is counted, with the time of the next one from
  * FORGET_WAITS_MS, before the provider is asked; a row is removed once the provider has deleted the copy (a 404: it is
  * already gone). After MAX_FORGET_ATTEMPTS tries a row is left alone. Run for one file (o.mediaId) after its
  * transcript is stored (the processor's afterFinish) and by the processor itself once it has noted a copy (Task 6
@@ -27,7 +28,7 @@ export async function forgetVoiceCopies(
   db: Db,
   voice: VoiceTranscriber | null,
   log: Logger,
-  o: { mediaId?: number; clock?: Clock } = {},
+  o: { mediaId?: number; clock?: Clock; warned?: Set<number> } = {},
 ): Promise<number> {
   const clock = o.clock ?? systemClock;
   const rows = pendingMediaForgets(db, {
@@ -38,6 +39,8 @@ export async function forgetVoiceCopies(
   let deleted = 0;
   for (const f of rows) {
     if (voice === null || voice.provider !== f.provider || !voice.canForget) {
+      if (o.warned?.has(f.id)) continue;
+      o.warned?.add(f.id);
       log.warn({ mediaId: f.mediaId, provider: f.provider, code: 'provider_unavailable' }, 'voice note speech copy left for later: its provider is not set up now');
       continue;
     }
