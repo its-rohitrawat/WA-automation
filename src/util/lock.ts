@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import { unlinkSync } from 'node:fs';
 import net from 'node:net';
-import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 export class AlreadyRunningError extends Error {
@@ -11,13 +10,19 @@ export class AlreadyRunningError extends Error {
   }
 }
 
-/** Name of the OS-held lock for a data folder (Windows named pipe, or a unix socket elsewhere). */
+/**
+ * Name of the OS-held lock for a data folder (Windows named pipe, or a unix socket elsewhere). The socket is in /tmp,
+ * not tmpdir(): on macOS tmpdir() differs per account and per launch (launchd, sudo), so the service and the CLI
+ * would each see a different lock.
+ */
 export function lockName(dataDir: string): string {
   const id = createHash('sha256').update(resolve(dataDir).toLowerCase()).digest('hex').slice(0, 16);
-  return process.platform === 'win32' ? `\\\\.\\pipe\\wa-agent-${id}` : join(tmpdir(), `wa-agent-${id}.sock`);
+  return process.platform === 'win32' ? `\\\\.\\pipe\\wa-agent-${id}` : join('/tmp', `wa-agent-${id}.sock`);
 }
 
-const RUNNING_MSG = 'Another WA Agent process is using this data folder. Stop it first (net stop wa-agent).';
+const RUNNING_MSG = `Another WA Agent process is using this data folder. Stop it first (${
+  process.platform === 'darwin' ? 'sudo launchctl bootout system/com.wa-agent' : 'net stop wa-agent'
+}).`;
 
 function tryListen(name: string): Promise<net.Server> {
   return new Promise((resolveP, reject) => {

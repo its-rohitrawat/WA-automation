@@ -41,6 +41,7 @@ export function formatStatus(i: {
     if (s.media) {
       lines.push(`Files:       ${s.media.pending} waiting to be read · ${s.media.failedRecent} could not be read (24 h) · ${s.media.uploadFailed} not uploaded to Drive`);
     }
+    if (s.report) lines.push(`Report:      ${lk}${s.report.text}`);
     lines.push(`Spend today: ${lk}$${s.spentToday.toFixed(2)} of $${s.capUsd.toFixed(2)}`);
     lines.push(`Disk free:   ${s.freeGb === null ? 'unknown' : `${s.freeGb.toFixed(1)} GB`}`);
   }

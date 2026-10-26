@@ -1,8 +1,8 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { DpapiKeyProvider, MasterKeyError, powershellDpapi, type DpapiRunner } from '../../src/crypto/keyProvider.ts';
+import { DpapiKeyProvider, MasterKeyError, ownerOnlyFile, powershellDpapi, type DpapiRunner } from '../../src/crypto/keyProvider.ts';
 
 // Reversible stand-in for DPAPI so the logic can be tested anywhere.
 const fakeDpapi: DpapiRunner = (mode, b64) =>
@@ -83,4 +83,19 @@ describe('DpapiKeyProvider', () => {
     expect(protectedB64).not.toBe(secret);
     expect(powershellDpapi('unprotect', protectedB64)).toBe(secret);
   }, 60_000); // two PowerShell starts can take well over 5 s on a busy PC
+
+  it('keeps a key stored with ownerOnlyFile across providers', () => {
+    const file = join(tempDir(), 'keys', 'master.key');
+    const first = new DpapiKeyProvider(file, ownerOnlyFile).getKey();
+    expect(first).toHaveLength(32);
+    expect(new DpapiKeyProvider(file, ownerOnlyFile).getKey().equals(first)).toBe(true);
+  });
+
+  it.runIf(process.platform !== 'win32')('defaults to an owner-only key file outside Windows', () => {
+    const file = join(tempDir(), 'keys', 'master.key');
+    const key = new DpapiKeyProvider(file).getKey();
+    expect(key).toHaveLength(32);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(statSync(dirname(file)).mode & 0o777).toBe(0o700);
+  });
 });

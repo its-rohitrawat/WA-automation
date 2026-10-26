@@ -43,7 +43,7 @@ describe('logger', () => {
     expect(line).toMatchObject({ jid: '[REDACTED]', token: '[REDACTED]', clientId: 1 });
   });
 
-  it.each(['name', 'pushName', 'number', 'phone', 'jid', 'token', 'refreshToken', 'refresh_token', 'accessToken', 'access_token', 'apiKey', 'secret', 'password'])(
+  it.each(['name', 'pushName', 'number', 'phone', 'jid', 'recipient', 'token', 'refreshToken', 'refresh_token', 'accessToken', 'access_token', 'apiKey', 'secret', 'password'])(
     'censors %s at the top level and one level deep',
     (key) => {
       const { log, out } = capture();
