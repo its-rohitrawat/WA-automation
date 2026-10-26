@@ -6,13 +6,16 @@ import { describe, expect, it } from 'vitest';
 const SRC = fileURLToPath(new URL('../../src/', import.meta.url));
 /**
  * Baileys socket methods, other than sendMessage, that put traffic on WhatsApp in the account's name: a receipt, presence,
- * a chat or profile change, a call rejection, a group or newsletter action, or a retry or analytics packet.
+ * a chat or profile change, a call rejection, a group, community or newsletter action, a retry or analytics packet, a raw
+ * node or IQ query (sendNode, query), an app-state patch or a star, a block, a logout or a pairing-code request.
+ * The scan matches whole words, also in comments: a comment in src/ that needs one of these words is reworded.
  * (updateMediaMessage and reuploadRequest are checked by tests/media/fetch.test.ts.)
  */
 const OUTBOUND = [
   'relayMessage', 'sendPresenceUpdate', 'presenceSubscribe', 'readMessages', 'sendReceipt', 'sendReceipts', 'chatModify',
   'sendMessageAck', 'sendPeerDataOperationMessage', 'sendRetryRequest', 'rejectCall', 'updateProfile\\w*',
-  'group(?:Create|Leave|ParticipantsUpdate|Update\\w*)', 'newsletter\\w*', 'sendWAMBuffer',
+  'group(?:Create|Leave|ParticipantsUpdate|Update\\w*)', 'newsletter\\w*', 'sendWAMBuffer', 'sendNode', 'query', 'appPatch', 'star',
+  'updateBlockStatus', 'logout', 'requestPairingCode', 'community\\w*',
 ].join('|');
 /** Every Baileys method that sends something to WhatsApp. */
 const SEND_NAMES = new RegExp(`\\b(sendMessage|${OUTBOUND})\\b`);
@@ -53,7 +56,8 @@ describe('who may send on WhatsApp', () => {
       'sendMessage', 'relayMessage', 'sendPresenceUpdate', 'presenceSubscribe', 'readMessages', 'sendReceipt', 'sendReceipts',
       'chatModify', 'sendMessageAck', 'sendPeerDataOperationMessage', 'sendRetryRequest', 'rejectCall', 'updateProfileStatus',
       'updateProfileName', 'updateProfilePicture', 'groupCreate', 'groupLeave', 'groupParticipantsUpdate', 'groupUpdateSubject',
-      'newsletterCreate', 'newsletterFollow', 'sendWAMBuffer',
+      'newsletterCreate', 'newsletterFollow', 'sendWAMBuffer', 'sendNode', 'query', 'appPatch', 'star', 'updateBlockStatus', 'logout',
+      'requestPairingCode', 'communityCreate', 'communityLeave', 'communityParticipantsUpdate',
     ]) {
       expect(`sock.${name}(x)`).toMatch(SEND_NAMES);
       if (name !== 'sendMessage') expect(`sock.${name}(x)`).toMatch(OTHER_OUTBOUND);
