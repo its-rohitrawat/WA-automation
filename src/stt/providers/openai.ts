@@ -2,7 +2,7 @@ import { openAsBlob } from 'node:fs';
 import { z } from 'zod';
 import { longFetch, parseAnswer, requestJson, type HttpFetch } from '../http.ts';
 import { modelFor } from '../prices.ts';
-import type { AudioPart, ProviderResult, SttProvider, TranscribeOptions } from '../types.ts';
+import { AUDIO_FORMATS, type AudioPart, type ProviderResult, type SttProvider, type TranscribeOptions } from '../types.ts';
 
 const ENDPOINT = 'https://api.openai.com/v1/audio/transcriptions';
 
@@ -43,9 +43,10 @@ export class OpenAiProvider implements SttProvider {
 
   async transcribe(audio: AudioPart, opts: TranscribeOptions): Promise<ProviderResult> {
     const { model } = modelFor('openai', opts.diarize);
+    const f = AUDIO_FORMATS[audio.format ?? 'mp3'];
     const form = new FormData();
     form.append('model', model);
-    form.append('file', await openAsBlob(audio.path, { type: 'audio/mpeg' }), 'audio.mp3');
+    form.append('file', await openAsBlob(audio.path, { type: f.mimeType }), f.fileName);
     if (opts.diarize) {
       form.append('response_format', 'diarized_json');
       form.append('chunking_strategy', 'auto');

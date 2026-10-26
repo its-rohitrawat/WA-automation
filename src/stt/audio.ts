@@ -78,6 +78,15 @@ export function parseDuration(stderr: string): number | null {
 
 const QUIET = ['-hide_banner', '-nostdin', '-loglevel', 'error'];
 
+/**
+ * The demuxers an input may be read with. ffmpeg picks the input format from the file's content, so without a list a
+ * crafted file (an #EXTM3U playlist, concat or dash) could make it read other local files, such as another client's
+ * meeting audio, or fetch a URL. mov covers MP4 and Meet recordings; mp3 covers the prepared parts.
+ */
+export const INPUT_FORMATS = 'ogg,mp3,mov,mp4,m4a,3gp,3g2,mj2,aac,amr,wav,matroska,webm,flac';
+/** Put before every -i: local files only, and only the formats above. */
+export const SAFE_INPUT: readonly string[] = ['-protocol_whitelist', 'file', '-format_whitelist', INPUT_FORMATS];
+
 export class Ffmpeg {
   readonly #exe: string;
   readonly #run: RunFile;
@@ -101,7 +110,7 @@ export class Ffmpeg {
   /** Length in seconds, read from ffmpeg's input summary, so ffprobe is not needed. */
   async seconds(input: string, signal?: AbortSignal): Promise<number> {
     // With no output named, ffmpeg exits with an error, after printing the input summary.
-    const { stderr } = await this.#ffmpeg(['-hide_banner', '-nostdin', '-i', input], 60_000, signal);
+    const { stderr } = await this.#ffmpeg(['-hide_banner', '-nostdin', ...SAFE_INPUT, '-i', input], 60_000, signal);
     const seconds = parseDuration(stderr);
     if (seconds === null || !(seconds > 0)) throw new AudioError('no_duration');
     return seconds;
@@ -116,7 +125,7 @@ export class Ffmpeg {
     if (existsSync(output)) return;
     const tmp = `${output}.part.mp3`;
     const args = [
-      ...QUIET, '-y', '-i', input, '-vn', '-map_metadata', '-1', '-map_chapters', '-1',
+      ...QUIET, '-y', ...SAFE_INPUT, '-i', input, '-vn', '-map_metadata', '-1', '-map_chapters', '-1',
       '-ac', '1', '-ar', '16000', '-c:a', 'libmp3lame', '-b:a', '64k', tmp,
     ];
     const { code } = await this.#ffmpeg(args, 60 * 60_000, signal);
@@ -136,7 +145,7 @@ export class Ffmpeg {
       // Equal parts, so there is no tiny, separately paid last part. The count still matches the plan's ceil.
       const count = Math.ceil(input.seconds / partSeconds);
       const segmentTime = (input.seconds / count).toFixed(3);
-      const args = [...QUIET, '-y', '-i', input.path, '-f', 'segment', '-segment_time', segmentTime, '-c', 'copy', join(dir, 'part-%03d.mp3')];
+      const args = [...QUIET, '-y', ...SAFE_INPUT, '-i', input.path, '-f', 'segment', '-segment_time', segmentTime, '-c', 'copy', join(dir, 'part-%03d.mp3')];
       const { code } = await this.#ffmpeg(args, 30 * 60_000, signal);
       if (code !== 0) throw new AudioError('split_failed');
       writeFileSync(finished, '');

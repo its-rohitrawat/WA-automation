@@ -74,6 +74,24 @@ export const FORWARDED_NOT_DESCRIBED = 'forwarded_not_described';
  */
 export const TOO_COSTLY = 'too_costly';
 
+/** The extractor's note for a forwarded voice note or audio file, which is never sent for a transcript (V4, as D2). */
+export const FORWARDED_NOT_TRANSCRIBED = 'forwarded_not_transcribed';
+
+/**
+ * The extractor's note for a voice note or audio file whose size allows more than STT_MAX_SECONDS of audio (V2, V5).
+ * It is not sent, and the file is finished, so it never blocks its message.
+ */
+export const TOO_LONG = 'too_long';
+
+/** The extractor's note for a voice note or audio file that was transcribed but had no speech in it. */
+export const NO_SPEECH = 'no_speech';
+
+/**
+ * The extractor's note for an audio format the speech provider does not take as it is, when ffmpeg is not there to
+ * convert it (N2). cli transcribe-voice picks the file up once ffmpeg is installed.
+ */
+export const FORMAT_NOT_SUPPORTED = 'format_not_supported';
+
 /**
  * Control and format characters (direction overrides, zero-width marks), lone surrogates (T4-02) and U+FFFE/U+FFFF,
  * which XML does not allow. The zero-width non-joiner and joiner (U+200C, U+200D) are kept (T14-12): emoji sequences

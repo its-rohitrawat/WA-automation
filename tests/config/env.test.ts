@@ -131,7 +131,9 @@ describe('speech-to-text settings', () => {
   });
 
   it('none needs no key', () => {
-    expect(parseEnv({ STT_PROVIDER: 'none' }).STT_API_KEY).toBeUndefined();
+    const env = parseEnv({ STT_PROVIDER: 'none' });
+    expect(env.STT_API_KEY).toBeUndefined();
+    expect(env.STT_MAX_SECONDS).toBe(600);
   });
 
   it('a provider without STT_API_KEY is an error naming STT_API_KEY', () => {
@@ -143,6 +145,20 @@ describe('speech-to-text settings', () => {
     expect(parseEnv({ INR_PER_USD: '40' }).INR_PER_USD).toBe(40);
     expect(parseEnv({ INR_PER_USD: '200' }).INR_PER_USD).toBe(200);
     for (const v of ['39', '8800', 'Infinity', 'rupees']) expect(envError({ INR_PER_USD: v })).toMatch(/INR_PER_USD/);
+  });
+
+  it('STT_MAX_SECONDS defaults to 600', () => {
+    expect(parseEnv({}).STT_MAX_SECONDS).toBe(600);
+  });
+
+  it('STT_MAX_SECONDS is a whole number from 30 to 900, refused without echoing the value', () => {
+    expect(parseEnv({ STT_MAX_SECONDS: '30' }).STT_MAX_SECONDS).toBe(30);
+    expect(parseEnv({ STT_MAX_SECONDS: '900' }).STT_MAX_SECONDS).toBe(900);
+    for (const v of ['29', '901', 'abc', '60.5']) {
+      const msg = envError({ STT_MAX_SECONDS: v });
+      expect(msg).toMatch(/STT_MAX_SECONDS/);
+      expect(msg).not.toContain(v);
+    }
   });
 
   it('requireKey reports a missing STT_API_KEY by name and returns a set one', () => {
@@ -164,6 +180,7 @@ describe('setting values never appear in errors', () => {
       { MEETINGS_SINCE: SECRET },
       { STT_PROVIDER: SECRET },
       { INR_PER_USD: SECRET },
+      { STT_MAX_SECONDS: SECRET },
       { STT_PROVIDER: 'sarvam', MEETINGS_ENABLED: 'true', ANTHROPIC_API_KEY: SECRET, GOOGLE_OAUTH_CLIENT_SECRET: SECRET, FFMPEG_PATH: SECRET },
     ];
     for (const c of cases) {
@@ -183,9 +200,9 @@ describe('setting values never appear in errors', () => {
 describe('.env.example', () => {
   it('lists every meeting and speech-to-text setting, and its placeholders parse to the defaults', () => {
     const vars = parseDotenv(readFileSync('.env.example', 'utf8'));
-    const names = ['MEETINGS_ENABLED', 'TEAM_EMAIL_DOMAINS', 'MEETING_POLL_MINUTES', 'MEETING_MAX_MINUTES', 'MEETINGS_SINCE', 'FFMPEG_PATH', 'STT_PROVIDER', 'STT_API_KEY', 'INR_PER_USD'];
+    const names = ['MEETINGS_ENABLED', 'TEAM_EMAIL_DOMAINS', 'MEETING_POLL_MINUTES', 'MEETING_MAX_MINUTES', 'MEETINGS_SINCE', 'FFMPEG_PATH', 'STT_PROVIDER', 'STT_API_KEY', 'INR_PER_USD', 'STT_MAX_SECONDS'];
     for (const n of names) expect(Object.keys(vars)).toContain(n);
     expect(vars.STT_API_KEY).toBe('');
-    expect(parseEnv(vars)).toMatchObject({ MEETINGS_ENABLED: false, TEAM_EMAIL_DOMAINS: [], MEETING_POLL_MINUTES: 5, MEETING_MAX_MINUTES: 180, STT_PROVIDER: 'none', INR_PER_USD: 88 });
+    expect(parseEnv(vars)).toMatchObject({ MEETINGS_ENABLED: false, TEAM_EMAIL_DOMAINS: [], MEETING_POLL_MINUTES: 5, MEETING_MAX_MINUTES: 180, STT_PROVIDER: 'none', INR_PER_USD: 88, STT_MAX_SECONDS: 600 });
   });
 });

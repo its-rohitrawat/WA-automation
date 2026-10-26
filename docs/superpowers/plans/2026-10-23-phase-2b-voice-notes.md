@@ -482,6 +482,7 @@ CREATE TABLE media_stt_forget (
     - pending: `{voice note, 0:42, being transcribed}`;
     - failed: `{voice note, 0:42, could not be transcribed}`;
     - unavailable: `{voice note, could not be downloaded}`;
+    - unavailable with error too_large: `{voice note, too large to download}`;
     - note `no_speech`: `{voice note, 0:42, no speech}`;
     - note `too_long`: `{voice note, 14:05, too long to transcribe}`;
     - note `too_costly`: `{voice note, 0:42, not transcribed: too costly for the daily limit}`;
@@ -588,7 +589,10 @@ program
 - [ ] Full suite and type-check on the merged branch.
 - [ ] A dry run of `transcribe-voice` on a **copy** of a test database (never the real one, never `--yes`).
 - [ ] A secret scan of the whole diff: no keys, no `.env` values, no transcript text in logs or tests, no real voice notes in the repo.
-- [ ] The golden run is listed for the owner's approval, with its cost estimate. Not run.
+- [ ] The golden run is listed for the owner's approval, with its cost estimate. Not run. It covers both prompts the SYSTEM_PROMPT change reaches:
+  - the WhatsApp cases (`npm run golden`, the 10 existing cases plus 2b's six new ones);
+  - the 4 meeting tracker cases (`node scripts/golden.ts --meetings`, cases 4–7, previewed at up to $0.43 each), because `MEETING_TRACKER_PROMPT` is SYSTEM_PROMPT plus the meeting rules (`src/brain/meetingTracker.ts`).
+  - The owner's rule: the meeting cases first run after Phase 3 is on main, so on the old prompt; 2b's run then repeats them on the new one.
 - [ ] An independent review: spec, safety and test adequacy, with mutation checks on the extractor, `REQUEUING_FILE`, `isBlocking` and the processor's error classes.
 - [ ] Status sent to wa-agent-68 for the build map.
 
