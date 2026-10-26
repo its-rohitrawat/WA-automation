@@ -36,7 +36,7 @@ function findClient(db: Db, code: string): ClientRow {
   return c;
 }
 
-function humanEvent(db: Db, taskId: number | null, clientId: number, op: string, detail: object, now: Date): void {
+export function humanEvent(db: Db, taskId: number | null, clientId: number, op: string, detail: object, now: Date): void {
   recordEvent(db, { taskId, clientId, actor: 'human', op, detail, reason: 'cli', sourceIds: [], at: now.toISOString() });
 }
 

@@ -45,6 +45,17 @@ export class SpendGuard {
     return r.total;
   }
 
+  /** Today's spend by kind (IST day): AI calls and speech-to-text. */
+  spentTodayByKind(): Record<SpendKind, number> {
+    const rows = this.#db.prepare('SELECT kind, COALESCE(SUM(usd), 0) AS total FROM spend WHERE day = ? GROUP BY kind').all(istDate(this.#clock.now())) as {
+      kind: string;
+      total: number;
+    }[];
+    const out: Record<SpendKind, number> = { ai: 0, stt: 0 };
+    for (const r of rows) if (r.kind === 'ai' || r.kind === 'stt') out[r.kind] = r.total;
+    return out;
+  }
+
   /** Sums live reservations and forgets expired ones. */
   #pendingTotal(): number {
     const now = this.#clock.now().getTime();

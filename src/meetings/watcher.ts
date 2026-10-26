@@ -51,6 +51,8 @@ export interface FoundMeeting {
   status: MeetingStatus;
   clientId: number | null;
   driveSeconds: number | null;
+  /** The match before the file check: a no_access row still says whether it was a client's, unassigned or internal. */
+  match: MatchResult['kind'];
 }
 
 export interface BackfillResult extends DiscoverResult {
@@ -220,6 +222,7 @@ export class MeetingWatcher {
     const clients = this.#activeClients();
     const conferences = await this.#api.listConferences(fromIso, toIso, signal);
     const pending: NewMeeting[] = [];
+    const matches: MatchResult['kind'][] = [];
     let skipped = 0;
     let errors = 0;
     for (const c of conferences) {
@@ -235,6 +238,7 @@ export class MeetingWatcher {
       try {
         const r = await this.#conference(c, known, clients, createdAt, signal);
         pending.push(...r.rows);
+        matches.push(...r.matches);
         skipped += r.skipped;
       } catch (e) {
         if (signal.aborted || !isConferenceError(e)) throw e; // GoogleAccessError included: the caller sets the health state
@@ -243,12 +247,13 @@ export class MeetingWatcher {
       }
     }
 
-    const found = pending.map((m) => ({
+    const found = pending.map((m, i) => ({
       recording: m.recording,
       startedAt: new Date(Date.parse(m.startedAt)).toISOString(),
       status: m.status,
       clientId: m.clientId,
       driveSeconds: m.driveSeconds,
+      match: matches[i]!,
     }));
     if (dryRun) return { added: pending.length, skipped, errors, ids: [], found };
     const ids: number[] = [];
@@ -282,16 +287,17 @@ export class MeetingWatcher {
     clients: MatchableClient[],
     createdAt: string,
     signal: AbortSignal,
-  ): Promise<{ rows: NewMeeting[]; skipped: number }> {
+  ): Promise<{ rows: NewMeeting[]; matches: MatchResult['kind'][]; skipped: number }> {
     const recordings = await this.#api.listRecordings(c.name, signal);
     const rows: NewMeeting[] = [];
+    const matches: MatchResult['kind'][] = [];
     let skipped = 0;
     const fresh = recordings.filter((r) => {
       if (r.state !== 'FILE_GENERATED' || r.driveFileId === null) return false;
       if (known.has(r.name)) skipped++;
       return !known.has(r.name);
     });
-    if (fresh.length === 0) return { rows, skipped };
+    if (fresh.length === 0) return { rows, matches, skipped };
 
     const code = await this.#api.meetingCode(c.space, signal);
     const invite: InviteInfo | null = code === null ? null : await this.#api.findInvite(code, c.startTime, signal);
@@ -329,6 +335,7 @@ export class MeetingWatcher {
         const names = await this.#api.listSignedInNames(c.name, signal);
         participants = [...new Set(names.map((n) => cleanLine(n, NAME_MAX)).filter((n) => n !== ''))];
       }
+      matches.push(match.kind);
       rows.push(
         buildRow({
           recording: r.name,
@@ -348,6 +355,6 @@ export class MeetingWatcher {
         }),
       );
     }
-    return { rows, skipped };
+    return { rows, matches, skipped };
   }
 }

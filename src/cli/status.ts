@@ -41,7 +41,13 @@ export function formatStatus(i: {
     if (s.media) {
       lines.push(`Files:       ${s.media.pending} waiting to be read · ${s.media.failedRecent} could not be read (24 h) · ${s.media.uploadFailed} not uploaded to Drive`);
     }
-    lines.push(`Spend today: ${lk}$${s.spentToday.toFixed(2)} of $${s.capUsd.toFixed(2)}`);
+    if (s.meetings) {
+      const m = s.meetings.stats;
+      const extra = `${m.noAccess > 0 ? `, ${m.noAccess} no access` : ''}${m.tooLong > 0 ? `, ${m.tooLong} too long` : ''}`;
+      lines.push(`Meetings:    ${m.done} done, ${m.waiting} waiting, ${m.unassigned} unassigned, ${m.failed} failed${extra}`);
+    }
+    const split = s.spendByKind ? ` (AI $${s.spendByKind.ai.toFixed(2)}, speech $${s.spendByKind.stt.toFixed(2)})` : '';
+    lines.push(`Spend today: ${lk}$${s.spentToday.toFixed(2)} of $${s.capUsd.toFixed(2)}${split}`);
     lines.push(`Disk free:   ${s.freeGb === null ? 'unknown' : `${s.freeGb.toFixed(1)} GB`}`);
   }
   lines.push('Clients:');

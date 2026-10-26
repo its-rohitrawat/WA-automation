@@ -461,8 +461,8 @@ describe('MeetingWatcher.backfill', () => {
     const plan = await w.backfill('2026-09-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z', signal, { dryRun: true });
     expect(plan).toMatchObject({ added: 2, skipped: 0, errors: 0, ids: [] });
     expect(plan.found).toEqual([
-      { recording: 'conferenceRecords/c1/recordings/c1r1', startedAt: '2026-09-10T05:00:00.000Z', status: 'queued', clientId: 1, driveSeconds: 2700 },
-      { recording: 'conferenceRecords/c2/recordings/c2r1', startedAt: '2026-09-11T05:00:00.000Z', status: 'queued', clientId: 1, driveSeconds: null },
+      { recording: 'conferenceRecords/c1/recordings/c1r1', startedAt: '2026-09-10T05:00:00.000Z', status: 'queued', clientId: 1, driveSeconds: 2700, match: 'client' },
+      { recording: 'conferenceRecords/c2/recordings/c2r1', startedAt: '2026-09-11T05:00:00.000Z', status: 'queued', clientId: 1, driveSeconds: null, match: 'client' },
     ]);
     expect(rowCount(db)).toBe(0);
     expect(api.callsOf('listConferences')).toEqual([['2026-09-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z']]);
