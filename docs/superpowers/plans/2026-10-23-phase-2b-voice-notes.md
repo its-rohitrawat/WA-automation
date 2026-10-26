@@ -738,15 +738,24 @@ program
 
 ### Task 12: Final verification (½ day)
 
-- [ ] Full suite and type-check on the merged branch.
-- [ ] A dry run of `transcribe-voice` on a **copy** of a test database (never the real one, never `--yes`).
-- [ ] A secret scan of the whole diff: no keys, no `.env` values, no transcript text in logs or tests, no real voice notes in the repo.
-- [ ] The golden run is listed for the owner's approval, with its cost estimate. Not run. It covers both prompts the SYSTEM_PROMPT change reaches:
+- [x] Full suite and type-check on the merged branch.
+- [x] A dry run of `transcribe-voice` on a **copy** of a test database (never the real one, never `--yes`).
+- [x] A secret scan of the whole diff: no keys, no `.env` values, no transcript text in logs or tests, no real voice notes in the repo.
+- [x] The golden run is listed for the owner's approval, with its cost estimate. Not run. It covers both prompts the SYSTEM_PROMPT change reaches:
   - the WhatsApp cases (`npm run golden`, the 10 existing cases plus 2b's six new ones);
   - the 4 meeting tracker cases (`node scripts/golden.ts --meetings`, cases 4–7, previewed at up to $0.43 each), because `MEETING_TRACKER_PROMPT` is SYSTEM_PROMPT plus the meeting rules (`src/brain/meetingTracker.ts`).
   - The owner's rule: the meeting cases first run after Phase 3 is on main, so on the old prompt; 2b's run then repeats them on the new one.
 - [ ] An independent review: spec, safety and test adequacy, with mutation checks on the extractor, `REQUEUING_FILE`, `isBlocking` and the processor's error classes.
 - [ ] Status sent to wa-agent-68 for the build map.
+
+**Final verification (2026-10-26)**, on `feat/phase-2b-voice-notes` at 58e8e0b (Task 10 merged), 2b's own changes being `git diff feat/phase-3-meetings...feat/phase-2b-voice-notes` (74 files):
+
+- **Suite and type-check:** `npx vitest run`: 126 files, 2,933 tests passed, 2 skipped, first run (the appMedia "2 runs" flake did not show). `npm run typecheck`: clean.
+- **Dry run:** a throwaway database in the session's scratchpad (never `data/`), built with the app's own `openDb`, `syncClients` and media/message store helpers: 1 client, 3 finished voice rows with no text, local dummy files of 45,000, 300,000 and 2,000,000 bytes. `node src/cli.ts transcribe-voice` without `--yes`, run from an empty folder (no `.env` there; the repo has none either; `loadEnv` reads `.env` from the working folder only) with only `DATA_DIR`, `VOICE_STT_PROVIDER=local`, dummy absolute `STT_LOCAL_BIN`/`STT_LOCAL_MODEL`, `FFMPEG_PATH`, `LOG_LEVEL`, `PATH` and `SystemRoot` in its environment. Output: "To transcribe: 3 voice notes or audio files saved before Phase 2b, about 14 minutes." / "Cost: $0 (local engine on this computer)." / "With --yes the running service transcribes them, for the record. It costs nothing and does not count toward the daily spend cap." / "Nothing was changed. Re-run with --yes to queue them." Exit 0, nothing on stderr. 14 minutes is right: 30 + 200 + min(1,334, 605) = 835 s. Every row's status, backlog, note, attempts, error code, created_at and next_attempt_at, and every message's processed_at, were the same before and after.
+- **Secret scan** of the added lines (key prefixes, Bearer, AIza, long hex/base64 runs, PEM headers, `password=`, `api_key=`): no secret. Hits were only the public model SHA-256 checksums (`docs/SETUP-mac.md` 200–204, `2026-10-26-local-stt.md` 78–82), `requireKey(env, 'STT_API_KEY')` (`src/stt/voice.ts:421`) and the placeholder `'test-key'` (`tests/cli/commands.test.ts:614, 622`). No `.env` or credential file; `.env.example` gains setting names with defaults or empty values only. No audio file (`.ogg`, `.opus`, `.wav`, `.mp3`, `.m4a`, ...) and no binary in the diff or tracked anywhere. Tests hold only made-up transcripts. No log call in `src` carries transcript text or engine stderr: the voice logs carry ids, codes, provider and counts; `LocalEngineError` messages carry the code only. `npm run stt:local-check` prints a transcript to the owner's terminal by design (amendment L2).
+- **Golden run, for the owner's approval (not run):** the previews (`node scripts/golden.ts` and `--meetings`, both without `--yes`, which exit before any API client is built; run with no key and no `.env`, so on the code's default model and prices) give: the 16 WhatsApp cases (10 existing, 6 voice) up to $0.42 each, $6.74 in all; the 4 meeting tracker cases (`--meetings --case 4` to `7`) up to $0.43 each, about $1.72. Total up to about **$8.46**, one attempt per case. These are ceilings (16,000 output tokens per case at the dearer of the configured and fallback prices); real runs usually cost much less. Re-run the previews in the real folder before `--yes`, since its `.env` may set another model or prices.
+- **Docs:** every health and status line in `docs/SETUP.md` and `docs/SETUP-mac.md` matches `src/health/health.ts`, `src/cli/status.ts` and `src/cli/transcribeVoice.ts` word for word (the docs leave out the "⚠️ " prefix, as for every other health line). Every setting named in both files is in `src/config/env.ts` and `.env.example`, with the same defaults and ranges. No mismatch.
+- **Still open:** the independent review with mutation checks, and the status to wa-agent-68.
 
 ---
 
