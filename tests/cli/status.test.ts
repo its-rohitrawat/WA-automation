@@ -93,7 +93,7 @@ describe('formatStatus', () => {
   });
 
   it('prints the shared-file counts when the service reports them', () => {
-    const out = formatStatus({ ...base, snapshot: { ...snapshot, media: { pending: 2, stale: 0, spendCap: 0, failedRecent: 1, uploadFailed: 0 } } });
+    const out = formatStatus({ ...base, snapshot: { ...snapshot, media: { pending: 2, stale: 0, spendCap: 0, failedRecent: 1, uploadFailed: 0, sttRefused: 0 } } });
     expect(out).toContain('Files:       2 waiting to be read · 1 could not be read (24 h) · 0 not uploaded to Drive');
     expect(formatStatus({ ...base, snapshot })).not.toContain('Files:');
   });

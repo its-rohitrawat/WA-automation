@@ -340,9 +340,9 @@ export function voiceTranscriber(provider: SttProvider, o: { inrPerUsd: number; 
   - **Migration:** a database at v7 migrates to v8; `media.backlog` exists with default 0; `media_stt_forget` exists with its CHECKs (provider list, `ref` length 1–200, `UNIQUE (provider, ref)`); a database already at v8 is untouched. The existing migration tests still pass.
   - **`REQUEUING_FILE` (12h, V1):** a voice or audio row finished with text re-queues a processed message and sets `requeued_for_text`, exactly as an image does; `markProcessedIfUnchanged` treats it the same. Rewrite the existing pin `tests/store/media.test.ts:352` ("kind %s: a file that finishes with text re-queues nothing, as a Phase 2b transcript would") so `voice` and `audio` expect the re-queue and `video`, `sticker` still expect nothing.
   - **Backlog rows never re-queue:** the same finish with `backlog = 1` stores the text but leaves the message processed and unflagged.
-  - **`finishMedia` with `forget: { provider: 'elevenlabs', ref: 'tr_1' }`** writes one `media_stt_forget` row in the same transaction. A second finish of the same file writes nothing. Without `forget`, no row.
-  - **`voiceBacklog(db, { clientId? })`** returns `{ id, clientId, fileSize }` for rows that are kind `voice` or `audio`, `status 'done'`, `text IS NULL`, `note IS NULL` or `'format_not_supported'` (N2), `error_code IS NULL`, `local_path` set, `backlog = 0`, message not revoked, client active. It skips rows with a note, with text, without a file, with a revoked message, of an inactive client, and other kinds; the `clientId` filter works.
-  - **`queueVoiceBacklog(db, ids, at)`** sets exactly those rows (re-checking the same conditions) to `status 'pending'`, `backlog 1`, `attempts 0`, `next_attempt_at NULL`, `error_code NULL`, in one transaction, and returns how many changed. A row that changed since the listing is left alone.
+  - **`finishMedia` with `forget: { provider: 'elevenlabs', ref: 'tr_1' }`** writes one `media_stt_forget` row in the same transaction. A second finish of the same file with the same ref writes nothing more; one with a different ref notes that copy too (review F). Without `forget`, no row.
+  - **`voiceBacklog(db, { clientId? })`** returns `{ id, clientId, fileSize, mimeType }` for rows that are kind `voice` or `audio`, `status 'done'`, `text IS NULL`, `note IS NULL` or `'format_not_supported'` (N2), `error_code IS NULL`, `local_path` set, `backlog = 0` or note `'format_not_supported'` (review C), message not revoked, client active. It skips rows with a note, with text, without a file, with a revoked message, of an inactive client, and other kinds; the `clientId` filter works.
+  - **`queueVoiceBacklog(db, ids, at)`** sets exactly those rows (re-checking the same conditions) to `status 'pending'`, `backlog 1` (only when the message is processed, review B), `attempts 0`, `next_attempt_at NULL`, `error_code NULL`, `note NULL`, `created_at = at` (review A), in one transaction, and returns how many changed. A row that changed since the listing is left alone.
   - **Forget queue:** `pendingMediaForgets(db, { nowIso, maxAttempts, mediaId? })`, `countMediaForgetAttempt(db, id, nextIso)` and `deleteMediaForget(db, id)` behave like their meeting twins (due order, attempts cap, `next_try_at`).
   - **`mediaStats`** gains `sttRefused`: pending rows with `error_code = 'stt_unavailable'` of active clients. Existing counts are unchanged.
   - **`MediaRow.backlog`** is read by `getMedia` and `mediaForMessages`.
@@ -373,11 +373,20 @@ CREATE TABLE media_stt_forget (
 ```
 
   - `REQUEUING_FILE` becomes `media.kind IN ('image', 'document', 'voice', 'audio') AND media.backlog = 0 AND media.status = 'done' AND …` (the rest unchanged). Rewrite its comment: voice and audio now hold up a message (V1), so their transcript re-checks it like a picture's description; a backlog transcript never does (V6).
-  - `finishMedia(db, id, x)`: `x.forget?: { provider: ProviderId; ref: string } | null`. Inside the existing transaction, after the `finished === 0` return, `INSERT OR IGNORE INTO media_stt_forget (media_id, provider, ref, created_at) VALUES (…)`.
+  - `finishMedia(db, id, x)`: `x.forget?: { provider: ProviderId; ref: string } | null`. Inside the existing transaction, before the `finished === 0` return (review F), `INSERT INTO media_stt_forget (media_id, provider, ref, created_at) VALUES (…) ON CONFLICT (provider, ref) DO NOTHING`.
   - Add `backlog` to `columns()`, `RawMedia`, `MediaRow` (`backlog: boolean`) and `toRow`.
   - The new functions above, with the same SQL style as the file (named parameters, `json_each` for id lists).
 - [ ] **Step 4: Run** the files, the suite and the type-check. Expected: PASS.
 - [ ] **Step 5: Commit**, and tell wa-agent-cf that migration v8 is taken by 2b.
+
+**Review round 1 amendments (done):**
+- **A.** `queueVoiceBacklog` also sets `created_at = @at`, so a queued file is not stale at once and its waits (Health's stale count, the processor's 24 hours, Task 7's `isBlocking` 30 minutes) count from the queueing. Test: an old row queued is not stale until 30 minutes after queueing.
+- **B.** `queueVoiceBacklog` sets `backlog = 1` only when the message is processed (`processed_at IS NOT NULL AND requeue_reason IS NULL`), else 0, so the transcript of a message still queued (or queued again for an edit or a reaction) is read with it. Tests: both cases, with `finishMedia` afterwards.
+- **C.** `VOICE_BACKLOG_FROM` uses `(m.backlog = 0 OR m.note = 'format_not_supported')`, so a file that finished `format_not_supported` again can be queued again; `queueVoiceBacklog` resets `note = NULL`; `VoiceBacklogRow` gains `mimeType` (Task 8). Test: queue, finish `format_not_supported`, listed again.
+- **D.** `dueMediaIds` orders `m.backlog, msg.ts, m.id`, so the backlog never starves live files. Test: with limit 1, a newer live file comes before older backlog files.
+- **E.** `mediaStats.stale` leaves out `stt_unavailable` as well as `spend_cap` (they are counted in `sttRefused`), so Task 9's key-refused line is not hidden by the stale line. Test.
+- **F.** `finishMedia` notes the provider copy before the `finished === 0` return: a copy is deleted whether or not this finish stored the transcript. `ON CONFLICT (provider, ref) DO NOTHING` keeps a repeated ref to one row. Tests: same ref once, a different ref noted; a finish of a failed file still notes its copy.
+- **G.** Test gap: `sttRefused` does not count a failed row with `error_code 'stt_unavailable'`.
 
 ### Task 5: The extractor's voice and audio case (1 day)
 
@@ -515,11 +524,12 @@ CREATE TABLE media_stt_forget (
   - `STT_PROVIDER none`: prints "Speech-to-text is not set up (STT_PROVIDER is none). Nothing changed." and changes nothing.
   - **Dry run** (no `--yes`): prints the count, the minutes at most (from file sizes) and the cost ceiling (`voiceCeilingUsd` per file, summed); nothing changes.
   - Files whose size implies more than `STT_MAX_SECONDS` are counted as "too long, skipped" and never queued (N4).
+  - Files the configured transcriber cannot send (`canSend(row.mimeType)` false: ffmpeg missing, N2) are counted as "needs ffmpeg, skipped" and never queued, so no file is queued only to finish `format_not_supported` again. They stay listed (`VoiceBacklogRow.mimeType`, Task 4 review C), so installing ffmpeg and running the command again picks them up.
   - `--client CODE` limits to that client; an unknown code is refused by name.
   - **`--yes`:** the rows become pending with `backlog = 1`; after a fake extractor finishes them, no message is re-queued and no flag is set.
   - Rows with a note or text are untouched; nothing is printed that comes from a transcript, a file name or a key.
 - [ ] **Step 2: Run** the file. Expected: FAIL.
-- [ ] **Step 3: Implement** `transcribeVoiceCommand({ client?, yes }, deps)`, using `voiceBacklog`, `sizeBoundSeconds`, `voiceCeilingUsd` and `queueVoiceBacklog`. Register it in `src/cli.ts`:
+- [ ] **Step 3: Implement** `transcribeVoiceCommand({ client?, yes }, deps)`, using `voiceBacklog`, `sizeBoundSeconds`, `voiceCeilingUsd`, the transcriber's `canSend` (on each row's `mimeType`) and `queueVoiceBacklog`. Register it in `src/cli.ts`:
 
 ```ts
 program
@@ -536,16 +546,17 @@ program
 
 ### Task 9: Health and status (½ day)
 
-**Files:** modify `src/health/health.ts`, `src/cli/status.ts`; tests `tests/health/health.test.ts`, `tests/cli/status.test.ts`.
+**Files:** modify `src/health/health.ts`, `src/cli/status.ts`, `src/cli/commands.ts`, `src/store/media.ts`; tests `tests/health/health.test.ts`, `tests/cli/status.test.ts`, `tests/store/media.test.ts`.
 
 - [ ] **Step 1: Write the failing tests:**
   - With `media.sttRefused > 0` and nothing more urgent, the line is "⚠️ Voice notes are not being transcribed: the speech-to-text key was refused." It comes after the upload line and before the spend-cap line.
   - Snapshots without `sttRefused` still parse (older snapshots); a non-number is refused.
   - `cli status` shows the spend split `(AI $x, speech $y)` whenever `spendByKind.stt > 0`, with or without meetings; with meetings it shows as today.
   - The `Files:` line adds "· N voice notes waiting (speech key refused)" only when `sttRefused > 0`.
+  - **Voice copies not deleted:** `mediaSttForgetsGivenUp(db, { maxAttempts, provider })` counts `media_stt_forget` rows whose last try is used or whose provider is not the one set up now (`'none'` when speech-to-text is off), as Phase 3's `sttForgetsGivenUp` does for `stt_forget`. `cli status` reads it from the database (shown even when the service is stopped, not on the health line) and, only when it is above 0, prints "Voice copies: N speech-to-text copies of voice notes could not be deleted from the provider; see SETUP (Voice notes)" ("copy" for 1), next to the "Speech copies:" line.
   - Existing health and status tests are unchanged.
 - [ ] **Step 2: Run** both files. Expected: FAIL.
-- [ ] **Step 3: Implement.** `MediaHealth` gains an optional `sttRefused?: number` (not in `MEDIA_COUNTS`, which older snapshots lack; checked separately when present). The line goes in `line()` after the upload line. In `status.ts`, the split condition becomes `s.spendByKind && (s.meetings || s.spendByKind.stt > 0)`.
+- [ ] **Step 3: Implement.** `MediaHealth` gains an optional `sttRefused?: number` (not in `MEDIA_COUNTS`, which older snapshots lack; checked separately when present). The line goes in `line()` after the upload line. In `status.ts`, the split condition becomes `s.spendByKind && (s.meetings || s.spendByKind.stt > 0)`. `commands.ts` passes `voiceCopiesLeft: mediaSttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: deps.env.STT_PROVIDER })` beside `sttCopiesLeft`.
 - [ ] **Step 4: Run** the files, the suite and the type-check. Expected: PASS.
 - [ ] **Step 5: Commit.**
 

@@ -73,7 +73,7 @@ export class Health {
   #lastSuccess: Date | null = null;
   #lastPublished: Date | null = null;
   #ingestFailures = 0;
-  #media: MediaHealth = { pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0 };
+  #media: MediaHealth = { pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0 };
   #meetings: MeetingsHealth | null = null;
 
   constructor(o: { db: Db; clock: Clock; spend: SpendGuard; dataDir?: string; freeBytes?: (dir: string) => number | null }) {

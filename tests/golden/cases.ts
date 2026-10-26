@@ -52,7 +52,7 @@ function file(messageId: number, o: Partial<MediaRow>): MediaRow {
   const row: MediaRow = {
     id: messageId, messageId, clientId: 1, kind: 'image', status: 'done', mimeType: 'image/jpeg', fileName: null, fileSize: 180_000, seconds: null,
     forwarded: false, pageCount: null, hasRef: false, localPath: null, sha256: null, textKind: 'description', text: null, textChars: null, note: null,
-    errorCode: null, attempts: 1, nextAttemptAt: null, driveFileId: null, requeuedForText: false, createdAt: '2026-10-19T00:00:00.000Z',
+    errorCode: null, attempts: 1, nextAttemptAt: null, driveFileId: null, requeuedForText: false, backlog: false, createdAt: '2026-10-19T00:00:00.000Z',
     updatedAt: '2026-10-19T00:00:00.000Z', ...o,
   };
   return { ...row, textChars: row.text === null ? null : [...row.text].length };
