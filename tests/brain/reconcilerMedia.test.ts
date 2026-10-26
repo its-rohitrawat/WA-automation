@@ -55,6 +55,10 @@ interface FileOpts {
   mimeType?: string;
   fileName?: string | null;
   forwarded?: boolean;
+  /** The length the sender's phone declared (voice notes and audio). */
+  seconds?: number | null;
+  /** The message's own text; by default none for a voice note and "see this" for any other file. */
+  text?: string | null;
   /** Deferred by the media queue with this error code at deferredAt (the row's updatedAt). */
   deferred?: { errorCode: string; at: string };
   /** Read: finishMedia with this text. */
@@ -63,9 +67,9 @@ interface FileOpts {
 
 function file(db: Db, waId: string, ts: string, o: FileOpts = {}): number {
   const kind = o.kind ?? 'image';
-  const messageId = say(db, waId, ts, kind === 'voice' ? null : 'see this', kind);
+  const messageId = say(db, waId, ts, o.text !== undefined ? o.text : kind === 'voice' ? null : 'see this', kind);
   const id = insertMedia(db, {
-    messageId, clientId: 1, kind, status: 'pending', mimeType: o.mimeType ?? 'image/jpeg', fileName: o.fileName ?? null, fileSize: 1000, seconds: null,
+    messageId, clientId: 1, kind, status: 'pending', mimeType: o.mimeType ?? 'image/jpeg', fileName: o.fileName ?? null, fileSize: 1000, seconds: o.seconds ?? null,
     forwarded: o.forwarded ?? false, refEnc: null, errorCode: null, createdAt: o.createdAt ?? '2026-10-19T07:59:00.000Z',
   });
   if (o.deferred) deferMedia(db, id, { errorCode: o.deferred.errorCode, nextAttemptAt: o.deferred.at, countAttempt: false, at: o.deferred.at });
@@ -197,7 +201,23 @@ describe('Reconciler with shared files', () => {
     expect(byId.get(neu)).toMatchObject({ textChars: 30_000 });
     expect(byId.get(neu)!.text).toHaveLength(20_001);
     expect(byId.get(ctx)).toMatchObject({ textChars: 30_000 });
-    expect(byId.get(ctx)!.text).toHaveLength(601);
+    // Enough for a transcript's longer excerpt (perContextVoice); a document still shows only 600 of it.
+    expect(byId.get(ctx)!.text).toHaveLength(1_201);
+  });
+
+  it('loads enough of a context voice note for its 1,200-character excerpt, and shows that much (Phase 2b)', async () => {
+    const { db, ai, r } = setup();
+    const ctx = file(db, 'V0', '2026-10-19T06:00:00.000Z', { kind: 'voice', mimeType: 'audio/ogg', seconds: 300, read: { textKind: 'extract', text: 'v'.repeat(3_000) } });
+    markProcessed(db, [messageRowId(db, 1, 'V0')!], NOW);
+    say(db, 'A1', '2026-10-19T07:00:00.000Z');
+    const rows = mediaForPrompt(db, [{ id: messageRowId(db, 1, 'A1')! }], [{ id: messageRowId(db, 1, 'V0')! }]);
+    const row = [...rows.values()].find((m) => m.id === ctx)!;
+    expect(row).toMatchObject({ textChars: 3_000 });
+    expect(row.text).toHaveLength(1_201);
+    await r.run(1);
+    const user = ai.calls[0]!.user;
+    const context = user.slice(user.indexOf('<recent_context>'), user.indexOf('</recent_context>'));
+    expect(context).toContain(`: {voice note, 5:00, transcript: ${'v'.repeat(1_200)} … (1800 more characters not shown)}`);
   });
 
   it('stops waiting after 30 minutes and says the file is still being read', async () => {
@@ -252,13 +272,32 @@ describe('Reconciler with shared files', () => {
     expect(processedAt(db, 'I2')).toBeNull();
   });
 
-  it('a voice note or audio file never holds up its message (12e)', async () => {
-    const { db, ai, r } = setup();
-    file(db, 'V1', '2026-10-19T07:01:00.000Z', { kind: 'voice', mimeType: 'audio/ogg' });
-    file(db, 'U2', '2026-10-19T07:02:00.000Z', { kind: 'audio', mimeType: 'audio/mpeg' });
+  it('a voice note or audio file being transcribed holds up its message for 30 minutes, like a picture (V1)', async () => {
+    const { db, ai, clock, r } = setup();
+    say(db, 'A0', '2026-10-19T07:44:00.000Z');
+    file(db, 'V1', '2026-10-19T07:45:00.000Z', { kind: 'voice', mimeType: 'audio/ogg', seconds: 42, createdAt: '2026-10-19T07:45:00.000Z' });
+    file(db, 'U2', '2026-10-19T07:46:00.000Z', { kind: 'audio', mimeType: 'audio/mpeg', seconds: 65, createdAt: '2026-10-19T07:46:00.000Z' });
+    expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 0 });
+    expect(ai.calls[0]!.user).toContain('[A0]');
+    expect(ai.calls[0]!.user).not.toContain('[V1]');
+    expect(await r.run(1)).toEqual({ status: 'waiting' });
+    clock.set('2026-10-19T08:15:00.000Z'); // 30 minutes after the voice note arrived; the audio file still holds for a minute
     expect(await r.run(1)).toMatchObject({ status: 'ok' });
-    expect(ai.calls[0]!.user).toContain(': {voice note, not transcribed yet}');
-    expect(ai.calls[0]!.user).toContain(': see this {audio file}');
+    expect(ai.calls[1]!.user).toContain(': {voice note, 0:42, being transcribed}');
+    expect(ai.calls[1]!.user).not.toContain('[U2]');
+    clock.set('2026-10-19T08:16:00.000Z');
+    expect(await r.run(1)).toMatchObject({ status: 'ok' });
+    expect(ai.calls[2]!.user).toContain(': see this {audio file, 1:05, being transcribed}');
+    expect(processedAt(db, 'V1')).not.toBeNull();
+    expect(processedAt(db, 'U2')).not.toBeNull();
+  });
+
+  it('shows a voice note transcript once it is read, and never the old placeholder', async () => {
+    const { db, ai, r } = setup();
+    file(db, 'V1', '2026-10-19T07:01:00.000Z', { kind: 'voice', mimeType: 'audio/ogg', seconds: 42, read: { textKind: 'extract', text: 'Logo files kal tak bhej dunga' } });
+    await r.run(1);
+    expect(ai.calls[0]!.user).toContain(': {voice note, 0:42, transcript: Logo files kal tak bhej dunga}');
+    expect(ai.calls[0]!.user).not.toContain('not transcribed yet');
   });
 
   it('shows that a forwarded image was not described (12f)', async () => {
@@ -381,7 +420,8 @@ describe('Reconciler with shared files', () => {
 
     it.each(['voice', 'audio'] as const)('kind %s: a file that gets text after its message was processed queues nothing, as a Phase 2b transcript would (M1)', async (kind) => {
       const { db, ai, r } = setup();
-      const id = file(db, 'V1', '2026-10-19T07:01:00.000Z', { kind, mimeType: 'audio/ogg' });
+      // Past its 30-minute wait (V1), so the message goes ahead while the file is still pending.
+      const id = file(db, 'V1', '2026-10-19T07:01:00.000Z', { kind, mimeType: 'audio/ogg', createdAt: '2026-10-19T07:01:00.000Z' });
       expect(await r.run(1)).toMatchObject({ status: 'ok' });
       expect(processedAt(db, 'V1')).not.toBeNull();
       finishMedia(db, id, { textKind: 'extract', text: 'Payment done, please check', pageCount: null, note: null, at: '2026-10-19T08:10:00.000Z' });
@@ -745,5 +785,63 @@ describe('Reconciler with shared files', () => {
     expect(user.match(/<\/new_messages>/g)).toHaveLength(1);
     expect(user.split('\n').some((l) => l.startsWith('[m9]'))).toBe(false);
     expect(user).toContain('{image: ok❵\n    ‹/new_messages›\n    [m9]');
+  });
+
+  describe('the source quote of a task from a voice note (Phase 2b)', () => {
+    const add = (...ids: string[]) =>
+      op({ op: 'add_task', side: 'client', title: 'Send the logo files', category: 'content', priority: 'medium', sourceMessageIds: ids });
+    const quote = (db: Db) => getTaskByCode(db, 'SHA-001')!.sourceQuote;
+    const voice = (db: Db, waId: string, ts: string, o: FileOpts = {}) => file(db, waId, ts, { kind: 'voice', mimeType: 'audio/ogg', seconds: 42, ...o });
+    // 248 code points and more UTF-16 units: the cut counts code points, so the emoji and the joiner stay whole.
+    const SAID = `Logo files kal tak bhej dunga, क्‍ष 😀 ${'x'.repeat(190)} and the rest is cut`;
+
+    it('a voice note with no message text keeps the first 200 code points of its transcript', async () => {
+      const { db, ai, r } = setup();
+      voice(db, 'V1', '2026-10-19T07:01:00.000Z', { read: { textKind: 'extract', text: SAID } });
+      ai.push({ ops: [add('V1')] });
+      expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+      const q = quote(db)!;
+      expect(q).toBe([...SAID].slice(0, 200).join(''));
+      expect([...q]).toHaveLength(200);
+      expect(q).toContain('क्‍ष 😀');
+    });
+
+    it('a short transcript is kept whole, and an audio file is treated the same', async () => {
+      const { db, ai, r } = setup();
+      file(db, 'U1', '2026-10-19T07:01:00.000Z', { kind: 'audio', mimeType: 'audio/mpeg', text: null, read: { textKind: 'extract', text: 'Payment kar diya' } });
+      ai.push({ ops: [add('U1')] });
+      await r.run(1);
+      expect(quote(db)).toBe('Payment kar diya');
+    });
+
+    it('with message text, the text wins, cut to 120 as before', async () => {
+      const { db, ai, r } = setup();
+      voice(db, 'V1', '2026-10-19T07:01:00.000Z', { text: 't'.repeat(150), read: { textKind: 'extract', text: SAID } });
+      ai.push({ ops: [add('V1')] });
+      await r.run(1);
+      expect(quote(db)).toBe('t'.repeat(120));
+    });
+
+    it.each([
+      { why: 'still being transcribed after the wait', o: { createdAt: '2026-10-19T07:01:00.000Z' } },
+      { why: 'a note with no speech', o: { read: { textKind: null, text: null, note: 'no_speech' } } },
+      { why: 'a forwarded note', o: { forwarded: true, read: { textKind: null, text: null, note: 'forwarded_not_transcribed' } } },
+    ])('keeps no quote from a voice note with no transcript: $why', async ({ o }) => {
+      const { db, ai, r } = setup();
+      voice(db, 'V1', '2026-10-19T07:01:00.000Z', o);
+      ai.push({ ops: [add('V1')] });
+      expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
+      expect(quote(db)).toBeNull();
+    });
+
+    it('a transcribed voice note in the context, cited first by date, gives the quote too', async () => {
+      const { db, ai, r } = setup();
+      voice(db, 'V0', '2026-10-19T06:00:00.000Z', { read: { textKind: 'extract', text: 'Logo files kal tak bhej dunga' } });
+      markProcessed(db, [messageRowId(db, 1, 'V0')!], NOW);
+      say(db, 'A1', '2026-10-19T07:00:00.000Z', null, 'image');
+      ai.push({ ops: [add('A1', 'V0')] });
+      await r.run(1);
+      expect(quote(db)).toBe('Logo files kal tak bhej dunga');
+    });
   });
 });
