@@ -410,6 +410,212 @@ The line reads, for example, `⚠️ 2 files could not be uploaded to Drive. See
 - A file can wait for the budget before the cap is reached, because a scanned PDF needs about $4 of room. The line then says `(number) shared files waiting for today's AI budget (read after midnight IST)`. It ranks below the other file and group warnings, so it never hides a more urgent problem.
 - Either way, the tracker does not wait more than 30 minutes for a file, and it keeps reading messages as long as there is budget for them.
 
+## Meeting summaries (Phase 3)
+
+When this is on, the agent finds the Google Meet recordings of client meetings and makes a summary Google Doc for each one, in `WA Agent > Clients > <client name> > Meetings`. The meeting's action items and decisions go into the same tracker as WhatsApp, without making a second task for work WhatsApp already tracks.
+
+- It is **off** until you switch it on (`MEETINGS_ENABLED`). Off means no meeting call to Google at all.
+- It asks Google Meet for the meetings the **mailbox** account hosted or joined, and reads the attendees from the Calendar invite. It **never reads email**.
+- It only reads. Nothing in the founder's Drive is changed, moved or deleted.
+- A meeting is processed only when it clearly belongs to one client (see "Which meetings are processed" below). The rest wait for you, or are ignored as internal.
+- Only meetings from the day it is switched on are picked up. Older ones need `meeting backfill` (see the commands below).
+
+Do the steps below once, in order.
+
+### 1. Before you start
+
+- **Speech-to-text.** The speech-to-text test (bake-off, `docs/STT-BAKEOFF.md`) has picked a provider. Meetings and voice notes share the same provider and key.
+- **Internal Google app.** The OAuth consent screen is **Internal** (step 4). One of the new permissions (Meet files in Drive) is a "restricted" one. **If the app is not Internal, stop and ask.**
+- **Privacy steps done** (step 6 below). Do them before the first real meeting is sent.
+
+### 2. Install ffmpeg (admin)
+
+ffmpeg turns a recording into a small audio file on this PC. The service account must be able to run it.
+
+1. In your normal browser, open ffmpeg.org > Download > Windows builds, and take the **gyan.dev** "release essentials" build (a zip). Write down its version number.
+2. **Check the download before you unzip it.** gyan.dev shows a SHA-256 checksum next to each release build. In an admin window:
+
+```bat
+certutil -hashfile "%USERPROFILE%\Downloads\ffmpeg-release-essentials.zip" SHA256
+```
+
+   Use the zip's real file name. The long number printed must be exactly the one gyan.dev shows for that file. If it differs, or you cannot find a checksum, delete the download and ask.
+
+3. Unzip it to `C:\Tools\ffmpeg` and lock the folder, so only administrators can change it and waagent can only run it:
+
+```bat
+mkdir C:\Tools\ffmpeg
+tar -xf "%USERPROFILE%\Downloads\ffmpeg-release-essentials.zip" -C C:\Tools\ffmpeg --strip-components 1
+icacls C:\Tools\ffmpeg /inheritance:r /grant:r "Administrators:(OI)(CI)F" "SYSTEM:(OI)(CI)F" "waagent:(OI)(CI)RX"
+```
+
+4. In the waagent window, check that it runs:
+
+```bat
+C:\Tools\ffmpeg\bin\ffmpeg.exe -version
+```
+
+5. Put the full path in `.env` (step 5): `FFMPEG_PATH=C:\Tools\ffmpeg\bin\ffmpeg.exe`. Without `FFMPEG_PATH` the agent looks for `ffmpeg` on the PATH.
+
+Only `ffmpeg.exe` is used; `ffprobe` is not needed. If ffmpeg cannot be found, meetings pause and the status line says so.
+
+### 3. Switch on the Google APIs
+
+Signed in as the **mailbox** Google account, in console.cloud.google.com, project `WA Agent`:
+
+1. APIs & Services > Library > enable **Google Meet API** (it may be listed as "Google Meet REST API").
+2. APIs & Services > Library > enable **Google Calendar API**.
+
+The Google Drive API is already on (step 4).
+
+### 4. Settings
+
+In an admin window or the waagent window, open `notepad C:\wa-agent\.env` and fill in these names. Values stay on this PC only; `.env.example` explains each one.
+
+| Setting | What it is |
+|---|---|
+| `MEETINGS_ENABLED` | `true` to switch meetings on. Default `false`. |
+| `TEAM_EMAIL_DOMAINS` | Our own email domains, comma-separated, for example `ourstudio.in`. Required when meetings are on. Public mail domains such as gmail.com are refused. |
+| `MEETING_POLL_MINUTES` | How often to look for new recordings. Default 5, allowed 2–60. |
+| `MEETING_MAX_MINUTES` | Longer meetings are listed as "too long" and not transcribed. Default 180 (3 hours), allowed 10–300. |
+| `MEETINGS_SINCE` | Optional, `YYYY-MM-DD`: only meetings from this day on. Empty means from the day meetings were first switched on. |
+| `FFMPEG_PATH` | Full path to `ffmpeg.exe` (step 2). |
+| `STT_PROVIDER` | `sarvam`, `elevenlabs`, `openai` or `none`. Default `none`: meetings are found and matched, but wait. |
+| `STT_API_KEY` | The speech-to-text provider's key. Required when `STT_PROVIDER` is not `none`. Type it into `.env` yourself, never into chat or code. |
+| `INR_PER_USD` | Rupees per US dollar, for Sarvam's rupee prices. Default 88, allowed 40–200. |
+
+Then tell the agent which meetings belong to which client. In `config\allowed-groups.json`, each client can have two more fields:
+
+```json
+{ "groupId": "120363000000000001@g.us", "name": "Client name", "code": "ABC",
+  "emailDomains": ["clientcompany.example"], "meetingKeywords": ["Client project"] }
+```
+
+- **`emailDomains`**: the client's own email domains. An attendee from that domain, or from a subdomain of it, points to this client. Public mail domains (gmail.com, outlook.com, yahoo.com and the like) are refused, because they would match everyone.
+- **`meetingKeywords`**: words in a meeting title that point to this client, as whole words. Each must keep at least 3 characters (spaces not counted) once punctuation and symbols are removed, so "c++" is refused; at most 20 per client. Capitals and punctuation do not matter when matching. The client's name counts too.
+- A very short client name, such as "AB", never matches a title. Such a client is matched only by its keywords or email domains.
+- The service picks up changes to this file within seconds, as before. Run `npm run cli -- status` and check the client is still listed.
+
+### 5. Sign in to Google again (as waagent)
+
+With `MEETINGS_ENABLED=true` saved in `.env`, in the waagent window:
+
+```bat
+npm run cli -- google-auth
+```
+
+It first prints the permissions it will ask for. Besides Google Drive (only the files WA Agent creates), there are three new ones, all **read only**:
+
+- **Google Meet recordings list (read only)**: the meetings the mailbox account hosted or joined.
+- **Calendar invites (read only)**: invite titles and attendee emails.
+- **Meet files in Drive (read only)**: only files that Google Meet made, such as recordings.
+
+Tick every box Google shows. If one is missing, `google-auth` says which, saves nothing, and you run it again. Until all three are granted, meetings stay paused and the status line says so.
+
+### 6. Privacy steps (required before the first real meeting)
+
+1. **Tell clients.** Say in the agreement, or at onboarding, that recorded meetings are transcribed and summarised for the project tracker. Google Meet itself shows everyone that a meeting is being recorded.
+2. **Set the speech-to-text account's privacy settings**, as for voice notes:
+   - **Sarvam:** opt out of training, and set data retention to 0 days.
+   - **ElevenLabs:** switch off "Improve the models for everyone". The agent also deletes each transcript from the ElevenLabs account once it is stored on this PC.
+3. **Know what stays on this PC:**
+   - the transcript and the summary, in the tracker database;
+   - the meeting's audio, in `C:\wa-agent\data\meetings\<CODE>\<year-month>\` (about 28 MB per hour of meeting);
+   - the downloaded video and audio parts only while they are needed, in `data\meetings\tmp\`. The agent deletes only its own files there;
+   - the logs hold ids, counts and error codes only, never titles, names, emails or what was said.
+4. **Internal meetings** (only our team) are never downloaded, transcribed or summarised. Only their id, start time and status are kept.
+5. **In Drive** the agent only adds the summary Docs. It never changes, moves or deletes the founder's recordings or any other file. Share the Meetings folders with the team only, never clients (they are inside the **WA Agent** folder, step 6).
+
+### 7. Check first, then start
+
+Before the service starts processing meetings, see what it would do. In the waagent window:
+
+```bat
+npm run cli -- meeting check
+```
+
+- It lists the last 7 days' recordings, which client each one matches (or "unassigned"), and whether each file opens.
+- It only reads: it downloads nothing and stores nothing.
+- A recording marked as not opening usually belongs to a meeting recorded by someone else. The agent cannot open it, and lists it as "no access".
+- If a client meeting shows as unassigned, add a keyword or domain for that client (step 4) and run the check again.
+
+When the list looks right, restart the service (`net stop wa-agent`, then `net start wa-agent`).
+
+### Which meetings are processed
+
+The client is chosen **before** anything is downloaded or sent anywhere:
+
+1. The meeting title (from the invite, or the recording's name) contains a client's name or one of its keywords, as whole words.
+2. Otherwise, an attendee's email domain is in a client's `emailDomains`.
+
+- **Exactly one client found:** the meeting is processed.
+- **None, or more than one:** it waits as **Unassigned** until you assign it (`meeting assign`). The Overview tab lists unassigned meetings by number, date and length only. Titles and attendees are shown only by `meeting list`, on this PC.
+- **Internal:** an invite with at least one other attendee, every attendee from `TEAM_EMAIL_DOMAINS`, and no client name in the title. A meeting with no invite or no attendees is never internal.
+- **Too long:** over `MEETING_MAX_MINUTES`. It is listed, not transcribed.
+
+### What a meeting does
+
+1. Downloads the recording into `data\meetings\tmp\`, makes a small audio file with ffmpeg, and deletes the video.
+2. Turns the speech into text with speaker labels.
+3. Has Claude write the summary.
+4. Makes the Google Doc: meeting info (client, date, length, attendees), what happened, discussion points, decisions, action items (ours and the client's, with owner and deadline when said), open questions, conclusion and next steps, then the full transcript with times and speaker names. The name is `YYYY-MM-DD – <Client> – <Meeting title>`.
+5. Updates the tracker. A meeting can do what a WhatsApp message can: add tasks (marked "Meeting"), update tasks first raised on WhatsApp, close tasks, mark them maybe done, and log reminders and decisions. It never changes anyone's role.
+
+- **Closing tasks** follows the chat rules: a task closes only when the meeting clearly says the work is done or approved by the right person. "Sent" without an approval makes it maybe done. Speech-to-text can mishear, so check closes from meetings: the Doc has the transcript, and `task reopen` undoes a wrong close.
+- A task a person reopened by hand is closed again only by a meeting that started after the reopen.
+- **Speaker names** come only from the invite's attendees and from people signed in to Google in the meeting. A name someone just says, or a guest's self-chosen name, is never used. Unknown speakers stay labels such as "speaker_2".
+- Meetings are processed one at a time. Each step is saved before the next, so a restart carries on where it stopped and does not pay twice for finished work.
+
+### Cost of meetings
+
+Speech-to-text is booked as `stt` and the summary as `ai`. Both count toward `DAILY_SPEND_CAP_USD`. Expected cost for a 1-hour meeting, at list prices:
+
+| Step | Cost |
+|---|---|
+| Speech | ElevenLabs $0.22, Sarvam about $0.41, OpenAI $0.36 |
+| Summary | about $0.15–0.25 |
+| Tracker update | about $0.05–0.08 |
+| **Total** | **about $0.45–0.70** |
+
+- Before speech-to-text starts, the agent holds the list price for the meeting's measured length. When the answer comes, the real cost is booked.
+- A meeting that does not fit in what is left of today's budget waits, and is processed after midnight India time.
+- **Restarting during speech-to-text.** If the service is stopped while a part of a meeting is being transcribed, that part is booked at its full list price, and (ElevenLabs or OpenAI) sent again after the start. A Sarvam job is picked up again instead.
+- **The meeting golden check** sends a few made-up meetings to Claude and checks the answers. It costs money on the Anthropic account, so it needs the owner's approval. The first command sends nothing and shows the most each case could cost; the second runs them:
+
+```bat
+npm run golden -- --meetings
+npm run golden -- --meetings --yes
+```
+
+### Meeting commands (run in the waagent window)
+
+| Command | What it does |
+|---|---|
+| `npm run cli -- meeting list` | Lists meetings: number, date, client or "unassigned", status and title. On screen only. Add `--all` to see every meeting. |
+| `npm run cli -- meeting assign 12 ABC` | Gives meeting 12 to client ABC and queues it. Works for unassigned and internal meetings. |
+| `npm run cli -- meeting skip 12` | An unassigned meeting is never processed. |
+| `npm run cli -- meeting retry 12` | Puts a failed or "no access" meeting back in the queue, at the step it reached. |
+| `npm run cli -- meeting backfill --since 2026-10-01` | For older meetings: shows how many it would process, their total hours and the most they could cost, and changes nothing. Add `--yes` to queue them. Needs the service stopped. |
+| `npm run cli -- meeting check` | Read only: the last 7 days' recordings, their client match, and whether each file opens. |
+
+`status` also prints a `Meetings:` line, for example `Meetings: 4 done, 1 waiting, 2 unassigned, 0 failed`, and today's spend split as `AI $x, speech $y`.
+
+### Meeting status lines
+
+These appear on the `Health:` line, after the shared-file lines and before low disk:
+
+| What you see | What it means | What to do |
+|---|---|---|
+| Meetings paused: Google sign-in needs meeting access. Run: npm run cli -- google-auth | The three meeting permissions are not all granted. | Run `npm run cli -- google-auth` in the waagent window (step 5), tick every box, then restart the service. |
+| Meetings paused: ffmpeg not found | `FFMPEG_PATH` is wrong, or ffmpeg is not on the PATH. | Check step 2, fix `FFMPEG_PATH` in `.env`, restart the service. |
+| (number) meetings could not be processed | Meetings failed after their retries, or the agent cannot open the recording ("no access"). | Run `npm run cli -- meeting list`. Read `wa-agent.out.log` (look for lines with `meeting`). After a fix, run `meeting retry <number>`. |
+| Meetings waiting: speech-to-text is not set up | `STT_PROVIDER` is `none`. Meetings are found and matched, but not transcribed. | Set `STT_PROVIDER` and `STT_API_KEY` in `.env`, then restart the service. |
+| Meetings waiting: the speech-to-text key was refused | The provider refused `STT_API_KEY`. The agent tries again every hour. | Check the key in the provider's console. Put a working key in `.env`, then restart the service. |
+
+### Turning meetings off
+
+Set `MEETINGS_ENABLED=false` in `.env` and restart the service. Nothing is deleted: the Docs, the tasks and the saved audio stay. Meetings already found wait, untouched, until you switch it on again.
+
 ## If the service will not start
 
 When the agent refuses to start it exits, and WinSW tries again every minute or so. So `net stop` alone may not hold it down. Use the two procedures below around every fix.
