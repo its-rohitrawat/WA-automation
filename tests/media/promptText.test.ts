@@ -13,7 +13,8 @@ const row = (o: Partial<MediaRow> = {}): MediaRow => {
   const r: MediaRow = {
     id: 1, messageId: 1, clientId: 1, kind: 'image', status: 'done', mimeType: 'image/jpeg', fileName: null, fileSize: 2048, seconds: null, forwarded: false,
     pageCount: null, hasRef: false, localPath: 'media/SHA/2026-10/a-1.jpg', sha256: null, textKind: 'description', text: 'A blue banner', textChars: null,
-    note: null, errorCode: null, attempts: 0, nextAttemptAt: null, driveFileId: null, requeuedForText: false, createdAt: NOW, updatedAt: NOW, ...o,
+    note: null, errorCode: null, attempts: 0, nextAttemptAt: null, driveFileId: null, requeuedForText: false, backlog: false, createdAt: NOW, updatedAt: NOW,
+    ...o,
   };
   return { ...r, textChars: o.textChars !== undefined ? o.textChars : r.text === null ? null : [...r.text].length };
 };

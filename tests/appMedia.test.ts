@@ -462,7 +462,7 @@ describe('app media wiring (15g)', () => {
     await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0));
     expect(getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable' });
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(readHealthSnapshot(db)!.media).toEqual({ pending: 1, stale: 1, spendCap: 0, failedRecent: 0, uploadFailed: 0 });
+    expect(readHealthSnapshot(db)!.media).toEqual({ pending: 1, stale: 1, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0 });
     expect(readHealthSnapshot(db)!.line).toEqual({ ok: false, text: '⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.' });
     await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0));
     await stopApp(app);
@@ -715,7 +715,7 @@ describe('app start time (15a, 15f)', () => {
     });
     const { db, ai, app } = setup({ startedAt, media: { sealer, fetcher }, prepare: (db) => storedImage(db, sealer, minutesBefore(120).toISOString()) });
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalled());
-    expect(readHealthSnapshot(db)!.media).toEqual({ pending: 1, stale: expected.stale, spendCap: 0, failedRecent: 0, uploadFailed: 0 });
+    expect(readHealthSnapshot(db)!.media).toEqual({ pending: 1, stale: expected.stale, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0 });
     await vi.advanceTimersByTimeAsync(241_000);
     if (expected.blocks) expect(ai.calls).toHaveLength(0);
     else expect(ai.calls[0]!.user).toContain(': old banner {image, still being read}');

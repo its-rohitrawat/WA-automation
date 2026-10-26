@@ -463,7 +463,7 @@ describe('migration 7', () => {
       media: db.prepare('SELECT * FROM media').all(),
       clients: db.prepare('SELECT * FROM clients').all(),
     };
-    migrate(db);
+    migrate(db, MIGRATIONS.filter((x) => x.version <= 7)); // up to 7 only: v8 (Phase 2b) adds a media column
     expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(7);
     const strip = (rows: unknown[]) => rows.map((r) => {
       const { meeting_id: _m, ...rest } = r as Record<string, unknown>;
@@ -486,10 +486,10 @@ describe('migration 7', () => {
     expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
   });
 
-  it('a fresh database migrates to 7, with its indexes, and the table refuses unknown statuses and stages', () => {
+  it('a fresh database has migration 7, with its indexes, and the table refuses unknown statuses and stages', () => {
     const db = seededDb();
-    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(7);
-    expect(MIGRATIONS.map((m) => m.version).at(-1)).toBe(7);
+    expect(db.prepare('SELECT version FROM schema_version WHERE version = 7').get()).toEqual({ version: 7 });
+    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(8); // the latest: v8 is Phase 2b's
     const idx = (db.prepare("SELECT tbl_name || '.' || name AS n FROM sqlite_master WHERE type = 'index'").all() as { n: string }[]).map((i) => i.n);
     expect(idx).toEqual(expect.arrayContaining([
       'meetings.meetings_due', 'meetings.meetings_conference', 'meetings.meetings_client', 'tasks.tasks_meeting', 'decisions.decisions_meeting',

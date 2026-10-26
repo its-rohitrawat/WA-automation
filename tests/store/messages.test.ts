@@ -404,10 +404,29 @@ describe('a file read after its message was processed (12h)', () => {
     expect(flag(db, fileId)).toBe(false);
   });
 
-  describe('only images and documents count (M1)', () => {
+  describe('images, documents, voice notes and audio count; videos, stickers and backlog transcripts do not (M1, V1, V6)', () => {
     const TRANSCRIPT = { textKind: 'extract' as const, text: 'Payment done, please check', pageCount: null, note: null, at: LATER };
 
-    it.each(['voice', 'audio'] as const)('kind %s: a file that gets text during the call leaves its message to be marked processed', (kind) => {
+    it.each(['voice', 'audio'] as const)('kind %s: a file that gets text during the call leaves its message queued and flagged, as an image does', (kind) => {
+      const { db, fileId } = withFile(kind);
+      const seen = seenBy(db, { fileUnread: true });
+      finishMedia(db, fileId, TRANSCRIPT);
+      expect(markProcessedIfUnchanged(db, seen, LATER)).toBe(1);
+      expect(flag(db, fileId)).toBe(true);
+      expect(listUnprocessed(db, 1)[0]).toMatchObject({ waId: 'm1', processedAt: null, requeueReason: null });
+    });
+
+    it.each(['voice', 'audio'] as const)('kind %s: a file that gets text during a call that also saw an edit is flagged, and the edit keeps its label', (kind) => {
+      const { db, fileId } = withFile(kind);
+      const seen = seenBy(db, { fileUnread: true });
+      applyEdit(db, 1, 'm1', 'hello edited', LATER);
+      finishMedia(db, fileId, TRANSCRIPT);
+      expect(markProcessedIfUnchanged(db, seen, LATER)).toBe(1);
+      expect(flag(db, fileId)).toBe(true);
+      expect(listUnprocessed(db, 1)[0]).toMatchObject({ waId: 'm1', processedAt: null, requeueReason: 'edit' });
+    });
+
+    it.each(['video', 'sticker'] as const)('kind %s: a file that gets text during the call leaves its message to be marked processed', (kind) => {
       const { db, fileId } = withFile(kind);
       const seen = seenBy(db, { fileUnread: true });
       finishMedia(db, fileId, TRANSCRIPT);
@@ -416,14 +435,15 @@ describe('a file read after its message was processed (12h)', () => {
       expect(listUnprocessed(db, 1)).toEqual([]);
     });
 
-    it.each(['voice', 'audio'] as const)('kind %s: a file that gets text during a call that also saw an edit is not flagged, and the edit keeps its label', (kind) => {
+    it.each(['voice', 'audio'] as const)('kind %s: a backlog transcript that arrives during the call leaves its message to be marked processed (V6)', (kind) => {
       const { db, fileId } = withFile(kind);
+      db.prepare('UPDATE media SET backlog = 1 WHERE id = ?').run(fileId);
       const seen = seenBy(db, { fileUnread: true });
-      applyEdit(db, 1, 'm1', 'hello edited', LATER);
       finishMedia(db, fileId, TRANSCRIPT);
-      expect(markProcessedIfUnchanged(db, seen, LATER)).toBe(1);
+      expect(markProcessedIfUnchanged(db, seen, LATER)).toBe(0);
       expect(flag(db, fileId)).toBe(false);
-      expect(listUnprocessed(db, 1)[0]).toMatchObject({ waId: 'm1', processedAt: null, requeueReason: 'edit' });
+      expect(listUnprocessed(db, 1)).toEqual([]);
+      expect(getMedia(db, fileId)).toMatchObject({ status: 'done', text: 'Payment done, please check', backlog: true });
     });
   });
 

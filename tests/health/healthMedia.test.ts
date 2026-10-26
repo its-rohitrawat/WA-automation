@@ -13,7 +13,7 @@ function setup(freeBytes: () => number | null = () => 200e9) {
   h.setWhatsApp({ state: 'open', since: '2026-10-19T08:00:00.000Z', lastErrorCode: null, credsSaveFailures: 0 });
   return { db, h, spend };
 }
-const counts = (o: Partial<MediaHealth> = {}): MediaHealth => ({ pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0, ...o });
+const counts = (o: Partial<MediaHealth> = {}): MediaHealth => ({ pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, ...o });
 const SPEND_LINE = '⚠️ Daily spend cap reached. Paused until midnight IST';
 const budgetLine = (n: number) => `⚠️ ${n} shared file${n === 1 ? '' : 's'} waiting for today's AI budget (read after midnight IST)`;
 

@@ -379,11 +379,26 @@ describe('Reconciler with shared files', () => {
       expect(ai.calls).toHaveLength(1);
     });
 
-    it.each(['voice', 'audio'] as const)('kind %s: a file that gets text after its message was processed queues nothing, as a Phase 2b transcript would (M1)', async (kind) => {
+    it.each(['voice', 'audio'] as const)('kind %s: a transcript that arrives after its message was processed queues it again, as a picture does (V1)', async (kind) => {
       const { db, ai, r } = setup();
       const id = file(db, 'V1', '2026-10-19T07:01:00.000Z', { kind, mimeType: 'audio/ogg' });
       expect(await r.run(1)).toMatchObject({ status: 'ok' });
       expect(processedAt(db, 'V1')).not.toBeNull();
+      finishMedia(db, id, { textKind: 'extract', text: 'Payment done, please check', pageCount: null, note: null, at: '2026-10-19T08:10:00.000Z' });
+      expect(flagOf(db, id)).toBe(true);
+      expect(processedAt(db, 'V1')).toBeNull();
+      expect(await r.run(1)).toMatchObject({ status: 'ok' });
+      expect(ai.calls).toHaveLength(2);
+      expect(processedAt(db, 'V1')).not.toBeNull();
+      expect(flagOf(db, id)).toBe(false);
+    });
+
+    it.each(['voice', 'audio'] as const)('kind %s: a backlog transcript after its message was processed queues nothing (V6)', async (kind) => {
+      const { db, ai, r } = setup();
+      const id = file(db, 'V1', '2026-10-19T07:01:00.000Z', { kind, mimeType: 'audio/ogg' });
+      expect(await r.run(1)).toMatchObject({ status: 'ok' });
+      expect(processedAt(db, 'V1')).not.toBeNull();
+      db.prepare('UPDATE media SET backlog = 1 WHERE id = ?').run(id); // queued by `cli transcribe-voice`
       finishMedia(db, id, { textKind: 'extract', text: 'Payment done, please check', pageCount: null, note: null, at: '2026-10-19T08:10:00.000Z' });
       expect(flagOf(db, id)).toBe(false);
       expect(processedAt(db, 'V1')).not.toBeNull();

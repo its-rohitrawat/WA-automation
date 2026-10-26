@@ -248,4 +248,23 @@ CREATE TABLE stt_forget (
 );
 `,
   },
+  {
+    // Phase 2b: voice notes. backlog: 1 for a 2a voice note queued by `cli transcribe-voice`; its transcript is stored for
+    // the record and never queues its message again (V6). media_stt_forget: the speech provider's stored copies of voice
+    // transcripts still to delete (N1), as stt_forget does for meetings: the provider's id only, never what was said.
+    version: 8,
+    sql: `
+ALTER TABLE media ADD COLUMN backlog INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE media_stt_forget (
+  id INTEGER PRIMARY KEY,
+  media_id INTEGER NOT NULL REFERENCES media(id),
+  provider TEXT NOT NULL CHECK (provider IN ('sarvam', 'elevenlabs', 'openai')),
+  ref TEXT NOT NULL CHECK (length(ref) BETWEEN 1 AND 200),
+  created_at TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_try_at TEXT,
+  UNIQUE (provider, ref)
+);
+`,
+  },
 ];
