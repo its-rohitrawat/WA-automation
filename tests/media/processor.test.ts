@@ -1486,6 +1486,89 @@ describe('MediaProcessor: voice notes', () => {
       expect(extract).toHaveBeenCalledTimes(2);
     });
 
+    // Review round 1, fix 1: voicePaid unset is derived from the voice transcriber, paid-safe when none is known.
+    describe('voicePaid unset is derived from the voice transcriber', () => {
+      const runsUntilFailed = async (voice: VoiceTranscriber | null | undefined): Promise<number> => {
+        const { db, clock, p, extract, shareVoice } = setup({ extract: throwing(() => new LocalEngineError('timeout')), ...(voice !== undefined ? { voice } : {}) });
+        const id = shareVoice();
+        for (let i = 0; i < 5 && (await p.process(id)).outcome === 'deferred'; i++) clock.advance(5 * MINUTE);
+        expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_timeout' });
+        return extract.mock.calls.length;
+      };
+
+      it('a local (free) voice transcriber gives 3 runs', async () => {
+        expect(await runsUntilFailed(new FakeLocalVoiceTranscriber())).toBe(MEDIA_MAX_ATTEMPTS);
+      });
+
+      it('a paid voice transcriber gives 2 runs', async () => {
+        expect(await runsUntilFailed(new FakeVoiceTranscriber())).toBe(STT_NO_ANSWER_MAX_ATTEMPTS);
+      });
+
+      it.each([['null', null], ['not given', undefined]] as const)('no voice transcriber (%s) gives 2 runs, the paid-safe setting', async (_name, voice) => {
+        expect(await runsUntilFailed(voice)).toBe(STT_NO_ANSWER_MAX_ATTEMPTS);
+      });
+
+      it('an explicit voicePaid still wins over the transcriber', async () => {
+        const a = setup({ extract: throwing(() => new LocalEngineError('timeout')), voice: new FakeLocalVoiceTranscriber(), voicePaid: true });
+        const ida = a.shareVoice();
+        expect((await a.p.process(ida)).outcome).toBe('deferred');
+        a.clock.advance(MINUTE);
+        expect((await a.p.process(ida)).outcome).toBe('failed');
+        const b = setup({ extract: throwing(() => new LocalEngineError('timeout')), voice: new FakeVoiceTranscriber(), voicePaid: false });
+        const idb = b.shareVoice();
+        expect((await b.p.process(idb)).outcome).toBe('deferred');
+        b.clock.advance(MINUTE);
+        expect((await b.p.process(idb)).outcome).toBe('deferred');
+        b.clock.advance(5 * MINUTE);
+        expect((await b.p.process(idb)).outcome).toBe('failed');
+        expect(getMedia(b.db, idb)).toMatchObject({ attempts: MEDIA_MAX_ATTEMPTS });
+      });
+
+      it('a local voice transcriber with voicePaid unset: a voice note whose runs never end fails as crashed after 3 runs', async () => {
+        const s = setup({ extract: () => new Promise<Extraction>(() => {}), voice: new FakeLocalVoiceTranscriber() });
+        const id = s.shareVoice();
+        for (let run = 1; run <= MEDIA_MAX_ATTEMPTS; run++) {
+          void s.restart().process(id);
+          await vi.waitFor(() => expect(s.extract).toHaveBeenCalledTimes(run));
+          s.clock.advance(15 * MINUTE);
+        }
+        expect(await s.restart().process(id)).toEqual({ outcome: 'failed', clientId: 1 });
+        expect(getMedia(s.db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed', attempts: MEDIA_MAX_ATTEMPTS });
+      });
+    });
+
+    // Review round 1, fix 2: local_aborted waits, but not forever (the 24-hour rule of the other free waits).
+    describe('an abort has an age limit', () => {
+      it('under 24 hours from arrival it still waits, counting nothing', async () => {
+        const { db, clock, p, extract, shareVoice } = setup({ extract: throwing(() => new LocalEngineError('aborted')), voicePaid: false });
+        const id = shareVoice();
+        clock.advance(24 * 60 * MINUTE); // exactly 24 hours: still waits
+        expect((await p.process(id)).outcome).toBe('deferred');
+        expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'local_aborted', nextAttemptAt: at(24 * 60 * MINUTE + MINUTE) });
+        expect(extract).toHaveBeenCalledTimes(1);
+      });
+
+      it('over 24 hours from arrival it fails as local_aborted', async () => {
+        const { db, clock, p, shareVoice } = setup({ extract: throwing(() => new LocalEngineError('aborted')), voicePaid: false });
+        const id = shareVoice();
+        expect((await p.process(id)).outcome).toBe('deferred');
+        clock.advance(24 * 60 * MINUTE + 1);
+        expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
+        expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_aborted', nextAttemptAt: null });
+      });
+
+      it('counts the 24 hours from the service start for a file saved before it', async () => {
+        const startedAt = new Date(Date.parse('2026-10-19T08:00:00Z') + 3 * 24 * 60 * MINUTE);
+        const { db, clock, p, shareVoice } = setup({ extract: throwing(() => new LocalEngineError('aborted')), voicePaid: false, startedAt });
+        const id = shareVoice();
+        clock.set(startedAt.toISOString());
+        expect((await p.process(id)).outcome).toBe('deferred');
+        clock.advance(24 * 60 * MINUTE + 1);
+        expect((await p.process(id)).outcome).toBe('failed');
+        expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_aborted' });
+      });
+    });
+
     it('voicePaid false leaves images at 3 attempts', async () => {
       const { db, clock, p, share } = setup({ extract: throwing(() => new AiInvalidOutputError('not json', null)), voicePaid: false });
       const id = share();

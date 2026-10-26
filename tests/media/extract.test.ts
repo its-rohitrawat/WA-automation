@@ -977,6 +977,15 @@ describe('voice and audio', () => {
     expect((await extract(input(note()))).forget).toEqual({ provider: 'elevenlabs', ref: 'tr_1' });
   });
 
+  // Review round 1, fix 6: the guard kept on the paid path. media_stt_forget takes paid providers only.
+  it("never makes a forget from a paid call's result that names 'local', for a transcript or no speech", async () => {
+    const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ provider: 'local', forgetRef: 'tr_1' }, { provider: 'local', text: '', forgetRef: 'tr_2' }] });
+    const { extract, input } = voiceSetup(v);
+    expect(await extract(input(note()))).toEqual({ textKind: 'extract', text: 'namaste', pageCount: null, note: null, forget: null });
+    expect((await extract(input(note()))).forget).toBeNull();
+    expect(v.transcribed).toBe(2);
+  });
+
   // Task 5 review round 1, Fix 3: the provider answered (and billed), then the booking itself failed.
   describe('a booking that fails after a successful paid call', () => {
     const TRANSCRIPT = 'payment bhej diya, ₹42,000';

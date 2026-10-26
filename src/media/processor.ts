@@ -140,8 +140,9 @@ export interface MediaProcessorOptions {
    */
   afterFinish?: (mediaId: number, x: Extraction) => void | Promise<void>;
   /**
-   * Whether the voice transcriber set up is a paid one (Phase 2b amendment L2). True by default, the safe setting: voice
-   * notes and audio files then get 2 runs in all (maxRuns). False for the local engine or none (Task 10 sets it): 3.
+   * Whether the voice transcriber set up is a paid one (Phase 2b amendment L2): paid, voice notes and audio files get 2
+   * runs in all (maxRuns); free, 3. When not given it is derived (review round 1, fix 1): `!voice.costsNothing`, and
+   * true (paid, the safe setting) when no voice transcriber is given. A value given always wins.
    */
   voicePaid?: boolean;
 }
@@ -317,7 +318,15 @@ export class MediaProcessor {
   }
 
   #maxRuns(kind: MediaKind): number {
-    return maxRuns(kind, this.#o.voicePaid ?? true);
+    return maxRuns(kind, this.#voicePaid);
+  }
+
+  /**
+   * voicePaid as given, else derived from the voice transcriber (review round 1, fix 1): paid unless it costs nothing,
+   * and paid when none is known, the safe setting.
+   */
+  get #voicePaid(): boolean {
+    return this.#o.voicePaid ?? (this.#o.voice ? !this.#o.voice.costsNothing : true);
   }
 
   /**
@@ -456,7 +465,7 @@ export class MediaProcessor {
    *   voice note or audio file stop at maxRuns (2).
    * The local engine's errors (Phase 2b amendment L2), each free:
    * - stopped by the service's stop signal (LocalEngineError 'aborted'): local_aborted, the attempt given back, tried
-   *   again a minute later;
+   *   again a minute later; failed as local_aborted once the file has waited 24 hours (#waitedTooLong, review round 1);
    * - any other (empty_output, timeout, exit_<n>, no_output): the counted retries, local_<code>, which stop at maxRuns
    *   (3 with voicePaid false).
    * A copy the provider kept although its answer could not be read (voiceCopyOf) is noted first, best effort, and its
@@ -504,7 +513,13 @@ export class MediaProcessor {
     if (e instanceof SttJobError) return this.#failAtOnce(row, at, `stt_job_${e.code}`, 'voice note job failed at the provider: not retried', { neverPayAgain: true });
     if (e instanceof AudioError) return this.#failAtOnce(row, at, `audio_${e.code}`, 'voice note could not be converted: not retried');
     if (e instanceof LocalEngineError && e.code === 'aborted') {
-      // The service is stopping: the free run is simply tried again after the restart, counting nothing.
+      // The service is stopping: the free run is simply tried again after the restart, counting nothing. Not forever
+      // (review round 1, fix 2): past the 24 hours of the other free waits (#waitedTooLong), the file fails.
+      if (this.#waitedTooLong(row, at)) {
+        failMedia(db, row.id, { status: 'failed', errorCode: LOCAL_ABORTED, at });
+        log.warn({ ...ids, errorCode: LOCAL_ABORTED }, 'voice note not transcribed: local speech engine stopped for 24 hours');
+        return 'failed';
+      }
       deferMedia(db, row.id, { errorCode: LOCAL_ABORTED, nextAttemptAt: new Date(Date.parse(at) + LOCAL_ABORTED_RETRY_MS).toISOString(), attempts: row.attempts, at });
       log.info({ ...ids, errorCode: LOCAL_ABORTED }, 'local speech engine stopped: voice note waits');
       return 'deferred';

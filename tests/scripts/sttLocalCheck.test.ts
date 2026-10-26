@@ -288,6 +288,27 @@ describe('scripts/stt-local-check.ts', () => {
     expect(quiet.out).toContain('\nTranscript:\n(no speech)\n');
   });
 
+  // Review round 1, fix 5a: an unmeasured volume is never read as silence.
+  it('an empty transcript of a ready WAV without ffmpeg (no volume measured) says the service would retry it, not no speech', async () => {
+    plan({ text: '' });
+    const r = await runCheck(writeWav('zz-note-zz.wav', { seconds: 2 }));
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('Mean volume: not measured (ffmpeg not found)');
+    expect(r.out).toContain('\nTranscript:\n(empty; the volume was not measured, so the service would retry this note as empty_output)\n');
+    expect(r.out).not.toContain('(no speech)');
+    expect(readdirSync(systemTmp)).toEqual([]);
+  });
+
+  it('an empty transcript when ffmpeg reports no mean_volume says the service would retry it, not no speech', async () => {
+    plan({ text: '' });
+    ffmpegPlan({ mean: 'nan' });
+    const r = await runCheck(writeWav('zz-note-zz.wav', { seconds: 2 }), { FFMPEG_PATH: ffmpegBin });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('Mean volume: not measured (ffmpeg reported none)');
+    expect(r.out).toContain('\nTranscript:\n(empty; the volume was not measured, so the service would retry this note as empty_output)\n');
+    expect(r.out).not.toContain('(no speech)');
+  });
+
   it('a fatal error prints only the error name and code', async () => {
     plan({ text: 'never' });
     // The system's temporary folder does not exist, so making the check's own folder in it fails (ENOENT).
