@@ -1,5 +1,5 @@
 import { mkdirSync, rmSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { requireKey, type Env } from '../config/env.ts';
 import { AudioError, type Ffmpeg } from './audio.ts';
 import type { HttpFetch } from './http.ts';
@@ -325,20 +325,31 @@ export const LOCAL_SILENCE_DB = -50;
 const silent = (meanVolumeDb: number | null): boolean => meanVolumeDb !== null && meanVolumeDb <= LOCAL_SILENCE_DB;
 
 /**
+ * A transcript made only of whisper's non-speech markers, such as "[BLANK_AUDIO]", "[ Silence ]", "(silence)" or
+ * "[MUSIC]" (review round 1, fix 4): one or more [...] or (...) groups and spaces, nothing else. Text with any word
+ * outside a group is real text, kept as it is.
+ */
+const ONLY_MARKERS = /^\s*(?:(?:\[[^[\]]*\]|\([^()]*\))\s*)+$/;
+
+/**
  * The local engine as a VoiceTranscriber (Phase 2b amendment L2). It costs nothing: ceilingUsd and costUsd are 0, and
  * the extractor holds no money for it. It keeps no copies, so forget does nothing. canSend is whether ffmpeg is there
  * (the engine's files are checked when the service starts, Task 10).
  * - prepare converts the note to a 16 kHz mono WAV (voice-<id>/audio.wav), stopped and measured as for the paid path,
  *   with the same too_long rule, then measures its mean volume.
- * - transcribe runs the engine once, in the note's folder, stopped by the signal. EMPTY-OUTPUT RULE: an empty
- *   transcript of a note that is not silent (mean volume above LOCAL_SILENCE_DB, or unknown) is
- *   LocalEngineError('empty_output'), retried by the processor; of a silent note it is '' (no speech).
+ * - tmpDir is resolved to an absolute path first (review round 1), as the engine takes absolute paths only.
+ * - transcribe runs the engine once, in the note's folder, stopped by the signal. For whisper, a transcript made only of
+ *   its non-speech markers ([BLANK_AUDIO], [ Silence ], (silence), [MUSIC], ...) counts as empty (review round 1).
+ *   EMPTY-OUTPUT RULE: an empty transcript of a note that is not silent (mean volume above LOCAL_SILENCE_DB, or
+ *   unknown) is LocalEngineError('empty_output'), retried by the processor; of a silent note it is '' (no speech).
  * Nothing is logged here. Exported for tests (a fake engine and ffmpeg).
  */
 export function localVoiceTranscriber(
   engine: Pick<LocalEngine, 'transcribe'>,
-  o: { engine: LocalEngineName; ffmpeg: Ffmpeg | null; tmpDir: string },
+  given: { engine: LocalEngineName; ffmpeg: Ffmpeg | null; tmpDir: string },
 ): LocalVoiceTranscriber {
+  // Absolute (review round 1, fix 3): the engine refuses a WAV path that is not.
+  const o = { ...given, tmpDir: resolve(given.tmpDir) };
   return {
     provider: 'local',
     costsNothing: true,
@@ -354,7 +365,9 @@ export function localVoiceTranscriber(
       try {
         const wav = prepared.wav;
         if (wav === undefined) throw new Error('local voice transcribe: the note was not prepared for the local engine');
-        const { text } = await engine.transcribe(wav.path, { workDir: dirname(wav.path), ...(signal ? { signal } : {}) });
+        const ran = await engine.transcribe(wav.path, { workDir: dirname(wav.path), ...(signal ? { signal } : {}) });
+        // whisper writes a marker for silence, never an empty file: such a transcript is empty, before the rule below.
+        const text = o.engine === 'whisper' && ONLY_MARKERS.test(ran.text) ? '' : ran.text;
         if (text === '' && !silent(wav.meanVolumeDb)) throw new LocalEngineError('empty_output');
         return { provider: 'local', model: o.engine, text, billedSeconds: null, forgetRef: null };
       } finally {
@@ -387,7 +400,10 @@ export function createVoiceTranscriber(
   if (choice === 'local') {
     const bin = env.STT_LOCAL_BIN;
     const model = env.STT_LOCAL_MODEL;
+    // parseEnv refuses this already; checked again for an Env built by hand (defence in depth).
     if (bin === undefined || model === undefined) throw new Error('STT_LOCAL_BIN and STT_LOCAL_MODEL are required when VOICE_STT_PROVIDER is local');
+    // Absolute (review round 1, fix 3), so a relative tmpDir cannot break the engine's absolute-path rule.
+    const tmpDir = resolve(deps.tmpDir);
     const engine = new LocalEngine({
       engine: env.STT_LOCAL_ENGINE,
       bin,
@@ -395,10 +411,10 @@ export function createVoiceTranscriber(
       threads: env.STT_LOCAL_THREADS,
       timeoutMs: env.STT_LOCAL_TIMEOUT_SECONDS * 1000,
       language: env.STT_LOCAL_LANGUAGE,
-      tmpDir: deps.tmpDir,
+      tmpDir,
       ...(deps.localRun ? { run: deps.localRun } : {}),
     });
-    return localVoiceTranscriber(engine, { engine: env.STT_LOCAL_ENGINE, ffmpeg: deps.ffmpeg, tmpDir: deps.tmpDir });
+    return localVoiceTranscriber(engine, { engine: env.STT_LOCAL_ENGINE, ffmpeg: deps.ffmpeg, tmpDir });
   }
   // parseEnv refuses this already; checked again because STT_API_KEY is the meetings' provider's key.
   if (choice !== env.STT_PROVIDER) throw new Error('VOICE_STT_PROVIDER must be local, none or the same as STT_PROVIDER');

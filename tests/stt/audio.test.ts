@@ -457,6 +457,13 @@ describe('parseMeanVolume', () => {
     expect(parseMeanVolume('    comment         : mean_volume: -1.0 dB\n')).toBeNull();
     expect(parseMeanVolume('')).toBeNull();
   });
+
+  // Review round 1, fix 5b: ffmpeg may print a whole number.
+  it('reads a whole-number value, and -inf', () => {
+    expect(parseMeanVolume('[Parsed_volumedetect_0 @ 0x1] mean_volume: -91 dB\n')).toBe(-91);
+    expect(parseMeanVolume('[Parsed_volumedetect_0 @ 000001] mean_volume: 0 dB\n')).toBe(0);
+    expect(parseMeanVolume('[Parsed_volumedetect_0 @ 0x1] mean_volume: -inf dB\n')).toBe(Number.NEGATIVE_INFINITY);
+  });
 });
 
 describe('findFfmpeg', () => {

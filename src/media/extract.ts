@@ -368,6 +368,9 @@ export function createExtractor(d: ExtractorDeps): Extractor {
         if (paid.result === undefined) throw failedAndUnbooked(noteUnansweredCopy(e, v.provider), ceiling, input);
         throw await paidButUnbooked(e, { ...paid, result: paid.result }, ceiling, input);
       }
+      // The copy is named by the result's provider (its own answer). A local transcriber never reaches here (it took
+      // transcribeFree above); the 'local' check is kept (review round 1, fix 6) because the result's type allows it, and
+      // media_stt_forget refuses any provider but a paid one, so such a result must never become a forget.
       const forget = result.forgetRef === null || result.provider === 'local' ? null : { provider: result.provider, ref: result.forgetRef };
       if (result.text === '') return { ...NONE, note: NO_SPEECH, forget };
       return { textKind: 'extract', text: capStored(result.text), pageCount: null, note: null, forget };

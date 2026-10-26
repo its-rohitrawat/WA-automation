@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseEnv } from '../../src/config/env.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
@@ -698,6 +698,14 @@ describe('createVoiceTranscriber', () => {
     expect(built).toEqual([]);
   });
 
+  // Review round 1, fix 6: parseEnv refuses this already; the check stays as defence in depth.
+  it.each(['STT_LOCAL_BIN', 'STT_LOCAL_MODEL'] as const)('a hand-built local Env without %s is refused by setting names, building nothing', (name) => {
+    const full = parseEnv({ VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: join(tmp, 'bin', 'transcribe-cli'), STT_LOCAL_MODEL: join(tmp, 'm.gguf') });
+    const e = { ...full, [name]: undefined };
+    expect(() => createVoiceTranscriber(e, deps())).toThrow(/^STT_LOCAL_BIN and STT_LOCAL_MODEL are required when VOICE_STT_PROVIDER is local$/);
+    expect(built).toEqual([]);
+  });
+
   it('a hand-built Env whose paid VOICE_STT_PROVIDER differs from STT_PROVIDER is refused by setting name, building nothing', () => {
     const e = { ...env('sarvam'), VOICE_STT_PROVIDER: 'openai' as const };
     expect(() => createVoiceTranscriber(e, deps())).toThrow(/^VOICE_STT_PROVIDER must be local, none or the same as STT_PROVIDER$/);
@@ -923,6 +931,74 @@ describe('localVoiceTranscriber', () => {
       ffmpeg!.volume = -70;
       engine.script = [async () => ({ text: 'haan' })];
       expect((await t.transcribe(await t.prepare(input()))).text).toBe('haan');
+    });
+  });
+
+  // Review round 1, fix 4: whisper writes a marker such as [BLANK_AUDIO] for silence, never an empty file.
+  describe("whisper's silence markers", () => {
+    const whisperRun = async (text: string, o: { engine?: 'whisper' | 'voxtral' | 'qwen3-asr'; volume?: number | null } = {}) => {
+      const engine = new FakeEngine();
+      const ffmpeg = new FakeFfmpeg();
+      if (o.volume !== undefined) ffmpeg.volume = o.volume;
+      engine.script = [async () => ({ text })];
+      const t = localVoiceTranscriber(engine, { engine: o.engine ?? 'whisper', ffmpeg, tmpDir: join(tmp, 'work') });
+      return await t.transcribe(await t.prepare(input())).catch((x: unknown) => x);
+    };
+
+    it.each(['[BLANK_AUDIO]', '[ Silence ]', '(silence)', '[MUSIC]', '[Music] [BLANK_AUDIO]', '  (wind blowing)  [ silence ] '])(
+      'whisper text made only of markers (%j) of a silent note is no speech',
+      async (text) => {
+        expect(await whisperRun(text, { volume: -80 })).toEqual({ provider: 'local', model: 'whisper', text: '', billedSeconds: null, forgetRef: null });
+      },
+    );
+
+    it('whisper text made only of markers of a note that is not silent is empty_output, retried', async () => {
+      expect(await whisperRun('[BLANK_AUDIO]', { volume: -23 })).toMatchObject({ name: 'LocalEngineError', code: 'empty_output' });
+      expect(await whisperRun('[ Silence ]', { volume: null })).toMatchObject({ name: 'LocalEngineError', code: 'empty_output' });
+    });
+
+    it.each(['[BLANK_AUDIO] haan ji', 'payment [approx] 5000', 'kal (subah) aana', 'ok [MUSIC]', '[ok'])('whisper text with words besides brackets (%j) is kept as it is', async (text) => {
+      expect(await whisperRun(text, { volume: -80 })).toMatchObject({ text });
+    });
+
+    it.each(['voxtral', 'qwen3-asr'] as const)('%s text in brackets is kept as it is: the rule is whisper only', async (engine) => {
+      expect(await whisperRun('[BLANK_AUDIO]', { engine, volume: -80 })).toMatchObject({ text: '[BLANK_AUDIO]', model: engine });
+    });
+  });
+
+  // Review round 1, fix 3: a relative tmpDir is resolved, so the engine still gets absolute paths.
+  describe('a relative tmpDir', () => {
+    const relativeWork = () => {
+      const rel = relative(process.cwd(), join(tmp, 'work'));
+      expect(isAbsolute(rel)).toBe(false);
+      return rel;
+    };
+
+    it('localVoiceTranscriber converts to, and runs the engine on, absolute paths', async () => {
+      const engine = new FakeEngine();
+      const ffmpeg = new FakeFfmpeg();
+      const t = localVoiceTranscriber(engine, { engine: 'voxtral', ffmpeg, tmpDir: relativeWork() });
+      const prepared = await t.prepare(input());
+      expect(prepared.wav!.path).toBe(wavPath());
+      expect(ffmpeg.wavs[0]!.output).toBe(wavPath());
+      await t.transcribe(prepared);
+      expect(engine.runs).toEqual([{ wav: wavPath(), workDir: voiceDir(), signal: undefined, wavThere: true }]);
+      expect(existsSync(voiceDir())).toBe(false);
+    });
+
+    it('createVoiceTranscriber, over the real LocalEngine, transcribes', async () => {
+      const args: (readonly string[])[] = [];
+      const run: LocalRunFile = async (_file, a) => {
+        args.push(a);
+        writeFileSync(a[a.indexOf('-o') + 1]!, 'theek hai\n');
+        return { code: 0, stderr: '' };
+      };
+      const env = parseEnv({ VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: join(tmp, 'engine', 'transcribe-cli'), STT_LOCAL_MODEL: join(tmp, 'engine', 'voxtral.gguf') });
+      const t = createVoiceTranscriber(env, { ffmpeg: new FakeFfmpeg(), tmpDir: relativeWork(), localRun: run })!;
+      expect((await t.transcribe(await t.prepare(input()))).text).toBe('theek hai');
+      expect(args[0]!.at(-1)).toBe(wavPath());
+      expect(args[0]![args[0]!.indexOf('-o') + 1]).toBe(join(voiceDir(), 'transcript.txt'));
+      expect(existsSync(voiceDir())).toBe(false);
     });
   });
 
