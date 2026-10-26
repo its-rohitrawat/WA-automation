@@ -435,9 +435,12 @@ export interface SttForgetRow {
   attempts: number;
 }
 
-/** Notes a provider copy to delete. A copy already noted is kept as it is. */
+/**
+ * Notes a provider copy to delete. A copy already noted is kept as it is. ON CONFLICT rather than OR IGNORE: OR IGNORE
+ * would also skip a CHECK failure silently, and that copy would never be deleted.
+ */
 export function addSttForget(db: Db, f: { meetingId: number; provider: ProviderId; ref: string; at: string }): void {
-  db.prepare('INSERT OR IGNORE INTO stt_forget (meeting_id, provider, ref, created_at) VALUES (?, ?, ?, ?)')
+  db.prepare('INSERT INTO stt_forget (meeting_id, provider, ref, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (provider, ref) DO NOTHING')
     .run(f.meetingId, f.provider, f.ref, canonical('addSttForget', 'at', f.at));
 }
 
