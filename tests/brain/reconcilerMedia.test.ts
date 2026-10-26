@@ -220,6 +220,16 @@ describe('Reconciler with shared files', () => {
     expect(context).toContain(`: {voice note, 5:00, transcript: ${'v'.repeat(1_200)} … (1800 more characters not shown)}`);
   });
 
+  it('loads 1,200 characters of a context voice note when the limits passed leave perContextVoice out (Phase 2b)', () => {
+    const { db } = setup();
+    const ctx = file(db, 'V0', '2026-10-19T06:00:00.000Z', { kind: 'voice', mimeType: 'audio/ogg', seconds: 300, read: { textKind: 'extract', text: 'v'.repeat(3_000) } });
+    say(db, 'A1', '2026-10-19T07:00:00.000Z');
+    const rows = mediaForPrompt(db, [{ id: messageRowId(db, 1, 'A1')! }], [{ id: messageRowId(db, 1, 'V0')! }], { perMessage: 20, perBatch: 25, perContextMessage: 5 });
+    const row = [...rows.values()].find((m) => m.id === ctx)!;
+    expect(row).toMatchObject({ textChars: 3_000 });
+    expect(row.text).toHaveLength(1_201);
+  });
+
   it('stops waiting after 30 minutes and says the file is still being read', async () => {
     const { db, ai, r } = setup();
     image(db, 'I1', '2026-10-19T07:01:00.000Z', undefined, { createdAt: '2026-10-19T07:20:00.000Z' });
@@ -830,6 +840,17 @@ describe('Reconciler with shared files', () => {
       const { db, ai, r } = setup();
       voice(db, 'V1', '2026-10-19T07:01:00.000Z', o);
       ai.push({ ops: [add('V1')] });
+      expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
+      expect(quote(db)).toBeNull();
+    });
+
+    it.each([
+      { why: 'an image with a stored description', o: { text: null, read: { textKind: 'description', text: 'A blue logo on a white banner' } } },
+      { why: 'a document with an extract', o: { kind: 'document', mimeType: 'application/pdf', fileName: 'brief.pdf', text: null, read: { textKind: 'extract', text: 'Send the logo files by Friday', pageCount: 1 } } },
+    ] as { why: string; o: FileOpts }[])('keeps no quote from a file that is not a voice note or audio file, with no message text: $why', async ({ o }) => {
+      const { db, ai, r } = setup();
+      file(db, 'F1', '2026-10-19T07:01:00.000Z', o);
+      ai.push({ ops: [add('F1')] });
       expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
       expect(quote(db)).toBeNull();
     });

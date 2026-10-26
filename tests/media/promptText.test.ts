@@ -490,6 +490,7 @@ describe('voice notes and audio files (Phase 2b)', () => {
     expect(shown(make({ status: 'pending', ...untranscribed }))).toBe(`{${noun}, 0:42, being transcribed}`);
     expect(shown(make({ status: 'failed', ...untranscribed }))).toBe(`{${noun}, 0:42, could not be transcribed}`);
     expect(shown(make({ status: 'unavailable', errorCode: 'expired', ...untranscribed }))).toBe(`{${noun}, could not be downloaded}`);
+    expect(shown(make({ status: 'unavailable', errorCode: 'too_large', ...untranscribed }))).toBe(`{${noun}, too large to download}`);
     expect(shown(make({ ...untranscribed, note: NO_SPEECH }))).toBe(`{${noun}, 0:42, no speech}`);
     expect(shown(make({ ...untranscribed, seconds: 845, note: TOO_LONG }))).toBe(`{${noun}, 14:05, too long to transcribe}`);
     expect(shown(make({ ...untranscribed, note: TOO_COSTLY }))).toBe(`{${noun}, 0:42, not transcribed: too costly for the daily limit}`);

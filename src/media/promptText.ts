@@ -85,7 +85,7 @@ function voiceBlock(row: MediaRow, maxChars: number): MediaBlock {
     case 'pending':
       return just('being transcribed');
     case 'unavailable':
-      return { head: `${noun}, could not be downloaded`, body: null };
+      return { head: `${noun}, ${row.errorCode === 'too_large' ? 'too large to download' : 'could not be downloaded'}`, body: null };
     case 'failed':
       return just('could not be transcribed');
     case 'metadata':
