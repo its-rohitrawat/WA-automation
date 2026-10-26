@@ -655,7 +655,7 @@ program
   - (e) `{voice note, being transcribed}` → no task invented.
   - (f) A late transcript re-check → the task is added once.
   - The scorer tests (`tests/golden/score.test.ts`) keep passing; they do not call the AI.
-- [ ] **`docs/SETUP.md`:** replace the "Voice notes and audio files … not transcribed" rows and lines (around lines 246, 262 and 270) with the 2b behaviour. Add a "Voice notes" section: the settings (V9, `STT_MAX_SECONDS`), the privacy steps on the winning account including telling clients (V7, N1), the cost per minute, the limits (V2, V5), the formats and ffmpeg (N2), the backlog command (V6, N4), and the health line.
+- [ ] **`docs/SETUP.md`:** replace the "Voice notes and audio files … not transcribed" rows and lines (around lines 246, 262 and 270) with the 2b behaviour. Add a "Voice notes" section: the settings (V9, `STT_MAX_SECONDS`), the privacy steps on the winning account including telling clients (V7, N1), the cost per minute, the limits (V2, V5), the formats and ffmpeg (N2), the backlog command (V6, N4), and the health line. Also the `cli status` additions: the "including N voice notes waiting (speech key refused)" part of the Files line, and the "Voice copies:" line. For "Voice copies:", copy Phase 3's "Speech copies" paragraph (SETUP.md, around line 604): what it means, what to do (delete the copies by hand in the provider's history), and that the count does not go down after a manual deletion.
 - [ ] **Spec amendments file:** blocking (V1), the transcript block format, storage as `extract`, forwarded (V4), the backlog (V6), N1–N4, and `VoiceTranscriber` replacing the §7.4 / old `types.ts` shapes.
 - [ ] **Commit.**
 
