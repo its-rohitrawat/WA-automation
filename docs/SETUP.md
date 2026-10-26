@@ -1,5 +1,7 @@
 # WA Agent: office PC setup and pilot
 
+**On a Mac?** Start with [SETUP-mac.md](SETUP-mac.md) instead; it points back here for everything after setup.
+
 Do the steps once, in order. Commands run in **Command Prompt**. "Admin" means: right-click Command Prompt and choose *Run as administrator*.
 
 What WA Agent does: it quietly reads the WhatsApp client groups you allow, keeps a task tracker, and updates an Excel file in Google Drive. It also saves the images and documents shared in those groups, reads them for the tracker, and puts the files that clients send into Drive. It never sends a WhatsApp message.

@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  WA Agent as a macOS background service (the launchd counterpart of deploy/winsw/wa-agent.xml).
+  Install: docs/SETUP-mac.md, step 6. Paths assume the code is in /opt/wa-agent and Node came from the nodejs.org installer.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.wa-agent</string>
+  <key>UserName</key>
+  <string>waagent</string>
+  <key>GroupName</key>
+  <string>staff</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>src/main.ts</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/opt/wa-agent</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- Restart after a crash or a refusal to start (exit 1 or 2), not after a clean stop. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <!-- At most one start a minute, so a config mistake does not spin. -->
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <!-- The app waits up to 120 s for an AI call in flight, then up to 10 s for a Drive upload. -->
+  <key>ExitTimeOut</key>
+  <integer>150</integer>
+  <!-- 077: every file the agent creates is readable by waagent only. -->
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/opt/wa-agent/logs/wa-agent.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/opt/wa-agent/logs/wa-agent.err.log</string>
+</dict>
+</plist>
