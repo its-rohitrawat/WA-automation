@@ -445,7 +445,7 @@ Set `REPORT_ENABLED=false` (or leave it empty) in `.env`, then restart the servi
 | `npm run cli -- report send-now` | Send today's morning report now (asks first; refuses if already sent) |
 | `npm run cli -- link-sender` | Link the spare number for the morning report (stop the service first) |
 | `npm run cli -- transcribe-voice` | Count the voice notes saved earlier without a transcript; add `--yes` to transcribe them (see "Voice notes") |
-| `npm run cli -- transcribe-voice --failed` | Count the voice notes the local engine could not transcribe; add `--yes` to try them again (see "Voice notes") |
+| `npm run cli -- transcribe-voice --failed` | Count the voice notes that could not be transcribed on this computer (`VOICE_STT_PROVIDER=local` only); add `--yes` to try them again (see "Voice notes") |
 
 Notes:
 
@@ -487,6 +487,7 @@ In `npm run cli -- status` it appears as the `Health:` line. It is also the firs
 | (number) groups waiting (AI error) | The AI call failed for some groups. Nothing is lost. | Wait: failed batches retry every hour. If it persists, read `wa-agent.out.log` and run `status`. |
 | (number) shared files waiting over 30 minutes to be read. See docs/SETUP.md. | Images or documents are still not read 30 minutes after they arrived. The tracker went ahead without them. Nothing is lost. | See "Status "shared files waiting over 30 minutes to be read"" below. |
 | (number) files could not be uploaded to Drive. See docs/SETUP.md. | Files from clients failed to upload many times, and the agent stopped trying. They are safe on this PC. | See "Status "files could not be uploaded to Drive"" below. |
+| Voice notes are not being transcribed: the speech-to-text key was refused. | Paid service only. The provider refused `STT_API_KEY`. The notes are saved and tried again, but only for 24 hours. The tracker keeps working. | Fix the key soon. See "Voice notes" below, under "Voice note status lines". |
 | (number) shared files waiting for today's AI budget (read after midnight IST) | Images or scans that need Claude do not fit in what is left of today's budget (a scan needs about $4 of room). The cap is not reached, and the tracker keeps working. | Nothing: they are tried every 10 minutes and read once there is room, at the latest after midnight India time. See "Spend cap and shared files" below. |
 | Morning report: unknown, check WhatsApp | The morning report's send started but did not finish cleanly. It may have reached the founder. The agent does not resend it by itself. | See "Morning report" above, under its own status heading. |
 | Morning report: the spare number is not linked | The spare number cannot send the morning report. The tracker is not affected. | See "Morning report" above, under "the spare number is not linked". |
@@ -496,10 +497,10 @@ In `npm run cli -- status` it appears as the `Health:` line. It is also the firs
 | Morning report: WhatsApp refused the spare number (403) | WhatsApp blocked the spare number's device. The tracker is not affected. | Check the spare phone. See "Morning report" above. |
 | Morning report: another session took over the spare number | Another copy of the agent, or another WhatsApp Web session, took the spare number's linked device. The tracker is not affected. | Restart the service. See "Morning report" above. |
 | Low disk: (number) GB free | Under 10 GB left. | Free up disk space. |
-| Voice notes are not being transcribed: (reason) | The local speech engine is not set up, ffmpeg was not found, or the speech-to-text key was refused. Voice notes are saved. The tracker keeps working. | See "Voice notes" below, under "Voice note status lines". |
-| (number) voice notes could not be transcribed by the local engine. See docs/SETUP.md, Voice notes | In the last 24 hours, some voice notes failed every try in the local engine (or in ffmpeg). They are saved. The tracker went ahead without them. | See "Voice notes" below, under "Voice note status lines". |
+| Voice notes are not being transcribed: (reason) | The local speech engine is not set up, or ffmpeg was not found. Voice notes are saved. The tracker keeps working. | See "Voice notes" below, under "Voice note status lines". |
+| (number) voice notes could not be transcribed on this computer. See docs/SETUP.md, Voice notes | In the last 24 hours, some voice notes could not be transcribed on this computer: the local engine failed on them 3 times, ffmpeg could not convert them, or the service was stopped in the middle of them again and again for 24 hours. They are saved. The tracker went ahead without them. | See "Voice notes" below, under "Voice note status lines". |
 
-The voice note lines come last, so they never hide the morning report, a meeting line or low disk.
+The key-refused line comes before the budget line, because notes waiting on a refused key are given up after 24 hours. The other voice note lines come last, so they never hide the morning report, a meeting line or low disk.
 
 ### Status "shared files waiting over 30 minutes to be read"
 
@@ -593,8 +594,8 @@ Each voice note reaches the AI as a block on its message, for example `{voice no
 - **Forwarded voice notes are not transcribed**, just as forwarded pictures are not described.
 - **Speed.** Voxtral on the Mac can be slower than the note itself: a 10-minute note can take 10–20 minutes. It does one note at a time; pictures and documents are not held up. The tracker waits at most 30 minutes for a note (see above).
 - **Mishearing.** Names, numbers and amounts can come out wrong. The AI is told to prefer the typed chat when the two disagree. Check tasks closed from voice notes; `task reopen` undoes a wrong close.
-- **Empty text from a note with sound.** The local engine sometimes returns nothing for a quiet note. That is never taken as "no speech": the note is tried again, after 1 minute and then 5 minutes (3 tries in all). If every try comes back empty, it shows as "could not be transcribed", `status` counts it under "could not be read (24 h)", and the status line says how many voice notes could not be transcribed by the local engine. `transcribe-voice --failed` tries them again (see "Voice notes the local engine could not transcribe" below). Only a note quieter than -50 dB counts as silent. If real notes often come back empty, tell the developer.
-- **Stopping the service** while a note is being transcribed: the note is simply tried again after the start (free with the local engine).
+- **Empty text from a note with sound.** The local engine sometimes returns nothing for a quiet note. That is never taken as "no speech": the note is tried again, after 1 minute and then 5 minutes (3 tries in all). If every try comes back empty, it shows as "could not be transcribed", `status` counts it under "could not be read (24 h)", and the status line says how many voice notes could not be transcribed on this computer. `transcribe-voice --failed` tries them again (see "Voice notes the local engine could not transcribe" below). Only a note quieter than -50 dB counts as silent. If real notes often come back empty, tell the developer.
+- **Stopping the service** while a note is being transcribed: the note is simply tried again after the start (free with the local engine). This does not use up one of its tries; but a note still not done 24 hours after it arrived is given up.
 - **Where the text is kept.** Transcripts are stored in the tracker database, like the text of shared files, and the audio stays in `data\media`. The logs hold ids, counts and error codes only, never what was said.
 
 ### Privacy
@@ -625,6 +626,7 @@ npm run cli -- transcribe-voice
 
 - This only shows how many there are, about how many minutes, and the cost (`Cost: $0 (local engine on this computer).` with the local engine). It changes nothing.
 - Add `--client ABC` for one client only.
+- After changing `VOICE_STT_PROVIDER` or the `STT_LOCAL_*` settings, restart the service before running this command.
 - `npm run cli -- transcribe-voice --yes` queues them. The **running** service then transcribes them. A new voice note goes before any of them that are still waiting; but the local engine does one note at a time and does not stop a note it has started, so a new note can wait behind one of these for up to `STT_LOCAL_TIMEOUT_SECONDS` (30 minutes by default).
 - With the local engine, the command first checks that `STT_LOCAL_BIN` and `STT_LOCAL_MODEL` are files. If one is not, it says so, naming the setting, and changes nothing: fix it in `.env` (SETUP-mac, section 8), restart the service, then run the command again.
 - If voice notes were switched off while some of these were still waiting, those come back in the count. Run the command again once voice notes are on.
@@ -635,15 +637,22 @@ npm run cli -- transcribe-voice
 
 ### Voice notes the local engine could not transcribe
 
-A note the local engine (or ffmpeg, when converting it) could not transcribe after its 3 tries shows as "could not be transcribed". For a day the status line says `(number) voice notes could not be transcribed by the local engine`. Once the cause is fixed (for example a better model, a longer `STT_LOCAL_TIMEOUT_SECONDS`, or a working ffmpeg; restart the service after changing `.env`), try them again, in the waagent window:
+A voice note shows as "could not be transcribed" when:
+
+- the local engine failed on it 3 tries in a row (empty text from a note with sound, too slow, or the engine stopping with an error);
+- ffmpeg could not convert it. This is not tried again, because it would fail the same way;
+- the service was stopped in the middle of it again and again. Each stop does not use up a try, and the note is tried again after the start; but once it has waited 24 hours (from when it arrived, or from the service start if that is later), it is given up.
+
+For a day the status line says `(number) voice notes could not be transcribed on this computer`. Once the cause is fixed (for example a better model, a longer `STT_LOCAL_TIMEOUT_SECONDS`, or a working ffmpeg; restart the service after changing `.env`), try them again, in the waagent window:
 
 ```bat
 npm run cli -- transcribe-voice --failed
 ```
 
 - This only shows how many there are, about how many minutes, and `Cost: $0 (local engine on this computer).` It changes nothing.
-- `npm run cli -- transcribe-voice --failed --yes` queues them again, each with 3 new tries. The **running** service transcribes them. Add `--client ABC` for one client only.
-- It works only with `VOICE_STT_PROVIDER=local`. Notes that failed at a paid service are never queued again, because those tries may have been paid.
+- After changing `VOICE_STT_PROVIDER` or the `STT_LOCAL_*` settings, restart the service before running this command.
+- `npm run cli -- transcribe-voice --failed --yes` queues them again, starting fresh: the local engine again gets 3 tries for each. The **running** service transcribes them. Add `--client ABC` for one client only.
+- It works only with `VOICE_STT_PROVIDER=local`. With a paid provider, these notes stay failed: the command says so and changes nothing. Notes that failed at a paid service are never queued again, because those tries may have been paid.
 - A message the tracker already handled without its note is not looked at again: the transcript is kept for the record, as for "Voice notes saved earlier".
 
 ### Voice note status lines
@@ -652,13 +661,13 @@ On the Health line (see "What the status line means"):
 
 | What you see | What it means | What to do |
 |---|---|---|
+| Voice notes are not being transcribed: the speech-to-text key was refused. | Paid service only. The provider refused `STT_API_KEY`. Nothing is paid. The notes wait and are tried again after 5, 15, 30 and 60 minutes, then every hour, for up to 24 hours; after that they show as "could not be transcribed". The tracker does not wait for them more than 30 minutes. | Check the key in the provider's console. Put a working key in `.env`, then restart the service. |
 | Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_BIN) | The engine program is not at the path `STT_LOCAL_BIN` names in `.env`. Voice notes are saved but not transcribed. WhatsApp tracking keeps running. | Fix `STT_LOCAL_BIN` in `.env` (SETUP-mac, section 8), restart the service, then run `transcribe-voice` for the notes that came in meanwhile. |
 | Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_MODEL) | The model file is not at the path `STT_LOCAL_MODEL` names in `.env`. Voice notes are saved but not transcribed. WhatsApp tracking keeps running. | Fix `STT_LOCAL_MODEL` in `.env` (SETUP-mac, section 8), restart the service, then run `transcribe-voice` for the notes that came in meanwhile. |
 | Voice notes are not being transcribed: ffmpeg not found | ffmpeg is not installed, or `FFMPEG_PATH` is wrong. Voice notes are saved and show as "not transcribed". | Install ffmpeg or fix `FFMPEG_PATH` (see "ffmpeg is required"), restart the service, then run `transcribe-voice`. |
-| Voice notes are not being transcribed: the speech-to-text key was refused. | Paid service only. The provider refused `STT_API_KEY`. Nothing is paid. The notes wait and are tried again after 5, 15, 30 and 60 minutes, then every hour, for up to 24 hours; after that they show as "could not be transcribed". The tracker does not wait for them more than 30 minutes. | Check the key in the provider's console. Put a working key in `.env`, then restart the service. |
-| (number) voice notes could not be transcribed by the local engine. See docs/SETUP.md, Voice notes | In the last 24 hours, that many voice notes failed all 3 tries in the local engine (empty text from a note with sound, too slow, the engine stopping with an error) or in ffmpeg. They are saved and show as "could not be transcribed". The line clears by itself a day later. | Read `wa-agent.out.log` for lines with `local_` or `audio_` codes. Fix the cause, then see "Voice notes the local engine could not transcribe" above. If real notes keep failing, tell the developer. |
+| (number) voice notes could not be transcribed on this computer. See docs/SETUP.md, Voice notes | In the last 24 hours, that many voice notes could not be transcribed on this computer: the local engine failed on them 3 tries in a row (empty text from a note with sound, too slow, the engine stopping with an error); ffmpeg could not convert them (not tried again); or the service was stopped in the middle of them again and again for 24 hours. ffmpeg failures with a paid provider count here too. They are saved and show as "could not be transcribed". The line clears by itself a day later. | Read `wa-agent.out.log` for lines with `local_` or `audio_` codes. Fix the cause, then see "Voice notes the local engine could not transcribe" above. If real notes keep failing, tell the developer. |
 
-These lines come after every other line on the Health line, so they never hide a more urgent one: the not-set-up and ffmpeg lines first, then the key line, then the could-not-transcribe line.
+The key-refused line comes before the budget line (see "What the status line means"), because notes waiting on a refused key are given up after 24 hours. The other lines come after every other line on the Health line, so they never hide a more urgent one. In order: the key line, then the not-set-up and ffmpeg lines, then the could-not-transcribe line.
 
 A slow engine, or many notes at once, can also show `shared files waiting over 30 minutes to be read`: voice notes count there too. It clears by itself once they are transcribed.
 
