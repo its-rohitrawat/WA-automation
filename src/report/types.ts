@@ -20,9 +20,11 @@ export type SendResult =
 /**
  * unreadable: data/sender-session.db is damaged or was written with another master key (fixed by link-sender --reset).
  * unavailable: the file could not be opened at service start (disk, permissions or a lock); a restart opens it again.
+ * self_send: the saved link is the recipient's own number (the QR code was scanned with the founder's phone), so it
+ * never sends (fixed by link-sender --reset, scanning with the spare phone).
  */
 export type SenderState =
-  | 'idle' | 'not_linked' | 'unreadable' | 'unavailable' | 'connecting' | 'open' | 'logged_out' | 'forbidden' | 'replaced';
+  | 'idle' | 'not_linked' | 'unreadable' | 'unavailable' | 'self_send' | 'connecting' | 'open' | 'logged_out' | 'forbidden' | 'replaced';
 
 export interface SenderStatus {
   state: SenderState;

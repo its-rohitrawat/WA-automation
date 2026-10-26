@@ -133,6 +133,27 @@ describe('SenderGateway', () => {
     expect(sockets).toHaveLength(0);
   });
 
+  it("fails definitely, without connecting, when the saved link is the recipient's own number (scanned with the founder's phone)", async () => {
+    for (const id of [`${RECIPIENT}:5@s.whatsapp.net`, `${RECIPIENT}@s.whatsapp.net`]) {
+      const auth = senderAuth(true);
+      auth.state.creds.me = { id, name: 'Founder' };
+      const { gw, sockets } = setup({ auth });
+      expect(gw.status().state).toBe('self_send');
+      expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'self_send' });
+      expect(gw.status().state).toBe('self_send');
+      expect(sockets).toHaveLength(0);
+    }
+  });
+
+  it('sends normally when the saved link is another number', async () => {
+    const auth = senderAuth(true);
+    auth.state.creds.me = { id: '919800000099:2@s.whatsapp.net', name: 'Spare' };
+    const { gw, sockets } = setup({ auth });
+    expect(gw.status().state).toBe('idle');
+    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(sockets).toHaveLength(1);
+  });
+
   it('fails definitely, without connecting, when the stored session could not be read (no auth)', async () => {
     const { gw, sockets } = setup({ noAuth: true });
     expect(gw.status().state).toBe('unreadable');

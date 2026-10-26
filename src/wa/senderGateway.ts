@@ -42,6 +42,15 @@ export function recipientJid(digits: string): string {
   return `${digits}@s.whatsapp.net`;
 }
 
+/**
+ * The phone number a saved link belongs to: the digits of creds.me.id before the device part (":5") or "@".
+ * Undefined while nothing is linked.
+ */
+export function linkedNumber(auth: EncryptedAuth): string | undefined {
+  const id = auth.state.creds.me?.id;
+  return id ? id.split(/[:@]/)[0] : undefined;
+}
+
 export class RecipientRefusedError extends Error {
   constructor() {
     super('The morning report may go only to REPORT_RECIPIENT');
@@ -210,7 +219,13 @@ export class SenderGateway implements ReportSender {
     this.#jid = recipientJid(opts.recipient);
     this.#opts = opts;
     this.#clock = opts.clock ?? systemClock;
-    const state: SenderState = !opts.auth ? (opts.authProblem ?? 'unreadable') : opts.auth.hasSession ? 'idle' : 'not_linked';
+    const state: SenderState = !opts.auth
+      ? (opts.authProblem ?? 'unreadable')
+      : !opts.auth.hasSession
+        ? 'not_linked'
+        : this.#linkedToRecipient(opts.auth)
+          ? 'self_send'
+          : 'idle';
     this.#status = { state, since: this.#clock.now().toISOString(), lastErrorCode: null };
   }
 
@@ -228,6 +243,11 @@ export class SenderGateway implements ReportSender {
     if (!auth.hasSession) {
       this.#setState('not_linked', null);
       return { status: 'failed', code: 'not_linked' };
+    }
+    // The link-sender QR code was scanned with the founder's phone: sending would come from the founder's own number.
+    if (this.#linkedToRecipient(auth)) {
+      this.#setState('self_send', null);
+      return { status: 'failed', code: 'self_send' };
     }
     this.#busy = true;
     this.#setState('connecting', null);
@@ -304,6 +324,11 @@ export class SenderGateway implements ReportSender {
       const timer = setTimeout(end, ms);
       this.#endLinger = end;
     });
+  }
+
+  /** True when the saved link is the recipient's own number. The founder's number never sends. */
+  #linkedToRecipient(auth: EncryptedAuth): boolean {
+    return linkedNumber(auth) === this.#opts.recipient;
   }
 
   #setState(state: SenderState, code: number | null): void {

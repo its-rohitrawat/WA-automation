@@ -1,8 +1,11 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Command } from 'commander';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ConfirmCancelled, linkSenderCommand, reportSendNowCommand, reportStatusCommand, type CliDeps } from '../../src/cli/commands.ts';
+import {
+  addReportCommands, ConfirmCancelled, linkSenderCommand, reportSendNowCommand, reportStatusCommand, type CliDeps,
+} from '../../src/cli/commands.ts';
 import { parseEnv } from '../../src/config/env.ts';
 import { senderSessionDbPath, sessionDbPath, trackerDbPath } from '../../src/config/paths.ts';
 import { StaticKeyProvider } from '../../src/crypto/keyProvider.ts';
@@ -11,8 +14,24 @@ import { openDb, type Db } from '../../src/store/db.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
 import { claimReport, finishReport, REPORT_REQUEST_KEY, reportFor, reportRequestValue, retryReport, skipReport } from '../../src/store/reports.ts';
 import { acquireLock } from '../../src/util/lock.ts';
-import { openSessionDb, useSenderAuthState } from '../../src/wa/authState.ts';
+import { openSessionDb, SenderSessionDecryptError, useSenderAuthState } from '../../src/wa/authState.ts';
+import type { SenderSocketFactory } from '../../src/wa/senderGateway.ts';
 import { closeWith, FakeSocket, SEND_METHODS } from '../helpers/fakeSocket.ts';
+
+/** renameSync passes through, except that it fails for the one path in failRename (a file another program has locked). */
+const fsSeam = vi.hoisted(() => ({ failRename: undefined as string | undefined }));
+vi.mock('node:fs', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...real,
+    renameSync: (from: import('node:fs').PathLike, to: import('node:fs').PathLike): void => {
+      if (fsSeam.failRename !== undefined && String(from) === fsSeam.failRename) {
+        throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+      }
+      real.renameSync(from, to);
+    },
+  };
+});
 
 const KEY = Buffer.alloc(32, 7);
 const OTHER_KEY = Buffer.alloc(32, 9);
@@ -111,6 +130,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  fsSeam.failRename = undefined;
   vi.useRealTimers();
   rmSync(dir, { recursive: true, force: true });
 });
@@ -203,10 +223,47 @@ describe('cli link-sender', () => {
     await expect(linkSenderCommand({ reset: false }, deps())).rejects.toThrow(/link-sender --reset/);
   });
 
+  it("refuses a link made with the founder's phone: clears the saved session, links nothing and sends nothing", async () => {
+    const factory: SenderSocketFactory = (auth) => {
+      const s = new FakeSocket();
+      sockets.push(s);
+      queueMicrotask(() => {
+        s.emit('connection.update', { qr: 'QR-1' });
+        auth.creds.me = { id: `${NUMBER}:5@s.whatsapp.net`, name: 'Founder' }; // the founder's phone scanned the QR code
+        s.emit('creds.update', { me: auth.creds.me });
+        open(s);
+      });
+      return s;
+    };
+    const err = await linkSenderCommand({ reset: false }, { ...deps(), senderSocketFactory: factory }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    const message = (err as Error).message;
+    expect(message).not.toContain('\n');
+    expect(message).toContain("scanned with the founder's phone");
+    expect(message).toContain('SPARE phone');
+    expect(message).not.toContain(NUMBER);
+    expect(out()).not.toContain('Spare number linked.');
+    expect(senderLinked()).toBe(false);
+    expect(sockets).toHaveLength(1);
+    for (const s of sockets) for (const name of SEND_METHODS) expect(s[name]).not.toHaveBeenCalled();
+    const lock = await acquireLock(dataDir); // released after the failure
+    await lock.release();
+  });
+
   it('a session written with another master key: without --reset it says to reset and changes nothing', async () => {
     await seedSender(OTHER_KEY);
     const before = readFileSync(senderSessionDbPath(dataDir));
-    await expect(linkSenderCommand({ reset: false }, deps())).rejects.toThrow(/link-sender --reset/);
+    const err = await linkSenderCommand({ reset: false }, deps()).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(SenderSessionDecryptError); // a key mismatch, not a damaged file
+    expect((err as Error).message).toContain('master key');
+    expect((err as Error).message).toContain('link-sender --reset');
+    expect((err as Error).message).not.toContain('damaged');
     expect(readFileSync(senderSessionDbPath(dataDir)).equals(before)).toBe(true);
     expect(existsSync(sessionDbPath(dataDir))).toBe(false);
     expect(confirm).not.toHaveBeenCalled();
@@ -279,6 +336,27 @@ describe('cli link-sender', () => {
     expect(readFileSync(`${file}-wal.damaged-20261023T090000-2`).toString()).toBe('new wal bytes');
     expect(out()).toContain('sender-session.db.damaged-20261023T090000-2');
     expect(out()).toContain('Spare number linked.');
+  });
+
+  it('a damaged session file: the moved-aside name carries the seconds', async () => {
+    vi.setSystemTime(new Date('2026-10-23T03:30:07.000Z'));
+    writeFileSync(senderSessionDbPath(dataDir), JUNK);
+    await linkSenderCommand({ reset: true }, deps());
+    expect(senderFiles().filter((f) => f.startsWith('sender-session.db.damaged-'))).toEqual(['sender-session.db.damaged-20261023T090007']);
+  });
+
+  it('a damaged session file: the -wal and -shm files are moved first, so a failed rename of the main file leaves no stale log beside it', async () => {
+    const file = senderSessionDbPath(dataDir);
+    writeFileSync(file, JUNK);
+    writeFileSync(`${file}-wal`, Buffer.from('wal bytes'));
+    writeFileSync(`${file}-shm`, Buffer.from('shm bytes'));
+    fsSeam.failRename = file; // another program holds the main file
+    await expect(linkSenderCommand({ reset: true }, deps())).rejects.toThrow(/EBUSY/);
+    expect(senderFiles()).toEqual(['sender-session.db', 'sender-session.db-shm.damaged-20261023T090000', 'sender-session.db-wal.damaged-20261023T090000']);
+    expect(readFileSync(file).equals(JUNK)).toBe(true);
+    expect(sockets).toHaveLength(0);
+    const lock = await acquireLock(dataDir); // released after the failure
+    await lock.release();
   });
 
   it('a damaged session file: "no" or Ctrl+C leaves it and its -wal and -shm files unchanged at their names', async () => {
@@ -388,6 +466,11 @@ describe('cli report status', () => {
   });
 
   it('says when the report is off', () => {
+    reportStatusCommand(deps({ REPORT_ENABLED: 'false' }));
+    expect(lines).toEqual(['Morning report: off (set REPORT_ENABLED=true and REPORT_RECIPIENT in .env, then restart the service)']);
+    // A stopped service does not matter while the report is off: still the one line.
+    writeSnapshot(new Date(NOW.getTime() - 3 * 60_000), { reportOn: false });
+    lines = [];
     reportStatusCommand(deps({ REPORT_ENABLED: 'false' }));
     expect(lines).toEqual(['Morning report: off (set REPORT_ENABLED=true and REPORT_RECIPIENT in .env, then restart the service)']);
   });
@@ -576,5 +659,27 @@ describe('cli report send-now', () => {
     await reportSendNowCommand(deps({ REPORT_ENABLED: 'false' }));
     expect(out()).toContain('The morning report is off.');
     expect(confirm).not.toHaveBeenCalled();
+  });
+});
+
+describe('cli wiring of the report commands', () => {
+  async function run(args: string[]): Promise<unknown[][]> {
+    const calls: unknown[][] = [];
+    const d = deps();
+    const program = new Command().exitOverride();
+    addReportCommands(program, () => d, {
+      linkSender: async (opts, got) => void calls.push(['link-sender', opts, got === d]),
+      reportStatus: (got) => void calls.push(['report status', got === d]),
+      reportSendNow: async (got) => void calls.push(['report send-now', got === d]),
+    });
+    await program.parseAsync(args, { from: 'user' });
+    return calls;
+  }
+
+  it('link-sender resets only with --reset, and each report command runs its own function', async () => {
+    expect(await run(['link-sender'])).toEqual([['link-sender', { reset: false }, true]]);
+    expect(await run(['link-sender', '--reset'])).toEqual([['link-sender', { reset: true }, true]]);
+    expect(await run(['report', 'status'])).toEqual([['report status', true]]);
+    expect(await run(['report', 'send-now'])).toEqual([['report send-now', true]]);
   });
 });

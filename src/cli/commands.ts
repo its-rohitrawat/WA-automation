@@ -1,5 +1,6 @@
 import { existsSync, renameSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
+import type { Command } from 'commander';
 import qrcode from 'qrcode-terminal';
 import { maskNumber, reportRecipient, reportSettings, requireKey, type Env } from '../config/env.ts';
 import { loadGroupsFile, type ClientConfig } from '../config/groups.ts';
@@ -25,7 +26,7 @@ import {
 } from '../wa/authState.ts';
 import { baileysSocketFactory, WhatsAppGateway, type GatewayState, type SocketFactory } from '../wa/gateway.ts';
 import { Ingestor } from '../wa/ingest.ts';
-import { baileysSenderSocketFactory, linkSender, type OpenFailure, type SenderSocketFactory } from '../wa/senderGateway.ts';
+import { baileysSenderSocketFactory, linkedNumber, linkSender, type OpenFailure, type SenderSocketFactory } from '../wa/senderGateway.ts';
 import { formatStatus } from './status.ts';
 
 export interface CliDeps {
@@ -436,6 +437,13 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
       },
     });
     if (!result.ok) throw new Error(SENDER_ADVICE[result.code]);
+    // The founder's number must never send. REPORT_RECIPIENT may not be set yet; SenderGateway checks again at send time.
+    if (env.REPORT_RECIPIENT && linkedNumber(auth) === env.REPORT_RECIPIENT) {
+      resetSession(senderDb!); // the spare number's session rows only: this link is never used
+      throw new Error(
+        "That QR code was scanned with the founder's phone. On the founder's phone remove the new 'WA Agent' linked device (the one linked just now, not the older one the tracker uses), then run link-sender again and scan with the SPARE phone.",
+      );
+    }
     out('Spare number linked. Next: set REPORT_RECIPIENT and REPORT_ENABLED=true in .env, then start the service (net start wa-agent).');
   } finally {
     senderDb?.close();
@@ -465,7 +473,7 @@ export function reportStatusCommand(deps: CliDeps): void {
     }
     // An old snapshot's warning may no longer hold (the owner may have fixed it since the service stopped).
     const snap = readHealthSnapshot(db);
-    if (snap && now.getTime() - Date.parse(snap.at) > SERVICE_FRESH_MS) {
+    if (settings.enabled && snap && now.getTime() - Date.parse(snap.at) > SERVICE_FRESH_MS) {
       const at = new Date(snap.at);
       out(`⚠️ The service has not reported since ${istShortDate(at)} ${istTime(at)}. Is it running?`);
     } else if (snap?.report?.warning) {
@@ -488,8 +496,9 @@ function sendNowRefusal(row: ReportRow | undefined): string | undefined {
 
 /**
  * Asks the running service to send today's report now. It refuses if today was already sent or is being sent, if the
- * service is not running, and if the running service has the report off. It sends nothing itself: only the service uses the spare number's session. The request records
- * the row the owner confirmed, and the service honours it only while today's row is still exactly that.
+ * service is not running, and if the running service has the report off. It sends nothing itself: only the service
+ * uses the spare number's session. The request records the row the owner confirmed, and the service honours it only
+ * while today's row is still exactly that.
  */
 export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
   const { env, out } = deps;
@@ -555,4 +564,32 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
   } finally {
     db.close();
   }
+}
+
+export interface ReportCommandHandlers {
+  linkSender: (opts: { reset: boolean }, deps: CliDeps) => Promise<void>;
+  reportStatus: (deps: CliDeps) => void;
+  reportSendNow: (deps: CliDeps) => Promise<void>;
+}
+
+const REPORT_HANDLERS: ReportCommandHandlers = {
+  linkSender: linkSenderCommand,
+  reportStatus: reportStatusCommand,
+  reportSendNow: reportSendNowCommand,
+};
+
+/** Adds link-sender, report status and report send-now to the CLI. deps is called only when a command runs. */
+export function addReportCommands(program: Command, deps: () => CliDeps, h: ReportCommandHandlers = REPORT_HANDLERS): void {
+  program
+    .command('link-sender')
+    .description('Link the spare number that sends the morning report (stop the service first)')
+    .option('--reset', 'discard the saved spare-number session only, or move a damaged one aside (the founder link and tracker data are kept); asks first')
+    .action(async (opts: { reset?: boolean }) => h.linkSender({ reset: opts.reset === true }, deps()));
+
+  const report = program.command('report').description('Morning report');
+  report.command('status').description("Today's morning report and the last 7 days").action(() => h.reportStatus(deps()));
+  report
+    .command('send-now')
+    .description("Ask the running service to send today's report now (asks first; refuses if already sent)")
+    .action(async () => h.reportSendNow(deps()));
 }

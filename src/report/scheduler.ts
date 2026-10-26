@@ -25,6 +25,7 @@ export const REASON_TEXT: Record<string, string> = {
   not_linked: 'the spare number is not linked',
   session_unreadable: "the spare number's saved session cannot be read",
   session_unavailable: "the spare number's session file could not be opened",
+  self_send: "the sender is linked to the founder's own number; re-link with the spare phone",
   connect_timeout: 'could not connect to WhatsApp',
   closed: 'the WhatsApp connection closed before sending',
   restart_required: 'WhatsApp asked for a reconnect',
@@ -49,6 +50,8 @@ export const SENDER_WARNINGS: Partial<Record<SenderState, string>> = {
   unreadable: "⚠️ Morning report: the spare number's saved session cannot be read. Stop the service and run: npm run cli -- link-sender --reset",
   unavailable:
     "⚠️ Morning report: the spare number's session file could not be opened (disk, permissions or a lock). Restart the service; see docs/SETUP.md",
+  self_send:
+    "⚠️ Morning report: the sender is linked to the founder's own number. Stop the service and run: npm run cli -- link-sender --reset, then scan with the SPARE phone",
   logged_out: '⚠️ Morning report: the spare number was logged out. Stop the service and run: npm run cli -- link-sender --reset',
   forbidden: '⚠️ Morning report: WhatsApp refused the spare number (403). Check the spare phone.',
   replaced: '⚠️ Morning report: another session took over the spare number. Restart the service.',
