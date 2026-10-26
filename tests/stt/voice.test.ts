@@ -10,7 +10,7 @@ import { withSttHold, type SttBooking } from '../../src/stt/paidStt.ts';
 import { costUsd, modelFor } from '../../src/stt/prices.ts';
 import type { AudioPart, ProviderId, ProviderResult, Segment, SttProvider, TranscribeOptions } from '../../src/stt/types.ts';
 import {
-  createVoiceTranscriber, sizeBoundSeconds, SttPartialError, VOICE_LENGTH_TOLERANCE_S, VOICE_STT_TIMEOUTS, voiceCeilingUsd,
+  canSendVoice, createVoiceTranscriber, sizeBoundSeconds, SttPartialError, VOICE_LENGTH_TOLERANCE_S, VOICE_STT_TIMEOUTS, voiceCeilingUsd,
   voiceTranscriber, type VoiceInput, type VoiceResult, type VoiceTranscriber,
 } from '../../src/stt/voice.ts';
 import { manualClock } from '../../src/util/clock.ts';
@@ -198,6 +198,21 @@ describe('voiceTranscriber: choosing the format', () => {
   it('openai: without ffmpeg, canSend is always false', () => {
     const t = make(new FakeProvider('openai'), null);
     for (const mime of [...OGG_MIMES, ...MP3_MIMES, ...OTHER_MIMES]) expect(t.canSend(mime)).toBe(false);
+  });
+
+  it('canSendVoice, the pure rule the CLI uses without a key, agrees with every transcriber for each provider, format and ffmpeg', () => {
+    for (const id of ['sarvam', 'elevenlabs', 'openai'] as const) {
+      for (const ffmpeg of [new FakeFfmpeg(), null]) {
+        const t = make(new FakeProvider(id), ffmpeg);
+        for (const mime of [...OGG_MIMES, ...MP3_MIMES, ...OTHER_MIMES]) expect(canSendVoice(id, mime, ffmpeg !== null)).toBe(t.canSend(mime));
+      }
+    }
+    expect(canSendVoice('sarvam', 'audio/ogg; codecs=opus', false)).toBe(true);
+    expect(canSendVoice('elevenlabs', 'audio/mpeg', false)).toBe(true);
+    expect(canSendVoice('sarvam', 'audio/mp4', false)).toBe(false);
+    expect(canSendVoice('sarvam', 'audio/mp4', true)).toBe(true);
+    expect(canSendVoice('openai', 'audio/ogg', false)).toBe(false);
+    expect(canSendVoice('openai', 'audio/ogg', true)).toBe(true);
   });
 
   it('without ffmpeg, a file that needs converting is refused by prepare', async () => {
