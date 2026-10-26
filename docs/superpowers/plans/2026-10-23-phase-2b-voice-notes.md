@@ -221,6 +221,10 @@ Estimates assume one developer-agent working test-first, with reviews. The whole
   - Sarvam: `audio/ogg` and `voice.ogg` are sent instead of `audio/mpeg` and `audio.mp3`.
   - Each adapter: the request timeout is set.
   - The bake-off tests still pass.
+- **Note from Phase 3 (meetings use the same adapters):**
+  - Keep the `AudioPart` (path) entry point beside the new bytes input. Meetings send MP3 parts from disk through it.
+  - Keep the timeouts as constructor options. Meetings set their own (ElevenLabs 40 minutes, OpenAI 10 minutes, Sarvam up to 3 hours).
+  - For `withSttReservation` (Task 4), reuse `withSttHold` from `src/stt/paidStt.ts` (Phase 3): compute the ceiling and call it, so the hold-and-settle rules live in one place.
 
 ### Task 3: The Transcriber (½ day)
 - **Change:** `createTranscriber(env)` in `src/stt/transcriber.ts` returns `null` when `STT_PROVIDER = none`, otherwise the chosen adapter behind the interface above.
