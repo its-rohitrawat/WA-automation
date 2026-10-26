@@ -315,11 +315,13 @@ export function createApp(d: AppDeps): App {
       }
       // The upload in flight, then one more if results were applied during the drain; and the file upload still in
       // flight, so its Drive id is saved before the database closes. Bounded to 10 s, in parallel.
-      // A morning report still sending gets the same 10 s, plus up to 2 s to record its outcome after the sender stops
-      // (a report in its linger is still 'sent'); one cut off is marked unknown at the next start. main.ts closes the
-      // databases only after stop() resolves, so after the scheduler's stop() has returned (tests/appReport.test.ts).
+      // A morning report still sending gets the same 10 s, then up to 3 s to close its socket, then up to 2 s to record
+      // its outcome (a report in its linger is still 'sent'); one cut off is marked unknown at the next start. main.ts
+      // closes the databases only after stop() resolves, so after the scheduler's stop() has returned
+      // (tests/appReport.test.ts).
       await Promise.all([publisher.flush(10_000), uploader?.stop(10_000), reportScheduler?.stop(10_000)]);
-      // A socket that never closes must not eat the rest of WinSW's 150 s (120 + 12 + 5 plus margin: the morning report may take 10 s + 2 s).
+      // A socket that never closes must not eat the rest of WinSW's 150 s: 120 s drain + 15 s (the morning report's
+      // 10 + 3 + 2; the uploads take at most 10) + 5 s here = 140 s, plus margin.
       let timer: NodeJS.Timeout | undefined;
       try {
         await Promise.race([

@@ -17,8 +17,12 @@ export type SendResult =
   | { status: 'failed'; code: string }
   | { status: 'unknown'; code: string };
 
-/** unreadable: data/sender-session.db is damaged or was written with another master key (fixed by link-sender --reset). */
-export type SenderState = 'idle' | 'not_linked' | 'unreadable' | 'connecting' | 'open' | 'logged_out' | 'forbidden' | 'replaced';
+/**
+ * unreadable: data/sender-session.db is damaged or was written with another master key (fixed by link-sender --reset).
+ * unavailable: the file could not be opened at service start (disk, permissions or a lock); a restart opens it again.
+ */
+export type SenderState =
+  | 'idle' | 'not_linked' | 'unreadable' | 'unavailable' | 'connecting' | 'open' | 'logged_out' | 'forbidden' | 'replaced';
 
 export interface SenderStatus {
   state: SenderState;

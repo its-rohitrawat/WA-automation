@@ -47,5 +47,9 @@ describe('Health and the morning report', () => {
     const stored = JSON.parse(getKv(db, 'health')!) as Record<string, unknown>;
     setKv(db, 'health', JSON.stringify({ ...stored, report: { text: 5, warning: null } }));
     expect(readHealthSnapshot(db)).toBeUndefined();
+    setKv(db, 'health', JSON.stringify({ ...stored, report: { text: 'ok', warning: 5 } }));
+    expect(readHealthSnapshot(db)).toBeUndefined();
+    setKv(db, 'health', JSON.stringify({ ...stored, report: { text: 'ok' } })); // warning missing
+    expect(readHealthSnapshot(db)).toBeUndefined();
   });
 });

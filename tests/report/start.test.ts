@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DestinationStream } from 'pino';
@@ -137,8 +137,44 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
     const call = /createApp\(\{([\s\S]*?)\n\s*\}\);/.exec(src);
     expect(call).not.toBeNull();
     expect(call![1]).toMatch(/^\s*report,?\s*$/m);
-    // The spare-number session is closed after app.stop(), and on the startup-failure path.
-    expect(src).toContain('senderStore?.close()');
-    expect(src).toContain('senderDb?.close()');
+    // The spare-number session is closed after app.stop(), and on the startup-failure path, and nowhere else: closing it
+    // while the sender runs would make its credential saves fail.
+    const count = (sub: string) => src.split(sub).length - 1;
+    expect(count('senderDb?.close()')).toBe(1);
+    const catchAt = src.indexOf('} catch (e) {');
+    expect(catchAt).toBeGreaterThan(0);
+    const catchBlock = src.slice(catchAt, src.indexOf('process.exit(2)', catchAt));
+    expect(catchBlock).toContain('senderDb?.close()');
+    expect(count('senderStore?.close()')).toBe(1);
+    const stopAt = src.indexOf('.stop()');
+    expect(stopAt).toBeGreaterThan(0);
+    const afterStop = src.slice(stopAt, src.indexOf('process.exit', stopAt));
+    expect(afterStop).toMatch(/\.finally\(\(\) => \{[\s\S]*senderStore\?\.close\(\)/);
+    const startup = src.slice(src.indexOf('openMorningReport('), src.indexOf('createApp({'));
+    expect(startup.length).toBeGreaterThan(0);
+    expect(startup).not.toMatch(/\.close\(/);
+  });
+
+  it('closes the spare-number database when the sender cannot be made, so no handle is left open', () => {
+    const dir = tempDir();
+    const env = { ...parseEnv({ DATA_DIR: dir, REPORT_ENABLED: 'true', REPORT_RECIPIENT: RECIPIENT }), REPORT_RECIPIENT: '12345' };
+    const c = capture();
+    expect(() => openMorningReport({ env, masterKey: randomBytes(32), log: c.log, factory: vi.fn(() => new FakeSocket()) })).toThrow();
+    expect(existsSync(senderSessionDbPath(dir))).toBe(true); // it was opened
+    // An open handle would make this fail with EBUSY on Windows.
+    for (const suffix of ['', '-wal', '-shm']) rmSync(senderSessionDbPath(dir) + suffix, { force: true });
+    expect(existsSync(senderSessionDbPath(dir))).toBe(false);
+  });
+
+  it('a session file that cannot be opened (not damaged) is unavailable: logged, no --reset advice', () => {
+    const dir = tempDir();
+    mkdirSync(senderSessionDbPath(dir), { recursive: true }); // a directory where the file should be
+    const r = start(dir, randomBytes(32));
+    expect(r.senderDb).toBeUndefined();
+    expect(r.report.sender.status().state).toBe('unavailable');
+    const err = r.records().find((l) => l.reason === 'session_unavailable');
+    expect(err?.level).toBe(50);
+    expect(String(err?.code)).toMatch(/^SQLITE_CANTOPEN/);
+    expectNoNumber(r.out());
   });
 });

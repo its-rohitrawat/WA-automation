@@ -141,6 +141,15 @@ describe('SenderGateway', () => {
     expect(sockets).toHaveLength(0);
   });
 
+  it('fails definitely, without connecting, when the session file could not be opened (disk, permissions or a lock)', async () => {
+    const { factory, sockets } = scriptedFactory();
+    const gw = new SenderGateway({ recipient: RECIPIENT, factory, auth: undefined, authProblem: 'unavailable' });
+    expect(gw.status().state).toBe('unavailable');
+    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'session_unavailable' });
+    expect(gw.status().state).toBe('unavailable');
+    expect(sockets).toHaveLength(0);
+  });
+
   it('fails definitely when WhatsApp shows a QR code, refuses the session or never connects', async () => {
     const cases: { script: Script; code: string; state: string; statusCode: number | null }[] = [
       { script: (s) => s.emit('connection.update', { qr: 'QR-1' }), code: 'not_linked', state: 'not_linked', statusCode: null },
@@ -394,6 +403,56 @@ describe('SenderGateway default timings', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(result).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
     await p;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('gives a socket whose end() never resolves 3 s: a send whose ids are back still returns sent, with no timer left', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const endHangs: Script = (s) => {
+      s.end.mockImplementation(() => new Promise<void>(() => {}));
+      open(s);
+    };
+    const { factory, sockets } = scriptedFactory([endHangs]);
+    const gw = new SenderGateway({ recipient: RECIPIENT, factory, auth: senderAuth(true), lingerMs: 0 });
+    let result: unknown;
+    const p = gw.sendReport('hi', XLSX, FILE).then((r) => (result = r));
+    await vi.advanceTimersByTimeAsync(2_900);
+    expect(sockets[0]!.end).toHaveBeenCalledTimes(1);
+    expect(result).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(result).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    await p;
+    expect(gw.status().state).toBe('idle');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('stop() gives a socket whose end() never resolves 3 s, then returns', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const stuck: Script = (s) => {
+      s.end.mockImplementation(() => new Promise<void>(() => {}));
+      s.sendMessage
+        .mockImplementationOnce(async () => ({ key: { id: 'msg-1' } }))
+        .mockImplementationOnce(() => new Promise(() => {})); // the document send never answers
+      open(s);
+    };
+    const { gw, sockets } = defaultGateway([stuck]);
+    let result: unknown;
+    const p = gw.sendReport('hi', XLSX, FILE).then((r) => (result = r));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(2);
+    let stopped = false;
+    const s = gw.stop().then(() => {
+      stopped = true;
+    });
+    await vi.advanceTimersByTimeAsync(2_900);
+    expect(stopped).toBe(false);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(stopped).toBe(true);
+    await s;
+    expect(sockets[0]!.end).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(120_000); // the document send's own limit
+    await p;
+    expect(result).toEqual({ status: 'unknown', code: 'timeout' });
     expect(vi.getTimerCount()).toBe(0);
   });
 

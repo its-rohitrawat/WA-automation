@@ -24,6 +24,7 @@ export const REASON_TEXT: Record<string, string> = {
   not_running: 'the service was not running in time',
   not_linked: 'the spare number is not linked',
   session_unreadable: "the spare number's saved session cannot be read",
+  session_unavailable: "the spare number's session file could not be opened",
   connect_timeout: 'could not connect to WhatsApp',
   closed: 'the WhatsApp connection closed before sending',
   restart_required: 'WhatsApp asked for a reconnect',
@@ -46,6 +47,8 @@ export const UNKNOWN_WARNING = '⚠️ Morning report: unknown, check WhatsApp. 
 const SENDER_WARNINGS: Partial<Record<SenderState, string>> = {
   not_linked: '⚠️ Morning report: the spare number is not linked. Stop the service and run: npm run cli -- link-sender',
   unreadable: "⚠️ Morning report: the spare number's saved session cannot be read. Stop the service and run: npm run cli -- link-sender --reset",
+  unavailable:
+    "⚠️ Morning report: the spare number's session file could not be opened (disk, permissions or a lock). Restart the service; see docs/SETUP.md",
   logged_out: '⚠️ Morning report: the spare number was logged out. Stop the service and run: npm run cli -- link-sender --reset',
   forbidden: '⚠️ Morning report: WhatsApp refused the spare number (403). Check the spare phone.',
   replaced: '⚠️ Morning report: another session took over the spare number. Restart the service.',
@@ -102,6 +105,8 @@ export class ReportScheduler {
   readonly #o: ReportSchedulerOptions;
   #inFlight: Promise<void> | undefined;
   #stopped = false;
+  /** Set once recover() has succeeded. No send starts before it: a row left 'sending' must become unknown first. */
+  #recovered = false;
 
   constructor(o: ReportSchedulerOptions) {
     this.#o = o;
@@ -110,12 +115,23 @@ export class ReportScheduler {
   /** At service start: a row still 'sending' was cut off by a crash or a stop mid-send, so its outcome is unknown. */
   recover(now: Date = this.#o.clock.now()): void {
     const count = markInterruptedReports(this.#o.db, now.toISOString());
+    this.#recovered = true;
     if (count > 0) this.#o.log.warn({ count }, 'morning report was cut off mid-send; marked unknown, not retried');
   }
 
   /** Called from the app tick (every 30 s). Never throws. Resolves when a send it started has finished. */
   async tick(now: Date = this.#o.clock.now()): Promise<void> {
     if (this.#inFlight || this.#stopped) return;
+    if (!this.#recovered) {
+      // The recovery at service start failed (for example the database was locked). Until it succeeds, a row cut off
+      // mid-send would read 'sending now' all day and hide a report that may already have gone out, so send nothing.
+      try {
+        this.recover(now);
+      } catch (err) {
+        this.#o.log.error({ err }, 'morning report recovery failed again; nothing is sent until it succeeds');
+        return;
+      }
+    }
     const run = this.#run(now);
     this.#inFlight = run;
     try {
@@ -132,8 +148,9 @@ export class ReportScheduler {
   }
 
   /**
-   * Starts no new send, waits up to waitMs for the send in flight, stops the sender, then waits up to 2 s more (never
-   * more than waitMs) for that send to record its outcome. Leaves no timers.
+   * Starts no new send, waits up to waitMs for the send in flight, stops the sender (up to 3 s), then waits up to 2 s
+   * more for that send to record its outcome. Neither extra wait is longer than waitMs, so the whole stop takes at most
+   * waitMs + 5 s. Leaves no timers.
    */
   async stop(waitMs: number): Promise<void> {
     this.#stopped = true;
@@ -143,10 +160,19 @@ export class ReportScheduler {
       await Promise.race([inFlight, new Promise<void>((resolve) => (timer = setTimeout(resolve, waitMs)))]);
       clearTimeout(timer);
     }
+    // Bounded: closing a socket on a dead network can hang (SenderGateway also caps it at 3 s).
+    let stopTimer: NodeJS.Timeout | undefined;
     try {
-      await this.#o.sender.stop();
+      await Promise.race([
+        this.#o.sender.stop(),
+        new Promise<void>((resolve) => {
+          stopTimer = setTimeout(resolve, Math.min(3_000, waitMs));
+        }),
+      ]);
     } catch (err) {
       this.#o.log.error({ err }, 'stopping the report sender failed');
+    } finally {
+      clearTimeout(stopTimer);
     }
     // Stopping the sender ends a send in its linger (both ids already back) or cuts one off. Give it up to 2 s more to
     // record its outcome, so a report that went out is 'sent' before main.ts closes the database.

@@ -159,13 +159,23 @@ export function useSenderAuthState(db: Db, masterKey: Buffer): EncryptedAuth {
   }
 }
 
-/** code is a reason code safe to log: 'decrypt_failed', or the SQLite error code (such as SQLITE_NOTADB). */
-export type SenderSession = { ok: true; db: Db; auth: EncryptedAuth } | { ok: false; code: string };
+/**
+ * code is a reason code safe to log: 'decrypt_failed', or the SQLite error code (such as SQLITE_NOTADB). transient is
+ * set when the file could not be opened but is not known to be damaged (a lock, permissions, a disk error): moving it
+ * aside with link-sender --reset would be the wrong fix.
+ */
+export type SenderSession = { ok: true; db: Db; auth: EncryptedAuth } | { ok: false; code: string; transient?: true };
+
+/** SQLite codes that mean the file itself is damaged or not a database. Every other SQLite error may pass. */
+function isDamage(code: string): boolean {
+  return code === 'SQLITE_NOTADB' || code.startsWith('SQLITE_CORRUPT');
+}
 
 /**
  * Opens the spare number's session at service start. A file that is damaged, not a database, or written with another
  * master key is reported, not thrown, and left as it is: a bad spare-number session never stops the service (only
- * link-sender --reset replaces it). Any other error is thrown.
+ * link-sender --reset replaces it). Any other SQLite error (a lock, a read-only file, a disk error) is reported as
+ * transient. Any other error is thrown.
  */
 export function openSenderSession(file: string, masterKey: Buffer): SenderSession {
   let db: Db | undefined;
@@ -179,7 +189,7 @@ export function openSenderSession(file: string, masterKey: Buffer): SenderSessio
       // best effort
     }
     if (err instanceof SenderSessionDecryptError) return { ok: false, code: 'decrypt_failed' };
-    if (err instanceof Database.SqliteError) return { ok: false, code: err.code };
+    if (err instanceof Database.SqliteError) return isDamage(err.code) ? { ok: false, code: err.code } : { ok: false, code: err.code, transient: true };
     throw err;
   }
 }

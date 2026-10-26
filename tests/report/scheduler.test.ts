@@ -580,6 +580,10 @@ describe('describeReport', () => {
     expect(describeReport(row({ status: 'retry', detail: 'session_unreadable' }), now, ON, 'unreadable').text).toContain(
       "not sent yet (the spare number's saved session cannot be read)",
     );
+    const unavailable = describeReport(row({ status: 'retry', detail: 'session_unavailable' }), now, ON, 'unavailable');
+    expect(unavailable.warning).toContain("the spare number's session file could not be opened (disk, permissions or a lock). Restart the service");
+    expect(unavailable.warning).not.toContain('--reset');
+    expect(unavailable.text).toContain("not sent yet (the spare number's session file could not be opened)");
     expect(describeReport(undefined, now, ON, 'forbidden').warning).toContain('(403)');
     expect(describeReport(undefined, now, ON, 'replaced').warning).toContain('another session');
     expect(describeReport(row({ status: 'unknown' }), now, ON, 'not_linked').warning).toBe(UNKNOWN_WARNING);

@@ -205,6 +205,58 @@ describe('app and the morning report', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('stop() stays bounded when the spare-number socket never closes and the document send never answers', async () => {
+    const sockets: FakeSocket[] = [];
+    const factory = () => {
+      const s = new FakeSocket();
+      s.end.mockImplementation(() => new Promise<void>(() => {})); // ws.close() on a dead network
+      s.sendMessage
+        .mockImplementationOnce(async () => ({ key: { id: 'msg-1' } }))
+        .mockImplementationOnce(() => new Promise(() => {}));
+      sockets.push(s);
+      queueMicrotask(() => s.emit('connection.update', { connection: 'open' }));
+      return s;
+    };
+    const auth = { ...useSenderAuthState(openSessionDb(':memory:'), randomBytes(32)), hasSession: true };
+    const sender = new SenderGateway({ recipient: '919800000000', factory, auth }); // production timeouts and linger
+    const { db, app } = setup({ sender, settings: ON });
+    for (let i = 0; i < 30 && (sockets[0]?.sendMessage.mock.calls.length ?? 0) < 2; i++) await vi.advanceTimersByTimeAsync(1_000);
+    expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(2);
+    let done = false;
+    const t0 = Date.now();
+    let elapsed = 0;
+    void app.stop().then(() => {
+      elapsed = Date.now() - t0;
+      done = true;
+    });
+    // 10 s for the send in flight, 3 s to close the socket, 2 s to record the outcome; the founder-number gateway's 5 s.
+    for (let i = 0; i < 25 && !done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    expect(done).toBe(true);
+    expect(elapsed).toBeGreaterThanOrEqual(10_000);
+    expect(elapsed).toBeLessThanOrEqual(10_000 + 3_000 + 2_000 + 5_000);
+    expect(reportFor(db, DAY)?.status).toBe('sending'); // the next start marks it unknown, never sent again
+    await vi.advanceTimersByTimeAsync(120_000); // the document send's own limit ends it
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'timeout' });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a recovery that failed at start is tried again at the next tick: the cut-off send becomes unknown, nothing is sent', async () => {
+    const db = seededDb();
+    claimReport(db, DAY, '2026-10-23T00:29:00.000Z');
+    vi.spyOn(ReportScheduler.prototype, 'recover').mockImplementationOnce(() => {
+      throw new Error('database is locked');
+    });
+    const sender = new FakeReportSender();
+    const { app } = setup({ sender, settings: ON }, db);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'interrupted' });
+    expect(sender.calls).toHaveLength(0);
+    const snap = readHealthSnapshot(db)!;
+    expect(snap.line.text).toBe(UNKNOWN_WARNING);
+    expect(snap.report?.warning).toBe(UNKNOWN_WARNING);
+    await stopApp(app);
+  });
+
   it("the report's workbook carries the live Health line", async () => {
     const sender = new FakeReportSender();
     const { db, app } = setup({ sender, settings: ON }, seededDb(), { freeBytes: () => 2e9 });
@@ -232,6 +284,9 @@ describe('app and the morning report', () => {
     expect(app.health.workbookLine().ok).toBe(true); // connected
     const errors = lines.map((l) => JSON.parse(l) as { level: number; msg: string }).filter((l) => l.level === 50);
     expect(errors.map((l) => l.msg)).toContain('morning report recovery failed');
+    // While recovery keeps failing, no report is sent: a row cut off mid-send could otherwise hide a report already out.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sender.calls).toHaveLength(0);
     await stopApp(app);
   });
 });

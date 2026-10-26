@@ -68,11 +68,23 @@ function closeCode(statusCode: number | null): OpenFailure {
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/** How long closing a socket may take. On a dead network ws waits up to 30 s for the close handshake. */
+export const END_TIMEOUT_MS = 3_000;
+
+/** Closes the socket, giving up after END_TIMEOUT_MS so a stop stays within the service's shutdown budget. */
 async function endQuietly(sock: SenderSocketLike): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
   try {
-    await sock.end(undefined);
+    await Promise.race([
+      Promise.resolve(sock.end(undefined)),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, END_TIMEOUT_MS);
+      }),
+    ]);
   } catch {
     // closing an already-dead socket is fine
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -162,8 +174,14 @@ export interface SenderGatewayOptions {
   /** REPORT_RECIPIENT: the founder's number, digits only. The only chat this sender ever writes to. */
   recipient: string;
   factory: SenderSocketFactory;
-  /** The spare number's session. Undefined when the stored session could not be read (state 'unreadable'). */
+  /** The spare number's session. Undefined when the stored session could not be opened or read. */
   auth: EncryptedAuth | undefined;
+  /**
+   * Why auth is undefined. 'unreadable' (the default): the file is damaged or was written with another key, and only
+   * link-sender --reset fixes it. 'unavailable': the file could not be opened (disk, permissions or a lock), and a
+   * restart may fix it.
+   */
+  authProblem?: 'unreadable' | 'unavailable';
   clock?: Clock;
   /** How long to wait for the connection to open. Default 60 s. */
   connectTimeoutMs?: number;
@@ -192,7 +210,7 @@ export class SenderGateway implements ReportSender {
     this.#jid = recipientJid(opts.recipient);
     this.#opts = opts;
     this.#clock = opts.clock ?? systemClock;
-    const state: SenderState = !opts.auth ? 'unreadable' : opts.auth.hasSession ? 'idle' : 'not_linked';
+    const state: SenderState = !opts.auth ? (opts.authProblem ?? 'unreadable') : opts.auth.hasSession ? 'idle' : 'not_linked';
     this.#status = { state, since: this.#clock.now().toISOString(), lastErrorCode: null };
   }
 
@@ -204,8 +222,9 @@ export class SenderGateway implements ReportSender {
     const auth = this.#opts.auth;
     if (this.#stopped) return { status: 'failed', code: 'stopped' };
     if (this.#busy) return { status: 'failed', code: 'busy' };
-    // The stored session could not be read: only link-sender --reset fixes it, so the state stays 'unreadable'.
-    if (!auth) return { status: 'failed', code: 'session_unreadable' };
+    // The stored session could not be opened or read. The state stays as it is: only link-sender --reset fixes an
+    // unreadable one, and only a restart reopens an unavailable one.
+    if (!auth) return { status: 'failed', code: this.#opts.authProblem === 'unavailable' ? 'session_unavailable' : 'session_unreadable' };
     if (!auth.hasSession) {
       this.#setState('not_linked', null);
       return { status: 'failed', code: 'not_linked' };

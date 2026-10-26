@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -64,6 +64,43 @@ describe('openSenderSession (service start)', () => {
     if (!r.ok) expect(r.code).toMatch(/^SQLITE_/);
     expect(readFileSync(file).equals(junk)).toBe(true);
     rmSync(file);
+  });
+
+  it('reports a damaged file as unreadable and not transient: only link-sender --reset fixes it', () => {
+    const file = senderSessionDbPath(tempDir());
+    writeFileSync(file, Buffer.alloc(4096, 0x41));
+    const r = openSenderSession(file, randomBytes(32));
+    expect(r).toEqual({ ok: false, code: 'SQLITE_NOTADB' });
+    rmSync(file);
+  });
+
+  it('reports a read-only file as transient, not damaged, and leaves it as it is', () => {
+    const file = senderSessionDbPath(tempDir());
+    writeFileSync(file, '');
+    chmodSync(file, 0o444);
+    try {
+      const r = openSenderSession(file, randomBytes(32));
+      if (r.ok) r.db.close();
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.code).toMatch(/^SQLITE_READONLY/);
+        expect(r.transient).toBe(true);
+      }
+      expect(readFileSync(file).length).toBe(0);
+    } finally {
+      chmodSync(file, 0o666);
+    }
+  });
+
+  it('reports a directory at the session path as transient, not damaged', () => {
+    const file = senderSessionDbPath(tempDir());
+    mkdirSync(file, { recursive: true });
+    const r = openSenderSession(file, randomBytes(32));
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toMatch(/^SQLITE_CANTOPEN/);
+      expect(r.transient).toBe(true);
+    }
   });
 
   it('throws an error that is neither a SQLite nor a decrypt error, instead of calling the session unreadable', () => {
