@@ -369,7 +369,7 @@ Last days:
 
 ### Status "Morning report: unknown, check WhatsApp"
 
-The send started but did not finish cleanly (a timeout, or the service stopped mid-send). The report may or may not have reached the founder, so the agent does **not** try again by itself.
+The send started but did not finish cleanly (a timeout, the service stopped mid-send, or the result could not be saved and the send has said nothing for over 10 minutes). The report may or may not have reached the founder, so the agent does **not** try again by itself.
 
 1. Look at the founder's WhatsApp, in the chat with the spare number.
 2. If today's report is not there, run `npm run cli -- report send-now` and type `yes`.

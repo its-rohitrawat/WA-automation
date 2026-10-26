@@ -234,6 +234,12 @@ export class ReportScheduler {
           log.info({ date }, 'send-now request ignored: it is not for today, or today changed since it was confirmed');
           return 'schedule';
         }
+        // A stale 'sending' row is a send whose outcome could not be recorded (no send is in flight here: tick returns
+        // while one is). Status shows it as unknown, so it becomes unknown first and the request can take it, as it
+        // would take any unknown row the owner confirmed.
+        if (isStaleSending(reportFor(db, date), now) && finishReport(db, date, 'unknown', 'not_recorded', at)) {
+          log.warn({ date }, 'morning report outcome was never recorded; marked unknown before the send-now request');
+        }
         if (claimReport(db, date, at, { force: true })) return 'send';
         log.info({ date }, 'send-now request ignored: today is already sent or being sent');
         return 'done';

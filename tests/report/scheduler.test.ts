@@ -267,6 +267,21 @@ describe('ReportScheduler', () => {
     expect(sender.calls).toHaveLength(1);
   });
 
+  it("a send-now request takes a 'sending' row older than 10 minutes (its outcome was lost), but not a younger one", async () => {
+    const { db, sender, at } = setup();
+    await at('05:00');
+    claimReport(db, DAY, iso('06:00')); // the 06:00 send ran, then recording its outcome failed
+    request(db, '06:05'); // too soon: the row may still be a send in progress
+    await at('06:05');
+    expect(sender.calls).toHaveLength(0);
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'sending', attempts: 1 });
+    request(db, '06:15'); // status now reads unknown, and the owner confirmed that row
+    await at('06:15');
+    expect(sender.calls).toHaveLength(1);
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'sent', forced: true, attempts: 2 });
+    expect(getKv(db, REPORT_REQUEST_KEY)).toBe('');
+  });
+
   it('a send-now request confirmed before a scheduled send that ends unknown is not used: nothing is sent twice', async () => {
     const { db, clock, sender, s, at } = setup();
     const g = gate();

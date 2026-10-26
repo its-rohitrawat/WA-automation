@@ -9,7 +9,7 @@ import { DpapiKeyProvider, type KeyProvider } from '../crypto/keyProvider.ts';
 import { MediaRefSealer } from '../media/ref.ts';
 import { readHealthSnapshot } from '../health/health.ts';
 import { DRIVE_SCOPES, runLoopbackConsent, TokenStore, type ConsentClient } from '../output/googleAuth.ts';
-import { describeReport, reasonText } from '../report/scheduler.ts';
+import { describeReport, isStaleSending, reasonText } from '../report/scheduler.ts';
 import { latestBatches } from '../store/batches.ts';
 import { listClients, syncClients } from '../store/clients.ts';
 import { openDb, tx, type Db } from '../store/db.ts';
@@ -501,10 +501,14 @@ export function reportStatusCommand(deps: CliDeps): void {
 /** A health snapshot younger than this means the service is running (cli status uses the same 2 minutes). */
 const SERVICE_FRESH_MS = 2 * 60_000;
 
-/** Why send-now must not ask for a send while today's row is in this state, or undefined when it may. */
-function sendNowRefusal(row: ReportRow | undefined): string | undefined {
+/**
+ * Why send-now must not ask for a send while today's row is in this state, or undefined when it may. A 'sending' row
+ * older than 10 minutes is not a send in progress: its outcome could not be recorded, status reads it as unknown, and
+ * it is treated like an unknown row (the service marks it unknown before it takes the request).
+ */
+function sendNowRefusal(row: ReportRow | undefined, now: Date): string | undefined {
   if (row?.status === 'sent') return `Today's report was already sent at ${istTime(new Date(row.updatedAt))} IST. Nothing was sent.`;
-  if (row?.status === 'sending') return "Today's report is being sent right now. Check with: npm run cli -- report status";
+  if (row?.status === 'sending' && !isStaleSending(row, now)) return "Today's report is being sent right now. Check with: npm run cli -- report status";
   return undefined;
 }
 
@@ -526,7 +530,7 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
   const db = openDb(trackerDbPath(env.DATA_DIR));
   try {
     const row = reportFor(db, today);
-    const refusal = sendNowRefusal(row);
+    const refusal = sendNowRefusal(row, now);
     if (refusal) {
       out(refusal);
       return;
@@ -558,7 +562,7 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
       return;
     }
     const caution =
-      row?.status === 'unknown'
+      row?.status === 'unknown' || isStaleSending(row, now)
         ? "The last try ended without a clear answer, so today's report may already be on the founder's phone. Check the founder's WhatsApp first. "
         : '';
     let yes: boolean;
@@ -579,7 +583,7 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
       const at = new Date();
       if (istDate(at) !== today) return 'The date changed while you were answering. Nothing was sent. Run this again.';
       const current = reportFor(db, today);
-      const late = sendNowRefusal(current);
+      const late = sendNowRefusal(current, at);
       if (late) return late;
       if (current?.status !== row?.status || current?.updatedAt !== row?.updatedAt) {
         const nowText = describeReport(current, at, reportSettings(env), 'idle').text;

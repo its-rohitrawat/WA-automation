@@ -645,6 +645,18 @@ describe('cli report send-now', () => {
     expect(confirm).not.toHaveBeenCalled();
   });
 
+  it("does not refuse a 'sending' row older than 10 minutes (its outcome was lost): it warns first and records that row", async () => {
+    writeSnapshot(NOW);
+    // the 08:30 send went out, then recording its outcome failed, so the row stayed 'sending' (status reads unknown)
+    withTracker((db) => claimReport(db, DAY, '2026-10-23T03:00:00.000Z'));
+    await reportSendNowCommand(deps());
+    expect(out()).not.toContain('being sent right now');
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm.mock.calls[0]![0]).toContain("may already be on the founder's phone");
+    expect(request()).toBe(`${DAY}|sending|2026-10-23T03:00:00.000Z|${NOW.toISOString()}`);
+    expect(out()).toContain('Requested.');
+  });
+
   it('refuses when the service is not running', async () => {
     await reportSendNowCommand(deps());
     writeSnapshot(new Date(NOW.getTime() - 3 * 60_000));
