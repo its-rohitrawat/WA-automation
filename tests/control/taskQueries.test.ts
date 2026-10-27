@@ -253,3 +253,30 @@ describe('taskDetail', () => {
     expect(taskDetail(db, code, now)!.history.map((h) => h.what)).toEqual(['Created from a meeting', 'Updated', 'Edited by the owner']);
   });
 });
+
+describe('listDashboardTasks review fixes', () => {
+  it('sorts by status as overdue, open, review, done', () => {
+    const db = seededDb();
+    const done = task(db, { status: 'done' });
+    const review = task(db, { status: 'maybe_done' });
+    const open = task(db);
+    const late = task(db, { deadline: '2026-10-01' });
+    expect(codes(listDashboardTasks(db, q({ sort: 'status' }), now))).toEqual([late, open, review, done]);
+    expect(codes(listDashboardTasks(db, q({ sort: 'status', dir: 'desc' }), now))).toEqual([done, review, open, late]);
+  });
+
+  it('sorts client names without regard to case', () => {
+    const db = seededDb();
+    db.prepare("UPDATE clients SET name = 'mehta foods' WHERE id = 2").run();
+    const sharma = task(db);
+    const mehta = task(db, { clientId: 2 });
+    expect(codes(listDashboardTasks(db, q({ sort: 'client' }), now))).toEqual([mehta, sharma]);
+  });
+
+  it('counts done tasks with an old deadline under deadline=past', () => {
+    const db = seededDb();
+    const done = task(db, { deadline: '2026-10-01', status: 'done' });
+    expect(codes(listDashboardTasks(db, q({ deadline: 'past' }), now))).toEqual([done]);
+    expect(codes(listDashboardTasks(db, q({ status: 'overdue' }), now))).toEqual([]);
+  });
+});

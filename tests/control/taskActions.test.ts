@@ -170,3 +170,17 @@ describe('parseTaskEdit', () => {
     expect(run(db, 'SHA-001', 'done', { title: 'ignored' }).detail).toMatchObject({ title: 'Banner', status: 'done' });
   });
 });
+
+describe('parseTaskEdit review fixes', () => {
+  it('never repeats an unknown key in the message, and names it only when it is a short plain word', () => {
+    const long = `x${'<script>'.repeat(20)}`;
+    expect(refusal(() => parseTaskEdit({ [long]: 'a' }))).toMatchObject({ status: 422, field: 'body', message: 'That field cannot be changed here' });
+    expect(refusal(() => parseTaskEdit({ askedBy: 'a' }))).toMatchObject({ field: 'askedBy', message: 'That field cannot be changed here' });
+  });
+
+  it('refuses the word none, which editTask would read as clearing the field', () => {
+    for (const field of ['assignedTo', 'latestProgress', 'title']) {
+      expect(refusal(() => parseTaskEdit({ [field]: ' None ' })), field).toMatchObject({ status: 422, field });
+    }
+  });
+});

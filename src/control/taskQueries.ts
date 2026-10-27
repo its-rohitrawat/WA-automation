@@ -170,7 +170,7 @@ function orderBy(sort: TaskQuery['sort'], dir: 'asc' | 'desc'): string {
     case 'code':
       return `c.code ${d}, ${CODE_NUMBER_SQL} ${d}, t.id ${d}`;
     case 'client':
-      return `c.name ${d}, ${tie}`;
+      return `lower(c.name) ${d}, ${tie}`;
     case 'owner':
       return `t.assigned_to IS NULL, lower(t.assigned_to) ${d}, ${tie}`;
     case 'status':
@@ -204,6 +204,7 @@ export function listDashboardTasks(db: Db, f: TaskQuery, now: Date): { total: nu
     where.push('lower(t.assigned_to) = lower(@owner)');
     params.owner = f.owner;
   }
+  // past is the deadline alone, done tasks included (the status filter's overdue is the not-done ones).
   if (f.deadline === 'past') where.push('t.deadline < @today');
   if (f.deadline === 'none') where.push('t.deadline IS NULL');
   if (f.deadline === 'week') {

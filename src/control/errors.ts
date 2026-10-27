@@ -24,4 +24,8 @@ export interface AuditEntry {
   detail: string;
 }
 
+/**
+ * Writes one audit row. It must be synchronous and write through the same database connection as the action: the
+ * actions call it inside their transaction, so a failed write rolls the change back with it.
+ */
 export type Audit = (entry: AuditEntry) => void;

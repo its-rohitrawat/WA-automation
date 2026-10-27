@@ -31,7 +31,8 @@ export function parseTaskEdit(body: unknown): EditOptions {
   if (entries.length === 0) throw invalid('body', 'Nothing to change');
   const out: EditOptions = {};
   for (const [key, raw] of entries) {
-    if (!(EDITABLE_FIELDS as readonly string[]).includes(key)) throw invalid(key, `${key} cannot be changed here`);
+    // The key is request input: it is named back only when it is a short plain word, and never in the message.
+    if (!(EDITABLE_FIELDS as readonly string[]).includes(key)) throw invalid(/^[A-Za-z]{1,30}$/.test(key) ? key : 'body', 'That field cannot be changed here');
     const field = key as EditableField;
     if (field === 'priority' || field === 'side' || field === 'category') {
       const v = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
@@ -45,6 +46,8 @@ export function parseTaskEdit(body: unknown): EditOptions {
       if (v !== '' && !isIsoDate(v)) throw invalid(field, 'deadline must be a real date, YYYY-MM-DD, or empty');
     } else {
       if (field === 'title' && v === '') throw invalid(field, 'title cannot be empty');
+      // editTask reads "none" (any case) as "clear it", so a typed "None" would be lost without a word. Empty clears.
+      if (v.toLowerCase() === 'none') throw invalid(field, `${field} cannot be the word none; leave it empty to clear it`);
       if (v.length > MAX_CHARS[field]) throw invalid(field, `${field} must be at most ${MAX_CHARS[field]} characters`);
     }
     out[field] = v;
