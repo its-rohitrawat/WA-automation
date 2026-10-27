@@ -6,11 +6,13 @@ import { fromIstDate, istDate } from '../util/time.ts';
 // set. One uptime_log row at every service start, one each time Health.isUp() changes, and a down row at a clean stop,
 // so the time the service was stopped counts as down. After a crash the last state stands until the next start: the
 // heartbeat monitor sees that gap, this log cannot. A down row keeps why, when the agent knows (migration v10): a fixed
-// code, never free text; rows written before v10 have none.
+// code from Health.downReason() or 'stopped', never free text; rows written before v10 have none, and a code this
+// version does not know reads as none. An outage shows the reason of its first down row: a stop followed by a start
+// that is down for another cause stays one outage, "The service was stopped" (the row of the later cause is kept).
 
 const DAY_MS = 86_400_000;
 
-/** Why the agent went down, as stored in uptime_log.reason. */
+/** Why the agent went down, as stored in uptime_log.reason. Checked here, not in the table: a new code needs no rebuild. */
 export const DOWN_REASONS = {
   stopped: 'The service was stopped',
   whatsapp_logged_out: "WhatsApp was unlinked from the founder's phone",
@@ -23,24 +25,6 @@ export const DOWN_REASONS = {
 export type DownReason = keyof typeof DOWN_REASONS;
 
 const isReason = (v: unknown): v is DownReason => typeof v === 'string' && Object.hasOwn(DOWN_REASONS, v);
-
-/**
- * Why Health.isUp() is false, from its snapshot, in the order isUp() checks; null when up or the cause is not one of
- * these. Reads only the WhatsApp state and the publish-failure fields, never the line's text beyond telling a Google
- * sign-in failure from other tracker failures.
- */
-export function downReason(
-  up: boolean,
-  s: { whatsapp: { state: string }; downSince: string | null; publishFailingSince: string | null; line: { text: string } },
-): DownReason | null {
-  if (up) return null;
-  if (s.whatsapp.state === 'logged_out') return 'whatsapp_logged_out';
-  if (s.whatsapp.state === 'replaced') return 'whatsapp_replaced';
-  if (s.whatsapp.state === 'forbidden') return 'whatsapp_forbidden';
-  if (s.downSince !== null) return 'whatsapp_disconnected';
-  if (s.publishFailingSince !== null) return s.line.text.includes('Google sign-in') ? 'google_signin' : 'tracker_failing';
-  return null;
-}
 
 /** A down stretch, in epoch ms; end null while it is still going. reason: the first down row's, when it has one. */
 export interface Interval {
@@ -147,7 +131,7 @@ export class UptimeLog {
     this.#write(up, reason);
   }
 
-  /** From the app tick: a row only when up changed. reason: downReason(up, snapshot). */
+  /** From the app tick: a row only when up changed. reason: Health.downReason(). */
   tick(up: boolean, reason: DownReason | null = null): void {
     if (up !== this.#last) this.#write(up, reason);
   }

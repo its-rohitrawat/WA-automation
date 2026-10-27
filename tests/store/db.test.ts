@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import { migrate, openDb } from '../../src/store/db.ts';
@@ -358,5 +359,12 @@ describe('migration v10 (dashboard: task history index, outage reasons)', () => 
     const schema = db.prepare('SELECT name, sql FROM sqlite_master ORDER BY name').all();
     migrate(db);
     expect(db.prepare('SELECT name, sql FROM sqlite_master ORDER BY name').all()).toEqual(schema);
+  });
+});
+
+describe('applied migrations never change', () => {
+  it('v1 to v10 stay byte for byte as written (a change goes in a new version after them, never an edit)', () => {
+    const text = MIGRATIONS.filter((m) => m.version <= 10).map((m) => `${m.version}\n${m.sql}`).join('\n---\n');
+    expect(createHash('sha256').update(text).digest('hex')).toBe('b8f67ddeff8d2f33bda23181a83a4c7b6609c60b9efd8312f0c0ededacf8fb51');
   });
 });

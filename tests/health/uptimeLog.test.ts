@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dailyDown, downIntervals, downReason, uptimeRatio, UptimeLog } from '../../src/health/uptimeLog.ts';
+import { dailyDown, downIntervals, uptimeRatio, UptimeLog } from '../../src/health/uptimeLog.ts';
 import { openDb, type Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 
@@ -187,21 +187,6 @@ describe('UptimeLog review fixes', () => {
 });
 
 describe('UptimeLog reasons (migration v10)', () => {
-  const snap = (o: { state?: string; downSince?: string | null; failing?: string | null; text?: string } = {}) => ({
-    whatsapp: { state: o.state ?? 'open' }, downSince: o.downSince ?? null, publishFailingSince: o.failing ?? null, line: { text: o.text ?? '✅' },
-  });
-
-  it('tells why Health is down, in the order isUp checks', () => {
-    expect(downReason(true, snap({ state: 'logged_out' }))).toBeNull();
-    expect(downReason(false, snap({ state: 'logged_out', downSince: 'x' }))).toBe('whatsapp_logged_out');
-    expect(downReason(false, snap({ state: 'replaced' }))).toBe('whatsapp_replaced');
-    expect(downReason(false, snap({ state: 'forbidden' }))).toBe('whatsapp_forbidden');
-    expect(downReason(false, snap({ state: 'closed', downSince: 'x', failing: 'y' }))).toBe('whatsapp_disconnected');
-    expect(downReason(false, snap({ failing: 'y', text: '❌ Google sign-in expired. Run: npm run cli -- google-auth' }))).toBe('google_signin');
-    expect(downReason(false, snap({ failing: 'y', text: '⚠️ Tracker update failing since 19 Oct 10:00' }))).toBe('tracker_failing');
-    expect(downReason(false, snap())).toBeNull();
-  });
-
   it('stores the code on the down row only, and shows it in plain words', () => {
     const t = setup();
     t.log.start(true);
@@ -236,6 +221,25 @@ describe('UptimeLog reasons (migration v10)', () => {
   it('a row from before v10, with no reason, reads as none', () => {
     const t = setup();
     t.db.prepare("INSERT INTO uptime_log (at, up) VALUES ('2026-10-18T23:00:00.000Z', 0)").run();
+    expect(t.log.outages(1)[0]!.reason).toBeNull();
+  });
+});
+
+describe('UptimeLog reasons, review round 1', () => {
+  it('an outage that began before the window keeps the reason of its first down row', () => {
+    const t = setup('2026-09-01T00:00:00.000Z');
+    t.log.start(true);
+    t.clock.set('2026-09-02T00:00:00.000Z');
+    t.log.tick(false, 'whatsapp_forbidden');
+    t.clock.set('2026-09-03T00:00:00.000Z');
+    new UptimeLog(t.db, t.clock).start(false, 'google_signin');
+    t.clock.set('2026-10-20T00:00:00.000Z');
+    expect(t.log.outages(30)).toMatchObject([{ start: '2026-09-02T00:00:00.000Z', reason: "WhatsApp refused the founder's number" }]);
+  });
+
+  it('a stored code this version does not know reads as none', () => {
+    const t = setup();
+    t.db.prepare("INSERT INTO uptime_log (at, up, reason) VALUES ('2026-10-18T23:00:00.000Z', 0, 'some_future_code')").run();
     expect(t.log.outages(1)[0]!.reason).toBeNull();
   });
 });
