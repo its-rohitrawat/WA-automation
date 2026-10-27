@@ -1,0 +1,115 @@
+import { afterEach, describe, expect, it } from 'vitest';
+import { parseEnv } from '../../src/config/env.ts';
+import { SettingsStore } from '../../src/config/settingsStore.ts';
+import { UptimeLog } from '../../src/health/uptimeLog.ts';
+import { SpendGuard } from '../../src/spend/spendGuard.ts';
+import type { Db } from '../../src/store/db.ts';
+import { manualClock } from '../../src/util/clock.ts';
+import { AuditLog } from '../../src/web/audit.ts';
+import { registerControlApi } from '../../src/web/routes/controlScreens.ts';
+import { NOW, seededDb } from '../helpers/db.ts';
+import { bootDashboard, OWNER } from '../helpers/web.ts';
+
+const closers: (() => Promise<void>)[] = [];
+afterEach(async () => {
+  for (const c of closers.splice(0)) await c();
+});
+
+const NUMBER = '919812345678';
+
+async function boot(o: { linked?: boolean } = {}) {
+  const db = seededDb();
+  const clock = manualClock(NOW);
+  const audit = new AuditLog(db, clock);
+  const spend = new SpendGuard({ db, clock, capUsd: 10 });
+  const uptime = new UptimeLog(db, clock);
+  uptime.start(true);
+  const settings = new SettingsStore({ db, env: parseEnv({ REPORT_RECIPIENT: NUMBER }), clock, spareLinked: () => o.linked ?? true });
+  let sessions!: Parameters<Parameters<typeof bootDashboard>[0]['mount']>[1]['sessions'];
+  const h = await bootDashboard({
+    db, clock,
+    mount: (router, x) => {
+      sessions = x.sessions;
+      registerControlApi(router, {
+        ...x, db, clock, audit, spend, voiceLocal: true, uptime: { log: uptime }, isOwner: (e) => e.toLowerCase() === OWNER, settings, sessions: x.sessions,
+      });
+    },
+  });
+  closers.push(() => h.close());
+  return { db, h, audit, sessions };
+}
+
+const auditRows = (db: Db) => db.prepare('SELECT actor, event, kind, detail FROM audit_log ORDER BY id').all();
+
+describe('control API: reads', () => {
+  it('needs a signed-in owner', async () => {
+    const { h } = await boot();
+    for (const path of ['/dashboard/api/usage', '/dashboard/api/uptime', '/dashboard/api/audit', '/dashboard/api/settings', '/dashboard/api/session']) {
+      expect((await h.get(path, { cookie: null })).status, path).toBe(401);
+    }
+  });
+
+  it('serves usage, uptime, audit and the masked settings', async () => {
+    const { h } = await boot();
+    expect(await h.get('/dashboard/api/usage')).toMatchObject({ status: 200, json: { today: { capUsd: 10 }, days: expect.any(Array) } });
+    expect(await h.get('/dashboard/api/uptime')).toMatchObject({ status: 200, json: { source: 'agent', ratios: expect.any(Object) } });
+    expect(await h.get('/dashboard/api/audit?kind=config')).toMatchObject({ status: 200, json: { rows: [], next: null } });
+    expect((await h.get('/dashboard/api/audit?kind=chat')).status).toBe(400);
+    const s = await h.get('/dashboard/api/settings');
+    expect(s).toMatchObject({ status: 200, json: { recipientMasked: '…5678' } });
+    expect(JSON.stringify(s.json)).not.toContain('9812345678');
+  });
+
+  it("gives the owner's own session", async () => {
+    const { h } = await boot();
+    expect(await h.get('/dashboard/api/session')).toMatchObject({ status: 200, json: { email: OWNER, createdAt: NOW, expiresAt: expect.any(String) } });
+  });
+});
+
+describe('control API: settings', () => {
+  it('changes a setting with CSRF, audits it, and answers with the masked view', async () => {
+    const { db, h } = await boot();
+    expect((await h.post('/dashboard/api/settings', { body: { key: 'reportDays', value: 'daily' }, csrf: null })).status).toBe(403);
+    expect(await h.post('/dashboard/api/settings', { body: { key: 'reportDays', value: 'daily' } })).toMatchObject({ status: 200, json: { reportDays: 'daily' } });
+    expect(auditRows(db)).toEqual([{ actor: OWNER, event: 'settings.reportDays', kind: 'config', detail: 'Morning briefing days set to every day' }]);
+  });
+
+  it('needs the new number typed twice, and never sends it back', async () => {
+    const { db, h } = await boot();
+    const other = '917012349999';
+    expect(await h.post('/dashboard/api/settings', { body: { key: 'reportRecipient', value: other } })).toMatchObject({ status: 422, json: { error: { field: 'confirm' } } });
+    expect(await h.post('/dashboard/api/settings', { body: { key: 'reportRecipient', value: other, confirm: '917012340000' } }))
+      .toMatchObject({ status: 422, json: { error: { message: 'The two numbers do not match' } } });
+    const ok = await h.post('/dashboard/api/settings', { body: { key: 'reportRecipient', value: other, confirm: '+91 70123 49999' } });
+    expect(ok).toMatchObject({ status: 200, json: { recipientMasked: '…9999' } });
+    expect(JSON.stringify(ok.json)).not.toContain('7012349999');
+    expect(JSON.stringify(auditRows(db))).not.toContain('7012349999');
+  });
+
+  it('refuses to switch on before the spare phone is linked, and bad keys or values', async () => {
+    const { h } = await boot({ linked: false });
+    expect(await h.post('/dashboard/api/settings', { body: { key: 'reportEnabled', value: true } })).toMatchObject({ status: 409, json: { error: { field: 'reportEnabled' } } });
+    expect((await h.post('/dashboard/api/settings', { body: { key: 'dailySpendCap', value: 100 } })).status).toBe(422);
+    expect((await h.post('/dashboard/api/settings', { body: { key: 'reportDays', value: 'sundays' } })).status).toBe(422);
+    expect((await h.post('/dashboard/api/settings', { body: [] })).status).toBe(422);
+  });
+});
+
+describe('control API: sign out everywhere', () => {
+  it('ends every session of the owner, clears the cookie and audits it', async () => {
+    const { db, h, sessions } = await boot();
+    const second = sessions.create(OWNER).id;
+    const r = await h.post('/dashboard/api/session/signout-everywhere');
+    expect(r).toMatchObject({ status: 200, json: { ended: 2 } });
+    expect(String(r.headers['set-cookie'])).toMatch(/^wa_session=; HttpOnly; SameSite=Lax; Path=\/dashboard; Max-Age=0/);
+    expect((await h.get('/dashboard/api/session')).status).toBe(401);
+    expect((await h.get('/dashboard/api/session', { cookie: second })).status).toBe(401);
+    expect(auditRows(db)).toEqual([{ actor: OWNER, event: 'auth.signout_everywhere', kind: 'auth', detail: 'Signed out everywhere (2 sessions)' }]);
+  });
+
+  it('needs CSRF', async () => {
+    const { h } = await boot();
+    expect((await h.post('/dashboard/api/session/signout-everywhere', { csrf: null })).status).toBe(403);
+    expect((await h.get('/dashboard/api/session')).status).toBe(200);
+  });
+});
