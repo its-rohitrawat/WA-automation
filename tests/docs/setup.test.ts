@@ -680,3 +680,92 @@ describe('owner dashboard setup (SETUP-mac.md section 10, D1 task 8)', () => {
     expect(setup).toMatch(/update step must run `npm ci` after pulling/);
   });
 });
+
+describe('dashboard first, commands as the fallback (D2 task 5, D3 task 10)', () => {
+  const setup = () => read('docs/SETUP.md');
+  /** A "### title" section of SETUP.md, up to the next heading. */
+  const sub = (title: string) => {
+    const s = setup();
+    const start = s.indexOf(`\n### ${title}\n`);
+    expect(start, title).toBeGreaterThan(-1);
+    return s.slice(start, s.indexOf('\n#', start + 1));
+  };
+  const GROUPS = 'Choosing client groups in the dashboard';
+  const FIX = 'Fixing a connection in the dashboard';
+
+  it('both sections sit under "Owner dashboard", with setup mode explained', () => {
+    const s = setup();
+    const owner = s.indexOf('\n## Owner dashboard\n');
+    const next = s.indexOf('\n## ', owner + 1);
+    for (const title of [GROUPS, FIX]) {
+      const at = s.indexOf(`\n### ${title}\n`);
+      expect(at, title).toBeGreaterThan(owner);
+      expect(at, title).toBeLessThan(next);
+    }
+    expect(s.slice(owner, next)).toMatch(/\*\*setup mode\*\*/);
+    expect(s.slice(owner, next)).toContain('With the dashboard off, a missing link still stops the service, as before.');
+  });
+
+  it('choosing groups follows the Manage groups screen, word for word where it quotes it', () => {
+    const g = sub(GROUPS);
+    const screen = read('src/web/public/views/groups.js');
+    const tabs = read('src/web/public/views/clients.js');
+    expect(g).toContain('**Clients → Manage groups**');
+    expect(tabs).toContain('>Manage groups</button>');
+    for (const quoted of ['Saved. The agent picks up the new groups within 2 seconds.', "can't be changed once the client has tasks", 'More: meeting matching']) {
+      expect(g, quoted).toContain(quoted);
+      expect(screen, quoted).toContain(quoted);
+    }
+    for (const button of ['Approve', 'Remove']) {
+      expect(g, button).toContain(`**${button}**`);
+      expect(screen, button).toContain(`>${button}</button>`);
+    }
+    expect(g).toMatch(/\*\*Pick it carefully: it can't be changed once the client has tasks\.\*\*/);
+    expect(g).toContain('No restart is needed.');
+    expect(g).toContain('Nothing is deleted');
+    // The hand edit stays documented as the fallback.
+    expect(g).toMatch(/\*\*Fallback, when the dashboard can't be reached:\*\* edit `allowed-groups\.json` by hand as in step 5/);
+  });
+
+  it('fixing a connection starts in the dashboard, with every Connections button named as the screen names it', () => {
+    const f = sub(FIX);
+    const screen = read('src/web/public/views/connections.js');
+    expect(f).toContain('**Fix now**');
+    expect(read('src/web/public/views/overview.js')).toContain('>Fix now</button>');
+    for (const button of ['Reconnect', 'Link phone', 'Add Google account', 'Upload tracker now', 'Test connection', 'Send test beat']) {
+      expect(f, button).toContain(`**${button}**`);
+      expect(screen, button).toContain(`'${button}'`);
+    }
+    expect(f).toContain("Never scan it with the founder's phone");
+    expect(f).toContain('the service does not need to be stopped');
+    // The link timeout it states is the code's.
+    expect(f).toContain('after 5 minutes without a scan');
+    expect(read('src/wa/linkSession.ts')).toMatch(/const TIMEOUT_MS = 5 \* 60_000;/);
+    // The commands stay as the fallback, with their rules.
+    expect(f).toMatch(/\*\*Fallback, when the dashboard can't be reached:\*\*/);
+    for (const cmd of ['npm run cli -- link`', 'npm run cli -- link-sender`', 'npm run cli -- google-auth`']) expect(f, cmd).toContain(cmd);
+    expect(f).toContain('`link` and `link-sender` need the service stopped first; after `google-auth`, restart the service.');
+  });
+
+  it('step 5 and the status line table point to the dashboard sections by their real titles', () => {
+    const s = setup();
+    expect(s).toContain(`see "${GROUPS}" under "Owner dashboard"`);
+    const status = s.slice(s.indexOf('\n## What the status line means\n'));
+    expect(status.slice(0, 400)).toContain(`see "${FIX}" under "Owner dashboard"`);
+  });
+
+  it('SETUP-mac section 10 sends the owner to the same two sections, keeping the commands as the fallback', () => {
+    const mac = read('docs/SETUP-mac.md');
+    const start = mac.indexOf('## 10. Owner dashboard (optional)');
+    const s = mac.slice(start, mac.indexOf('\n## ', start + 1));
+    expect(s).toContain(`7. **Client groups:**`);
+    expect(s).toContain(`SETUP.md, "${GROUPS}"`);
+    expect(s).toContain(`8. **Connections:**`);
+    expect(s).toContain(`SETUP.md, "${FIX}"`);
+    expect(s).toMatch(/stay the fallback/);
+    expect(mac).toContain('Once the owner dashboard is set up (section 10), choosing groups and fixing a connection start in the dashboard; these commands stay as the fallback.');
+    // Both steps come after signing in and before the way to switch it off.
+    expect(s.indexOf('**Open**')).toBeLessThan(s.indexOf('7. **Client groups:**'));
+    expect(s.indexOf('8. **Connections:**')).toBeLessThan(s.indexOf('DASHBOARD_ENABLED=false'));
+  });
+});

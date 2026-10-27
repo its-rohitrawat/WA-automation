@@ -114,7 +114,7 @@ npm run cli -- list-groups
 
 1. `google-auth` prints a link. Open it in a browser **on this PC**, signed in as the mailbox account, and allow access. (After you allow, Google sends the answer back to this same PC at 127.0.0.1, so a browser on another computer will not work.)
 2. `link` shows a QR code. On the founder's phone: WhatsApp > Settings > Linked devices > Link a device. The phone then lists this link as "WA Agent - Tracker". With an empty allow-list nothing is stored.
-3. `list-groups` prints every group's id and name on screen only. In an admin window or the waagent window, open `notepad C:\wa-agent\config\allowed-groups.json` and add the 1-2 pilot groups, like this:
+3. `list-groups` prints every group's id and name on screen only. (With the owner dashboard on, you can choose the groups there instead: see "Choosing client groups in the dashboard" under "Owner dashboard".) In an admin window or the waagent window, open `notepad C:\wa-agent\config\allowed-groups.json` and add the 1-2 pilot groups, like this:
 
 ```json
 {
@@ -462,6 +462,43 @@ Set `REPORT_ENABLED=false` (or leave it empty) in `.env`, then restart the servi
 
 The owner dashboard and the website run on the office Mac only. Set them up with [SETUP-mac.md](SETUP-mac.md), section 10 "Owner dashboard", then [GO-LIVE.md](GO-LIVE.md) for the company domain. From that update on, the update step must run `npm ci` after pulling.
 
+With the dashboard on, the service also starts when WhatsApp or Google is not linked yet (**setup mode**): the Overview then shows what to link, and you link it from the dashboard. With the dashboard off, a missing link still stops the service, as before.
+
+### Choosing client groups in the dashboard
+
+With the dashboard on, this replaces editing `allowed-groups.json` by hand (step 5).
+
+1. Open **Clients → Manage groups**. It lists every WhatsApp group the founder's phone is in. Search by name.
+2. To start tracking a group, press **Approve** (on a computer you can also drag it to the right; on a phone, switch it on). A panel opens:
+   - **Client name**: filled in from the group name; change it if needed.
+   - **Code**: 3–4 capital letters, suggested for you. Every task number starts with it (for example `SHA-001`). **Pick it carefully: it can't be changed once the client has tasks.** A group that was a client before keeps its old code.
+   - **More: meeting matching** (optional): the same meeting keywords and email domains as in "Meeting summaries" below.
+3. Changes wait in a bar at the bottom ("1 change not saved"). Press **Save**: "Saved. The agent picks up the new groups within 2 seconds." No restart is needed. If a change is refused (for example a code already in use), the panel of that group opens and says why.
+4. To stop tracking a group, press **Remove** and **Save**. Nothing is deleted: its tasks are kept, and approving it again later brings it back with the same code.
+
+Every saved change is recorded in **Audit logs**. The dashboard writes the same `config/allowed-groups.json` file, so `npm run cli -- status` shows the new clients as before.
+
+When WhatsApp is not connected, the page shows the last list it had ("WhatsApp isn't connected") and you can still approve from it.
+
+**Fallback, when the dashboard can't be reached:** edit `allowed-groups.json` by hand as in step 5 (`list-groups`, then the file). Do not edit the file by hand while someone saves in the dashboard.
+
+### Fixing a connection in the dashboard
+
+With the dashboard on, start here when a connection is down. The **Overview** shows a banner naming the part that needs you; **Fix now** opens it on **Connections**, which has one card per connection:
+
+| Card | Button | What happens |
+|---|---|---|
+| Founder WhatsApp | **Reconnect** | A QR code appears. On the founder's phone: WhatsApp > Settings > Linked devices > Link a device, and scan it. The tracker carries on with the new link; the service does not need to be stopped. |
+| Spare WhatsApp (morning report) | **Link phone** | The same, scanned from the **spare** phone. Never scan it with the founder's phone: the agent refuses to send from the founder's own number. |
+| Google | **Reconnect**, or **Add Google account** | Google's sign-in opens. Sign in with that account and allow access; you come back to Connections. |
+| Tracker on Drive | **Upload tracker now** | Uploads the tracker at once. |
+| Claude | **Test connection** | Checks the AI key works. It costs nothing. |
+| Monitoring | **Send test beat** | Sends one heartbeat to UptimeRobot. |
+
+A link stops by itself after 5 minutes without a scan, and **Cancel** puts back the link that was there before. Every reconnect is recorded in **Audit logs**. Once the company address is set up ([GO-LIVE.md](GO-LIVE.md)), do Google's **Reconnect** from the dashboard at that address, not from `localhost`.
+
+**Fallback, when the dashboard can't be reached:** the commands in this guide still work: `npm run cli -- link` (founder), `npm run cli -- link-sender` (spare phone) and `npm run cli -- google-auth` (Google), each as described in its section. `link` and `link-sender` need the service stopped first; after `google-auth`, restart the service.
+
 ## Everyday commands (run in the waagent window)
 
 | Command | What it does |
@@ -503,6 +540,8 @@ Notes:
 - **Limit of `reprocess`:** it cannot add a missed second task from a message that already produced a task (or that already counted as a reminder or an update on a task). If the AI missed a second piece of work in an old message, add a note to an existing task with `task edit <code> --latest-progress "..."`, or tell the team. There is no "task add" command yet.
 
 ## What the status line means
+
+With the owner dashboard on, fix a connection from the dashboard first (see "Fixing a connection in the dashboard" under "Owner dashboard"). The commands below are the fallback.
 
 In `npm run cli -- status` it appears as the `Health:` line. It is also the first line on the Overview tab. The Google sign-in and Tracker update lines are never shown in the workbook, because the workbook cannot upload while those are failing; look at `status` instead. If several things are wrong at once, the line shows the most serious one.
 

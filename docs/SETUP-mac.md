@@ -86,6 +86,8 @@ Exactly as SETUP.md step 5:
 2. `link` shows a QR code. Scan it from the founder's phone: WhatsApp > Settings > Linked devices > Link a device. Make the Terminal window big enough to show the whole QR code. The founder's phone then lists this link as "WA Agent - Tracker".
 3. `list-groups` prints the group ids. Add the 1–2 pilot groups with `nano config/allowed-groups.json`, in the format shown in SETUP.md.
 
+Once the owner dashboard is set up (section 10), choosing groups and fixing a connection start in the dashboard; these commands stay as the fallback.
+
 ## 6. Install and start the service (normal Terminal window)
 
 ```sh
@@ -309,6 +311,8 @@ The agent can show a private owner dashboard in the browser, at `http://localhos
    `DASHBOARD_OWNER_EMAILS`: the Google accounts that may sign in, separated by commas. `DASHBOARD_PUBLIC_URL` stays empty until the company domain is set up (GO-LIVE.md). `UPTIMEROBOT_READ_KEY` is optional: a read-only key, never the main one.
 5. **Start the service again** (normal Terminal window; it was stopped in step 1): `sudo launchctl enable system/com.wa-agent` then `sudo launchctl bootstrap system /Library/LaunchDaemons/com.wa-agent.plist`. Later changes to `.env` need only a restart: `sudo launchctl kickstart -k system/com.wa-agent`.
 6. **Open** `http://localhost:8787/dashboard` in Chrome on this Mac and sign in with an owner email. Safari may refuse the sign-in on a `http://localhost` address.
+7. **Client groups:** from now on, choose them in **Clients → Manage groups**, as in SETUP.md, "Choosing client groups in the dashboard". Editing `config/allowed-groups.json` with `nano` stays the fallback.
+8. **Connections:** when one is down, start with **Fix now** on the Overview, as in SETUP.md, "Fixing a connection in the dashboard". The commands (`npm run cli -- link`, `link-sender`, `google-auth`, in the waagent window) stay the fallback when the dashboard can't be reached.
 
 To switch it off: set `DASHBOARD_ENABLED=false` in `.env` and restart. The agent carries on as before.
 
