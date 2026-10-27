@@ -1,3 +1,4 @@
+import type { IncomingMessage } from 'node:http';
 import type { SpendView } from '../../app.ts';
 import type { SettingsStore } from '../../config/settingsStore.ts';
 import { listAudit, parseAuditParams } from '../../control/auditQueries.ts';
@@ -11,7 +12,7 @@ import type { AuditLog } from '../audit.ts';
 import type { Guard } from '../guard.ts';
 import { sendJson } from '../http.ts';
 import type { Router } from '../router.ts';
-import { clearSessionCookie, type SessionStore } from '../sessions.ts';
+import { clearSessionCookie, hashToken, type SessionStore } from '../sessions.ts';
 import { actionSession, controlled, readBody, type ActionGuard } from './respond.ts';
 
 // The control screens' API (D5 Task 1-4 logic, served here): AI usage, uptime, audit logs, the morning briefing's
@@ -31,8 +32,11 @@ export interface ControlApiDeps extends ActionGuard {
   isOwner: (email: string) => boolean;
   settings: Pick<SettingsStore, 'view' | 'set'>;
   sessions: Pick<SessionStore, 'destroyAllFor'>;
-  /** cookieSecure(DASHBOARD_PUBLIC_URL): the session cookie is cleared with the attributes it was set with. */
-  secureCookies: boolean;
+  /**
+   * Whether this request came in over the https public address (secureRequest): the session cookie is cleared with the
+   * attributes sign-in set it with, so a browser on http://localhost (where Secure cookies are dropped) is signed out too.
+   */
+  secureFor: (req: IncomingMessage) => boolean;
 }
 
 const digits = (v: unknown) => (typeof v === 'string' ? v.replace(/\D/g, '') : '');
@@ -70,7 +74,9 @@ export function registerControlApi(router: Router, d: ControlApiDeps): void {
 
   read('/dashboard/api/session', ({ req }) => {
     const s = d.guard.requireOwner(req);
-    return { email: s.email, createdAt: s.createdAt, expiresAt: s.expiresAt };
+    // The browser label sign-in saved (cleaned there, for example "Safari on macOS"); null for an older session.
+    const row = d.db.prepare('SELECT agent_label FROM web_sessions WHERE id_hash = ?').get(hashToken(s.id)) as { agent_label: string | null } | undefined;
+    return { email: s.email, createdAt: s.createdAt, expiresAt: s.expiresAt, browser: row?.agent_label ?? null };
   });
 
   router.post('/dashboard/api/session/signout-everywhere', controlled((ctx) => {
@@ -81,7 +87,7 @@ export function registerControlApi(router: Router, d: ControlApiDeps): void {
       d.audit.record({ actor: s.email, event: 'auth.signout_everywhere', kind: 'auth', detail: `Signed out everywhere (${n} ${n === 1 ? 'session' : 'sessions'})`, requestId: ctx.requestId });
       return n;
     });
-    ctx.res.setHeader('Set-Cookie', clearSessionCookie({ secure: d.secureCookies }));
+    ctx.res.setHeader('Set-Cookie', clearSessionCookie({ secure: d.secureFor(ctx.req) }));
     sendJson(ctx.res, 200, { ended });
   }));
 }

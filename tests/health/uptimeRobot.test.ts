@@ -151,6 +151,7 @@ describe('uptimeReport', () => {
       ratios: { d1: 100, d7: 99.5, d30: 98.25 },
       days: [{ day: '2026-10-19', downMinutes: 10, longestMinutes: 10 }, { day: '2026-10-20', downMinutes: 10, longestMinutes: 10 }],
       outages: [{ start: '2026-10-19T18:20:00.000Z', end: '2026-10-19T18:40:00.000Z', minutes: 20, reason: 'No heartbeat' }],
+      knownSinceDay: null, // UptimeRobot keeps its own history
     });
   });
 
@@ -162,6 +163,7 @@ describe('uptimeReport', () => {
         source: 'agent',
         days: [{ day: '2026-10-20', downMinutes: 30, longestMinutes: 30 }],
         outages: [{ minutes: 30, reason: null }],
+        knownSinceDay: '2026-10-20', // the agent log's first row: earlier days are not known
       });
       expect(r.ratios.d1).toBeCloseTo(100 * (1 - 30 / 720), 2);
     }

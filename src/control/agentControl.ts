@@ -50,11 +50,16 @@ export interface AgentControlDeps {
   gateway: { status(): GatewayStatus };
   env: Pick<Env, 'MEETINGS_ENABLED' | 'VOICE_STT_PROVIDER'>;
   clock: Clock;
-  /** The morning report's spare-number sender, when the report module is open. */
-  sender?: { status(): SenderStatus; maskedRecipient(): string };
+  /**
+   * The morning report's spare-number sender, when the report module is open. A function is read on each call: the
+   * dashboard's live briefing opens, swaps and closes its sender while the service runs (undefined while none is open).
+   */
+  sender?: SenderView | (() => SenderView | undefined);
   /** The uptime heartbeat, when HEARTBEAT_URL is set. */
   heartbeat?: { lastBeatAt(): Date | null };
 }
+
+type SenderView = { status(): SenderStatus; maskedRecipient(): string };
 
 const FOUNDER_DEVICE = 'WA Agent - Tracker';
 const SPARE_DEVICE = 'WA Agent - Morning report';
@@ -80,6 +85,11 @@ export class AgentControl {
         return { state: 'down', label: 'Taken over by another copy' };
       case 'forbidden':
         return { state: 'down', label: 'Refused by WhatsApp' };
+      // Setup mode: no founder link yet. The front end keys its "Link the founder's phone" call to action on this label.
+      case 'not_linked':
+        return { state: 'down', label: 'Not linked' };
+      case 'linking':
+        return { state: 'warn', label: 'Linking from the dashboard' };
       case 'open':
         return s.credsSaveFailures > 0 ? { state: 'warn', label: 'The session could not be saved' } : { state: 'ok', label: 'Connected' };
       default:
@@ -175,7 +185,8 @@ export class AgentControl {
   }
 
   connections(): Connections {
-    const { db, env, clock, sender, heartbeat } = this.#d;
+    const { db, env, clock, heartbeat } = this.#d;
+    const sender = typeof this.#d.sender === 'function' ? this.#d.sender() : this.#d.sender;
     const { health, spend } = this.#d.app;
     const snap = health.snapshot();
     const now = clock.now();

@@ -69,3 +69,6 @@
 
 /* the sort arrow points the other way for a descending sort */
 th button.sort-desc svg { transform: rotate(180deg); }
+
+/* the Overview uptime strip: a day before the agent log began */
+.strip i.u { background: var(--line-2); opacity: .5; }

@@ -44,6 +44,10 @@ export function recipientJid(digits: string): string {
   return `${digits}@s.whatsapp.net`;
 }
 
+/** The founder reader's number, as given or read now. */
+const founderOf = (o: Pick<SenderGatewayOptions, 'founderNumber'>): string | undefined =>
+  typeof o.founderNumber === 'function' ? o.founderNumber() : o.founderNumber;
+
 /**
  * The phone number a saved link belongs to: the digits of creds.me.id before the device part (":5") or "@".
  * Undefined while nothing is linked.
@@ -224,9 +228,10 @@ export interface SenderGatewayOptions {
   recipient: string;
   /**
    * The number the founder-number reader is linked to (digits of its creds.me.id), which may differ from recipient. Like
-   * recipient, it never sends: a spare-number link to it is refused ('self_send').
+   * recipient, it never sends: a spare-number link to it is refused ('self_send'). A function is read at each check, so a
+   * founder relink from the dashboard is followed without making the sender again.
    */
-  founderNumber?: string;
+  founderNumber?: string | (() => string | undefined);
   factory: SenderSocketFactory;
   /** The spare number's session. Undefined when the stored session could not be opened or read. */
   auth: EncryptedAuth | undefined;
@@ -386,7 +391,7 @@ export class SenderGateway implements ReportSender {
   /** True when the saved link is the recipient's number or the founder reader's number. The founder's number never sends. */
   #linkedToFounder(auth: EncryptedAuth): boolean {
     const linked = linkedNumber(auth);
-    return linked !== undefined && (linked === this.#opts.recipient || linked === this.#opts.founderNumber);
+    return linked !== undefined && (linked === this.#opts.recipient || linked === founderOf(this.#opts));
   }
 
   #setState(state: SenderState, code: number | null): void {

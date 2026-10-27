@@ -203,6 +203,12 @@ export class UptimeLog {
     }));
   }
 
+  /** The IST day of the log's first row, or null while it is empty: the days before it are not known. */
+  knownSinceDay(): string | null {
+    const r = this.#db.prepare('SELECT MIN(at) AS at FROM uptime_log').get() as { at: string | null };
+    return r.at === null ? null : istDate(new Date(r.at));
+  }
+
   ratios(): UptimeRatios {
     const now = this.#clock.now().getTime();
     const { intervals, knownSince } = this.#intervals(30);

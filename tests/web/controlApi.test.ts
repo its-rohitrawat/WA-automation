@@ -33,7 +33,7 @@ async function boot(o: { linked?: boolean; secureCookies?: boolean; actionCapaci
       sessions = x.sessions;
       registerControlApi(router, {
         ...x, db, clock, audit, spend, voiceLocal: true, uptime: { log: uptime }, isOwner: (e) => e.toLowerCase() === OWNER, settings, sessions: x.sessions,
-        secureCookies: o.secureCookies ?? false,
+        secureFor: () => o.secureCookies ?? false,
       });
     },
   });
@@ -152,10 +152,10 @@ describe('control API review fixes', () => {
     expect(requestIds(db)).toEqual([expect.stringMatching(/^[0-9a-f]{12}$/), expect.stringMatching(/^[0-9a-f]{12}$/)]);
   });
 
-  it('the session answer has exactly the email and the two times', async () => {
+  it('the session answer has exactly the email, the two times and the browser label', async () => {
     const { h } = await boot();
     const r = await h.get('/dashboard/api/session');
-    expect(Object.keys(r.json as object).sort()).toEqual(['createdAt', 'email', 'expiresAt']);
+    expect(Object.keys(r.json as object).sort()).toEqual(['browser', 'createdAt', 'email', 'expiresAt']);
   });
 
   it('control changes count against the action limit; refused requests do not', async () => {

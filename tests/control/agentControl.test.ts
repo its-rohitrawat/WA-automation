@@ -76,6 +76,16 @@ describe('AgentControl.status', () => {
     }
   });
 
+  it('shows setup mode and a dashboard link in progress, on Overview and Connections alike', () => {
+    const t = setup();
+    t.setGateway('not_linked');
+    expect(part(t, 'whatsapp')).toMatchObject({ state: 'down', label: 'Not linked' });
+    expect(t.control.connections().founder).toMatchObject({ state: 'down', label: 'Not linked' });
+    t.setGateway('linking');
+    expect(part(t, 'whatsapp')).toMatchObject({ state: 'warn', label: 'Linking from the dashboard' });
+    expect(t.control.connections().founder).toMatchObject({ state: 'warn', label: 'Linking from the dashboard' });
+  });
+
   it('maps the tracker: updated, failing, failing for over an hour, and a Google sign-in failure', () => {
     const t = setup();
     expect(part(t, 'tracker')).toMatchObject({ state: 'ok' });

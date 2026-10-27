@@ -7,12 +7,12 @@ import { confirmDialog, errorText, failed, listen, loading, pill } from './ui.js
 
 /** @typedef {import('./registry.js').ScreenCtx} ScreenCtx */
 
-/** @param {{ email: string, createdAt: string, expiresAt: string }} s @param {string} name the owner's Google name, from the shell's account menu */
+/** @param {{ email: string, createdAt: string, expiresAt: string, browser?: string | null }} s @param {string} name the owner's Google name, from the shell's account menu */
 function render(s, name) {
   return `<div class="grid">
     <section class="card col-6"><div class="card-head"><h3>Owner</h3></div><div class="owner-row"><div class="avatar avatar-lg">${esc(initials(name, s.email))}</div><div><b>${esc(name || s.email)}</b><div class="muted-p">${esc(name ? `${s.email} · Google` : 'Google sign-in')}</div></div></div>
       <div class="note">${icon('info', 16)}<span>Owners are the Google emails listed on the Mac in .env (DASHBOARD_OWNER_EMAILS). Adding an owner is done there.</span></div></section>
-    <section class="card col-6"><div class="card-head"><h3>This session</h3>${pill({ cls: 'p-done', label: 'Active' })}</div><dl class="kv"><dt>Signed in</dt><dd>${esc(when(s.createdAt))}</dd><dt>Expires</dt><dd>${esc(when(s.expiresAt))}, or after 24 hours unused</dd></dl>
+    <section class="card col-6"><div class="card-head"><h3>This session</h3>${pill({ cls: 'p-done', label: 'Active' })}</div><dl class="kv"><dt>Browser</dt><dd>${esc(s.browser || 'Not recorded')}</dd><dt>Signed in</dt><dd>${esc(when(s.createdAt))}</dd><dt>Expires</dt><dd>${esc(when(s.expiresAt))}, or after 24 hours unused</dd></dl>
       <div class="row-gap row-top"><button class="btn btn-ghost" type="button" data-signout>${icon('logout', 16)}Sign out</button><button class="btn btn-ghost" type="button" data-everywhere>${icon('logout', 16)}Sign out everywhere</button></div></section>
     <section class="card col-6"><div class="card-head"><h3>Preferences</h3></div><dl class="kv"><dt>Time zone</dt><dd>Asia/Kolkata ${pill({ cls: 'p-muted', label: 'display only' })}</dd><dt>Appearance</dt><dd><button class="link" type="button" data-theme-switch>Switch light / dark</button></dd></dl></section>
     <section class="card col-6"><div class="card-head"><h3>Security</h3></div><ul class="timeline"><li><b>Google sign-in only.</b> No passwords stored.</li><li><b>Owner list on the Mac.</b> Anyone else is refused and logged.</li>

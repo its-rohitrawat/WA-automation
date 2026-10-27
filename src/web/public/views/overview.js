@@ -1,5 +1,6 @@
 // Overview: greeting, the five counts, the agent vitals monitor, AI spend, tasks by client, latest meetings, recent
 // activity and the tracker. Every value from the agent goes through esc() or textContent.
+import { get } from '../api.js';
 import { problems } from '../contract.js';
 import { $, $$, countUp, esc, gsap, icon, reduceMotion } from '../dom.js';
 import { ago, clock, greeting, today, usd, when } from '../format.js';
@@ -63,10 +64,11 @@ function monitor(status) {
       <div class="mon-body">
         <div><canvas id="ecg" aria-hidden="true"></canvas>
           <div class="eyebrow mon-eyebrow">Uptime · last 30 days</div>
-          <p class="strip-note">Uptime history starts with the next update.</p></div>
+          <div class="strip" data-uptime-strip aria-hidden="true"></div>
+          <p class="strip-note" data-uptime-note>Loading the uptime history…</p></div>
         <div class="readouts">
           <div class="readout"><div class="t">Status</div><div class="v">${esc(word)}</div><div class="s">${esc(status ? (p.length ? p.length === 1 ? '1 part needs you' : `${p.length} parts need you` : 'every part answering') : '…')}</div></div>
-          <div class="readout"><div class="t">Uptime 30 d</div><div class="v">—</div><div class="s">from the next update</div></div>
+          <div class="readout"><div class="t">Uptime 30 d</div><div class="v" data-uptime-ratio>—</div><div class="s" data-uptime-source>…</div></div>
           <div class="readout"><div class="t">Last message</div><div class="v">${esc(status?.lastMessageAt ? ago(status.lastMessageAt).replace(' ago', '') : '—')}</div><div class="s">WhatsApp</div></div>
         </div>
       </div>
@@ -118,6 +120,47 @@ export function afterOverview(root, status, opts = { animate: true }) {
   }
   if (animate) gsap.from($$('.sbar .track i', root), { scaleX: 0, duration: 0.9, ease: 'expo.out', stagger: 0.02, delay: 0.15 });
   startEcg(root);
+  void fillUptime(root);
+}
+
+/** @typedef {{ source: 'uptimerobot' | 'agent', ratios: { d30: number | null }, days: { day: string, downMinutes: number, longestMinutes: number }[], knownSinceDay: string | null }} Uptime */
+
+/** How long one /uptime answer is reused across the Overview's redraws. */
+const UPTIME_TTL_MS = 5 * 60_000;
+/** @type {{ at: number, data: Promise<Uptime> } | null} */
+let uptimeCache = null;
+
+/** The 30-day strip and ratio: one square a day, green when never down, amber under an hour down, red from an hour. @param {HTMLElement} root */
+async function fillUptime(root) {
+  const strip = $('[data-uptime-strip]', root);
+  const note = $('[data-uptime-note]', root);
+  if (!strip || !note) return;
+  if (!uptimeCache || Date.now() - uptimeCache.at > UPTIME_TTL_MS) uptimeCache = { at: Date.now(), data: get('/uptime') };
+  /** @type {Uptime} */
+  let u;
+  try {
+    u = await uptimeCache.data;
+  } catch {
+    uptimeCache = null; // the next redraw asks again
+    if (strip.isConnected) note.textContent = 'The uptime history could not be loaded.';
+    return;
+  }
+  if (!strip.isConnected) return; // redrawn meanwhile: that draw fills its own strip
+  const known = u.knownSinceDay;
+  strip.replaceChildren(...u.days.map((d) => {
+    const i = document.createElement('i');
+    const unknown = known === null ? u.source === 'agent' : d.day < known;
+    i.className = unknown ? 'u' : d.downMinutes === 0 ? '' : d.downMinutes < 60 ? 'w' : 'd';
+    i.setAttribute('data-tip', unknown ? `${d.day} · not recorded` : d.downMinutes === 0 ? `${d.day} · up all day` : `${d.day} · down ${d.downMinutes} min`);
+    return i;
+  }));
+  const ratio = $('[data-uptime-ratio]', root);
+  const source = $('[data-uptime-source]', root);
+  if (ratio) ratio.textContent = u.ratios.d30 === null ? '—' : `${u.ratios.d30.toFixed(u.ratios.d30 === 100 ? 0 : 2)}%`;
+  if (source) source.textContent = u.source === 'uptimerobot' ? 'UptimeRobot' : 'agent log';
+  const firstDay = u.days[0]?.day;
+  note.textContent = known !== null && firstDay !== undefined && known > firstDay ? `Recorded since ${known}.` : '';
+  note.hidden = note.textContent === '';
 }
 
 let ecgRaf = 0;

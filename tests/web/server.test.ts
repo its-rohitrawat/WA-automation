@@ -102,8 +102,13 @@ describe('web server: routing', () => {
       expect(r.headers.get('content-type')).toBe('application/json; charset=utf-8');
       expect(await r.json()).toEqual({ error: { code: 'not_found', message: 'Not found.' } });
     }
+    // A screen path takes GET and HEAD only: 405 with Allow, never the shell.
     const post = await fetch(`${s.base}/dashboard/tasks`, { method: 'POST', body: '{}' });
-    expect(post.status).toBe(404);
+    expect(post.status).toBe(405);
+    expect(post.headers.get('allow')).toBe('GET, HEAD');
+    expect(await post.json()).toEqual({ error: { code: 'method_not_allowed', message: 'Method not allowed.' } });
+    // A path nothing serves stays 404 whatever the method.
+    expect((await fetch(`${s.base}/dashboard/api/nope`, { method: 'POST', body: '{}' })).status).toBe(404);
   });
 
   it('serves index.html for /dashboard and every /dashboard/<screen> path', async () => {

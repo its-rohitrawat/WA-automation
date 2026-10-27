@@ -173,13 +173,14 @@ export class ReportScheduler {
     this.#sender = o.sender;
   }
 
-  /**
-   * A newly linked spare phone's sender (D3), used from the next tick. A send already in flight finishes with the sender
-   * it started with. The old sender is stopped unless a send is using it (it then disconnects by itself afterwards).
-   */
   /** The current sender's masked recipient ("…5678"). */
   maskedRecipient(): string {
     return this.#sender.maskedRecipient();
+  }
+
+  /** The sender the next tick uses (its status shows on the dashboard's Connections screen). */
+  sender(): ReportSender {
+    return this.#sender;
   }
 
   /** Resolves once no send is in flight (at once when none is). */
@@ -187,6 +188,10 @@ export class ReportScheduler {
     while (this.#inFlight) await this.#inFlight.catch(() => undefined);
   }
 
+  /**
+   * A newly linked spare phone's sender (D3), used from the next tick. A send already in flight finishes with the sender
+   * it started with. The old sender is stopped unless a send is using it (it then disconnects by itself afterwards).
+   */
   replaceSender(next: ReportSender): void {
     const old = this.#sender;
     if (old === next) return;

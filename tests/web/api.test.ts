@@ -169,6 +169,6 @@ describe('read API', () => {
       r.on('error', reject);
       r.end();
     });
-    expect(post).toBe(404); // no POST route: never the read answer
+    expect(post).toBe(405); // no POST route: never the read answer, and the path says which methods it takes
   });
 });

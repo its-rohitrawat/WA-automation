@@ -73,7 +73,8 @@ export class AuditLog {
 
   /**
    * Newest first (by entry id, which follows the order of recording). `before` is the id of the last entry already
-   * shown, for the next page. `limit` is 1-500, default 100.
+   * shown, for the next page. `limit` is 1-500, default 100. For tests and tools only: the dashboard's Audit screen
+   * reads through src/control/auditQueries.ts (filters, masked emails), and no route serves this list.
    */
   list(o: { kind?: AuditKind; before?: number; limit?: number } = {}): AuditEntry[] {
     const wanted = o.limit !== undefined && Number.isFinite(o.limit) ? Math.floor(o.limit) : 100;

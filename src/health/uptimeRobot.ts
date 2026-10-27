@@ -161,6 +161,8 @@ export interface UptimeReport {
   ratios: UptimeRatios;
   days: DayDown[];
   outages: Outage[];
+  /** The agent's log: the IST day it began (earlier days are unknown, not up). Null for UptimeRobot, or an empty log. */
+  knownSinceDay: string | null;
 }
 
 /** Down stretches in time order with overlaps joined, so no minute is counted twice. */
@@ -186,7 +188,7 @@ export async function uptimeReport(o: { log: UptimeLog; robot?: UptimeRobotClien
     // As with the agent's own log: only outages that reach into the window.
     const outages = reading.outages.filter((x) => (x.end === null ? now : Date.parse(x.end)) > now - days * DAY_MS);
     const intervals = merged(outages.map((x) => ({ start: Date.parse(x.start), end: x.end === null ? null : Date.parse(x.end) })), now);
-    return { source: 'uptimerobot', ratios: reading.ratios, days: dailyDown(intervals, now, days), outages };
+    return { source: 'uptimerobot', ratios: reading.ratios, days: dailyDown(intervals, now, days), outages, knownSinceDay: null };
   }
-  return { source: 'agent', ratios: o.log.ratios(), days: o.log.daily(days), outages: o.log.outages(days) };
+  return { source: 'agent', ratios: o.log.ratios(), days: o.log.daily(days), outages: o.log.outages(days), knownSinceDay: o.log.knownSinceDay() };
 }

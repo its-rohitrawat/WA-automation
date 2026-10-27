@@ -186,6 +186,19 @@ export function createWebServer(deps: WebServerDeps): WebServer {
 
   const notFound = (res: ServerResponse) => sendError(res, 404, 'not_found', 'Not found.');
 
+  /** A dashboard path that exists, asked with a method it does not take: 405 with the methods it does. */
+  function notAllowed(res: ServerResponse, allow: readonly string[]): void {
+    res.setHeader('Allow', allow.join(', '));
+    sendError(res, 405, 'method_not_allowed', 'Method not allowed.');
+  }
+
+  /** The methods a /dashboard path takes: its routes', and GET and HEAD for the shell, static and vendor files. */
+  function allowedFor(pathname: string): string[] {
+    const routed = router.methodsFor(pathname).flatMap((m) => (m === 'GET' ? ['GET', 'HEAD'] : [m]));
+    const files = pathname.startsWith('/dashboard/static/') || pathname.startsWith('/dashboard/vendor/') || isScreenPath(pathname);
+    return [...new Set([...routed, ...(files ? ['GET', 'HEAD'] : [])])];
+  }
+
   async function serveStatic(req: IncomingMessage, res: ServerResponse, rel: string): Promise<void> {
     const type = MIME[extname(rel).toLowerCase()];
     const body = type === undefined ? undefined : await readPublic(publicDir, rel);
@@ -254,6 +267,8 @@ export function createWebServer(deps: WebServerDeps): WebServer {
           return await serveShell(req, res);
         }
       }
+      const allow = allowedFor(pathname);
+      if (allow.length > 0 && !allow.includes(method)) return notAllowed(res, allow);
       notFound(res);
     } catch (err) {
       if (res.headersSent) {

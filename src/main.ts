@@ -1,7 +1,8 @@
 import { existsSync } from 'node:fs';
+import Anthropic from '@anthropic-ai/sdk';
 import { createApp, type AppReportDeps } from './app.ts';
 import type { AppMeetingsDeps } from './app.ts';
-import { ClaudeClient } from './brain/claudeClient.ts';
+import { ClaudeClient, keepConnectTimeoutCode } from './brain/claudeClient.ts';
 import { ClaudeMediaClient } from './brain/mediaClient.ts';
 import { ClaudeMeetingClient } from './brain/meetingClient.ts';
 import { loadEnv, requireKey } from './config/env.ts';
@@ -9,8 +10,14 @@ import type { Env } from './config/env.ts';
 import { GROUPS_FILE_MISSING_MESSAGE, loadGroupsFile, watchGroupsFile } from './config/groups.ts';
 import type { ClientConfig } from './config/groups.ts';
 import { masterKeyPath, sessionDbPath, trackerDbPath } from './config/paths.ts';
-import { DpapiKeyProvider, MasterKeyError } from './crypto/keyProvider.ts';
+import { SettingsStore } from './config/settingsStore.ts';
+import { ActionRateLimiter, claudeModelsCheck } from './control/actions.ts';
+import { publisherAuditHooks } from './control/activityQueries.ts';
+import { GroupDirectory } from './control/groups.ts';
+import { deriveSubkey, DpapiKeyProvider, MasterKeyError } from './crypto/keyProvider.ts';
 import { Heartbeat } from './health/heartbeat.ts';
+import { UptimeLog } from './health/uptimeLog.ts';
+import { UptimeRobotClient } from './health/uptimeRobot.ts';
 import { baileysFetcher } from './media/fetch.ts';
 import { MediaRefSealer } from './media/ref.ts';
 import type { LiveMeetingsApi } from './meetings/multiAccount.ts';
@@ -18,7 +25,9 @@ import { createMeetingTranscriber } from './meetings/transcribe.ts';
 import { TokenDecryptError, TokenStore } from './output/googleAuth.ts';
 import { meetingsReady } from './output/googleAuth.ts';
 import { buildGoogle, founderGateway, googleCredentials, planStartup, WHATSAPP_NOT_LINKED_EXIT } from './setupMode.ts';
-import { openMorningReport } from './report/start.ts';
+import { LiveReport } from './report/liveReport.ts';
+import { briefingSettings, spareDriver, spareLinked } from './report/dashboardReport.ts';
+import { openMorningReport, senderOpener } from './report/start.ts';
 import { pricesFromEnv } from './spend/pricing.ts';
 import type { Prices } from './spend/pricing.ts';
 import { syncClients } from './store/clients.ts';
@@ -28,16 +37,29 @@ import { systemClock } from './util/clock.ts';
 import { acquireLock, AlreadyRunningError } from './util/lock.ts';
 import { createLogger, silentLogger } from './util/logger.ts';
 import type { Logger } from './util/logger.ts';
+import { istDate } from './util/time.ts';
 import { AllowList } from './wa/allowlist.ts';
-import { openSessionDb, SessionDecryptError, useEncryptedAuthState } from './wa/authState.ts';
+import { openSessionDb, readFounderNumber, SessionDecryptError, useEncryptedAuthState } from './wa/authState.ts';
 import { baileysSocketFactory, WhatsAppGateway } from './wa/gateway.ts';
+import { founderLinkDriver, LinkSessions } from './wa/linkSession.ts';
 import { baileysSenderSocketFactory, linkedNumber } from './wa/senderGateway.ts';
 import { buildVoiceDeps } from './voiceDeps.ts';
+import { AuditLog } from './web/audit.ts';
+import { mountAgentRoutes } from './web/mountRoutes.ts';
+import { makeGroupKey } from './web/routes/groups.ts';
 import { startDashboard } from './web/start.ts';
+import type { DashboardMount } from './web/start.ts';
 import { AgentControl } from './control/agentControl.ts';
 
 /** Expected startup refusal. The message is safe to print. */
 class StartupExit extends Error {}
+
+/** How often the dashboard's uptime log is brought up to date, and how long it and the audit log are kept. */
+const UPTIME_TICK_MS = 30_000;
+const UPTIME_KEEP_DAYS = 90;
+const AUDIT_KEEP_DAYS = 90;
+/** The HKDF label of the secret that turns group ids into the opaque keys the browser gets (D2). */
+const GROUP_KEY_INFO = 'wa-agent dashboard group keys v1';
 
 /**
  * The meeting dependencies (Phase 3), built only when MEETINGS_ENABLED is true. Nothing here calls Google: without the
@@ -103,6 +125,8 @@ async function main(): Promise<void> {
   let db: Db | undefined;
   let sessionDb: Db | undefined;
   let senderDb: Db | undefined;
+  /** Spare-number session files a dashboard link opened and handed to a new sender: closed after app.stop(). */
+  const adoptedDbs: Db[] = [];
 
   /** Stops startup with a one-line message; the catch below cleans up and exits with code 2. */
   function exitEarly(message: string): never {
@@ -147,7 +171,31 @@ async function main(): Promise<void> {
     // founderNumber: the founder reader's own linked number. A spare-number link to it never sends, even when it is
     // not REPORT_RECIPIENT.
     let report: AppReportDeps | undefined;
-    if (env.REPORT_ENABLED) {
+    // The founder reader's number at each check, so a relink from the dashboard is followed (falls back to the number
+    // linked at start when the file cannot be read: refusing that one too is the safe side).
+    const founderNumber = () => readFounderNumber(sessionDbPath(env.DATA_DIR), key) ?? linkedNumber(auth);
+    const senderFactory = baileysSenderSocketFactory(silentLogger());
+    // With the dashboard: the briefing's settings are changed on its Automations screen (tracker.db; .env gives the
+    // defaults), and LiveReport opens the spare number's sender only once it is on with a number (tested). Off: as before.
+    let live: LiveReport | undefined;
+    let settings: SettingsStore | undefined;
+    /** A spare-phone link from the dashboard is running: the session file is being reset, so it is not read meanwhile. */
+    let spareLinking = false;
+    if (env.DASHBOARD_ENABLED) {
+      const briefing: { live?: LiveReport } = {};
+      const store = new SettingsStore({
+        db, env, clock: systemClock, log,
+        spareLinked: spareLinked({ dataDir: env.DATA_DIR, key, briefing: { sender: () => briefing.live?.sender() }, linking: () => spareLinking }),
+      });
+      settings = store;
+      live = new LiveReport({
+        db, clock: systemClock, log,
+        settings: briefingSettings(store),
+        open: senderOpener({ env, masterKey: key, log, factory: senderFactory, founderNumber }),
+        healthLine: () => app.health.workbookLine(),
+      });
+      briefing.live = live;
+    } else if (env.REPORT_ENABLED) {
       const started = openMorningReport({
         env, masterKey: key, log, factory: baileysSenderSocketFactory(silentLogger()), founderNumber: linkedNumber(auth),
       });
@@ -170,6 +218,8 @@ async function main(): Promise<void> {
     // Phase 2b: the voice transcriber VOICE_STT_PROVIDER names (src/voiceDeps.ts, tested). A local engine that is not set
     // up, or no ffmpeg, never stops the service: voice notes are then kept, not transcribed, and Health says why.
     const voiceDeps = await buildVoiceDeps(env, { findFfmpeg, log });
+    // The dashboard's audit log (tracker.db audit_log): sign-in, the owner's changes, phone links and the agent's uploads.
+    const auditLog = env.DASHBOARD_ENABLED ? new AuditLog(db, systemClock) : undefined;
     const app = createApp({
       db,
       clock: systemClock,
@@ -190,13 +240,17 @@ async function main(): Promise<void> {
       media: { sealer: new MediaRefSealer(key), fetcher: baileysFetcher(), ai: new ClaudeMediaClient({ apiKey, model: env.AI_MODEL, prices }), ...voiceDeps },
       ...(meetings ? { meetings } : {}),
       report,
+      ...(live ? { liveReport: live } : {}),
+      ...(auditLog ? { publishHooks: publisherAuditHooks((e) => auditLog.record(e), systemClock) } : {}),
     });
 
     // watchGroupsFile catches a throwing onChange (including reloadClients conflicts) and calls onError.
+    let currentConfigs = configs;
     const stopWatching = watchGroupsFile(
       env.GROUPS_FILE,
       (next) => {
         app.reloadClients(next);
+        currentConfigs = next;
         log.info({ groups: next.length }, 'allow-list reloaded');
       },
       (err) =>
@@ -222,14 +276,100 @@ async function main(): Promise<void> {
     // Only what it reads: the health and the read-only spend view, two settings (no key or link), and status wrappers in
     // place of the live gateway and sender. It queries tracker.db (parameterised reads only).
     const sender = report?.sender;
+    const liveReport = live;
     const control = new AgentControl({
       app: { health: app.health, spend: app.spend }, db, clock: systemClock,
       env: { MEETINGS_ENABLED: env.MEETINGS_ENABLED, VOICE_STT_PROVIDER: env.VOICE_STT_PROVIDER },
       gateway: { status: () => gateway.status() },
-      ...(sender ? { sender: { status: () => sender.status(), maskedRecipient: () => sender.maskedRecipient() } } : {}),
+      ...(liveReport ? { sender: () => liveReport.sender() } : sender ? { sender: { status: () => sender.status(), maskedRecipient: () => sender.maskedRecipient() } } : {}),
       ...(heartbeat ? { heartbeat: { lastBeatAt: () => heartbeat.lastBeatAt() } } : {}),
     });
-    const webReady = env.DASHBOARD_ENABLED ? startDashboard({ env, db, log, control }) : Promise.resolve(undefined);
+    let links: LinkSessions | undefined;
+    let uptime: UptimeLog | undefined;
+    let uptimeTimer: NodeJS.Timeout | undefined;
+    /** What startDashboard gets besides its own parts: the shared audit log and the agent's routes. */
+    let agentRoutes: { audit: AuditLog; mount: (m: DashboardMount) => void } | undefined;
+    if (env.DASHBOARD_ENABLED && live && settings && auditLog) {
+      const store = settings;
+      const audit = auditLog;
+      const trackerStore = db;
+      // Phone links from the dashboard (D3), one at a time. The founder's relinks the gateway in place; the spare one
+      // pauses the briefing while it resets the session file the sender may be using, then hands it the new sender.
+      const spare = spareDriver({
+        dataDir: env.DATA_DIR, key, factory: senderFactory, founderNumber, briefing: live,
+        settingsNumber: () => store.get().reportRecipient,
+        adoptDb: (d) => adoptedDbs.push(d),
+        linking: (on) => (spareLinking = on),
+        log,
+      });
+      const founder = founderLinkDriver({
+        sessionDb, trackerDb: db, key, switchable: gateway, log,
+        buildGateway: (a, onQr) => new WhatsAppGateway({
+          allow, factory: baileysSocketFactory(silentLogger()), auth: a.state, saveCreds: a.saveCreds, ...(onQr ? { onQr } : {}),
+        }),
+      });
+      links = new LinkSessions({
+        drivers: { founder, spare }, log,
+        audit: (event, actor) => audit.record({ actor, event, kind: 'connection', detail: '' }),
+      });
+      // The 30-day uptime strip: a row whenever up changes, and the daily retention of both logs.
+      const log30 = new UptimeLog(db, systemClock);
+      uptime = log30;
+      let purgedDay = '';
+      const keepUptime = () => {
+        try {
+          log30.tick(app.health.isUp(), app.health.downReason());
+          const today = istDate(systemClock.now());
+          if (today !== purgedDay) {
+            purgedDay = today;
+            log30.purgeOlderThan(UPTIME_KEEP_DAYS);
+            audit.purgeOlderThan(AUDIT_KEEP_DAYS);
+          }
+        } catch (err) {
+          log.error({ err }, 'uptime log update failed');
+        }
+      };
+      try {
+        log30.start(app.health.isUp(), app.health.downReason());
+      } catch (err) {
+        log.error({ err }, 'uptime log could not start');
+      }
+      keepUptime();
+      uptimeTimer = setInterval(keepUptime, UPTIME_TICK_MS);
+      uptimeTimer.unref();
+      const directory = new GroupDirectory({ gateway, clock: systemClock });
+      const meetingsApi = google.meetings;
+      const phoneLinks = links;
+      agentRoutes = {
+        audit,
+        // On the guard, session store and limiter startDashboard builds: every route shares them.
+        mount: (m) => mountAgentRoutes(m, {
+          db: trackerStore, clock: systemClock, log, control, spend: app.spend, health: () => app.health.snapshot(),
+          ...(meetingsApi ? { accountOf: (c: string) => meetingsApi.accountOf(c) } : {}),
+          voiceLocal: env.VOICE_STT_PROVIDER === 'local',
+          uptime: { log: log30, ...(env.UPTIMEROBOT_READ_KEY ? { robot: new UptimeRobotClient({ apiKey: env.UPTIMEROBOT_READ_KEY, clock: systemClock, log }) } : {}) },
+          ownerEmails: env.DASHBOARD_OWNER_EMAILS,
+          settings: store,
+          groups: {
+            db: trackerStore, directory, groupsFile: env.GROUPS_FILE, configs: () => currentConfigs,
+            groupKey: makeGroupKey(deriveSubkey(key, GROUP_KEY_INFO)), log, clock: systemClock,
+          },
+          clients: { db: trackerStore, directory, clock: systemClock },
+          google: {
+            db: trackerStore, hub: google.hub, publicUrl: env.DASHBOARD_PUBLIC_URL ?? `http://localhost:${env.DASHBOARD_PORT}`,
+            web: googleCredentials(env).web, meetingsEnabled: env.MEETINGS_ENABLED, log, clock: systemClock,
+          },
+          actions: {
+            publisher: app.publisher, clock: systemClock, limiter: new ActionRateLimiter(systemClock),
+            // One models list, no tokens: its own client, so the test never shares the agent's retries.
+            listModels: claudeModelsCheck(new Anthropic({ apiKey, fetch: keepConnectTimeoutCode })),
+            ...(heartbeat ? { heartbeat } : {}),
+          },
+          links: phoneLinks,
+        }),
+      };
+    }
+    const webReady = env.DASHBOARD_ENABLED ? startDashboard({ env, db, log, control, ...agentRoutes }) : Promise.resolve(undefined);
 
     const trackerDb = db;
     const sessionStore = sessionDb;
@@ -248,10 +388,14 @@ async function main(): Promise<void> {
       stopping = true;
       log.info('WA Agent stopping');
       // The dashboard stops first (in-flight requests get up to 5 s), so no request reaches the app while it drains.
+      // Then a phone link still running is undone (its driver restores what it changed), at most 10 s, before the app stops.
       const webStopped = webReady
         .then((w) => w?.stop())
-        .catch((err: unknown) => log.error({ err }, 'error while stopping the dashboard'));
+        .catch((err: unknown) => log.error({ err }, 'error while stopping the dashboard'))
+        .then(() => Promise.race([links?.stop(), new Promise((r) => setTimeout(r, 10_000).unref())]))
+        .catch((err: unknown) => log.error({ err }, 'error while stopping a phone link'));
       void heartbeat?.stop();
+      clearInterval(uptimeTimer);
       stopWatching();
       void webStopped
         .then(() => app.stop())
@@ -259,6 +403,12 @@ async function main(): Promise<void> {
         .finally(() => {
           // Databases are closed only after app.stop() has settled, so after the morning report's stop() has returned.
           try {
+            uptime?.stop(); // the stopped time counts as down
+          } catch {
+            // best effort
+          }
+          try {
+            for (const d of adoptedDbs) d.close();
             trackerDb.close();
             sessionStore.close();
             senderStore?.close();
@@ -273,6 +423,7 @@ async function main(): Promise<void> {
     process.on('SIGTERM', shutdown);
   } catch (e) {
     try {
+      for (const d of adoptedDbs) d.close();
       db?.close();
       sessionDb?.close();
       senderDb?.close();

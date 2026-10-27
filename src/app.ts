@@ -27,7 +27,7 @@ import { meetingsReady } from './output/googleAuth.ts';
 import { loadTrackerView } from './output/view.ts';
 import { buildWorkbook } from './output/workbook.ts';
 import { ReportScheduler } from './report/scheduler.ts';
-import type { ReportSender, ReportSettings } from './report/types.ts';
+import type { ReportHealth, ReportSender, ReportSettings } from './report/types.ts';
 import type { Prices } from './spend/pricing.ts';
 import { SpendGuard } from './spend/spendGuard.ts';
 import { getClient, listClients, syncClients } from './store/clients.ts';
@@ -87,6 +87,16 @@ export interface AppReportDeps {
   settings: ReportSettings;
 }
 
+/** What the tick drives for the morning report: the ReportScheduler, or the dashboard's LiveReport around it. */
+export interface ReportRunner {
+  /** Never throws; a send runs on in the background. */
+  tick(now: Date): Promise<void>;
+  health(now: Date): ReportHealth;
+  stop(waitMs: number): Promise<void>;
+  /** At start: a send cut off by a crash becomes unknown. LiveReport does this itself before each sender's first send. */
+  recover?(now: Date): void;
+}
+
 export interface AppDeps {
   db: Db;
   clock: Clock;
@@ -122,6 +132,10 @@ export interface AppDeps {
   onMeetingsHealth?: (m: MeetingsHealth | null) => void;
   /** The Phase 2c morning report. Without it, no report is sent and Health has no report line. */
   report?: AppReportDeps;
+  /** With the dashboard: the morning report whose settings the owner changes while the service runs. Replaces report. */
+  liveReport?: ReportRunner;
+  /** With the dashboard: told of each upload and failure (the Activity screen's rows). A throw is logged, never passed on. */
+  publishHooks?: { onPublished(): void; onFailure(f: { step: 'build' | 'drive'; auth: boolean }): void };
 }
 
 export interface App {
@@ -168,11 +182,20 @@ export function createApp(d: AppDeps): App {
   const startedAt = d.startedAt ?? d.clock.now();
   const spend = new SpendGuard({ db: d.db, clock: d.clock, capUsd: d.spendCapUsd });
   const health = new Health({ db: d.db, clock: d.clock, spend, dataDir: d.dataDir, freeBytes: d.freeBytes });
-  const reportScheduler = d.report
+  const reportScheduler = d.report && !d.liveReport
     ? new ReportScheduler({
         db: d.db, clock: d.clock, log: d.log, sender: d.report.sender, settings: d.report.settings, healthLine: () => health.workbookLine(),
       })
     : undefined;
+  const reportRunner: ReportRunner | undefined = d.liveReport ?? reportScheduler;
+  const hook = (fn: (h: NonNullable<AppDeps['publishHooks']>) => void) => {
+    if (!d.publishHooks) return;
+    try {
+      fn(d.publishHooks);
+    } catch (err) {
+      d.log.error({ err }, 'the dashboard activity row for an upload could not be written');
+    }
+  };
   /** The health line in the workbook being built, and in the last one that reached Drive (the tick compares it). */
   let buildingLine: string | undefined;
   let publishedLine: string | undefined;
@@ -199,8 +222,12 @@ export function createApp(d: AppDeps): App {
       // (the reconciler's, and the CLI's through its rebuild request), which can make a sender's files due.
       void uploader?.run();
       health.markPublished();
+      hook((h) => h.onPublished());
     },
-    onFailure: (f) => health.markPublishFailed(f),
+    onFailure: (f) => {
+      health.markPublishFailed(f);
+      hook((h) => h.onFailure(f));
+    },
   });
 
   /** Health writes its snapshot to the DB. A busy DB must not turn a finished run into a crash, or break a callback. */
@@ -499,10 +526,10 @@ export function createApp(d: AppDeps): App {
       safely(refreshMeetings);
       health.setIngestFailures(d.gateway.failedCount());
       refreshMedia();
-      if (reportScheduler) {
+      if (reportRunner) {
         // tick() never throws. A send runs on in the background; the claim is already written when it returns.
-        void reportScheduler.tick(d.clock.now());
-        health.setReport(reportScheduler.health(d.clock.now()));
+        void reportRunner.tick(d.clock.now());
+        health.setReport(reportRunner.health(d.clock.now()));
       }
       // A line that changes with no other change (a file waiting too long, an upload that gave up, a message that could
       // not be saved) would otherwise reach the workbook only with an unrelated publish, possibly hours later.
@@ -533,9 +560,9 @@ export function createApp(d: AppDeps): App {
     },
     start() {
       if (poll) return; // already started: a second interval would outlive stop()
-      if (reportScheduler) {
+      if (reportRunner?.recover) {
         try {
-          reportScheduler.recover(d.clock.now()); // a send cut off by a crash becomes unknown, never sent again by itself
+          reportRunner.recover(d.clock.now()); // a send cut off by a crash becomes unknown, never sent again by itself
         } catch (err) {
           d.log.error({ err }, 'morning report recovery failed');
         }
@@ -591,7 +618,7 @@ export function createApp(d: AppDeps): App {
       // closes the databases only after stop() resolves, so after the scheduler's stop() has returned
       // (tests/appReport.test.ts). A voice-copy deletion in flight (the sweep's, or one a finished note started during
       // the drain) gets up to 5 s alongside, so the database is not closed under it.
-      await Promise.all([publisher.flush(10_000), uploader?.stop(10_000), reportScheduler?.stop(10_000), waitForForgets(5_000)]);
+      await Promise.all([publisher.flush(10_000), uploader?.stop(10_000), reportRunner?.stop(10_000), waitForForgets(5_000)]);
       // A socket that never closes must not eat the rest of WinSW's 150 s: 120 s drain + 15 s (the morning report's
       // 10 + 3 + 2; the uploads take at most 10; the copy deletions at most 5) + 5 s here = 140 s, plus margin.
       let timer: NodeJS.Timeout | undefined;

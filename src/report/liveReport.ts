@@ -3,6 +3,7 @@ import type { Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { ReportScheduler, type ReportPayload } from './scheduler.ts';
+import type { SenderScheduler } from './senderLink.ts';
 import type { ReportHealth, ReportSender, ReportSettings } from './types.ts';
 
 // The morning briefing with settings the owner changes while the service runs (D5 Task 1, spec 4.7). It wraps the
@@ -12,6 +13,8 @@ import type { ReportHealth, ReportSender, ReportSettings } from './types.ts';
 // - a new one when the number changes: the recipient stays fixed per sender, so the old scheduler is stopped and its
 //   sender closed first (no send can be in flight: ticks never overlap), and the new one recovers before it sends.
 // Switching off needs nothing here: the scheduler reads the settings on every tick and sends nothing while off.
+// While a spare-phone link from the dashboard runs (pause()), nothing is opened, closed or ticked: the link may be
+// resetting the very session file the sender uses.
 
 export interface LiveReportSettings {
   report: ReportSettings;
@@ -23,6 +26,8 @@ export interface LiveReportSettings {
 export interface OpenedSender {
   sender: ReportSender;
   close: () => void;
+  /** The open session file, which a spare-phone link shares while the briefing runs. */
+  db?: Db;
 }
 
 export interface LiveReportOptions {
@@ -55,6 +60,7 @@ export class LiveReport {
   #closing: Promise<void> | undefined;
   #busy: Promise<void> | undefined;
   #stopped = false;
+  #paused = 0;
   #openFailures = 0;
   #nextOpenAt = 0;
 
@@ -67,7 +73,7 @@ export class LiveReport {
    * number change never stops a scheduler in the middle of its send.
    */
   async tick(now: Date = this.#o.clock.now()): Promise<void> {
-    if (this.#busy || this.#stopped) return;
+    if (this.#busy || this.#stopped || this.#paused > 0) return;
     const run = this.#run(now);
     this.#busy = run;
     try {
@@ -139,6 +145,43 @@ export class LiveReport {
     } catch (err) {
       this.#o.log.error({ err }, 'closing the morning report sender failed');
     }
+  }
+
+  /**
+   * For a spare-phone link: from now on no tick opens, closes or sends, and it resolves once a tick in flight (with a
+   * sender being closed for a number change) has ended. Call the returned function when the link is over; a number
+   * changed meanwhile is picked up by the next tick.
+   */
+  async pause(): Promise<() => void> {
+    this.#paused++;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      this.#paused--;
+    };
+    if (this.#busy) await this.#busy; // #run never rejects
+    return release;
+  }
+
+  /** The open briefing's scheduler (what a spare-phone link hands its new sender to), or undefined while none is open. */
+  scheduler(): SenderScheduler | undefined {
+    return this.#current?.scheduler;
+  }
+
+  /** The open briefing's session file, or undefined. */
+  reportDb(): Db | undefined {
+    return this.#current?.opened.db;
+  }
+
+  /** The number the open briefing sends to (digits), or undefined. Server-side only. */
+  recipient(): string | undefined {
+    return this.#current?.recipient;
+  }
+
+  /** The open briefing's current sender, for its status, or undefined. */
+  sender(): ReportSender | undefined {
+    return this.#current?.scheduler.sender();
   }
 
   /** Today's line for Health. Never throws: settings that cannot be read give a plain line. */
