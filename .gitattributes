@@ -1,0 +1,3 @@
+# The website export is served byte for byte: its inline-script hashes (src/web/site.ts) must match what git checks out.
+site/** -text
+tests/fixtures/site/** -text

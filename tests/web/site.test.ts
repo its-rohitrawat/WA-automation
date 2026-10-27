@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { cpSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +10,7 @@ import { manualClock } from '../../src/util/clock.ts';
 import { createLogger } from '../../src/util/logger.ts';
 import { CONTENT_SECURITY_POLICY } from '../../src/web/http.ts';
 import { createWebServer, type WebServer } from '../../src/web/server.ts';
-import { inlineScriptHashes, SITE_DIR, sitePolicy } from '../../src/web/site.ts';
+import { createSite, inlineScriptHashes, MAX_FILE_BYTES, SITE_DIR, sitePolicy } from '../../src/web/site.ts';
 
 const FIXTURE = fileURLToPath(new URL('../fixtures/site/', import.meta.url));
 const SECRET = 'OUTSIDE-SITE-SECRET-91c2';
@@ -210,5 +210,82 @@ describe('without the website folder', () => {
 
   it("the real site folder is the repo's site/", () => {
     expect(SITE_DIR.replaceAll('\\', '/')).toMatch(/\/site\/$/);
+  });
+});
+
+describe('website review fixes', () => {
+  it('hashes scripts as browsers do: line breaks as LF, attributes read properly, every script type that runs', () => {
+    expect(inlineScriptHashes('<script>a()\r\nb()\rc()</script>')).toEqual([sha('a()\nb()\nc()')]);
+    expect(inlineScriptHashes('<script data-src="/x.js">d()</script>')).toEqual([sha('d()')]);
+    expect(inlineScriptHashes('<script data-type="application/json">e()</script>')).toEqual([sha('e()')]);
+    expect(inlineScriptHashes('<script title="a>b">f()</script>')).toEqual([sha('f()')]);
+    expect(inlineScriptHashes('<script type="importmap">{"imports":{}}</script><script type="text/ecmascript">g()</script>'))
+      .toEqual([sha('{"imports":{}}'), sha('g()')]);
+    expect(inlineScriptHashes('<script SRC="/y.js"></script><script type="application/ld+json">{}</script>')).toEqual([]);
+  });
+
+  it('the site policy is exactly this', () => {
+    expect(sitePolicy([])).toBe("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; " +
+      "connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+  });
+
+  it('works out every page at startup, and a page changed since gets the hashes of what is sent', async () => {
+    const { site } = siteCopy();
+    const s = createSite({ dir: site, log: createLogger('silent') });
+    expect(s.warmed).toBe(5); // index, about, docs/index, 404, .hidden
+    const { port } = await boot(site);
+    writeFileSync(join(site, 'about.html'), '<!doctype html><script>window.changed=1;</script>');
+    const csp = String((await get(port, '/about')).headers['content-security-policy']);
+    expect(csp).toContain(sha('window.changed=1;'));
+    expect(csp).not.toContain(sha('window.about=true;'));
+  });
+
+  it('never reaches a hidden folder, by a short name or through a link', async () => {
+    const { site } = siteCopy();
+    mkdirSync(join(site, '.verylongsecretdir'));
+    writeFileSync(join(site, '.verylongsecretdir', 'data.json'), JSON.stringify({ secret: SECRET }));
+    symlinkSync(join(site, '.verylongsecretdir'), join(site, 'pub'), 'junction');
+    const { port } = await boot(site);
+    for (const path of ['/VERYLO~1/data.json', '/verylo~1/data.json', '/.verylongsecretdir/data.json', '/pub/data.json', '/pub/data']) {
+      const r = await get(port, path);
+      expect(r.body, path).not.toContain(SECRET);
+      expect(r.status, path).toBe(404);
+    }
+  });
+
+  it('refuses a file over the size cap, and video', async () => {
+    const { site } = siteCopy();
+    writeFileSync(join(site, 'big.json'), Buffer.alloc(MAX_FILE_BYTES + 1, 0x20));
+    writeFileSync(join(site, 'clip.mp4'), 'x');
+    const { port } = await boot(site);
+    expect((await get(port, '/big.json')).status).toBe(404);
+    expect((await get(port, '/clip.mp4')).status).toBe(404);
+  });
+
+  it('serves no service worker', async () => {
+    const { site } = siteCopy();
+    writeFileSync(join(site, 'sw.js'), 'self.addEventListener("fetch", () => {});');
+    const { port } = await boot(site);
+    expect((await get(port, '/sw.js', { headers: { 'service-worker': 'script' } })).status).toBe(404);
+    expect((await get(port, '/sw.js')).status).toBe(200);
+  });
+
+  it('prefers x.html over x/index.html, and caches build files as immutable only under /_next/static/', async () => {
+    const { site } = siteCopy();
+    writeFileSync(join(site, 'docs.html'), '<!doctype html><h1>Docs page</h1>');
+    mkdirSync(join(site, 'x', '_next', 'static'), { recursive: true });
+    writeFileSync(join(site, 'x', '_next', 'static', 'a.js'), 'a()');
+    const { port } = await boot(site);
+    expect((await get(port, '/docs')).body).toContain('Docs page');
+    expect((await get(port, '/x/_next/static/a.js')).headers['cache-control']).toBe('public, max-age=3600');
+  });
+
+  it('without 404.html, a plain text 404', async () => {
+    const { site } = siteCopy();
+    rmSync(join(site, '404.html'));
+    const { port } = await boot(site);
+    const r = await get(port, '/nope');
+    expect(r.status).toBe(404);
+    expect(r.headers['content-type']).toBe('text/plain; charset=utf-8');
   });
 });
