@@ -39,6 +39,7 @@ import type { Ffmpeg } from './stt/audio.ts';
 import type { VoiceTranscriber } from './stt/voice.ts';
 import type { Clock } from './util/clock.ts';
 import type { Logger } from './util/logger.ts';
+import { istDate } from './util/time.ts';
 import type { AllowList } from './wa/allowlist.ts';
 import type { WhatsAppGateway } from './wa/gateway.ts';
 import { Ingestor } from './wa/ingest.ts';
@@ -165,6 +166,9 @@ export function createApp(d: AppDeps): App {
   /** The health line in the workbook being built, and in the last one that reached Drive (the tick compares it). */
   let buildingLine: string | undefined;
   let publishedLine: string | undefined;
+  /** The IST day of the workbook being built, and of the last one that reached Drive (the Today tab is per day). */
+  let buildingDay: string | undefined;
+  let publishedDay: string | undefined;
   const publisher = new DrivePublisher({
     db: d.db,
     api: d.drive,
@@ -174,10 +178,13 @@ export function createApp(d: AppDeps): App {
     build: () => {
       const line = health.workbookLine();
       buildingLine = line.text;
-      return buildWorkbook(loadTrackerView(d.db, d.clock.now(), line));
+      const now = d.clock.now();
+      buildingDay = istDate(now); // the date the Today tab is worked out for
+      return buildWorkbook(loadTrackerView(d.db, now, line));
     },
     onPublished: () => {
       publishedLine = buildingLine; // one publish runs at a time, so this is the line of the upload that just succeeded
+      publishedDay = buildingDay;
       // The first publish creates the Drive root the file uploads need. A publish also follows every role change
       // (the reconciler's, and the CLI's through its rebuild request), which can make a sender's files due.
       void uploader?.run();
@@ -490,6 +497,9 @@ export function createApp(d: AppDeps): App {
       // A line that changes with no other change (a file waiting too long, an upload that gave up, a message that could
       // not be saved) would otherwise reach the workbook only with an unrelated publish, possibly hours later.
       if (health.workbookLine().text !== publishedLine) publisher.schedule();
+      // The Today tab's counts, notes and order are worked out for the day it was built. After a quiet night the 06:00
+      // link would show yesterday's: republish once when the IST date changes (Task 3 review round 2).
+      if (publishedDay !== undefined && istDate(d.clock.now()) !== publishedDay) publisher.schedule();
       health.persist();
     } catch (err) {
       d.log.error({ err }, 'tick failed');

@@ -668,6 +668,32 @@ describe('app health and publishing', () => {
     expect(await overviewTexts(uploaded)).toContain('⚠️ 1 incoming message could not be saved. See docs/SETUP.md.');
   });
 
+  it('republishes once after IST midnight with no other event, so the Today tab carries the new date (Task 3 review round 2)', async () => {
+    const drive = new CapturingDrive();
+    vi.setSystemTime(new Date('2026-10-19T18:00:00Z')); // 23:30 IST on 19 Oct
+    const { app } = setup({ drive });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(drive.uploads).toBe(1); // the start publish, built on 19 Oct
+    const first = drive.last!;
+    await vi.advanceTimersByTimeAsync(20 * 60_000); // still 19 Oct IST: quiet ticks publish nothing
+    expect(drive.uploads).toBe(1);
+    await vi.advanceTimersByTimeAsync(15 * 60_000); // past 00:00 IST on 20 Oct, still no event
+    expect(drive.uploads).toBe(2);
+    const second = drive.last!;
+    await vi.advanceTimersByTimeAsync(60 * 60_000); // the rest of the new day stays quiet
+    expect(drive.uploads).toBe(2);
+    await stopApp(app);
+
+    vi.useRealTimers();
+    const title = async (buf: Buffer) => {
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.load(buf as unknown as ExcelJS.Buffer);
+      return String(wb.getWorksheet('Today')!.getCell('A1').value);
+    };
+    expect(await title(first)).toMatch(/^Today · 19 Oct · /);
+    expect(await title(second)).toMatch(/^Today · 20 Oct · /);
+  });
+
   it('points to the safe procedure when WhatsApp unlinks the device', async () => {
     const { app, sock } = setup();
     closeWith(sock, 401);

@@ -85,6 +85,7 @@ describe('Today tab', () => {
     expect(ws.views[0]).toMatchObject({ state: 'frozen', ySplit: 2 });
     expect(ws.getColumn(6).width).toBeGreaterThanOrEqual(40);
     expect(ws.getCell('A9').font?.bold).toBe(true);
+    expect(ws.getCell('A9').border?.top?.style).toBe('thin');
     expect((ws.getCell('C5').fill as ExcelJS.FillPattern).fgColor?.argb).toBe('FFFFD9D2');
     expect((ws.getCell('C3').fill as ExcelJS.FillPattern | undefined)?.fgColor).toBeUndefined();
   });
