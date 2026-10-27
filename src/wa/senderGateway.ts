@@ -1,4 +1,4 @@
-import makeWASocket, { Browsers, DisconnectReason, makeCacheableSignalKeyStore } from 'baileys';
+import makeWASocket, { DisconnectReason, makeCacheableSignalKeyStore } from 'baileys';
 import type { AnyMessageContent, AuthenticationState, BaileysEventMap, WAMessage } from 'baileys';
 import { INDIAN_MOBILE, maskNumber } from '../config/env.ts';
 import { XLSX_MIME } from '../output/workbook.ts';
@@ -21,12 +21,15 @@ export type SenderSocketFactory = (auth: AuthenticationState) => SenderSocketLik
  * never "online". No history sync. enableRecentMessageCache keeps only this socket's own outgoing report in memory, so
  * Baileys can answer a retry request from the founder's phone while the socket is still open.
  */
+/** How the spare phone lists this link under Linked devices. Fixed when the QR code is scanned. */
+export const SENDER_DEVICE_NAME = 'WA Agent - Morning report';
+
 export function baileysSenderSocketFactory(logger: BaileysLogger): SenderSocketFactory {
   return (auth) =>
     makeWASocket({
       auth: { creds: auth.creds, keys: makeCacheableSignalKeyStore(auth.keys, logger) },
       logger,
-      browser: Browsers.windows('Desktop'),
+      browser: [SENDER_DEVICE_NAME, 'Desktop', '1.0.0'],
       markOnlineOnConnect: false,
       syncFullHistory: false,
       shouldSyncHistoryMessage: () => false,

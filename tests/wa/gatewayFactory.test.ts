@@ -15,7 +15,8 @@ vi.mock('baileys', async (importOriginal) => {
   };
 });
 
-const { baileysSocketFactory } = await import('../../src/wa/gateway.ts');
+const { baileysSocketFactory, TRACKER_DEVICE_NAME } = await import('../../src/wa/gateway.ts');
+const { SENDER_DEVICE_NAME } = await import('../../src/wa/senderGateway.ts');
 
 describe('baileysSocketFactory', () => {
   it('builds a passive socket configuration', async () => {
@@ -26,6 +27,10 @@ describe('baileysSocketFactory', () => {
     expect(c.markOnlineOnConnect).toBe(false);
     expect(c.syncFullHistory).toBe(false);
     expect(c.enableRecentMessageCache).toBe(false);
+    // The founder's phone lists this link under its own name, never the spare number's.
+    expect(c.browser).toEqual([TRACKER_DEVICE_NAME, 'Desktop', '1.0.0']);
+    expect(TRACKER_DEVICE_NAME).toBe('WA Agent - Tracker');
+    expect(TRACKER_DEVICE_NAME).not.toBe(SENDER_DEVICE_NAME);
     expect(await (c.getMessage as () => Promise<unknown>)()).toBeUndefined();
   });
 });

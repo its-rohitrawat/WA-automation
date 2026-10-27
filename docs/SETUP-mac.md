@@ -83,7 +83,7 @@ npm run cli -- list-groups
 Exactly as SETUP.md step 5:
 
 1. `google-auth` prints a link. Open it in a browser **on this Mac**, signed in as the mailbox account, and allow access.
-2. `link` shows a QR code. Scan it from the founder's phone: WhatsApp > Settings > Linked devices > Link a device. Make the Terminal window big enough to show the whole QR code.
+2. `link` shows a QR code. Scan it from the founder's phone: WhatsApp > Settings > Linked devices > Link a device. Make the Terminal window big enough to show the whole QR code. The founder's phone then lists this link as "WA Agent - Tracker".
 3. `list-groups` prints the group ids. Add the 1–2 pilot groups with `nano config/allowed-groups.json`, in the format shown in SETUP.md.
 
 ## 6. Install and start the service (normal Terminal window)
@@ -129,7 +129,7 @@ Every day at 06:00 IST the founder gets one WhatsApp message from a spare number
 
 1. Spare SIM in a spare phone with WhatsApp. From the founder's phone, send the spare number "hi".
 2. **Stop the service safely** (see *Service commands*).
-3. Waagent window: `npm run cli -- link-sender`, and scan the QR code from the **spare** phone.
+3. Waagent window: `npm run cli -- link-sender`, and scan the QR code from the **spare** phone. The spare phone then lists this link as "WA Agent - Morning report". If the founder's phone ever shows "WA Agent - Morning report", the wrong phone scanned it: remove that device and link again from the spare phone.
 4. `nano .env` and set `REPORT_ENABLED=true` and `REPORT_RECIPIENT=` the founder's number: `91` then the 10-digit mobile, digits only.
 5. **Start the service again**, wait one minute, then: `npm run cli -- report status`.
 6. Test once: `npm run cli -- report send-now`, type `yes`, and check the founder's phone.
@@ -288,4 +288,4 @@ The key file `data/keys/master.key` is damaged, or belongs to a different accoun
 
 ## Moving from a Windows PC
 
-The master key cannot be moved from Windows (DPAPI ties it to that PC), so the Mac starts with a fresh `data/` folder. You may copy `config/allowed-groups.json` (keep the same client codes). Ask the developer before copying `data/tracker.db`: parts of it are locked with the Windows key. Stop the Windows service safely first, and on the founder's phone remove the old "WA Agent" device before step 5. Never run the Windows PC and the Mac at the same time on the same WhatsApp number.
+The master key cannot be moved from Windows (DPAPI ties it to that PC), so the Mac starts with a fresh `data/` folder. You may copy `config/allowed-groups.json` (keep the same client codes). Ask the developer before copying `data/tracker.db`: parts of it are locked with the Windows key. Stop the Windows service safely first, and on the founder's phone remove the old Windows link (listed as "Windows" or "WA Agent - Tracker") before step 5. Never run the Windows PC and the Mac at the same time on the same WhatsApp number.
