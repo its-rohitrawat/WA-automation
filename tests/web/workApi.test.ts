@@ -119,3 +119,21 @@ describe('work API: changes', () => {
     expect(r.headers['retry-after']).toBeDefined();
   });
 });
+
+describe('work API review fixes', () => {
+  it('a meeting action needs the CSRF token and a matching Origin; nothing changes without them', async () => {
+    const { db, h } = await boot();
+    for (const x of [{ csrf: null }, { origin: null }, { origin: 'https://evil.example' }, { cookie: null }]) {
+      const r = await h.post('/dashboard/api/meetings/1/skip', x);
+      expect(r.status, JSON.stringify(x)).toBe(x.cookie === null ? 401 : 403);
+    }
+    expect(db.prepare('SELECT status FROM meetings WHERE id = 1').get()).toEqual({ status: 'unassigned' });
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  it('a meeting action is audited with the owner and the request id', async () => {
+    const { db, h } = await boot();
+    await h.post('/dashboard/api/meetings/1/assign', { body: { client: 'SHA' } });
+    expect(auditRows(db)).toEqual([{ actor: OWNER, event: 'meeting.assign', kind: 'meeting', detail: 'Meeting 1 assigned to SHA', requestId: expect.stringMatching(/^[0-9a-f]{12}$/) }]);
+  });
+});

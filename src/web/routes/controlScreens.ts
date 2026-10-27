@@ -5,13 +5,13 @@ import { ControlError, type AuditEntry } from '../../control/errors.ts';
 import { usageSummary } from '../../control/usage.ts';
 import type { UptimeLog } from '../../health/uptimeLog.ts';
 import { uptimeReport, type UptimeRobotClient } from '../../health/uptimeRobot.ts';
-import type { Db } from '../../store/db.ts';
+import { tx, type Db } from '../../store/db.ts';
 import type { Clock } from '../../util/clock.ts';
 import type { AuditLog } from '../audit.ts';
 import type { Guard } from '../guard.ts';
-import { sendJson, serializeCookie } from '../http.ts';
+import { sendJson } from '../http.ts';
 import type { Router } from '../router.ts';
-import { SESSION_COOKIE, type SessionStore } from '../sessions.ts';
+import { clearSessionCookie, type SessionStore } from '../sessions.ts';
 import { actionSession, controlled, readBody, type ActionGuard } from './respond.ts';
 
 // The control screens' API (D5 Task 1-4 logic, served here): AI usage, uptime, audit logs, the morning briefing's
@@ -31,6 +31,8 @@ export interface ControlApiDeps extends ActionGuard {
   isOwner: (email: string) => boolean;
   settings: Pick<SettingsStore, 'view' | 'set'>;
   sessions: Pick<SessionStore, 'destroyAllFor'>;
+  /** cookieSecure(DASHBOARD_PUBLIC_URL): the session cookie is cleared with the attributes it was set with. */
+  secureCookies: boolean;
 }
 
 const digits = (v: unknown) => (typeof v === 'string' ? v.replace(/\D/g, '') : '');
@@ -58,6 +60,10 @@ export function registerControlApi(router: Router, d: ControlApiDeps): void {
     if (key === 'reportRecipient' && (digits(value) === '' || digits(value) !== digits(confirm))) {
       throw new ControlError(422, 'The two numbers do not match', 'confirm');
     }
+    // Switching the briefing on starts messages to the founder: the dashboard's confirmation step must come with it.
+    if (key === 'reportEnabled' && value === true && confirm !== true) {
+      throw new ControlError(422, 'Confirm that the morning briefing should start sending', 'confirm');
+    }
     d.settings.set(key, value, s.email, auditFor(s.email, ctx.requestId));
     sendJson(ctx.res, 200, d.settings.view());
   }));
@@ -69,9 +75,13 @@ export function registerControlApi(router: Router, d: ControlApiDeps): void {
 
   router.post('/dashboard/api/session/signout-everywhere', controlled((ctx) => {
     const s = actionSession(ctx, d);
-    const ended = d.sessions.destroyAllFor(s.email);
-    d.audit.record({ actor: s.email, event: 'auth.signout_everywhere', kind: 'auth', detail: `Signed out everywhere (${ended} ${ended === 1 ? 'session' : 'sessions'})`, requestId: ctx.requestId });
-    ctx.res.setHeader('Set-Cookie', serializeCookie(SESSION_COOKIE, '', { httpOnly: true, sameSite: 'Lax', path: '/dashboard', maxAge: 0 }));
+    // The sessions end and the audit row is written together: if the row cannot be written, nothing ends.
+    const ended = tx(d.db, () => {
+      const n = d.sessions.destroyAllFor(s.email);
+      d.audit.record({ actor: s.email, event: 'auth.signout_everywhere', kind: 'auth', detail: `Signed out everywhere (${n} ${n === 1 ? 'session' : 'sessions'})`, requestId: ctx.requestId });
+      return n;
+    });
+    ctx.res.setHeader('Set-Cookie', clearSessionCookie({ secure: d.secureCookies }));
     sendJson(ctx.res, 200, { ended });
   }));
 }

@@ -238,3 +238,20 @@ describe('uptimeReport review fixes', () => {
     expect(r.outages).toHaveLength(3);
   });
 });
+
+describe('UptimeRobotClient shares a request in flight', () => {
+  it('polls at the same moment make one call', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const f = fakeFetch(async () => {
+      await gate;
+      return { status: 200, json: GOOD };
+    });
+    const { robot } = client(f.fetch);
+    const reads = [robot.read(), robot.read(), robot.read()];
+    release();
+    const results = await Promise.all(reads);
+    expect(f.calls).toHaveLength(1);
+    expect(results.every((r) => r !== null)).toBe(true);
+  });
+});

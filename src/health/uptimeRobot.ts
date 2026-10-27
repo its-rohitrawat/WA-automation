@@ -95,6 +95,7 @@ export class UptimeRobotClient {
   readonly #log: Logger;
   readonly #timeoutMs: number;
   #cached: { at: number; reading: RobotReading | null } | undefined;
+  #inFlight: Promise<RobotReading | null> | undefined;
 
   constructor(o: { apiKey: string; fetch?: FetchLike; clock: Clock; log: Logger; timeoutMs?: number | undefined }) {
     this.#key = o.apiKey;
@@ -109,9 +110,18 @@ export class UptimeRobotClient {
     const now = this.#clock.now().getTime();
     const c = this.#cached;
     if (c && now - c.at < (c.reading ? CACHE_MS : RETRY_MS)) return c.reading;
-    const reading = await this.#ask(now);
-    this.#cached = { at: now, reading };
-    return reading;
+    // Polls that arrive while a request is out share it: one call to UptimeRobot, never one per poll.
+    if (this.#inFlight) return this.#inFlight;
+    const ask = this.#ask(now).then((reading) => {
+      this.#cached = { at: now, reading };
+      return reading;
+    });
+    this.#inFlight = ask;
+    try {
+      return await ask;
+    } finally {
+      this.#inFlight = undefined;
+    }
   }
 
   async #ask(now: number): Promise<RobotReading | null> {

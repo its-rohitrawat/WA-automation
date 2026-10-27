@@ -40,7 +40,7 @@ export async function bootDashboard(o: {
   const { id, csrf } = sessions.create(OWNER);
   const origin = `http://127.0.0.1:${port}`;
 
-  function send(method: string, path: string, x: { body?: unknown; cookie?: string | null; csrf?: string | null; origin?: string | null } = {}): Promise<Reply> {
+  function send(method: string, path: string, x: { body?: unknown; raw?: string; cookie?: string | null; csrf?: string | null; origin?: string | null } = {}): Promise<Reply> {
     const headers: Record<string, string> = {};
     const cookie = x.cookie === undefined ? id : x.cookie;
     if (cookie !== null) headers.cookie = `wa_session=${cookie}`;
@@ -50,7 +50,7 @@ export async function bootDashboard(o: {
       const or = x.origin === undefined ? origin : x.origin;
       if (or !== null) headers.origin = or;
     }
-    const text = x.body === undefined ? undefined : JSON.stringify(x.body);
+    const text = x.raw !== undefined ? x.raw : x.body === undefined ? undefined : JSON.stringify(x.body);
     if (text !== undefined) {
       headers['content-type'] = 'application/json';
       headers['content-length'] = String(Buffer.byteLength(text));
@@ -61,7 +61,13 @@ export async function bootDashboard(o: {
         res.on('data', (c: Buffer) => chunks.push(c));
         res.on('end', () => {
           const raw = Buffer.concat(chunks).toString('utf8');
-          resolve({ status: res.statusCode ?? 0, headers: res.headers, json: raw === '' ? null : (JSON.parse(raw) as unknown) });
+          let json: unknown = null;
+          try {
+            json = raw === '' ? null : (JSON.parse(raw) as unknown);
+          } catch {
+            json = raw;
+          }
+          resolve({ status: res.statusCode ?? 0, headers: res.headers, json });
         });
       });
       r.on('error', reject);
@@ -72,7 +78,7 @@ export async function bootDashboard(o: {
   return {
     port, sessions, log: () => lines.join(''),
     get: (path: string, x?: { cookie?: string | null }) => send('GET', path, x),
-    post: (path: string, x?: { body?: unknown; cookie?: string | null; csrf?: string | null; origin?: string | null }) => send('POST', path, x),
+    post: (path: string, x?: { body?: unknown; raw?: string; cookie?: string | null; csrf?: string | null; origin?: string | null }) => send('POST', path, x),
     async close() {
       await server.stop();
       rmSync(root, { recursive: true, force: true });
