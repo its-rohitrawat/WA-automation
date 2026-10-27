@@ -93,3 +93,25 @@ describe('ReportScheduler with a settings getter', () => {
     expect(sender.calls).toHaveLength(1);
   });
 });
+
+describe('ReportScheduler with a getter that throws', () => {
+  it('tick resolves, sends nothing and logs; health gives a plain line', async () => {
+    const db = seededDb();
+    setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
+    const clock = manualClock(at('2026-10-23', '06:30'));
+    const sender = new FakeReportSender();
+    const errors: string[] = [];
+    const log = { ...silentLogger(), error: (_o: unknown, msg: string) => errors.push(msg) } as unknown as ReturnType<typeof silentLogger>;
+    const s = new ReportScheduler({
+      db, clock, log, sender, healthLine: () => ({ ok: true, text: '✅' }),
+      settings: () => {
+        throw new Error('database is locked');
+      },
+    });
+    s.recover();
+    await expect(s.tick()).resolves.toBeUndefined();
+    expect(sender.calls).toHaveLength(0);
+    expect(errors).toContain('morning report tick failed');
+    expect(s.health()).toEqual({ text: 'Morning report: settings could not be read', warning: null, recipientMasked: '…1234' });
+  });
+});

@@ -40,18 +40,32 @@ export interface LiveReportOptions {
 
 /** How long a stop or a rebuild waits for a send in flight (the scheduler adds at most 5 s to it). */
 const STOP_WAIT_MS = 10_000;
+/** After a failed open, the next try waits 1 minute, doubling to at most 10. */
+const OPEN_RETRY_MS = [60_000, 120_000, 240_000, 480_000, 600_000];
+/** After this many failed opens in a row, Health tells the owner. */
+const OPEN_WARN_AFTER = 3;
+export const OPEN_FAILED_WARNING = '⚠️ Morning report: the spare number could not be started. Restart the service; see docs/SETUP.md';
+
+type Current = { recipient: string; opened: OpenedSender; scheduler: ReportScheduler };
 
 export class LiveReport {
   readonly #o: LiveReportOptions;
-  #current: { recipient: string; opened: OpenedSender; scheduler: ReportScheduler } | undefined;
+  #current: Current | undefined;
+  /** A sender being stopped and closed (a number change): stop() waits for it, and nothing opens before it ends. */
+  #closing: Promise<void> | undefined;
   #busy: Promise<void> | undefined;
   #stopped = false;
+  #openFailures = 0;
+  #nextOpenAt = 0;
 
   constructor(o: LiveReportOptions) {
     this.#o = o;
   }
 
-  /** Called from the app tick. Never throws. A tick while another runs does nothing. */
+  /**
+   * Called from the app tick, which does not wait for it. Never throws. A tick while another runs does nothing, so a
+   * number change never stops a scheduler in the middle of its send.
+   */
   async tick(now: Date = this.#o.clock.now()): Promise<void> {
     if (this.#busy || this.#stopped) return;
     const run = this.#run(now);
@@ -66,17 +80,35 @@ export class LiveReport {
   async #run(now: Date): Promise<void> {
     const { log } = this.#o;
     try {
-      const s = this.#o.settings();
+      let s = this.#o.settings();
       const cur = this.#current;
       if (cur && s.recipient !== undefined && s.recipient !== cur.recipient) {
         this.#current = undefined;
-        await this.#close(cur);
+        const closing = this.#close(cur);
+        this.#closing = closing;
+        try {
+          await closing; // the old sender lets go of the session file before a new one opens it
+        } finally {
+          this.#closing = undefined;
+        }
         log.info({}, 'morning report: the number changed; the sender is made again for the new number');
+        if (this.#stopped) return; // stop() came while the old sender was closing: open nothing new
+        // The close takes up to a few seconds: the owner may have changed the number (or switched off) meanwhile.
+        s = this.#o.settings();
       }
-      if (this.#stopped) return; // stop() came while the old sender was closing: open nothing new
       if (!this.#current) {
         if (!s.report.enabled || s.recipient === undefined) return;
-        this.#current = this.#start(s.recipient);
+        if (now.getTime() < this.#nextOpenAt) return;
+        try {
+          this.#current = this.#start(s.recipient);
+          this.#openFailures = 0;
+          this.#nextOpenAt = 0;
+        } catch (err) {
+          this.#openFailures++;
+          this.#nextOpenAt = now.getTime() + OPEN_RETRY_MS[Math.min(this.#openFailures, OPEN_RETRY_MS.length) - 1]!;
+          log.error({ err, failures: this.#openFailures }, 'morning report: the spare number sender could not be opened; trying again later');
+          return;
+        }
       }
       await this.#current.scheduler.tick(now);
     } catch (err) {
@@ -85,7 +117,7 @@ export class LiveReport {
   }
 
   /** Opens the sender and its scheduler; a send cut off under the previous one becomes unknown before anything is sent. */
-  #start(recipient: string): { recipient: string; opened: OpenedSender; scheduler: ReportScheduler } {
+  #start(recipient: string): Current {
     const { db, clock, log, healthLine, build } = this.#o;
     const opened = this.#o.open(recipient);
     const scheduler = new ReportScheduler({
@@ -100,8 +132,8 @@ export class LiveReport {
     return { recipient, opened, scheduler };
   }
 
-  async #close(c: { opened: OpenedSender; scheduler: ReportScheduler }): Promise<void> {
-    await c.scheduler.stop(STOP_WAIT_MS);
+  async #close(c: Current, waitMs: number = STOP_WAIT_MS): Promise<void> {
+    await c.scheduler.stop(waitMs);
     try {
       c.opened.close();
     } catch (err) {
@@ -109,27 +141,30 @@ export class LiveReport {
     }
   }
 
-  /** Today's line for Health. */
+  /** Today's line for Health. Never throws: settings that cannot be read give a plain line. */
   health(now: Date = this.#o.clock.now()): ReportHealth {
     if (this.#current) return this.#current.scheduler.health(now);
-    const s = this.#o.settings();
-    if (!s.report.enabled) return { text: 'Morning report: off', warning: null };
-    return { text: s.recipient === undefined ? "Morning report: no founder's number set" : 'Morning report: starting', warning: null };
+    try {
+      const s = this.#o.settings();
+      if (!s.report.enabled) return { text: 'Morning report: off', warning: null };
+      if (s.recipient === undefined) return { text: "Morning report: no founder's number set", warning: null };
+    } catch (err) {
+      this.#o.log.error({ err }, 'morning report settings could not be read');
+      return { text: 'Morning report: settings could not be read', warning: null };
+    }
+    return { text: 'Morning report: starting', warning: this.#openFailures >= OPEN_WARN_AFTER ? OPEN_FAILED_WARNING : null };
   }
 
-  /** Starts nothing more, waits for a tick in flight (bounded by the scheduler's own stop), then stops and closes. */
+  /**
+   * Starts nothing more, then stops and closes the sender, also one being closed for a number change, so the spare
+   * number's session file is closed when this resolves. Bounded by the scheduler's own stop (waitMs + 5 s).
+   */
   async stop(waitMs: number = STOP_WAIT_MS): Promise<void> {
     this.#stopped = true;
     const cur = this.#current;
     this.#current = undefined;
-    if (cur) {
-      await cur.scheduler.stop(waitMs);
-      try {
-        cur.opened.close();
-      } catch (err) {
-        this.#o.log.error({ err }, 'closing the morning report sender failed');
-      }
-    }
+    if (cur) await this.#close(cur, waitMs);
+    if (this.#closing) await this.#closing;
     if (this.#busy) {
       let timer: NodeJS.Timeout | undefined;
       await Promise.race([this.#busy, new Promise<void>((resolve) => (timer = setTimeout(resolve, Math.min(2_000, waitMs))))]);

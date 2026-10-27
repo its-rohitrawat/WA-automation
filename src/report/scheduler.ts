@@ -205,10 +205,16 @@ export class ReportScheduler {
     return typeof s === 'function' ? s() : s;
   }
 
-  /** Today's line for Health. */
+  /** Today's line for Health. Never throws: a settings getter that fails gives a plain line. */
   health(now: Date = this.#o.clock.now()): ReportHealth {
     const recipientMasked = this.#o.sender.maskedRecipient();
-    const settings = this.#settings();
+    let settings: ReportSettings;
+    try {
+      settings = this.#settings();
+    } catch (err) {
+      this.#o.log.error({ err }, 'morning report settings could not be read');
+      return { text: 'Morning report: settings could not be read', warning: null, recipientMasked };
+    }
     if (!settings.enabled) return { text: 'Morning report: off', warning: null, recipientMasked };
     return { ...describeReport(reportFor(this.#o.db, istDate(now)), now, settings, this.#o.sender.status().state), recipientMasked };
   }

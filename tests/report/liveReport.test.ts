@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { LiveReport, type LiveReportSettings } from '../../src/report/liveReport.ts';
+import { LiveReport, OPEN_FAILED_WARNING, type LiveReportSettings } from '../../src/report/liveReport.ts';
 import { TRACKER_ID_KEY } from '../../src/report/morningReport.ts';
 import type { ReportSettings } from '../../src/report/types.ts';
 import { setKv } from '../../src/store/kv.ts';
@@ -148,5 +148,118 @@ describe('LiveReport', () => {
     await t.tick('06:30');
     expect(sent(t.opened)).toBe(0);
     expect(t.opened).toHaveLength(1);
+  });
+});
+
+describe('LiveReport review fixes', () => {
+  /** Makes the sender's stop wait until released, as a slow socket close would. */
+  function gateStop(sender: FakeReportSender): () => void {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    sender.stop = async () => {
+      sender.stopped++;
+      await gate;
+    };
+    return release;
+  }
+  const settle = () => new Promise((r) => setTimeout(r, 10));
+
+  it('the old sender is closed before the new one opens', async () => {
+    const t = setup({ report: ON, recipient: A });
+    await t.tick('05:30');
+    const release = gateStop(t.opened[0]!.sender);
+    t.set({ report: ON, recipient: B });
+    const rebuilding = t.tick('05:31');
+    await settle();
+    expect(t.opened.map((o) => [o.recipient, o.closed])).toEqual([[A, 0]]);
+    release();
+    await rebuilding;
+    expect(t.opened.map((o) => [o.recipient, o.closed])).toEqual([[A, 1], [B, 0]]);
+  });
+
+  it('reads the number again after the close: a second change meanwhile opens for the latest number only', async () => {
+    const C = '919900001111';
+    const t = setup({ report: ON, recipient: A });
+    await t.tick('05:30');
+    const release = gateStop(t.opened[0]!.sender);
+    t.set({ report: ON, recipient: B });
+    const rebuilding = t.tick('06:30');
+    await settle();
+    t.set({ report: ON, recipient: C });
+    release();
+    await rebuilding;
+    expect(t.opened.map((o) => o.recipient)).toEqual([A, C]);
+    expect(t.opened[1]!.sender.calls).toHaveLength(1);
+  });
+
+  it('switched off during the close, it opens nothing new', async () => {
+    const t = setup({ report: ON, recipient: A });
+    await t.tick('05:30');
+    const release = gateStop(t.opened[0]!.sender);
+    t.set({ report: ON, recipient: B });
+    const rebuilding = t.tick('06:30');
+    await settle();
+    t.set({ report: { ...ON, enabled: false }, recipient: B });
+    release();
+    await rebuilding;
+    expect(t.opened).toHaveLength(1);
+  });
+
+  it('stop during a rebuild waits for the old session file to close, and opens nothing new', async () => {
+    const t = setup({ report: ON, recipient: A });
+    await t.tick('05:30');
+    const release = gateStop(t.opened[0]!.sender);
+    t.set({ report: ON, recipient: B });
+    const rebuilding = t.tick('05:31');
+    await settle();
+    let stopped = false;
+    const stopping = t.live.stop(1000).then(() => (stopped = true));
+    await settle();
+    expect(stopped).toBe(false);
+    release();
+    await stopping;
+    await rebuilding;
+    expect(t.opened.map((o) => [o.recipient, o.closed])).toEqual([[A, 1]]);
+  });
+
+  it('a number change during a send waits: the old sender is not stopped and nothing opens until the send ends', async () => {
+    const t = setup({ report: ON, recipient: A });
+    await t.tick('05:30');
+    let release!: () => void;
+    t.opened[0]!.sender.gate = new Promise((r) => (release = r));
+    const sending = t.tick('06:30');
+    await settle();
+    t.set({ report: ON, recipient: B });
+    await t.tick('06:31');
+    expect(t.opened[0]!.sender.stopped).toBe(0);
+    expect(t.opened).toHaveLength(1);
+    release();
+    await sending;
+    expect(reportFor(t.db, '2026-10-23')?.status).toBe('sent');
+    await t.tick('06:32');
+    expect(t.opened.map((o) => o.recipient)).toEqual([A, B]);
+    expect(sent(t.opened)).toBe(1);
+  });
+
+  it('waits longer after each failed open, and warns the owner after three', async () => {
+    const t = setup({ report: ON, recipient: A }, { failOpen: 3 });
+    await t.tick('06:00'); // 1st failure: next try in 1 min
+    await t.tick('06:00');
+    await t.tick('06:01'); // 2nd: in 2 min
+    expect(t.live.health()).toEqual({ text: 'Morning report: starting', warning: null });
+    await t.tick('06:02');
+    await t.tick('06:03'); // 3rd: in 4 min
+    expect(t.live.health().warning).toBe(OPEN_FAILED_WARNING);
+    await t.tick('06:06');
+    expect(t.opened).toHaveLength(0);
+    await t.tick('06:07');
+    expect(t.opened).toHaveLength(1);
+    expect(t.live.health().warning).toBeNull();
+  });
+
+  it('health never throws when the settings cannot be read', async () => {
+    const t = setup({ report: ON, recipient: A });
+    t.set(undefined as unknown as LiveReportSettings);
+    expect(t.live.health().text).toBe('Morning report: settings could not be read');
   });
 });
