@@ -8,6 +8,7 @@ import { systemClock } from '../src/util/clock.ts';
 import { silentLogger } from '../src/util/logger.ts';
 import type { Logger } from '../src/util/logger.ts';
 import type { ServerResponse } from 'node:http';
+import { mountFakeScreens } from './dashboardScreensFake.ts';
 
 const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
 
@@ -204,6 +205,8 @@ function fakeGroupsApi(state: FakeState) {
 export function fakeDashboard(o: { port: number; state: FakeState; log?: Logger }): WebServer {
   const { state } = o;
   const web = createWebServer({ control: {}, env: { DASHBOARD_PORT: o.port }, log: o.log ?? silentLogger(), clock: systemClock });
+  // Tasks, Meetings, Activity, Tracker, AI usage, Automations, Audit logs and Settings: the real routes on an in-memory db.
+  mountFakeScreens(web, { signedIn: () => state.signedIn, csrf: FAKE_CSRF });
   const guarded = (body: () => unknown) => (ctx: { res: ServerResponse }) => {
     if (!state.signedIn) return sendError(ctx.res, 401, 'unauthenticated', 'Sign in first.');
     sendJson(ctx.res, 200, body());

@@ -26,6 +26,8 @@ const VIEWPORTS = [
 ] as const;
 const THEMES = ['dark', 'light'] as const;
 const SEARCH_WORDS = ['Nair', 'Joshi', 'Patel', 'Gupta'];
+/** The screens drawn from src/web/public/views/screens.js. */
+const WORK_SCREENS = ['tasks', 'meetings', 'activity', 'tracker', 'usage', 'automations', 'audit', 'settings'];
 let round = 0;
 
 const state: FakeState = { signedIn: false, empty: false };
@@ -140,9 +142,15 @@ async function main() {
         const cards = await p.locator('.conn').count();
         if (cards !== 7) fail(where, `expected 7 cards, found ${cards}`);
 
-        where = `placeholder ${tag}`;
-        await p.goto(`${base}/dashboard/tasks`);
-        await check(p, where, 'text=Coming in the next update', `placeholder-${tag}`);
+        // The work and control screens (D4, D5), on the real routes: each draws its content, with no error panel.
+        for (const screen of WORK_SCREENS) {
+          where = `${screen} ${tag}`;
+          await p.goto(`${base}/dashboard/${screen}`);
+          await p.locator('#view .skel').first().waitFor({ state: 'detached', timeout: WAIT_MS }).catch(() => fail(where, 'still loading'));
+          await check(p, where, '#view .card', `${screen}-${tag}`);
+          if (await p.locator('#view .err-state').count()) fail(where, 'shows its error panel');
+          if ((await p.locator('#view', { hasText: 'Coming in the next update' }).count()) !== 0) fail(where, 'is still the placeholder');
+        }
 
         where = `overview empty ${tag}`;
         state.empty = true;
@@ -152,7 +160,7 @@ async function main() {
         where = `back button ${tag}`;
         await p.goBack();
         await settle(p);
-        if (!p.url().endsWith('/dashboard/tasks')) fail(where, `back went to ${p.url()}`);
+        if (!p.url().endsWith(`/dashboard/${WORK_SCREENS.at(-1)}`)) fail(where, `back went to ${p.url()}`);
 
         state.empty = false;
         where = `clients ${tag}`;
