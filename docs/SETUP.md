@@ -322,8 +322,15 @@ Besides a description or the start of the text, the description column can say:
 
 ## Morning report
 
-Every day at 06:00 IST, Sundays included, the founder gets one WhatsApp message from a **spare number** the business owns. It lists, per active client, how many tasks are open and overdue and the 3 most urgent open tasks (tagged `us` or `client`), then a total line. The current tracker is attached as `Tracker-YYYY-MM-DD.xlsx`. It makes no AI call, so it costs nothing.
+Monday to Friday at 06:00 IST, the founder gets one short WhatsApp message from a **spare number** the business owns, with the totals of the active clients and a link to the tracker on Google Drive, for example:
 
+`Good morning. 5 open tasks, 2 overdue. Today's tracker: https://drive.google.com/file/d/…/view`
+
+With no open tasks it reads `Good morning. No open tasks. Today's tracker: …`. No file is attached: the link opens `Tracker.xlsx` on its **Today** tab (the first tab), which lists, per active client, how many tasks are open and overdue and the 3 most urgent open tasks (tagged `us` or `client`). It makes no AI call, so it costs nothing.
+
+- No report goes out on Saturday or Sunday. `REPORT_DAYS` changes the days (see step 4 below). `report send-now` still works on any day.
+- The founder needs view access to `Tracker.xlsx` on Drive, or the link asks for access (step 6 below).
+- The link exists only once the tracker has reached Google Drive. Until then the report is not sent, and the status says why (see "Checking it" below).
 - The founder's own number is unchanged: the agent still only reads it and never sends from it.
 - The spare number sends only to `REPORT_RECIPIENT`. It reads no chats, sends no read receipts, and is online only for the minute it takes to send.
 - If the PC is off or offline at 06:00, the report goes as soon as possible, but only until 12:00 IST. After that the day is skipped.
@@ -347,11 +354,12 @@ Every day at 06:00 IST, Sundays included, the founder gets one WhatsApp message 
    REPORT_RECIPIENT=your_founder_number_here
    ```
 
-   `REPORT_RECIPIENT` is the founder's Indian mobile: `91` then the 10-digit mobile number (12 digits in all), digits only, for example `919812345678`, with no `+` or spaces. The service refuses to start with any other form. Leave `REPORT_TIME` and `REPORT_DEADLINE` empty for 06:00 and 12:00 IST.
+   `REPORT_RECIPIENT` is the founder's Indian mobile: `91` then the 10-digit mobile number (12 digits in all), digits only, for example `919812345678`, with no `+` or spaces. The service refuses to start with any other form. Leave `REPORT_TIME`, `REPORT_DEADLINE` and `REPORT_DAYS` empty for 06:00 and 12:00 IST, Monday to Friday. Set `REPORT_DAYS=mon-sat` to add Saturday, or `REPORT_DAYS=daily` for every day.
 5. **Start the service again** (see "Start the service again" under "If the service will not start" below), wait one minute, and check `npm run cli -- report status`.
-6. Send one test report: `npm run cli -- report send-now`, then type `yes`. It works only while the service is running, and it refuses if today's report was already sent. Check the founder's phone.
+6. Give the founder view access to `Tracker.xlsx`, or the link asks for access when he opens it. In Google Drive (mailbox account), Share the **WA Agent** folder with the founder's Google account (the one signed in on his phone), as Viewer. Sharing the folder, not the file, keeps it working if the file is ever re-created (see step 7 of "6. Install and start the service").
+7. Send one test report: `npm run cli -- report send-now`, then type `yes`. It works only while the service is running, on any day, weekends too, and it refuses if today's report was already sent. Check the founder's phone, and open the link once.
    If you change `REPORT_RECIPIENT` later, restart the service: until then `report status` warns that the running service still sends to the old number, and `report send-now` refuses.
-7. Open WhatsApp on the spare phone at least every 14 days, so the linked device stays valid.
+8. Open WhatsApp on the spare phone at least every 14 days, so the linked device stays valid.
 
 The spare number's session is in `C:\wa-agent\data\sender-session.db`. It is encrypted with its own key, derived from the same master key. Back it up with the rest of `data`.
 
@@ -368,6 +376,21 @@ Last days:
 ```
 
 `npm run cli -- status` shows the same line as `Report:`.
+
+What the line can say (HH:MM is a time in IST):
+
+| What you see | What it means | What to do |
+|---|---|---|
+| Morning report: due at 06:00 IST | A report day, before 06:00. | Nothing. |
+| Morning report: due now | Between 06:00 and 12:00, not sent yet. It goes on the next check (every 30 seconds). | Nothing. |
+| Morning report: sent at HH:MM IST | Today's message left. | Nothing. |
+| Morning report: sending now | The send is running. | Nothing. |
+| Morning report: no report today (weekend) | Saturday or Sunday, and `REPORT_DAYS` leaves the day out. Nothing is sent and nothing is skipped. | Nothing. `report send-now` still sends one if you want it. |
+| Morning report: not sent yet (the tracker is not on Google Drive yet (run google-auth and let it upload once)), next try HH:MM IST | The tracker has never reached Google Drive, so there is no link to send. Nothing was sent. | If Google was never signed in, run `npm run cli -- google-auth` (see "5. One-time sign-ins"), then restart the service. Once `Tracker.xlsx` is in the **WA Agent** folder on Drive, the report goes on the next try. |
+| Morning report skipped today (the tracker is not on Google Drive yet (run google-auth and let it upload once)) | 12:00 came and there was still no link, so the day was skipped. Nothing was sent. | Same as above; tomorrow's report goes once the tracker is on Drive. |
+| Morning report: not sent yet (reason), next try HH:MM IST | Another definite failure, nothing was sent. It tries again after 2, 5 and 10 minutes, until 12:00. | Usually nothing. If it says the spare number, see the status headings below. |
+| Morning report skipped today (reason) | Not sent by 12:00 (for example the PC was off). | Check the reason. Tomorrow's report is not affected. |
+| Morning report: unknown, check WhatsApp | See the next heading. | See the next heading. |
 
 ### Status "Morning report: unknown, check WhatsApp"
 

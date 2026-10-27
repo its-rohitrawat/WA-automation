@@ -2,7 +2,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { INDIAN_MOBILE, parseEnv, reportSettings } from '../../src/config/env.ts';
-import { SENDER_WARNINGS, UNKNOWN_WARNING } from '../../src/report/scheduler.ts';
+import { describeReport, REASON_TEXT, SENDER_WARNINGS, UNKNOWN_WARNING } from '../../src/report/scheduler.ts';
+import type { ReportRow } from '../../src/store/reports.ts';
 
 const read = (path: string) => readFileSync(fileURLToPath(new URL(`../../${path}`, import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
 
@@ -121,13 +122,22 @@ describe('morning report documentation: safety statements', () => {
     expect(step3).toContain("not from the founder's phone");
     expect(step3).not.toMatch(/from the \*\*founder/);
     const step6 = step(6);
-    expect(step6).toContain('only while the service is running');
-    expect(step6).toContain("refuses if today's report was already sent");
+    expect(step6).toContain('view access to `Tracker.xlsx`');
+    expect(step6).toContain("the founder's Google account");
+    expect(step6).toContain('the link asks for access');
+    const step7 = step(7);
+    expect(step7).toContain('only while the service is running');
+    expect(step7).toContain("refuses if today's report was already sent");
+    expect(step7).toContain('any day, weekends too');
+    expect(steps.indexOf('view access to `Tracker.xlsx`')).toBeLessThan(steps.indexOf('report send-now'));
     const step4 = step(4);
     expect(step4).toContain('with no `+` or spaces');
     expect(step4).toContain('refuses to start');
+    expect(step4).toContain('`REPORT_DAYS`');
+    expect(step4).toContain('`REPORT_DAYS=mon-sat`');
+    expect(step4).toContain('`REPORT_DAYS=daily`');
     expect(step(5)).toContain('If the service will not start');
-    expect(step(7)).toContain('at least every 14 days');
+    expect(step(8)).toContain('at least every 14 days');
   });
 
   it('the documented recipient example matches the validation', () => {
@@ -136,9 +146,11 @@ describe('morning report documentation: safety statements', () => {
     expect(INDIAN_MOBILE.test(example![1]!)).toBe(true);
   });
 
-  it('the documented times are the code defaults', () => {
-    const { time, deadline } = reportSettings(parseEnv({}));
-    expect(report).toContain(`Every day at ${time} IST`);
+  it('the documented times and days are the code defaults', () => {
+    const { time, deadline, days } = reportSettings(parseEnv({}));
+    expect(days).toBe('weekdays');
+    expect(report).toContain(`Monday to Friday at ${time} IST`);
+    expect(report).not.toMatch(/Every day at|Sundays included/);
     expect(report).toContain(`empty for ${time} and ${deadline} IST`);
     expect(report).toContain(`only until ${deadline} IST`);
   });
@@ -263,5 +275,87 @@ describe('morning report documentation: safety statements', () => {
     expect(row).toBeDefined();
     expect(row).toContain('Another copy of the agent');
     expect(row).not.toContain('link-sender');
+  });
+});
+
+describe('morning report documentation: short message with the tracker link (27 Oct 2026)', () => {
+  const setup = read('docs/SETUP.md');
+  const report = setup.slice(setup.indexOf('\n## Morning report\n'), setup.indexOf('\n## Everyday commands'));
+  const settings = reportSettings(parseEnv({}));
+  const row = (o: Partial<ReportRow>): ReportRow => ({
+    date: '2026-10-30',
+    status: 'retry',
+    detail: null,
+    attempts: 1,
+    nextAttemptAt: null,
+    forced: false,
+    createdAt: '2026-10-30T00:30:00.000Z',
+    updatedAt: '2026-10-30T00:30:00.000Z',
+    ...o,
+  });
+  /** The rows of the report status table under "Checking it". */
+  const statusRows = (): string[] => {
+    const checking = report.slice(report.indexOf('\n### Checking it\n'), report.indexOf('\n### ', report.indexOf('\n### Checking it\n') + 1));
+    return checking.split('\n').filter((line) => line.startsWith('| Morning report'));
+  };
+
+  it('describes the short message with the link and no attachment', () => {
+    expect(report).toContain('`Good morning. 5 open tasks, 2 overdue. Today\'s tracker: https://drive.google.com/file/d/…/view`');
+    expect(report).toContain('`Good morning. No open tasks. Today\'s tracker: …`');
+    expect(report).toContain('No file is attached');
+    expect(report).toContain('**Today** tab');
+    expect(report).not.toMatch(/Tracker-YYYY-MM-DD|is attached as|attached as/);
+  });
+
+  it('names the report days and REPORT_DAYS', () => {
+    expect(report).toContain('Monday to Friday');
+    expect(report).toContain('No report goes out on Saturday or Sunday');
+    expect(report).toContain('`REPORT_DAYS`');
+  });
+
+  it('the founder needs view access to Tracker.xlsx, by sharing the folder with his Google account', () => {
+    expect(report).toContain('view access to `Tracker.xlsx`');
+    expect(report).toContain("the founder's Google account");
+    expect(report).toContain('the link asks for access');
+    expect(report).toContain('Share the **WA Agent** folder');
+  });
+
+  it('the status table lists the weekend line and the no_tracker_link lines exactly as the code writes them', () => {
+    const rows = statusRows();
+    const has = (text: string) => expect(rows.some((line) => line.startsWith(`| ${text} |`)), text).toBe(true);
+    const saturday = describeReport(undefined, new Date('2026-10-31T03:00:00Z'), settings, 'idle');
+    expect(saturday).toEqual({ text: 'Morning report: no report today (weekend)', warning: null });
+    has(saturday.text);
+    const retry = describeReport(row({ detail: 'no_tracker_link', nextAttemptAt: '2026-10-30T00:32:00.000Z' }), new Date('2026-10-30T00:31:00Z'), settings, 'idle');
+    expect(retry.text).toBe(`Morning report: not sent yet (${REASON_TEXT.no_tracker_link!}), next try 06:02 IST`);
+    has(retry.text.replace('06:02', 'HH:MM'));
+    const skipped = describeReport(row({ status: 'skipped', detail: 'no_tracker_link' }), new Date('2026-10-30T07:00:00Z'), settings, 'idle');
+    has(skipped.text);
+    expect(skipped.text).toBe(`Morning report skipped today (${REASON_TEXT.no_tracker_link!})`);
+    has(`Morning report: due at ${settings.time} IST`);
+    has('Morning report: sent at HH:MM IST');
+  });
+
+  it('SETUP-mac.md section 7 says the same, short', () => {
+    const mac = read('docs/SETUP-mac.md');
+    const start = mac.indexOf('\n## 7. Morning report');
+    expect(start).toBeGreaterThanOrEqual(0);
+    const section = mac.slice(start, mac.indexOf('\n## ', start + 1));
+    expect(section).toContain('Monday to Friday at 06:00 IST');
+    expect(section).toContain('link to the tracker on Google Drive');
+    expect(section).toContain('No file is attached');
+    expect(section).toContain('`REPORT_DAYS`');
+    expect(section).toContain('view access to `Tracker.xlsx`');
+    expect(section).toContain("the founder's Google account");
+    expect(section).not.toMatch(/Tracker-YYYY-MM-DD|attached as|Excel sheet every morning/);
+  });
+
+  it('the spec has the 27 Oct 2026 amendment with D1 to D4', () => {
+    const spec = read('docs/superpowers/specs/2026-10-23-morning-report-design.md');
+    const amendment = spec.slice(spec.indexOf('\n## Amendment, 27 Oct 2026\n'));
+    expect(spec).toContain('\n## Amendment, 27 Oct 2026\n');
+    for (const d of ['**D1', '**D2', '**D3', '**D4']) expect(amendment).toContain(d);
+    expect(amendment).toContain("`Good morning. {open} open tasks, {overdue} overdue. Today's tracker: {link}`");
+    expect(amendment).toContain('`REPORT_DAYS`');
   });
 });

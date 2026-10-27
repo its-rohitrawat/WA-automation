@@ -123,16 +123,16 @@ In `/opt/wa-agent/logs/` (read them in the waagent window, for example `tail -n 
 
 These logs are not trimmed automatically. Check their size once a month (`ls -lh logs`). If one grows past about 100 MB, stop the service safely, move the file to `backups/`, and start again.
 
-## 7. Morning report (the Excel sheet every morning)
+## 7. Morning report (a short message with the tracker link)
 
-Every day at 06:00 IST the founder gets one WhatsApp message from a spare number, with the tracker attached as `Tracker-YYYY-MM-DD.xlsx`. Set it up once:
+Monday to Friday at 06:00 IST the founder gets one short WhatsApp message from a spare number: the open and overdue totals and a link to the tracker on Google Drive, which opens on its **Today** tab. No file is attached. `REPORT_DAYS` changes the days (`mon-sat` or `daily`; empty is Monday to Friday). The founder needs view access to `Tracker.xlsx`: share the **WA Agent** folder with the founder's Google account (Viewer), or the link asks for access. Set it up once:
 
 1. Spare SIM in a spare phone with WhatsApp. From the founder's phone, send the spare number "hi".
 2. **Stop the service safely** (see *Service commands*).
 3. Waagent window: `npm run cli -- link-sender`, and scan the QR code from the **spare** phone. The spare phone then lists this link as "WA Agent - Morning report". If the founder's phone ever shows "WA Agent - Morning report", the wrong phone scanned it: remove that device and link again from the spare phone.
 4. `nano .env` and set `REPORT_ENABLED=true` and `REPORT_RECIPIENT=` the founder's number: `91` then the 10-digit mobile, digits only.
 5. **Start the service again**, wait one minute, then: `npm run cli -- report status`.
-6. Test once: `npm run cli -- report send-now`, type `yes`, and check the founder's phone.
+6. Test once (it works on any day): `npm run cli -- report send-now`, type `yes`, check the founder's phone and open the link.
 
 Details and every status message: "Morning report" in [SETUP.md](SETUP.md).
 

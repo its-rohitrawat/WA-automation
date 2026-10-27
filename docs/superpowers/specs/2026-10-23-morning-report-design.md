@@ -1,6 +1,6 @@
 # Morning report (Phase 2c): design
 
-Status: approved by the owner on 2026-10-23. It amends the main design (`2026-10-19-wa-agent-design.md`), which says the agent never sends on WhatsApp. That rule still holds for the founder's number. This phase adds one narrow sender on a separate spare number.
+Status: approved by the owner on 2026-10-23, amended on 2026-10-27 (see "Amendment, 27 Oct 2026" at the end). It amends the main design (`2026-10-19-wa-agent-design.md`), which says the agent never sends on WhatsApp. That rule still holds for the founder's number. This phase adds one narrow sender on a separate spare number.
 
 ## 1. What it does
 
@@ -93,3 +93,22 @@ Status: approved by the owner on 2026-10-23. It amends the main design (`2026-10
 ## 9. Size
 
 About 1 day, using the same build-and-review loop as Phase 2a.
+
+## Amendment, 27 Oct 2026
+
+Owner decisions, final. Where they differ from §1 to §8 above, they replace them. Plan: `docs/superpowers/plans/2026-10-27-short-morning-link.md`.
+
+- **D1 text:** the message is one short line with the totals and a link to the tracker on Google Drive:
+  `Good morning. {open} open tasks, {overdue} overdue. Today's tracker: {link}`
+  - "1 open task" and "1 overdue" use the singular.
+  - With no active clients: `Good morning. No open tasks. Today's tracker: {link}`
+  - Totals count active clients only: open is `us` plus `client` open tasks, overdue is the overdue ones.
+  - `{link}` is `https://drive.google.com/file/d/{id}/view`, from the tracker id `src/output/drive.ts` already stores. Until the tracker has reached Drive there is no link: the day is a definite failure with reason `no_tracker_link` ("the tracker is not on Google Drive yet (run google-auth and let it upload once)"), retried with the normal waits and skipped at the deadline. Nothing is sent.
+  - The founder needs view access to `Tracker.xlsx` (the **WA Agent** folder shared with his Google account), or the link asks for access.
+- **D2 days:** Monday to Friday by default, no longer every day. The setting `REPORT_DAYS` accepts `weekdays` (default), `mon-sat` and `daily`.
+  - On a day that is not a report day the scheduled path does nothing: no claim, no row, no skipped row, no "due" promise. The status says `Morning report: no report today (weekend)`, with no warning.
+  - `report send-now` is still honoured on any day, with every send-now rule.
+- **D3 summary tab:** the workbook gets a `Today` worksheet first, before Overview: per active client its open and overdue counts, and its 3 most urgent open tasks in the order of §1 (side, code, title, deadline, notes), then a total row. The link therefore opens on it.
+- **D4 no attachment:** only the text is sent, with `linkPreview: null`. `ReportSender.sendReport(text)` takes no file, and `buildMorningText` is replaced by `buildShortMorningText(view, today, link)`. The §7 "Large tracker" risk no longer applies.
+
+Unchanged: everything in §2 to §4 about who may be sent to and how. The founder-number reader never sends; the sender messages only `REPORT_RECIPIENT`; claim before send, at most once per IST date, an unknown outcome is never retried automatically, catch up until the deadline, no AI spend; only `src/wa/senderGateway.ts` names a Baileys send method.
