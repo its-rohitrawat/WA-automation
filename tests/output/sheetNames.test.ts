@@ -39,6 +39,10 @@ describe('sheet names, round 2', () => {
     expect(new Set(out.map((s) => s.toLowerCase())).size).toBe(2);
   });
 
+  it('reserves Today, the summary tab, case-insensitively', () => {
+    expect(uniqueSheetNames(['Today', 'TODAY'])).toEqual(['Today (2)', 'TODAY (3)']);
+  });
+
   it('keeps suffixed names within 31 units and without a trailing apostrophe', () => {
     const long = "x".repeat(28) + "'' z";
     const out = uniqueSheetNames([long, long]);
