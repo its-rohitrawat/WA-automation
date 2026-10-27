@@ -6,7 +6,7 @@ import type { DestinationStream } from 'pino';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseEnv, reportSettings } from '../../src/config/env.ts';
 import { senderSessionDbPath, sessionDbPath } from '../../src/config/paths.ts';
-import { openMorningReport } from '../../src/report/start.ts';
+import { openMorningReport, senderOpener } from '../../src/report/start.ts';
 import { createLogger } from '../../src/util/logger.ts';
 import { openSessionDb, useEncryptedAuthState, useSenderAuthState } from '../../src/wa/authState.ts';
 import { FakeSocket } from '../helpers/fakeSocket.ts';
@@ -204,5 +204,31 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
     expect(err?.level).toBe(50);
     expect(String(err?.code)).toMatch(/^SQLITE_CANTOPEN/);
     expectNoNumber(r.out());
+  });
+});
+
+describe('senderOpener (dashboard settings, D5 Task 1)', () => {
+  it('opens a sender for the given number, not the .env one, and close() closes its session file', () => {
+    const dir = tempDir();
+    const env = parseEnv({ DATA_DIR: dir, REPORT_RECIPIENT: RECIPIENT });
+    const c = capture();
+    const open = senderOpener({ env, masterKey: randomBytes(32), log: c.log, factory: vi.fn(() => new FakeSocket()) });
+    const a = open('917012349999');
+    expect(a.sender.maskedRecipient()).toBe('…9999');
+    a.close();
+    // The file is closed, so the next open (a later number change) can open it again.
+    const b = open('919811112222');
+    expect(b.sender.maskedRecipient()).toBe('…2222');
+    b.close();
+    expect(c.out()).not.toContain('7012349999');
+  });
+
+  it('works when REPORT_ENABLED was false at service start', () => {
+    const dir = tempDir();
+    const env = parseEnv({ DATA_DIR: dir });
+    const open = senderOpener({ env, masterKey: randomBytes(32), log: capture().log, factory: vi.fn(() => new FakeSocket()) });
+    const a = open('917012349999');
+    expect(a.sender.maskedRecipient()).toBe('…9999');
+    a.close();
   });
 });
