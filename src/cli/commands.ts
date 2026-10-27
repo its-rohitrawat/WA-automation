@@ -30,9 +30,9 @@ import {
   openSenderSession, openSessionDb, readFounderNumber, resetSession, SenderSessionDecryptError, SessionDecryptError, useEncryptedAuthState,
   useSenderAuthState, type EncryptedAuth,
 } from '../wa/authState.ts';
-import { baileysSocketFactory, WhatsAppGateway, type GatewayState, type SocketFactory } from '../wa/gateway.ts';
+import { baileysSocketFactory, TRACKER_DEVICE_NAME, WhatsAppGateway, type GatewayState, type SocketFactory } from '../wa/gateway.ts';
 import { Ingestor } from '../wa/ingest.ts';
-import { baileysSenderSocketFactory, linkedNumber, linkSender, type OpenFailure, type SenderSocketFactory } from '../wa/senderGateway.ts';
+import { baileysSenderSocketFactory, linkedNumber, SENDER_DEVICE_NAME, linkSender, type OpenFailure, type SenderSocketFactory } from '../wa/senderGateway.ts';
 import { formatStatus } from './status.ts';
 
 export interface CliDeps {
@@ -203,7 +203,7 @@ export async function linkCommand(opts: { reset: boolean }, deps: CliDeps): Prom
         let yes: boolean;
         try {
           yes = await deps.confirm(
-          'This removes the saved WhatsApp link. The founder will have to scan a new QR code. First remove the old "WA Agent" device on his phone (Settings → Linked devices). Your tasks and tracker data are not touched. Type yes to continue:',
+          `This removes the saved WhatsApp link. The founder will have to scan a new QR code. First remove the old "${TRACKER_DEVICE_NAME}" device on his phone (Settings → Linked devices). Your tasks and tracker data are not touched. Type yes to continue:`,
           );
         } catch (e) {
           if (!(e instanceof ConfirmCancelled)) throw e;
@@ -347,7 +347,7 @@ export async function googleAuthCommand(deps: CliDeps): Promise<void> {
 const SENDER_ADVICE: Record<OpenFailure, string> = {
   not_linked: 'The QR code was not scanned. Run link-sender again.',
   connect_timeout: 'No connection to WhatsApp, or the QR code was not scanned within 5 minutes. Check the internet connection, then run link-sender again.',
-  logged_out: 'WhatsApp refused the link. On the spare phone remove any old "WA Agent" device (Linked devices), then run: npm run cli -- link-sender --reset',
+  logged_out: `WhatsApp refused the link. On the spare phone remove any old "${SENDER_DEVICE_NAME}" device (Linked devices), then run: npm run cli -- link-sender --reset`,
   forbidden: 'WhatsApp refused the spare number (403). Check the spare phone for a WhatsApp warning.',
   replaced: 'Another session took over the spare number. Close it, then run link-sender again.',
   restart_required: 'WhatsApp kept asking for a restart. Run link-sender again.',
@@ -466,7 +466,7 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
     if (linked !== undefined && ((env.REPORT_RECIPIENT && linked === env.REPORT_RECIPIENT) || linked === founder)) {
       resetSession(senderDb!); // the spare number's session rows only: this link is never used
       throw new Error(
-        "That QR code was scanned with the founder's phone. On the founder's phone remove the new 'WA Agent' linked device (the one linked just now, not the older one the tracker uses), then run link-sender again and scan with the SPARE phone.",
+        `That QR code was scanned with the founder's phone. On the founder's phone remove the device named "${SENDER_DEVICE_NAME}" (keep "${TRACKER_DEVICE_NAME}", which the tracker uses), then run link-sender again and scan with the SPARE phone.`,
       );
     }
     out('Spare number linked. Next: set REPORT_RECIPIENT and REPORT_ENABLED=true in .env, then start the service (net start wa-agent).');

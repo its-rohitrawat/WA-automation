@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import makeWASocket, { Browsers, DisconnectReason, makeCacheableSignalKeyStore } from 'baileys';
+import makeWASocket, { DisconnectReason, makeCacheableSignalKeyStore } from 'baileys';
 import type { AuthenticationState, BaileysEventMap, GroupMetadata } from 'baileys';
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { AllowList } from './allowlist.ts';
@@ -24,12 +24,15 @@ export type BaileysLogger = NonNullable<Parameters<typeof makeWASocket>[0]['logg
  * The logger passed in must be silent (or censor everything): Baileys logs JIDs and push names.
  * enableRecentMessageCache is off so Baileys keeps no cross-chat plaintext cache and has nothing to resend on retry receipts.
  */
+/** How the founder's phone lists this link under Linked devices. Fixed when the QR code is scanned. */
+export const TRACKER_DEVICE_NAME = 'WA Agent - Tracker';
+
 export function baileysSocketFactory(logger: BaileysLogger): SocketFactory {
   return (auth, cachedGroupMetadata) =>
     makeWASocket({
       auth: { creds: auth.creds, keys: makeCacheableSignalKeyStore(auth.keys, logger) },
       logger,
-      browser: Browsers.windows('Desktop'),
+      browser: [TRACKER_DEVICE_NAME, 'Desktop', '1.0.0'],
       markOnlineOnConnect: false,
       syncFullHistory: false,
       generateHighQualityLinkPreview: false,

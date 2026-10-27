@@ -113,7 +113,7 @@ npm run cli -- list-groups
 ```
 
 1. `google-auth` prints a link. Open it in a browser **on this PC**, signed in as the mailbox account, and allow access. (After you allow, Google sends the answer back to this same PC at 127.0.0.1, so a browser on another computer will not work.)
-2. `link` shows a QR code. On the founder's phone: WhatsApp > Settings > Linked devices > Link a device. With an empty allow-list nothing is stored.
+2. `link` shows a QR code. On the founder's phone: WhatsApp > Settings > Linked devices > Link a device. The phone then lists this link as "WA Agent - Tracker". With an empty allow-list nothing is stored.
 3. `list-groups` prints every group's id and name on screen only. In an admin window or the waagent window, open `notepad C:\wa-agent\config\allowed-groups.json` and add the 1-2 pilot groups, like this:
 
 ```json
@@ -141,7 +141,7 @@ copy C:\wa-agent\data\session.db* C:\wa-agent\backups\2026-10-21-1430\
 ```
 
    Use today's date and time in the folder name, so a second backup never overwrites the first.
-3. On the founder's phone open Settings > Linked devices and remove the old "WA Agent" device.
+3. On the founder's phone open Settings > Linked devices and remove the old "WA Agent - Tracker" device (a link made before this name was added shows as "Windows").
 4. Run `npm run cli -- link --reset`. It asks you to type `yes`. It deletes only the saved WhatsApp link, not your tracker data.
 5. Scan the new QR code.
 
@@ -339,7 +339,7 @@ Every day at 06:00 IST, Sundays included, the founder gets one WhatsApp message 
    npm run cli -- link-sender
    ```
 
-   Scan the QR code from the **spare** phone (WhatsApp > Linked devices > Link a device), not from the founder's phone.
+   Scan the QR code from the **spare** phone (WhatsApp > Linked devices > Link a device), not from the founder's phone. The spare phone then lists this link as "WA Agent - Morning report".
 4. In `.env`, set:
 
    ```env
@@ -389,7 +389,7 @@ The send started but did not finish cleanly (a timeout, the service stopped mid-
      copy C:\wa-agent\data\sender-session.db* C:\wa-agent\backups\2026-10-21-1430\
      ```
 
-  3. On the spare phone, remove any old "WA Agent" device.
+  3. On the spare phone, remove any old "WA Agent - Morning report" device.
   4. In the waagent window, run `npm run cli -- link-sender --reset` (type `yes`), and scan from the spare phone.
   5. **Start the service again**. The founder's link and the tracker are not touched.
 - **"the spare number's saved session cannot be read"**: the file `sender-session.db` was written with a different master key, or it is damaged.
@@ -411,7 +411,7 @@ The send started but did not finish cleanly (a timeout, the service stopped mid-
   The `sender-session.db.damaged-…` files in `C:\wa-agent\data` can be deleted (or moved to the backup folder) once the new link works and `report status` is clean.
 - **"the sender is linked to the founder's own number"** (the `link-sender` QR code was scanned with the founder's phone: the number in `REPORT_RECIPIENT`, or the number the tracker reads; the agent never sends from either):
   1. **Stop the service safely** (see "If the service will not start" below).
-  2. Remove the "WA Agent" device that was linked last from the founder's phone (Settings > Linked devices). Keep the older one, which the tracker uses.
+  2. Remove the "WA Agent - Morning report" device from the founder's phone (Settings > Linked devices). Keep "WA Agent - Tracker", which the tracker uses.
   3. In the waagent window, run `npm run cli -- link-sender --reset` (type `yes`), and scan from the **spare** phone.
   4. **Start the service again**. The founder's tracker link and the tracker data are not touched.
 - **Refused (403) or banned:** check the spare phone for a WhatsApp warning. A 403 can be a temporary restriction. To move to a new spare number:
@@ -966,7 +966,7 @@ move C:\wa-agent\data\keys\master.key.dpapi C:\wa-agent\backups\2026-10-21-1430\
 move C:\wa-agent\data\session.db* C:\wa-agent\backups\2026-10-21-1430\
 ```
 
-  4. On the founder's phone, remove the old "WA Agent" device first (Settings > Linked devices). After the move, `link --reset` will say "No saved WhatsApp link to reset" and skip its question, so it will not remind you.
+  4. On the founder's phone, remove the old "WA Agent - Tracker" device first (Settings > Linked devices). After the move, `link --reset` will say "No saved WhatsApp link to reset" and skip its question, so it will not remind you.
   5. In the waagent window, link WhatsApp again: `npm run cli -- link` If it says a link is already saved, stop: step 3 did not move the session. Re-check it before going on.
   6. Sign in to Google again: `npm run cli -- google-auth`.
   7. **Start the service again** (see above).
@@ -984,7 +984,7 @@ mkdir C:\wa-agent\backups\2026-10-21-1430
 copy C:\wa-agent\data\session.db* C:\wa-agent\backups\2026-10-21-1430\
 ```
 
-  3. On the founder's phone, remove the old "WA Agent" device (Settings > Linked devices).
+  3. On the founder's phone, remove the old "WA Agent - Tracker" device (Settings > Linked devices).
   4. In the waagent window: `npm run cli -- link --reset` (type `yes`), then scan the new QR code.
   5. **Start the service again** (see above).
 
@@ -1004,6 +1004,6 @@ copy C:\wa-agent\data\session.db* C:\wa-agent\backups\2026-10-21-1430\
 - **What to do:**
   1. **Stop the service safely** (see above).
   2. Copy the old session to a backup folder, as in the SessionDecryptError steps.
-  3. On the founder's phone, remove the old "WA Agent" device if it is still listed.
+  3. On the founder's phone, remove the old "WA Agent - Tracker" device if it is still listed.
   4. In the waagent window: `npm run cli -- link --reset` (type `yes`), then scan the QR code.
   5. **Start the service again** (see above).

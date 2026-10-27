@@ -15,7 +15,7 @@ vi.mock('baileys', async (importOriginal) => {
   };
 });
 
-const { baileysSenderSocketFactory } = await import('../../src/wa/senderGateway.ts');
+const { baileysSenderSocketFactory, SENDER_DEVICE_NAME } = await import('../../src/wa/senderGateway.ts');
 
 describe('baileysSenderSocketFactory', () => {
   it('builds a socket that sets no online presence and syncs no history', async () => {
@@ -24,6 +24,9 @@ describe('baileysSenderSocketFactory', () => {
     baileysSenderSocketFactory(silent as never)(auth);
     const c = captured.config!;
     expect(c.logger).toBe(silent);
+    // The spare phone lists this link under its own name.
+    expect(c.browser).toEqual([SENDER_DEVICE_NAME, 'Desktop', '1.0.0']);
+    expect(SENDER_DEVICE_NAME).toBe('WA Agent - Morning report');
     expect(c.markOnlineOnConnect).toBe(false);
     expect(c.syncFullHistory).toBe(false);
     expect((c.shouldSyncHistoryMessage as () => boolean)()).toBe(false);

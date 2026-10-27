@@ -278,6 +278,9 @@ describe('cli link-sender', () => {
     expect(message).not.toContain('\n');
     expect(message).toContain("scanned with the founder's phone");
     expect(message).toContain('SPARE phone');
+    // Names the exact device to remove, and the one to keep.
+    expect(message).toContain('"WA Agent - Morning report"');
+    expect(message).toContain('"WA Agent - Tracker"');
     expect(message).not.toContain(NUMBER);
     expect(out()).not.toContain('Spare number linked.');
     expect(senderLinked()).toBe(false);
