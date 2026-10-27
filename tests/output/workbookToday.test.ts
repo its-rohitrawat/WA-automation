@@ -85,6 +85,8 @@ describe('Today tab', () => {
     expect(ws.views[0]).toMatchObject({ state: 'frozen', ySplit: 2 });
     expect(ws.getColumn(6).width).toBeGreaterThanOrEqual(40);
     expect(ws.getCell('A9').font?.bold).toBe(true);
+    expect((ws.getCell('C5').fill as ExcelJS.FillPattern).fgColor?.argb).toBe('FFFFD9D2');
+    expect((ws.getCell('C3').fill as ExcelJS.FillPattern | undefined)?.fgColor).toBeUndefined();
   });
 
   it('lists maybe done tasks and all four notes', async () => {
@@ -92,10 +94,12 @@ describe('Today tab', () => {
     const t = createTask(db, task({ title: 'Launch', priority: 'high', deadline: '2026-10-19' }), NOW);
     setTaskStatus(db, t.id, 'maybe_done', '2026-10-19', NOW, 'ai');
     createTask(db, task({ title: 'Old one', priority: 'high', deadline: '2026-10-02' }), NOW);
+    createTask(db, task({ title: 'Later', deadline: '2026-10-25' }), NOW);
     const rows = body(await today(db)).filter((r) => r[4] !== '');
-    expect(rows.map((r) => [r[4], r[7]])).toEqual([
-      ['SHA-002', 'overdue, high priority'],
-      ['SHA-001', 'due today, high priority, maybe done'],
+    expect(rows.map((r) => [r[4], r[6], r[7]])).toEqual([
+      ['SHA-002', date('2026-10-02'), 'overdue, high priority'],
+      ['SHA-001', date('2026-10-19'), 'due today, high priority, maybe done'],
+      ['SHA-003', date('2026-10-25'), ''],
     ]);
   });
 
@@ -155,6 +159,13 @@ describe('Today tab', () => {
     expect(first.formula).toBeUndefined();
     expect(ws.getCell('F6').type).toBe(ExcelJS.ValueType.String);
     expect(ws.getCell('F6').value).toBe('+1');
+  });
+
+  it('removes characters XML does not allow from task titles', async () => {
+    const db = seededDb();
+    createTask(db, task({ title: 'Kick\x01off\uFFFE' }), NOW);
+    const ws = await today(db);
+    expect(ws.getCell('F5').value).toBe('Kickoff');
   });
 
   it('a client named Today gets its own tab next to the Today tab', async () => {
