@@ -200,6 +200,21 @@ export class Health {
     return this.#compute(true);
   }
 
+  /**
+   * For the uptime heartbeat: false only when the agent is not doing its job, so someone should look now. That is
+   * WhatsApp unlinked, replaced, refused or disconnected past the grace period, the Google sign-in expired, or tracker
+   * updates failing for over an hour. Smaller warnings (a waiting group, the spend cap, low disk) keep it up.
+   */
+  isUp(): boolean {
+    const now = this.#clock.now();
+    if (this.#wa.state === 'logged_out' || this.#wa.state === 'replaced' || this.#wa.state === 'forbidden') return false;
+    if (this.#downSince && now.getTime() - this.#downSince.getTime() > DISCONNECT_GRACE_MS) return false;
+    const pubFail = this.#publishFailedSince;
+    if (pubFail && this.#publishAuthFailed) return false;
+    if (pubFail && now.getTime() - pubFail.getTime() > PUBLISH_FAIL_MS) return false;
+    return true;
+  }
+
   /** Same as line() but without publish failures: used inside the uploaded workbook. */
   workbookLine(): HealthLine {
     return this.#compute(false);

@@ -73,6 +73,12 @@ const EnvSchema = z.object({
   REPORT_DEADLINE: z.string().regex(HHMM).default('12:00'),
   /** The founder's number: 91 and the 10-digit mobile, digits only. Personal data: never logged in full. */
   REPORT_RECIPIENT: z.string().regex(INDIAN_MOBILE).optional(),
+  /** Uptime heartbeat link (an UptimeRobot heartbeat monitor). Secret: never logged. Off when empty. */
+  HEARTBEAT_URL: z
+    .string()
+    .url()
+    .refine((u) => u.startsWith('https://'), { message: 'must be an https:// link' })
+    .optional(),
 }).superRefine((env, ctx) => {
   if (env.MEETINGS_ENABLED && env.TEAM_EMAIL_DOMAINS.length === 0) {
     ctx.addIssue({ code: 'custom', path: ['TEAM_EMAIL_DOMAINS'], message: 'is required when MEETINGS_ENABLED is true' });

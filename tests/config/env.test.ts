@@ -383,3 +383,27 @@ describe('morning report settings', () => {
     expect(maskNumber('919812345678')).toBe('…5678');
   });
 });
+
+describe('uptime heartbeat setting', () => {
+  it('is off by default and when empty', () => {
+    expect(parseEnv({}).HEARTBEAT_URL).toBeUndefined();
+    expect(parseEnv({ HEARTBEAT_URL: '' }).HEARTBEAT_URL).toBeUndefined();
+  });
+
+  it('accepts an https link', () => {
+    const url = 'https://heartbeat.uptimerobot.com/abc123';
+    expect(parseEnv({ HEARTBEAT_URL: url }).HEARTBEAT_URL).toBe(url);
+  });
+
+  it('refuses a non-https or malformed link, naming the setting without echoing it', () => {
+    for (const bad of ['http://heartbeat.uptimerobot.com/abc123', 'heartbeat.uptimerobot.com/abc123', 'not a url', 'ftp://x.y/z']) {
+      try {
+        parseEnv({ HEARTBEAT_URL: bad });
+        expect.unreachable(bad);
+      } catch (e) {
+        expect((e as Error).message).toBe('Invalid configuration in: HEARTBEAT_URL. HEARTBEAT_URL must be an https:// link');
+        expect((e as Error).message).not.toContain(bad);
+      }
+    }
+  });
+});

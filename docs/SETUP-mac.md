@@ -262,6 +262,23 @@ If the check says `Failed (...)`, it also says what to look at. `no_output` usua
 
 Normal Terminal window: `sudo launchctl kickstart -k system/com.wa-agent`. Wait one minute. After the restart, new voice notes are transcribed. For older ones, run `npm run cli -- transcribe-voice` in the waagent window (a dry run that only counts them), then `npm run cli -- transcribe-voice --yes`, which queues them for the running service. Run `npm run cli -- status`: if its Health line says the local speech engine is not set up, or ffmpeg not found, see "Voice note status lines" in SETUP.md. If it says voice notes could not be transcribed on this computer, see the same place: `npm run cli -- transcribe-voice --failed` tries them again.
 
+## 9. Uptime monitoring (optional, UptimeRobot)
+
+UptimeRobot can tell you when the agent stops working. The agent visits a secret link every 5 minutes while it is working; when the visits stop, UptimeRobot sends you an alert by email, SMS or its app. The agent sends nothing else: no messages, names or numbers.
+
+1. In UptimeRobot, add a new monitor of type **Heartbeat** (heartbeat monitors may need a paid plan; check UptimeRobot's pricing page). Set the interval to **5 minutes**, and choose who gets the alerts.
+2. UptimeRobot shows the monitor's heartbeat link (it starts with `https://heartbeat.uptimerobot.com/`). Copy it. Treat it like a password: anyone who has it can make the monitor look green.
+3. Waagent window: open `.env`, paste the link after `HEARTBEAT_URL=`, and save. Do not paste it anywhere else.
+4. Normal Terminal window: `sudo launchctl kickstart -k system/com.wa-agent`. About a minute later the first visit arrives and the monitor turns green.
+
+The visits stop, and you get an alert, when:
+
+- the Mac is off, asleep or offline, or the service stopped or crashed;
+- WhatsApp is unlinked, taken over, refused, or disconnected for over 30 minutes;
+- the Google sign-in expired, or tracker updates have failed for over an hour.
+
+Smaller warnings (a group waiting, the daily AI budget, low disk) do not stop the visits; they show on the status line as usual. After an alert, run `npm run cli -- status` in the waagent window: its Health line says what is wrong. To switch monitoring off, empty `HEARTBEAT_URL=` and restart the service.
+
 ## Reading SETUP.md on a Mac
 
 | SETUP.md (Windows) | On the Mac |
