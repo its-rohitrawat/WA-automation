@@ -176,17 +176,17 @@ export class DrivePublisher {
   /**
    * Runs a publish now. If a run is already in flight, it queues one follow-up run and resolves when the
    * CURRENT run ends (not the follow-up), so it never starts two uploads at once.
+   * Resolves true when that run published, false when it failed or the publisher is stopped (existing callers ignore it).
    */
-  async publishNow(): Promise<void> {
-    if (this.#stopped) return;
+  async publishNow(): Promise<boolean> {
+    if (this.#stopped) return false;
     if (this.#current) {
       this.#pending = true;
-      await this.#current;
-      return;
+      return this.#current;
     }
     clearTimeout(this.#timer);
     this.#timer = undefined;
-    await this.#start();
+    return this.#start();
   }
 
   /**

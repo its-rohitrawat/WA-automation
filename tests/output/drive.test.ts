@@ -152,6 +152,56 @@ describe('DrivePublisher', () => {
     expect(drive.created).toHaveLength(1);
   });
 
+  describe('publishNow() result', () => {
+    it('resolves true when the run it started published', async () => {
+      const { p } = setup();
+      await expect(p.publishNow()).resolves.toBe(true);
+    });
+
+    it('resolves false when the run failed (build or Drive)', async () => {
+      const failingBuild = setup(vi.fn(async (): Promise<Buffer> => { throw new Error('boom'); }));
+      await expect(failingBuild.p.publishNow()).resolves.toBe(false);
+      await failingBuild.p.stop();
+
+      const { drive, p } = setup();
+      drive.failNext = 1;
+      await expect(p.publishNow()).resolves.toBe(false);
+    });
+
+    it('during a run, resolves with that run’s result', async () => {
+      const { drive, p } = setup();
+      let release!: () => void;
+      drive.gate = new Promise<void>((r) => (release = r));
+      const first = p.publishNow();
+      await new Promise((r) => setTimeout(r, 10));
+      const second = p.publishNow();
+      release();
+      await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
+    });
+
+    it('during a run that fails, both calls resolve false', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const { p } = setup(vi.fn(async (): Promise<Buffer> => {
+        await gate;
+        throw new Error('boom');
+      }));
+      const first = p.publishNow();
+      await new Promise((r) => setTimeout(r, 10));
+      const second = p.publishNow();
+      release();
+      await expect(Promise.all([first, second])).resolves.toEqual([false, false]);
+      await p.stop();
+    });
+
+    it('resolves false once stopped, and starts nothing', async () => {
+      const { build, p } = setup();
+      await p.stop();
+      await expect(p.publishNow()).resolves.toBe(false);
+      expect(build).not.toHaveBeenCalled();
+    });
+  });
+
   it('await stop() waits for an in-flight create and the file id is saved', async () => {
     const { db, drive, p } = setup();
     let release!: () => void;
