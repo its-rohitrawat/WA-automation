@@ -92,6 +92,8 @@ export function describeReport(row: ReportRow | undefined, now: Date, settings: 
       // No scheduled report today, so no "due" promise and no skip. A row on such a day comes only from send-now.
       const date = istDate(now);
       if (!isReportDay(date, settings.days)) {
+        // 'not a report day' is unreachable with today's REPORT_DAYS values (every off day is a Saturday or Sunday).
+        // It is kept for a future value that makes a weekday an off day; add a test for the label with that value.
         const weekend = weekdayOf(date) === 0 || weekdayOf(date) === 6;
         return `Morning report: no report today (${weekend ? 'weekend' : 'not a report day'})`;
       }
