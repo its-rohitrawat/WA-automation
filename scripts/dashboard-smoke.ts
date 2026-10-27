@@ -162,6 +162,16 @@ async function main() {
           await check(p, where, '#view .card', `${screen}-${tag}`);
           if (await p.locator('#view .err-state').count()) fail(where, 'shows its error panel');
           if ((await p.locator('#view', { hasText: 'Coming in the next update' }).count()) !== 0) fail(where, 'is still the placeholder');
+          if (screen === 'automations') {
+            // Link phone opens the spare phone's first-link dialog right here, not Connections.
+            where = `automations link phone ${tag}`;
+            await p.locator('#view [data-fix="spare-link"]').click();
+            await p.locator('.modal .qr img').waitFor();
+            if (!p.url().endsWith('/dashboard/automations')) fail(where, `moved to ${p.url()}`);
+            await p.keyboard.press('Escape');
+            await p.locator('.modal').waitFor({ state: 'detached' });
+            state.spareLinked = false; // the Connections steps below start from an unlinked spare phone
+          }
         }
 
         where = `overview empty ${tag}`;

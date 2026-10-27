@@ -55,6 +55,11 @@ export interface AgentControlDeps {
    * dashboard's live briefing opens, swaps and closes its sender while the service runs (undefined while none is open).
    */
   sender?: SenderView | (() => SenderView | undefined);
+  /**
+   * With the dashboard: whether the spare phone has a saved link, for while no sender is open (the briefing is off). Not
+   * given: the spare phone shows as switched off then, as before.
+   */
+  spareLinked?: () => boolean;
   /** The uptime heartbeat, when HEARTBEAT_URL is set. */
   heartbeat?: { lastBeatAt(): Date | null };
 }
@@ -209,7 +214,9 @@ export class AgentControl {
     return {
       founder: { ...this.#whatsapp(), groups, lastActivityAt: this.#lastMessageAt(), device: FOUNDER_DEVICE },
       spare: sender ? { ...spareState(sender.status()), device: SPARE_DEVICE, recipientMasked: sender.maskedRecipient() }
-        : { state: 'off', label: 'Switched off', device: SPARE_DEVICE, recipientMasked: null },
+        : this.#d.spareLinked
+          ? { ...(this.#d.spareLinked() ? { state: 'ok' as const, label: 'Linked' } : { state: 'warn' as const, label: 'Not linked' }), device: SPARE_DEVICE, recipientMasked: null }
+          : { state: 'off', label: 'Switched off', device: SPARE_DEVICE, recipientMasked: null },
       google,
       drive: { ...this.#tracker(snap), lastUploadAt: lastTrackerUpload(db, snap.lastPublishedAt) },
       claude: { callsToday: calls, spentToday: spend.spentToday(), capUsd: spend.capUsd },

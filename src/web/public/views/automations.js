@@ -1,9 +1,10 @@
-// Automations (D5 Task 5): the morning briefing. The switch stays off until the spare phone is linked (Link phone goes
-// to Connections); switching on asks "Start sending to the founder?" and sends the confirmation the agent requires.
+// Automations (D5 Task 5): the morning briefing. The switch stays off until the spare phone is linked (Link phone opens
+// the link dialog); switching on asks "Start sending to the founder?" and sends the confirmation the agent requires.
 // Days are a select. Change number takes the number twice; the page only ever shows it masked, and the typed number
 // is cleared from the form at once. The preview uses today's real counts.
 import { get, post } from '../api.js';
 import { $, esc, icon, toast } from '../dom.js';
+import { CONNECTIONS_CHANGED } from './connect.js';
 import { confirmDialog, errorText, failed, listen, loading, pill } from './ui.js';
 import { numbersMatch } from './workLib.js';
 
@@ -18,6 +19,8 @@ const DAYS = [['weekdays', 'Monday to Friday'], ['mon-sat', 'Monday to Saturday'
 function render(d, problem = '') {
   const s = d.settings;
   const linked = d.spare.state === 'ok';
+  // Never linked: the first-link dialog. A link that is gone (logged out, refused, unreadable): the relink, which asks first.
+  const firstLink = d.spare.label === 'Not linked' || d.spare.state === 'off';
   const dayWords = DAYS.find(([k]) => k === s.reportDays)?.[1] ?? s.reportDays;
   const preview = d.counts
     ? `Good morning. ${d.counts.open} open task${d.counts.open === 1 ? '' : 's'}, ${d.counts.overdue} overdue. Today's tracker: drive.google.com/…`
@@ -34,7 +37,7 @@ function render(d, problem = '') {
     <form class="edit-form" data-numform method="post" hidden novalidate><label><span>New number</span><input name="n1" inputmode="tel" autocomplete="off" maxlength="20" placeholder="91 98765 43210"></label>
       <label><span>Type it again</span><input name="n2" inputmode="tel" autocomplete="off" maxlength="20"></label>${problem ? `<p class="field-err" role="alert">${esc(problem)}</p>` : ''}
       <div class="row-gap"><button class="btn btn-primary btn-sm" type="submit">Save number</button><button class="btn btn-ghost btn-sm" type="button" data-numcancel>Cancel</button></div></form>
-    ${linked ? '' : `<div class="note note-row">${icon('phone', 16)}<span class="grow-1">The briefing is sent from the spare phone, so link it before switching this on.</span><button class="btn btn-primary btn-sm" type="button" data-go="connections">${icon('phone', 15)}Link phone</button></div>`}
+    ${linked ? '' : `<div class="note note-row">${icon('phone', 16)}<span class="grow-1">The briefing is sent from the spare phone, so link it before switching this on.</span><button class="btn btn-primary btn-sm" type="button" data-fix="${firstLink ? 'spare-link' : 'spare'}">${icon('phone', 15)}Link phone</button></div>`}
     <div class="note">${icon('info', 16)}<span>Switching this on starts real messages to the founder's number. Every change is recorded in Audit logs.</span></div></section>
   <section class="card col-5"><div class="card-head"><h3>Preview</h3><span class="eyebrow">Today's numbers</span></div>
     <div class="phone"><div class="bar"><i></i><div><b>WA Agent</b><div class="phone-sub">spare number</div></div></div><div class="chat"><div class="msg">${esc(preview)}<small>${esc(s.sendAt)}</small></div></div></div></section></div>`;
@@ -92,7 +95,10 @@ export function mountAutomations(ctx) {
     if (!$('[data-numform]:not([hidden])', ctx.view)) ctx.redraw(render(d));
   });
 
-  return listen(ctx.view, {
+  // A phone linked from the dialog (Link phone): load again, so the switch unlocks.
+  const onLinked = () => void load();
+  addEventListener(CONNECTIONS_CHANGED, onLinked);
+  const stopListening = listen(ctx.view, {
     click: async (e) => {
       const t = /** @type {Element} */ (e.target);
       if (t.closest('[data-retry]')) return void load();
@@ -141,4 +147,8 @@ export function mountAutomations(ctx) {
       if (await save({ key: 'reportRecipient', value: a, confirm: b })) toast('Number saved.');
     },
   });
+  return () => {
+    removeEventListener(CONNECTIONS_CHANGED, onLinked);
+    stopListening();
+  };
 }

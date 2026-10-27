@@ -181,12 +181,12 @@ async function main(): Promise<void> {
     let settings: SettingsStore | undefined;
     /** A spare-phone link from the dashboard is running: the session file is being reset, so it is not read meanwhile. */
     let spareLinking = false;
+    /** Whether the spare phone is linked: the open sender's state, else its saved session (the briefing may be off). */
+    let spareCheck: (() => boolean) | undefined;
     if (env.DASHBOARD_ENABLED) {
       const briefing: { live?: LiveReport } = {};
-      const store = new SettingsStore({
-        db, env, clock: systemClock, log,
-        spareLinked: spareLinked({ dataDir: env.DATA_DIR, key, briefing: { sender: () => briefing.live?.sender() }, linking: () => spareLinking }),
-      });
+      spareCheck = spareLinked({ dataDir: env.DATA_DIR, key, briefing: { sender: () => briefing.live?.sender() }, linking: () => spareLinking });
+      const store = new SettingsStore({ db, env, clock: systemClock, log, spareLinked: spareCheck });
       settings = store;
       live = new LiveReport({
         db, clock: systemClock, log,
@@ -283,6 +283,7 @@ async function main(): Promise<void> {
       gateway: { status: () => gateway.status() },
       ...(liveReport ? { sender: () => liveReport.sender() } : sender ? { sender: { status: () => sender.status(), maskedRecipient: () => sender.maskedRecipient() } } : {}),
       ...(heartbeat ? { heartbeat: { lastBeatAt: () => heartbeat.lastBeatAt() } } : {}),
+      ...(spareCheck ? { spareLinked: spareCheck } : {}),
     });
     let links: LinkSessions | undefined;
     let uptime: UptimeLog | undefined;

@@ -14,7 +14,7 @@ import { seededDb } from '../helpers/db.ts';
 const NOW = '2026-10-19T08:00:00.000Z';
 const KEY = Buffer.alloc(32, 7);
 
-function setup(o: { env?: Record<string, string>; sender?: SenderState; heartbeat?: Date | null | 'none'; cap?: number } = {}) {
+function setup(o: { env?: Record<string, string>; sender?: SenderState; heartbeat?: Date | null | 'none'; cap?: number; spareLinked?: () => boolean } = {}) {
   const db = seededDb();
   const clock = manualClock(NOW);
   const spend = new SpendGuard({ db, clock, capUsd: o.cap ?? 10 });
@@ -36,6 +36,7 @@ function setup(o: { env?: Record<string, string>; sender?: SenderState; heartbea
       sender: { status: () => ({ state: senderState, since: NOW, lastErrorCode: null }), maskedRecipient: () => '…5678' },
     }),
     ...(o.heartbeat === undefined || o.heartbeat === 'none' ? {} : { heartbeat: { lastBeatAt: () => o.heartbeat as Date | null } }),
+    ...(o.spareLinked ? { spareLinked: o.spareLinked } : {}),
   });
   return { db, clock, spend, health, control, setGateway, setSender: (s: SenderState) => (senderState = s) };
 }
@@ -177,6 +178,14 @@ describe('AgentControl.connections', () => {
 
   it('maps the spare phone states, and has no spare card state without the report', () => {
     expect(setup().control.connections().spare).toEqual({ state: 'off', label: 'Switched off', device: 'WA Agent - Morning report', recipientMasked: null });
+    // With the dashboard, the briefing may be off with no sender open: the saved link decides (Automations' switch needs it).
+    let saved = true;
+    const off = setup({ spareLinked: () => saved });
+    expect(off.control.connections().spare).toEqual({ state: 'ok', label: 'Linked', device: 'WA Agent - Morning report', recipientMasked: null });
+    saved = false;
+    expect(off.control.connections().spare).toEqual({ state: 'warn', label: 'Not linked', device: 'WA Agent - Morning report', recipientMasked: null });
+    // An open sender's own state comes first.
+    expect(setup({ sender: 'logged_out', spareLinked: () => true }).control.connections().spare).toMatchObject({ state: 'down', label: 'Logged out' });
     const t = setup({ sender: 'not_linked' });
     const spare = () => t.control.connections().spare;
     expect(spare()).toMatchObject({ state: 'warn', label: 'Not linked' });
