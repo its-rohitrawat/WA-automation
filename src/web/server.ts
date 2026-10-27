@@ -48,6 +48,8 @@ export interface WebServerDeps {
   publicDir?: string;
   /** Tests only: another vendor allowlist. */
   vendorFiles?: Readonly<Record<string, string>>;
+  /** Tests only: how long stop() waits for requests in flight (default 5 s). */
+  stopGraceMs?: number;
 }
 
 export interface WebServer {
@@ -80,11 +82,15 @@ function safePathname(rawUrl: string): string | undefined {
   return path;
 }
 
-/** `/dashboard`, `/dashboard/` and `/dashboard/<screen>[/<sub>[/<sub>]]` in lower-case words: the front end routes these. */
+/**
+ * `/dashboard`, `/dashboard/` and `/dashboard/<screen>[/<sub>[/<sub>]]` in lower-case words, with or without one trailing
+ * slash: the front end routes these.
+ */
 function isScreenPath(pathname: string): boolean {
   if (pathname === '/dashboard' || pathname === '/dashboard/') return true;
   if (!pathname.startsWith('/dashboard/')) return false;
   const segs = pathname.slice('/dashboard/'.length).split('/');
+  if (segs.length > 1 && segs.at(-1) === '') segs.pop();
   if (segs.length > 3 || RESERVED.has(segs[0]!)) return false;
   return segs.every((s) => SCREEN_SEGMENT.test(s));
 }
@@ -221,6 +227,10 @@ export function createWebServer(deps: WebServerDeps): WebServer {
         return;
       }
       if (err instanceof HttpError) {
+        // A 413 can come while the body is still arriving (or never ends). Node answers, marks the answer
+        // `Connection: close` and closes the connection itself when the request is unfinished, so the answer reaches the
+        // client and a slow or endless upload cannot hold the connection. Setting that header here, or destroying the
+        // request before answering, would reset the connection and lose the 413 (tests pin both halves).
         sendError(res, err.status, err.code, err.message);
         return;
       }
@@ -257,7 +267,7 @@ export function createWebServer(deps: WebServerDeps): WebServer {
       if (!server.listening) return Promise.resolve();
       stopping = true;
       stopped = new Promise<void>((done) => {
-        const force = setTimeout(() => server.closeAllConnections(), STOP_GRACE_MS);
+        const force = setTimeout(() => server.closeAllConnections(), deps.stopGraceMs ?? STOP_GRACE_MS);
         force.unref();
         server.close(() => {
           clearTimeout(force);

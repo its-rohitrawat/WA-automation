@@ -18,20 +18,23 @@ export class HttpError extends Error {
   }
 }
 
-/** Past this much, an oversized body is no longer drained to keep the connection tidy: the request is cut off. */
+/**
+ * Past this much, readJson does not wait for the end of the body: it rejects at once and the server answers 413. Node
+ * closes the connection after an answer to an unfinished request, so a slow or endless upload cannot hold it open.
+ * The request is not destroyed here: that would reset the connection before the 413 is sent.
+ */
 const DRAIN_LIMIT_BYTES = 1_048_576;
 
 /**
  * Reads a JSON request body. Over `limitBytes` it rejects with 413 (`too_large`); an empty or unparsable body rejects
- * with 400 (`bad_json`). A moderately oversized body is read to the end and dropped, so the 413 reaches the browser.
+ * with 400 (`bad_json`). A moderately oversized body is read to the end and dropped. A declared length over 1 MiB is
+ * refused before any of the body is read, and a body that passes 1 MiB is refused as soon as it does; in both cases the
+ * server still sends the 413 before the connection is closed.
  */
 export function readJson(req: IncomingMessage, limitBytes = 65_536): Promise<unknown> {
   const tooLarge = () => new HttpError(413, 'too_large', 'The request is too large.');
   const declared = Number(req.headers['content-length']);
-  if (Number.isFinite(declared) && declared > DRAIN_LIMIT_BYTES) {
-    req.destroy();
-    return Promise.reject(tooLarge());
-  }
+  if (Number.isFinite(declared) && declared > DRAIN_LIMIT_BYTES) return Promise.reject(tooLarge());
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -39,7 +42,8 @@ export function readJson(req: IncomingMessage, limitBytes = 65_536): Promise<unk
     req.on('data', (chunk: Buffer) => {
       size += chunk.length;
       if (size > DRAIN_LIMIT_BYTES) {
-        req.destroy();
+        // Settled once; later chunks are dropped until Node closes the connection after the 413.
+        chunks.length = 0;
         reject(tooLarge());
         return;
       }

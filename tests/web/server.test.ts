@@ -1,11 +1,13 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { request } from 'node:http';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createServer, request } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { DestinationStream } from 'pino';
-import { CONTENT_SECURITY_POLICY, readJson, sendJson } from '../../src/web/http.ts';
+import { CONTENT_SECURITY_POLICY, HttpError, readJson, sendJson } from '../../src/web/http.ts';
 import { createWebServer, PUBLIC_DIR } from '../../src/web/server.ts';
+import { startDashboard } from '../../src/web/start.ts';
 import type { WebServer } from '../../src/web/server.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger } from '../../src/util/logger.ts';
@@ -49,7 +51,7 @@ afterEach(async () => {
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
 });
 
-async function boot(o: { publicDir?: string; vendorFiles?: Record<string, string> } = {}) {
+async function boot(o: { publicDir?: string; vendorFiles?: Record<string, string>; stopGraceMs?: number } = {}) {
   const c = capture();
   const f = fixture();
   roots.push(f.root);
@@ -60,6 +62,7 @@ async function boot(o: { publicDir?: string; vendorFiles?: Record<string, string
     clock: manualClock('2026-10-27T10:00:00Z'),
     publicDir: o.publicDir ?? f.pub,
     vendorFiles: o.vendorFiles ?? { 'lib.js': join(f.root, 'vendor-lib.js'), 'missing.js': join(f.root, 'nope.js') },
+    ...(o.stopGraceMs === undefined ? {} : { stopGraceMs: o.stopGraceMs }),
   });
   servers.push(server);
   const { port, host } = await server.start();
@@ -69,7 +72,7 @@ async function boot(o: { publicDir?: string; vendorFiles?: Record<string, string
 /** A GET that sends the path exactly as written (fetch would normalise dot segments first). */
 function rawGet(port: number, path: string, headers: Record<string, string> = {}) {
   return new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }>((resolve, reject) => {
-    const req = request({ host: '127.0.0.1', port, path, method: 'GET', headers }, (res) => {
+    const req = request({ host: '127.0.0.1', port, path, method: 'GET', headers, agent: false }, (res) => {
       const chunks: Buffer[] = [];
       res.on('data', (c: Buffer) => chunks.push(c));
       res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
@@ -94,7 +97,8 @@ describe('web server: routing', () => {
 
   it('serves index.html for /dashboard and every /dashboard/<screen> path', async () => {
     const s = await boot();
-    for (const path of ['/dashboard', '/dashboard/', '/dashboard/tasks', '/dashboard/clients/groups', '/dashboard/tasks?x=1']) {
+    const paths = ['/dashboard', '/dashboard/', '/dashboard/tasks', '/dashboard/tasks/', '/dashboard/clients/groups', '/dashboard/clients/groups/', '/dashboard/tasks?x=1'];
+    for (const path of paths) {
       const r = await fetch(s.base + path);
       expect(r.status, path).toBe(200);
       expect(r.headers.get('content-type')).toBe('text/html; charset=utf-8');
@@ -104,7 +108,8 @@ describe('web server: routing', () => {
 
   it('does not serve the shell for reserved or odd prefixes', async () => {
     const s = await boot();
-    for (const path of ['/dashboard/api', '/dashboard/static', '/dashboard/auth/x', '/dashboard/Tasks', '/dashboard/a/b/c/d']) {
+    const paths = ['/dashboard/api', '/dashboard/api/', '/dashboard/static', '/dashboard/auth/x', '/dashboard/Tasks', '/dashboard/a/b/c/d', '/dashboard/a/b/c/d/', '/dashboard/tasks//'];
+    for (const path of paths) {
       const r = await fetch(s.base + path);
       expect(r.status, path).toBe(404);
     }
@@ -122,6 +127,63 @@ describe('web server: routing', () => {
     s.server.router.get('/dashboard/api/echo/:id', ({ res, params, url }) => sendJson(res, 200, { id: params.id, q: url.searchParams.get('q') }));
     const r = await fetch(`${s.base}/dashboard/api/echo/a%20b?q=1`);
     expect(await r.json()).toEqual({ id: 'a b', q: '1' });
+  });
+
+  it('odd paths never reach a :param handler', async () => {
+    const s = await boot();
+    let calls = 0;
+    s.server.router.get('/dashboard/api/echo/:id', ({ res, params }) => {
+      calls++;
+      sendJson(res, 200, { id: params.id });
+    });
+    s.server.router.get('/dashboard/api/pair/:a/:b', ({ res }) => {
+      calls++;
+      sendJson(res, 200, {});
+    });
+    const variants = [
+      '/dashboard/api/echo/%2e%2e',
+      '/dashboard/api/echo/%2E%2E',
+      '/dashboard/api/echo/.%2e',
+      '/dashboard/api/echo/..%2fx',
+      '/dashboard/api/echo/..%2Fx',
+      '/dashboard/api/echo/a%5cb',
+      '/dashboard/api/echo/a\\b',
+      '/dashboard/api/echo/%00',
+      '/dashboard/api/echo/a%00b',
+      '/dashboard/api/echo/..',
+      '/dashboard/api/echo/.',
+      '/dashboard/api//echo/1',
+      '/dashboard/api/pair/a/%2e%2e',
+      '/dashboard/api/pair/%2fetc/x',
+    ];
+    for (const path of variants) {
+      const r = await rawGet(s.port, path);
+      expect(r.status, path).toBe(404);
+      expect(JSON.parse(r.body), path).toEqual({ error: { code: 'not_found', message: 'Not found.' } });
+    }
+    expect(calls).toBe(0);
+    // The route itself works.
+    expect((await rawGet(s.port, '/dashboard/api/echo/abc')).status).toBe(200);
+    expect(calls).toBe(1);
+  });
+
+  it('a throwing handler with a plain internal message still gives the generic 500', async () => {
+    const s = await boot();
+    s.server.router.get('/dashboard/api/boom', () => {
+      throw new Error('UNIQUE constraint failed: web_sessions.id_hash SECRET-DETAIL');
+    });
+    s.server.router.get('/dashboard/api/boom-async', async () => {
+      await Promise.resolve();
+      throw new Error('invalid_grant SECRET-DETAIL');
+    });
+    for (const path of ['/dashboard/api/boom', '/dashboard/api/boom-async']) {
+      const r = await fetch(s.base + path);
+      expect(r.status, path).toBe(500);
+      const text = await r.text();
+      expect(JSON.parse(text), path).toEqual({ error: { code: 'internal', message: 'Something went wrong.' } });
+      expect(text, path).not.toContain('SECRET-DETAIL');
+    }
+    expect(s.out()).not.toContain('SECRET-DETAIL');
   });
 
   it('a throwing handler gives a plain 500 and the detail stays in the log with the request id', async () => {
@@ -213,6 +275,20 @@ describe('web server: static files', () => {
     }
   });
 
+  it('a link inside the public folder that points outside is refused', async (ctx) => {
+    const s = await boot();
+    try {
+      symlinkSync(join(s.root, 'outside.json'), join(s.pub, 'link.json'), 'file');
+    } catch {
+      ctx.skip(); // Windows without the right to make links; it runs on macOS and CI.
+      return;
+    }
+    const r = await rawGet(s.port, '/dashboard/static/link.json');
+    expect(r.status).toBe(404);
+    expect(r.body).not.toContain(SECRET);
+    expect(JSON.parse(r.body)).toEqual({ error: { code: 'not_found', message: 'Not found.' } });
+  });
+
   it('serves vendor files from the allowlist only, cached for an hour', async () => {
     const s = await boot();
     const r = await fetch(`${s.base}/dashboard/vendor/lib.js`);
@@ -293,6 +369,95 @@ describe('web server: request bodies', () => {
   });
 });
 
+describe('web server: very large bodies', () => {
+  it('a body over 1 MB gets a 413 answer, not a dropped connection', async () => {
+    const s = await boot();
+    s.server.router.post('/dashboard/api/echo', async ({ req, res }) => sendJson(res, 200, { got: await readJson(req) }));
+    const r = await fetch(`${s.base}/dashboard/api/echo`, { method: 'POST', body: JSON.stringify({ x: 'a'.repeat(2_000_000) }) });
+    expect(r.status).toBe(413);
+    expect(await r.json()).toEqual({ error: { code: 'too_large', message: 'The request is too large.' } });
+  });
+
+  it('a streamed body that passes 1 MB gets a 413 answer', async () => {
+    const s = await boot();
+    s.server.router.post('/dashboard/api/echo', async ({ req, res }) => sendJson(res, 200, { got: await readJson(req) }));
+    const chunk = new TextEncoder().encode('c'.repeat(64 * 1024));
+    let sent = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(c) {
+        if (sent >= 40) return c.close(); // 2.5 MB in all
+        sent++;
+        c.enqueue(chunk);
+      },
+    });
+    const r = await fetch(`${s.base}/dashboard/api/echo`, { method: 'POST', body: stream, duplex: 'half' } as RequestInit);
+    expect(r.status).toBe(413);
+    expect(await r.json()).toEqual({ error: { code: 'too_large', message: 'The request is too large.' } });
+  });
+
+  it('a streamed body that passes 1 MB and then stalls gets a 413, and the connection is then cut', async () => {
+    const s = await boot();
+    s.server.router.post('/dashboard/api/echo', async ({ req, res }) => sendJson(res, 200, { got: await readJson(req) }));
+    const t0 = Date.now();
+    let closed!: Promise<number>;
+    const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = request(
+        { host: '127.0.0.1', port: s.port, path: '/dashboard/api/echo', method: 'POST', agent: false, headers: { 'Content-Type': 'application/json' } },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') }));
+        },
+      );
+      req.on('error', reject);
+      closed = new Promise<number>((r) => req.once('socket', (sock) => sock.once('close', () => r(Date.now() - t0))));
+      req.write(Buffer.alloc(1_100_000, 0x61)); // chunked, past 1 MiB, and then nothing more
+    });
+    expect(result.status).toBe(413);
+    expect(JSON.parse(result.body)).toEqual({ error: { code: 'too_large', message: 'The request is too large.' } });
+    expect(await closed).toBeLessThan(5_000);
+  });
+
+  it('a declared Content-Length over 1 MB is refused before the body arrives', async () => {
+    const s = await boot();
+    let rejected: unknown;
+    s.server.router.post('/dashboard/api/echo', async ({ req, res }) => {
+      try {
+        sendJson(res, 200, { got: await readJson(req) });
+      } catch (err) {
+        rejected = err;
+        throw err;
+      }
+    });
+    const t0 = Date.now();
+    let closed!: Promise<void>;
+    const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = request(
+        {
+          host: '127.0.0.1', port: s.port, path: '/dashboard/api/echo', method: 'POST', agent: false,
+          headers: { 'Content-Type': 'application/json', 'Content-Length': '5000000' },
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') }));
+        },
+      );
+      req.on('error', reject);
+      closed = new Promise<void>((r) => req.once('socket', (sock) => sock.once('close', () => r())));
+      req.write('{"x":'); // a few bytes and then nothing: the answer must not wait for the rest
+    });
+    expect(Date.now() - t0).toBeLessThan(1_000);
+    expect(result.status).toBe(413);
+    expect(JSON.parse(result.body)).toEqual({ error: { code: 'too_large', message: 'The request is too large.' } });
+    expect(rejected).toBeInstanceOf(HttpError);
+    expect((rejected as HttpError).status).toBe(413);
+    // The upload that never finishes is then cut off by the server.
+    await closed;
+    expect(Date.now() - t0).toBeLessThan(5_000);
+  });
+});
+
 describe('web server: start and stop', () => {
   it('binds 127.0.0.1 only', async () => {
     const s = await boot();
@@ -323,6 +488,28 @@ describe('web server: start and stop', () => {
     expect(s.server.address()).toBeNull();
   });
 
+  it('stop() cuts a handler that never finishes once the grace period is over', async () => {
+    const s = await boot({ stopGraceMs: 200 });
+    let entered!: () => void;
+    const inHandler = new Promise<void>((r) => {
+      entered = r;
+    });
+    s.server.router.get('/dashboard/api/hang', () => {
+      entered();
+      return new Promise<void>(() => {}); // never answers
+    });
+    const pending = fetch(`${s.base}/dashboard/api/hang`).then(async (r) => r.text());
+    pending.catch(() => {}); // asserted below
+    await inHandler;
+    const t0 = Date.now();
+    await s.server.stop();
+    const took = Date.now() - t0;
+    expect(took).toBeGreaterThanOrEqual(150);
+    expect(took).toBeLessThan(1_000);
+    await expect(pending).rejects.toThrow();
+    expect(s.server.address()).toBeNull();
+  });
+
   it('stop() closes idle keep-alive connections at once and can be called twice', async () => {
     const s = await boot();
     await (await fetch(`${s.base}/dashboard`)).text(); // leaves a keep-alive connection open
@@ -337,19 +524,52 @@ describe('main.ts dashboard wiring', () => {
   const src = readFileSync(join(import.meta.dirname, '../../src/main.ts'), 'utf8');
 
   it('starts the web server only when DASHBOARD_ENABLED is set, after app.start()', () => {
-    expect(src).toMatch(/const web = env\.DASHBOARD_ENABLED \? await startDashboard\(/);
-    expect(src.split('createWebServer(').length - 1).toBe(1);
-    const fn = src.slice(src.indexOf('async function startDashboard('), src.indexOf('async function main('));
-    expect(fn).toContain('createWebServer(');
-    expect(fn).toContain('.start()');
-    expect(fn).toMatch(/dashboard on http:\/\/127\.0\.0\.1:\$\{port\}\/dashboard/);
-    expect(src.indexOf('app.start();')).toBeLessThan(src.indexOf('const web = env.DASHBOARD_ENABLED'));
+    expect(src).toMatch(/const webReady = env\.DASHBOARD_ENABLED\s*\?\s*startDashboard\(/);
+    expect(src).toMatch(/import \{ startDashboard \} from '\.\/web\/start\.ts';/);
+    expect(src).not.toContain('createWebServer(');
+    expect(src.indexOf('app.start();')).toBeLessThan(src.indexOf('const webReady = env.DASHBOARD_ENABLED'));
+  });
+
+  it('awaits nothing between app.start() and the SIGINT/SIGTERM handlers', () => {
+    const gap = src.slice(src.indexOf('app.start();'), src.indexOf("process.on('SIGTERM', shutdown);"));
+    expect(gap.length).toBeGreaterThan(0);
+    expect(gap).not.toMatch(/\bawait\b/);
   });
 
   it('stops the web server before app.stop() on shutdown', () => {
     const shutdown = src.slice(src.indexOf('const shutdown = () => {'), src.indexOf("process.on('SIGINT', shutdown);"));
-    expect(shutdown).toContain('web.stop()');
-    expect(shutdown.indexOf('web.stop()')).toBeLessThan(shutdown.indexOf('app.stop()'));
+    expect(shutdown).toMatch(/const webStopped = webReady\s*\.then\(\(w\) => w\?\.stop\(\)\)/);
+    expect(shutdown.indexOf('webReady')).toBeLessThan(shutdown.indexOf('app.stop()'));
     expect(shutdown).toMatch(/webStopped\s*\.then\(\(\) => app\.stop\(\)\)/);
+  });
+});
+
+describe('startDashboard', () => {
+  it('logs the address and returns the running server', async () => {
+    const c = capture();
+    const web = await startDashboard({ env: { DASHBOARD_PORT: 0 }, log: c.log, control: {} });
+    expect(web).toBeDefined();
+    servers.push(web!);
+    const port = web!.address()!.port;
+    expect(c.out()).toContain(`dashboard on http://127.0.0.1:${port}/dashboard`);
+  });
+
+  it('a port already taken leaves the agent running: undefined, and only the error code in the log', async () => {
+    const blocker = createServer();
+    await new Promise<void>((r) => blocker.listen(0, '127.0.0.1', r));
+    try {
+      const port = (blocker.address() as AddressInfo).port;
+      const c = capture();
+      const web = await startDashboard({ env: { DASHBOARD_PORT: port }, log: c.log, control: {} });
+      expect(web).toBeUndefined();
+      const errors = c.records().filter((l) => l.level === 50);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]!.code).toBe('EADDRINUSE');
+      expect(errors[0]).not.toHaveProperty('err');
+      expect(errors[0]).not.toHaveProperty('stack');
+      expect(c.out()).not.toContain(String(port));
+    } finally {
+      await new Promise<void>((r) => blocker.close(() => r()));
+    }
   });
 });
