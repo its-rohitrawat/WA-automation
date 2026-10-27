@@ -201,10 +201,12 @@ async function main(): Promise<void> {
     // Owner dashboard: off (the default) means no web server and no port. Not awaited here, so the stop handlers below
     // are in place before anything else is awaited. It never rejects: a dashboard that cannot start resolves to undefined.
     // AgentControl is the dashboard's only way into the agent (read side: status, overview, connections).
-    // Narrow wrappers, not the live objects: the dashboard can read the gateway's and the sender's status, nothing more.
+    // Only what it reads: the health and the read-only spend view, two settings (no key or link), and status wrappers in
+    // place of the live gateway and sender. It queries tracker.db (parameterised reads only).
     const sender = report?.sender;
     const control = new AgentControl({
-      app, db, env, clock: systemClock,
+      app: { health: app.health, spend: app.spend }, db, clock: systemClock,
+      env: { MEETINGS_ENABLED: env.MEETINGS_ENABLED, VOICE_STT_PROVIDER: env.VOICE_STT_PROVIDER },
       gateway: { status: () => gateway.status() },
       ...(sender ? { sender: { status: () => sender.status(), maskedRecipient: () => sender.maskedRecipient() } } : {}),
       ...(heartbeat ? { heartbeat: { lastBeatAt: () => heartbeat.lastBeatAt() } } : {}),

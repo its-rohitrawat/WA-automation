@@ -142,9 +142,10 @@ export class AgentControl {
   }
 
   #lastMessageAt(): string | null {
-    // The newest stored message by arrival: the last row, found through the primary key at once (MAX(ts) would read a
-    // whole index on every poll).
-    return (this.#d.db.prepare('SELECT ts FROM messages ORDER BY id DESC LIMIT 1').get() as { ts: string } | undefined)?.ts ?? null;
+    // The newest message time among the last 500 stored, found through the primary key (MAX(ts) over the whole table
+    // would read a whole index on every poll). Not simply the last row: the catch-up after a reconnect stores older
+    // messages last.
+    return (this.#d.db.prepare('SELECT MAX(ts) AS ts FROM (SELECT ts FROM messages ORDER BY id DESC LIMIT 500)').get() as { ts: string | null }).ts;
   }
 
   status(): AgentStatus {

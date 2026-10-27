@@ -14,9 +14,9 @@ export interface ReadApiDeps {
 
 export function registerReadApi(router: Router, d: ReadApiDeps): void {
   const read = (path: string, answer: () => unknown) =>
-    router.get(path, ({ req, res }) => {
-      d.guard.requireOwner(req);
-      sendJson(res, 200, answer());
+    router.get(path, async ({ req, res }) => {
+      d.guard.requireOwner(req); // before any work: a request without an owner session reads nothing
+      sendJson(res, 200, await answer());
     });
   read('/dashboard/api/status', () => d.control.status());
   read('/dashboard/api/overview', () => d.control.overview());

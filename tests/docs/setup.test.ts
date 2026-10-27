@@ -643,12 +643,23 @@ describe('owner dashboard setup (SETUP-mac.md section 10, D1 task 8)', () => {
     for (const name of names) expect(envSource, name).toMatch(new RegExp(`^\\s*${name}: `, 'm'));
   });
 
-  it('says the update must run npm ci after pulling, and backs up first', () => {
+  it('backs up, gets the new version with npm ci after pulling, sets up, then starts the stopped service, in that order', () => {
     const s = section();
-    expect(s).toMatch(/must run `npm ci` after pulling/);
-    expect(s.indexOf('git pull --ff-only')).toBeGreaterThan(-1);
-    expect(s.indexOf('git pull --ff-only')).toBeLessThan(s.indexOf('then `npm ci`'));
-    expect(s).toMatch(/Back up first/);
+    expect(s).toMatch(/always run `npm ci` after pulling/);
+    const at = (text: string) => {
+      const i = s.indexOf(text);
+      expect(i, text).toBeGreaterThan(-1);
+      return i;
+    };
+    const steps = [
+      at('**Back up first.**'), at('step 1 of [GO-LIVE.md](GO-LIVE.md)'),
+      at('**Get the new version'), at('`git pull --ff-only`, then `npm ci`'),
+      at('**Google web sign-in client.**'), at('**Settings.**'),
+      // The service was booted out in the backup: a restart (kickstart) cannot start it, only enable and bootstrap.
+      at('**Start the service again**'), at('sudo launchctl enable system/com.wa-agent'), at('sudo launchctl bootstrap system /Library/LaunchDaemons/com.wa-agent.plist'),
+      at('**Open**'),
+    ];
+    expect(steps).toEqual([...steps].sort((a, b) => a - b));
   });
 
   it('adds the Web application client with the localhost redirects first, then signs in on localhost', () => {

@@ -264,3 +264,14 @@ describe('AgentControl review fixes', () => {
     expect(t.control.status().lastMessageAt).toBe('2026-10-19T07:30:00.000Z');
   });
 });
+
+describe('AgentControl review round 2', () => {
+  it('the last message is the newest one even when older messages are stored after it (catch-up after a reconnect)', () => {
+    const t = setup();
+    for (const [waId, ts] of [['new', '2026-10-19T07:30:00.000Z'], ['old', '2026-10-18T22:00:00.000Z']] as const) {
+      insertMessage(t.db, { waId, clientId: 1, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts, text: 'x', quotedWaId: null, mediaType: null });
+    }
+    expect(t.control.status().lastMessageAt).toBe('2026-10-19T07:30:00.000Z');
+    expect(t.control.connections().founder.lastActivityAt).toBe('2026-10-19T07:30:00.000Z');
+  });
+});

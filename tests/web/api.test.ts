@@ -73,14 +73,30 @@ function shape(v: unknown): unknown {
 const PATHS = ['/dashboard/api/status', '/dashboard/api/overview', '/dashboard/api/connections'];
 
 describe('read API', () => {
-  it('needs a signed-in owner: 401 JSON without a session, or for an email no longer on the list', async () => {
-    const { port, other } = await boot();
+  it('needs a signed-in owner: 401 JSON without a session, a malformed or unknown one, or a non-owner, and reads nothing first', async () => {
+    let calls = 0;
+    const spy = () => {
+      calls++;
+      return {};
+    };
+    const { port, other } = await boot({ control: { status: spy, overview: spy, connections: spy } as never });
+    // The guard ends a non-owner's session at its first refusal, so that case comes first on each path's own run.
+    const r0 = await get(port, PATHS[0]!, other);
+    expect(r0.status).toBe(401);
     for (const path of PATHS) {
-      for (const cookie of [undefined, 'x'.repeat(43), other]) {
+      for (const cookie of [undefined, 'not-a-token', 'x'.repeat(43), other]) {
         const r = await get(port, path, cookie);
         expect(r.status, `${path} ${cookie === other ? 'other' : String(cookie)}`).toBe(401);
         expect(r.json).toEqual({ error: { code: 'unauthorized', message: 'Sign in to continue.' } });
       }
+    }
+    expect(calls).toBe(0);
+  });
+
+  it('a non-owner is refused on every path, not only the first', async () => {
+    for (const path of PATHS) {
+      const { port, other } = await boot();
+      expect((await get(port, path, other)).status, path).toBe(401);
     }
   });
 
@@ -112,9 +128,9 @@ describe('read API', () => {
     });
   });
 
-  it('an internal error gives the plain 500, and its detail stays in the log with the request id', async () => {
+  it('an internal error gives the plain 500, and is logged with the request id, its type and stack, never its message', async () => {
     const boom = () => {
-      throw new Error('SQLITE_BUSY at C:\\data\\tracker.db secret detail');
+      throw new Error('SQLITE_BUSY secret detail'); // no path in it: the plain-message filter must not be what hides it
     };
     const { port, owner, log } = await boot({ control: { status: boom, overview: boom, connections: boom } });
     for (const path of PATHS) {
@@ -124,7 +140,14 @@ describe('read API', () => {
       expect(r.headers['cache-control']).toBe('no-store');
       expect(JSON.stringify(r.json)).not.toContain('secret');
     }
-    expect(log()).toMatch(/"rid":"[0-9a-f]{12}"/);
+    const failed = log().split('\n').filter((l) => l.includes('"request failed"'));
+    expect(failed).toHaveLength(3);
+    for (const l of failed) {
+      expect(l).toMatch(/"rid":"[0-9a-f]{12}"/);
+      // The logger keeps the error's type and stack frames, never its message (src/util/logger.ts).
+      expect(l).toMatch(/"err":{"type":"Error"/);
+      expect(l).not.toContain('secret');
+    }
   });
 
   it('answers HEAD like GET, and refuses other methods', async () => {

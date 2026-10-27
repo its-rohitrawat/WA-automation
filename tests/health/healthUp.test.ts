@@ -121,3 +121,18 @@ describe('Health.publishProblem (the tracker upload on its own)', () => {
     expect(h.publishProblem()).toBe('google_signin');
   });
 });
+
+describe('Health.publishProblem edges (review round 2)', () => {
+  it('a sign-in failure stays google_signin after an hour, and the hour is strict', () => {
+    const auth = setup();
+    auth.h.markPublishFailed({ step: 'drive', auth: true });
+    auth.clock.advance(61 * 60_000);
+    expect(auth.h.publishProblem()).toBe('google_signin');
+    const plain = setup();
+    plain.h.markPublishFailed({ step: 'drive', auth: false });
+    plain.clock.advance(60 * 60_000);
+    expect(plain.h.publishProblem()).toBe('failing');
+    plain.clock.advance(1);
+    expect(plain.h.publishProblem()).toBe('tracker_failing');
+  });
+});
