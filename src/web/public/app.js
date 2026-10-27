@@ -4,11 +4,16 @@ import { problems, readConnections, readOverview, readStatus } from './contract.
 import { $, $$, esc, gsap, icon, installTooltip, paint, reduceMotion, toast } from './dom.js';
 import { initials } from './format.js';
 import { NAV, navigate, onPopState, parsePath, SCREENS } from './router.js';
+import { mountClients } from './views/clients.js';
 import { renderConnections } from './views/connections.js';
+import { closeDrawer } from './views/drawer.js';
+import { resetGroups } from './views/groups.js';
 import { afterOverview, attentionBanner, renderOverview } from './views/overview.js';
 import { renderPlaceholder } from './views/placeholder.js';
 import { SCREEN_MOUNTS } from './views/registry.js';
 import './views/screens.js';
+
+SCREEN_MOUNTS.set('clients', mountClients);
 import { hideSignin, showSignin } from './views/signin.js';
 
 const STATUS_MS = 10_000;
@@ -183,6 +188,7 @@ function show(screen, sub, opts = {}) {
   if (!opts.fromHistory) navigate(screen, sub, { replace: opts.replace });
   if (current.screen === screen && current.sub === sub && !opts.replace) return;
   current = { screen, sub };
+  closeDrawer(true);
   const mine = ++visit;
   const live = () => mine === visit;
   onStatus = () => {};
@@ -312,6 +318,8 @@ function leaveApp(signedOut) {
   screenPolls = [];
   visit++;
   onStatus = () => {};
+  closeDrawer(true);
+  resetGroups();
   owner = null;
   status = null;
   current = { screen: '', sub: null };

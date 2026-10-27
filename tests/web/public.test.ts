@@ -7,7 +7,10 @@ import { VENDOR_FILES } from '../../src/web/server.ts';
 // The front end is plain browser modules; these four need no DOM. Their JSDoc types are checked by tsconfig.web.json,
 // which this project's tsconfig does not include, so the imports are untyped here.
 // @ts-expect-error -- browser module (see above)
-import { problems, readConnections, readOverview, readStatus } from '../../src/web/public/contract.js';
+import { problems, readClientDetail, readClients, readConnections, readGroups, readOverview, readStatus } from '../../src/web/public/contract.js';
+// @ts-expect-error -- browser module (see above)
+import { PUBLIC_MAIL_DOMAINS as BROWSER_PUBLIC, fieldProblem } from '../../src/web/public/views/rules.js';
+import { PUBLIC_MAIL_DOMAINS } from '../../src/config/domains.ts';
 // @ts-expect-error -- browser module (see above)
 import { ago, greeting, initials, usd, when } from '../../src/web/public/format.js';
 // @ts-expect-error -- browser module (see above)
@@ -230,5 +233,45 @@ describe('contract (the API answers as the screens read them)', () => {
     expect(cards[5]).toMatchObject({ state: 'warn', stateLabel: 'Daily cap reached' });
     expect(cards[6]).toMatchObject({ state: 'off', stateLabel: 'Off' });
     expect(JSON.stringify(cards)).not.toMatch(/sk-|apiKey|token/i);
+  });
+});
+
+describe('Clients and Manage groups (D2)', () => {
+  it("the drawer's field rules match the agent's", () => {
+    expect([...BROWSER_PUBLIC].sort()).toEqual([...PUBLIC_MAIL_DOMAINS].sort());
+    const ok = { name: 'Desai Foods', keywords: ['desai', 'dental website'], domains: ['desai.in'] };
+    expect(fieldProblem(ok)).toBe('');
+    expect(fieldProblem({ ...ok, name: '' })).toMatch(/name/);
+    expect(fieldProblem({ ...ok, name: 'x'.repeat(81) })).toMatch(/80/);
+    expect(fieldProblem({ ...ok, keywords: ['c++'] })).toMatch(/c\+\+/);
+    expect(fieldProblem({ ...ok, keywords: Array.from({ length: 21 }, (_, i) => `keyword ${i}`) })).toMatch(/20/);
+    expect(fieldProblem({ ...ok, domains: ['someone@desai.in'] })).toMatch(/not a domain/);
+    expect(fieldProblem({ ...ok, domains: ['gmail.com'] })).toMatch(/public mail domain/);
+  });
+
+  it('reads the groups answer; a key that is not the agent\'s 24-hex key drops the row', () => {
+    const g = readGroups({
+      rows: [
+        { key: 'a'.repeat(24), name: 'Desai Foods x Studio', approved: true, inWhatsApp: true, client: { name: 'Desai Foods', code: 'DES', active: true, hasTasks: true, codeLocked: true, emailDomains: ['desai.in'], meetingKeywords: [] } },
+        { key: '120363000000000001@g.us', name: 'raw id', approved: false, client: null },
+        { key: 'b'.repeat(24), name: { toString: 1 }, approved: 'yes', inWhatsApp: false, client: null },
+      ],
+      total: 3, counts: { all: 250, approved: 1, notApproved: 249 }, stale: true, reason: 'nonsense', fetchedAt: '2026-10-27T06:00:00Z',
+    });
+    expect(g.rows.map((r: { key: string }) => r.key)).toEqual(['a'.repeat(24), 'b'.repeat(24)]);
+    expect(g.rows[0].client).toMatchObject({ code: 'DES', codeLocked: true, emailDomains: ['desai.in'] });
+    expect(g.rows[1]).toEqual({ key: 'b'.repeat(24), name: '', approved: false, inWhatsApp: false, client: null });
+    expect(g).toMatchObject({ counts: { all: 250, approved: 1, notApproved: 249 }, stale: true, reason: null });
+    expect(() => readGroups(null)).not.toThrow();
+  });
+
+  it('reads clients and a client, with the phase position', () => {
+    const [c] = readClients({ clients: [{ code: 'DES', name: 'Desai', groupName: '', counts: { open: 2 }, phases: ['A', 'B', 'C'], currentPhase: 'B', lastActivity: null, sheetName: 'Desai' }, { name: 'no code' }] });
+    expect(c).toMatchObject({ code: 'DES', groupName: 'Desai', phaseIndex: 1, counts: { open: 2, overdue: 0, review: 0, doneThisWeek: 0 } });
+    expect(readClients({ clients: [{ name: 'no code' }] })).toEqual([]);
+    const d = readClientDetail({ client: { code: 'DES', name: 'Desai', meetings: [{ id: 1, startedAt: '2026-10-27T06:00:00Z', title: '', status: 'done' }], openTasks: [{ code: 'DES-001', title: 'Quote', assignedTo: null, deadline: null, status: 'open' }] } });
+    expect(d.meetings[0].title).toBe('Untitled meeting');
+    expect(d.openTasks[0]).toEqual({ code: 'DES-001', title: 'Quote', assignedTo: null, deadline: null, status: 'open' });
+    expect(() => readClientDetail(undefined)).not.toThrow();
   });
 });

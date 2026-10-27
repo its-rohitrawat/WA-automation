@@ -186,9 +186,15 @@ export function groupsOverview(o: {
     };
   };
 
+  // A group removed earlier keeps its client row: approving it again must use that code, so the row says so.
+  const formerClient = (groupId: string): GroupClientInfo | null => {
+    const row = byGroup.get(groupId);
+    return row ? { name: row.name, code: row.code, active: row.active, hasTasks: withTasks.has(row.id), codeLocked: true, emailDomains: [], meetingKeywords: [] } : null;
+  };
+
   const rows: GroupRow[] = listing.groups.map((g) => {
     const c = approved.get(g.id);
-    return { groupId: g.id, name: g.subject, approved: c !== undefined, inWhatsApp: true, client: c ? clientInfo(c) : null };
+    return { groupId: g.id, name: g.subject, approved: c !== undefined, inWhatsApp: true, client: c ? clientInfo(c) : formerClient(g.id) };
   });
   for (const c of o.configs) {
     if (liveIds.has(c.groupId)) continue;

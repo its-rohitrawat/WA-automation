@@ -15,12 +15,16 @@ export function setSignedOutHandler(fn) {
 }
 
 export class ApiError extends Error {
-  /** @param {number} status @param {string} code @param {string} message */
-  constructor(status, code, message) {
+  /**
+   * @param {number} status @param {string} code @param {string} message
+   * @param {Record<string, unknown>} [details] the error's other fields (for example `key` and `field` on a 422)
+   */
+  constructor(status, code, message, details = {}) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -35,8 +39,9 @@ async function parse(res) {
   }
   if (res.ok) return body;
   if (res.status === 401) onSignedOut();
-  const err = /** @type {{ error?: { code?: string, message?: string } } | null} */ (body)?.error;
-  throw new ApiError(res.status, err?.code ?? 'http_' + res.status, err?.message ?? 'Something went wrong.');
+  const err = /** @type {{ error?: { code?: string, message?: string } & Record<string, unknown> } | null} */ (body)?.error;
+  const message = typeof err?.message === 'string' ? err.message : 'Something went wrong.';
+  throw new ApiError(res.status, typeof err?.code === 'string' ? err.code : 'http_' + res.status, message, err ?? {});
 }
 
 /** GET a path under /dashboard/api. @param {string} path */

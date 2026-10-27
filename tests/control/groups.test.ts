@@ -255,6 +255,16 @@ describe('groupsOverview', () => {
     expect(by(gid(99))).toMatchObject({ hasTasks: false, codeLocked: false, active: false });
   });
 
+  it('a group removed earlier, not approved now, shows its former client with the code locked', () => {
+    const db = seededDb();
+    syncClients(db, [MEHTA]); // Sharma removed from the allow-list: its row stays, inactive
+    const o = groupsOverview({ db, listing: listing([{ id: SHARMA.groupId, subject: 'Sharma x Studio' }, { id: gid(7), subject: 'New group' }]), configs: [MEHTA] });
+    const row = o.rows.find((r) => r.groupId === SHARMA.groupId)!;
+    expect(row).toMatchObject({ approved: false, name: 'Sharma x Studio' });
+    expect(row.client).toEqual({ name: SHARMA.name, code: 'SHA', active: false, hasTasks: false, codeLocked: true, emailDomains: [], meetingKeywords: [] });
+    expect(o.rows.find((r) => r.groupId === gid(7))!.client).toBeNull();
+  });
+
   it('an inactive client row (removed earlier, approved again) still locks its code', () => {
     const db = seededDb();
     syncClients(db, [MEHTA]); // Sharma inactive

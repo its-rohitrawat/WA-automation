@@ -394,3 +394,19 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
   .side { visibility: hidden; transition: transform 300ms var(--ease-drawer), visibility 0s linear 300ms; }
   .app.nav-open .side { visibility: visible; transition: transform 300ms var(--ease-drawer), visibility 0s; }
 }
+/* Clients and Manage groups (D2) */
+.g-search { min-width: min(100%, 260px); } .g-search input { width: 100%; }
+.g-name { min-width: 0; } .g-name small { display: block; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.g-handle { color: var(--faint); display: grid; } .g-act { display: flex; gap: 8px; align-items: center; }
+.g-row.changed { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.link-btn { all: unset; cursor: pointer; display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.link-btn:hover { color: var(--accent); } .link-btn:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
+.g-more { color: var(--faint); font-size: 12.5px; text-align: center; padding: 8px 0 2px; min-height: 1px; }
+.g-label { display: block; } .g-label:first-of-type { margin-top: 0; } .g-code-field { width: 140px; } .g-code { text-transform: uppercase; letter-spacing: .08em; }
+.g-more-toggle { cursor: pointer; color: var(--muted); margin-top: 18px; }
+.g-error { margin: 0 0 14px; padding: 10px 12px; border-radius: 12px; font-size: 13.5px; background: rgba(217,79,99,.12); color: #f07585; border: 1px solid rgba(217,79,99,.35); }
+:root[data-theme="light"] .g-error { color: #b23247; }
+.btn-plain { background: transparent; color: inherit; } .btn-plain:hover { background: rgba(255,255,255,.08); }
+.ccard .grp .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; } .ccard:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.empty-card { display: flex; gap: 14px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.drawer .field input { width: 100%; } .drawer details .h4 { margin-top: 14px; }

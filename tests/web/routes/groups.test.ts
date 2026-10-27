@@ -272,6 +272,17 @@ describe('groupsApplyHandler', () => {
     expect(unknown).not.toContain('sneakyField');
   });
 
+  it('the 400 names the group (by its key) and the form field, so the dashboard can open that group', async () => {
+    const r = await groupsApplyHandler(deps, CTX, approve({ emailDomains: ['gmail.com'] }));
+    const key = (approve({}) as { approve: { key: string }[] }).approve[0]!.key;
+    expect(errorOf(r)).toMatchObject({ code: 'invalid', key, field: 'emailDomains' });
+    expect(errorOf(await groupsApplyHandler(deps, CTX, { edit: [{ key: k(SHARMA.groupId), name: '' }] }))).toMatchObject({ key: k(SHARMA.groupId), field: 'name' });
+    // A key that is not well-formed, an unknown field, or no list position: neither is echoed.
+    expect(errorOf(await groupsApplyHandler(deps, CTX, approve({ key: 'not-a-key' })))).toMatchObject({ key: null, field: null });
+    expect(errorOf(await groupsApplyHandler(deps, CTX, approve({ sneakyField: 1 })))).toMatchObject({ field: null });
+    expect(errorOf(await groupsApplyHandler(deps, CTX, 'approve'))).toMatchObject({ key: null, field: null });
+  });
+
   it('exactly 300 changes pass the limit (the writer then judges them)', async () => {
     src.groups.push(...ids(300).map((id, i) => ({ id, subject: `Extra ${i}` })));
     clock.advance(30_000);

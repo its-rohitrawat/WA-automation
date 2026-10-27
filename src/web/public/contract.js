@@ -136,3 +136,81 @@ export function readConnections(raw) {
 export function problems(s) {
   return [...s.parts.filter((p) => p.state === 'down'), ...s.parts.filter((p) => p.state === 'warn')];
 }
+
+/** @param {unknown} v */
+const counts = (v) => {
+  const o = obj(v);
+  return { open: num(o.open), overdue: num(o.overdue), review: num(o.review), doneThisWeek: num(o.doneThisWeek) };
+};
+
+/** @param {unknown} v */
+function clientCard(v) {
+  const o = obj(v);
+  const phases = arr(o.phases).map(str).filter(Boolean);
+  const currentPhase = str(o.currentPhase) || null;
+  return {
+    code: str(o.code), name: str(o.name), groupName: str(o.groupName) || str(o.name), counts: counts(o.counts), phases,
+    currentPhase, phaseIndex: currentPhase ? phases.indexOf(currentPhase) : -1, lastActivity: iso(o.lastActivity), sheetName: str(o.sheetName),
+  };
+}
+
+/** GET /dashboard/api/clients ({ clients: ClientCard[] }). @param {unknown} raw */
+export function readClients(raw) {
+  return arr(obj(raw).clients).map(clientCard).filter((c) => c.code);
+}
+
+/** GET /dashboard/api/clients/:code ({ client: ClientDetail }). @param {unknown} raw */
+export function readClientDetail(raw) {
+  const o = obj(obj(raw).client);
+  return {
+    ...clientCard(o),
+    openTasks: arr(o.openTasks).map((t) => {
+      const x = obj(t);
+      return { code: str(x.code), title: str(x.title), assignedTo: str(x.assignedTo) || null, deadline: str(x.deadline) || null, status: str(x.status) };
+    }),
+    meetings: arr(o.meetings).map((m) => {
+      const x = obj(m);
+      return { id: num(x.id), startedAt: iso(x.startedAt), title: str(x.title) || 'Untitled meeting', status: str(x.status) };
+    }),
+    lastSyncAt: iso(o.lastSyncAt),
+  };
+}
+
+/** @param {unknown} v */
+const strings = (v) => arr(v).map(str).filter(Boolean);
+
+/**
+ * One row of Manage groups. `key` is the agent's opaque key for the group (never its WhatsApp id).
+ * @typedef {{ key: string, name: string, approved: boolean, inWhatsApp: boolean,
+ *   client: { name: string, code: string, active: boolean, hasTasks: boolean, codeLocked: boolean, emailDomains: string[], meetingKeywords: string[] } | null }} GroupRow
+ */
+
+/** GET /dashboard/api/groups (and the answer to /groups/apply). @param {unknown} raw */
+export function readGroups(raw) {
+  const r = obj(raw);
+  const c = obj(r.counts);
+  const reason = str(r.reason);
+  return {
+    /** @type {GroupRow[]} */
+    rows: arr(r.rows)
+      .map((row) => {
+        const o = obj(row);
+        const cl = o.client && typeof o.client === 'object' ? obj(o.client) : null;
+        return {
+          key: /^[0-9a-f]{24}$/.test(str(o.key)) ? str(o.key) : '',
+          name: str(o.name),
+          approved: o.approved === true,
+          inWhatsApp: o.inWhatsApp !== false,
+          client: cl
+            ? { name: str(cl.name), code: str(cl.code), active: cl.active === true, hasTasks: cl.hasTasks === true, codeLocked: cl.codeLocked === true, emailDomains: strings(cl.emailDomains), meetingKeywords: strings(cl.meetingKeywords) }
+            : null,
+        };
+      })
+      .filter((row) => row.key),
+    total: num(r.total),
+    counts: { all: num(c.all), approved: num(c.approved), notApproved: num(c.notApproved) },
+    stale: r.stale === true,
+    reason: reason === 'whatsapp_not_connected' || reason === 'list_failed' ? reason : null,
+    fetchedAt: iso(r.fetchedAt),
+  };
+}

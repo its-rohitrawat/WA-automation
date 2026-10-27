@@ -109,6 +109,19 @@ function problem(error: z.ZodError): string {
   return `The changes are not valid: ${where === '' ? '' : `${where} `}${what}.`;
 }
 
+/**
+ * Which group and field the first problem is about, so the dashboard can open that group's form: the key only when the
+ * sender's item has a well-formed one, and the field only when it is one of the form's own (never the sender's text).
+ */
+function problemTarget(error: z.ZodError, body: unknown): { key: string | null; field: string | null } {
+  const [list, index, field] = error.issues[0]?.path ?? [];
+  if ((list !== 'approve' && list !== 'edit' && list !== 'unapprove') || typeof index !== 'number') return { key: null, field: null };
+  const item = (body as Record<string, unknown[]> | null)?.[list]?.[index];
+  const key = list === 'unapprove' ? item : (item as { key?: unknown } | null | undefined)?.key;
+  const known = typeof field === 'string' && ['name', 'code', 'emailDomains', 'meetingKeywords'].includes(field) ? field : null;
+  return { key: typeof key === 'string' && KEY.test(key) ? key : null, field: known };
+}
+
 /** Key → group id over the groups the owner can see: the last cached list and the allow-list. */
 function keyIndex(deps: GroupsDeps): Map<string, string> {
   const ids = [...(deps.directory.cachedGroups() ?? []).map((g) => g.id), ...deps.configs().map((c) => c.groupId)];
@@ -121,7 +134,7 @@ const withoutIds = (message: string) => message.replace(/\s*\b[0-9-]+@g\.us\b/g,
 /** POST /dashboard/api/groups/apply with { approve, unapprove, edit }, each group named by its key. */
 export async function groupsApplyHandler(deps: GroupsDeps, ctx: OwnerContext, body: unknown): Promise<ApiResult<GroupsView | ApiError>> {
   const parsed = ApplyBody.safeParse(body);
-  if (!parsed.success) return fail(400, 'invalid', problem(parsed.error));
+  if (!parsed.success) return fail(400, 'invalid', problem(parsed.error), problemTarget(parsed.error, body));
   const index = keyIndex(deps);
   const unknown = () => fail(400, 'invalid', 'A group in the changes is not in the current list. Refresh the list and try again.');
   const idOf = (key: string) => index.get(key);
