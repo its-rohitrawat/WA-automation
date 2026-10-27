@@ -89,3 +89,15 @@ describe('purgeAuditOlderThan', () => {
     expect(() => purgeAuditOlderThan(seededDb(), 0, new Date())).toThrowError();
   });
 });
+
+describe('audit review fixes', () => {
+  it('a page shorter than the limit has no next', () => {
+    const db = seededDb();
+    row(db, t('05:00'));
+    expect(listAudit(db, params({ limit: '2' }), isOwner).next).toBeNull();
+  });
+
+  it('masks at the last @', () => {
+    expect(maskEmail('a@b@x.org')).toBe('a@••••@x.org');
+  });
+});

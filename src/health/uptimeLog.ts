@@ -1,4 +1,4 @@
-import type { Db } from '../store/db.ts';
+import { tx, type Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import { fromIstDate, istDate } from '../util/time.ts';
 
@@ -121,12 +121,46 @@ export class UptimeLog {
     if (this.#last !== false) this.#write(false);
   }
 
+  /**
+   * The daily retention: removes rows older than `days` days, keeping the newest one before the cutoff (and, when that
+   * one is down, the row where its outage began), so the state at the window's start and an outage's start stay known.
+   * Returns how many went.
+   */
+  purgeOlderThan(days: number): number {
+    if (!Number.isInteger(days) || days < 1) throw new Error('the uptime log keeps at least one day');
+    const cutoff = new Date(this.#clock.now().getTime() - days * DAY_MS).toISOString();
+    return tx(this.#db, () => {
+      const last = this.#db.prepare('SELECT id, up FROM uptime_log WHERE at < ? ORDER BY at DESC, id DESC LIMIT 1').get(cutoff) as
+        { id: number; up: number } | undefined;
+      if (!last) return 0;
+      const keep = [last.id];
+      if (last.up === 0) {
+        const began = this.#db
+          .prepare(`SELECT id FROM uptime_log WHERE at < @cutoff AND up = 0
+            AND at > COALESCE((SELECT MAX(at) FROM uptime_log WHERE at < @cutoff AND up = 1), '') ORDER BY at, id LIMIT 1`)
+          .get({ cutoff }) as { id: number };
+        keep.push(began.id);
+      }
+      return this.#db.prepare('DELETE FROM uptime_log WHERE at < ? AND id NOT IN (SELECT value FROM json_each(?))').run(cutoff, JSON.stringify(keep)).changes;
+    });
+  }
+
   /** The down stretches overlapping the last `days` days, and when the log began. */
   #intervals(days: number): { intervals: Interval[]; knownSince: number | undefined } {
     const now = this.#clock.now().getTime();
     const from = new Date(now - days * DAY_MS).toISOString();
-    // The last row before the window says whether the window starts inside an outage.
-    const before = this.#db.prepare('SELECT at, up FROM uptime_log WHERE at < ? ORDER BY at DESC, id DESC LIMIT 1').all(from) as { at: string; up: number }[];
+    // The last row before the window says whether the window starts inside an outage. If it does, the outage began at the
+    // first down row after the last up row (a down tick, then a stop row, then a start(false) row are one outage).
+    const last = this.#db.prepare('SELECT at, up FROM uptime_log WHERE at < ? ORDER BY at DESC, id DESC LIMIT 1').get(from) as
+      { at: string; up: number } | undefined;
+    let before: { at: string; up: number }[] = last ? [last] : [];
+    if (last?.up === 0) {
+      const began = this.#db
+        .prepare(`SELECT MIN(at) AS at FROM uptime_log WHERE at < @from AND up = 0
+          AND at > COALESCE((SELECT MAX(at) FROM uptime_log WHERE at < @from AND up = 1), '')`)
+        .get({ from }) as { at: string };
+      before = [{ at: began.at, up: 0 }];
+    }
     const inside = this.#db.prepare('SELECT at, up FROM uptime_log WHERE at >= ? ORDER BY at, id').all(from) as { at: string; up: number }[];
     const first = this.#db.prepare('SELECT MIN(at) AS at FROM uptime_log').get() as { at: string | null };
     const rows = [...before, ...inside].map((r) => ({ at: Date.parse(r.at), up: r.up === 1 }));

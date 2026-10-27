@@ -142,3 +142,46 @@ describe('UptimeLog reading', () => {
     expect(t.log.daily(1)).toEqual([{ day: '2026-10-19', downMinutes: 0, longestMinutes: 0 }]);
   });
 });
+
+describe('UptimeLog review fixes', () => {
+  it('an outage that began before the window starts at its first down row, across a stop and a down start', () => {
+    const t = setup('2026-09-01T00:00:00.000Z');
+    t.log.start(true);
+    t.clock.set('2026-09-02T00:00:00.000Z');
+    t.log.tick(false);
+    t.clock.set('2026-09-03T00:00:00.000Z');
+    t.log.stop(); // already down: no row
+    const again = new UptimeLog(t.db, t.clock);
+    t.clock.set('2026-09-05T00:00:00.000Z');
+    again.start(false);
+    t.clock.set('2026-10-20T00:00:00.000Z');
+    expect(again.outages(30)).toEqual([{ start: '2026-09-02T00:00:00.000Z', end: null, minutes: 69_120, reason: null }]);
+  });
+
+  it('dailyDown never counts past now', () => {
+    const now = ist('2026-10-20', '10:00');
+    expect(dailyDown([{ start: ist('2026-10-20', '09:00'), end: ist('2026-10-20', '23:00') }], now, 1)).toEqual([
+      { day: '2026-10-20', downMinutes: 60, longestMinutes: 60 },
+    ]);
+  });
+
+  it('purges old rows but keeps what says the state at the cutoff and where its outage began', () => {
+    const t = setup('2026-07-01T00:00:00.000Z');
+    t.log.start(true);
+    t.clock.set('2026-07-02T00:00:00.000Z');
+    t.log.tick(false);
+    t.clock.set('2026-07-03T00:00:00.000Z');
+    new UptimeLog(t.db, t.clock).start(false);
+    t.clock.set('2026-10-19T00:00:00.000Z');
+    t.log.tick(true);
+    expect(t.log.purgeOlderThan(30)).toBe(1); // the first up row
+    expect(rows(t.db)).toEqual([
+      { at: '2026-07-02T00:00:00.000Z', up: 0 },
+      { at: '2026-07-03T00:00:00.000Z', up: 0 },
+      { at: '2026-10-19T00:00:00.000Z', up: 1 },
+    ]);
+    expect(t.log.outages(30)[0]).toMatchObject({ start: '2026-07-02T00:00:00.000Z', end: '2026-10-19T00:00:00.000Z' });
+    expect(t.log.purgeOlderThan(30)).toBe(0);
+    expect(() => t.log.purgeOlderThan(0)).toThrowError();
+  });
+});

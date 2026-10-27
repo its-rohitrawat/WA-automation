@@ -263,3 +263,28 @@ describe('LiveReport review fixes', () => {
     expect(t.live.health().text).toBe('Morning report: settings could not be read');
   });
 });
+
+describe('LiveReport stop during a rebuild (review round 2)', () => {
+  it('stop does not resolve while the old sender is still closing, even past its own short wait', async () => {
+    const t = setup({ report: ON, recipient: A });
+    await t.tick('05:30');
+    const old = t.opened[0]!.sender;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    old.stop = async () => {
+      old.stopped++;
+      await gate;
+    };
+    t.set({ report: ON, recipient: B });
+    const rebuilding = t.tick('05:31');
+    await new Promise((r) => setTimeout(r, 10));
+    let stopped = false;
+    const stopping = t.live.stop(20).then(() => (stopped = true));
+    await new Promise((r) => setTimeout(r, 60));
+    expect(stopped).toBe(false);
+    release();
+    await stopping;
+    await rebuilding;
+    expect(t.opened.map((o) => [o.recipient, o.closed])).toEqual([[A, 1]]);
+  });
+});

@@ -167,3 +167,74 @@ describe('uptimeReport', () => {
     }
   });
 });
+
+describe('UptimeRobotClient review fixes', () => {
+  const answer = (monitor: Record<string, unknown>) => ({ status: 200, json: { stat: 'ok', monitors: [{ custom_uptime_ratio: '100-100-100', ...monitor }] } });
+
+  it('asks for heartbeat monitors only, refuses redirects, and needs exactly one monitor', async () => {
+    const f = fakeFetch(() => ({ status: 200, json: { stat: 'ok', monitors: [GOOD.monitors[0], GOOD.monitors[0]] } }));
+    const { robot, out } = client(f.fetch);
+    expect(await robot.read()).toBeNull();
+    expect(new URLSearchParams(f.calls[0]!.body).get('types')).toBe('5');
+    expect(out()).toContain('not_one_monitor');
+    let redirect: string | undefined;
+    const g: FetchLike = async (_url, init) => {
+      redirect = init.redirect;
+      return { ok: true, status: 200, json: async () => GOOD };
+    };
+    await client(g).robot.read();
+    expect(redirect).toBe('error');
+  });
+
+  it('refuses a ratio over 100', async () => {
+    const { robot } = client(fakeFetch(() => answer({ custom_uptime_ratio: '150-99-99' })).fetch);
+    expect(await robot.read()).toBeNull();
+  });
+
+  it('drops logs with a negative or unbelievable duration, or a time in the future', async () => {
+    const now = at(NOW);
+    const { robot } = client(fakeFetch(() => answer({ logs: [
+      { type: 1, datetime: now - 600, duration: -60 },
+      { type: 1, datetime: now - 600, duration: 1e12 },
+      { type: 1, datetime: now + 3600, duration: 60 },
+      { type: 1, datetime: 1e15, duration: 60 },
+      { type: 1, datetime: now - 600, duration: 120 },
+    ] })).fetch);
+    expect((await robot.read())!.outages).toEqual([{ start: new Date((now - 600) * 1000).toISOString(), end: new Date((now - 480) * 1000).toISOString(),
+      minutes: 2, reason: null }]);
+  });
+
+  it('marks the newest outage as still going while the monitor is down, and cuts an end past now', async () => {
+    const now = at(NOW);
+    const down = client(fakeFetch(() => answer({ status: 9, logs: [{ type: 1, datetime: now - 1800, duration: 600 }] })).fetch);
+    expect((await down.robot.read())!.outages[0]).toMatchObject({ end: null, minutes: 30 });
+    const past = client(fakeFetch(() => answer({ status: 2, logs: [{ type: 1, datetime: now - 600, duration: 3600 }] })).fetch);
+    expect((await past.robot.read())!.outages[0]).toMatchObject({ end: NOW, minutes: 10 });
+  });
+
+  it('keeps an answer for just under 5 minutes', async () => {
+    const f = fakeFetch(() => ({ status: 200, json: GOOD }));
+    const { robot, clock } = client(f.fetch);
+    await robot.read();
+    clock.advance(4 * 60_000 + 59_000);
+    await robot.read();
+    expect(f.calls).toHaveLength(1);
+  });
+});
+
+describe('uptimeReport review fixes', () => {
+  it('joins overlapping UptimeRobot outages and leaves out those before the window', async () => {
+    const db = openDb(':memory:');
+    const clock = manualClock(NOW);
+    const log = new UptimeLog(db, clock);
+    const hour = at('2026-10-20T03:00:00.000Z');
+    const old = at('2026-09-01T00:00:00.000Z');
+    const { robot } = client(fakeFetch(() => ({ status: 200, json: { stat: 'ok', monitors: [{ custom_uptime_ratio: '99-99-99', logs: [
+      { type: 1, datetime: hour, duration: 3600 }, { type: 1, datetime: hour, duration: 3600 }, { type: 1, datetime: hour + 1800, duration: 3600 },
+      { type: 1, datetime: old, duration: 60 },
+    ] }] } })).fetch, { clock });
+    const r = await uptimeReport({ log, robot, now: clock.now(), days: 1 });
+    expect(r.days).toEqual([{ day: '2026-10-20', downMinutes: 90, longestMinutes: 90 }]);
+    expect(r.outages).toHaveLength(3);
+  });
+});

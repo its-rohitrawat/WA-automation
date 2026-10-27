@@ -99,3 +99,14 @@ describe('usageSummary', () => {
     expect(t.summary().days.at(-1)!.usd).toBe(0.3);
   });
 });
+
+describe('usageSummary review fixes', () => {
+  it('leaves out a batch finished just after the next IST midnight, and lists no other line without such spend', () => {
+    const t = setup();
+    finishBatch(t.db, startBatch(t.db, 1, 8, '2026-10-19T18:30:00.000Z'), { status: 'ok', errorCode: null, accepted: 0, rejected: 0, at: '2026-10-19T18:30:00.000Z' });
+    spend(t.db, '2026-10-19', 'ai', 1, 'batch 1');
+    const s = t.summary();
+    expect(s.batches).toEqual({ today: 0, messagesRead: 0 });
+    expect(s.byUse.map((u) => u.use)).toEqual(['messages', 'meetings', 'files', 'speech']);
+  });
+});
