@@ -5,7 +5,7 @@ import type { Db } from '../store/db.ts';
 import { setKv } from '../store/kv.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
-import { useEncryptedAuthState, type EncryptedAuth } from './authState.ts';
+import { backupAndReset, dropBackup, restoreBackup, useEncryptedAuthState, type EncryptedAuth } from './authState.ts';
 import { TRACKER_DEVICE_NAME, type GatewayLike } from './gateway.ts';
 import type { SwitchableGateway } from './switchableGateway.ts';
 
@@ -248,54 +248,8 @@ function safely(fn: (e: LinkEvent) => void, e: LinkEvent): void {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The session backup. A link copies the session rows into auth_backup (next to auth, in the same database file) in the
-// same transaction that resets them, so the copy survives a crash or a power cut during the 5 minutes. The backup is
-// dropped once the new link is committed, or once the old rows are back. recoverInterruptedLink() runs at service start,
-// before the session is read: a backup still there means a link never finished, so the old rows come back.
-
-/** Marks a backup as present even when the session it copied was empty. Row names are hex hashes, so it cannot collide. */
-const BACKUP_MARKER = '#link-in-progress';
-
-function ensureBackupTable(db: Db): void {
-  db.exec('CREATE TABLE IF NOT EXISTS auth_backup (k TEXT PRIMARY KEY, v BLOB NOT NULL)');
-}
-
-/** In one transaction: copies every row to auth_backup, then empties auth (the reset for a new link). */
-export function backupAndReset(db: Db): void {
-  ensureBackupTable(db);
-  db.transaction(() => {
-    db.prepare('DELETE FROM auth_backup').run();
-    db.prepare('INSERT INTO auth_backup (k, v) SELECT k, v FROM auth').run();
-    db.prepare('INSERT INTO auth_backup (k, v) VALUES (?, ?)').run(BACKUP_MARKER, Buffer.alloc(0));
-    db.prepare('DELETE FROM auth').run();
-  })();
-}
-
-/** In one transaction: the backed-up rows replace auth, and the backup is dropped. False when there was no backup. */
-export function restoreBackup(db: Db): boolean {
-  ensureBackupTable(db);
-  return db.transaction(() => {
-    if (!db.prepare('SELECT 1 FROM auth_backup WHERE k = ?').get(BACKUP_MARKER)) return false;
-    db.prepare('DELETE FROM auth').run();
-    db.prepare('INSERT INTO auth (k, v) SELECT k, v FROM auth_backup WHERE k <> ?').run(BACKUP_MARKER);
-    db.prepare('DELETE FROM auth_backup').run();
-    return true;
-  })();
-}
-
-/** The new link is kept: the backup is no longer needed. */
-export function dropBackup(db: Db): void {
-  ensureBackupTable(db);
-  db.prepare('DELETE FROM auth_backup').run();
-}
-
-/**
- * At service start, before the session is read: a link that never finished (the process stopped during it) left its
- * backup, so the session rows from before the link come back. Returns true when it restored them.
- */
-export function recoverInterruptedLink(db: Db): boolean {
-  return restoreBackup(db);
-}
+// The session backup helpers live in authState.ts (openSessionDb restores an unfinished link's backup); re-exported here.
+export { backupAndReset, dropBackup, recoverInterruptedLink, restoreBackup } from './authState.ts';
 
 /**
  * The link's auth state, with its writes (saveCreds and key changes) dropped once `stopped()` is true. A socket that is

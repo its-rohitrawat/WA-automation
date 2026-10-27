@@ -41,11 +41,52 @@ export function openSessionDb(file: string): Db {
     db.exec('CREATE TABLE IF NOT EXISTS auth (k TEXT PRIMARY KEY, v BLOB NOT NULL)');
     // A copy of the rows while a dashboard link runs (src/wa/linkSession.ts); empty otherwise.
     db.exec('CREATE TABLE IF NOT EXISTS auth_backup (k TEXT PRIMARY KEY, v BLOB NOT NULL)');
+    restoreBackup(db); // a link that never finished: the session from before it comes back
   } catch (err) {
     db.close();
     throw err;
   }
   return db;
+}
+
+// The session backup. A dashboard link copies the session rows into auth_backup (same file) in the transaction that
+// resets them, so the copy survives a crash or a power cut during the link. It is dropped once the new link is committed,
+// or once the old rows are back. openSessionDb restores a backup it finds (a link that never finished) before anything
+// reads the session. Only the holder of the data-folder lock opens a session file (the service, or a CLI command with the
+// service stopped), so this never runs beside a link in progress.
+
+/** Marks a backup as present even when the session it copied was empty. Row names are hex hashes, so it cannot collide. */
+const BACKUP_MARKER = '#link-in-progress';
+
+/** In one transaction: copies every row to auth_backup, then empties auth (the reset for a new link). */
+export function backupAndReset(db: Db): void {
+  db.transaction(() => {
+    db.prepare('DELETE FROM auth_backup').run();
+    db.prepare('INSERT INTO auth_backup (k, v) SELECT k, v FROM auth').run();
+    db.prepare('INSERT INTO auth_backup (k, v) VALUES (?, ?)').run(BACKUP_MARKER, Buffer.alloc(0));
+    db.prepare('DELETE FROM auth').run();
+  })();
+}
+
+/** In one transaction: the backed-up rows replace auth, and the backup is dropped. False when there was no backup. */
+export function restoreBackup(db: Db): boolean {
+  return db.transaction(() => {
+    if (!db.prepare('SELECT 1 FROM auth_backup WHERE k = ?').get(BACKUP_MARKER)) return false;
+    db.prepare('DELETE FROM auth').run();
+    db.prepare('INSERT INTO auth (k, v) SELECT k, v FROM auth_backup WHERE k <> ?').run(BACKUP_MARKER);
+    db.prepare('DELETE FROM auth_backup').run();
+    return true;
+  })();
+}
+
+/** The new link is kept: the backup is no longer needed. */
+export function dropBackup(db: Db): void {
+  db.prepare('DELETE FROM auth_backup').run();
+}
+
+/** A link that never finished left its backup: the session rows from before it come back. True when it restored them. */
+export function recoverInterruptedLink(db: Db): boolean {
+  return restoreBackup(db);
 }
 
 /**

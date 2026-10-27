@@ -58,7 +58,8 @@ export class SwitchableGateway implements GatewayLike {
 
   start(): void {
     this.#phase = 'running';
-    this.#inner?.start();
+    if (this.#inner) this.#inner.start();
+    else this.#emitStatus(this.status()); // setup mode: Health learns 'not_linked' (or 'linking') at once
   }
 
   /** While a relink holds no gateway ('linking'), the link session owns and stops its own gateway. */
