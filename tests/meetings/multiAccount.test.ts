@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { GoogleAccessError, GoogleNoAccessError, GoogleTransientError } from '../../src/meetings/googleErrors.ts';
-import { combineMeetingAccounts, MultiAccountMeetingsApi, storedMeetingAccounts } from '../../src/meetings/multiAccount.ts';
+import { combineMeetingAccounts, hubMeetingAccounts, LiveMeetingsApi, MultiAccountMeetingsApi, storedMeetingAccounts } from '../../src/meetings/multiAccount.ts';
 import {
   createOAuthClient, MEETING_SCOPES, saveGrantedScopes, saveMeetingAccount, TokenStore, type OAuth2Client,
 } from '../../src/output/googleAuth.ts';
@@ -193,5 +193,45 @@ describe('storedMeetingAccounts', () => {
     // Move company2's ciphertext into company3's slot.
     setKv(db2, 'google_refresh_token:company3', String(db2.prepare("SELECT v FROM kv WHERE k = 'google_refresh_token:company2'").pluck().get()));
     expect(() => new TokenStore(db2, key, 'company3').load()).toThrow(/google-auth --account company3/);
+  });
+});
+
+describe('hubMeetingAccounts and LiveMeetingsApi', () => {
+  const ALL = MEETING_SCOPES.join(' ');
+  const client = () => createOAuthClient('id', 'secret');
+
+  it('takes each account that has a client and every meeting scope, main first', () => {
+    const db = seededDb();
+    const key = randomBytes(32);
+    saveGrantedScopes(db, ALL);
+    saveMeetingAccount(db, key, 'company2', 'rt-2', ALL);
+    saveMeetingAccount(db, key, 'company3', 'rt-3', 'https://www.googleapis.com/auth/drive.file');
+    const clients = new Map([['main', client()], ['company2', client()], ['company3', client()]]);
+    expect(hubMeetingAccounts(db, { client: (l) => clients.get(l) }).map((a) => a.label)).toEqual(['main', 'company2']);
+    clients.delete('main');
+    expect(hubMeetingAccounts(db, { client: (l) => clients.get(l) }).map((a) => a.label)).toEqual(['company2']);
+  });
+
+  it('with no account every call is refused as not connected; a rebuild picks up a reconnected account', async () => {
+    let accounts: { label: string; api: FakeMeetingsApi }[] = [];
+    const live = new LiveMeetingsApi(() => accounts, log);
+    await expect(live.listConferences(FROM, TO, signal)).rejects.toMatchObject({ name: 'GoogleAccessError', code: 'not_connected' });
+    const a = new FakeMeetingsApi();
+    a.conferences = [conference('c1')];
+    accounts = [{ label: 'main', api: a }];
+    live.rebuild();
+    expect((await live.listConferences(FROM, TO, signal)).map((c) => c.name)).toEqual(['conferenceRecords/c1']);
+    expect(live.lostAccounts()).toEqual([]);
+  });
+
+  it('several accounts go through the router: lostAccounts and accountOf come from it', async () => {
+    const { a, b } = twoAccounts();
+    b.failWith.set('listConferences', new GoogleAccessError('invalid_grant'));
+    const live = new LiveMeetingsApi(() => [{ label: 'main', api: a }, { label: 'company2', api: b }], log);
+    await live.listConferences(FROM, TO, signal);
+    expect(live.lostAccounts()).toEqual(['company2']);
+    expect(live.accountOf('conferenceRecords/c1')).toBe('main');
+    const dest = join(dir, 'a.mp4.part');
+    expect(await live.download('fa', dest, 100, signal)).toBe(5);
   });
 });

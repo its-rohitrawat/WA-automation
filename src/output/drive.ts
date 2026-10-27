@@ -1,5 +1,5 @@
 import { Readable } from 'node:stream';
-import { drive } from '@googleapis/drive';
+import { drive, type drive_v3 } from '@googleapis/drive';
 import type { Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import type { Logger } from '../util/logger.ts';
@@ -52,8 +52,22 @@ function mapCreateError(e: unknown, parentId: string, wrapAuth = false): unknown
   return e;
 }
 
-export function googleDriveApi(client: OAuth2Client): DriveApi {
-  const api = drive({ version: 'v3', auth: client, timeout: 120_000 });
+/**
+ * client may be a getter (GoogleAuthHub): it is read on every call, so a reconnected account applies to the next upload
+ * without a restart. A new client gets a new Drive handle; the same client keeps its handle.
+ */
+export function googleDriveApi(client: OAuth2Client | (() => OAuth2Client)): DriveApi {
+  const current = typeof client === 'function' ? client : () => client;
+  // A fixed client is built at once, as before the getter existed.
+  let built: { client: OAuth2Client; api: drive_v3.Drive } | undefined =
+    typeof client === 'function' ? undefined : { client, api: drive({ version: 'v3', auth: client, timeout: 120_000 }) };
+  const api = {
+    get files(): drive_v3.Resource$Files {
+      const c = current();
+      if (built?.client !== c) built = { client: c, api: drive({ version: 'v3', auth: c, timeout: 120_000 }) };
+      return built.api.files;
+    },
+  };
   return {
     async createFolder(name, parentId) {
       try {
