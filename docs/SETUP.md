@@ -245,7 +245,7 @@ In `C:\wa-agent\data\media\<CODE>\<year-month>\`, for example `C:\wa-agent\data\
 | Scanned PDF (no text inside) | Claude reads it if it has 20 pages or fewer and is 20 MB or smaller. Longer scans are listed with their page count only. | Up to about 60 US cents for 20 pages (an estimate from the limits, not from real bills; usually less) |
 | Word file (.docx) | The text is read on this PC. | Free |
 | Other files (Excel, old .doc, ZIP, HEIC photos sent as a document, ...) | Saved. Only the name, type and size are used. | Free |
-| Voice notes and audio files | Saved on this PC for a later update. Not transcribed, listed or uploaded yet. The AI only learns that one was sent. | Free |
+| Voice notes and audio files | Saved on this PC. When voice notes are switched on, each one is turned into text (transcribed), and the AI reads the text like a message. While they are off, the AI only learns that one was sent. Never listed or uploaded. See "Voice notes" below. | Free with the local engine (recommended) |
 | Videos | Not downloaded. The AI and Files received get the length only. | Free |
 | Stickers | Not saved. | Free |
 | View-once photos and videos | Never saved, listed or uploaded. | Free |
@@ -261,15 +261,15 @@ In `C:\wa-agent\data\media\<CODE>\<year-month>\`, for example `C:\wa-agent\data\
 
 - The tracker reads a message together with its file. While a file is still being read, the tracker waits for it, but for 30 minutes at most, counted from when the file arrived (or from the service start, if that is later).
 - After 30 minutes it goes ahead without the file. When the file is read later, the tracker looks at that message once more, now with the file, and updates the tracker from what the file adds.
-- Voice notes and audio files never hold the tracker up.
-- **Known limit.** If a client sends a list or brief as a photo or scan during a Claude outage or a spend-limit hold, and it is read late, new work that appears only in that file is not added as a new task. (This happens when the tracker had already made a task from that message before the file was read.) Check the tracker afterwards and add any missing work by hand. There is no `task add` command yet, so note it on the related task with `task edit <code> --latest-progress "..."`, or tell the team.
+- Voice notes and audio files are waited for in the same way while voice notes are switched on: up to 30 minutes for the text, then a second look at the message when the text arrives. While voice notes are off, they never hold the tracker up.
+- **Known limit.** If a client sends a list or brief as a photo, a scan or a voice note during a Claude outage, a spend-limit hold or a slow transcription, and it is read late, new work that appears only in that file is not added as a new task. (This happens when the tracker had already made a task from that message before the file was read.) Check the tracker afterwards and add any missing work by hand. There is no `task add` command yet, so note it on the related task with `task edit <code> --latest-progress "..."`, or tell the team.
 
 ### Drive and the Files received list
 
 - Files from people marked **Client** in the People section are uploaded to Drive, into `WA Agent > Clients > <client name> > Files`, usually within a minute or two.
   - Only images and documents are uploaded.
   - Videos are listed but not uploaded (they are not downloaded).
-  - Voice notes and audio files are not listed or uploaded yet.
+  - Voice notes and audio files are not listed or uploaded. They stay on this PC only, even when they are transcribed.
   - Files from the team, and from the founder's own phone, stay on this PC only.
 - Each client tab lists these files under **Files received**: date, sent by, file name, description and a Drive link (`Open`). The tab shows the newest 500 files. Older ones drop off the tab but stay in Drive.
 - The agent writes the description from what it read; the AI does not choose which files to list. So every client file is listed, a meme too.
@@ -450,6 +450,8 @@ Set `REPORT_ENABLED=false` (or leave it empty) in `.env`, then restart the servi
 | `npm run cli -- report status` | Today's morning report and the last 7 days |
 | `npm run cli -- report send-now` | Send today's morning report now (asks first; refuses if already sent) |
 | `npm run cli -- link-sender` | Link the spare number for the morning report (stop the service first) |
+| `npm run cli -- transcribe-voice` | Count the voice notes saved earlier without a transcript; add `--yes` to transcribe them (see "Voice notes") |
+| `npm run cli -- transcribe-voice --failed` | Count the voice notes that could not be transcribed on this computer (`VOICE_STT_PROVIDER=local` only); add `--yes` to try them again (see "Voice notes") |
 
 Notes:
 
@@ -462,6 +464,7 @@ Notes:
   - *waiting to be read*: files not read yet (still downloading, waiting for Claude, or waiting for the daily budget).
   - *could not be read (24 h)*: files given up in the last 24 hours. Files received shows them as "could not be read". Files that could not be downloaded from WhatsApp are not counted here.
   - *not uploaded to Drive*: uploads that gave up (see "Status "files could not be uploaded to Drive"" below).
+  - Voice notes count as files here too. With a paid speech-to-text service the line can end with `· including N voice notes waiting (speech key refused)` (see "Voice notes" below).
   - The counts leave out clients removed from the allow-list. Their files wait, untouched, until the client is added back.
 - **`task edit`** options: `--title`, `--side` (us or client), `--category` (design, development, content, payment, approval, other), `--priority` (high, medium, low), `--assigned-to`, `--asked-by`, `--deadline` (YYYY-MM-DD or `none`), `--latest-progress`. Fields you fix by hand stay fixed until you run `task unlock`.
 - **`person set <number> <team|client>`**: use the full number with country code and no `+` or spaces (for example `919812345678`). A WhatsApp id (it contains `@`) also works. People who show no number in the People section cannot be fixed with `person set` yet. Add `--client ABC` to change the role in one client group only.
@@ -490,6 +493,7 @@ In `npm run cli -- status` it appears as the `Health:` line. It is also the firs
 | (number) groups waiting (AI error) | The AI call failed for some groups. Nothing is lost. | Wait: failed batches retry every hour. If it persists, read `wa-agent.out.log` and run `status`. |
 | (number) shared files waiting over 30 minutes to be read. See docs/SETUP.md. | Images or documents are still not read 30 minutes after they arrived. The tracker went ahead without them. Nothing is lost. | See "Status "shared files waiting over 30 minutes to be read"" below. |
 | (number) files could not be uploaded to Drive. See docs/SETUP.md. | Files from clients failed to upload many times, and the agent stopped trying. They are safe on this PC. | See "Status "files could not be uploaded to Drive"" below. |
+| Voice notes are not being transcribed: the speech-to-text key was refused. | Paid service only. The provider refused `STT_API_KEY`. The notes are saved and tried again, but only for 24 hours. The tracker keeps working. | Fix the key soon. See "Voice notes" below, under "Voice note status lines". |
 | (number) shared files waiting for today's AI budget (read after midnight IST) | Images or scans that need Claude do not fit in what is left of today's budget (a scan needs about $4 of room). The cap is not reached, and the tracker keeps working. | Nothing: they are tried every 10 minutes and read once there is room, at the latest after midnight India time. See "Spend cap and shared files" below. |
 | Morning report: unknown, check WhatsApp | The morning report's send started but did not finish cleanly. It may have reached the founder. The agent does not resend it by itself. | See "Morning report" above, under its own status heading. |
 | Morning report: the spare number is not linked | The spare number cannot send the morning report. The tracker is not affected. | See "Morning report" above, under "the spare number is not linked". |
@@ -500,6 +504,10 @@ In `npm run cli -- status` it appears as the `Health:` line. It is also the firs
 | Morning report: WhatsApp refused the spare number (403) | WhatsApp blocked the spare number's device. The tracker is not affected. | Check the spare phone. See "Morning report" above. |
 | Morning report: another session took over the spare number | Another copy of the agent, or another WhatsApp Web session, took the spare number's linked device. The tracker is not affected. | Restart the service. See "Morning report" above. |
 | Low disk: (number) GB free | Under 10 GB left. | Free up disk space. |
+| Voice notes are not being transcribed: (reason) | The local speech engine is not set up, or ffmpeg was not found. Voice notes are saved. The tracker keeps working. | See "Voice notes" below, under "Voice note status lines". |
+| (number) voice notes could not be transcribed on this computer. See docs/SETUP.md, Voice notes | In the last 24 hours, some voice notes could not be transcribed on this computer: the local engine failed on them 3 times, ffmpeg could not convert them, or the service was stopped in the middle of them again and again for 24 hours. They are saved. The tracker went ahead without them. | See "Voice notes" below, under "Voice note status lines". |
+
+The key-refused line comes before the budget line, because notes waiting on a refused key are given up after 24 hours. The other voice note lines come last, so they never hide the morning report, a meeting line or low disk.
 
 ### Status "shared files waiting over 30 minutes to be read"
 
@@ -536,6 +544,145 @@ The line reads, for example, `⚠️ 2 files could not be uploaded to Drive. See
 - A file can wait for the budget before the cap is reached, because a scanned PDF needs about $4 of room. The line then says `(number) shared files waiting for today's AI budget (read after midnight IST)`. It ranks below the other file and group warnings, so it never hides a more urgent problem.
 - Either way, the tracker does not wait more than 30 minutes for a file, and it keeps reading messages as long as there is budget for them.
 
+## Voice notes
+
+The agent can turn the voice notes and audio files shared in the allowed groups into text (transcribe them). The tracker then reads what was said like a typed message: a client asking for a change by Friday, a team member saying "bhej diya", a client saying the payment was sent.
+
+- It is **off** until you switch it on (`VOICE_STT_PROVIDER=none`, the default). While it is off, voice notes are saved on this computer as before, and the AI only learns that one was sent. They can be transcribed later (see "Voice notes saved earlier" below).
+- **Recommended: the free local engine.** An open-source model (Voxtral) runs on the office Mac, on its own processor. No audio leaves the computer, there is no key, and it costs nothing. Set it up with `docs/SETUP-mac.md`, section 8 "Voice notes: local speech-to-text", then set `VOICE_STT_PROVIDER=local` and restart the service.
+- A paid speech-to-text service can be used instead, but only the one meetings use (see "Privacy" and "Cost" below).
+- Meetings are not affected. They keep their own setting, `STT_PROVIDER`.
+- Voice notes are never listed in Files received or uploaded to Drive, even when transcribed.
+
+### ffmpeg is required
+
+Every voice note and audio file is first converted on this computer with ffmpeg, and its real length is measured. **Without ffmpeg, nothing is transcribed:** the notes are saved, show as "not transcribed", and the status line says so.
+
+- On the Mac: `brew install ffmpeg` in a normal Terminal window.
+- On Windows: see "Meeting summaries", step 2 "Install ffmpeg".
+- Set `FFMPEG_PATH` to ffmpeg's full path, or leave it empty to use the `ffmpeg` on the PATH.
+- The service looks for ffmpeg only when it starts. After installing it, restart the service, then run `transcribe-voice` (below) for the notes that came in meanwhile.
+
+### Settings
+
+In `.env` (values stay on this computer only; `.env.example` explains each one):
+
+| Setting | What it is |
+|---|---|
+| `VOICE_STT_PROVIDER` | `local` (recommended), `none` (off, the default), or a paid service: `sarvam`, `elevenlabs` or `openai`. A paid one must be the same as `STT_PROVIDER`, because both use the one key `STT_API_KEY`; the service refuses to start otherwise. `local` needs no key. |
+| `STT_LOCAL_ENGINE` | `voxtral` (the default, chosen after a test), `qwen3-asr` or `whisper`. |
+| `STT_LOCAL_BIN` | Full path to the engine program (SETUP-mac, section 8). Required for `local`. |
+| `STT_LOCAL_MODEL` | Full path to the model file (SETUP-mac, section 8). Required for `local`. |
+| `STT_LOCAL_THREADS` | Processor cores the engine uses. Default 8, allowed 1–64. |
+| `STT_LOCAL_TIMEOUT_SECONDS` | A note that takes longer is stopped and tried again (3 tries in all). Default 1800 (30 minutes), allowed 60–7200. |
+| `STT_LOCAL_LANGUAGE` | `hi` (the default), `en` or `auto`. Qwen3-ASR always finds the language itself. |
+| `STT_MAX_SECONDS` | The longest note that is transcribed, in seconds. Default 600 (10 minutes), allowed 30–900. |
+| `FFMPEG_PATH` | Full path to ffmpeg (above). |
+
+If `STT_LOCAL_BIN` or `STT_LOCAL_MODEL` is set but the file is not there when the service starts, voice notes stay off, the status line says so, and WhatsApp tracking keeps running.
+
+### What the tracker sees
+
+Each voice note reaches the AI as a block on its message, for example `{voice note, 0:42, transcript: ...}`. The length is the one WhatsApp shows. Instead of a transcript, the block can say:
+
+| Block says | Meaning |
+|---|---|
+| `being transcribed` | Not done yet. The tracker waits for it up to 30 minutes, then goes on without it and looks at the message again when the text arrives. No task is made from a note it cannot read yet. While voice notes are off (or the engine is not set up), the tracker does not wait for them at all. |
+| `no speech` | The note is silent. |
+| `too long to transcribe` | Longer than `STT_MAX_SECONDS`. |
+| `could not be transcribed` | Every try failed. |
+| `not transcribed` | Voice notes were off, ffmpeg or the engine was missing, or the note was saved earlier. `transcribe-voice` can do it later. |
+| `(forwarded), not transcribed` | A forwarded note. Never transcribed. |
+| `not transcribed: too costly for the daily limit` | Paid service only: see "Cost" below. |
+
+### Limits
+
+- **Too long.** A note longer than `STT_MAX_SECONDS` (10 minutes by default) is not transcribed, and it never holds the tracker up. The length is measured on this computer after the conversion, not taken from WhatsApp, because the sender's phone sets that one. Audio files (a song, a recorded call) follow the same rule: only short ones are transcribed.
+- **Forwarded voice notes are not transcribed**, just as forwarded pictures are not described.
+- **Speed.** Voxtral on the Mac can be slower than the note itself: a 10-minute note can take 10–20 minutes. It does one note at a time; pictures and documents are not held up. The tracker waits at most 30 minutes for a note (see above).
+- **Mishearing.** Names, numbers and amounts can come out wrong. The AI is told to prefer the typed chat when the two disagree. Check tasks closed from voice notes; `task reopen` undoes a wrong close.
+- **Empty text from a note with sound.** The local engine sometimes returns nothing for a quiet note. That is never taken as "no speech": the note is tried again, after 1 minute and then 5 minutes (3 tries in all). If every try comes back empty, it shows as "could not be transcribed", `status` counts it under "could not be read (24 h)", and the status line says how many voice notes could not be transcribed on this computer. `transcribe-voice --failed` tries them again (see "Voice notes the local engine could not transcribe" below). Only a note quieter than -50 dB counts as silent. If real notes often come back empty, tell the developer.
+- **Stopping the service** while a note is being transcribed: the note is simply tried again after the start (free with the local engine). This does not use up one of its tries; but a note still not done 24 hours after it arrived is given up.
+- **Where the text is kept.** Transcripts are stored in the tracker database, like the text of shared files, and the audio stays in `data\media`. The logs hold ids, counts and error codes only, never what was said.
+
+### Privacy
+
+- **With the local engine** no audio leaves the computer, and there is nothing to set at a provider. Tell clients, in the agreement or at onboarding, that voice notes sent to the project group are transcribed on the office computer for the project tracker.
+- **Only if a paid service is chosen**, before the first real voice note:
+  1. **Tell clients** that their voice notes are sent to a speech-to-text service to be transcribed.
+  2. **Set the account's privacy settings**, as for meetings:
+     - **Sarvam:** opt out of training, and set data retention to 0 days.
+     - **ElevenLabs:** switch off "Improve the models for everyone". ElevenLabs keeps a copy of every transcript in the account, so the agent deletes each copy right after it stores the transcript, and tries again later if that fails (see "Voice copies" below).
+     - **OpenAI:** nothing to switch.
+
+### Cost
+
+- **Local engine: $0.** Nothing counts toward `DAILY_SPEND_CAP_USD`.
+- **Paid service** (only if chosen): about $0.004–0.006 per minute of voice note at list prices, so 100 notes a day of 45 seconds each cost about $0.30–0.45 a day. It counts toward `DAILY_SPEND_CAP_USD`, and `status` shows it as "speech" in the spend line, for example `(AI $1.20, speech $0.35)`.
+  - While a note is being transcribed, its full price (for its measured length plus 5 seconds) is held from today's budget; then the real cost is booked.
+  - A paid note gets at most 2 tries in all. When the outcome of a try is unknown, it is booked at its full price.
+  - If the cap is so low that one note could cost more than the whole cap, the note is not transcribed ("too costly for the daily limit"), and it is not transcribed later either.
+
+### Voice notes saved earlier
+
+Voice notes saved before voice notes were switched on, while they were off, or while ffmpeg or the engine was missing, are not transcribed by themselves. To transcribe them, for the record, in the waagent window:
+
+```bat
+npm run cli -- transcribe-voice
+```
+
+- This only shows how many there are, about how many minutes, and the cost (`Cost: $0 (local engine on this computer).` with the local engine). It changes nothing.
+- Add `--client ABC` for one client only.
+- After changing `VOICE_STT_PROVIDER` or the `STT_LOCAL_*` settings, restart the service before running this command.
+- `npm run cli -- transcribe-voice --yes` queues them. The **running** service then transcribes them. A new voice note goes before any of them that are still waiting; but the local engine does one note at a time and does not stop a note it has started, so a new note can wait behind one of these for up to `STT_LOCAL_TIMEOUT_SECONDS` (30 minutes by default).
+- With the local engine, the command first checks that `STT_LOCAL_BIN` and `STT_LOCAL_MODEL` are files. If one is not, it says so, naming the setting, and changes nothing: fix it in `.env` (SETUP-mac, section 8), restart the service, then run the command again.
+- If voice notes were switched off while some of these were still waiting, those come back in the count. Run the command again once voice notes are on.
+- These transcripts are for the record only. They do not change the tracker or make tasks, because those messages were handled long ago. To have the AI look at old messages again, use `reprocess` (it costs money; see "Everyday commands").
+- `N need ffmpeg, skipped` means ffmpeg was not found. Install it, restart the service, then run the command again.
+- With a paid service it costs money, counts toward the daily cap, and shows two figures: about how much from the file sizes, and the most it could cost.
+- A note that turns out to be too long is not transcribed ("too long to transcribe").
+
+### Voice notes the local engine could not transcribe
+
+A voice note shows as "could not be transcribed" when:
+
+- the local engine failed on it 3 tries in a row (empty text from a note with sound, too slow, or the engine stopping with an error);
+- ffmpeg could not convert it. This is not tried again, because it would fail the same way;
+- the service was stopped in the middle of it again and again. Each stop does not use up a try, and the note is tried again after the start; but once it has waited 24 hours (from when it arrived, or from the service start if that is later), it is given up.
+
+For a day the status line says `(number) voice notes could not be transcribed on this computer`. Once the cause is fixed (for example a better model, a longer `STT_LOCAL_TIMEOUT_SECONDS`, or a working ffmpeg; restart the service after changing `.env`), try them again, in the waagent window:
+
+```bat
+npm run cli -- transcribe-voice --failed
+```
+
+- This only shows how many there are, about how many minutes, and `Cost: $0 (local engine on this computer).` It changes nothing.
+- After changing `VOICE_STT_PROVIDER` or the `STT_LOCAL_*` settings, restart the service before running this command.
+- `npm run cli -- transcribe-voice --failed --yes` queues them again, starting fresh: the local engine again gets 3 tries for each. The **running** service transcribes them. Add `--client ABC` for one client only.
+- It works only with `VOICE_STT_PROVIDER=local`. With a paid provider, these notes stay failed: the command says so and changes nothing. Notes that failed at a paid service are never queued again, because those tries may have been paid.
+- A message the tracker already handled without its note is not looked at again: the transcript is kept for the record, as for "Voice notes saved earlier".
+
+### Voice note status lines
+
+On the Health line (see "What the status line means"):
+
+| What you see | What it means | What to do |
+|---|---|---|
+| Voice notes are not being transcribed: the speech-to-text key was refused. | Paid service only. The provider refused `STT_API_KEY`. Nothing is paid. The notes wait and are tried again after 5, 15, 30 and 60 minutes, then every hour, for up to 24 hours; after that they show as "could not be transcribed". The tracker does not wait for them more than 30 minutes. | Check the key in the provider's console. Put a working key in `.env`, then restart the service. |
+| Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_BIN) | The engine program is not at the path `STT_LOCAL_BIN` names in `.env`. Voice notes are saved but not transcribed. WhatsApp tracking keeps running. | Fix `STT_LOCAL_BIN` in `.env` (SETUP-mac, section 8), restart the service, then run `transcribe-voice` for the notes that came in meanwhile. |
+| Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_MODEL) | The model file is not at the path `STT_LOCAL_MODEL` names in `.env`. Voice notes are saved but not transcribed. WhatsApp tracking keeps running. | Fix `STT_LOCAL_MODEL` in `.env` (SETUP-mac, section 8), restart the service, then run `transcribe-voice` for the notes that came in meanwhile. |
+| Voice notes are not being transcribed: ffmpeg not found | ffmpeg is not installed, or `FFMPEG_PATH` is wrong. Voice notes are saved and show as "not transcribed". | Install ffmpeg or fix `FFMPEG_PATH` (see "ffmpeg is required"), restart the service, then run `transcribe-voice`. |
+| (number) voice notes could not be transcribed on this computer. See docs/SETUP.md, Voice notes | In the last 24 hours, that many voice notes could not be transcribed on this computer: the local engine failed on them 3 tries in a row (empty text from a note with sound, too slow, the engine stopping with an error); ffmpeg could not convert them (not tried again); or the service was stopped in the middle of them again and again for 24 hours. ffmpeg failures with a paid provider count here too. They are saved and show as "could not be transcribed". The line clears by itself a day later. | Read `wa-agent.out.log` for lines with `local_` or `audio_` codes. Fix the cause, then see "Voice notes the local engine could not transcribe" above. If real notes keep failing, tell the developer. |
+
+The key-refused line comes before the budget line (see "What the status line means"), because notes waiting on a refused key are given up after 24 hours. The other lines come after every other line on the Health line, so they never hide a more urgent one. In order: the key line, then the not-set-up and ffmpeg lines, then the could-not-transcribe line.
+
+A slow engine, or many notes at once, can also show `shared files waiting over 30 minutes to be read`: voice notes count there too. It clears by itself once they are transcribed.
+
+In `npm run cli -- status`:
+
+- **The `Files:` line** ends with `· including N voice notes waiting (speech key refused)` while a paid service refuses the key (see the last row above). Those notes are part of the "waiting to be read" count.
+- **Voice copies.** If `status` shows `Voice copies: N speech-to-text copies of voice notes could not be deleted from the provider; see SETUP (Voice notes)`, the agent has given up deleting its copies of those voice-note transcripts in the provider's account (ElevenLabs; the local engine keeps no copies). It tries each copy at most 5 times (right after the transcript is stored, then later, at least 15 minutes, 1 hour, 6 hours and 24 hours apart); a copy made by a provider that is no longer `VOICE_STT_PROVIDER` is not tried at all. This line is on `status` only, not on the Health line. What to do: delete those transcripts in the provider's account yourself. If `VOICE_STT_PROVIDER` was changed, setting it back lets the agent try the copies it has not tried 5 times yet. The count is a reminder: it does not go down when you delete copies by hand.
+
 ## Meeting summaries (Phase 3)
 
 When this is on, the agent finds the Google Meet recordings of client meetings and makes a summary Google Doc for each one, in `WA Agent > Clients > <client name> > Meetings`. The meeting's action items and decisions go into the same tracker as WhatsApp, without making a second task for work WhatsApp already tracks.
@@ -551,7 +698,7 @@ Do the steps below once, in order.
 
 ### 1. Before you start
 
-- **Speech-to-text.** The speech-to-text test (bake-off, `docs/STT-BAKEOFF.md`) has picked a provider. Meetings and voice notes share the same provider and key.
+- **Speech-to-text.** The speech-to-text test (bake-off, `docs/STT-BAKEOFF.md`) has picked a provider. Meetings use `STT_PROVIDER`. Voice notes have their own setting, `VOICE_STT_PROVIDER` (see "Voice notes"); the recommended local engine is not used for meetings, and a paid voice service must be this same provider and key.
 - **Internal Google app.** The OAuth consent screen is **Internal** (section 4 of this guide). One of the new permissions (Meet files in Drive) is a "restricted" one. **If the app is not Internal, stop and ask.**
 - **Privacy steps done** (step 6 below). Do them before the first real meeting is sent.
 

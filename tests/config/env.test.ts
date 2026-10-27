@@ -131,7 +131,9 @@ describe('speech-to-text settings', () => {
   });
 
   it('none needs no key', () => {
-    expect(parseEnv({ STT_PROVIDER: 'none' }).STT_API_KEY).toBeUndefined();
+    const env = parseEnv({ STT_PROVIDER: 'none' });
+    expect(env.STT_API_KEY).toBeUndefined();
+    expect(env.STT_MAX_SECONDS).toBe(600);
   });
 
   it('a provider without STT_API_KEY is an error naming STT_API_KEY', () => {
@@ -145,9 +147,125 @@ describe('speech-to-text settings', () => {
     for (const v of ['39', '8800', 'Infinity', 'rupees']) expect(envError({ INR_PER_USD: v })).toMatch(/INR_PER_USD/);
   });
 
+  it('STT_MAX_SECONDS defaults to 600', () => {
+    expect(parseEnv({}).STT_MAX_SECONDS).toBe(600);
+  });
+
+  it('STT_MAX_SECONDS is a whole number from 30 to 900, refused without echoing the value', () => {
+    expect(parseEnv({ STT_MAX_SECONDS: '30' }).STT_MAX_SECONDS).toBe(30);
+    expect(parseEnv({ STT_MAX_SECONDS: '900' }).STT_MAX_SECONDS).toBe(900);
+    for (const v of ['29', '901', 'abc', '60.5']) {
+      const msg = envError({ STT_MAX_SECONDS: v });
+      expect(msg).toMatch(/STT_MAX_SECONDS/);
+      expect(msg).not.toContain(v);
+    }
+  });
+
   it('requireKey reports a missing STT_API_KEY by name and returns a set one', () => {
     expect(() => requireKey(parseEnv({}), 'STT_API_KEY')).toThrowError('STT_API_KEY is not configured');
     expect(requireKey(parseEnv({ STT_PROVIDER: 'openai', STT_API_KEY: 'k' }), 'STT_API_KEY')).toBe('k');
+  });
+});
+
+describe('voice-note speech-to-text settings (local engine)', () => {
+  const BIN = '/opt/stt/transcribe.cpp/build/bin/transcribe-cli';
+  const MODEL = '/opt/stt/models/Voxtral-Mini-3B-2507-Q4_K_M.gguf';
+  const local = { VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: BIN, STT_LOCAL_MODEL: MODEL };
+
+  it('apply defaults: voice notes off, voxtral, no paths, 8 threads, 1800 seconds, Hindi', () => {
+    const env = parseEnv({});
+    expect(env.VOICE_STT_PROVIDER).toBe('none');
+    expect(env.STT_LOCAL_ENGINE).toBe('voxtral');
+    expect(env.STT_LOCAL_BIN).toBeUndefined();
+    expect(env.STT_LOCAL_MODEL).toBeUndefined();
+    expect(env.STT_LOCAL_THREADS).toBe(8);
+    expect(env.STT_LOCAL_TIMEOUT_SECONDS).toBe(1800);
+    expect(env.STT_LOCAL_LANGUAGE).toBe('hi');
+  });
+
+  it('leaves STT_PROVIDER alone: meetings keep their own provider', () => {
+    const env = parseEnv({ ...local, STT_PROVIDER: 'sarvam', STT_API_KEY: 'k' });
+    expect(env.STT_PROVIDER).toBe('sarvam');
+    expect(env.VOICE_STT_PROVIDER).toBe('local');
+  });
+
+  it('local needs no key, and takes both paths as given', () => {
+    const env = parseEnv(local);
+    expect(env.STT_API_KEY).toBeUndefined();
+    expect(env.STT_LOCAL_BIN).toBe(BIN);
+    expect(env.STT_LOCAL_MODEL).toBe(MODEL);
+  });
+
+  it('local without STT_LOCAL_BIN or STT_LOCAL_MODEL is an error naming the missing one', () => {
+    const noBin = envError({ VOICE_STT_PROVIDER: 'local', STT_LOCAL_MODEL: MODEL });
+    expect(noBin).toMatch(/STT_LOCAL_BIN/);
+    expect(noBin).not.toMatch(/STT_LOCAL_MODEL/);
+    const noModel = envError({ VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: BIN });
+    expect(noModel).toMatch(/STT_LOCAL_MODEL/);
+    expect(noModel).not.toMatch(/STT_LOCAL_BIN/);
+    const neither = envError({ VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: '', STT_LOCAL_MODEL: '' });
+    expect(neither).toMatch(/STT_LOCAL_BIN/);
+    expect(neither).toMatch(/STT_LOCAL_MODEL/);
+  });
+
+  it('both paths must be absolute, only for local, refused without echoing them', () => {
+    for (const name of ['STT_LOCAL_BIN', 'STT_LOCAL_MODEL']) {
+      for (const rel of ['zz-relative-zz/transcribe-cli', './zz-relative-zz', 'zz-relative-zz', '-zz-relative-zz']) {
+        const msg = envError({ ...local, [name]: rel });
+        expect(msg).toMatch(new RegExp(`${name} must be an absolute path`));
+        expect(msg).not.toContain('zz-relative-zz');
+      }
+    }
+  });
+
+  it('a stray relative path while voice notes are not local never stops the service', () => {
+    for (const provider of [{}, { VOICE_STT_PROVIDER: 'none' }, { VOICE_STT_PROVIDER: 'openai', STT_PROVIDER: 'openai', STT_API_KEY: 'k' }]) {
+      const env = parseEnv({ ...provider, STT_LOCAL_BIN: 'zz-relative-zz/transcribe-cli', STT_LOCAL_MODEL: './model.gguf' });
+      expect(env.STT_LOCAL_BIN).toBe('zz-relative-zz/transcribe-cli');
+    }
+    // Paths outside local are kept, so a later switch to local needs no other change.
+    expect(parseEnv({ STT_LOCAL_BIN: BIN }).STT_LOCAL_BIN).toBe(BIN);
+  });
+
+  it('refuses an unknown VOICE_STT_PROVIDER by name, without echoing it', () => {
+    for (const v of ['whisper', 'Local', 'LOCAL', 'voxtral', 'zz-unknown-zz', 'local ']) {
+      const msg = envError({ VOICE_STT_PROVIDER: v, STT_LOCAL_BIN: BIN, STT_LOCAL_MODEL: MODEL });
+      expect(msg).toMatch(/VOICE_STT_PROVIDER/);
+      expect(msg).not.toContain('zz-unknown-zz');
+    }
+  });
+
+  it('accepts each engine and language, and refuses others by name', () => {
+    for (const e of ['voxtral', 'qwen3-asr', 'whisper'] as const) expect(parseEnv({ ...local, STT_LOCAL_ENGINE: e }).STT_LOCAL_ENGINE).toBe(e);
+    for (const l of ['hi', 'en', 'auto'] as const) expect(parseEnv({ ...local, STT_LOCAL_LANGUAGE: l }).STT_LOCAL_LANGUAGE).toBe(l);
+    for (const v of ['llama', 'Voxtral', 'qwen3']) expect(envError({ STT_LOCAL_ENGINE: v })).toMatch(/STT_LOCAL_ENGINE/);
+    for (const v of ['hindi', 'HI', 'fr']) expect(envError({ STT_LOCAL_LANGUAGE: v })).toMatch(/STT_LOCAL_LANGUAGE/);
+    expect(envError({ VOICE_STT_PROVIDER: 'whisper' })).toMatch(/VOICE_STT_PROVIDER/);
+  });
+
+  it('STT_LOCAL_THREADS is a whole number from 1 to 64', () => {
+    expect(parseEnv({ STT_LOCAL_THREADS: '1' }).STT_LOCAL_THREADS).toBe(1);
+    expect(parseEnv({ STT_LOCAL_THREADS: '64' }).STT_LOCAL_THREADS).toBe(64);
+    for (const v of ['0', '65', '4.5', 'all']) expect(envError({ STT_LOCAL_THREADS: v })).toMatch(/STT_LOCAL_THREADS/);
+  });
+
+  it('STT_LOCAL_TIMEOUT_SECONDS is a whole number from 60 to 7200', () => {
+    expect(parseEnv({ STT_LOCAL_TIMEOUT_SECONDS: '60' }).STT_LOCAL_TIMEOUT_SECONDS).toBe(60);
+    expect(parseEnv({ STT_LOCAL_TIMEOUT_SECONDS: '7200' }).STT_LOCAL_TIMEOUT_SECONDS).toBe(7200);
+    for (const v of ['59', '7201', '90.5', 'long']) expect(envError({ STT_LOCAL_TIMEOUT_SECONDS: v })).toMatch(/STT_LOCAL_TIMEOUT_SECONDS/);
+  });
+
+  it('a paid voice provider must be the same as STT_PROVIDER, since both use STT_API_KEY', () => {
+    for (const p of ['sarvam', 'elevenlabs', 'openai'] as const) {
+      expect(parseEnv({ VOICE_STT_PROVIDER: p, STT_PROVIDER: p, STT_API_KEY: 'k' }).VOICE_STT_PROVIDER).toBe(p);
+      expect(envError({ VOICE_STT_PROVIDER: p })).toMatch(/VOICE_STT_PROVIDER/);
+    }
+    const other = envError({ VOICE_STT_PROVIDER: 'openai', STT_PROVIDER: 'sarvam', STT_API_KEY: 'k' });
+    expect(other).toMatch(/VOICE_STT_PROVIDER/);
+    expect(other).toMatch(/STT_PROVIDER/);
+    // local and none go with any STT_PROVIDER.
+    expect(parseEnv({ VOICE_STT_PROVIDER: 'none', STT_PROVIDER: 'openai', STT_API_KEY: 'k' }).VOICE_STT_PROVIDER).toBe('none');
+    expect(parseEnv({ ...local, STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'k' }).VOICE_STT_PROVIDER).toBe('local');
   });
 });
 
@@ -164,7 +282,18 @@ describe('setting values never appear in errors', () => {
       { MEETINGS_SINCE: SECRET },
       { STT_PROVIDER: SECRET },
       { INR_PER_USD: SECRET },
+      { STT_MAX_SECONDS: SECRET },
       { STT_PROVIDER: 'sarvam', MEETINGS_ENABLED: 'true', ANTHROPIC_API_KEY: SECRET, GOOGLE_OAUTH_CLIENT_SECRET: SECRET, FFMPEG_PATH: SECRET },
+      { VOICE_STT_PROVIDER: SECRET },
+      { VOICE_STT_PROVIDER: 'openai', STT_PROVIDER: 'sarvam', STT_API_KEY: SECRET },
+      { STT_LOCAL_ENGINE: SECRET },
+      { VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: SECRET, STT_LOCAL_MODEL: '/opt/stt/models/m.gguf' },
+      { VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: '/opt/stt/bin/transcribe-cli', STT_LOCAL_MODEL: SECRET },
+      { VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: SECRET, STT_LOCAL_MODEL: `${SECRET}/model.gguf` },
+      { VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: `/opt/${SECRET}/transcribe-cli` },
+      { STT_LOCAL_THREADS: SECRET },
+      { STT_LOCAL_TIMEOUT_SECONDS: SECRET },
+      { STT_LOCAL_LANGUAGE: SECRET },
     ];
     for (const c of cases) {
       const msg = envError(c);
@@ -183,10 +312,18 @@ describe('setting values never appear in errors', () => {
 describe('.env.example', () => {
   it('lists every meeting and speech-to-text setting, and its placeholders parse to the defaults', () => {
     const vars = parseDotenv(readFileSync('.env.example', 'utf8'));
-    const names = ['MEETINGS_ENABLED', 'TEAM_EMAIL_DOMAINS', 'MEETING_POLL_MINUTES', 'MEETING_MAX_MINUTES', 'MEETINGS_SINCE', 'FFMPEG_PATH', 'STT_PROVIDER', 'STT_API_KEY', 'INR_PER_USD'];
+    const names = [
+      'MEETINGS_ENABLED', 'TEAM_EMAIL_DOMAINS', 'MEETING_POLL_MINUTES', 'MEETING_MAX_MINUTES', 'MEETINGS_SINCE', 'FFMPEG_PATH', 'STT_PROVIDER', 'STT_API_KEY', 'INR_PER_USD', 'STT_MAX_SECONDS',
+      'VOICE_STT_PROVIDER', 'STT_LOCAL_ENGINE', 'STT_LOCAL_BIN', 'STT_LOCAL_MODEL', 'STT_LOCAL_THREADS', 'STT_LOCAL_TIMEOUT_SECONDS', 'STT_LOCAL_LANGUAGE',
+    ];
     for (const n of names) expect(Object.keys(vars)).toContain(n);
     expect(vars.STT_API_KEY).toBe('');
-    expect(parseEnv(vars)).toMatchObject({ MEETINGS_ENABLED: false, TEAM_EMAIL_DOMAINS: [], MEETING_POLL_MINUTES: 5, MEETING_MAX_MINUTES: 180, STT_PROVIDER: 'none', INR_PER_USD: 88 });
+    expect(vars.STT_LOCAL_BIN).toBe('');
+    expect(vars.STT_LOCAL_MODEL).toBe('');
+    expect(parseEnv(vars)).toMatchObject({
+      MEETINGS_ENABLED: false, TEAM_EMAIL_DOMAINS: [], MEETING_POLL_MINUTES: 5, MEETING_MAX_MINUTES: 180, STT_PROVIDER: 'none', INR_PER_USD: 88, STT_MAX_SECONDS: 600,
+      VOICE_STT_PROVIDER: 'none', STT_LOCAL_ENGINE: 'voxtral', STT_LOCAL_THREADS: 8, STT_LOCAL_TIMEOUT_SECONDS: 1800, STT_LOCAL_LANGUAGE: 'hi',
+    });
   });
 });
 

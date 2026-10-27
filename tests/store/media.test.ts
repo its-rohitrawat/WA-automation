@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { syncClients } from '../../src/store/clients.ts';
 import { migrate, type Db } from '../../src/store/db.ts';
 import {
-  claimMedia, deferMedia, dueMediaIds, failMedia, finishMedia, getMedia, getMediaRef, insertMedia, markDownloaded, mediaForMessages, mediaJob, messageRowId,
-  type MediaKind, type MediaStatus, type NewMedia, type TextKind,
+  claimMedia, countMediaForgetAttempt, deferMedia, deleteMediaForget, dueMediaIds, failMedia, finishMedia, getMedia, getMediaRef, insertMedia, markDownloaded,
+  failedLocalVoice, mediaForMessages, mediaJob, mediaStats, mediaSttForgetsGivenUp, messageRowId, noteMediaForget, pendingMediaForgets, queueFailedLocalVoice, queueVoiceBacklog, voiceBacklog, type MediaKind, type MediaStatus, type NewMedia, type TextKind,
 } from '../../src/store/media.ts';
 import { MIGRATIONS } from '../../src/store/migrations.ts';
 import { applyRevoke, insertMessage, listUnprocessed, markProcessed, markProcessedIfUnchanged, upsertReaction } from '../../src/store/messages.ts';
@@ -37,7 +37,7 @@ describe('media store', () => {
     db.prepare("INSERT INTO clients (code, name, group_id, phases) VALUES ('SHA', 'Sharma', '1@g.us', '[]')").run();
     db.prepare("INSERT INTO messages (wa_id, client_id, sender_jid, ts) VALUES ('m1', 1, 'x', '2026-10-10T00:00:00Z')").run();
     migrate(db);
-    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(7); // the latest migration
+    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(8); // the latest migration
     expect((db.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n).toBe(1);
     expect((db.prepare('SELECT COUNT(*) AS n FROM media').get() as { n: number }).n).toBe(0);
     expect(db.prepare(`SELECT "notnull" AS required, dflt_value AS dflt FROM pragma_table_info('media') WHERE name = 'forwarded'`).get())
@@ -56,7 +56,7 @@ describe('media store', () => {
     db.prepare(`INSERT INTO media (message_id, client_id, kind, status, text_kind, text, created_at, updated_at)
       VALUES (1, 1, 'image', 'done', 'description', 'A blue banner', '2026-10-10T00:00:00Z', '2026-10-10T00:01:00Z')`).run();
     migrate(db);
-    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(7); // the latest migration
+    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(8); // the latest migration
     expect(db.prepare(`SELECT "notnull" AS required, dflt_value AS dflt FROM pragma_table_info('media') WHERE name = 'requeued_for_text'`).get())
       .toEqual({ required: 1, dflt: '0' });
     expect(getMedia(db, 1)).toMatchObject({ status: 'done', text: 'A blue banner', requeuedForText: false });
@@ -64,7 +64,7 @@ describe('media store', () => {
   });
 
   it('adds version 5 as a new migration after version 4', () => {
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(MIGRATIONS[4]!.sql.trim()).toBe('ALTER TABLE media ADD COLUMN requeued_for_text INTEGER NOT NULL DEFAULT 0;');
   });
 
@@ -348,7 +348,15 @@ describe('a file read after its message was processed (12h)', () => {
     expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ id: messageId, requeueReason: null })]);
   });
 
-  it.each(['voice', 'audio', 'video', 'sticker'] as const)('kind %s: a file that finishes with text re-queues nothing, as a Phase 2b transcript would (M1)', (kind) => {
+  it.each(['voice', 'audio'] as const)('kind %s: a transcript read late queues the message again, exactly as the description of a picture does (V1)', (kind) => {
+    const { db, id, messageId } = processedWithFile({ kind, mimeType: 'audio/ogg; codecs=opus' });
+    finishMedia(db, id, { textKind: 'extract', text: 'Payment done, please check', pageCount: null, note: null, at: LATER });
+    expect(getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'extract', text: 'Payment done, please check', backlog: false });
+    expect(stateOf(db, messageId, id)).toEqual({ processedAt: null, version: 1, requeuedForText: true });
+    expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ id: messageId, requeueReason: null })]);
+  });
+
+  it.each(['video', 'sticker'] as const)('kind %s: a file that finishes with text re-queues nothing (M1)', (kind) => {
     const { db, id, messageId } = processedWithFile({ kind, mimeType: null });
     finishMedia(db, id, { textKind: 'extract', text: 'Payment done, please check', pageCount: null, note: null, at: LATER });
     expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'Payment done, please check' });
@@ -356,12 +364,50 @@ describe('a file read after its message was processed (12h)', () => {
     expect(listUnprocessed(db, 1)).toEqual([]);
   });
 
-  it.each(['voice', 'audio'] as const)('kind %s: a file that finishes with text leaves the version of a message never processed alone (M1)', (kind) => {
+  it.each(['voice', 'audio'] as const)('kind %s: a transcript of a message never processed moves only its version, as a picture does (V1)', (kind) => {
     const db = seededDb();
     const messageId = message(db, 'A', { mediaType: kind });
     const id = insertMedia(db, media(messageId, { kind, mimeType: null }));
     finishMedia(db, id, { textKind: 'extract', text: 'Payment done', pageCount: null, note: null, at: LATER });
-    expect(stateOf(db, messageId, id)).toEqual({ processedAt: null, version: 0, requeuedForText: false });
+    expect(stateOf(db, messageId, id)).toEqual({ processedAt: null, version: 1, requeuedForText: false });
+  });
+
+  it.each(['voice', 'audio'] as const)('kind %s: a backlog transcript is stored for the record and never queues its message again (V6)', (kind) => {
+    const db = seededDb();
+    const messageId = message(db, 'A', { mediaType: kind });
+    const id = insertMedia(db, media(messageId, { kind, mimeType: null, refEnc: null }));
+    markDownloaded(db, id, { localPath: 'media/SHA/2026-10/A-1.ogg', sha256: 'x', fileSize: 9000, at: NOW });
+    finishMedia(db, id, { textKind: null, text: null, pageCount: null, note: null, at: NOW }); // the 2a backlog: saved, no transcript
+    markProcessed(db, [messageId], NOW);
+    expect(queueVoiceBacklog(db, [id], LATER)).toBe(1);
+    finishMedia(db, id, { textKind: 'extract', text: 'Payment done, please check', pageCount: null, note: null, at: LATER });
+    expect(getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'extract', text: 'Payment done, please check', backlog: true });
+    expect(stateOf(db, messageId, id)).toEqual({ processedAt: NOW, version: 0, requeuedForText: false });
+    expect(listUnprocessed(db, 1)).toEqual([]);
+  });
+
+  it.each([
+    { why: 'never processed', after: (_db: Db, _messageId: number) => undefined, state: { processedAt: null, version: 1, requeuedForText: false } },
+    {
+      why: 'queued again for a reaction',
+      after: (db: Db, messageId: number) => {
+        markProcessed(db, [messageId], NOW);
+        upsertReaction(db, { clientId: 1, targetWaId: 'A', reactorJid: 'r@s.whatsapp.net', emoji: '\u{1F44D}', ts: NOW });
+      },
+      state: { processedAt: null, version: 2, requeuedForText: true }, // the reaction moved the version once, the transcript once
+    },
+  ])('a 2a file queued while its message is $why is queued as a live file: its transcript is read with the message (review B)', ({ after, state }) => {
+    const db = seededDb();
+    const messageId = message(db, 'A', { mediaType: 'voice' });
+    const id = insertMedia(db, media(messageId, { kind: 'voice', mimeType: null, refEnc: null }));
+    markDownloaded(db, id, { localPath: 'media/SHA/2026-10/A-1.ogg', sha256: 'x', fileSize: 9000, at: NOW });
+    finishMedia(db, id, { textKind: null, text: null, pageCount: null, note: null, at: NOW });
+    after(db, messageId);
+    expect(queueVoiceBacklog(db, [id], LATER)).toBe(1);
+    expect(getMedia(db, id)).toMatchObject({ status: 'pending', backlog: false });
+    finishMedia(db, id, { textKind: 'extract', text: 'Payment done, please check', pageCount: null, note: null, at: LATER });
+    expect(stateOf(db, messageId, id)).toEqual(state);
+    expect(listUnprocessed(db, 1).map((m) => m.id)).toEqual([messageId]);
   });
 
   it('never re-queues a message deleted for everyone', () => {
@@ -437,5 +483,441 @@ describe('a file read after its message was processed (12h)', () => {
     expect(mediaForMessages(db, [messageId], 0).get(messageId)!.requeuedForText).toBe(false);
     finishMedia(db, id, { textKind: 'description', text: 'A receipt', pageCount: null, note: null, at: LATER });
     expect(mediaForMessages(db, [messageId], 0).get(messageId)).toMatchObject({ id, requeuedForText: true, updatedAt: LATER });
+  });
+});
+
+/** A voice note (or audio file) saved on disk. Pending: about to be transcribed. */
+function savedVoice(db: Db, waId: string, o: { clientId?: number; kind?: MediaKind; fileSize?: number; mimeType?: string; ts?: string } = {}): number {
+  const clientId = o.clientId ?? 1;
+  const kind = o.kind ?? 'voice';
+  const id = insertMedia(db, media(message(db, waId, { clientId, mediaType: kind, ts: o.ts }), { clientId, kind, mimeType: o.mimeType ?? 'audio/ogg; codecs=opus' }));
+  markDownloaded(db, id, { localPath: `media/x/2026-10/${waId}-${id}.ogg`, sha256: 'x', fileSize: o.fileSize ?? 9000, at: NOW });
+  return id;
+}
+
+/** A 2a voice note: saved, finished without a transcript (a claim counted one attempt), and its message processed. */
+function backlogVoice(db: Db, waId: string, o: { clientId?: number; kind?: MediaKind; fileSize?: number; mimeType?: string; note?: string | null } = {}): number {
+  const id = savedVoice(db, waId, o);
+  claimMedia(db, id, { nextAttemptAt: LATER, at: NOW });
+  finishMedia(db, id, { textKind: null, text: null, pageCount: null, note: o.note ?? null, at: NOW });
+  markProcessed(db, [getMedia(db, id)!.messageId], NOW);
+  return id;
+}
+
+const TRANSCRIPT = { textKind: 'extract' as const, text: 'Payment done, please check', pageCount: null, note: null, at: LATER };
+const forgets = (db: Db) =>
+  db.prepare('SELECT media_id AS mediaId, provider, ref, created_at AS createdAt, attempts, next_try_at AS nextTryAt FROM media_stt_forget ORDER BY id').all();
+
+describe('finishMedia: the speech provider\'s stored copy of a transcript (N1)', () => {
+  // Task 6: the copy an unreadable answer named (Phase 3's M7), noted by the processor when the error ends a run.
+  it('noteMediaForget notes a copy without finishing the file, once per provider and ref', () => {
+    const db = seededDb();
+    const id = savedVoice(db, 'A');
+    noteMediaForget(db, id, { provider: 'elevenlabs', ref: 'tr_9', at: NOW });
+    noteMediaForget(db, id, { provider: 'elevenlabs', ref: 'tr_9', at: LATER });
+    expect(getMedia(db, id)).toMatchObject({ status: 'pending' });
+    expect(forgets(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_9', createdAt: NOW, attempts: 0, nextTryAt: null }]);
+    expect(() => noteMediaForget(db, id, { provider: 'elevenlabs', ref: '', at: NOW })).toThrow();
+  });
+
+  it('notes the copy to delete in the same write as the finish', () => {
+    const db = seededDb();
+    const id = savedVoice(db, 'A');
+    finishMedia(db, id, { ...TRANSCRIPT, forget: { provider: 'elevenlabs', ref: 'tr_1' } });
+    expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'Payment done, please check' });
+    expect(forgets(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_1', createdAt: LATER, attempts: 0, nextTryAt: null }]);
+  });
+
+  it('a second finish with the same copy notes nothing more; one with another copy notes it, though its transcript is not stored (review F)', () => {
+    const db = seededDb();
+    const id = savedVoice(db, 'A');
+    finishMedia(db, id, { ...TRANSCRIPT, forget: { provider: 'elevenlabs', ref: 'tr_1' } });
+    finishMedia(db, id, { ...TRANSCRIPT, forget: { provider: 'elevenlabs', ref: 'tr_1' } });
+    expect(forgets(db)).toEqual([expect.objectContaining({ mediaId: id, ref: 'tr_1' })]);
+    finishMedia(db, id, { ...TRANSCRIPT, text: 'Another transcript', forget: { provider: 'elevenlabs', ref: 'tr_2' } });
+    expect(forgets(db)).toEqual([expect.objectContaining({ mediaId: id, ref: 'tr_1' }), expect.objectContaining({ mediaId: id, ref: 'tr_2', createdAt: LATER })]);
+    expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'Payment done, please check' });
+  });
+
+  it('a finish of a file that already failed still notes its copy (review F)', () => {
+    const db = seededDb();
+    const id = savedVoice(db, 'A');
+    failMedia(db, id, { status: 'failed', errorCode: 'stt_failed', at: NOW });
+    finishMedia(db, id, { ...TRANSCRIPT, forget: { provider: 'openai', ref: 'resp_1' } });
+    expect(getMedia(db, id)).toMatchObject({ status: 'failed', text: null });
+    expect(forgets(db)).toEqual([expect.objectContaining({ mediaId: id, provider: 'openai', ref: 'resp_1' })]);
+  });
+
+  it('notes nothing without a copy', () => {
+    const db = seededDb();
+    finishMedia(db, savedVoice(db, 'A'), TRANSCRIPT);
+    finishMedia(db, savedVoice(db, 'B'), { ...TRANSCRIPT, forget: null });
+    expect(forgets(db)).toEqual([]);
+  });
+
+  it('a copy that cannot be noted leaves the file pending, so the finish and the note never part', () => {
+    const db = seededDb();
+    const id = savedVoice(db, 'A');
+    expect(() => finishMedia(db, id, { ...TRANSCRIPT, forget: { provider: 'elevenlabs', ref: '' } })).toThrow(/CHECK/);
+    expect(getMedia(db, id)).toMatchObject({ status: 'pending', text: null });
+    expect(forgets(db)).toEqual([]);
+  });
+});
+
+describe('the 2a voice backlog (V6, N2)', () => {
+  it('lists saved voice notes and audio files that have no transcript, a format_not_supported note included', () => {
+    const db = seededDb();
+    const voice = backlogVoice(db, 'V', { fileSize: 12_000 });
+    const audio = backlogVoice(db, 'AU', { kind: 'audio', fileSize: 40_000 });
+    const m4a = backlogVoice(db, 'M4A', { kind: 'audio', mimeType: 'audio/mp4', note: 'format_not_supported' });
+    const mehta = backlogVoice(db, 'MV', { clientId: 2, fileSize: 5_000 });
+    const ogg = 'audio/ogg; codecs=opus';
+    expect(voiceBacklog(db)).toEqual([
+      { id: voice, clientId: 1, fileSize: 12_000, mimeType: ogg },
+      { id: audio, clientId: 1, fileSize: 40_000, mimeType: ogg },
+      { id: m4a, clientId: 1, fileSize: 9000, mimeType: 'audio/mp4' },
+      { id: mehta, clientId: 2, fileSize: 5_000, mimeType: ogg },
+    ]);
+    expect(voiceBacklog(db, { clientId: 2 })).toEqual([{ id: mehta, clientId: 2, fileSize: 5_000, mimeType: ogg }]);
+    expect(voiceBacklog(db, { clientId: 1 }).map((r) => r.id)).toEqual([voice, audio, m4a]);
+  });
+
+  it('skips files with another note, with text, without a saved file, with an error, still pending, queued, or of another kind', () => {
+    const db = seededDb();
+    backlogVoice(db, 'LONG', { note: 'too_long' });
+    backlogVoice(db, 'FWD', { note: 'forwarded_not_transcribed' });
+    backlogVoice(db, 'SILENT', { note: 'no_speech' });
+    finishMedia(db, savedVoice(db, 'DONE'), TRANSCRIPT);
+    const unsaved = insertMedia(db, media(message(db, 'NOFILE', { mediaType: 'voice' }), { kind: 'voice', mimeType: 'audio/ogg' }));
+    finishMedia(db, unsaved, { textKind: null, text: null, pageCount: null, note: null, at: NOW });
+    const withError = insertMedia(db, media(message(db, 'ERR', { mediaType: 'voice' }), { kind: 'voice', status: 'done', errorCode: 'x', refEnc: null }));
+    markDownloaded(db, withError, { localPath: 'media/x/2026-10/ERR.ogg', sha256: 'x', fileSize: 9000, at: NOW });
+    savedVoice(db, 'PENDING');
+    const queued = backlogVoice(db, 'QUEUED');
+    queueVoiceBacklog(db, [queued], LATER); // queued, not finished yet: pending
+    const image = insertMedia(db, media(message(db, 'IMG')));
+    markDownloaded(db, image, { localPath: 'media/x/2026-10/IMG.jpg', sha256: 'x', fileSize: 9000, at: NOW });
+    finishMedia(db, image, { textKind: null, text: null, pageCount: null, note: null, at: NOW });
+    const video = insertMedia(db, media(message(db, 'VID', { mediaType: 'video' }), { kind: 'video', status: 'done', refEnc: null }));
+    markDownloaded(db, video, { localPath: 'media/x/2026-10/VID.mp4', sha256: 'x', fileSize: 9000, at: NOW });
+    expect(voiceBacklog(db)).toEqual([]);
+  });
+
+  it('skips a message deleted for everyone and a client no longer on the allow-list', () => {
+    const db = seededDb();
+    backlogVoice(db, 'A');
+    applyRevoke(db, 1, 'A');
+    const mehta = backlogVoice(db, 'B', { clientId: 2 });
+    expect(voiceBacklog(db)).toEqual([{ id: mehta, clientId: 2, fileSize: 9000, mimeType: 'audio/ogg; codecs=opus' }]);
+    syncClients(db, [SHARMA]);
+    expect(voiceBacklog(db)).toEqual([]);
+    syncClients(db, [SHARMA, MEHTA]);
+    expect(voiceBacklog(db).map((r) => r.id)).toEqual([mehta]);
+  });
+
+  it('queues exactly the given files for transcription as backlog, in one write, and says how many', () => {
+    const db = seededDb();
+    const a = backlogVoice(db, 'A');
+    const b = backlogVoice(db, 'B', { kind: 'audio', note: 'format_not_supported' });
+    const c = backlogVoice(db, 'C');
+    expect(getMedia(db, a)).toMatchObject({ status: 'done', attempts: 1, backlog: false });
+    expect(queueVoiceBacklog(db, [a, b], LATER)).toBe(2);
+    for (const id of [a, b]) {
+      expect(getMedia(db, id)).toMatchObject({ status: 'pending', backlog: true, attempts: 0, nextAttemptAt: null, errorCode: null, updatedAt: LATER });
+    }
+    expect(getMedia(db, c)).toMatchObject({ status: 'done', backlog: false, attempts: 1 });
+    expect(dueMediaIds(db, LATER, 10)).toEqual([a, b]);
+    expect(voiceBacklog(db).map((r) => r.id)).toEqual([c]);
+    expect(queueVoiceBacklog(db, [], LATER)).toBe(0);
+  });
+
+  it('leaves alone a file that changed since it was listed, or that never qualified', () => {
+    const db = seededDb();
+    const revoked = backlogVoice(db, 'A');
+    const transcribed = backlogVoice(db, 'B');
+    const fine = backlogVoice(db, 'C');
+    const image = insertMedia(db, media(message(db, 'IMG')));
+    const listed = voiceBacklog(db).map((r) => r.id);
+    expect(listed).toEqual([revoked, transcribed, fine]);
+    applyRevoke(db, 1, 'A');
+    db.prepare("UPDATE media SET text_kind = 'extract', text = 'Done' WHERE id = ?").run(transcribed);
+    expect(queueVoiceBacklog(db, [...listed, image, 9999], LATER)).toBe(1);
+    expect(getMedia(db, revoked)).toMatchObject({ status: 'done', backlog: false });
+    expect(getMedia(db, transcribed)).toMatchObject({ status: 'done', backlog: false });
+    expect(getMedia(db, fine)).toMatchObject({ status: 'pending', backlog: true });
+    expect(getMedia(db, image)).toMatchObject({ status: 'pending', backlog: false });
+  });
+
+  it('getMedia and mediaForMessages read backlog', () => {
+    const db = seededDb();
+    const id = backlogVoice(db, 'A');
+    const messageId = getMedia(db, id)!.messageId;
+    expect(getMedia(db, id)!.backlog).toBe(false);
+    expect(mediaForMessages(db, [messageId], 10).get(messageId)!.backlog).toBe(false);
+    queueVoiceBacklog(db, [id], LATER);
+    expect(getMedia(db, id)!.backlog).toBe(true);
+    expect(mediaForMessages(db, [messageId], 10).get(messageId)!.backlog).toBe(true);
+  });
+
+  it('a queued file counts its waits from the queueing, not from its arrival days before, and is never stale (review A, round 2)', () => {
+    const db = seededDb();
+    const id = backlogVoice(db, 'A'); // arrived at NOW
+    const queuedAt = '2026-10-22T08:00:00.000Z';
+    expect(queueVoiceBacklog(db, [id], queuedAt)).toBe(1);
+    expect(getMedia(db, id)).toMatchObject({ status: 'pending', createdAt: queuedAt, updatedAt: queuedAt });
+    expect(mediaStats(db, new Date(queuedAt))).toMatchObject({ pending: 1, stale: 0 });
+    // A long backlog run is not a fault: the file never counts as waiting too long, however long the queue takes.
+    expect(mediaStats(db, new Date('2026-10-22T08:31:00.000Z'))).toMatchObject({ pending: 1, stale: 0 });
+  });
+
+  it('a file that finished format_not_supported after it was queued is listed again, and can be queued again (review C)', () => {
+    const db = seededDb();
+    const id = backlogVoice(db, 'A', { kind: 'audio', mimeType: 'audio/mp4', note: 'format_not_supported' });
+    expect(queueVoiceBacklog(db, [id], LATER)).toBe(1);
+    expect(getMedia(db, id)).toMatchObject({ status: 'pending', backlog: true, note: null });
+    expect(voiceBacklog(db)).toEqual([]);
+    finishMedia(db, id, { textKind: null, text: null, pageCount: null, note: 'format_not_supported', at: LATER }); // still no ffmpeg
+    expect(voiceBacklog(db)).toEqual([{ id, clientId: 1, fileSize: 9000, mimeType: 'audio/mp4' }]);
+    expect(queueVoiceBacklog(db, [id], '2026-10-19T10:00:00.000Z')).toBe(1);
+    expect(getMedia(db, id)).toMatchObject({ status: 'pending', backlog: true, note: null, createdAt: '2026-10-19T10:00:00.000Z' });
+  });
+
+  // Phase 2b final review: a backlog file that finished with no transcriber (voice notes switched off while it waited)
+  // has no text and no note. It used to be left out for good (backlog = 1); it is listed again.
+  it('round trip: queued, then finished with no transcriber, it is listed again and can be queued again', () => {
+    const db = seededDb();
+    const id = backlogVoice(db, 'A');
+    expect(voiceBacklog(db).map((r) => r.id)).toEqual([id]);
+    expect(queueVoiceBacklog(db, [id], LATER)).toBe(1);
+    expect(getMedia(db, id)).toMatchObject({ status: 'pending', backlog: true });
+    expect(voiceBacklog(db)).toEqual([]);
+    finishMedia(db, id, { textKind: null, text: null, pageCount: null, note: null, at: LATER }); // no transcriber: as in 2a
+    expect(getMedia(db, id)).toMatchObject({ status: 'done', backlog: true, text: null, textKind: null, note: null });
+    expect(voiceBacklog(db)).toEqual([{ id, clientId: 1, fileSize: 9000, mimeType: 'audio/ogg; codecs=opus' }]);
+    expect(queueVoiceBacklog(db, [id], '2026-10-19T10:00:00.000Z')).toBe(1);
+    expect(getMedia(db, id)).toMatchObject({ status: 'pending', backlog: true, createdAt: '2026-10-19T10:00:00.000Z' });
+  });
+
+  it.each([
+    ['transcribed', { textKind: 'extract' as const, text: 'Payment done', note: null }],
+    ['transcribed as text that shows nothing (stored as no text)', { textKind: 'extract' as const, text: ' ​ ', note: null }],
+    ['too_long', { textKind: null, text: null, note: 'too_long' }],
+    ['forwarded', { textKind: null, text: null, note: 'forwarded_not_transcribed' }],
+    ['no_speech', { textKind: null, text: null, note: 'no_speech' }],
+    ['too_costly', { textKind: null, text: null, note: 'too_costly' }],
+    ['revoked', { textKind: null, text: null, note: 'revoked' }],
+  ])('a queued backlog file that finished %s is never listed again', (_what, x) => {
+    const db = seededDb();
+    const id = backlogVoice(db, 'A');
+    expect(queueVoiceBacklog(db, [id], LATER)).toBe(1);
+    finishMedia(db, id, { ...x, pageCount: null, at: LATER });
+    expect(getMedia(db, id)).toMatchObject({ status: 'done', backlog: true });
+    expect(voiceBacklog(db)).toEqual([]);
+    expect(queueVoiceBacklog(db, [id], '2026-10-19T10:00:00.000Z')).toBe(0);
+  });
+
+  it('a live file transcribed as text that shows nothing is not listed: it was transcribed', () => {
+    const db = seededDb();
+    const id = savedVoice(db, 'A');
+    finishMedia(db, id, { ...TRANSCRIPT, text: '   ' });
+    expect(getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'extract', text: null });
+    expect(voiceBacklog(db)).toEqual([]);
+  });
+
+  it('lists live pending files before backlog files, so a long backlog never holds up a new voice note (review D)', () => {
+    const db = seededDb();
+    const old1 = backlogVoice(db, 'OLD1');
+    const old2 = backlogVoice(db, 'OLD2');
+    expect(queueVoiceBacklog(db, [old1, old2], NOW)).toBe(2);
+    const live = savedVoice(db, 'NEW', { ts: '2026-10-19T07:59:00.000Z' }); // sent days after the backlog's messages
+    expect(dueMediaIds(db, LATER, 1)).toEqual([live]);
+    expect(dueMediaIds(db, LATER, 10)).toEqual([live, old1, old2]);
+  });
+
+  it('lists only voice notes and audio files, or only the other files, when asked (the voice lane, Task 10)', () => {
+    const db = seededDb();
+    const voice = savedVoice(db, 'V', { ts: '2026-10-19T07:00:00.000Z' });
+    const image = insertMedia(db, media(message(db, 'I', { mediaType: 'image', ts: '2026-10-19T07:01:00.000Z' })));
+    const audio = savedVoice(db, 'A', { kind: 'audio', mimeType: 'audio/mpeg', ts: '2026-10-19T07:02:00.000Z' });
+    const doc = insertMedia(db, pdf(message(db, 'D', { mediaType: 'document', ts: '2026-10-19T07:03:00.000Z' })));
+    expect(dueMediaIds(db, LATER, 10)).toEqual([voice, image, audio, doc]);
+    expect(dueMediaIds(db, LATER, 10, { audio: true })).toEqual([voice, audio]);
+    expect(dueMediaIds(db, LATER, 1, { audio: true })).toEqual([voice]);
+    expect(dueMediaIds(db, LATER, 10, { audio: false })).toEqual([image, doc]);
+  });
+});
+
+// Phase 2b final review: `cli transcribe-voice --failed`, notes that failed on this computer (the local engine or ffmpeg).
+describe('voice notes that failed on this computer', () => {
+  /** A saved voice note that failed with errorCode at `at` (its message processed, as the tracker went ahead). */
+  function failedVoice(db: Db, waId: string, errorCode: string, o: { clientId?: number; kind?: MediaKind; at?: string } = {}): number {
+    const id = savedVoice(db, waId, o);
+    claimMedia(db, id, { nextAttemptAt: LATER, at: NOW });
+    deferMedia(db, id, { errorCode, nextAttemptAt: LATER, attempts: 2, at: NOW });
+    failMedia(db, id, { status: 'failed', errorCode, at: o.at ?? NOW });
+    markProcessed(db, [getMedia(db, id)!.messageId], NOW);
+    return id;
+  }
+
+  it('lists failures of the local engine and of ffmpeg, never of a paid provider, and only voice notes and audio files', () => {
+    const db = seededDb();
+    const empty = failedVoice(db, 'A', 'local_empty_output');
+    const timeout = failedVoice(db, 'B', 'local_timeout', { kind: 'audio' });
+    const exit = failedVoice(db, 'C', 'local_exit_1');
+    const aborted = failedVoice(db, 'D', 'local_aborted');
+    const convert = failedVoice(db, 'E', 'audio_convert_failed');
+    const duration = failedVoice(db, 'F', 'audio_no_duration');
+    const split = failedVoice(db, 'G', 'audio_split_failed', { clientId: 2 });
+    for (const code of ['stt_partial', 'stt_paid_unbooked', 'stt_job_failed', 'stt_http_500', 'stt_unavailable', 'stt_no_answer_lost', 'audio_no_ffmpeg', 'audio_too_long']) {
+      failedVoice(db, `P-${code}`, code);
+    }
+    // LIKE's underscore is escaped: 'localX...' and 'local' alone are not local_ codes.
+    failedVoice(db, 'X1', 'localXtimeout');
+    failedVoice(db, 'X2', 'local');
+    const image = insertMedia(db, media(message(db, 'IMG')));
+    markDownloaded(db, image, { localPath: 'media/x/2026-10/IMG.jpg', sha256: 'x', fileSize: 9000, at: NOW });
+    failMedia(db, image, { status: 'failed', errorCode: 'local_timeout', at: NOW });
+    expect(failedLocalVoice(db).map((r) => r.id)).toEqual([empty, timeout, exit, aborted, convert, duration, split]);
+    expect(failedLocalVoice(db, { clientId: 2 })).toEqual([{ id: split, clientId: 2, fileSize: 9000, mimeType: 'audio/ogg; codecs=opus' }]);
+  });
+
+  it('skips a file without its original, a message deleted for everyone, a client no longer on the allow-list, and a pending or done file', () => {
+    const db = seededDb();
+    const unsaved = insertMedia(db, media(message(db, 'NOFILE', { mediaType: 'voice' }), { kind: 'voice', mimeType: 'audio/ogg' }));
+    failMedia(db, unsaved, { status: 'failed', errorCode: 'local_timeout', at: NOW });
+    failedVoice(db, 'REV', 'local_timeout');
+    applyRevoke(db, 1, 'REV');
+    const pending = savedVoice(db, 'PEND');
+    deferMedia(db, pending, { errorCode: 'local_timeout', nextAttemptAt: LATER, attempts: 1, at: NOW });
+    const mehta = failedVoice(db, 'M', 'local_timeout', { clientId: 2 });
+    expect(failedLocalVoice(db).map((r) => r.id)).toEqual([mehta]);
+    syncClients(db, [SHARMA]);
+    expect(failedLocalVoice(db)).toEqual([]);
+  });
+
+  it('queues them again as queueVoiceBacklog does: pending, attempts 0, no error, note or next attempt, created now, backlog by the same rule', () => {
+    const db = seededDb();
+    const processed = failedVoice(db, 'A', 'local_empty_output');
+    const unprocessed = failedVoice(db, 'B', 'audio_convert_failed');
+    db.prepare('UPDATE messages SET processed_at = NULL WHERE id = ?').run(getMedia(db, unprocessed)!.messageId);
+    const edited = failedVoice(db, 'C', 'local_timeout');
+    db.prepare("UPDATE messages SET requeue_reason = 'edit' WHERE id = ?").run(getMedia(db, edited)!.messageId);
+    const left = failedVoice(db, 'D', 'local_timeout');
+    db.prepare("UPDATE media SET note = 'x' WHERE id = ?").run(processed); // a stray note is cleared too
+    const queuedAt = '2026-10-22T08:00:00.000Z';
+    expect(queueFailedLocalVoice(db, [processed, unprocessed, edited], queuedAt)).toBe(3);
+    const fresh = { status: 'pending', attempts: 0, errorCode: null, nextAttemptAt: null, note: null, createdAt: queuedAt, updatedAt: queuedAt };
+    expect(getMedia(db, processed)).toMatchObject({ ...fresh, backlog: true });
+    expect(getMedia(db, unprocessed)).toMatchObject({ ...fresh, backlog: false });
+    expect(getMedia(db, edited)).toMatchObject({ ...fresh, backlog: false });
+    expect(getMedia(db, left)).toMatchObject({ status: 'failed', errorCode: 'local_timeout' });
+    expect(failedLocalVoice(db).map((r) => r.id)).toEqual([left]);
+    expect(queueFailedLocalVoice(db, [], queuedAt)).toBe(0);
+    // A queued file is not stale: its waits count from the queueing.
+    expect(mediaStats(db, new Date('2026-10-22T08:10:00.000Z'))).toMatchObject({ pending: 3, stale: 0 });
+  });
+
+  it('never queues a file that failed at a paid provider, or one that changed since it was listed', () => {
+    const db = seededDb();
+    const paid = failedVoice(db, 'A', 'stt_partial');
+    const unbooked = failedVoice(db, 'B', 'stt_paid_unbooked');
+    const changed = failedVoice(db, 'C', 'local_timeout');
+    const fine = failedVoice(db, 'D', 'local_timeout');
+    applyRevoke(db, 1, 'C');
+    const image = insertMedia(db, media(message(db, 'IMG')));
+    failMedia(db, image, { status: 'failed', errorCode: 'local_timeout', at: NOW });
+    expect(queueFailedLocalVoice(db, [paid, unbooked, changed, fine, image, 9999], LATER)).toBe(1);
+    expect(getMedia(db, paid)).toMatchObject({ status: 'failed', errorCode: 'stt_partial', attempts: 2 });
+    expect(getMedia(db, unbooked)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
+    expect(getMedia(db, changed)).toMatchObject({ status: 'failed' });
+    expect(getMedia(db, image)).toMatchObject({ status: 'failed' });
+    expect(getMedia(db, fine)).toMatchObject({ status: 'pending', attempts: 0 });
+  });
+
+  it('mediaStats counts them under voiceFailed for 24 hours, of active clients only, and never a paid failure', () => {
+    const db = seededDb();
+    const now = new Date('2026-10-19T08:00:00.000Z');
+    failedVoice(db, 'A', 'local_empty_output', { at: '2026-10-19T07:00:00.000Z' });
+    failedVoice(db, 'B', 'audio_no_duration', { kind: 'audio', at: '2026-10-18T08:00:00.000Z' }); // exactly 24 h ago: counted
+    failedVoice(db, 'C', 'local_timeout', { at: '2026-10-18T07:59:59.999Z' }); // older: not counted
+    failedVoice(db, 'D', 'stt_partial', { at: '2026-10-19T07:00:00.000Z' });
+    failedVoice(db, 'E', 'localXtimeout', { at: '2026-10-19T07:00:00.000Z' });
+    failedVoice(db, 'F', 'local_exit_1', { clientId: 2, at: '2026-10-19T07:00:00.000Z' });
+    const image = insertMedia(db, media(message(db, 'IMG')));
+    failMedia(db, image, { status: 'failed', errorCode: 'local_timeout', at: '2026-10-19T07:00:00.000Z' });
+    expect(mediaStats(db, now)).toMatchObject({ voiceFailed: 3, failedRecent: 6 });
+    syncClients(db, [SHARMA]);
+    expect(mediaStats(db, now)).toMatchObject({ voiceFailed: 2 });
+  });
+});
+
+describe('the queue of provider copies to delete (N1)', () => {
+  const T0 = '2026-10-19T10:00:00.000Z';
+  const T1 = '2026-10-19T10:15:00.000Z';
+  /** Three transcribed voice notes, each with a copy to delete (ids 1 to 3 in media_stt_forget). */
+  function threeCopies() {
+    const db = seededDb();
+    const ids = ['A', 'B', 'C'].map((waId, i) => {
+      const id = savedVoice(db, waId);
+      finishMedia(db, id, { ...TRANSCRIPT, forget: { provider: 'elevenlabs', ref: `tr_${i + 1}` } });
+      return id;
+    });
+    return { db, ids };
+  }
+
+  it('lists the copies due, oldest first, and only one file\'s when asked', () => {
+    const { db, ids } = threeCopies();
+    expect(pendingMediaForgets(db, { nowIso: T0, maxAttempts: 5 })).toEqual([
+      { id: 1, mediaId: ids[0], provider: 'elevenlabs', ref: 'tr_1', attempts: 0 },
+      { id: 2, mediaId: ids[1], provider: 'elevenlabs', ref: 'tr_2', attempts: 0 },
+      { id: 3, mediaId: ids[2], provider: 'elevenlabs', ref: 'tr_3', attempts: 0 },
+    ]);
+    expect(pendingMediaForgets(db, { nowIso: T0, maxAttempts: 5, mediaId: ids[1] })).toEqual([
+      { id: 2, mediaId: ids[1], provider: 'elevenlabs', ref: 'tr_2', attempts: 0 },
+    ]);
+  });
+
+  it('counts a try and holds the copy back until its next try is due', () => {
+    const { db } = threeCopies();
+    countMediaForgetAttempt(db, 2, T1);
+    expect(db.prepare('SELECT attempts, next_try_at AS nextTryAt FROM media_stt_forget WHERE id = 2').get()).toEqual({ attempts: 1, nextTryAt: T1 });
+    expect(pendingMediaForgets(db, { nowIso: T0, maxAttempts: 5 }).map((f) => f.id)).toEqual([1, 3]);
+    expect(pendingMediaForgets(db, { nowIso: T1, maxAttempts: 5 })).toEqual([
+      expect.objectContaining({ id: 1 }), expect.objectContaining({ id: 2, attempts: 1 }), expect.objectContaining({ id: 3 }),
+    ]);
+  });
+
+  it('stops listing a copy once its tries are used up', () => {
+    const { db } = threeCopies();
+    for (let i = 0; i < 5; i++) countMediaForgetAttempt(db, 1, T0);
+    expect(pendingMediaForgets(db, { nowIso: T1, maxAttempts: 5 }).map((f) => f.id)).toEqual([2, 3]);
+    expect(pendingMediaForgets(db, { nowIso: T1, maxAttempts: 6 }).map((f) => f.id)).toEqual([1, 2, 3]);
+  });
+
+  it('removes a copy once the provider has deleted it', () => {
+    const { db } = threeCopies();
+    deleteMediaForget(db, 2);
+    expect(pendingMediaForgets(db, { nowIso: T0, maxAttempts: 5 }).map((f) => f.id)).toEqual([1, 3]);
+    expect(forgets(db)).toHaveLength(2);
+  });
+  it('counts the copies given up: last try used, or a provider that is not set up now (status, Task 9)', () => {
+    const db = seededDb();
+    const add = (waId: string, provider: 'elevenlabs' | 'openai', ref: string) => {
+      const id = savedVoice(db, waId);
+      finishMedia(db, id, { ...TRANSCRIPT, forget: { provider, ref } });
+    };
+    expect(mediaSttForgetsGivenUp(db, { maxAttempts: 5, provider: 'elevenlabs' })).toBe(0);
+    add('A', 'elevenlabs', 'tr_1'); // last try used
+    add('B', 'elevenlabs', 'tr_2'); // still being tried
+    add('C', 'openai', 'tr_3'); // not the provider set up now
+    for (let i = 0; i < 5; i++) countMediaForgetAttempt(db, 1, T0);
+    countMediaForgetAttempt(db, 2, T0);
+    expect(mediaSttForgetsGivenUp(db, { maxAttempts: 5, provider: 'elevenlabs' })).toBe(2);
+    expect(mediaSttForgetsGivenUp(db, { maxAttempts: 6, provider: 'elevenlabs' })).toBe(1);
+    expect(mediaSttForgetsGivenUp(db, { maxAttempts: 5, provider: 'openai' })).toBe(2);
+    expect(mediaSttForgetsGivenUp(db, { maxAttempts: 5, provider: 'none' })).toBe(3);
+    // A copy the provider deleted is no longer counted; meeting copies (stt_forget) never are.
+    deleteMediaForget(db, 1);
+    expect(mediaSttForgetsGivenUp(db, { maxAttempts: 5, provider: 'elevenlabs' })).toBe(1);
   });
 });

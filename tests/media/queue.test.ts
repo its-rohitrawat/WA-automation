@@ -36,6 +36,15 @@ function pending(db: Db, waId: string): number {
   });
 }
 
+/** A pending file of this kind (voice notes and audio files are the local engine's lane, Task 10). */
+function pendingOf(db: Db, waId: string, kind: 'image' | 'document' | 'voice' | 'audio', ts: string = NOW): number {
+  insertMessage(db, { waId, clientId: 1, senderJid: 'x@s.whatsapp.net', senderNumber: null, senderName: null, fromMe: false, ts, text: null, quotedWaId: null, mediaType: kind });
+  return insertMedia(db, {
+    messageId: messageRowId(db, 1, waId)!, clientId: 1, kind, status: 'pending', mimeType: null, fileName: null, fileSize: 1, seconds: null,
+    forwarded: false, refEnc: Buffer.from('s'), errorCode: null, createdAt: NOW,
+  });
+}
+
 const flush = () => new Promise<void>((r) => setImmediate(r));
 
 function logLines(): { log: Logger; lines: string[] } {
@@ -44,7 +53,7 @@ function logLines(): { log: Logger; lines: string[] } {
 }
 
 /** A processor whose calls wait until the test finishes them; finishing also updates the row like the real one. */
-function setup(o: { log?: Logger; onSettled?: (clientId: number) => void; concurrency?: number } = {}) {
+function setup(o: { log?: Logger; onSettled?: (clientId: number) => void; concurrency?: number; voiceLane?: number } = {}) {
   const db = seededDb();
   const started: number[] = [];
   const waiting = new Map<number, (r: ProcessResult) => void>();
@@ -56,7 +65,7 @@ function setup(o: { log?: Logger; onSettled?: (clientId: number) => void; concur
   };
   const onSettled = vi.fn(o.onSettled ?? (() => {}));
   const clock = manualClock('2026-10-19T08:00:00Z');
-  const queue = new MediaQueue({ db, clock, log: o.log ?? silentLogger(), processor, concurrency: o.concurrency ?? 2, onSettled });
+  const queue = new MediaQueue({ db, clock, log: o.log ?? silentLogger(), processor, concurrency: o.concurrency ?? 2, onSettled, voiceLane: o.voiceLane });
   const finish = async (id: number, outcome: ProcessOutcome, clientId: number | null = 1) => {
     if (outcome === 'deferred') db.prepare("UPDATE media SET next_attempt_at = '2099-01-01T00:00:00.000Z' WHERE id = ?").run(id);
     else db.prepare("UPDATE media SET status = 'done' WHERE id = ?").run(id);
@@ -415,5 +424,86 @@ describe('MediaQueue never retries a file in a loop', () => {
     await queue.drain(5_000);
     expect(processor.process).toHaveBeenCalledTimes(2);
     expect(onSettled).not.toHaveBeenCalled();
+  });
+});
+
+describe('MediaQueue voice lane (Phase 2b Task 10)', () => {
+  it('with voiceLane 1, three voice notes and two images due with concurrency 3: one voice note and both images run', async () => {
+    const { db, started, queue, finish } = setup({ concurrency: 3, voiceLane: 1 });
+    const [v1, v2, v3] = [pendingOf(db, 'V1', 'voice'), pendingOf(db, 'V2', 'voice'), pendingOf(db, 'V3', 'audio')];
+    const [i1, i2] = [pendingOf(db, 'I1', 'image'), pendingOf(db, 'I2', 'document')];
+    queue.kick();
+    await flush();
+    expect(started).toEqual([v1, i1, i2]);
+    expect(queue.active).toBe(3);
+    // An image finishing frees a slot, but the lane is still full: no voice note takes it.
+    await finish(i1!, 'done');
+    expect(started).toEqual([v1, i1, i2]);
+    expect(queue.active).toBe(2);
+    // The voice note finishing frees the lane: the next one starts (an audio file shares the lane too).
+    await finish(v1!, 'done');
+    expect(started).toEqual([v1, i1, i2, v2]);
+    await finish(v2!, 'done');
+    expect(started).toEqual([v1, i1, i2, v2, v3]);
+    expect(queue.active).toBe(2);
+  });
+
+  it('the lane holds across kicks, and a later image still gets a free slot', async () => {
+    const { db, started, queue } = setup({ concurrency: 3, voiceLane: 1 });
+    const v1 = pendingOf(db, 'V1', 'voice');
+    pendingOf(db, 'V2', 'voice');
+    queue.kick();
+    await flush();
+    expect(started).toEqual([v1]);
+    const i1 = pendingOf(db, 'I1', 'image');
+    queue.kick();
+    await flush();
+    expect(started).toEqual([v1, i1]);
+    expect(queue.active).toBe(2);
+  });
+
+  it('the lane never takes the queue past its concurrency: one voice note and three images due, concurrency 3, run 3', async () => {
+    const { db, started, queue, finish } = setup({ concurrency: 3, voiceLane: 1 });
+    const v1 = pendingOf(db, 'V1', 'voice');
+    const [i1, i2, i3] = [pendingOf(db, 'I1', 'image'), pendingOf(db, 'I2', 'image'), pendingOf(db, 'I3', 'image')];
+    queue.kick();
+    await flush();
+    expect(started).toEqual([v1, i1, i2]); // 1 voice note, 2 images: never 4
+    expect(queue.active).toBe(3);
+    queue.kick();
+    await flush();
+    expect(started).toEqual([v1, i1, i2]);
+    // A slot frees: the third image takes it, and the queue is at 3 again.
+    await finish(i1!, 'done');
+    expect(started).toEqual([v1, i1, i2, i3]);
+    expect(queue.active).toBe(3);
+  });
+
+  it('the lane takes only voice notes and audio files: an image due before them does not take it', async () => {
+    const { db, started, queue, finish } = setup({ concurrency: 3, voiceLane: 1 });
+    const early = '2026-10-19T07:00:00.000Z';
+    const i0 = pendingOf(db, 'I0', 'image', early); // due first, in time and in order
+    const [v1, v2] = [pendingOf(db, 'V1', 'voice'), pendingOf(db, 'V2', 'audio')];
+    const [i1, i2] = [pendingOf(db, 'I1', 'image'), pendingOf(db, 'I2', 'image')];
+    queue.kick();
+    await flush();
+    // The voice note runs in the lane; the image runs in one of the other slots, not in the lane.
+    expect(started).toEqual([v1, i0, i1]);
+    expect(queue.active).toBe(3);
+    // The early image finishing frees an image slot, not the lane: the next image starts, not the second note.
+    await finish(i0!, 'done');
+    expect(started).toEqual([v1, i0, i1, i2]);
+    await finish(v1!, 'done');
+    expect(started).toEqual([v1, i0, i1, i2, v2]);
+    expect(queue.active).toBe(3);
+  });
+
+  it('without a lane, voice notes take every slot as before', async () => {
+    const { db, started, queue } = setup({ concurrency: 3 });
+    const ids = [pendingOf(db, 'V1', 'voice'), pendingOf(db, 'V2', 'voice'), pendingOf(db, 'V3', 'voice')];
+    pendingOf(db, 'I1', 'image');
+    queue.kick();
+    await flush();
+    expect(started).toEqual(ids);
   });
 });

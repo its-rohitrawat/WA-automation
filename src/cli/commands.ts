@@ -15,6 +15,7 @@ import { latestBatches } from '../store/batches.ts';
 import { listClients, syncClients } from '../store/clients.ts';
 import { openDb, tx, type Db } from '../store/db.ts';
 import { setKv } from '../store/kv.ts';
+import { mediaSttForgetsGivenUp } from '../store/media.ts';
 import { sttForgetsGivenUp } from '../store/meetings.ts';
 import { unprocessedCounts } from '../store/messages.ts';
 import { recentReports, REPORT_REQUEST_KEY, reportFor, reportRequest, type ReportRow } from '../store/reports.ts';
@@ -298,6 +299,8 @@ export function statusCommand(deps: CliDeps): void {
         unprocessed: unprocessedCounts(db),
         now: new Date(),
         sttCopiesLeft: sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: deps.env.STT_PROVIDER }),
+        // Voice-note copies are deleted through the voice transcriber, so VOICE_STT_PROVIDER decides (Task 10), not STT_PROVIDER.
+        voiceCopiesLeft: mediaSttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: deps.env.VOICE_STT_PROVIDER }),
       }),
     );
   } finally {

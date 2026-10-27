@@ -6,7 +6,7 @@ import {
 } from '../../src/store/media.ts';
 import { applyRevoke, insertMessage } from '../../src/store/messages.ts';
 import { setRole, upsertPerson } from '../../src/store/people.ts';
-import { MEHTA, NOW, seededDb } from '../helpers/db.ts';
+import { MEHTA, NOW, SHARMA, seededDb } from '../helpers/db.ts';
 
 function add(db: Db, waId: string, o: { clientId?: number; createdAt?: string; errorCode?: string; senderJid?: string } = {}): number {
   const clientId = o.clientId ?? 1;
@@ -32,7 +32,7 @@ function gaveUpUpload(db: Db, waId: string, clientId = 1): number {
   return id;
 }
 
-const ZERO = { pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0 };
+const ZERO = { pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0 };
 
 describe('mediaStats', () => {
   it('counts waiting, long-waiting, budget-waiting and recently failed files and uploads that gave up', () => {
@@ -43,7 +43,36 @@ describe('mediaStats', () => {
     failMedia(db, add(db, 'D'), { status: 'failed', errorCode: 'not_pdf', at: '2026-10-19T07:30:00.000Z' });
     failMedia(db, add(db, 'E'), { status: 'failed', errorCode: 'not_pdf', at: '2026-10-17T07:30:00.000Z' });
     gaveUpUpload(db, 'F');
-    expect(mediaStats(db, new Date('2026-10-19T08:00:00.000Z'))).toEqual({ pending: 3, stale: 1, spendCap: 1, failedRecent: 1, uploadFailed: 1 });
+    expect(mediaStats(db, new Date('2026-10-19T08:00:00.000Z'))).toEqual({ pending: 3, stale: 1, spendCap: 1, failedRecent: 1, uploadFailed: 1, sttRefused: 0, voiceFailed: 0 });
+  });
+
+  it('counts pending files waiting because the speech-to-text key was refused (sttRefused), of active clients only', () => {
+    const db = seededDb();
+    const a = add(db, 'A', { errorCode: 'stt_unavailable' });
+    add(db, 'B', { errorCode: 'stt_unavailable' });
+    add(db, 'C', { errorCode: 'ai_unavailable' });
+    add(db, 'D', { clientId: 2, errorCode: 'stt_unavailable' });
+    failMedia(db, add(db, 'E'), { status: 'failed', errorCode: 'stt_unavailable', at: NOW }); // given up: no longer waiting for the key (review G)
+    expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 4, failedRecent: 1, sttRefused: 3 });
+    finishMedia(db, a, { textKind: 'extract', text: 'Payment done', pageCount: null, note: null, at: NOW });
+    expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 3, failedRecent: 1, sttRefused: 2 });
+    syncClients(db, [SHARMA]);
+    expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 2, failedRecent: 1, sttRefused: 1 });
+  });
+
+  it('counts a file waiting for the speech-to-text key under sttRefused, not as waiting too long, so Health shows the key line (review E)', () => {
+    const db = seededDb();
+    add(db, 'A', { createdAt: '2026-10-19T06:00:00.000Z', errorCode: 'stt_unavailable' });
+    add(db, 'B', { createdAt: '2026-10-19T06:00:00.000Z', errorCode: 'ai_unavailable' });
+    expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 2, stale: 1, sttRefused: 1 });
+  });
+
+  it('never counts a queued backlog file as waiting too long: a long backlog run is not a fault (review round 2)', () => {
+    const db = seededDb();
+    const id = add(db, 'A', { createdAt: '2026-10-19T06:00:00.000Z' });
+    db.prepare('UPDATE media SET backlog = 1 WHERE id = ?').run(id);
+    add(db, 'B', { createdAt: '2026-10-19T06:00:00.000Z' });
+    expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 2, stale: 1 });
   });
 
   it('is all zeros on an empty table', () => {

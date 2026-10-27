@@ -8,7 +8,7 @@ describe('openDb', () => {
     const db = openDb(':memory:');
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]).map((t) => t.name);
     expect(tables).toEqual(expect.arrayContaining([
-      'batches', 'clients', 'decisions', 'kv', 'media', 'meetings', 'message_edits', 'messages', 'people', 'reactions', 'reports', 'schema_version', 'spend',
+      'batches', 'clients', 'decisions', 'kv', 'media', 'media_stt_forget', 'meetings', 'message_edits', 'messages', 'people', 'reactions', 'reports', 'schema_version', 'spend',
       'stt_forget', 'task_events', 'tasks',
     ]));
   });
@@ -21,13 +21,13 @@ describe('openDb', () => {
 
   it('is at schema version 7 straight after openDb', () => {
     const db = openDb(':memory:');
-    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(7);
+    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(8);
   });
 
   it('is safe to migrate twice', () => {
     const db = openDb(':memory:');
     migrate(db);
-    expect((db.prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(7);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(8);
   });
 
   it('overwrites deleted content, so wiped download details do not stay in free pages', () => {
@@ -44,18 +44,18 @@ describe('openDb', () => {
 });
 
 describe('migrate: a skipped migration', () => {
-  // A database made before main's v6 (the reports table) reached this branch is recorded at 1 to 5 and 7.
+  // A database made before main's v6 (the reports table) reached this branch is recorded at 1 to 5, 7 and 8.
   const withoutV6 = MIGRATIONS.filter((m) => m.version !== 6);
-  const FAKE_V8: Migration = { version: 8, sql: 'CREATE TABLE fake_later (id INTEGER PRIMARY KEY);' };
+  const FAKE_V9: Migration = { version: 9, sql: 'CREATE TABLE fake_later (id INTEGER PRIMARY KEY);' };
   const versions = (db: Database.Database) =>
     (db.prepare('SELECT version FROM schema_version ORDER BY version').all() as { version: number }[]).map((r) => r.version);
 
   it('throws, naming only the version numbers, and applies nothing when the code knows a version the database skipped', () => {
     const db = new Database(':memory:');
     migrate(db, withoutV6);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7]);
-    expect(() => migrate(db)).toThrow('database is at v7 but v6 was never applied; restore a backup or contact the developer');
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7, 8]);
+    expect(() => migrate(db)).toThrow('database is at v8 but v6 was never applied; restore a backup or contact the developer');
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7, 8]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'reports'").get()).toBeUndefined();
   });
 
@@ -63,17 +63,17 @@ describe('migrate: a skipped migration', () => {
     const db = new Database(':memory:');
     migrate(db);
     db.prepare('DELETE FROM schema_version WHERE version IN (2, 6)').run();
-    expect(() => migrate(db)).toThrow('database is at v7 but v2, v6 were never applied');
+    expect(() => migrate(db)).toThrow('database is at v8 but v2, v6 were never applied');
   });
 
   it('applies every version in order on a fresh database, a later one after them, and a database with every version recorded migrates as before', () => {
     const db = new Database(':memory:');
     migrate(db);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
-    migrate(db);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
-    migrate(db, [...MIGRATIONS, FAKE_V8]);
     expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    migrate(db);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    migrate(db, [...MIGRATIONS, FAKE_V9]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'fake_later'").get()).toEqual({ name: 'fake_later' });
   });
 
@@ -82,8 +82,66 @@ describe('migrate: a skipped migration', () => {
     migrate(db, MIGRATIONS.filter((m) => m.version <= 4));
     expect(versions(db)).toEqual([1, 2, 3, 4]);
     migrate(db);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(() => migrate(db)).not.toThrow();
     expect(() => openDb(':memory:')).not.toThrow();
+  });
+});
+
+describe('migration v8 (Phase 2b: voice notes)', () => {
+  const versions = (db: Database.Database) =>
+    (db.prepare('SELECT version FROM schema_version ORDER BY version').all() as { version: number }[]).map((r) => r.version);
+  /** A database at v7 (this branch's migrations before 2b) with one finished voice note. */
+  function atV7() {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    migrate(db, MIGRATIONS.filter((m) => m.version <= 7));
+    db.prepare("INSERT INTO clients (code, name, group_id, phases) VALUES ('SHA', 'Sharma', '1@g.us', '[]')").run();
+    db.prepare("INSERT INTO messages (wa_id, client_id, sender_jid, ts) VALUES ('m1', 1, 'x', '2026-10-10T00:00:00Z')").run();
+    db.prepare(`INSERT INTO media (message_id, client_id, kind, status, local_path, created_at, updated_at)
+      VALUES (1, 1, 'voice', 'done', 'media/SHA/2026-10/m1-1.ogg', '2026-10-10T00:00:00Z', '2026-10-10T00:01:00Z')`).run();
+    return db;
+  }
+  const forget = (db: Database.Database, provider: string, ref: string) =>
+    db.prepare("INSERT INTO media_stt_forget (media_id, provider, ref, created_at) VALUES (1, ?, ?, '2026-10-10T00:02:00Z')").run(provider, ref);
+
+  it('migrates a v7 database to v8: media gains backlog, 0 for the files already there', () => {
+    const db = atV7();
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    migrate(db);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(db.prepare(`SELECT "notnull" AS required, dflt_value AS dflt FROM pragma_table_info('media') WHERE name = 'backlog'`).get())
+      .toEqual({ required: 1, dflt: '0' });
+    expect(db.prepare('SELECT kind, status, local_path AS localPath, backlog FROM media').all())
+      .toEqual([{ kind: 'voice', status: 'done', localPath: 'media/SHA/2026-10/m1-1.ogg', backlog: 0 }]);
+  });
+
+  it('creates media_stt_forget with its checks: known providers only, a ref of 1 to 200 characters, one row per copy', () => {
+    const db = atV7();
+    migrate(db);
+    forget(db, 'elevenlabs', 'tr_1');
+    expect(db.prepare('SELECT media_id AS mediaId, provider, ref, attempts, next_try_at AS nextTryAt FROM media_stt_forget').all())
+      .toEqual([{ mediaId: 1, provider: 'elevenlabs', ref: 'tr_1', attempts: 0, nextTryAt: null }]);
+    expect(() => forget(db, 'whisper', 'tr_2')).toThrow(/CHECK/);
+    expect(() => forget(db, 'elevenlabs', '')).toThrow(/CHECK/);
+    expect(() => forget(db, 'elevenlabs', 'x'.repeat(201))).toThrow(/CHECK/);
+    forget(db, 'elevenlabs', 'x'.repeat(200));
+    expect(() => forget(db, 'elevenlabs', 'tr_1')).toThrow(/UNIQUE/);
+    forget(db, 'sarvam', 'tr_1'); // the same id from another provider is another copy
+    expect(() => db.prepare("INSERT INTO media_stt_forget (media_id, provider, ref, created_at) VALUES (99, 'openai', 'r', 'x')").run()).toThrow(/FOREIGN KEY/);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM media_stt_forget').get() as { n: number }).n).toBe(3);
+  });
+
+  it('leaves a database already at v8 untouched', () => {
+    const db = atV7();
+    migrate(db);
+    forget(db, 'elevenlabs', 'tr_1');
+    db.prepare('UPDATE media SET backlog = 1').run();
+    const schema = db.prepare("SELECT name, sql FROM sqlite_master ORDER BY name").all();
+    migrate(db);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(db.prepare("SELECT name, sql FROM sqlite_master ORDER BY name").all()).toEqual(schema);
+    expect(db.prepare('SELECT backlog FROM media').get()).toEqual({ backlog: 1 });
+    expect((db.prepare('SELECT COUNT(*) AS n FROM media_stt_forget').get() as { n: number }).n).toBe(1);
   });
 });

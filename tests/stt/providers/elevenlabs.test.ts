@@ -33,12 +33,16 @@ function fake(res: () => Response) {
 const saved = (raw: unknown) => ({ model: 'scribe_v2', segments: [], billedSeconds: 4.2, raw });
 
 let audio: AudioPart;
+let voiceNote: AudioPart;
 
 beforeAll(() => {
   const dir = mkdtempSync(join(tmpdir(), 'stt-eleven-'));
   const path = join(dir, 'a.mp3');
   writeFileSync(path, 'fake mp3 bytes');
   audio = { path, seconds: 4.2, offset: 0 };
+  const ogg = join(dir, 'a.ogg');
+  writeFileSync(ogg, 'fake ogg bytes');
+  voiceNote = { path: ogg, seconds: 4.2, offset: 0, format: 'ogg' };
 });
 
 describe('ElevenLabsProvider', () => {
@@ -55,6 +59,23 @@ describe('ElevenLabsProvider', () => {
     expect(form.get('timestamps_granularity')).toBe('word');
     expect(form.get('tag_audio_events')).toBe('false');
     expect((form.get('file') as File).name).toBe('audio.mp3');
+  });
+
+  it('sends the file as MP3 when the part names no format', async () => {
+    const { http, calls } = fake(() => Response.json(ANSWER));
+    await new ElevenLabsProvider({ apiKey: 'k', http }).transcribe(audio, { diarize: false });
+    const file = calls[0]!.form.get('file') as File;
+    expect(file.type).toBe('audio/mpeg');
+    expect(file.name).toBe('audio.mp3');
+  });
+
+  it("sends a voice note in the part's own format, Ogg", async () => {
+    const { http, calls } = fake(() => Response.json(ANSWER));
+    await new ElevenLabsProvider({ apiKey: 'k', http }).transcribe(voiceNote, { diarize: false });
+    const file = calls[0]!.form.get('file') as File;
+    expect(file.type).toBe('audio/ogg');
+    expect(file.name).toBe('voice.ogg');
+    expect(await file.text()).toBe('fake ogg bytes');
   });
 
   it('groups words into segments by speaker and skips spacing', async () => {

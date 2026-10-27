@@ -93,9 +93,37 @@ describe('formatStatus', () => {
   });
 
   it('prints the shared-file counts when the service reports them', () => {
-    const out = formatStatus({ ...base, snapshot: { ...snapshot, media: { pending: 2, stale: 0, spendCap: 0, failedRecent: 1, uploadFailed: 0 } } });
+    const out = formatStatus({ ...base, snapshot: { ...snapshot, media: { pending: 2, stale: 0, spendCap: 0, failedRecent: 1, uploadFailed: 0, sttRefused: 0 } } });
     expect(out).toContain('Files:       2 waiting to be read · 1 could not be read (24 h) · 0 not uploaded to Drive');
     expect(formatStatus({ ...base, snapshot })).not.toContain('Files:');
+  });
+
+  it('adds the voice notes waiting for a refused speech key to the Files line, only when there are some (Phase 2b)', () => {
+    const files = { pending: 3, stale: 0, spendCap: 0, failedRecent: 1, uploadFailed: 0 };
+    const three = formatStatus({ ...base, snapshot: { ...snapshot, media: { ...files, sttRefused: 2 } } });
+    expect(three).toMatch(/^Files: {7}3 waiting to be read · 1 could not be read \(24 h\) · 0 not uploaded to Drive · including 2 voice notes waiting \(speech key refused\)$/m);
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, media: { ...files, sttRefused: 1 } } })).toContain(' · including 1 voice note waiting (speech key refused)');
+    const none = /^Files: {7}3 waiting to be read · 1 could not be read \(24 h\) · 0 not uploaded to Drive$/m;
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, media: { ...files, sttRefused: 0 } } })).toMatch(none);
+    // A snapshot written before Phase 2b has no sttRefused.
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, media: files } })).toMatch(none);
+  });
+
+  it('shows the voice-note copies that could not be deleted, on a status line of their own, even with no report (Phase 2b)', () => {
+    expect(formatStatus({ ...base, snapshot })).not.toContain('Voice copies');
+    expect(formatStatus({ ...base, snapshot, voiceCopiesLeft: 0 })).not.toContain('Voice copies');
+    const one = formatStatus({ ...base, snapshot, voiceCopiesLeft: 1 });
+    expect(one).toContain('Voice copies: 1 speech-to-text copy of voice notes could not be deleted from the provider; see SETUP (Voice notes)');
+    expect(one).toContain('Health:      ✅ Connected · last update 19 Oct 13:25'); // the health line is unchanged
+    expect(one).not.toContain('Speech copies');
+    expect(formatStatus({ ...base, snapshot: undefined, voiceCopiesLeft: 3 })).toContain(
+      'Voice copies: 3 speech-to-text copies of voice notes could not be deleted from the provider; see SETUP (Voice notes)',
+    );
+    // Next to the meetings' line, after it.
+    const both = formatStatus({ ...base, snapshot, sttCopiesLeft: 2, voiceCopiesLeft: 4 }).split('\n');
+    const speech = both.findIndex((l) => l.startsWith('Speech copies: 2 '));
+    expect(speech).toBeGreaterThan(-1);
+    expect(both[speech + 1]).toBe('Voice copies: 4 speech-to-text copies of voice notes could not be deleted from the provider; see SETUP (Voice notes)');
   });
 });
 
@@ -114,13 +142,27 @@ describe('formatStatus meetings and spend split', () => {
     expect(out).toContain('Meetings:    4 done, 1 waiting, 2 unassigned, 0 failed, 1 no access, 2 too long');
   });
 
-  it('splits spend today into AI and speech only when the snapshot has meetings and the split', () => {
+  it('splits spend today into AI and speech only when the snapshot has the split, and meetings or speech spend', () => {
     const split = { ai: 1.0, stt: 0.234 };
     const out = formatStatus({ ...base, snapshot: { ...snapshot, spendByKind: split, meetings: { stats, paused: null, sttProvider: 'sarvam' } } });
     expect(out).toContain('Spend today: $1.23 of $15.00 (AI $1.00, speech $0.23)');
-    expect(formatStatus({ ...base, snapshot: { ...snapshot, spendByKind: split } })).toMatch(/Spend today: \$1\.23 of \$15\.00$/m);
+    // Without meetings and with no speech spend (Phase 2b shows the split once voice notes cost speech spend).
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, spendByKind: { ...split, stt: 0 } } })).toMatch(/Spend today: \$1\.23 of \$15\.00$/m);
     expect(formatStatus({ ...base, snapshot: { ...snapshot, meetings: { stats, paused: null, sttProvider: 'sarvam' } } })).toMatch(
       /Spend today: \$1\.23 of \$15\.00$/m,
+    );
+  });
+
+  it('splits spend today without meetings once speech-to-text has cost something (voice notes, Phase 2b)', () => {
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, spendByKind: { ai: 1.0, stt: 0.234 } } })).toContain(
+      'Spend today: $1.23 of $15.00 (AI $1.00, speech $0.23)',
+    );
+    // Nothing spent on speech and no meetings: no split, as before.
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, spendByKind: { ai: 1.234, stt: 0 } } })).toMatch(/Spend today: \$1\.23 of \$15\.00$/m);
+    // With meetings the split shows even at 0 speech, as before.
+    const meetings = { stats, paused: null, sttProvider: 'sarvam' as const };
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, spendByKind: { ai: 1.234, stt: 0 }, meetings } })).toContain(
+      'Spend today: $1.23 of $15.00 (AI $1.23, speech $0.00)',
     );
   });
 });

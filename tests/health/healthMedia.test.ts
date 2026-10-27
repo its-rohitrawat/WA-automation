@@ -13,9 +13,16 @@ function setup(freeBytes: () => number | null = () => 200e9) {
   h.setWhatsApp({ state: 'open', since: '2026-10-19T08:00:00.000Z', lastErrorCode: null, credsSaveFailures: 0 });
   return { db, h, spend };
 }
-const counts = (o: Partial<MediaHealth> = {}): MediaHealth => ({ pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0, ...o });
+const counts = (o: Partial<MediaHealth> = {}): MediaHealth => ({ pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0, ...o });
 const SPEND_LINE = '⚠️ Daily spend cap reached. Paused until midnight IST';
+const STT_REFUSED_LINE = '⚠️ Voice notes are not being transcribed: the speech-to-text key was refused.';
 const budgetLine = (n: number) => `⚠️ ${n} shared file${n === 1 ? '' : 's'} waiting for today's AI budget (read after midnight IST)`;
+const voiceFailedLine = (n: number) =>
+  `⚠️ ${n} voice note${n === 1 ? '' : 's'} could not be transcribed on this computer. See docs/SETUP.md, Voice notes`;
+const REPORT_UNKNOWN = { text: 'Morning report: unknown, check WhatsApp', warning: '⚠️ Morning report: unknown, check WhatsApp. See docs/SETUP.md → "Morning report".' };
+const MEETINGS_FAILED = {
+  stats: { done: 0, waiting: 0, unassigned: 0, failed: 1, noAccess: 0, tooLong: 0, internal: 0, deferred: {} }, paused: null, sttProvider: 'sarvam' as const,
+};
 
 describe('Health and shared files', () => {
   it('warns when shared files wait more than 30 minutes', () => {
@@ -121,6 +128,68 @@ describe('Health and shared files', () => {
     expect(h.line().text).toBe(SPEND_LINE);
   });
 
+  it('warns when voice notes wait because the speech-to-text key was refused (Phase 2b)', () => {
+    const { h } = setup();
+    h.setMedia(counts({ pending: 2, sttRefused: 2 }));
+    expect(h.line()).toEqual({ ok: false, text: STT_REFUSED_LINE });
+    expect(h.workbookLine()).toEqual({ ok: false, text: STT_REFUSED_LINE });
+    h.setMedia(counts({ pending: 1, sttRefused: 1 }));
+    expect(h.line().text).toBe(STT_REFUSED_LINE);
+    h.setMedia(counts({ pending: 2 }));
+    expect(h.line().ok).toBe(true);
+  });
+
+  // Phase 2b final polish: notes waiting on a refused key give up after 24 hours, so the key-refused line sits above the
+  // budget line (as in Task 9), and so above the morning report, the meeting lines, low disk and the other voice lines.
+  it('the key-refused line comes after the file lines and before the budget line, the report, meetings and low disk (Phase 2b final polish)', () => {
+    const { h } = setup(() => 5e9);
+    h.setMedia(counts({ pending: 3, stale: 1, sttRefused: 1, spendCap: 1 }));
+    expect(h.line().text).toBe('⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.');
+    h.setMedia(counts({ pending: 2, uploadFailed: 1, sttRefused: 1, spendCap: 1 }));
+    expect(h.line().text).toBe('⚠️ 1 file could not be uploaded to Drive. See docs/SETUP.md.');
+    h.setMedia(counts({ pending: 2, sttRefused: 1, spendCap: 1 }));
+    expect(h.line().text).toBe(STT_REFUSED_LINE);
+    h.setReport(REPORT_UNKNOWN);
+    h.setMeetings(MEETINGS_FAILED);
+    expect(h.line().text).toBe(STT_REFUSED_LINE);
+    h.setMedia(counts({ pending: 1, sttRefused: 1 }));
+    expect(h.line().text).toBe(STT_REFUSED_LINE);
+    h.setMedia(counts({ pending: 1 }));
+    expect(h.line().text).toBe(REPORT_UNKNOWN.warning);
+  });
+
+  it('the budget line shows once the key is no longer refused (Phase 2b final polish)', () => {
+    const { h } = setup();
+    h.setMedia(counts({ pending: 2, sttRefused: 1, spendCap: 1 }));
+    expect(h.line().text).toBe(STT_REFUSED_LINE);
+    h.setMedia(counts({ pending: 1, spendCap: 1 }));
+    expect(h.line().text).toBe(budgetLine(1));
+  });
+
+  it('the key-refused line yields to the spend-cap line when the cap is reached (Phase 2b)', () => {
+    const { h, spend } = setup();
+    h.setMedia(counts({ pending: 1, sttRefused: 1 }));
+    spend.record('ai', 1, 'batch 1');
+    expect(h.line().text).toBe(SPEND_LINE);
+  });
+
+  it('reads older snapshots whose media counts have no sttRefused, and refuses one that is not a number (Phase 2b)', () => {
+    const { db, h } = setup();
+    h.setMedia(counts({ pending: 2, sttRefused: 1 }));
+    h.persist();
+    expect(readHealthSnapshot(db)!.media).toEqual(counts({ pending: 2, sttRefused: 1 }));
+    const old = JSON.parse(JSON.stringify(h.snapshot())) as Record<string, unknown>;
+    const { sttRefused: _gone, ...before2b } = counts({ pending: 2 });
+    setKv(db, 'health', JSON.stringify({ ...old, media: before2b }));
+    expect(readHealthSnapshot(db)).toBeDefined();
+    expect(readHealthSnapshot(db)!.media).toEqual(before2b);
+    expect(readHealthSnapshot(db)!.media!.sttRefused).toBeUndefined();
+    for (const bad of ['1', null, true, {}]) {
+      setKv(db, 'health', JSON.stringify({ ...old, media: { ...before2b, sttRefused: bad } }));
+      expect(readHealthSnapshot(db)).toBeUndefined();
+    }
+  });
+
   it('keeps the counts in the snapshot and still reads older snapshots without them', () => {
     const { db, h } = setup();
     h.setMedia(counts({ pending: 2, failedRecent: 1 }));
@@ -138,5 +207,143 @@ describe('Health and shared files', () => {
     const { spendCap: _left, ...noSpendCap } = counts({ pending: 2 });
     setKv(db, 'health', JSON.stringify({ ...old, media: noSpendCap }));
     expect(readHealthSnapshot(db)).toBeUndefined();
+  });
+});
+
+describe('Health and voice notes that cannot be transcribed (Phase 2b Task 10)', () => {
+  const NOT_SET_UP = '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_BIN)';
+  const NOT_SET_UP_MODEL = '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_MODEL)';
+  const NO_FFMPEG = '⚠️ Voice notes are not being transcribed: ffmpeg not found';
+
+  it('says the local speech engine is not set up, naming the setting, or that ffmpeg is missing', () => {
+    const { h } = setup();
+    h.setVoiceProblem('local_not_set_up_bin');
+    expect(h.line()).toEqual({ ok: false, text: NOT_SET_UP });
+    expect(h.workbookLine()).toEqual({ ok: false, text: NOT_SET_UP });
+    h.setVoiceProblem('local_not_set_up_model');
+    expect(h.line()).toEqual({ ok: false, text: NOT_SET_UP_MODEL });
+    expect(h.workbookLine()).toEqual({ ok: false, text: NOT_SET_UP_MODEL });
+    h.setVoiceProblem('no_ffmpeg');
+    expect(h.line()).toEqual({ ok: false, text: NO_FFMPEG });
+    expect(h.workbookLine()).toEqual({ ok: false, text: NO_FFMPEG });
+    h.setVoiceProblem(null);
+    expect(h.line().ok).toBe(true);
+  });
+
+  // Phase 2b final review: these voice lines come last, below the morning report, the meeting lines and low disk, so
+  // they never hide those. Among themselves: not set up, then notes that failed. The key-refused line is not among them
+  // (final polish): it sits above the budget line.
+  it('the lines come after the file lines, the budget line, the morning report, the meeting lines and low disk', () => {
+    const { h } = setup(() => 5e9);
+    h.setVoiceProblem('local_not_set_up_bin');
+    h.setMedia(counts({ pending: 3, stale: 1, spendCap: 1, voiceFailed: 1 }));
+    expect(h.line().text).toBe('⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.');
+    h.setMedia(counts({ pending: 2, uploadFailed: 1, spendCap: 1, voiceFailed: 1 }));
+    expect(h.line().text).toBe('⚠️ 1 file could not be uploaded to Drive. See docs/SETUP.md.');
+    h.setMedia(counts({ pending: 2, spendCap: 1, voiceFailed: 1 }));
+    expect(h.line().text).toBe(budgetLine(1));
+    h.setMedia(counts({ voiceFailed: 1 }));
+    h.setReport(REPORT_UNKNOWN);
+    expect(h.line().text).toBe(REPORT_UNKNOWN.warning);
+    h.setReport(null);
+    h.setMeetings(MEETINGS_FAILED);
+    expect(h.line().text).toBe('⚠️ 1 meeting could not be processed');
+    h.setMeetings(null);
+    expect(h.line().text).toBe('⚠️ Low disk: 5.0 GB free');
+  });
+
+  it('among the voice lines: the key refused first (above the budget line), then not set up, then notes that failed', () => {
+    const { h } = setup();
+    h.setVoiceProblem('no_ffmpeg');
+    h.setMedia(counts({ sttRefused: 1, voiceFailed: 2 }));
+    expect(h.line().text).toBe(STT_REFUSED_LINE);
+    h.setMedia(counts({ voiceFailed: 2 }));
+    expect(h.line().text).toBe(NO_FFMPEG);
+    h.setVoiceProblem('local_not_set_up_bin');
+    expect(h.line().text).toBe(NOT_SET_UP);
+    h.setVoiceProblem(null);
+    expect(h.line().text).toBe(voiceFailedLine(2));
+    h.setMedia(counts());
+    expect(h.line().ok).toBe(true);
+  });
+
+  it('a voice setup line yields to the budget line and to low disk', () => {
+    const { h } = setup(() => 5e9);
+    h.setVoiceProblem('no_ffmpeg');
+    h.setMedia(counts({ pending: 1, spendCap: 1 }));
+    expect(h.line().text).toBe(budgetLine(1));
+    h.setMedia(counts());
+    expect(h.line().text).toBe('⚠️ Low disk: 5.0 GB free');
+  });
+
+  // Phase 2b final review: a note that could not be transcribed on this computer is visible (final polish: the wording).
+  it('says how many voice notes could not be transcribed on this computer in the last 24 hours, one or many', () => {
+    const { h } = setup();
+    h.setMedia(counts({ failedRecent: 1, voiceFailed: 1 }));
+    expect(h.line()).toEqual({ ok: false, text: '⚠️ 1 voice note could not be transcribed on this computer. See docs/SETUP.md, Voice notes' });
+    expect(h.workbookLine()).toEqual({ ok: false, text: voiceFailedLine(1) });
+    h.setMedia(counts({ failedRecent: 3, voiceFailed: 3 }));
+    expect(h.line().text).toBe('⚠️ 3 voice notes could not be transcribed on this computer. See docs/SETUP.md, Voice notes');
+    // Other failed files say nothing on the line (status counts them), as before.
+    h.setMedia(counts({ failedRecent: 3 }));
+    expect(h.line().ok).toBe(true);
+  });
+
+  it('keeps voiceFailed in the snapshot, reads snapshots written before it, and refuses one that is not a number', () => {
+    const { db, h } = setup();
+    h.setMedia(counts({ failedRecent: 1, voiceFailed: 1 }));
+    h.persist();
+    expect(readHealthSnapshot(db)!.media).toEqual(counts({ failedRecent: 1, voiceFailed: 1 }));
+    const old = JSON.parse(JSON.stringify(h.snapshot())) as Record<string, unknown>;
+    const { voiceFailed: _gone, ...before } = counts({ failedRecent: 1 });
+    setKv(db, 'health', JSON.stringify({ ...old, media: before }));
+    expect(readHealthSnapshot(db)!.media).toEqual(before);
+    expect(readHealthSnapshot(db)!.media!.voiceFailed).toBeUndefined();
+    const { sttRefused: _also, ...before2b } = before;
+    setKv(db, 'health', JSON.stringify({ ...old, media: before2b }));
+    expect(readHealthSnapshot(db)!.media).toEqual(before2b);
+    for (const bad of ['1', null, true, {}]) {
+      setKv(db, 'health', JSON.stringify({ ...old, media: { ...before, voiceFailed: bad } }));
+      expect(readHealthSnapshot(db)).toBeUndefined();
+    }
+  });
+
+  it('yields to the spend-cap line when the cap is reached', () => {
+    const { h, spend } = setup();
+    h.setVoiceProblem('no_ffmpeg');
+    spend.record('ai', 1, 'batch 1');
+    expect(h.line().text).toBe(SPEND_LINE);
+  });
+
+  it('keeps the problem in the snapshot only when there is one, and reads snapshots without it', () => {
+    const { db, h } = setup();
+    h.persist();
+    expect(readHealthSnapshot(db)).toBeDefined();
+    expect('voiceProblem' in readHealthSnapshot(db)!).toBe(false);
+    h.setVoiceProblem('local_not_set_up_bin');
+    h.persist();
+    expect(readHealthSnapshot(db)!.voiceProblem).toBe('local_not_set_up_bin');
+    expect(readHealthSnapshot(db)!.line.text).toBe(NOT_SET_UP);
+    h.setVoiceProblem('local_not_set_up_model');
+    h.persist();
+    expect(readHealthSnapshot(db)!.voiceProblem).toBe('local_not_set_up_model');
+    expect(readHealthSnapshot(db)!.line.text).toBe(NOT_SET_UP_MODEL);
+    h.setVoiceProblem('no_ffmpeg');
+    h.persist();
+    expect(readHealthSnapshot(db)!.voiceProblem).toBe('no_ffmpeg');
+    // An older snapshot (before Task 10) has no voiceProblem and still reads.
+    const old = JSON.parse(JSON.stringify(h.snapshot())) as Record<string, unknown>;
+    delete old.voiceProblem;
+    setKv(db, 'health', JSON.stringify(old));
+    expect(readHealthSnapshot(db)).toBeDefined();
+    expect(readHealthSnapshot(db)!.voiceProblem).toBeUndefined();
+    // A value this version does not know (a newer writer) drops only that field, not the snapshot.
+    // 'local_not_set_up' is the value written before the problem named its setting: dropped the same way.
+    // So are the names every object inherits ("toString", "__proto__"): only the table's own keys count.
+    for (const unknown of ['engine_on_fire', 'local_not_set_up', 'toString', '__proto__', 'constructor', 'hasOwnProperty', 1, null, {}]) {
+      setKv(db, 'health', JSON.stringify({ ...old, voiceProblem: unknown }));
+      expect(readHealthSnapshot(db)).toBeDefined();
+      expect(readHealthSnapshot(db)!.voiceProblem).toBeUndefined();
+    }
   });
 });

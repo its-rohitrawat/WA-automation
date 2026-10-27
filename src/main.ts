@@ -31,6 +31,7 @@ import { AllowList } from './wa/allowlist.ts';
 import { openSessionDb, SessionDecryptError, useEncryptedAuthState } from './wa/authState.ts';
 import { baileysSocketFactory, WhatsAppGateway } from './wa/gateway.ts';
 import { baileysSenderSocketFactory, linkedNumber } from './wa/senderGateway.ts';
+import { buildVoiceDeps } from './voiceDeps.ts';
 
 /** Expected startup refusal. The message is safe to print. */
 class StartupExit extends Error {}
@@ -144,6 +145,9 @@ async function main(): Promise<void> {
     const startedAt = systemClock.now();
     // Phase 3: off (the default) means no meeting dependency is built and no meeting call of any kind is made.
     const meetings = env.MEETINGS_ENABLED ? await meetingDeps({ env, db, google, apiKey, prices, configs, log }) : undefined;
+    // Phase 2b: the voice transcriber VOICE_STT_PROVIDER names (src/voiceDeps.ts, tested). A local engine that is not set
+    // up, or no ffmpeg, never stops the service: voice notes are then kept, not transcribed, and Health says why.
+    const voiceDeps = await buildVoiceDeps(env, { findFfmpeg, log });
     const app = createApp({
       db,
       clock: systemClock,
@@ -159,8 +163,9 @@ async function main(): Promise<void> {
       maxConcurrent: env.MAX_PARALLEL_CLIENTS,
       dataDir: env.DATA_DIR,
       startedAt,
-      // Phase 2a: download, keep and read shared images and documents. Voice notes are kept, not transcribed yet.
-      media: { sealer: new MediaRefSealer(key), fetcher: baileysFetcher(), ai: new ClaudeMediaClient({ apiKey, model: env.AI_MODEL, prices }) },
+      // Phase 2a: download, keep and read shared images and documents. Phase 2b: transcribe voice notes and audio files
+      // with the transcriber VOICE_STT_PROVIDER names (the local engine on this machine by default; none keeps them as in 2a).
+      media: { sealer: new MediaRefSealer(key), fetcher: baileysFetcher(), ai: new ClaudeMediaClient({ apiKey, model: env.AI_MODEL, prices }), ...voiceDeps },
       ...(meetings ? { meetings } : {}),
       report,
     });

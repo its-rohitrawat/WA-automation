@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { longFetch, requestJson, requestOk, SttNoAnswerError, type HttpFetch } from '../http.ts';
 import { modelFor } from '../prices.ts';
 import { wordsToSegments, type TimedWord } from '../segments.ts';
-import type { AudioPart, ProviderResult, Segment, SttProvider, TranscribeOptions } from '../types.ts';
+import { AUDIO_FORMATS, type AudioPart, type ProviderResult, type Segment, type SttProvider, type TranscribeOptions } from '../types.ts';
 
 const ENDPOINT = 'https://api.elevenlabs.io/v1/speech-to-text';
 
@@ -46,9 +46,10 @@ export class ElevenLabsProvider implements SttProvider {
 
   async transcribe(audio: AudioPart, opts: TranscribeOptions): Promise<ProviderResult> {
     const { model } = modelFor('elevenlabs', opts.diarize);
+    const f = AUDIO_FORMATS[audio.format ?? 'mp3'];
     const form = new FormData();
     form.append('model_id', model);
-    form.append('file', await openAsBlob(audio.path, { type: 'audio/mpeg' }), 'audio.mp3');
+    form.append('file', await openAsBlob(audio.path, { type: f.mimeType }), f.fileName);
     form.append('language_code', 'hin');
     form.append('diarize', String(opts.diarize));
     form.append('timestamps_granularity', 'word');

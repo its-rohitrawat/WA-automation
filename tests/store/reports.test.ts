@@ -22,13 +22,13 @@ describe('migration v6', () => {
     }
     db.prepare("INSERT INTO clients (code, name, group_id, phases) VALUES ('SHA', 'Sharma', '1@g.us', '[]')").run();
     migrate(db);
-    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(7); // the latest migration
+    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(8); // the latest migration
     expect((db.prepare('SELECT COUNT(*) AS n FROM clients').get() as { n: number }).n).toBe(1);
     expect((db.prepare('SELECT COUNT(*) AS n FROM reports').get() as { n: number }).n).toBe(0);
   });
 
   it('adds version 6 as a new, additive migration and leaves versions 1 to 5 unchanged', () => {
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     const text = MIGRATIONS.filter((m) => m.version <= 5).map((m) => `${m.version}\n${m.sql}`).join('\n---\n');
     expect(createHash('sha256').update(text).digest('hex')).toBe('53081fb02c22d829badad1e5b7f5d7c0855a67b631a353244b1e5828f81c02df');
     expect(MIGRATIONS[5]!.sql).toMatch(/^\s*CREATE TABLE reports \(/);

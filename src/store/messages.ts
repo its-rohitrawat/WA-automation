@@ -191,7 +191,8 @@ export function markProcessedIfUnchanged(
   const mark = db.prepare('UPDATE messages SET processed_at = @at, requeue_reason = NULL, touch_reason = NULL WHERE id = @id AND version = @version');
   const clearFlag = db.prepare('UPDATE media SET requeued_for_text = 0 WHERE message_id = ? AND requeued_for_text = 1');
   const requeue = db.prepare('UPDATE messages SET requeue_reason = COALESCE(touch_reason, requeue_reason) WHERE id = ?');
-  // The same test as finishMedia's: an image or document read with a description or text, of a message not deleted for everyone.
+  // The same test as finishMedia's: an image, document, voice note or audio file read with a description, text or transcript
+  // (never a backlog transcript), of a message not deleted for everyone.
   const flagReadFile = db.prepare(`UPDATE media SET requeued_for_text = 1
     WHERE message_id = ? AND ${REQUEUING_FILE} AND message_id IN (SELECT id FROM messages WHERE revoked = 0)`);
   const fileOnly = db.prepare('UPDATE messages SET requeue_reason = NULL, touch_reason = NULL WHERE id = @id AND version = @version + 1');

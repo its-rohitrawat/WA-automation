@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
@@ -20,6 +20,8 @@ import type { Db } from '../src/store/db.ts';
 import { finishMedia, getMedia, insertMedia, markDownloaded, markUploadFailed, messageRowId } from '../src/store/media.ts';
 import { insertMessage, listUnprocessed, markProcessed } from '../src/store/messages.ts';
 import { setRole, upsertPerson } from '../src/store/people.ts';
+import { LocalEngineError } from '../src/stt/local.ts';
+import type { PreparedVoice, VoiceInput, VoiceResult, VoiceTranscriber } from '../src/stt/voice.ts';
 import { systemClock } from '../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../src/util/logger.ts';
 import { AllowList } from '../src/wa/allowlist.ts';
@@ -31,7 +33,43 @@ import { FakeDrive } from './helpers/fakeDrive.ts';
 import { tinyPdf } from './helpers/files.ts';
 import { FakeMediaAi } from './helpers/mediaAi.ts';
 import { FakeSocket, SEND_METHODS } from './helpers/fakeSocket.ts';
+import { FakeLocalVoiceTranscriber, FakeVoiceTranscriber } from './helpers/voice.ts';
 import { SHARMA_PN, waRaw, waText } from './helpers/wa.ts';
+
+/**
+ * forgetVoiceCopies runs as it is, unless a test sets `forgetHook.impl` (Task 10: the start and hourly sweeps, and the
+ * processor's afterFinish). Every call's options are recorded.
+ */
+const forgetHook = vi.hoisted(() => ({
+  impl: null as null | ((...a: unknown[]) => Promise<number>),
+  calls: [] as ({ mediaId?: number } | undefined)[],
+}));
+vi.mock('../src/media/voiceForget.ts', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/media/voiceForget.ts')>();
+  return {
+    ...real,
+    forgetVoiceCopies: (...args: Parameters<typeof real.forgetVoiceCopies>) => {
+      forgetHook.calls.push(args[3]);
+      return forgetHook.impl ? forgetHook.impl(...args) : real.forgetVoiceCopies(...args);
+    },
+  };
+});
+
+/**
+ * rmSync from node:fs runs as it is, unless a test sets `fsHook.rmFails`: then a path it returns true for throws
+ * EBUSY instead (Task 10 review round 1: the folder sweep's delete that fails on one entry).
+ */
+const fsHook = vi.hoisted(() => ({ rmFails: null as null | ((path: string) => boolean) }));
+vi.mock('node:fs', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...real,
+    rmSync: (...args: Parameters<typeof real.rmSync>) => {
+      if (fsHook.rmFails?.(String(args[0]))) throw Object.assign(new Error(`EBUSY: resource busy or locked, rm '${String(args[0])}'`), { code: 'EBUSY' });
+      return real.rmSync(...args);
+    },
+  };
+});
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
 const MEDIA_KEY = Buffer.alloc(32, 9);
@@ -311,20 +349,20 @@ describe('app with shared files', () => {
     expect(getMedia(db, 2)).toMatchObject({ status: 'pending', attempts: 0, localPath: null });
   });
 
-  it('reads two files at once by default', async () => {
+  it('reads three files at once by default (Phase 2b Task 10)', async () => {
     const g = gate();
     const fetcher = vi.fn<MediaFetcher>(async () => {
       await g.promise;
       return Buffer.from('jpeg-bytes');
     });
     const { db, app, sock } = setup({ media: { fetcher } });
-    for (const id of ['IMG1', 'IMG2', 'IMG3']) shareImage(sock, id);
-    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+    for (const id of ['IMG1', 'IMG2', 'IMG3', 'IMG4']) shareImage(sock, id);
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(fetcher).toHaveBeenCalledTimes(2);
-    expect(app.mediaQueue!.active).toBe(2);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(app.mediaQueue!.active).toBe(3);
     g.release();
-    await vi.waitFor(() => expect([1, 2, 3].map((id) => getMedia(db, id)?.status)).toEqual(['done', 'done', 'done']));
+    await vi.waitFor(() => expect([1, 2, 3, 4].map((id) => getMedia(db, id)?.status)).toEqual(['done', 'done', 'done', 'done']));
     await stopApp(app);
   });
 
@@ -462,7 +500,7 @@ describe('app media wiring (15g)', () => {
     await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0));
     expect(getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable' });
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(readHealthSnapshot(db)!.media).toEqual({ pending: 1, stale: 1, spendCap: 0, failedRecent: 0, uploadFailed: 0 });
+    expect(readHealthSnapshot(db)!.media).toEqual({ pending: 1, stale: 1, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0 });
     expect(readHealthSnapshot(db)!.line).toEqual({ ok: false, text: '⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.' });
     await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0));
     await stopApp(app);
@@ -715,7 +753,7 @@ describe('app start time (15a, 15f)', () => {
     });
     const { db, ai, app } = setup({ startedAt, media: { sealer, fetcher }, prepare: (db) => storedImage(db, sealer, minutesBefore(120).toISOString()) });
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalled());
-    expect(readHealthSnapshot(db)!.media).toEqual({ pending: 1, stale: expected.stale, spendCap: 0, failedRecent: 0, uploadFailed: 0 });
+    expect(readHealthSnapshot(db)!.media).toEqual({ pending: 1, stale: expected.stale, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0 });
     await vi.advanceTimersByTimeAsync(241_000);
     if (expected.blocks) expect(ai.calls).toHaveLength(0);
     else expect(ai.calls[0]!.user).toContain(': old banner {image, still being read}');
@@ -837,6 +875,656 @@ describe('app health line with fresh file counts (final review)', () => {
     app.reloadClients([MEHTA]); // Sharma, whose file it is, is removed
     expect(app.health.workbookLine()).toEqual({ ok: true, text: '✅ Connected · waiting for new messages' });
     expect(readHealthSnapshot(db)!.media).toMatchObject({ pending: 0, stale: 0 });
+    await stopApp(app);
+  });
+});
+
+/** A WhatsApp voice note of 0:14 (an audioMessage with ptt), from Mr. Sharma in client SHA's group. */
+const shareVoice = (sock: FakeSocket, waId = 'VN1') =>
+  sock.emit('messages.upsert', { type: 'notify', messages: [
+    waRaw(waId, { audioMessage: { url: 'https://mmg.whatsapp.net/v/t9', directPath: '/v/t9', mediaKey: MEDIA_KEY, mimetype: 'audio/ogg; codecs=opus', ptt: true, seconds: 14 } }),
+  ] });
+
+/** A local transcriber whose runs wait for `g.release`, then answer as the fake does. */
+class GatedLocalVoice extends FakeLocalVoiceTranscriber {
+  readonly g = gate();
+  entered = 0;
+  override async transcribe(prepared: PreparedVoice, signal?: AbortSignal): Promise<VoiceResult> {
+    this.entered++;
+    await this.g.promise;
+    return super.transcribe(prepared, signal);
+  }
+}
+
+/**
+ * A local transcriber whose conversion (prepare) lasts until the stop signal, then ends as the real one now does
+ * (Phase 2b final review): LocalEngineError('aborted'). Without a signal it would never end.
+ */
+class UntilAbortedConversion extends FakeLocalVoiceTranscriber {
+  entered = 0;
+  readonly prepareSignals: (AbortSignal | undefined)[] = [];
+  override prepare(input: VoiceInput): Promise<PreparedVoice> {
+    this.entered++;
+    this.prepared.push(input);
+    this.prepareSignals.push(input.signal);
+    return new Promise<never>((_resolve, reject) => {
+      input.signal?.addEventListener('abort', () => reject(new LocalEngineError('aborted')), { once: true });
+    });
+  }
+}
+
+/** A local transcriber whose run lasts until the stop signal, then ends as the real engine does (LocalEngineError('aborted')). */
+class UntilAbortedLocalVoice extends FakeLocalVoiceTranscriber {
+  entered = 0;
+  override transcribe(_prepared: PreparedVoice, signal?: AbortSignal): Promise<VoiceResult> {
+    this.entered++;
+    this.signals.push(signal);
+    return new Promise<never>((_resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(new LocalEngineError('aborted')), { once: true });
+    });
+  }
+}
+
+describe('app voice notes (Phase 2b Task 10)', () => {
+  const HOUR = 60 * MINUTE;
+  const ledger = (db: Db) => db.prepare('SELECT kind FROM spend ORDER BY id').all() as { kind: string }[];
+  const sweeps = () => forgetHook.calls.filter((o) => o?.mediaId === undefined).length;
+  const capture = () => {
+    const lines: string[] = [];
+    const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
+    return { log, out: () => lines.join('') };
+  };
+  const NOT_SET_UP = '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_BIN)';
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-19T07:00:00Z'));
+    forgetHook.impl = null;
+    forgetHook.calls.length = 0;
+  });
+  afterEach(() => {
+    forgetHook.impl = null;
+    fsHook.rmFails = null;
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  it('a voice note flows end to end through the local engine: the prompt holds the transcript, and nothing is booked', async () => {
+    const voice = new FakeLocalVoiceTranscriber({ results: [{ text: 'payment bhej diya' }] });
+    const { db, ai, app, sock } = setup({ media: { voice, maxVoiceSeconds: 300, extract: undefined } });
+    shareVoice(sock);
+    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'done', kind: 'voice', text: 'payment bhej diya' }), SLOW_IO);
+    expect(voice.prepared[0]!.maxSeconds).toBe(300); // maxVoiceSeconds reaches the extractor
+    expect(voice.signals[0]).toBeInstanceOf(AbortSignal); // the stop signal reaches the local run
+    expect(voice.signals[0]!.aborted).toBe(false);
+    expect(voice.priced).toBe(0);
+    expect(ledger(db)).toEqual([]); // free: no spend row
+    await vi.advanceTimersByTimeAsync(240_000);
+    expect(ai.calls).toHaveLength(1);
+    expect(ai.calls[0]!.user).toContain('{voice note, 0:14, transcript: payment bhej diya}');
+    expect(ledger(db).map((r) => r.kind)).toEqual(['ai']); // only the reconcile
+    await stopApp(app);
+  });
+
+  it('with a paid transcriber, the note is booked as speech-to-text', async () => {
+    const voice = new FakeVoiceTranscriber({ provider: 'sarvam', results: [{ text: 'kal tak bhej dena' }] });
+    const { db, app, sock } = setup({ media: { voice, extract: undefined } });
+    shareVoice(sock);
+    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'done', text: 'kal tak bhej dena' }), SLOW_IO);
+    expect(voice.transcribed).toBe(1);
+    expect(ledger(db).map((r) => r.kind)).toEqual(['stt']);
+    await stopApp(app);
+  });
+
+  it('without a voice transcriber, a voice note finishes without text, as in 2a', async () => {
+    const { db, ai, app, sock } = setup({ media: { extract: undefined } });
+    shareVoice(sock);
+    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'done', text: null, note: null }), SLOW_IO);
+    await vi.advanceTimersByTimeAsync(240_000);
+    expect(ai.calls[0]!.user).toContain('{voice note, 0:14, not transcribed}');
+    await stopApp(app);
+  });
+
+  // Phase 2b final review: voice notes hold up their messages only while a transcriber is set up.
+  describe('whether a voice note still being read holds up its message', () => {
+    /** A voice note whose download never ends while the test runs, so it stays pending. */
+    const stuckVoice = (voice: VoiceTranscriber | null) => {
+      const g = gate();
+      const fetcher = vi.fn<MediaFetcher>(async () => {
+        await g.promise;
+        return Buffer.from('bytes');
+      });
+      const s = setup({ media: { voice, fetcher, extract: undefined } });
+      shareVoice(s.sock);
+      return { ...s, fetcher, release: () => g.release() };
+    };
+
+    it('with no transcriber (VOICE_STT_PROVIDER none), it holds up nothing, as in 2a', async () => {
+      const { db, ai, app, fetcher, release } = stuckVoice(null);
+      await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce(), SLOW_IO);
+      await vi.advanceTimersByTimeAsync(240_000);
+      expect(getMedia(db, 1)).toMatchObject({ status: 'pending' });
+      expect(ai.calls).toHaveLength(1);
+      expect(ai.calls[0]!.user).toContain('{voice note, 0:14, being transcribed}');
+      release();
+      await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0), SLOW_IO);
+      await stopApp(app);
+    });
+
+    it('with the local engine, it holds up its message for 30 minutes', async () => {
+      const { db, ai, app, fetcher, release } = stuckVoice(new FakeLocalVoiceTranscriber());
+      await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce(), SLOW_IO);
+      await vi.advanceTimersByTimeAsync(240_000);
+      expect(ai.calls).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(20 * MINUTE);
+      expect(getMedia(db, 1)).toMatchObject({ status: 'pending' });
+      expect(ai.calls).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(12 * MINUTE); // past 30 minutes, the next tick and the quiet time
+      expect(ai.calls).toHaveLength(1);
+      expect(ai.calls[0]!.user).toContain('{voice note, 0:14, being transcribed}');
+      release();
+      await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0), SLOW_IO);
+      await stopApp(app);
+    });
+  });
+
+  /**
+   * The run's deferral itself has been written: `runs` runs made, and the row deferred after the last one (its next
+   * attempt `delayMs` after the deferral, which the claim's 15 minutes never match). Waiting only for the claim (attempts
+   * counted) let the fake clock move before the run ended: the deferral then counted from the moved clock, and the next
+   * run never came within the test's advance (Phase 2b final review, the flaky tests).
+   */
+  const deferredAfter = (db: Db, transcribed: () => number, runs: number, delayMs: number, errorCode: string) => {
+    expect(transcribed()).toBe(runs);
+    const m = getMedia(db, 1)!;
+    expect(m).toMatchObject({ status: 'pending', attempts: runs, errorCode });
+    expect(Date.parse(m.nextAttemptAt!) - Date.parse(m.updatedAt)).toBe(delayMs);
+  };
+
+  it('the local engine gets 3 runs (voicePaid false): a note whose runs all fail fails after the third', async () => {
+    const voice = new FakeLocalVoiceTranscriber({ results: [new LocalEngineError('timeout'), new LocalEngineError('timeout'), new LocalEngineError('timeout')] });
+    const { db, app, sock } = setup({ media: { voice, extract: undefined } });
+    shareVoice(sock);
+    await vi.waitFor(() => deferredAfter(db, () => voice.transcribed, 1, MINUTE, 'local_timeout'), SLOW_IO);
+    await vi.advanceTimersByTimeAsync(2 * MINUTE);
+    await vi.waitFor(() => deferredAfter(db, () => voice.transcribed, 2, 5 * MINUTE, 'local_timeout'), SLOW_IO);
+    await vi.advanceTimersByTimeAsync(6 * MINUTE);
+    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'failed', attempts: 3, errorCode: 'local_timeout' }), SLOW_IO);
+    expect(voice.transcribed).toBe(3);
+    await stopApp(app);
+    // Three runs, each awaited by a vi.waitFor of up to 10 s (SLOW_IO) on real file I/O, plus stopApp: on a busy PC
+    // during the whole suite the stages add up past the 20 s default before any one of them times out.
+  }, 30_000);
+
+  it('a paid transcriber keeps the paid path’s 2 runs (voicePaid true)', async () => {
+    const voice = new FakeVoiceTranscriber({ provider: 'sarvam', results: [new LocalEngineError('exit_1'), new LocalEngineError('exit_1'), new LocalEngineError('exit_1')] });
+    const { db, app, sock } = setup({ media: { voice, extract: undefined } });
+    shareVoice(sock);
+    await vi.waitFor(() => deferredAfter(db, () => voice.transcribed, 1, MINUTE, 'local_exit_1'), SLOW_IO);
+    await vi.advanceTimersByTimeAsync(2 * MINUTE);
+    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'failed', attempts: 2 }), SLOW_IO);
+    expect(voice.transcribed).toBe(2);
+    await stopApp(app);
+    // Two runs, each awaited by a vi.waitFor of up to 10 s (SLOW_IO), plus stopApp: see the test above.
+  }, 30_000);
+
+  it('with the local engine, one voice note at a time takes a media slot: images use the others', async () => {
+    const g = gate();
+    const fetcher = vi.fn<MediaFetcher>(async () => {
+      await g.promise;
+      return Buffer.from('bytes');
+    });
+    const voice = new FakeLocalVoiceTranscriber();
+    const { app, sock } = setup({ media: { voice, fetcher, extract: undefined } });
+    for (const id of ['VN1', 'VN2', 'VN3']) shareVoice(sock, id);
+    for (const id of ['IMG1', 'IMG2']) shareImage(sock, id);
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher.mock.calls.map(([ref]) => ref.contentType).sort()).toEqual(['audioMessage', 'imageMessage', 'imageMessage']);
+    expect(app.mediaQueue!.active).toBe(3);
+    g.release();
+    await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0), SLOW_IO);
+    await stopApp(app);
+  });
+
+  it('with a paid transcriber there is no voice lane: voice notes may take every slot', async () => {
+    const g = gate();
+    const fetcher = vi.fn<MediaFetcher>(async () => {
+      await g.promise;
+      return Buffer.from('bytes');
+    });
+    const { app, sock } = setup({ media: { voice: new FakeVoiceTranscriber(), fetcher, extract: undefined } });
+    for (const id of ['VN1', 'VN2', 'VN3']) shareVoice(sock, id);
+    shareImage(sock, 'IMG1');
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
+    expect(fetcher.mock.calls.map(([ref]) => ref.contentType)).toEqual(['audioMessage', 'audioMessage', 'audioMessage']);
+    g.release();
+    await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0), SLOW_IO);
+    await stopApp(app);
+  });
+
+  it('stop() aborts a local run in flight before the drain: the note waits for the restart, its attempt given back', async () => {
+    const voice = new UntilAbortedLocalVoice();
+    const { db, app, sock } = setup({ media: { voice, extract: undefined }, drainMs: 60_000 });
+    shareVoice(sock);
+    await vi.waitFor(() => expect(voice.entered).toBe(1), SLOW_IO);
+    expect(voice.signals[0]!.aborted).toBe(false);
+    let stopped = false;
+    const p = app.stop().then(() => {
+      stopped = true;
+    });
+    expect(voice.signals[0]!.aborted).toBe(true);
+    // Not the 60 s drain: the run ends at once; then the last publish and WhatsApp's close.
+    for (let i = 0; i < 20 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
+    expect(stopped).toBe(true);
+    await p;
+    expect(getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'local_aborted' });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  // Phase 2b final review: a stop during the conversion stops ffmpeg too, and gives the attempt back like a stopped run.
+  it('stop() during the local conversion stops it: the note waits for the restart as local_aborted, its attempt given back', async () => {
+    const voice = new UntilAbortedConversion();
+    const { db, app, sock } = setup({ media: { voice, extract: undefined }, drainMs: 60_000 });
+    shareVoice(sock);
+    await vi.waitFor(() => expect(voice.entered).toBe(1), SLOW_IO);
+    expect(voice.prepareSignals[0]).toBeInstanceOf(AbortSignal);
+    expect(voice.prepareSignals[0]!.aborted).toBe(false);
+    let stopped = false;
+    const p = app.stop().then(() => {
+      stopped = true;
+    });
+    expect(voice.prepareSignals[0]!.aborted).toBe(true);
+    for (let i = 0; i < 20 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
+    expect(stopped).toBe(true);
+    await p;
+    expect(voice.transcribed).toBe(0);
+    expect(getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'local_aborted' });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('start() sweeps the voice copies once for all rows, then hourly; stop() ends the hourly sweep', async () => {
+    const { app } = setup();
+    expect(sweeps()).toBe(1);
+    await vi.advanceTimersByTimeAsync(HOUR);
+    expect(sweeps()).toBe(2);
+    await vi.advanceTimersByTimeAsync(HOUR);
+    expect(sweeps()).toBe(3);
+    await stopApp(app);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(3 * HOUR);
+    expect(sweeps()).toBe(3);
+  });
+
+  it('the sweep goes through the voice transcriber: a due copy is deleted at start', async () => {
+    const voice = new FakeVoiceTranscriber({ provider: 'elevenlabs' });
+    const { db, app } = setup({
+      media: { voice },
+      prepare: (db) => {
+        insertMessage(db, {
+          waId: 'V0', clientId: 1, senderJid: SHARMA_PN, senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T06:00:00.000Z', text: null,
+          quotedWaId: null, mediaType: 'voice',
+        });
+        const mediaId = insertMedia(db, {
+          messageId: messageRowId(db, 1, 'V0')!, clientId: 1, kind: 'voice', status: 'done', mimeType: 'audio/ogg', fileName: null, fileSize: 9000, seconds: 12,
+          forwarded: false, refEnc: null, errorCode: null, createdAt: '2026-10-19T06:00:00.000Z',
+        });
+        db.prepare('INSERT INTO media_stt_forget (media_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, 0)').run(mediaId, 'elevenlabs', 'tr-old', '2026-10-19T06:00:00.000Z');
+      },
+    });
+    await vi.waitFor(() => expect(voice.forgotten).toEqual(['tr-old']));
+    expect(db.prepare('SELECT COUNT(*) AS n FROM media_stt_forget').get()).toEqual({ n: 0 });
+    await stopApp(app);
+  });
+
+  it('a sweep that fails, at start or hourly, sync or async, is logged with a code only and never thrown', async () => {
+    const { log, out } = capture();
+    const boom = () => Object.assign(new Error('database is locked at C:\\secret\\tracker.db'), { code: 'SQLITE_BUSY' });
+    let n = 0;
+    forgetHook.impl = () => {
+      if (++n === 1) throw boom(); // a sync throw at start
+      return Promise.reject(boom());
+    };
+    const { app } = setup({ log });
+    expect(sweeps()).toBe(1);
+    await vi.advanceTimersByTimeAsync(HOUR);
+    expect(sweeps()).toBe(2);
+    await vi.advanceTimersByTimeAsync(HOUR);
+    expect(sweeps()).toBe(3); // a failed sweep does not stop the next one
+    await stopApp(app);
+    expect(out().match(/voice copy sweep failed/g)?.length).toBe(3);
+    expect(out()).toContain('"code":"SQLITE_BUSY"');
+    expect(out()).not.toContain('secret');
+    expect(out()).not.toContain('database is locked');
+  });
+
+  it('an hourly sweep is skipped while the previous one still runs', async () => {
+    const g = gate();
+    forgetHook.impl = async () => {
+      await g.promise;
+      return 0;
+    };
+    const { app } = setup();
+    expect(sweeps()).toBe(1);
+    await vi.advanceTimersByTimeAsync(2 * HOUR);
+    expect(sweeps()).toBe(1);
+    g.release();
+    await vi.advanceTimersByTimeAsync(HOUR);
+    expect(sweeps()).toBe(2);
+    await stopApp(app);
+  });
+
+  it('without the media pipeline nothing is swept', async () => {
+    const { app } = setup({ media: null });
+    await vi.advanceTimersByTimeAsync(HOUR);
+    expect(forgetHook.calls).toEqual([]);
+    await stopApp(app);
+  });
+
+  it('afterFinish deletes the copy a paid transcript left, for that file only', async () => {
+    const voice = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ text: 'theek hai', forgetRef: 'tr-1' }] });
+    const { db, app, sock } = setup({ media: { voice, extract: undefined } });
+    shareVoice(sock);
+    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'), SLOW_IO);
+    await vi.waitFor(() => expect(voice.forgotten).toEqual(['tr-1']));
+    expect(forgetHook.calls.some((o) => o?.mediaId === 1)).toBe(true);
+    expect(db.prepare('SELECT COUNT(*) AS n FROM media_stt_forget').get()).toEqual({ n: 0 });
+    await stopApp(app);
+  });
+
+  it('afterFinish is not asked to delete anything for a local transcript (it keeps no copies)', async () => {
+    const voice = new FakeLocalVoiceTranscriber();
+    const { db, app, sock } = setup({ media: { voice, extract: undefined } });
+    shareVoice(sock);
+    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'), SLOW_IO);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(forgetHook.calls.some((o) => o?.mediaId !== undefined)).toBe(false);
+    await stopApp(app);
+  });
+
+  it('an afterFinish whose delete fails is logged with a code only; the file stays done and the copy stays noted', async () => {
+    const { log, out } = capture();
+    forgetHook.impl = (...a: unknown[]) =>
+      (a[3] as { mediaId?: number } | undefined)?.mediaId === undefined
+        ? Promise.resolve(0)
+        : Promise.reject(Object.assign(new Error('C:\\secret'), { code: 'SQLITE_BUSY' }));
+    const voice = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ text: 'theek hai', forgetRef: 'tr-1' }] });
+    const { db, app, sock } = setup({ log, media: { voice, extract: undefined } });
+    shareVoice(sock);
+    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'), SLOW_IO);
+    await vi.waitFor(() => expect(out()).toContain('voice note speech copy not deleted yet'));
+    expect(out()).toContain('"code":"SQLITE_BUSY"');
+    expect(out()).not.toContain('secret');
+    expect(db.prepare('SELECT COUNT(*) AS n FROM media_stt_forget').get()).toEqual({ n: 1 }); // left for the sweep
+    await stopApp(app);
+  });
+
+  it('start() removes leftover voice-<digits> folders in DATA_DIR/tmp/voice, before the queue starts, and nothing else', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'wa-app-media-outside-'));
+    dirs.push(outside);
+    writeFileSync(join(outside, 'keep.txt'), 'keep');
+    const { dataDir, app } = setup({
+      prepare: (_db, dataDir) => {
+        const voiceDir = join(dataDir, 'tmp', 'voice');
+        // xvoice-12 and voice-12-old: the name must be voice-<digits> from its first character to its last.
+        for (const d of ['voice-12', 'voice-7', 'voice-12x', 'xvoice-12', 'voice-12-old', 'voice-', 'other', join('other', 'voice-4')]) {
+          mkdirSync(join(voiceDir, d), { recursive: true });
+        }
+        writeFileSync(join(voiceDir, 'voice-12', 'audio.wav'), 'client audio');
+        writeFileSync(join(voiceDir, 'voice-99'), 'a file, not a folder');
+        writeFileSync(join(voiceDir, 'notes.txt'), 'x');
+        mkdirSync(join(dataDir, 'tmp', 'meetings', 'voice-3'), { recursive: true });
+        symlinkSync(outside, join(voiceDir, 'voice-55'), 'junction'); // a link is never followed, nor removed
+      },
+    });
+    // Synchronously inside start(), so before the first tick starts any file.
+    const voiceDir = join(dataDir, 'tmp', 'voice');
+    expect(readdirSync(voiceDir).sort()).toEqual(['notes.txt', 'other', 'voice-', 'voice-12-old', 'voice-12x', 'voice-55', 'voice-99', 'xvoice-12']);
+    expect(existsSync(join(voiceDir, 'other', 'voice-4'))).toBe(true);
+    expect(existsSync(join(dataDir, 'tmp', 'meetings', 'voice-3'))).toBe(true);
+    expect(existsSync(join(outside, 'keep.txt'))).toBe(true);
+    unlinkSync(join(voiceDir, 'voice-55')); // the link only, before the folders are cleaned up
+    await stopApp(app);
+  });
+
+  it('a folder sweep that cannot run is logged with a code only; a missing folder is not a failure', async () => {
+    const { log, out } = capture();
+    const { app, dataDir } = setup({
+      log,
+      prepare: (_db, dataDir) => {
+        mkdirSync(join(dataDir, 'tmp'), { recursive: true });
+        writeFileSync(join(dataDir, 'tmp', 'voice'), 'not a folder');
+      },
+    });
+    expect(out()).toContain('leftover voice folders not removed');
+    expect(out()).toContain('"code":"voice_tmp_not_plain_folder"');
+    expect(out()).not.toContain(dataDir.replaceAll('\\', '\\\\'));
+    await stopApp(app);
+    const quiet = capture();
+    const second = setup({ log: quiet.log });
+    expect(quiet.out()).not.toContain('leftover voice folders not removed');
+    await stopApp(second.app);
+  });
+
+  it('a folder delete that fails is logged with a code only: start() goes on, and the other folders are still removed', async () => {
+    const { log, out } = capture();
+    fsHook.rmFails = (path) => path.endsWith('voice-2');
+    const { dataDir, app } = setup({
+      log,
+      prepare: (_db, dataDir) => {
+        for (const d of ['voice-1', 'voice-2', 'voice-3']) {
+          mkdirSync(join(dataDir, 'tmp', 'voice', d), { recursive: true });
+          writeFileSync(join(dataDir, 'tmp', 'voice', d, 'audio.wav'), 'client audio');
+        }
+      },
+    }); // setup() runs start(): it did not throw
+    expect(readdirSync(join(dataDir, 'tmp', 'voice'))).toEqual(['voice-2']);
+    expect(out().match(/leftover voice folders not removed/g)?.length).toBe(1);
+    expect(out()).toContain('"code":"EBUSY"');
+    expect(out()).not.toContain('resource busy');
+    expect(out()).not.toContain(dataDir.replaceAll('\\', '\\\\'));
+    expect(sweeps()).toBe(1); // start() went on to the copy sweep
+    fsHook.rmFails = null;
+    await stopApp(app);
+  });
+
+  it('a paid transcript finishMedia cannot store: the processor deletes its copy now through the transcriber, not at the hourly sweep', async () => {
+    const voice = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ text: 'theek hai', forgetRef: 'tr-1' }] });
+    const { db, app, sock } = setup({
+      media: { voice, extract: undefined },
+      // finishMedia's UPDATE to done fails for voice notes, as a full or locked database would.
+      prepare: (db) => db.exec(`CREATE TRIGGER refuse_voice_done BEFORE UPDATE OF status ON media
+        WHEN NEW.status = 'done' AND NEW.kind = 'voice' BEGIN SELECT RAISE(ABORT, 'finish refused'); END`),
+    });
+    shareVoice(sock);
+    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('failed'), SLOW_IO);
+    await vi.waitFor(() => expect(voice.forgotten).toEqual(['tr-1']));
+    expect(voice.transcribed).toBe(1); // never paid again
+    expect(forgetHook.calls.some((o) => o?.mediaId === 1)).toBe(true);
+    expect(sweeps()).toBe(1); // only the start's, before the note: no hourly sweep did it
+    expect(db.prepare('SELECT COUNT(*) AS n FROM media_stt_forget').get()).toEqual({ n: 0 });
+    await stopApp(app);
+  });
+
+  it('the voice problem found at start reaches the health line', async () => {
+    const { db, app } = setup({ media: { voiceProblem: 'local_not_set_up_bin' } });
+    expect(readHealthSnapshot(db)!.voiceProblem).toBe('local_not_set_up_bin');
+    expect(readHealthSnapshot(db)!.line.text).toBe(NOT_SET_UP);
+    await stopApp(app);
+    const other = setup({ media: { voiceProblem: 'no_ffmpeg' } });
+    expect(readHealthSnapshot(other.db)!.line.text).toBe('⚠️ Voice notes are not being transcribed: ffmpeg not found');
+    await stopApp(other.app);
+  });
+
+  /** Makes `link` a junction (Windows) or symlink to `target`; false where links cannot be made here. */
+  const tryLink = (target: string, link: string): boolean => {
+    try {
+      symlinkSync(target, link, 'junction');
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  it.for([
+    ['DATA_DIR/tmp', ['tmp']],
+    ['DATA_DIR/tmp/voice', ['tmp', 'voice']],
+  ] as const)('the folder sweep is skipped, logging a code, when %s is a link or junction: nothing behind it is touched', async ([, parts], ctx) => {
+    const outside = mkdtempSync(join(tmpdir(), 'wa-app-media-outside-'));
+    dirs.push(outside);
+    // The link's target, laid out as the part of DATA_DIR/tmp/voice it stands for.
+    const behind = parts.length === 1 ? join(outside, 'voice') : outside;
+    mkdirSync(join(behind, 'voice-1'), { recursive: true });
+    writeFileSync(join(behind, 'voice-1', 'audio.wav'), 'someone else’s audio');
+    const { log, out } = capture();
+    let linked = false;
+    let link = '';
+    const { app } = setup({
+      log,
+      prepare: (_db, dataDir) => {
+        if (parts.length === 2) mkdirSync(join(dataDir, 'tmp'), { recursive: true });
+        link = join(dataDir, ...parts);
+        linked = tryLink(outside, link);
+      },
+    });
+    if (!linked) {
+      await stopApp(app);
+      ctx.skip();
+      return;
+    }
+    expect(existsSync(join(behind, 'voice-1', 'audio.wav'))).toBe(true);
+    expect(out()).toContain('leftover voice folders not removed');
+    expect(out()).toContain('"code":"voice_tmp_not_plain_folder"');
+    expect(out()).not.toContain('outside');
+    unlinkSync(link); // the link only, before the folders are cleaned up
+    await stopApp(app);
+    expect(existsSync(join(behind, 'voice-1', 'audio.wav'))).toBe(true);
+  });
+
+  it('without a voice transcriber (VOICE_STT_PROVIDER none), a voice note gets 3 runs, as in 2a', async () => {
+    const fetcher = vi.fn<MediaFetcher>(async () => {
+      throw new MediaDownloadError('http_503');
+    });
+    const { db, app, sock } = setup({ media: { voice: null, fetcher, extract: undefined } });
+    shareVoice(sock);
+    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'http_503' }), SLOW_IO);
+    await vi.advanceTimersByTimeAsync(2 * MINUTE);
+    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 2 }), SLOW_IO);
+    await vi.advanceTimersByTimeAsync(6 * MINUTE);
+    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'failed', attempts: 3, errorCode: 'http_503' }), SLOW_IO);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    await stopApp(app);
+  });
+
+  it('the hourly sweep warns provider_unavailable once per leftover copy, not every hour', async () => {
+    const { log, out } = capture();
+    const { app } = setup({
+      log,
+      media: { voice: new FakeLocalVoiceTranscriber() }, // switched to local: the elevenlabs copy cannot be deleted now
+      prepare: (db) => {
+        insertMessage(db, {
+          waId: 'V0', clientId: 1, senderJid: SHARMA_PN, senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T06:00:00.000Z', text: null,
+          quotedWaId: null, mediaType: 'voice',
+        });
+        const mediaId = insertMedia(db, {
+          messageId: messageRowId(db, 1, 'V0')!, clientId: 1, kind: 'voice', status: 'done', mimeType: 'audio/ogg', fileName: null, fileSize: 9000, seconds: 12,
+          forwarded: false, refEnc: null, errorCode: null, createdAt: '2026-10-19T06:00:00.000Z',
+        });
+        db.prepare('INSERT INTO media_stt_forget (media_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, 0)').run(mediaId, 'elevenlabs', 'tr-old', '2026-10-19T06:00:00.000Z');
+      },
+    });
+    await vi.advanceTimersByTimeAsync(3 * HOUR);
+    expect(sweeps()).toBe(4);
+    expect(out().match(/"code":"provider_unavailable"/g)?.length).toBe(1);
+    await stopApp(app);
+  });
+
+  /** Runs app.stop() and reports whether it has resolved. */
+  const stopping = (app: { stop(): Promise<void> }) => {
+    const s = { done: false, p: Promise.resolve() };
+    s.p = app.stop().then(() => {
+      s.done = true;
+    });
+    return s;
+  };
+
+  it('stop() waits for a copy sweep in flight before it returns (so before the database closes)', async () => {
+    const g = gate();
+    let sweepDone = false;
+    forgetHook.impl = async () => {
+      await g.promise;
+      sweepDone = true;
+      return 0;
+    };
+    const { app } = setup();
+    const s = stopping(app);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(s.done).toBe(false);
+    g.release();
+    for (let i = 0; i < 30 && !s.done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    await s.p;
+    expect(sweepDone).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('stop() waits for an afterFinish delete in flight', async () => {
+    const g = gate();
+    let deleteDone = false;
+    forgetHook.impl = async (...a: unknown[]) => {
+      if ((a[3] as { mediaId?: number } | undefined)?.mediaId === undefined) return 0;
+      await g.promise;
+      deleteDone = true;
+      return 1;
+    };
+    const voice = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ text: 'theek hai', forgetRef: 'tr-1' }] });
+    const { db, app, sock } = setup({ media: { voice, extract: undefined } });
+    shareVoice(sock);
+    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'), SLOW_IO);
+    await vi.waitFor(() => expect(forgetHook.calls.some((o) => o?.mediaId === 1)).toBe(true));
+    const s = stopping(app);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(s.done).toBe(false);
+    g.release();
+    for (let i = 0; i < 30 && !s.done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    await s.p;
+    expect(deleteDone).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('stop() waits for a copy deletion at most 5 s, then logs a code and goes on', async () => {
+    const { log, out } = capture();
+    forgetHook.impl = () => new Promise<number>(() => {}); // never ends
+    const { app } = setup({ log });
+    const s = stopping(app);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(s.done).toBe(false);
+    for (let i = 0; i < 30 && !s.done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    await s.p;
+    expect(s.done).toBe(true);
+    expect(out()).toContain('"code":"forget_in_flight"');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a late transcript (12h): a note still being transcribed when its message was processed re-queues the message as a re-check', async () => {
+    const voice = new GatedLocalVoice({ results: [{ text: 'payment kal tak ho jayega' }] });
+    const { db, ai, app, sock } = setup({ media: { voice, extract: undefined } });
+    shareVoice(sock);
+    await vi.waitFor(() => expect(voice.entered).toBe(1), SLOW_IO);
+    // V1: the note blocks its client's update for 30 minutes, then the update goes on without it.
+    await vi.advanceTimersByTimeAsync(36 * MINUTE); // the wait, then the debouncer's quiet time
+    expect(ai.calls).toHaveLength(1);
+    expect(ai.calls[0]!.user).toContain('{voice note, 0:14, being transcribed}');
+    expect(ai.calls[0]!.user).not.toContain('(re-check: file now read)');
+    expect(listUnprocessed(db, 1)).toEqual([]);
+    voice.g.release();
+    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'done', text: 'payment kal tak ho jayega' }), SLOW_IO);
+    await vi.waitFor(() => expect(listUnprocessed(db, 1)).toHaveLength(1));
+    await vi.advanceTimersByTimeAsync(241_000);
+    expect(ai.calls).toHaveLength(2);
+    expect(ai.calls[1]!.user).toContain('(re-check: file now read)');
+    expect(ai.calls[1]!.user).toContain('{voice note, 0:14, transcript: payment kal tak ho jayega}');
     await stopApp(app);
   });
 });

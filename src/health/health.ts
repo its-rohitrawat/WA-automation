@@ -15,8 +15,32 @@ const LOW_DISK_GB = 10;
 const DISCONNECT_GRACE_MS = 30 * 60_000;
 const PUBLISH_FAIL_MS = 60 * 60_000;
 const SPEND_CAP_LINE = '⚠️ Daily spend cap reached. Paused until midnight IST';
+const STT_REFUSED_LINE = '⚠️ Voice notes are not being transcribed: the speech-to-text key was refused.';
+/**
+ * Voice notes that failed on this computer in the last 24 hours (mediaStats.voiceFailed); docs/SETUP.md lists the line.
+ * "On this computer", not "by the local engine" (Phase 2b final polish): an ffmpeg failure counts too, with any provider.
+ */
+export const voiceFailedLine = (n: number) => `⚠️ ${n} voice note${n === 1 ? '' : 's'} could not be transcribed on this computer. See docs/SETUP.md, Voice notes`;
+
+/**
+ * Why voice notes are not transcribed at all, found when the service starts (Phase 2b Task 10, src/voiceDeps.ts):
+ * VOICE_STT_PROVIDER is local but STT_LOCAL_BIN (local_not_set_up_bin) or STT_LOCAL_MODEL (local_not_set_up_model) is
+ * not a file, or ffmpeg was not found. The notes are kept; the service runs on. The line names the setting, never its path.
+ */
+export type VoiceProblem = 'local_not_set_up_bin' | 'local_not_set_up_model' | 'no_ffmpeg';
+/** The Health line for each problem; docs/SETUP.md ("Voice note status lines") lists each one, without the ⚠️. */
+export const VOICE_PROBLEM_LINES: Readonly<Record<VoiceProblem, string>> = {
+  local_not_set_up_bin: '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_BIN)',
+  local_not_set_up_model: '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_MODEL)',
+  no_ffmpeg: '⚠️ Voice notes are not being transcribed: ffmpeg not found',
+};
 
 export type MediaHealth = MediaStats;
+/**
+ * The shared-file counts as a snapshot stores them: snapshots written before Phase 2b have no sttRefused, and those
+ * written before the Phase 2b final review no voiceFailed.
+ */
+export type MediaSnapshot = Omit<MediaStats, 'sttRefused' | 'voiceFailed'> & { sttRefused?: number; voiceFailed?: number };
 export type { MeetingsHealth } from '../meetings/healthTypes.ts';
 
 export interface HealthSnapshot {
@@ -35,15 +59,19 @@ export interface HealthSnapshot {
   ingestFailures: number;
   /**
    * Shared files: waiting, waiting too long, waiting for the daily budget, failed in the last 24 h, Drive uploads that
-   * gave up. Missing in older snapshots.
+   * gave up, voice notes waiting for a refused speech-to-text key, voice notes that failed on this computer in the last
+   * 24 hours. Missing in older snapshots; sttRefused missing in snapshots written before Phase 2b, voiceFailed in those
+   * written before its final review.
    */
-  media?: MediaHealth;
+  media?: MediaSnapshot;
   /** Meeting counts and pauses; missing while meetings are switched off, and in older snapshots. */
   meetings?: MeetingsHealth;
   /** spentToday split by kind: AI calls and speech-to-text. Missing in older snapshots. */
   spendByKind?: Record<SpendKind, number>;
   /** The morning report's line (Phase 2c). Missing when the report is off, and in older snapshots. */
   report?: ReportHealth;
+  /** Why voice notes are not transcribed (Phase 2b Task 10). Missing when they are (or are off), and in older snapshots. */
+  voiceProblem?: VoiceProblem;
 }
 
 /**
@@ -76,9 +104,10 @@ export class Health {
   #lastSuccess: Date | null = null;
   #lastPublished: Date | null = null;
   #ingestFailures = 0;
-  #media: MediaHealth = { pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0 };
+  #media: MediaHealth = { pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0 };
   #meetings: MeetingsHealth | null = null;
   #report: ReportHealth | null = null;
+  #voiceProblem: VoiceProblem | null = null;
 
   constructor(o: { db: Db; clock: Clock; spend: SpendGuard; dataDir?: string; freeBytes?: (dir: string) => number | null }) {
     this.#db = o.db;
@@ -131,6 +160,11 @@ export class Health {
   /** Stores the morning report's line; the next persist() records it. Null when the report is off. */
   setReport(r: ReportHealth | null): void {
     this.#report = r;
+  }
+
+  /** Stores why voice notes are not transcribed (null: nothing wrong, or voice notes are off); the next persist() records it. */
+  setVoiceProblem(p: VoiceProblem | null): void {
+    this.#voiceProblem = p;
   }
 
   forget(clientId: number): void {
@@ -205,23 +239,36 @@ export class Health {
       const n = this.#media.uploadFailed;
       return { ok: false, text: `⚠️ ${n} file${n === 1 ? '' : 's'} could not be uploaded to Drive. See docs/SETUP.md.` };
     }
+    // Voice notes wait for a speech-to-text key that was refused: the owner must fix STT_API_KEY. Above the budget line
+    // (Phase 2b final polish, as in Task 9), because those notes give up after 24 hours: the owner must see it in time.
+    // They are not counted as waiting too long (mediaStats.stale), so the long-wait line above never hides this one.
+    if (this.#media.sttRefused > 0) return { ok: false, text: STT_REFUSED_LINE };
     // A paid read holds its ceiling (about $4 for a scan) while it runs, so a file can wait for the budget long before
     // the cap is reached. Nothing is paused and nothing needs the owner, so this comes after the warnings above.
     if (this.#media.spendCap > 0) {
       const n = this.#media.spendCap;
       return { ok: false, text: `⚠️ ${n} shared file${n === 1 ? '' : 's'} waiting for today's AI budget (read after midnight IST)` };
     }
-    // After the media lines and before low disk: the morning report's warning first, then the meeting lines.
+    // After the file lines and before low disk: the morning report's warning first, then the meeting lines.
     // The morning report warns only when the owner must act: an unknown outcome, or a spare number that is unlinked.
     if (this.#report?.warning) return { ok: false, text: this.#report.warning };
     const meeting = this.#meetingLine();
     if (meeting !== null) return { ok: false, text: meeting };
     const free = this.#freeGb();
     if (free !== null && free < LOW_DISK_GB) return { ok: false, text: `⚠️ Low disk: ${free.toFixed(1)} GB free` };
+    // The other voice lines come last (Phase 2b final review), so they never hide the morning report's warning, a meeting
+    // line or low disk. The tracker keeps working without the notes (it waits 30 minutes for one at most), and the notes
+    // are kept, to be transcribed once the cause is fixed. The key-refused line is not among them (final polish): it sits
+    // above the budget line, since notes waiting on a refused key give up after 24 hours. Among these, the most basic
+    // cause first:
+    // - not transcribed at all: the local engine's files or ffmpeg were missing at start (set up, then restart);
+    // - notes that could not be transcribed on this computer (`cli transcribe-voice --failed`, local engine only).
+    if (this.#voiceProblem !== null) return { ok: false, text: VOICE_PROBLEM_LINES[this.#voiceProblem] };
+    if (this.#media.voiceFailed > 0) return { ok: false, text: voiceFailedLine(this.#media.voiceFailed) };
     return { ok: true, text: this.#lastSuccess ? `✅ Connected · last update ${stamp(this.#lastSuccess)}` : '✅ Connected · waiting for new messages' };
   }
 
-  /** The meeting warning, if any, in this order (after the media lines, before low disk). Null while meetings are off. */
+  /** The meeting warning, if any, in this order (after the file lines, before low disk). Null while meetings are off. */
   #meetingLine(): string | null {
     const m = this.#meetings;
     if (m === null) return null;
@@ -256,6 +303,7 @@ export class Health {
       ...(this.#meetings === null ? {} : { meetings: { ...this.#meetings, stats: { ...this.#meetings.stats, deferred: { ...this.#meetings.stats.deferred } } } }),
       spendByKind: this.#spend.spentTodayByKind(),
       ...(this.#report ? { report: { ...this.#report } } : {}),
+      ...(this.#voiceProblem === null ? {} : { voiceProblem: this.#voiceProblem }),
     };
   }
 
@@ -266,9 +314,14 @@ export class Health {
 
 const MEDIA_COUNTS = ['pending', 'stale', 'spendCap', 'failedRecent', 'uploadFailed'] as const;
 
-const isMediaHealth = (m: unknown): m is MediaHealth => {
+/** sttRefused and voiceFailed are checked separately: snapshots written before Phase 2b (or its final review) lack them. */
+const OPTIONAL_MEDIA_COUNTS = ['sttRefused', 'voiceFailed'] as const;
+const isMediaSnapshot = (m: unknown): m is MediaSnapshot => {
   const x = m as Record<string, unknown> | null;
-  return typeof x === 'object' && x !== null && MEDIA_COUNTS.every((k) => typeof x[k] === 'number');
+  return (
+    typeof x === 'object' && x !== null && MEDIA_COUNTS.every((k) => typeof x[k] === 'number') &&
+    OPTIONAL_MEDIA_COUNTS.every((k) => x[k] === undefined || typeof x[k] === 'number')
+  );
 };
 
 const MEETING_COUNTS = ['done', 'waiting', 'unassigned', 'failed', 'noAccess', 'tooLong', 'internal'] as const;
@@ -301,6 +354,8 @@ const isReportHealth = (r: unknown): r is ReportHealth => {
   );
 };
 
+const isVoiceProblem = (p: unknown): p is VoiceProblem => typeof p === 'string' && Object.hasOwn(VOICE_PROBLEM_LINES, p);
+
 export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
   const v = getKv(db, 'health');
   if (!v) return undefined;
@@ -316,16 +371,19 @@ export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
     // Snapshots written before ingestFailures existed still parse.
     if (o.ingestFailures !== undefined && typeof o.ingestFailures !== 'number') return undefined;
     // Snapshots written before media counts existed still parse.
-    if (o.media !== undefined && !isMediaHealth(o.media)) return undefined;
+    if (o.media !== undefined && !isMediaSnapshot(o.media)) return undefined;
     // Snapshots written before meetings, or with meetings off, have no meetings; older ones no spend split.
     if (o.meetings !== undefined && !isMeetingsHealth(o.meetings)) return undefined;
     if (o.spendByKind !== undefined && !isSpendByKind(o.spendByKind)) return undefined;
     // Snapshots written before the morning report existed, or with it off, have no report line.
     if (o.report !== undefined && !isReportHealth(o.report)) return undefined;
     // A pause reason or provider this version does not know (a newer writer) drops only the meetings, not the snapshot.
-    const { meetings, ...rest } = o;
+    // So does a voice problem it does not know (including the earlier 'local_not_set_up', written before the problem
+    // named its setting): only that field is dropped. Snapshots before Task 10 have none.
+    const { meetings, voiceProblem, ...rest } = o;
     const keep = meetings !== undefined && isKnownMeetingsState(meetings) ? { meetings } : {};
-    return { ...rest, ...keep, ingestFailures: o.ingestFailures ?? 0 } as HealthSnapshot;
+    const voice = isVoiceProblem(voiceProblem) ? { voiceProblem } : {};
+    return { ...rest, ...keep, ...voice, ingestFailures: o.ingestFailures ?? 0 } as HealthSnapshot;
   } catch {
     return undefined;
   }

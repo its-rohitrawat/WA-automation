@@ -11,6 +11,7 @@ import {
 import {
   assignMeetingToClient, defaultMeetingDeps, meetingBackfillCommand, meetingCheckCommand, meetingListLines, retryLine, retryMeetingById, skipMeetingById,
 } from './cli/meetings.ts';
+import { transcribeVoiceCommand } from './cli/transcribeVoice.ts';
 
 // Without these Node prints the raw error (Boom data, gaxios request config), bypassing any redaction.
 function fatal(err: unknown): void {
@@ -126,6 +127,18 @@ program
       console.log('The running service will now make new AI calls for them. This costs money and counts toward the daily spend cap.');
     }
   });
+
+program
+  .command('transcribe-voice')
+  .description(
+    'Transcribe voice notes saved before Phase 2b, for the record (costs money only with a paid provider). Without --yes only shows the count and cost',
+  )
+  .option('--client <code>', 'only this client')
+  .option('--failed', 'instead, the notes the local engine could not transcribe (VOICE_STT_PROVIDER=local only)')
+  .option('--yes', 'queue them; the running service transcribes them')
+  .action((opts: { client?: string; yes?: boolean; failed?: boolean }) =>
+    transcribeVoiceCommand({ ...opts, yes: opts.yes === true, failed: opts.failed === true }, deps()),
+  );
 
 const meeting = program.command('meeting').description('Fix and check recorded meetings');
 meeting

@@ -16,12 +16,16 @@ function fake(answer: unknown) {
 }
 
 let audio: AudioPart;
+let voiceNote: AudioPart;
 
 beforeAll(() => {
   const dir = mkdtempSync(join(tmpdir(), 'stt-openai-'));
   const path = join(dir, 'a.mp3');
   writeFileSync(path, 'fake mp3 bytes');
   audio = { path, seconds: 42, offset: 0 };
+  const ogg = join(dir, 'a.ogg');
+  writeFileSync(ogg, 'fake ogg bytes');
+  voiceNote = { path: ogg, seconds: 42, offset: 0, format: 'ogg' };
 });
 
 describe('OpenAiProvider', () => {
@@ -73,6 +77,23 @@ describe('OpenAiProvider', () => {
     const d = await new OpenAiProvider({ apiKey: 'k', http: diarized.http }).transcribe(audio, { diarize: true });
     expect(d.segments).toEqual([{ start: 0, end: 2, speaker: 'A', text: 'Haan' }]);
     expect(d.billedSeconds).toBeNull();
+  });
+
+  it('sends the file as MP3 when the part names no format', async () => {
+    const { http, calls } = fake({ text: 'Theek hai' });
+    await new OpenAiProvider({ apiKey: 'k', http }).transcribe(audio, { diarize: false });
+    const file = calls[0]!.form.get('file') as File;
+    expect(file.type).toBe('audio/mpeg');
+    expect(file.name).toBe('audio.mp3');
+  });
+
+  it("sends a voice note in the part's own format, Ogg", async () => {
+    const { http, calls } = fake({ text: 'Theek hai' });
+    await new OpenAiProvider({ apiKey: 'k', http }).transcribe(voiceNote, { diarize: false });
+    const file = calls[0]!.form.get('file') as File;
+    expect(file.type).toBe('audio/ogg');
+    expect(file.name).toBe('voice.ogg');
+    expect(await file.text()).toBe('fake ogg bytes');
   });
 
   it('caps each request at 5 minutes of audio', () => {
