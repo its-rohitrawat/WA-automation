@@ -33,6 +33,7 @@ import { openSessionDb, SessionDecryptError, useEncryptedAuthState } from './wa/
 import { baileysSocketFactory, WhatsAppGateway } from './wa/gateway.ts';
 import { baileysSenderSocketFactory, linkedNumber } from './wa/senderGateway.ts';
 import { buildVoiceDeps } from './voiceDeps.ts';
+import { startDashboard } from './web/start.ts';
 
 /** Expected startup refusal. The message is safe to print. */
 class StartupExit extends Error {}
@@ -196,6 +197,10 @@ async function main(): Promise<void> {
     const heartbeat = env.HEARTBEAT_URL ? new Heartbeat({ url: env.HEARTBEAT_URL, isUp: () => app.health.isUp(), log }) : undefined;
     heartbeat?.start();
     if (heartbeat) log.info('uptime heartbeat on');
+    // Owner dashboard: off (the default) means no web server and no port. Not awaited here, so the stop handlers below
+    // are in place before anything else is awaited. It never rejects: a dashboard that cannot start resolves to undefined.
+    // The AgentControl (the dashboard's only way into the agent) is passed here once it exists (task 5).
+    const webReady = env.DASHBOARD_ENABLED ? startDashboard({ env, log, control: {} }) : Promise.resolve(undefined);
 
     const trackerDb = db;
     const sessionStore = sessionDb;
@@ -213,10 +218,14 @@ async function main(): Promise<void> {
       }
       stopping = true;
       log.info('WA Agent stopping');
+      // The dashboard stops first (in-flight requests get up to 5 s), so no request reaches the app while it drains.
+      const webStopped = webReady
+        .then((w) => w?.stop())
+        .catch((err: unknown) => log.error({ err }, 'error while stopping the dashboard'));
       void heartbeat?.stop();
       stopWatching();
-      void app
-        .stop()
+      void webStopped
+        .then(() => app.stop())
         .catch((err) => log.error({ err }, 'error while stopping'))
         .finally(() => {
           // Databases are closed only after app.stop() has settled, so after the morning report's stop() has returned.
