@@ -769,3 +769,16 @@ describe('dashboard first, commands as the fallback (D2 task 5, D3 task 10)', ()
     expect(s.indexOf('8. **Connections:**')).toBeLessThan(s.indexOf('DASHBOARD_ENABLED=false'));
   });
 });
+
+describe('go-live guide: the website build (GO-LIVE.md step 5)', () => {
+  it('says how the website gets into the code, and when the Next.js upgrade is due', () => {
+    const g = read('docs/GO-LIVE.md');
+    const step = g.slice(g.indexOf('\n## 5. The website files\n'), g.indexOf('\n## 6. '));
+    expect(step).toContain('The Mac never builds the website.');
+    expect(step).toContain('`npm run site:import`');
+    expect(step).toContain('**Due on or after 6 Nov 2026:** the website\'s Next.js upgrade (16.4.0 to 16.4.3).');
+    // The command it names is a real script of this repo.
+    expect(read('package.json')).toContain('"site:import": "node scripts/site-import.ts"');
+    expect(read('scripts/site-import.ts')).toContain('Due on or after 6 Nov 2026');
+  });
+});

@@ -119,6 +119,10 @@ The agent listens on `127.0.0.1:8787` only: nothing on the office network can re
 
 The website's files come with the code, in the `site` folder of `/opt/wa-agent`, so step 2 brings them. Until they are there, `/` shows a plain "Website not installed" page and the dashboard still works. The website and the dashboard both run only while `DASHBOARD_ENABLED=true`.
 
+The Mac never builds the website. The developer builds it in the website project and copies it into the code with `npm run site:import`, which checks the files first; the Mac's usual update (step 2) then brings it.
+
+**Due on or after 6 Nov 2026:** the website's Next.js upgrade (16.4.0 to 16.4.3). The known Next.js advisories need a Next.js server, and the agent serves the website as plain files, so this can wait until the new version is two weeks old. Then the developer upgrades, rebuilds the website and re-imports it with `npm run site:import`.
+
 ## 6. Point the domain at the Mac
 
 The domain must reach the agent on the Mac without opening a port on the office network. One way is a tunnel that runs on the Mac and connects out, for example Cloudflare Tunnel:
