@@ -131,6 +131,11 @@ describe('the website at /', () => {
     expect((await get(port, '/')).headers['cache-control']).toBe('no-cache');
     expect((await get(port, '/about')).headers['cache-control']).toBe('no-cache');
     expect((await get(port, '/nope')).headers['cache-control']).toBe('no-cache');
+    // The router's payloads change with every build: never cached, and served as text/plain (the router accepts no other).
+    expect(await get(port, '/__next._tree.txt')).toMatchObject({ status: 200, headers: { 'cache-control': 'no-cache', 'content-type': 'text/plain; charset=utf-8' } });
+    // Its prefetches add ?_rsc=...: the path alone decides.
+    expect((await get(port, '/__next._tree.txt?_rsc=1x2y')).status).toBe(200);
+    expect((await get(port, '/about?_rsc=1x2y')).status).toBe(200);
   });
 
   it('answers HEAD without a body, a matching ETag with 304, and refuses other methods', async () => {
@@ -225,7 +230,7 @@ describe('website review fixes', () => {
   });
 
   it('the site policy is exactly this', () => {
-    expect(sitePolicy([])).toBe("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; " +
+    expect(sitePolicy([])).toBe("default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data:; font-src 'self'; " +
       "connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
   });
 

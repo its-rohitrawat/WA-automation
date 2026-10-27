@@ -50,7 +50,7 @@ const ASSET = 'public, max-age=3600';
 const HTML = 'no-cache';
 
 /** A path segment as served: no leading dot (no hidden files), no slash, backslash, colon, NUL, tilde or control character. */
-const SEGMENT = /^[A-Za-z0-9_@+-][A-Za-z0-9._@+-]*$/;
+export const SEGMENT = /^[A-Za-z0-9_@+-][A-Za-z0-9._@+-]*$/;
 /** The biggest file served, and the biggest page read for its scripts. */
 export const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_HTML_BYTES = 5 * 1024 * 1024;
@@ -60,7 +60,9 @@ const MAX_POLICIES = 4_000;
 
 const BASE_POLICY = [
   "default-src 'self'",
-  "style-src 'self' 'unsafe-inline'",
+  // The export has no <style> tags; React writes style="..." attributes, so only those are allowed inline.
+  "style-src 'self'",
+  "style-src-attr 'unsafe-inline'",
   "img-src 'self' data:",
   "font-src 'self'",
   "connect-src 'self'",
@@ -297,7 +299,8 @@ export function createSite(o: { dir: string; log: Logger; /** Tests only: reads 
       const ext = extname(file).toLowerCase();
       const type = SITE_MIME[ext];
       if (type === undefined) return notFound(req, res);
-      if (ext !== '.html') return streamFile(req, res, file, type, pathname.startsWith(IMMUTABLE_PREFIX) ? IMMUTABLE : ASSET);
+      // The router's .txt payloads change with every build, like the pages: never kept stale.
+      if (ext !== '.html') return streamFile(req, res, file, type, pathname.startsWith(IMMUTABLE_PREFIX) ? IMMUTABLE : ext === '.txt' ? HTML : ASSET);
       // A page is read whole, for its policy: a few at a time.
       if (pageReads >= MAX_PAGE_READS) {
         res.setHeader('Retry-After', '1');
