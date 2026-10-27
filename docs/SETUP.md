@@ -917,6 +917,14 @@ These appear on the `Health:` line, after the shared-file lines and before low d
 
 Set `MEETINGS_ENABLED=false` in `.env` and restart the service. Nothing is deleted: the Docs, the tasks and the saved audio stay. Meetings already found wait, untouched, until you switch it on again.
 
+## Uptime monitoring (optional, UptimeRobot)
+
+The agent can visit an UptimeRobot **Heartbeat** monitor link every 5 minutes while it is working, so UptimeRobot alerts you when the visits stop (the PC is off, the service stopped, WhatsApp is unlinked or disconnected for over 30 minutes, the Google sign-in expired, or tracker updates fail for over an hour). It sends nothing but the visit.
+
+1. In UptimeRobot add a **Heartbeat** monitor with a 5-minute interval, and copy its link (`https://heartbeat.uptimerobot.com/...`). Keep it secret.
+2. Paste it after `HEARTBEAT_URL=` in `.env`, save, and restart the service (`net stop wa-agent`, then `net start wa-agent`).
+3. After an alert, run `npm run cli -- status`: the Health line says what is wrong. To switch it off, empty `HEARTBEAT_URL=` and restart.
+
 ## If the service will not start
 
 When the agent refuses to start it exits, and WinSW tries again every minute or so. So `net stop` alone may not hold it down. Use the two procedures below around every fix.

@@ -10,6 +10,7 @@ import { GROUPS_FILE_MISSING_MESSAGE, loadGroupsFile, watchGroupsFile } from './
 import type { ClientConfig } from './config/groups.ts';
 import { masterKeyPath, sessionDbPath, trackerDbPath } from './config/paths.ts';
 import { DpapiKeyProvider, MasterKeyError } from './crypto/keyProvider.ts';
+import { Heartbeat } from './health/heartbeat.ts';
 import { baileysFetcher } from './media/fetch.ts';
 import { MediaRefSealer } from './media/ref.ts';
 import { combineMeetingAccounts, storedMeetingAccounts } from './meetings/multiAccount.ts';
@@ -191,6 +192,10 @@ async function main(): Promise<void> {
 
     app.start();
     log.info({ groups: configs.length }, 'WA Agent started');
+    // Optional uptime heartbeat: visits HEARTBEAT_URL (never logged) every 5 minutes while the agent is up.
+    const heartbeat = env.HEARTBEAT_URL ? new Heartbeat({ url: env.HEARTBEAT_URL, isUp: () => app.health.isUp(), log }) : undefined;
+    heartbeat?.start();
+    if (heartbeat) log.info('uptime heartbeat on');
 
     const trackerDb = db;
     const sessionStore = sessionDb;
@@ -208,6 +213,7 @@ async function main(): Promise<void> {
       }
       stopping = true;
       log.info('WA Agent stopping');
+      void heartbeat?.stop();
       stopWatching();
       void app
         .stop()
