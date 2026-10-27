@@ -236,3 +236,12 @@ The dashboard comes first because it is what the owner needs for daily work. The
 - Which emails go in `DASHBOARD_OWNER_EMAILS`.
 - Review the draft Privacy and Terms before the website goes live.
 - Approve creating the `wa-agent-website` repo when W1 starts.
+
+## Amendment, 27 Oct 2026: everything runs on the Mac (owner decision)
+
+This replaces section 9 where they differ.
+
+- The website and the dashboard live in **this repo** and are both served by the agent on the office Mac: the website at `/`, the dashboard at `/dashboard`. One merge to main updates both through the Mac's normal auto-update.
+- **There is no Cloudflare Pages, no routing Worker and no "Agent offline" page.** When the Mac is off, the whole site is down.
+- **Claude deploys nothing.** The owner merges, and the owner does any hosting or domain set-up, for example a tunnel from the domain straight to the agent's port. The go-live guide describes these steps; it does not run them.
+- The website is built as a static export (W1, in its own local folder), then copied into this repo and served by the agent's web server with its own CSP. Its inline scripts are allowed by hash, kept separate from the dashboard's strict CSP. The Mac never runs the website's build.
