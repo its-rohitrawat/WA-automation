@@ -67,12 +67,12 @@ export function installTooltip() {
   });
 }
 
-/** A short notice in the corner. @param {string} msg */
-export function toast(msg) {
+/** A short notice in the corner: a tick, or (good false) a warning sign. @param {string} msg @param {boolean} [good] */
+export function toast(msg, good = true) {
   const t = document.createElement('div');
-  t.className = 'toast';
+  t.className = good ? 'toast' : 'toast toast-warn';
   t.setAttribute('role', 'status');
-  t.innerHTML = icon('ok', 18);
+  t.innerHTML = icon(good ? 'ok' : 'alert', 18);
   t.append(document.createTextNode(msg));
   document.body.appendChild(t);
   if (!gsap || reduceMotion) {

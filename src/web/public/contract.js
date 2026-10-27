@@ -73,7 +73,8 @@ export function readOverview(raw) {
 
 /**
  * One card on the Connections screen.
- * @typedef {{ id: string, kind: string, title: string, subtitle: string, state: PartState, stateLabel: string, rows: [string, string][], note: string }} Card
+ * @typedef {{ id: string, kind: string, title: string, subtitle: string, state: PartState, stateLabel: string, rows: [string, string][], note: string,
+ *   email?: string, meetings?: boolean }} Card
  */
 
 /**
@@ -107,6 +108,7 @@ export function readConnections(raw) {
       id: `google:${label}`, kind: 'google', title: label === 'main' ? 'Google account · main' : `Google account · ${label}`,
       subtitle: str(o.email) || (label === 'main' ? 'The mailbox account' : 'Meeting recordings'),
       state: state(o.state), stateLabel: str(o.stateLabel), rows: [['Used for', usedFor.join(', ') || '—']], note: '',
+      email: str(o.email), meetings: usedFor.some((u) => /meeting/i.test(u)),
     });
   }
   const d = obj(r.drive);

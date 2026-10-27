@@ -4,6 +4,7 @@ import { get } from '../api.js';
 import { problems } from '../contract.js';
 import { $, $$, countUp, esc, gsap, icon, reduceMotion } from '../dom.js';
 import { ago, clock, greeting, today, usd, when } from '../format.js';
+import { fixFor } from './connect.js';
 
 /** @typedef {ReturnType<typeof import('../contract.js').readStatus>} Status */
 /** @typedef {ReturnType<typeof import('../contract.js').readOverview>} Overview */
@@ -12,19 +13,36 @@ const LAMP = { ok: '', warn: 'warn', down: 'down', off: 'off' };
 /** @type {Record<string, string>} */
 const ACTIVITY_ICON = { msg: 'bubble', task: 'task', issue: 'alert' };
 
-/** The attention banner, or ''. Shared with other screens. @param {Status | null} status */
+/**
+ * The attention banner, or ''. Shared with other screens. Fix now opens the dialog that fixes the first problem, or
+ * Connections when no single dialog does. @param {Status | null} status
+ */
 export function attentionBanner(status) {
   if (!status) return '';
   const p = problems(status);
   if (p.length === 0) return '';
   const head = p.length === 1 ? 'One part needs you' : `${p.length} parts need you`;
+  const fix = fixFor(p[0]);
   return `<div class="attn" role="status">${icon('alert', 20)}<div class="grow-1"><b>${esc(head)}</b><div>${p.map((x) => esc(x.detail ? `${x.label}: ${x.detail}` : x.label)).join(' · ')}</div></div>
-    <button class="btn btn-primary btn-sm" type="button" data-go="connections">Fix now</button></div>`;
+    <button class="btn btn-primary btn-sm" type="button" ${fix ? `data-fix="${esc(fix)}"` : 'data-go="connections"'}>Fix now</button></div>`;
+}
+
+/** Setup mode: the founder's phone has never been linked, so nothing else can work yet. @param {Status | null} status */
+export const isSetup = (status) => Boolean(status?.parts.some((p) => p.key === 'whatsapp' && p.detail === 'Not linked'));
+
+/** The one thing to do in setup mode. @param {string} first */
+function setupScreen(first) {
+  return `<div class="hello"><div><h2>${esc(`Welcome, ${first}`)}</h2><p>${esc(today())}</p></div></div>
+    <section class="card setup-cta"><div class="badge">${icon('phone', 26)}</div>
+      <div class="grow-1"><h3>Link the founder's phone</h3>
+        <p class="m-p">The agent isn't reading WhatsApp yet. Link the founder's phone once: in WhatsApp open Linked devices → Link a device, and scan the code shown here. Everything else starts on its own.</p></div>
+      <button class="btn btn-primary" type="button" data-fix="founder-link">${icon('phone', 16)}Link the founder's phone</button></section>`;
 }
 
 /** @param {{ name: string, email: string } | null} me @param {Status | null} status @param {Overview | null} ov @param {unknown} [error] */
 export function renderOverview(me, status, ov, error) {
   const first = (me?.name || '').trim().split(/\s+/)[0] || 'there';
+  if (isSetup(status)) return setupScreen(first);
   const hello = `<div class="hello"><div><h2>${esc(`${greeting()}, ${first}`)}</h2><p>${esc(today())}${status?.lastMessageAt ? ` · last message ${esc(ago(status.lastMessageAt))}` : ''}</p></div>
     ${ov ? `<div class="row-gap"><span class="pill ${ov.tracker.ok ? 'p-done' : 'p-warn'}"><i></i>${ov.tracker.lastPublishedAt ? `Tracker synced ${esc(ago(ov.tracker.lastPublishedAt))}` : 'Tracker not uploaded yet'}</span></div>` : ''}</div>`;
   if (!ov) {
