@@ -166,7 +166,7 @@ describe('AgentControl.connections', () => {
   });
 
   it('maps the spare phone states, and has no spare card state without the report', () => {
-    expect(setup().control.connections().spare).toEqual({ state: 'off', label: 'Not set up', device: 'WA Agent - Morning report', recipientMasked: null });
+    expect(setup().control.connections().spare).toEqual({ state: 'off', label: 'Switched off', device: 'WA Agent - Morning report', recipientMasked: null });
     const t = setup({ sender: 'not_linked' });
     const spare = () => t.control.connections().spare;
     expect(spare()).toMatchObject({ state: 'warn', label: 'Not linked' });
@@ -208,5 +208,59 @@ describe('AgentControl answers carry no secrets', () => {
     expect(json).not.toMatch(/refresh-token|secret-hb-token|heartbeat\.uptimerobot|9812345678|secret chat words|Ravi/);
     // No run of 7 or more digits outside a date or time.
     expect(json.replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/g, '')).not.toMatch(/\d{7,}/);
+  });
+});
+
+describe('AgentControl review fixes', () => {
+  it('shows the tracker and Google problem even while WhatsApp is down for another cause', () => {
+    const t = setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' } });
+    t.setGateway('logged_out');
+    t.health.markPublishFailed({ step: 'drive', auth: true });
+    expect(part(t, 'tracker')).toMatchObject({ state: 'down', label: 'Google sign-in expired' });
+    expect(t.control.connections().google[0]).toMatchObject({ state: 'down', stateLabel: 'Sign-in expired' });
+    t.health.markPublished();
+    t.health.markPublishFailed({ step: 'drive', auth: false });
+    t.clock.advance(61 * 60_000);
+    expect(part(t, 'tracker')).toMatchObject({ state: 'down', label: 'Uploads failing for over an hour' });
+  });
+
+  it('warns when meetings wait for a refused speech-to-text key, and is ok with no speech-to-text and nothing waiting', () => {
+    const t = setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' } });
+    t.health.setMeetings(meetings({ stats: { ...meetings().stats, deferred: { stt_unavailable: 1 } } }));
+    expect(part(t, 'meetings')).toMatchObject({ state: 'warn', label: 'Waiting: the speech-to-text key was refused' });
+    t.health.setMeetings(meetings({ sttProvider: 'none' }));
+    expect(part(t, 'meetings')).toMatchObject({ state: 'ok', label: 'Working' });
+  });
+
+  it('labels the tracker from the last recorded upload, which survives a restart', () => {
+    const t = setup();
+    expect(part(t, 'tracker')).toMatchObject({ state: 'ok', label: 'Waiting for the first upload' });
+    db_publish(t.db);
+    expect(part(t, 'tracker')).toMatchObject({ state: 'ok', label: 'Updated' });
+  });
+
+  it('warns while the WhatsApp session cannot be saved, and says Starting before the gateway runs', () => {
+    const t = setup();
+    t.health.setWhatsApp({ state: 'open', since: NOW, lastErrorCode: null, credsSaveFailures: 1 });
+    const gw = { state: 'open' as const, since: NOW, lastErrorCode: null, credsSaveFailures: 1 };
+    const c = new AgentControl({ app: { health: t.health, spend: t.spend }, db: t.db, gateway: { status: () => gw }, env: parseEnv({}), clock: t.clock });
+    expect(c.status().parts[0]).toMatchObject({ state: 'warn', label: 'The session could not be saved' });
+    t.setGateway('stopped');
+    expect(part(t, 'whatsapp')).toMatchObject({ state: 'warn', label: 'Starting' });
+  });
+
+  it('counts approved groups only, and main is used for the tracker only while meetings are off', () => {
+    const t = setup();
+    t.db.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
+    expect(t.control.connections().founder.groups).toBe(1);
+    expect(t.control.connections().google).toEqual([{ label: 'main', email: null, usedFor: ['Tracker on Drive'], state: 'ok', stateLabel: 'Connected' }]);
+  });
+
+  it('the last message is the newest one stored', () => {
+    const t = setup();
+    for (const [waId, ts] of [['a', '2026-10-19T06:00:00.000Z'], ['b', '2026-10-19T07:30:00.000Z']] as const) {
+      insertMessage(t.db, { waId, clientId: 1, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts, text: 'x', quotedWaId: null, mediaType: null });
+    }
+    expect(t.control.status().lastMessageAt).toBe('2026-10-19T07:30:00.000Z');
   });
 });

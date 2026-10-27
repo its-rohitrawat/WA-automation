@@ -49,10 +49,10 @@ describe('trackerSummary', () => {
     task(db, 2, { status: 'done', closedOn: '2026-10-19' });
     task(db, 3);
     expect(trackerSummary(db, now).sheets).toEqual([
-      { name: 'Today', client: null, open: 5, overdue: 2, review: 1, doneThisWeek: 2 },
-      { name: 'Mehta Foods', client: { code: 'MEH', name: 'Mehta Foods' }, open: 0, overdue: 0, review: 0, doneThisWeek: 1 },
-      { name: 'Sharma Interiors', client: { code: 'SHA', name: 'Sharma Interiors' }, open: 4, overdue: 2, review: 1, doneThisWeek: 1 },
-      { name: 'Sharma Interiors (2)', client: { code: 'SHB', name: 'Sharma Interiors' }, open: 1, overdue: 0, review: 0, doneThisWeek: 0 },
+      { name: 'Today', client: null, notDone: 5, overdue: 2, review: 1, doneThisWeek: 2 },
+      { name: 'Mehta Foods', client: { code: 'MEH', name: 'Mehta Foods' }, notDone: 0, overdue: 0, review: 0, doneThisWeek: 1 },
+      { name: 'Sharma Interiors', client: { code: 'SHA', name: 'Sharma Interiors' }, notDone: 4, overdue: 2, review: 1, doneThisWeek: 1 },
+      { name: 'Sharma Interiors (2)', client: { code: 'SHB', name: 'Sharma Interiors' }, notDone: 1, overdue: 0, review: 0, doneThisWeek: 0 },
     ]);
   });
 
@@ -62,9 +62,9 @@ describe('trackerSummary', () => {
     task(db, 1);
     syncClients(db, [MEHTA, { ...SHARMA, groupId: '120363000000000003@g.us', code: 'SHB' }]); // SHA leaves the allow-list
     expect(trackerSummary(db, now).sheets).toEqual([
-      { name: 'Today', client: null, open: 0, overdue: 0, review: 0, doneThisWeek: 0 },
-      { name: 'Mehta Foods', client: { code: 'MEH', name: 'Mehta Foods' }, open: 0, overdue: 0, review: 0, doneThisWeek: 0 },
-      { name: 'Sharma Interiors (2)', client: { code: 'SHB', name: 'Sharma Interiors' }, open: 0, overdue: 0, review: 0, doneThisWeek: 0 },
+      { name: 'Today', client: null, notDone: 0, overdue: 0, review: 0, doneThisWeek: 0 },
+      { name: 'Mehta Foods', client: { code: 'MEH', name: 'Mehta Foods' }, notDone: 0, overdue: 0, review: 0, doneThisWeek: 0 },
+      { name: 'Sharma Interiors (2)', client: { code: 'SHB', name: 'Sharma Interiors' }, notDone: 0, overdue: 0, review: 0, doneThisWeek: 0 },
     ]);
   });
 
@@ -97,7 +97,7 @@ describe('trackerSummary review fixes', () => {
   it('counts a task due today as open, not overdue', () => {
     const db = seededDb();
     task(db, 1, { deadline: '2026-10-19' });
-    expect(trackerSummary(db, now).sheets[0]).toMatchObject({ open: 1, overdue: 0 });
+    expect(trackerSummary(db, now).sheets[0]).toMatchObject({ notDone: 1, overdue: 0 });
   });
 
   it('takes the newest failure, and ignores tracker rows not written by the agent', () => {

@@ -105,3 +105,19 @@ describe('Health.downReason (the uptime log, migration v10)', () => {
     expect(both()).toEqual([true, true]);
   });
 });
+
+describe('Health.publishProblem (the tracker upload on its own)', () => {
+  it('is null while uploads work, failing under an hour, then tracker_failing, and google_signin at once; whatever WhatsApp does', () => {
+    const { h, clock } = setup();
+    h.setWhatsApp(status('logged_out'));
+    expect(h.publishProblem()).toBeNull();
+    h.markPublishFailed({ step: 'drive', auth: false });
+    expect(h.publishProblem()).toBe('failing');
+    clock.advance(61 * 60_000);
+    expect(h.publishProblem()).toBe('tracker_failing');
+    expect(h.downReason()).toBe('whatsapp_logged_out'); // the outage's first cause is still WhatsApp
+    h.markPublished();
+    h.markPublishFailed({ step: 'drive', auth: true });
+    expect(h.publishProblem()).toBe('google_signin');
+  });
+});

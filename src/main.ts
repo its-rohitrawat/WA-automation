@@ -201,8 +201,13 @@ async function main(): Promise<void> {
     // Owner dashboard: off (the default) means no web server and no port. Not awaited here, so the stop handlers below
     // are in place before anything else is awaited. It never rejects: a dashboard that cannot start resolves to undefined.
     // AgentControl is the dashboard's only way into the agent (read side: status, overview, connections).
+    // Narrow wrappers, not the live objects: the dashboard can read the gateway's and the sender's status, nothing more.
+    const sender = report?.sender;
     const control = new AgentControl({
-      app, db, gateway, env, clock: systemClock, ...(report ? { sender: report.sender } : {}), ...(heartbeat ? { heartbeat } : {}),
+      app, db, env, clock: systemClock,
+      gateway: { status: () => gateway.status() },
+      ...(sender ? { sender: { status: () => sender.status(), maskedRecipient: () => sender.maskedRecipient() } } : {}),
+      ...(heartbeat ? { heartbeat: { lastBeatAt: () => heartbeat.lastBeatAt() } } : {}),
     });
     const webReady = env.DASHBOARD_ENABLED ? startDashboard({ env, log, control }) : Promise.resolve(undefined);
 

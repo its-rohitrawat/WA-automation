@@ -8,7 +8,7 @@ import type { Clock } from '../util/clock.ts';
 import { istDate } from '../util/time.ts';
 import type { GatewayStatus } from '../wa/gateway.ts';
 import { overview, type Overview } from './queries.ts';
-import { trackerSummary } from './trackerQueries.ts';
+import { lastTrackerUpload } from './trackerQueries.ts';
 
 // The dashboard's only way into the running agent (D1 Task 5, spec 4.2), read side. Everything here is read from the
 // live health snapshot, the gateway and sender status and the database, and reduced to what the screens need: states,
@@ -44,7 +44,7 @@ export interface Connections {
 }
 
 export interface AgentControlDeps {
-  app: { health: Pick<Health, 'snapshot' | 'isUp' | 'downReason'>; spend: SpendView };
+  app: { health: Pick<Health, 'snapshot' | 'isUp' | 'downReason' | 'publishProblem'>; spend: SpendView };
   db: Db;
   /** The founder-number gateway: its status only. */
   gateway: { status(): GatewayStatus };
@@ -89,12 +89,19 @@ export class AgentControl {
     }
   }
 
+  /** The tracker upload's own state (Health.publishProblem), shown even while WhatsApp is down for another cause. */
   #tracker(snap: HealthSnapshot): { state: PartState; label: string } {
-    if (snap.publishFailingSince === null) return { state: 'ok', label: snap.lastPublishedAt === null ? 'Waiting for the first upload' : 'Updated' };
-    const why = this.#d.app.health.downReason();
-    if (why === 'google_signin') return { state: 'down', label: 'Google sign-in expired' };
-    if (why === 'tracker_failing') return { state: 'down', label: 'Uploads failing for over an hour' };
-    return { state: 'warn', label: 'Upload failing' };
+    switch (this.#d.app.health.publishProblem()) {
+      case 'google_signin':
+        return { state: 'down', label: 'Google sign-in expired' };
+      case 'tracker_failing':
+        return { state: 'down', label: 'Uploads failing for over an hour' };
+      case 'failing':
+        return { state: 'warn', label: 'Upload failing' };
+      case null:
+        // The audit log keeps the last upload across a restart; the snapshot's time lives in memory only.
+        return { state: 'ok', label: lastTrackerUpload(this.#d.db, snap.lastPublishedAt) === null ? 'Waiting for the first upload' : 'Updated' };
+    }
   }
 
   #meetings(snap: HealthSnapshot): { state: PartState; label: string } {
@@ -106,6 +113,7 @@ export class AgentControl {
     if (lost.length > 0) return { state: 'warn', label: `Google sign-in lost for ${lost.join(', ')}` };
     if (m.stats.failed > 0) return { state: 'warn', label: `${plural(m.stats.failed, 'meeting')} could not be processed` };
     if (m.sttProvider === 'none' && m.stats.waiting > 0) return { state: 'warn', label: 'Waiting: speech-to-text is not set up' };
+    if ((m.stats.deferred.stt_unavailable ?? 0) > 0) return { state: 'warn', label: 'Waiting: the speech-to-text key was refused' };
     return { state: 'ok', label: 'Working' };
   }
 
@@ -134,7 +142,9 @@ export class AgentControl {
   }
 
   #lastMessageAt(): string | null {
-    return (this.#d.db.prepare('SELECT MAX(ts) AS ts FROM messages').get() as { ts: string | null }).ts;
+    // The newest stored message by arrival: the last row, found through the primary key at once (MAX(ts) would read a
+    // whole index on every poll).
+    return (this.#d.db.prepare('SELECT ts FROM messages ORDER BY id DESC LIMIT 1').get() as { ts: string } | undefined)?.ts ?? null;
   }
 
   status(): AgentStatus {
@@ -170,7 +180,7 @@ export class AgentControl {
     const now = clock.now();
     const groups = (db.prepare('SELECT COUNT(*) AS n FROM clients WHERE active = 1').get() as { n: number }).n;
     const lost = new Set(snap.meetings?.lostAccounts ?? []);
-    const signInExpired = health.downReason() === 'google_signin';
+    const signInExpired = health.publishProblem() === 'google_signin';
     const meetingAccess = snap.meetings?.paused === 'google_auth' || snap.meetings?.paused === 'google_scopes';
     const mainState = signInExpired
       ? { state: 'down' as const, stateLabel: 'Sign-in expired' }
@@ -187,9 +197,9 @@ export class AgentControl {
     return {
       founder: { ...this.#whatsapp(), groups, lastActivityAt: this.#lastMessageAt(), device: FOUNDER_DEVICE },
       spare: sender ? { ...spareState(sender.status()), device: SPARE_DEVICE, recipientMasked: sender.maskedRecipient() }
-        : { state: 'off', label: 'Not set up', device: SPARE_DEVICE, recipientMasked: null },
+        : { state: 'off', label: 'Switched off', device: SPARE_DEVICE, recipientMasked: null },
       google,
-      drive: { ...this.#tracker(snap), lastUploadAt: trackerSummary(db, now, snap).lastPublishedAt },
+      drive: { ...this.#tracker(snap), lastUploadAt: lastTrackerUpload(db, snap.lastPublishedAt) },
       claude: { callsToday: calls, spentToday: spend.spentToday(), capUsd: spend.capUsd },
       monitoring: { on: heartbeat !== undefined, lastBeatAt: beat === null ? null : beat.toISOString() },
     };

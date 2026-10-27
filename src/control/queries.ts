@@ -4,7 +4,7 @@ import type { MeetingStatus } from '../store/meetings.ts';
 import { istDate } from '../util/time.ts';
 import { listActivity, type ActivityItem } from './activityQueries.ts';
 import { listDashboardMeetings } from './meetingQueries.ts';
-import { trackerSummary } from './trackerQueries.ts';
+import { lastTrackerUpload } from './trackerQueries.ts';
 
 // The dashboard's Overview (D1 Task 5): plain parameterised SQL, with the Meetings, Activity and Tracker screens' own
 // queries reused, so every screen counts the same way. Counts use the Tasks screen's split, one bucket per task:
@@ -45,13 +45,12 @@ export function overview(db: Db, now: Date, health?: Pick<HealthSnapshot, 'line'
   const meetings = listDashboardMeetings(db, { view: 'all', limit: 4, offset: 0 }, now).rows.map((m) => ({
     id: m.id, title: m.title, status: m.status, stageLabel: m.stageLabel, when: m.when, minutes: m.minutes,
   }));
-  const tracker = trackerSummary(db, now, health);
   return {
     clients: rows.length,
     tasks: { open: sum('open'), overdue: sum('overdue'), review: sum('review'), doneThisWeek: sum('done') },
     byClient: rows.map((r) => ({ client: { code: r.code, name: r.name }, segments: SEGMENT_ORDER.map((key) => ({ key, count: r[key] })) })),
     meetings,
     activity: listActivity(db, { kind: 'work', limit: 5 }).items,
-    tracker: { lastPublishedAt: tracker.lastPublishedAt, health: tracker.health },
+    tracker: { lastPublishedAt: lastTrackerUpload(db, health?.lastPublishedAt), health: health ? { ok: health.line.ok, text: health.line.text } : null },
   };
 }

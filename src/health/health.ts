@@ -220,10 +220,19 @@ export class Health {
     if (this.#wa.state === 'replaced') return 'whatsapp_replaced';
     if (this.#wa.state === 'forbidden') return 'whatsapp_forbidden';
     if (this.#downSince && now.getTime() - this.#downSince.getTime() > DISCONNECT_GRACE_MS) return 'whatsapp_disconnected';
+    const pub = this.publishProblem();
+    return pub === 'failing' ? null : pub;
+  }
+
+  /**
+   * The tracker upload's own state, whatever WhatsApp is doing: the Google sign-in expired, uploads failing for over an
+   * hour (both make isUp() false), failing for less (a warning only), or null while uploads work.
+   */
+  publishProblem(): 'google_signin' | 'tracker_failing' | 'failing' | null {
     const pubFail = this.#publishFailedSince;
-    if (pubFail && this.#publishAuthFailed) return 'google_signin';
-    if (pubFail && now.getTime() - pubFail.getTime() > PUBLISH_FAIL_MS) return 'tracker_failing';
-    return null;
+    if (!pubFail) return null;
+    if (this.#publishAuthFailed) return 'google_signin';
+    return this.#clock.now().getTime() - pubFail.getTime() > PUBLISH_FAIL_MS ? 'tracker_failing' : 'failing';
   }
 
   /** Same as line() but without publish failures: used inside the uploaded workbook. */

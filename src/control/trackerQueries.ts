@@ -6,15 +6,16 @@ import type { Db } from '../store/db.ts';
 import { istDate } from '../util/time.ts';
 
 // The dashboard's Tracker screen (D4 Task 5): the workbook link, the last upload and failure, and per-sheet counts.
-// Counts follow the workbook: open is every task not done, as its Today tab counts it; overdue (not done, deadline
+// Counts follow the workbook: notDone is every task not done, as its Today tab counts "Open" (the Tasks screen and the Overview
+// say open for the not-done tasks that are neither overdue nor in review); overdue (not done, deadline
 // before today IST) and review (maybe done and not overdue, as the Tasks screen splits them) are parts of it.
 
 export interface TrackerSheet {
   /** The tab's name in Tracker.xlsx: "Today", or the client's sheet name as the workbook assigns it. */
   name: string;
   client: { code: string; name: string } | null;
-  /** Every task not done, as the workbook counts open. */
-  open: number;
+  /** Every task not done: the workbook's "Open". */
+  notDone: number;
   overdue: number;
   review: number;
   /** Closed in the last 7 IST days, today included. */
@@ -39,6 +40,15 @@ function minusDays(date: string, n: number): string {
 const FAILURE_PREFIX = 'Tracker upload failed: ';
 
 /**
+ * The last tracker upload: the agent's own audit row (it survives a restart) or the live snapshot's time (which the
+ * audit log may not have yet: it is written on changes only), whichever is later. Counts no tasks.
+ */
+export function lastTrackerUpload(db: Db, snapshotLast: string | null | undefined): string | null {
+  const published = db.prepare("SELECT MAX(at) AS at FROM audit_log WHERE actor = 'agent' AND event = 'tracker.published'").get() as { at: string | null };
+  return [published.at, snapshotLast ?? null].filter((t): t is string => t !== null).sort().at(-1) ?? null;
+}
+
+/**
  * The Tracker screen. health: the live (or last persisted) snapshot, when there is one. The upload times come from the
  * agent's own audit rows (src/control/activityQueries.ts publisherAuditHooks) and the snapshot, whichever is later.
  */
@@ -49,11 +59,9 @@ export function trackerSummary(
 ): TrackerSummary {
   const today = istDate(now);
   const url = trackerLink(db) ?? null;
-  const published = db.prepare("SELECT MAX(at) AS at FROM audit_log WHERE actor = 'agent' AND event = 'tracker.published'").get() as { at: string | null };
   const failure = db
     .prepare("SELECT at, detail FROM audit_log WHERE actor = 'agent' AND event = 'tracker.publish_failed' ORDER BY at DESC, id DESC LIMIT 1")
     .get() as { at: string; detail: string } | undefined;
-  const times = [published.at, health?.lastPublishedAt ?? null].filter((t): t is string => t !== null).sort();
 
   const clients = listClients(db, false);
   const byId = [...clients].sort((a, b) => a.id - b.id);
@@ -63,7 +71,7 @@ export function trackerSummary(
     (db.prepare(`SELECT client_id AS clientId,
         COALESCE(SUM(status <> 'done' AND deadline IS NOT NULL AND deadline < @today), 0) AS overdue,
         COALESCE(SUM(status = 'maybe_done' AND NOT (deadline IS NOT NULL AND deadline < @today)), 0) AS review,
-        COALESCE(SUM(status <> 'done'), 0) AS open,
+        COALESCE(SUM(status <> 'done'), 0) AS notDone,
         COALESCE(SUM(status = 'done' AND closed_on BETWEEN @weekStart AND @today), 0) AS doneThisWeek
       FROM tasks GROUP BY client_id`).all({ today, weekStart: minusDays(today, 6) }) as (Omit<TrackerSheet, 'name' | 'client'> & { clientId: number })[])
       .map((r) => [r.clientId, r]),
@@ -74,20 +82,20 @@ export function trackerSummary(
     const n = counts.get(c.id);
     return {
       name: sheetName.get(c.id)!, client: { code: c.code, name: c.name },
-      open: n?.open ?? 0, overdue: n?.overdue ?? 0, review: n?.review ?? 0, doneThisWeek: n?.doneThisWeek ?? 0,
+      notDone: n?.notDone ?? 0, overdue: n?.overdue ?? 0, review: n?.review ?? 0, doneThisWeek: n?.doneThisWeek ?? 0,
     };
   });
-  const sum = (k: 'open' | 'overdue' | 'review' | 'doneThisWeek') => perClient.reduce((a, s) => a + s[k], 0);
+  const sum = (k: 'notDone' | 'overdue' | 'review' | 'doneThisWeek') => perClient.reduce((a, s) => a + s[k], 0);
 
   return {
     uploaded: url !== null,
     url,
-    lastPublishedAt: times.at(-1) ?? null,
+    lastPublishedAt: lastTrackerUpload(db, health?.lastPublishedAt),
     lastFailure: failure
       ? { at: failure.at, reason: failure.detail.startsWith(FAILURE_PREFIX) ? failure.detail.slice(FAILURE_PREFIX.length) : failure.detail }
       : null,
     failingSince: health?.publishFailingSince ?? null,
     health: health ? { ok: health.line.ok, text: health.line.text } : null,
-    sheets: [{ name: 'Today', client: null, open: sum('open'), overdue: sum('overdue'), review: sum('review'), doneThisWeek: sum('doneThisWeek') }, ...perClient],
+    sheets: [{ name: 'Today', client: null, notDone: sum('notDone'), overdue: sum('overdue'), review: sum('review'), doneThisWeek: sum('doneThisWeek') }, ...perClient],
   };
 }
