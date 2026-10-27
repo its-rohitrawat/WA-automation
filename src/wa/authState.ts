@@ -39,6 +39,8 @@ export function openSessionDb(file: string): Db {
     // Wipe rotated-out keys from free pages.
     db.pragma('secure_delete = ON');
     db.exec('CREATE TABLE IF NOT EXISTS auth (k TEXT PRIMARY KEY, v BLOB NOT NULL)');
+    // A copy of the rows while a dashboard link runs (src/wa/linkSession.ts); empty otherwise.
+    db.exec('CREATE TABLE IF NOT EXISTS auth_backup (k TEXT PRIMARY KEY, v BLOB NOT NULL)');
   } catch (err) {
     db.close();
     throw err;
@@ -46,10 +48,14 @@ export function openSessionDb(file: string): Db {
   return db;
 }
 
-/** Discards the stored session (the agent's own key material) so a new QR scan can start fresh. */
+/**
+ * Discards the stored session (the agent's own key material) so a new QR scan can start fresh. A backup left by a
+ * dashboard link that never finished goes too: otherwise the next start would restore it over this new link.
+ */
 export function resetSession(db: Db): void {
   db.transaction(() => {
     db.prepare('DELETE FROM auth').run();
+    db.prepare('DELETE FROM auth_backup').run();
   })();
 }
 

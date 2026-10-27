@@ -4,7 +4,8 @@ import { hubMeetingAccounts, LiveMeetingsApi } from '../../src/meetings/multiAcc
 import { isAuthFailure } from '../../src/output/authFailure.ts';
 import { googleDriveApi } from '../../src/output/drive.ts';
 import {
-  DRIVE_SCOPES, hasMeetingScopes, MEETING_SCOPES, meetingAccounts, saveGrantedScopes, saveMeetingAccount, TokenStore, type OAuth2Client,
+  DRIVE_SCOPES, hasMeetingScopes, MEETING_SCOPES, meetingAccounts, removeMeetingAccount, saveGrantedScopes, saveMeetingAccount, TokenStore,
+  type OAuth2Client,
 } from '../../src/output/googleAuth.ts';
 import { GoogleAuthHub, GoogleNotConnectedError, type OAuthCredentials } from '../../src/output/googleAuthHub.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
@@ -230,5 +231,18 @@ describe('GoogleAuthHub', () => {
 
   it('a missing main client counts as a Google sign-in problem for Drive', () => {
     expect(isAuthFailure(new GoogleNotConnectedError('main'))).toBe(true);
+  });
+
+  it('a CLI sign-in of a meeting account resets its issuer to desktop; removing the account forgets it', () => {
+    const db = seededDb();
+    const key = randomBytes(32);
+    const hub = new GoogleAuthHub({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: fakeClients().newClient });
+    hub.setToken('company2', 'rt-web', 'web', MEETING_SCOPES.join(' '));
+    expect(getKv(db, 'google_client:company2')).toBe('web');
+    saveMeetingAccount(db, key, 'company2', 'rt-cli', MEETING_SCOPES.join(' ')); // what google-auth --account does
+    expect(getKv(db, 'google_client:company2')).toBe('desktop');
+    expect(new GoogleAuthHub({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: fakeClients().newClient }).issuer('company2')).toBe('desktop');
+    removeMeetingAccount(db, 'company2');
+    expect(getKv(db, 'google_client:company2')).toBeUndefined();
   });
 });

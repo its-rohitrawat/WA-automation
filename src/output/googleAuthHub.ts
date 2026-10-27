@@ -1,10 +1,13 @@
 import { auth } from '@googleapis/drive';
 import { tx, type Db } from '../store/db.ts';
-import { getKv, setKv } from '../store/kv.ts';
+import { getKv } from '../store/kv.ts';
 import type { Logger } from '../util/logger.ts';
 import {
-  checkAccountLabel, MAIN_ACCOUNT, meetingAccounts, saveGrantedScopes, saveMeetingAccount, TokenDecryptError, TokenStore, type OAuth2Client,
+  MAIN_ACCOUNT, meetingAccounts, saveGrantedScopes, saveMeetingAccount, saveTokenIssuer, TokenDecryptError, tokenIssuerKey, TokenStore,
+  type OAuth2Client, type TokenIssuer,
 } from './googleAuth.ts';
+
+export type { TokenIssuer };
 
 // One Google OAuth client per account label ('main', then the meeting accounts), replaceable in place (D3). The Drive
 // publisher, the media uploader and meetings read their client through a getter, so a reconnect from the dashboard
@@ -13,8 +16,6 @@ import {
 // Each refresh token belongs to the OAuth client that issued it: 'desktop' (google-auth on the Mac, the only kind until
 // the dashboard) or 'web' (the dashboard's reconnect). The issuer is kept in kv google_client:<label>; a missing value
 // means desktop, so the tokens stored before the dashboard keep working. Tokens are encrypted by TokenStore as before.
-
-export type TokenIssuer = 'desktop' | 'web';
 
 /** An OAuth client's id and secret, from .env (main.ts reads them; nothing here does). */
 export interface OAuthCredentials {
@@ -44,9 +45,6 @@ export interface GoogleAuthHubOptions {
   newClient?: (c: OAuthCredentials) => OAuth2Client;
   log?: Logger;
 }
-
-const ISSUER_KEY = 'google_client';
-const issuerKey = (label: string) => `${ISSUER_KEY}:${label === MAIN_ACCOUNT ? MAIN_ACCOUNT : checkAccountLabel(label)}`;
 
 interface Account {
   client: OAuth2Client | undefined;
@@ -112,7 +110,7 @@ export class GoogleAuthHub {
    * that the scopes are the required ones is the caller's job (as runLoopbackConsent does for google-auth).
    */
   setToken(label: string, refreshToken: string, issuer: TokenIssuer, scope: string): void {
-    const kvKey = issuerKey(label);
+    tokenIssuerKey(label); // checks the label before anything else
     const creds = this.#credentials[issuer];
     if (!creds) {
       throw new Error(issuer === 'web' ? 'The dashboard Google client is not set up on the Mac.' : 'The Google client is not set up on the Mac.');
@@ -124,9 +122,9 @@ export class GoogleAuthHub {
         new TokenStore(this.#db, this.#key).save(refreshToken);
         saveGrantedScopes(this.#db, scope);
       } else {
-        saveMeetingAccount(this.#db, this.#key, label, refreshToken, scope); // token, scopes and list entry
+        saveMeetingAccount(this.#db, this.#key, label, refreshToken, scope, issuer); // token, scopes, issuer and list entry
       }
-      setKv(this.#db, kvKey, issuer);
+      if (label === MAIN_ACCOUNT) saveTokenIssuer(this.#db, MAIN_ACCOUNT, issuer);
     });
     this.#accounts.set(label, { client, issuer, problem: null });
     for (const fn of [...this.#listeners]) {
@@ -146,7 +144,7 @@ export class GoogleAuthHub {
   }
 
   #load(label: string): Account | undefined {
-    const stored = getKv(this.#db, issuerKey(label));
+    const stored = getKv(this.#db, tokenIssuerKey(label));
     const issuer: TokenIssuer = stored === 'web' ? 'web' : 'desktop';
     let token: string | undefined;
     try {
