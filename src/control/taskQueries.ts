@@ -287,3 +287,11 @@ export function taskDetail(db: Db, rawCode: string, now: Date): DashboardTaskDet
     }),
   };
 }
+
+/** A meeting's action items: the tasks made from it, by code. */
+export function tasksForMeeting(db: Db, meetingId: number, now: Date): Pick<DashboardTaskRow, 'code' | 'title' | 'owner' | 'deadline' | 'status'>[] {
+  const rows = db
+    .prepare(`${SELECT_SQL} WHERE t.meeting_id = @meetingId ORDER BY ${CODE_NUMBER_SQL}, t.id`)
+    .all({ meetingId, today: istDate(now) }) as RawRow[];
+  return rows.map((r) => ({ code: r.code, title: r.title, owner: r.owner, deadline: r.deadline, status: r.status }));
+}
