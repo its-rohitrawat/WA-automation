@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +10,7 @@ import { manualClock } from '../../src/util/clock.ts';
 import { createLogger } from '../../src/util/logger.ts';
 import { CONTENT_SECURITY_POLICY } from '../../src/web/http.ts';
 import { createWebServer, type WebServer } from '../../src/web/server.ts';
-import { createSite, inlineScriptHashes, MAX_FILE_BYTES, SITE_DIR, sitePolicy } from '../../src/web/site.ts';
+import { createSite, etagMatches, inlineScriptHashes, MAX_FILE_BYTES, SITE_DIR, sitePolicy } from '../../src/web/site.ts';
 
 const FIXTURE = fileURLToPath(new URL('../fixtures/site/', import.meta.url));
 const SECRET = 'OUTSIDE-SITE-SECRET-91c2';
@@ -287,5 +287,54 @@ describe('website review fixes', () => {
     const r = await get(port, '/nope');
     expect(r.status).toBe(404);
     expect(r.headers['content-type']).toBe('text/plain; charset=utf-8');
+  });
+});
+
+describe('website review round 2', () => {
+  it('matches If-None-Match lists, weak tags and *, and nothing else', () => {
+    expect(etagMatches('"abc"', '"abc"')).toBe(true);
+    expect(etagMatches('W/"abc"', '"abc"')).toBe(true);
+    expect(etagMatches('"x", W/"abc"', '"abc"')).toBe(true);
+    expect(etagMatches('*', '"abc"')).toBe(true);
+    expect(etagMatches('"abd"', '"abc"')).toBe(false);
+    expect(etagMatches('', '"abc"')).toBe(false);
+    expect(etagMatches(undefined, '"abc"')).toBe(false);
+  });
+
+  it('a wrong or out-of-date ETag gets the file, for pages and other files', async () => {
+    const { site } = siteCopy();
+    const { port } = await boot(site);
+    for (const path of ['/about', '/style.css']) {
+      const old = String((await get(port, path)).headers.etag);
+      expect((await get(port, path, { headers: { 'if-none-match': '"nope"' } })).status, path).toBe(200);
+      expect((await get(port, path, { headers: { 'if-none-match': `W/${old}` } })).status, path).toBe(304);
+    }
+    const old = String((await get(port, '/style.css')).headers.etag);
+    writeFileSync(join(site, 'style.css'), 'body{color:#222;margin:0}');
+    expect((await get(port, '/style.css', { headers: { 'if-none-match': old } })).status).toBe(200);
+  });
+
+  it('streams a large file whole, with its length', async () => {
+    const { site } = siteCopy();
+    const big = 'x'.repeat(3 * 1024 * 1024);
+    writeFileSync(join(site, 'big.txt'), big);
+    const { port } = await boot(site);
+    const r = await get(port, '/big.txt');
+    expect(r.status).toBe(200);
+    expect(Number(r.headers['content-length'])).toBe(big.length);
+    expect(r.body.length).toBe(big.length);
+  });
+
+  it('one page that cannot be read at startup leaves the site installed and the other pages worked out', () => {
+    const { site } = siteCopy();
+    const s = createSite({
+      dir: site, log: createLogger('silent'),
+      readPage: (file) => {
+        if (file.endsWith('about.html')) throw Object.assign(new Error('locked'), { code: 'EBUSY' });
+        return readFileSync(file);
+      },
+    });
+    expect(s.installed).toBe(true);
+    expect(s.warmed).toBe(4);
   });
 });

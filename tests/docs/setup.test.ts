@@ -541,21 +541,43 @@ describe('morning report documentation: short message with the tracker link (27 
 describe('go-live guide (docs/GO-LIVE.md, D5 task 6)', () => {
   const guide = () => read('docs/GO-LIVE.md');
 
-  it('starts with a backup of the data folder, and checks the copy opens', () => {
+  /** Where `text` first appears; fails the test when it is missing (so an order check never passes on -1). */
+  const at = (g: string, text: string) => {
+    const i = g.indexOf(text);
+    expect(i, text).toBeGreaterThan(-1);
+    return i;
+  };
+
+  it('backs up before the merge: stop, confirm stopped, copy, private, then check the copy opens and is whole', () => {
     const g = guide();
-    const backup = g.indexOf('## 1. Back up the data folder');
-    expect(backup).toBeGreaterThan(-1);
-    expect(g.indexOf('## 2.')).toBeGreaterThan(backup);
-    expect(g).toContain('sqlite3');
-    expect(g).toMatch(/select count\(\*\) from tasks/i);
-    expect(g).toContain('chmod 700');
+    expect(g).toMatch(/step 1 comes before the merge/i);
+    const steps = [
+      '## 1. Back up the data folder',
+      'sudo launchctl bootout system/com.wa-agent',
+      'Could not find service',
+      'cp -Rp data/. backups/2026-11-01-data/',
+      'chmod 700 backups/2026-11-01-data',
+      'sqlite3 backups/2026-11-01-data/tracker.db "select count(*) from tasks"',
+      'sqlite3 backups/2026-11-01-data/tracker.db "pragma integrity_check"',
+      '## 2. Get the new version',
+    ].map((s) => at(g, s));
+    expect(steps).toEqual([...steps].sort((a, b) => a - b));
   });
 
-  it('makes the update run npm ci after pulling, then restart', () => {
+  it('makes the update pull, then run npm ci, then restart; and pulls by hand after the merge', () => {
     const g = guide();
-    expect(g).toContain('npm ci');
-    expect(g.indexOf('git pull')).toBeLessThan(g.indexOf('npm ci'));
-    expect(g).toContain('sudo launchctl kickstart -k system/com.wa-agent');
+    const update = g.slice(at(g, '## 2. Get the new version'), at(g, '## 3.'));
+    // The update's own commands, in this order, one after the other.
+    expect(update).toMatch(/cd \/opt\/wa-agent\s+git pull --ff-only\s+npm ci\s+sudo launchctl kickstart -k system\/com\.wa-agent/);
+    // And the pull by hand after the merge, without a restart (the service stays stopped until step 4).
+    expect(update).toMatch(/cd \/opt\/wa-agent\s+git pull --ff-only\s+npm ci\s+```/);
+    expect(update.match(/git pull --ff-only/g)).toHaveLength(2);
+    expect(update).toMatch(/fails while the service is stopped: that is expected and harmless/);
+  });
+
+  it('starts the service again before the checks', () => {
+    const g = guide();
+    expect(at(g, 'sudo launchctl bootstrap system /Library/LaunchDaemons/com.wa-agent.plist')).toBeLessThan(at(g, '## 7. Checks'));
   });
 
   it('names every dashboard setting, with placeholders only', () => {
@@ -565,6 +587,7 @@ describe('go-live guide (docs/GO-LIVE.md, D5 task 6)', () => {
       expect(g, name).toContain(name);
     }
     expect(g).toContain('DASHBOARD_GOOGLE_CLIENT_SECRET=your_web_client_secret_here');
+    expect(g).toContain('DASHBOARD_OWNER_EMAILS=owner@example.com,second.owner@example.com');
     // Nothing that looks like a real Google client secret, client id or API key.
     expect(g).not.toMatch(/GOCSPX-|\d{6,}-[a-z0-9]{20,}\.apps\.googleusercontent\.com|AIza[0-9A-Za-z_-]{20,}|\bu\d{6,}-[0-9a-f]{20,}/);
   });
@@ -579,6 +602,8 @@ describe('go-live guide (docs/GO-LIVE.md, D5 task 6)', () => {
     ]) expect(g, uri).toContain(uri);
     expect(g).toContain('Web application');
     expect(g).toContain('In production');
+    // Google takes https redirects only for an authorized domain: the domain comes first.
+    expect(at(g, 'Authorized domains')).toBeLessThan(at(g, 'Authorized redirect URIs'));
   });
 
   it('points the domain straight at the agent on the Mac, with no Pages, Worker or offline page', () => {
@@ -586,6 +611,7 @@ describe('go-live guide (docs/GO-LIVE.md, D5 task 6)', () => {
     expect(g).toContain('127.0.0.1:8787');
     expect(g).not.toMatch(/\bPages\b|\bWorker\b|offline page|Agent offline/i);
     expect(g).toMatch(/When the Mac is off, the website and the dashboard are both down/);
+    expect(g).toContain('sudo cloudflared service install <token>');
   });
 
   it('says the owner runs every step, and how to turn it all off again', () => {

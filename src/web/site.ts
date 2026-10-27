@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, join, relative, resolve, sep } from 'node:path';
@@ -90,7 +90,10 @@ export function inlineScriptHashes(html: string): string[] {
   const out = new Set<string>();
   for (const m of html.matchAll(SCRIPT)) {
     const attrs = new Map<string, string>();
-    for (const a of (m[1] ?? '').matchAll(ATTR)) attrs.set(a[1]!.toLowerCase(), a[2] ?? a[3] ?? a[4] ?? '');
+    for (const a of (m[1] ?? '').matchAll(ATTR)) {
+      const name = a[1]!.toLowerCase();
+      if (!attrs.has(name)) attrs.set(name, a[2] ?? a[3] ?? a[4] ?? ''); // a repeated attribute: the first counts, as in a browser
+    }
     if (attrs.has('src')) continue;
     if (!RUNS.test((attrs.get('type') ?? '').trim())) continue;
     const text = (m[2] ?? '').replace(/\r\n?/g, '\n');
@@ -113,11 +116,30 @@ export interface Site {
 
 const contentKey = (body: Buffer) => createHash('sha1').update(body).digest('base64url');
 
-/** Every .html file under root (links not followed), at most MAX_HTML_FILES. */
+/** Pages read at the same time; more get a 503 for a moment, so a flood of requests cannot fill the agent's memory. */
+export const MAX_PAGE_READS = 16;
+
+/** Whether an If-None-Match header names this ETag: a list, weak tags (W/"…", as a proxy may send) and * included. */
+export function etagMatches(header: string | string[] | undefined, etag: string): boolean {
+  if (header === undefined) return false;
+  const opaque = etag.replace(/^W\//, '');
+  return String(header)
+    .split(',')
+    .map((t) => t.trim())
+    .some((t) => t === '*' || t.replace(/^W\//, '') === opaque);
+}
+
+/** Every .html file under root (links not followed), at most MAX_HTML_FILES. A folder that cannot be read is skipped. */
 function htmlFiles(root: string): string[] {
   const out: string[] = [];
   const walk = (dir: string) => {
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
       if (out.length >= MAX_HTML_FILES) return;
       const p = join(dir, e.name);
       if (e.isDirectory()) walk(p);
@@ -132,9 +154,11 @@ function htmlFiles(root: string): string[] {
  * Loads the site folder once at startup: checks it is there and works out each page's policy. A missing folder is
  * logged as such; a page that cannot be read is skipped (its policy is worked out when it is served).
  */
-export function createSite(o: { dir: string; log: Logger }): Site {
+export function createSite(o: { dir: string; log: Logger; /** Tests only: reads a page at startup. */ readPage?: (file: string) => Buffer }): Site {
   let root: string | undefined;
   const policies = new Map<string, string>();
+  const readPage = o.readPage ?? ((file: string) => readFileSync(file));
+  let pageReads = 0;
 
   function policyFor(body: Buffer): string {
     const key = contentKey(body);
@@ -156,16 +180,10 @@ export function createSite(o: { dir: string; log: Logger }): Site {
   }
   let warmed = 0;
   if (root) {
-    let files: string[] = [];
-    try {
-      files = htmlFiles(root);
-    } catch (err) {
-      o.log.warn({ code: (err as { code?: unknown }).code ?? 'unknown' }, 'the website folder could not be read in full; pages get their policy when served');
-    }
-    for (const file of files) {
+    for (const file of htmlFiles(root)) {
       try {
         if (statSync(file).size > MAX_HTML_BYTES) continue;
-        policyFor(readFileSync(file));
+        policyFor(readPage(file));
         warmed++;
       } catch {
         // Skipped: worked out when the page is served.
@@ -226,7 +244,7 @@ export function createSite(o: { dir: string; log: Logger }): Site {
     if (o2.status === 200) {
       const etag = `"${contentKey(o2.body)}"`;
       res.setHeader('ETag', etag);
-      if (req.headers['if-none-match'] === etag) {
+      if (etagMatches(req.headers['if-none-match'], etag)) {
         res.statusCode = 304;
         res.end();
         return;
@@ -279,16 +297,61 @@ export function createSite(o: { dir: string; log: Logger }): Site {
       const ext = extname(file).toLowerCase();
       const type = SITE_MIME[ext];
       if (type === undefined) return notFound(req, res);
+      if (ext !== '.html') return streamFile(req, res, file, type, pathname.startsWith(IMMUTABLE_PREFIX) ? IMMUTABLE : ASSET);
+      // A page is read whole, for its policy: a few at a time.
+      if (pageReads >= MAX_PAGE_READS) {
+        res.setHeader('Retry-After', '1');
+        return plain(req, res, 503, 'Busy, try again in a moment.');
+      }
+      pageReads++;
       let body: Buffer;
       try {
         body = await readFile(file);
       } catch {
         return notFound(req, res);
+      } finally {
+        pageReads--;
       }
-      const html = ext === '.html';
-      if (html && body.length > MAX_HTML_BYTES) return notFound(req, res);
-      const cache = html ? HTML : pathname.startsWith(IMMUTABLE_PREFIX) ? IMMUTABLE : ASSET;
-      send(req, res, { status: 200, body, type, cache, policy: html ? policyFor(body) : plainPolicy });
+      if (body.length > MAX_HTML_BYTES) return notFound(req, res);
+      send(req, res, { status: 200, body, type, cache: HTML, policy: policyFor(body) });
     },
   };
+
+  /** Any other file is streamed from disk, never held whole; its ETag comes from its size and change time. */
+  async function streamFile(req: IncomingMessage, res: ServerResponse, file: string, type: string, cache: string): Promise<void> {
+    let st;
+    try {
+      st = await stat(file);
+    } catch {
+      return notFound(req, res);
+    }
+    const etag = `"${st.size.toString(36)}-${Math.floor(st.mtimeMs).toString(36)}"`;
+    res.setHeader('Content-Security-Policy', plainPolicy);
+    res.setHeader('Cache-Control', cache);
+    res.setHeader('ETag', etag);
+    if (etagMatches(req.headers['if-none-match'], etag)) {
+      res.statusCode = 304;
+      res.end();
+      return;
+    }
+    res.statusCode = 200;
+    res.setHeader('Content-Type', type);
+    res.setHeader('Content-Length', st.size);
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+    await new Promise<void>((done) => {
+      const stream = createReadStream(file);
+      stream.on('error', () => {
+        res.destroy(); // the headers are out: the answer can only be cut
+        done();
+      });
+      res.on('close', () => {
+        stream.destroy();
+        done();
+      });
+      stream.pipe(res);
+    });
+  }
 }
