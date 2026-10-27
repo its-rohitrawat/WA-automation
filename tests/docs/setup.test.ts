@@ -11,10 +11,12 @@ import { seededDb } from '../helpers/db.ts';
 
 const read = (path: string) => readFileSync(fileURLToPath(new URL(`../../${path}`, import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
 /** The tracker holds client task data: it is shared with the founder's Google account only, never by a public link. */
-const PUBLIC_SHARING = /anyone with the link|public|General access/i;
+const PUBLIC_SHARING = /\banyone\b|public|general access|link sharing|restricted/i;
 /** Any wording that says a file goes with the message, once the one allowed "No file is attached" is taken out. */
 const saysAttached = (text: string): boolean =>
-  /attach|comes with the message|\.xlsx file is sent|tracker file (also )?(comes|goes|is sent)|Tracker-YYYY-MM-DD/i.test(text.replaceAll('No file is attached', ''));
+  /attach|comes with the message|\.xlsx file is sent|tracker file (also )?(comes|goes|is sent)|Tracker-YYYY-MM-DD|\b(workbook|spreadsheet|document|file|xlsx)\b[^.,]*\b(sent|goes|comes)\b/i.test(
+    text.replaceAll('No file is attached', ''),
+  );
 /** The REPORT_DAYS values a text names: `REPORT_DAYS=v`, or a lower-case `v` on a line that names `REPORT_DAYS`. */
 const reportDaysValues = (text: string): string[] =>
   text
@@ -346,8 +348,31 @@ describe('morning report documentation: short message with the tracker link (27 
   });
 
   it('nothing is sent until the tracker link exists', () => {
-    expect(report).toContain('Until then the report is not sent');
+    expect(report).toContain('Until then the report is not sent, and the status says why');
     expect(report).not.toMatch(/sent without a link/);
+    const bullet = report.split('\n').find((line) => line.startsWith('- The link exists only once'));
+    expect(bullet).toBeDefined();
+    expect(bullet).not.toMatch(/goes out|sent with|totals only|without/i);
+  });
+
+  it('the attachment guard catches a file sent in any wording', () => {
+    for (const bad of [
+      '- The tracker is attached to the message.',
+      '- The workbook is also sent to the founder as a document.',
+      '- The spreadsheet goes with the message.',
+      '- A copy of the xlsx comes along each morning.',
+    ]) expect(saysAttached(bad), bad).toBe(true);
+    expect(saysAttached('No file is attached. The link opens on the **Today** tab.')).toBe(false);
+  });
+
+  it('the public-sharing guard catches any link-sharing wording', () => {
+    for (const bad of [
+      'or set the folder so anyone who has the link can view it',
+      'make it public',
+      'under General access pick a setting',
+      'turn on link sharing',
+      'change Restricted to something else',
+    ]) expect(bad, bad).toMatch(PUBLIC_SHARING);
   });
 
   it('the founder needs view access to Tracker.xlsx, by sharing the folder with his Google account', () => {
@@ -357,6 +382,7 @@ describe('morning report documentation: short message with the tracker link (27 
     expect(report).toContain('share the **WA Agent** folder');
     expect(step(6)).toContain('share the **WA Agent** folder');
     expect(step(6)).toContain('as Viewer');
+    expect(step(6)).toContain('Sharing the folder, not the file');
     expect(step(6)).not.toMatch(/Editor/);
     expect(step(6)).not.toMatch(PUBLIC_SHARING);
     expect(report).not.toMatch(PUBLIC_SHARING);
@@ -380,6 +406,14 @@ describe('morning report documentation: short message with the tracker link (27 
     for (const line of [retry.text.replace('06:02', 'HH:MM'), skipped.text]) {
       expect(rows.find((r) => r.startsWith(`| ${line} |`)), line).toContain('Nothing was sent.');
     }
+    // The advice signs in to Google (which makes the Drive link), never re-links the spare phone.
+    const retryRow = rows.find((r) => r.startsWith(`| ${retry.text.replace('06:02', 'HH:MM')} |`))!;
+    expect(retryRow).toContain('run `npm run cli -- google-auth`');
+    expect(retryRow).toContain('If Google is already signed in');
+    expect(retryRow).toContain('Tracker update failing');
+    expect(retryRow).toContain('Google sign-in expired');
+    expect(retryRow).not.toContain('link-sender');
+    expect(rows.find((r) => r.startsWith(`| ${skipped.text} |`))).not.toContain('link-sender');
   });
 
   it('the status table has a row for every line describeReport and Health can show', () => {
@@ -420,6 +454,8 @@ describe('morning report documentation: short message with the tracker link (27 
     expect(start).toBeGreaterThanOrEqual(0);
     const section = mac.slice(start, mac.indexOf('\n## ', start + 1));
     expect(section).toContain('Monday to Friday at 06:00 IST');
+    expect(section).toContain('empty is Monday to Friday');
+    expect(section).not.toMatch(/every day|Sundays included/i);
     expect(section).toContain('link to the tracker on Google Drive');
     expect(section).toContain('No file is attached');
     expect(section).toContain('`REPORT_DAYS`');
@@ -445,6 +481,10 @@ describe('morning report documentation: short message with the tracker link (27 
     const amendment = spec.slice(spec.indexOf('\n## Amendment, 27 Oct 2026\n'));
     expect(spec).toContain('\n## Amendment, 27 Oct 2026\n');
     for (const d of ['**D1', '**D2', '**D3', '**D4']) expect(amendment).toContain(d);
+    expect(amendment).toContain('**D4 no attachment:**');
+    const saturday = describeReport(undefined, new Date('2026-10-31T03:00:00Z'), reportSettings(parseEnv({})), 'idle');
+    expect(saturday.warning).toBeNull();
+    expect(amendment).toContain(`The status says \`${saturday.text}\`, with no warning`);
     expect(amendment).toContain("`Good morning. {open} open tasks, {overdue} overdue. Today's tracker: {link}`");
     expect(amendment).toContain('`REPORT_DAYS`');
     for (const rule of [
@@ -464,7 +504,12 @@ describe('morning report documentation: short message with the tracker link (27 
       'no AI spend',
       'Nothing is sent.',
       '`no_tracker_link`',
+      'only the text is sent',
+      '`ReportSender.sendReport(text)` takes no file',
+      'Totals count active clients only',
+      'no "due" promise',
     ]) expect(amendment, rule).toContain(rule);
+    expect(amendment).not.toMatch(/every client|active or not|with a warning/i);
     // The documented link format is the one the code builds.
     const db = seededDb();
     setKv(db, TRACKER_ID_KEY, 'IDPLACEHOLDER');
