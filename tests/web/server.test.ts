@@ -772,6 +772,114 @@ describe('startDashboard', () => {
     expect((await fetch(`http://127.0.0.1:${port}/dashboard/api/me`)).status).toBe(401);
   });
 
+  const endpoints: Server[] = [];
+  afterEach(async () => {
+    for (const s of endpoints.splice(0)) await new Promise<void>((r) => s.close(() => r()));
+  });
+  /**
+   * startDashboard's own wiring, with a Google that says yes: the real code exchanger posts to a fake token endpoint
+   * on 127.0.0.1 (which records each form), and the verifier returns good claims carrying the nonce from the last
+   * authorize redirect. Requests go through node:http so the Host header can be set.
+   */
+  async function bootSignIn(o: { publicUrl?: string } = {}) {
+    const forms: URLSearchParams[] = [];
+    const ep = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (ch: Buffer) => chunks.push(ch));
+      req.on('end', () => {
+        forms.push(new URLSearchParams(Buffer.concat(chunks).toString('utf8')));
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ id_token: 'ID-TOKEN-x', access_token: 'ACCESS-x' }));
+      });
+    });
+    await new Promise<void>((r) => ep.listen(0, '127.0.0.1', r));
+    endpoints.push(ep);
+    const db = memDb();
+    let nonce: string | undefined;
+    const c = capture();
+    const env = { ...dashEnv(0), ...(o.publicUrl === undefined ? {} : { DASHBOARD_PUBLIC_URL: o.publicUrl }) };
+    const web = await startDashboard({
+      env,
+      db,
+      log: c.log,
+      control: {},
+      google: {
+        tokenUrl: `http://127.0.0.1:${(ep.address() as AddressInfo).port}/token`,
+        verifier: async () => ({
+          iss: 'https://accounts.google.com',
+          aud: 'client-id',
+          exp: Date.now() / 1000 + 3600,
+          nonce,
+          email: 'owner@example.com',
+          email_verified: true,
+        }),
+      },
+    });
+    servers.push(web!);
+    const port = web!.address()!.port;
+    const get = async (path: string, headers: Record<string, string> = {}) => {
+      const r = await rawGet(port, path, headers);
+      const loc = r.headers.location;
+      if (typeof loc === 'string' && loc.startsWith('https://accounts.google.com/')) nonce = new URL(loc).searchParams.get('nonce') ?? undefined;
+      return r;
+    };
+    return { db, port, forms, get, ...c };
+  }
+  const cookiesOf = (r: { headers: Record<string, string | string[] | undefined> }) => {
+    const v = r.headers['set-cookie'];
+    return v === undefined ? [] : Array.isArray(v) ? v : [v];
+  };
+  const cookieValue = (r: { headers: Record<string, string | string[] | undefined> }, name: string) =>
+    cookiesOf(r).find((s) => s.startsWith(`${name}=`))?.slice(name.length + 1).split(';')[0];
+  async function fullSignIn(b: Awaited<ReturnType<typeof bootSignIn>>, headers: Record<string, string> = {}) {
+    const l = await b.get('/dashboard/auth/login', headers);
+    expect(l.status).toBe(302);
+    const google = new URL(l.headers.location as string);
+    const state = google.searchParams.get('state')!;
+    const signin = cookieValue(l, 'wa_signin')!;
+    const cb = await b.get(`/dashboard/auth/callback?code=CODE-x&state=${encodeURIComponent(state)}`, { ...headers, cookie: `wa_signin=${signin}` });
+    return { l, google, cb };
+  }
+
+  it('signs the owner in through the public https address: its redirect_uri, Secure cookies, the client secret sent', async () => {
+    const b = await bootSignIn({ publicUrl: 'https://dash.example.com' });
+    const host = { host: 'dash.example.com' };
+    const { l, google, cb } = await fullSignIn(b, host);
+    expect(google.searchParams.get('redirect_uri')).toBe('https://dash.example.com/dashboard/auth/callback');
+    expect(google.searchParams.get('client_id')).toBe('client-id');
+    for (const c of cookiesOf(l)) expect(c).toMatch(/; Secure$/);
+    expect(cb.status).toBe(302);
+    expect(cb.headers.location).toBe('/dashboard');
+    const cookies = cookiesOf(cb);
+    expect(cookies.some((c) => c.startsWith('wa_session='))).toBe(true);
+    for (const c of cookies) expect(c).toMatch(/; Secure$/);
+    // The production code exchanger posted the web client's id and secret, and the same redirect_uri.
+    expect(b.forms).toHaveLength(1);
+    expect(b.forms[0]!.get('client_id')).toBe('client-id');
+    expect(b.forms[0]!.get('client_secret')).toBe('client-secret');
+    expect(b.forms[0]!.get('redirect_uri')).toBe('https://dash.example.com/dashboard/auth/callback');
+    expect((b.db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(1);
+    expect(b.out()).not.toContain('client-secret');
+  });
+
+  it('a sign-in whose audit row cannot be written leaves no session (one database transaction)', async () => {
+    const b = await bootSignIn();
+    b.db.exec(`CREATE TRIGGER t_fail_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'audit down'); END`);
+    const { cb } = await fullSignIn(b);
+    expect(cb.status).toBe(302);
+    expect(cb.headers.location).toBe('/dashboard?error=signin');
+    expect(cookiesOf(cb).some((c) => c.startsWith('wa_session='))).toBe(false);
+    expect((b.db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
+  });
+
+  it('sign-in is limited to 10 a minute per client: the 11th goes to the sign-in error page', async () => {
+    const b = await bootSignIn();
+    for (let i = 0; i < 10; i++) expect((await b.get('/dashboard/auth/login')).headers.location).toMatch(/^https:\/\/accounts\.google\.com\//);
+    const over = await b.get('/dashboard/auth/login');
+    expect(over.status).toBe(302);
+    expect(over.headers.location).toBe('/dashboard?error=signin');
+    expect(Number(over.headers['retry-after'])).toBeGreaterThanOrEqual(1);
+  });
+
   it.each([
     ['no client id', { DASHBOARD_GOOGLE_CLIENT_ID: undefined }],
     ['no client secret', { DASHBOARD_GOOGLE_CLIENT_SECRET: undefined }],

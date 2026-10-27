@@ -55,6 +55,8 @@ export interface AuthRouteDeps {
   actionLimiter: RateLimiter;
   /** Tests only: the pending sign-ins. */
   pending?: PendingSignIns;
+  /** Tests only: the in-memory display names, by session id hash. */
+  names?: Map<string, string>;
 }
 
 function redirect(res: ServerResponse, location: string): void {
@@ -79,7 +81,7 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
   const publicOrigin = d.publicUrl === undefined ? undefined : new URL(d.publicUrl).origin;
   // Display names from Google, by session id hash, in memory only (the sessions table has no name column). After a
   // restart, /api/me answers `name: null` until the next sign-in.
-  const names = new Map<string, string>();
+  const names = d.names ?? new Map<string, string>();
 
   /**
    * The origin this browser is using, from an allowlist only: the public address, or this machine's own

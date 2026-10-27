@@ -30,8 +30,11 @@ export async function startDashboard(o: {
   log: Logger;
   control: object;
   clock?: Clock;
-  /** Tests only: a fake Google (code exchange and ID-token check). */
-  google?: { exchange: CodeExchanger; verifier: IdTokenVerifier };
+  /**
+   * Tests only: a fake Google. `exchange` and `verifier` replace the production ones; `tokenUrl` points the production
+   * code exchanger (with this env's client id and secret) at a local endpoint instead of Google's.
+   */
+  google?: { exchange?: CodeExchanger; verifier?: IdTokenVerifier; tokenUrl?: string };
 }): Promise<WebServer | undefined> {
   const { env, log } = o;
   const clock = o.clock ?? systemClock;
@@ -59,7 +62,9 @@ export async function startDashboard(o: {
     ...publicUrl,
     port,
     tx: <T>(fn: () => T): T => tx(o.db, fn),
-    exchange: o.google?.exchange ?? googleCodeExchanger({ clientId, clientSecret }),
+    exchange:
+      o.google?.exchange ??
+      googleCodeExchanger({ clientId, clientSecret, ...(o.google?.tokenUrl === undefined ? {} : { tokenUrl: o.google.tokenUrl }) }),
     verifier: o.google?.verifier ?? googleIdVerifier(clientId),
     signinLimiter: new RateLimiter({ ...SIGNIN_LIMIT, clock }),
     actionLimiter: new RateLimiter({ ...ACTION_LIMIT, clock }),

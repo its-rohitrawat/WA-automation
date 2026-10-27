@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { OAuth2Client } from 'google-auth-library';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { manualClock } from '../../src/util/clock.ts';
 import {
   authorizeUrl,
@@ -9,6 +10,7 @@ import {
   checkClaims,
   DASHBOARD_SCREENS,
   googleCodeExchanger,
+  googleIdVerifier,
   GOOGLE_AUTHORIZE_URL,
   maskEmail,
   PENDING_MAX,
@@ -19,6 +21,7 @@ import {
   SignInError,
   SignInRefused,
 } from '../../src/web/oidc.ts';
+import { badTokens, goodPayload, signJwt, stubGoogleCerts } from '../helpers/googleJwt.ts';
 
 const T0 = '2026-10-27T10:00:00.000Z';
 const CLIENT_ID = 'client-123.apps.googleusercontent.com';
@@ -209,9 +212,12 @@ describe('checkClaims', () => {
 });
 
 describe('maskEmail', () => {
-  it('keeps two letters and the domain', () => {
+  it('keeps two letters and the domain, fewer for a short name, so no address is shown whole', () => {
     expect(maskEmail('stranger@gmail.com')).toBe('st••••@gmail.com');
-    expect(maskEmail('a@x.com')).toBe('a••••@x.com');
+    expect(maskEmail('abcd@x.com')).toBe('ab••••@x.com');
+    expect(maskEmail('abc@x.com')).toBe('a••••@x.com');
+    expect(maskEmail('jo@company.com')).toBe('j••••@company.com');
+    expect(maskEmail('a@x.com')).toBe('••••@x.com');
     expect(maskEmail('no-at-sign')).toBe('••••');
     expect(maskEmail(`ev${String.fromCharCode(0x202e)}il@x.com`)).toBe('ev••••@x.com');
   });
@@ -309,5 +315,34 @@ describe('googleCodeExchanger (fake token endpoint)', () => {
     await closers.pop()!();
     const exchange = googleCodeExchanger({ clientId: CLIENT_ID, clientSecret: 'shh', tokenUrl: ep.url, timeoutMs: 2_000 });
     await expect(exchange({ code: 'C0DE', verifier: 'V', redirectUri: 'r' })).rejects.toMatchObject({ code: 'token_exchange' });
+  });
+});
+
+describe('googleIdVerifier (production ID-token check, offline)', () => {
+  it('asks google-auth-library to verify with our client id as the audience and passes the claims through', async () => {
+    const claims = { iss: 'https://accounts.google.com', aud: CLIENT_ID, email: 'o@x.com' };
+    const spy = vi
+      .spyOn(OAuth2Client.prototype, 'verifyIdToken')
+      .mockResolvedValueOnce({ getPayload: () => claims } as never)
+      .mockResolvedValueOnce({ getPayload: () => undefined } as never);
+    const verify = googleIdVerifier(CLIENT_ID);
+    await expect(verify('ID.TOKEN.1')).resolves.toBe(claims);
+    expect(spy).toHaveBeenNthCalledWith(1, { idToken: 'ID.TOKEN.1', audience: CLIENT_ID });
+    const noPayload = verify('ID.TOKEN.2');
+    await expect(noPayload).rejects.toBeInstanceOf(SignInError);
+    await expect(noPayload).rejects.toMatchObject({ code: 'id_token_invalid' });
+    expect(spy).toHaveBeenNthCalledWith(2, { idToken: 'ID.TOKEN.2', audience: CLIENT_ID });
+  });
+
+  it("accepts a token signed by Google's key, with email_verified as a boolean", async () => {
+    const certs = stubGoogleCerts();
+    const c = await googleIdVerifier(CLIENT_ID)(signJwt(goodPayload(CLIENT_ID)));
+    expect(c).toMatchObject({ aud: CLIENT_ID, email: 'Owner@Example.com', email_verified: true, nonce: 'N' });
+    expect(certs).toHaveBeenCalled();
+  });
+
+  it.each(badTokens(CLIENT_ID))('rejects %s', async (_what, idToken) => {
+    stubGoogleCerts();
+    await expect(googleIdVerifier(CLIENT_ID)(idToken)).rejects.toThrow();
   });
 });

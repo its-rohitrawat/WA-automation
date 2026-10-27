@@ -221,12 +221,17 @@ export function checkClaims(c: IdClaims, o: { clientId: string; nonce: string; n
   return name === undefined ? { email } : { email, name };
 }
 
-/** `st••••@gmail.com`: two characters and the domain, for the audit log of a refused sign-in. */
+/**
+ * `st••••@gmail.com`: the first characters and the domain, for the audit log of a refused sign-in. A short name keeps
+ * fewer (two from 4 characters up, one for 2-3, none for 1), so no address is ever shown whole.
+ */
 export function maskEmail(email: string): string {
   const clean = email.replace(UNSAFE_TEXT, '').trim().toLowerCase();
   const at = clean.lastIndexOf('@');
   if (at < 0) return '••••';
-  const head = Array.from(clean.slice(0, at)).slice(0, 2).join('');
+  const local = Array.from(clean.slice(0, at));
+  const keep = local.length > 3 ? 2 : local.length > 1 ? 1 : 0;
+  const head = local.slice(0, keep).join('');
   return `${head}••••@${clean.slice(at + 1).slice(0, 100)}`;
 }
 

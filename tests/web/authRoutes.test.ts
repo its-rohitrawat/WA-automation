@@ -11,12 +11,13 @@ import type { ManualClock } from '../../src/util/clock.ts';
 import { createLogger } from '../../src/util/logger.ts';
 import { AuditLog } from '../../src/web/audit.ts';
 import { ACTION_LIMIT, createGuard, RateLimiter, SIGNIN_LIMIT } from '../../src/web/guard.ts';
-import { googleCodeExchanger, PENDING_TTL_MS, PendingSignIns } from '../../src/web/oidc.ts';
-import type { IdClaims } from '../../src/web/oidc.ts';
+import { googleCodeExchanger, googleIdVerifier, PENDING_TTL_MS, PendingSignIns } from '../../src/web/oidc.ts';
+import type { IdClaims, IdTokenVerifier } from '../../src/web/oidc.ts';
 import { registerAuthRoutes } from '../../src/web/routes/auth.ts';
 import { createWebServer } from '../../src/web/server.ts';
 import type { WebServer } from '../../src/web/server.ts';
 import { SessionStore } from '../../src/web/sessions.ts';
+import { badTokens, stubGoogleCerts } from '../helpers/googleJwt.ts';
 
 const T0 = '2026-10-27T10:00:00.000Z';
 const CLIENT_ID = 'client-123.apps.googleusercontent.com';
@@ -45,14 +46,14 @@ afterEach(async () => {
 });
 
 /** A fake Google token endpoint on 127.0.0.1: answers with an ID token and an access token, and records each form. */
-async function fakeTokenEndpoint() {
+async function fakeTokenEndpoint(idToken: () => string = () => ID_TOKEN) {
   const forms: URLSearchParams[] = [];
   const server: Server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => {
       forms.push(new URLSearchParams(Buffer.concat(chunks).toString('utf8')));
-      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ id_token: ID_TOKEN, access_token: ACCESS_TOKEN, expires_in: 3599 }));
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ id_token: idToken(), access_token: ACCESS_TOKEN, expires_in: 3599 }));
     });
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
@@ -74,6 +75,7 @@ interface Boot {
   out: () => string;
   records: () => Record<string, unknown>[];
   bodies: string[];
+  names: Map<string, string>;
   req: (method: string, path: string, headers?: Record<string, string>) => Promise<Reply>;
 }
 
@@ -85,6 +87,10 @@ async function boot(
     /** The code exchange rejects with this plain Error (not a SignInError). */
     exchangeThrows?: Error;
     pendingMax?: number;
+    /** The ID token the fake token endpoint answers with (default ID_TOKEN). */
+    idToken?: () => string;
+    /** A real verifier (such as googleIdVerifier) in place of the fake one. */
+    verifier?: IdTokenVerifier;
   } = {},
 ): Promise<Boot> {
   const c = capture();
@@ -95,7 +101,7 @@ async function boot(
   const clock = manualClock(T0);
   const sessions = new SessionStore(db, clock);
   const audit = new AuditLog(db, clock);
-  const ep = await fakeTokenEndpoint();
+  const ep = await fakeTokenEndpoint(o.idToken);
   const web = createWebServer({ control: {}, env: { DASHBOARD_PORT: 0 }, log: c.log, clock, sessions });
   cleanups.push(() => web.stop());
   const owners = o.owners ?? [OWNER];
@@ -106,6 +112,7 @@ async function boot(
     claims: {} as Boot['claims'],
     verified: [] as string[],
     bodies: [] as string[],
+    names: new Map<string, string>(),
   };
   registerAuthRoutes({
     router: web.router,
@@ -124,7 +131,8 @@ async function boot(
         ? googleCodeExchanger({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, tokenUrl: ep.url })
         : () => Promise.reject(o.exchangeThrows),
     ...(o.pendingMax === undefined ? {} : { pending: new PendingSignIns(clock, { max: o.pendingMax }) }),
-    verifier: async (idToken) => {
+    names: b.names,
+    verifier: o.verifier ?? (async (idToken) => {
       b.verified.push(idToken);
       if (o.verifierThrows) throw new Error(`Wrong number of segments in token: ${idToken}`);
       return {
@@ -137,7 +145,7 @@ async function boot(
         name: 'The Owner',
         ...b.claims,
       };
-    },
+    }),
     signinLimiter: new RateLimiter({ ...SIGNIN_LIMIT, clock }),
     actionLimiter: new RateLimiter({ ...ACTION_LIMIT, clock }),
   });
@@ -286,6 +294,35 @@ describe('owner sign-in: happy path', () => {
     expect(l.google.searchParams.get('redirect_uri')).toBe(`http://localhost:${b.port}/dashboard/auth/callback`);
   });
 
+  // Hosts that only look like this machine or the public address: none of them may become the redirect origin.
+  const lookalikes = (port: number) => [
+    '127.0.0.1.evil.com',
+    'localhost.evil.com',
+    `127.0.0.1.evil.com:${port}`,
+    `127.0.0.1:${port + 1}`,
+    `localhost:${port}@evil.com`,
+    `localhost:${port}.evil.com`,
+    'dash.example.com.evil.com',
+    'evil.com@dash.example.com',
+  ];
+
+  it('a Host that only looks like this machine falls back to the public address', async () => {
+    const b = await boot({ publicUrl: 'https://dash.example.com' });
+    for (const host of lookalikes(b.port)) {
+      const l = await login(b, '', { host });
+      expect(l.google.searchParams.get('redirect_uri'), host).toBe('https://dash.example.com/dashboard/auth/callback');
+      expect(setCookies(l.r).find((s) => s.startsWith('wa_signin=')), host).toMatch(/; Secure$/);
+    }
+  });
+
+  it('a Host that only looks like this machine falls back to localhost when no public address is set', async () => {
+    const b = await boot();
+    for (const host of lookalikes(b.port)) {
+      const l = await login(b, '', { host });
+      expect(l.google.searchParams.get('redirect_uri'), host).toBe(`http://localhost:${b.port}/dashboard/auth/callback`);
+    }
+  });
+
   it('the owner list is matched trimmed and lower-cased', async () => {
     const b = await boot({ owners: [' Owner@Example.COM '] });
     const sid = await signIn(b);
@@ -414,6 +451,26 @@ describe('owner sign-in: state, nonce and pending records', () => {
   });
 });
 
+describe('owner sign-in with the production ID-token verifier (offline)', () => {
+  it.each(badTokens(CLIENT_ID))('%s is a sign-in failure, and no log line or response holds the token', async (_what, idToken) => {
+    stubGoogleCerts();
+    const b = await boot({ idToken: () => idToken, verifier: googleIdVerifier(CLIENT_ID) });
+    const l = await login(b);
+    const r = await callback(b, l.state, l.signin);
+    expect(r.status).toBe(302);
+    expect(r.headers.location).toBe('/dashboard?error=signin');
+    expect(setCookies(r).some((c) => c.startsWith('wa_session='))).toBe(false);
+    expect(b.records().filter((x) => x.msg === 'dashboard sign-in failed').map((x) => x.code)).toEqual(['id_token_invalid']);
+    // Neither the whole token nor any of its parts (the library's messages can quote the payload).
+    for (const part of [idToken, ...idToken.split('.').filter((p) => p.length > 8)]) {
+      expect(b.out()).not.toContain(part);
+      expect(b.bodies.join(' ')).not.toContain(part);
+    }
+    expect(b.out()).not.toContain('evil@example.com');
+    expect((b.db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
+  });
+});
+
 describe('owner sign-in: refusals', () => {
   it('an email that is not verified is refused and audited masked', async () => {
     const b = await boot();
@@ -509,6 +566,39 @@ describe('owner sign-out', () => {
   it('without a session it is 401', async () => {
     const b = await boot();
     expect((await b.req('POST', '/dashboard/auth/logout', { origin: `http://127.0.0.1:${b.port}` })).status).toBe(401);
+  });
+
+  it('is limited to 30 a minute per client, counted before the session check: then 429 with Retry-After', async () => {
+    const b = await boot();
+    const origin = `http://127.0.0.1:${b.port}`;
+    for (let i = 0; i < ACTION_LIMIT.capacity; i++) expect((await b.req('POST', '/dashboard/auth/logout', { origin })).status).toBe(401);
+    const over = await b.req('POST', '/dashboard/auth/logout', { origin });
+    expect(over.status).toBe(429);
+    expect(Number(over.headers['retry-after'])).toBeGreaterThanOrEqual(1);
+    // Another client is not affected.
+    expect((await b.req('POST', '/dashboard/auth/logout', { origin, 'cf-connecting-ip': '203.0.113.9' })).status).toBe(401);
+  });
+
+  it('forgets the display name on sign-out and when the browser signs in again', async () => {
+    const b = await boot();
+    const first = await signIn(b);
+    expect([...b.names.values()]).toEqual(['The Owner']);
+    // Signing in again from the same browser (Google gives no name this time) drops the earlier session's name.
+    b.claims.name = undefined;
+    const l = await login(b);
+    const cb = await b.req('GET', `/dashboard/auth/callback?code=${CODE}&state=${l.state}`, { cookie: `wa_signin=${l.signin}; wa_session=${first}` });
+    const second = cookieValue(cb, 'wa_session')!;
+    expect(second).toBeDefined();
+    expect(b.names.size).toBe(0);
+    // A third sign-in with a name, then sign-out: the name goes with the session.
+    b.claims.name = 'Owner Again';
+    const third = await signIn(b);
+    expect([...b.names.values()]).toEqual(['Owner Again']);
+    const me = JSON.parse((await b.req('GET', '/dashboard/api/me', { cookie: `wa_session=${third}` })).body) as { csrf: string; name: string };
+    expect(me.name).toBe('Owner Again');
+    const r = await b.req('POST', '/dashboard/auth/logout', { cookie: `wa_session=${third}`, origin: `http://127.0.0.1:${b.port}`, 'x-csrf-token': me.csrf });
+    expect(r.status).toBe(204);
+    expect(b.names.size).toBe(0);
   });
 
   it('with the session, Origin and CSRF token: 204, the row is gone, the cookie cleared and audited', async () => {
