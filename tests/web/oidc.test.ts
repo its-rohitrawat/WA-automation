@@ -12,6 +12,7 @@ import {
   GOOGLE_AUTHORIZE_URL,
   maskEmail,
   PENDING_MAX,
+  PENDING_PER_CLIENT,
   PENDING_TTL_MS,
   PendingSignIns,
   safeReturnPath,
@@ -89,12 +90,38 @@ describe('PendingSignIns', () => {
     expect(() => p.take(a.key, a.state)).toThrow(expect.objectContaining({ code: 'expired' }));
   });
 
-  it('keeps at most 100 records, dropping the oldest', () => {
+  it('when full it refuses a new sign-in (busy) and never drops one that is in flight', () => {
+    expect(PENDING_MAX).toBe(10_000);
+    const p = new PendingSignIns(manualClock(T0), { max: 3 });
+    const first = p.add({ redirectUri: 'x', returnTo: '/dashboard', client: 'owner' });
+    p.add({ redirectUri: 'x', returnTo: '/dashboard', client: 'a' });
+    p.add({ redirectUri: 'x', returnTo: '/dashboard', client: 'b' });
+    expect(() => p.add({ redirectUri: 'x', returnTo: '/dashboard', client: 'c' })).toThrow(expect.objectContaining({ code: 'busy' }));
+    expect(() => p.add({ redirectUri: 'x', returnTo: '/dashboard' })).toThrow(expect.objectContaining({ code: 'busy' }));
+    expect(p.size()).toBe(3);
+    expect(p.take(first.key, first.state).returnTo).toBe('/dashboard');
+  });
+
+  it('keeps at most 5 per client, dropping only that client\'s own oldest', () => {
     const p = new PendingSignIns(manualClock(T0));
-    const first = p.add({ redirectUri: 'x', returnTo: '/dashboard' });
-    for (let i = 0; i < PENDING_MAX + 20; i++) p.add({ redirectUri: 'x', returnTo: '/dashboard' });
-    expect(p.size()).toBe(PENDING_MAX);
-    expect(() => p.take(first.key, first.state)).toThrow(expect.objectContaining({ code: 'no_pending' }));
+    const other = p.add({ redirectUri: 'x', returnTo: '/dashboard', client: 'b' });
+    const mine = Array.from({ length: PENDING_PER_CLIENT + 2 }, () => p.add({ redirectUri: 'x', returnTo: '/dashboard', client: 'a' }));
+    expect(PENDING_PER_CLIENT).toBe(5);
+    expect(p.size()).toBe(PENDING_PER_CLIENT + 1);
+    expect(() => p.take(mine[0]!.key, mine[0]!.state)).toThrow(expect.objectContaining({ code: 'no_pending' }));
+    expect(() => p.take(mine[1]!.key, mine[1]!.state)).toThrow(expect.objectContaining({ code: 'no_pending' }));
+    expect(p.take(mine[2]!.key, mine[2]!.state).returnTo).toBe('/dashboard');
+    expect(p.take(other.key, other.state).returnTo).toBe('/dashboard');
+  });
+
+  it('a full map makes room again once records expire', () => {
+    const clock = manualClock(T0);
+    const p = new PendingSignIns(clock, { max: 2 });
+    p.add({ redirectUri: 'x', returnTo: '/dashboard' });
+    p.add({ redirectUri: 'x', returnTo: '/dashboard' });
+    clock.advance(PENDING_TTL_MS + 1);
+    expect(() => p.add({ redirectUri: 'x', returnTo: '/dashboard' })).not.toThrow();
+    expect(p.size()).toBe(1);
   });
 
   it('drops expired records when adding', () => {
@@ -259,6 +286,22 @@ describe('googleCodeExchanger (fake token endpoint)', () => {
       }
     }
     expect(codes).toEqual(['token_exchange', 'no_id_token', 'token_exchange']);
+  });
+
+  it('a redirect from the token endpoint is refused, not followed', async () => {
+    const elsewhere = await fakeEndpoint(() => ({ status: 200, body: JSON.stringify({ id_token: 'ID.TOKEN.X' }) }));
+    const hits: string[] = [];
+    const server = createServer((req, res) => {
+      hits.push(req.url ?? '');
+      res.writeHead(307, { location: elsewhere.url }).end();
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    closers.push(() => new Promise<void>((r) => server.close(() => r())));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/token`;
+    const exchange = googleCodeExchanger({ clientId: CLIENT_ID, clientSecret: 'shh', tokenUrl: url });
+    await expect(exchange({ code: 'C0DE', verifier: 'V', redirectUri: 'r' })).rejects.toMatchObject({ code: 'token_exchange' });
+    expect(hits).toHaveLength(1);
+    expect(elsewhere.seen).toHaveLength(0);
   });
 
   it('an endpoint that cannot be reached is a token_exchange failure', async () => {

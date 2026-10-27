@@ -772,13 +772,18 @@ describe('startDashboard', () => {
     expect((await fetch(`http://127.0.0.1:${port}/dashboard/api/me`)).status).toBe(401);
   });
 
-  it('a missing Google client or owner list does not start the dashboard (and says so without values)', async () => {
+  it.each([
+    ['no client id', { DASHBOARD_GOOGLE_CLIENT_ID: undefined }],
+    ['no client secret', { DASHBOARD_GOOGLE_CLIENT_SECRET: undefined }],
+    ['an empty owner list', { DASHBOARD_OWNER_EMAILS: [] as string[] }],
+  ])('%s: the dashboard does not start (and says so without values)', async (_what, patch) => {
     const c = capture();
-    const env = { DASHBOARD_PORT: 0, DASHBOARD_OWNER_EMAILS: [] as string[], DASHBOARD_GOOGLE_CLIENT_ID: 'client-id' };
+    const env = { ...dashEnv(0), ...patch };
     const web = await startDashboard({ env, db: memDb(), log: c.log, control: {}, google: fakeGoogle });
+    if (web !== undefined) servers.push(web);
     expect(web).toBeUndefined();
     expect(c.out()).toContain('dashboard not started');
-    expect(c.out()).not.toContain('client-id');
+    for (const value of ['client-id', 'client-secret', 'owner@example.com']) expect(c.out()).not.toContain(value);
   });
 });
 

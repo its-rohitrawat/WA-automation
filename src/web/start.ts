@@ -1,4 +1,5 @@
 import type { Env } from '../config/env.ts';
+import { tx } from '../store/db.ts';
 import type { Db } from '../store/db.ts';
 import { systemClock } from '../util/clock.ts';
 import type { Clock } from '../util/clock.ts';
@@ -57,6 +58,7 @@ export async function startDashboard(o: {
     clientId,
     ...publicUrl,
     port,
+    tx: <T>(fn: () => T): T => tx(o.db, fn),
     exchange: o.google?.exchange ?? googleCodeExchanger({ clientId, clientSecret }),
     verifier: o.google?.verifier ?? googleIdVerifier(clientId),
     signinLimiter: new RateLimiter({ ...SIGNIN_LIMIT, clock }),

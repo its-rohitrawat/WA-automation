@@ -15,8 +15,13 @@ export const SIGNIN_SCOPES = 'openid email profile';
 export const SIGNIN_COOKIE = 'wa_signin';
 /** A started sign-in must come back within 10 minutes. */
 export const PENDING_TTL_MS = 10 * 60_000;
-/** At most this many sign-ins wait at once; past it the oldest is dropped (memory stays small whatever arrives). */
-export const PENDING_MAX = 100;
+/**
+ * At most this many sign-ins wait at once (each under 0.5 KB, so a few MB at worst). When full, a new sign-in is
+ * refused (`busy`) rather than dropping one in flight, so a flood of anonymous logins cannot push out the owner's.
+ */
+export const PENDING_MAX = 10_000;
+/** At most this many sign-ins wait per client (rate-limit key); a client's next one drops its own oldest. */
+export const PENDING_PER_CLIENT = 5;
 /** The dashboard's screens, as in the approved design: `/dashboard/<screen>`. */
 export const DASHBOARD_SCREENS: readonly string[] = Object.freeze([
   'overview',
@@ -47,7 +52,8 @@ export type SignInFailure =
   | 'audience'
   | 'token_expired'
   | 'nonce'
-  | 'no_email';
+  | 'no_email'
+  | 'busy';
 
 /** A sign-in that went wrong (not a refused person): the page shows a plain "try again". */
 export class SignInError extends Error {
@@ -117,6 +123,8 @@ export interface Pending {
   redirectUri: string;
   returnTo: string;
   createdAt: number;
+  /** The client (rate-limit key) that started it, for the per-client cap. */
+  client?: string;
 }
 
 /**
@@ -127,21 +135,34 @@ export class PendingSignIns {
   readonly #clock: Clock;
   readonly #ttlMs: number;
   readonly #max: number;
+  readonly #perClient: number;
   readonly #map = new Map<string, Pending>();
 
-  constructor(clock: Clock, o: { ttlMs?: number; max?: number } = {}) {
+  constructor(clock: Clock, o: { ttlMs?: number; max?: number; perClient?: number } = {}) {
     this.#clock = clock;
     this.#ttlMs = o.ttlMs ?? PENDING_TTL_MS;
     this.#max = o.max ?? PENDING_MAX;
+    this.#perClient = o.perClient ?? PENDING_PER_CLIENT;
   }
 
-  /** Starts one: returns the cookie key, and the state, nonce and S256 challenge for Google's page. */
-  add(o: { redirectUri: string; returnTo: string }): { key: string; state: string; nonce: string; challenge: string } {
+  /**
+   * Starts one: returns the cookie key, and the state, nonce and S256 challenge for Google's page. Expired records are
+   * dropped first, then this client's own oldest past its cap. If the map is still full, throws `SignInError('busy')`:
+   * a sign-in in flight is never dropped to make room for someone else's.
+   */
+  add(o: { redirectUri: string; returnTo: string; client?: string }): { key: string; state: string; nonce: string; challenge: string } {
     const now = this.#clock.now().getTime();
-    for (const [k, p] of this.#map) if (now - p.createdAt > this.#ttlMs) this.#map.delete(k);
-    while (this.#map.size >= this.#max) this.#map.delete(this.#map.keys().next().value!);
+    const mine: string[] = [];
+    for (const [k, p] of this.#map) {
+      if (now - p.createdAt > this.#ttlMs) this.#map.delete(k);
+      else if (o.client !== undefined && p.client === o.client) mine.push(k);
+    }
+    // Insertion order is oldest first.
+    while (mine.length >= this.#perClient) this.#map.delete(mine.shift()!);
+    if (this.#map.size >= this.#max) throw new SignInError('busy');
     const key = token();
     const p: Pending = { state: token(), nonce: token(), verifier: token(), redirectUri: o.redirectUri, returnTo: o.returnTo, createdAt: now };
+    if (o.client !== undefined) p.client = o.client;
     this.#map.set(key, p);
     return { key, state: p.state, nonce: p.nonce, challenge: createHash('sha256').update(p.verifier).digest('base64url') };
   }

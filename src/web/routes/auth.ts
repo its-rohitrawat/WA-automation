@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Clock } from '../../util/clock.ts';
 import type { Logger } from '../../util/logger.ts';
 import type { AuditLog } from '../audit.ts';
+import { clientAddress } from '../guard.ts';
 import type { Guard, RateLimiter } from '../guard.ts';
 import { parseCookies, sendJson, serializeCookie } from '../http.ts';
 import type { RequestContext, Router } from '../router.ts';
@@ -18,7 +19,7 @@ import {
   SignInRefused,
 } from '../oidc.ts';
 import type { CodeExchanger, IdTokenVerifier } from '../oidc.ts';
-import { clearSessionCookie, csrfFor, hashToken, SESSION_COOKIE, sessionCookie } from '../sessions.ts';
+import { clearSessionCookie, csrfFor, hashToken, secureFor, SESSION_COOKIE, sessionCookie } from '../sessions.ts';
 import type { SessionStore } from '../sessions.ts';
 
 /** The sign-out route (POST only, CSRF-checked). */
@@ -42,6 +43,8 @@ export interface AuthRouteDeps {
   publicUrl?: string;
   /** The port the dashboard listens on (for the localhost origins). */
   port: () => number | undefined;
+  /** Runs `fn` in one database transaction (production: `tx(db, fn)`): session writes and their audit row together. */
+  tx: <T>(fn: () => T) => T;
   /** Code to ID token (production: `googleCodeExchanger`). */
   exchange: CodeExchanger;
   /** ID-token signature check (production: `googleIdVerifier`). */
@@ -90,28 +93,51 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
     return publicOrigin ?? `http://localhost:${port ?? 0}`;
   }
 
-  const isSecure = (o: string) => o.startsWith('https://');
-
   function remember(sessionId: string, name: string | undefined): void {
     if (name === undefined) return;
     while (names.size >= NAMES_MAX) names.delete(names.keys().next().value!);
     names.set(hashToken(sessionId), name);
   }
 
+  /** A sign-in that went wrong: logged by its code only, and the browser goes to the page's plain "try again". */
+  function failed(ctx: RequestContext, code: string): void {
+    d.log.warn({ rid: ctx.requestId, code }, 'dashboard sign-in failed');
+    redirect(ctx.res, '/dashboard?error=signin');
+  }
+
+  /**
+   * Counts this request against the sign-in limit. Login and callback are top-level navigations, so over the limit the
+   * browser goes to the sign-in error page (with `Retry-After`) rather than a JSON 429.
+   */
+  function withinLimit(ctx: RequestContext): boolean {
+    const key = clientAddress(ctx.req);
+    if (d.signinLimiter.take(key)) return true;
+    ctx.res.setHeader('Retry-After', String(d.signinLimiter.retryAfter(key)));
+    failed(ctx, 'rate_limited');
+    return false;
+  }
+
   d.router.get('/dashboard/auth/login', (ctx: RequestContext) => {
     const { req, res } = ctx;
-    d.signinLimiter.hit(req, res);
+    if (!withinLimit(ctx)) return;
     const o = origin(req);
     const redirectUri = `${o}${CALLBACK_PATH}`;
-    const p = pending.add({ redirectUri, returnTo: safeReturnPath(ctx.url.searchParams.get('return')) });
-    res.setHeader('Set-Cookie', signinCookie(p.key, isSecure(o)));
+    let p;
+    try {
+      p = pending.add({ redirectUri, returnTo: safeReturnPath(ctx.url.searchParams.get('return')), client: clientAddress(req) });
+    } catch (err) {
+      if (!(err instanceof SignInError)) throw err;
+      failed(ctx, err.code);
+      return;
+    }
+    res.setHeader('Set-Cookie', signinCookie(p.key, secureFor(o)));
     redirect(res, authorizeUrl({ clientId: d.clientId, redirectUri, state: p.state, nonce: p.nonce, challenge: p.challenge }));
   });
 
   d.router.get(CALLBACK_PATH, async (ctx: RequestContext) => {
     const { req, res } = ctx;
-    d.signinLimiter.hit(req, res);
-    const secure = isSecure(origin(req));
+    if (!withinLimit(ctx)) return;
+    const secure = secureFor(origin(req));
     const cookies = parseCookies(typeof req.headers.cookie === 'string' ? req.headers.cookie : undefined);
     const clearSignin = signinCookie('', secure);
     const label = browserLabel(typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : undefined);
@@ -132,15 +158,17 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
       const who = checkClaims(claims, { clientId: d.clientId, nonce: p.nonce, now: d.clock.now().getTime() });
       if (!owners.has(who.email)) throw new SignInRefused('not_owner', who.email);
 
-      // A browser signing in again leaves its earlier session behind: end it.
+      // A browser signing in again leaves its earlier session behind: end it. One transaction with the new session and
+      // its audit row, so a failed audit write leaves no orphan session and keeps the earlier one.
       const earlier = cookies[SESSION_COOKIE];
-      if (earlier !== undefined) {
-        d.sessions.destroy(earlier);
-        names.delete(hashToken(earlier));
-      }
-      const s = d.sessions.create(who.email, label);
+      const s = d.tx(() => {
+        if (earlier !== undefined) d.sessions.destroy(earlier);
+        const created = d.sessions.create(who.email, label);
+        d.audit.record({ actor: who.email, event: 'Signed in', kind: 'auth', detail: label, requestId: ctx.requestId });
+        return created;
+      });
+      if (earlier !== undefined) names.delete(hashToken(earlier));
       remember(s.id, who.name);
-      d.audit.record({ actor: who.email, event: 'Signed in', kind: 'auth', detail: label, requestId: ctx.requestId });
       res.setHeader('Set-Cookie', [clearSignin, sessionCookie(s.id, { secure })]);
       redirect(res, p.returnTo);
     } catch (err) {
@@ -153,9 +181,8 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
         redirect(res, '/dashboard?denied=1');
         return;
       }
-      const code = err instanceof SignInError ? err.code : 'internal';
-      d.log.warn({ rid: ctx.requestId, code }, 'dashboard sign-in failed');
-      redirect(res, '/dashboard?error=signin');
+      // Any other error's message may quote the code or a token: only the code is logged.
+      failed(ctx, err instanceof SignInError ? err.code : 'internal');
     }
   });
 
@@ -164,12 +191,14 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
     d.actionLimiter.hit(req, res);
     const s = d.guard.requireOwner(req);
     d.guard.requireCsrf(req, s);
-    d.sessions.destroy(s.id);
-    names.delete(hashToken(s.id));
     const label = browserLabel(typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : undefined);
-    d.audit.record({ actor: s.email, event: 'Signed out', kind: 'auth', detail: label, requestId: ctx.requestId });
+    d.tx(() => {
+      d.sessions.destroy(s.id);
+      d.audit.record({ actor: s.email, event: 'Signed out', kind: 'auth', detail: label, requestId: ctx.requestId });
+    });
+    names.delete(hashToken(s.id));
     res.statusCode = 204;
-    res.setHeader('Set-Cookie', clearSessionCookie({ secure: isSecure(origin(req)) }));
+    res.setHeader('Set-Cookie', clearSessionCookie({ secure: secureFor(origin(req)) }));
     res.setHeader('Cache-Control', 'no-store');
     res.end();
   });

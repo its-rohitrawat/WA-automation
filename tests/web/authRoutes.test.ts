@@ -4,14 +4,14 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { DestinationStream } from 'pino';
-import { openDb } from '../../src/store/db.ts';
+import { openDb, tx } from '../../src/store/db.ts';
 import type { Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import type { ManualClock } from '../../src/util/clock.ts';
 import { createLogger } from '../../src/util/logger.ts';
 import { AuditLog } from '../../src/web/audit.ts';
 import { ACTION_LIMIT, createGuard, RateLimiter, SIGNIN_LIMIT } from '../../src/web/guard.ts';
-import { googleCodeExchanger, PENDING_TTL_MS } from '../../src/web/oidc.ts';
+import { googleCodeExchanger, PENDING_TTL_MS, PendingSignIns } from '../../src/web/oidc.ts';
 import type { IdClaims } from '../../src/web/oidc.ts';
 import { registerAuthRoutes } from '../../src/web/routes/auth.ts';
 import { createWebServer } from '../../src/web/server.ts';
@@ -77,7 +77,16 @@ interface Boot {
   req: (method: string, path: string, headers?: Record<string, string>) => Promise<Reply>;
 }
 
-async function boot(o: { owners?: string[]; publicUrl?: string; verifierThrows?: boolean } = {}): Promise<Boot> {
+async function boot(
+  o: {
+    owners?: string[];
+    publicUrl?: string;
+    verifierThrows?: boolean;
+    /** The code exchange rejects with this plain Error (not a SignInError). */
+    exchangeThrows?: Error;
+    pendingMax?: number;
+  } = {},
+): Promise<Boot> {
   const c = capture();
   const db = openDb(':memory:');
   cleanups.push(() => {
@@ -109,7 +118,12 @@ async function boot(o: { owners?: string[]; publicUrl?: string; verifierThrows?:
     clientId: CLIENT_ID,
     ...(o.publicUrl === undefined ? {} : { publicUrl: o.publicUrl }),
     port,
-    exchange: googleCodeExchanger({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, tokenUrl: ep.url }),
+    tx: <T>(fn: () => T): T => tx(db, fn),
+    exchange:
+      o.exchangeThrows === undefined
+        ? googleCodeExchanger({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, tokenUrl: ep.url })
+        : () => Promise.reject(o.exchangeThrows),
+    ...(o.pendingMax === undefined ? {} : { pending: new PendingSignIns(clock, { max: o.pendingMax }) }),
     verifier: async (idToken) => {
       b.verified.push(idToken);
       if (o.verifierThrows) throw new Error(`Wrong number of segments in token: ${idToken}`);
@@ -266,6 +280,18 @@ describe('owner sign-in: happy path', () => {
     expect(l.google.searchParams.get('redirect_uri')).toBe('https://dash.example.com/dashboard/auth/callback');
   });
 
+  it('an unknown Host without a public address falls back to localhost', async () => {
+    const b = await boot();
+    const l = await login(b, '', { host: 'evil.example.net' });
+    expect(l.google.searchParams.get('redirect_uri')).toBe(`http://localhost:${b.port}/dashboard/auth/callback`);
+  });
+
+  it('the owner list is matched trimmed and lower-cased', async () => {
+    const b = await boot({ owners: [' Owner@Example.COM '] });
+    const sid = await signIn(b);
+    expect((await b.req('GET', '/dashboard/api/me', { cookie: `wa_session=${sid}` })).status).toBe(200);
+  });
+
   it('signing in again ends the session the browser already had', async () => {
     const b = await boot();
     const first = await signIn(b);
@@ -344,6 +370,41 @@ describe('owner sign-in: state, nonce and pending records', () => {
     expect(loggedCode(b)).toEqual(['google_error']);
   });
 
+  it('an over-long code is refused before any exchange', async () => {
+    const b = await boot();
+    const l = await login(b);
+    failed(await b.req('GET', `/dashboard/auth/callback?code=${'x'.repeat(2049)}&state=${l.state}`, { cookie: `wa_signin=${l.signin}` }));
+    expect(loggedCode(b)).toEqual(['no_code']);
+    expect(b.forms).toHaveLength(0);
+  });
+
+  it('an unexpected failure (not a SignInError) logs the code "internal" only, never its message', async () => {
+    const b = await boot({ exchangeThrows: new Error(`boom ${CODE} ${ID_TOKEN}`) });
+    const l = await login(b);
+    failed(await callback(b, l.state, l.signin));
+    expect(loggedCode(b)).toEqual(['internal']);
+    expect(b.out()).not.toContain(CODE);
+    expect(b.out()).not.toContain(ID_TOKEN);
+    expect(b.out()).not.toContain('boom');
+    expect(b.bodies.join('\n')).not.toContain(ID_TOKEN);
+  });
+
+  it('when the pending sign-ins are full a new login is refused, and the owner sign-in in flight still works', async () => {
+    const b = await boot({ pendingMax: 2 });
+    const owner = await login(b);
+    const visitor = (ip: string) => b.req('GET', '/dashboard/auth/login', { 'cf-connecting-ip': ip });
+    expect((await visitor('203.0.113.1')).headers.location).toMatch(/^https:\/\/accounts\.google\.com\//);
+    const refused = await visitor('203.0.113.2');
+    failed(refused);
+    expect(setCookies(refused).some((c) => c.startsWith('wa_signin='))).toBe(false);
+    expect(loggedCode(b)).toEqual(['busy']);
+    // The fake verifier would answer with the visitor's nonce (the last one sent to Google); use the owner's.
+    b.claims.nonce = owner.google.searchParams.get('nonce')!;
+    const cb = await callback(b, owner.state, owner.signin);
+    expect(cb.headers.location).toBe('/dashboard');
+    expect(cookieValue(cb, 'wa_session')).toBeDefined();
+  });
+
   it('a verifier that rejects the ID token is a failure, and its message (which may hold the token) is not logged', async () => {
     const b = await boot({ verifierThrows: true });
     const l = await login(b);
@@ -404,6 +465,36 @@ describe('owner sign-in: the return path', () => {
   });
 });
 
+describe('owner sign-in and sign-out: one transaction with the audit row', () => {
+  const failAudit = (db: Db) => db.exec(`CREATE TRIGGER t_fail_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'audit down'); END`);
+  const count = (db: Db) => (db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n;
+
+  it('a sign-in whose audit row cannot be written creates no session and keeps the earlier one', async () => {
+    const b = await boot();
+    const first = await signIn(b);
+    failAudit(b.db);
+    const l = await login(b);
+    const cb = await b.req('GET', `/dashboard/auth/callback?code=${CODE}&state=${l.state}`, { cookie: `wa_signin=${l.signin}; wa_session=${first}` });
+    expect(cb.status).toBe(302);
+    expect(cb.headers.location).toBe('/dashboard?error=signin');
+    expect(setCookies(cb).some((c) => c.startsWith('wa_session='))).toBe(false);
+    expect(count(b.db)).toBe(1);
+    expect((await b.req('GET', '/dashboard/api/me', { cookie: `wa_session=${first}` })).status).toBe(200);
+    expect(b.out()).not.toContain('audit down');
+  });
+
+  it('a sign-out whose audit row cannot be written keeps the session', async () => {
+    const b = await boot();
+    const sid = await signIn(b);
+    const me = JSON.parse((await b.req('GET', '/dashboard/api/me', { cookie: `wa_session=${sid}` })).body) as { csrf: string };
+    failAudit(b.db);
+    const r = await b.req('POST', '/dashboard/auth/logout', { cookie: `wa_session=${sid}`, origin: `http://127.0.0.1:${b.port}`, 'x-csrf-token': me.csrf });
+    expect(r.status).toBe(500);
+    expect(count(b.db)).toBe(1);
+    expect((await b.req('GET', '/dashboard/api/me', { cookie: `wa_session=${sid}` })).status).toBe(200);
+  });
+});
+
 describe('owner sign-out', () => {
   it('without a CSRF token or with a wrong Origin it is 403 and the session stays', async () => {
     const b = await boot();
@@ -435,14 +526,36 @@ describe('owner sign-out', () => {
   });
 });
 
+describe('owner sign-out over the public https address', () => {
+  it('clears the cookie with the same attributes, Secure included', async () => {
+    const b = await boot({ publicUrl: 'https://dash.example.com' });
+    const host = { host: 'dash.example.com' };
+    const l = await login(b, '', host);
+    const cb = await callback(b, l.state, l.signin, '', host);
+    const sid = cookieValue(cb, 'wa_session')!;
+    const me = JSON.parse((await b.req('GET', '/dashboard/api/me', { cookie: `wa_session=${sid}`, ...host })).body) as { csrf: string };
+    const r = await b.req('POST', '/dashboard/auth/logout', { cookie: `wa_session=${sid}`, ...host, origin: 'https://dash.example.com', 'x-csrf-token': me.csrf });
+    expect(r.status).toBe(204);
+    expect(setCookies(r)).toEqual(['wa_session=; HttpOnly; SameSite=Lax; Path=/dashboard; Max-Age=0; Secure']);
+  });
+});
+
 describe('owner sign-in: limits and secrets', () => {
-  it('sign-in and its callback share a limit of 10 a minute per client', async () => {
+  it('sign-in and its callback share a limit of 10 a minute per client; over it, the sign-in error page', async () => {
     const b = await boot();
-    for (let i = 0; i < 10; i++) expect((await b.req('GET', '/dashboard/auth/login')).status).toBe(302);
-    const r = await b.req('GET', '/dashboard/auth/login');
-    expect(r.status).toBe(429);
-    expect(r.headers['retry-after']).toBeDefined();
-    expect((await b.req('GET', `/dashboard/auth/callback?code=x&state=y`)).status).toBe(429);
+    const toGoogle = /^https:\/\/accounts\.google\.com\//;
+    for (let i = 0; i < 10; i++) expect((await b.req('GET', '/dashboard/auth/login')).headers.location).toMatch(toGoogle);
+    const over = [await b.req('GET', '/dashboard/auth/login'), await b.req('GET', '/dashboard/auth/callback?code=x&state=y')];
+    for (const r of over) {
+      expect(r.status).toBe(302);
+      expect(r.headers.location).toBe('/dashboard?error=signin');
+      expect(Number(r.headers['retry-after'])).toBeGreaterThanOrEqual(1);
+      expect(setCookies(r)).toEqual([]);
+    }
+    const codes = b.records().filter((l) => l.msg === 'dashboard sign-in failed').map((l) => l.code);
+    expect(codes).toEqual(['rate_limited', 'rate_limited']);
+    // Another client is not affected.
+    expect((await b.req('GET', '/dashboard/auth/login', { 'cf-connecting-ip': '203.0.113.9' })).headers.location).toMatch(toGoogle);
   });
 
   it('no response or log line holds the code, the tokens, the client secret, the session id or the CSRF token', async () => {

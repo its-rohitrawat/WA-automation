@@ -141,9 +141,13 @@ export class SessionStore {
   }
 }
 
-/** Secure cookies when the dashboard is reached over https (the public URL); plain http on localhost cannot use them. */
-export function cookieSecure(publicUrl: string | undefined): boolean {
-  return publicUrl !== undefined && publicUrl.startsWith('https://');
+/**
+ * Whether the cookies set for a request carry `Secure`: true when the origin that request uses (the public https
+ * address) is https. A browser on the Mac itself uses plain `http://localhost`, where a Secure cookie would be dropped
+ * and sign-in would loop, so the flag follows each request's origin, never the public URL alone.
+ */
+export function secureFor(origin: string): boolean {
+  return origin.startsWith('https://');
 }
 
 /** `wa_session=<id>; HttpOnly; SameSite=Lax; Path=/dashboard; Max-Age=604800`, plus `Secure` behind https. */

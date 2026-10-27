@@ -5,7 +5,6 @@ import type { Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import {
   clearSessionCookie,
-  cookieSecure,
   csrfFor,
   hashToken,
   IDLE_TIMEOUT_MS,
@@ -13,6 +12,7 @@ import {
   SESSION_COOKIE,
   SESSION_TTL_MS,
   SessionStore,
+  secureFor,
   sessionCookie,
 } from '../../src/web/sessions.ts';
 
@@ -60,6 +60,13 @@ describe('SessionStore: create and get', () => {
     expect(csrfFor(id)).toBe(csrf);
     expect(csrfFor(id)).not.toBe(csrfFor(store.create('a@example.com').id));
     expect(store.get(id)!.csrfHash).toBe(sha(csrfFor(id)));
+    expect(csrfFor(id)).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(csrfFor(id)).not.toBe(id);
+    // Every character of the id counts, the last one included.
+    const last = id.slice(-1) === 'A' ? 'B' : 'A';
+    expect(csrfFor(`${id.slice(0, -1)}${last}`)).not.toBe(csrfFor(id));
+    const tokens = new Set(Array.from({ length: 50 }, () => csrfFor(store.create('a@example.com').id)));
+    expect(tokens.size).toBe(50);
   });
 
   it('stores only SHA-256 hashes: no column holds the raw id or CSRF token', () => {
@@ -266,10 +273,9 @@ describe('session cookie', () => {
     expect(clearSessionCookie({ secure: true })).toBe('wa_session=; HttpOnly; SameSite=Lax; Path=/dashboard; Max-Age=0; Secure');
   });
 
-  it('the Secure flag follows the public URL', () => {
-    expect(cookieSecure('https://dash.example.com')).toBe(true);
-    expect(cookieSecure('http://localhost:8787')).toBe(false);
-    expect(cookieSecure('http://127.0.0.1:8787')).toBe(false);
-    expect(cookieSecure(undefined)).toBe(false);
+  it('the Secure flag follows the origin each request uses: https only (localhost stays plain http)', () => {
+    expect(secureFor('https://dash.example.com')).toBe(true);
+    expect(secureFor('http://localhost:8787')).toBe(false);
+    expect(secureFor('http://127.0.0.1:8787')).toBe(false);
   });
 });
