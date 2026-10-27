@@ -34,6 +34,7 @@ import { baileysSocketFactory, WhatsAppGateway } from './wa/gateway.ts';
 import { baileysSenderSocketFactory, linkedNumber } from './wa/senderGateway.ts';
 import { buildVoiceDeps } from './voiceDeps.ts';
 import { startDashboard } from './web/start.ts';
+import { AgentControl } from './control/agentControl.ts';
 
 /** Expected startup refusal. The message is safe to print. */
 class StartupExit extends Error {}
@@ -199,8 +200,11 @@ async function main(): Promise<void> {
     if (heartbeat) log.info('uptime heartbeat on');
     // Owner dashboard: off (the default) means no web server and no port. Not awaited here, so the stop handlers below
     // are in place before anything else is awaited. It never rejects: a dashboard that cannot start resolves to undefined.
-    // The AgentControl (the dashboard's only way into the agent) is passed here once it exists (task 5).
-    const webReady = env.DASHBOARD_ENABLED ? startDashboard({ env, log, control: {} }) : Promise.resolve(undefined);
+    // AgentControl is the dashboard's only way into the agent (read side: status, overview, connections).
+    const control = new AgentControl({
+      app, db, gateway, env, clock: systemClock, ...(report ? { sender: report.sender } : {}), ...(heartbeat ? { heartbeat } : {}),
+    });
+    const webReady = env.DASHBOARD_ENABLED ? startDashboard({ env, log, control }) : Promise.resolve(undefined);
 
     const trackerDb = db;
     const sessionStore = sessionDb;

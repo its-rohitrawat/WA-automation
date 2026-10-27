@@ -73,16 +73,16 @@ const list = (xs: readonly string[]) => xs.map((x) => `'${x}'`).join(', '); // f
  * Each source's newest rows for a filter, as (at, src, id), already cut at the cursor and the page size, so a page reads
  * at most limit rows from each table. cursor: the condition with @at (and @src, @id), or '' for the first page.
  */
-function sourcesFor(kind: ActivityFilter, cursor: (at: string, src: Source) => string): string[] {
+function sourcesFor(kind: ActivityFilter | 'work', cursor: (at: string, src: Source) => string): string[] {
   const out: string[] = [];
   const branch = (at: string, src: Source, from: string, where: string) => {
     const c = cursor(at, src);
     return `SELECT * FROM (SELECT ${at} AS at, '${src}' AS src, id FROM ${from} WHERE (${where})${c ? ` AND ${c}` : ''}
       ORDER BY ${at} DESC, id DESC LIMIT @limit)`;
   };
-  const batches = kind === 'all' ? "status IN ('ok', 'failed')" : kind === 'msg' ? "status = 'ok'" : kind === 'issue' ? "status = 'failed'" : null;
+  const batches = kind === 'all' || kind === 'work' ? "status IN ('ok', 'failed')" : kind === 'msg' ? "status = 'ok'" : kind === 'issue' ? "status = 'failed'" : null;
   if (batches) out.push(branch('finished_at', 'b', 'batches', `finished_at IS NOT NULL AND ${batches}`));
-  if (kind === 'all' || kind === 'task') out.push(branch('at', 'e', 'task_events', `task_id IS NOT NULL AND op IN (${list(TASK_OPS)})`));
+  if (kind === 'all' || kind === 'task' || kind === 'work') out.push(branch('at', 'e', 'task_events', `task_id IS NOT NULL AND op IN (${list(TASK_OPS)})`));
   const meetings = kind === 'all' ? [...MEET_STATUSES, ...ISSUE_STATUSES] : kind === 'meet' ? MEET_STATUSES : kind === 'issue' ? ISSUE_STATUSES : null;
   // A no-access meeting matched as internal keeps no title and needs nothing: it is left out, as internal ones are.
   if (meetings) {
@@ -158,8 +158,8 @@ function auditItem(db: Db, id: number): Omit<ActivityItem, 'id' | 'at'> {
 
 const ITEMS: Record<Source, (db: Db, id: number) => Omit<ActivityItem, 'id' | 'at'>> = { a: auditItem, b: batchItem, e: taskItem, m: meetingItem };
 
-/** One page of the feed, newest first. next: the cursor for the following page, or null when this page is the last. */
-export function listActivity(db: Db, p: ActivityParams): { items: ActivityItem[]; next: string | null } {
+/** One page of the feed (kind 'work': batches and task events only, for the Overview), newest first. next: the cursor for the following page, or null when this page is the last. */
+export function listActivity(db: Db, p: ActivityParams | (Omit<ActivityParams, 'kind'> & { kind: 'work' })): { items: ActivityItem[]; next: string | null } {
   const params: Record<string, string | number> = { limit: p.limit };
   const b = p.before;
   if (b) {

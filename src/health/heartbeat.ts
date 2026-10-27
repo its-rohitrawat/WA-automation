@@ -14,6 +14,8 @@ export interface HeartbeatOptions {
   isUp: () => boolean;
   log: Logger;
   fetch?: typeof fetch;
+  /** Tests only: the time a visit is recorded at. */
+  now?: () => Date;
 }
 
 /**
@@ -29,6 +31,7 @@ export class Heartbeat {
   #inFlight: AbortController | undefined;
   #stopped = false;
   #pausedLogged = false;
+  #lastBeatAt: Date | null = null;
 
   constructor(o: HeartbeatOptions) {
     this.#o = o;
@@ -43,6 +46,11 @@ export class Heartbeat {
       this.#every.unref?.();
     }, FIRST_BEAT_MS);
     this.#first.unref?.();
+  }
+
+  /** When the monitor last accepted a visit; null before the first one (the owner dashboard's Monitoring card). */
+  lastBeatAt(): Date | null {
+    return this.#lastBeatAt;
   }
 
   /** Stops the timers and aborts a visit still running. Leaves no timers. */
@@ -76,6 +84,7 @@ export class Heartbeat {
     try {
       const res = await this.#fetch(this.#o.url, { method: 'GET', signal: ctrl.signal });
       if (!res.ok) this.#o.log.warn({ status: res.status }, 'uptime heartbeat visit was refused');
+      else this.#lastBeatAt = (this.#o.now ?? (() => new Date()))();
     } catch (err) {
       // Never log the error message or the link: either could contain the secret heartbeat token.
       if (!this.#stopped) this.#o.log.warn({ problem: err instanceof Error ? err.name : 'unknown' }, 'uptime heartbeat visit failed');
