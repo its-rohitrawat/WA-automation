@@ -1,0 +1,160 @@
+import { systemClock, type Clock } from '../util/clock.ts';
+import type { GatewayLike, GatewayState, GatewayStatus } from './gateway.ts';
+import type { NormalizedEvent } from './normalize.ts';
+
+// Holds the founder's WhatsApp gateway so the dashboard can replace it in place (a relink) without restarting the
+// service (D3). The app registers its handlers here once; they keep working across swaps. Only the current inner
+// gateway's events and statuses get through: a stopped gateway that still fires is ignored.
+
+/** listGroups with no open WhatsApp connection. */
+export class NotConnectedError extends Error {
+  readonly code = 'whatsapp_not_connected';
+  constructor() {
+    super('WhatsApp is not connected');
+    this.name = 'NotConnectedError';
+  }
+}
+
+/** The states SwitchableGateway reports while it holds no gateway. */
+export type HeldState = Extract<GatewayState, 'not_linked' | 'linking'>;
+
+const STOP_CAP_MS = 5_000;
+
+export class SwitchableGateway implements GatewayLike {
+  readonly #clock: Clock;
+  readonly #stopCapMs: number;
+  readonly #eventFns: ((e: NormalizedEvent) => void)[] = [];
+  readonly #statusFns: ((s: GatewayStatus) => void)[] = [];
+  #inner: GatewayLike | undefined;
+  #held: { state: HeldState; since: string };
+  /**
+   * idle: never started (a gateway swapped in waits for start()); running: a gateway swapped in is started; stopped: the
+   * service is shutting down, so a gateway swapped in is stopped (a relink may hand over one that is already running).
+   */
+  #phase: 'idle' | 'running' | 'stopped' = 'idle';
+  /** Failure and drop counts of earlier gateways, so the counters run on across swaps. */
+  #failedBefore = 0;
+  #droppedBefore = 0;
+
+  constructor(o: { inner?: GatewayLike; clock?: Clock; initialState?: HeldState; stopCapMs?: number } = {}) {
+    this.#clock = o.clock ?? systemClock;
+    this.#stopCapMs = o.stopCapMs ?? STOP_CAP_MS;
+    this.#held = { state: o.initialState ?? 'not_linked', since: this.#clock.now().toISOString() };
+    if (o.inner) this.#install(o.inner);
+  }
+
+  onEvent(fn: (e: NormalizedEvent) => void): void {
+    this.#eventFns.push(fn);
+  }
+
+  onStatus(fn: (s: GatewayStatus) => void): void {
+    this.#statusFns.push(fn);
+  }
+
+  status(): GatewayStatus {
+    if (this.#inner) return this.#inner.status();
+    return { state: this.#held.state, since: this.#held.since, lastErrorCode: null, credsSaveFailures: 0 };
+  }
+
+  start(): void {
+    this.#phase = 'running';
+    this.#inner?.start();
+  }
+
+  /** While a relink holds no gateway ('linking'), the link session owns and stops its own gateway. */
+  async stop(): Promise<void> {
+    this.#phase = 'stopped';
+    await this.#inner?.stop();
+  }
+
+  async listGroups(): Promise<{ id: string; subject: string }[]> {
+    const inner = this.#inner;
+    if (!inner || inner.status().state !== 'open') throw new NotConnectedError();
+    return inner.listGroups();
+  }
+
+  failedCount(): number {
+    return this.#failedBefore + (this.#inner?.failedCount() ?? 0);
+  }
+
+  droppedCount(): number {
+    return this.#droppedBefore + (this.#inner?.droppedCount() ?? 0);
+  }
+
+  /** Has an inner gateway (WhatsApp linked, or a relink just handed over). */
+  hasGateway(): boolean {
+    return this.#inner !== undefined;
+  }
+
+  /**
+   * Stops the current gateway (waiting at most 5 s), installs next, and starts it while the service runs. A gateway
+   * that is already running (a finished relink) is handed over as it is: WhatsAppGateway.start() is a no-op then.
+   */
+  async swap(next: GatewayLike): Promise<void> {
+    if (next === this.#inner) return; // already installed: installing again would deliver every event twice
+    const old = this.#detach();
+    this.#install(next);
+    await this.#stopCapped(old);
+    if (this.#inner !== next) return; // swapped or cleared again meanwhile
+    if (this.#phase === 'running') next.start();
+    else if (this.#phase === 'stopped') await this.#stopCapped(next); // shutting down: never leave a live socket behind
+    if (this.#inner === next) this.#emitStatus(next.status());
+  }
+
+  /** Stops the current gateway (at most 5 s) and holds none: status() reports `state`, listGroups throws. */
+  async clear(state: HeldState): Promise<void> {
+    const old = this.#detach();
+    this.#held = { state, since: this.#clock.now().toISOString() };
+    this.#emitStatus(this.status()); // Health shows the new state at once, not after the old gateway has stopped
+    await this.#stopCapped(old);
+  }
+
+  #install(inner: GatewayLike): void {
+    this.#inner = inner;
+    inner.onEvent((e) => {
+      if (this.#inner === inner) this.#emitEvent(e);
+    });
+    inner.onStatus((s) => {
+      if (this.#inner === inner) this.#emitStatus(s);
+    });
+  }
+
+  /** From here on the old gateway's events and statuses are ignored; its counts are kept. */
+  #detach(): GatewayLike | undefined {
+    const old = this.#inner;
+    if (old) {
+      this.#failedBefore += old.failedCount();
+      this.#droppedBefore += old.droppedCount();
+    }
+    this.#inner = undefined;
+    return old;
+  }
+
+  async #stopCapped(g: GatewayLike | undefined): Promise<void> {
+    if (!g) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cap = new Promise<void>((r) => {
+      timer = setTimeout(r, this.#stopCapMs);
+    });
+    try {
+      await Promise.race([g.stop().catch(() => undefined), cap]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  #emitEvent(e: NormalizedEvent): void {
+    // The app's event handler rethrows on failure so the gateway can count it; keep that, as WhatsAppGateway does.
+    for (const fn of this.#eventFns) fn(e);
+  }
+
+  #emitStatus(s: GatewayStatus): void {
+    for (const fn of this.#statusFns) {
+      try {
+        fn(s);
+      } catch {
+        // a faulty status listener must not break the connection
+      }
+    }
+  }
+}
