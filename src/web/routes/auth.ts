@@ -178,7 +178,13 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
       if (err instanceof SignInRefused) {
         const masked = maskEmail(err.email);
         const why = err.reason === 'unverified' ? 'email not verified' : 'not on the owner list';
-        d.audit.record({ actor: masked, event: 'Sign-in refused', kind: 'auth', detail: `${masked}, ${why}, ${label}`, requestId: ctx.requestId });
+        try {
+          d.audit.record({ actor: masked, event: 'Sign-in refused', kind: 'auth', detail: `${masked}, ${why}, ${label}`, requestId: ctx.requestId });
+        } catch {
+          // A refusal that cannot be audited still sends the browser to a page, never a bare JSON 500.
+          failed(ctx, 'audit');
+          return;
+        }
         d.log.warn({ rid: ctx.requestId, code: err.reason }, 'dashboard sign-in refused');
         redirect(res, '/dashboard?denied=1');
         return;

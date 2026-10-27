@@ -82,8 +82,12 @@ async function boot(o: { publicDir?: string; vendorFiles?: Record<string, string
 
 /** A GET that sends the path exactly as written (fetch would normalise dot segments first). */
 function rawGet(port: number, path: string, headers: Record<string, string> = {}) {
+  return rawRequest('GET', port, path, headers);
+}
+
+function rawRequest(method: string, port: number, path: string, headers: Record<string, string> = {}) {
   return new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }>((resolve, reject) => {
-    const req = request({ host: '127.0.0.1', port, path, method: 'GET', headers, agent: false }, (res) => {
+    const req = request({ host: '127.0.0.1', port, path, method, headers, agent: false }, (res) => {
       const chunks: Buffer[] = [];
       res.on('data', (c: Buffer) => chunks.push(c));
       res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
@@ -827,7 +831,8 @@ describe('startDashboard', () => {
       if (typeof loc === 'string' && loc.startsWith('https://accounts.google.com/')) nonce = new URL(loc).searchParams.get('nonce') ?? undefined;
       return r;
     };
-    return { db, port, forms, get, ...c };
+    const post = (path: string, headers: Record<string, string> = {}) => rawRequest('POST', port, path, headers);
+    return { db, port, forms, get, post, ...c };
   }
   const cookiesOf = (r: { headers: Record<string, string | string[] | undefined> }) => {
     const v = r.headers['set-cookie'];
@@ -864,6 +869,26 @@ describe('startDashboard', () => {
     expect(b.forms[0]!.get('redirect_uri')).toBe('https://dash.example.com/dashboard/auth/callback');
     expect((b.db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(1);
     expect(b.out()).not.toContain('client-secret');
+
+    // The guard startDashboard builds: the owner list lets this owner in, and the public origin passes the CSRF check.
+    const sid = cookieValue(cb, 'wa_session')!;
+    const meRes = await b.get('/dashboard/api/me', { ...host, cookie: `wa_session=${sid}` });
+    expect(meRes.status).toBe(200);
+    const me = JSON.parse(meRes.body) as { email: string; csrf: string };
+    expect(me.email).toBe('owner@example.com');
+    const logout = (origin: string) =>
+      b.post('/dashboard/auth/logout', { ...host, cookie: `wa_session=${sid}`, origin, 'x-csrf-token': me.csrf });
+    const evil = await logout('https://evil.com');
+    expect(evil.status).toBe(403);
+    expect((b.db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(1);
+    const out = await logout('https://dash.example.com');
+    expect(out.status).toBe(204);
+    const cleared = cookiesOf(out).find((c) => c.startsWith('wa_session='));
+    expect(cleared).toMatch(/^wa_session=;/);
+    expect(cleared).toContain('Max-Age=0');
+    expect(cleared).toMatch(/; Secure$/);
+    expect((b.db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
+    expect((await b.get('/dashboard/api/me', { ...host, cookie: `wa_session=${sid}` })).status).toBe(401);
   });
 
   it('a sign-in whose audit row cannot be written leaves no session (one database transaction)', async () => {

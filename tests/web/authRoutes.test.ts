@@ -426,6 +426,23 @@ describe('owner sign-in: state, nonce and pending records', () => {
     expect(b.bodies.join('\n')).not.toContain(ID_TOKEN);
   });
 
+  it('one client starting many logins drops only its own oldest pending sign-in, so it cannot fill the map', async () => {
+    const b = await boot({ pendingMax: 6 });
+    const visitor = () => b.req('GET', '/dashboard/auth/login', { 'cf-connecting-ip': '203.0.113.1' });
+    const first = await visitor();
+    expect(first.headers.location).toMatch(/^https:\/\/accounts\.google\.com\//);
+    for (let i = 0; i < 6; i++) expect((await visitor()).headers.location).toMatch(/^https:\/\/accounts\.google\.com\//);
+    expect(loggedCode(b)).toEqual([]);
+    // Another client (no header: this machine's own address) can still start a sign-in.
+    const owner = await login(b);
+    expect(owner.google.origin).toBe('https://accounts.google.com');
+    expect(loggedCode(b)).toEqual([]);
+    // The visitor's earliest sign-in was dropped to keep it under its own cap.
+    const state = new URL(first.headers.location as string).searchParams.get('state')!;
+    failed(await callback(b, state, cookieValue(first, 'wa_signin')));
+    expect(loggedCode(b)).toEqual(['no_pending']);
+  });
+
   it('when the pending sign-ins are full a new login is refused, and the owner sign-in in flight still works', async () => {
     const b = await boot({ pendingMax: 2 });
     const owner = await login(b);
@@ -484,6 +501,8 @@ describe('owner sign-in: refusals', () => {
     expect(a[0]).toMatchObject({ event: 'Sign-in refused', kind: 'auth' });
     expect(a[0]!.detail).toContain('ow••••@example.com');
     expect(JSON.stringify(a)).not.toContain(OWNER);
+    expect(b.out().toLowerCase()).not.toContain(OWNER);
+    expect(b.bodies.join('\n').toLowerCase()).not.toContain(OWNER);
   });
 
   it('an email not on the owner list is refused, audited with the masked email, and gets no session', async () => {
@@ -538,6 +557,23 @@ describe('owner sign-in and sign-out: one transaction with the audit row', () =>
     expect(count(b.db)).toBe(1);
     expect((await b.req('GET', '/dashboard/api/me', { cookie: `wa_session=${first}` })).status).toBe(200);
     expect(b.out()).not.toContain('audit down');
+  });
+
+  it('a refused sign-in whose audit row cannot be written still goes to the sign-in error page, with no session', async () => {
+    const b = await boot();
+    failAudit(b.db);
+    b.claims.email = 'Stranger@Gmail.com';
+    const l = await login(b);
+    const cb = await callback(b, l.state, l.signin);
+    expect(cb.status).toBe(302);
+    expect(cb.headers.location).toBe('/dashboard?error=signin');
+    expect(setCookies(cb).some((c) => c.startsWith('wa_session='))).toBe(false);
+    expect(setCookies(cb)).toContain('wa_signin=; HttpOnly; SameSite=Lax; Path=/dashboard/auth; Max-Age=0');
+    expect(count(b.db)).toBe(0);
+    expect(b.records().filter((x) => x.msg === 'dashboard sign-in failed').map((x) => x.code)).toEqual(['audit']);
+    expect(b.out()).not.toContain('audit down');
+    expect(b.out().toLowerCase()).not.toContain('stranger');
+    expect(b.bodies.join('\n').toLowerCase()).not.toContain('stranger');
   });
 
   it('a sign-out whose audit row cannot be written keeps the session', async () => {
