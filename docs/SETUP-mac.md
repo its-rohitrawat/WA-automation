@@ -280,6 +280,38 @@ The visits stop, and you get an alert, when:
 
 Smaller warnings (a group waiting, the daily AI budget, low disk) do not stop the visits; they show on the status line as usual. After an alert, run `npm run cli -- status` in the waagent window: its Health line says what is wrong. To switch monitoring off, empty `HEARTBEAT_URL=` and restart the service.
 
+## 10. Owner dashboard (optional)
+
+The agent can show a private owner dashboard in the browser, at `http://localhost:8787/dashboard` on this Mac, and the website at `http://localhost:8787/`. It listens on this Mac only (`127.0.0.1:8787`): nothing on the office network can reach it. To open it from anywhere on the company domain, follow [GO-LIVE.md](GO-LIVE.md) after this section.
+
+1. **Back up first.** The first start with the dashboard version adds new tables to the database. Do step 1 of [GO-LIVE.md](GO-LIVE.md) (stop the service, copy `data`, check the copy) before the update reaches the Mac.
+2. **From this update on, the Mac's update step must run `npm ci` after pulling**, every time, as `waagent`: `git pull --ff-only`, then `npm ci`, then the restart. The dashboard's files come as new parts; without `npm ci` it does not load.
+3. **Google web sign-in client.** Google Cloud Console, the same project as today: **APIs & Services → Credentials → Create credentials → OAuth client ID**, type **Web application**, name `WA Agent dashboard`. Under **Authorized redirect URIs**, add the two on this Mac first:
+
+   ```
+   http://localhost:8787/dashboard/auth/callback
+   http://localhost:8787/dashboard/connect/google/callback
+   ```
+
+   The two on the company domain come later (GO-LIVE.md, step 3). Copy the client ID and secret straight into `.env` in the next step, nowhere else.
+4. **Settings.** Waagent window: open `.env` and set (your real values in place of the examples):
+
+   ```
+   DASHBOARD_ENABLED=true
+   DASHBOARD_PORT=8787
+   DASHBOARD_OWNER_EMAILS=owner@example.com
+   DASHBOARD_GOOGLE_CLIENT_ID=your_web_client_id_here
+   DASHBOARD_GOOGLE_CLIENT_SECRET=your_web_client_secret_here
+   DASHBOARD_PUBLIC_URL=
+   UPTIMEROBOT_READ_KEY=
+   ```
+
+   `DASHBOARD_OWNER_EMAILS`: the Google accounts that may sign in, separated by commas. `DASHBOARD_PUBLIC_URL` stays empty until the company domain is set up (GO-LIVE.md). `UPTIMEROBOT_READ_KEY` is optional: a read-only key, never the main one.
+5. **Restart** (normal Terminal window): `sudo launchctl kickstart -k system/com.wa-agent`.
+6. **Open** `http://localhost:8787/dashboard` in Chrome on this Mac and sign in with an owner email. Safari may refuse the sign-in on a `http://localhost` address.
+
+To switch it off: set `DASHBOARD_ENABLED=false` in `.env` and restart. The agent carries on as before.
+
 ## Reading SETUP.md on a Mac
 
 | SETUP.md (Windows) | On the Mac |

@@ -621,3 +621,51 @@ describe('go-live guide (docs/GO-LIVE.md, D5 task 6)', () => {
     expect(g).toContain('## 7. Checks');
   });
 });
+
+describe('owner dashboard setup (SETUP-mac.md section 10, D1 task 8)', () => {
+  const section = () => {
+    const mac = read('docs/SETUP-mac.md');
+    const start = mac.indexOf('## 10. Owner dashboard (optional)');
+    expect(start).toBeGreaterThan(-1);
+    return mac.slice(start, mac.indexOf('\n## ', start + 1));
+  };
+
+  it('names every dashboard setting, with placeholders only', () => {
+    const s = section();
+    for (const name of ['DASHBOARD_ENABLED=true', 'DASHBOARD_PORT=8787', 'DASHBOARD_OWNER_EMAILS=owner@example.com', 'DASHBOARD_GOOGLE_CLIENT_ID=your_web_client_id_here',
+      'DASHBOARD_GOOGLE_CLIENT_SECRET=your_web_client_secret_here', 'DASHBOARD_PUBLIC_URL=', 'UPTIMEROBOT_READ_KEY=']) {
+      expect(s, name).toContain(name);
+    }
+    // Every name it sets is a real setting of src/config/env.ts.
+    const envSource = read('src/config/env.ts');
+    const names = [...s.matchAll(/^\s*([A-Z][A-Z_]+)=/gm)].map((m) => m[1]!);
+    expect(names.length).toBeGreaterThanOrEqual(7);
+    for (const name of names) expect(envSource, name).toMatch(new RegExp(`^\\s*${name}: `, 'm'));
+  });
+
+  it('says the update must run npm ci after pulling, and backs up first', () => {
+    const s = section();
+    expect(s).toMatch(/must run `npm ci` after pulling/);
+    expect(s.indexOf('git pull --ff-only')).toBeGreaterThan(-1);
+    expect(s.indexOf('git pull --ff-only')).toBeLessThan(s.indexOf('then `npm ci`'));
+    expect(s).toMatch(/Back up first/);
+  });
+
+  it('adds the Web application client with the localhost redirects first, then signs in on localhost', () => {
+    const s = section();
+    expect(s).toContain('Web application');
+    expect(s).toContain('http://localhost:8787/dashboard/auth/callback');
+    expect(s).toContain('http://localhost:8787/dashboard/connect/google/callback');
+    expect(s).not.toContain('https://waagent.agentsolutionbowl.si/dashboard/auth/callback'); // the domain's come later, in GO-LIVE.md
+    expect(s).toContain('sudo launchctl kickstart -k system/com.wa-agent');
+    expect(s).toContain('http://localhost:8787/dashboard');
+    expect(s).toContain('DASHBOARD_ENABLED=false');
+  });
+
+  it('SETUP.md points to it, with the npm ci note', () => {
+    const setup = read('docs/SETUP.md');
+    expect(setup).toContain('\n## Owner dashboard\n');
+    expect(setup).toContain('[SETUP-mac.md](SETUP-mac.md), section 10 "Owner dashboard"');
+    expect(setup).toMatch(/update step must run `npm ci` after pulling/);
+  });
+});
