@@ -1,0 +1,156 @@
+import type { Db } from '../store/db.ts';
+import type { Clock } from '../util/clock.ts';
+import { fromIstDate, istDate } from '../util/time.ts';
+
+// The agent's own up/down history (D5 Task 3, spec 4.8), for the vitals strip when UptimeRobot's read-only API is not
+// set. One uptime_log row at every service start, one each time Health.isUp() changes, and a down row at a clean stop,
+// so the time the service was stopped counts as down. After a crash the last state stands until the next start: the
+// heartbeat monitor sees that gap, this log cannot. The table keeps no reason, so outages here have none.
+
+const DAY_MS = 86_400_000;
+
+/** A down stretch, in epoch ms; end null while it is still going. */
+export interface Interval {
+  start: number;
+  end: number | null;
+}
+
+export interface DayDown {
+  day: string;
+  downMinutes: number;
+  /** The longest single stretch down within the day. */
+  longestMinutes: number;
+}
+
+export interface Outage {
+  start: string;
+  end: string | null;
+  /** The whole outage, also the part before the window. */
+  minutes: number;
+  reason: string | null;
+}
+
+export interface UptimeRatios {
+  d1: number | null;
+  d7: number | null;
+  d30: number | null;
+}
+
+/** Down stretches from up/down rows in time order: from a down row to the next up row; repeated rows merge. */
+export function downIntervals(rows: readonly { at: number; up: boolean }[]): Interval[] {
+  const out: Interval[] = [];
+  let downSince: number | null = null;
+  for (const r of rows) {
+    if (!r.up && downSince === null) downSince = r.at;
+    if (r.up && downSince !== null) {
+      out.push({ start: downSince, end: r.at });
+      downSince = null;
+    }
+  }
+  if (downSince !== null) out.push({ start: downSince, end: null });
+  return out;
+}
+
+const minutes = (ms: number) => Math.round(ms / 60_000);
+
+/** "YYYY-MM-DD" minus n days (calendar dates, no time zone involved). */
+function minusDays(date: string, n: number): string {
+  return new Date(Date.parse(`${date}T00:00:00Z`) - n * DAY_MS).toISOString().slice(0, 10);
+}
+
+/** The last `days` IST days, oldest first, today last (up to now): minutes down and the longest stretch in each. */
+export function dailyDown(intervals: readonly Interval[], now: number, days: number): DayDown[] {
+  const today = istDate(new Date(now));
+  return Array.from({ length: days }, (_, i) => {
+    const day = minusDays(today, days - 1 - i);
+    const from = fromIstDate(day).getTime();
+    const to = Math.min(from + DAY_MS, now);
+    let total = 0;
+    let longest = 0;
+    for (const iv of intervals) {
+      const overlap = Math.min(iv.end ?? now, to) - Math.max(iv.start, from);
+      if (overlap <= 0) continue;
+      total += overlap;
+      longest = Math.max(longest, overlap);
+    }
+    return { day, downMinutes: minutes(total), longestMinutes: minutes(longest) };
+  });
+}
+
+/**
+ * The percentage of the last `days` days spent up, counting only the time since the log began (knownSince); null when
+ * nothing was ever recorded. Two decimals.
+ */
+export function uptimeRatio(intervals: readonly Interval[], knownSince: number | undefined, now: number, days: number): number | null {
+  if (knownSince === undefined || knownSince >= now) return null;
+  const from = Math.max(now - days * DAY_MS, knownSince);
+  let down = 0;
+  for (const iv of intervals) down += Math.max(0, Math.min(iv.end ?? now, now) - Math.max(iv.start, from));
+  return Math.round(10_000 * (1 - down / (now - from))) / 100;
+}
+
+export class UptimeLog {
+  readonly #db: Db;
+  readonly #clock: Clock;
+  #last: boolean | undefined;
+
+  constructor(db: Db, clock: Clock) {
+    this.#db = db;
+    this.#clock = clock;
+    const r = db.prepare('SELECT up FROM uptime_log ORDER BY at DESC, id DESC LIMIT 1').get() as { up: number } | undefined;
+    this.#last = r === undefined ? undefined : r.up === 1;
+  }
+
+  #write(up: boolean): void {
+    this.#db.prepare('INSERT INTO uptime_log (at, up) VALUES (?, ?)').run(this.#clock.now().toISOString(), up ? 1 : 0);
+    this.#last = up;
+  }
+
+  /** At service start: always one row, so the time since a stop row ends the outage it began. */
+  start(up: boolean): void {
+    this.#write(up);
+  }
+
+  /** From the app tick: a row only when up changed. */
+  tick(up: boolean): void {
+    if (up !== this.#last) this.#write(up);
+  }
+
+  /** At a clean stop: the stopped time counts as down. */
+  stop(): void {
+    if (this.#last !== false) this.#write(false);
+  }
+
+  /** The down stretches overlapping the last `days` days, and when the log began. */
+  #intervals(days: number): { intervals: Interval[]; knownSince: number | undefined } {
+    const now = this.#clock.now().getTime();
+    const from = new Date(now - days * DAY_MS).toISOString();
+    // The last row before the window says whether the window starts inside an outage.
+    const before = this.#db.prepare('SELECT at, up FROM uptime_log WHERE at < ? ORDER BY at DESC, id DESC LIMIT 1').all(from) as { at: string; up: number }[];
+    const inside = this.#db.prepare('SELECT at, up FROM uptime_log WHERE at >= ? ORDER BY at, id').all(from) as { at: string; up: number }[];
+    const first = this.#db.prepare('SELECT MIN(at) AS at FROM uptime_log').get() as { at: string | null };
+    const rows = [...before, ...inside].map((r) => ({ at: Date.parse(r.at), up: r.up === 1 }));
+    return { intervals: downIntervals(rows), knownSince: first.at === null ? undefined : Date.parse(first.at) };
+  }
+
+  daily(days = 30): DayDown[] {
+    return dailyDown(this.#intervals(days).intervals, this.#clock.now().getTime(), days);
+  }
+
+  /** Newest first. */
+  outages(days = 30): Outage[] {
+    const now = this.#clock.now().getTime();
+    return this.#intervals(days).intervals.reverse().map((iv) => ({
+      start: new Date(iv.start).toISOString(),
+      end: iv.end === null ? null : new Date(iv.end).toISOString(),
+      minutes: minutes((iv.end ?? now) - iv.start),
+      reason: null,
+    }));
+  }
+
+  ratios(): UptimeRatios {
+    const now = this.#clock.now().getTime();
+    const { intervals, knownSince } = this.#intervals(30);
+    return { d1: uptimeRatio(intervals, knownSince, now, 1), d7: uptimeRatio(intervals, knownSince, now, 7), d30: uptimeRatio(intervals, knownSince, now, 30) };
+  }
+}
