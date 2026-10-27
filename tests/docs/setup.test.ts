@@ -537,3 +537,61 @@ describe('morning report documentation: short message with the tracker link (27 
     expect(amendment.match(/\(default\)/g)).toHaveLength(1);
   });
 });
+
+describe('go-live guide (docs/GO-LIVE.md, D5 task 6)', () => {
+  const guide = () => read('docs/GO-LIVE.md');
+
+  it('starts with a backup of the data folder, and checks the copy opens', () => {
+    const g = guide();
+    const backup = g.indexOf('## 1. Back up the data folder');
+    expect(backup).toBeGreaterThan(-1);
+    expect(g.indexOf('## 2.')).toBeGreaterThan(backup);
+    expect(g).toContain('sqlite3');
+    expect(g).toMatch(/select count\(\*\) from tasks/i);
+    expect(g).toContain('chmod 700');
+  });
+
+  it('makes the update run npm ci after pulling, then restart', () => {
+    const g = guide();
+    expect(g).toContain('npm ci');
+    expect(g.indexOf('git pull')).toBeLessThan(g.indexOf('npm ci'));
+    expect(g).toContain('sudo launchctl kickstart -k system/com.wa-agent');
+  });
+
+  it('names every dashboard setting, with placeholders only', () => {
+    const g = guide();
+    for (const name of ['DASHBOARD_ENABLED=true', 'DASHBOARD_PORT=8787', 'DASHBOARD_PUBLIC_URL=https://waagent.agentsolutionbowl.si', 'DASHBOARD_OWNER_EMAILS=',
+      'DASHBOARD_GOOGLE_CLIENT_ID=', 'DASHBOARD_GOOGLE_CLIENT_SECRET=', 'UPTIMEROBOT_READ_KEY=']) {
+      expect(g, name).toContain(name);
+    }
+    expect(g).toContain('DASHBOARD_GOOGLE_CLIENT_SECRET=your_web_client_secret_here');
+    // Nothing that looks like a real Google client secret, client id or API key.
+    expect(g).not.toMatch(/GOCSPX-|\d{6,}-[a-z0-9]{20,}\.apps\.googleusercontent\.com|AIza[0-9A-Za-z_-]{20,}|\bu\d{6,}-[0-9a-f]{20,}/);
+  });
+
+  it('lists the four redirect addresses of the web sign-in client', () => {
+    const g = guide();
+    for (const uri of [
+      'https://waagent.agentsolutionbowl.si/dashboard/auth/callback',
+      'https://waagent.agentsolutionbowl.si/dashboard/connect/google/callback',
+      'http://localhost:8787/dashboard/auth/callback',
+      'http://localhost:8787/dashboard/connect/google/callback',
+    ]) expect(g, uri).toContain(uri);
+    expect(g).toContain('Web application');
+    expect(g).toContain('In production');
+  });
+
+  it('points the domain straight at the agent on the Mac, with no Pages, Worker or offline page', () => {
+    const g = guide();
+    expect(g).toContain('127.0.0.1:8787');
+    expect(g).not.toMatch(/\bPages\b|\bWorker\b|offline page|Agent offline/i);
+    expect(g).toMatch(/When the Mac is off, the website and the dashboard are both down/);
+  });
+
+  it('says the owner runs every step, and how to turn it all off again', () => {
+    const g = guide();
+    expect(g).toMatch(/nothing in this guide is run by Claude/i);
+    expect(g).toContain('DASHBOARD_ENABLED=false');
+    expect(g).toContain('## 7. Checks');
+  });
+});
