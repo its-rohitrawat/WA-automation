@@ -3,6 +3,7 @@ import { systemClock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { createWebServer } from './server.ts';
 import type { WebServer } from './server.ts';
+import { SITE_DIR } from './site.ts';
 
 /**
  * The owner dashboard (D1), started by main.ts only when DASHBOARD_ENABLED is true, after app.start(). It listens on
@@ -11,7 +12,7 @@ import type { WebServer } from './server.ts';
  */
 export async function startDashboard(o: { env: Pick<Env, 'DASHBOARD_PORT'>; log: Logger; control: object }): Promise<WebServer | undefined> {
   const { env, log } = o;
-  const web = createWebServer({ control: o.control, env, log, clock: systemClock });
+  const web = createWebServer({ control: o.control, env, log, clock: systemClock, siteDir: SITE_DIR });
   try {
     const { port } = await web.start();
     log.info(`dashboard on http://127.0.0.1:${port}/dashboard`);

@@ -11,6 +11,7 @@ import type { Logger } from '../util/logger.ts';
 import { HttpError, requestId, securityHeaders, sendError } from './http.ts';
 import { createRouter } from './router.ts';
 import type { Router } from './router.ts';
+import { createSite } from './site.ts';
 
 /** The front-end files (`index.html`, scripts, styles), served under `/dashboard/static/`. */
 export const PUBLIC_DIR = fileURLToPath(new URL('./public/', import.meta.url));
@@ -52,6 +53,8 @@ export interface WebServerDeps {
   stopGraceMs?: number;
   /** Tests only: receives the underlying Node server once it is made. */
   onHttpServer?: (server: Server) => void;
+  /** The website's folder, served for every path outside /dashboard (src/web/site.ts). Not given: no website. */
+  siteDir?: string;
 }
 
 export interface WebServer {
@@ -154,6 +157,7 @@ export function createWebServer(deps: WebServerDeps): WebServer {
   const publicDir = deps.publicDir ?? PUBLIC_DIR;
   const vendorFiles = deps.vendorFiles ?? VENDOR_FILES;
   const router = createRouter();
+  const site = deps.siteDir === undefined ? undefined : createSite({ dir: deps.siteDir, log });
   let stopping = false;
   let stopped: Promise<void> | undefined;
 
@@ -208,6 +212,10 @@ export function createWebServer(deps: WebServerDeps): WebServer {
         route = match.pattern;
         await match.handler({ req, res, params: match.params, url: new URL(req.url ?? '/', 'http://127.0.0.1'), requestId: rid });
         return;
+      }
+      if (site && pathname !== '/dashboard' && !pathname.startsWith('/dashboard/')) {
+        route = '/*';
+        return await site.serve(req, res, pathname);
       }
       if (method === 'GET' || method === 'HEAD') {
         if (pathname.startsWith('/dashboard/static/')) {
