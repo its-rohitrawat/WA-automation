@@ -5,10 +5,10 @@ import { connect } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DestinationStream } from 'pino';
 import { CONTENT_SECURITY_POLICY, HttpError, readJson, sendJson } from '../../src/web/http.ts';
-import { createWebServer, PUBLIC_DIR, STOP_GRACE_MS } from '../../src/web/server.ts';
+import { createWebServer, PUBLIC_DIR, SESSION_PURGE_EVERY_MS, STOP_GRACE_MS } from '../../src/web/server.ts';
 import { startDashboard } from '../../src/web/start.ts';
 import type { WebServer } from '../../src/web/server.ts';
 import { manualClock } from '../../src/util/clock.ts';
@@ -730,5 +730,51 @@ describe('startDashboard', () => {
     } finally {
       await new Promise<void>((r) => blocker.close(() => r()));
     }
+  });
+});
+
+describe('web server: session purge', () => {
+  async function bootWith(sessions: { purgeExpired(): number }, purgeEveryMs: number) {
+    const c = capture();
+    const server = createWebServer({
+      control: {},
+      env: { DASHBOARD_PORT: 0 },
+      log: c.log,
+      clock: manualClock('2026-10-27T10:00:00Z'),
+      sessions,
+      purgeEveryMs,
+    });
+    servers.push(server);
+    await server.start();
+    return { server, ...c };
+  }
+
+  it('purges expired sessions at start and then on every interval, and stops with the server', async () => {
+    let calls = 0;
+    const { server } = await bootWith({ purgeExpired: () => (calls++, 0) }, 20);
+    expect(calls).toBe(1);
+    await vi.waitFor(() => expect(calls).toBeGreaterThanOrEqual(3), { timeout: 2_000 });
+    await server.stop();
+    const after = calls;
+    await new Promise((r) => setTimeout(r, 80));
+    expect(calls).toBe(after);
+  });
+
+  it('a purge that fails is logged by its code only and the server carries on', async () => {
+    const { server, records, out } = await bootWith({
+      purgeExpired: () => {
+        throw Object.assign(new Error('SQLITE_BUSY: wa_session=SECRETVALUE'), { code: 'SQLITE_BUSY' });
+      },
+    }, 60_000);
+    const errors = records().filter((l) => l.level === 50);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.code).toBe('SQLITE_BUSY');
+    expect(out()).not.toContain('SECRETVALUE');
+    const res = await fetch(`http://127.0.0.1:${server.address()!.port}/nope`);
+    expect(res.status).toBe(404);
+  });
+
+  it('runs the purge hourly by default', () => {
+    expect(SESSION_PURGE_EVERY_MS).toBe(3_600_000);
   });
 });

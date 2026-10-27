@@ -34,6 +34,8 @@ export const MIME: Readonly<Record<string, string>> = Object.freeze({
 
 /** How long stop() waits for requests in flight before cutting the remaining connections. */
 export const STOP_GRACE_MS = 5_000;
+/** How often expired and idle owner sessions are removed while the server runs (also once at start). */
+export const SESSION_PURGE_EVERY_MS = 3_600_000;
 /** First path segments under /dashboard that are never a front-end screen. */
 const RESERVED = new Set(['api', 'static', 'vendor', 'auth', 'connect']);
 const SCREEN_SEGMENT = /^[a-z][a-z0-9-]{0,39}$/;
@@ -45,6 +47,10 @@ export interface WebServerDeps {
   env: Pick<Env, 'DASHBOARD_PORT'>;
   log: Logger;
   clock: Clock;
+  /** The owner sessions (task 3): purged at start and then hourly while the server runs. */
+  sessions?: { purgeExpired(): number };
+  /** Tests only: how often sessions are purged (default hourly). */
+  purgeEveryMs?: number;
   /** Tests only: another public folder. */
   publicDir?: string;
   /** Tests only: another vendor allowlist. */
@@ -160,6 +166,16 @@ export function createWebServer(deps: WebServerDeps): WebServer {
   const site = deps.siteDir === undefined ? undefined : createSite({ dir: deps.siteDir, log });
   let stopping = false;
   let stopped: Promise<void> | undefined;
+  let purgeTimer: NodeJS.Timeout | undefined;
+
+  /** Housekeeping must never stop the server: a failure is logged by its code only. */
+  function purgeSessions(): void {
+    try {
+      deps.sessions?.purgeExpired();
+    } catch (err) {
+      log.error({ code: (err as { code?: unknown }).code ?? 'unknown' }, 'dashboard session purge failed');
+    }
+  }
 
   const notFound = (res: ServerResponse) => sendError(res, 404, 'not_found', 'Not found.');
 
@@ -276,12 +292,21 @@ export function createWebServer(deps: WebServerDeps): WebServer {
         server.once('error', onError);
         server.listen(deps.env.DASHBOARD_PORT, '127.0.0.1', () => {
           server.off('error', onError);
+          if (deps.sessions !== undefined && purgeTimer === undefined) {
+            purgeSessions();
+            purgeTimer = setInterval(purgeSessions, deps.purgeEveryMs ?? SESSION_PURGE_EVERY_MS);
+            purgeTimer.unref();
+          }
           const a = server.address() as AddressInfo;
           resolveStart({ port: a.port, host: a.address });
         });
       });
     },
     stop() {
+      if (purgeTimer !== undefined) {
+        clearInterval(purgeTimer);
+        purgeTimer = undefined;
+      }
       if (stopped) return stopped;
       if (!server.listening) return Promise.resolve();
       stopping = true;
