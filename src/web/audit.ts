@@ -1,5 +1,6 @@
 import type { Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
+import { UNSAFE_TEXT } from './sessions.ts';
 
 export const AUDIT_KINDS = ['auth', 'config', 'connection', 'task', 'meeting', 'ops'] as const;
 export type AuditKind = (typeof AUDIT_KINDS)[number];
@@ -40,7 +41,7 @@ interface Row {
 }
 
 function oneLine(text: string): string {
-  return text.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/ {2,}/g, ' ').trim();
+  return text.replace(UNSAFE_TEXT, ' ').replace(/ {2,}/g, ' ').trim();
 }
 
 /**

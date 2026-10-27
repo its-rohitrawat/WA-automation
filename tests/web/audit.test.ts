@@ -35,6 +35,16 @@ describe('AuditLog.record', () => {
     expect(e!.detail).not.toMatch(/[\r\n\t]/);
   });
 
+  it('removes Unicode line breaks and bidi controls from actor, event and detail', () => {
+    const { audit } = setup();
+    audit.record({ actor: 'agent\u2028x', event: 'Group\u2029renamed', kind: 'config', detail: 'Acme\u2028Ltd\u0085next\u202egnp.exe \u2066a\u2069 \u200fb' });
+    const [e] = audit.list();
+    expect(e!.actor).toBe('agent x');
+    expect(e!.event).toBe('Group renamed');
+    expect(e!.detail).toBe('Acme Ltd next gnp.exe a b');
+    expect(JSON.stringify(e)).not.toMatch(/[\u0085\u2028\u2029\u202a-\u202e\u2066-\u2069\u200e\u200f]/);
+  });
+
   it('an empty detail is stored as an empty string', () => {
     const { audit } = setup();
     audit.record({ actor: 'agent', event: 'Restarted', kind: 'ops', detail: '' });

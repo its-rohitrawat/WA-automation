@@ -96,9 +96,53 @@ export function clientAddress(req: IncomingMessage): string {
   const remote = req.socket.remoteAddress;
   if (remote !== undefined && LOOPBACK.has(remote)) {
     const cf = header(req, 'cf-connecting-ip')?.trim();
-    if (cf !== undefined && isIP(cf) !== 0) return cf;
+    if (cf !== undefined && isIP(cf) !== 0) return rateKey(cf);
   }
-  return remote ?? 'unknown';
+  return remote === undefined ? 'unknown' : rateKey(remote);
+}
+
+/** The 8 hextets of an IPv6 address (a trailing dotted IPv4 part becomes two), or undefined when it cannot be read. */
+function hextets(ip: string): number[] | undefined {
+  const bare = ip.split('%')[0]!.toLowerCase();
+  const halves = bare.split('::');
+  if (halves.length > 2) return undefined;
+  const parse = (s: string): number[] | undefined => {
+    if (s === '') return [];
+    const out: number[] = [];
+    for (const part of s.split(':')) {
+      if (part.includes('.')) {
+        if (isIP(part) !== 4) return undefined;
+        const [a, b, c, d] = part.split('.').map(Number) as [number, number, number, number];
+        out.push((a << 8) | b, (c << 8) | d);
+      } else if (/^[0-9a-f]{1,4}$/.test(part)) {
+        out.push(parseInt(part, 16));
+      } else {
+        return undefined;
+      }
+    }
+    return out;
+  };
+  const head = parse(halves[0]!);
+  const tail = halves.length === 2 ? parse(halves[1]!) : [];
+  if (head === undefined || tail === undefined) return undefined;
+  const fill = 8 - head.length - tail.length;
+  if (halves.length === 2 ? fill < 1 : fill !== 0) return undefined;
+  return [...head, ...new Array<number>(fill).fill(0), ...tail];
+}
+
+/**
+ * One rate-limit key per client: an IPv4 address as it is, an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) as its IPv4
+ * address, and any other IPv6 address as its /64 prefix (one home or one server usually holds a whole /64, so counting
+ * each address on its own would give it endless buckets).
+ */
+export function rateKey(ip: string): string {
+  if (isIP(ip) !== 6) return ip;
+  const h = hextets(ip);
+  if (h === undefined) return ip;
+  if (h.slice(0, 5).every((x) => x === 0) && h[5] === 0xffff) {
+    return `${h[6]! >> 8}.${h[6]! & 0xff}.${h[7]! >> 8}.${h[7]! & 0xff}`;
+  }
+  return `${h.slice(0, 4).map((x) => x.toString(16)).join(':')}::/64`;
 }
 
 export interface RateLimit {
@@ -142,12 +186,17 @@ export class RateLimiter {
     b.at = now;
   }
 
-  /** Takes one request from this key's bucket: true when allowed, false when over the limit. */
+  /**
+   * Takes one request from this key's bucket: true when allowed, false when over the limit. When the limiter already
+   * tracks `maxKeys` clients and every one of them is out of requests, a new client is refused too (fail closed) until
+   * some bucket refills, rather than forgetting a client that is over its limit.
+   */
   take(key: string): boolean {
     const now = this.#clock.now().getTime();
     let b = this.#buckets.get(key);
     if (b === undefined) {
       this.#prune(now);
+      if (this.#buckets.size >= this.#maxKeys) return false;
       b = { tokens: this.#capacity, at: now };
       this.#buckets.set(key, b);
     } else {
@@ -178,16 +227,20 @@ export class RateLimiter {
     return this.#buckets.size;
   }
 
-  /** Before a new key is added at the cap: drop buckets that are full again, then the oldest ones. */
+  /**
+   * Before a new key is added at the cap: drop buckets that are full again, then the oldest ones that still have a
+   * request left. A bucket that is out of requests is never dropped, so a client cannot flush its own limit by
+   * flooding the limiter with new addresses.
+   */
   #prune(now: number): void {
     if (this.#buckets.size < this.#maxKeys) return;
     for (const [k, b] of this.#buckets) {
       this.#refill(b, now);
       if (b.tokens >= this.#capacity) this.#buckets.delete(k);
     }
-    for (const k of this.#buckets.keys()) {
+    for (const [k, b] of this.#buckets) {
       if (this.#buckets.size < this.#maxKeys) break;
-      this.#buckets.delete(k);
+      if (b.tokens + EPSILON >= 1) this.#buckets.delete(k);
     }
   }
 }

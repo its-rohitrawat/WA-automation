@@ -45,10 +45,16 @@ function newToken(): string {
   return randomBytes(32).toString('base64url');
 }
 
+/**
+ * Control characters, Unicode line and paragraph breaks (U+0085, U+2028, U+2029) and bidi marks and overrides
+ * (U+200E-U+200F, U+202A-U+202E, U+2066-U+2069): anything that could break a one-line text or reverse how it reads.
+ */
+export const UNSAFE_TEXT = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]+/g;
+
 /** A short one-line browser label (for example "Edge on Windows"), or null. */
 function cleanLabel(label: string | undefined): string | null {
   if (label === undefined) return null;
-  const one = label.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const one = label.replace(UNSAFE_TEXT, ' ').replace(/\s+/g, ' ').trim();
   return one === '' ? null : one.slice(0, LABEL_MAX).trimEnd();
 }
 
@@ -92,8 +98,10 @@ export class SessionStore {
       .get(idHash) as Row | undefined;
     if (row === undefined) return undefined;
     const now = this.#clock.now().getTime();
+    const expires = Date.parse(row.expires_at);
     const lastSeen = Date.parse(row.last_seen_at);
-    if (now >= Date.parse(row.expires_at) || now - lastSeen > IDLE_TIMEOUT_MS) {
+    // Fail closed: a row whose times cannot be read is treated as ended, never as live forever.
+    if (!Number.isFinite(expires) || !Number.isFinite(lastSeen) || now >= expires || now - lastSeen > IDLE_TIMEOUT_MS) {
       this.#db.prepare('DELETE FROM web_sessions WHERE id_hash = ?').run(idHash);
       return undefined;
     }

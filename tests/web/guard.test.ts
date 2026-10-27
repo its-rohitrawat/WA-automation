@@ -7,6 +7,7 @@ import {
   clientAddress,
   createGuard,
   RateLimiter,
+  rateKey,
   SIGNIN_LIMIT,
 } from '../../src/web/guard.ts';
 import { SessionStore } from '../../src/web/sessions.ts';
@@ -62,7 +63,7 @@ describe('requireOwner', () => {
     expect(s.id).toBe(id);
   });
 
-  it('gives 401 JSON for no cookie, an unknown cookie or an expired session', () => {
+  it('gives a 401 HttpError for no cookie, an unknown cookie or an expired session', () => {
     const { sessions, guard, clock } = setup();
     const cases: Record<string, string>[] = [{}, { cookie: 'wa_session=' }, { cookie: `wa_session=${'A'.repeat(43)}` }];
     for (const headers of cases) {
@@ -139,12 +140,24 @@ describe('requireCsrf', () => {
       expect(caught(() => guard.requireCsrf(fakeReq({ method }), session)).status).toBe(403);
     }
   });
+
+  it('for POST, PUT, PATCH and DELETE checks both the Origin and the token', () => {
+    const { guard, session, csrf } = signedIn();
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+      const originOnly = fakeReq({ method, headers: { origin: PUBLIC } });
+      expect(caught(() => guard.requireCsrf(originOnly, session)).status, `${method} without token`).toBe(403);
+      const tokenOnly = fakeReq({ method, headers: { 'x-csrf-token': csrf } });
+      expect(caught(() => guard.requireCsrf(tokenOnly, session)).status, `${method} without Origin`).toBe(403);
+      const both = fakeReq({ method, headers: { origin: PUBLIC, 'x-csrf-token': csrf } });
+      expect(() => guard.requireCsrf(both, session), `${method} with both`).not.toThrow();
+    }
+  });
 });
 
 describe('clientAddress', () => {
   it('uses CF-Connecting-IP only for requests from 127.0.0.1 (the tunnel)', () => {
     expect(clientAddress(fakeReq({ remote: '127.0.0.1', headers: { 'cf-connecting-ip': '203.0.113.9' } }))).toBe('203.0.113.9');
-    expect(clientAddress(fakeReq({ remote: '::ffff:127.0.0.1', headers: { 'cf-connecting-ip': '2001:db8::1' } }))).toBe('2001:db8::1');
+    expect(clientAddress(fakeReq({ remote: '::ffff:127.0.0.1', headers: { 'cf-connecting-ip': '2001:db8::1' } }))).toBe('2001:db8:0:0::/64');
     expect(clientAddress(fakeReq({ remote: '::1', headers: { 'cf-connecting-ip': '203.0.113.9' } }))).toBe('203.0.113.9');
     expect(clientAddress(fakeReq({ remote: '198.51.100.7', headers: { 'cf-connecting-ip': '203.0.113.9' } }))).toBe('198.51.100.7');
   });
@@ -159,6 +172,32 @@ describe('clientAddress', () => {
   it('falls back to a fixed key when the socket has no address', () => {
     const req = { method: 'GET', headers: {}, socket: {} } as unknown as IncomingMessage;
     expect(clientAddress(req)).toBe('unknown');
+  });
+
+  it('counts two addresses in the same IPv6 /64 as one client', () => {
+    const viaTunnel = (ip: string) => clientAddress(fakeReq({ headers: { 'cf-connecting-ip': ip } }));
+    expect(viaTunnel('2001:db8:1:2::1')).toBe(viaTunnel('2001:db8:1:2:ffff:abcd:1234:5678'));
+    expect(viaTunnel('2001:db8:1:2::1')).toBe('2001:db8:1:2::/64');
+    expect(viaTunnel('2001:db8:1:3::1')).not.toBe(viaTunnel('2001:db8:1:2::1'));
+    expect(clientAddress(fakeReq({ remote: '2001:0DB8:0001:0002:0:0:0:9' }))).toBe('2001:db8:1:2::/64');
+  });
+
+  it('counts an IPv4-mapped IPv6 address as its IPv4 address', () => {
+    const viaTunnel = (ip: string) => clientAddress(fakeReq({ headers: { 'cf-connecting-ip': ip } }));
+    expect(viaTunnel('::ffff:203.0.113.9')).toBe('203.0.113.9');
+    expect(viaTunnel('::ffff:cb00:7109')).toBe('203.0.113.9');
+    expect(viaTunnel('203.0.113.9')).toBe('203.0.113.9');
+    expect(clientAddress(fakeReq({ remote: '::ffff:198.51.100.7' }))).toBe('198.51.100.7');
+  });
+});
+
+describe('rateKey', () => {
+  it('leaves IPv4 alone and reduces IPv6 to its /64', () => {
+    expect(rateKey('203.0.113.9')).toBe('203.0.113.9');
+    expect(rateKey('::1')).toBe('0:0:0:0::/64');
+    expect(rateKey('fe80::1%eth0')).toBe('fe80:0:0:0::/64');
+    expect(rateKey('64:ff9b::192.0.2.33')).toBe('64:ff9b:0:0::/64');
+    expect(rateKey('unknown')).toBe('unknown');
   });
 });
 
@@ -222,5 +261,27 @@ describe('RateLimiter', () => {
     const limiter = new RateLimiter({ capacity: 5, refillPerSec: 1, clock, maxKeys: 3 });
     for (const k of ['a', 'b', 'c', 'd', 'e']) limiter.take(k);
     expect(limiter.size()).toBeLessThanOrEqual(3);
+  });
+
+  it('at the cap never forgets a client that is out of requests', () => {
+    const clock = manualClock(T0);
+    const limiter = new RateLimiter({ capacity: 2, refillPerSec: 1 / 60, clock, maxKeys: 3 });
+    expect(limiter.take('attacker')).toBe(true);
+    expect(limiter.take('attacker')).toBe(true);
+    expect(limiter.take('attacker')).toBe(false);
+    for (let i = 0; i < 50; i++) limiter.take(`fresh-${i}`);
+    expect(limiter.size()).toBeLessThanOrEqual(3);
+    expect(limiter.take('attacker')).toBe(false);
+  });
+
+  it('when every tracked client is out of requests, a new one is refused until a bucket refills', () => {
+    const clock = manualClock(T0);
+    const limiter = new RateLimiter({ capacity: 1, refillPerSec: 1 / 60, clock, maxKeys: 2 });
+    expect(limiter.take('a')).toBe(true);
+    expect(limiter.take('b')).toBe(true);
+    expect(limiter.take('c')).toBe(false);
+    expect(limiter.size()).toBe(2);
+    clock.advance(60_000);
+    expect(limiter.take('c')).toBe(true);
   });
 });

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { openDb } from '../../src/store/db.ts';
 import type { Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
@@ -8,6 +8,7 @@ import {
   cookieSecure,
   hashToken,
   IDLE_TIMEOUT_MS,
+  isToken,
   SESSION_COOKIE,
   SESSION_TTL_MS,
   SessionStore,
@@ -86,6 +87,38 @@ describe('SessionStore: create and get', () => {
       expect(store.get(bad)).toBeUndefined();
     }
   });
+
+  it('a malformed id is refused before any database work', () => {
+    const { db, store } = setup();
+    store.create('owner@example.com');
+    const prepare = vi.spyOn(db, 'prepare');
+    expect(store.get('A'.repeat(10_000))).toBeUndefined();
+    store.destroy('A'.repeat(10_000));
+    expect(prepare).not.toHaveBeenCalled();
+    prepare.mockRestore();
+  });
+
+  it('removes the Unicode line breaks and bidi controls from the label', () => {
+    const { db, store } = setup();
+    store.create('owner@example.com', 'Edge\u2028on\u0085Windows\u202e evil');
+    expect(rows(db)[0]!.agent_label).toBe('Edge on Windows evil');
+  });
+});
+
+describe('isToken', () => {
+  it('accepts exactly 43 base64url characters', () => {
+    const good = 'aZ09_-'.repeat(7) + 'x';
+    expect(good).toHaveLength(43);
+    expect(isToken(good)).toBe(true);
+    expect(isToken('A'.repeat(43))).toBe(true);
+  });
+
+  it('refuses anything else', () => {
+    const base = 'A'.repeat(42);
+    for (const bad of [undefined, '', 'A'.repeat(42), 'A'.repeat(44), `${base}+`, `${base}/`, `${base}=`, `${base} `, `${base}\n`, 'A'.repeat(10_000)]) {
+      expect(isToken(bad), JSON.stringify(bad)?.slice(0, 50)).toBe(false);
+    }
+  });
 });
 
 describe('SessionStore: expiry and idle timeout', () => {
@@ -145,6 +178,16 @@ describe('SessionStore: expiry and idle timeout', () => {
     expect(store.get(id)).toBeUndefined();
     expect(rows(db)).toHaveLength(0);
   });
+
+  it('fails closed: a row whose times cannot be read is refused and removed', () => {
+    for (const column of ['expires_at', 'last_seen_at']) {
+      const { db, store } = setup();
+      const { id } = store.create('owner@example.com');
+      db.prepare(`UPDATE web_sessions SET ${column} = ?`).run('not a date');
+      expect(store.get(id), column).toBeUndefined();
+      expect(rows(db), column).toHaveLength(0);
+    }
+  });
 });
 
 describe('SessionStore: destroy and purge', () => {
@@ -180,6 +223,25 @@ describe('SessionStore: destroy and purge', () => {
     expect(rows(db).map((r) => r.email)).toEqual(['live@example.com']);
     expect(store.get(live.id)).toBeDefined();
     expect(store.purgeExpired()).toBe(0);
+  });
+
+  it('purgeExpired removes a session past its 7 days even when it was used recently', () => {
+    const { db, store, clock } = setup();
+    const { id } = store.create('owner@example.com');
+    const at = (ms: number) => clock.set(new Date(Date.parse(T0) + ms).toISOString());
+    // Keep it in use right up to the end, so only the 7-day expiry (not the idle timeout) can remove it.
+    for (let h = 4; h < 7 * 24; h += 4) {
+      at(h * HOUR);
+      expect(store.get(id), `at ${h} h`).toBeDefined();
+      expect(store.purgeExpired(), `at ${h} h`).toBe(0);
+    }
+    at(SESSION_TTL_MS - 1);
+    expect(store.get(id)).toBeDefined();
+    expect(store.purgeExpired()).toBe(0);
+    expect(Date.parse(rows(db)[0]!.last_seen_at!)).toBeGreaterThan(Date.parse(T0) + SESSION_TTL_MS - IDLE_TIMEOUT_MS);
+    at(SESSION_TTL_MS);
+    expect(store.purgeExpired()).toBe(1);
+    expect(rows(db)).toHaveLength(0);
   });
 });
 
