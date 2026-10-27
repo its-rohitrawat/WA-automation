@@ -200,7 +200,7 @@ async function main(): Promise<void> {
     // Owner dashboard: off (the default) means no web server and no port. Not awaited here, so the stop handlers below
     // are in place before anything else is awaited. It never rejects: a dashboard that cannot start resolves to undefined.
     // The AgentControl (the dashboard's only way into the agent) is passed here once it exists (task 5).
-    const webReady = env.DASHBOARD_ENABLED ? startDashboard({ env, log, control: {} }) : Promise.resolve(undefined);
+    const webReady = env.DASHBOARD_ENABLED ? startDashboard({ env, db, log, control: {} }) : Promise.resolve(undefined);
 
     const trackerDb = db;
     const sessionStore = sessionDb;

@@ -6,6 +6,7 @@ import { manualClock } from '../../src/util/clock.ts';
 import {
   clearSessionCookie,
   cookieSecure,
+  csrfFor,
   hashToken,
   IDLE_TIMEOUT_MS,
   isToken,
@@ -51,6 +52,14 @@ describe('SessionStore: create and get', () => {
     const a = store.create('a@example.com');
     const b = store.create('a@example.com');
     expect(new Set([a.id, b.id, a.csrf, b.csrf]).size).toBe(4);
+  });
+
+  it('the CSRF token is derived from the id, so /api/me can hand it out again without storing it', () => {
+    const { store } = setup();
+    const { id, csrf } = store.create('a@example.com');
+    expect(csrfFor(id)).toBe(csrf);
+    expect(csrfFor(id)).not.toBe(csrfFor(store.create('a@example.com').id));
+    expect(store.get(id)!.csrfHash).toBe(sha(csrfFor(id)));
   });
 
   it('stores only SHA-256 hashes: no column holds the raw id or CSRF token', () => {

@@ -10,6 +10,9 @@ import type { DestinationStream } from 'pino';
 import { CONTENT_SECURITY_POLICY, HttpError, readJson, sendJson } from '../../src/web/http.ts';
 import { createWebServer, PUBLIC_DIR, SESSION_PURGE_EVERY_MS, STOP_GRACE_MS } from '../../src/web/server.ts';
 import { startDashboard } from '../../src/web/start.ts';
+import { SessionStore } from '../../src/web/sessions.ts';
+import { openDb } from '../../src/store/db.ts';
+import type { Db } from '../../src/store/db.ts';
 import type { WebServer } from '../../src/web/server.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger } from '../../src/util/logger.ts';
@@ -48,8 +51,10 @@ function fixture() {
 
 const servers: WebServer[] = [];
 const roots: string[] = [];
+const dbs: Db[] = [];
 afterEach(async () => {
   for (const s of servers.splice(0)) await s.stop();
+  for (const d of dbs.splice(0)) d.close();
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
 });
 
@@ -704,9 +709,27 @@ describe('main.ts dashboard wiring', () => {
 });
 
 describe('startDashboard', () => {
+  const fakeGoogle = {
+    exchange: () => Promise.reject(new Error('no Google in tests')),
+    verifier: () => Promise.reject(new Error('no Google in tests')),
+  };
+  function dashEnv(port: number) {
+    return {
+      DASHBOARD_PORT: port,
+      DASHBOARD_OWNER_EMAILS: ['owner@example.com'],
+      DASHBOARD_GOOGLE_CLIENT_ID: 'client-id',
+      DASHBOARD_GOOGLE_CLIENT_SECRET: 'client-secret',
+    };
+  }
+  function memDb() {
+    const db = openDb(':memory:');
+    dbs.push(db);
+    return db;
+  }
+
   it('logs the address and returns the running server', async () => {
     const c = capture();
-    const web = await startDashboard({ env: { DASHBOARD_PORT: 0 }, log: c.log, control: {} });
+    const web = await startDashboard({ env: dashEnv(0), db: memDb(), log: c.log, control: {}, google: fakeGoogle });
     expect(web).toBeDefined();
     servers.push(web!);
     const port = web!.address()!.port;
@@ -719,7 +742,7 @@ describe('startDashboard', () => {
     try {
       const port = (blocker.address() as AddressInfo).port;
       const c = capture();
-      const web = await startDashboard({ env: { DASHBOARD_PORT: port }, log: c.log, control: {} });
+      const web = await startDashboard({ env: dashEnv(port), db: memDb(), log: c.log, control: {}, google: fakeGoogle });
       expect(web).toBeUndefined();
       const errors = c.records().filter((l) => l.level === 50);
       expect(errors).toHaveLength(1);
@@ -730,6 +753,32 @@ describe('startDashboard', () => {
     } finally {
       await new Promise<void>((r) => blocker.close(() => r()));
     }
+  });
+
+  it('removes expired owner sessions once at start (and serves the sign-in routes)', async () => {
+    const db = memDb();
+    const clock = manualClock('2026-10-27T10:00:00Z');
+    const store = new SessionStore(db, clock);
+    store.create('owner@example.com');
+    clock.advance(8 * 24 * 3_600_000);
+    const c = capture();
+    const web = await startDashboard({ env: dashEnv(0), db, log: c.log, control: {}, clock, google: fakeGoogle });
+    servers.push(web!);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
+    const port = web!.address()!.port;
+    const r = await fetch(`http://127.0.0.1:${port}/dashboard/auth/login`, { redirect: 'manual' });
+    expect(r.status).toBe(302);
+    expect(r.headers.get('location')).toMatch(/^https:\/\/accounts\.google\.com\//);
+    expect((await fetch(`http://127.0.0.1:${port}/dashboard/api/me`)).status).toBe(401);
+  });
+
+  it('a missing Google client or owner list does not start the dashboard (and says so without values)', async () => {
+    const c = capture();
+    const env = { DASHBOARD_PORT: 0, DASHBOARD_OWNER_EMAILS: [] as string[], DASHBOARD_GOOGLE_CLIENT_ID: 'client-id' };
+    const web = await startDashboard({ env, db: memDb(), log: c.log, control: {}, google: fakeGoogle });
+    expect(web).toBeUndefined();
+    expect(c.out()).toContain('dashboard not started');
+    expect(c.out()).not.toContain('client-id');
   });
 });
 

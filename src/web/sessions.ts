@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import type { Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import { serializeCookie } from './http.ts';
@@ -46,6 +46,15 @@ function newToken(): string {
 }
 
 /**
+ * The session's CSRF token, derived from its id (HMAC-SHA256 keyed by the id): only a browser that holds the cookie
+ * can get it, through `/dashboard/api/me`, and the database still keeps only its hash. Deriving it lets the page get
+ * the same token again after a reload without the server storing it.
+ */
+export function csrfFor(id: string): string {
+  return createHmac('sha256', id).update('wa-dashboard-csrf').digest('base64url');
+}
+
+/**
  * Control characters, Unicode line and paragraph breaks (U+0085, U+2028, U+2029) and bidi marks and overrides
  * (U+200E-U+200F, U+202A-U+202E, U+2066-U+2069): anything that could break a one-line text or reverse how it reads.
  */
@@ -74,7 +83,7 @@ export class SessionStore {
   /** Starts a session. The returned id goes only into the cookie and the CSRF token only to the signed-in page. */
   create(email: string, agentLabel?: string): { id: string; csrf: string } {
     const id = newToken();
-    const csrf = newToken();
+    const csrf = csrfFor(id);
     const now = this.#clock.now();
     const at = now.toISOString();
     this.#db
