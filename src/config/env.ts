@@ -16,7 +16,10 @@ const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 /** 91, then a 10-digit Indian mobile (starts 6-9). The owner's decision: the report goes only to an Indian number. */
 export const INDIAN_MOBILE = /^91[6-9]\d{9}$/;
 
-/** https anywhere, or plain http only on this machine and with an explicit port (http://localhost:8787). */
+/**
+ * https anywhere, or plain http only on this machine and with an explicit port (http://localhost:8787).
+ * Never a user name or password: the value becomes links and redirects, so credentials in it would leak.
+ */
 function isDashboardUrl(raw: string): boolean {
   let u: URL;
   try {
@@ -24,6 +27,7 @@ function isDashboardUrl(raw: string): boolean {
   } catch {
     return false;
   }
+  if (u.username !== '' || u.password !== '') return false;
   if (u.protocol === 'https:') return true;
   return u.protocol === 'http:' && (u.hostname === 'localhost' || u.hostname === '127.0.0.1') && u.port !== '';
 }
@@ -96,11 +100,15 @@ const EnvSchema = z.object({
   // Owner dashboard (D1). Off unless DASHBOARD_ENABLED is true. The server listens on 127.0.0.1 only.
   DASHBOARD_ENABLED: Flag.default(false),
   DASHBOARD_PORT: z.coerce.number().int().min(1024).max(65535).default(8787),
-  /** The address owners open: https, or http on this machine (localhost or 127.0.0.1 with a port). */
+  /**
+   * The address owners open: https, or http on this machine (localhost or 127.0.0.1 with a port). Kept as its origin
+   * only (lower-case scheme and host, no path or trailing slash), so it can be compared with a browser's Origin header.
+   */
   DASHBOARD_PUBLIC_URL: z
     .string()
     .url()
-    .refine(isDashboardUrl, { message: 'must be an https:// link or http://localhost:<port>' })
+    .refine(isDashboardUrl, { message: 'must be an https:// link or http://localhost:<port>, with no user name or password' })
+    .transform((s) => new URL(s).origin)
     .optional(),
   /** Google accounts that may sign in: trimmed, lower-cased, without repeats. Personal data: never logged. */
   DASHBOARD_OWNER_EMAILS: z

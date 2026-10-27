@@ -478,18 +478,31 @@ describe('owner dashboard settings', () => {
   });
 
   it('accepts an https link, or http on localhost or 127.0.0.1 with a port', () => {
-    for (const good of ['https://dash.example.com', 'https://dash.example.com/', 'http://localhost:8787', 'http://127.0.0.1:8787', 'http://localhost:9000/']) {
+    for (const good of ['https://dash.example.com', 'http://localhost:8787', 'http://127.0.0.1:8787']) {
       expect(parseEnv({ DASHBOARD_PUBLIC_URL: good }).DASHBOARD_PUBLIC_URL, good).toBe(good);
     }
   });
 
+  it('keeps only the origin, so it compares equal to a browser Origin header', () => {
+    const cases: [string, string][] = [
+      ['https://dash.example.com/', 'https://dash.example.com'],
+      ['http://localhost:9000/', 'http://localhost:9000'],
+      ['HTTP://LOCALHOST:8787', 'http://localhost:8787'],
+      ['HTTPS://Dash.Example.COM/dashboard?x=1#top', 'https://dash.example.com'],
+      ['https://dash.example.com:443/', 'https://dash.example.com'],
+      ['https://dash.example.com:8443', 'https://dash.example.com:8443'],
+    ];
+    for (const [typed, origin] of cases) expect(parseEnv({ DASHBOARD_PUBLIC_URL: typed }).DASHBOARD_PUBLIC_URL, typed).toBe(origin);
+  });
+
   it('refuses any other link, naming only DASHBOARD_PUBLIC_URL and not echoing it', () => {
     const bads = ['http://example.com', 'http://example.com:8787', 'http://localhost', 'http://127.0.0.1', 'http://localhost.example.com:8787',
-      'http://192.168.1.5:8787', 'ftp://dash.example.com', 'not a url', 'dash.example.com'];
+      'http://192.168.1.5:8787', 'ftp://dash.example.com', 'not a url', 'dash.example.com',
+      'https://u:p@dash.example.com', 'https://u@dash.example.com', 'https://:p@dash.example.com', 'http://u:p@localhost:8787'];
     // Exactly one of two fixed texts, so no part of the value can be in it.
     const allowed = [
       'Invalid configuration in: DASHBOARD_PUBLIC_URL',
-      'Invalid configuration in: DASHBOARD_PUBLIC_URL. DASHBOARD_PUBLIC_URL must be an https:// link or http://localhost:<port>',
+      'Invalid configuration in: DASHBOARD_PUBLIC_URL. DASHBOARD_PUBLIC_URL must be an https:// link or http://localhost:<port>, with no user name or password',
     ];
     for (const bad of bads) expect(allowed, bad).toContain(envError({ DASHBOARD_PUBLIC_URL: bad }));
   });
@@ -531,6 +544,7 @@ describe('owner dashboard settings', () => {
       { DASHBOARD_PORT: SECRET },
       { DASHBOARD_PUBLIC_URL: SECRET },
       { DASHBOARD_PUBLIC_URL: `http://${SECRET}.example.com` },
+      { DASHBOARD_PUBLIC_URL: `https://user:${SECRET}@dash.example.com` },
       { DASHBOARD_OWNER_EMAILS: SECRET },
       { DASHBOARD_OWNER_EMAILS: `${SECRET}@example.com,bad` },
       { DASHBOARD_ENABLED: 'true', DASHBOARD_GOOGLE_CLIENT_ID: SECRET, DASHBOARD_GOOGLE_CLIENT_SECRET: SECRET, UPTIMEROBOT_READ_KEY: SECRET },
