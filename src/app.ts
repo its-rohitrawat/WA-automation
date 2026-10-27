@@ -148,6 +148,15 @@ export interface App {
   meetings: MeetingService | undefined;
   /** Undefined without report dependencies. */
   report: ReportScheduler | undefined;
+  /** A read-only view of the daily spend guard (the owner dashboard reads it; nothing here can book or reserve). */
+  spend: SpendView;
+}
+
+export interface SpendView {
+  spentToday(): number;
+  spentTodayByKind(): { ai: number; stt: number };
+  readonly capUsd: number;
+  isPaused(): boolean;
 }
 
 /**
@@ -513,6 +522,14 @@ export function createApp(d: AppDeps): App {
     mediaQueue,
     meetings,
     report: reportScheduler,
+    spend: {
+      spentToday: () => spend.spentToday(),
+      spentTodayByKind: () => spend.spentTodayByKind(),
+      get capUsd() {
+        return spend.capUsd;
+      },
+      isPaused: () => spend.isPaused(),
+    },
     start() {
       if (poll) return; // already started: a second interval would outlive stop()
       if (reportScheduler) {

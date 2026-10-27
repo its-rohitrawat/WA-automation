@@ -323,4 +323,14 @@ CREATE TABLE uptime_log (
 CREATE INDEX uptime_log_at ON uptime_log(at);
 `,
   },
+  {
+    // Owner dashboard (D4/D5). task_events_task: a task's history is read by task (the Tasks screen's detail).
+    // uptime_log.reason: why the agent went down, when it knows (a fixed code such as stopped or whatsapp_logged_out,
+    // never free text); rows written before this stay without one. Additive only.
+    version: 10,
+    sql: `
+CREATE INDEX task_events_task ON task_events(task_id, at, id);
+ALTER TABLE uptime_log ADD COLUMN reason TEXT CHECK (reason IS NULL OR length(reason) BETWEEN 1 AND 100);
+`,
+  },
 ];

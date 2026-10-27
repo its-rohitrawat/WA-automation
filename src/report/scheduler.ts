@@ -144,7 +144,11 @@ export interface ReportSchedulerOptions {
   clock: Clock;
   log: Logger;
   sender: ReportSender;
-  settings: ReportSettings;
+  /**
+   * When the report goes out. A getter is read once at the start of every tick (and by health()), so a change made from
+   * the dashboard applies from the next tick; a plain object stays fixed, as before.
+   */
+  settings: ReportSettings | (() => ReportSettings);
   /** The health line the tracker view is loaded with (Health.workbookLine). The short text does not show it. */
   healthLine: () => HealthLine;
   /** Test seam: replaces building the text from the tracker. */
@@ -195,11 +199,24 @@ export class ReportScheduler {
     }
   }
 
-  /** Today's line for Health. */
+  /** The settings in force now: the getter's answer, or the fixed object. */
+  #settings(): ReportSettings {
+    const s = this.#o.settings;
+    return typeof s === 'function' ? s() : s;
+  }
+
+  /** Today's line for Health. Never throws: a settings getter that fails gives a plain line. */
   health(now: Date = this.#o.clock.now()): ReportHealth {
     const recipientMasked = this.#o.sender.maskedRecipient();
-    if (!this.#o.settings.enabled) return { text: 'Morning report: off', warning: null, recipientMasked };
-    return { ...describeReport(reportFor(this.#o.db, istDate(now)), now, this.#o.settings, this.#o.sender.status().state), recipientMasked };
+    let settings: ReportSettings;
+    try {
+      settings = this.#settings();
+    } catch (err) {
+      this.#o.log.error({ err }, 'morning report settings could not be read');
+      return { text: 'Morning report: settings could not be read', warning: null, recipientMasked };
+    }
+    if (!settings.enabled) return { text: 'Morning report: off', warning: null, recipientMasked };
+    return { ...describeReport(reportFor(this.#o.db, istDate(now)), now, settings, this.#o.sender.status().state), recipientMasked };
   }
 
   /**
@@ -239,8 +256,11 @@ export class ReportScheduler {
   }
 
   async #run(now: Date): Promise<void> {
-    const { db, settings, log } = this.#o;
+    const { db, log } = this.#o;
     try {
+      // Read once, inside the try: a getter that throws is logged like any other tick failure, and one tick never mixes
+      // two versions of the settings.
+      const settings = this.#settings();
       const date = istDate(now);
       const at = now.toISOString();
       // Taking the request, checking it and the forced claim are one transaction, so a request written meanwhile is

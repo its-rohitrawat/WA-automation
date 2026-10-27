@@ -537,3 +537,146 @@ describe('morning report documentation: short message with the tracker link (27 
     expect(amendment.match(/\(default\)/g)).toHaveLength(1);
   });
 });
+
+describe('go-live guide (docs/GO-LIVE.md, D5 task 6)', () => {
+  const guide = () => read('docs/GO-LIVE.md');
+
+  /** Where `text` first appears; fails the test when it is missing (so an order check never passes on -1). */
+  const at = (g: string, text: string) => {
+    const i = g.indexOf(text);
+    expect(i, text).toBeGreaterThan(-1);
+    return i;
+  };
+
+  it('backs up before the merge: stop, confirm stopped, copy, private, then check the copy opens and is whole', () => {
+    const g = guide();
+    expect(g).toMatch(/step 1 comes before the merge/i);
+    const steps = [
+      '## 1. Back up the data folder',
+      'sudo launchctl bootout system/com.wa-agent',
+      'Could not find service',
+      'cp -Rp data/. backups/2026-11-01-data/',
+      'chmod 700 backups/2026-11-01-data',
+      'sqlite3 backups/2026-11-01-data/tracker.db "select count(*) from tasks"',
+      'sqlite3 backups/2026-11-01-data/tracker.db "pragma integrity_check"',
+      '## 2. Get the new version',
+    ].map((s) => at(g, s));
+    expect(steps).toEqual([...steps].sort((a, b) => a - b));
+  });
+
+  it('makes the update pull, then run npm ci, then restart; and pulls by hand after the merge', () => {
+    const g = guide();
+    const update = g.slice(at(g, '## 2. Get the new version'), at(g, '## 3.'));
+    // The update's own commands, in this order, one after the other.
+    expect(update).toMatch(/cd \/opt\/wa-agent\s+git pull --ff-only\s+npm ci\s+sudo launchctl kickstart -k system\/com\.wa-agent/);
+    // And the pull by hand after the merge, without a restart (the service stays stopped until step 4).
+    expect(update).toMatch(/cd \/opt\/wa-agent\s+git pull --ff-only\s+npm ci\s+```/);
+    expect(update.match(/git pull --ff-only/g)).toHaveLength(2);
+    expect(update).toMatch(/fails while the service is stopped: that is expected and harmless/);
+  });
+
+  it('starts the service again before the checks', () => {
+    const g = guide();
+    expect(at(g, 'sudo launchctl bootstrap system /Library/LaunchDaemons/com.wa-agent.plist')).toBeLessThan(at(g, '## 7. Checks'));
+  });
+
+  it('names every dashboard setting, with placeholders only', () => {
+    const g = guide();
+    for (const name of ['DASHBOARD_ENABLED=true', 'DASHBOARD_PORT=8787', 'DASHBOARD_PUBLIC_URL=https://waagent.agentsolutionbowl.si', 'DASHBOARD_OWNER_EMAILS=',
+      'DASHBOARD_GOOGLE_CLIENT_ID=', 'DASHBOARD_GOOGLE_CLIENT_SECRET=', 'UPTIMEROBOT_READ_KEY=']) {
+      expect(g, name).toContain(name);
+    }
+    expect(g).toContain('DASHBOARD_GOOGLE_CLIENT_SECRET=your_web_client_secret_here');
+    expect(g).toContain('DASHBOARD_OWNER_EMAILS=owner@example.com,second.owner@example.com');
+    // Nothing that looks like a real Google client secret, client id or API key.
+    expect(g).not.toMatch(/GOCSPX-|\d{6,}-[a-z0-9]{20,}\.apps\.googleusercontent\.com|AIza[0-9A-Za-z_-]{20,}|\bu\d{6,}-[0-9a-f]{20,}/);
+  });
+
+  it('lists the four redirect addresses of the web sign-in client', () => {
+    const g = guide();
+    for (const uri of [
+      'https://waagent.agentsolutionbowl.si/dashboard/auth/callback',
+      'https://waagent.agentsolutionbowl.si/dashboard/connect/google/callback',
+      'http://localhost:8787/dashboard/auth/callback',
+      'http://localhost:8787/dashboard/connect/google/callback',
+    ]) expect(g, uri).toContain(uri);
+    expect(g).toContain('Web application');
+    expect(g).toContain('In production');
+    // Google takes https redirects only for an authorized domain: the domain comes first.
+    expect(at(g, 'Authorized domains')).toBeLessThan(at(g, 'Authorized redirect URIs'));
+  });
+
+  it('points the domain straight at the agent on the Mac, with no Pages, Worker or offline page', () => {
+    const g = guide();
+    expect(g).toContain('127.0.0.1:8787');
+    expect(g).not.toMatch(/\bPages\b|\bWorker\b|offline page|Agent offline/i);
+    expect(g).toMatch(/When the Mac is off, the website and the dashboard are both down/);
+    expect(g).toContain('sudo cloudflared service install <token>');
+  });
+
+  it('says the owner runs every step, and how to turn it all off again', () => {
+    const g = guide();
+    expect(g).toMatch(/nothing in this guide is run by Claude/i);
+    expect(g).toContain('DASHBOARD_ENABLED=false');
+    expect(g).toContain('## 7. Checks');
+  });
+});
+
+describe('owner dashboard setup (SETUP-mac.md section 10, D1 task 8)', () => {
+  const section = () => {
+    const mac = read('docs/SETUP-mac.md');
+    const start = mac.indexOf('## 10. Owner dashboard (optional)');
+    expect(start).toBeGreaterThan(-1);
+    return mac.slice(start, mac.indexOf('\n## ', start + 1));
+  };
+
+  it('names every dashboard setting, with placeholders only', () => {
+    const s = section();
+    for (const name of ['DASHBOARD_ENABLED=true', 'DASHBOARD_PORT=8787', 'DASHBOARD_OWNER_EMAILS=owner@example.com', 'DASHBOARD_GOOGLE_CLIENT_ID=your_web_client_id_here',
+      'DASHBOARD_GOOGLE_CLIENT_SECRET=your_web_client_secret_here', 'DASHBOARD_PUBLIC_URL=', 'UPTIMEROBOT_READ_KEY=']) {
+      expect(s, name).toContain(name);
+    }
+    // Every name it sets is a real setting of src/config/env.ts.
+    const envSource = read('src/config/env.ts');
+    const names = [...s.matchAll(/^\s*([A-Z][A-Z_]+)=/gm)].map((m) => m[1]!);
+    expect(names.length).toBeGreaterThanOrEqual(7);
+    for (const name of names) expect(envSource, name).toMatch(new RegExp(`^\\s*${name}: `, 'm'));
+  });
+
+  it('backs up, gets the new version with npm ci after pulling, sets up, then starts the stopped service, in that order', () => {
+    const s = section();
+    expect(s).toMatch(/always run `npm ci` after pulling/);
+    const at = (text: string) => {
+      const i = s.indexOf(text);
+      expect(i, text).toBeGreaterThan(-1);
+      return i;
+    };
+    const steps = [
+      at('**Back up first.**'), at('step 1 of [GO-LIVE.md](GO-LIVE.md)'),
+      at('**Get the new version'), at('`git pull --ff-only`, then `npm ci`'),
+      at('**Google web sign-in client.**'), at('**Settings.**'),
+      // The service was booted out in the backup: a restart (kickstart) cannot start it, only enable and bootstrap.
+      at('**Start the service again**'), at('sudo launchctl enable system/com.wa-agent'), at('sudo launchctl bootstrap system /Library/LaunchDaemons/com.wa-agent.plist'),
+      at('**Open**'),
+    ];
+    expect(steps).toEqual([...steps].sort((a, b) => a - b));
+  });
+
+  it('adds the Web application client with the localhost redirects first, then signs in on localhost', () => {
+    const s = section();
+    expect(s).toContain('Web application');
+    expect(s).toContain('http://localhost:8787/dashboard/auth/callback');
+    expect(s).toContain('http://localhost:8787/dashboard/connect/google/callback');
+    expect(s).not.toContain('https://waagent.agentsolutionbowl.si/dashboard/auth/callback'); // the domain's come later, in GO-LIVE.md
+    expect(s).toContain('sudo launchctl kickstart -k system/com.wa-agent');
+    expect(s).toContain('http://localhost:8787/dashboard');
+    expect(s).toContain('DASHBOARD_ENABLED=false');
+  });
+
+  it('SETUP.md points to it, with the npm ci note', () => {
+    const setup = read('docs/SETUP.md');
+    expect(setup).toContain('\n## Owner dashboard\n');
+    expect(setup).toContain('[SETUP-mac.md](SETUP-mac.md), section 10 "Owner dashboard"');
+    expect(setup).toMatch(/update step must run `npm ci` after pulling/);
+  });
+});

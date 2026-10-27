@@ -458,6 +458,10 @@ The tracker keeps working in every case; only the morning report is skipped.
 
 Set `REPORT_ENABLED=false` (or leave it empty) in `.env`, then restart the service.
 
+## Owner dashboard
+
+The owner dashboard and the website run on the office Mac only. Set them up with [SETUP-mac.md](SETUP-mac.md), section 10 "Owner dashboard", then [GO-LIVE.md](GO-LIVE.md) for the company domain. From that update on, the update step must run `npm ci` after pulling.
+
 ## Everyday commands (run in the waagent window)
 
 | Command | What it does |

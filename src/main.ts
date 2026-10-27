@@ -34,6 +34,7 @@ import { baileysSocketFactory, WhatsAppGateway } from './wa/gateway.ts';
 import { baileysSenderSocketFactory, linkedNumber } from './wa/senderGateway.ts';
 import { buildVoiceDeps } from './voiceDeps.ts';
 import { startDashboard } from './web/start.ts';
+import { AgentControl } from './control/agentControl.ts';
 
 /** Expected startup refusal. The message is safe to print. */
 class StartupExit extends Error {}
@@ -199,8 +200,18 @@ async function main(): Promise<void> {
     if (heartbeat) log.info('uptime heartbeat on');
     // Owner dashboard: off (the default) means no web server and no port. Not awaited here, so the stop handlers below
     // are in place before anything else is awaited. It never rejects: a dashboard that cannot start resolves to undefined.
-    // The AgentControl (the dashboard's only way into the agent) is passed here once it exists (task 5).
-    const webReady = env.DASHBOARD_ENABLED ? startDashboard({ env, db, log, control: {} }) : Promise.resolve(undefined);
+    // AgentControl is the dashboard's only way into the agent (read side: status, overview, connections).
+    // Only what it reads: the health and the read-only spend view, two settings (no key or link), and status wrappers in
+    // place of the live gateway and sender. It queries tracker.db (parameterised reads only).
+    const sender = report?.sender;
+    const control = new AgentControl({
+      app: { health: app.health, spend: app.spend }, db, clock: systemClock,
+      env: { MEETINGS_ENABLED: env.MEETINGS_ENABLED, VOICE_STT_PROVIDER: env.VOICE_STT_PROVIDER },
+      gateway: { status: () => gateway.status() },
+      ...(sender ? { sender: { status: () => sender.status(), maskedRecipient: () => sender.maskedRecipient() } } : {}),
+      ...(heartbeat ? { heartbeat: { lastBeatAt: () => heartbeat.lastBeatAt() } } : {}),
+    });
+    const webReady = env.DASHBOARD_ENABLED ? startDashboard({ env, db, log, control }) : Promise.resolve(undefined);
 
     const trackerDb = db;
     const sessionStore = sessionDb;

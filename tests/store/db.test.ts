@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import { migrate, openDb } from '../../src/store/db.ts';
@@ -19,15 +20,15 @@ describe('openDb', () => {
     expect(idx).toEqual(expect.arrayContaining(['tasks_client_status', 'task_events_client_at', 'media_due', 'media_client', 'meetings_due', 'meetings_conference']));
   });
 
-  it('is at schema version 9 straight after openDb', () => {
+  it('is at schema version 10 straight after openDb', () => {
     const db = openDb(':memory:');
-    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(9);
+    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(10);
   });
 
   it('is safe to migrate twice', () => {
     const db = openDb(':memory:');
     migrate(db);
-    expect((db.prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(9);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(10);
   });
 
   it('overwrites deleted content, so wiped download details do not stay in free pages', () => {
@@ -46,16 +47,16 @@ describe('openDb', () => {
 describe('migrate: a skipped migration', () => {
   // A database made before main's v6 (the reports table) reached this branch is recorded at 1 to 5 and 7 onwards.
   const withoutV6 = MIGRATIONS.filter((m) => m.version !== 6);
-  const FAKE_V10: Migration = { version: 10, sql: 'CREATE TABLE fake_later (id INTEGER PRIMARY KEY);' };
+  const FAKE_V11: Migration = { version: 11, sql: 'CREATE TABLE fake_later (id INTEGER PRIMARY KEY);' };
   const versions = (db: Database.Database) =>
     (db.prepare('SELECT version FROM schema_version ORDER BY version').all() as { version: number }[]).map((r) => r.version);
 
   it('throws, naming only the version numbers, and applies nothing when the code knows a version the database skipped', () => {
     const db = new Database(':memory:');
     migrate(db, withoutV6);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7, 8, 9]);
-    expect(() => migrate(db)).toThrow('database is at v9 but v6 was never applied; restore a backup or contact the developer');
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7, 8, 9]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7, 8, 9, 10]);
+    expect(() => migrate(db)).toThrow('database is at v10 but v6 was never applied; restore a backup or contact the developer');
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7, 8, 9, 10]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'reports'").get()).toBeUndefined();
   });
 
@@ -63,17 +64,17 @@ describe('migrate: a skipped migration', () => {
     const db = new Database(':memory:');
     migrate(db);
     db.prepare('DELETE FROM schema_version WHERE version IN (2, 6)').run();
-    expect(() => migrate(db)).toThrow('database is at v9 but v2, v6 were never applied');
+    expect(() => migrate(db)).toThrow('database is at v10 but v2, v6 were never applied');
   });
 
   it('applies every version in order on a fresh database, a later one after them, and a database with every version recorded migrates as before', () => {
     const db = new Database(':memory:');
     migrate(db);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
-    migrate(db);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
-    migrate(db, [...MIGRATIONS, FAKE_V10]);
     expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    migrate(db);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    migrate(db, [...MIGRATIONS, FAKE_V11]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'fake_later'").get()).toEqual({ name: 'fake_later' });
   });
 
@@ -82,7 +83,7 @@ describe('migrate: a skipped migration', () => {
     migrate(db, MIGRATIONS.filter((m) => m.version <= 4));
     expect(versions(db)).toEqual([1, 2, 3, 4]);
     migrate(db);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     expect(() => migrate(db)).not.toThrow();
     expect(() => openDb(':memory:')).not.toThrow();
   });
@@ -153,6 +154,14 @@ describe('migration v9 (owner dashboard)', () => {
     (db.prepare('SELECT version FROM schema_version ORDER BY version').all() as { version: number }[]).map((r) => r.version);
   const columns = (db: Database.Database, table: string) =>
     db.prepare(`SELECT name, type, "notnull" AS required, pk FROM pragma_table_info('${table}') ORDER BY cid`).all();
+  /** Up to v9 only, so these keep testing v9 itself once later versions exist. */
+  const upToV9 = MIGRATIONS.filter((m) => m.version <= 9);
+  function freshV9() {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    migrate(db, upToV9);
+    return db;
+  }
   const NEW_TABLES = ['audit_log', 'settings', 'uptime_log', 'web_sessions'];
   /** Every table v1 to v8 made, with all its rows, so a later step can show they did not change. */
   const oldContents = (db: Database.Database) => {
@@ -183,7 +192,7 @@ describe('migration v9 (owner dashboard)', () => {
   }
 
   it('reaches schema_version 9 on a fresh database, with the four new tables', () => {
-    const db = openDb(':memory:');
+    const db = freshV9();
     expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((t) => t.name);
     expect(tables).toEqual(expect.arrayContaining(NEW_TABLES));
@@ -196,7 +205,7 @@ describe('migration v9 (owner dashboard)', () => {
     const rows = oldContents(db);
     const schema = oldSchema(db);
     expect(Object.values(rows).flat().length).toBeGreaterThanOrEqual(7);
-    migrate(db);
+    migrate(db, upToV9);
     expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect(oldContents(db)).toEqual(rows);
     expect(oldSchema(db)).toEqual(schema);
@@ -205,12 +214,12 @@ describe('migration v9 (owner dashboard)', () => {
 
   it('is additive only: it creates, and never drops, alters, deletes, updates or inserts', () => {
     const v9 = MIGRATIONS.find((m) => m.version === 9)!;
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(MIGRATIONS.map((m) => m.version).slice(0, 9)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect(v9.sql).not.toMatch(/\b(DROP|ALTER|DELETE|UPDATE|INSERT)\b/i);
   });
 
   it('web_sessions keeps a hashed id and a hashed CSRF token, never the raw values', () => {
-    const db = openDb(':memory:');
+    const db = freshV9();
     expect(columns(db, 'web_sessions')).toEqual([
       { name: 'id_hash', type: 'TEXT', required: 0, pk: 1 },
       { name: 'email', type: 'TEXT', required: 1, pk: 0 },
@@ -229,7 +238,7 @@ describe('migration v9 (owner dashboard)', () => {
   });
 
   it('audit_log accepts only the known kinds, and is indexed by time', () => {
-    const db = openDb(':memory:');
+    const db = freshV9();
     expect(columns(db, 'audit_log')).toEqual([
       { name: 'id', type: 'INTEGER', required: 0, pk: 1 },
       { name: 'at', type: 'TEXT', required: 1, pk: 0 },
@@ -249,7 +258,7 @@ describe('migration v9 (owner dashboard)', () => {
   });
 
   it('settings holds one value per key with who changed it and when', () => {
-    const db = openDb(':memory:');
+    const db = freshV9();
     expect(columns(db, 'settings')).toEqual([
       { name: 'k', type: 'TEXT', required: 0, pk: 1 },
       { name: 'v', type: 'TEXT', required: 1, pk: 0 },
@@ -262,7 +271,7 @@ describe('migration v9 (owner dashboard)', () => {
   });
 
   it('uptime_log records up/down transitions and is indexed by time', () => {
-    const db = openDb(':memory:');
+    const db = freshV9();
     expect(columns(db, 'uptime_log')).toEqual([
       { name: 'id', type: 'INTEGER', required: 0, pk: 1 },
       { name: 'at', type: 'TEXT', required: 1, pk: 0 },
@@ -274,12 +283,88 @@ describe('migration v9 (owner dashboard)', () => {
 
   it('leaves a database already at v9 untouched', () => {
     const db = atV8();
-    migrate(db);
+    migrate(db, upToV9);
     db.prepare("INSERT INTO uptime_log (at, up) VALUES ('2026-10-27T00:00:00Z', 0)").run();
     const schema = db.prepare('SELECT name, sql FROM sqlite_master ORDER BY name').all();
-    migrate(db);
+    migrate(db, upToV9);
     expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect(db.prepare('SELECT name, sql FROM sqlite_master ORDER BY name').all()).toEqual(schema);
     expect(db.prepare('SELECT at, up FROM uptime_log').all()).toEqual([{ at: '2026-10-27T00:00:00Z', up: 0 }]);
+  });
+});
+
+describe('migration v10 (dashboard: task history index, outage reasons)', () => {
+  const versions = (db: Database.Database) =>
+    (db.prepare('SELECT version FROM schema_version ORDER BY version').all() as { version: number }[]).map((r) => r.version);
+  const columns = (db: Database.Database, table: string) =>
+    db.prepare(`SELECT name, type, "notnull" AS required FROM pragma_table_info('${table}') ORDER BY cid`).all();
+
+  function atV9WithData() {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    migrate(db, MIGRATIONS.filter((m) => m.version <= 9));
+    db.prepare(`INSERT INTO clients (code, name, group_id, phases) VALUES ('SHA', 'Sharma', '120363000000000001@g.us', '[]')`).run();
+    db.prepare(`INSERT INTO tasks (code, client_id, side, title, category, priority, raised_on, created_at, updated_at)
+      VALUES ('SHA-001', 1, 'us', 'Logo', 'design', 'high', '2026-10-10', '2026-10-10T00:00:00Z', '2026-10-10T00:00:00Z')`).run();
+    db.prepare(`INSERT INTO task_events (task_id, client_id, actor, op, detail, at) VALUES (1, 1, 'ai', 'add_task', '{}', '2026-10-10T00:00:00Z')`).run();
+    db.prepare("INSERT INTO uptime_log (at, up) VALUES ('2026-10-27T00:00:00Z', 0)").run();
+    return db;
+  }
+
+  it('reaches v10 on a fresh database, with the task history index and the reason column', () => {
+    const db = openDb(':memory:');
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(db.prepare("SELECT name FROM pragma_index_info('task_events_task') ORDER BY seqno").all()).toEqual([{ name: 'task_id' }, { name: 'at' }, { name: 'id' }]);
+    expect(columns(db, 'uptime_log')).toEqual([
+      { name: 'id', type: 'INTEGER', required: 0 },
+      { name: 'at', type: 'TEXT', required: 1 },
+      { name: 'up', type: 'INTEGER', required: 1 },
+      { name: 'reason', type: 'TEXT', required: 0 },
+    ]);
+  });
+
+  it('upgrades a v9 database with data, keeping every row; old uptime rows have no reason', () => {
+    const db = atV9WithData();
+    const before = {
+      tasks: db.prepare('SELECT * FROM tasks').all(), events: db.prepare('SELECT * FROM task_events').all(), clients: db.prepare('SELECT * FROM clients').all(),
+    };
+    migrate(db);
+    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect({
+      tasks: db.prepare('SELECT * FROM tasks').all(), events: db.prepare('SELECT * FROM task_events').all(), clients: db.prepare('SELECT * FROM clients').all(),
+    }).toEqual(before);
+    expect(db.prepare('SELECT at, up, reason FROM uptime_log').all()).toEqual([{ at: '2026-10-27T00:00:00Z', up: 0, reason: null }]);
+    expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+  });
+
+  it('takes a reason of 1 to 100 characters, or none', () => {
+    const db = openDb(':memory:');
+    const put = db.prepare("INSERT INTO uptime_log (at, up, reason) VALUES ('2026-10-27T00:00:00Z', 0, ?)");
+    put.run('stopped');
+    put.run(null);
+    expect(() => put.run('')).toThrowError(/CHECK/);
+    expect(() => put.run('x'.repeat(101))).toThrowError(/CHECK/);
+  });
+
+  it('is additive only: it adds a column and an index, and never drops, deletes, updates or inserts', () => {
+    const v10 = MIGRATIONS.find((m) => m.version === 10)!;
+    expect(v10.sql).not.toMatch(/\b(DROP|DELETE|UPDATE|INSERT|RENAME)\b/i);
+    expect(v10.sql.match(/\bALTER\b/gi) ?? []).toHaveLength(1);
+    expect(v10.sql).toMatch(/ALTER TABLE uptime_log ADD COLUMN reason/);
+  });
+
+  it('leaves a database already at v10 untouched', () => {
+    const db = atV9WithData();
+    migrate(db);
+    const schema = db.prepare('SELECT name, sql FROM sqlite_master ORDER BY name').all();
+    migrate(db);
+    expect(db.prepare('SELECT name, sql FROM sqlite_master ORDER BY name').all()).toEqual(schema);
+  });
+});
+
+describe('applied migrations never change', () => {
+  it('v1 to v10 stay byte for byte as written (a change goes in a new version after them, never an edit)', () => {
+    const text = MIGRATIONS.filter((m) => m.version <= 10).map((m) => `${m.version}\n${m.sql}`).join('\n---\n');
+    expect(createHash('sha256').update(text).digest('hex')).toBe('b8f67ddeff8d2f33bda23181a83a4c7b6609c60b9efd8312f0c0ededacf8fb51');
   });
 });

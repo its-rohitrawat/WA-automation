@@ -63,3 +63,76 @@ describe('Health.isUp (the uptime heartbeat)', () => {
     expect(h.isUp()).toBe(true);
   });
 });
+
+describe('Health.downReason (the uptime log, migration v10)', () => {
+  it('names the cause isUp() sees, and nothing while up', () => {
+    const { h, clock } = setup();
+    expect(h.downReason()).toBeNull(); // just started: within the grace period
+    for (const [state, reason] of [['logged_out', 'whatsapp_logged_out'], ['replaced', 'whatsapp_replaced'], ['forbidden', 'whatsapp_forbidden']] as const) {
+      h.setWhatsApp(status(state));
+      expect(h.downReason(), state).toBe(reason);
+    }
+    h.setWhatsApp(status('closed', clock.now().toISOString()));
+    clock.advance(31 * 60_000);
+    expect(h.downReason()).toBe('whatsapp_disconnected');
+  });
+
+  it('a Google sign-in failure while WhatsApp is still in its grace period is google_signin, not a disconnect', () => {
+    const { h } = setup(); // just started: WhatsApp not connected yet
+    h.markPublishFailed({ step: 'drive', auth: true });
+    expect(h.isUp()).toBe(false);
+    expect(h.downReason()).toBe('google_signin');
+  });
+
+  it('tracker updates failing for over an hour without a sign-in problem is tracker_failing', () => {
+    const { h, clock } = setup();
+    h.setWhatsApp(status('open'));
+    h.markPublishFailed({ step: 'drive', auth: false });
+    clock.advance(59 * 60_000);
+    expect(h.downReason()).toBeNull();
+    clock.advance(2 * 60_000);
+    expect(h.downReason()).toBe('tracker_failing');
+  });
+
+  it('isUp() is exactly downReason() being null', () => {
+    const { h, clock } = setup();
+    const both = () => [h.isUp(), h.downReason() === null];
+    expect(new Set(both()).size).toBe(1);
+    h.setWhatsApp(status('closed', clock.now().toISOString()));
+    clock.advance(31 * 60_000);
+    expect(both()).toEqual([false, false]);
+    h.setWhatsApp(status('open', clock.now().toISOString()));
+    expect(both()).toEqual([true, true]);
+  });
+});
+
+describe('Health.publishProblem (the tracker upload on its own)', () => {
+  it('is null while uploads work, failing under an hour, then tracker_failing, and google_signin at once; whatever WhatsApp does', () => {
+    const { h, clock } = setup();
+    h.setWhatsApp(status('logged_out'));
+    expect(h.publishProblem()).toBeNull();
+    h.markPublishFailed({ step: 'drive', auth: false });
+    expect(h.publishProblem()).toBe('failing');
+    clock.advance(61 * 60_000);
+    expect(h.publishProblem()).toBe('tracker_failing');
+    expect(h.downReason()).toBe('whatsapp_logged_out'); // the outage's first cause is still WhatsApp
+    h.markPublished();
+    h.markPublishFailed({ step: 'drive', auth: true });
+    expect(h.publishProblem()).toBe('google_signin');
+  });
+});
+
+describe('Health.publishProblem edges (review round 2)', () => {
+  it('a sign-in failure stays google_signin after an hour, and the hour is strict', () => {
+    const auth = setup();
+    auth.h.markPublishFailed({ step: 'drive', auth: true });
+    auth.clock.advance(61 * 60_000);
+    expect(auth.h.publishProblem()).toBe('google_signin');
+    const plain = setup();
+    plain.h.markPublishFailed({ step: 'drive', auth: false });
+    plain.clock.advance(60 * 60_000);
+    expect(plain.h.publishProblem()).toBe('failing');
+    plain.clock.advance(1);
+    expect(plain.h.publishProblem()).toBe('tracker_failing');
+  });
+});

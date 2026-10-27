@@ -97,7 +97,7 @@
   - the workbook link (`https://drive.google.com/file/d/<id>/view` from the stored Drive id, validated);
   - the last successful publish and the last failure (with a plain reason);
   - health;
-  - sheets: Today, then one per active client, with open, overdue, review and done-this-week counts.
+  - sheets: Today, then one per active client, with not-done (`notDone`, the workbook's "Open"), overdue, review and done-this-week counts.
 - **Tests:** a missing Drive id gives `{ uploaded: false }`; the counts; the link validation.
 
 ## Task 6: Front end: Tasks, Meetings, Activity, Tracker

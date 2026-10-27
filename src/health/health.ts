@@ -10,6 +10,7 @@ import type { MediaStats } from '../store/media.ts';
 import type { Clock } from '../util/clock.ts';
 import { istDate, istShortDate, istTime } from '../util/time.ts';
 import type { GatewayStatus } from '../wa/gateway.ts';
+import type { DownReason } from './uptimeLog.ts';
 
 const LOW_DISK_GB = 10;
 const DISCONNECT_GRACE_MS = 30 * 60_000;
@@ -206,13 +207,32 @@ export class Health {
    * updates failing for over an hour. Smaller warnings (a waiting group, the spend cap, low disk) keep it up.
    */
   isUp(): boolean {
+    return this.downReason() === null;
+  }
+
+  /**
+   * Why isUp() is false, or null while it is true: the same checks in the same order, so the uptime log (UptimeLog)
+   * never names a cause isUp() did not see.
+   */
+  downReason(): DownReason | null {
     const now = this.#clock.now();
-    if (this.#wa.state === 'logged_out' || this.#wa.state === 'replaced' || this.#wa.state === 'forbidden') return false;
-    if (this.#downSince && now.getTime() - this.#downSince.getTime() > DISCONNECT_GRACE_MS) return false;
+    if (this.#wa.state === 'logged_out') return 'whatsapp_logged_out';
+    if (this.#wa.state === 'replaced') return 'whatsapp_replaced';
+    if (this.#wa.state === 'forbidden') return 'whatsapp_forbidden';
+    if (this.#downSince && now.getTime() - this.#downSince.getTime() > DISCONNECT_GRACE_MS) return 'whatsapp_disconnected';
+    const pub = this.publishProblem();
+    return pub === 'failing' ? null : pub;
+  }
+
+  /**
+   * The tracker upload's own state, whatever WhatsApp is doing: the Google sign-in expired, uploads failing for over an
+   * hour (both make isUp() false), failing for less (a warning only), or null while uploads work.
+   */
+  publishProblem(): 'google_signin' | 'tracker_failing' | 'failing' | null {
     const pubFail = this.#publishFailedSince;
-    if (pubFail && this.#publishAuthFailed) return false;
-    if (pubFail && now.getTime() - pubFail.getTime() > PUBLISH_FAIL_MS) return false;
-    return true;
+    if (!pubFail) return null;
+    if (this.#publishAuthFailed) return 'google_signin';
+    return this.#clock.now().getTime() - pubFail.getTime() > PUBLISH_FAIL_MS ? 'tracker_failing' : 'failing';
   }
 
   /** Same as line() but without publish failures: used inside the uploaded workbook. */

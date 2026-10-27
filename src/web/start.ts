@@ -12,6 +12,7 @@ import { registerAuthRoutes } from './routes/auth.ts';
 import { createWebServer } from './server.ts';
 import type { WebServer } from './server.ts';
 import { SessionStore } from './sessions.ts';
+import { SITE_DIR } from './site.ts';
 
 export type DashboardEnv = Pick<
   Env,
@@ -46,7 +47,7 @@ export async function startDashboard(o: {
     return undefined;
   }
   const sessions = new SessionStore(o.db, clock);
-  const web = createWebServer({ control: o.control, env, log, clock, sessions });
+  const web = createWebServer({ control: o.control, env, log, clock, sessions, siteDir: SITE_DIR });
   const port = () => web.address()?.port;
   const publicUrl = env.DASHBOARD_PUBLIC_URL === undefined ? {} : { publicUrl: env.DASHBOARD_PUBLIC_URL };
   const guard = createGuard({ sessions, ownerEmails: env.DASHBOARD_OWNER_EMAILS, port, ...publicUrl });

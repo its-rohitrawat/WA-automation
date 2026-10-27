@@ -104,3 +104,33 @@ describe('main.ts heartbeat wiring', () => {
     expect(src).not.toMatch(/log\.\w+\([^)]*HEARTBEAT_URL/);
   });
 });
+
+describe('Heartbeat.lastBeatAt (owner dashboard)', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('is null before the first accepted visit, then the time of the last one; a refused or skipped visit does not move it', async () => {
+    let status = 200;
+    let up = true;
+    const times = [new Date('2026-10-27T10:01:00Z'), new Date('2026-10-27T10:06:00Z'), new Date('2026-10-27T10:11:00Z')];
+    const fetchMock = vi.fn(async () => new Response('x', { status }));
+    const hb = new Heartbeat({
+      url: URL_, isUp: () => up, log: createLogger('silent'), fetch: fetchMock as unknown as typeof fetch, now: () => times.shift()!,
+    });
+    expect(hb.lastBeatAt()).toBeNull();
+    hb.start();
+    await vi.advanceTimersByTimeAsync(FIRST_BEAT_MS);
+    expect(hb.lastBeatAt()).toEqual(new Date('2026-10-27T10:01:00Z'));
+    status = 500;
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    expect(hb.lastBeatAt()).toEqual(new Date('2026-10-27T10:01:00Z'));
+    status = 200;
+    up = false;
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    expect(hb.lastBeatAt()).toEqual(new Date('2026-10-27T10:01:00Z'));
+    up = true;
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    expect(hb.lastBeatAt()).toEqual(new Date('2026-10-27T10:06:00Z'));
+    await hb.stop();
+  });
+});

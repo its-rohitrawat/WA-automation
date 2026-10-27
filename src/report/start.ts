@@ -49,3 +49,22 @@ export function openMorningReport(o: {
   o.log.info({ recipientLast4: maskNumber(recipient), linked: auth?.hasSession ?? false }, 'morning report enabled');
   return { report: { sender, settings: reportSettings(o.env) }, senderDb: opened.ok ? opened.db : undefined };
 }
+
+/**
+ * For the dashboard's live settings (LiveReport, D5 Task 1): opens the spare number's session and sender for a number
+ * the owner set, which may differ from REPORT_RECIPIENT, and may come while REPORT_ENABLED was false at service start.
+ * Each call is openMorningReport with that number; close() closes the session file it opened, so the next number can
+ * open it again. The same safeguards hold: the spare number's own key, and no send to the founder's own link.
+ */
+export function senderOpener(o: {
+  env: Env;
+  masterKey: Buffer;
+  log: Logger;
+  factory: SenderSocketFactory;
+  founderNumber?: string;
+}): (recipient: string) => { sender: ReportSender; close: () => void } {
+  return (recipient) => {
+    const r = openMorningReport({ ...o, env: { ...o.env, REPORT_ENABLED: true, REPORT_RECIPIENT: recipient } });
+    return { sender: r.report.sender, close: () => r.senderDb?.close() };
+  };
+}
