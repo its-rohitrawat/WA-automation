@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { INDIAN_MOBILE, parseEnv, reportSettings } from '../../src/config/env.ts';
+import type { TrackerView } from '../../src/output/view.ts';
+import { buildShortMorningText } from '../../src/report/morningReport.ts';
 import { describeReport, REASON_TEXT, SENDER_WARNINGS, UNKNOWN_WARNING } from '../../src/report/scheduler.ts';
 import type { ReportRow } from '../../src/store/reports.ts';
 
@@ -298,10 +300,24 @@ describe('morning report documentation: short message with the tracker link (27 
     const checking = report.slice(report.indexOf('\n### Checking it\n'), report.indexOf('\n### ', report.indexOf('\n### Checking it\n') + 1));
     return checking.split('\n').filter((line) => line.startsWith('| Morning report'));
   };
+  /** Numbered step n of the setup list (up to the next step). */
+  const step = (n: number): string => {
+    const start = report.indexOf(`\n${n}. `);
+    expect(start, `step ${n}`).toBeGreaterThanOrEqual(0);
+    const next = report.indexOf(`\n${n + 1}. `, start + 1);
+    return report.slice(start, next < 0 ? undefined : next);
+  };
+  /** A stand-in tracker view: active clients with the given open and overdue counts (none: no active clients). */
+  const fakeView = (...clients: { open: number; overdue: number }[]): TrackerView =>
+    ({ clients: clients.map((c) => ({ client: { active: true }, usOpen: new Array(c.open).fill(null), clientOpen: [], overdue: c.overdue })) }) as unknown as TrackerView;
 
   it('describes the short message with the link and no attachment', () => {
-    expect(report).toContain('`Good morning. 5 open tasks, 2 overdue. Today\'s tracker: https://drive.google.com/file/d/…/view`');
-    expect(report).toContain('`Good morning. No open tasks. Today\'s tracker: …`');
+    const example = buildShortMorningText(fakeView({ open: 3, overdue: 2 }, { open: 2, overdue: 0 }), '2026-10-30', 'https://drive.google.com/file/d/…/view');
+    expect(example).toBe('Good morning. 5 open tasks, 2 overdue. Today\'s tracker: https://drive.google.com/file/d/…/view');
+    expect(report).toContain(`\`${example}\``);
+    expect(report).toContain(`With no active clients it reads \`${buildShortMorningText(fakeView(), '2026-10-30', '…')}\``);
+    expect(report).toContain(`with active clients and nothing open it reads \`${buildShortMorningText(fakeView({ open: 0, overdue: 0 }), '2026-10-30', '…')}\``);
+    expect(report).not.toContain('With no open tasks it reads');
     expect(report).toContain('No file is attached');
     expect(report).toContain('**Today** tab');
     expect(report).not.toMatch(/Tracker-YYYY-MM-DD|is attached as|attached as/);
@@ -311,6 +327,13 @@ describe('morning report documentation: short message with the tracker link (27 
     expect(report).toContain('Monday to Friday');
     expect(report).toContain('No report goes out on Saturday or Sunday');
     expect(report).toContain('`REPORT_DAYS`');
+    expect(report).toContain('`report send-now` still works on any day');
+    expect(report).not.toMatch(/refused on weekends|weekdays only/);
+  });
+
+  it('nothing is sent until the tracker link exists', () => {
+    expect(report).toContain('Until then the report is not sent');
+    expect(report).not.toMatch(/sent without a link/);
   });
 
   it('the founder needs view access to Tracker.xlsx, by sharing the folder with his Google account', () => {
@@ -318,6 +341,9 @@ describe('morning report documentation: short message with the tracker link (27 
     expect(report).toContain("the founder's Google account");
     expect(report).toContain('the link asks for access');
     expect(report).toContain('Share the **WA Agent** folder');
+    expect(step(6)).toContain('Share the **WA Agent** folder');
+    expect(step(6)).toContain('as Viewer');
+    expect(step(6)).not.toMatch(/Editor/);
   });
 
   it('the status table lists the weekend line and the no_tracker_link lines exactly as the code writes them', () => {
@@ -332,8 +358,37 @@ describe('morning report documentation: short message with the tracker link (27 
     const skipped = describeReport(row({ status: 'skipped', detail: 'no_tracker_link' }), new Date('2026-10-30T07:00:00Z'), settings, 'idle');
     has(skipped.text);
     expect(skipped.text).toBe(`Morning report skipped today (${REASON_TEXT.no_tracker_link!})`);
-    has(`Morning report: due at ${settings.time} IST`);
-    has('Morning report: sent at HH:MM IST');
+    for (const line of [retry.text.replace('06:02', 'HH:MM'), skipped.text]) {
+      expect(rows.find((r) => r.startsWith(`| ${line} |`)), line).toContain('Nothing was sent.');
+    }
+  });
+
+  it('the status table has a row for every line describeReport and Health can show', () => {
+    const rows = statusRows();
+    const has = (text: string) => expect(rows.some((line) => line.startsWith(`| ${text} |`)), text).toBe(true);
+    const at = (iso: string) => new Date(iso);
+    // Friday 30 Oct 2026, a report day. Times are UTC (06:00 IST is 00:30Z, 12:00 IST is 06:30Z).
+    const states: [ReportRow | undefined, Date, string][] = [
+      [undefined, at('2026-10-30T00:00:00Z'), `Morning report: due at ${settings.time} IST`],
+      [undefined, at('2026-10-30T01:00:00Z'), 'Morning report: due now'],
+      [row({ status: 'sent', updatedAt: '2026-10-30T00:31:00.000Z' }), at('2026-10-30T01:00:00Z'), 'Morning report: sent at HH:MM IST'],
+      [row({ status: 'sending' }), at('2026-10-30T00:31:00Z'), 'Morning report: sending now'],
+      [row({ status: 'unknown' }), at('2026-10-30T01:00:00Z'), 'Morning report: unknown, check WhatsApp'],
+      [row({ detail: 'not_linked', nextAttemptAt: '2026-10-30T00:32:00.000Z' }), at('2026-10-30T00:31:00Z'), 'Morning report: not sent yet (reason), next try HH:MM IST'],
+      [row({ detail: 'not_linked', nextAttemptAt: '2026-10-30T06:35:00.000Z' }), at('2026-10-30T06:25:00Z'), `Morning report: not sent yet (reason); no more tries today, it will be skipped at ${settings.deadline} IST`],
+      [row({ status: 'skipped', detail: 'not_linked' }), at('2026-10-30T07:00:00Z'), 'Morning report skipped today (reason)'],
+    ];
+    for (const [r, now, expected] of states) {
+      const { text } = describeReport(r, now, settings, 'idle');
+      // Times other than the fixed 06:00 and 12:00 become HH:MM; the first bracket becomes (reason).
+      const general = text
+        .replace(/\d\d:\d\d(?= IST)/g, (hm) => (hm === settings.time || hm === settings.deadline ? hm : 'HH:MM'))
+        .replace(/\([^)]*(\([^)]*\))?[^)]*\)/, '(reason)');
+      expect(general).toBe(expected);
+      has(expected);
+    }
+    expect(settings.deadline).toBe('12:00');
+    has('Morning report: off');
   });
 
   it('SETUP-mac.md section 7 says the same, short', () => {
@@ -347,6 +402,15 @@ describe('morning report documentation: short message with the tracker link (27 
     expect(section).toContain('`REPORT_DAYS`');
     expect(section).toContain('view access to `Tracker.xlsx`');
     expect(section).toContain("the founder's Google account");
+    expect(section).toContain('(Viewer)');
+    expect(section).toContain('works on any day');
+    expect(section).not.toMatch(/Editor|weekdays only/);
+    const steps = section.split('\n').filter((line) => /^\d\. /.test(line));
+    const share = steps.findIndex((line) => line.includes('share the **WA Agent** folder'));
+    const test = steps.findIndex((line) => line.includes('report send-now'));
+    expect(share, 'a numbered share step').toBeGreaterThanOrEqual(0);
+    expect(steps[share]).toContain('as Viewer');
+    expect(share).toBeLessThan(test);
     expect(section).not.toMatch(/Tracker-YYYY-MM-DD|attached as|Excel sheet every morning/);
   });
 
@@ -357,5 +421,15 @@ describe('morning report documentation: short message with the tracker link (27 
     for (const d of ['**D1', '**D2', '**D3', '**D4']) expect(amendment).toContain(d);
     expect(amendment).toContain("`Good morning. {open} open tasks, {overdue} overdue. Today's tracker: {link}`");
     expect(amendment).toContain('`REPORT_DAYS`');
+    for (const rule of [
+      'linkPreview: null',
+      'only `REPORT_RECIPIENT`',
+      'never retried automatically',
+      'only `src/wa/senderGateway.ts`',
+      'use the singular',
+      'no claim, no row, no skipped row',
+      '`report send-now` is still honoured on any day',
+      'keeps the normal retry waits and the deadline skip',
+    ]) expect(amendment, rule).toContain(rule);
   });
 });

@@ -326,7 +326,7 @@ Monday to Friday at 06:00 IST, the founder gets one short WhatsApp message from 
 
 `Good morning. 5 open tasks, 2 overdue. Today's tracker: https://drive.google.com/file/d/…/view`
 
-With no open tasks it reads `Good morning. No open tasks. Today's tracker: …`. No file is attached: the link opens `Tracker.xlsx` on its **Today** tab (the first tab), which lists, per active client, how many tasks are open and overdue and the 3 most urgent open tasks (tagged `us` or `client`). It makes no AI call, so it costs nothing.
+With no active clients it reads `Good morning. No open tasks. Today's tracker: …`; with active clients and nothing open it reads `Good morning. 0 open tasks, 0 overdue. Today's tracker: …`. No file is attached: the link opens `Tracker.xlsx` on its **Today** tab (the first tab), which lists, per active client, how many tasks are open and overdue and the 3 most urgent open tasks (tagged `us` or `client`). It makes no AI call, so it costs nothing.
 
 - No report goes out on Saturday or Sunday. `REPORT_DAYS` changes the days (see step 4 below). `report send-now` still works on any day.
 - The founder needs view access to `Tracker.xlsx` on Drive, or the link asks for access (step 6 below).
@@ -385,12 +385,14 @@ What the line can say (HH:MM is a time in IST):
 | Morning report: due now | Between 06:00 and 12:00, not sent yet. It goes on the next check (every 30 seconds). | Nothing. |
 | Morning report: sent at HH:MM IST | Today's message left. | Nothing. |
 | Morning report: sending now | The send is running. | Nothing. |
-| Morning report: no report today (weekend) | Saturday or Sunday, and `REPORT_DAYS` leaves the day out. Nothing is sent and nothing is skipped. | Nothing. `report send-now` still sends one if you want it. |
+| Morning report: no report today (weekend) | Saturday or Sunday, and `REPORT_DAYS` leaves the day out. No scheduled report is sent or skipped (a `report send-now` that fails is still retried until 12:00). | Nothing. `report send-now` still sends one if you want it. |
 | Morning report: not sent yet (the tracker is not on Google Drive yet (run google-auth and let it upload once)), next try HH:MM IST | The tracker has never reached Google Drive, so there is no link to send. Nothing was sent. | If Google was never signed in, run `npm run cli -- google-auth` (see "5. One-time sign-ins"), then restart the service. Once `Tracker.xlsx` is in the **WA Agent** folder on Drive, the report goes on the next try. |
 | Morning report skipped today (the tracker is not on Google Drive yet (run google-auth and let it upload once)) | 12:00 came and there was still no link, so the day was skipped. Nothing was sent. | Same as above; tomorrow's report goes once the tracker is on Drive. |
 | Morning report: not sent yet (reason), next try HH:MM IST | Another definite failure, nothing was sent. It tries again after 2, 5 and 10 minutes, until 12:00. | Usually nothing. If it says the spare number, see the status headings below. |
+| Morning report: not sent yet (reason); no more tries today, it will be skipped at 12:00 IST | A definite failure too close to 12:00 for another try (the next try would fall after 12:00). Nothing was sent. | Nothing; the day is skipped at 12:00. Tomorrow's report is not affected. |
 | Morning report skipped today (reason) | Not sent by 12:00 (for example the PC was off). | Check the reason. Tomorrow's report is not affected. |
 | Morning report: unknown, check WhatsApp | See the next heading. | See the next heading. |
+| Morning report: off | `REPORT_ENABLED` is not `true`. | See "Turning it off" below. |
 
 ### Status "Morning report: unknown, check WhatsApp"
 

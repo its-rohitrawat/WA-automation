@@ -132,7 +132,8 @@ Monday to Friday at 06:00 IST the founder gets one short WhatsApp message from a
 3. Waagent window: `npm run cli -- link-sender`, and scan the QR code from the **spare** phone. The spare phone then lists this link as "WA Agent - Morning report". If the founder's phone ever shows "WA Agent - Morning report", the wrong phone scanned it: remove that device and link again from the spare phone.
 4. `nano .env` and set `REPORT_ENABLED=true` and `REPORT_RECIPIENT=` the founder's number: `91` then the 10-digit mobile, digits only.
 5. **Start the service again**, wait one minute, then: `npm run cli -- report status`.
-6. Test once (it works on any day): `npm run cli -- report send-now`, type `yes`, check the founder's phone and open the link.
+6. In Google Drive (mailbox account), share the **WA Agent** folder with the founder's Google account as Viewer.
+7. Test once (it works on any day): `npm run cli -- report send-now`, type `yes`, check the founder's phone and open the link.
 
 Details and every status message: "Morning report" in [SETUP.md](SETUP.md).
 
