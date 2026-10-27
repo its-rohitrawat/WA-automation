@@ -73,6 +73,8 @@ export function spareDriver(o: {
       o.linking(true);
       const release = await briefing.pause();
       try {
+        // Cancelled, timed out or stopped while a send finished: the session file is left as it was.
+        if (signal.aborted) return { ok: false, code: typeof signal.reason === 'string' ? signal.reason : 'cancelled' };
         return await inner.run(hooks, signal);
       } finally {
         release();

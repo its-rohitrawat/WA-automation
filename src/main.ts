@@ -321,9 +321,9 @@ async function main(): Promise<void> {
           log30.tick(app.health.isUp(), app.health.downReason());
           const today = istDate(systemClock.now());
           if (today !== purgedDay) {
-            purgedDay = today;
             log30.purgeOlderThan(UPTIME_KEEP_DAYS);
             audit.purgeOlderThan(AUDIT_KEEP_DAYS);
+            purgedDay = today; // only once both ran: a failed purge is tried again at the next tick
           }
         } catch (err) {
           log.error({ err }, 'uptime log update failed');
@@ -395,26 +395,26 @@ async function main(): Promise<void> {
         .then(() => Promise.race([links?.stop(), new Promise((r) => setTimeout(r, 10_000).unref())]))
         .catch((err: unknown) => log.error({ err }, 'error while stopping a phone link'));
       void heartbeat?.stop();
-      clearInterval(uptimeTimer);
       stopWatching();
       void webStopped
         .then(() => app.stop())
         .catch((err) => log.error({ err }, 'error while stopping'))
         .finally(() => {
           // Databases are closed only after app.stop() has settled, so after the morning report's stop() has returned.
-          try {
-            uptime?.stop(); // the stopped time counts as down
-          } catch {
-            // best effort
-          }
-          try {
-            for (const d of adoptedDbs) d.close();
-            trackerDb.close();
-            sessionStore.close();
-            senderStore?.close();
-          } catch {
-            // best effort
-          }
+          // The uptime log keeps recording through the drain; the stopped time then counts as down.
+          clearInterval(uptimeTimer);
+          const bestEffort = (fn: () => void) => {
+            try {
+              fn();
+            } catch {
+              // best effort: the next close still runs
+            }
+          };
+          bestEffort(() => uptime?.stop());
+          for (const d of adoptedDbs) bestEffort(() => d.close());
+          bestEffort(() => trackerDb.close());
+          bestEffort(() => sessionStore.close());
+          bestEffort(() => senderStore?.close());
           void startedLock.release().finally(() => process.exit(0));
           setTimeout(() => process.exit(0), 2000).unref();
         });

@@ -288,3 +288,34 @@ describe('LiveReport stop during a rebuild (review round 2)', () => {
     expect(t.opened.map((o) => [o.recipient, o.closed])).toEqual([[A, 1]]);
   });
 });
+
+describe('LiveReport pause (a spare-phone link from the dashboard)', () => {
+  it('opens, ticks and sends nothing while paused, and goes on once released', async () => {
+    const t = setup({ report: ON, recipient: A });
+    const release = await t.live.pause();
+    await t.tick('06:30');
+    expect(t.opened).toHaveLength(0);
+    expect(t.live.scheduler()).toBeUndefined();
+    release();
+    release(); // a second call changes nothing
+    await t.tick('06:31');
+    expect(t.opened.map((o) => o.recipient)).toEqual([A]);
+    expect(t.live.recipient()).toBe(A);
+    expect(t.live.sender()).toBe(t.opened[0]!.sender);
+  });
+
+  it('a pause that comes while a number change closes the old sender opens no new one until released', async () => {
+    const t = setup({ report: ON, recipient: A });
+    await t.tick('05:30'); // opens A before the send time
+    t.set({ report: ON, recipient: B });
+    const ticking = t.tick('05:31'); // closes A for the new number
+    const paused = t.live.pause(); // waits for that tick
+    await ticking;
+    const release = await paused;
+    expect(t.opened.map((o) => o.recipient)).toEqual([A]);
+    expect(t.opened[0]!.closed).toBe(1);
+    release();
+    await t.tick('05:32');
+    expect(t.opened.map((o) => o.recipient)).toEqual([A, B]);
+  });
+});

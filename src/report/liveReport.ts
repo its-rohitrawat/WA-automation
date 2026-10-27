@@ -98,7 +98,8 @@ export class LiveReport {
           this.#closing = undefined;
         }
         log.info({}, 'morning report: the number changed; the sender is made again for the new number');
-        if (this.#stopped) return; // stop() came while the old sender was closing: open nothing new
+        // stop() came while the old sender was closing, or a spare-phone link is waiting to start: open nothing new.
+        if (this.#stopped || this.#paused > 0) return;
         // The close takes up to a few seconds: the owner may have changed the number (or switched off) meanwhile.
         s = this.#o.settings();
       }

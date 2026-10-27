@@ -120,8 +120,14 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
       throw err;
     }
     const p = ctx.url.searchParams;
-    const r = await google.callback(ownerOf(ctx, s), { state: p.get('state'), code: p.get('code'), error: p.get('error') });
-    redirect(ctx.res, r.location);
+    let location: string;
+    try {
+      location = (await google.callback(ownerOf(ctx, s), { state: p.get('state'), code: p.get('code'), error: p.get('error') })).location;
+    } catch (err) {
+      d.log.error({ rid: ctx.requestId, err }, 'Google connect callback failed');
+      location = '/dashboard/connections?google_error=internal';
+    }
+    redirect(ctx.res, location);
   });
 
   // Quick actions (D3): upload the tracker now, test Claude, send a test heartbeat. Each has its own limit as well.
