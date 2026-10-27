@@ -8,23 +8,36 @@ import { systemClock } from '../src/util/clock.ts';
 import { silentLogger } from '../src/util/logger.ts';
 import type { Logger } from '../src/util/logger.ts';
 import type { ServerResponse } from 'node:http';
+import { randomBytes } from 'node:crypto';
+import { renderQrSvg } from '../src/web/qrSvg.ts';
 
 const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
 
 /** The fake session's CSRF token (it guards nothing real). */
 export const FAKE_CSRF = 'fake-csrf';
 
+/** The status parts (the agent's keys: whatsapp, tracker, meetings, voice, report, spend), from the fake's flags. */
+function statusParts(st: FakeState) {
+  return [
+    st.setup ? { key: 'whatsapp', name: 'WhatsApp', state: 'down', label: 'Not linked' } : { key: 'whatsapp', name: 'WhatsApp', state: 'ok', label: 'Connected' },
+    { key: 'tracker', name: 'Tracker', state: 'ok', label: 'Updated' },
+    st.org2Ok ? { key: 'meetings', name: 'Meetings', state: 'ok', label: 'Working' } : { key: 'meetings', name: 'Meetings', state: 'warn', label: 'Google sign-in lost for org2' },
+    { key: 'voice', name: 'Voice notes', state: 'off', label: 'Switched off' },
+    st.spareLinked ? { key: 'report', name: 'Morning report', state: 'ok', label: 'On' } : { key: 'report', name: 'Morning report', state: 'warn', label: 'The spare phone is not linked' },
+    { key: 'spend', name: 'AI spend', state: 'ok', label: 'Within the daily limit' },
+  ];
+}
+
 /** Made-up answers. `empty` is a new install: no clients, tasks or meetings yet. */
-export const fixtures = (empty: boolean) => ({
+export const fixtures = (st: FakeState) => {
+  const empty = st.empty;
+  const parts = statusParts(st);
+  const worst = parts.find((x) => x.state === 'down') ?? parts.find((x) => x.state === 'warn');
+  return {
   status: {
-    at: at(0), up: true, line: { ok: false, text: 'Spare WhatsApp is not linked' },
-    parts: [
-      { key: 'founder', name: 'Founder WhatsApp', state: 'ok', label: 'Connected' },
-      { key: 'spare', name: 'Spare WhatsApp', state: 'warn', label: 'Not linked' },
-      { key: 'google', name: 'Google', state: 'ok', label: 'Connected' },
-      { key: 'claude', name: 'Claude spend', state: 'ok', label: '$0.84 of $3.00' },
-    ],
-    lastMessageAt: at(3), spentToday: 0.84, capUsd: 3,
+    at: at(0), up: true, line: worst ? { ok: false, text: `${worst.name}: ${worst.label}` } : { ok: true, text: 'All systems normal' },
+    parts,
+    lastMessageAt: st.setup ? null : at(3), spentToday: 0.84, capUsd: 3,
   },
   overview: empty
     ? { clients: 0, tasks: { open: 0, overdue: 0, review: 0, doneThisWeek: 0 }, byClient: [], meetings: [], activity: [], tracker: null }
@@ -48,17 +61,20 @@ export const fixtures = (empty: boolean) => ({
         tracker: { lastPublishedAt: at(300), health: { ok: true, text: 'Published to Drive' } },
       },
   connections: {
-    founder: { state: 'ok', label: 'Connected', groups: 3, lastActivityAt: at(3) },
-    spare: { state: 'not_linked', label: 'Not linked', recipientMasked: '•••• 0000' },
+    founder: st.setup ? { state: 'down', label: 'Not linked', groups: 0, lastActivityAt: null } : { state: 'ok', label: 'Connected', groups: 3, lastActivityAt: at(3) },
+    spare: st.spareLinked ? { state: 'ok', label: 'Connected', recipientMasked: '•••• 0000' } : { state: 'warn', label: 'Not linked', recipientMasked: '•••• 0000' },
     google: [
       { label: 'main', email: 'owner@example.com', state: 'ok', stateLabel: 'Connected', usedFor: ['Mail', 'Drive', 'Meetings'] },
-      { label: 'org2', email: 'meetings@example.org', state: 'down', stateLabel: 'Sign in again', usedFor: ['Meetings'] },
+      st.org2Ok
+        ? { label: 'org2', email: 'meetings@example.org', state: 'ok', stateLabel: 'Connected', usedFor: ['Meetings'] }
+        : { label: 'org2', email: 'meetings@example.org', state: 'down', stateLabel: 'Sign in again', usedFor: ['Meetings'] },
     ],
     drive: { state: 'ok', label: 'Connected', lastUploadAt: at(300) },
     claude: { callsToday: 41, spentToday: 0.84, capUsd: 3 },
     monitoring: { on: true, lastBeatAt: at(1) },
   },
-});
+  };
+};
 
 /** What the fake answers depend on; the caller may change it at any time. */
 export interface FakeState {
@@ -66,6 +82,40 @@ export interface FakeState {
   empty: boolean;
   /** Manage groups shows the "WhatsApp isn't connected" banner. */
   whatsappDown?: boolean;
+  /** Setup mode: the founder's phone was never linked. A fake link clears it. */
+  setup?: boolean;
+  /** The spare phone is linked (a fake link sets it). */
+  spareLinked?: boolean;
+  /** The org2 Google account is signed in (a fake reconnect sets it). */
+  org2Ok?: boolean;
+}
+
+/** A fake phone link: two codes, a scan, then linked (and the fake flags updated). */
+function fakeLinks(state: FakeState) {
+  const links = new Map<string, { target: 'founder' | 'spare'; cancelled: boolean }>();
+  const stream = (id: string, res: ServerResponse) => {
+    const link = links.get(id);
+    if (!link) return sendError(res, 404, 'not_found', 'Unknown link.');
+    res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store' });
+    const send = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    const steps: [number, () => void][] = [
+      [300, () => send('state', { state: 'waiting_qr', label: 'Getting a code from WhatsApp…' })],
+      [700, () => send('qr', { svg: renderQrSvg(`fake-link-${id}-1`) })],
+      [2600, () => send('qr', { svg: renderQrSvg(`fake-link-${id}-2`) })],
+      [4200, () => send('state', { state: 'opening', label: 'Scanned. Linking…' })],
+      [5600, () => {
+        if (link.target === 'founder') state.setup = false;
+        else state.spareLinked = true;
+        send('done', { device: link.target === 'founder' ? 'WA Agent - Tracker' : 'WA Agent - Morning report' });
+        res.end();
+      }],
+    ];
+    const timers = steps.map(([ms, fn]) => setTimeout(() => {
+      if (!link.cancelled && !res.writableEnded) fn();
+    }, ms));
+    res.on('close', () => timers.forEach(clearTimeout));
+  };
+  return { links, stream };
 }
 
 interface FakeClient {
@@ -209,9 +259,52 @@ export function fakeDashboard(o: { port: number; state: FakeState; log?: Logger 
     sendJson(ctx.res, 200, body());
   };
   web.router.get('/dashboard/api/me', guarded(() => ({ email: 'owner@example.com', name: 'Test Owner', signedInAt: at(5), expiresAt: at(-600), csrf: FAKE_CSRF })));
-  web.router.get('/dashboard/api/status', guarded(() => fixtures(state.empty).status));
-  web.router.get('/dashboard/api/overview', guarded(() => fixtures(state.empty).overview));
-  web.router.get('/dashboard/api/connections', guarded(() => fixtures(state.empty).connections));
+  web.router.get('/dashboard/api/status', guarded(() => fixtures(state).status));
+  web.router.get('/dashboard/api/overview', guarded(() => fixtures(state).overview));
+  web.router.get('/dashboard/api/connections', guarded(() => fixtures(state).connections));
+  const owner = (req: { headers: Record<string, unknown> }, res: ServerResponse, csrf = true) => {
+    if (!state.signedIn) return sendError(res, 401, 'unauthenticated', 'Sign in first.'), false;
+    if (csrf && req.headers['x-csrf-token'] !== FAKE_CSRF) return sendError(res, 403, 'csrf', 'Refused.'), false;
+    return true;
+  };
+  const wa = fakeLinks(state);
+  web.router.post('/dashboard/api/whatsapp/link/start', async ({ req, res }) => {
+    if (!owner(req, res)) return;
+    const b = (await readJson(req)) as { target?: unknown; confirm?: unknown };
+    if ((b.target !== 'founder' && b.target !== 'spare') || b.confirm !== true) return sendError(res, 400, 'invalid', 'Choose the founder or the spare phone, and confirm.');
+    const linkId = randomBytes(16).toString('hex');
+    wa.links.set(linkId, { target: b.target, cancelled: false });
+    sendJson(res, 200, { linkId });
+  });
+  web.router.get('/dashboard/api/whatsapp/link/stream', ({ req, res, url }) => {
+    if (owner(req, res, false)) wa.stream(url.searchParams.get('id') ?? '', res);
+  });
+  web.router.post('/dashboard/api/whatsapp/link/cancel', async ({ req, res }) => {
+    if (!owner(req, res)) return;
+    const link = wa.links.get(String(((await readJson(req)) as { linkId?: unknown }).linkId ?? ''));
+    if (link) link.cancelled = true;
+    sendJson(res, 200, { cancelled: Boolean(link) });
+  });
+  web.router.post('/dashboard/api/google/connect', async ({ req, res }) => {
+    if (!owner(req, res)) return;
+    const b = (await readJson(req)) as { account?: unknown };
+    const label = typeof b.account === 'string' ? b.account : (b.account as { add?: unknown } | undefined)?.add;
+    if (typeof label !== 'string' || !/^[a-z0-9-]{1,20}$/.test(label)) return sendError(res, 400, 'invalid', 'Choose the account to connect.');
+    if (label === 'org2') state.org2Ok = true; // the fake has no Google: the reconnect counts as done
+    // Google's sign-in page; the smoke test answers it with a redirect back, as Google would after consent.
+    sendJson(res, 200, { url: `https://accounts.google.com/o/oauth2/v2/auth?fake=1&account=${encodeURIComponent(label)}` });
+  });
+  const ACTIONS: Record<string, unknown> = {
+    'upload-tracker': { ok: true, at: at(0) },
+    'test-claude': { ok: true, ms: 812 },
+    'test-heartbeat': { ok: true, status: 200 },
+  };
+  web.router.post('/dashboard/api/actions/:name', ({ req, res, params }) => {
+    if (!owner(req, res)) return;
+    const r = ACTIONS[params.name ?? ''];
+    if (!r) return sendError(res, 404, 'not_found', 'There is no such action.');
+    setTimeout(() => sendJson(res, 200, r), 600);
+  });
   const g = fakeGroupsApi(state);
   web.router.get('/dashboard/api/clients', guarded(() => ({ clients: g.clientCards() })));
   web.router.get('/dashboard/api/clients/:code', ({ res, params }) => {

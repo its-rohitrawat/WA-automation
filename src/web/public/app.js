@@ -1,12 +1,13 @@
 // The dashboard app: sign-in or the shell, the sidebar, top bar, theme, account menu, screens and live status.
 import { get, me, poll, setSignedOutHandler, signOut } from './api.js';
-import { problems, readConnections, readOverview, readStatus } from './contract.js';
+import { problems, readOverview, readStatus } from './contract.js';
 import { $, $$, esc, gsap, icon, installTooltip, paint, reduceMotion, toast } from './dom.js';
 import { initials } from './format.js';
 import { NAV, navigate, onPopState, parsePath, SCREENS } from './router.js';
 import { mountClients } from './views/clients.js';
-import { renderConnections } from './views/connections.js';
-import { closeDrawer } from './views/drawer.js';
+import { CONNECTIONS_CHANGED, openFix, runAction } from './views/connect.js';
+import { mountConnections } from './views/connections.js';
+import { closeDrawer, openDrawerElement } from './views/drawer.js';
 import { resetGroups } from './views/groups.js';
 import { afterOverview, attentionBanner, renderOverview } from './views/overview.js';
 import { renderPlaceholder } from './views/placeholder.js';
@@ -14,6 +15,11 @@ import { SCREEN_MOUNTS } from './views/registry.js';
 import './views/screens.js';
 
 SCREEN_MOUNTS.set('clients', mountClients);
+SCREEN_MOUNTS.set('connections', mountConnections);
+// After a link, a reconnect or a quick action: the health pill now (an open dialog stays; Connections reloads itself).
+addEventListener(CONNECTIONS_CHANGED, () => {
+  if (owner) void refreshStatus();
+});
 import { hideSignin, showSignin } from './views/signin.js';
 
 const STATUS_MS = 10_000;
@@ -62,6 +68,19 @@ function buildNav() {
 function wireShell() {
   document.addEventListener('click', (e) => {
     const target = /** @type {Element} */ (e.target);
+    // A connection's fix (a dialog) or quick action, from any screen: Connections cards, the Overview's Fix now.
+    const fix = /** @type {HTMLElement | null} */ (target.closest('[data-fix]'));
+    if (fix && !(/** @type {HTMLButtonElement} */ (fix).disabled)) {
+      e.preventDefault();
+      const card = /** @type {HTMLElement | null} */ (fix.closest('[data-conn]'));
+      openFix(fix.dataset.fix ?? '', { email: card?.dataset.email, meetings: card?.dataset.meetings === '1' });
+      return;
+    }
+    const act = /** @type {HTMLButtonElement | null} */ (target.closest('button[data-action]'));
+    if (act && !act.disabled) {
+      void runAction(act, act.dataset.action ?? '');
+      return;
+    }
     const go = /** @type {HTMLElement | null} */ (target.closest('[data-go]'));
     if (go && !(/** @type {HTMLButtonElement} */ (go).disabled)) {
       // A link opened in a new tab or window keeps the browser's own behaviour.
@@ -91,6 +110,8 @@ function wireShell() {
     if (!m.hidden && gsap && !reduceMotion) gsap.fromTo(m, { scale: 0.96, autoAlpha: 0 }, { scale: 1, autoAlpha: 1, duration: 0.18, ease: 'power2.out' });
   });
   $('#signout').addEventListener('click', async () => {
+    // First, while the session still works: an open dialog cancels its phone link.
+    closeDrawer(true);
     try {
       await signOut();
     } catch {
@@ -101,7 +122,7 @@ function wireShell() {
   });
   addEventListener('keydown', (e) => {
     const tag = /** @type {HTMLElement} */ (document.activeElement)?.tagName;
-    if (e.key === '/' && tag !== 'INPUT' && tag !== 'TEXTAREA') {
+    if (e.key === '/' && tag !== 'INPUT' && tag !== 'TEXTAREA' && !openDrawerElement()) {
       e.preventDefault();
       /** @type {HTMLInputElement} */ ($('#q')).focus();
     }
@@ -237,31 +258,6 @@ function show(screen, sub, opts = {}) {
           if (live() && !ov) draw(e);
         }
       }, OVERVIEW_MS),
-    );
-  } else if (screen === 'connections') {
-    /** @type {ReturnType<typeof readConnections> | null} */
-    let cards = null;
-    const draw = (/** @type {unknown} */ err) => {
-      if (live()) redraw(view, attentionBanner(status) + renderConnections(cards, err));
-    };
-    draw(undefined);
-    let drawnStatus = statusKey();
-    onStatus = () => {
-      if (statusKey() === drawnStatus) return;
-      drawnStatus = statusKey();
-      draw(undefined);
-    };
-    screenPolls.push(
-      poll(async () => {
-        try {
-          const next = readConnections(await get('/connections'));
-          if (!live()) return;
-          cards = next;
-          draw(undefined);
-        } catch (e) {
-          if (live() && !cards) draw(e);
-        }
-      }, STATUS_MS),
     );
   } else {
     const mount = SCREEN_MOUNTS.get(screen);

@@ -49,12 +49,16 @@ export async function get(path) {
   return parse(await fetch(BASE + path, { credentials: 'same-origin', headers: { Accept: 'application/json' } }));
 }
 
-/** POST JSON to a path under /dashboard/api, with the CSRF token. @param {string} path @param {unknown} [body] */
-export async function post(path, body) {
+/**
+ * POST JSON to a path under /dashboard/api, with the CSRF token. `keepalive` lets it finish while the page unloads.
+ * @param {string} path @param {unknown} [body] @param {{ keepalive?: boolean }} [opts]
+ */
+export async function post(path, body, opts = {}) {
   return parse(
     await fetch(BASE + path, {
       method: 'POST',
       credentials: 'same-origin',
+      keepalive: opts.keepalive === true,
       headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRF-Token': csrf ?? '' },
       body: JSON.stringify(body ?? {}),
     }),

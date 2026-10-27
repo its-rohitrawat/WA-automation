@@ -410,3 +410,21 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
 .ccard .grp .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; } .ccard:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .empty-card { display: flex; gap: 14px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
 .drawer .field input { width: 100%; } .drawer details .h4 { margin-top: 14px; }
+/* Connections dialogs and setup mode (D3) */
+/* Centred without a transform, so the open animation's scale never fights the centring. */
+.modal { inset: 0; margin: auto; height: fit-content; }
+.m-foot { flex-wrap: wrap; }
+.toast-warn svg { color: #e9b75a; }
+.m-body .steps { margin-top: 0; }
+.qr { display: grid; place-items: center; } .qr img { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
+.qr-wait .spin, .qr-status .spin, .m-wait .spin { border-color: var(--line-2); border-top-color: var(--green); }
+.qr-dim img { opacity: .25; transition: opacity 200ms ease; }
+.m-wait { margin: 28px 0; }
+.note-warn { border: 1px solid rgba(226,169,59,.35); }
+.m-fail { display: flex; gap: 12px; align-items: flex-start; color: #e9b75a; } .m-fail .m-p { color: var(--text); }
+:root[data-theme="light"] .m-fail { color: #9a6a10; }
+.gbtn-inline { width: auto; padding: 10px 16px; }
+.btn .spin { width: 14px; height: 14px; border-color: rgba(127,127,127,.3); border-top-color: currentColor; }
+.setup-cta { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; padding: 26px; border-color: color-mix(in srgb, var(--green) 35%, var(--line)); }
+.setup-cta h3 { margin: 0 0 6px; font-size: 19px; letter-spacing: -0.02em; } .setup-cta .m-p { max-width: 62ch; }
+.setup-cta .badge { width: 54px; height: 54px; border-radius: 16px; display: grid; place-items: center; color: var(--accent); background: linear-gradient(160deg, rgba(37,211,102,.18), rgba(7,94,84,.4)); border: 1px solid rgba(37,211,102,.25); }

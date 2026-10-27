@@ -46,7 +46,11 @@ function watch(page: Page, where: () => string) {
     if (r.status() === 422 && path === '/dashboard/api/groups/apply' && where().startsWith('manage groups refused')) return; // the refusal step
     if (r.status() >= 400 && !(r.status() === 401 && path.startsWith('/dashboard/api/') && !state.signedIn)) fail(where(), `${r.status()} ${path}`);
   });
-  page.on('requestfailed', (r) => fail(where(), `request failed ${new URL(r.url()).pathname}: ${r.failure()?.errorText}`));
+  page.on('requestfailed', (r) => {
+    // Closing the link dialog closes its event stream on purpose.
+    if (new URL(r.url()).pathname === '/dashboard/api/whatsapp/link/stream') return;
+    fail(where(), `request failed ${new URL(r.url()).pathname}: ${r.failure()?.errorText}`);
+  });
 }
 
 /** Slow machines (and the sign-in core drawn without a GPU) can take seconds per page: wait for content, not a fixed time. */
@@ -109,8 +113,16 @@ async function main() {
       for (const theme of THEMES) {
         state.signedIn = true;
         state.empty = false;
+        state.setup = false;
+        state.spareLinked = false;
+        state.org2Ok = false;
         const tctx = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
         tctx.setDefaultTimeout(WAIT_MS);
+        // Google's sign-in page, answered as Google would after consent: straight back to the agent's callback result.
+        await tctx.route('https://accounts.google.com/**', (route) => {
+          const account = new URL(route.request().url()).searchParams.get('account') ?? '';
+          return route.fulfill({ status: 302, headers: { Location: `${base}/dashboard/connections?connected=${encodeURIComponent(account)}` } });
+        });
         await tctx.addInitScript((t) => {
           try {
             localStorage.setItem('wa-agent-theme', t);
@@ -211,6 +223,58 @@ async function main() {
         await p.locator('#g-save').click();
         await p.locator('.toast', { hasText: 'Saved' }).waitFor();
         await p.locator('.savebar').waitFor({ state: 'detached' });
+
+        where = `fix now ${tag}`;
+        await p.goto(`${base}/dashboard`);
+        await check(p, where, '.attn [data-fix="google:org2"]', `overview-attention-${tag}`);
+        await p.locator('.attn [data-fix]').click();
+        await p.locator('.modal h2', { hasText: 'Reconnect meetings@example.org' }).waitFor(); // the email comes from Connections
+        await p.keyboard.press('Escape');
+        await p.locator('.modal').waitFor({ state: 'detached' });
+
+        where = `quick action ${tag}`;
+        await p.goto(`${base}/dashboard/connections`);
+        await check(p, where, '.conn', `connections-actions-${tag}`);
+        await p.locator('[data-action="test-claude"]').click();
+        await p.locator('.toast', { hasText: 'Claude answered in 0.8 s' }).waitFor();
+
+        where = `link spare ${tag}`;
+        await p.locator('[data-fix="spare-link"]').click();
+        await p.locator('.modal .qr img').waitFor();
+        await p.waitForTimeout(400);
+        await p.screenshot({ path: join(OUT, `qr-${tag}.png`) });
+        await p.locator('.modal .m-done', { hasText: 'Linked as "WA Agent - Morning report"' }).waitFor();
+        await p.screenshot({ path: join(OUT, `linked-${tag}.png`) });
+        await p.locator('.modal [data-close]', { hasText: 'Done' }).click();
+        await p.locator('.modal').waitFor({ state: 'detached' });
+        await p.locator('[data-conn="spare"] [data-fix="spare"]').waitFor(); // the card reloaded: linked, so Reconnect
+
+        where = `relink cancelled ${tag}`;
+        await p.locator('[data-conn="spare"] [data-fix="spare"]').click();
+        await p.locator('.modal [data-step="start"]').click();
+        await p.locator('.modal .qr img').waitFor();
+        await p.keyboard.press('Escape');
+        await p.locator('.modal').waitFor({ state: 'detached' });
+
+        where = `google reconnect ${tag}`;
+        await p.locator('[data-conn="google:org2"] [data-fix]').click();
+        await p.locator('.modal h2', { hasText: 'meetings@example.org' }).waitFor();
+        await p.waitForTimeout(300);
+        await p.screenshot({ path: join(OUT, `google-dialog-${tag}.png`) });
+        await p.locator('.modal button[type="submit"]').click();
+        await p.waitForURL(/\/dashboard\/connections$/);
+        await p.locator('.toast', { hasText: 'Google account org2 is signed in' }).waitFor();
+
+        if (vp.name === 'laptop' && theme === 'dark') {
+          where = `setup mode ${tag}`;
+          state.setup = true;
+          await p.goto(`${base}/dashboard`);
+          await check(p, where, '.setup-cta', `setup-${tag}`);
+          await p.locator('.setup-cta [data-fix="founder-link"]').click();
+          await p.locator('.modal .m-done', { hasText: 'Linked as "WA Agent - Tracker"' }).waitFor();
+          await p.locator('.modal [data-close]', { hasText: 'Done' }).click();
+          await p.locator('.kpis').waitFor(); // the status changed: the Overview is back
+        }
 
         where = `sign out ${tag}`;
         await p.locator('#avatar').click();
