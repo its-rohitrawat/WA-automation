@@ -71,6 +71,8 @@ const EnvSchema = z.object({
   REPORT_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   REPORT_TIME: z.string().regex(HHMM).default('06:00'),
   REPORT_DEADLINE: z.string().regex(HHMM).default('12:00'),
+  /** The IST days the report goes out: weekdays (Monday to Friday), mon-sat or daily. */
+  REPORT_DAYS: z.enum(['weekdays', 'mon-sat', 'daily']).default('weekdays'),
   /** The founder's number: 91 and the 10-digit mobile, digits only. Personal data: never logged in full. */
   REPORT_RECIPIENT: z.string().regex(INDIAN_MOBILE).optional(),
   /** Uptime heartbeat link (an UptimeRobot heartbeat monitor). Secret: never logged. Off when empty. */
@@ -139,7 +141,7 @@ export function requireKey(env: Env, name: 'ANTHROPIC_API_KEY' | 'GOOGLE_OAUTH_C
 }
 
 export function reportSettings(env: Env): ReportSettings {
-  return { enabled: env.REPORT_ENABLED, time: env.REPORT_TIME, deadline: env.REPORT_DEADLINE };
+  return { enabled: env.REPORT_ENABLED, time: env.REPORT_TIME, deadline: env.REPORT_DEADLINE, days: env.REPORT_DAYS };
 }
 
 /** The founder's number (digits only). parseEnv already refuses REPORT_ENABLED=true without it. */

@@ -317,6 +317,8 @@ describe('.env.example', () => {
       'VOICE_STT_PROVIDER', 'STT_LOCAL_ENGINE', 'STT_LOCAL_BIN', 'STT_LOCAL_MODEL', 'STT_LOCAL_THREADS', 'STT_LOCAL_TIMEOUT_SECONDS', 'STT_LOCAL_LANGUAGE',
     ];
     for (const n of names) expect(Object.keys(vars)).toContain(n);
+    expect(vars.REPORT_DAYS).toBe('');
+    expect(parseEnv(vars).REPORT_DAYS).toBe('weekdays');
     expect(vars.STT_API_KEY).toBe('');
     expect(vars.STT_LOCAL_BIN).toBe('');
     expect(vars.STT_LOCAL_MODEL).toBe('');
@@ -330,15 +332,35 @@ describe('.env.example', () => {
 describe('morning report settings', () => {
   it('is off by default, with 06:00 to 12:00 IST', () => {
     const env = parseEnv({ REPORT_ENABLED: '', REPORT_TIME: '', REPORT_DEADLINE: '', REPORT_RECIPIENT: '' });
-    expect(reportSettings(env)).toEqual({ enabled: false, time: '06:00', deadline: '12:00' });
+    expect(reportSettings(env)).toEqual({ enabled: false, time: '06:00', deadline: '12:00', days: 'weekdays' });
     expect(env.REPORT_RECIPIENT).toBeUndefined();
   });
 
   it('turns on only with REPORT_ENABLED=true and a recipient', () => {
     const env = parseEnv({ REPORT_ENABLED: 'true', REPORT_RECIPIENT: '919800000000', REPORT_TIME: '06:30', REPORT_DEADLINE: '11:00' });
-    expect(reportSettings(env)).toEqual({ enabled: true, time: '06:30', deadline: '11:00' });
+    expect(reportSettings(env)).toEqual({ enabled: true, time: '06:30', deadline: '11:00', days: 'weekdays' });
     expect(reportRecipient(env)).toBe('919800000000');
     expect(parseEnv({ REPORT_ENABLED: 'false' }).REPORT_ENABLED).toBe(false);
+  });
+
+  it('sends Monday to Friday by default; REPORT_DAYS accepts weekdays, mon-sat and daily', () => {
+    expect(parseEnv({}).REPORT_DAYS).toBe('weekdays');
+    expect(parseEnv({ REPORT_DAYS: '' }).REPORT_DAYS).toBe('weekdays');
+    for (const days of ['weekdays', 'mon-sat', 'daily'] as const) {
+      expect(reportSettings(parseEnv({ REPORT_DAYS: days })).days).toBe(days);
+    }
+  });
+
+  it('refuses a bad REPORT_DAYS, naming only that setting and not echoing the value', () => {
+    for (const bad of ['weekend', 'Weekdays', 'mon-fri', ' daily', 'sunday-secret']) {
+      try {
+        parseEnv({ REPORT_DAYS: bad });
+        expect.unreachable();
+      } catch (e) {
+        expect((e as Error).message).toBe('Invalid configuration in: REPORT_DAYS');
+        expect((e as Error).message).not.toContain(bad);
+      }
+    }
   });
 
   it('refuses REPORT_ENABLED=true without a recipient, naming the variable', () => {
@@ -374,7 +396,7 @@ describe('morning report settings', () => {
     for (const bad of ['9:00', '24:00', '12:60']) {
       expect(() => parseEnv({ REPORT_TIME: '00:00', REPORT_DEADLINE: bad }), bad).toThrowError(/REPORT_DEADLINE/);
     }
-    expect(reportSettings(parseEnv({ REPORT_TIME: '00:00', REPORT_DEADLINE: '23:59' }))).toEqual({ enabled: false, time: '00:00', deadline: '23:59' });
+    expect(reportSettings(parseEnv({ REPORT_TIME: '00:00', REPORT_DEADLINE: '23:59' }))).toEqual({ enabled: false, time: '00:00', deadline: '23:59', days: 'weekdays' });
     expect(() => parseEnv({ REPORT_ENABLED: 'yes' })).toThrowError(/REPORT_ENABLED/);
     expect(() => parseEnv({ REPORT_TIME: '12:00', REPORT_DEADLINE: '12:00' })).toThrowError('Invalid configuration in: REPORT_DEADLINE');
   });

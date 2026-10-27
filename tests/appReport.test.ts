@@ -23,7 +23,7 @@ import { FakeSocket, SEND_METHODS } from './helpers/fakeSocket.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
 const DAY = '2026-10-23';
-const ON = { enabled: true, time: '06:00', deadline: '12:00' };
+const ON = { enabled: true, time: '06:00', deadline: '12:00', days: 'weekdays' } as const;
 
 function setup(report?: AppReportDeps, db: Db = seededDb(), o: { log?: Logger; freeBytes?: () => number } = {}) {
   const sockets: FakeSocket[] = [];

@@ -3,7 +3,7 @@ import { Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import type { HealthLine } from '../../src/output/view.ts';
 import {
-  describeReport, reasonText, ReportScheduler, retryWaitMs, SENDER_WARNINGS, UNKNOWN_WARNING, type ReportPayload,
+  describeReport, isReportDay, reasonText, ReportScheduler, retryWaitMs, SENDER_WARNINGS, UNKNOWN_WARNING, type ReportPayload,
 } from '../../src/report/scheduler.ts';
 import type { ReportSettings, SendResult } from '../../src/report/types.ts';
 import type { Db } from '../../src/store/db.ts';
@@ -13,13 +13,14 @@ import {
 } from '../../src/store/reports.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
+import { istDate } from '../../src/util/time.ts';
 import { MEHTA, seededDb, SHARMA } from '../helpers/db.ts';
 import { FakeReportSender } from '../helpers/fakeReportSender.ts';
 
 const DAY = '2026-10-23';
 const IST = (hm: string) => `${DAY}T${hm}:00.000+05:30`;
 const iso = (hm: string) => new Date(IST(hm)).toISOString();
-const ON: ReportSettings = { enabled: true, time: '06:00', deadline: '12:00' };
+const ON: ReportSettings = { enabled: true, time: '06:00', deadline: '12:00', days: 'weekdays' };
 const failed = (code: string): SendResult => ({ status: 'failed', code });
 /** health() also carries the masked number the sender sends to (FakeReportSender: …1234). */
 const TO = { recipientMasked: '…1234' };
@@ -741,5 +742,127 @@ describe('describeReport', () => {
 
   it('waits 2, 5, then 10 minutes', () => {
     expect([0, 1, 2, 3, 4, 9].map(retryWaitMs)).toEqual([120_000, 120_000, 300_000, 600_000, 600_000, 600_000]);
+  });
+});
+
+describe('report days (REPORT_DAYS)', () => {
+  const FRI = '2026-10-30';
+  const SAT = '2026-10-31';
+  const SUN = '2026-11-01';
+  const MON = '2026-11-02';
+  const at = (date: string, hm: string) => new Date(`${date}T${hm}:00.000+05:30`);
+
+  it('reads the weekday of the IST date, also at the IST midnight edge', () => {
+    // 2026-10-30 23:59 IST is Friday; one minute later (18:30 UTC the same UTC day) it is Saturday in India.
+    expect(istDate(at(FRI, '23:59'))).toBe(FRI);
+    expect(istDate(new Date('2026-10-30T18:30:00.000Z'))).toBe(SAT);
+    expect(isReportDay(istDate(at(FRI, '23:59')), 'weekdays')).toBe(true);
+    expect(isReportDay(istDate(new Date('2026-10-30T18:30:00.000Z')), 'weekdays')).toBe(false);
+    // 2026-11-01 23:59 IST is Sunday; 2026-11-02 00:00 IST (18:30 UTC on 1 Nov) is Monday.
+    expect(isReportDay(istDate(at(SUN, '23:59')), 'weekdays')).toBe(false);
+    expect(isReportDay(istDate(new Date('2026-11-01T18:30:00.000Z')), 'weekdays')).toBe(true);
+  });
+
+  it('weekdays is Monday to Friday, mon-sat adds Saturday, daily is every day', () => {
+    const week = ['2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05', '2026-11-06', '2026-11-07', '2026-11-08']; // Monday to Sunday
+    expect(week.map((d) => isReportDay(d, 'weekdays'))).toEqual([true, true, true, true, true, false, false]);
+    expect(week.map((d) => isReportDay(d, 'mon-sat'))).toEqual([true, true, true, true, true, true, false]);
+    expect(week.map((d) => isReportDay(d, 'daily'))).toEqual([true, true, true, true, true, true, true]);
+  });
+
+  function weekSetup(settings: ReportSettings = ON) {
+    const db = seededDb();
+    const clock = manualClock(at(SAT, '05:00').toISOString());
+    const sender = new FakeReportSender();
+    const s = new ReportScheduler({ db, clock, log: silentLogger(), sender, settings, healthLine: () => ({ ok: true, text: '✅ Connected' }) });
+    const tick = async (date: string, hm: string) => {
+      clock.set(at(date, hm).toISOString());
+      await s.tick(clock.now());
+    };
+    return { db, clock, sender, s, tick };
+  }
+
+  it('on Saturday and Sunday the scheduled ticks at 06:00, 09:00 and after the deadline create no row and send nothing; Monday sends', async () => {
+    const { db, sender, s, tick } = weekSetup();
+    for (const date of [SAT, SUN]) {
+      for (const hm of ['05:59', '06:00', '09:00', '11:59', '12:00', '23:59']) await tick(date, hm);
+      expect(reportFor(db, date)).toBeUndefined();
+    }
+    expect(sender.calls).toHaveLength(0);
+    expect(s.health(at(SUN, '07:00'))).toEqual({ text: 'Morning report: no report today (weekend)', warning: null, ...TO });
+    await tick(MON, '06:00');
+    expect(sender.calls).toHaveLength(1);
+    expect(reportFor(db, MON)).toMatchObject({ status: 'sent', attempts: 1, forced: false });
+  });
+
+  it('the Friday 23:59 IST tick is Friday and the 00:00 IST tick is Saturday', async () => {
+    const { db, sender, tick } = weekSetup({ ...ON, time: '00:00', deadline: '23:59' });
+    await tick(FRI, '23:58');
+    expect(reportFor(db, FRI)!.status).toBe('sent');
+    await tick(SAT, '00:00');
+    expect(reportFor(db, SAT)).toBeUndefined();
+    expect(sender.calls).toHaveLength(1);
+  });
+
+  it('mon-sat sends on Saturday but not on Sunday; daily sends on Sunday', async () => {
+    const monSat = weekSetup({ ...ON, days: 'mon-sat' });
+    await monSat.tick(SAT, '06:00');
+    await monSat.tick(SUN, '06:00');
+    await monSat.tick(SUN, '12:00');
+    expect(monSat.sender.calls).toHaveLength(1);
+    expect(reportFor(monSat.db, SAT)!.status).toBe('sent');
+    expect(reportFor(monSat.db, SUN)).toBeUndefined();
+    const daily = weekSetup({ ...ON, days: 'daily' });
+    await daily.tick(SUN, '06:00');
+    expect(reportFor(daily.db, SUN)!.status).toBe('sent');
+  });
+
+  it('a send-now request on a Sunday sends once, and is never sent a second time that day', async () => {
+    const { db, sender, s, tick } = weekSetup();
+    await tick(SUN, '10:00');
+    expect(sender.calls).toHaveLength(0);
+    setKv(db, REPORT_REQUEST_KEY, reportRequest(SUN, reportFor(db, SUN), at(SUN, '10:00')));
+    await tick(SUN, '10:01');
+    expect(sender.calls).toHaveLength(1);
+    expect(reportFor(db, SUN)).toMatchObject({ status: 'sent', forced: true });
+    expect(s.health(at(SUN, '10:02')).text).toBe('Morning report: sent at 10:01 IST');
+    setKv(db, REPORT_REQUEST_KEY, reportRequest(SUN, reportFor(db, SUN), at(SUN, '10:05')));
+    for (const hm of ['10:05', '10:06', '12:00']) await tick(SUN, hm);
+    expect(sender.calls).toHaveLength(1);
+  });
+
+  it('a send-now request on a Sunday that fails keeps the normal retry and deadline rules for that row', async () => {
+    const { db, sender, tick } = weekSetup();
+    sender.results = [failed('connect_timeout'), failed('closed')];
+    setKv(db, REPORT_REQUEST_KEY, reportRequest(SUN, undefined, at(SUN, '10:00')));
+    await tick(SUN, '10:00');
+    expect(reportFor(db, SUN)).toMatchObject({ status: 'retry', detail: 'connect_timeout' });
+    await tick(SUN, '10:02');
+    expect(sender.calls).toHaveLength(2);
+    await tick(SUN, '12:00');
+    expect(reportFor(db, SUN)).toMatchObject({ status: 'skipped', detail: 'closed' });
+    expect(sender.calls).toHaveLength(2);
+  });
+
+  it('health on a non-report day says so, with no warning and no "due" promise', () => {
+    for (const hm of ['00:00', '05:00', '06:30', '13:00']) {
+      expect(describeReport(undefined, at(SAT, hm), ON, 'idle')).toEqual({ text: 'Morning report: no report today (weekend)', warning: null });
+    }
+    expect(describeReport(undefined, at(SUN, '07:00'), { ...ON, days: 'mon-sat' }, 'idle').text).toBe('Morning report: no report today (weekend)');
+    expect(describeReport(undefined, at(SAT, '07:00'), { ...ON, days: 'mon-sat' }, 'idle').text).toBe('Morning report: due now');
+    expect(describeReport(undefined, at(SUN, '05:00'), { ...ON, days: 'daily' }, 'idle').text).toBe('Morning report: due at 06:00 IST');
+    expect(describeReport(undefined, at(MON, '05:00'), ON, 'idle').text).toBe('Morning report: due at 06:00 IST');
+    // A row exists on a non-report day only after a send-now request; it is described as on any other day.
+    const sent: ReportRow = {
+      date: SUN, status: 'sent', detail: null, attempts: 1, nextAttemptAt: null, forced: true,
+      createdAt: at(SUN, '10:00').toISOString(), updatedAt: at(SUN, '10:01').toISOString(),
+    };
+    expect(describeReport(sent, at(SUN, '11:00'), ON, 'idle').text).toBe('Morning report: sent at 10:01 IST');
+  });
+
+  it('on a non-report day the spare number still warns when the owner has to act before the next report', () => {
+    expect(describeReport(undefined, at(SAT, '07:00'), ON, 'logged_out')).toEqual({
+      text: 'Morning report: no report today (weekend)', warning: SENDER_WARNINGS.logged_out,
+    });
   });
 });

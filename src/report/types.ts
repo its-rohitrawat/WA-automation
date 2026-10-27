@@ -1,3 +1,6 @@
+/** The IST days the scheduled report goes out: Monday to Friday, Monday to Saturday, or every day (REPORT_DAYS). */
+export type ReportDays = 'weekdays' | 'mon-sat' | 'daily';
+
 /** When the morning report goes out. Times are IST, "HH:MM". */
 export interface ReportSettings {
   enabled: boolean;
@@ -5,6 +8,8 @@ export interface ReportSettings {
   time: string;
   /** From this time on, a day not yet sent is skipped. Default "12:00". */
   deadline: string;
+  /** On other days the scheduled path does nothing; a send-now request is still honoured. Default "weekdays". */
+  days: ReportDays;
 }
 
 /**

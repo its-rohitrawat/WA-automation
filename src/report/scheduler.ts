@@ -10,7 +10,7 @@ import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { istDate, istTime } from '../util/time.ts';
 import { buildMorningText } from './morningReport.ts';
-import type { ReportHealth, ReportSender, ReportSettings, SenderState, SendResult } from './types.ts';
+import type { ReportDays, ReportHealth, ReportSender, ReportSettings, SenderState, SendResult } from './types.ts';
 
 /** Waits after a definite failure: 2 minutes, then 5, then 10 for every later try, until the deadline. */
 export const RETRY_WAITS_MS = [2 * 60_000, 5 * 60_000, 10 * 60_000];
@@ -70,12 +70,31 @@ export const SENDER_WARNINGS: Partial<Record<SenderState, string>> = {
   replaced: '⚠️ Morning report: another session took over the spare number. Restart the service.',
 };
 
+/** 0 for Sunday to 6 for Saturday: the weekday of an IST calendar date "YYYY-MM-DD" (the date alone fixes it). */
+function weekdayOf(date: string): number {
+  return new Date(`${date}T00:00:00Z`).getUTCDay();
+}
+
+/** True when the scheduled report goes out on this IST date: weekdays is Monday to Friday, mon-sat adds Saturday, daily is every day. */
+export function isReportDay(date: string, days: ReportDays): boolean {
+  const day = weekdayOf(date);
+  if (days === 'daily') return true;
+  if (days === 'mon-sat') return day !== 0;
+  return day !== 0 && day !== 6;
+}
+
 /** The Health and `cli status` line for one day. Pure: reads nothing. */
 export function describeReport(row: ReportRow | undefined, now: Date, settings: ReportSettings, sender: SenderState): ReportHealth {
   const unknown = row?.status === 'unknown' || isStaleSending(row, now);
   const text = ((): string => {
     if (unknown) return 'Morning report: unknown, check WhatsApp';
     if (!row) {
+      // No scheduled report today, so no "due" promise and no skip. A row on such a day comes only from send-now.
+      const date = istDate(now);
+      if (!isReportDay(date, settings.days)) {
+        const weekend = weekdayOf(date) === 0 || weekdayOf(date) === 6;
+        return `Morning report: no report today (${weekend ? 'weekend' : 'not a report day'})`;
+      }
       const hm = istTime(now);
       if (hm < settings.time) return `Morning report: due at ${settings.time} IST`;
       if (hm < settings.deadline) return 'Morning report: due now';
@@ -246,6 +265,9 @@ export class ReportScheduler {
       });
       if (step === 'send') await this.#send(date, now);
       if (step !== 'schedule') return;
+      // On a day that is not a report day the scheduled path creates nothing: no claim, no row, no skipped row. A row
+      // that exists on such a day was made by a send-now request, and keeps the usual retry and deadline rules.
+      if (!isReportDay(date, settings.days) && !reportFor(db, date)) return;
       const hm = istTime(now);
       if (hm < settings.time) return;
       if (hm >= settings.deadline) {
