@@ -1,0 +1,2 @@
+# Fonts are binary: never convert their line endings.
+*.woff2 binary
