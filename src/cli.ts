@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import { addReportCommands, defaultDeps, googleAuthCommand, linkCommand, listGroupsCommand, statusCommand } from './cli/commands.ts';
+import { addReportCommands, defaultDeps, googleAccountCommand, googleAuthCommand, linkCommand, listGroupsCommand, statusCommand } from './cli/commands.ts';
 import { loadEnv } from './config/env.ts';
 import { masterKeyPath, trackerDbPath } from './config/paths.ts';
 import { DpapiKeyProvider } from './crypto/keyProvider.ts';
@@ -38,7 +38,16 @@ program
   .description('Show group names and ids on screen; allowed groups are still saved (stop the service first)')
   .action(async () => listGroupsCommand(deps()));
 program.command('status').description('Connection, backlog, failures, spend and disk').action(() => statusCommand(deps()));
-program.command('google-auth').description('Connect Google Drive through a browser sign-in').action(async () => googleAuthCommand(deps()));
+program
+  .command('google-auth')
+  .description('Connect Google Drive through a browser sign-in')
+  .option('--account <name>', 'connect one more Google account that records Meet meetings (read only), e.g. company2')
+  .option('--remove', 'with --account: forget that account here; asks first')
+  .action(async (opts: { account?: string; remove?: boolean }) => {
+    if (opts.account !== undefined) return googleAccountCommand({ account: opts.account, remove: opts.remove === true }, deps());
+    if (opts.remove) throw new Error('--remove needs --account <name>');
+    return googleAuthCommand(deps());
+  });
 
 addReportCommands(program, deps);
 

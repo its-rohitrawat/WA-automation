@@ -5,6 +5,10 @@ export function getKv(db: Db, k: string): string | undefined {
   return r?.v;
 }
 
+export function deleteKv(db: Db, k: string): void {
+  db.prepare('DELETE FROM kv WHERE k = ?').run(k);
+}
+
 export function setKv(db: Db, k: string, v: string): void {
   db.prepare('INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v').run(k, v);
 }

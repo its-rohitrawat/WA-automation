@@ -6,9 +6,10 @@ import { requireKey, type Env } from '../config/env.ts';
 import { loadGroupsFile, type ClientConfig } from '../config/groups.ts';
 import { trackerDbPath } from '../config/paths.ts';
 import type { KeyProvider } from '../crypto/keyProvider.ts';
-import { googleMeetingsApi, type MeetingsGoogleApi } from '../meetings/googleApi.ts';
+import type { MeetingsGoogleApi } from '../meetings/googleApi.ts';
+import { combineMeetingAccounts, MultiAccountMeetingsApi, storedMeetingAccounts } from '../meetings/multiAccount.ts';
 import { MeetingWatcher, type FoundMeeting } from '../meetings/watcher.ts';
-import { createOAuthClient, hasMeetingScopes, TokenStore } from '../output/googleAuth.ts';
+import { createOAuthClient, MAIN_ACCOUNT, meetingsReady, TokenStore } from '../output/googleAuth.ts';
 import { estimateCostUsd, pricesFromEnv, type Prices } from '../spend/pricing.ts';
 import { getClientByCode, getClientByGroupId, listClients, syncClients } from '../store/clients.ts';
 import { openDb, tx, type Db } from '../store/db.ts';
@@ -158,13 +159,16 @@ export function speechCeilingFromEnv(env: Pick<Env, 'STT_PROVIDER' | 'INR_PER_US
   return (seconds) => costUsd(price, seconds, env.INR_PER_USD);
 }
 
+/** The main sign-in and every extra meetings account, as the service builds them (one account: unchanged). */
 export function storedGoogleApi(env: Env): (db: Db, key: Buffer) => MeetingsGoogleApi {
   return (db, key) => {
     const token = new TokenStore(db, key).load();
     if (!token) throw new CorrectionError('Google is not connected. Run: npm run cli -- google-auth');
-    const client = createOAuthClient(requireKey(env, 'GOOGLE_OAUTH_CLIENT_ID'), requireKey(env, 'GOOGLE_OAUTH_CLIENT_SECRET'));
-    client.setCredentials({ refresh_token: token });
-    return googleMeetingsApi(client);
+    const newClient = () => createOAuthClient(requireKey(env, 'GOOGLE_OAUTH_CLIENT_ID'), requireKey(env, 'GOOGLE_OAUTH_CLIENT_SECRET'));
+    const main = newClient();
+    main.setCredentials({ refresh_token: token });
+    const log = silentLogger();
+    return combineMeetingAccounts(storedMeetingAccounts({ db, key, main, newClient, log }), log).api;
   };
 }
 
@@ -244,7 +248,7 @@ export async function meetingBackfillCommand(opts: { since: string; yes: boolean
     const key = deps.keyProvider.getKey();
     const configs = loadGroupsFile(env.GROUPS_FILE);
     db = openDb(trackerDbPath(env.DATA_DIR));
-    if (!hasMeetingScopes(db)) throw new CorrectionError(NO_SCOPES);
+    if (!meetingsReady(db)) throw new CorrectionError(NO_SCOPES);
     const api = deps.googleApi(db, key);
     const run = () => {
       // The groups file's clients are synced first, so a newly added client matches in the preview as in the real run.
@@ -301,7 +305,7 @@ export async function meetingCheckCommand(deps: MeetingCliDeps): Promise<void> {
   const configs = loadGroupsFile(env.GROUPS_FILE);
   const db = openDb(trackerDbPath(env.DATA_DIR));
   try {
-    if (!hasMeetingScopes(db)) throw new CorrectionError(NO_SCOPES);
+    if (!meetingsReady(db)) throw new CorrectionError(NO_SCOPES);
     const api = deps.googleApi(db, key);
     const now = deps.clock.now();
     const from = new Date(now.getTime() - CHECK_DAYS * 86_400_000);
@@ -315,13 +319,19 @@ export async function meetingCheckCommand(deps: MeetingCliDeps): Promise<void> {
       out(`${unsynced} client${unsynced === 1 ? '' : 's'} in the groups file ${unsynced === 1 ? 'is' : 'are'} not stored yet; their meetings show as unassigned until the service restarts.`);
     }
     out(`Recordings in the last ${CHECK_DAYS} days not stored yet: ${r.found.length}` + (r.skipped > 0 ? ` (${r.skipped} already stored)` : ''));
+    // With several Google accounts, each line names the account that found the recording.
+    const router = api instanceof MultiAccountMeetingsApi ? api : null;
     for (const f of [...r.found].sort((a, b) => a.startedAt.localeCompare(b.startedAt))) {
       const who = f.match === 'client' && f.clientId !== null ? (codes.get(f.clientId) ?? 'client') : f.match;
       const file = f.status === 'no_access' ? 'no access' : 'file opens';
       const length = f.driveSeconds === null ? '' : `  ${Math.round(f.driveSeconds / 60)} min`;
-      out(`  ${istShortDate(new Date(f.startedAt))} ${istTime(new Date(f.startedAt))}  ${who.padEnd(11)}${file}${f.status === 'too_long' ? ' (too long)' : ''}${length}`);
+      const account = router ? `  [${router.accountOf(f.recording.split('/recordings/')[0]!) ?? '?'}]` : '';
+      out(`  ${istShortDate(new Date(f.startedAt))} ${istTime(new Date(f.startedAt))}  ${who.padEnd(11)}${file}${f.status === 'too_long' ? ' (too long)' : ''}${length}${account}`);
     }
     if (r.errors > 0) out(`${r.errors} meeting${r.errors === 1 ? '' : 's'} could not be read from Google this time; try again later.`);
+    for (const label of router?.lostAccounts() ?? []) {
+      out(`Google refused the sign-in of account ${label}. Run: npm run cli -- google-auth${label === MAIN_ACCOUNT ? '' : ` --account ${label}`}`);
+    }
     out('Nothing was downloaded or stored.');
   } finally {
     db.close();

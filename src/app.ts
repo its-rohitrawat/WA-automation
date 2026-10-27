@@ -23,7 +23,7 @@ import { errorCode } from './meetings/sttParts.ts';
 import type { MeetingTranscriber } from './meetings/transcribe.ts';
 import type { ClientConfigLike } from './meetings/watcher.ts';
 import { DrivePublisher, type DriveApi } from './output/drive.ts';
-import { hasMeetingScopes } from './output/googleAuth.ts';
+import { meetingsReady } from './output/googleAuth.ts';
 import { loadTrackerView } from './output/view.ts';
 import { buildWorkbook } from './output/workbook.ts';
 import { ReportScheduler } from './report/scheduler.ts';
@@ -76,6 +76,8 @@ export interface AppMeetingsDeps {
   settings: MeetingSettings;
   /** The configs at start; reloadClients passes later ones on. */
   clients: readonly ClientConfigLike[];
+  /** With several Google accounts: the labels whose sign-in Google refused last time. */
+  lostAccounts?: () => readonly string[];
 }
 
 /** The Phase 2c morning report. Only the spare-number sender can send; the founder-number gateway still cannot. */
@@ -325,7 +327,8 @@ export function createApp(d: AppDeps): App {
         transcriber: mt.transcriber, ffmpeg: mt.ffmpeg, settings: mt.settings, clients: mt.clients, freeBytes: d.freeBytes ?? defaultFreeBytes,
         // The tracker step holds the client's run flag through the reconciler's exclusive (debouncer.runExclusive).
         track: (clientId, meeting) => reconciler.runMeeting(clientId, meeting),
-        hasMeetingScopes: () => hasMeetingScopes(d.db),
+        hasMeetingScopes: () => meetingsReady(d.db),
+        ...(mt.lostAccounts ? { lostAccounts: mt.lostAccounts } : {}),
         // A finished or failed meeting, or new rows: the workbook is rebuilt, with the meeting counts of now (not the
         // last tick's), as refreshMedia does for files.
         onChanged: () => {
