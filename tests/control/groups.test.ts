@@ -49,6 +49,53 @@ describe('GroupDirectory', () => {
     expect(src.calls).toBe(3);
   });
 
+  it('cachedGroups gives the last list without asking WhatsApp (null before the first list), as a copy', async () => {
+    const src = new FakeSource();
+    src.groups = [{ id: gid(1), subject: 'A' }];
+    const dir = new GroupDirectory({ gateway: src, clock: manualClock(T0) });
+    expect(dir.cachedGroups()).toBeNull();
+    expect(src.calls).toBe(0);
+    await dir.list();
+    const cached = dir.cachedGroups()!;
+    expect(cached).toEqual([{ id: gid(1), subject: 'A' }]);
+    cached[0]!.subject = 'changed';
+    expect(dir.cachedGroups()).toEqual([{ id: gid(1), subject: 'A' }]);
+    src.state = 'closed';
+    expect(dir.cachedGroups()).toEqual([{ id: gid(1), subject: 'A' }]);
+    expect(src.calls).toBe(1);
+  });
+
+  it('cachedListing gives the last list with its time and state, never asking WhatsApp', async () => {
+    const src = new FakeSource();
+    src.groups = [{ id: gid(1), subject: 'A' }];
+    const clock = manualClock(T0);
+    const dir = new GroupDirectory({ gateway: src, clock });
+    expect(dir.cachedListing()).toEqual({ groups: [], stale: true, reason: null, fetchedAt: null });
+    src.state = 'closed';
+    expect(dir.cachedListing()).toEqual({ groups: [], stale: true, reason: 'whatsapp_not_connected', fetchedAt: null });
+    src.state = 'open';
+    await dir.list();
+    expect(dir.cachedListing()).toEqual({ groups: [{ id: gid(1), subject: 'A' }], stale: false, reason: null, fetchedAt: T0 });
+    // The last list failed: still stale with its reason.
+    clock.advance(60_000);
+    src.fail = new Error('boom');
+    await dir.list({ refresh: true });
+    expect(dir.cachedListing()).toMatchObject({ stale: true, reason: 'list_failed', fetchedAt: T0 });
+    // WhatsApp closed: stale, whatever the last list said.
+    src.fail = undefined;
+    await dir.list({ refresh: true });
+    src.state = 'closed';
+    expect(dir.cachedListing()).toMatchObject({ stale: true, reason: 'whatsapp_not_connected', fetchedAt: '2026-10-27T08:01:00.000Z' });
+    // Open again after a closed answer: stale until a fresh list, with no reason left to show.
+    await dir.list();
+    src.state = 'open';
+    expect(dir.cachedListing()).toMatchObject({ stale: true, reason: null });
+    const listing = dir.cachedListing();
+    listing.groups[0]!.subject = 'changed';
+    expect(dir.cachedListing().groups[0]!.subject).toBe('A');
+    expect(src.calls).toBe(3);
+  });
+
   it('concurrent calls share one in-flight request', async () => {
     const src = new FakeSource();
     let open!: () => void;

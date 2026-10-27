@@ -42,6 +42,8 @@ export class GroupDirectory {
   readonly #fetchTimeoutMs: number;
   #cache: { groups: LiveGroup[]; at: number } | undefined;
   #inFlight: Promise<GroupListing> | undefined;
+  /** What the last list() answer said, for cachedListing. */
+  #last: { stale: boolean; reason: ListingReason | null } | undefined;
 
   /** fetchTimeoutMs bounds one listGroups call (Baileys itself may wait about 60 s). */
   constructor(o: { gateway: GroupSource; clock: Clock; ttlMs?: number; fetchTimeoutMs?: number }) {
@@ -85,7 +87,28 @@ export class GroupDirectory {
     return this.#fromCache(false, null);
   }
 
+  /** The groups of the last list, as copies, without asking WhatsApp; null before the first list. */
+  cachedGroups(): LiveGroup[] | null {
+    return this.#cache ? this.#cache.groups.map((g) => ({ ...g })) : null;
+  }
+
+  /**
+   * The last list as a listing, without asking WhatsApp. Stale when WhatsApp is not open, before the first list, or when
+   * the last answer was stale; the reason 'list_failed' is kept only while WhatsApp is open.
+   */
+  cachedListing(): GroupListing {
+    if (this.#gateway.status().state !== 'open') return this.#view(true, 'whatsapp_not_connected');
+    const last = this.#last;
+    return this.#view(last?.stale ?? true, last?.reason === 'list_failed' ? 'list_failed' : null);
+  }
+
+  /** The answer list() gives; remembered for cachedListing. */
   #fromCache(stale: boolean, reason: ListingReason | null): GroupListing {
+    this.#last = { stale, reason };
+    return this.#view(stale, reason);
+  }
+
+  #view(stale: boolean, reason: ListingReason | null): GroupListing {
     const c = this.#cache;
     return copy({ groups: c?.groups ?? [], stale, reason, fetchedAt: c ? new Date(c.at).toISOString() : null });
   }
