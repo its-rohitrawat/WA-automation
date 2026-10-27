@@ -13,11 +13,11 @@ import { DpapiKeyProvider, MasterKeyError } from './crypto/keyProvider.ts';
 import { Heartbeat } from './health/heartbeat.ts';
 import { baileysFetcher } from './media/fetch.ts';
 import { MediaRefSealer } from './media/ref.ts';
-import { combineMeetingAccounts, storedMeetingAccounts } from './meetings/multiAccount.ts';
+import type { LiveMeetingsApi } from './meetings/multiAccount.ts';
 import { createMeetingTranscriber } from './meetings/transcribe.ts';
-import { googleDriveApi } from './output/drive.ts';
-import { createOAuthClient, TokenDecryptError, TokenStore } from './output/googleAuth.ts';
-import { meetingsReady, type OAuth2Client } from './output/googleAuth.ts';
+import { TokenDecryptError, TokenStore } from './output/googleAuth.ts';
+import { meetingsReady } from './output/googleAuth.ts';
+import { buildGoogle, founderGateway, googleCredentials, planStartup, WHATSAPP_NOT_LINKED_EXIT } from './setupMode.ts';
 import { openMorningReport } from './report/start.ts';
 import { pricesFromEnv } from './spend/pricing.ts';
 import type { Prices } from './spend/pricing.ts';
@@ -44,17 +44,11 @@ class StartupExit extends Error {}
  * meeting scopes the app keeps meetings paused (google_scopes) and makes no Google meeting call. Logs codes only.
  */
 async function meetingDeps(
-  o: { env: Env; db: Db; key: Buffer; google: OAuth2Client; apiKey: string; prices: Prices; configs: ClientConfig[]; log: Logger },
+  o: { env: Env; db: Db; api: LiveMeetingsApi; apiKey: string; prices: Prices; configs: ClientConfig[]; log: Logger },
 ): Promise<AppMeetingsDeps> {
-  const { env, log } = o;
+  const { env, log, api } = o;
   if (!meetingsReady(o.db)) log.warn({ code: 'google_scopes' }, 'meetings paused: Google sign-in needs meeting access. Run: npm run cli -- google-auth');
-  // The main sign-in plus every extra account (google-auth --account); one account is passed through unchanged.
-  const accounts = storedMeetingAccounts({
-    db: o.db, key: o.key, main: o.google, log,
-    newClient: () => createOAuthClient(requireKey(env, 'GOOGLE_OAUTH_CLIENT_ID'), requireKey(env, 'GOOGLE_OAUTH_CLIENT_SECRET')),
-  });
-  const { api, router } = combineMeetingAccounts(accounts, log);
-  if (router) log.info({ accounts: accounts.map((a) => a.label) }, 'meetings: several Google accounts');
+  // The main sign-in plus every extra account (google-auth --account), from the hub: rebuilt when one is reconnected.
   let exe: string | null = null;
   try {
     exe = await findFfmpeg(env.FFMPEG_PATH);
@@ -66,7 +60,8 @@ async function meetingDeps(
   if (transcriber === null) log.warn({ code: 'stt_none' }, 'meetings wait: speech-to-text is not set up');
   return {
     api,
-    ...(router ? { lostAccounts: () => router.lostAccounts() } : {}),
+    // Empty with one account, so that account's refusal still pauses meetings as before.
+    lostAccounts: () => api.lostAccounts(),
     ai: new ClaudeMeetingClient({ apiKey: o.apiKey, model: env.AI_MODEL, prices: o.prices }),
     transcriber,
     ffmpeg: exe === null ? null : new Ffmpeg(exe),
@@ -125,13 +120,25 @@ async function main(): Promise<void> {
     syncClients(db, configs);
     const allow = new AllowList(configs.map((c) => c.groupId));
 
+    // openSessionDb has already restored a session left by a dashboard link that never finished (D3).
     const auth = useEncryptedAuthState(sessionDb, key);
-    if (!auth.hasSession) exitEarly('WhatsApp is not linked. Stop the service and run: npm run cli -- link');
-    const refreshToken = new TokenStore(db, key).load();
-    if (!refreshToken) exitEarly('Google Drive is not connected. Run: npm run cli -- google-auth');
-
-    const google = createOAuthClient(requireKey(env, 'GOOGLE_OAUTH_CLIENT_ID'), requireKey(env, 'GOOGLE_OAUTH_CLIENT_SECRET'));
-    google.setCredentials({ refresh_token: refreshToken });
+    // Setup mode (src/setupMode.ts, tested): with the dashboard off, a missing link or token stops the service as before,
+    // in the same order (the link is checked before the token is read). With it on, the service starts and the dashboard
+    // links what is missing; an unreadable token waits the same way.
+    if (!env.DASHBOARD_ENABLED && !auth.hasSession) exitEarly(WHATSAPP_NOT_LINKED_EXIT);
+    let googleToken: boolean;
+    try {
+      googleToken = new TokenStore(db, key).load() !== undefined;
+    } catch (e) {
+      if (!(env.DASHBOARD_ENABLED && e instanceof TokenDecryptError)) throw e;
+      googleToken = false;
+    }
+    const plan = planStartup({ dashboardEnabled: env.DASHBOARD_ENABLED, whatsappLinked: auth.hasSession, googleToken });
+    if ('exit' in plan) exitEarly(plan.exit);
+    if (plan.whatsapp === 'not_linked') log.warn('setup mode: WhatsApp is not linked; link the founder\'s phone in the dashboard');
+    if (plan.google === 'not_connected') log.warn('setup mode: Google is not connected; connect it in the dashboard');
+    // One Google client per account, swapped in place on a reconnect: Drive and meetings read theirs on every call.
+    const google = buildGoogle({ db, key, credentials: googleCredentials(env), meetingsEnabled: env.MEETINGS_ENABLED, log });
 
     // Phase 2c: the morning report from the spare number. A missing, damaged or undecryptable spare-number session never
     // stops the service: the founder-number reader runs as usual, each day's report fails until the deadline and is then
@@ -150,12 +157,16 @@ async function main(): Promise<void> {
 
     const prices = pricesFromEnv(env);
     const apiKey = requireKey(env, 'ANTHROPIC_API_KEY');
-    const gateway = new WhatsAppGateway({ allow, factory: baileysSocketFactory(silentLogger()), auth: auth.state, saveCreds: auth.saveCreds });
+    // The founder's gateway inside its holder, so a relink from the dashboard replaces it in place. None in setup mode.
+    const gateway = founderGateway({
+      linked: plan.whatsapp === 'linked',
+      build: () => new WhatsAppGateway({ allow, factory: baileysSocketFactory(silentLogger()), auth: auth.state, saveCreds: auth.saveCreds }),
+    });
     // One start time for every wait that counts from the service start: the reconciler's wait for a file, the
     // processor's 24 hours of waits for Claude, and Health's long-wait count (amendments 10f, 12a, 15a, 15f).
     const startedAt = systemClock.now();
     // Phase 3: off (the default) means no meeting dependency is built and no meeting call of any kind is made.
-    const meetings = env.MEETINGS_ENABLED ? await meetingDeps({ env, db, key, google, apiKey, prices, configs, log }) : undefined;
+    const meetings = env.MEETINGS_ENABLED ? await meetingDeps({ env, db, api: google.meetings!, apiKey, prices, configs, log }) : undefined;
     // Phase 2b: the voice transcriber VOICE_STT_PROVIDER names (src/voiceDeps.ts, tested). A local engine that is not set
     // up, or no ffmpeg, never stops the service: voice notes are then kept, not transcribed, and Health says why.
     const voiceDeps = await buildVoiceDeps(env, { findFfmpeg, log });
@@ -166,7 +177,7 @@ async function main(): Promise<void> {
       gateway,
       allow,
       ai: new ClaudeClient({ apiKey, model: env.AI_MODEL, effort: env.AI_EFFORT, prices }),
-      drive: googleDriveApi(google),
+      drive: google.drive,
       prices,
       spendCapUsd: env.DAILY_SPEND_CAP_USD,
       quietMs: env.QUIET_MINUTES * 60_000,
@@ -192,6 +203,13 @@ async function main(): Promise<void> {
         log.error({ problem: err instanceof Error ? err.message : String(err) }, 'allowed-groups.json change rejected; keeping the previous allow-list'),
     );
 
+    // Only with the dashboard on: its line points there. Off, a Google problem shows when publishing fails, as before.
+    if (env.DASHBOARD_ENABLED) app.health.setGoogleConnected(google.connected());
+    google.hub.onChange((label) => {
+      if (env.DASHBOARD_ENABLED) app.health.setGoogleConnected(google.connected());
+      // A reconnected main account uploads now, not after the failure backoff (up to 15 minutes).
+      if (label === 'main') void app.publisher.publishNow().catch((err: unknown) => log.error({ err }, 'upload after the Google reconnect failed'));
+    });
     app.start();
     log.info({ groups: configs.length }, 'WA Agent started');
     // Optional uptime heartbeat: visits HEARTBEAT_URL (never logged) every 5 minutes while the agent is up.

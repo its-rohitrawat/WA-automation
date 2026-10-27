@@ -7,6 +7,16 @@ export const HEARTBEAT_INTERVAL_MS = 5 * 60_000;
 /** One visit may take at most this long. */
 export const HEARTBEAT_TIMEOUT_MS = 10_000;
 
+/**
+ * What beatNow() found. reason is a short code: 'refused' (the monitor answered with a non-2xx status), 'timeout',
+ * 'unreachable', 'not_up' (no visit: the agent is not up) or 'stopped'.
+ */
+export interface BeatNowResult {
+  ok: boolean;
+  status?: number;
+  reason?: string;
+}
+
 export interface HeartbeatOptions {
   /** HEARTBEAT_URL. Secret: it is never logged. */
   url: string;
@@ -29,6 +39,8 @@ export class Heartbeat {
   #first: NodeJS.Timeout | undefined;
   #every: NodeJS.Timeout | undefined;
   #inFlight: AbortController | undefined;
+  /** beatNow() visits in flight; kept apart from #inFlight so a test visit never makes a scheduled one skip. */
+  readonly #testVisits = new Set<AbortController>();
   #stopped = false;
   #pausedLogged = false;
   #lastBeatAt: Date | null = null;
@@ -53,7 +65,7 @@ export class Heartbeat {
     return this.#lastBeatAt;
   }
 
-  /** Stops the timers and aborts a visit still running. Leaves no timers. */
+  /** Stops the timers and aborts a visit still running (a test visit too). Leaves no timers. */
   async stop(): Promise<void> {
     this.#stopped = true;
     clearTimeout(this.#first);
@@ -61,6 +73,48 @@ export class Heartbeat {
     this.#first = undefined;
     this.#every = undefined;
     this.#inFlight?.abort();
+    for (const c of this.#testVisits) c.abort();
+  }
+
+  /**
+   * One visit now, for the dashboard's "Send test beat": outside the 5-minute schedule, which it leaves as it was.
+   * Like a scheduled visit it only goes while the agent is up (reason 'not_up'), so a test never tells the monitor a
+   * down agent is alive. Never throws; never logs or returns the link or an error message.
+   */
+  async beatNow(): Promise<BeatNowResult> {
+    if (this.#stopped) return { ok: false, reason: 'stopped' };
+    let up: boolean;
+    try {
+      up = this.#o.isUp();
+    } catch {
+      up = false;
+    }
+    if (!up) return { ok: false, reason: 'not_up' };
+    const ctrl = new AbortController();
+    this.#testVisits.add(ctrl);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      ctrl.abort();
+    }, HEARTBEAT_TIMEOUT_MS);
+    try {
+      const res = await this.#fetch(this.#o.url, { method: 'GET', signal: ctrl.signal });
+      if (res.ok) {
+        this.#lastBeatAt = (this.#o.now ?? (() => new Date()))(); // the monitor got a visit: it counts as the last beat
+        this.#o.log.info({ status: res.status }, 'test uptime heartbeat sent');
+        return { ok: true, status: res.status };
+      }
+      this.#o.log.warn({ status: res.status }, 'test uptime heartbeat was refused');
+      return { ok: false, status: res.status, reason: 'refused' };
+    } catch (err) {
+      const reason = timedOut ? 'timeout' : this.#stopped ? 'stopped' : 'unreachable';
+      // As in #beat: only the error's type, never its message or the link.
+      this.#o.log.warn({ problem: err instanceof Error ? err.name : 'unknown', reason }, 'test uptime heartbeat failed');
+      return { ok: false, reason };
+    } finally {
+      clearTimeout(timer);
+      this.#testVisits.delete(ctrl);
+    }
   }
 
   async #beat(): Promise<void> {

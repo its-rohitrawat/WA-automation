@@ -109,6 +109,7 @@ function openSocket(
   timeoutMs: number,
   onQr?: (qr: string) => void,
   onSocket?: (sock: SenderSocketLike) => void,
+  signal?: AbortSignal,
 ): Promise<Opened> {
   const sock = factory(auth.state);
   onSocket?.(sock);
@@ -119,13 +120,18 @@ function openSocket(
   return new Promise<Opened>((resolve) => {
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
+    const onAbort = () => finish({ code: 'closed', statusCode: null });
     const finish = (r: Opened) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       if ('code' in r) void endQuietly(sock);
       resolve(r);
     };
+    // A stop through the signal (the dashboard's cancel) closes the socket and gives 'closed'.
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
     // The timer starts after the listener is added: a listener that throws rejects this promise and leaves no timer.
     sock.ev.on('connection.update', (u) => {
       if (u.qr) {
@@ -155,11 +161,26 @@ export async function linkSender(o: {
   timeoutMs: number;
   /** How long the linked socket stays open so Baileys can finish its first key uploads. Default 5 s. */
   settleMs?: number;
+  /** The dashboard's cancel: closes the socket and gives { ok: false, code: 'closed' }. The CLI passes none. */
+  signal?: AbortSignal;
+  /** Called when WhatsApp asks for its restart after a QR code was shown: the phone has scanned it. */
+  onScanned?: () => void;
 }): Promise<LinkResult> {
+  let qrSeen = false;
+  const onQr = (qr: string) => {
+    qrSeen = true;
+    o.onQr(qr);
+  };
   for (let i = 0; i < 3; i++) {
-    const r = await openSocket(o.factory, o.auth, o.timeoutMs, o.onQr);
+    if (o.signal?.aborted) return { ok: false, code: 'closed' };
+    const r = await openSocket(o.factory, o.auth, o.timeoutMs, onQr, undefined, o.signal);
+    if ('code' in r && r.code === 'restart_required' && qrSeen) o.onScanned?.();
     if ('sock' in r) {
-      await delay(o.settleMs ?? 5_000);
+      await abortableDelay(o.settleMs ?? 5_000, o.signal);
+      if (o.signal?.aborted) {
+        await endQuietly(r.sock);
+        return { ok: false, code: 'closed' };
+      }
       await o.auth.saveCreds();
       await endQuietly(r.sock);
       return { ok: true };
@@ -167,6 +188,21 @@ export async function linkSender(o: {
     if (r.code !== 'restart_required') return { ok: false, code: r.code };
   }
   return { ok: false, code: 'closed' };
+}
+
+/** Like delay, but ends early when the signal aborts. */
+function abortableDelay(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (!signal) return delay(ms);
+  return new Promise<void>((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+    if (signal.aborted) done();
+  });
 }
 
 class SendTimeoutError extends Error {

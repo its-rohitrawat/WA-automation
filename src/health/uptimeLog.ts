@@ -15,6 +15,7 @@ const DAY_MS = 86_400_000;
 /** Why the agent went down, as stored in uptime_log.reason. Checked here, not in the table: a new code needs no rebuild. */
 export const DOWN_REASONS = {
   stopped: 'The service was stopped',
+  not_set_up: 'WhatsApp or Google was not linked yet (setup mode)',
   whatsapp_logged_out: "WhatsApp was unlinked from the founder's phone",
   whatsapp_replaced: 'Another copy of the agent took over WhatsApp',
   whatsapp_forbidden: "WhatsApp refused the founder's number",

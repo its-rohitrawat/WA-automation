@@ -901,3 +901,38 @@ describe('report days (REPORT_DAYS)', () => {
     });
   });
 });
+
+describe('replaceSender', () => {
+  it('the next tick sends with the new sender; the old one is stopped', async () => {
+    const { s, at, sender } = setup();
+    const next = new FakeReportSender();
+    next.recipientMasked = '…9999';
+    s.replaceSender(next);
+    expect(sender.stopped).toBe(1);
+    await at('06:00');
+    expect(sender.calls).toHaveLength(0);
+    expect(next.calls).toHaveLength(1);
+    expect(s.health(new Date(IST('06:01'))).recipientMasked).toBe('…9999');
+  });
+
+  it('a send in flight finishes with its own sender, which is not stopped under it', async () => {
+    const { s, clock, sender } = setup();
+    const g = gate();
+    sender.gate = g.promise;
+    clock.set(IST('06:00'));
+    const tick = s.tick(clock.now());
+    await vi.waitFor(() => expect(sender.calls).toHaveLength(1), { interval: 5 });
+    const next = new FakeReportSender();
+    s.replaceSender(next);
+    expect(sender.stopped).toBe(0);
+    g.release();
+    await tick;
+    expect(next.calls).toHaveLength(0);
+  });
+
+  it('replacing with the same sender changes nothing', () => {
+    const { s, sender } = setup();
+    s.replaceSender(sender);
+    expect(sender.stopped).toBe(0);
+  });
+});

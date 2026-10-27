@@ -41,7 +41,7 @@ import type { Clock } from './util/clock.ts';
 import type { Logger } from './util/logger.ts';
 import { istDate } from './util/time.ts';
 import type { AllowList } from './wa/allowlist.ts';
-import type { WhatsAppGateway } from './wa/gateway.ts';
+import type { GatewayLike } from './wa/gateway.ts';
 import { Ingestor } from './wa/ingest.ts';
 
 export interface AppMediaDeps {
@@ -91,7 +91,8 @@ export interface AppDeps {
   db: Db;
   clock: Clock;
   log: Logger;
-  gateway: WhatsAppGateway;
+  /** The founder's gateway: the SwitchableGateway around WhatsAppGateway in the service (D3). */
+  gateway: GatewayLike;
   allow: AllowList;
   ai: AiClient;
   drive: DriveApi;

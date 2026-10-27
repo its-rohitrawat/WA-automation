@@ -16,11 +16,18 @@ import { createSite } from './site.ts';
 /** The front-end files (`index.html`, scripts, styles), served under `/dashboard/static/`. */
 export const PUBLIC_DIR = fileURLToPath(new URL('./public/', import.meta.url));
 
+const nodeModule = (path: string) => fileURLToPath(new URL(`../../node_modules/${path}`, import.meta.url));
+
 /**
  * The fixed allowlist of third-party files served under `/dashboard/vendor/<name>`: published name to absolute file
- * path. Nothing else under `node_modules` is reachable. Filled in with the front end (task 7).
+ * path. Nothing else under `node_modules` is reachable. Versions are pinned exactly in package.json.
+ * three.js imports './three.core.js', which resolves to the second Three.js entry here.
  */
-export const VENDOR_FILES: Readonly<Record<string, string>> = Object.freeze({});
+export const VENDOR_FILES: Readonly<Record<string, string>> = Object.freeze({
+  'gsap.js': nodeModule('gsap/dist/gsap.min.js'),
+  'three.js': nodeModule('three/build/three.module.js'),
+  'three.core.js': nodeModule('three/build/three.core.js'),
+});
 
 /** The only file types served. Anything else is a 404. */
 export const MIME: Readonly<Record<string, string>> = Object.freeze({

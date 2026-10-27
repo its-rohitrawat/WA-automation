@@ -627,3 +627,43 @@ describe('linkSender', () => {
     expect(await linkSender({ factory, auth: senderAuth(false), onQr: () => {}, timeoutMs: 1_000, settleMs: 0 })).toEqual({ ok: false, code: 'logged_out' });
   });
 });
+
+describe('linkSender with a signal (the dashboard)', () => {
+  it('an abort closes the socket and gives closed; no settle wait, no save', async () => {
+    const { factory, sockets } = scriptedFactory([(s) => s.emit('connection.update', { qr: 'QR-1' })]);
+    const auth = senderAuth(false);
+    const saveCreds = vi.fn(auth.saveCreds);
+    const stop = new AbortController();
+    const p = linkSender({ factory, auth: { ...auth, saveCreds }, onQr: () => {}, timeoutMs: 60_000, settleMs: 60_000, signal: stop.signal });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1), { interval: 5 });
+    stop.abort();
+    expect(await p).toEqual({ ok: false, code: 'closed' });
+    expect(sockets[0]!.end).toHaveBeenCalled();
+    expect(saveCreds).not.toHaveBeenCalled();
+  });
+
+  it('an abort during the settle time ends the open socket without saving', async () => {
+    const { factory, sockets } = scriptedFactory([open]);
+    const auth = senderAuth(false);
+    const saveCreds = vi.fn(auth.saveCreds);
+    const stop = new AbortController();
+    const p = linkSender({ factory, auth: { ...auth, saveCreds }, onQr: () => {}, timeoutMs: 1_000, settleMs: 60_000, signal: stop.signal });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1), { interval: 5 });
+    await new Promise((r) => setTimeout(r, 10));
+    stop.abort();
+    expect(await p).toEqual({ ok: false, code: 'closed' });
+    expect(saveCreds).not.toHaveBeenCalled();
+    expect(sockets[0]!.end).toHaveBeenCalled();
+  });
+
+  it('onScanned fires when WhatsApp asks for its restart after a QR code, not for a restart with no QR', async () => {
+    let scanned = 0;
+    const withQr = scriptedFactory([(s) => { s.emit('connection.update', { qr: 'QR-1' }); closeWith(s, 515); }, open]);
+    await linkSender({ factory: withQr.factory, auth: senderAuth(false), onQr: () => {}, onScanned: () => scanned++, timeoutMs: 1_000, settleMs: 0 });
+    expect(scanned).toBe(1);
+    scanned = 0;
+    const noQr = scriptedFactory([(s) => closeWith(s, 515), open]);
+    await linkSender({ factory: noQr.factory, auth: senderAuth(false), onQr: () => {}, onScanned: () => scanned++, timeoutMs: 1_000, settleMs: 0 });
+    expect(scanned).toBe(0);
+  });
+});

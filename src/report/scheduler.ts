@@ -165,9 +165,35 @@ export class ReportScheduler {
   #stopped = false;
   /** Set once recover() has succeeded. No send starts before it: a row left 'sending' must become unknown first. */
   #recovered = false;
+  /** The spare-number sender; replaced in place when the spare phone is linked from the dashboard. */
+  #sender: ReportSender;
 
   constructor(o: ReportSchedulerOptions) {
     this.#o = o;
+    this.#sender = o.sender;
+  }
+
+  /**
+   * A newly linked spare phone's sender (D3), used from the next tick. A send already in flight finishes with the sender
+   * it started with. The old sender is stopped unless a send is using it (it then disconnects by itself afterwards).
+   */
+  /** The current sender's masked recipient ("…5678"). */
+  maskedRecipient(): string {
+    return this.#sender.maskedRecipient();
+  }
+
+  /** Resolves once no send is in flight (at once when none is). */
+  async whenIdle(): Promise<void> {
+    while (this.#inFlight) await this.#inFlight.catch(() => undefined);
+  }
+
+  replaceSender(next: ReportSender): void {
+    const old = this.#sender;
+    if (old === next) return;
+    this.#sender = next;
+    if (!this.#inFlight) {
+      void old.stop().catch((err: unknown) => this.#o.log.error({ err }, 'stopping the replaced report sender failed'));
+    }
   }
 
   /** At service start: a row still 'sending' was cut off by a crash or a stop mid-send, so its outcome is unknown. */
@@ -207,7 +233,7 @@ export class ReportScheduler {
 
   /** Today's line for Health. Never throws: a settings getter that fails gives a plain line. */
   health(now: Date = this.#o.clock.now()): ReportHealth {
-    const recipientMasked = this.#o.sender.maskedRecipient();
+    const recipientMasked = this.#sender.maskedRecipient();
     let settings: ReportSettings;
     try {
       settings = this.#settings();
@@ -216,7 +242,7 @@ export class ReportScheduler {
       return { text: 'Morning report: settings could not be read', warning: null, recipientMasked };
     }
     if (!settings.enabled) return { text: 'Morning report: off', warning: null, recipientMasked };
-    return { ...describeReport(reportFor(this.#o.db, istDate(now)), now, settings, this.#o.sender.status().state), recipientMasked };
+    return { ...describeReport(reportFor(this.#o.db, istDate(now)), now, settings, this.#sender.status().state), recipientMasked };
   }
 
   /**
@@ -236,7 +262,7 @@ export class ReportScheduler {
     let stopTimer: NodeJS.Timeout | undefined;
     try {
       await Promise.race([
-        this.#o.sender.stop(),
+        this.#sender.stop(),
         new Promise<void>((resolve) => {
           stopTimer = setTimeout(resolve, Math.min(3_000, waitMs));
         }),
@@ -320,7 +346,8 @@ export class ReportScheduler {
   }
 
   async #send(date: string, now: Date): Promise<void> {
-    const { db, log, sender } = this.#o;
+    const { db, log } = this.#o;
+    const sender = this.#sender;
     let payload: ReportPayload;
     try {
       payload = await (this.#o.build ?? ((n: Date) => this.#build(n)))(now);

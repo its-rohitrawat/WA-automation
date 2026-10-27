@@ -85,12 +85,31 @@ export function meetingsReady(db: Db): boolean {
   return hasMeetingScopes(db) || meetingAccounts(db).some((a) => hasMeetingScopes(db, a));
 }
 
-/** Stores an extra account's sign-in: its token, its scopes and its place in the list, all or nothing. */
-export function saveMeetingAccount(db: Db, key: Buffer, label: string, refreshToken: string, scope: string): void {
+/**
+ * Which OAuth client issued an account's refresh token (D3): 'desktop' (google-auth on the Mac) or 'web' (the
+ * dashboard). Kept in kv google_client:<label> ('main' for the main sign-in); missing means desktop.
+ */
+export type TokenIssuer = 'desktop' | 'web';
+
+export function tokenIssuerKey(label: string): string {
+  return `google_client:${label === MAIN_ACCOUNT ? MAIN_ACCOUNT : checkAccountLabel(label)}`;
+}
+
+export function saveTokenIssuer(db: Db, label: string, issuer: TokenIssuer): void {
+  setKv(db, tokenIssuerKey(label), issuer);
+}
+
+/**
+ * Stores an extra account's sign-in: its token, its scopes, its place in the list and the client that issued it, all
+ * or nothing. The issuer defaults to desktop (google-auth); a stale 'web' from an earlier dashboard reconnect would
+ * pair this token with the wrong client.
+ */
+export function saveMeetingAccount(db: Db, key: Buffer, label: string, refreshToken: string, scope: string, issuer: TokenIssuer = 'desktop'): void {
   checkAccountLabel(label);
   tx(db, () => {
     new TokenStore(db, key, label).save(refreshToken);
     saveGrantedScopes(db, scope, label);
+    saveTokenIssuer(db, label, issuer);
     const labels = meetingAccounts(db);
     if (!labels.includes(label)) setMeetingAccounts(db, [...labels, label]);
   });
@@ -104,6 +123,7 @@ export function removeMeetingAccount(db: Db, label: string): boolean {
   tx(db, () => {
     deleteKv(db, tokenKey(label));
     deleteKv(db, scopesKey(label));
+    deleteKv(db, tokenIssuerKey(label));
     setMeetingAccounts(db, labels.filter((l) => l !== label));
   });
   return true;

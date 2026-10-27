@@ -42,13 +42,29 @@ export function baileysSocketFactory(logger: BaileysLogger): SocketFactory {
     });
 }
 
-export type GatewayState = 'stopped' | 'connecting' | 'open' | 'closed' | 'logged_out' | 'replaced' | 'forbidden';
+/**
+ * 'not_linked' and 'linking' come only from SwitchableGateway: no founder link yet (setup mode), or a relink from the
+ * dashboard in progress. WhatsAppGateway itself never reports them.
+ */
+export type GatewayState = 'stopped' | 'connecting' | 'open' | 'closed' | 'logged_out' | 'replaced' | 'forbidden' | 'not_linked' | 'linking';
 
 export interface GatewayStatus {
   state: GatewayState;
   since: string;
   lastErrorCode: number | null;
   credsSaveFailures: number;
+}
+
+/** What the app and the dashboard use of a founder gateway: WhatsAppGateway, or the SwitchableGateway holding one. */
+export interface GatewayLike {
+  onEvent(fn: (e: NormalizedEvent) => void): void;
+  onStatus(fn: (s: GatewayStatus) => void): void;
+  status(): GatewayStatus;
+  start(): void;
+  stop(): Promise<void>;
+  listGroups(): Promise<{ id: string; subject: string }[]>;
+  failedCount(): number;
+  droppedCount(): number;
 }
 
 export type Scheduler = (fn: () => void, ms: number) => { cancel(): void };
@@ -71,7 +87,7 @@ export interface GatewayOptions {
   onQr?: (qr: string) => void;
 }
 
-export class WhatsAppGateway {
+export class WhatsAppGateway implements GatewayLike {
   readonly #opts: GatewayOptions;
   readonly #emitter = new EventEmitter();
   /** Baileys only reads cachedGroupMetadata on the send path, which this passive client never uses. Kept for completeness. */

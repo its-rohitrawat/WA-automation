@@ -1,4 +1,3 @@
-import { existsSync, renameSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import type { Command } from 'commander';
 import qrcode from 'qrcode-terminal';
@@ -10,8 +9,8 @@ import { MediaRefSealer } from '../media/ref.ts';
 import { readHealthSnapshot } from '../health/health.ts';
 import { MAX_FORGET_ATTEMPTS } from '../meetings/sttForget.ts';
 import {
-  checkAccountLabel, MEETING_SCOPES, meetingAccounts, removeMeetingAccount, requestedScopes, runLoopbackConsent, saveGrantedScopes,
-  saveMeetingAccount, scopeName, TokenStore, type ConsentClient,
+  checkAccountLabel, MAIN_ACCOUNT, MEETING_SCOPES, meetingAccounts, removeMeetingAccount, requestedScopes, runLoopbackConsent, saveGrantedScopes,
+  saveMeetingAccount, saveTokenIssuer, scopeName, TokenStore, type ConsentClient,
 } from '../output/googleAuth.ts';
 import { describeReport, isStaleSending, reasonText } from '../report/scheduler.ts';
 import { latestBatches } from '../store/batches.ts';
@@ -23,6 +22,7 @@ import { sttForgetsGivenUp } from '../store/meetings.ts';
 import { unprocessedCounts } from '../store/messages.ts';
 import { recentReports, REPORT_REQUEST_KEY, reportFor, reportRequest, type ReportRow } from '../store/reports.ts';
 import { acquireLock } from '../util/lock.ts';
+import { moveDamagedSession } from '../wa/sessionFiles.ts';
 import { silentLogger } from '../util/logger.ts';
 import { istDate, istShortDate, istTime } from '../util/time.ts';
 import { AllowList } from '../wa/allowlist.ts';
@@ -337,6 +337,8 @@ export async function googleAuthCommand(deps: CliDeps): Promise<void> {
     tx(db, () => {
       tokens.save(refreshToken);
       saveGrantedScopes(db, scope);
+      // Issued by the desktop client: a 'web' left from an earlier dashboard reconnect would pair it with the wrong client.
+      saveTokenIssuer(db, MAIN_ACCOUNT, 'desktop');
     });
     out(`${env.MEETINGS_ENABLED ? 'Google Drive, Meet and Calendar' : 'Google Drive'} connected. If the WA Agent service is running, restart it so it uses the new sign-in: net stop wa-agent, then net start wa-agent`);
   } finally {
@@ -355,27 +357,6 @@ const SENDER_ADVICE: Record<OpenFailure, string> = {
 };
 
 const SENDER_DAMAGED = "The spare number's session file (data/sender-session.db) is damaged. Run: npm run cli -- link-sender --reset";
-
-/** "20261026T061500": the IST date and time, safe in a Windows file name. IST is a whole number of minutes ahead of UTC. */
-function fileStamp(d: Date): string {
-  return `${istDate(d).replace(/-/g, '')}T${istTime(d).replace(':', '')}${String(d.getUTCSeconds()).padStart(2, '0')}`;
-}
-
-/**
- * Renames a damaged session file and its -wal and -shm files to `<name>.damaged-<stamp>`. Nothing is deleted, and an
- * earlier damaged copy is never overwritten (a -2, -3 ... suffix is added instead). The -wal and -shm files go first, so
- * a fresh file is never opened next to a stale write-ahead log. Returns the new name of the main file.
- */
-function moveDamagedSession(file: string, now: Date): string {
-  const parts = ['-wal', '-shm', ''];
-  const stamp = fileStamp(now);
-  for (let n = 1; ; n++) {
-    const suffix = `.damaged-${stamp}${n === 1 ? '' : `-${n}`}`;
-    if (parts.some((p) => existsSync(`${file}${p}${suffix}`))) continue;
-    for (const p of parts) if (existsSync(`${file}${p}`)) renameSync(`${file}${p}`, `${file}${p}${suffix}`);
-    return `sender-session.db${suffix}`;
-  }
-}
 
 /** Asks for the typed yes. Returns false, after saying nothing was changed, on no or Ctrl+C. */
 async function confirmChange(deps: CliDeps, question: string): Promise<boolean> {
