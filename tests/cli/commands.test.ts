@@ -11,7 +11,7 @@ import { MAX_FORGET_ATTEMPTS } from '../../src/meetings/sttForget.ts';
 import { DRIVE_SCOPES, hasMeetingScopes, MEETING_SCOPES, TokenStore, type ConsentClient } from '../../src/output/googleAuth.ts';
 import { syncClients } from '../../src/store/clients.ts';
 import { openDb } from '../../src/store/db.ts';
-import { getKv } from '../../src/store/kv.ts';
+import { getKv, setKv } from '../../src/store/kv.ts';
 import { insertMedia, mediaSttForgetsGivenUp, messageRowId } from '../../src/store/media.ts';
 import { insertFound, sttForgetsGivenUp } from '../../src/store/meetings.ts';
 import { insertMessage } from '../../src/store/messages.ts';
@@ -485,6 +485,16 @@ describe('google-auth', () => {
     db.close();
     expect(out()).not.toContain(REFRESH_TOKEN);
     expect(out()).toContain('Google Drive connected. If the WA Agent service is running, restart it so it uses the new sign-in: net stop wa-agent, then net start wa-agent');
+  });
+
+  it('records the desktop client as the issuer of the main token, replacing one left by a dashboard reconnect', async () => {
+    const pre = openDb(trackerDbPath(dataDir));
+    setKv(pre, 'google_client:main', 'web');
+    pre.close();
+    const p = googleAuthCommand(deps({ createConsentClient: consentClient() }));
+    await visit();
+    await p;
+    expect(kv('google_client:main')).toBe('desktop');
   });
 
   it('with meetings off asks for Drive only, says so before the link, and records the granted scope', async () => {
