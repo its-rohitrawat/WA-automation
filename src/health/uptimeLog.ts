@@ -5,14 +5,48 @@ import { fromIstDate, istDate } from '../util/time.ts';
 // The agent's own up/down history (D5 Task 3, spec 4.8), for the vitals strip when UptimeRobot's read-only API is not
 // set. One uptime_log row at every service start, one each time Health.isUp() changes, and a down row at a clean stop,
 // so the time the service was stopped counts as down. After a crash the last state stands until the next start: the
-// heartbeat monitor sees that gap, this log cannot. The table keeps no reason, so outages here have none.
+// heartbeat monitor sees that gap, this log cannot. A down row keeps why, when the agent knows (migration v10): a fixed
+// code, never free text; rows written before v10 have none.
 
 const DAY_MS = 86_400_000;
 
-/** A down stretch, in epoch ms; end null while it is still going. */
+/** Why the agent went down, as stored in uptime_log.reason. */
+export const DOWN_REASONS = {
+  stopped: 'The service was stopped',
+  whatsapp_logged_out: "WhatsApp was unlinked from the founder's phone",
+  whatsapp_replaced: 'Another copy of the agent took over WhatsApp',
+  whatsapp_forbidden: "WhatsApp refused the founder's number",
+  whatsapp_disconnected: 'WhatsApp was disconnected',
+  google_signin: 'The Google sign-in expired',
+  tracker_failing: 'Tracker updates kept failing',
+} as const;
+export type DownReason = keyof typeof DOWN_REASONS;
+
+const isReason = (v: unknown): v is DownReason => typeof v === 'string' && Object.hasOwn(DOWN_REASONS, v);
+
+/**
+ * Why Health.isUp() is false, from its snapshot, in the order isUp() checks; null when up or the cause is not one of
+ * these. Reads only the WhatsApp state and the publish-failure fields, never the line's text beyond telling a Google
+ * sign-in failure from other tracker failures.
+ */
+export function downReason(
+  up: boolean,
+  s: { whatsapp: { state: string }; downSince: string | null; publishFailingSince: string | null; line: { text: string } },
+): DownReason | null {
+  if (up) return null;
+  if (s.whatsapp.state === 'logged_out') return 'whatsapp_logged_out';
+  if (s.whatsapp.state === 'replaced') return 'whatsapp_replaced';
+  if (s.whatsapp.state === 'forbidden') return 'whatsapp_forbidden';
+  if (s.downSince !== null) return 'whatsapp_disconnected';
+  if (s.publishFailingSince !== null) return s.line.text.includes('Google sign-in') ? 'google_signin' : 'tracker_failing';
+  return null;
+}
+
+/** A down stretch, in epoch ms; end null while it is still going. reason: the first down row's, when it has one. */
 export interface Interval {
   start: number;
   end: number | null;
+  reason?: DownReason | null;
 }
 
 export interface DayDown {
@@ -37,17 +71,17 @@ export interface UptimeRatios {
 }
 
 /** Down stretches from up/down rows in time order: from a down row to the next up row; repeated rows merge. */
-export function downIntervals(rows: readonly { at: number; up: boolean }[]): Interval[] {
+export function downIntervals(rows: readonly { at: number; up: boolean; reason?: DownReason | null }[]): Interval[] {
   const out: Interval[] = [];
-  let downSince: number | null = null;
+  let down: { since: number; reason: DownReason | null } | null = null;
   for (const r of rows) {
-    if (!r.up && downSince === null) downSince = r.at;
-    if (r.up && downSince !== null) {
-      out.push({ start: downSince, end: r.at });
-      downSince = null;
+    if (!r.up && down === null) down = { since: r.at, reason: r.reason ?? null };
+    if (r.up && down !== null) {
+      out.push({ start: down.since, end: r.at, reason: down.reason });
+      down = null;
     }
   }
-  if (downSince !== null) out.push({ start: downSince, end: null });
+  if (down !== null) out.push({ start: down.since, end: null, reason: down.reason });
   return out;
 }
 
@@ -101,24 +135,26 @@ export class UptimeLog {
     this.#last = r === undefined ? undefined : r.up === 1;
   }
 
-  #write(up: boolean): void {
-    this.#db.prepare('INSERT INTO uptime_log (at, up) VALUES (?, ?)').run(this.#clock.now().toISOString(), up ? 1 : 0);
+  /** An up row never keeps a reason; a down row keeps one only when it is a known code. */
+  #write(up: boolean, reason: DownReason | null): void {
+    const r = !up && isReason(reason) ? reason : null;
+    this.#db.prepare('INSERT INTO uptime_log (at, up, reason) VALUES (?, ?, ?)').run(this.#clock.now().toISOString(), up ? 1 : 0, r);
     this.#last = up;
   }
 
   /** At service start: always one row, so the time since a stop row ends the outage it began. */
-  start(up: boolean): void {
-    this.#write(up);
+  start(up: boolean, reason: DownReason | null = null): void {
+    this.#write(up, reason);
   }
 
-  /** From the app tick: a row only when up changed. */
-  tick(up: boolean): void {
-    if (up !== this.#last) this.#write(up);
+  /** From the app tick: a row only when up changed. reason: downReason(up, snapshot). */
+  tick(up: boolean, reason: DownReason | null = null): void {
+    if (up !== this.#last) this.#write(up, reason);
   }
 
   /** At a clean stop: the stopped time counts as down. */
   stop(): void {
-    if (this.#last !== false) this.#write(false);
+    if (this.#last !== false) this.#write(false, 'stopped');
   }
 
   /**
@@ -151,19 +187,19 @@ export class UptimeLog {
     const from = new Date(now - days * DAY_MS).toISOString();
     // The last row before the window says whether the window starts inside an outage. If it does, the outage began at the
     // first down row after the last up row (a down tick, then a stop row, then a start(false) row are one outage).
-    const last = this.#db.prepare('SELECT at, up FROM uptime_log WHERE at < ? ORDER BY at DESC, id DESC LIMIT 1').get(from) as
-      { at: string; up: number } | undefined;
-    let before: { at: string; up: number }[] = last ? [last] : [];
+    type Row = { at: string; up: number; reason: string | null };
+    const last = this.#db.prepare('SELECT at, up, reason FROM uptime_log WHERE at < ? ORDER BY at DESC, id DESC LIMIT 1').get(from) as Row | undefined;
+    let before: Row[] = last ? [last] : [];
     if (last?.up === 0) {
       const began = this.#db
-        .prepare(`SELECT MIN(at) AS at FROM uptime_log WHERE at < @from AND up = 0
-          AND at > COALESCE((SELECT MAX(at) FROM uptime_log WHERE at < @from AND up = 1), '')`)
-        .get({ from }) as { at: string };
-      before = [{ at: began.at, up: 0 }];
+        .prepare(`SELECT at, up, reason FROM uptime_log WHERE at < @from AND up = 0
+          AND at > COALESCE((SELECT MAX(at) FROM uptime_log WHERE at < @from AND up = 1), '') ORDER BY at, id LIMIT 1`)
+        .get({ from }) as Row;
+      before = [began];
     }
-    const inside = this.#db.prepare('SELECT at, up FROM uptime_log WHERE at >= ? ORDER BY at, id').all(from) as { at: string; up: number }[];
+    const inside = this.#db.prepare('SELECT at, up, reason FROM uptime_log WHERE at >= ? ORDER BY at, id').all(from) as Row[];
     const first = this.#db.prepare('SELECT MIN(at) AS at FROM uptime_log').get() as { at: string | null };
-    const rows = [...before, ...inside].map((r) => ({ at: Date.parse(r.at), up: r.up === 1 }));
+    const rows = [...before, ...inside].map((r) => ({ at: Date.parse(r.at), up: r.up === 1, reason: isReason(r.reason) ? r.reason : null }));
     return { intervals: downIntervals(rows), knownSince: first.at === null ? undefined : Date.parse(first.at) };
   }
 
@@ -178,7 +214,7 @@ export class UptimeLog {
       start: new Date(iv.start).toISOString(),
       end: iv.end === null ? null : new Date(iv.end).toISOString(),
       minutes: minutes((iv.end ?? now) - iv.start),
-      reason: null,
+      reason: iv.reason ? DOWN_REASONS[iv.reason] : null,
     }));
   }
 

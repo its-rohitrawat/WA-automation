@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dailyDown, downIntervals, uptimeRatio, UptimeLog } from '../../src/health/uptimeLog.ts';
+import { dailyDown, downIntervals, downReason, uptimeRatio, UptimeLog } from '../../src/health/uptimeLog.ts';
 import { openDb, type Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 
@@ -57,7 +57,7 @@ describe('downIntervals', () => {
     const r = [
       { at: 0, up: true }, { at: 10, up: false }, { at: 15, up: false }, { at: 20, up: true }, { at: 30, up: false },
     ];
-    expect(downIntervals(r)).toEqual([{ start: 10, end: 20 }, { start: 30, end: null }]);
+    expect(downIntervals(r)).toEqual([{ start: 10, end: 20, reason: null }, { start: 30, end: null, reason: null }]);
     expect(downIntervals([])).toEqual([]);
   });
 });
@@ -119,7 +119,7 @@ describe('UptimeLog reading', () => {
       { day: '2026-10-20', downMinutes: 10, longestMinutes: 10 },
     ]);
     expect(restarted.outages(30)).toEqual([
-      { start: '2026-10-19T18:20:00.000Z', end: '2026-10-19T18:40:00.000Z', minutes: 20, reason: null },
+      { start: '2026-10-19T18:20:00.000Z', end: '2026-10-19T18:40:00.000Z', minutes: 20, reason: 'The service was stopped' },
       { start: '2026-10-19T04:30:00.000Z', end: '2026-10-19T04:50:00.000Z', minutes: 20, reason: null },
     ]);
     const r = restarted.ratios();
@@ -183,5 +183,59 @@ describe('UptimeLog review fixes', () => {
     expect(t.log.outages(30)[0]).toMatchObject({ start: '2026-07-02T00:00:00.000Z', end: '2026-10-19T00:00:00.000Z' });
     expect(t.log.purgeOlderThan(30)).toBe(0);
     expect(() => t.log.purgeOlderThan(0)).toThrowError();
+  });
+});
+
+describe('UptimeLog reasons (migration v10)', () => {
+  const snap = (o: { state?: string; downSince?: string | null; failing?: string | null; text?: string } = {}) => ({
+    whatsapp: { state: o.state ?? 'open' }, downSince: o.downSince ?? null, publishFailingSince: o.failing ?? null, line: { text: o.text ?? '✅' },
+  });
+
+  it('tells why Health is down, in the order isUp checks', () => {
+    expect(downReason(true, snap({ state: 'logged_out' }))).toBeNull();
+    expect(downReason(false, snap({ state: 'logged_out', downSince: 'x' }))).toBe('whatsapp_logged_out');
+    expect(downReason(false, snap({ state: 'replaced' }))).toBe('whatsapp_replaced');
+    expect(downReason(false, snap({ state: 'forbidden' }))).toBe('whatsapp_forbidden');
+    expect(downReason(false, snap({ state: 'closed', downSince: 'x', failing: 'y' }))).toBe('whatsapp_disconnected');
+    expect(downReason(false, snap({ failing: 'y', text: '❌ Google sign-in expired. Run: npm run cli -- google-auth' }))).toBe('google_signin');
+    expect(downReason(false, snap({ failing: 'y', text: '⚠️ Tracker update failing since 19 Oct 10:00' }))).toBe('tracker_failing');
+    expect(downReason(false, snap())).toBeNull();
+  });
+
+  it('stores the code on the down row only, and shows it in plain words', () => {
+    const t = setup();
+    t.log.start(true);
+    t.clock.advance(60_000);
+    t.log.tick(false, 'whatsapp_logged_out');
+    t.clock.advance(60_000);
+    t.log.tick(true, 'whatsapp_logged_out'); // an up row never keeps one
+    t.clock.advance(60_000);
+    t.log.tick(false, 'not a code' as never); // an unknown value is not stored
+    t.clock.advance(60_000);
+    t.log.tick(true);
+    t.clock.advance(60_000);
+    t.log.stop();
+    expect(t.db.prepare('SELECT up, reason FROM uptime_log ORDER BY id').all()).toEqual([
+      { up: 1, reason: null }, { up: 0, reason: 'whatsapp_logged_out' }, { up: 1, reason: null }, { up: 0, reason: null }, { up: 1, reason: null },
+      { up: 0, reason: 'stopped' },
+    ]);
+    expect(t.log.outages(1).map((o) => o.reason)).toEqual(['The service was stopped', null, "WhatsApp was unlinked from the founder's phone"]);
+  });
+
+  it('an outage spanning a stop keeps the reason of its first down row', () => {
+    const t = setup();
+    t.log.start(true);
+    t.clock.advance(60_000);
+    t.log.tick(false, 'tracker_failing');
+    t.log.stop(); // already down: no row
+    t.clock.advance(60_000);
+    new UptimeLog(t.db, t.clock).start(false, 'google_signin');
+    expect(t.log.outages(1)).toMatchObject([{ reason: 'Tracker updates kept failing', end: null }]);
+  });
+
+  it('a row from before v10, with no reason, reads as none', () => {
+    const t = setup();
+    t.db.prepare("INSERT INTO uptime_log (at, up) VALUES ('2026-10-18T23:00:00.000Z', 0)").run();
+    expect(t.log.outages(1)[0]!.reason).toBeNull();
   });
 });

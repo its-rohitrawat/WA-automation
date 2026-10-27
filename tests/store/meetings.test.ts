@@ -493,7 +493,7 @@ describe('migration 7', () => {
   it('a fresh database has migration 7, with its indexes, and the table refuses unknown statuses and stages', () => {
     const db = seededDb();
     expect(db.prepare('SELECT version FROM schema_version WHERE version = 7').get()).toEqual({ version: 7 });
-    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(9); // the latest: v9 is the owner dashboard's
+    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(10); // the latest: v10 is the owner dashboard's second
     const idx = (db.prepare("SELECT tbl_name || '.' || name AS n FROM sqlite_master WHERE type = 'index'").all() as { n: string }[]).map((i) => i.n);
     expect(idx).toEqual(expect.arrayContaining([
       'meetings.meetings_due', 'meetings.meetings_conference', 'meetings.meetings_client', 'tasks.tasks_meeting', 'decisions.decisions_meeting',
