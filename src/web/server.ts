@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFile, realpath } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,7 +32,7 @@ export const MIME: Readonly<Record<string, string>> = Object.freeze({
 });
 
 /** How long stop() waits for requests in flight before cutting the remaining connections. */
-const STOP_GRACE_MS = 5_000;
+export const STOP_GRACE_MS = 5_000;
 /** First path segments under /dashboard that are never a front-end screen. */
 const RESERVED = new Set(['api', 'static', 'vendor', 'auth', 'connect']);
 const SCREEN_SEGMENT = /^[a-z][a-z0-9-]{0,39}$/;
@@ -50,6 +50,8 @@ export interface WebServerDeps {
   vendorFiles?: Readonly<Record<string, string>>;
   /** Tests only: how long stop() waits for requests in flight (default 5 s). */
   stopGraceMs?: number;
+  /** Tests only: receives the underlying Node server once it is made. */
+  onHttpServer?: (server: Server) => void;
 }
 
 export interface WebServer {
@@ -190,9 +192,11 @@ export function createWebServer(deps: WebServerDeps): WebServer {
     const rid = requestId();
     const method = req.method ?? 'GET';
     let route = '(unmatched)';
-    // One line per request: no full path, no search string, no cookies, no headers.
+    // One line per request: no full path, no search string, no cookies, no headers. Status 0: the connection closed
+    // before the answer was complete (the client gave up, or the answer was cut).
     res.once('close', () => {
-      log.info({ rid, method, route, status: res.statusCode, ms: Math.round(performance.now() - started) }, 'http');
+      const status = res.writableFinished ? res.statusCode : 0;
+      log.info({ rid, method, route, status, ms: Math.round(performance.now() - started) }, 'http');
     });
     securityHeaders(res);
     if (stopping) res.setHeader('Connection', 'close');
@@ -242,6 +246,13 @@ export function createWebServer(deps: WebServerDeps): WebServer {
   const server = createServer((req, res) => {
     void handle(req, res);
   });
+  // Without a listener, an error the server emits while running (for example EMFILE on accept) would throw, reach
+  // main.ts's uncaughtException handler and stop the whole agent. Only the code is logged; start() handles listen errors.
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    if (!server.listening) return;
+    log.error({ code: err.code ?? 'unknown' }, 'dashboard server error; the agent carries on');
+  });
+  deps.onHttpServer?.(server);
   // A connection that finishes its last response during stop() closes at once instead of idling.
   server.on('request', (_req: IncomingMessage, res: ServerResponse) => {
     res.once('finish', () => {
@@ -269,11 +280,12 @@ export function createWebServer(deps: WebServerDeps): WebServer {
       stopped = new Promise<void>((done) => {
         const force = setTimeout(() => server.closeAllConnections(), deps.stopGraceMs ?? STOP_GRACE_MS);
         force.unref();
+        // On Node 19 and later (engines: >=24) close() also closes the connections idle at this moment; the 'finish'
+        // hook above closes the ones that go idle later, and new requests during stop get `Connection: close`.
         server.close(() => {
           clearTimeout(force);
           done();
         });
-        server.closeIdleConnections();
       });
       return stopped;
     },
