@@ -90,7 +90,7 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
     const r = start(dir, master, '919800000099');
     try {
       expect(r.report.sender.status().state).toBe('self_send');
-      expect(await r.report.sender.sendReport('hi', Buffer.from('x'), 'f.xlsx')).toEqual({ status: 'failed', code: 'self_send' });
+      expect(await r.report.sender.sendReport('hi')).toEqual({ status: 'failed', code: 'self_send' });
       expect(r.factory).not.toHaveBeenCalled();
       for (let i = 0; i + 5 <= 12; i++) expect(r.out()).not.toContain('919800000099'.slice(i, i + 5));
     } finally {

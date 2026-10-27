@@ -1,7 +1,6 @@
 import makeWASocket, { DisconnectReason, makeCacheableSignalKeyStore } from 'baileys';
 import type { AnyMessageContent, AuthenticationState, BaileysEventMap, WAMessage } from 'baileys';
 import { INDIAN_MOBILE, maskNumber } from '../config/env.ts';
-import { XLSX_MIME } from '../output/workbook.ts';
 import type { ReportSender, SenderState, SenderStatus, SendResult } from '../report/types.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { EncryptedAuth } from './authState.ts';
@@ -204,9 +203,9 @@ export interface SenderGatewayOptions {
   clock?: Clock;
   /** How long to wait for the connection to open. Default 60 s. */
   connectTimeoutMs?: number;
-  /** How long each message may take, including the document upload. Default 120 s. */
+  /** How long the message may take. Default 120 s. */
   sendTimeoutMs?: number;
-  /** How long the socket stays open after both messages left, for WhatsApp's acks and retry requests. Default 15 s. */
+  /** How long the socket stays open after the message left, for WhatsApp's acks and retry requests. Default 15 s. */
   lingerMs?: number;
 }
 
@@ -247,7 +246,8 @@ export class SenderGateway implements ReportSender {
     return maskNumber(this.#opts.recipient);
   }
 
-  async sendReport(text: string, xlsx: Buffer, fileName: string): Promise<SendResult> {
+  /** Sends one text message, the report with the tracker link, and nothing else: no document. */
+  async sendReport(text: string): Promise<SendResult> {
     const auth = this.#opts.auth;
     if (this.#stopped) return { status: 'failed', code: 'stopped' };
     if (this.#busy) return { status: 'failed', code: 'busy' };
@@ -285,10 +285,9 @@ export class SenderGateway implements ReportSender {
       this.#setState('open', null);
       // From here on a failure may hide a message that reached the founder: the outcome is unknown, never retried.
       try {
-        // linkPreview: null stops Baileys fetching a preview of a URL that a task title copied from a chat.
+        // linkPreview: null stops Baileys fetching a preview of the tracker link (or of any URL in the text).
         const ids = [await this.#send(opened.sock, this.#jid, { text, linkPreview: null })];
-        ids.push(await this.#send(opened.sock, this.#jid, { document: xlsx, mimetype: XLSX_MIME, fileName }));
-        // stop() ends the linger early: both ids are back, so the result is still 'sent'.
+        // stop() ends the linger early: the id is back, so the result is still 'sent'.
         await this.#linger(this.#opts.lingerMs ?? 15_000);
         return { status: 'sent', messageIds: ids };
       } catch (err) {
@@ -304,7 +303,7 @@ export class SenderGateway implements ReportSender {
   }
 
   /**
-   * Ends a connection in progress. A send cut off before both message ids came back is unknown; one in its linger is
+   * Ends a connection in progress. A send cut off before the message id came back is unknown; one in its linger is
    * still sent, and returns at once. Later sends are refused.
    */
   async stop(): Promise<void> {

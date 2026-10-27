@@ -13,7 +13,7 @@ export interface ReportSettings {
 }
 
 /**
- * sent: both messages left, with their WhatsApp ids.
+ * sent: the message left, with its WhatsApp id (one id).
  * failed: a definite failure before anything was sent (not linked, no connection, session refused, or an error while the
  * socket was made or opening). Safe to retry.
  * unknown: the send started and did not finish cleanly. It may have reached the founder, so it is never retried automatically.
@@ -43,7 +43,8 @@ export interface SenderStatus {
  * SenderGateway (Baileys, spare number) implements it today; the official WhatsApp Business API could replace it later.
  */
 export interface ReportSender {
-  sendReport(text: string, xlsx: Buffer, fileName: string): Promise<SendResult>;
+  /** Sends the text only (the tracker link is in it). No attachment. */
+  sendReport(text: string): Promise<SendResult>;
   status(): SenderStatus;
   stop(): Promise<void>;
   /** The fixed recipient, masked to its last 4 digits ("…5678"). Never the full number. */

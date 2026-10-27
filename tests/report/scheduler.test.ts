@@ -1,10 +1,10 @@
-import ExcelJS from 'exceljs';
 import { Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import type { HealthLine } from '../../src/output/view.ts';
 import {
   describeReport, isReportDay, reasonText, ReportScheduler, retryWaitMs, SENDER_WARNINGS, UNKNOWN_WARNING, type ReportPayload,
 } from '../../src/report/scheduler.ts';
+import { TRACKER_ID_KEY } from '../../src/report/morningReport.ts';
 import type { ReportSettings, SendResult } from '../../src/report/types.ts';
 import type { Db } from '../../src/store/db.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
@@ -24,11 +24,19 @@ const ON: ReportSettings = { enabled: true, time: '06:00', deadline: '12:00', da
 const failed = (code: string): SendResult => ({ status: 'failed', code });
 /** health() also carries the masked number the sender sends to (FakeReportSender: …1234). */
 const TO = { recipientMasked: '…1234' };
+/** The Tracker.xlsx id the Drive publisher stores once it has uploaded the tracker, and the link the report carries. */
+const TRACKER_ID = '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123';
+const LINK = `https://drive.google.com/file/d/${TRACKER_ID}/view`;
 
 function setup(
-  o: { settings?: ReportSettings; build?: (now: Date) => Promise<ReportPayload>; log?: Logger; healthLine?: () => HealthLine } = {},
+  o: {
+    settings?: ReportSettings; build?: (now: Date) => Promise<ReportPayload>; log?: Logger; healthLine?: () => HealthLine;
+    /** The stored tracker id; null leaves it unset, as before the first upload. Default TRACKER_ID. */
+    trackerId?: string | null;
+  } = {},
 ) {
   const db = seededDb();
+  if (o.trackerId !== null) setKv(db, TRACKER_ID_KEY, o.trackerId ?? TRACKER_ID);
   const clock = manualClock(IST('05:00'));
   const sender = new FakeReportSender();
   const s = new ReportScheduler({
@@ -73,18 +81,14 @@ function request(db: Db, hm: string, date = DAY): void {
 const settle = () => new Promise<void>((r) => setImmediate(r));
 
 describe('ReportScheduler', () => {
-  it('sends once at 06:00, with the tracker attached', async () => {
+  it('sends once at 06:00: the short text with the tracker link, and records its one message id', async () => {
     const { db, sender, at } = setup();
     await at('05:59');
     expect(sender.calls).toHaveLength(0);
     expect(reportFor(db, DAY)).toBeUndefined();
     await at('06:00');
-    expect(sender.calls).toHaveLength(1);
-    const call = sender.calls[0]!;
-    expect(call.fileName).toBe('Tracker-2026-10-23.xlsx');
-    expect(call.text.startsWith('Morning report · 23 Oct')).toBe(true);
-    expect(call.xlsx.subarray(0, 2).toString('latin1')).toBe('PK');
-    expect(reportFor(db, DAY)).toMatchObject({ status: 'sent', detail: 'msg-1,msg-2', attempts: 1, forced: false });
+    expect(sender.calls).toEqual([{ text: `Good morning. 0 open tasks, 0 overdue. Today's tracker: ${LINK}` }]);
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'sent', detail: 'msg-1', attempts: 1, forced: false });
     for (const hm of ['06:01', '09:00', '11:59']) await at(hm);
     expect(sender.calls).toHaveLength(1);
   });
@@ -377,14 +381,37 @@ describe('ReportScheduler', () => {
     expect(reportFor(db, DAY)).toMatchObject({ status: 'sent', forced: true });
   });
 
-  it('puts the real health line in the attached workbook', async () => {
-    const healthLine = vi.fn((): HealthLine => ({ ok: false, text: 'HEALTH-MARKER' }));
-    const { sender, at } = setup({ healthLine });
+  it('without a tracker link (never uploaded, or a bad id) retries with the usual waits, then skips at the deadline, never sending', async () => {
+    for (const trackerId of [null, '', 'file-1', '../../evil?x=1']) {
+      const { db, sender, s, at } = setup({ trackerId });
+      await at('06:00');
+      expect(reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'no_tracker_link', attempts: 1, nextAttemptAt: iso('06:02') });
+      expect(s.health()).toEqual({
+        text: 'Morning report: not sent yet (the tracker is not on Google Drive yet (run google-auth and let it upload once)), next try 06:02 IST',
+        warning: null,
+        ...TO,
+      });
+      await at('06:02');
+      expect(reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'no_tracker_link', attempts: 2, nextAttemptAt: iso('06:07') });
+      await at('06:07');
+      expect(reportFor(db, DAY)!.nextAttemptAt).toBe(iso('06:17'));
+      await at('12:00');
+      expect(reportFor(db, DAY)).toMatchObject({ status: 'skipped', detail: 'no_tracker_link' });
+      expect(s.health().text).toBe('Morning report skipped today (the tracker is not on Google Drive yet (run google-auth and let it upload once))');
+      await at('12:30');
+      expect(sender.calls).toHaveLength(0);
+    }
+    expect(reasonText('no_tracker_link')).toBe('the tracker is not on Google Drive yet (run google-auth and let it upload once)');
+  });
+
+  it('sends once the tracker has been uploaded after a no_tracker_link try', async () => {
+    const { db, sender, at } = setup({ trackerId: null });
     await at('06:00');
-    expect(healthLine).toHaveBeenCalled();
-    const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(sender.calls[0]!.xlsx as unknown as ExcelJS.Buffer);
-    expect(wb.getWorksheet('Overview')!.getCell('A1').value).toBe('HEALTH-MARKER');
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'no_tracker_link' });
+    setKv(db, TRACKER_ID_KEY, TRACKER_ID); // the Drive publisher uploads the tracker
+    await at('06:02');
+    expect(sender.calls).toEqual([{ text: `Good morning. 0 open tasks, 0 overdue. Today's tracker: ${LINK}` }]);
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'sent', detail: 'msg-1', attempts: 2 });
   });
 
   it('records the time the send finished, not the time it started', async () => {
@@ -392,9 +419,9 @@ describe('ReportScheduler', () => {
       const one = setup();
       one.sender.results = fails ? [failed('connect_timeout')] : [];
       const send = one.sender.sendReport.bind(one.sender);
-      one.sender.sendReport = async (text, xlsx, fileName) => {
+      one.sender.sendReport = async (text) => {
         one.clock.set(IST('06:03')); // a slow connect
-        return send(text, xlsx, fileName);
+        return send(text);
       };
       await one.at('06:00');
       const row = reportFor(one.db, DAY)!;
@@ -524,9 +551,9 @@ describe('ReportScheduler', () => {
     const { db, sender, at } = setup();
     const seen: (ReportRow | undefined)[] = [];
     const send = sender.sendReport.bind(sender);
-    sender.sendReport = async (text, xlsx, fileName) => {
+    sender.sendReport = async (text) => {
       seen.push(reportFor(db, DAY));
-      return send(text, xlsx, fileName);
+      return send(text);
     };
     await at('06:00');
     expect(seen).toHaveLength(1);
@@ -554,7 +581,7 @@ describe('ReportScheduler', () => {
     const build = async (): Promise<ReportPayload> => {
       await g.promise;
       built = true;
-      return { text: 'report text', xlsx: Buffer.from('PK'), fileName: 'Tracker-2026-10-23.xlsx' };
+      return { text: 'report text' };
     };
     const { db, clock, sender, s } = setup({ build });
     clock.set(IST('06:00'));
@@ -604,7 +631,9 @@ describe('ReportScheduler', () => {
       expect(lines.length).toBeGreaterThan(0);
       for (const line of lines) {
         for (const t of texts) expect(line).not.toContain(t);
-        for (const bad of [SHARMA.name, MEHTA.name, 'Sharma', 'Mehta', 'Tracker-', 'Morning report ·', 'msg-1']) expect(line).not.toContain(bad);
+        for (const bad of [SHARMA.name, MEHTA.name, 'Sharma', 'Mehta', 'Tracker-', 'Good morning', TRACKER_ID, 'drive.google', 'msg-1']) {
+          expect(line).not.toContain(bad);
+        }
         for (const key of Object.keys(JSON.parse(line) as object)) expect(allowed).toContain(key);
       }
     };
@@ -624,6 +653,11 @@ describe('ReportScheduler', () => {
     // a build failure whose error message names a client and the file
     const broken = setup({ log, build: async () => Promise.reject(new Error(`Sharma Interiors Tracker-${DAY}.xlsx`)) });
     await broken.at('06:00');
+
+    // no tracker link yet: a retry, then skipped at the deadline
+    const noLink = setup({ log, trackerId: null });
+    await noLink.at('06:00');
+    await noLink.at('12:00');
 
     // skipped after the deadline, and a crash mid-send found at start
     const late = setup({ log });
@@ -772,6 +806,7 @@ describe('report days (REPORT_DAYS)', () => {
 
   function weekSetup(settings: ReportSettings = ON) {
     const db = seededDb();
+    setKv(db, TRACKER_ID_KEY, TRACKER_ID);
     const clock = manualClock(at(SAT, '05:00').toISOString());
     const sender = new FakeReportSender();
     const s = new ReportScheduler({ db, clock, log: silentLogger(), sender, settings, healthLine: () => ({ ok: true, text: '✅ Connected' }) });

@@ -1,14 +1,11 @@
 import { randomBytes } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { XLSX_MIME } from '../../src/output/workbook.ts';
 import { openSessionDb, useSenderAuthState, type EncryptedAuth } from '../../src/wa/authState.ts';
 import { checkRecipient, linkSender, recipientJid, RecipientRefusedError, SenderGateway } from '../../src/wa/senderGateway.ts';
 import { closeWith, FakeSocket, SEND_METHODS } from '../helpers/fakeSocket.ts';
 
 const RECIPIENT = '919800000000';
 const JID = '919800000000@s.whatsapp.net';
-const XLSX = Buffer.from('xlsx bytes');
-const FILE = 'Tracker-2026-10-23.xlsx';
 
 type Script = (s: FakeSocket) => void;
 const open: Script = (s) => s.emit('connection.update', { connection: 'open' });
@@ -71,21 +68,19 @@ function setup(
 }
 
 describe('SenderGateway', () => {
-  it('sends the text, then the tracker as a document, to the configured recipient, then disconnects', async () => {
+  it('sends one text message with the link preview off, and no document, to the configured recipient, then disconnects', async () => {
     const { gw, sockets } = setup();
-    expect(await gw.sendReport('Morning report · 23 Oct', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(await gw.sendReport('Morning report · 23 Oct')).toEqual({ status: 'sent', messageIds: ['msg-1'] });
     const sock = sockets[0]!;
-    expect(sock.sendMessage.mock.calls).toEqual([
-      [JID, { text: 'Morning report · 23 Oct', linkPreview: null }],
-      [JID, { document: XLSX, mimetype: XLSX_MIME, fileName: FILE }],
-    ]);
+    expect(sock.sendMessage.mock.calls).toEqual([[JID, { text: 'Morning report · 23 Oct', linkPreview: null }]]);
+    for (const [, content] of sock.sendMessage.mock.calls) expect(content).not.toHaveProperty('document');
     expect(sock.end).toHaveBeenCalled();
     expect(gw.status().state).toBe('idle');
   });
 
   it('sets no presence, sends no read receipts and changes no chat', async () => {
     const { gw, sockets } = setup();
-    await gw.sendReport('hi', XLSX, FILE);
+    await gw.sendReport('hi');
     for (const name of SEND_METHODS.filter((n) => n !== 'sendMessage')) expect(sockets[0]![name]).not.toHaveBeenCalled();
   });
 
@@ -97,7 +92,7 @@ describe('SenderGateway', () => {
     for (const bad of ['+919800000000', '91 98000 00000', '120363000000000001@g.us', '']) {
       expect(() => new SenderGateway({ recipient: bad, factory: scriptedFactory().factory, auth: senderAuth(true) })).toThrow(/digits only/);
     }
-    expect(SenderGateway.prototype.sendReport.length).toBe(3); // text, xlsx, fileName
+    expect(SenderGateway.prototype.sendReport.length).toBe(1); // the text only
   });
 
   it('accepts only 91 and a 10-digit Indian mobile as the recipient', () => {
@@ -135,7 +130,7 @@ describe('SenderGateway', () => {
   it('fails definitely, without connecting, when the spare number is not linked', async () => {
     const { gw, sockets } = setup({ auth: senderAuth(false) });
     expect(gw.status().state).toBe('not_linked');
-    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'not_linked' });
+    expect(await gw.sendReport('hi')).toEqual({ status: 'failed', code: 'not_linked' });
     expect(sockets).toHaveLength(0);
   });
 
@@ -145,7 +140,7 @@ describe('SenderGateway', () => {
       auth.state.creds.me = { id, name: 'Founder' };
       const { gw, sockets } = setup({ auth });
       expect(gw.status().state).toBe('self_send');
-      expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'self_send' });
+      expect(await gw.sendReport('hi')).toEqual({ status: 'failed', code: 'self_send' });
       expect(gw.status().state).toBe('self_send');
       expect(sockets).toHaveLength(0);
     }
@@ -159,7 +154,7 @@ describe('SenderGateway', () => {
       const { factory, sockets } = scriptedFactory();
       const gw = new SenderGateway({ recipient: RECIPIENT, founderNumber: FOUNDER, factory, auth, connectTimeoutMs: 1_000, lingerMs: 0 });
       expect(gw.status().state).toBe('self_send');
-      expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'self_send' });
+      expect(await gw.sendReport('hi')).toEqual({ status: 'failed', code: 'self_send' });
       expect(gw.status().state).toBe('self_send');
       expect(sockets).toHaveLength(0);
     }
@@ -170,7 +165,7 @@ describe('SenderGateway', () => {
     const gw = new SenderGateway({ recipient: RECIPIENT, founderNumber: FOUNDER, factory, auth, connectTimeoutMs: 1_000, lingerMs: 0 });
     expect(gw.status().state).toBe('idle');
     auth.state.creds.me = { id: `${FOUNDER}:7@s.whatsapp.net`, name: 'Founder' };
-    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'self_send' });
+    expect(await gw.sendReport('hi')).toEqual({ status: 'failed', code: 'self_send' });
     expect(gw.status().state).toBe('self_send');
     expect(sockets).toHaveLength(0);
   });
@@ -181,7 +176,7 @@ describe('SenderGateway', () => {
     const { factory, sockets } = scriptedFactory();
     const gw = new SenderGateway({ recipient: RECIPIENT, founderNumber: '919811112222', factory, auth, connectTimeoutMs: 1_000, lingerMs: 0 });
     expect(gw.status().state).toBe('idle');
-    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(await gw.sendReport('hi')).toEqual({ status: 'sent', messageIds: ['msg-1'] });
     expect(sockets).toHaveLength(1);
   });
 
@@ -190,14 +185,14 @@ describe('SenderGateway', () => {
     auth.state.creds.me = { id: '919800000099:2@s.whatsapp.net', name: 'Spare' };
     const { gw, sockets } = setup({ auth });
     expect(gw.status().state).toBe('idle');
-    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(await gw.sendReport('hi')).toEqual({ status: 'sent', messageIds: ['msg-1'] });
     expect(sockets).toHaveLength(1);
   });
 
   it('fails definitely, without connecting, when the stored session could not be read (no auth)', async () => {
     const { gw, sockets } = setup({ noAuth: true });
     expect(gw.status().state).toBe('unreadable');
-    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'session_unreadable' });
+    expect(await gw.sendReport('hi')).toEqual({ status: 'failed', code: 'session_unreadable' });
     expect(gw.status().state).toBe('unreadable');
     expect(sockets).toHaveLength(0);
   });
@@ -206,7 +201,7 @@ describe('SenderGateway', () => {
     const { factory, sockets } = scriptedFactory();
     const gw = new SenderGateway({ recipient: RECIPIENT, factory, auth: undefined, authProblem: 'unavailable' });
     expect(gw.status().state).toBe('unavailable');
-    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'session_unavailable' });
+    expect(await gw.sendReport('hi')).toEqual({ status: 'failed', code: 'session_unavailable' });
     expect(gw.status().state).toBe('unavailable');
     expect(sockets).toHaveLength(0);
   });
@@ -222,7 +217,7 @@ describe('SenderGateway', () => {
     ];
     for (const c of cases) {
       const { gw, sockets } = setup({ scripts: [c.script], connectTimeoutMs: 20 });
-      expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: c.code });
+      expect(await gw.sendReport('hi')).toEqual({ status: 'failed', code: c.code });
       expect(sockets[0]!.sendMessage).not.toHaveBeenCalled();
       expect(sockets[0]!.end).toHaveBeenCalled();
       expect(gw.status()).toMatchObject({ state: c.state, lastErrorCode: c.statusCode });
@@ -231,15 +226,15 @@ describe('SenderGateway', () => {
 
   it('reports unknown when a send times out or fails after it started', async () => {
     const timedOut = setup({ scripts: [hang], sendTimeoutMs: 20 });
-    expect(await timedOut.gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'unknown', code: 'timeout' });
+    expect(await timedOut.gw.sendReport('hi')).toEqual({ status: 'unknown', code: 'timeout' });
 
-    const docFails: Script = (s) => {
-      s.sendMessage.mockResolvedValueOnce({ key: { id: 'msg-1' } }).mockRejectedValueOnce(new Error('upload failed'));
+    const textFails: Script = (s) => {
+      s.sendMessage.mockRejectedValueOnce(new Error('socket error'));
       open(s);
     };
-    const failed = setup({ scripts: [docFails] });
-    expect(await failed.gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'unknown', code: 'send_error' });
-    expect(failed.sockets[0]!.sendMessage).toHaveBeenCalledTimes(2);
+    const failed = setup({ scripts: [textFails] });
+    expect(await failed.gw.sendReport('hi')).toEqual({ status: 'unknown', code: 'send_error' });
+    expect(failed.sockets[0]!.sendMessage).toHaveBeenCalledTimes(1);
     expect(failed.sockets[0]!.end).toHaveBeenCalled();
   });
 
@@ -256,9 +251,9 @@ describe('SenderGateway', () => {
       connectTimeoutMs: 1_000,
       lingerMs: 0,
     });
-    expect(await throwing.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'connect_error' });
+    expect(await throwing.sendReport('hi')).toEqual({ status: 'failed', code: 'connect_error' });
     expect(throwing.status().state).toBe('idle');
-    expect(await throwing.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'connect_error' }); // not stuck busy
+    expect(await throwing.sendReport('hi')).toEqual({ status: 'failed', code: 'connect_error' }); // not stuck busy
     expect(made).toBe(2);
 
     // The socket exists but throws while the gateway listens for it to open: it is closed, and nothing was sent.
@@ -267,7 +262,7 @@ describe('SenderGateway', () => {
       throw new Error('listener failed');
     };
     const broken = new SenderGateway({ recipient: RECIPIENT, factory: () => sock, auth: senderAuth(true), connectTimeoutMs: 1_000, lingerMs: 0 });
-    expect(await broken.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'connect_error' });
+    expect(await broken.sendReport('hi')).toEqual({ status: 'failed', code: 'connect_error' });
     expect(sock.sendMessage).not.toHaveBeenCalled();
     expect(sock.end).toHaveBeenCalled();
     expect(broken.status().state).toBe('idle');
@@ -275,24 +270,24 @@ describe('SenderGateway', () => {
 
   it('sends one report at a time', async () => {
     const { gw } = setup({ scripts: [hang], sendTimeoutMs: 50 });
-    const first = gw.sendReport('hi', XLSX, FILE);
-    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'busy' });
+    const first = gw.sendReport('hi');
+    expect(await gw.sendReport('hi')).toEqual({ status: 'failed', code: 'busy' });
     expect(await first).toEqual({ status: 'unknown', code: 'timeout' });
   });
 
   it('stop ends a send in progress and refuses later sends', async () => {
     const { gw, sockets } = setup({ scripts: [hang], sendTimeoutMs: 50 });
-    const p = gw.sendReport('hi', XLSX, FILE);
+    const p = gw.sendReport('hi');
     await vi.waitFor(() => expect(sockets[0]?.sendMessage).toHaveBeenCalled());
     await gw.stop();
     expect(sockets[0]!.end).toHaveBeenCalled();
     expect(await p).toEqual({ status: 'unknown', code: 'timeout' });
-    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'stopped' });
+    expect(await gw.sendReport('hi')).toEqual({ status: 'failed', code: 'stopped' });
   });
 
   it('sends nothing when stop comes while the socket is still connecting', async () => {
     const { gw, sockets } = setup({ scripts: [() => {}] });
-    const p = gw.sendReport('hi', XLSX, FILE);
+    const p = gw.sendReport('hi');
     await vi.waitFor(() => expect(sockets).toHaveLength(1));
     await gw.stop();
     open(sockets[0]!); // WhatsApp reports open after the service stopped
@@ -303,7 +298,7 @@ describe('SenderGateway', () => {
 
   it('listens only to creds.update and connection.update: it never reads chats', async () => {
     const { gw, sockets } = setup();
-    await gw.sendReport('hi', XLSX, FILE);
+    await gw.sendReport('hi');
     expect(sockets[0]!.subscribedEvents().sort()).toEqual(['connection.update', 'creds.update']);
   });
 
@@ -314,41 +309,41 @@ describe('SenderGateway', () => {
         open(s);
       },
       (s) => {
-        s.sendMessage.mockResolvedValueOnce({ key: { id: 'msg-1' } }).mockResolvedValueOnce({ key: {} });
+        s.sendMessage.mockResolvedValueOnce({ key: {} });
         open(s);
       },
     ];
     for (const script of noId) {
       const { gw, sockets } = setup({ scripts: [script] });
-      expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'unknown', code: 'send_error' });
+      expect(await gw.sendReport('hi')).toEqual({ status: 'unknown', code: 'send_error' });
       expect(sockets[0]!.end).toHaveBeenCalled();
     }
   });
 
-  it('keeps the socket open for the linger time after both messages left', async () => {
+  it('keeps the socket open for the linger time after the message left', async () => {
     const { gw, sockets } = setup({ lingerMs: 400 });
-    const p = gw.sendReport('hi', XLSX, FILE);
-    await vi.waitFor(() => expect(sockets[0]?.sendMessage).toHaveBeenCalledTimes(2), { interval: 5 });
+    const p = gw.sendReport('hi');
+    await vi.waitFor(() => expect(sockets[0]?.sendMessage).toHaveBeenCalledTimes(1), { interval: 5 });
     await new Promise((r) => setTimeout(r, 10));
     expect(sockets[0]!.end).not.toHaveBeenCalled();
-    expect(await p).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(await p).toEqual({ status: 'sent', messageIds: ['msg-1'] });
     expect(sockets[0]!.end).toHaveBeenCalled();
   });
 
-  it('stop() during the linger ends it at once and keeps the sent result: both message ids are already back', async () => {
+  it('stop() during the linger ends it at once and keeps the sent result: the message id is already back', async () => {
     const { gw, sockets } = setup({ lingerMs: 60_000 });
-    const p = gw.sendReport('hi', XLSX, FILE);
-    await vi.waitFor(() => expect(sockets[0]?.sendMessage).toHaveBeenCalledTimes(2), { interval: 5 });
+    const p = gw.sendReport('hi');
+    await vi.waitFor(() => expect(sockets[0]?.sendMessage).toHaveBeenCalledTimes(1), { interval: 5 });
     await new Promise((r) => setTimeout(r, 10)); // now in the linger
     await gw.stop();
-    expect(await p).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(await p).toEqual({ status: 'sent', messageIds: ['msg-1'] });
     expect(sockets[0]!.end).toHaveBeenCalledTimes(1);
   });
 
   it('is free for the next send after a send that went out', async () => {
     const { gw, sockets } = setup();
-    expect(await gw.sendReport('day 1', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
-    expect(await gw.sendReport('day 2', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(await gw.sendReport('day 1')).toEqual({ status: 'sent', messageIds: ['msg-1'] });
+    expect(await gw.sendReport('day 2')).toEqual({ status: 'sent', messageIds: ['msg-1'] });
     expect(sockets).toHaveLength(2);
     for (const s of sockets) expect(s.end).toHaveBeenCalled();
     expect(gw.status().state).toBe('idle');
@@ -357,13 +352,13 @@ describe('SenderGateway', () => {
   it('is free for the next send after a definite failure or an unknown result', async () => {
     const qr: Script = (s) => s.emit('connection.update', { qr: 'QR-1' });
     const afterFailure = setup({ scripts: [qr, open] });
-    expect(await afterFailure.gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'not_linked' });
-    expect(await afterFailure.gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(await afterFailure.gw.sendReport('hi')).toEqual({ status: 'failed', code: 'not_linked' });
+    expect(await afterFailure.gw.sendReport('hi')).toEqual({ status: 'sent', messageIds: ['msg-1'] });
     expect(afterFailure.sockets).toHaveLength(2);
 
     const afterUnknown = setup({ scripts: [hang, open], sendTimeoutMs: 20 });
-    expect(await afterUnknown.gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'unknown', code: 'timeout' });
-    expect(await afterUnknown.gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(await afterUnknown.gw.sendReport('hi')).toEqual({ status: 'unknown', code: 'timeout' });
+    expect(await afterUnknown.gw.sendReport('hi')).toEqual({ status: 'sent', messageIds: ['msg-1'] });
     expect(afterUnknown.sockets).toHaveLength(2);
   });
 
@@ -380,23 +375,23 @@ describe('SenderGateway', () => {
     };
     for (const script of [endThrows, endRejects]) {
       const { gw, sockets } = setup({ scripts: [script, script] });
-      expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+      expect(await gw.sendReport('hi')).toEqual({ status: 'sent', messageIds: ['msg-1'] });
       expect(sockets[0]!.end).toHaveBeenCalled();
-      expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+      expect(await gw.sendReport('hi')).toEqual({ status: 'sent', messageIds: ['msg-1'] });
       await expect(gw.stop()).resolves.toBeUndefined();
     }
   });
 
   it('shows connecting while the socket opens, open while sending, and idle afterwards', async () => {
     const connecting = setup({ scripts: [() => {}], connectTimeoutMs: 50 });
-    const p = connecting.gw.sendReport('hi', XLSX, FILE);
+    const p = connecting.gw.sendReport('hi');
     await vi.waitFor(() => expect(connecting.sockets).toHaveLength(1));
     expect(connecting.gw.status().state).toBe('connecting');
     expect(await p).toEqual({ status: 'failed', code: 'connect_timeout' });
     expect(connecting.gw.status().state).toBe('idle');
 
     const sending = setup({ scripts: [hang], sendTimeoutMs: 50 });
-    const q = sending.gw.sendReport('hi', XLSX, FILE);
+    const q = sending.gw.sendReport('hi');
     await vi.waitFor(() => expect(sending.sockets[0]?.sendMessage).toHaveBeenCalled());
     expect(sending.gw.status().state).toBe('open');
     expect(await q).toEqual({ status: 'unknown', code: 'timeout' });
@@ -419,7 +414,7 @@ describe('SenderGateway', () => {
         open(s);
       };
       const { gw } = setup({ auth, scripts: [credsThenOpen] });
-      expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+      expect(await gw.sendReport('hi')).toEqual({ status: 'sent', messageIds: ['msg-1'] });
       expect(saves).toBeGreaterThan(0);
       await new Promise((r) => setTimeout(r, 20));
       expect(unhandled).not.toHaveBeenCalled();
@@ -441,16 +436,16 @@ describe('SenderGateway default timings', () => {
     return { gw, sockets };
   }
 
-  it('lingers 15 s after both messages left before closing the socket', async () => {
+  it('lingers 15 s after the message left before closing the socket', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const { gw, sockets } = defaultGateway([open]);
-    const p = gw.sendReport('hi', XLSX, FILE);
+    const p = gw.sendReport('hi');
     await vi.advanceTimersByTimeAsync(0);
-    expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(2);
+    expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(14_900);
     expect(sockets[0]!.end).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(200);
-    expect(await p).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(await p).toEqual({ status: 'sent', messageIds: ['msg-1'] });
     expect(sockets[0]!.end).toHaveBeenCalled();
   });
 
@@ -463,7 +458,7 @@ describe('SenderGateway default timings', () => {
       on(event as 'creds.update', listener);
     }) as typeof sock.ev.on;
     const gw = new SenderGateway({ recipient: RECIPIENT, factory: () => sock, auth: senderAuth(true) });
-    expect(await gw.sendReport('hi', XLSX, FILE)).toEqual({ status: 'failed', code: 'connect_error' });
+    expect(await gw.sendReport('hi')).toEqual({ status: 'failed', code: 'connect_error' });
     expect(sock.end).toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -471,7 +466,7 @@ describe('SenderGateway default timings', () => {
   it('waits 60 s for the connection to open', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const { gw, sockets } = defaultGateway([() => {}]);
-    const p = gw.sendReport('hi', XLSX, FILE);
+    const p = gw.sendReport('hi');
     await vi.advanceTimersByTimeAsync(59_900);
     expect(sockets[0]!.end).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(200);
@@ -482,31 +477,29 @@ describe('SenderGateway default timings', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const { gw } = defaultGateway([open]);
     let result: unknown;
-    const p = gw.sendReport('hi', XLSX, FILE).then((r) => (result = r));
+    const p = gw.sendReport('hi').then((r) => (result = r));
     await vi.advanceTimersByTimeAsync(15_000);
     await p;
-    expect(result).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(result).toEqual({ status: 'sent', messageIds: ['msg-1'] });
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('stop() while the document send is in flight: a send that then returns its id is sent, with no linger and no timer', async () => {
+  it('stop() while the text send is in flight: a send that then returns its id is sent, with no linger and no timer', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let release: (msg: { key: { id: string } }) => void = () => {};
     const gated: Script = (s) => {
-      s.sendMessage
-        .mockImplementationOnce(async () => ({ key: { id: 'msg-1' } }))
-        .mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+      s.sendMessage.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
       open(s);
     };
     const { gw, sockets } = defaultGateway([gated]);
     let result: unknown;
-    const p = gw.sendReport('hi', XLSX, FILE).then((r) => (result = r));
+    const p = gw.sendReport('hi').then((r) => (result = r));
     await vi.advanceTimersByTimeAsync(0);
-    expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(2); // the xlsx is on its way
+    expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(1); // the text is on its way
     await gw.stop();
-    release({ key: { id: 'msg-2' } });
+    release({ key: { id: 'msg-1' } });
     await vi.advanceTimersByTimeAsync(0);
-    expect(result).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(result).toEqual({ status: 'sent', messageIds: ['msg-1'] });
     await p;
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -520,12 +513,12 @@ describe('SenderGateway default timings', () => {
     const { factory, sockets } = scriptedFactory([endHangs]);
     const gw = new SenderGateway({ recipient: RECIPIENT, factory, auth: senderAuth(true), lingerMs: 0 });
     let result: unknown;
-    const p = gw.sendReport('hi', XLSX, FILE).then((r) => (result = r));
+    const p = gw.sendReport('hi').then((r) => (result = r));
     await vi.advanceTimersByTimeAsync(2_900);
     expect(sockets[0]!.end).toHaveBeenCalledTimes(1);
     expect(result).toBeUndefined();
     await vi.advanceTimersByTimeAsync(200);
-    expect(result).toEqual({ status: 'sent', messageIds: ['msg-1', 'msg-2'] });
+    expect(result).toEqual({ status: 'sent', messageIds: ['msg-1'] });
     await p;
     expect(gw.status().state).toBe('idle');
     expect(vi.getTimerCount()).toBe(0);
@@ -535,16 +528,14 @@ describe('SenderGateway default timings', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const stuck: Script = (s) => {
       s.end.mockImplementation(() => new Promise<void>(() => {}));
-      s.sendMessage
-        .mockImplementationOnce(async () => ({ key: { id: 'msg-1' } }))
-        .mockImplementationOnce(() => new Promise(() => {})); // the document send never answers
+      s.sendMessage.mockImplementationOnce(() => new Promise(() => {})); // the text send never answers
       open(s);
     };
     const { gw, sockets } = defaultGateway([stuck]);
     let result: unknown;
-    const p = gw.sendReport('hi', XLSX, FILE).then((r) => (result = r));
+    const p = gw.sendReport('hi').then((r) => (result = r));
     await vi.advanceTimersByTimeAsync(0);
-    expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(2);
+    expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(1);
     let stopped = false;
     const s = gw.stop().then(() => {
       stopped = true;
@@ -555,7 +546,7 @@ describe('SenderGateway default timings', () => {
     expect(stopped).toBe(true);
     await s;
     expect(sockets[0]!.end).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(120_000); // the document send's own limit
+    await vi.advanceTimersByTimeAsync(120_000); // the text send's own limit
     await p;
     expect(result).toEqual({ status: 'unknown', code: 'timeout' });
     expect(vi.getTimerCount()).toBe(0);
@@ -565,18 +556,18 @@ describe('SenderGateway default timings', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const { gw } = defaultGateway([(s) => closeWith(s, 401)]);
     let result: unknown;
-    const p = gw.sendReport('hi', XLSX, FILE).then((r) => (result = r));
+    const p = gw.sendReport('hi').then((r) => (result = r));
     await vi.advanceTimersByTimeAsync(0);
     await p;
     expect(result).toEqual({ status: 'failed', code: 'logged_out' });
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('gives each message 120 s before reporting unknown', async () => {
+  it('gives the message 120 s before reporting unknown', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const { gw, sockets } = defaultGateway([hang]);
     let result: unknown;
-    const p = gw.sendReport('hi', XLSX, FILE).then((r) => (result = r));
+    const p = gw.sendReport('hi').then((r) => (result = r));
     await vi.advanceTimersByTimeAsync(119_900);
     expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(1);
     expect(result).toBeUndefined();

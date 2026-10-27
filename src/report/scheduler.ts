@@ -1,5 +1,4 @@
 import { loadTrackerView, type HealthLine } from '../output/view.ts';
-import { buildWorkbook } from '../output/workbook.ts';
 import { tx, type Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import {
@@ -9,7 +8,7 @@ import {
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { istDate, istTime } from '../util/time.ts';
-import { buildMorningText } from './morningReport.ts';
+import { buildShortMorningText, trackerLink } from './morningReport.ts';
 import type { ReportDays, ReportHealth, ReportSender, ReportSettings, SenderState, SendResult } from './types.ts';
 
 /** Waits after a definite failure: 2 minutes, then 5, then 10 for every later try, until the deadline. */
@@ -34,6 +33,7 @@ export const REASON_TEXT: Record<string, string> = {
   forbidden: 'WhatsApp refused the spare number (403)',
   replaced: 'another session took over the spare number',
   build_failed: 'the report could not be built',
+  no_tracker_link: 'the tracker is not on Google Drive yet (run google-auth and let it upload once)',
   busy: 'another send was running',
   stopped: 'the service was stopping',
   timeout: 'WhatsApp did not confirm in time',
@@ -44,7 +44,7 @@ export const REASON_TEXT: Record<string, string> = {
 };
 
 /**
- * A send takes at most about 5.5 minutes (60 s to connect, 120 s per message, 15 s linger). A row still 'sending' after
+ * A send takes at most about 3.5 minutes (60 s to connect, 120 s for the message, 15 s linger). A row still 'sending' after
  * this long had its outcome lost (recording it failed), so it reads unknown and is never retried.
  */
 export const STALE_SENDING_MS = 10 * 60_000;
@@ -124,10 +124,19 @@ export function describeReport(row: ReportRow | undefined, now: Date, settings: 
   return { text, warning: unknown ? UNKNOWN_WARNING : (SENDER_WARNINGS[sender] ?? null) };
 }
 
+/** What the report sends: the short text with the tracker link. No attachment. */
 export interface ReportPayload {
   text: string;
-  xlsx: Buffer;
-  fileName: string;
+}
+
+/** A definite failure while building the report: nothing was sent, so the day is retried with this reason code. */
+export class ReportBuildError extends Error {
+  readonly code: string;
+  constructor(code: string) {
+    super(`The morning report could not be built (${code})`);
+    this.name = 'ReportBuildError';
+    this.code = code;
+  }
 }
 
 export interface ReportSchedulerOptions {
@@ -136,9 +145,9 @@ export interface ReportSchedulerOptions {
   log: Logger;
   sender: ReportSender;
   settings: ReportSettings;
-  /** The health line printed in the attached workbook (Health.workbookLine). */
+  /** The health line the tracker view is loaded with (Health.workbookLine). The short text does not show it. */
   healthLine: () => HealthLine;
-  /** Test seam: replaces building the text and the workbook from the tracker. */
+  /** Test seam: replaces building the text from the tracker. */
   build?: (now: Date) => Promise<ReportPayload>;
 }
 
@@ -220,7 +229,7 @@ export class ReportScheduler {
     } finally {
       clearTimeout(stopTimer);
     }
-    // Stopping the sender ends a send in its linger (both ids already back) or cuts one off. Give it up to 2 s more to
+    // Stopping the sender ends a send in its linger (its id already back) or cuts one off. Give it up to 2 s more to
     // record its outcome, so a report that went out is 'sent' before main.ts closes the database.
     if (inFlight) {
       let timer: NodeJS.Timeout | undefined;
@@ -296,8 +305,13 @@ export class ReportScheduler {
     try {
       payload = await (this.#o.build ?? ((n: Date) => this.#build(n)))(now);
     } catch (err) {
-      log.error({ err }, 'morning report could not be built');
-      this.#retry(date, 'build_failed');
+      if (err instanceof ReportBuildError) {
+        log.warn({ code: err.code }, 'morning report could not be built');
+        this.#retry(date, err.code);
+      } else {
+        log.error({ err }, 'morning report could not be built');
+        this.#retry(date, 'build_failed');
+      }
       return;
     }
     if (this.#stopped) {
@@ -306,7 +320,7 @@ export class ReportScheduler {
     }
     let result: SendResult;
     try {
-      result = await sender.sendReport(payload.text, payload.xlsx, payload.fileName);
+      result = await sender.sendReport(payload.text);
     } catch (err) {
       log.error({ err }, 'morning report sender crashed');
       result = { status: 'unknown', code: 'crash' };
@@ -330,8 +344,11 @@ export class ReportScheduler {
     this.#o.log.warn({ date, code, nextAttemptAt: next }, 'morning report not sent; will try again');
   }
 
+  /** Throws ReportBuildError('no_tracker_link') while the tracker is not on Drive: the text has nothing to link to. */
   async #build(now: Date): Promise<ReportPayload> {
+    const link = trackerLink(this.#o.db);
+    if (!link) throw new ReportBuildError('no_tracker_link');
     const view = loadTrackerView(this.#o.db, now, this.#o.healthLine());
-    return { text: buildMorningText(view, view.today), xlsx: await buildWorkbook(view), fileName: `Tracker-${view.today}.xlsx` };
+    return { text: buildShortMorningText(view, view.today, link) };
   }
 }
