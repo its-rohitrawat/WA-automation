@@ -276,6 +276,10 @@ export class Health {
       return '⚠️ Meetings paused: Google sign-in needs meeting access. Run: npm run cli -- google-auth';
     }
     if (m.paused === 'no_ffmpeg') return '⚠️ Meetings paused: ffmpeg not found';
+    const lost = m.lostAccounts ?? [];
+    if (lost.length > 0) {
+      return `⚠️ Meetings: Google sign-in lost for ${lost.join(', ')}. Run: npm run cli -- google-auth --account ${lost[0]}`;
+    }
     if (m.stats.failed > 0) {
       const n = m.stats.failed;
       return `⚠️ ${n} meeting${n === 1 ? '' : 's'} could not be processed`;

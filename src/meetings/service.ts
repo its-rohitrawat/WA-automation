@@ -1,6 +1,7 @@
 import type { MeetingAi } from '../brain/meetingClient.ts';
 import type { MeetingForTracker, MeetingTrackOutcome } from '../brain/reconciler.ts';
 import type { DriveApi } from '../output/drive.ts';
+import { MAIN_ACCOUNT } from '../output/googleAuth.ts';
 import type { Prices } from '../spend/pricing.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
 import type { Db } from '../store/db.ts';
@@ -46,8 +47,10 @@ export interface MeetingServiceDeps {
   clients: readonly ClientConfigLike[];
   freeBytes: (dir: string) => number | null;
   track: (clientId: number, meeting: MeetingForTracker) => Promise<MeetingTrackOutcome>;
-  /** Read on every tick: false while the stored Google sign-in lacks the meeting scopes (no Google meeting call at all). */
+  /** Read on every tick: false while no stored Google sign-in has the meeting scopes (no Google meeting call at all). */
   hasMeetingScopes: () => boolean;
+  /** With several Google accounts: the labels whose sign-in Google refused last time ('main' for the main sign-in). */
+  lostAccounts?: () => readonly string[];
   /** New rows were found, or a meeting finished or failed: the workbook should be rebuilt. */
   onChanged: () => void;
 }
@@ -141,9 +144,14 @@ export class MeetingService {
 
   /** What Health shows about meetings now. */
   health(): MeetingsHealth {
+    // With several accounts, a refusal for extra accounts only is named per account and pauses nothing: the other
+    // accounts' meetings go on. The main sign-in refused (or one account only): paused, as before.
+    const lost = this.#d.lostAccounts?.() ?? [];
+    const extraLost = lost.filter((l) => l !== MAIN_ACCOUNT);
+    const authLost = this.#googleAuthLost && (lost.length === 0 || lost.includes(MAIN_ACCOUNT));
     const paused: MeetingsHealth['paused'] = !this.#d.hasMeetingScopes()
       ? 'google_scopes'
-      : this.#googleAuthLost
+      : authLost
         ? 'google_auth'
         : this.#d.ffmpeg === null
           ? 'no_ffmpeg'
@@ -152,6 +160,7 @@ export class MeetingService {
       stats: meetingStats(this.#d.db, this.#d.clock.now().toISOString()),
       paused,
       sttProvider: this.#d.transcriber?.provider ?? 'none',
+      ...(extraLost.length > 0 ? { lostAccounts: extraLost } : {}),
     };
   }
 

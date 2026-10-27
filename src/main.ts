@@ -12,11 +12,11 @@ import { masterKeyPath, sessionDbPath, trackerDbPath } from './config/paths.ts';
 import { DpapiKeyProvider, MasterKeyError } from './crypto/keyProvider.ts';
 import { baileysFetcher } from './media/fetch.ts';
 import { MediaRefSealer } from './media/ref.ts';
-import { googleMeetingsApi } from './meetings/googleApi.ts';
+import { combineMeetingAccounts, storedMeetingAccounts } from './meetings/multiAccount.ts';
 import { createMeetingTranscriber } from './meetings/transcribe.ts';
 import { googleDriveApi } from './output/drive.ts';
 import { createOAuthClient, TokenDecryptError, TokenStore } from './output/googleAuth.ts';
-import { hasMeetingScopes, type OAuth2Client } from './output/googleAuth.ts';
+import { meetingsReady, type OAuth2Client } from './output/googleAuth.ts';
 import { openMorningReport } from './report/start.ts';
 import { pricesFromEnv } from './spend/pricing.ts';
 import type { Prices } from './spend/pricing.ts';
@@ -41,10 +41,17 @@ class StartupExit extends Error {}
  * meeting scopes the app keeps meetings paused (google_scopes) and makes no Google meeting call. Logs codes only.
  */
 async function meetingDeps(
-  o: { env: Env; db: Db; google: OAuth2Client; apiKey: string; prices: Prices; configs: ClientConfig[]; log: Logger },
+  o: { env: Env; db: Db; key: Buffer; google: OAuth2Client; apiKey: string; prices: Prices; configs: ClientConfig[]; log: Logger },
 ): Promise<AppMeetingsDeps> {
   const { env, log } = o;
-  if (!hasMeetingScopes(o.db)) log.warn({ code: 'google_scopes' }, 'meetings paused: Google sign-in needs meeting access. Run: npm run cli -- google-auth');
+  if (!meetingsReady(o.db)) log.warn({ code: 'google_scopes' }, 'meetings paused: Google sign-in needs meeting access. Run: npm run cli -- google-auth');
+  // The main sign-in plus every extra account (google-auth --account); one account is passed through unchanged.
+  const accounts = storedMeetingAccounts({
+    db: o.db, key: o.key, main: o.google, log,
+    newClient: () => createOAuthClient(requireKey(env, 'GOOGLE_OAUTH_CLIENT_ID'), requireKey(env, 'GOOGLE_OAUTH_CLIENT_SECRET')),
+  });
+  const { api, router } = combineMeetingAccounts(accounts, log);
+  if (router) log.info({ accounts: accounts.map((a) => a.label) }, 'meetings: several Google accounts');
   let exe: string | null = null;
   try {
     exe = await findFfmpeg(env.FFMPEG_PATH);
@@ -55,7 +62,8 @@ async function meetingDeps(
   const transcriber = createMeetingTranscriber(env); // STT_API_KEY goes to the provider only
   if (transcriber === null) log.warn({ code: 'stt_none' }, 'meetings wait: speech-to-text is not set up');
   return {
-    api: googleMeetingsApi(o.google),
+    api,
+    ...(router ? { lostAccounts: () => router.lostAccounts() } : {}),
     ai: new ClaudeMeetingClient({ apiKey: o.apiKey, model: env.AI_MODEL, prices: o.prices }),
     transcriber,
     ffmpeg: exe === null ? null : new Ffmpeg(exe),
@@ -144,7 +152,7 @@ async function main(): Promise<void> {
     // processor's 24 hours of waits for Claude, and Health's long-wait count (amendments 10f, 12a, 15a, 15f).
     const startedAt = systemClock.now();
     // Phase 3: off (the default) means no meeting dependency is built and no meeting call of any kind is made.
-    const meetings = env.MEETINGS_ENABLED ? await meetingDeps({ env, db, google, apiKey, prices, configs, log }) : undefined;
+    const meetings = env.MEETINGS_ENABLED ? await meetingDeps({ env, db, key, google, apiKey, prices, configs, log }) : undefined;
     // Phase 2b: the voice transcriber VOICE_STT_PROVIDER names (src/voiceDeps.ts, tested). A local engine that is not set
     // up, or no ffmpeg, never stops the service: voice notes are then kept, not transcribed, and Health says why.
     const voiceDeps = await buildVoiceDeps(env, { findFfmpeg, log });

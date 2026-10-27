@@ -786,6 +786,31 @@ It first prints the permissions it will ask for. Besides Google Drive (only the 
 
 Tick every box Google shows. If one is missing, `google-auth` says which, saves nothing, and you run it again. Until all three are granted, meetings stay paused and the status line says so.
 
+### 5b. More Google accounts that record meetings (optional)
+
+If meetings are recorded on other Google accounts too (for example sir's accounts at other companies), sign each one in once. Give each a short name of your choice: lower-case letters, digits or `-`, for example `company2`. In the waagent window:
+
+```bat
+npm run cli -- google-auth --account company2
+npm run cli -- google-auth --account company3
+```
+
+- Each command prints a link. Open it, **choose that account** in Google's account chooser, and tick every box.
+- An extra account gets the three **read-only** meeting permissions only. It never gets Drive file access: summaries still go to the mailbox account's **WA Agent** folder.
+- The agent then checks every account for new recordings. Each recording is matched to a client exactly as above. A meeting seen by two accounts is processed once.
+- Restart the service after adding or removing an account.
+- `meeting check` shows, at the end of each line, which account found the recording, for example `[company2]`.
+- To stop using an account: `npm run cli -- google-auth --account company2 --remove` (it asks first). Then also remove WA Agent at myaccount.google.com/permissions while signed in as that account.
+- If Google refuses one account's sign-in later, only that account's meetings wait. The status line names it: `Meetings: Google sign-in lost for company2`. Run `google-auth --account company2` again.
+
+**Accounts on other company domains need one Google Cloud change.** An **Internal** OAuth app (step 1) only lets accounts of the mailbox account's own company sign in. For accounts at other companies:
+
+1. In console.cloud.google.com, project `WA Agent`, open APIs & Services > OAuth consent screen. Set the user type to **External**, then **Publish app** (status "In production", not "Testing"; in Testing, sign-ins expire every 7 days).
+2. At sign-in Google warns "Google hasn't verified this app". It is your own private app: click **Advanced > Go to WA Agent**. Google may limit an unverified app to a small number of users, which is fine here.
+3. If a company's Google Workspace admin blocks outside apps, that account's sign-in is refused. The admin must allow the app (Admin console > Security > API controls), using the client ID from `.env`.
+
+**TEAM_EMAIL_DOMAINS:** list the other companies' domains there only if everyone at those companies counts as your own team. A meeting whose attendees are all in team domains is internal and is never processed.
+
 ### 6. Privacy steps (required before the first real meeting)
 
 1. **Tell clients.** Say in the agreement, or at onboarding, that recorded meetings are transcribed and summarised for the project tracker. Google Meet itself shows everyone that a meeting is being recorded.

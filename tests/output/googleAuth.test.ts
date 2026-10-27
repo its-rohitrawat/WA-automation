@@ -3,9 +3,14 @@ import { describe, expect, it } from 'vitest';
 import { parseEnv } from '../../src/config/env.ts';
 import { decrypt } from '../../src/crypto/envelope.ts';
 import {
+  checkAccountLabel,
   DRIVE_SCOPES,
   hasMeetingScopes,
   MEETING_SCOPES,
+  meetingAccounts,
+  meetingsReady,
+  removeMeetingAccount,
+  saveMeetingAccount,
   parseCallback,
   requestedScopes,
   runLoopbackConsent,
@@ -319,5 +324,83 @@ describe('runLoopbackConsent', () => {
       }),
     ).rejects.toThrow('boom');
     await expect(fetch(`${f.calls.redirectUri}/`)).rejects.toThrow();
+  });
+});
+
+describe('extra meeting accounts', () => {
+  const ALL = MEETING_SCOPES.join(' ');
+
+  it('checks the label before it goes into a kv key', () => {
+    expect(checkAccountLabel('company2')).toBe('company2');
+    for (const bad of ['main', '', 'Company2', 'a b', 'x:y', '../x', 'a'.repeat(21), '-x']) {
+      expect(() => checkAccountLabel(bad)).toThrow(/account name/);
+    }
+  });
+
+  it('stores each account under its own key, leaves the main token alone, and lists them in order', () => {
+    const db = seededDb();
+    const key = randomBytes(32);
+    new TokenStore(db, key).save(TOKEN);
+    saveMeetingAccount(db, key, 'company2', 'rt-2', ALL);
+    saveMeetingAccount(db, key, 'company3', 'rt-3', ALL);
+    saveMeetingAccount(db, key, 'company2', 'rt-2b', ALL); // signing in again replaces, keeps the place
+    expect(meetingAccounts(db)).toEqual(['company2', 'company3']);
+    expect(new TokenStore(db, key).load()).toBe(TOKEN);
+    expect(new TokenStore(db, key, 'company2').load()).toBe('rt-2b');
+    expect(new TokenStore(db, key, 'company3').load()).toBe('rt-3');
+    expect(getKv(db, 'google_refresh_token:company3')).not.toContain('rt-3');
+  });
+
+  it('meetingsReady: the main sign-in or any extra account with every meeting scope', () => {
+    const db = seededDb();
+    const key = randomBytes(32);
+    saveGrantedScopes(db, DRIVE_SCOPES[0]!);
+    expect(meetingsReady(db)).toBe(false);
+    saveMeetingAccount(db, key, 'company2', 'rt-2', MEETING_SCOPES.slice(1).join(' '));
+    expect(meetingsReady(db)).toBe(false);
+    saveMeetingAccount(db, key, 'company3', 'rt-3', ALL);
+    expect(meetingsReady(db)).toBe(true);
+    expect(hasMeetingScopes(db)).toBe(false); // the main sign-in alone is unchanged
+  });
+
+  it('remove forgets the token, scopes and list entry of that account only', () => {
+    const db = seededDb();
+    const key = randomBytes(32);
+    new TokenStore(db, key).save(TOKEN);
+    saveMeetingAccount(db, key, 'company2', 'rt-2', ALL);
+    saveMeetingAccount(db, key, 'company3', 'rt-3', ALL);
+    expect(removeMeetingAccount(db, 'company2')).toBe(true);
+    expect(removeMeetingAccount(db, 'company2')).toBe(false);
+    expect(meetingAccounts(db)).toEqual(['company3']);
+    expect(getKv(db, 'google_refresh_token:company2')).toBeUndefined();
+    expect(getKv(db, 'google_scopes:company2')).toBeUndefined();
+    expect(new TokenStore(db, key).load()).toBe(TOKEN);
+    expect(new TokenStore(db, key, 'company3').load()).toBe('rt-3');
+  });
+
+  it('a damaged account list reads as no extra accounts', () => {
+    const db = seededDb();
+    setKv(db, 'google_meeting_accounts', '{not json');
+    expect(meetingAccounts(db)).toEqual([]);
+    setKv(db, 'google_meeting_accounts', JSON.stringify(['ok-1', 'main', 'Bad', 7]));
+    expect(meetingAccounts(db)).toEqual(['ok-1']);
+  });
+
+  it('runLoopbackConsent with requireDrive false accepts the meeting scopes without Drive', async () => {
+    const f = fakeClient({ scope: ALL });
+    let url = '';
+    let ready!: () => void;
+    const urlReady = new Promise<void>((r) => (ready = r));
+    const promise = runLoopbackConsent({
+      clientId: 'id', clientSecret: 'secret', scopes: MEETING_SCOPES, requireDrive: false, createClient: f.createClient,
+      showUrl: (u) => {
+        url = u;
+        ready();
+      },
+    });
+    await urlReady;
+    await fetch(`${f.calls.redirectUri!}/?state=${new URL(url).searchParams.get('state')!}&code=abc`);
+    expect(await promise).toEqual({ refreshToken: 'rt-1', scope: ALL });
+    expect(f.calls.authUrlOpts!.scope).toEqual(MEETING_SCOPES);
   });
 });

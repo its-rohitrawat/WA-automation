@@ -54,6 +54,19 @@ describe('Health and meetings', () => {
     expect(h.workbookLine()).toEqual({ ok: false, text });
   });
 
+  it('names extra Google accounts whose sign-in was refused, below the pauses and above failed meetings', () => {
+    const { h } = setup();
+    h.setMeetings(meetings({ lostAccounts: ['company2', 'company3'] }, { failed: 1 }));
+    expect(h.line()).toEqual({
+      ok: false,
+      text: '⚠️ Meetings: Google sign-in lost for company2, company3. Run: npm run cli -- google-auth --account company2',
+    });
+    h.setMeetings(meetings({ paused: 'no_ffmpeg', lostAccounts: ['company2'] }));
+    expect(h.line().text).toBe(FFMPEG);
+    h.setMeetings(meetings({ lostAccounts: [] }));
+    expect(h.line().text).toBe(GREEN);
+  });
+
   it('counts meetings that could not be processed', () => {
     const { h } = setup();
     h.setMeetings(meetings({}, { failed: 1 }));

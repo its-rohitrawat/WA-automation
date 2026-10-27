@@ -3,8 +3,8 @@ import { createServer } from 'node:http';
 import { auth } from '@googleapis/drive';
 import type { Env } from '../config/env.ts';
 import { decrypt, encrypt } from '../crypto/envelope.ts';
-import type { Db } from '../store/db.ts';
-import { getKv, setKv } from '../store/kv.ts';
+import { tx, type Db } from '../store/db.ts';
+import { deleteKv, getKv, setKv } from '../store/kv.ts';
 
 /** Only files this app creates. */
 export const DRIVE_SCOPES: readonly string[] = ['https://www.googleapis.com/auth/drive.file'];
@@ -33,17 +33,80 @@ export function requestedScopes(env: Pick<Env, 'MEETINGS_ENABLED'>): string[] {
   return env.MEETINGS_ENABLED ? [...DRIVE_SCOPES, ...MEETING_SCOPES] : [...DRIVE_SCOPES];
 }
 
-// The scopes Google granted with the stored token, as Google wrote them. Not a secret.
-const SCOPES_KEY = 'google_scopes';
+/**
+ * The main sign-in has no label in kv: it owns the Drive tree and, with meetings on, finds its own meetings. Extra
+ * accounts (`google-auth --account <label>`) only find and read Meet recordings; each has its own token and scopes.
+ */
+export const MAIN_ACCOUNT = 'main';
+const ACCOUNT_LABEL = /^[a-z0-9][a-z0-9-]{0,19}$/;
+const ACCOUNTS_KEY = 'google_meeting_accounts';
 
-export function saveGrantedScopes(db: Db, scope: string): void {
-  setKv(db, SCOPES_KEY, scope);
+/** A label is checked before it goes into a kv key: 1-20 lower-case letters, digits or '-', and never 'main'. */
+export function checkAccountLabel(label: string): string {
+  if (!ACCOUNT_LABEL.test(label) || label === MAIN_ACCOUNT) {
+    throw new Error("The account name must be 1-20 lower-case letters, digits or '-', not 'main'. For example: company2");
+  }
+  return label;
 }
 
-/** True only when the stored sign-in recorded every meeting scope. A token from before Phase 3 has none recorded: Drive only. */
-export function hasMeetingScopes(db: Db): boolean {
-  const granted = new Set((getKv(db, SCOPES_KEY) ?? '').split(' '));
+/** The extra meeting accounts, in the order they were added. */
+export function meetingAccounts(db: Db): string[] {
+  try {
+    const v: unknown = JSON.parse(getKv(db, ACCOUNTS_KEY) ?? '[]');
+    return Array.isArray(v) ? v.filter((l): l is string => typeof l === 'string' && ACCOUNT_LABEL.test(l) && l !== MAIN_ACCOUNT) : [];
+  } catch {
+    return [];
+  }
+}
+
+function setMeetingAccounts(db: Db, labels: string[]): void {
+  setKv(db, ACCOUNTS_KEY, JSON.stringify(labels));
+}
+
+// The scopes Google granted with the stored token, as Google wrote them. Not a secret.
+const SCOPES_KEY = 'google_scopes';
+const scopesKey = (account?: string): string => (account === undefined ? SCOPES_KEY : `${SCOPES_KEY}:${checkAccountLabel(account)}`);
+
+export function saveGrantedScopes(db: Db, scope: string, account?: string): void {
+  setKv(db, scopesKey(account), scope);
+}
+
+/**
+ * True only when the sign-in (the main one, or the extra account) recorded every meeting scope. A token from before
+ * Phase 3 has none recorded: Drive only.
+ */
+export function hasMeetingScopes(db: Db, account?: string): boolean {
+  const granted = new Set((getKv(db, scopesKey(account)) ?? '').split(' '));
   return MEETING_SCOPES.every((s) => granted.has(s));
+}
+
+/** Meetings can run: the main sign-in or at least one extra account has every meeting scope. */
+export function meetingsReady(db: Db): boolean {
+  return hasMeetingScopes(db) || meetingAccounts(db).some((a) => hasMeetingScopes(db, a));
+}
+
+/** Stores an extra account's sign-in: its token, its scopes and its place in the list, all or nothing. */
+export function saveMeetingAccount(db: Db, key: Buffer, label: string, refreshToken: string, scope: string): void {
+  checkAccountLabel(label);
+  tx(db, () => {
+    new TokenStore(db, key, label).save(refreshToken);
+    saveGrantedScopes(db, scope, label);
+    const labels = meetingAccounts(db);
+    if (!labels.includes(label)) setMeetingAccounts(db, [...labels, label]);
+  });
+}
+
+/** Forgets an extra account here (its token, scopes and list entry). Google keeps the grant until it is removed there. */
+export function removeMeetingAccount(db: Db, label: string): boolean {
+  checkAccountLabel(label);
+  const labels = meetingAccounts(db);
+  if (!labels.includes(label)) return false;
+  tx(db, () => {
+    deleteKv(db, tokenKey(label));
+    deleteKv(db, scopesKey(label));
+    setMeetingAccounts(db, labels.filter((l) => l !== label));
+  });
+  return true;
 }
 
 export type OAuth2Client = InstanceType<typeof auth.OAuth2>;
@@ -53,11 +116,13 @@ export function createOAuthClient(clientId: string, clientSecret: string, redire
 }
 
 const TOKEN_KEY = 'google_refresh_token';
-const TOKEN_AAD = Buffer.from(TOKEN_KEY);
+/** The main token keeps its pre-multi-account key; an extra account's is `google_refresh_token:<label>`. */
+const tokenKey = (account?: string): string => (account === undefined ? TOKEN_KEY : `${TOKEN_KEY}:${checkAccountLabel(account)}`);
 
 export class TokenDecryptError extends Error {
-  constructor(options?: { cause?: unknown }) {
-    super("Stored Google sign-in cannot be read with this PC's key. Run: npm run cli -- google-auth", options);
+  constructor(options?: { cause?: unknown; account?: string }) {
+    const command = options?.account === undefined ? 'google-auth' : `google-auth --account ${options.account}`;
+    super(`Stored Google sign-in cannot be read with this PC's key. Run: npm run cli -- ${command}`, options);
     this.name = 'TokenDecryptError';
   }
 }
@@ -65,24 +130,32 @@ export class TokenDecryptError extends Error {
 export class TokenStore {
   readonly #db: Db;
   readonly #key: Buffer;
+  readonly #account: string | undefined;
+  readonly #kvKey: string;
+  /** The kv key is the AAD, so one account's token never opens as another's. */
+  readonly #aad: Buffer;
 
-  constructor(db: Db, key: Buffer) {
+  /** No account: the main sign-in. */
+  constructor(db: Db, key: Buffer, account?: string) {
     this.#db = db;
     // A purpose-specific key, so the master key itself never encrypts the token directly.
     this.#key = Buffer.from(hkdfSync('sha256', key, Buffer.alloc(0), 'google-refresh-token', 32));
+    this.#account = account;
+    this.#kvKey = tokenKey(account);
+    this.#aad = Buffer.from(this.#kvKey);
   }
 
   save(refreshToken: string): void {
-    setKv(this.#db, TOKEN_KEY, encrypt(this.#key, Buffer.from(refreshToken, 'utf8'), TOKEN_AAD).toString('base64'));
+    setKv(this.#db, this.#kvKey, encrypt(this.#key, Buffer.from(refreshToken, 'utf8'), this.#aad).toString('base64'));
   }
 
   load(): string | undefined {
-    const v = getKv(this.#db, TOKEN_KEY);
+    const v = getKv(this.#db, this.#kvKey);
     if (!v) return undefined;
     try {
-      return decrypt(this.#key, Buffer.from(v, 'base64'), TOKEN_AAD).toString('utf8');
+      return decrypt(this.#key, Buffer.from(v, 'base64'), this.#aad).toString('utf8');
     } catch (e) {
-      throw new TokenDecryptError({ cause: e });
+      throw new TokenDecryptError({ cause: e, ...(this.#account === undefined ? {} : { account: this.#account }) });
     }
   }
 }
@@ -136,6 +209,8 @@ export async function runLoopbackConsent(o: {
   scopes: readonly string[];
   showUrl: (url: string) => void;
   timeoutMs?: number;
+  /** Default true. False for an extra meetings account, which never gets Drive file access. */
+  requireDrive?: boolean;
   /** Test seam: build the OAuth client for the given redirect URI. */
   createClient?: (redirectUri: string) => ConsentClient;
 }): Promise<ConsentResult> {
@@ -173,7 +248,7 @@ export async function runLoopbackConsent(o: {
           if (!tokens.refresh_token) throw new ConsentRefused(NO_REFRESH);
           const scope = tokens.scope ?? '';
           const granted = new Set(scope.split(' '));
-          if (!granted.has(DRIVE_SCOPES[0]!)) throw new ConsentRefused(NO_DRIVE_SCOPE);
+          if (o.requireDrive !== false && !granted.has(DRIVE_SCOPES[0]!)) throw new ConsentRefused(NO_DRIVE_SCOPE);
           // Every requested scope, or no result at all (so the caller saves nothing).
           const missing = o.scopes.filter((s) => !granted.has(s));
           if (missing.length > 0) throw new ConsentRefused(noMeetingScope(missing));

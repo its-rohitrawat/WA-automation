@@ -9,7 +9,10 @@ import { DpapiKeyProvider, type KeyProvider } from '../crypto/keyProvider.ts';
 import { MediaRefSealer } from '../media/ref.ts';
 import { readHealthSnapshot } from '../health/health.ts';
 import { MAX_FORGET_ATTEMPTS } from '../meetings/sttForget.ts';
-import { requestedScopes, runLoopbackConsent, saveGrantedScopes, scopeName, TokenStore, type ConsentClient } from '../output/googleAuth.ts';
+import {
+  checkAccountLabel, MEETING_SCOPES, meetingAccounts, removeMeetingAccount, requestedScopes, runLoopbackConsent, saveGrantedScopes,
+  saveMeetingAccount, scopeName, TokenStore, type ConsentClient,
+} from '../output/googleAuth.ts';
 import { describeReport, isStaleSending, reasonText } from '../report/scheduler.ts';
 import { latestBatches } from '../store/batches.ts';
 import { listClients, syncClients } from '../store/clients.ts';
@@ -611,6 +614,58 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
       return undefined;
     });
     out(answer ?? 'Requested. The service sends it within about a minute. Check with: npm run cli -- report status');
+  } finally {
+    db.close();
+  }
+}
+
+const RESTART = 'If the WA Agent service is running, restart it so it uses the change: net stop wa-agent, then net start wa-agent';
+
+/**
+ * `google-auth --account <label>`: signs in one more Google account that records Meet meetings. It gets the three
+ * read-only meeting permissions only, never Drive file access: summaries still go to the main account's Drive.
+ * With --remove: forgets that account here, after a 'yes'.
+ */
+export async function googleAccountCommand(opts: { account: string; remove: boolean }, deps: CliDeps): Promise<void> {
+  const { env, out } = deps;
+  const label = checkAccountLabel(opts.account.trim());
+  if (!opts.remove && !env.MEETINGS_ENABLED) {
+    throw new Error('Extra Google accounts are for meetings. Set MEETINGS_ENABLED=true in .env first.');
+  }
+  const key = deps.keyProvider.getKey();
+  const db = openDb(trackerDbPath(env.DATA_DIR));
+  try {
+    if (opts.remove) {
+      if (!meetingAccounts(db).includes(label)) {
+        out(`No Google account named ${label} is connected. Connected: ${meetingAccounts(db).join(', ') || 'none besides the main one'}.`);
+        return;
+      }
+      if (!(await deps.confirm(`Forget Google account ${label} here? Its meetings are no longer found. Type yes to continue: `))) {
+        out('Nothing was changed.');
+        return;
+      }
+      removeMeetingAccount(db, label);
+      out(`Google account ${label} forgotten here. To end its access at Google too, remove WA Agent at myaccount.google.com/permissions while signed in as that account.`);
+      out(RESTART);
+      return;
+    }
+    out(`Google will ask the account you sign in with (${label}) to allow:`);
+    for (const s of MEETING_SCOPES) out(`  - ${scopeName(s)}`);
+    out('Keep every box ticked.\n');
+    const { refreshToken, scope } = await runLoopbackConsent({
+      clientId: requireKey(env, 'GOOGLE_OAUTH_CLIENT_ID'),
+      clientSecret: requireKey(env, 'GOOGLE_OAUTH_CLIENT_SECRET'),
+      scopes: MEETING_SCOPES,
+      requireDrive: false,
+      createClient: deps.createConsentClient,
+      showUrl: (url) => {
+        out(`Open this link in a browser, and choose the Google account that records the meetings for ${label}:\n`);
+        out(url);
+      },
+    });
+    saveMeetingAccount(db, key, label, refreshToken, scope);
+    out(`Google account ${label} connected for meetings (read only). Connected accounts: main, ${meetingAccounts(db).join(', ')}.`);
+    out(RESTART);
   } finally {
     db.close();
   }
