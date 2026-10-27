@@ -105,7 +105,7 @@
   - the rate limiter allows exactly the capacity and then 429, and refills over time;
   - audit list order and paging, and the 90-day purge.
 
-## Task 4: Owner sign-in (`src/web/auth/oidc.ts`, routes in `src/web/routes/auth.ts`)
+## Task 4: Owner sign-in (`src/web/oidc.ts` (built there, not in `src/web/auth/`), routes in `src/web/routes/auth.ts`)
 
 - **`GET /dashboard/auth/login`:**
   - creates a pending sign-in record in memory: `state`, `nonce` and PKCE verifier, kept for 10 minutes and tied to a short `wa_signin` cookie (HttpOnly, Lax, `Path=/dashboard/auth`).
