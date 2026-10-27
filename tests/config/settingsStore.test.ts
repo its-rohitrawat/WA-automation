@@ -97,7 +97,7 @@ describe('SettingsStore.set', () => {
     expect(audits).toEqual([{ actor: OWNER, event: 'settings.reportRecipient', kind: 'config', detail: 'Morning briefing number changed to …9999' }]);
     expect(JSON.stringify(audits)).not.toContain('70123');
     expect(store.view()).toEqual({
-      reportEnabled: false, reportDays: 'weekdays', recipientMasked: '…9999',
+      reportEnabled: false, reportDays: 'weekdays', recipientMasked: '…9999', sendAt: '06:00', deadline: '12:00',
       source: { reportEnabled: 'env', reportDays: 'env', reportRecipient: 'dashboard' },
     });
     expect(JSON.stringify(store.view())).not.toContain(OTHER);

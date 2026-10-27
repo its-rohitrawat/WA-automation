@@ -10,6 +10,15 @@ import { mountTasks } from './tasks.js';
 import { mountTracker } from './tracker.js';
 import { mountUsage } from './usage.js';
 
+// The screens' own styles (views-work.css), loaded once from the same origin (the CSP allows style-src 'self').
+if (!document.querySelector('link[data-views-work]')) {
+  const link = document.createElement('link');
+  link.rel = 'stylesheet';
+  link.href = '/dashboard/static/views-work.css';
+  link.dataset.viewsWork = '';
+  document.head.append(link);
+}
+
 SCREEN_MOUNTS.set('tasks', mountTasks);
 SCREEN_MOUNTS.set('meetings', mountMeetings);
 SCREEN_MOUNTS.set('activity', mountActivity);

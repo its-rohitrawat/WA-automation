@@ -1,7 +1,7 @@
 // Activity (D4 Task 6): filter chips kept in the address, items grouped by India day, newest first, and "Show older"
 // with the API's cursor. Titles and details carry task and meeting titles: esc() on everything.
 import { get } from '../api.js';
-import { esc, icon } from '../dom.js';
+import { esc, icon, toast } from '../dom.js';
 import { clock } from '../format.js';
 import { empty, failed, listen, loading, setQuery } from './ui.js';
 import { groupByIstDay, readList } from './workLib.js';
@@ -38,17 +38,23 @@ export function mountActivity(ctx) {
     ctx.redraw(chips + body);
   };
 
+  let asked = 0;
   /** @param {boolean} [more] */
   async function load(more = false) {
     if (!more && older) return; // while older pages are open, the refresh would drop them
+    const mine = ++asked;
     try {
       const r = await get(`/activity?kind=${encodeURIComponent(kind)}&limit=50${more && next ? `&before=${encodeURIComponent(next)}` : ''}`);
-      if (!ctx.live()) return;
+      if (!ctx.live() || mine !== asked) return; // an answer for an earlier filter is dropped
       items = more && items ? [...items, ...r.items] : r.items;
       next = r.next;
       err = null;
     } catch (e) {
-      if (!ctx.live()) return;
+      if (!ctx.live() || mine !== asked) return;
+      if (more) {
+        toast('Older activity could not be loaded. Try again.');
+        return;
+      }
       err = e;
     }
     draw();
@@ -71,7 +77,10 @@ export function mountActivity(ctx) {
         void load();
         return;
       }
-      if (t.closest('[data-retry]')) return void load();
+      if (t.closest('[data-retry]')) {
+        older = false;
+        return void load();
+      }
       if (t.closest('[data-older]')) {
         older = true;
         void load(true);

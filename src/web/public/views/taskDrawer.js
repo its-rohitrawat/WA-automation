@@ -48,7 +48,7 @@ export function openTaskDrawer(code, o) {
 
   const show = (/** @type {{ editing?: boolean, problem?: { field?: string, message: string } | null }} */ state = {}) => {
     if (!t) return;
-    const d = refillDrawer(render(t, state));
+    const d = refillDrawer(drawer, render(t, state));
     if (!d) return;
     if (state.editing) $(`[name="${state.problem?.field === 'deadline' ? 'deadline' : 'assignedTo'}"]`, d)?.focus();
   };
@@ -58,7 +58,7 @@ export function openTaskDrawer(code, o) {
       t = await get(path);
       show();
     } catch (e) {
-      refillDrawer(`<div class="dr-head"><div><span class="code">${esc(code)}</span></div><button class="icon-btn" type="button" data-close aria-label="Close">${icon('close', 18)}</button></div><div class="dr-body">${failed(e)}</div>`);
+      refillDrawer(drawer, `<div class="dr-head"><div><span class="code">${esc(code)}</span></div><button class="icon-btn" type="button" data-close aria-label="Close">${icon('close', 18)}</button></div><div class="dr-body">${failed(e)}</div>`);
     }
   }
 

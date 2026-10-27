@@ -30,6 +30,9 @@ export interface SettingsView {
   reportEnabled: boolean;
   reportDays: ReportDays;
   recipientMasked: string | null;
+  /** The earliest send time and the catch-up deadline, IST "HH:MM" (.env only). */
+  sendAt: string;
+  deadline: string;
   source: Record<SettingKey, SettingSource>;
 }
 
@@ -110,7 +113,8 @@ export class SettingsStore {
   view(): SettingsView {
     const s = this.get();
     return {
-      reportEnabled: s.reportEnabled, reportDays: s.reportDays, recipientMasked: s.reportRecipient ? maskNumber(s.reportRecipient) : null, source: s.source,
+      reportEnabled: s.reportEnabled, reportDays: s.reportDays, recipientMasked: s.reportRecipient ? maskNumber(s.reportRecipient) : null,
+      sendAt: this.#env.REPORT_TIME, deadline: this.#env.REPORT_DEADLINE, source: s.source,
     };
   }
 

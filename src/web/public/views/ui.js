@@ -16,6 +16,8 @@ export function listen(view, handlers) {
   return () => {
     ac.abort();
     closeDrawer(true);
+    // A confirmation still open when the screen is left (the back button) is answered no: it never sends anything.
+    for (const no of [...dialogs]) no();
   };
 }
 
@@ -44,17 +46,72 @@ export function setQuery(search) {
   if (next !== location.pathname + location.search) history.replaceState(history.state, '', next);
 }
 
-// ---------- the drawer ----------
+// ---------- focus: a stack of dialogs, the top one holds the keyboard ----------
 
-/** @type {{ drawer: HTMLElement, scrim: HTMLElement, back: Element | null } | null} */
-let open = null;
+/** @type {HTMLElement[]} */
+const layers = [];
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /**
- * Opens a side drawer with this markup (already escaped by the caller). Esc, the scrim and any [data-close] close it;
- * focus moves in and returns to where it was. @param {string} html @returns {HTMLElement}
+ * Makes `box` the top layer: Tab and Shift+Tab cycle inside it, Escape anywhere calls onEscape, and what is behind it
+ * (the shell, and a drawer under a dialog) is inert. Returns the function that undoes it.
+ * @param {HTMLElement} box @param {() => void} onEscape
+ */
+function holdFocus(box, onEscape) {
+  const behind = [/** @type {HTMLElement | null} */ (document.querySelector('#app')), ...layers].filter((x) => x !== null);
+  const was = behind.map((el) => el.inert);
+  for (const el of behind) el.inert = true;
+  layers.push(box);
+  const onKey = (/** @type {KeyboardEvent} */ e) => {
+    if (layers.at(-1) !== box) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      onEscape();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    const f = $$(FOCUSABLE, box).filter((el) => el.getClientRects().length > 0);
+    if (f.length === 0) {
+      e.preventDefault();
+      return;
+    }
+    const first = f[0];
+    const last = f[f.length - 1];
+    const at = document.activeElement;
+    if (e.shiftKey && (at === first || !box.contains(at))) {
+      e.preventDefault();
+      last?.focus();
+    } else if (!e.shiftKey && (at === last || !box.contains(at))) {
+      e.preventDefault();
+      first?.focus();
+    }
+  };
+  document.addEventListener('keydown', onKey, true);
+  return () => {
+    document.removeEventListener('keydown', onKey, true);
+    const i = layers.indexOf(box);
+    if (i >= 0) layers.splice(i, 1);
+    behind.forEach((el, k) => (el.inert = was[k] ?? false));
+  };
+}
+
+// ---------- the drawer ----------
+
+/** @type {{ drawer: HTMLElement, scrim: HTMLElement, back: Element | null, release: () => void } | null} */
+let open = null;
+
+const wireClose = (/** @type {HTMLElement} */ drawer) => {
+  for (const b of $$('[data-close]', drawer)) b.addEventListener('click', () => closeDrawer());
+};
+
+/**
+ * Opens a side drawer with this markup (already escaped by the caller) and returns it: the handle refillDrawer needs.
+ * Esc, the scrim and any [data-close] close it; focus moves in, stays in, and returns to where it was.
+ * @param {string} html @returns {HTMLElement}
  */
 export function openDrawer(html) {
   closeDrawer(true);
+  const back = document.activeElement;
   const scrim = document.createElement('div');
   scrim.className = 'scrim';
   const drawer = document.createElement('aside');
@@ -64,18 +121,10 @@ export function openDrawer(html) {
   drawer.innerHTML = html;
   document.body.append(scrim, drawer);
   paint(drawer);
-  open = { drawer, scrim, back: document.activeElement };
+  wireClose(drawer);
   scrim.addEventListener('click', () => closeDrawer());
-  for (const b of $$('[data-close]', drawer)) b.addEventListener('click', () => closeDrawer());
-  drawer.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeDrawer();
-  });
-  const h = drawer.querySelector('h2');
-  if (h) {
-    h.setAttribute('tabindex', '-1');
-    drawer.setAttribute('aria-labelledby', (h.id ||= `dr-${Date.now()}`));
-    h.focus({ preventScroll: true });
-  }
+  open = { drawer, scrim, back, release: holdFocus(drawer, () => closeDrawer()) };
+  focusHeading(drawer);
   if (gsap && !reduceMotion) {
     gsap.fromTo(scrim, { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.2 });
     gsap.fromTo(drawer, { xPercent: 100 }, { xPercent: 0, duration: 0.42, ease: 'expo.out' });
@@ -83,20 +132,39 @@ export function openDrawer(html) {
   return drawer;
 }
 
-/** Replaces the open drawer's content (after an action), keeping it open. @param {string} html */
-export function refillDrawer(html) {
-  if (!open) return null;
-  open.drawer.innerHTML = html;
-  paint(open.drawer);
-  for (const b of $$('[data-close]', open.drawer)) b.addEventListener('click', () => closeDrawer());
-  return open.drawer;
+/** @param {HTMLElement} drawer */
+function focusHeading(drawer) {
+  const h = drawer.querySelector('h2');
+  if (!h) return;
+  h.setAttribute('tabindex', '-1');
+  drawer.setAttribute('aria-labelledby', (h.id ||= `dr-${Date.now()}`));
+  h.focus({ preventScroll: true });
 }
+
+/**
+ * Replaces the content of this drawer, if it is still the one open: an answer that arrives after its drawer was closed
+ * or replaced draws nothing (and must change nothing). Returns the drawer, or null.
+ * @param {HTMLElement} handle @param {string} html
+ */
+export function refillDrawer(handle, html) {
+  if (!open || open.drawer !== handle) return null;
+  const hadFocus = handle.contains(document.activeElement);
+  handle.innerHTML = html;
+  paint(handle);
+  wireClose(handle);
+  if (hadFocus || !handle.contains(document.activeElement)) focusHeading(handle);
+  return handle;
+}
+
+/** Whether this drawer is still the one open. @param {HTMLElement} handle */
+export const isOpen = (handle) => open?.drawer === handle;
 
 /** Closes the drawer; `instant` skips the animation (a new one is opening, or the screen is left). @param {boolean} [instant] */
 export function closeDrawer(instant = false) {
   if (!open) return;
-  const { drawer, scrim, back } = open;
+  const { drawer, scrim, back, release } = open;
   open = null;
+  release();
   const done = () => {
     drawer.remove();
     scrim.remove();
@@ -111,9 +179,13 @@ export function closeDrawer(instant = false) {
 
 // ---------- the confirm dialog ----------
 
+/** The open confirm dialogs, each closed as "no" by its function. @type {Set<() => void>} */
+const dialogs = new Set();
+
 /**
  * Asks before something that costs money or reaches the founder. Resolves true for the confirm button, false for
- * Cancel, Esc or the scrim. Title and text are fixed words from the screen, escaped all the same.
+ * Cancel, Esc or the scrim. Title and text are fixed words from the screen, escaped all the same. While it is open,
+ * everything behind it (a drawer too) is inert, so a second dialog cannot be opened under it.
  * @param {{ eyebrow?: string, title: string, text: string, yes: string }} o @returns {Promise<boolean>}
  */
 export function confirmDialog(o) {
@@ -129,18 +201,23 @@ export function confirmDialog(o) {
       <p class="m-p">${esc(o.text)}</p><div class="m-foot"><button class="btn btn-ghost" type="button" data-no>Cancel</button><button class="btn btn-primary" type="button" data-yes>${esc(o.yes)}</button></div>`;
     m.setAttribute('aria-labelledby', 'm-title');
     document.body.append(scrim, m);
+    let done = false;
     const finish = (/** @type {boolean} */ v) => {
+      if (done) return;
+      done = true;
+      dialogs.delete(no);
+      release();
       m.remove();
       scrim.remove();
       if (back instanceof HTMLElement && document.contains(back)) back.focus({ preventScroll: true });
       resolve(v);
     };
+    const no = () => finish(false);
+    dialogs.add(no);
+    const release = holdFocus(m, no);
     $('[data-yes]', m).addEventListener('click', () => finish(true));
     $('[data-no]', m).addEventListener('click', () => finish(false));
     scrim.addEventListener('click', () => finish(false));
-    m.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') finish(false);
-    });
     $('[data-no]', m).focus();
   });
 }

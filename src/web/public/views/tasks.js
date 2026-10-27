@@ -19,9 +19,19 @@ const SORTABLE = [['code', 'Task'], ['client', 'Client'], ['owner', 'Owner'], ['
 export function mountTasks(ctx) {
   /** @type {TaskFilter} */
   const f = taskQueryFromSearch(location.search);
-  // The top search box sends the owner here with what they typed.
+  // The top search box sends the owner here with what they typed: it is taken once, into the address, and emptied, so
+  // it never comes back on a later visit.
   const top = /** @type {HTMLInputElement | null} */ (document.querySelector('#q'));
-  if (!f.q && top && top.value.trim()) f.q = top.value.trim().slice(0, 200);
+  const takeTop = () => {
+    const v = top?.value.trim().slice(0, 200) ?? '';
+    if (top) top.value = '';
+    return v;
+  };
+  const fromTop = takeTop();
+  if (fromTop) {
+    f.q = fromTop;
+    setQuery(taskQueryToSearch(f));
+  }
   /** @type {{ total: number, rows: TaskRow[] } | null} */
   let data = null;
   /** @type {unknown} */
@@ -47,7 +57,7 @@ export function mountTasks(ctx) {
 
   const th = (/** @type {string} */ k, /** @type {string} */ l) => {
     const on = f.sort === k;
-    return `<th aria-sort="${on ? (f.dir === 'asc' ? 'ascending' : 'descending') : 'none'}"><button type="button" data-sort="${esc(k)}">${esc(l)}${on ? icon('sort', 13) : ''}</button></th>`;
+    return `<th aria-sort="${on ? (f.dir === 'asc' ? 'ascending' : 'descending') : 'none'}"><button type="button" data-sort="${esc(k)}"${on && f.dir === 'desc' ? ' class="sort-desc"' : ''}>${esc(l)}${on ? icon('sort', 13) : ''}</button></th>`;
   };
 
   const table = () => {
@@ -116,12 +126,13 @@ export function mountTasks(ctx) {
   void lists();
 
   const open = (/** @type {string} */ code) => openTaskDrawer(code, { onChange: () => void load() });
-  return listen(ctx.view, {
+  const stop = listen(ctx.view, {
     input: (e) => {
       const el = /** @type {HTMLInputElement} */ (e.target);
       if (el.dataset.f !== 'q') return;
       clearTimeout(typing);
       typing = setTimeout(() => {
+        if (!ctx.live()) return;
         const v = el.value.trim().slice(0, 200);
         if (v) f.q = v;
         else delete f.q;
@@ -167,4 +178,20 @@ export function mountTasks(ctx) {
       }
     },
   });
+  // The top search box while already on Tasks: the shell does not show Tasks again, so the Enter is taken here.
+  const onTopKey = (/** @type {KeyboardEvent} */ e) => {
+    if (e.key !== 'Enter' || e.target !== top || !ctx.live()) return;
+    const v = takeTop();
+    if (!v) return;
+    f.q = v;
+    const box = /** @type {HTMLInputElement | null} */ (ctx.view.querySelector('[data-f="q"]'));
+    if (box) box.value = v;
+    changed();
+  };
+  document.addEventListener('keydown', onTopKey);
+  return () => {
+    document.removeEventListener('keydown', onTopKey);
+    clearTimeout(typing); // a search typed just before leaving must not reach another screen's address
+    stop();
+  };
 }

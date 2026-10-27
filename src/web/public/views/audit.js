@@ -1,7 +1,7 @@
 // Audit logs (D5 Task 5): filter tabs kept in the address, the table (cards on phones), and "Show older" with the
 // API's cursor. Rows hold who did what; emails of anyone but the owners arrive masked.
 import { get } from '../api.js';
-import { esc } from '../dom.js';
+import { esc, toast } from '../dom.js';
 import { when } from '../format.js';
 import { empty, failed, listen, loading, pill, setQuery } from './ui.js';
 import { auditPill, readList } from './workLib.js';
@@ -45,16 +45,22 @@ export function mountAudit(ctx) {
     ctx.redraw(tabs + body);
   };
 
+  let asked = 0;
   /** @param {boolean} [more] */
   async function load(more = false) {
+    const mine = ++asked;
     try {
       const r = await get(`/audit?limit=50${kind === 'all' ? '' : `&kind=${encodeURIComponent(kind)}`}${more && next ? `&before=${encodeURIComponent(next)}` : ''}`);
-      if (!ctx.live()) return;
+      if (!ctx.live() || mine !== asked) return; // an answer for an earlier tab is dropped
       rows = more && rows ? [...rows, ...r.rows] : r.rows;
       next = r.next;
       err = null;
     } catch (e) {
-      if (!ctx.live()) return;
+      if (!ctx.live() || mine !== asked) return;
+      if (more) {
+        toast('Older entries could not be loaded. Try again.');
+        return;
+      }
       err = e;
     }
     draw();

@@ -7,10 +7,10 @@ import { confirmDialog, errorText, failed, listen, loading, pill } from './ui.js
 
 /** @typedef {import('./registry.js').ScreenCtx} ScreenCtx */
 
-/** @param {{ email: string, createdAt: string, expiresAt: string }} s */
-function render(s) {
+/** @param {{ email: string, createdAt: string, expiresAt: string }} s @param {string} name the owner's Google name, from the shell's account menu */
+function render(s, name) {
   return `<div class="grid">
-    <section class="card col-6"><div class="card-head"><h3>Owner</h3></div><div class="owner-row"><div class="avatar avatar-lg">${esc(initials('', s.email))}</div><div><b>${esc(s.email)}</b><div class="muted-p">Google sign-in</div></div></div>
+    <section class="card col-6"><div class="card-head"><h3>Owner</h3></div><div class="owner-row"><div class="avatar avatar-lg">${esc(initials(name, s.email))}</div><div><b>${esc(name || s.email)}</b><div class="muted-p">${esc(name ? `${s.email} · Google` : 'Google sign-in')}</div></div></div>
       <div class="note">${icon('info', 16)}<span>Owners are the Google emails listed on the Mac in .env (DASHBOARD_OWNER_EMAILS). Adding an owner is done there.</span></div></section>
     <section class="card col-6"><div class="card-head"><h3>This session</h3>${pill({ cls: 'p-done', label: 'Active' })}</div><dl class="kv"><dt>Signed in</dt><dd>${esc(when(s.createdAt))}</dd><dt>Expires</dt><dd>${esc(when(s.expiresAt))}, or after 24 hours unused</dd></dl>
       <div class="row-gap row-top"><button class="btn btn-ghost" type="button" data-signout>${icon('logout', 16)}Sign out</button><button class="btn btn-ghost" type="button" data-everywhere>${icon('logout', 16)}Sign out everywhere</button></div></section>
@@ -24,7 +24,7 @@ export function mountSettings(ctx) {
   const load = async () => {
     try {
       const s = await get('/session');
-      if (ctx.live()) ctx.redraw(render(s));
+      if (ctx.live()) ctx.redraw(render(s, ($('#me-name')?.textContent ?? '').trim()));
     } catch (e) {
       if (ctx.live()) ctx.redraw(failed(e));
     }

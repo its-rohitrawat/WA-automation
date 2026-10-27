@@ -39,20 +39,22 @@ export function mountMeetings(ctx) {
     if (err && !data) body = failed(err);
     else if (!data) body = loading('Loading meetings…');
     else if (!data.rows.length) body = `<div class="card">${empty(view === 'all' ? 'No meetings yet.' : 'Nothing here.')}</div>`;
-    else body = `<div class="card"><div class="list">${data.rows.map((m) => `<button type="button" class="li li-btn" data-meet="${m.id}"><div class="ic">${icon('video', 17)}</div>
+    else body = `<div class="card"><div class="list">${data.rows.map((m) => `<button type="button" class="li li-btn" data-meet="${Number(m.id)}"><div class="ic">${icon('video', 17)}</div>
         <div><b>${esc(titleOf(m))}</b><small>${esc(m.client ? m.client.name : 'No client yet')}${m.account ? ` · ${esc(m.account)}` : ''}${m.minutes === null ? '' : ` · ${esc(m.minutes)} min`}</small></div>
         ${pill(m.status === 'queued' ? { cls: 'p-open', label: m.stageLabel } : meetingPill(m.status))}<time>${esc(when(m.when))}</time></button>`).join('')}</div></div>`;
     ctx.redraw(seg + body);
   };
 
+  let asked = 0;
   async function load() {
+    const mine = ++asked;
     try {
       const r = await get(`/meetings?view=${encodeURIComponent(view)}`);
-      if (!ctx.live()) return;
+      if (!ctx.live() || mine !== asked) return; // an answer for an earlier tab is dropped
       data = r;
       err = null;
     } catch (e) {
-      if (!ctx.live()) return;
+      if (!ctx.live() || mine !== asked) return;
       err = e;
     }
     draw();
@@ -60,7 +62,8 @@ export function mountMeetings(ctx) {
 
   draw();
   ctx.poll(load, POLL_MS);
-  void get('/overview').then((ov) => {
+  // The clients for Assign; a drawer waits for them, so its select is never empty for want of them.
+  const clientsReady = get('/overview').then((ov) => {
     clients = (ov?.byClient ?? []).map((/** @type {{ client: { code: string, name: string } }} */ c) => c.client);
   }).catch(() => {});
 
@@ -78,7 +81,7 @@ export function mountMeetings(ctx) {
       }
       if (t.closest('[data-retry]')) return void load();
       const row = /** @type {HTMLElement | null} */ (t.closest('[data-meet]'));
-      if (row?.dataset.meet) openMeeting(Number(row.dataset.meet), () => clients, () => void load());
+      if (row?.dataset.meet) openMeeting(Number(row.dataset.meet), () => clients, clientsReady, () => void load());
     },
   });
 }
@@ -106,15 +109,16 @@ function render(m, clients) {
       <button class="btn btn-ghost" type="button" data-close>Close</button></div>`;
 }
 
-/** @param {number} id @param {() => { code: string, name: string }[]} clients @param {() => void} onChange */
-function openMeeting(id, clients, onChange) {
+/** @param {number} id @param {() => { code: string, name: string }[]} clients @param {Promise<void>} clientsReady @param {() => void} onChange */
+function openMeeting(id, clients, clientsReady, onChange) {
   const drawer = openDrawer(`<div class="dr-head"><div><h2>Meeting</h2></div><button class="icon-btn" type="button" data-close aria-label="Close">${icon('close', 18)}</button></div><div class="dr-body">${loading('Loading the meeting…')}</div>`);
   let busy = false;
   const load = async () => {
     try {
-      refillDrawer(render(await get(`/meetings/${id}`), clients()));
+      const [m] = await Promise.all([get(`/meetings/${id}`), clientsReady]);
+      refillDrawer(drawer, render(m, clients()));
     } catch (e) {
-      refillDrawer(`<div class="dr-head"><div><h2>Meeting</h2></div><button class="icon-btn" type="button" data-close aria-label="Close">${icon('close', 18)}</button></div><div class="dr-body">${failed(e)}</div>`);
+      refillDrawer(drawer, `<div class="dr-head"><div><h2>Meeting</h2></div><button class="icon-btn" type="button" data-close aria-label="Close">${icon('close', 18)}</button></div><div class="dr-body">${failed(e)}</div>`);
     }
   };
   drawer.addEventListener('click', async (e) => {
@@ -134,7 +138,7 @@ function openMeeting(id, clients, onChange) {
     busy = true;
     try {
       const r = await post(`/meetings/${id}/${action}`, body);
-      refillDrawer(render(r.meeting, clients()));
+      refillDrawer(drawer, render(r.meeting, clients()));
       toast(r.warning ? `Done. ${r.warning}.` : 'Done.');
       onChange();
     } catch (err) {
