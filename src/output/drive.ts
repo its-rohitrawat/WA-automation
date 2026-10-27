@@ -5,6 +5,7 @@ import { getKv, setKv } from '../store/kv.ts';
 import type { Logger } from '../util/logger.ts';
 import { isAuthFailure } from './authFailure.ts';
 import type { OAuth2Client } from './googleAuth.ts';
+import { TRACKER_ID_KEY } from './trackerKey.ts';
 import { XLSX_MIME } from './workbook.ts';
 
 export class DriveNotFoundError extends Error {
@@ -287,7 +288,7 @@ export class DrivePublisher {
       root = await api.createFolder('WA Agent');
       setKv(db, 'drive_root_id', root);
     }
-    const tracker = getKv(db, 'drive_tracker_id');
+    const tracker = getKv(db, TRACKER_ID_KEY);
     if (tracker) {
       try {
         await api.updateFile(tracker, XLSX_MIME, body);
@@ -297,13 +298,13 @@ export class DrivePublisher {
       }
     }
     try {
-      setKv(db, 'drive_tracker_id', await api.createFile('Tracker.xlsx', XLSX_MIME, body, root));
+      setKv(db, TRACKER_ID_KEY, await api.createFile('Tracker.xlsx', XLSX_MIME, body, root));
     } catch (e) {
       if (!(e instanceof DriveNotFoundError)) throw e;
       // The root folder was removed: re-create it and retry once, in the same run.
       root = await api.createFolder('WA Agent');
       setKv(db, 'drive_root_id', root);
-      setKv(db, 'drive_tracker_id', await api.createFile('Tracker.xlsx', XLSX_MIME, body, root));
+      setKv(db, TRACKER_ID_KEY, await api.createFile('Tracker.xlsx', XLSX_MIME, body, root));
     }
   }
 }

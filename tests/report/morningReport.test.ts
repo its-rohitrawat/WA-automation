@@ -55,12 +55,14 @@ describe('buildShortMorningText', () => {
     expect(text(db)).toBe(`Good morning. 0 open tasks, 0 overdue. Today's tracker: ${LINK}`);
   });
 
-  it('counts maybe-done tasks as open, like the tracker does', () => {
+  it('counts maybe-done tasks as open, like the tracker does, on our side and on the client side', () => {
     const db = seededDb();
     const maybe = createTask(db, task({ title: 'Maybe finished', deadline: '2026-10-22' }), NOW.toISOString());
     setTaskStatus(db, maybe.id, 'maybe_done', TODAY, NOW.toISOString(), 'ai');
+    const clientMaybe = createTask(db, task({ side: 'client', title: 'Client maybe', deadline: '2026-10-22' }), NOW.toISOString());
+    setTaskStatus(db, clientMaybe.id, 'maybe_done', TODAY, NOW.toISOString(), 'ai');
     createTask(db, task({ title: 'Other' }), NOW.toISOString());
-    expect(text(db)).toBe(`Good morning. 2 open tasks, 1 overdue. Today's tracker: ${LINK}`);
+    expect(text(db)).toBe(`Good morning. 3 open tasks, 2 overdue. Today's tracker: ${LINK}`);
   });
 
   it('leaves inactive clients out of the totals', () => {
@@ -96,7 +98,6 @@ describe('trackerLink', () => {
     const db = seededDb();
     setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
     expect(trackerLink(db)).toBe(LINK);
-    expect(TRACKER_ID_KEY).toBe('drive_tracker_id'); // the key src/output/drive.ts writes
   });
 
   it('accepts an id of exactly 10 safe characters', () => {

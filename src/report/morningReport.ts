@@ -1,3 +1,4 @@
+import { TRACKER_ID_KEY } from '../output/trackerKey.ts';
 import { isOverdue, type TrackerView } from '../output/view.ts';
 import type { Db } from '../store/db.ts';
 import { getKv } from '../store/kv.ts';
@@ -43,8 +44,7 @@ export function taskNotes(t: TaskRow, today: string): string[] {
   return notes;
 }
 
-/** The kv key under which src/output/drive.ts stores the Drive file id of Tracker.xlsx once it has uploaded it. */
-export const TRACKER_ID_KEY = 'drive_tracker_id';
+export { TRACKER_ID_KEY };
 
 /** A Drive file id: letters, digits, _ and -, at least 10 of them. Anything else never goes into the link. */
 const DRIVE_FILE_ID = /^[A-Za-z0-9_-]{10,}$/;
