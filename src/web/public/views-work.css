@@ -1,0 +1,68 @@
+/* The work and control screens (D4 Task 6, D5 Task 5), on top of styles.css: the classes that replace the mockup's
+   inline styles (the Content-Security-Policy allows none) and the phone layout of the tables. Tokens are styles.css's. */
+
+.count-note { margin-left: auto; color: var(--muted); font-size: 13px; }
+.card.flush { padding: 6px 8px; }
+.faint { color: var(--faint); }
+.muted-p { margin: 0; color: var(--muted); }
+.nowrap { white-space: nowrap; }
+.mono.nowrap { font-size: 12.5px; }
+.tbl tr.static { cursor: default; }
+.tbl td[data-label] { vertical-align: middle; }
+
+/* loading, error and "more" */
+.skel { display: grid; gap: 10px; padding: 6px 2px 2px; }
+.skel i { display: block; height: 14px; border-radius: 7px; background: linear-gradient(90deg, var(--line), var(--line-2), var(--line)); background-size: 200% 100%; animation: skel 1.4s ease-in-out infinite; }
+.skel i:nth-child(2) { width: 82%; } .skel i:nth-child(3) { width: 64%; }
+@keyframes skel { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) { .skel i { animation: none; } }
+.err-state { display: flex; gap: 12px; align-items: center; border-color: rgba(217, 79, 99, .35); }
+.err-state svg { color: var(--s-overdue); flex: none; }
+.err-state div div { color: var(--muted); font-size: 13px; }
+.more { display: flex; justify-content: center; padding: 12px 0 4px; }
+
+/* lists */
+.li.li-btn { width: 100%; text-align: left; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; grid-template-columns: 34px minmax(0, 1fr) auto auto; }
+.li.li-btn:hover, .li.li-btn:focus-visible { background: var(--raise); }
+.day-head { margin: 10px 0 6px; } .day-head:first-child { margin-top: 0; }
+.ic.ic-issue { color: var(--s-overdue); }
+
+/* drawer forms */
+.edit-form { display: grid; gap: 10px; margin: 14px 0 4px; padding: 12px; border-radius: 12px; background: var(--panel-2); border: 1px solid var(--line); }
+.edit-form label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.edit-form input { font: inherit; color: var(--text); background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 10px; padding: 8px 10px; }
+.edit-form input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.field-err { margin: 0; color: var(--s-overdue); font-size: 13px; }
+.foot-note { flex-basis: 100%; color: var(--faint); font-size: 12px; }
+
+/* tracker hero */
+.hero { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+.hero h3 { margin: 0; font-size: 20px; }
+.hero .grow-1 { min-width: 220px; }
+.hero-ic { width: 56px; height: 56px; border-radius: 16px; display: grid; place-items: center; background: rgba(37, 211, 102, .12); color: var(--accent); flex: none; }
+
+/* usage */
+.kpis.kpis-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.num.num-word { font-size: 24px; margin-top: 22px; color: var(--accent); }
+.num.num-word.is-warn { color: var(--s-warn); }
+.ubars .b { transform-origin: bottom; }
+
+/* automations and settings */
+.kv.kv-top { margin-top: 16px; }
+.note.note-row { align-items: center; }
+.phone-sub { font-size: 11px; opacity: .6; }
+.owner-row { display: flex; gap: 14px; align-items: center; }
+.avatar.avatar-lg { width: 52px; height: 52px; border-radius: 16px; font-size: 17px; display: grid; place-items: center; }
+.row-gap.row-top { margin-top: 14px; flex-wrap: wrap; }
+
+/* tables become cards on phones */
+@media (max-width: 720px) {
+  .tbl.tbl-cards thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .tbl.tbl-cards, .tbl.tbl-cards tbody, .tbl.tbl-cards tr, .tbl.tbl-cards td { display: block; width: 100%; }
+  .tbl.tbl-cards tr { padding: 10px 6px; border-bottom: 1px solid var(--line); }
+  .tbl.tbl-cards td { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; border: 0; text-align: right; }
+  .tbl.tbl-cards td[data-label]::before { content: attr(data-label); color: var(--muted); font-size: 12.5px; text-align: left; flex: none; }
+  .tbl.tbl-cards td.ttl { font-weight: 600; }
+  .kpis.kpis-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .count-note { margin-left: 0; flex-basis: 100%; }
+}
