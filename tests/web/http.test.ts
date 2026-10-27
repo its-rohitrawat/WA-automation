@@ -76,6 +76,39 @@ describe('sendJson and sendError', () => {
     sendError(res3, 400, 'bad', 'ENOENT: no such file, open C:\\Users\\Dell\\data\\tracker.db');
     expect(out3.body).not.toMatch(/Users|tracker\.db/);
   });
+
+  it('sendError replaces real paths, file URLs and stack frames with the generic message', () => {
+    const generic = [
+      'open /Users/dell/data/tracker.db failed',
+      'cannot read /home/a/b',
+      'see file:///C:/x/y.ts',
+      'failed at Object.<anonymous> (src/web/server.ts:10:5)',
+      'failed at foo (node:internal/fs:1:2)',
+      'D:/data/x failed',
+      'a\\b failed',
+    ];
+    for (const m of generic) {
+      const { res, out } = fakeRes();
+      sendError(res, 400, 'bad', m);
+      expect((JSON.parse(out.body) as { error: { message: string } }).error.message, m).toBe('Something went wrong.');
+    }
+  });
+
+  it('sendError lets ordinary plain messages through unchanged', () => {
+    const plain = [
+      'Upload a groups.json file.',
+      'allowed-groups.json could not be written.',
+      'Try again at 10:00 (local time).',
+      'Choose a .js-free browser',
+      'Use and/or skip.',
+      'The tracker.db file is busy.',
+    ];
+    for (const m of plain) {
+      const { res, out } = fakeRes();
+      sendError(res, 400, 'bad', m);
+      expect((JSON.parse(out.body) as { error: { message: string } }).error.message, m).toBe(m);
+    }
+  });
 });
 
 describe('HttpError', () => {

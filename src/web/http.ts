@@ -27,21 +27,22 @@ const DRAIN_LIMIT_BYTES = 1_048_576;
 
 /**
  * Reads a JSON request body. Over `limitBytes` it rejects with 413 (`too_large`); an empty or unparsable body rejects
- * with 400 (`bad_json`). A moderately oversized body is read to the end and dropped. A declared length over 1 MiB is
- * refused before any of the body is read, and a body that passes 1 MiB is refused as soon as it does; in both cases the
- * server still sends the 413 before the connection is closed.
+ * with 400 (`bad_json`). A moderately oversized body is read to the end and dropped. A declared length over the drain
+ * cap (1 MiB, or `limitBytes` when larger) is refused before any of the body is read, and a body that passes the cap is
+ * refused as soon as it does; in both cases the server still sends the 413 before the connection is closed.
  */
 export function readJson(req: IncomingMessage, limitBytes = 65_536): Promise<unknown> {
   const tooLarge = () => new HttpError(413, 'too_large', 'The request is too large.');
+  const drainCap = Math.max(limitBytes, DRAIN_LIMIT_BYTES);
   const declared = Number(req.headers['content-length']);
-  if (Number.isFinite(declared) && declared > DRAIN_LIMIT_BYTES) return Promise.reject(tooLarge());
+  if (Number.isFinite(declared) && declared > drainCap) return Promise.reject(tooLarge());
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     let over = false;
     req.on('data', (chunk: Buffer) => {
       size += chunk.length;
-      if (size > DRAIN_LIMIT_BYTES) {
+      if (size > drainCap) {
         // Settled once; later chunks are dropped until Node closes the connection after the 413.
         chunks.length = 0;
         reject(tooLarge());
@@ -80,8 +81,11 @@ export function sendJson(res: ServerResponse, status: number, body: unknown): vo
 }
 
 const GENERIC_MESSAGE = 'Something went wrong.';
-/** Anything that looks like a file path or a source location. */
-const PATH_LIKE = /[A-Za-z]:[\\/]|\\|(?:^|\s)\/[\w.-]+\/|\.(?:ts|js|db|json)\b|\bat\s+\S+\s*\(/;
+/**
+ * A real file path or source location: a drive letter and slash, any backslash, an absolute POSIX path of two or more
+ * segments, a `file:` URL, or a stack frame (`at x (…:line:col)`). Plain words such as `groups.json` are not.
+ */
+const PATH_LIKE = /\b[A-Za-z]:[\\/]|\\|(?:^|[\s(='"])\/[^\s/]+\/|\bfile:\/\/|\bat\s+\S+\s+\([^)]*:\d+:\d+\)/;
 
 /** First line only, at most 200 characters; a message that looks like a path or a stack frame becomes the generic one. */
 function plainMessage(message: string): string {

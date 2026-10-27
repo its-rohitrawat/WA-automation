@@ -1,12 +1,14 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, request } from 'node:http';
+import type { Server } from 'node:http';
+import { connect } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { DestinationStream } from 'pino';
 import { CONTENT_SECURITY_POLICY, HttpError, readJson, sendJson } from '../../src/web/http.ts';
-import { createWebServer, PUBLIC_DIR } from '../../src/web/server.ts';
+import { createWebServer, PUBLIC_DIR, STOP_GRACE_MS } from '../../src/web/server.ts';
 import { startDashboard } from '../../src/web/start.ts';
 import type { WebServer } from '../../src/web/server.ts';
 import { manualClock } from '../../src/util/clock.ts';
@@ -55,6 +57,7 @@ async function boot(o: { publicDir?: string; vendorFiles?: Record<string, string
   const c = capture();
   const f = fixture();
   roots.push(f.root);
+  let http!: Server;
   const server = createWebServer({
     control: {},
     env: { DASHBOARD_PORT: 0 },
@@ -63,10 +66,13 @@ async function boot(o: { publicDir?: string; vendorFiles?: Record<string, string
     publicDir: o.publicDir ?? f.pub,
     vendorFiles: o.vendorFiles ?? { 'lib.js': join(f.root, 'vendor-lib.js'), 'missing.js': join(f.root, 'nope.js') },
     ...(o.stopGraceMs === undefined ? {} : { stopGraceMs: o.stopGraceMs }),
+    onHttpServer: (h) => {
+      http = h;
+    },
   });
   servers.push(server);
   const { port, host } = await server.start();
-  return { server, port, host, base: `http://127.0.0.1:${port}`, ...c, ...f };
+  return { server, http, port, host, base: `http://127.0.0.1:${port}`, ...c, ...f };
 }
 
 /** A GET that sends the path exactly as written (fetch would normalise dot segments first). */
@@ -200,6 +206,20 @@ describe('web server: routing', () => {
     expect(failed?.rid).toMatch(/^[0-9a-f]{12}$/);
     expect(s.out()).not.toContain('SECRET-DETAIL');
   });
+
+  it('a handler that throws after the headers went out has its connection cut, and the log leaves out the detail', async () => {
+    const s = await boot();
+    s.server.router.get('/dashboard/api/half', ({ res }) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.write('partial');
+      throw new Error('half-way SECRET-DETAIL');
+    });
+    // A truncated answer must not look complete: the read fails (at the headers or in the body, by timing).
+    await expect(fetch(`${s.base}/dashboard/api/half`).then(async (r) => r.text())).rejects.toThrow();
+    const failed = s.records().find((l) => l.msg === 'request failed');
+    expect(failed?.rid).toMatch(/^[0-9a-f]{12}$/);
+    expect(s.out()).not.toContain('SECRET-DETAIL');
+  });
 });
 
 describe('web server: static files', () => {
@@ -219,9 +239,13 @@ describe('web server: static files', () => {
       expect(r.status, path).toBe(200);
       expect(r.headers.get('content-type'), path).toBe(type);
       expect(r.headers.get('etag'), path).toMatch(/^"[A-Za-z0-9_-]{8,}"$/);
+      expect(r.headers.get('cache-control'), path).toBe('no-cache');
     }
     const r = await fetch(`${s.base}/dashboard/static/app.js`);
     expect(await r.text()).toBe('export const a = 1;\n');
+    // The shell is revalidated on every load too, so a deploy reaches the browser at once.
+    const shell = await fetch(`${s.base}/dashboard/tasks`);
+    expect(shell.headers.get('cache-control')).toBe('no-cache');
   });
 
   it('answers a matching If-None-Match with 304', async () => {
@@ -289,6 +313,19 @@ describe('web server: static files', () => {
     expect(JSON.parse(r.body)).toEqual({ error: { code: 'not_found', message: 'Not found.' } });
   });
 
+  it('a linked folder inside the public folder that points outside is refused (junction: runs on Windows without admin)', async () => {
+    const s = await boot();
+    const outDir = join(s.root, 'outdir');
+    mkdirSync(outDir);
+    writeFileSync(join(outDir, 'secret.json'), JSON.stringify({ secret: SECRET }));
+    // 'junction' is a Windows directory junction; elsewhere the type is ignored and a directory link is made.
+    symlinkSync(outDir, join(s.pub, 'lnkdir'), 'junction');
+    const r = await rawGet(s.port, '/dashboard/static/lnkdir/secret.json');
+    expect(r.status).toBe(404);
+    expect(r.body).not.toContain(SECRET);
+    expect(JSON.parse(r.body)).toEqual({ error: { code: 'not_found', message: 'Not found.' } });
+  });
+
   it('serves vendor files from the allowlist only, cached for an hour', async () => {
     const s = await boot();
     const r = await fetch(`${s.base}/dashboard/vendor/lib.js`);
@@ -301,6 +338,13 @@ describe('web server: static files', () => {
     expect((await fetch(`${s.base}/dashboard/vendor/missing.js`)).status).toBe(404);
     expect((await fetch(`${s.base}/dashboard/vendor/toString`)).status).toBe(404);
     expect((await fetch(`${s.base}/dashboard/vendor/__proto__`)).status).toBe(404);
+    // Names that do exist relative to the working directory: only the allowlist may decide what is served.
+    for (const name of ['package.json', 'tsconfig.json']) {
+      expect(readFileSync(join(process.cwd(), name), 'utf8').length, name).toBeGreaterThan(0);
+      const r = await fetch(`${s.base}/dashboard/vendor/${name}`);
+      expect(r.status, name).toBe(404);
+      expect(await r.json(), name).toEqual({ error: { code: 'not_found', message: 'Not found.' } });
+    }
   });
 });
 
@@ -336,6 +380,46 @@ describe('web server: headers and logging', () => {
     }
     const out = s.out();
     for (const secret of ['QUERY-SECRET', 'COOKIE-SECRET', 'HEADER-SECRET', 'PATHIDSECRET', 'app.js', 'clients']) expect(out).not.toContain(secret);
+  });
+
+  it('a request the client gives up on before any answer is not logged as a 200', async () => {
+    const s = await boot();
+    let entered!: () => void;
+    const inHandler = new Promise<void>((r) => {
+      entered = r;
+    });
+    s.server.router.get('/dashboard/api/hang', ({ req }) => {
+      entered();
+      return new Promise<void>((r) => req.once('close', () => r()));
+    });
+    const ac = new AbortController();
+    const pending = fetch(`${s.base}/dashboard/api/hang`, { signal: ac.signal });
+    pending.catch(() => {}); // aborted on purpose
+    await inHandler;
+    ac.abort();
+    await expect(pending).rejects.toThrow();
+    const deadline = Date.now() + 2_000;
+    let line: Record<string, unknown> | undefined;
+    while (!line && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+      line = s.records().find((l) => l.msg === 'http' && l.route === '/dashboard/api/hang');
+    }
+    expect(line).toBeDefined();
+    expect(line!.status).toBe(0);
+  });
+
+  it('an error the server emits after start (for example EMFILE) is logged by its code and the agent carries on', async () => {
+    const s = await boot();
+    expect(s.http.listenerCount('error')).toBeGreaterThanOrEqual(1);
+    expect(() => s.http.emit('error', Object.assign(new Error('accept failed SECRET-DETAIL'), { code: 'EMFILE' }))).not.toThrow();
+    const errors = s.records().filter((l) => l.level === 50);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.code).toBe('EMFILE');
+    expect(errors[0]).not.toHaveProperty('err');
+    expect(errors[0]).not.toHaveProperty('stack');
+    expect(s.out()).not.toContain('SECRET-DETAIL');
+    // Still answering.
+    expect((await fetch(`${s.base}/dashboard/tasks`)).status).toBe(200);
   });
 });
 
@@ -416,6 +500,19 @@ describe('web server: very large bodies', () => {
     expect(result.status).toBe(413);
     expect(JSON.parse(result.body)).toEqual({ error: { code: 'too_large', message: 'The request is too large.' } });
     expect(await closed).toBeLessThan(5_000);
+  });
+
+  it('a caller that asks for more than 1 MB gets it', async () => {
+    const s = await boot();
+    s.server.router.post('/dashboard/api/echo', async ({ req, res }) => {
+      const got = (await readJson(req, 2_000_000)) as { x: string };
+      sendJson(res, 200, { len: got.x.length });
+    });
+    const r = await fetch(`${s.base}/dashboard/api/echo`, { method: 'POST', body: JSON.stringify({ x: 'a'.repeat(1_500_000) }) });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ len: 1_500_000 });
+    const over = await fetch(`${s.base}/dashboard/api/echo`, { method: 'POST', body: JSON.stringify({ x: 'a'.repeat(2_100_000) }) });
+    expect(over.status).toBe(413);
   });
 
   it('a declared Content-Length over 1 MB is refused before the body arrives', async () => {
@@ -517,6 +614,68 @@ describe('web server: start and stop', () => {
     await s.server.stop();
     await s.server.stop();
     expect(Date.now() - t0).toBeLessThan(2_000);
+  });
+
+  it('a kept-alive connection whose answer finishes during stop() closes at once, not after the grace period', async () => {
+    const s = await boot();
+    let entered!: () => void;
+    const inHandler = new Promise<void>((r) => {
+      entered = r;
+    });
+    s.server.router.get('/dashboard/api/slow', async ({ res }) => {
+      entered();
+      await new Promise((r) => setTimeout(r, 300));
+      sendJson(res, 200, { done: true });
+    });
+    const sock = connect(s.port, '127.0.0.1');
+    const chunks: Buffer[] = [];
+    sock.on('data', (c: Buffer) => chunks.push(c));
+    const closed = new Promise<number>((r) => sock.once('close', () => r(Date.now())));
+    sock.write('GET /dashboard/api/slow HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n');
+    await inHandler;
+    const t0 = Date.now();
+    await s.server.stop();
+    expect((await closed) - t0).toBeLessThan(2_000);
+    expect(Buffer.concat(chunks).toString('utf8')).toContain('{"done":true}');
+  });
+
+  it('the default grace period is 5 s', () => {
+    expect(STOP_GRACE_MS).toBe(5_000);
+  });
+
+  it('a request that arrives on a kept-alive connection during stop() is answered with Connection: close, then the connection closes', async () => {
+    const s = await boot();
+    let entered!: () => void;
+    const inHandler = new Promise<void>((r) => {
+      entered = r;
+    });
+    s.server.router.get('/dashboard/api/slow', async ({ res }) => {
+      entered();
+      await new Promise((r) => setTimeout(r, 300));
+      sendJson(res, 200, { done: true });
+    });
+    const sock = connect(s.port, '127.0.0.1');
+    const chunks: Buffer[] = [];
+    sock.on('data', (c: Buffer) => chunks.push(c));
+    const closed = new Promise<number>((r) => sock.once('close', () => r(Date.now())));
+    sock.write('GET /dashboard/api/slow HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n');
+    await inHandler;
+    const t0 = Date.now();
+    const stopping = s.server.stop();
+    // The second request comes on the same connection while the first is still running.
+    sock.write('GET /dashboard/tasks HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n');
+    const at = await closed;
+    await stopping;
+    // Closed once both answers went out, well before the 5 s grace period.
+    expect(at - t0).toBeLessThan(2_000);
+    const text = Buffer.concat(chunks).toString('utf8');
+    const answers = text.split(/(?=HTTP\/1\.1 )/);
+    expect(answers).toHaveLength(2);
+    expect(answers[0]).toMatch(/^HTTP\/1\.1 200/);
+    expect(answers[0]).toContain('{"done":true}');
+    expect(answers[1]).toMatch(/^HTTP\/1\.1 200/);
+    expect(answers[1]!.toLowerCase()).toContain('connection: close');
+    expect(answers[1]).toContain('test shell');
   });
 });
 
