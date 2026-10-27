@@ -33,9 +33,29 @@ import { openSessionDb, SessionDecryptError, useEncryptedAuthState } from './wa/
 import { baileysSocketFactory, WhatsAppGateway } from './wa/gateway.ts';
 import { baileysSenderSocketFactory, linkedNumber } from './wa/senderGateway.ts';
 import { buildVoiceDeps } from './voiceDeps.ts';
+import { createWebServer } from './web/server.ts';
+import type { WebServer } from './web/server.ts';
 
 /** Expected startup refusal. The message is safe to print. */
 class StartupExit extends Error {}
+
+/**
+ * The owner dashboard (D1), started only when DASHBOARD_ENABLED is true, after app.start(). It listens on 127.0.0.1 only.
+ * A dashboard that cannot start (for example, the port is taken) is logged by code and never stops the agent.
+ */
+async function startDashboard(o: { env: Env; log: Logger }): Promise<WebServer | undefined> {
+  const { env, log } = o;
+  // The AgentControl (the dashboard's only way into the agent) is built here once it exists; the core server does not use it.
+  const web = createWebServer({ control: {}, env, log, clock: systemClock });
+  try {
+    const { port } = await web.start();
+    log.info(`dashboard on http://127.0.0.1:${port}/dashboard`);
+    return web;
+  } catch (err) {
+    log.error({ code: (err as { code?: unknown }).code ?? 'unknown' }, 'dashboard did not start; the agent carries on without it');
+    return undefined;
+  }
+}
 
 /**
  * The meeting dependencies (Phase 3), built only when MEETINGS_ENABLED is true. Nothing here calls Google: without the
@@ -196,6 +216,8 @@ async function main(): Promise<void> {
     const heartbeat = env.HEARTBEAT_URL ? new Heartbeat({ url: env.HEARTBEAT_URL, isUp: () => app.health.isUp(), log }) : undefined;
     heartbeat?.start();
     if (heartbeat) log.info('uptime heartbeat on');
+    // Owner dashboard: off (the default) means no web server and no port.
+    const web = env.DASHBOARD_ENABLED ? await startDashboard({ env, log }) : undefined;
 
     const trackerDb = db;
     const sessionStore = sessionDb;
@@ -213,10 +235,12 @@ async function main(): Promise<void> {
       }
       stopping = true;
       log.info('WA Agent stopping');
+      // The dashboard stops first (in-flight requests get up to 5 s), so no request reaches the app while it drains.
+      const webStopped = web ? web.stop().catch((err: unknown) => log.error({ err }, 'error while stopping the dashboard')) : Promise.resolve();
       void heartbeat?.stop();
       stopWatching();
-      void app
-        .stop()
+      void webStopped
+        .then(() => app.stop())
         .catch((err) => log.error({ err }, 'error while stopping'))
         .finally(() => {
           // Databases are closed only after app.stop() has settled, so after the morning report's stop() has returned.
