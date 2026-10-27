@@ -6,12 +6,14 @@ import type { Db } from '../store/db.ts';
 import { istDate } from '../util/time.ts';
 
 // The dashboard's Tracker screen (D4 Task 5): the workbook link, the last upload and failure, and per-sheet counts.
-// Counts use the Tasks screen's split (overdue, then review, then open), so the two screens always agree.
+// Counts follow the workbook: open is every task not done, as its Today tab counts it; overdue (not done, deadline
+// before today IST) and review (maybe done and not overdue, as the Tasks screen splits them) are parts of it.
 
 export interface TrackerSheet {
   /** The tab's name in Tracker.xlsx: "Today", or the client's sheet name as the workbook assigns it. */
   name: string;
   client: { code: string; name: string } | null;
+  /** Every task not done, as the workbook counts open. */
   open: number;
   overdue: number;
   review: number;
@@ -61,7 +63,7 @@ export function trackerSummary(
     (db.prepare(`SELECT client_id AS clientId,
         COALESCE(SUM(status <> 'done' AND deadline IS NOT NULL AND deadline < @today), 0) AS overdue,
         COALESCE(SUM(status = 'maybe_done' AND NOT (deadline IS NOT NULL AND deadline < @today)), 0) AS review,
-        COALESCE(SUM(status = 'open' AND NOT (deadline IS NOT NULL AND deadline < @today)), 0) AS open,
+        COALESCE(SUM(status <> 'done'), 0) AS open,
         COALESCE(SUM(status = 'done' AND closed_on BETWEEN @weekStart AND @today), 0) AS doneThisWeek
       FROM tasks GROUP BY client_id`).all({ today, weekStart: minusDays(today, 6) }) as (Omit<TrackerSheet, 'name' | 'client'> & { clientId: number })[])
       .map((r) => [r.clientId, r]),

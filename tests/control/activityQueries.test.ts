@@ -7,6 +7,7 @@ import { finishBatch, startBatch } from '../../src/store/batches.ts';
 import type { Db } from '../../src/store/db.ts';
 import { insertFound, type MeetingStatus } from '../../src/store/meetings.ts';
 import { createTask, recordEvent } from '../../src/store/tasks.ts';
+import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { FakeDrive } from '../helpers/fakeDrive.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
@@ -73,8 +74,8 @@ describe('listActivity', () => {
     meeting(db, 'internal', at('07:00')); // never listed
     const r = listActivity(db, params());
     expect(r.items.map(({ kind, title, detail, who }) => ({ kind, title, detail, who }))).toEqual([
-      { kind: 'config', title: 'Setting changed', detail: 'Morning briefing switched on', who: 'by owner@example.com' },
-      { kind: 'connection', title: 'Connection changed', detail: "Founder's phone relinked", who: 'by owner@example.com' },
+      { kind: 'config', title: 'Setting changed', detail: 'Morning briefing switched on', who: 'by the owner' },
+      { kind: 'connection', title: 'Connection changed', detail: "Founder's phone relinked", who: 'by the owner' },
       { kind: 'issue', title: 'Tracker upload failed', detail: 'Tracker upload failed: Google sign-in expired', who: 'by the agent' },
       { kind: 'issue', title: 'Could not read 4 messages', detail: 'Sharma Interiors', who: 'the agent tries again' },
       { kind: 'issue', title: 'Meeting too long to process', detail: 'Launch prep · Sharma Interiors (196 min)', who: 'over the length limit' },
@@ -83,7 +84,7 @@ describe('listActivity', () => {
       { kind: 'task', title: 'Marked done', detail: 'SHA-001 · Revise <b>landing</b> page', who: 'by the owner · Sharma Interiors' },
       { kind: 'task', title: 'Marked maybe done', detail: 'SHA-001 · Revise <b>landing</b> page', who: 'by the agent · Sharma Interiors' },
       { kind: 'task', title: 'Task created', detail: 'SHA-001 · Revise <b>landing</b> page', who: 'from WhatsApp · Sharma Interiors' },
-      { kind: 'msg', title: '18 messages read', detail: 'Mehta Foods', who: '2 tasks changed' },
+      { kind: 'msg', title: '18 messages read', detail: 'Mehta Foods', who: '2 changes' },
     ]);
     expect(r.items[0]!.at).toBe(at('06:40'));
     expect(JSON.stringify(r)).not.toContain('chat words');
@@ -166,7 +167,7 @@ describe('publisherAuditHooks', () => {
 
   it('writes an agent row for a publish and for a failure, in fixed words only', async () => {
     const entries: AuditEntry[] = [];
-    const hooks = publisherAuditHooks((e) => entries.push(e));
+    const hooks = publisherAuditHooks((e) => entries.push(e), manualClock(NOW));
     await publish(new FakeDrive(), hooks);
     const failing = new FakeDrive();
     failing.failNextWith = new Error('secret words from a chat message');
@@ -179,9 +180,77 @@ describe('publisherAuditHooks', () => {
 
   it('names each failure in plain words', () => {
     const entries: AuditEntry[] = [];
-    const { onFailure } = publisherAuditHooks((e) => entries.push(e));
+    const { onFailure } = publisherAuditHooks((e) => entries.push(e), manualClock(NOW));
     onFailure({ step: 'drive', auth: true });
     onFailure({ step: 'build', auth: false });
     expect(entries.map((e) => e.detail)).toEqual(['Tracker upload failed: Google sign-in expired', 'Tracker upload failed: the workbook could not be built']);
+  });
+});
+
+describe('activity review fixes', () => {
+  it('says where a task came from: a voice note or a meeting', () => {
+    const db = seededDb();
+    db.prepare("INSERT INTO messages (wa_id, client_id, sender_jid, ts, media_type) VALUES ('V1', 1, 'x', ?, 'audio')").run(NOW);
+    db.prepare("INSERT INTO media (message_id, client_id, kind, status, created_at, updated_at) VALUES (1, 1, 'voice', 'done', ?, ?)").run(NOW, NOW);
+    const voice = createTask(db, { clientId: 1, side: 'us', title: 'From voice', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,
+      raisedOn: '2026-10-19', deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: 'V1', origin: 'whatsapp' }, NOW);
+    const mid = meeting(db, 'done', at('04:00'));
+    const fromMeeting = createTask(db, { clientId: 1, side: 'us', title: 'From meeting', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,
+      raisedOn: '2026-10-19', deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'meeting', meetingId: mid }, NOW);
+    recordEvent(db, { taskId: voice.id, clientId: 1, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: at('05:00') });
+    recordEvent(db, { taskId: fromMeeting.id, clientId: 1, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: at('05:01') });
+    expect(listActivity(db, params({ kind: 'task' })).items.map((i) => i.who)).toEqual(['from a meeting · Sharma Interiors', 'from a voice note · Sharma Interiors']);
+  });
+
+  it('refuses a before that is a date only or not in UTC', () => {
+    for (const before of ['2026-10-19', '2026-10-19T08:00:00+05:30', '2026-10-19T08:00:00.000+05:30|b|1']) {
+      expect(() => params({ before }), before).toThrowError(ControlError);
+    }
+  });
+
+  it('ignores tracker rows not written by the agent', () => {
+    const db = seededDb();
+    audit(db, { at: at('05:00'), actor: 'owner@example.com', event: 'tracker.published', kind: 'ops', detail: 'x' });
+    audit(db, { at: at('05:01'), actor: 'owner@example.com', event: 'tracker.publish_failed', kind: 'ops', detail: 'x' });
+    expect(listActivity(db, params()).items).toEqual([]);
+  });
+
+  it('leaves out a no-access meeting found as internal', () => {
+    const db = seededDb();
+    const id = meeting(db, 'no_access', at('05:00'), { title: '' });
+    db.prepare("UPDATE meetings SET note = 'found_internal', client_id = NULL WHERE id = ?").run(id);
+    expect(listActivity(db, params()).items).toEqual([]);
+  });
+
+  it('pages correctly when one source has more rows than the page', () => {
+    const db = seededDb();
+    for (let i = 0; i < 4; i++) batch(db, { at: at(`05:0${i}`), status: 'ok', messages: i + 1 });
+    audit(db, { at: at('05:02'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'x' });
+    const first = listActivity(db, params({ limit: '2' }));
+    const second = listActivity(db, params({ limit: '2', before: first.next! }));
+    const third = listActivity(db, params({ limit: '2', before: second.next! }));
+    expect([...first.items, ...second.items, ...third.items].map((i) => i.id)).toEqual(['b:4', 'b:3', 'a:1', 'b:2', 'b:1']);
+  });
+});
+
+describe('publisherAuditHooks review fixes', () => {
+  it('writes a row only when the state changes, and a success again after an hour', () => {
+    const entries: AuditEntry[] = [];
+    const clock = manualClock(NOW);
+    const h = publisherAuditHooks((e) => entries.push(e), clock);
+    h.onPublished();
+    clock.advance(60_000);
+    h.onPublished(); // nothing new
+    h.onFailure({ step: 'drive', auth: false });
+    h.onFailure({ step: 'drive', auth: false }); // the same failure again
+    h.onFailure({ step: 'drive', auth: true }); // a new kind
+    h.onPublished(); // back after a failure
+    clock.advance(59 * 60_000);
+    h.onPublished();
+    clock.advance(2 * 60_000);
+    h.onPublished(); // over an hour since the last success row
+    expect(entries.map((e) => e.event)).toEqual([
+      'tracker.published', 'tracker.publish_failed', 'tracker.publish_failed', 'tracker.published', 'tracker.published',
+    ]);
   });
 });

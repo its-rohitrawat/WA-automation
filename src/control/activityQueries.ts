@@ -1,5 +1,6 @@
 import type { Db } from '../store/db.ts';
-import type { MeetingStatus } from '../store/meetings.ts';
+import { FOUND_INTERNAL_NOTE, type MeetingStatus } from '../store/meetings.ts';
+import type { Clock } from '../util/clock.ts';
 import { ControlError, type Audit, type AuditEntry } from './errors.ts';
 
 // The dashboard's Activity screen (D4 Task 4): one feed, newest first, merged from the batches, task events, meetings
@@ -68,20 +69,29 @@ const PUBLISH_FAILED = 'tracker.publish_failed';
 
 const list = (xs: readonly string[]) => xs.map((x) => `'${x}'`).join(', '); // fixed values from this file only
 
-/** Each source's rows for a filter, as (at, src, id). */
-function sourcesFor(kind: ActivityFilter): string[] {
+/**
+ * Each source's newest rows for a filter, as (at, src, id), already cut at the cursor and the page size, so a page reads
+ * at most limit rows from each table. cursor: the condition with @at (and @src, @id), or '' for the first page.
+ */
+function sourcesFor(kind: ActivityFilter, cursor: (at: string, src: Source) => string): string[] {
   const out: string[] = [];
+  const branch = (at: string, src: Source, from: string, where: string) => {
+    const c = cursor(at, src);
+    return `SELECT * FROM (SELECT ${at} AS at, '${src}' AS src, id FROM ${from} WHERE (${where})${c ? ` AND ${c}` : ''}
+      ORDER BY ${at} DESC, id DESC LIMIT @limit)`;
+  };
   const batches = kind === 'all' ? "status IN ('ok', 'failed')" : kind === 'msg' ? "status = 'ok'" : kind === 'issue' ? "status = 'failed'" : null;
-  if (batches) out.push(`SELECT finished_at AS at, 'b' AS src, id FROM batches WHERE finished_at IS NOT NULL AND ${batches}`);
-  if (kind === 'all' || kind === 'task') {
-    out.push(`SELECT at, 'e' AS src, id FROM task_events WHERE task_id IS NOT NULL AND op IN (${list(TASK_OPS)})`);
-  }
+  if (batches) out.push(branch('finished_at', 'b', 'batches', `finished_at IS NOT NULL AND ${batches}`));
+  if (kind === 'all' || kind === 'task') out.push(branch('at', 'e', 'task_events', `task_id IS NOT NULL AND op IN (${list(TASK_OPS)})`));
   const meetings = kind === 'all' ? [...MEET_STATUSES, ...ISSUE_STATUSES] : kind === 'meet' ? MEET_STATUSES : kind === 'issue' ? ISSUE_STATUSES : null;
-  if (meetings) out.push(`SELECT updated_at AS at, 'm' AS src, id FROM meetings WHERE status IN (${list(meetings)})`);
+  // A no-access meeting matched as internal keeps no title and needs nothing: it is left out, as internal ones are.
+  if (meetings) {
+    out.push(branch('updated_at', 'm', 'meetings', `status IN (${list(meetings)}) AND NOT (status = 'no_access' AND COALESCE(note = '${FOUND_INTERNAL_NOTE}', 0))`));
+  }
   const audit = kind === 'all'
     ? `kind IN ('connection', 'config') OR (actor = 'agent' AND event IN ('${PUBLISHED}', '${PUBLISH_FAILED}'))`
     : kind === 'tracker' ? `actor = 'agent' AND event = '${PUBLISHED}'` : kind === 'issue' ? `actor = 'agent' AND event = '${PUBLISH_FAILED}'` : null;
-  if (audit) out.push(`SELECT at, 'a' AS src, id FROM audit_log WHERE ${audit}`);
+  if (audit) out.push(branch('at', 'a', 'audit_log', audit));
   return out;
 }
 
@@ -91,7 +101,7 @@ function batchItem(db: Db, id: number): Omit<ActivityItem, 'id' | 'at'> {
   const b = db.prepare(`SELECT b.status, b.message_count AS messages, b.accepted, c.name AS client FROM batches b JOIN clients c ON c.id = b.client_id
     WHERE b.id = ?`).get(id) as { status: string; messages: number; accepted: number | null; client: string };
   return b.status === 'ok'
-    ? { kind: 'msg', title: `${plural(b.messages, 'message')} read`, detail: b.client, who: `${plural(b.accepted ?? 0, 'task')} changed` }
+    ? { kind: 'msg', title: `${plural(b.messages, 'message')} read`, detail: b.client, who: `${plural(b.accepted ?? 0, 'change')}` }
     : { kind: 'issue', title: `Could not read ${plural(b.messages, 'message')}`, detail: b.client, who: 'the agent tries again' };
 }
 
@@ -137,7 +147,8 @@ function meetingItem(db: Db, id: number): Omit<ActivityItem, 'id' | 'at'> {
 
 function auditItem(db: Db, id: number): Omit<ActivityItem, 'id' | 'at'> {
   const a = db.prepare('SELECT actor, event, kind, detail FROM audit_log WHERE id = ?').get(id) as { actor: string; event: string; kind: string; detail: string };
-  const who = a.actor === 'agent' ? 'by the agent' : `by ${a.actor}`;
+  // The owner's email is not repeated on every line: the Audit logs screen names who did what.
+  const who = a.actor === 'agent' ? 'by the agent' : 'by the owner';
   if (a.event === PUBLISHED) return { kind: 'tracker', title: 'Tracker updated', detail: a.detail, who };
   if (a.event === PUBLISH_FAILED) return { kind: 'issue', title: 'Tracker upload failed', detail: a.detail, who };
   return a.kind === 'config'
@@ -149,38 +160,61 @@ const ITEMS: Record<Source, (db: Db, id: number) => Omit<ActivityItem, 'id' | 'a
 
 /** One page of the feed, newest first. next: the cursor for the following page, or null when this page is the last. */
 export function listActivity(db: Db, p: ActivityParams): { items: ActivityItem[]; next: string | null } {
-  const union = sourcesFor(p.kind).join(' UNION ALL ');
   const params: Record<string, string | number> = { limit: p.limit };
-  let where = '';
-  if (p.before) {
-    params.at = p.before.at;
-    if (p.before.src === undefined) {
-      where = 'WHERE at < @at';
-    } else {
-      where = 'WHERE (at, src, id) < (@at, @src, @id)';
-      params.src = p.before.src;
-      params.id = p.before.id!;
+  const b = p.before;
+  if (b) {
+    params.at = b.at;
+    if (b.src !== undefined) {
+      params.src = b.src;
+      params.id = b.id!;
     }
   }
-  const rows = db.prepare(`SELECT at, src, id FROM (${union}) ${where} ORDER BY at DESC, src DESC, id DESC LIMIT @limit`).all(params) as {
-    at: string; src: Source; id: number;
-  }[];
-  const items = rows.map((r) => ({ id: `${r.src}:${r.id}`, ...ITEMS[r.src](db, r.id), at: r.at }));
-  const last = rows.at(-1);
-  return { items, next: rows.length === p.limit && last ? `${last.at}|${last.src}|${last.id}` : null };
+  // With a source and id, the row values compare as the final ORDER BY does; with a time alone, strictly before it.
+  const cursor = (at: string, src: Source) => (!b ? '' : b.src === undefined ? `${at} < @at` : `(${at}, '${src}', id) < (@at, @src, @id)`);
+  const union = sourcesFor(p.kind, cursor).join(' UNION ALL ');
+  // One read transaction: the page and the lines it shows come from the same moment.
+  return db.transaction(() => {
+    const rows = db.prepare(`SELECT at, src, id FROM (${union}) ORDER BY at DESC, src DESC, id DESC LIMIT @limit`).all(params) as {
+      at: string; src: Source; id: number;
+    }[];
+    const items = rows.map((r) => ({ id: `${r.src}:${r.id}`, ...ITEMS[r.src](db, r.id), at: r.at }));
+    const last = rows.at(-1);
+    return { items, next: rows.length === p.limit && last ? `${last.at}|${last.src}|${last.id}` : null };
+  })();
 }
 
 const FAILURE_WORDS = (f: { step: 'build' | 'drive'; auth: boolean }): string =>
   f.step === 'build' ? 'the workbook could not be built' : f.auth ? 'Google sign-in expired' : 'Drive did not accept the upload';
 
+/** A success row is written again after this long without one, so the Tracker screen's last upload stays near the truth. */
+const PUBLISHED_EVERY_MS = 60 * 60_000;
+
 /**
- * The DrivePublisher's onPublished and onFailure hooks, writing the agent's own rows for the Activity screen. The words
- * are fixed: the error itself (which can hold anything) never reaches the audit log.
+ * The DrivePublisher's onPublished and onFailure hooks, writing the agent's own rows for the Activity screen. The publisher
+ * runs up to once a minute, so a row is written only when something changed: the first success, the first success after
+ * a failure, a success an hour after the last success row, and a failure of a new kind (the first one, or after a
+ * success). The words are fixed: the error itself (which can hold anything) never reaches the audit log.
  */
-export function publisherAuditHooks(audit: Audit): { onPublished: () => void; onFailure: (f: { step: 'build' | 'drive'; auth: boolean }) => void } {
+export function publisherAuditHooks(audit: Audit, clock: Clock): {
+  onPublished: () => void;
+  onFailure: (f: { step: 'build' | 'drive'; auth: boolean }) => void;
+} {
   const entry = (event: string, detail: string): AuditEntry => ({ actor: 'agent', event, kind: 'ops', detail });
+  let lastOk: number | undefined;
+  let failing: string | undefined;
   return {
-    onPublished: () => audit(entry(PUBLISHED, 'Tracker.xlsx uploaded to Drive')),
-    onFailure: (f) => audit(entry(PUBLISH_FAILED, `Tracker upload failed: ${FAILURE_WORDS(f)}`)),
+    onPublished: () => {
+      const now = clock.now().getTime();
+      if (failing === undefined && lastOk !== undefined && now - lastOk < PUBLISHED_EVERY_MS) return;
+      audit(entry(PUBLISHED, 'Tracker.xlsx uploaded to Drive'));
+      lastOk = now;
+      failing = undefined;
+    },
+    onFailure: (f) => {
+      const words = FAILURE_WORDS(f);
+      if (failing === words) return;
+      audit(entry(PUBLISH_FAILED, `Tracker upload failed: ${words}`));
+      failing = words;
+    },
   };
 }

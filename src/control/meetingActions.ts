@@ -13,15 +13,21 @@ import { meetingDetail, parseMeetingId, type AccountOf, type DashboardMeetingDet
 export const MEETING_ACTIONS = ['assign', 'skip', 'retry'] as const;
 export type MeetingAction = (typeof MEETING_ACTIONS)[number];
 
-/** Shown with every retry: queuing a meeting again leads to paid speech-to-text and AI calls. */
-export const RETRY_COST_WARNING = 'Processing a meeting costs money';
+/**
+ * Shown with every assign and retry: both queue the meeting for paid speech-to-text and AI calls (the CLI's assign says
+ * so too). A skip costs nothing.
+ */
+export const MEETING_COST_WARNING = 'Processing a meeting costs money';
 export const SPEND_CAP_REFUSAL = "Today's AI spending limit is reached. Try again after midnight IST.";
 
 export interface MeetingActionResult {
   meeting: DashboardMeetingDetail;
-  /** Set for a retry. */
+  /** Set for an assign or a retry. */
   warning?: string;
 }
+
+/** The CLI's own hint, in the dashboard's words. */
+const dashboardWords = (message: string) => message.replace(/; run meeting list again$/, '; refresh the list and try again');
 
 function clientCode(body: unknown): string {
   const raw = typeof body === 'object' && body !== null && !Array.isArray(body) ? (body as Record<string, unknown>).client : undefined;
@@ -33,7 +39,7 @@ function clientCode(body: unknown): string {
 /** A CorrectionError in the dashboard's terms: a client problem is 422 on the client field, any other refusal 409. */
 function fromCorrection(e: CorrectionError): ControlError {
   if (/^(No client with code |Client \S+ is not in the allow-list)/.test(e.message)) return new ControlError(422, e.message, 'client');
-  return new ControlError(409, e.message);
+  return new ControlError(409, dashboardWords(e.message));
 }
 
 /**
@@ -82,5 +88,5 @@ export function runMeetingAction(
     throw e;
   }
   const meeting = meetingDetail(db, String(id), now, ctx.accountOf)!;
-  return action === 'retry' ? { meeting, warning: RETRY_COST_WARNING } : { meeting };
+  return action === 'skip' ? { meeting } : { meeting, warning: MEETING_COST_WARNING };
 }

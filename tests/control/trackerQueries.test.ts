@@ -49,9 +49,9 @@ describe('trackerSummary', () => {
     task(db, 2, { status: 'done', closedOn: '2026-10-19' });
     task(db, 3);
     expect(trackerSummary(db, now).sheets).toEqual([
-      { name: 'Today', client: null, open: 2, overdue: 2, review: 1, doneThisWeek: 2 },
+      { name: 'Today', client: null, open: 5, overdue: 2, review: 1, doneThisWeek: 2 },
       { name: 'Mehta Foods', client: { code: 'MEH', name: 'Mehta Foods' }, open: 0, overdue: 0, review: 0, doneThisWeek: 1 },
-      { name: 'Sharma Interiors', client: { code: 'SHA', name: 'Sharma Interiors' }, open: 1, overdue: 2, review: 1, doneThisWeek: 1 },
+      { name: 'Sharma Interiors', client: { code: 'SHA', name: 'Sharma Interiors' }, open: 4, overdue: 2, review: 1, doneThisWeek: 1 },
       { name: 'Sharma Interiors (2)', client: { code: 'SHB', name: 'Sharma Interiors' }, open: 1, overdue: 0, review: 0, doneThisWeek: 0 },
     ]);
   });
@@ -90,5 +90,24 @@ describe('trackerSummary', () => {
     const health = { line: { ok: true, text: '✅' }, lastPublishedAt: '2026-10-19T07:30:00.000Z', publishFailingSince: null };
     expect(trackerSummary(db, now, health).lastPublishedAt).toBe('2026-10-19T07:30:00.000Z');
     expect(trackerSummary(db, now, { ...health, lastPublishedAt: '2026-10-19T05:00:00.000Z' }).lastPublishedAt).toBe('2026-10-19T06:00:00.000Z');
+  });
+});
+
+describe('trackerSummary review fixes', () => {
+  it('counts a task due today as open, not overdue', () => {
+    const db = seededDb();
+    task(db, 1, { deadline: '2026-10-19' });
+    expect(trackerSummary(db, now).sheets[0]).toMatchObject({ open: 1, overdue: 0 });
+  });
+
+  it('takes the newest failure, and ignores tracker rows not written by the agent', () => {
+    const db = seededDb();
+    audit(db, '2026-10-19T05:00:00.000Z', 'tracker.publish_failed', 'Tracker upload failed: Drive did not accept the upload');
+    audit(db, '2026-10-19T07:00:00.000Z', 'tracker.publish_failed', 'Tracker upload failed: Google sign-in expired');
+    audit(db, '2026-10-19T06:00:00.000Z', 'tracker.publish_failed', 'Tracker upload failed: the workbook could not be built');
+    const owner = db.prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, 'owner@example.com', ?, 'ops', 'x')");
+    owner.run('2026-10-19T09:00:00.000Z', 'tracker.published');
+    owner.run('2026-10-19T09:00:00.000Z', 'tracker.publish_failed');
+    expect(trackerSummary(db, now)).toMatchObject({ lastPublishedAt: null, lastFailure: { at: '2026-10-19T07:00:00.000Z', reason: 'Google sign-in expired' } });
   });
 });

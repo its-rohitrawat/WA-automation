@@ -174,3 +174,32 @@ describe('meetingDetail', () => {
     for (const bad of ['999', '0', '-1', '1.5', 'abc', '1 OR 1=1', '']) expect(meetingDetail(db, bad, now), bad).toBeUndefined();
   });
 });
+
+describe('meeting review fixes', () => {
+  it('labels a no-access meeting found as internal like the CLI does', () => {
+    const db = seededDb();
+    const id = meeting(db, { status: 'no_access', clientId: null, title: '' });
+    db.prepare("UPDATE meetings SET note = 'found_internal' WHERE id = ?").run(id);
+    expect(list(db).rows[0]!.stageLabel).toBe('Internal, no access to the recording');
+  });
+
+  it('a deferral ending exactly now is due; a future next attempt without an error code shows the stage', () => {
+    const db = seededDb();
+    const due = meeting(db, { status: 'queued', stage: 'audio', errorCode: 'spend_cap', nextAttemptAt: NOW });
+    const noCode = meeting(db, { status: 'queued', stage: 'audio', nextAttemptAt: '2026-10-19T09:00:00.000Z' });
+    const rows = list(db).rows;
+    expect(rows.find((r) => r.id === due)!.stageLabel).toBe('Transcribing');
+    expect(rows.find((r) => r.id === noCode)!.stageLabel).toBe('Transcribing');
+  });
+
+  it('rounds minutes to the nearest', () => {
+    const db = seededDb();
+    meeting(db, { seconds: 1530 });
+    expect(list(db).rows[0]!.minutes).toBe(26);
+  });
+
+  it('accepts offset 0 and refuses a negative one', () => {
+    expect(parseMeetingList(new URLSearchParams({ offset: '0' })).offset).toBe(0);
+    expect(() => parseMeetingList(new URLSearchParams({ offset: '-1' }))).toThrowError(ControlError);
+  });
+});

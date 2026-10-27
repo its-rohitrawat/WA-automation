@@ -1,5 +1,5 @@
 import type { Db } from '../store/db.ts';
-import { getMeeting, MEETING_STATUSES, type MeetingStage, type MeetingStatus } from '../store/meetings.ts';
+import { FOUND_INTERNAL_NOTE, getMeeting, MEETING_STATUSES, type MeetingStage, type MeetingStatus } from '../store/meetings.ts';
 import { ControlError } from './errors.ts';
 import { tasksForMeeting, type DashboardTaskRow } from './taskQueries.ts';
 
@@ -98,7 +98,12 @@ const STAGE_LABELS: Record<MeetingStage, string> = {
   doc: 'Updating the tracker', tracked: 'Updating the tracker',
 };
 
-function stageLabel(r: { status: MeetingStatus; stage: MeetingStage; errorCode: string | null; nextAttemptAt: string | null }, now: Date): string {
+function stageLabel(
+  r: { status: MeetingStatus; stage: MeetingStage; errorCode: string | null; nextAttemptAt: string | null; foundInternal: number },
+  now: Date,
+): string {
+  // A no-access meeting matched as internal keeps no title; the CLI calls it internal too (meeting list).
+  if (r.status === 'no_access' && r.foundInternal === 1) return 'Internal, no access to the recording';
   if (r.status !== 'queued') return STATUS_LABELS[r.status];
   // A deferral still ahead (the daily budget, low disk, a speech-to-text outage): it waits, whatever its stage.
   if (r.errorCode !== null && r.nextAttemptAt !== null && Date.parse(r.nextAttemptAt) > now.getTime()) return 'Waiting to try again';
@@ -107,7 +112,8 @@ function stageLabel(r: { status: MeetingStatus; stage: MeetingStage; errorCode: 
 
 const SELECT_SQL = `SELECT m.id, m.title, m.started_at AS startedAt, COALESCE(m.audio_seconds, m.drive_seconds) AS seconds, m.conference,
     c.code AS clientCode, c.name AS clientName, m.status, m.stage, m.error_code AS errorCode, m.next_attempt_at AS nextAttemptAt,
-    m.doc_file_id AS docFileId, (SELECT COUNT(*) FROM tasks t WHERE t.meeting_id = m.id) AS actionItems
+    m.doc_file_id AS docFileId, (SELECT COUNT(*) FROM tasks t WHERE t.meeting_id = m.id) AS actionItems,
+    COALESCE(m.note = '${FOUND_INTERNAL_NOTE}', 0) AS foundInternal
   FROM meetings m LEFT JOIN clients c ON c.id = m.client_id`;
 
 interface RawRow {
@@ -123,6 +129,7 @@ interface RawRow {
   errorCode: string | null;
   nextAttemptAt: string | null;
   docFileId: string | null;
+  foundInternal: number;
   actionItems: number;
 }
 

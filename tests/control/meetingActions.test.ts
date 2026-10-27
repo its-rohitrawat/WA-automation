@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { assignMeetingToClient, retryMeetingById, skipMeetingById } from '../../src/cli/meetings.ts';
 import { ControlError, type AuditEntry } from '../../src/control/errors.ts';
-import { RETRY_COST_WARNING, runMeetingAction } from '../../src/control/meetingActions.ts';
+import { MEETING_COST_WARNING, runMeetingAction } from '../../src/control/meetingActions.ts';
 import type { Db } from '../../src/store/db.ts';
 import { getKv } from '../../src/store/kv.ts';
 import { insertFound, type MeetingStatus } from '../../src/store/meetings.ts';
@@ -55,7 +55,7 @@ describe('runMeetingAction matches the CLI', () => {
     assignMeetingToClient(cli, '1', 'SHA', now);
     expect(state(web)).toEqual(state(cli));
     expect(result.meeting).toMatchObject({ id: 1, status: 'queued', client: { code: 'SHA' } });
-    expect(result.warning).toBeUndefined();
+    expect(result.warning).toBe(MEETING_COST_WARNING); // assigning queues the meeting for paid processing
     expect(audits).toEqual([{ actor: OWNER, event: 'meeting.assign', kind: 'meeting', detail: 'Meeting 1 assigned to SHA' }]);
   });
 
@@ -75,8 +75,8 @@ describe('runMeetingAction matches the CLI', () => {
     const { result, audits } = run(web, '1', 'retry');
     retryMeetingById(cli, '1', now);
     expect(state(web)).toEqual(state(cli));
-    expect(result).toMatchObject({ meeting: { status: 'queued' }, warning: RETRY_COST_WARNING });
-    expect(RETRY_COST_WARNING).toBe('Processing a meeting costs money');
+    expect(result).toMatchObject({ meeting: { status: 'queued' }, warning: MEETING_COST_WARNING });
+    expect(MEETING_COST_WARNING).toBe('Processing a meeting costs money');
     expect(audits).toEqual([{ actor: OWNER, event: 'meeting.retry', kind: 'meeting', detail: 'Meeting 1 queued again' }]);
   });
 
@@ -107,7 +107,7 @@ describe('runMeetingAction refusals', () => {
     expect(audits).toEqual([]);
   });
 
-  it('assign and skip still work at the cap: they cost nothing by themselves', () => {
+  it('assign and skip still work at the cap: the pipeline itself waits for the budget', () => {
     expect(run(withMeeting('unassigned'), '1', 'skip', undefined, paused).result.meeting.status).toBe('skipped');
     expect(run(withMeeting('unassigned'), '1', 'assign', { client: 'SHA' }, paused).result.meeting.status).toBe('queued');
   });
@@ -147,5 +147,19 @@ describe('runMeetingAction refusals', () => {
     expect(() => runMeetingAction(db, { id: '1', action: 'skip' }, { actor: OWNER, now, audit: () => { throw new Error('disk full'); }, spend: notPaused }))
       .toThrowError('disk full');
     expect(state(db)).toEqual(before);
+  });
+});
+
+describe('runMeetingAction review fixes', () => {
+  it('a skip carries no cost warning', () => {
+    expect(run(withMeeting('unassigned'), '1', 'skip').result.warning).toBeUndefined();
+  });
+
+  it("puts a meeting that changed meanwhile in the dashboard's words", () => {
+    const db = withMeeting('unassigned');
+    // As if another writer took the meeting between the check and the change.
+    db.exec('CREATE TRIGGER grab BEFORE UPDATE ON meetings BEGIN SELECT RAISE(IGNORE); END');
+    const e = refusal(() => run(db, '1', 'skip'));
+    expect(e).toMatchObject({ status: 409, message: 'Meeting 1 changed meanwhile; refresh the list and try again' });
   });
 });
