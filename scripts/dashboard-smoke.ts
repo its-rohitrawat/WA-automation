@@ -5,17 +5,14 @@
 //
 //   npm run smoke:dashboard [-- --out <folder>] [-- --browser chrome|msedge]
 //
-// Nothing here touches the agent, WhatsApp, Google or any data folder: the API answers are fixed fake data.
+// Nothing here touches the agent, WhatsApp, Google or any data folder: see scripts/dashboardFake.ts.
 import { mkdirSync } from 'node:fs';
-import type { ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright-core';
 import type { Page } from 'playwright-core';
-import { sendError, sendJson } from '../src/web/http.ts';
-import { createWebServer } from '../src/web/server.ts';
-import { manualClock } from '../src/util/clock.ts';
-import { silentLogger } from '../src/util/logger.ts';
+import { fakeDashboard } from './dashboardFake.ts';
+import type { FakeState } from './dashboardFake.ts';
 
 const arg = (name: string) => {
   const i = process.argv.indexOf(`--${name}`);
@@ -28,72 +25,11 @@ const VIEWPORTS = [
   { name: 'phone', width: 390, height: 844 },
 ] as const;
 const THEMES = ['dark', 'light'] as const;
+const SEARCH_WORDS = ['Nair', 'Joshi', 'Patel', 'Gupta'];
+let round = 0;
 
-const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
-
-/** Made-up answers in the agent's shapes (D1 tasks 5 and 6). */
-const fixtures = (empty: boolean) => ({
-  status: {
-    at: at(0), up: true, line: { ok: false, text: 'Spare WhatsApp is not linked' },
-    parts: [
-      { key: 'founder', name: 'Founder WhatsApp', state: 'ok', label: 'Connected' },
-      { key: 'spare', name: 'Spare WhatsApp', state: 'warn', label: 'Not linked' },
-      { key: 'google', name: 'Google', state: 'ok', label: 'Connected' },
-      { key: 'claude', name: 'Claude spend', state: 'ok', label: '$0.84 of $3.00' },
-    ],
-    lastMessageAt: at(3), spentToday: 0.84, capUsd: 3,
-  },
-  overview: empty
-    ? { clients: 0, tasks: { open: 0, overdue: 0, review: 0, doneThisWeek: 0 }, byClient: [], meetings: [], activity: [], tracker: null }
-    : {
-        clients: 3,
-        tasks: { open: 9, overdue: 2, review: 1, doneThisWeek: 6 },
-        byClient: [
-          { client: { code: 'ACM', name: 'Acme Traders' }, segments: [{ key: 'overdue', count: 2 }, { key: 'open', count: 4 }, { key: 'done', count: 3 }] },
-          { client: { code: 'BLU', name: 'Blue Harbour Logistics With A Very Long Name' }, segments: [{ key: 'open', count: 5 }, { key: 'review', count: 1 }] },
-          { client: { code: 'CED', name: 'Cedar' }, segments: [{ key: 'done', count: 3 }] },
-        ],
-        meetings: [
-          { title: 'Weekly review', status: 'done', stageLabel: 'Summarised', when: at(90), minutes: 42 },
-          { title: '', status: 'processing', stageLabel: 'Transcribing', when: at(20), minutes: null },
-        ],
-        activity: [
-          { kind: 'task', title: 'New task', detail: 'Send the revised quote', who: 'Acme Traders', at: at(12) },
-          { kind: 'msg', title: 'Message read', detail: '<b>not bold</b>', who: 'Blue Harbour', at: at(30) },
-          { kind: 'issue', title: 'Spare WhatsApp not linked', detail: '', who: '', at: at(60) },
-        ],
-        tracker: { lastPublishedAt: at(300), health: { ok: true, text: 'Published to Drive' } },
-      },
-  connections: {
-    founder: { state: 'ok', label: 'Connected', groups: 3, lastActivityAt: at(3) },
-    spare: { state: 'not_linked', label: 'Not linked', recipientMasked: '•••• 0000' },
-    google: [
-      { label: 'main', email: 'owner@example.com', state: 'ok', stateLabel: 'Connected', usedFor: ['Mail', 'Drive', 'Meetings'] },
-      { label: 'org2', email: 'meetings@example.org', state: 'down', stateLabel: 'Sign in again', usedFor: ['Meetings'] },
-    ],
-    drive: { state: 'ok', label: 'Connected', lastUploadAt: at(300) },
-    claude: { callsToday: 41, spentToday: 0.84, capUsd: 3 },
-    monitoring: { on: true, lastBeatAt: at(1) },
-  },
-});
-
-let signedIn = false;
-let empty = false;
-
-const web = createWebServer({ control: {}, env: { DASHBOARD_PORT: 0 }, log: silentLogger(), clock: manualClock(new Date().toISOString()) });
-const guarded = (body: () => unknown) => (ctx: { res: ServerResponse }) => {
-  if (!signedIn) return sendError(ctx.res, 401, 'unauthenticated', 'Sign in first.');
-  sendJson(ctx.res, 200, body());
-};
-web.router.get('/dashboard/api/me', guarded(() => ({ email: 'owner@example.com', name: 'Test Owner', signedInAt: at(5), expiresAt: at(-600), csrf: 'smoke-csrf' })));
-web.router.get('/dashboard/api/status', guarded(() => fixtures(empty).status));
-web.router.get('/dashboard/api/overview', guarded(() => fixtures(empty).overview));
-web.router.get('/dashboard/api/connections', guarded(() => fixtures(empty).connections));
-web.router.post('/dashboard/auth/logout', ({ req, res }) => {
-  if (req.headers['x-csrf-token'] !== 'smoke-csrf') return sendError(res, 403, 'csrf', 'Refused.');
-  signedIn = false;
-  res.writeHead(204).end();
-});
+const state: FakeState = { signedIn: false, empty: false };
+const web = fakeDashboard({ port: 0, state });
 
 const failures: string[] = [];
 const fail = (where: string, what: string) => failures.push(`${where}: ${what}`);
@@ -107,7 +43,8 @@ function watch(page: Page, where: () => string) {
   });
   page.on('response', (r) => {
     const path = new URL(r.url()).pathname;
-    if (r.status() >= 400 && !(r.status() === 401 && path.startsWith('/dashboard/api/') && !signedIn)) fail(where(), `${r.status()} ${path}`);
+    if (r.status() === 422 && path === '/dashboard/api/groups/apply' && where().startsWith('manage groups refused')) return; // the refusal step
+    if (r.status() >= 400 && !(r.status() === 401 && path.startsWith('/dashboard/api/') && !state.signedIn)) fail(where(), `${r.status()} ${path}`);
   });
   page.on('requestfailed', (r) => fail(where(), `request failed ${new URL(r.url()).pathname}: ${r.failure()?.errorText}`));
 }
@@ -152,7 +89,7 @@ async function main() {
   try {
     for (const vp of VIEWPORTS) {
       // Signed out: the sign-in page, then its two notes.
-      signedIn = false;
+      state.signedIn = false;
       let where = '';
       const ctx = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
       ctx.setDefaultTimeout(WAIT_MS);
@@ -170,8 +107,8 @@ async function main() {
       await ctx.close();
 
       for (const theme of THEMES) {
-        signedIn = true;
-        empty = false;
+        state.signedIn = true;
+        state.empty = false;
         const tctx = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
         tctx.setDefaultTimeout(WAIT_MS);
         await tctx.addInitScript((t) => {
@@ -208,7 +145,7 @@ async function main() {
         await check(p, where, 'text=Coming in the next update', `placeholder-${tag}`);
 
         where = `overview empty ${tag}`;
-        empty = true;
+        state.empty = true;
         await p.goto(`${base}/dashboard`);
         await check(p, where, 'text=No clients approved yet', `overview-empty-${tag}`);
 
@@ -216,6 +153,64 @@ async function main() {
         await p.goBack();
         await settle(p);
         if (!p.url().endsWith('/dashboard/tasks')) fail(where, `back went to ${p.url()}`);
+
+        state.empty = false;
+        where = `clients ${tag}`;
+        await p.goto(`${base}/dashboard/clients`);
+        await check(p, where, '.ccard', `clients-${tag}`);
+        await p.locator('.ccard').first().click();
+        await p.locator('.drawer h2', { hasText: 'Acme Traders' }).waitFor();
+        if ((await p.locator('.drawer .li').count()) < 3) fail(where, 'the client drawer has no tasks');
+        await p.waitForTimeout(600); // the drawer slides in
+        await p.screenshot({ path: join(OUT, `client-drawer-${tag}.png`) });
+        await p.keyboard.press('Escape');
+        await p.locator('.drawer').waitFor({ state: 'detached' });
+
+        where = `manage groups ${tag}`;
+        await p.locator('[data-ctab="groups"]').click();
+        await p.waitForURL('**/dashboard/clients/groups');
+        await check(p, where, '.g-row', `groups-${tag}`);
+        const firstBatch = await p.locator('.g-row').count();
+        if (firstBatch > 2 * 60 + 3) fail(where, `drew ${firstBatch} rows at once (batches of 60)`);
+        // A different family name each round: the fake directory keeps every save, so codes would run out.
+        const word = SEARCH_WORDS[round++ % SEARCH_WORDS.length]!;
+        await p.locator('#g-q').fill(word);
+        await p.waitForURL(new RegExp(`q=${word}`));
+        await p.waitForFunction((w) => [...document.querySelectorAll('.g-row')].every((r) => (r.textContent ?? '').includes(w)), word);
+        const control = vp.name === 'phone' ? '[data-toggle][aria-checked="false"]' : '[data-approve]';
+        await p.locator(`.g-row:not(.changed) ${control}`).first().click();
+        await p.locator('#g-form').waitFor();
+        await p.waitForFunction(() => /^[A-Z]{3,4}$/.test((document.querySelector('#g-code') as HTMLInputElement | null)?.value ?? ''));
+        await p.waitForTimeout(600);
+        await p.screenshot({ path: join(OUT, `group-drawer-${tag}.png`) });
+        await p.locator('.drawer button[type="submit"]').click();
+        await p.locator('.savebar', { hasText: '1 change not saved' }).waitFor();
+        if (vp.name === 'laptop' && theme === 'dark') {
+          // A code a listed client has: the drawer says so before any save.
+          where = `manage groups refused ${tag}`;
+          await p.locator('.g-row:not(.changed) [data-approve]').first().click();
+          await p.locator('#g-code').fill('ACM');
+          await p.locator('.drawer button[type="submit"]').click();
+          await p.locator('.g-error', { hasText: 'used by Acme Traders' }).waitFor();
+          // A code only the agent knows is taken: it refuses the save and that group's drawer opens with why.
+          await p.locator('#g-code').fill('ZZZ');
+          await p.locator('.drawer button[type="submit"]').click();
+          await p.locator('.drawer').waitFor({ state: 'detached' });
+          await p.locator('#g-save').click();
+          await p.locator('.g-error', { hasText: 'already used' }).waitFor();
+          await p.waitForTimeout(600);
+          await p.screenshot({ path: join(OUT, `group-refused-${tag}.png`) });
+          await p.keyboard.press('Escape');
+          await p.locator('#g-undo').click();
+          await p.locator('.savebar').waitFor({ state: 'detached' });
+          await p.locator('.g-row:not(.changed) [data-approve]').first().click();
+          await p.locator('.drawer button[type="submit"]').click();
+        }
+        where = `manage groups save ${tag}`;
+        await p.screenshot({ path: join(OUT, `groups-unsaved-${tag}.png`) });
+        await p.locator('#g-save').click();
+        await p.locator('.toast', { hasText: 'Saved' }).waitFor();
+        await p.locator('.savebar').waitFor({ state: 'detached' });
 
         where = `sign out ${tag}`;
         await p.locator('#avatar').click();
@@ -236,4 +231,8 @@ async function main() {
   }
 }
 
-await main();
+await main().catch((e: unknown) => {
+  // Stopped early: what the pages reported so far usually explains why.
+  if (failures.length) console.error(`Before it stopped (${failures.length}):\n- ${failures.join('\n- ')}`);
+  throw e;
+});

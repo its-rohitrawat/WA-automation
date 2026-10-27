@@ -15,6 +15,7 @@
     "golden": "node scripts/golden.ts",
     "stt:local-check": "node scripts/stt-local-check.ts",
     "smoke:dashboard": "node scripts/dashboard-smoke.ts",
+    "preview:dashboard": "node scripts/dashboard-preview.ts",
     "build:icons": "node scripts/build-dashboard-icons.ts"
   },
   "dependencies": {
