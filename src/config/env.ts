@@ -16,6 +16,18 @@ const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 /** 91, then a 10-digit Indian mobile (starts 6-9). The owner's decision: the report goes only to an Indian number. */
 export const INDIAN_MOBILE = /^91[6-9]\d{9}$/;
 
+/** https anywhere, or plain http only on this machine and with an explicit port (http://localhost:8787). */
+function isDashboardUrl(raw: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (u.protocol === 'https:') return true;
+  return u.protocol === 'http:' && (u.hostname === 'localhost' || u.hostname === '127.0.0.1') && u.port !== '';
+}
+
 const EnvSchema = z.object({
   ANTHROPIC_API_KEY: z.string().min(1).optional(),
   AI_MODEL: z.string().default('claude-opus-5-5'),
@@ -81,6 +93,27 @@ const EnvSchema = z.object({
     .url()
     .refine((u) => u.startsWith('https://'), { message: 'must be an https:// link' })
     .optional(),
+  // Owner dashboard (D1). Off unless DASHBOARD_ENABLED is true. The server listens on 127.0.0.1 only.
+  DASHBOARD_ENABLED: Flag.default(false),
+  DASHBOARD_PORT: z.coerce.number().int().min(1024).max(65535).default(8787),
+  /** The address owners open: https, or http on this machine (localhost or 127.0.0.1 with a port). */
+  DASHBOARD_PUBLIC_URL: z
+    .string()
+    .url()
+    .refine(isDashboardUrl, { message: 'must be an https:// link or http://localhost:<port>' })
+    .optional(),
+  /** Google accounts that may sign in: trimmed, lower-cased, without repeats. Personal data: never logged. */
+  DASHBOARD_OWNER_EMAILS: z
+    .string()
+    .transform((s) => s.split(',').map((e) => e.trim().toLowerCase()).filter((e) => e !== ''))
+    .pipe(z.array(z.email()))
+    .transform((es) => [...new Set(es)])
+    .default([]),
+  /** The dashboard's own Google web OAuth client (not the desktop one). Secret: never logged. */
+  DASHBOARD_GOOGLE_CLIENT_ID: z.string().min(1).optional(),
+  DASHBOARD_GOOGLE_CLIENT_SECRET: z.string().min(1).optional(),
+  /** UptimeRobot read-only API key, for the uptime history. Secret: never logged. */
+  UPTIMEROBOT_READ_KEY: z.string().min(1).optional(),
 }).superRefine((env, ctx) => {
   if (env.MEETINGS_ENABLED && env.TEAM_EMAIL_DOMAINS.length === 0) {
     ctx.addIssue({ code: 'custom', path: ['TEAM_EMAIL_DOMAINS'], message: 'is required when MEETINGS_ENABLED is true' });
@@ -107,6 +140,14 @@ const EnvSchema = z.object({
   }
   if (env.REPORT_TIME >= env.REPORT_DEADLINE) {
     ctx.addIssue({ code: 'custom', path: ['REPORT_DEADLINE'], message: 'must be later than REPORT_TIME' });
+  }
+  if (env.DASHBOARD_ENABLED) {
+    if (env.DASHBOARD_OWNER_EMAILS.length === 0) {
+      ctx.addIssue({ code: 'custom', path: ['DASHBOARD_OWNER_EMAILS'], message: 'is required when DASHBOARD_ENABLED is true' });
+    }
+    for (const name of ['DASHBOARD_GOOGLE_CLIENT_ID', 'DASHBOARD_GOOGLE_CLIENT_SECRET'] as const) {
+      if (!env[name]) ctx.addIssue({ code: 'custom', path: [name], message: 'is required when DASHBOARD_ENABLED is true' });
+    }
   }
 });
 
