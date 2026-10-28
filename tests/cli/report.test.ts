@@ -589,6 +589,20 @@ describe('cli report status', () => {
     expect(out()).not.toContain('…1111');
   });
 
+  it('follows REPORT_DAYS: no report on a Saturday by default, due now with REPORT_DAYS=daily', () => {
+    vi.setSystemTime(new Date('2026-10-24T02:00:00.000Z')); // Saturday 07:30 IST, inside the send window
+    reportStatusCommand(deps());
+    expect(lines).toEqual([
+      'Morning report: on, 06:00 to 12:00 IST, to the number ending …5678',
+      'Today (2026-10-24): Morning report: no report today (weekend)',
+    ]);
+    expect(out()).not.toMatch(/due|skipped/);
+
+    lines = [];
+    reportStatusCommand(deps({ REPORT_DAYS: 'daily' }));
+    expect(lines).toEqual(['Morning report: on, 06:00 to 12:00 IST, to the number ending …5678', 'Today (2026-10-24): Morning report: due now']);
+  });
+
   it('lists at most the last 7 days, newest first', () => {
     withTracker((db) => {
       for (let d = 14; d <= 22; d++) skipReport(db, `2026-10-${d}`, 'connect_timeout', `2026-10-${d}T06:30:00.000Z`);

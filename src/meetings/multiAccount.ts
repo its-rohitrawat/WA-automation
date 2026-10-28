@@ -61,6 +61,84 @@ export function storedMeetingAccounts(o: {
   return out.length > 0 ? out : [{ label: MAIN_ACCOUNT, api: googleMeetingsApi(o.main) }];
 }
 
+/** What hubMeetingAccounts reads of GoogleAuthHub: each account's current client. */
+export interface MeetingClients {
+  client(label: string): OAuth2Client | undefined;
+}
+
+/**
+ * The accounts meetings may use, from the hub's current clients (D3): the main sign-in when it has every meeting scope
+ * and a client, then each meeting account that has both. An account without either gets no call at all. Unlike
+ * storedMeetingAccounts there is no fallback: with no account, LiveMeetingsApi refuses each call as not connected.
+ */
+export function hubMeetingAccounts(db: Db, hub: MeetingClients): MeetingAccount[] {
+  const out: MeetingAccount[] = [];
+  for (const label of [MAIN_ACCOUNT, ...meetingAccounts(db)]) {
+    const client = hub.client(label);
+    if (!client || !hasMeetingScopes(db, label === MAIN_ACCOUNT ? undefined : label)) continue;
+    out.push({ label, api: googleMeetingsApi(client) });
+  }
+  return out;
+}
+
+/**
+ * The combined meetings API, rebuilt in place when an account is reconnected (GoogleAuthHub.onChange → rebuild()), so
+ * meetings resume without a restart. A call in flight finishes on the build it started with. A rebuild forgets which
+ * account listed which item; the router then tries the accounts in order, as after a restart.
+ */
+export class LiveMeetingsApi implements MeetingsGoogleApi {
+  readonly #build: () => MeetingAccount[];
+  readonly #log: Logger;
+  #current: { api: MeetingsGoogleApi; router: MultiAccountMeetingsApi | null } | null = null;
+
+  constructor(build: () => MeetingAccount[], log: Logger) {
+    this.#build = build;
+    this.#log = log;
+    this.rebuild();
+  }
+
+  rebuild(): void {
+    const accounts = this.#build();
+    this.#current = accounts.length === 0 ? null : combineMeetingAccounts(accounts, this.#log);
+  }
+
+  /** As MultiAccountMeetingsApi.lostAccounts; empty with one account (the meetings service shows that one as paused). */
+  lostAccounts(): string[] {
+    return this.#current?.router?.lostAccounts() ?? [];
+  }
+
+  accountOf(conference: string): string | null {
+    return this.#current?.router?.accountOf(conference) ?? null;
+  }
+
+  #api(): MeetingsGoogleApi {
+    if (!this.#current) throw new GoogleAccessError('not_connected');
+    return this.#current.api;
+  }
+
+  async listConferences(fromIso: string, toIso: string, signal: AbortSignal): Promise<ConferenceRef[]> {
+    return this.#api().listConferences(fromIso, toIso, signal);
+  }
+  async listRecordings(conference: string, signal: AbortSignal): Promise<RecordingRef[]> {
+    return this.#api().listRecordings(conference, signal);
+  }
+  async listSignedInNames(conference: string, signal: AbortSignal): Promise<string[]> {
+    return this.#api().listSignedInNames(conference, signal);
+  }
+  async meetingCode(space: string, signal: AbortSignal): Promise<string | null> {
+    return this.#api().meetingCode(space, signal);
+  }
+  async findInvite(code: string, startIso: string, signal: AbortSignal): Promise<InviteInfo | null> {
+    return this.#api().findInvite(code, startIso, signal);
+  }
+  async videoInfo(fileId: string, signal: AbortSignal): Promise<DriveVideoInfo> {
+    return this.#api().videoInfo(fileId, signal);
+  }
+  async download(fileId: string, dest: string, maxBytes: number, signal: AbortSignal): Promise<number> {
+    return this.#api().download(fileId, dest, maxBytes, signal);
+  }
+}
+
 /** One account: its API unchanged, and no account labels. Several: the router. */
 export function combineMeetingAccounts(
   accounts: readonly MeetingAccount[],

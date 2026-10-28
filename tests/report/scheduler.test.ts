@@ -1,10 +1,10 @@
-import ExcelJS from 'exceljs';
 import { Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import type { HealthLine } from '../../src/output/view.ts';
 import {
-  describeReport, reasonText, ReportScheduler, retryWaitMs, SENDER_WARNINGS, UNKNOWN_WARNING, type ReportPayload,
+  describeReport, isReportDay, reasonText, ReportScheduler, retryWaitMs, SENDER_WARNINGS, UNKNOWN_WARNING, type ReportPayload,
 } from '../../src/report/scheduler.ts';
+import { TRACKER_ID_KEY } from '../../src/report/morningReport.ts';
 import type { ReportSettings, SendResult } from '../../src/report/types.ts';
 import type { Db } from '../../src/store/db.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
@@ -13,21 +13,30 @@ import {
 } from '../../src/store/reports.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
+import { istDate } from '../../src/util/time.ts';
 import { MEHTA, seededDb, SHARMA } from '../helpers/db.ts';
 import { FakeReportSender } from '../helpers/fakeReportSender.ts';
 
 const DAY = '2026-10-23';
 const IST = (hm: string) => `${DAY}T${hm}:00.000+05:30`;
 const iso = (hm: string) => new Date(IST(hm)).toISOString();
-const ON: ReportSettings = { enabled: true, time: '06:00', deadline: '12:00' };
+const ON: ReportSettings = { enabled: true, time: '06:00', deadline: '12:00', days: 'weekdays' };
 const failed = (code: string): SendResult => ({ status: 'failed', code });
 /** health() also carries the masked number the sender sends to (FakeReportSender: …1234). */
 const TO = { recipientMasked: '…1234' };
+/** The Tracker.xlsx id the Drive publisher stores once it has uploaded the tracker, and the link the report carries. */
+const TRACKER_ID = '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123';
+const LINK = `https://drive.google.com/file/d/${TRACKER_ID}/view`;
 
 function setup(
-  o: { settings?: ReportSettings; build?: (now: Date) => Promise<ReportPayload>; log?: Logger; healthLine?: () => HealthLine } = {},
+  o: {
+    settings?: ReportSettings; build?: (now: Date) => Promise<ReportPayload>; log?: Logger; healthLine?: () => HealthLine;
+    /** The stored tracker id; null leaves it unset, as before the first upload. Default TRACKER_ID. */
+    trackerId?: string | null;
+  } = {},
 ) {
   const db = seededDb();
+  if (o.trackerId !== null) setKv(db, TRACKER_ID_KEY, o.trackerId ?? TRACKER_ID);
   const clock = manualClock(IST('05:00'));
   const sender = new FakeReportSender();
   const s = new ReportScheduler({
@@ -72,18 +81,14 @@ function request(db: Db, hm: string, date = DAY): void {
 const settle = () => new Promise<void>((r) => setImmediate(r));
 
 describe('ReportScheduler', () => {
-  it('sends once at 06:00, with the tracker attached', async () => {
+  it('sends once at 06:00: the short text with the tracker link, and records its one message id', async () => {
     const { db, sender, at } = setup();
     await at('05:59');
     expect(sender.calls).toHaveLength(0);
     expect(reportFor(db, DAY)).toBeUndefined();
     await at('06:00');
-    expect(sender.calls).toHaveLength(1);
-    const call = sender.calls[0]!;
-    expect(call.fileName).toBe('Tracker-2026-10-23.xlsx');
-    expect(call.text.startsWith('Morning report · 23 Oct')).toBe(true);
-    expect(call.xlsx.subarray(0, 2).toString('latin1')).toBe('PK');
-    expect(reportFor(db, DAY)).toMatchObject({ status: 'sent', detail: 'msg-1,msg-2', attempts: 1, forced: false });
+    expect(sender.calls).toEqual([{ text: `Good morning. 0 open tasks, 0 overdue. Today's tracker: ${LINK}` }]);
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'sent', detail: 'msg-1', attempts: 1, forced: false });
     for (const hm of ['06:01', '09:00', '11:59']) await at(hm);
     expect(sender.calls).toHaveLength(1);
   });
@@ -376,14 +381,37 @@ describe('ReportScheduler', () => {
     expect(reportFor(db, DAY)).toMatchObject({ status: 'sent', forced: true });
   });
 
-  it('puts the real health line in the attached workbook', async () => {
-    const healthLine = vi.fn((): HealthLine => ({ ok: false, text: 'HEALTH-MARKER' }));
-    const { sender, at } = setup({ healthLine });
+  it('without a tracker link (never uploaded, or a bad id) retries with the usual waits, then skips at the deadline, never sending', async () => {
+    for (const trackerId of [null, '', 'file-1', '../../evil?x=1']) {
+      const { db, sender, s, at } = setup({ trackerId });
+      await at('06:00');
+      expect(reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'no_tracker_link', attempts: 1, nextAttemptAt: iso('06:02') });
+      expect(s.health()).toEqual({
+        text: 'Morning report: not sent yet (the tracker is not on Google Drive yet (run google-auth and let it upload once)), next try 06:02 IST',
+        warning: null,
+        ...TO,
+      });
+      await at('06:02');
+      expect(reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'no_tracker_link', attempts: 2, nextAttemptAt: iso('06:07') });
+      await at('06:07');
+      expect(reportFor(db, DAY)!.nextAttemptAt).toBe(iso('06:17'));
+      await at('12:00');
+      expect(reportFor(db, DAY)).toMatchObject({ status: 'skipped', detail: 'no_tracker_link' });
+      expect(s.health().text).toBe('Morning report skipped today (the tracker is not on Google Drive yet (run google-auth and let it upload once))');
+      await at('12:30');
+      expect(sender.calls).toHaveLength(0);
+    }
+    expect(reasonText('no_tracker_link')).toBe('the tracker is not on Google Drive yet (run google-auth and let it upload once)');
+  });
+
+  it('sends once the tracker has been uploaded after a no_tracker_link try', async () => {
+    const { db, sender, at } = setup({ trackerId: null });
     await at('06:00');
-    expect(healthLine).toHaveBeenCalled();
-    const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(sender.calls[0]!.xlsx as unknown as ExcelJS.Buffer);
-    expect(wb.getWorksheet('Overview')!.getCell('A1').value).toBe('HEALTH-MARKER');
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'no_tracker_link' });
+    setKv(db, TRACKER_ID_KEY, TRACKER_ID); // the Drive publisher uploads the tracker
+    await at('06:02');
+    expect(sender.calls).toEqual([{ text: `Good morning. 0 open tasks, 0 overdue. Today's tracker: ${LINK}` }]);
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'sent', detail: 'msg-1', attempts: 2 });
   });
 
   it('records the time the send finished, not the time it started', async () => {
@@ -391,9 +419,9 @@ describe('ReportScheduler', () => {
       const one = setup();
       one.sender.results = fails ? [failed('connect_timeout')] : [];
       const send = one.sender.sendReport.bind(one.sender);
-      one.sender.sendReport = async (text, xlsx, fileName) => {
+      one.sender.sendReport = async (text) => {
         one.clock.set(IST('06:03')); // a slow connect
-        return send(text, xlsx, fileName);
+        return send(text);
       };
       await one.at('06:00');
       const row = reportFor(one.db, DAY)!;
@@ -523,9 +551,9 @@ describe('ReportScheduler', () => {
     const { db, sender, at } = setup();
     const seen: (ReportRow | undefined)[] = [];
     const send = sender.sendReport.bind(sender);
-    sender.sendReport = async (text, xlsx, fileName) => {
+    sender.sendReport = async (text) => {
       seen.push(reportFor(db, DAY));
-      return send(text, xlsx, fileName);
+      return send(text);
     };
     await at('06:00');
     expect(seen).toHaveLength(1);
@@ -553,7 +581,7 @@ describe('ReportScheduler', () => {
     const build = async (): Promise<ReportPayload> => {
       await g.promise;
       built = true;
-      return { text: 'report text', xlsx: Buffer.from('PK'), fileName: 'Tracker-2026-10-23.xlsx' };
+      return { text: 'report text' };
     };
     const { db, clock, sender, s } = setup({ build });
     clock.set(IST('06:00'));
@@ -603,7 +631,9 @@ describe('ReportScheduler', () => {
       expect(lines.length).toBeGreaterThan(0);
       for (const line of lines) {
         for (const t of texts) expect(line).not.toContain(t);
-        for (const bad of [SHARMA.name, MEHTA.name, 'Sharma', 'Mehta', 'Tracker-', 'Morning report ·', 'msg-1']) expect(line).not.toContain(bad);
+        for (const bad of [SHARMA.name, MEHTA.name, 'Sharma', 'Mehta', 'Tracker-', 'Good morning', TRACKER_ID, 'drive.google', 'msg-1']) {
+          expect(line).not.toContain(bad);
+        }
         for (const key of Object.keys(JSON.parse(line) as object)) expect(allowed).toContain(key);
       }
     };
@@ -623,6 +653,11 @@ describe('ReportScheduler', () => {
     // a build failure whose error message names a client and the file
     const broken = setup({ log, build: async () => Promise.reject(new Error(`Sharma Interiors Tracker-${DAY}.xlsx`)) });
     await broken.at('06:00');
+
+    // no tracker link yet: a retry, then skipped at the deadline
+    const noLink = setup({ log, trackerId: null });
+    await noLink.at('06:00');
+    await noLink.at('12:00');
 
     // skipped after the deadline, and a crash mid-send found at start
     const late = setup({ log });
@@ -741,5 +776,163 @@ describe('describeReport', () => {
 
   it('waits 2, 5, then 10 minutes', () => {
     expect([0, 1, 2, 3, 4, 9].map(retryWaitMs)).toEqual([120_000, 120_000, 300_000, 600_000, 600_000, 600_000]);
+  });
+});
+
+describe('report days (REPORT_DAYS)', () => {
+  const FRI = '2026-10-30';
+  const SAT = '2026-10-31';
+  const SUN = '2026-11-01';
+  const MON = '2026-11-02';
+  const at = (date: string, hm: string) => new Date(`${date}T${hm}:00.000+05:30`);
+
+  it('reads the weekday of the IST date, also at the IST midnight edge', () => {
+    // 2026-10-30 23:59 IST is Friday; one minute later (18:30 UTC the same UTC day) it is Saturday in India.
+    expect(istDate(at(FRI, '23:59'))).toBe(FRI);
+    expect(istDate(new Date('2026-10-30T18:30:00.000Z'))).toBe(SAT);
+    expect(isReportDay(istDate(at(FRI, '23:59')), 'weekdays')).toBe(true);
+    expect(isReportDay(istDate(new Date('2026-10-30T18:30:00.000Z')), 'weekdays')).toBe(false);
+    // 2026-11-01 23:59 IST is Sunday; 2026-11-02 00:00 IST (18:30 UTC on 1 Nov) is Monday.
+    expect(isReportDay(istDate(at(SUN, '23:59')), 'weekdays')).toBe(false);
+    expect(isReportDay(istDate(new Date('2026-11-01T18:30:00.000Z')), 'weekdays')).toBe(true);
+  });
+
+  it('weekdays is Monday to Friday, mon-sat adds Saturday, daily is every day', () => {
+    const week = ['2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05', '2026-11-06', '2026-11-07', '2026-11-08']; // Monday to Sunday
+    expect(week.map((d) => isReportDay(d, 'weekdays'))).toEqual([true, true, true, true, true, false, false]);
+    expect(week.map((d) => isReportDay(d, 'mon-sat'))).toEqual([true, true, true, true, true, true, false]);
+    expect(week.map((d) => isReportDay(d, 'daily'))).toEqual([true, true, true, true, true, true, true]);
+  });
+
+  function weekSetup(settings: ReportSettings = ON) {
+    const db = seededDb();
+    setKv(db, TRACKER_ID_KEY, TRACKER_ID);
+    const clock = manualClock(at(SAT, '05:00').toISOString());
+    const sender = new FakeReportSender();
+    const s = new ReportScheduler({ db, clock, log: silentLogger(), sender, settings, healthLine: () => ({ ok: true, text: '✅ Connected' }) });
+    const tick = async (date: string, hm: string) => {
+      clock.set(at(date, hm).toISOString());
+      await s.tick(clock.now());
+    };
+    return { db, clock, sender, s, tick };
+  }
+
+  it('on Saturday and Sunday the scheduled ticks at 06:00, 09:00 and after the deadline create no row and send nothing; Monday sends', async () => {
+    const { db, sender, s, tick } = weekSetup();
+    for (const date of [SAT, SUN]) {
+      for (const hm of ['05:59', '06:00', '09:00', '11:59', '12:00', '23:59']) await tick(date, hm);
+      expect(reportFor(db, date)).toBeUndefined();
+    }
+    expect(sender.calls).toHaveLength(0);
+    expect(s.health(at(SUN, '07:00'))).toEqual({ text: 'Morning report: no report today (weekend)', warning: null, ...TO });
+    await tick(MON, '06:00');
+    expect(sender.calls).toHaveLength(1);
+    expect(reportFor(db, MON)).toMatchObject({ status: 'sent', attempts: 1, forced: false });
+  });
+
+  it('the Friday 23:59 IST tick is Friday and the 00:00 IST tick is Saturday', async () => {
+    const { db, sender, tick } = weekSetup({ ...ON, time: '00:00', deadline: '23:59' });
+    await tick(FRI, '23:58');
+    expect(reportFor(db, FRI)!.status).toBe('sent');
+    await tick(SAT, '00:00');
+    expect(reportFor(db, SAT)).toBeUndefined();
+    expect(sender.calls).toHaveLength(1);
+  });
+
+  it('mon-sat sends on Saturday but not on Sunday; daily sends on Sunday', async () => {
+    const monSat = weekSetup({ ...ON, days: 'mon-sat' });
+    await monSat.tick(SAT, '06:00');
+    await monSat.tick(SUN, '06:00');
+    await monSat.tick(SUN, '12:00');
+    expect(monSat.sender.calls).toHaveLength(1);
+    expect(reportFor(monSat.db, SAT)!.status).toBe('sent');
+    expect(reportFor(monSat.db, SUN)).toBeUndefined();
+    const daily = weekSetup({ ...ON, days: 'daily' });
+    await daily.tick(SUN, '06:00');
+    expect(reportFor(daily.db, SUN)!.status).toBe('sent');
+  });
+
+  it('a send-now request on a Sunday sends once, and is never sent a second time that day', async () => {
+    const { db, sender, s, tick } = weekSetup();
+    await tick(SUN, '10:00');
+    expect(sender.calls).toHaveLength(0);
+    setKv(db, REPORT_REQUEST_KEY, reportRequest(SUN, reportFor(db, SUN), at(SUN, '10:00')));
+    await tick(SUN, '10:01');
+    expect(sender.calls).toHaveLength(1);
+    expect(reportFor(db, SUN)).toMatchObject({ status: 'sent', forced: true });
+    expect(s.health(at(SUN, '10:02')).text).toBe('Morning report: sent at 10:01 IST');
+    setKv(db, REPORT_REQUEST_KEY, reportRequest(SUN, reportFor(db, SUN), at(SUN, '10:05')));
+    for (const hm of ['10:05', '10:06', '12:00']) await tick(SUN, hm);
+    expect(sender.calls).toHaveLength(1);
+  });
+
+  it('a send-now request on a Sunday that fails keeps the normal retry and deadline rules for that row', async () => {
+    const { db, sender, tick } = weekSetup();
+    sender.results = [failed('connect_timeout'), failed('closed')];
+    setKv(db, REPORT_REQUEST_KEY, reportRequest(SUN, undefined, at(SUN, '10:00')));
+    await tick(SUN, '10:00');
+    expect(reportFor(db, SUN)).toMatchObject({ status: 'retry', detail: 'connect_timeout' });
+    await tick(SUN, '10:02');
+    expect(sender.calls).toHaveLength(2);
+    await tick(SUN, '12:00');
+    expect(reportFor(db, SUN)).toMatchObject({ status: 'skipped', detail: 'closed' });
+    expect(sender.calls).toHaveLength(2);
+  });
+
+  it('health on a non-report day says so, with no warning and no "due" promise', () => {
+    for (const hm of ['00:00', '05:00', '06:30', '13:00']) {
+      expect(describeReport(undefined, at(SAT, hm), ON, 'idle')).toEqual({ text: 'Morning report: no report today (weekend)', warning: null });
+    }
+    expect(describeReport(undefined, at(SUN, '07:00'), { ...ON, days: 'mon-sat' }, 'idle').text).toBe('Morning report: no report today (weekend)');
+    expect(describeReport(undefined, at(SAT, '07:00'), { ...ON, days: 'mon-sat' }, 'idle').text).toBe('Morning report: due now');
+    expect(describeReport(undefined, at(SUN, '05:00'), { ...ON, days: 'daily' }, 'idle').text).toBe('Morning report: due at 06:00 IST');
+    expect(describeReport(undefined, at(MON, '05:00'), ON, 'idle').text).toBe('Morning report: due at 06:00 IST');
+    // A row exists on a non-report day only after a send-now request; it is described as on any other day.
+    const sent: ReportRow = {
+      date: SUN, status: 'sent', detail: null, attempts: 1, nextAttemptAt: null, forced: true,
+      createdAt: at(SUN, '10:00').toISOString(), updatedAt: at(SUN, '10:01').toISOString(),
+    };
+    expect(describeReport(sent, at(SUN, '11:00'), ON, 'idle').text).toBe('Morning report: sent at 10:01 IST');
+  });
+
+  it('on a non-report day the spare number still warns when the owner has to act before the next report', () => {
+    expect(describeReport(undefined, at(SAT, '07:00'), ON, 'logged_out')).toEqual({
+      text: 'Morning report: no report today (weekend)', warning: SENDER_WARNINGS.logged_out,
+    });
+  });
+});
+
+describe('replaceSender', () => {
+  it('the next tick sends with the new sender; the old one is stopped', async () => {
+    const { s, at, sender } = setup();
+    const next = new FakeReportSender();
+    next.recipientMasked = '…9999';
+    s.replaceSender(next);
+    expect(sender.stopped).toBe(1);
+    await at('06:00');
+    expect(sender.calls).toHaveLength(0);
+    expect(next.calls).toHaveLength(1);
+    expect(s.health(new Date(IST('06:01'))).recipientMasked).toBe('…9999');
+  });
+
+  it('a send in flight finishes with its own sender, which is not stopped under it', async () => {
+    const { s, clock, sender } = setup();
+    const g = gate();
+    sender.gate = g.promise;
+    clock.set(IST('06:00'));
+    const tick = s.tick(clock.now());
+    await vi.waitFor(() => expect(sender.calls).toHaveLength(1), { interval: 5 });
+    const next = new FakeReportSender();
+    s.replaceSender(next);
+    expect(sender.stopped).toBe(0);
+    g.release();
+    await tick;
+    expect(next.calls).toHaveLength(0);
+  });
+
+  it('replacing with the same sender changes nothing', () => {
+    const { s, sender } = setup();
+    s.replaceSender(sender);
+    expect(sender.stopped).toBe(0);
   });
 });

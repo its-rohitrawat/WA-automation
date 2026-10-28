@@ -1,13 +1,14 @@
 import { randomBytes } from 'node:crypto';
-import ExcelJS from 'exceljs';
 import type { DestinationStream } from 'pino';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp, type App, type AppReportDeps } from '../src/app.ts';
 import { formatStatus } from '../src/cli/status.ts';
 import { readHealthSnapshot } from '../src/health/health.ts';
+import { TRACKER_ID_KEY } from '../src/report/morningReport.ts';
 import { ReportScheduler, UNKNOWN_WARNING } from '../src/report/scheduler.ts';
 import type { Prices } from '../src/spend/pricing.ts';
 import type { Db } from '../src/store/db.ts';
+import { setKv } from '../src/store/kv.ts';
 import { claimReport, reportFor } from '../src/store/reports.ts';
 import { systemClock } from '../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../src/util/logger.ts';
@@ -23,9 +24,13 @@ import { FakeSocket, SEND_METHODS } from './helpers/fakeSocket.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
 const DAY = '2026-10-23';
-const ON = { enabled: true, time: '06:00', deadline: '12:00' };
+const ON = { enabled: true, time: '06:00', deadline: '12:00', days: 'weekdays' } as const;
+/** The Tracker.xlsx id the Drive publisher stored at an earlier upload; the report links to it. */
+const TRACKER_ID = '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123';
+const LINK = `https://drive.google.com/file/d/${TRACKER_ID}/view`;
 
-function setup(report?: AppReportDeps, db: Db = seededDb(), o: { log?: Logger; freeBytes?: () => number } = {}) {
+function setup(report?: AppReportDeps, db: Db = seededDb(), o: { log?: Logger; freeBytes?: () => number; trackerId?: null } = {}) {
+  if (o.trackerId !== null) setKv(db, TRACKER_ID_KEY, TRACKER_ID); // null: the tracker was never uploaded
   const sockets: FakeSocket[] = [];
   const auth = useEncryptedAuthState(openSessionDb(':memory:'), randomBytes(32));
   const allow = new AllowList([SHARMA.groupId, MEHTA.groupId]);
@@ -73,7 +78,7 @@ describe('app and the morning report', () => {
     const { db, app, sockets } = setup({ sender, settings: ON });
     for (let i = 0; i < 30 && reportFor(db, DAY)?.status !== 'sent'; i++) await vi.advanceTimersByTimeAsync(1_000);
     expect(sender.calls).toHaveLength(1);
-    expect(sender.calls[0]!.fileName).toBe('Tracker-2026-10-23.xlsx');
+    expect(sender.calls).toEqual([{ text: `Good morning. 0 open tasks, 0 overdue. Today's tracker: ${LINK}` }]);
     expect(app.report).toBeDefined();
     await vi.advanceTimersByTimeAsync(30_000); // the next tick records the line
     expect(readHealthSnapshot(db)!.report).toEqual({ text: 'Morning report: sent at 06:00 IST', warning: null, recipientMasked: '…1234' });
@@ -190,8 +195,8 @@ describe('app and the morning report', () => {
     const auth = { ...useSenderAuthState(openSessionDb(':memory:'), randomBytes(32)), hasSession: true };
     const sender = new SenderGateway({ recipient: '919800000000', factory, auth }); // production timeouts and linger
     const { db, app } = setup({ sender, settings: ON });
-    for (let i = 0; i < 30 && (sockets[0]?.sendMessage.mock.calls.length ?? 0) < 2; i++) await vi.advanceTimersByTimeAsync(1_000);
-    expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(2);
+    for (let i = 0; i < 30 && (sockets[0]?.sendMessage.mock.calls.length ?? 0) < 1; i++) await vi.advanceTimersByTimeAsync(1_000);
+    expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(1);
     let done = false;
     let statusAtStop: string | undefined;
     const p = app.stop().then(() => {
@@ -205,14 +210,12 @@ describe('app and the morning report', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('stop() stays bounded when the spare-number socket never closes and the document send never answers', async () => {
+  it('stop() stays bounded when the spare-number socket never closes and the text send never answers', async () => {
     const sockets: FakeSocket[] = [];
     const factory = () => {
       const s = new FakeSocket();
       s.end.mockImplementation(() => new Promise<void>(() => {})); // ws.close() on a dead network
-      s.sendMessage
-        .mockImplementationOnce(async () => ({ key: { id: 'msg-1' } }))
-        .mockImplementationOnce(() => new Promise(() => {}));
+      s.sendMessage.mockImplementationOnce(() => new Promise(() => {}));
       sockets.push(s);
       queueMicrotask(() => s.emit('connection.update', { connection: 'open' }));
       return s;
@@ -220,8 +223,8 @@ describe('app and the morning report', () => {
     const auth = { ...useSenderAuthState(openSessionDb(':memory:'), randomBytes(32)), hasSession: true };
     const sender = new SenderGateway({ recipient: '919800000000', factory, auth }); // production timeouts and linger
     const { db, app } = setup({ sender, settings: ON });
-    for (let i = 0; i < 30 && (sockets[0]?.sendMessage.mock.calls.length ?? 0) < 2; i++) await vi.advanceTimersByTimeAsync(1_000);
-    expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(2);
+    for (let i = 0; i < 30 && (sockets[0]?.sendMessage.mock.calls.length ?? 0) < 1; i++) await vi.advanceTimersByTimeAsync(1_000);
+    expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(1);
     let done = false;
     const t0 = Date.now();
     let elapsed = 0;
@@ -235,7 +238,7 @@ describe('app and the morning report', () => {
     expect(elapsed).toBeGreaterThanOrEqual(10_000);
     expect(elapsed).toBeLessThanOrEqual(10_000 + 3_000 + 2_000 + 5_000);
     expect(reportFor(db, DAY)?.status).toBe('sending'); // the next start marks it unknown, never sent again
-    await vi.advanceTimersByTimeAsync(120_000); // the document send's own limit ends it
+    await vi.advanceTimersByTimeAsync(120_000); // the text send's own limit ends it
     expect(reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'timeout' });
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -257,19 +260,14 @@ describe('app and the morning report', () => {
     await stopApp(app);
   });
 
-  it("the report's workbook carries the live Health line", async () => {
+  it('without a stored tracker id the report is not sent: it waits for a retry with the no_tracker_link reason', async () => {
     const sender = new FakeReportSender();
-    const { db, app } = setup({ sender, settings: ON }, seededDb(), { freeBytes: () => 2e9 });
-    for (let i = 0; i < 30 && reportFor(db, DAY)?.status !== 'sent'; i++) await vi.advanceTimersByTimeAsync(1_000);
-    expect(sender.calls).toHaveLength(1);
-    const live = app.health.workbookLine().text;
+    const db = seededDb();
+    const { app } = setup({ sender, settings: ON }, db, { trackerId: null });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(sender.calls).toHaveLength(0);
+    expect(reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'no_tracker_link' });
     await stopApp(app);
-    vi.useRealTimers(); // reading the xlsx back needs real timers
-    const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(sender.calls[0]!.xlsx as unknown as ExcelJS.Buffer);
-    const cell = wb.getWorksheet('Overview')!.getRow(1).getCell(1).value;
-    expect(cell).toBe('⚠️ Low disk: 2.0 GB free');
-    expect(cell).toBe(live);
   });
 
   it('a failed recovery at start is logged and the founder-number reader still connects', async () => {

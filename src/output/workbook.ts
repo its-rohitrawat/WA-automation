@@ -1,5 +1,6 @@
 import ExcelJS from 'exceljs';
 import { MAX_FILE_NAME_CHARS } from '../media/paths.ts';
+import { byMorningUrgency, shortTitle, taskNotes, TOP_TASKS } from '../report/morningReport.ts';
 import type { TaskRow } from '../store/tasks.ts';
 import { daysBetween, displayDate, istDateTime, istShortDate, istTime, meetingLength } from '../util/time.ts';
 import { isOverdue, type ClientView, type FileView, type MeetingView, type TrackerView } from './view.ts';
@@ -242,6 +243,51 @@ function addOverview(wb: ExcelJS.Workbook, view: TrackerView): void {
   addUnassigned(ws, view);
 }
 
+const TODAY_HEADERS = ['Client', 'Open', 'Overdue', 'Side', 'ID', 'Task', 'Deadline', 'Notes'];
+const TODAY_COLUMN_WIDTHS = [30, 8, 9, 8, 10, 50, 12, 36];
+
+/**
+ * The task notes for the Today tab: overdue, due today, high priority, maybe done. A later deadline is already in the Deadline
+ * column, so its "due 21 Oct" note is left out.
+ */
+const todayNotes = (t: TaskRow, today: string): string =>
+  taskNotes(t, today)
+    .filter((n) => n === 'due today' || !n.startsWith('due '))
+    .join(', ');
+
+/**
+ * The "Today" summary tab, first in the workbook (owner decision D3, 27 Oct 2026). Active clients only: open and overdue
+ * counts per client, its most urgent open tasks below it (the old morning message's order and title cut), then the totals.
+ */
+function addToday(wb: ExcelJS.Workbook, view: TrackerView): void {
+  const ws = wb.addWorksheet('Today', { views: [{ state: 'frozen', ySplit: 2 }] });
+  ws.columns = TODAY_COLUMN_WIDTHS.map((width) => ({ width }));
+  ws.addRow([`Today · ${displayDate(view.today)} · built ${istTime(view.generatedAt)} IST`]).font = { bold: true, size: 13, color: { argb: ORANGE } };
+  ws.mergeCells(1, 1, 1, TODAY_HEADERS.length);
+  styleHeader(ws.addRow(TODAY_HEADERS));
+  const active = view.clients.filter((c) => c.client.active);
+  if (active.length === 0) noneRow(ws);
+  let open = 0;
+  let overdue = 0;
+  const urgency = byMorningUrgency(view.today);
+  for (const c of active) {
+    const tasks = [...c.usOpen, ...c.clientOpen];
+    open += tasks.length;
+    overdue += c.overdue;
+    const row = ws.addRow([c.client.name, tasks.length, c.overdue]);
+    row.font = { bold: true };
+    if (c.overdue > 0) row.getCell(3).fill = solid(FILL_OVERDUE);
+    for (const t of tasks.sort(urgency).slice(0, TOP_TASKS)) {
+      const taskRow = ws.addRow(['', '', '', t.side, t.code, shortTitle(t.title), t.deadline ? isoToDate(t.deadline) : '', todayNotes(t, view.today)]);
+      formatDates(taskRow);
+      taskRow.alignment = { vertical: 'top', wrapText: true };
+    }
+  }
+  const total = ws.addRow(['Total', open, overdue]);
+  total.font = { bold: true };
+  total.border = { top: { style: 'thin' } };
+}
+
 function addClientSheet(wb: ExcelJS.Workbook, c: ClientView, today: string): void {
   const ws = wb.addWorksheet(c.sheetName, { views: [{ state: 'frozen', ySplit: 1 }] });
   ws.columns = CLIENT_COLUMN_WIDTHS.map((width) => ({ width }));
@@ -323,6 +369,7 @@ export async function buildWorkbook(view: TrackerView): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
   wb.creator = 'WA Agent';
   wb.created = view.generatedAt;
+  addToday(wb, view);
   addOverview(wb, view);
   for (const c of view.clients) addClientSheet(wb, c, view.today);
   cleanText(wb);

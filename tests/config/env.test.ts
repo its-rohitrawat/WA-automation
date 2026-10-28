@@ -317,6 +317,8 @@ describe('.env.example', () => {
       'VOICE_STT_PROVIDER', 'STT_LOCAL_ENGINE', 'STT_LOCAL_BIN', 'STT_LOCAL_MODEL', 'STT_LOCAL_THREADS', 'STT_LOCAL_TIMEOUT_SECONDS', 'STT_LOCAL_LANGUAGE',
     ];
     for (const n of names) expect(Object.keys(vars)).toContain(n);
+    expect(vars.REPORT_DAYS).toBe('');
+    expect(parseEnv(vars).REPORT_DAYS).toBe('weekdays');
     expect(vars.STT_API_KEY).toBe('');
     expect(vars.STT_LOCAL_BIN).toBe('');
     expect(vars.STT_LOCAL_MODEL).toBe('');
@@ -330,15 +332,35 @@ describe('.env.example', () => {
 describe('morning report settings', () => {
   it('is off by default, with 06:00 to 12:00 IST', () => {
     const env = parseEnv({ REPORT_ENABLED: '', REPORT_TIME: '', REPORT_DEADLINE: '', REPORT_RECIPIENT: '' });
-    expect(reportSettings(env)).toEqual({ enabled: false, time: '06:00', deadline: '12:00' });
+    expect(reportSettings(env)).toEqual({ enabled: false, time: '06:00', deadline: '12:00', days: 'weekdays' });
     expect(env.REPORT_RECIPIENT).toBeUndefined();
   });
 
   it('turns on only with REPORT_ENABLED=true and a recipient', () => {
     const env = parseEnv({ REPORT_ENABLED: 'true', REPORT_RECIPIENT: '919800000000', REPORT_TIME: '06:30', REPORT_DEADLINE: '11:00' });
-    expect(reportSettings(env)).toEqual({ enabled: true, time: '06:30', deadline: '11:00' });
+    expect(reportSettings(env)).toEqual({ enabled: true, time: '06:30', deadline: '11:00', days: 'weekdays' });
     expect(reportRecipient(env)).toBe('919800000000');
     expect(parseEnv({ REPORT_ENABLED: 'false' }).REPORT_ENABLED).toBe(false);
+  });
+
+  it('sends Monday to Friday by default; REPORT_DAYS accepts weekdays, mon-sat and daily', () => {
+    expect(parseEnv({}).REPORT_DAYS).toBe('weekdays');
+    expect(parseEnv({ REPORT_DAYS: '' }).REPORT_DAYS).toBe('weekdays');
+    for (const days of ['weekdays', 'mon-sat', 'daily'] as const) {
+      expect(reportSettings(parseEnv({ REPORT_DAYS: days })).days).toBe(days);
+    }
+  });
+
+  it('refuses a bad REPORT_DAYS, naming only that setting and not echoing the value', () => {
+    for (const bad of ['weekend', 'Weekdays', 'mon-fri', ' daily', 'sunday-secret']) {
+      try {
+        parseEnv({ REPORT_DAYS: bad });
+        expect.unreachable();
+      } catch (e) {
+        expect((e as Error).message).toBe('Invalid configuration in: REPORT_DAYS');
+        expect((e as Error).message).not.toContain(bad);
+      }
+    }
   });
 
   it('refuses REPORT_ENABLED=true without a recipient, naming the variable', () => {
@@ -374,7 +396,7 @@ describe('morning report settings', () => {
     for (const bad of ['9:00', '24:00', '12:60']) {
       expect(() => parseEnv({ REPORT_TIME: '00:00', REPORT_DEADLINE: bad }), bad).toThrowError(/REPORT_DEADLINE/);
     }
-    expect(reportSettings(parseEnv({ REPORT_TIME: '00:00', REPORT_DEADLINE: '23:59' }))).toEqual({ enabled: false, time: '00:00', deadline: '23:59' });
+    expect(reportSettings(parseEnv({ REPORT_TIME: '00:00', REPORT_DEADLINE: '23:59' }))).toEqual({ enabled: false, time: '00:00', deadline: '23:59', days: 'weekdays' });
     expect(() => parseEnv({ REPORT_ENABLED: 'yes' })).toThrowError(/REPORT_ENABLED/);
     expect(() => parseEnv({ REPORT_TIME: '12:00', REPORT_DEADLINE: '12:00' })).toThrowError('Invalid configuration in: REPORT_DEADLINE');
   });
@@ -405,5 +427,140 @@ describe('uptime heartbeat setting', () => {
         expect((e as Error).message).not.toContain(bad);
       }
     }
+  });
+});
+
+describe('owner dashboard settings', () => {
+  /** Everything the dashboard needs when it is switched on. Placeholder values only. */
+  const ON = {
+    DASHBOARD_ENABLED: 'true',
+    DASHBOARD_OWNER_EMAILS: 'owner@example.com',
+    DASHBOARD_GOOGLE_CLIENT_ID: 'web-client-id',
+    DASHBOARD_GOOGLE_CLIENT_SECRET: 'web-client-secret',
+  };
+
+  it('defaults: off, port 8787, no public link, no owners, no web client, no UptimeRobot key', () => {
+    const env = parseEnv({});
+    expect(env.DASHBOARD_ENABLED).toBe(false);
+    expect(env.DASHBOARD_PORT).toBe(8787);
+    expect(env.DASHBOARD_PUBLIC_URL).toBeUndefined();
+    expect(env.DASHBOARD_OWNER_EMAILS).toEqual([]);
+    expect(env.DASHBOARD_GOOGLE_CLIENT_ID).toBeUndefined();
+    expect(env.DASHBOARD_GOOGLE_CLIENT_SECRET).toBeUndefined();
+    expect(env.UPTIMEROBOT_READ_KEY).toBeUndefined();
+  });
+
+  it('empty values count as unset', () => {
+    const env = parseEnv({ DASHBOARD_ENABLED: '', DASHBOARD_PORT: '', DASHBOARD_PUBLIC_URL: '', DASHBOARD_OWNER_EMAILS: '', UPTIMEROBOT_READ_KEY: '' });
+    expect(env).toMatchObject({ DASHBOARD_ENABLED: false, DASHBOARD_PORT: 8787, DASHBOARD_OWNER_EMAILS: [] });
+    expect(env.DASHBOARD_PUBLIC_URL).toBeUndefined();
+    expect(env.UPTIMEROBOT_READ_KEY).toBeUndefined();
+  });
+
+  it('turns on with every required value, and DASHBOARD_ENABLED accepts true, false, 1 and 0 only', () => {
+    const env = parseEnv({ ...ON, DASHBOARD_PORT: '9000', DASHBOARD_PUBLIC_URL: 'https://dash.example.com', UPTIMEROBOT_READ_KEY: 'ur-read-key' });
+    expect(env).toMatchObject({
+      DASHBOARD_ENABLED: true, DASHBOARD_PORT: 9000, DASHBOARD_PUBLIC_URL: 'https://dash.example.com', DASHBOARD_OWNER_EMAILS: ['owner@example.com'],
+      DASHBOARD_GOOGLE_CLIENT_ID: 'web-client-id', DASHBOARD_GOOGLE_CLIENT_SECRET: 'web-client-secret', UPTIMEROBOT_READ_KEY: 'ur-read-key',
+    });
+    expect(parseEnv({ ...ON, DASHBOARD_ENABLED: '1' }).DASHBOARD_ENABLED).toBe(true);
+    expect(parseEnv({ DASHBOARD_ENABLED: 'false' }).DASHBOARD_ENABLED).toBe(false);
+    expect(parseEnv({ DASHBOARD_ENABLED: '0' }).DASHBOARD_ENABLED).toBe(false);
+    for (const v of ['yes', 'TRUE', 'on', '2']) expect(envError({ ...ON, DASHBOARD_ENABLED: v })).toBe('Invalid configuration in: DASHBOARD_ENABLED');
+  });
+
+  it('refuses a bad port, naming only DASHBOARD_PORT', () => {
+    for (const bad of ['80', '1023', '65536', '70000', '8787.5', 'abc', '-1']) {
+      expect(envError({ DASHBOARD_PORT: bad }), bad).toBe('Invalid configuration in: DASHBOARD_PORT');
+    }
+    expect(parseEnv({ DASHBOARD_PORT: '1024' }).DASHBOARD_PORT).toBe(1024);
+    expect(parseEnv({ DASHBOARD_PORT: '65535' }).DASHBOARD_PORT).toBe(65535);
+  });
+
+  it('accepts an https link, or http on localhost or 127.0.0.1 with a port', () => {
+    for (const good of ['https://dash.example.com', 'http://localhost:8787', 'http://127.0.0.1:8787']) {
+      expect(parseEnv({ DASHBOARD_PUBLIC_URL: good }).DASHBOARD_PUBLIC_URL, good).toBe(good);
+    }
+  });
+
+  it('keeps only the origin, so it compares equal to a browser Origin header', () => {
+    const cases: [string, string][] = [
+      ['https://dash.example.com/', 'https://dash.example.com'],
+      ['http://localhost:9000/', 'http://localhost:9000'],
+      ['HTTP://LOCALHOST:8787', 'http://localhost:8787'],
+      ['HTTPS://Dash.Example.COM/dashboard?x=1#top', 'https://dash.example.com'],
+      ['https://dash.example.com:443/', 'https://dash.example.com'],
+      ['https://dash.example.com:8443', 'https://dash.example.com:8443'],
+    ];
+    for (const [typed, origin] of cases) expect(parseEnv({ DASHBOARD_PUBLIC_URL: typed }).DASHBOARD_PUBLIC_URL, typed).toBe(origin);
+  });
+
+  it('refuses any other link, naming only DASHBOARD_PUBLIC_URL and not echoing it', () => {
+    const bads = ['http://example.com', 'http://example.com:8787', 'http://localhost', 'http://127.0.0.1', 'http://localhost.example.com:8787',
+      'http://192.168.1.5:8787', 'ftp://dash.example.com', 'not a url', 'dash.example.com',
+      'https://u:p@dash.example.com', 'https://u@dash.example.com', 'https://:p@dash.example.com', 'http://u:p@localhost:8787'];
+    // Exactly one of two fixed texts, so no part of the value can be in it.
+    const allowed = [
+      'Invalid configuration in: DASHBOARD_PUBLIC_URL',
+      'Invalid configuration in: DASHBOARD_PUBLIC_URL. DASHBOARD_PUBLIC_URL must be an https:// link or http://localhost:<port>, with no user name or password',
+    ];
+    for (const bad of bads) expect(allowed, bad).toContain(envError({ DASHBOARD_PUBLIC_URL: bad }));
+  });
+
+  it('owner emails are a trimmed, lower-cased, de-duplicated list', () => {
+    expect(parseEnv({ DASHBOARD_OWNER_EMAILS: ' Owner@Example.com , second@example.co.in,OWNER@example.COM,, ' }).DASHBOARD_OWNER_EMAILS)
+      .toEqual(['owner@example.com', 'second@example.co.in']);
+  });
+
+  it('refuses a bad email, naming only DASHBOARD_OWNER_EMAILS and not echoing it', () => {
+    for (const bad of ['not-an-email', 'owner@example.com,nobody', 'owner@', '@example.com', 'two words@example.com']) {
+      const msg = envError({ DASHBOARD_OWNER_EMAILS: bad });
+      expect(msg, bad).toBe('Invalid configuration in: DASHBOARD_OWNER_EMAILS');
+    }
+  });
+
+  it('when on, each missing value is named on its own, without echoing anything set', () => {
+    for (const name of ['DASHBOARD_OWNER_EMAILS', 'DASHBOARD_GOOGLE_CLIENT_ID', 'DASHBOARD_GOOGLE_CLIENT_SECRET'] as const) {
+      const msg = envError({ ...ON, [name]: '' });
+      expect(msg, name).toBe(`Invalid configuration in: ${name}. ${name} is required when DASHBOARD_ENABLED is true`);
+      expect(msg).not.toContain('web-client');
+      expect(msg).not.toContain('owner@example.com');
+    }
+    expect(envError({ ...ON, DASHBOARD_OWNER_EMAILS: ' , ' }))
+      .toBe('Invalid configuration in: DASHBOARD_OWNER_EMAILS. DASHBOARD_OWNER_EMAILS is required when DASHBOARD_ENABLED is true');
+    expect(envError({ DASHBOARD_ENABLED: 'true' })).toBe('Invalid configuration in: DASHBOARD_OWNER_EMAILS, DASHBOARD_GOOGLE_CLIENT_ID, DASHBOARD_GOOGLE_CLIENT_SECRET. '
+      + 'DASHBOARD_OWNER_EMAILS is required when DASHBOARD_ENABLED is true. DASHBOARD_GOOGLE_CLIENT_ID is required when DASHBOARD_ENABLED is true. '
+      + 'DASHBOARD_GOOGLE_CLIENT_SECRET is required when DASHBOARD_ENABLED is true');
+  });
+
+  it('when off, the web client and owners are not required', () => {
+    expect(() => parseEnv({ DASHBOARD_ENABLED: 'false', DASHBOARD_PORT: '9000' })).not.toThrow();
+  });
+
+  it('never echoes a dashboard value in an error', () => {
+    const SECRET = 'zz-distinctive-secret-zz';
+    const cases: Record<string, string>[] = [
+      { DASHBOARD_ENABLED: SECRET },
+      { DASHBOARD_PORT: SECRET },
+      { DASHBOARD_PUBLIC_URL: SECRET },
+      { DASHBOARD_PUBLIC_URL: `http://${SECRET}.example.com` },
+      { DASHBOARD_PUBLIC_URL: `https://user:${SECRET}@dash.example.com` },
+      { DASHBOARD_OWNER_EMAILS: SECRET },
+      { DASHBOARD_OWNER_EMAILS: `${SECRET}@example.com,bad` },
+      { DASHBOARD_ENABLED: 'true', DASHBOARD_GOOGLE_CLIENT_ID: SECRET, DASHBOARD_GOOGLE_CLIENT_SECRET: SECRET, UPTIMEROBOT_READ_KEY: SECRET },
+      { DASHBOARD_PORT: '1', DASHBOARD_GOOGLE_CLIENT_SECRET: SECRET, UPTIMEROBOT_READ_KEY: SECRET },
+    ];
+    for (const c of cases) {
+      const msg = envError(c);
+      expect(msg).toMatch(/^Invalid configuration in: /);
+      expect(msg).not.toContain(SECRET);
+    }
+  });
+
+  it('.env.example lists every dashboard setting with an empty value, and they parse to the defaults', () => {
+    const vars = parseDotenv(readFileSync('.env.example', 'utf8'));
+    const names = ['DASHBOARD_ENABLED', 'DASHBOARD_PORT', 'DASHBOARD_PUBLIC_URL', 'DASHBOARD_OWNER_EMAILS', 'DASHBOARD_GOOGLE_CLIENT_ID', 'DASHBOARD_GOOGLE_CLIENT_SECRET', 'UPTIMEROBOT_READ_KEY'];
+    for (const n of names) expect(vars[n], n).toBe('');
+    expect(parseEnv(vars)).toMatchObject({ DASHBOARD_ENABLED: false, DASHBOARD_PORT: 8787, DASHBOARD_OWNER_EMAILS: [] });
   });
 });

@@ -1,5 +1,4 @@
 import { loadTrackerView, type HealthLine } from '../output/view.ts';
-import { buildWorkbook } from '../output/workbook.ts';
 import { tx, type Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import {
@@ -9,8 +8,8 @@ import {
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { istDate, istTime } from '../util/time.ts';
-import { buildMorningText } from './morningReport.ts';
-import type { ReportHealth, ReportSender, ReportSettings, SenderState, SendResult } from './types.ts';
+import { buildShortMorningText, trackerLink } from './morningReport.ts';
+import type { ReportDays, ReportHealth, ReportSender, ReportSettings, SenderState, SendResult } from './types.ts';
 
 /** Waits after a definite failure: 2 minutes, then 5, then 10 for every later try, until the deadline. */
 export const RETRY_WAITS_MS = [2 * 60_000, 5 * 60_000, 10 * 60_000];
@@ -34,6 +33,7 @@ export const REASON_TEXT: Record<string, string> = {
   forbidden: 'WhatsApp refused the spare number (403)',
   replaced: 'another session took over the spare number',
   build_failed: 'the report could not be built',
+  no_tracker_link: 'the tracker is not on Google Drive yet (run google-auth and let it upload once)',
   busy: 'another send was running',
   stopped: 'the service was stopping',
   timeout: 'WhatsApp did not confirm in time',
@@ -44,7 +44,7 @@ export const REASON_TEXT: Record<string, string> = {
 };
 
 /**
- * A send takes at most about 5.5 minutes (60 s to connect, 120 s per message, 15 s linger). A row still 'sending' after
+ * A send takes at most about 3.5 minutes (60 s to connect, 120 s for the message, 15 s linger). A row still 'sending' after
  * this long had its outcome lost (recording it failed), so it reads unknown and is never retried.
  */
 export const STALE_SENDING_MS = 10 * 60_000;
@@ -70,12 +70,33 @@ export const SENDER_WARNINGS: Partial<Record<SenderState, string>> = {
   replaced: '⚠️ Morning report: another session took over the spare number. Restart the service.',
 };
 
+/** 0 for Sunday to 6 for Saturday: the weekday of an IST calendar date "YYYY-MM-DD" (the date alone fixes it). */
+function weekdayOf(date: string): number {
+  return new Date(`${date}T00:00:00Z`).getUTCDay();
+}
+
+/** True when the scheduled report goes out on this IST date: weekdays is Monday to Friday, mon-sat adds Saturday, daily is every day. */
+export function isReportDay(date: string, days: ReportDays): boolean {
+  const day = weekdayOf(date);
+  if (days === 'daily') return true;
+  if (days === 'mon-sat') return day !== 0;
+  return day !== 0 && day !== 6;
+}
+
 /** The Health and `cli status` line for one day. Pure: reads nothing. */
 export function describeReport(row: ReportRow | undefined, now: Date, settings: ReportSettings, sender: SenderState): ReportHealth {
   const unknown = row?.status === 'unknown' || isStaleSending(row, now);
   const text = ((): string => {
     if (unknown) return 'Morning report: unknown, check WhatsApp';
     if (!row) {
+      // No scheduled report today, so no "due" promise and no skip. A row on such a day comes only from send-now.
+      const date = istDate(now);
+      if (!isReportDay(date, settings.days)) {
+        // 'not a report day' is unreachable with today's REPORT_DAYS values (every off day is a Saturday or Sunday).
+        // It is kept for a future value that makes a weekday an off day; add a test for the label with that value.
+        const weekend = weekdayOf(date) === 0 || weekdayOf(date) === 6;
+        return `Morning report: no report today (${weekend ? 'weekend' : 'not a report day'})`;
+      }
       const hm = istTime(now);
       if (hm < settings.time) return `Morning report: due at ${settings.time} IST`;
       if (hm < settings.deadline) return 'Morning report: due now';
@@ -103,10 +124,19 @@ export function describeReport(row: ReportRow | undefined, now: Date, settings: 
   return { text, warning: unknown ? UNKNOWN_WARNING : (SENDER_WARNINGS[sender] ?? null) };
 }
 
+/** What the report sends: the short text with the tracker link. No attachment. */
 export interface ReportPayload {
   text: string;
-  xlsx: Buffer;
-  fileName: string;
+}
+
+/** A definite failure while building the report: nothing was sent, so the day is retried with this reason code. */
+export class ReportBuildError extends Error {
+  readonly code: string;
+  constructor(code: string) {
+    super(`The morning report could not be built (${code})`);
+    this.name = 'ReportBuildError';
+    this.code = code;
+  }
 }
 
 export interface ReportSchedulerOptions {
@@ -114,10 +144,14 @@ export interface ReportSchedulerOptions {
   clock: Clock;
   log: Logger;
   sender: ReportSender;
-  settings: ReportSettings;
-  /** The health line printed in the attached workbook (Health.workbookLine). */
+  /**
+   * When the report goes out. A getter is read once at the start of every tick (and by health()), so a change made from
+   * the dashboard applies from the next tick; a plain object stays fixed, as before.
+   */
+  settings: ReportSettings | (() => ReportSettings);
+  /** The health line the tracker view is loaded with (Health.workbookLine). The short text does not show it. */
   healthLine: () => HealthLine;
-  /** Test seam: replaces building the text and the workbook from the tracker. */
+  /** Test seam: replaces building the text from the tracker. */
   build?: (now: Date) => Promise<ReportPayload>;
 }
 
@@ -131,9 +165,40 @@ export class ReportScheduler {
   #stopped = false;
   /** Set once recover() has succeeded. No send starts before it: a row left 'sending' must become unknown first. */
   #recovered = false;
+  /** The spare-number sender; replaced in place when the spare phone is linked from the dashboard. */
+  #sender: ReportSender;
 
   constructor(o: ReportSchedulerOptions) {
     this.#o = o;
+    this.#sender = o.sender;
+  }
+
+  /** The current sender's masked recipient ("…5678"). */
+  maskedRecipient(): string {
+    return this.#sender.maskedRecipient();
+  }
+
+  /** The sender the next tick uses (its status shows on the dashboard's Connections screen). */
+  sender(): ReportSender {
+    return this.#sender;
+  }
+
+  /** Resolves once no send is in flight (at once when none is). */
+  async whenIdle(): Promise<void> {
+    while (this.#inFlight) await this.#inFlight.catch(() => undefined);
+  }
+
+  /**
+   * A newly linked spare phone's sender (D3), used from the next tick. A send already in flight finishes with the sender
+   * it started with. The old sender is stopped unless a send is using it (it then disconnects by itself afterwards).
+   */
+  replaceSender(next: ReportSender): void {
+    const old = this.#sender;
+    if (old === next) return;
+    this.#sender = next;
+    if (!this.#inFlight) {
+      void old.stop().catch((err: unknown) => this.#o.log.error({ err }, 'stopping the replaced report sender failed'));
+    }
   }
 
   /** At service start: a row still 'sending' was cut off by a crash or a stop mid-send, so its outcome is unknown. */
@@ -165,11 +230,24 @@ export class ReportScheduler {
     }
   }
 
-  /** Today's line for Health. */
+  /** The settings in force now: the getter's answer, or the fixed object. */
+  #settings(): ReportSettings {
+    const s = this.#o.settings;
+    return typeof s === 'function' ? s() : s;
+  }
+
+  /** Today's line for Health. Never throws: a settings getter that fails gives a plain line. */
   health(now: Date = this.#o.clock.now()): ReportHealth {
-    const recipientMasked = this.#o.sender.maskedRecipient();
-    if (!this.#o.settings.enabled) return { text: 'Morning report: off', warning: null, recipientMasked };
-    return { ...describeReport(reportFor(this.#o.db, istDate(now)), now, this.#o.settings, this.#o.sender.status().state), recipientMasked };
+    const recipientMasked = this.#sender.maskedRecipient();
+    let settings: ReportSettings;
+    try {
+      settings = this.#settings();
+    } catch (err) {
+      this.#o.log.error({ err }, 'morning report settings could not be read');
+      return { text: 'Morning report: settings could not be read', warning: null, recipientMasked };
+    }
+    if (!settings.enabled) return { text: 'Morning report: off', warning: null, recipientMasked };
+    return { ...describeReport(reportFor(this.#o.db, istDate(now)), now, settings, this.#sender.status().state), recipientMasked };
   }
 
   /**
@@ -189,7 +267,7 @@ export class ReportScheduler {
     let stopTimer: NodeJS.Timeout | undefined;
     try {
       await Promise.race([
-        this.#o.sender.stop(),
+        this.#sender.stop(),
         new Promise<void>((resolve) => {
           stopTimer = setTimeout(resolve, Math.min(3_000, waitMs));
         }),
@@ -199,7 +277,7 @@ export class ReportScheduler {
     } finally {
       clearTimeout(stopTimer);
     }
-    // Stopping the sender ends a send in its linger (both ids already back) or cuts one off. Give it up to 2 s more to
+    // Stopping the sender ends a send in its linger (its id already back) or cuts one off. Give it up to 2 s more to
     // record its outcome, so a report that went out is 'sent' before main.ts closes the database.
     if (inFlight) {
       let timer: NodeJS.Timeout | undefined;
@@ -209,8 +287,11 @@ export class ReportScheduler {
   }
 
   async #run(now: Date): Promise<void> {
-    const { db, settings, log } = this.#o;
+    const { db, log } = this.#o;
     try {
+      // Read once, inside the try: a getter that throws is logged like any other tick failure, and one tick never mixes
+      // two versions of the settings.
+      const settings = this.#settings();
       const date = istDate(now);
       const at = now.toISOString();
       // Taking the request, checking it and the forced claim are one transaction, so a request written meanwhile is
@@ -246,6 +327,9 @@ export class ReportScheduler {
       });
       if (step === 'send') await this.#send(date, now);
       if (step !== 'schedule') return;
+      // On a day that is not a report day the scheduled path creates nothing: no claim, no row, no skipped row. A row
+      // that exists on such a day was made by a send-now request, and keeps the usual retry and deadline rules.
+      if (!isReportDay(date, settings.days) && !reportFor(db, date)) return;
       const hm = istTime(now);
       if (hm < settings.time) return;
       if (hm >= settings.deadline) {
@@ -267,13 +351,19 @@ export class ReportScheduler {
   }
 
   async #send(date: string, now: Date): Promise<void> {
-    const { db, log, sender } = this.#o;
+    const { db, log } = this.#o;
+    const sender = this.#sender;
     let payload: ReportPayload;
     try {
       payload = await (this.#o.build ?? ((n: Date) => this.#build(n)))(now);
     } catch (err) {
-      log.error({ err }, 'morning report could not be built');
-      this.#retry(date, 'build_failed');
+      if (err instanceof ReportBuildError) {
+        log.warn({ code: err.code }, 'morning report could not be built');
+        this.#retry(date, err.code);
+      } else {
+        log.error({ err }, 'morning report could not be built');
+        this.#retry(date, 'build_failed');
+      }
       return;
     }
     if (this.#stopped) {
@@ -282,7 +372,7 @@ export class ReportScheduler {
     }
     let result: SendResult;
     try {
-      result = await sender.sendReport(payload.text, payload.xlsx, payload.fileName);
+      result = await sender.sendReport(payload.text);
     } catch (err) {
       log.error({ err }, 'morning report sender crashed');
       result = { status: 'unknown', code: 'crash' };
@@ -306,8 +396,11 @@ export class ReportScheduler {
     this.#o.log.warn({ date, code, nextAttemptAt: next }, 'morning report not sent; will try again');
   }
 
+  /** Throws ReportBuildError('no_tracker_link') while the tracker is not on Drive: the text has nothing to link to. */
   async #build(now: Date): Promise<ReportPayload> {
+    const link = trackerLink(this.#o.db);
+    if (!link) throw new ReportBuildError('no_tracker_link');
     const view = loadTrackerView(this.#o.db, now, this.#o.healthLine());
-    return { text: buildMorningText(view, view.today), xlsx: await buildWorkbook(view), fileName: `Tracker-${view.today}.xlsx` };
+    return { text: buildShortMorningText(view, view.today, link) };
   }
 }

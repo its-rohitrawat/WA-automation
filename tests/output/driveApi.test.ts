@@ -23,6 +23,22 @@ describe('googleDriveApi', () => {
     expect(vi.mocked(drive)).toHaveBeenCalledWith(expect.objectContaining({ version: 'v3', timeout: 120_000 }));
   });
 
+  it('with a getter: builds the Drive handle on the first call, again only when the client changes, each with 120 s', async () => {
+    vi.mocked(drive).mockClear();
+    const other = {} as OAuth2Client;
+    let current = client;
+    const api = googleDriveApi(() => current);
+    expect(vi.mocked(drive)).not.toHaveBeenCalled();
+    await api.createFolder('A');
+    await api.createFolder('B');
+    expect(vi.mocked(drive)).toHaveBeenCalledTimes(1);
+    current = other;
+    await api.createFolder('C');
+    expect(vi.mocked(drive)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(drive).mock.calls.map((c) => c[0] as unknown as { auth: unknown; timeout: number }))
+      .toEqual([expect.objectContaining({ auth: client, timeout: 120_000 }), expect.objectContaining({ auth: other, timeout: 120_000 })]);
+  });
+
   it('createFile passes timeoutMs as the per-request timeout, and no per-request timeout without it', async () => {
     const api = googleDriveApi(client);
     expect(await api.createFile('a.pdf', 'application/pdf', Buffer.from('x'), 'parent-1', 600_000)).toBe('new-id');

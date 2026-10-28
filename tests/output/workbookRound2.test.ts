@@ -101,7 +101,7 @@ describe('workbook round 2', () => {
     const db = openDb(':memory:');
     syncClients(db, [cfg(1, 'History'), cfg(2, "Sharma & Sons Interior Design' Studio"), cfg(3, `${'a'.repeat(30)}😀`)]);
     const wb = await build(db);
-    expect(wb.worksheets).toHaveLength(4);
+    expect(wb.worksheets).toHaveLength(5);
     for (const w of wb.worksheets) expect(w.name.endsWith("'")).toBe(false);
   });
 
@@ -109,7 +109,7 @@ describe('workbook round 2', () => {
     const db = openDb(':memory:');
     syncClients(db, [cfg(1, 'Sharma\\Mehta Designs')]);
     const wb = await build(db);
-    expect(wb.worksheets.map((w) => w.name)).toEqual(['Overview', 'Sharma Mehta Designs']);
+    expect(wb.worksheets.map((w) => w.name)).toEqual(['Today', 'Overview', 'Sharma Mehta Designs']);
   });
 
   it('breaks ties by creation order, not by text of the code', () => {
@@ -149,7 +149,7 @@ describe('workbook round 2', () => {
 
   it('builds an Overview with only the header when there are no clients', async () => {
     const wb = await build(openDb(':memory:'));
-    expect(wb.worksheets.map((w) => w.name)).toEqual(['Overview']);
+    expect(wb.worksheets.map((w) => w.name)).toEqual(['Today', 'Overview']);
     expect(wb.getWorksheet('Overview')!.getCell('A3').value).toBe('Client');
     expect(wb.getWorksheet('Overview')!.getCell('A4').value).toBeNull();
   });

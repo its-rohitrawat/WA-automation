@@ -18,8 +18,11 @@ export function sanitizeSheetName(name: string): string {
   return edge(cut(spaced)) || 'Client';
 }
 
-/** Names are assigned in the order given (callers pass client-id order) so an existing suffix never moves. */
-export function uniqueSheetNames(names: string[], reserved: string[] = ['Overview', 'History']): string[] {
+/**
+ * Names are assigned in the order given (callers pass client-id order) so an existing suffix never moves. Today and Overview are
+ * the workbook's own tabs; History is kept free as well.
+ */
+export function uniqueSheetNames(names: string[], reserved: string[] = ['Today', 'Overview', 'History']): string[] {
   const used = new Set(reserved.map((r) => r.toLowerCase()));
   return names.map((n) => {
     const base = sanitizeSheetName(n);

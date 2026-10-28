@@ -1,7 +1,6 @@
 import makeWASocket, { DisconnectReason, makeCacheableSignalKeyStore } from 'baileys';
 import type { AnyMessageContent, AuthenticationState, BaileysEventMap, WAMessage } from 'baileys';
 import { INDIAN_MOBILE, maskNumber } from '../config/env.ts';
-import { XLSX_MIME } from '../output/workbook.ts';
 import type { ReportSender, SenderState, SenderStatus, SendResult } from '../report/types.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { EncryptedAuth } from './authState.ts';
@@ -44,6 +43,10 @@ export function recipientJid(digits: string): string {
   if (!INDIAN_MOBILE.test(digits)) throw new Error('REPORT_RECIPIENT must be 91 and the 10-digit Indian mobile, digits only');
   return `${digits}@s.whatsapp.net`;
 }
+
+/** The founder reader's number, as given or read now. */
+const founderOf = (o: Pick<SenderGatewayOptions, 'founderNumber'>): string | undefined =>
+  typeof o.founderNumber === 'function' ? o.founderNumber() : o.founderNumber;
 
 /**
  * The phone number a saved link belongs to: the digits of creds.me.id before the device part (":5") or "@".
@@ -110,6 +113,7 @@ function openSocket(
   timeoutMs: number,
   onQr?: (qr: string) => void,
   onSocket?: (sock: SenderSocketLike) => void,
+  signal?: AbortSignal,
 ): Promise<Opened> {
   const sock = factory(auth.state);
   onSocket?.(sock);
@@ -120,13 +124,18 @@ function openSocket(
   return new Promise<Opened>((resolve) => {
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
+    const onAbort = () => finish({ code: 'closed', statusCode: null });
     const finish = (r: Opened) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       if ('code' in r) void endQuietly(sock);
       resolve(r);
     };
+    // A stop through the signal (the dashboard's cancel) closes the socket and gives 'closed'.
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
     // The timer starts after the listener is added: a listener that throws rejects this promise and leaves no timer.
     sock.ev.on('connection.update', (u) => {
       if (u.qr) {
@@ -156,11 +165,26 @@ export async function linkSender(o: {
   timeoutMs: number;
   /** How long the linked socket stays open so Baileys can finish its first key uploads. Default 5 s. */
   settleMs?: number;
+  /** The dashboard's cancel: closes the socket and gives { ok: false, code: 'closed' }. The CLI passes none. */
+  signal?: AbortSignal;
+  /** Called when WhatsApp asks for its restart after a QR code was shown: the phone has scanned it. */
+  onScanned?: () => void;
 }): Promise<LinkResult> {
+  let qrSeen = false;
+  const onQr = (qr: string) => {
+    qrSeen = true;
+    o.onQr(qr);
+  };
   for (let i = 0; i < 3; i++) {
-    const r = await openSocket(o.factory, o.auth, o.timeoutMs, o.onQr);
+    if (o.signal?.aborted) return { ok: false, code: 'closed' };
+    const r = await openSocket(o.factory, o.auth, o.timeoutMs, onQr, undefined, o.signal);
+    if ('code' in r && r.code === 'restart_required' && qrSeen) o.onScanned?.();
     if ('sock' in r) {
-      await delay(o.settleMs ?? 5_000);
+      await abortableDelay(o.settleMs ?? 5_000, o.signal);
+      if (o.signal?.aborted) {
+        await endQuietly(r.sock);
+        return { ok: false, code: 'closed' };
+      }
       await o.auth.saveCreds();
       await endQuietly(r.sock);
       return { ok: true };
@@ -168,6 +192,21 @@ export async function linkSender(o: {
     if (r.code !== 'restart_required') return { ok: false, code: r.code };
   }
   return { ok: false, code: 'closed' };
+}
+
+/** Like delay, but ends early when the signal aborts. */
+function abortableDelay(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (!signal) return delay(ms);
+  return new Promise<void>((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+    if (signal.aborted) done();
+  });
 }
 
 class SendTimeoutError extends Error {
@@ -189,9 +228,10 @@ export interface SenderGatewayOptions {
   recipient: string;
   /**
    * The number the founder-number reader is linked to (digits of its creds.me.id), which may differ from recipient. Like
-   * recipient, it never sends: a spare-number link to it is refused ('self_send').
+   * recipient, it never sends: a spare-number link to it is refused ('self_send'). A function is read at each check, so a
+   * founder relink from the dashboard is followed without making the sender again.
    */
-  founderNumber?: string;
+  founderNumber?: string | (() => string | undefined);
   factory: SenderSocketFactory;
   /** The spare number's session. Undefined when the stored session could not be opened or read. */
   auth: EncryptedAuth | undefined;
@@ -204,9 +244,9 @@ export interface SenderGatewayOptions {
   clock?: Clock;
   /** How long to wait for the connection to open. Default 60 s. */
   connectTimeoutMs?: number;
-  /** How long each message may take, including the document upload. Default 120 s. */
+  /** How long the message may take. Default 120 s. */
   sendTimeoutMs?: number;
-  /** How long the socket stays open after both messages left, for WhatsApp's acks and retry requests. Default 15 s. */
+  /** How long the socket stays open after the message left, for WhatsApp's acks and retry requests. Default 15 s. */
   lingerMs?: number;
 }
 
@@ -247,7 +287,8 @@ export class SenderGateway implements ReportSender {
     return maskNumber(this.#opts.recipient);
   }
 
-  async sendReport(text: string, xlsx: Buffer, fileName: string): Promise<SendResult> {
+  /** Sends one text message, the report with the tracker link, and nothing else: no document. */
+  async sendReport(text: string): Promise<SendResult> {
     const auth = this.#opts.auth;
     if (this.#stopped) return { status: 'failed', code: 'stopped' };
     if (this.#busy) return { status: 'failed', code: 'busy' };
@@ -285,10 +326,9 @@ export class SenderGateway implements ReportSender {
       this.#setState('open', null);
       // From here on a failure may hide a message that reached the founder: the outcome is unknown, never retried.
       try {
-        // linkPreview: null stops Baileys fetching a preview of a URL that a task title copied from a chat.
+        // linkPreview: null stops Baileys fetching a preview of the tracker link (or of any URL in the text).
         const ids = [await this.#send(opened.sock, this.#jid, { text, linkPreview: null })];
-        ids.push(await this.#send(opened.sock, this.#jid, { document: xlsx, mimetype: XLSX_MIME, fileName }));
-        // stop() ends the linger early: both ids are back, so the result is still 'sent'.
+        // stop() ends the linger early: the id is back, so the result is still 'sent'.
         await this.#linger(this.#opts.lingerMs ?? 15_000);
         return { status: 'sent', messageIds: ids };
       } catch (err) {
@@ -304,7 +344,7 @@ export class SenderGateway implements ReportSender {
   }
 
   /**
-   * Ends a connection in progress. A send cut off before both message ids came back is unknown; one in its linger is
+   * Ends a connection in progress. A send cut off before the message id came back is unknown; one in its linger is
    * still sent, and returns at once. Later sends are refused.
    */
   async stop(): Promise<void> {
@@ -351,7 +391,7 @@ export class SenderGateway implements ReportSender {
   /** True when the saved link is the recipient's number or the founder reader's number. The founder's number never sends. */
   #linkedToFounder(auth: EncryptedAuth): boolean {
     const linked = linkedNumber(auth);
-    return linked !== undefined && (linked === this.#opts.recipient || linked === this.#opts.founderNumber);
+    return linked !== undefined && (linked === this.#opts.recipient || linked === founderOf(this.#opts));
   }
 
   #setState(state: SenderState, code: number | null): void {

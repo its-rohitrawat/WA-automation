@@ -1,3 +1,6 @@
+/** The IST days the scheduled report goes out: Monday to Friday, Monday to Saturday, or every day (REPORT_DAYS). */
+export type ReportDays = 'weekdays' | 'mon-sat' | 'daily';
+
 /** When the morning report goes out. Times are IST, "HH:MM". */
 export interface ReportSettings {
   enabled: boolean;
@@ -5,10 +8,12 @@ export interface ReportSettings {
   time: string;
   /** From this time on, a day not yet sent is skipped. Default "12:00". */
   deadline: string;
+  /** On other days the scheduled path does nothing; a send-now request is still honoured. Default "weekdays". */
+  days: ReportDays;
 }
 
 /**
- * sent: both messages left, with their WhatsApp ids.
+ * sent: the message left, with its WhatsApp id (one id).
  * failed: a definite failure before anything was sent (not linked, no connection, session refused, or an error while the
  * socket was made or opening). Safe to retry.
  * unknown: the send started and did not finish cleanly. It may have reached the founder, so it is never retried automatically.
@@ -38,7 +43,8 @@ export interface SenderStatus {
  * SenderGateway (Baileys, spare number) implements it today; the official WhatsApp Business API could replace it later.
  */
 export interface ReportSender {
-  sendReport(text: string, xlsx: Buffer, fileName: string): Promise<SendResult>;
+  /** Sends the text only (the tracker link is in it). No attachment. */
+  sendReport(text: string): Promise<SendResult>;
   status(): SenderStatus;
   stop(): Promise<void>;
   /** The fixed recipient, masked to its last 4 digits ("…5678"). Never the full number. */

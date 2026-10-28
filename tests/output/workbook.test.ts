@@ -58,7 +58,7 @@ describe('loadTrackerView', () => {
 describe('buildWorkbook', () => {
   it('has an Overview tab and one tab per client', async () => {
     const wb = await load(await buildWorkbook(loadTrackerView(fixture(), now, healthy)));
-    expect(wb.worksheets.map((w) => w.name)).toEqual(['Overview', 'Mehta Foods', 'Sharma Interiors']);
+    expect(wb.worksheets.map((w) => w.name)).toEqual(['Today', 'Overview', 'Mehta Foods', 'Sharma Interiors']);
   });
 
   it('writes the health line and a linked summary row per client', async () => {

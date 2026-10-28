@@ -1,10 +1,13 @@
-import { isOverdue, type ClientView, type TrackerView } from '../output/view.ts';
+import { TRACKER_ID_KEY } from '../output/trackerKey.ts';
+import { isOverdue, type TrackerView } from '../output/view.ts';
+import type { Db } from '../store/db.ts';
+import { getKv } from '../store/kv.ts';
 import type { TaskRow } from '../store/tasks.ts';
-import { displayDate, istShortDate, istTime } from '../util/time.ts';
+import { displayDate } from '../util/time.ts';
 
 /** Most urgent open tasks listed per client. */
 export const TOP_TASKS = 3;
-/** Longest task title in the message, in characters. Longer titles are cut, at a space when one is near the end. */
+/** Longest task title shown, in characters. Longer titles are cut, at a space when one is near the end. */
 export const MAX_TITLE_CHARS = 70;
 
 const PRIORITY_RANK: Record<TaskRow['priority'], number> = { high: 0, medium: 1, low: 2 };
@@ -31,35 +34,40 @@ export function shortTitle(title: string, max = MAX_TITLE_CHARS): string {
   return `${(space >= max / 2 ? cut.slice(0, space) : cut).trimEnd()}…`;
 }
 
-function taskLine(t: TaskRow, today: string): string {
+/** The notes shown after a task: its deadline ("due today" or "due 21 Oct"), overdue, high priority, maybe done. */
+export function taskNotes(t: TaskRow, today: string): string[] {
   const notes: string[] = [];
   if (t.deadline) notes.push(t.deadline === today ? 'due today' : `due ${displayDate(t.deadline)}`);
   if (isOverdue(t, today)) notes.push('overdue');
   if (t.priority === 'high') notes.push('high priority');
   if (t.status === 'maybe_done') notes.push('maybe done');
-  return `• [${t.side}] ${t.code} ${shortTitle(t.title)}${notes.length ? ` (${notes.join(', ')})` : ''}`;
+  return notes;
 }
 
-function clientLines(c: ClientView, today: string): string[] {
-  const open = [...c.usOpen, ...c.clientOpen];
-  if (open.length === 0) return [`*${c.client.name}*: no open tasks`];
-  const top = open.sort(byMorningUrgency(today)).slice(0, TOP_TASKS);
-  return [`*${c.client.name}*: ${open.length} open, ${c.overdue} overdue`, ...top.map((t) => taskLine(t, today))];
+export { TRACKER_ID_KEY };
+
+/** A Drive file id: letters, digits, _ and -, at least 10 of them. Anything else never goes into the link. */
+const DRIVE_FILE_ID = /^[A-Za-z0-9_-]{10,}$/;
+
+/** The Drive link to Tracker.xlsx, or undefined while the tracker was never uploaded (or the stored id is not a Drive id). */
+export function trackerLink(db: Db): string | undefined {
+  const id = getKv(db, TRACKER_ID_KEY);
+  return id !== undefined && DRIVE_FILE_ID.test(id) ? `https://drive.google.com/file/d/${id}/view` : undefined;
 }
 
-/** The morning WhatsApp text, built from the tracker view only (no AI call). Inactive clients are left out. */
-export function buildMorningText(view: TrackerView, today: string): string {
+/**
+ * The morning WhatsApp text: one line with the totals of the active clients and the tracker link (owner decision D1,
+ * 27 Oct 2026). Built from the tracker view only (no AI call). It names no client and no task.
+ * today: the IST date the view was built for (view.today); the view's overdue counts already use it.
+ */
+export function buildShortMorningText(view: TrackerView, today: string, link: string): string {
   const active = view.clients.filter((c) => c.client.active);
-  const lines = [`Morning report · ${displayDate(today)}`];
+  if (active.length === 0) return `Good morning. No open tasks. Today's tracker: ${link}`;
   let open = 0;
   let overdue = 0;
-  if (active.length === 0) lines.push('', 'No active clients.');
   for (const c of active) {
     open += c.usOpen.length + c.clientOpen.length;
     overdue += c.overdue;
-    lines.push('', ...clientLines(c, today));
   }
-  const built = `${istShortDate(view.generatedAt)} ${istTime(view.generatedAt)}`;
-  lines.push('', `Total: ${open} open, ${overdue} overdue · Built ${built} IST`);
-  return lines.join('\n');
+  return `Good morning. ${open} open ${open === 1 ? 'task' : 'tasks'}, ${overdue} overdue. Today's tracker: ${link}`;
 }

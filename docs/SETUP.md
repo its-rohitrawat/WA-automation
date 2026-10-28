@@ -114,7 +114,7 @@ npm run cli -- list-groups
 
 1. `google-auth` prints a link. Open it in a browser **on this PC**, signed in as the mailbox account, and allow access. (After you allow, Google sends the answer back to this same PC at 127.0.0.1, so a browser on another computer will not work.)
 2. `link` shows a QR code. On the founder's phone: WhatsApp > Settings > Linked devices > Link a device. The phone then lists this link as "WA Agent - Tracker". With an empty allow-list nothing is stored.
-3. `list-groups` prints every group's id and name on screen only. In an admin window or the waagent window, open `notepad C:\wa-agent\config\allowed-groups.json` and add the 1-2 pilot groups, like this:
+3. `list-groups` prints every group's id and name on screen only. (With the owner dashboard on, you can choose the groups there instead: see "Choosing client groups in the dashboard" under "Owner dashboard".) In an admin window or the waagent window, open `notepad C:\wa-agent\config\allowed-groups.json` and add the 1-2 pilot groups, like this:
 
 ```json
 {
@@ -322,8 +322,15 @@ Besides a description or the start of the text, the description column can say:
 
 ## Morning report
 
-Every day at 06:00 IST, Sundays included, the founder gets one WhatsApp message from a **spare number** the business owns. It lists, per active client, how many tasks are open and overdue and the 3 most urgent open tasks (tagged `us` or `client`), then a total line. The current tracker is attached as `Tracker-YYYY-MM-DD.xlsx`. It makes no AI call, so it costs nothing.
+Monday to Friday at 06:00 IST, the founder gets one short WhatsApp message from a **spare number** the business owns, with the totals of the active clients and a link to the tracker on Google Drive, for example:
 
+`Good morning. 5 open tasks, 2 overdue. Today's tracker: https://drive.google.com/file/d/…/view`
+
+With no active clients it reads `Good morning. No open tasks. Today's tracker: …`; with active clients and nothing open it reads `Good morning. 0 open tasks, 0 overdue. Today's tracker: …`. No file is attached: the link opens `Tracker.xlsx` on its **Today** tab (the first tab), which lists, per active client, how many tasks are open and overdue and the 3 most urgent open tasks (tagged `us` or `client`). It makes no AI call, so it costs nothing.
+
+- No report goes out on Saturday or Sunday. `REPORT_DAYS` changes the days (see step 4 below). `report send-now` still works on any day.
+- The founder needs view access to `Tracker.xlsx` on Drive, or the link asks for access (step 6 below).
+- The link exists only once the tracker has reached Google Drive. Until then the report is not sent, and the status says why (see "Checking it" below).
 - The founder's own number is unchanged: the agent still only reads it and never sends from it.
 - The spare number sends only to `REPORT_RECIPIENT`. It reads no chats, sends no read receipts, and is online only for the minute it takes to send.
 - If the PC is off or offline at 06:00, the report goes as soon as possible, but only until 12:00 IST. After that the day is skipped.
@@ -347,11 +354,12 @@ Every day at 06:00 IST, Sundays included, the founder gets one WhatsApp message 
    REPORT_RECIPIENT=your_founder_number_here
    ```
 
-   `REPORT_RECIPIENT` is the founder's Indian mobile: `91` then the 10-digit mobile number (12 digits in all), digits only, for example `919812345678`, with no `+` or spaces. The service refuses to start with any other form. Leave `REPORT_TIME` and `REPORT_DEADLINE` empty for 06:00 and 12:00 IST.
+   `REPORT_RECIPIENT` is the founder's Indian mobile: `91` then the 10-digit mobile number (12 digits in all), digits only, for example `919812345678`, with no `+` or spaces. The service refuses to start with any other form. Leave `REPORT_TIME`, `REPORT_DEADLINE` and `REPORT_DAYS` empty for 06:00 and 12:00 IST, Monday to Friday. Set `REPORT_DAYS=mon-sat` to add Saturday, or `REPORT_DAYS=daily` for every day.
 5. **Start the service again** (see "Start the service again" under "If the service will not start" below), wait one minute, and check `npm run cli -- report status`.
-6. Send one test report: `npm run cli -- report send-now`, then type `yes`. It works only while the service is running, and it refuses if today's report was already sent. Check the founder's phone.
+6. Give the founder view access to `Tracker.xlsx`, or the link asks for access when he opens it. In Google Drive (mailbox account), share the **WA Agent** folder with the founder's Google account (the one signed in on his phone), as Viewer. Sharing the folder, not the file, keeps it working if the file is ever re-created (see step 7 of "6. Install and start the service").
+7. Send one test report: `npm run cli -- report send-now`, then type `yes`. It works only while the service is running, on any day, weekends too, and it refuses if today's report was already sent. Check the founder's phone, and open the link once.
    If you change `REPORT_RECIPIENT` later, restart the service: until then `report status` warns that the running service still sends to the old number, and `report send-now` refuses.
-7. Open WhatsApp on the spare phone at least every 14 days, so the linked device stays valid.
+8. Open WhatsApp on the spare phone at least every 14 days, so the linked device stays valid.
 
 The spare number's session is in `C:\wa-agent\data\sender-session.db`. It is encrypted with its own key, derived from the same master key. Back it up with the rest of `data`.
 
@@ -368,6 +376,23 @@ Last days:
 ```
 
 `npm run cli -- status` shows the same line as `Report:`.
+
+What the line can say (HH:MM is a time in IST):
+
+| What you see | What it means | What to do |
+|---|---|---|
+| Morning report: due at 06:00 IST | A report day, before 06:00. | Nothing. |
+| Morning report: due now | Between 06:00 and 12:00, not sent yet. It goes on the next check (every 30 seconds). | Nothing. |
+| Morning report: sent at HH:MM IST | Today's message left. | Nothing. |
+| Morning report: sending now | The send is running. | Nothing. |
+| Morning report: no report today (weekend) | Saturday or Sunday, and `REPORT_DAYS` leaves the day out. No scheduled report is sent or skipped (a `report send-now` that fails is still retried until 12:00). | Nothing. `report send-now` still sends one if you want it. |
+| Morning report: not sent yet (the tracker is not on Google Drive yet (run google-auth and let it upload once)), next try HH:MM IST | The tracker has never reached Google Drive, so there is no link to send. Nothing was sent. | If Google was never signed in, run `npm run cli -- google-auth` (see "5. One-time sign-ins"), then restart the service. If Google is already signed in, check the `Health:` line in `npm run cli -- status` for `Tracker update failing` or `Google sign-in expired` and follow that row in "What the status line means". Once `Tracker.xlsx` is in the **WA Agent** folder on Drive, the report goes on the next try. |
+| Morning report skipped today (the tracker is not on Google Drive yet (run google-auth and let it upload once)) | 12:00 came and there was still no link, so the day was skipped. Nothing was sent. | Same as above; tomorrow's report goes once the tracker is on Drive. |
+| Morning report: not sent yet (reason), next try HH:MM IST | Another definite failure, nothing was sent. It tries again after 2, 5 and 10 minutes, until 12:00. A failure before 06:00 (from `report send-now`) waits until 06:00 for its next try. | Usually nothing. If it says the spare number, see the status headings below. |
+| Morning report: not sent yet (reason); no more tries today, it will be skipped at 12:00 IST | A definite failure too close to 12:00 for another try (the next try would fall after 12:00). Nothing was sent. | Nothing; the day is skipped at 12:00. Tomorrow's report is not affected. |
+| Morning report skipped today (reason) | Not sent by 12:00 (for example the PC was off). | Check the reason. Tomorrow's report is not affected. |
+| Morning report: unknown, check WhatsApp | See the next heading. | See the next heading. |
+| Morning report: off | `REPORT_ENABLED` is not `true`. | See "Turning it off" below. |
 
 ### Status "Morning report: unknown, check WhatsApp"
 
@@ -433,6 +458,47 @@ The tracker keeps working in every case; only the morning report is skipped.
 
 Set `REPORT_ENABLED=false` (or leave it empty) in `.env`, then restart the service.
 
+## Owner dashboard
+
+The owner dashboard and the website run on the office Mac only. Set them up with [SETUP-mac.md](SETUP-mac.md), section 10 "Owner dashboard", then [GO-LIVE.md](GO-LIVE.md) for the company domain. From that update on, the update step must run `npm ci` after pulling.
+
+With the dashboard on, the service also starts when WhatsApp or Google is not linked yet (**setup mode**): the Overview then shows what to link, and you link it from the dashboard. With the dashboard off, a missing link still stops the service, as before.
+
+### Choosing client groups in the dashboard
+
+With the dashboard on, this replaces editing `allowed-groups.json` by hand (step 5).
+
+1. Open **Clients → Manage groups**. It lists every WhatsApp group the founder's phone is in. Search by name.
+2. To start tracking a group, press **Approve** (on a computer you can also drag it to the right; on a phone, switch it on). A panel opens:
+   - **Client name**: filled in from the group name; change it if needed.
+   - **Code**: 3–4 capital letters, suggested for you. Every task number starts with it (for example `SHA-001`). **Pick it carefully: it can't be changed once the client has tasks.** A group that was a client before keeps its old code.
+   - **More: meeting matching** (optional): the same meeting keywords and email domains as in "Meeting summaries" below.
+3. Changes wait in a bar at the bottom ("1 change not saved"). Press **Save**: "Saved. The agent picks up the new groups within 2 seconds." No restart is needed. If a change is refused (for example a code already in use), the panel of that group opens and says why.
+4. To stop tracking a group, press **Remove** and **Save**. Nothing is deleted: its tasks are kept, and approving it again later brings it back with the same code.
+
+Every saved change is recorded in **Audit logs**. The dashboard writes the same `config/allowed-groups.json` file, so `npm run cli -- status` shows the new clients as before.
+
+When WhatsApp is not connected, the page shows the last list it had ("WhatsApp isn't connected") and you can still approve from it.
+
+**Fallback, when the dashboard can't be reached:** edit `allowed-groups.json` by hand as in step 5 (`list-groups`, then the file). Do not edit the file by hand while someone saves in the dashboard.
+
+### Fixing a connection in the dashboard
+
+With the dashboard on, start here when a connection is down. The **Overview** shows a banner naming the part that needs you; **Fix now** opens it on **Connections**, which has one card per connection:
+
+| Card | Button | What happens |
+|---|---|---|
+| Founder WhatsApp | **Reconnect** | A QR code appears. On the founder's phone: WhatsApp > Settings > Linked devices > Link a device, and scan it. The tracker carries on with the new link; the service does not need to be stopped. |
+| Spare WhatsApp (morning report) | **Link phone** | The same, scanned from the **spare** phone. Never scan it with the founder's phone: the agent refuses to send from the founder's own number. |
+| Google | **Reconnect**, or **Add Google account** | Google's sign-in opens. Sign in with that account and allow access; you come back to Connections. |
+| Tracker on Drive | **Upload tracker now** | Uploads the tracker at once. |
+| Claude | **Test connection** | Checks the AI key works. It costs nothing. |
+| Monitoring | **Send test beat** | Sends one heartbeat to UptimeRobot. |
+
+A link stops by itself after 5 minutes without a scan, and **Cancel** puts back the link that was there before. Every reconnect is recorded in **Audit logs**. Once the company address is set up ([GO-LIVE.md](GO-LIVE.md)), do Google's **Reconnect** from the dashboard at that address, not from `localhost`.
+
+**Fallback, when the dashboard can't be reached:** the commands in this guide still work: `npm run cli -- link` (founder), `npm run cli -- link-sender` (spare phone) and `npm run cli -- google-auth` (Google), each as described in its section. `link` and `link-sender` need the service stopped first; after `google-auth`, restart the service.
+
 ## Everyday commands (run in the waagent window)
 
 | Command | What it does |
@@ -474,6 +540,8 @@ Notes:
 - **Limit of `reprocess`:** it cannot add a missed second task from a message that already produced a task (or that already counted as a reminder or an update on a task). If the AI missed a second piece of work in an old message, add a note to an existing task with `task edit <code> --latest-progress "..."`, or tell the team. There is no "task add" command yet.
 
 ## What the status line means
+
+With the owner dashboard on, fix a connection from the dashboard first (see "Fixing a connection in the dashboard" under "Owner dashboard"). The commands below are the fallback.
 
 In `npm run cli -- status` it appears as the `Health:` line. It is also the first line on the Overview tab. The Google sign-in and Tracker update lines are never shown in the workbook, because the workbook cannot upload while those are failing; look at `status` instead. If several things are wrong at once, the line shows the most serious one.
 

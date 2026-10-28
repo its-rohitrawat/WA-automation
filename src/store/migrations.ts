@@ -283,4 +283,54 @@ CREATE TABLE media_stt_forget (
 );
 `,
   },
+  {
+    // Owner dashboard (D1). web_sessions keeps only SHA-256 hashes of the session id and CSRF token, never the raw values.
+    // audit_log: who did what, for the dashboard's Audit screen; never tokens, cookies, QR codes or message text.
+    // settings: values the owner changes from the dashboard (JSON in v). uptime_log: up/down transitions, for the vitals
+    // strip when UptimeRobot's read-only API is not set. Additive only: no existing table or row is touched.
+    version: 9,
+    sql: `
+CREATE TABLE web_sessions (
+  id_hash TEXT PRIMARY KEY,
+  email TEXT NOT NULL,
+  csrf_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  agent_label TEXT
+);
+CREATE TABLE audit_log (
+  id INTEGER PRIMARY KEY,
+  at TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  event TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('auth', 'config', 'connection', 'task', 'meeting', 'ops')),
+  detail TEXT NOT NULL,
+  request_id TEXT
+);
+CREATE INDEX audit_log_at ON audit_log(at);
+CREATE TABLE settings (
+  k TEXT PRIMARY KEY,
+  v TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT NOT NULL
+);
+CREATE TABLE uptime_log (
+  id INTEGER PRIMARY KEY,
+  at TEXT NOT NULL,
+  up INTEGER NOT NULL
+);
+CREATE INDEX uptime_log_at ON uptime_log(at);
+`,
+  },
+  {
+    // Owner dashboard (D4/D5). task_events_task: a task's history is read by task (the Tasks screen's detail).
+    // uptime_log.reason: why the agent went down, when it knows (a fixed code such as stopped or whatsapp_logged_out,
+    // never free text); rows written before this stay without one. Additive only.
+    version: 10,
+    sql: `
+CREATE INDEX task_events_task ON task_events(task_id, at, id);
+ALTER TABLE uptime_log ADD COLUMN reason TEXT CHECK (reason IS NULL OR length(reason) BETWEEN 1 AND 100);
+`,
+  },
 ];

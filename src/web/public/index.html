@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="same-origin">
+<title>WA Agent · Owner</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/dashboard/static/styles.css">
+<script src="/dashboard/vendor/gsap.js" defer></script>
+<script type="module" src="/dashboard/static/app.js"></script>
+</head>
+<body>
+
+<!-- ===================== SIGN-IN ===================== -->
+<section class="signin" id="signin" hidden>
+  <div class="si-left">
+    <canvas id="si-core" aria-hidden="true"></canvas>
+    <a class="si-brand" id="si-brand" href="/" title="Back to the website"><span class="logo-mark" data-icon="bubble" data-size="15"></span>WA Agent</a>
+    <div class="si-chip glass c1" aria-hidden="true"><b>SHA-014</b>Revise landing page</div>
+    <div class="si-chip glass c2" aria-hidden="true"><span data-icon="video" data-size="16"></span>Meeting summary ready</div>
+    <div class="si-chip glass c3" aria-hidden="true"><span data-icon="xls" data-size="16"></span>Tracker synced · 3 min ago</div>
+    <div class="si-copy">
+      <h1>Your client work, <span>in one calm place.</span></h1>
+      <p>Sign in to see every task, meeting and connection the agent is keeping track of.</p>
+    </div>
+  </div>
+  <div class="si-right">
+    <div class="si-card glass" id="si-card">
+      <div class="si-out" id="si-out" hidden><span data-icon="ok" data-size="16"></span>You're signed out. Your session has ended.</div>
+      <span class="logo-mark" data-icon="bubble" data-size="15"></span>
+      <h2>Welcome back</h2>
+      <p class="sub">Owner sign-in for the WA Agent dashboard.</p>
+      <a class="gbtn" id="gbtn" href="/dashboard/auth/login">
+        <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#4285F4" d="M45 24.5c0-1.6-.1-2.8-.4-4.1H24v7.7h12c-.2 2-1.6 5-4.6 7l7.1 5.5C42.7 36.7 45 31.1 45 24.5z"/><path fill="#34A853" d="M24 46c6 0 11-2 14.6-5.4l-7.1-5.5c-1.9 1.3-4.4 2.2-7.5 2.2-5.8 0-10.6-3.8-12.4-9.1l-7.3 5.7C7.9 41.1 15.4 46 24 46z"/><path fill="#FBBC05" d="M11.6 28.2c-.5-1.3-.7-2.7-.7-4.2s.3-2.9.7-4.2l-7.3-5.7C2.8 17.1 2 20.4 2 24s.8 6.9 2.3 9.9l7.3-5.7z"/><path fill="#EA4335" d="M24 10.7c4.1 0 6.9 1.8 8.5 3.3l6.2-6.1C34.9 4.4 30 2 24 2 15.4 2 7.9 6.9 4.3 14.1l7.3 5.7c1.8-5.3 6.6-9.1 12.4-9.1z"/></svg>
+        <span>Continue with Google</span>
+      </a>
+      <div class="si-denied" id="si-denied" role="alert" hidden>
+        <b><span data-icon="alert" data-size="16"></span>This account can't open the dashboard</b>
+        It is not on the owner list. Try another Google account.
+      </div>
+      <div class="si-error" id="si-error" role="alert" hidden>
+        <b><span data-icon="alert" data-size="16"></span>Sign-in did not finish</b>
+        Something went wrong with Google sign-in. Try again.
+      </div>
+      <div class="si-or">What this sign-in shares</div>
+      <ul class="si-list">
+        <li><span data-icon="user" data-size="17"></span>Only your name and email, to check you are an owner.</li>
+        <li><span data-icon="lock" data-size="17"></span>No access to your Gmail or Drive from this sign-in.</li>
+        <li><span data-icon="clock" data-size="17"></span>You stay signed in on this browser for up to 7 days.</li>
+      </ul>
+    </div>
+    <a class="si-back" id="si-back" href="/"><span data-icon="arrowL" data-size="16"></span>Back to website</a>
+    <div class="si-foot">Privacy · Terms · Not affiliated with WhatsApp or Meta</div>
+  </div>
+</section>
+
+<!-- ===================== APP ===================== -->
+<div class="app" id="app" hidden>
+  <aside class="side" id="side">
+    <div class="side-top"><span class="logo-mark" data-icon="bubble" data-size="15"></span><span>WA Agent</span></div>
+    <nav class="nav" id="nav" aria-label="Dashboard"></nav>
+    <div class="side-health" id="side-health"><svg class="ecg" width="36" height="20" viewBox="0 0 36 20" fill="none" stroke="#25D366" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 10h8l3-6 5 12 3-6h15"/></svg>
+      <div><b id="sh-t">Checking the agent…</b><small id="sh-s">One moment</small></div></div>
+    <button class="collapse" id="collapse" type="button"><span data-icon="sidebar" data-size="18"></span><span>Collapse</span></button>
+  </aside>
+  <div class="main">
+    <header class="top">
+      <button class="icon-btn menu-btn-mobile" id="mnav" type="button" aria-label="Open menu" aria-controls="side" aria-expanded="false" data-icon="menu" data-size="18"></button>
+      <div><div class="crumb" id="crumb">Workspace</div><h1 id="title">Overview</h1></div>
+      <label class="search"><span data-icon="search" data-size="16"></span><input id="q" placeholder="Search tasks, clients…" autocomplete="off" aria-label="Search"><kbd>/</kbd></label>
+      <button class="health-pill" id="hpill" type="button" data-go="connections"><svg class="ecg" width="26" height="14" viewBox="0 0 36 20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 10h8l3-6 5 12 3-6h15"/></svg><span id="hpill-t">Checking…</span></button>
+      <button class="icon-btn" id="theme" type="button" aria-label="Switch theme"></button>
+      <div class="me"><button class="avatar" id="avatar" type="button" aria-haspopup="true" aria-expanded="false" aria-label="Account menu">··</button>
+        <div class="menu" id="menu" hidden>
+          <div class="who"><b id="me-name"></b><small id="me-email"></small></div>
+          <button type="button" data-go="settings"><span data-icon="settings" data-size="17"></span>Settings</button>
+          <button type="button" id="signout"><span data-icon="logout" data-size="17"></span>Sign out</button>
+        </div></div>
+    </header>
+    <div class="offline-bar" id="offline" role="status" hidden>The agent is not answering. The numbers below may be out of date.</div>
+    <main class="view" id="view" tabindex="-1"></main>
+  </div>
+</div>
+<div class="tip" id="tip" role="tooltip" hidden></div>
+<noscript><p>The WA Agent dashboard needs JavaScript.</p></noscript>
+</body>
+</html>

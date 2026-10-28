@@ -21,10 +21,20 @@ const OUTBOUND = [
 const SEND_NAMES = new RegExp(`\\b(sendMessage|${OUTBOUND})\\b`);
 const OTHER_OUTBOUND = new RegExp(`\\b(${OUTBOUND})\\b`);
 
+/**
+ * The dashboard's sign-out route is a URL path (spec section 8), not a Baileys call: that one exact string literal is
+ * removed before the scan, and only in the dashboard's auth routes.
+ */
+const DASHBOARD_SIGN_OUT_PATH = "'/dashboard/auth/logout'";
+
 function sources(): { file: string; text: string }[] {
   return readdirSync(SRC, { recursive: true, encoding: 'utf8' })
     .filter((f) => f.endsWith('.ts'))
-    .map((f) => ({ file: f.replaceAll('\\', '/'), text: readFileSync(join(SRC, f), 'utf8') }));
+    .map((f) => {
+      const file = f.replaceAll('\\', '/');
+      const text = readFileSync(join(SRC, f), 'utf8');
+      return { file, text: file === 'web/routes/auth.ts' ? text.replaceAll(DASHBOARD_SIGN_OUT_PATH, "''") : text };
+    });
 }
 
 describe('who may send on WhatsApp', () => {

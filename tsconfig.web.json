@@ -1,0 +1,17 @@
+{
+  "//": "Type-checks the dashboard's browser code (plain ES modules with JSDoc, no build step). Run by npm run typecheck.",
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["es2023", "dom", "dom.iterable"],
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": true,
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "types": []
+  },
+  "include": ["src/web/public/**/*.js"]
+}
