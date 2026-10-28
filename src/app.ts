@@ -17,7 +17,7 @@ import type { MediaRefSealer } from './media/ref.ts';
 import { DriveFileUploader } from './media/uploader.ts';
 import { forgetVoiceCopies } from './media/voiceForget.ts';
 import type { MeetingsGoogleApi } from './meetings/googleApi.ts';
-import type { MeetingsHealth } from './meetings/healthTypes.ts';
+import type { MeetingSttProblem, MeetingsHealth } from './meetings/healthTypes.ts';
 import { MeetingService, type MeetingSettings } from './meetings/service.ts';
 import { errorCode } from './meetings/sttParts.ts';
 import type { MeetingTranscriber } from './meetings/transcribe.ts';
@@ -70,8 +70,10 @@ export interface AppMediaDeps {
 export interface AppMeetingsDeps {
   api: MeetingsGoogleApi;
   ai: MeetingAi;
-  /** null: STT_PROVIDER none; meetings are found and matched but wait (stt_none). */
+  /** null: STT_PROVIDER none, or the local engine not set up; meetings are found and matched but wait (stt_none). */
   transcriber: MeetingTranscriber | null;
+  /** STT_PROVIDER is local but STT_LOCAL_BIN or STT_LOCAL_MODEL is not a file (buildMeetingTranscriber): shown in Health. */
+  sttProblem?: MeetingSttProblem | null;
   /** null: ffmpeg not found; meetings are paused (no_ffmpeg). */
   ffmpeg: Ffmpeg | null;
   settings: MeetingSettings;
@@ -368,7 +370,7 @@ export function createApp(d: AppDeps): App {
   const meetings = mt
     ? new MeetingService({
         db: d.db, clock: d.clock, log: d.log, dataDir: d.dataDir, spend, prices: d.prices, drive: d.drive, api: mt.api, ai: mt.ai,
-        transcriber: mt.transcriber, ffmpeg: mt.ffmpeg, settings: mt.settings, clients: mt.clients, freeBytes: d.freeBytes ?? defaultFreeBytes,
+        transcriber: mt.transcriber, ...(mt.sttProblem ? { sttProblem: mt.sttProblem } : {}), ffmpeg: mt.ffmpeg, settings: mt.settings, clients: mt.clients, freeBytes: d.freeBytes ?? defaultFreeBytes,
         // The tracker step holds the client's run flag through the reconciler's exclusive (debouncer.runExclusive).
         track: (clientId, meeting) => reconciler.runMeeting(clientId, meeting),
         hasMeetingScopes: () => meetingsReady(d.db),

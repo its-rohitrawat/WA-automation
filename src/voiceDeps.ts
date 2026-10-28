@@ -2,7 +2,7 @@ import { join, resolve } from 'node:path';
 import type { Env } from './config/env.ts';
 import type { VoiceProblem } from './health/health.ts';
 import { Ffmpeg } from './stt/audio.ts';
-import { checkLocalEngineFiles } from './stt/local.ts';
+import { checkLocalEngineFiles, type LocalEngine } from './stt/local.ts';
 import { createVoiceTranscriber, type VoiceTranscriber } from './stt/voice.ts';
 import type { Logger } from './util/logger.ts';
 
@@ -21,6 +21,11 @@ export interface VoiceDepsSeams {
   findFfmpeg: (configured: string | undefined) => Promise<string | null>;
   /** checkLocalEngineFiles from src/stt/local.ts: the first of the two settings that is not a file, by name. */
   check?: (env: Pick<Env, 'STT_LOCAL_BIN' | 'STT_LOCAL_MODEL'>) => 'STT_LOCAL_BIN' | 'STT_LOCAL_MODEL' | null;
+  /**
+   * sharedLocalEngine from src/stt/local.ts: the one engine voice notes and meetings share, so only one model runs at a
+   * time. Its folder (DATA_DIR/tmp) holds DATA_DIR/tmp/voice. Not given: a local transcriber builds its own.
+   */
+  localEngine?: Pick<LocalEngine, 'transcribe'>;
   log: Logger;
 }
 
@@ -62,7 +67,10 @@ export async function buildVoiceDeps(env: Env, s: VoiceDepsSeams): Promise<Voice
     exe = null;
   }
   if (exe === null) log.warn({ code: 'no_ffmpeg_voice' }, 'voice notes are kept but not transcribed: ffmpeg not found');
-  const voice = createVoiceTranscriber(env, { ffmpeg: exe === null ? null : new Ffmpeg(exe), tmpDir: resolve(join(env.DATA_DIR, 'tmp', 'voice')) });
+  const voice = createVoiceTranscriber(env, {
+    ffmpeg: exe === null ? null : new Ffmpeg(exe), tmpDir: resolve(join(env.DATA_DIR, 'tmp', 'voice')),
+    ...(s.localEngine && choice === 'local' ? { localEngine: s.localEngine } : {}),
+  });
   if (voice !== null && exe !== null) log.info({ provider: voice.provider }, 'voice notes are transcribed');
   return { voice, maxVoiceSeconds, voiceProblem: exe === null ? 'no_ffmpeg' : null };
 }

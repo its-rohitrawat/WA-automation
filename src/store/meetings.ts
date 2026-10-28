@@ -512,6 +512,19 @@ export function deferMeeting(
 }
 
 /**
+ * Queued meetings still waiting out a speech-to-text-not-set-up deferral (stt_none) become due at `at`: the service
+ * started with a transcriber, so they need not wait out the rest of their hour (plan 2026-10-28-meetings-local-stt.md,
+ * Task 3). Only the next attempt moves; the error code and the attempt count stay. Returns how many.
+ */
+export function releaseSttNoneWaits(db: Db, at: string): number {
+  const now = canonical('releaseSttNoneWaits', 'at', at);
+  return db
+    .prepare(`UPDATE meetings SET next_attempt_at = @now, updated_at = @now
+      WHERE status = 'queued' AND error_code = 'stt_none' AND next_attempt_at > @now`)
+    .run({ now }).changes;
+}
+
+/**
  * A final failure of a queued meeting. The stage is kept, so `meeting retry` starts again after the last finished stage.
  * audioPath and audioSeconds, when given, are stored in the same write (a measured too_long keeps its audio); not given,
  * the stored values stay. Throws when not queued.

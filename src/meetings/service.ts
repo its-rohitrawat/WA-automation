@@ -11,7 +11,7 @@ import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import type { MeetingsGoogleApi } from './googleApi.ts';
 import { GoogleAccessError } from './googleErrors.ts';
-import type { MeetingsHealth } from './healthTypes.ts';
+import type { MeetingSttProblem, MeetingsHealth } from './healthTypes.ts';
 import { MeetingProcessor, type MeetingProcessResult } from './processor.ts';
 import { MeetingQueue } from './queue.ts';
 import type { MeetingTranscriber } from './transcribe.ts';
@@ -42,6 +42,8 @@ export interface MeetingServiceDeps {
   api: MeetingsGoogleApi;
   ai: MeetingAi;
   transcriber: MeetingTranscriber | null;
+  /** STT_PROVIDER is local but the engine is not set up (the transcriber is then null): Health names the setting. */
+  sttProblem?: MeetingSttProblem | null;
   ffmpeg: Ffmpeg | null;
   settings: MeetingSettings;
   clients: readonly ClientConfigLike[];
@@ -56,11 +58,11 @@ export interface MeetingServiceDeps {
 }
 
 /**
- * The speech-to-text provider Health names. The local engine shows as 'none' until Health and the dashboard know it
- * (plan 2026-10-28-meetings-local-stt.md, Task 3); meetings stay safe either way.
+ * The speech-to-text provider Health names: the transcriber's, 'local' for a local engine that is not set up (no
+ * transcriber, with its problem), else 'none'.
  */
-const sttProviderOf = (t: MeetingTranscriber | null): MeetingsHealth['sttProvider'] =>
-  t === null || t.provider === 'local' ? 'none' : t.provider;
+const sttProviderOf = (t: MeetingTranscriber | null, problem: MeetingSttProblem | null): MeetingsHealth['sttProvider'] =>
+  t !== null ? t.provider : problem !== null ? 'local' : 'none';
 
 /**
  * Meetings inside the app (Task 10): discovery at most every MEETING_POLL_MINUTES (never two passes at once), the queue
@@ -163,10 +165,12 @@ export class MeetingService {
         : this.#d.ffmpeg === null
           ? 'no_ffmpeg'
           : null;
+    const problem = this.#d.transcriber === null ? (this.#d.sttProblem ?? null) : null;
     return {
       stats: meetingStats(this.#d.db, this.#d.clock.now().toISOString()),
       paused,
-      sttProvider: sttProviderOf(this.#d.transcriber),
+      sttProvider: sttProviderOf(this.#d.transcriber, problem),
+      ...(problem !== null ? { sttProblem: problem } : {}),
       ...(extraLost.length > 0 ? { lostAccounts: extraLost } : {}),
     };
   }

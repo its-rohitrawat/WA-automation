@@ -766,7 +766,7 @@ Do the steps below once, in order.
 
 ### 1. Before you start
 
-- **Speech-to-text.** The speech-to-text test (bake-off, `docs/STT-BAKEOFF.md`) has picked a provider. Meetings use `STT_PROVIDER`. Voice notes have their own setting, `VOICE_STT_PROVIDER` (see "Voice notes"); the recommended local engine is not used for meetings, and a paid voice service must be this same provider and key.
+- **Speech-to-text.** The speech-to-text test (bake-off, `docs/STT-BAKEOFF.md`) has picked a provider. Meetings use `STT_PROVIDER`. Voice notes have their own setting, `VOICE_STT_PROVIDER` (see "Voice notes"); a paid voice service must be this same provider and key. On the Mac, `STT_PROVIDER=local` sends meetings through the free local engine voice notes use (SETUP-mac.md, section 8, "Meetings on the same engine"): no key and no speech cost, but slow (about 4 hours for a 3-hour meeting on Voxtral) and with no speaker labels.
 - **Internal Google app.** The OAuth consent screen is **Internal** (section 4 of this guide). One of the new permissions (Meet files in Drive) is a "restricted" one. **If the app is not Internal, stop and ask.**
 - **Privacy steps done** (step 6 below). Do them before the first real meeting is sent.
 
@@ -822,8 +822,8 @@ In an admin window or the waagent window, open `notepad C:\wa-agent\.env` and fi
 | `MEETING_MAX_MINUTES` | Longer meetings are listed as "too long" and not transcribed. Default 180 (3 hours), allowed 10–300. |
 | `MEETINGS_SINCE` | Optional, `YYYY-MM-DD`: only meetings from this day on. Empty means from the day the service first ran with meetings on (stored, so a restart does not move it). |
 | `FFMPEG_PATH` | Full path to `ffmpeg.exe` (step 2). |
-| `STT_PROVIDER` | `sarvam`, `elevenlabs`, `openai` or `none`. Default `none`: meetings are found and matched, but wait. |
-| `STT_API_KEY` | The speech-to-text provider's key. Required when `STT_PROVIDER` is not `none`. Type it into `.env` yourself, never into chat or code. |
+| `STT_PROVIDER` | `local`, `sarvam`, `elevenlabs`, `openai` or `none`. Default `none`: meetings are found and matched, but wait. `local` is the engine on the Mac (needs `STT_LOCAL_BIN` and `STT_LOCAL_MODEL`, SETUP-mac.md section 8). |
+| `STT_API_KEY` | The speech-to-text provider's key. Required when `STT_PROVIDER` is not `none` or `local`. Type it into `.env` yourself, never into chat or code. |
 | `INR_PER_USD` | Rupees per US dollar, for Sarvam's rupee prices. Default 88, allowed 40–200. |
 
 Then tell the agent which meetings belong to which client. In `config\allowed-groups.json`, each client can have two more fields:
@@ -923,7 +923,7 @@ The client is chosen **before** anything is downloaded or sent anywhere:
 ### What a meeting does
 
 1. Downloads the recording into `data\meetings\tmp\`, makes a small audio file with ffmpeg, and deletes the video.
-2. Turns the speech into text with speaker labels.
+2. Turns the speech into text: with speaker labels from a paid provider, as plain text (each line labelled "Speaker") from the local engine.
 3. Has Claude write the summary.
 4. Makes the Google Doc: meeting info (client, date, length, attendees), what happened, discussion points, decisions, action items (ours and the client's, with owner and deadline when said), open questions, conclusion and next steps, then the full transcript with times and speaker names. The name is `YYYY-MM-DD – <Client> – <Meeting title>`.
 5. Updates the tracker. A meeting can do what a WhatsApp message can: add tasks (marked "Meeting"), update tasks first raised on WhatsApp, close tasks, mark them maybe done, and log reminders and decisions. It never changes anyone's role.
@@ -939,7 +939,7 @@ Speech-to-text is booked as `stt` and the summary as `ai`. Both count toward `DA
 
 | Step | Cost |
 |---|---|
-| Speech | ElevenLabs $0.22, Sarvam about $0.41, OpenAI $0.36 |
+| Speech | ElevenLabs $0.22, Sarvam about $0.41, OpenAI $0.36, local engine $0 |
 | Summary | about $0.15–0.25 |
 | Tracker update | about $0.05–0.08 |
 | **Total** | **about $0.45–0.70** |
@@ -978,7 +978,9 @@ These appear on the `Health:` line, after the shared-file lines and before low d
 | Meetings paused: Google sign-in needs meeting access. Run: npm run cli -- google-auth | The three meeting permissions are not all granted. | Run `npm run cli -- google-auth` in the waagent window (step 5), tick every box, then restart the service. |
 | Meetings paused: ffmpeg not found | `FFMPEG_PATH` is wrong, or ffmpeg is not on the PATH. | Check step 2, fix `FFMPEG_PATH` in `.env`, restart the service. |
 | (number) meetings could not be processed | Meetings failed after their retries (for example the speech-to-text key was refused for 24 hours). Meetings the agent cannot open are not counted here: `status` lists them as `no access`. | Run `npm run cli -- meeting list`. Read `wa-agent.out.log` (look for lines with `meeting`). After a fix, run `meeting retry <number>`. |
-| Meetings waiting: speech-to-text is not set up | `STT_PROVIDER` is `none`. Meetings are found and matched, but not transcribed. | Set `STT_PROVIDER` and `STT_API_KEY` in `.env`, then restart the service. |
+| Meetings waiting: speech-to-text is not set up | `STT_PROVIDER` is `none`. Meetings are found and matched, but not transcribed. | Set `STT_PROVIDER` and `STT_API_KEY` in `.env` (or `STT_PROVIDER=local` on the Mac), then restart the service. Waiting meetings are picked up right after the restart. |
+| Meetings waiting: the local speech engine is not set up (STT_LOCAL_BIN) | `STT_PROVIDER` is `local`, but there is no file at `STT_LOCAL_BIN` (the engine program). Meetings wait; nothing is lost. | Check the path in `.env` (SETUP-mac.md, section 8), then restart the service. |
+| Meetings waiting: the local speech engine is not set up (STT_LOCAL_MODEL) | `STT_PROVIDER` is `local`, but there is no file at `STT_LOCAL_MODEL` (the model). Meetings wait; nothing is lost. | Check the path in `.env` (SETUP-mac.md, section 8), then restart the service. |
 | Meetings waiting: the speech-to-text key was refused | The provider refused `STT_API_KEY`. The agent tries again every hour. After 24 hours of refusals in one service run the meeting fails; run `meeting retry <number>` after fixing the key. | Check the key in the provider's console. Put a working key in `.env`, then restart the service. |
 
 ### Turning meetings off

@@ -4,10 +4,11 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MeetingProcessResult } from '../../src/meetings/processor.ts';
 import { MeetingQueue } from '../../src/meetings/queue.ts';
-import { meetingTranscriber } from '../../src/meetings/transcribe.ts';
+import { localMeetingTranscriber } from '../../src/meetings/localTranscriber.ts';
+import { meetingTranscriber, type MeetingTranscriber } from '../../src/meetings/transcribe.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import type { Db } from '../../src/store/db.ts';
-import { addSttForget, failMeeting, getMeeting, insertFound, setSttParts } from '../../src/store/meetings.ts';
+import { addSttForget, deferMeeting, failMeeting, getMeeting, getMeetingState, insertFound, setSttParts } from '../../src/store/meetings.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { seededDb } from '../helpers/db.ts';
@@ -40,7 +41,7 @@ class FakeProcessor {
   }
 }
 
-function setup(o: { meetings?: number } = {}) {
+function setup(o: { meetings?: number; transcriber?: MeetingTranscriber | null } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'meet-queue-'));
   dirs.push(dataDir);
   const db = seededDb();
@@ -51,7 +52,7 @@ function setup(o: { meetings?: number } = {}) {
   const settled: MeetingProcessResult[] = [];
   const stt = new FakeSttProvider();
   const queue = new MeetingQueue({
-    db, clock, log: silentLogger(), spend, dataDir, transcriber: meetingTranscriber(stt, 88), inrPerUsd: 88, processor,
+    db, clock, log: silentLogger(), spend, dataDir, transcriber: o.transcriber === undefined ? meetingTranscriber(stt, 88) : o.transcriber, inrPerUsd: 88, processor,
     onSettled: (r) => settled.push(r),
   });
   return { db, clock, spend, ids, processor, settled, queue, dataDir, stt };
@@ -91,6 +92,41 @@ describe('MeetingQueue', () => {
     expect(existsSync(join(tmp, 'notes.txt'))).toBe(true);
     processor.gates.shift()!();
     await queue.drain(1_000);
+  });
+
+  describe('meetings waiting for speech-to-text (stt_none) after a restart with a transcriber (Task 3)', () => {
+    const IN_AN_HOUR = '2026-11-01T13:00:00.000Z';
+    const local = () => localMeetingTranscriber({ transcribe: async () => ({ text: 'namaste' }) }, { engine: 'voxtral', ffmpeg: null, tmpDir: tmpdir(), inrPerUsd: 88 });
+    /** Meeting ids[0] waits stt_none for an hour, as the processor left it while STT_PROVIDER was none; ids[1] waits low_disk. */
+    const waiting = (s: ReturnType<typeof setup>) => {
+      deferMeeting(s.db, s.ids[0]!, { errorCode: 'stt_none', nextAttemptAt: IN_AN_HOUR, at: NOW, attempts: 0 });
+      deferMeeting(s.db, s.ids[1]!, { errorCode: 'low_disk', nextAttemptAt: IN_AN_HOUR, at: NOW, attempts: 0 });
+    };
+
+    it.each([
+      ['the local engine', local],
+      ['a paid provider', () => meetingTranscriber(new FakeSttProvider(), 88)],
+    ])('with %s, they are due at once at start, not an hour later; other waits are kept', async (_name, make) => {
+      const s = setup({ meetings: 2, transcriber: make() });
+      waiting(s);
+      s.queue.start();
+      await vi.waitFor(() => expect(s.processor.calls.map((c) => c.id)).toEqual([s.ids[0]]), WAIT);
+      expect(getMeetingState(s.db, s.ids[0]!)).toMatchObject({ status: 'queued', attempts: 0, nextAttemptAt: NOW });
+      expect(getMeetingState(s.db, s.ids[1]!)).toMatchObject({ errorCode: 'low_disk', nextAttemptAt: IN_AN_HOUR });
+      s.processor.gates.shift()!();
+      await s.queue.drain(1_000);
+    });
+
+    it('with no transcriber (STT_PROVIDER none, or the local engine not set up) they keep waiting their hour', async () => {
+      const s = setup({ meetings: 2, transcriber: null });
+      waiting(s);
+      s.queue.start();
+      await ticks();
+      await ticks();
+      expect(s.processor.calls).toEqual([]);
+      expect(getMeetingState(s.db, s.ids[0]!)).toMatchObject({ errorCode: 'stt_none', nextAttemptAt: IN_AN_HOUR });
+      await s.queue.drain(1_000);
+    });
   });
 
   it('runs one meeting at a time, oldest first, and goes on to the next when one ends', async () => {

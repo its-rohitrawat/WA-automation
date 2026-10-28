@@ -7,6 +7,7 @@ import type { Db } from '../store/db.ts';
 import { advanceStage, getMeeting, meetingIdsWithInflightParts, type SttPartRow } from '../store/meetings.ts';
 import type { Ffmpeg } from '../stt/audio.ts';
 import { SttHttpError, type HttpFetch } from '../stt/http.ts';
+import { checkLocalEngineFiles, type LocalEngine, type LocalRunFile } from '../stt/local.ts';
 import { SttBookingError } from '../stt/paidStt.ts';
 import { costUsd, modelFor } from '../stt/prices.ts';
 import { ElevenLabsProvider } from '../stt/providers/elevenlabs.ts';
@@ -17,6 +18,8 @@ import type { AudioPart, ProviderOrLocal, Segment, SttProvider } from '../stt/ty
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { MeetingDeferral, meetingsTmpDir, removePartsFolder } from './audio.ts';
+import type { MeetingSttProblem } from './healthTypes.ts';
+import { createLocalMeetingTranscriber, localMeetingTmpDir } from './localTranscriber.ts';
 import { forgetPending } from './sttForget.ts';
 import { bookStuckParts, ensurePartFiles, errorCode, heldPart, localPart, partContext, planParts, replanForProvider, sarvamPart } from './sttParts.ts';
 
@@ -126,11 +129,23 @@ export function meetingTranscriber(provider: SttProvider, inrPerUsd: number): Me
 /**
  * The meeting transcriber STT_PROVIDER names, or null when it is 'none'. STT_API_KEY goes to the provider's constructor
  * and nowhere else. `deps.http` replaces the network in tests.
- * 'local' (the engine on this machine, no key) is null too until the local meeting transcriber is wired in: meetings
- * then wait safely at stage found (stt_none), as with 'none', and nothing is sent anywhere.
+ * 'local' (the engine on this machine, no key, nothing sent anywhere) is the LocalMeetingTranscriber, working in
+ * DATA_DIR/tmp/meetings-local with deps.ffmpeg (null: meetings wait no_ffmpeg). deps.localEngine is the engine shared
+ * with voice notes (sharedLocalEngine, whose DATA_DIR/tmp holds that folder); without it the transcriber has its own.
+ * deps.localRun replaces the engine's runner in tests. Whether the engine's files exist is checked by
+ * buildMeetingTranscriber, not here.
  */
-export function createMeetingTranscriber(env: Env, deps: { http?: HttpFetch } = {}): MeetingTranscriber | null {
-  if (env.STT_PROVIDER === 'none' || env.STT_PROVIDER === 'local') return null;
+export function createMeetingTranscriber(
+  env: Env,
+  deps: { http?: HttpFetch; ffmpeg?: Ffmpeg | null; localEngine?: Pick<LocalEngine, 'transcribe'>; localRun?: LocalRunFile } = {},
+): MeetingTranscriber | null {
+  if (env.STT_PROVIDER === 'none') return null;
+  if (env.STT_PROVIDER === 'local') {
+    return createLocalMeetingTranscriber(env, {
+      ffmpeg: deps.ffmpeg ?? null, tmpDir: localMeetingTmpDir(env.DATA_DIR), inrPerUsd: env.INR_PER_USD,
+      ...(deps.localEngine ? { localEngine: deps.localEngine } : {}), ...(deps.localRun ? { localRun: deps.localRun } : {}),
+    });
+  }
   const apiKey = requireKey(env, 'STT_API_KEY');
   const http = deps.http ? { http: deps.http } : {};
   let provider: SttProvider;
@@ -146,6 +161,51 @@ export function createMeetingTranscriber(env: Env, deps: { http?: HttpFetch } = 
       break;
   }
   return meetingTranscriber(provider, env.INR_PER_USD);
+}
+
+/**
+ * The meeting transcriber the service starts with (src/main.ts), and why there is none when the cause is the owner's
+ * to fix. Never throws for the local engine's files:
+ * - none: no transcriber (stt_none, a warning); meetings are found and matched, and wait.
+ * - local: STT_LOCAL_BIN and STT_LOCAL_MODEL must each be a file (s.check, checkLocalEngineFiles by default; a check that
+ *   throws counts as STT_LOCAL_BIN). If one is not, no transcriber, and sttProblem names it (local_not_set_up_bin or
+ *   local_not_set_up_model), as the voice notes' problem does; meetings wait (stt_none) and Health shows the line.
+ *   Otherwise the LocalMeetingTranscriber on s.localEngine (the engine shared with voice notes).
+ * - a paid provider: as createMeetingTranscriber, unchanged.
+ * Logs codes and setting names only: never a path, a key or an error message.
+ */
+export function buildMeetingTranscriber(
+  env: Env,
+  s: {
+    ffmpeg: Ffmpeg | null;
+    log: Logger;
+    localEngine?: Pick<LocalEngine, 'transcribe'>;
+    check?: (env: Pick<Env, 'STT_LOCAL_BIN' | 'STT_LOCAL_MODEL'>) => 'STT_LOCAL_BIN' | 'STT_LOCAL_MODEL' | null;
+    http?: HttpFetch;
+  },
+): { transcriber: MeetingTranscriber | null; sttProblem: MeetingSttProblem | null } {
+  const { log } = s;
+  if (env.STT_PROVIDER === 'none') {
+    log.warn({ code: 'stt_none' }, 'meetings wait: speech-to-text is not set up');
+    return { transcriber: null, sttProblem: null };
+  }
+  if (env.STT_PROVIDER === 'local') {
+    let missing: 'STT_LOCAL_BIN' | 'STT_LOCAL_MODEL' | null;
+    try {
+      missing = (s.check ?? checkLocalEngineFiles)(env);
+    } catch {
+      missing = 'STT_LOCAL_BIN'; // the check itself failed: treated as not set up, never a crash
+    }
+    if (missing !== null) {
+      log.warn({ code: 'local_not_set_up', setting: missing }, 'meetings wait: the local speech engine is not set up');
+      return { transcriber: null, sttProblem: missing === 'STT_LOCAL_MODEL' ? 'local_not_set_up_model' : 'local_not_set_up_bin' };
+    }
+  }
+  const transcriber = createMeetingTranscriber(env, {
+    ffmpeg: s.ffmpeg, ...(s.localEngine ? { localEngine: s.localEngine } : {}), ...(s.http ? { http: s.http } : {}),
+  });
+  if (transcriber?.provider === 'local') log.info({ provider: 'local' }, 'meetings are transcribed on the local speech engine');
+  return { transcriber, sttProblem: null };
 }
 
 export interface TranscribeMeetingDeps {

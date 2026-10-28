@@ -31,6 +31,12 @@ export const LOCAL_MEETING_PART_SECONDS = 600;
 /** How long ffmpeg may take to turn one ten-minute part into a WAV. */
 export const LOCAL_PART_CONVERT_TIMEOUT_MS = 10 * 60_000;
 
+/**
+ * Where the service puts the parts' work folders: DATA_DIR/tmp/meetings-local (absolute), inside the shared engine's
+ * DATA_DIR/tmp (localEngineTmpDir), never under data/meetings/tmp (cleanupTemp's folder).
+ */
+export const localMeetingTmpDir = (dataDir: string): string => resolve(join(dataDir, 'tmp', 'meetings-local'));
+
 /** The prefix of a part's work folder inside tmpDir; only folders with it are ever removed as left over. */
 const WORK_PREFIX = 'meeting-part-';
 

@@ -4,12 +4,12 @@ import { isAbsolute, join, relative } from 'node:path';
 import { Writable } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseEnv } from '../src/config/env.ts';
-import { checkLocalEngineFiles } from '../src/stt/local.ts';
+import { checkLocalEngineFiles, localEngineTmpDir, sharedLocalEngine } from '../src/stt/local.ts';
 import { createLogger } from '../src/util/logger.ts';
 import { buildVoiceDeps } from '../src/voiceDeps.ts';
 
 /** Every deps argument buildVoiceDeps hands createVoiceTranscriber, which still runs as it is (mutation review). */
-const created = vi.hoisted(() => ({ deps: [] as { tmpDir: string }[] }));
+const created = vi.hoisted(() => ({ deps: [] as { tmpDir: string; localEngine?: unknown }[] }));
 vi.mock('../src/stt/voice.ts', async (importOriginal) => {
   const real = await importOriginal<typeof import('../src/stt/voice.ts')>();
   return {
@@ -186,5 +186,23 @@ describe('buildVoiceDeps (Phase 2b Task 10)', () => {
     expect(created.deps).toHaveLength(1);
     expect(created.deps[0]!.tmpDir).toBe(join(dir, 'tmp', 'voice'));
     expect(isAbsolute(created.deps[0]!.tmpDir)).toBe(true);
+  });
+
+  it('local: the shared engine it is given (sharedLocalEngine, shared with meetings) is the one the voice transcriber runs', async () => {
+    const { env, log, findFfmpeg } = local({ bin: true, model: true });
+    const shared = sharedLocalEngine(env)!;
+    const d = await buildVoiceDeps(env, { findFfmpeg, log, localEngine: shared });
+    expect(d.voice).toMatchObject({ provider: 'local' });
+    expect(created.deps).toHaveLength(1);
+    expect(created.deps[0]!.localEngine).toBe(shared);
+    // Its work folder, DATA_DIR/tmp/voice, is inside the shared engine's DATA_DIR/tmp.
+    expect(relative(localEngineTmpDir(env.DATA_DIR), created.deps[0]!.tmpDir)).toBe('voice');
+  });
+
+  it('without a shared engine nothing is passed, so the transcriber builds its own as before', async () => {
+    const { env, log, findFfmpeg } = local({ bin: true, model: true });
+    await buildVoiceDeps(env, { findFfmpeg, log });
+    expect(created.deps).toHaveLength(1);
+    expect('localEngine' in created.deps[0]!).toBe(false);
   });
 });

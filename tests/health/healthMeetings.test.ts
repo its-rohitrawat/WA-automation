@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Health, readHealthSnapshot, type MediaHealth, type MeetingsHealth } from '../../src/health/health.ts';
+import { Health, MEETING_STT_PROBLEM_LINES, readHealthSnapshot, VOICE_PROBLEM_LINES, type MediaHealth, type MeetingsHealth } from '../../src/health/health.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { setKv } from '../../src/store/kv.ts';
 import type { MeetingStats } from '../../src/store/meetings.ts';
@@ -83,6 +83,46 @@ describe('Health and meetings', () => {
     expect(h.line()).toEqual({ ok: false, text: STT_NONE });
     h.setMeetings(meetings({ sttProvider: 'openai' }, { waiting: 2 }));
     expect(h.line().text).toBe(GREEN);
+  });
+
+  it('STT_PROVIDER=local (Task 3): working, the provider is local and no line shows, whatever waits', () => {
+    const { h } = setup();
+    h.setMeetings(meetings({ sttProvider: 'local' }, { waiting: 3 }));
+    expect(h.line()).toEqual({ ok: true, text: GREEN });
+  });
+
+  it.each([
+    ['local_not_set_up_bin', '⚠️ Meetings waiting: the local speech engine is not set up (STT_LOCAL_BIN)'],
+    ['local_not_set_up_model', '⚠️ Meetings waiting: the local speech engine is not set up (STT_LOCAL_MODEL)'],
+  ] as const)('the local engine not set up (%s): its own line, naming the setting as the voice-note line does', (problem, text) => {
+    const { h } = setup();
+    expect(MEETING_STT_PROBLEM_LINES[problem]).toBe(text);
+    // The same problem, worded as the voice notes' line.
+    expect(text.replace('Meetings waiting', '')).toBe(VOICE_PROBLEM_LINES[problem].replace('Voice notes are not being transcribed', ''));
+    h.setMeetings(meetings({ sttProvider: 'local', sttProblem: problem }));
+    expect(h.line()).toEqual({ ok: false, text });
+    expect(h.workbookLine()).toEqual({ ok: false, text });
+    // Below the pauses, above everything else about meetings.
+    h.setMeetings(meetings({ sttProvider: 'local', sttProblem: problem, paused: 'no_ffmpeg' }));
+    expect(h.line().text).toBe(FFMPEG);
+    h.setMeetings(meetings({ sttProvider: 'local', sttProblem: problem, lostAccounts: ['company2'] }, { failed: 1, waiting: 1 }));
+    expect(h.line().text).toBe(text);
+  });
+
+  it('keeps sttProvider local and the problem in the snapshot, and drops only the meetings for an unknown problem', () => {
+    const { db, h } = setup();
+    const m = meetings({ sttProvider: 'local', sttProblem: 'local_not_set_up_bin' }, { waiting: 1, deferred: { stt_none: 1 } });
+    h.setMeetings(m);
+    h.persist();
+    expect(readHealthSnapshot(db)!.meetings).toEqual(m);
+    h.setMeetings(meetings({ sttProvider: 'local' }));
+    h.persist();
+    expect(readHealthSnapshot(db)!.meetings).toEqual(meetings({ sttProvider: 'local' }));
+    const snap = JSON.parse(JSON.stringify(h.snapshot())) as Record<string, unknown>;
+    setKv(db, 'health', JSON.stringify({ ...snap, meetings: { ...meetings({ sttProvider: 'local' }), sttProblem: 'local_broken' } }));
+    const read = readHealthSnapshot(db);
+    expect(read).toBeDefined();
+    expect('meetings' in read!).toBe(false);
   });
 
   it('says the speech-to-text key was refused when meetings are deferred stt_unavailable', () => {

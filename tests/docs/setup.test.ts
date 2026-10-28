@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { INDIAN_MOBILE, parseEnv, reportSettings } from '../../src/config/env.ts';
+import { MEETING_STT_PROBLEM_LINES } from '../../src/health/health.ts';
 import type { TrackerView } from '../../src/output/view.ts';
 import { buildShortMorningText, trackerLink, TRACKER_ID_KEY } from '../../src/report/morningReport.ts';
 import { describeReport, REASON_TEXT, SENDER_WARNINGS, UNKNOWN_WARNING } from '../../src/report/scheduler.ts';
@@ -780,5 +781,48 @@ describe('go-live guide: the website build (GO-LIVE.md step 5)', () => {
     // The command it names is a real script of this repo.
     expect(read('package.json')).toContain('"site:import": "node scripts/site-import.ts"');
     expect(read('scripts/site-import.ts')).toContain('Due on or after 6 Nov 2026');
+  });
+});
+
+describe('meetings on the local speech engine (plan 2026-10-28-meetings-local-stt.md, Task 3)', () => {
+  const mac = read('docs/SETUP-mac.md');
+  const macStart = mac.indexOf('\n## 8. Voice notes: local speech-to-text\n');
+  const section8 = mac.slice(macStart, mac.indexOf('\n## ', macStart + 1));
+  const setup = read('docs/SETUP.md');
+  const meetStart = setup.indexOf('\n## Meeting summaries (Phase 3)\n');
+  const meetings = setup.slice(meetStart, setup.indexOf('\n## ', meetStart + 1));
+
+  it('SETUP-mac.md section 8 says meetings can use the same engine with STT_PROVIDER=local, how long it takes, and that there are no speaker labels', () => {
+    expect(macStart).toBeGreaterThanOrEqual(0);
+    const para = section8.split('\n\n').find((b) => b.includes('`STT_PROVIDER=local`'));
+    expect(para, 'a paragraph naming STT_PROVIDER=local').toBeDefined();
+    expect(para).toMatch(/[Mm]eetings/);
+    expect(para).toContain('same engine');
+    expect(para).toMatch(/3-hour meeting takes about 4 hours on Voxtral and under 3 on Qwen3-ASR/);
+    expect(para).toMatch(/no speaker labels/i);
+    expect(para).toMatch(/no key/);
+    expect(section8).not.toContain('Meetings keep using `STT_PROVIDER`, unchanged.');
+    // The setting it names is one the code accepts, with no key.
+    const env = parseEnv({ STT_PROVIDER: 'local', STT_LOCAL_BIN: '/opt/stt/bin/transcribe-cli', STT_LOCAL_MODEL: '/opt/stt/models/m.gguf' });
+    expect(env.STT_PROVIDER).toBe('local');
+    expect(env.STT_API_KEY).toBeUndefined();
+  });
+
+  it('SETUP.md meetings section names local as an STT_PROVIDER choice that needs no STT_API_KEY', () => {
+    expect(meetStart).toBeGreaterThanOrEqual(0);
+    const row = (name: string) => meetings.split('\n').find((l) => l.startsWith(`| \`${name}\` |`));
+    expect(row('STT_PROVIDER')).toContain('`local`');
+    expect(row('STT_API_KEY')).toMatch(/not `none` or `local`|unless `STT_PROVIDER` is `none` or `local`/);
+    expect(meetings).not.toContain('the recommended local engine is not used for meetings');
+    expect(meetings).toContain('`STT_PROVIDER=local`');
+  });
+
+  it('SETUP.md lists the meeting lines for a local engine that is not set up, exactly as the code writes them', () => {
+    const at = meetings.indexOf('\n### Meeting status lines\n');
+    expect(at).toBeGreaterThanOrEqual(0);
+    const table = meetings.slice(at, meetings.indexOf('\n### ', at + 1));
+    const lines = Object.values(MEETING_STT_PROBLEM_LINES).map((l) => l.replace(/^⚠️ /, ''));
+    expect(lines).toHaveLength(2);
+    for (const line of lines) expect(table.split('\n').filter((r) => r.startsWith(`| ${line} |`)), line).toHaveLength(1);
   });
 });

@@ -124,6 +124,8 @@ export class AgentControl {
     if (!this.#d.env.MEETINGS_ENABLED || m === undefined) return { state: 'off', label: 'Switched off' };
     if (m.paused === 'google_auth' || m.paused === 'google_scopes') return { state: 'down', label: 'Paused: Google needs meeting access' };
     if (m.paused === 'no_ffmpeg') return { state: 'down', label: 'Paused: ffmpeg not found' };
+    // STT_PROVIDER=local with its files missing: the voice notes' wording for the same problem.
+    if (m.sttProblem !== undefined) return { state: 'warn', label: 'Waiting: the local speech engine is not set up' };
     const lost = m.lostAccounts ?? [];
     if (lost.length > 0) return { state: 'warn', label: `Google sign-in lost for ${lost.join(', ')}` };
     if (m.stats.failed > 0) return { state: 'warn', label: `${plural(m.stats.failed, 'meeting')} could not be processed` };

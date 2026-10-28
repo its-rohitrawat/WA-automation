@@ -1,6 +1,6 @@
 import { statfsSync } from 'node:fs';
 import type { ReconcileOutcome } from '../brain/reconciler.ts';
-import type { MeetingsHealth } from '../meetings/healthTypes.ts';
+import type { MeetingSttProblem, MeetingsHealth } from '../meetings/healthTypes.ts';
 import type { HealthLine } from '../output/view.ts';
 import { MASKED_NUMBER, type ReportHealth } from '../report/types.ts';
 import type { SpendGuard, SpendKind } from '../spend/spendGuard.ts';
@@ -35,6 +35,15 @@ export const VOICE_PROBLEM_LINES: Readonly<Record<VoiceProblem, string>> = {
   local_not_set_up_bin: '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_BIN)',
   local_not_set_up_model: '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_MODEL)',
   no_ffmpeg: '⚠️ Voice notes are not being transcribed: ffmpeg not found',
+};
+
+/**
+ * The meeting line for a local engine that is not set up (STT_PROVIDER=local, plan 2026-10-28-meetings-local-stt.md
+ * Task 3), worded as the voice notes' line for the same problem; docs/SETUP.md ("Meeting status lines") lists each one.
+ */
+export const MEETING_STT_PROBLEM_LINES: Readonly<Record<MeetingSttProblem, string>> = {
+  local_not_set_up_bin: '⚠️ Meetings waiting: the local speech engine is not set up (STT_LOCAL_BIN)',
+  local_not_set_up_model: '⚠️ Meetings waiting: the local speech engine is not set up (STT_LOCAL_MODEL)',
 };
 
 export type MediaHealth = MediaStats;
@@ -323,6 +332,9 @@ export class Health {
       return '⚠️ Meetings paused: Google sign-in needs meeting access. Run: npm run cli -- google-auth';
     }
     if (m.paused === 'no_ffmpeg') return '⚠️ Meetings paused: ffmpeg not found';
+    // STT_PROVIDER=local, but the engine's files were missing at start: nothing is transcribed until it is set up and
+    // the service restarted, so it shows whether or not a meeting waits yet (as the voice notes' line does).
+    if (m.sttProblem !== undefined) return MEETING_STT_PROBLEM_LINES[m.sttProblem];
     const lost = m.lostAccounts ?? [];
     if (lost.length > 0) {
       return `⚠️ Meetings: Google sign-in lost for ${lost.join(', ')}. Run: npm run cli -- google-auth --account ${lost[0]}`;
@@ -377,7 +389,7 @@ const isMediaSnapshot = (m: unknown): m is MediaSnapshot => {
 
 const MEETING_COUNTS = ['done', 'waiting', 'unassigned', 'failed', 'noAccess', 'tooLong', 'internal'] as const;
 const MEETING_PAUSES = new Set<unknown>([null, 'google_scopes', 'google_auth', 'no_ffmpeg']);
-const STT_PROVIDERS = new Set<unknown>(['sarvam', 'elevenlabs', 'openai', 'none']);
+const STT_PROVIDERS = new Set<unknown>(['local', 'sarvam', 'elevenlabs', 'openai', 'none']);
 
 /** The counts' shape; the pause and provider values are checked separately (isKnownMeetingsState). */
 const isMeetingsHealth = (m: unknown): m is MeetingsHealth => {
@@ -389,7 +401,9 @@ const isMeetingsHealth = (m: unknown): m is MeetingsHealth => {
   return typeof d === 'object' && d !== null && !Array.isArray(d) && Object.values(d).every((n) => typeof n === 'number');
 };
 
-const isKnownMeetingsState = (m: MeetingsHealth): boolean => MEETING_PAUSES.has(m.paused) && STT_PROVIDERS.has(m.sttProvider);
+const isKnownMeetingsState = (m: MeetingsHealth): boolean =>
+  MEETING_PAUSES.has(m.paused) && STT_PROVIDERS.has(m.sttProvider) &&
+  (m.sttProblem === undefined || (typeof m.sttProblem === 'string' && Object.hasOwn(MEETING_STT_PROBLEM_LINES, m.sttProblem)));
 
 const isSpendByKind = (v: unknown): v is Record<SpendKind, number> => {
   const x = v as Record<string, unknown> | null;

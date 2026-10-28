@@ -116,6 +116,19 @@ describe('AgentControl.status', () => {
     expect(part(t, 'meetings')).toMatchObject({ state: 'warn', label: 'Waiting: speech-to-text is not set up' });
   });
 
+  it('meetings on the local engine (Task 3): working, or waiting with the same "local speech engine is not set up" as voice notes', () => {
+    const t = setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' } });
+    t.health.setMeetings(meetings({ sttProvider: 'local', stats: { ...meetings().stats, waiting: 2 } }));
+    expect(part(t, 'meetings')).toMatchObject({ state: 'ok', label: 'Working' });
+    for (const sttProblem of ['local_not_set_up_bin', 'local_not_set_up_model'] as const) {
+      t.health.setMeetings(meetings({ sttProvider: 'local', sttProblem }));
+      expect(part(t, 'meetings')).toMatchObject({ state: 'warn', label: 'Waiting: the local speech engine is not set up' });
+    }
+    // Below the pauses, which say what to fix first.
+    t.health.setMeetings(meetings({ sttProvider: 'local', sttProblem: 'local_not_set_up_bin', paused: 'no_ffmpeg' }));
+    expect(part(t, 'meetings')).toMatchObject({ state: 'down', label: 'Paused: ffmpeg not found' });
+  });
+
   it('maps voice notes: off, a missing engine or ffmpeg, a refused key, failures, working', () => {
     expect(state(setup(), 'voice')).toBe('off');
     const t = setup({ env: { VOICE_STT_PROVIDER: 'sarvam', STT_PROVIDER: 'sarvam', STT_API_KEY: 'test-key-not-real' } });

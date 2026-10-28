@@ -1,17 +1,19 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { Writable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseEnv } from '../../src/config/env.ts';
 import { MeetingDeferral } from '../../src/meetings/audio.ts';
+import { LOCAL_MEETING_PART_SECONDS, localMeetingTmpDir } from '../../src/meetings/localTranscriber.ts';
 import {
-  bookStuckParts, createMeetingTranscriber, forgetPending, MAX_FORGET_ATTEMPTS, meetingTranscriber, recoverInflightParts, transcribeMeeting, type MeetingTranscriber,
+  bookStuckParts, buildMeetingTranscriber, createMeetingTranscriber, forgetPending, MAX_FORGET_ATTEMPTS, meetingTranscriber, recoverInflightParts, transcribeMeeting, type MeetingTranscriber,
   type TranscribeMeetingDeps,
 } from '../../src/meetings/transcribe.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { Ffmpeg, type RunFile } from '../../src/stt/audio.ts';
 import { SttHttpError, SttJobLostError, SttNoAnswerError, type HttpFetch } from '../../src/stt/http.ts';
+import { localEngineTmpDir } from '../../src/stt/local.ts';
 import { costUsd, modelFor } from '../../src/stt/prices.ts';
 import type { AudioPart, ProviderId, ProviderResult, Segment, SttProvider, TranscribeOptions } from '../../src/stt/types.ts';
 import type { Db } from '../../src/store/db.ts';
@@ -803,10 +805,33 @@ describe('createMeetingTranscriber', () => {
     expect(createMeetingTranscriber(parseEnv({}))).toBeNull();
   });
 
-  it('with local, needs no STT_API_KEY and builds no paid provider (meetings keep waiting until the local transcriber is wired)', () => {
+  it('with local, needs no STT_API_KEY and builds the local meeting transcriber: free, ten-minute parts, no copies', () => {
     const local = parseEnv({ STT_PROVIDER: 'local', STT_LOCAL_BIN: '/opt/stt/bin/transcribe-cli', STT_LOCAL_MODEL: '/opt/stt/models/m.gguf' });
     expect(local.STT_API_KEY).toBeUndefined();
-    expect(createMeetingTranscriber(local)).toBeNull();
+    const t = createMeetingTranscriber(local, { ffmpeg: null })!;
+    expect(t).toMatchObject({ provider: 'local', maxPartSeconds: LOCAL_MEETING_PART_SECONDS, canForget: false, inrPerUsd: local.INR_PER_USD });
+    expect(t.partCeilingUsd(3600)).toBe(0);
+    expect(t.partCostUsd(3600, null)).toBe(0);
+  });
+
+  it('with local, runs the shared engine it is given, in DATA_DIR/tmp/meetings-local', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'meet-factory-'));
+    dirs.push(dataDir);
+    const local = parseEnv({ DATA_DIR: dataDir, STT_PROVIDER: 'local', STT_LOCAL_BIN: '/opt/stt/bin/transcribe-cli', STT_LOCAL_MODEL: '/opt/stt/models/m.gguf' });
+    const workDirs: string[] = [];
+    const engine = { transcribe: vi.fn(async (_wav: string, o: { workDir: string }) => (workDirs.push(o.workDir), { text: 'namaste' })) };
+    const ffmpeg = new Ffmpeg('ffmpeg.exe', async (_file, args) => {
+      writeFileSync(args[args.length - 1]!, 'wav-bytes');
+      return { code: 0, stderr: '' };
+    });
+    const part = join(dataDir, 'part.mp3');
+    writeFileSync(part, 'mp3-bytes');
+    const t = createMeetingTranscriber(local, { ffmpeg, localEngine: engine })!;
+    const r = await t.transcribePart({ path: part, seconds: 300, offset: 0 }, {});
+    expect(engine.transcribe).toHaveBeenCalledTimes(1);
+    expect(r.segments).toEqual([{ start: 0, end: 300, speaker: null, text: 'namaste' }]);
+    expect(relative(localMeetingTmpDir(dataDir), workDirs[0]!)).toMatch(/^meeting-part-/);
+    expect(relative(localEngineTmpDir(dataDir), localMeetingTmpDir(dataDir))).toBe(join('meetings-local'));
   });
 
   it.each([
@@ -827,5 +852,60 @@ describe('createMeetingTranscriber', () => {
     expect(el.partCostUsd(300, 310)).toBeCloseTo((0.22 * 310) / 3600, 9);
     expect(el.partCostUsd(300, null)).toBeCloseTo((0.22 * 300) / 3600, 9);
     expect(el.partCostUsd(300, Number.NaN)).toBeCloseTo((0.22 * 300) / 3600, 9);
+  });
+});
+
+describe('buildMeetingTranscriber (the service start, Task 3)', () => {
+  const LOCAL = { STT_PROVIDER: 'local', STT_LOCAL_BIN: '/opt/stt/bin/transcribe-cli', STT_LOCAL_MODEL: '/opt/stt/models/voxtral-secret-name.gguf' };
+  const ffmpeg = new Ffmpeg('ffmpeg.exe', async () => ({ code: 0, stderr: '' }));
+
+  it('none: no transcriber and no problem; logs stt_none', () => {
+    const { lines, log } = capturingLogger();
+    const check = vi.fn(() => null);
+    expect(buildMeetingTranscriber(parseEnv({}), { ffmpeg, log, check })).toEqual({ transcriber: null, sttProblem: null });
+    expect(check).not.toHaveBeenCalled();
+    expect(lines.join('')).toContain('"code":"stt_none"');
+  });
+
+  it('local with both files: the local meeting transcriber on the shared engine, no problem', async () => {
+    const { log } = capturingLogger();
+    const engine = { transcribe: vi.fn(async () => ({ text: 'namaste' })) };
+    const r = buildMeetingTranscriber(parseEnv(LOCAL), { ffmpeg, log, check: () => null, localEngine: engine });
+    expect(r.sttProblem).toBeNull();
+    expect(r.transcriber).toMatchObject({ provider: 'local', maxPartSeconds: LOCAL_MEETING_PART_SECONDS });
+  });
+
+  it.each([['STT_LOCAL_BIN', 'local_not_set_up_bin'], ['STT_LOCAL_MODEL', 'local_not_set_up_model']] as const)(
+    'local with %s not a file: meetings wait (no transcriber) and the problem names the setting, never its path',
+    (setting, problem) => {
+      const { lines, log } = capturingLogger();
+      const r = buildMeetingTranscriber(parseEnv(LOCAL), { ffmpeg, log, check: () => setting });
+      expect(r).toEqual({ transcriber: null, sttProblem: problem });
+      const out = lines.join('');
+      expect(out).toContain('"code":"local_not_set_up"');
+      expect(out).toContain(`"setting":"${setting}"`);
+      expect(out).toContain('local speech engine is not set up');
+      expect(out).not.toContain('/opt/stt');
+      expect(out).not.toContain('voxtral-secret-name');
+    },
+  );
+
+  it('local: a check that throws counts as STT_LOCAL_BIN, never a crash', () => {
+    const { log } = capturingLogger();
+    const r = buildMeetingTranscriber(parseEnv(LOCAL), {
+      ffmpeg, log, check: () => {
+        throw new Error('EACCES /opt/stt/bin');
+      },
+    });
+    expect(r).toEqual({ transcriber: null, sttProblem: 'local_not_set_up_bin' });
+  });
+
+  it('a paid provider is built as before, with no file check and no problem', () => {
+    const { log } = capturingLogger();
+    const check = vi.fn(() => 'STT_LOCAL_BIN' as const);
+    const r = buildMeetingTranscriber(parseEnv({ STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }), { ffmpeg, log, check });
+    expect(r.sttProblem).toBeNull();
+    expect(r.transcriber?.provider).toBe('elevenlabs');
+    expect(check).not.toHaveBeenCalled();
   });
 });

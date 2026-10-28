@@ -227,7 +227,7 @@ STT_LOCAL_MODEL=/opt/stt/models/Voxtral-Mini-3B-2507-Q4_K_M.gguf
 - `STT_LOCAL_BIN` and `STT_LOCAL_MODEL` must be full paths starting with `/`. The `transcribe-cli` path above is an example: use the one `find` printed.
 - For Qwen3-ASR: `STT_LOCAL_ENGINE=qwen3-asr` and the Qwen3-ASR model file. For Whisper: `STT_LOCAL_ENGINE=whisper`, the `whisper-cli` path and a Whisper model file.
 - Leave the others empty unless needed: `STT_LOCAL_THREADS` (default 8, one per core), `STT_LOCAL_TIMEOUT_SECONDS` (default 1800: a note that takes longer is stopped and tried again, 3 tries in all), `STT_LOCAL_LANGUAGE` (default `hi`; `en` or `auto`; Qwen3-ASR always finds the language itself).
-- `VOICE_STT_PROVIDER` must be `local` or `none` (or the same paid service as `STT_PROVIDER`). Meetings keep using `STT_PROVIDER`, unchanged.
+- `VOICE_STT_PROVIDER` must be `local` or `none` (or the same paid service as `STT_PROVIDER`). Meetings use `STT_PROVIDER` (see "Meetings on the same engine" below).
 
 ### Test it on real notes (waagent window)
 
@@ -260,6 +260,10 @@ Run the same notes with `STT_LOCAL_ENGINE=voxtral` and then with `STT_LOCAL_ENGI
 Keep the settings of the one you choose. When you are done, remove the test copies: `rm -r ~/stt-check`.
 
 If the check says `Failed (...)`, it also says what to look at. `no_output` usually means a different program version: build exactly v0.4.1 as above.
+
+### Meetings on the same engine
+
+Meeting recordings can use the same engine too: set `STT_PROVIDER=local` in `.env` (with the same `STT_LOCAL_*` settings as above) and restart the service. There is no key and no speech cost, and no audio leaves the Mac. Meetings found while speech-to-text was not set up are picked up right after the restart. It is slow on this Mac's processor: a 3-hour meeting takes about 4 hours on Voxtral and under 3 on Qwen3-ASR, in ten-minute parts, one at a time. Voice notes and meeting parts share the engine, so a voice note that arrives during a meeting part waits for it. The local engine gives no speaker labels: the summary and the Doc's transcript show the text with times, each line labelled "Speaker", and names are not matched to voices.
 
 ### Then restart the service
 

@@ -289,3 +289,28 @@ export function createLocalEngine(
     ...(deps.localRun ? { run: deps.localRun } : {}),
   });
 }
+
+/**
+ * The shared engine's temporary folder, DATA_DIR/tmp (absolute). Each user's work folder sits inside it: voice notes in
+ * DATA_DIR/tmp/voice, meeting parts in DATA_DIR/tmp/meetings-local (localMeetingTmpDir).
+ */
+export const localEngineTmpDir = (dataDir: string): string => resolve(join(dataDir, 'tmp'));
+
+/**
+ * The one LocalEngine the service builds when STT_PROVIDER or VOICE_STT_PROVIDER is local (plan
+ * 2026-10-28-meetings-local-stt.md, Task 3), undefined otherwise. Voice notes and meetings both run on it, so only one
+ * model ever runs on the CPU: a voice note that arrives while a meeting part runs waits for that part (at most
+ * STT_LOCAL_TIMEOUT_SECONDS), and the reverse. Its folder is localEngineTmpDir. Checks no file (checkLocalEngineFiles
+ * does, per user) and runs nothing. deps.localRun replaces the runner in tests.
+ */
+export function sharedLocalEngine(
+  env: Pick<
+    Env,
+    'DATA_DIR' | 'STT_PROVIDER' | 'VOICE_STT_PROVIDER' | 'STT_LOCAL_ENGINE' | 'STT_LOCAL_BIN' | 'STT_LOCAL_MODEL' | 'STT_LOCAL_THREADS' | 'STT_LOCAL_TIMEOUT_SECONDS' | 'STT_LOCAL_LANGUAGE'
+  >,
+  deps: { localRun?: LocalRunFile } = {},
+): LocalEngine | undefined {
+  const setting = env.STT_PROVIDER === 'local' ? 'STT_PROVIDER' : env.VOICE_STT_PROVIDER === 'local' ? 'VOICE_STT_PROVIDER' : null;
+  if (setting === null) return undefined;
+  return createLocalEngine(env, { tmpDir: localEngineTmpDir(env.DATA_DIR), setting, ...(deps.localRun ? { localRun: deps.localRun } : {}) });
+}

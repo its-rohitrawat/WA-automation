@@ -135,9 +135,13 @@ export interface FakeFfmpeg {
   hung: Promise<void>;
 }
 
-/** ffmpeg without a program: converting writes a small file, measuring answers `seconds`. */
+/**
+ * ffmpeg without a program: converting writes a small file, measuring answers `seconds`. A split (-f segment) writes
+ * equal parts, each measured at its own length.
+ */
 export function fakeFfmpeg(seconds = 2700): FakeFfmpeg {
   let hung: () => void = () => {};
+  const parts = new Map<string, number>();
   const f: FakeFfmpeg = {
     opts: [],
     convert: 'ok',
@@ -157,7 +161,17 @@ export function fakeFfmpeg(seconds = 2700): FakeFfmpeg {
         writeFileSync(args[args.length - 1]!, 'mp3-bytes');
         return { code: 0, stderr: '' };
       }
-      return { code: 1, stderr: banner(f.seconds) };
+      if (args.includes('segment')) {
+        const each = Number(args[args.indexOf('-segment_time') + 1]);
+        const count = Math.round(f.seconds / each);
+        for (let i = 0; i < count; i++) {
+          const path = args[args.length - 1]!.replace('%03d', String(i).padStart(3, '0'));
+          writeFileSync(path, 'mp3-part');
+          parts.set(path, Math.round(each));
+        }
+        return { code: 0, stderr: '' };
+      }
+      return { code: 1, stderr: banner(parts.get(args[args.indexOf('-i') + 1]!) ?? f.seconds) };
     },
   };
   return f;
