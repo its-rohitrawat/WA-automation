@@ -1,5 +1,5 @@
 import { systemClock, type Clock } from '../util/clock.ts';
-import type { GatewayLike, GatewayState, GatewayStatus } from './gateway.ts';
+import type { GatewayLike, GatewayState, GatewayStatus, HistoryAnchor, HistoryAnswer } from './gateway.ts';
 import type { NormalizedEvent } from './normalize.ts';
 
 // Holds the founder's WhatsApp gateway so the dashboard can replace it in place (a relink) without restarting the
@@ -25,6 +25,7 @@ export class SwitchableGateway implements GatewayLike {
   readonly #stopCapMs: number;
   readonly #eventFns: ((e: NormalizedEvent) => void)[] = [];
   readonly #statusFns: ((s: GatewayStatus) => void)[] = [];
+  readonly #historyFns: ((a: HistoryAnswer) => void)[] = [];
   #inner: GatewayLike | undefined;
   #held: { state: HeldState; since: string };
   /**
@@ -49,6 +50,17 @@ export class SwitchableGateway implements GatewayLike {
 
   onStatus(fn: (s: GatewayStatus) => void): void {
     this.#statusFns.push(fn);
+  }
+
+  onHistory(fn: (a: HistoryAnswer) => void): void {
+    this.#historyFns.push(fn);
+  }
+
+  /** Asks the current gateway; false without one (setup mode, a relink in progress) or when it cannot ask. */
+  async fetchHistory(groupId: string, anchor: HistoryAnchor, count: number): Promise<boolean> {
+    const inner = this.#inner;
+    if (!inner?.fetchHistory || inner.status().state !== 'open') return false;
+    return inner.fetchHistory(groupId, anchor, count);
   }
 
   status(): GatewayStatus {
@@ -117,6 +129,10 @@ export class SwitchableGateway implements GatewayLike {
     });
     inner.onStatus((s) => {
       if (this.#inner === inner) this.#emitStatus(s);
+    });
+    inner.onHistory?.((a) => {
+      if (this.#inner !== inner) return;
+      for (const fn of this.#historyFns) fn(a);
     });
   }
 

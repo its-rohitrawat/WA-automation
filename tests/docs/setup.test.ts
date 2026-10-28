@@ -826,3 +826,21 @@ describe('meetings on the local speech engine (plan 2026-10-28-meetings-local-st
     for (const line of lines) expect(table.split('\n').filter((r) => r.startsWith(`| ${line} |`)), line).toHaveLength(1);
   });
 });
+
+describe('earlier messages of a newly approved group (Task 4, 28 Oct 2026)', () => {
+  it('SETUP.md, Manage groups and the client card say the same, honestly: up to 7 days, as far as WhatsApp provides', () => {
+    const setup = read('docs/SETUP.md');
+    const groups = read('src/web/public/views/groups.js');
+    const clients = read('src/web/public/views/clients.js');
+    expect(setup).toContain('**up to 7 days back, as far as WhatsApp provides**: WhatsApp may not hand over every old message.');
+    expect(groups).toContain("and its earlier ones up to 7 days back, as far as WhatsApp provides.");
+    // The card's three lines, word for word in the doc and the screen.
+    expect(setup).toContain('"Reading earlier messages… <n> found", then "Earlier messages read (last 7 days)"');
+    expect(setup).toContain('("Waiting for the first new message to read earlier ones")');
+    for (const text of ['Reading earlier messages… ${h.found} found', 'Earlier messages read (last 7 days)', 'Waiting for the first new message to read earlier ones']) {
+      expect(clients, text).toContain(text);
+    }
+    expect(setup).toContain('within the daily spend cap');
+    expect(setup).toContain('Removing the group stops it.');
+  });
+});

@@ -92,3 +92,17 @@ describe('who may send on WhatsApp', () => {
     expect(makers).toEqual(['wa/gateway.ts', 'wa/senderGateway.ts']);
   });
 });
+
+describe('the one request the founder reader makes (history backfill, 28 Oct 2026)', () => {
+  it('fetchMessageHistory is named only in src/wa/gateway.ts, called once, behind the allow-list and the open check', () => {
+    const named = sources().filter((s) => /\bfetchMessageHistory\b/.test(s.text)).map((s) => s.file);
+    expect(named).toEqual(['wa/gateway.ts']);
+    const text = readFileSync(join(SRC, 'wa', 'gateway.ts'), 'utf8');
+    expect(text.match(/\.fetchMessageHistory\(/g)).toHaveLength(1);
+    // The guard sits right before the call: stopped, no socket, not open, or not an approved group asks for nothing.
+    const call = text.indexOf('.fetchMessageHistory(');
+    const guard = text.lastIndexOf("if (this.#stopped || !sock || this.#status.state !== 'open' || !this.#opts.allow.has(groupId)) return false;", call);
+    expect(guard).toBeGreaterThan(-1);
+    expect(call - guard).toBeLessThan(300);
+  });
+});

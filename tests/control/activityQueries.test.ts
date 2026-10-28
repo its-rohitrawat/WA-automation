@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { closeTask } from '../../src/cli/corrections.ts';
-import { listActivity, parseActivityParams, publisherAuditHooks } from '../../src/control/activityQueries.ts';
+import { historyReadEntry, listActivity, parseActivityParams, publisherAuditHooks } from '../../src/control/activityQueries.ts';
 import { ControlError, type AuditEntry } from '../../src/control/errors.ts';
 import { DrivePublisher } from '../../src/output/drive.ts';
 import { finishBatch, startBatch } from '../../src/store/batches.ts';
@@ -252,5 +252,19 @@ describe('publisherAuditHooks review fixes', () => {
     expect(entries.map((e) => e.event)).toEqual([
       'tracker.published', 'tracker.publish_failed', 'tracker.publish_failed', 'tracker.published', 'tracker.published',
     ]);
+  });
+});
+
+describe('Activity: a newly approved group\'s earlier messages', () => {
+  it('one row when they were read: the count and the client, under All and Messages, nowhere else', () => {
+    const db = seededDb();
+    const e = historyReadEntry(42, 'Sharma Interiors');
+    expect(e).toEqual({ actor: 'agent', event: 'history.read', kind: 'ops', detail: '42 earlier messages read · Sharma Interiors' });
+    db.prepare('INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, ?, ?, ?, ?)').run(NOW, e.actor, e.event, e.kind, e.detail);
+    const row = { kind: 'msg', title: '42 earlier messages read', detail: 'Sharma Interiors', who: 'by the agent' };
+    expect(listActivity(db, params()).items).toEqual([expect.objectContaining(row)]);
+    expect(listActivity(db, params({ kind: 'msg' })).items).toEqual([expect.objectContaining(row)]);
+    for (const kind of ['task', 'meet', 'tracker', 'issue']) expect(listActivity(db, params({ kind })).items, kind).toEqual([]);
+    expect(historyReadEntry(1, 'A · B').detail).toBe('1 earlier message read · A · B');
   });
 });

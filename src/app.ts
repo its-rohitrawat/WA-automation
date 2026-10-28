@@ -42,6 +42,8 @@ import type { Logger } from './util/logger.ts';
 import { istDate } from './util/time.ts';
 import type { AllowList } from './wa/allowlist.ts';
 import type { GatewayLike } from './wa/gateway.ts';
+import { HistoryBackfill } from './wa/historyBackfill.ts';
+import type { NormalizedEvent } from './wa/normalize.ts';
 import { Ingestor } from './wa/ingest.ts';
 
 export interface AppMediaDeps {
@@ -138,6 +140,8 @@ export interface AppDeps {
   liveReport?: ReportRunner;
   /** With the dashboard: told of each upload and failure (the Activity screen's rows). A throw is logged, never passed on. */
   publishHooks?: { onPublished(): void; onFailure(f: { step: 'build' | 'drive'; auth: boolean }): void };
+  /** With the dashboard: a newly approved group's earlier messages were read (the Activity row). A throw is logged. */
+  onHistoryRead?: (r: { clientId: number; found: number }) => void;
 }
 
 export interface App {
@@ -277,7 +281,11 @@ export function createApp(d: AppDeps): App {
     // A meeting's tracker step holds the client's run flag, so it never interleaves with a WhatsApp run (Task 9).
     exclusive: (clientId, fn) => debouncer.runExclusive(clientId, fn),
   });
+  /** Reads a newly approved group's last 7 days (src/wa/historyBackfill.ts); only with a gateway that can ask. */
+  let backfill: HistoryBackfill | undefined;
   const debouncer = new GroupDebouncer({
+    // Held while the client's earlier messages are being read, so old and new are reconciled together, in time order.
+    held: (clientId) => backfill?.held(clientId) ?? false,
     quietMs: d.quietMs,
     maxWaitMs: d.maxWaitMs,
     maxConcurrent: d.maxConcurrent,
@@ -399,7 +407,7 @@ export function createApp(d: AppDeps): App {
     media: m ? { sealer: m.sealer, onQueued: () => mediaQueue?.kick() } : undefined,
   });
 
-  d.gateway.onEvent((e) => {
+  const handleEvent = (e: NormalizedEvent) => {
     try {
       ingestor.handle(e);
     } catch (err) {
@@ -408,7 +416,21 @@ export function createApp(d: AppDeps): App {
     }
     // A deleted source message changes the workbook ("source message deleted by sender") without any AI run.
     if (e.kind === 'revoke' && d.allow.has(e.groupId)) publisher.schedule();
-  });
+  };
+  d.gateway.onEvent(handleEvent);
+  // Earlier messages go through the same ingest as live ones.
+  const { fetchHistory, onHistory } = d.gateway;
+  if (fetchHistory && onHistory) {
+    backfill = new HistoryBackfill({
+      db: d.db, clock: d.clock, log: d.log, ingest: handleEvent, spendPaused: () => spend.isPaused(),
+      gateway: { status: () => d.gateway.status(), fetchHistory: fetchHistory.bind(d.gateway), onHistory: onHistory.bind(d.gateway) },
+      onFinished: ({ clientId, found, stopped }) => {
+        if (stopped) return; // removed from the allow-list: reloadClients has already cancelled its work
+        debouncer.ensure(clientId); // its held messages are reconciled now
+        d.onHistoryRead?.({ clientId, found });
+      },
+    });
+  }
   d.gateway.onStatus((s) => {
     safely(() => health.setWhatsApp(s));
     publisher.schedule();
@@ -525,6 +547,7 @@ export function createApp(d: AppDeps): App {
       mediaQueue?.kick(); // retries that are due, and files saved by cli link
       void uploader?.run(); // retries that are due
       meetings?.tick(); // discovery when due (MEETING_POLL_MINUTES), then the next due meeting
+      backfill?.tick(); // a group waiting for WhatsApp, the spend cap or its first message
       safely(refreshMeetings);
       health.setIngestFailures(d.gateway.failedCount());
       refreshMedia();
@@ -584,6 +607,7 @@ export function createApp(d: AppDeps): App {
       }
       d.gateway.start();
       meetings?.start(); // books speech parts left in flight and cleans work files before any meeting runs
+      backfill?.start(); // carries on with a group whose earlier messages were being read at the last stop
       tick();
       poll = setInterval(tick, d.pollMs ?? 30_000);
       publisher.schedule();
@@ -591,6 +615,7 @@ export function createApp(d: AppDeps): App {
     async stop() {
       clearInterval(poll);
       poll = undefined;
+      backfill?.stop();
       clearInterval(forgetTimer);
       forgetTimer = undefined;
       debouncer.stop();
@@ -637,7 +662,7 @@ export function createApp(d: AppDeps): App {
     },
     reloadClients(configs) {
       const wasActive = listClients(d.db).map((c) => c.id);
-      syncClients(d.db, configs); // throws on a code conflict, before anything else changes
+      syncClients(d.db, configs, d.clock.now()); // throws on a code conflict, before anything else changes; queues new groups' history
       d.allow.replace(configs.map((c) => c.groupId));
       meetings?.setClients(configs);
       const active = new Set(listClients(d.db).map((c) => c.id));
@@ -649,6 +674,7 @@ export function createApp(d: AppDeps): App {
       safely(refreshMedia); // a removed client's files leave the counts before the publish
       safely(() => health.persist());
       publisher.schedule();
+      backfill?.tick(); // a newly approved group starts reading its earlier messages; a removed one stops
     },
   };
 }

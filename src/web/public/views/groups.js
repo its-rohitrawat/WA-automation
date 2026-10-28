@@ -326,7 +326,7 @@ export function mountGroups(ctx, toolbar) {
           <label class="h4 g-label" for="g-words">Meeting keywords</label><div class="field"><input id="g-words" class="grow-1" autocomplete="off" placeholder="iyer, dental website" value="${esc(startWords.join(', '))}"></div>
           <label class="h4 g-label" for="g-domains">Client email domains</label><div class="field"><input id="g-domains" class="grow-1" autocomplete="off" placeholder="iyerdental.in" value="${esc(startDomains.join(', '))}"></div>
           <p class="muted-note">Separate several with commas. A meeting is matched to this client when its title has a keyword or a guest's email is on one of these domains.</p></details>
-        ${editing ? '' : `<div class="note">${icon('info', 16)}<span>From now on the agent reads this group's new messages. Recent history that WhatsApp re-sends when the agent reconnects may be read too.</span></div>`}
+        ${editing ? '' : `<div class="note">${icon('info', 16)}<span>From now on the agent reads this group's new messages, and its earlier ones up to 7 days back, as far as WhatsApp provides.</span></div>`}
       </form>
       <div class="dr-foot"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit" form="g-form">${editing ? 'Keep changes' : 'Add client'}</button></div>`);
 

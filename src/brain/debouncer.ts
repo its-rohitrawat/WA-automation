@@ -29,6 +29,11 @@ export interface DebouncerOptions {
   retryMs?: number;
   run: (clientId: number) => Promise<ReconcileOutcome>;
   onError?: (clientId: number, err: unknown) => void;
+  /**
+   * True while the client's earlier messages are being read (src/wa/historyBackfill.ts): no run starts, so the old and
+   * new messages are reconciled together, in time order. The app's tick schedules the client again once it is released.
+   */
+  held?: (clientId: number) => boolean;
 }
 
 /** Waits for a group to go quiet (or for the max wait) before reconciling, so a burst becomes one AI call. */
@@ -39,6 +44,7 @@ export class GroupDebouncer {
   readonly #retryMs: number;
   readonly #run: DebouncerOptions['run'];
   readonly #onError: DebouncerOptions['onError'];
+  readonly #held: DebouncerOptions['held'];
   readonly #states = new Map<number, ClientState>();
   readonly #queue: number[] = [];
   #active = 0;
@@ -52,6 +58,7 @@ export class GroupDebouncer {
     this.#retryMs = o.retryMs ?? 3_600_000;
     this.#run = o.run;
     this.#onError = o.onError;
+    this.#held = o.held;
   }
 
   /** A new message arrived for this client. */
@@ -65,6 +72,7 @@ export class GroupDebouncer {
     }
     if (s.queued) return;
     if (s.failures >= FAILURES_BEFORE_BACKOFF && s.retry) return;
+    if (this.#held?.(clientId)) return;
     clearTimeout(s.quiet);
     s.quiet = setTimeout(() => this.#fire(clientId), this.#quietMs);
     s.max ??= setTimeout(() => this.#fire(clientId), this.#maxWaitMs);
@@ -161,6 +169,7 @@ export class GroupDebouncer {
       return;
     }
     if (s.queued) return;
+    if (this.#held?.(clientId)) return; // a timer set before the hold began
     s.queued = true;
     this.#queue.push(clientId);
     this.#pump();

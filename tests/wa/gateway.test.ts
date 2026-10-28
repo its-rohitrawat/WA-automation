@@ -294,3 +294,48 @@ describe('WhatsAppGateway restart throttling and re-entrancy', () => {
     expect(counts).toEqual([1, 0]);
   });
 });
+
+describe('WhatsAppGateway: earlier messages on demand (history backfill)', () => {
+  const open = (sock: FakeSocket) => sock.emit('connection.update', { connection: 'open' });
+  const anchor = { waId: 'A1', fromMe: false, ts: new Date('2026-10-27T10:00:00.000Z') };
+
+  it('asks the founder\'s phone only for an allowed group, only while open, at most 50 messages, from the anchor (ms)', async () => {
+    const { gw, sock } = setup();
+    expect(await gw.fetchHistory(SHARMA.groupId, anchor, 50)).toBe(false); // not open yet
+    open(sock);
+    expect(await gw.fetchHistory(OTHER_GROUP, anchor, 50)).toBe(false); // never an unapproved group
+    expect(sock.fetchMessageHistory).not.toHaveBeenCalled();
+    expect(await gw.fetchHistory(SHARMA.groupId, anchor, 500)).toBe(true);
+    expect(sock.fetchMessageHistory).toHaveBeenCalledExactlyOnceWith(50, { remoteJid: SHARMA.groupId, fromMe: false, id: 'A1' }, anchor.ts.getTime());
+    for (const m of SEND_METHODS) expect(sock[m]).not.toHaveBeenCalled();
+    await gw.stop();
+    expect(await gw.fetchHistory(SHARMA.groupId, anchor, 50)).toBe(false);
+  });
+
+  it('a failed request is false, never thrown', async () => {
+    const { gw, sock } = setup();
+    open(sock);
+    sock.fetchMessageHistory.mockRejectedValueOnce(new Error('request with the group id inside'));
+    expect(await gw.fetchHistory(SHARMA.groupId, anchor, 50)).toBe(false);
+  });
+
+  it('an on-demand answer goes to the history channel only, allowed groups only, grouped; other history syncs stay live events', () => {
+    const { gw, sock, events } = setup();
+    const answers: unknown[] = [];
+    gw.onHistory((a) => answers.push(a));
+    const ON_DEMAND = proto.HistorySync.HistorySyncType.ON_DEMAND;
+    sock.emit('messaging-history.set', {
+      chats: [], contacts: [], syncType: ON_DEMAND,
+      messages: [waText('h1', 'old allowed'), waText('h2', 'old other', { group: OTHER_GROUP }), waText('h3', 'older allowed')],
+    });
+    expect(events).toEqual([]);
+    expect(answers).toEqual([{ groups: [{ groupId: SHARMA.groupId, events: [expect.objectContaining({ waId: 'h1' }), expect.objectContaining({ waId: 'h3' })] }] }]);
+    expect(gw.droppedCount()).toBe(1);
+    // An empty answer is reported too: the backfill learns there is nothing more.
+    sock.emit('messaging-history.set', { chats: [], contacts: [], syncType: ON_DEMAND, messages: [] });
+    expect(answers[1]).toEqual({ groups: [] });
+    // The sync at link time (not on demand) is delivered as before.
+    sock.emit('messaging-history.set', { chats: [], contacts: [], isLatest: true, messages: [waText('h4', 'link time')] });
+    expect(events).toEqual([expect.objectContaining({ waId: 'h4' })]);
+  });
+});

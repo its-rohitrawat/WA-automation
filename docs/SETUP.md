@@ -478,6 +478,8 @@ With the dashboard on, this replaces editing `allowed-groups.json` by hand (step
 
 Every saved change is recorded in **Audit logs**. The dashboard writes the same `config/allowed-groups.json` file, so `npm run cli -- status` shows the new clients as before.
 
+**Earlier messages.** When a group is approved (in the dashboard or by hand), the agent also reads its earlier messages, **up to 7 days back, as far as WhatsApp provides**: WhatsApp may not hand over every old message. It asks the founder's phone for them while WhatsApp is connected, and the tracker reads them like new ones, within the daily spend cap (at the cap it waits for the next day). The client's card says "Reading earlier messages… <n> found", then "Earlier messages read (last 7 days)", and **Activity** gets one line, "<n> earlier messages read". A group with no stored message yet waits for its first new one ("Waiting for the first new message to read earlier ones"). Removing the group stops it.
+
 When WhatsApp is not connected, the page shows the last list it had ("WhatsApp isn't connected") and you can still approve from it.
 
 **Fallback, when the dashboard can't be reached:** edit `allowed-groups.json` by hand as in step 5 (`list-groups`, then the file). Do not edit the file by hand while someone saves in the dashboard.

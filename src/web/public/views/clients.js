@@ -36,6 +36,17 @@ const MEETING_LABEL = /** @type {Record<string, string>} */ ({
   no_access: 'No access', failed: 'Failed',
 });
 
+/**
+ * The card's line about a newly approved group's earlier messages (up to 7 days back, as far as WhatsApp provides).
+ * @param {ReturnType<typeof readClients>[number]['history']} h
+ */
+function historyLine(h) {
+  if (!h) return '';
+  const text = h.state === 'waiting' ? 'Waiting for the first new message to read earlier ones'
+    : h.state === 'reading' ? `Reading earlier messages… ${h.found} found` : 'Earlier messages read (last 7 days)';
+  return `<p class="muted-note c-history">${esc(text)}</p>`;
+}
+
 /** @param {ReturnType<typeof readClients>[number]} c */
 function card(c) {
   const n = c.counts;
@@ -43,7 +54,7 @@ function card(c) {
       <div class="row"><div class="g-name"><h3>${esc(c.name)}</h3><div class="grp">${icon('bubble', 14)}<span class="t">${esc(c.groupName)}</span></div></div><span class="code">${esc(c.code)}</span></div>
       ${c.phases.length ? `<div class="phase">${c.phases.map((p, i) => `<i class="${i <= c.phaseIndex ? 'on' : ''}" data-tip="${esc(p)}"></i>`).join('')}</div>` : ''}
       <div class="nums"><div><b>${n.open}</b><small>Open</small></div><div><b class="${n.overdue ? 'od' : ''}">${n.overdue}</b><small>Overdue</small></div><div><b>${n.review}</b><small>Review</small></div></div>
-      <div class="foot"><span>${c.currentPhase ? `Phase · ${esc(c.currentPhase)}` : 'No phase set'}</span><span>${c.lastActivity ? `Active ${esc(ago(c.lastActivity))}` : 'No messages yet'}</span></div></article>`;
+      <div class="foot"><span>${c.currentPhase ? `Phase · ${esc(c.currentPhase)}` : 'No phase set'}</span><span>${c.lastActivity ? `Active ${esc(ago(c.lastActivity))}` : 'No messages yet'}</span></div>${historyLine(c.history)}</article>`;
 }
 
 /** Opens the client's drawer and fills it from /clients/:code. @param {string} code */
