@@ -480,10 +480,10 @@ Every saved change is recorded in **Audit logs**. The dashboard writes the same 
 
 **Earlier messages of an approved group.** When a group is approved (new, or approved again; in the dashboard or by hand), the agent also reads its earlier messages, **up to 7 days back, as far as WhatsApp provides**: WhatsApp may not hand over every old message, so some can be missing. It works like this:
 
-- It asks the founder's phone for them, starting from a message of that group the agent already has. If it has none yet, it waits for the first new message in the group, and the client card says so ("Waiting for the first new message to read earlier ones").
+- It asks the founder's phone for them, starting from a message of that group the agent already has. If it has none yet, it waits for the first new message in the group, and the client card and its panel say so ("Waiting for the first new message to read earlier ones").
 - It reads only while the founder's WhatsApp is connected. Removing the group stops it. After a restart it carries on where it stopped.
 - The earlier messages go through the tracker like new ones, by their real times; a message read twice is kept once. While they are being read (a few minutes at most), the group's new messages wait, so old and new are read together, in order. The AI work on them is within the daily spend cap: if the cap is reached, the reading pauses and carries on the next day.
-- The client card in **Clients** says "Reading earlier messages… <n> found", then "Earlier messages read (last 7 days)". **Activity** gets one line per group when it is done, "<n> earlier messages read", with the count and no message text.
+- While it reads, the client card in **Clients** and its panel say "Reading the last 7 days · <n> found". Afterwards the panel's **Earlier messages** row says "Last 7 days read · <n> found". **Activity** gets one line per group when it is done, "<n> earlier messages read", with the count and no message text.
 
 When WhatsApp is not connected, the page shows the last list it had ("WhatsApp isn't connected") and you can still approve from it.
 

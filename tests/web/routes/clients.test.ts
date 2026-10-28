@@ -81,9 +81,16 @@ describe('clientDetailHandler', () => {
     }
   });
 
-  it('no response carries message text, quotes or phone numbers', () => {
+  it('no response carries quotes, phone numbers or WhatsApp ids; message text only in the drawer latest messages', () => {
     const { deps } = setup();
-    const all = JSON.stringify([clientsListHandler(deps, CTX), clientDetailHandler(deps, CTX, 'SHA'), clientDetailHandler(deps, CTX, 'MEH')]);
-    for (const s of [MESSAGE, QUOTE, '919800000001']) expect(all).not.toContain(s);
+    const list = clientsListHandler(deps, CTX);
+    const detail = clientDetailHandler(deps, CTX, 'SHA');
+    const all = JSON.stringify([list, detail, clientDetailHandler(deps, CTX, 'MEH')]);
+    for (const s of [QUOTE, '919800000001', '@s.whatsapp.net']) expect(all).not.toContain(s);
+    expect(JSON.stringify(list)).not.toContain(MESSAGE);
+    // The owner chose to see the group's last three messages in the drawer (28 Oct 2026): there, and nowhere else.
+    const { activity, ...rest } = (detail.body as { client: { activity: { latest: { text: string }[] } } }).client;
+    expect(activity.latest.map((m) => m.text)).toContain(MESSAGE);
+    expect(JSON.stringify(rest)).not.toContain(MESSAGE);
   });
 });

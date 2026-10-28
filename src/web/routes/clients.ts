@@ -11,6 +11,8 @@ export interface ClientsDeps {
   /** Only its last list is read (for group names); the Clients screen never makes the agent ask WhatsApp. */
   directory: GroupDirectory;
   clock: Clock;
+  /** QUIET_MINUTES: how long a group must be quiet before its messages are read (the drawer's "in about N min"). */
+  quietMinutes?: number;
 }
 
 function groupNames(directory: GroupDirectory): Map<string, string> {
@@ -19,11 +21,11 @@ function groupNames(directory: GroupDirectory): Map<string, string> {
 
 /** GET /dashboard/api/clients */
 export function clientsListHandler(deps: ClientsDeps, _ctx: OwnerContext): ApiResult<{ clients: ClientCard[] }> {
-  return ok({ clients: clientCards(deps.db, deps.clock.now(), groupNames(deps.directory)) });
+  return ok({ clients: clientCards(deps.db, deps.clock.now(), groupNames(deps.directory), deps.quietMinutes) });
 }
 
 /** GET /dashboard/api/clients/:code */
 export function clientDetailHandler(deps: ClientsDeps, _ctx: OwnerContext, code: string): ApiResult<{ client: ClientDetail } | ApiError> {
-  const client = typeof code === 'string' && /^[A-Z]{3,4}$/.test(code) ? clientDetail(deps.db, code, deps.clock.now(), groupNames(deps.directory)) : null;
+  const client = typeof code === 'string' && /^[A-Z]{3,4}$/.test(code) ? clientDetail(deps.db, code, deps.clock.now(), groupNames(deps.directory), deps.quietMinutes) : null;
   return client ? ok({ client }) : fail(404, 'not_found', 'There is no active client with this code.');
 }

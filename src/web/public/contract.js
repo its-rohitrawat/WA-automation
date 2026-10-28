@@ -165,7 +165,14 @@ function clientCard(v) {
     code: str(o.code), name: str(o.name), groupName: str(o.groupName) || str(o.name), counts: counts(o.counts), phases,
     currentPhase, phaseIndex: currentPhase ? phases.indexOf(currentPhase) : -1, lastActivity: iso(o.lastActivity), sheetName: str(o.sheetName),
     history: history(o.history),
+    pulse: pulse(o.pulse),
   };
+}
+
+/** A card's status inputs: unread messages, when the group was last read, the quiet minutes. @param {unknown} v */
+function pulse(v) {
+  const o = obj(v);
+  return { pending: num(o.pending), lastReadAt: iso(o.lastReadAt), quietMinutes: num(o.quietMinutes) || 4 };
 }
 
 const HISTORY_STATES = ['waiting', 'reading', 'done'];
@@ -195,6 +202,41 @@ export function readClientDetail(raw) {
       return { id: num(x.id), startedAt: iso(x.startedAt), title: str(x.title) || 'Untitled meeting', status: str(x.status) };
     }),
     lastSyncAt: iso(o.lastSyncAt),
+    activity: activity(o.activity),
+  };
+}
+
+const MESSAGE_KINDS = ['text', 'image', 'video', 'document', 'sticker', 'voice', 'audio', 'location', 'contact', 'poll', 'event', 'other'];
+/** At most n characters, whole code points (the agent already cut the text to one short line). @param {string} s @param {number} n */
+const cut = (s, n) => Array.from(s).slice(0, n).join('');
+const BACKFILL_STATES = ['waiting', 'fetching', 'done', 'stopped'];
+
+/**
+ * What the agent has seen of the client's group (the drawer's status line, last-7-days numbers and latest messages).
+ * Message text and sender names are the group's own words: shown through esc() or textContent only.
+ * @param {unknown} v
+ */
+function activity(v) {
+  const o = obj(v);
+  const w = obj(o.week);
+  const b = o.lastBatch && typeof o.lastBatch === 'object' ? obj(o.lastBatch) : null;
+  const h = o.history && typeof o.history === 'object' ? obj(o.history) : null;
+  return {
+    pending: num(o.pending),
+    quietMinutes: num(o.quietMinutes) || 4,
+    lastBatch: b && iso(b.at) ? { at: /** @type {string} */ (iso(b.at)), messages: num(b.messages), taskChanges: num(b.taskChanges) } : null,
+    taskCount: num(o.taskCount),
+    week: { messages: num(w.messages), people: num(w.people), files: num(w.files), voice: num(w.voice) },
+    latest: arr(o.latest).slice(0, 3).map((m) => {
+      const x = obj(m);
+      const kind = MESSAGE_KINDS.includes(str(x.kind)) ? str(x.kind) : 'text';
+      return {
+        sender: cut(str(x.sender), 80) || 'Someone', kind, text: cut(str(x.text), 400),
+        seconds: typeof x.seconds === 'number' && Number.isFinite(x.seconds) ? x.seconds : null, transcribed: x.transcribed === true, at: iso(x.at),
+      };
+    }),
+    approvedAt: iso(o.approvedAt),
+    history: h && BACKFILL_STATES.includes(str(h.state)) ? { state: str(h.state), found: num(h.found) } : null,
   };
 }
 

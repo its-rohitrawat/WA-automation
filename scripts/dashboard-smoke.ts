@@ -198,22 +198,42 @@ async function main() {
         where = `clients ${tag}`;
         await p.goto(`${base}/dashboard/clients`);
         await check(p, where, '.ccard', `clients-${tag}`);
+        // Every card has its status line; the ones the agent is working on have the travelling edge.
+        if ((await p.locator('.ccard .cstat').count()) !== (await p.locator('.ccard').count())) fail(where, 'a card has no status line');
+        if ((await p.locator('.ccard.busy').count()) !== 2) fail(where, 'expected 2 busy cards (Acme reading, Blue Harbour reading its last 7 days)');
         await p.locator('.ccard').first().click();
         await p.locator('.drawer h2', { hasText: 'Acme Traders' }).waitFor();
         if ((await p.locator('.drawer .li').count()) < 3) fail(where, 'the client drawer has no tasks');
+        await p.locator('.drawer .status', { hasText: 'Reading new messages' }).waitFor();
+        if ((await p.locator('.drawer .msgs .msg').count()) !== 3) fail(where, 'expected the 3 latest messages');
+        // The group's text is shown as text: the tags in it stay visible characters.
+        await p.locator('.drawer .bub p', { hasText: '<b>not bold</b>' }).waitFor();
+        await p.locator('.drawer .bub p', { hasText: 'Voice note · 0:42 · transcribed' }).waitFor();
+        await p.locator('.drawer .lastread', { hasText: '2 task changes' }).waitFor();
+        if ((await p.locator('.drawer .syncline [data-action="upload-tracker"]').count()) !== 1) fail(where, 'the panel has no Sync now');
+        if ((await p.locator('.drawer .dr-foot button').count()) !== 2) fail(where, 'the panel foot should hold only Close and Open tracker');
         await p.waitForTimeout(600); // the drawer slides in
         await p.screenshot({ path: join(OUT, `client-drawer-${tag}.png`) });
-        if ((await p.locator('.drawer [data-action="upload-tracker"]').count()) !== 1) fail(where, 'the client drawer has no Sync tracker now');
+        await p.keyboard.press('Escape');
+        await p.locator('.drawer').waitFor({ state: 'detached' });
+
+        where = `client panel, no tasks ${tag}`;
+        await p.locator('.ccard', { hasText: 'Cedar' }).click();
+        await p.locator('.drawer .empty', { hasText: 'No tasks yet' }).waitFor();
+        await p.locator('.drawer .status', { hasText: 'Watching for new messages' }).waitFor();
+        await p.locator('.drawer .kv', { hasText: 'Last 7 days read · 42 found' }).waitFor();
+        await p.waitForTimeout(600);
+        await p.screenshot({ path: join(OUT, `client-panel-no-tasks-${tag}.png`) });
         await p.keyboard.press('Escape');
         await p.locator('.drawer').waitFor({ state: 'detached' });
 
         where = `sync tracker ${tag}`;
-        await p.locator('.sync-bar', { hasText: 'Updated' }).waitFor();
-        await p.locator('.sync-bar [data-action="upload-tracker"]').click();
+        await p.locator('.synch', { hasText: 'Tracker updated' }).waitFor();
+        await p.locator('.synch [data-action="upload-tracker"]').click();
         await p.locator('.toast', { hasText: 'Tracker.xlsx uploaded to Drive' }).waitFor();
-        await p.locator('.sync-bar [data-action="upload-tracker"]:not([disabled])').waitFor();
+        await p.locator('.synch [data-action="upload-tracker"]:not([disabled])').waitFor();
         state.rateLimited = true; // the agent's 5-a-minute limit
-        await p.locator('.sync-bar [data-action="upload-tracker"]').click();
+        await p.locator('.synch [data-action="upload-tracker"]').click();
         await p.locator('.toast', { hasText: 'Too many tries' }).waitFor();
         state.rateLimited = false;
 

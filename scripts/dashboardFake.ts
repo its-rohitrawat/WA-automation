@@ -170,6 +170,27 @@ type ApplyBody = {
   edit?: { key: string; name?: string; emailDomains?: string[]; meetingKeywords?: string[] }[];
 };
 
+/** The client drawer's "what the agent has seen" block (the agent's ClientActivity shape), made up per client. */
+function activityFor(c: { code: string; lastActivity: string | null; history: { state: string; found: number } | null; pulse: { pending: number; lastReadAt: string | null; quietMinutes: number } }) {
+  if (!c.lastActivity) {
+    return { pending: 0, quietMinutes: 4, lastBatch: null, taskCount: 0, week: { messages: 0, people: 0, files: 0, voice: 0 }, latest: [], approvedAt: at(5), history: { state: 'waiting', found: 0 } };
+  }
+  return {
+    pending: c.pulse.pending,
+    quietMinutes: c.pulse.quietMinutes,
+    lastBatch: c.pulse.lastReadAt ? { at: c.pulse.lastReadAt, messages: 6, taskChanges: c.code === 'ACM' ? 2 : 0 } : null,
+    taskCount: c.code === 'CED' ? 0 : 3, // Cedar: no task was ever found
+    week: { messages: 42, people: 5, files: 3, voice: 2 },
+    latest: [
+      { sender: 'Rahul Kapoor', kind: 'image', text: 'Site photos from today', seconds: null, transcribed: false, at: at(12) },
+      { sender: 'Neha', kind: 'text', text: 'Thanks! Will check with the client tomorrow morning <b>not bold</b> and a long tail '.repeat(2), seconds: null, transcribed: false, at: at(14) },
+      { sender: 'Ajay Jain', kind: 'voice', text: '', seconds: 42, transcribed: true, at: at(19) },
+    ],
+    approvedAt: at(60 * 24 * 3),
+    history: c.history ? { state: c.history.state === 'reading' ? 'fetching' : c.history.state, found: c.history.found } : { state: 'done', found: 42 },
+  };
+}
+
 /** The fake directory and clients: what Manage groups and Clients read and change. */
 function fakeGroupsApi(state: FakeState) {
   const groups = makeGroups();
@@ -233,6 +254,9 @@ function fakeGroupsApi(state: FakeState) {
             counts: COUNTS[i] ?? { open: 0, overdue: 0, review: 0, doneThisWeek: 0 },
             phases: ['Discovery', 'Design', 'Build', 'Launch'], currentPhase: ['Design', 'Build', 'Launch'][i] ?? null,
             lastActivity: i < 3 ? at(12 * (i + 1)) : null, sheetName: g.client!.name.slice(0, 31),
+            // Acme: new messages waiting (busy); Blue Harbour: reading its last 7 days (busy); Cedar (no tasks): up to date.
+            history: i === 1 ? { state: 'reading', found: 18 } : null,
+            pulse: { pending: i === 0 ? 3 : 0, lastReadAt: i < 3 ? at([20, 30, 3][i]!) : null, quietMinutes: 4 },
           }));
   const detail = (code: string) => {
     const c = clientCards().find((x) => x.code === code);
@@ -248,6 +272,7 @@ function fakeGroupsApi(state: FakeState) {
         : [],
       meetings: code === 'ACM' ? [{ id: 1, startedAt: at(90), title: 'Weekly review', status: 'done' }, { id: 2, startedAt: at(20), title: '', status: 'queued' }] : [],
       lastSyncAt: at(3),
+      activity: activityFor(c),
     };
   };
   return { overview, suggest, apply, clientCards, detail, refresh: () => (fetchedAt = at(0)) };

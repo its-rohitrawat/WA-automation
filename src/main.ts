@@ -375,7 +375,7 @@ async function main(): Promise<void> {
             db: trackerStore, directory, groupsFile: env.GROUPS_FILE, configs: () => currentConfigs,
             groupKey: makeGroupKey(deriveSubkey(key, GROUP_KEY_INFO)), log, clock: systemClock,
           },
-          clients: { db: trackerStore, directory, clock: systemClock },
+          clients: { db: trackerStore, directory, clock: systemClock, quietMinutes: env.QUIET_MINUTES },
           google: {
             db: trackerStore, hub: google.hub, publicUrl: env.DASHBOARD_PUBLIC_URL ?? `http://localhost:${env.DASHBOARD_PORT}`,
             web: googleCredentials(env).web, meetingsEnabled: env.MEETINGS_ENABLED, log, clock: systemClock,

@@ -410,10 +410,50 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
 .ccard .grp .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; } .ccard:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .empty-card { display: flex; gap: 14px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
 .drawer .field input { width: 100%; } .drawer details .h4 { margin-top: 14px; }
-/* Sync tracker now (Clients header and client drawer) */
-.sync-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: -6px 0 16px; }
-.sync-note { flex-basis: 100%; font-size: 12.5px; }
-.dr-foot .sync-at { align-self: center; }
+/* Clients: the header (tabs left, one sync line right), each card's status line, and the client panel (owner, 28 Oct 2026) */
+.chead { justify-content: space-between; }
+.synch { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12.5px; }
+.cstat { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
+.cstat b { color: var(--text); font-weight: 600; }
+.cstat .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px rgba(37,211,102,.16), 0 0 8px rgba(37,211,102,.7); animation: cp-breathe 1.4s ease-in-out infinite; }
+.cstat.ok .dot { animation: none; box-shadow: 0 0 0 3px rgba(37,211,102,.14); }
+@keyframes cp-breathe { 50% { opacity: .4; } }
+/* A card the agent is working on, and the panel's status line, get a green edge travelling round. */
+@property --ga { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
+@keyframes cp-ring { to { --ga: 360deg; } }
+.ccard.busy { position: relative; }
+.ccard.busy::before { content: ""; position: absolute; inset: -1px; border-radius: inherit; padding: 1px; pointer-events: none;
+  background: conic-gradient(from var(--ga), transparent 0deg, transparent 220deg, #25D366 285deg, #34B7F1 320deg, transparent 360deg);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; animation: cp-ring 5s linear infinite; }
+.drawer .status { position: relative; display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-radius: 12px; margin-bottom: 18px; font-size: 13.5px;
+  background: linear-gradient(90deg, rgba(37,211,102,.10), rgba(18,140,126,.04)); }
+.drawer .status::before { content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1px; pointer-events: none;
+  background: conic-gradient(from var(--ga), rgba(37,211,102,.16) 0deg, rgba(37,211,102,.16) 220deg, #25D366 285deg, #34B7F1 320deg, rgba(37,211,102,.16) 360deg);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; animation: cp-ring 5s linear infinite; }
+:root[data-theme="light"] .drawer .status { background: linear-gradient(90deg, rgba(0,168,132,.10), rgba(0,168,132,.03)); }
+.drawer .status .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px rgba(37,211,102,.18), 0 0 10px rgba(37,211,102,.8); animation: cp-breathe 1.4s ease-in-out infinite; }
+.drawer .status b { font-weight: 600; } .drawer .status span { color: var(--muted); }
+.drawer .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.drawer .stats div { background: var(--panel-2); border-radius: 12px; padding: 10px; }
+.drawer .stats b { display: block; font: 600 18px var(--mono); }
+.drawer .stats small { color: var(--muted); font-size: 11.5px; }
+.drawer .lastread { margin: 10px 0 0; color: var(--muted); font-size: 12.5px; }
+.drawer .lastread b { color: var(--text); font-weight: 600; }
+.drawer .msgs { display: grid; gap: 8px; }
+.drawer .msg { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 10px; align-items: start; }
+.drawer .av { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; color: #06251a; background: linear-gradient(135deg, #25D366, #34B7F1); }
+.drawer .av.b { background: linear-gradient(135deg, #e9b75a, #f07585); } .drawer .av.c { background: linear-gradient(135deg, #6aa9e8, #19b39a); }
+.drawer .bub { background: var(--raise); border-radius: 4px 12px 12px 12px; padding: 7px 10px; min-width: 0; }
+:root[data-theme="light"] .drawer .bub { background: var(--panel-2); }
+.drawer .bub b { display: block; font-size: 12px; color: var(--accent); margin-bottom: 1px; }
+.drawer .bub p { margin: 0; font-size: 13px; line-height: 1.45; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drawer .msg time { font: 400 11px var(--mono); color: var(--faint); padding-top: 4px; }
+.drawer .tag { display: inline-flex; align-items: center; gap: 5px; font: 500 11px var(--mono); color: var(--muted); }
+.drawer .empty b { display: block; color: var(--text); font-size: 13.5px; margin-bottom: 4px; }
+.drawer .syncline { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 18px 0 0; padding-top: 14px; border-top: 1px solid var(--line); }
+.drawer .syncline small { color: var(--muted); font-size: 12.5px; }
+@media (max-width: 520px) { .drawer .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (prefers-reduced-motion: reduce) { .ccard.busy::before, .cstat .dot, .drawer .status::before, .drawer .status .dot { animation: none; } }
 /* A Google card's title is its email: it wraps instead of running under the state pill. */
 .conn .top-row .grow-1 { min-width: 0; } .conn h3 { overflow-wrap: anywhere; }
 
