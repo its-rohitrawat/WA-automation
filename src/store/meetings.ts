@@ -34,6 +34,13 @@ export interface SttPartRow {
   booked: 'none' | 'ceiling' | 'actual';
   segments: Segment[] | null;
   billedSeconds: number | null;
+  /**
+   * Local engine only: how many runs of this part failed (missing: none). A stop or a crash is not counted. The part is
+   * given up after LOCAL_PART_MAX_TRIES (src/meetings/sttParts.ts).
+   */
+  tries?: number;
+  /** Local engine only: the part was given up after its last try: done with no segments, "No speech recognised" in the Doc. */
+  unheard?: true;
 }
 
 export interface NewMeeting {
@@ -147,6 +154,9 @@ const SttPartsSchema = z.array(
     booked: z.enum(['none', 'ceiling', 'actual']),
     segments: z.array(SegmentSchema).nullable(),
     billedSeconds: z.number().nullable(),
+    // Added for the local engine's parts (review fixes 1 and 2); rows written before have neither.
+    tries: z.number().int().min(1).optional(),
+    unheard: z.literal(true).optional(),
   }),
 );
 const TranscriptSchema = z.array(SegmentSchema);
@@ -522,6 +532,15 @@ export function releaseSttNoneWaits(db: Db, at: string): number {
     .prepare(`UPDATE meetings SET next_attempt_at = @now, updated_at = @now
       WHERE status = 'queued' AND error_code = 'stt_none' AND next_attempt_at > @now`)
     .run({ now }).changes;
+}
+
+/**
+ * A part of a queued meeting finished on the local engine (done, or given up): the stage's attempt count goes back to the
+ * run in hand (1), so passing failures spread over many parts never add up to a final one (review fix 2). Called inside
+ * the part's own write. The next attempt and the error code are left as they are.
+ */
+export function noteMeetingProgress(db: Db, id: number): void {
+  db.prepare(`UPDATE meetings SET attempts = MIN(attempts, 1) WHERE id = ? AND status = 'queued'`).run(id);
 }
 
 /**

@@ -39,7 +39,12 @@ export interface MeetingDocInput {
   segments: readonly Segment[];
   /** The summary prompt was cut (MeetingPrompt.cut): the summary covers only the first part of the meeting. */
   transcriptCut: boolean;
+  /** Stretches the local engine gave up on (seconds from the start, review fix 1): a "No speech recognised" line each. */
+  unheard?: readonly { start: number; end: number }[];
 }
+
+/** The transcript line for a stretch the local engine gave up on. */
+export const unheardLine = (start: number, end: number): string => `No speech recognised ${formatClock(start)}–${formatClock(end)}`;
 
 const ENTITIES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 
@@ -161,7 +166,8 @@ function summarySections(s: MeetingSummary, plain: ReadonlyMap<string, string>):
 /**
  * One paragraph per segment, "12:05 Rahul: text": the clock from the start, the name the summary gave the segment's shown
  * label (as given, through plainNames), else the label. Segments with no text are skipped. Stops before the line that would pass DOC_TRANSCRIPT_MAX_CHARS
- * characters of transcript text, with TRANSCRIPT_REST_NOTE.
+ * characters of transcript text, with TRANSCRIPT_REST_NOTE. Each unheard stretch is its own line (unheardLine), in time
+ * order among the others.
  */
 function transcript(m: MeetingDocInput, plain: ReadonlyMap<string, string>): string {
   const labels = speakerLabels(m.segments);
@@ -170,18 +176,33 @@ function transcript(m: MeetingDocInput, plain: ReadonlyMap<string, string>): str
   const out: string[] = [];
   let chars = 0;
   let cut = false;
-  for (const s of m.segments) {
-    const text = docText(s.text);
-    if (!text) continue;
-    const label = shownLabel(labels, s.speaker);
-    const line = `${formatClock(Number.isFinite(s.start) ? s.start : 0)} ${docText(names.get(label) ?? label) || label}: ${text}`;
+  const add = (line: string): boolean => {
     if (chars + line.length > DOC_TRANSCRIPT_MAX_CHARS) {
       cut = true;
-      break;
+      return false;
     }
     chars += line.length;
     out.push(p(line));
+    return true;
+  };
+  // Stretches given up, in time order, each placed before the first line that starts at or after it.
+  const gaps = [...(m.unheard ?? [])].sort((a, b) => a.start - b.start);
+  const gapsUpTo = (at: number): boolean => {
+    while (gaps.length > 0 && gaps[0]!.start <= at) {
+      const g = gaps.shift()!;
+      if (!add(unheardLine(g.start, g.end))) return false;
+    }
+    return true;
+  };
+  for (const s of m.segments) {
+    const text = docText(s.text);
+    if (!text) continue;
+    const start = Number.isFinite(s.start) ? s.start : 0;
+    if (!gapsUpTo(start)) break;
+    const label = shownLabel(labels, s.speaker);
+    if (!add(`${formatClock(start)} ${docText(names.get(label) ?? label) || label}: ${text}`)) break;
   }
+  if (!cut) gapsUpTo(Infinity);
   return `<h2>Transcript</h2>${out.length ? out.join('') : NONE}${cut ? p(TRANSCRIPT_REST_NOTE) : ''}`;
 }
 

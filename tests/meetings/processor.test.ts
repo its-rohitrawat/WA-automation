@@ -17,7 +17,7 @@ import type { Prices } from '../../src/spend/pricing.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import type { Db } from '../../src/store/db.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
-import { advanceStage, getMeeting, insertFound, setSttParts, type MeetingStage, type NewMeeting } from '../../src/store/meetings.ts';
+import { advanceStage, getMeeting, insertFound, setSttParts, type MeetingStage, type NewMeeting, type SttPartRow } from '../../src/store/meetings.ts';
 import { listDecisions, listTasks } from '../../src/store/tasks.ts';
 import { Ffmpeg, type RunFile } from '../../src/stt/audio.ts';
 import { LocalEngine, type LocalRunFile } from '../../src/stt/local.ts';
@@ -641,7 +641,7 @@ describe('MeetingProcessor: the local engine (STT_PROVIDER=local)', () => {
     return { calls, started, ffmpeg, transcriber: localMeetingTranscriber(engine, { engine: 'voxtral', ffmpeg, tmpDir, inrPerUsd: 88 }) };
   };
 
-  it('a part that keeps timing out is retried after 1, 5 and 30 minutes, then the meeting fails; nothing is booked', async () => {
+  it('a part that keeps timing out is retried after 1, 5 and 30 minutes, then given up as unheard; the meeting goes on, nothing booked', async () => {
     const w = world();
     at(w, 'audio');
     const e = engineOf(w, ['ek'], 30);
@@ -651,12 +651,55 @@ describe('MeetingProcessor: the local engine (STT_PROVIDER=local)', () => {
       expect(row(w)).toMatchObject({ status: 'queued', stage: 'audio', errorCode: 'timeout', attempts: n });
       later(w, wait * MINUTE);
     }
-    expect((await p.process(w.id, signal())).outcome).toBe('failed');
-    expect(row(w)).toMatchObject({ status: 'failed', errorCode: 'timeout', stage: 'audio' });
-    // Part 1 was done once and never run again; part 2 was tried 4 times, then left to do.
-    expect(e.calls).toHaveLength(5);
-    expect(row(w).sttParts.map((x) => x.state)).toEqual(['done', 'todo', 'todo', 'todo', 'todo']);
+    // Part 2's 4th try gives it up and the run goes on; part 3 then times out: a first failure again (attempts 1).
+    expect((await p.process(w.id, signal())).outcome).toBe('deferred');
+    expect(row(w)).toMatchObject({ status: 'queued', stage: 'audio', errorCode: 'timeout', attempts: 1 });
+    expect(e.calls).toHaveLength(6);
+    expect(row(w).sttParts.map((x) => [x.state, x.unheard ?? false])).toEqual([['done', false], ['done', true], ['todo', false], ['todo', false], ['todo', false]]);
     expect(spendRows(w)).toEqual([]);
+  });
+
+  it('one passing failure on each of several parts never adds up: the meeting finishes', async () => {
+    const w = world();
+    at(w, 'audio');
+    // Parts 2 to 5 each fail once (the engine exits 1), then work on their retry.
+    const steps: (string | null)[] = ['ek', null, 'do', null, 'teen', null, 'char', null, 'paanch'];
+    const run: LocalRunFile = async (_file, args) => {
+      const text = steps.shift();
+      if (text === null || text === undefined) return { code: 1, stderr: '' };
+      writeFileSync(args[args.indexOf('-o') + 1]!, text);
+      return { code: 0, stderr: '' };
+    };
+    const tmpDir = join(w.dataDir, 'tmp', 'local');
+    const engine = new LocalEngine({ engine: 'voxtral', bin: join(w.dataDir, 'bin'), model: join(w.dataDir, 'model'), threads: 2, timeoutMs: 60_000, language: 'hi', tmpDir, run, killGraceMs: 10 });
+    const ffmpeg = new Ffmpeg('ffmpeg.exe', localFfmpeg(w));
+    const p = processor(w, { transcriber: localMeetingTranscriber(engine, { engine: 'voxtral', ffmpeg, tmpDir, inrPerUsd: 88 }), ffmpeg });
+    for (let n = 0; n < 4; n++) {
+      expect((await p.process(w.id, signal())).outcome).toBe('deferred');
+      expect(row(w)).toMatchObject({ status: 'queued', stage: 'audio', errorCode: 'exit_1', attempts: 1 });
+      later(w, MINUTE);
+    }
+    expect((await p.process(w.id, signal())).outcome).toBe('done');
+    expect(row(w).transcript!.map((s) => s.text)).toEqual(['ek', 'do', 'teen', 'char', 'paanch']);
+    expect(row(w).sttParts.some((x) => x.unheard)).toBe(false);
+  });
+
+  it('the Doc says where no speech was recognised', async () => {
+    const w = world();
+    at(w, 'audio');
+    const part = (index: number, text: string | null): SttPartRow => ({
+      index, provider: 'local', file: `${w.id}-parts/part-00${index - 1}.mp3`, offset: (index - 1) * 540, seconds: 540, state: 'done', jobId: null,
+      booked: 'none', segments: text === null ? [] : [{ start: 0, end: 540, speaker: null, text }], billedSeconds: null,
+      ...(text === null ? { unheard: true as const, tries: 4 } : {}),
+    });
+    setSttParts(w.db, w.id, [part(1, 'ek'), part(2, null), part(3, 'teen'), part(4, 'char'), part(5, null)], NOW);
+    const e = engineOf(w, []);
+    expect((await processor(w, { transcriber: e.transcriber, ffmpeg: e.ffmpeg }).process(w.id, signal())).outcome).toBe('done');
+    expect(e.calls).toHaveLength(0);
+    const html = w.drive.docs[0]!.html;
+    expect(html).toContain('<p>No speech recognised 9:00–18:00</p>');
+    expect(html).toContain('<p>No speech recognised 36:00–45:00</p>');
+    expect(html.indexOf('No speech recognised 9:00')).toBeLessThan(html.indexOf('teen'));
   });
 
   it('a stop during a part stops the engine: the meeting is left queued and due at once, with its attempt given back', async () => {

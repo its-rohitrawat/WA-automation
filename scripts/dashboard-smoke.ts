@@ -46,6 +46,7 @@ function watch(page: Page, where: () => string) {
   page.on('response', (r) => {
     const path = new URL(r.url()).pathname;
     if (r.status() === 422 && path === '/dashboard/api/groups/apply' && where().startsWith('manage groups refused')) return; // the refusal step
+    if (r.status() === 429 && path === '/dashboard/api/actions/upload-tracker' && where().startsWith('sync tracker')) return; // the limit step
     if (r.status() >= 400 && !(r.status() === 401 && path.startsWith('/dashboard/api/') && !state.signedIn)) fail(where(), `${r.status()} ${path}`);
   });
   page.on('requestfailed', (r) => {
@@ -153,6 +154,9 @@ async function main() {
         await check(p, where, '.conn', `connections-${tag}`);
         const cards = await p.locator('.conn').count();
         if (cards !== 7) fail(where, `expected 7 cards, found ${cards}`);
+        const driveCard = p.locator('[data-conn="drive"]');
+        if ((await driveCard.locator('dd', { hasText: 'owner@example.com' }).count()) !== 1) fail(where, 'the Drive card does not name the account');
+        if ((await driveCard.locator('a[data-open-drive][href^="https://drive.google.com/file/d/"]').count()) !== 1) fail(where, 'the Drive card has no Open in Drive');
 
         // The work and control screens (D4, D5), on the real routes: each draws its content, with no error panel.
         for (const screen of WORK_SCREENS) {
@@ -162,6 +166,12 @@ async function main() {
           await check(p, where, '#view .card', `${screen}-${tag}`);
           if (await p.locator('#view .err-state').count()) fail(where, 'shows its error panel');
           if ((await p.locator('#view', { hasText: 'Coming in the next update' }).count()) !== 0) fail(where, 'is still the placeholder');
+          if (screen === 'tracker') {
+            // Which file is written, as whom, and the one-time note that a new file had to be started.
+            if ((await p.locator('#view [data-tracker-file]', { hasText: 'owner@example.com' }).count()) !== 1) fail(where, 'does not name the account');
+            if ((await p.locator('#view [data-new-file]', { hasText: 'A new tracker file was started on' }).count()) !== 1) fail(where, 'has no new-file note');
+            if ((await p.locator('#view a[href^="https://drive.google.com/file/d/"]', { hasText: 'Open in Drive' }).count()) !== 1) fail(where, 'has no Open in Drive');
+          }
           if (screen === 'automations') {
             // Link phone opens the spare phone's first-link dialog right here, not Connections.
             where = `automations link phone ${tag}`;
@@ -193,8 +203,19 @@ async function main() {
         if ((await p.locator('.drawer .li').count()) < 3) fail(where, 'the client drawer has no tasks');
         await p.waitForTimeout(600); // the drawer slides in
         await p.screenshot({ path: join(OUT, `client-drawer-${tag}.png`) });
+        if ((await p.locator('.drawer [data-action="upload-tracker"]').count()) !== 1) fail(where, 'the client drawer has no Sync tracker now');
         await p.keyboard.press('Escape');
         await p.locator('.drawer').waitFor({ state: 'detached' });
+
+        where = `sync tracker ${tag}`;
+        await p.locator('.sync-bar', { hasText: 'Updated' }).waitFor();
+        await p.locator('.sync-bar [data-action="upload-tracker"]').click();
+        await p.locator('.toast', { hasText: 'Tracker.xlsx uploaded to Drive' }).waitFor();
+        await p.locator('.sync-bar [data-action="upload-tracker"]:not([disabled])').waitFor();
+        state.rateLimited = true; // the agent's 5-a-minute limit
+        await p.locator('.sync-bar [data-action="upload-tracker"]').click();
+        await p.locator('.toast', { hasText: 'Too many tries' }).waitFor();
+        state.rateLimited = false;
 
         where = `manage groups ${tag}`;
         await p.locator('[data-ctab="groups"]').click();
@@ -255,6 +276,10 @@ async function main() {
         await check(p, where, '.conn', `connections-actions-${tag}`);
         await p.locator('[data-action="test-claude"]').click();
         await p.locator('.toast', { hasText: 'Claude answered in 0.8 s' }).waitFor();
+        // Each Google card names its account by email; the Drive card says which account it writes as.
+        await p.locator('[data-conn="google:main"] h3', { hasText: 'owner@example.com' }).waitFor();
+        await p.locator('[data-conn="google:main"]', { hasText: 'Account name: main' }).waitFor();
+        await p.locator('[data-conn="drive"]', { hasText: 'Writes as' }).waitFor();
 
         where = `link spare ${tag}`;
         await p.locator('[data-fix="spare-link"]').click();

@@ -3,9 +3,11 @@ import { parseEnv } from '../../src/config/env.ts';
 import { AgentControl, type PartState } from '../../src/control/agentControl.ts';
 import { Health } from '../../src/health/health.ts';
 import type { MeetingsHealth } from '../../src/health/health.ts';
-import { saveMeetingAccount } from '../../src/output/googleAuth.ts';
+import { saveAccountEmail, saveMeetingAccount } from '../../src/output/googleAuth.ts';
+import { TRACKER_ID_KEY } from '../../src/output/trackerKey.ts';
 import type { SenderState } from '../../src/report/types.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
+import { setKv } from '../../src/store/kv.ts';
 import { insertMessage } from '../../src/store/messages.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import type { GatewayState, GatewayStatus } from '../../src/wa/gateway.ts';
@@ -183,10 +185,30 @@ describe('AgentControl.connections', () => {
         { label: 'main', email: null, usedFor: ['Tracker on Drive', 'Meetings'], state: 'ok', stateLabel: 'Connected' },
         { label: 'company2', email: null, usedFor: ['Meetings'], state: 'down', stateLabel: 'Sign-in lost' },
       ],
-      drive: { state: 'ok', label: expect.any(String), lastUploadAt: '2026-10-19T06:00:00.000Z' },
+      drive: {
+        state: 'ok', label: expect.any(String), lastUploadAt: '2026-10-19T06:00:00.000Z', file: 'Tracker.xlsx', folder: 'WA Agent', account: null, url: null,
+      },
       claude: { callsToday: 2, spentToday: 1, capUsd: 10 },
       monitoring: { on: true, lastBeatAt: '2026-10-19T07:55:00.000Z' },
     });
+  });
+
+  it('the Drive card names the file, its folder, its link and the main account it is written with', () => {
+    const t = setup();
+    setKv(t.db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qr-st');
+    setKv(t.db, 'google_account_email:main', 'owner@example.com');
+    expect(t.control.connections().drive).toMatchObject({
+      file: 'Tracker.xlsx', folder: 'WA Agent', account: 'owner@example.com', url: 'https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp_qr-st/view',
+    });
+  });
+
+  it("shows each Google account's stored email, and names the main one on the Drive card", () => {
+    const t = setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' } });
+    saveMeetingAccount(t.db, KEY, 'company2', 'refresh-token-not-real', 'https://www.googleapis.com/auth/meetings.space.readonly');
+    saveAccountEmail(t.db, 'main', 'owner@studio.in');
+    const c = t.control.connections();
+    expect(c.google.map((g) => [g.label, g.email])).toEqual([['main', 'owner@studio.in'], ['company2', null]]);
+    expect(c.drive.account).toBe('owner@studio.in');
   });
 
   it('maps the spare phone states, and has no spare card state without the report', () => {

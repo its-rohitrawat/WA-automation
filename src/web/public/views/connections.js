@@ -3,7 +3,7 @@
 import { get } from '../api.js';
 import { readConnections } from '../contract.js';
 import { esc, icon, toast } from '../dom.js';
-import { CONNECTIONS_CHANGED, actionRunning, googleErrorMessage } from './connect.js';
+import { CONNECTIONS_CHANGED, googleErrorMessage, quickButton } from './connect.js';
 import { attentionBanner } from './overview.js';
 
 /** @typedef {ReturnType<typeof readConnections>[number]} Card */
@@ -24,17 +24,12 @@ function action(c) {
   }
   if (c.kind === 'spare') return c.state === 'ok' ? button('data-fix="spare"', 'refresh', 'Reconnect') : button('data-fix="spare-link"', 'phone', 'Link phone', true);
   if (c.kind === 'google') return button(`data-fix="${esc(c.id)}"`, 'refresh', 'Reconnect', broken);
-  if (c.kind === 'drive') return quick('upload-tracker', 'cloud', 'Upload tracker now');
-  if (c.kind === 'claude') return quick('test-claude', 'flash', 'Test connection');
+  if (c.kind === 'drive') return quickButton('upload-tracker', 'cloud', 'Upload tracker now');
+  if (c.kind === 'claude') return quickButton('test-claude', 'flash', 'Test connection');
   if (c.state === 'off') return '<button class="btn btn-sm btn-ghost" type="button" disabled data-tip="Set up the heartbeat on the Mac first">' + icon('pulse', 15) + 'Send test beat</button>';
-  return quick('test-heartbeat', 'pulse', 'Send test beat');
+  return quickButton('test-heartbeat', 'pulse', 'Send test beat');
 }
 
-/** A quick action's button; still busy if the action runs while the cards are drawn again. @param {string} name @param {string} ic @param {string} label */
-function quick(name, ic, label) {
-  if (actionRunning(name)) return `<button class="btn btn-sm btn-ghost" type="button" disabled data-action="${name}"><span class="spin"></span>Working…</button>`;
-  return button(`data-action="${name}"`, ic, label);
-}
 
 /** @param {Card[] | null} cards @param {unknown} [error] */
 export function renderConnections(cards, error) {
@@ -47,7 +42,7 @@ export function renderConnections(cards, error) {
         <span class="pill ${PILL[c.state]}"><i></i>${esc(c.stateLabel || DEFAULT_LABEL[c.state])}</span></div>
       <dl class="kv">${c.rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>
       ${c.note ? `<div class="note">${icon('info', 16)}<span>${esc(c.note)}</span></div>` : ''}
-      <div class="conn-act">${action(c)}</div></article>`;
+      <div class="conn-act">${action(c)}${c.link ? `<a class="btn btn-sm btn-ghost" href="${esc(c.link)}" target="_blank" rel="noopener noreferrer" data-open-drive>${icon('ext', 15)}Open in Drive</a>` : ''}</div></article>`;
   };
   return `<div class="toolbar"><span class="grow-1"></span>${button('data-fix="google-add"', 'mail', 'Add Google account')}</div>
     <div class="conns">${cards.map(card).join('')}</div>

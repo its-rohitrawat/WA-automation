@@ -768,7 +768,7 @@ Do the steps below once, in order.
 
 ### 1. Before you start
 
-- **Speech-to-text.** The speech-to-text test (bake-off, `docs/STT-BAKEOFF.md`) has picked a provider. Meetings use `STT_PROVIDER`. Voice notes have their own setting, `VOICE_STT_PROVIDER` (see "Voice notes"); a paid voice service must be this same provider and key. On the Mac, `STT_PROVIDER=local` sends meetings through the free local engine voice notes use (SETUP-mac.md, section 8, "Meetings on the same engine"): no key and no speech cost, but slow (about 4 hours for a 3-hour meeting on Voxtral) and with no speaker labels.
+- **Speech-to-text.** The speech-to-text test (bake-off, `docs/STT-BAKEOFF.md`) has picked a provider. Meetings use `STT_PROVIDER`. Voice notes have their own setting, `VOICE_STT_PROVIDER` (see "Voice notes"); a paid voice service must be this same provider and key. On the Mac, `STT_PROVIDER=local` sends meetings through the free local engine voice notes use (SETUP-mac.md, section 8, "Meetings on the same engine"): no key and no speech cost, but slow (about 4 hours for a 3-hour meeting on Voxtral) and with no speaker labels. After switching to `STT_PROVIDER=local`, the copies a paid provider kept of earlier meeting transcripts (ElevenLabs keeps one per call) are not deleted while the setting stays `local`: `status` counts them as left, and they are deleted once that provider is set again, or you can delete them in that provider's own console.
 - **Internal Google app.** The OAuth consent screen is **Internal** (section 4 of this guide). One of the new permissions (Meet files in Drive) is a "restricted" one. **If the app is not Internal, stop and ask.**
 - **Privacy steps done** (step 6 below). Do them before the first real meeting is sent.
 

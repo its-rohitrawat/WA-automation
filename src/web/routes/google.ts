@@ -1,12 +1,14 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import {
-  checkAccountLabel, createOAuthClient, DRIVE_SCOPES, MAIN_ACCOUNT, MEETING_SCOPES, meetingAccounts, requestedScopes, type ConsentClient,
+  checkAccountLabel, createOAuthClient, DRIVE_SCOPES, MAIN_ACCOUNT, MEETING_SCOPES, meetingAccounts, requestedScopes, saveAccountEmail,
+  type ConsentClient,
 } from '../../output/googleAuth.ts';
 import type { GoogleAuthHub, OAuthCredentials } from '../../output/googleAuthHub.ts';
 import type { Db } from '../../store/db.ts';
 import { systemClock, type Clock } from '../../util/clock.ts';
 import type { Logger } from '../../util/logger.ts';
+import { checkClaims, maskEmail, SignInError, SignInRefused, type IdTokenVerifier } from '../oidc.ts';
 import { fail, ok, type ApiError, type ApiResult, type AuditFn, type OwnerContext } from './context.ts';
 
 // Reconnecting or adding a Google account from the dashboard (D3 task 6), unmounted. The same safeguards as
@@ -20,6 +22,8 @@ const PENDING_TTL_MS = 10 * 60_000;
 const PENDING_PER_SESSION = 5;
 export const CALLBACK_PATH = '/dashboard/connect/google/callback';
 const DONE_PATH = '/dashboard/connections';
+/** Asked for on top of the account's own scopes, only to learn which Google account was chosen (shown to the owner). */
+const IDENTITY_SCOPES: readonly string[] = ['openid', 'email'];
 
 const ConnectBody = z
   .object({ account: z.union([z.string().min(1).max(20), z.object({ add: z.string().min(1).max(20) }).strict()]) })
@@ -30,6 +34,8 @@ interface Pending {
   label: string;
   isNew: boolean;
   verifier: string | undefined;
+  /** Bound into the ID token, so an ID token from any other sign-in is refused. */
+  nonce: string;
   scopes: readonly string[];
   expiresAt: number;
 }
@@ -53,6 +59,11 @@ export interface GoogleConnectDeps {
   clock?: Clock;
   /** Test seam: the OAuth client for this redirect. */
   createClient?: (redirectUri: string) => ConsentClient;
+  /**
+   * Checks an ID token's signature (production: googleIdVerifier with the web client). Without it the account's email is
+   * not taken from the sign-in (it may still be filled later from Drive).
+   */
+  verifier?: IdTokenVerifier;
 }
 
 export class GoogleConnectRoutes {
@@ -99,15 +110,17 @@ export class GoogleConnectRoutes {
     const mine = [...this.#pending.entries()].filter(([, p]) => p.sessionId === ctx.sessionId);
     while (mine.length >= PENDING_PER_SESSION) this.#pending.delete(mine.shift()![0]); // the oldest first
     const state = randomBytes(16).toString('hex');
+    const nonce = randomBytes(16).toString('hex');
     const client = this.#client();
     const pkce = await client.generateCodeVerifierAsync();
     // PKCE is required, never skipped silently.
     if (!pkce.codeVerifier || !pkce.codeChallenge) return fail(503, 'unavailable', 'Google sign-in could not be started. Try again.');
     const url = client.generateAuthUrl({
-      access_type: 'offline', prompt: 'consent', scope: [...scopes], state, code_challenge_method: 'S256', code_challenge: pkce.codeChallenge,
+      access_type: 'offline', prompt: 'consent', scope: [...scopes, ...IDENTITY_SCOPES], state, nonce, code_challenge_method: 'S256',
+      code_challenge: pkce.codeChallenge,
     });
     this.#pending.set(state, {
-      sessionId: ctx.sessionId, label, isNew, verifier: pkce.codeVerifier, scopes, expiresAt: this.#clock.now().getTime() + PENDING_TTL_MS,
+      sessionId: ctx.sessionId, label, isNew, verifier: pkce.codeVerifier, nonce, scopes, expiresAt: this.#clock.now().getTime() + PENDING_TTL_MS,
     });
     return ok({ url });
   }
@@ -133,7 +146,7 @@ export class GoogleConnectRoutes {
       if (pending.isNew && listed) return refuse('exists');
       if (!pending.isNew && !listed) return refuse('not_found');
     }
-    let tokens: { refresh_token?: string | null; scope?: string };
+    let tokens: { refresh_token?: string | null; scope?: string; id_token?: string | null };
     try {
       ({ tokens } = await this.#client().getToken({ code: params.code, codeVerifier: pending.verifier }));
     } catch (err) {
@@ -146,17 +159,39 @@ export class GoogleConnectRoutes {
     const granted = new Set(scope.split(' '));
     const required = pending.label === MAIN_ACCOUNT ? [...DRIVE_SCOPES, ...pending.scopes] : pending.scopes;
     if (!required.every((s) => granted.has(s))) return refuse('missing_scope');
+    // The address the owner chose, from Google's signed ID token only. Checked before anything is saved, so the token
+    // and its email are then stored back to back: two reconnects at once can never pair one's token with the other's email.
+    const email = await this.#verifiedEmail(tokens.id_token, pending);
     try {
-      this.#d.hub.setToken(pending.label, tokens.refresh_token, 'web', scope);
+      this.#d.hub.setToken(pending.label, tokens.refresh_token, 'web', scope); // forgets the account's old email
     } catch (err) {
       this.#d.log.error({ account: pending.label, code: (err as Error | null)?.name ?? 'Error' }, 'reconnected Google account could not be saved');
       return refuse('save');
     }
+    if (email !== null) saveAccountEmail(this.#d.db, pending.label, email);
+    const who = email === null ? '' : ` · ${maskEmail(email)}`;
     this.#d.audit({
       actor: ctx.actor, kind: 'connection', requestId: ctx.requestId,
-      event: pending.isNew ? `Google account added · ${pending.label}` : `Google account reconnected · ${pending.label}`,
+      event: pending.isNew ? `Google account added · ${pending.label}${who}` : `Google account reconnected · ${pending.label}${who}`,
     });
     return { status: 302, location: `${DONE_PATH}?connected=${encodeURIComponent(pending.label)}` };
+  }
+
+  /**
+   * The chosen account's email from the ID token: its signature checked by the verifier, then the same claim checks as
+   * the owner sign-in (Google issuer, this web client as the audience, not expired, this sign-in's nonce) and
+   * email_verified true. Anything else gives null: the reconnect itself still stands. Only a code is logged.
+   */
+  async #verifiedEmail(idToken: string | null | undefined, pending: Pending): Promise<string | null> {
+    if (!this.#d.verifier || !this.#d.web || !idToken) return null;
+    try {
+      const claims = await this.#d.verifier(idToken);
+      return checkClaims(claims, { clientId: this.#d.web.clientId, nonce: pending.nonce, now: this.#clock.now().getTime() }).email;
+    } catch (err) {
+      const code = err instanceof SignInError ? err.code : err instanceof SignInRefused ? err.reason : 'id_token_invalid';
+      this.#d.log.warn({ account: pending.label, code }, "reconnected Google account's email could not be confirmed");
+      return null;
+    }
   }
 
   #prune(): void {

@@ -139,7 +139,7 @@ export interface AppDeps {
   /** With the dashboard: the morning report whose settings the owner changes while the service runs. Replaces report. */
   liveReport?: ReportRunner;
   /** With the dashboard: told of each upload and failure (the Activity screen's rows). A throw is logged, never passed on. */
-  publishHooks?: { onPublished(): void; onFailure(f: { step: 'build' | 'drive'; auth: boolean }): void };
+  publishHooks?: { onPublished(): void; onFailure(f: { step: 'build' | 'drive'; auth: boolean }): void; onNewFile?(): void };
   /** With the dashboard: a newly approved group's earlier messages were read (the Activity row). A throw is logged. */
   onHistoryRead?: (r: { clientId: number; found: number }) => void;
 }
@@ -213,6 +213,7 @@ export function createApp(d: AppDeps): App {
     api: d.drive,
     log: d.log,
     minIntervalMs: d.publishIntervalMs,
+    now: () => d.clock.now(),
     // workbookLine() leaves out publish failures: if this upload succeeds, they are already over.
     build: () => {
       const line = health.workbookLine();
@@ -234,6 +235,7 @@ export function createApp(d: AppDeps): App {
       health.markPublishFailed(f);
       hook((h) => h.onFailure(f));
     },
+    onNewFile: () => hook((h) => h.onNewFile?.()),
   });
 
   /** Health writes its snapshot to the DB. A busy DB must not turn a finished run into a crash, or break a callback. */

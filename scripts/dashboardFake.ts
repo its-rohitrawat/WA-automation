@@ -70,7 +70,10 @@ export const fixtures = (st: FakeState) => {
         ? { label: 'org2', email: 'meetings@example.org', state: 'ok', stateLabel: 'Connected', usedFor: ['Meetings'] }
         : { label: 'org2', email: 'meetings@example.org', state: 'down', stateLabel: 'Sign in again', usedFor: ['Meetings'] },
     ],
-    drive: { state: 'ok', label: 'Connected', lastUploadAt: at(300) },
+    drive: {
+      state: 'ok', label: 'Connected', lastUploadAt: at(300), file: 'Tracker.xlsx', folder: 'WA Agent', account: 'owner@example.com',
+      url: 'https://drive.google.com/file/d/1FakeTrackerFileId_000/view',
+    },
     claude: { callsToday: 41, spentToday: 0.84, capUsd: 3 },
     monitoring: { on: true, lastBeatAt: at(1) },
   },
@@ -89,6 +92,8 @@ export interface FakeState {
   spareLinked?: boolean;
   /** The org2 Google account is signed in (a fake reconnect sets it). */
   org2Ok?: boolean;
+  /** Quick actions answer 429, as the agent does past 5 tries a minute. */
+  rateLimited?: boolean;
 }
 
 /** A fake phone link: two codes, a scan, then linked (and the fake flags updated). */
@@ -306,6 +311,7 @@ export function fakeDashboard(o: { port: number; state: FakeState; log?: Logger 
     if (!owner(req, res)) return;
     const r = ACTIONS[params.name ?? ''];
     if (!r) return sendError(res, 404, 'not_found', 'There is no such action.');
+    if (state.rateLimited) return sendJson(res, 429, { error: { code: 'rate_limited', message: 'Too many tries. Wait a minute and try again.', retryAfterSec: 60 } });
     setTimeout(() => sendJson(res, 200, r), 600);
   });
   const g = fakeGroupsApi(state);

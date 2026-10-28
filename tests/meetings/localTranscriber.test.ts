@@ -4,7 +4,9 @@ import { join } from 'node:path';
 import { Writable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parseEnv } from '../../src/config/env.ts';
-import { MeetingDeferral } from '../../src/meetings/audio.ts';
+import { MeetingDeferral, MeetingFailure } from '../../src/meetings/audio.ts';
+import { MEETING_MAX_ATTEMPTS } from '../../src/meetings/processor.ts';
+import { LOCAL_PART_MAX_TRIES } from '../../src/meetings/sttParts.ts';
 import {
   createLocalMeetingTranscriber, LOCAL_MEETING_PART_SECONDS, localMeetingTranscriber, type LocalMeetingTranscriber,
 } from '../../src/meetings/localTranscriber.ts';
@@ -640,5 +642,165 @@ describe('the local meeting transcriber', () => {
     await transcribeMeeting(id, deps(meetingTranscriber(provider, 88), ff), new AbortController().signal);
     expect(seen).toEqual([{ diarize: true }]);
     expect(rows()).toHaveLength(1);
+  });
+
+  describe('parts the engine cannot hear (review fixes 1 and 2)', () => {
+    const attemptsOf = () => (db.prepare('SELECT attempts FROM meetings WHERE id = ?').get(id) as { attempts: number }).attempts;
+    const setAttempts = (n: number) => db.prepare('UPDATE meetings SET attempts = ? WHERE id = ?').run(n, id);
+    /** One run of the stage over a fresh fake engine; what it threw, or its result. */
+    const runWith = async (ff: ReturnType<typeof fakeFfmpeg>, steps: Step[], timeoutMs?: number) => {
+      const { t } = timeoutMs === undefined ? fromEnv(ff, steps) : withTimeout(ff, steps, timeoutMs);
+      return transcribeMeeting(id, deps(t, ff)).catch((e: unknown) => e);
+    };
+    /** The first LOCAL_PART_MAX_TRIES - 1 tries of a part, each failing with `step`. */
+    const failTries = async (ff: ReturnType<typeof fakeFfmpeg>, first: Step[], step: Step, timeoutMs?: number) => {
+      for (let n = 1; n < LOCAL_PART_MAX_TRIES; n++) await runWith(ff, n === 1 ? [...first, step] : [step], timeoutMs);
+    };
+
+    it('a part gets as many tries as a meeting stage has attempts', () => {
+      expect(LOCAL_PART_MAX_TRIES).toBe(MEETING_MAX_ATTEMPTS);
+    });
+
+    it('a loud part the engine never hears is given up on its last try: done with no text, noted, and the meeting goes on', async () => {
+      prepare(1500);
+      const ff = fakeFfmpeg([500, 500, 500]);
+      for (const [n, steps] of [[1, ['shuru', '']], [2, ['']], [3, ['']]] as const) {
+        expect(((await runWith(ff, [...steps])) as LocalEngineError).code).toBe('empty_output');
+        expect(parts()[1]).toMatchObject({ state: 'todo', booked: 'none', tries: n });
+      }
+      expect(await runWith(ff, ['', 'ant'])).toEqual({ parts: 3, segments: 2, note: 'unheard_parts' });
+      const m = getMeeting(db, id)!;
+      expect(m.stage).toBe('transcribed');
+      expect(m.note).toBe('unheard_parts');
+      expect(m.transcript!.map((s) => s.text)).toEqual(['shuru', 'ant']);
+      expect(m.sttParts[1]).toMatchObject({ state: 'done', booked: 'none', segments: [], unheard: true, tries: LOCAL_PART_MAX_TRIES });
+      expect(m.sttParts[0]!.unheard).toBeUndefined();
+      expect(m.sttParts[2]!.unheard).toBeUndefined();
+      expect(rows()).toEqual([]);
+    });
+
+    it('timeouts and exit codes on the same part count together, and give it up the same way once a part was heard', async () => {
+      prepare(1500);
+      const ff = fakeFfmpeg([500, 500, 500]);
+      expect(((await runWith(ff, ['shuru', { hang: true }], 50)) as LocalEngineError).code).toBe('timeout');
+      expect(((await runWith(ff, [{ fail: 3 }], 50)) as LocalEngineError).code).toBe('exit_3');
+      expect(((await runWith(ff, [{ hang: true }], 50)) as LocalEngineError).code).toBe('timeout');
+      expect(parts()[1]).toMatchObject({ state: 'todo', tries: 3 });
+      expect(await runWith(ff, [{ fail: 3 }, 'ant'], 50)).toEqual({ parts: 3, segments: 2, note: 'unheard_parts' });
+      expect(parts()[1]).toMatchObject({ state: 'done', segments: [], unheard: true });
+    });
+
+    it('loud audio with no words before anything was heard is given up too: it is not taken for a broken engine', async () => {
+      prepare(1500);
+      const ff = fakeFfmpeg([500, 500, 500]);
+      await failTries(ff, [], '');
+      expect(await runWith(ff, ['', 'beech', 'ant'])).toEqual({ parts: 3, segments: 2, note: 'unheard_parts' });
+      expect(parts().map((p) => p.unheard ?? false)).toEqual([true, false, false]);
+    });
+
+    it.each([
+      ['an exit code', { fail: 139 } as Step],
+      ['a timeout', { hang: true } as Step],
+    ] as const)('%s on every try of the first part, with nothing heard yet, fails the meeting (local_engine_failed), the part ready to run again', async (_name, step) => {
+      prepare(1500);
+      const ff = fakeFfmpeg([500, 500, 500]);
+      await failTries(ff, [], step, 50);
+      expect(parts()[0]).toMatchObject({ state: 'todo', tries: LOCAL_PART_MAX_TRIES - 1 });
+      const err = await runWith(ff, [step], 50);
+      expect(err).toBeInstanceOf(MeetingFailure);
+      expect(err).toMatchObject({ status: 'failed', code: 'local_engine_failed' });
+      // A `meeting retry` once the engine is fixed starts the part's tries again.
+      expect(parts()[0]).toMatchObject({ state: 'todo', booked: 'none', segments: null });
+      expect(parts()[0]!.tries).toBeUndefined();
+      expect(parts().some((p) => p.unheard)).toBe(false);
+      expect(getMeeting(db, id)!.stage).toBe('audio');
+      expect(rows()).toEqual([]);
+    });
+
+    it('a meeting where nothing is heard but a part was given up fails (nothing_heard), its parts ready to run again', async () => {
+      prepare(420);
+      const ff = fakeFfmpeg([]);
+      await failTries(ff, [], '');
+      const err = await runWith(ff, ['']);
+      expect(err).toBeInstanceOf(MeetingFailure);
+      expect(err).toMatchObject({ status: 'failed', code: 'nothing_heard' });
+      expect(parts()[0]).toMatchObject({ state: 'todo', booked: 'none', segments: null });
+      expect(parts()[0]!.tries).toBeUndefined();
+      expect(parts()[0]!.unheard).toBeUndefined();
+      expect(getMeeting(db, id)!.stage).toBe('audio');
+    });
+
+    it('silent parts and a given-up part with nothing else heard also fail as nothing_heard, never no_speech', async () => {
+      prepare(1500);
+      // Parts 1 and 2 silent (done, no segment); part 3 fails its first try, then is loud with no words.
+      const sil = fakeFfmpeg([500, 500, 500], { volumeDb: -91 });
+      await runWith(sil, ['', '', { fail: 1 }]);
+      expect(parts().map((p) => [p.state, p.tries])).toEqual([['done', undefined], ['done', undefined], ['todo', 1]]);
+      const ff = fakeFfmpeg([500, 500, 500]);
+      for (let n = 2; n < LOCAL_PART_MAX_TRIES; n++) await runWith(ff, ['']);
+      expect(await runWith(ff, [''])).toMatchObject({ code: 'nothing_heard' });
+      expect(parts().map((p) => p.state)).toEqual(['done', 'done', 'todo']);
+    });
+
+    it('a stop or a crash is not a try of the part', async () => {
+      prepare(1500);
+      const ff = fakeFfmpeg([500, 500, 500]);
+      await runWith(ff, ['shuru', '']);
+      expect(parts()[1]).toMatchObject({ state: 'todo', tries: 1 });
+      const { t, engine } = fromEnv(ff, [{ hang: true }]);
+      const ctl = new AbortController();
+      const run = transcribeMeeting(id, deps(t, ff), ctl.signal);
+      await engine.started;
+      ctl.abort(new Error('stop'));
+      await run.catch(() => undefined);
+      expect(parts()[1]).toMatchObject({ state: 'todo', tries: 1 });
+      setSttParts(db, id, parts().map((p, i) => (i === 1 ? { ...p, state: 'inflight' } : p)), NOW);
+      expect(bookStuckParts(db, spend, id, { inrPerUsd: 88 })).toBe(0);
+      expect(parts()[1]).toMatchObject({ state: 'todo', tries: 1 });
+    });
+
+    it('a finished part resets the meeting attempts to the run in hand, so failures spread over many parts never add up', async () => {
+      prepare(1500);
+      const ff = fakeFfmpeg([500, 500, 500]);
+      setAttempts(3);
+      await runWith(ff, ['shuru', '']);
+      expect(attemptsOf()).toBe(1);
+      setAttempts(3);
+      await runWith(ff, ['']); // part 2's 2nd try; no part finished: nothing reset
+      expect(attemptsOf()).toBe(3);
+      await runWith(ff, ['']); // its 3rd try
+      expect(parts()[1]).toMatchObject({ state: 'todo', tries: 3 });
+      await runWith(ff, ['', { fail: 1 }]); // its last try gives it up (a finished part), then part 3 fails
+      expect(parts()[1]).toMatchObject({ state: 'done', unheard: true });
+      expect(attemptsOf()).toBe(1);
+    });
+
+    it('a switch to a paid provider sends the parts left to do with their tries cleared', async () => {
+      prepare(1500);
+      const ff = fakeFfmpeg([500, 500, 500]);
+      await runWith(ff, ['shuru', '']);
+      const provider: SttProvider = {
+        id: 'openai',
+        maxPartSeconds: 3000,
+        async transcribe(): Promise<ProviderResult> {
+          return { model: 'm', segments: [{ start: 0, end: 1, speaker: 'A', text: 'x' }], billedSeconds: 500, raw: {} };
+        },
+      };
+      await transcribeMeeting(id, deps(meetingTranscriber(provider, 88), ff));
+      expect(parts().map((p) => [p.provider, p.tries, p.unheard])).toEqual([['local', undefined, undefined], ['openai', undefined, undefined], ['openai', undefined, undefined]]);
+    });
+
+    it('the log line for a part given up has its number and code only', async () => {
+      prepare(1500);
+      const ff = fakeFfmpeg([500, 500, 500]);
+      await failTries(ff, ['shuru'], '');
+      const { lines, log } = capturingLogger();
+      const { t } = fromEnv(ff, ['']);
+      await transcribeMeeting(id, deps(t, ff, { log })).catch(() => undefined);
+      const out = lines.join('');
+      expect(out).toContain('meeting speech part given up');
+      expect(out).toContain('"code":"empty_output"');
+      expect(out).not.toContain(dataDir);
+    });
   });
 });

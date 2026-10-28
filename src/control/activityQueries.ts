@@ -66,6 +66,7 @@ const MEET_STATUSES: readonly MeetingStatus[] = ['done', 'unassigned', 'queued',
 const ISSUE_STATUSES: readonly MeetingStatus[] = ['too_long', 'no_access', 'failed'];
 const PUBLISHED = 'tracker.published';
 const PUBLISH_FAILED = 'tracker.publish_failed';
+const NEW_FILE = 'tracker.new_file';
 /** A newly approved group's earlier messages were read (src/wa/historyBackfill.ts). */
 const HISTORY_READ = 'history.read';
 
@@ -203,14 +204,16 @@ export function historyReadEntry(found: number, client: string): AuditEntry {
 }
 
 /**
- * The DrivePublisher's onPublished and onFailure hooks, writing the agent's own rows for the Activity screen. The publisher
+ * The DrivePublisher's onPublished, onFailure and onNewFile hooks, writing the agent's own rows for the Activity screen. The publisher
  * runs up to once a minute, so a row is written only when something changed: the first success, the first success after
  * a failure, a success an hour after the last success row, and a failure of a new kind (the first one, or after a
- * success). The words are fixed: the error itself (which can hold anything) never reaches the audit log.
+ * success). onNewFile writes one row each time the old Tracker.xlsx could not be reached and a new one was made (no ids,
+ * no emails). The words are fixed: the error itself (which can hold anything) never reaches the audit log.
  */
 export function publisherAuditHooks(audit: Audit, clock: Clock): {
   onPublished: () => void;
   onFailure: (f: { step: 'build' | 'drive'; auth: boolean }) => void;
+  onNewFile: () => void;
 } {
   const entry = (event: string, detail: string): AuditEntry => ({ actor: 'agent', event, kind: 'ops', detail });
   let lastOk: number | undefined;
@@ -229,5 +232,6 @@ export function publisherAuditHooks(audit: Audit, clock: Clock): {
       audit(entry(PUBLISH_FAILED, `Tracker upload failed: ${words}`));
       failing = words;
     },
+    onNewFile: () => audit(entry(NEW_FILE, 'The old tracker file could not be reached; a new Tracker.xlsx was made')),
   };
 }
