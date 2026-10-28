@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { MeetingSummarySchema, type MeetingSummary } from '../brain/meetingSchema.ts';
-import type { ProviderId, Segment } from '../stt/types.ts';
+import type { ProviderId, ProviderOrLocal, Segment } from '../stt/types.ts';
 import { tx, type Db } from './db.ts';
 
 export const MEETING_STATUSES = ['unassigned', 'internal', 'queued', 'done', 'skipped', 'too_long', 'no_access', 'failed'] as const;
@@ -20,8 +20,11 @@ export interface MeetingAttendee {
 /** One speech part's durable bookkeeping (see src/meetings/transcribe.ts). */
 export interface SttPartRow {
   index: number;
-  /** The provider the part is planned for, and sent to: a stuck part is booked at this provider's price. */
-  provider: ProviderId;
+  /**
+   * The provider the part is planned for, and sent to: a stuck part is booked at this provider's price. 'local' (the
+   * engine on this machine) is free: such a part is never booked, and one left in flight is simply run again.
+   */
+  provider: ProviderOrLocal;
   /** The part's MP3 under data/meetings/tmp/ ("12-parts/part-000.mp3", forward slashes); null: the whole kept MP3. */
   file: string | null;
   offset: number;
@@ -31,6 +34,13 @@ export interface SttPartRow {
   booked: 'none' | 'ceiling' | 'actual';
   segments: Segment[] | null;
   billedSeconds: number | null;
+  /**
+   * Local engine only: how many runs of this part failed (missing: none). A stop or a crash is not counted. The part is
+   * given up after LOCAL_PART_MAX_TRIES (src/meetings/sttParts.ts).
+   */
+  tries?: number;
+  /** Local engine only: the part was given up after its last try: done with no segments, "No speech recognised" in the Doc. */
+  unheard?: true;
 }
 
 export interface NewMeeting {
@@ -135,7 +145,7 @@ export const PART_FILE = /^[1-9]\d{0,14}-parts(?:-[1-9]\d{0,3})?\/part-\d{3}\.mp
 const SttPartsSchema = z.array(
   z.strictObject({
     index: z.number().int(),
-    provider: z.enum(['sarvam', 'elevenlabs', 'openai']),
+    provider: z.enum(['sarvam', 'elevenlabs', 'openai', 'local']),
     file: z.string().regex(PART_FILE).nullable(),
     offset: z.number(),
     seconds: z.number(),
@@ -144,6 +154,9 @@ const SttPartsSchema = z.array(
     booked: z.enum(['none', 'ceiling', 'actual']),
     segments: z.array(SegmentSchema).nullable(),
     billedSeconds: z.number().nullable(),
+    // Added for the local engine's parts (review fixes 1 and 2); rows written before have neither.
+    tries: z.number().int().min(1).optional(),
+    unheard: z.literal(true).optional(),
   }),
 );
 const TranscriptSchema = z.array(SegmentSchema);
@@ -467,10 +480,11 @@ export function deleteSttForget(db: Db, id: number): void {
 
 /**
  * Provider copies the agent has given up deleting for now: the last try is used (maxAttempts), or the copy's provider
- * is not the one set up now (`provider`; 'none' when speech-to-text is off), so forgetPending skips it. A count only,
+ * is not the one set up now (`provider`; 'none' when speech-to-text is off, 'local' for the engine on this machine,
+ * which keeps no copy), so forgetPending skips it. A count only,
  * for `cli status`.
  */
-export function sttForgetsGivenUp(db: Db, o: { maxAttempts: number; provider: ProviderId | 'none' }): number {
+export function sttForgetsGivenUp(db: Db, o: { maxAttempts: number; provider: ProviderOrLocal | 'none' }): number {
   return (
     db.prepare('SELECT COUNT(*) AS n FROM stt_forget WHERE attempts >= ? OR provider <> ?').get(o.maxAttempts, o.provider) as { n: number }
   ).n;
@@ -505,6 +519,28 @@ export function deferMeeting(
       at: canonical('deferMeeting', 'at', d.at),
     }).changes;
   if (n === 0) notQueued('deferMeeting', id);
+}
+
+/**
+ * Queued meetings still waiting out a speech-to-text-not-set-up deferral (stt_none) become due at `at`: the service
+ * started with the local engine (MeetingQueue calls this for STT_PROVIDER=local only), so they need not wait out the rest of their hour (plan 2026-10-28-meetings-local-stt.md,
+ * Task 3). Only the next attempt moves; the error code and the attempt count stay. Returns how many.
+ */
+export function releaseSttNoneWaits(db: Db, at: string): number {
+  const now = canonical('releaseSttNoneWaits', 'at', at);
+  return db
+    .prepare(`UPDATE meetings SET next_attempt_at = @now, updated_at = @now
+      WHERE status = 'queued' AND error_code = 'stt_none' AND next_attempt_at > @now`)
+    .run({ now }).changes;
+}
+
+/**
+ * A part of a queued meeting finished on the local engine (done, or given up): the stage's attempt count goes back to the
+ * run in hand (1), so passing failures spread over many parts never add up to a final one (review fix 2). Called inside
+ * the part's own write. The next attempt and the error code are left as they are.
+ */
+export function noteMeetingProgress(db: Db, id: number): void {
+  db.prepare(`UPDATE meetings SET attempts = MIN(attempts, 1) WHERE id = ? AND status = 'queued'`).run(id);
 }
 
 /**

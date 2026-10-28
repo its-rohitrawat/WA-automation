@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ICONS_FILE, iconsModule } from '../../scripts/build-dashboard-icons.ts';
 import { VENDOR_FILES } from '../../src/web/server.ts';
 // The front end is plain browser modules; these four need no DOM. Their JSDoc types are checked by tsconfig.web.json,
@@ -12,7 +12,7 @@ import { problems, readClientDetail, readClients, readConnections, readGroups, r
 import { PUBLIC_MAIL_DOMAINS as BROWSER_PUBLIC, fieldProblem } from '../../src/web/public/views/rules.js';
 import { PUBLIC_MAIL_DOMAINS } from '../../src/config/domains.ts';
 // @ts-expect-error -- browser module (see above)
-import { ago, greeting, initials, usd, when } from '../../src/web/public/format.js';
+import { ago, date, greeting, initials, usd, when } from '../../src/web/public/format.js';
 // @ts-expect-error -- browser module (see above)
 import { HI } from '../../src/web/public/icons.js';
 // @ts-expect-error -- browser module (see above)
@@ -145,6 +145,8 @@ describe('format (India time)', () => {
   it('names the day in India time, not the machine time', () => {
     expect(when('2026-10-27T05:30:00Z', now)).toBe('Today 11:00');
     expect(when('2026-10-26T19:00:00Z', now)).toBe('Today 00:30');
+    expect(date('2026-10-27T19:00:00Z')).toBe('28 Oct 2026'); // India date
+    expect(date('nonsense')).toBe('—');
     expect(when('2026-10-26T18:00:00Z', now)).toBe('Yesterday 23:30');
     expect(when('2026-10-23T11:00:00Z', now)).toBe('Fri 16:30');
     expect(when('2026-10-21T03:42:00Z', now)).toBe('Wed 09:12');
@@ -221,7 +223,7 @@ describe('contract (the API answers as the screens read them)', () => {
       founder: { state: 'ok', label: 'Connected', groups: 3 },
       spare: { state: 'not_linked', label: 'Not linked', recipientMasked: '+91 •••• 1234' },
       google: [{ label: 'main', email: 'owner@example.com', state: 'ok', stateLabel: 'Connected', usedFor: ['Mail', 'Drive'] }, { label: 'org2', state: 'down', stateLabel: 'Sign in again' }],
-      drive: { state: 'ok', label: 'Connected' },
+      drive: { state: 'ok', label: 'Connected', account: 'owner@example.com' },
       claude: { callsToday: 12, spentToday: 3, capUsd: 3 },
       monitoring: { on: false },
     });
@@ -229,10 +231,57 @@ describe('contract (the API answers as the screens read them)', () => {
     expect(cards[1].state).toBe('off');
     expect(cards[1].note).toMatch(/spare phone/);
     expect(cards[2].rows).toEqual([['Used for', 'Mail, Drive']]);
-    expect(cards[3].title).toBe('Google account · org2');
+    // Each Google card is titled with its email (or says it is not known yet), its account name below.
+    expect(cards[2]).toMatchObject({ title: 'owner@example.com', subtitle: 'Account name: main', email: 'owner@example.com', note: '' });
+    expect(cards[3]).toMatchObject({ title: 'Google account', subtitle: 'Account name: org2', email: '', note: 'Email not known yet: press Reconnect to show it.' });
+    expect(cards[4].rows[0]).toEqual(['Writes as', 'owner@example.com']);
     expect(cards[5]).toMatchObject({ state: 'warn', stateLabel: 'Daily cap reached' });
     expect(cards[6]).toMatchObject({ state: 'off', stateLabel: 'Off' });
     expect(JSON.stringify(cards)).not.toMatch(/sk-|apiKey|token/i);
+  });
+});
+
+describe('the Drive card names the tracker file', () => {
+  const drive = (d: unknown) => readConnections({ drive: d }).find((c: { id: string }) => c.id === 'drive');
+
+  it('shows the file, the folder, the account and the last upload, and links Open in Drive only to a Drive file address', () => {
+    const url = 'https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp_qr-st/view';
+    const c = drive({ state: 'ok', label: 'Connected', lastUploadAt: null, file: 'Tracker.xlsx', folder: 'WA Agent', account: 'owner@example.com', url });
+    expect(c.rows).toEqual([['Writes as', 'owner@example.com'], ['File', 'Tracker.xlsx'], ['Folder', 'WA Agent'], ['Last upload', 'Not uploaded yet']]);
+    expect(c.link).toBe(url);
+    for (const bad of ['https://evil.example/file/d/1AbCdEfGhIjKlMnOp_qr-st/view', 'javascript:alert(1)', 7, null]) {
+      expect(drive({ url: bad }).link, String(bad)).toBe('');
+    }
+  });
+
+  it('the Tracker screen and the Drive card escape the file, folder and account text', async () => {
+    // dom.js reads matchMedia when it loads; the views themselves only build strings.
+    vi.stubGlobal('matchMedia', () => ({ matches: false }));
+    try {
+      // @ts-expect-error -- browser module (see above)
+      const { render } = await import('../../src/web/public/views/tracker.js');
+      // @ts-expect-error -- browser module (see above)
+      const { renderConnections } = await import('../../src/web/public/views/connections.js');
+      const evil = '<img src=x onerror=1>@x';
+      const html: string = render({
+        uploaded: true, url: 'https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp_qr-st/view', file: { name: evil, folder: evil, account: evil },
+        newFileAt: '2026-10-28T05:00:00.000Z', lastPublishedAt: null, lastFailure: null, failingSince: null, health: null, sheets: [],
+      });
+      const card: string = renderConnections([drive({ state: 'ok', file: evil, folder: evil, account: evil, url: 'javascript:alert(1)' })]);
+      for (const out of [html, card]) {
+        expect(out).toContain('&lt;img');
+        expect(out).not.toContain('<img');
+      }
+      expect(html).toContain('data-new-file');
+      expect(card).not.toContain('javascript:');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('says plainly when the account is not known yet, and falls back to the fixed names', () => {
+    const c = drive({ state: 'ok' });
+    expect(c.rows.slice(0, 3)).toEqual([['Writes as', 'Main Google account (email not known yet)'], ['File', 'Tracker.xlsx'], ['Folder', 'WA Agent']]);
   });
 });
 
@@ -273,5 +322,26 @@ describe('Clients and Manage groups (D2)', () => {
     expect(d.meetings[0].title).toBe('Untitled meeting');
     expect(d.openTasks[0]).toEqual({ code: 'DES-001', title: 'Quote', assignedTo: null, deadline: null, status: 'open' });
     expect(() => readClientDetail(undefined)).not.toThrow();
+  });
+});
+
+describe('owner fixes: Sync tracker now and account emails', () => {
+  it('the shared quick-action button names its action and escapes what it is given', async () => {
+    // @ts-expect-error -- browser module (see the top of this file)
+    const { quickButton } = await import('../../src/web/public/views/connect.js');
+    const html = quickButton('upload-tracker', 'refresh', 'Sync tracker now') as string;
+    expect(html).toMatch(/^<button class="btn btn-sm btn-ghost" type="button" data-action="upload-tracker">/);
+    expect(html).toContain('Sync tracker now');
+    expect(quickButton('x"><b>', 'refresh', '<i>hi</i>')).not.toMatch(/<b>|<i>/);
+  });
+
+  it('an account email reaches the Connections card escaped, as text', async () => {
+    // @ts-expect-error -- browser module (see the top of this file)
+    const { renderConnections } = await import('../../src/web/public/views/connections.js');
+    const cards = readConnections({ google: [{ label: 'main', email: 'a"<b>&x@evil.example', state: 'ok', usedFor: ['Tracker on Drive'] }], drive: { account: '<i>@x.example' } });
+    const html = renderConnections(cards) as string;
+    expect(html).toContain('a&quot;&lt;b&gt;&amp;x@evil.example');
+    expect(html).toContain('&lt;i&gt;@x.example');
+    expect(html).not.toMatch(/<b>&|<i>@/);
   });
 });

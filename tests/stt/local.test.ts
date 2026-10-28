@@ -1,10 +1,12 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, parse } from 'node:path';
+import { join, parse, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { parseEnv } from '../../src/config/env.ts';
+import { localMeetingTmpDir } from '../../src/meetings/localTranscriber.ts';
 import { minimalEnv } from '../../src/stt/audio.ts';
 import {
-  checkLocalEngineFiles, LocalEngine, LocalEngineError, localEngineArgs, runLocalEngine,
+  checkLocalEngineFiles, LocalEngine, LocalEngineError, localEngineArgs, localEngineTmpDir, runLocalEngine, sharedLocalEngine,
   type LocalEngineOptions, type LocalRunFile as RunFile, type LocalRunOptions as RunOptions,
 } from '../../src/stt/local.ts';
 
@@ -521,5 +523,42 @@ describe('checkLocalEngineFiles', () => {
     expect(checkLocalEngineFiles({ STT_LOCAL_BIN: bin, STT_LOCAL_MODEL: bin })).toBeNull();
     expect(checkLocalEngineFiles({ STT_LOCAL_BIN: bin, STT_LOCAL_MODEL: workDir })).toBe('STT_LOCAL_MODEL');
     expect(checkLocalEngineFiles({ STT_LOCAL_BIN: join(root, 'missing'), STT_LOCAL_MODEL: bin })).toBe('STT_LOCAL_BIN');
+  });
+});
+
+describe('sharedLocalEngine (meetings on the local engine, Task 3)', () => {
+  let dataDir: string;
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'wa-shared-engine-'));
+  });
+  afterEach(() => rmSync(dataDir, { recursive: true, force: true }));
+  const env = (vars: Partial<Record<'STT_PROVIDER' | 'VOICE_STT_PROVIDER', string>>) =>
+    parseEnv({ DATA_DIR: dataDir, STT_LOCAL_BIN: BIN, STT_LOCAL_MODEL: MODEL, ...vars });
+
+  it('is undefined when neither meetings nor voice notes use the local engine', () => {
+    expect(sharedLocalEngine(parseEnv({ DATA_DIR: dataDir }))).toBeUndefined();
+    expect(sharedLocalEngine(parseEnv({ DATA_DIR: dataDir, STT_PROVIDER: 'sarvam', STT_API_KEY: 'test-key', VOICE_STT_PROVIDER: 'sarvam' }))).toBeUndefined();
+  });
+
+  it.each([
+    ['meetings only', { STT_PROVIDER: 'local' }],
+    ['voice notes only', { VOICE_STT_PROVIDER: 'local' }],
+    ['both', { STT_PROVIDER: 'local', VOICE_STT_PROVIDER: 'local' }],
+  ] as const)('%s: one engine working in DATA_DIR/tmp, which holds both work folders (voice and meetings-local)', async (_name, vars) => {
+    const { run, calls } = fakeRun({ text: 'namaste' });
+    const engine = sharedLocalEngine(env(vars), { localRun: run })!;
+    expect(engine).toBeInstanceOf(LocalEngine);
+    expect(localEngineTmpDir(dataDir)).toBe(resolve(dataDir, 'tmp'));
+    const voiceWork = join(localEngineTmpDir(dataDir), 'voice', 'voice-1');
+    const meetingWork = join(localMeetingTmpDir(dataDir), 'meeting-part-x');
+    expect(localMeetingTmpDir(dataDir)).toBe(resolve(dataDir, 'tmp', 'meetings-local'));
+    for (const workDir of [voiceWork, meetingWork]) {
+      mkdirSync(workDir, { recursive: true });
+      await expect(engine.transcribe(join(workDir, 'audio.wav'), { workDir })).resolves.toEqual({ text: 'namaste' });
+    }
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.file).toBe(BIN);
+    // A folder outside DATA_DIR/tmp is still refused.
+    await expect(engine.transcribe(join(dataDir, 'meetings', 'tmp', 'a.wav'), { workDir: join(dataDir, 'meetings', 'tmp') })).rejects.toThrow(/inside its temporary folder/);
   });
 });

@@ -21,9 +21,11 @@ import { UptimeRobotClient } from './health/uptimeRobot.ts';
 import { baileysFetcher } from './media/fetch.ts';
 import { MediaRefSealer } from './media/ref.ts';
 import type { LiveMeetingsApi } from './meetings/multiAccount.ts';
-import { createMeetingTranscriber } from './meetings/transcribe.ts';
+import { buildMeetingTranscriber } from './meetings/transcribe.ts';
 import { TokenDecryptError, TokenStore } from './output/googleAuth.ts';
 import { meetingsReady } from './output/googleAuth.ts';
+import { fillAccountEmails } from './output/accountEmail.ts';
+import { googleIdVerifier } from './web/oidc.ts';
 import { buildGoogle, founderGateway, googleCredentials, planStartup, WHATSAPP_NOT_LINKED_EXIT } from './setupMode.ts';
 import { LiveReport } from './report/liveReport.ts';
 import { briefingSettings, spareDriver, spareLinked } from './report/dashboardReport.ts';
@@ -33,6 +35,7 @@ import type { Prices } from './spend/pricing.ts';
 import { syncClients } from './store/clients.ts';
 import { openDb, type Db } from './store/db.ts';
 import { Ffmpeg, findFfmpeg } from './stt/audio.ts';
+import { sharedLocalEngine, type LocalEngine } from './stt/local.ts';
 import { systemClock } from './util/clock.ts';
 import { acquireLock, AlreadyRunningError } from './util/lock.ts';
 import { createLogger, silentLogger } from './util/logger.ts';
@@ -66,7 +69,11 @@ const GROUP_KEY_INFO = 'wa-agent dashboard group keys v1';
  * meeting scopes the app keeps meetings paused (google_scopes) and makes no Google meeting call. Logs codes only.
  */
 async function meetingDeps(
-  o: { env: Env; db: Db; api: LiveMeetingsApi; apiKey: string; prices: Prices; configs: ClientConfig[]; log: Logger },
+  o: {
+    env: Env; db: Db; api: LiveMeetingsApi; apiKey: string; prices: Prices; configs: ClientConfig[]; log: Logger;
+    /** The local engine shared with voice notes (sharedLocalEngine); undefined unless a setting is local. */
+    localEngine: LocalEngine | undefined;
+  },
 ): Promise<AppMeetingsDeps> {
   const { env, log, api } = o;
   if (!meetingsReady(o.db)) log.warn({ code: 'google_scopes' }, 'meetings paused: Google sign-in needs meeting access. Run: npm run cli -- google-auth');
@@ -78,15 +85,18 @@ async function meetingDeps(
     exe = null;
   }
   if (exe === null) log.warn({ code: 'no_ffmpeg' }, 'meetings paused: ffmpeg not found');
-  const transcriber = createMeetingTranscriber(env); // STT_API_KEY goes to the provider only
-  if (transcriber === null) log.warn({ code: 'stt_none' }, 'meetings wait: speech-to-text is not set up');
+  const ffmpeg = exe === null ? null : new Ffmpeg(exe);
+  // STT_API_KEY goes to the provider only. STT_PROVIDER=local: the shared engine, or none when its files are missing
+  // (sttProblem, shown in Health); none: meetings wait. Logs codes and setting names only (tested).
+  const { transcriber, sttProblem } = buildMeetingTranscriber(env, { ffmpeg, log, ...(o.localEngine ? { localEngine: o.localEngine } : {}) });
   return {
     api,
     // Empty with one account, so that account's refusal still pauses meetings as before.
     lostAccounts: () => api.lostAccounts(),
     ai: new ClaudeMeetingClient({ apiKey: o.apiKey, model: env.AI_MODEL, prices: o.prices }),
     transcriber,
-    ffmpeg: exe === null ? null : new Ffmpeg(exe),
+    sttProblem,
+    ffmpeg,
     settings: {
       teamDomains: env.TEAM_EMAIL_DOMAINS, pollMinutes: env.MEETING_POLL_MINUTES, maxMinutes: env.MEETING_MAX_MINUTES,
       ...(env.MEETINGS_SINCE !== undefined ? { since: env.MEETINGS_SINCE } : {}), inrPerUsd: env.INR_PER_USD,
@@ -214,10 +224,13 @@ async function main(): Promise<void> {
     // processor's 24 hours of waits for Claude, and Health's long-wait count (amendments 10f, 12a, 15a, 15f).
     const startedAt = systemClock.now();
     // Phase 3: off (the default) means no meeting dependency is built and no meeting call of any kind is made.
-    const meetings = env.MEETINGS_ENABLED ? await meetingDeps({ env, db, api: google.meetings!, apiKey, prices, configs, log }) : undefined;
+    // One local engine for voice notes and meetings (STT_PROVIDER or VOICE_STT_PROVIDER local), so only one model runs on
+    // the CPU at a time; each one's work folder is inside its DATA_DIR/tmp. It checks no file and runs nothing yet.
+    const localEngine = sharedLocalEngine(env);
+    const meetings = env.MEETINGS_ENABLED ? await meetingDeps({ env, db, api: google.meetings!, apiKey, prices, configs, log, localEngine }) : undefined;
     // Phase 2b: the voice transcriber VOICE_STT_PROVIDER names (src/voiceDeps.ts, tested). A local engine that is not set
     // up, or no ffmpeg, never stops the service: voice notes are then kept, not transcribed, and Health says why.
-    const voiceDeps = await buildVoiceDeps(env, { findFfmpeg, log });
+    const voiceDeps = await buildVoiceDeps(env, { findFfmpeg, log, ...(localEngine ? { localEngine } : {}) });
     // The dashboard's audit log (tracker.db audit_log): sign-in, the owner's changes, phone links and the agent's uploads.
     const auditLog = env.DASHBOARD_ENABLED ? new AuditLog(db, systemClock) : undefined;
     const app = createApp({
@@ -259,7 +272,11 @@ async function main(): Promise<void> {
 
     // Only with the dashboard on: its line points there. Off, a Google problem shows when publishing fails, as before.
     if (env.DASHBOARD_ENABLED) app.health.setGoogleConnected(google.connected());
+    // Older accounts' emails (for the owner's Connections screen), once; never awaited, never fatal.
+    const emailDb = db;
+    void fillAccountEmails({ db: emailDb, hub: google.hub, log }).catch(() => {});
     google.hub.onChange((label) => {
+      void fillAccountEmails({ db: emailDb, hub: google.hub, log, labels: [label] }).catch(() => {});
       if (env.DASHBOARD_ENABLED) app.health.setGoogleConnected(google.connected());
       // A reconnected main account uploads now, not after the failure backoff (up to 15 minutes).
       if (label === 'main') void app.publisher.publishNow().catch((err: unknown) => log.error({ err }, 'upload after the Google reconnect failed'));
@@ -359,6 +376,8 @@ async function main(): Promise<void> {
           google: {
             db: trackerStore, hub: google.hub, publicUrl: env.DASHBOARD_PUBLIC_URL ?? `http://localhost:${env.DASHBOARD_PORT}`,
             web: googleCredentials(env).web, meetingsEnabled: env.MEETINGS_ENABLED, log, clock: systemClock,
+            // The chosen account's email comes from its ID token, checked like the owner sign-in's.
+            ...(googleCredentials(env).web ? { verifier: googleIdVerifier(googleCredentials(env).web!.clientId) } : {}),
           },
           actions: {
             publisher: app.publisher, clock: systemClock, limiter: new ActionRateLimiter(systemClock),

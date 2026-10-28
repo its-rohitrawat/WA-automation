@@ -8,7 +8,7 @@ export const $ = (s, r = document) => /** @type {HTMLElement} */ (r.querySelecto
 /** @type {(s: string, r?: ParentNode) => HTMLElement[]} */
 export const $$ = (s, r = document) => /** @type {HTMLElement[]} */ ([...r.querySelectorAll(s)]);
 
-export const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+export const reduceMotion = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 
 /** @param {unknown} s */
 export const esc = (s) =>

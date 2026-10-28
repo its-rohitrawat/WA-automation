@@ -151,10 +151,14 @@ export function defaultMeetingDeps(env: Env, keyProvider: KeyProvider, clock: Cl
   return { env, keyProvider, out: (l) => console.log(l), clock, googleApi: storedGoogleApi(env) };
 }
 
-/** The list price, with speaker labels, of STT_PROVIDER for a meeting of this length; null when none. Prices only: no provider, no key. */
+/**
+ * The list price, with speaker labels, of STT_PROVIDER for a meeting of this length; null when none, $0 for the local
+ * engine on this machine. Prices only: no provider, no key.
+ */
 export function speechCeilingFromEnv(env: Pick<Env, 'STT_PROVIDER' | 'INR_PER_USD'>): ((seconds: number) => number) | null {
   const provider = env.STT_PROVIDER;
   if (provider === 'none') return null;
+  if (provider === 'local') return () => 0;
   const price = modelFor(provider, true);
   return (seconds) => costUsd(price, seconds, env.INR_PER_USD);
 }

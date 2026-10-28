@@ -34,10 +34,13 @@ import { cleanNames, fileNameTitle, inviteFacts } from './watcher.ts';
  * - a transient error keeps the claim's attempt and retries after 1, 5 and 30 minutes; the 4th failed attempt of a stage
  *   is final (failed);
  * - a stage whose runs never ended MAX_ATTEMPTS times (the process stopped each time) fails as crashed;
+ * - on the local engine, a part that finishes during a run puts the count back to that run (noteMeetingProgress), so
+ *   only repeated failures of one part, not passing ones spread over many, use up the stage's attempts;
  * - every path to a final status books speech parts left in flight first (bookStuckParts), then failMeeting.
- * A stop (the signal) aborts only the download and ffmpeg: speech and Claude calls never take the signal. A stage cut off
- * by the stop is left queued and due at once, with its attempt given back: a stop is not the meeting's fault, and an
- * aborted download or ffmpeg run costs nothing. A run the stop could not abort (a speech or Claude call) finishes and is
+ * A stop (the signal) aborts only the download, ffmpeg and the free local speech engine (STT_PROVIDER=local): paid
+ * speech and Claude calls never take the signal. A stage cut off by the stop is left queued and due at once, with its
+ * attempt given back: a stop is not the meeting's fault, and an aborted download, ffmpeg or local engine run costs
+ * nothing (the local part runs again). A run the stop could not abort (a speech or Claude call) finishes and is
  * stored, or is booked by SpendGuard.settlePending, and the claim's attempt stays counted, as for a crash.
  * Logs carry the meeting id, client id, stage, codes and counts only: never titles, names, emails or what was said.
  */
@@ -261,7 +264,7 @@ export class MeetingProcessor {
     d.log.info({ meetingId: m.id, attendeeCount: facts.attendees.length, participantCount: participants.length }, 'meeting attendees read again');
   }
 
-  /** audio -> transcribed. The signal stops it only before a new part starts or while splitting. */
+  /** audio -> transcribed. The signal stops it before a new part starts, while splitting, and during a local engine part. */
   async #transcribe(id: number, signal: AbortSignal): Promise<StageResult> {
     const d = this.#d;
     if (d.ffmpeg === null) throw new MeetingDeferral('no_ffmpeg');
@@ -305,6 +308,8 @@ export class MeetingProcessor {
       {
         clientId: m.clientId, clientName: client.name, title: m.title, startedAt: m.startedAt, seconds: m.audioSeconds ?? 0,
         attendees: this.#people(m), summary: m.summary, segments: m.transcript ?? [], transcriptCut: m.note === 'transcript_cut',
+        // Parts the local engine gave up: "No speech recognised" lines in the transcript.
+        unheard: m.sttParts.filter((p) => p.unheard === true).map((p) => ({ start: p.offset, end: p.offset + p.seconds })),
       },
     );
     advanceStage(d.db, id, 'doc', { docFileId }, this.#now());
@@ -377,7 +382,9 @@ export class MeetingProcessor {
       return 'failed';
     }
     const code = stepCode(e);
-    const attempts = before.attempts + 1; // the attempt the claim counted
+    // The attempt the claim counted, or fewer when a local part finished during this run (noteMeetingProgress, review
+    // fix 2): passing failures spread over many parts never add up. Never more than the claim counted.
+    const attempts = Math.min(before.attempts + 1, Math.max(1, now.attempts));
     if (attempts >= MEETING_MAX_ATTEMPTS) {
       this.#fail(before, 'failed', code, at);
       return 'failed';

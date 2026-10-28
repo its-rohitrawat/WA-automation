@@ -212,7 +212,7 @@ describe('voice-note speech-to-text settings (local engine)', () => {
     for (const name of ['STT_LOCAL_BIN', 'STT_LOCAL_MODEL']) {
       for (const rel of ['zz-relative-zz/transcribe-cli', './zz-relative-zz', 'zz-relative-zz', '-zz-relative-zz']) {
         const msg = envError({ ...local, [name]: rel });
-        expect(msg).toMatch(new RegExp(`${name} must be an absolute path`));
+        expect(msg).toMatch(new RegExp(`${name} must be an absolute path when VOICE_STT_PROVIDER is local`));
         expect(msg).not.toContain('zz-relative-zz');
       }
     }
@@ -309,7 +309,139 @@ describe('setting values never appear in errors', () => {
   });
 });
 
+describe('meetings on the local engine (STT_PROVIDER=local)', () => {
+  const BIN = '/opt/stt/transcribe.cpp/build/bin/transcribe-cli';
+  const MODEL = '/opt/stt/models/Voxtral-Mini-3B-2507-Q4_K_M.gguf';
+  const meetingsLocal = { STT_PROVIDER: 'local', STT_LOCAL_BIN: BIN, STT_LOCAL_MODEL: MODEL };
+
+  it('is accepted without STT_API_KEY, and takes both paths as given', () => {
+    const env = parseEnv(meetingsLocal);
+    expect(env.STT_PROVIDER).toBe('local');
+    expect(env.STT_API_KEY).toBeUndefined();
+    expect(env.STT_LOCAL_BIN).toBe(BIN);
+    expect(env.STT_LOCAL_MODEL).toBe(MODEL);
+    expect(env.VOICE_STT_PROVIDER).toBe('none');
+  });
+
+  it('a stray STT_API_KEY with local is kept, not required and not refused', () => {
+    expect(parseEnv({ ...meetingsLocal, STT_API_KEY: 'k' }).STT_PROVIDER).toBe('local');
+  });
+
+  it('local with local for voice notes is fine', () => {
+    const env = parseEnv({ ...meetingsLocal, VOICE_STT_PROVIDER: 'local' });
+    expect(env.STT_PROVIDER).toBe('local');
+    expect(env.VOICE_STT_PROVIDER).toBe('local');
+  });
+
+  it('voice notes may be none with local meetings; a paid voice provider must still equal STT_PROVIDER', () => {
+    expect(parseEnv({ ...meetingsLocal, VOICE_STT_PROVIDER: 'none' }).VOICE_STT_PROVIDER).toBe('none');
+    for (const p of ['sarvam', 'elevenlabs', 'openai']) {
+      const msg = envError({ ...meetingsLocal, VOICE_STT_PROVIDER: p, STT_API_KEY: 'k' });
+      expect(msg).toMatch(/VOICE_STT_PROVIDER must be local, none or the same as STT_PROVIDER/);
+    }
+  });
+
+  it('STT_LOCAL_BIN and STT_LOCAL_MODEL are required for meetings on local, naming STT_PROVIDER', () => {
+    const noBin = envError({ STT_PROVIDER: 'local', STT_LOCAL_MODEL: MODEL });
+    expect(noBin).toMatch(/STT_LOCAL_BIN is required when STT_PROVIDER is local/);
+    expect(noBin).not.toMatch(/STT_LOCAL_MODEL/);
+    expect(noBin).not.toMatch(/STT_API_KEY/);
+    const noModel = envError({ STT_PROVIDER: 'local', STT_LOCAL_BIN: BIN });
+    expect(noModel).toMatch(/STT_LOCAL_MODEL is required when STT_PROVIDER is local/);
+    expect(noModel).not.toMatch(/STT_LOCAL_BIN/);
+    const neither = envError({ STT_PROVIDER: 'local' });
+    expect(neither).toMatch(/STT_LOCAL_BIN is required when STT_PROVIDER is local/);
+    expect(neither).toMatch(/STT_LOCAL_MODEL is required when STT_PROVIDER is local/);
+  });
+
+  it('both paths must be absolute for meetings on local, refused without echoing them', () => {
+    for (const name of ['STT_LOCAL_BIN', 'STT_LOCAL_MODEL']) {
+      for (const rel of ['zz-relative-zz/transcribe-cli', './zz-relative-zz', 'zz-relative-zz', '-zz-relative-zz']) {
+        const msg = envError({ ...meetingsLocal, [name]: rel });
+        expect(msg).toMatch(new RegExp(`${name} must be an absolute path when STT_PROVIDER is local`));
+        expect(msg).not.toContain('zz-relative-zz');
+      }
+    }
+  });
+
+  it('with both local, a missing path is reported once, naming both settings', () => {
+    const msg = envError({ STT_PROVIDER: 'local', VOICE_STT_PROVIDER: 'local', STT_LOCAL_MODEL: MODEL });
+    expect(msg).toMatch(/STT_LOCAL_BIN is required when STT_PROVIDER and VOICE_STT_PROVIDER are local/);
+    expect(msg.match(/STT_LOCAL_BIN is required/g)).toHaveLength(1);
+    expect(msg).not.toMatch(/STT_LOCAL_MODEL/);
+  });
+
+  it('with both local, a relative path is reported once, naming both settings, without echoing it', () => {
+    const msg = envError({ STT_PROVIDER: 'local', VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: 'zz-rel-zz/cli', STT_LOCAL_MODEL: MODEL });
+    expect(msg).toMatch(/STT_LOCAL_BIN must be an absolute path when STT_PROVIDER and VOICE_STT_PROVIDER are local/);
+    expect(msg.match(/STT_LOCAL_BIN must be an absolute path/g)).toHaveLength(1);
+    expect(msg).not.toMatch(/STT_LOCAL_MODEL/);
+    expect(msg).not.toContain('zz-rel-zz');
+  });
+
+  it('voice-notes-only local keeps its message', () => {
+    expect(envError({ VOICE_STT_PROVIDER: 'local', STT_LOCAL_MODEL: MODEL })).toMatch(/STT_LOCAL_BIN is required when VOICE_STT_PROVIDER is local/);
+  });
+
+  it('a stray relative path while neither setting is local never stops the service', () => {
+    for (const p of [{}, { STT_PROVIDER: 'none' }, { STT_PROVIDER: 'sarvam', STT_API_KEY: 'k' }]) {
+      expect(parseEnv({ ...p, STT_LOCAL_BIN: 'rel/transcribe-cli', STT_LOCAL_MODEL: './m.gguf' }).STT_LOCAL_BIN).toBe('rel/transcribe-cli');
+    }
+  });
+
+  it('the paid and none cases are unchanged', () => {
+    for (const p of ['sarvam', 'elevenlabs', 'openai'] as const) {
+      expect(parseEnv({ STT_PROVIDER: p, STT_API_KEY: 'k' }).STT_PROVIDER).toBe(p);
+      expect(envError({ STT_PROVIDER: p })).toMatch(/STT_API_KEY/);
+      // A paid provider needs no local engine paths.
+      expect(envError({ STT_PROVIDER: p })).not.toMatch(/STT_LOCAL_/);
+    }
+    expect(parseEnv({ STT_PROVIDER: 'none' }).STT_API_KEY).toBeUndefined();
+    expect(parseEnv({}).STT_PROVIDER).toBe('none');
+  });
+
+  it('refuses near misses of local by name', () => {
+    for (const v of ['Local', 'LOCAL', 'local ', 'voxtral']) {
+      expect(envError({ ...meetingsLocal, STT_PROVIDER: v })).toMatch(/STT_PROVIDER/);
+    }
+  });
+
+  it('never echoes a path or key in its errors', () => {
+    const SECRET = 'zz-distinctive-secret-zz';
+    const cases: Record<string, string>[] = [
+      { STT_PROVIDER: 'local', STT_LOCAL_BIN: SECRET, STT_LOCAL_MODEL: MODEL },
+      { STT_PROVIDER: 'local', STT_LOCAL_BIN: BIN, STT_LOCAL_MODEL: SECRET },
+      { STT_PROVIDER: 'local', STT_LOCAL_BIN: `${SECRET}/transcribe-cli` },
+      { STT_PROVIDER: 'local', VOICE_STT_PROVIDER: 'local', STT_LOCAL_MODEL: `./${SECRET}.gguf` },
+      { STT_PROVIDER: 'local', VOICE_STT_PROVIDER: 'openai', STT_API_KEY: SECRET, STT_LOCAL_BIN: BIN, STT_LOCAL_MODEL: MODEL },
+      { STT_PROVIDER: SECRET, STT_LOCAL_BIN: BIN, STT_LOCAL_MODEL: MODEL },
+    ];
+    for (const c of cases) {
+      const msg = envError(c);
+      expect(msg).toMatch(/^Invalid configuration in: /);
+      expect(msg).not.toContain(SECRET);
+      expect(msg).not.toContain('/opt/stt');
+    }
+  });
+});
+
 describe('.env.example', () => {
+  it('says STT_PROVIDER=local sends meetings through the local engine', () => {
+    const example = readFileSync('.env.example', 'utf8');
+    expect(example).toMatch(/^# local, sarvam, elevenlabs, openai or none \(default none: nothing is transcribed, no spend\)\.$/m);
+    expect(example).toMatch(/STT_PROVIDER=local sends meetings through the local engine too/);
+    expect(example).toMatch(/Required unless STT_PROVIDER is none or local\./);
+  });
+
+  it('labels the STT_LOCAL_* block as serving both voice notes and meetings', () => {
+    const example = readFileSync('.env.example', 'utf8');
+    expect(example).not.toMatch(/meetings keep STT_PROVIDER/);
+    const heading = example.indexOf('# The local engine, used by VOICE_STT_PROVIDER=local and STT_PROVIDER=local');
+    expect(heading).toBeGreaterThan(example.indexOf('VOICE_STT_PROVIDER=none'));
+    expect(heading).toBeLessThan(example.indexOf('STT_LOCAL_ENGINE='));
+    expect(example).toMatch(/Required when STT_PROVIDER or VOICE_STT_PROVIDER is local\./);
+  });
+
   it('lists every meeting and speech-to-text setting, and its placeholders parse to the defaults', () => {
     const vars = parseDotenv(readFileSync('.env.example', 'utf8'));
     const names = [

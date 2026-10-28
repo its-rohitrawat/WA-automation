@@ -62,21 +62,22 @@ const EnvSchema = z.object({
   MEETING_MAX_MINUTES: z.coerce.number().int().min(10).max(300).default(180),
   MEETINGS_SINCE: z.string().refine(isRealDate, 'must be a real date written YYYY-MM-DD').optional(),
   FFMPEG_PATH: z.string().min(1).optional(),
-  // Speech-to-text, shared by voice notes (Phase 2b) and meetings.
-  STT_PROVIDER: z.enum(['sarvam', 'elevenlabs', 'openai', 'none']).default('none'),
+  // Speech-to-text, shared by voice notes (Phase 2b) and meetings. local: meetings go through the local engine on this
+  // machine (STT_LOCAL_*), with no key and no spend.
+  STT_PROVIDER: z.enum(['local', 'sarvam', 'elevenlabs', 'openai', 'none']).default('none'),
   STT_API_KEY: z.string().min(1).optional(),
   // A sane band: a typo such as 8800 would make every Sarvam estimate 100 times too small. Zod 4 numbers refuse Infinity.
   INR_PER_USD: z.coerce.number().min(40).max(200).default(88),
   /** Longest voice note or audio file sent to speech-to-text, in seconds, measured on the converted audio (Phase 2b V5, N3). */
   STT_MAX_SECONDS: z.coerce.number().int().min(30).max(900).default(600),
-  // Voice notes only (Phase 2b amendment, local speech-to-text). Meetings keep STT_PROVIDER. A paid value here must be
+  // Voice notes only (Phase 2b amendment, local speech-to-text); meetings use STT_PROVIDER. A paid value here must be
   // the same as STT_PROVIDER, since both use the one STT_API_KEY; local needs no key.
   VOICE_STT_PROVIDER: z.enum(['local', 'sarvam', 'elevenlabs', 'openai', 'none']).default('none'),
   /** The open-source model run on this machine: voxtral and qwen3-asr through transcribe.cpp, whisper through whisper.cpp. */
   STT_LOCAL_ENGINE: z.enum(['voxtral', 'qwen3-asr', 'whisper']).default('voxtral'),
-  /** Absolute path to transcribe-cli (voxtral, qwen3-asr) or whisper-cli (whisper). Required for local. */
+  /** Absolute path to transcribe-cli (voxtral, qwen3-asr) or whisper-cli (whisper). Required when STT_PROVIDER or VOICE_STT_PROVIDER is local. */
   STT_LOCAL_BIN: z.string().min(1).optional(),
-  /** Absolute path to the model file. Required for local. */
+  /** Absolute path to the model file. Required when STT_PROVIDER or VOICE_STT_PROVIDER is local. */
   STT_LOCAL_MODEL: z.string().min(1).optional(),
   STT_LOCAL_THREADS: z.coerce.number().int().min(1).max(64).default(8),
   /** Longest one run of the engine may take, in seconds. */
@@ -126,20 +127,25 @@ const EnvSchema = z.object({
   if (env.MEETINGS_ENABLED && env.TEAM_EMAIL_DOMAINS.length === 0) {
     ctx.addIssue({ code: 'custom', path: ['TEAM_EMAIL_DOMAINS'], message: 'is required when MEETINGS_ENABLED is true' });
   }
-  if (env.STT_PROVIDER !== 'none' && !env.STT_API_KEY) {
-    ctx.addIssue({ code: 'custom', path: ['STT_API_KEY'], message: 'is required when STT_PROVIDER is not none' });
+  if (env.STT_PROVIDER !== 'none' && env.STT_PROVIDER !== 'local' && !env.STT_API_KEY) {
+    ctx.addIssue({ code: 'custom', path: ['STT_API_KEY'], message: 'is required when STT_PROVIDER is not none or local' });
   }
   if (env.VOICE_STT_PROVIDER !== 'local' && env.VOICE_STT_PROVIDER !== 'none' && env.VOICE_STT_PROVIDER !== env.STT_PROVIDER) {
     ctx.addIssue({ code: 'custom', path: ['VOICE_STT_PROVIDER'], message: 'must be local, none or the same as STT_PROVIDER' });
   }
-  // Checked only for local: a stray path while voice notes are off or paid must not stop the service.
-  if (env.VOICE_STT_PROVIDER === 'local') {
+  // Checked only for local (meetings, voice notes or both): a stray path while neither is local must not stop the
+  // service. The message names the setting that asks for the engine, never a value.
+  const localFor = [env.STT_PROVIDER === 'local' && 'STT_PROVIDER', env.VOICE_STT_PROVIDER === 'local' && 'VOICE_STT_PROVIDER'].filter(
+    (n) => n !== false,
+  );
+  if (localFor.length > 0) {
+    const when = `when ${localFor.join(' and ')} ${localFor.length > 1 ? 'are' : 'is'} local`;
     for (const name of ['STT_LOCAL_BIN', 'STT_LOCAL_MODEL'] as const) {
       const path = env[name];
       if (path === undefined) {
-        ctx.addIssue({ code: 'custom', path: [name], message: 'is required when VOICE_STT_PROVIDER is local' });
+        ctx.addIssue({ code: 'custom', path: [name], message: `is required ${when}` });
       } else if (!isAbsolute(path)) {
-        ctx.addIssue({ code: 'custom', path: [name], message: 'must be an absolute path when VOICE_STT_PROVIDER is local' });
+        ctx.addIssue({ code: 'custom', path: [name], message: `must be an absolute path ${when}` });
       }
     }
   }

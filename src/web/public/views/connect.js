@@ -309,6 +309,17 @@ const running = new Set();
 /** @param {string} name */
 export const actionRunning = (name) => running.has(name);
 
+/**
+ * A quick action's button, for any screen (Connections, Clients): the shell runs it on click (data-action). While the
+ * action runs it is drawn busy, even when its screen is drawn again meanwhile.
+ * @param {string} name @param {string} ic @param {string} label @param {{ primary?: boolean }} [opts]
+ */
+export function quickButton(name, ic, label, opts = {}) {
+  const cls = `btn btn-sm ${opts.primary ? 'btn-primary' : 'btn-ghost'}`;
+  if (running.has(name)) return `<button class="${cls}" type="button" disabled data-action="${esc(name)}"><span class="spin"></span>Working…</button>`;
+  return `<button class="${cls}" type="button" data-action="${esc(name)}">${icon(ic, 15)}${esc(label)}</button>`;
+}
+
 /** Runs a quick action, its button busy meanwhile. @param {HTMLButtonElement} btn @param {string} name */
 export async function runAction(btn, name) {
   if (running.has(name)) return;

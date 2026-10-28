@@ -1,14 +1,15 @@
 import type { SpendView } from '../app.ts';
 import type { Env } from '../config/env.ts';
 import type { Health, HealthSnapshot } from '../health/health.ts';
-import { MAIN_ACCOUNT, meetingAccounts } from '../output/googleAuth.ts';
+import { accountEmail, MAIN_ACCOUNT, meetingAccounts } from '../output/googleAuth.ts';
+import { trackerLink } from '../report/morningReport.ts';
 import type { SenderStatus } from '../report/types.ts';
 import type { Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import { istDate } from '../util/time.ts';
 import type { GatewayStatus } from '../wa/gateway.ts';
 import { overview, type Overview } from './queries.ts';
-import { lastTrackerUpload } from './trackerQueries.ts';
+import { lastTrackerUpload, trackerFile } from './trackerQueries.ts';
 
 // The dashboard's only way into the running agent (D1 Task 5, spec 4.2), read side. Everything here is read from the
 // live health snapshot, the gateway and sender status and the database, and reduced to what the screens need: states,
@@ -38,7 +39,8 @@ export interface Connections {
   founder: { state: PartState; label: string; groups: number; lastActivityAt: string | null; device: string };
   spare: { state: PartState; label: string; device: string; recipientMasked: string | null };
   google: { label: string; email: string | null; usedFor: string[]; state: PartState; stateLabel: string }[];
-  drive: { state: PartState; label: string; lastUploadAt: string | null };
+  /** The tracker file: its name, folder, the main account's email (when known) and its Drive link (once uploaded). */
+  drive: { state: PartState; label: string; lastUploadAt: string | null; file: string; folder: string; account: string | null; url: string | null };
   claude: { callsToday: number; spentToday: number; capUsd: number };
   monitoring: { on: boolean; lastBeatAt: string | null };
 }
@@ -124,6 +126,8 @@ export class AgentControl {
     if (!this.#d.env.MEETINGS_ENABLED || m === undefined) return { state: 'off', label: 'Switched off' };
     if (m.paused === 'google_auth' || m.paused === 'google_scopes') return { state: 'down', label: 'Paused: Google needs meeting access' };
     if (m.paused === 'no_ffmpeg') return { state: 'down', label: 'Paused: ffmpeg not found' };
+    // STT_PROVIDER=local with its files missing: the voice notes' wording for the same problem.
+    if (m.sttProblem !== undefined) return { state: 'warn', label: 'Waiting: the local speech engine is not set up' };
     const lost = m.lostAccounts ?? [];
     if (lost.length > 0) return { state: 'warn', label: `Google sign-in lost for ${lost.join(', ')}` };
     if (m.stats.failed > 0) return { state: 'warn', label: `${plural(m.stats.failed, 'meeting')} could not be processed` };
@@ -203,14 +207,15 @@ export class AgentControl {
       ? { state: 'down' as const, stateLabel: 'Sign-in expired' }
       : meetingAccess ? { state: 'warn' as const, stateLabel: 'Needs meeting access' } : { state: 'ok' as const, stateLabel: 'Connected' };
     const google = [
-      { label: MAIN_ACCOUNT, email: null, usedFor: ['Tracker on Drive', ...(env.MEETINGS_ENABLED ? ['Meetings'] : [])], ...mainState },
+      { label: MAIN_ACCOUNT, email: accountEmail(db, MAIN_ACCOUNT), usedFor: ['Tracker on Drive', ...(env.MEETINGS_ENABLED ? ['Meetings'] : [])], ...mainState },
       ...meetingAccounts(db).map((label) => ({
-        label, email: null, usedFor: ['Meetings'],
+        label, email: accountEmail(db, label), usedFor: ['Meetings'],
         ...(lost.has(label) ? { state: 'down' as const, stateLabel: 'Sign-in lost' } : { state: 'ok' as const, stateLabel: 'Connected' }),
       })),
     ];
     const calls = (db.prepare("SELECT COUNT(*) AS n FROM spend WHERE day = ? AND kind = 'ai'").get(istDate(now)) as { n: number }).n;
     const beat = heartbeat?.lastBeatAt() ?? null;
+    const file = trackerFile(db);
     return {
       founder: { ...this.#whatsapp(), groups, lastActivityAt: this.#lastMessageAt(), device: FOUNDER_DEVICE },
       spare: sender ? { ...spareState(sender.status()), device: SPARE_DEVICE, recipientMasked: sender.maskedRecipient() }
@@ -218,7 +223,10 @@ export class AgentControl {
           ? { ...(this.#d.spareLinked() ? { state: 'ok' as const, label: 'Linked' } : { state: 'warn' as const, label: 'Not linked' }), device: SPARE_DEVICE, recipientMasked: null }
           : { state: 'off', label: 'Switched off', device: SPARE_DEVICE, recipientMasked: null },
       google,
-      drive: { ...this.#tracker(snap), lastUploadAt: lastTrackerUpload(db, snap.lastPublishedAt) },
+      drive: {
+        ...this.#tracker(snap), lastUploadAt: lastTrackerUpload(db, snap.lastPublishedAt), file: file.name, folder: file.folder, account: file.account,
+        url: trackerLink(db) ?? null,
+      },
       claude: { callsToday: calls, spentToday: spend.spentToday(), capUsd: spend.capUsd },
       monitoring: { on: heartbeat !== undefined, lastBeatAt: beat === null ? null : beat.toISOString() },
     };

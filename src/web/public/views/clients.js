@@ -4,10 +4,28 @@ import { ApiError, get } from '../api.js';
 import { readClientDetail, readClients } from '../contract.js';
 import { esc, icon } from '../dom.js';
 import { ago, when } from '../format.js';
+import { CONNECTIONS_CHANGED, quickButton } from './connect.js';
 import { openDrawer, openDrawerElement } from './drawer.js';
 import { mountGroups } from './groups.js';
 
 const CLIENTS_MS = 30_000;
+
+/** The tracker's last successful upload (GET /tracker), for the Sync tracker now bars: undefined until the agent answers. */
+let trackerAt = /** @type {string | null | undefined} */ (undefined);
+const loadTrackerAt = async () => {
+  try {
+    const t = await get('/tracker');
+    trackerAt = typeof t?.lastPublishedAt === 'string' && !Number.isNaN(Date.parse(t.lastPublishedAt)) ? t.lastPublishedAt : null;
+  } catch {
+    // keeps what it knew; nothing is claimed before the agent has answered
+  }
+};
+const updated = () => (trackerAt === undefined ? '' : trackerAt ? `Updated ${ago(trackerAt)}` : 'Not uploaded yet');
+const SYNC_NOTE = 'The tracker also updates by itself after the agent reads new messages.';
+
+/** Sync tracker now: the upload-tracker quick action (same busy state, messages and limit as on Connections). */
+const syncBar = () => `<div class="sync-bar">${quickButton('upload-tracker', 'refresh', 'Sync tracker now')}<span class="muted-note sync-at">${esc(updated())}</span>
+    <span class="muted-note sync-note">${SYNC_NOTE}</span></div>`;
 
 /** The Clients / Manage groups tabs. @param {string | null} sub */
 const tabs = (sub) => `<div class="toolbar"><div class="seg" role="tablist" aria-label="Clients">
@@ -75,6 +93,8 @@ async function clientDrawer(code) {
   }
   const foot = d.querySelector('.dr-foot');
   if (foot) foot.insertAdjacentHTML('beforeend', `<button class="btn btn-primary" type="button" data-go="tracker">${icon('xls', 16)}Open tracker</button>`);
+  // Sync tracker now, as in the Clients header.
+  if (foot) foot.insertAdjacentHTML('beforeend', `${quickButton('upload-tracker', 'refresh', 'Sync tracker now')}<span class="muted-note sync-at">${esc(updated())}</span><span class="muted-note sync-note">${SYNC_NOTE}</span>`);
 }
 
 /** @param {import('./registry.js').ScreenCtx} ctx @returns {(() => void) | void} */
@@ -99,7 +119,7 @@ export function mountClients(ctx) {
   /** @type {unknown} */
   let error = null;
   const draw = () => {
-    const head = tabs(null);
+    const head = tabs(null) + syncBar();
     if (!clients) {
       ctx.redraw(`${head}<p class="loading">${error ? esc(error instanceof ApiError ? error.message : 'The clients could not be loaded. Trying again shortly.') : 'Loading the clients…'}</p>`);
       return;
@@ -122,9 +142,23 @@ export function mountClients(ctx) {
   view.addEventListener('click', onOpen);
   view.addEventListener('keydown', onOpen);
   draw();
+  // After a sync (here or on Connections): the new upload time, here and in an open drawer.
+  const onSynced = async () => {
+    await loadTrackerAt();
+    if (!ctx.live()) return;
+    draw();
+    const drawer = openDrawerElement();
+    const at = drawer?.querySelector('.sync-at');
+    if (at) at.textContent = updated();
+    // Its button too: it may have been drawn busy while the header's sync ran.
+    const btn = drawer?.querySelector('[data-action="upload-tracker"]');
+    if (btn) btn.outerHTML = quickButton('upload-tracker', 'refresh', 'Sync tracker now');
+  };
+  addEventListener(CONNECTIONS_CHANGED, onSynced);
   ctx.poll(async () => {
     try {
-      const next = readClients(await get('/clients'));
+      const [answer] = await Promise.all([get('/clients'), loadTrackerAt()]);
+      const next = readClients(answer);
       if (!ctx.live()) return;
       clients = next;
       error = null;
@@ -135,6 +169,7 @@ export function mountClients(ctx) {
     draw();
   }, CLIENTS_MS);
   return () => {
+    removeEventListener(CONNECTIONS_CHANGED, onSynced);
     view.removeEventListener('click', onTab);
     view.removeEventListener('click', onOpen);
     view.removeEventListener('keydown', onOpen);

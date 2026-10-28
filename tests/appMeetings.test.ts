@@ -1,16 +1,18 @@
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp, type AppMeetingsDeps } from '../src/app.ts';
 import type { MeetingsHealth } from '../src/meetings/healthTypes.ts';
-import { meetingTranscriber } from '../src/meetings/transcribe.ts';
+import { MEETING_STT_PROBLEM_LINES } from '../src/health/health.ts';
+import { localMeetingTranscriber } from '../src/meetings/localTranscriber.ts';
+import { meetingTranscriber, type MeetingTranscriber } from '../src/meetings/transcribe.ts';
 import { MEETING_SCOPES, saveGrantedScopes } from '../src/output/googleAuth.ts';
 import type { Prices } from '../src/spend/pricing.ts';
 import type { Db } from '../src/store/db.ts';
 import { getKv } from '../src/store/kv.ts';
-import { getMeeting, insertFound } from '../src/store/meetings.ts';
+import { deferMeeting, getMeeting, insertFound } from '../src/store/meetings.ts';
 import { listTasks } from '../src/store/tasks.ts';
 import { Ffmpeg } from '../src/stt/audio.ts';
 import { systemClock } from '../src/util/clock.ts';
@@ -39,6 +41,9 @@ interface SetupOptions {
   drainMs?: number;
   prepare?: (db: Db) => void;
   stt?: FakeSttProvider;
+  /** Replaces the paid fake transcriber (null: none), built with the test's data folder. */
+  transcriber?: (dataDir: string) => MeetingTranscriber | null;
+  sttProblem?: AppMeetingsDeps['sttProblem'];
 }
 
 /** One finished Sharma recording in Meet, with its invite. */
@@ -86,7 +91,8 @@ function setup(o: SetupOptions = {}) {
     o.meetings === false
       ? undefined
       : {
-          api, ai: meetingAi, transcriber: meetingTranscriber(stt, 88), ffmpeg: new Ffmpeg('ffmpeg.exe', ff.run),
+          api, ai: meetingAi, transcriber: o.transcriber ? o.transcriber(dataDir) : meetingTranscriber(stt, 88), ffmpeg: new Ffmpeg('ffmpeg.exe', ff.run),
+          ...(o.sttProblem !== undefined ? { sttProblem: o.sttProblem } : {}),
           settings: { teamDomains: ['studio.example'], pollMinutes: 5, maxMinutes: 180, since: '2026-11-01', inrPerUsd: 88 },
           clients: [SHARMA, MEHTA],
         };
@@ -289,6 +295,72 @@ describe('app with meetings', () => {
     await stopApp(app);
     expect(spendRows(db)).toEqual([expect.objectContaining({ kind: 'stt' })]);
     expect(getMeeting(db, 1)?.sttParts[0]).toMatchObject({ booked: 'ceiling' });
+  });
+
+  describe('STT_PROVIDER=local (plan 2026-10-28-meetings-local-stt.md, Task 3)', () => {
+    /** The local transcriber on a fake engine (each ten-minute part says something new) and a fake WAV conversion. */
+    const local = (said: { n: number }) => (dataDir: string) =>
+      localMeetingTranscriber(
+        { transcribe: async () => ({ text: `part ${++said.n}: logo files kal tak bhej dijiye` }) },
+        {
+          engine: 'voxtral', inrPerUsd: 88, tmpDir: join(dataDir, 'tmp', 'meetings-local'),
+          ffmpeg: new Ffmpeg('ffmpeg.exe', async (_file, args) => {
+            writeFileSync(args[args.length - 1]!, 'wav-bytes');
+            return { code: 0, stderr: '' };
+          }),
+        },
+      );
+    /** The recording discovery finds, already stored and waiting for speech-to-text for another hour (STT_PROVIDER was none). */
+    const waitingForStt = (db: Db) => {
+      const id = insertFound(db, queuedMeeting({ recording: 'conferenceRecords/c1/recordings/r1', title: 'Sharma Interiors weekly' }))!;
+      deferMeeting(db, id, { errorCode: 'stt_none', nextAttemptAt: '2026-11-01T13:00:00.000Z', at: '2026-11-01T12:00:00.000Z', attempts: 0 });
+    };
+
+    it('a meeting waiting with stt_none is processed after the restart, not an hour later: free, speaker-less lines to Claude and the Doc', async () => {
+      const said = { n: 0 };
+      const { app, db, meetingAi, drive, health } = setup({ prepare: waitingForStt, transcriber: local(said) });
+      await vi.waitFor(() => expect(['summarised', 'tracked']).toContain(getMeeting(db, 1)?.stage), SLOW_IO);
+      await vi.advanceTimersByTimeAsync(6 * MINUTE); // past the Doc's wait for the WA Agent folder
+      await vi.waitFor(() => expect(getMeeting(db, 1)?.status).toBe('done'), SLOW_IO);
+      expect(Date.now()).toBeLessThan(Date.parse('2026-11-01T13:00:00.000Z'));
+      expect(db.prepare('SELECT COUNT(*) AS n FROM meetings').get()).toEqual({ n: 1 });
+
+      // 45 minutes in five ten-minute-or-less parts, no speech spend: only the summary and the tracker step are booked.
+      const m = getMeeting(db, 1)!;
+      expect(said.n).toBe(5);
+      expect(m.sttParts.map((p) => [p.provider, p.booked])).toEqual(Array.from({ length: 5 }, () => ['local', 'none']));
+      expect(m.transcript!.map((x) => [x.start, x.speaker])).toEqual([[0, null], [540, null], [1080, null], [1620, null], [2160, null]]);
+      expect(spendRows(db).map((r) => r.kind)).toEqual(['ai', 'ai']);
+
+      // Claude gets plain lines with times and the "Speaker" label for unlabelled speech: never null or undefined.
+      const user = meetingAi.calls[0]!.user;
+      const lines = user.slice(user.indexOf('<transcript>\n') + 13, user.indexOf('\n</transcript>')).split('\n');
+      expect(lines).toEqual([
+        '[s1 0:00] Speaker: part 1: logo files kal tak bhej dijiye',
+        '[s2 9:00] Speaker: part 2: logo files kal tak bhej dijiye',
+        '[s3 18:00] Speaker: part 3: logo files kal tak bhej dijiye',
+        '[s4 27:00] Speaker: part 4: logo files kal tak bhej dijiye',
+        '[s5 36:00] Speaker: part 5: logo files kal tak bhej dijiye',
+      ]);
+      expect(user).not.toMatch(/\bnull\b|\bundefined\b/i);
+      // The Doc's transcript too.
+      const html = drive.docs[0]!.html;
+      expect(html).toContain('<p>9:00 Speaker: part 2: logo files kal tak bhej dijiye</p>');
+      expect(html).not.toMatch(/\bnull\b|\bundefined\b/i);
+
+      await vi.waitFor(() => expect(health.at(-1)).toMatchObject({ sttProvider: 'local', stats: { done: 1 } }), SLOW_IO);
+      expect(health.at(-1)!.sttProblem).toBeUndefined();
+      await stopApp(app);
+    });
+
+    it('the local engine not set up: meetings wait (stt_none), and Health says the local speech engine is not set up', async () => {
+      const { app, db, health } = setup({ transcriber: () => null, sttProblem: 'local_not_set_up_model' });
+      await vi.waitFor(() => expect(getMeeting(db, 1)).toMatchObject({ status: 'queued', errorCode: 'stt_none' }), SLOW_IO);
+      await vi.waitFor(() => expect(health.at(-1)).toMatchObject({ sttProvider: 'local', sttProblem: 'local_not_set_up_model' }), SLOW_IO);
+      expect(app.health.line()).toEqual({ ok: false, text: MEETING_STT_PROBLEM_LINES.local_not_set_up_model });
+      expect(spendRows(db)).toEqual([]);
+      await stopApp(app);
+    });
   });
 
   it('reloadClients passes the new configs to the watcher', async () => {

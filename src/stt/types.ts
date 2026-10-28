@@ -1,5 +1,8 @@
+/** The paid providers: each is an SttProvider adapter (the bake-off's too). */
 export type ProviderId = 'sarvam' | 'elevenlabs' | 'openai';
 export const PROVIDER_IDS: readonly ProviderId[] = ['sarvam', 'elevenlabs', 'openai'];
+/** A paid provider, or 'local': the free engine on this machine (src/stt/local.ts), for voice notes and meetings. */
+export type ProviderOrLocal = ProviderId | 'local';
 
 /** Voice notes are sent without speaker labels; meetings with speaker labels (diarization) on. */
 export type SampleKind = 'voice' | 'meeting';

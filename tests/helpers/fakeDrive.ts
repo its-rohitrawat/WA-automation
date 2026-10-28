@@ -4,6 +4,12 @@ export class FakeDrive implements DriveApi {
   folders: string[] = [];
   /** Parent of each created folder, in the same order as `folders` (undefined: top level). */
   folderParents: (string | undefined)[] = [];
+  /** Id of each created folder, in the same order as `folders`. */
+  folderIds: string[] = [];
+  /** Folders this sign-in can see that this fake did not create (for example a WA Agent folder an earlier login made). */
+  visibleFolders: { id: string; name: string }[] = [];
+  /** Every findFolders call, by name. */
+  findFolderCalls: string[] = [];
   created: { id: string; name: string; parentId: string; bytes: number }[] = [];
   /** Per-request timeout of each created file, in the same order as `created` (undefined: the client's default). */
   createTimeouts: (number | undefined)[] = [];
@@ -23,6 +29,13 @@ export class FakeDrive implements DriveApi {
   /** When set, the next call throws this once (for example a 401 from Google). */
   failNextWith: unknown;
   failUpdateWith: unknown;
+  /**
+   * Files this sign-in can see that this fake did not create (for example a Tracker.xlsx made earlier that is still
+   * visible after the stored id stopped answering). findFile looks at these after the created ones.
+   */
+  visible: { id: string; name: string; parentId: string }[] = [];
+  /** Every findFile call, as (name, parentId). */
+  findCalls: { name: string; parentId: string }[] = [];
   /** When set, createFile and updateFile wait for it (simulates a slow or hung upload). */
   gate: Promise<void> | undefined;
   #n = 0;
@@ -32,7 +45,9 @@ export class FakeDrive implements DriveApi {
     if (parentId !== undefined && this.missing.has(parentId)) throw new DriveNotFoundError(parentId);
     this.folders.push(name);
     this.folderParents.push(parentId);
-    return `folder-${++this.#n}`;
+    const id = `folder-${++this.#n}`;
+    this.folderIds.push(id);
+    return id;
   }
 
   async createFile(name: string, mime: string, body: Buffer, parentId: string, timeoutMs?: number): Promise<string> {
@@ -64,6 +79,22 @@ export class FakeDrive implements DriveApi {
     await this.gate;
     if (this.missing.has(id)) throw new DriveNotFoundError(id);
     this.updated.push({ id, bytes: body.length });
+  }
+
+  /** The newest (last) created or visible file with that name in parentId that is not missing; a missing parent has none. */
+  async findFile(name: string, parentId: string): Promise<string | undefined> {
+    this.findCalls.push({ name, parentId });
+    this.#maybeFail();
+    if (this.missing.has(parentId)) return undefined;
+    return [...this.created, ...this.visible].filter((f) => f.name === name && f.parentId === parentId && !this.missing.has(f.id)).at(-1)?.id;
+  }
+
+  /** Created and visible folders with that name that are not missing, newest (last added) first. */
+  async findFolders(name: string): Promise<string[]> {
+    this.findFolderCalls.push(name);
+    this.#maybeFail();
+    const created = this.folderIds.map((id, i) => ({ id, name: this.folders[i]! }));
+    return [...created, ...this.visibleFolders].filter((f) => f.name === name && !this.missing.has(f.id)).map((f) => f.id).reverse();
   }
 
   get uploads(): number {

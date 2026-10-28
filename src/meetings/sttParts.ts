@@ -3,15 +3,16 @@ import { basename, join } from 'node:path';
 import { SpendCapReachedError } from '../brain/paidCall.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
 import { tx, type Db } from '../store/db.ts';
-import { addSttForget, getMeeting, PART_FILE, setSttParts, writeStuckSttParts, type SttPartRow } from '../store/meetings.ts';
+import { addSttForget, getMeeting, noteMeetingProgress, PART_FILE, setSttParts, writeStuckSttParts, type SttPartRow } from '../store/meetings.ts';
 import { AudioError } from '../stt/audio.ts';
 import { SttHttpError, SttJobError, SttJobLostError, SttNoAnswerError } from '../stt/http.ts';
+import { LocalEngineError } from '../stt/local.ts';
 import { SttBookingError, withSttHold } from '../stt/paidStt.ts';
 import { costUsd, modelFor } from '../stt/prices.ts';
-import type { AudioPart, ProviderId } from '../stt/types.ts';
+import type { AudioPart, ProviderOrLocal } from '../stt/types.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
-import { meetingsTmpDir } from './audio.ts';
+import { MeetingFailure, meetingsTmpDir } from './audio.ts';
 import type { MeetingTranscriber, TranscribeMeetingDeps } from './transcribe.ts';
 
 // The durable speech parts of one meeting (Task 6): planning them, sending one, and booking what a crash left in flight.
@@ -27,7 +28,7 @@ export function errorCode(e: unknown): string {
 }
 
 /** The list price, with speaker labels, of a part of this length at this provider, in US dollars. */
-export function partCeilingFor(provider: ProviderId, seconds: number, inrPerUsd: number): number {
+export function partCeilingFor(provider: ProviderOrLocal, seconds: number, inrPerUsd: number): number {
   return costUsd(modelFor(provider, true), seconds, inrPerUsd);
 }
 
@@ -36,23 +37,28 @@ export function partCeilingFor(provider: ProviderId, seconds: number, inrPerUsd:
  * the provider it was sent to, as 'stt' "(unknown, estimated)", and sets it unknown/ceiling, in one transaction. Works
  * whatever the meeting's status: the processor calls it before failMeeting, so a part of a meeting that fails is still
  * booked, and recoverInflightParts calls it for every meeting at start. Booking twice is impossible: the parts it books
- * are no longer inflight/none. Returns how many were booked. Throws when the meeting is missing or its record cannot be
- * read or written (nothing is booked then).
+ * are no longer inflight/none. A part left inflight on the local engine cost nothing: it is set back to todo, with no
+ * spend row, in the same write, and simply runs again. Returns how many were booked (local parts are not counted).
+ * Throws when the meeting is missing or its record cannot be read or written (nothing is booked then).
  */
 export function bookStuckParts(db: Db, spend: SpendGuard, meetingId: number, o: { inrPerUsd: number; clock?: Clock; log?: Logger }): number {
   const m = getMeeting(db, meetingId);
   if (m === undefined) throw new Error(`bookStuckParts: no meeting ${meetingId}`);
   const stuck = (p: SttPartRow) => p.state === 'inflight' && p.booked === 'none';
-  const n = m.sttParts.filter(stuck).length;
-  if (n === 0) return 0;
+  const paid = (p: SttPartRow) => stuck(p) && p.provider !== 'local';
+  const local = (p: SttPartRow) => stuck(p) && p.provider === 'local';
+  const n = m.sttParts.filter(paid).length;
+  const runAgain = m.sttParts.filter(local).length;
+  if (n === 0 && runAgain === 0) return 0;
   tx(db, () => {
-    for (const p of m.sttParts.filter(stuck)) {
+    for (const p of m.sttParts.filter(paid)) {
       spend.record('stt', partCeilingFor(p.provider, p.seconds, o.inrPerUsd), `meeting ${meetingId} part ${p.index} (unknown, estimated)`);
     }
-    const parts = m.sttParts.map((p): SttPartRow => (stuck(p) ? { ...p, state: 'unknown', booked: 'ceiling' } : p));
+    const parts = m.sttParts.map((p): SttPartRow => (paid(p) ? { ...p, state: 'unknown', booked: 'ceiling' } : local(p) ? { ...p, state: 'todo' } : p));
     writeStuckSttParts(db, meetingId, parts, (o.clock ?? systemClock).now().toISOString());
   });
-  o.log?.info({ meetingId, parts: n }, 'meeting speech parts left in flight booked at their ceiling');
+  if (n > 0) o.log?.info({ meetingId, parts: n }, 'meeting speech parts left in flight booked at their ceiling');
+  if (runAgain > 0) o.log?.info({ meetingId, parts: runAgain, provider: 'local' }, 'meeting speech parts left in flight on the local engine will run again');
   return n;
 }
 
@@ -106,7 +112,8 @@ export function partContext(id: number, parts: SttPartRow[], t: MeetingTranscrib
     }
   };
   const forget = (ref: string | null) => {
-    if (ref !== null && ref.length >= 1 && ref.length <= 200) addSttForget(db, { meetingId: id, provider: t.provider, ref, at: clock.now().toISOString() });
+    // The local engine keeps no copies, so it never has one to note.
+    if (t.provider !== 'local' && ref !== null && ref.length >= 1 && ref.length <= 200) addSttForget(db, { meetingId: id, provider: t.provider, ref, at: clock.now().toISOString() });
   };
   const markDone = (i: number, r: PartAnswer, booked?: SttPartRow['booked']) => {
     put(i, { state: 'done', segments: r.segments, billedSeconds: r.billedSeconds, ...(booked ? { booked } : {}) });
@@ -120,7 +127,7 @@ export function partContext(id: number, parts: SttPartRow[], t: MeetingTranscrib
   return { id, parts, t, deps, whole, save, put, atomically, markDone, forget, pathOf };
 }
 
-const todo = (index: number, provider: ProviderId, offset: number, seconds: number, file: string | null): SttPartRow => ({
+const todo = (index: number, provider: ProviderOrLocal, offset: number, seconds: number, file: string | null): SttPartRow => ({
   index, provider, file, offset, seconds, state: 'todo', jobId: null, booked: 'none', segments: null, billedSeconds: null,
 });
 
@@ -158,7 +165,8 @@ export async function replanForProvider(ctx: PartContext, signal: AbortSignal | 
       out.push(p);
       continue;
     }
-    const fresh: SttPartRow = { ...p, provider: t.provider, state: 'todo', booked: 'none', jobId: null, segments: null, billedSeconds: null };
+    // As planned for the new provider: a local part's tries do not carry over.
+    const fresh: SttPartRow = { ...afresh(p), provider: t.provider };
     if (p.seconds <= t.maxPartSeconds) {
       out.push(fresh);
       continue;
@@ -341,6 +349,119 @@ export async function sarvamPart(ctx: PartContext, i: number): Promise<void> {
       throw new SttBookingError(writeErr, e);
     }
     log.warn({ meetingId: id, part: before.index, provider: t.provider, code: errorCode(e) }, 'meeting speech part failed');
+    throw e;
+  }
+}
+
+/**
+ * The local engine (STT_PROVIDER=local): free, so there is no hold, no booking and no spend cap. The part is set
+ * inflight, run (the signal stops the conversion and the engine), then stored done with booked none. On a failure it
+ * goes back to todo with one more try counted (tries), so the retry runs it again; if that write fails, it is left
+ * inflight and bookStuckParts sets it back to todo (nothing booked) before the next run. A stop throws the signal's
+ * reason, so the processor gives the attempt back, and counts no try.
+ * - The part's last try (LOCAL_PART_MAX_TRIES) failing on its own audio (review fix 1) gives it up: done with no
+ *   segments and unheard, and the meeting goes on. If the engine itself failed (timeout, exit_<n>, no_output) and no
+ *   part of the meeting was heard yet, the meeting fails instead (MeetingFailure local_engine_failed), the part afresh.
+ * - A part done or given up resets the meeting's attempts to the run in hand (noteMeetingProgress, review fix 2).
+ * Logs the meeting id, part number, provider, code, tries, seconds and how long the run took: never text or paths.
+ */
+export async function localPart(ctx: PartContext, i: number, signal: AbortSignal | undefined): Promise<void> {
+  const { id, parts, t, deps, put } = ctx;
+  const before = parts[i]!;
+  const audio: AudioPart = { path: ctx.pathOf(before), seconds: before.seconds, offset: before.offset };
+  checkPartFile(audio.path);
+  put(i, { state: 'inflight', booked: 'none', jobId: null });
+  const started = performance.now();
+  const durationMs = () => Math.round(performance.now() - started);
+  let r: PartAnswer;
+  try {
+    r = await t.transcribePart(audio, signal ? { signal } : {});
+  } catch (e) {
+    const stopped = signal?.aborted === true;
+    const tries = stopped ? before.tries : (before.tries ?? 0) + 1;
+    const fields = { meetingId: id, part: before.index, provider: t.provider, code: errorCode(e), durationMs: durationMs(), ...(tries !== undefined ? { tries } : {}) };
+    if (!stopped && tries !== undefined && tries >= LOCAL_PART_MAX_TRIES && partOwnFailure(e)) {
+      if (engineFailure(e) && !parts.some(heard)) {
+        // The engine has not worked once for this meeting: it is likely broken (or its timeout too short), not this
+        // part's audio. The part runs afresh after `meeting retry`.
+        try {
+          replacePart(ctx, i, afresh(parts[i]!));
+        } catch (writeErr) {
+          deps.log.warn({ ...fields, writeCode: errorCode(writeErr) }, 'meeting speech part could not be reset');
+        }
+        deps.log.warn(fields, 'meeting fails: the local speech engine failed on every try, with nothing heard yet');
+        throw new MeetingFailure('failed', 'local_engine_failed');
+      }
+      ctx.atomically(() => {
+        put(i, { state: 'done', booked: 'none', segments: [], billedSeconds: null, tries, unheard: true });
+        noteMeetingProgress(deps.db, id);
+      });
+      deps.log.warn(fields, 'meeting speech part given up: no speech recognised');
+      return;
+    }
+    try {
+      put(i, { state: 'todo', booked: 'none', ...(tries !== undefined ? { tries } : {}) });
+      deps.log.warn(fields, 'meeting speech part failed');
+    } catch (writeErr) {
+      deps.log.warn({ ...fields, writeCode: errorCode(writeErr) }, 'meeting speech part failed');
+    }
+    if (stopped) throw signal!.reason;
+    throw e;
+  }
+  ctx.atomically(() => {
+    ctx.markDone(i, r);
+    noteMeetingProgress(deps.db, id);
+  });
+  deps.log.info({ meetingId: id, part: before.index, provider: t.provider, seconds: Math.round(before.seconds), durationMs: durationMs() }, 'meeting speech part transcribed');
+}
+
+/**
+ * Runs of one local part: as many as a meeting stage's attempts (MEETING_MAX_ATTEMPTS in src/meetings/processor.ts,
+ * which imports this module, so the number is repeated here; a test keeps them equal).
+ */
+export const LOCAL_PART_MAX_TRIES = 4;
+
+/** A failure of the part's own audio, on the engine or in its conversion: given up after the part's last try. */
+const partOwnFailure = (e: unknown): boolean => (e instanceof LocalEngineError && e.code !== 'aborted') || e instanceof AudioError;
+
+/** A failure of the engine itself, as opposed to what it heard (empty_output) or the conversion. */
+const engineFailure = (e: unknown): boolean =>
+  e instanceof LocalEngineError && (e.code === 'timeout' || e.code === 'no_output' || e.code.startsWith('exit_'));
+
+/** A part whose speech was heard: done, with text. */
+const heard = (p: SttPartRow): boolean => p.state === 'done' && (p.segments?.length ?? 0) > 0;
+
+/** The part as it was planned: to do, nothing booked, no tries counted and not given up. */
+export function afresh(p: SttPartRow): SttPartRow {
+  const out: SttPartRow = { ...p, state: 'todo', booked: 'none', jobId: null, segments: null, billedSeconds: null };
+  delete out.tries;
+  delete out.unheard;
+  return out;
+}
+
+/** Replaces part i and stores the parts at once; on a failed write the part stays as it was. */
+function replacePart(ctx: PartContext, i: number, row: SttPartRow): void {
+  const prev = ctx.parts[i]!;
+  ctx.parts[i] = row;
+  try {
+    ctx.save();
+  } catch (e) {
+    ctx.parts[i] = prev;
+    throw e;
+  }
+}
+
+/**
+ * Nothing was heard in the meeting and a part was given up: the parts given up are set to run afresh, so `meeting
+ * retry` (once the engine is looked at) tries them again. The caller then fails the meeting (nothing_heard).
+ */
+export function runUnheardAgain(ctx: PartContext): void {
+  const prev = [...ctx.parts];
+  ctx.parts.splice(0, ctx.parts.length, ...prev.map((p) => (p.unheard === true ? afresh(p) : p)));
+  try {
+    ctx.save();
+  } catch (e) {
+    ctx.parts.splice(0, ctx.parts.length, ...prev);
     throw e;
   }
 }

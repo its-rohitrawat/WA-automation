@@ -4,6 +4,7 @@ import {
   speakerLabels,
   type MeetingPromptInput,
 } from '../../src/brain/meetingPrompt.ts';
+import { mergeParts } from '../../src/stt/segments.ts';
 import type { Segment } from '../../src/stt/types.ts';
 
 const seg = (start: number, speaker: string | null, text: string): Segment => ({ start, end: start + 3, speaker, text });
@@ -185,6 +186,22 @@ describe('buildMeetingPrompt', () => {
     expect(transcriptLines(over.user)).toEqual([`[s1 0:00] A: ${'x'.repeat(200_000)}`, TRANSCRIPT_CUT_MARKER]);
     expect(over.segmentIds).toEqual(['s1']);
     expect(over.labels).toEqual(['A']);
+  });
+});
+
+describe('buildMeetingPrompt: a transcript with no speaker labels (the local engine, Task 3)', () => {
+  // Three ten-minute local parts as transcribeMeeting merges them: one segment per part, speaker null.
+  const local = mergeParts([0, 600, 1200].map((offset, i) => ({ offset, segments: [{ start: 0, end: 600, speaker: null, text: `part ${i + 1} baat` }] })));
+
+  it('sends plain lines with times and the "Speaker" label, never null or undefined, and no labels to name', () => {
+    expect(local.every((s) => s.speaker === null)).toBe(true);
+    const p = buildMeetingPrompt({ ...base, segments: local });
+    expect(transcriptLines(p.user)).toEqual(['[s1 0:00] Speaker: part 1 baat', '[s2 10:00] Speaker: part 2 baat', '[s3 20:00] Speaker: part 3 baat']);
+    expect(p.user).not.toMatch(/\bnull\b|\bundefined\b/i);
+    expect(p.labels).toEqual([]);
+    expect(p.segmentIds).toEqual(['s1', 's2', 's3']);
+    // The system prompt says what "Speaker" means.
+    expect(p.system).toContain('"Speaker" stands for speech the transcript gave no label for.');
   });
 });
 

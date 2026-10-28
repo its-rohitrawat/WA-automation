@@ -1,7 +1,8 @@
 import { Writable } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DriveAuthError, DrivePublisher } from '../../src/output/drive.ts';
-import { getKv } from '../../src/store/kv.ts';
+import { TRACKER_ID_KEY, TRACKER_NEW_FILE_KEY } from '../../src/output/trackerKey.ts';
+import { getKv, setKv } from '../../src/store/kv.ts';
 import { createLogger, silentLogger } from '../../src/util/logger.ts';
 import { seededDb } from '../helpers/db.ts';
 import { FakeDrive } from '../helpers/fakeDrive.ts';
@@ -381,5 +382,207 @@ describe('DrivePublisher', () => {
     await publisher.publishNow();
     expect(failures.map((f) => f.auth)).toEqual([true, false]);
     expect(new DriveAuthError(new Error('x')).name).toBe('DriveAuthError');
+  });
+});
+
+describe('DrivePublisher keeps one tracker file', () => {
+  const AT = new Date('2026-10-28T05:00:00.000Z');
+
+  function keep(log = silentLogger()) {
+    const db = seededDb();
+    const drive = new FakeDrive();
+    const newFiles: number[] = [];
+    publisher = new DrivePublisher({
+      db, api: drive, build: async () => Buffer.from('x'), log, minIntervalMs: 0, now: () => AT, onNewFile: () => newFiles.push(1),
+    });
+    return { db, drive, newFiles, p: publisher };
+  }
+
+  it('repeated publishes update the same id and never look for or create a second file', async () => {
+    const { db, drive, newFiles, p } = keep();
+    for (let i = 0; i < 4; i++) expect(await p.publishNow()).toBe(true);
+    expect(drive.created).toHaveLength(1);
+    expect(drive.updated.map((u) => u.id)).toEqual(Array(3).fill(drive.created[0]!.id));
+    expect(drive.findCalls).toEqual([]); // the first run made the folder just now: nothing to look for in it
+    expect(getKv(db, TRACKER_ID_KEY)).toBe(drive.created[0]!.id);
+    expect(getKv(db, TRACKER_NEW_FILE_KEY)).toBeUndefined();
+    expect(newFiles).toEqual([]);
+  });
+
+  it('a 404 with a visible Tracker.xlsx in the folder reuses the newest one and stores its id', async () => {
+    const { db, drive, newFiles, p } = keep();
+    await p.publishNow();
+    const old = drive.created[0]!.id;
+    drive.missing.add(old); // the login changed: the stored file is invisible now
+    drive.visible.push({ id: 'seen-older', name: 'Tracker.xlsx', parentId: 'folder-1' }, { id: 'other-name', name: 'Notes.xlsx', parentId: 'folder-1' },
+      { id: 'seen-newest', name: 'Tracker.xlsx', parentId: 'folder-1' }, { id: 'elsewhere', name: 'Tracker.xlsx', parentId: 'folder-9' });
+    expect(await p.publishNow()).toBe(true);
+    expect(drive.findCalls).toEqual([{ name: 'Tracker.xlsx', parentId: 'folder-1' }]);
+    expect(drive.created).toHaveLength(1);
+    expect(drive.updated.map((u) => u.id)).toEqual(['seen-newest']);
+    expect(getKv(db, TRACKER_ID_KEY)).toBe('seen-newest');
+    expect(getKv(db, TRACKER_NEW_FILE_KEY)).toBeUndefined();
+    expect(newFiles).toEqual([]);
+    await p.publishNow(); // from now on the found file is the one
+    expect(drive.updated.map((u) => u.id)).toEqual(['seen-newest', 'seen-newest']);
+    expect(drive.findCalls).toHaveLength(1);
+  });
+
+  it('a stored folder with no stored file id looks in it first', async () => {
+    const { db, drive, newFiles, p } = keep();
+    setKv(db, 'drive_root_id', 'root-a');
+    drive.visible.push({ id: 'seen-1', name: 'Tracker.xlsx', parentId: 'root-a' });
+    await p.publishNow();
+    expect(drive.created).toEqual([]);
+    expect(getKv(db, TRACKER_ID_KEY)).toBe('seen-1');
+    expect(newFiles).toEqual([]);
+  });
+
+  it('a 404 with none visible creates one, keeps its id, calls onNewFile once and sets the note date', async () => {
+    const { db, drive, newFiles, p } = keep();
+    await p.publishNow();
+    drive.missing.add(drive.created[0]!.id);
+    await p.publishNow();
+    expect(drive.findCalls).toHaveLength(1);
+    expect(drive.created).toHaveLength(2);
+    expect(drive.created[1]!.parentId).toBe('folder-1');
+    expect(getKv(db, TRACKER_ID_KEY)).toBe(drive.created[1]!.id);
+    expect(getKv(db, TRACKER_NEW_FILE_KEY)).toBe(AT.toISOString());
+    expect(newFiles).toEqual([1]);
+    await p.publishNow();
+    expect(drive.created).toHaveLength(2);
+    expect(newFiles).toEqual([1]);
+  });
+
+  it('the first file ever made is no new-file event', async () => {
+    const { db, drive, newFiles, p } = keep();
+    setKv(db, 'drive_root_id', 'root-a');
+    await p.publishNow();
+    expect(drive.findCalls).toHaveLength(1);
+    expect(drive.created).toHaveLength(1);
+    expect(getKv(db, TRACKER_NEW_FILE_KEY)).toBeUndefined();
+    expect(newFiles).toEqual([]);
+  });
+
+  it('the folder-gone path re-creates the folder and the file in one run, as before, and notes the new file', async () => {
+    const { db, drive, newFiles, p } = keep();
+    await p.publishNow();
+    drive.missing.add('folder-1');
+    drive.missing.add(drive.created[0]!.id);
+    expect(await p.publishNow()).toBe(true);
+    expect(drive.folders).toEqual(['WA Agent', 'WA Agent']);
+    expect(drive.created).toHaveLength(2);
+    expect(drive.created[1]!.parentId).not.toBe('folder-1');
+    expect(getKv(db, 'drive_root_id')).toBe(drive.created[1]!.parentId);
+    expect(getKv(db, TRACKER_ID_KEY)).toBe(drive.created[1]!.id);
+    expect(newFiles).toEqual([1]);
+  });
+
+  it('when the stored folder and file are both invisible, a Tracker.xlsx in another visible WA Agent folder is reused', async () => {
+    const { db, drive, newFiles, p } = keep();
+    await p.publishNow();
+    drive.missing.add('folder-1'); // another login: the old folder and its file cannot be seen
+    drive.missing.add(drive.created[0]!.id);
+    drive.visibleFolders.push({ id: 'other-older', name: 'WA Agent' }, { id: 'not-ours', name: 'Photos' }, { id: 'other-newest', name: 'WA Agent' });
+    drive.visible.push({ id: 'kept-file', name: 'Tracker.xlsx', parentId: 'other-older' });
+    expect(await p.publishNow()).toBe(true);
+    expect(drive.findFolderCalls).toEqual(['WA Agent']);
+    expect(drive.findCalls.map((c) => c.parentId)).toEqual(['folder-1', 'other-newest', 'other-older']);
+    expect(drive.folders).toEqual(['WA Agent']);
+    expect(drive.created).toHaveLength(1);
+    expect(drive.updated.map((u) => u.id)).toEqual(['kept-file']);
+    expect(getKv(db, 'drive_root_id')).toBe('other-older');
+    expect(getKv(db, TRACKER_ID_KEY)).toBe('kept-file');
+    expect(getKv(db, TRACKER_NEW_FILE_KEY)).toBeUndefined();
+    expect(newFiles).toEqual([]);
+  });
+
+  it('switching back to the first login finds the original file again instead of making a third', async () => {
+    const { db, drive, newFiles, p } = keep();
+    await p.publishNow();
+    const first = { folder: 'folder-1', file: drive.created[0]!.id };
+    drive.missing.add(first.folder); // login B: nothing of login A can be seen
+    drive.missing.add(first.file);
+    await p.publishNow();
+    expect(drive.created).toHaveLength(2);
+    expect(newFiles).toEqual([1]);
+    const second = { folder: getKv(db, 'drive_root_id')!, file: getKv(db, TRACKER_ID_KEY)! };
+    drive.missing.clear(); // back to login A: its folder and file are visible again, login B's are not
+    drive.missing.add(second.folder);
+    drive.missing.add(second.file);
+    expect(await p.publishNow()).toBe(true);
+    expect(drive.created).toHaveLength(2);
+    expect(drive.folders).toHaveLength(2);
+    expect(drive.updated.at(-1)!.id).toBe(first.file);
+    expect(getKv(db, 'drive_root_id')).toBe(first.folder);
+    expect(getKv(db, TRACKER_ID_KEY)).toBe(first.file);
+    expect(newFiles).toEqual([1]);
+    await p.publishNow(); // and it stays on the original
+    expect(drive.updated.at(-1)!.id).toBe(first.file);
+    expect(drive.created).toHaveLength(2);
+  });
+
+  it('a visible WA Agent folder without a Tracker.xlsx is not adopted: the file is made in the stored folder', async () => {
+    const { db, drive, p } = keep();
+    await p.publishNow();
+    drive.missing.add(drive.created[0]!.id);
+    drive.visibleFolders.push({ id: 'empty-one', name: 'WA Agent' });
+    await p.publishNow();
+    expect(drive.created).toHaveLength(2);
+    expect(drive.created[1]!.parentId).toBe('folder-1');
+    expect(getKv(db, 'drive_root_id')).toBe('folder-1');
+  });
+
+  it('a failed look-up fails the run like any Drive error, and keeps the stored id', async () => {
+    const { db, drive, newFiles, p } = keep();
+    await p.publishNow();
+    const old = drive.created[0]!.id;
+    drive.missing.add(old);
+    const find = drive.findFile.bind(drive);
+    drive.findFile = async (n, parent) => {
+      await find(n, parent);
+      throw Object.assign(new Error('backend error'), { code: 500 });
+    };
+    expect(await p.publishNow()).toBe(false);
+    expect(drive.created).toHaveLength(1);
+    expect(getKv(db, TRACKER_ID_KEY)).toBe(old);
+    expect(newFiles).toEqual([]);
+    await p.stop(1000);
+  });
+
+  it('an onNewFile that throws is logged and the run still counts as published', async () => {
+    const { lines, log } = capturingLogger();
+    const db = seededDb();
+    const drive = new FakeDrive();
+    publisher = new DrivePublisher({ db, api: drive, build: async () => Buffer.from('x'), log, onNewFile: () => {
+      throw new Error('hook-bug');
+    } });
+    await publisher.publishNow();
+    drive.missing.add(drive.created[0]!.id);
+    expect(await publisher.publishNow()).toBe(true);
+    expect(lines.some((l) => l.msg === 'onNewFile failed' && l.level === 50)).toBe(true);
+    expect(getKv(db, TRACKER_NEW_FILE_KEY)).toEqual(expect.any(String));
+  });
+
+  it('no file or folder id reaches the logs on any of these paths', async () => {
+    const { lines, log } = capturingLogger();
+    const { drive, p } = keep(log);
+    await p.publishNow();
+    const ids = ['folder-1', drive.created[0]!.id, 'seen-newest'];
+    drive.missing.add(drive.created[0]!.id);
+    drive.visible.push({ id: 'seen-newest', name: 'Tracker.xlsx', parentId: 'folder-1' });
+    await p.publishNow();
+    drive.missing.add('seen-newest');
+    await p.publishNow();
+    drive.missing.add('folder-1');
+    drive.missing.add(drive.created.at(-1)!.id);
+    await p.publishNow();
+    ids.push(...drive.created.map((f) => f.id), 'folder-');
+    drive.failUpdateWith = Object.assign(new Error(`Drive item ${drive.created.at(-1)!.id} not found`), { code: 500 });
+    await p.publishNow();
+    await p.stop(1000);
+    const text = JSON.stringify(lines);
+    expect(lines.length).toBeGreaterThan(0);
+    for (const id of ids) expect(text).not.toContain(id);
   });
 });

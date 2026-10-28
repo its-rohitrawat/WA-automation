@@ -3,7 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { requireKey, type Env } from '../config/env.ts';
 import { AudioError, type Ffmpeg } from './audio.ts';
 import type { HttpFetch } from './http.ts';
-import { LocalEngine, LocalEngineError, type LocalEngineName, type LocalRunFile } from './local.ts';
+import { createLocalEngine, LocalEngineError, type LocalEngine, type LocalEngineName, type LocalRunFile } from './local.ts';
 import { costUsd, modelFor } from './prices.ts';
 import { ElevenLabsProvider } from './providers/elevenlabs.ts';
 import { OpenAiProvider } from './providers/openai.ts';
@@ -328,15 +328,18 @@ function combine(provider: SttProvider, results: ProviderResult[]): VoiceResult 
  */
 export const LOCAL_SILENCE_DB = -50;
 
-/** Whether a note's mean volume is silence. Unknown (null) is not: the note is retried rather than lost. */
-const silent = (meanVolumeDb: number | null): boolean => meanVolumeDb !== null && meanVolumeDb <= LOCAL_SILENCE_DB;
+/**
+ * Whether a note's mean volume is silence. Unknown (null) is not: the note is retried rather than lost. Meetings on the
+ * local engine use the same rule for each part (src/meetings/localTranscriber.ts).
+ */
+export const silent =(meanVolumeDb: number | null): boolean => meanVolumeDb !== null && meanVolumeDb <= LOCAL_SILENCE_DB;
 
 /**
  * A transcript made only of whisper's non-speech markers, such as "[BLANK_AUDIO]", "[ Silence ]", "(silence)" or
  * "[MUSIC]" (review round 1, fix 4): one or more [...] or (...) groups and spaces, nothing else. Text with any word
- * outside a group is real text, kept as it is.
+ * outside a group is real text, kept as it is. Meetings on the local engine read them the same way.
  */
-const ONLY_MARKERS = /^\s*(?:(?:\[[^[\]]*\]|\([^()]*\))\s*)+$/;
+export const ONLY_MARKERS = /^\s*(?:(?:\[[^[\]]*\]|\([^()]*\))\s*)+$/;
 
 /**
  * The local engine as a VoiceTranscriber (Phase 2b amendment L2). It costs nothing: ceilingUsd and costUsd are 0, and
@@ -403,6 +406,8 @@ export function localVoiceTranscriber(
  * notes; it stays the meetings' setting).
  * - 'local': the engine STT_LOCAL_ENGINE, STT_LOCAL_BIN, STT_LOCAL_MODEL, STT_LOCAL_THREADS, STT_LOCAL_TIMEOUT_SECONDS
  *   and STT_LOCAL_LANGUAGE set, working inside deps.tmpDir; deps.localRun replaces its runner in tests. No key.
+ *   deps.localEngine, when given, is run instead: one engine shared with meetings (createLocalEngine), so their runs
+ *   stay one at a time. deps.tmpDir must then be inside that engine's tmpDir.
  * - a paid provider: the env rule makes it equal STT_PROVIDER, whose key STT_API_KEY goes to the provider's constructor
  *   and nowhere else; deps.http replaces the network in tests.
  * deps.ffmpeg is null when there is none (then nothing is sent: canSend is false for every file); deps.tmpDir holds the
@@ -410,27 +415,16 @@ export function localVoiceTranscriber(
  */
 export function createVoiceTranscriber(
   env: Env,
-  deps: { ffmpeg: Ffmpeg | null; tmpDir: string; http?: HttpFetch; localRun?: LocalRunFile },
+  deps: { ffmpeg: Ffmpeg | null; tmpDir: string; http?: HttpFetch; localRun?: LocalRunFile; localEngine?: Pick<LocalEngine, 'transcribe'> },
 ): VoiceTranscriber | null {
   const choice = env.VOICE_STT_PROVIDER;
   if (choice === 'none') return null;
   if (choice === 'local') {
-    const bin = env.STT_LOCAL_BIN;
-    const model = env.STT_LOCAL_MODEL;
-    // parseEnv refuses this already; checked again for an Env built by hand (defence in depth).
-    if (bin === undefined || model === undefined) throw new Error('STT_LOCAL_BIN and STT_LOCAL_MODEL are required when VOICE_STT_PROVIDER is local');
     // Absolute (review round 1, fix 3), so a relative tmpDir cannot break the engine's absolute-path rule.
     const tmpDir = resolve(deps.tmpDir);
-    const engine = new LocalEngine({
-      engine: env.STT_LOCAL_ENGINE,
-      bin,
-      model,
-      threads: env.STT_LOCAL_THREADS,
-      timeoutMs: env.STT_LOCAL_TIMEOUT_SECONDS * 1000,
-      language: env.STT_LOCAL_LANGUAGE,
-      tmpDir,
-      ...(deps.localRun ? { run: deps.localRun } : {}),
-    });
+    // The settings are checked even with a shared engine given (the same error as before when bin or model is unset).
+    const own = createLocalEngine(env, { tmpDir, setting: 'VOICE_STT_PROVIDER', ...(deps.localRun ? { localRun: deps.localRun } : {}) });
+    const engine = deps.localEngine ?? own;
     return localVoiceTranscriber(engine, { engine: env.STT_LOCAL_ENGINE, ffmpeg: deps.ffmpeg, tmpDir });
   }
   // parseEnv refuses this already; checked again because STT_API_KEY is the meetings' provider's key.

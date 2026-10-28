@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // The Google client is replaced by a stub: these tests check what googleDriveApi asks it to send, without any network.
-const files = vi.hoisted(() => ({ create: vi.fn(), update: vi.fn() }));
+const files = vi.hoisted(() => ({ create: vi.fn(), update: vi.fn(), list: vi.fn() }));
 vi.mock('@googleapis/drive', () => ({ drive: vi.fn(() => ({ files })) }));
 
 import { drive } from '@googleapis/drive';
@@ -14,6 +14,7 @@ const client = {} as unknown as OAuth2Client;
 beforeEach(() => {
   files.create.mockReset();
   files.update.mockReset();
+  files.list.mockReset();
   files.create.mockResolvedValue({ data: { id: 'new-id' } });
 });
 
@@ -97,5 +98,50 @@ describe('googleDriveApi', () => {
     await expect(api.createDoc('N', '<p></p>', 'p')).rejects.toBe(other);
     files.create.mockResolvedValueOnce({ data: {} });
     await expect(api.createDoc('N', '<p></p>', 'p')).rejects.toThrow('Drive returned no document id');
+  });
+
+  it('findFile asks for the newest file of that name in the folder, not in the trash, and only its id', async () => {
+    const api = googleDriveApi(client);
+    files.list.mockResolvedValueOnce({ data: { files: [{ id: 'newest' }] } });
+    expect(await api.findFile('Tracker.xlsx', 'root-1')).toBe('newest');
+    expect(files.list.mock.calls[0]![0]).toEqual({
+      q: "name = 'Tracker.xlsx' and 'root-1' in parents and trashed = false",
+      orderBy: 'modifiedTime desc', pageSize: 1, fields: 'files(id)', spaces: 'drive',
+    });
+    files.list.mockResolvedValueOnce({ data: { files: [] } });
+    expect(await api.findFile('Tracker.xlsx', 'root-1')).toBeUndefined();
+    files.list.mockResolvedValueOnce({ data: {} });
+    expect(await api.findFile('Tracker.xlsx', 'root-1')).toBeUndefined();
+  });
+
+  it('findFolders asks for folders of that name, not in the trash, newest first, a few ids only', async () => {
+    const api = googleDriveApi(client);
+    files.list.mockResolvedValueOnce({ data: { files: [{ id: 'f-new' }, {}, { id: 'f-old' }] } });
+    expect(await api.findFolders("WA 'Agent")).toEqual(['f-new', 'f-old']);
+    expect(files.list.mock.calls[0]![0]).toEqual({
+      q: "name = 'WA \\'Agent' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+      orderBy: 'modifiedTime desc', pageSize: 5, fields: 'files(id)', spaces: 'drive',
+    });
+    files.list.mockResolvedValueOnce({ data: {} });
+    expect(await api.findFolders('WA Agent')).toEqual([]);
+    const other = Object.assign(new Error('server'), { code: 500 });
+    files.list.mockRejectedValueOnce(other);
+    await expect(api.findFolders('WA Agent')).rejects.toBe(other);
+  });
+
+  it('findFile escapes quotes and backslashes in the name and the folder id', async () => {
+    const api = googleDriveApi(client);
+    files.list.mockResolvedValueOnce({ data: { files: [] } });
+    await api.findFile(String.raw`O'Neil\x.xlsx`, "r'1");
+    expect((files.list.mock.calls[0]![0] as { q: string }).q).toBe(String.raw`name = 'O\'Neil\\x.xlsx' and 'r\'1' in parents and trashed = false`);
+  });
+
+  it('findFile treats a 404 (the folder is gone) as nothing found, and passes other errors on', async () => {
+    const api = googleDriveApi(client);
+    files.list.mockRejectedValueOnce(Object.assign(new Error('not found'), { code: 404 }));
+    expect(await api.findFile('Tracker.xlsx', 'gone')).toBeUndefined();
+    const other = Object.assign(new Error('server'), { code: 500 });
+    files.list.mockRejectedValueOnce(other);
+    await expect(api.findFile('Tracker.xlsx', 'root-1')).rejects.toBe(other);
   });
 });

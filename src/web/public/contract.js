@@ -14,6 +14,11 @@ const iso = (/** @type {unknown} */ v) => (typeof v === 'string' && !Number.isNa
 const arr = (v) => (Array.isArray(v) ? v : []);
 /** @param {unknown} v @returns {Record<string, unknown>} */
 const obj = (v) => (v && typeof v === 'object' ? /** @type {Record<string, unknown>} */ (v) : {});
+/** The only tracker link the screens open: the Drive file address the agent builds. */
+export const DRIVE_FILE_URL = /^https:\/\/drive\.google\.com\/file\/d\/[A-Za-z0-9_-]{10,}\/view$/;
+/** What the screens say while the main Google account's email is not known. */
+export const ACCOUNT_UNKNOWN = 'Main Google account (email not known yet)';
+
 /** @param {unknown} v @returns {PartState} */
 const state = (v) => (STATES.has(str(v)) ? /** @type {PartState} */ (str(v)) : 'off');
 
@@ -74,7 +79,7 @@ export function readOverview(raw) {
 /**
  * One card on the Connections screen.
  * @typedef {{ id: string, kind: string, title: string, subtitle: string, state: PartState, stateLabel: string, rows: [string, string][], note: string,
- *   email?: string, meetings?: boolean }} Card
+ *   email?: string, meetings?: boolean, link?: string }} Card
  */
 
 /**
@@ -104,17 +109,23 @@ export function readConnections(raw) {
     const o = obj(g);
     const label = str(o.label);
     const usedFor = arr(o.usedFor).map(str).filter(Boolean);
+    const email = str(o.email);
+    // The address is the card's title: which Google account it is. The agent's own name for it sits below, small.
     cards.push({
-      id: `google:${label}`, kind: 'google', title: label === 'main' ? 'Google account · main' : `Google account · ${label}`,
-      subtitle: str(o.email) || (label === 'main' ? 'The mailbox account' : 'Meeting recordings'),
-      state: state(o.state), stateLabel: str(o.stateLabel), rows: [['Used for', usedFor.join(', ') || '—']], note: '',
-      email: str(o.email), meetings: usedFor.some((u) => /meeting/i.test(u)),
+      id: `google:${label}`, kind: 'google', title: email || 'Google account', subtitle: `Account name: ${label}`,
+      state: state(o.state), stateLabel: str(o.stateLabel), rows: [['Used for', usedFor.join(', ') || '—']],
+      note: email ? '' : 'Email not known yet: press Reconnect to show it.',
+      email, meetings: usedFor.some((u) => /meeting/i.test(u)),
     });
   }
   const d = obj(r.drive);
+  const folder = str(d.folder) || 'WA Agent';
+  const driveUrl = str(d.url);
   cards.push({
-    id: 'drive', kind: 'drive', title: 'Google Drive', subtitle: 'WA Agent folder', state: state(d.state), stateLabel: str(d.label),
-    rows: [['Tracker', iso(d.lastUploadAt) ? `Uploaded ${when(iso(d.lastUploadAt))}` : 'Not uploaded yet']], note: '',
+    id: 'drive', kind: 'drive', title: 'Google Drive', subtitle: `${folder} folder`, state: state(d.state), stateLabel: str(d.label),
+    rows: [['Writes as', str(d.account) || ACCOUNT_UNKNOWN], ['File', str(d.file) || 'Tracker.xlsx'], ['Folder', folder],
+      ['Last upload', iso(d.lastUploadAt) ? when(iso(d.lastUploadAt)) : 'Not uploaded yet']],
+    note: '', link: DRIVE_FILE_URL.test(driveUrl) ? driveUrl : '',
   });
   const c = obj(r.claude);
   const capUsd = num(c.capUsd);

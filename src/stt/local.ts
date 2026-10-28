@@ -261,3 +261,56 @@ export function checkLocalEngineFiles(
   }
   return null;
 }
+
+/**
+ * The one LocalEngine the settings describe (STT_LOCAL_ENGINE, STT_LOCAL_BIN, STT_LOCAL_MODEL, STT_LOCAL_THREADS,
+ * STT_LOCAL_TIMEOUT_SECONDS per run, STT_LOCAL_LANGUAGE), working inside deps.tmpDir (made absolute). Voice notes and
+ * meetings can share it (createVoiceTranscriber's and createLocalMeetingTranscriber's localEngine), so their runs stay
+ * one at a time on the CPU; each one's work folder must then be inside this tmpDir. deps.localRun replaces the runner in
+ * tests. `setting` names the setting that asked for the engine in the error, never a value. No key.
+ */
+export function createLocalEngine(
+  env: Pick<Env, 'STT_LOCAL_ENGINE' | 'STT_LOCAL_BIN' | 'STT_LOCAL_MODEL' | 'STT_LOCAL_THREADS' | 'STT_LOCAL_TIMEOUT_SECONDS' | 'STT_LOCAL_LANGUAGE'>,
+  deps: { tmpDir: string; localRun?: LocalRunFile; setting: 'STT_PROVIDER' | 'VOICE_STT_PROVIDER' },
+): LocalEngine {
+  const bin = env.STT_LOCAL_BIN;
+  const model = env.STT_LOCAL_MODEL;
+  // parseEnv refuses this already; checked again for an Env built by hand (defence in depth).
+  if (bin === undefined || model === undefined) throw new Error(`STT_LOCAL_BIN and STT_LOCAL_MODEL are required when ${deps.setting} is local`);
+  return new LocalEngine({
+    engine: env.STT_LOCAL_ENGINE,
+    bin,
+    model,
+    threads: env.STT_LOCAL_THREADS,
+    timeoutMs: env.STT_LOCAL_TIMEOUT_SECONDS * 1000,
+    language: env.STT_LOCAL_LANGUAGE,
+    // Absolute (review round 1, fix 3), so a relative tmpDir cannot break the engine's absolute-path rule.
+    tmpDir: resolve(deps.tmpDir),
+    ...(deps.localRun ? { run: deps.localRun } : {}),
+  });
+}
+
+/**
+ * The shared engine's temporary folder, DATA_DIR/tmp (absolute). Each user's work folder sits inside it: voice notes in
+ * DATA_DIR/tmp/voice, meeting parts in DATA_DIR/tmp/meetings-local (localMeetingTmpDir).
+ */
+export const localEngineTmpDir = (dataDir: string): string => resolve(join(dataDir, 'tmp'));
+
+/**
+ * The one LocalEngine the service builds when STT_PROVIDER or VOICE_STT_PROVIDER is local (plan
+ * 2026-10-28-meetings-local-stt.md, Task 3), undefined otherwise. Voice notes and meetings both run on it, so only one
+ * model ever runs on the CPU: a voice note that arrives while a meeting part runs waits for that part (at most
+ * STT_LOCAL_TIMEOUT_SECONDS), and the reverse. Its folder is localEngineTmpDir. Checks no file (checkLocalEngineFiles
+ * does, per user) and runs nothing. deps.localRun replaces the runner in tests.
+ */
+export function sharedLocalEngine(
+  env: Pick<
+    Env,
+    'DATA_DIR' | 'STT_PROVIDER' | 'VOICE_STT_PROVIDER' | 'STT_LOCAL_ENGINE' | 'STT_LOCAL_BIN' | 'STT_LOCAL_MODEL' | 'STT_LOCAL_THREADS' | 'STT_LOCAL_TIMEOUT_SECONDS' | 'STT_LOCAL_LANGUAGE'
+  >,
+  deps: { localRun?: LocalRunFile } = {},
+): LocalEngine | undefined {
+  const setting = env.STT_PROVIDER === 'local' ? 'STT_PROVIDER' : env.VOICE_STT_PROVIDER === 'local' ? 'VOICE_STT_PROVIDER' : null;
+  if (setting === null) return undefined;
+  return createLocalEngine(env, { tmpDir: localEngineTmpDir(env.DATA_DIR), setting, ...(deps.localRun ? { localRun: deps.localRun } : {}) });
+}

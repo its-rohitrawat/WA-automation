@@ -17,7 +17,7 @@ import type { MediaRefSealer } from './media/ref.ts';
 import { DriveFileUploader } from './media/uploader.ts';
 import { forgetVoiceCopies } from './media/voiceForget.ts';
 import type { MeetingsGoogleApi } from './meetings/googleApi.ts';
-import type { MeetingsHealth } from './meetings/healthTypes.ts';
+import type { MeetingSttProblem, MeetingsHealth } from './meetings/healthTypes.ts';
 import { MeetingService, type MeetingSettings } from './meetings/service.ts';
 import { errorCode } from './meetings/sttParts.ts';
 import type { MeetingTranscriber } from './meetings/transcribe.ts';
@@ -70,8 +70,10 @@ export interface AppMediaDeps {
 export interface AppMeetingsDeps {
   api: MeetingsGoogleApi;
   ai: MeetingAi;
-  /** null: STT_PROVIDER none; meetings are found and matched but wait (stt_none). */
+  /** null: STT_PROVIDER none, or the local engine not set up; meetings are found and matched but wait (stt_none). */
   transcriber: MeetingTranscriber | null;
+  /** STT_PROVIDER is local but STT_LOCAL_BIN or STT_LOCAL_MODEL is not a file (buildMeetingTranscriber): shown in Health. */
+  sttProblem?: MeetingSttProblem | null;
   /** null: ffmpeg not found; meetings are paused (no_ffmpeg). */
   ffmpeg: Ffmpeg | null;
   settings: MeetingSettings;
@@ -135,7 +137,7 @@ export interface AppDeps {
   /** With the dashboard: the morning report whose settings the owner changes while the service runs. Replaces report. */
   liveReport?: ReportRunner;
   /** With the dashboard: told of each upload and failure (the Activity screen's rows). A throw is logged, never passed on. */
-  publishHooks?: { onPublished(): void; onFailure(f: { step: 'build' | 'drive'; auth: boolean }): void };
+  publishHooks?: { onPublished(): void; onFailure(f: { step: 'build' | 'drive'; auth: boolean }): void; onNewFile?(): void };
 }
 
 export interface App {
@@ -207,6 +209,7 @@ export function createApp(d: AppDeps): App {
     api: d.drive,
     log: d.log,
     minIntervalMs: d.publishIntervalMs,
+    now: () => d.clock.now(),
     // workbookLine() leaves out publish failures: if this upload succeeds, they are already over.
     build: () => {
       const line = health.workbookLine();
@@ -228,6 +231,7 @@ export function createApp(d: AppDeps): App {
       health.markPublishFailed(f);
       hook((h) => h.onFailure(f));
     },
+    onNewFile: () => hook((h) => h.onNewFile?.()),
   });
 
   /** Health writes its snapshot to the DB. A busy DB must not turn a finished run into a crash, or break a callback. */
@@ -368,7 +372,7 @@ export function createApp(d: AppDeps): App {
   const meetings = mt
     ? new MeetingService({
         db: d.db, clock: d.clock, log: d.log, dataDir: d.dataDir, spend, prices: d.prices, drive: d.drive, api: mt.api, ai: mt.ai,
-        transcriber: mt.transcriber, ffmpeg: mt.ffmpeg, settings: mt.settings, clients: mt.clients, freeBytes: d.freeBytes ?? defaultFreeBytes,
+        transcriber: mt.transcriber, ...(mt.sttProblem ? { sttProblem: mt.sttProblem } : {}), ffmpeg: mt.ffmpeg, settings: mt.settings, clients: mt.clients, freeBytes: d.freeBytes ?? defaultFreeBytes,
         // The tracker step holds the client's run flag through the reconciler's exclusive (debouncer.runExclusive).
         track: (clientId, meeting) => reconciler.runMeeting(clientId, meeting),
         hasMeetingScopes: () => meetingsReady(d.db),
