@@ -5,7 +5,7 @@ import { Writable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseEnv } from '../../src/config/env.ts';
 import { MeetingDeferral } from '../../src/meetings/audio.ts';
-import { LOCAL_MEETING_PART_SECONDS, localMeetingTmpDir } from '../../src/meetings/localTranscriber.ts';
+import { LOCAL_MEETING_MIN_TIMEOUT_SECONDS, LOCAL_MEETING_PART_SECONDS, localMeetingTmpDir } from '../../src/meetings/localTranscriber.ts';
 import {
   bookStuckParts, buildMeetingTranscriber, createMeetingTranscriber, forgetPending, MAX_FORGET_ATTEMPTS, meetingTranscriber, recoverInflightParts, transcribeMeeting, type MeetingTranscriber,
   type TranscribeMeetingDeps,
@@ -893,6 +893,26 @@ describe('buildMeetingTranscriber (the service start, Task 3)', () => {
     const r = buildMeetingTranscriber(parseEnv(LOCAL), { ffmpeg: null, log, check: () => null, localEngine: { transcribe: vi.fn() } });
     expect(r.transcriber?.provider).toBe('local');
     expect(lines.join('')).not.toContain('meetings are transcribed on the local speech engine');
+  });
+
+  it(`local with STT_LOCAL_TIMEOUT_SECONDS under ${LOCAL_MEETING_MIN_TIMEOUT_SECONDS}: a warning naming the setting, never its value`, () => {
+    const { lines, log } = capturingLogger();
+    const r = buildMeetingTranscriber(parseEnv({ ...LOCAL, STT_LOCAL_TIMEOUT_SECONDS: '1137' }), { ffmpeg, log, check: () => null, localEngine: { transcribe: vi.fn() } });
+    expect(r.transcriber?.provider).toBe('local');
+    const out = lines.join('');
+    expect(out).toContain('"code":"local_timeout_short"');
+    expect(out).toContain('"setting":"STT_LOCAL_TIMEOUT_SECONDS"');
+    expect(out).not.toContain('1137');
+  });
+
+  it.each([
+    ['local at the floor', { ...LOCAL, STT_LOCAL_TIMEOUT_SECONDS: String(LOCAL_MEETING_MIN_TIMEOUT_SECONDS) }],
+    ['local with the default', LOCAL],
+    ['voice notes only on the local engine', { VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: LOCAL.STT_LOCAL_BIN, STT_LOCAL_MODEL: LOCAL.STT_LOCAL_MODEL, STT_LOCAL_TIMEOUT_SECONDS: '300' }],
+  ] as const)('no timeout warning: %s', (_name, settings) => {
+    const { lines, log } = capturingLogger();
+    buildMeetingTranscriber(parseEnv(settings), { ffmpeg, log, check: () => null, localEngine: { transcribe: vi.fn() } });
+    expect(lines.join('')).not.toContain('local_timeout_short');
   });
 
   it.each([['STT_LOCAL_BIN', 'local_not_set_up_bin'], ['STT_LOCAL_MODEL', 'local_not_set_up_model']] as const)(

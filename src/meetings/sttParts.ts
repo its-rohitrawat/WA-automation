@@ -3,15 +3,16 @@ import { basename, join } from 'node:path';
 import { SpendCapReachedError } from '../brain/paidCall.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
 import { tx, type Db } from '../store/db.ts';
-import { addSttForget, getMeeting, PART_FILE, setSttParts, writeStuckSttParts, type SttPartRow } from '../store/meetings.ts';
+import { addSttForget, getMeeting, noteMeetingProgress, PART_FILE, setSttParts, writeStuckSttParts, type SttPartRow } from '../store/meetings.ts';
 import { AudioError } from '../stt/audio.ts';
 import { SttHttpError, SttJobError, SttJobLostError, SttNoAnswerError } from '../stt/http.ts';
+import { LocalEngineError } from '../stt/local.ts';
 import { SttBookingError, withSttHold } from '../stt/paidStt.ts';
 import { costUsd, modelFor } from '../stt/prices.ts';
 import type { AudioPart, ProviderOrLocal } from '../stt/types.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
-import { meetingsTmpDir } from './audio.ts';
+import { MeetingFailure, meetingsTmpDir } from './audio.ts';
 import type { MeetingTranscriber, TranscribeMeetingDeps } from './transcribe.ts';
 
 // The durable speech parts of one meeting (Task 6): planning them, sending one, and booking what a crash left in flight.
@@ -164,7 +165,8 @@ export async function replanForProvider(ctx: PartContext, signal: AbortSignal | 
       out.push(p);
       continue;
     }
-    const fresh: SttPartRow = { ...p, provider: t.provider, state: 'todo', booked: 'none', jobId: null, segments: null, billedSeconds: null };
+    // As planned for the new provider: a local part's tries do not carry over.
+    const fresh: SttPartRow = { ...afresh(p), provider: t.provider };
     if (p.seconds <= t.maxPartSeconds) {
       out.push(fresh);
       continue;
@@ -353,10 +355,15 @@ export async function sarvamPart(ctx: PartContext, i: number): Promise<void> {
 
 /**
  * The local engine (STT_PROVIDER=local): free, so there is no hold, no booking and no spend cap. The part is set
- * inflight, run (the signal stops the conversion and the engine), then stored done with booked none. On any failure it
- * goes back to todo, so the retry runs it again; if that write fails, it is left inflight and bookStuckParts sets it back
- * to todo (nothing booked) before the next run. A stop throws the signal's reason, so the processor gives the attempt
- * back. Logs the meeting id, part number, provider, seconds and how long the run took: never text or paths.
+ * inflight, run (the signal stops the conversion and the engine), then stored done with booked none. On a failure it
+ * goes back to todo with one more try counted (tries), so the retry runs it again; if that write fails, it is left
+ * inflight and bookStuckParts sets it back to todo (nothing booked) before the next run. A stop throws the signal's
+ * reason, so the processor gives the attempt back, and counts no try.
+ * - The part's last try (LOCAL_PART_MAX_TRIES) failing on its own audio (review fix 1) gives it up: done with no
+ *   segments and unheard, and the meeting goes on. If the engine itself failed (timeout, exit_<n>, no_output) and no
+ *   part of the meeting was heard yet, the meeting fails instead (MeetingFailure local_engine_failed), the part afresh.
+ * - A part done or given up resets the meeting's attempts to the run in hand (noteMeetingProgress, review fix 2).
+ * Logs the meeting id, part number, provider, code, tries, seconds and how long the run took: never text or paths.
  */
 export async function localPart(ctx: PartContext, i: number, signal: AbortSignal | undefined): Promise<void> {
   const { id, parts, t, deps, put } = ctx;
@@ -370,16 +377,91 @@ export async function localPart(ctx: PartContext, i: number, signal: AbortSignal
   try {
     r = await t.transcribePart(audio, signal ? { signal } : {});
   } catch (e) {
-    const fields = { meetingId: id, part: before.index, provider: t.provider, code: errorCode(e), durationMs: durationMs() };
+    const stopped = signal?.aborted === true;
+    const tries = stopped ? before.tries : (before.tries ?? 0) + 1;
+    const fields = { meetingId: id, part: before.index, provider: t.provider, code: errorCode(e), durationMs: durationMs(), ...(tries !== undefined ? { tries } : {}) };
+    if (!stopped && tries !== undefined && tries >= LOCAL_PART_MAX_TRIES && partOwnFailure(e)) {
+      if (engineFailure(e) && !parts.some(heard)) {
+        // The engine has not worked once for this meeting: it is likely broken (or its timeout too short), not this
+        // part's audio. The part runs afresh after `meeting retry`.
+        try {
+          replacePart(ctx, i, afresh(parts[i]!));
+        } catch (writeErr) {
+          deps.log.warn({ ...fields, writeCode: errorCode(writeErr) }, 'meeting speech part could not be reset');
+        }
+        deps.log.warn(fields, 'meeting fails: the local speech engine failed on every try, with nothing heard yet');
+        throw new MeetingFailure('failed', 'local_engine_failed');
+      }
+      ctx.atomically(() => {
+        put(i, { state: 'done', booked: 'none', segments: [], billedSeconds: null, tries, unheard: true });
+        noteMeetingProgress(deps.db, id);
+      });
+      deps.log.warn(fields, 'meeting speech part given up: no speech recognised');
+      return;
+    }
     try {
-      put(i, { state: 'todo', booked: 'none' });
+      put(i, { state: 'todo', booked: 'none', ...(tries !== undefined ? { tries } : {}) });
       deps.log.warn(fields, 'meeting speech part failed');
     } catch (writeErr) {
       deps.log.warn({ ...fields, writeCode: errorCode(writeErr) }, 'meeting speech part failed');
     }
-    if (signal?.aborted) throw signal.reason;
+    if (stopped) throw signal!.reason;
     throw e;
   }
-  ctx.markDone(i, r);
+  ctx.atomically(() => {
+    ctx.markDone(i, r);
+    noteMeetingProgress(deps.db, id);
+  });
   deps.log.info({ meetingId: id, part: before.index, provider: t.provider, seconds: Math.round(before.seconds), durationMs: durationMs() }, 'meeting speech part transcribed');
+}
+
+/**
+ * Runs of one local part: as many as a meeting stage's attempts (MEETING_MAX_ATTEMPTS in src/meetings/processor.ts,
+ * which imports this module, so the number is repeated here; a test keeps them equal).
+ */
+export const LOCAL_PART_MAX_TRIES = 4;
+
+/** A failure of the part's own audio, on the engine or in its conversion: given up after the part's last try. */
+const partOwnFailure = (e: unknown): boolean => (e instanceof LocalEngineError && e.code !== 'aborted') || e instanceof AudioError;
+
+/** A failure of the engine itself, as opposed to what it heard (empty_output) or the conversion. */
+const engineFailure = (e: unknown): boolean =>
+  e instanceof LocalEngineError && (e.code === 'timeout' || e.code === 'no_output' || e.code.startsWith('exit_'));
+
+/** A part whose speech was heard: done, with text. */
+const heard = (p: SttPartRow): boolean => p.state === 'done' && (p.segments?.length ?? 0) > 0;
+
+/** The part as it was planned: to do, nothing booked, no tries counted and not given up. */
+export function afresh(p: SttPartRow): SttPartRow {
+  const out: SttPartRow = { ...p, state: 'todo', booked: 'none', jobId: null, segments: null, billedSeconds: null };
+  delete out.tries;
+  delete out.unheard;
+  return out;
+}
+
+/** Replaces part i and stores the parts at once; on a failed write the part stays as it was. */
+function replacePart(ctx: PartContext, i: number, row: SttPartRow): void {
+  const prev = ctx.parts[i]!;
+  ctx.parts[i] = row;
+  try {
+    ctx.save();
+  } catch (e) {
+    ctx.parts[i] = prev;
+    throw e;
+  }
+}
+
+/**
+ * Nothing was heard in the meeting and a part was given up: the parts given up are set to run afresh, so `meeting
+ * retry` (once the engine is looked at) tries them again. The caller then fails the meeting (nothing_heard).
+ */
+export function runUnheardAgain(ctx: PartContext): void {
+  const prev = [...ctx.parts];
+  ctx.parts.splice(0, ctx.parts.length, ...prev.map((p) => (p.unheard === true ? afresh(p) : p)));
+  try {
+    ctx.save();
+  } catch (e) {
+    ctx.parts.splice(0, ctx.parts.length, ...prev);
+    throw e;
+  }
 }

@@ -128,6 +128,19 @@ describe('renderMeetingDoc', () => {
     expect(html).not.toMatch(/\bnull\b|\bundefined\b/i);
   });
 
+  it('says where no speech was recognised (a part the local engine gave up), in time order among the lines', () => {
+    const segments = [seg(0, null, 'pehle'), seg(1200, null, 'baad mein')];
+    const b = body(renderMeetingDoc({ ...base, segments, summary: { ...summary, speakers: [] }, unheard: [{ start: 3600, end: 4200 }, { start: 600, end: 1200 }] }));
+    expect(b).toContain(
+      '<h2>Transcript</h2><p>0:00 Speaker: pehle</p><p>No speech recognised 10:00–20:00</p><p>20:00 Speaker: baad mein</p>'
+      + '<p>No speech recognised 1:00:00–1:10:00</p>',
+    );
+  });
+
+  it('no unheard parts given: the transcript is as before', () => {
+    expect(body(renderMeetingDoc({ ...base, unheard: [] }))).toBe(body(renderMeetingDoc(base)));
+  });
+
   it('maps names through the shown labels, including a "~2" label for a raw label that cleans to the same text', () => {
     const b = body(renderMeetingDoc({
       ...base,
