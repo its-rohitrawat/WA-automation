@@ -478,6 +478,13 @@ With the dashboard on, this replaces editing `allowed-groups.json` by hand (step
 
 Every saved change is recorded in **Audit logs**. The dashboard writes the same `config/allowed-groups.json` file, so `npm run cli -- status` shows the new clients as before.
 
+**Earlier messages of an approved group.** When a group is approved (new, or approved again), the agent also reads its earlier messages: up to 7 days back, as far as WhatsApp provides. WhatsApp may not hand over every past message, so some can be missing. It works like this:
+
+- It starts from a message of that group the agent already has. If it has none yet, it waits for the first new message in the group, and the client card says it is waiting.
+- It reads only while the founder's WhatsApp is connected, and stops if the group is removed. After a restart it carries on where it stopped.
+- The earlier messages go through the tracker like new ones, by their real times; a message read twice is kept once. The AI work on them counts towards the daily spend cap: if the cap is reached, the reading pauses and carries on the next day.
+- The client card in **Clients** shows how many it has found, then that the earlier messages are read. **Activity** gets one line per group when it is done, with the count and no message text.
+
 When WhatsApp is not connected, the page shows the last list it had ("WhatsApp isn't connected") and you can still approve from it.
 
 **Fallback, when the dashboard can't be reached:** edit `allowed-groups.json` by hand as in step 5 (`list-groups`, then the file). Do not edit the file by hand while someone saves in the dashboard.
@@ -491,13 +498,26 @@ With the dashboard on, start here when a connection is down. The **Overview** sh
 | Founder WhatsApp | **Reconnect** | A QR code appears. On the founder's phone: WhatsApp > Settings > Linked devices > Link a device, and scan it. The tracker carries on with the new link; the service does not need to be stopped. |
 | Spare WhatsApp (morning report) | **Link phone** | The same, scanned from the **spare** phone. Never scan it with the founder's phone: the agent refuses to send from the founder's own number. |
 | Google | **Reconnect**, or **Add Google account** | Google's sign-in opens. Sign in with that account and allow access; you come back to Connections. |
-| Tracker on Drive | **Upload tracker now** | Uploads the tracker at once. |
+| Tracker on Drive | **Upload tracker now** | Uploads the tracker at once. The card also says which file it writes and which Google account that file belongs to. |
 | Claude | **Test connection** | Checks the AI key works. It costs nothing. |
 | Monitoring | **Send test beat** | Sends one heartbeat to UptimeRobot. |
 
 A link stops by itself after 5 minutes without a scan, and **Cancel** puts back the link that was there before. Every reconnect is recorded in **Audit logs**. Once the company address is set up ([GO-LIVE.md](GO-LIVE.md)), do Google's **Reconnect** from the dashboard at that address, not from `localhost`.
 
+**Which Google account is which.** Each Google card shows the account's email address and what it is used for (the tracker on Drive, meetings), with its label in small text below. An account connected before this version (with `npm run cli -- google-auth`) shows its email once the agent has looked it up; if the card says the email is not known yet, press **Reconnect** on it and sign in with the same account. The email is shown on the dashboard only; logs and **Audit logs** keep it masked.
+
 **Fallback, when the dashboard can't be reached:** the commands in this guide still work: `npm run cli -- link` (founder), `npm run cli -- link-sender` (spare phone) and `npm run cli -- google-auth` (Google), each as described in its section. `link` and `link-sender` need the service stopped first; after `google-auth`, restart the service.
+
+### Keeping the tracker up to date
+
+The tracker updates by itself after the agent reads new messages. To update it at once, press the Sync tracker button at the top of **Clients** (or in a client's panel); it does the same as **Upload tracker now** on Connections. Next to the button is the time of the last update. Pressed too many times in a minute, it asks you to wait a moment.
+
+The agent always writes one tracker file, `Tracker.xlsx` in the `WA Agent` folder on Drive. The **Tracker** screen and the Drive card on **Connections** show which file it is, its folder, the Google account it belongs to, when it was last uploaded, and a link to open it in Drive.
+
+**If a new tracker file appears.** The agent makes a new `Tracker.xlsx` only when it can no longer reach the old one. That almost always means the Google login changed: another Google account, or another Google Cloud project, was connected. The **Tracker** screen then says once that a new tracker file was started, and **Audit logs** has a line for it. Either:
+
+- **Go back to the old file:** on **Connections**, press **Reconnect** on the Google card and sign in with the account that owns the old file (Drive shows a file's owner in its details). Then check on the **Tracker** screen which file it writes.
+- **Keep the new file:** do nothing. The agent goes on with it, and the old file stays in Drive as it was.
 
 ## Everyday commands (run in the waagent window)
 
