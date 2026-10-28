@@ -13,12 +13,12 @@ import { ElevenLabsProvider } from '../stt/providers/elevenlabs.ts';
 import { OpenAiProvider } from '../stt/providers/openai.ts';
 import { SarvamProvider } from '../stt/providers/sarvam.ts';
 import { mergeParts } from '../stt/segments.ts';
-import type { AudioPart, ProviderId, Segment, SttProvider } from '../stt/types.ts';
+import type { AudioPart, ProviderOrLocal, Segment, SttProvider } from '../stt/types.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { MeetingDeferral, meetingsTmpDir, removePartsFolder } from './audio.ts';
 import { forgetPending } from './sttForget.ts';
-import { bookStuckParts, ensurePartFiles, errorCode, heldPart, partContext, planParts, replanForProvider, sarvamPart } from './sttParts.ts';
+import { bookStuckParts, ensurePartFiles, errorCode, heldPart, localPart, partContext, planParts, replanForProvider, sarvamPart } from './sttParts.ts';
 
 export { bookStuckParts } from './sttParts.ts';
 export { forgetPending, MAX_FORGET_ATTEMPTS } from './sttForget.ts';
@@ -31,20 +31,25 @@ export { forgetPending, MAX_FORGET_ATTEMPTS } from './sttForget.ts';
  * - Sarvam: the ceiling is held while the job is sent and booked, durably with the job id, when the job is accepted. The
  *   list price for the measured length is exactly the ceiling, so nothing more is booked when the answer comes; no
  *   in-memory hold has to outlive a batch job of up to 3 hours.
+ * - The local engine (STT_PROVIDER=local, src/meetings/localTranscriber.ts): free, so nothing is held or booked and the
+ *   spend cap never stops it. A part left inflight (a crash) is set back to todo by bookStuckParts with nothing booked,
+ *   and run again. It is the one speech call the stop signal stops: the part goes back to todo and runs at the next start.
  * - A booking and the part state it goes with are written in one transaction; if that fails, the part is left inflight
  *   with nothing booked, and bookStuckParts books it at the ceiling of the provider it was sent to.
  * - A provider copy of an answer (ElevenLabs) is noted in stt_forget with the finished part and deleted once the
  *   transcript is stored (M7); forgetPending tries again later.
- * Logs carry the meeting id, part number, provider, seconds and cost only: never what was said, paths or keys.
+ * Logs carry the meeting id, part number, provider, seconds and cost (a local run's duration) only: never what was said,
+ * paths or keys.
  * The parts themselves (planning, sending, booking) are in src/meetings/sttParts.ts; copies in src/meetings/sttForget.ts.
  *
  * WHAT THE PROCESSOR (Task 10) MUST CALL
  * - At start, before any meeting runs: recoverInflightParts(db, spend, INR_PER_USD, log), then
  *   forgetPending(db, transcriber, log). Both run with STT_PROVIDER none too (forgetPending then only logs).
  * - Per meeting at stage audio: transcribeMeeting(id, deps, signal), and map what it throws:
- *   MeetingDeferral stt_none / stt_unavailable / spend_cap / spend_busy -> defer without counting an attempt;
- *   anything else (SttHttpError 429/5xx, SttNoAnswerError, SttJobError, SttBookingError, AudioError, disk errors) ->
- *   retry, counting an attempt.
+ *   MeetingDeferral stt_none / stt_unavailable / spend_cap / spend_busy (no_ffmpeg for local) -> defer without counting
+ *   an attempt; the signal's reason -> stopped; anything else (SttHttpError 429/5xx, SttNoAnswerError, SttJobError,
+ *   SttBookingError, LocalEngineError timeout / exit_<n> / no_output, AudioError, disk errors) -> retry, counting an
+ *   attempt.
  * - On a final failure (attempts used up, or any path to failMeeting for a meeting that has stt_parts):
  *   bookStuckParts(db, spend, id, { inrPerUsd, clock, log }) BEFORE failMeeting, so a part left in flight is booked.
  * - At shutdown: SpendGuard.settlePending runs while the database is still open (it writes the bookings and the parts'
@@ -62,7 +67,7 @@ export const MEETING_STT_TIMEOUTS = {
 };
 
 export interface MeetingTranscriber {
-  readonly provider: ProviderId;
+  readonly provider: ProviderOrLocal;
   readonly maxPartSeconds: number;
   /** INR_PER_USD, for prices in rupees (also those of parts sent to an earlier provider). */
   readonly inrPerUsd: number;
@@ -71,12 +76,13 @@ export interface MeetingTranscriber {
   /** What a part cost: the billed seconds when the provider reports them, otherwise the measured length. */
   partCostUsd(seconds: number, billedSeconds: number | null): number;
   /**
-   * One part. Never aborted. forgetRef: the provider's id for its stored copy of the answer (an id only), stored with the
-   * finished part and deleted through forget() once the transcript is stored; null when the provider keeps none.
+   * One part. A paid call is never aborted; only the local engine takes the signal (o.signal), which stops it.
+   * forgetRef: the provider's id for its stored copy of the answer (an id only), stored with the finished part and
+   * deleted through forget() once the transcript is stored; null when the provider keeps none.
    */
   transcribePart(
     part: AudioPart,
-    o: { resumeJobId?: string; onJobId?: (id: string) => void },
+    o: { resumeJobId?: string; onJobId?: (id: string) => void; signal?: AbortSignal },
   ): Promise<{ model: string; segments: Segment[]; billedSeconds: number | null; forgetRef: string | null }>;
   /** Whether this provider keeps copies that forget() deletes. */
   readonly canForget: boolean;
@@ -181,7 +187,10 @@ const KEY_REFUSED = new Set([401, 403]);
  *   is reached), spend_busy (only holds of paid calls in flight are in the way);
  * - SttHttpError 429 and 5xx, SttNoAnswerError, SttJobLostError, SttJobError, SttBookingError, AudioError and others:
  *   thrown as they are, the processor retries (the part records make the retry book nothing twice);
- * - an abort: the signal's reason, before a new part starts or while splitting. A speech call is never aborted.
+ * - an abort: the signal's reason, before a new part starts or while splitting. A paid speech call is never aborted;
+ *   a local engine run is (the part goes back to todo);
+ * - local engine failures (LocalEngineError timeout, exit_<n>, no_output): thrown as they are, the part back to todo,
+ *   and the processor retries (the parts already done are kept); no_ffmpeg (MeetingDeferral) when ffmpeg is missing.
  * A Sarvam job that is lost after acceptance is booked again when it is sent again: a second job is a second charge.
  */
 export async function transcribeMeeting(meetingId: number, deps: TranscribeMeetingDeps, signal?: AbortSignal): Promise<TranscribeMeetingResult> {
@@ -219,6 +228,7 @@ async function runParts(id: number, t: MeetingTranscriber, deps: TranscribeMeeti
     if (parts[i]!.state === 'done') continue;
     signal?.throwIfAborted();
     if (t.provider === 'sarvam') await sarvamPart(ctx, i);
+    else if (t.provider === 'local') await localPart(ctx, i, signal);
     else await heldPart(ctx, i);
   }
 
@@ -253,8 +263,9 @@ function removeParts(id: number, dir: string, log: Logger): void {
 
 /**
  * At processor start, before any speech call: bookStuckParts for every meeting, of any status, with a part left inflight
- * with nothing booked, each at the ceiling of the provider it was sent to. A Sarvam part with a job id is already booked
- * and is resumed later; an unknown part without one is sent again with a new hold. Needs no transcriber, so it runs with
+ * with nothing booked, each at the ceiling of the provider it was sent to (a local part is set back to todo, unbooked).
+ * A Sarvam part with a job id is already booked and is resumed later; an unknown part without one is sent again with a
+ * new hold. Needs no transcriber, so it runs with
  * STT_PROVIDER none too. Returns how many parts were booked. A meeting whose record cannot be read or written is logged
  * by id and left for the next call (transcribeMeeting and the processor's final bookStuckParts check it again).
  */

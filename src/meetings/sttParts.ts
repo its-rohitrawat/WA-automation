@@ -8,7 +8,7 @@ import { AudioError } from '../stt/audio.ts';
 import { SttHttpError, SttJobError, SttJobLostError, SttNoAnswerError } from '../stt/http.ts';
 import { SttBookingError, withSttHold } from '../stt/paidStt.ts';
 import { costUsd, modelFor } from '../stt/prices.ts';
-import type { AudioPart, ProviderId } from '../stt/types.ts';
+import type { AudioPart, ProviderOrLocal } from '../stt/types.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { meetingsTmpDir } from './audio.ts';
@@ -27,7 +27,7 @@ export function errorCode(e: unknown): string {
 }
 
 /** The list price, with speaker labels, of a part of this length at this provider, in US dollars. */
-export function partCeilingFor(provider: ProviderId, seconds: number, inrPerUsd: number): number {
+export function partCeilingFor(provider: ProviderOrLocal, seconds: number, inrPerUsd: number): number {
   return costUsd(modelFor(provider, true), seconds, inrPerUsd);
 }
 
@@ -36,23 +36,28 @@ export function partCeilingFor(provider: ProviderId, seconds: number, inrPerUsd:
  * the provider it was sent to, as 'stt' "(unknown, estimated)", and sets it unknown/ceiling, in one transaction. Works
  * whatever the meeting's status: the processor calls it before failMeeting, so a part of a meeting that fails is still
  * booked, and recoverInflightParts calls it for every meeting at start. Booking twice is impossible: the parts it books
- * are no longer inflight/none. Returns how many were booked. Throws when the meeting is missing or its record cannot be
- * read or written (nothing is booked then).
+ * are no longer inflight/none. A part left inflight on the local engine cost nothing: it is set back to todo, with no
+ * spend row, in the same write, and simply runs again. Returns how many were booked (local parts are not counted).
+ * Throws when the meeting is missing or its record cannot be read or written (nothing is booked then).
  */
 export function bookStuckParts(db: Db, spend: SpendGuard, meetingId: number, o: { inrPerUsd: number; clock?: Clock; log?: Logger }): number {
   const m = getMeeting(db, meetingId);
   if (m === undefined) throw new Error(`bookStuckParts: no meeting ${meetingId}`);
   const stuck = (p: SttPartRow) => p.state === 'inflight' && p.booked === 'none';
-  const n = m.sttParts.filter(stuck).length;
-  if (n === 0) return 0;
+  const paid = (p: SttPartRow) => stuck(p) && p.provider !== 'local';
+  const local = (p: SttPartRow) => stuck(p) && p.provider === 'local';
+  const n = m.sttParts.filter(paid).length;
+  const runAgain = m.sttParts.filter(local).length;
+  if (n === 0 && runAgain === 0) return 0;
   tx(db, () => {
-    for (const p of m.sttParts.filter(stuck)) {
+    for (const p of m.sttParts.filter(paid)) {
       spend.record('stt', partCeilingFor(p.provider, p.seconds, o.inrPerUsd), `meeting ${meetingId} part ${p.index} (unknown, estimated)`);
     }
-    const parts = m.sttParts.map((p): SttPartRow => (stuck(p) ? { ...p, state: 'unknown', booked: 'ceiling' } : p));
+    const parts = m.sttParts.map((p): SttPartRow => (paid(p) ? { ...p, state: 'unknown', booked: 'ceiling' } : local(p) ? { ...p, state: 'todo' } : p));
     writeStuckSttParts(db, meetingId, parts, (o.clock ?? systemClock).now().toISOString());
   });
-  o.log?.info({ meetingId, parts: n }, 'meeting speech parts left in flight booked at their ceiling');
+  if (n > 0) o.log?.info({ meetingId, parts: n }, 'meeting speech parts left in flight booked at their ceiling');
+  if (runAgain > 0) o.log?.info({ meetingId, parts: runAgain, provider: 'local' }, 'meeting speech parts left in flight on the local engine will run again');
   return n;
 }
 
@@ -106,7 +111,8 @@ export function partContext(id: number, parts: SttPartRow[], t: MeetingTranscrib
     }
   };
   const forget = (ref: string | null) => {
-    if (ref !== null && ref.length >= 1 && ref.length <= 200) addSttForget(db, { meetingId: id, provider: t.provider, ref, at: clock.now().toISOString() });
+    // The local engine keeps no copies, so it never has one to note.
+    if (t.provider !== 'local' && ref !== null && ref.length >= 1 && ref.length <= 200) addSttForget(db, { meetingId: id, provider: t.provider, ref, at: clock.now().toISOString() });
   };
   const markDone = (i: number, r: PartAnswer, booked?: SttPartRow['booked']) => {
     put(i, { state: 'done', segments: r.segments, billedSeconds: r.billedSeconds, ...(booked ? { booked } : {}) });
@@ -120,7 +126,7 @@ export function partContext(id: number, parts: SttPartRow[], t: MeetingTranscrib
   return { id, parts, t, deps, whole, save, put, atomically, markDone, forget, pathOf };
 }
 
-const todo = (index: number, provider: ProviderId, offset: number, seconds: number, file: string | null): SttPartRow => ({
+const todo = (index: number, provider: ProviderOrLocal, offset: number, seconds: number, file: string | null): SttPartRow => ({
   index, provider, file, offset, seconds, state: 'todo', jobId: null, booked: 'none', segments: null, billedSeconds: null,
 });
 
@@ -343,4 +349,37 @@ export async function sarvamPart(ctx: PartContext, i: number): Promise<void> {
     log.warn({ meetingId: id, part: before.index, provider: t.provider, code: errorCode(e) }, 'meeting speech part failed');
     throw e;
   }
+}
+
+/**
+ * The local engine (STT_PROVIDER=local): free, so there is no hold, no booking and no spend cap. The part is set
+ * inflight, run (the signal stops the conversion and the engine), then stored done with booked none. On any failure it
+ * goes back to todo, so the retry runs it again; if that write fails, it is left inflight and bookStuckParts sets it back
+ * to todo (nothing booked) before the next run. A stop throws the signal's reason, so the processor gives the attempt
+ * back. Logs the meeting id, part number, provider, seconds and how long the run took: never text or paths.
+ */
+export async function localPart(ctx: PartContext, i: number, signal: AbortSignal | undefined): Promise<void> {
+  const { id, parts, t, deps, put } = ctx;
+  const before = parts[i]!;
+  const audio: AudioPart = { path: ctx.pathOf(before), seconds: before.seconds, offset: before.offset };
+  checkPartFile(audio.path);
+  put(i, { state: 'inflight', booked: 'none', jobId: null });
+  const started = performance.now();
+  const durationMs = () => Math.round(performance.now() - started);
+  let r: PartAnswer;
+  try {
+    r = await t.transcribePart(audio, signal ? { signal } : {});
+  } catch (e) {
+    const fields = { meetingId: id, part: before.index, provider: t.provider, code: errorCode(e), durationMs: durationMs() };
+    try {
+      put(i, { state: 'todo', booked: 'none' });
+      deps.log.warn(fields, 'meeting speech part failed');
+    } catch (writeErr) {
+      deps.log.warn({ ...fields, writeCode: errorCode(writeErr) }, 'meeting speech part failed');
+    }
+    if (signal?.aborted) throw signal.reason;
+    throw e;
+  }
+  ctx.markDone(i, r);
+  deps.log.info({ meetingId: id, part: before.index, provider: t.provider, seconds: Math.round(before.seconds), durationMs: durationMs() }, 'meeting speech part transcribed');
 }

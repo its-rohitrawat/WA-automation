@@ -56,6 +56,13 @@ export interface MeetingServiceDeps {
 }
 
 /**
+ * The speech-to-text provider Health names. The local engine shows as 'none' until Health and the dashboard know it
+ * (plan 2026-10-28-meetings-local-stt.md, Task 3); meetings stay safe either way.
+ */
+const sttProviderOf = (t: MeetingTranscriber | null): MeetingsHealth['sttProvider'] =>
+  t === null || t.provider === 'local' ? 'none' : t.provider;
+
+/**
  * Meetings inside the app (Task 10): discovery at most every MEETING_POLL_MINUTES (never two passes at once), the queue
  * kicked on every tick, the paused state for Health. Without the meeting scopes nothing calls Google's meeting APIs.
  */
@@ -159,7 +166,7 @@ export class MeetingService {
     return {
       stats: meetingStats(this.#d.db, this.#d.clock.now().toISOString()),
       paused,
-      sttProvider: this.#d.transcriber?.provider ?? 'none',
+      sttProvider: sttProviderOf(this.#d.transcriber),
       ...(extraLost.length > 0 ? { lostAccounts: extraLost } : {}),
     };
   }

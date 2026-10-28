@@ -334,9 +334,9 @@ const silent = (meanVolumeDb: number | null): boolean => meanVolumeDb !== null &
 /**
  * A transcript made only of whisper's non-speech markers, such as "[BLANK_AUDIO]", "[ Silence ]", "(silence)" or
  * "[MUSIC]" (review round 1, fix 4): one or more [...] or (...) groups and spaces, nothing else. Text with any word
- * outside a group is real text, kept as it is.
+ * outside a group is real text, kept as it is. Meetings on the local engine read them the same way.
  */
-const ONLY_MARKERS = /^\s*(?:(?:\[[^[\]]*\]|\([^()]*\))\s*)+$/;
+export const ONLY_MARKERS = /^\s*(?:(?:\[[^[\]]*\]|\([^()]*\))\s*)+$/;
 
 /**
  * The local engine as a VoiceTranscriber (Phase 2b amendment L2). It costs nothing: ceilingUsd and costUsd are 0, and

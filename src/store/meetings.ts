@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { MeetingSummarySchema, type MeetingSummary } from '../brain/meetingSchema.ts';
-import type { ProviderId, Segment } from '../stt/types.ts';
+import type { ProviderId, ProviderOrLocal, Segment } from '../stt/types.ts';
 import { tx, type Db } from './db.ts';
 
 export const MEETING_STATUSES = ['unassigned', 'internal', 'queued', 'done', 'skipped', 'too_long', 'no_access', 'failed'] as const;
@@ -20,8 +20,11 @@ export interface MeetingAttendee {
 /** One speech part's durable bookkeeping (see src/meetings/transcribe.ts). */
 export interface SttPartRow {
   index: number;
-  /** The provider the part is planned for, and sent to: a stuck part is booked at this provider's price. */
-  provider: ProviderId;
+  /**
+   * The provider the part is planned for, and sent to: a stuck part is booked at this provider's price. 'local' (the
+   * engine on this machine) is free: such a part is never booked, and one left in flight is simply run again.
+   */
+  provider: ProviderOrLocal;
   /** The part's MP3 under data/meetings/tmp/ ("12-parts/part-000.mp3", forward slashes); null: the whole kept MP3. */
   file: string | null;
   offset: number;
@@ -135,7 +138,7 @@ export const PART_FILE = /^[1-9]\d{0,14}-parts(?:-[1-9]\d{0,3})?\/part-\d{3}\.mp
 const SttPartsSchema = z.array(
   z.strictObject({
     index: z.number().int(),
-    provider: z.enum(['sarvam', 'elevenlabs', 'openai']),
+    provider: z.enum(['sarvam', 'elevenlabs', 'openai', 'local']),
     file: z.string().regex(PART_FILE).nullable(),
     offset: z.number(),
     seconds: z.number(),
@@ -471,7 +474,7 @@ export function deleteSttForget(db: Db, id: number): void {
  * which keeps no copy), so forgetPending skips it. A count only,
  * for `cli status`.
  */
-export function sttForgetsGivenUp(db: Db, o: { maxAttempts: number; provider: ProviderId | 'local' | 'none' }): number {
+export function sttForgetsGivenUp(db: Db, o: { maxAttempts: number; provider: ProviderOrLocal | 'none' }): number {
   return (
     db.prepare('SELECT COUNT(*) AS n FROM stt_forget WHERE attempts >= ? OR provider <> ?').get(o.maxAttempts, o.provider) as { n: number }
   ).n;

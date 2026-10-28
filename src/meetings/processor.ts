@@ -35,9 +35,10 @@ import { cleanNames, fileNameTitle, inviteFacts } from './watcher.ts';
  *   is final (failed);
  * - a stage whose runs never ended MAX_ATTEMPTS times (the process stopped each time) fails as crashed;
  * - every path to a final status books speech parts left in flight first (bookStuckParts), then failMeeting.
- * A stop (the signal) aborts only the download and ffmpeg: speech and Claude calls never take the signal. A stage cut off
- * by the stop is left queued and due at once, with its attempt given back: a stop is not the meeting's fault, and an
- * aborted download or ffmpeg run costs nothing. A run the stop could not abort (a speech or Claude call) finishes and is
+ * A stop (the signal) aborts only the download, ffmpeg and the free local speech engine (STT_PROVIDER=local): paid
+ * speech and Claude calls never take the signal. A stage cut off by the stop is left queued and due at once, with its
+ * attempt given back: a stop is not the meeting's fault, and an aborted download, ffmpeg or local engine run costs
+ * nothing (the local part runs again). A run the stop could not abort (a speech or Claude call) finishes and is
  * stored, or is booked by SpendGuard.settlePending, and the claim's attempt stays counted, as for a crash.
  * Logs carry the meeting id, client id, stage, codes and counts only: never titles, names, emails or what was said.
  */
@@ -261,7 +262,7 @@ export class MeetingProcessor {
     d.log.info({ meetingId: m.id, attendeeCount: facts.attendees.length, participantCount: participants.length }, 'meeting attendees read again');
   }
 
-  /** audio -> transcribed. The signal stops it only before a new part starts or while splitting. */
+  /** audio -> transcribed. The signal stops it before a new part starts, while splitting, and during a local engine part. */
   async #transcribe(id: number, signal: AbortSignal): Promise<StageResult> {
     const d = this.#d;
     if (d.ffmpeg === null) throw new MeetingDeferral('no_ffmpeg');
