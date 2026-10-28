@@ -17,11 +17,13 @@ import { mergeParts } from '../stt/segments.ts';
 import type { AudioPart, ProviderOrLocal, Segment, SttProvider } from '../stt/types.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
-import { MeetingDeferral, meetingsTmpDir, removePartsFolder } from './audio.ts';
+import { MeetingDeferral, MeetingFailure, meetingsTmpDir, removePartsFolder } from './audio.ts';
 import type { MeetingSttProblem } from './healthTypes.ts';
-import { createLocalMeetingTranscriber, localMeetingTmpDir } from './localTranscriber.ts';
+import { createLocalMeetingTranscriber, LOCAL_MEETING_MIN_TIMEOUT_SECONDS, localMeetingTmpDir } from './localTranscriber.ts';
 import { forgetPending } from './sttForget.ts';
-import { bookStuckParts, ensurePartFiles, errorCode, heldPart, localPart, partContext, planParts, replanForProvider, sarvamPart } from './sttParts.ts';
+import {
+  bookStuckParts, ensurePartFiles, errorCode, heldPart, localPart, partContext, planParts, replanForProvider, runUnheardAgain, sarvamPart,
+} from './sttParts.ts';
 
 export { bookStuckParts } from './sttParts.ts';
 export { forgetPending, MAX_FORGET_ATTEMPTS } from './sttForget.ts';
@@ -37,6 +39,9 @@ export { forgetPending, MAX_FORGET_ATTEMPTS } from './sttForget.ts';
  * - The local engine (STT_PROVIDER=local, src/meetings/localTranscriber.ts): free, so nothing is held or booked and the
  *   spend cap never stops it. A part left inflight (a crash) is set back to todo by bookStuckParts with nothing booked,
  *   and run again. It is the one speech call the stop signal stops: the part goes back to todo and runs at the next start.
+ *   Each part has its own tries; one that fails on its own audio every time is given up (no speech recognised) instead of
+ *   failing the meeting, and the meeting fails only when nothing at all is heard (nothing_heard) or the engine never
+ *   worked on it (local_engine_failed). See localPart in src/meetings/sttParts.ts.
  * - A booking and the part state it goes with are written in one transaction; if that fails, the part is left inflight
  *   with nothing booked, and bookStuckParts books it at the ceiling of the provider it was sent to.
  * - A provider copy of an answer (ElevenLabs) is noted in stt_forget with the finished part and deleted once the
@@ -206,6 +211,11 @@ export function buildMeetingTranscriber(
   });
   // Without ffmpeg the meetings wait (no_ffmpeg, logged where ffmpeg is looked up), so this line would mislead.
   if (transcriber?.provider === 'local' && s.ffmpeg !== null) log.info({ provider: 'local' }, 'meetings are transcribed on the local speech engine');
+  // Review fix 3: one ten-minute part takes about 13 minutes on Voxtral, so a lower limit times out every part. The
+  // setting is named, never its value.
+  if (transcriber?.provider === 'local' && env.STT_LOCAL_TIMEOUT_SECONDS < LOCAL_MEETING_MIN_TIMEOUT_SECONDS) {
+    log.warn({ code: 'local_timeout_short', setting: 'STT_LOCAL_TIMEOUT_SECONDS' }, 'the local speech engine time limit is too short for ten-minute meeting parts');
+  }
   return { transcriber, sttProblem: null };
 }
 
@@ -223,7 +233,8 @@ export interface TranscribeMeetingDeps {
 export interface TranscribeMeetingResult {
   parts: number;
   segments: number;
-  note: 'no_speech' | null;
+  /** no_speech: nothing said; unheard_parts: speech heard, and some part given up (no speech recognised in it). */
+  note: 'no_speech' | 'unheard_parts' | null;
 }
 
 /** The SttHttpError statuses that mean the key is wrong or refused: waiting helps only once a person fixes it. */
@@ -252,6 +263,8 @@ const KEY_REFUSED = new Set([401, 403]);
  *   a local engine run is (the part goes back to todo);
  * - local engine failures (LocalEngineError timeout, exit_<n>, no_output, empty_output): thrown as they are, the part back to todo,
  *   and the processor retries (the parts already done are kept); no_ffmpeg (MeetingDeferral) when ffmpeg is missing.
+ *   On a part's last try it is given up instead (the run goes on, note unheard_parts), or MeetingFailure
+ *   local_engine_failed when the engine never worked on the meeting; MeetingFailure nothing_heard when no part was heard.
  * A Sarvam job that is lost after acceptance is booked again when it is sent again: a second job is a second charge.
  */
 export async function transcribeMeeting(meetingId: number, deps: TranscribeMeetingDeps, signal?: AbortSignal): Promise<TranscribeMeetingResult> {
@@ -295,9 +308,17 @@ async function runParts(id: number, t: MeetingTranscriber, deps: TranscribeMeeti
 
   const merged = mergeParts(parts.map((p) => ({ offset: p.offset, segments: p.segments ?? [] })));
   const noSpeech = merged.every((s) => s.text.trim() === '');
+  const unheard = parts.filter((p) => p.unheard === true).length;
+  if (noSpeech && unheard > 0) {
+    // Nothing heard anywhere, and a part was given up: not a meeting without speech, but one the engine could not hear.
+    runUnheardAgain(ctx);
+    log.warn({ meetingId: id, parts: parts.length, unheard }, 'meeting fails: no speech was recognised in any part');
+    throw new MeetingFailure('failed', 'nothing_heard');
+  }
   const transcript = noSpeech ? [] : merged;
-  advanceStage(db, id, 'transcribed', noSpeech ? { transcript, note: 'no_speech' } : { transcript }, deps.clock.now().toISOString());
-  log.info({ meetingId: id, parts: parts.length, segmentCount: transcript.length, noSpeech }, 'meeting transcribed');
+  const note: TranscribeMeetingResult['note'] = noSpeech ? 'no_speech' : unheard > 0 ? 'unheard_parts' : null;
+  advanceStage(db, id, 'transcribed', note !== null ? { transcript, note } : { transcript }, deps.clock.now().toISOString());
+  log.info({ meetingId: id, parts: parts.length, segmentCount: transcript.length, noSpeech, unheard }, 'meeting transcribed');
 
   // Only now that the transcript is stored: the provider's own copies go. What fails stays noted in stt_forget, and
   // forgetPending tries again at the next processor start.
@@ -308,7 +329,7 @@ async function runParts(id: number, t: MeetingTranscriber, deps: TranscribeMeeti
   }
   const folders = new Set([`${id}-parts`, ...parts.flatMap((p) => (p.file === null ? [] : [p.file.split('/')[0]!]))]);
   for (const f of folders) removeParts(id, join(meetingsTmpDir(deps.dataDir), f), log);
-  return { parts: parts.length, segments: transcript.length, note: noSpeech ? 'no_speech' : null };
+  return { parts: parts.length, segments: transcript.length, note };
 }
 
 /** Removes a parts folder with the same rules as cleanupTemp; best-effort (cleanupTemp tries again at the next start). */

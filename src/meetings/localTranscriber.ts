@@ -28,6 +28,12 @@ import type { MeetingTranscriber } from './transcribe.ts';
 /** Ten-minute parts: a 3-hour meeting is 18 parts, each run (and timed) on its own. */
 export const LOCAL_MEETING_PART_SECONDS = 600;
 
+/**
+ * The least STT_LOCAL_TIMEOUT_SECONDS that suits ten-minute parts (about 13 minutes each on Voxtral on the Mac Pro):
+ * below it the service warns at start (buildMeetingTranscriber), as every part would time out.
+ */
+export const LOCAL_MEETING_MIN_TIMEOUT_SECONDS = 1200;
+
 /** How long ffmpeg may take to turn one ten-minute part into a WAV. */
 export const LOCAL_PART_CONVERT_TIMEOUT_MS = 10 * 60_000;
 

@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { INDIAN_MOBILE, parseEnv, reportSettings } from '../../src/config/env.ts';
 import { MEETING_STT_PROBLEM_LINES } from '../../src/health/health.ts';
+import { LOCAL_MEETING_MIN_TIMEOUT_SECONDS } from '../../src/meetings/localTranscriber.ts';
 import type { TrackerView } from '../../src/output/view.ts';
 import { buildShortMorningText, trackerLink, TRACKER_ID_KEY } from '../../src/report/morningReport.ts';
 import { describeReport, REASON_TEXT, SENDER_WARNINGS, UNKNOWN_WARNING } from '../../src/report/scheduler.ts';
@@ -815,6 +816,17 @@ describe('meetings on the local speech engine (plan 2026-10-28-meetings-local-st
     expect(row('STT_API_KEY')).toMatch(/not `none` or `local`|unless `STT_PROVIDER` is `none` or `local`/);
     expect(meetings).not.toContain('the recommended local engine is not used for meetings');
     expect(meetings).toContain('`STT_PROVIDER=local`');
+  });
+
+  it('SETUP-mac.md: the timeout floor for meetings, the ten-minute transcript blocks and the parts given up (review fixes 3 and 5)', () => {
+    const para = section8.split('\n\n').find((b) => b.includes('`STT_PROVIDER=local`'))!;
+    expect(para).toContain(`keep \`STT_LOCAL_TIMEOUT_SECONDS\` at least ${LOCAL_MEETING_MIN_TIMEOUT_SECONDS}`);
+    expect(para).toMatch(/ten-minute blocks/);
+    expect(para).toContain('No speech recognised');
+  });
+
+  it('SETUP.md meetings section says copies a paid provider kept are not deleted while STT_PROVIDER is local (review fix 6)', () => {
+    expect(meetings).toMatch(/switch(?:ing|ed)? to `STT_PROVIDER=local`[^.]*copies[^.]*(?:stay|are not deleted)/);
   });
 
   it('SETUP.md lists the meeting lines for a local engine that is not set up, exactly as the code writes them', () => {
