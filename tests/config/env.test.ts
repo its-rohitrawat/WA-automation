@@ -212,7 +212,7 @@ describe('voice-note speech-to-text settings (local engine)', () => {
     for (const name of ['STT_LOCAL_BIN', 'STT_LOCAL_MODEL']) {
       for (const rel of ['zz-relative-zz/transcribe-cli', './zz-relative-zz', 'zz-relative-zz', '-zz-relative-zz']) {
         const msg = envError({ ...local, [name]: rel });
-        expect(msg).toMatch(new RegExp(`${name} must be an absolute path`));
+        expect(msg).toMatch(new RegExp(`${name} must be an absolute path when VOICE_STT_PROVIDER is local`));
         expect(msg).not.toContain('zz-relative-zz');
       }
     }
@@ -371,6 +371,14 @@ describe('meetings on the local engine (STT_PROVIDER=local)', () => {
     expect(msg).not.toMatch(/STT_LOCAL_MODEL/);
   });
 
+  it('with both local, a relative path is reported once, naming both settings, without echoing it', () => {
+    const msg = envError({ STT_PROVIDER: 'local', VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: 'zz-rel-zz/cli', STT_LOCAL_MODEL: MODEL });
+    expect(msg).toMatch(/STT_LOCAL_BIN must be an absolute path when STT_PROVIDER and VOICE_STT_PROVIDER are local/);
+    expect(msg.match(/STT_LOCAL_BIN must be an absolute path/g)).toHaveLength(1);
+    expect(msg).not.toMatch(/STT_LOCAL_MODEL/);
+    expect(msg).not.toContain('zz-rel-zz');
+  });
+
   it('voice-notes-only local keeps its message', () => {
     expect(envError({ VOICE_STT_PROVIDER: 'local', STT_LOCAL_MODEL: MODEL })).toMatch(/STT_LOCAL_BIN is required when VOICE_STT_PROVIDER is local/);
   });
@@ -423,6 +431,15 @@ describe('.env.example', () => {
     expect(example).toMatch(/^# local, sarvam, elevenlabs, openai or none \(default none: nothing is transcribed, no spend\)\.$/m);
     expect(example).toMatch(/STT_PROVIDER=local sends meetings through the local engine too/);
     expect(example).toMatch(/Required unless STT_PROVIDER is none or local\./);
+  });
+
+  it('labels the STT_LOCAL_* block as serving both voice notes and meetings', () => {
+    const example = readFileSync('.env.example', 'utf8');
+    expect(example).not.toMatch(/meetings keep STT_PROVIDER/);
+    const heading = example.indexOf('# The local engine, used by VOICE_STT_PROVIDER=local and STT_PROVIDER=local');
+    expect(heading).toBeGreaterThan(example.indexOf('VOICE_STT_PROVIDER=none'));
+    expect(heading).toBeLessThan(example.indexOf('STT_LOCAL_ENGINE='));
+    expect(example).toMatch(/Required when STT_PROVIDER or VOICE_STT_PROVIDER is local\./);
   });
 
   it('lists every meeting and speech-to-text setting, and its placeholders parse to the defaults', () => {

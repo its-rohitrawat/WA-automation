@@ -70,14 +70,14 @@ const EnvSchema = z.object({
   INR_PER_USD: z.coerce.number().min(40).max(200).default(88),
   /** Longest voice note or audio file sent to speech-to-text, in seconds, measured on the converted audio (Phase 2b V5, N3). */
   STT_MAX_SECONDS: z.coerce.number().int().min(30).max(900).default(600),
-  // Voice notes only (Phase 2b amendment, local speech-to-text). Meetings keep STT_PROVIDER. A paid value here must be
+  // Voice notes only (Phase 2b amendment, local speech-to-text); meetings use STT_PROVIDER. A paid value here must be
   // the same as STT_PROVIDER, since both use the one STT_API_KEY; local needs no key.
   VOICE_STT_PROVIDER: z.enum(['local', 'sarvam', 'elevenlabs', 'openai', 'none']).default('none'),
   /** The open-source model run on this machine: voxtral and qwen3-asr through transcribe.cpp, whisper through whisper.cpp. */
   STT_LOCAL_ENGINE: z.enum(['voxtral', 'qwen3-asr', 'whisper']).default('voxtral'),
-  /** Absolute path to transcribe-cli (voxtral, qwen3-asr) or whisper-cli (whisper). Required for local. */
+  /** Absolute path to transcribe-cli (voxtral, qwen3-asr) or whisper-cli (whisper). Required when STT_PROVIDER or VOICE_STT_PROVIDER is local. */
   STT_LOCAL_BIN: z.string().min(1).optional(),
-  /** Absolute path to the model file. Required for local. */
+  /** Absolute path to the model file. Required when STT_PROVIDER or VOICE_STT_PROVIDER is local. */
   STT_LOCAL_MODEL: z.string().min(1).optional(),
   STT_LOCAL_THREADS: z.coerce.number().int().min(1).max(64).default(8),
   /** Longest one run of the engine may take, in seconds. */
