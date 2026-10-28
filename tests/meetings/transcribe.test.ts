@@ -868,11 +868,31 @@ describe('buildMeetingTranscriber (the service start, Task 3)', () => {
   });
 
   it('local with both files: the local meeting transcriber on the shared engine, no problem', async () => {
-    const { log } = capturingLogger();
+    const dataDir = mkdtempSync(join(tmpdir(), 'meet-build-'));
+    dirs.push(dataDir);
+    const { lines, log } = capturingLogger();
     const engine = { transcribe: vi.fn(async () => ({ text: 'namaste' })) };
-    const r = buildMeetingTranscriber(parseEnv(LOCAL), { ffmpeg, log, check: () => null, localEngine: engine });
+    const writing = new Ffmpeg('ffmpeg.exe', async (_file, args) => {
+      writeFileSync(args[args.length - 1]!, 'wav-bytes');
+      return { code: 0, stderr: '' };
+    });
+    const r = buildMeetingTranscriber(parseEnv({ ...LOCAL, DATA_DIR: dataDir }), { ffmpeg: writing, log, check: () => null, localEngine: engine });
     expect(r.sttProblem).toBeNull();
     expect(r.transcriber).toMatchObject({ provider: 'local', maxPartSeconds: LOCAL_MEETING_PART_SECONDS });
+    expect(lines.join('')).toContain('meetings are transcribed on the local speech engine');
+    // The engine given (the one voice notes use) is the one run: never a second model on the CPU.
+    const part = join(dataDir, 'part.mp3');
+    writeFileSync(part, 'mp3-bytes');
+    const out = await r.transcriber!.transcribePart({ path: part, seconds: 300, offset: 0 }, {});
+    expect(engine.transcribe).toHaveBeenCalledTimes(1);
+    expect(out.segments).toEqual([{ start: 0, end: 300, speaker: null, text: 'namaste' }]);
+  });
+
+  it('local without ffmpeg: does not say meetings are transcribed on the local engine (they wait no_ffmpeg)', () => {
+    const { lines, log } = capturingLogger();
+    const r = buildMeetingTranscriber(parseEnv(LOCAL), { ffmpeg: null, log, check: () => null, localEngine: { transcribe: vi.fn() } });
+    expect(r.transcriber?.provider).toBe('local');
+    expect(lines.join('')).not.toContain('meetings are transcribed on the local speech engine');
   });
 
   it.each([['STT_LOCAL_BIN', 'local_not_set_up_bin'], ['STT_LOCAL_MODEL', 'local_not_set_up_model']] as const)(

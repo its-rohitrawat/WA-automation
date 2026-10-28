@@ -513,7 +513,7 @@ export function deferMeeting(
 
 /**
  * Queued meetings still waiting out a speech-to-text-not-set-up deferral (stt_none) become due at `at`: the service
- * started with a transcriber, so they need not wait out the rest of their hour (plan 2026-10-28-meetings-local-stt.md,
+ * started with the local engine (MeetingQueue calls this for STT_PROVIDER=local only), so they need not wait out the rest of their hour (plan 2026-10-28-meetings-local-stt.md,
  * Task 3). Only the next attempt moves; the error code and the attempt count stay. Returns how many.
  */
 export function releaseSttNoneWaits(db: Db, at: string): number {

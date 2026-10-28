@@ -28,7 +28,7 @@ export interface MeetingQueueOptions {
 /**
  * Works through due queued meetings one at a time (meetings are rare and large). The database is the queue.
  * - start(): before any meeting runs, speech parts a crash left in flight are booked (recoverInflightParts), meetings
- *   that waited for a transcriber (stt_none) are made due when there is one now (releaseSttNoneWaits), the providers'
+ *   that waited for speech-to-text (stt_none) are made due when the local engine is set up now (releaseSttNoneWaits), the providers'
  *   copies still to delete are deleted (forgetPending), and leftover work files removed (cleanupTemp).
  * - kick(): from the tick; starts the next due meeting when none is running.
  * - stop(): no new meeting starts, and the running one's signal is aborted: only a download or ffmpeg run stops; speech
@@ -73,9 +73,10 @@ export class MeetingQueue {
     const { db, spend, inrPerUsd, log, clock, dataDir, transcriber } = this.#o;
     // Before any speech call: a part that may have been billed is booked once, at its ceiling.
     recoverInflightParts(db, spend, inrPerUsd, log, clock);
-    // Started with a transcriber (for example after switching to STT_PROVIDER=local): meetings that waited for one
-    // (stt_none) are due now, not at the end of their hour.
-    if (transcriber !== null) {
+    // Started with the local engine (after switching to STT_PROVIDER=local): meetings that waited for speech-to-text
+    // (stt_none) are due now, not at the end of their hour. Only for local (plan 2026-10-28-meetings-local-stt.md,
+    // Task 3): a paid provider keeps today's timing, as the plan's ground rules ask.
+    if (transcriber?.provider === 'local') {
       try {
         const count = releaseSttNoneWaits(db, clock.now().toISOString());
         if (count > 0) log.info({ count, provider: transcriber.provider }, 'meetings waiting for speech-to-text are due now');

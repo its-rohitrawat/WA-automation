@@ -204,7 +204,8 @@ export function buildMeetingTranscriber(
   const transcriber = createMeetingTranscriber(env, {
     ffmpeg: s.ffmpeg, ...(s.localEngine ? { localEngine: s.localEngine } : {}), ...(s.http ? { http: s.http } : {}),
   });
-  if (transcriber?.provider === 'local') log.info({ provider: 'local' }, 'meetings are transcribed on the local speech engine');
+  // Without ffmpeg the meetings wait (no_ffmpeg, logged where ffmpeg is looked up), so this line would mislead.
+  if (transcriber?.provider === 'local' && s.ffmpeg !== null) log.info({ provider: 'local' }, 'meetings are transcribed on the local speech engine');
   return { transcriber, sttProblem: null };
 }
 

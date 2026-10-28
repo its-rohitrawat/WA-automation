@@ -1,5 +1,5 @@
 import { lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, type Dirent } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import type { Env } from '../config/env.ts';
 import type { Ffmpeg } from '../stt/audio.ts';
 import { createLocalEngine, LocalEngineError, type LocalEngine, type LocalEngineName, type LocalRunFile } from '../stt/local.ts';
@@ -75,16 +75,19 @@ export function localMeetingTranscriber(engine: Pick<LocalEngine, 'transcribe'>,
   let swept = false;
   /**
    * Work folders an earlier run left (a crash, or a removal that failed) go before the first new part. As the voice
-   * sweep (src/app.ts), nothing is listed in or removed through a link or junction: tmpDir must be a plain folder, and
-   * each entry is removed only when it is a plain folder itself. Best effort and silent (this module logs nothing).
+   * sweep (src/app.ts), nothing is listed in or removed through a link or junction: tmpDir and the folder above it
+   * (DATA_DIR/tmp in the service) must each be a plain folder, and each entry is removed only when it is a plain folder
+   * itself. Best effort and silent (this module logs nothing).
    */
   const sweep = (): void => {
     if (swept) return;
     swept = true;
     let entries: Dirent[];
     try {
-      const st = lstatSync(tmpDir); // a junction shows as a link here, as a symlink does
-      if (!st.isDirectory() || st.isSymbolicLink()) return;
+      for (const path of [dirname(tmpDir), tmpDir]) {
+        const st = lstatSync(path); // a junction shows as a link here, as a symlink does
+        if (!st.isDirectory() || st.isSymbolicLink()) return;
+      }
       entries = readdirSync(tmpDir, { withFileTypes: true });
     } catch {
       return;

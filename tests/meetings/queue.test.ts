@@ -103,11 +103,8 @@ describe('MeetingQueue', () => {
       deferMeeting(s.db, s.ids[1]!, { errorCode: 'low_disk', nextAttemptAt: IN_AN_HOUR, at: NOW, attempts: 0 });
     };
 
-    it.each([
-      ['the local engine', local],
-      ['a paid provider', () => meetingTranscriber(new FakeSttProvider(), 88)],
-    ])('with %s, they are due at once at start, not an hour later; other waits are kept', async (_name, make) => {
-      const s = setup({ meetings: 2, transcriber: make() });
+    it('with the local engine, they are due at once at start, not an hour later; other waits are kept', async () => {
+      const s = setup({ meetings: 2, transcriber: local() });
       waiting(s);
       s.queue.start();
       await vi.waitFor(() => expect(s.processor.calls.map((c) => c.id)).toEqual([s.ids[0]]), WAIT);
@@ -117,8 +114,11 @@ describe('MeetingQueue', () => {
       await s.queue.drain(1_000);
     });
 
-    it('with no transcriber (STT_PROVIDER none, or the local engine not set up) they keep waiting their hour', async () => {
-      const s = setup({ meetings: 2, transcriber: null });
+    it.each([
+      ['no transcriber (STT_PROVIDER none, or the local engine not set up)', () => null],
+      ['a paid provider (unchanged: it books spend, so its timing stays as before)', () => meetingTranscriber(new FakeSttProvider(), 88)],
+    ])('with %s they keep waiting their hour', async (_name, make) => {
+      const s = setup({ meetings: 2, transcriber: make() });
       waiting(s);
       s.queue.start();
       await ticks();

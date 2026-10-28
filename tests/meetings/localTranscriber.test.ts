@@ -585,6 +585,19 @@ describe('the local meeting transcriber', () => {
     expect(getMeeting(db, id)!.stage).toBe('transcribed');
   });
 
+  it('the sweep lists nothing when the folder above the work folder (DATA_DIR/tmp) is a link', async () => {
+    const real = join(dataDir, 'real-tmp');
+    mkdirSync(join(real, 'local', 'meeting-part-old'), { recursive: true });
+    writeFileSync(join(real, 'local', 'meeting-part-old', 'audio.wav'), 'old');
+    symlinkSync(real, join(dataDir, 'tmp'), 'junction');
+    prepare(420);
+    const ff = fakeFfmpeg([]);
+    const { t } = fromEnv(ff, ['naya']);
+    await transcribeMeeting(id, deps(t, ff));
+    expect(readdirSync(join(real, 'local'))).toEqual(['meeting-part-old']);
+    expect(getMeeting(db, id)!.stage).toBe('transcribed');
+  });
+
   it('logs the meeting id, part, provider, seconds and duration only: never what was said or a path', async () => {
     prepare(1500);
     const ff = fakeFfmpeg([500, 500, 500]);
