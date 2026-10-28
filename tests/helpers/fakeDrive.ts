@@ -23,6 +23,13 @@ export class FakeDrive implements DriveApi {
   /** When set, the next call throws this once (for example a 401 from Google). */
   failNextWith: unknown;
   failUpdateWith: unknown;
+  /**
+   * Files this sign-in can see that this fake did not create (for example a Tracker.xlsx made earlier that is still
+   * visible after the stored id stopped answering). findFile looks at these after the created ones.
+   */
+  visible: { id: string; name: string; parentId: string }[] = [];
+  /** Every findFile call, as (name, parentId). */
+  findCalls: { name: string; parentId: string }[] = [];
   /** When set, createFile and updateFile wait for it (simulates a slow or hung upload). */
   gate: Promise<void> | undefined;
   #n = 0;
@@ -64,6 +71,14 @@ export class FakeDrive implements DriveApi {
     await this.gate;
     if (this.missing.has(id)) throw new DriveNotFoundError(id);
     this.updated.push({ id, bytes: body.length });
+  }
+
+  /** The newest (last) created or visible file with that name in parentId that is not missing; a missing parent has none. */
+  async findFile(name: string, parentId: string): Promise<string | undefined> {
+    this.findCalls.push({ name, parentId });
+    this.#maybeFail();
+    if (this.missing.has(parentId)) return undefined;
+    return [...this.created, ...this.visible].filter((f) => f.name === name && f.parentId === parentId && !this.missing.has(f.id)).at(-1)?.id;
   }
 
   get uploads(): number {

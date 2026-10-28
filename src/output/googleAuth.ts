@@ -49,6 +49,20 @@ export function checkAccountLabel(label: string): string {
   return label;
 }
 
+/**
+ * The kv key of a Google account's email ('main' for the main sign-in), following the google_*:<label> keys. Shown on the
+ * owner's dashboard only; audit rows and logs keep emails masked.
+ */
+export function accountEmailKey(label: string): string {
+  return `google_account_email:${label === MAIN_ACCOUNT ? MAIN_ACCOUNT : checkAccountLabel(label)}`;
+}
+
+/** The account's stored email, or null while it is not known. */
+export function accountEmail(db: Db, label: string): string | null {
+  const v = getKv(db, accountEmailKey(label));
+  return v && v.includes('@') ? v : null;
+}
+
 /** The extra meeting accounts, in the order they were added. */
 export function meetingAccounts(db: Db): string[] {
   try {

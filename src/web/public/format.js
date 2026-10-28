@@ -33,6 +33,12 @@ export function when(iso, now = new Date()) {
   return `${d.toLocaleDateString('en-GB', { timeZone: IST, day: 'numeric', month: 'short' })} ${time}`;
 }
 
+/** "28 Oct 2026" in India time. @param {string | null | undefined} iso */
+export function date(iso) {
+  const d = parse(iso);
+  return d ? d.toLocaleDateString('en-GB', { timeZone: IST, day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+}
+
 /** "11:55" in India time. @param {string | null | undefined} iso */
 export function clock(iso) {
   const d = parse(iso);

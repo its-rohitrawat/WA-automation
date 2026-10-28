@@ -47,7 +47,7 @@ export function renderConnections(cards, error) {
         <span class="pill ${PILL[c.state]}"><i></i>${esc(c.stateLabel || DEFAULT_LABEL[c.state])}</span></div>
       <dl class="kv">${c.rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>
       ${c.note ? `<div class="note">${icon('info', 16)}<span>${esc(c.note)}</span></div>` : ''}
-      <div class="conn-act">${action(c)}</div></article>`;
+      <div class="conn-act">${action(c)}${c.link ? `<a class="btn btn-sm btn-ghost" href="${esc(c.link)}" target="_blank" rel="noopener noreferrer" data-open-drive>${icon('ext', 15)}Open in Drive</a>` : ''}</div></article>`;
   };
   return `<div class="toolbar"><span class="grow-1"></span>${button('data-fix="google-add"', 'mail', 'Add Google account')}</div>
     <div class="conns">${cards.map(card).join('')}</div>

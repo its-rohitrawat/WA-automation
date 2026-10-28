@@ -120,7 +120,7 @@ describe('read API', () => {
     expect(connections.headers['cache-control']).toBe('no-store');
     expect(shape(connections.json)).toEqual({
       claude: { callsToday: 'number', capUsd: 'number', spentToday: 'number' },
-      drive: { label: 'string', lastUploadAt: 'null', state: 'string' },
+      drive: { account: 'null', file: 'string', folder: 'string', label: 'string', lastUploadAt: 'null', state: 'string', url: 'null' },
       founder: { device: 'string', groups: 'number', label: 'string', lastActivityAt: 'null', state: 'string' },
       google: [{ email: 'null', label: 'string', state: 'string', stateLabel: 'string', usedFor: ['string'] }],
       monitoring: { lastBeatAt: 'null', on: 'boolean' },

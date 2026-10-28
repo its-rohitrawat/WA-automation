@@ -16,6 +16,7 @@ const EVENT_WORDS = {
   'meeting.assign': 'Meeting assigned', 'meeting.skip': 'Meeting skipped', 'meeting.retry': 'Meeting retried',
   'settings.reportEnabled': 'Briefing switched', 'settings.reportDays': 'Briefing days', 'settings.reportRecipient': 'Briefing number',
   'auth.signout_everywhere': 'Signed out everywhere', 'tracker.published': 'Tracker uploaded', 'tracker.publish_failed': 'Tracker upload failed',
+  'tracker.new_file': 'New tracker file',
 };
 
 /** @param {ScreenCtx} ctx */

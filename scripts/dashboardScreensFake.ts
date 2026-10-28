@@ -6,8 +6,10 @@ import { parseEnv } from '../src/config/env.ts';
 import { SettingsStore } from '../src/config/settingsStore.ts';
 import { UptimeLog } from '../src/health/uptimeLog.ts';
 import { SpendGuard } from '../src/spend/spendGuard.ts';
+import { TRACKER_ID_KEY, TRACKER_NEW_FILE_KEY } from '../src/output/trackerKey.ts';
 import { syncClients } from '../src/store/clients.ts';
 import { openDb } from '../src/store/db.ts';
+import { setKv } from '../src/store/kv.ts';
 import { insertFound } from '../src/store/meetings.ts';
 import { createTask } from '../src/store/tasks.ts';
 import { systemClock } from '../src/util/clock.ts';
@@ -40,6 +42,10 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
     recording: 'conferenceRecords/a/recordings/b', conference: 'conferenceRecords/a', driveFileId: 'd1', meetingCode: null, title: 'Weekly sync',
     startedAt: day(1), endedAt: null, attendees: [], participants: [], clientId: null, matchKind: null, status: 'unassigned', driveSeconds: 1800, createdAt: day(1),
   });
+  // A tracker that had to be started again after the Google login changed, written as the main account's made-up email.
+  setKv(db, TRACKER_ID_KEY, '1FakeTrackerFileId_000');
+  setKv(db, TRACKER_NEW_FILE_KEY, day(1));
+  setKv(db, 'google_account_email:main', OWNER);
   const audit = new AuditLog(db, clock);
   audit.record({ actor: OWNER, event: 'Task closed · ACM-001', kind: 'task', detail: 'Closed from the dashboard' });
   audit.record({ actor: 'agent', event: 'Tracker uploaded', kind: 'ops', detail: 'Tracker.xlsx uploaded to Drive' });

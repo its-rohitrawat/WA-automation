@@ -153,6 +153,9 @@ async function main() {
         await check(p, where, '.conn', `connections-${tag}`);
         const cards = await p.locator('.conn').count();
         if (cards !== 7) fail(where, `expected 7 cards, found ${cards}`);
+        const driveCard = p.locator('[data-conn="drive"]');
+        if ((await driveCard.locator('dd', { hasText: 'owner@example.com' }).count()) !== 1) fail(where, 'the Drive card does not name the account');
+        if ((await driveCard.locator('a[data-open-drive][href^="https://drive.google.com/file/d/"]').count()) !== 1) fail(where, 'the Drive card has no Open in Drive');
 
         // The work and control screens (D4, D5), on the real routes: each draws its content, with no error panel.
         for (const screen of WORK_SCREENS) {
@@ -162,6 +165,12 @@ async function main() {
           await check(p, where, '#view .card', `${screen}-${tag}`);
           if (await p.locator('#view .err-state').count()) fail(where, 'shows its error panel');
           if ((await p.locator('#view', { hasText: 'Coming in the next update' }).count()) !== 0) fail(where, 'is still the placeholder');
+          if (screen === 'tracker') {
+            // Which file is written, as whom, and the one-time note that a new file had to be started.
+            if ((await p.locator('#view [data-tracker-file]', { hasText: 'owner@example.com' }).count()) !== 1) fail(where, 'does not name the account');
+            if ((await p.locator('#view [data-new-file]', { hasText: 'A new tracker file was started on' }).count()) !== 1) fail(where, 'has no new-file note');
+            if ((await p.locator('#view a[href^="https://drive.google.com/file/d/"]', { hasText: 'Open in Drive' }).count()) !== 1) fail(where, 'has no Open in Drive');
+          }
           if (screen === 'automations') {
             // Link phone opens the spare phone's first-link dialog right here, not Connections.
             where = `automations link phone ${tag}`;

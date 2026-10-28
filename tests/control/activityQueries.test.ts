@@ -178,6 +178,22 @@ describe('publisherAuditHooks', () => {
     ]);
   });
 
+  it('writes one ops row, with no ids or emails, when the old tracker file could not be reached and a new one was made', async () => {
+    const entries: AuditEntry[] = [];
+    const hooks = publisherAuditHooks((e) => entries.push(e), manualClock(NOW));
+    const db = seededDb();
+    const drive = new FakeDrive();
+    const p = new DrivePublisher({ db, api: drive, build: async () => Buffer.from('x'), log: silentLogger(), minIntervalMs: 0, ...hooks });
+    await p.publishNow();
+    drive.missing.add(drive.created[0]!.id);
+    await p.publishNow();
+    await p.publishNow();
+    await p.stop(1000);
+    const made = entries.filter((e) => e.event === 'tracker.new_file');
+    expect(made).toEqual([{ actor: 'agent', event: 'tracker.new_file', kind: 'ops', detail: 'The old tracker file could not be reached; a new Tracker.xlsx was made' }]);
+    expect(JSON.stringify(entries)).not.toMatch(/file-\d|folder-\d|@/);
+  });
+
   it('names each failure in plain words', () => {
     const entries: AuditEntry[] = [];
     const { onFailure } = publisherAuditHooks((e) => entries.push(e), manualClock(NOW));

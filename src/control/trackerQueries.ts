@@ -1,8 +1,11 @@
 import type { HealthSnapshot } from '../health/health.ts';
+import { accountEmail, MAIN_ACCOUNT } from '../output/googleAuth.ts';
 import { uniqueSheetNames } from '../output/sheetNames.ts';
+import { DRIVE_ROOT_NAME, TRACKER_FILE_NAME, TRACKER_NEW_FILE_KEY } from '../output/trackerKey.ts';
 import { trackerLink } from '../report/morningReport.ts';
 import { listClients } from '../store/clients.ts';
 import type { Db } from '../store/db.ts';
+import { getKv } from '../store/kv.ts';
 import { istDate } from '../util/time.ts';
 
 // The dashboard's Tracker screen (D4 Task 5): the workbook link, the last upload and failure, and per-sheet counts.
@@ -22,9 +25,19 @@ export interface TrackerSheet {
   doneThisWeek: number;
 }
 
+/** Which file the agent writes: its name, its folder, and the main Google account's email when it is known. */
+export interface TrackerFile {
+  name: string;
+  folder: string;
+  account: string | null;
+}
+
 export interface TrackerSummary {
   uploaded: boolean;
   url: string | null;
+  file: TrackerFile;
+  /** When the agent last had to start a new Tracker.xlsx because the old one could not be reached; null if never. */
+  newFileAt: string | null;
   lastPublishedAt: string | null;
   lastFailure: { at: string; reason: string } | null;
   failingSince: string | null;
@@ -38,6 +51,17 @@ function minusDays(date: string, n: number): string {
 }
 
 const FAILURE_PREFIX = 'Tracker upload failed: ';
+
+/** The tracker file the agent writes, for the Tracker screen and the Connections Drive card. */
+export function trackerFile(db: Db): TrackerFile {
+  return { name: TRACKER_FILE_NAME, folder: DRIVE_ROOT_NAME, account: accountEmail(db, MAIN_ACCOUNT) };
+}
+
+/** The stored new-file time, when it is a valid time. */
+function newFileAt(db: Db): string | null {
+  const v = getKv(db, TRACKER_NEW_FILE_KEY);
+  return v && !Number.isNaN(Date.parse(v)) ? v : null;
+}
 
 /**
  * The last tracker upload: the agent's own audit row (it survives a restart) or the live snapshot's time (which the
@@ -90,6 +114,8 @@ export function trackerSummary(
   return {
     uploaded: url !== null,
     url,
+    file: trackerFile(db),
+    newFileAt: newFileAt(db),
     lastPublishedAt: lastTrackerUpload(db, health?.lastPublishedAt),
     lastFailure: failure
       ? { at: failure.at, reason: failure.detail.startsWith(FAILURE_PREFIX) ? failure.detail.slice(FAILURE_PREFIX.length) : failure.detail }

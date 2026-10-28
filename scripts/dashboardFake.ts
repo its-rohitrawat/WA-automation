@@ -70,7 +70,10 @@ export const fixtures = (st: FakeState) => {
         ? { label: 'org2', email: 'meetings@example.org', state: 'ok', stateLabel: 'Connected', usedFor: ['Meetings'] }
         : { label: 'org2', email: 'meetings@example.org', state: 'down', stateLabel: 'Sign in again', usedFor: ['Meetings'] },
     ],
-    drive: { state: 'ok', label: 'Connected', lastUploadAt: at(300) },
+    drive: {
+      state: 'ok', label: 'Connected', lastUploadAt: at(300), file: 'Tracker.xlsx', folder: 'WA Agent', account: 'owner@example.com',
+      url: 'https://drive.google.com/file/d/1FakeTrackerFileId_000/view',
+    },
     claude: { callsToday: 41, spentToday: 0.84, capUsd: 3 },
     monitoring: { on: true, lastBeatAt: at(1) },
   },

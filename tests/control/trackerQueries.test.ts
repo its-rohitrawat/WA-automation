@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { trackerSummary } from '../../src/control/trackerQueries.ts';
-import { TRACKER_ID_KEY } from '../../src/output/trackerKey.ts';
+import { TRACKER_ID_KEY, TRACKER_NEW_FILE_KEY } from '../../src/output/trackerKey.ts';
 import { syncClients } from '../../src/store/clients.ts';
 import type { Db } from '../../src/store/db.ts';
 import { setKv } from '../../src/store/kv.ts';
@@ -35,6 +35,22 @@ describe('trackerSummary', () => {
     const db = seededDb();
     setKv(db, TRACKER_ID_KEY, ID);
     expect(trackerSummary(db, now)).toMatchObject({ uploaded: true, url: `https://drive.google.com/file/d/${ID}/view` });
+  });
+
+  it('names the file it writes: Tracker.xlsx in the WA Agent folder, and the main account when its email is known', () => {
+    const db = seededDb();
+    expect(trackerSummary(db, now)).toMatchObject({ file: { name: 'Tracker.xlsx', folder: 'WA Agent', account: null }, newFileAt: null });
+    setKv(db, 'google_account_email:main', 'owner@example.com');
+    setKv(db, 'google_account_email:org2', 'meetings@example.org');
+    expect(trackerSummary(db, now).file).toEqual({ name: 'Tracker.xlsx', folder: 'WA Agent', account: 'owner@example.com' });
+  });
+
+  it('carries the date a new tracker file had to be started, when one was', () => {
+    const db = seededDb();
+    setKv(db, TRACKER_NEW_FILE_KEY, '2026-10-28T05:00:00.000Z');
+    expect(trackerSummary(db, now).newFileAt).toBe('2026-10-28T05:00:00.000Z');
+    setKv(db, TRACKER_NEW_FILE_KEY, 'not a date');
+    expect(trackerSummary(db, now).newFileAt).toBeNull();
   });
 
   it('counts Today (active clients) and each active client in tab order, using the workbook sheet names', () => {

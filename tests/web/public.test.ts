@@ -12,7 +12,7 @@ import { problems, readClientDetail, readClients, readConnections, readGroups, r
 import { PUBLIC_MAIL_DOMAINS as BROWSER_PUBLIC, fieldProblem } from '../../src/web/public/views/rules.js';
 import { PUBLIC_MAIL_DOMAINS } from '../../src/config/domains.ts';
 // @ts-expect-error -- browser module (see above)
-import { ago, greeting, initials, usd, when } from '../../src/web/public/format.js';
+import { ago, date, greeting, initials, usd, when } from '../../src/web/public/format.js';
 // @ts-expect-error -- browser module (see above)
 import { HI } from '../../src/web/public/icons.js';
 // @ts-expect-error -- browser module (see above)
@@ -145,6 +145,8 @@ describe('format (India time)', () => {
   it('names the day in India time, not the machine time', () => {
     expect(when('2026-10-27T05:30:00Z', now)).toBe('Today 11:00');
     expect(when('2026-10-26T19:00:00Z', now)).toBe('Today 00:30');
+    expect(date('2026-10-27T19:00:00Z')).toBe('28 Oct 2026'); // India date
+    expect(date('nonsense')).toBe('—');
     expect(when('2026-10-26T18:00:00Z', now)).toBe('Yesterday 23:30');
     expect(when('2026-10-23T11:00:00Z', now)).toBe('Fri 16:30');
     expect(when('2026-10-21T03:42:00Z', now)).toBe('Wed 09:12');
@@ -233,6 +235,25 @@ describe('contract (the API answers as the screens read them)', () => {
     expect(cards[5]).toMatchObject({ state: 'warn', stateLabel: 'Daily cap reached' });
     expect(cards[6]).toMatchObject({ state: 'off', stateLabel: 'Off' });
     expect(JSON.stringify(cards)).not.toMatch(/sk-|apiKey|token/i);
+  });
+});
+
+describe('the Drive card names the tracker file', () => {
+  const drive = (d: unknown) => readConnections({ drive: d }).find((c: { id: string }) => c.id === 'drive');
+
+  it('shows the file, the folder, the account and the last upload, and links Open in Drive only to a Drive file address', () => {
+    const url = 'https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp_qr-st/view';
+    const c = drive({ state: 'ok', label: 'Connected', lastUploadAt: null, file: 'Tracker.xlsx', folder: 'WA Agent', account: 'owner@example.com', url });
+    expect(c.rows).toEqual([['File', 'Tracker.xlsx'], ['Folder', 'WA Agent'], ['Account', 'owner@example.com'], ['Last upload', 'Not uploaded yet']]);
+    expect(c.link).toBe(url);
+    for (const bad of ['https://evil.example/file/d/1AbCdEfGhIjKlMnOp_qr-st/view', 'javascript:alert(1)', 7, null]) {
+      expect(drive({ url: bad }).link, String(bad)).toBe('');
+    }
+  });
+
+  it('says plainly when the account is not known yet, and falls back to the fixed names', () => {
+    const c = drive({ state: 'ok' });
+    expect(c.rows.slice(0, 3)).toEqual([['File', 'Tracker.xlsx'], ['Folder', 'WA Agent'], ['Account', 'Main Google account (email not known yet)']]);
   });
 });
 
