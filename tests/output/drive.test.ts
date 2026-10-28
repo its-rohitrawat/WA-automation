@@ -478,6 +478,61 @@ describe('DrivePublisher keeps one tracker file', () => {
     expect(newFiles).toEqual([1]);
   });
 
+  it('when the stored folder and file are both invisible, a Tracker.xlsx in another visible WA Agent folder is reused', async () => {
+    const { db, drive, newFiles, p } = keep();
+    await p.publishNow();
+    drive.missing.add('folder-1'); // another login: the old folder and its file cannot be seen
+    drive.missing.add(drive.created[0]!.id);
+    drive.visibleFolders.push({ id: 'other-older', name: 'WA Agent' }, { id: 'not-ours', name: 'Photos' }, { id: 'other-newest', name: 'WA Agent' });
+    drive.visible.push({ id: 'kept-file', name: 'Tracker.xlsx', parentId: 'other-older' });
+    expect(await p.publishNow()).toBe(true);
+    expect(drive.findFolderCalls).toEqual(['WA Agent']);
+    expect(drive.findCalls.map((c) => c.parentId)).toEqual(['folder-1', 'other-newest', 'other-older']);
+    expect(drive.folders).toEqual(['WA Agent']);
+    expect(drive.created).toHaveLength(1);
+    expect(drive.updated.map((u) => u.id)).toEqual(['kept-file']);
+    expect(getKv(db, 'drive_root_id')).toBe('other-older');
+    expect(getKv(db, TRACKER_ID_KEY)).toBe('kept-file');
+    expect(getKv(db, TRACKER_NEW_FILE_KEY)).toBeUndefined();
+    expect(newFiles).toEqual([]);
+  });
+
+  it('switching back to the first login finds the original file again instead of making a third', async () => {
+    const { db, drive, newFiles, p } = keep();
+    await p.publishNow();
+    const first = { folder: 'folder-1', file: drive.created[0]!.id };
+    drive.missing.add(first.folder); // login B: nothing of login A can be seen
+    drive.missing.add(first.file);
+    await p.publishNow();
+    expect(drive.created).toHaveLength(2);
+    expect(newFiles).toEqual([1]);
+    const second = { folder: getKv(db, 'drive_root_id')!, file: getKv(db, TRACKER_ID_KEY)! };
+    drive.missing.clear(); // back to login A: its folder and file are visible again, login B's are not
+    drive.missing.add(second.folder);
+    drive.missing.add(second.file);
+    expect(await p.publishNow()).toBe(true);
+    expect(drive.created).toHaveLength(2);
+    expect(drive.folders).toHaveLength(2);
+    expect(drive.updated.at(-1)!.id).toBe(first.file);
+    expect(getKv(db, 'drive_root_id')).toBe(first.folder);
+    expect(getKv(db, TRACKER_ID_KEY)).toBe(first.file);
+    expect(newFiles).toEqual([1]);
+    await p.publishNow(); // and it stays on the original
+    expect(drive.updated.at(-1)!.id).toBe(first.file);
+    expect(drive.created).toHaveLength(2);
+  });
+
+  it('a visible WA Agent folder without a Tracker.xlsx is not adopted: the file is made in the stored folder', async () => {
+    const { db, drive, p } = keep();
+    await p.publishNow();
+    drive.missing.add(drive.created[0]!.id);
+    drive.visibleFolders.push({ id: 'empty-one', name: 'WA Agent' });
+    await p.publishNow();
+    expect(drive.created).toHaveLength(2);
+    expect(drive.created[1]!.parentId).toBe('folder-1');
+    expect(getKv(db, 'drive_root_id')).toBe('folder-1');
+  });
+
   it('a failed look-up fails the run like any Drive error, and keeps the stored id', async () => {
     const { db, drive, newFiles, p } = keep();
     await p.publishNow();

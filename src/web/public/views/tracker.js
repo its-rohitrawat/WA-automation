@@ -17,8 +17,8 @@ import { failed, listen, loading, pill } from './ui.js';
 
 const POLL_MS = 30_000;
 
-/** @param {Tracker} t */
-function render(t) {
+/** The Tracker screen's markup (exported for the escaping test). @param {Tracker} t */
+export function render(t) {
   const url = typeof t.url === 'string' && DRIVE_FILE_URL.test(t.url) ? t.url : null;
   const text = (/** @type {unknown} */ v, /** @type {string} */ fallback) => (typeof v === 'string' && v ? v : fallback);
   const name = text(t.file?.name, 'Tracker.xlsx');

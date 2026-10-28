@@ -114,6 +114,21 @@ describe('googleDriveApi', () => {
     expect(await api.findFile('Tracker.xlsx', 'root-1')).toBeUndefined();
   });
 
+  it('findFolders asks for folders of that name, not in the trash, newest first, a few ids only', async () => {
+    const api = googleDriveApi(client);
+    files.list.mockResolvedValueOnce({ data: { files: [{ id: 'f-new' }, {}, { id: 'f-old' }] } });
+    expect(await api.findFolders("WA 'Agent")).toEqual(['f-new', 'f-old']);
+    expect(files.list.mock.calls[0]![0]).toEqual({
+      q: "name = 'WA \\'Agent' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+      orderBy: 'modifiedTime desc', pageSize: 5, fields: 'files(id)', spaces: 'drive',
+    });
+    files.list.mockResolvedValueOnce({ data: {} });
+    expect(await api.findFolders('WA Agent')).toEqual([]);
+    const other = Object.assign(new Error('server'), { code: 500 });
+    files.list.mockRejectedValueOnce(other);
+    await expect(api.findFolders('WA Agent')).rejects.toBe(other);
+  });
+
   it('findFile escapes quotes and backslashes in the name and the folder id', async () => {
     const api = googleDriveApi(client);
     files.list.mockResolvedValueOnce({ data: { files: [] } });

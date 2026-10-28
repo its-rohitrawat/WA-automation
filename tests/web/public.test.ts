@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ICONS_FILE, iconsModule } from '../../scripts/build-dashboard-icons.ts';
 import { VENDOR_FILES } from '../../src/web/server.ts';
 // The front end is plain browser modules; these four need no DOM. Their JSDoc types are checked by tsconfig.web.json,
@@ -248,6 +248,31 @@ describe('the Drive card names the tracker file', () => {
     expect(c.link).toBe(url);
     for (const bad of ['https://evil.example/file/d/1AbCdEfGhIjKlMnOp_qr-st/view', 'javascript:alert(1)', 7, null]) {
       expect(drive({ url: bad }).link, String(bad)).toBe('');
+    }
+  });
+
+  it('the Tracker screen and the Drive card escape the file, folder and account text', async () => {
+    // dom.js reads matchMedia when it loads; the views themselves only build strings.
+    vi.stubGlobal('matchMedia', () => ({ matches: false }));
+    try {
+      // @ts-expect-error -- browser module (see above)
+      const { render } = await import('../../src/web/public/views/tracker.js');
+      // @ts-expect-error -- browser module (see above)
+      const { renderConnections } = await import('../../src/web/public/views/connections.js');
+      const evil = '<img src=x onerror=1>@x';
+      const html: string = render({
+        uploaded: true, url: 'https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp_qr-st/view', file: { name: evil, folder: evil, account: evil },
+        newFileAt: '2026-10-28T05:00:00.000Z', lastPublishedAt: null, lastFailure: null, failingSince: null, health: null, sheets: [],
+      });
+      const card: string = renderConnections([drive({ state: 'ok', file: evil, folder: evil, account: evil, url: 'javascript:alert(1)' })]);
+      for (const out of [html, card]) {
+        expect(out).toContain('&lt;img');
+        expect(out).not.toContain('<img');
+      }
+      expect(html).toContain('data-new-file');
+      expect(card).not.toContain('javascript:');
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 

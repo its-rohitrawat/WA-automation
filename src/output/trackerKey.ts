@@ -12,6 +12,6 @@ export const DRIVE_ROOT_NAME = 'WA Agent';
 
 /**
  * The kv key holding when (ISO time) the publisher last had to start a new Tracker.xlsx because the stored one could not
- * be reached and none was visible in the folder (usually: the Google login changed). The Tracker screen shows it as a note.
+ * be reached and none was visible in any WA Agent folder (usually: the Google login changed). The Tracker screen shows it as a note.
  */
 export const TRACKER_NEW_FILE_KEY = 'drive_tracker_new_file_at';

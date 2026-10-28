@@ -4,6 +4,12 @@ export class FakeDrive implements DriveApi {
   folders: string[] = [];
   /** Parent of each created folder, in the same order as `folders` (undefined: top level). */
   folderParents: (string | undefined)[] = [];
+  /** Id of each created folder, in the same order as `folders`. */
+  folderIds: string[] = [];
+  /** Folders this sign-in can see that this fake did not create (for example a WA Agent folder an earlier login made). */
+  visibleFolders: { id: string; name: string }[] = [];
+  /** Every findFolders call, by name. */
+  findFolderCalls: string[] = [];
   created: { id: string; name: string; parentId: string; bytes: number }[] = [];
   /** Per-request timeout of each created file, in the same order as `created` (undefined: the client's default). */
   createTimeouts: (number | undefined)[] = [];
@@ -39,7 +45,9 @@ export class FakeDrive implements DriveApi {
     if (parentId !== undefined && this.missing.has(parentId)) throw new DriveNotFoundError(parentId);
     this.folders.push(name);
     this.folderParents.push(parentId);
-    return `folder-${++this.#n}`;
+    const id = `folder-${++this.#n}`;
+    this.folderIds.push(id);
+    return id;
   }
 
   async createFile(name: string, mime: string, body: Buffer, parentId: string, timeoutMs?: number): Promise<string> {
@@ -79,6 +87,14 @@ export class FakeDrive implements DriveApi {
     this.#maybeFail();
     if (this.missing.has(parentId)) return undefined;
     return [...this.created, ...this.visible].filter((f) => f.name === name && f.parentId === parentId && !this.missing.has(f.id)).at(-1)?.id;
+  }
+
+  /** Created and visible folders with that name that are not missing, newest (last added) first. */
+  async findFolders(name: string): Promise<string[]> {
+    this.findFolderCalls.push(name);
+    this.#maybeFail();
+    const created = this.folderIds.map((id, i) => ({ id, name: this.folders[i]! }));
+    return [...created, ...this.visibleFolders].filter((f) => f.name === name && !this.missing.has(f.id)).map((f) => f.id).reverse();
   }
 
   get uploads(): number {

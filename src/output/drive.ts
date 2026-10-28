@@ -37,6 +37,11 @@ export interface DriveApi {
    */
   findFile(name: string, parentId: string): Promise<string | undefined>;
   /**
+   * Up to five folders named name (not in the trash), anywhere in My Drive, that this sign-in can see, newest first. Under
+   * drive.file these are folders this app made with the same Google project and account.
+   */
+  findFolders(name: string): Promise<string[]>;
+  /**
    * Uploads HTML that Drive converts into a Google Doc inside parentId; returns the Doc id. A missing parent throws
    * DriveNotFoundError and a Google sign-in failure DriveAuthError.
    */
@@ -44,6 +49,7 @@ export interface DriveApi {
 }
 
 export const GOOGLE_DOC_MIME = 'application/vnd.google-apps.document';
+const FOLDER_MIME = 'application/vnd.google-apps.folder';
 
 const isNotFound = (e: unknown) => (e as { code?: number }).code === 404;
 
@@ -129,6 +135,13 @@ export function googleDriveApi(client: OAuth2Client | (() => OAuth2Client)): Dri
         throw e;
       }
     },
+    async findFolders(name) {
+      const r = await api.files.list({
+        q: `name = ${quoted(name)} and mimeType = ${quoted(FOLDER_MIME)} and trashed = false`,
+        orderBy: 'modifiedTime desc', pageSize: 5, fields: 'files(id)', spaces: 'drive',
+      });
+      return (r.data.files ?? []).map((f) => f.id).filter((id): id is string => typeof id === 'string' && id !== '');
+    },
     async updateFile(fileId, mimeType, body) {
       try {
         await api.files.update({ fileId, media: { mimeType, body: Readable.from(body) } });
@@ -172,7 +185,8 @@ class PublishError extends Error {
 /**
  * Overwrites the same Drive file so its link never changes. At most one upload per minute. Never deletes or trashes anything.
  * When the stored file stops answering (404: usually the Google login changed, and drive.file cannot see the old file),
- * it first reuses the newest Tracker.xlsx this login can see in the WA Agent folder, and only makes a new one if none is.
+ * it first reuses the newest Tracker.xlsx this login can see in the WA Agent folder, then in any other WA Agent folder it can
+ * see (for example the first login's, after switching back), and only makes a new one if none is.
  */
 export class DrivePublisher {
   readonly #o: PublisherOptions;
@@ -346,14 +360,14 @@ export class DrivePublisher {
     }
     // A folder made just now is empty. Otherwise a Tracker.xlsx this login can see there is the one to keep writing.
     if (!rootIsNew) {
-      const found = await api.findFile(TRACKER_FILE_NAME, root);
-      if (found && found !== stored) {
-        try {
-          await api.updateFile(found, XLSX_MIME, body);
-          setKv(db, TRACKER_ID_KEY, found);
+      if (await this.#reuse(root, stored, body)) return;
+      // After a login change the stored folder is usually invisible too (same login made it): another WA Agent folder
+      // this login can see (say, the first login's, after switching back) may hold the tracker to keep writing.
+      for (const folder of await api.findFolders(DRIVE_ROOT_NAME)) {
+        if (folder === root) continue;
+        if (await this.#reuse(folder, stored, body)) {
+          setKv(db, 'drive_root_id', folder);
           return;
-        } catch (e) {
-          if (!(e instanceof DriveNotFoundError)) throw e;
         }
       }
     }
@@ -366,6 +380,25 @@ export class DrivePublisher {
       setKv(db, 'drive_root_id', root);
       setKv(db, TRACKER_ID_KEY, await api.createFile(TRACKER_FILE_NAME, XLSX_MIME, body, root));
     }
+    this.#noteNewFile(stored);
+  }
+
+  /** Writes the newest Tracker.xlsx this login can see in folder (other than stored) and keeps its id; false when there is none. */
+  async #reuse(folder: string, stored: string | undefined, body: Buffer): Promise<boolean> {
+    const found = await this.#o.api.findFile(TRACKER_FILE_NAME, folder);
+    if (!found || found === stored) return false;
+    try {
+      await this.#o.api.updateFile(found, XLSX_MIME, body);
+    } catch (e) {
+      if (e instanceof DriveNotFoundError) return false;
+      throw e;
+    }
+    setKv(this.#o.db, TRACKER_ID_KEY, found);
+    return true;
+  }
+
+  #noteNewFile(stored: string | undefined): void {
+    const { db } = this.#o;
     // The first file ever is no news. A stored one that could not be reached means a new link: say so once.
     if (stored) {
       setKv(db, TRACKER_NEW_FILE_KEY, (this.#o.now?.() ?? new Date()).toISOString());
