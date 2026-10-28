@@ -3,7 +3,7 @@
 import { get } from '../api.js';
 import { readConnections } from '../contract.js';
 import { esc, icon, toast } from '../dom.js';
-import { CONNECTIONS_CHANGED, actionRunning, googleErrorMessage } from './connect.js';
+import { CONNECTIONS_CHANGED, googleErrorMessage, quickButton } from './connect.js';
 import { attentionBanner } from './overview.js';
 
 /** @typedef {ReturnType<typeof readConnections>[number]} Card */
@@ -24,17 +24,12 @@ function action(c) {
   }
   if (c.kind === 'spare') return c.state === 'ok' ? button('data-fix="spare"', 'refresh', 'Reconnect') : button('data-fix="spare-link"', 'phone', 'Link phone', true);
   if (c.kind === 'google') return button(`data-fix="${esc(c.id)}"`, 'refresh', 'Reconnect', broken);
-  if (c.kind === 'drive') return quick('upload-tracker', 'cloud', 'Upload tracker now');
-  if (c.kind === 'claude') return quick('test-claude', 'flash', 'Test connection');
+  if (c.kind === 'drive') return quickButton('upload-tracker', 'cloud', 'Upload tracker now');
+  if (c.kind === 'claude') return quickButton('test-claude', 'flash', 'Test connection');
   if (c.state === 'off') return '<button class="btn btn-sm btn-ghost" type="button" disabled data-tip="Set up the heartbeat on the Mac first">' + icon('pulse', 15) + 'Send test beat</button>';
-  return quick('test-heartbeat', 'pulse', 'Send test beat');
+  return quickButton('test-heartbeat', 'pulse', 'Send test beat');
 }
 
-/** A quick action's button; still busy if the action runs while the cards are drawn again. @param {string} name @param {string} ic @param {string} label */
-function quick(name, ic, label) {
-  if (actionRunning(name)) return `<button class="btn btn-sm btn-ghost" type="button" disabled data-action="${name}"><span class="spin"></span>Working…</button>`;
-  return button(`data-action="${name}"`, ic, label);
-}
 
 /** @param {Card[] | null} cards @param {unknown} [error] */
 export function renderConnections(cards, error) {

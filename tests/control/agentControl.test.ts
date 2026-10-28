@@ -3,7 +3,7 @@ import { parseEnv } from '../../src/config/env.ts';
 import { AgentControl, type PartState } from '../../src/control/agentControl.ts';
 import { Health } from '../../src/health/health.ts';
 import type { MeetingsHealth } from '../../src/health/health.ts';
-import { saveMeetingAccount } from '../../src/output/googleAuth.ts';
+import { saveAccountEmail, saveMeetingAccount } from '../../src/output/googleAuth.ts';
 import type { SenderState } from '../../src/report/types.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { insertMessage } from '../../src/store/messages.ts';
@@ -183,10 +183,19 @@ describe('AgentControl.connections', () => {
         { label: 'main', email: null, usedFor: ['Tracker on Drive', 'Meetings'], state: 'ok', stateLabel: 'Connected' },
         { label: 'company2', email: null, usedFor: ['Meetings'], state: 'down', stateLabel: 'Sign-in lost' },
       ],
-      drive: { state: 'ok', label: expect.any(String), lastUploadAt: '2026-10-19T06:00:00.000Z' },
+      drive: { state: 'ok', label: expect.any(String), lastUploadAt: '2026-10-19T06:00:00.000Z', account: null },
       claude: { callsToday: 2, spentToday: 1, capUsd: 10 },
       monitoring: { on: true, lastBeatAt: '2026-10-19T07:55:00.000Z' },
     });
+  });
+
+  it("shows each Google account's stored email, and names the main one on the Drive card", () => {
+    const t = setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' } });
+    saveMeetingAccount(t.db, KEY, 'company2', 'refresh-token-not-real', 'https://www.googleapis.com/auth/meetings.space.readonly');
+    saveAccountEmail(t.db, 'main', 'owner@studio.in');
+    const c = t.control.connections();
+    expect(c.google.map((g) => [g.label, g.email])).toEqual([['main', 'owner@studio.in'], ['company2', null]]);
+    expect(c.drive.account).toBe('owner@studio.in');
   });
 
   it('maps the spare phone states, and has no spare card state without the report', () => {

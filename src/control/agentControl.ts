@@ -1,7 +1,7 @@
 import type { SpendView } from '../app.ts';
 import type { Env } from '../config/env.ts';
 import type { Health, HealthSnapshot } from '../health/health.ts';
-import { MAIN_ACCOUNT, meetingAccounts } from '../output/googleAuth.ts';
+import { accountEmail, MAIN_ACCOUNT, meetingAccounts } from '../output/googleAuth.ts';
 import type { SenderStatus } from '../report/types.ts';
 import type { Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
@@ -38,7 +38,8 @@ export interface Connections {
   founder: { state: PartState; label: string; groups: number; lastActivityAt: string | null; device: string };
   spare: { state: PartState; label: string; device: string; recipientMasked: string | null };
   google: { label: string; email: string | null; usedFor: string[]; state: PartState; stateLabel: string }[];
-  drive: { state: PartState; label: string; lastUploadAt: string | null };
+  /** account: the main Google account's email the tracker is written as, when known. */
+  drive: { state: PartState; label: string; lastUploadAt: string | null; account: string | null };
   claude: { callsToday: number; spentToday: number; capUsd: number };
   monitoring: { on: boolean; lastBeatAt: string | null };
 }
@@ -205,9 +206,9 @@ export class AgentControl {
       ? { state: 'down' as const, stateLabel: 'Sign-in expired' }
       : meetingAccess ? { state: 'warn' as const, stateLabel: 'Needs meeting access' } : { state: 'ok' as const, stateLabel: 'Connected' };
     const google = [
-      { label: MAIN_ACCOUNT, email: null, usedFor: ['Tracker on Drive', ...(env.MEETINGS_ENABLED ? ['Meetings'] : [])], ...mainState },
+      { label: MAIN_ACCOUNT, email: accountEmail(db, MAIN_ACCOUNT), usedFor: ['Tracker on Drive', ...(env.MEETINGS_ENABLED ? ['Meetings'] : [])], ...mainState },
       ...meetingAccounts(db).map((label) => ({
-        label, email: null, usedFor: ['Meetings'],
+        label, email: accountEmail(db, label), usedFor: ['Meetings'],
         ...(lost.has(label) ? { state: 'down' as const, stateLabel: 'Sign-in lost' } : { state: 'ok' as const, stateLabel: 'Connected' }),
       })),
     ];
@@ -220,7 +221,7 @@ export class AgentControl {
           ? { ...(this.#d.spareLinked() ? { state: 'ok' as const, label: 'Linked' } : { state: 'warn' as const, label: 'Not linked' }), device: SPARE_DEVICE, recipientMasked: null }
           : { state: 'off', label: 'Switched off', device: SPARE_DEVICE, recipientMasked: null },
       google,
-      drive: { ...this.#tracker(snap), lastUploadAt: lastTrackerUpload(db, snap.lastPublishedAt) },
+      drive: { ...this.#tracker(snap), lastUploadAt: lastTrackerUpload(db, snap.lastPublishedAt), account: accountEmail(db, MAIN_ACCOUNT) },
       claude: { callsToday: calls, spentToday: spend.spentToday(), capUsd: spend.capUsd },
       monitoring: { on: heartbeat !== undefined, lastBeatAt: beat === null ? null : beat.toISOString() },
     };
