@@ -598,6 +598,8 @@ describe('status command', () => {
     add('openai', 'tr-3', 0); // not the provider set up now
     expect(sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'elevenlabs' })).toBe(2);
     expect(sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'none' })).toBe(3);
+    // With meetings on the local engine, no paid copy will be deleted by the service: all are left.
+    expect(sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'local' })).toBe(3);
     db.close();
     statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
     expect(out()).toContain('Speech copies: 2 speech-to-text copies could not be deleted from the provider; see SETUP (Meeting summaries)');

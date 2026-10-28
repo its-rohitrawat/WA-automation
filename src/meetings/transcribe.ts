@@ -120,9 +120,11 @@ export function meetingTranscriber(provider: SttProvider, inrPerUsd: number): Me
 /**
  * The meeting transcriber STT_PROVIDER names, or null when it is 'none'. STT_API_KEY goes to the provider's constructor
  * and nowhere else. `deps.http` replaces the network in tests.
+ * 'local' (the engine on this machine, no key) is null too until the local meeting transcriber is wired in: meetings
+ * then wait safely at stage found (stt_none), as with 'none', and nothing is sent anywhere.
  */
 export function createMeetingTranscriber(env: Env, deps: { http?: HttpFetch } = {}): MeetingTranscriber | null {
-  if (env.STT_PROVIDER === 'none') return null;
+  if (env.STT_PROVIDER === 'none' || env.STT_PROVIDER === 'local') return null;
   const apiKey = requireKey(env, 'STT_API_KEY');
   const http = deps.http ? { http: deps.http } : {};
   let provider: SttProvider;

@@ -803,6 +803,12 @@ describe('createMeetingTranscriber', () => {
     expect(createMeetingTranscriber(parseEnv({}))).toBeNull();
   });
 
+  it('with local, needs no STT_API_KEY and builds no paid provider (meetings keep waiting until the local transcriber is wired)', () => {
+    const local = parseEnv({ STT_PROVIDER: 'local', STT_LOCAL_BIN: '/opt/stt/bin/transcribe-cli', STT_LOCAL_MODEL: '/opt/stt/models/m.gguf' });
+    expect(local.STT_API_KEY).toBeUndefined();
+    expect(createMeetingTranscriber(local)).toBeNull();
+  });
+
   it.each([
     ['sarvam', 7200],
     ['elevenlabs', 36_000],

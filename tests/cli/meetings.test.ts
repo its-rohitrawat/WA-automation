@@ -427,6 +427,12 @@ describe('speechCeilingFromEnv', () => {
     expect(speechCeilingFromEnv({ STT_PROVIDER: 'openai', INR_PER_USD: 88 })!(3600)).toBeCloseTo(0.36);
     expect(speechCeilingFromEnv({ STT_PROVIDER: 'sarvam', INR_PER_USD: 90 })!(3600)).toBeCloseTo(0.4);
   });
+
+  it('is $0 for the local engine: nothing is paid', () => {
+    const local = speechCeilingFromEnv({ STT_PROVIDER: 'local', INR_PER_USD: 88 });
+    expect(local).not.toBeNull();
+    expect(local!(3 * 3600)).toBe(0);
+  });
 });
 
 describe('meetingAiCeilingUsd', () => {

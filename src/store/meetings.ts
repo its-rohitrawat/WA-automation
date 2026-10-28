@@ -467,10 +467,11 @@ export function deleteSttForget(db: Db, id: number): void {
 
 /**
  * Provider copies the agent has given up deleting for now: the last try is used (maxAttempts), or the copy's provider
- * is not the one set up now (`provider`; 'none' when speech-to-text is off), so forgetPending skips it. A count only,
+ * is not the one set up now (`provider`; 'none' when speech-to-text is off, 'local' for the engine on this machine,
+ * which keeps no copy), so forgetPending skips it. A count only,
  * for `cli status`.
  */
-export function sttForgetsGivenUp(db: Db, o: { maxAttempts: number; provider: ProviderId | 'none' }): number {
+export function sttForgetsGivenUp(db: Db, o: { maxAttempts: number; provider: ProviderId | 'local' | 'none' }): number {
   return (
     db.prepare('SELECT COUNT(*) AS n FROM stt_forget WHERE attempts >= ? OR provider <> ?').get(o.maxAttempts, o.provider) as { n: number }
   ).n;
