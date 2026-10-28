@@ -31,6 +31,10 @@ export interface Backfill {
   timeouts: number;
   /** Requests that could not be sent (a send error): counted apart, with a growing wait. */
   failures: number;
+  /** The oldest message the answers have reached: the next request pages back from it. Null before the first answer. */
+  cursor: { waId: string; fromMe: boolean; ts: string } | null;
+  /** Messages this backfill stored itself (duplicates and messages kept earlier are not counted). */
+  found: number;
   /** When fetching began (ISO), for how long the group's processing is held; null before. */
   fetchingSince: string | null;
   finishedAt: string | null;
@@ -48,6 +52,8 @@ function parse(groupId: string, v: string | undefined): Backfill | undefined {
       groupId, clientId: o.clientId, since: o.since, until: o.until, state,
       requests: Number.isInteger(o.requests) ? o.requests! : 0, empties: Number.isInteger(o.empties) ? o.empties! : 0,
       timeouts: Number.isInteger(o.timeouts) ? o.timeouts! : 0, failures: Number.isInteger(o.failures) ? o.failures! : 0,
+      cursor: o.cursor && typeof o.cursor.waId === 'string' && typeof o.cursor.ts === 'string' ? { waId: o.cursor.waId, fromMe: o.cursor.fromMe === true, ts: o.cursor.ts } : null,
+      found: Number.isInteger(o.found) ? o.found! : 0,
       fetchingSince: typeof o.fetchingSince === 'string' ? o.fetchingSince : null, finishedAt: typeof o.finishedAt === 'string' ? o.finishedAt : null,
     };
   } catch {
@@ -59,7 +65,7 @@ function parse(groupId: string, v: string | undefined): Backfill | undefined {
 export function queueBackfill(db: Db, groupId: string, clientId: number, now: Date): void {
   saveBackfill(db, {
     groupId, clientId, since: new Date(now.getTime() - BACKFILL_DAYS * 86_400_000).toISOString(), until: now.toISOString(),
-    state: 'waiting', requests: 0, empties: 0, timeouts: 0, failures: 0, fetchingSince: null, finishedAt: null,
+    state: 'waiting', requests: 0, empties: 0, timeouts: 0, failures: 0, cursor: null, found: 0, fetchingSince: null, finishedAt: null,
   });
 }
 
@@ -79,16 +85,19 @@ export function listBackfills(db: Db): Backfill[] {
   return rows.flatMap((r) => parse(r.k.slice(PREFIX.length), r.v) ?? []);
 }
 
-/** The group's oldest stored message: where the next request pages back from. */
-export function oldestMessage(db: Db, clientId: number): { waId: string; fromMe: boolean; ts: string } | undefined {
-  const r = db.prepare('SELECT wa_id, from_me, ts FROM messages WHERE client_id = ? ORDER BY ts, id LIMIT 1').get(clientId) as
+/**
+ * Where the first request pages back from: the group's oldest message since it was approved. Messages kept from an
+ * earlier approval are not used, so the days the group was not approved are read too.
+ */
+export function firstAnchor(db: Db, clientId: number, until: string): { waId: string; fromMe: boolean; ts: string } | undefined {
+  const r = db.prepare('SELECT wa_id, from_me, ts FROM messages WHERE client_id = ? AND ts >= ? ORDER BY ts, id LIMIT 1').get(clientId, until) as
     { wa_id: string; from_me: number; ts: string } | undefined;
   return r ? { waId: r.wa_id, fromMe: r.from_me === 1, ts: r.ts } : undefined;
 }
 
-/** Stored messages from since up to (not including) until: the earlier messages read. */
-export function earlierCount(db: Db, b: Pick<Backfill, 'clientId' | 'since' | 'until'>): number {
-  return (db.prepare('SELECT COUNT(*) AS n FROM messages WHERE client_id = ? AND ts >= ? AND ts < ?').get(b.clientId, b.since, b.until) as { n: number }).n;
+/** The client's stored messages, to count what an answer added. */
+export function messageCount(db: Db, clientId: number): number {
+  return (db.prepare('SELECT COUNT(*) AS n FROM messages WHERE client_id = ?').get(clientId) as { n: number }).n;
 }
 
 /** How long a finished backfill shows on the Clients card. */
@@ -101,7 +110,7 @@ export type BackfillStatus = { state: 'waiting' | 'reading'; found: number } | {
 export function backfillStatus(db: Db, clientId: number, now: Date): BackfillStatus {
   const b = listBackfills(db).find((x) => x.clientId === clientId);
   if (!b || b.state === 'stopped') return null;
-  const found = earlierCount(db, b);
+  const found = b.found;
   if (b.state === 'done') return b.finishedAt && now.getTime() - Date.parse(b.finishedAt) < SHOW_DONE_MS ? { state: 'done', found } : null;
   return { state: b.state === 'waiting' ? 'waiting' : 'reading', found };
 }
