@@ -317,6 +317,7 @@ The agent can show a private owner dashboard in the browser, at `http://localhos
 6. **Open** `http://localhost:8787/dashboard` in Chrome on this Mac and sign in with an owner email. Safari may refuse the sign-in on a `http://localhost` address.
 7. **Client groups:** from now on, choose them in **Clients → Manage groups**, as in SETUP.md, "Choosing client groups in the dashboard". Editing `config/allowed-groups.json` with `nano` stays the fallback.
 8. **Connections:** when one is down, start with **Fix now** on the Overview, as in SETUP.md, "Fixing a connection in the dashboard". The commands (`npm run cli -- link`, `link-sender`, `google-auth`, in the waagent window) stay the fallback when the dashboard can't be reached.
+9. **More in SETUP.md:** approving a group also reads its earlier messages, up to 7 days back ("Choosing client groups in the dashboard"); each Google card shows its account's email ("Fixing a connection in the dashboard"); the Sync tracker button, and what to do if a new tracker file appears ("Keeping the tracker up to date").
 
 To switch it off: set `DASHBOARD_ENABLED=false` in `.env` and restart. The agent carries on as before.
 
