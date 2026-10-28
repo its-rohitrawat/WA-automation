@@ -1,5 +1,6 @@
 import type { ClientConfig } from '../config/groups.ts';
 import type { Db } from './db.ts';
+import { queueBackfill } from './historyBackfill.ts';
 
 export interface ClientRow {
   id: number;
@@ -42,14 +43,18 @@ function toRow(r: RawClient): ClientRow {
   };
 }
 
-/** Makes the clients table match the config. Removed clients become inactive; nothing is deleted. */
-export function syncClients(db: Db, configs: ClientConfig[]): void {
+/**
+ * Makes the clients table match the config. Removed clients become inactive; nothing is deleted. A group that becomes
+ * active here (new, or approved again) gets its last 7 days of messages queued for reading, in the same transaction
+ * (src/wa/historyBackfill.ts reads them). Returns those group ids.
+ */
+export function syncClients(db: Db, configs: ClientConfig[], now: Date = new Date()): string[] {
   const upsert = db.prepare(`
     INSERT INTO clients (code, name, group_id, phases, active) VALUES (@code, @name, @groupId, @phases, 1)
     ON CONFLICT (group_id) DO UPDATE SET code = excluded.code, name = excluded.name, phases = excluded.phases, active = 1`);
   const byGroup = db.prepare('SELECT code, name FROM clients WHERE group_id = ?');
   const byCode = db.prepare('SELECT name, group_id FROM clients WHERE code = ?');
-  db.transaction(() => {
+  return db.transaction(() => {
     for (const c of configs) {
       const existing = byGroup.get(c.groupId) as { code: string; name: string } | undefined;
       if (existing && existing.code !== c.code) {
@@ -60,8 +65,15 @@ export function syncClients(db: Db, configs: ClientConfig[]): void {
         throw new Error(`Code ${c.code} is already used by ${other.name}. Pick a different code.`);
       }
     }
+    const wasActive = new Set((db.prepare('SELECT group_id FROM clients WHERE active = 1').all() as { group_id: string }[]).map((r) => r.group_id));
     db.prepare('UPDATE clients SET active = 0').run();
     for (const c of configs) upsert.run({ code: c.code, name: c.name, groupId: c.groupId, phases: JSON.stringify(c.phases) });
+    const approved = configs.map((c) => c.groupId).filter((g) => !wasActive.has(g));
+    for (const groupId of approved) {
+      const { id } = db.prepare('SELECT id FROM clients WHERE group_id = ?').get(groupId) as { id: number };
+      queueBackfill(db, groupId, id, now);
+    }
+    return approved;
   }).immediate();
 }
 

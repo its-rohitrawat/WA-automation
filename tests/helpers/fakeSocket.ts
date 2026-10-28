@@ -34,6 +34,9 @@ export class FakeSocket implements SocketLike {
     }),
   );
 
+  /** The history request to the founder's own phone (src/wa/historyBackfill.ts). Resolves with a request id. */
+  fetchMessageHistory = vi.fn(async (_count: number, _key: { remoteJid: string; fromMe: boolean; id: string }, _ts: number): Promise<string> => 'req-1');
+
   end = vi.fn();
   sendMessage = vi.fn();
   readMessages = vi.fn();

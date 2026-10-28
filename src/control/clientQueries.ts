@@ -1,6 +1,7 @@
 import { uniqueSheetNames } from '../output/sheetNames.ts';
 import { getClientByCode, listClients, type ClientRow } from '../store/clients.ts';
 import type { Db } from '../store/db.ts';
+import { backfillStatus, type BackfillStatus } from '../store/historyBackfill.ts';
 import type { MeetingStatus } from '../store/meetings.ts';
 import { lastActivity } from '../store/messages.ts';
 import type { Status } from '../store/tasks.ts';
@@ -32,6 +33,8 @@ export interface ClientCard {
   lastActivity: string | null;
   /** The client's tab in the tracker workbook. */
   sheetName: string;
+  /** Reading the group's earlier messages after it was approved (up to 7 days back); null when there is nothing to say. */
+  history: BackfillStatus;
 }
 
 export interface ClientOpenTask {
@@ -111,6 +114,7 @@ function card(
   latest: ReadonlyMap<number, string | null>,
   sheets: Map<number, string>,
   groupNames?: ReadonlyMap<string, string>,
+  history: BackfillStatus = null,
 ): ClientCard {
   return {
     code: c.code,
@@ -121,6 +125,7 @@ function card(
     currentPhase: c.currentPhase,
     lastActivity: latest.get(c.id) ?? null,
     sheetName: sheets.get(c.id) ?? c.name,
+    history,
   };
 }
 
@@ -129,14 +134,14 @@ export function clientCards(db: Db, now: Date, groupNames?: ReadonlyMap<string, 
   const counts = countsByClient(db, now);
   const latest = lastActivityByClient(db);
   const sheets = sheetNames(db);
-  return listClients(db, true).map((c) => card(c, counts, latest, sheets, groupNames));
+  return listClients(db, true).map((c) => card(c, counts, latest, sheets, groupNames, backfillStatus(db, c.id, now)));
 }
 
 /** The client drawer for an active client; null for an unknown or inactive code. */
 export function clientDetail(db: Db, code: string, now: Date, groupNames?: ReadonlyMap<string, string>): ClientDetail | null {
   const c = getClientByCode(db, code);
   if (!c || !c.active) return null;
-  const base = card(c, countsForClient(db, now, c.id), new Map([[c.id, lastActivity(db, c.id)]]), sheetNames(db), groupNames);
+  const base = card(c, countsForClient(db, now, c.id), new Map([[c.id, lastActivity(db, c.id)]]), sheetNames(db), groupNames, backfillStatus(db, c.id, now));
   const openTasks = db
     .prepare(`SELECT code, title, assigned_to AS assignedTo, deadline, status FROM tasks
       WHERE client_id = ? AND status <> 'done' ORDER BY deadline IS NULL, deadline, id`)

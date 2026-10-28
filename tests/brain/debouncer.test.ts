@@ -405,3 +405,29 @@ describe('GroupDebouncer', () => {
     expect(await runsAfter({ status: 'waiting' })).toBe(FAILURES_BEFORE_BACKOFF + 2);
   });
 });
+
+describe('GroupDebouncer: held while earlier messages are read', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('starts no run for a held client, also from a timer set before the hold; runs once released and ensured', async () => {
+    const run = vi.fn(async (_id: number): Promise<ReconcileOutcome> => OK);
+    let held = false;
+    const d = new GroupDebouncer({ quietMs: 240_000, maxWaitMs: 1_200_000, maxConcurrent: 3, run, held: (id) => held && id === 1 });
+    d.notify(1); // its quiet timer is counting
+    held = true;
+    await adv(1_300_000);
+    d.notify(1);
+    d.ensure(1);
+    await adv(1_300_000);
+    expect(run).not.toHaveBeenCalled();
+    d.notify(2); // another client is not held
+    await adv(240_000);
+    expect(run).toHaveBeenCalledExactlyOnceWith(2);
+    held = false;
+    d.ensure(1);
+    await adv(240_000);
+    expect(run).toHaveBeenLastCalledWith(1);
+    await d.stop?.();
+  });
+});

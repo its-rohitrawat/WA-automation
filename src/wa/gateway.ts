@@ -1,16 +1,36 @@
 import { EventEmitter } from 'node:events';
-import makeWASocket, { DisconnectReason, makeCacheableSignalKeyStore } from 'baileys';
+import makeWASocket, { DisconnectReason, makeCacheableSignalKeyStore, proto } from 'baileys';
 import type { AuthenticationState, BaileysEventMap, GroupMetadata } from 'baileys';
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { AllowList } from './allowlist.ts';
 import { backoffMs } from './backoff.ts';
 import { normalizeMessage, normalizeReaction, normalizeUpdate, type NormalizedEvent } from './normalize.ts';
 
-/** The subset of a Baileys socket the gateway uses. Deliberately has no send-type methods. */
+/**
+ * The subset of a Baileys socket the gateway uses. Deliberately has no send-type methods. fetchMessageHistory is the
+ * one request it makes: it asks the founder's own phone (Baileys addresses it to the account's own number, as a peer
+ * request) for earlier messages of one chat. Nothing reaches any chat or any other person.
+ */
 export interface SocketLike {
   ev: { on<T extends keyof BaileysEventMap>(event: T, listener: (arg: BaileysEventMap[T]) => void): void };
   groupFetchAllParticipating(): Promise<{ [jid: string]: GroupMetadata }>;
+  fetchMessageHistory(count: number, oldestMsgKey: { remoteJid: string; fromMe: boolean; id: string }, oldestMsgTimestamp: number): Promise<string>;
   end(error: Error | undefined): Promise<void> | void;
+}
+
+/** WhatsApp's limit per history request. */
+export const HISTORY_PAGE_MAX = 50;
+
+/** The stored message a history request pages back from. */
+export interface HistoryAnchor {
+  waId: string;
+  fromMe: boolean;
+  ts: Date;
+}
+
+/** One on-demand history answer: the allowed groups' events in it, per group (none when WhatsApp sent nothing). */
+export interface HistoryAnswer {
+  groups: { groupId: string; events: NormalizedEvent[] }[];
 }
 
 export type SocketFactory = (
@@ -65,6 +85,13 @@ export interface GatewayLike {
   listGroups(): Promise<{ id: string; subject: string }[]>;
   failedCount(): number;
   droppedCount(): number;
+  /** Answers to fetchHistory, never delivered through onEvent (src/wa/historyBackfill.ts decides what to keep). */
+  onHistory?(fn: (a: HistoryAnswer) => void): void;
+  /**
+   * Asks the founder's phone for up to `count` messages of an allowed group older than `anchor`. Only while open; false
+   * when it was not asked (not open, not allowed, stopped, or the request failed).
+   */
+  fetchHistory?(groupId: string, anchor: HistoryAnchor, count: number): Promise<boolean>;
 }
 
 export type Scheduler = (fn: () => void, ms: number) => { cancel(): void };
@@ -118,6 +145,23 @@ export class WhatsAppGateway implements GatewayLike {
 
   onStatus(fn: (s: GatewayStatus) => void): void {
     this.#emitter.on('status', fn);
+  }
+
+  onHistory(fn: (a: HistoryAnswer) => void): void {
+    this.#emitter.on('history', fn);
+  }
+
+  async fetchHistory(groupId: string, anchor: HistoryAnchor, count: number): Promise<boolean> {
+    const sock = this.#sock;
+    // The allow-list again here: an unapproved group is never asked for.
+    if (this.#stopped || !sock || this.#status.state !== 'open' || !this.#opts.allow.has(groupId)) return false;
+    try {
+      // The protocol field is oldestMsgTimestampMs: milliseconds.
+      await sock.fetchMessageHistory(Math.max(1, Math.min(HISTORY_PAGE_MAX, count)), { remoteJid: groupId, fromMe: anchor.fromMe, id: anchor.waId }, anchor.ts.getTime());
+      return true;
+    } catch {
+      return false; // never the error: it can carry the request
+    }
   }
 
   status(): GatewayStatus {
@@ -192,7 +236,8 @@ export class WhatsAppGateway implements GatewayLike {
         this.#deliver(() => normalizeMessage(m));
       }
     });
-    sock.ev.on('messaging-history.set', ({ messages }) => {
+    sock.ev.on('messaging-history.set', ({ messages, syncType }) => {
+      if (syncType === proto.HistorySync.HistorySyncType.ON_DEMAND) return this.#onDemand(messages);
       for (const m of messages) {
         if (!this.#allowed(m.key.remoteJid)) continue;
         this.#deliver(() => normalizeMessage(m));
@@ -213,6 +258,31 @@ export class WhatsAppGateway implements GatewayLike {
     sock.ev.on('groups.upsert', (groups) => {
       for (const g of groups) if (this.#opts.allow.has(g.id)) this.#groupCache.set(g.id, g);
     });
+  }
+
+  /** An answer to fetchHistory: the allowed groups' events, grouped, on the history channel only. */
+  #onDemand(messages: BaileysEventMap['messaging-history.set']['messages']): void {
+    if (this.#stopped) return;
+    const groups = new Map<string, NormalizedEvent[]>();
+    for (const m of messages) {
+      if (!this.#allowed(m.key.remoteJid)) continue;
+      let e: NormalizedEvent | null;
+      try {
+        e = normalizeMessage(m);
+      } catch {
+        this.#failed++;
+        continue;
+      }
+      if (!e) continue;
+      const list = groups.get(e.groupId) ?? [];
+      list.push(e);
+      groups.set(e.groupId, list);
+    }
+    try {
+      this.#emitter.emit('history', { groups: [...groups].map(([groupId, events]) => ({ groupId, events })) } satisfies HistoryAnswer);
+    } catch {
+      this.#failed++;
+    }
   }
 
   #allowed(jid: string | null | undefined): boolean {

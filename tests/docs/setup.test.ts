@@ -785,6 +785,51 @@ describe('go-live guide: the website build (GO-LIVE.md step 5)', () => {
   });
 });
 
+describe('owner fixes in the dashboard docs (plan 2026-10-28-owner-fixes.md, Task 5)', () => {
+  const setup = read('docs/SETUP.md');
+  /** A ### section of SETUP.md, up to the next ## or ### heading. */
+  const section = (heading: string) => {
+    const at = setup.indexOf(`\n### ${heading}\n`);
+    expect(at, heading).toBeGreaterThanOrEqual(0);
+    const ends = ['\n## ', '\n### '].map((h) => setup.indexOf(h, at + 1)).filter((n) => n > 0);
+    return setup.slice(at, ends.length > 0 ? Math.min(...ends) : undefined);
+  };
+  const mac = read('docs/SETUP-mac.md');
+  const macStart = mac.indexOf('\n## 10. Owner dashboard (optional)\n');
+  const section10 = mac.slice(macStart, mac.indexOf('\n## ', macStart + 1));
+
+  it('approving a group reads up to 7 days back, as far as WhatsApp provides, within the spend cap', () => {
+    const groups = section('Choosing client groups in the dashboard');
+    expect(groups).toContain('up to 7 days back, as far as WhatsApp provides');
+    expect(groups).toMatch(/spend cap: if the cap is reached, the reading pauses and carries on the next day/);
+    expect(groups).toMatch(/no message text/);
+  });
+
+  it('Connections shows each Google account email, kept masked in logs and Audit logs', () => {
+    const fix = section('Fixing a connection in the dashboard');
+    expect(fix).toMatch(/Each Google card shows the account's email address/);
+    expect(fix).toMatch(/logs and \*\*Audit logs\*\* keep it masked/);
+  });
+
+  it('the Sync tracker button and what to do when a new tracker file appears', () => {
+    const tracker = section('Keeping the tracker up to date');
+    expect(tracker).toContain('Sync tracker button');
+    expect(tracker).toContain('**If a new tracker file appears.**');
+    expect(tracker).toMatch(/the Google login changed/);
+    expect(tracker).toMatch(/sign in with the account that owns the old file/);
+    expect(tracker).toMatch(/\*\*Keep the new file:\*\*/);
+  });
+
+  it('SETUP-mac section 10 points to those three SETUP.md sections', () => {
+    expect(macStart).toBeGreaterThanOrEqual(0);
+    for (const name of ['Choosing client groups in the dashboard', 'Fixing a connection in the dashboard', 'Keeping the tracker up to date']) {
+      expect(section10).toContain(`"${name}"`);
+      expect(setup).toContain(`\n### ${name}\n`);
+    }
+    expect(section10).toMatch(/up to 7 days back/);
+  });
+});
+
 describe('meetings on the local speech engine (plan 2026-10-28-meetings-local-stt.md, Task 3)', () => {
   const mac = read('docs/SETUP-mac.md');
   const macStart = mac.indexOf('\n## 8. Voice notes: local speech-to-text\n');
@@ -836,5 +881,23 @@ describe('meetings on the local speech engine (plan 2026-10-28-meetings-local-st
     const lines = Object.values(MEETING_STT_PROBLEM_LINES).map((l) => l.replace(/^⚠️ /, ''));
     expect(lines).toHaveLength(2);
     for (const line of lines) expect(table.split('\n').filter((r) => r.startsWith(`| ${line} |`)), line).toHaveLength(1);
+  });
+});
+
+describe('earlier messages of a newly approved group (Task 4, 28 Oct 2026)', () => {
+  it('SETUP.md, Manage groups and the client card say the same, honestly: up to 7 days, as far as WhatsApp provides', () => {
+    const setup = read('docs/SETUP.md');
+    const groups = read('src/web/public/views/groups.js');
+    const clients = read('src/web/public/views/clients.js');
+    expect(setup).toContain('**up to 7 days back, as far as WhatsApp provides**: WhatsApp may not hand over every old message, so some can be missing.');
+    expect(groups).toContain("and its earlier ones up to 7 days back, as far as WhatsApp provides.");
+    // The card's three lines, word for word in the doc and the screen.
+    expect(setup).toContain('"Reading earlier messages… <n> found", then "Earlier messages read (last 7 days)"');
+    expect(setup).toContain('("Waiting for the first new message to read earlier ones")');
+    for (const text of ['Reading earlier messages… ${h.found} found', 'Earlier messages read (last 7 days)', 'Waiting for the first new message to read earlier ones']) {
+      expect(clients, text).toContain(text);
+    }
+    expect(setup).toContain('within the daily spend cap');
+    expect(setup).toContain('Removing the group stops it.');
   });
 });

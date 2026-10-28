@@ -70,6 +70,8 @@ describe('clientCards', () => {
       counts: { open: 3, overdue: 2, review: 1, doneThisWeek: 1 },
       phases: SHARMA.phases, currentPhase: 'Design',
       lastActivity: '2026-10-28T04:00:00.000Z', sheetName: 'Sharma Interiors',
+      // seededDb approves the group with the real clock: its earlier messages are waiting to be read.
+      history: { state: 'waiting', found: expect.any(Number) },
     });
     expect(cards[0]).toMatchObject({ code: 'MEH', counts: { open: 0, overdue: 0, review: 0, doneThisWeek: 1 }, currentPhase: null, lastActivity: '2026-10-20T04:00:00.000Z' });
   });

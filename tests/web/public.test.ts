@@ -318,6 +318,12 @@ describe('Clients and Manage groups (D2)', () => {
     const [c] = readClients({ clients: [{ code: 'DES', name: 'Desai', groupName: '', counts: { open: 2 }, phases: ['A', 'B', 'C'], currentPhase: 'B', lastActivity: null, sheetName: 'Desai' }, { name: 'no code' }] });
     expect(c).toMatchObject({ code: 'DES', groupName: 'Desai', phaseIndex: 1, counts: { open: 2, overdue: 0, review: 0, doneThisWeek: 0 } });
     expect(readClients({ clients: [{ name: 'no code' }] })).toEqual([]);
+    // Reading earlier messages: only the three known states, with a count; anything else is no line at all.
+    expect(c.history).toBeNull();
+    const h = (history: unknown) => readClients({ clients: [{ code: 'DES', name: 'Desai', history }] })[0]!.history;
+    expect(h({ state: 'reading', found: 12 })).toEqual({ state: 'reading', found: 12 });
+    expect(h({ state: 'done', found: 'x' })).toEqual({ state: 'done', found: 0 });
+    expect(h({ state: '<b>', found: 3 })).toBeNull();
     const d = readClientDetail({ client: { code: 'DES', name: 'Desai', meetings: [{ id: 1, startedAt: '2026-10-27T06:00:00Z', title: '', status: 'done' }], openTasks: [{ code: 'DES-001', title: 'Quote', assignedTo: null, deadline: null, status: 'open' }] } });
     expect(d.meetings[0].title).toBe('Untitled meeting');
     expect(d.openTasks[0]).toEqual({ code: 'DES-001', title: 'Quote', assignedTo: null, deadline: null, status: 'open' });

@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { describe, expect, it } from 'vitest';
 import { manualClock } from '../../src/util/clock.ts';
-import type { GatewayLike, GatewayState, GatewayStatus } from '../../src/wa/gateway.ts';
+import type { GatewayLike, GatewayState, GatewayStatus, HistoryAnswer } from '../../src/wa/gateway.ts';
 import type { NormalizedEvent } from '../../src/wa/normalize.ts';
 import { NotConnectedError, SwitchableGateway } from '../../src/wa/switchableGateway.ts';
 
@@ -249,5 +249,48 @@ describe('SwitchableGateway', () => {
     const { statuses } = collect(g);
     a.setState('open');
     expect(statuses.at(-1)!.state).toBe('open');
+  });
+});
+
+describe('SwitchableGateway: earlier messages (history backfill)', () => {
+  /** A gateway that can ask for history: its answers go out on the history channel. */
+  class HistoryGateway extends FakeGateway {
+    readonly #h = new EventEmitter();
+    asked = 0;
+    onHistory(fn: (a: HistoryAnswer) => void) {
+      this.#h.on('h', fn);
+    }
+    answer(a: HistoryAnswer) {
+      this.#h.emit('h', a);
+    }
+    async fetchHistory() {
+      this.asked++;
+      return true;
+    }
+  }
+  const anchor = { waId: 'A', fromMe: false, ts: new Date(T0) };
+
+  it('asks the current gateway only while it is open; nothing in setup mode', async () => {
+    const empty = new SwitchableGateway({ clock: manualClock(T0) });
+    expect(await empty.fetchHistory('g@g.us', anchor, 50)).toBe(false);
+    const inner = new HistoryGateway('a');
+    const sw = new SwitchableGateway({ inner, clock: manualClock(T0) });
+    expect(await sw.fetchHistory('g@g.us', anchor, 50)).toBe(false);
+    inner.state = 'open';
+    expect(await sw.fetchHistory('g@g.us', anchor, 50)).toBe(true);
+    expect(inner.asked).toBe(1);
+  });
+
+  it('passes on the current gateway\'s answers, never an old one\'s after a relink', async () => {
+    const first = new HistoryGateway('first');
+    const sw = new SwitchableGateway({ inner: first, clock: manualClock(T0) });
+    const got: HistoryAnswer[] = [];
+    sw.onHistory((a) => got.push(a));
+    first.answer({ groups: [] });
+    const second = new HistoryGateway('second');
+    await sw.swap(second);
+    first.answer({ groups: [{ groupId: 'old@g.us', events: [] }] });
+    second.answer({ groups: [{ groupId: 'new@g.us', events: [] }] });
+    expect(got).toEqual([{ groups: [] }, { groups: [{ groupId: 'new@g.us', events: [] }] }]);
   });
 });

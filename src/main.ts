@@ -12,7 +12,7 @@ import type { ClientConfig } from './config/groups.ts';
 import { masterKeyPath, sessionDbPath, trackerDbPath } from './config/paths.ts';
 import { SettingsStore } from './config/settingsStore.ts';
 import { ActionRateLimiter, claudeModelsCheck } from './control/actions.ts';
-import { publisherAuditHooks } from './control/activityQueries.ts';
+import { historyReadEntry, publisherAuditHooks } from './control/activityQueries.ts';
 import { GroupDirectory } from './control/groups.ts';
 import { deriveSubkey, DpapiKeyProvider, MasterKeyError } from './crypto/keyProvider.ts';
 import { Heartbeat } from './health/heartbeat.ts';
@@ -32,7 +32,7 @@ import { briefingSettings, spareDriver, spareLinked } from './report/dashboardRe
 import { openMorningReport, senderOpener } from './report/start.ts';
 import { pricesFromEnv } from './spend/pricing.ts';
 import type { Prices } from './spend/pricing.ts';
-import { syncClients } from './store/clients.ts';
+import { getClient, syncClients } from './store/clients.ts';
 import { openDb, type Db } from './store/db.ts';
 import { Ffmpeg, findFfmpeg } from './stt/audio.ts';
 import { sharedLocalEngine, type LocalEngine } from './stt/local.ts';
@@ -151,7 +151,7 @@ async function main(): Promise<void> {
     sessionDb = openSessionDb(sessionDbPath(env.DATA_DIR));
 
     const configs = loadGroupsFile(env.GROUPS_FILE);
-    syncClients(db, configs);
+    syncClients(db, configs, systemClock.now()); // a group approved while the service was stopped gets its history queued
     const allow = new AllowList(configs.map((c) => c.groupId));
 
     // openSessionDb has already restored a session left by a dashboard link that never finished (D3).
@@ -233,6 +233,7 @@ async function main(): Promise<void> {
     const voiceDeps = await buildVoiceDeps(env, { findFfmpeg, log, ...(localEngine ? { localEngine } : {}) });
     // The dashboard's audit log (tracker.db audit_log): sign-in, the owner's changes, phone links and the agent's uploads.
     const auditLog = env.DASHBOARD_ENABLED ? new AuditLog(db, systemClock) : undefined;
+    const historyDb = db;
     const app = createApp({
       db,
       clock: systemClock,
@@ -255,6 +256,8 @@ async function main(): Promise<void> {
       report,
       ...(live ? { liveReport: live } : {}),
       ...(auditLog ? { publishHooks: publisherAuditHooks((e) => auditLog.record(e), systemClock) } : {}),
+      // The Activity row when a newly approved group's earlier messages were read: a count and the client's name.
+      ...(auditLog ? { onHistoryRead: ({ clientId, found }: { clientId: number; found: number }) => auditLog.record(historyReadEntry(found, getClient(historyDb, clientId).name)) } : {}),
     });
 
     // watchGroupsFile catches a throwing onChange (including reloadClients conflicts) and calls onError.

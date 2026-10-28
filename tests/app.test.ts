@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { Writable } from 'node:stream';
-import { WAMessageStubType, type WAMessageUpdate } from 'baileys';
+import { proto, WAMessageStubType, type WAMessageUpdate } from 'baileys';
 import ExcelJS from 'exceljs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.ts';
@@ -698,6 +698,53 @@ describe('app health and publishing', () => {
     const { app, sock } = setup();
     closeWith(sock, 401);
     expect(app.health.line()).toEqual({ ok: false, text: '❌ WhatsApp unlinked since 19 Oct 12:30. Follow docs/SETUP.md → "Status logged_out".' });
+    await stopApp(app);
+  });
+});
+
+describe('app: a newly approved group\'s earlier messages (history backfill)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-19T07:00:00Z'));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+  const sec = (iso: string) => Math.floor(Date.parse(iso) / 1000);
+  const ON_DEMAND = proto.HistorySync.HistorySyncType.ON_DEMAND;
+
+  it('pages back from the first new message, holds the AI meanwhile, then reads old and new together in time order', async () => {
+    const { db, ai, app, sock } = setup();
+    // seededDb approved Sharma at 07:00: no message yet, so it waits for the first new one.
+    expect(sock.fetchMessageHistory).not.toHaveBeenCalled();
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('L1', 'NEW: send the final logo today', { ts: sec('2026-10-19T07:00:30Z') })] });
+    await vi.advanceTimersByTimeAsync(30_000); // the tick
+    expect(sock.fetchMessageHistory).toHaveBeenCalledExactlyOnceWith(50, { remoteJid: SHARMA.groupId, fromMe: false, id: 'L1' }, Date.parse('2026-10-19T07:00:30Z'));
+    sock.emit('messaging-history.set', { chats: [], contacts: [], syncType: ON_DEMAND, messages: [waText('E1', 'OLD: please make a logo', { ts: sec('2026-10-17T09:00:00Z') })] });
+    await vi.advanceTimersByTimeAsync(4_000); // the gap, then the next page from the new oldest message
+    expect(sock.fetchMessageHistory).toHaveBeenCalledTimes(2);
+    expect(sock.fetchMessageHistory.mock.calls[1]![1]).toEqual({ remoteJid: SHARMA.groupId, fromMe: false, id: 'E1' });
+    expect(ai.calls).toEqual([]); // held: nothing is reconciled while earlier messages are being read
+    // Older than 7 days: dropped, and the backfill ends.
+    sock.emit('messaging-history.set', { chats: [], contacts: [], syncType: ON_DEMAND, messages: [waText('E0', 'TOO OLD', { ts: sec('2026-10-10T09:00:00Z') })] });
+    expect(db.prepare("SELECT 1 FROM messages WHERE wa_id = 'E0'").get()).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(240_000);
+    expect(ai.calls).toHaveLength(1);
+    const user = ai.calls[0]!.user;
+    expect(user.indexOf('OLD: please make a logo')).toBeGreaterThan(-1);
+    expect(user.indexOf('OLD: please make a logo')).toBeLessThan(user.indexOf('NEW: send the final logo today'));
+    expect(user).not.toContain('TOO OLD');
+    await stopApp(app);
+  });
+
+  it('asks for nothing for a group that is not approved, and stops a group that is removed', async () => {
+    const { app, sock } = setup();
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('X1', 'not ours', { group: OTHER_GROUP, ts: sec('2026-10-19T07:00:30Z') })] });
+    app.reloadClients([MEHTA]); // Sharma removed before its first message
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('L1', 'after removal', { ts: sec('2026-10-19T07:00:40Z') })] });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sock.fetchMessageHistory).not.toHaveBeenCalled();
     await stopApp(app);
   });
 });

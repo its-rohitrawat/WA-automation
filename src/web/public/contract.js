@@ -164,7 +164,16 @@ function clientCard(v) {
   return {
     code: str(o.code), name: str(o.name), groupName: str(o.groupName) || str(o.name), counts: counts(o.counts), phases,
     currentPhase, phaseIndex: currentPhase ? phases.indexOf(currentPhase) : -1, lastActivity: iso(o.lastActivity), sheetName: str(o.sheetName),
+    history: history(o.history),
   };
+}
+
+const HISTORY_STATES = ['waiting', 'reading', 'done'];
+/** Reading a newly approved group's earlier messages: { state, found }, or null. @param {unknown} v */
+function history(v) {
+  const o = obj(v);
+  const state = str(o.state);
+  return HISTORY_STATES.includes(state) ? { state, found: num(o.found) } : null;
 }
 
 /** GET /dashboard/api/clients ({ clients: ClientCard[] }). @param {unknown} raw */

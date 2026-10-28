@@ -67,6 +67,8 @@ const ISSUE_STATUSES: readonly MeetingStatus[] = ['too_long', 'no_access', 'fail
 const PUBLISHED = 'tracker.published';
 const PUBLISH_FAILED = 'tracker.publish_failed';
 const NEW_FILE = 'tracker.new_file';
+/** A newly approved group's earlier messages were read (src/wa/historyBackfill.ts). */
+const HISTORY_READ = 'history.read';
 
 const list = (xs: readonly string[]) => xs.map((x) => `'${x}'`).join(', '); // fixed values from this file only
 
@@ -90,8 +92,9 @@ function sourcesFor(kind: ActivityFilter | 'work', cursor: (at: string, src: Sou
     out.push(branch('updated_at', 'm', 'meetings', `status IN (${list(meetings)}) AND NOT (status = 'no_access' AND COALESCE(note = '${FOUND_INTERNAL_NOTE}', 0))`));
   }
   const audit = kind === 'all'
-    ? `kind IN ('connection', 'config') OR (actor = 'agent' AND event IN ('${PUBLISHED}', '${PUBLISH_FAILED}'))`
-    : kind === 'tracker' ? `actor = 'agent' AND event = '${PUBLISHED}'` : kind === 'issue' ? `actor = 'agent' AND event = '${PUBLISH_FAILED}'` : null;
+    ? `kind IN ('connection', 'config') OR (actor = 'agent' AND event IN ('${PUBLISHED}', '${PUBLISH_FAILED}', '${HISTORY_READ}'))`
+    : kind === 'tracker' ? `actor = 'agent' AND event = '${PUBLISHED}'` : kind === 'issue' ? `actor = 'agent' AND event = '${PUBLISH_FAILED}'`
+      : kind === 'msg' ? `actor = 'agent' AND event = '${HISTORY_READ}'` : null;
   if (audit) out.push(branch('at', 'a', 'audit_log', audit));
   return out;
 }
@@ -152,6 +155,11 @@ function auditItem(db: Db, id: number): Omit<ActivityItem, 'id' | 'at'> {
   const who = a.actor === 'agent' ? 'by the agent' : 'by the owner';
   if (a.event === PUBLISHED) return { kind: 'tracker', title: 'Tracker updated', detail: a.detail, who };
   if (a.event === PUBLISH_FAILED) return { kind: 'issue', title: 'Tracker upload failed', detail: a.detail, who };
+  if (a.event === HISTORY_READ) {
+    // "<n> earlier messages read · <client>": the count never holds " · ", the client name may.
+    const at = a.detail.indexOf(' · ');
+    return { kind: 'msg', title: at < 0 ? a.detail : a.detail.slice(0, at), detail: at < 0 ? '' : a.detail.slice(at + 3), who };
+  }
   return a.kind === 'config'
     ? { kind: 'config', title: 'Setting changed', detail: a.detail, who }
     : { kind: 'connection', title: 'Connection changed', detail: a.detail, who };
@@ -189,6 +197,11 @@ const FAILURE_WORDS = (f: { step: 'build' | 'drive'; auth: boolean }): string =>
 
 /** A success row is written again after this long without one, so the Tracker screen's last upload stays near the truth. */
 const PUBLISHED_EVERY_MS = 60 * 60_000;
+
+/** The Activity row for a group whose earlier messages were read: a count and the client's name, never message text. */
+export function historyReadEntry(found: number, client: string): AuditEntry {
+  return { actor: 'agent', event: HISTORY_READ, kind: 'ops', detail: `${plural(found, 'earlier message')} read · ${client}` };
+}
 
 /**
  * The DrivePublisher's onPublished, onFailure and onNewFile hooks, writing the agent's own rows for the Activity screen. The publisher
