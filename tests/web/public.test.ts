@@ -223,7 +223,7 @@ describe('contract (the API answers as the screens read them)', () => {
       founder: { state: 'ok', label: 'Connected', groups: 3 },
       spare: { state: 'not_linked', label: 'Not linked', recipientMasked: '+91 •••• 1234' },
       google: [{ label: 'main', email: 'owner@example.com', state: 'ok', stateLabel: 'Connected', usedFor: ['Mail', 'Drive'] }, { label: 'org2', state: 'down', stateLabel: 'Sign in again' }],
-      drive: { state: 'ok', label: 'Connected' },
+      drive: { state: 'ok', label: 'Connected', account: 'owner@example.com' },
       claude: { callsToday: 12, spentToday: 3, capUsd: 3 },
       monitoring: { on: false },
     });
@@ -231,7 +231,10 @@ describe('contract (the API answers as the screens read them)', () => {
     expect(cards[1].state).toBe('off');
     expect(cards[1].note).toMatch(/spare phone/);
     expect(cards[2].rows).toEqual([['Used for', 'Mail, Drive']]);
-    expect(cards[3].title).toBe('Google account · org2');
+    // Each Google card is titled with its email (or says it is not known yet), its account name below.
+    expect(cards[2]).toMatchObject({ title: 'owner@example.com', subtitle: 'Account name: main', email: 'owner@example.com', note: '' });
+    expect(cards[3]).toMatchObject({ title: 'Google account', subtitle: 'Account name: org2', email: '', note: 'Email not known yet: press Reconnect to show it.' });
+    expect(cards[4].rows[0]).toEqual(['Writes as', 'owner@example.com']);
     expect(cards[5]).toMatchObject({ state: 'warn', stateLabel: 'Daily cap reached' });
     expect(cards[6]).toMatchObject({ state: 'off', stateLabel: 'Off' });
     expect(JSON.stringify(cards)).not.toMatch(/sk-|apiKey|token/i);
@@ -244,7 +247,7 @@ describe('the Drive card names the tracker file', () => {
   it('shows the file, the folder, the account and the last upload, and links Open in Drive only to a Drive file address', () => {
     const url = 'https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp_qr-st/view';
     const c = drive({ state: 'ok', label: 'Connected', lastUploadAt: null, file: 'Tracker.xlsx', folder: 'WA Agent', account: 'owner@example.com', url });
-    expect(c.rows).toEqual([['File', 'Tracker.xlsx'], ['Folder', 'WA Agent'], ['Account', 'owner@example.com'], ['Last upload', 'Not uploaded yet']]);
+    expect(c.rows).toEqual([['Writes as', 'owner@example.com'], ['File', 'Tracker.xlsx'], ['Folder', 'WA Agent'], ['Last upload', 'Not uploaded yet']]);
     expect(c.link).toBe(url);
     for (const bad of ['https://evil.example/file/d/1AbCdEfGhIjKlMnOp_qr-st/view', 'javascript:alert(1)', 7, null]) {
       expect(drive({ url: bad }).link, String(bad)).toBe('');
@@ -278,7 +281,7 @@ describe('the Drive card names the tracker file', () => {
 
   it('says plainly when the account is not known yet, and falls back to the fixed names', () => {
     const c = drive({ state: 'ok' });
-    expect(c.rows.slice(0, 3)).toEqual([['File', 'Tracker.xlsx'], ['Folder', 'WA Agent'], ['Account', 'Main Google account (email not known yet)']]);
+    expect(c.rows.slice(0, 3)).toEqual([['Writes as', 'Main Google account (email not known yet)'], ['File', 'Tracker.xlsx'], ['Folder', 'WA Agent']]);
   });
 });
 
@@ -319,5 +322,26 @@ describe('Clients and Manage groups (D2)', () => {
     expect(d.meetings[0].title).toBe('Untitled meeting');
     expect(d.openTasks[0]).toEqual({ code: 'DES-001', title: 'Quote', assignedTo: null, deadline: null, status: 'open' });
     expect(() => readClientDetail(undefined)).not.toThrow();
+  });
+});
+
+describe('owner fixes: Sync tracker now and account emails', () => {
+  it('the shared quick-action button names its action and escapes what it is given', async () => {
+    // @ts-expect-error -- browser module (see the top of this file)
+    const { quickButton } = await import('../../src/web/public/views/connect.js');
+    const html = quickButton('upload-tracker', 'refresh', 'Sync tracker now') as string;
+    expect(html).toMatch(/^<button class="btn btn-sm btn-ghost" type="button" data-action="upload-tracker">/);
+    expect(html).toContain('Sync tracker now');
+    expect(quickButton('x"><b>', 'refresh', '<i>hi</i>')).not.toMatch(/<b>|<i>/);
+  });
+
+  it('an account email reaches the Connections card escaped, as text', async () => {
+    // @ts-expect-error -- browser module (see the top of this file)
+    const { renderConnections } = await import('../../src/web/public/views/connections.js');
+    const cards = readConnections({ google: [{ label: 'main', email: 'a"<b>&x@evil.example', state: 'ok', usedFor: ['Tracker on Drive'] }], drive: { account: '<i>@x.example' } });
+    const html = renderConnections(cards) as string;
+    expect(html).toContain('a&quot;&lt;b&gt;&amp;x@evil.example');
+    expect(html).toContain('&lt;i&gt;@x.example');
+    expect(html).not.toMatch(/<b>&|<i>@/);
   });
 });

@@ -3,7 +3,7 @@ import { parseEnv } from '../../src/config/env.ts';
 import { AgentControl, type PartState } from '../../src/control/agentControl.ts';
 import { Health } from '../../src/health/health.ts';
 import type { MeetingsHealth } from '../../src/health/health.ts';
-import { saveMeetingAccount } from '../../src/output/googleAuth.ts';
+import { saveAccountEmail, saveMeetingAccount } from '../../src/output/googleAuth.ts';
 import { TRACKER_ID_KEY } from '../../src/output/trackerKey.ts';
 import type { SenderState } from '../../src/report/types.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
@@ -200,6 +200,15 @@ describe('AgentControl.connections', () => {
     expect(t.control.connections().drive).toMatchObject({
       file: 'Tracker.xlsx', folder: 'WA Agent', account: 'owner@example.com', url: 'https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp_qr-st/view',
     });
+  });
+
+  it("shows each Google account's stored email, and names the main one on the Drive card", () => {
+    const t = setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' } });
+    saveMeetingAccount(t.db, KEY, 'company2', 'refresh-token-not-real', 'https://www.googleapis.com/auth/meetings.space.readonly');
+    saveAccountEmail(t.db, 'main', 'owner@studio.in');
+    const c = t.control.connections();
+    expect(c.google.map((g) => [g.label, g.email])).toEqual([['main', 'owner@studio.in'], ['company2', null]]);
+    expect(c.drive.account).toBe('owner@studio.in');
   });
 
   it('maps the spare phone states, and has no spare card state without the report', () => {

@@ -49,20 +49,6 @@ export function checkAccountLabel(label: string): string {
   return label;
 }
 
-/**
- * The kv key of a Google account's email ('main' for the main sign-in), following the google_*:<label> keys. Shown on the
- * owner's dashboard only; audit rows and logs keep emails masked.
- */
-export function accountEmailKey(label: string): string {
-  return `google_account_email:${label === MAIN_ACCOUNT ? MAIN_ACCOUNT : checkAccountLabel(label)}`;
-}
-
-/** The account's stored email, or null while it is not known. */
-export function accountEmail(db: Db, label: string): string | null {
-  const v = getKv(db, accountEmailKey(label));
-  return v && v.includes('@') ? v : null;
-}
-
 /** The extra meeting accounts, in the order they were added. */
 export function meetingAccounts(db: Db): string[] {
   try {
@@ -129,6 +115,33 @@ export function saveMeetingAccount(db: Db, key: Buffer, label: string, refreshTo
   });
 }
 
+/** The scopes an account's sign-in recorded ('main' or an extra account's label); empty when none were recorded. */
+export function grantedScopes(db: Db, label: string): string[] {
+  return (getKv(db, scopesKey(label === MAIN_ACCOUNT ? undefined : label)) ?? '').split(' ').filter(Boolean);
+}
+
+/**
+ * Each account's Google email, for the owner's dashboard only: kv `google_account_email:<label>`. It is written from
+ * a verified ID token (a dashboard sign-in) or Drive's own answer (older accounts), and cleared by every new sign-in for
+ * the account, so a reconnect with another Google account never shows the old address. Never logged or audited whole.
+ */
+export const accountEmailKey = (label: string): string => `google_account_email:${label === MAIN_ACCOUNT ? MAIN_ACCOUNT : checkAccountLabel(label)}`;
+const EMAIL = /^[^\s@]{1,64}@[^\s@.]+(?:\.[^\s@.]+)+$/;
+
+/** The account's email, or null when it is not known. */
+export function accountEmail(db: Db, label: string): string | null {
+  const v = getKv(db, accountEmailKey(label));
+  return v !== undefined && EMAIL.test(v) ? v : null;
+}
+
+/** Stores the account's email (lower-cased). Returns false, storing nothing, for anything that is not one address. */
+export function saveAccountEmail(db: Db, label: string, email: string): boolean {
+  const e = email.trim().toLowerCase();
+  if (e.length > 254 || !EMAIL.test(e)) return false;
+  setKv(db, accountEmailKey(label), e);
+  return true;
+}
+
 /** Forgets an extra account here (its token, scopes and list entry). Google keeps the grant until it is removed there. */
 export function removeMeetingAccount(db: Db, label: string): boolean {
   checkAccountLabel(label);
@@ -138,6 +151,7 @@ export function removeMeetingAccount(db: Db, label: string): boolean {
     deleteKv(db, tokenKey(label));
     deleteKv(db, scopesKey(label));
     deleteKv(db, tokenIssuerKey(label));
+    deleteKv(db, accountEmailKey(label));
     setMeetingAccounts(db, labels.filter((l) => l !== label));
   });
   return true;
@@ -179,8 +193,10 @@ export class TokenStore {
     this.#aad = Buffer.from(this.#kvKey);
   }
 
+  /** Stores a new sign-in. The account's known email is forgotten with the old token: the new one may be another account. */
   save(refreshToken: string): void {
     setKv(this.#db, this.#kvKey, encrypt(this.#key, Buffer.from(refreshToken, 'utf8'), this.#aad).toString('base64'));
+    deleteKv(this.#db, accountEmailKey(this.#account ?? MAIN_ACCOUNT));
   }
 
   load(): string | undefined {
@@ -232,8 +248,8 @@ export interface ConsentResult {
 /** The part of the OAuth client the sign-in uses (so tests can inject a fake). */
 export interface ConsentClient {
   generateCodeVerifierAsync(): Promise<{ codeVerifier?: string; codeChallenge?: string }>;
-  generateAuthUrl(opts: { access_type: string; prompt: string; scope: string[]; state: string; code_challenge_method: string; code_challenge?: string }): string;
-  getToken(opts: { code: string; codeVerifier?: string }): Promise<{ tokens: { refresh_token?: string | null; scope?: string } }>;
+  generateAuthUrl(opts: { access_type: string; prompt: string; scope: string[]; state: string; code_challenge_method: string; code_challenge?: string; nonce?: string }): string;
+  getToken(opts: { code: string; codeVerifier?: string }): Promise<{ tokens: { refresh_token?: string | null; scope?: string; id_token?: string | null } }>;
 }
 
 /** One-time loopback sign-in with PKCE. Listens on 127.0.0.1 only, for one redirect, then closes. */

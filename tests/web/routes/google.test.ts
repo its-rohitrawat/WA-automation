@@ -10,6 +10,8 @@ import { manualClock } from '../../../src/util/clock.ts';
 import { createLogger } from '../../../src/util/logger.ts';
 import type { OwnerContext } from '../../../src/web/routes/context.ts';
 import { CALLBACK_PATH, GoogleConnectRoutes } from '../../../src/web/routes/google.ts';
+import type { IdClaims, IdTokenVerifier } from '../../../src/web/oidc.ts';
+import { accountEmail } from '../../../src/output/googleAuth.ts';
 import { seededDb } from '../../helpers/db.ts';
 
 const owner: OwnerContext = { actor: 'owner@studio.in', sessionId: 'session-a', requestId: 'aaaaaaaaaaaa' };
@@ -20,7 +22,7 @@ const CODE = 'auth-code-SECRET';
 const REFRESH = 'refresh-token-SECRET';
 
 /** Google's token endpoint and consent URL, faked: what it is asked, and what it answers. */
-function fakeGoogle(answer: { refresh_token?: string | null; scope?: string } | Error = { refresh_token: REFRESH, scope: '' }) {
+function fakeGoogle(answer: { refresh_token?: string | null; scope?: string; id_token?: string | null } | Error = { refresh_token: REFRESH, scope: '' }) {
   const seen: { redirectUri: string[]; authOpts: Record<string, unknown>[]; tokenArgs: unknown[] } = { redirectUri: [], authOpts: [], tokenArgs: [] };
   const createClient = (redirectUri: string): ConsentClient => {
     seen.redirectUri.push(redirectUri);
@@ -40,7 +42,7 @@ function fakeGoogle(answer: { refresh_token?: string | null; scope?: string } | 
   return { seen, createClient };
 }
 
-function setup(o: { answer?: Parameters<typeof fakeGoogle>[0]; meetingsEnabled?: boolean; web?: typeof WEB | undefined } = {}) {
+function setup(o: { answer?: Parameters<typeof fakeGoogle>[0]; meetingsEnabled?: boolean; web?: typeof WEB | undefined; verifier?: IdTokenVerifier } = {}) {
   const db = seededDb();
   const key = randomBytes(32);
   new TokenStore(db, key).save('old-main-token');
@@ -56,6 +58,7 @@ function setup(o: { answer?: Parameters<typeof fakeGoogle>[0]; meetingsEnabled?:
   const routes = new GoogleConnectRoutes({
     db, hub, publicUrl: 'https://waagent.example/', web: 'web' in o ? o.web : WEB, meetingsEnabled: o.meetingsEnabled ?? false,
     audit: (e) => audits.push(e), log: createLogger('debug', { write: (l: string) => void lines.push(l) }), clock, createClient: g.createClient,
+    ...(o.verifier ? { verifier: o.verifier } : {}),
   });
   /** connect, then the state from the URL. */
   const begin = async (ctx: OwnerContext, account: unknown) => {
@@ -72,7 +75,7 @@ describe('GoogleConnectRoutes', () => {
     await t.begin(owner, 'main');
     expect(t.g.seen.redirectUri[0]).toBe(`https://waagent.example${CALLBACK_PATH}`);
     expect(t.g.seen.authOpts[0]).toMatchObject({
-      access_type: 'offline', prompt: 'consent', code_challenge_method: 'S256', code_challenge: 'challenge-1', scope: [...DRIVE_SCOPES, ...MEETING_SCOPES],
+      access_type: 'offline', prompt: 'consent', code_challenge_method: 'S256', code_challenge: 'challenge-1', scope: [...DRIVE_SCOPES, ...MEETING_SCOPES, 'openid', 'email'],
     });
     expect((t.g.seen.authOpts[0] as { state: string }).state).toMatch(/^[0-9a-f]{32}$/);
   });
@@ -94,7 +97,7 @@ describe('GoogleConnectRoutes', () => {
     const t = setup({ answer: { refresh_token: REFRESH, scope: ALL_MEETING } });
     saveMeetingAccount(t.db, t.key, 'company2', 'old', ALL_MEETING);
     const state = await t.begin(owner, 'company2');
-    expect(t.g.seen.authOpts[0]!.scope).toEqual(MEETING_SCOPES);
+    expect(t.g.seen.authOpts[0]!.scope).toEqual([...MEETING_SCOPES, 'openid', 'email']);
     expect(await t.routes.callback(owner, { state, code: CODE })).toEqual({ status: 302, location: '/dashboard/connections?connected=company2' });
     expect(new TokenStore(t.db, t.key, 'company2').load()).toBe(REFRESH);
     expect(getKv(t.db, 'google_client:company2')).toBe('web');
@@ -210,5 +213,74 @@ describe('GoogleConnectRoutes', () => {
     const r2 = await ok.routes.callback(owner, { state: s2, code: CODE });
     const everything = JSON.stringify([r, r2, t.audits, ok.audits]) + t.lines.join('') + ok.lines.join('');
     expect(everything).not.toMatch(/SECRET/);
+  });
+});
+
+describe('GoogleConnectRoutes: the account email (owner fix 3)', () => {
+  const ID_TOKEN = 'id-token-SECRET';
+  /** A verifier that accepts only ID_TOKEN and returns these claims; the nonce is read from the consent URL options. */
+  const claimsFor = (over: Partial<IdClaims> = {}) => (t: ReturnType<typeof setup>): IdClaims => ({
+    iss: 'https://accounts.google.com', aud: WEB.clientId, exp: Date.parse('2026-10-27T09:00:00Z') / 1000,
+    nonce: (t.g.seen.authOpts[0] as { nonce?: string }).nonce, email: 'Meetings@Studio.IN', email_verified: true, ...over,
+  });
+  function withVerifier(over: Partial<IdClaims> = {}, answer: Parameters<typeof fakeGoogle>[0] = { refresh_token: REFRESH, scope: DRIVE_SCOPES[0], id_token: ID_TOKEN }) {
+    const box: { t?: ReturnType<typeof setup> } = {};
+    const verifier: IdTokenVerifier = async (token) => {
+      if (token !== ID_TOKEN) throw new Error('bad signature');
+      return claimsFor(over)(box.t!);
+    };
+    box.t = setup({ verifier, answer });
+    return box.t;
+  }
+
+  it('asks Google for openid and email too, with a fresh nonce bound into the sign-in', async () => {
+    const t = withVerifier();
+    await t.begin(owner, 'main');
+    const opts = t.g.seen.authOpts[0] as { scope: string[]; nonce: string };
+    expect(opts.scope).toEqual(expect.arrayContaining(['openid', 'email']));
+    expect(opts.nonce).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it('stores the email from a verified ID token, lower-cased; the audit line has it masked; no log line has it', async () => {
+    const t = withVerifier();
+    const state = await t.begin(owner, 'main');
+    expect((await t.routes.callback(owner, { state, code: CODE })).location).toBe('/dashboard/connections?connected=main');
+    expect(accountEmail(t.db, 'main')).toBe('meetings@studio.in');
+    expect(JSON.stringify(t.audits)).toContain('me••••@studio.in');
+    expect(JSON.stringify(t.audits)).not.toContain('meetings@studio.in');
+    expect(t.lines.join('\n')).not.toMatch(/meetings@|studio\.in|SECRET/i);
+  });
+
+  it.each([
+    ['email_verified false', { email_verified: false }],
+    ['another client as the audience', { aud: 'someone-else' }],
+    ['another sign-in\'s nonce', { nonce: 'f'.repeat(32) }],
+    ['an expired token', { exp: Date.parse('2026-10-27T07:00:00Z') / 1000 }],
+    ['no email', { email: undefined }],
+  ])('%s: the reconnect stands, but no email is stored', async (_, over) => {
+    const t = withVerifier(over as Partial<IdClaims>);
+    const state = await t.begin(owner, 'main');
+    expect((await t.routes.callback(owner, { state, code: CODE })).location).toBe('/dashboard/connections?connected=main');
+    expect(accountEmail(t.db, 'main')).toBeNull();
+    expect(t.lines.join('\n')).not.toMatch(/meetings@|SECRET/i);
+  });
+
+  it('an ID token the verifier refuses, or none at all, stores no email', async () => {
+    const forged = withVerifier({}, { refresh_token: REFRESH, scope: DRIVE_SCOPES[0], id_token: 'forged' });
+    let state = await forged.begin(owner, 'main');
+    await forged.routes.callback(owner, { state, code: CODE });
+    expect(accountEmail(forged.db, 'main')).toBeNull();
+    const none = withVerifier({}, { refresh_token: REFRESH, scope: DRIVE_SCOPES[0] });
+    state = await none.begin(owner, 'main');
+    await none.routes.callback(owner, { state, code: CODE });
+    expect(accountEmail(none.db, 'main')).toBeNull();
+  });
+
+  it('a reconnect forgets the old email before storing the new one', async () => {
+    const t = withVerifier({ email_verified: false });
+    t.db.prepare('INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)').run('google_account_email:main', 'old@studio.in');
+    const state = await t.begin(owner, 'main');
+    await t.routes.callback(owner, { state, code: CODE });
+    expect(accountEmail(t.db, 'main')).toBeNull();
   });
 });

@@ -1,7 +1,7 @@
 import type { SpendView } from '../app.ts';
 import type { Env } from '../config/env.ts';
 import type { Health, HealthSnapshot } from '../health/health.ts';
-import { MAIN_ACCOUNT, meetingAccounts } from '../output/googleAuth.ts';
+import { accountEmail, MAIN_ACCOUNT, meetingAccounts } from '../output/googleAuth.ts';
 import { trackerLink } from '../report/morningReport.ts';
 import type { SenderStatus } from '../report/types.ts';
 import type { Db } from '../store/db.ts';
@@ -207,9 +207,9 @@ export class AgentControl {
       ? { state: 'down' as const, stateLabel: 'Sign-in expired' }
       : meetingAccess ? { state: 'warn' as const, stateLabel: 'Needs meeting access' } : { state: 'ok' as const, stateLabel: 'Connected' };
     const google = [
-      { label: MAIN_ACCOUNT, email: null, usedFor: ['Tracker on Drive', ...(env.MEETINGS_ENABLED ? ['Meetings'] : [])], ...mainState },
+      { label: MAIN_ACCOUNT, email: accountEmail(db, MAIN_ACCOUNT), usedFor: ['Tracker on Drive', ...(env.MEETINGS_ENABLED ? ['Meetings'] : [])], ...mainState },
       ...meetingAccounts(db).map((label) => ({
-        label, email: null, usedFor: ['Meetings'],
+        label, email: accountEmail(db, label), usedFor: ['Meetings'],
         ...(lost.has(label) ? { state: 'down' as const, stateLabel: 'Sign-in lost' } : { state: 'ok' as const, stateLabel: 'Connected' }),
       })),
     ];

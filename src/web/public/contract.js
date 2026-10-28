@@ -109,11 +109,13 @@ export function readConnections(raw) {
     const o = obj(g);
     const label = str(o.label);
     const usedFor = arr(o.usedFor).map(str).filter(Boolean);
+    const email = str(o.email);
+    // The address is the card's title: which Google account it is. The agent's own name for it sits below, small.
     cards.push({
-      id: `google:${label}`, kind: 'google', title: label === 'main' ? 'Google account · main' : `Google account · ${label}`,
-      subtitle: str(o.email) || (label === 'main' ? 'The mailbox account' : 'Meeting recordings'),
-      state: state(o.state), stateLabel: str(o.stateLabel), rows: [['Used for', usedFor.join(', ') || '—']], note: '',
-      email: str(o.email), meetings: usedFor.some((u) => /meeting/i.test(u)),
+      id: `google:${label}`, kind: 'google', title: email || 'Google account', subtitle: `Account name: ${label}`,
+      state: state(o.state), stateLabel: str(o.stateLabel), rows: [['Used for', usedFor.join(', ') || '—']],
+      note: email ? '' : 'Email not known yet: press Reconnect to show it.',
+      email, meetings: usedFor.some((u) => /meeting/i.test(u)),
     });
   }
   const d = obj(r.drive);
@@ -121,7 +123,7 @@ export function readConnections(raw) {
   const driveUrl = str(d.url);
   cards.push({
     id: 'drive', kind: 'drive', title: 'Google Drive', subtitle: `${folder} folder`, state: state(d.state), stateLabel: str(d.label),
-    rows: [['File', str(d.file) || 'Tracker.xlsx'], ['Folder', folder], ['Account', str(d.account) || ACCOUNT_UNKNOWN],
+    rows: [['Writes as', str(d.account) || ACCOUNT_UNKNOWN], ['File', str(d.file) || 'Tracker.xlsx'], ['Folder', folder],
       ['Last upload', iso(d.lastUploadAt) ? when(iso(d.lastUploadAt)) : 'Not uploaded yet']],
     note: '', link: DRIVE_FILE_URL.test(driveUrl) ? driveUrl : '',
   });

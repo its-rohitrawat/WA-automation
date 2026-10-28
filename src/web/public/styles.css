@@ -410,6 +410,13 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
 .ccard .grp .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; } .ccard:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .empty-card { display: flex; gap: 14px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
 .drawer .field input { width: 100%; } .drawer details .h4 { margin-top: 14px; }
+/* Sync tracker now (Clients header and client drawer) */
+.sync-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: -6px 0 16px; }
+.sync-note { flex-basis: 100%; font-size: 12.5px; }
+.dr-foot .sync-at { align-self: center; }
+/* A Google card's title is its email: it wraps instead of running under the state pill. */
+.conn .top-row .grow-1 { min-width: 0; } .conn h3 { overflow-wrap: anywhere; }
+
 /* Connections dialogs and setup mode (D3) */
 /* Centred without a transform, so the open animation's scale never fights the centring. */
 .modal { inset: 0; margin: auto; height: fit-content; }

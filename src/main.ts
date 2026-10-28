@@ -24,6 +24,8 @@ import type { LiveMeetingsApi } from './meetings/multiAccount.ts';
 import { buildMeetingTranscriber } from './meetings/transcribe.ts';
 import { TokenDecryptError, TokenStore } from './output/googleAuth.ts';
 import { meetingsReady } from './output/googleAuth.ts';
+import { fillAccountEmails } from './output/accountEmail.ts';
+import { googleIdVerifier } from './web/oidc.ts';
 import { buildGoogle, founderGateway, googleCredentials, planStartup, WHATSAPP_NOT_LINKED_EXIT } from './setupMode.ts';
 import { LiveReport } from './report/liveReport.ts';
 import { briefingSettings, spareDriver, spareLinked } from './report/dashboardReport.ts';
@@ -270,7 +272,11 @@ async function main(): Promise<void> {
 
     // Only with the dashboard on: its line points there. Off, a Google problem shows when publishing fails, as before.
     if (env.DASHBOARD_ENABLED) app.health.setGoogleConnected(google.connected());
+    // Older accounts' emails (for the owner's Connections screen), once; never awaited, never fatal.
+    const emailDb = db;
+    void fillAccountEmails({ db: emailDb, hub: google.hub, log }).catch(() => {});
     google.hub.onChange((label) => {
+      void fillAccountEmails({ db: emailDb, hub: google.hub, log, labels: [label] }).catch(() => {});
       if (env.DASHBOARD_ENABLED) app.health.setGoogleConnected(google.connected());
       // A reconnected main account uploads now, not after the failure backoff (up to 15 minutes).
       if (label === 'main') void app.publisher.publishNow().catch((err: unknown) => log.error({ err }, 'upload after the Google reconnect failed'));
@@ -370,6 +376,8 @@ async function main(): Promise<void> {
           google: {
             db: trackerStore, hub: google.hub, publicUrl: env.DASHBOARD_PUBLIC_URL ?? `http://localhost:${env.DASHBOARD_PORT}`,
             web: googleCredentials(env).web, meetingsEnabled: env.MEETINGS_ENABLED, log, clock: systemClock,
+            // The chosen account's email comes from its ID token, checked like the owner sign-in's.
+            ...(googleCredentials(env).web ? { verifier: googleIdVerifier(googleCredentials(env).web!.clientId) } : {}),
           },
           actions: {
             publisher: app.publisher, clock: systemClock, limiter: new ActionRateLimiter(systemClock),
