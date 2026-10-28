@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
@@ -11,7 +11,8 @@ import {
 import { bookStuckParts, meetingTranscriber, recoverInflightParts, transcribeMeeting, type TranscribeMeetingDeps } from '../../src/meetings/transcribe.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { Ffmpeg, type RunFile } from '../../src/stt/audio.ts';
-import { LocalEngine, LocalEngineError, type LocalRunFile } from '../../src/stt/local.ts';
+import { createLocalEngine, LocalEngine, LocalEngineError, type LocalRunFile } from '../../src/stt/local.ts';
+import { createVoiceTranscriber } from '../../src/stt/voice.ts';
 import { costUsd, modelFor } from '../../src/stt/prices.ts';
 import type { AudioPart, ProviderResult, SttProvider } from '../../src/stt/types.ts';
 import type { Db } from '../../src/store/db.ts';
@@ -41,18 +42,25 @@ const banner = (s: number) =>
   `  Duration: ${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}:${(s % 60).toFixed(2).padStart(5, '0')}, start: 0\n`;
 
 /**
- * ffmpeg without a program: a segment run writes one MP3 per length; toWav writes a small WAV (recording its input and
- * signal); measuring answers the length a part was written with.
+ * ffmpeg without a program: a segment run writes one MP3 per length (recording its -segment_time); toWav writes a small
+ * WAV (recording its input and signal), or, for the call numbered o.hangWavAt (from 0), runs until it is stopped;
+ * volumedetect answers o.volumeDb (loud, -20 dB, by default; null: no answer); measuring answers the length a part was
+ * written with.
  */
-function fakeFfmpeg(lengths: number[]): { run: RunFile; segmentRuns: () => number; wavInputs: string[]; wavSignals: (AbortSignal | undefined)[] } {
+function fakeFfmpeg(lengths: number[], o: { volumeDb?: number | null; hangWavAt?: number } = {}) {
   const written = new Map<string, number>();
   const wavInputs: string[] = [];
   const wavSignals: (AbortSignal | undefined)[] = [];
+  const segmentTimes: string[] = [];
   let segments = 0;
+  let volumes = 0;
+  let onHang: () => void = () => {};
+  const wavStarted = new Promise<void>((r) => (onHang = r));
   const run: RunFile = async (_file, args, opts) => {
     const last = args[args.length - 1]!;
     if (args.includes('segment')) {
       segments++;
+      segmentTimes.push(args[args.indexOf('-segment_time') + 1]!);
       lengths.forEach((s, i) => {
         const path = last.replace('%03d', String(i).padStart(3, '0'));
         writeFileSync(path, 'part');
@@ -61,15 +69,26 @@ function fakeFfmpeg(lengths: number[]): { run: RunFile; segmentRuns: () => numbe
       return { code: 0, stderr: '' };
     }
     if (args.includes('pcm_s16le')) {
+      const n = wavInputs.length;
       wavInputs.push(args[args.indexOf('-i') + 1]!);
       wavSignals.push(opts.signal);
+      if (n === o.hangWavAt) {
+        onHang();
+        await new Promise<void>((r) => (opts.signal?.aborted ? r() : opts.signal?.addEventListener('abort', () => r(), { once: true })));
+        return { code: -1, stderr: '' };
+      }
       writeFileSync(last, 'wav-bytes');
       return { code: 0, stderr: '' };
+    }
+    if (args.includes('volumedetect')) {
+      volumes++;
+      const db = o.volumeDb === undefined ? -20 : o.volumeDb;
+      return { code: 0, stderr: db === null ? '' : `[Parsed_volumedetect_0 @ 0000abcd] mean_volume: ${db.toFixed(1)} dB\n` };
     }
     const input = args[args.indexOf('-i') + 1]!;
     return { code: 1, stderr: banner(written.get(input) ?? 0) };
   };
-  return { run, segmentRuns: () => segments, wavInputs, wavSignals };
+  return { run, segmentRuns: () => segments, segmentTimes, wavInputs, wavSignals, volumeRuns: () => volumes, wavStarted };
 }
 
 /** One run of the fake engine: the transcript text it writes, or a way to fail. */
@@ -182,6 +201,8 @@ describe('the local meeting transcriber', () => {
     const ff = fakeFfmpeg([500, 500, 500]);
     const { t, engine } = fromEnv(ff, ['pehla hissa', 'doosra  hissa', 'teesra hissa']);
     expect(await transcribeMeeting(id, deps(t, ff))).toEqual({ parts: 3, segments: 3, note: null });
+    expect(ff.segmentTimes).toEqual(['500.000']); // three equal parts of at most ten minutes
+    expect(ff.volumeRuns()).toBe(0); // only an empty transcript is measured
     expect(ff.wavInputs).toEqual([0, 1, 2].map((n) => join(partsDir(), `part-00${n}.mp3`)));
     // Exactly the voice notes' arguments, each run on its own WAV in a work folder of its own.
     expect(engine.calls).toHaveLength(3);
@@ -214,6 +235,7 @@ describe('the local meeting transcriber', () => {
     const ff = fakeFfmpeg(Array.from({ length: 18 }, () => 600));
     const { t, engine } = fromEnv(ff, Array.from({ length: 18 }, (_, i) => `hissa ${i + 1}`));
     expect(await transcribeMeeting(id, deps(t, ff))).toEqual({ parts: 18, segments: 18, note: null });
+    expect(ff.segmentTimes).toEqual(['600.000']); // ten-minute parts
     expect(engine.calls).toHaveLength(18);
     expect(getMeeting(db, id)!.transcript!.map((s) => s.start)).toEqual(Array.from({ length: 18 }, (_, i) => i * 600));
     expect(rows()).toEqual([]);
@@ -375,23 +397,141 @@ describe('the local meeting transcriber', () => {
     expect(getMeeting(db, id)!.transcript!.map((s) => s.text)).toEqual(['one', 'two', 'three']);
   });
 
-  it('nothing heard in every part: the meeting advances with the note no_speech (whisper markers count as nothing)', async () => {
+  it('nothing heard in every silent part: the meeting advances with the note no_speech (whisper markers count as nothing)', async () => {
     prepare(1500);
-    const ff = fakeFfmpeg([500, 500, 500]);
+    const ff = fakeFfmpeg([500, 500, 500], { volumeDb: -91 });
     const { t } = fromEnv(ff, ['', '[BLANK_AUDIO]', ' (silence) '], { STT_LOCAL_ENGINE: 'whisper', STT_LOCAL_LANGUAGE: 'en' });
     expect(await transcribeMeeting(id, deps(t, ff))).toEqual({ parts: 3, segments: 0, note: 'no_speech' });
     expect(getMeeting(db, id)!.transcript).toEqual([]);
+    expect(ff.volumeRuns()).toBe(3);
   });
 
-  it('a part with nothing heard gives no segment; the others are kept', async () => {
+  it('a silent part with nothing heard gives no segment; the others are kept', async () => {
     prepare(1500);
-    const ff = fakeFfmpeg([500, 500, 500]);
+    const ff = fakeFfmpeg([500, 500, 500], { volumeDb: -91 });
     const { t } = fromEnv(ff, ['shuru', '', 'ant']);
     await transcribeMeeting(id, deps(t, ff));
     expect(getMeeting(db, id)!.transcript).toEqual([
       { start: 0, end: 500, speaker: null, text: 'shuru' },
       { start: 1000, end: 1500, speaker: null, text: 'ant' },
     ]);
+  });
+
+  it.each([
+    ['a loud part (-20 dB)', -20],
+    ['a part just above the silence line (-49.9 dB)', -49.9],
+    ['a part whose volume is unknown', null],
+  ] as const)('an empty transcript of %s is empty_output: thrown, the part back to todo, nothing booked or lost', async (_name, volumeDb) => {
+    prepare(1500);
+    const ff = fakeFfmpeg([500, 500, 500], { volumeDb });
+    const { t } = fromEnv(ff, ['shuru', '']);
+    const err = await transcribeMeeting(id, deps(t, ff)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LocalEngineError);
+    expect((err as LocalEngineError).code).toBe('empty_output');
+    expect(parts().map((p) => [p.state, p.booked])).toEqual([['done', 'none'], ['todo', 'none'], ['todo', 'none']]);
+    expect(getMeeting(db, id)!.stage).toBe('audio');
+    expect(rows()).toEqual([]);
+    expect(readdirSync(work())).toEqual([]);
+
+    // The retry runs that part again; this time the engine hears it.
+    const again = fromEnv(ff, ['beech', 'ant']);
+    await transcribeMeeting(id, deps(again.t, ff));
+    expect(getMeeting(db, id)!.transcript!.map((s) => s.text)).toEqual(['shuru', 'beech', 'ant']);
+    expect(rows()).toEqual([]);
+  });
+
+  it('whisper markers on a loud part are empty_output too, never no_speech', async () => {
+    prepare(420);
+    const ff = fakeFfmpeg([], { volumeDb: -18 });
+    const { t } = fromEnv(ff, ['[BLANK_AUDIO]'], { STT_LOCAL_ENGINE: 'whisper', STT_LOCAL_LANGUAGE: 'en' });
+    const err = await transcribeMeeting(id, deps(t, ff)).catch((e: unknown) => e);
+    expect((err as LocalEngineError).code).toBe('empty_output');
+    expect(parts()[0]).toMatchObject({ state: 'todo', booked: 'none' });
+  });
+
+  it('a stop during the WAV conversion throws the stop, sets the part back to todo and books nothing', async () => {
+    prepare(1500);
+    const ff = fakeFfmpeg([500, 500, 500], { hangWavAt: 1 });
+    const { t, engine } = fromEnv(ff, ['one']);
+    const ctl = new AbortController();
+    const reason = new Error('stop');
+    const run = transcribeMeeting(id, deps(t, ff), ctl.signal);
+    await ff.wavStarted;
+    ctl.abort(reason);
+    await expect(run).rejects.toBe(reason);
+    expect(engine.calls).toHaveLength(1); // the engine never ran for the part being converted
+    expect(parts().map((p) => [p.state, p.booked])).toEqual([['done', 'none'], ['todo', 'none'], ['todo', 'none']]);
+    expect(rows()).toEqual([]);
+    expect(readdirSync(work())).toEqual([]);
+  });
+
+  it('a switch from Sarvam with a job accepted and booked: not booked again, and run locally after the done paid part', async () => {
+    prepare(1200);
+    mkdirSync(partsDir(), { recursive: true });
+    for (const n of [0, 1]) writeFileSync(join(partsDir(), `part-00${n}.mp3`), 'part');
+    writeFileSync(join(partsDir(), '.done'), '');
+    const sarvam = (index: number, o: Partial<SttPartRow>): SttPartRow => ({
+      index, provider: 'sarvam', file: `${id}-parts/part-00${index - 1}.mp3`, offset: (index - 1) * 600, seconds: 600,
+      state: 'todo', jobId: null, booked: 'none', segments: null, billedSeconds: null, ...o,
+    });
+    setSttParts(db, id, [
+      sarvam(1, { state: 'done', booked: 'actual', segments: [{ start: 0, end: 600, speaker: 'A', text: 'pehle Sarvam ne suna' }], billedSeconds: 600 }),
+      sarvam(2, { state: 'inflight', jobId: 'job-2', booked: 'ceiling' }),
+    ], NOW);
+    spend.record('stt', 0.12, `meeting ${id} part 2 (job accepted)`);
+    const before = rows();
+    expect(before).toHaveLength(1);
+
+    const ff = fakeFfmpeg([600, 600]);
+    const { t, engine } = fromEnv(ff, ['phir local ne']);
+    await transcribeMeeting(id, deps(t, ff));
+    expect(engine.calls).toHaveLength(1);
+    expect(ff.wavInputs).toEqual([join(partsDir(), 'part-001.mp3')]);
+    expect(rows()).toEqual(before); // nothing booked again, nothing new
+    expect(getMeeting(db, id)!.transcript).toEqual([
+      { start: 0, end: 600, speaker: 'p1:A', text: 'pehle Sarvam ne suna' },
+      { start: 600, end: 1200, speaker: null, text: 'phir local ne' },
+    ]);
+  });
+
+  it('one engine shared with voice notes: a voice note and a meeting part run one after the other, never at once', async () => {
+    prepare(420);
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const runner = engineRunner([{ wait: gate, text: 'voice note' }, 'meeting part']);
+    let running = 0;
+    let most = 0;
+    const counted: LocalRunFile = async (file, args, opts) => {
+      running++;
+      most = Math.max(most, running);
+      try {
+        return await runner.run(file, args, opts);
+      } finally {
+        running--;
+      }
+    };
+    const shared = createLocalEngine(env(), { tmpDir: join(dataDir, 'tmp'), localRun: counted, setting: 'STT_PROVIDER' });
+    const ff = fakeFfmpeg([]);
+    const ffmpeg = new Ffmpeg('ffmpeg.exe', ff.run);
+    const voiceEnv = parseEnv({ VOICE_STT_PROVIDER: 'local', STT_LOCAL_BIN: BIN(), STT_LOCAL_MODEL: MODEL() });
+    const voice = createVoiceTranscriber(voiceEnv, { ffmpeg, tmpDir: join(dataDir, 'tmp', 'voice'), localEngine: shared })!;
+    const meeting = createLocalMeetingTranscriber(env(), { ffmpeg, tmpDir: work(), inrPerUsd: 88, localEngine: shared });
+
+    // The voice note's run starts first and is held; the meeting part waits for it in the engine's line.
+    mkdirSync(join(dataDir, 'tmp', 'voice', 'voice-1'), { recursive: true });
+    const wav = join(dataDir, 'tmp', 'voice', 'voice-1', 'audio.wav');
+    writeFileSync(wav, 'wav');
+    const note = voice.transcribe({ parts: [], wav: { path: wav, meanVolumeDb: -20 }, measuredSeconds: 5, dispose: () => {} });
+    await runner.started;
+    const m = transcribeMeeting(id, deps(meeting, ff));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(runner.calls).toHaveLength(1);
+    release();
+    expect((await note).text).toBe('voice note');
+    await m;
+    expect(runner.calls).toHaveLength(2);
+    expect(most).toBe(1);
+    expect(getMeeting(db, id)!.transcript).toEqual([{ start: 0, end: 420, speaker: null, text: 'meeting part' }]);
   });
 
   it('without ffmpeg the meeting waits (no_ffmpeg), with nothing run or booked', async () => {
@@ -414,6 +554,35 @@ describe('the local meeting transcriber', () => {
     const { t } = fromEnv(ff, ['naya']);
     await transcribeMeeting(id, deps(t, ff));
     expect(readdirSync(work())).toEqual(['voice-7']);
+  });
+
+  it('the sweep never follows a link: a junction named like a work folder is left, and so is what it points to', async () => {
+    const outside = join(dataDir, 'outside');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, 'keep.txt'), 'keep');
+    mkdirSync(work(), { recursive: true });
+    symlinkSync(outside, join(work(), 'meeting-part-link'), 'junction');
+    writeFileSync(join(work(), 'meeting-part-file'), 'a file, not a folder');
+    prepare(420);
+    const ff = fakeFfmpeg([]);
+    const { t } = fromEnv(ff, ['naya']);
+    await transcribeMeeting(id, deps(t, ff));
+    expect(readdirSync(outside)).toEqual(['keep.txt']);
+    expect(readdirSync(work()).sort()).toEqual(['meeting-part-file', 'meeting-part-link']);
+  });
+
+  it('the sweep lists nothing when the work folder itself is a link', async () => {
+    const real = join(dataDir, 'real-work');
+    mkdirSync(join(real, 'meeting-part-old'), { recursive: true });
+    writeFileSync(join(real, 'meeting-part-old', 'audio.wav'), 'old');
+    mkdirSync(join(dataDir, 'tmp'), { recursive: true });
+    symlinkSync(real, work(), 'junction');
+    prepare(420);
+    const ff = fakeFfmpeg([]);
+    const { t } = fromEnv(ff, ['naya']);
+    await transcribeMeeting(id, deps(t, ff));
+    expect(readdirSync(real)).toEqual(['meeting-part-old']);
+    expect(getMeeting(db, id)!.stage).toBe('transcribed');
   });
 
   it('logs the meeting id, part, provider, seconds and duration only: never what was said or a path', async () => {

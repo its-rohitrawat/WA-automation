@@ -48,7 +48,7 @@ export { forgetPending, MAX_FORGET_ATTEMPTS } from './sttForget.ts';
  * - Per meeting at stage audio: transcribeMeeting(id, deps, signal), and map what it throws:
  *   MeetingDeferral stt_none / stt_unavailable / spend_cap / spend_busy (no_ffmpeg for local) -> defer without counting
  *   an attempt; the signal's reason -> stopped; anything else (SttHttpError 429/5xx, SttNoAnswerError, SttJobError,
- *   SttBookingError, LocalEngineError timeout / exit_<n> / no_output, AudioError, disk errors) -> retry, counting an
+ *   SttBookingError, LocalEngineError timeout / exit_<n> / no_output / empty_output, AudioError, disk errors) -> retry, counting an
  *   attempt.
  * - On a final failure (attempts used up, or any path to failMeeting for a meeting that has stt_parts):
  *   bookStuckParts(db, spend, id, { inrPerUsd, clock, log }) BEFORE failMeeting, so a part left in flight is booked.
@@ -189,7 +189,7 @@ const KEY_REFUSED = new Set([401, 403]);
  *   thrown as they are, the processor retries (the part records make the retry book nothing twice);
  * - an abort: the signal's reason, before a new part starts or while splitting. A paid speech call is never aborted;
  *   a local engine run is (the part goes back to todo);
- * - local engine failures (LocalEngineError timeout, exit_<n>, no_output): thrown as they are, the part back to todo,
+ * - local engine failures (LocalEngineError timeout, exit_<n>, no_output, empty_output): thrown as they are, the part back to todo,
  *   and the processor retries (the parts already done are kept); no_ffmpeg (MeetingDeferral) when ffmpeg is missing.
  * A Sarvam job that is lost after acceptance is booked again when it is sent again: a second job is a second charge.
  */
