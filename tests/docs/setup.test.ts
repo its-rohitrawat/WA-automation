@@ -891,12 +891,15 @@ describe('earlier messages of a newly approved group (Task 4, 28 Oct 2026)', () 
     const clients = read('src/web/public/views/clients.js');
     expect(setup).toContain('**up to 7 days back, as far as WhatsApp provides**: WhatsApp may not hand over every old message, so some can be missing.');
     expect(groups).toContain("and its earlier ones up to 7 days back, as far as WhatsApp provides.");
-    // The card's three lines, word for word in the doc and the screen.
-    expect(setup).toContain('"Reading earlier messages… <n> found", then "Earlier messages read (last 7 days)"');
+    // The three states, word for word in the doc and the screen (card and panel status line, the panel's Earlier messages row).
     expect(setup).toContain('("Waiting for the first new message to read earlier ones")');
-    for (const text of ['Reading earlier messages… ${h.found} found', 'Earlier messages read (last 7 days)', 'Waiting for the first new message to read earlier ones']) {
-      expect(clients, text).toContain(text);
-    }
+    expect(setup).toContain('say "Reading the last 7 days · <n> found"');
+    expect(setup).toContain('**Earlier messages** row says "Last 7 days read · <n> found"');
+    // The status line is "<head> · <rest>": the head and the rest as the screen builds them.
+    expect(clients).toContain("head: 'Reading the last 7 days', rest: `${s.history?.found ?? 0} found`");
+    expect(clients).toContain('<b>${esc(st.head)}</b>${st.rest ? ` <span>· ${esc(st.rest)}</span>` : \'\'}');
+    expect(clients).toContain("head: 'Waiting for the first new message to read earlier ones'");
+    expect(clients).toContain('`Last 7 days read · ${h.found} found`');
     expect(setup).toContain('within the daily spend cap');
     expect(setup).toContain('Removing the group stops it.');
   });
