@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
-import { dailyDown, type DayDown, type Interval, type Outage, type UptimeLog, type UptimeRatios } from './uptimeLog.ts';
+import { dailyDown, dayOutages, outageText, type DayDown, type Interval, type Outage, type UptimeLog, type UptimeRatios } from './uptimeLog.ts';
 
 // UptimeRobot's read-only API, for the uptime history (D5 Task 3), used only when UPTIMEROBOT_READ_KEY is set. The call
 // is made by the agent, never the browser. The key goes only in the POST body to api.uptimerobot.com: never in a URL, a
@@ -159,8 +159,10 @@ export class UptimeRobotClient {
 export interface UptimeReport {
   source: 'uptimerobot' | 'agent';
   ratios: UptimeRatios;
-  days: DayDown[];
-  outages: Outage[];
+  /** outages: that day's outages in plain words with their exact times (outageText), oldest first. */
+  days: (DayDown & { outages: string[] })[];
+  /** text: the outage in plain words with its exact times, IST. */
+  outages: (Outage & { text: string })[];
   /** The agent's log: the IST day it began (earlier days are unknown, not up). Null for UptimeRobot, or an empty log. */
   knownSinceDay: string | null;
 }
@@ -182,13 +184,20 @@ function merged(intervals: Interval[], now: number): Interval[] {
 /** The uptime screen: UptimeRobot when its key is set and it answers, else the agent's own log. */
 export async function uptimeReport(o: { log: UptimeLog; robot?: UptimeRobotClient | undefined; now: Date; days?: number }): Promise<UptimeReport> {
   const days = o.days ?? 30;
+  const now = o.now.getTime();
   const reading = o.robot ? await o.robot.read() : null;
+  // Each outage and each day also in plain words with the exact times (owner request, 29 Oct 2026).
+  const withTimes = (daily: DayDown[], outages: Outage[], intervals: Interval[]) => ({
+    days: daily.map((d) => ({ ...d, outages: dayOutages(intervals, d.day, now) })),
+    outages: outages.map((x) => ({ ...x, text: outageText(Date.parse(x.start), x.end === null ? null : Date.parse(x.end), now) })),
+  });
+  const toIntervals = (outages: Outage[]) => outages.map((x) => ({ start: Date.parse(x.start), end: x.end === null ? null : Date.parse(x.end) }));
   if (reading) {
-    const now = o.now.getTime();
     // As with the agent's own log: only outages that reach into the window.
     const outages = reading.outages.filter((x) => (x.end === null ? now : Date.parse(x.end)) > now - days * DAY_MS);
-    const intervals = merged(outages.map((x) => ({ start: Date.parse(x.start), end: x.end === null ? null : Date.parse(x.end) })), now);
-    return { source: 'uptimerobot', ratios: reading.ratios, days: dailyDown(intervals, now, days), outages, knownSinceDay: null };
+    const intervals = merged(toIntervals(outages), now);
+    return { source: 'uptimerobot', ratios: reading.ratios, ...withTimes(dailyDown(intervals, now, days), outages, intervals), knownSinceDay: null };
   }
-  return { source: 'agent', ratios: o.log.ratios(), days: o.log.daily(days), outages: o.log.outages(days), knownSinceDay: o.log.knownSinceDay() };
+  const outages = o.log.outages(days);
+  return { source: 'agent', ratios: o.log.ratios(), ...withTimes(o.log.daily(days), outages, toIntervals(outages)), knownSinceDay: o.log.knownSinceDay() };
 }

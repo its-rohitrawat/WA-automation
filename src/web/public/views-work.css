@@ -85,3 +85,7 @@ th button.sort-desc svg { transform: rotate(180deg); }
 .kw-none { font-size: 12.5px; }
 [data-priority] .brief-toggle { margin-top: 4px; }
 @media (max-width: 720px) { .kw-grid { grid-template-columns: minmax(0, 1fr); } }
+/* the Overview uptime strip: the newest outages with their exact times */
+.outages ul { margin: 4px 0 0; padding: 0; list-style: none; font: 400 11.5px/1.6 var(--mono); color: rgba(215,247,227,.75); }
+/* Automations: the briefing's send time */
+.time-in { padding-right: 12px; background-image: none; cursor: text; }

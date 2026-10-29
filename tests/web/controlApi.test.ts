@@ -78,6 +78,21 @@ describe('control API: settings', () => {
     expect(auditRows(db)).toEqual([{ actor: OWNER, event: 'settings.reportDays', kind: 'config', detail: 'Morning briefing days set to every day' }]);
   });
 
+  it('sets the send time with CSRF, owner-only, checked on the server and audited', async () => {
+    const { db, h } = await boot();
+    const time = { key: 'reportTime', value: '07:30' };
+    expect((await h.post('/dashboard/api/settings', { body: time, csrf: null })).status).toBe(403);
+    expect((await h.post('/dashboard/api/settings', { body: time, cookie: null })).status).toBe(401);
+    for (const value of ['7:30', '07:30:00', '25:00', 730]) {
+      expect(await h.post('/dashboard/api/settings', { body: { key: 'reportTime', value } }), String(value)).toMatchObject({ status: 422, json: { error: { field: 'reportTime' } } });
+    }
+    expect(auditRows(db)).toEqual([]);
+    // 13:30 IST: 07:30 has passed today, so it starts tomorrow. The briefing is off, so there is no next report.
+    expect(await h.post('/dashboard/api/settings', { body: time })).toMatchObject({ status: 200, json: { sendAt: '07:30', nextReport: null, source: { reportTime: 'dashboard' } } });
+    expect(auditRows(db)).toEqual([{ actor: OWNER, event: 'settings.reportTime', kind: 'config', detail: 'Morning briefing time set to 07:30 IST, from tomorrow' }]);
+    expect(await h.get('/dashboard/api/settings')).toMatchObject({ json: { sendAt: '07:30' } });
+  });
+
   it('needs the new number typed twice, and never sends it back', async () => {
     const { db, h } = await boot();
     const other = '917012349999';

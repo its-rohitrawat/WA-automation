@@ -12,7 +12,8 @@ function isRealDate(s: string): boolean {
   return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === s;
 }
 
-const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+/** "HH:MM", 00:00 to 23:59. */
+export const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 /** 91, then a 10-digit Indian mobile (starts 6-9). The owner's decision: the report goes only to an Indian number. */
 export const INDIAN_MOBILE = /^91[6-9]\d{9}$/;
 

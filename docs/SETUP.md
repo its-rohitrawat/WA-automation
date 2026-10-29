@@ -354,7 +354,7 @@ With no active clients it reads `Good morning. No open tasks. Today's tracker: â
    REPORT_RECIPIENT=your_founder_number_here
    ```
 
-   `REPORT_RECIPIENT` is the founder's Indian mobile: `91` then the 10-digit mobile number (12 digits in all), digits only, for example `919812345678`, with no `+` or spaces. The service refuses to start with any other form. Leave `REPORT_TIME`, `REPORT_DEADLINE` and `REPORT_DAYS` empty for 06:00 and 12:00 IST, Monday to Friday. Set `REPORT_DAYS=mon-sat` to add Saturday, or `REPORT_DAYS=daily` for every day.
+   `REPORT_RECIPIENT` is the founder's Indian mobile: `91` then the 10-digit mobile number (12 digits in all), digits only, for example `919812345678`, with no `+` or spaces. The service refuses to start with any other form. Leave `REPORT_TIME`, `REPORT_DEADLINE` and `REPORT_DAYS` empty for 06:00 and 12:00 IST, Monday to Friday. The send time can be changed later on the dashboard's Automations screen (Sends at, then Save time), without a restart; the dashboard's time then wins over `REPORT_TIME`. Any time of day can be picked: a time before `REPORT_DEADLINE` catches up until `REPORT_DEADLINE` as before, and a later time catches up for 3 hours after it, never past 23:59 IST. A time that has already passed today starts tomorrow (today keeps the time it had), and the screen shows when the next report goes, for example "Next report: tomorrow 07:30". Set `REPORT_DAYS=mon-sat` to add Saturday, or `REPORT_DAYS=daily` for every day.
 5. **Start the service again** (see "Start the service again" under "If the service will not start" below), wait one minute, and check `npm run cli -- report status`.
 6. Give the founder view access to `Tracker.xlsx`, or the link asks for access when he opens it. In Google Drive (mailbox account), share the **WA Agent** folder with the founder's Google account (the one signed in on his phone), as Viewer. Sharing the folder, not the file, keeps it working if the file is ever re-created (see step 7 of "6. Install and start the service").
 7. Send one test report: `npm run cli -- report send-now`, then type `yes`. It works only while the service is running, on any day, weekends too, and it refuses if today's report was already sent. Check the founder's phone, and open the link once.
@@ -1026,6 +1026,8 @@ The agent can visit an UptimeRobot **Heartbeat** monitor link every 5 minutes wh
 1. In UptimeRobot add a **Heartbeat** monitor with a 5-minute interval, and copy its link (`https://heartbeat.uptimerobot.com/...`). Keep it secret.
 2. Paste it after `HEARTBEAT_URL=` in `.env`, save, and restart the service (`net stop wa-agent`, then `net start wa-agent`).
 3. After an alert, run `npm run cli -- status`: the Health line says what is wrong. To switch it off, empty `HEARTBEAT_URL=` and restart.
+
+The dashboard's Overview shows the last 30 days of uptime with the exact times of each outage, in IST: hover a day for its outages, and the newest three are listed under the strip, for example "Off from 02:14 to 06:33 (4 h 19 min)", "Off Mon 27 Oct, 23:50 to 00:20 (30 min)" for another day, or "Still off since 09:12 (â€¦)" while it is going.
 
 ## If the service will not start
 
