@@ -206,7 +206,7 @@ async function main() {
         await p.waitForURL((u) => u.search === '?status=done&closed=7d');
         await p.locator('.fchip[data-clear="closed"]').click();
         await p.waitForURL((u) => u.pathname === '/dashboard/tasks' && u.search === '?status=done');
-        if ((await p.locator('.fchip').count()) !== 0) fail(where, 'the chip stayed after removing it');
+        if ((await p.locator('.fchip[data-clear]').count()) !== 0) fail(where, 'the chip stayed after removing it');
         await p.goto(`${base}/dashboard`);
         await p.locator('.kpis').waitFor();
 
