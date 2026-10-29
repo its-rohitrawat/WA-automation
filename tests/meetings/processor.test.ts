@@ -74,7 +74,7 @@ async function world(o: { capUsd?: number; meeting?: Partial<NewMeeting> } = {})
   const clock = manualClock(NOW);
   const api = new FakeMeetingsApi();
   addRecordingFile(api);
-  const id = insertFound(db, queuedMeeting(o.meeting))!;
+  const id = (await insertFound(db, queuedMeeting(o.meeting)))!;
   return {
     dataDir, db, clock, spend: new SpendGuard({ db, clock, capUsd: o.capUsd ?? 15 }), api, drive: new FakeDrive(), ff: fakeFfmpeg(),
     stt: new FakeSttProvider(), ai: new FakeMeetingAi(), trackerAi: new FakeAi([addTask(id)]), access: [], scopes: { ok: true }, id,
@@ -93,24 +93,24 @@ function processor(w: World, o: Partial<MeetingProcessorDeps> & { exclusive?: Re
   });
 }
 
-const row = (w: World) => getMeeting(w.db, w.id)!;
+const row = async (w: World) => (await getMeeting(w.db, w.id))!;
 const spendRows = (w: World) => w.db.raw.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
 const later = (w: World, ms: number) => w.clock.advance(ms);
 const signal = () => new AbortController().signal;
 const audioRel = (id: number) => `meetings/SHA/2026-11/${id}.mp3`;
 
 /** Moves the world's meeting to `stage` with the results the earlier stages would have stored. */
-function at(w: World, stage: MeetingStage): void {
+async function at(w: World, stage: MeetingStage): Promise<void> {
   const stages: MeetingStage[] = ['audio', 'transcribed', 'summarised', 'doc'];
   for (const s of stages.slice(0, stages.indexOf(stage) + 1)) {
     if (s === 'audio') {
       mkdirSync(join(w.dataDir, 'meetings', 'SHA', '2026-11'), { recursive: true });
       writeFileSync(join(w.dataDir, ...audioRel(w.id).split('/')), 'mp3-bytes');
-      advanceStage(w.db, w.id, 'audio', { audioPath: audioRel(w.id), audioSeconds: 2700 }, NOW);
+      await advanceStage(w.db, w.id, 'audio', { audioPath: audioRel(w.id), audioSeconds: 2700 }, NOW);
     }
-    if (s === 'transcribed') advanceStage(w.db, w.id, 'transcribed', { transcript: SAID }, NOW);
-    if (s === 'summarised') advanceStage(w.db, w.id, 'summarised', { summary: structuredClone(SUMMARY_WIRE) as MeetingSummary }, NOW);
-    if (s === 'doc') advanceStage(w.db, w.id, 'doc', { docFileId: 'doc-old' }, NOW);
+    if (s === 'transcribed') await advanceStage(w.db, w.id, 'transcribed', { transcript: SAID }, NOW);
+    if (s === 'summarised') await advanceStage(w.db, w.id, 'summarised', { summary: structuredClone(SUMMARY_WIRE) as MeetingSummary }, NOW);
+    if (s === 'doc') await advanceStage(w.db, w.id, 'doc', { docFileId: 'doc-old' }, NOW);
   }
 }
 
@@ -122,7 +122,7 @@ describe('MeetingProcessor: found to done', () => {
     const r = await processor(w).process(w.id, signal());
     expect(r).toEqual({ outcome: 'done', clientId: 1 });
 
-    const m = row(w);
+    const m = await row(w);
     expect(m).toMatchObject({ status: 'done', stage: 'tracked', audioPath: audioRel(w.id), audioSeconds: 2700, errorCode: null, nextAttemptAt: null });
     expect(m.transcript).toEqual(SAID);
     expect(m.summary?.actionItems).toHaveLength(1);
@@ -159,7 +159,7 @@ describe('MeetingProcessor: found to done', () => {
     w.stt.transcribe = async () => ({ model: 'scribe', segments: [{ start: 0, end: 1, speaker: 'A', text: ' ' }], billedSeconds: null, raw: {} });
     const r = await processor(w).process(w.id, signal());
     expect(r.outcome).toBe('done');
-    expect(row(w)).toMatchObject({ status: 'done', note: 'no_speech', transcript: [] });
+    expect(await row(w)).toMatchObject({ status: 'done', note: 'no_speech', transcript: [] });
     expect(w.ai.calls).toHaveLength(0);
     expect(w.trackerAi.calls).toHaveLength(0);
     expect(w.drive.docs).toHaveLength(1);
@@ -172,7 +172,7 @@ describe('MeetingProcessor: found to done', () => {
     });
     w.api.signedInNames.set('conferenceRecords/c1', ['Asha Verma', 'Guest Person']);
     await processor(w).process(w.id, signal());
-    const m = row(w);
+    const m = await row(w);
     expect(m.title).toBe('Brand review');
     expect(m.attendees).toEqual([
       { email: 'asha@sharma.example', name: 'Asha Verma', team: false },
@@ -204,7 +204,7 @@ describe('MeetingProcessor: found to done', () => {
     const warned: unknown[] = [];
     const log = hookLogger((l) => l.msg.startsWith('meeting attendees could not be read again') && warned.push(l));
     expect((await processor(w, { log }).process(w.id, signal())).outcome).toBe('done');
-    expect(row(w)).toMatchObject({ status: 'done', title: '', attendees: [], participants: [] });
+    expect(await row(w)).toMatchObject({ status: 'done', title: '', attendees: [], participants: [] });
     expect(warned).toEqual([expect.objectContaining({ meetingId: w.id, code })]);
   });
 
@@ -212,7 +212,7 @@ describe('MeetingProcessor: found to done', () => {
     const w = await world({ meeting: { attendees: [], matchKind: 'human' } });
     w.api.failWith.set('findInvite', new GoogleAccessError('http_401'));
     expect((await processor(w).process(w.id, signal())).outcome).toBe('deferred');
-    expect(row(w)).toMatchObject({ errorCode: 'google_auth', stage: 'found' });
+    expect(await row(w)).toMatchObject({ errorCode: 'google_auth', stage: 'found' });
   });
 
   it('reads an assigned meeting again at most once per service run', async () => {
@@ -230,9 +230,9 @@ describe('MeetingProcessor: found to done', () => {
 
   it('a queued meeting at stage tracked is finished as done', async () => {
     const w = await world();
-    advanceStage(w.db, w.id, 'tracked', { docFileId: 'doc-old' }, NOW);
+    await advanceStage(w.db, w.id, 'tracked', { docFileId: 'doc-old' }, NOW);
     expect((await processor(w).process(w.id, signal())).outcome).toBe('done');
-    expect(row(w)).toMatchObject({ status: 'done', stage: 'tracked' });
+    expect(await row(w)).toMatchObject({ status: 'done', stage: 'tracked' });
     expect(w.api.calls).toEqual([]);
     expect(w.trackerAi.calls).toEqual([]);
   });
@@ -258,12 +258,12 @@ describe('MeetingProcessor: resuming', () => {
     const ctl = new AbortController();
     const first = processor(w, { log: hookLogger((l) => l.msg === line && ctl.abort()) });
     expect((await first.process(w.id, ctl.signal)).outcome).toBe('stopped');
-    expect(row(w)).toMatchObject({ status: 'queued', stage, attempts: 0 });
+    expect(await row(w)).toMatchObject({ status: 'queued', stage, attempts: 0 });
 
     // The restart: a new processor; the same database, files and Google.
     const r = await processor(w).process(w.id, signal());
     expect(r.outcome).toBe('done');
-    expect(row(w)).toMatchObject({ status: 'done', stage: 'tracked' });
+    expect(await row(w)).toMatchObject({ status: 'done', stage: 'tracked' });
     expect(w.api.callsOf('download')).toHaveLength(1);
     expect(w.stt.calls).toHaveLength(1);
     expect(w.ai.calls).toHaveLength(1);
@@ -275,12 +275,12 @@ describe('MeetingProcessor: resuming', () => {
 
   it('a stage cut off by a crash waits out its claim, with the attempt counted', async () => {
     const w = await world();
-    at(w, 'transcribed');
+    await at(w, 'transcribed');
     // The crash: the claim was written, then the process died during the summary.
     w.ai.gate = new Promise<void>(() => {});
     void processor(w).process(w.id, signal());
     await w.ai.started;
-    expect(row(w)).toMatchObject({ attempts: 1, nextAttemptAt: new Date(Date.parse(NOW) + MEETING_CLAIM_MS).toISOString() });
+    expect(await row(w)).toMatchObject({ attempts: 1, nextAttemptAt: new Date(Date.parse(NOW) + MEETING_CLAIM_MS).toISOString() });
 
     const restart = processor(w, { ai: new FakeMeetingAi() });
     expect((await restart.process(w.id, signal())).outcome).toBe('skipped'); // not due yet
@@ -290,27 +290,27 @@ describe('MeetingProcessor: resuming', () => {
 
   it(`after ${MEETING_MAX_ATTEMPTS} runs that never ended it fails as crashed, booking a part left in flight first`, async () => {
     const w = await world();
-    at(w, 'audio');
-    setSttParts(w.db, w.id, [{ index: 0, provider: 'elevenlabs', file: null, offset: 0, seconds: 2700, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
+    await at(w, 'audio');
+    await setSttParts(w.db, w.id, [{ index: 0, provider: 'elevenlabs', file: null, offset: 0, seconds: 2700, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
     setAttempts(w, MEETING_MAX_ATTEMPTS);
     const r = await processor(w).process(w.id, signal());
     expect(r.outcome).toBe('failed');
-    expect(row(w)).toMatchObject({ status: 'failed', errorCode: 'crashed', stage: 'audio' });
-    expect(row(w).sttParts[0]).toMatchObject({ state: 'unknown', booked: 'ceiling' });
+    expect(await row(w)).toMatchObject({ status: 'failed', errorCode: 'crashed', stage: 'audio' });
+    expect((await row(w)).sttParts[0]).toMatchObject({ state: 'unknown', booked: 'ceiling' });
     expect(spendRows(w)).toEqual([expect.objectContaining({ kind: 'stt', detail: `meeting ${w.id} part 0 (unknown, estimated)` })]);
     expect(w.stt.calls).toHaveLength(0);
   });
 
   it('books stuck parts before failing: when that booking cannot be written, the meeting is not failed', async () => {
     const w = await world();
-    at(w, 'audio');
-    setSttParts(w.db, w.id, [{ index: 0, provider: 'elevenlabs', file: null, offset: 0, seconds: 2700, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
+    await at(w, 'audio');
+    await setSttParts(w.db, w.id, [{ index: 0, provider: 'elevenlabs', file: null, offset: 0, seconds: 2700, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
     setAttempts(w, MEETING_MAX_ATTEMPTS);
     vi.spyOn(w.spend, 'record').mockImplementation(() => {
       throw new Error('database is locked');
     });
     await expect(processor(w).process(w.id, signal())).rejects.toThrow('database is locked');
-    expect(row(w).status).toBe('queued');
+    expect((await row(w)).status).toBe('queued');
   });
 });
 
@@ -322,7 +322,7 @@ describe('MeetingProcessor: deferrals', () => {
     const r = await p.process(w.id, signal());
     expect(r.outcome).toBe('deferred');
     const due = waitMs === 'midnight' ? '2026-11-01T18:30:00.000Z' : new Date(Date.parse(NOW) + waitMs).toISOString();
-    expect(row(w)).toMatchObject({ status: 'queued', errorCode: code, nextAttemptAt: due, attempts: PRE_CLAIM });
+    expect(await row(w)).toMatchObject({ status: 'queued', errorCode: code, nextAttemptAt: due, attempts: PRE_CLAIM });
   }
 
   it('google_scopes: no Google call at all, 15 minutes', async () => {
@@ -337,7 +337,7 @@ describe('MeetingProcessor: deferrals', () => {
     await deferred(w, processor(w, { ffmpeg: null }), 'no_ffmpeg', 60 * MINUTE);
     expect(w.api.calls).toEqual([]);
     const w2 = await world();
-    at(w2, 'audio');
+    await at(w2, 'audio');
     await deferred(w2, processor(w2, { ffmpeg: null }), 'no_ffmpeg', 60 * MINUTE);
     expect(w2.stt.calls).toEqual([]);
   });
@@ -358,31 +358,31 @@ describe('MeetingProcessor: deferrals', () => {
 
   it('stt_unavailable when the speech key is refused, 60 minutes; after 24 hours of it the meeting fails', async () => {
     const w = await world();
-    at(w, 'audio');
+    await at(w, 'audio');
     w.stt.failures = [new SttHttpError(401)];
     const p = processor(w);
     await deferred(w, p, 'stt_unavailable', 60 * MINUTE);
     later(w, STT_UNAVAILABLE_MAX_MS);
     w.stt.failures = [new SttHttpError(403)];
     expect((await p.process(w.id, signal())).outcome).toBe('failed');
-    expect(row(w)).toMatchObject({ status: 'failed', errorCode: 'stt_unavailable' });
+    expect(await row(w)).toMatchObject({ status: 'failed', errorCode: 'stt_unavailable' });
   });
 
   it('spend_cap waits for the next IST midnight; spend_busy 10 minutes', async () => {
     const w = await world({ capUsd: 0.1 });
-    at(w, 'transcribed');
+    await at(w, 'transcribed');
     await deferred(w, processor(w), 'spend_cap', 'midnight');
     expect(w.ai.calls).toEqual([]);
 
     const w2 = await world({ capUsd: 1 });
-    at(w2, 'transcribed');
+    await at(w2, 'transcribed');
     w2.spend.reserve(0.9); // another paid call in flight
     await deferred(w2, processor(w2), 'spend_busy', 10 * MINUTE);
   });
 
   it('client_busy while a WhatsApp run of the client is in flight, 1 minute', async () => {
     const w = await world();
-    at(w, 'doc');
+    await at(w, 'doc');
     await deferred(w, processor(w, { exclusive: async () => 'busy' }), 'client_busy', MINUTE);
     expect(w.trackerAi.calls).toEqual([]);
   });
@@ -396,7 +396,7 @@ describe('MeetingProcessor: deferrals', () => {
 
   it('drive_root waits 5 minutes for the publisher to make the WA Agent folder', async () => {
     const w = await world();
-    at(w, 'summarised');
+    await at(w, 'summarised');
     setKv(w.db, 'drive_root_id', '');
     expect(getKv(w.db, 'drive_root_id')).toBeFalsy();
     await deferred(w, processor(w), 'drive_root', 5 * MINUTE);
@@ -417,7 +417,7 @@ describe('MeetingProcessor: deferrals', () => {
 
   it('a deferral from any stage step (MeetingDeferral) restores the attempt', async () => {
     const w = await world();
-    at(w, 'doc');
+    await at(w, 'doc');
     await deferred(w, processor(w, { track: async () => { throw new MeetingDeferral('spend_busy'); } }), 'spend_busy', 10 * MINUTE);
   });
 });
@@ -427,18 +427,18 @@ describe('MeetingProcessor: failures', () => {
     const w = await world();
     w.ff.convert = 'fail';
     // A part some earlier run left in flight (never sent again while the audio step fails).
-    setSttParts(w.db, w.id, [{ index: 0, provider: 'elevenlabs', file: null, offset: 0, seconds: 2700, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
+    await setSttParts(w.db, w.id, [{ index: 0, provider: 'elevenlabs', file: null, offset: 0, seconds: 2700, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
     const p = processor(w);
     for (const [n, wait] of [[1, 1], [2, 5], [3, 30]] as const) {
       expect((await p.process(w.id, signal())).outcome).toBe('deferred');
-      expect(row(w)).toMatchObject({ status: 'queued', errorCode: 'convert_failed', attempts: n });
-      expect(row(w).nextAttemptAt).toBe(new Date(w.clock.now().getTime() + wait * MINUTE).toISOString());
+      expect(await row(w)).toMatchObject({ status: 'queued', errorCode: 'convert_failed', attempts: n });
+      expect((await row(w)).nextAttemptAt).toBe(new Date(w.clock.now().getTime() + wait * MINUTE).toISOString());
       expect(spendRows(w)).toEqual([]);
       later(w, wait * MINUTE);
     }
     expect((await p.process(w.id, signal())).outcome).toBe('failed');
-    expect(row(w)).toMatchObject({ status: 'failed', errorCode: 'convert_failed', stage: 'found' });
-    expect(row(w).sttParts[0]).toMatchObject({ booked: 'ceiling' });
+    expect(await row(w)).toMatchObject({ status: 'failed', errorCode: 'convert_failed', stage: 'found' });
+    expect((await row(w)).sttParts[0]).toMatchObject({ booked: 'ceiling' });
     expect(spendRows(w).map((s) => s.kind)).toEqual(['stt']);
     expect(w.ff.conversions).toBe(4);
     // Every attempt downloaded afresh and left nothing behind.
@@ -447,11 +447,11 @@ describe('MeetingProcessor: failures', () => {
 
   it('a 503 from the speech provider is retried and then succeeds, booking speech once', async () => {
     const w = await world();
-    at(w, 'audio');
+    await at(w, 'audio');
     w.stt.failures = [new SttHttpError(503)];
     const p = processor(w);
     expect((await p.process(w.id, signal())).outcome).toBe('deferred');
-    expect(row(w)).toMatchObject({ errorCode: 'http_503', attempts: 1 });
+    expect(await row(w)).toMatchObject({ errorCode: 'http_503', attempts: 1 });
     later(w, MINUTE);
     expect((await p.process(w.id, signal())).outcome).toBe('done');
     expect(spendRows(w).filter((s) => s.kind === 'stt')).toHaveLength(1);
@@ -461,33 +461,33 @@ describe('MeetingProcessor: failures', () => {
     const w = await world();
     w.api.failWith.set('download', new GoogleNoAccessError('http_403'));
     expect((await processor(w).process(w.id, signal())).outcome).toBe('failed');
-    expect(row(w)).toMatchObject({ status: 'no_access', errorCode: 'http_403' });
+    expect(await row(w)).toMatchObject({ status: 'no_access', errorCode: 'http_403' });
 
     const w2 = await world();
     w2.ff.seconds = 200 * 60;
     expect((await processor(w2).process(w2.id, signal())).outcome).toBe('failed');
-    expect(row(w2)).toMatchObject({ status: 'too_long', errorCode: 'too_long_measured', audioSeconds: 12_000 });
+    expect(await row(w2)).toMatchObject({ status: 'too_long', errorCode: 'too_long_measured', audioSeconds: 12_000 });
     expect(w2.stt.calls).toEqual([]);
   });
 
   it('an invalid summary twice (summarizeMeeting tried once more) fails at once after exactly 2 booked calls', async () => {
     const w = await world();
-    at(w, 'transcribed');
+    await at(w, 'transcribed');
     const invalid = () => new AiInvalidOutputError('bad', { inputTokens: 1, outputTokens: 1, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }, 0.03);
     const ai = new FakeMeetingAi([invalid(), invalid(), {}]);
     expect((await processor(w, { ai }).process(w.id, signal())).outcome).toBe('failed');
-    expect(row(w)).toMatchObject({ status: 'failed', errorCode: 'ai_invalid_output', stage: 'transcribed' });
+    expect(await row(w)).toMatchObject({ status: 'failed', errorCode: 'ai_invalid_output', stage: 'transcribed' });
     expect(ai.calls).toHaveLength(2);
     expect(spendRows(w).map((r) => r.kind)).toEqual(['ai', 'ai']);
   });
 
   it('an invalid tracker answer twice fails at once after exactly 2 booked calls', async () => {
     const w = await world();
-    at(w, 'doc');
+    await at(w, 'doc');
     const invalid = () => new AiInvalidOutputError('bad', { inputTokens: 1, outputTokens: 1, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }, 0.02);
     w.trackerAi = new FakeAi([invalid(), invalid(), addTask(w.id)]);
     expect((await processor(w).process(w.id, signal())).outcome).toBe('failed');
-    expect(row(w)).toMatchObject({ status: 'failed', errorCode: 'ai_invalid_output', stage: 'doc' });
+    expect(await row(w)).toMatchObject({ status: 'failed', errorCode: 'ai_invalid_output', stage: 'doc' });
     expect(w.trackerAi.calls).toHaveLength(2);
     expect(spendRows(w).map((r) => r.kind)).toEqual(['ai', 'ai']);
     expect(listTasks(w.db, 1)).toEqual([]);
@@ -495,29 +495,29 @@ describe('MeetingProcessor: failures', () => {
 
   it('a row missing what its stage needs is retried with a real code, and a plain Error is stored as unknown', async () => {
     const w = await world();
-    advanceStage(w.db, w.id, 'doc', { docFileId: 'doc-old' }, NOW); // no summary stored
+    await advanceStage(w.db, w.id, 'doc', { docFileId: 'doc-old' }, NOW); // no summary stored
     expect((await processor(w).process(w.id, signal())).outcome).toBe('deferred');
-    expect(row(w)).toMatchObject({ errorCode: 'no_summary', attempts: 1 });
+    expect(await row(w)).toMatchObject({ errorCode: 'no_summary', attempts: 1 });
 
     const w2 = await world();
-    at(w2, 'doc');
+    await at(w2, 'doc');
     expect((await processor(w2, { track: async () => { throw new Error('boom'); } }).process(w2.id, signal())).outcome).toBe('deferred');
-    expect(row(w2)).toMatchObject({ errorCode: 'unknown', attempts: 1 });
+    expect(await row(w2)).toMatchObject({ errorCode: 'unknown', attempts: 1 });
   });
 
   it('a refused summary fails at once: a retry would pay again', async () => {
     const w = await world();
-    at(w, 'transcribed');
+    await at(w, 'transcribed');
     const ai: MeetingAi = { summarize: async () => { throw new AiRefusalError('cyber', { inputTokens: 1, outputTokens: 1, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }, 0.02); } };
     expect((await processor(w, { ai }).process(w.id, signal())).outcome).toBe('failed');
-    expect(row(w)).toMatchObject({ status: 'failed', errorCode: 'ai_refusal', stage: 'transcribed' });
+    expect(await row(w)).toMatchObject({ status: 'failed', errorCode: 'ai_refusal', stage: 'transcribed' });
   });
 
   it('a meeting that is not queued is left alone', async () => {
     const w = await world({ meeting: { status: 'unassigned', clientId: null, matchKind: null } });
     expect((await processor(w).process(w.id, signal())).outcome).toBe('skipped');
     expect(w.api.calls).toEqual([]);
-    expect(row(w).attempts).toBe(0);
+    expect((await row(w)).attempts).toBe(0);
   });
 });
 
@@ -535,7 +535,7 @@ describe('MeetingProcessor: stopping', () => {
     await vi.waitFor(() => expect(w.api.callsOf('download')).toHaveLength(1));
     ctl.abort();
     expect((await run).outcome).toBe('stopped');
-    expect(row(w)).toMatchObject({ status: 'queued', stage: 'found', attempts: 0, errorCode: 'stopped', nextAttemptAt: NOW });
+    expect(await row(w)).toMatchObject({ status: 'queued', stage: 'found', attempts: 0, errorCode: 'stopped', nextAttemptAt: NOW });
     expect(readdirSync(join(w.dataDir, 'meetings', 'tmp'))).toEqual([]);
   });
 
@@ -552,7 +552,7 @@ describe('MeetingProcessor: stopping', () => {
 
   it('a stop lets a speech call finish and be stored, then runs no further stage', async () => {
     const w = await world();
-    at(w, 'audio');
+    await at(w, 'audio');
     const g = gate();
     w.stt.gate = g.promise;
     const ctl = new AbortController();
@@ -561,14 +561,14 @@ describe('MeetingProcessor: stopping', () => {
     ctl.abort();
     g.open();
     expect((await run).outcome).toBe('stopped');
-    expect(row(w).stage).toBe('transcribed');
+    expect((await row(w)).stage).toBe('transcribed');
     expect(spendRows(w).map((s) => s.kind)).toEqual(['stt']);
     expect(w.ai.calls).toEqual([]);
   });
 
   it('a stop lets a Claude summary finish and be stored, then makes no Doc', async () => {
     const w = await world();
-    at(w, 'transcribed');
+    await at(w, 'transcribed');
     const g = gate();
     w.ai.gate = g.promise;
     const ctl = new AbortController();
@@ -577,14 +577,14 @@ describe('MeetingProcessor: stopping', () => {
     ctl.abort();
     g.open();
     expect((await run).outcome).toBe('stopped');
-    expect(row(w).stage).toBe('summarised');
+    expect((await row(w)).stage).toBe('summarised');
     expect(spendRows(w).map((s) => s.kind)).toEqual(['ai']);
     expect(w.drive.docs).toEqual([]);
   });
 
   it('a speech call still running when the drain ends is booked by settlePending', async () => {
     const w = await world();
-    at(w, 'audio');
+    await at(w, 'audio');
     w.stt.gate = new Promise<void>(() => {});
     const ctl = new AbortController();
     void processor(w).process(w.id, ctl.signal);
@@ -592,7 +592,7 @@ describe('MeetingProcessor: stopping', () => {
     ctl.abort();
     expect(w.spend.settlePending('shutdown before the paid call finished (estimated)')).toBe(1);
     expect(spendRows(w).map((s) => s.kind)).toEqual(['stt']);
-    expect(row(w).sttParts[0]).toMatchObject({ booked: 'ceiling' });
+    expect((await row(w)).sttParts[0]).toMatchObject({ booked: 'ceiling' });
   });
 });
 
@@ -643,25 +643,25 @@ describe('MeetingProcessor: the local engine (STT_PROVIDER=local)', () => {
 
   it('a part that keeps timing out is retried after 1, 5 and 30 minutes, then given up as unheard; the meeting goes on, nothing booked', async () => {
     const w = await world();
-    at(w, 'audio');
+    await at(w, 'audio');
     const e = engineOf(w, ['ek'], 30);
     const p = processor(w, { transcriber: e.transcriber, ffmpeg: e.ffmpeg });
     for (const [n, wait] of [[1, 1], [2, 5], [3, 30]] as const) {
       expect((await p.process(w.id, signal())).outcome).toBe('deferred');
-      expect(row(w)).toMatchObject({ status: 'queued', stage: 'audio', errorCode: 'timeout', attempts: n });
+      expect(await row(w)).toMatchObject({ status: 'queued', stage: 'audio', errorCode: 'timeout', attempts: n });
       later(w, wait * MINUTE);
     }
     // Part 2's 4th try gives it up and the run goes on; part 3 then times out: a first failure again (attempts 1).
     expect((await p.process(w.id, signal())).outcome).toBe('deferred');
-    expect(row(w)).toMatchObject({ status: 'queued', stage: 'audio', errorCode: 'timeout', attempts: 1 });
+    expect(await row(w)).toMatchObject({ status: 'queued', stage: 'audio', errorCode: 'timeout', attempts: 1 });
     expect(e.calls).toHaveLength(6);
-    expect(row(w).sttParts.map((x) => [x.state, x.unheard ?? false])).toEqual([['done', false], ['done', true], ['todo', false], ['todo', false], ['todo', false]]);
+    expect((await row(w)).sttParts.map((x) => [x.state, x.unheard ?? false])).toEqual([['done', false], ['done', true], ['todo', false], ['todo', false], ['todo', false]]);
     expect(spendRows(w)).toEqual([]);
   });
 
   it('one passing failure on each of several parts never adds up: the meeting finishes', async () => {
     const w = await world();
-    at(w, 'audio');
+    await at(w, 'audio');
     // Parts 2 to 5 each fail once (the engine exits 1), then work on their retry.
     const steps: (string | null)[] = ['ek', null, 'do', null, 'teen', null, 'char', null, 'paanch'];
     const run: LocalRunFile = async (_file, args) => {
@@ -676,23 +676,23 @@ describe('MeetingProcessor: the local engine (STT_PROVIDER=local)', () => {
     const p = processor(w, { transcriber: localMeetingTranscriber(engine, { engine: 'voxtral', ffmpeg, tmpDir, inrPerUsd: 88 }), ffmpeg });
     for (let n = 0; n < 4; n++) {
       expect((await p.process(w.id, signal())).outcome).toBe('deferred');
-      expect(row(w)).toMatchObject({ status: 'queued', stage: 'audio', errorCode: 'exit_1', attempts: 1 });
+      expect(await row(w)).toMatchObject({ status: 'queued', stage: 'audio', errorCode: 'exit_1', attempts: 1 });
       later(w, MINUTE);
     }
     expect((await p.process(w.id, signal())).outcome).toBe('done');
-    expect(row(w).transcript!.map((s) => s.text)).toEqual(['ek', 'do', 'teen', 'char', 'paanch']);
-    expect(row(w).sttParts.some((x) => x.unheard)).toBe(false);
+    expect((await row(w)).transcript!.map((s) => s.text)).toEqual(['ek', 'do', 'teen', 'char', 'paanch']);
+    expect((await row(w)).sttParts.some((x) => x.unheard)).toBe(false);
   });
 
   it('the Doc says where no speech was recognised', async () => {
     const w = await world();
-    at(w, 'audio');
+    await at(w, 'audio');
     const part = (index: number, text: string | null): SttPartRow => ({
       index, provider: 'local', file: `${w.id}-parts/part-00${index - 1}.mp3`, offset: (index - 1) * 540, seconds: 540, state: 'done', jobId: null,
       booked: 'none', segments: text === null ? [] : [{ start: 0, end: 540, speaker: null, text }], billedSeconds: null,
       ...(text === null ? { unheard: true as const, tries: 4 } : {}),
     });
-    setSttParts(w.db, w.id, [part(1, 'ek'), part(2, null), part(3, 'teen'), part(4, 'char'), part(5, null)], NOW);
+    await setSttParts(w.db, w.id, [part(1, 'ek'), part(2, null), part(3, 'teen'), part(4, 'char'), part(5, null)], NOW);
     const e = engineOf(w, []);
     expect((await processor(w, { transcriber: e.transcriber, ffmpeg: e.ffmpeg }).process(w.id, signal())).outcome).toBe('done');
     expect(e.calls).toHaveLength(0);
@@ -704,7 +704,7 @@ describe('MeetingProcessor: the local engine (STT_PROVIDER=local)', () => {
 
   it('a stop during a part stops the engine: the meeting is left queued and due at once, with its attempt given back', async () => {
     const w = await world();
-    at(w, 'audio');
+    await at(w, 'audio');
     const e = engineOf(w, ['ek']);
     const ctl = new AbortController();
     const run = processor(w, { transcriber: e.transcriber, ffmpeg: e.ffmpeg }).process(w.id, ctl.signal);
@@ -712,27 +712,27 @@ describe('MeetingProcessor: the local engine (STT_PROVIDER=local)', () => {
     ctl.abort();
     expect((await run).outcome).toBe('stopped');
     expect(e.calls[1]?.aborted).toBe(true);
-    expect(row(w)).toMatchObject({ status: 'queued', stage: 'audio', attempts: 0, errorCode: 'stopped', nextAttemptAt: NOW });
-    expect(row(w).sttParts.map((x) => x.state)).toEqual(['done', 'todo', 'todo', 'todo', 'todo']);
+    expect(await row(w)).toMatchObject({ status: 'queued', stage: 'audio', attempts: 0, errorCode: 'stopped', nextAttemptAt: NOW });
+    expect((await row(w)).sttParts.map((x) => x.state)).toEqual(['done', 'todo', 'todo', 'todo', 'todo']);
     expect(spendRows(w)).toEqual([]);
 
     // The restart runs the rest, part 2 included; part 1 is not run again.
     const again = engineOf(w, ['do', 'teen', 'char', 'paanch']);
     expect((await processor(w, { transcriber: again.transcriber, ffmpeg: again.ffmpeg }).process(w.id, signal())).outcome).toBe('done');
     expect(again.calls).toHaveLength(4);
-    expect(row(w).transcript!.map((s) => s.text)).toEqual(['ek', 'do', 'teen', 'char', 'paanch']);
+    expect((await row(w)).transcript!.map((s) => s.text)).toEqual(['ek', 'do', 'teen', 'char', 'paanch']);
     expect(spendRows(w).filter((s) => s.kind === 'stt')).toEqual([]);
   });
 
   it('a crash with a local part in flight fails as crashed after the runs are used up, booking nothing', async () => {
     const w = await world();
-    at(w, 'audio');
-    setSttParts(w.db, w.id, [{ index: 1, provider: 'local', file: null, offset: 0, seconds: 2700, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
+    await at(w, 'audio');
+    await setSttParts(w.db, w.id, [{ index: 1, provider: 'local', file: null, offset: 0, seconds: 2700, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
     setAttempts(w, MEETING_MAX_ATTEMPTS);
     const e = engineOf(w, []);
     expect((await processor(w, { transcriber: e.transcriber, ffmpeg: e.ffmpeg }).process(w.id, signal())).outcome).toBe('failed');
-    expect(row(w)).toMatchObject({ status: 'failed', errorCode: 'crashed' });
-    expect(row(w).sttParts[0]).toMatchObject({ state: 'todo', booked: 'none' });
+    expect(await row(w)).toMatchObject({ status: 'failed', errorCode: 'crashed' });
+    expect((await row(w)).sttParts[0]).toMatchObject({ state: 'todo', booked: 'none' });
     expect(spendRows(w)).toEqual([]);
   });
 });

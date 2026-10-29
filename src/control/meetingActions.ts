@@ -1,7 +1,7 @@
 import { CorrectionError } from '../cli/corrections.ts';
 import { assignMeetingToClient, retryMeetingById, skipMeetingById } from '../cli/meetings.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
-import { txSync, type Db } from '../store/db.ts';
+import type { Db } from '../store/db.ts';
 import { getMeetingState } from '../store/meetings.ts';
 import { ControlError, type Audit } from './errors.ts';
 import { meetingDetail, parseMeetingId, type AccountOf, type DashboardMeetingDetail } from './meetingQueries.ts';
@@ -58,31 +58,25 @@ export async function runMeetingAction(
   const action = req.action as MeetingAction;
   const id = parseMeetingId(req.id);
   if (id === undefined) throw new ControlError(404, 'No meeting with that id');
-  if (!getMeetingState(db, id)) throw new ControlError(404, `No meeting ${id}`);
+  if (!(await getMeetingState(db, id))) throw new ControlError(404, `No meeting ${id}`);
   const code = action === 'assign' ? clientCode(req.body) : undefined;
   if (action === 'retry' && ctx.spend.isPaused()) throw new ControlError(409, SPEND_CAP_REFUSAL);
   const { now } = ctx;
+  // The audit line is written inside the command's own transaction (inTx), so the change and the line are one write.
+  const audit = (line: string) => ctx.audit({ actor: ctx.actor, event: `meeting.${action}`, kind: 'meeting', detail: line });
   try {
-    txSync(db, () => {
-      let line: string;
-      switch (action) {
-        case 'assign': {
-          const r = assignMeetingToClient(db, String(id), code!, now);
-          line = `Meeting ${id} assigned to ${r.code}`;
-          break;
-        }
-        case 'skip':
-          skipMeetingById(db, String(id), now);
-          line = `Meeting ${id} skipped`;
-          break;
-        case 'retry':
-          line = retryMeetingById(db, String(id), now).status === 'queued'
-            ? `Meeting ${id} queued again`
-            : `Meeting ${id} has no client, so it is unassigned again`;
-          break;
-      }
-      ctx.audit({ actor: ctx.actor, event: `meeting.${action}`, kind: 'meeting', detail: line });
-    });
+    switch (action) {
+      case 'assign':
+        await assignMeetingToClient(db, String(id), code!, now, (_q, r) => audit(`Meeting ${id} assigned to ${r.code}`));
+        break;
+      case 'skip':
+        await skipMeetingById(db, String(id), now, () => audit(`Meeting ${id} skipped`));
+        break;
+      case 'retry':
+        await retryMeetingById(db, String(id), now, (_q, r) =>
+          audit(r.status === 'queued' ? `Meeting ${id} queued again` : `Meeting ${id} has no client, so it is unassigned again`));
+        break;
+    }
   } catch (e) {
     if (e instanceof CorrectionError) throw fromCorrection(e);
     throw e;

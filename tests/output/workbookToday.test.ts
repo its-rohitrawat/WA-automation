@@ -20,7 +20,7 @@ const now = new Date('2026-10-19T08:00:00Z');
 
 async function build(db: Db): Promise<ExcelJS.Workbook> {
   const wb = new ExcelJS.Workbook();
-  await wb.xlsx.load((await buildWorkbook(loadTrackerView(db, now, healthy))) as unknown as ExcelJS.Buffer);
+  await wb.xlsx.load((await buildWorkbook(await loadTrackerView(db, now, healthy))) as unknown as ExcelJS.Buffer);
   return wb;
 }
 

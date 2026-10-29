@@ -18,11 +18,11 @@ async function boot(o: { paused?: boolean; actionCapacity?: number } = {}) {
   const clock = manualClock(NOW);
   createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
     deadline: null, latestProgress: null, sourceQuote: 'secret words from the chat', sourceDate: '2026-10-10', sourceWaId: null, origin: 'whatsapp' }, NOW);
-  insertFound(db, {
+  await insertFound(db, {
     recording: 'conferenceRecords/a/recordings/b', conference: 'conferenceRecords/a', driveFileId: 'd1', meetingCode: null, title: 'Weekly sync',
     startedAt: NOW, endedAt: null, attendees: [], participants: [], clientId: null, matchKind: null, status: 'unassigned', driveSeconds: 1800, createdAt: NOW,
   });
-  insertFound(db, {
+  await insertFound(db, {
     recording: 'conferenceRecords/c/recordings/d', conference: 'conferenceRecords/c', driveFileId: 'd2', meetingCode: null, title: 'Failed one',
     startedAt: NOW, endedAt: null, attendees: [], participants: [], clientId: 1, matchKind: 'title', status: 'failed', driveSeconds: 1800, errorCode: 'x', createdAt: NOW,
   });

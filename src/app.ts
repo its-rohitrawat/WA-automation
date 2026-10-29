@@ -223,12 +223,12 @@ export function createApp(d: AppDeps): App {
     minIntervalMs: d.publishIntervalMs,
     now: () => d.clock.now(),
     // workbookLine() leaves out publish failures: if this upload succeeds, they are already over.
-    build: () => {
+    build: async () => {
       const line = health.workbookLine();
       buildingLine = line.text;
       const now = d.clock.now();
       buildingDay = istDate(now); // the date the Today tab is worked out for
-      return buildWorkbook(loadTrackerView(d.db, now, line));
+      return buildWorkbook(await loadTrackerView(d.db, now, line));
     },
     onPublished: () => {
       publishedLine = buildingLine; // one publish runs at a time, so this is the line of the upload that just succeeded
@@ -252,6 +252,13 @@ export function createApp(d: AppDeps): App {
       fn();
     } catch (err) {
       d.log.error({ ...fields, err }, 'health update failed');
+    }
+  };
+  const safelyAsync = async (fn: () => Promise<void>) => {
+    try {
+      await fn();
+    } catch (err) {
+      d.log.error({ err }, 'health update failed');
     }
   };
   /**
@@ -285,8 +292,7 @@ export function createApp(d: AppDeps): App {
     voiceTranscriptionOn: (d.media?.voice ?? null) !== null,
     // A meeting's tracker step finishes the meeting here: the rebuild gets the meeting counts of now.
     onChanged: () => {
-      safely(refreshMeetings);
-      publisher.schedule();
+      void safelyAsync(refreshMeetings).then(() => publisher.schedule());
     },
     // A meeting's tracker step holds the client's run flag, so it never interleaves with a WhatsApp run (Task 9).
     exclusive: (clientId, fn) => debouncer.runExclusive(clientId, fn),
@@ -397,14 +403,13 @@ export function createApp(d: AppDeps): App {
         // A finished or failed meeting, or new rows: the workbook is rebuilt, with the meeting counts of now (not the
         // last tick's), as refreshMedia does for files.
         onChanged: () => {
-          safely(refreshMeetings);
-          publisher.schedule();
+          void safelyAsync(refreshMeetings).then(() => publisher.schedule());
         },
       })
     : undefined;
   /** Gives the meetings' health to the health line and to the optional callback (null when meetings are off). */
-  const refreshMeetings = () => {
-    const m = meetings ? meetings.health() : null;
+  const refreshMeetings = async () => {
+    const m = meetings ? await meetings.health() : null;
     health.setMeetings(m);
     d.onMeetingsHealth?.(m);
   };
@@ -559,7 +564,7 @@ export function createApp(d: AppDeps): App {
       void uploader?.run(); // retries that are due
       meetings?.tick(); // discovery when due (MEETING_POLL_MINUTES), then the next due meeting
       backfill?.tick(); // a group waiting for WhatsApp, the spend cap or its first message
-      safely(refreshMeetings);
+      void safelyAsync(refreshMeetings);
       health.setIngestFailures(d.gateway.failedCount());
       refreshMedia();
       if (reportRunner) {

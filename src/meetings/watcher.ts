@@ -2,7 +2,7 @@ import { sanitizeInline } from '../brain/prompt.ts';
 import { isDomain } from '../config/domains.ts';
 import type { ClientConfig } from '../config/groups.ts';
 import { getClientByGroupId } from '../store/clients.ts';
-import { txSync, type Db } from '../store/db.ts';
+import type { Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import { insertFound, knownRecordings, type MeetingAttendee, type MeetingStatus, type NewMeeting } from '../store/meetings.ts';
 import type { Clock } from '../util/clock.ts';
@@ -278,7 +278,7 @@ export class MeetingWatcher {
     let errors = 0;
     for (const c of conferences) {
       signal.throwIfAborted();
-      const known = knownRecordings(this.#db, c.name);
+      const known = await knownRecordings(this.#db, c.name);
       // A conference with no row (no recording yet, or none at all) is listed again every pass while it is inside the
       // 72-hour window: accepted, as it costs one listRecordings call per pass. A conference with a row is settled 24 h
       // after it ended, so a second recording whose file appears later than that is not found: accepted (rare).
@@ -309,9 +309,9 @@ export class MeetingWatcher {
     if (dryRun) return { added: pending.length, skipped, errors, ids: [], found };
     const ids: number[] = [];
     const stored: FoundMeeting[] = [];
-    txSync(this.#db, () => {
+    await this.#db.tx(async (q) => {
       for (const [i, m] of pending.entries()) {
-        const id = insertFound(this.#db, m);
+        const id = await insertFound(q, m);
         if (id === null) skipped++;
         else {
           ids.push(id);

@@ -101,23 +101,23 @@ function byClosed(a: TaskRow, b: TaskRow): number {
 }
 
 /** Inactive clients stay in the workbook, marked "(inactive)". Tabs are in name order. */
-export function loadTrackerView(db: Db, now: Date, health: HealthLine): TrackerView {
+export async function loadTrackerView(db: Db, now: Date, health: HealthLine): Promise<TrackerView> {
   const today = istDate(now);
   const clients = listClients(db, false);
   // Sheet names are assigned in id (creation) order so a new client never changes an existing suffix.
   const byId = [...clients].sort((a, b) => a.id - b.id);
   const assigned = uniqueSheetNames(byId.map((c) => c.name));
   const sheetNames = new Map(byId.map((c, i) => [c.id, assigned[i]!]));
-  const lastMeetings = lastMeetingByClient(db);
+  const lastMeetings = await lastMeetingByClient(db);
   const ordered = [...clients].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.id - b.id);
   return {
     generatedAt: now,
     sentiment: readSentimentEnabled(db),
     today,
     health,
-    unassigned: listUnassigned(db, UNASSIGNED_LIMIT).map((m) => ({ id: m.id, date: istDate(new Date(m.startedAt)), seconds: m.seconds })),
-    unassignedTotal: meetingStats(db, now.toISOString()).unassigned,
-    clients: ordered.map((client) => {
+    unassigned: (await listUnassigned(db, UNASSIGNED_LIMIT)).map((m) => ({ id: m.id, date: istDate(new Date(m.startedAt)), seconds: m.seconds })),
+    unassignedTotal: (await meetingStats(db, now.toISOString())).unassigned,
+    clients: await Promise.all(ordered.map(async (client) => {
       const all = listTasks(db, client.id);
       const notDone = all.filter((t) => t.status !== 'done');
       const last = lastMeetings.get(client.id);
@@ -137,7 +137,7 @@ export function loadTrackerView(db: Db, now: Date, health: HealthLine): TrackerV
           // Owner decision D3: a file deleted for everyone loses its Drive link as well as its description. The Drive copy is kept.
           driveFileId: f.revoked ? null : f.driveFileId,
         })),
-        meetings: listClientMeetings(db, client.id, CLIENT_MEETINGS_LIMIT).map((m) => ({
+        meetings: (await listClientMeetings(db, client.id, CLIENT_MEETINGS_LIMIT)).map((m) => ({
           id: m.id,
           date: istDate(new Date(m.startedAt)),
           title: m.title,
@@ -153,6 +153,6 @@ export function loadTrackerView(db: Db, now: Date, health: HealthLine): TrackerV
         maybeDone: notDone.filter((t) => t.status === 'maybe_done').length,
         nextDeadline: deadlines[0] ?? null,
       };
-    }),
+    })),
   };
 }

@@ -578,35 +578,35 @@ describe('google-auth', () => {
 });
 
 describe('status command', () => {
-  it('prints no report yet on a fresh database', () => {
-    statusCommand(deps());
+  it('prints no report yet on a fresh database', async () => {
+    await statusCommand(deps());
     expect(out()).toContain('no report yet');
     expect(out()).not.toContain('Speech copies');
   });
 
-  it('counts the speech copies given up: last try used, or a provider that is not set up now', () => {
+  it('counts the speech copies given up: last try used, or a provider that is not set up now', async () => {
     const db = openDb(trackerDbPath(dataDir));
-    const id = insertFound(db, {
+    const id = (await insertFound(db, {
       recording: 'conferenceRecords/c1/recordings/r1', conference: 'conferenceRecords/c1', driveFileId: 'file1', meetingCode: null, title: 'Weekly',
       startedAt: '2026-10-18T10:00:00.000Z', endedAt: null, attendees: [], participants: [], clientId: null, matchKind: null, status: 'unassigned',
       driveSeconds: null, createdAt: '2026-10-18T11:00:00.000Z',
-    })!;
+    }))!;
     const add = (provider: 'elevenlabs' | 'openai', ref: string, attempts: number) =>
       db.raw.prepare('INSERT INTO stt_forget (meeting_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, ?)').run(id, provider, ref, '2026-10-18T11:00:00.000Z', attempts);
     add('elevenlabs', 'tr-1', MAX_FORGET_ATTEMPTS); // last try used
     add('elevenlabs', 'tr-2', 1); // still being tried
     add('openai', 'tr-3', 0); // not the provider set up now
-    expect(sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'elevenlabs' })).toBe(2);
-    expect(sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'none' })).toBe(3);
+    expect(await sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'elevenlabs' })).toBe(2);
+    expect(await sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'none' })).toBe(3);
     // With meetings on the local engine, no paid copy will be deleted by the service: all are left.
-    expect(sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'local' })).toBe(3);
+    expect(await sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'local' })).toBe(3);
     db.raw.close();
-    statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
+    await statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
     expect(out()).toContain('Speech copies: 2 speech-to-text copies could not be deleted from the provider; see SETUP (Meeting summaries)');
   });
 
-  it('counts the voice-note copies given up the same way, on a line of their own (Phase 2b)', () => {
-    statusCommand(deps());
+  it('counts the voice-note copies given up the same way, on a line of their own (Phase 2b)', async () => {
+    await statusCommand(deps());
     expect(out()).not.toContain('Voice copies');
     lines.length = 0;
     const db = openDb(trackerDbPath(dataDir));
@@ -623,7 +623,7 @@ describe('status command', () => {
     add('openai', 'tr-3', 0); // not the provider set up now
     expect(mediaSttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'elevenlabs' })).toBe(2);
     db.raw.close();
-    statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', VOICE_STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
+    await statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', VOICE_STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
     expect(out()).toContain('Voice copies: 2 speech-to-text copies of voice notes could not be deleted from the provider; see SETUP (Voice notes)');
     expect(out()).not.toContain('Speech copies');
     // VOICE_STT_PROVIDER decides, not STT_PROVIDER (Task 10): with voice notes off, or on the local engine (which keeps no
@@ -634,7 +634,7 @@ describe('status command', () => {
         DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', VOICE_STT_PROVIDER: voice, STT_API_KEY: 'test-key',
         ...(voice === 'local' ? { STT_LOCAL_BIN: join(dataDir, 'transcribe-cli'), STT_LOCAL_MODEL: join(dataDir, 'model.gguf') } : {}),
       });
-      statusCommand(deps({ env }));
+      await statusCommand(deps({ env }));
       expect(out()).toContain('Voice copies: 3 speech-to-text copies of voice notes could not be deleted from the provider; see SETUP (Voice notes)');
     }
   });

@@ -75,7 +75,11 @@ function addConference(api: FakeMeetingsApi, s: ConfSpec): void {
 }
 
 const rowCount = (db: Db): number => (db.raw.prepare('SELECT COUNT(*) AS n FROM meetings').get() as { n: number }).n;
-const allRows = (db: Db) => (db.raw.prepare('SELECT id FROM meetings ORDER BY id').all() as { id: number }[]).map((r) => getMeeting(db, r.id)!);
+const allRows = async (db: Db) => {
+  const rows = [];
+  for (const r of db.raw.prepare('SELECT id FROM meetings ORDER BY id').all() as { id: number }[]) rows.push((await getMeeting(db, r.id))!);
+  return rows;
+};
 
 function capture(): { lines: string[]; log: Logger } {
   const lines: string[] = [];
@@ -179,7 +183,7 @@ describe('MeetingWatcher.discover', () => {
       },
     });
     await watcher().discover(signal);
-    const [row] = allRows(db);
+    const [row] = await allRows(db);
     expect(row!.attendees).toEqual([{ email: 'asha@studio.example', name: 'C', team: true }, { email: 'x@elsewhere.example', name: 'D', team: false }]);
     expect(row).toMatchObject({ status: 'unassigned', clientId: null }); // the dropped addresses match no client
   });
@@ -190,7 +194,7 @@ describe('MeetingWatcher.discover', () => {
     const w = watcher({ log, clients: [SHARMA, clash], settings: { teamDomains: ['eng.studio.example'] } });
     addConference(api, { id: 'c1', start: ago(3), invite: { title: 'Weekly', attendees: [{ email: 'x@studio.example', name: null, self: false }] } });
     await w.discover(signal);
-    expect(allRows(db)[0]).toMatchObject({ status: 'unassigned', clientId: null });
+    expect((await allRows(db))[0]).toMatchObject({ status: 'unassigned', clientId: null });
     const text = lines.join('');
     expect(text).toContain('MEH');
     expect(text).not.toContain('studio.example');
@@ -201,7 +205,7 @@ describe('MeetingWatcher.discover', () => {
     addConference(api, { id: 'c1', start: ago(3), names: ['Ravi Sharma', ' Owner '] });
     const w = watcher();
     expect(await w.discover(signal)).toEqual({ added: 1, skipped: 0, errors: 0 });
-    const [row] = allRows(db);
+    const [row] = await allRows(db);
     expect(row).toMatchObject({
       recording: 'conferenceRecords/c1/recordings/c1r1',
       conference: 'conferenceRecords/c1',
@@ -228,7 +232,7 @@ describe('MeetingWatcher.discover', () => {
   it('stores two rows for two recordings of one conference', async () => {
     addConference(api, { id: 'c1', start: ago(3), recordings: [{ id: 'a' }, { id: 'b', startTime: ago(2.5) }] });
     expect(await watcher().discover(signal)).toEqual({ added: 2, skipped: 0, errors: 0 });
-    const rows = allRows(db);
+    const rows = await allRows(db);
     expect(rows.map((r) => [r.recording, r.driveFileId, r.startedAt])).toEqual([
       ['conferenceRecords/c1/recordings/a', 'filea', ago(3)],
       ['conferenceRecords/c1/recordings/b', 'fileb', ago(2.5)],
@@ -246,7 +250,7 @@ describe('MeetingWatcher.discover', () => {
     addConference(api, { id: 'c1', start: ago(3), code: null, files: { filec1r1: { name: 'Sharma Interiors sync (2026-10-23 10:00 GMT+05:30).mp4' } } });
     addConference(api, { id: 'c2', start: ago(2), invite: { title: '  ', attendees: [] }, files: { filec2r1: { name: 'Mehta Foods call (2026-10-23 11:00 GMT+05:30)' } } });
     expect(await watcher().discover(signal)).toEqual({ added: 2, skipped: 0, errors: 0 });
-    const [a, b] = allRows(db);
+    const [a, b] = await allRows(db);
     expect(a).toMatchObject({ title: 'Sharma Interiors sync', meetingCode: null, attendees: [], clientId: 1, matchKind: 'title', status: 'queued' });
     expect(b).toMatchObject({ title: 'Mehta Foods call', clientId: 2, status: 'queued' });
     expect(api.callsOf('findInvite').map((c) => c[0])).toEqual(['code-c2']); // no code, no invite lookup
@@ -261,7 +265,7 @@ describe('MeetingWatcher.discover', () => {
       names: ['  ', 'Ravi\tS', 'z'.repeat(150)],
     });
     await watcher().discover(signal);
-    const [row] = allRows(db);
+    const [row] = await allRows(db);
     expect(row!.title.startsWith('Sharma Interiors x')).toBe(true);
     expect([...row!.title]).toHaveLength(200);
     expect(row!.attendees).toHaveLength(1);
@@ -275,7 +279,7 @@ describe('MeetingWatcher.discover', () => {
     addConference(api, { id: 'c1', start: ago(3), invite: { title: 'Weekly', attendees: [{ email: 'om@mail.mehtafoods.example', name: null, self: false }] } });
     addConference(api, { id: 'c2', start: ago(2), invite: { title: 'Weekly', attendees: [{ email: 'x@elsewhere.example', name: null, self: false }] } });
     await watcher().discover(signal);
-    const [a, b] = allRows(db);
+    const [a, b] = await allRows(db);
     expect(a).toMatchObject({ clientId: 2, matchKind: 'domain', status: 'queued' });
     expect(b).toMatchObject({ clientId: null, matchKind: null, status: 'unassigned', title: 'Weekly' });
   });
@@ -285,7 +289,7 @@ describe('MeetingWatcher.discover', () => {
     addConference(api, { id: 'c2', start: ago(4), files: { filec2r1: { durationMs: 180 * 60_000 } } });
     addConference(api, { id: 'c3', start: ago(3), files: { filec3r1: { durationMs: null } } });
     await watcher().discover(signal);
-    const [a, b, c] = allRows(db);
+    const [a, b, c] = await allRows(db);
     expect(a).toMatchObject({ status: 'too_long', clientId: 1, matchKind: 'title', driveSeconds: 181 * 60 });
     expect(b).toMatchObject({ status: 'queued', driveSeconds: 180 * 60 });
     expect(c).toMatchObject({ status: 'queued', driveSeconds: null }); // left to ffmpeg
@@ -296,7 +300,7 @@ describe('MeetingWatcher.discover', () => {
     addConference(api, { id: 'c1', start: ago(3), invite, names: ['Asha'] });
     addConference(api, { id: 'c2', start: ago(2), invite, files: { filec2r1: { durationMs: 400 * 60_000 } } });
     await watcher().discover(signal);
-    for (const row of allRows(db)) {
+    for (const row of (await allRows(db))) {
       expect(row).toMatchObject({ status: 'internal', title: '', attendees: [], participants: [], clientId: null, matchKind: null, endedAt: null, driveSeconds: null });
     }
     expect(rowCount(db)).toBe(2);
@@ -308,7 +312,7 @@ describe('MeetingWatcher.discover', () => {
     addConference(api, { id: 'c1', start: ago(71) });
     await watcher().discover(signal);
     expect(api.callsOf('listConferences')).toEqual([[ago(72), NOW]]);
-    expect(allRows(db).map((r) => r.conference)).toEqual(['conferenceRecords/c1']);
+    expect((await allRows(db)).map((r) => r.conference)).toEqual(['conferenceRecords/c1']);
   });
 
   it('never fetches conferences before the since date (midnight IST)', async () => {
@@ -316,7 +320,7 @@ describe('MeetingWatcher.discover', () => {
     addConference(api, { id: 'after', start: '2026-10-21T18:30:00.000Z' });
     await watcher({ settings: { since: '2026-10-22' } }).discover(signal);
     expect(api.callsOf('listConferences')).toEqual([['2026-10-21T18:30:00.000Z', NOW]]);
-    expect(allRows(db).map((r) => r.conference)).toEqual(['conferenceRecords/after']);
+    expect((await allRows(db)).map((r) => r.conference)).toEqual(['conferenceRecords/after']);
   });
 
   it('asks nothing when the since date is still ahead', async () => {
@@ -329,7 +333,7 @@ describe('MeetingWatcher.discover', () => {
       const id = `old${i}`;
       const start = ago(70 - i * 0.2); // all inside the window, all ended more than 24 h ago
       addConference(api, { id, start });
-      insertFound(db, {
+      await insertFound(db, {
         recording: `conferenceRecords/${id}/recordings/${id}r1`, conference: `conferenceRecords/${id}`, driveFileId: `file${id}r1`, meetingCode: null,
         title: '', startedAt: start, endedAt: null, attendees: [], participants: [], clientId: null, matchKind: null, status: 'unassigned',
         driveSeconds: null, createdAt: NOW,
@@ -371,7 +375,7 @@ describe('MeetingWatcher.discover', () => {
     };
     const { lines, log } = capture();
     expect(await watcher({ log }).discover(signal)).toEqual({ added: 3, skipped: 0, errors: 1 });
-    const rows = allRows(db);
+    const rows = await allRows(db);
     expect(rows.map((r) => [r.recording, r.status])).toEqual([
       ['conferenceRecords/c2/recordings/c2r1', 'queued'],
       ['conferenceRecords/c3/recordings/a', 'no_access'],
@@ -397,7 +401,7 @@ describe('MeetingWatcher.discover', () => {
     addConference(api, { id: 'c1', start: ago(3), invite, names: ['Asha'] });
     api.files.delete('filec1r1');
     await watcher().discover(signal);
-    expect(allRows(db)[0]).toMatchObject({
+    expect((await allRows(db))[0]).toMatchObject({
       status: 'no_access', errorCode: 'http_404', title: '', attendees: [], participants: [], clientId: null, matchKind: null, endedAt: null, driveSeconds: null,
     });
   });
@@ -406,7 +410,7 @@ describe('MeetingWatcher.discover', () => {
     addConference(api, { id: 'c1', start: ago(3), code: null });
     api.files.delete('filec1r1');
     await watcher().discover(signal);
-    expect(allRows(db)[0]).toMatchObject({ status: 'no_access', title: '', clientId: null, errorCode: 'http_404' });
+    expect((await allRows(db))[0]).toMatchObject({ status: 'no_access', title: '', clientId: null, errorCode: 'http_404' });
   });
 
   it('ignores a client email domain that is, or is under, a team domain, logging the client code only', async () => {
@@ -416,7 +420,7 @@ describe('MeetingWatcher.discover', () => {
     addConference(api, { id: 'c1', start: ago(4), invite: { title: 'Weekly', attendees: [{ email: 'x@elsewhere.example', name: null, self: false }, { email: 'dev@eng.studio.example', name: null, self: false }] } });
     addConference(api, { id: 'c2', start: ago(3), invite: { title: 'Weekly', attendees: [{ email: 'om@mehtafoods.example', name: null, self: false }] } });
     await w.discover(signal);
-    expect(allRows(db).map((r) => [r.status, r.clientId])).toEqual([['unassigned', null], ['queued', 2]]);
+    expect((await allRows(db)).map((r) => [r.status, r.clientId])).toEqual([['unassigned', null], ['queued', 2]]);
     const text = lines.join('');
     expect(text).toContain('MEH');
     expect(text).not.toContain('studio.example');
@@ -442,13 +446,13 @@ describe('MeetingWatcher.discover', () => {
     addConference(api, { id: 'c1', start: ago(5), invite: { title: 'Gupta Traders intro', attendees: [] } });
     const w = watcher();
     await w.discover(signal);
-    expect(allRows(db)[0]).toMatchObject({ status: 'unassigned' });
+    expect((await allRows(db))[0]).toMatchObject({ status: 'unassigned' });
 
     syncClients(db, [SHARMA, MEHTA, GUPTA]); // id 3
     w.setClients([SHARMA, MEHTA, GUPTA]);
     addConference(api, { id: 'c2', start: ago(4), invite: { title: 'Gupta Traders intro', attendees: [] } });
     await w.discover(signal);
-    expect(allRows(db)[1]).toMatchObject({ status: 'queued', clientId: 3, matchKind: 'title' });
+    expect((await allRows(db))[1]).toMatchObject({ status: 'queued', clientId: 3, matchKind: 'title' });
   });
 
   it('ignores a configured client whose tracker row is inactive or missing', async () => {
@@ -456,7 +460,7 @@ describe('MeetingWatcher.discover', () => {
     addConference(api, { id: 'c1', start: ago(5) });
     addConference(api, { id: 'c2', start: ago(4), invite: { title: 'Gupta Traders intro', attendees: [] } });
     await watcher({ clients: [SHARMA, MEHTA, GUPTA] }).discover(signal);
-    expect(allRows(db).map((r) => r.status)).toEqual(['unassigned', 'unassigned']);
+    expect((await allRows(db)).map((r) => r.status)).toEqual(['unassigned', 'unassigned']);
   });
 });
 
@@ -476,7 +480,7 @@ describe('MeetingWatcher.backfill', () => {
 
     const real = await w.backfill('2026-09-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z', signal);
     expect(real.added).toBe(2);
-    expect(real.ids).toEqual(allRows(db).map((r) => r.id));
+    expect(real.ids).toEqual((await allRows(db)).map((r) => r.id));
     expect(await w.backfill('2026-09-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z', signal)).toMatchObject({ added: 0, skipped: 2, ids: [] });
   });
 });

@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { SpendCapReachedError } from '../../src/brain/paidCall.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
-import { txSync } from '../../src/store/db.ts';
 import { SttHttpError, SttJobError, SttJobLostError, SttNoAnswerError } from '../../src/stt/http.ts';
 import { SttBookingError, withSttHold, type SttBooking } from '../../src/stt/paidStt.ts';
 import { manualClock } from '../../src/util/clock.ts';
@@ -20,7 +19,7 @@ describe('withSttHold', () => {
   it('books what the call reports as stt and returns the result', async () => {
     const { spend, rows } = await setup();
     const booked: SttBooking[] = [];
-    const out = await withSttHold(spend, 0.2, 'meeting 4 part 1', async () => ({ result: 'segments', costUsd: 0.05 }), { onBooked: (b) => booked.push(b) });
+    const out = await withSttHold(spend, 0.2, 'meeting 4 part 1', async () => ({ result: 'segments', costUsd: 0.05 }), { onBooked: (b) => void booked.push(b) });
     expect(out).toEqual({ result: 'segments', costUsd: 0.05 });
     expect(rows()).toEqual([{ kind: 'stt', usd: 0.05, detail: 'meeting 4 part 1' }]);
     expect(booked).toEqual([{ outcome: 'actual', usd: 0.05 }]);
@@ -53,7 +52,7 @@ describe('withSttHold', () => {
     const { spend, rows } = await setup();
     const booked: SttBooking[] = [];
     const err = new SttHttpError(500);
-    await expect(withSttHold(spend, 0.2, 'meeting 4 part 1', () => Promise.reject(err), { onBooked: (b) => booked.push(b) })).rejects.toBe(err);
+    await expect(withSttHold(spend, 0.2, 'meeting 4 part 1', () => Promise.reject(err), { onBooked: (b) => void booked.push(b) })).rejects.toBe(err);
     expect(rows()).toEqual([]);
     expect(booked).toEqual([{ outcome: 'none', usd: 0 }]);
     expectNoHold(spend);
@@ -67,7 +66,7 @@ describe('withSttHold', () => {
   ])('books the ceiling as stt on %s, then throws it again', async (_name, err, detail) => {
     const { spend, rows } = await setup();
     const booked: SttBooking[] = [];
-    await expect(withSttHold(spend, 0.2, 'meeting 4 part 1', () => Promise.reject(err), { onBooked: (b) => booked.push(b) })).rejects.toBe(err);
+    await expect(withSttHold(spend, 0.2, 'meeting 4 part 1', () => Promise.reject(err), { onBooked: (b) => void booked.push(b) })).rejects.toBe(err);
     expect(rows()).toEqual([{ kind: 'stt', usd: 0.2, detail }]);
     expect(booked).toEqual([{ outcome: 'ceiling', usd: 0.2 }]);
     expectNoHold(spend);
@@ -111,7 +110,7 @@ describe('withSttHold', () => {
     const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 1 });
     const ownerFailed = new Error('part write refused');
     const err = await withSttHold(spend, 0.2, 'meeting 4 part 1', async () => ({ result: 'x', costUsd: 0.05 }), {
-      atomically: (fn) => txSync(db, fn),
+      atomically: (fn) => db.tx(fn),
       onBooked: (_b, r) => {
         expect(r).toBe('x');
         throw ownerFailed;

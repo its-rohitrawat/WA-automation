@@ -52,7 +52,8 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
   // One task from before priority levels: no level, shown as "—".
   db.raw.prepare("UPDATE tasks SET priority_level = NULL, priority_source = NULL, sentiment = NULL WHERE id = 5").run();
   db.raw.prepare("UPDATE clients SET sentiment = 'frustrated', sentiment_at = ? WHERE id = 1").run(day(0.1));
-  insertFound(db, {
+  // Not awaited (this setup is synchronous): the engine runs statements in order, so every route reads it.
+  void insertFound(db, {
     recording: 'conferenceRecords/a/recordings/b', conference: 'conferenceRecords/a', driveFileId: 'd1', meetingCode: null, title: 'Weekly sync',
     startedAt: day(1), endedAt: null, attendees: [], participants: [], clientId: null, matchKind: null, status: 'unassigned', driveSeconds: 1800, createdAt: day(1),
   });

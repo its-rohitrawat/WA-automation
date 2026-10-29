@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { MeetingSummarySchema, type MeetingSummary } from '../brain/meetingSchema.ts';
 import type { ProviderId, ProviderOrLocal, Segment } from '../stt/types.ts';
-import { txSync, type Db } from './db.ts';
+import type { Sql } from './db.ts';
 
 export const MEETING_STATUSES = ['unassigned', 'internal', 'queued', 'done', 'skipped', 'too_long', 'no_access', 'failed'] as const;
 export type MeetingStatus = (typeof MEETING_STATUSES)[number];
@@ -264,14 +264,14 @@ function notQueued(what: string, id: number, extra = ''): never {
  * Records a recording found in Meet. Returns the new row's id, or null when the recording is already known (nothing
  * changes). startedAt and endedAt are stored in canonical form; an unreadable time throws.
  */
-export function insertFound(db: Db, m: NewMeeting): number | null {
-  const r = db
-    .raw.prepare(`INSERT INTO meetings (recording, conference, drive_file_id, meeting_code, title, started_at, ended_at, attendees, participants, client_id,
+export async function insertFound(db: Sql, m: NewMeeting): Promise<number | null> {
+  const r = await db.get<{ id: number }>(
+    `INSERT INTO meetings (recording, conference, drive_file_id, meeting_code, title, started_at, ended_at, attendees, participants, client_id,
         match_kind, status, drive_seconds, error_code, note, created_at, updated_at)
       VALUES (@recording, @conference, @driveFileId, @meetingCode, @title, @startedAt, @endedAt, @attendees, @participants, @clientId,
         @matchKind, @status, @driveSeconds, @errorCode, @note, @createdAt, @createdAt)
-      ON CONFLICT (recording) DO NOTHING`)
-    .run({
+      ON CONFLICT (recording) DO NOTHING RETURNING id`,
+    {
       recording: m.recording, conference: m.conference, driveFileId: m.driveFileId, meetingCode: m.meetingCode, title: m.title,
       clientId: m.clientId, matchKind: m.matchKind, status: m.status, driveSeconds: m.driveSeconds,
       errorCode: m.errorCode ?? null,
@@ -281,18 +281,19 @@ export function insertFound(db: Db, m: NewMeeting): number | null {
       createdAt: canonical('insertFound', 'createdAt', m.createdAt),
       attendees: toJson('insertFound', 'attendees', AttendeesSchema, m.attendees),
       participants: toJson('insertFound', 'participants', ParticipantsSchema, m.participants),
-    });
-  return r.changes === 0 ? null : Number(r.lastInsertRowid);
+    },
+  );
+  return r?.id ?? null;
 }
 
-export function knownRecordings(db: Db, conference: string): Set<string> {
-  const rows = db.raw.prepare('SELECT recording FROM meetings WHERE conference = ?').all(conference) as { recording: string }[];
+export async function knownRecordings(db: Sql, conference: string): Promise<Set<string>> {
+  const rows = await db.all<{ recording: string }>('SELECT recording FROM meetings WHERE conference = ?', [conference]);
   return new Set(rows.map((r) => r.recording));
 }
 
 /** Throws a MeetingRowError when one of the row's JSON columns cannot be read. */
-export function getMeeting(db: Db, id: number): MeetingRow | undefined {
-  const r = db.raw.prepare(`SELECT ${COLUMNS} FROM meetings WHERE id = ?`).get(id) as RawMeeting | undefined;
+export async function getMeeting(db: Sql, id: number): Promise<MeetingRow | undefined> {
+  const r = await db.get<RawMeeting>(`SELECT ${COLUMNS} FROM meetings WHERE id = ?`, [id]);
   return r ? toRow(r) : undefined;
 }
 
@@ -309,20 +310,22 @@ export interface MeetingState {
   updatedAt: string;
 }
 
-export function getMeetingState(db: Db, id: number): MeetingState | undefined {
-  return db
-    .raw.prepare(`SELECT id, status, stage, attempts, error_code AS errorCode, next_attempt_at AS nextAttemptAt, client_id AS clientId, updated_at AS updatedAt
-      FROM meetings WHERE id = ?`)
-    .get(id) as MeetingState | undefined;
+export async function getMeetingState(db: Sql, id: number): Promise<MeetingState | undefined> {
+  return db.get<MeetingState>(
+    `SELECT id, status, stage, attempts, error_code AS errorCode, next_attempt_at AS nextAttemptAt, client_id AS clientId, updated_at AS updatedAt
+      FROM meetings WHERE id = ?`,
+    [id],
+  );
 }
 
 /** Queued meetings whose next attempt is due, oldest meeting first. */
-export function dueMeetingIds(db: Db, nowIso: string, limit: number): number[] {
+export async function dueMeetingIds(db: Sql, nowIso: string, limit: number): Promise<number[]> {
   return (
-    db
-      .raw.prepare(`SELECT id FROM meetings WHERE status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-        ORDER BY started_at, id LIMIT ?`)
-      .all(canonical('dueMeetingIds', 'nowIso', nowIso), limit) as { id: number }[]
+    await db.all<{ id: number }>(
+      `SELECT id FROM meetings WHERE status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+        ORDER BY started_at, id LIMIT ?`,
+      [canonical('dueMeetingIds', 'nowIso', nowIso), limit],
+    )
   ).map((r) => r.id);
 }
 
@@ -338,11 +341,16 @@ export function dueMeetingIds(db: Db, nowIso: string, limit: number): number[] {
  * A deferral that should not count passes the pre-claim count back to deferMeeting as `attempts`.
  * Returns false when the meeting is not queued or not due.
  */
-export function claimMeeting(db: Db, id: number, c: { nextAttemptAt: string; at: string }): boolean {
+export async function claimMeeting(db: Sql, id: number, c: { nextAttemptAt: string; at: string }): Promise<boolean> {
   const params = { id, nextAttemptAt: canonical('claimMeeting', 'nextAttemptAt', c.nextAttemptAt), at: canonical('claimMeeting', 'at', c.at) };
   return (
-    db.raw.prepare(`UPDATE meetings SET attempts = attempts + 1, next_attempt_at = @nextAttemptAt, error_code = NULL, updated_at = @at
-      WHERE id = @id AND status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= @at)`).run(params).changes === 1
+    (
+      await db.run(
+        `UPDATE meetings SET attempts = attempts + 1, next_attempt_at = @nextAttemptAt, error_code = NULL, updated_at = @at
+      WHERE id = @id AND status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= @at)`,
+        params,
+      )
+    ).changes === 1
   );
 }
 
@@ -364,7 +372,7 @@ export interface StageFields {
  * state (error code, attempts, next attempt) is cleared. Throws, writing nothing, when the meeting is missing or not
  * queued, or the move is to the same or an earlier stage.
  */
-export function advanceStage(db: Db, id: number, stage: MeetingStage, fields: Partial<StageFields>, at: string): void {
+export async function advanceStage(db: Sql, id: number, stage: MeetingStage, fields: Partial<StageFields>, at: string): Promise<void> {
   const f = fields;
   const params = {
     id,
@@ -380,18 +388,21 @@ export function advanceStage(db: Db, id: number, stage: MeetingStage, fields: Pa
     attendees: f.attendees === undefined ? null : toJson('advanceStage', 'attendees', AttendeesSchema, f.attendees),
     participants: f.participants === undefined ? null : toJson('advanceStage', 'participants', ParticipantsSchema, f.participants),
   };
-  txSync(db, () => {
-    const cur = db.raw.prepare('SELECT status, stage FROM meetings WHERE id = ?').get(id) as { status: MeetingStatus; stage: MeetingStage } | undefined;
+  await db.tx(async (q) => {
+    const cur = await q.get<{ status: MeetingStatus; stage: MeetingStage }>('SELECT status, stage FROM meetings WHERE id = ?', [id]);
     if (cur === undefined) throw new Error(`advanceStage: no meeting ${id}`);
     if (cur.status !== 'queued') notQueued('advanceStage', id);
     if (MEETING_STAGES.indexOf(stage) <= MEETING_STAGES.indexOf(cur.stage)) {
       throw new Error(`advanceStage: meeting ${id} cannot move from ${cur.stage} to ${stage}`);
     }
-    db.raw.prepare(`UPDATE meetings SET stage = @stage, audio_path = COALESCE(@audioPath, audio_path), audio_seconds = COALESCE(@audioSeconds, audio_seconds),
+    await q.run(
+      `UPDATE meetings SET stage = @stage, audio_path = COALESCE(@audioPath, audio_path), audio_seconds = COALESCE(@audioSeconds, audio_seconds),
         transcript = COALESCE(@transcript, transcript), summary = COALESCE(@summary, summary), doc_file_id = COALESCE(@docFileId, doc_file_id),
         note = COALESCE(@note, note), title = COALESCE(@title, title), attendees = COALESCE(@attendees, attendees),
         participants = COALESCE(@participants, participants), error_code = NULL, attempts = 0, next_attempt_at = NULL, updated_at = @at
-      WHERE id = @id`).run(params);
+      WHERE id = @id`,
+      params,
+    );
   });
 }
 
@@ -401,12 +412,12 @@ export function advanceStage(db: Db, id: number, stage: MeetingStage, fields: Pa
  * stored values. The retry state is left as it is. Throws, writing nothing, when the meeting is missing, not queued or
  * past stage found.
  */
-export function refreshMeetingFacts(
-  db: Db,
+export async function refreshMeetingFacts(
+  db: Sql,
   id: number,
   f: { title: string; attendees: MeetingAttendee[]; participants: string[] },
   at: string,
-): void {
+): Promise<void> {
   const params = {
     id,
     at: canonical('refreshMeetingFacts', 'at', at),
@@ -414,10 +425,11 @@ export function refreshMeetingFacts(
     attendees: f.attendees.length === 0 ? null : toJson('refreshMeetingFacts', 'attendees', AttendeesSchema, f.attendees),
     participants: f.participants.length === 0 ? null : toJson('refreshMeetingFacts', 'participants', ParticipantsSchema, f.participants),
   };
-  const n = db
-    .raw.prepare(`UPDATE meetings SET title = COALESCE(@title, title), attendees = COALESCE(@attendees, attendees),
-        participants = COALESCE(@participants, participants), updated_at = @at WHERE id = @id AND status = 'queued' AND stage = 'found'`)
-    .run(params).changes;
+  const { changes: n } = await db.run(
+    `UPDATE meetings SET title = COALESCE(@title, title), attendees = COALESCE(@attendees, attendees),
+        participants = COALESCE(@participants, participants), updated_at = @at WHERE id = @id AND status = 'queued' AND stage = 'found'`,
+    params,
+  );
   if (n === 0) notQueued('refreshMeetingFacts', id, ' at stage found');
 }
 
@@ -425,17 +437,17 @@ export function refreshMeetingFacts(
  * Meetings of any status whose speech parts may include one left inflight, for the speech recovery at processor start.
  * A text match, so it reads no JSON; the caller checks the parts.
  */
-export function meetingIdsWithInflightParts(db: Db): number[] {
-  return (db.raw.prepare(`SELECT id FROM meetings WHERE instr(stt_parts, '"inflight"') > 0 ORDER BY id`).all() as { id: number }[]).map((r) => r.id);
+export async function meetingIdsWithInflightParts(db: Sql): Promise<number[]> {
+  return (await db.all<{ id: number }>(`SELECT id FROM meetings WHERE instr(stt_parts, '"inflight"') > 0 ORDER BY id`)).map((r) => r.id);
 }
 
 /**
  * Stores speech-part bookkeeping whatever the meeting's status. Only for booking parts left inflight (bookStuckParts),
  * which must happen even after the meeting has failed. Throws when the meeting is missing.
  */
-export function writeStuckSttParts(db: Db, id: number, parts: SttPartRow[], at: string): void {
+export async function writeStuckSttParts(db: Sql, id: number, parts: SttPartRow[], at: string): Promise<void> {
   const json = toJson('writeStuckSttParts', 'stt_parts', SttPartsSchema, parts);
-  const n = db.raw.prepare('UPDATE meetings SET stt_parts = ?, updated_at = ? WHERE id = ?').run(json, canonical('writeStuckSttParts', 'at', at), id).changes;
+  const { changes: n } = await db.run('UPDATE meetings SET stt_parts = ?, updated_at = ? WHERE id = ?', [json, canonical('writeStuckSttParts', 'at', at), id]);
   if (n === 0) throw new Error(`writeStuckSttParts: no meeting ${id}`);
 }
 
@@ -452,30 +464,35 @@ export interface SttForgetRow {
  * Notes a provider copy to delete. A copy already noted is kept as it is. ON CONFLICT rather than OR IGNORE: OR IGNORE
  * would also skip a CHECK failure silently, and that copy would never be deleted.
  */
-export function addSttForget(db: Db, f: { meetingId: number; provider: ProviderId; ref: string; at: string }): void {
-  db.raw.prepare('INSERT INTO stt_forget (meeting_id, provider, ref, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (provider, ref) DO NOTHING')
-    .run(f.meetingId, f.provider, f.ref, canonical('addSttForget', 'at', f.at));
+export async function addSttForget(db: Sql, f: { meetingId: number; provider: ProviderId; ref: string; at: string }): Promise<void> {
+  await db.run('INSERT INTO stt_forget (meeting_id, provider, ref, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (provider, ref) DO NOTHING', [
+    f.meetingId,
+    f.provider,
+    f.ref,
+    canonical('addSttForget', 'at', f.at),
+  ]);
 }
 
 /** Copies due for a try at nowIso with fewer than maxAttempts tries, oldest first; optionally one meeting's only. */
-export function pendingSttForgets(db: Db, o: { nowIso: string; maxAttempts: number; meetingId?: number }): SttForgetRow[] {
-  return db
-    .raw.prepare(`SELECT id, meeting_id AS meetingId, provider, ref, attempts FROM stt_forget
-      WHERE attempts < ? AND (next_try_at IS NULL OR next_try_at <= ?) AND (? IS NULL OR meeting_id = ?) ORDER BY id`)
-    .all(o.maxAttempts, canonical('pendingSttForgets', 'nowIso', o.nowIso), o.meetingId ?? null, o.meetingId ?? null) as SttForgetRow[];
+export async function pendingSttForgets(db: Sql, o: { nowIso: string; maxAttempts: number; meetingId?: number }): Promise<SttForgetRow[]> {
+  return db.all<SttForgetRow>(
+    `SELECT id, meeting_id AS meetingId, provider, ref, attempts FROM stt_forget
+      WHERE attempts < ? AND (next_try_at IS NULL OR next_try_at <= ?) AND (? IS NULL OR meeting_id = ?) ORDER BY id`,
+    [o.maxAttempts, canonical('pendingSttForgets', 'nowIso', o.nowIso), o.meetingId ?? null, o.meetingId ?? null],
+  );
 }
 
 /**
  * Counts one try and sets when the next may start, before the provider is asked: a try cut off by a crash still counts,
  * and a restart does not try again before nextTryAt.
  */
-export function countSttForgetAttempt(db: Db, id: number, nextTryAt: string): void {
-  db.raw.prepare('UPDATE stt_forget SET attempts = attempts + 1, next_try_at = ? WHERE id = ?').run(canonical('countSttForgetAttempt', 'nextTryAt', nextTryAt), id);
+export async function countSttForgetAttempt(db: Sql, id: number, nextTryAt: string): Promise<void> {
+  await db.run('UPDATE stt_forget SET attempts = attempts + 1, next_try_at = ? WHERE id = ?', [canonical('countSttForgetAttempt', 'nextTryAt', nextTryAt), id]);
 }
 
 /** The provider has deleted its copy. */
-export function deleteSttForget(db: Db, id: number): void {
-  db.raw.prepare('DELETE FROM stt_forget WHERE id = ?').run(id);
+export async function deleteSttForget(db: Sql, id: number): Promise<void> {
+  await db.run('DELETE FROM stt_forget WHERE id = ?', [id]);
 }
 
 /**
@@ -484,16 +501,23 @@ export function deleteSttForget(db: Db, id: number): void {
  * which keeps no copy), so forgetPending skips it. A count only,
  * for `cli status`.
  */
-export function sttForgetsGivenUp(db: Db, o: { maxAttempts: number; provider: ProviderOrLocal | 'none' }): number {
-  return (
-    db.raw.prepare('SELECT COUNT(*) AS n FROM stt_forget WHERE attempts >= ? OR provider <> ?').get(o.maxAttempts, o.provider) as { n: number }
-  ).n;
+export async function sttForgetsGivenUp(db: Sql, o: { maxAttempts: number; provider: ProviderOrLocal | 'none' }): Promise<number> {
+  return (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM stt_forget WHERE attempts >= ? OR provider <> ?', [o.maxAttempts, o.provider]))!.n;
+}
+
+/** The stt_parts column value, checked against the stored shape. S1 only: for the shutdown write in src/meetings/sttParts.ts. */
+export function sttPartsJson(what: string, parts: SttPartRow[]): string {
+  return toJson(what, 'stt_parts', SttPartsSchema, parts);
 }
 
 /** Stores a queued meeting's speech-part bookkeeping as it is now (written before and after every part's call). Throws when not queued. */
-export function setSttParts(db: Db, id: number, parts: SttPartRow[], at: string): void {
+export async function setSttParts(db: Sql, id: number, parts: SttPartRow[], at: string): Promise<void> {
   const json = toJson('setSttParts', 'stt_parts', SttPartsSchema, parts);
-  const n = db.raw.prepare("UPDATE meetings SET stt_parts = ?, updated_at = ? WHERE id = ? AND status = 'queued'").run(json, canonical('setSttParts', 'at', at), id).changes;
+  const { changes: n } = await db.run("UPDATE meetings SET stt_parts = ?, updated_at = ? WHERE id = ? AND status = 'queued'", [
+    json,
+    canonical('setSttParts', 'at', at),
+    id,
+  ]);
   if (n === 0) notQueued('setSttParts', id);
 }
 
@@ -502,22 +526,23 @@ export function setSttParts(db: Db, id: number, parts: SttPartRow[], at: string)
  * it is: a deferral that doesn't count (spend cap, busy, settings) passes the count from before its claim. With neither,
  * the count is left as the claim made it. Throws when the meeting is not queued.
  */
-export function deferMeeting(
-  db: Db,
+export async function deferMeeting(
+  db: Sql,
   id: number,
   d: { errorCode: string; nextAttemptAt: string; at: string } & ({ countAttempt?: boolean; attempts?: never } | { attempts: number; countAttempt?: never }),
-): void {
-  const n = db
-    .raw.prepare(`UPDATE meetings SET error_code = @errorCode, next_attempt_at = @nextAttemptAt, attempts = COALESCE(@attempts, attempts + @inc), updated_at = @at
-      WHERE id = @id AND status = 'queued'`)
-    .run({
+): Promise<void> {
+  const { changes: n } = await db.run(
+    `UPDATE meetings SET error_code = @errorCode, next_attempt_at = @nextAttemptAt, attempts = COALESCE(@attempts, attempts + @inc), updated_at = @at
+      WHERE id = @id AND status = 'queued'`,
+    {
       id,
       errorCode: d.errorCode,
       nextAttemptAt: canonical('deferMeeting', 'nextAttemptAt', d.nextAttemptAt),
       inc: d.countAttempt ? 1 : 0,
       attempts: d.attempts ?? null,
       at: canonical('deferMeeting', 'at', d.at),
-    }).changes;
+    },
+  );
   if (n === 0) notQueued('deferMeeting', id);
 }
 
@@ -526,12 +551,15 @@ export function deferMeeting(
  * started with the local engine (MeetingQueue calls this for STT_PROVIDER=local only), so they need not wait out the rest of their hour (plan 2026-10-28-meetings-local-stt.md,
  * Task 3). Only the next attempt moves; the error code and the attempt count stay. Returns how many.
  */
-export function releaseSttNoneWaits(db: Db, at: string): number {
+export async function releaseSttNoneWaits(db: Sql, at: string): Promise<number> {
   const now = canonical('releaseSttNoneWaits', 'at', at);
-  return db
-    .raw.prepare(`UPDATE meetings SET next_attempt_at = @now, updated_at = @now
-      WHERE status = 'queued' AND error_code = 'stt_none' AND next_attempt_at > @now`)
-    .run({ now }).changes;
+  return (
+    await db.run(
+      `UPDATE meetings SET next_attempt_at = @now, updated_at = @now
+      WHERE status = 'queued' AND error_code = 'stt_none' AND next_attempt_at > @now`,
+      { now },
+    )
+  ).changes;
 }
 
 /**
@@ -539,8 +567,8 @@ export function releaseSttNoneWaits(db: Db, at: string): number {
  * run in hand (1), so passing failures spread over many parts never add up to a final one (review fix 2). Called inside
  * the part's own write. The next attempt and the error code are left as they are.
  */
-export function noteMeetingProgress(db: Db, id: number): void {
-  db.raw.prepare(`UPDATE meetings SET attempts = MIN(attempts, 1) WHERE id = ? AND status = 'queued'`).run(id);
+export async function noteMeetingProgress(db: Sql, id: number): Promise<void> {
+  await db.run(`UPDATE meetings SET attempts = MIN(attempts, 1) WHERE id = ? AND status = 'queued'`, [id]);
 }
 
 /**
@@ -548,18 +576,19 @@ export function noteMeetingProgress(db: Db, id: number): void {
  * audioPath and audioSeconds, when given, are stored in the same write (a measured too_long keeps its audio); not given,
  * the stored values stay. Throws when not queued.
  */
-export function failMeeting(
-  db: Db,
+export async function failMeeting(
+  db: Sql,
   id: number,
   f: { status: 'failed' | 'no_access' | 'too_long'; errorCode: string; at: string; audioPath?: string; audioSeconds?: number },
-): void {
-  const n = db
-    .raw.prepare(`UPDATE meetings SET status = @status, error_code = @errorCode, next_attempt_at = NULL, audio_path = COALESCE(@audioPath, audio_path),
-        audio_seconds = COALESCE(@audioSeconds, audio_seconds), updated_at = @at WHERE id = @id AND status = 'queued'`)
-    .run({
+): Promise<void> {
+  const { changes: n } = await db.run(
+    `UPDATE meetings SET status = @status, error_code = @errorCode, next_attempt_at = NULL, audio_path = COALESCE(@audioPath, audio_path),
+        audio_seconds = COALESCE(@audioSeconds, audio_seconds), updated_at = @at WHERE id = @id AND status = 'queued'`,
+    {
       id, status: f.status, errorCode: f.errorCode, audioPath: f.audioPath ?? null, audioSeconds: f.audioSeconds ?? null,
       at: canonical('failMeeting', 'at', f.at),
-    }).changes;
+    },
+  );
   if (n === 0) notQueued('failMeeting', id);
 }
 
@@ -567,11 +596,12 @@ export function failMeeting(
  * A queued meeting at stage doc or later is in the tracker: done, stage tracked. A note, when given, replaces the stored
  * one. Throws when the meeting is not queued or not yet at stage doc.
  */
-export function finishMeeting(db: Db, id: number, f: { note?: string; at: string }): void {
-  const n = db
-    .raw.prepare(`UPDATE meetings SET status = 'done', stage = 'tracked', note = COALESCE(@note, note), error_code = NULL, next_attempt_at = NULL,
-      updated_at = @at WHERE id = @id AND status = 'queued' AND stage IN ('doc', 'tracked')`)
-    .run({ id, note: f.note ?? null, at: canonical('finishMeeting', 'at', f.at) }).changes;
+export async function finishMeeting(db: Sql, id: number, f: { note?: string; at: string }): Promise<void> {
+  const { changes: n } = await db.run(
+    `UPDATE meetings SET status = 'done', stage = 'tracked', note = COALESCE(@note, note), error_code = NULL, next_attempt_at = NULL,
+      updated_at = @at WHERE id = @id AND status = 'queued' AND stage IN ('doc', 'tracked')`,
+    { id, note: f.note ?? null, at: canonical('finishMeeting', 'at', f.at) },
+  );
   if (n === 0) notQueued('finishMeeting', id, ' at stage doc or later');
 }
 
@@ -580,18 +610,22 @@ export function finishMeeting(db: Db, id: number, f: { note?: string; at: string
  * without a client (found as unassigned or internal) can be assigned too: the download is tried again for that client.
  * Returns false for any other meeting.
  */
-export function assignMeeting(db: Db, id: number, clientId: number, at: string): boolean {
+export async function assignMeeting(db: Sql, id: number, clientId: number, at: string): Promise<boolean> {
   return (
-    db.raw.prepare(`UPDATE meetings SET status = 'queued', client_id = @clientId, match_kind = 'human', error_code = NULL, attempts = 0, next_attempt_at = NULL,
+    (
+      await db.run(
+        `UPDATE meetings SET status = 'queued', client_id = @clientId, match_kind = 'human', error_code = NULL, attempts = 0, next_attempt_at = NULL,
         note = CASE WHEN note = '${FOUND_INTERNAL_NOTE}' THEN NULL ELSE note END, updated_at = @at
-      WHERE id = @id AND (status IN ('unassigned', 'internal') OR (status = 'no_access' AND client_id IS NULL))`)
-      .run({ id, clientId, at: canonical('assignMeeting', 'at', at) }).changes === 1
+      WHERE id = @id AND (status IN ('unassigned', 'internal') OR (status = 'no_access' AND client_id IS NULL))`,
+        { id, clientId, at: canonical('assignMeeting', 'at', at) },
+      )
+    ).changes === 1
   );
 }
 
 /** A person decides an unassigned meeting is not processed. Returns false for any other status. */
-export function skipMeeting(db: Db, id: number, at: string): boolean {
-  return db.raw.prepare("UPDATE meetings SET status = 'skipped', updated_at = ? WHERE id = ? AND status = 'unassigned'").run(canonical('skipMeeting', 'at', at), id)
+export async function skipMeeting(db: Sql, id: number, at: string): Promise<boolean> {
+  return (await db.run("UPDATE meetings SET status = 'skipped', updated_at = ? WHERE id = ? AND status = 'unassigned'", [canonical('skipMeeting', 'at', at), id]))
     .changes === 1;
 }
 
@@ -600,12 +634,13 @@ export function skipMeeting(db: Db, id: number, at: string): boolean {
  * attempts. One without a client (found as unassigned or internal) cannot be processed: it goes back to unassigned, for
  * `meeting assign`. Returns the new status, or null for any other meeting.
  */
-export function retryMeeting(db: Db, id: number, at: string): 'queued' | 'unassigned' | null {
-  const r = db
-    .raw.prepare(`UPDATE meetings SET status = CASE WHEN client_id IS NULL THEN 'unassigned' ELSE 'queued' END, attempts = 0, next_attempt_at = NULL,
+export async function retryMeeting(db: Sql, id: number, at: string): Promise<'queued' | 'unassigned' | null> {
+  const r = await db.get<{ status: 'queued' | 'unassigned' }>(
+    `UPDATE meetings SET status = CASE WHEN client_id IS NULL THEN 'unassigned' ELSE 'queued' END, attempts = 0, next_attempt_at = NULL,
         error_code = NULL, note = CASE WHEN client_id IS NULL AND note = '${FOUND_INTERNAL_NOTE}' THEN NULL ELSE note END, updated_at = ?
-      WHERE id = ? AND status IN ('failed', 'no_access') RETURNING status`)
-    .get(canonical('retryMeeting', 'at', at), id) as { status: 'queued' | 'unassigned' } | undefined;
+      WHERE id = ? AND status IN ('failed', 'no_access') RETURNING status`,
+    [canonical('retryMeeting', 'at', at), id],
+  );
   return r?.status ?? null;
 }
 
@@ -618,11 +653,12 @@ export interface UnassignedMeeting {
 }
 
 /** Unassigned meetings, newest first. Internal meetings are never listed. */
-export function listUnassigned(db: Db, limit: number): UnassignedMeeting[] {
-  return db
-    .raw.prepare(`SELECT id, started_at AS startedAt, COALESCE(audio_seconds, drive_seconds) AS seconds FROM meetings WHERE status = 'unassigned'
-      ORDER BY started_at DESC, id DESC LIMIT ?`)
-    .all(limit) as UnassignedMeeting[];
+export async function listUnassigned(db: Sql, limit: number): Promise<UnassignedMeeting[]> {
+  return db.all<UnassignedMeeting>(
+    `SELECT id, started_at AS startedAt, COALESCE(audio_seconds, drive_seconds) AS seconds FROM meetings WHERE status = 'unassigned'
+      ORDER BY started_at DESC, id DESC LIMIT ?`,
+    [limit],
+  );
 }
 
 /**
@@ -645,22 +681,23 @@ export interface ClientMeeting {
  * A client's done meetings, newest first. A meeting whose stored summary is not JSON, or has no actionItems list, is
  * left out, in SQL, so the limit counts only listed meetings. The summary itself is not read here.
  */
-export function listClientMeetings(db: Db, clientId: number, limit: number): ClientMeeting[] {
-  return db
-    .raw.prepare(`SELECT id, started_at AS startedAt, title, COALESCE(audio_seconds, drive_seconds) AS seconds, doc_file_id AS docFileId,
+export async function listClientMeetings(db: Sql, clientId: number, limit: number): Promise<ClientMeeting[]> {
+  return db.all<ClientMeeting>(
+    `SELECT id, started_at AS startedAt, title, COALESCE(audio_seconds, drive_seconds) AS seconds, doc_file_id AS docFileId,
         CASE WHEN summary IS NULL THEN 0 ELSE json_array_length(summary, '$.actionItems') END AS actionItemCount
       FROM meetings
       WHERE client_id = ? AND ${LISTED_DONE}
-      ORDER BY started_at DESC, id DESC LIMIT ?`)
-    .all(clientId, limit) as ClientMeeting[];
+      ORDER BY started_at DESC, id DESC LIMIT ?`,
+    [clientId, limit],
+  );
 }
 
 /** Each client's latest done meeting that its tab lists: client id → its start. */
-export function lastMeetingByClient(db: Db): Map<number, string> {
-  const rows = db
-    .raw.prepare(`SELECT client_id AS clientId, MAX(started_at) AS startedAt FROM meetings WHERE client_id IS NOT NULL AND ${LISTED_DONE}
-      GROUP BY client_id`)
-    .all() as { clientId: number; startedAt: string }[];
+export async function lastMeetingByClient(db: Sql): Promise<Map<number, string>> {
+  const rows = await db.all<{ clientId: number; startedAt: string }>(
+    `SELECT client_id AS clientId, MAX(started_at) AS startedAt FROM meetings WHERE client_id IS NOT NULL AND ${LISTED_DONE}
+      GROUP BY client_id`,
+  );
   return new Map(rows.map((r) => [r.clientId, r.startedAt]));
 }
 
@@ -681,9 +718,9 @@ export interface MeetingStats {
 }
 
 /** Counts for Health and `cli status`. */
-export function meetingStats(db: Db, nowIso: string): MeetingStats {
-  const counts = db
-    .raw.prepare(`SELECT
+export async function meetingStats(db: Sql, nowIso: string): Promise<MeetingStats> {
+  const counts = (await db.get<Omit<MeetingStats, 'deferred'>>(
+    `SELECT
         COALESCE(SUM(status = 'done'), 0) AS done,
         COALESCE(SUM(status = 'queued'), 0) AS waiting,
         COALESCE(SUM(status = 'unassigned'), 0) AS unassigned,
@@ -691,12 +728,13 @@ export function meetingStats(db: Db, nowIso: string): MeetingStats {
         COALESCE(SUM(status = 'no_access'), 0) AS noAccess,
         COALESCE(SUM(status = 'too_long'), 0) AS tooLong,
         COALESCE(SUM(status = 'internal'), 0) AS internal
-      FROM meetings`)
-    .get() as Omit<MeetingStats, 'deferred'>;
-  const deferred = db
-    .raw.prepare(`SELECT error_code AS code, COUNT(*) AS n FROM meetings
-      WHERE status = 'queued' AND error_code IS NOT NULL AND next_attempt_at > ? GROUP BY error_code ORDER BY error_code`)
-    .all(canonical('meetingStats', 'nowIso', nowIso)) as { code: string; n: number }[];
+      FROM meetings`,
+  ))!;
+  const deferred = await db.all<{ code: string; n: number }>(
+    `SELECT error_code AS code, COUNT(*) AS n FROM meetings
+      WHERE status = 'queued' AND error_code IS NOT NULL AND next_attempt_at > ? GROUP BY error_code ORDER BY error_code`,
+    [canonical('meetingStats', 'nowIso', nowIso)],
+  );
   return { ...counts, deferred: Object.fromEntries(deferred.map((d) => [d.code, d.n])) };
 }
 
@@ -714,12 +752,13 @@ export interface MeetingListRow {
 }
 
 /** Meetings with one of these statuses, newest first. */
-export function listMeetingsByStatus(db: Db, statuses: readonly MeetingStatus[]): MeetingListRow[] {
+export async function listMeetingsByStatus(db: Sql, statuses: readonly MeetingStatus[]): Promise<MeetingListRow[]> {
   if (statuses.length === 0) return [];
-  const rows = db
-    .raw.prepare(`SELECT id, started_at AS startedAt, client_id AS clientId, status, title, error_code AS errorCode,
+  const rows = await db.all<Omit<MeetingListRow, 'foundInternal'> & { foundInternal: number }>(
+    `SELECT id, started_at AS startedAt, client_id AS clientId, status, title, error_code AS errorCode,
         COALESCE(note = '${FOUND_INTERNAL_NOTE}', 0) AS foundInternal FROM meetings
-      WHERE status IN (${statuses.map(() => '?').join(', ')}) ORDER BY started_at DESC, id DESC`)
-    .all(...statuses) as (Omit<MeetingListRow, 'foundInternal'> & { foundInternal: number })[];
+      WHERE status IN (${statuses.map(() => '?').join(', ')}) ORDER BY started_at DESC, id DESC`,
+    statuses,
+  );
   return rows.map((r) => ({ ...r, foundInternal: r.foundInternal === 1 }));
 }

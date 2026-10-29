@@ -413,7 +413,7 @@ describe('voiceTranscriber: OpenAI parts', () => {
       const out = await withSttHold(spend, ceiling, 'media 7', async () => {
         const r = await t.transcribe(prepared);
         return { result: r, costUsd: t.costUsd({ maxSeconds: bound, billedSeconds: r.billedSeconds, measuredSeconds: prepared.measuredSeconds }) };
-      }, { onBooked: (b) => booked.push(b) }).catch((x: unknown) => x);
+      }, { onBooked: (b) => void booked.push(b) }).catch((x: unknown) => x);
       return { out, ceiling, booked };
     };
 

@@ -162,21 +162,21 @@ export class MeetingProcessor {
     let clientId: number | null = null;
     for (;;) {
       if (signal.aborted) return { outcome: 'stopped', clientId };
-      const before = getMeetingState(db, id);
+      const before = await getMeetingState(db, id);
       if (before === undefined || before.status !== 'queued') return { outcome: 'skipped', clientId: before?.clientId ?? clientId };
       clientId = before.clientId;
       const at = this.#now();
       if (before.attempts >= MEETING_MAX_ATTEMPTS) {
         // Each of these runs was cut off without an answer (the process stopped): a stage that cannot finish.
-        this.#fail(before, 'failed', 'crashed', at);
+        await this.#fail(before, 'failed', 'crashed', at);
         return { outcome: 'failed', clientId };
       }
-      if (!claimMeeting(db, id, { nextAttemptAt: new Date(Date.parse(at) + MEETING_CLAIM_MS).toISOString(), at })) return { outcome: 'skipped', clientId };
+      if (!(await claimMeeting(db, id, { nextAttemptAt: new Date(Date.parse(at) + MEETING_CLAIM_MS).toISOString(), at }))) return { outcome: 'skipped', clientId };
       let r: StageResult;
       try {
         r = await this.#stage(before, signal);
       } catch (e) {
-        return { outcome: this.#settle(before, e, signal), clientId };
+        return { outcome: await this.#settle(before, e, signal), clientId };
       }
       this.#sttRefusedSince.delete(id); // a finished stage ends a run of stt_unavailable waits
       if (r === 'done') return { outcome: 'done', clientId };
@@ -188,7 +188,7 @@ export class MeetingProcessor {
     return this.#d.clock.now().toISOString();
   }
 
-  #stage(s: MeetingState, signal: AbortSignal): Promise<StageResult> {
+  async #stage(s: MeetingState, signal: AbortSignal): Promise<StageResult> {
     switch (s.stage) {
       case 'found':
         return this.#audio(s.id, signal);
@@ -202,13 +202,13 @@ export class MeetingProcessor {
         return this.#track(s.id);
       case 'tracked':
         // finishMeeting sets stage tracked and status done together; a queued row at tracked only needs finishing.
-        finishMeeting(this.#d.db, s.id, { at: this.#now() });
-        return Promise.resolve('done');
+        await finishMeeting(this.#d.db, s.id, { at: this.#now() });
+        return 'done';
     }
   }
 
-  #meeting(id: number): MeetingRow & { clientId: number } {
-    const m = getMeeting(this.#d.db, id);
+  async #meeting(id: number): Promise<MeetingRow & { clientId: number }> {
+    const m = await getMeeting(this.#d.db, id);
     if (m === undefined) throw new MeetingRowStateError('missing_row', id);
     if (m.clientId === null) throw new MeetingRowStateError('no_client', id);
     return m as MeetingRow & { clientId: number };
@@ -220,11 +220,11 @@ export class MeetingProcessor {
     if (!d.hasMeetingScopes()) throw new MeetingDeferral('google_scopes');
     if (d.ffmpeg === null) throw new MeetingDeferral('no_ffmpeg');
     if (d.transcriber === null) throw new MeetingDeferral('stt_none');
-    let m = this.#meeting(id);
+    let m = await this.#meeting(id);
     if (m.matchKind === 'human' && m.attendees.length === 0 && !this.#refreshed.has(id)) {
       this.#refreshed.add(id);
       await this.#refreshFacts(m, signal);
-      m = this.#meeting(id);
+      m = await this.#meeting(id);
     }
     const r = await prepareAudio(
       m,
@@ -260,7 +260,7 @@ export class MeetingProcessor {
       d.log.warn({ meetingId: m.id, code: e.code }, 'meeting attendees could not be read again; going on with the stored ones');
       return;
     }
-    refreshMeetingFacts(d.db, m.id, { title, attendees: facts.attendees, participants }, this.#now());
+    await refreshMeetingFacts(d.db, m.id, { title, attendees: facts.attendees, participants }, this.#now());
     d.log.info({ meetingId: m.id, attendeeCount: facts.attendees.length, participantCount: participants.length }, 'meeting attendees read again');
   }
 
@@ -283,7 +283,7 @@ export class MeetingProcessor {
   /** transcribed -> summarised. Never aborted. */
   async #summarise(id: number): Promise<StageResult> {
     const d = this.#d;
-    const m = this.#meeting(id);
+    const m = await this.#meeting(id);
     const client = getClient(d.db, m.clientId);
     const r = await summarizeMeeting(
       { ai: d.ai, spend: d.spend, prices: d.prices },
@@ -292,7 +292,7 @@ export class MeetingProcessor {
         segments: m.transcript ?? [], people: this.#people(m),
       },
     );
-    advanceStage(d.db, id, 'summarised', r.cut ? { summary: r.summary, note: 'transcript_cut' } : { summary: r.summary }, this.#now());
+    await advanceStage(d.db, id, 'summarised', r.cut ? { summary: r.summary, note: 'transcript_cut' } : { summary: r.summary }, this.#now());
     d.log.info({ meetingId: id, skipped: r.skipped, cut: r.cut, dropped: r.dropped, costUsd: r.costUsd }, 'meeting summarised');
     return 'next';
   }
@@ -300,7 +300,7 @@ export class MeetingProcessor {
   /** summarised -> doc. The Doc id is stored at once, so a retry never makes a second Doc. */
   async #doc(id: number): Promise<StageResult> {
     const d = this.#d;
-    const m = this.#meeting(id);
+    const m = await this.#meeting(id);
     if (m.summary === null) throw new MeetingRowStateError('no_summary', id);
     const client = getClient(d.db, m.clientId);
     const docFileId = await uploadMeetingDoc(
@@ -312,7 +312,7 @@ export class MeetingProcessor {
         unheard: m.sttParts.filter((p) => p.unheard === true).map((p) => ({ start: p.offset, end: p.offset + p.seconds })),
       },
     );
-    advanceStage(d.db, id, 'doc', { docFileId }, this.#now());
+    await advanceStage(d.db, id, 'doc', { docFileId }, this.#now());
     d.log.info({ meetingId: id }, 'meeting Doc created');
     return 'next';
   }
@@ -320,7 +320,7 @@ export class MeetingProcessor {
   /** doc -> tracked/done, in the tracker's own transaction (finishMeeting). */
   async #track(id: number): Promise<StageResult> {
     const d = this.#d;
-    const m = this.#meeting(id);
+    const m = await this.#meeting(id);
     if (m.summary === null) throw new MeetingRowStateError('no_summary', id);
     const r = await d.track(m.clientId, { id, startedAt: m.startedAt, title: m.title, summary: m.summary, segments: m.transcript ?? [] });
     d.log.info({ meetingId: id, clientId: m.clientId, accepted: r.accepted, rejected: r.rejected, note: r.note ?? null }, 'meeting done');
@@ -331,18 +331,18 @@ export class MeetingProcessor {
    * Ends a stage that threw. `before` is the meeting as it was before the claim: a deferral stores its attempts back.
    * A meeting no longer queued (finished or changed meanwhile) is left as it is.
    */
-  #settle(before: MeetingState, e: unknown, signal: AbortSignal): MeetingProcessOutcome {
+  async #settle(before: MeetingState, e: unknown, signal: AbortSignal): Promise<MeetingProcessOutcome> {
     const { db, log } = this.#d;
     const id = before.id;
     const at = this.#now();
     const ids = { meetingId: id, clientId: before.clientId, stage: before.stage };
-    const now = getMeetingState(db, id);
+    const now = await getMeetingState(db, id);
     if (now === undefined || now.status !== 'queued') {
       log.warn({ ...ids, code: stepCode(e), status: now?.status ?? null }, 'meeting step ended, but the meeting is no longer queued; left as it is');
       return 'skipped';
     }
     if (signal.aborted && (e === signal.reason || (e as { name?: unknown } | null)?.name === 'AbortError')) {
-      deferMeeting(db, id, { errorCode: 'stopped', nextAttemptAt: at, attempts: before.attempts, at });
+      await deferMeeting(db, id, { errorCode: 'stopped', nextAttemptAt: at, attempts: before.attempts, at });
       log.info(ids, 'meeting step stopped by shutdown; it runs again at the next start');
       return 'stopped';
     }
@@ -354,31 +354,31 @@ export class MeetingProcessor {
         this.#sttRefusedSince.set(id, since);
         if (Date.parse(at) - since >= STT_UNAVAILABLE_MAX_MS) {
           this.#sttRefusedSince.delete(id);
-          this.#fail(before, 'failed', 'stt_unavailable', at);
+          await this.#fail(before, 'failed', 'stt_unavailable', at);
           return 'failed';
         }
       }
       const due = deferralDueAt(deferral, new Date(at)).toISOString();
-      deferMeeting(db, id, { errorCode: deferral, nextAttemptAt: due, attempts: before.attempts, at });
+      await deferMeeting(db, id, { errorCode: deferral, nextAttemptAt: due, attempts: before.attempts, at });
       log.info({ ...ids, code: deferral, nextAttemptAt: due }, 'meeting waits');
       return 'deferred';
     }
     if (e instanceof MeetingFailure) {
-      this.#fail(before, e.status, e.code, at);
+      await this.#fail(before, e.status, e.code, at);
       return 'failed';
     }
     if (e instanceof GoogleNoAccessError) {
-      this.#fail(before, 'no_access', e.code, at);
+      await this.#fail(before, 'no_access', e.code, at);
       return 'failed';
     }
     if (e instanceof AiRefusalError) {
       // A refusal is booked already; trying again would pay again for the same answer.
-      this.#fail(before, 'failed', 'ai_refusal', at);
+      await this.#fail(before, 'failed', 'ai_refusal', at);
       return 'failed';
     }
     if (e instanceof AiInvalidOutputError) {
       // summarizeMeeting and the tracker step each tried once more already, and both calls were booked.
-      this.#fail(before, 'failed', 'ai_invalid_output', at);
+      await this.#fail(before, 'failed', 'ai_invalid_output', at);
       return 'failed';
     }
     const code = stepCode(e);
@@ -386,12 +386,12 @@ export class MeetingProcessor {
     // fix 2): passing failures spread over many parts never add up. Never more than the claim counted.
     const attempts = Math.min(before.attempts + 1, Math.max(1, now.attempts));
     if (attempts >= MEETING_MAX_ATTEMPTS) {
-      this.#fail(before, 'failed', code, at);
+      await this.#fail(before, 'failed', code, at);
       return 'failed';
     }
     const delay = MEETING_RETRY_DELAYS_MS[attempts - 1]!;
     const due = new Date(Date.parse(at) + delay).toISOString();
-    deferMeeting(db, id, { errorCode: code, nextAttemptAt: due, at });
+    await deferMeeting(db, id, { errorCode: code, nextAttemptAt: due, at });
     log.warn({ ...ids, code, attempts, nextAttemptAt: due }, 'meeting step failed; it will be retried');
     return 'deferred';
   }
@@ -406,10 +406,10 @@ export class MeetingProcessor {
   }
 
   /** A final status: speech parts left in flight are booked first, so a part that may have been billed is never lost. */
-  #fail(before: MeetingState, status: 'failed' | 'no_access' | 'too_long', code: string, at: string): void {
+  async #fail(before: MeetingState, status: 'failed' | 'no_access' | 'too_long', code: string, at: string): Promise<void> {
     const { db, spend, inrPerUsd, clock, log } = this.#d;
-    bookStuckParts(db, spend, before.id, { inrPerUsd, clock, log });
-    failMeeting(db, before.id, { status, errorCode: code, at });
+    await bookStuckParts(db, spend, before.id, { inrPerUsd, clock, log });
+    await failMeeting(db, before.id, { status, errorCode: code, at });
     this.#sttRefusedSince.delete(before.id);
     log.warn({ meetingId: before.id, clientId: before.clientId, stage: before.stage, status, code }, 'meeting could not be processed');
   }

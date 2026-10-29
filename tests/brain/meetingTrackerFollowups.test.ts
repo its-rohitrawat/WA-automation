@@ -30,14 +30,14 @@ function summary(): MeetingSummary {
   };
 }
 
-function meetingAt(db: Db): MeetingForTracker {
+async function meetingAt(db: Db): Promise<MeetingForTracker> {
   const s = summary();
-  const id = insertFound(db, {
+  const id = (await insertFound(db, {
     recording: `conferenceRecords/c/recordings/${STARTED}`, conference: 'conferenceRecords/c', driveFileId: 'file1', meetingCode: null,
     title: 'Sharma weekly', startedAt: STARTED, endedAt: null, attendees: [], participants: [], clientId: 1, matchKind: 'title', status: 'queued',
     driveSeconds: 600, createdAt: NOW,
-  })!;
-  advanceStage(db, id, 'doc', { summary: s, transcript: SEGMENTS, docFileId: 'doc1' }, NOW);
+  }))!;
+  await advanceStage(db, id, 'doc', { summary: s, transcript: SEGMENTS, docFileId: 'doc1' }, NOW);
   return { id, startedAt: STARTED, title: 'Sharma weekly', summary: s, segments: SEGMENTS };
 }
 
@@ -76,7 +76,7 @@ describe('Reconciler.runMeeting spend logs', () => {
 
   it('a meeting kept out by the cap logs its meeting id, not a WhatsApp run pause', async () => {
     const { db, info, r } = await setup(0.001);
-    const m = meetingAt(db);
+    const m = await meetingAt(db);
     await expect(r.runMeeting(1, m)).rejects.toMatchObject({ code: 'spend_cap' });
     expect(info).toHaveBeenCalledWith({ clientId: 1, meetingId: m.id }, 'spend cap: meeting deferred');
     expect(info).not.toHaveBeenCalledWith(expect.anything(), 'spend cap: run paused');
@@ -85,7 +85,7 @@ describe('Reconciler.runMeeting spend logs', () => {
   it('a meeting kept out by holds logs its meeting id, not a WhatsApp run deferral', async () => {
     const { db, spend, info, r } = await setup(15);
     expect(spend.reserve(15 - (MAX_OUTPUT_TOKENS * P.outputPerMTok) / 1_000_000 / 2)).not.toBeNull();
-    const m = meetingAt(db);
+    const m = await meetingAt(db);
     await expect(r.runMeeting(1, m)).rejects.toMatchObject({ code: 'spend_busy' });
     expect(info).toHaveBeenCalledWith({ clientId: 1, meetingId: m.id }, 'other paid calls in flight: meeting deferred');
     expect(info).not.toHaveBeenCalledWith(expect.anything(), 'other paid calls in flight: run deferred');

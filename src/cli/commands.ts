@@ -291,7 +291,7 @@ export async function listGroupsCommand(deps: CliDeps): Promise<void> {
   }
 }
 
-export function statusCommand(deps: CliDeps): void {
+export async function statusCommand(deps: CliDeps): Promise<void> {
   const db = openDb(trackerDbPath(deps.env.DATA_DIR));
   try {
     deps.out(
@@ -301,7 +301,7 @@ export function statusCommand(deps: CliDeps): void {
         batches: latestBatches(db),
         unprocessed: unprocessedCounts(db),
         now: new Date(),
-        sttCopiesLeft: sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: deps.env.STT_PROVIDER }),
+        sttCopiesLeft: await sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: deps.env.STT_PROVIDER }),
         // Voice-note copies are deleted through the voice transcriber, so VOICE_STT_PROVIDER decides (Task 10), not STT_PROVIDER.
         voiceCopiesLeft: mediaSttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: deps.env.VOICE_STT_PROVIDER }),
       }),

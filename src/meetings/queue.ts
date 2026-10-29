@@ -42,6 +42,7 @@ export class MeetingQueue {
   #startup: Promise<void> | undefined;
   #running: Promise<void> | undefined;
   #runningId: number | undefined;
+  #filling: Promise<void> = Promise.resolve();
   /** Meetings started since the last kick(): a run that leaves its meeting due (a bug) is tried once per kick, never in a loop. */
   readonly #startedSinceKick = new Set<number>();
   /** Meetings whose run crashed, held back until this time (ms). In memory only. */
@@ -72,20 +73,20 @@ export class MeetingQueue {
   async #prepare(): Promise<void> {
     const { db, spend, inrPerUsd, log, clock, dataDir, transcriber } = this.#o;
     // Before any speech call: a part that may have been billed is booked once, at its ceiling.
-    recoverInflightParts(db, spend, inrPerUsd, log, clock);
+    await recoverInflightParts(db, spend, inrPerUsd, log, clock);
     // Started with the local engine (after switching to STT_PROVIDER=local): meetings that waited for speech-to-text
     // (stt_none) are due now, not at the end of their hour. Only for local (plan 2026-10-28-meetings-local-stt.md,
     // Task 3): a paid provider keeps today's timing, as the plan's ground rules ask.
     if (transcriber?.provider === 'local') {
       try {
-        const count = releaseSttNoneWaits(db, clock.now().toISOString());
+        const count = await releaseSttNoneWaits(db, clock.now().toISOString());
         if (count > 0) log.info({ count, provider: transcriber.provider }, 'meetings waiting for speech-to-text are due now');
       } catch (err) {
         log.warn({ err }, 'meetings waiting for speech-to-text could not be made due; they wait out their hour');
       }
     }
     try {
-      cleanupTemp(db, dataDir, log);
+      await cleanupTemp(db, dataDir, log);
     } catch (err) {
       log.warn({ err }, 'meeting work files could not be cleaned');
     }
@@ -104,20 +105,31 @@ export class MeetingQueue {
     this.#fill();
   }
 
+  /** Fills run one after another, so two kicks never start two meetings. Never throws. */
   #fill(): void {
+    this.#filling = this.#filling.then(() => this.#fillOnce());
+  }
+
+  async #fillOnce(): Promise<void> {
     if (this.#stopped || !this.#ready || this.#running) return;
     const now = this.#o.clock.now();
     for (const [id, until] of this.#crashed) if (until <= now.getTime()) this.#crashed.delete(id);
     const held = new Set(this.#crashed.keys());
     let ids: number[];
     try {
-      ids = dueMeetingIds(this.#o.db, now.toISOString(), 1 + this.#startedSinceKick.size + held.size);
+      ids = await dueMeetingIds(this.#o.db, now.toISOString(), 1 + this.#startedSinceKick.size + held.size);
     } catch (err) {
       this.#o.log.error({ err }, 'meeting queue read failed');
       return;
     }
+    if (this.#stopped || this.#running) return; // stopped, or a meeting started, while the queue was read
     const id = ids.find((i) => !this.#startedSinceKick.has(i) && !held.has(i));
     if (id !== undefined) this.#start(id);
+  }
+
+  /** Resolves once the fills asked for so far have run (tests). */
+  async idle(): Promise<void> {
+    await this.#filling;
   }
 
   #start(id: number): void {
@@ -157,6 +169,7 @@ export class MeetingQueue {
   async drain(timeoutMs: number): Promise<void> {
     const work = async () => {
       await this.#startup;
+      await this.#filling;
       while (this.#running) await this.#running;
     };
     let timer: NodeJS.Timeout | undefined;

@@ -25,13 +25,13 @@ function task(db: Db, title: string, clientId = 1) {
 }
 
 let n = 0;
-function meeting(db: Db, status: MeetingStatus, updatedAt: string, o: { title?: string; seconds?: number } = {}) {
+async function meeting(db: Db, status: MeetingStatus, updatedAt: string, o: { title?: string; seconds?: number } = {}) {
   n++;
-  const id = insertFound(db, {
+  const id = (await insertFound(db, {
     recording: `conferenceRecords/c${n}/recordings/r`, conference: `conferenceRecords/c${n}`, driveFileId: `d${n}`, meetingCode: null,
     title: status === 'internal' ? '' : (o.title ?? 'Weekly sync'), startedAt: NOW, endedAt: null, attendees: [], participants: [],
     clientId: status === 'unassigned' || status === 'internal' ? null : 1, matchKind: null, status, driveSeconds: o.seconds ?? 1800, createdAt: NOW,
-  })!;
+  }))!;
   db.raw.prepare("UPDATE meetings SET updated_at = ?, stage = CASE WHEN status = 'done' THEN 'tracked' ELSE stage END WHERE id = ?").run(updatedAt, id);
   return id;
 }
@@ -63,15 +63,15 @@ describe('listActivity', () => {
     recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'add_task', detail: { title: 'chat words' }, reason: null, sourceIds: [], at: at('05:10') });
     recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'mark_maybe_done', detail: {}, reason: null, sourceIds: [], at: at('05:20') });
     closeTask(db, t.code, new Date(at('05:30')));
-    meeting(db, 'done', at('05:40'));
+    await meeting(db, 'done', at('05:40'));
     audit(db, { at: at('05:50'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'Tracker.xlsx uploaded to Drive' });
-    meeting(db, 'too_long', at('06:00'), { title: 'Launch prep', seconds: 196 * 60 });
+    await meeting(db, 'too_long', at('06:00'), { title: 'Launch prep', seconds: 196 * 60 });
     batch(db, { at: at('06:10'), status: 'failed', messages: 4 });
     audit(db, { at: at('06:20'), actor: 'agent', event: 'tracker.publish_failed', kind: 'ops', detail: 'Tracker upload failed: Google sign-in expired' });
     audit(db, { at: at('06:30'), actor: 'owner@example.com', event: 'whatsapp.relink', kind: 'connection', detail: "Founder's phone relinked" });
     audit(db, { at: at('06:40'), actor: 'owner@example.com', event: 'settings.report', kind: 'config', detail: 'Morning briefing switched on' });
     audit(db, { at: at('06:50'), actor: 'owner@example.com', event: 'auth.signin', kind: 'auth', detail: 'Signed in' }); // not activity
-    meeting(db, 'internal', at('07:00')); // never listed
+    await meeting(db, 'internal', at('07:00')); // never listed
     const r = await listActivity(db, params());
     expect(r.items.map(({ kind, title, detail, who }) => ({ kind, title, detail, who }))).toEqual([
       { kind: 'config', title: 'Setting changed', detail: 'Morning briefing switched on', who: 'by the owner' },
@@ -92,11 +92,11 @@ describe('listActivity', () => {
 
   it('labels the meeting states the owner cares about', async () => {
     const db = await seededDb();
-    meeting(db, 'unassigned', at('05:00'), { title: 'Client call' });
-    meeting(db, 'queued', at('05:01'));
-    meeting(db, 'skipped', at('05:02'));
-    meeting(db, 'no_access', at('05:03'));
-    meeting(db, 'failed', at('05:04'));
+    await meeting(db, 'unassigned', at('05:00'), { title: 'Client call' });
+    await meeting(db, 'queued', at('05:01'));
+    await meeting(db, 'skipped', at('05:02'));
+    await meeting(db, 'no_access', at('05:03'));
+    await meeting(db, 'failed', at('05:04'));
     expect((await listActivity(db, params())).items.map(({ kind, title, detail }) => [kind, title, detail])).toEqual([
       ['issue', 'Meeting could not be processed', 'Weekly sync · Sharma Interiors'],
       ['issue', 'No access to a meeting recording', 'Weekly sync · Sharma Interiors'],
@@ -112,8 +112,8 @@ describe('listActivity', () => {
     batch(db, { at: at('05:01'), status: 'failed', messages: 3 });
     const t = task(db, 'Logo');
     recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: at('05:02') });
-    meeting(db, 'done', at('05:03'));
-    meeting(db, 'failed', at('05:04'));
+    await meeting(db, 'done', at('05:03'));
+    await meeting(db, 'failed', at('05:04'));
     audit(db, { at: at('05:05'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'Tracker.xlsx uploaded to Drive' });
     audit(db, { at: at('05:06'), actor: 'agent', event: 'tracker.publish_failed', kind: 'ops', detail: 'Tracker upload failed' });
     expect(titles(await listActivity(db, params({ kind: 'msg' })))).toEqual(['3 messages read']);
@@ -210,7 +210,7 @@ describe('activity review fixes', () => {
     db.raw.prepare("INSERT INTO media (message_id, client_id, kind, status, created_at, updated_at) VALUES (1, 1, 'voice', 'done', ?, ?)").run(NOW, NOW);
     const voice = createTask(db, { clientId: 1, side: 'us', title: 'From voice', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,
       raisedOn: '2026-10-19', deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: 'V1', origin: 'whatsapp' }, NOW);
-    const mid = meeting(db, 'done', at('04:00'));
+    const mid = await meeting(db, 'done', at('04:00'));
     const fromMeeting = createTask(db, { clientId: 1, side: 'us', title: 'From meeting', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,
       raisedOn: '2026-10-19', deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'meeting', meetingId: mid }, NOW);
     recordEvent(db, { taskId: voice.id, clientId: 1, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: at('05:00') });
@@ -233,7 +233,7 @@ describe('activity review fixes', () => {
 
   it('leaves out a no-access meeting found as internal', async () => {
     const db = await seededDb();
-    const id = meeting(db, 'no_access', at('05:00'), { title: '' });
+    const id = await meeting(db, 'no_access', at('05:00'), { title: '' });
     db.raw.prepare("UPDATE meetings SET note = 'found_internal', client_id = NULL WHERE id = ?").run(id);
     expect((await listActivity(db, params())).items).toEqual([]);
   });

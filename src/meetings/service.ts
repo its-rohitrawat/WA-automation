@@ -152,7 +152,7 @@ export class MeetingService {
   }
 
   /** What Health shows about meetings now. */
-  health(): MeetingsHealth {
+  async health(): Promise<MeetingsHealth> {
     // With several accounts, a refusal for extra accounts only is named per account and pauses nothing: the other
     // accounts' meetings go on. The main sign-in refused (or one account only): paused, as before.
     const lost = this.#d.lostAccounts?.() ?? [];
@@ -167,7 +167,7 @@ export class MeetingService {
           : null;
     const problem = this.#d.transcriber === null ? (this.#d.sttProblem ?? null) : null;
     return {
-      stats: meetingStats(this.#d.db, this.#d.clock.now().toISOString()),
+      stats: await meetingStats(this.#d.db, this.#d.clock.now().toISOString()),
       paused,
       sttProvider: sttProviderOf(this.#d.transcriber, problem),
       ...(problem !== null ? { sttProblem: problem } : {}),

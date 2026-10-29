@@ -179,10 +179,10 @@ describe('listDashboardTasks', () => {
 
   it('names the source: a meeting, a voice note, or WhatsApp', async () => {
     const db = await seededDb();
-    const meetingId = insertFound(db, {
+    const meetingId = (await insertFound(db, {
       recording: 'conferenceRecords/a/recordings/b', conference: 'conferenceRecords/a', driveFileId: 'd1', meetingCode: null, title: 'Sync',
       startedAt: NOW, endedAt: null, attendees: [], participants: [], clientId: 1, matchKind: 'title', status: 'done', driveSeconds: 60, createdAt: NOW,
-    })!;
+    }))!;
     const fromMeeting = task(db, { origin: 'meeting', meetingId });
     insertMessage(db, { waId: 'V1', clientId: 1, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts: NOW, text: null, quotedWaId: null, mediaType: 'audio' });
     insertMedia(db, { messageId: messageRowId(db, 1, 'V1')!, clientId: 1, kind: 'voice', status: 'done', mimeType: 'audio/ogg', fileName: null, fileSize: 1, seconds: 4,

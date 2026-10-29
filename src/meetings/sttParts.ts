@@ -2,8 +2,10 @@ import { existsSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { SpendCapReachedError } from '../brain/paidCall.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
-import { txSync, type Db } from '../store/db.ts';
-import { addSttForget, getMeeting, noteMeetingProgress, PART_FILE, setSttParts, writeStuckSttParts, type SttPartRow } from '../store/meetings.ts';
+import type { Sql } from '../store/db.ts';
+import {
+  addSttForget, getMeeting, noteMeetingProgress, PART_FILE, setSttParts, sttPartsJson, writeStuckSttParts, type SttPartRow,
+} from '../store/meetings.ts';
 import { AudioError } from '../stt/audio.ts';
 import { SttHttpError, SttJobError, SttJobLostError, SttNoAnswerError } from '../stt/http.ts';
 import { LocalEngineError } from '../stt/local.ts';
@@ -41,21 +43,22 @@ export function partCeilingFor(provider: ProviderOrLocal, seconds: number, inrPe
  * spend row, in the same write, and simply runs again. Returns how many were booked (local parts are not counted).
  * Throws when the meeting is missing or its record cannot be read or written (nothing is booked then).
  */
-export function bookStuckParts(db: Db, spend: SpendGuard, meetingId: number, o: { inrPerUsd: number; clock?: Clock; log?: Logger }): number {
-  const m = getMeeting(db, meetingId);
-  if (m === undefined) throw new Error(`bookStuckParts: no meeting ${meetingId}`);
+export async function bookStuckParts(db: Sql, spend: SpendGuard, meetingId: number, o: { inrPerUsd: number; clock?: Clock; log?: Logger }): Promise<number> {
   const stuck = (p: SttPartRow) => p.state === 'inflight' && p.booked === 'none';
   const paid = (p: SttPartRow) => stuck(p) && p.provider !== 'local';
   const local = (p: SttPartRow) => stuck(p) && p.provider === 'local';
-  const n = m.sttParts.filter(paid).length;
-  const runAgain = m.sttParts.filter(local).length;
-  if (n === 0 && runAgain === 0) return 0;
-  txSync(db, () => {
+  // Read inside the transaction, so the parts written are the parts booked.
+  const { n, runAgain } = await db.tx(async (q) => {
+    const m = await getMeeting(q, meetingId);
+    if (m === undefined) throw new Error(`bookStuckParts: no meeting ${meetingId}`);
+    const counts = { n: m.sttParts.filter(paid).length, runAgain: m.sttParts.filter(local).length };
+    if (counts.n === 0 && counts.runAgain === 0) return counts;
     for (const p of m.sttParts.filter(paid)) {
       spend.record('stt', partCeilingFor(p.provider, p.seconds, o.inrPerUsd), `meeting ${meetingId} part ${p.index} (unknown, estimated)`);
     }
     const parts = m.sttParts.map((p): SttPartRow => (paid(p) ? { ...p, state: 'unknown', booked: 'ceiling' } : local(p) ? { ...p, state: 'todo' } : p));
-    writeStuckSttParts(db, meetingId, parts, (o.clock ?? systemClock).now().toISOString());
+    await writeStuckSttParts(q, meetingId, parts, (o.clock ?? systemClock).now().toISOString());
+    return counts;
   });
   if (n > 0) o.log?.info({ meetingId, parts: n }, 'meeting speech parts left in flight booked at their ceiling');
   if (runAgain > 0) o.log?.info({ meetingId, parts: runAgain, provider: 'local' }, 'meeting speech parts left in flight on the local engine will run again');
@@ -64,7 +67,7 @@ export function bookStuckParts(db: Db, spend: SpendGuard, meetingId: number, o: 
 
 type PartAnswer = Awaited<ReturnType<MeetingTranscriber['transcribePart']>>;
 
-/** One meeting's parts, as stored, and the writes on them. */
+/** One meeting's parts, as stored, and the writes on them. Inside atomically, every write passes the handle it gave. */
 export interface PartContext {
   id: number;
   parts: SttPartRow[];
@@ -72,18 +75,23 @@ export interface PartContext {
   deps: TranscribeMeetingDeps;
   /** The kept MP3 of the whole meeting. */
   whole: AudioPart;
-  save(): void;
+  save(q?: Sql): Promise<void>;
   /** Changes part i and stores the parts at once; on a failed write the part stays as it was. */
-  put(i: number, patch: Partial<SttPartRow>): void;
+  put(i: number, patch: Partial<SttPartRow>, q?: Sql): Promise<void>;
+  /**
+   * S1 only, until SpendGuard books through a transaction handle (S1.5): put for settlePending's onBookedAtShutdown, which
+   * runs inside SpendGuard's synchronous transaction, so the part is written there, synchronously.
+   */
+  putAtShutdown(i: number, patch: Partial<SttPartRow>): void;
   /**
    * Runs fn in one transaction (a savepoint inside another). A booking and the part state it goes with are written here,
    * so they are kept or lost together; on a failure the parts in memory go back to what is stored.
    */
-  atomically(fn: () => void): void;
+  atomically(fn: (q: Sql) => Promise<void>): Promise<void>;
   /** Part i is done: its answer and, when the provider keeps a copy, that copy's id in stt_forget. Inside atomically. */
-  markDone(i: number, r: PartAnswer, booked?: SttPartRow['booked']): void;
+  markDone(i: number, r: PartAnswer, booked: SttPartRow['booked'] | undefined, q: Sql | undefined): Promise<void>;
   /** Notes a provider copy to delete in stt_forget (an id of 1 to 200 characters; anything else is ignored). */
-  forget(ref: string | null): void;
+  forget(ref: string | null, q?: Sql): Promise<void>;
   /** The absolute path of a part's MP3. Throws for a stored name that is not one of this meeting's part files. */
   pathOf(p: SttPartRow): string;
 }
@@ -91,40 +99,52 @@ export interface PartContext {
 export function partContext(id: number, parts: SttPartRow[], t: MeetingTranscriber, deps: TranscribeMeetingDeps, whole: AudioPart): PartContext {
   const { db, clock } = deps;
   const tmp = meetingsTmpDir(deps.dataDir);
-  const save = () => setSttParts(db, id, parts, clock.now().toISOString());
-  const put = (i: number, patch: Partial<SttPartRow>) => {
+  const save = (q: Sql = db) => setSttParts(q, id, parts, clock.now().toISOString());
+  const put = async (i: number, patch: Partial<SttPartRow>, q?: Sql) => {
     const prev = parts[i]!;
     parts[i] = { ...prev, ...patch };
     try {
-      save();
+      await save(q);
     } catch (e) {
       parts[i] = prev;
       throw e;
     }
   };
-  const atomically = (fn: () => void) => {
+  const putAtShutdown = (i: number, patch: Partial<SttPartRow>) => {
+    const prev = parts[i]!;
+    parts[i] = { ...prev, ...patch };
+    try {
+      const n = db.raw.prepare("UPDATE meetings SET stt_parts = ?, updated_at = ? WHERE id = ? AND status = 'queued'")
+        .run(sttPartsJson('putAtShutdown', parts), clock.now().toISOString(), id).changes;
+      if (n === 0) throw new Error(`putAtShutdown: meeting ${id} is not queued`);
+    } catch (e) {
+      parts[i] = prev;
+      throw e;
+    }
+  };
+  const atomically = async (fn: (q: Sql) => Promise<void>) => {
     const stored = [...parts];
     try {
-      txSync(db, fn);
+      await db.tx(fn);
     } catch (e) {
       parts.splice(0, parts.length, ...stored);
       throw e;
     }
   };
-  const forget = (ref: string | null) => {
+  const forget = async (ref: string | null, q: Sql = db) => {
     // The local engine keeps no copies, so it never has one to note.
-    if (t.provider !== 'local' && ref !== null && ref.length >= 1 && ref.length <= 200) addSttForget(db, { meetingId: id, provider: t.provider, ref, at: clock.now().toISOString() });
+    if (t.provider !== 'local' && ref !== null && ref.length >= 1 && ref.length <= 200) await addSttForget(q, { meetingId: id, provider: t.provider, ref, at: clock.now().toISOString() });
   };
-  const markDone = (i: number, r: PartAnswer, booked?: SttPartRow['booked']) => {
-    put(i, { state: 'done', segments: r.segments, billedSeconds: r.billedSeconds, ...(booked ? { booked } : {}) });
-    forget(r.forgetRef);
+  const markDone = async (i: number, r: PartAnswer, booked: SttPartRow['booked'] | undefined, q: Sql | undefined) => {
+    await put(i, { state: 'done', segments: r.segments, billedSeconds: r.billedSeconds, ...(booked ? { booked } : {}) }, q);
+    await forget(r.forgetRef, q);
   };
   const pathOf = (p: SttPartRow) => {
     if (p.file === null) return whole.path;
     if (!PART_FILE.test(p.file) || !p.file.startsWith(`${id}-parts`)) throw new Error(`meeting ${id}: a stored part file name is not valid`);
     return join(tmp, ...p.file.split('/'));
   };
-  return { id, parts, t, deps, whole, save, put, atomically, markDone, forget, pathOf };
+  return { id, parts, t, deps, whole, save, put, putAtShutdown, atomically, markDone, forget, pathOf };
 }
 
 const todo = (index: number, provider: ProviderOrLocal, offset: number, seconds: number, file: string | null): SttPartRow => ({
@@ -144,7 +164,7 @@ export async function planParts(ctx: PartContext, signal: AbortSignal | undefine
   } else {
     parts.push(todo(1, t.provider, 0, whole.seconds, null));
   }
-  ctx.save();
+  await ctx.save();
 }
 
 /**
@@ -176,7 +196,7 @@ export async function replanForProvider(ctx: PartContext, signal: AbortSignal | 
     for (const c of cut) out.push({ ...fresh, offset: c.offset, seconds: c.seconds, file: `${folder}/${basename(c.path)}` });
   }
   parts.splice(0, parts.length, ...out.map((p, i) => ({ ...p, index: i + 1 })));
-  ctx.save();
+  await ctx.save();
   deps.log.info({ meetingId: id, provider: t.provider, parts: parts.length }, 'meeting speech parts planned again for a new provider');
 }
 
@@ -217,7 +237,7 @@ export async function heldPart(ctx: PartContext, i: number): Promise<void> {
   const ceiling = t.partCeilingUsd(before.seconds);
   checkPartFile(audio.path);
   // A part sent again is a new call: what was booked before belongs to the earlier call.
-  put(i, { state: 'inflight', booked: 'none', jobId: null });
+  await put(i, { state: 'inflight', booked: 'none', jobId: null });
   let sent = false;
   let bookedAtShutdown = false;
   let cost = 0;
@@ -240,25 +260,25 @@ export async function heldPart(ctx: PartContext, i: number): Promise<void> {
       },
       {
         atomically: ctx.atomically,
-        onBooked: (b, r) => {
+        onBooked: async (b, r, q) => {
           // An answer after shutdown booked the hold stays booked at the ceiling: that is what was recorded.
-          if (r !== undefined) ctx.markDone(i, r, bookedAtShutdown ? 'ceiling' : 'actual');
-          else if (b.outcome === 'none') put(i, { state: 'todo', booked: 'none' });
+          if (r !== undefined) await ctx.markDone(i, r, bookedAtShutdown ? 'ceiling' : 'actual', q);
+          else if (b.outcome === 'none') await put(i, { state: 'todo', booked: 'none' }, q);
           else {
-            put(i, { state: 'unknown', booked: 'ceiling' });
-            ctx.forget(lostRef);
+            await put(i, { state: 'unknown', booked: 'ceiling' }, q);
+            await ctx.forget(lostRef, q);
           }
         },
         onBookedAtShutdown: () => {
           bookedAtShutdown = true; // booked even when the write below fails (settlePending then books the hold alone)
-          put(i, { state: 'unknown', booked: 'ceiling' });
+          ctx.putAtShutdown(i, { state: 'unknown', booked: 'ceiling' });
         },
       },
     ));
   } catch (e) {
     // Never sent (no room under the cap): as it was. Anything else is already written with its booking, or left
     // inflight with nothing booked for bookStuckParts.
-    if (e instanceof SpendCapReachedError && !sent) put(i, before);
+    if (e instanceof SpendCapReachedError && !sent) await put(i, before);
     const fields = { meetingId: id, part: before.index, provider: t.provider, code: errorCode(callErrorOf(e)), state: parts[i]!.state };
     deps.log.warn(e instanceof SttBookingError ? { ...fields, writeCode: errorCode(e.writeError) } : fields, 'meeting speech part failed');
     throw e;
@@ -283,32 +303,32 @@ export async function sarvamPart(ctx: PartContext, i: number): Promise<void> {
   if (resumeJobId !== undefined) {
     if (before.booked === 'none') {
       // Never written this way (the id and the booking are stored together), but a job id means a job was started.
-      atomically(() => {
+      await atomically(async (q) => {
         spend.record('stt', ceiling, label);
-        put(i, { booked: 'ceiling' });
+        await put(i, { booked: 'ceiling' }, q);
       });
     }
-    put(i, { state: 'inflight' });
+    await put(i, { state: 'inflight' });
   } else {
     checkPartFile(audio.path);
     // A new job: what was booked before belongs to an earlier job.
-    put(i, { state: 'inflight', booked: 'none' });
-    hold = spend.reserve(ceiling, 'stt', () => put(i, { state: 'unknown', booked: 'ceiling' }));
+    await put(i, { state: 'inflight', booked: 'none' });
+    hold = spend.reserve(ceiling, 'stt', () => ctx.putAtShutdown(i, { state: 'unknown', booked: 'ceiling' }));
     if (hold === null) {
-      put(i, before);
+      await put(i, before);
       throw new SpendCapReachedError({ busy: spend.fitsIgnoringHolds(ceiling) });
     }
   }
 
   let seenJobId: string | null = resumeJobId ?? null;
-  const onJobId = (jobId: string): void => {
+  const onJobId = async (jobId: string): Promise<void> => {
     const h = hold;
     if (h === null) return; // only a new job is booked here
     seenJobId = jobId;
     // settle books nothing when shutdown already booked the hold.
-    atomically(() => {
+    await atomically(async (q) => {
       spend.settle(h, 'stt', ceiling, label);
-      put(i, { jobId, booked: 'ceiling' });
+      await put(i, { jobId, booked: 'ceiling' }, q);
     });
     hold = null;
     log.info({ meetingId: id, part: before.index, provider: t.provider, seconds: Math.round(before.seconds), costUsd: ceiling }, 'meeting speech job accepted');
@@ -317,9 +337,9 @@ export async function sarvamPart(ctx: PartContext, i: number): Promise<void> {
   try {
     const r = await t.transcribePart(audio, resumeJobId !== undefined ? { resumeJobId } : { onJobId });
     const h = hold;
-    atomically(() => {
+    await atomically(async (q) => {
       if (h !== null) spend.settle(h, 'stt', ceiling, label); // an answer without a job id first: booked now
-      ctx.markDone(i, r, h !== null ? 'ceiling' : undefined);
+      await ctx.markDone(i, r, h !== null ? 'ceiling' : undefined, q);
     });
     hold = null;
     log.info({ meetingId: id, part: before.index, provider: t.provider, seconds: Math.round(before.seconds) }, 'meeting speech part transcribed');
@@ -331,17 +351,17 @@ export async function sarvamPart(ctx: PartContext, i: number): Promise<void> {
         // The job was never accepted, or its booking could not be written.
         if (e instanceof SttHttpError) {
           spend.release(h);
-          put(i, { state: 'todo', booked: 'none', jobId: null });
+          await put(i, { state: 'todo', booked: 'none', jobId: null });
         } else {
-          atomically(() => {
+          await atomically(async (q) => {
             spend.settle(h, 'stt', ceiling, `${label} (unknown, estimated)`);
-            put(i, { state: 'unknown', booked: 'ceiling', jobId: seenJobId });
+            await put(i, { state: 'unknown', booked: 'ceiling', jobId: seenJobId }, q);
           });
         }
       } else {
         // The job is booked. A lost or failed job cannot be waited on again: its id goes, and a retry sends a new job.
         const gone = e instanceof SttJobLostError || e instanceof SttJobError;
-        put(i, gone ? { state: 'unknown', jobId: null } : { state: 'unknown' });
+        await put(i, gone ? { state: 'unknown', jobId: null } : { state: 'unknown' });
       }
     } catch (writeErr) {
       // Left inflight with nothing booked (or booked, with its job id), for bookStuckParts or the resume.
@@ -370,7 +390,7 @@ export async function localPart(ctx: PartContext, i: number, signal: AbortSignal
   const before = parts[i]!;
   const audio: AudioPart = { path: ctx.pathOf(before), seconds: before.seconds, offset: before.offset };
   checkPartFile(audio.path);
-  put(i, { state: 'inflight', booked: 'none', jobId: null });
+  await put(i, { state: 'inflight', booked: 'none', jobId: null });
   const started = performance.now();
   const durationMs = () => Math.round(performance.now() - started);
   let r: PartAnswer;
@@ -385,22 +405,22 @@ export async function localPart(ctx: PartContext, i: number, signal: AbortSignal
         // The engine has not worked once for this meeting: it is likely broken (or its timeout too short), not this
         // part's audio. The part runs afresh after `meeting retry`.
         try {
-          replacePart(ctx, i, afresh(parts[i]!));
+          await replacePart(ctx, i, afresh(parts[i]!));
         } catch (writeErr) {
           deps.log.warn({ ...fields, writeCode: errorCode(writeErr) }, 'meeting speech part could not be reset');
         }
         deps.log.warn(fields, 'meeting fails: the local speech engine failed on every try, with nothing heard yet');
         throw new MeetingFailure('failed', 'local_engine_failed');
       }
-      ctx.atomically(() => {
-        put(i, { state: 'done', booked: 'none', segments: [], billedSeconds: null, tries, unheard: true });
-        noteMeetingProgress(deps.db, id);
+      await ctx.atomically(async (q) => {
+        await put(i, { state: 'done', booked: 'none', segments: [], billedSeconds: null, tries, unheard: true }, q);
+        await noteMeetingProgress(q, id);
       });
       deps.log.warn(fields, 'meeting speech part given up: no speech recognised');
       return;
     }
     try {
-      put(i, { state: 'todo', booked: 'none', ...(tries !== undefined ? { tries } : {}) });
+      await put(i, { state: 'todo', booked: 'none', ...(tries !== undefined ? { tries } : {}) });
       deps.log.warn(fields, 'meeting speech part failed');
     } catch (writeErr) {
       deps.log.warn({ ...fields, writeCode: errorCode(writeErr) }, 'meeting speech part failed');
@@ -408,9 +428,9 @@ export async function localPart(ctx: PartContext, i: number, signal: AbortSignal
     if (stopped) throw signal!.reason;
     throw e;
   }
-  ctx.atomically(() => {
-    ctx.markDone(i, r);
-    noteMeetingProgress(deps.db, id);
+  await ctx.atomically(async (q) => {
+    await ctx.markDone(i, r, undefined, q);
+    await noteMeetingProgress(q, id);
   });
   deps.log.info({ meetingId: id, part: before.index, provider: t.provider, seconds: Math.round(before.seconds), durationMs: durationMs() }, 'meeting speech part transcribed');
 }
@@ -440,11 +460,11 @@ export function afresh(p: SttPartRow): SttPartRow {
 }
 
 /** Replaces part i and stores the parts at once; on a failed write the part stays as it was. */
-function replacePart(ctx: PartContext, i: number, row: SttPartRow): void {
+async function replacePart(ctx: PartContext, i: number, row: SttPartRow): Promise<void> {
   const prev = ctx.parts[i]!;
   ctx.parts[i] = row;
   try {
-    ctx.save();
+    await ctx.save();
   } catch (e) {
     ctx.parts[i] = prev;
     throw e;
@@ -455,11 +475,11 @@ function replacePart(ctx: PartContext, i: number, row: SttPartRow): void {
  * Nothing was heard in the meeting and a part was given up: the parts given up are set to run afresh, so `meeting
  * retry` (once the engine is looked at) tries them again. The caller then fails the meeting (nothing_heard).
  */
-export function runUnheardAgain(ctx: PartContext): void {
+export async function runUnheardAgain(ctx: PartContext): Promise<void> {
   const prev = [...ctx.parts];
   ctx.parts.splice(0, ctx.parts.length, ...prev.map((p) => (p.unheard === true ? afresh(p) : p)));
   try {
-    ctx.save();
+    await ctx.save();
   } catch (e) {
     ctx.parts.splice(0, ctx.parts.length, ...prev);
     throw e;

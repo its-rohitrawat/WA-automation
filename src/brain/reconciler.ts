@@ -345,11 +345,11 @@ export class Reconciler {
     const { db, clock } = this.#o;
     const items = meetingItems(meeting.id, meeting.summary, meeting.segments, meeting.startedAt);
     if (items.length === 0) {
-      finishMeeting(db, meeting.id, { at: clock.now().toISOString() });
+      await finishMeeting(db, meeting.id, { at: clock.now().toISOString() });
       return { status: 'done', accepted: 0, rejected: 0 };
     }
     if (!getClient(db, clientId).active) {
-      finishMeeting(db, meeting.id, { note: 'client_inactive', at: clock.now().toISOString() });
+      await finishMeeting(db, meeting.id, { note: 'client_inactive', at: clock.now().toISOString() });
       return { status: 'done', accepted: 0, rejected: 0, note: 'client_inactive' };
     }
     const exclusive = this.#o.exclusive ?? (<T>(_id: number, fn: () => Promise<T>): Promise<T | 'busy'> => fn());
@@ -401,7 +401,8 @@ export class Reconciler {
     const appliedAt = clock.now();
     let applied: { accepted: AiOp[]; rejected: Rejection[] };
     try {
-      applied = txSync(db, () => {
+      // The ops are still applied on raw (S1.11 converts them), which is allowed inside this transaction.
+      applied = await db.tx(async (q) => {
         const fresh = getClient(db, clientId);
         const state = this.#validationState(fresh, clientId, {
           batchIds: new Set(items.map((it) => it.id)),
@@ -412,7 +413,7 @@ export class Reconciler {
         });
         const { accepted, rejected } = validateOps(result.output.ops, state);
         for (const op of accepted) this.#apply(fresh, op, evidence, appliedAt, rules);
-        finishMeeting(db, meeting.id, { at: appliedAt.toISOString() });
+        await finishMeeting(q, meeting.id, { at: appliedAt.toISOString() });
         return { accepted, rejected };
       });
     } catch (err) {

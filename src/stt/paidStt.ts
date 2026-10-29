@@ -1,5 +1,6 @@
 import { SpendCapReachedError } from '../brain/paidCall.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
+import type { Sql } from '../store/db.ts';
 import { SttHttpError, SttJobError } from './http.ts';
 
 /**
@@ -25,9 +26,12 @@ export interface SttHoldHooks<T> {
    * its own record of the call there (a meeting part's state), so the booking and that record are kept or lost together.
    * If it throws, the step is undone (with `atomically`) and the error thrown on.
    */
-  onBooked?: (b: SttBooking, result: T | undefined) => void;
-  /** Runs the booking and onBooked as one step, for example a database transaction. By default they just run. */
-  atomically?: (fn: () => void) => void;
+  onBooked?: (b: SttBooking, result: T | undefined, q: Sql | undefined) => void | Promise<void>;
+  /**
+   * Runs the booking and onBooked as one step, for example a database transaction, whose handle onBooked gets as q. By
+   * default they just run, with no handle.
+   */
+  atomically?: (fn: (q?: Sql) => Promise<void>) => Promise<void>;
   /**
    * Called inside settlePending's booking of the hold at shutdown, while the call is still running (see SpendGuard.reserve).
    * The call's own settle then books nothing more.
@@ -61,16 +65,16 @@ export async function withSttHold<T>(
 ): Promise<{ result: T; costUsd: number }> {
   const rid = spend.reserve(ceilingUsd, 'stt', hooks.onBookedAtShutdown);
   if (rid === null) throw new SpendCapReachedError({ busy: spend.fitsIgnoringHolds(ceilingUsd) });
-  const atomically = hooks.atomically ?? ((fn: () => void) => fn());
+  const atomically = hooks.atomically ?? ((fn: (q?: Sql) => Promise<void>) => fn());
   let r: { result: T; costUsd: number };
   try {
     r = await call();
   } catch (e) {
     try {
       // Booked as its own statement: inside `hooks.onBooked?.(…)` the booking would be skipped when there is no hook.
-      atomically(() => {
+      await atomically(async (q) => {
         const booked = settleFailedSttCall(spend, rid, e, ceilingUsd, label);
-        hooks.onBooked?.(booked, undefined);
+        await hooks.onBooked?.(booked, undefined, q);
       });
     } catch (writeErr) {
       throw new SttBookingError(writeErr, e);
@@ -78,9 +82,9 @@ export async function withSttHold<T>(
     throw e;
   }
   const done = r;
-  atomically(() => {
+  await atomically(async (q) => {
     spend.settle(rid, 'stt', done.costUsd, label);
-    hooks.onBooked?.({ outcome: 'actual', usd: done.costUsd }, done.result);
+    await hooks.onBooked?.({ outcome: 'actual', usd: done.costUsd }, done.result, q);
   });
   return r;
 }

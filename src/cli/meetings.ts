@@ -12,7 +12,7 @@ import { MeetingWatcher, type FoundMeeting } from '../meetings/watcher.ts';
 import { createOAuthClient, MAIN_ACCOUNT, meetingsReady, TokenStore } from '../output/googleAuth.ts';
 import { estimateCostUsd, pricesFromEnv, type Prices } from '../spend/pricing.ts';
 import { getClientByCode, getClientByGroupId, listClients, syncClients } from '../store/clients.ts';
-import { openDb, txSync, type Db } from '../store/db.ts';
+import { openDb, type Db, type Sql } from '../store/db.ts';
 import {
   assignMeeting, getMeetingState, listMeetingsByStatus, retryMeeting, skipMeeting, type MeetingStatus, type MeetingState,
 } from '../store/meetings.ts';
@@ -47,16 +47,16 @@ function parseId(raw: string): number {
   return Number(s);
 }
 
-function findMeeting(db: Db, raw: string): MeetingState {
+async function findMeeting(db: Db, raw: string): Promise<MeetingState> {
   const id = parseId(raw);
-  const m = getMeetingState(db, id);
+  const m = await getMeetingState(db, id);
   if (!m) throw new CorrectionError(`No meeting ${id}`);
   return m;
 }
 
 /** The lines of `meeting list`: id, IST date, client code (or unassigned / internal), status and the title. */
-export function meetingListLines(db: Db, all: boolean): string[] {
-  const rows = listMeetingsByStatus(db, all ? LIST_ALL : LIST_DEFAULT);
+export async function meetingListLines(db: Db, all: boolean): Promise<string[]> {
+  const rows = await listMeetingsByStatus(db, all ? LIST_ALL : LIST_DEFAULT);
   if (rows.length === 0) return [all ? 'No meetings yet.' : 'No meetings need you. (npm run cli -- meeting list --all shows every meeting.)'];
   const codes = new Map(listClients(db, false).map((c) => [c.id, c.code]));
   return rows.map((r) => {
@@ -69,11 +69,23 @@ export function meetingListLines(db: Db, all: boolean): string[] {
 }
 
 /**
+ * Runs inside the command's own transaction, after its change: the dashboard writes its audit line there, so the change
+ * and the line are kept or lost together.
+ */
+export type InTx<R> = (q: Sql, r: R) => void | Promise<void>;
+
+/**
  * `meeting assign`: an unassigned or internal meeting goes to a client and is queued (match kind human). So does a
  * no-access meeting without a client (found as unassigned or internal): its download is tried again for that client.
  */
-export function assignMeetingToClient(db: Db, rawId: string, clientCode: string, now: Date): { id: number; code: string } {
-  const m = findMeeting(db, rawId);
+export async function assignMeetingToClient(
+  db: Db,
+  rawId: string,
+  clientCode: string,
+  now: Date,
+  inTx?: InTx<{ id: number; code: string }>,
+): Promise<{ id: number; code: string }> {
+  const m = await findMeeting(db, rawId);
   const c = getClientByCode(db, clientCode.trim().toUpperCase());
   if (!c) throw new CorrectionError(`No client with code ${clientCode}`);
   if (!c.active) throw new CorrectionError(`Client ${c.code} is not in the allow-list`);
@@ -83,21 +95,25 @@ export function assignMeetingToClient(db: Db, rawId: string, clientCode: string,
       `Meeting ${m.id} is ${LABELS[m.status]}; only unassigned or internal meetings can be assigned (and no-access ones without a client)`,
     );
   }
-  txSync(db, () => {
-    if (!assignMeeting(db, m.id, c.id, now.toISOString())) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
+  const r = { id: m.id, code: c.code };
+  // humanEvent and requestRebuild are not converted yet (S1.11): on raw, which is allowed inside this transaction.
+  await db.tx(async (q) => {
+    if (!(await assignMeeting(q, m.id, c.id, now.toISOString()))) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
     humanEvent(db, null, c.id, 'assign_meeting', { meetingId: m.id }, now);
     requestRebuild(db, now);
+    await inTx?.(q, r);
   });
-  return { id: m.id, code: c.code };
+  return r;
 }
 
 /** `meeting skip`: an unassigned meeting is not processed. */
-export function skipMeetingById(db: Db, rawId: string, now: Date): number {
-  const m = findMeeting(db, rawId);
+export async function skipMeetingById(db: Db, rawId: string, now: Date, inTx?: InTx<number>): Promise<number> {
+  const m = await findMeeting(db, rawId);
   if (m.status !== 'unassigned') throw new CorrectionError(`Meeting ${m.id} is ${LABELS[m.status]}; only unassigned meetings can be skipped`);
-  txSync(db, () => {
-    if (!skipMeeting(db, m.id, now.toISOString())) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
+  await db.tx(async (q) => {
+    if (!(await skipMeeting(q, m.id, now.toISOString()))) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
     requestRebuild(db, now); // the workbook lists unassigned meetings
+    await inTx?.(q, m.id);
   });
   return m.id;
 }
@@ -108,18 +124,24 @@ export function skipMeetingById(db: Db, rawId: string, now: Date): number {
  * One without a client (found as unassigned or internal) cannot be processed: it goes back to unassigned, which the
  * workbook lists (a rebuild is requested), and the person assigns it with `meeting assign`.
  */
-export function retryMeetingById(db: Db, rawId: string, now: Date): { id: number; status: 'queued' | 'unassigned' } {
-  const m = findMeeting(db, rawId);
+export async function retryMeetingById(
+  db: Db,
+  rawId: string,
+  now: Date,
+  inTx?: InTx<{ id: number; status: 'queued' | 'unassigned' }>,
+): Promise<{ id: number; status: 'queued' | 'unassigned' }> {
+  const m = await findMeeting(db, rawId);
   if (m.status !== 'failed' && m.status !== 'no_access') {
     throw new CorrectionError(`Meeting ${m.id} is ${LABELS[m.status]}; only failed or no-access meetings can be retried`);
   }
-  const status = txSync(db, () => {
-    const s = retryMeeting(db, m.id, now.toISOString());
-    if (s === null) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
-    if (s === 'unassigned') requestRebuild(db, now);
-    return s;
+  return db.tx(async (q) => {
+    const status = await retryMeeting(q, m.id, now.toISOString());
+    if (status === null) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
+    if (status === 'unassigned') requestRebuild(db, now);
+    const r = { id: m.id, status };
+    await inTx?.(q, r);
+    return r;
   });
-  return { id: m.id, status };
 }
 
 /** What `meeting retry` prints. */
@@ -266,7 +288,8 @@ export async function meetingBackfillCommand(opts: { since: string; yes: boolean
       r = await run();
     } else {
       // The preview syncs inside a transaction that is always rolled back, so it stores nothing. The lock is held (the
-      // service is stopped), so no other writer waits on it.
+      // service is stopped), so no other writer waits on it. S1 only: a raw transaction, because the preview calls Google
+      // inside it and the watcher reads through db; S1.12 moves it onto db.tx once the clients store is converted.
       db.raw.exec('BEGIN');
       try {
         r = await run();

@@ -125,7 +125,7 @@ describe('prepareAudio', () => {
     db, api, ffmpeg: new Ffmpeg('ffmpeg.exe', ff.run), dataDir, clock: manualClock('2026-11-01T10:00:00.000Z'), log: silentLogger(),
     maxMinutes: 180, freeBytes: async () => free, ...o,
   });
-  const row = () => getMeeting(db, id)!;
+  const row = async () => (await getMeeting(db, id))!;
 
   beforeEach(async () => {
     dataDir = tempDir('meet-audio-');
@@ -134,31 +134,31 @@ describe('prepareAudio', () => {
     api.files.set(FILE_ID, { info: { name: 'rec.mp4', size: 4000, mimeType: 'video/mp4', durationMs: 2_700_000 }, bytes: Buffer.from('video-bytes') });
     ff = fakeFfmpeg();
     free = 50 * 1024 ** 3;
-    id = insertFound(db, newMeeting())!;
+    id = (await insertFound(db, newMeeting()))!;
   });
 
   it('downloads, converts, measures, deletes the video and keeps the MP3 in the client month folder', async () => {
-    const r = await prepareAudio(row(), deps(), new AbortController().signal);
+    const r = await prepareAudio(await row(), deps(), new AbortController().signal);
     const rel = `meetings/SHA/2026-11/${id}.mp3`;
     expect(r).toEqual({ outcome: 'audio', audioPath: rel, audioSeconds: 2700 });
     expect(readFileSync(finalAbs(), 'utf8')).toBe('mp3-bytes');
     expect(readdirSync(tmp())).toEqual([]);
     expect(api.callsOf('download')).toEqual([[FILE_ID, join(tmp(), `${id}.mp4.part`), MEETING_MAX_BYTES]]);
     expect(ff.inputs).toEqual([join(tmp(), `${id}.mp4.part`), join(tmp(), `${id}.mp3`)]);
-    const m = row();
+    const m = await row();
     expect(m).toMatchObject({ status: 'queued', stage: 'audio', audioPath: rel, audioSeconds: 2700 });
     expect(m.audioPath).not.toContain('\\');
   });
 
   it('defers low_disk without downloading when free space is under the file size plus 10 GB', async () => {
     free = 4000 + MEETING_DISK_HEADROOM_BYTES - 1;
-    const err = await prepareAudio(row(), deps(), new AbortController().signal).catch((e: unknown) => e);
+    const err = await prepareAudio(await row(), deps(), new AbortController().signal).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(MeetingDeferral);
     expect(err).toMatchObject({ code: 'low_disk' });
     expect(api.callsOf('download')).toHaveLength(0);
-    expect(row()).toMatchObject({ status: 'queued', stage: 'found' });
+    expect(await row()).toMatchObject({ status: 'queued', stage: 'found' });
     free = 4000 + MEETING_DISK_HEADROOM_BYTES;
-    await expect(prepareAudio(row(), deps(), new AbortController().signal)).resolves.toMatchObject({ outcome: 'audio' });
+    await expect(prepareAudio(await row(), deps(), new AbortController().signal)).resolves.toMatchObject({ outcome: 'audio' });
   });
 
   it('an abort mid-download removes the temp file and rethrows the abort', async () => {
@@ -170,19 +170,19 @@ describe('prepareAudio', () => {
     };
     const ac = new AbortController();
     const reason = new Error('stopping');
-    const p = prepareAudio(row(), deps(), ac.signal);
+    const p = prepareAudio(await row(), deps(), ac.signal);
     await vi.waitFor(() => expect(existsSync(join(tmp(), `${id}.mp4.part`))).toBe(true), { timeout: 5000 });
     ac.abort(reason);
     await expect(p).rejects.toBe(reason);
     expect(readdirSync(tmp())).toEqual([]);
-    expect(row()).toMatchObject({ status: 'queued', stage: 'found' });
+    expect(await row()).toMatchObject({ status: 'queued', stage: 'found' });
   });
 
   it('an abort mid-ffmpeg reaches the runner, removes the temp files and rethrows the abort', async () => {
     ff.convert = 'hang';
     const ac = new AbortController();
     const reason = new Error('stopping');
-    const p = prepareAudio(row(), deps(), ac.signal);
+    const p = prepareAudio(await row(), deps(), ac.signal);
     await ff.hung;
     expect(ff.opts[0]!.signal).toBe(ac.signal);
     expect(readdirSync(tmp()).sort()).toEqual([`${id}.mp3.part.mp3`, `${id}.mp4.part`]);
@@ -194,13 +194,13 @@ describe('prepareAudio', () => {
 
   it('an ffmpeg failure rethrows the AudioError with the temp files removed, and a retry downloads again', async () => {
     ff.convert = 'fail';
-    const err = await prepareAudio(row(), deps(), new AbortController().signal).catch((e: unknown) => e);
+    const err = await prepareAudio(await row(), deps(), new AbortController().signal).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AudioError);
     expect(err).toMatchObject({ code: 'convert_failed' });
     expect(readdirSync(tmp())).toEqual([]);
-    expect(row()).toMatchObject({ status: 'queued', stage: 'found' });
+    expect(await row()).toMatchObject({ status: 'queued', stage: 'found' });
     ff.convert = 'ok';
-    await expect(prepareAudio(row(), deps(), new AbortController().signal)).resolves.toMatchObject({ outcome: 'audio' });
+    await expect(prepareAudio(await row(), deps(), new AbortController().signal)).resolves.toMatchObject({ outcome: 'audio' });
     expect(api.callsOf('download')).toHaveLength(2);
   });
 
@@ -208,18 +208,18 @@ describe('prepareAudio', () => {
     mkdirSync(join(dataDir, 'meetings', 'SHA', '2026-11'), { recursive: true });
     writeFileSync(finalAbs(), 'kept');
     ff.seconds = 1200;
-    const r = await prepareAudio(row(), deps(), new AbortController().signal);
+    const r = await prepareAudio(await row(), deps(), new AbortController().signal);
     expect(r).toEqual({ outcome: 'audio', audioPath: `meetings/SHA/2026-11/${id}.mp3`, audioSeconds: 1200 });
     expect(api.calls).toHaveLength(0);
     expect(ff.inputs).toEqual([finalAbs()]);
     expect(readFileSync(finalAbs(), 'utf8')).toBe('kept');
-    expect(row()).toMatchObject({ stage: 'audio', audioSeconds: 1200 });
+    expect(await row()).toMatchObject({ stage: 'audio', audioSeconds: 1200 });
   });
 
   it('removes a leftover download from a crash before downloading again', async () => {
     mkdirSync(tmp(), { recursive: true });
     writeFileSync(join(tmp(), `${id}.mp4.part`), 'half');
-    await expect(prepareAudio(row(), deps(), new AbortController().signal)).resolves.toMatchObject({ outcome: 'audio' });
+    await expect(prepareAudio(await row(), deps(), new AbortController().signal)).resolves.toMatchObject({ outcome: 'audio' });
     expect(api.callsOf('download')).toHaveLength(1);
     expect(readdirSync(tmp())).toEqual([]);
   });
@@ -231,19 +231,19 @@ describe('prepareAudio', () => {
     mkdirSync(tmp(), { recursive: true });
     const link = join(tmp(), `${id}.mp4.part`);
     symlinkSync(outside, link, 'junction');
-    const err = await prepareAudio(row(), deps(), new AbortController().signal).catch((e: unknown) => e);
+    const err = await prepareAudio(await row(), deps(), new AbortController().signal).catch((e: unknown) => e);
     // The download cannot write over the link (EEXIST): an error for the processor to retry, or a deferral.
     expect(err).toBeInstanceOf(Error);
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
     expect(readFileSync(join(outside, 'keep.txt'), 'utf8')).toBe('not ours');
     expect(readdirSync(outside)).toEqual(['keep.txt']);
     expect(existsSync(finalAbs())).toBe(false);
-    expect(row()).toMatchObject({ status: 'queued', stage: 'found' });
+    expect(await row()).toMatchObject({ status: 'queued', stage: 'found' });
   });
 
   it('a file over the download cap is too_long (too_big), with nothing left in tmp', async () => {
     api.failWith.set('download', new DownloadTooBigError());
-    const err = await prepareAudio(row(), deps(), new AbortController().signal).catch((e: unknown) => e);
+    const err = await prepareAudio(await row(), deps(), new AbortController().signal).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(MeetingFailure);
     expect(err).toMatchObject({ status: 'too_long', code: 'too_big' });
     expect(readdirSync(tmp())).toEqual([]);
@@ -251,9 +251,9 @@ describe('prepareAudio', () => {
 
   it('a measured length over the limit is too_long, and the audio is kept', async () => {
     ff.seconds = 11 * 60;
-    const r = await prepareAudio(row(), deps({ maxMinutes: 10 }), new AbortController().signal);
+    const r = await prepareAudio(await row(), deps({ maxMinutes: 10 }), new AbortController().signal);
     expect(r).toEqual({ outcome: 'too_long', audioPath: `meetings/SHA/2026-11/${id}.mp3`, audioSeconds: 660 });
-    expect(row()).toMatchObject({
+    expect(await row()).toMatchObject({
       status: 'too_long', errorCode: 'too_long_measured', stage: 'found', audioPath: `meetings/SHA/2026-11/${id}.mp3`, audioSeconds: 660,
     });
     expect(existsSync(finalAbs())).toBe(true);
@@ -267,7 +267,7 @@ describe('prepareAudio', () => {
       ff.opts.push(o);
       return { code: 1, stderr: 'Invalid data found when processing input' };
     };
-    const err = await prepareAudio(row(), deps(), new AbortController().signal).catch((e: unknown) => e);
+    const err = await prepareAudio(await row(), deps(), new AbortController().signal).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(MeetingFailure);
     expect(err).toMatchObject({ status: 'failed', code: 'bad_audio' });
     expect(existsSync(finalAbs())).toBe(true);
@@ -281,16 +281,16 @@ describe('prepareAudio', () => {
     };
     const lines: string[] = [];
     const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
-    await expect(prepareAudio(row(), deps({ log }), new AbortController().signal)).resolves.toMatchObject({ outcome: 'audio' });
+    await expect(prepareAudio(await row(), deps({ log }), new AbortController().signal)).resolves.toMatchObject({ outcome: 'audio' });
     expect(readFileSync(finalAbs(), 'utf8')).toBe('mp3-bytes');
     expect(readdirSync(tmp())).toEqual([`${id}.mp4.part`]);
-    expect(row()).toMatchObject({ stage: 'audio' });
+    expect(await row()).toMatchObject({ stage: 'audio' });
     const warning = lines.find((l) => l.includes('could not be removed'))!;
     expect(warning).toContain(`"meetingId":${id}`);
     expect(warning).toContain('"code":"EPERM"');
     expect(warning).not.toContain('mp4');
     fsHooks.unlink = undefined;
-    expect(cleanupTemp(db, dataDir, silentLogger())).toEqual({ removed: 1, kept: 0 });
+    expect(await cleanupTemp(db, dataDir, silentLogger())).toEqual({ removed: 1, kept: 0 });
     expect(readdirSync(tmp())).toEqual([]);
   });
 
@@ -300,7 +300,7 @@ describe('prepareAudio', () => {
     fsHooks.unlink = () => {
       throw fsError('EPERM');
     };
-    const err = await prepareAudio(row(), deps(), new AbortController().signal).catch((e: unknown) => e);
+    const err = await prepareAudio(await row(), deps(), new AbortController().signal).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(MeetingDeferral);
     expect(err).toMatchObject({ code: 'disk_busy' });
     expect(api.callsOf('download')).toHaveLength(0);
@@ -310,25 +310,25 @@ describe('prepareAudio', () => {
     fsHooks.rename = (from) => {
       if (from === join(tmp(), `${id}.mp3`)) throw fsError('EBUSY');
     };
-    const err = await prepareAudio(row(), deps(), new AbortController().signal).catch((e: unknown) => e);
+    const err = await prepareAudio(await row(), deps(), new AbortController().signal).catch((e: unknown) => e);
     expect(err).toMatchObject({ name: 'MeetingDeferral', code: 'disk_busy' });
     expect(readdirSync(tmp())).toEqual([]);
     expect(existsSync(finalAbs())).toBe(false);
-    expect(row()).toMatchObject({ status: 'queued', stage: 'found' });
+    expect(await row()).toMatchObject({ status: 'queued', stage: 'found' });
   });
 
   it('a move across volumes (EXDEV) copies, then removes the source', async () => {
     fsHooks.rename = (from) => {
       if (from === join(tmp(), `${id}.mp3`)) throw fsError('EXDEV');
     };
-    await expect(prepareAudio(row(), deps(), new AbortController().signal)).resolves.toMatchObject({ outcome: 'audio' });
+    await expect(prepareAudio(await row(), deps(), new AbortController().signal)).resolves.toMatchObject({ outcome: 'audio' });
     expect(readFileSync(finalAbs(), 'utf8')).toBe('mp3-bytes');
     expect(readdirSync(tmp())).toEqual([]);
   });
 
   it('a full disk during the download defers disk_full', async () => {
     api.failWith.set('download', fsError('ENOSPC'));
-    const err = await prepareAudio(row(), deps(), new AbortController().signal).catch((e: unknown) => e);
+    const err = await prepareAudio(await row(), deps(), new AbortController().signal).catch((e: unknown) => e);
     expect(err).toMatchObject({ name: 'MeetingDeferral', code: 'disk_full' });
     expect(readdirSync(tmp())).toEqual([]);
   });
@@ -337,7 +337,7 @@ describe('prepareAudio', () => {
     const saved = process.env.ANTHROPIC_API_KEY;
     process.env.ANTHROPIC_API_KEY = 'dummy-test-value';
     try {
-      await prepareAudio(row(), deps(), new AbortController().signal);
+      await prepareAudio(await row(), deps(), new AbortController().signal);
       expect(ff.opts).toHaveLength(2);
       for (const o of ff.opts) {
         expect(o.env).toBeDefined();
@@ -360,10 +360,10 @@ describe('cleanupTemp', () => {
     mkdirSync(join(tmp(), `${id}-parts`));
     for (const f of files) writeFileSync(join(tmp(), `${id}-parts`, f), 'p');
   };
-  const meetingAt = (status: MeetingStatus, stage?: 'audio' | 'transcribed'): number => {
-    const id = insertFound(db, newMeeting({ status }))!;
-    if (stage === 'audio' || stage === 'transcribed') advanceStage(db, id, 'audio', { audioPath: 'meetings/SHA/2026-11/x.mp3', audioSeconds: 60 }, NOW);
-    if (stage === 'transcribed') advanceStage(db, id, 'transcribed', { transcript: [] }, NOW);
+  const meetingAt = async (status: MeetingStatus, stage?: 'audio' | 'transcribed'): Promise<number> => {
+    const id = (await insertFound(db, newMeeting({ status })))!;
+    if (stage === 'audio' || stage === 'transcribed') await advanceStage(db, id, 'audio', { audioPath: 'meetings/SHA/2026-11/x.mp3', audioSeconds: 60 }, NOW);
+    if (stage === 'transcribed') await advanceStage(db, id, 'transcribed', { transcript: [] }, NOW);
     return id;
   };
 
@@ -373,17 +373,17 @@ describe('cleanupTemp', () => {
     mkdirSync(tmp(), { recursive: true });
   });
 
-  it('does nothing when there is no tmp folder', () => {
+  it('does nothing when there is no tmp folder', async () => {
     const empty = tempDir('meet-clean-none-');
-    expect(cleanupTemp(db, empty, silentLogger())).toEqual({ removed: 0, kept: 0 });
+    expect(await cleanupTemp(db, empty, silentLogger())).toEqual({ removed: 0, kept: 0 });
   });
 
-  it('removes only matching work files of finished meetings and leaves everything else', () => {
-    const working = meetingAt('queued'); // stage found: its files are in use
-    const audioDone = meetingAt('queued', 'audio');
-    const transcribed = meetingAt('queued', 'transcribed');
-    const failed = meetingAt('failed');
-    const done = meetingAt('done');
+  it('removes only matching work files of finished meetings and leaves everything else', async () => {
+    const working = await meetingAt('queued'); // stage found: its files are in use
+    const audioDone = await meetingAt('queued', 'audio');
+    const transcribed = await meetingAt('queued', 'transcribed');
+    const failed = await meetingAt('failed');
+    const done = await meetingAt('done');
     for (const id of [working, audioDone, failed]) for (const ext of ['.mp4.part', '.mp3', '.mp3.part.mp3']) put(`${id}${ext}`);
     partsDir(working, ['part-000.mp3', '.done']);
     partsDir(audioDone, ['part-000.mp3']); // still needed for the transcript
@@ -402,7 +402,7 @@ describe('cleanupTemp', () => {
 
     const lines: string[] = [];
     const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
-    const r = cleanupTemp(db, dataDir, log);
+    const r = await cleanupTemp(db, dataDir, log);
 
     const left = readdirSync(tmp()).sort();
     expect(left).toEqual(
@@ -427,8 +427,8 @@ describe('cleanupTemp', () => {
   });
 
   // Junctions (directory links, which Windows lets any user make without admin rights) stand in for the files.
-  it('cleanupTemp never follows or removes links', () => {
-    const done = meetingAt('done');
+  it('cleanupTemp never follows or removes links', async () => {
+    const done = await meetingAt('done');
     const outside = tempDir('meet-clean-outside-');
     writeFileSync(join(outside, 'keep.txt'), 'not ours');
     const fileLink = join(tmp(), `${done}.mp3`);
@@ -440,7 +440,7 @@ describe('cleanupTemp', () => {
 
     const lines: string[] = [];
     const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
-    const r = cleanupTemp(db, dataDir, log);
+    const r = await cleanupTemp(db, dataDir, log);
 
     expect(lstatSync(fileLink).isSymbolicLink()).toBe(true);
     expect(lstatSync(partLink).isSymbolicLink()).toBe(true);
@@ -455,15 +455,15 @@ describe('cleanupTemp', () => {
     expect(text).not.toContain('keep.txt');
   });
 
-  it('removes the folders of parts cut again for another provider (<id>-parts-<n>) once transcribed, and only then', () => {
-    const working = meetingAt('queued', 'audio');
-    const transcribed = meetingAt('queued', 'transcribed');
+  it('removes the folders of parts cut again for another provider (<id>-parts-<n>) once transcribed, and only then', async () => {
+    const working = await meetingAt('queued', 'audio');
+    const transcribed = await meetingAt('queued', 'transcribed');
     for (const id of [working, transcribed]) {
       mkdirSync(join(tmp(), `${id}-parts-2`));
       writeFileSync(join(tmp(), `${id}-parts-2`, 'part-000.mp3'), 'p');
     }
     mkdirSync(join(tmp(), `${transcribed}-parts-0`)); // not a name the agent makes
-    const r = cleanupTemp(db, dataDir, silentLogger());
+    const r = await cleanupTemp(db, dataDir, silentLogger());
     expect(r.removed).toBe(1);
     expect(readdirSync(tmp()).sort()).toEqual([`${transcribed}-parts-0`, `${working}-parts-2`].sort());
   });

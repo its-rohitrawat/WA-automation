@@ -30,13 +30,13 @@ function task(db: Db, clientId: number, o: { title?: string; deadline?: string |
   return t;
 }
 
-function meeting(db: Db, n: number, clientId: number | null, title: string, startedAt: string) {
-  return insertFound(db, {
+async function meeting(db: Db, n: number, clientId: number | null, title: string, startedAt: string): Promise<number> {
+  return (await insertFound(db, {
     recording: `conferenceRecords/c${n}/recordings/r${n}`, conference: `conferenceRecords/c${n}`, driveFileId: `drive${n}`, meetingCode: null, title,
     startedAt, endedAt: null, attendees: [{ email: 'a@client.com', name: 'Attendee Name', team: false }], participants: ['Participant Name'],
     clientId, matchKind: clientId === null ? null : 'title', status: clientId === null ? 'unassigned' : 'queued', driveSeconds: 600,
     createdAt: startedAt,
-  })!;
+  }))!;
 }
 
 function message(db: Db, clientId: number, waId: string, ts: string) {
@@ -127,10 +127,10 @@ describe('clientCards', () => {
 describe('clientDetail', () => {
   it('lists open tasks (deadline first), the matched meetings (newest first) and the last sync time; counts match the card', async () => {
     const db = await world();
-    const m1 = meeting(db, 1, 1, 'Sharma weekly', '2026-10-20T06:00:00.000Z');
-    const m2 = meeting(db, 2, 1, 'Sharma design review', '2026-10-27T06:00:00.000Z');
-    meeting(db, 3, 2, 'Mehta call', '2026-10-27T07:00:00.000Z');
-    meeting(db, 4, null, 'Unassigned call', '2026-10-27T08:00:00.000Z');
+    const m1 = await meeting(db, 1, 1, 'Sharma weekly', '2026-10-20T06:00:00.000Z');
+    const m2 = await meeting(db, 2, 1, 'Sharma design review', '2026-10-27T06:00:00.000Z');
+    await meeting(db, 3, 2, 'Mehta call', '2026-10-27T07:00:00.000Z');
+    await meeting(db, 4, null, 'Unassigned call', '2026-10-27T08:00:00.000Z');
     const b1 = startBatch(db, 1, 3, '2026-10-27T09:00:00.000Z');
     finishBatch(db, b1, { status: 'ok', errorCode: null, accepted: 1, rejected: 0, at: '2026-10-27T09:00:30.000Z' });
     const b2 = startBatch(db, 1, 2, '2026-10-28T05:00:00.000Z');
@@ -180,7 +180,8 @@ describe('clientDetail', () => {
   it(`lists at most MEETINGS_LIMIT (${MEETINGS_LIMIT}) meetings, the newest`, async () => {
     expect(MEETINGS_LIMIT).toBe(50);
     const db = await seededDb();
-    const ids = Array.from({ length: 51 }, (_, i) => meeting(db, i + 1, 1, `Call ${i}`, new Date(Date.parse('2026-09-01T06:00:00.000Z') + i * 86_400_000).toISOString()));
+    const ids: number[] = [];
+    for (let i = 0; i < 51; i++) ids.push(await meeting(db, i + 1, 1, `Call ${i}`, new Date(Date.parse('2026-09-01T06:00:00.000Z') + i * 86_400_000).toISOString()));
     const d = (await clientDetail(db, 'SHA', NOW))!;
     expect(d.meetings).toHaveLength(50);
     expect(d.meetings[0]!.id).toBe(ids[50]);
@@ -189,7 +190,7 @@ describe('clientDetail', () => {
 
   it('never carries quotes, progress notes, attendees, participant names or a phone number; cards carry no message text', async () => {
     const db = await world();
-    meeting(db, 1, 1, 'Sharma weekly', '2026-10-20T06:00:00.000Z');
+    await meeting(db, 1, 1, 'Sharma weekly', '2026-10-20T06:00:00.000Z');
     const all = JSON.stringify([await clientCards(db, NOW), await clientDetail(db, 'SHA', NOW)]);
     for (const s of [QUOTE, 'progress words', 'Attendee Name', 'Participant Name', 'a@client.com', '919800000001', '@s.whatsapp.net']) expect(all).not.toContain(s);
     expect(JSON.stringify(await clientCards(db, NOW))).not.toContain(MESSAGE);

@@ -48,7 +48,7 @@ const healthy = { ok: true, text: '✅ Connected · waiting for new messages' };
 
 async function sheet(db: Db, name: string): Promise<ExcelJS.Worksheet> {
   const wb = new ExcelJS.Workbook();
-  await wb.xlsx.load((await buildWorkbook(loadTrackerView(db, now, healthy))) as unknown as ExcelJS.Buffer);
+  await wb.xlsx.load((await buildWorkbook(await loadTrackerView(db, now, healthy))) as unknown as ExcelJS.Buffer);
   return wb.getWorksheet(name)!;
 }
 
@@ -69,11 +69,11 @@ const replaceText = (db: Db, waId: string, text: string): void => {
   db.raw.prepare('UPDATE media SET text = ? WHERE id = ?').run(text, mediaIdOf(db, waId));
 };
 
-const sharmaFiles = (db: Db) => loadTrackerView(db, now, healthy).clients.find((c) => c.client.code === 'SHA')!.files;
+const sharmaFiles = async (db: Db) => (await loadTrackerView(db, now, healthy)).clients.find((c) => c.client.code === 'SHA')!.files;
 
 describe('Files received', () => {
   it('lists files from client members only, newest first, with a description and Drive id', async () => {
-    expect(sharmaFiles(await seed())).toEqual([
+    expect(await sharmaFiles(await seed())).toEqual([
       { date: '2026-10-16', sentBy: 'Mr. Sharma', name: 'image-2026-10-16-1130-2.jpg', description: 'A payment receipt. Visible text: Paid ₹42,000', driveFileId: null },
       { date: '2026-10-15', sentBy: 'Mr. Sharma', name: 'brief.pdf', description: 'PDF, 3 pages: Homepage brief Hero banner with the new logo', driveFileId: 'drivefile123' },
       { date: '2026-10-14', sentBy: 'Mr. Sharma', name: '=HYPERLINK(_http___evil_)', description: 'PDF, being read', driveFileId: null },
@@ -156,7 +156,7 @@ describe('Files received', () => {
   });
 
   it('gives the workbook row the estimated height, with wrap text on (D4)', async () => {
-    const view = loadTrackerView(await seed(), now, healthy);
+    const view = await loadTrackerView(await seed(), now, healthy);
     const files = view.clients.find((c) => c.client.code === 'SHA')!.files;
     const brief = files.find((f) => f.name === 'brief.pdf')!;
     brief.description = 'word '.repeat(80);
@@ -189,10 +189,10 @@ describe('Files received', () => {
   it('keeps a file deleted for everyone in the list, with (deleted by sender) and no Drive link (amendment 14b, D3)', async () => {
     const db = await seed();
     applyRevoke(db, 1, 'D1');
-    expect(sharmaFiles(db).find((f) => f.name === 'brief.pdf')).toEqual({
+    expect((await sharmaFiles(db)).find((f) => f.name === 'brief.pdf')).toEqual({
       date: '2026-10-15', sentBy: 'Mr. Sharma', name: 'brief.pdf', description: '(deleted by sender)', driveFileId: null,
     });
-    expect(sharmaFiles(db)).toHaveLength(3);
+    expect(await sharmaFiles(db)).toHaveLength(3);
   });
 
   it('does not link or describe an uploaded file that was then deleted for everyone, but still links other uploaded files (D3)', async () => {
@@ -219,7 +219,7 @@ describe('Files received', () => {
     finishMedia(db, scan, { textKind: null, text: null, pageCount: 2, note: 'forwarded_not_described', at: NOW });
     const text = file(db, { waId: 'FW3', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'quote.pdf', mimeType: 'application/pdf', ts: '2026-10-18T04:00:00.000Z', forwarded: true });
     finishMedia(db, text, { textKind: 'extract', text: 'Quotation No. 17', pageCount: 1, note: null, at: NOW });
-    expect(sharmaFiles(db).slice(0, 3).map((f) => [f.name, f.description])).toEqual([
+    expect((await sharmaFiles(db)).slice(0, 3).map((f) => [f.name, f.description])).toEqual([
       [`image-2026-10-18-1130-${img}.jpg`, '(forwarded image)'],
       ['scan.pdf', '(forwarded scanned PDF)'],
       ['quote.pdf', 'PDF, 1 page: Quotation No. 17'],
@@ -236,7 +236,7 @@ describe('Files received', () => {
       waId: 'OLD', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'old.pdf', mimeType: 'application/pdf', ts: '2026-10-18T05:00:00.000Z',
       status: 'unavailable', errorCode: 'expired',
     });
-    expect(sharmaFiles(db).slice(0, 2).map((f) => [f.name, f.description])).toEqual([
+    expect((await sharmaFiles(db)).slice(0, 2).map((f) => [f.name, f.description])).toEqual([
       ['site plan.pdf', 'PDF, too large to download (over the 50 MB limit)'],
       ['old.pdf', 'PDF, could not be downloaded from WhatsApp'],
     ]);
@@ -253,7 +253,7 @@ describe('Files received', () => {
     file(db, { waId: 'VN1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'voice', fileName: null, mimeType: 'audio/ogg', ts: '2026-10-18T06:00:00.000Z' });
     file(db, { waId: 'AU1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'audio', fileName: 'song.mp3', mimeType: 'audio/mpeg', ts: '2026-10-18T06:00:00.000Z' });
     const video = file(db, { waId: 'VI1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'video', fileName: null, mimeType: 'video/mp4', ts: '2026-10-18T07:00:00.000Z', status: 'metadata', seconds: 42 });
-    const files = sharmaFiles(db);
+    const files = await sharmaFiles(db);
     expect(files.map((f) => f.name)).toEqual([`video-2026-10-18-1230-${video}.mp4`, 'image-2026-10-16-1130-2.jpg', 'brief.pdf', '=HYPERLINK(_http___evil_)']);
     expect(files[0]!.description).toBe('Video, 0:42 (not downloaded)');
   });
@@ -265,7 +265,7 @@ describe('Files received', () => {
     setRole(db, 2, RAHUL_PN, 'client', 'human');
     upsertPerson(db, { clientId: 2, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
     setRole(db, 2, SHARMA_PN, 'client', 'human');
-    const files = sharmaFiles(db);
+    const files = await sharmaFiles(db);
     expect(files.some((f) => f.name === 'team-only.pdf')).toBe(false);
     expect(files.map((f) => f.name)).toEqual(['image-2026-10-16-1130-2.jpg', 'brief.pdf', '=HYPERLINK(_http___evil_)']);
   });
@@ -276,7 +276,7 @@ describe('Files received', () => {
     const first = file(db, { waId: 'S1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'first.pdf', mimeType: 'application/pdf', ts });
     const second = file(db, { waId: 'S2', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'second.pdf', mimeType: 'application/pdf', ts });
     expect(second).toBeGreaterThan(first);
-    expect(sharmaFiles(db).slice(0, 2).map((f) => f.name)).toEqual(['second.pdf', 'first.pdf']);
+    expect((await sharmaFiles(db)).slice(0, 2).map((f) => f.name)).toEqual(['second.pdf', 'first.pdf']);
   });
 
   it('shows at most the newest CLIENT_FILES_LIMIT files in the client tab', async () => {
@@ -285,16 +285,16 @@ describe('Files received', () => {
       const ts = new Date(Date.UTC(2026, 9, 18, 0, 0, i)).toISOString();
       file(db, { waId: `N${i}`, jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: `n${i}.pdf`, mimeType: 'application/pdf', ts });
     }
-    const files = sharmaFiles(db);
+    const files = await sharmaFiles(db);
     expect(files).toHaveLength(CLIENT_FILES_LIMIT);
     expect(files.at(-1)!.name).toBe('brief.pdf');
   });
 
   it('includes earlier files of someone who becomes a client', async () => {
     const db = await seed();
-    expect(sharmaFiles(db).some((f) => f.name === 'team-only.pdf')).toBe(false);
+    expect((await sharmaFiles(db)).some((f) => f.name === 'team-only.pdf')).toBe(false);
     setRole(db, 1, RAHUL_PN, 'client', 'human');
-    expect(sharmaFiles(db)[0]).toMatchObject({ name: 'team-only.pdf', sentBy: 'Rahul', description: 'PDF, being read' });
+    expect((await sharmaFiles(db))[0]).toMatchObject({ name: 'team-only.pdf', sentBy: 'Rahul', description: 'PDF, being read' });
   });
 
   it('reads only the start of a long text from the store', async () => {
@@ -315,7 +315,7 @@ describe('Files received', () => {
     const id = file(db, { waId: 'X1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'a\uFFFF.pdf', mimeType: 'application/pdf', ts: '2026-10-18T06:00:00.000Z' });
     finishMedia(db, id, { textKind: 'extract', text: 'Paid\uFFFE amount \u202E000,24', pageCount: 1, note: null, at: NOW });
     const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load((await buildWorkbook(loadTrackerView(db, now, healthy))) as unknown as ExcelJS.Buffer);
+    await wb.xlsx.load((await buildWorkbook(await loadTrackerView(db, now, healthy))) as unknown as ExcelJS.Buffer);
     const ws = wb.getWorksheet('Sharma Interiors')!;
     const row = rowWhere(ws, (r) => r.getCell(3).value === 'a.pdf');
     expect(row.getCell(2).value).toBe('Mr. Sharma');

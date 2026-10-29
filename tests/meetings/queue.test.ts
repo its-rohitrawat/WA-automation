@@ -28,12 +28,12 @@ class FakeProcessor {
   result: (id: number) => MeetingProcessResult | Error = () => ({ outcome: 'done', clientId: 1 });
   /** What the database held when each call started (here: the stuck part's booking). */
   readonly seen: unknown[] = [];
-  onCall: (id: number) => void = () => {};
+  onCall: (id: number) => void | Promise<void> = () => {};
   hold = true;
 
   async process(id: number, signal: AbortSignal): Promise<MeetingProcessResult> {
     this.calls.push({ id, signal, at: new Date().toISOString() });
-    this.onCall(id);
+    await this.onCall(id);
     if (this.hold) await new Promise<void>((r) => this.gates.push(r));
     const r = this.result(id);
     if (r instanceof Error) throw r;
@@ -47,7 +47,8 @@ async function setup(o: { meetings?: number; transcriber?: MeetingTranscriber | 
   const db = await seededDb();
   const clock = manualClock(NOW);
   const spend = new SpendGuard({ db, clock, capUsd: 15 });
-  const ids = Array.from({ length: o.meetings ?? 1 }, (_, i) => insertFound(db, queuedMeeting({ startedAt: `2026-11-01T0${i + 1}:00:00.000Z` }))!);
+  const ids: number[] = [];
+  for (let i = 0; i < (o.meetings ?? 1); i++) ids.push((await insertFound(db, queuedMeeting({ startedAt: `2026-11-01T0${i + 1}:00:00.000Z` })))!);
   const processor = new FakeProcessor();
   const settled: MeetingProcessResult[] = [];
   const stt = new FakeSttProvider();
@@ -70,16 +71,16 @@ describe('MeetingQueue', () => {
   it('at start books parts left in flight, deletes provider copies and cleans work files before any meeting runs', async () => {
     const { db, ids, processor, queue, dataDir, stt } = await setup();
     const id = ids[0]!;
-    setSttParts(db, id, [{ index: 0, provider: 'elevenlabs', file: null, offset: 0, seconds: 600, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
-    addSttForget(db, { meetingId: id, provider: 'elevenlabs', ref: 'tr-9', at: NOW });
+    await setSttParts(db, id, [{ index: 0, provider: 'elevenlabs', file: null, offset: 0, seconds: 600, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
+    await addSttForget(db, { meetingId: id, provider: 'elevenlabs', ref: 'tr-9', at: NOW });
     // A finished meeting's leftover video, and an unrelated file that must stay.
-    const done = insertFound(db, queuedMeeting())!;
-    failMeeting(db, done, { status: 'failed', errorCode: 'x', at: NOW });
+    const done = (await insertFound(db, queuedMeeting()))!;
+    await failMeeting(db, done, { status: 'failed', errorCode: 'x', at: NOW });
     const tmp = join(dataDir, 'meetings', 'tmp');
     mkdirSync(tmp, { recursive: true });
     writeFileSync(join(tmp, `${done}.mp4.part`), 'v');
     writeFileSync(join(tmp, 'notes.txt'), 'keep');
-    processor.onCall = () => processor.seen.push({ parts: getMeeting(db, id)!.sttParts[0]!.booked, spend: spendRows(db).length, forgotten: [...stt.forgotten] });
+    processor.onCall = async () => void processor.seen.push({ parts: (await getMeeting(db, id))!.sttParts[0]!.booked, spend: spendRows(db).length, forgotten: [...stt.forgotten] });
 
     queue.kick(); // before start: nothing runs
     await ticks();
@@ -98,18 +99,18 @@ describe('MeetingQueue', () => {
     const IN_AN_HOUR = '2026-11-01T13:00:00.000Z';
     const local = () => localMeetingTranscriber({ transcribe: async () => ({ text: 'namaste' }) }, { engine: 'voxtral', ffmpeg: null, tmpDir: tmpdir(), inrPerUsd: 88 });
     /** Meeting ids[0] waits stt_none for an hour, as the processor left it while STT_PROVIDER was none; ids[1] waits low_disk. */
-    const waiting = (s: Awaited<ReturnType<typeof setup>>) => {
-      deferMeeting(s.db, s.ids[0]!, { errorCode: 'stt_none', nextAttemptAt: IN_AN_HOUR, at: NOW, attempts: 0 });
-      deferMeeting(s.db, s.ids[1]!, { errorCode: 'low_disk', nextAttemptAt: IN_AN_HOUR, at: NOW, attempts: 0 });
+    const waiting = async (s: Awaited<ReturnType<typeof setup>>) => {
+      await deferMeeting(s.db, s.ids[0]!, { errorCode: 'stt_none', nextAttemptAt: IN_AN_HOUR, at: NOW, attempts: 0 });
+      await deferMeeting(s.db, s.ids[1]!, { errorCode: 'low_disk', nextAttemptAt: IN_AN_HOUR, at: NOW, attempts: 0 });
     };
 
     it('with the local engine, they are due at once at start, not an hour later; other waits are kept', async () => {
       const s = await setup({ meetings: 2, transcriber: local() });
-      waiting(s);
+      await waiting(s);
       s.queue.start();
       await vi.waitFor(() => expect(s.processor.calls.map((c) => c.id)).toEqual([s.ids[0]]), WAIT);
-      expect(getMeetingState(s.db, s.ids[0]!)).toMatchObject({ status: 'queued', attempts: 0, nextAttemptAt: NOW });
-      expect(getMeetingState(s.db, s.ids[1]!)).toMatchObject({ errorCode: 'low_disk', nextAttemptAt: IN_AN_HOUR });
+      expect(await getMeetingState(s.db, s.ids[0]!)).toMatchObject({ status: 'queued', attempts: 0, nextAttemptAt: NOW });
+      expect(await getMeetingState(s.db, s.ids[1]!)).toMatchObject({ errorCode: 'low_disk', nextAttemptAt: IN_AN_HOUR });
       s.processor.gates.shift()!();
       await s.queue.drain(1_000);
     });
@@ -119,12 +120,12 @@ describe('MeetingQueue', () => {
       ['a paid provider (unchanged: it books spend, so its timing stays as before)', () => meetingTranscriber(new FakeSttProvider(), 88)],
     ])('with %s they keep waiting their hour', async (_name, make) => {
       const s = await setup({ meetings: 2, transcriber: make() });
-      waiting(s);
+      await waiting(s);
       s.queue.start();
       await ticks();
       await ticks();
       expect(s.processor.calls).toEqual([]);
-      expect(getMeetingState(s.db, s.ids[0]!)).toMatchObject({ errorCode: 'stt_none', nextAttemptAt: IN_AN_HOUR });
+      expect(await getMeetingState(s.db, s.ids[0]!)).toMatchObject({ errorCode: 'stt_none', nextAttemptAt: IN_AN_HOUR });
       await s.queue.drain(1_000);
     });
   });

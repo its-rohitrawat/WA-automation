@@ -12,7 +12,7 @@ const OWNER = 'owner@example.com';
 
 async function withMeeting(status: MeetingStatus, clientId: number | null = null): Promise<Db> {
   const db = await seededDb();
-  insertFound(db, {
+  await insertFound(db, {
     recording: 'conferenceRecords/a/recordings/b', conference: 'conferenceRecords/a', driveFileId: 'drive1', meetingCode: null,
     title: status === 'internal' ? '' : 'Weekly sync', startedAt: NOW, endedAt: null, attendees: [], participants: [], clientId,
     matchKind: clientId === null ? null : 'title', status, driveSeconds: 1800, errorCode: status === 'failed' ? 'stt_failed' : null, createdAt: NOW,
@@ -52,7 +52,7 @@ describe('runMeetingAction matches the CLI', () => {
     const web = await withMeeting('unassigned');
     const cli = await withMeeting('unassigned');
     const { result, audits } = await run(web, '1', 'assign', { client: 'sha' });
-    assignMeetingToClient(cli, '1', 'SHA', now);
+    await assignMeetingToClient(cli, '1', 'SHA', now);
     expect(state(web)).toEqual(state(cli));
     expect(result.meeting).toMatchObject({ id: 1, status: 'queued', client: { code: 'SHA' } });
     expect(result.warning).toBe(MEETING_COST_WARNING); // assigning queues the meeting for paid processing
@@ -63,7 +63,7 @@ describe('runMeetingAction matches the CLI', () => {
     const web = await withMeeting('unassigned');
     const cli = await withMeeting('unassigned');
     const { result, audits } = await run(web, '1', 'skip');
-    skipMeetingById(cli, '1', now);
+    await skipMeetingById(cli, '1', now);
     expect(state(web)).toEqual(state(cli));
     expect(result.meeting.status).toBe('skipped');
     expect(audits).toEqual([{ actor: OWNER, event: 'meeting.skip', kind: 'meeting', detail: 'Meeting 1 skipped' }]);
@@ -73,7 +73,7 @@ describe('runMeetingAction matches the CLI', () => {
     const web = await withMeeting('failed', 1);
     const cli = await withMeeting('failed', 1);
     const { result, audits } = await run(web, '1', 'retry');
-    retryMeetingById(cli, '1', now);
+    await retryMeetingById(cli, '1', now);
     expect(state(web)).toEqual(state(cli));
     expect(result).toMatchObject({ meeting: { status: 'queued' }, warning: MEETING_COST_WARNING });
     expect(MEETING_COST_WARNING).toBe('Processing a meeting costs money');
@@ -84,7 +84,7 @@ describe('runMeetingAction matches the CLI', () => {
     const web = await withMeeting('no_access');
     const cli = await withMeeting('no_access');
     const { result, audits } = await run(web, '1', 'retry');
-    retryMeetingById(cli, '1', now);
+    await retryMeetingById(cli, '1', now);
     expect(state(web)).toEqual(state(cli));
     expect(result.meeting.status).toBe('unassigned');
     expect(audits[0]!.detail).toBe('Meeting 1 has no client, so it is unassigned again');

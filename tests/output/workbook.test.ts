@@ -47,7 +47,7 @@ const now = new Date('2026-10-19T08:00:00Z');
 
 describe('loadTrackerView', () => {
   it('computes counts, % done, overdue and next deadline', async () => {
-    const sharma = loadTrackerView(await fixture(), now, healthy).clients.find((c) => c.client.code === 'SHA')!;
+    const sharma = (await loadTrackerView(await fixture(), now, healthy)).clients.find((c) => c.client.code === 'SHA')!;
     expect(sharma).toMatchObject({ percentDone: 33, overdue: 1, maybeDone: 0, nextDeadline: '2026-10-18', sheetName: 'Sharma Interiors' });
     expect(sharma.usOpen.map((t) => t.code)).toEqual(['SHA-001']);
     expect(sharma.clientOpen.map((t) => t.code)).toEqual(['SHA-002']);
@@ -57,12 +57,12 @@ describe('loadTrackerView', () => {
 
 describe('buildWorkbook', () => {
   it('has an Overview tab and one tab per client', async () => {
-    const wb = await load(await buildWorkbook(loadTrackerView(await fixture(), now, healthy)));
+    const wb = await load(await buildWorkbook(await loadTrackerView(await fixture(), now, healthy)));
     expect(wb.worksheets.map((w) => w.name)).toEqual(['Today', 'Overview', 'Mehta Foods', 'Sharma Interiors']);
   });
 
   it('writes the health line and a linked summary row per client', async () => {
-    const ov = (await load(await buildWorkbook(loadTrackerView(await fixture(), now, healthy)))).getWorksheet('Overview')!;
+    const ov = (await load(await buildWorkbook(await loadTrackerView(await fixture(), now, healthy)))).getWorksheet('Overview')!;
     expect(ov.getCell('A1').value).toBe('✅ Connected · waiting for new messages');
     expect(ov.getCell('A3').value).toBe('Client');
     expect(ov.getCell('H3').value).toBe('Where we are');
@@ -78,7 +78,7 @@ describe('buildWorkbook', () => {
   });
 
   it('lists tasks with India dates, reminders, status and colour', async () => {
-    const ws = (await load(await buildWorkbook(loadTrackerView(await fixture(), now, healthy)))).getWorksheet('Sharma Interiors')!;
+    const ws = (await load(await buildWorkbook(await loadTrackerView(await fixture(), now, healthy)))).getWorksheet('Sharma Interiors')!;
     const row = findRow(ws, 'SHA-001');
     expect(row.getCell(2).value).toBe('Revise homepage banner');
     expect(row.getCell(3).value).toBe('Design');
@@ -98,7 +98,7 @@ describe('buildWorkbook', () => {
     const db = await fixture();
     db.raw.prepare("UPDATE tasks SET priority_level = 'critical', priority_source = 'keyword', sentiment = 'frustrated' WHERE code = 'SHA-001'").run();
     db.raw.prepare("UPDATE tasks SET priority_level = NULL, sentiment = 'positive' WHERE code = 'SHA-002'").run();
-    const sheet = async () => (await load(await buildWorkbook(loadTrackerView(db, now, healthy)))).getWorksheet('Sharma Interiors')!;
+    const sheet = async () => (await load(await buildWorkbook(await loadTrackerView(db, now, healthy)))).getWorksheet('Sharma Interiors')!;
     const headerAbove = (ws: ExcelJS.Worksheet, title: string) => (ws.getRow(findRow(ws, title).number + 1).values as unknown[]).slice(1);
     let ws = await sheet();
     expect(headerAbove(ws, 'Our pending tasks')).toEqual(['ID', 'Task', 'Category', 'Priority', 'Assigned to', 'Asked by', 'Raised', 'Deadline', 'Age (days)', 'Latest progress', 'Reminders', 'Status', 'Source message', 'Priority level', 'Sentiment']);
@@ -116,7 +116,7 @@ describe('buildWorkbook', () => {
   it('shows (none) in empty sections and marks inactive clients', async () => {
     const db = await fixture();
     syncClients(db, [SHARMA]);
-    const wb = await load(await buildWorkbook(loadTrackerView(db, now, healthy)));
+    const wb = await load(await buildWorkbook(await loadTrackerView(db, now, healthy)));
     expect(wb.getWorksheet('Overview')!.getCell('A4').text).toBe(`${MEHTA.name} (inactive)`);
     expect(findRow(wb.getWorksheet('Mehta Foods')!, '(none)')).toBeDefined();
   });
@@ -124,7 +124,7 @@ describe('buildWorkbook', () => {
   it('keeps chat-derived text as plain strings, never formulas', async () => {
     const db = await seededDb();
     createTask(db, task({ title: '=1+1', latestProgress: '+cmd', sourceQuote: '=HYPERLINK("http://x")' }), NOW);
-    const ws = (await load(await buildWorkbook(loadTrackerView(db, now, healthy)))).getWorksheet('Sharma Interiors')!;
+    const ws = (await load(await buildWorkbook(await loadTrackerView(db, now, healthy)))).getWorksheet('Sharma Interiors')!;
     const row = findRow(ws, 'SHA-001');
     const cell = row.getCell(2);
     expect(cell.type).toBe(ExcelJS.ValueType.String);

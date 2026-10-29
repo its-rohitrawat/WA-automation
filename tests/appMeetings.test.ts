@@ -121,8 +121,8 @@ async function stopApp(app: { stop(): Promise<void> }): Promise<void> {
 function watchSchedules(app: Awaited<ReturnType<typeof setup>>['app'], db: Db): (string | undefined)[] {
   const seen: (string | undefined)[] = [];
   const schedule = app.publisher.schedule.bind(app.publisher);
-  vi.spyOn(app.publisher, 'schedule').mockImplementation(() => {
-    seen.push(getMeeting(db, 1)?.status);
+  vi.spyOn(app.publisher, 'schedule').mockImplementation(async () => {
+    seen.push((await getMeeting(db, 1))?.status);
     schedule();
   });
   return seen;
@@ -153,7 +153,7 @@ describe('app with meetings', () => {
 
   it('without the meeting scopes: paused google_scopes, and no Google meeting call even for a queued meeting', async () => {
     const { app, api, health, db } = await setup({ scopes: false, prepare: (d) => void insertFound(d, queuedMeeting()) });
-    await vi.waitFor(() => expect(getMeeting(db, 1)?.errorCode).toBe('google_scopes'), SLOW_IO);
+    await vi.waitFor(async () => expect((await getMeeting(db, 1))?.errorCode).toBe('google_scopes'), SLOW_IO);
     await vi.advanceTimersByTimeAsync(20 * MINUTE);
     expect(api.calls).toEqual([]);
     expect(health.at(-1)).toMatchObject({ paused: 'google_scopes', sttProvider: 'elevenlabs', stats: { waiting: 1 } });
@@ -171,10 +171,10 @@ describe('app with meetings', () => {
     const { app, api, db, drive, stt, meetingAi, ai, health } = await setup();
     const statusAtSchedule = watchSchedules(app, db);
     // The first Doc may wait for the publisher's first upload to make the WA Agent folder (drive_root, 5 minutes).
-    await vi.waitFor(() => expect(['summarised', 'tracked']).toContain(getMeeting(db, 1)?.stage), SLOW_IO);
+    await vi.waitFor(async () => expect(['summarised', 'tracked']).toContain((await getMeeting(db, 1))?.stage), SLOW_IO);
     await vi.advanceTimersByTimeAsync(6 * MINUTE); // past the wait and the next tick
-    await vi.waitFor(() => expect(getMeeting(db, 1)?.status).toBe('done'), SLOW_IO);
-    const m = getMeeting(db, 1)!;
+    await vi.waitFor(async () => expect((await getMeeting(db, 1))?.status).toBe('done'), SLOW_IO);
+    const m = (await getMeeting(db, 1))!;
     expect(m).toMatchObject({ clientId: 1, matchKind: 'title', stage: 'tracked', title: 'Sharma Interiors weekly' });
     expect(api.callsOf('download')).toHaveLength(1);
     expect(stt.calls).toHaveLength(1);
@@ -206,13 +206,13 @@ describe('app with meetings', () => {
     // At each rebuild request: the meeting's status, and the done count the workbook's health would be built with.
     const seen: { status: string | undefined; done: number | undefined }[] = [];
     const schedule = app.publisher.schedule.bind(app.publisher);
-    vi.spyOn(app.publisher, 'schedule').mockImplementation(() => {
-      seen.push({ status: getMeeting(db, 1)?.status, done: app.health.snapshot().meetings?.stats.done });
+    vi.spyOn(app.publisher, 'schedule').mockImplementation(async () => {
+      seen.push({ status: (await getMeeting(db, 1))?.status, done: app.health.snapshot().meetings?.stats.done });
       schedule();
     });
-    await vi.waitFor(() => expect(['summarised', 'tracked']).toContain(getMeeting(db, 1)?.stage), SLOW_IO);
+    await vi.waitFor(async () => expect(['summarised', 'tracked']).toContain((await getMeeting(db, 1))?.stage), SLOW_IO);
     await vi.advanceTimersByTimeAsync(6 * MINUTE);
-    await vi.waitFor(() => expect(getMeeting(db, 1)?.status).toBe('done'), SLOW_IO);
+    await vi.waitFor(async () => expect((await getMeeting(db, 1))?.status).toBe('done'), SLOW_IO);
     // Every request after the finish (the tracker step's, the service's) comes before any tick could refresh the counts.
     const afterDone = seen.filter((x) => x.status === 'done');
     expect(afterDone.length).toBeGreaterThanOrEqual(1);
@@ -225,9 +225,9 @@ describe('app with meetings', () => {
     stt.transcribe = async () => ({ model: 'scribe', segments: [], billedSeconds: null, raw: {} });
     const { app, db, ai, meetingAi, drive } = await setup({ stt });
     const statusAtSchedule = watchSchedules(app, db);
-    await vi.waitFor(() => expect(['summarised', 'tracked']).toContain(getMeeting(db, 1)?.stage), SLOW_IO);
+    await vi.waitFor(async () => expect(['summarised', 'tracked']).toContain((await getMeeting(db, 1))?.stage), SLOW_IO);
     await vi.advanceTimersByTimeAsync(6 * MINUTE);
-    await vi.waitFor(() => expect(getMeeting(db, 1)).toMatchObject({ status: 'done', note: 'no_speech' }), SLOW_IO);
+    await vi.waitFor(async () => expect(await getMeeting(db, 1)).toMatchObject({ status: 'done', note: 'no_speech' }), SLOW_IO);
     expect(ai.calls).toEqual([]);
     expect(meetingAi.calls).toEqual([]);
     expect(drive.docs).toHaveLength(1);
@@ -263,7 +263,7 @@ describe('app with meetings', () => {
     for (let i = 0; i < 60 && !done; i++) await vi.advanceTimersByTimeAsync(1_000);
     expect(done).toBe(true);
     await stop;
-    expect(getMeeting(db, 1)).toMatchObject({ status: 'queued', stage: 'found', errorCode: 'stopped', attempts: 0 });
+    expect(await getMeeting(db, 1)).toMatchObject({ status: 'queued', stage: 'found', errorCode: 'stopped', attempts: 0 });
     expect(spendRows(db)).toEqual([]);
   });
 
@@ -282,7 +282,7 @@ describe('app with meetings', () => {
     release();
     for (let i = 0; i < 200 && !done; i++) await vi.advanceTimersByTimeAsync(1_000);
     await stop;
-    expect(getMeeting(db, 1)?.stage).toBe('transcribed');
+    expect((await getMeeting(db, 1))?.stage).toBe('transcribed');
     expect(spendRows(db).map((s) => s.kind)).toEqual(['stt']);
     expect(meetingAi.calls).toEqual([]);
   });
@@ -294,7 +294,7 @@ describe('app with meetings', () => {
     await vi.waitFor(() => expect(stt.calls).toHaveLength(1), SLOW_IO);
     await stopApp(app);
     expect(spendRows(db)).toEqual([expect.objectContaining({ kind: 'stt' })]);
-    expect(getMeeting(db, 1)?.sttParts[0]).toMatchObject({ booked: 'ceiling' });
+    expect((await getMeeting(db, 1))?.sttParts[0]).toMatchObject({ booked: 'ceiling' });
   });
 
   describe('STT_PROVIDER=local (plan 2026-10-28-meetings-local-stt.md, Task 3)', () => {
@@ -311,22 +311,22 @@ describe('app with meetings', () => {
         },
       );
     /** The recording discovery finds, already stored and waiting for speech-to-text for another hour (STT_PROVIDER was none). */
-    const waitingForStt = (db: Db) => {
-      const id = insertFound(db, queuedMeeting({ recording: 'conferenceRecords/c1/recordings/r1', title: 'Sharma Interiors weekly' }))!;
-      deferMeeting(db, id, { errorCode: 'stt_none', nextAttemptAt: '2026-11-01T13:00:00.000Z', at: '2026-11-01T12:00:00.000Z', attempts: 0 });
+    const waitingForStt = async (db: Db) => {
+      const id = (await insertFound(db, queuedMeeting({ recording: 'conferenceRecords/c1/recordings/r1', title: 'Sharma Interiors weekly' })))!;
+      await deferMeeting(db, id, { errorCode: 'stt_none', nextAttemptAt: '2026-11-01T13:00:00.000Z', at: '2026-11-01T12:00:00.000Z', attempts: 0 });
     };
 
     it('a meeting waiting with stt_none is processed after the restart, not an hour later: free, speaker-less lines to Claude and the Doc', async () => {
       const said = { n: 0 };
       const { app, db, meetingAi, drive, health } = await setup({ prepare: waitingForStt, transcriber: local(said) });
-      await vi.waitFor(() => expect(['summarised', 'tracked']).toContain(getMeeting(db, 1)?.stage), SLOW_IO);
+      await vi.waitFor(async () => expect(['summarised', 'tracked']).toContain((await getMeeting(db, 1))?.stage), SLOW_IO);
       await vi.advanceTimersByTimeAsync(6 * MINUTE); // past the Doc's wait for the WA Agent folder
-      await vi.waitFor(() => expect(getMeeting(db, 1)?.status).toBe('done'), SLOW_IO);
+      await vi.waitFor(async () => expect((await getMeeting(db, 1))?.status).toBe('done'), SLOW_IO);
       expect(Date.now()).toBeLessThan(Date.parse('2026-11-01T13:00:00.000Z'));
       expect(db.raw.prepare('SELECT COUNT(*) AS n FROM meetings').get()).toEqual({ n: 1 });
 
       // 45 minutes in five ten-minute-or-less parts, no speech spend: only the summary and the tracker step are booked.
-      const m = getMeeting(db, 1)!;
+      const m = (await getMeeting(db, 1))!;
       expect(said.n).toBe(5);
       expect(m.sttParts.map((p) => [p.provider, p.booked])).toEqual(Array.from({ length: 5 }, () => ['local', 'none']));
       expect(m.transcript!.map((x) => [x.start, x.speaker])).toEqual([[0, null], [540, null], [1080, null], [1620, null], [2160, null]]);
@@ -355,7 +355,7 @@ describe('app with meetings', () => {
 
     it('the local engine not set up: meetings wait (stt_none), and Health says the local speech engine is not set up', async () => {
       const { app, db, health } = await setup({ transcriber: () => null, sttProblem: 'local_not_set_up_model' });
-      await vi.waitFor(() => expect(getMeeting(db, 1)).toMatchObject({ status: 'queued', errorCode: 'stt_none' }), SLOW_IO);
+      await vi.waitFor(async () => expect(await getMeeting(db, 1)).toMatchObject({ status: 'queued', errorCode: 'stt_none' }), SLOW_IO);
       await vi.waitFor(() => expect(health.at(-1)).toMatchObject({ sttProvider: 'local', sttProblem: 'local_not_set_up_model' }), SLOW_IO);
       expect(app.health.line()).toEqual({ ok: false, text: MEETING_STT_PROBLEM_LINES.local_not_set_up_model });
       expect(spendRows(db)).toEqual([]);

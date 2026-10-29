@@ -29,7 +29,7 @@ export async function forgetPending(
   o: { meetingId?: number; clock?: Clock } = {},
 ): Promise<number> {
   const clock = o.clock ?? systemClock;
-  const rows = pendingSttForgets(db, {
+  const rows = await pendingSttForgets(db, {
     nowIso: clock.now().toISOString(),
     maxAttempts: MAX_FORGET_ATTEMPTS,
     ...(o.meetingId !== undefined ? { meetingId: o.meetingId } : {}),
@@ -42,7 +42,7 @@ export async function forgetPending(
     }
     const attempts = f.attempts + 1;
     const wait = FORGET_WAITS_MS[Math.min(attempts, FORGET_WAITS_MS.length) - 1]!;
-    countSttForgetAttempt(db, f.id, new Date(clock.now().getTime() + wait).toISOString());
+    await countSttForgetAttempt(db, f.id, new Date(clock.now().getTime() + wait).toISOString());
     try {
       await transcriber.forget(f.ref);
     } catch (e) {
@@ -53,7 +53,7 @@ export async function forgetPending(
         continue;
       }
     }
-    deleteSttForget(db, f.id);
+    await deleteSttForget(db, f.id);
     deleted++;
   }
   return deleted;

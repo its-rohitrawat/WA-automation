@@ -24,16 +24,16 @@ interface Over {
 }
 
 let n = 0;
-function meeting(db: Db, o: Over = {}): number {
+async function meeting(db: Db, o: Over = {}): Promise<number> {
   n++;
   const status = o.status ?? 'done';
   const internal = status === 'internal';
-  const id = insertFound(db, {
+  const id = (await insertFound(db, {
     recording: `conferenceRecords/c${n}/recordings/r${n}`, conference: `conferenceRecords/c${n}`, driveFileId: `drive${n}`, meetingCode: null,
     title: internal ? '' : (o.title ?? `Meeting ${n}`), startedAt: o.startedAt ?? `2026-10-1${n % 10}T05:00:00.000Z`, endedAt: null,
     attendees: [], participants: [], clientId: o.clientId === undefined ? (status === 'unassigned' || internal ? null : 1) : o.clientId,
     matchKind: 'title', status, driveSeconds: o.seconds === undefined ? 1800 : o.seconds, createdAt: NOW,
-  })!;
+  }))!;
   db.raw.prepare(`UPDATE meetings SET stage = COALESCE(?, stage), audio_seconds = ?, doc_file_id = ?, summary = ?, error_code = ?, next_attempt_at = ?
     WHERE id = ?`).run(o.stage ?? (status === 'done' ? 'tracked' : null), o.audioSeconds ?? null, o.doc ?? null, o.summary ?? null, o.errorCode ?? null,
     o.nextAttemptAt ?? null, id);
@@ -63,14 +63,14 @@ describe('parseMeetingList', () => {
 describe('listDashboardMeetings', () => {
   it('filters by view: ready is done, progress is queued, attention is what needs the owner', async () => {
     const db = await seededDb();
-    const done = meeting(db, { status: 'done', startedAt: '2026-10-18T05:00:00.000Z' });
-    const queued = meeting(db, { status: 'queued', stage: 'audio', startedAt: '2026-10-17T05:00:00.000Z' });
-    const unassigned = meeting(db, { status: 'unassigned', startedAt: '2026-10-16T05:00:00.000Z' });
-    const tooLong = meeting(db, { status: 'too_long', startedAt: '2026-10-15T05:00:00.000Z' });
-    const noAccess = meeting(db, { status: 'no_access', startedAt: '2026-10-14T05:00:00.000Z' });
-    const failed = meeting(db, { status: 'failed', startedAt: '2026-10-13T05:00:00.000Z' });
-    const skipped = meeting(db, { status: 'skipped', startedAt: '2026-10-12T05:00:00.000Z' });
-    const internal = meeting(db, { status: 'internal', startedAt: '2026-10-11T05:00:00.000Z' });
+    const done = await meeting(db, { status: 'done', startedAt: '2026-10-18T05:00:00.000Z' });
+    const queued = await meeting(db, { status: 'queued', stage: 'audio', startedAt: '2026-10-17T05:00:00.000Z' });
+    const unassigned = await meeting(db, { status: 'unassigned', startedAt: '2026-10-16T05:00:00.000Z' });
+    const tooLong = await meeting(db, { status: 'too_long', startedAt: '2026-10-15T05:00:00.000Z' });
+    const noAccess = await meeting(db, { status: 'no_access', startedAt: '2026-10-14T05:00:00.000Z' });
+    const failed = await meeting(db, { status: 'failed', startedAt: '2026-10-13T05:00:00.000Z' });
+    const skipped = await meeting(db, { status: 'skipped', startedAt: '2026-10-12T05:00:00.000Z' });
+    const internal = await meeting(db, { status: 'internal', startedAt: '2026-10-11T05:00:00.000Z' });
     expect(ids(await list(db, { view: 'ready' }))).toEqual([done]);
     expect(ids(await list(db, { view: 'progress' }))).toEqual([queued]);
     expect(ids(await list(db, { view: 'attention' }))).toEqual([unassigned, tooLong, noAccess, failed]);
@@ -80,7 +80,7 @@ describe('listDashboardMeetings', () => {
 
   it('returns the row shape: minutes from the audio length when known, the client, the account label and the doc link', async () => {
     const db = await seededDb();
-    const id = meeting(db, { title: 'Weekly <b>sync</b>', seconds: 1800, audioSeconds: 1500, doc: DOC, summary: SUMMARY });
+    const id = await meeting(db, { title: 'Weekly <b>sync</b>', seconds: 1800, audioSeconds: 1500, doc: DOC, summary: SUMMARY });
     createTask(db, { clientId: 1, side: 'us', title: 'Send logo', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-18',
       deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'meeting', meetingId: id }, NOW);
     expect((await list(db, {}, (c) => (c === `conferenceRecords/c${n}` ? 'company2' : null))).rows).toEqual([{
@@ -92,14 +92,14 @@ describe('listDashboardMeetings', () => {
 
   it('gives no minutes, client, account or doc when they are not known', async () => {
     const db = await seededDb();
-    meeting(db, { status: 'unassigned', seconds: null });
+    await meeting(db, { status: 'unassigned', seconds: null });
     expect((await list(db)).rows[0]).toMatchObject({ minutes: null, client: null, account: null, docUrl: null, actionItems: 0 });
   });
 
   it('labels each status and the queued stages in plain words', async () => {
     const db = await seededDb();
     const label = async (o: Over) => {
-      const id = meeting(db, o);
+      const id = await meeting(db, o);
       return (await list(db)).rows.find((r) => r.id === id)!.stageLabel;
     };
     expect(await label({ status: 'queued', stage: 'found' })).toBe('Downloading the recording');
@@ -121,7 +121,9 @@ describe('listDashboardMeetings', () => {
 
   it('pages, counting the total before paging', async () => {
     const db = await seededDb();
-    const all = [1, 2, 3, 4].map((d) => meeting(db, { startedAt: `2026-10-0${d}T05:00:00.000Z` })).reverse();
+    const all: number[] = [];
+    for (const d of [1, 2, 3, 4]) all.push(await meeting(db, { startedAt: `2026-10-0${d}T05:00:00.000Z` }));
+    all.reverse();
     expect(await list(db, { limit: '2', offset: '1' })).toEqual(expect.objectContaining({ total: 4 }));
     expect(ids(await list(db, { limit: '2', offset: '1' }))).toEqual([all[1], all[2]]);
   });
@@ -137,7 +139,7 @@ describe('meetingDocUrl', () => {
 
   it('leaves a bad stored id out of the list', async () => {
     const db = await seededDb();
-    meeting(db, { doc: 'https://evil.example/x' });
+    await meeting(db, { doc: 'https://evil.example/x' });
     expect((await list(db)).rows[0]!.docUrl).toBeNull();
   });
 });
@@ -145,8 +147,8 @@ describe('meetingDocUrl', () => {
 describe('meetingDetail', () => {
   it('adds the summary and the action items from the tasks made from the meeting', async () => {
     const db = await seededDb();
-    const id = meeting(db, { summary: SUMMARY, doc: DOC });
-    const other = meeting(db);
+    const id = await meeting(db, { summary: SUMMARY, doc: DOC });
+    const other = await meeting(db);
     createTask(db, { clientId: 1, side: 'us', title: 'Send logo', category: 'design', priority: 'major', assignedTo: 'Rahul', askedBy: null, raisedOn: '2026-10-18',
       deadline: '2026-10-01', latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'meeting', meetingId: id }, NOW);
     createTask(db, { clientId: 1, side: 'us', title: 'Other', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-18',
@@ -163,14 +165,14 @@ describe('meetingDetail', () => {
 
   it('has no summary when none is stored, or the stored one cannot be read', async () => {
     const db = await seededDb();
-    expect((await meetingDetail(db, String(meeting(db, { status: 'queued', stage: 'audio' })), now))!.summary).toBeNull();
-    expect((await meetingDetail(db, String(meeting(db, { summary: '{"not":"a summary"}' })), now))!.summary).toBeNull();
-    expect((await meetingDetail(db, String(meeting(db, { summary: 'not json' })), now))!.summary).toBeNull();
+    expect((await meetingDetail(db, String(await meeting(db, { status: 'queued', stage: 'audio' })), now))!.summary).toBeNull();
+    expect((await meetingDetail(db, String(await meeting(db, { summary: '{"not":"a summary"}' })), now))!.summary).toBeNull();
+    expect((await meetingDetail(db, String(await meeting(db, { summary: 'not json' })), now))!.summary).toBeNull();
   });
 
   it('returns undefined for an unknown or badly formed id', async () => {
     const db = await seededDb();
-    meeting(db);
+    await meeting(db);
     for (const bad of ['999', '0', '-1', '1.5', 'abc', '1 OR 1=1', '']) expect(await meetingDetail(db, bad, now), bad).toBeUndefined();
   });
 });
@@ -178,15 +180,15 @@ describe('meetingDetail', () => {
 describe('meeting review fixes', () => {
   it('labels a no-access meeting found as internal like the CLI does', async () => {
     const db = await seededDb();
-    const id = meeting(db, { status: 'no_access', clientId: null, title: '' });
+    const id = await meeting(db, { status: 'no_access', clientId: null, title: '' });
     db.raw.prepare("UPDATE meetings SET note = 'found_internal' WHERE id = ?").run(id);
     expect((await list(db)).rows[0]!.stageLabel).toBe('Internal, no access to the recording');
   });
 
   it('a deferral ending exactly now is due; a future next attempt without an error code shows the stage', async () => {
     const db = await seededDb();
-    const due = meeting(db, { status: 'queued', stage: 'audio', errorCode: 'spend_cap', nextAttemptAt: NOW });
-    const noCode = meeting(db, { status: 'queued', stage: 'audio', nextAttemptAt: '2026-10-19T09:00:00.000Z' });
+    const due = await meeting(db, { status: 'queued', stage: 'audio', errorCode: 'spend_cap', nextAttemptAt: NOW });
+    const noCode = await meeting(db, { status: 'queued', stage: 'audio', nextAttemptAt: '2026-10-19T09:00:00.000Z' });
     const rows = (await list(db)).rows;
     expect(rows.find((r) => r.id === due)!.stageLabel).toBe('Transcribing');
     expect(rows.find((r) => r.id === noCode)!.stageLabel).toBe('Transcribing');
@@ -194,7 +196,7 @@ describe('meeting review fixes', () => {
 
   it('rounds minutes to the nearest', async () => {
     const db = await seededDb();
-    meeting(db, { seconds: 1530 });
+    await meeting(db, { seconds: 1530 });
     expect((await list(db)).rows[0]!.minutes).toBe(26);
   });
 

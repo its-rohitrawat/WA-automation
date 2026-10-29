@@ -20,7 +20,7 @@ const now = new Date('2026-10-19T08:00:00Z');
 
 async function build(db: Awaited<ReturnType<typeof seededDb>>): Promise<ExcelJS.Workbook> {
   const wb = new ExcelJS.Workbook();
-  await wb.xlsx.load((await buildWorkbook(loadTrackerView(db, now, healthy))) as unknown as ExcelJS.Buffer);
+  await wb.xlsx.load((await buildWorkbook(await loadTrackerView(db, now, healthy))) as unknown as ExcelJS.Buffer);
   return wb;
 }
 
@@ -77,24 +77,24 @@ describe('workbook round 2', () => {
     setTaskStatus(db, d1.id, 'done', '2026-10-12', NOW, 'ai');
     setTaskStatus(db, d2.id, 'done', '2026-10-16', NOW, 'ai');
     setTaskStatus(db, d3.id, 'done', '2026-10-16', NOW, 'ai');
-    const v = loadTrackerView(db, now, healthy).clients.find((c) => c.client.code === 'SHA')!;
+    const v = (await loadTrackerView(db, now, healthy)).clients.find((c) => c.client.code === 'SHA')!;
     expect(v.usOpen.map((t) => t.code)).toEqual(['SHA-004', 'SHA-003', 'SHA-002', 'SHA-005', 'SHA-001']);
     expect(v.done.map((t) => t.code)).toEqual(['SHA-007', 'SHA-008', 'SHA-006']);
   });
 
-  it('orders clients by name case-insensitively', () => {
+  it('orders clients by name case-insensitively', async () => {
     const db = openDb(':memory:');
     syncClients(db, [cfg(1, 'zeta'), cfg(2, 'Alpha'), cfg(3, 'beta')]);
-    expect(loadTrackerView(db, now, healthy).clients.map((c) => c.client.name)).toEqual(['Alpha', 'beta', 'zeta']);
+    expect((await loadTrackerView(db, now, healthy)).clients.map((c) => c.client.name)).toEqual(['Alpha', 'beta', 'zeta']);
   });
 
-  it('keeps sheet-name suffixes stable by client id', () => {
+  it('keeps sheet-name suffixes stable by client id', async () => {
     const db = openDb(':memory:');
     syncClients(db, [cfg(1, 'Acme'), cfg(2, 'acme')]);
-    const names = () => Object.fromEntries(loadTrackerView(db, now, healthy).clients.map((c) => [c.client.code, c.sheetName]));
-    expect(names()).toEqual({ C01: 'Acme', C02: 'acme (2)' });
+    const names = async () => Object.fromEntries((await loadTrackerView(db, now, healthy)).clients.map((c) => [c.client.code, c.sheetName]));
+    expect(await names()).toEqual({ C01: 'Acme', C02: 'acme (2)' });
     syncClients(db, [cfg(1, 'Acme'), cfg(2, 'acme'), cfg(3, 'ACME')]);
-    expect(names()).toMatchObject({ C01: 'Acme', C02: 'acme (2)' });
+    expect(await names()).toMatchObject({ C01: 'Acme', C02: 'acme (2)' });
   });
 
   it('builds with awkward client names', async () => {
@@ -115,7 +115,7 @@ describe('workbook round 2', () => {
   it('breaks ties by creation order, not by text of the code', async () => {
     const db = await seededDb();
     for (let i = 0; i < 1000; i++) createTask(db, task({ title: `t${i}`, deadline: null }), NOW);
-    const codes = loadTrackerView(db, now, healthy).clients.find((c) => c.client.code === 'SHA')!.usOpen.map((t) => t.code);
+    const codes = (await loadTrackerView(db, now, healthy)).clients.find((c) => c.client.code === 'SHA')!.usOpen.map((t) => t.code);
     expect(codes[998]).toBe('SHA-999');
     expect(codes[999]).toBe('SHA-1000');
   });

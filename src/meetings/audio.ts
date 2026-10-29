@@ -233,11 +233,11 @@ export async function prepareAudio(
 
   const at = deps.clock.now().toISOString();
   if (audioSeconds > deps.maxMinutes * 60) {
-    failMeeting(deps.db, id, { status: 'too_long', errorCode: 'too_long_measured', at, audioPath, audioSeconds });
+    await failMeeting(deps.db, id, { status: 'too_long', errorCode: 'too_long_measured', at, audioPath, audioSeconds });
     deps.log.info({ meetingId: id, seconds: Math.round(audioSeconds) }, 'meeting too long by measured length; audio kept');
     return { outcome: 'too_long', audioPath, audioSeconds };
   }
-  advanceStage(deps.db, id, 'audio', { audioPath, audioSeconds }, at);
+  await advanceStage(deps.db, id, 'audio', { audioPath, audioSeconds }, at);
   deps.log.info({ meetingId: id, seconds: Math.round(audioSeconds) }, 'meeting audio prepared');
   return { outcome: 'audio', audioPath, audioSeconds };
 }
@@ -259,7 +259,7 @@ const stageAtLeast = (stage: MeetingStage, min: MeetingStage): boolean => MEETIN
  *   (anything else: the folder is left whole and the meeting id logged).
  * Links are never followed or removed. Returns counts; logs counts and meeting ids only.
  */
-export function cleanupTemp(db: Db, dataDir: string, log: Logger): { removed: number; kept: number } {
+export async function cleanupTemp(db: Db, dataDir: string, log: Logger): Promise<{ removed: number; kept: number }> {
   const tmp = meetingsTmpDir(dataDir);
   let entries;
   try {
@@ -272,7 +272,7 @@ export function cleanupTemp(db: Db, dataDir: string, log: Logger): { removed: nu
   let kept = 0;
   for (const entry of entries) {
     const m = WORK_NAME.exec(entry.name);
-    const state = m ? getMeetingState(db, Number(m[1])) : undefined;
+    const state = m ? await getMeetingState(db, Number(m[1])) : undefined;
     const isParts = m?.[2]?.startsWith('-parts') ?? false;
     const finished = state !== undefined && (TERMINAL.has(state.status) || stageAtLeast(state.stage, isParts ? 'transcribed' : 'audio'));
     if (!m || !state || !finished) {

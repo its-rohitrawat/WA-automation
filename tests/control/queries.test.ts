@@ -18,11 +18,11 @@ function task(db: Db, clientId: number, o: { status?: 'open' | 'maybe_done' | 'd
 }
 
 let n = 0;
-function meeting(db: Db, startedAt: string, title = `Meeting ${++n}`) {
-  return insertFound(db, {
+async function meeting(db: Db, startedAt: string, title = `Meeting ${++n}`): Promise<number> {
+  return (await insertFound(db, {
     recording: `conferenceRecords/o${n}/recordings/r`, conference: `conferenceRecords/o${n}`, driveFileId: `d${n}`, meetingCode: null, title,
     startedAt, endedAt: null, attendees: [], participants: [], clientId: 1, matchKind: 'title', status: 'queued', driveSeconds: 1800, createdAt: NOW,
-  })!;
+  }))!;
 }
 
 describe('overview', () => {
@@ -72,7 +72,8 @@ describe('overview', () => {
 
   it('lists the latest 4 meetings, newest first, with their plain status', async () => {
     const db = await seededDb();
-    const ids = ['2026-10-10', '2026-10-11', '2026-10-12', '2026-10-13', '2026-10-14'].map((d) => meeting(db, `${d}T05:00:00.000Z`));
+    const ids: number[] = [];
+    for (const d of ['2026-10-10', '2026-10-11', '2026-10-12', '2026-10-13', '2026-10-14']) ids.push(await meeting(db, `${d}T05:00:00.000Z`));
     const m = (await overview(db, now)).meetings;
     expect(m.map((x) => x.id)).toEqual(ids.slice(1).reverse());
     expect(m[0]).toEqual({ id: ids[4], title: expect.any(String), status: 'queued', stageLabel: 'Downloading the recording', when: '2026-10-14T05:00:00.000Z', minutes: 30 });
@@ -87,7 +88,7 @@ describe('overview', () => {
       finishBatch(db, b, { status: 'ok', errorCode: null, accepted: 0, rejected: 0, at: at(i) });
     }
     for (const i of [1, 3, 5]) recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'update_task', detail: {}, reason: null, sourceIds: [], at: at(i) });
-    meeting(db, at(6)); // never in the Overview's activity
+    await meeting(db, at(6)); // never in the Overview's activity
     db.raw.prepare("UPDATE meetings SET updated_at = ? WHERE id = 1").run(at(9));
     db.raw.prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, 'agent', 'tracker.published', 'ops', 'x')").run(at(8));
     const a = (await overview(db, now)).activity;

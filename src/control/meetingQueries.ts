@@ -158,10 +158,10 @@ export async function listDashboardMeetings(db: Db, p: MeetingListParams, now: D
 }
 
 /** The meeting's summary in the screen's shape; null when none is stored or the stored one cannot be read. */
-function summaryOf(db: Db, id: number): MeetingSummaryView | null {
+async function summaryOf(db: Db, id: number): Promise<MeetingSummaryView | null> {
   let s;
   try {
-    s = getMeeting(db, id)?.summary;
+    s = (await getMeeting(db, id))?.summary;
   } catch {
     return null; // a stored value that fails its schema (MeetingRowError): the rest of the detail still shows
   }
@@ -187,5 +187,5 @@ export async function meetingDetail(db: Db, rawId: string, now: Date, accountOf?
   if (id === undefined) return undefined;
   const r = await db.get<RawRow>(`${SELECT_SQL} WHERE m.id = ?`, [id]);
   if (!r) return undefined;
-  return { ...toRow(r, now, accountOf), summary: summaryOf(db, id), actionItemTasks: await tasksForMeeting(db, id, now) };
+  return { ...toRow(r, now, accountOf), summary: await summaryOf(db, id), actionItemTasks: await tasksForMeeting(db, id, now) };
 }

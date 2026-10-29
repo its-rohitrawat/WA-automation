@@ -430,7 +430,7 @@ export class ReportScheduler {
   async #build(now: Date): Promise<ReportPayload> {
     const link = trackerLink(this.#o.db);
     if (!link) throw new ReportBuildError('no_tracker_link');
-    const view = loadTrackerView(this.#o.db, now, this.#o.healthLine());
+    const view = await loadTrackerView(this.#o.db, now, this.#o.healthLine());
     return { text: buildShortMorningText(view, view.today, link) };
   }
 }

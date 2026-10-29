@@ -7,12 +7,10 @@ cli/meetings.ts
 config/prioritySettings.ts
 config/settingsStore.ts
 control/groups.ts
-control/meetingActions.ts
 control/taskActions.ts
 health/uptimeLog.ts
 media/extract.ts
 meetings/sttParts.ts
-meetings/watcher.ts
 output/googleAuth.ts
 output/googleAuthHub.ts
 report/scheduler.ts
@@ -23,7 +21,6 @@ store/db.ts
 store/historyBackfill.ts
 store/kv.ts
 store/media.ts
-store/meetings.ts
 store/messages.ts
 store/outbox.ts
 store/people.ts
