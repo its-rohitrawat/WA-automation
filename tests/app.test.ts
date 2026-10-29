@@ -134,7 +134,7 @@ async function sharmaRows(buf: Buffer): Promise<string[][]> {
 }
 
 const bannerTask = () =>
-  op({ op: 'add_task', side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'high', deadline: '2026-10-18', sourceMessageIds: ['m1'] });
+  op({ op: 'add_task', side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'major', deadline: '2026-10-18', sourceMessageIds: ['m1'] });
 
 describe('app end to end', () => {
   beforeEach(() => {

@@ -36,6 +36,8 @@ export function failed(err) {
 
 /** A status pill. @param {{ cls: string, label: string }} p */
 export const pill = (p) => `<span class="pill ${esc(p.cls)}"><i></i>${esc(p.label)}</span>`;
+/** The client's mood as a small label, or nothing (sentiment off, or not judged). @param {{ cls: string, label: string } | null} m */
+export const moodTag = (m) => (m ? `<span class="${esc(m.cls)}" title="Client mood">${esc(m.label)}</span>` : '');
 
 /** The message of a refusal from the API (plain text it sent), or a fixed one. @param {unknown} err */
 export const errorText = (err) => (err instanceof Error && err.name === 'ApiError' ? err.message : 'Something went wrong. Try again.');

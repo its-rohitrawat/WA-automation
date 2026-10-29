@@ -5,8 +5,8 @@ import { auditPill, deadlineText, groupByIstDay, meetingPill, numbersMatch, read
 
 describe('task filters in the URL', () => {
   it('reads only allowed values, with the defaults left out', () => {
-    expect(taskQueryFromSearch('?q=logo&client=sha&status=overdue&owner=Rahul&deadline=week&priority=high&sort=client&dir=desc')).toEqual({
-      q: 'logo', client: 'SHA', status: 'overdue', owner: 'Rahul', deadline: 'week', priority: 'high', sort: 'client', dir: 'desc',
+    expect(taskQueryFromSearch('?q=logo&client=sha&status=overdue&owner=Rahul&deadline=week&priority=major&sort=client&dir=desc')).toEqual({
+      q: 'logo', client: 'SHA', status: 'overdue', owner: 'Rahul', deadline: 'week', priority: 'major', sort: 'client', dir: 'desc',
     });
     expect(taskQueryFromSearch('?status=late&deadline=soon&priority=urgent&sort=title&dir=up&client=sh1')).toEqual({ sort: 'deadline', dir: 'asc' });
     expect(taskQueryFromSearch('')).toEqual({ sort: 'deadline', dir: 'asc' });

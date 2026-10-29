@@ -188,14 +188,25 @@ export function readClients(raw) {
   return arr(obj(raw).clients).map(clientCard).filter((c) => c.code);
 }
 
+const PRIORITY_LEVELS = ['critical', 'major', 'medium', 'low'];
+const MOODS = ['positive', 'neutral', 'negative', 'frustrated'];
+/** One of the known words, else null (shown as "—", or not at all). @param {unknown} v @param {string[]} allowed */
+const known = (v, allowed) => (typeof v === 'string' && allowed.includes(v) ? v : null);
+
 /** GET /dashboard/api/clients/:code ({ client: ClientDetail }). @param {unknown} raw */
 export function readClientDetail(raw) {
   const o = obj(obj(raw).client);
+  const mood = obj(o.sentiment);
   return {
     ...clientCard(o),
+    // The client's latest mood: null while sentiment is off, or before a batch judged it.
+    sentiment: known(mood.mood, MOODS) ? { mood: /** @type {string} */ (known(mood.mood, MOODS)), at: iso(mood.at) } : null,
     openTasks: arr(o.openTasks).map((t) => {
       const x = obj(t);
-      return { code: str(x.code), title: str(x.title), assignedTo: str(x.assignedTo) || null, deadline: str(x.deadline) || null, status: str(x.status) };
+      return {
+        code: str(x.code), title: str(x.title), assignedTo: str(x.assignedTo) || null, deadline: str(x.deadline) || null, status: str(x.status),
+        priority: known(x.priority, PRIORITY_LEVELS), sentiment: known(x.sentiment, MOODS),
+      };
     }),
     meetings: arr(o.meetings).map((m) => {
       const x = obj(m);

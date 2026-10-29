@@ -34,12 +34,22 @@ const openTask = (db: Db, code: string): TaskRow => {
 describe('buildShortMorningText', () => {
   it('gives the totals and the link in one line, many open and overdue tasks', () => {
     const db = seededDb();
-    createTask(db, task({ title: 'Fix contact form', priority: 'high' }), NOW.toISOString());
+    createTask(db, task({ title: 'Fix contact form', priority: 'major' }), NOW.toISOString());
     createTask(db, task({ side: 'client', title: 'Send logo files', deadline: '2026-10-20' }), NOW.toISOString());
     createTask(db, task({ title: 'Write about page', deadline: TODAY }), NOW.toISOString());
     createTask(db, task({ clientId: 2, side: 'client', title: 'Approve menu', deadline: '2026-10-21' }), NOW.toISOString());
     createTask(db, task({ clientId: 2, title: 'Print menu' }), NOW.toISOString());
     expect(text(db)).toBe(`Good morning. 5 open tasks, 2 overdue. Today's tracker: ${LINK}`);
+  });
+
+  it('leads with the critical count when there are critical open tasks, and leaves done ones out', () => {
+    const db = seededDb();
+    createTask(db, task({ title: 'Site down', priority: 'critical' }), NOW.toISOString());
+    createTask(db, task({ clientId: 2, side: 'client', title: 'Payment', priority: 'critical' }), NOW.toISOString());
+    const done = createTask(db, task({ title: 'Fixed', priority: 'critical' }), NOW.toISOString());
+    setTaskStatus(db, done.id, 'done', TODAY, NOW.toISOString(), 'ai');
+    createTask(db, task({ title: 'Plain' }), NOW.toISOString());
+    expect(text(db)).toBe(`Good morning. 2 critical, 3 open tasks, 0 overdue. Today's tracker: ${LINK}`);
   });
 
   it('uses the singular for 1 open task and 1 overdue', () => {
@@ -82,7 +92,7 @@ describe('buildShortMorningText', () => {
 
   it('carries no client name, task title or code, and leaves the view it is given unchanged', () => {
     const db = seededDb();
-    createTask(db, task({ title: 'Secret banner work', priority: 'high' }), NOW.toISOString());
+    createTask(db, task({ title: 'Secret banner work', priority: 'major' }), NOW.toISOString());
     createTask(db, task({ side: 'client', title: 'Client overdue', deadline: '2026-10-21' }), NOW.toISOString());
     const v = view(db);
     const codes = () => v.clients.map((c) => [c.usOpen.map((t) => t.code), c.clientOpen.map((t) => t.code)]);
@@ -126,7 +136,7 @@ describe('trackerLink', () => {
 describe('byMorningUrgency', () => {
   it('orders overdue first, then due today, then priority, then oldest raised', () => {
     const db = seededDb();
-    createTask(db, task({ title: 'Fix contact form', priority: 'high', raisedOn: '2026-10-01' }), NOW.toISOString()); // SHA-001
+    createTask(db, task({ title: 'Fix contact form', priority: 'major', raisedOn: '2026-10-01' }), NOW.toISOString()); // SHA-001
     createTask(db, task({ side: 'client', title: 'Send logo files', priority: 'low', deadline: '2026-10-20', raisedOn: '2026-10-15' }), NOW.toISOString()); // SHA-002
     createTask(db, task({ title: 'Write about page', deadline: TODAY, raisedOn: '2026-10-05' }), NOW.toISOString()); // SHA-003
     createTask(db, task({ title: 'Old low task', priority: 'low', raisedOn: '2026-09-01' }), NOW.toISOString()); // SHA-004
@@ -138,9 +148,19 @@ describe('byMorningUrgency', () => {
   it('ranks high priority above older tasks', () => {
     const db = seededDb();
     createTask(db, task({ title: 'Oldest', raisedOn: '2026-09-01' }), NOW.toISOString()); // SHA-001
-    createTask(db, task({ title: 'Urgent one', priority: 'high', raisedOn: '2026-10-20' }), NOW.toISOString()); // SHA-002
+    createTask(db, task({ title: 'Urgent one', priority: 'major', raisedOn: '2026-10-20' }), NOW.toISOString()); // SHA-002
     createTask(db, task({ title: 'Later', raisedOn: '2026-10-02' }), NOW.toISOString()); // SHA-003
     expect(urgent(db)).toEqual(['SHA-002', 'SHA-001', 'SHA-003']);
+  });
+
+  it('puts critical tasks first, even before overdue ones, and ranks a task from before levels by its old priority', () => {
+    const db = seededDb();
+    createTask(db, task({ title: 'Overdue', deadline: '2026-10-20' }), NOW.toISOString()); // SHA-001
+    createTask(db, task({ title: 'Critical', priority: 'critical', raisedOn: '2026-10-20' }), NOW.toISOString()); // SHA-002
+    createTask(db, task({ title: 'Old high', priority: 'major', raisedOn: '2026-10-21' }), NOW.toISOString()); // SHA-003
+    db.prepare("UPDATE tasks SET priority_level = NULL WHERE code = 'SHA-003'").run(); // old column stays 'high'
+    createTask(db, task({ title: 'Medium', raisedOn: '2026-09-01' }), NOW.toISOString()); // SHA-004
+    expect(urgent(db)).toEqual(['SHA-002', 'SHA-001', 'SHA-003', 'SHA-004']);
   });
 
   it('breaks a full tie by task id, whichever side each task is on', () => {
@@ -153,15 +173,24 @@ describe('byMorningUrgency', () => {
 });
 
 describe('taskNotes', () => {
-  it('notes due today, a later deadline, overdue, high priority and maybe done', () => {
+  it('notes critical, and a task without a level (from before levels) gets no priority note', () => {
+    const db = seededDb();
+    createTask(db, task({ title: 'Down', priority: 'critical' }), NOW.toISOString()); // SHA-001
+    createTask(db, task({ title: 'Old high', priority: 'major' }), NOW.toISOString()); // SHA-002
+    db.prepare("UPDATE tasks SET priority_level = NULL WHERE code = 'SHA-002'").run();
+    expect(taskNotes(openTask(db, 'SHA-001'), TODAY)).toEqual(['critical']);
+    expect(taskNotes(openTask(db, 'SHA-002'), TODAY)).toEqual([]);
+  });
+
+  it('notes due today, a later deadline, overdue, major and maybe done', () => {
     const db = seededDb();
     createTask(db, task({ title: 'Today', deadline: TODAY }), NOW.toISOString()); // SHA-001
-    createTask(db, task({ title: 'Late', priority: 'high', deadline: '2026-10-21' }), NOW.toISOString()); // SHA-002
+    createTask(db, task({ title: 'Late', priority: 'major', deadline: '2026-10-21' }), NOW.toISOString()); // SHA-002
     const maybe = createTask(db, task({ title: 'Maybe', deadline: '2026-10-30' }), NOW.toISOString()); // SHA-003
     setTaskStatus(db, maybe.id, 'maybe_done', TODAY, NOW.toISOString(), 'ai');
     createTask(db, task({ title: 'Plain' }), NOW.toISOString()); // SHA-004
     expect(taskNotes(openTask(db, 'SHA-001'), TODAY)).toEqual(['due today']);
-    expect(taskNotes(openTask(db, 'SHA-002'), TODAY)).toEqual(['due 21 Oct', 'overdue', 'high priority']);
+    expect(taskNotes(openTask(db, 'SHA-002'), TODAY)).toEqual(['due 21 Oct', 'overdue', 'major']);
     expect(taskNotes(openTask(db, 'SHA-003'), TODAY)).toEqual(['due 30 Oct', 'maybe done']);
     expect(taskNotes(openTask(db, 'SHA-004'), TODAY)).toEqual([]);
   });

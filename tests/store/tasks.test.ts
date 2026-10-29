@@ -6,7 +6,7 @@ import {
 import { LATER, NOW, seededDb } from '../helpers/db.ts';
 
 const newTask = (o: Partial<NewTask> = {}): NewTask => ({
-  clientId: 1, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'high', assignedTo: 'Rahul', askedBy: 'Mr. Sharma',
+  clientId: 1, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'major', assignedTo: 'Rahul', askedBy: 'Mr. Sharma',
   raisedOn: '2026-10-10', deadline: '2026-10-18', latestProgress: null, sourceQuote: 'banner thoda bright karo', sourceDate: '2026-10-10',
   sourceWaId: 'm1', origin: 'whatsapp', ...o,
 });

@@ -79,7 +79,7 @@ function context(db: Db, waId: string, text: string, ts = '2026-10-18T07:00:00.0
 }
 
 function banner(db: Db, raisedOn = '2026-10-10', origin = 'whatsapp'): void {
-  createTask(db, { clientId: 1, side: 'us', title: 'Homepage banner', category: 'design', priority: 'high', assignedTo: null, askedBy: 'Mr. Sharma',
+  createTask(db, { clientId: 1, side: 'us', title: 'Homepage banner', category: 'design', priority: 'major', assignedTo: null, askedBy: 'Mr. Sharma',
     raisedOn, deadline: null, latestProgress: null, sourceQuote: 'banner bright karo', sourceDate: raisedOn, sourceWaId: 'W0', origin }, NOW);
 }
 

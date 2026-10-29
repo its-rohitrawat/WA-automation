@@ -326,7 +326,14 @@ describe('morning report documentation: short message with the tracker link (27 
   };
   /** A stand-in tracker view: active clients with the given open and overdue counts (none: no active clients). */
   const fakeView = (...clients: { open: number; overdue: number }[]): TrackerView =>
-    ({ clients: clients.map((c) => ({ client: { active: true }, usOpen: new Array(c.open).fill(null), clientOpen: [], overdue: c.overdue })) }) as unknown as TrackerView;
+    ({ clients: clients.map((c) => ({ client: { active: true }, usOpen: new Array(c.open).fill({ priority: 'medium' }), clientOpen: [], overdue: c.overdue })) }) as unknown as TrackerView;
+
+  it('gives the critical example exactly as the message reads', () => {
+    const t = (priority: string) => ({ priority });
+    const view = { clients: [{ client: { active: true }, usOpen: [t('critical'), t('critical'), t('medium')], clientOpen: [t('low'), t('major')], overdue: 2 }] } as unknown as TrackerView;
+    expect(report).toContain(`\`${buildShortMorningText(view, '2026-10-30', '…')}\``);
+    expect(buildShortMorningText(view, '2026-10-30', '…')).toBe("Good morning. 2 critical, 5 open tasks, 2 overdue. Today's tracker: …");
+  });
 
   it('describes the short message with the link and no attachment', () => {
     const example = buildShortMorningText(fakeView({ open: 3, overdue: 2 }, { open: 2, overdue: 0 }), '2026-10-30', 'https://drive.google.com/file/d/…/view');

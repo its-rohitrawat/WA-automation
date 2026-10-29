@@ -20,7 +20,7 @@ const FOUNDER = 'self@founder';
 
 const client: ClientRow = {
   id: 1, code: 'SHA', name: 'Sharma Interiors', groupId: '120363000000000001@g.us', phases: ['Discovery', 'Design', 'Development', 'Review', 'Launch'],
-  currentPhase: 'Design', phaseLocked: false, statusText: 'Homepage approved; logo and inner pages in progress.', statusUpdatedAt: null, active: true,
+  currentPhase: 'Design', phaseLocked: false, statusText: 'Homepage approved; logo and inner pages in progress.', statusUpdatedAt: null, active: true, sentiment: null, sentimentAt: null,
 };
 
 const people: PersonRow[] = [
@@ -192,7 +192,7 @@ export interface MeetingTrackerCase extends GoldenCase {
 
 function task(code: string, title: string, side: 'us' | 'client', status: Status, category: Category): TaskRow {
   return {
-    id: 0, code, clientId: 1, side, title, category, priority: 'high', assignedTo: 'Rahul', askedBy: 'Mr. Sharma', raisedOn: '2026-10-12',
+    id: 0, code, clientId: 1, side, title, category, priority: 'major', legacyPriority: 'high', prioritySource: 'ai', priorityKeyword: null, sentiment: null, assignedTo: 'Rahul', askedBy: 'Mr. Sharma', raisedOn: '2026-10-12',
     deadline: '2026-10-21', latestProgress: null, reminderCount: 0, lastReminderOn: null, status, sourceQuote: null, sourceDate: null,
     sourceWaId: null, sourceRevoked: false, closedOn: null, origin: 'whatsapp', lockedFields: [], statusLockedAt: null, createdAt: '', updatedAt: '',
   };

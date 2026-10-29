@@ -7,6 +7,8 @@ import { ago, clock, when } from '../format.js';
 import { CONNECTIONS_CHANGED, quickButton } from './connect.js';
 import { openDrawer, openDrawerElement } from './drawer.js';
 import { mountGroups } from './groups.js';
+import { moodTag, pill } from './ui.js';
+import { moodLabel, priorityPill } from './workLib.js';
 
 const CLIENTS_MS = 30_000;
 
@@ -190,7 +192,9 @@ function panelBody(c) {
     ? `Last read <b>${esc(stamp(a.lastBatch.at))}</b> · ${a.lastBatch.messages} message${a.lastBatch.messages === 1 ? '' : 's'} · <b>${changes ? `${changes} task change${changes === 1 ? '' : 's'}` : 'no new tasks'}</b>`
     : 'Not read yet';
   const w = a.week;
-  return `<div class="status" role="status"><i class="dot" aria-hidden="true"></i><div>${statusWords(st)}</div></div>
+  // The client's mood in its latest batch: shown only while sentiment is switched on (the agent sends none otherwise).
+  const mood = c.sentiment ? `<p class="mood-line">Client mood ${moodTag(moodLabel(c.sentiment.mood))}${c.sentiment.at ? ` <span>· ${esc(ago(c.sentiment.at))}</span>` : ''}</p>` : '';
+  return `<div class="status" role="status"><i class="dot" aria-hidden="true"></i><div>${statusWords(st)}</div></div>${mood}
     <div class="h4">This group, last 7 days</div>
     <div class="stats"><div><b>${w.messages}</b><small>messages read</small></div><div><b>${w.people}</b><small>people active</small></div>
       <div><b>${w.files}</b><small>files &amp; photos</small></div><div><b>${w.voice}</b><small>voice notes</small></div></div>
@@ -198,7 +202,7 @@ function panelBody(c) {
     <div class="h4">Latest messages</div>
     ${a.latest.length ? `<div class="msgs">${a.latest.map(bubble).join('')}</div>` : '<p class="empty-note">No messages yet. They show up here once the group talks.</p>'}
     <div class="h4">Open tasks · ${c.openTasks.length}</div>
-    ${c.openTasks.length ? `<div class="list">${c.openTasks.map((t) => `<div class="li"><div class="ic">${icon('task', 16)}</div><div><b>${esc(t.code)} · ${esc(t.title)}</b><small>${esc(t.assignedTo ?? 'Unassigned')} · ${t.deadline ? `due ${esc(day(t.deadline))}` : 'no deadline'}</small></div>${taskPill(t)}</div>`).join('')}</div>`
+    ${c.openTasks.length ? `<div class="list">${c.openTasks.map((t) => `<div class="li"><div class="ic">${icon('task', 16)}</div><div><b>${esc(t.code)} · ${esc(t.title)}</b><small>${esc(t.assignedTo ?? 'Unassigned')} · ${t.deadline ? `due ${esc(day(t.deadline))}` : 'no deadline'}${t.sentiment ? ` · ${moodTag(moodLabel(t.sentiment))}` : ''}</small></div><span class="pills">${pill(priorityPill(t.priority))}${taskPill(t)}</span></div>`).join('')}</div>`
       : a.taskCount === 0
         ? `<div class="empty"><b>No tasks yet</b>Nothing in this group's messages has been a task so far. New ones show up here about ${Math.ceil(a.quietMinutes)} minutes after a conversation goes quiet.</div>`
         : '<p class="empty-note">No open tasks.</p>'}

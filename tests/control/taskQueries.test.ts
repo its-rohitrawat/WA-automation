@@ -57,12 +57,12 @@ describe('parseTaskQuery', () => {
 describe('listDashboardTasks', () => {
   it('returns the row shape, with the client and plain status', () => {
     const db = seededDb();
-    task(db, { title: 'Logo', assignedTo: 'Rahul', askedBy: 'Mr Sharma', deadline: '2026-10-25', priority: 'high' });
+    task(db, { title: 'Logo', assignedTo: 'Rahul', askedBy: 'Mr Sharma', deadline: '2026-10-25', priority: 'major' });
     expect(listDashboardTasks(db, q({}), now)).toEqual({
       total: 1,
       rows: [{
         code: 'SHA-001', title: 'Logo', client: { code: 'SHA', name: 'Sharma Interiors' }, side: 'us', owner: 'Rahul', askedBy: 'Mr Sharma',
-        deadline: '2026-10-25', status: 'open', overdue: false, priority: 'high', category: 'design', source: 'whatsapp', updatedAt: NOW,
+        deadline: '2026-10-25', status: 'open', overdue: false, priority: 'major', prioritySource: 'ai', sentiment: null, category: 'design', source: 'whatsapp', updatedAt: NOW,
       }],
     });
   });
@@ -109,12 +109,12 @@ describe('listDashboardTasks', () => {
 
   it('filters by client, owner (any case) and priority', () => {
     const db = seededDb();
-    const a = task(db, { assignedTo: 'Rahul', priority: 'high' });
+    const a = task(db, { assignedTo: 'Rahul', priority: 'major' });
     const b = task(db, { clientId: 2, assignedTo: 'rahul' });
     task(db, { assignedTo: 'Priya' });
     expect(codes(listDashboardTasks(db, q({ client: 'MEH' }), now))).toEqual([b]);
     expect(codes(listDashboardTasks(db, q({ owner: 'RAHUL', sort: 'code' }), now))).toEqual([b, a]);
-    expect(codes(listDashboardTasks(db, q({ priority: 'high' }), now))).toEqual([a]);
+    expect(codes(listDashboardTasks(db, q({ priority: 'major' }), now))).toEqual([a]);
     expect(listDashboardTasks(db, q({ client: 'XYZ' }), now)).toEqual({ total: 0, rows: [] });
   });
 
@@ -278,5 +278,33 @@ describe('listDashboardTasks review fixes', () => {
     const done = task(db, { deadline: '2026-10-01', status: 'done' });
     expect(codes(listDashboardTasks(db, q({ deadline: 'past' }), now))).toEqual([done]);
     expect(codes(listDashboardTasks(db, q({ status: 'overdue' }), now))).toEqual([]);
+  });
+});
+
+describe('listDashboardTasks: priority levels and sentiment', () => {
+  const sentimentOn = (db: Db) => db.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', ?, 'o')").run(NOW);
+
+  it('filters and sorts by the four levels, a task without one last', () => {
+    const db = seededDb();
+    const low = task(db, { priority: 'low' });
+    const critical = task(db, { priority: 'critical' });
+    const old = task(db, { priority: 'major' });
+    db.prepare('UPDATE tasks SET priority_level = NULL, priority_source = NULL WHERE code = ?').run(old);
+    const major = task(db, { priority: 'major' });
+    expect(codes(listDashboardTasks(db, q({ sort: 'priority' }), now))).toEqual([critical, major, low, old]);
+    expect(codes(listDashboardTasks(db, q({ sort: 'priority', dir: 'desc' }), now))).toEqual([old, low, major, critical]);
+    expect(codes(listDashboardTasks(db, q({ priority: 'critical' }), now))).toEqual([critical]);
+    expect(listDashboardTasks(db, q({ priority: 'major' }), now).rows.map((r) => [r.code, r.priority])).toEqual([[major, 'major']]);
+    expect(listDashboardTasks(db, q({}), now).rows.find((r) => r.code === old)).toMatchObject({ priority: null, prioritySource: null });
+  });
+
+  it('sends a task\'s mood only while sentiment is switched on, and says what set the priority', () => {
+    const db = seededDb();
+    const code = task(db, { priority: 'critical', prioritySource: 'keyword', priorityKeyword: 'urgent', sentiment: 'frustrated' });
+    expect(listDashboardTasks(db, q({}), now).rows[0]).toMatchObject({ priority: 'critical', prioritySource: 'keyword', sentiment: null });
+    expect(taskDetail(db, code, now)).toMatchObject({ priorityKeyword: 'urgent', sentiment: null });
+    sentimentOn(db);
+    expect(listDashboardTasks(db, q({}), now).rows[0]).toMatchObject({ sentiment: 'frustrated' });
+    expect(taskDetail(db, code, now)).toMatchObject({ sentiment: 'frustrated' });
   });
 });

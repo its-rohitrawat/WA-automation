@@ -281,7 +281,7 @@ describe('Phase 2b golden cases (voice notes, written but not run)', () => {
   });
 
   it('(a) is scored on a task for us citing the voice note', () => {
-    const add = (source: string, side: 'us' | 'client' = 'us') => op({ op: 'add_task', side, title: 'Team photos section', category: 'design', priority: 'high', sourceMessageIds: [source] });
+    const add = (source: string, side: 'us' | 'client' = 'us') => op({ op: 'add_task', side, title: 'Team photos section', category: 'design', priority: 'major', sourceMessageIds: [source] });
     expect(scoreCase(request, [add('g20')]).pass).toBe(true);
     expect(scoreCase(request, [add('g20', 'client')])).toMatchObject({ pass: false, missing: ['add_task us from g20'] });
   });
@@ -314,7 +314,7 @@ describe('Phase 2b golden cases (voice notes, written but not run)', () => {
   });
 
   it('(f) passes on one task and fails on a second one for the same work', () => {
-    const add = (source: string) => op({ op: 'add_task', side: 'us', title: 'Testimonials section', category: 'design', priority: 'high', sourceMessageIds: [source] });
+    const add = (source: string) => op({ op: 'add_task', side: 'us', title: 'Testimonials section', category: 'design', priority: 'major', sourceMessageIds: [source] });
     expect(scoreCase(late, [add('g27')]).pass).toBe(true);
     expect(scoreCase(late, [add('g28')]).pass).toBe(true);
     expect(scoreCase(late, [add('g27'), add('g28')])).toEqual({ pass: false, missing: [], forbidden: ['add_task more than 1'] });

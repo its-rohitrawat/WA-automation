@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { BetaUsage } from '@anthropic-ai/sdk/resources/beta/messages/messages';
 import { FALLBACK_PRICES, costUsd, type Prices, type TokenUsage } from '../spend/pricing.ts';
-import { AI_OUTPUT_JSON_SCHEMA, AiOutputParseError, parseAiOutput, type AiOutput } from './schema.ts';
+import { AI_OUTPUT_JSON_SCHEMA, AI_OUTPUT_JSON_SCHEMA_WITH_SENTIMENT, AiOutputParseError, parseAiOutput, type AiOutput } from './schema.ts';
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
@@ -40,8 +40,13 @@ export interface AiCallResult {
   invalidOps: number;
 }
 
+/** sentiment: ask for each operation's sentiment too (the switch on the dashboard's Settings screen). */
+export interface ReconcileOptions {
+  sentiment?: boolean;
+}
+
 export interface AiClient {
-  reconcile(system: string, user: string): Promise<AiCallResult>;
+  reconcile(system: string, user: string, opts?: ReconcileOptions): Promise<AiCallResult>;
 }
 
 export class AiRefusalError extends Error {
@@ -122,7 +127,8 @@ export class ClaudeClient implements AiClient {
     this.#prices = opts.prices;
   }
 
-  async reconcile(system: string, user: string): Promise<AiCallResult> {
+  async reconcile(system: string, user: string, opts: ReconcileOptions = {}): Promise<AiCallResult> {
+    const schema = opts.sentiment ? AI_OUTPUT_JSON_SCHEMA_WITH_SENTIMENT : AI_OUTPUT_JSON_SCHEMA;
     const res = await this.#client.beta.messages.create({
       model: this.#model,
       max_tokens: MAX_OUTPUT_TOKENS,
@@ -130,7 +136,7 @@ export class ClaudeClient implements AiClient {
       fallbacks: 'default',
       system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
       messages: [{ role: 'user', content: user }],
-      output_config: { effort: this.#effort, format: { type: 'json_schema', schema: AI_OUTPUT_JSON_SCHEMA } },
+      output_config: { effort: this.#effort, format: { type: 'json_schema', schema } },
     });
     const bill = billOf(res.usage, this.#model, this.#prices);
     if (res.stop_reason === 'refusal') {
@@ -141,7 +147,7 @@ export class ClaudeClient implements AiClient {
     }
     const text = res.content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('');
     try {
-      const { output, invalidOps } = parseAiOutput(text);
+      const { output, invalidOps } = parseAiOutput(text, { sentiment: opts.sentiment === true });
       return { output, usage: bill.usage, costUsd: bill.costUsd, fallbackUsed: bill.fallbackUsed, model: res.model, invalidOps };
     } catch (e) {
       if (e instanceof AiOutputParseError) {

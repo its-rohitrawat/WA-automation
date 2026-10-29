@@ -97,7 +97,7 @@ describe('mediaPromptText', () => {
     expect(mediaPromptText(row({ ...viewOnce, kind: 'voice', mimeType: 'audio/ogg' }), 100)).toEqual(said('view-once voice note, not saved'));
     expect(mediaPromptText(row({ ...viewOnce, kind: 'audio', mimeType: 'audio/mpeg' }), 100)).toEqual(said('view-once audio file, not saved'));
     const out = buildUserContent({
-      client: { id: 1, code: 'SHA', name: 'Sharma Interiors', groupId: SHARMA.groupId, phases: SHARMA.phases, currentPhase: null, phaseLocked: false, statusText: null, statusUpdatedAt: null, active: true },
+      client: { id: 1, code: 'SHA', name: 'Sharma Interiors', groupId: SHARMA.groupId, phases: SHARMA.phases, currentPhase: null, phaseLocked: false, statusText: null, statusUpdatedAt: null, active: true, sentiment: null, sentimentAt: null },
       people: [], openTasks: [], decisions: [], recent: [], reactions: [], today: '2026-10-19',
       batch: [msg(1, { text: null, mediaType: 'voice' })],
       mediaText: mediaPromptTexts(new Map([[1, row({ ...viewOnce, kind: 'voice', mimeType: 'audio/ogg' })]]), [msg(1, { text: null, mediaType: 'voice' })], []),
@@ -352,7 +352,7 @@ describe('waiting for files', () => {
 describe('prompt with file text', () => {
   const client: ClientRow = {
     id: 1, code: 'SHA', name: 'Sharma Interiors', groupId: SHARMA.groupId, phases: SHARMA.phases, currentPhase: null, phaseLocked: false,
-    statusText: null, statusUpdatedAt: null, active: true,
+    statusText: null, statusUpdatedAt: null, active: true, sentiment: null, sentimentAt: null,
   };
   const base = { client, people: [], openTasks: [], decisions: [], recent: [], reactions: [], today: '2026-10-19' };
   const lineOf = (out: string, waId: string) => out.split('\n').find((l) => l.startsWith(`[${waId}]`))!;
@@ -481,7 +481,7 @@ describe('prompt with file text', () => {
 describe('voice notes and audio files (Phase 2b)', () => {
   const client: ClientRow = {
     id: 1, code: 'SHA', name: 'Sharma Interiors', groupId: SHARMA.groupId, phases: SHARMA.phases, currentPhase: null, phaseLocked: false,
-    statusText: null, statusUpdatedAt: null, active: true,
+    statusText: null, statusUpdatedAt: null, active: true, sentiment: null, sentimentAt: null,
   };
   const base = { client, people: [], openTasks: [], decisions: [], recent: [], reactions: [], today: '2026-10-19' };
   const SAID = 'Logo files kal tak bhej dunga';

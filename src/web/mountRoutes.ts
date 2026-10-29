@@ -1,5 +1,6 @@
 import type { ServerResponse } from 'node:http';
 import type { SpendView } from '../app.ts';
+import type { PrioritySettings } from '../config/prioritySettings.ts';
 import type { SettingsStore } from '../config/settingsStore.ts';
 import { actionHandler, type ActionDeps } from '../control/actions.ts';
 import type { AgentControl } from '../control/agentControl.ts';
@@ -46,6 +47,7 @@ export interface AgentRoutesDeps {
   /** DASHBOARD_OWNER_EMAILS (lower-cased). */
   ownerEmails: readonly string[];
   settings: Pick<SettingsStore, 'view' | 'set'>;
+  priority: Pick<PrioritySettings, 'view' | 'set'>;
   groups: Omit<GroupsDeps, 'audit'>;
   clients: ClientsDeps;
   /** Google reconnect and add-account; the audit is bound here. */
@@ -82,7 +84,7 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   });
   registerControlApi(router, {
     ...action, db: d.db, clock: d.clock, audit: m.audit, spend: d.spend, voiceLocal: d.voiceLocal, uptime: d.uptime,
-    isOwner: (email) => owners.has(email.trim().toLowerCase()), settings: d.settings, sessions: m.sessions, secureFor: m.secureFor,
+    isOwner: (email) => owners.has(email.trim().toLowerCase()), settings: d.settings, priority: d.priority, sessions: m.sessions, secureFor: m.secureFor,
   });
 
   // An owner read: the guard first, then the handler.

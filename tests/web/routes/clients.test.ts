@@ -29,7 +29,7 @@ function setup() {
   createTask(
     db,
     {
-      clientId: 1, side: 'us', title: 'Send the moodboard', category: 'design', priority: 'high', assignedTo: 'Ravi', askedBy: null, raisedOn: '2026-10-20',
+      clientId: 1, side: 'us', title: 'Send the moodboard', category: 'design', priority: 'major', assignedTo: 'Ravi', askedBy: null, raisedOn: '2026-10-20',
       deadline: '2026-10-25', latestProgress: null, sourceQuote: QUOTE, sourceDate: '2026-10-20', sourceWaId: 'W1', origin: 'whatsapp',
     },
     '2026-10-20T05:00:00.000Z',
@@ -69,7 +69,20 @@ describe('clientDetailHandler', () => {
     const d = (r.body as { client: { counts: unknown; openTasks: unknown[] } }).client;
     const card = (clientsListHandler(deps, CTX).body as { clients: { code: string; counts: unknown }[] }).clients.find((c) => c.code === 'SHA')!;
     expect(d.counts).toEqual(card.counts);
-    expect(d.openTasks).toEqual([{ code: 'SHA-001', title: 'Send the moodboard', assignedTo: 'Ravi', deadline: '2026-10-25', status: 'open' }]);
+    expect(d.openTasks).toEqual([{ code: 'SHA-001', title: 'Send the moodboard', assignedTo: 'Ravi', deadline: '2026-10-25', status: 'open', priority: 'major', sentiment: null }]);
+  });
+
+  it('sends moods, the task\'s and the client\'s, only while sentiment is switched on', () => {
+    const { deps } = setup();
+    const db = deps.db;
+    db.prepare("UPDATE tasks SET sentiment = 'frustrated' WHERE code = 'SHA-001'").run();
+    db.prepare("UPDATE clients SET sentiment = 'negative', sentiment_at = '2026-10-19T08:00:00.000Z' WHERE code = 'SHA'").run();
+    const detail = () => (clientDetailHandler(deps, CTX, 'SHA').body as { client: { sentiment: unknown; openTasks: { sentiment: unknown }[] } }).client;
+    expect(detail().sentiment).toBeNull();
+    expect(detail().openTasks[0]!.sentiment).toBeNull();
+    db.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', '2026-10-19T08:00:00.000Z', 'o')").run();
+    expect(detail().sentiment).toEqual({ mood: 'negative', at: '2026-10-19T08:00:00.000Z' });
+    expect(detail().openTasks[0]!.sentiment).toBe('frustrated');
   });
 
   it('an unknown or malformed code gives 404 not_found', () => {

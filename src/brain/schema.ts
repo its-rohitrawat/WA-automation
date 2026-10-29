@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { PRIORITIES, SENTIMENTS } from '../store/tasks.ts';
 
 export const OP_NAMES = [
   'add_task', 'update_task', 'close_task', 'mark_maybe_done', 'reopen_task', 'log_reminder',
@@ -7,7 +8,8 @@ export const OP_NAMES = [
 
 const SIDE = ['us', 'client'] as const;
 const CATEGORY = ['design', 'development', 'content', 'payment', 'approval', 'other'] as const;
-const PRIORITY = ['high', 'medium', 'low'] as const;
+const PRIORITY = PRIORITIES;
+const SENTIMENT = SENTIMENTS;
 const INITIAL_STATUS = ['maybe_done', 'done'] as const; // '' = open
 const ROLE = ['team', 'client'] as const;
 
@@ -32,7 +34,13 @@ export const AiWireOpSchema = z.object({
   reason: z.string(),
 });
 export const AiWireOutputSchema = z.object({ ops: z.array(AiWireOpSchema) });
-export type AiWireOp = z.infer<typeof AiWireOpSchema>;
+/**
+ * With sentiment switched on (29 Oct 2026): the same operation plus the client's mood. Only asked for when on, so a
+ * switched-off read spends no output on it.
+ */
+export const AiWireOpWithSentimentSchema = AiWireOpSchema.extend({ sentiment: z.enum(['', ...SENTIMENT]) });
+export const AiWireOutputWithSentimentSchema = z.object({ ops: z.array(AiWireOpWithSentimentSchema) });
+export type AiWireOp = z.infer<typeof AiWireOpSchema> & { sentiment?: (typeof SENTIMENT)[number] | '' };
 
 /** Domain operation used by the validator and reconciler: "" becomes null. */
 export interface AiOp {
@@ -53,6 +61,8 @@ export interface AiOp {
   role: (typeof ROLE)[number] | null;
   sourceMessageIds: string[];
   reason: string;
+  /** Only when sentiment is switched on: the client's mood about the task (add/update_task) or in the batch (set_status). */
+  sentiment?: (typeof SENTIMENT)[number] | null;
 }
 export interface AiOutput { ops: AiOp[] }
 
@@ -77,14 +87,19 @@ export function toAiOp(w: AiWireOp): AiOp {
     role: nul(w.role),
     sourceMessageIds: w.sourceMessageIds,
     reason: w.reason,
+    ...(w.sentiment !== undefined ? { sentiment: nul(w.sentiment) } : {}),
   };
 }
 
-/** JSON schema sent as output_config.format.schema. Built by zod so `enum` is kept. */
-export const AI_OUTPUT_JSON_SCHEMA: Record<string, unknown> = (() => {
-  const { $schema: _ignored, ...schema } = z.toJSONSchema(AiWireOutputSchema) as Record<string, unknown>;
+const jsonSchemaOf = (zs: z.ZodType): Record<string, unknown> => {
+  const { $schema: _ignored, ...schema } = z.toJSONSchema(zs) as Record<string, unknown>;
   return schema;
-})();
+};
+
+/** JSON schema sent as output_config.format.schema. Built by zod so `enum` is kept. */
+export const AI_OUTPUT_JSON_SCHEMA: Record<string, unknown> = jsonSchemaOf(AiWireOutputSchema);
+/** The same with each operation's sentiment, sent only while sentiment is switched on. */
+export const AI_OUTPUT_JSON_SCHEMA_WITH_SENTIMENT: Record<string, unknown> = jsonSchemaOf(AiWireOutputWithSentimentSchema);
 
 export class AiOutputParseError extends Error {
   constructor() {
@@ -93,8 +108,12 @@ export class AiOutputParseError extends Error {
   }
 }
 
-/** Parses the model's text. Invalid individual ops are dropped and counted, never fatal for the batch. */
-export function parseAiOutput(text: string): { output: AiOutput; invalidOps: number } {
+/**
+ * Parses the model's text. Invalid individual ops are dropped and counted, never fatal for the batch. sentiment: the read
+ * asked for it, so every op must carry it.
+ */
+export function parseAiOutput(text: string, opts: { sentiment?: boolean } = {}): { output: AiOutput; invalidOps: number } {
+  const opSchema = opts.sentiment ? AiWireOpWithSentimentSchema : AiWireOpSchema;
   let raw: unknown;
   try {
     raw = JSON.parse(text);
@@ -106,7 +125,7 @@ export function parseAiOutput(text: string): { output: AiOutput; invalidOps: num
   const valid: AiOp[] = [];
   let invalidOps = 0;
   for (const candidate of ops) {
-    const r = AiWireOpSchema.safeParse(candidate);
+    const r = opSchema.safeParse(candidate);
     if (r.success) valid.push(toAiOp(r.data));
     else invalidOps++;
   }

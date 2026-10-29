@@ -4,7 +4,8 @@ import { MeetingDeferral } from '../meetings/audio.ts';
 import { estimateCostUsd, type Prices } from '../spend/pricing.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
 import { finishBatch, startBatch } from '../store/batches.ts';
-import { getClient, setPhase, setStatus, type ClientRow } from '../store/clients.ts';
+import type { PriorityConfig } from '../config/prioritySettings.ts';
+import { getClient, setClientSentiment, setPhase, setStatus, type ClientRow } from '../store/clients.ts';
 import { tx, type Db } from '../store/db.ts';
 import { mediaForMessages } from '../store/media.ts';
 import { finishMeeting } from '../store/meetings.ts';
@@ -13,7 +14,8 @@ import {
 } from '../store/messages.ts';
 import { listPeople, setRole } from '../store/people.ts';
 import {
-  addDecision, createTask, decisionSourceIds, getTaskByCode, listDecisions, listTasks, logReminder, recordEvent, reminderSourceIds, setTaskStatus, taskSourceIds, TASK_FIELDS, updateTaskFields, type TaskField,
+  addDecision, createTask, decisionSourceIds, getTaskByCode, listDecisions, listTasks, logReminder, PRIORITIES, recordEvent, reminderSourceIds, setTaskSentiment,
+  setTaskStatus, taskSourceIds, TASK_FIELDS, updateTaskFields, type Priority, type TaskField, type TaskRow,
 } from '../store/tasks.ts';
 import type { Segment } from '../stt/types.ts';
 import type { Clock } from '../util/clock.ts';
@@ -23,7 +25,8 @@ import { AiInvalidOutputError, AiRefusalError, MAX_OUTPUT_TOKENS, type AiCallRes
 import type { MeetingSummary } from './meetingSchema.ts';
 import { MEETING_ITEM_MAX_QUOTE, MEETING_TRACKER_PROMPT, meetingItemLines, meetingItems, type MeetingItem } from './meetingTracker.ts';
 import { SpendCapReachedError, settleFailedCall } from './paidCall.ts';
-import { buildUserContent, SYSTEM_PROMPT } from './prompt.ts';
+import { keywordMatcher, NO_KEYWORDS, type KeywordMatch } from './priorityKeywords.ts';
+import { buildUserContent, systemPromptFor } from './prompt.ts';
 import type { AiOp, AiOutput } from './schema.ts';
 import { validateOps, type Rejection, type ValidationState } from './validator.ts';
 
@@ -67,7 +70,20 @@ export interface ReconcilerOptions {
    * nothing, as in 2a: no transcript is coming. Images and documents are unchanged. Default true, the safe side.
    */
   voiceTranscriptionOn?: boolean;
+  /**
+   * The owner's priority keywords and the sentiment switch (src/config/prioritySettings.ts), read at the start of every
+   * run so a change from the dashboard applies to the next batch. Default: no keywords, sentiment off.
+   */
+  priority?: () => PriorityConfig;
 }
+
+/** What one run applies with: the keyword matcher and whether this read asked for sentiment. */
+interface RunRules {
+  match: (texts: readonly string[]) => KeywordMatch | null;
+  sentiment: boolean;
+}
+
+const rank = (p: Priority): number => PRIORITIES.indexOf(p);
 
 /** A meeting at stage doc, as the tracker step needs it. */
 export interface MeetingForTracker {
@@ -94,6 +110,8 @@ export interface MeetingTrackOutcome {
 interface EvidenceTimes {
   /** A message's send time; a meeting item's meeting start. Task and decision dates come from this. */
   dateTs: string;
+  /** What the owner's priority keywords are matched in: a message's text and its voice note's transcript, an item's text. */
+  text: string;
   /** When it became evidence, for the human status lock (ValidationState.messageTs): evidenceTs for a message, the meeting start for an item. */
   lockTs: string;
 }
@@ -140,6 +158,7 @@ function messageEvidence(m: MessageRow, reactions: StoredReactionRow[], transcri
   return {
     kind: 'message',
     dateTs: m.ts,
+    text: [m.text ?? '', transcript ?? ''].filter(Boolean).join('\n'),
     lockTs: evidenceTs(m, reactions),
     quote,
     waId: m.waId,
@@ -149,7 +168,7 @@ function messageEvidence(m: MessageRow, reactions: StoredReactionRow[], transcri
 }
 
 function itemEvidence(meetingId: number, it: MeetingItem): MeetingEvidence {
-  return { kind: 'meeting', dateTs: it.ts, lockTs: it.ts, quote: it.quote, meetingId };
+  return { kind: 'meeting', dateTs: it.ts, lockTs: it.ts, text: it.text, quote: it.quote, meetingId };
 }
 
 /** Re-exported for existing importers; it lives in paidCall.ts with the other spend helpers. */
@@ -190,6 +209,18 @@ export class Reconciler {
   constructor(o: ReconcilerOptions) {
     this.#o = o;
     this.#startedAt = o.startedAt ?? o.clock.now();
+  }
+
+  /** This run's rules. A meeting run never asks for sentiment: its prompt has no sentiment rules. */
+  #rules(o: { meeting: boolean }): RunRules {
+    let c: PriorityConfig = { keywords: NO_KEYWORDS, sentimentEnabled: false };
+    try {
+      if (this.#o.priority) c = this.#o.priority();
+    } catch (err) {
+      // The settings could not be read: this run goes on without keywords or sentiment, as before they existed.
+      this.#o.log.error({ err }, 'priority settings could not be read');
+    }
+    return { match: keywordMatcher(c.keywords), sentiment: c.sentimentEnabled && !o.meeting };
   }
 
   async run(clientId: number): Promise<ReconcileOutcome> {
@@ -233,11 +264,13 @@ export class Reconciler {
     const user = buildUserContent({
       client, people, openTasks, decisions, recent, batch, reactions, today: istDate(now), mediaText, fileRechecks,
     });
+    const rules = this.#rules({ meeting: false });
+    const system = systemPromptFor({ sentiment: rules.sentiment });
 
     // Known and accepted: a call that falls back can cost up to about 2.25x this reservation (a declined primary
     // attempt, then a full fallback attempt at 1.25x rates). settle() books the true cost, so the books stay right;
     // the cap can be overshot only by that gap per call in flight.
-    const estimate = estimateCostUsd(SYSTEM_PROMPT.length + user.length, prices, MAX_OUTPUT_TOKENS);
+    const estimate = estimateCostUsd(system.length + user.length, prices, MAX_OUTPUT_TOKENS);
     if (!spend.canSpend(estimate)) return this.#spendBlocked(clientId, estimate);
 
     // Job C, P2: only an edit or a reaction made during the call may label a message queued again, never one from before
@@ -246,7 +279,7 @@ export class Reconciler {
     const batchId = startBatch(db, clientId, batch.length, now.toISOString());
     let result: { output: AiOutput; invalidOps: number };
     try {
-      result = await this.#callWithRetry(SYSTEM_PROMPT, user, `batch ${batchId}`, estimate);
+      result = await this.#callWithRetry(system, user, `batch ${batchId}`, estimate, { sentiment: rules.sentiment });
     } catch (e) {
       // A retry that cannot reserve is not an AI error: a pause when the cap is the reason, busy when holds are.
       const blocked = e instanceof SpendCapReachedError ? this.#spendBlocked(clientId, estimate) : undefined;
@@ -276,7 +309,7 @@ export class Reconciler {
         const fresh = getClient(db, clientId);
         const state = this.#validationState(fresh, clientId, { batchIds, contextIds, messageTs, editedIds, source: 'whatsapp' });
         const { accepted, rejected } = validateOps(result.output.ops, state);
-        for (const op of accepted) this.#apply(fresh, op, evidence, appliedAt);
+        for (const op of accepted) this.#apply(fresh, op, evidence, appliedAt, rules);
         // fileUnread: the prompt showed the file as still being read. If it was read during the call, the message stays
         // queued as a "file now read" re-check. fileShown: the prompt showed the file's text as a "file now read"
         // re-check, so a message queued again for an edit or a reaction does not show it as one again (amendment 12h).
@@ -348,6 +381,7 @@ export class Reconciler {
       meetingLines: meetingItemLines(items, meeting.startedAt, meeting.title),
     });
 
+    const rules = this.#rules({ meeting: true });
     const estimate = estimateCostUsd(MEETING_TRACKER_PROMPT.length + user.length, prices, MAX_OUTPUT_TOKENS);
     const deferral = (): MeetingDeferral =>
       new MeetingDeferral(this.#spendBlocked(clientId, estimate, meeting.id).status === 'busy' ? 'spend_busy' : 'spend_cap');
@@ -377,7 +411,7 @@ export class Reconciler {
           source: 'meeting',
         });
         const { accepted, rejected } = validateOps(result.output.ops, state);
-        for (const op of accepted) this.#apply(fresh, op, evidence, appliedAt);
+        for (const op of accepted) this.#apply(fresh, op, evidence, appliedAt, rules);
         finishMeeting(db, meeting.id, { at: appliedAt.toISOString() });
         return { accepted, rejected };
       });
@@ -454,14 +488,16 @@ export class Reconciler {
   }
 
   /** Every attempt reserves its estimate first, and every outcome settles or releases that reservation. */
-  async #callWithRetry(system: string, user: string, label: string, estimate: number): Promise<{ output: AiOutput; invalidOps: number }> {
+  async #callWithRetry(
+    system: string, user: string, label: string, estimate: number, opts: { sentiment?: boolean } = {},
+  ): Promise<{ output: AiOutput; invalidOps: number }> {
     const { ai, spend } = this.#o;
     for (let attempt = 0; ; attempt++) {
       const rid = spend.reserve(estimate);
       if (rid === null) throw new SpendCapReachedError();
       let r: AiCallResult;
       try {
-        r = await ai.reconcile(system, user);
+        r = await ai.reconcile(system, user, opts);
       } catch (e) {
         settleFailedCall(spend, rid, e, estimate, label);
         if (e instanceof AiInvalidOutputError && attempt === 0) continue;
@@ -472,10 +508,27 @@ export class Reconciler {
     }
   }
 
-  #apply(client: ClientRow, op: AiOp, evidence: Map<string, Evidence>, at: Date): void {
+  /**
+   * The priority an op on an existing task leaves it with, when that is a change. A keyword in the op's own messages only
+   * raises the priority after the task was made, and a priority a keyword set is never lowered by the AI's guess. A
+   * person's priority (locked) is never changed.
+   */
+  #priorityChange(t: TaskRow, aiGuess: Priority | null, kw: KeywordMatch | null): { level: Priority; keyword?: string } | null {
+    if (t.lockedFields.includes('priority')) return null;
+    let next: { level: Priority; keyword?: string } | null = aiGuess === null ? null : { level: aiGuess };
+    if (next && t.prioritySource === 'keyword' && t.priority !== null && rank(next.level) > rank(t.priority)) next = null;
+    const current = next?.level ?? t.priority;
+    if (kw && (current === null || rank(kw.level) < rank(current))) next = { level: kw.level, keyword: kw.keyword };
+    return next && next.level !== t.priority ? next : null;
+  }
+
+  #apply(client: ClientRow, op: AiOp, evidence: Map<string, Evidence>, at: Date, rules: RunRules): void {
     const { db } = this.#o;
     const nowIso = at.toISOString();
     const cited = op.sourceMessageIds.map((id) => evidence.get(id)).filter((e): e is Evidence => e !== undefined);
+    // The owner's keywords, in the op's own messages (new and context alike): the most urgent level found, or null.
+    const kw = rules.match(cited.map((e) => e.text));
+    const sentiment = rules.sentiment ? (op.sentiment ?? null) : null;
     // An op of a meeting run that also cites WhatsApp context is sourced and dated by its first cited meeting item.
     const item = cited.find((e): e is MeetingEvidence => e.kind === 'meeting');
     const sources = item ? [item] : cited.sort((a, b) => a.dateTs.localeCompare(b.dateTs));
@@ -502,7 +555,11 @@ export class Reconciler {
           side: op.side!,
           title: op.title!,
           category: op.category!,
-          priority: op.priority!,
+          // A keyword in the task's messages wins over the AI's guess.
+          priority: kw?.level ?? op.priority!,
+          prioritySource: kw ? 'keyword' : 'ai',
+          priorityKeyword: kw?.keyword ?? null,
+          sentiment,
           assignedTo: op.assignedTo,
           askedBy: op.askedBy ?? firstMessage?.senderName ?? null,
           raisedOn: dateOf(first),
@@ -523,10 +580,13 @@ export class Reconciler {
         const fields: Partial<Record<TaskField, string | null>> = {};
         for (const f of TASK_FIELDS) {
           const v = op[f];
-          if (v !== null) fields[f] = v;
+          if (v !== null && f !== 'priority') fields[f] = v;
         }
-        updateTaskFields(db, t.id, fields, nowIso, 'ai');
-        event(t.id, fields);
+        const change = this.#priorityChange(t, op.priority, kw);
+        if (change) fields.priority = change.level;
+        updateTaskFields(db, t.id, fields, nowIso, 'ai', change?.keyword);
+        if (sentiment) setTaskSentiment(db, t.id, sentiment, nowIso);
+        event(t.id, sentiment ? { ...fields, sentiment } : fields);
         return;
       }
       case 'close_task': {
@@ -554,6 +614,15 @@ export class Reconciler {
         const t = taskFor(op.taskCode);
         logReminder(db, t.id, lastDate, nowIso);
         event(t.id, { reminder: lastDate });
+        // A chase with a keyword in it raises the task's priority, as a separate change in its history.
+        const change = this.#priorityChange(t, null, kw);
+        if (change) {
+          updateTaskFields(db, t.id, { priority: change.level }, nowIso, 'ai', change.keyword);
+          recordEvent(db, {
+            taskId: t.id, clientId: client.id, actor: 'ai', op: 'update_task', detail: { priority: change.level }, reason: 'priority keyword',
+            sourceIds: op.sourceMessageIds, at: nowIso,
+          });
+        }
         return;
       }
       case 'add_decision':
@@ -569,7 +638,8 @@ export class Reconciler {
         return;
       case 'set_status':
         setStatus(db, client.id, op.text!, nowIso);
-        event(null, { status: op.text });
+        if (sentiment) setClientSentiment(db, client.id, sentiment, nowIso);
+        event(null, sentiment ? { status: op.text, sentiment } : { status: op.text });
         return;
       case 'set_person_role':
         setRole(db, client.id, op.personJid!, op.role!, 'ai');

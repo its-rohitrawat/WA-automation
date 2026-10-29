@@ -1,6 +1,7 @@
 import type { ClientConfig } from '../config/groups.ts';
 import type { Db } from './db.ts';
 import { queueBackfill } from './historyBackfill.ts';
+import type { Sentiment } from './tasks.ts';
 
 export interface ClientRow {
   id: number;
@@ -13,6 +14,9 @@ export interface ClientRow {
   statusText: string | null;
   statusUpdatedAt: string | null;
   active: boolean;
+  /** The client's mood in the latest batch that judged it (sentiment switched on); null when none did. */
+  sentiment: Sentiment | null;
+  sentimentAt: string | null;
 }
 
 interface RawClient {
@@ -26,6 +30,8 @@ interface RawClient {
   status_text: string | null;
   status_updated_at: string | null;
   active: number;
+  sentiment: Sentiment | null;
+  sentiment_at: string | null;
 }
 
 function toRow(r: RawClient): ClientRow {
@@ -40,6 +46,8 @@ function toRow(r: RawClient): ClientRow {
     statusText: r.status_text,
     statusUpdatedAt: r.status_updated_at,
     active: r.active === 1,
+    sentiment: r.sentiment,
+    sentimentAt: r.sentiment_at,
   };
 }
 
@@ -117,4 +125,9 @@ export function clearPhaseLock(db: Db, clientId: number): void {
 
 export function setStatus(db: Db, clientId: number, text: string, at: string): void {
   db.prepare('UPDATE clients SET status_text = ?, status_updated_at = ? WHERE id = ?').run(text, at, clientId);
+}
+
+/** The client's mood in a batch, as the AI judged it (only while sentiment is switched on). */
+export function setClientSentiment(db: Db, clientId: number, sentiment: Sentiment, at: string): void {
+  db.prepare('UPDATE clients SET sentiment = ?, sentiment_at = ? WHERE id = ?').run(sentiment, at, clientId);
 }

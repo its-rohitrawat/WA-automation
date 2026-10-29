@@ -181,7 +181,7 @@ describe('meeting tracker cases with the real validator', () => {
   });
 
   it('(d) fails on a second task for work WhatsApp already tracks', () => {
-    const dup = op({ op: 'add_task', side: 'us', title: 'Services and About page designs', category: 'design', priority: 'high', sourceMessageIds: ['mtg11-a1'] });
+    const dup = op({ op: 'add_task', side: 'us', title: 'Services and About page designs', category: 'design', priority: 'major', sourceMessageIds: ['mtg11-a1'] });
     expect(scoreCase(update, [dup])).toEqual({ pass: false, missing: ['update_task SHA-020 from mtg11-a1'], forbidden: ['add_task'] });
   });
 
