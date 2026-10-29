@@ -87,11 +87,11 @@ describe('reports store', () => {
     await skipReport(db, '2026-10-21', 'not_running', T0);
     await claimReport(db, '2026-10-22', T0);
     await finishReport(db, '2026-10-22', 'sent', 'msg-1', T0);
-    const before = ['2026-10-20', '2026-10-21', '2026-10-22'].map(async (date) => await reportFor(db, date));
+    const before = await Promise.all(['2026-10-20', '2026-10-21', '2026-10-22'].map(async (date) => await reportFor(db, date)));
     for (const date of ['2026-10-20', '2026-10-21', '2026-10-22']) {
       for (const at of [T1, T2, '2026-10-24T06:00:00.000Z']) expect(await claimReport(db, date, at)).toBe(false);
     }
-    expect(['2026-10-20', '2026-10-21', '2026-10-22'].map(async (date) => await reportFor(db, date))).toEqual(before);
+    expect(await Promise.all(['2026-10-20', '2026-10-21', '2026-10-22'].map(async (date) => await reportFor(db, date)))).toEqual(before);
     expect(await reportFor(db, '2026-10-20')).toMatchObject({ status: 'unknown', detail: 'timeout', attempts: 1, forced: false });
     expect(await reportFor(db, '2026-10-21')).toMatchObject({ status: 'skipped', detail: 'not_running', attempts: 0, forced: false });
     expect(await reportFor(db, '2026-10-22')).toMatchObject({ status: 'sent', detail: 'msg-1', attempts: 1, forced: false });
@@ -133,10 +133,10 @@ describe('reports store', () => {
     await claimReport(db, '2026-10-22', T0);
     await retryReport(db, '2026-10-22', 'connect_timeout', '2026-10-23T05:00:00.000Z', T0);
     const dates = ['2026-10-19', '2026-10-20', '2026-10-21', '2026-10-22'];
-    const before = dates.map(async (date) => await reportFor(db, date));
+    const before = await Promise.all(dates.map(async (date) => await reportFor(db, date)));
     for (const date of dates) expect(await retryReport(db, date, 'closed', T1, T1)).toBe(false);
     expect(await retryReport(db, DAY, 'closed', T1, T1)).toBe(false);
-    expect(dates.map(async (date) => await reportFor(db, date))).toEqual(before);
+    expect(await Promise.all(dates.map(async (date) => await reportFor(db, date)))).toEqual(before);
     expect(await reportFor(db, DAY)).toBeUndefined();
     expect(await reportFor(db, '2026-10-19')).toMatchObject({ status: 'unknown', nextAttemptAt: null });
     expect(await reportFor(db, '2026-10-20')).toMatchObject({ status: 'unknown', detail: 'interrupted', nextAttemptAt: null });
@@ -145,7 +145,7 @@ describe('reports store', () => {
     for (const date of ['2026-10-19', '2026-10-20', '2026-10-21']) {
       for (const at of [T2, '2026-10-24T06:00:00.000Z']) expect(await claimReport(db, date, at)).toBe(false);
     }
-    expect(dates.slice(0, 3).map(async (date) => await reportFor(db, date))).toEqual(before.slice(0, 3));
+    expect(await Promise.all(dates.slice(0, 3).map(async (date) => await reportFor(db, date)))).toEqual(before.slice(0, 3));
   });
 
   it('finishReport changes only a row that is sending: never unknown, interrupted, retry or skipped', async () => {
@@ -158,13 +158,13 @@ describe('reports store', () => {
     await claimReport(db, '2026-10-22', T0);
     await retryReport(db, '2026-10-22', 'connect_timeout', T2, T0);
     const dates = ['2026-10-19', '2026-10-20', '2026-10-21', '2026-10-22'];
-    const before = dates.map(async (date) => await reportFor(db, date));
+    const before = await Promise.all(dates.map(async (date) => await reportFor(db, date)));
     for (const date of dates) {
       expect(await finishReport(db, date, 'sent', 'msg-1', T1)).toBe(false);
       expect(await finishReport(db, date, 'unknown', 'timeout', T1)).toBe(false);
     }
-    expect(dates.map(async (date) => await reportFor(db, date))).toEqual(before);
-    expect(dates.map(async (date) => (await reportFor(db, date))!.status)).toEqual(['unknown', 'unknown', 'skipped', 'retry']);
+    expect(await Promise.all(dates.map(async (date) => await reportFor(db, date)))).toEqual(before);
+    expect(await Promise.all(dates.map(async (date) => (await reportFor(db, date))!.status))).toEqual(['unknown', 'unknown', 'skipped', 'retry']);
   });
 
   it('never skips a sent row or a row that is still sending', async () => {
@@ -209,10 +209,10 @@ describe('reports store', () => {
     await skipReport(db, '2026-10-20', 'not_running', T0);
     await claimReport(db, '2026-10-21', T0);
     await finishReport(db, '2026-10-21', 'unknown', 'timeout', T0);
-    const others = ['2026-10-19', '2026-10-20', '2026-10-21', DAY].map(async (date) => await reportFor(db, date));
+    const others = await Promise.all(['2026-10-19', '2026-10-20', '2026-10-21', DAY].map(async (date) => await reportFor(db, date)));
     expect(await markInterruptedReports(db, T1)).toBe(1);
     expect(await reportFor(db, '2026-10-22')).toMatchObject({ status: 'unknown', detail: 'interrupted', updatedAt: T1 });
-    expect(['2026-10-19', '2026-10-20', '2026-10-21', DAY].map(async (date) => await reportFor(db, date))).toEqual(others);
+    expect(await Promise.all(['2026-10-19', '2026-10-20', '2026-10-21', DAY].map(async (date) => await reportFor(db, date)))).toEqual(others);
     expect(await reportFor(db, '2026-10-19')).toMatchObject({ status: 'retry', detail: 'connect_timeout', updatedAt: T0 });
     expect(await reportFor(db, '2026-10-20')).toMatchObject({ status: 'skipped', detail: 'not_running', updatedAt: T0 });
     expect(await reportFor(db, '2026-10-21')).toMatchObject({ status: 'unknown', detail: 'timeout', updatedAt: T0 });
@@ -232,12 +232,12 @@ describe('reports store', () => {
     await finishReport(db, '2026-10-20', 'sent', 'msg-1', T0);
     await skipReport(db, '2026-10-21', 'not_running', T0);
     const earlier = ['2026-10-18', '2026-10-19', '2026-10-20', '2026-10-21'];
-    const before = earlier.map(async (date) => await reportFor(db, date));
+    const before = await Promise.all(earlier.map(async (date) => await reportFor(db, date)));
     expect(await closeOldRetries(db, DAY, T2)).toBe(1);
     expect(await reportFor(db, '2026-10-22')).toMatchObject({ status: 'skipped', detail: 'connect_timeout', nextAttemptAt: null });
     expect((await reportFor(db, DAY))!.status).toBe('retry');
-    expect(earlier.map(async (date) => await reportFor(db, date))).toEqual(before);
-    expect(earlier.map(async (date) => (await reportFor(db, date))!.status)).toEqual(['sending', 'unknown', 'sent', 'skipped']);
+    expect(await Promise.all(earlier.map(async (date) => await reportFor(db, date)))).toEqual(before);
+    expect(await Promise.all(earlier.map(async (date) => (await reportFor(db, date))!.status))).toEqual(['sending', 'unknown', 'sent', 'skipped']);
   });
 
   it('lists recent reports newest first', async () => {
