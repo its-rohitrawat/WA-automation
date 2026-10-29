@@ -3,7 +3,7 @@ import { chatPage, outboxItem, type ChatOutboxItem, type ChatPage } from '../../
 import type { GroupDirectory } from '../../control/groups.ts';
 import type { ClientConfig } from '../../config/groups.ts';
 import { getClientByCode, type ClientRow } from '../../store/clients.ts';
-import { txSync, type Db } from '../../store/db.ts';
+import type { Db } from '../../store/db.ts';
 import { claimedSince, claimOutbox, finishOutbox, lastClaimedAt, markSending, outboxByUuid, type OutboxRow } from '../../store/outbox.ts';
 import type { Clock } from '../../util/clock.ts';
 import type { Logger } from '../../util/logger.ts';
@@ -122,41 +122,42 @@ export async function chatSendHandler(deps: ChatDeps, ctx: OwnerContext, code: s
     row.clientId === c.id && row.text === text && row.replyTo === replyTo
       ? ok({ message: await outboxItem(deps.db, row), replayed: true })
       : fail(409, 'uuid_reused', 'This message id was already used for another message. Write the message again.');
-  const earlier = outboxByUuid(deps.db, uuid);
+  const earlier = await outboxByUuid(deps.db, uuid);
   if (earlier) return await replay(earlier);
 
   let quoted: QuotedMessage | null = null;
   if (replyTo !== null) {
-    const q = deps.db
-      .raw.prepare('SELECT wa_id AS waId, sender_jid AS senderJid, from_me AS fromMe, text FROM messages WHERE id = ? AND client_id = ? AND revoked = 0')
-      .get(replyTo, c.id) as { waId: string; senderJid: string; fromMe: number; text: string | null } | undefined;
+    const q = await deps.db.get<{ waId: string; senderJid: string; fromMe: number; text: string | null }>(
+      'SELECT wa_id AS waId, sender_jid AS senderJid, from_me AS fromMe, text FROM messages WHERE id = ? AND client_id = ? AND revoked = 0',
+      [replyTo, c.id],
+    );
     if (!q) return fail(400, 'invalid', 'The message you are replying to is not in this chat.');
     quoted = { key: { remoteJid: c.groupId, id: q.waId, fromMe: q.fromMe === 1, participant: q.senderJid }, message: { conversation: q.text ?? '' } };
   }
 
   // The limits and the claim in one write transaction: two requests at once cannot both pass.
   const now = deps.clock.now();
-  const claim = txSync(deps.db, (): { row: OutboxRow } | { limited: ApiResult<ApiError> } | { taken: OutboxRow } => {
-    const again = outboxByUuid(deps.db, uuid);
+  const claim = await deps.db.tx(async (tx): Promise<{ row: OutboxRow } | { limited: ApiResult<ApiError> } | { taken: OutboxRow }> => {
+    const again = await outboxByUuid(tx, uuid);
     if (again) return { taken: again };
-    const last = lastClaimedAt(deps.db, c.id);
+    const last = await lastClaimedAt(tx, c.id);
     const gap = last === null ? Infinity : now.getTime() - Date.parse(last);
     if (gap < SEND_GAP_MS) {
       return { limited: fail(429, 'rate_limited', 'Wait a few seconds between messages to the same group.', { retryAfterSec: Math.ceil((SEND_GAP_MS - gap) / 1000) }) };
     }
-    if (claimedSince(deps.db, new Date(now.getTime() - 3_600_000).toISOString()) >= SEND_HOURLY_MAX) {
+    if ((await claimedSince(tx, new Date(now.getTime() - 3_600_000).toISOString())) >= SEND_HOURLY_MAX) {
       return { limited: fail(429, 'rate_limited', `At most ${SEND_HOURLY_MAX} messages an hour can be sent from the dashboard. Try again later.`, { retryAfterSec: 600 }) };
     }
-    return { row: claimOutbox(deps.db, { uuid, clientId: c.id, text, replyTo, actor: ctx.actor, at: now.toISOString() }) };
+    return { row: await claimOutbox(tx, { uuid, clientId: c.id, text, replyTo, actor: ctx.actor, at: now.toISOString() }) };
   });
   if ('taken' in claim) return await replay(claim.taken);
   if ('limited' in claim) return claim.limited;
 
   // Logged before WhatsApp is asked: a crash mid-send leaves the row "sending" (unknown at the next start), and this line.
-  markSending(deps.db, claim.row.id, deps.clock.now().toISOString());
+  await markSending(deps.db, claim.row.id, deps.clock.now().toISOString());
   deps.log.info({ client: c.code, outbox: claim.row.id, chars: text.length, requestId: ctx.requestId }, 'dashboard send: asking WhatsApp');
   const outcome = await sendGroupText(deps.groupSocket, c.groupId, text, quoted, deps.sendTimeoutMs);
-  const done = finishOutbox(deps.db, claim.row.id, {
+  const done = await finishOutbox(deps.db, claim.row.id, {
     state: outcome.state, waId: outcome.state === 'sent' ? outcome.waId : null, errorCode: outcome.state === 'sent' ? null : outcome.code,
     at: deps.clock.now().toISOString(),
   });

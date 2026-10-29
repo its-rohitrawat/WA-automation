@@ -191,7 +191,7 @@ describe('sending from the dashboard', () => {
       const r = await send({ uuid: uuid(n) });
       expect(r.status).toBe(200);
       expect(sent(r).message.state).toBe('unknown');
-      expect(outboxByUuid(db, uuid(n))).toMatchObject({ state: 'unknown', errorCode: code });
+      expect(await outboxByUuid(db, uuid(n))).toMatchObject({ state: 'unknown', errorCode: code });
       expect(audits.at(-1)).toMatchObject({ event: 'Message may have been sent (check WhatsApp) · Sharma Interiors (SHA)', detail: `10 characters · ${code}` });
     }
     sock.mode = 'ok';
@@ -207,7 +207,7 @@ describe('sending from the dashboard', () => {
     open = false;
     const r = await send({});
     expect(sent(r).message.state).toBe('failed');
-    expect(outboxByUuid(db, uuid(1))).toMatchObject({ state: 'failed', errorCode: 'whatsapp_not_connected' });
+    expect(await outboxByUuid(db, uuid(1))).toMatchObject({ state: 'failed', errorCode: 'whatsapp_not_connected' });
     expect(sock.calls).toEqual([]);
     expect(audits.at(-1)!.event).toBe('Message not sent · Sharma Interiors (SHA)');
   });
@@ -250,13 +250,13 @@ describe('sending from the dashboard', () => {
     expect(page.messages.filter((m) => m.text === 'Hello team')).toEqual([expect.objectContaining({ mine: true, sender: 'Founder' })]);
   });
 
-  it('a stop mid-send: claimed becomes failed, sending becomes unknown; neither is sent again', () => {
-    const a = claimOutbox(db, { uuid: uuid(1), clientId: 1, text: 'a', replyTo: null, actor: CTX.actor, at: NOW });
-    const b = claimOutbox(db, { uuid: uuid(2), clientId: 1, text: 'b', replyTo: null, actor: CTX.actor, at: NOW });
-    markSending(db, b.id, NOW);
-    expect(settleInterrupted(db, NOW)).toEqual({ failed: 1, unknown: 1 });
-    expect(outboxByUuid(db, a.uuid)).toMatchObject({ state: 'failed', errorCode: 'interrupted_before_send' });
-    expect(outboxByUuid(db, b.uuid)).toMatchObject({ state: 'unknown', errorCode: 'interrupted' });
+  it('a stop mid-send: claimed becomes failed, sending becomes unknown; neither is sent again', async () => {
+    const a = await claimOutbox(db, { uuid: uuid(1), clientId: 1, text: 'a', replyTo: null, actor: CTX.actor, at: NOW });
+    const b = await claimOutbox(db, { uuid: uuid(2), clientId: 1, text: 'b', replyTo: null, actor: CTX.actor, at: NOW });
+    await markSending(db, b.id, NOW);
+    expect(await settleInterrupted(db, NOW)).toEqual({ failed: 1, unknown: 1 });
+    expect(await outboxByUuid(db, a.uuid)).toMatchObject({ state: 'failed', errorCode: 'interrupted_before_send' });
+    expect(await outboxByUuid(db, b.uuid)).toMatchObject({ state: 'unknown', errorCode: 'interrupted' });
   });
 });
 

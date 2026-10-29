@@ -41,11 +41,11 @@ describe('ReportScheduler with a settings getter', () => {
     const t = await setup(ON);
     await t.tick('2026-10-24', '06:30'); // Saturday, weekdays only: nothing
     expect(t.sender.calls).toHaveLength(0);
-    expect(reportFor(t.db, '2026-10-24')).toBeUndefined();
+    expect(await reportFor(t.db, '2026-10-24')).toBeUndefined();
     t.set({ ...ON, days: 'mon-sat' });
     await t.tick('2026-10-24', '06:31');
     expect(t.sender.calls).toHaveLength(1);
-    expect(reportFor(t.db, '2026-10-24')?.status).toBe('sent');
+    expect((await reportFor(t.db, '2026-10-24'))?.status).toBe('sent');
   });
 
   it('turning off skips the next scheduled send, and on again sends within the window', async () => {

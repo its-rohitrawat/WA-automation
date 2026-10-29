@@ -137,7 +137,7 @@ export async function chatPage(db: Db, c: ClientRow, now: Date, o: { before?: nu
   }
   const since = new Date(now.getTime() - OUTBOX_DAYS * 86_400_000).toISOString();
   const outbox: ChatOutboxItem[] = [];
-  if (o.before === undefined) for (const row of outboxToShow(db, c.id, since)) outbox.push(await outboxItem(db, row));
+  if (o.before === undefined) for (const row of await outboxToShow(db, c.id, since)) outbox.push(await outboxItem(db, row));
   return { messages: rows.slice(0, limit).map(toMessage), hasOlder: rows.length > limit, outbox };
 }
 

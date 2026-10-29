@@ -99,7 +99,7 @@ describe('the briefing send time set from the dashboard', () => {
     expect(t.sender.calls).toHaveLength(1);
     await t.tick(FRI, '07:30');
     expect(t.sender.calls).toHaveLength(2);
-    expect(reportFor(t.db, FRI)?.status).toBe('sent');
+    expect((await reportFor(t.db, FRI))?.status).toBe('sent');
   });
 
   it('an earlier time after today was sent sends nothing more today, and goes out tomorrow at the new time', async () => {

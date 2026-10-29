@@ -13,7 +13,6 @@ media/extract.ts
 meetings/sttParts.ts
 output/googleAuth.ts
 output/googleAuthHub.ts
-report/scheduler.ts
 spend/spendGuard.ts
 store/batches.ts
 store/clients.ts
@@ -30,7 +29,6 @@ wa/authState.ts
 wa/ingest.ts
 wa/linkSession.ts
 web/audit.ts
-web/routes/chat.ts
 web/routes/controlScreens.ts
 web/routes/groups.ts
 web/sessions.ts

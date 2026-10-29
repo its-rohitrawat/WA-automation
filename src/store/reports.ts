@@ -1,4 +1,4 @@
-import type { Db } from './db.ts';
+import type { Db, Sql } from './db.ts';
 
 export type ReportStatus = 'sending' | 'sent' | 'retry' | 'unknown' | 'skipped';
 
@@ -73,14 +73,14 @@ function toRow(r: RawReport): ReportRow {
   };
 }
 
-export function reportFor(db: Db, date: string): ReportRow | undefined {
-  const r = db.raw.prepare('SELECT * FROM reports WHERE date = ?').get(date) as RawReport | undefined;
+export async function reportFor(db: Sql, date: string): Promise<ReportRow | undefined> {
+  const r = await db.get<RawReport>('SELECT * FROM reports WHERE date = ?', [date]);
   return r ? toRow(r) : undefined;
 }
 
 /** Newest date first. */
-export function recentReports(db: Db, limit: number): ReportRow[] {
-  return (db.raw.prepare('SELECT * FROM reports ORDER BY date DESC LIMIT ?').all(limit) as RawReport[]).map(toRow);
+export async function recentReports(db: Sql, limit: number): Promise<ReportRow[]> {
+  return (await db.all<RawReport>('SELECT * FROM reports ORDER BY date DESC LIMIT ?', [limit])).map(toRow);
 }
 
 /**
@@ -89,52 +89,68 @@ export function recentReports(db: Db, limit: number): ReportRow[] {
  * 'unknown' or 'skipped' row, or a 'retry' row still waiting. Never a 'sent' or 'sending' row.
  * Returns true when this call claimed the date.
  */
-export function claimReport(db: Db, date: string, at: string, opts: { force?: boolean } = {}): boolean {
+export async function claimReport(db: Sql, date: string, at: string, opts: { force?: boolean } = {}): Promise<boolean> {
   const reclaim = opts.force ? "reports.status IN ('retry', 'unknown', 'skipped')" : "reports.status = 'retry' AND reports.next_attempt_at <= @at";
-  const info = db
-    .raw.prepare(`INSERT INTO reports (date, status, attempts, forced, created_at, updated_at)
+  const info = await db.run(
+    `INSERT INTO reports (date, status, attempts, forced, created_at, updated_at)
       VALUES (@date, 'sending', 1, @forced, @at, @at)
       ON CONFLICT (date) DO UPDATE SET status = 'sending', attempts = reports.attempts + 1, next_attempt_at = NULL, forced = @forced,
         updated_at = @at
-      WHERE ${reclaim}`)
-    .run({ date, at, forced: opts.force ? 1 : 0 });
+      WHERE ${reclaim}`,
+    { date, at, forced: opts.force ? 1 : 0 },
+  );
   return info.changes === 1;
 }
 
 /** 'sending' becomes 'sent' or 'unknown'. Returns false, changing nothing, when the row is not 'sending'. */
-export function finishReport(db: Db, date: string, status: 'sent' | 'unknown', detail: string | null, at: string): boolean {
-  const info = db
-    .raw.prepare("UPDATE reports SET status = @status, detail = @detail, next_attempt_at = NULL, updated_at = @at WHERE date = @date AND status = 'sending'")
-    .run({ date, status, detail, at });
+export async function finishReport(db: Sql, date: string, status: 'sent' | 'unknown', detail: string | null, at: string): Promise<boolean> {
+  const info = await db.run(
+    "UPDATE reports SET status = @status, detail = @detail, next_attempt_at = NULL, updated_at = @at WHERE date = @date AND status = 'sending'",
+    { date, status, detail, at },
+  );
   return info.changes === 1;
 }
 
 /** 'sending' becomes 'retry': a definite failure before anything left. A normal claim takes it again from nextAttemptAt. */
-export function retryReport(db: Db, date: string, detail: string, nextAttemptAt: string, at: string): boolean {
-  const info = db
-    .raw.prepare("UPDATE reports SET status = 'retry', detail = @detail, next_attempt_at = @nextAttemptAt, updated_at = @at WHERE date = @date AND status = 'sending'")
-    .run({ date, detail, nextAttemptAt, at });
+export async function retryReport(db: Sql, date: string, detail: string, nextAttemptAt: string, at: string): Promise<boolean> {
+  const info = await db.run(
+    "UPDATE reports SET status = 'retry', detail = @detail, next_attempt_at = @nextAttemptAt, updated_at = @at WHERE date = @date AND status = 'sending'",
+    { date, detail, nextAttemptAt, at },
+  );
   return info.changes === 1;
 }
 
 /** Past the deadline: no row, or a 'retry' row, becomes 'skipped'. A 'sent', 'sending', 'unknown' or 'skipped' row is left as it is. */
-export function skipReport(db: Db, date: string, reason: string, at: string): boolean {
-  const info = db
-    .raw.prepare(`INSERT INTO reports (date, status, detail, created_at, updated_at) VALUES (@date, 'skipped', @reason, @at, @at)
+export async function skipReport(db: Sql, date: string, reason: string, at: string): Promise<boolean> {
+  const info = await db.run(
+    `INSERT INTO reports (date, status, detail, created_at, updated_at) VALUES (@date, 'skipped', @reason, @at, @at)
       ON CONFLICT (date) DO UPDATE SET status = 'skipped', detail = @reason, next_attempt_at = NULL, updated_at = @at
-      WHERE reports.status = 'retry'`)
-    .run({ date, reason, at });
+      WHERE reports.status = 'retry'`,
+    { date, reason, at },
+  );
   return info.changes === 1;
 }
 
 /** At service start: a row still 'sending' was cut off mid-send, so its outcome is unknown. Returns how many rows changed. */
-export function markInterruptedReports(db: Db, at: string): number {
-  return db.raw.prepare("UPDATE reports SET status = 'unknown', detail = 'interrupted', updated_at = ? WHERE status = 'sending'").run(at).changes;
+export async function markInterruptedReports(db: Sql, at: string): Promise<number> {
+  return (await db.run("UPDATE reports SET status = 'unknown', detail = 'interrupted', updated_at = ? WHERE status = 'sending'", [at])).changes;
 }
 
 /** A 'retry' row of an earlier date (the service stopped before its deadline) becomes 'skipped' and keeps its reason. */
-export function closeOldRetries(db: Db, beforeDate: string, at: string): number {
-  return db
-    .raw.prepare("UPDATE reports SET status = 'skipped', next_attempt_at = NULL, updated_at = @at WHERE status = 'retry' AND date < @beforeDate")
-    .run({ beforeDate, at }).changes;
+export async function closeOldRetries(db: Sql, beforeDate: string, at: string): Promise<number> {
+  return (await db.run("UPDATE reports SET status = 'skipped', next_attempt_at = NULL, updated_at = @at WHERE status = 'retry' AND date < @beforeDate", { beforeDate, at })).changes;
+}
+
+/**
+ * S1 only, removed in S1.5: reportFor and markInterruptedReports on raw, for the two synchronous readers left (the
+ * Health line through ReportScheduler.health() and SettingsStore.view(), and the start-up recovery app.ts calls).
+ */
+export function reportForSync(db: Db, date: string): ReportRow | undefined {
+  const r = db.raw.prepare('SELECT * FROM reports WHERE date = ?').get(date) as RawReport | undefined;
+  return r ? toRow(r) : undefined;
+}
+
+/** S1 only, removed in S1.5: see reportForSync. */
+export function markInterruptedReportsSync(db: Db, at: string): number {
+  return db.raw.prepare("UPDATE reports SET status = 'unknown', detail = 'interrupted', updated_at = ? WHERE status = 'sending'").run(at).changes;
 }

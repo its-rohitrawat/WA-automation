@@ -370,7 +370,7 @@ async function main(): Promise<void> {
       const directory = new GroupDirectory({ gateway, clock: systemClock });
       // Open chat: a message the last run claimed but never asked WhatsApp for is failed; one it was asking about may
       // have gone and stays unknown. Neither is ever sent again.
-      const settled = settleInterrupted(trackerStore, systemClock.now().toISOString());
+      const settled = await settleInterrupted(trackerStore, systemClock.now().toISOString());
       if (settled.failed + settled.unknown > 0) log.warn(settled, 'dashboard messages interrupted by the last stop');
       const meetingsApi = google.meetings;
       const phoneLinks = links;

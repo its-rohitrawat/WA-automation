@@ -458,7 +458,7 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
 }
 
 /** Today's morning report and the last 7 days. Reads the tracker database only. */
-export function reportStatusCommand(deps: CliDeps): void {
+export async function reportStatusCommand(deps: CliDeps): Promise<void> {
   const { env, out } = deps;
   const settings = reportSettings(env);
   const now = new Date();
@@ -480,9 +480,9 @@ export function reportStatusCommand(deps: CliDeps): void {
     } else {
       out('Morning report: off (set REPORT_ENABLED=true and REPORT_RECIPIENT in .env, then restart the service)');
     }
-    const row = reportFor(db, today);
+    const row = await reportFor(db, today);
     if (settings.enabled || row) out(`Today (${today}): ${describeReport(row, now, settings, 'idle').text}`);
-    const past = recentReports(db, 8).filter((r) => r.date !== today).slice(0, 7);
+    const past = (await recentReports(db, 8)).filter((r) => r.date !== today).slice(0, 7);
     if (past.length > 0) {
       out('Last days:');
       for (const r of past) out(`  ${r.date}  ${r.status.padEnd(8)}${r.status === 'sent' ? `at ${istTime(new Date(r.updatedAt))} IST` : reasonText(r.detail)}`);
@@ -530,7 +530,7 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
   const today = istDate(now);
   const db = openDb(trackerDbPath(env.DATA_DIR));
   try {
-    const row = reportFor(db, today);
+    const row = await reportFor(db, today);
     const refusal = sendNowRefusal(row, now);
     if (refusal) {
       out(refusal);
@@ -580,10 +580,10 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
     }
     // The service may have changed today's row while the owner was answering. Read it again and write the request in
     // the same transaction, so the request always names the row it was checked against.
-    const answer = txSync(db, (): string | undefined => {
+    const answer = await db.tx(async (q): Promise<string | undefined> => {
       const at = new Date();
       if (istDate(at) !== today) return 'The date changed while you were answering. Nothing was sent. Run this again.';
-      const current = reportFor(db, today);
+      const current = await reportFor(q, today);
       const late = sendNowRefusal(current, at);
       if (late) return late;
       if (current?.status !== row?.status || current?.updatedAt !== row?.updatedAt) {

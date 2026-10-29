@@ -2,7 +2,7 @@ import { ControlError, type Audit } from '../control/errors.ts';
 import { nextReport } from '../report/scheduler.ts';
 import type { ReportDays, ReportSettings } from '../report/types.ts';
 import { txSync, type Db } from '../store/db.ts';
-import { reportFor } from '../store/reports.ts';
+import { reportForSync } from '../store/reports.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { istDate, istTime } from '../util/time.ts';
@@ -170,7 +170,7 @@ export class SettingsStore {
     return {
       reportEnabled: s.reportEnabled, reportDays: s.reportDays, recipientMasked: s.reportRecipient ? maskNumber(s.reportRecipient) : null,
       sendAt: s.reportTime, deadline: deadlineFor(s.reportTime, this.#env.REPORT_DEADLINE),
-      nextReport: nextReport(reportFor(this.#db, istDate(now)), now, this.reportSettings(), s.reportTime), dashboardSend: s.dashboardSend,
+      nextReport: nextReport(reportForSync(this.#db, istDate(now)), now, this.reportSettings(), s.reportTime), dashboardSend: s.dashboardSend,
       source: s.source,
     };
   }

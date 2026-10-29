@@ -63,7 +63,7 @@ describe('LiveReport', () => {
     await t.tick('07:00');
     expect(t.opened.map((o) => o.recipient)).toEqual([A]);
     expect(sent(t.opened)).toBe(1);
-    expect(reportFor(t.db, '2026-10-23')?.status).toBe('sent');
+    expect((await reportFor(t.db, '2026-10-23'))?.status).toBe('sent');
     expect(t.live.health()).toMatchObject({ text: expect.stringMatching(/^Morning report: sent at/), recipientMasked: '…5678' });
   });
 
@@ -104,11 +104,11 @@ describe('LiveReport', () => {
   it('a send cut off mid-way reads unknown under the new sender and is never retried', async () => {
     const t = await setup({ report: ON, recipient: A });
     await t.tick('05:30');
-    claimReport(t.db, '2026-10-23', new Date(at('06:00')).toISOString()); // as if a send had started and the outcome was lost
+    await claimReport(t.db, '2026-10-23', new Date(at('06:00')).toISOString()); // as if a send had started and the outcome was lost
     t.set({ report: ON, recipient: B });
     await t.tick('06:30');
     await t.tick('07:00');
-    expect(reportFor(t.db, '2026-10-23')?.status).toBe('unknown');
+    expect((await reportFor(t.db, '2026-10-23'))?.status).toBe('unknown');
     expect(sent(t.opened)).toBe(0);
   });
 
@@ -235,7 +235,7 @@ describe('LiveReport review fixes', () => {
     expect(t.opened).toHaveLength(1);
     release();
     await sending;
-    expect(reportFor(t.db, '2026-10-23')?.status).toBe('sent');
+    expect((await reportFor(t.db, '2026-10-23'))?.status).toBe('sent');
     await t.tick('06:32');
     expect(t.opened.map((o) => o.recipient)).toEqual([A, B]);
     expect(sent(t.opened)).toBe(1);
