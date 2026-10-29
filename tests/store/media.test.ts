@@ -1,3 +1,4 @@
+import { SqliteDb } from '../../src/store/engine/sqlite.ts';
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import { syncClients } from '../../src/store/clients.ts';
@@ -59,7 +60,7 @@ describe('media store', () => {
     expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(12); // the latest migration
     expect(db.prepare(`SELECT "notnull" AS required, dflt_value AS dflt FROM pragma_table_info('media') WHERE name = 'requeued_for_text'`).get())
       .toEqual({ required: 1, dflt: '0' });
-    expect(getMedia(db, 1)).toMatchObject({ status: 'done', text: 'A blue banner', requeuedForText: false });
+    expect(getMedia(SqliteDb.wrap(db), 1)).toMatchObject({ status: 'done', text: 'A blue banner', requeuedForText: false });
     expect(db.prepare("SELECT processed_at AS p, version FROM messages WHERE wa_id = 'm1'").get()).toEqual({ p: '2026-10-10T00:05:00Z', version: 0 });
   });
 
@@ -96,7 +97,7 @@ describe('media store', () => {
     const sharmaMessage = message(db, 'A'); // client 1
     expect(() => insertMedia(db, media(sharmaMessage, { clientId: 2 }))).toThrow(/not a message of client 2/);
     expect(() => insertMedia(db, media(9999))).toThrow(/not a message of client 1/); // no such message at all
-    expect(db.prepare('SELECT COUNT(*) AS n FROM media').get()).toEqual({ n: 0 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM media').get()).toEqual({ n: 0 });
     // The right client still works.
     const id = insertMedia(db, media(sharmaMessage));
     expect(getMedia(db, id)).toMatchObject({ messageId: sharmaMessage, clientId: 1 });
@@ -306,7 +307,7 @@ describe('a file read after its message was processed (12h)', () => {
     return { db, id, messageId };
   }
   const stateOf = (db: Db, messageId: number, id: number) => ({
-    ...(db.prepare('SELECT processed_at AS processedAt, version FROM messages WHERE id = ?').get(messageId) as { processedAt: string | null; version: number }),
+    ...(db.raw.prepare('SELECT processed_at AS processedAt, version FROM messages WHERE id = ?').get(messageId) as { processedAt: string | null; version: number }),
     requeuedForText: getMedia(db, id)!.requeuedForText,
   });
 
@@ -324,7 +325,7 @@ describe('a file read after its message was processed (12h)', () => {
 
   it('re-queues in the same transaction as the finish: a failed re-queue leaves the file pending', () => {
     const { db, id, messageId } = processedWithFile();
-    db.exec("CREATE TRIGGER fail_requeue BEFORE UPDATE OF processed_at ON messages BEGIN SELECT RAISE(ABORT, 'test failure'); END");
+    db.raw.exec("CREATE TRIGGER fail_requeue BEFORE UPDATE OF processed_at ON messages BEGIN SELECT RAISE(ABORT, 'test failure'); END");
     expect(() => finishMedia(db, id, { textKind: 'description', text: 'A receipt', pageCount: null, note: null, at: LATER })).toThrow(/test failure/);
     expect(getMedia(db, id)).toMatchObject({ status: 'pending', text: null, requeuedForText: false });
     expect(stateOf(db, messageId, id)).toEqual({ processedAt: NOW, version: 0, requeuedForText: false });
@@ -506,7 +507,7 @@ function backlogVoice(db: Db, waId: string, o: { clientId?: number; kind?: Media
 
 const TRANSCRIPT = { textKind: 'extract' as const, text: 'Payment done, please check', pageCount: null, note: null, at: LATER };
 const forgets = (db: Db) =>
-  db.prepare('SELECT media_id AS mediaId, provider, ref, created_at AS createdAt, attempts, next_try_at AS nextTryAt FROM media_stt_forget ORDER BY id').all();
+  db.raw.prepare('SELECT media_id AS mediaId, provider, ref, created_at AS createdAt, attempts, next_try_at AS nextTryAt FROM media_stt_forget ORDER BY id').all();
 
 describe('finishMedia: the speech provider\'s stored copy of a transcript (N1)', () => {
   // Task 6: the copy an unreadable answer named (Phase 3's M7), noted by the processor when the error ends a run.
@@ -640,7 +641,7 @@ describe('the 2a voice backlog (V6, N2)', () => {
     const listed = voiceBacklog(db).map((r) => r.id);
     expect(listed).toEqual([revoked, transcribed, fine]);
     applyRevoke(db, 1, 'A');
-    db.prepare("UPDATE media SET text_kind = 'extract', text = 'Done' WHERE id = ?").run(transcribed);
+    db.raw.prepare("UPDATE media SET text_kind = 'extract', text = 'Done' WHERE id = ?").run(transcribed);
     expect(queueVoiceBacklog(db, [...listed, image, 9999], LATER)).toBe(1);
     expect(getMedia(db, revoked)).toMatchObject({ status: 'done', backlog: false });
     expect(getMedia(db, transcribed)).toMatchObject({ status: 'done', backlog: false });
@@ -799,11 +800,11 @@ describe('voice notes that failed on this computer', () => {
     const db = seededDb();
     const processed = failedVoice(db, 'A', 'local_empty_output');
     const unprocessed = failedVoice(db, 'B', 'audio_convert_failed');
-    db.prepare('UPDATE messages SET processed_at = NULL WHERE id = ?').run(getMedia(db, unprocessed)!.messageId);
+    db.raw.prepare('UPDATE messages SET processed_at = NULL WHERE id = ?').run(getMedia(db, unprocessed)!.messageId);
     const edited = failedVoice(db, 'C', 'local_timeout');
-    db.prepare("UPDATE messages SET requeue_reason = 'edit' WHERE id = ?").run(getMedia(db, edited)!.messageId);
+    db.raw.prepare("UPDATE messages SET requeue_reason = 'edit' WHERE id = ?").run(getMedia(db, edited)!.messageId);
     const left = failedVoice(db, 'D', 'local_timeout');
-    db.prepare("UPDATE media SET note = 'x' WHERE id = ?").run(processed); // a stray note is cleared too
+    db.raw.prepare("UPDATE media SET note = 'x' WHERE id = ?").run(processed); // a stray note is cleared too
     const queuedAt = '2026-10-22T08:00:00.000Z';
     expect(queueFailedLocalVoice(db, [processed, unprocessed, edited], queuedAt)).toBe(3);
     const fresh = { status: 'pending', attempts: 0, errorCode: null, nextAttemptAt: null, note: null, createdAt: queuedAt, updatedAt: queuedAt };
@@ -880,7 +881,7 @@ describe('the queue of provider copies to delete (N1)', () => {
   it('counts a try and holds the copy back until its next try is due', () => {
     const { db } = threeCopies();
     countMediaForgetAttempt(db, 2, T1);
-    expect(db.prepare('SELECT attempts, next_try_at AS nextTryAt FROM media_stt_forget WHERE id = 2').get()).toEqual({ attempts: 1, nextTryAt: T1 });
+    expect(db.raw.prepare('SELECT attempts, next_try_at AS nextTryAt FROM media_stt_forget WHERE id = 2').get()).toEqual({ attempts: 1, nextTryAt: T1 });
     expect(pendingMediaForgets(db, { nowIso: T0, maxAttempts: 5 }).map((f) => f.id)).toEqual([1, 3]);
     expect(pendingMediaForgets(db, { nowIso: T1, maxAttempts: 5 })).toEqual([
       expect.objectContaining({ id: 1 }), expect.objectContaining({ id: 2, attempts: 1 }), expect.objectContaining({ id: 3 }),

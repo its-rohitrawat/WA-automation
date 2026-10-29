@@ -177,20 +177,20 @@ function toRow(r: RawTask): TaskRow {
 }
 
 export function getTaskById(db: Db, id: number): TaskRow {
-  const r = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as RawTask | undefined;
+  const r = db.raw.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as RawTask | undefined;
   if (!r) throw new Error(`Unknown task id ${id}`);
   return toRow(r);
 }
 
 export function getTaskByCode(db: Db, code: string): TaskRow | undefined {
-  const r = db.prepare('SELECT * FROM tasks WHERE code = ?').get(code) as RawTask | undefined;
+  const r = db.raw.prepare('SELECT * FROM tasks WHERE code = ?').get(code) as RawTask | undefined;
   return r ? toRow(r) : undefined;
 }
 
 export function createTask(db: Db, t: NewTask, now: string): TaskRow {
   const code = nextTaskCode(db, t.clientId);
   const info = db
-    .prepare(`INSERT INTO tasks (code, client_id, side, title, category, priority, priority_level, priority_source, priority_keyword, sentiment,
+    .raw.prepare(`INSERT INTO tasks (code, client_id, side, title, category, priority, priority_level, priority_source, priority_keyword, sentiment,
         assigned_to, asked_by, raised_on, deadline, latest_progress, source_quote, source_date, source_wa_id, origin, meeting_id, created_at, updated_at)
       VALUES (@code, @clientId, @side, @title, @category, @legacy, @priority, @prioritySource, @priorityKeyword, @sentiment,
         @assignedTo, @askedBy, @raisedOn, @deadline, @latestProgress, @sourceQuote, @sourceDate, @sourceWaId, @origin, @meetingId, @now, @now)`)
@@ -203,8 +203,8 @@ export function createTask(db: Db, t: NewTask, now: string): TaskRow {
 
 export function listTasks(db: Db, clientId: number, statuses?: Status[]): TaskRow[] {
   const rows = statuses
-    ? (db.prepare('SELECT * FROM tasks WHERE client_id = ? AND status IN (SELECT value FROM json_each(?)) ORDER BY id').all(clientId, JSON.stringify(statuses)) as RawTask[])
-    : (db.prepare('SELECT * FROM tasks WHERE client_id = ? ORDER BY id').all(clientId) as RawTask[]);
+    ? (db.raw.prepare('SELECT * FROM tasks WHERE client_id = ? AND status IN (SELECT value FROM json_each(?)) ORDER BY id').all(clientId, JSON.stringify(statuses)) as RawTask[])
+    : (db.raw.prepare('SELECT * FROM tasks WHERE client_id = ? ORDER BY id').all(clientId) as RawTask[]);
   return rows.map(toRow);
 }
 
@@ -227,22 +227,22 @@ export function updateTaskFields(
     params.prioritySource = by === 'human' ? 'human' : keyword !== undefined ? 'keyword' : 'ai';
     params.priorityKeyword = by === 'human' ? null : (keyword ?? null);
   }
-  db.prepare(`UPDATE tasks SET ${sets.join(', ')}, updated_at = @now WHERE id = @id`).run(params);
+  db.raw.prepare(`UPDATE tasks SET ${sets.join(', ')}, updated_at = @now WHERE id = @id`).run(params);
   if (by === 'human') {
     const locked = new Set([...getTaskById(db, id).lockedFields, ...keys]);
-    db.prepare('UPDATE tasks SET locked_fields = ? WHERE id = ?').run(JSON.stringify([...locked]), id);
+    db.raw.prepare('UPDATE tasks SET locked_fields = ? WHERE id = ?').run(JSON.stringify([...locked]), id);
   }
 }
 
 /** The client's mood about a task, as the AI judged it (only while sentiment is switched on). */
 export function setTaskSentiment(db: Db, id: number, sentiment: Sentiment, now: string): void {
-  db.prepare('UPDATE tasks SET sentiment = ?, updated_at = ? WHERE id = ?').run(sentiment, now, id);
+  db.raw.prepare('UPDATE tasks SET sentiment = ?, updated_at = ? WHERE id = ?').run(sentiment, now, id);
 }
 
 /** A human status change is timestamped; the AI then needs newer evidence to change the status again. */
 export function setTaskStatus(db: Db, id: number, status: Status, today: string, now: string, by: 'ai' | 'human'): void {
   const humanLock = by === 'human' ? ', status_locked_at = @now' : '';
-  db.prepare(`UPDATE tasks SET status = @status, closed_on = @closedOn, updated_at = @now${humanLock} WHERE id = @id`).run({
+  db.raw.prepare(`UPDATE tasks SET status = @status, closed_on = @closedOn, updated_at = @now${humanLock} WHERE id = @id`).run({
     id,
     status,
     closedOn: status === 'done' ? today : null,
@@ -255,7 +255,7 @@ export function setTaskStatus(db: Db, id: number, status: Status, today: string,
  * message was sent (amendment 12h), which can be before a reminder already logged from a later message.
  */
 export function logReminder(db: Db, id: number, onDate: string, now: string): void {
-  db.prepare(`UPDATE tasks SET reminder_count = reminder_count + 1, last_reminder_on = MAX(COALESCE(last_reminder_on, ''), @onDate),
+  db.raw.prepare(`UPDATE tasks SET reminder_count = reminder_count + 1, last_reminder_on = MAX(COALESCE(last_reminder_on, ''), @onDate),
       updated_at = @now WHERE id = @id`).run({ onDate, now, id });
 }
 
@@ -263,7 +263,7 @@ export function recordEvent(
   db: Db,
   e: { taskId: number | null; clientId: number; actor: 'ai' | 'human'; op: string; detail: object; reason: string | null; sourceIds: string[]; at: string },
 ): void {
-  db.prepare('INSERT INTO task_events (task_id, client_id, actor, op, detail, reason, source_ids, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+  db.raw.prepare('INSERT INTO task_events (task_id, client_id, actor, op, detail, reason, source_ids, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
     e.taskId,
     e.clientId,
     e.actor,
@@ -280,7 +280,7 @@ export function addDecision(
   d: { clientId: number; text: string; decidedOn: string; source: DecisionRow['source']; sourceWaId: string | null; meetingId?: number | null },
   now: string,
 ): void {
-  db.prepare('INSERT INTO decisions (client_id, text, decided_on, source, source_wa_id, meeting_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+  db.raw.prepare('INSERT INTO decisions (client_id, text, decided_on, source, source_wa_id, meeting_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
     d.clientId,
     d.text,
     d.decidedOn,
@@ -293,7 +293,7 @@ export function addDecision(
 
 export function listDecisions(db: Db, clientId: number, limit = 1000): DecisionRow[] {
   return db
-    .prepare(`SELECT d.id, d.client_id AS clientId, d.text, d.decided_on AS decidedOn, d.source, d.source_wa_id AS sourceWaId,
+    .raw.prepare(`SELECT d.id, d.client_id AS clientId, d.text, d.decided_on AS decidedOn, d.source, d.source_wa_id AS sourceWaId,
         m.doc_file_id AS docFileId
       FROM decisions d LEFT JOIN meetings m ON m.id = d.meeting_id WHERE d.client_id = ? ORDER BY d.decided_on DESC, d.id DESC LIMIT ?`)
     .all(clientId, limit) as DecisionRow[];
@@ -301,7 +301,7 @@ export function listDecisions(db: Db, clientId: number, limit = 1000): DecisionR
 
 /** Every message cited by an applied event of this op (source_ids JSON), for this client. */
 function eventSourceIds(db: Db, clientId: number, op: string): string[] {
-  const rows = db.prepare('SELECT source_ids AS ids FROM task_events WHERE client_id = ? AND op = ?').all(clientId, op) as { ids: string }[];
+  const rows = db.raw.prepare('SELECT source_ids AS ids FROM task_events WHERE client_id = ? AND op = ?').all(clientId, op) as { ids: string }[];
   return rows.flatMap((r) => JSON.parse(r.ids) as string[]);
 }
 
@@ -310,8 +310,8 @@ function eventSourceIds(db: Db, clientId: number, op: string): string[] {
  * add_task cited, and every message cited by any other event on a task (reminder, update, status change; AI or human).
  */
 export function taskSourceIds(db: Db, clientId: number): Set<string> {
-  const rows = db.prepare('SELECT source_wa_id AS id FROM tasks WHERE client_id = ? AND source_wa_id IS NOT NULL').all(clientId) as { id: string }[];
-  const onTasks = db.prepare('SELECT source_ids AS ids FROM task_events WHERE client_id = ? AND task_id IS NOT NULL').all(clientId) as { ids: string }[];
+  const rows = db.raw.prepare('SELECT source_wa_id AS id FROM tasks WHERE client_id = ? AND source_wa_id IS NOT NULL').all(clientId) as { id: string }[];
+  const onTasks = db.raw.prepare('SELECT source_ids AS ids FROM task_events WHERE client_id = ? AND task_id IS NOT NULL').all(clientId) as { ids: string }[];
   return new Set([
     ...rows.map((r) => r.id),
     ...eventSourceIds(db, clientId, 'add_task'),
@@ -322,7 +322,7 @@ export function taskSourceIds(db: Db, clientId: number): Set<string> {
 /** Task code to the message ids already cited by an applied log_reminder event. */
 export function reminderSourceIds(db: Db, clientId: number): Map<string, Set<string>> {
   const rows = db
-    .prepare(`SELECT t.code AS code, e.source_ids AS ids FROM task_events e JOIN tasks t ON t.id = e.task_id WHERE e.client_id = ? AND e.op = 'log_reminder'`)
+    .raw.prepare(`SELECT t.code AS code, e.source_ids AS ids FROM task_events e JOIN tasks t ON t.id = e.task_id WHERE e.client_id = ? AND e.op = 'log_reminder'`)
     .all(clientId) as { code: string; ids: string }[];
   const out = new Map<string, Set<string>>();
   for (const r of rows) {
@@ -334,11 +334,11 @@ export function reminderSourceIds(db: Db, clientId: number): Map<string, Set<str
 }
 
 export function decisionSourceIds(db: Db, clientId: number): Set<string> {
-  const rows = db.prepare('SELECT source_wa_id AS id FROM decisions WHERE client_id = ? AND source_wa_id IS NOT NULL').all(clientId) as { id: string }[];
+  const rows = db.raw.prepare('SELECT source_wa_id AS id FROM decisions WHERE client_id = ? AND source_wa_id IS NOT NULL').all(clientId) as { id: string }[];
   return new Set([...rows.map((r) => r.id), ...eventSourceIds(db, clientId, 'add_decision')]);
 }
 
 /** Hands the task back to the AI: clears the field locks and the status lock. */
 export function clearTaskLocks(db: Db, id: number, now: string): void {
-  db.prepare("UPDATE tasks SET locked_fields = '[]', status_locked_at = NULL, updated_at = ? WHERE id = ?").run(now, id);
+  db.raw.prepare("UPDATE tasks SET locked_fields = '[]', status_locked_at = NULL, updated_at = ? WHERE id = ?").run(now, id);
 }

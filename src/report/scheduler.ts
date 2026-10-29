@@ -1,5 +1,5 @@
 import { loadTrackerView, type HealthLine } from '../output/view.ts';
-import { tx, type Db } from '../store/db.ts';
+import { txSync, type Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import {
   claimReport, closeOldRetries, finishReport, markInterruptedReports, parseReportRequest, REPORT_REQUEST_KEY, REPORT_REQUEST_MAX_AGE_MS, reportFor,
@@ -326,7 +326,7 @@ export class ReportScheduler {
       const at = now.toISOString();
       // Taking the request, checking it and the forced claim are one transaction, so a request written meanwhile is
       // never wiped unread, and the row cannot change between the check and the claim. The send comes after it.
-      const step = tx(db, (): 'send' | 'done' | 'schedule' => {
+      const step = txSync(db, (): 'send' | 'done' | 'schedule' => {
         const requested = getKv(db, REPORT_REQUEST_KEY);
         if (requested) setKv(db, REPORT_REQUEST_KEY, ''); // a request is used once, whatever happens next
         if (!settings.enabled) return 'done';

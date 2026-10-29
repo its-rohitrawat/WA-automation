@@ -54,7 +54,7 @@ const roots: string[] = [];
 const dbs: Db[] = [];
 afterEach(async () => {
   for (const s of servers.splice(0)) await s.stop();
-  for (const d of dbs.splice(0)) d.close();
+  for (const d of dbs.splice(0)) d.raw.close();
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
 });
 
@@ -773,7 +773,7 @@ describe('startDashboard', () => {
     const c = capture();
     const web = await startDashboard({ env: dashEnv(0), db, log: c.log, control: {}, clock, google: fakeGoogle });
     servers.push(web!);
-    expect((db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
+    expect((db.raw.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
     const port = web!.address()!.port;
     const r = await fetch(`http://127.0.0.1:${port}/dashboard/auth/login`, { redirect: 'manual' });
     expect(r.status).toBe(302);
@@ -867,7 +867,7 @@ describe('startDashboard', () => {
     expect(b.forms[0]!.get('client_id')).toBe('client-id');
     expect(b.forms[0]!.get('client_secret')).toBe('client-secret');
     expect(b.forms[0]!.get('redirect_uri')).toBe('https://dash.example.com/dashboard/auth/callback');
-    expect((b.db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(1);
+    expect((b.db.raw.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(1);
     expect(b.out()).not.toContain('client-secret');
 
     // The guard startDashboard builds: the owner list lets this owner in, and the public origin passes the CSRF check.
@@ -880,25 +880,25 @@ describe('startDashboard', () => {
       b.post('/dashboard/auth/logout', { ...host, cookie: `wa_session=${sid}`, origin, 'x-csrf-token': me.csrf });
     const evil = await logout('https://evil.com');
     expect(evil.status).toBe(403);
-    expect((b.db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(1);
+    expect((b.db.raw.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(1);
     const out = await logout('https://dash.example.com');
     expect(out.status).toBe(204);
     const cleared = cookiesOf(out).find((c) => c.startsWith('wa_session='));
     expect(cleared).toMatch(/^wa_session=;/);
     expect(cleared).toContain('Max-Age=0');
     expect(cleared).toMatch(/; Secure$/);
-    expect((b.db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
+    expect((b.db.raw.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
     expect((await b.get('/dashboard/api/me', { ...host, cookie: `wa_session=${sid}` })).status).toBe(401);
   });
 
   it('a sign-in whose audit row cannot be written leaves no session (one database transaction)', async () => {
     const b = await bootSignIn();
-    b.db.exec(`CREATE TRIGGER t_fail_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'audit down'); END`);
+    b.db.raw.exec(`CREATE TRIGGER t_fail_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'audit down'); END`);
     const { cb } = await fullSignIn(b);
     expect(cb.status).toBe(302);
     expect(cb.headers.location).toBe('/dashboard?error=signin');
     expect(cookiesOf(cb).some((c) => c.startsWith('wa_session='))).toBe(false);
-    expect((b.db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
+    expect((b.db.raw.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
   });
 
   it('sign-in is limited to 10 a minute per client: the 11th goes to the sign-in error page', async () => {

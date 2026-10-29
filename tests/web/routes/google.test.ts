@@ -278,7 +278,7 @@ describe('GoogleConnectRoutes: the account email (owner fix 3)', () => {
 
   it('a reconnect forgets the old email before storing the new one', async () => {
     const t = withVerifier({ email_verified: false });
-    t.db.prepare('INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)').run('google_account_email:main', 'old@studio.in');
+    t.db.raw.prepare('INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)').run('google_account_email:main', 'old@studio.in');
     const state = await t.begin(owner, 'main');
     await t.routes.callback(owner, { state, code: CODE });
     expect(accountEmail(t.db, 'main')).toBeNull();

@@ -21,7 +21,7 @@ function setup(o: { env?: Record<string, string>; linked?: boolean } = {}) {
   return { db, store, clock, audits, audit, setLinked: (v: boolean) => (linked = v) };
 }
 
-const rows = (db: Db) => db.prepare('SELECT k, v, updated_at AS updatedAt, updated_by AS updatedBy FROM settings ORDER BY k').all();
+const rows = (db: Db) => db.raw.prepare('SELECT k, v, updated_at AS updatedAt, updated_by AS updatedBy FROM settings ORDER BY k').all();
 
 function refusal(fn: () => unknown): ControlError {
   try {
@@ -55,7 +55,7 @@ describe('SettingsStore.get', () => {
 
   it('falls back to .env for a stored value that is not valid', () => {
     const { db, store } = setup({ env: { REPORT_DAYS: 'mon-sat' } });
-    const put = db.prepare('INSERT INTO settings (k, v, updated_at, updated_by) VALUES (?, ?, ?, ?)');
+    const put = db.raw.prepare('INSERT INTO settings (k, v, updated_at, updated_by) VALUES (?, ?, ?, ?)');
     put.run('reportDays', '"sundays"', NOW, OWNER);
     put.run('reportEnabled', 'not json', NOW, OWNER);
     put.run('reportRecipient', '"12345"', NOW, OWNER);

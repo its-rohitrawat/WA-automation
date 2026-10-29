@@ -4,7 +4,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { DestinationStream } from 'pino';
-import { openDb, tx } from '../../src/store/db.ts';
+import { openDb, txSync } from '../../src/store/db.ts';
 import type { Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import type { ManualClock } from '../../src/util/clock.ts';
@@ -96,7 +96,7 @@ async function boot(
   const c = capture();
   const db = openDb(':memory:');
   cleanups.push(() => {
-    db.close();
+    db.raw.close();
   });
   const clock = manualClock(T0);
   const sessions = new SessionStore(db, clock);
@@ -125,7 +125,7 @@ async function boot(
     clientId: CLIENT_ID,
     ...(o.publicUrl === undefined ? {} : { publicUrl: o.publicUrl }),
     port,
-    tx: <T>(fn: () => T): T => tx(db, fn),
+    tx: <T>(fn: () => T): T => txSync(db, fn),
     exchange:
       o.exchangeThrows === undefined
         ? googleCodeExchanger({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, tokenUrl: ep.url })
@@ -236,7 +236,7 @@ describe('owner sign-in: happy path', () => {
     expect(form.get('redirect_uri')).toBe(q.get('redirect_uri'));
     expect(b.verified).toEqual([ID_TOKEN]);
 
-    const rows = b.db.prepare('SELECT email, agent_label FROM web_sessions').all() as { email: string; agent_label: string }[];
+    const rows = b.db.raw.prepare('SELECT email, agent_label FROM web_sessions').all() as { email: string; agent_label: string }[];
     expect(rows).toEqual([{ email: OWNER, agent_label: 'Edge on Windows' }]);
     const audit = b.audit.list({});
     expect(audit).toHaveLength(1);
@@ -256,7 +256,7 @@ describe('owner sign-in: happy path', () => {
     expect(me.name).toBe('The Owner');
     expect(me.signedInAt).toBe(T0);
     expect(me.expiresAt).toBe('2026-11-03T10:00:00.000Z');
-    const row = b.db.prepare('SELECT csrf_hash FROM web_sessions').get() as { csrf_hash: string };
+    const row = b.db.raw.prepare('SELECT csrf_hash FROM web_sessions').get() as { csrf_hash: string };
     expect(sha256hex(me.csrf!)).toBe(row.csrf_hash);
     // The same token every time for the same session.
     const again = JSON.parse((await b.req('GET', '/dashboard/api/me', { cookie: `wa_session=${sid}` })).body) as Record<string, string>;
@@ -336,7 +336,7 @@ describe('owner sign-in: happy path', () => {
     const cb = await b.req('GET', `/dashboard/auth/callback?code=${CODE}&state=${l.state}`, { cookie: `wa_signin=${l.signin}; wa_session=${first}` });
     expect(cb.status).toBe(302);
     expect((await b.req('GET', '/dashboard/api/me', { cookie: `wa_session=${first}` })).status).toBe(401);
-    expect((b.db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(1);
+    expect((b.db.raw.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(1);
   });
 });
 
@@ -484,7 +484,7 @@ describe('owner sign-in with the production ID-token verifier (offline)', () => 
       expect(b.bodies.join(' ')).not.toContain(part);
     }
     expect(b.out()).not.toContain('evil@example.com');
-    expect((b.db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
+    expect((b.db.raw.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
   });
 });
 
@@ -513,7 +513,7 @@ describe('owner sign-in: refusals', () => {
     expect(r.status).toBe(302);
     expect(r.headers.location).toBe('/dashboard?denied=1');
     expect(setCookies(r)).toContain('wa_signin=; HttpOnly; SameSite=Lax; Path=/dashboard/auth; Max-Age=0');
-    expect((b.db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
+    expect((b.db.raw.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
     const a = b.audit.list({});
     expect(a).toHaveLength(1);
     expect(a[0]).toMatchObject({ actor: 'st••••@gmail.com', event: 'Sign-in refused', kind: 'auth' });
@@ -542,8 +542,8 @@ describe('owner sign-in: the return path', () => {
 });
 
 describe('owner sign-in and sign-out: one transaction with the audit row', () => {
-  const failAudit = (db: Db) => db.exec(`CREATE TRIGGER t_fail_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'audit down'); END`);
-  const count = (db: Db) => (db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n;
+  const failAudit = (db: Db) => db.raw.exec(`CREATE TRIGGER t_fail_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'audit down'); END`);
+  const count = (db: Db) => (db.raw.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n;
 
   it('a sign-in whose audit row cannot be written creates no session and keeps the earlier one', async () => {
     const b = await boot();
@@ -645,7 +645,7 @@ describe('owner sign-out', () => {
     expect(r.status).toBe(204);
     expect(r.body).toBe('');
     expect(setCookies(r)).toEqual(['wa_session=; HttpOnly; SameSite=Lax; Path=/dashboard; Max-Age=0']);
-    expect((b.db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
+    expect((b.db.raw.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
     expect((await b.req('GET', '/dashboard/api/me', { cookie: `wa_session=${sid}` })).status).toBe(401);
     const events = b.audit.list({}).map((e) => [e.actor, e.event, e.kind]);
     expect(events).toContainEqual([OWNER, 'Signed out', 'auth']);

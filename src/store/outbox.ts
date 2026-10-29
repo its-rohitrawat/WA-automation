@@ -45,38 +45,38 @@ const toRow = (r: RawRow): OutboxRow => ({
 });
 
 export function outboxByUuid(db: Db, uuid: string): OutboxRow | undefined {
-  const r = db.prepare('SELECT * FROM outbox WHERE uuid = ?').get(uuid) as RawRow | undefined;
+  const r = db.raw.prepare('SELECT * FROM outbox WHERE uuid = ?').get(uuid) as RawRow | undefined;
   return r ? toRow(r) : undefined;
 }
 
 /** Claims a message: the row exists, state claimed, before anything is sent. Throws on a uuid already used. */
 export function claimOutbox(db: Db, o: { uuid: string; clientId: number; text: string; replyTo: number | null; actor: string; at: string }): OutboxRow {
   const r = db
-    .prepare("INSERT INTO outbox (uuid, client_id, text, reply_to, state, actor, created_at) VALUES (?, ?, ?, ?, 'claimed', ?, ?) RETURNING *")
+    .raw.prepare("INSERT INTO outbox (uuid, client_id, text, reply_to, state, actor, created_at) VALUES (?, ?, ?, ?, 'claimed', ?, ?) RETURNING *")
     .get(o.uuid, o.clientId, o.text, o.replyTo, o.actor, o.at) as RawRow;
   return toRow(r);
 }
 
 /** Written before WhatsApp is asked: a crash after this leaves the row as "may have gone", never as "not sent". */
 export function markSending(db: Db, id: number, at: string): void {
-  db.prepare("UPDATE outbox SET state = 'sending', attempted_at = ? WHERE id = ? AND state = 'claimed'").run(at, id);
+  db.raw.prepare("UPDATE outbox SET state = 'sending', attempted_at = ? WHERE id = ? AND state = 'claimed'").run(at, id);
 }
 
 export function finishOutbox(db: Db, id: number, o: { state: 'sent' | 'failed' | 'unknown'; waId?: string | null; errorCode?: string | null; at: string }): OutboxRow {
   const r = db
-    .prepare("UPDATE outbox SET state = ?, wa_id = ?, error_code = ?, finished_at = ? WHERE id = ? AND state IN ('claimed', 'sending') RETURNING *")
+    .raw.prepare("UPDATE outbox SET state = ?, wa_id = ?, error_code = ?, finished_at = ? WHERE id = ? AND state IN ('claimed', 'sending') RETURNING *")
     .get(o.state, o.waId ?? null, o.errorCode ?? null, o.at, id) as RawRow | undefined;
-  return r ? toRow(r) : toRow(db.prepare('SELECT * FROM outbox WHERE id = ?').get(id) as RawRow);
+  return r ? toRow(r) : toRow(db.raw.prepare('SELECT * FROM outbox WHERE id = ?').get(id) as RawRow);
 }
 
 /** When the latest message to this client's group was claimed, or null. */
 export function lastClaimedAt(db: Db, clientId: number): string | null {
-  return (db.prepare('SELECT MAX(created_at) AS at FROM outbox WHERE client_id = ?').get(clientId) as { at: string | null }).at;
+  return (db.raw.prepare('SELECT MAX(created_at) AS at FROM outbox WHERE client_id = ?').get(clientId) as { at: string | null }).at;
 }
 
 /** How many messages were claimed (to any group) since this time. */
 export function claimedSince(db: Db, since: string): number {
-  return (db.prepare('SELECT COUNT(*) AS n FROM outbox WHERE created_at >= ?').get(since) as { n: number }).n;
+  return (db.raw.prepare('SELECT COUNT(*) AS n FROM outbox WHERE created_at >= ?').get(since) as { n: number }).n;
 }
 
 /**
@@ -84,8 +84,8 @@ export function claimedSince(db: Db, since: string): number {
  * (unknown, interrupted). Neither is sent again.
  */
 export function settleInterrupted(db: Db, at: string): { failed: number; unknown: number } {
-  const failed = db.prepare("UPDATE outbox SET state = 'failed', error_code = 'interrupted_before_send', finished_at = ? WHERE state = 'claimed'").run(at).changes;
-  const unknown = db.prepare("UPDATE outbox SET state = 'unknown', error_code = 'interrupted', finished_at = ? WHERE state = 'sending'").run(at).changes;
+  const failed = db.raw.prepare("UPDATE outbox SET state = 'failed', error_code = 'interrupted_before_send', finished_at = ? WHERE state = 'claimed'").run(at).changes;
+  const unknown = db.raw.prepare("UPDATE outbox SET state = 'unknown', error_code = 'interrupted', finished_at = ? WHERE state = 'sending'").run(at).changes;
   return { failed, unknown };
 }
 
@@ -95,7 +95,7 @@ export function settleInterrupted(db: Db, at: string): { failed: number; unknown
  */
 export function outboxToShow(db: Db, clientId: number, since: string): OutboxRow[] {
   return (db
-    .prepare(`SELECT o.* FROM outbox o WHERE o.client_id = ? AND o.created_at >= ?
+    .raw.prepare(`SELECT o.* FROM outbox o WHERE o.client_id = ? AND o.created_at >= ?
       AND NOT (o.state = 'sent' AND EXISTS (SELECT 1 FROM messages m WHERE m.client_id = o.client_id AND m.wa_id = o.wa_id))
       ORDER BY o.created_at, o.id`)
     .all(clientId, since) as RawRow[]).map(toRow);
@@ -107,7 +107,7 @@ export function outboxToShow(db: Db, clientId: number, since: string): OutboxRow
  */
 export function sentTextFor(db: Db, waId: string, groupId: string): string | undefined {
   const r = db
-    .prepare("SELECT o.text FROM outbox o JOIN clients c ON c.id = o.client_id WHERE o.wa_id = ? AND c.group_id = ? AND o.state = 'sent'")
+    .raw.prepare("SELECT o.text FROM outbox o JOIN clients c ON c.id = o.client_id WHERE o.wa_id = ? AND c.group_id = ? AND o.state = 'sent'")
     .get(waId, groupId) as { text: string } | undefined;
   return r?.text;
 }

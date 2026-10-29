@@ -102,7 +102,7 @@ function sourcesFor(kind: ActivityFilter | 'work', cursor: (at: string, src: Sou
 const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`;
 
 function batchItem(db: Db, id: number): Omit<ActivityItem, 'id' | 'at'> {
-  const b = db.prepare(`SELECT b.status, b.message_count AS messages, b.accepted, c.name AS client FROM batches b JOIN clients c ON c.id = b.client_id
+  const b = db.raw.prepare(`SELECT b.status, b.message_count AS messages, b.accepted, c.name AS client FROM batches b JOIN clients c ON c.id = b.client_id
     WHERE b.id = ?`).get(id) as { status: string; messages: number; accepted: number | null; client: string };
   return b.status === 'ok'
     ? { kind: 'msg', title: `${plural(b.messages, 'message')} read`, detail: b.client, who: `${plural(b.accepted ?? 0, 'change')}` }
@@ -115,7 +115,7 @@ const TASK_TITLES: Record<(typeof TASK_OPS)[number], string> = {
 };
 
 function taskItem(db: Db, id: number): Omit<ActivityItem, 'id' | 'at'> {
-  const e = db.prepare(`SELECT e.op, e.actor, t.code, t.title, t.origin, t.meeting_id AS meetingId, c.name AS client,
+  const e = db.raw.prepare(`SELECT e.op, e.actor, t.code, t.title, t.origin, t.meeting_id AS meetingId, c.name AS client,
       EXISTS (SELECT 1 FROM messages m JOIN media md ON md.message_id = m.id
         WHERE m.client_id = t.client_id AND m.wa_id = t.source_wa_id AND md.kind = 'voice') AS voice
     FROM task_events e JOIN tasks t ON t.id = e.task_id JOIN clients c ON c.id = t.client_id WHERE e.id = ?`).get(id) as {
@@ -137,7 +137,7 @@ const MEETING_TITLES: Record<string, string> = {
 };
 
 function meetingItem(db: Db, id: number): Omit<ActivityItem, 'id' | 'at'> {
-  const m = db.prepare(`SELECT m.status, m.title, COALESCE(m.audio_seconds, m.drive_seconds) AS seconds, c.name AS client,
+  const m = db.raw.prepare(`SELECT m.status, m.title, COALESCE(m.audio_seconds, m.drive_seconds) AS seconds, c.name AS client,
       (SELECT COUNT(*) FROM tasks t WHERE t.meeting_id = m.id) AS items
     FROM meetings m LEFT JOIN clients c ON c.id = m.client_id WHERE m.id = ?`).get(id) as {
     status: MeetingStatus; title: string; seconds: number | null; client: string | null; items: number;
@@ -150,7 +150,7 @@ function meetingItem(db: Db, id: number): Omit<ActivityItem, 'id' | 'at'> {
 }
 
 function auditItem(db: Db, id: number): Omit<ActivityItem, 'id' | 'at'> {
-  const a = db.prepare('SELECT actor, event, kind, detail FROM audit_log WHERE id = ?').get(id) as { actor: string; event: string; kind: string; detail: string };
+  const a = db.raw.prepare('SELECT actor, event, kind, detail FROM audit_log WHERE id = ?').get(id) as { actor: string; event: string; kind: string; detail: string };
   // The owner's email is not repeated on every line: the Audit logs screen names who did what.
   const who = a.actor === 'agent' ? 'by the agent' : 'by the owner';
   if (a.event === PUBLISHED) return { kind: 'tracker', title: 'Tracker updated', detail: a.detail, who };
@@ -182,8 +182,8 @@ export function listActivity(db: Db, p: ActivityParams | (Omit<ActivityParams, '
   const cursor = (at: string, src: Source) => (!b ? '' : b.src === undefined ? `${at} < @at` : `(${at}, '${src}', id) < (@at, @src, @id)`);
   const union = sourcesFor(p.kind, cursor).join(' UNION ALL ');
   // One read transaction: the page and the lines it shows come from the same moment.
-  return db.transaction(() => {
-    const rows = db.prepare(`SELECT at, src, id FROM (${union}) ORDER BY at DESC, src DESC, id DESC LIMIT @limit`).all(params) as {
+  return db.raw.transaction(() => {
+    const rows = db.raw.prepare(`SELECT at, src, id FROM (${union}) ORDER BY at DESC, src DESC, id DESC LIMIT @limit`).all(params) as {
       at: string; src: Source; id: number;
     }[];
     const items = rows.map((r) => ({ id: `${r.src}:${r.id}`, ...ITEMS[r.src](db, r.id), at: r.at }));

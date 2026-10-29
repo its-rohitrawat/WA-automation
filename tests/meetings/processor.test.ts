@@ -94,7 +94,7 @@ function processor(w: World, o: Partial<MeetingProcessorDeps> & { exclusive?: Re
 }
 
 const row = (w: World) => getMeeting(w.db, w.id)!;
-const spendRows = (w: World) => w.db.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
+const spendRows = (w: World) => w.db.raw.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
 const later = (w: World, ms: number) => w.clock.advance(ms);
 const signal = () => new AbortController().signal;
 const audioRel = (id: number) => `meetings/SHA/2026-11/${id}.mp3`;
@@ -114,7 +114,7 @@ function at(w: World, stage: MeetingStage): void {
   }
 }
 
-const setAttempts = (w: World, n: number) => w.db.prepare('UPDATE meetings SET attempts = ? WHERE id = ?').run(n, w.id);
+const setAttempts = (w: World, n: number) => w.db.raw.prepare('UPDATE meetings SET attempts = ? WHERE id = ?').run(n, w.id);
 
 describe('MeetingProcessor: found to done', () => {
   it('takes one meeting through every stage with each result stored, one Doc, the tracker updated and the meeting done', async () => {
@@ -143,7 +143,7 @@ describe('MeetingProcessor: found to done', () => {
     expect(w.stt.forgotten).toEqual(['tr-1']);
 
     expect(listTasks(w.db, 1).map((t) => ({ title: t.title, origin: t.origin }))).toEqual([{ title: 'Send the logo files', origin: 'meeting' }]);
-    expect(w.db.prepare('SELECT meeting_id AS meetingId FROM tasks').all()).toEqual([{ meetingId: w.id }]);
+    expect(w.db.raw.prepare('SELECT meeting_id AS meetingId FROM tasks').all()).toEqual([{ meetingId: w.id }]);
     expect(listDecisions(w.db, 1, 10)).toEqual([]);
 
     expect(spendRows(w).map((s) => [s.kind, s.detail])).toEqual([

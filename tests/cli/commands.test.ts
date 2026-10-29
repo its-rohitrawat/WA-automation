@@ -53,7 +53,7 @@ function seedTracker(): void {
   const db = openDb(trackerDbPath(dataDir));
   syncClients(db, [MEHTA]);
   insertMessage(db, { waId: 'seed1', clientId: 1, senderJid: 'a@s.whatsapp.net', senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T08:00:00.000Z', text: 'hi', quotedWaId: null, mediaType: null });
-  db.close();
+  db.raw.close();
 }
 
 async function seedSession(): Promise<void> {
@@ -61,23 +61,23 @@ async function seedSession(): Promise<void> {
   const auth = useEncryptedAuthState(sdb, KEY);
   auth.state.creds.me = { id: '919800000000:1@s.whatsapp.net', name: 'Founder' };
   await auth.saveCreds();
-  sdb.close();
+  sdb.raw.close();
 }
 
 const rowCount = (file: string, sql: string): number => {
   const db = openDb(file);
   try {
-    return (db.prepare(sql).get() as { n: number }).n;
+    return (db.raw.prepare(sql).get() as { n: number }).n;
   } finally {
-    db.close();
+    db.raw.close();
   }
 };
 const sessionRows = () => {
   const db = openSessionDb(sessionDbPath(dataDir));
   try {
-    return (db.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n;
+    return (db.raw.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n;
   } finally {
-    db.close();
+    db.raw.close();
   }
 };
 const trackerMessages = () => rowCount(trackerDbPath(dataDir), 'SELECT COUNT(*) AS n FROM messages');
@@ -143,7 +143,7 @@ describe('link --reset', () => {
     expect(readFileSync(masterKeyPath(dataDir), 'utf8')).toBe(keyBefore);
     const db = openDb(trackerDbPath(dataDir));
     expect(getKv(db, 'session_reset_at')).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    db.close();
+    db.raw.close();
     expect(out()).toContain('tracker data were NOT touched');
     await lockIsFree();
   });
@@ -170,7 +170,7 @@ describe('link --reset', () => {
     expect(factory).not.toHaveBeenCalled();
     const db = openDb(trackerDbPath(dataDir));
     expect(getKv(db, 'session_reset_at')).toBeUndefined();
-    db.close();
+    db.raw.close();
     await lockIsFree();
   });
 
@@ -279,14 +279,14 @@ describe('link connection flow', () => {
     await p;
     const db = openDb(trackerDbPath(dataDir));
     try {
-      const row = db.prepare('SELECT status, ref_enc, client_id FROM media').get() as { status: string; ref_enc: Buffer; client_id: number };
+      const row = db.raw.prepare('SELECT status, ref_enc, client_id FROM media').get() as { status: string; ref_enc: Buffer; client_id: number };
       expect(row.status).toBe('pending');
       expect(row.ref_enc.includes(mediaKey)).toBe(false);
       expect(row.ref_enc.toString('latin1')).not.toContain('mmg.whatsapp.net');
       // Sealed under the master key, so the service can open it.
       expect(new MediaRefSealer(KEY).open(row.ref_enc, mediaRefAad(row.client_id, 'img1'))).toMatchObject({ directPath: '/v/x', mediaKey: mediaKey.toString('base64') });
     } finally {
-      db.close();
+      db.raw.close();
     }
     await lockIsFree();
   });
@@ -336,8 +336,8 @@ describe('link connection flow', () => {
   it('says plainly when allowed messages could not be saved', async () => {
     seedTracker();
     const tdb = openDb(trackerDbPath(dataDir));
-    tdb.exec("CREATE TRIGGER block_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'blocked'); END");
-    tdb.close();
+    tdb.raw.exec("CREATE TRIGGER block_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'blocked'); END");
+    tdb.raw.close();
     const { p } = await start();
     const sock = await openViaQr();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('f1', 'hello', { group: MEHTA.groupId })] });
@@ -411,12 +411,12 @@ describe('list-groups', () => {
     await p;
     const db = openDb(trackerDbPath(dataDir));
     try {
-      const row = db.prepare('SELECT status, ref_enc, client_id FROM media').get() as { status: string; ref_enc: Buffer; client_id: number };
+      const row = db.raw.prepare('SELECT status, ref_enc, client_id FROM media').get() as { status: string; ref_enc: Buffer; client_id: number };
       expect(row.status).toBe('pending');
       expect(row.ref_enc.includes(mediaKey)).toBe(false);
       expect(new MediaRefSealer(KEY).open(row.ref_enc, mediaRefAad(row.client_id, 'img1'))).toMatchObject({ directPath: '/v/x', mediaKey: mediaKey.toString('base64') });
     } finally {
-      db.close();
+      db.raw.close();
     }
     expect(sendCalls().every((n) => n === 0)).toBe(true);
     await lockIsFree();
@@ -469,7 +469,7 @@ describe('google-auth', () => {
     try {
       return getKv(db, k);
     } finally {
-      db.close();
+      db.raw.close();
     }
   };
 
@@ -482,7 +482,7 @@ describe('google-auth', () => {
     expect(raw).toBeTruthy();
     expect(raw).not.toContain(REFRESH_TOKEN);
     expect(new TokenStore(db, KEY).load()).toBe(REFRESH_TOKEN);
-    db.close();
+    db.raw.close();
     expect(out()).not.toContain(REFRESH_TOKEN);
     expect(out()).toContain('Google Drive connected. If the WA Agent service is running, restart it so it uses the new sign-in: net stop wa-agent, then net start wa-agent');
   });
@@ -490,7 +490,7 @@ describe('google-auth', () => {
   it('records the desktop client as the issuer of the main token, replacing one left by a dashboard reconnect', async () => {
     const pre = openDb(trackerDbPath(dataDir));
     setKv(pre, 'google_client:main', 'web');
-    pre.close();
+    pre.raw.close();
     const p = googleAuthCommand(deps({ createConsentClient: consentClient() }));
     await visit();
     await p;
@@ -510,7 +510,7 @@ describe('google-auth', () => {
     expect(kv('google_scopes')).toBe(DRIVE_SCOPES[0]);
     const db = openDb(trackerDbPath(dataDir));
     expect(hasMeetingScopes(db)).toBe(false);
-    db.close();
+    db.raw.close();
   });
 
   it('with meetings on asks for the meeting permissions too, in plain words, and saves token and scopes', async () => {
@@ -530,7 +530,7 @@ describe('google-auth', () => {
     const db = openDb(trackerDbPath(dataDir));
     expect(new TokenStore(db, KEY).load()).toBe(REFRESH_TOKEN);
     expect(hasMeetingScopes(db)).toBe(true);
-    db.close();
+    db.raw.close();
     expect(out()).not.toContain(REFRESH_TOKEN);
     expect(out()).toContain('Google Drive, Meet and Calendar connected. If the WA Agent service is running, restart it so it uses the new sign-in: net stop wa-agent, then net start wa-agent');
   });
@@ -572,7 +572,7 @@ describe('google-auth', () => {
     expect((err as Error).message).not.toContain(REFRESH_TOKEN);
     const db = openDb(trackerDbPath(dataDir));
     expect(getKv(db, 'google_refresh_token')).toBeUndefined();
-    db.close();
+    db.raw.close();
     expect(out()).not.toContain(REFRESH_TOKEN);
   });
 });
@@ -592,7 +592,7 @@ describe('status command', () => {
       driveSeconds: null, createdAt: '2026-10-18T11:00:00.000Z',
     })!;
     const add = (provider: 'elevenlabs' | 'openai', ref: string, attempts: number) =>
-      db.prepare('INSERT INTO stt_forget (meeting_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, ?)').run(id, provider, ref, '2026-10-18T11:00:00.000Z', attempts);
+      db.raw.prepare('INSERT INTO stt_forget (meeting_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, ?)').run(id, provider, ref, '2026-10-18T11:00:00.000Z', attempts);
     add('elevenlabs', 'tr-1', MAX_FORGET_ATTEMPTS); // last try used
     add('elevenlabs', 'tr-2', 1); // still being tried
     add('openai', 'tr-3', 0); // not the provider set up now
@@ -600,7 +600,7 @@ describe('status command', () => {
     expect(sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'none' })).toBe(3);
     // With meetings on the local engine, no paid copy will be deleted by the service: all are left.
     expect(sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'local' })).toBe(3);
-    db.close();
+    db.raw.close();
     statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
     expect(out()).toContain('Speech copies: 2 speech-to-text copies could not be deleted from the provider; see SETUP (Meeting summaries)');
   });
@@ -617,12 +617,12 @@ describe('status command', () => {
       forwarded: false, refEnc: null, errorCode: null, createdAt: '2026-10-19T08:00:00.000Z',
     });
     const add = (provider: 'elevenlabs' | 'openai', ref: string, attempts: number) =>
-      db.prepare('INSERT INTO media_stt_forget (media_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, ?)').run(mediaId, provider, ref, '2026-10-19T08:00:00.000Z', attempts);
+      db.raw.prepare('INSERT INTO media_stt_forget (media_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, ?)').run(mediaId, provider, ref, '2026-10-19T08:00:00.000Z', attempts);
     add('elevenlabs', 'tr-1', MAX_FORGET_ATTEMPTS); // last try used
     add('elevenlabs', 'tr-2', 1); // still being tried
     add('openai', 'tr-3', 0); // not the provider set up now
     expect(mediaSttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'elevenlabs' })).toBe(2);
-    db.close();
+    db.raw.close();
     statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', VOICE_STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
     expect(out()).toContain('Voice copies: 2 speech-to-text copies of voice notes could not be deleted from the provider; see SETUP (Voice notes)');
     expect(out()).not.toContain('Speech copies');

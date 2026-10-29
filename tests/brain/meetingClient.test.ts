@@ -154,7 +154,7 @@ const estimate = estimateFor(prompt);
 function setup(capUsd = 5) {
   const db = seededDb();
   const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd });
-  const rows = () => db.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
+  const rows = () => db.raw.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
   return { spend, rows };
 }
 const invalid = (cost: number | null) => new AiInvalidOutputError('Model output was not valid JSON', FAKE_USAGE, cost);

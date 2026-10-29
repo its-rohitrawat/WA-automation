@@ -137,7 +137,7 @@ describe('the local meeting transcriber', () => {
   let spend: SpendGuard;
   let id: number;
   const clock = manualClock('2026-11-01T10:00:00.000Z');
-  const rows = () => db.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
+  const rows = () => db.raw.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
   const parts = () => getMeeting(db, id)!.sttParts;
   const partsDir = () => join(dataDir, 'meetings', 'tmp', `${id}-parts`);
   const work = () => join(dataDir, 'tmp', 'local');
@@ -645,8 +645,8 @@ describe('the local meeting transcriber', () => {
   });
 
   describe('parts the engine cannot hear (review fixes 1 and 2)', () => {
-    const attemptsOf = () => (db.prepare('SELECT attempts FROM meetings WHERE id = ?').get(id) as { attempts: number }).attempts;
-    const setAttempts = (n: number) => db.prepare('UPDATE meetings SET attempts = ? WHERE id = ?').run(n, id);
+    const attemptsOf = () => (db.raw.prepare('SELECT attempts FROM meetings WHERE id = ?').get(id) as { attempts: number }).attempts;
+    const setAttempts = (n: number) => db.raw.prepare('UPDATE meetings SET attempts = ? WHERE id = ?').run(n, id);
     /** One run of the stage over a fresh fake engine; what it threw, or its result. */
     const runWith = async (ff: ReturnType<typeof fakeFfmpeg>, steps: Step[], timeoutMs?: number) => {
       const { t } = timeoutMs === undefined ? fromEnv(ff, steps) : withTimeout(ff, steps, timeoutMs);

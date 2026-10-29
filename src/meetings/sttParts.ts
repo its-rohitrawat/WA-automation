@@ -2,7 +2,7 @@ import { existsSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { SpendCapReachedError } from '../brain/paidCall.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
-import { tx, type Db } from '../store/db.ts';
+import { txSync, type Db } from '../store/db.ts';
 import { addSttForget, getMeeting, noteMeetingProgress, PART_FILE, setSttParts, writeStuckSttParts, type SttPartRow } from '../store/meetings.ts';
 import { AudioError } from '../stt/audio.ts';
 import { SttHttpError, SttJobError, SttJobLostError, SttNoAnswerError } from '../stt/http.ts';
@@ -50,7 +50,7 @@ export function bookStuckParts(db: Db, spend: SpendGuard, meetingId: number, o: 
   const n = m.sttParts.filter(paid).length;
   const runAgain = m.sttParts.filter(local).length;
   if (n === 0 && runAgain === 0) return 0;
-  tx(db, () => {
+  txSync(db, () => {
     for (const p of m.sttParts.filter(paid)) {
       spend.record('stt', partCeilingFor(p.provider, p.seconds, o.inrPerUsd), `meeting ${meetingId} part ${p.index} (unknown, estimated)`);
     }
@@ -105,7 +105,7 @@ export function partContext(id: number, parts: SttPartRow[], t: MeetingTranscrib
   const atomically = (fn: () => void) => {
     const stored = [...parts];
     try {
-      tx(db, fn);
+      txSync(db, fn);
     } catch (e) {
       parts.splice(0, parts.length, ...stored);
       throw e;

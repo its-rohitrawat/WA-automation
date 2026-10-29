@@ -124,7 +124,7 @@ describe('workbook round 2', () => {
     const db = seededDb();
     const a = createTask(db, task({ title: 'no quote', sourceQuote: null, sourceDate: null, sourceWaId: 'r1' }), NOW);
     const b = createTask(db, task({ title: 'with quote', sourceWaId: 'r2' }), NOW);
-    db.prepare('UPDATE tasks SET source_revoked = 1 WHERE id IN (?, ?)').run(a.id, b.id);
+    db.raw.prepare('UPDATE tasks SET source_revoked = 1 WHERE id IN (?, ?)').run(a.id, b.id);
     const ws = (await build(db)).getWorksheet('Sharma Interiors')!;
     expect(findByCell(ws, 1, 'SHA-001').getCell(13).value).toBe('source message deleted by sender');
     expect(findByCell(ws, 1, 'SHA-002').getCell(13).value).toBe('"banner thoda bright karo" (10 Oct) (source message deleted by sender)');

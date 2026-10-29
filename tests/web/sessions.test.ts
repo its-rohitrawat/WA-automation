@@ -27,7 +27,7 @@ function setup() {
 }
 
 function rows(db: Db) {
-  return db.prepare('SELECT * FROM web_sessions').all() as Record<string, string | null>[];
+  return db.raw.prepare('SELECT * FROM web_sessions').all() as Record<string, string | null>[];
 }
 
 describe('SessionStore: create and get', () => {
@@ -107,7 +107,7 @@ describe('SessionStore: create and get', () => {
   it('a malformed id is refused before any database work', () => {
     const { db, store } = setup();
     store.create('owner@example.com');
-    const prepare = vi.spyOn(db, 'prepare');
+    const prepare = vi.spyOn(db.raw, 'prepare');
     expect(store.get('A'.repeat(10_000))).toBeUndefined();
     store.destroy('A'.repeat(10_000));
     expect(prepare).not.toHaveBeenCalled();
@@ -199,7 +199,7 @@ describe('SessionStore: expiry and idle timeout', () => {
     for (const column of ['expires_at', 'last_seen_at']) {
       const { db, store } = setup();
       const { id } = store.create('owner@example.com');
-      db.prepare(`UPDATE web_sessions SET ${column} = ?`).run('not a date');
+      db.raw.prepare(`UPDATE web_sessions SET ${column} = ?`).run('not a date');
       expect(store.get(id), column).toBeUndefined();
       expect(rows(db), column).toHaveLength(0);
     }

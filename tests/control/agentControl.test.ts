@@ -247,7 +247,7 @@ describe('AgentControl.connections', () => {
 });
 
 function db_publish(db: ReturnType<typeof seededDb>) {
-  db.prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES ('2026-10-19T06:00:00.000Z', 'agent', 'tracker.published', 'ops', 'x')").run();
+  db.raw.prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES ('2026-10-19T06:00:00.000Z', 'agent', 'tracker.published', 'ops', 'x')").run();
 }
 
 describe('AgentControl answers carry no secrets', () => {
@@ -305,7 +305,7 @@ describe('AgentControl review fixes', () => {
 
   it('counts approved groups only, and main is used for the tracker only while meetings are off', () => {
     const t = setup();
-    t.db.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
+    t.db.raw.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
     expect(t.control.connections().founder.groups).toBe(1);
     expect(t.control.connections().google).toEqual([{ label: 'main', email: null, usedFor: ['Tracker on Drive'], state: 'ok', stateLabel: 'Connected' }]);
   });

@@ -458,10 +458,10 @@ async function main(): Promise<void> {
             }
           };
           bestEffort(() => uptime?.stop());
-          for (const d of adoptedDbs) bestEffort(() => d.close());
-          bestEffort(() => trackerDb.close());
-          bestEffort(() => sessionStore.close());
-          bestEffort(() => senderStore?.close());
+          for (const d of adoptedDbs) bestEffort(() => d.raw.close());
+          bestEffort(() => trackerDb.raw.close());
+          bestEffort(() => sessionStore.raw.close());
+          bestEffort(() => senderStore?.raw.close());
           void startedLock.release().finally(() => process.exit(0));
           setTimeout(() => process.exit(0), 2000).unref();
         });
@@ -470,10 +470,10 @@ async function main(): Promise<void> {
     process.on('SIGTERM', shutdown);
   } catch (e) {
     try {
-      for (const d of adoptedDbs) d.close();
-      db?.close();
-      sessionDb?.close();
-      senderDb?.close();
+      for (const d of adoptedDbs) d.raw.close();
+      db?.raw.close();
+      sessionDb?.raw.close();
+      senderDb?.raw.close();
     } catch {
       // best effort
     }

@@ -84,11 +84,11 @@ function banner(db: Db, raisedOn = '2026-10-10', origin = 'whatsapp'): void {
 }
 
 const meetingIdOf = (db: Db, table: 'tasks' | 'decisions', id: number) =>
-  (db.prepare(`SELECT meeting_id AS m FROM ${table} WHERE id = ?`).get(id) as { m: number | null }).m;
+  (db.raw.prepare(`SELECT meeting_id AS m FROM ${table} WHERE id = ?`).get(id) as { m: number | null }).m;
 
 /** Puts a finished meeting back to queued at stage doc, as if the tracker step ran again. */
 function requeue(db: Db, id: number): void {
-  db.prepare("UPDATE meetings SET status = 'queued', stage = 'doc' WHERE id = ?").run(id);
+  db.raw.prepare("UPDATE meetings SET status = 'queued', stage = 'doc' WHERE id = ?").run(id);
 }
 
 describe('meetingItems', () => {
@@ -183,7 +183,7 @@ describe('Reconciler.runMeeting', () => {
     expect(meetingIdOf(db, 'decisions', d.id)).toBe(m.id);
     expect(getClient(db, 1).statusText).toBe('Waiting for the logo files.');
     expect(getMeeting(db, m.id)).toMatchObject({ status: 'done', stage: 'tracked' });
-    const ev = db.prepare("SELECT source_ids AS ids FROM task_events WHERE op = 'add_task'").get() as { ids: string };
+    const ev = db.raw.prepare("SELECT source_ids AS ids FROM task_events WHERE op = 'add_task'").get() as { ids: string };
     expect(JSON.parse(ev.ids)).toEqual(['mtg1-a1', 'C1']);
     expect(onChanged).toHaveBeenCalledTimes(1);
 
@@ -287,7 +287,7 @@ describe('Reconciler.runMeeting', () => {
   it('an inactive client is done with the note client_inactive, without an AI call', async () => {
     const { db, ai, r } = setup([]);
     const m = meetingAt(db);
-    db.prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
+    db.raw.prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
     expect(await r.runMeeting(1, m)).toEqual({ status: 'done', accepted: 0, rejected: 0, note: 'client_inactive' });
     expect(ai.calls).toHaveLength(0);
     expect(getMeeting(db, m.id)).toMatchObject({ status: 'done', stage: 'tracked', note: 'client_inactive' });
@@ -330,7 +330,7 @@ describe('Reconciler.runMeeting', () => {
   it('rolls back every op when the meeting cannot be finished, and rethrows', async () => {
     const { db, r } = setup([{ ops: [op({ op: 'add_task', side: 'us', title: 'X', category: 'other', priority: 'low', sourceMessageIds: ['mtg1-a1'] })] }]);
     const m = meetingAt(db);
-    db.prepare("UPDATE meetings SET status = 'skipped' WHERE id = ?").run(m.id);
+    db.raw.prepare("UPDATE meetings SET status = 'skipped' WHERE id = ?").run(m.id);
     await expect(r.runMeeting(1, m)).rejects.toThrow();
     expect(listTasks(db, 1)).toHaveLength(0);
   });

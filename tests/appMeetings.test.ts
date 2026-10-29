@@ -128,7 +128,7 @@ function watchSchedules(app: ReturnType<typeof setup>['app'], db: Db): (string |
   return seen;
 }
 
-const spendRows = (db: Db) => db.prepare('SELECT kind, detail FROM spend ORDER BY id').all() as { kind: string; detail: string }[];
+const spendRows = (db: Db) => db.raw.prepare('SELECT kind, detail FROM spend ORDER BY id').all() as { kind: string; detail: string }[];
 
 describe('app with meetings', () => {
   beforeEach(() => {
@@ -192,7 +192,7 @@ describe('app with meetings', () => {
     // A later discovery pass stores nothing twice.
     await vi.advanceTimersByTimeAsync(10 * MINUTE);
     expect(api.callsOf('listConferences').length).toBeGreaterThan(1);
-    expect(db.prepare('SELECT COUNT(*) AS n FROM meetings').get()).toEqual({ n: 1 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM meetings').get()).toEqual({ n: 1 });
     await stopApp(app);
   });
 
@@ -323,7 +323,7 @@ describe('app with meetings', () => {
       await vi.advanceTimersByTimeAsync(6 * MINUTE); // past the Doc's wait for the WA Agent folder
       await vi.waitFor(() => expect(getMeeting(db, 1)?.status).toBe('done'), SLOW_IO);
       expect(Date.now()).toBeLessThan(Date.parse('2026-11-01T13:00:00.000Z'));
-      expect(db.prepare('SELECT COUNT(*) AS n FROM meetings').get()).toEqual({ n: 1 });
+      expect(db.raw.prepare('SELECT COUNT(*) AS n FROM meetings').get()).toEqual({ n: 1 });
 
       // 45 minutes in five ten-minute-or-less parts, no speech spend: only the summary and the tracker step are booked.
       const m = getMeeting(db, 1)!;

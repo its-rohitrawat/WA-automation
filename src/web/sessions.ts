@@ -110,7 +110,7 @@ export class SessionStore {
     const now = this.#clock.now();
     const at = now.toISOString();
     this.#db
-      .prepare(
+      .raw.prepare(
         `INSERT INTO web_sessions (id_hash, email, csrf_hash, created_at, expires_at, last_seen_at, agent_label)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
@@ -126,7 +126,7 @@ export class SessionStore {
     if (!isToken(id)) return undefined;
     const idHash = hashToken(id);
     const row = this.#db
-      .prepare('SELECT email, csrf_hash, created_at, expires_at, last_seen_at FROM web_sessions WHERE id_hash = ?')
+      .raw.prepare('SELECT email, csrf_hash, created_at, expires_at, last_seen_at FROM web_sessions WHERE id_hash = ?')
       .get(idHash) as Row | undefined;
     if (row === undefined) return undefined;
     const now = this.#clock.now().getTime();
@@ -134,12 +134,12 @@ export class SessionStore {
     const lastSeen = Date.parse(row.last_seen_at);
     // Fail closed: a row whose times cannot be read is treated as ended, never as live forever.
     if (!Number.isFinite(expires) || !Number.isFinite(lastSeen) || now >= expires || now - lastSeen > IDLE_TIMEOUT_MS) {
-      this.#db.prepare('DELETE FROM web_sessions WHERE id_hash = ?').run(idHash);
+      this.#db.raw.prepare('DELETE FROM web_sessions WHERE id_hash = ?').run(idHash);
       this.#tell({ idHash });
       return undefined;
     }
     if (now - lastSeen >= TOUCH_EVERY_MS) {
-      this.#db.prepare('UPDATE web_sessions SET last_seen_at = ? WHERE id_hash = ?').run(new Date(now).toISOString(), idHash);
+      this.#db.raw.prepare('UPDATE web_sessions SET last_seen_at = ? WHERE id_hash = ?').run(new Date(now).toISOString(), idHash);
     }
     return { email: row.email, csrfHash: row.csrf_hash, createdAt: row.created_at, expiresAt: row.expires_at };
   }
@@ -147,13 +147,13 @@ export class SessionStore {
   /** Ends one session (sign-out). An unknown id is a no-op. */
   destroy(id: string): void {
     if (!isToken(id)) return;
-    this.#db.prepare('DELETE FROM web_sessions WHERE id_hash = ?').run(hashToken(id));
+    this.#db.raw.prepare('DELETE FROM web_sessions WHERE id_hash = ?').run(hashToken(id));
     this.#tell({ idHash: hashToken(id) });
   }
 
   /** Ends every session of this owner. Returns how many ended. */
   destroyAllFor(email: string): number {
-    const n = this.#db.prepare('DELETE FROM web_sessions WHERE email = ?').run(email.trim().toLowerCase()).changes;
+    const n = this.#db.raw.prepare('DELETE FROM web_sessions WHERE email = ?').run(email.trim().toLowerCase()).changes;
     this.#tell({ email: email.trim().toLowerCase() });
     return n;
   }
@@ -163,7 +163,7 @@ export class SessionStore {
     const now = this.#clock.now().getTime();
     const idleCutoff = new Date(now - IDLE_TIMEOUT_MS).toISOString();
     return this.#db
-      .prepare('DELETE FROM web_sessions WHERE expires_at <= ? OR last_seen_at < ?')
+      .raw.prepare('DELETE FROM web_sessions WHERE expires_at <= ? OR last_seen_at < ?')
       .run(new Date(now).toISOString(), idleCutoff).changes;
   }
 }

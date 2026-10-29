@@ -74,8 +74,8 @@ function addConference(api: FakeMeetingsApi, s: ConfSpec): void {
   }
 }
 
-const rowCount = (db: Db): number => (db.prepare('SELECT COUNT(*) AS n FROM meetings').get() as { n: number }).n;
-const allRows = (db: Db) => (db.prepare('SELECT id FROM meetings ORDER BY id').all() as { id: number }[]).map((r) => getMeeting(db, r.id)!);
+const rowCount = (db: Db): number => (db.raw.prepare('SELECT COUNT(*) AS n FROM meetings').get() as { n: number }).n;
+const allRows = (db: Db) => (db.raw.prepare('SELECT id FROM meetings ORDER BY id').all() as { id: number }[]).map((r) => getMeeting(db, r.id)!);
 
 function capture(): { lines: string[]; log: Logger } {
   const lines: string[] = [];

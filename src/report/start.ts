@@ -42,7 +42,7 @@ export function openMorningReport(o: {
   try {
     sender = new SenderGateway({ recipient, founderNumber: o.founderNumber, factory: o.factory, auth, authProblem });
   } catch (err) {
-    if (opened.ok) opened.db.close(); // the caller never receives the handle
+    if (opened.ok) opened.db.raw.close(); // the caller never receives the handle
     throw err;
   }
   // recipientLast4, not recipient: the logger censors any field named recipient.
@@ -65,6 +65,6 @@ export function senderOpener(o: {
 }): (recipient: string) => { sender: ReportSender; close: () => void; db: Db | undefined } {
   return (recipient) => {
     const r = openMorningReport({ ...o, env: { ...o.env, REPORT_ENABLED: true, REPORT_RECIPIENT: recipient } });
-    return { sender: r.report.sender, close: () => r.senderDb?.close(), db: r.senderDb };
+    return { sender: r.report.sender, close: () => r.senderDb?.raw.close(), db: r.senderDb };
   };
 }

@@ -83,7 +83,7 @@ function file(db: Db, waId: string, ts: string, o: FileOpts = {}): number {
 const image = (db: Db, waId: string, ts: string, description?: string, o: FileOpts = {}) =>
   file(db, waId, ts, description === undefined ? o : { ...o, read: { textKind: 'description', text: description } });
 
-const processedAt = (db: Db, waId: string) => (db.prepare('SELECT processed_at AS p FROM messages WHERE wa_id = ?').get(waId) as { p: string | null }).p;
+const processedAt = (db: Db, waId: string) => (db.raw.prepare('SELECT processed_at AS p FROM messages WHERE wa_id = ?').get(waId) as { p: string | null }).p;
 
 /** Holds the fake AI call open until the returned function is called; run() has read its batch by then. */
 function hold(ai: FakeAi): () => void {
@@ -361,7 +361,7 @@ describe('Reconciler with shared files', () => {
   describe('a file read after its message was processed (12h)', () => {
     const RECEIPT = 'A payment receipt. Visible text: Paid ₹42,000';
     const read = (db: Db, id: number, at: string) => finishMedia(db, id, { textKind: 'description', text: RECEIPT, pageCount: null, note: null, at });
-    const version = (db: Db, waId: string) => (db.prepare('SELECT version FROM messages WHERE wa_id = ?').get(waId) as { version: number }).version;
+    const version = (db: Db, waId: string) => (db.raw.prepare('SELECT version FROM messages WHERE wa_id = ?').get(waId) as { version: number }).version;
     const flagOf = (db: Db, id: number) => getMedia(db, id)!.requeuedForText;
     const newMessages = (user: string) => user.slice(user.indexOf('<new_messages>'));
     const contextOf = (user: string) => user.slice(user.indexOf('<recent_context>'), user.indexOf('</recent_context>'));
@@ -481,7 +481,7 @@ describe('Reconciler with shared files', () => {
       const id = file(db, 'V1', '2026-10-19T07:01:00.000Z', { kind, mimeType: 'audio/ogg', createdAt: '2026-10-19T07:01:00.000Z' });
       expect(await r.run(1)).toMatchObject({ status: 'ok' });
       expect(processedAt(db, 'V1')).not.toBeNull();
-      db.prepare('UPDATE media SET backlog = 1 WHERE id = ?').run(id); // queued by `cli transcribe-voice`
+      db.raw.prepare('UPDATE media SET backlog = 1 WHERE id = ?').run(id); // queued by `cli transcribe-voice`
       finishMedia(db, id, { textKind: 'extract', text: 'Payment done, please check', pageCount: null, note: null, at: '2026-10-19T08:10:00.000Z' });
       expect(flagOf(db, id)).toBe(false);
       expect(processedAt(db, 'V1')).not.toBeNull();

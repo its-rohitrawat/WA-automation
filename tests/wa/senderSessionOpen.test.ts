@@ -22,7 +22,7 @@ async function linkedSenderFile(dir: string, master: Buffer): Promise<string> {
   const a = useSenderAuthState(db, master);
   a.state.creds.me = { id: '919800000099:3@s.whatsapp.net', name: 'S' };
   await a.saveCreds();
-  db.close();
+  db.raw.close();
   return file;
 }
 
@@ -33,7 +33,7 @@ describe('openSenderSession (service start)', () => {
     expect(fresh.ok).toBe(true);
     if (fresh.ok) {
       expect(fresh.auth.hasSession).toBe(false);
-      fresh.db.close();
+      fresh.db.raw.close();
     }
     const master = randomBytes(32);
     const file = await linkedSenderFile(tempDir(), master);
@@ -41,7 +41,7 @@ describe('openSenderSession (service start)', () => {
     expect(linked.ok).toBe(true);
     if (linked.ok) {
       expect(linked.auth.hasSession).toBe(true);
-      linked.db.close();
+      linked.db.raw.close();
     }
   });
 
@@ -113,7 +113,7 @@ describe('openSenderSession (service start)', () => {
     chmodSync(file, 0o444);
     try {
       const r = openSenderSession(file, randomBytes(32));
-      if (r.ok) r.db.close();
+      if (r.ok) r.db.raw.close();
       expect(r.ok).toBe(false);
       if (!r.ok) {
         expect(r.code).toMatch(/^SQLITE_READONLY/);
@@ -154,7 +154,7 @@ describe('openSenderSession (service start)', () => {
     const f = useEncryptedAuthState(founder, master);
     f.state.creds.me = { id: '919800000001:1@s.whatsapp.net', name: 'F' };
     await f.saveCreds();
-    founder.close();
+    founder.raw.close();
     const before = readFileSync(sessionDbPath(dir));
     writeFileSync(senderSessionDbPath(dir), Buffer.alloc(4096, 0x41));
     expect(openSenderSession(senderSessionDbPath(dir), master).ok).toBe(false);

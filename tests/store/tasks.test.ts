@@ -60,7 +60,7 @@ describe('tasks repository', () => {
     const db = seededDb();
     const t = createTask(db, newTask(), NOW);
     recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'add_task', detail: { code: t.code }, reason: 'asked in chat', sourceIds: ['m1'], at: NOW });
-    expect(db.prepare('SELECT actor, op, source_ids FROM task_events').get()).toEqual({ actor: 'ai', op: 'add_task', source_ids: '["m1"]' });
+    expect(db.raw.prepare('SELECT actor, op, source_ids FROM task_events').get()).toEqual({ actor: 'ai', op: 'add_task', source_ids: '["m1"]' });
     addDecision(db, { clientId: 1, text: 'Blue theme', decidedOn: '2026-10-14', source: 'whatsapp', sourceWaId: 'm5' }, NOW);
     addDecision(db, { clientId: 1, text: 'Launch 1 Nov', decidedOn: '2026-10-15', source: 'whatsapp', sourceWaId: 'm6' }, NOW);
     expect(listDecisions(db, 1).map((d) => d.text)).toEqual(['Launch 1 Nov', 'Blue theme']);

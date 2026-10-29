@@ -40,13 +40,13 @@ function store(db: Db, waId: string, text: string, ts = '2026-10-19T07:00:00.000
 function banner(db: Db, priority: Priority | null = 'medium', source: 'ai' | 'keyword' = 'ai'): void {
   createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: priority ?? 'medium', prioritySource: source, assignedTo: null, askedBy: null,
     raisedOn: '2026-10-10', deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp' }, NOW);
-  if (priority === null) db.prepare("UPDATE tasks SET priority_level = NULL, priority_source = NULL, priority = 'high' WHERE code = 'SHA-001'").run();
+  if (priority === null) db.raw.prepare("UPDATE tasks SET priority_level = NULL, priority_source = NULL, priority = 'high' WHERE code = 'SHA-001'").run();
 }
 
 const add = (ids: string[], priority: Priority = 'medium', extra: Partial<Parameters<typeof op>[0]> = {}) =>
   op({ op: 'add_task', sourceMessageIds: ids, side: 'us', title: 'Fix footer', category: 'development', priority, ...extra });
 const row = (db: Db, code: string) =>
-  db.prepare('SELECT priority, priority_level AS level, priority_source AS source, priority_keyword AS keyword, sentiment FROM tasks WHERE code = ?').get(code);
+  db.raw.prepare('SELECT priority, priority_level AS level, priority_source AS source, priority_keyword AS keyword, sentiment FROM tasks WHERE code = ?').get(code);
 
 describe('Reconciler: priority keywords', () => {
   it('a keyword in a new task\'s message wins over the AI\'s guess, even a more urgent guess, and is recorded', async () => {
@@ -68,7 +68,7 @@ describe('Reconciler: priority keywords', () => {
   it('matches the keyword in a cited context message as well', async () => {
     const { db, r } = setup([{ ops: [add(['A2', 'A1'])] }]);
     store(db, 'A1', 'site down hai', '2026-10-19T06:00:00.000Z');
-    db.prepare("UPDATE messages SET processed_at = ? WHERE wa_id = 'A1'").run(NOW);
+    db.raw.prepare("UPDATE messages SET processed_at = ? WHERE wa_id = 'A1'").run(NOW);
     store(db, 'A2', 'please fix');
     await r.run(1);
     expect(row(db, 'SHA-001')).toMatchObject({ level: 'critical', keyword: 'site down' });
@@ -83,7 +83,7 @@ describe('Reconciler: priority keywords', () => {
     store(db, 'A1', 'Banner ka kya hua? important hai');
     await r.run(1);
     expect(row(db, 'SHA-001')).toMatchObject({ level: 'major', source: 'keyword', keyword: 'important' });
-    const events = db.prepare("SELECT op, detail, reason FROM task_events WHERE task_id = 1 ORDER BY id").all();
+    const events = db.raw.prepare("SELECT op, detail, reason FROM task_events WHERE task_id = 1 ORDER BY id").all();
     expect(events).toEqual([
       { op: 'log_reminder', detail: JSON.stringify({ reminder: '2026-10-19' }), reason: 'test' },
       { op: 'update_task', detail: JSON.stringify({ priority: 'major' }), reason: 'priority keyword' },

@@ -309,7 +309,7 @@ describe('applyGroupChanges', () => {
 
 function openFreshDb() {
   const db = seededDb();
-  db.exec('DELETE FROM clients');
+  db.raw.exec('DELETE FROM clients');
   return db;
 }
 

@@ -4,7 +4,7 @@ import { SETTING_KEYS } from '../config/settingsStore.ts';
 import { ControlError, type Audit } from '../control/errors.ts';
 import { createTaskAction, parseNewTask, parseTaskEdit, runTaskAction } from '../control/taskActions.ts';
 import { taskDetail } from '../control/taskQueries.ts';
-import { tx, type Db } from '../store/db.ts';
+import { txSync, type Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import type { SessionEnd } from '../web/sessions.ts';
 import { INPUTS } from './tools.ts';
@@ -182,7 +182,7 @@ export function runProposal(action: ProposalAction, d: RunDeps): { message: stri
   switch (action.kind) {
     case 'task_change': {
       // The edit and the status change are one transaction: both happen or neither.
-      tx(d.db, () => {
+      txSync(d.db, () => {
         if (action.edit) runTaskAction(d.db, { code: action.code, action: 'edit', body: action.edit }, ctx);
         if (action.status) runTaskAction(d.db, { code: action.code, action: action.status === 'done' ? 'done' : 'reopen' }, ctx);
       });

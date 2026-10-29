@@ -15,7 +15,7 @@ import {
 import { describeReport, isStaleSending, reasonText } from '../report/scheduler.ts';
 import { latestBatches } from '../store/batches.ts';
 import { listClients, syncClients } from '../store/clients.ts';
-import { openDb, tx, type Db } from '../store/db.ts';
+import { openDb, txSync, type Db } from '../store/db.ts';
 import { setKv } from '../store/kv.ts';
 import { mediaSttForgetsGivenUp } from '../store/media.ts';
 import { sttForgetsGivenUp } from '../store/meetings.ts';
@@ -89,7 +89,7 @@ export function defaultDeps(env: Env): CliDeps {
   };
 }
 
-const countMessages = (db: Db) => (db.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n;
+const countMessages = (db: Db) => (db.raw.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n;
 
 const ADVICE_LOGGED_OUT = 'WhatsApp refused this session (logged out). Follow docs/SETUP.md → "Status logged_out" before running link --reset.';
 const ADVICE_FORBIDDEN = "WhatsApp refused this device (403). Check the founder's phone for a WhatsApp warning; do not reset the link.";
@@ -246,8 +246,8 @@ export async function linkCommand(opts: { reset: boolean }, deps: CliDeps): Prom
     out(`Linked. ${countMessages(db) - before} messages saved from the allowed groups.`);
     out('Next: npm run cli -- list-groups (if you still need group ids), then start the service: net start wa-agent');
   } finally {
-    sessionDb?.close();
-    db?.close();
+    sessionDb?.raw.close();
+    db?.raw.close();
     await lock.release();
   }
 }
@@ -285,8 +285,8 @@ export async function listGroupsCommand(deps: CliDeps): Promise<void> {
       },
     });
   } finally {
-    sessionDb?.close();
-    db?.close();
+    sessionDb?.raw.close();
+    db?.raw.close();
     await lock.release();
   }
 }
@@ -307,7 +307,7 @@ export function statusCommand(deps: CliDeps): void {
       }),
     );
   } finally {
-    db.close();
+    db.raw.close();
   }
 }
 
@@ -334,7 +334,7 @@ export async function googleAuthCommand(deps: CliDeps): Promise<void> {
     });
     const tokens = new TokenStore(db, key);
     // Both or neither: the scope record must describe the token beside it.
-    tx(db, () => {
+    txSync(db, () => {
       tokens.save(refreshToken);
       saveGrantedScopes(db, scope);
       // Issued by the desktop client: a 'web' left from an earlier dashboard reconnect would pair it with the wrong client.
@@ -342,7 +342,7 @@ export async function googleAuthCommand(deps: CliDeps): Promise<void> {
     });
     out(`${env.MEETINGS_ENABLED ? 'Google Drive, Meet and Calendar' : 'Google Drive'} connected. If the WA Agent service is running, restart it so it uses the new sign-in: net stop wa-agent, then net start wa-agent`);
   } finally {
-    db.close();
+    db.raw.close();
   }
 }
 
@@ -452,7 +452,7 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
     }
     out('Spare number linked. Next: set REPORT_RECIPIENT and REPORT_ENABLED=true in .env, then start the service (net start wa-agent).');
   } finally {
-    senderDb?.close();
+    senderDb?.raw.close();
     await lock.release();
   }
 }
@@ -495,7 +495,7 @@ export function reportStatusCommand(deps: CliDeps): void {
       out(snap.report.warning);
     }
   } finally {
-    db.close();
+    db.raw.close();
   }
 }
 
@@ -580,7 +580,7 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
     }
     // The service may have changed today's row while the owner was answering. Read it again and write the request in
     // the same transaction, so the request always names the row it was checked against.
-    const answer = tx(db, (): string | undefined => {
+    const answer = txSync(db, (): string | undefined => {
       const at = new Date();
       if (istDate(at) !== today) return 'The date changed while you were answering. Nothing was sent. Run this again.';
       const current = reportFor(db, today);
@@ -596,7 +596,7 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
     });
     out(answer ?? 'Requested. The service sends it within about a minute. Check with: npm run cli -- report status');
   } finally {
-    db.close();
+    db.raw.close();
   }
 }
 
@@ -648,7 +648,7 @@ export async function googleAccountCommand(opts: { account: string; remove: bool
     out(`Google account ${label} connected for meetings (read only). Connected accounts: main, ${meetingAccounts(db).join(', ')}.`);
     out(RESTART);
   } finally {
-    db.close();
+    db.raw.close();
   }
 }
 

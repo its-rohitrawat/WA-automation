@@ -3,7 +3,7 @@ import { dailyDown, dayOutages, downIntervals, outageText, uptimeRatio, UptimeLo
 import { openDb, type Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 
-const rows = (db: Db) => db.prepare('SELECT at, up FROM uptime_log ORDER BY id').all();
+const rows = (db: Db) => db.raw.prepare('SELECT at, up FROM uptime_log ORDER BY id').all();
 const ist = (date: string, hm: string) => new Date(`${date}T${hm}:00.000+05:30`).getTime();
 
 function setup(start = '2026-10-19T00:00:00.000Z') {
@@ -200,7 +200,7 @@ describe('UptimeLog reasons (migration v10)', () => {
     t.log.tick(true);
     t.clock.advance(60_000);
     t.log.stop();
-    expect(t.db.prepare('SELECT up, reason FROM uptime_log ORDER BY id').all()).toEqual([
+    expect(t.db.raw.prepare('SELECT up, reason FROM uptime_log ORDER BY id').all()).toEqual([
       { up: 1, reason: null }, { up: 0, reason: 'whatsapp_logged_out' }, { up: 1, reason: null }, { up: 0, reason: null }, { up: 1, reason: null },
       { up: 0, reason: 'stopped' },
     ]);
@@ -220,7 +220,7 @@ describe('UptimeLog reasons (migration v10)', () => {
 
   it('a row from before v10, with no reason, reads as none', () => {
     const t = setup();
-    t.db.prepare("INSERT INTO uptime_log (at, up) VALUES ('2026-10-18T23:00:00.000Z', 0)").run();
+    t.db.raw.prepare("INSERT INTO uptime_log (at, up) VALUES ('2026-10-18T23:00:00.000Z', 0)").run();
     expect(t.log.outages(1)[0]!.reason).toBeNull();
   });
 });
@@ -239,7 +239,7 @@ describe('UptimeLog reasons, review round 1', () => {
 
   it('a stored code this version does not know reads as none', () => {
     const t = setup();
-    t.db.prepare("INSERT INTO uptime_log (at, up, reason) VALUES ('2026-10-18T23:00:00.000Z', 0, 'some_future_code')").run();
+    t.db.raw.prepare("INSERT INTO uptime_log (at, up, reason) VALUES ('2026-10-18T23:00:00.000Z', 0, 'some_future_code')").run();
     expect(t.log.outages(1)[0]!.reason).toBeNull();
   });
 });

@@ -56,7 +56,7 @@ function hold(ai: FakeAi): () => void {
 }
 
 function processedAt(db: Db, waId: string): string | null {
-  return (db.prepare('SELECT processed_at AS p FROM messages WHERE wa_id = ?').get(waId) as { p: string | null }).p;
+  return (db.raw.prepare('SELECT processed_at AS p FROM messages WHERE wa_id = ?').get(waId) as { p: string | null }).p;
 }
 
 /** Every reservation was settled or released: the whole rest of the cap can be reserved (1e-9 absorbs float rounding). */
@@ -68,7 +68,7 @@ describe('Reconciler', () => {
   it('skips an inactive client without calling the AI', async () => {
     const { db, ai, r } = setup([]);
     store(db, 'A1', 'hello');
-    db.prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
+    db.raw.prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
     expect(await r.run(1)).toEqual({ status: 'noop' });
     expect(ai.calls).toHaveLength(0);
   });
@@ -99,7 +99,7 @@ describe('Reconciler', () => {
     expect(getClient(db, 1).statusText).toBe('Homepage banner is being revised.');
     expect(listPeople(db, 1)[0]).toMatchObject({ role: 'client', roleSetBy: 'ai' });
     expect(listUnprocessed(db, 1)).toHaveLength(0);
-    expect(db.prepare('SELECT COUNT(*) AS n FROM task_events').get()).toEqual({ n: 4 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM task_events').get()).toEqual({ n: 4 });
     expect(latestBatches(db)[0]).toMatchObject({ status: 'ok' });
     expect(spend.spentToday()).toBeCloseTo(0.01, 9);
     expectNoReservation(spend);
@@ -129,7 +129,7 @@ describe('Reconciler', () => {
     expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
     expect(ai.calls[0]!.user).toMatch(/^\[m2\] .*\]: \{document\}$/m);
     expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', raisedOn: '2026-10-17', closedOn: '2026-10-18' });
-    const ev = db.prepare('SELECT detail FROM task_events').get() as { detail: string };
+    const ev = db.raw.prepare('SELECT detail FROM task_events').get() as { detail: string };
     expect(JSON.parse(ev.detail)).toMatchObject({ code: 'SHA-001', status: 'done' });
   });
 
@@ -170,11 +170,11 @@ describe('Reconciler', () => {
       op({ op: 'add_decision', text: 'Blue theme chosen', sourceMessageIds: ['m1'] }),
     ] }]);
     store(db, 'm1', 'Banner bright karo, blue theme final');
-    db.exec("CREATE TRIGGER fail_decisions BEFORE INSERT ON decisions BEGIN SELECT RAISE(ABORT, 'test failure'); END");
+    db.raw.exec("CREATE TRIGGER fail_decisions BEFORE INSERT ON decisions BEGIN SELECT RAISE(ABORT, 'test failure'); END");
 
     expect(await r.run(1)).toEqual({ status: 'failed', errorCode: 'apply_failed' });
     expect(listTasks(db, 1)).toHaveLength(0);
-    expect(db.prepare('SELECT COUNT(*) AS n FROM task_events').get()).toEqual({ n: 0 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM task_events').get()).toEqual({ n: 0 });
     expect(listUnprocessed(db, 1)).toHaveLength(1);
     expect(latestBatches(db)[0]).toMatchObject({ status: 'failed', errorCode: 'apply_failed' });
     expect(onChanged).not.toHaveBeenCalled();
@@ -336,7 +336,7 @@ describe('Reconciler', () => {
     const { db, r, spend } = setup([{ output: { ops: [] }, costUsd: 0.05, fallbackUsed: true }]);
     store(db, 'm1', 'hello');
     await r.run(1);
-    const rows = db.prepare('SELECT usd, detail FROM spend').all() as { usd: number; detail: string }[];
+    const rows = db.raw.prepare('SELECT usd, detail FROM spend').all() as { usd: number; detail: string }[];
     expect(rows).toHaveLength(1);
     expect(rows[0]!.usd).toBeCloseTo(0.05, 9);
     expect(rows[0]!.detail).toMatch(/\(fallback\)$/);
@@ -348,7 +348,7 @@ describe('Reconciler', () => {
     store(db, 'm1', 'hello');
     expect(await r.run(1)).toEqual({ status: 'failed', errorCode: 'unknown' });
     expect(spend.spentToday()).toBeCloseTo(estimateOf(ai), 9);
-    const row = db.prepare('SELECT detail FROM spend').get() as { detail: string };
+    const row = db.raw.prepare('SELECT detail FROM spend').get() as { detail: string };
     expect(row.detail).toMatch(/^batch \d+ \(unknown, estimated\)$/);
     expectNoReservation(spend);
   });
@@ -613,7 +613,7 @@ describe('Reconciler', () => {
       applyEdit(db, 1, 'm1', 'Banner dark karo', '2026-10-19T07:05:00.000Z');
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 0 });
       expect(listUnprocessed(db, 1)).toHaveLength(0);
-      expect(db.prepare("SELECT touch_reason AS touch, requeue_reason AS requeue FROM messages WHERE wa_id = 'm1'").get()).toEqual({ touch: null, requeue: null });
+      expect(db.raw.prepare("SELECT touch_reason AS touch, requeue_reason AS requeue FROM messages WHERE wa_id = 'm1'").get()).toEqual({ touch: null, requeue: null });
     });
 
     describe('a touch from before the run never labels the message queued again (Job C: P2)', () => {

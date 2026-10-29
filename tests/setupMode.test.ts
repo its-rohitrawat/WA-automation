@@ -232,12 +232,12 @@ describe('openSessionDb recovers a link that never finished', () => {
     const auth = useEncryptedAuthState(first, key);
     auth.state.creds.me = { id: '919800000001:3@s.whatsapp.net', name: 'Founder' };
     await auth.saveCreds();
-    const before = first.prepare('SELECT k, v FROM auth ORDER BY k').all();
+    const before = first.raw.prepare('SELECT k, v FROM auth ORDER BY k').all();
     backupAndReset(first);
-    first.close(); // the process stops mid-link
+    first.raw.close(); // the process stops mid-link
     const again = openSessionDb(file);
-    expect(again.prepare('SELECT k, v FROM auth ORDER BY k').all()).toEqual(before);
+    expect(again.raw.prepare('SELECT k, v FROM auth ORDER BY k').all()).toEqual(before);
     expect(useEncryptedAuthState(again, key).hasSession).toBe(true);
-    again.close();
+    again.raw.close();
   });
 });

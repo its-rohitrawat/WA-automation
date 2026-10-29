@@ -70,7 +70,7 @@ export function listAudit(db: Db, p: AuditParams, isOwner: (email: string) => bo
     params.id = p.before.id;
   }
   const rows = db
-    .prepare(`SELECT id, at, actor, event, kind, detail FROM audit_log ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+    .raw.prepare(`SELECT id, at, actor, event, kind, detail FROM audit_log ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY at DESC, id DESC LIMIT @limit`)
     .all(params) as AuditRow[];
   const out = rows.map((r) => ({ ...r, actor: r.actor === 'agent' || isOwner(r.actor) ? r.actor : maskEmail(r.actor) }));
@@ -82,5 +82,5 @@ export function listAudit(db: Db, p: AuditParams, isOwner: (email: string) => bo
 export function purgeAuditOlderThan(db: Db, days: number, now: Date): number {
   if (!Number.isInteger(days) || days < 1) throw new Error('the audit log keeps at least one day');
   const cutoff = new Date(now.getTime() - days * 86_400_000).toISOString();
-  return db.prepare('DELETE FROM audit_log WHERE at < ?').run(cutoff).changes;
+  return db.raw.prepare('DELETE FROM audit_log WHERE at < ?').run(cutoff).changes;
 }

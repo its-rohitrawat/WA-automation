@@ -31,7 +31,7 @@ export function spareLinked(o: { dataDir: string; key: Buffer; briefing: Pick<Li
     try {
       return s.auth.hasSession;
     } finally {
-      s.db.close();
+      s.db.raw.close();
     }
   };
 }

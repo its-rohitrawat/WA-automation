@@ -67,7 +67,7 @@ export class AuditLog {
     const detail = oneLine(e.detail).slice(0, AUDIT_DETAIL_MAX);
     const requestId = e.requestId !== undefined && REQUEST_ID.test(e.requestId) ? e.requestId : null;
     this.#db
-      .prepare('INSERT INTO audit_log (at, actor, event, kind, detail, request_id) VALUES (?, ?, ?, ?, ?, ?)')
+      .raw.prepare('INSERT INTO audit_log (at, actor, event, kind, detail, request_id) VALUES (?, ?, ?, ?, ?, ?)')
       .run(this.#clock.now().toISOString(), actor, event, e.kind, detail, requestId);
   }
 
@@ -90,7 +90,7 @@ export class AuditLog {
       args.push(Math.floor(o.before));
     }
     const sql = `SELECT id, at, actor, event, kind, detail, request_id FROM audit_log${where.length > 0 ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY id DESC LIMIT ?`;
-    const rows = this.#db.prepare(sql).all(...args, limit) as Row[];
+    const rows = this.#db.raw.prepare(sql).all(...args, limit) as Row[];
     return rows.map((r) => {
       const entry: AuditEntry = { id: r.id, at: r.at, actor: r.actor, event: r.event, kind: r.kind, detail: r.detail };
       if (r.request_id !== null) entry.requestId = r.request_id;
@@ -101,6 +101,6 @@ export class AuditLog {
   /** Removes entries older than `days` days (default 90). Returns how many were removed. */
   purgeOlderThan(days = 90): number {
     const cutoff = new Date(this.#clock.now().getTime() - days * 86_400_000).toISOString();
-    return this.#db.prepare('DELETE FROM audit_log WHERE at < ?').run(cutoff).changes;
+    return this.#db.raw.prepare('DELETE FROM audit_log WHERE at < ?').run(cutoff).changes;
   }
 }

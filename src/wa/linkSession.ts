@@ -332,7 +332,7 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
     async run(hooks, signal) {
       const wasLinked = d.switchable.hasGateway();
       // Read only when there are rows: on an empty table useEncryptedAuthState would write its canary row.
-      const hasRows = (d.sessionDb.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n > 0;
+      const hasRows = (d.sessionDb.raw.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n > 0;
       const before = hasRows ? numberOf(() => useEncryptedAuthState(d.sessionDb, d.key)) : undefined;
       let gw: GatewayLike | undefined;
       let onAbort: (() => void) | undefined;

@@ -81,7 +81,7 @@ describe('requireOwner', () => {
     const { id } = sessions.create('former@example.com');
     const guard = createGuard({ sessions, ownerEmails: ['owner@example.com'], publicUrl: PUBLIC, port: () => 8787 });
     expect(caught(() => guard.requireOwner(fakeReq({ headers: { cookie: `wa_session=${id}` } }))).status).toBe(401);
-    expect(db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get()).toEqual({ n: 0 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM web_sessions').get()).toEqual({ n: 0 });
   });
 });
 

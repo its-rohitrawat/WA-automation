@@ -1,4 +1,4 @@
-import { tx, type Db } from '../store/db.ts';
+import { txSync, type Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import { fromIstDate, istDate, istDayLabel, istTime, meetingLength } from '../util/time.ts';
 
@@ -143,14 +143,14 @@ export class UptimeLog {
   constructor(db: Db, clock: Clock) {
     this.#db = db;
     this.#clock = clock;
-    const r = db.prepare('SELECT up FROM uptime_log ORDER BY at DESC, id DESC LIMIT 1').get() as { up: number } | undefined;
+    const r = db.raw.prepare('SELECT up FROM uptime_log ORDER BY at DESC, id DESC LIMIT 1').get() as { up: number } | undefined;
     this.#last = r === undefined ? undefined : r.up === 1;
   }
 
   /** An up row never keeps a reason; a down row keeps one only when it is a known code. */
   #write(up: boolean, reason: DownReason | null): void {
     const r = !up && isReason(reason) ? reason : null;
-    this.#db.prepare('INSERT INTO uptime_log (at, up, reason) VALUES (?, ?, ?)').run(this.#clock.now().toISOString(), up ? 1 : 0, r);
+    this.#db.raw.prepare('INSERT INTO uptime_log (at, up, reason) VALUES (?, ?, ?)').run(this.#clock.now().toISOString(), up ? 1 : 0, r);
     this.#last = up;
   }
 
@@ -177,19 +177,19 @@ export class UptimeLog {
   purgeOlderThan(days: number): number {
     if (!Number.isInteger(days) || days < 1) throw new Error('the uptime log keeps at least one day');
     const cutoff = new Date(this.#clock.now().getTime() - days * DAY_MS).toISOString();
-    return tx(this.#db, () => {
-      const last = this.#db.prepare('SELECT id, up FROM uptime_log WHERE at < ? ORDER BY at DESC, id DESC LIMIT 1').get(cutoff) as
+    return txSync(this.#db, () => {
+      const last = this.#db.raw.prepare('SELECT id, up FROM uptime_log WHERE at < ? ORDER BY at DESC, id DESC LIMIT 1').get(cutoff) as
         { id: number; up: number } | undefined;
       if (!last) return 0;
       const keep = [last.id];
       if (last.up === 0) {
         const began = this.#db
-          .prepare(`SELECT id FROM uptime_log WHERE at < @cutoff AND up = 0
+          .raw.prepare(`SELECT id FROM uptime_log WHERE at < @cutoff AND up = 0
             AND at > COALESCE((SELECT MAX(at) FROM uptime_log WHERE at < @cutoff AND up = 1), '') ORDER BY at, id LIMIT 1`)
           .get({ cutoff }) as { id: number };
         keep.push(began.id);
       }
-      return this.#db.prepare('DELETE FROM uptime_log WHERE at < ? AND id NOT IN (SELECT value FROM json_each(?))').run(cutoff, JSON.stringify(keep)).changes;
+      return this.#db.raw.prepare('DELETE FROM uptime_log WHERE at < ? AND id NOT IN (SELECT value FROM json_each(?))').run(cutoff, JSON.stringify(keep)).changes;
     });
   }
 
@@ -200,17 +200,17 @@ export class UptimeLog {
     // The last row before the window says whether the window starts inside an outage. If it does, the outage began at the
     // first down row after the last up row (a down tick, then a stop row, then a start(false) row are one outage).
     type Row = { at: string; up: number; reason: string | null };
-    const last = this.#db.prepare('SELECT at, up, reason FROM uptime_log WHERE at < ? ORDER BY at DESC, id DESC LIMIT 1').get(from) as Row | undefined;
+    const last = this.#db.raw.prepare('SELECT at, up, reason FROM uptime_log WHERE at < ? ORDER BY at DESC, id DESC LIMIT 1').get(from) as Row | undefined;
     let before: Row[] = last ? [last] : [];
     if (last?.up === 0) {
       const began = this.#db
-        .prepare(`SELECT at, up, reason FROM uptime_log WHERE at < @from AND up = 0
+        .raw.prepare(`SELECT at, up, reason FROM uptime_log WHERE at < @from AND up = 0
           AND at > COALESCE((SELECT MAX(at) FROM uptime_log WHERE at < @from AND up = 1), '') ORDER BY at, id LIMIT 1`)
         .get({ from }) as Row;
       before = [began];
     }
-    const inside = this.#db.prepare('SELECT at, up, reason FROM uptime_log WHERE at >= ? ORDER BY at, id').all(from) as Row[];
-    const first = this.#db.prepare('SELECT MIN(at) AS at FROM uptime_log').get() as { at: string | null };
+    const inside = this.#db.raw.prepare('SELECT at, up, reason FROM uptime_log WHERE at >= ? ORDER BY at, id').all(from) as Row[];
+    const first = this.#db.raw.prepare('SELECT MIN(at) AS at FROM uptime_log').get() as { at: string | null };
     const rows = [...before, ...inside].map((r) => ({ at: Date.parse(r.at), up: r.up === 1, reason: isReason(r.reason) ? r.reason : null }));
     return { intervals: downIntervals(rows), knownSince: first.at === null ? undefined : Date.parse(first.at) };
   }
@@ -232,7 +232,7 @@ export class UptimeLog {
 
   /** The IST day of the log's first row, or null while it is empty: the days before it are not known. */
   knownSinceDay(): string | null {
-    const r = this.#db.prepare('SELECT MIN(at) AS at FROM uptime_log').get() as { at: string | null };
+    const r = this.#db.raw.prepare('SELECT MIN(at) AS at FROM uptime_log').get() as { at: string | null };
     return r.at === null ? null : istDate(new Date(r.at));
   }
 

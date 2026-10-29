@@ -1,4 +1,4 @@
-import { tx, type Db } from '../store/db.ts';
+import { txSync, type Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import { istDate } from '../util/time.ts';
 
@@ -41,13 +41,13 @@ export class SpendGuard {
   }
 
   spentToday(): number {
-    const r = this.#db.prepare('SELECT COALESCE(SUM(usd), 0) AS total FROM spend WHERE day = ?').get(istDate(this.#clock.now())) as { total: number };
+    const r = this.#db.raw.prepare('SELECT COALESCE(SUM(usd), 0) AS total FROM spend WHERE day = ?').get(istDate(this.#clock.now())) as { total: number };
     return r.total;
   }
 
   /** Today's spend by kind (IST day): AI calls and speech-to-text. */
   spentTodayByKind(): Record<SpendKind, number> {
-    const rows = this.#db.prepare('SELECT kind, COALESCE(SUM(usd), 0) AS total FROM spend WHERE day = ? GROUP BY kind').all(istDate(this.#clock.now())) as {
+    const rows = this.#db.raw.prepare('SELECT kind, COALESCE(SUM(usd), 0) AS total FROM spend WHERE day = ? GROUP BY kind').all(istDate(this.#clock.now())) as {
       kind: string;
       total: number;
     }[];
@@ -133,7 +133,7 @@ export class SpendGuard {
       if (owner) {
         try {
           // The booking and the owner's own record of it (a meeting's speech part) are written together.
-          tx(this.#db, () => {
+          txSync(this.#db, () => {
             this.record(r.kind, r.usd, detail);
             owner();
           });
@@ -161,6 +161,6 @@ export class SpendGuard {
     const amount = bad ? this.#cap : usd;
     const note = bad ? `${detail} (invalid amount, recorded as the cap)` : detail;
     const now = this.#clock.now();
-    this.#db.prepare('INSERT INTO spend (day, kind, usd, detail, at) VALUES (?, ?, ?, ?, ?)').run(istDate(now), kind, amount, note, now.toISOString());
+    this.#db.raw.prepare('INSERT INTO spend (day, kind, usd, detail, at) VALUES (?, ?, ?, ?, ?)').run(istDate(now), kind, amount, note, now.toISOString());
   }
 }

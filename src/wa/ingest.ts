@@ -1,7 +1,7 @@
 import { isSafeMediaAddress, isSafeMediaUrl, mediaRefAad, type MediaRefSealer } from '../media/ref.ts';
 import { MEDIA_LIMITS, type MediaInfo, type MediaRef } from '../media/types.ts';
 import { getClientByGroupId } from '../store/clients.ts';
-import { tx, type Db } from '../store/db.ts';
+import { txSync, type Db } from '../store/db.ts';
 import { insertMedia, messageRowId, type MediaStatus } from '../store/media.ts';
 import { applyEdit, applyRevoke, insertMessage, upsertReaction } from '../store/messages.ts';
 import { upsertPerson } from '../store/people.ts';
@@ -58,7 +58,7 @@ export class Ingestor {
     switch (e.kind) {
       case 'message': {
         // The message and its file row are written together, so a file is never left without its message.
-        const result = tx(db, () => {
+        const result = txSync(db, () => {
           const isNew = insertMessage(db, {
             waId: e.waId,
             clientId: client.id,

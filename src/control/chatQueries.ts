@@ -111,7 +111,7 @@ function toMessage(r: RawMessage): ChatMessage {
 
 /** One stored message of this client, as the chat shows it, or null (a quote for a reply). */
 function messageQuote(db: Db, clientId: number, id: number): ChatOutboxItem['quote'] {
-  const r = db.prepare(`${SELECT} WHERE m.client_id = ? AND m.id = ?`).get(clientId, id) as RawMessage | undefined;
+  const r = db.raw.prepare(`${SELECT} WHERE m.client_id = ? AND m.id = ?`).get(clientId, id) as RawMessage | undefined;
   if (!r) return null;
   const m = toMessage(r);
   return { sender: m.sender, text: oneLine(m.text, QUOTE_MAX), kind: m.kind };
@@ -125,13 +125,13 @@ export function chatPage(db: Db, c: ClientRow, now: Date, o: { before?: number; 
   const limit = Math.max(1, Math.min(CHAT_PAGE_MAX, Math.floor(o.limit ?? CHAT_PAGE)));
   let rows: RawMessage[];
   if (o.before !== undefined) {
-    const cursor = db.prepare('SELECT ts, id FROM messages WHERE client_id = ? AND id = ?').get(c.id, o.before) as { ts: string; id: number } | undefined;
+    const cursor = db.raw.prepare('SELECT ts, id FROM messages WHERE client_id = ? AND id = ?').get(c.id, o.before) as { ts: string; id: number } | undefined;
     rows = cursor
-      ? (db.prepare(`${SELECT} WHERE m.client_id = @client AND (m.ts < @ts OR (m.ts = @ts AND m.id < @id)) ORDER BY m.ts DESC, m.id DESC LIMIT @limit`)
+      ? (db.raw.prepare(`${SELECT} WHERE m.client_id = @client AND (m.ts < @ts OR (m.ts = @ts AND m.id < @id)) ORDER BY m.ts DESC, m.id DESC LIMIT @limit`)
         .all({ client: c.id, ts: cursor.ts, id: cursor.id, limit: limit + 1 }) as RawMessage[])
       : [];
   } else {
-    rows = db.prepare(`${SELECT} WHERE m.client_id = ? ORDER BY m.ts DESC, m.id DESC LIMIT ?`).all(c.id, limit + 1) as RawMessage[];
+    rows = db.raw.prepare(`${SELECT} WHERE m.client_id = ? ORDER BY m.ts DESC, m.id DESC LIMIT ?`).all(c.id, limit + 1) as RawMessage[];
   }
   const since = new Date(now.getTime() - OUTBOX_DAYS * 86_400_000).toISOString();
   const outbox = o.before === undefined ? outboxToShow(db, c.id, since).map((row) => outboxItem(db, row)) : [];

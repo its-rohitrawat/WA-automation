@@ -77,7 +77,7 @@ function setup(o: { configs?: typeof SHARMA[]; state?: GatewayState; paused?: bo
     await new Promise((r) => setImmediate(r));
   };
   const live = (groupId: string, waId: string, ts: Date) => ingestor.handle(msg(groupId, waId, ts));
-  const count = (clientId = 1) => (db.prepare('SELECT COUNT(*) AS n FROM messages WHERE client_id = ?').get(clientId) as { n: number }).n;
+  const count = (clientId = 1) => (db.raw.prepare('SELECT COUNT(*) AS n FROM messages WHERE client_id = ?').get(clientId) as { n: number }).n;
   const step = async () => {
     bf.tick();
     await new Promise((r) => setImmediate(r));
@@ -143,7 +143,7 @@ describe('history backfill: paging', () => {
     // Older than 7 days: dropped, and the backfill ends.
     await answer({ groups: [{ groupId: SHARMA.groupId, events: [msg(SHARMA.groupId, 'D', at(6)), msg(SHARMA.groupId, 'OLDER', at(8))] }] });
     expect(count()).toBe(4);
-    expect(db.prepare("SELECT 1 FROM messages WHERE wa_id = 'OLDER'").get()).toBeUndefined();
+    expect(db.raw.prepare("SELECT 1 FROM messages WHERE wa_id = 'OLDER'").get()).toBeUndefined();
     expect(getBackfill(db, SHARMA.groupId)?.state).toBe('done');
     // Found: what the backfill stored itself (B, C, D), not the new message it started from.
     expect(finished).toEqual([{ clientId: 1, found: 3, stopped: false }]);
@@ -260,7 +260,7 @@ describe('history backfill: the privacy rules', () => {
     bf.start();
     await step();
     await answer({ groups: [{ groupId: MEHTA.groupId, events: [msg(MEHTA.groupId, 'X', at(1))] }] });
-    expect(db.prepare("SELECT 1 FROM messages WHERE wa_id = 'X'").get()).toBeUndefined();
+    expect(db.raw.prepare("SELECT 1 FROM messages WHERE wa_id = 'X'").get()).toBeUndefined();
   });
 
   it('asks nothing while WhatsApp is not open, nor at the spend cap; carries on after', async () => {

@@ -19,8 +19,8 @@ function task(db: Db, over: Partial<NewTask> & { status?: 'open' | 'maybe_done' 
     clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
     deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp', ...rest,
   }, NOW);
-  if (status) db.prepare('UPDATE tasks SET status = ? WHERE id = ?').run(status, t.id);
-  if (updatedAt) db.prepare('UPDATE tasks SET updated_at = ? WHERE id = ?').run(updatedAt, t.id);
+  if (status) db.raw.prepare('UPDATE tasks SET status = ? WHERE id = ?').run(status, t.id);
+  if (updatedAt) db.raw.prepare('UPDATE tasks SET updated_at = ? WHERE id = ?').run(updatedAt, t.id);
   return t.code;
 }
 
@@ -140,7 +140,7 @@ describe('listDashboardTasks', () => {
     expect(codes(listDashboardTasks(db, q({ q: '_' }), now))).toEqual([und]);
     expect(codes(listDashboardTasks(db, q({ q: '\\' }), now))).toEqual([back]);
     expect(codes(listDashboardTasks(db, q({ q: "'; DROP TABLE tasks; --" }), now))).toEqual([]);
-    expect(db.prepare('SELECT COUNT(*) AS n FROM tasks').get()).toEqual({ n: 4 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM tasks').get()).toEqual({ n: 4 });
   });
 
   it('sorts by deadline (none last), code, client, owner (none last) and status, either way', () => {
@@ -163,7 +163,7 @@ describe('listDashboardTasks', () => {
 
   it('sorts codes by their number, so SHA-1000 comes after SHA-999', () => {
     const db = seededDb();
-    db.prepare('UPDATE clients SET next_task_seq = 999 WHERE id = 1').run();
+    db.raw.prepare('UPDATE clients SET next_task_seq = 999 WHERE id = 1').run();
     const a = task(db);
     const b = task(db);
     expect([a, b]).toEqual(['SHA-999', 'SHA-1000']);
@@ -211,7 +211,7 @@ describe('taskDetail', () => {
   it('adds the source quote, progress, reminders and history in plain words', () => {
     const db = seededDb();
     const code = task(db, { sourceQuote: 'Please send the <b>logo</b>', sourceDate: '2026-10-10', latestProgress: 'Draft sent' });
-    db.prepare("UPDATE tasks SET reminder_count = 2, source_revoked = 1 WHERE code = ?").run(code);
+    db.raw.prepare("UPDATE tasks SET reminder_count = 2, source_revoked = 1 WHERE code = ?").run(code);
     const ai = (op: string, detail: object, at: string) =>
       recordEvent(db, { taskId: 1, clientId: 1, actor: 'ai', op, detail, reason: 'x', sourceIds: ['W1'], at });
     ai('add_task', { code, title: 'secret words from chat', side: 'us', status: 'open' }, '2026-10-10T05:00:00.000Z');
@@ -250,7 +250,7 @@ describe('taskDetail', () => {
     const code = task(db, { origin: 'meeting' });
     recordEvent(db, { taskId: 1, clientId: 1, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: NOW });
     recordEvent(db, { taskId: 1, clientId: 1, actor: 'ai', op: 'update_task', detail: {}, reason: null, sourceIds: [], at: NOW });
-    db.prepare("INSERT INTO task_events (task_id, client_id, actor, op, detail, at) VALUES (1, 1, 'human', 'update_task', 'not json', ?)").run(NOW);
+    db.raw.prepare("INSERT INTO task_events (task_id, client_id, actor, op, detail, at) VALUES (1, 1, 'human', 'update_task', 'not json', ?)").run(NOW);
     expect(taskDetail(db, code, now)!.history.map((h) => h.what)).toEqual(['Created from a meeting', 'Updated', 'Edited by the owner']);
   });
 });
@@ -268,7 +268,7 @@ describe('listDashboardTasks review fixes', () => {
 
   it('sorts client names without regard to case', () => {
     const db = seededDb();
-    db.prepare("UPDATE clients SET name = 'mehta foods' WHERE id = 2").run();
+    db.raw.prepare("UPDATE clients SET name = 'mehta foods' WHERE id = 2").run();
     const sharma = task(db);
     const mehta = task(db, { clientId: 2 });
     expect(codes(listDashboardTasks(db, q({ sort: 'client' }), now))).toEqual([mehta, sharma]);
@@ -285,7 +285,7 @@ describe('listDashboardTasks review fixes', () => {
     const db = seededDb();
     const sharma = task(db, { deadline: '2026-10-18' });
     const mehta = task(db, { clientId: 2, deadline: '2026-10-18' });
-    db.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
+    db.raw.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
     expect(codes(listDashboardTasks(db, q({}), now))).toEqual([sharma]);
     expect(codes(listDashboardTasks(db, q({ removed: '1' }), now)).sort()).toEqual([sharma, mehta].sort());
     expect(() => q({ removed: 'yes' })).toThrowError(ControlError);
@@ -298,9 +298,9 @@ describe('listDashboardTasks review fixes', () => {
       task(db, { clientId }); // open
       task(db, { clientId, status: 'maybe_done' }); // review
       const done = task(db, { clientId });
-      db.prepare("UPDATE tasks SET status = 'done', closed_on = '2026-10-17' WHERE code = ?").run(done);
+      db.raw.prepare("UPDATE tasks SET status = 'done', closed_on = '2026-10-17' WHERE code = ?").run(done);
     }
-    db.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
+    db.raw.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
     const t = overview(db, now).tasks;
     const total = (o: Record<string, string>) => listDashboardTasks(db, q(o), now).total;
     expect(total({ status: 'overdue' })).toBe(t.overdue);
@@ -312,7 +312,7 @@ describe('listDashboardTasks review fixes', () => {
 
   it('closed=7d lists the done tasks closed today and the six days before (IST): the Overview\'s Done count, task for task', () => {
     const db = seededDb();
-    const closedOn = (code: string, day: string) => db.prepare("UPDATE tasks SET status = 'done', closed_on = ? WHERE code = ?").run(day, code);
+    const closedOn = (code: string, day: string) => db.raw.prepare("UPDATE tasks SET status = 'done', closed_on = ? WHERE code = ?").run(day, code);
     const today = task(db);
     const sixth = task(db);
     const older = task(db);
@@ -322,7 +322,7 @@ describe('listDashboardTasks review fixes', () => {
     closedOn(sixth, '2026-10-13');
     closedOn(older, '2026-10-12');
     closedOn(reopened, '2026-10-15');
-    db.prepare("UPDATE tasks SET status = 'open' WHERE code = ?").run(reopened);
+    db.raw.prepare("UPDATE tasks SET status = 'open' WHERE code = ?").run(reopened);
     const r = listDashboardTasks(db, q({ status: 'done', closed: '7d' }), now);
     expect(codes(r).sort()).toEqual([today, sixth].sort());
     expect(r.total).toBe(overview(db, now).tasks.doneThisWeek);
@@ -332,14 +332,14 @@ describe('listDashboardTasks review fixes', () => {
 });
 
 describe('listDashboardTasks: priority levels and sentiment', () => {
-  const sentimentOn = (db: Db) => db.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', ?, 'o')").run(NOW);
+  const sentimentOn = (db: Db) => db.raw.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', ?, 'o')").run(NOW);
 
   it('filters and sorts by the four levels, a task without one last', () => {
     const db = seededDb();
     const low = task(db, { priority: 'low' });
     const critical = task(db, { priority: 'critical' });
     const old = task(db, { priority: 'major' });
-    db.prepare('UPDATE tasks SET priority_level = NULL, priority_source = NULL WHERE code = ?').run(old);
+    db.raw.prepare('UPDATE tasks SET priority_level = NULL, priority_source = NULL WHERE code = ?').run(old);
     const major = task(db, { priority: 'major' });
     expect(codes(listDashboardTasks(db, q({ sort: 'priority' }), now))).toEqual([critical, major, low, old]);
     expect(codes(listDashboardTasks(db, q({ sort: 'priority', dir: 'desc' }), now))).toEqual([old, low, major, critical]);

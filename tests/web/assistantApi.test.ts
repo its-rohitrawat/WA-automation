@@ -69,7 +69,7 @@ async function boot(o: { askCapacity?: number } = {}) {
 
 /** The answer's events, one JSON object per line. */
 const lines = (raw: unknown) => String(raw).trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
-const auditRows = (db: Db) => db.prepare('SELECT actor, event, detail, request_id AS requestId FROM audit_log ORDER BY id').all() as Record<string, string | null>[];
+const auditRows = (db: Db) => db.raw.prepare('SELECT actor, event, detail, request_id AS requestId FROM audit_log ORDER BY id').all() as Record<string, string | null>[];
 
 describe('assistant API', () => {
   it('needs the signed-in owner, and CSRF for anything that asks or changes', async () => {

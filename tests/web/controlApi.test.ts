@@ -42,8 +42,8 @@ async function boot(o: { linked?: boolean; secureCookies?: boolean; actionCapaci
   return { db, h, audit: real, sessions };
 }
 
-const auditRows = (db: Db) => db.prepare('SELECT actor, event, kind, detail FROM audit_log ORDER BY id').all();
-const requestIds = (db: Db) => (db.prepare('SELECT request_id AS r FROM audit_log ORDER BY id').all() as { r: string | null }[]).map((x) => x.r);
+const auditRows = (db: Db) => db.raw.prepare('SELECT actor, event, kind, detail FROM audit_log ORDER BY id').all();
+const requestIds = (db: Db) => (db.raw.prepare('SELECT request_id AS r FROM audit_log ORDER BY id').all() as { r: string | null }[]).map((x) => x.r);
 
 describe('control API: reads', () => {
   it('needs a signed-in owner', async () => {

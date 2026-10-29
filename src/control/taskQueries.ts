@@ -250,9 +250,9 @@ export function listDashboardTasks(db: Db, f: TaskQuery, now: Date): { total: nu
     params.closedFrom = addDays(today, -6);
   }
   const whereSql = where.length > 0 ? ` WHERE ${where.join(' AND ')}` : '';
-  const total = (db.prepare(`SELECT COUNT(*) AS n FROM tasks t JOIN clients c ON c.id = t.client_id${whereSql}`).get(params) as { n: number }).n;
+  const total = (db.raw.prepare(`SELECT COUNT(*) AS n FROM tasks t JOIN clients c ON c.id = t.client_id${whereSql}`).get(params) as { n: number }).n;
   const rows = db
-    .prepare(`${SELECT_SQL}${whereSql} ORDER BY ${orderBy(f.sort, f.dir)} LIMIT @limit OFFSET @offset`)
+    .raw.prepare(`${SELECT_SQL}${whereSql} ORDER BY ${orderBy(f.sort, f.dir)} LIMIT @limit OFFSET @offset`)
     .all({ ...params, limit: f.limit, offset: f.offset }) as RawRow[];
   const moods = readSentimentEnabled(db);
   return { total, rows: rows.map((r) => toRow(r, moods)) };
@@ -307,10 +307,10 @@ function historyWords(op: string, actor: 'agent' | 'owner', detail: string, sour
 export function taskDetail(db: Db, rawCode: string, now: Date): DashboardTaskDetail | undefined {
   const code = rawCode.trim().toUpperCase();
   if (!/^[A-Z]{3,4}-\d{1,9}$/.test(code)) return undefined;
-  const r = db.prepare(`${SELECT_SQL} WHERE t.code = @code`).get({ code, today: istDate(now) }) as RawRow | undefined;
+  const r = db.raw.prepare(`${SELECT_SQL} WHERE t.code = @code`).get({ code, today: istDate(now) }) as RawRow | undefined;
   if (!r) return undefined;
   const events = db
-    .prepare('SELECT at, actor, op, detail FROM task_events WHERE task_id = ? ORDER BY at, id')
+    .raw.prepare('SELECT at, actor, op, detail FROM task_events WHERE task_id = ? ORDER BY at, id')
     .all(r.id) as { at: string; actor: 'ai' | 'human'; op: string; detail: string }[];
   return {
     ...toRow(r, readSentimentEnabled(db)),
@@ -330,7 +330,7 @@ export function taskDetail(db: Db, rawCode: string, now: Date): DashboardTaskDet
 /** A meeting's action items: the tasks made from it, by code. */
 export function tasksForMeeting(db: Db, meetingId: number, now: Date): Pick<DashboardTaskRow, 'code' | 'title' | 'owner' | 'deadline' | 'status'>[] {
   const rows = db
-    .prepare(`${SELECT_SQL} WHERE t.meeting_id = @meetingId ORDER BY ${CODE_NUMBER_SQL}, t.id`)
+    .raw.prepare(`${SELECT_SQL} WHERE t.meeting_id = @meetingId ORDER BY ${CODE_NUMBER_SQL}, t.id`)
     .all({ meetingId, today: istDate(now) }) as RawRow[];
   return rows.map((r) => ({ code: r.code, title: r.title, owner: r.owner, deadline: r.deadline, status: r.status }));
 }

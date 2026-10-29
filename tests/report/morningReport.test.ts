@@ -158,7 +158,7 @@ describe('byMorningUrgency', () => {
     createTask(db, task({ title: 'Overdue', deadline: '2026-10-20' }), NOW.toISOString()); // SHA-001
     createTask(db, task({ title: 'Critical', priority: 'critical', raisedOn: '2026-10-20' }), NOW.toISOString()); // SHA-002
     createTask(db, task({ title: 'Old high', priority: 'major', raisedOn: '2026-10-21' }), NOW.toISOString()); // SHA-003
-    db.prepare("UPDATE tasks SET priority_level = NULL WHERE code = 'SHA-003'").run(); // old column stays 'high'
+    db.raw.prepare("UPDATE tasks SET priority_level = NULL WHERE code = 'SHA-003'").run(); // old column stays 'high'
     createTask(db, task({ title: 'Medium', raisedOn: '2026-09-01' }), NOW.toISOString()); // SHA-004
     expect(urgent(db)).toEqual(['SHA-002', 'SHA-001', 'SHA-003', 'SHA-004']);
   });
@@ -177,7 +177,7 @@ describe('taskNotes', () => {
     const db = seededDb();
     createTask(db, task({ title: 'Down', priority: 'critical' }), NOW.toISOString()); // SHA-001
     createTask(db, task({ title: 'Old high', priority: 'major' }), NOW.toISOString()); // SHA-002
-    db.prepare("UPDATE tasks SET priority_level = NULL WHERE code = 'SHA-002'").run();
+    db.raw.prepare("UPDATE tasks SET priority_level = NULL WHERE code = 'SHA-002'").run();
     expect(taskNotes(openTask(db, 'SHA-001'), TODAY)).toEqual(['critical']);
     expect(taskNotes(openTask(db, 'SHA-002'), TODAY)).toEqual([]);
   });

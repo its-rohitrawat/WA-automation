@@ -120,7 +120,7 @@ describe('the briefing send time set from the dashboard', () => {
     expect(t.store().reportSettings().time).toBe('09:00');
     t.setTime(THU, '08:10', '08:45'); // ahead again: today goes at 08:45, and the kept time is gone
     expect(t.store().reportSettings().time).toBe('08:45');
-    expect(t.db.prepare("SELECT k FROM settings WHERE k = 'reportTimeToday'").all()).toEqual([]);
+    expect(t.db.raw.prepare("SELECT k FROM settings WHERE k = 'reportTimeToday'").all()).toEqual([]);
     await t.tick(THU, '08:45');
     await t.tick(THU, '09:00');
     expect(t.sender.calls).toHaveLength(1);
@@ -139,7 +139,7 @@ describe('the briefing send time set from the dashboard', () => {
       expect((e as ControlError).status).toBe(422);
       expect((e as ControlError).field).toBe('reportTime');
     }
-    expect(t.db.prepare('SELECT k FROM settings').all()).toEqual([]);
+    expect(t.db.raw.prepare('SELECT k FROM settings').all()).toEqual([]);
     expect(t.audits).toEqual([]);
   });
 

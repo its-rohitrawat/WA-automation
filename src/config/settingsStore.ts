@@ -1,7 +1,7 @@
 import { ControlError, type Audit } from '../control/errors.ts';
 import { nextReport } from '../report/scheduler.ts';
 import type { ReportDays, ReportSettings } from '../report/types.ts';
-import { tx, type Db } from '../store/db.ts';
+import { txSync, type Db } from '../store/db.ts';
 import { reportFor } from '../store/reports.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
@@ -116,7 +116,7 @@ export class SettingsStore {
 
   /** The value stored from the dashboard, when there is a valid one. */
   #stored(key: SettingKey): { value: boolean | ReportDays | string } | undefined {
-    const r = this.#db.prepare('SELECT v FROM settings WHERE k = ?').get(key) as { v: string } | undefined;
+    const r = this.#db.raw.prepare('SELECT v FROM settings WHERE k = ?').get(key) as { v: string } | undefined;
     if (!r) return undefined;
     let parsed: unknown;
     try {
@@ -151,7 +151,7 @@ export class SettingsStore {
 
   /** Today's send time when the time was changed after today's had passed (the old one, kept for today), else undefined. */
   #todayTime(date: string): string | undefined {
-    const r = this.#db.prepare('SELECT v FROM settings WHERE k = ?').get(TODAY_KEY) as { v: string } | undefined;
+    const r = this.#db.raw.prepare('SELECT v FROM settings WHERE k = ?').get(TODAY_KEY) as { v: string } | undefined;
     if (!r) return undefined;
     try {
       const v = JSON.parse(r.v) as unknown;
@@ -223,13 +223,13 @@ export class SettingsStore {
       : key === 'reportDays' ? `Morning briefing days set to ${DAYS_WORDS[value as ReportDays]}`
       : key === 'reportTime' ? `Morning briefing time set to ${value as string} IST${keepToday ? ', from tomorrow' : ''}`
       : `Morning briefing number changed to ${maskNumber(value as string)}`;
-    tx(this.#db, () => {
-      const put = this.#db.prepare(
+    txSync(this.#db, () => {
+      const put = this.#db.raw.prepare(
         'INSERT INTO settings (k, v, updated_at, updated_by) VALUES (?, ?, ?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at, updated_by = excluded.updated_by',
       );
       put.run(key, JSON.stringify(value), now.toISOString(), actor);
       if (keepToday) put.run(TODAY_KEY, JSON.stringify(keepToday), now.toISOString(), actor);
-      else if (key === 'reportTime') this.#db.prepare('DELETE FROM settings WHERE k = ?').run(TODAY_KEY);
+      else if (key === 'reportTime') this.#db.raw.prepare('DELETE FROM settings WHERE k = ?').run(TODAY_KEY);
       audit({ actor, event: `settings.${key}`, kind: 'config', detail });
     });
     const next = this.get();

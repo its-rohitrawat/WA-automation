@@ -67,8 +67,8 @@ function setup(o: { log?: Logger; onSettled?: (clientId: number) => void; concur
   const clock = manualClock('2026-10-19T08:00:00Z');
   const queue = new MediaQueue({ db, clock, log: o.log ?? silentLogger(), processor, concurrency: o.concurrency ?? 2, onSettled, voiceLane: o.voiceLane });
   const finish = async (id: number, outcome: ProcessOutcome, clientId: number | null = 1) => {
-    if (outcome === 'deferred') db.prepare("UPDATE media SET next_attempt_at = '2099-01-01T00:00:00.000Z' WHERE id = ?").run(id);
-    else db.prepare("UPDATE media SET status = 'done' WHERE id = ?").run(id);
+    if (outcome === 'deferred') db.raw.prepare("UPDATE media SET next_attempt_at = '2099-01-01T00:00:00.000Z' WHERE id = ?").run(id);
+    else db.raw.prepare("UPDATE media SET status = 'done' WHERE id = ?").run(id);
     waiting.get(id)!({ outcome, clientId });
     await flush();
   };
@@ -107,11 +107,11 @@ describe('MediaQueue', () => {
     const { db, started, queue } = setup();
     const [a, b, c, d] = [pending(db, 'A'), pending(db, 'B'), pending(db, 'C'), pending(db, 'D')];
     // Only D is due at first, so it is in flight while the older A, B and C come due.
-    db.prepare("UPDATE media SET next_attempt_at = '2099-01-01T00:00:00.000Z' WHERE id IN (?, ?, ?)").run(a, b, c);
+    db.raw.prepare("UPDATE media SET next_attempt_at = '2099-01-01T00:00:00.000Z' WHERE id IN (?, ?, ?)").run(a, b, c);
     queue.kick();
     await flush();
     expect(started).toEqual([d]);
-    db.prepare('UPDATE media SET next_attempt_at = NULL WHERE id IN (?, ?, ?)').run(a, b, c);
+    db.raw.prepare('UPDATE media SET next_attempt_at = NULL WHERE id IN (?, ?, ?)').run(a, b, c);
     queue.kick();
     await flush();
     expect(started).toEqual([d, a]);
@@ -285,7 +285,7 @@ describe('MediaQueue', () => {
   it('kick() never throws, even when the database cannot be read', async () => {
     const { log, lines } = logLines();
     const { db, queue } = setup({ log });
-    db.close();
+    db.raw.close();
     expect(() => queue.kick()).not.toThrow();
     await flush();
     expect(lines.join('')).toContain('media queue read failed');
@@ -319,7 +319,7 @@ describe('MediaQueue never retries a file in a loop', () => {
     const ing = new Ingestor({ db, onNewMessages: () => {}, clock, media: { sealer, onQueued: () => queue.kick() } });
     const share = (waId: string): number => {
       ing.handle(normalizeMessage(waRaw(waId, { imageMessage: { url: 'https://mmg.whatsapp.net/v/x', directPath: '/v/x', mediaKey: MEDIA_KEY, mimetype: 'image/jpeg' } }))!);
-      return (db.prepare('SELECT id FROM media ORDER BY id DESC LIMIT 1').get() as { id: number }).id;
+      return (db.raw.prepare('SELECT id FROM media ORDER BY id DESC LIMIT 1').get() as { id: number }).id;
     };
     return { db, clock, processor, onSettled, queue, share };
   }
@@ -351,7 +351,7 @@ describe('MediaQueue never retries a file in a loop', () => {
           describeImage: async (img) => {
             const r = await fake.describeImage(img);
             // From now on the database refuses every update of a file and every spend booking, as on a full disk.
-            db.exec(`CREATE TRIGGER IF NOT EXISTS refuse_media BEFORE UPDATE ON media BEGIN SELECT RAISE(ABORT, 'disk full'); END;
+            db.raw.exec(`CREATE TRIGGER IF NOT EXISTS refuse_media BEFORE UPDATE ON media BEGIN SELECT RAISE(ABORT, 'disk full'); END;
               CREATE TRIGGER IF NOT EXISTS refuse_spend BEFORE INSERT ON spend BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
             return r;
           },
@@ -384,7 +384,7 @@ describe('MediaQueue never retries a file in a loop', () => {
       process: vi.fn((id: number): Promise<ProcessResult> => {
         calls.push(id);
         if (calls.length > 50) return new Promise<ProcessResult>(() => {});
-        if (id === d) db.prepare("UPDATE media SET status = 'done' WHERE id = ?").run(id);
+        if (id === d) db.raw.prepare("UPDATE media SET status = 'done' WHERE id = ?").run(id);
         return Promise.resolve({ outcome: id === b ? 'deferred' : id === d ? 'done' : 'skipped', clientId: 1 });
       }),
     };

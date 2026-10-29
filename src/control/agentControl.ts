@@ -164,7 +164,7 @@ export class AgentControl {
     // The newest message time among the last 500 stored, found through the primary key (MAX(ts) over the whole table
     // would read a whole index on every poll). Not simply the last row: the catch-up after a reconnect stores older
     // messages last.
-    return (this.#d.db.prepare('SELECT MAX(ts) AS ts FROM (SELECT ts FROM messages ORDER BY id DESC LIMIT 500)').get() as { ts: string | null }).ts;
+    return (this.#d.db.raw.prepare('SELECT MAX(ts) AS ts FROM (SELECT ts FROM messages ORDER BY id DESC LIMIT 500)').get() as { ts: string | null }).ts;
   }
 
   status(): AgentStatus {
@@ -199,7 +199,7 @@ export class AgentControl {
     const { health, spend } = this.#d.app;
     const snap = health.snapshot();
     const now = clock.now();
-    const groups = (db.prepare('SELECT COUNT(*) AS n FROM clients WHERE active = 1').get() as { n: number }).n;
+    const groups = (db.raw.prepare('SELECT COUNT(*) AS n FROM clients WHERE active = 1').get() as { n: number }).n;
     const lost = new Set(snap.meetings?.lostAccounts ?? []);
     const signInExpired = health.publishProblem() === 'google_signin';
     const meetingAccess = snap.meetings?.paused === 'google_auth' || snap.meetings?.paused === 'google_scopes';
@@ -213,7 +213,7 @@ export class AgentControl {
         ...(lost.has(label) ? { state: 'down' as const, stateLabel: 'Sign-in lost' } : { state: 'ok' as const, stateLabel: 'Connected' }),
       })),
     ];
-    const calls = (db.prepare("SELECT COUNT(*) AS n FROM spend WHERE day = ? AND kind = 'ai'").get(istDate(now)) as { n: number }).n;
+    const calls = (db.raw.prepare("SELECT COUNT(*) AS n FROM spend WHERE day = ? AND kind = 'ai'").get(istDate(now)) as { n: number }).n;
     const beat = heartbeat?.lastBeatAt() ?? null;
     const file = trackerFile(db);
     return {

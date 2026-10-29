@@ -107,7 +107,7 @@ describe('app and the morning report', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(app.report).toBeUndefined();
     expect(readHealthSnapshot(db)!.report).toBeUndefined();
-    expect(db.prepare('SELECT COUNT(*) AS n FROM reports').get()).toEqual({ n: 0 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM reports').get()).toEqual({ n: 0 });
     await stopApp(app);
   });
 

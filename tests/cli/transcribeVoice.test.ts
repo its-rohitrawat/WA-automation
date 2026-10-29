@@ -104,7 +104,7 @@ const statusOf = (id: number) => {
   const m = getMedia(db, id)!;
   return { status: m.status, backlog: m.backlog, note: m.note, text: m.text, attempts: m.attempts, createdAt: m.createdAt };
 };
-const allMedia = () => db.prepare('SELECT * FROM media ORDER BY id').all();
+const allMedia = () => db.raw.prepare('SELECT * FROM media ORDER BY id').all();
 const output = () => lines.join('\n');
 const NEEDS_FFMPEG = 'ffmpeg, skipped (install ffmpeg, or set FFMPEG_PATH; after installing ffmpeg, restart the service, then run this again).';
 /** The cost line, in the command's words. */
@@ -242,7 +242,7 @@ describe('transcribe-voice: the dry run', () => {
 
   it('a file with no size is estimated at STT_MAX_SECONDS plus the tolerance, and queued', async () => {
     const id = backlogVoice();
-    db.prepare('UPDATE media SET file_size = NULL WHERE id = ?').run(id);
+    db.raw.prepare('UPDATE media SET file_size = NULL WHERE id = ?').run(id);
     await run({ yes: true });
     expect(lines).toEqual([
       'To transcribe: 1 voice note or audio file saved before Phase 2b, about 11 minutes.',
@@ -351,7 +351,7 @@ describe('transcribe-voice --client', () => {
     await run({ client: 'meh' });
     expect(lines[0]).toBe('To transcribe: 1 voice note or audio file saved before Phase 2b, about 1 minute.');
     await run({ client: 'MEH', yes: true });
-    expect(db.prepare("SELECT id FROM media WHERE status = 'pending'").all()).toEqual([{ id: mehta }]);
+    expect(db.raw.prepare("SELECT id FROM media WHERE status = 'pending'").all()).toEqual([{ id: mehta }]);
   });
 
   it('a code with spaces around it works', async () => {
@@ -361,7 +361,7 @@ describe('transcribe-voice --client', () => {
     await run({ client: ' sha ' });
     expect(lines[0]).toBe('To transcribe: 2 voice notes or audio files saved before Phase 2b, about 2 minutes.');
     await run({ client: ' sha ', yes: true });
-    expect(db.prepare("SELECT id FROM media WHERE status = 'pending' ORDER BY id").all()).toEqual([{ id: a }, { id: b }]);
+    expect(db.raw.prepare("SELECT id FROM media WHERE status = 'pending' ORDER BY id").all()).toEqual([{ id: a }, { id: b }]);
   });
 
   it('refuses an unknown code by name, and a client no longer on the allow-list', async () => {
@@ -395,8 +395,8 @@ describe('transcribe-voice --yes', () => {
     for (const id of [a, b, large, amr]) finishMedia(db, id, { textKind: 'extract', text: TRANSCRIPT, pageCount: null, note: null, at: LATER });
     expect(listUnprocessed(db, 1)).toEqual([]);
     expect(listUnprocessed(db, 2)).toEqual([]);
-    expect(db.prepare('SELECT COUNT(*) AS n FROM messages WHERE processed_at IS NULL').get()).toEqual({ n: 0 });
-    expect(db.prepare('SELECT COUNT(*) AS n FROM media WHERE requeued_for_text = 1').get()).toEqual({ n: 0 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM messages WHERE processed_at IS NULL').get()).toEqual({ n: 0 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM media WHERE requeued_for_text = 1').get()).toEqual({ n: 0 });
     // Once transcribed, nothing is left to queue.
     lines = [];
     await run({ yes: true });
@@ -404,9 +404,9 @@ describe('transcribe-voice --yes', () => {
   });
 
   it.each([
-    ['gets a note', (id: number) => void db.prepare("UPDATE media SET note = 'too_long' WHERE id = ?").run(id)],
+    ['gets a note', (id: number) => void db.raw.prepare("UPDATE media SET note = 'too_long' WHERE id = ?").run(id)],
     ['has its message deleted for everyone', (id: number) =>
-      void db.prepare('UPDATE messages SET revoked = 1 WHERE id = (SELECT message_id FROM media WHERE id = ?)').run(id)],
+      void db.raw.prepare('UPDATE messages SET revoked = 1 WHERE id = (SELECT message_id FROM media WHERE id = ?)').run(id)],
   ])('a counted file that %s before it is queued is left alone and said so', async (_what, change) => {
     const a = backlogVoice({ fileSize: 90_000 });
     const b = backlogVoice({ fileSize: 90_000 });
@@ -432,10 +432,10 @@ describe('transcribe-voice --yes', () => {
     const tooLong = backlogVoice({ note: 'too_long' });
     const forwarded = backlogVoice({ note: 'forwarded_not_transcribed' });
     const transcribed = backlogVoice({ text: TRANSCRIPT });
-    const before = [tooLong, forwarded, transcribed].map((id) => db.prepare('SELECT * FROM media WHERE id = ?').get(id));
+    const before = [tooLong, forwarded, transcribed].map((id) => db.raw.prepare('SELECT * FROM media WHERE id = ?').get(id));
     const fresh = backlogVoice();
     await run({ yes: true });
-    expect([tooLong, forwarded, transcribed].map((id) => db.prepare('SELECT * FROM media WHERE id = ?').get(id))).toEqual(before);
+    expect([tooLong, forwarded, transcribed].map((id) => db.raw.prepare('SELECT * FROM media WHERE id = ?').get(id))).toEqual(before);
     expect(statusOf(fresh).status).toBe('pending');
   });
 
@@ -549,7 +549,7 @@ describe('transcribe-voice --failed', () => {
     const a = failedVoice('local_timeout');
     const b = failedVoice('audio_no_duration', { kind: 'audio' });
     const unprocessed = failedVoice('local_exit_1');
-    db.prepare('UPDATE messages SET processed_at = NULL WHERE id = ?').run(getMedia(db, unprocessed)!.messageId);
+    db.raw.prepare('UPDATE messages SET processed_at = NULL WHERE id = ?').run(getMedia(db, unprocessed)!.messageId);
     const paid = failedVoice('stt_paid_unbooked');
     const backlog = backlogVoice();
     await run({ failed: true, yes: true }, { env: localEnv() });
@@ -609,14 +609,14 @@ describe('transcribe-voice --failed', () => {
     const mehta = failedVoice('local_timeout', { clientId: 2 });
     await run({ failed: true, yes: true, client: 'meh' }, { env: localEnv() });
     expect(lines[0]).toBe('To try again: 1 voice note or audio file the local engine could not transcribe, about 1 minute.');
-    expect(db.prepare("SELECT id FROM media WHERE status = 'pending'").all()).toEqual([{ id: mehta }]);
+    expect(db.raw.prepare("SELECT id FROM media WHERE status = 'pending'").all()).toEqual([{ id: mehta }]);
   });
 
   it('a note that changed since it was counted is left alone and said so', async () => {
     const a = failedVoice('local_timeout');
     const b = failedVoice('local_timeout');
     const findFfmpeg = async (): Promise<string | null> => {
-      db.prepare('UPDATE messages SET revoked = 1 WHERE id = (SELECT message_id FROM media WHERE id = ?)').run(b);
+      db.raw.prepare('UPDATE messages SET revoked = 1 WHERE id = (SELECT message_id FROM media WHERE id = ?)').run(b);
       return 'ffmpeg';
     };
     await run({ failed: true, yes: true }, { env: localEnv(), findFfmpeg });

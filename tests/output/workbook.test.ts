@@ -96,8 +96,8 @@ describe('buildWorkbook', () => {
 
   it('appends Priority level and Sentiment after every existing column, the old Priority kept in D', async () => {
     const db = fixture();
-    db.prepare("UPDATE tasks SET priority_level = 'critical', priority_source = 'keyword', sentiment = 'frustrated' WHERE code = 'SHA-001'").run();
-    db.prepare("UPDATE tasks SET priority_level = NULL, sentiment = 'positive' WHERE code = 'SHA-002'").run();
+    db.raw.prepare("UPDATE tasks SET priority_level = 'critical', priority_source = 'keyword', sentiment = 'frustrated' WHERE code = 'SHA-001'").run();
+    db.raw.prepare("UPDATE tasks SET priority_level = NULL, sentiment = 'positive' WHERE code = 'SHA-002'").run();
     const sheet = async () => (await load(await buildWorkbook(loadTrackerView(db, now, healthy)))).getWorksheet('Sharma Interiors')!;
     const headerAbove = (ws: ExcelJS.Worksheet, title: string) => (ws.getRow(findRow(ws, title).number + 1).values as unknown[]).slice(1);
     let ws = await sheet();
@@ -107,7 +107,7 @@ describe('buildWorkbook', () => {
     expect([4, 14, 15].map((c) => findRow(ws, 'SHA-001').getCell(c).value)).toEqual(['High', 'Critical', '']);
     expect([4, 14, 15].map((c) => findRow(ws, 'SHA-002').getCell(c).value)).toEqual(['High', '—', '']);
     expect([14, 15, 16].map((c) => findRow(ws, 'SHA-003').getCell(c).value)).toEqual([new Date(Date.UTC(2026, 9, 15)), 'Major', '']);
-    db.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', ?, 'o')").run(NOW);
+    db.raw.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', ?, 'o')").run(NOW);
     ws = await sheet();
     expect(findRow(ws, 'SHA-001').getCell(15).value).toBe('Frustrated');
     expect(findRow(ws, 'SHA-002').getCell(15).value).toBe('Positive');

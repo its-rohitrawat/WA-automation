@@ -79,7 +79,7 @@ function setup(o: { ai: FakeAi; cap?: number; clock?: ManualClock }) {
   return { db, clock, spend, pending, settings, assistant, task, run };
 }
 
-const spendRows = (db: Db) => db.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
+const spendRows = (db: Db) => db.raw.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
 
 describe('Assistant: answers with read tools', () => {
   it('runs a read tool, hands its result back as untrusted data, streams the answer and books every call', async () => {
@@ -369,8 +369,8 @@ describe('Assistant: priority levels, sentiment and the combine\'s filters (29 O
       },
     ]);
     const { db, run } = setup({ ai });
-    db.prepare("UPDATE tasks SET sentiment = 'frustrated' WHERE code = 'SHA-001'").run();
-    db.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
+    db.raw.prepare("UPDATE tasks SET sentiment = 'frustrated' WHERE code = 'SHA-001'").run();
+    db.raw.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
     createTask(db, {
       clientId: 2, side: 'us', title: 'Old client task', category: 'other', priority: 'low', assignedTo: null, askedBy: null, raisedOn: '2026-10-18',
       deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp',
@@ -382,7 +382,7 @@ describe('Assistant: priority levels, sentiment and the combine\'s filters (29 O
     expect(seen[0]).not.toContain('MEH-001');
     expect(seen[1]).toContain('MEH-001'); // includeRemovedClients
     expect(seen[2]).toContain('"total":0'); // nothing closed in the last 7 days
-    db.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', ?, 'owner@example.com')").run(NOW);
+    db.raw.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', ?, 'owner@example.com')").run(NOW);
     await run('and SHA-1?');
     expect(seen[3]).toContain('"sentiment":"frustrated"');
   });

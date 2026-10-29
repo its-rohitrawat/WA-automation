@@ -22,8 +22,8 @@ function withMeeting(status: MeetingStatus, clientId: number | null = null): Db 
 
 function state(db: Db) {
   return {
-    meetings: db.prepare('SELECT * FROM meetings').all(),
-    events: db.prepare('SELECT task_id, client_id, actor, op, detail, reason, at FROM task_events ORDER BY id').all(),
+    meetings: db.raw.prepare('SELECT * FROM meetings').all(),
+    events: db.raw.prepare('SELECT task_id, client_id, actor, op, detail, reason, at FROM task_events ORDER BY id').all(),
     rebuild: getKv(db, 'rebuild_requested'),
   };
 }
@@ -137,7 +137,7 @@ describe('runMeetingAction refusals', () => {
       expect(refusal(() => run(db, '1', 'assign', body)), JSON.stringify(body)).toMatchObject({ status: 422, field: 'client' });
     }
     expect(refusal(() => run(db, '1', 'assign', { client: 'XYZ' }))).toMatchObject({ status: 422, field: 'client', message: 'No client with code XYZ' });
-    db.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
+    db.raw.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
     expect(refusal(() => run(db, '1', 'assign', { client: 'MEH' }))).toMatchObject({ status: 422, field: 'client' });
   });
 
@@ -158,7 +158,7 @@ describe('runMeetingAction review fixes', () => {
   it("puts a meeting that changed meanwhile in the dashboard's words", () => {
     const db = withMeeting('unassigned');
     // As if another writer took the meeting between the check and the change.
-    db.exec('CREATE TRIGGER grab BEFORE UPDATE ON meetings BEGIN SELECT RAISE(IGNORE); END');
+    db.raw.exec('CREATE TRIGGER grab BEFORE UPDATE ON meetings BEGIN SELECT RAISE(IGNORE); END');
     const e = refusal(() => run(db, '1', 'skip'));
     expect(e).toMatchObject({ status: 409, message: 'Meeting 1 changed meanwhile; refresh the list and try again' });
   });

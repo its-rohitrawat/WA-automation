@@ -2,7 +2,7 @@ import { sanitizeInline } from '../brain/prompt.ts';
 import { isDomain } from '../config/domains.ts';
 import type { ClientConfig } from '../config/groups.ts';
 import { getClientByGroupId } from '../store/clients.ts';
-import { tx, type Db } from '../store/db.ts';
+import { txSync, type Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import { insertFound, knownRecordings, type MeetingAttendee, type MeetingStatus, type NewMeeting } from '../store/meetings.ts';
 import type { Clock } from '../util/clock.ts';
@@ -309,7 +309,7 @@ export class MeetingWatcher {
     if (dryRun) return { added: pending.length, skipped, errors, ids: [], found };
     const ids: number[] = [];
     const stored: FoundMeeting[] = [];
-    tx(this.#db, () => {
+    txSync(this.#db, () => {
       for (const [i, m] of pending.entries()) {
         const id = insertFound(this.#db, m);
         if (id === null) skipped++;

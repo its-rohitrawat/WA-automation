@@ -37,7 +37,7 @@ describe('migration v6', () => {
 
   it('rejects a status outside the known list', () => {
     const db = openDb(':memory:');
-    const insert = db.prepare("INSERT INTO reports (date, status, created_at, updated_at) VALUES (@date, @status, @at, @at)");
+    const insert = db.raw.prepare("INSERT INTO reports (date, status, created_at, updated_at) VALUES (@date, @status, @at, @at)");
     expect(() => insert.run({ date: DAY, status: 'bogus', at: T0 })).toThrow(/CHECK constraint failed/);
     expect(() => insert.run({ date: DAY, status: 'send', at: T0 })).toThrow(/CHECK constraint failed/);
     expect(reportFor(db, DAY)).toBeUndefined();

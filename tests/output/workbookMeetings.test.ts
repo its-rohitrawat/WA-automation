@@ -91,7 +91,7 @@ describe('meetings in the view', () => {
     const db = seededDb();
     done(db, { startedAt: '2026-10-20T06:00:00.000Z' });
     const hidden = done(db, { startedAt: '2026-10-22T06:00:00.000Z' });
-    db.prepare("UPDATE meetings SET summary = '{not json' WHERE id = ?").run(hidden);
+    db.raw.prepare("UPDATE meetings SET summary = '{not json' WHERE id = ?").run(hidden);
     expect(sharma(db).meetings).toHaveLength(1);
     expect(sharma(db).lastMeeting).toBe('2026-10-20');
   });
@@ -234,7 +234,7 @@ describe('Meetings section on the client tab', () => {
   it('keeps the workbook readable when a meeting title holds characters XML does not allow', async () => {
     const db = seededDb();
     const id = done(db, { startedAt: '2026-10-22T06:00:00.000Z' });
-    db.prepare('UPDATE meetings SET title = ? WHERE id = ?').run('Kick￾off\x01 call￿', id);
+    db.raw.prepare('UPDATE meetings SET title = ? WHERE id = ?').run('Kick￾off\x01 call￿', id);
     const ws = (await book(db)).getWorksheet('Sharma Interiors')!;
     expect(ws.getRow(rowOf(ws, 'Meetings').number + 2).getCell(2).value).toBe('Kickoff call');
   });

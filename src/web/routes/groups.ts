@@ -70,7 +70,7 @@ function keyed(deps: GroupsDeps, o: GroupsOverview): GroupsView {
 /** Which groups the owner ignored: one read of the kv rows, then a check by key. */
 function ignoredCheck(deps: GroupsDeps): (groupId: string) => boolean {
   const keys = new Set(
-    (deps.db.prepare('SELECT k FROM kv WHERE k GLOB ?').all(`${IGNORED}*`) as { k: string }[]).map((r) => r.k.slice(IGNORED.length)),
+    (deps.db.raw.prepare('SELECT k FROM kv WHERE k GLOB ?').all(`${IGNORED}*`) as { k: string }[]).map((r) => r.k.slice(IGNORED.length)),
   );
   return (groupId) => keys.size > 0 && keys.has(deps.groupKey(groupId));
 }
@@ -249,7 +249,7 @@ export async function groupsBulkHandler(deps: GroupsDeps, ctx: OwnerContext, bod
   if (action !== 'approve') {
     const tracked = new Set(configs.map((c) => c.groupId));
     const at = deps.clock.now().toISOString();
-    deps.db.transaction(() => {
+    deps.db.raw.transaction(() => {
       for (const key of keys) {
         if (tracked.has(index.get(key)!)) failed(key, 'It is tracked. Remove it from the agent first.');
         else {

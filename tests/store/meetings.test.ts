@@ -1,3 +1,4 @@
+import { SqliteDb } from '../../src/store/engine/sqlite.ts';
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import type { MeetingSummary } from '../../src/brain/meetingSchema.ts';
@@ -72,7 +73,7 @@ describe('meetings store', () => {
     const id = insertFound(db, m);
     expect(id).toBeTypeOf('number');
     expect(insertFound(db, { ...m, title: 'Other' })).toBeNull();
-    expect((db.prepare('SELECT COUNT(*) AS n FROM meetings').get() as { n: number }).n).toBe(1);
+    expect((db.raw.prepare('SELECT COUNT(*) AS n FROM meetings').get() as { n: number }).n).toBe(1);
     expect(getMeeting(db, id!)).toMatchObject({
       id, recording: m.recording, conference: CONF, driveFileId: m.driveFileId, meetingCode: 'abc-defg-hij', title: 'Sharma weekly',
       startedAt: m.startedAt, endedAt: m.endedAt, attendees: m.attendees, participants: ['Mr. Sharma'], clientId: 1, matchKind: 'title',
@@ -223,7 +224,7 @@ describe('meetings store', () => {
     const extra = { ...summary(1), mood: 'happy' } as unknown as MeetingSummary;
     expect(() => advanceStage(db, id, 'summarised', { summary: extra }, NOW)).toThrow(/summary value does not have the stored shape/);
     expect(getMeeting(db, id)).toMatchObject({ stage: 'found', summary: null });
-    db.prepare('UPDATE meetings SET summary = ? WHERE id = ?').run(JSON.stringify(extra), id);
+    db.raw.prepare('UPDATE meetings SET summary = ? WHERE id = ?').run(JSON.stringify(extra), id);
     expect(() => getMeeting(db, id)).toThrow(new RegExp(`meeting ${id}.*summary`));
   });
 
@@ -354,7 +355,7 @@ describe('meetings store', () => {
     const old = withStatus(db, 'unassigned', { startedAt: '2026-10-10T10:00:00.000Z', driveSeconds: 100 });
     const recent = withStatus(db, 'unassigned', { startedAt: '2026-10-12T10:00:00.000Z', driveSeconds: null });
     withStatus(db, 'internal');
-    db.prepare('UPDATE meetings SET audio_seconds = 95.5 WHERE id = ?').run(old); // the audio's length wins over Drive's
+    db.raw.prepare('UPDATE meetings SET audio_seconds = 95.5 WHERE id = ?').run(old); // the audio's length wins over Drive's
     const rows = listUnassigned(db, 10);
     expect(rows).toEqual([
       { id: recent, startedAt: '2026-10-12T10:00:00.000Z', seconds: null },
@@ -421,9 +422,9 @@ describe('meetings store', () => {
     const bad = doneMeeting(db, { startedAt: '2026-10-11T10:00:00.000Z' }, { summary: summary(1) });
     const badSummary = doneMeeting(db, { startedAt: '2026-10-12T10:00:00.000Z' }, { summary: summary(1) });
     const noList = doneMeeting(db, { startedAt: '2026-10-13T10:00:00.000Z' }, { summary: summary(1) });
-    db.prepare("UPDATE meetings SET attendees = '[{\"email\": 42, \"secret\": \"Mr Sharma private\"}]' WHERE id = ?").run(bad);
-    db.prepare("UPDATE meetings SET summary = '{not json: private words' WHERE id = ?").run(badSummary);
-    db.prepare(`UPDATE meetings SET summary = '{"actionItems": "private"}' WHERE id = ?`).run(noList);
+    db.raw.prepare("UPDATE meetings SET attendees = '[{\"email\": 42, \"secret\": \"Mr Sharma private\"}]' WHERE id = ?").run(bad);
+    db.raw.prepare("UPDATE meetings SET summary = '{not json: private words' WHERE id = ?").run(badSummary);
+    db.raw.prepare(`UPDATE meetings SET summary = '{"actionItems": "private"}' WHERE id = ?`).run(noList);
     expect(() => getMeeting(db, bad)).toThrow(new RegExp(`meeting ${bad}.*attendees`));
     expect(() => getMeeting(db, bad)).not.toThrow(/private/);
     expect(() => getMeeting(db, badSummary)).toThrow(new RegExp(`meeting ${badSummary}.*summary`));
@@ -482,7 +483,7 @@ describe('migration 7', () => {
     expect((db.prepare('SELECT COUNT(*) AS n FROM meetings').get() as { n: number }).n).toBe(0);
 
     // The new links point at meetings, and the foreign keys hold.
-    const id = insertFound(db, meeting({ status: 'done' }))!;
+    const id = insertFound(SqliteDb.wrap(db), meeting({ status: 'done' }))!;
     db.prepare('UPDATE tasks SET meeting_id = ?').run(id);
     db.prepare('UPDATE decisions SET meeting_id = ?').run(id);
     expect(() => db.prepare('UPDATE tasks SET meeting_id = 999').run()).toThrow(/FOREIGN KEY/);
@@ -492,18 +493,18 @@ describe('migration 7', () => {
 
   it('a fresh database has migration 7, with its indexes, and the table refuses unknown statuses and stages', () => {
     const db = seededDb();
-    expect(db.prepare('SELECT version FROM schema_version WHERE version = 7').get()).toEqual({ version: 7 });
-    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(12); // the latest: v12 is Open chat's outbox, after v11 (priority and sentiment)
-    const idx = (db.prepare("SELECT tbl_name || '.' || name AS n FROM sqlite_master WHERE type = 'index'").all() as { n: string }[]).map((i) => i.n);
+    expect(db.raw.prepare('SELECT version FROM schema_version WHERE version = 7').get()).toEqual({ version: 7 });
+    expect((db.raw.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(12); // the latest: v12 is Open chat's outbox, after v11 (priority and sentiment)
+    const idx = (db.raw.prepare("SELECT tbl_name || '.' || name AS n FROM sqlite_master WHERE type = 'index'").all() as { n: string }[]).map((i) => i.n);
     expect(idx).toEqual(expect.arrayContaining([
       'meetings.meetings_due', 'meetings.meetings_conference', 'meetings.meetings_client', 'tasks.tasks_meeting', 'decisions.decisions_meeting',
     ]));
-    expect(db.prepare("SELECT name FROM pragma_index_info('meetings_client') ORDER BY seqno").all()).toEqual([
+    expect(db.raw.prepare("SELECT name FROM pragma_index_info('meetings_client') ORDER BY seqno").all()).toEqual([
       { name: 'client_id' }, { name: 'status' }, { name: 'started_at' },
     ]);
     expect(() => insertFound(db, meeting({ status: 'pending' as MeetingStatus }))).toThrow(/CHECK/);
     const id = withStatus(db, 'queued');
-    expect(() => db.prepare("UPDATE meetings SET stage = 'uploaded' WHERE id = ?").run(id)).toThrow(/CHECK/);
+    expect(() => db.raw.prepare("UPDATE meetings SET stage = 'uploaded' WHERE id = ?").run(id)).toThrow(/CHECK/);
     expect(() => insertFound(db, meeting({ clientId: 999 }))).toThrow(/FOREIGN KEY/);
   });
 
@@ -515,7 +516,7 @@ describe('migration 7', () => {
     expect(() => insertFound(db, meeting({ ...internal, attendees: [{ email: 'r@us.example', name: null, team: true }] }))).toThrow(/CHECK/);
     expect(() => insertFound(db, meeting({ ...internal, participants: ['Rohit'] }))).toThrow(/CHECK/);
     const queued = withStatus(db, 'queued');
-    expect(() => db.prepare("UPDATE meetings SET status = 'internal' WHERE id = ?").run(queued)).toThrow(/CHECK/);
+    expect(() => db.raw.prepare("UPDATE meetings SET status = 'internal' WHERE id = ?").run(queued)).toThrow(/CHECK/);
   });
 });
 

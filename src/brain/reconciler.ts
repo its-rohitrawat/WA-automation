@@ -6,7 +6,7 @@ import type { SpendGuard } from '../spend/spendGuard.ts';
 import { finishBatch, startBatch } from '../store/batches.ts';
 import type { PriorityConfig } from '../config/prioritySettings.ts';
 import { getClient, setClientSentiment, setPhase, setStatus, type ClientRow } from '../store/clients.ts';
-import { tx, type Db } from '../store/db.ts';
+import { txSync, type Db } from '../store/db.ts';
 import { mediaForMessages } from '../store/media.ts';
 import { finishMeeting } from '../store/meetings.ts';
 import {
@@ -303,7 +303,7 @@ export class Reconciler {
     const appliedAt = clock.now();
     let applied: { accepted: AiOp[]; rejected: Rejection[]; requeued: number };
     try {
-      applied = tx(db, () => {
+      applied = txSync(db, () => {
         // The call can take minutes and a human can correct the tracker meanwhile, so validate against the
         // client, tasks and people as they are now. Nothing can interleave inside this synchronous transaction.
         const fresh = getClient(db, clientId);
@@ -401,7 +401,7 @@ export class Reconciler {
     const appliedAt = clock.now();
     let applied: { accepted: AiOp[]; rejected: Rejection[] };
     try {
-      applied = tx(db, () => {
+      applied = txSync(db, () => {
         const fresh = getClient(db, clientId);
         const state = this.#validationState(fresh, clientId, {
           batchIds: new Set(items.map((it) => it.id)),

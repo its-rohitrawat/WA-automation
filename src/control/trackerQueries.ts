@@ -68,7 +68,7 @@ function newFileAt(db: Db): string | null {
  * audit log may not have yet: it is written on changes only), whichever is later. Counts no tasks.
  */
 export function lastTrackerUpload(db: Db, snapshotLast: string | null | undefined): string | null {
-  const published = db.prepare("SELECT MAX(at) AS at FROM audit_log WHERE actor = 'agent' AND event = 'tracker.published'").get() as { at: string | null };
+  const published = db.raw.prepare("SELECT MAX(at) AS at FROM audit_log WHERE actor = 'agent' AND event = 'tracker.published'").get() as { at: string | null };
   return [published.at, snapshotLast ?? null].filter((t): t is string => t !== null).sort().at(-1) ?? null;
 }
 
@@ -84,7 +84,7 @@ export function trackerSummary(
   const today = istDate(now);
   const url = trackerLink(db) ?? null;
   const failure = db
-    .prepare("SELECT at, detail FROM audit_log WHERE actor = 'agent' AND event = 'tracker.publish_failed' ORDER BY at DESC, id DESC LIMIT 1")
+    .raw.prepare("SELECT at, detail FROM audit_log WHERE actor = 'agent' AND event = 'tracker.publish_failed' ORDER BY at DESC, id DESC LIMIT 1")
     .get() as { at: string; detail: string } | undefined;
 
   const clients = listClients(db, false);
@@ -92,7 +92,7 @@ export function trackerSummary(
   const assigned = uniqueSheetNames(byId.map((c) => c.name));
   const sheetName = new Map(byId.map((c, i) => [c.id, assigned[i]!]));
   const counts = new Map(
-    (db.prepare(`SELECT client_id AS clientId,
+    (db.raw.prepare(`SELECT client_id AS clientId,
         COALESCE(SUM(status <> 'done' AND deadline IS NOT NULL AND deadline < @today), 0) AS overdue,
         COALESCE(SUM(status = 'maybe_done' AND NOT (deadline IS NOT NULL AND deadline < @today)), 0) AS review,
         COALESCE(SUM(status <> 'done'), 0) AS notDone,

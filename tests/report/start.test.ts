@@ -43,7 +43,7 @@ async function linkedFile(file: string, master: Buffer, open: typeof useSenderAu
   const a = open(db, master);
   a.state.creds.me = { id: '919800000099:3@s.whatsapp.net', name: 'S' };
   await a.saveCreds();
-  db.close();
+  db.raw.close();
 }
 
 /** The full number, or any 5 of its digits in a row, must not reach the log. */
@@ -66,7 +66,7 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
       expect(line).toMatchObject({ recipientLast4: '…1234', linked: false });
       expectNoNumber(r.out());
     } finally {
-      r.senderDb?.close();
+      r.senderDb?.raw.close();
     }
   });
 
@@ -79,7 +79,7 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
       expect(r.report.sender.status().state).toBe('idle');
       expect(r.records().find((l) => l.msg === 'morning report enabled')).toMatchObject({ linked: true });
     } finally {
-      r.senderDb?.close();
+      r.senderDb?.raw.close();
     }
   });
 
@@ -94,10 +94,10 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
       expect(r.factory).not.toHaveBeenCalled();
       for (let i = 0; i + 5 <= 12; i++) expect(r.out()).not.toContain('919800000099'.slice(i, i + 5));
     } finally {
-      r.senderDb?.close();
+      r.senderDb?.raw.close();
     }
     const other = start(tempDir(), master, '919800000099');
-    other.senderDb?.close();
+    other.senderDb?.raw.close();
     expect(other.report.sender.status().state).toBe('not_linked');
   });
 
@@ -121,7 +121,7 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
       expect(r.report.sender.status().state).toBe('not_linked');
       expect(readFileSync(sessionDbPath(dir)).equals(before)).toBe(true);
     } finally {
-      r.senderDb?.close();
+      r.senderDb?.raw.close();
     }
   });
 
@@ -168,16 +168,16 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
     // The spare-number session is closed after app.stop(), and on the startup-failure path, and nowhere else: closing it
     // while the sender runs would make its credential saves fail.
     const count = (sub: string) => src.split(sub).length - 1;
-    expect(count('senderDb?.close()')).toBe(1);
+    expect(count('senderDb?.raw.close()')).toBe(1);
     const catchAt = src.indexOf('} catch (e) {');
     expect(catchAt).toBeGreaterThan(0);
     const catchBlock = src.slice(catchAt, src.indexOf('process.exit(2)', catchAt));
-    expect(catchBlock).toContain('senderDb?.close()');
-    expect(count('senderStore?.close()')).toBe(1);
+    expect(catchBlock).toContain('senderDb?.raw.close()');
+    expect(count('senderStore?.raw.close()')).toBe(1);
     const stopAt = src.indexOf('.stop()');
     expect(stopAt).toBeGreaterThan(0);
     const afterStop = src.slice(stopAt, src.indexOf('process.exit', stopAt));
-    expect(afterStop).toMatch(/\.finally\(\(\) => \{[\s\S]*senderStore\?\.close\(\)/);
+    expect(afterStop).toMatch(/\.finally\(\(\) => \{[\s\S]*senderStore\?\.raw\.close\(\)/);
     const startup = src.slice(src.indexOf('openMorningReport('), src.indexOf('createApp({'));
     expect(startup.length).toBeGreaterThan(0);
     expect(startup).not.toMatch(/\.close\(/);

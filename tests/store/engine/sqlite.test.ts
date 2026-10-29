@@ -1,3 +1,4 @@
+import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import { SqliteDb, TxMisuseError } from '../../../src/store/engine/sqlite.ts';
 
@@ -77,6 +78,17 @@ describe('SqliteDb', () => {
     release();
     await held;
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM t').get()).toEqual({ n: 2 });
+  });
+
+  it('wraps a handle opened elsewhere, keeping its own pragmas', async () => {
+    const raw = new Database(':memory:');
+    raw.pragma('busy_timeout = 1234');
+    const db = SqliteDb.wrap(raw);
+    expect(db.raw).toBe(raw);
+    expect(raw.pragma('busy_timeout', { simple: true })).toBe(1234); // wrap sets nothing (open sets 5000)
+    await db.exec('CREATE TABLE t (k TEXT)');
+    await db.run('INSERT INTO t VALUES (?)', ['a']);
+    expect(raw.prepare('SELECT k FROM t').all()).toEqual([{ k: 'a' }]);
   });
 
   it('a transaction held too long fails under test', async () => {

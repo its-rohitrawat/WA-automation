@@ -64,7 +64,7 @@ const ticks = async () => {
   for (let i = 0; i < 5; i++) await flush();
 };
 const WAIT = { timeout: 10_000 };
-const spendRows = (db: Db) => db.prepare('SELECT kind, detail FROM spend ORDER BY id').all();
+const spendRows = (db: Db) => db.raw.prepare('SELECT kind, detail FROM spend ORDER BY id').all();
 
 describe('MeetingQueue', () => {
   it('at start books parts left in flight, deletes provider copies and cleans work files before any meeting runs', async () => {

@@ -19,7 +19,7 @@ function setup() {
   return { db, clock, store, audits, audit: (e: AuditEntry) => audits.push(e) };
 }
 
-const rows = (db: Db) => db.prepare('SELECT k, v, updated_by AS by FROM settings ORDER BY k').all();
+const rows = (db: Db) => db.raw.prepare('SELECT k, v, updated_by AS by FROM settings ORDER BY k').all();
 
 function refusal(fn: () => unknown): ControlError {
   try {
@@ -110,7 +110,7 @@ describe('PrioritySettings', () => {
 
   it('falls back to the defaults when a stored row is damaged', () => {
     const { db, store } = setup();
-    db.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('priorityKeywords', '{\"critical\":5}', ?, 'x'), ('sentimentEnabled', 'nope', ?, 'x')").run(NOW, NOW);
+    db.raw.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('priorityKeywords', '{\"critical\":5}', ?, 'x'), ('sentimentEnabled', 'nope', ?, 'x')").run(NOW, NOW);
     expect(store.get()).toEqual({ keywords: DEFAULT_KEYWORDS, sentimentEnabled: false });
     expect(store.view().source).toEqual({ priorityKeywords: 'default', sentimentEnabled: 'default' });
   });

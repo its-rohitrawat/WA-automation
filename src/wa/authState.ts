@@ -7,6 +7,7 @@ import type { AuthenticationCreds, AuthenticationState, SignalDataSet, SignalDat
 import { decrypt, encrypt } from '../crypto/envelope.ts';
 import { deriveSubkey } from '../crypto/keyProvider.ts';
 import type { Db } from '../store/db.ts';
+import { SqliteDb } from '../store/engine/sqlite.ts';
 
 export class SessionDecryptError extends Error {
   constructor(options?: ErrorOptions) {
@@ -31,19 +32,21 @@ export class SenderSessionDecryptError extends Error {
   }
 }
 
+/** The session file, behind the same Db interface as the tracker, with its own pragmas. */
 export function openSessionDb(file: string): Db {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
-  const db = new Database(file);
+  const raw = new Database(file);
+  const db = SqliteDb.wrap(raw);
   try {
-    db.pragma('journal_mode = WAL');
+    raw.pragma('journal_mode = WAL');
     // Wipe rotated-out keys from free pages.
-    db.pragma('secure_delete = ON');
-    db.exec('CREATE TABLE IF NOT EXISTS auth (k TEXT PRIMARY KEY, v BLOB NOT NULL)');
+    raw.pragma('secure_delete = ON');
+    raw.exec('CREATE TABLE IF NOT EXISTS auth (k TEXT PRIMARY KEY, v BLOB NOT NULL)');
     // A copy of the rows while a dashboard link runs (src/wa/linkSession.ts); empty otherwise.
-    db.exec('CREATE TABLE IF NOT EXISTS auth_backup (k TEXT PRIMARY KEY, v BLOB NOT NULL)');
+    raw.exec('CREATE TABLE IF NOT EXISTS auth_backup (k TEXT PRIMARY KEY, v BLOB NOT NULL)');
     restoreBackup(db); // a link that never finished: the session from before it comes back
   } catch (err) {
-    db.close();
+    raw.close();
     throw err;
   }
   return db;
@@ -60,28 +63,28 @@ const BACKUP_MARKER = '#link-in-progress';
 
 /** In one transaction: copies every row to auth_backup, then empties auth (the reset for a new link). */
 export function backupAndReset(db: Db): void {
-  db.transaction(() => {
-    db.prepare('DELETE FROM auth_backup').run();
-    db.prepare('INSERT INTO auth_backup (k, v) SELECT k, v FROM auth').run();
-    db.prepare('INSERT INTO auth_backup (k, v) VALUES (?, ?)').run(BACKUP_MARKER, Buffer.alloc(0));
-    db.prepare('DELETE FROM auth').run();
+  db.raw.transaction(() => {
+    db.raw.prepare('DELETE FROM auth_backup').run();
+    db.raw.prepare('INSERT INTO auth_backup (k, v) SELECT k, v FROM auth').run();
+    db.raw.prepare('INSERT INTO auth_backup (k, v) VALUES (?, ?)').run(BACKUP_MARKER, Buffer.alloc(0));
+    db.raw.prepare('DELETE FROM auth').run();
   })();
 }
 
 /** In one transaction: the backed-up rows replace auth, and the backup is dropped. False when there was no backup. */
 export function restoreBackup(db: Db): boolean {
-  return db.transaction(() => {
-    if (!db.prepare('SELECT 1 FROM auth_backup WHERE k = ?').get(BACKUP_MARKER)) return false;
-    db.prepare('DELETE FROM auth').run();
-    db.prepare('INSERT INTO auth (k, v) SELECT k, v FROM auth_backup WHERE k <> ?').run(BACKUP_MARKER);
-    db.prepare('DELETE FROM auth_backup').run();
+  return db.raw.transaction(() => {
+    if (!db.raw.prepare('SELECT 1 FROM auth_backup WHERE k = ?').get(BACKUP_MARKER)) return false;
+    db.raw.prepare('DELETE FROM auth').run();
+    db.raw.prepare('INSERT INTO auth (k, v) SELECT k, v FROM auth_backup WHERE k <> ?').run(BACKUP_MARKER);
+    db.raw.prepare('DELETE FROM auth_backup').run();
     return true;
   })();
 }
 
 /** The new link is kept: the backup is no longer needed. */
 export function dropBackup(db: Db): void {
-  db.prepare('DELETE FROM auth_backup').run();
+  db.raw.prepare('DELETE FROM auth_backup').run();
 }
 
 /** A link that never finished left its backup: the session rows from before it come back. True when it restored them. */
@@ -94,9 +97,9 @@ export function recoverInterruptedLink(db: Db): boolean {
  * dashboard link that never finished goes too: otherwise the next start would restore it over this new link.
  */
 export function resetSession(db: Db): void {
-  db.transaction(() => {
-    db.prepare('DELETE FROM auth').run();
-    db.prepare('DELETE FROM auth_backup').run();
+  db.raw.transaction(() => {
+    db.raw.prepare('DELETE FROM auth').run();
+    db.raw.prepare('DELETE FROM auth_backup').run();
   })();
 }
 
@@ -121,10 +124,10 @@ function sessionCodec(key: Buffer) {
 
 /** Writes the canary row when the table is empty. */
 export function useEncryptedAuthState(db: Db, key: Buffer): EncryptedAuth {
-  const getStmt = db.prepare('SELECT v FROM auth WHERE k = ?');
-  const putStmt = db.prepare('INSERT INTO auth (k, v) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v');
-  const getCount = db.prepare('SELECT COUNT(*) AS n FROM auth');
-  const delStmt = db.prepare('DELETE FROM auth WHERE k = ?');
+  const getStmt = db.raw.prepare('SELECT v FROM auth WHERE k = ?');
+  const putStmt = db.raw.prepare('INSERT INTO auth (k, v) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v');
+  const getCount = db.raw.prepare('SELECT COUNT(*) AS n FROM auth');
+  const delStmt = db.raw.prepare('DELETE FROM auth WHERE k = ?');
 
   const { valueKey, rowId, open } = sessionCodec(key);
   const read = (name: string): unknown => {
@@ -165,7 +168,7 @@ export function useEncryptedAuthState(db: Db, key: Buffer): EncryptedAuth {
   return {
     hasSession: Boolean(creds.me?.id),
     saveCreds: async () => {
-      db.transaction(() => {
+      db.raw.transaction(() => {
         write('canary', 'ok');
         write('creds', creds);
       })();
@@ -183,7 +186,7 @@ export function useEncryptedAuthState(db: Db, key: Buffer): EncryptedAuth {
           return out;
         },
         set: async (data: SignalDataSet) => {
-          db.transaction(() => {
+          db.raw.transaction(() => {
             for (const category of Object.keys(data) as (keyof SignalDataSet)[]) {
               for (const [id, value] of Object.entries(data[category] ?? {})) {
                 const name = `${category}:${id}`;
@@ -223,7 +226,7 @@ export function useSenderAuthState(db: Db, masterKey: Buffer): EncryptedAuth {
  */
 export function readFounderNumber(file: string, key: Buffer): string | undefined {
   if (!existsSync(file)) return undefined;
-  let db: Db | undefined;
+  let db: Database.Database | undefined;
   try {
     const wal = `${file}-wal`;
     if (existsSync(wal) && statSync(wal).size > 0) {
@@ -294,7 +297,7 @@ function probeDamage(file: string): string | undefined {
   } catch {
     return undefined; // missing, a folder, no permission: the normal open reports it
   }
-  let probe: Db | undefined;
+  let probe: Database.Database | undefined;
   try {
     probe = new Database(file, { readonly: true, fileMustExist: true });
     probe.prepare('SELECT 1 FROM sqlite_master').get();
@@ -325,7 +328,7 @@ export function openSenderSession(file: string, masterKey: Buffer): SenderSessio
     return { ok: true, db, auth: useSenderAuthState(db, masterKey) };
   } catch (err) {
     try {
-      db?.close();
+      db?.raw.close();
     } catch {
       // best effort
     }

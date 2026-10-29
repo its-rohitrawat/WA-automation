@@ -50,7 +50,7 @@ export function usageSummary(
   const today = istDate(now);
   const first = minusDays(today, USAGE_DAYS - 1);
   const totals = new Map(
-    (db.prepare('SELECT day, SUM(usd) AS usd FROM spend WHERE day BETWEEN ? AND ? GROUP BY day').all(first, today) as { day: string; usd: number }[])
+    (db.raw.prepare('SELECT day, SUM(usd) AS usd FROM spend WHERE day BETWEEN ? AND ? GROUP BY day').all(first, today) as { day: string; usd: number }[])
       .map((r) => [r.day, r.usd]),
   );
   const days = Array.from({ length: USAGE_DAYS }, (_, i) => {
@@ -59,7 +59,7 @@ export function usageSummary(
   });
 
   const uses = new Map(
-    (db.prepare(`SELECT ${USE_SQL} AS use, SUM(usd) AS usd FROM spend WHERE day = ? GROUP BY 1`).all(today) as { use: string; usd: number }[])
+    (db.raw.prepare(`SELECT ${USE_SQL} AS use, SUM(usd) AS usd FROM spend WHERE day = ? GROUP BY 1`).all(today) as { use: string; usd: number }[])
       .map((r) => [r.use, r.usd]),
   );
   const byUse: UsageSummary['byUse'] = [];
@@ -76,7 +76,7 @@ export function usageSummary(
   const from = fromIstDate(today);
   const to = new Date(from.getTime() + 86_400_000);
   const b = db
-    .prepare("SELECT COUNT(*) AS n, COALESCE(SUM(message_count), 0) AS messages FROM batches WHERE status = 'ok' AND finished_at >= ? AND finished_at < ?")
+    .raw.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(message_count), 0) AS messages FROM batches WHERE status = 'ok' AND finished_at >= ? AND finished_at < ?")
     .get(from.toISOString(), to.toISOString()) as { n: number; messages: number };
 
   const spent = spend.spentToday();

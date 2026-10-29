@@ -80,7 +80,7 @@ function withTracker<T>(fn: (db: Db) => T): T {
   try {
     return fn(db);
   } finally {
-    db.close();
+    db.raw.close();
   }
 }
 
@@ -107,7 +107,7 @@ async function seedSender(key: Buffer = KEY): Promise<void> {
   const auth = useSenderAuthState(sdb, key);
   auth.state.creds.me = { id: '919800000099:2@s.whatsapp.net', name: 'Spare' };
   await auth.saveCreds();
-  sdb.close();
+  sdb.raw.close();
 }
 
 /** The founder reader's own number (session.db), deliberately not REPORT_RECIPIENT. */
@@ -119,7 +119,7 @@ async function seedFounder(key: Buffer = KEY): Promise<void> {
   const auth = useEncryptedAuthState(db, key);
   auth.state.creds.me = { id: `${FOUNDER}:7@s.whatsapp.net`, name: 'Founder' };
   await auth.saveCreds();
-  db.close();
+  db.raw.close();
 }
 
 /** A spare-number socket factory whose QR code is scanned by the phone with this number. */
@@ -142,7 +142,7 @@ const senderLinked = (): boolean => {
   try {
     return useSenderAuthState(sdb, KEY).hasSession;
   } finally {
-    sdb.close();
+    sdb.raw.close();
   }
 };
 

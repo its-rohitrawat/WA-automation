@@ -13,7 +13,7 @@ import { seededDb } from '../helpers/db.ts';
 function setup(capUsd = 1) {
   const db = seededDb();
   const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd });
-  const rows = () => db.prepare('SELECT usd, detail FROM spend ORDER BY id').all() as { usd: number; detail: string }[];
+  const rows = () => db.raw.prepare('SELECT usd, detail FROM spend ORDER BY id').all() as { usd: number; detail: string }[];
   return { spend, rows };
 }
 const ok = (costUsd: number, fallbackUsed = false) => async () => ({ costUsd, fallbackUsed, text: 'x' });

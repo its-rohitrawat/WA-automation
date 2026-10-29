@@ -32,7 +32,7 @@ class FakeSocket implements GroupSendSocket {
   }
   async sendMessage(jid: string, content: { text: string }, options?: { quoted: QuotedMessage }) {
     this.calls.push({ jid, text: content.text, quoted: options?.quoted });
-    this.stateDuring.push((this.db.prepare('SELECT state FROM outbox ORDER BY id DESC LIMIT 1').get() as { state: string } | undefined)?.state);
+    this.stateDuring.push((this.db.raw.prepare('SELECT state FROM outbox ORDER BY id DESC LIMIT 1').get() as { state: string } | undefined)?.state);
     if (this.mode === 'throw') throw new Error('socket closed while sending to 120363000000000001@g.us');
     if (this.mode === 'hang') return new Promise<never>(() => {});
     if (this.mode === 'no-id') return { key: {} };
@@ -77,14 +77,14 @@ beforeEach(() => {
 const send = (body: Record<string, unknown>, code = 'SHA') => chatSendHandler(deps, CTX, code, { uuid: uuid(1), text: 'Hello team', confirm: true, ...body });
 const errorOf = (r: { body: unknown }) => (r.body as { error: { code: string; message: string } }).error;
 const sent = (r: { body: unknown }) => r.body as { message: { uuid: string; state: string; text: string; quote: unknown }; replayed: boolean };
-const outboxRows = () => db.prepare('SELECT * FROM outbox').all() as { state: string; wa_id: string | null; error_code: string | null }[];
+const outboxRows = () => db.raw.prepare('SELECT * FROM outbox').all() as { state: string; wa_id: string | null; error_code: string | null }[];
 
 function say(waId: string, o: { text?: string | null; fromMe?: boolean; ts?: string; jid?: string; media?: string } = {}): number {
   insertMessage(db, {
     waId, clientId: 1, senderJid: o.jid ?? '919812345678@s.whatsapp.net', senderNumber: o.fromMe ? null : '919812345678', senderName: null,
     fromMe: o.fromMe ?? false, ts: o.ts ?? '2026-10-19T07:00:00.000Z', text: o.text === undefined ? `text of ${waId}` : o.text, quotedWaId: null, mediaType: o.media ?? null,
   });
-  return (db.prepare('SELECT id FROM messages WHERE wa_id = ?').get(waId) as { id: number }).id;
+  return (db.raw.prepare('SELECT id FROM messages WHERE wa_id = ?').get(waId) as { id: number }).id;
 }
 
 describe('sending from the dashboard', () => {
@@ -149,7 +149,7 @@ describe('sending from the dashboard', () => {
     configs = [MEHTA]; // Sharma's group is no longer in the allow-list
     expect((await send({})).status).toBe(404);
     configs = [SHARMA, MEHTA];
-    db.prepare("UPDATE clients SET active = 0 WHERE code = 'SHA'").run();
+    db.raw.prepare("UPDATE clients SET active = 0 WHERE code = 'SHA'").run();
     expect((await send({})).status).toBe(404);
     expect(sock.calls).toEqual([]);
   });
@@ -224,7 +224,7 @@ describe('sending from the dashboard', () => {
       waId: 'MEHTA00000000001', clientId: 2, senderJid: 'x@s.whatsapp.net', senderNumber: null, senderName: null, fromMe: false,
       ts: NOW, text: 'other client', quotedWaId: null, mediaType: null,
     });
-    const otherId = (db.prepare("SELECT id FROM messages WHERE wa_id = 'MEHTA00000000001'").get() as { id: number }).id;
+    const otherId = (db.raw.prepare("SELECT id FROM messages WHERE wa_id = 'MEHTA00000000001'").get() as { id: number }).id;
     clock.advance(5_000);
     const bad = await send({ uuid: uuid(2), replyTo: otherId });
     expect(bad.status).toBe(400);
@@ -244,7 +244,7 @@ describe('sending from the dashboard', () => {
     expect(echo).not.toBeNull();
     ingest.handle(echo!);
     ingest.handle(echo!); // Baileys' own event, then the phone's copy of the same message
-    expect((db.prepare('SELECT COUNT(*) AS n FROM messages WHERE wa_id = ?').get(waId) as { n: number }).n).toBe(1);
+    expect((db.raw.prepare('SELECT COUNT(*) AS n FROM messages WHERE wa_id = ?').get(waId) as { n: number }).n).toBe(1);
     const page = chatPage(db, sha, clock.now());
     expect(page.outbox).toEqual([]);
     expect(page.messages.filter((m) => m.text === 'Hello team')).toEqual([expect.objectContaining({ mine: true, sender: 'Founder' })]);
@@ -268,7 +268,7 @@ describe('resending to a phone that could not read a message (getMessage)', () =
     expect(await getMessage({ id: waId, remoteJid: SHARMA.groupId })).toEqual({ conversation: 'Hello team' });
     // A message the agent only read (stored, not in the outbox), the right id in another group, an unknown id, no id.
     const read = say('READ000000000001', { text: 'a member wrote this' });
-    const readWaId = (db.prepare('SELECT wa_id AS w FROM messages WHERE id = ?').get(read) as { w: string }).w;
+    const readWaId = (db.raw.prepare('SELECT wa_id AS w FROM messages WHERE id = ?').get(read) as { w: string }).w;
     expect(await getMessage({ id: readWaId, remoteJid: SHARMA.groupId })).toBeUndefined();
     expect(await getMessage({ id: waId, remoteJid: MEHTA.groupId })).toBeUndefined();
     expect(await getMessage({ id: 'NOPE000000000000', remoteJid: SHARMA.groupId })).toBeUndefined();
@@ -308,11 +308,11 @@ describe('reading the chat', () => {
 
   it('a deleted message has no text; a voice note shows its transcript; a reply shows its quote', () => {
     const gone = say('GONE000000000001', { text: 'secret' });
-    db.prepare('UPDATE messages SET revoked = 1 WHERE id = ?').run(gone);
+    db.raw.prepare('UPDATE messages SET revoked = 1 WHERE id = ?').run(gone);
     const voice = say('VOICE00000000001', { text: null, media: 'voice', ts: '2026-10-19T07:01:00.000Z' });
-    db.prepare("INSERT INTO media (message_id, client_id, kind, status, seconds, text_kind, text, created_at, updated_at) VALUES (?, 1, 'voice', 'done', 42, 'extract', 'Please call me', '2026-10-19T07:01:00.000Z', '2026-10-19T07:01:00.000Z')").run(voice);
+    db.raw.prepare("INSERT INTO media (message_id, client_id, kind, status, seconds, text_kind, text, created_at, updated_at) VALUES (?, 1, 'voice', 'done', 42, 'extract', 'Please call me', '2026-10-19T07:01:00.000Z', '2026-10-19T07:01:00.000Z')").run(voice);
     say('QUOTER0000000001', { ts: '2026-10-19T07:02:00.000Z', text: 'yes' });
-    db.prepare("UPDATE messages SET quoted_wa_id = 'VOICE00000000001' WHERE wa_id = 'QUOTER0000000001'").run();
+    db.raw.prepare("UPDATE messages SET quoted_wa_id = 'VOICE00000000001' WHERE wa_id = 'QUOTER0000000001'").run();
     const [reply, note, deleted] = view(read()).messages;
     expect(deleted).toMatchObject({ deleted: true, text: '' });
     expect(note).toMatchObject({ kind: 'voice', transcript: 'Please call me' });

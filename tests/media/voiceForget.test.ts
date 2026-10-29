@@ -28,7 +28,7 @@ function copied(db: Db, waId: string, ref: string, provider: ProviderId = 'eleve
 }
 
 const rows = (db: Db) =>
-  db.prepare('SELECT media_id AS mediaId, provider, ref, attempts, next_try_at AS nextTryAt FROM media_stt_forget ORDER BY id').all() as {
+  db.raw.prepare('SELECT media_id AS mediaId, provider, ref, attempts, next_try_at AS nextTryAt FROM media_stt_forget ORDER BY id').all() as {
     mediaId: number; provider: string; ref: string; attempts: number; nextTryAt: string | null;
   }[];
 

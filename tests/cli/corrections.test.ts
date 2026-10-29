@@ -22,7 +22,7 @@ function withTask() {
 
 interface Ev { op: string; actor: string; detail: unknown; task_id: number | null; client_id: number }
 function events(db: Db): Ev[] {
-  const rows = db.prepare("SELECT op, actor, detail, task_id, client_id FROM task_events WHERE actor = 'human' ORDER BY id").all() as (Omit<Ev, 'detail'> & { detail: string })[];
+  const rows = db.raw.prepare("SELECT op, actor, detail, task_id, client_id FROM task_events WHERE actor = 'human' ORDER BY id").all() as (Omit<Ev, 'detail'> & { detail: string })[];
   return rows.map((e) => ({ ...e, detail: JSON.parse(e.detail) as unknown }));
 }
 
@@ -193,7 +193,7 @@ describe('reprocess', () => {
     expect(() => requestReprocess(db, 'SHA', '2026-10-11', now, 'soon')).toThrowError(/YYYY-MM-DD/);
     expect(() => requestReprocess(db, 'SHA', '2026-10-11', now, '2026-10-10')).toThrowError(/on or after/);
     expect(() => requestReprocess(db, 'ZZZ', '2026-10-11', now)).toThrowError(/No client/);
-    db.prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
+    db.raw.prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
     expect(() => requestReprocess(db, 'SHA', '2026-10-11', now)).toThrowError('Client SHA is not in the allow-list; nothing to reprocess');
     expect(() => countReprocess(db, 'SHA', '2026-10-11')).toThrowError(/not in the allow-list/);
   });

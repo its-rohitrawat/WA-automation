@@ -7,7 +7,7 @@ import { MIGRATIONS, type Migration } from '../../src/store/migrations.ts';
 describe('openDb', () => {
   it('creates every table', () => {
     const db = openDb(':memory:');
-    const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]).map((t) => t.name);
+    const tables = (db.raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]).map((t) => t.name);
     expect(tables).toEqual(expect.arrayContaining([
       'batches', 'clients', 'decisions', 'kv', 'media', 'media_stt_forget', 'meetings', 'message_edits', 'messages', 'people', 'reactions', 'reports', 'schema_version', 'spend',
       'stt_forget', 'task_events', 'tasks', 'web_sessions', 'audit_log', 'settings', 'uptime_log',
@@ -16,30 +16,30 @@ describe('openDb', () => {
 
   it('creates the task and media indexes', () => {
     const db = openDb(':memory:');
-    const idx = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as { name: string }[]).map((i) => i.name);
+    const idx = (db.raw.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as { name: string }[]).map((i) => i.name);
     expect(idx).toEqual(expect.arrayContaining(['tasks_client_status', 'task_events_client_at', 'media_due', 'media_client', 'meetings_due', 'meetings_conference']));
   });
 
   it('is at schema version 12 straight after openDb', () => {
     const db = openDb(':memory:');
-    expect((db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(12);
+    expect((db.raw.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(12);
   });
 
   it('is safe to migrate twice', () => {
     const db = openDb(':memory:');
-    migrate(db);
-    expect((db.prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(12);
+    migrate(db.raw);
+    expect((db.raw.prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(12);
   });
 
   it('overwrites deleted content, so wiped download details do not stay in free pages', () => {
     const db = openDb(':memory:');
-    expect(db.pragma('secure_delete', { simple: true })).toBe(1);
+    expect(db.raw.pragma('secure_delete', { simple: true })).toBe(1);
   });
 
   it('enforces foreign keys', () => {
     const db = openDb(':memory:');
     expect(() =>
-      db.prepare("INSERT INTO messages (wa_id, client_id, sender_jid, ts) VALUES ('m1', 999, 'x', '2026-10-10T00:00:00Z')").run(),
+      db.raw.prepare("INSERT INTO messages (wa_id, client_id, sender_jid, ts) VALUES ('m1', 999, 'x', '2026-10-10T00:00:00Z')").run(),
     ).toThrowError(/FOREIGN KEY/);
   });
 });
@@ -313,9 +313,9 @@ describe('migration v10 (dashboard: task history index, outage reasons)', () => 
 
   it('reaches v10 on a fresh database, with the task history index and the reason column', () => {
     const db = openDb(':memory:');
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
-    expect(db.prepare("SELECT name FROM pragma_index_info('task_events_task') ORDER BY seqno").all()).toEqual([{ name: 'task_id' }, { name: 'at' }, { name: 'id' }]);
-    expect(columns(db, 'uptime_log')).toEqual([
+    expect(versions(db.raw)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(db.raw.prepare("SELECT name FROM pragma_index_info('task_events_task') ORDER BY seqno").all()).toEqual([{ name: 'task_id' }, { name: 'at' }, { name: 'id' }]);
+    expect(columns(db.raw, 'uptime_log')).toEqual([
       { name: 'id', type: 'INTEGER', required: 0 },
       { name: 'at', type: 'TEXT', required: 1 },
       { name: 'up', type: 'INTEGER', required: 1 },
@@ -340,7 +340,7 @@ describe('migration v10 (dashboard: task history index, outage reasons)', () => 
 
   it('takes a reason of 1 to 100 characters, or none', () => {
     const db = openDb(':memory:');
-    const put = db.prepare("INSERT INTO uptime_log (at, up, reason) VALUES ('2026-10-27T00:00:00Z', 0, ?)");
+    const put = db.raw.prepare("INSERT INTO uptime_log (at, up, reason) VALUES ('2026-10-27T00:00:00Z', 0, ?)");
     put.run('stopped');
     put.run(null);
     expect(() => put.run('')).toThrowError(/CHECK/);
@@ -436,14 +436,14 @@ describe('migration v12 (Open chat: the outbox)', () => {
 
   it('one row per uuid, a known state, 1 to 4096 characters, an existing client', () => {
     const db = openDb(':memory:');
-    db.prepare(`INSERT INTO clients (code, name, group_id, phases) VALUES ('SHA', 'Sharma', '120363000000000001@g.us', '[]')`).run();
-    put(db);
-    expect(() => put(db)).toThrowError(/UNIQUE/);
-    expect(() => put(db, { uuid: 'short' })).toThrowError(/CHECK/);
-    expect(() => put(db, { uuid: '00000000-0000-4000-8000-000000000002', state: 'retrying' })).toThrowError(/CHECK/);
-    expect(() => put(db, { uuid: '00000000-0000-4000-8000-000000000003', text: '' })).toThrowError(/CHECK/);
-    expect(() => put(db, { uuid: '00000000-0000-4000-8000-000000000004', text: 'x'.repeat(4097) })).toThrowError(/CHECK/);
-    expect(() => put(db, { uuid: '00000000-0000-4000-8000-000000000005', client: 99 })).toThrowError(/FOREIGN KEY/);
+    db.raw.prepare(`INSERT INTO clients (code, name, group_id, phases) VALUES ('SHA', 'Sharma', '120363000000000001@g.us', '[]')`).run();
+    put(db.raw);
+    expect(() => put(db.raw)).toThrowError(/UNIQUE/);
+    expect(() => put(db.raw, { uuid: 'short' })).toThrowError(/CHECK/);
+    expect(() => put(db.raw, { uuid: '00000000-0000-4000-8000-000000000002', state: 'retrying' })).toThrowError(/CHECK/);
+    expect(() => put(db.raw, { uuid: '00000000-0000-4000-8000-000000000003', text: '' })).toThrowError(/CHECK/);
+    expect(() => put(db.raw, { uuid: '00000000-0000-4000-8000-000000000004', text: 'x'.repeat(4097) })).toThrowError(/CHECK/);
+    expect(() => put(db.raw, { uuid: '00000000-0000-4000-8000-000000000005', client: 99 })).toThrowError(/FOREIGN KEY/);
   });
 });
 

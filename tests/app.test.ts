@@ -152,7 +152,7 @@ describe('app end to end', () => {
       waText('x1', 'private family plans', { group: OTHER_GROUP }),
       waText('p1', 'personal chat', { group: '919811111111@s.whatsapp.net' }),
     ] });
-    expect(db.prepare('SELECT wa_id FROM messages').all()).toEqual([{ wa_id: 'm1' }]);
+    expect(db.raw.prepare('SELECT wa_id FROM messages').all()).toEqual([{ wa_id: 'm1' }]);
 
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls).toHaveLength(1);
@@ -177,7 +177,7 @@ describe('app end to end', () => {
     const { db, app, sock } = setup();
     app.reloadClients([SHARMA]);
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
-    expect(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 0 });
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 0 });
     await stopApp(app);
   });
 
@@ -220,7 +220,7 @@ describe('app shutdown', () => {
     release();
     await finish(stop);
     expect(listTasks(db, 1).map((t) => t.code)).toEqual(['SHA-001']);
-    expect(db.prepare('SELECT COUNT(*) AS n FROM messages WHERE processed_at IS NULL').get()).toEqual({ n: 0 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM messages WHERE processed_at IS NULL').get()).toEqual({ n: 0 });
     expect(sock.end).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -292,7 +292,7 @@ describe('app shutdown', () => {
 
     await stopApp(app);
     const c = ai.calls[0]!;
-    const rows = db.prepare('SELECT kind, usd, detail FROM spend').all() as { kind: string; usd: number; detail: string }[];
+    const rows = db.raw.prepare('SELECT kind, usd, detail FROM spend').all() as { kind: string; usd: number; detail: string }[];
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ kind: 'ai', detail: 'shutdown before the paid call finished (estimated)' });
     expect(rows[0]!.usd).toBeCloseTo(estimateCostUsd(c.system.length + c.user.length, P, MAX_OUTPUT_TOKENS), 9);
@@ -310,7 +310,7 @@ describe('app shutdown', () => {
     const stop = stopping(app);
     aiCall.resolve();
     await finish(stop);
-    expect(db.prepare('SELECT detail FROM spend').all()).toEqual([{ detail: 'batch 1' }]);
+    expect(db.raw.prepare('SELECT detail FROM spend').all()).toEqual([{ detail: 'batch 1' }]);
   });
 
   it('starting twice leaves no extra timer behind', async () => {
@@ -398,7 +398,7 @@ describe('app allow-list changes', () => {
     const run = vi.spyOn(Reconciler.prototype, 'run');
     const { db, ai, app, sock } = setup();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
-    expect(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 1 });
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 1 });
 
     app.reloadClients([SHARMA]);
     await vi.advanceTimersByTimeAsync(1_300_000);
@@ -458,7 +458,7 @@ describe('app allow-list changes', () => {
     const { db, app, sock } = setup();
     expect(() => app.reloadClients([SHARMA, { ...MEHTA, code: 'MEX' }])).toThrow(/codes are permanent/);
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
-    expect(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 1 });
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 1 });
     await stopApp(app);
   });
 
@@ -487,7 +487,7 @@ describe('app ingest failures', () => {
   it('logs a failed database write without the chat text and still counts it', async () => {
     const { lines, log } = capturingLogger();
     const { db, app, sock, gateway } = setup({ log });
-    db.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store: banner thoda bright'); END");
+    db.raw.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store: banner thoda bright'); END");
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
 
     expect(gateway.failedCount()).toBe(1);
@@ -498,7 +498,7 @@ describe('app ingest failures', () => {
 
   it('records the count of unsaved messages on the next tick and warns in health', async () => {
     const { db, app, sock, gateway } = setup();
-    db.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
+    db.raw.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
     expect(gateway.failedCount()).toBe(1);
     await vi.advanceTimersByTimeAsync(30_000);
@@ -655,7 +655,7 @@ describe('app health and publishing', () => {
     expect(drive.uploads).toBe(1);
 
     // A message that cannot be saved changes only the health line: no reconcile, no file, no other publish.
-    db.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
+    db.raw.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
     await vi.advanceTimersByTimeAsync(31_000); // the next tick sees the new line
     expect(drive.uploads).toBe(2);
@@ -728,7 +728,7 @@ describe('app: a newly approved group\'s earlier messages (history backfill)', (
     expect(ai.calls).toEqual([]); // held: nothing is reconciled while earlier messages are being read
     // Older than 7 days: dropped, and the backfill ends.
     sock.emit('messaging-history.set', { chats: [], contacts: [], syncType: ON_DEMAND, messages: [waText('E0', 'TOO OLD', { ts: sec('2026-10-10T09:00:00Z') })] });
-    expect(db.prepare("SELECT 1 FROM messages WHERE wa_id = 'E0'").get()).toBeUndefined();
+    expect(db.raw.prepare("SELECT 1 FROM messages WHERE wa_id = 'E0'").get()).toBeUndefined();
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls).toHaveLength(1);
     const user = ai.calls[0]!.user;

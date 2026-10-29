@@ -7,7 +7,7 @@ import { ControlError, type AuditEntry } from '../../control/errors.ts';
 import { usageSummary } from '../../control/usage.ts';
 import type { UptimeLog } from '../../health/uptimeLog.ts';
 import { uptimeReport, type UptimeRobotClient } from '../../health/uptimeRobot.ts';
-import { tx, type Db } from '../../store/db.ts';
+import { txSync, type Db } from '../../store/db.ts';
 import type { Clock } from '../../util/clock.ts';
 import type { AuditLog } from '../audit.ts';
 import type { Guard } from '../guard.ts';
@@ -93,14 +93,14 @@ export function registerControlApi(router: Router, d: ControlApiDeps): void {
   read('/dashboard/api/session', ({ req }) => {
     const s = d.guard.requireOwner(req);
     // The browser label sign-in saved (cleaned there, for example "Safari on macOS"); null for an older session.
-    const row = d.db.prepare('SELECT agent_label FROM web_sessions WHERE id_hash = ?').get(hashToken(s.id)) as { agent_label: string | null } | undefined;
+    const row = d.db.raw.prepare('SELECT agent_label FROM web_sessions WHERE id_hash = ?').get(hashToken(s.id)) as { agent_label: string | null } | undefined;
     return { email: s.email, createdAt: s.createdAt, expiresAt: s.expiresAt, browser: row?.agent_label ?? null };
   });
 
   router.post('/dashboard/api/session/signout-everywhere', controlled((ctx) => {
     const s = actionSession(ctx, d);
     // The sessions end and the audit row is written together: if the row cannot be written, nothing ends.
-    const ended = tx(d.db, () => {
+    const ended = txSync(d.db, () => {
       const n = d.sessions.destroyAllFor(s.email);
       d.audit.record({ actor: s.email, event: 'auth.signout_everywhere', kind: 'auth', detail: `Signed out everywhere (${n} ${n === 1 ? 'session' : 'sessions'})`, requestId: ctx.requestId });
       return n;

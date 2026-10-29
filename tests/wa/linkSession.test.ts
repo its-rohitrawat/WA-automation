@@ -59,10 +59,10 @@ async function setup(o: { linked?: boolean; timeoutMs?: number } = {}) {
     audit: (event, actor) => audits.push({ event, actor }),
     ...(o.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : {}),
   });
-  const rows = () => sessionDb.prepare('SELECT k, v FROM auth ORDER BY k').all() as { k: string; v: Buffer }[];
+  const rows = () => sessionDb.raw.prepare('SELECT k, v FROM auth ORDER BY k').all() as { k: string; v: Buffer }[];
   const backupRows = () => {
-    sessionDb.exec('CREATE TABLE IF NOT EXISTS auth_backup (k TEXT PRIMARY KEY, v BLOB NOT NULL)');
-    return (sessionDb.prepare('SELECT COUNT(*) AS n FROM auth_backup').get() as { n: number }).n;
+    sessionDb.raw.exec('CREATE TABLE IF NOT EXISTS auth_backup (k TEXT PRIMARY KEY, v BLOB NOT NULL)');
+    return (sessionDb.raw.prepare('SELECT COUNT(*) AS n FROM auth_backup').get() as { n: number }).n;
   };
   return { key, sessionDb, trackerDb, sockets, auths, lines, switchable, statuses, audits, sessions, rows, backupRows };
 }
@@ -378,7 +378,7 @@ describe('session backup helpers', () => {
     const auth = useEncryptedAuthState(db, key);
     let stopped = false;
     const guarded = guardAuth(auth, () => stopped);
-    const count = () => (db.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n;
+    const count = () => (db.raw.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n;
     const start = count();
     await guarded.state.keys.set({ 'pre-key': { '1': { public: Buffer.alloc(32), private: Buffer.alloc(32) } } });
     expect(count()).toBe(start + 1);
@@ -394,7 +394,7 @@ describe('session backup helpers', () => {
     backupAndReset(db);
     resetSession(db);
     expect(recoverInterruptedLink(db)).toBe(false);
-    expect((db.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n).toBe(0);
+    expect((db.raw.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n).toBe(0);
   });
 
   it('a cancelled founder link leaves no backup behind', async () => {

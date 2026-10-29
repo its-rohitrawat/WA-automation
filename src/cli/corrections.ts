@@ -1,5 +1,5 @@
 import { clearPhaseLock, getClientByCode, setPhase, type ClientRow } from '../store/clients.ts';
-import { tx, type Db } from '../store/db.ts';
+import { txSync, type Db } from '../store/db.ts';
 import { setKv } from '../store/kv.ts';
 import { countProcessedBetween, resetProcessedSince } from '../store/messages.ts';
 import { findPeopleByJid, findPeopleByNumber, setRole, type PersonRow } from '../store/people.ts';
@@ -43,7 +43,7 @@ export function humanEvent(db: Db, taskId: number | null, clientId: number, op: 
 function setStatusAsHuman(db: Db, code: string, status: 'open' | 'done', now: Date): TaskRow {
   const t = findTask(db, code);
   if (t.status === status) throw new CorrectionError(`Task ${t.code} is already ${status}`);
-  tx(db, () => {
+  txSync(db, () => {
     setTaskStatus(db, t.id, status, istDate(now), now.toISOString(), 'human');
     humanEvent(db, t.id, t.clientId, status === 'done' ? 'close_task' : 'reopen_task', { status }, now);
     requestRebuild(db, now);
@@ -73,7 +73,7 @@ export function editTask(db: Db, code: string, opts: EditOptions, now: Date): Ta
   check('priority', PRIORITIES);
   if (fields.title === null) throw new CorrectionError('title cannot be empty');
   if (fields.deadline != null && !isIsoDate(fields.deadline)) throw new CorrectionError('deadline must be YYYY-MM-DD, or none');
-  tx(db, () => {
+  txSync(db, () => {
     updateTaskFields(db, t.id, fields, now.toISOString(), 'human');
     humanEvent(db, t.id, t.clientId, 'update_task', fields, now);
     requestRebuild(db, now);
@@ -83,7 +83,7 @@ export function editTask(db: Db, code: string, opts: EditOptions, now: Date): Ta
 
 export function unlockTask(db: Db, code: string, now: Date): TaskRow {
   const t = findTask(db, code);
-  tx(db, () => {
+  txSync(db, () => {
     clearTaskLocks(db, t.id, now.toISOString());
     humanEvent(db, t.id, t.clientId, 'unlock', { lockedFields: t.lockedFields, statusLocked: t.statusLockedAt !== null }, now);
     requestRebuild(db, now);
@@ -117,7 +117,7 @@ export function setPersonRole(db: Db, who: string, roleInput: string, clientCode
     if (people.length === 0) throw new CorrectionError(`That number has posted, but not in client ${c.code}`);
   }
   const chosen = people;
-  tx(db, () => {
+  txSync(db, () => {
     for (const p of chosen) {
       setRole(db, p.clientId, p.jid, role, 'human');
       humanEvent(db, null, p.clientId, 'set_person_role', { ...detailKey, role }, now);
@@ -131,7 +131,7 @@ export function setClientPhase(db: Db, clientCode: string, phase: string, now: D
   const c = findClient(db, clientCode);
   const match = c.phases.find((p) => p.toLowerCase() === phase.trim().toLowerCase());
   if (!match) throw new CorrectionError(`Phase must be one of: ${c.phases.join(', ')}`);
-  tx(db, () => {
+  txSync(db, () => {
     setPhase(db, c.id, match, 'human');
     humanEvent(db, null, c.id, 'set_phase', { phase: match }, now);
     requestRebuild(db, now);
@@ -140,7 +140,7 @@ export function setClientPhase(db: Db, clientCode: string, phase: string, now: D
 
 export function unlockClientPhase(db: Db, clientCode: string, now: Date): void {
   const c = findClient(db, clientCode);
-  tx(db, () => {
+  txSync(db, () => {
     clearPhaseLock(db, c.id);
     humanEvent(db, null, c.id, 'unlock_phase', { phase: c.currentPhase }, now);
     requestRebuild(db, now);
@@ -178,7 +178,7 @@ export function countReprocess(db: Db, clientCode: string, since: string, until?
 /** Re-queues processed messages in the window for the AI. Returns how many were actually re-queued. */
 export function requestReprocess(db: Db, clientCode: string, since: string, now: Date, until?: string): number {
   const w = reprocessWindow(db, clientCode, since, until);
-  return tx(db, () => {
+  return txSync(db, () => {
     const n = resetProcessedSince(db, w.clientId, w.sinceIso, w.untilIso);
     humanEvent(db, null, w.clientId, 'reprocess', { since, until: until ?? null, messages: n }, now);
     requestRebuild(db, now);

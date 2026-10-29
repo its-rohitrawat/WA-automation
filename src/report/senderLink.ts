@@ -133,7 +133,7 @@ export function spareLinkDriver(d: SpareLinkDeps): LinkDriver {
       const close = () => {
         if (!own) return;
         try {
-          db.close();
+          db.raw.close();
         } catch {
           // best effort
         }

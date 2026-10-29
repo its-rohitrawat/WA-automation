@@ -3,7 +3,7 @@ import { chatPage, outboxItem, type ChatOutboxItem, type ChatPage } from '../../
 import type { GroupDirectory } from '../../control/groups.ts';
 import type { ClientConfig } from '../../config/groups.ts';
 import { getClientByCode, type ClientRow } from '../../store/clients.ts';
-import { tx, type Db } from '../../store/db.ts';
+import { txSync, type Db } from '../../store/db.ts';
 import { claimedSince, claimOutbox, finishOutbox, lastClaimedAt, markSending, outboxByUuid, type OutboxRow } from '../../store/outbox.ts';
 import type { Clock } from '../../util/clock.ts';
 import type { Logger } from '../../util/logger.ts';
@@ -128,7 +128,7 @@ export async function chatSendHandler(deps: ChatDeps, ctx: OwnerContext, code: s
   let quoted: QuotedMessage | null = null;
   if (replyTo !== null) {
     const q = deps.db
-      .prepare('SELECT wa_id AS waId, sender_jid AS senderJid, from_me AS fromMe, text FROM messages WHERE id = ? AND client_id = ? AND revoked = 0')
+      .raw.prepare('SELECT wa_id AS waId, sender_jid AS senderJid, from_me AS fromMe, text FROM messages WHERE id = ? AND client_id = ? AND revoked = 0')
       .get(replyTo, c.id) as { waId: string; senderJid: string; fromMe: number; text: string | null } | undefined;
     if (!q) return fail(400, 'invalid', 'The message you are replying to is not in this chat.');
     quoted = { key: { remoteJid: c.groupId, id: q.waId, fromMe: q.fromMe === 1, participant: q.senderJid }, message: { conversation: q.text ?? '' } };
@@ -136,7 +136,7 @@ export async function chatSendHandler(deps: ChatDeps, ctx: OwnerContext, code: s
 
   // The limits and the claim in one write transaction: two requests at once cannot both pass.
   const now = deps.clock.now();
-  const claim = tx(deps.db, (): { row: OutboxRow } | { limited: ApiResult<ApiError> } | { taken: OutboxRow } => {
+  const claim = txSync(deps.db, (): { row: OutboxRow } | { limited: ApiResult<ApiError> } | { taken: OutboxRow } => {
     const again = outboxByUuid(deps.db, uuid);
     if (again) return { taken: again };
     const last = lastClaimedAt(deps.db, c.id);

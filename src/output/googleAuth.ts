@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { auth } from '@googleapis/drive';
 import type { Env } from '../config/env.ts';
 import { decrypt, encrypt } from '../crypto/envelope.ts';
-import { tx, type Db } from '../store/db.ts';
+import { txSync, type Db } from '../store/db.ts';
 import { deleteKv, getKv, setKv } from '../store/kv.ts';
 
 /** Only files this app creates. */
@@ -106,7 +106,7 @@ export function saveTokenIssuer(db: Db, label: string, issuer: TokenIssuer): voi
  */
 export function saveMeetingAccount(db: Db, key: Buffer, label: string, refreshToken: string, scope: string, issuer: TokenIssuer = 'desktop'): void {
   checkAccountLabel(label);
-  tx(db, () => {
+  txSync(db, () => {
     new TokenStore(db, key, label).save(refreshToken);
     saveGrantedScopes(db, scope, label);
     saveTokenIssuer(db, label, issuer);
@@ -147,7 +147,7 @@ export function removeMeetingAccount(db: Db, label: string): boolean {
   checkAccountLabel(label);
   const labels = meetingAccounts(db);
   if (!labels.includes(label)) return false;
-  tx(db, () => {
+  txSync(db, () => {
     deleteKv(db, tokenKey(label));
     deleteKv(db, scopesKey(label));
     deleteKv(db, tokenIssuerKey(label));

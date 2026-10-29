@@ -1,5 +1,5 @@
 import { auth } from '@googleapis/drive';
-import { tx, type Db } from '../store/db.ts';
+import { txSync, type Db } from '../store/db.ts';
 import { getKv } from '../store/kv.ts';
 import type { Logger } from '../util/logger.ts';
 import {
@@ -117,7 +117,7 @@ export class GoogleAuthHub {
     }
     const client = this.#newClient(creds);
     client.setCredentials({ refresh_token: refreshToken });
-    tx(this.#db, () => {
+    txSync(this.#db, () => {
       if (label === MAIN_ACCOUNT) {
         new TokenStore(this.#db, this.#key).save(refreshToken);
         saveGrantedScopes(this.#db, scope);

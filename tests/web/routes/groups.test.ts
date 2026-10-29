@@ -83,7 +83,7 @@ beforeEach(() => {
   };
 });
 afterEach(() => {
-  db.close();
+  db.raw.close();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -334,7 +334,7 @@ describe('groupsApplyHandler', () => {
   });
 
   it('any other error is thrown, not turned into a response', async () => {
-    db.close();
+    db.raw.close();
     await expect(groupsApplyHandler(deps, CTX, approve())).rejects.toThrow();
     expect(audits).toEqual([]);
     db = openDb(':memory:');
@@ -347,7 +347,7 @@ describe('groupsBulkHandler', () => {
   const bulk = (action: string, keys: string[]) => groupsBulkHandler(deps, CTX, { action, keys });
   const results = (r: { body: unknown }) => (r.body as { results: { key: string; ok: boolean; reason: string | null }[] }).results;
   // The ignore rows only (the kv table also holds each client's history read).
-  const kvRows = () => db.prepare("SELECT k, v FROM kv WHERE k GLOB 'group_ignored:*'").all() as { k: string; v: string }[];
+  const kvRows = () => db.raw.prepare("SELECT k, v FROM kv WHERE k GLOB 'group_ignored:*'").all() as { k: string; v: string }[];
   beforeEach(async () => {
     src.groups.push({ id: HINDI, subject: 'शर्मा परिवार' }, { id: EXPORTS, subject: 'Desai Exports' });
     await deps.directory.list();

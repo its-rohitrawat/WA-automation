@@ -191,7 +191,7 @@ describe('storedMeetingAccounts', () => {
     const db2 = seededDb();
     new TokenStore(db2, key, 'company2').save('rt-2');
     // Move company2's ciphertext into company3's slot.
-    setKv(db2, 'google_refresh_token:company3', String(db2.prepare("SELECT v FROM kv WHERE k = 'google_refresh_token:company2'").pluck().get()));
+    setKv(db2, 'google_refresh_token:company3', String(db2.raw.prepare("SELECT v FROM kv WHERE k = 'google_refresh_token:company2'").pluck().get()));
     expect(() => new TokenStore(db2, key, 'company3').load()).toThrow(/google-auth --account company3/);
   });
 });

@@ -50,8 +50,8 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
     latestProgress: null, sourceQuote: 'made-up words', sourceDate: day(i + 1).slice(0, 10), sourceWaId: null, origin: 'whatsapp',
   }, day(i + 1)));
   // One task from before priority levels: no level, shown as "—".
-  db.prepare("UPDATE tasks SET priority_level = NULL, priority_source = NULL, sentiment = NULL WHERE id = 5").run();
-  db.prepare("UPDATE clients SET sentiment = 'frustrated', sentiment_at = ? WHERE id = 1").run(day(0.1));
+  db.raw.prepare("UPDATE tasks SET priority_level = NULL, priority_source = NULL, sentiment = NULL WHERE id = 5").run();
+  db.raw.prepare("UPDATE clients SET sentiment = 'frustrated', sentiment_at = ? WHERE id = 1").run(day(0.1));
   insertFound(db, {
     recording: 'conferenceRecords/a/recordings/b', conference: 'conferenceRecords/a', driveFileId: 'd1', meetingCode: null, title: 'Weekly sync',
     startedAt: day(1), endedAt: null, attendees: [], participants: [], clientId: null, matchKind: null, status: 'unassigned', driveSeconds: 1800, createdAt: day(1),
@@ -66,7 +66,7 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
   const spend = new SpendGuard({ db, clock, capUsd: 3 });
   spend.record('ai', 0.42, 'batch');
   // Made-up outages for the uptime strip's exact times: one this morning, one around midnight two days ago.
-  const put = db.prepare('INSERT INTO uptime_log (at, up, reason) VALUES (?, ?, ?)');
+  const put = db.raw.prepare('INSERT INTO uptime_log (at, up, reason) VALUES (?, ?, ?)');
   const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
   for (const [h, up, reason] of [[60, 1, null], [48.5, 0, 'whatsapp_disconnected'], [48, 1, null], [6, 0, 'stopped'], [1.7, 1, null]] as const) put.run(hoursAgo(h), up, reason);
   const uptime = new UptimeLog(db, clock);
@@ -170,16 +170,16 @@ function seedChat(db: Db): void {
   for (let i = 0; i < 60; i++) put({ minutesAgo: 3 * 24 * 60 - i * 70, who: i % 4 === 3 ? -1 : i % 3, text: lines[i % lines.length]! });
   const photo = put({ minutesAgo: 95, who: 0, text: 'Site photos from today', media: 'image' });
   const voice = put({ minutesAgo: 80, who: 2, text: null, media: 'voice' });
-  const rowId = (waId: string) => (db.prepare('SELECT id FROM messages WHERE wa_id = ?').get(waId) as { id: number }).id;
+  const rowId = (waId: string) => (db.raw.prepare('SELECT id FROM messages WHERE wa_id = ?').get(waId) as { id: number }).id;
   const stamp = at(80);
-  db.prepare("INSERT INTO media (message_id, client_id, kind, status, created_at, updated_at) VALUES (?, 1, 'image', 'done', ?, ?)").run(rowId(photo), stamp, stamp);
-  db.prepare("INSERT INTO media (message_id, client_id, kind, status, seconds, text_kind, text, created_at, updated_at) VALUES (?, 1, 'voice', 'done', 42, 'extract', ?, ?, ?)")
+  db.raw.prepare("INSERT INTO media (message_id, client_id, kind, status, created_at, updated_at) VALUES (?, 1, 'image', 'done', ?, ?)").run(rowId(photo), stamp, stamp);
+  db.raw.prepare("INSERT INTO media (message_id, client_id, kind, status, seconds, text_kind, text, created_at, updated_at) VALUES (?, 1, 'voice', 'done', 42, 'extract', ?, ?, ?)")
     .run(rowId(voice), 'Hi, I checked the samples. The blue one works, please go ahead with it and send the final invoice.', stamp, stamp);
   put({ minutesAgo: 70, who: 1, text: 'Quote attached', media: 'document' });
   const gone = put({ minutesAgo: 60, who: 1, text: 'wrong group, sorry' });
-  db.prepare('UPDATE messages SET revoked = 1 WHERE wa_id = ?').run(gone);
+  db.raw.prepare('UPDATE messages SET revoked = 1 WHERE wa_id = ?').run(gone);
   put({ minutesAgo: 45, who: -1, text: 'Going with the blue one 👍', quoted: voice });
   put({ minutesAgo: 30, who: 0, text: 'Text with <b>tags</b> stays text, and a very long line that has to wrap inside the bubble on a phone without scrolling sideways at all' });
   const edited = put({ minutesAgo: 12, who: 2, text: 'See you at 11 tomorrow\nAddress: 2nd floor, the usual place' });
-  db.prepare('UPDATE messages SET edited_at = ? WHERE wa_id = ?').run(at(11), edited);
+  db.raw.prepare('UPDATE messages SET edited_at = ? WHERE wa_id = ?').run(at(11), edited);
 }

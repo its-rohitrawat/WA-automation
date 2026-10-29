@@ -70,7 +70,7 @@ describe('mediaStats', () => {
   it('never counts a queued backlog file as waiting too long: a long backlog run is not a fault (review round 2)', () => {
     const db = seededDb();
     const id = add(db, 'A', { createdAt: '2026-10-19T06:00:00.000Z' });
-    db.prepare('UPDATE media SET backlog = 1 WHERE id = ?').run(id);
+    db.raw.prepare('UPDATE media SET backlog = 1 WHERE id = ?').run(id);
     add(db, 'B', { createdAt: '2026-10-19T06:00:00.000Z' });
     expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 2, stale: 1 });
   });

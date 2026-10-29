@@ -56,6 +56,11 @@ export class SqliteDb implements Db {
     return new SqliteDb(raw, o);
   }
 
+  /** A handle opened elsewhere with its own pragmas (the WhatsApp session files, src/wa/authState.ts). */
+  static wrap(raw: Database.Database, o: { txMaxMs?: number } = {}): SqliteDb {
+    return new SqliteDb(raw, o);
+  }
+
   /** S1 only (removed in S1.15): the better-sqlite3 handle, for code not converted yet. */
   get raw(): Database.Database {
     if (this.#held && inTx.getStore() !== this) throw new TxMisuseError('a synchronous statement ran while another flow holds a transaction');

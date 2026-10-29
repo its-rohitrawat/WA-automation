@@ -68,7 +68,7 @@ function setup(
   const reserve = vi.spyOn(spend, 'reserve');
   return { db, spend, ai, parse, prepareImage, extract, input, reserve };
 }
-const spendRows = (db: Db) => db.prepare('SELECT usd, detail FROM spend').all() as { usd: number; detail: string }[];
+const spendRows = (db: Db) => db.raw.prepare('SELECT usd, detail FROM spend').all() as { usd: number; detail: string }[];
 
 describe('createExtractor', () => {
   it('describes an image through Claude and books the actual cost', async () => {
@@ -508,7 +508,7 @@ describe('voice and audio', () => {
   /** 90,000 bytes: a size bound of 60 seconds. */
   const note = (i: Partial<ExtractInput> = {}): Partial<ExtractInput> => ({ kind: 'voice', mimeType: OGG, bytes: Buffer.alloc(90_000), ...i });
   const voiceSetup = (v: VoiceTranscriber | null = new FakeVoiceTranscriber(), o: { capUsd?: number; maxVoiceSeconds?: number; signal?: AbortSignal } = {}) => setup({ voice: v, ...o });
-  const sttRows = (db: Db) => db.prepare('SELECT kind, usd, detail FROM spend').all() as { kind: string; usd: number; detail: string }[];
+  const sttRows = (db: Db) => db.raw.prepare('SELECT kind, usd, detail FROM spend').all() as { kind: string; usd: number; detail: string }[];
   const caught = async (run: Promise<unknown>): Promise<unknown> => run.then(() => null, (e: unknown) => e);
   /** A folder of its own for the real transcriber's conversions, removed after each test. */
   const dirs: string[] = [];

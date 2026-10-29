@@ -118,10 +118,10 @@ describe('transcribeMeeting', () => {
   let id: number;
   let audioAbs: string;
   const clock = manualClock('2026-11-01T10:00:00.000Z');
-  const rows = () => db.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
+  const rows = () => db.raw.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
   const parts = () => getMeeting(db, id)!.sttParts;
   const later = (ms: number) => manualClock(new Date(clock.now().getTime() + ms).toISOString());
-  const forgets = () => db.prepare('SELECT * FROM stt_forget ORDER BY id').all() as { id: number; meeting_id: number; provider: string; ref: string; attempts: number }[];
+  const forgets = () => db.raw.prepare('SELECT * FROM stt_forget ORDER BY id').all() as { id: number; meeting_id: number; provider: string; ref: string; attempts: number }[];
   const partsDir = () => join(dataDir, 'meetings', 'tmp', `${id}-parts`);
 
   const prepare = (audioSeconds: number) => {
@@ -459,7 +459,7 @@ describe('transcribeMeeting', () => {
     const p = new FakeProvider('elevenlabs', 36_000);
     p.script = [
       async () => {
-        db.prepare("UPDATE meetings SET status = 'failed' WHERE id = ?").run(id); // the part write after the call is refused
+        db.raw.prepare("UPDATE meetings SET status = 'failed' WHERE id = ?").run(id); // the part write after the call is refused
         return result(said('x'), 1200);
       },
     ];
@@ -548,7 +548,7 @@ describe('transcribeMeeting', () => {
       throw new SttNoAnswerError('timeout');
     };
     await transcribeMeeting(id, deps(el));
-    db.prepare('UPDATE stt_forget SET attempts = 0, next_try_at = NULL').run();
+    db.raw.prepare('UPDATE stt_forget SET attempts = 0, next_try_at = NULL').run();
     const { lines, log } = capturingLogger();
     const openai = new FakeProvider('openai', 300);
     expect(await forgetPending(db, meetingTranscriber(openai, INR), log, { clock })).toBe(0);
@@ -565,7 +565,7 @@ describe('transcribeMeeting', () => {
     const p = new FakeProvider('elevenlabs', 36_000);
     p.script = [
       async () => {
-        db.prepare("UPDATE meetings SET status = 'failed' WHERE id = ?").run(id);
+        db.raw.prepare("UPDATE meetings SET status = 'failed' WHERE id = ?").run(id);
         throw new SttHttpError(401);
       },
     ];
@@ -573,7 +573,7 @@ describe('transcribeMeeting', () => {
     const err = await transcribeMeeting(id, deps(p, { log })).catch((e: unknown) => e);
     expect((err as MeetingDeferral).code).toBe('stt_unavailable');
     expect(lines.some((l) => l.includes('"code":"http_401"') && l.includes('"writeCode"'))).toBe(true);
-    db.prepare("UPDATE meetings SET status = 'queued' WHERE id = ?").run(id);
+    db.raw.prepare("UPDATE meetings SET status = 'queued' WHERE id = ?").run(id);
     expect(parts()[0]).toMatchObject({ state: 'inflight', booked: 'none' }); // left for bookStuckParts (the safe side)
   });
 
@@ -684,7 +684,7 @@ describe('transcribeMeeting', () => {
     expect(forgets()[0]).toMatchObject({ attempts: MAX_FORGET_ATTEMPTS });
     expect(lines.some((l) => l.includes('no more tries') && l.includes(`"meetingId":${id}`) && l.includes('"code":"timeout"'))).toBe(true);
 
-    db.prepare('UPDATE stt_forget SET attempts = 0, next_try_at = NULL').run();
+    db.raw.prepare('UPDATE stt_forget SET attempts = 0, next_try_at = NULL').run();
     p.forgetImpl = async () => {
       throw new SttHttpError(404);
     };
@@ -716,13 +716,13 @@ describe('transcribeMeeting', () => {
     const p = new FakeProvider('openai', 36_000);
     p.script = [
       async () => {
-        db.prepare("UPDATE meetings SET status = 'failed' WHERE id = ?").run(id); // the part write will be refused
+        db.raw.prepare("UPDATE meetings SET status = 'failed' WHERE id = ?").run(id); // the part write will be refused
         return result(said('x'), 1200);
       },
     ];
     await expect(transcribeMeeting(id, deps(p))).rejects.toThrow();
     expect(rows()).toEqual([]);
-    db.prepare("UPDATE meetings SET status = 'queued' WHERE id = ?").run(id);
+    db.raw.prepare("UPDATE meetings SET status = 'queued' WHERE id = ?").run(id);
     expect(parts()[0]).toMatchObject({ state: 'inflight', booked: 'none' });
     expect(recoverInflightParts(db, spend, INR, silentLogger())).toBe(1);
   });

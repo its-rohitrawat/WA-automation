@@ -204,11 +204,11 @@ describe('the client drawer: what the agent has seen (owner decision, 28 Oct 202
       waId: `D${n}`, clientId: 1, senderJid: JID(person), senderNumber: `9198000000${String(person).padStart(2, '0')}`, senderName: 'Push Name',
       fromMe: o.fromMe ?? false, ts, text: o.text === undefined ? `message ${n}` : o.text, quotedWaId: null, mediaType: o.media ?? o.mediaType ?? null,
     });
-    const id = (db.prepare("SELECT id FROM messages WHERE wa_id = ?").get(`D${n}`) as { id: number }).id;
+    const id = (db.raw.prepare("SELECT id FROM messages WHERE wa_id = ?").get(`D${n}`) as { id: number }).id;
     if (o.media) {
       insertMedia(db, { messageId: id, clientId: 1, kind: o.media, status: 'done', mimeType: null, fileName: 'secret-file-name.pdf', fileSize: 10,
         seconds: o.media === 'voice' ? 42 : null, forwarded: false, refEnc: null, errorCode: null, createdAt: ts });
-      if (o.media === 'voice') db.prepare("UPDATE media SET text = 'TRANSCRIPT-never-sent', text_kind = 'extract' WHERE message_id = ?").run(id);
+      if (o.media === 'voice') db.raw.prepare("UPDATE media SET text = 'TRANSCRIPT-never-sent', text_kind = 'extract' WHERE message_id = ?").run(id);
     }
     return id;
   }
@@ -223,7 +223,7 @@ describe('the client drawer: what the agent has seen (owner decision, 28 Oct 202
     say(db, 4, '2026-10-27T08:00:00.000Z', { person: 3, media: 'voice', text: null });
     say(db, 5, '2026-10-28T05:00:00.000Z', { person: 1, text: `Line one\nline two ${'x'.repeat(300)}` });
     say(db, 6, '2026-10-28T05:30:00.000Z', { fromMe: true, person: 9, text: 'from the founder' });
-    db.prepare("UPDATE messages SET revoked = 1 WHERE wa_id = 'D6'").run();
+    db.raw.prepare("UPDATE messages SET revoked = 1 WHERE wa_id = 'D6'").run();
     const a = clientDetail(db, 'SHA', NOW)!.activity;
     expect(a.week).toEqual({ messages: 4, people: 3, files: 1, voice: 1 });
     expect(a.latest.map((m) => [m.sender, m.kind])).toEqual([['Rahul', 'text'], ['Someone', 'voice'], ['Someone', 'image']]);
@@ -239,7 +239,7 @@ describe('the client drawer: what the agent has seen (owner decision, 28 Oct 202
     const db = seededDb();
     say(db, 1, '2026-10-28T05:00:00.000Z');
     say(db, 2, '2026-10-28T05:10:00.000Z');
-    db.prepare("UPDATE messages SET processed_at = '2026-10-28T05:20:00.000Z' WHERE wa_id = 'D1'").run();
+    db.raw.prepare("UPDATE messages SET processed_at = '2026-10-28T05:20:00.000Z' WHERE wa_id = 'D1'").run();
     const b = startBatch(db, 1, 6, '2026-10-28T05:19:00.000Z');
     // Three accepted ops: two on tasks, one a decision (no task): two task changes.
     finishBatch(db, b, { status: 'ok', errorCode: null, accepted: 3, rejected: 0, at: '2026-10-28T05:20:00.000Z' });

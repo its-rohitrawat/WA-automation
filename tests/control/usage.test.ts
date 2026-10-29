@@ -10,7 +10,7 @@ import { seededDb } from '../helpers/db.ts';
 const NOW = '2026-10-19T08:00:00.000Z';
 
 function spend(db: Db, day: string, kind: 'ai' | 'stt', usd: number, detail: string) {
-  db.prepare('INSERT INTO spend (day, kind, usd, detail, at) VALUES (?, ?, ?, ?, ?)').run(day, kind, usd, detail, NOW);
+  db.raw.prepare('INSERT INTO spend (day, kind, usd, detail, at) VALUES (?, ?, ?, ?, ?)').run(day, kind, usd, detail, NOW);
 }
 
 function setup(cap = 15, now = NOW) {

@@ -74,13 +74,13 @@ function toRow(r: RawReport): ReportRow {
 }
 
 export function reportFor(db: Db, date: string): ReportRow | undefined {
-  const r = db.prepare('SELECT * FROM reports WHERE date = ?').get(date) as RawReport | undefined;
+  const r = db.raw.prepare('SELECT * FROM reports WHERE date = ?').get(date) as RawReport | undefined;
   return r ? toRow(r) : undefined;
 }
 
 /** Newest date first. */
 export function recentReports(db: Db, limit: number): ReportRow[] {
-  return (db.prepare('SELECT * FROM reports ORDER BY date DESC LIMIT ?').all(limit) as RawReport[]).map(toRow);
+  return (db.raw.prepare('SELECT * FROM reports ORDER BY date DESC LIMIT ?').all(limit) as RawReport[]).map(toRow);
 }
 
 /**
@@ -92,7 +92,7 @@ export function recentReports(db: Db, limit: number): ReportRow[] {
 export function claimReport(db: Db, date: string, at: string, opts: { force?: boolean } = {}): boolean {
   const reclaim = opts.force ? "reports.status IN ('retry', 'unknown', 'skipped')" : "reports.status = 'retry' AND reports.next_attempt_at <= @at";
   const info = db
-    .prepare(`INSERT INTO reports (date, status, attempts, forced, created_at, updated_at)
+    .raw.prepare(`INSERT INTO reports (date, status, attempts, forced, created_at, updated_at)
       VALUES (@date, 'sending', 1, @forced, @at, @at)
       ON CONFLICT (date) DO UPDATE SET status = 'sending', attempts = reports.attempts + 1, next_attempt_at = NULL, forced = @forced,
         updated_at = @at
@@ -104,7 +104,7 @@ export function claimReport(db: Db, date: string, at: string, opts: { force?: bo
 /** 'sending' becomes 'sent' or 'unknown'. Returns false, changing nothing, when the row is not 'sending'. */
 export function finishReport(db: Db, date: string, status: 'sent' | 'unknown', detail: string | null, at: string): boolean {
   const info = db
-    .prepare("UPDATE reports SET status = @status, detail = @detail, next_attempt_at = NULL, updated_at = @at WHERE date = @date AND status = 'sending'")
+    .raw.prepare("UPDATE reports SET status = @status, detail = @detail, next_attempt_at = NULL, updated_at = @at WHERE date = @date AND status = 'sending'")
     .run({ date, status, detail, at });
   return info.changes === 1;
 }
@@ -112,7 +112,7 @@ export function finishReport(db: Db, date: string, status: 'sent' | 'unknown', d
 /** 'sending' becomes 'retry': a definite failure before anything left. A normal claim takes it again from nextAttemptAt. */
 export function retryReport(db: Db, date: string, detail: string, nextAttemptAt: string, at: string): boolean {
   const info = db
-    .prepare("UPDATE reports SET status = 'retry', detail = @detail, next_attempt_at = @nextAttemptAt, updated_at = @at WHERE date = @date AND status = 'sending'")
+    .raw.prepare("UPDATE reports SET status = 'retry', detail = @detail, next_attempt_at = @nextAttemptAt, updated_at = @at WHERE date = @date AND status = 'sending'")
     .run({ date, detail, nextAttemptAt, at });
   return info.changes === 1;
 }
@@ -120,7 +120,7 @@ export function retryReport(db: Db, date: string, detail: string, nextAttemptAt:
 /** Past the deadline: no row, or a 'retry' row, becomes 'skipped'. A 'sent', 'sending', 'unknown' or 'skipped' row is left as it is. */
 export function skipReport(db: Db, date: string, reason: string, at: string): boolean {
   const info = db
-    .prepare(`INSERT INTO reports (date, status, detail, created_at, updated_at) VALUES (@date, 'skipped', @reason, @at, @at)
+    .raw.prepare(`INSERT INTO reports (date, status, detail, created_at, updated_at) VALUES (@date, 'skipped', @reason, @at, @at)
       ON CONFLICT (date) DO UPDATE SET status = 'skipped', detail = @reason, next_attempt_at = NULL, updated_at = @at
       WHERE reports.status = 'retry'`)
     .run({ date, reason, at });
@@ -129,12 +129,12 @@ export function skipReport(db: Db, date: string, reason: string, at: string): bo
 
 /** At service start: a row still 'sending' was cut off mid-send, so its outcome is unknown. Returns how many rows changed. */
 export function markInterruptedReports(db: Db, at: string): number {
-  return db.prepare("UPDATE reports SET status = 'unknown', detail = 'interrupted', updated_at = ? WHERE status = 'sending'").run(at).changes;
+  return db.raw.prepare("UPDATE reports SET status = 'unknown', detail = 'interrupted', updated_at = ? WHERE status = 'sending'").run(at).changes;
 }
 
 /** A 'retry' row of an earlier date (the service stopped before its deadline) becomes 'skipped' and keeps its reason. */
 export function closeOldRetries(db: Db, beforeDate: string, at: string): number {
   return db
-    .prepare("UPDATE reports SET status = 'skipped', next_attempt_at = NULL, updated_at = @at WHERE status = 'retry' AND date < @beforeDate")
+    .raw.prepare("UPDATE reports SET status = 'skipped', next_attempt_at = NULL, updated_at = @at WHERE status = 'retry' AND date < @beforeDate")
     .run({ beforeDate, at }).changes;
 }

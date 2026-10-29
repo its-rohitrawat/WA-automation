@@ -1,6 +1,6 @@
 import type { PriorityKeywords } from '../brain/priorityKeywords.ts';
 import { ControlError, type Audit } from '../control/errors.ts';
-import { tx, type Db } from '../store/db.ts';
+import { txSync, type Db } from '../store/db.ts';
 import { setKv } from '../store/kv.ts';
 import { PRIORITIES, type Priority } from '../store/tasks.ts';
 import type { Clock } from '../util/clock.ts';
@@ -111,7 +111,7 @@ export class PrioritySettings {
   }
 
   #stored(key: PrioritySettingKey): unknown {
-    const r = this.#db.prepare('SELECT v FROM settings WHERE k = ?').get(key) as { v: string } | undefined;
+    const r = this.#db.raw.prepare('SELECT v FROM settings WHERE k = ?').get(key) as { v: string } | undefined;
     if (!r) return undefined;
     try {
       return JSON.parse(r.v) as unknown;
@@ -160,9 +160,9 @@ export class PrioritySettings {
     const current = this.get();
     const same = key === 'sentimentEnabled' ? current.sentimentEnabled === value : JSON.stringify(current.keywords) === JSON.stringify(value);
     if (same && this.#read().source[key] === 'dashboard') return this.view();
-    tx(this.#db, () => {
+    txSync(this.#db, () => {
       this.#db
-        .prepare('INSERT INTO settings (k, v, updated_at, updated_by) VALUES (?, ?, ?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at, updated_by = excluded.updated_by')
+        .raw.prepare('INSERT INTO settings (k, v, updated_at, updated_by) VALUES (?, ?, ?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at, updated_by = excluded.updated_by')
         .run(key, JSON.stringify(value), this.#clock.now().toISOString(), actor);
       audit({ actor, event: `settings.${key}`, kind: 'config', detail });
       // The tracker's Sentiment column fills or empties with the switch: rebuild it at the next tick, as a task edit does.
@@ -177,6 +177,6 @@ export class PrioritySettings {
  * settings table, like PrioritySettings.get().
  */
 export function readSentimentEnabled(db: Db): boolean {
-  const r = db.prepare("SELECT v FROM settings WHERE k = 'sentimentEnabled'").get() as { v: string } | undefined;
+  const r = db.raw.prepare("SELECT v FROM settings WHERE k = 'sentimentEnabled'").get() as { v: string } | undefined;
   return r?.v === 'true';
 }

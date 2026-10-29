@@ -106,7 +106,7 @@ function setup(o: SetupOptions = {}) {
   const p = new MediaProcessor({ db, dataDir, clock, log: o.log ?? silentLogger(), sealer, fetcher, extract, ...more });
   const ingest = (waId: string, message: Parameters<typeof waRaw>[1]): number => {
     ing.handle(normalizeMessage(waRaw(waId, message))!);
-    return (db.prepare('SELECT id FROM media ORDER BY id DESC LIMIT 1').get() as { id: number }).id;
+    return (db.raw.prepare('SELECT id FROM media ORDER BY id DESC LIMIT 1').get() as { id: number }).id;
   };
   const share = (waId = 'IMG1', extras: ImageExtras = {}): number =>
     ingest(waId, { imageMessage: { url: 'https://mmg.whatsapp.net/v/x', directPath: '/v/x', mediaKey: MEDIA_KEY, mimetype: 'image/jpeg', caption: 'new banner', ...extras } });
@@ -126,7 +126,7 @@ function setup(o: SetupOptions = {}) {
 
 /** From now on the database refuses every update of a file and every spend booking, as on a full disk. Reads still work. */
 const refuseWrites = (db: Db): void => {
-  db.exec(`CREATE TRIGGER IF NOT EXISTS refuse_media BEFORE UPDATE ON media BEGIN SELECT RAISE(ABORT, 'disk full'); END;
+  db.raw.exec(`CREATE TRIGGER IF NOT EXISTS refuse_media BEFORE UPDATE ON media BEGIN SELECT RAISE(ABORT, 'disk full'); END;
     CREATE TRIGGER IF NOT EXISTS refuse_spend BEFORE INSERT ON spend BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
 };
 
@@ -446,9 +446,9 @@ describe('MediaProcessor', () => {
     ['cannot be opened', 'ref_unreadable', (db: Db, id: number) => {
       const blob = getMediaRef(db, id)!;
       blob.writeUInt8(blob.readUInt8(blob.length - 1) ^ 1, blob.length - 1); // one flipped bit: the seal no longer opens
-      db.prepare('UPDATE media SET ref_enc = ? WHERE id = ?').run(blob, id);
+      db.raw.prepare('UPDATE media SET ref_enc = ? WHERE id = ?').run(blob, id);
     }],
-    ['is missing', 'no_ref', (db: Db, id: number) => db.prepare('UPDATE media SET ref_enc = NULL WHERE id = ?').run(id)],
+    ['is missing', 'no_ref', (db: Db, id: number) => db.raw.prepare('UPDATE media SET ref_enc = NULL WHERE id = ?').run(id)],
   ])('marks a file unavailable when its download details %s', async (_name, code, spoil) => {
     const { db, p, fetcher, share } = setup();
     const id = share();
@@ -538,9 +538,9 @@ describe('MediaProcessor', () => {
   it('fails a file whose message is missing instead of leaving it pending', async () => {
     const { db, p, fetcher, share } = setup();
     const id = share();
-    db.pragma('foreign_keys = OFF');
-    db.prepare("DELETE FROM messages WHERE wa_id = 'IMG1'").run();
-    db.pragma('foreign_keys = ON');
+    db.raw.pragma('foreign_keys = OFF');
+    db.raw.prepare("DELETE FROM messages WHERE wa_id = 'IMG1'").run();
+    db.raw.pragma('foreign_keys = ON');
     expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
     expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'no_job', hasRef: false, nextAttemptAt: null });
     expect(fetcher).not.toHaveBeenCalled();
@@ -883,11 +883,11 @@ describe('MediaProcessor: voice notes', () => {
   const throwing = (e: () => unknown): Extractor => async () => {
     throw e();
   };
-  const forgetRows = (db: Db) => db.prepare('SELECT media_id AS mediaId, provider, ref, attempts FROM media_stt_forget ORDER BY id').all();
+  const forgetRows = (db: Db) => db.raw.prepare('SELECT media_id AS mediaId, provider, ref, attempts FROM media_stt_forget ORDER BY id').all();
   const TRANSCRIPT: Extraction = { textKind: 'extract', text: 'payment bhej diya', pageCount: null, note: null, forget: { provider: 'elevenlabs', ref: 'tr_1' } };
   /** media_stt_forget refuses every new row from now on, so finishMedia with a forget throws; failMedia still works. */
   const refuseCopies = (db: Db): void => {
-    db.exec(`CREATE TRIGGER refuse_forget BEFORE INSERT ON media_stt_forget BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
+    db.raw.exec(`CREATE TRIGGER refuse_forget BEFORE INSERT ON media_stt_forget BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
   };
   /** As src/stt/http.ts throws it with Phase 3's M7: an unreadable answer that still names its copy. */
   const unreadable = (ref: string): SttNoAnswerError => Object.assign(new SttNoAnswerError('unreadable_body'), { forgetRef: ref });
@@ -1007,7 +1007,7 @@ describe('MediaProcessor: voice notes', () => {
   // but this processor never runs it again: every such run could pay the provider again.
   describe('a never-retry failure that cannot be written', () => {
     const refuseFail = (db: Db): void => {
-      db.exec(`CREATE TRIGGER refuse_fail BEFORE UPDATE OF status ON media WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
+      db.raw.exec(`CREATE TRIGGER refuse_fail BEFORE UPDATE OF status ON media WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
     };
 
     it('stt_paid_unbooked: the error propagates, and the next run of the file makes no extractor call', async () => {
@@ -1121,7 +1121,7 @@ describe('MediaProcessor: voice notes', () => {
     // Review round 1, fix 5: noted first, then deleted, so a failed delete leaves a row for the sweep.
     describe('when the copy can still be noted', () => {
       const refuseFinish = (db: Db): void => {
-        db.exec(`CREATE TRIGGER refuse_finish BEFORE UPDATE OF status ON media WHEN NEW.status = 'done' BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
+        db.raw.exec(`CREATE TRIGGER refuse_finish BEFORE UPDATE OF status ON media WHEN NEW.status = 'done' BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
       };
 
       it('notes the copy, deletes it and removes its row', async () => {
@@ -1175,7 +1175,7 @@ describe('MediaProcessor: voice notes', () => {
     it('a finish without a copy that throws keeps the old rule (a counted retry)', async () => {
       const { db, p, shareVoice } = setup({ extract: async () => ({ ...TRANSCRIPT, forget: null }) });
       const id = shareVoice();
-      db.exec(`CREATE TRIGGER refuse_finish BEFORE UPDATE OF status ON media WHEN NEW.status = 'done' BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
+      db.raw.exec(`CREATE TRIGGER refuse_finish BEFORE UPDATE OF status ON media WHEN NEW.status = 'done' BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
       expect((await p.process(id)).outcome).toBe('deferred');
       expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'unknown', attempts: 1 });
     });
@@ -1433,7 +1433,7 @@ describe('MediaProcessor: voice notes', () => {
       expect(getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'extract', text: 'kal milte hain', note: null });
       expect(v.transcribed).toBe(3);
       expect(forgetRows(db)).toEqual([]);
-      expect(spendDb.prepare('SELECT COUNT(*) AS n FROM spend').get()).toEqual({ n: 0 });
+      expect(spendDb.raw.prepare('SELECT COUNT(*) AS n FROM spend').get()).toEqual({ n: 0 });
     });
 
     it('an abort (the service stopping) gives the attempt back: it waits 1 minute and counts nothing, however often', async () => {

@@ -179,7 +179,7 @@ export function groupsOverview(o: {
   const { db, listing } = o;
   const isIgnored = o.ignored ?? (() => false);
   const byGroup = new Map(listClients(db, false).map((c) => [c.groupId, c]));
-  const withTasks = new Set((db.prepare('SELECT DISTINCT client_id AS id FROM tasks').all() as { id: number }[]).map((r) => r.id));
+  const withTasks = new Set((db.raw.prepare('SELECT DISTINCT client_id AS id FROM tasks').all() as { id: number }[]).map((r) => r.id));
   const approved = new Map(o.configs.map((c) => [c.groupId, c]));
   const liveIds = new Set(listing.groups.map((g) => g.id));
 

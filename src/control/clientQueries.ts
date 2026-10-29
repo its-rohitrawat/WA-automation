@@ -155,25 +155,25 @@ export function senderLabel(name: string | null, fromMe: boolean): string {
 /** What the drawer shows about the client's group (see ClientActivity). Parameterised reads only. */
 export function clientActivity(db: Db, c: ClientRow, now: Date, quietMinutes: number): ClientActivity {
   const since = new Date(now.getTime() - WEEK_MS).toISOString();
-  const pending = (db.prepare('SELECT COUNT(*) AS n FROM messages WHERE client_id = ? AND processed_at IS NULL AND revoked = 0').get(c.id) as { n: number }).n;
+  const pending = (db.raw.prepare('SELECT COUNT(*) AS n FROM messages WHERE client_id = ? AND processed_at IS NULL AND revoked = 0').get(c.id) as { n: number }).n;
   const batch = db
-    .prepare("SELECT finished_at AS at, message_count AS messages FROM batches WHERE client_id = ? AND status = 'ok' AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1")
+    .raw.prepare("SELECT finished_at AS at, message_count AS messages FROM batches WHERE client_id = ? AND status = 'ok' AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1")
     .get(c.id) as { at: string; messages: number } | undefined;
   // The batch's own task changes: its task events carry its finish time (reconciler: one appliedAt for both). Decisions,
   // phases, people's roles and reminders are not task changes.
   const taskChanges = batch
-    ? (db.prepare("SELECT COUNT(*) AS n FROM task_events WHERE client_id = ? AND actor = 'ai' AND at = ? AND task_id IS NOT NULL AND op <> 'log_reminder'")
+    ? (db.raw.prepare("SELECT COUNT(*) AS n FROM task_events WHERE client_id = ? AND actor = 'ai' AND at = ? AND task_id IS NOT NULL AND op <> 'log_reminder'")
       .get(c.id, batch.at) as { n: number }).n
     : 0;
-  const taskCount = (db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE client_id = ?').get(c.id) as { n: number }).n;
+  const taskCount = (db.raw.prepare('SELECT COUNT(*) AS n FROM tasks WHERE client_id = ?').get(c.id) as { n: number }).n;
   const week = db
-    .prepare(`SELECT COUNT(*) AS messages, COUNT(DISTINCT m.sender_jid) AS people,
+    .raw.prepare(`SELECT COUNT(*) AS messages, COUNT(DISTINCT m.sender_jid) AS people,
         SUM(COALESCE(md.kind, m.media_type) IN ('image', 'video', 'document', 'audio')) AS files, SUM(COALESCE(md.kind, m.media_type) = 'voice') AS voice
       FROM messages m LEFT JOIN media md ON md.message_id = m.id
       WHERE m.client_id = ? AND m.revoked = 0 AND m.ts >= ?`)
     .get(c.id, since) as { messages: number; people: number; files: number | null; voice: number | null };
   const rows = db
-    .prepare(`SELECT m.ts AS at, m.text, m.from_me AS fromMe, m.media_type AS mediaType, p.name AS name,
+    .raw.prepare(`SELECT m.ts AS at, m.text, m.from_me AS fromMe, m.media_type AS mediaType, p.name AS name,
         md.kind, md.seconds, md.status AS mediaStatus, md.text IS NOT NULL AS hasText
       FROM messages m
       LEFT JOIN people p ON p.client_id = m.client_id AND p.jid = m.sender_jid
@@ -223,7 +223,7 @@ const COUNTS = `SUM(status <> 'done') AS open,
 /** Every client's counts, in one pass over tasks. */
 function countsByClient(db: Db, now: Date): Map<number, ClientCounts> {
   const rows = db
-    .prepare(`SELECT client_id AS id, ${COUNTS} FROM tasks GROUP BY client_id`)
+    .raw.prepare(`SELECT client_id AS id, ${COUNTS} FROM tasks GROUP BY client_id`)
     .all({ today: istDate(now), monday: weekStart(now) }) as (ClientCounts & { id: number })[];
   return new Map(rows.map(({ id, ...c }) => [id, c]));
 }
@@ -231,7 +231,7 @@ function countsByClient(db: Db, now: Date): Map<number, ClientCounts> {
 /** One client's counts: its own WHERE client_id = ?, so the tasks_client_status index is used. */
 function countsForClient(db: Db, now: Date, clientId: number): Map<number, ClientCounts> {
   const row = db
-    .prepare(`SELECT ${COUNTS} FROM tasks WHERE client_id = @clientId`)
+    .raw.prepare(`SELECT ${COUNTS} FROM tasks WHERE client_id = @clientId`)
     .get({ today: istDate(now), monday: weekStart(now), clientId }) as { [K in keyof ClientCounts]: number | null };
   // SUM over no rows is NULL.
   return new Map([[clientId, { open: row.open ?? 0, overdue: row.overdue ?? 0, review: row.review ?? 0, doneThisWeek: row.doneThisWeek ?? 0 }]]);
@@ -239,7 +239,7 @@ function countsForClient(db: Db, now: Date, clientId: number): Map<number, Clien
 
 /** The latest message time per client, in one statement. */
 function lastActivityByClient(db: Db): Map<number, string> {
-  const rows = db.prepare('SELECT client_id AS id, MAX(ts) AS ts FROM messages GROUP BY client_id').all() as { id: number; ts: string }[];
+  const rows = db.raw.prepare('SELECT client_id AS id, MAX(ts) AS ts FROM messages GROUP BY client_id').all() as { id: number; ts: string }[];
   return new Map(rows.map((r) => [r.id, r.ts]));
 }
 
@@ -252,13 +252,13 @@ function sheetNames(db: Db): Map<number, string> {
 
 /** Unread messages per client, in one statement (the messages_unprocessed index). */
 function pendingByClient(db: Db): Map<number, number> {
-  const rows = db.prepare('SELECT client_id AS id, COUNT(*) AS n FROM messages WHERE processed_at IS NULL AND revoked = 0 GROUP BY client_id').all() as { id: number; n: number }[];
+  const rows = db.raw.prepare('SELECT client_id AS id, COUNT(*) AS n FROM messages WHERE processed_at IS NULL AND revoked = 0 GROUP BY client_id').all() as { id: number; n: number }[];
   return new Map(rows.map((r) => [r.id, r.n]));
 }
 
 /** When each client's latest batch that worked finished, in one statement. */
 function lastReadByClient(db: Db): Map<number, string> {
-  const rows = db.prepare("SELECT client_id AS id, MAX(finished_at) AS at FROM batches WHERE status = 'ok' AND finished_at IS NOT NULL GROUP BY client_id").all() as { id: number; at: string }[];
+  const rows = db.raw.prepare("SELECT client_id AS id, MAX(finished_at) AS at FROM batches WHERE status = 'ok' AND finished_at IS NOT NULL GROUP BY client_id").all() as { id: number; at: string }[];
   return new Map(rows.map((r) => [r.id, r.at]));
 }
 
@@ -307,14 +307,14 @@ export function clientDetail(db: Db, code: string, now: Date, groupNames?: Reado
   // Sentiment is shown only while it is switched on: off, none leaves here.
   const moods = readSentimentEnabled(db);
   const openTasks = (db
-    .prepare(`SELECT code, title, assigned_to AS assignedTo, deadline, status, priority_level AS priority, sentiment FROM tasks
+    .raw.prepare(`SELECT code, title, assigned_to AS assignedTo, deadline, status, priority_level AS priority, sentiment FROM tasks
       WHERE client_id = ? AND status <> 'done' ORDER BY deadline IS NULL, deadline, id`)
     .all(c.id) as ClientOpenTask[]).map((t) => (moods ? t : { ...t, sentiment: null }));
   const meetings = db
-    .prepare('SELECT id, started_at AS startedAt, title, status FROM meetings WHERE client_id = ? ORDER BY started_at DESC, id DESC LIMIT ?')
+    .raw.prepare('SELECT id, started_at AS startedAt, title, status FROM meetings WHERE client_id = ? ORDER BY started_at DESC, id DESC LIMIT ?')
     .all(c.id, MEETINGS_LIMIT) as ClientMeeting[];
   const batch = db
-    .prepare("SELECT started_at AS startedAt, finished_at AS finishedAt FROM batches WHERE client_id = ? AND status <> 'failed' ORDER BY id DESC LIMIT 1")
+    .raw.prepare("SELECT started_at AS startedAt, finished_at AS finishedAt FROM batches WHERE client_id = ? AND status <> 'failed' ORDER BY id DESC LIMIT 1")
     .get(c.id) as { startedAt: string; finishedAt: string | null } | undefined;
   const sentiment = moods && c.sentiment ? { mood: c.sentiment, at: c.sentimentAt } : null;
   return { ...base, sentiment, openTasks, meetings, lastSyncAt: batch ? (batch.finishedAt ?? batch.startedAt) : null, activity };

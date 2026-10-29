@@ -142,7 +142,7 @@ function toRow(r: RawMedia): MediaRow {
  */
 export function insertMedia(db: Db, m: NewMedia): number {
   const r = db
-    .prepare(`INSERT INTO media (message_id, client_id, kind, status, mime_type, file_name, file_size, seconds, forwarded, ref_enc, error_code,
+    .raw.prepare(`INSERT INTO media (message_id, client_id, kind, status, mime_type, file_name, file_size, seconds, forwarded, ref_enc, error_code,
         created_at, updated_at)
       SELECT id, client_id, @kind, @status, @mimeType, @fileName, @fileSize, @seconds, @forwarded, @refEnc, @errorCode, @createdAt, @createdAt
       FROM messages WHERE id = @messageId AND client_id = @clientId`)
@@ -152,17 +152,17 @@ export function insertMedia(db: Db, m: NewMedia): number {
 }
 
 export function messageRowId(db: Db, clientId: number, waId: string): number | undefined {
-  return (db.prepare('SELECT id FROM messages WHERE client_id = ? AND wa_id = ?').get(clientId, waId) as { id: number } | undefined)?.id;
+  return (db.raw.prepare('SELECT id FROM messages WHERE client_id = ? AND wa_id = ?').get(clientId, waId) as { id: number } | undefined)?.id;
 }
 
 export function getMedia(db: Db, id: number): MediaRow | undefined {
-  const r = db.prepare(`SELECT ${COLUMNS} FROM media WHERE id = ?`).get(id) as RawMedia | undefined;
+  const r = db.raw.prepare(`SELECT ${COLUMNS} FROM media WHERE id = ?`).get(id) as RawMedia | undefined;
   return r ? toRow(r) : undefined;
 }
 
 /** The sealed download details. Secret: never log or return them anywhere else. */
 export function getMediaRef(db: Db, id: number): Buffer | null {
-  return (db.prepare('SELECT ref_enc FROM media WHERE id = ?').get(id) as { ref_enc: Buffer | null } | undefined)?.ref_enc ?? null;
+  return (db.raw.prepare('SELECT ref_enc FROM media WHERE id = ?').get(id) as { ref_enc: Buffer | null } | undefined)?.ref_enc ?? null;
 }
 
 /**
@@ -176,7 +176,7 @@ export function dueMediaIds(db: Db, nowIso: string, limit: number, o: { audio?: 
   const kinds = o.audio === undefined ? '' : o.audio ? "AND m.kind IN ('voice', 'audio')" : "AND m.kind NOT IN ('voice', 'audio')";
   return (
     db
-      .prepare(`SELECT m.id FROM media m
+      .raw.prepare(`SELECT m.id FROM media m
         JOIN clients c ON c.id = m.client_id AND c.active = 1
         JOIN messages msg ON msg.id = m.message_id
         WHERE m.status = 'pending' AND (m.next_attempt_at IS NULL OR m.next_attempt_at <= ?) ${kinds}
@@ -196,7 +196,7 @@ export interface MediaJob {
 /** What processing one file needs to know about its message and client. */
 export function mediaJob(db: Db, mediaId: number): MediaJob | undefined {
   const r = db
-    .prepare(`SELECT m.client_id AS clientId, c.code AS clientCode, msg.wa_id AS waId, msg.ts AS ts, msg.revoked AS revoked
+    .raw.prepare(`SELECT m.client_id AS clientId, c.code AS clientCode, msg.wa_id AS waId, msg.ts AS ts, msg.revoked AS revoked
       FROM media m JOIN messages msg ON msg.id = m.message_id JOIN clients c ON c.id = m.client_id WHERE m.id = ?`)
     .get(mediaId) as (Omit<MediaJob, 'revoked'> & { revoked: number }) | undefined;
   return r ? { ...r, revoked: r.revoked === 1 } : undefined;
@@ -204,7 +204,7 @@ export function mediaJob(db: Db, mediaId: number): MediaJob | undefined {
 
 /** The original is on disk: the sealed download details are no longer needed and are wiped. */
 export function markDownloaded(db: Db, id: number, d: { localPath: string; sha256: string; fileSize: number; at: string }): void {
-  db.prepare('UPDATE media SET local_path = @localPath, sha256 = @sha256, file_size = @fileSize, ref_enc = NULL, updated_at = @at WHERE id = @id').run({ id, ...d });
+  db.raw.prepare('UPDATE media SET local_path = @localPath, sha256 = @sha256, file_size = @fileSize, ref_enc = NULL, updated_at = @at WHERE id = @id').run({ id, ...d });
 }
 
 /**
@@ -265,19 +265,19 @@ export function finishMedia(
   const { forget, ...fields } = x;
   const spaced = fields.text === null ? null : fields.text.replaceAll('\u0000', ' ');
   const text = spaced !== null && showsText(spaced) ? spaced : null;
-  db.transaction(() => {
-    const finished = db.prepare(`UPDATE media SET status = 'done', text_kind = @textKind, text = @text, page_count = @pageCount, note = @note, error_code = NULL,
+  db.raw.transaction(() => {
+    const finished = db.raw.prepare(`UPDATE media SET status = 'done', text_kind = @textKind, text = @text, page_count = @pageCount, note = @note, error_code = NULL,
       next_attempt_at = NULL, ref_enc = NULL, updated_at = @at WHERE id = @id AND status = 'pending'`).run({ id, ...fields, text }).changes;
     if (forget) {
       // ON CONFLICT rather than OR IGNORE: a copy already noted is kept, but a ref the CHECK refuses still throws, so the
       // finish is undone instead of a transcript stored with its copy silently never deleted.
-      db.prepare(NOTE_FORGET).run({ id, provider: forget.provider, ref: forget.ref, at: fields.at });
+      db.raw.prepare(NOTE_FORGET).run({ id, provider: forget.provider, ref: forget.ref, at: fields.at });
     }
     if (finished === 0) return; // already finished (or failed): nothing to flag or queue again
     // The flag first: it needs processed_at as it was before the message is queued again.
-    db.prepare(`UPDATE media SET requeued_for_text = 1 WHERE id = ? AND ${REQUEUING_FILE} AND message_id IN
+    db.raw.prepare(`UPDATE media SET requeued_for_text = 1 WHERE id = ? AND ${REQUEUING_FILE} AND message_id IN
       (SELECT id FROM messages WHERE revoked = 0 AND (processed_at IS NOT NULL OR requeue_reason IS NOT NULL))`).run(id);
-    db.prepare(`UPDATE messages SET processed_at = NULL, version = version + 1
+    db.raw.prepare(`UPDATE messages SET processed_at = NULL, version = version + 1
       WHERE revoked = 0 AND id = (SELECT message_id FROM media WHERE id = ? AND ${REQUEUING_FILE})`).run(id);
   }).immediate();
 }
@@ -288,12 +288,12 @@ export function finishMedia(
  * same provider and ref) is noted once; a ref the CHECK refuses throws.
  */
 export function noteMediaForget(db: Db, id: number, f: { provider: ProviderId; ref: string; at: string }): void {
-  db.prepare(NOTE_FORGET).run({ id, ...f });
+  db.raw.prepare(NOTE_FORGET).run({ id, ...f });
 }
 
 /** A final failure. The sealed details are wiped; an original already saved stays on disk. */
 export function failMedia(db: Db, id: number, f: { status: 'failed' | 'unavailable'; errorCode: string; at: string }): void {
-  db.prepare('UPDATE media SET status = @status, error_code = @errorCode, next_attempt_at = NULL, ref_enc = NULL, updated_at = @at WHERE id = @id').run({ id, ...f });
+  db.raw.prepare('UPDATE media SET status = @status, error_code = @errorCode, next_attempt_at = NULL, ref_enc = NULL, updated_at = @at WHERE id = @id').run({ id, ...f });
 }
 
 /**
@@ -305,7 +305,7 @@ export function failMedia(db: Db, id: number, f: { status: 'failed' | 'unavailab
  */
 export function claimMedia(db: Db, id: number, c: { nextAttemptAt: string; at: string }): boolean {
   return (
-    db.prepare(`UPDATE media SET attempts = attempts + 1, next_attempt_at = @nextAttemptAt, updated_at = @at WHERE id = @id AND status = 'pending'`).run({ id, ...c })
+    db.raw.prepare(`UPDATE media SET attempts = attempts + 1, next_attempt_at = @nextAttemptAt, updated_at = @at WHERE id = @id AND status = 'pending'`).run({ id, ...c })
       .changes === 1
   );
 }
@@ -319,7 +319,7 @@ export function deferMedia(
   id: number,
   d: { errorCode: string; nextAttemptAt: string; at: string } & ({ countAttempt: boolean; attempts?: never } | { attempts: number; countAttempt?: never }),
 ): void {
-  db.prepare('UPDATE media SET error_code = @errorCode, next_attempt_at = @nextAttemptAt, attempts = COALESCE(@attempts, attempts + @inc), updated_at = @at WHERE id = @id').run({
+  db.raw.prepare('UPDATE media SET error_code = @errorCode, next_attempt_at = @nextAttemptAt, attempts = COALESCE(@attempts, attempts + @inc), updated_at = @at WHERE id = @id').run({
     id,
     errorCode: d.errorCode,
     nextAttemptAt: d.nextAttemptAt,
@@ -337,7 +337,7 @@ export function deferMedia(
 export function mediaForMessages(db: Db, messageIds: number[], maxChars: number): Map<number, MediaRow> {
   if (messageIds.length === 0) return new Map();
   const rows = db
-    .prepare(`SELECT ${columns('substr(text, 1, @maxChars)')} FROM media WHERE message_id IN (SELECT value FROM json_each(@ids))`)
+    .raw.prepare(`SELECT ${columns('substr(text, 1, @maxChars)')} FROM media WHERE message_id IN (SELECT value FROM json_each(@ids))`)
     .all({ maxChars, ids: JSON.stringify(messageIds) }) as RawMedia[];
   return new Map(rows.map((r) => [r.message_id, toRow(r)]));
 }
@@ -394,7 +394,7 @@ const REQUEUE_SET = `status = 'pending', attempts = 0, next_attempt_at = NULL, e
 /** The 2a voice notes and audio files `cli transcribe-voice` can transcribe, oldest first; optionally one client's only. */
 export function voiceBacklog(db: Db, o: { clientId?: number } = {}): VoiceBacklogRow[] {
   return db
-    .prepare(`SELECT m.id, m.client_id AS clientId, m.file_size AS fileSize, m.mime_type AS mimeType ${VOICE_BACKLOG_FROM}
+    .raw.prepare(`SELECT m.id, m.client_id AS clientId, m.file_size AS fileSize, m.mime_type AS mimeType ${VOICE_BACKLOG_FROM}
       AND (@clientId IS NULL OR m.client_id = @clientId) ORDER BY m.id`)
     .all({ clientId: o.clientId ?? null }) as VoiceBacklogRow[];
 }
@@ -413,7 +413,7 @@ export function voiceBacklog(db: Db, o: { clientId?: number } = {}): VoiceBacklo
 export function queueVoiceBacklog(db: Db, ids: number[], at: string): number {
   if (ids.length === 0) return 0;
   return db
-    .prepare(`UPDATE media SET ${REQUEUE_SET}
+    .raw.prepare(`UPDATE media SET ${REQUEUE_SET}
       WHERE id IN (SELECT value FROM json_each(@ids)) AND id IN (SELECT m.id ${VOICE_BACKLOG_FROM})`)
     .run({ ids: JSON.stringify(ids), at }).changes;
 }
@@ -424,7 +424,7 @@ export function queueVoiceBacklog(db: Db, ids: number[], at: string): number {
  */
 export function failedLocalVoice(db: Db, o: { clientId?: number } = {}): VoiceBacklogRow[] {
   return db
-    .prepare(`SELECT m.id, m.client_id AS clientId, m.file_size AS fileSize, m.mime_type AS mimeType ${FAILED_LOCAL_VOICE_FROM}
+    .raw.prepare(`SELECT m.id, m.client_id AS clientId, m.file_size AS fileSize, m.mime_type AS mimeType ${FAILED_LOCAL_VOICE_FROM}
       AND (@clientId IS NULL OR m.client_id = @clientId) ORDER BY m.id`)
     .all({ clientId: o.clientId ?? null }) as VoiceBacklogRow[];
 }
@@ -438,7 +438,7 @@ export function failedLocalVoice(db: Db, o: { clientId?: number } = {}): VoiceBa
 export function queueFailedLocalVoice(db: Db, ids: number[], at: string): number {
   if (ids.length === 0) return 0;
   return db
-    .prepare(`UPDATE media SET ${REQUEUE_SET}
+    .raw.prepare(`UPDATE media SET ${REQUEUE_SET}
       WHERE id IN (SELECT value FROM json_each(@ids)) AND id IN (SELECT m.id ${FAILED_LOCAL_VOICE_FROM})`)
     .run({ ids: JSON.stringify(ids), at }).changes;
 }
@@ -455,7 +455,7 @@ export interface MediaForgetRow {
 /** Copies due for a try at nowIso with fewer than maxAttempts tries, oldest first; optionally one file's only. */
 export function pendingMediaForgets(db: Db, o: { nowIso: string; maxAttempts: number; mediaId?: number }): MediaForgetRow[] {
   return db
-    .prepare(`SELECT id, media_id AS mediaId, provider, ref, attempts FROM media_stt_forget
+    .raw.prepare(`SELECT id, media_id AS mediaId, provider, ref, attempts FROM media_stt_forget
       WHERE attempts < @maxAttempts AND (next_try_at IS NULL OR next_try_at <= @nowIso) AND (@mediaId IS NULL OR media_id = @mediaId) ORDER BY id`)
     .all({ maxAttempts: o.maxAttempts, nowIso: o.nowIso, mediaId: o.mediaId ?? null }) as MediaForgetRow[];
 }
@@ -465,12 +465,12 @@ export function pendingMediaForgets(db: Db, o: { nowIso: string; maxAttempts: nu
  * and a restart does not try again before nextTryAt.
  */
 export function countMediaForgetAttempt(db: Db, id: number, nextTryAt: string): void {
-  db.prepare('UPDATE media_stt_forget SET attempts = attempts + 1, next_try_at = @nextTryAt WHERE id = @id').run({ id, nextTryAt });
+  db.raw.prepare('UPDATE media_stt_forget SET attempts = attempts + 1, next_try_at = @nextTryAt WHERE id = @id').run({ id, nextTryAt });
 }
 
 /** The provider has deleted its copy. */
 export function deleteMediaForget(db: Db, id: number): void {
-  db.prepare('DELETE FROM media_stt_forget WHERE id = ?').run(id);
+  db.raw.prepare('DELETE FROM media_stt_forget WHERE id = ?').run(id);
 }
 
 /**
@@ -481,7 +481,7 @@ export function deleteMediaForget(db: Db, id: number): void {
  */
 export function mediaSttForgetsGivenUp(db: Db, o: { maxAttempts: number; provider: ProviderId | 'local' | 'none' }): number {
   return (
-    db.prepare('SELECT COUNT(*) AS n FROM media_stt_forget WHERE attempts >= ? OR provider <> ?').get(o.maxAttempts, o.provider) as { n: number }
+    db.raw.prepare('SELECT COUNT(*) AS n FROM media_stt_forget WHERE attempts >= ? OR provider <> ?').get(o.maxAttempts, o.provider) as { n: number }
   ).n;
 }
 
@@ -517,7 +517,7 @@ const UPLOAD_CANDIDATES_FROM = `FROM media m JOIN messages msg ON msg.id = m.mes
  */
 export function uploadCandidates(db: Db, nowIso: string, limit: number): UploadCandidate[] {
   return db
-    .prepare(`SELECT m.id, m.client_id AS clientId, c.name AS clientName, m.kind, m.mime_type AS mimeType, m.file_name AS fileName,
+    .raw.prepare(`SELECT m.id, m.client_id AS clientId, c.name AS clientName, m.kind, m.mime_type AS mimeType, m.file_name AS fileName,
         m.local_path AS localPath, msg.ts, m.drive_attempts AS driveAttempts
       ${UPLOAD_CANDIDATES_FROM}
       ORDER BY m.id LIMIT ?`)
@@ -526,16 +526,16 @@ export function uploadCandidates(db: Db, nowIso: string, limit: number): UploadC
 
 /** Whether one file is still an upload candidate: checked again just before it is uploaded, since a pass can take minutes. */
 export function isUploadCandidate(db: Db, mediaId: number, nowIso: string): boolean {
-  return db.prepare(`SELECT 1 ${UPLOAD_CANDIDATES_FROM} AND m.id = ?`).get(nowIso, mediaId) !== undefined;
+  return db.raw.prepare(`SELECT 1 ${UPLOAD_CANDIDATES_FROM} AND m.id = ?`).get(nowIso, mediaId) !== undefined;
 }
 
 export function markUploaded(db: Db, id: number, driveFileId: string): void {
-  db.prepare('UPDATE media SET drive_file_id = ?, drive_next_at = NULL WHERE id = ?').run(driveFileId, id);
+  db.raw.prepare('UPDATE media SET drive_file_id = ?, drive_next_at = NULL WHERE id = ?').run(driveFileId, id);
 }
 
 /** One failed upload try: counts the attempt. failed: stop trying until the next service start. */
 export function markUploadFailed(db: Db, id: number, f: { failed: boolean; nextAt: string | null }): void {
-  db.prepare('UPDATE media SET drive_attempts = drive_attempts + 1, drive_failed = @failed, drive_next_at = @nextAt WHERE id = @id').run({
+  db.raw.prepare('UPDATE media SET drive_attempts = drive_attempts + 1, drive_failed = @failed, drive_next_at = @nextAt WHERE id = @id').run({
     id,
     failed: f.failed ? 1 : 0,
     nextAt: f.nextAt,
@@ -544,7 +544,7 @@ export function markUploadFailed(db: Db, id: number, f: { failed: boolean; nextA
 
 /** At service start: uploads that gave up get a fresh set of attempts. Returns how many. */
 export function resetUploadFailures(db: Db): number {
-  return db.prepare('UPDATE media SET drive_failed = 0, drive_attempts = 0, drive_next_at = NULL WHERE drive_failed = 1 AND drive_file_id IS NULL').run().changes;
+  return db.raw.prepare('UPDATE media SET drive_failed = 0, drive_attempts = 0, drive_next_at = NULL WHERE drive_failed = 1 AND drive_file_id IS NULL').run().changes;
 }
 
 export interface ClientFileRow {
@@ -573,7 +573,7 @@ export const CLIENT_FILES_LIMIT = 500;
 /** Images, documents and videos sent by people whose role is 'client', newest first. View-once media is never listed. */
 export function listClientFiles(db: Db, clientId: number, limit = CLIENT_FILES_LIMIT): ClientFileRow[] {
   const rows = db
-    .prepare(`SELECT m.id, m.kind, m.status, m.mime_type AS mimeType, m.file_name AS fileName, m.file_size AS fileSize, m.seconds,
+    .raw.prepare(`SELECT m.id, m.kind, m.status, m.mime_type AS mimeType, m.file_name AS fileName, m.file_size AS fileSize, m.seconds,
         m.page_count AS pageCount, m.text_kind AS textKind, substr(m.text, 1, 400) AS textStart, m.note, m.error_code AS errorCode,
         m.drive_file_id AS driveFileId, msg.ts, msg.revoked, COALESCE(p.name, msg.sender_name) AS sender
       FROM media m JOIN messages msg ON msg.id = m.message_id
@@ -621,7 +621,7 @@ export interface MediaStats {
 export function mediaStats(db: Db, now: Date, startedAt: Date = new Date(0), staleMs = 30 * 60_000): MediaStats {
   const staleBefore = new Date(now.getTime() - staleMs).toISOString();
   return db
-    .prepare(`SELECT
+    .raw.prepare(`SELECT
         COALESCE(SUM(m.status = 'pending'), 0) AS pending,
         COALESCE(SUM(m.status = 'pending' AND m.backlog = 0 AND m.created_at < @staleBefore AND @startedAt < @staleBefore
           AND COALESCE(m.error_code, '') NOT IN ('spend_cap', 'stt_unavailable')), 0) AS stale,

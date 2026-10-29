@@ -188,7 +188,7 @@ describe('GoogleAuthHub', () => {
     const before = hub.client('main');
     let calls = 0;
     hub.onChange(() => calls++);
-    db.exec("CREATE TRIGGER no_issuer BEFORE INSERT ON kv WHEN NEW.k = 'google_client:main' BEGIN SELECT RAISE(ABORT, 'disk full'); END");
+    db.raw.exec("CREATE TRIGGER no_issuer BEFORE INSERT ON kv WHEN NEW.k = 'google_client:main' BEGIN SELECT RAISE(ABORT, 'disk full'); END");
     expect(() => hub.setToken('main', 'rt-new', 'web', SCOPE)).toThrow('disk full');
     expect(hub.client('main')).toBe(before);
     expect(calls).toBe(0);

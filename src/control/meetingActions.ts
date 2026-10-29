@@ -1,7 +1,7 @@
 import { CorrectionError } from '../cli/corrections.ts';
 import { assignMeetingToClient, retryMeetingById, skipMeetingById } from '../cli/meetings.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
-import { tx, type Db } from '../store/db.ts';
+import { txSync, type Db } from '../store/db.ts';
 import { getMeetingState } from '../store/meetings.ts';
 import { ControlError, type Audit } from './errors.ts';
 import { meetingDetail, parseMeetingId, type AccountOf, type DashboardMeetingDetail } from './meetingQueries.ts';
@@ -63,7 +63,7 @@ export function runMeetingAction(
   if (action === 'retry' && ctx.spend.isPaused()) throw new ControlError(409, SPEND_CAP_REFUSAL);
   const { now } = ctx;
   try {
-    tx(db, () => {
+    txSync(db, () => {
       let line: string;
       switch (action) {
         case 'assign': {

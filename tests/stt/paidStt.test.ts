@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { SpendCapReachedError } from '../../src/brain/paidCall.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
-import { tx } from '../../src/store/db.ts';
+import { txSync } from '../../src/store/db.ts';
 import { SttHttpError, SttJobError, SttJobLostError, SttNoAnswerError } from '../../src/stt/http.ts';
 import { SttBookingError, withSttHold, type SttBooking } from '../../src/stt/paidStt.ts';
 import { manualClock } from '../../src/util/clock.ts';
@@ -10,7 +10,7 @@ import { seededDb } from '../helpers/db.ts';
 function setup(capUsd = 1) {
   const db = seededDb();
   const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd });
-  const rows = () => db.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
+  const rows = () => db.raw.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
   return { spend, rows };
 }
 /** No hold is left: the whole remaining budget can still be reserved. */
@@ -111,14 +111,14 @@ describe('withSttHold', () => {
     const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 1 });
     const ownerFailed = new Error('part write refused');
     const err = await withSttHold(spend, 0.2, 'meeting 4 part 1', async () => ({ result: 'x', costUsd: 0.05 }), {
-      atomically: (fn) => tx(db, fn),
+      atomically: (fn) => txSync(db, fn),
       onBooked: (_b, r) => {
         expect(r).toBe('x');
         throw ownerFailed;
       },
     }).catch((e: unknown) => e);
     expect(err).toBe(ownerFailed);
-    expect(db.prepare('SELECT COUNT(*) AS n FROM spend').get()).toEqual({ n: 0 }); // the owner's record still says "sent, nothing booked"
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM spend').get()).toEqual({ n: 0 }); // the owner's record still says "sent, nothing booked"
     expectNoHold(spend);
   });
 

@@ -75,12 +75,12 @@ describe('clientDetailHandler', () => {
   it('sends moods, the task\'s and the client\'s, only while sentiment is switched on', () => {
     const { deps } = setup();
     const db = deps.db;
-    db.prepare("UPDATE tasks SET sentiment = 'frustrated' WHERE code = 'SHA-001'").run();
-    db.prepare("UPDATE clients SET sentiment = 'negative', sentiment_at = '2026-10-19T08:00:00.000Z' WHERE code = 'SHA'").run();
+    db.raw.prepare("UPDATE tasks SET sentiment = 'frustrated' WHERE code = 'SHA-001'").run();
+    db.raw.prepare("UPDATE clients SET sentiment = 'negative', sentiment_at = '2026-10-19T08:00:00.000Z' WHERE code = 'SHA'").run();
     const detail = () => (clientDetailHandler(deps, CTX, 'SHA').body as { client: { sentiment: unknown; openTasks: { sentiment: unknown }[] } }).client;
     expect(detail().sentiment).toBeNull();
     expect(detail().openTasks[0]!.sentiment).toBeNull();
-    db.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', '2026-10-19T08:00:00.000Z', 'o')").run();
+    db.raw.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', '2026-10-19T08:00:00.000Z', 'o')").run();
     expect(detail().sentiment).toEqual({ mood: 'negative', at: '2026-10-19T08:00:00.000Z' });
     expect(detail().openTasks[0]!.sentiment).toBe('frustrated');
   });

@@ -32,7 +32,7 @@ function minusDays(date: string, n: number): string {
 export function overview(db: Db, now: Date, health?: Pick<HealthSnapshot, 'line' | 'lastPublishedAt' | 'publishFailingSince'>): Overview {
   const today = istDate(now);
   const rows = db
-    .prepare(`SELECT c.code, c.name,
+    .raw.prepare(`SELECT c.code, c.name,
         COALESCE(SUM(t.status <> 'done' AND t.deadline IS NOT NULL AND t.deadline < @today), 0) AS overdue,
         COALESCE(SUM(t.status = 'open' AND NOT (t.deadline IS NOT NULL AND t.deadline < @today)), 0) AS open,
         COALESCE(SUM(t.status = 'maybe_done' AND NOT (t.deadline IS NOT NULL AND t.deadline < @today)), 0) AS review,

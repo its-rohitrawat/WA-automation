@@ -12,7 +12,7 @@ import { MeetingWatcher, type FoundMeeting } from '../meetings/watcher.ts';
 import { createOAuthClient, MAIN_ACCOUNT, meetingsReady, TokenStore } from '../output/googleAuth.ts';
 import { estimateCostUsd, pricesFromEnv, type Prices } from '../spend/pricing.ts';
 import { getClientByCode, getClientByGroupId, listClients, syncClients } from '../store/clients.ts';
-import { openDb, tx, type Db } from '../store/db.ts';
+import { openDb, txSync, type Db } from '../store/db.ts';
 import {
   assignMeeting, getMeetingState, listMeetingsByStatus, retryMeeting, skipMeeting, type MeetingStatus, type MeetingState,
 } from '../store/meetings.ts';
@@ -83,7 +83,7 @@ export function assignMeetingToClient(db: Db, rawId: string, clientCode: string,
       `Meeting ${m.id} is ${LABELS[m.status]}; only unassigned or internal meetings can be assigned (and no-access ones without a client)`,
     );
   }
-  tx(db, () => {
+  txSync(db, () => {
     if (!assignMeeting(db, m.id, c.id, now.toISOString())) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
     humanEvent(db, null, c.id, 'assign_meeting', { meetingId: m.id }, now);
     requestRebuild(db, now);
@@ -95,7 +95,7 @@ export function assignMeetingToClient(db: Db, rawId: string, clientCode: string,
 export function skipMeetingById(db: Db, rawId: string, now: Date): number {
   const m = findMeeting(db, rawId);
   if (m.status !== 'unassigned') throw new CorrectionError(`Meeting ${m.id} is ${LABELS[m.status]}; only unassigned meetings can be skipped`);
-  tx(db, () => {
+  txSync(db, () => {
     if (!skipMeeting(db, m.id, now.toISOString())) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
     requestRebuild(db, now); // the workbook lists unassigned meetings
   });
@@ -113,7 +113,7 @@ export function retryMeetingById(db: Db, rawId: string, now: Date): { id: number
   if (m.status !== 'failed' && m.status !== 'no_access') {
     throw new CorrectionError(`Meeting ${m.id} is ${LABELS[m.status]}; only failed or no-access meetings can be retried`);
   }
-  const status = tx(db, () => {
+  const status = txSync(db, () => {
     const s = retryMeeting(db, m.id, now.toISOString());
     if (s === null) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
     if (s === 'unassigned') requestRebuild(db, now);
@@ -267,11 +267,11 @@ export async function meetingBackfillCommand(opts: { since: string; yes: boolean
     } else {
       // The preview syncs inside a transaction that is always rolled back, so it stores nothing. The lock is held (the
       // service is stopped), so no other writer waits on it.
-      db.exec('BEGIN');
+      db.raw.exec('BEGIN');
       try {
         r = await run();
       } finally {
-        db.exec('ROLLBACK');
+        db.raw.exec('ROLLBACK');
       }
     }
     const f = r.found;
@@ -290,7 +290,7 @@ export async function meetingBackfillCommand(opts: { since: string; yes: boolean
     if (r.added > 0) requestRebuild(db, now);
     out('Next: start the service (net start wa-agent); it processes the queued meetings. See them with: npm run cli -- meeting list');
   } finally {
-    db?.close();
+    db?.raw.close();
     await lock.release();
   }
 }
@@ -338,6 +338,6 @@ export async function meetingCheckCommand(deps: MeetingCliDeps): Promise<void> {
     }
     out('Nothing was downloaded or stored.');
   } finally {
-    db.close();
+    db.raw.close();
   }
 }

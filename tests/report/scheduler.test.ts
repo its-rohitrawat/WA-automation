@@ -141,11 +141,11 @@ describe('ReportScheduler', () => {
   it("a send whose outcome could not be recorded reads unknown after 10 minutes, and at the deadline becomes unknown, never skipped or sent again", async () => {
     const { db, clock, sender, s, at } = setup();
     await at('05:00'); // recovered: nothing was cut off
-    const prepare = db.prepare.bind(db);
-    const spy = vi.spyOn(db, 'prepare').mockImplementation(((sql: string) => {
+    const prepare = db.raw.prepare.bind(db.raw);
+    const spy = vi.spyOn(db.raw, 'prepare').mockImplementation(((sql: string) => {
       if (/SET status = @status/.test(sql)) throw new Error('disk I/O error'); // finishReport fails
       return prepare(sql);
-    }) as typeof db.prepare);
+    }) as typeof db.raw.prepare);
     try {
       await at('06:00');
     } finally {
@@ -199,11 +199,11 @@ describe('ReportScheduler', () => {
   it('counts as recovered only once the cut-off row is marked unknown: a recovery that failed runs again at the next tick', async () => {
     const { db, clock, sender, s, at } = setup();
     claimReport(db, DAY, iso('06:00')); // the previous run died while sending
-    const prepare = db.prepare.bind(db);
-    const spy = vi.spyOn(db, 'prepare').mockImplementation(((sql: string) => {
+    const prepare = db.raw.prepare.bind(db.raw);
+    const spy = vi.spyOn(db.raw, 'prepare').mockImplementation(((sql: string) => {
       if (/detail = 'interrupted'/.test(sql)) throw new Error('database is locked'); // markInterruptedReports fails
       return prepare(sql);
-    }) as typeof db.prepare);
+    }) as typeof db.raw.prepare);
     clock.set(IST('06:20'));
     try {
       expect(() => s.recover(clock.now())).toThrow('database is locked');
@@ -326,11 +326,11 @@ describe('ReportScheduler', () => {
     const { db, sender, at } = setup();
     request(db, '05:00');
     const writes: string[] = [];
-    const prepare = db.prepare.bind(db);
-    const spy = vi.spyOn(db, 'prepare').mockImplementation(((sql: string) => {
+    const prepare = db.raw.prepare.bind(db.raw);
+    const spy = vi.spyOn(db.raw, 'prepare').mockImplementation(((sql: string) => {
       if (/INSERT INTO kv/.test(sql)) writes.push(sql);
       return prepare(sql);
-    }) as typeof db.prepare);
+    }) as typeof db.raw.prepare);
     try {
       await at('05:00');
       await at('05:01');
@@ -682,7 +682,7 @@ describe('ReportScheduler', () => {
 
   it('never throws from tick, and the next tick still runs', async () => {
     const { db, sender, s, clock } = setup();
-    const prepare = vi.spyOn(db, 'prepare').mockImplementationOnce(() => {
+    const prepare = vi.spyOn(db.raw, 'prepare').mockImplementationOnce(() => {
       throw new Error('database is locked');
     });
     clock.set(IST('06:00'));
@@ -696,7 +696,7 @@ describe('ReportScheduler', () => {
 
   it('never throws from tick when the database is closed', async () => {
     const { db, s, clock } = setup();
-    db.close();
+    db.raw.close();
     clock.set(IST('06:00'));
     await expect(s.tick(clock.now())).resolves.toBeUndefined();
   });

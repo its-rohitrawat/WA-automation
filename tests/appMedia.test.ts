@@ -265,7 +265,7 @@ describe('app with shared files', () => {
     const lines: string[] = [];
     const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
     const { db, app, sock } = setup({ log });
-    db.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
+    db.raw.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
     shareImage(sock);
     await stopApp(app);
     const out = lines.join('');
@@ -387,7 +387,7 @@ describe('app with shared files', () => {
     await p;
     expect(getMedia(db, 1)).toMatchObject({ status: 'done', driveFileId: null });
     expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']);
-    expect(db.prepare('SELECT drive_attempts FROM media').get()).toEqual({ drive_attempts: 0 });
+    expect(db.raw.prepare('SELECT drive_attempts FROM media').get()).toEqual({ drive_attempts: 0 });
   });
 });
 
@@ -402,7 +402,7 @@ describe('app media spend (review round 1)', () => {
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 
-  const ledger = (db: Db) => db.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
+  const ledger = (db: Db) => db.raw.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
 
   it('paid file reads use the app’s daily cap: an image whose hold does not fit waits for the budget, and Health says so', async () => {
     const ai = new FakeMediaAi();
@@ -644,11 +644,11 @@ describe('app media wiring (15g)', () => {
     });
     // The first publish creates the Drive root, then the uploader tries the file.
     await vi.waitFor(() =>
-      expect(db.prepare('SELECT drive_file_id, drive_attempts, drive_failed FROM media').get()).toEqual({ drive_file_id: null, drive_attempts: 1, drive_failed: 0 }),
+      expect(db.raw.prepare('SELECT drive_file_id, drive_attempts, drive_failed FROM media').get()).toEqual({ drive_file_id: null, drive_attempts: 1, drive_failed: 0 }),
     );
     expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']);
     // Due again 2 minutes later. Nothing else happens meanwhile: no message, no file, no publish.
-    const { nextAt } = db.prepare('SELECT drive_next_at AS nextAt FROM media').get() as { nextAt: string };
+    const { nextAt } = db.raw.prepare('SELECT drive_next_at AS nextAt FROM media').get() as { nextAt: string };
     await vi.advanceTimersByTimeAsync(Date.parse(nextAt) - Date.now() - 1_000);
     expect(getMedia(db, 1)?.driveFileId).toBeNull();
     expect(drive.uploads).toBe(1);
@@ -665,7 +665,7 @@ describe('app media wiring (15g)', () => {
     const { db, drive, app } = setup({
       prepare: (db, dataDir) => markUploadFailed(db, storedClientDoc(db, dataDir), { failed: true, nextAt: null }),
     });
-    expect(db.prepare('SELECT drive_failed, drive_attempts FROM media').get()).toEqual({ drive_failed: 0, drive_attempts: 0 });
+    expect(db.raw.prepare('SELECT drive_failed, drive_attempts FROM media').get()).toEqual({ drive_failed: 0, drive_attempts: 0 });
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => expect(getMedia(db, 1)?.driveFileId).toBeTruthy());
     expect(drive.created.map((f) => f.name)).toContain('brief.pdf');
@@ -927,7 +927,7 @@ class UntilAbortedLocalVoice extends FakeLocalVoiceTranscriber {
 
 describe('app voice notes (Phase 2b Task 10)', () => {
   const HOUR = 60 * MINUTE;
-  const ledger = (db: Db) => db.prepare('SELECT kind FROM spend ORDER BY id').all() as { kind: string }[];
+  const ledger = (db: Db) => db.raw.prepare('SELECT kind FROM spend ORDER BY id').all() as { kind: string }[];
   const sweeps = () => forgetHook.calls.filter((o) => o?.mediaId === undefined).length;
   const capture = () => {
     const lines: string[] = [];
@@ -1171,11 +1171,11 @@ describe('app voice notes (Phase 2b Task 10)', () => {
           messageId: messageRowId(db, 1, 'V0')!, clientId: 1, kind: 'voice', status: 'done', mimeType: 'audio/ogg', fileName: null, fileSize: 9000, seconds: 12,
           forwarded: false, refEnc: null, errorCode: null, createdAt: '2026-10-19T06:00:00.000Z',
         });
-        db.prepare('INSERT INTO media_stt_forget (media_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, 0)').run(mediaId, 'elevenlabs', 'tr-old', '2026-10-19T06:00:00.000Z');
+        db.raw.prepare('INSERT INTO media_stt_forget (media_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, 0)').run(mediaId, 'elevenlabs', 'tr-old', '2026-10-19T06:00:00.000Z');
       },
     });
     await vi.waitFor(() => expect(voice.forgotten).toEqual(['tr-old']));
-    expect(db.prepare('SELECT COUNT(*) AS n FROM media_stt_forget').get()).toEqual({ n: 0 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM media_stt_forget').get()).toEqual({ n: 0 });
     await stopApp(app);
   });
 
@@ -1230,7 +1230,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'), SLOW_IO);
     await vi.waitFor(() => expect(voice.forgotten).toEqual(['tr-1']));
     expect(forgetHook.calls.some((o) => o?.mediaId === 1)).toBe(true);
-    expect(db.prepare('SELECT COUNT(*) AS n FROM media_stt_forget').get()).toEqual({ n: 0 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM media_stt_forget').get()).toEqual({ n: 0 });
     await stopApp(app);
   });
 
@@ -1257,7 +1257,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     await vi.waitFor(() => expect(out()).toContain('voice note speech copy not deleted yet'));
     expect(out()).toContain('"code":"SQLITE_BUSY"');
     expect(out()).not.toContain('secret');
-    expect(db.prepare('SELECT COUNT(*) AS n FROM media_stt_forget').get()).toEqual({ n: 1 }); // left for the sweep
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM media_stt_forget').get()).toEqual({ n: 1 }); // left for the sweep
     await stopApp(app);
   });
 
@@ -1335,7 +1335,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const { db, app, sock } = setup({
       media: { voice, extract: undefined },
       // finishMedia's UPDATE to done fails for voice notes, as a full or locked database would.
-      prepare: (db) => db.exec(`CREATE TRIGGER refuse_voice_done BEFORE UPDATE OF status ON media
+      prepare: (db) => db.raw.exec(`CREATE TRIGGER refuse_voice_done BEFORE UPDATE OF status ON media
         WHEN NEW.status = 'done' AND NEW.kind = 'voice' BEGIN SELECT RAISE(ABORT, 'finish refused'); END`),
     });
     shareVoice(sock);
@@ -1344,7 +1344,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     expect(voice.transcribed).toBe(1); // never paid again
     expect(forgetHook.calls.some((o) => o?.mediaId === 1)).toBe(true);
     expect(sweeps()).toBe(1); // only the start's, before the note: no hourly sweep did it
-    expect(db.prepare('SELECT COUNT(*) AS n FROM media_stt_forget').get()).toEqual({ n: 0 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM media_stt_forget').get()).toEqual({ n: 0 });
     await stopApp(app);
   });
 
@@ -1432,7 +1432,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
           messageId: messageRowId(db, 1, 'V0')!, clientId: 1, kind: 'voice', status: 'done', mimeType: 'audio/ogg', fileName: null, fileSize: 9000, seconds: 12,
           forwarded: false, refEnc: null, errorCode: null, createdAt: '2026-10-19T06:00:00.000Z',
         });
-        db.prepare('INSERT INTO media_stt_forget (media_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, 0)').run(mediaId, 'elevenlabs', 'tr-old', '2026-10-19T06:00:00.000Z');
+        db.raw.prepare('INSERT INTO media_stt_forget (media_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, 0)').run(mediaId, 'elevenlabs', 'tr-old', '2026-10-19T06:00:00.000Z');
       },
     });
     await vi.advanceTimersByTimeAsync(3 * HOUR);

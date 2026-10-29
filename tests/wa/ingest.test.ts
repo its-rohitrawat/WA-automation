@@ -33,7 +33,7 @@ describe('Ingestor', () => {
   it('ignores groups that are not configured clients', () => {
     const { db, onNew, ing } = setup();
     ing.handle(message({ groupId: OTHER_GROUP }));
-    expect(db.prepare('SELECT COUNT(*) AS n FROM messages').get()).toEqual({ n: 0 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM messages').get()).toEqual({ n: 0 });
     expect(onNew).not.toHaveBeenCalled();
   });
 
@@ -41,7 +41,7 @@ describe('Ingestor', () => {
     const { db, ing } = setup();
     syncClients(db, [MEHTA]);
     ing.handle(message());
-    expect(db.prepare('SELECT COUNT(*) AS n FROM messages').get()).toEqual({ n: 0 });
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM messages').get()).toEqual({ n: 0 });
   });
 
   it('applies edits, reactions and revokes', () => {

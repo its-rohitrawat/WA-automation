@@ -57,7 +57,7 @@ function withDb<T>(fn: (db: Db) => T): T {
   try {
     return fn(db);
   } finally {
-    db.close();
+    db.raw.close();
   }
 }
 

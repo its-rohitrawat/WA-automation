@@ -8,7 +8,7 @@ const OWNERS = ['owner@example.com', 'second.owner@example.com'];
 const isOwner = (email: string) => OWNERS.includes(email.toLowerCase());
 
 function row(db: Db, at: string, o: { actor?: string; event?: string; kind?: string; detail?: string } = {}) {
-  db.prepare('INSERT INTO audit_log (at, actor, event, kind, detail, request_id) VALUES (?, ?, ?, ?, ?, ?)')
+  db.raw.prepare('INSERT INTO audit_log (at, actor, event, kind, detail, request_id) VALUES (?, ?, ?, ?, ?, ?)')
     .run(at, o.actor ?? 'owner@example.com', o.event ?? 'task.done', o.kind ?? 'task', o.detail ?? 'Task SHA-001 marked done', 'req-1');
 }
 
@@ -81,7 +81,7 @@ describe('purgeAuditOlderThan', () => {
     row(db, '2026-07-21T00:00:00.000Z'); // exactly 90 days: kept
     row(db, '2026-10-18T00:00:00.000Z');
     expect(purgeAuditOlderThan(db, 90, now)).toBe(1);
-    expect(db.prepare('SELECT at FROM audit_log ORDER BY at').all()).toEqual([{ at: '2026-07-21T00:00:00.000Z' }, { at: '2026-10-18T00:00:00.000Z' }]);
+    expect(db.raw.prepare('SELECT at FROM audit_log ORDER BY at').all()).toEqual([{ at: '2026-07-21T00:00:00.000Z' }, { at: '2026-10-18T00:00:00.000Z' }]);
     expect(purgeAuditOlderThan(db, 90, now)).toBe(0);
   });
 

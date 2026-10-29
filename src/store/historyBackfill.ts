@@ -81,7 +81,7 @@ export function saveBackfill(db: Db, b: Backfill): void {
 /** Every backfill entry, finished ones too. */
 export function listBackfills(db: Db): Backfill[] {
   // A range, not LIKE: "_" in the prefix would be a wildcard there.
-  const rows = db.prepare('SELECT k, v FROM kv WHERE k >= ? AND k < ? ORDER BY k').all(PREFIX, `${PREFIX.slice(0, -1)};`) as { k: string; v: string }[];
+  const rows = db.raw.prepare('SELECT k, v FROM kv WHERE k >= ? AND k < ? ORDER BY k').all(PREFIX, `${PREFIX.slice(0, -1)};`) as { k: string; v: string }[];
   return rows.flatMap((r) => parse(r.k.slice(PREFIX.length), r.v) ?? []);
 }
 
@@ -90,14 +90,14 @@ export function listBackfills(db: Db): Backfill[] {
  * earlier approval are not used, so the days the group was not approved are read too.
  */
 export function firstAnchor(db: Db, clientId: number, until: string): { waId: string; fromMe: boolean; ts: string } | undefined {
-  const r = db.prepare('SELECT wa_id, from_me, ts FROM messages WHERE client_id = ? AND ts >= ? ORDER BY ts, id LIMIT 1').get(clientId, until) as
+  const r = db.raw.prepare('SELECT wa_id, from_me, ts FROM messages WHERE client_id = ? AND ts >= ? ORDER BY ts, id LIMIT 1').get(clientId, until) as
     { wa_id: string; from_me: number; ts: string } | undefined;
   return r ? { waId: r.wa_id, fromMe: r.from_me === 1, ts: r.ts } : undefined;
 }
 
 /** The client's stored messages, to count what an answer added. */
 export function messageCount(db: Db, clientId: number): number {
-  return (db.prepare('SELECT COUNT(*) AS n FROM messages WHERE client_id = ?').get(clientId) as { n: number }).n;
+  return (db.raw.prepare('SELECT COUNT(*) AS n FROM messages WHERE client_id = ?').get(clientId) as { n: number }).n;
 }
 
 /** How long a finished backfill shows on the Clients card. */

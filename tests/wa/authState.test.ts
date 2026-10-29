@@ -20,7 +20,7 @@ describe('encrypted auth state', () => {
     const a = useEncryptedAuthState(db, key);
     a.state.creds.me = { id: '919800000000:5@s.whatsapp.net', name: 'Founder' };
     await a.saveCreds();
-    for (const { v } of db.prepare('SELECT v FROM auth').all() as { v: Buffer }[]) {
+    for (const { v } of db.raw.prepare('SELECT v FROM auth').all() as { v: Buffer }[]) {
       const text = v.toString('latin1');
       for (const marker of ['noiseKey', 'Founder', '"type":"Buffer"']) expect(text).not.toContain(marker);
     }
@@ -50,7 +50,7 @@ describe('encrypted auth state', () => {
     const a = useEncryptedAuthState(db, key);
     await a.saveCreds();
     await a.state.keys.set({ session: { '919800000001.0': Buffer.from('priv') } });
-    const rows = db.prepare('SELECT k FROM auth').all() as { k: string }[];
+    const rows = db.raw.prepare('SELECT k FROM auth').all() as { k: string }[];
     expect(rows.length).toBe(3);
     for (const { k } of rows) {
       expect(k).toMatch(/^[0-9a-f]{64}$/);
@@ -63,7 +63,7 @@ describe('encrypted auth state', () => {
     const db = openSessionDb(':memory:');
     const a = useEncryptedAuthState(db, key);
     await a.state.keys.set({ 'pre-key': { '1': { public: Buffer.from('pub'), private: Buffer.from('priv') } } });
-    const rows = db.prepare('SELECT v FROM auth').all() as { v: Buffer }[];
+    const rows = db.raw.prepare('SELECT v FROM auth').all() as { v: Buffer }[];
     expect(rows.length).toBeGreaterThan(1);
     for (const { v } of rows) {
       const text = v.toString('latin1');
@@ -101,15 +101,15 @@ describe('encrypted auth state', () => {
         '2': { public: Buffer.from('r'), private: Buffer.from('s') },
       },
     });
-    const rows = db.prepare('SELECT k, v FROM auth').all() as { k: string; v: Buffer }[];
+    const rows = db.raw.prepare('SELECT k, v FROM auth').all() as { k: string; v: Buffer }[];
     // a key blob copied over another key row
-    db.prepare('UPDATE auth SET v = ? WHERE k = ?').run(rows[2]!.v, rows[3]!.k);
+    db.raw.prepare('UPDATE auth SET v = ? WHERE k = ?').run(rows[2]!.v, rows[3]!.k);
     const outcomes = await Promise.all(
       ['1', '2'].map((id) => Promise.resolve(a.state.keys.get('pre-key', [id])).then(() => 'ok', () => 'err')),
     );
     expect(outcomes).toContain('err');
     // a key blob copied over the creds row
-    db.prepare('UPDATE auth SET v = ? WHERE k = ?').run(rows[2]!.v, rows[1]!.k);
+    db.raw.prepare('UPDATE auth SET v = ? WHERE k = ?').run(rows[2]!.v, rows[1]!.k);
     expect(() => useEncryptedAuthState(db, key)).toThrow(SessionDecryptError);
   });
 
@@ -117,8 +117,8 @@ describe('encrypted auth state', () => {
     const dir = mkdtempSync(join(tmpdir(), 'wa-sess-'));
     try {
       const db = openSessionDb(join(dir, 'session.db'));
-      expect(db.pragma('journal_mode', { simple: true })).toBe('wal');
-      db.close();
+      expect(db.raw.pragma('journal_mode', { simple: true })).toBe('wal');
+      db.raw.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -130,7 +130,7 @@ describe('encrypted auth state', () => {
     first.state.creds.me = { id: '919800000000:5@s.whatsapp.net', name: 'Founder' };
     await first.saveCreds();
     resetSession(db);
-    expect((db.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n).toBe(0);
+    expect((db.raw.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n).toBe(0);
     const second = useEncryptedAuthState(db, key);
     expect(second.hasSession).toBe(false);
     second.state.creds.me = { id: '919800000001:5@s.whatsapp.net', name: 'Founder' };
@@ -141,17 +141,17 @@ describe('encrypted auth state', () => {
   it('rejects a corrupted canary', async () => {
     const db = openSessionDb(':memory:');
     await useEncryptedAuthState(db, key).saveCreds();
-    const first = db.prepare('SELECT k, v FROM auth ORDER BY rowid LIMIT 1').get() as { k: string; v: Buffer };
+    const first = db.raw.prepare('SELECT k, v FROM auth ORDER BY rowid LIMIT 1').get() as { k: string; v: Buffer };
     const bad = Buffer.from(first.v);
     bad[bad.length - 1] = bad[bad.length - 1]! ^ 0xff;
-    db.prepare('UPDATE auth SET v = ? WHERE k = ?').run(bad, first.k);
+    db.raw.prepare('UPDATE auth SET v = ? WHERE k = ?').run(bad, first.k);
     expect(() => useEncryptedAuthState(db, key)).toThrow(SessionDecryptError);
   });
 
   it('leaves the database unchanged when opened with the wrong key', async () => {
     const db = openSessionDb(':memory:');
     await useEncryptedAuthState(db, key).saveCreds();
-    const count = () => (db.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n;
+    const count = () => (db.raw.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n;
     const before = count();
     expect(() => useEncryptedAuthState(db, randomBytes(32))).toThrow(SessionDecryptError);
     expect(count()).toBe(before);
@@ -161,7 +161,7 @@ describe('encrypted auth state', () => {
     const dir = mkdtempSync(join(tmpdir(), 'wa-sess-'));
     try {
       const db = openSessionDb(join(dir, 'session.db'));
-      db.close();
+      db.raw.close();
       let thrown: unknown;
       try {
         useEncryptedAuthState(db, key);
@@ -192,7 +192,7 @@ describe("readFounderNumber (link-sender's read of the founder's session)", () =
       await a.saveCreds();
       // While the writer is open its rows are in the -wal file, and are read from there.
       expect(readFounderNumber(file, key)).toBe('919811112222');
-      db.close();
+      db.raw.close();
       const before = readFileSync(file);
       expect(files(dir)).toEqual(['session.db']);
       expect(readFounderNumber(file, key)).toBe('919811112222');

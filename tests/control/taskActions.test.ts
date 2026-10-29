@@ -20,8 +20,8 @@ function withTask(): Db {
 /** Everything a correction changes: the task row, its events and the rebuild request. */
 function state(db: Db) {
   return {
-    task: db.prepare('SELECT * FROM tasks').all(),
-    events: db.prepare('SELECT task_id, client_id, actor, op, detail, reason, source_ids, at FROM task_events ORDER BY id').all(),
+    task: db.raw.prepare('SELECT * FROM tasks').all(),
+    events: db.raw.prepare('SELECT task_id, client_id, actor, op, detail, reason, source_ids, at FROM task_events ORDER BY id').all(),
     rebuild: getKv(db, 'rebuild_requested'),
   };
 }

@@ -1,6 +1,6 @@
 import { closeTask, CorrectionError, editTask, humanEvent, reopenTask, requestRebuild, unlockTask, type EditOptions } from '../cli/corrections.ts';
 import { getClientByCode } from '../store/clients.ts';
-import { tx, type Db } from '../store/db.ts';
+import { txSync, type Db } from '../store/db.ts';
 import { CATEGORIES, createTask, getTaskByCode, PRIORITIES, SIDES, TASK_FIELDS, updateTaskFields, type TaskField } from '../store/tasks.ts';
 import { isIsoDate, istDate } from '../util/time.ts';
 import { ControlError, type Audit } from './errors.ts';
@@ -87,7 +87,7 @@ export function runTaskAction(
   const edit = action === 'edit' ? parseTaskEdit(req.body) : undefined;
   const { now } = ctx;
   try {
-    tx(db, () => {
+    txSync(db, () => {
       let line: string;
       switch (action) {
         case 'done':
@@ -152,7 +152,7 @@ export function createTaskAction(db: Db, input: NewTaskInput, ctx: { actor: stri
   const { clientId, fields } = parseNewTask(db, input);
   const { now } = ctx;
   const at = now.toISOString();
-  const code = tx(db, () => {
+  const code = txSync(db, () => {
     const t = createTask(db, {
       clientId, side: fields.side as (typeof SIDES)[number], title: fields.title, category: fields.category as (typeof CATEGORIES)[number],
       priority: fields.priority as (typeof PRIORITIES)[number], assignedTo: fields.assignedTo || null, askedBy: null, raisedOn: istDate(now),

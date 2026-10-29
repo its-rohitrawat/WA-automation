@@ -34,7 +34,7 @@ function meeting(db: Db, o: Over = {}): number {
     attendees: [], participants: [], clientId: o.clientId === undefined ? (status === 'unassigned' || internal ? null : 1) : o.clientId,
     matchKind: 'title', status, driveSeconds: o.seconds === undefined ? 1800 : o.seconds, createdAt: NOW,
   })!;
-  db.prepare(`UPDATE meetings SET stage = COALESCE(?, stage), audio_seconds = ?, doc_file_id = ?, summary = ?, error_code = ?, next_attempt_at = ?
+  db.raw.prepare(`UPDATE meetings SET stage = COALESCE(?, stage), audio_seconds = ?, doc_file_id = ?, summary = ?, error_code = ?, next_attempt_at = ?
     WHERE id = ?`).run(o.stage ?? (status === 'done' ? 'tracked' : null), o.audioSeconds ?? null, o.doc ?? null, o.summary ?? null, o.errorCode ?? null,
     o.nextAttemptAt ?? null, id);
   return id;
@@ -179,7 +179,7 @@ describe('meeting review fixes', () => {
   it('labels a no-access meeting found as internal like the CLI does', () => {
     const db = seededDb();
     const id = meeting(db, { status: 'no_access', clientId: null, title: '' });
-    db.prepare("UPDATE meetings SET note = 'found_internal' WHERE id = ?").run(id);
+    db.raw.prepare("UPDATE meetings SET note = 'found_internal' WHERE id = ?").run(id);
     expect(list(db).rows[0]!.stageLabel).toBe('Internal, no access to the recording');
   });
 

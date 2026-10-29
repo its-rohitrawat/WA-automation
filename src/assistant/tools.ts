@@ -250,7 +250,7 @@ function searchMessages(db: Db, i: z.infer<typeof INPUTS.search_messages>, now: 
   const since = new Date(now.getTime() - (i.days ?? 30) * 86_400_000).toISOString();
   const like = `%${i.text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
   const rows = db
-    .prepare(`SELECT m.ts AS at, m.text, m.from_me AS fromMe, p.name AS name, c.code AS client
+    .raw.prepare(`SELECT m.ts AS at, m.text, m.from_me AS fromMe, p.name AS name, c.code AS client
       FROM messages m JOIN clients c ON c.id = m.client_id
       LEFT JOIN people p ON p.client_id = m.client_id AND p.jid = m.sender_jid
       WHERE c.active = 1 AND m.revoked = 0 AND m.ts >= @since AND m.text LIKE @like ESCAPE '\\' AND (@client IS NULL OR c.code = @client)
