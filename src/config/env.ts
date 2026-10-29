@@ -12,7 +12,8 @@ function isRealDate(s: string): boolean {
   return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === s;
 }
 
-const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+/** "HH:MM", 00:00 to 23:59. */
+export const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 /** 91, then a 10-digit Indian mobile (starts 6-9). The owner's decision: the report goes only to an Indian number. */
 export const INDIAN_MOBILE = /^91[6-9]\d{9}$/;
 
@@ -100,6 +101,8 @@ const EnvSchema = z.object({
     .optional(),
   // Owner dashboard (D1). Off unless DASHBOARD_ENABLED is true. The server listens on 127.0.0.1 only.
   DASHBOARD_ENABLED: Flag.default(false),
+  /** The dashboard's AI assistant (owner request, 29 Oct 2026): on with the dashboard unless set to false. Its answers are paid calls under DAILY_SPEND_CAP_USD. */
+  DASHBOARD_ASSISTANT: Flag.default(true),
   DASHBOARD_PORT: z.coerce.number().int().min(1024).max(65535).default(8787),
   /**
    * The address owners open: https, or http on this machine (localhost or 127.0.0.1 with a port). Kept as its origin

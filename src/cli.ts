@@ -80,7 +80,7 @@ task
   .option('--title <text>')
   .option('--side <us|client>')
   .option('--category <design|development|content|payment|approval|other>')
-  .option('--priority <high|medium|low>')
+  .option('--priority <critical|major|medium|low>')
   .option('--assigned-to <name>')
   .option('--asked-by <name>')
   .option('--deadline <YYYY-MM-DD|none>')

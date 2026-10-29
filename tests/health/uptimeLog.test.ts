@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dailyDown, downIntervals, uptimeRatio, UptimeLog } from '../../src/health/uptimeLog.ts';
+import { dailyDown, dayOutages, downIntervals, outageText, uptimeRatio, UptimeLog } from '../../src/health/uptimeLog.ts';
 import { openDb, type Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 
@@ -241,5 +241,55 @@ describe('UptimeLog reasons, review round 1', () => {
     const t = setup();
     t.db.prepare("INSERT INTO uptime_log (at, up, reason) VALUES ('2026-10-18T23:00:00.000Z', 0, 'some_future_code')").run();
     expect(t.log.outages(1)[0]!.reason).toBeNull();
+  });
+});
+
+describe('outageText: the exact times of an outage, IST (owner request, 29 Oct 2026)', () => {
+  const now = ist('2026-10-29', '12:00'); // a Thursday
+
+  it("today's outage gives its start and end: Off from 02:14 to 06:33 (4 h 19 min)", () => {
+    expect(outageText(ist('2026-10-29', '02:14'), ist('2026-10-29', '06:33'), now)).toBe('Off from 02:14 to 06:33 (4 h 19 min)');
+    expect(outageText(ist('2026-10-29', '09:00'), ist('2026-10-29', '09:30'), now)).toBe('Off from 09:00 to 09:30 (30 min)');
+    expect(outageText(ist('2026-10-29', '09:00'), ist('2026-10-29', '09:00') + 20_000, now)).toBe('Off from 09:00 to 09:00 (under 1 min)');
+  });
+
+  it('another day is named; an end on the next day is not, unless it is a day or more later', () => {
+    expect(outageText(ist('2026-10-26', '23:50'), ist('2026-10-27', '00:20'), now)).toBe('Off Mon 26 Oct, 23:50 to 00:20 (30 min)');
+    expect(outageText(ist('2026-10-27', '10:00'), ist('2026-10-27', '11:05'), now)).toBe('Off Tue 27 Oct, 10:00 to 11:05 (1 h 05 min)');
+    // Started yesterday, ended today: the start's day only.
+    expect(outageText(ist('2026-10-28', '23:00'), ist('2026-10-29', '01:00'), now)).toBe('Off Wed 28 Oct, 23:00 to 01:00 (2 h 00 min)');
+    expect(outageText(ist('2026-10-25', '22:00'), ist('2026-10-27', '08:00'), now)).toBe('Off Sun 25 Oct, 22:00 to Tue 27 Oct, 08:00 (34 h 00 min)');
+    expect(outageText(ist('2026-10-26', '08:00'), ist('2026-10-27', '09:00'), now)).toBe('Off Mon 26 Oct, 08:00 to Tue 27 Oct, 09:00 (25 h 00 min)');
+  });
+
+  it('an outage still going says since when', () => {
+    expect(outageText(ist('2026-10-29', '09:12'), null, now)).toBe('Still off since 09:12 (2 h 48 min)');
+    expect(outageText(ist('2026-10-28', '23:50'), null, now)).toBe('Still off since Wed 28 Oct, 23:50 (12 h 10 min)');
+  });
+
+  it("dayOutages lists the outages that reach into a day, oldest first, one crossing midnight on both days", () => {
+    const intervals = [
+      { start: ist('2026-10-29', '09:12'), end: null },
+      { start: ist('2026-10-28', '23:50'), end: ist('2026-10-29', '00:20') },
+      { start: ist('2026-10-28', '02:14'), end: ist('2026-10-28', '06:33') },
+    ];
+    expect(dayOutages(intervals, '2026-10-28', now)).toEqual(['Off Wed 28 Oct, 02:14 to 06:33 (4 h 19 min)', 'Off Wed 28 Oct, 23:50 to 00:20 (30 min)']);
+    expect(dayOutages(intervals, '2026-10-29', now)).toEqual(['Off Wed 28 Oct, 23:50 to 00:20 (30 min)', 'Still off since 09:12 (2 h 48 min)']);
+    expect(dayOutages(intervals, '2026-10-27', now)).toEqual([]);
+  });
+
+  it("the agent's log gives the same times from its stored rows (no new column needed)", () => {
+    const { db, clock, log } = setup(new Date(ist('2026-10-29', '02:00')).toISOString());
+    log.start(true);
+    clock.set(new Date(ist('2026-10-29', '02:14')).toISOString());
+    log.tick(false, 'whatsapp_disconnected');
+    clock.set(new Date(ist('2026-10-29', '06:33')).toISOString());
+    log.tick(true);
+    clock.set(new Date(ist('2026-10-29', '09:12')).toISOString());
+    log.stop();
+    clock.set(new Date(now).toISOString());
+    const texts = log.outages(1).map((o) => outageText(Date.parse(o.start), o.end === null ? null : Date.parse(o.end), now));
+    expect(texts).toEqual(['Still off since 09:12 (2 h 48 min)', 'Off from 02:14 to 06:33 (4 h 19 min)']);
+    expect(rows(db)).toHaveLength(4);
   });
 });

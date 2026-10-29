@@ -295,6 +295,20 @@ describe('WhatsAppGateway restart throttling and re-entrancy', () => {
   });
 });
 
+describe('WhatsAppGateway: the socket for Open chat', () => {
+  it('hands its socket over only for an allowed group while open, and sends nothing itself', async () => {
+    const { gw, sock } = setup();
+    expect(gw.groupSocket(SHARMA.groupId)).toBeNull(); // not open yet
+    sock.emit('connection.update', { connection: 'open' });
+    expect(gw.groupSocket(OTHER_GROUP)).toBeNull(); // never an unapproved group
+    expect(gw.groupSocket(PERSONAL_CHAT)).toBeNull();
+    expect(gw.groupSocket(SHARMA.groupId)).toBe(sock);
+    for (const m of SEND_METHODS) expect(sock[m]).not.toHaveBeenCalled();
+    await gw.stop();
+    expect(gw.groupSocket(SHARMA.groupId)).toBeNull();
+  });
+});
+
 describe('WhatsAppGateway: earlier messages on demand (history backfill)', () => {
   const open = (sock: FakeSocket) => sock.emit('connection.update', { connection: 'open' });
   const anchor = { waId: 'A1', fromMe: false, ts: new Date('2026-10-27T10:00:00.000Z') };

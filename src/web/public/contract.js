@@ -188,14 +188,25 @@ export function readClients(raw) {
   return arr(obj(raw).clients).map(clientCard).filter((c) => c.code);
 }
 
+const PRIORITY_LEVELS = ['critical', 'major', 'medium', 'low'];
+const MOODS = ['positive', 'neutral', 'negative', 'frustrated'];
+/** One of the known words, else null (shown as "—", or not at all). @param {unknown} v @param {string[]} allowed */
+const known = (v, allowed) => (typeof v === 'string' && allowed.includes(v) ? v : null);
+
 /** GET /dashboard/api/clients/:code ({ client: ClientDetail }). @param {unknown} raw */
 export function readClientDetail(raw) {
   const o = obj(obj(raw).client);
+  const mood = obj(o.sentiment);
   return {
     ...clientCard(o),
+    // The client's latest mood: null while sentiment is off, or before a batch judged it.
+    sentiment: known(mood.mood, MOODS) ? { mood: /** @type {string} */ (known(mood.mood, MOODS)), at: iso(mood.at) } : null,
     openTasks: arr(o.openTasks).map((t) => {
       const x = obj(t);
-      return { code: str(x.code), title: str(x.title), assignedTo: str(x.assignedTo) || null, deadline: str(x.deadline) || null, status: str(x.status) };
+      return {
+        code: str(x.code), title: str(x.title), assignedTo: str(x.assignedTo) || null, deadline: str(x.deadline) || null, status: str(x.status),
+        priority: known(x.priority, PRIORITY_LEVELS), sentiment: known(x.sentiment, MOODS),
+      };
     }),
     meetings: arr(o.meetings).map((m) => {
       const x = obj(m);
@@ -245,7 +256,7 @@ const strings = (v) => arr(v).map(str).filter(Boolean);
 
 /**
  * One row of Manage groups. `key` is the agent's opaque key for the group (never its WhatsApp id).
- * @typedef {{ key: string, name: string, approved: boolean, inWhatsApp: boolean,
+ * @typedef {{ key: string, name: string, approved: boolean, inWhatsApp: boolean, ignored: boolean,
  *   client: { name: string, code: string, active: boolean, hasTasks: boolean, codeLocked: boolean, emailDomains: string[], meetingKeywords: string[] } | null }} GroupRow
  */
 
@@ -265,6 +276,7 @@ export function readGroups(raw) {
           name: str(o.name),
           approved: o.approved === true,
           inWhatsApp: o.inWhatsApp !== false,
+          ignored: o.ignored === true && o.approved !== true,
           client: cl
             ? { name: str(cl.name), code: str(cl.code), active: cl.active === true, hasTasks: cl.hasTasks === true, codeLocked: cl.codeLocked === true, emailDomains: strings(cl.emailDomains), meetingKeywords: strings(cl.meetingKeywords) }
             : null,
@@ -272,9 +284,76 @@ export function readGroups(raw) {
       })
       .filter((row) => row.key),
     total: num(r.total),
-    counts: { all: num(c.all), approved: num(c.approved), notApproved: num(c.notApproved) },
+    counts: { all: num(c.all), approved: num(c.approved), notApproved: num(c.notApproved), ignored: num(c.ignored) },
     stale: r.stale === true,
     reason: reason === 'whatsapp_not_connected' || reason === 'list_failed' ? reason : null,
     fetchedAt: iso(r.fetchedAt),
   };
+}
+
+/**
+ * The answer to POST /groups/bulk: the new list and one result per group (the reason is the agent's plain sentence).
+ * @param {unknown} raw
+ */
+export function readBulk(raw) {
+  return {
+    list: readGroups(raw),
+    results: arr(obj(raw).results)
+      .map((x) => {
+        const o = obj(x);
+        return { key: str(o.key), ok: o.ok === true, reason: str(o.reason).slice(0, 300) };
+      })
+      .filter((r) => /^[0-9a-f]{24}$/.test(r.key)),
+  };
+}
+
+const OUTBOX_STATES = ['claimed', 'sending', 'sent', 'failed', 'unknown'];
+
+/** A quote in a chat bubble, or null. @param {unknown} v */
+function quoteOf(v) {
+  if (!v || typeof v !== 'object') return null;
+  const q = obj(v);
+  return { sender: cut(str(q.sender), 80) || 'Someone', text: cut(str(q.text), 200), kind: MESSAGE_KINDS.includes(str(q.kind)) ? str(q.kind) : 'text' };
+}
+
+/** One message of the dashboard's own (sent, sending, failed or unknown). @param {unknown} v */
+function outboxOf(v) {
+  const o = obj(v);
+  const state = OUTBOX_STATES.includes(str(o.state)) ? str(o.state) : 'unknown';
+  return { uuid: str(o.uuid), at: iso(o.at), text: cut(str(o.text), 4096), state, quote: quoteOf(o.quote) };
+}
+
+/**
+ * GET /clients/:code/chat: the client, whether sending is on and WhatsApp connected, a page of messages (newest first)
+ * and the dashboard's own messages still to show. Every text is untrusted: shown with esc() or textContent only.
+ * @param {unknown} raw
+ */
+export function readChat(raw) {
+  const r = obj(raw);
+  const c = obj(r.client);
+  return {
+    client: { code: str(c.code), name: str(c.name), groupName: cut(str(c.groupName), 120) || str(c.name) },
+    sendingOn: r.sendingOn === true,
+    connected: r.connected === true,
+    hasOlder: r.hasOlder === true,
+    messages: arr(r.messages)
+      .map((m) => {
+        const x = obj(m);
+        return {
+          id: num(x.id), at: iso(x.at), mine: x.mine === true, sender: cut(str(x.sender), 80) || 'Someone', text: cut(str(x.text), 4096),
+          kind: MESSAGE_KINDS.includes(str(x.kind)) ? str(x.kind) : 'text',
+          seconds: typeof x.seconds === 'number' && Number.isFinite(x.seconds) ? x.seconds : null,
+          transcript: typeof x.transcript === 'string' && x.transcript ? cut(x.transcript, 2000) : null,
+          quote: quoteOf(x.quote), edited: x.edited === true, deleted: x.deleted === true,
+        };
+      })
+      .filter((m) => m.id > 0 && m.at !== null),
+    outbox: arr(r.outbox).map(outboxOf).filter((o) => o.uuid && o.at !== null),
+  };
+}
+
+/** The answer to POST /clients/:code/chat/send. @param {unknown} raw */
+export function readSendResult(raw) {
+  const r = obj(raw);
+  return { message: outboxOf(r.message), replayed: r.replayed === true };
 }

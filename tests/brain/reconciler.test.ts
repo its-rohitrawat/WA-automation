@@ -38,7 +38,7 @@ function store(db: Db, waId: string, text: string | null, ts = '2026-10-19T07:00
 }
 
 function banner(db: Db): void {
-  createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'high', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
+  createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
     deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp' }, NOW);
 }
 
@@ -81,7 +81,7 @@ describe('Reconciler', () => {
 
   it('applies accepted operations in one go and marks the batch processed', async () => {
     const { db, ai, r, onChanged, spend } = setup([{ ops: [
-      op({ op: 'add_task', side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'high', assignedTo: 'Rahul', deadline: '2026-10-18', sourceMessageIds: ['m1'] }),
+      op({ op: 'add_task', side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'major', assignedTo: 'Rahul', deadline: '2026-10-18', sourceMessageIds: ['m1'] }),
       op({ op: 'add_decision', text: 'Blue theme chosen', sourceMessageIds: ['m2'] }),
       op({ op: 'set_status', text: 'Homepage banner is being revised.', sourceMessageIds: ['m1'] }),
       op({ op: 'set_person_role', personJid: SHARMA_PN, role: 'client', sourceMessageIds: ['m1'] }),
@@ -166,7 +166,7 @@ describe('Reconciler', () => {
 
   it('applies nothing and keeps the messages queued when applying fails part-way', async () => {
     const { db, r, onChanged } = setup([{ ops: [
-      op({ op: 'add_task', side: 'us', title: 'Revise banner', category: 'design', priority: 'high', sourceMessageIds: ['m1'] }),
+      op({ op: 'add_task', side: 'us', title: 'Revise banner', category: 'design', priority: 'major', sourceMessageIds: ['m1'] }),
       op({ op: 'add_decision', text: 'Blue theme chosen', sourceMessageIds: ['m1'] }),
     ] }]);
     store(db, 'm1', 'Banner bright karo, blue theme final');
@@ -449,7 +449,7 @@ describe('Reconciler', () => {
       const id = fileOf(db);
       store(db, 'm2', 'Homepage banner bhi chahiye', '2026-10-15T05:00:00.000Z');
       markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-15T06:00:00.000Z'); // m1's file was still being read
-      createTask(db, { clientId: 1, side: 'us', title: 'Homepage banner', category: 'design', priority: 'high', assignedTo: null, askedBy: null, raisedOn: '2026-10-15',
+      createTask(db, { clientId: 1, side: 'us', title: 'Homepage banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-15',
         deadline: null, latestProgress: null, sourceQuote: null, sourceDate: '2026-10-15', sourceWaId: 'm2', origin: 'whatsapp' }, NOW); // raised by the later m2
       readAt(db, id, '2026-10-19T07:00:00.000Z');
       expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: null })]);
@@ -673,7 +673,7 @@ describe('Reconciler', () => {
     });
 
     it('flags a new task whose source message was deleted during the call', async () => {
-      const { db, ai, r } = setup([{ ops: [op({ op: 'add_task', side: 'us', title: 'Revise banner', category: 'design', priority: 'high', sourceMessageIds: ['m1'] })] }]);
+      const { db, ai, r } = setup([{ ops: [op({ op: 'add_task', side: 'us', title: 'Revise banner', category: 'design', priority: 'major', sourceMessageIds: ['m1'] })] }]);
       store(db, 'm1', 'Banner bright karo');
       const open = hold(ai);
       const run = r.run(1);
@@ -685,7 +685,7 @@ describe('Reconciler', () => {
   });
 
   it('does not re-create a task a human closed when the message is reprocessed', async () => {
-    const add = op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'high', sourceMessageIds: ['m1'] });
+    const add = op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'major', sourceMessageIds: ['m1'] });
     const { db, r } = setup([{ ops: [add] }, { ops: [add] }]);
     store(db, 'm1', 'banner chahiye');
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
@@ -697,9 +697,9 @@ describe('Reconciler', () => {
   });
 
   it('does not turn a follow-up that logged a reminder into a new task after the task was closed', async () => {
-    const add = op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'high', sourceMessageIds: ['m1'] });
+    const add = op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'major', sourceMessageIds: ['m1'] });
     const remind = op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['m2'] });
-    const replay = op({ op: 'add_task', side: 'us', title: 'Banner update', category: 'design', priority: 'high', sourceMessageIds: ['m2'] });
+    const replay = op({ op: 'add_task', side: 'us', title: 'Banner update', category: 'design', priority: 'major', sourceMessageIds: ['m2'] });
     const log = silentLogger();
     const info = vi.spyOn(log, 'info');
     const { db, r } = setup([{ ops: [add] }, { ops: [remind] }, { ops: [replay] }], 15, log);
@@ -730,7 +730,7 @@ describe('Reconciler', () => {
   });
 
   it('still creates a task from an edit re-check that adds new work', async () => {
-    const banner1 = op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'high', sourceMessageIds: ['m1'] });
+    const banner1 = op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'major', sourceMessageIds: ['m1'] });
     const logo = op({ op: 'add_task', side: 'us', title: 'Logo', category: 'design', priority: 'medium', sourceMessageIds: ['m1'] });
     const { db, r } = setup([{ ops: [banner1] }, { ops: [logo] }]);
     store(db, 'm1', 'Banner bright karo', '2026-10-19T05:00:00.000Z');
@@ -743,8 +743,8 @@ describe('Reconciler', () => {
   });
 
   it('blocks a replay that cites only a later message of the original task (GapB)', async () => {
-    const first = op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'high', sourceMessageIds: ['m1', 'm2'] });
-    const replay = op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'high', sourceMessageIds: ['m2'] });
+    const first = op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'major', sourceMessageIds: ['m1', 'm2'] });
+    const replay = op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'major', sourceMessageIds: ['m2'] });
     const { db, r } = setup([{ ops: [first] }, { ops: [replay] }]);
     store(db, 'm1', 'banner');
     store(db, 'm2', 'urgent', '2026-10-19T07:10:00.000Z');

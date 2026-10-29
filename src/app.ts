@@ -6,6 +6,7 @@ import type { MediaAi } from './brain/mediaClient.ts';
 import type { MeetingAi } from './brain/meetingClient.ts';
 import { Reconciler, type ReconcileOutcome } from './brain/reconciler.ts';
 import type { ClientConfig } from './config/groups.ts';
+import type { PriorityConfig } from './config/prioritySettings.ts';
 import { Health, type VoiceProblem } from './health/health.ts';
 import { defaultFreeBytes } from './health/health.ts';
 import { createExtractor, type Extractor } from './media/extract.ts';
@@ -103,6 +104,8 @@ export interface ReportRunner {
 
 export interface AppDeps {
   db: Db;
+  /** The owner's priority keywords and the sentiment switch, read at each batch (src/config/prioritySettings.ts). Default: none, off. */
+  priority?: () => PriorityConfig;
   clock: Clock;
   log: Logger;
   /** The founder's gateway: the SwitchableGateway around WhatsAppGateway in the service (D3). */
@@ -171,6 +174,11 @@ export interface App {
   report: ReportScheduler | undefined;
   /** A read-only view of the daily spend guard (the owner dashboard reads it; nothing here can book or reserve). */
   spend: SpendView;
+  /**
+   * The dashboard assistant's paid calls: reserve and book under the same guard, so its calls count against the same
+   * daily cap and a call still running at shutdown is booked like the agent's own.
+   */
+  paidCalls: Pick<SpendGuard, 'reserve' | 'settle' | 'release' | 'fitsIgnoringHolds'>;
 }
 
 export interface SpendView {
@@ -282,6 +290,7 @@ export function createApp(d: AppDeps): App {
     },
     // A meeting's tracker step holds the client's run flag, so it never interleaves with a WhatsApp run (Task 9).
     exclusive: (clientId, fn) => debouncer.runExclusive(clientId, fn),
+    ...(d.priority ? { priority: d.priority } : {}),
   });
   /** Reads a newly approved group's last 7 days (src/wa/historyBackfill.ts); only with a gateway that can ask. */
   let backfill: HistoryBackfill | undefined;
@@ -584,6 +593,12 @@ export function createApp(d: AppDeps): App {
         return spend.capUsd;
       },
       isPaused: () => spend.isPaused(),
+    },
+    paidCalls: {
+      reserve: (usd, kind, onBooked) => spend.reserve(usd, kind, onBooked),
+      settle: (id, kind, usd, detail) => spend.settle(id, kind, usd, detail),
+      release: (id) => spend.release(id),
+      fitsIgnoringHolds: (usd) => spend.fitsIgnoringHolds(usd),
     },
     start() {
       if (poll) return; // already started: a second interval would outlive stop()

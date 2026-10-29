@@ -3,13 +3,14 @@ import { get, me, poll, setSignedOutHandler, signOut } from './api.js';
 import { problems, readOverview, readStatus } from './contract.js';
 import { $, $$, esc, gsap, icon, installTooltip, paint, reduceMotion, toast } from './dom.js';
 import { initials } from './format.js';
-import { NAV, navigate, onPopState, parsePath, SCREENS } from './router.js';
+import { NAV, navigate, onPopState, parsePath, pathFor, SCREENS } from './router.js';
+import { ASSISTANT_CHANGED, ASSISTANT_GO, mountAssistant, unmountAssistant } from './views/assistant.js';
 import { mountClients } from './views/clients.js';
 import { CONNECTIONS_CHANGED, openFix, runAction } from './views/connect.js';
 import { mountConnections } from './views/connections.js';
 import { closeDrawer, openDrawerElement } from './views/drawer.js';
 import { resetGroups } from './views/groups.js';
-import { afterOverview, attentionBanner, renderOverview } from './views/overview.js';
+import { afterOverview, attentionBanner, closeKpiInfo, kpiInfoClick, renderOverview } from './views/overview.js';
 import { renderPlaceholder } from './views/placeholder.js';
 import { SCREEN_MOUNTS } from './views/registry.js';
 import './views/screens.js';
@@ -19,6 +20,21 @@ SCREEN_MOUNTS.set('connections', mountConnections);
 // After a link, a reconnect or a quick action: the health pill now (an open dialog stays; Connections reloads itself).
 addEventListener(CONNECTIONS_CHANGED, () => {
   if (owner) void refreshStatus();
+});
+// The assistant opens a screen with its filters in the address; the screen reads them as from a link.
+addEventListener(ASSISTANT_GO, (e) => {
+  const d = /** @type {CustomEvent<{ screen?: unknown, search?: unknown }>} */ (e).detail;
+  if (!owner || typeof d?.screen !== 'string' || !SCREENS.has(d.screen)) return;
+  history.pushState(null, '', pathFor(d.screen, null) + (typeof d.search === 'string' ? d.search : ''));
+  current = { screen: '', sub: null }; // drawn again even when it is the screen already showing
+  show(d.screen, null, { fromHistory: true });
+});
+// A change confirmed in the assistant: the screen showing is drawn again with it.
+addEventListener(ASSISTANT_CHANGED, () => {
+  if (!owner || !current.screen) return;
+  const { screen, sub } = current;
+  current = { screen: '', sub: null };
+  show(screen, sub, { fromHistory: true });
 });
 import { hideSignin, showSignin } from './views/signin.js';
 
@@ -68,6 +84,8 @@ function buildNav() {
 function wireShell() {
   document.addEventListener('click', (e) => {
     const target = /** @type {Element} */ (e.target);
+    // The Overview's "i" buttons (and a click elsewhere closes an open sentence).
+    if (kpiInfoClick(target)) return;
     // A connection's fix (a dialog) or quick action, from any screen: Connections cards, the Overview's Fix now.
     const fix = /** @type {HTMLElement | null} */ (target.closest('[data-fix]'));
     if (fix && !(/** @type {HTMLButtonElement} */ (fix).disabled)) {
@@ -87,7 +105,9 @@ function wireShell() {
       if (go.tagName === 'A' && (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button !== 0)) return;
       e.preventDefault();
       closeMenu(false);
-      show(go.dataset.go ?? 'overview', null);
+      // A filter for the screen (the Overview's counts): only a query string, nothing else.
+      const query = /^\?[a-z]+=[a-z0-9_]+(&[a-z]+=[a-z0-9_]+)*$/.test(go.dataset.query ?? '') ? go.dataset.query : undefined;
+      show(go.dataset.go ?? 'overview', null, { query });
       return;
     }
     if (!target.closest('.me')) closeMenu(false);
@@ -127,6 +147,7 @@ function wireShell() {
       /** @type {HTMLInputElement} */ ($('#q')).focus();
     }
     if (e.key === 'Escape') {
+      if (closeKpiInfo()) return;
       if (!$('#menu').hidden) closeMenu(true);
       else if ($('#app').classList.contains('nav-open')) {
         setDrawer(false);
@@ -197,7 +218,8 @@ function redraw(view, html) {
 // ---------- screens ----------
 /**
  * Shows a screen. New history entry unless it came from the back/forward buttons.
- * @param {string} screen @param {string | null} sub @param {{ fromHistory?: boolean, replace?: boolean }} [opts]
+ * `query` ("?status=overdue") goes into the new address with the screen, for the screen to read its filter from.
+ * @param {string} screen @param {string | null} sub @param {{ fromHistory?: boolean, replace?: boolean, query?: string }} [opts]
  */
 function show(screen, sub, opts = {}) {
   if (!owner) {
@@ -206,9 +228,10 @@ function show(screen, sub, opts = {}) {
     return;
   }
   if (!SCREENS.has(screen)) screen = 'overview';
-  if (!opts.fromHistory) navigate(screen, sub, { replace: opts.replace });
+  if (!opts.fromHistory) navigate(screen, sub, { replace: opts.replace, query: opts.query });
   if (current.screen === screen && current.sub === sub && !opts.replace) return;
   current = { screen, sub };
+  closeKpiInfo();
   closeDrawer(true);
   const mine = ++visit;
   const live = () => mine === visit;
@@ -298,6 +321,7 @@ function enterApp() {
   $('#me-name').textContent = owner?.name || 'Owner';
   $('#me-email').textContent = owner?.email ?? '';
   statusPoll = poll(refreshStatus, STATUS_MS);
+  mountAssistant();
   const { screen, sub } = parsePath(location.pathname);
   show(screen, sub, { replace: true });
   if (!reduceMotion && gsap) {
@@ -316,6 +340,7 @@ function leaveApp(signedOut) {
   onStatus = () => {};
   closeDrawer(true);
   resetGroups();
+  unmountAssistant();
   owner = null;
   status = null;
   current = { screen: '', sub: null };

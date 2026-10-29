@@ -26,9 +26,13 @@ const VIEWPORTS = [
 ] as const;
 const THEMES = ['dark', 'light'] as const;
 const SEARCH_WORDS = ['Nair', 'Joshi', 'Patel', 'Gupta'];
+/** Another family per round for the bulk steps (each family's groups are approved or ignored by the end of its round). */
+const BULK_WORDS = ['Bose', 'Reddy', 'Sethi', 'Malhotra'];
+let bulkRound = 0;
 /** The screens drawn from src/web/public/views/screens.js. */
 const WORK_SCREENS = ['tasks', 'meetings', 'activity', 'tracker', 'usage', 'automations', 'audit', 'settings'];
 let round = 0;
+let timeRound = 0;
 
 const state: FakeState = { signedIn: false, empty: false };
 const web = fakeDashboard({ port: 0, state });
@@ -52,6 +56,9 @@ function watch(page: Page, where: () => string) {
   page.on('requestfailed', (r) => {
     // Closing the link dialog closes its event stream on purpose.
     if (new URL(r.url()).pathname === '/dashboard/api/whatsapp/link/stream') return;
+    // Chrome reports a fetch read through its body stream as aborted even when every line arrived (text() of the same
+    // answer finishes); the assistant steps check that each answer finished instead.
+    if (new URL(r.url()).pathname === '/dashboard/api/assistant/ask' && r.failure()?.errorText === 'net::ERR_ABORTED') return;
     fail(where(), `request failed ${new URL(r.url()).pathname}: ${r.failure()?.errorText}`);
   });
 }
@@ -140,9 +147,104 @@ async function main() {
         where = `overview ${tag}`;
         await p.goto(`${base}/dashboard`);
         await check(p, where, '.kpis', `overview-${tag}`);
+        // The uptime strip lists the newest outages with their exact times ("Off from 02:14 to 06:33 (4 h 19 min)").
+        if ((await p.locator('[data-uptime-outages] li', { hasText: / to \d\d:\d\d \(/ }).count()) < 1) fail(where, 'no outage with its exact times');
         if ((await p.locator('#view b', { hasText: '<b>' }).count()) !== 1) fail(where, 'agent text was not shown as plain text');
         const htmlTheme = await p.evaluate(() => document.documentElement.dataset.theme ?? 'dark');
         if (htmlTheme !== theme) fail(where, `theme is ${htmlTheme}`);
+
+        // Every count is a link to the screen that lists it, with the filter in the address; the "i" beside it says
+        // what the number means (hover on a laptop, a tap on a phone, keyboard focus on both).
+        where = `overview counts ${tag}`;
+        const hrefs = await p.locator('.kpi-link').evaluateAll((els) => els.map((a) => a.getAttribute('href')));
+        const want = ['/dashboard/clients', '/dashboard/tasks?status=open', '/dashboard/tasks?status=overdue', '/dashboard/tasks?status=review', '/dashboard/tasks?status=done&closed=7d'];
+        if (JSON.stringify(hrefs) !== JSON.stringify(want)) fail(where, `links are ${JSON.stringify(hrefs)}`);
+        if ((await p.locator('.kpi .kpi-link .kpi-i').count()) !== 0) fail(where, 'an info button is inside a link');
+        const tip = p.locator('#kpi-tip-overdue');
+        if (vp.name === 'phone') await p.locator('[data-kpi-info="overdue"]').click();
+        else await p.locator('[data-kpi-info="overdue"]').hover();
+        await tip.waitFor({ state: 'visible' });
+        if ((await tip.textContent()) !== 'Tasks past their deadline that are not done yet.') fail(where, `the overdue sentence is "${await tip.textContent()}"`);
+        await p.waitForTimeout(300);
+        await p.screenshot({ path: join(OUT, `overview-info-${tag}.png`) });
+        if (vp.name === 'phone') {
+          await p.locator('[data-kpi-info="overdue"]').click(); // a second tap closes it
+          await p.locator('[data-kpi-info="overdue"][aria-expanded="false"]').waitFor();
+          // This test browser reports a mouse that can hover (a phone has none): move it off before checking.
+          await p.mouse.move(5, 5);
+          await tip.waitFor({ state: 'hidden' });
+        } else await p.mouse.move(5, 5);
+        // Keyboard: Tab to the review tile's "i" (past its link) shows its sentence, and Esc closes an open one.
+        await p.locator('[data-kpi-info="overdue"]').focus();
+        await p.keyboard.press('Tab');
+        await p.keyboard.press('Tab');
+        await p.locator('#kpi-tip-review').waitFor({ state: 'visible' });
+        const ring = await p.locator('.kpi-link[data-query="?status=review"]').evaluate((a) => {
+          a.focus();
+          return getComputedStyle(a).outlineStyle;
+        });
+        if (ring !== 'solid') fail(where, `a focused count has no focus ring (${ring})`);
+        await p.locator('[data-kpi-info="done"]').click();
+        await p.locator('.kpi.info-open #kpi-tip-done').waitFor({ state: 'visible' });
+        await p.keyboard.press('Escape');
+        await p.locator('.kpi.info-open').waitFor({ state: 'detached' });
+        await p.locator('.kpi-link[data-query="?status=overdue"]').click();
+        await p.waitForURL('**/dashboard/tasks?status=overdue');
+        await p.locator('select[data-f="status"]').waitFor();
+        if ((await p.locator('select[data-f="status"]').inputValue()) !== 'overdue') fail(where, 'Tasks did not open filtered to overdue');
+        await p.goBack();
+        await p.waitForURL(/\/dashboard$/);
+        await p.locator('.kpis').waitFor();
+        // Done: the tasks closed in the last 7 days (the count's own days), as a chip that removes that filter.
+        where = `overview done ${tag}`;
+        await p.locator('.kpi-link[data-query="?status=done&closed=7d"]').click();
+        await p.waitForURL('**/dashboard/tasks?status=done&closed=7d');
+        await p.locator('.fchip[data-clear="closed"]', { hasText: 'Done · last 7 days' }).waitFor();
+        // Active clients only, as the Overview counts; removed clients' tasks only when asked for.
+        await p.locator('.fchip[data-removed][aria-pressed="false"]', { hasText: 'Include removed clients' }).waitFor();
+        await p.locator('#view .skel').first().waitFor({ state: 'detached' });
+        await p.waitForTimeout(400);
+        await p.screenshot({ path: join(OUT, `tasks-done-7d-${tag}.png`) });
+        await p.locator('.fchip[data-removed]').click();
+        await p.waitForURL((u) => u.search === '?status=done&closed=7d&removed=1');
+        await p.locator('.fchip[data-removed][aria-pressed="true"]').waitFor();
+        await p.locator('.fchip[data-removed]').click();
+        await p.waitForURL((u) => u.search === '?status=done&closed=7d');
+        await p.locator('.fchip[data-clear="closed"]').click();
+        await p.waitForURL((u) => u.pathname === '/dashboard/tasks' && u.search === '?status=done');
+        if ((await p.locator('.fchip[data-clear]').count()) !== 0) fail(where, 'the chip stayed after removing it');
+        await p.goto(`${base}/dashboard`);
+        await p.locator('.kpis').waitFor();
+
+        // The AI assistant, on a scripted Claude (scripts/assistantFake.ts: no API call): open it, ask, Confirm a card,
+        // let it open a screen, and close it with Escape.
+        where = `assistant ${tag}`;
+        await p.locator('#asst-fab').click();
+        await p.locator('#asst .asst-sugg .chip').first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'no suggested questions'));
+        await p.waitForTimeout(400);
+        await p.screenshot({ path: join(OUT, `assistant-open-${tag}.png`) });
+        await p.locator('#asst .chip', { hasText: 'Summarise today' }).click();
+        await p.locator('#asst .asst-meta').first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the answer never finished'));
+        if ((await p.locator('#asst .asst-msg.bot b', { hasText: '11 open tasks' }).count()) !== 1) fail(where, 'the answer was not drawn');
+        await p.locator('#asst-q').fill('Add a task for Acme: book the photo shoot');
+        await p.keyboard.press('Enter');
+        await p.locator('#asst .asst-card [data-confirm]').waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'no card to confirm'));
+        await p.locator('#asst .asst-meta').nth(1).waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the second answer never finished'));
+        await p.waitForTimeout(300);
+        await p.screenshot({ path: join(OUT, `assistant-card-${tag}.png`) });
+        await p.locator('#asst .asst-card [data-confirm]').click();
+        await p.locator('#asst .asst-card .ok', { hasText: 'added' }).waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'Confirm did not finish'));
+        await p.locator('#asst-q').fill('Show overdue tasks');
+        await p.keyboard.press('Enter');
+        await p.waitForURL('**/dashboard/tasks?status=overdue', { timeout: WAIT_MS }).catch(() => fail(where, `did not open the overdue tasks: ${p.url()}`));
+        await p.locator('#asst .asst-meta').nth(2).waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the third answer never finished'));
+        await p.waitForTimeout(300);
+        await p.screenshot({ path: join(OUT, `assistant-screen-${tag}.png`) });
+        const asstSideways = await p.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+        if (asstSideways > 1) fail(where, `scrolls sideways by ${asstSideways}px`);
+        await p.locator('#asst-q').focus();
+        await p.keyboard.press('Escape');
+        await p.locator('#asst').waitFor({ state: 'hidden', timeout: 5_000 }).catch(() => fail(where, 'Escape did not close it'));
 
         where = `connections ${tag}`;
         if (vp.name === 'phone') {
@@ -173,6 +275,17 @@ async function main() {
             if ((await p.locator('#view a[href^="https://drive.google.com/file/d/"]', { hasText: 'Open in Drive' }).count()) !== 1) fail(where, 'has no Open in Drive');
           }
           if (screen === 'automations') {
+            // The send time is saved with its own button (a new one each round: a time already in force saves nothing),
+            // and the next report follows it.
+            where = `automations send time ${tag}`;
+            const hm = `07:${String(10 + timeRound++).padStart(2, '0')}`;
+            await p.locator('#view [data-timeform] input').fill(hm);
+            await p.locator('#view [data-timeform] button[type="submit"]').click();
+            await p.locator('.toast', { hasText: 'Briefing time saved' }).first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'no saved toast'));
+            const next = await p.locator('#view [data-next]').innerText();
+            if (!next.includes(hm) && !next.includes('due now')) fail(where, `the next report does not follow the new time: ${next}`);
+            await p.waitForTimeout(300);
+            await p.screenshot({ path: join(OUT, `automations-time-${tag}.png`), fullPage: true });
             // Link phone opens the spare phone's first-link dialog right here, not Connections.
             where = `automations link phone ${tag}`;
             await p.locator('#view [data-fix="spare-link"]').click();
@@ -211,7 +324,7 @@ async function main() {
         await p.locator('.drawer .bub p', { hasText: 'Voice note · 0:42 · transcribed' }).waitFor();
         await p.locator('.drawer .lastread', { hasText: '2 task changes' }).waitFor();
         if ((await p.locator('.drawer .syncline [data-action="upload-tracker"]').count()) !== 1) fail(where, 'the panel has no Sync now');
-        if ((await p.locator('.drawer .dr-foot button').count()) !== 2) fail(where, 'the panel foot should hold only Close and Open tracker');
+        if ((await p.locator('.drawer .dr-foot button').count()) !== 3) fail(where, 'the panel foot should hold Close, Open chat and Open tracker');
         await p.waitForTimeout(600); // the drawer slides in
         await p.screenshot({ path: join(OUT, `client-drawer-${tag}.png`) });
         await p.keyboard.press('Escape');
@@ -226,6 +339,91 @@ async function main() {
         await p.screenshot({ path: join(OUT, `client-panel-no-tasks-${tag}.png`) });
         await p.keyboard.press('Escape');
         await p.locator('.drawer').waitFor({ state: 'detached' });
+
+        // Open chat. Sending is off at first: the chat says so and has no text box.
+        where = `open chat, sending off ${tag}`;
+        const openAcmeChat = async () => {
+          await p.locator('.ccard', { hasText: 'Acme Traders' }).click();
+          await p.locator('.drawer [data-open-chat]').click();
+          await p.locator('.chat-sheet .ch-row').first().waitFor();
+          await p.locator('.chat-sheet .ch-head h2', { hasText: 'Acme Traders x Studio' }).waitFor();
+          await p.waitForTimeout(500); // the sheet comes in
+          // It opens at the newest message.
+          const fromEnd = await p.locator('.chat-sheet .ch-body').evaluate((b) => b.scrollHeight - b.scrollTop - b.clientHeight);
+          if (fromEnd > 80) fail(where, `the chat did not open at its newest message (${fromEnd}px from the end)`);
+        };
+        await openAcmeChat();
+        await p.locator('.chat-sheet .ch-off', { hasText: 'Sending is off' }).waitFor();
+        if ((await p.locator('.chat-sheet #ch-text').count()) !== 0) fail(where, 'a text box while sending is off');
+        if ((await p.locator('.chat-sheet .ch-reply').count()) !== 0) fail(where, 'Reply buttons while sending is off');
+        await p.screenshot({ path: join(OUT, `chat-off-${tag}.png`) });
+        // The stored messages: bubbles, days, names, tags, the voice note's words; text shown as text.
+        where = `open chat ${tag}`;
+        if ((await p.locator('.chat-sheet .ch-row').count()) < 40) fail(where, 'expected a page of messages');
+        if ((await p.locator('.chat-sheet .ch-day').count()) < 2) fail(where, 'expected day separators');
+        await p.locator('.chat-sheet .ch-bub p', { hasText: 'Text with <b>tags</b> stays text' }).waitFor();
+        await p.locator('.chat-sheet .ch-tag', { hasText: 'Voice note · 0:42' }).waitFor();
+        await p.locator('.chat-sheet .ch-tr', { hasText: 'The blue one works' }).waitFor();
+        await p.locator('.chat-sheet .ch-gone', { hasText: 'This message was deleted' }).waitFor();
+        const page1 = await p.locator('.chat-sheet .ch-row[data-msg]').count();
+        // Scrolling up with the wheel, as the owner would, loads the page before.
+        await p.locator('.chat-sheet .ch-body').hover();
+        for (let i = 0; i < 12; i++) {
+          await p.mouse.wheel(0, -800);
+          await p.waitForTimeout(80);
+        }
+        await p.waitForFunction((n) => document.querySelectorAll('.chat-sheet .ch-row[data-msg]').length > n, page1);
+        // Back to the client's panel.
+        await p.locator('.chat-sheet [data-chat-back]').click();
+        await p.locator('.drawer h2', { hasText: 'Acme Traders' }).waitFor();
+        await p.keyboard.press('Escape');
+        await p.locator('.drawer').waitFor({ state: 'detached' });
+
+        // Settings: switching sending on asks first, with the ban risk.
+        where = `settings, sending ${tag}`;
+        await p.goto(`${base}/dashboard/settings`);
+        await p.locator('#send-card [data-send-switch][aria-checked="false"]').waitFor();
+        await p.locator('#send-card').scrollIntoViewIfNeeded();
+        await p.screenshot({ path: join(OUT, `settings-sending-${tag}.png`), fullPage: true });
+        await p.locator('[data-send-switch]').click();
+        await p.locator('.modal h2', { hasText: "Allow sending from the founder's WhatsApp?" }).waitFor();
+        await p.locator('.modal [data-yes]').click();
+        await p.locator('#send-card [data-send-switch][aria-checked="true"]').waitFor();
+
+        // Reply to a message: the confirm dialog shows the exact text and the group; Send, then the bubble says Sent.
+        where = `open chat, send ${tag}`;
+        await p.goto(`${base}/dashboard/clients`);
+        await p.locator('.ccard').first().waitFor();
+        await openAcmeChat();
+        await p.waitForTimeout(300);
+        await p.screenshot({ path: join(OUT, `chat-${tag}.png`) });
+        const target = p.locator('.chat-sheet .ch-row[data-msg]', { hasText: 'See you at 11 tomorrow' });
+        await target.hover();
+        await target.locator('.ch-reply').click();
+        await p.locator('.chat-sheet .ch-replying .ch-quote', { hasText: 'See you at 11 tomorrow' }).waitFor();
+        const words = `See you there ${tag}\nI'll bring the samples`;
+        await p.locator('#ch-text').fill(words);
+        await p.locator('#ch-text').press('Enter');
+        await p.locator('.modal h2', { hasText: 'Send this from your WhatsApp to Acme Traders x Studio?' }).waitFor();
+        if ((await p.locator('.modal .m-quote').textContent()) !== words) fail(where, 'the dialog does not show the exact text');
+        await p.waitForTimeout(300);
+        await p.screenshot({ path: join(OUT, `chat-confirm-${tag}.png`) });
+        await p.locator('.modal [data-yes]').click();
+        await p.locator('.chat-sheet .ch-own.ok .ch-state', { hasText: 'Sent' }).waitFor();
+        await p.locator('.chat-sheet .ch-own .ch-quote', { hasText: 'See you at 11 tomorrow' }).waitFor();
+        if ((await p.locator('#ch-text').inputValue()) !== '') fail(where, 'the text box was not emptied');
+        await p.waitForTimeout(300);
+        await p.screenshot({ path: join(OUT, `chat-sent-${tag}.png`) });
+        await p.keyboard.press('Escape');
+        await p.locator('.chat-sheet').waitFor({ state: 'detached' });
+
+        // Off again, so the next round starts as the owner would: sending off. Switching off asks nothing.
+        where = `settings, sending off ${tag}`;
+        await p.goto(`${base}/dashboard/settings`);
+        await p.locator('[data-send-switch][aria-checked="true"]').click();
+        await p.locator('#send-card [data-send-switch][aria-checked="false"]').waitFor();
+        await p.goto(`${base}/dashboard/clients`);
+        await p.locator('.ccard').first().waitFor();
 
         where = `sync tracker ${tag}`;
         await p.locator('.synch', { hasText: 'Tracker updated' }).waitFor();
@@ -282,6 +480,52 @@ async function main() {
         await p.locator('#g-save').click();
         await p.locator('.toast', { hasText: 'Saved' }).waitFor();
         await p.locator('.savebar').waitFor({ state: 'detached' });
+
+        // Several at once: a shift-click range, approved together. The fake makes codes as the agent does: the third
+        // group of a family has none left, so it fails on its own and the others still go through.
+        where = `manage groups bulk ${tag}`;
+        const family = BULK_WORDS[bulkRound++ % BULK_WORDS.length]!;
+        await p.locator('#g-q').fill(family);
+        await p.waitForURL(new RegExp(`q=${family}`));
+        await p.waitForFunction((w) => [...document.querySelectorAll('.g-row')].every((r) => (r.textContent ?? '').includes(w)), family);
+        const ticks = p.locator('[data-select]');
+        await ticks.nth(0).click();
+        await ticks.nth(2).click({ modifiers: ['Shift'] });
+        await p.locator('.selbar', { hasText: '3 selected' }).waitFor();
+        if ((await p.locator('.g-row.selected').count()) !== 3) fail(where, 'the shift-click range did not tick 3 groups');
+        await p.waitForTimeout(500);
+        await p.screenshot({ path: join(OUT, `groups-selected-${tag}.png`) });
+        if (vp.name === 'laptop' && theme === 'dark') {
+          // Dragging a ticked group carries all three: dropped on the right, it asks to approve the three (cancelled here).
+          where = `manage groups drag selection ${tag}`;
+          await p.locator('.g-row.selected').first().dragTo(p.locator('.board.on'), { targetPosition: { x: 60, y: 30 } });
+          await p.locator('.modal h2', { hasText: 'Track 3 groups?' }).waitFor();
+          await p.locator('.modal [data-no]').click();
+          await p.locator('.modal').waitFor({ state: 'detached' });
+          where = `manage groups bulk ${tag}`;
+        }
+        await p.locator('#g-bulk-approve').click();
+        await p.locator('.modal h2', { hasText: 'Track 3 groups?' }).waitFor();
+        await p.locator('.modal [data-yes]').click();
+        await p.locator('.g-outcome', { hasText: '2 approved, 1 failed: No code could be made from its name' }).waitFor();
+        if ((await p.locator('.g-row.selected').count()) !== 1) fail(where, 'the group that failed is not still ticked');
+        await p.waitForTimeout(500);
+        await p.screenshot({ path: join(OUT, `groups-bulk-result-${tag}.png`), fullPage: true });
+
+        // Select all, ignore them, then show one again from the Ignored list.
+        where = `manage groups ignore ${tag}`;
+        await p.locator('#g-all').check();
+        const many = Number(await p.locator('.selbar b').textContent());
+        if (!(many > 3)) fail(where, `Select all ticked ${many}`);
+        await p.locator('#g-bulk-ignore').click();
+        await p.locator('.g-outcome', { hasText: `${many} groups ignored.` }).waitFor();
+        await p.locator('.selbar').waitFor({ state: 'detached' });
+        await p.locator('[data-filter="ignored"]').click();
+        await p.locator('[data-unignore]').first().waitFor();
+        await p.locator('[data-unignore]').first().click();
+        await p.locator('.g-outcome', { hasText: '1 group shown again.' }).waitFor();
+        await p.waitForTimeout(400);
+        await p.screenshot({ path: join(OUT, `groups-ignored-${tag}.png`), fullPage: true });
 
         where = `fix now ${tag}`;
         await p.goto(`${base}/dashboard`);

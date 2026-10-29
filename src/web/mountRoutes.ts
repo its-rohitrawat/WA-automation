@@ -1,5 +1,6 @@
 import type { ServerResponse } from 'node:http';
 import type { SpendView } from '../app.ts';
+import type { PrioritySettings } from '../config/prioritySettings.ts';
 import type { SettingsStore } from '../config/settingsStore.ts';
 import { actionHandler, type ActionDeps } from '../control/actions.ts';
 import type { AgentControl } from '../control/agentControl.ts';
@@ -14,11 +15,12 @@ import type { AuditLog } from './audit.ts';
 import type { OwnerSession } from './guard.ts';
 import { HttpError, sendJson } from './http.ts';
 import { registerReadApi } from './routes/api.ts';
+import { chatReadHandler, chatSendHandler, type ChatDeps } from './routes/chat.ts';
 import { clientDetailHandler, clientsListHandler, type ClientsDeps } from './routes/clients.ts';
 import type { ApiResult, AuditFn, OwnerContext } from './routes/context.ts';
 import { registerControlApi } from './routes/controlScreens.ts';
 import { CALLBACK_PATH, GoogleConnectRoutes, type GoogleConnectDeps } from './routes/google.ts';
-import { groupsApplyHandler, groupsListHandler, suggestCodeHandler, type GroupsDeps } from './routes/groups.ts';
+import { groupsApplyHandler, groupsBulkHandler, groupsListHandler, suggestCodeHandler, type GroupsDeps } from './routes/groups.ts';
 import { actionSession, readBody } from './routes/respond.ts';
 import { WhatsAppLinkRoutes } from './routes/whatsapp.ts';
 import { registerWorkApi } from './routes/work.ts';
@@ -26,6 +28,11 @@ import type { RequestContext } from './router.ts';
 import { hashToken } from './sessions.ts';
 import type { DashboardMount } from './start.ts';
 import type { LinkSessions } from '../wa/linkSession.ts';
+import { Assistant, type AssistantAi } from '../assistant/assistant.ts';
+import { PendingActions } from '../assistant/proposals.ts';
+import type { App } from '../app.ts';
+import type { Prices } from '../spend/pricing.ts';
+import { registerAssistantApi } from './routes/assistant.ts';
 
 // Every agent route of the dashboard, registered behind D1's guard (startDashboard's mount). Reads need a signed-in
 // owner; changes also the Origin and CSRF checks and the shared action limit (actionSession). The D2/D3 handlers are
@@ -46,12 +53,17 @@ export interface AgentRoutesDeps {
   /** DASHBOARD_OWNER_EMAILS (lower-cased). */
   ownerEmails: readonly string[];
   settings: Pick<SettingsStore, 'view' | 'set'>;
+  priority: Pick<PrioritySettings, 'view' | 'set'>;
   groups: Omit<GroupsDeps, 'audit'>;
   clients: ClientsDeps;
+  /** Open chat: a client's messages, and sending (when switched on in Settings); the audit is bound here. */
+  chat?: Omit<ChatDeps, 'audit'>;
   /** Google reconnect and add-account; the audit is bound here. */
   google: Omit<GoogleConnectDeps, 'audit'>;
   actions: Omit<ActionDeps, 'audit'>;
   links: LinkSessions;
+  /** The AI assistant (DASHBOARD_ASSISTANT): its Claude client, the agent's spend guard and the prices. None: no assistant. */
+  assistant?: { ai: AssistantAi; paid: App['paidCalls']; prices: Prices };
 }
 
 /** The owner's context for a D2/D3 handler. sessionId is the session's hash, never the cookie value. */
@@ -82,7 +94,7 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   });
   registerControlApi(router, {
     ...action, db: d.db, clock: d.clock, audit: m.audit, spend: d.spend, voiceLocal: d.voiceLocal, uptime: d.uptime,
-    isOwner: (email) => owners.has(email.trim().toLowerCase()), settings: d.settings, sessions: m.sessions, secureFor: m.secureFor,
+    isOwner: (email) => owners.has(email.trim().toLowerCase()), settings: d.settings, priority: d.priority, sessions: m.sessions, secureFor: m.secureFor,
   });
 
   // An owner read: the guard first, then the handler.
@@ -103,9 +115,16 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   read('/dashboard/api/groups', ({ url }, o) =>
     groupsListHandler(groups, o, { q: url.searchParams.get('q'), filter: url.searchParams.get('filter'), refresh: url.searchParams.get('refresh') }));
   change('/dashboard/api/groups/apply', (_ctx, o, body) => groupsApplyHandler(groups, o, body));
+  change('/dashboard/api/groups/bulk', (_ctx, o, body) => groupsBulkHandler(groups, o, body));
   read('/dashboard/api/groups/suggest-code', ({ url }, o) => suggestCodeHandler(groups, o, url.searchParams.get('name') ?? ''));
   read('/dashboard/api/clients', (_ctx, o) => clientsListHandler(d.clients, o));
   read('/dashboard/api/clients/:code', ({ params }, o) => clientDetailHandler(d.clients, o, params.code!));
+  if (d.chat) {
+    const chat: ChatDeps = { ...d.chat, audit };
+    read('/dashboard/api/clients/:code/chat', ({ params, url }, o) =>
+      chatReadHandler(chat, o, params.code!, { before: url.searchParams.get('before'), limit: url.searchParams.get('limit') }));
+    change('/dashboard/api/clients/:code/chat/send', ({ params }, o, body) => chatSendHandler(chat, o, params.code!, body));
+  }
 
   // Google reconnect and add-account (D3).
   const google = new GoogleConnectRoutes({ ...d.google, audit });
@@ -136,6 +155,18 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
     const s = actionSession(ctx, action);
     send(ctx.res, await actionHandler(ctx.params.name!, actions, ownerOf(ctx, s)));
   });
+
+  // The AI assistant: answers, opens screens, and drafts changes that run only on the owner's Confirm. A session that
+  // ends takes its chat and its waiting cards with it.
+  if (d.assistant) {
+    const pending = new PendingActions(d.clock);
+    const assistant = new Assistant({
+      ai: d.assistant.ai, paid: d.assistant.paid, prices: d.assistant.prices, pending, settings: d.settings, log: d.log, clock: d.clock,
+      db: d.db, control: d.control, spend: d.spend, voiceLocal: d.voiceLocal, health: d.health, ...(d.accountOf ? { accountOf: d.accountOf } : {}),
+    });
+    m.sessions.onEnd((e) => assistant.forget(e));
+    registerAssistantApi(router, { ...action, db: d.db, clock: d.clock, assistant, pending, settings: d.settings, audit: m.audit });
+  }
 
   // Phone links (D3): start, cancel, and the QR stream (server-sent events).
   const links = new WhatsAppLinkRoutes({ sessions: d.links });

@@ -14,7 +14,8 @@ const KINDS = [['all', 'All'], ['auth', 'Sign-ins'], ['config', 'Changes'], ['co
 const EVENT_WORDS = {
   'task.done': 'Task marked done', 'task.reopen': 'Task reopened', 'task.unlock': 'Task handed back', 'task.edit': 'Task edited',
   'meeting.assign': 'Meeting assigned', 'meeting.skip': 'Meeting skipped', 'meeting.retry': 'Meeting retried',
-  'settings.reportEnabled': 'Briefing switched', 'settings.reportDays': 'Briefing days', 'settings.reportRecipient': 'Briefing number',
+  'settings.reportEnabled': 'Briefing switched', 'settings.reportDays': 'Briefing days', 'settings.reportRecipient': 'Briefing number', 'settings.reportTime': 'Briefing time',
+  'settings.priorityKeywords': 'Priority keywords', 'settings.sentimentEnabled': 'Sentiment switched',
   'auth.signout_everywhere': 'Signed out everywhere', 'tracker.published': 'Tracker uploaded', 'tracker.publish_failed': 'Tracker upload failed',
   'tracker.new_file': 'New tracker file',
 };

@@ -4,7 +4,7 @@
 
 Do the steps once, in order. Commands run in **Command Prompt**. "Admin" means: right-click Command Prompt and choose *Run as administrator*.
 
-What WA Agent does: it quietly reads the WhatsApp client groups you allow, keeps a task tracker, and updates an Excel file in Google Drive. It also saves the images and documents shared in those groups, reads them for the tracker, and puts the files that clients send into Drive. It never sends a WhatsApp message.
+What WA Agent does: it quietly reads the WhatsApp client groups you allow, keeps a task tracker, and updates an Excel file in Google Drive. It also saves the images and documents shared in those groups, reads them for the tracker, and puts the files that clients send into Drive. It never sends a WhatsApp message on its own. The one exception is **Open chat** in the dashboard: off until you switch it on, it sends only a text you have confirmed (see "Open chat" below).
 
 ## 1. Prepare the PC (admin)
 
@@ -326,12 +326,12 @@ Monday to Friday at 06:00 IST, the founder gets one short WhatsApp message from 
 
 `Good morning. 5 open tasks, 2 overdue. Today's tracker: https://drive.google.com/file/d/…/view`
 
-With no active clients it reads `Good morning. No open tasks. Today's tracker: …`; with active clients and nothing open it reads `Good morning. 0 open tasks, 0 overdue. Today's tracker: …`. No file is attached: the link opens `Tracker.xlsx` on its **Today** tab (the first tab), which lists, per active client, how many tasks are open and overdue and the 3 most urgent open tasks (tagged `us` or `client`). It makes no AI call, so it costs nothing.
+With no active clients it reads `Good morning. No open tasks. Today's tracker: …`; with active clients and nothing open it reads `Good morning. 0 open tasks, 0 overdue. Today's tracker: …`. When open tasks are critical, the message starts with how many, for example `Good morning. 2 critical, 5 open tasks, 2 overdue. Today's tracker: …`. No file is attached: the link opens `Tracker.xlsx` on its **Today** tab (the first tab), which lists, per active client, how many tasks are open and overdue and the 3 most urgent open tasks (tagged `us` or `client`), critical ones first. It makes no AI call, so it costs nothing.
 
 - No report goes out on Saturday or Sunday. `REPORT_DAYS` changes the days (see step 4 below). `report send-now` still works on any day.
 - The founder needs view access to `Tracker.xlsx` on Drive, or the link asks for access (step 6 below).
 - The link exists only once the tracker has reached Google Drive. Until then the report is not sent, and the status says why (see "Checking it" below).
-- The founder's own number is unchanged: the agent still only reads it and never sends from it.
+- The founder's own number is unchanged by the report: the report never sends from it. (Only Open chat can, when you switch it on; see "Open chat".)
 - The spare number sends only to `REPORT_RECIPIENT`. It reads no chats, sends no read receipts, and is online only for the minute it takes to send.
 - If the PC is off or offline at 06:00, the report goes as soon as possible, but only until 12:00 IST. After that the day is skipped.
 - It is never sent twice on one day.
@@ -354,7 +354,7 @@ With no active clients it reads `Good morning. No open tasks. Today's tracker: �
    REPORT_RECIPIENT=your_founder_number_here
    ```
 
-   `REPORT_RECIPIENT` is the founder's Indian mobile: `91` then the 10-digit mobile number (12 digits in all), digits only, for example `919812345678`, with no `+` or spaces. The service refuses to start with any other form. Leave `REPORT_TIME`, `REPORT_DEADLINE` and `REPORT_DAYS` empty for 06:00 and 12:00 IST, Monday to Friday. Set `REPORT_DAYS=mon-sat` to add Saturday, or `REPORT_DAYS=daily` for every day.
+   `REPORT_RECIPIENT` is the founder's Indian mobile: `91` then the 10-digit mobile number (12 digits in all), digits only, for example `919812345678`, with no `+` or spaces. The service refuses to start with any other form. Leave `REPORT_TIME`, `REPORT_DEADLINE` and `REPORT_DAYS` empty for 06:00 and 12:00 IST, Monday to Friday. The send time can be changed later on the dashboard's Automations screen (Sends at, then Save time), without a restart; the dashboard's time then wins over `REPORT_TIME`. Any time of day can be picked: a time before `REPORT_DEADLINE` catches up until `REPORT_DEADLINE` as before, and a later time catches up for 3 hours after it, never past 23:59 IST. A time that has already passed today starts tomorrow (today keeps the time it had), and the screen shows when the next report goes, for example "Next report: tomorrow 07:30". Set `REPORT_DAYS=mon-sat` to add Saturday, or `REPORT_DAYS=daily` for every day.
 5. **Start the service again** (see "Start the service again" under "If the service will not start" below), wait one minute, and check `npm run cli -- report status`.
 6. Give the founder view access to `Tracker.xlsx`, or the link asks for access when he opens it. In Google Drive (mailbox account), share the **WA Agent** folder with the founder's Google account (the one signed in on his phone), as Viewer. Sharing the folder, not the file, keeps it working if the file is ever re-created (see step 7 of "6. Install and start the service").
 7. Send one test report: `npm run cli -- report send-now`, then type `yes`. It works only while the service is running, on any day, weekends too, and it refuses if today's report was already sent. Check the founder's phone, and open the link once.
@@ -475,6 +475,9 @@ With the dashboard on, this replaces editing `allowed-groups.json` by hand (step
    - **More: meeting matching** (optional): the same meeting keywords and email domains as in "Meeting summaries" below.
 3. Changes wait in a bar at the bottom ("1 change not saved"). Press **Save**: "Saved. The agent picks up the new groups within 2 seconds." No restart is needed. If a change is refused (for example a code already in use), the panel of that group opens and says why.
 4. To stop tracking a group, press **Remove** and **Save**. Nothing is deleted: its tasks are kept, and approving it again later brings it back with the same code.
+5. **Several groups at once:** tick the box on each untracked group (shift-click ticks a range; **Select all** ticks every group the search shows). A bar shows "<n> selected" with **Approve selected**, **Ignore selected** and **Clear**. On a computer, dragging a ticked group to the right moves all the ticked ones.
+   - **Approve selected** asks first, then approves each group straight away (no Save), with the client name and code the panel would suggest. Each group is approved on its own, so one that fails does not stop the others: the page says, for example, "4 approved, 1 failed: No code could be made from its name…". Approve such a group on its own to choose its code.
+   - **Ignore selected** sets groups aside (for example family groups): they leave **All** and **Not approved** and appear under **Ignored**, where **Show again** brings one back. Like any untracked group, the agent does not read them; ignoring changes nothing in WhatsApp, and their names are not saved.
 
 Every saved change is recorded in **Audit logs**. The dashboard writes the same `config/allowed-groups.json` file, so `npm run cli -- status` shows the new clients as before.
 
@@ -488,6 +491,18 @@ Every saved change is recorded in **Audit logs**. The dashboard writes the same 
 When WhatsApp is not connected, the page shows the last list it had ("WhatsApp isn't connected") and you can still approve from it.
 
 **Fallback, when the dashboard can't be reached:** edit `allowed-groups.json` by hand as in step 5 (`list-groups`, then the file). Do not edit the file by hand while someone saves in the dashboard.
+
+### Open chat (a client's group, and replying when allowed)
+
+In **Clients**, open a client and press **Open chat**. It shows the group's messages as the agent stored them: names, times, a line for each day, and photos, files and voice notes as labels (a voice note with its words, once they are written out). Scrolling up loads older messages; new ones appear with the Clients screen's refresh (every 30 seconds). **Back** returns to the client.
+
+**Replying is off until you switch it on**, in **Settings → Sending from the dashboard → Allow sending from the dashboard**. Read the note there first: WhatsApp can restrict or ban a number that sends from a linked tool like this one. When it is on:
+
+- Type a message (text only) and press **Send**, or press **Reply** on a message to quote it. A dialog shows the exact text and the group: "Send this from your WhatsApp to <group>?". Nothing goes out until you press **Send** in it.
+- It goes from the founder's WhatsApp to everyone in the group, and appears on the founder's phone as sent from there. It only ever goes to an approved client group.
+- Limits: one message every 3 seconds to the same group, 30 an hour in all, 4,096 characters each.
+- Under the message: **Sent** (it went), **Not sent** (it surely did not go, for example WhatsApp was not connected), or **Not sure it was sent, check WhatsApp** (WhatsApp was asked but gave no clear answer). The agent never sends a message again by itself: look in the group on the phone before you send it again.
+- **Audit logs** gets a line for each message (the client, its length and what happened; never the text), and for each time the setting is switched on or off.
 
 ### Fixing a connection in the dashboard
 
@@ -518,6 +533,29 @@ The agent always writes one tracker file, `Tracker.xlsx` in the `WA Agent` folde
 
 - **Go back to the old file:** on **Connections**, press **Reconnect** on the Google card and sign in with the account that owns the old file (Drive shows a file's owner in its details). Then check on the **Tracker** screen which file it writes.
 - **Keep the new file:** do nothing. The agent goes on with it, and the old file stays in Drive as it was.
+
+### Priority and sentiment
+
+Every task has a priority: **Critical**, **Major**, **Medium** or **Low**. It shows as a coloured pill on **Tasks**, in the task panel and in a client's panel, and in the tracker's **Priority level** column. Tasks from before this version show `—` until the agent next touches them or a keyword sets one. The tracker's old **Priority** column (High, Medium, Low) stays where it was; Critical and Major count as High there.
+
+What sets a priority:
+
+1. **You.** In the task panel, **Edit owner, deadline or priority**, or `npm run cli -- task edit <code> --priority critical`. A priority you set stays until you hand the task back with **unlock**.
+2. **Your keywords.** On **Settings**, under **Priority & sentiment**, four lists of words: one per priority. When a task's messages contain one of the words, that sets its priority straight away, at no cost. A word matches as a whole word in any case, in English, Hinglish or Hindi (`urgent` does not match `urgently`), and the most urgent list with a match wins. Once a task exists, a keyword in later messages can only raise its priority, never lower it. Add spelling variants as separate words (`zaroori`, `zaruri`). Avoid words that also appear in "no hurry" phrases: with `jaldi` in Critical, "koi jaldi nahi" would be critical too.
+3. **The agent**, when no keyword matched. It reads the priority from the chat in the same AI call that finds the tasks: no extra call.
+
+**Sentiment** (off at first) is how the client feels: positive, neutral, negative or frustrated, judged from the client's own words and reactions in new messages. Switch it on under **Settings › Priority & sentiment**. It then shows as a small label on tasks, in a client's panel ("Client mood") and in the tracker's **Sentiment** column. It adds a little to each AI read (a few words per change it returns). Switched off, the agent does not ask for it and no mood is shown anywhere. Every change to the keywords or the switch is recorded in **Audit logs**, and both apply from the next messages read.
+
+### The AI assistant
+
+The **Ask** button at the bottom right of every dashboard screen opens the assistant: a panel at the side on a laptop, the whole screen on a phone. Type a question, or pick one of the suggestions.
+
+- **It answers** questions about clients, tasks, messages, meetings, AI spend and the agent's health, from the same data the screens show. It can summarise today, say what needs your attention, explain a number, find a message, summarise a meeting, and draft a reply as text for you to copy. **It never sends a WhatsApp message.**
+- **It opens screens.** "Show Acme's overdue tasks" opens Tasks with those filters.
+- **It drafts changes, and you decide.** It can change a task's status, assignee, deadline or priority (critical, major, medium or low), add a task, or change a morning briefing setting (on or off, the days, the time). Each change shows as a card with **Confirm** and **Cancel**. Nothing changes until you press **Confirm**. A card waits 10 minutes, and runs once. The change goes through the same checks as the screens, and **Audit logs** shows it with "via assistant". The founder's number is changed only on **Automations**.
+- **Cost.** Each answer is a Claude call, shown under it ("≈ $0.03"). It counts toward the daily AI cap (`DAILY_SPEND_CAP_USD`), and **AI usage** lists it as "Dashboard assistant". A typical question costs a few US cents. At the cap, the assistant pauses until the next day. It uses the same model and effort as the agent (`AI_MODEL`, `AI_EFFORT`). You can ask up to 30 questions an hour.
+- **Privacy.** It never sees phone numbers or WhatsApp ids. What clients write is treated as data, never as instructions: a message cannot make it change anything. The chat stays in the agent's memory only, and is gone when you press **New chat**, sign out, or leave it for two hours. Questions and answers are never written to the logs.
+- **To switch it off,** set `DASHBOARD_ASSISTANT=false` in `.env` and restart the service.
 
 ## Everyday commands (run in the waagent window)
 
@@ -552,7 +590,7 @@ Notes:
   - *not uploaded to Drive*: uploads that gave up (see "Status "files could not be uploaded to Drive"" below).
   - Voice notes count as files here too. With a paid speech-to-text service the line can end with `· including N voice notes waiting (speech key refused)` (see "Voice notes" below).
   - The counts leave out clients removed from the allow-list. Their files wait, untouched, until the client is added back.
-- **`task edit`** options: `--title`, `--side` (us or client), `--category` (design, development, content, payment, approval, other), `--priority` (high, medium, low), `--assigned-to`, `--asked-by`, `--deadline` (YYYY-MM-DD or `none`), `--latest-progress`. Fields you fix by hand stay fixed until you run `task unlock`.
+- **`task edit`** options: `--title`, `--side` (us or client), `--category` (design, development, content, payment, approval, other), `--priority` (critical, major, medium, low), `--assigned-to`, `--asked-by`, `--deadline` (YYYY-MM-DD or `none`), `--latest-progress`. Fields you fix by hand stay fixed until you run `task unlock`.
 - **`person set <number> <team|client>`**: use the full number with country code and no `+` or spaces (for example `919812345678`). A WhatsApp id (it contains `@`) also works. People who show no number in the People section cannot be fixed with `person set` yet. Add `--client ABC` to change the role in one client group only.
 - **`task unlock`** and **`phase unlock`** let the AI change that task or phase again.
 - **`rebuild`** shows up in Drive within about a minute (a 30-second check, then a 60-second upload wait).
@@ -1014,6 +1052,8 @@ The agent can visit an UptimeRobot **Heartbeat** monitor link every 5 minutes wh
 1. In UptimeRobot add a **Heartbeat** monitor with a 5-minute interval, and copy its link (`https://heartbeat.uptimerobot.com/...`). Keep it secret.
 2. Paste it after `HEARTBEAT_URL=` in `.env`, save, and restart the service (`net stop wa-agent`, then `net start wa-agent`).
 3. After an alert, run `npm run cli -- status`: the Health line says what is wrong. To switch it off, empty `HEARTBEAT_URL=` and restart.
+
+The dashboard's Overview shows the last 30 days of uptime with the exact times of each outage, in IST: hover a day for its outages, and the newest three are listed under the strip, for example "Off from 02:14 to 06:33 (4 h 19 min)", "Off Mon 27 Oct, 23:50 to 00:20 (30 min)" for another day, or "Still off since 09:12 (…)" while it is going.
 
 ## If the service will not start
 

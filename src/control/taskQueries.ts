@@ -1,5 +1,6 @@
+import { readSentimentEnabled } from '../config/prioritySettings.ts';
 import type { Db } from '../store/db.ts';
-import { PRIORITIES, TASK_FIELDS, type Category, type Priority, type Side, type TaskField } from '../store/tasks.ts';
+import { PRIORITIES, TASK_FIELDS, type Category, type Priority, type PrioritySource, type Sentiment, type Side, type TaskField } from '../store/tasks.ts';
 import { istDate } from '../util/time.ts';
 import { ControlError } from './errors.ts';
 
@@ -10,8 +11,12 @@ import { ControlError } from './errors.ts';
 export const TASK_STATUSES = ['overdue', 'open', 'review', 'done'] as const;
 export type DashboardTaskStatus = (typeof TASK_STATUSES)[number];
 export const TASK_DEADLINES = ['past', 'week', 'none'] as const;
-export const TASK_SORTS = ['deadline', 'code', 'client', 'owner', 'status'] as const;
-export type TaskSource = 'whatsapp' | 'meeting' | 'voice';
+export const TASK_SORTS = ['deadline', 'code', 'client', 'owner', 'status', 'priority'] as const;
+/** closed=7d: done tasks closed in the last 7 IST days, today included (the Overview's "Done this week", queries.ts). */
+export const TASK_CLOSED = ['7d'] as const;
+/** removed=1: also the tasks of removed (inactive) clients. Left out, only active clients' tasks: the Overview's scope. */
+export const TASK_REMOVED = ['1'] as const;
+export type TaskSource = 'whatsapp' | 'meeting' | 'voice' | 'dashboard';
 
 export const TASK_LIMIT_DEFAULT = 100;
 export const TASK_LIMIT_MAX = 500;
@@ -24,6 +29,8 @@ export interface TaskQuery {
   owner?: string;
   deadline?: (typeof TASK_DEADLINES)[number];
   priority?: Priority;
+  closed?: (typeof TASK_CLOSED)[number];
+  removed?: (typeof TASK_REMOVED)[number];
   sort: (typeof TASK_SORTS)[number];
   dir: 'asc' | 'desc';
   limit: number;
@@ -41,7 +48,12 @@ export interface DashboardTaskRow {
   /** overdue (not done, deadline before today IST), then done, review (maybe done) and open. */
   status: DashboardTaskStatus;
   overdue: boolean;
-  priority: Priority;
+  /** null for a task from before priority levels (shown as "—"). */
+  priority: Priority | null;
+  /** What set it: an owner's keyword, the AI or the owner. */
+  prioritySource: PrioritySource | null;
+  /** The client's mood about the task; null while sentiment is switched off. */
+  sentiment: Sentiment | null;
   category: Category;
   source: TaskSource;
   updatedAt: string;
@@ -54,6 +66,8 @@ export interface TaskHistoryItem {
 }
 
 export interface DashboardTaskDetail extends DashboardTaskRow {
+  /** The owner's keyword that set the priority, when one did. */
+  priorityKeyword: string | null;
   sourceQuote: string | null;
   sourceDate: string | null;
   /** The sender deleted the message the task came from (the quote is what was read before that). */
@@ -105,6 +119,10 @@ export function parseTaskQuery(p: URLSearchParams): TaskQuery {
   if (deadline) out.deadline = deadline;
   const priority = oneOf('priority', p.get('priority'), PRIORITIES);
   if (priority) out.priority = priority;
+  const closed = oneOf('closed', p.get('closed'), TASK_CLOSED);
+  if (closed) out.closed = closed;
+  const removed = oneOf('removed', p.get('removed'), TASK_REMOVED);
+  if (removed) out.removed = removed;
   return out;
 }
 
@@ -119,13 +137,14 @@ const STATUS_RANK_SQL = `CASE ${STATUS_SQL} WHEN 'overdue' THEN 0 WHEN 'open' TH
 /** The number after the dash, so SHA-1000 sorts after SHA-999. */
 const CODE_NUMBER_SQL = `CAST(substr(t.code, instr(t.code, '-') + 1) AS INTEGER)`;
 /** A meeting's task, a voice note's task (its source message, in the same group, carries a voice note), or WhatsApp. */
-const SOURCE_SQL = `CASE WHEN t.meeting_id IS NOT NULL OR t.origin = 'meeting' THEN 'meeting'
+const SOURCE_SQL = `CASE WHEN t.origin = 'dashboard' THEN 'dashboard' WHEN t.meeting_id IS NOT NULL OR t.origin = 'meeting' THEN 'meeting'
   WHEN t.source_wa_id IS NOT NULL AND EXISTS (SELECT 1 FROM messages m JOIN media md ON md.message_id = m.id
     WHERE m.client_id = t.client_id AND m.wa_id = t.source_wa_id AND md.kind = 'voice') THEN 'voice'
   ELSE 'whatsapp' END`;
 
 const SELECT_SQL = `SELECT t.code, t.title, c.code AS clientCode, c.name AS clientName, t.side, t.assigned_to AS owner, t.asked_by AS askedBy,
-    t.deadline, ${STATUS_SQL} AS status, t.priority, t.category, ${SOURCE_SQL} AS source, t.updated_at AS updatedAt,
+    t.deadline, ${STATUS_SQL} AS status, t.priority_level AS priority, t.priority_source AS prioritySource, t.priority_keyword AS priorityKeyword,
+    t.sentiment, t.category, ${SOURCE_SQL} AS source, t.updated_at AS updatedAt,
     t.id, t.source_quote AS sourceQuote, t.source_date AS sourceDate, t.source_revoked AS sourceRevoked, t.latest_progress AS latestProgress,
     t.reminder_count AS remindedCount
   FROM tasks t JOIN clients c ON c.id = t.client_id`;
@@ -140,7 +159,10 @@ interface RawRow {
   askedBy: string | null;
   deadline: string | null;
   status: DashboardTaskStatus;
-  priority: Priority;
+  priority: Priority | null;
+  prioritySource: PrioritySource | null;
+  priorityKeyword: string | null;
+  sentiment: Sentiment | null;
   category: Category;
   source: TaskSource;
   updatedAt: string;
@@ -152,13 +174,17 @@ interface RawRow {
   remindedCount: number;
 }
 
-function toRow(r: RawRow): DashboardTaskRow {
+/** moods: sentiment is switched on; off, no task's mood leaves here. */
+function toRow(r: RawRow, moods: boolean): DashboardTaskRow {
   return {
     code: r.code, title: r.title, client: { code: r.clientCode, name: r.clientName }, side: r.side, owner: r.owner, askedBy: r.askedBy,
-    deadline: r.deadline, status: r.status, overdue: r.status === 'overdue', priority: r.priority, category: r.category, source: r.source,
-    updatedAt: r.updatedAt,
+    deadline: r.deadline, status: r.status, overdue: r.status === 'overdue', priority: r.priority, prioritySource: r.prioritySource,
+    sentiment: moods ? r.sentiment : null, category: r.category, source: r.source, updatedAt: r.updatedAt,
   };
 }
+
+/** Critical first; a task without a level last (asc). */
+const PRIORITY_RANK_SQL = `CASE t.priority_level WHEN 'critical' THEN 0 WHEN 'major' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END`;
 
 /** The ORDER BY for a sort. dir comes from the parsed filter's fixed list, never from raw input. */
 function orderBy(sort: TaskQuery['sort'], dir: 'asc' | 'desc'): string {
@@ -175,6 +201,8 @@ function orderBy(sort: TaskQuery['sort'], dir: 'asc' | 'desc'): string {
       return `t.assigned_to IS NULL, lower(t.assigned_to) ${d}, ${tie}`;
     case 'status':
       return `${STATUS_RANK_SQL} ${d}, ${tie}`;
+    case 'priority':
+      return `${PRIORITY_RANK_SQL} ${d}, ${tie}`;
   }
 }
 
@@ -186,7 +214,8 @@ function likePattern(s: string): string {
 /** The Tasks screen's list: every filter, the sort and one page, with the total before paging. */
 export function listDashboardTasks(db: Db, f: TaskQuery, now: Date): { total: number; rows: DashboardTaskRow[] } {
   const today = istDate(now);
-  const where: string[] = [];
+  // Active clients only, as the Overview counts, unless the removed clients' tasks are asked for too.
+  const where: string[] = f.removed === '1' ? [] : ['c.active = 1'];
   const params: Record<string, string | number> = { today };
   if (f.q !== undefined) {
     where.push(`(t.code LIKE @q ESCAPE '\\' OR t.title LIKE @q ESCAPE '\\' OR c.name LIKE @q ESCAPE '\\' OR t.assigned_to LIKE @q ESCAPE '\\')`);
@@ -212,15 +241,21 @@ export function listDashboardTasks(db: Db, f: TaskQuery, now: Date): { total: nu
     params.weekEnd = addDays(today, 6);
   }
   if (f.priority !== undefined) {
-    where.push('t.priority = @priority');
+    where.push('t.priority_level = @priority');
     params.priority = f.priority;
+  }
+  // The same days as the Overview's count: today and the six before it (IST).
+  if (f.closed === '7d') {
+    where.push("t.status = 'done' AND t.closed_on BETWEEN @closedFrom AND @today");
+    params.closedFrom = addDays(today, -6);
   }
   const whereSql = where.length > 0 ? ` WHERE ${where.join(' AND ')}` : '';
   const total = (db.prepare(`SELECT COUNT(*) AS n FROM tasks t JOIN clients c ON c.id = t.client_id${whereSql}`).get(params) as { n: number }).n;
   const rows = db
     .prepare(`${SELECT_SQL}${whereSql} ORDER BY ${orderBy(f.sort, f.dir)} LIMIT @limit OFFSET @offset`)
     .all({ ...params, limit: f.limit, offset: f.offset }) as RawRow[];
-  return { total, rows: rows.map(toRow) };
+  const moods = readSentimentEnabled(db);
+  return { total, rows: rows.map((r) => toRow(r, moods)) };
 }
 
 /** Plain words for the task fields, as the history and the audit log name them. */
@@ -242,7 +277,9 @@ function fieldWords(detail: string): string {
   return names.length > 0 ? ` (${names.join(', ')})` : '';
 }
 
-const CREATED_FROM: Record<TaskSource, string> = { whatsapp: 'Created from WhatsApp', meeting: 'Created from a meeting', voice: 'Created from a voice note' };
+const CREATED_FROM: Record<TaskSource, string> = {
+  whatsapp: 'Created from WhatsApp', meeting: 'Created from a meeting', voice: 'Created from a voice note', dashboard: 'Added by the owner',
+};
 
 function historyWords(op: string, actor: 'agent' | 'owner', detail: string, source: TaskSource): string {
   const by = actor === 'owner' ? ' by the owner' : '';
@@ -276,7 +313,8 @@ export function taskDetail(db: Db, rawCode: string, now: Date): DashboardTaskDet
     .prepare('SELECT at, actor, op, detail FROM task_events WHERE task_id = ? ORDER BY at, id')
     .all(r.id) as { at: string; actor: 'ai' | 'human'; op: string; detail: string }[];
   return {
-    ...toRow(r),
+    ...toRow(r, readSentimentEnabled(db)),
+    priorityKeyword: r.priorityKeyword,
     sourceQuote: r.sourceQuote,
     sourceDate: r.sourceDate,
     sourceRevoked: r.sourceRevoked === 1,

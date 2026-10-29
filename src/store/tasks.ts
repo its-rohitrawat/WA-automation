@@ -3,11 +3,27 @@ import type { Db } from './db.ts';
 
 export const SIDES = ['us', 'client'] as const;
 export const CATEGORIES = ['design', 'development', 'content', 'payment', 'approval', 'other'] as const;
-export const PRIORITIES = ['high', 'medium', 'low'] as const;
+/** The priority every screen shows, most urgent first (migration v11). */
+export const PRIORITIES = ['critical', 'major', 'medium', 'low'] as const;
+/** The first priority column's values (migration v1). Still written, in step with the level: critical and major are high. */
+export const LEGACY_PRIORITIES = ['high', 'medium', 'low'] as const;
+export const SENTIMENTS = ['positive', 'neutral', 'negative', 'frustrated'] as const;
 export type Side = (typeof SIDES)[number];
 export type Category = (typeof CATEGORIES)[number];
 export type Priority = (typeof PRIORITIES)[number];
+export type LegacyPriority = (typeof LEGACY_PRIORITIES)[number];
+export type Sentiment = (typeof SENTIMENTS)[number];
+/** What set a task's priority: an owner's keyword in its messages, the AI, or a person (which locks it). */
+export type PrioritySource = 'keyword' | 'ai' | 'human';
 export type Status = 'open' | 'maybe_done' | 'done';
+
+export const legacyPriority = (p: Priority): LegacyPriority => (p === 'critical' || p === 'major' ? 'high' : p);
+
+/** Most urgent first (0 is critical). A task without a level (made before v11) ranks by its old priority: high as major. */
+export function priorityRank(t: Pick<TaskRow, 'priority' | 'legacyPriority'>): number {
+  const level = t.priority ?? (t.legacyPriority === 'high' ? 'major' : t.legacyPriority);
+  return PRIORITIES.indexOf(level);
+}
 
 /** Fields the AI may set and a human may lock. Names match the AI operation fields. */
 export const TASK_FIELDS = ['title', 'side', 'category', 'priority', 'assignedTo', 'askedBy', 'deadline', 'latestProgress'] as const;
@@ -17,7 +33,7 @@ const COLUMN: Record<TaskField, string> = {
   title: 'title',
   side: 'side',
   category: 'category',
-  priority: 'priority',
+  priority: 'priority_level',
   assignedTo: 'assigned_to',
   askedBy: 'asked_by',
   deadline: 'deadline',
@@ -31,7 +47,15 @@ export interface TaskRow {
   side: Side;
   title: string;
   category: Category;
-  priority: Priority;
+  /** null for a task made before priority levels (migration v11) until a keyword, the AI or a person sets one. */
+  priority: Priority | null;
+  /** The v1 column, kept in step with priority. */
+  legacyPriority: LegacyPriority;
+  prioritySource: PrioritySource | null;
+  /** The owner's keyword that set the priority, when a keyword did. */
+  priorityKeyword: string | null;
+  /** The client's mood about the task, while sentiment is switched on. */
+  sentiment: Sentiment | null;
   assignedTo: string | null;
   askedBy: string | null;
   raisedOn: string;
@@ -58,6 +82,10 @@ export interface NewTask {
   title: string;
   category: Category;
   priority: Priority;
+  /** Default 'ai'. */
+  prioritySource?: PrioritySource;
+  priorityKeyword?: string | null;
+  sentiment?: Sentiment | null;
   assignedTo: string | null;
   askedBy: string | null;
   raisedOn: string;
@@ -89,7 +117,11 @@ interface RawTask {
   side: Side;
   title: string;
   category: Category;
-  priority: Priority;
+  priority: LegacyPriority;
+  priority_level: Priority | null;
+  priority_source: PrioritySource | null;
+  priority_keyword: string | null;
+  sentiment: Sentiment | null;
   assigned_to: string | null;
   asked_by: string | null;
   raised_on: string;
@@ -118,7 +150,11 @@ function toRow(r: RawTask): TaskRow {
     side: r.side,
     title: r.title,
     category: r.category,
-    priority: r.priority,
+    priority: r.priority_level,
+    legacyPriority: r.priority,
+    prioritySource: r.priority_source,
+    priorityKeyword: r.priority_keyword,
+    sentiment: r.sentiment,
     assignedTo: r.assigned_to,
     askedBy: r.asked_by,
     raisedOn: r.raised_on,
@@ -154,11 +190,14 @@ export function getTaskByCode(db: Db, code: string): TaskRow | undefined {
 export function createTask(db: Db, t: NewTask, now: string): TaskRow {
   const code = nextTaskCode(db, t.clientId);
   const info = db
-    .prepare(`INSERT INTO tasks (code, client_id, side, title, category, priority, assigned_to, asked_by, raised_on, deadline, latest_progress,
-        source_quote, source_date, source_wa_id, origin, meeting_id, created_at, updated_at)
-      VALUES (@code, @clientId, @side, @title, @category, @priority, @assignedTo, @askedBy, @raisedOn, @deadline, @latestProgress,
-        @sourceQuote, @sourceDate, @sourceWaId, @origin, @meetingId, @now, @now)`)
-    .run({ ...t, meetingId: t.meetingId ?? null, code, now });
+    .prepare(`INSERT INTO tasks (code, client_id, side, title, category, priority, priority_level, priority_source, priority_keyword, sentiment,
+        assigned_to, asked_by, raised_on, deadline, latest_progress, source_quote, source_date, source_wa_id, origin, meeting_id, created_at, updated_at)
+      VALUES (@code, @clientId, @side, @title, @category, @legacy, @priority, @prioritySource, @priorityKeyword, @sentiment,
+        @assignedTo, @askedBy, @raisedOn, @deadline, @latestProgress, @sourceQuote, @sourceDate, @sourceWaId, @origin, @meetingId, @now, @now)`)
+    .run({
+      ...t, legacy: legacyPriority(t.priority), prioritySource: t.prioritySource ?? 'ai', priorityKeyword: t.priorityKeyword ?? null,
+      sentiment: t.sentiment ?? null, meetingId: t.meetingId ?? null, code, now,
+    });
   return getTaskById(db, Number(info.lastInsertRowid));
 }
 
@@ -169,18 +208,35 @@ export function listTasks(db: Db, clientId: number, statuses?: Status[]): TaskRo
   return rows.map(toRow);
 }
 
-/** Column names come from the fixed COLUMN map, never from input. */
-export function updateTaskFields(db: Db, id: number, fields: Partial<Record<TaskField, string | null>>, now: string, by: 'ai' | 'human'): void {
+/**
+ * Column names come from the fixed COLUMN map, never from input. A priority also writes the old column in step and what
+ * set it: a person, else the owner's keyword when keyword is given, else the AI.
+ */
+export function updateTaskFields(
+  db: Db, id: number, fields: Partial<Record<TaskField, string | null>>, now: string, by: 'ai' | 'human', keyword?: string,
+): void {
   const keys = TASK_FIELDS.filter((k) => k in fields);
   if (keys.length === 0) return;
   const params: Record<string, string | number | null> = { id, now };
   for (const k of keys) params[k] = fields[k] ?? null;
-  const sets = keys.map((k) => `${COLUMN[k]} = @${k}`).join(', ');
-  db.prepare(`UPDATE tasks SET ${sets}, updated_at = @now WHERE id = @id`).run(params);
+  const sets = keys.map((k) => `${COLUMN[k]} = @${k}`);
+  if (keys.includes('priority')) {
+    if (!(PRIORITIES as readonly unknown[]).includes(params.priority)) throw new Error('priority must be one of the levels');
+    sets.push('priority = @legacy', 'priority_source = @prioritySource', 'priority_keyword = @priorityKeyword');
+    params.legacy = legacyPriority(params.priority as Priority);
+    params.prioritySource = by === 'human' ? 'human' : keyword !== undefined ? 'keyword' : 'ai';
+    params.priorityKeyword = by === 'human' ? null : (keyword ?? null);
+  }
+  db.prepare(`UPDATE tasks SET ${sets.join(', ')}, updated_at = @now WHERE id = @id`).run(params);
   if (by === 'human') {
     const locked = new Set([...getTaskById(db, id).lockedFields, ...keys]);
     db.prepare('UPDATE tasks SET locked_fields = ? WHERE id = ?').run(JSON.stringify([...locked]), id);
   }
+}
+
+/** The client's mood about a task, as the AI judged it (only while sentiment is switched on). */
+export function setTaskSentiment(db: Db, id: number, sentiment: Sentiment, now: string): void {
+  db.prepare('UPDATE tasks SET sentiment = ?, updated_at = ? WHERE id = ?').run(sentiment, now, id);
 }
 
 /** A human status change is timestamped; the AI then needs newer evidence to change the status again. */

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { closeTask, editTask, reopenTask, unlockTask } from '../../src/cli/corrections.ts';
 import { ControlError } from '../../src/control/errors.ts';
+import { overview } from '../../src/control/queries.ts';
 import { listDashboardTasks, parseTaskQuery, taskDetail, TASK_LIMIT_MAX } from '../../src/control/taskQueries.ts';
 import type { Db } from '../../src/store/db.ts';
 import { insertMedia, messageRowId } from '../../src/store/media.ts';
@@ -57,12 +58,12 @@ describe('parseTaskQuery', () => {
 describe('listDashboardTasks', () => {
   it('returns the row shape, with the client and plain status', () => {
     const db = seededDb();
-    task(db, { title: 'Logo', assignedTo: 'Rahul', askedBy: 'Mr Sharma', deadline: '2026-10-25', priority: 'high' });
+    task(db, { title: 'Logo', assignedTo: 'Rahul', askedBy: 'Mr Sharma', deadline: '2026-10-25', priority: 'major' });
     expect(listDashboardTasks(db, q({}), now)).toEqual({
       total: 1,
       rows: [{
         code: 'SHA-001', title: 'Logo', client: { code: 'SHA', name: 'Sharma Interiors' }, side: 'us', owner: 'Rahul', askedBy: 'Mr Sharma',
-        deadline: '2026-10-25', status: 'open', overdue: false, priority: 'high', category: 'design', source: 'whatsapp', updatedAt: NOW,
+        deadline: '2026-10-25', status: 'open', overdue: false, priority: 'major', prioritySource: 'ai', sentiment: null, category: 'design', source: 'whatsapp', updatedAt: NOW,
       }],
     });
   });
@@ -109,12 +110,12 @@ describe('listDashboardTasks', () => {
 
   it('filters by client, owner (any case) and priority', () => {
     const db = seededDb();
-    const a = task(db, { assignedTo: 'Rahul', priority: 'high' });
+    const a = task(db, { assignedTo: 'Rahul', priority: 'major' });
     const b = task(db, { clientId: 2, assignedTo: 'rahul' });
     task(db, { assignedTo: 'Priya' });
     expect(codes(listDashboardTasks(db, q({ client: 'MEH' }), now))).toEqual([b]);
     expect(codes(listDashboardTasks(db, q({ owner: 'RAHUL', sort: 'code' }), now))).toEqual([b, a]);
-    expect(codes(listDashboardTasks(db, q({ priority: 'high' }), now))).toEqual([a]);
+    expect(codes(listDashboardTasks(db, q({ priority: 'major' }), now))).toEqual([a]);
     expect(listDashboardTasks(db, q({ client: 'XYZ' }), now)).toEqual({ total: 0, rows: [] });
   });
 
@@ -278,5 +279,82 @@ describe('listDashboardTasks review fixes', () => {
     const done = task(db, { deadline: '2026-10-01', status: 'done' });
     expect(codes(listDashboardTasks(db, q({ deadline: 'past' }), now))).toEqual([done]);
     expect(codes(listDashboardTasks(db, q({ status: 'overdue' }), now))).toEqual([]);
+  });
+
+  it('lists active clients only by default, as the Overview counts; removed=1 adds the removed clients\' tasks', () => {
+    const db = seededDb();
+    const sharma = task(db, { deadline: '2026-10-18' });
+    const mehta = task(db, { clientId: 2, deadline: '2026-10-18' });
+    db.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
+    expect(codes(listDashboardTasks(db, q({}), now))).toEqual([sharma]);
+    expect(codes(listDashboardTasks(db, q({ removed: '1' }), now)).sort()).toEqual([sharma, mehta].sort());
+    expect(() => q({ removed: 'yes' })).toThrowError(ControlError);
+  });
+
+  it('every Overview count equals the Tasks list its tile opens, with a removed client holding tasks in every bucket', () => {
+    const db = seededDb();
+    for (const clientId of [1, 2]) {
+      task(db, { clientId, deadline: '2026-10-18' }); // overdue
+      task(db, { clientId }); // open
+      task(db, { clientId, status: 'maybe_done' }); // review
+      const done = task(db, { clientId });
+      db.prepare("UPDATE tasks SET status = 'done', closed_on = '2026-10-17' WHERE code = ?").run(done);
+    }
+    db.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
+    const t = overview(db, now).tasks;
+    const total = (o: Record<string, string>) => listDashboardTasks(db, q(o), now).total;
+    expect(total({ status: 'overdue' })).toBe(t.overdue);
+    expect(total({ status: 'open' })).toBe(t.open);
+    expect(total({ status: 'review' })).toBe(t.review);
+    expect(total({ status: 'done', closed: '7d' })).toBe(t.doneThisWeek);
+    expect(t).toEqual({ open: 1, overdue: 1, review: 1, doneThisWeek: 1 });
+  });
+
+  it('closed=7d lists the done tasks closed today and the six days before (IST): the Overview\'s Done count, task for task', () => {
+    const db = seededDb();
+    const closedOn = (code: string, day: string) => db.prepare("UPDATE tasks SET status = 'done', closed_on = ? WHERE code = ?").run(day, code);
+    const today = task(db);
+    const sixth = task(db);
+    const older = task(db);
+    const reopened = task(db); // closed in the week, then reopened: not done, so not counted
+    task(db); // open
+    closedOn(today, '2026-10-19');
+    closedOn(sixth, '2026-10-13');
+    closedOn(older, '2026-10-12');
+    closedOn(reopened, '2026-10-15');
+    db.prepare("UPDATE tasks SET status = 'open' WHERE code = ?").run(reopened);
+    const r = listDashboardTasks(db, q({ status: 'done', closed: '7d' }), now);
+    expect(codes(r).sort()).toEqual([today, sixth].sort());
+    expect(r.total).toBe(overview(db, now).tasks.doneThisWeek);
+    expect(listDashboardTasks(db, q({ closed: '7d' }), now).total).toBe(2);
+    expect(() => q({ closed: '30d' })).toThrowError(ControlError);
+  });
+});
+
+describe('listDashboardTasks: priority levels and sentiment', () => {
+  const sentimentOn = (db: Db) => db.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', ?, 'o')").run(NOW);
+
+  it('filters and sorts by the four levels, a task without one last', () => {
+    const db = seededDb();
+    const low = task(db, { priority: 'low' });
+    const critical = task(db, { priority: 'critical' });
+    const old = task(db, { priority: 'major' });
+    db.prepare('UPDATE tasks SET priority_level = NULL, priority_source = NULL WHERE code = ?').run(old);
+    const major = task(db, { priority: 'major' });
+    expect(codes(listDashboardTasks(db, q({ sort: 'priority' }), now))).toEqual([critical, major, low, old]);
+    expect(codes(listDashboardTasks(db, q({ sort: 'priority', dir: 'desc' }), now))).toEqual([old, low, major, critical]);
+    expect(codes(listDashboardTasks(db, q({ priority: 'critical' }), now))).toEqual([critical]);
+    expect(listDashboardTasks(db, q({ priority: 'major' }), now).rows.map((r) => [r.code, r.priority])).toEqual([[major, 'major']]);
+    expect(listDashboardTasks(db, q({}), now).rows.find((r) => r.code === old)).toMatchObject({ priority: null, prioritySource: null });
+  });
+
+  it('sends a task\'s mood only while sentiment is switched on, and says what set the priority', () => {
+    const db = seededDb();
+    const code = task(db, { priority: 'critical', prioritySource: 'keyword', priorityKeyword: 'urgent', sentiment: 'frustrated' });
+    expect(listDashboardTasks(db, q({}), now).rows[0]).toMatchObject({ priority: 'critical', prioritySource: 'keyword', sentiment: null });
+    expect(taskDetail(db, code, now)).toMatchObject({ priorityKeyword: 'urgent', sentiment: null });
+    sentimentOn(db);
+    expect(listDashboardTasks(db, q({}), now).rows[0]).toMatchObject({ sentiment: 'frustrated' });
+    expect(taskDetail(db, code, now)).toMatchObject({ sentiment: 'frustrated' });
   });
 });

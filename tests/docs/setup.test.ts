@@ -326,7 +326,14 @@ describe('morning report documentation: short message with the tracker link (27 
   };
   /** A stand-in tracker view: active clients with the given open and overdue counts (none: no active clients). */
   const fakeView = (...clients: { open: number; overdue: number }[]): TrackerView =>
-    ({ clients: clients.map((c) => ({ client: { active: true }, usOpen: new Array(c.open).fill(null), clientOpen: [], overdue: c.overdue })) }) as unknown as TrackerView;
+    ({ clients: clients.map((c) => ({ client: { active: true }, usOpen: new Array(c.open).fill({ priority: 'medium' }), clientOpen: [], overdue: c.overdue })) }) as unknown as TrackerView;
+
+  it('gives the critical example exactly as the message reads', () => {
+    const t = (priority: string) => ({ priority });
+    const view = { clients: [{ client: { active: true }, usOpen: [t('critical'), t('critical'), t('medium')], clientOpen: [t('low'), t('major')], overdue: 2 }] } as unknown as TrackerView;
+    expect(report).toContain(`\`${buildShortMorningText(view, '2026-10-30', '…')}\``);
+    expect(buildShortMorningText(view, '2026-10-30', '…')).toBe("Good morning. 2 critical, 5 open tasks, 2 overdue. Today's tracker: …");
+  });
 
   it('describes the short message with the link and no attachment', () => {
     const example = buildShortMorningText(fakeView({ open: 3, overdue: 2 }, { open: 2, overdue: 0 }), '2026-10-30', 'https://drive.google.com/file/d/…/view');
@@ -902,5 +909,20 @@ describe('earlier messages of a newly approved group (Task 4, 28 Oct 2026)', () 
     expect(clients).toContain('`Last 7 days read · ${h.found} found`');
     expect(setup).toContain('within the daily spend cap');
     expect(setup).toContain('Removing the group stops it.');
+  });
+});
+
+describe('SETUP.md, choosing several groups at once', () => {
+  it('names the bar, its buttons and the failure reason as the screen and the agent say them', () => {
+    const setup = read('docs/SETUP.md');
+    const groups = read('src/web/public/views/groups.js');
+    const route = read('src/web/routes/groups.ts');
+    for (const text of ['Approve selected', 'Ignore selected', 'Show again', 'Select all']) {
+      expect(setup, text).toContain(`**${text}**`);
+      expect(groups, text).toContain(text);
+    }
+    expect(setup).toContain('"4 approved, 1 failed: No code could be made from its name…"');
+    expect(route).toContain("'No code could be made from its name. Approve it on its own to choose one.'");
+    expect(groups).toContain('${done.length} ${verb}, ${bad.length} failed');
   });
 });

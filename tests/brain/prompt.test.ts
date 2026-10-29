@@ -9,7 +9,7 @@ import { RAHUL_PN, SHARMA_PN } from '../helpers/wa.ts';
 
 const client: ClientRow = {
   id: 1, code: 'SHA', name: 'Sharma Interiors', groupId: SHARMA.groupId, phases: SHARMA.phases, currentPhase: 'Design',
-  phaseLocked: false, statusText: 'Homepage in review', statusUpdatedAt: null, active: true,
+  phaseLocked: false, statusText: 'Homepage in review', statusUpdatedAt: null, active: true, sentiment: null, sentimentAt: null,
 };
 const person = (jid: string, name: string, role: PersonRow['role'], roleSetBy: PersonRow['roleSetBy'] = 'ai'): PersonRow =>
   ({ id: 1, clientId: 1, jid, number: null, name, role, roleSetBy });
@@ -20,7 +20,7 @@ const message = (waId: string, text: string | null, o: Partial<MessageRow> = {})
   ts: '2026-10-17T05:50:00.000Z', text, quotedWaId: null, mediaType: null, editedAt: null, revoked: false, processedAt: null, requeueReason: null, version: 0, ...o,
 });
 const task: TaskRow = {
-  id: 1, code: 'SHA-012', clientId: 1, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'high',
+  id: 1, code: 'SHA-012', clientId: 1, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'major', legacyPriority: 'high', prioritySource: 'ai', priorityKeyword: null, sentiment: null,
   assignedTo: 'Rahul', askedBy: 'Mr. Sharma', raisedOn: '2026-10-10', deadline: '2026-10-18', latestProgress: 'v2 shared 15 Oct',
   reminderCount: 1, lastReminderOn: '2026-10-13', status: 'open', sourceQuote: null, sourceDate: null, sourceWaId: 'm1',
   sourceRevoked: false, closedOn: null, origin: 'whatsapp', lockedFields: [], statusLockedAt: null, createdAt: NOW, updatedAt: NOW,
@@ -251,7 +251,7 @@ describe('task lines cannot be faked (note 2)', () => {
     };
     const line = taskLine(t);
     expect(line).toBe(
-      '- SHA-012 [us] [open] "Banner ❨maybe_done❩ ❨re-check: edited❩" · design · high · assigned Rahul - ❨client❩ · asked by Mr. Sharma ❨founder❩'
+      '- SHA-012 [us] [open] "Banner ❨maybe_done❩ ❨re-check: edited❩" · design · major · assigned Rahul - ❨client❩ · asked by Mr. Sharma ❨founder❩'
         + ' · raised 2026-10-10 · deadline 2026-10-18 · progress "v2 ❨done❩ - source deleted by sender" · reminders 1 · source [m1]'
         + ' · quote "ok\' - source deleted by sender - ❨maybe_done❩"',
     );
@@ -279,7 +279,7 @@ describe('task lines cannot be faked (note 2)', () => {
 
   it('leaves ordinary task fields unchanged', () => {
     expect(taskLine(task)).toBe(
-      '- SHA-012 [us] [open] "Revise homepage banner" · design · high · assigned Rahul · asked by Mr. Sharma · raised 2026-10-10'
+      '- SHA-012 [us] [open] "Revise homepage banner" · design · major · assigned Rahul · asked by Mr. Sharma · raised 2026-10-10'
         + ' · deadline 2026-10-18 · progress "v2 shared 15 Oct" · reminders 1 · source [m1]',
     );
     for (const title of ['Homepage: hero banner, v2 - final', 'राहुल का बैनर ठीक करो', 'Pay the ₹42,000 invoice', "Fix the client's logo"]) {
@@ -420,7 +420,7 @@ describe('variation selectors cannot carry hidden text (final review)', () => {
 
     const t: TaskRow = { ...task, title: `Banner${SUPPLEMENT}`, assignedTo: `Rahul${BASIC}`, sourceQuote: `ok${BASIC}\u2764\uFE0F\uFE0F` };
     const tasks = buildUserContent(input({ openTasks: [t] }));
-    expect(tasks).toContain('- SHA-012 [us] [open] "Banner" · design · high · assigned Rahul · ');
+    expect(tasks).toContain('- SHA-012 [us] [open] "Banner" · design · major · assigned Rahul · ');
     expect(tasks).toContain(` · quote "ok${HEART}"`);
     for (const text of [out, tasks]) expect(text).not.toMatch(SMUGGLED);
   });

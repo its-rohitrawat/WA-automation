@@ -143,9 +143,9 @@ describe('clientDetail', () => {
     expect(d.openTasks).toHaveLength(d.counts.open);
     expect(d.openTasks.filter((t) => t.status === 'maybe_done')).toHaveLength(d.counts.review);
     expect(d.openTasks).toEqual([
-      { code: 'SHA-003', title: 'In review, overdue', assignedTo: null, deadline: '2026-10-20', status: 'maybe_done' },
-      { code: 'SHA-001', title: 'Overdue open', assignedTo: 'Ravi', deadline: '2026-10-27', status: 'open' },
-      { code: 'SHA-002', title: 'Due today', assignedTo: null, deadline: '2026-10-28', status: 'open' },
+      { code: 'SHA-003', title: 'In review, overdue', assignedTo: null, deadline: '2026-10-20', status: 'maybe_done', priority: 'medium', sentiment: null },
+      { code: 'SHA-001', title: 'Overdue open', assignedTo: 'Ravi', deadline: '2026-10-27', status: 'open', priority: 'medium', sentiment: null },
+      { code: 'SHA-002', title: 'Due today', assignedTo: null, deadline: '2026-10-28', status: 'open', priority: 'medium', sentiment: null },
     ]);
     expect(d.meetings).toEqual([
       { id: m2, startedAt: '2026-10-27T06:00:00.000Z', title: 'Sharma design review', status: 'queued' },

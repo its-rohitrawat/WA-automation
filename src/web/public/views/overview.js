@@ -49,15 +49,8 @@ export function renderOverview(me, status, ov, error) {
     return `${attentionBanner(status)}${hello}<p class="loading">${error ? 'The numbers could not be loaded. Trying again shortly.' : 'Loading the numbers…'}</p>`;
   }
   const t = ov.totals;
-  const kpis = [
-    ['Active clients', 'users', ov.clients, ov.clients === 1 ? 'One group approved' : `${ov.clients} groups approved`, 'rgba(37,211,102,.12)', ''],
-    ['Open tasks', 'task', t.open, 'Across every client', 'rgba(0,143,122,.16)', ''],
-    ['Overdue', 'alert', t.overdue, 'Deadline passed, not done', 'rgba(217,79,99,.16)', t.overdue > 0 ? 'alert' : ''],
-    ['Needs review', 'info', t.review, 'Marked maybe done', 'rgba(61,143,217,.16)', ''],
-    ['Done this week', 'ok', t.doneThisWeek, 'Closed since Monday', 'rgba(43,170,74,.16)', ''],
-  ];
   return `${attentionBanner(status)}${hello}
-  <div class="kpis">${kpis.map(([l, ic, n, d, glow, cls]) => `<div class="card kpi ${cls}" data-glow="${glow}"><div class="lab">${icon(String(ic), 17)}${esc(l)}</div><div class="num" data-count="${Number(n)}">0</div><div class="delta">${esc(d)}</div></div>`).join('')}</div>
+  <div class="kpis">${kpiTiles(ov.clients, t).map(kpiTile).join('')}</div>
   <div class="grid">
     ${monitor(status)}
     ${spend(status)}
@@ -73,6 +66,74 @@ export function renderOverview(me, status, ov, error) {
   </div>`;
 }
 
+/**
+ * @typedef {{ id: string, label: string, icon: string, n: number, delta: string, glow: string, cls: string,
+ *   go: string, query: string, info: string }} Kpi
+ */
+
+/**
+ * The five counts. Each opens the screen that lists what it counts, with that filter on (the Tasks screen's status
+ * filter splits tasks the way these counts do: control/queries.ts), and says in one sentence what the number means.
+ * @param {number} clients @param {Overview['totals']} t @returns {Kpi[]}
+ */
+export function kpiTiles(clients, t) {
+  return [
+    { id: 'clients', label: 'Active clients', icon: 'users', n: clients, delta: clients === 1 ? 'One group approved' : `${clients} groups approved`,
+      glow: 'rgba(37,211,102,.12)', cls: '', go: 'clients', query: '', info: 'Clients whose WhatsApp group the agent is reading now.' },
+    { id: 'open', label: 'Open tasks', icon: 'task', n: t.open, delta: 'Across every client', glow: 'rgba(0,143,122,.16)', cls: '',
+      go: 'tasks', query: '?status=open', info: 'Tasks still to do that are not past their deadline and not waiting for your review.' },
+    { id: 'overdue', label: 'Overdue', icon: 'alert', n: t.overdue, delta: 'Deadline passed, not done', glow: 'rgba(217,79,99,.16)', cls: t.overdue > 0 ? 'alert' : '',
+      go: 'tasks', query: '?status=overdue', info: 'Tasks past their deadline that are not done yet.' },
+    { id: 'review', label: 'Needs review', icon: 'info', n: t.review, delta: 'Marked maybe done', glow: 'rgba(61,143,217,.16)', cls: '',
+      go: 'tasks', query: '?status=review', info: 'Tasks the agent thinks may be done: check each one and close it or keep it open.' },
+    { id: 'done', label: 'Done this week', icon: 'ok', n: t.doneThisWeek, delta: 'Closed in the last 7 days', glow: 'rgba(43,170,74,.16)', cls: '',
+      go: 'tasks', query: '?status=done&closed=7d', info: 'Tasks closed in the last 7 days, today included.' },
+  ];
+}
+
+/** The info popover open on the Overview (its tile id), kept across the screen's refreshes. @type {string | null} */
+let openInfo = null;
+
+/**
+ * One count: the whole tile is a link to its screen (a real address, so a new tab works too); the "i" beside it is a
+ * separate button, never inside the link. Its sentence shows on hover, on keyboard focus and on a tap.
+ * @param {Kpi} k
+ */
+function kpiTile(k) {
+  const tip = `kpi-tip-${k.id}`;
+  const open = openInfo === k.id;
+  const href = `/dashboard/${k.go}${k.query}`;
+  return `<div class="card kpi ${k.cls}${open ? ' info-open' : ''}" data-glow="${k.glow}">
+    <a class="kpi-link" href="${esc(href)}" data-go="${esc(k.go)}"${k.query ? ` data-query="${esc(k.query)}"` : ''} aria-describedby="${tip}">
+      <span class="lab">${icon(k.icon, 17)}${esc(k.label)}</span><span class="num" data-count="${Number(k.n)}">0</span><span class="delta">${esc(k.delta)}</span></a>
+    <button class="kpi-i" type="button" data-kpi-info="${esc(k.id)}" aria-label="What ${esc(k.label)} means" aria-expanded="${open}" aria-controls="${tip}">${icon('info', 14)}</button>
+    <span class="kpi-tip" role="tooltip" id="${tip}">${esc(k.info)}</span></div>`;
+}
+
+/**
+ * A click on the Overview's "i" buttons: opens that tile's sentence (a tap on a phone) or closes it; a click anywhere
+ * else closes an open one. True when the click was an "i" (the caller does nothing more with it). @param {Element} target
+ */
+export function kpiInfoClick(target) {
+  const b = /** @type {HTMLElement | null} */ (target.closest('[data-kpi-info]'));
+  const next = b ? (openInfo === b.dataset.kpiInfo ? null : b.dataset.kpiInfo ?? null) : null;
+  if (next === openInfo) return Boolean(b);
+  openInfo = next;
+  for (const tile of document.querySelectorAll('.kpi')) {
+    const id = tile.querySelector('[data-kpi-info]')?.getAttribute('data-kpi-info');
+    tile.classList.toggle('info-open', id === openInfo);
+    tile.querySelector('[data-kpi-info]')?.setAttribute('aria-expanded', String(id === openInfo));
+  }
+  return Boolean(b);
+}
+
+/** Esc closes an open info sentence. True when one was open. */
+export function closeKpiInfo() {
+  if (openInfo === null) return false;
+  kpiInfoClick(document.body);
+  return true;
+}
+
 /** @param {Status | null} status */
 function monitor(status) {
   const p = status ? problems(status) : [];
@@ -83,7 +144,8 @@ function monitor(status) {
         <div><canvas id="ecg" aria-hidden="true"></canvas>
           <div class="eyebrow mon-eyebrow">Uptime · last 30 days</div>
           <div class="strip" data-uptime-strip aria-hidden="true"></div>
-          <p class="strip-note" data-uptime-note>Loading the uptime history…</p></div>
+          <p class="strip-note" data-uptime-note>Loading the uptime history…</p>
+          <div class="outages" data-uptime-outages hidden><div class="eyebrow mon-eyebrow">Recent outages</div><ul></ul></div></div>
         <div class="readouts">
           <div class="readout"><div class="t">Status</div><div class="v">${esc(word)}</div><div class="s">${esc(status ? (p.length ? p.length === 1 ? '1 part needs you' : `${p.length} parts need you` : 'every part answering') : '…')}</div></div>
           <div class="readout"><div class="t">Uptime 30 d</div><div class="v" data-uptime-ratio>—</div><div class="s" data-uptime-source>…</div></div>
@@ -141,14 +203,24 @@ export function afterOverview(root, status, opts = { animate: true }) {
   void fillUptime(root);
 }
 
-/** @typedef {{ source: 'uptimerobot' | 'agent', ratios: { d30: number | null }, days: { day: string, downMinutes: number, longestMinutes: number }[], knownSinceDay: string | null }} Uptime */
+/**
+ * @typedef {{ source: 'uptimerobot' | 'agent', ratios: { d30: number | null }, days: { day: string, downMinutes: number, longestMinutes: number, outages?: string[] }[],
+ *   outages?: { text?: string }[], knownSinceDay: string | null }} Uptime
+ */
+
+/** How many outages the list under the strip shows, newest first. */
+const OUTAGES_SHOWN = 3;
 
 /** How long one /uptime answer is reused across the Overview's redraws. */
 const UPTIME_TTL_MS = 5 * 60_000;
 /** @type {{ at: number, data: Promise<Uptime> } | null} */
 let uptimeCache = null;
 
-/** The 30-day strip and ratio: one square a day, green when never down, amber under an hour down, red from an hour. @param {HTMLElement} root */
+/**
+ * The 30-day strip and ratio: one square a day, green when never down, amber under an hour down, red from an hour. Each
+ * square's tip and the list under the strip give the outages' exact times ("Off from 02:14 to 06:33 (4 h 19 min)"),
+ * worded by the agent. @param {HTMLElement} root
+ */
 async function fillUptime(root) {
   const strip = $('[data-uptime-strip]', root);
   const note = $('[data-uptime-note]', root);
@@ -169,7 +241,8 @@ async function fillUptime(root) {
     const i = document.createElement('i');
     const unknown = known === null ? u.source === 'agent' : d.day < known;
     i.className = unknown ? 'u' : d.downMinutes === 0 ? '' : d.downMinutes < 60 ? 'w' : 'd';
-    i.setAttribute('data-tip', unknown ? `${d.day} · not recorded` : d.downMinutes === 0 ? `${d.day} · up all day` : `${d.day} · down ${d.downMinutes} min`);
+    const times = (d.outages ?? []).filter((x) => typeof x === 'string');
+    i.setAttribute('data-tip', unknown ? `${d.day} · not recorded` : d.downMinutes === 0 ? `${d.day} · up all day` : [`${d.day} · down ${d.downMinutes} min`, ...times].join(' · '));
     return i;
   }));
   const ratio = $('[data-uptime-ratio]', root);
@@ -179,6 +252,16 @@ async function fillUptime(root) {
   const firstDay = u.days[0]?.day;
   note.textContent = known !== null && firstDay !== undefined && known > firstDay ? `Recorded since ${known}.` : '';
   note.hidden = note.textContent === '';
+  const list = $('[data-uptime-outages]', root);
+  const texts = (u.outages ?? []).map((x) => x?.text).filter((t) => typeof t === 'string').slice(0, OUTAGES_SHOWN);
+  if (list) {
+    $('ul', list)?.replaceChildren(...texts.map((t) => {
+      const li = document.createElement('li');
+      li.textContent = t;
+      return li;
+    }));
+    list.hidden = texts.length === 0;
+  }
 }
 
 let ecgRaf = 0;

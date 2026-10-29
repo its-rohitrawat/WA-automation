@@ -37,8 +37,8 @@ describe('SettingsStore.get', () => {
   it('takes the .env defaults when the dashboard changed nothing', () => {
     const { store } = setup({ env: { REPORT_ENABLED: 'true', REPORT_RECIPIENT: NUMBER, REPORT_DAYS: 'mon-sat' } });
     expect(store.get()).toEqual({
-      reportEnabled: true, reportDays: 'mon-sat', reportRecipient: NUMBER,
-      source: { reportEnabled: 'env', reportDays: 'env', reportRecipient: 'env' },
+      reportEnabled: true, reportDays: 'mon-sat', reportRecipient: NUMBER, reportTime: '06:00',
+      dashboardSend: false, source: { reportEnabled: 'env', reportDays: 'env', reportRecipient: 'env', reportTime: 'env', dashboardSend: 'env' },
     });
     expect(setup().store.get()).toMatchObject({ reportEnabled: false, reportDays: 'weekdays', reportRecipient: undefined });
   });
@@ -48,8 +48,8 @@ describe('SettingsStore.get', () => {
     store.set('reportDays', 'daily', OWNER, audit);
     store.set('reportEnabled', false, OWNER, audit);
     expect(store.get()).toEqual({
-      reportEnabled: false, reportDays: 'daily', reportRecipient: NUMBER,
-      source: { reportEnabled: 'dashboard', reportDays: 'dashboard', reportRecipient: 'env' },
+      reportEnabled: false, reportDays: 'daily', reportRecipient: NUMBER, reportTime: '06:00',
+      dashboardSend: false, source: { reportEnabled: 'dashboard', reportDays: 'dashboard', reportRecipient: 'env', reportTime: 'env', dashboardSend: 'env' },
     });
   });
 
@@ -59,16 +59,34 @@ describe('SettingsStore.get', () => {
     put.run('reportDays', '"sundays"', NOW, OWNER);
     put.run('reportEnabled', 'not json', NOW, OWNER);
     put.run('reportRecipient', '"12345"', NOW, OWNER);
+    put.run('reportTime', '"7:30"', NOW, OWNER);
     expect(store.get()).toEqual({
-      reportEnabled: false, reportDays: 'mon-sat', reportRecipient: undefined,
-      source: { reportEnabled: 'env', reportDays: 'env', reportRecipient: 'env' },
+      reportEnabled: false, reportDays: 'mon-sat', reportRecipient: undefined, reportTime: '06:00',
+      dashboardSend: false, source: { reportEnabled: 'env', reportDays: 'env', reportRecipient: 'env', reportTime: 'env', dashboardSend: 'env' },
     });
   });
 
-  it('builds the scheduler settings with the .env send time and deadline', () => {
+  it('builds the scheduler settings with the .env send time and deadline when the dashboard set no time', () => {
     const { store, audit } = setup({ env: { REPORT_TIME: '07:00', REPORT_DEADLINE: '11:00', REPORT_RECIPIENT: NUMBER } });
     store.set('reportEnabled', true, OWNER, audit);
     expect(store.reportSettings()).toEqual({ enabled: true, time: '07:00', deadline: '11:00', days: 'weekdays' });
+  });
+});
+
+describe('SettingsStore: sending from the dashboard (Open chat)', () => {
+  it('is off by default with no .env value, switches on and off from the dashboard, audited each time', () => {
+    const { db, store, audits, audit } = setup({ env: { REPORT_RECIPIENT: NUMBER } });
+    expect(store.get().dashboardSend).toBe(false);
+    expect(store.view().dashboardSend).toBe(false);
+    store.set('dashboardSend', true, OWNER, audit);
+    expect(store.view()).toMatchObject({ dashboardSend: true, source: { dashboardSend: 'dashboard' } });
+    store.set('dashboardSend', false, OWNER, audit);
+    expect(rows(db)).toEqual([{ k: 'dashboardSend', v: 'false', updatedAt: NOW, updatedBy: OWNER }]);
+    expect(audits).toEqual([
+      { actor: OWNER, event: 'settings.dashboardSend', kind: 'config', detail: 'Sending from the dashboard switched on' },
+      { actor: OWNER, event: 'settings.dashboardSend', kind: 'config', detail: 'Sending from the dashboard switched off' },
+    ]);
+    expect(refusal(() => store.set('dashboardSend', 'true', OWNER, audit))).toMatchObject({ status: 422 });
   });
 });
 
@@ -97,8 +115,8 @@ describe('SettingsStore.set', () => {
     expect(audits).toEqual([{ actor: OWNER, event: 'settings.reportRecipient', kind: 'config', detail: 'Morning briefing number changed to …9999' }]);
     expect(JSON.stringify(audits)).not.toContain('70123');
     expect(store.view()).toEqual({
-      reportEnabled: false, reportDays: 'weekdays', recipientMasked: '…9999', sendAt: '06:00', deadline: '12:00',
-      source: { reportEnabled: 'env', reportDays: 'env', reportRecipient: 'dashboard' },
+      reportEnabled: false, reportDays: 'weekdays', recipientMasked: '…9999', sendAt: '06:00', deadline: '12:00', nextReport: null,
+      dashboardSend: false, source: { reportEnabled: 'env', reportDays: 'env', reportRecipient: 'dashboard', reportTime: 'env', dashboardSend: 'env' },
     });
     expect(JSON.stringify(store.view())).not.toContain(OTHER);
   });
@@ -108,7 +126,8 @@ describe('SettingsStore.set', () => {
     const bad: [string, unknown, number][] = [
       ['reportDays', 'sundays', 422], ['reportDays', 1, 422], ['reportEnabled', 'true', 422], ['reportEnabled', 1, 422],
       ['reportRecipient', '9812345678', 422], ['reportRecipient', '911234567890', 422], ['reportRecipient', 919812345678, 422],
-      ['reportRecipient', '91 98123 4567x', 422], ['reportRecipient', '', 422], ['dailySpendCap', 50, 422], ['reportTime', '05:00', 422],
+      ['reportRecipient', '91 98123 4567x', 422], ['reportRecipient', '', 422], ['dailySpendCap', 50, 422], ['reportDeadline', '13:00', 422],
+      ['reportTimeToday', '05:00', 422], ['reportTime', '25:00', 422],
     ];
     for (const [key, value, status] of bad) {
       const e = refusal(() => store.set(key, value, OWNER, audit));

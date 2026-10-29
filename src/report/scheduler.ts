@@ -7,7 +7,7 @@ import {
 } from '../store/reports.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
-import { istDate, istTime } from '../util/time.ts';
+import { istDate, istDayLabel, istTime } from '../util/time.ts';
 import { buildShortMorningText, trackerLink } from './morningReport.ts';
 import type { ReportDays, ReportHealth, ReportSender, ReportSettings, SenderState, SendResult } from './types.ts';
 
@@ -122,6 +122,36 @@ export function describeReport(row: ReportRow | undefined, now: Date, settings: 
     }
   })();
   return { text, warning: unknown ? UNKNOWN_WARNING : (SENDER_WARNINGS[sender] ?? null) };
+}
+
+/**
+ * When the next report goes out, for the Automations screen: "today 07:30", "today, due now", "tomorrow 07:30" or
+ * "Mon 3 Nov, 07:30". settings.time is today's time (a time changed after it had passed starts the next day, see
+ * SettingsStore), laterTime the one for the days after. Null while the briefing is off. Pure: reads nothing.
+ */
+export function nextReport(row: ReportRow | undefined, now: Date, settings: ReportSettings, laterTime: string = settings.time): string | null {
+  if (!settings.enabled) return null;
+  const today = istDate(now);
+  const hm = istTime(now);
+  // Today is still to come only before the deadline, with no row on a report day or a retry row. A row sent, skipped or
+  // unknown (a stale 'sending' one too) is done with: the next report is on a later day.
+  if (hm < settings.deadline && !isStaleSending(row, now)) {
+    if (row?.status === 'sending') return 'today, sending now';
+    let due: string | undefined;
+    if (!row && isReportDay(today, settings.days)) due = settings.time;
+    if (row?.status === 'retry') {
+      const next = new Date(row.nextAttemptAt ?? row.updatedAt);
+      // The scheduler tries again once the wait is over and today's time has come.
+      if (istDate(next) === today) due = istTime(next) > settings.time ? istTime(next) : settings.time;
+    }
+    if (due !== undefined && due < settings.deadline) return due > hm ? `today ${due}` : 'today, due now';
+  }
+  for (let i = 1; i <= 7; i++) {
+    const date = new Date(Date.parse(`${today}T00:00:00Z`) + i * 86_400_000).toISOString().slice(0, 10);
+    if (!isReportDay(date, settings.days)) continue;
+    return i === 1 ? `tomorrow ${laterTime}` : `${istDayLabel(new Date(`${date}T12:00:00+05:30`))}, ${laterTime}`;
+  }
+  return null; // unreachable: every REPORT_DAYS value has a report day each week
 }
 
 /** What the report sends: the short text with the tracker link. No attachment. */

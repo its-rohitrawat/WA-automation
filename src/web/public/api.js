@@ -66,6 +66,41 @@ export async function post(path, body, opts = {}) {
 }
 
 /**
+ * POSTs JSON with the CSRF token and reads the answer as it streams: one JSON object per line, each handed to onEvent
+ * as it arrives (the assistant's answers). An error status throws ApiError, as post() does.
+ * @param {string} path @param {unknown} body @param {(e: any) => void} onEvent
+ */
+export async function postLines(path, body, onEvent) {
+  const res = await fetch(BASE + path, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { Accept: 'application/x-ndjson, application/json', 'Content-Type': 'application/json', 'X-CSRF-Token': csrf ?? '' },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!res.ok || !res.body) {
+    await parse(res);
+    throw new ApiError(res.status, 'http_' + res.status, 'Something went wrong.');
+  }
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buf = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += value;
+    for (let i = buf.indexOf('\n'); i >= 0; i = buf.indexOf('\n')) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      if (!line) continue;
+      try {
+        onEvent(JSON.parse(line));
+      } catch {
+        // a line that is not JSON is skipped
+      }
+    }
+  }
+}
+
+/**
  * The signed-in owner, or null when there is no session (401). Keeps the CSRF token in memory.
  * @returns {Promise<{ email: string, name: string, signedInAt: string, expiresAt: string } | null>}
  */

@@ -4,7 +4,8 @@ import type { Db } from '../store/db.ts';
 import { backfillStatus, listBackfills, type BackfillState, type BackfillStatus } from '../store/historyBackfill.ts';
 import type { MeetingStatus } from '../store/meetings.ts';
 import { lastActivity } from '../store/messages.ts';
-import type { Status } from '../store/tasks.ts';
+import { readSentimentEnabled } from '../config/prioritySettings.ts';
+import type { Priority, Sentiment, Status } from '../store/tasks.ts';
 import { istDate, istWeekday } from '../util/time.ts';
 
 // The dashboard's Clients screen (D2): one card per active client and the client drawer. Counts, names, dates and task
@@ -56,6 +57,10 @@ export interface ClientOpenTask {
   assignedTo: string | null;
   deadline: string | null;
   status: Exclude<Status, 'done'>;
+  /** null for a task from before priority levels. */
+  priority: Priority | null;
+  /** The client's mood about the task; null while sentiment is off. */
+  sentiment: Sentiment | null;
 }
 
 export interface ClientMeeting {
@@ -101,6 +106,8 @@ export interface ClientActivity {
 }
 
 export interface ClientDetail extends ClientCard {
+  /** The client's mood in its latest batch that judged it, and when; null while sentiment is off or before any. */
+  sentiment: { mood: Sentiment; at: string | null } | null;
   /** The tasks counted as open, deadline first (none last), then by task number. */
   openTasks: ClientOpenTask[];
   /** Meetings matched to the client, newest first (at most MEETINGS_LIMIT). */
@@ -126,10 +133,23 @@ const UNPRINTABLE = /[\p{Cc}\u2028\u2029\u200B\u200E\u200F\u202A-\u202E\u2066-\u
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 /** One line of at most max visible characters (whole graphemes: never half an emoji or a conjunct), "…" when cut. */
-function oneLine(text: string | null, max = MESSAGE_CHARS): string {
+export function oneLine(text: string | null, max = MESSAGE_CHARS): string {
   const s = (text ?? '').replace(UNPRINTABLE, ' ').replace(/\s+/g, ' ').trim();
   const parts = Array.from(graphemes.segment(s), (g) => g.segment);
   return parts.length > max ? `${parts.slice(0, max - 1).join('').trimEnd()}…` : s;
+}
+
+/** The kind a stored message shows as: its media's kind, else its message type, else text. Shared with Open chat. */
+export function messageKind(kind: string | null, mediaType: string | null): ClientMessage['kind'] {
+  return (kind && MEDIA_KINDS.has(kind) ? kind
+    : mediaType && (MEDIA_KINDS.has(mediaType) || OTHER_KINDS.has(mediaType)) ? mediaType : mediaType ? 'other' : 'text') as ClientMessage['kind'];
+}
+
+/** The sender as shown: the saved name, cleaned, never one holding a phone number; else Founder or Someone. Shared with Open chat. */
+export function senderLabel(name: string | null, fromMe: boolean): string {
+  // Cleaned first, so marks around a number can't hide it.
+  const n = oneLine(name, SENDER_CHARS);
+  return n && !HAS_NUMBER.test(n) ? n : fromMe ? 'Founder' : 'Someone';
 }
 
 /** What the drawer shows about the client's group (see ClientActivity). Parameterised reads only. */
@@ -164,11 +184,8 @@ export function clientActivity(db: Db, c: ClientRow, now: Date, quietMinutes: nu
       kind: string | null; seconds: number | null; mediaStatus: string | null; hasText: number | null;
     }[];
   const latest = rows.map((r): ClientMessage => {
-    const kind = (r.kind && MEDIA_KINDS.has(r.kind) ? r.kind
-      : r.mediaType && (MEDIA_KINDS.has(r.mediaType) || OTHER_KINDS.has(r.mediaType)) ? r.mediaType : r.mediaType ? 'other' : 'text') as ClientMessage['kind'];
-    // Cleaned first, so marks around a number can't hide it; a name holding a phone number is never shown.
-    const name = oneLine(r.name, SENDER_CHARS);
-    const sender = name && !HAS_NUMBER.test(name) ? name : r.fromMe ? 'Founder' : 'Someone';
+    const kind = messageKind(r.kind, r.mediaType);
+    const sender = senderLabel(r.name, r.fromMe === 1);
     const audio = kind === 'voice' || kind === 'audio';
     return {
       sender, kind, text: oneLine(r.text), seconds: audio && Number.isInteger(r.seconds) ? r.seconds : null,
@@ -287,15 +304,18 @@ export function clientDetail(db: Db, code: string, now: Date, groupNames?: Reado
   const activity = clientActivity(db, c, now, quietMinutes);
   const pulse = { pending: activity.pending, lastReadAt: activity.lastBatch?.at ?? null, quietMinutes };
   const base = card(c, countsForClient(db, now, c.id), new Map([[c.id, lastActivity(db, c.id)]]), sheetNames(db), groupNames, backfillStatus(db, c.id, now), pulse);
-  const openTasks = db
-    .prepare(`SELECT code, title, assigned_to AS assignedTo, deadline, status FROM tasks
+  // Sentiment is shown only while it is switched on: off, none leaves here.
+  const moods = readSentimentEnabled(db);
+  const openTasks = (db
+    .prepare(`SELECT code, title, assigned_to AS assignedTo, deadline, status, priority_level AS priority, sentiment FROM tasks
       WHERE client_id = ? AND status <> 'done' ORDER BY deadline IS NULL, deadline, id`)
-    .all(c.id) as ClientOpenTask[];
+    .all(c.id) as ClientOpenTask[]).map((t) => (moods ? t : { ...t, sentiment: null }));
   const meetings = db
     .prepare('SELECT id, started_at AS startedAt, title, status FROM meetings WHERE client_id = ? ORDER BY started_at DESC, id DESC LIMIT ?')
     .all(c.id, MEETINGS_LIMIT) as ClientMeeting[];
   const batch = db
     .prepare("SELECT started_at AS startedAt, finished_at AS finishedAt FROM batches WHERE client_id = ? AND status <> 'failed' ORDER BY id DESC LIMIT 1")
     .get(c.id) as { startedAt: string; finishedAt: string | null } | undefined;
-  return { ...base, openTasks, meetings, lastSyncAt: batch ? (batch.finishedAt ?? batch.startedAt) : null, activity };
+  const sentiment = moods && c.sentiment ? { mood: c.sentiment, at: c.sentimentAt } : null;
+  return { ...base, sentiment, openTasks, meetings, lastSyncAt: batch ? (batch.finishedAt ?? batch.startedAt) : null, activity };
 }

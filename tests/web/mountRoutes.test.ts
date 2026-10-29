@@ -26,7 +26,7 @@ function deps(db: ReturnType<typeof seededDb>, clock: ReturnType<typeof manualCl
   const never = {} as never;
   return {
     db, clock, log: silentLogger(), control: never, spend: new SpendGuard({ db, clock, capUsd: 10 }) as never, health: never,
-    voiceLocal: true, uptime: { log: new UptimeLog(db, clock) }, ownerEmails: [OWNER], settings: never,
+    voiceLocal: true, uptime: { log: new UptimeLog(db, clock) }, ownerEmails: [OWNER], settings: never, priority: never,
     groups: never, clients: never, google: never, actions: never,
     links: { start: (o: { target: string }) => (started.push(o.target), { id: 'a'.repeat(32), target: o.target }) } as never,
   };

@@ -1,5 +1,6 @@
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { GatewayLike, GatewayState, GatewayStatus, HistoryAnchor, HistoryAnswer } from './gateway.ts';
+import type { GroupSendSocket } from './groupSend.ts';
 import type { NormalizedEvent } from './normalize.ts';
 
 // Holds the founder's WhatsApp gateway so the dashboard can replace it in place (a relink) without restarting the
@@ -61,6 +62,13 @@ export class SwitchableGateway implements GatewayLike {
     const inner = this.#inner;
     if (!inner?.fetchHistory || inner.status().state !== 'open') return false;
     return inner.fetchHistory(groupId, anchor, count);
+  }
+
+  /** The current gateway's socket for an approved group (groupSend.ts); null without one, or while it is not open. */
+  groupSocket(groupId: string): GroupSendSocket | null {
+    const inner = this.#inner;
+    if (!inner?.groupSocket || inner.status().state !== 'open') return null;
+    return inner.groupSocket(groupId);
   }
 
   status(): GatewayStatus {

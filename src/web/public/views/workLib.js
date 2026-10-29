@@ -6,11 +6,15 @@ const IST = 'Asia/Kolkata';
 
 export const TASK_STATUSES = ['overdue', 'open', 'review', 'done'];
 export const TASK_DEADLINES = ['past', 'week', 'none'];
-export const TASK_PRIORITIES = ['high', 'medium', 'low'];
-export const TASK_SORTS = ['deadline', 'code', 'client', 'owner', 'status'];
+export const TASK_PRIORITIES = ['critical', 'major', 'medium', 'low'];
+export const TASK_SORTS = ['deadline', 'code', 'client', 'owner', 'status', 'priority'];
+/** closed=7d: closed in the last 7 days (the Overview's Done count). */
+export const TASK_CLOSED = ['7d'];
+/** removed=1: also the tasks of removed clients (left out, active clients only, as the Overview counts). */
+export const TASK_REMOVED = ['1'];
 
 /**
- * @typedef {{ q?: string, client?: string, status?: string, owner?: string, deadline?: string, priority?: string, sort: string, dir: 'asc' | 'desc' }} TaskFilter
+ * @typedef {{ q?: string, client?: string, status?: string, owner?: string, deadline?: string, priority?: string, closed?: string, removed?: string, sort: string, dir: 'asc' | 'desc' }} TaskFilter
  */
 
 /** The Tasks screen's filters from the address's query: unknown values are dropped. @param {string} search @returns {TaskFilter} */
@@ -35,6 +39,10 @@ export function taskQueryFromSearch(search) {
   if (deadline) out.deadline = deadline;
   const priority = pick('priority', TASK_PRIORITIES);
   if (priority) out.priority = priority;
+  const closed = pick('closed', TASK_CLOSED);
+  if (closed) out.closed = closed;
+  const removed = pick('removed', TASK_REMOVED);
+  if (removed) out.removed = removed;
   out.sort = pick('sort', TASK_SORTS) ?? 'deadline';
   out.dir = p.get('dir') === 'desc' ? 'desc' : 'asc';
   return out;
@@ -43,7 +51,7 @@ export function taskQueryFromSearch(search) {
 /** The query for these filters: "" when nothing is set; the default sort is left out. @param {TaskFilter} f */
 export function taskQueryToSearch(f) {
   const p = new URLSearchParams();
-  for (const k of /** @type {const} */ (['q', 'client', 'status', 'owner', 'deadline', 'priority'])) {
+  for (const k of /** @type {const} */ (['q', 'client', 'status', 'owner', 'deadline', 'priority', 'closed', 'removed'])) {
     const v = f[k];
     if (v) p.set(k, v);
   }
@@ -69,8 +77,35 @@ const TASK_PILLS = {
 /** A task status's pill: its class (the colour) and its word (status is never shown by colour alone). @param {string} s */
 export const taskPill = (s) => TASK_PILLS[s] ?? { cls: 'p-muted', label: 'Unknown' };
 
+/** @type {Record<string, { cls: string, label: string }>} */
+const PRIORITY_PILLS = {
+  critical: { cls: 'p-critical', label: 'Critical' }, major: { cls: 'p-major', label: 'Major' }, medium: { cls: 'p-medium', label: 'Medium' },
+  low: { cls: 'p-low', label: 'Low' },
+};
+/**
+ * A task priority's pill (colour and word). A task from before priority levels has none: "—", in a muted pill.
+ * @param {string | null | undefined} p
+ */
+export const priorityPill = (p) => (p && PRIORITY_PILLS[p]) || { cls: 'p-muted', label: '—' };
+
+/** @type {Record<string, string>} */
+const MOOD_WORDS = { positive: 'Positive', neutral: 'Neutral', negative: 'Negative', frustrated: 'Frustrated' };
+/**
+ * The client's mood as a small label: its word and class, or null when there is none (sentiment off, or not judged).
+ * @param {string | null | undefined} s @returns {{ cls: string, label: string } | null}
+ */
+export const moodLabel = (s) => (s && MOOD_WORDS[s] ? { cls: `mood mood-${s}`, label: MOOD_WORDS[s] } : null);
+
+/** What set a priority, for the task drawer. @param {string | null | undefined} source @param {string | null | undefined} keyword */
+export function prioritySourceText(source, keyword) {
+  if (source === 'keyword') return keyword ? `from the keyword "${keyword}"` : 'from a keyword';
+  if (source === 'human') return 'set by the owner';
+  if (source === 'ai') return 'set by the agent';
+  return 'not set yet';
+}
+
 /** @type {Record<string, { icon: string, label: string }>} */
-const SOURCES = { whatsapp: { icon: 'bubble', label: 'WhatsApp' }, meeting: { icon: 'video', label: 'Meeting' }, voice: { icon: 'mic', label: 'Voice note' } };
+const SOURCES = { whatsapp: { icon: 'bubble', label: 'WhatsApp' }, meeting: { icon: 'video', label: 'Meeting' }, voice: { icon: 'mic', label: 'Voice note' }, dashboard: { icon: 'user', label: 'Added by you' } };
 /** @param {string} s */
 export const sourceLabel = (s) => SOURCES[s] ?? SOURCES.whatsapp;
 

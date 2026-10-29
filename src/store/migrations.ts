@@ -333,4 +333,46 @@ CREATE INDEX task_events_task ON task_events(task_id, at, id);
 ALTER TABLE uptime_log ADD COLUMN reason TEXT CHECK (reason IS NULL OR length(reason) BETWEEN 1 AND 100);
 `,
   },
+  {
+    // Priority and sentiment (29 Oct 2026). priority_level is the four-level priority every screen shows; the old
+    // priority column (high/medium/low, NOT NULL) stays and is kept in step (critical and major are high), so nothing
+    // that reads it changes. priority_source says what set the level, priority_keyword the owner's keyword that did.
+    // sentiment: the client's mood about a task, and the client's mood in its latest batch. Tasks from before this stay
+    // without a level ("—") until a keyword or the AI sets one. Additive only.
+    version: 11,
+    sql: `
+ALTER TABLE tasks ADD COLUMN priority_level TEXT CHECK (priority_level IS NULL OR priority_level IN ('critical', 'major', 'medium', 'low'));
+ALTER TABLE tasks ADD COLUMN priority_source TEXT CHECK (priority_source IS NULL OR priority_source IN ('keyword', 'ai', 'human'));
+ALTER TABLE tasks ADD COLUMN priority_keyword TEXT CHECK (priority_keyword IS NULL OR length(priority_keyword) BETWEEN 1 AND 200);
+ALTER TABLE tasks ADD COLUMN sentiment TEXT CHECK (sentiment IS NULL OR sentiment IN ('positive', 'neutral', 'negative', 'frustrated'));
+ALTER TABLE clients ADD COLUMN sentiment TEXT CHECK (sentiment IS NULL OR sentiment IN ('positive', 'neutral', 'negative', 'frustrated'));
+ALTER TABLE clients ADD COLUMN sentiment_at TEXT;
+`,
+  },
+  {
+    // Open chat (owner request, 29 Oct 2026): the dashboard's messages to an approved group, one row per message the
+    // owner confirmed, keyed by the browser's uuid so a repeated request never sends twice. The row is claimed before
+    // anything is sent and marked sending before WhatsApp is asked; sent, failed (surely not sent) or unknown (it may
+    // have gone) after. Unknown is never retried. wa_id: WhatsApp's id of the sent message, which the founder's own copy
+    // comes back with. It comes after v11 (priority and sentiment). Additive only.
+    version: 12,
+    sql: `
+CREATE TABLE outbox (
+  id INTEGER PRIMARY KEY,
+  uuid TEXT NOT NULL UNIQUE CHECK (length(uuid) = 36),
+  client_id INTEGER NOT NULL REFERENCES clients(id),
+  text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 4096),
+  reply_to INTEGER REFERENCES messages(id),
+  state TEXT NOT NULL CHECK (state IN ('claimed', 'sending', 'sent', 'failed', 'unknown')),
+  wa_id TEXT,
+  error_code TEXT CHECK (error_code IS NULL OR length(error_code) BETWEEN 1 AND 60),
+  actor TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  attempted_at TEXT,
+  finished_at TEXT
+);
+CREATE INDEX outbox_client ON outbox(client_id, created_at);
+CREATE INDEX outbox_created ON outbox(created_at);
+`,
+  },
 ];

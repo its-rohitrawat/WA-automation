@@ -7,7 +7,7 @@ import { NOW, SHARMA } from '../helpers/db.ts';
 import { SHARMA_PN } from '../helpers/wa.ts';
 
 const task = (o: Partial<TaskRow> = {}): TaskRow => ({
-  id: 1, code: 'SHA-012', clientId: 1, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'high', assignedTo: null,
+  id: 1, code: 'SHA-012', clientId: 1, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'major', legacyPriority: 'high', prioritySource: 'ai', priorityKeyword: null, sentiment: null, assignedTo: null,
   askedBy: null, raisedOn: '2026-10-10', deadline: null, latestProgress: null, reminderCount: 0, lastReminderOn: null, status: 'open',
   sourceQuote: null, sourceDate: null, sourceWaId: 'm1', sourceRevoked: false, closedOn: null, origin: 'whatsapp', lockedFields: [],
   statusLockedAt: null, createdAt: NOW, updatedAt: NOW, ...o,
@@ -26,7 +26,7 @@ function state(o: Partial<ValidationState> = {}): ValidationState {
   };
 }
 
-const addTask = (o = {}) => op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'high', sourceMessageIds: ['n1'], ...o });
+const addTask = (o = {}) => op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'major', sourceMessageIds: ['n1'], ...o });
 const reasons = (ops: Parameters<typeof validateOps>[0], s = state()) => validateOps(ops, s).rejected.map((r) => r.reason);
 
 describe('validateOps', () => {

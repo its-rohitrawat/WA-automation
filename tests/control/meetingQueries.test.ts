@@ -147,9 +147,9 @@ describe('meetingDetail', () => {
     const db = seededDb();
     const id = meeting(db, { summary: SUMMARY, doc: DOC });
     const other = meeting(db);
-    createTask(db, { clientId: 1, side: 'us', title: 'Send logo', category: 'design', priority: 'high', assignedTo: 'Rahul', askedBy: null, raisedOn: '2026-10-18',
+    createTask(db, { clientId: 1, side: 'us', title: 'Send logo', category: 'design', priority: 'major', assignedTo: 'Rahul', askedBy: null, raisedOn: '2026-10-18',
       deadline: '2026-10-01', latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'meeting', meetingId: id }, NOW);
-    createTask(db, { clientId: 1, side: 'us', title: 'Other', category: 'design', priority: 'high', assignedTo: null, askedBy: null, raisedOn: '2026-10-18',
+    createTask(db, { clientId: 1, side: 'us', title: 'Other', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-18',
       deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'meeting', meetingId: other }, NOW);
     const d = meetingDetail(db, String(id), now)!;
     expect(d).toMatchObject({ id, status: 'done', docUrl: `https://docs.google.com/document/d/${DOC}/edit` });
