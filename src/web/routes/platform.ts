@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { listCustomers, pauseCustomer, resumeCustomer, type CustomerHealth } from '../../platform/customers.ts';
 import { PlatformError } from '../../platform/errors.ts';
 import {
   cancelInvite, createInvite, inviteForSignup, INVITES_PER_DAY, linksLeftToday, listInvites, markSending, newLink, recordSend, redeemInvite, type InviteView,
@@ -42,6 +43,10 @@ export interface PlatformRouteDeps {
   mailer: () => InviteMailer | null;
   /** Each onboarding step's state for a customer (default: every step coming, until the customer workspace, S4). */
   probes?: OnboardingProbes;
+  /** What the customer runtimes report (memory); none until S4. */
+  health?: CustomerHealth;
+  /** Active customers this Mac runs at most (default 20). */
+  maxActive?: number;
 }
 
 /** How the dashboard's own registrars look (src/web/mountRoutes.ts). */
@@ -134,6 +139,21 @@ export function mountPlatformRoutes(m: PlatformMount, d: PlatformRouteDeps): voi
     const made = await newLink(d, o.actor, params.id!, o.requestId);
     const sent = await email(o, made.invite, made.token);
     return ok({ invite: (await listInvites(d)).find((v) => v.id === made.invite.id), email: sent });
+  }));
+
+  // Customers: setup and health of every customer, never their content. Founder only.
+  m.read('/dashboard/api/platform/customers', async (_ctx, o) => (d.isFounder(o) ? ok(await listCustomers(d)) : notFounder()));
+  m.change('/dashboard/api/platform/customers/:id/pause', ({ params }, o) => answer(async () => {
+    if (!d.isFounder(o)) return notFounder();
+    if (!ID.test(params.id ?? '')) return fail(404, 'not_found', 'There is no such customer.');
+    await pauseCustomer(d, o.actor, params.id!, o.requestId);
+    return ok(await listCustomers(d));
+  }));
+  m.change('/dashboard/api/platform/customers/:id/resume', ({ params }, o) => answer(async () => {
+    if (!d.isFounder(o)) return notFounder();
+    if (!ID.test(params.id ?? '')) return fail(404, 'not_found', 'There is no such customer.');
+    await resumeCustomer(d, o.actor, params.id!, o.requestId);
+    return ok(await listCustomers(d));
   }));
 
   // Getting started: the signed-in person's own workspace checklist (any member, not only the founder).

@@ -168,6 +168,19 @@ describe('the platform routes', () => {
     expect((await call('GET', '/dashboard/api/platform/onboarding', FOUNDER)).status).toBe(404);
   });
 
+  it('Customers: the founder only; pause and resume through the routes', async () => {
+    expect((await call('GET', '/dashboard/api/platform/customers', CUSTOMER)).status).toBe(403);
+    const made = body(await invite(false));
+    await redeemInvite({ db, clock }, { token: tokenOf(made.link), email: 'kapoor.studio@example.com' });
+    const list = body(await call('GET', '/dashboard/api/platform/customers'));
+    expect(list.customers).toHaveLength(1);
+    const id = list.customers[0].id;
+    expect((await call('POST', `/dashboard/api/platform/customers/${id}/pause`, CUSTOMER)).status).toBe(403);
+    expect(body(await call('POST', `/dashboard/api/platform/customers/${id}/pause`)).customers[0].status).toBe('paused');
+    expect(body(await call('POST', `/dashboard/api/platform/customers/${id}/resume`)).customers[0].status).toBe('onboarding');
+    expect((await call('POST', '/dashboard/api/platform/customers/00000000-0000-4000-8000-000000000000/pause')).status).toBe(404);
+  });
+
   it('refuses a bad body, a bad address, an unknown invite, and the daily limit, with plain messages', async () => {
     for (const b of [{}, { business: 'x', email: 'x@example.com' }, { business: 'x', email: 'x@example.com', send: 'yes' }, { business: 'x', email: 'x@example.com', send: false, extra: 1 }, null]) {
       expect((await call('POST', '/dashboard/api/platform/invites', FOUNDER, b)).status).toBe(400);

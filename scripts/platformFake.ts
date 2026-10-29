@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInvite, markSending, recordSend, redeemInvite } from '../src/platform/invites.ts';
 import type { InviteEmail, InviteMailer, MailOutcome } from '../src/platform/mailer.ts';
+import type { CustomerHealth } from '../src/platform/customers.ts';
 import type { OnboardingProbes, ProbeState, StepId } from '../src/platform/onboarding.ts';
 import { ensurePlatformSchema } from '../src/platform/schema.ts';
 import { ensureFounderTenant } from '../src/platform/store.ts';
@@ -47,7 +48,13 @@ export class PreviewMailer implements InviteMailer {
   }
 }
 
-/** Made-up invites like the approved demo's: one sent, one accepted, one expired, one unknown. */
+/** The preview's made-up customers whose steps are all done (and so active), and the ones that are paused. */
+const doneTenants = new Set<string>();
+
+/**
+ * Made-up invites and customers like the approved demo's: invites sent, accepted, expired and unknown; customers active,
+ * onboarding, invited and paused.
+ */
 async function seed(db: SqliteDb): Promise<void> {
   const at = (daysAgo: number, hour = 10): Clock => manualClock(new Date(Date.now() - daysAgo * 86_400_000 + (hour - 12) * 3_600_000).toISOString());
   await ensureFounderTenant(db, { name: 'Your studio', at: at(60).now().toISOString() });
@@ -61,15 +68,23 @@ async function seed(db: SqliteDb): Promise<void> {
   await sent('Patel Print House', 'patel.print@example.com', 10, { state: 'sent' });
   const nair = await sent('Nair Digital Works', 'nair.digital@example.com', 2, { state: 'sent' });
   await redeemInvite({ db, clock: at(2, 16) }, { token: nair.token, email: 'nair.digital@example.com', name: 'Nair' });
+  doneTenants.add(nair.invite.tenantId);
+  await db.run("UPDATE tenants SET status = 'active', last_activity_at = ? WHERE id = ?", [at(0.004).now().toISOString(), nair.invite.tenantId]);
+  const desai = await sent('Desai Tours & Travels', 'desai.tours@example.com', 6, { state: 'sent' });
+  await redeemInvite({ db, clock: at(6, 14) }, { token: desai.token, email: 'desai.tours@example.com', name: 'Desai' });
+  doneTenants.add(desai.invite.tenantId);
+  await db.run("UPDATE tenants SET status = 'paused', updated_at = ?, last_activity_at = ? WHERE id = ?", [at(4).now().toISOString(), at(4).now().toISOString(), desai.invite.tenantId]);
   await sent('Gupta Events Co.', 'gupta.events@example.com', 0.2, { state: 'unknown', code: 'timeout' });
   await sent('Kapoor Design Studio', 'kapoor.studio@example.com', 0.1, { state: 'sent' });
   const joshi = await sent('Joshi Interiors', FOUNDER, 1, { state: 'sent' });
   await redeemInvite({ db, clock: at(1, 15) }, { token: joshi.token, email: FOUNDER, name: 'Test Owner' });
 }
 
-/** What each onboarding step reports in the preview: coming until the test says otherwise. */
+/** What each onboarding step reports in the preview for the signed-in owner's customer: coming until a test says otherwise. */
 export const fakeSteps: Partial<Record<StepId, ProbeState>> = {};
-const previewProbes: OnboardingProbes = { state: async (_t, step) => fakeSteps[step] ?? 'coming' };
+const previewProbes: OnboardingProbes = { state: async (tenantId, step) => (doneTenants.has(tenantId) ? 'done' : fakeSteps[step] ?? 'coming') };
+/** Memory as a runtime would report it, for the preview's active customers. */
+const previewHealth: CustomerHealth = { memoryMb: (tenantId) => (doneTenants.has(tenantId) ? 96 : 118) };
 
 /**
  * Adds the platform screens to a fake dashboard: the patched shell, the platform routes behind the fake's owner check
@@ -108,7 +123,7 @@ export async function addPlatform(web: WebServer, o: { signedIn: () => boolean; 
   };
   mountPlatformRoutes(m, {
     db, clock: systemClock, log: silentLogger(), publicUrl: 'https://agent.example.com', founderName: 'Rohit',
-    isFounder: (x) => x.actor === FOUNDER, mailer: () => (o.gmail === false ? null : mailer), probes: previewProbes,
+    isFounder: (x) => x.actor === FOUNDER, mailer: () => (o.gmail === false ? null : mailer), probes: previewProbes, health: previewHealth,
   });
   return { mailer, db };
 }

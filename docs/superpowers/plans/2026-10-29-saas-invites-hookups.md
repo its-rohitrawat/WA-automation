@@ -215,3 +215,39 @@ person's own workspace (their membership). A customer becomes `active` once What
 
 A step that exists but is not done answers `todo`; the screen then needs that step's own panel (the QR code, the key
 form and so on), which S4 adds to `views/onboarding.js` in place of the "coming" note.
+
+## 6. Customers: setup and health (piece f)
+
+`src/platform/customers.ts` lists every business (the founder's first) with status, onboarding progress, last
+activity, memory and AI key state, and pauses or resumes a customer. `views/customers.js` draws it. The routes are
+founder only and mounted with the others (2.1):
+
+- `GET /dashboard/api/platform/customers`
+- `POST /dashboard/api/platform/customers/:id/pause` (never the founder's own business; active or onboarding only)
+- `POST /dashboard/api/platform/customers/:id/resume` (back to active when WhatsApp and the key are done, else
+  onboarding; refused when it would pass the limit of active customers)
+
+Both changes are audited (`tenant.paused`, `tenant.resumed`). The nav entry and `DASHBOARD_SCREENS` are already in 2.4
+and 2.5. Nothing here reads a customer's messages, tasks, files or keys.
+
+### 6.1 What S4 passes in (main.ts, lane A)
+
+`mountPlatformRoutes` takes two more optional deps; until S4 neither is passed, so memory shows "—" and the limit is 20.
+
+```ts
+mountPlatformRoutes(m, {
+  // ...the deps from 2.2, 3.2 and 5.2...
+  health: supervisor.health,                  // { memoryMb(tenantId): number | null }, from each customer runtime
+  maxActive: settings.platformMaxActive ?? 20, // PLATFORM_MAX_ACTIVE, a setting on the Mac (design 7)
+});
+```
+
+### 6.2 Pause and resume start or stop the runtime (S4)
+
+Today Pause and Resume only change `tenants.status`. The Supervisor (S4) watches that status: `paused` stops the
+customer's WhatsApp reader and AI work, `active` or `onboarding` starts them again. Nothing is deleted either way.
+
+### 6.3 The AI key column
+
+It comes from the `key` onboarding probe (5.2): `done` shows Configured, `todo` shows Missing, and "coming" shows "—".
+The key itself is never read or shown.

@@ -201,6 +201,27 @@ try {
       if ((await p.locator('.pf-step.done').count()) !== 2) fail(where, 'expected 2 done steps');
       await shot(p, where, `onboarding-active-${tag}`);
       for (const k of Object.keys(fakeSteps) as (keyof typeof fakeSteps)[]) delete fakeSteps[k];
+      await platformDb.run("UPDATE tenants SET status = 'onboarding' WHERE name = 'Joshi Interiors'");
+
+      // (f) Customers: setup and health only; pause and resume a customer.
+      where = `customers ${tag}`;
+      await p.goto(`${base}/dashboard/customers`);
+      await p.locator('.pf-cust tbody tr').nth(4).waitFor();
+      for (const label of ['Active', 'Onboarding', 'Invited', 'Paused']) {
+        if ((await p.locator('.pf-cust .pill', { hasText: label }).count()) < 1) fail(where, `no "${label}" customer`);
+      }
+      if ((await p.locator('.pf-cust tbody tr', { hasText: 'Your studio' }).locator('[data-pause]').count()) !== 0) fail(where, 'the founder can be paused');
+      if ((await p.locator('#nav [data-go="customers"]').count()) !== 1) fail(where, 'no nav entry');
+      await shot(p, where, `customers-${tag}`);
+
+      where = `customers pause ${tag}`;
+      const nairRow = p.locator('.pf-cust tbody tr', { hasText: 'Nair Digital Works' });
+      await nairRow.locator('[data-pause]').click();
+      await p.locator('.modal h2', { hasText: 'Pause Nair Digital Works?' }).waitFor();
+      await p.locator('.modal [data-yes]').click();
+      await nairRow.locator('.pill', { hasText: 'Paused' }).waitFor();
+      await nairRow.locator('[data-resume]').click();
+      await nairRow.locator('.pill', { hasText: 'Active' }).waitFor();
       await ctx.close();
     }
   }
