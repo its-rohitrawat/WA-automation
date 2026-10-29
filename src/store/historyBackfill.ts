@@ -1,4 +1,4 @@
-import type { Db } from './db.ts';
+import type { Db, Sql } from './db.ts';
 import { getKv, setKv } from './kv.ts';
 
 // The 7-day history backfill of a newly approved group (owner decision, 28 Oct 2026), kept in kv so a restart carries
@@ -79,9 +79,9 @@ export function saveBackfill(db: Db, b: Backfill): void {
 }
 
 /** Every backfill entry, finished ones too. */
-export function listBackfills(db: Db): Backfill[] {
+export async function listBackfills(db: Sql): Promise<Backfill[]> {
   // A range, not LIKE: "_" in the prefix would be a wildcard there.
-  const rows = db.raw.prepare('SELECT k, v FROM kv WHERE k >= ? AND k < ? ORDER BY k').all(PREFIX, `${PREFIX.slice(0, -1)};`) as { k: string; v: string }[];
+  const rows = await db.all<{ k: string; v: string }>('SELECT k, v FROM kv WHERE k >= ? AND k < ? ORDER BY k', [PREFIX, `${PREFIX.slice(0, -1)};`]);
   return rows.flatMap((r) => parse(r.k.slice(PREFIX.length), r.v) ?? []);
 }
 
@@ -89,15 +89,14 @@ export function listBackfills(db: Db): Backfill[] {
  * Where the first request pages back from: the group's oldest message since it was approved. Messages kept from an
  * earlier approval are not used, so the days the group was not approved are read too.
  */
-export function firstAnchor(db: Db, clientId: number, until: string): { waId: string; fromMe: boolean; ts: string } | undefined {
-  const r = db.raw.prepare('SELECT wa_id, from_me, ts FROM messages WHERE client_id = ? AND ts >= ? ORDER BY ts, id LIMIT 1').get(clientId, until) as
-    { wa_id: string; from_me: number; ts: string } | undefined;
+export async function firstAnchor(db: Sql, clientId: number, until: string): Promise<{ waId: string; fromMe: boolean; ts: string } | undefined> {
+  const r = await db.get<{ wa_id: string; from_me: number; ts: string }>('SELECT wa_id, from_me, ts FROM messages WHERE client_id = ? AND ts >= ? ORDER BY ts, id LIMIT 1', [clientId, until]);
   return r ? { waId: r.wa_id, fromMe: r.from_me === 1, ts: r.ts } : undefined;
 }
 
 /** The client's stored messages, to count what an answer added. */
-export function messageCount(db: Db, clientId: number): number {
-  return (db.raw.prepare('SELECT COUNT(*) AS n FROM messages WHERE client_id = ?').get(clientId) as { n: number }).n;
+export async function messageCount(db: Sql, clientId: number): Promise<number> {
+  return (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM messages WHERE client_id = ?', [clientId]))!.n;
 }
 
 /** How long a finished backfill shows on the Clients card. */
@@ -107,8 +106,8 @@ export const SHOW_DONE_MS = 7 * 86_400_000;
 export type BackfillStatus = { state: 'waiting' | 'reading'; found: number } | { state: 'done'; found: number } | null;
 
 /** The Clients card's line for a client: reading, waiting for the first message, or read (for a week after). */
-export function backfillStatus(db: Db, clientId: number, now: Date): BackfillStatus {
-  const b = listBackfills(db).find((x) => x.clientId === clientId);
+export async function backfillStatus(db: Db, clientId: number, now: Date): Promise<BackfillStatus> {
+  const b = (await listBackfills(db)).find((x) => x.clientId === clientId);
   if (!b || b.state === 'stopped') return null;
   const found = b.found;
   if (b.state === 'done') return b.finishedAt && now.getTime() - Date.parse(b.finishedAt) < SHOW_DONE_MS ? { state: 'done', found } : null;

@@ -14,9 +14,9 @@ import { NOW, seededDb } from '../helpers/db.ts';
 
 const at = (hhmm: string) => `2026-10-19T${hhmm}:00.000Z`;
 
-function batch(db: Db, o: { at: string; status: 'ok' | 'failed'; messages: number; accepted?: number; clientId?: number }) {
-  const id = startBatch(db, o.clientId ?? 1, o.messages, o.at);
-  finishBatch(db, id, { status: o.status, errorCode: o.status === 'failed' ? 'ai_error' : null, accepted: o.accepted ?? null, rejected: null, at: o.at });
+async function batch(db: Db, o: { at: string; status: 'ok' | 'failed'; messages: number; accepted?: number; clientId?: number }) {
+  const id = await startBatch(db, o.clientId ?? 1, o.messages, o.at);
+  await finishBatch(db, id, { status: o.status, errorCode: o.status === 'failed' ? 'ai_error' : null, accepted: o.accepted ?? null, rejected: null, at: o.at });
 }
 
 function task(db: Db, title: string, clientId = 1) {
@@ -58,7 +58,7 @@ describe('parseActivityParams', () => {
 describe('listActivity', () => {
   it('merges every source, newest first, in plain words', async () => {
     const db = await seededDb();
-    batch(db, { at: at('05:00'), status: 'ok', messages: 18, accepted: 2, clientId: 2 });
+    await batch(db, { at: at('05:00'), status: 'ok', messages: 18, accepted: 2, clientId: 2 });
     const t = task(db, 'Revise <b>landing</b> page');
     recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'add_task', detail: { title: 'chat words' }, reason: null, sourceIds: [], at: at('05:10') });
     recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'mark_maybe_done', detail: {}, reason: null, sourceIds: [], at: at('05:20') });
@@ -66,7 +66,7 @@ describe('listActivity', () => {
     await meeting(db, 'done', at('05:40'));
     audit(db, { at: at('05:50'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'Tracker.xlsx uploaded to Drive' });
     await meeting(db, 'too_long', at('06:00'), { title: 'Launch prep', seconds: 196 * 60 });
-    batch(db, { at: at('06:10'), status: 'failed', messages: 4 });
+    await batch(db, { at: at('06:10'), status: 'failed', messages: 4 });
     audit(db, { at: at('06:20'), actor: 'agent', event: 'tracker.publish_failed', kind: 'ops', detail: 'Tracker upload failed: Google sign-in expired' });
     audit(db, { at: at('06:30'), actor: 'owner@example.com', event: 'whatsapp.relink', kind: 'connection', detail: "Founder's phone relinked" });
     audit(db, { at: at('06:40'), actor: 'owner@example.com', event: 'settings.report', kind: 'config', detail: 'Morning briefing switched on' });
@@ -108,8 +108,8 @@ describe('listActivity', () => {
 
   it('filters by kind', async () => {
     const db = await seededDb();
-    batch(db, { at: at('05:00'), status: 'ok', messages: 3 });
-    batch(db, { at: at('05:01'), status: 'failed', messages: 3 });
+    await batch(db, { at: at('05:00'), status: 'ok', messages: 3 });
+    await batch(db, { at: at('05:01'), status: 'failed', messages: 3 });
     const t = task(db, 'Logo');
     recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: at('05:02') });
     await meeting(db, 'done', at('05:03'));
@@ -126,9 +126,9 @@ describe('listActivity', () => {
 
   it('pages with before, never losing items that share a time', async () => {
     const db = await seededDb();
-    for (let i = 0; i < 5; i++) batch(db, { at: at('05:00'), status: 'ok', messages: i + 1 });
+    for (let i = 0; i < 5; i++) await batch(db, { at: at('05:00'), status: 'ok', messages: i + 1 });
     audit(db, { at: at('05:00'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'x' });
-    batch(db, { at: at('04:00'), status: 'ok', messages: 9 });
+    await batch(db, { at: at('04:00'), status: 'ok', messages: 9 });
     const seen: string[] = [];
     let before: string | undefined;
     for (let page = 0; page < 10; page++) {
@@ -144,14 +144,14 @@ describe('listActivity', () => {
 
   it('gives next only when the page is full', async () => {
     const db = await seededDb();
-    batch(db, { at: at('05:00'), status: 'ok', messages: 1 });
+    await batch(db, { at: at('05:00'), status: 'ok', messages: 1 });
     expect((await listActivity(db, params({ limit: '1' }))).next).toBe(`${at('05:00')}|b|1`);
     expect((await listActivity(db, params({ limit: '2' }))).next).toBeNull();
   });
 
   it('skips running batches and events not about a task', async () => {
     const db = await seededDb();
-    startBatch(db, 1, 5, at('05:00'));
+    await startBatch(db, 1, 5, at('05:00'));
     recordEvent(db, { taskId: null, clientId: 1, actor: 'ai', op: 'set_status', detail: { status: 'chat words' }, reason: null, sourceIds: [], at: at('05:01') });
     expect((await listActivity(db, params())).items).toEqual([]);
   });
@@ -240,7 +240,7 @@ describe('activity review fixes', () => {
 
   it('pages correctly when one source has more rows than the page', async () => {
     const db = await seededDb();
-    for (let i = 0; i < 4; i++) batch(db, { at: at(`05:0${i}`), status: 'ok', messages: i + 1 });
+    for (let i = 0; i < 4; i++) await batch(db, { at: at(`05:0${i}`), status: 'ok', messages: i + 1 });
     audit(db, { at: at('05:02'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'x' });
     const first = await listActivity(db, params({ limit: '2' }));
     const second = await listActivity(db, params({ limit: '2', before: first.next! }));

@@ -145,7 +145,7 @@ export async function loadTrackerView(db: Db, now: Date, health: HealthLine): Pr
           docFileId: m.docFileId,
           actionItemCount: m.actionItemCount,
         })),
-        people: listPeople(db, client.id),
+        people: await listPeople(db, client.id),
         lastActivity: lastActivity(db, client.id),
         lastMeeting: last === undefined ? null : istDate(new Date(last)),
         percentDone: all.length ? Math.floor((100 * (all.length - notDone.length)) / all.length) : null,

@@ -254,7 +254,7 @@ describe('Reconciler.runMeeting', () => {
     context(db, 'C1', 'hello');
     const m = await meetingAt(db);
     expect(await r.runMeeting(1, m)).toEqual({ status: 'done', accepted: 0, rejected: 3 });
-    expect(listPeople(db, 1)[0]).toMatchObject({ role: 'unknown' });
+    expect((await listPeople(db, 1))[0]).toMatchObject({ role: 'unknown' });
     expect(listTasks(db, 1)).toHaveLength(0);
   });
 

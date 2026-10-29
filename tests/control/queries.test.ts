@@ -84,8 +84,8 @@ describe('overview', () => {
     const t = task(db, 1);
     const at = (m: number) => `2026-10-19T05:0${m}:00.000Z`;
     for (const i of [0, 2, 4]) {
-      const b = startBatch(db, 1, i + 1, at(i));
-      finishBatch(db, b, { status: 'ok', errorCode: null, accepted: 0, rejected: 0, at: at(i) });
+      const b = await startBatch(db, 1, i + 1, at(i));
+      await finishBatch(db, b, { status: 'ok', errorCode: null, accepted: 0, rejected: 0, at: at(i) });
     }
     for (const i of [1, 3, 5]) recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'update_task', detail: {}, reason: null, sourceIds: [], at: at(i) });
     await meeting(db, at(6)); // never in the Overview's activity

@@ -197,7 +197,7 @@ export async function clientActivity(db: Db, c: ClientRow, now: Date, quietMinut
       transcribed: audio && r.mediaStatus === 'done' && r.hasText === 1, at: r.at,
     };
   });
-  const backfill = listBackfills(db).find((b) => b.clientId === c.id && b.groupId === c.groupId);
+  const backfill = (await listBackfills(db)).find((b) => b.clientId === c.id && b.groupId === c.groupId);
   return {
     pending,
     quietMinutes,
@@ -296,9 +296,9 @@ export async function clientCards(db: Db, now: Date, groupNames?: ReadonlyMap<st
   const sheets = sheetNames(db);
   const pending = await pendingByClient(db);
   const read = await lastReadByClient(db);
-  return listClients(db, true).map((c) =>
-    card(c, counts, latest, sheets, groupNames, backfillStatus(db, c.id, now), { pending: pending.get(c.id) ?? 0, lastReadAt: read.get(c.id) ?? null, quietMinutes }),
-  );
+  return Promise.all(listClients(db, true).map(async (c) =>
+    card(c, counts, latest, sheets, groupNames, await backfillStatus(db, c.id, now), { pending: pending.get(c.id) ?? 0, lastReadAt: read.get(c.id) ?? null, quietMinutes }),
+  ));
 }
 
 /** The client drawer for an active client; null for an unknown or inactive code. */
@@ -307,7 +307,7 @@ export async function clientDetail(db: Db, code: string, now: Date, groupNames?:
   if (!c || !c.active) return null;
   const activity = await clientActivity(db, c, now, quietMinutes);
   const pulse = { pending: activity.pending, lastReadAt: activity.lastBatch?.at ?? null, quietMinutes };
-  const base = card(c, await countsForClient(db, now, c.id), new Map([[c.id, lastActivity(db, c.id)]]), sheetNames(db), groupNames, backfillStatus(db, c.id, now), pulse);
+  const base = card(c, await countsForClient(db, now, c.id), new Map([[c.id, lastActivity(db, c.id)]]), sheetNames(db), groupNames, await backfillStatus(db, c.id, now), pulse);
   // Sentiment is shown only while it is switched on: off, none leaves here.
   const moods = readSentimentEnabled(db);
   const openTasks = (await db.all<ClientOpenTask>(

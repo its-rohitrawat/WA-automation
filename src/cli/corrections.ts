@@ -92,22 +92,22 @@ export function unlockTask(db: Db, code: string, now: Date): TaskRow {
 }
 
 /** Accepts a phone number (any punctuation) or a WhatsApp id (contains @). Returns how many group memberships changed. */
-export function setPersonRole(db: Db, who: string, roleInput: string, clientCode: string | undefined, now: Date): number {
+export async function setPersonRole(db: Db, who: string, roleInput: string, clientCode: string | undefined, now: Date): Promise<number> {
   const role = roleInput.trim().toLowerCase();
   if (role !== 'team' && role !== 'client') throw new CorrectionError('role must be team or client');
   const target = who.trim();
   let people: PersonRow[];
   let detailKey: { jid: string } | { number: string };
   if (target.includes('@')) {
-    people = findPeopleByJid(db, target);
+    people = await findPeopleByJid(db, target);
     detailKey = { jid: target };
   } else {
     const digits = target.replace(/\D/g, '');
     if (digits === '') throw new CorrectionError('Give the full phone number with country code, e.g. 919812345678, or a WhatsApp id');
     // The schema has no link between a LID row and a phone-number row, so only rows that carry this number or its phone id match.
-    const byNumber = findPeopleByNumber(db, digits);
+    const byNumber = await findPeopleByNumber(db, digits);
     const seen = new Set(byNumber.map((p) => p.id));
-    people = [...byNumber, ...findPeopleByJid(db, `${digits}@s.whatsapp.net`).filter((p) => !seen.has(p.id))];
+    people = [...byNumber, ...(await findPeopleByJid(db, `${digits}@s.whatsapp.net`)).filter((p) => !seen.has(p.id))];
     detailKey = { number: digits };
   }
   if (people.length === 0) throw new CorrectionError(`No one with that ${target.includes('@') ? 'WhatsApp id' : 'number'} has posted in an allowed group yet`);

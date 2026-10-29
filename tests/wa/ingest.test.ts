@@ -25,7 +25,7 @@ describe('Ingestor', () => {
     ing.handle(message());
     ing.handle(message());
     expect(listUnprocessed(db, 1)).toHaveLength(1);
-    expect(listPeople(db, 1)[0]).toMatchObject({ jid: SHARMA_PN, name: 'Mr. Sharma', role: 'unknown' });
+    expect((await listPeople(db, 1))[0]).toMatchObject({ jid: SHARMA_PN, name: 'Mr. Sharma', role: 'unknown' });
     expect(onNew).toHaveBeenCalledTimes(1);
     expect(onNew).toHaveBeenCalledWith(1);
   });

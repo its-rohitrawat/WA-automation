@@ -298,7 +298,7 @@ export async function statusCommand(deps: CliDeps): Promise<void> {
       formatStatus({
         snapshot: readHealthSnapshot(db),
         clients: listClients(db, false),
-        batches: latestBatches(db),
+        batches: await latestBatches(db),
         unprocessed: unprocessedCounts(db),
         now: new Date(),
         sttCopiesLeft: await sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: deps.env.STT_PROVIDER }),

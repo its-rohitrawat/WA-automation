@@ -116,37 +116,37 @@ describe('person set', () => {
 
   it('sets a role by phone number in every client group', async () => {
     const db = await people();
-    expect(setPersonRole(db, '+91 98000-00002', 'Team', undefined, now)).toBe(2);
-    expect(listPeople(db, 1)[0]).toMatchObject({ role: 'team', roleSetBy: 'human' });
-    expect(listPeople(db, 2)[0]).toMatchObject({ role: 'team', roleSetBy: 'human' });
+    expect(await setPersonRole(db, '+91 98000-00002', 'Team', undefined, now)).toBe(2);
+    expect((await listPeople(db, 1))[0]).toMatchObject({ role: 'team', roleSetBy: 'human' });
+    expect((await listPeople(db, 2))[0]).toMatchObject({ role: 'team', roleSetBy: 'human' });
     expect(events(db)).toMatchObject([{ op: 'set_person_role', client_id: 1, detail: { number: '919800000002', role: 'team' } }, { op: 'set_person_role', client_id: 2, detail: { number: '919800000002', role: 'team' } }]);
     expect(rebuilt(db)).toBe(true);
   });
 
   it('scopes to one client with --client', async () => {
     const db = await people();
-    expect(setPersonRole(db, '919800000002', 'client', 'meh', now)).toBe(1);
-    expect(listPeople(db, 1)[0]).toMatchObject({ role: 'unknown' });
-    expect(listPeople(db, 2)[0]).toMatchObject({ role: 'client', roleSetBy: 'human' });
+    expect(await setPersonRole(db, '919800000002', 'client', 'meh', now)).toBe(1);
+    expect((await listPeople(db, 1))[0]).toMatchObject({ role: 'unknown' });
+    expect((await listPeople(db, 2))[0]).toMatchObject({ role: 'client', roleSetBy: 'human' });
   });
 
   it('accepts a WhatsApp id', async () => {
     const db = await people();
-    expect(setPersonRole(db, '919800000002@s.whatsapp.net', 'team', 'SHA', now)).toBe(1);
-    expect(listPeople(db, 1)[0]).toMatchObject({ role: 'team' });
+    expect(await setPersonRole(db, '919800000002@s.whatsapp.net', 'team', 'SHA', now)).toBe(1);
+    expect((await listPeople(db, 1))[0]).toMatchObject({ role: 'team' });
     expect(events(db)[0]).toMatchObject({ detail: { jid: '919800000002@s.whatsapp.net', role: 'team' } });
-    expect(() => setPersonRole(db, 'nobody@lid', 'team', undefined, now)).toThrowError('No one with that WhatsApp id has posted in an allowed group yet');
+    await expect(setPersonRole(db, 'nobody@lid', 'team', undefined, now)).rejects.toThrowError('No one with that WhatsApp id has posted in an allowed group yet');
   });
 
   it('gives clear errors', async () => {
     const db = await people();
-    expect(() => setPersonRole(db, 'abc', 'team', undefined, now)).toThrowError(/full phone number with country code/);
-    expect(() => setPersonRole(db, '+91 1', 'team', undefined, now)).toThrowError('No one with that number has posted in an allowed group yet');
-    expect(() => setPersonRole(db, '919800000002', 'boss', undefined, now)).toThrowError(/team or client/);
+    await expect(setPersonRole(db, 'abc', 'team', undefined, now)).rejects.toThrowError(/full phone number with country code/);
+    await expect(setPersonRole(db, '+91 1', 'team', undefined, now)).rejects.toThrowError('No one with that number has posted in an allowed group yet');
+    await expect(setPersonRole(db, '919800000002', 'boss', undefined, now)).rejects.toThrowError(/team or client/);
     const db2 = await withTask();
     upsertPerson(db2, { clientId: 2, jid: '919800000003@s.whatsapp.net', number: '919800000003', name: 'X', fromMe: false });
-    expect(() => setPersonRole(db2, '919800000003', 'team', 'SHA', now)).toThrowError('That number has posted, but not in client SHA');
-    expect(() => setPersonRole(db2, '919800000003', 'team', 'ZZZ', now)).toThrowError(/No client with code/);
+    await expect(setPersonRole(db2, '919800000003', 'team', 'SHA', now)).rejects.toThrowError('That number has posted, but not in client SHA');
+    await expect(setPersonRole(db2, '919800000003', 'team', 'ZZZ', now)).rejects.toThrowError(/No client with code/);
   });
 });
 

@@ -116,7 +116,7 @@ describe('Reconciler with shared files', () => {
     expect(await r.run(1)).toEqual({ status: 'waiting' });
     expect(ai.calls).toHaveLength(0);
     expect(spend.spentToday()).toBe(0);
-    expect(latestBatches(db)).toEqual([]);
+    expect(await latestBatches(db)).toEqual([]);
     expect(processedAt(db, 'I1')).toBeNull();
   });
 
@@ -132,7 +132,7 @@ describe('Reconciler with shared files', () => {
     expect(canSpend).not.toHaveBeenCalled();
     expect(reserve).not.toHaveBeenCalled();
     expect(ai.calls).toHaveLength(0);
-    expect(latestBatches(db)).toEqual([]);
+    expect(await latestBatches(db)).toEqual([]);
   });
 
   it('logs at info only when a client starts waiting, not on every waiting run', async () => {

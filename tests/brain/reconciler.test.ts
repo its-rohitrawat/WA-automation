@@ -99,10 +99,10 @@ describe('Reconciler', () => {
     });
     expect(listDecisions(db, 1)[0]).toMatchObject({ text: 'Blue theme chosen', decidedOn: '2026-10-19', source: 'whatsapp' });
     expect(getClient(db, 1).statusText).toBe('Homepage banner is being revised.');
-    expect(listPeople(db, 1)[0]).toMatchObject({ role: 'client', roleSetBy: 'ai' });
+    expect((await listPeople(db, 1))[0]).toMatchObject({ role: 'client', roleSetBy: 'ai' });
     expect(listUnprocessed(db, 1)).toHaveLength(0);
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM task_events').get()).toEqual({ n: 4 });
-    expect(latestBatches(db)[0]).toMatchObject({ status: 'ok' });
+    expect((await latestBatches(db))[0]).toMatchObject({ status: 'ok' });
     expect(spend.spentToday()).toBeCloseTo(0.01, 9);
     expectNoReservation(spend);
     expect(onChanged).toHaveBeenCalledTimes(1);
@@ -178,7 +178,7 @@ describe('Reconciler', () => {
     expect(listTasks(db, 1)).toHaveLength(0);
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM task_events').get()).toEqual({ n: 0 });
     expect(listUnprocessed(db, 1)).toHaveLength(1);
-    expect(latestBatches(db)[0]).toMatchObject({ status: 'failed', errorCode: 'apply_failed' });
+    expect((await latestBatches(db))[0]).toMatchObject({ status: 'failed', errorCode: 'apply_failed' });
     expect(onChanged).not.toHaveBeenCalled();
     banner(db);
     expect(listTasks(db, 1)[0]!.code).toBe('SHA-001'); // the task-code counter rolled back too
@@ -190,7 +190,7 @@ describe('Reconciler', () => {
     expect(await r.run(1)).toEqual({ status: 'failed', errorCode: 'invalid_output' });
     expect(ai.calls).toHaveLength(2);
     expect(listUnprocessed(db, 1)).toHaveLength(1);
-    expect(latestBatches(db)[0]).toMatchObject({ status: 'failed', errorCode: 'invalid_output' });
+    expect((await latestBatches(db))[0]).toMatchObject({ status: 'failed', errorCode: 'invalid_output' });
     expect(spend.spentToday()).toBeCloseTo(2 * estimateOf(ai), 9); // no cost on the errors, so each attempt is booked at the estimate
     expectNoReservation(spend);
   });
@@ -250,7 +250,7 @@ describe('Reconciler', () => {
       store(db, 'm1', 'hello');
       expect(await r.run(1)).toEqual({ status: 'busy' });
       expect(ai.calls).toHaveLength(0);
-      expect(latestBatches(db)).toEqual([]);
+      expect(await latestBatches(db)).toEqual([]);
       expect(listUnprocessed(db, 1)).toHaveLength(1);
       expect(info).toHaveBeenCalledWith({ clientId: 1 }, 'other paid calls in flight: run deferred');
       expect(info).not.toHaveBeenCalledWith({ clientId: 1 }, 'spend cap: run paused');
@@ -283,7 +283,7 @@ describe('Reconciler', () => {
       expect(await run).toEqual({ status: 'busy' });
       expect(spend.isPaused()).toBe(false);
       expect(ai.calls).toHaveLength(1);
-      expect(latestBatches(db)[0]).toMatchObject({ status: 'failed', errorCode: 'spend_busy' });
+      expect((await latestBatches(db))[0]).toMatchObject({ status: 'failed', errorCode: 'spend_busy' });
       expect(listUnprocessed(db, 1)).toHaveLength(1);
       expect(info).toHaveBeenCalledWith({ clientId: 1 }, 'other paid calls in flight: run deferred');
     });
@@ -297,7 +297,7 @@ describe('Reconciler', () => {
     expect(await r.run(1)).toEqual({ status: 'paused' });
     expect(info).toHaveBeenCalledWith({ clientId: 1 }, 'spend cap: run paused');
     expect(ai.calls).toHaveLength(1);
-    expect(latestBatches(db)[0]).toMatchObject({ status: 'failed', errorCode: 'spend_cap' });
+    expect((await latestBatches(db))[0]).toMatchObject({ status: 'failed', errorCode: 'spend_cap' });
     expect(listUnprocessed(db, 1)).toHaveLength(1);
   });
 
@@ -580,7 +580,7 @@ describe('Reconciler', () => {
       setRole(db, 1, SHARMA_PN, 'client', 'human');
       open();
       expect(await run).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
-      expect(listPeople(db, 1)[0]).toMatchObject({ role: 'client', roleSetBy: 'human' });
+      expect((await listPeople(db, 1))[0]).toMatchObject({ role: 'client', roleSetBy: 'human' });
     });
 
     it('queues a message edited during the call again, marked as an edit', async () => {

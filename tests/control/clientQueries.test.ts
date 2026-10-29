@@ -131,11 +131,11 @@ describe('clientDetail', () => {
     const m2 = await meeting(db, 2, 1, 'Sharma design review', '2026-10-27T06:00:00.000Z');
     await meeting(db, 3, 2, 'Mehta call', '2026-10-27T07:00:00.000Z');
     await meeting(db, 4, null, 'Unassigned call', '2026-10-27T08:00:00.000Z');
-    const b1 = startBatch(db, 1, 3, '2026-10-27T09:00:00.000Z');
-    finishBatch(db, b1, { status: 'ok', errorCode: null, accepted: 1, rejected: 0, at: '2026-10-27T09:00:30.000Z' });
-    const b2 = startBatch(db, 1, 2, '2026-10-28T05:00:00.000Z');
-    finishBatch(db, b2, { status: 'ok', errorCode: null, accepted: 1, rejected: 0, at: '2026-10-28T05:00:40.000Z' });
-    startBatch(db, 2, 1, '2026-10-28T05:30:00.000Z');
+    const b1 = await startBatch(db, 1, 3, '2026-10-27T09:00:00.000Z');
+    await finishBatch(db, b1, { status: 'ok', errorCode: null, accepted: 1, rejected: 0, at: '2026-10-27T09:00:30.000Z' });
+    const b2 = await startBatch(db, 1, 2, '2026-10-28T05:00:00.000Z');
+    await finishBatch(db, b2, { status: 'ok', errorCode: null, accepted: 1, rejected: 0, at: '2026-10-28T05:00:40.000Z' });
+    await startBatch(db, 2, 1, '2026-10-28T05:30:00.000Z');
 
     const d = (await clientDetail(db, 'SHA', NOW))!;
     const card = (await clientCards(db, NOW)).find((c) => c.code === 'SHA')!;
@@ -167,13 +167,13 @@ describe('clientDetail', () => {
 
   it('the last sync time ignores failed batches', async () => {
     const db = await seededDb();
-    const ok = startBatch(db, 1, 2, '2026-10-27T09:00:00.000Z');
-    finishBatch(db, ok, { status: 'ok', errorCode: null, accepted: 1, rejected: 0, at: '2026-10-27T09:00:30.000Z' });
-    const bad = startBatch(db, 1, 2, '2026-10-28T05:00:00.000Z');
-    finishBatch(db, bad, { status: 'failed', errorCode: 'ai_error', accepted: null, rejected: null, at: '2026-10-28T05:00:10.000Z' });
+    const ok = await startBatch(db, 1, 2, '2026-10-27T09:00:00.000Z');
+    await finishBatch(db, ok, { status: 'ok', errorCode: null, accepted: 1, rejected: 0, at: '2026-10-27T09:00:30.000Z' });
+    const bad = await startBatch(db, 1, 2, '2026-10-28T05:00:00.000Z');
+    await finishBatch(db, bad, { status: 'failed', errorCode: 'ai_error', accepted: null, rejected: null, at: '2026-10-28T05:00:10.000Z' });
     expect((await clientDetail(db, 'SHA', NOW))!.lastSyncAt).toBe('2026-10-27T09:00:30.000Z');
-    const onlyFailed = startBatch(db, 2, 1, '2026-10-28T05:00:00.000Z');
-    finishBatch(db, onlyFailed, { status: 'failed', errorCode: 'ai_error', accepted: null, rejected: null, at: '2026-10-28T05:00:10.000Z' });
+    const onlyFailed = await startBatch(db, 2, 1, '2026-10-28T05:00:00.000Z');
+    await finishBatch(db, onlyFailed, { status: 'failed', errorCode: 'ai_error', accepted: null, rejected: null, at: '2026-10-28T05:00:10.000Z' });
     expect((await clientDetail(db, 'MEH', NOW))!.lastSyncAt).toBeNull();
   });
 
@@ -241,14 +241,14 @@ describe('the client drawer: what the agent has seen (owner decision, 28 Oct 202
     say(db, 1, '2026-10-28T05:00:00.000Z');
     say(db, 2, '2026-10-28T05:10:00.000Z');
     db.raw.prepare("UPDATE messages SET processed_at = '2026-10-28T05:20:00.000Z' WHERE wa_id = 'D1'").run();
-    const b = startBatch(db, 1, 6, '2026-10-28T05:19:00.000Z');
+    const b = await startBatch(db, 1, 6, '2026-10-28T05:19:00.000Z');
     // Three accepted ops: two on tasks, one a decision (no task): two task changes.
-    finishBatch(db, b, { status: 'ok', errorCode: null, accepted: 3, rejected: 0, at: '2026-10-28T05:20:00.000Z' });
+    await finishBatch(db, b, { status: 'ok', errorCode: null, accepted: 3, rejected: 0, at: '2026-10-28T05:20:00.000Z' });
     const t = task(db, 1, {});
     for (const op of ['create_task', 'update_task']) recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op, detail: {}, reason: null, sourceIds: [], at: '2026-10-28T05:20:00.000Z' });
     recordEvent(db, { taskId: null, clientId: 1, actor: 'ai', op: 'add_decision', detail: {}, reason: null, sourceIds: [], at: '2026-10-28T05:20:00.000Z' });
-    const failed = startBatch(db, 1, 1, '2026-10-28T05:40:00.000Z');
-    finishBatch(db, failed, { status: 'failed', errorCode: 'x', accepted: null, rejected: null, at: '2026-10-28T05:41:00.000Z' });
+    const failed = await startBatch(db, 1, 1, '2026-10-28T05:40:00.000Z');
+    await finishBatch(db, failed, { status: 'failed', errorCode: 'x', accepted: null, rejected: null, at: '2026-10-28T05:41:00.000Z' });
     const a = (await clientDetail(db, 'SHA', NOW, undefined, 5))!.activity;
     expect(a.pending).toBe(1);
     expect(a.quietMinutes).toBe(5);

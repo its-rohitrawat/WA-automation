@@ -1,6 +1,5 @@
 assistant/proposals.ts
 assistant/tools.ts
-brain/reconciler.ts
 cli/commands.ts
 cli/corrections.ts
 cli/meetings.ts
@@ -14,10 +13,8 @@ meetings/sttParts.ts
 output/googleAuth.ts
 output/googleAuthHub.ts
 spend/spendGuard.ts
-store/batches.ts
 store/clients.ts
 store/db.ts
-store/historyBackfill.ts
 store/kv.ts
 store/media.ts
 store/messages.ts

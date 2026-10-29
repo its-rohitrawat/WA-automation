@@ -87,10 +87,10 @@ describe('tasks repository', () => {
 
   it('records batches and reports the latest per client', async () => {
     const db = await seededDb();
-    const a = startBatch(db, 1, 3, NOW);
-    finishBatch(db, a, { status: 'ok', errorCode: null, accepted: 2, rejected: 0, at: NOW });
-    const b = startBatch(db, 1, 1, LATER);
-    finishBatch(db, b, { status: 'failed', errorCode: 'refusal', accepted: null, rejected: null, at: LATER });
-    expect(latestBatches(db)).toEqual([{ clientId: 1, status: 'failed', errorCode: 'refusal', finishedAt: LATER }]);
+    const a = await startBatch(db, 1, 3, NOW);
+    await finishBatch(db, a, { status: 'ok', errorCode: null, accepted: 2, rejected: 0, at: NOW });
+    const b = await startBatch(db, 1, 1, LATER);
+    await finishBatch(db, b, { status: 'failed', errorCode: 'refusal', accepted: null, rejected: null, at: LATER });
+    expect(await latestBatches(db)).toEqual([{ clientId: 1, status: 'failed', errorCode: 'refusal', finishedAt: LATER }]);
   });
 });

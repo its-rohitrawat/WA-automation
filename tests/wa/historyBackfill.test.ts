@@ -111,12 +111,12 @@ describe('history backfill: the anchor', () => {
     bf.start();
     await step();
     expect(asked).toEqual([]);
-    expect(backfillStatus(db, 1, at(0))).toEqual({ state: 'waiting', found: 0 });
+    expect(await backfillStatus(db, 1, at(0))).toEqual({ state: 'waiting', found: 0 });
     live(SHARMA.groupId, 'FIRST', at(-0.01));
     await step();
     expect(asked).toEqual([{ groupId: SHARMA.groupId, anchor: { waId: 'FIRST', fromMe: false, ts: at(-0.01) }, count: 50 }]);
     expect(getBackfill(db, SHARMA.groupId)).toMatchObject({ state: 'fetching', requests: 1 });
-    expect(backfillStatus(db, 1, at(0))).toEqual({ state: 'reading', found: 0 });
+    expect(await backfillStatus(db, 1, at(0))).toEqual({ state: 'reading', found: 0 });
   });
 
   it('uses the oldest message since the approval, not one kept from an earlier approval', async () => {
@@ -147,7 +147,7 @@ describe('history backfill: paging', () => {
     expect(getBackfill(db, SHARMA.groupId)?.state).toBe('done');
     // Found: what the backfill stored itself (B, C, D), not the new message it started from.
     expect(finished).toEqual([{ clientId: 1, found: 3, stopped: false }]);
-    expect(backfillStatus(db, 1, at(0))).toEqual({ state: 'done', found: 3 });
+    expect(await backfillStatus(db, 1, at(0))).toEqual({ state: 'done', found: 3 });
     await s.advance(REQUEST_GAP_MS * 3);
     expect(asked).toHaveLength(2);
   });
@@ -302,7 +302,7 @@ describe('history backfill: restart and the hold', () => {
     await new Promise((r) => setImmediate(r));
     expect(asked).toHaveLength(2);
     expect(getBackfill(db, SHARMA.groupId)?.requests).toBe(2);
-    expect(listBackfills(db)).toHaveLength(1);
+    expect(await listBackfills(db)).toHaveLength(1);
   });
 
   it('holds the client while fetching and WhatsApp is open, never longer than the cap', async () => {

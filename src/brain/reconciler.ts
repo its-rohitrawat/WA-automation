@@ -6,7 +6,7 @@ import type { SpendGuard } from '../spend/spendGuard.ts';
 import { finishBatch, startBatch } from '../store/batches.ts';
 import type { PriorityConfig } from '../config/prioritySettings.ts';
 import { getClient, setClientSentiment, setPhase, setStatus, type ClientRow } from '../store/clients.ts';
-import { txSync, type Db } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
 import { mediaForMessages } from '../store/media.ts';
 import { finishMeeting } from '../store/meetings.ts';
 import {
@@ -255,7 +255,7 @@ export class Reconciler {
     // Re-checks (edits, reactions, files read late) of old messages are skipped here: they must not pull the context back in time.
     const firstNew = batch.find((m) => !isRecheck(m));
     const recent = listRecentProcessed(db, clientId, 30, firstNew?.ts);
-    const people = listPeople(db, clientId);
+    const people = await listPeople(db, clientId);
     const openTasks = listTasks(db, clientId, ['open', 'maybe_done']);
     const decisions = listDecisions(db, clientId, 20);
     const reactions = reactionsFor(db, clientId, [...recent, ...batch].map((m) => m.waId));
@@ -274,9 +274,9 @@ export class Reconciler {
     if (!spend.canSpend(estimate)) return this.#spendBlocked(clientId, estimate);
 
     // Job C, P2: only an edit or a reaction made during the call may label a message queued again, never one from before
-    // this run. Nothing has awaited since the batch was listed, and the version check keeps any touch made since.
+    // this run. The version check keeps any touch made since the batch was listed (the media reads above await).
     clearTouches(db, batch.map((m) => ({ id: m.id, version: m.version })));
-    const batchId = startBatch(db, clientId, batch.length, now.toISOString());
+    const batchId = await startBatch(db, clientId, batch.length, now.toISOString());
     let result: { output: AiOutput; invalidOps: number };
     try {
       result = await this.#callWithRetry(system, user, `batch ${batchId}`, estimate, { sentiment: rules.sentiment });
@@ -284,7 +284,7 @@ export class Reconciler {
       // A retry that cannot reserve is not an AI error: a pause when the cap is the reason, busy when holds are.
       const blocked = e instanceof SpendCapReachedError ? this.#spendBlocked(clientId, estimate) : undefined;
       const errorCode = blocked?.status === 'busy' ? 'spend_busy' : errorCodeOf(e);
-      finishBatch(db, batchId, { status: 'failed', errorCode, accepted: null, rejected: null, at: clock.now().toISOString() });
+      await finishBatch(db, batchId, { status: 'failed', errorCode, accepted: null, rejected: null, at: clock.now().toISOString() });
       if (blocked) return blocked;
       log.warn({ clientId, batchId, errorCode }, 'reconcile failed; messages stay queued');
       return { status: 'failed', errorCode };
@@ -303,11 +303,12 @@ export class Reconciler {
     const appliedAt = clock.now();
     let applied: { accepted: AiOp[]; rejected: Rejection[]; requeued: number };
     try {
-      applied = txSync(db, () => {
+      // The ops are still applied on raw (S1.11 converts them), which is allowed inside this transaction.
+      applied = await db.tx(async (q) => {
         // The call can take minutes and a human can correct the tracker meanwhile, so validate against the
-        // client, tasks and people as they are now. Nothing can interleave inside this synchronous transaction.
+        // client, tasks and people as they are now. Nothing else runs on the database inside this transaction.
         const fresh = getClient(db, clientId);
-        const state = this.#validationState(fresh, clientId, { batchIds, contextIds, messageTs, editedIds, source: 'whatsapp' });
+        const state = await this.#validationState(q, fresh, clientId, { batchIds, contextIds, messageTs, editedIds, source: 'whatsapp' });
         const { accepted, rejected } = validateOps(result.output.ops, state);
         for (const op of accepted) this.#apply(fresh, op, evidence, appliedAt, rules);
         // fileUnread: the prompt showed the file as still being read. If it was read during the call, the message stays
@@ -318,12 +319,12 @@ export class Reconciler {
         }));
         const requeued = markProcessedIfUnchanged(db, seen, appliedAt.toISOString());
         flagRevokedSources(db, clientId); // a source message deleted during the call
-        finishBatch(db, batchId, { status: 'ok', errorCode: null, accepted: accepted.length, rejected: rejected.length, at: appliedAt.toISOString() });
+        await finishBatch(q, batchId, { status: 'ok', errorCode: null, accepted: accepted.length, rejected: rejected.length, at: appliedAt.toISOString() });
         return { accepted, rejected, requeued };
       });
     } catch (err) {
       // The transaction rolled back: nothing was applied and the messages stay queued.
-      finishBatch(db, batchId, { status: 'failed', errorCode: 'apply_failed', accepted: null, rejected: null, at: clock.now().toISOString() });
+      await finishBatch(db, batchId, { status: 'failed', errorCode: 'apply_failed', accepted: null, rejected: null, at: clock.now().toISOString() });
       log.error({ clientId, batchId, err }, 'applying operations failed; messages stay queued');
       return { status: 'failed', errorCode: 'apply_failed' };
     }
@@ -370,7 +371,7 @@ export class Reconciler {
     const reactions = reactionsFor(db, clientId, recent.map((m) => m.waId));
     const user = buildUserContent({
       client,
-      people: listPeople(db, clientId),
+      people: await listPeople(db, clientId),
       openTasks: listTasks(db, clientId, ['open', 'maybe_done']),
       decisions: listDecisions(db, clientId, 20),
       recent,
@@ -404,7 +405,7 @@ export class Reconciler {
       // The ops are still applied on raw (S1.11 converts them), which is allowed inside this transaction.
       applied = await db.tx(async (q) => {
         const fresh = getClient(db, clientId);
-        const state = this.#validationState(fresh, clientId, {
+        const state = await this.#validationState(q, fresh, clientId, {
           batchIds: new Set(items.map((it) => it.id)),
           contextIds: new Set(recent.map((m) => m.waId)),
           messageTs,
@@ -448,11 +449,12 @@ export class Reconciler {
    * The validator's view, read inside the apply transaction: the client, its open tasks, people and replay sources as
    * they are now, plus what this run's AI saw. Shared by WhatsApp and meeting runs.
    */
-  #validationState(
+  async #validationState(
+    q: Sql,
     fresh: ClientRow,
     clientId: number,
     run: Pick<ValidationState, 'batchIds' | 'contextIds' | 'messageTs' | 'editedIds' | 'source'>,
-  ): ValidationState {
+  ): Promise<ValidationState> {
     const { db } = this.#o;
     return {
       clientCode: fresh.code,
@@ -462,7 +464,7 @@ export class Reconciler {
       batchIds: run.batchIds,
       contextIds: run.contextIds,
       messageTs: run.messageTs,
-      peopleByJid: new Map(listPeople(db, clientId).map((p) => [p.jid, p])),
+      peopleByJid: new Map((await listPeople(q, clientId)).map((p) => [p.jid, p])),
       taskSourceIds: taskSourceIds(db, clientId),
       reminderSourceIds: reminderSourceIds(db, clientId),
       decisionSourceIds: decisionSourceIds(db, clientId),
