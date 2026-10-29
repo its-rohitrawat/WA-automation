@@ -293,6 +293,13 @@ async function main(): Promise<void> {
       // A reconnected main account uploads now, not after the failure backoff (up to 15 minutes).
       if (label === 'main') void app.publisher.publishNow().catch((err: unknown) => log.error({ err }, 'upload after the Google reconnect failed'));
     });
+    // Open chat: a message the last run claimed but never asked WhatsApp for is failed; one it was asking about may
+    // have gone and stays unknown. Neither is ever sent again. Settled here, before app.start(): nothing is awaited
+    // between app.start() and the stop handlers, and the dashboard cannot claim a new message yet.
+    if (env.DASHBOARD_ENABLED) {
+      const settled = await settleInterrupted(db, systemClock.now().toISOString());
+      if (settled.failed + settled.unknown > 0) log.warn(settled, 'dashboard messages interrupted by the last stop');
+    }
     app.start();
     log.info({ groups: configs.length }, 'WA Agent started');
     // Optional uptime heartbeat: visits HEARTBEAT_URL (never logged) every 5 minutes while the agent is up.
@@ -368,10 +375,6 @@ async function main(): Promise<void> {
       uptimeTimer = setInterval(keepUptime, UPTIME_TICK_MS);
       uptimeTimer.unref();
       const directory = new GroupDirectory({ gateway, clock: systemClock });
-      // Open chat: a message the last run claimed but never asked WhatsApp for is failed; one it was asking about may
-      // have gone and stays unknown. Neither is ever sent again.
-      const settled = await settleInterrupted(trackerStore, systemClock.now().toISOString());
-      if (settled.failed + settled.unknown > 0) log.warn(settled, 'dashboard messages interrupted by the last stop');
       const meetingsApi = google.meetings;
       const phoneLinks = links;
       agentRoutes = {
