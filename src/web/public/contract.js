@@ -278,3 +278,54 @@ export function readGroups(raw) {
     fetchedAt: iso(r.fetchedAt),
   };
 }
+
+const OUTBOX_STATES = ['claimed', 'sending', 'sent', 'failed', 'unknown'];
+
+/** A quote in a chat bubble, or null. @param {unknown} v */
+function quoteOf(v) {
+  if (!v || typeof v !== 'object') return null;
+  const q = obj(v);
+  return { sender: cut(str(q.sender), 80) || 'Someone', text: cut(str(q.text), 200), kind: MESSAGE_KINDS.includes(str(q.kind)) ? str(q.kind) : 'text' };
+}
+
+/** One message of the dashboard's own (sent, sending, failed or unknown). @param {unknown} v */
+function outboxOf(v) {
+  const o = obj(v);
+  const state = OUTBOX_STATES.includes(str(o.state)) ? str(o.state) : 'unknown';
+  return { uuid: str(o.uuid), at: iso(o.at), text: cut(str(o.text), 4096), state, quote: quoteOf(o.quote) };
+}
+
+/**
+ * GET /clients/:code/chat: the client, whether sending is on and WhatsApp connected, a page of messages (newest first)
+ * and the dashboard's own messages still to show. Every text is untrusted: shown with esc() or textContent only.
+ * @param {unknown} raw
+ */
+export function readChat(raw) {
+  const r = obj(raw);
+  const c = obj(r.client);
+  return {
+    client: { code: str(c.code), name: str(c.name), groupName: cut(str(c.groupName), 120) || str(c.name) },
+    sendingOn: r.sendingOn === true,
+    connected: r.connected === true,
+    hasOlder: r.hasOlder === true,
+    messages: arr(r.messages)
+      .map((m) => {
+        const x = obj(m);
+        return {
+          id: num(x.id), at: iso(x.at), mine: x.mine === true, sender: cut(str(x.sender), 80) || 'Someone', text: cut(str(x.text), 4096),
+          kind: MESSAGE_KINDS.includes(str(x.kind)) ? str(x.kind) : 'text',
+          seconds: typeof x.seconds === 'number' && Number.isFinite(x.seconds) ? x.seconds : null,
+          transcript: typeof x.transcript === 'string' && x.transcript ? cut(x.transcript, 2000) : null,
+          quote: quoteOf(x.quote), edited: x.edited === true, deleted: x.deleted === true,
+        };
+      })
+      .filter((m) => m.id > 0 && m.at !== null),
+    outbox: arr(r.outbox).map(outboxOf).filter((o) => o.uuid && o.at !== null),
+  };
+}
+
+/** The answer to POST /clients/:code/chat/send. @param {unknown} raw */
+export function readSendResult(raw) {
+  const r = obj(raw);
+  return { message: outboxOf(r.message), replayed: r.replayed === true };
+}

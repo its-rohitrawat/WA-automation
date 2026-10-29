@@ -4,6 +4,7 @@ import type { AuthenticationState, BaileysEventMap, GroupMetadata } from 'bailey
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { AllowList } from './allowlist.ts';
 import { backoffMs } from './backoff.ts';
+import { asGroupSendSocket, type GroupSendSocket } from './groupSend.ts';
 import { normalizeMessage, normalizeReaction, normalizeUpdate, type NormalizedEvent } from './normalize.ts';
 
 /**
@@ -47,7 +48,20 @@ export type BaileysLogger = NonNullable<Parameters<typeof makeWASocket>[0]['logg
 /** How the founder's phone lists this link under Linked devices. Fixed when the QR code is scanned. */
 export const TRACKER_DEVICE_NAME = 'WA Agent - Tracker';
 
-export function baileysSocketFactory(logger: BaileysLogger): SocketFactory {
+/**
+ * Baileys' getMessage: what to send again when a member's phone asks for a message it could not read (a retry receipt).
+ * Only a message this agent sent from the dashboard (Open chat, src/wa/groupSend.ts), found by its id in that group
+ * (sentText reads the outbox), and only as its text. Anything else: undefined, as before.
+ */
+export function retryMessage(sentText?: (waId: string, groupId: string) => string | undefined): (key: { id?: string | null; remoteJid?: string | null }) => Promise<{ conversation: string } | undefined> {
+  return async (key) => {
+    const text = sentText && key.id && key.remoteJid ? sentText(key.id, key.remoteJid) : undefined;
+    return text === undefined ? undefined : { conversation: text };
+  };
+}
+
+/** sentText: the outbox lookup for retryMessage (left out: getMessage answers nothing). */
+export function baileysSocketFactory(logger: BaileysLogger, sentText?: (waId: string, groupId: string) => string | undefined): SocketFactory {
   return (auth, cachedGroupMetadata) =>
     makeWASocket({
       auth: { creds: auth.creds, keys: makeCacheableSignalKeyStore(auth.keys, logger) },
@@ -57,7 +71,7 @@ export function baileysSocketFactory(logger: BaileysLogger): SocketFactory {
       syncFullHistory: false,
       generateHighQualityLinkPreview: false,
       enableRecentMessageCache: false,
-      getMessage: async () => undefined,
+      getMessage: retryMessage(sentText),
       cachedGroupMetadata,
     });
 }
@@ -92,6 +106,11 @@ export interface GatewayLike {
    * when it was not asked (not open, not allowed, stopped, or the request failed).
    */
   fetchHistory?(groupId: string, anchor: HistoryAnchor, count: number): Promise<boolean>;
+  /**
+   * The socket for src/wa/groupSend.ts, for an allowed group while open; null otherwise. Used only by the dashboard's
+   * Open chat, after the owner confirmed the message.
+   */
+  groupSocket?(groupId: string): GroupSendSocket | null;
 }
 
 export type Scheduler = (fn: () => void, ms: number) => { cancel(): void };
@@ -162,6 +181,13 @@ export class WhatsAppGateway implements GatewayLike {
     } catch {
       return false; // never the error: it can carry the request
     }
+  }
+
+  groupSocket(groupId: string): GroupSendSocket | null {
+    const sock = this.#sock;
+    // The allow-list again here: a group that is not approved never gets a socket.
+    if (this.#stopped || !sock || this.#status.state !== 'open' || !this.#opts.allow.has(groupId)) return null;
+    return asGroupSendSocket(sock);
   }
 
   status(): GatewayStatus {

@@ -1,9 +1,10 @@
-// The side drawer (client details, approving a group) and the centred dialog (linking a phone, connecting Google). One at
-// a time: modal, with a scrim. Escape, the scrim and every [data-close] close it, Tab stays inside it, and focus goes back
+// The side drawer (client details, approving a group), the centred dialog (linking a phone, connecting Google) and the
+// chat sheet (Open chat: phone-sized on a computer, the whole screen on a phone). One at a time: modal, with a scrim. Escape, the scrim and every [data-close] close it, Tab stays inside it, and focus goes back
 // to what opened it. Its markup comes from the caller, built with esc() for anything from the agent.
 import { $$, gsap, paint, reduceMotion } from '../dom.js';
 
-/** @type {{ el: HTMLElement, scrim: HTMLElement, kind: 'drawer' | 'modal', opener: Element | null, onClose: () => void } | null} */
+/** @typedef {'drawer' | 'modal' | 'chat'} LayerKind */
+/** @type {{ el: HTMLElement, scrim: HTMLElement, kind: LayerKind, opener: Element | null, onClose: () => void } | null} */
 let open = null;
 
 /** @param {KeyboardEvent} e */
@@ -40,7 +41,7 @@ export function focusFirst(el) {
 }
 
 /**
- * Opens a layer. @param {'drawer' | 'modal'} kind @param {string} html @param {{ onClose?: () => void }} opts
+ * Opens a layer. @param {LayerKind} kind @param {string} html @param {{ onClose?: () => void }} opts
  * @returns {HTMLElement}
  */
 function openLayer(kind, html, opts) {
@@ -48,7 +49,8 @@ function openLayer(kind, html, opts) {
   const scrim = document.createElement('div');
   scrim.className = 'scrim';
   const el = document.createElement(kind === 'drawer' ? 'aside' : 'div');
-  el.className = kind;
+  // The chat's class is chat-sheet: .chat is the Automations screen's phone preview.
+  el.className = kind === 'chat' ? 'chat-sheet' : kind;
   el.setAttribute('role', 'dialog');
   el.setAttribute('aria-modal', 'true');
   el.innerHTML = html;
@@ -69,6 +71,8 @@ function openLayer(kind, html, opts) {
   if (gsap && !reduceMotion) {
     gsap.fromTo(scrim, { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.2 });
     if (kind === 'drawer') gsap.fromTo(el, { xPercent: 100 }, { xPercent: 0, duration: 0.42, ease: 'expo.out' });
+    // Opacity only: moving the sheet as it opens put its message list back at the top; the chat opens at its newest message.
+    else if (kind === 'chat') gsap.fromTo(el, { opacity: 0 }, { opacity: 1, duration: 0.24, ease: 'power2.out', clearProps: 'opacity' });
     else gsap.fromTo(el, { scale: 0.96, autoAlpha: 0 }, { scale: 1, autoAlpha: 1, duration: 0.22, ease: 'power2.out', clearProps: 'transform' });
   }
   focusFirst(el);
@@ -80,6 +84,9 @@ export const openDrawer = (html, opts = {}) => openLayer('drawer', html, opts);
 
 /** Opens a centred dialog (an .m-head with an h2, then the body). @param {string} html @param {{ onClose?: () => void }} [opts] */
 export const openModal = (html, opts = {}) => openLayer('modal', html, opts);
+
+/** Opens the chat sheet (a .ch-head with an h2, the messages, the composer). @param {string} html @param {{ onClose?: () => void }} [opts] */
+export const openChatLayer = (html, opts = {}) => openLayer('chat', html, opts);
 
 /** Closes the open drawer or dialog, if any. `instant` skips the animation (when another replaces it). @param {boolean} [instant] */
 export function closeDrawer(instant = false) {
@@ -93,6 +100,7 @@ export function closeDrawer(instant = false) {
     scrim.remove();
   } else {
     if (kind === 'drawer') gsap.to(el, { xPercent: 100, duration: 0.25, ease: 'power2.in', onComplete: () => el.remove() });
+    else if (kind === 'chat') gsap.to(el, { y: 20, autoAlpha: 0, duration: 0.18, ease: 'power2.in', onComplete: () => el.remove() });
     else gsap.to(el, { autoAlpha: 0, scale: 0.97, duration: 0.15, onComplete: () => el.remove() });
     gsap.to(scrim, { autoAlpha: 0, duration: 0.2, onComplete: () => scrim.remove() });
   }

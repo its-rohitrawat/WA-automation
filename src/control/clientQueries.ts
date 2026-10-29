@@ -126,10 +126,23 @@ const UNPRINTABLE = /[\p{Cc}\u2028\u2029\u200B\u200E\u200F\u202A-\u202E\u2066-\u
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 /** One line of at most max visible characters (whole graphemes: never half an emoji or a conjunct), "…" when cut. */
-function oneLine(text: string | null, max = MESSAGE_CHARS): string {
+export function oneLine(text: string | null, max = MESSAGE_CHARS): string {
   const s = (text ?? '').replace(UNPRINTABLE, ' ').replace(/\s+/g, ' ').trim();
   const parts = Array.from(graphemes.segment(s), (g) => g.segment);
   return parts.length > max ? `${parts.slice(0, max - 1).join('').trimEnd()}…` : s;
+}
+
+/** The kind a stored message shows as: its media's kind, else its message type, else text. Shared with Open chat. */
+export function messageKind(kind: string | null, mediaType: string | null): ClientMessage['kind'] {
+  return (kind && MEDIA_KINDS.has(kind) ? kind
+    : mediaType && (MEDIA_KINDS.has(mediaType) || OTHER_KINDS.has(mediaType)) ? mediaType : mediaType ? 'other' : 'text') as ClientMessage['kind'];
+}
+
+/** The sender as shown: the saved name, cleaned, never one holding a phone number; else Founder or Someone. Shared with Open chat. */
+export function senderLabel(name: string | null, fromMe: boolean): string {
+  // Cleaned first, so marks around a number can't hide it.
+  const n = oneLine(name, SENDER_CHARS);
+  return n && !HAS_NUMBER.test(n) ? n : fromMe ? 'Founder' : 'Someone';
 }
 
 /** What the drawer shows about the client's group (see ClientActivity). Parameterised reads only. */
@@ -164,11 +177,8 @@ export function clientActivity(db: Db, c: ClientRow, now: Date, quietMinutes: nu
       kind: string | null; seconds: number | null; mediaStatus: string | null; hasText: number | null;
     }[];
   const latest = rows.map((r): ClientMessage => {
-    const kind = (r.kind && MEDIA_KINDS.has(r.kind) ? r.kind
-      : r.mediaType && (MEDIA_KINDS.has(r.mediaType) || OTHER_KINDS.has(r.mediaType)) ? r.mediaType : r.mediaType ? 'other' : 'text') as ClientMessage['kind'];
-    // Cleaned first, so marks around a number can't hide it; a name holding a phone number is never shown.
-    const name = oneLine(r.name, SENDER_CHARS);
-    const sender = name && !HAS_NUMBER.test(name) ? name : r.fromMe ? 'Founder' : 'Someone';
+    const kind = messageKind(r.kind, r.mediaType);
+    const sender = senderLabel(r.name, r.fromMe === 1);
     const audio = kind === 'voice' || kind === 'audio';
     return {
       sender, kind, text: oneLine(r.text), seconds: audio && Number.isInteger(r.seconds) ? r.seconds : null,

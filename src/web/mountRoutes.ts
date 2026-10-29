@@ -14,6 +14,7 @@ import type { AuditLog } from './audit.ts';
 import type { OwnerSession } from './guard.ts';
 import { HttpError, sendJson } from './http.ts';
 import { registerReadApi } from './routes/api.ts';
+import { chatReadHandler, chatSendHandler, type ChatDeps } from './routes/chat.ts';
 import { clientDetailHandler, clientsListHandler, type ClientsDeps } from './routes/clients.ts';
 import type { ApiResult, AuditFn, OwnerContext } from './routes/context.ts';
 import { registerControlApi } from './routes/controlScreens.ts';
@@ -48,6 +49,8 @@ export interface AgentRoutesDeps {
   settings: Pick<SettingsStore, 'view' | 'set'>;
   groups: Omit<GroupsDeps, 'audit'>;
   clients: ClientsDeps;
+  /** Open chat: a client's messages, and sending (when switched on in Settings); the audit is bound here. */
+  chat?: Omit<ChatDeps, 'audit'>;
   /** Google reconnect and add-account; the audit is bound here. */
   google: Omit<GoogleConnectDeps, 'audit'>;
   actions: Omit<ActionDeps, 'audit'>;
@@ -106,6 +109,12 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   read('/dashboard/api/groups/suggest-code', ({ url }, o) => suggestCodeHandler(groups, o, url.searchParams.get('name') ?? ''));
   read('/dashboard/api/clients', (_ctx, o) => clientsListHandler(d.clients, o));
   read('/dashboard/api/clients/:code', ({ params }, o) => clientDetailHandler(d.clients, o, params.code!));
+  if (d.chat) {
+    const chat: ChatDeps = { ...d.chat, audit };
+    read('/dashboard/api/clients/:code/chat', ({ params, url }, o) =>
+      chatReadHandler(chat, o, params.code!, { before: url.searchParams.get('before'), limit: url.searchParams.get('limit') }));
+    change('/dashboard/api/clients/:code/chat/send', ({ params }, o, body) => chatSendHandler(chat, o, params.code!, body));
+  }
 
   // Google reconnect and add-account (D3).
   const google = new GoogleConnectRoutes({ ...d.google, audit });

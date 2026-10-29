@@ -4,7 +4,7 @@
 
 Do the steps once, in order. Commands run in **Command Prompt**. "Admin" means: right-click Command Prompt and choose *Run as administrator*.
 
-What WA Agent does: it quietly reads the WhatsApp client groups you allow, keeps a task tracker, and updates an Excel file in Google Drive. It also saves the images and documents shared in those groups, reads them for the tracker, and puts the files that clients send into Drive. It never sends a WhatsApp message.
+What WA Agent does: it quietly reads the WhatsApp client groups you allow, keeps a task tracker, and updates an Excel file in Google Drive. It also saves the images and documents shared in those groups, reads them for the tracker, and puts the files that clients send into Drive. It never sends a WhatsApp message on its own. The one exception is **Open chat** in the dashboard: off until you switch it on, it sends only a text you have confirmed (see "Open chat" below).
 
 ## 1. Prepare the PC (admin)
 
@@ -331,7 +331,7 @@ With no active clients it reads `Good morning. No open tasks. Today's tracker: �
 - No report goes out on Saturday or Sunday. `REPORT_DAYS` changes the days (see step 4 below). `report send-now` still works on any day.
 - The founder needs view access to `Tracker.xlsx` on Drive, or the link asks for access (step 6 below).
 - The link exists only once the tracker has reached Google Drive. Until then the report is not sent, and the status says why (see "Checking it" below).
-- The founder's own number is unchanged: the agent still only reads it and never sends from it.
+- The founder's own number is unchanged by the report: the report never sends from it. (Only Open chat can, when you switch it on; see "Open chat".)
 - The spare number sends only to `REPORT_RECIPIENT`. It reads no chats, sends no read receipts, and is online only for the minute it takes to send.
 - If the PC is off or offline at 06:00, the report goes as soon as possible, but only until 12:00 IST. After that the day is skipped.
 - It is never sent twice on one day.
@@ -488,6 +488,18 @@ Every saved change is recorded in **Audit logs**. The dashboard writes the same 
 When WhatsApp is not connected, the page shows the last list it had ("WhatsApp isn't connected") and you can still approve from it.
 
 **Fallback, when the dashboard can't be reached:** edit `allowed-groups.json` by hand as in step 5 (`list-groups`, then the file). Do not edit the file by hand while someone saves in the dashboard.
+
+### Open chat (a client's group, and replying when allowed)
+
+In **Clients**, open a client and press **Open chat**. It shows the group's messages as the agent stored them: names, times, a line for each day, and photos, files and voice notes as labels (a voice note with its words, once they are written out). Scrolling up loads older messages; new ones appear with the Clients screen's refresh (every 30 seconds). **Back** returns to the client.
+
+**Replying is off until you switch it on**, in **Settings → Sending from the dashboard → Allow sending from the dashboard**. Read the note there first: WhatsApp can restrict or ban a number that sends from a linked tool like this one. When it is on:
+
+- Type a message (text only) and press **Send**, or press **Reply** on a message to quote it. A dialog shows the exact text and the group: "Send this from your WhatsApp to <group>?". Nothing goes out until you press **Send** in it.
+- It goes from the founder's WhatsApp to everyone in the group, and appears on the founder's phone as sent from there. It only ever goes to an approved client group.
+- Limits: one message every 3 seconds to the same group, 30 an hour in all, 4,096 characters each.
+- Under the message: **Sent** (it went), **Not sent** (it surely did not go, for example WhatsApp was not connected), or **Not sure it was sent, check WhatsApp** (WhatsApp was asked but gave no clear answer). The agent never sends a message again by itself: look in the group on the phone before you send it again.
+- **Audit logs** gets a line for each message (the client, its length and what happened; never the text), and for each time the setting is switched on or off.
 
 ### Fixing a connection in the dashboard
 

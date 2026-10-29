@@ -6,11 +6,12 @@ import type { Logger } from '../util/logger.ts';
 import { INDIAN_MOBILE, maskNumber, type Env } from './env.ts';
 
 // Runtime settings (D5 Task 1, spec 4.7): the values the owner changes from the dashboard, kept in the settings table
-// (migration v9) as JSON. .env gives the defaults; a dashboard value wins. Only these three keys exist: the spend cap,
+// (migration v9) as JSON. .env gives the defaults; a dashboard value wins. Only these keys exist: the spend cap,
 // the send time and the deadline stay .env-only, so raising a limit stays a deliberate step on the Mac.
+// dashboardSend (Open chat) has no .env value: it is off until the owner switches it on in Settings.
 // The founder's number is never put in an error or an audit line in full: maskNumber shows its last 4 digits.
 
-export const SETTING_KEYS = ['reportEnabled', 'reportDays', 'reportRecipient'] as const;
+export const SETTING_KEYS = ['reportEnabled', 'reportDays', 'reportRecipient', 'dashboardSend'] as const;
 export type SettingKey = (typeof SETTING_KEYS)[number];
 export type SettingSource = 'env' | 'dashboard';
 
@@ -22,6 +23,8 @@ export interface RuntimeSettings {
   reportDays: ReportDays;
   /** The founder's number, digits only. Server-side only: the browser gets view() instead. */
   reportRecipient: string | undefined;
+  /** Open chat may send from the founder's WhatsApp. Off by default. */
+  dashboardSend: boolean;
   source: Record<SettingKey, SettingSource>;
 }
 
@@ -33,6 +36,7 @@ export interface SettingsView {
   /** The earliest send time and the catch-up deadline, IST "HH:MM" (.env only). */
   sendAt: string;
   deadline: string;
+  dashboardSend: boolean;
   source: Record<SettingKey, SettingSource>;
 }
 
@@ -42,6 +46,7 @@ type Listener = (settings: RuntimeSettings, key: SettingKey) => void;
 function check(key: SettingKey, v: unknown): boolean | ReportDays | string | undefined {
   switch (key) {
     case 'reportEnabled':
+    case 'dashboardSend':
       return typeof v === 'boolean' ? v : undefined;
     case 'reportDays':
       return typeof v === 'string' && (REPORT_DAYS as readonly string[]).includes(v) ? (v as ReportDays) : undefined;
@@ -101,11 +106,16 @@ export class SettingsStore {
     const enabled = this.#stored('reportEnabled');
     const days = this.#stored('reportDays');
     const recipient = this.#stored('reportRecipient');
+    const send = this.#stored('dashboardSend');
     return {
       reportEnabled: enabled ? (enabled.value as boolean) : this.#env.REPORT_ENABLED,
       reportDays: days ? (days.value as ReportDays) : this.#env.REPORT_DAYS,
       reportRecipient: recipient ? (recipient.value as string) : this.#env.REPORT_RECIPIENT,
-      source: { reportEnabled: enabled ? 'dashboard' : 'env', reportDays: days ? 'dashboard' : 'env', reportRecipient: recipient ? 'dashboard' : 'env' },
+      dashboardSend: send ? (send.value as boolean) : false,
+      source: {
+        reportEnabled: enabled ? 'dashboard' : 'env', reportDays: days ? 'dashboard' : 'env', reportRecipient: recipient ? 'dashboard' : 'env',
+        dashboardSend: send ? 'dashboard' : 'env',
+      },
     };
   }
 
@@ -114,7 +124,7 @@ export class SettingsStore {
     const s = this.get();
     return {
       reportEnabled: s.reportEnabled, reportDays: s.reportDays, recipientMasked: s.reportRecipient ? maskNumber(s.reportRecipient) : null,
-      sendAt: this.#env.REPORT_TIME, deadline: this.#env.REPORT_DEADLINE, source: s.source,
+      sendAt: this.#env.REPORT_TIME, deadline: this.#env.REPORT_DEADLINE, dashboardSend: s.dashboardSend, source: s.source,
     };
   }
 
@@ -142,6 +152,7 @@ export class SettingsStore {
     if (value === undefined) {
       const message = {
         reportEnabled: 'reportEnabled must be true or false',
+        dashboardSend: 'dashboardSend must be true or false',
         reportDays: `reportDays must be one of: ${REPORT_DAYS.join(', ')}`,
         reportRecipient: 'The number must be an Indian mobile number with 91 in front, for example 91 98765 43210',
       }[key];
@@ -155,6 +166,7 @@ export class SettingsStore {
     if (current[key] === value) return current;
     const detail =
       key === 'reportEnabled' ? `Morning briefing switched ${value ? 'on' : 'off'}`
+      : key === 'dashboardSend' ? `Sending from the dashboard switched ${value ? 'on' : 'off'}`
       : key === 'reportDays' ? `Morning briefing days set to ${DAYS_WORDS[value as ReportDays]}`
       : `Morning briefing number changed to ${maskNumber(value as string)}`;
     tx(this.#db, () => {

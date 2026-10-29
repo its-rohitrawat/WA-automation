@@ -44,8 +44,8 @@ describe('who may send on WhatsApp', () => {
     expect(files).toEqual(expect.arrayContaining(['wa/gateway.ts', 'wa/senderGateway.ts', 'app.ts']));
   });
 
-  it('no module except src/wa/senderGateway.ts names a Baileys send method', () => {
-    const offenders = sources().filter((s) => s.file !== 'wa/senderGateway.ts' && SEND_NAMES.test(s.text)).map((s) => s.file);
+  it('no module except src/wa/senderGateway.ts and src/wa/groupSend.ts names a Baileys send method', () => {
+    const offenders = sources().filter((s) => s.file !== 'wa/senderGateway.ts' && s.file !== 'wa/groupSend.ts' && SEND_NAMES.test(s.text)).map((s) => s.file);
     expect(offenders).toEqual([]);
   });
 
@@ -104,5 +104,53 @@ describe('the one request the founder reader makes (history backfill, 28 Oct 202
     const guard = text.lastIndexOf("if (this.#stopped || !sock || this.#status.state !== 'open' || !this.#opts.allow.has(groupId)) return false;", call);
     expect(guard).toBeGreaterThan(-1);
     expect(call - guard).toBeLessThan(300);
+  });
+});
+
+describe('the one send from the founder’s WhatsApp (Open chat, 29 Oct 2026)', () => {
+  const groupSend = () => readFileSync(join(SRC, 'wa', 'groupSend.ts'), 'utf8');
+
+  it('groupSend calls sendMessage once, and names no other outbound method', () => {
+    const text = groupSend();
+    expect(text.match(/\.sendMessage\(/g)).toHaveLength(1);
+    // The interface, the check that a socket has it, and the one call. Nothing else.
+    expect(text.match(/\bsendMessage\b/g)).toHaveLength(3);
+    expect(text).not.toMatch(OTHER_OUTBOUND);
+  });
+
+  it('the call comes after the group check and the founder gateway’s own check', () => {
+    const text = groupSend();
+    const body = text.slice(text.indexOf('export async function sendGroupText('));
+    const call = body.indexOf('sock.sendMessage(');
+    expect(call).toBeGreaterThan(-1);
+    for (const before of ['if (!GROUP_JID.test(groupId)) return', 'const sock = source(groupId);', 'if (!sock) return']) {
+      expect(body.indexOf(before), before).toBeGreaterThan(-1);
+      expect(body.indexOf(before), before).toBeLessThan(call);
+    }
+  });
+
+  it('the founder gateway gives its socket only for an approved group while open, right before handing it over', () => {
+    const text = readFileSync(join(SRC, 'wa', 'gateway.ts'), 'utf8');
+    const give = text.indexOf('return asGroupSendSocket(sock);');
+    expect(give).toBeGreaterThan(-1);
+    expect(text.match(/asGroupSendSocket\(/g)).toHaveLength(1);
+    const guard = text.lastIndexOf("if (this.#stopped || !sock || this.#status.state !== 'open' || !this.#opts.allow.has(groupId)) return null;", give);
+    expect(guard).toBeGreaterThan(-1);
+    expect(give - guard).toBeLessThan(200);
+  });
+
+  it('only the dashboard’s chat route sends, and only the gateways hand out the socket', () => {
+    expect(sources().filter((s) => /\bsendGroupText\(/.test(s.text)).map((s) => s.file).sort()).toEqual(['wa/groupSend.ts', 'web/routes/chat.ts']);
+    expect(sources().filter((s) => /\bgroupSocket\(/.test(s.text)).map((s) => s.file).sort()).toEqual(['main.ts', 'wa/gateway.ts', 'wa/switchableGateway.ts']);
+  });
+
+  it('the chat route checks the setting, the client and the limits, and claims the row before it sends', () => {
+    const text = readFileSync(join(SRC, 'web', 'routes', 'chat.ts'), 'utf8');
+    const send = text.indexOf('await sendGroupText(');
+    expect(send).toBeGreaterThan(-1);
+    for (const before of ['if (!deps.sendingOn()) return', 'const c = approvedClient(deps, code);', 'claimOutbox(deps.db,', 'markSending(deps.db,', "'dashboard send: asking WhatsApp'"]) {
+      expect(text.indexOf(before), before).toBeGreaterThan(-1);
+      expect(text.indexOf(before), before).toBeLessThan(send);
+    }
   });
 });
