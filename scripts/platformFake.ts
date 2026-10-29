@@ -21,7 +21,11 @@ import { PUBLIC_DIR, type WebServer } from '../src/web/server.ts';
 
 const FOUNDER = 'owner@example.com';
 
-/** The hookups, as the owning lanes will apply them: the platform screens' import and their nav entries. */
+/**
+ * The hookups, as the owning lanes will apply them: the platform screens' import (2.3) and their nav entries (2.4, 5.1).
+ * Getting started (5.1) is for customer sessions only; the preview shows it to everyone because its one signed-in person
+ * is both the founder and a customer's member, and the shell has no session role until customer sessions exist (4.2).
+ */
 export function patchedShell(): { app: string; router: string } {
   const app = readFileSync(join(PUBLIC_DIR, 'app.js'), 'utf8');
   const router = readFileSync(join(PUBLIC_DIR, 'router.js'), 'utf8');

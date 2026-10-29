@@ -90,3 +90,12 @@
 :root[data-theme="light"] .pf-signup .si-denied, :root[data-theme="light"] .pf-signup .si-error { color: var(--text); }
 :root[data-theme="light"] .pf-signup .si-denied b, :root[data-theme="light"] .pf-signup .si-error b { color: #b23247; }
 :root[data-theme="light"] .pf-signup .si-foot { color: var(--faint); }
+
+/* Room for the floating Ask button (assistant.css: a pill 24px from the corner on laptops, a 52px circle 16px from it on
+   phones). Row actions sit outside its lane, on the left of it on laptops and at the left of each card on phones, and the
+   end of each platform screen scrolls clear of it. */
+.view:has(.pf-cust, .pf-col-form, .pf-steps) { padding-bottom: 112px; }
+.pf-cust td:last-child, .pf-inv td:last-child { padding-right: 120px; }
+@media (max-width: 720px) {
+  .pf-cust td:last-child, .pf-inv td:last-child { padding-right: 56px; justify-content: flex-start; }
+}

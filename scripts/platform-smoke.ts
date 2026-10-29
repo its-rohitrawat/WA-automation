@@ -48,6 +48,24 @@ async function shot(page: Page, where: string, name: string, full = true) {
   await page.screenshot({ path: join(OUT, `${name}.png`), fullPage: full });
 }
 
+/** The floating Ask button never covers a control: row actions sit outside its lane, and the screen's end scrolls clear of it. */
+async function clearOfAsk(page: Page, where: string) {
+  const fab = await page.locator('.asst-fab').boundingBox();
+  if (!fab) return fail(where, 'no Ask button');
+  for (const b of await page.locator('.pf-cust td:last-child, .pf-inv td:last-child').locator('button, a').all()) {
+    const box = await b.boundingBox();
+    if (box && box.x + box.width > fab.x - 4) fail(where, `"${(await b.textContent())?.trim()}" sits in the Ask button's lane`);
+  }
+  await page.locator('.view').evaluate((v) => v.scrollIntoView({ block: 'end' }));
+  const covered = await page.evaluate((f) => [...document.querySelectorAll('.view :is(button, a, input, select, textarea)')]
+    .filter((e) => {
+      const r = e.getBoundingClientRect();
+      return r.width > 0 && r.right > f.x && r.left < f.x + f.width && r.bottom > f.y && r.top < f.y + f.height;
+    })
+    .map((e) => e.textContent?.trim().slice(0, 30) || e.tagName), fab);
+  if (covered.length) fail(where, `the Ask button covers ${covered.join(', ')} at the end of the screen`);
+}
+
 async function launch() {
   for (const channel of CHANNELS) {
     try {
@@ -98,6 +116,7 @@ try {
       }
       if ((await p.locator('#nav [data-go="invite"]').count()) !== 1) fail(where, 'no nav entry');
       await shot(p, where, `invite-${tag}`);
+      await clearOfAsk(p, where);
 
       where = `invite copy link ${tag}`;
       await p.locator('[data-invite] [name="business"]').fill(`Joshi Interiors ${round}`);
@@ -190,6 +209,7 @@ try {
       await p.locator('.pf-step.locked .pf-step-head').first().click({ force: true });
       await p.locator('.toast', { hasText: 'Finish WhatsApp and your API key first.' }).waitFor();
       await shot(p, where, `onboarding-${tag}`);
+      await clearOfAsk(p, where);
 
       where = `onboarding active ${tag}`;
       fakeSteps.whatsapp = 'done';
@@ -213,6 +233,7 @@ try {
       if ((await p.locator('.pf-cust tbody tr', { hasText: 'Your studio' }).locator('[data-pause]').count()) !== 0) fail(where, 'the founder can be paused');
       if ((await p.locator('#nav [data-go="customers"]').count()) !== 1) fail(where, 'no nav entry');
       await shot(p, where, `customers-${tag}`);
+      await clearOfAsk(p, where);
 
       where = `customers pause ${tag}`;
       const nairRow = p.locator('.pf-cust tbody tr', { hasText: 'Nair Digital Works' });

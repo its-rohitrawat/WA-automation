@@ -86,7 +86,12 @@ In `NAV`, the `System` group (line 10), at its start:
 ['System', [['customers', 'Customers', 'store'], ['invite', 'Invite a customer', 'mail'], ['connections', 'Connections', 'plug'], …
 ```
 
-(The preview and smoke test apply exactly 2.3 and 2.4 to the copies they serve: `scripts/platformFake.ts`, `patchedShell`.)
+These two System entries are for the founder only. The Getting started entry is not part of 2.4: it is for customer
+sessions only (5.1), never the founder.
+
+(The preview and smoke test apply 2.3, 2.4 and the 5.1 entry to the copies they serve: `scripts/platformFake.ts`,
+`patchedShell`. The preview shows Getting started to the founder too, only because its one signed-in person is both the
+founder and a customer's member, and the shell has no session role yet.)
 
 ### 2.5 `src/web/oidc.ts` (lane A): the screens a sign-in may return to
 
