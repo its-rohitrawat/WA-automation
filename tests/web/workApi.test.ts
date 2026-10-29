@@ -16,7 +16,7 @@ afterEach(async () => {
 async function boot(o: { paused?: boolean; actionCapacity?: number } = {}) {
   const db = seededDb();
   const clock = manualClock(NOW);
-  createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'high', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
+  createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
     deadline: null, latestProgress: null, sourceQuote: 'secret words from the chat', sourceDate: '2026-10-10', sourceWaId: null, origin: 'whatsapp' }, NOW);
   insertFound(db, {
     recording: 'conferenceRecords/a/recordings/b', conference: 'conferenceRecords/a', driveFileId: 'd1', meetingCode: null, title: 'Weekly sync',

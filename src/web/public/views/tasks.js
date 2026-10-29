@@ -3,14 +3,14 @@
 import { get } from '../api.js';
 import { $, esc, icon } from '../dom.js';
 import { openTaskDrawer } from './taskDrawer.js';
-import { empty, failed, listen, loading, pill, setQuery } from './ui.js';
-import { deadlineText, sourceLabel, taskPill, taskQueryFromSearch, taskQueryToSearch } from './workLib.js';
+import { empty, failed, listen, loading, moodTag, pill, setQuery } from './ui.js';
+import { deadlineText, moodLabel, priorityPill, sourceLabel, taskPill, taskQueryFromSearch, taskQueryToSearch } from './workLib.js';
 
 /** @typedef {import('./registry.js').ScreenCtx} ScreenCtx */
 /** @typedef {import('./workLib.js').TaskFilter} TaskFilter */
 /**
  * @typedef {{ code: string, title: string, client: { code: string, name: string }, owner: string | null, deadline: string | null,
- *   status: string, overdue: boolean, priority: string, source: string }} TaskRow
+ *   status: string, overdue: boolean, priority: string | null, sentiment: string | null, source: string }} TaskRow
  */
 
 const SORTABLE = [['code', 'Task'], ['client', 'Client'], ['owner', 'Owner'], ['deadline', 'Deadline'], ['status', 'Status']];
@@ -52,7 +52,7 @@ export function mountTasks(ctx) {
     ${sel('status', 'Any status', [['overdue', 'Overdue'], ['open', 'Open'], ['review', 'Needs review'], ['done', 'Done']])}
     ${sel('owner', 'Any owner', owners.map((o) => [o, o]))}
     ${sel('deadline', 'Any deadline', [['past', 'Past deadline'], ['week', 'Due this week'], ['none', 'No deadline']])}
-    ${sel('priority', 'Any priority', [['high', 'High'], ['medium', 'Medium'], ['low', 'Low']])}
+    ${sel('priority', 'Any priority', [['critical', 'Critical'], ['major', 'Major'], ['medium', 'Medium'], ['low', 'Low']])}
     <span class="count-note" data-region="count"></span></div>`;
 
   const th = (/** @type {string} */ k, /** @type {string} */ l) => {
@@ -63,13 +63,13 @@ export function mountTasks(ctx) {
   const table = () => {
     if (err && !data) return failed(err);
     if (!data) return loading('Loading tasks…');
-    const head = `<thead><tr>${th('code', 'Task')}<th>Title</th>${SORTABLE.slice(1).map(([k, l]) => th(k, l)).join('')}<th>Priority</th><th>Source</th></tr></thead>`;
+    const head = `<thead><tr>${th('code', 'Task')}<th>Title</th>${SORTABLE.slice(1).map(([k, l]) => th(k, l)).join('')}${th('priority', 'Priority')}<th>Source</th></tr></thead>`;
     const rows = data.rows.map((t) => {
       const src = sourceLabel(t.source);
-      return `<tr data-task="${esc(t.code)}" tabindex="0"><td data-label="Task"><span class="code">${esc(t.code)}</span></td><td class="ttl" data-label="Title">${esc(t.title)}</td>
+      return `<tr data-task="${esc(t.code)}" tabindex="0"><td data-label="Task"><span class="code">${esc(t.code)}</span></td><td class="ttl" data-label="Title">${esc(t.title)}${t.sentiment ? ` ${moodTag(moodLabel(t.sentiment))}` : ''}</td>
         <td data-label="Client">${esc(t.client.name)}</td><td data-label="Owner">${esc(t.owner ?? '—')}</td>
         <td data-label="Deadline" class="${t.overdue ? 'od' : ''}">${esc(deadlineText(t.deadline))}</td><td data-label="Status">${pill(taskPill(t.status))}</td>
-        <td data-label="Priority" class="pri-${esc(t.priority)}">${esc(t.priority[0]?.toUpperCase() + t.priority.slice(1))}</td>
+        <td data-label="Priority">${pill(priorityPill(t.priority))}</td>
         <td data-label="Source"><span class="src">${icon(src.icon, 15)}${esc(src.label)}</span></td></tr>`;
     }).join('');
     return `<div class="card flush"><div class="tbl-wrap"><table class="tbl tbl-cards"><caption class="sr-only">Tasks</caption>${head}<tbody>${rows || `<tr><td colspan="8">${empty('No tasks match these filters.')}</td></tr>`}</tbody></table></div></div>`;

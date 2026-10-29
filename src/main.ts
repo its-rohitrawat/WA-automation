@@ -10,6 +10,7 @@ import type { Env } from './config/env.ts';
 import { GROUPS_FILE_MISSING_MESSAGE, loadGroupsFile, watchGroupsFile } from './config/groups.ts';
 import type { ClientConfig } from './config/groups.ts';
 import { masterKeyPath, sessionDbPath, trackerDbPath } from './config/paths.ts';
+import { PrioritySettings } from './config/prioritySettings.ts';
 import { SettingsStore } from './config/settingsStore.ts';
 import { ActionRateLimiter, claudeModelsCheck } from './control/actions.ts';
 import { historyReadEntry, publisherAuditHooks } from './control/activityQueries.ts';
@@ -234,10 +235,13 @@ async function main(): Promise<void> {
     // The dashboard's audit log (tracker.db audit_log): sign-in, the owner's changes, phone links and the agent's uploads.
     const auditLog = env.DASHBOARD_ENABLED ? new AuditLog(db, systemClock) : undefined;
     const historyDb = db;
+    // Priority keywords and the sentiment switch: the dashboard changes them, every batch reads them (defaults without it).
+    const prioritySettings = new PrioritySettings({ db, clock: systemClock });
     const app = createApp({
       db,
       clock: systemClock,
       log,
+      priority: () => prioritySettings.get(),
       gateway,
       allow,
       ai: new ClaudeClient({ apiKey, model: env.AI_MODEL, effort: env.AI_EFFORT, prices }),
@@ -371,6 +375,7 @@ async function main(): Promise<void> {
           uptime: { log: log30, ...(env.UPTIMEROBOT_READ_KEY ? { robot: new UptimeRobotClient({ apiKey: env.UPTIMEROBOT_READ_KEY, clock: systemClock, log }) } : {}) },
           ownerEmails: env.DASHBOARD_OWNER_EMAILS,
           settings: store,
+          priority: prioritySettings,
           groups: {
             db: trackerStore, directory, groupsFile: env.GROUPS_FILE, configs: () => currentConfigs,
             groupKey: makeGroupKey(deriveSubkey(key, GROUP_KEY_INFO)), log, clock: systemClock,

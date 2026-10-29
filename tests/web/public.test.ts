@@ -326,7 +326,14 @@ describe('Clients and Manage groups (D2)', () => {
     expect(h({ state: '<b>', found: 3 })).toBeNull();
     const d = readClientDetail({ client: { code: 'DES', name: 'Desai', meetings: [{ id: 1, startedAt: '2026-10-27T06:00:00Z', title: '', status: 'done' }], openTasks: [{ code: 'DES-001', title: 'Quote', assignedTo: null, deadline: null, status: 'open' }] } });
     expect(d.meetings[0].title).toBe('Untitled meeting');
-    expect(d.openTasks[0]).toEqual({ code: 'DES-001', title: 'Quote', assignedTo: null, deadline: null, status: 'open' });
+    expect(d.openTasks[0]).toEqual({ code: 'DES-001', title: 'Quote', assignedTo: null, deadline: null, status: 'open', priority: null, sentiment: null });
+    expect(d.sentiment).toBeNull();
+    // Priority and mood: only the known words; anything else is none.
+    const mood = readClientDetail({ client: { code: 'DES', sentiment: { mood: 'frustrated', at: '2026-10-27T06:00:00Z' }, openTasks: [
+      { code: 'DES-002', priority: 'critical', sentiment: 'positive' }, { code: 'DES-003', priority: '<b>', sentiment: 'angry' }] } });
+    expect(mood.sentiment).toEqual({ mood: 'frustrated', at: '2026-10-27T06:00:00Z' });
+    expect(mood.openTasks.map((t: { priority: unknown; sentiment: unknown }) => [t.priority, t.sentiment])).toEqual([['critical', 'positive'], [null, null]]);
+    expect(readClientDetail({ client: { code: 'DES', sentiment: { mood: 'sad' } } }).sentiment).toBeNull();
     expect(() => readClientDetail(undefined)).not.toThrow();
   });
 });

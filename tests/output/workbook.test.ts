@@ -10,7 +10,7 @@ import type { ClientConfig } from '../../src/config/groups.ts';
 import { MEHTA, NOW, seededDb, SHARMA } from '../helpers/db.ts';
 
 const task = (o: Partial<NewTask> = {}): NewTask => ({
-  clientId: 1, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'high', assignedTo: 'Rahul', askedBy: 'Mr. Sharma',
+  clientId: 1, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'major', assignedTo: 'Rahul', askedBy: 'Mr. Sharma',
   raisedOn: '2026-10-10', deadline: '2026-10-18', latestProgress: 'v2 shared 15 Oct', sourceQuote: 'banner thoda bright karo', sourceDate: '2026-10-10',
   sourceWaId: 'm1', origin: 'whatsapp', ...o,
 });
@@ -92,6 +92,25 @@ describe('buildWorkbook', () => {
     expect((row.getCell(1).fill as ExcelJS.FillPattern).fgColor?.argb).toBe('FFFFD9D2');
     expect((findRow(ws, 'SHA-003').getCell(1).fill as ExcelJS.FillPattern).fgColor?.argb).toBe('FFD8F5DD');
     expect(findRow(ws, 'Our pending tasks')).toBeDefined();
+  });
+
+  it('appends Priority level and Sentiment after every existing column, the old Priority kept in D', async () => {
+    const db = fixture();
+    db.prepare("UPDATE tasks SET priority_level = 'critical', priority_source = 'keyword', sentiment = 'frustrated' WHERE code = 'SHA-001'").run();
+    db.prepare("UPDATE tasks SET priority_level = NULL, sentiment = 'positive' WHERE code = 'SHA-002'").run();
+    const sheet = async () => (await load(await buildWorkbook(loadTrackerView(db, now, healthy)))).getWorksheet('Sharma Interiors')!;
+    const headerAbove = (ws: ExcelJS.Worksheet, title: string) => (ws.getRow(findRow(ws, title).number + 1).values as unknown[]).slice(1);
+    let ws = await sheet();
+    expect(headerAbove(ws, 'Our pending tasks')).toEqual(['ID', 'Task', 'Category', 'Priority', 'Assigned to', 'Asked by', 'Raised', 'Deadline', 'Age (days)', 'Latest progress', 'Reminders', 'Status', 'Source message', 'Priority level', 'Sentiment']);
+    expect(headerAbove(ws, 'Done').slice(12)).toEqual(['Source message', 'Closed on', 'Priority level', 'Sentiment']);
+    // Sentiment off: the column is there and empty.
+    expect([4, 14, 15].map((c) => findRow(ws, 'SHA-001').getCell(c).value)).toEqual(['High', 'Critical', '']);
+    expect([4, 14, 15].map((c) => findRow(ws, 'SHA-002').getCell(c).value)).toEqual(['High', '—', '']);
+    expect([14, 15, 16].map((c) => findRow(ws, 'SHA-003').getCell(c).value)).toEqual([new Date(Date.UTC(2026, 9, 15)), 'Major', '']);
+    db.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', ?, 'o')").run(NOW);
+    ws = await sheet();
+    expect(findRow(ws, 'SHA-001').getCell(15).value).toBe('Frustrated');
+    expect(findRow(ws, 'SHA-002').getCell(15).value).toBe('Positive');
   });
 
   it('shows (none) in empty sections and marks inactive clients', async () => {

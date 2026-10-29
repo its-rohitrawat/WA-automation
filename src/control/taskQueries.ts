@@ -1,5 +1,6 @@
+import { readSentimentEnabled } from '../config/prioritySettings.ts';
 import type { Db } from '../store/db.ts';
-import { PRIORITIES, TASK_FIELDS, type Category, type Priority, type Side, type TaskField } from '../store/tasks.ts';
+import { PRIORITIES, TASK_FIELDS, type Category, type Priority, type PrioritySource, type Sentiment, type Side, type TaskField } from '../store/tasks.ts';
 import { istDate } from '../util/time.ts';
 import { ControlError } from './errors.ts';
 
@@ -10,7 +11,7 @@ import { ControlError } from './errors.ts';
 export const TASK_STATUSES = ['overdue', 'open', 'review', 'done'] as const;
 export type DashboardTaskStatus = (typeof TASK_STATUSES)[number];
 export const TASK_DEADLINES = ['past', 'week', 'none'] as const;
-export const TASK_SORTS = ['deadline', 'code', 'client', 'owner', 'status'] as const;
+export const TASK_SORTS = ['deadline', 'code', 'client', 'owner', 'status', 'priority'] as const;
 export type TaskSource = 'whatsapp' | 'meeting' | 'voice';
 
 export const TASK_LIMIT_DEFAULT = 100;
@@ -41,7 +42,12 @@ export interface DashboardTaskRow {
   /** overdue (not done, deadline before today IST), then done, review (maybe done) and open. */
   status: DashboardTaskStatus;
   overdue: boolean;
-  priority: Priority;
+  /** null for a task from before priority levels (shown as "—"). */
+  priority: Priority | null;
+  /** What set it: an owner's keyword, the AI or the owner. */
+  prioritySource: PrioritySource | null;
+  /** The client's mood about the task; null while sentiment is switched off. */
+  sentiment: Sentiment | null;
   category: Category;
   source: TaskSource;
   updatedAt: string;
@@ -54,6 +60,8 @@ export interface TaskHistoryItem {
 }
 
 export interface DashboardTaskDetail extends DashboardTaskRow {
+  /** The owner's keyword that set the priority, when one did. */
+  priorityKeyword: string | null;
   sourceQuote: string | null;
   sourceDate: string | null;
   /** The sender deleted the message the task came from (the quote is what was read before that). */
@@ -125,7 +133,8 @@ const SOURCE_SQL = `CASE WHEN t.meeting_id IS NOT NULL OR t.origin = 'meeting' T
   ELSE 'whatsapp' END`;
 
 const SELECT_SQL = `SELECT t.code, t.title, c.code AS clientCode, c.name AS clientName, t.side, t.assigned_to AS owner, t.asked_by AS askedBy,
-    t.deadline, ${STATUS_SQL} AS status, t.priority, t.category, ${SOURCE_SQL} AS source, t.updated_at AS updatedAt,
+    t.deadline, ${STATUS_SQL} AS status, t.priority_level AS priority, t.priority_source AS prioritySource, t.priority_keyword AS priorityKeyword,
+    t.sentiment, t.category, ${SOURCE_SQL} AS source, t.updated_at AS updatedAt,
     t.id, t.source_quote AS sourceQuote, t.source_date AS sourceDate, t.source_revoked AS sourceRevoked, t.latest_progress AS latestProgress,
     t.reminder_count AS remindedCount
   FROM tasks t JOIN clients c ON c.id = t.client_id`;
@@ -140,7 +149,10 @@ interface RawRow {
   askedBy: string | null;
   deadline: string | null;
   status: DashboardTaskStatus;
-  priority: Priority;
+  priority: Priority | null;
+  prioritySource: PrioritySource | null;
+  priorityKeyword: string | null;
+  sentiment: Sentiment | null;
   category: Category;
   source: TaskSource;
   updatedAt: string;
@@ -152,13 +164,17 @@ interface RawRow {
   remindedCount: number;
 }
 
-function toRow(r: RawRow): DashboardTaskRow {
+/** moods: sentiment is switched on; off, no task's mood leaves here. */
+function toRow(r: RawRow, moods: boolean): DashboardTaskRow {
   return {
     code: r.code, title: r.title, client: { code: r.clientCode, name: r.clientName }, side: r.side, owner: r.owner, askedBy: r.askedBy,
-    deadline: r.deadline, status: r.status, overdue: r.status === 'overdue', priority: r.priority, category: r.category, source: r.source,
-    updatedAt: r.updatedAt,
+    deadline: r.deadline, status: r.status, overdue: r.status === 'overdue', priority: r.priority, prioritySource: r.prioritySource,
+    sentiment: moods ? r.sentiment : null, category: r.category, source: r.source, updatedAt: r.updatedAt,
   };
 }
+
+/** Critical first; a task without a level last (asc). */
+const PRIORITY_RANK_SQL = `CASE t.priority_level WHEN 'critical' THEN 0 WHEN 'major' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END`;
 
 /** The ORDER BY for a sort. dir comes from the parsed filter's fixed list, never from raw input. */
 function orderBy(sort: TaskQuery['sort'], dir: 'asc' | 'desc'): string {
@@ -175,6 +191,8 @@ function orderBy(sort: TaskQuery['sort'], dir: 'asc' | 'desc'): string {
       return `t.assigned_to IS NULL, lower(t.assigned_to) ${d}, ${tie}`;
     case 'status':
       return `${STATUS_RANK_SQL} ${d}, ${tie}`;
+    case 'priority':
+      return `${PRIORITY_RANK_SQL} ${d}, ${tie}`;
   }
 }
 
@@ -212,7 +230,7 @@ export function listDashboardTasks(db: Db, f: TaskQuery, now: Date): { total: nu
     params.weekEnd = addDays(today, 6);
   }
   if (f.priority !== undefined) {
-    where.push('t.priority = @priority');
+    where.push('t.priority_level = @priority');
     params.priority = f.priority;
   }
   const whereSql = where.length > 0 ? ` WHERE ${where.join(' AND ')}` : '';
@@ -220,7 +238,8 @@ export function listDashboardTasks(db: Db, f: TaskQuery, now: Date): { total: nu
   const rows = db
     .prepare(`${SELECT_SQL}${whereSql} ORDER BY ${orderBy(f.sort, f.dir)} LIMIT @limit OFFSET @offset`)
     .all({ ...params, limit: f.limit, offset: f.offset }) as RawRow[];
-  return { total, rows: rows.map(toRow) };
+  const moods = readSentimentEnabled(db);
+  return { total, rows: rows.map((r) => toRow(r, moods)) };
 }
 
 /** Plain words for the task fields, as the history and the audit log name them. */
@@ -276,7 +295,8 @@ export function taskDetail(db: Db, rawCode: string, now: Date): DashboardTaskDet
     .prepare('SELECT at, actor, op, detail FROM task_events WHERE task_id = ? ORDER BY at, id')
     .all(r.id) as { at: string; actor: 'ai' | 'human'; op: string; detail: string }[];
   return {
-    ...toRow(r),
+    ...toRow(r, readSentimentEnabled(db)),
+    priorityKeyword: r.priorityKeyword,
     sourceQuote: r.sourceQuote,
     sourceDate: r.sourceDate,
     sourceRevoked: r.sourceRevoked === 1,

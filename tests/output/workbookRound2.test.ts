@@ -10,7 +10,7 @@ import { addDecision, createTask, logReminder, setTaskStatus, type NewTask } fro
 import { NOW, seededDb, SHARMA } from '../helpers/db.ts';
 
 const task = (o: Partial<NewTask> = {}): NewTask => ({
-  clientId: 1, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'high', assignedTo: 'Rahul', askedBy: 'Mr. Sharma',
+  clientId: 1, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'major', assignedTo: 'Rahul', askedBy: 'Mr. Sharma',
   raisedOn: '2026-10-10', deadline: '2026-10-18', latestProgress: null, sourceQuote: 'banner thoda bright karo', sourceDate: '2026-10-10',
   sourceWaId: 'm1', origin: 'whatsapp', ...o,
 });
@@ -67,9 +67,9 @@ describe('workbook round 2', () => {
   it('orders open tasks by priority, deadline (none last) and code; done by newest close', () => {
     const db = seededDb();
     createTask(db, task({ title: 'low early', priority: 'low', deadline: '2026-10-01' }), NOW); // 001
-    createTask(db, task({ title: 'high none', priority: 'high', deadline: null }), NOW); // 002
-    createTask(db, task({ title: 'high late', priority: 'high', deadline: '2026-10-30' }), NOW); // 003
-    createTask(db, task({ title: 'high early', priority: 'high', deadline: '2026-10-20' }), NOW); // 004
+    createTask(db, task({ title: 'high none', priority: 'major', deadline: null }), NOW); // 002
+    createTask(db, task({ title: 'high late', priority: 'major', deadline: '2026-10-30' }), NOW); // 003
+    createTask(db, task({ title: 'high early', priority: 'major', deadline: '2026-10-20' }), NOW); // 004
     createTask(db, task({ title: 'med', priority: 'medium', deadline: '2026-10-05' }), NOW); // 005
     const d1 = createTask(db, task({ title: 'd1' }), NOW); // 006
     const d2 = createTask(db, task({ title: 'd2' }), NOW); // 007

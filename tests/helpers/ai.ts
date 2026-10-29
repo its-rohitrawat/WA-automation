@@ -1,4 +1,4 @@
-import type { AiCallResult, AiClient } from '../../src/brain/claudeClient.ts';
+import type { AiCallResult, AiClient, ReconcileOptions } from '../../src/brain/claudeClient.ts';
 import type { AiOp, AiOutput } from '../../src/brain/schema.ts';
 
 /** A complete AI operation with every unused field null. */
@@ -24,6 +24,8 @@ export type FakeResponse = AiOutput | FakeResult | Error;
 /** Returns queued responses in order; an Error in the queue is thrown. Empty queue = no changes. */
 export class FakeAi implements AiClient {
   readonly calls: { system: string; user: string }[] = [];
+  /** Each call's options, in the same order as calls (kept apart so calls stays { system, user }). */
+  readonly options: (ReconcileOptions | undefined)[] = [];
   /** When set, each call waits for this promise before answering (for concurrency tests). */
   gate: Promise<unknown> | null = null;
   readonly #responses: FakeResponse[];
@@ -36,8 +38,9 @@ export class FakeAi implements AiClient {
     this.#responses.push(...responses);
   }
 
-  async reconcile(system: string, user: string): Promise<AiCallResult> {
+  async reconcile(system: string, user: string, opts?: ReconcileOptions): Promise<AiCallResult> {
     this.calls.push({ system, user });
+    this.options.push(opts);
     if (this.gate) await this.gate;
     const next = this.#responses.shift() ?? { ops: [] };
     if (next instanceof Error) throw next;

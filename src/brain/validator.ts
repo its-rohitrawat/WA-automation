@@ -101,7 +101,8 @@ export function validateOps(ops: AiOp[], s: ValidationState): { accepted: AiOp[]
           }
           changes++;
         }
-        if (changes === 0) { reject('no unlocked fields to change'); continue; }
+        // A new mood alone is a change too (sentiment switched on); it is never locked.
+        if (changes === 0 && !op.sentiment) { reject('no unlocked fields to change'); continue; }
         accepted.push(stripped);
         continue;
       }

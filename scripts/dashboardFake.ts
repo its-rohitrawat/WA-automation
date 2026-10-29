@@ -263,11 +263,13 @@ function fakeGroupsApi(state: FakeState) {
     if (!c) return null;
     return {
       ...c,
+      // Sentiment is on in the fake: Acme's latest batch read as frustrated.
+      sentiment: code === 'ACM' ? { mood: 'frustrated', at: at(3) } : null,
       openTasks: c.counts.open
         ? [
-            { code: `${code}-004`, title: 'Send the revised quote', assignedTo: 'Rohit', deadline: at(60 * 24 * 2).slice(0, 10), status: 'open' },
-            { code: `${code}-007`, title: 'Share moodboard v2', assignedTo: null, deadline: at(-60 * 24 * 3).slice(0, 10), status: 'open' },
-            { code: `${code}-009`, title: 'Confirm the launch date', assignedTo: 'Arjun', deadline: null, status: 'maybe_done' },
+            { code: `${code}-004`, title: 'Send the revised quote', assignedTo: 'Rohit', deadline: at(60 * 24 * 2).slice(0, 10), status: 'open', priority: 'critical', sentiment: 'frustrated' },
+            { code: `${code}-007`, title: 'Share moodboard v2', assignedTo: null, deadline: at(-60 * 24 * 3).slice(0, 10), status: 'open', priority: 'medium', sentiment: 'neutral' },
+            { code: `${code}-009`, title: 'Confirm the launch date', assignedTo: 'Arjun', deadline: null, status: 'maybe_done', priority: null, sentiment: null },
           ]
         : [],
       meetings: code === 'ACM' ? [{ id: 1, startedAt: at(90), title: 'Weekly review', status: 'done' }, { id: 2, startedAt: at(20), title: '', status: 'queued' }] : [],

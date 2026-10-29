@@ -3,6 +3,7 @@
 // in-memory database of made-up clients, tasks and meetings. No file is opened; nothing reaches the agent, WhatsApp,
 // Google or any data folder. The owner session is the fake's flag, checked by a stand-in for D1's guard.
 import { parseEnv } from '../src/config/env.ts';
+import { PrioritySettings } from '../src/config/prioritySettings.ts';
 import { SettingsStore } from '../src/config/settingsStore.ts';
 import { UptimeLog } from '../src/health/uptimeLog.ts';
 import { SpendGuard } from '../src/spend/spendGuard.ts';
@@ -11,7 +12,7 @@ import { syncClients } from '../src/store/clients.ts';
 import { openDb } from '../src/store/db.ts';
 import { setKv } from '../src/store/kv.ts';
 import { insertFound } from '../src/store/meetings.ts';
-import { createTask } from '../src/store/tasks.ts';
+import { createTask, PRIORITIES, SENTIMENTS } from '../src/store/tasks.ts';
 import { systemClock } from '../src/util/clock.ts';
 import { AuditLog } from '../src/web/audit.ts';
 import type { Guard, OwnerSession } from '../src/web/guard.ts';
@@ -34,10 +35,14 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
   ]);
   const titles = ['Send the revised quote', 'Share moodboard v2', 'Confirm the launch date', 'Fix the footer on mobile', 'Book the photo shoot', 'A very long task title that goes on and on to check that nothing scrolls sideways on a phone'];
   titles.forEach((title, i) => createTask(db, {
-    clientId: (i % 2) + 1, side: i % 3 === 0 ? 'client' : 'us', title, category: 'design', priority: i === 0 ? 'high' : 'medium',
+    clientId: (i % 2) + 1, side: i % 3 === 0 ? 'client' : 'us', title, category: 'design', priority: PRIORITIES[i % PRIORITIES.length]!,
+    prioritySource: i === 0 ? 'keyword' : 'ai', priorityKeyword: i === 0 ? 'urgent' : null, sentiment: SENTIMENTS[i % SENTIMENTS.length]!,
     assignedTo: i % 2 ? 'Rohit' : null, askedBy: null, raisedOn: day(i + 1).slice(0, 10), deadline: i < 2 ? day(i - 2).slice(0, 10) : null,
     latestProgress: null, sourceQuote: 'made-up words', sourceDate: day(i + 1).slice(0, 10), sourceWaId: null, origin: 'whatsapp',
   }, day(i + 1)));
+  // One task from before priority levels: no level, shown as "—".
+  db.prepare("UPDATE tasks SET priority_level = NULL, priority_source = NULL, sentiment = NULL WHERE id = 5").run();
+  db.prepare("UPDATE clients SET sentiment = 'frustrated', sentiment_at = ? WHERE id = 1").run(day(0.1));
   insertFound(db, {
     recording: 'conferenceRecords/a/recordings/b', conference: 'conferenceRecords/a', driveFileId: 'd1', meetingCode: null, title: 'Weekly sync',
     startedAt: day(1), endedAt: null, attendees: [], participants: [], clientId: null, matchKind: null, status: 'unassigned', driveSeconds: 1800, createdAt: day(1),
@@ -54,6 +59,9 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
   const uptime = new UptimeLog(db, clock);
   uptime.start(true);
   const settings = new SettingsStore({ db, env: parseEnv({ REPORT_RECIPIENT: '919800000000' }), clock, spareLinked: () => false });
+  // Sentiment on, so every screen shows the moods; the switch on Settings turns it off again.
+  const priority = new PrioritySettings({ db, clock });
+  priority.set('sentimentEnabled', true, OWNER, () => {});
 
   const session = (): OwnerSession => {
     if (!o.signedIn()) throw new HttpError(401, 'unauthenticated', 'Sign in first.');
@@ -69,7 +77,7 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
   const action = { guard, actions: { hit: () => {} } };
   registerWorkApi(web.router, { ...action, db, clock, audit, spend, health: () => ({ line: { ok: true, text: 'All good' }, lastPublishedAt: day(0.01), publishFailingSince: null }) });
   registerControlApi(web.router, {
-    ...action, db, clock, audit, spend, voiceLocal: true, uptime: { log: uptime }, isOwner: (e) => e === OWNER, settings,
+    ...action, db, clock, audit, spend, voiceLocal: true, uptime: { log: uptime }, isOwner: (e) => e === OWNER, settings, priority,
     sessions: { destroyAllFor: () => 0 }, secureFor: () => false,
   });
 }

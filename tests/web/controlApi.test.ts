@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { parseEnv } from '../../src/config/env.ts';
+import { PrioritySettings } from '../../src/config/prioritySettings.ts';
 import { SettingsStore } from '../../src/config/settingsStore.ts';
 import { UptimeLog } from '../../src/health/uptimeLog.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
@@ -32,7 +33,7 @@ async function boot(o: { linked?: boolean; secureCookies?: boolean; actionCapaci
     mount: (router, x) => {
       sessions = x.sessions;
       registerControlApi(router, {
-        ...x, db, clock, audit, spend, voiceLocal: true, uptime: { log: uptime }, isOwner: (e) => e.toLowerCase() === OWNER, settings, sessions: x.sessions,
+        ...x, db, clock, audit, spend, voiceLocal: true, uptime: { log: uptime }, isOwner: (e) => e.toLowerCase() === OWNER, settings, priority: new PrioritySettings({ db, clock }), sessions: x.sessions,
         secureFor: () => o.secureCookies ?? false,
       });
     },
@@ -114,6 +115,45 @@ describe('control API: sign out everywhere', () => {
     const { h } = await boot();
     expect((await h.post('/dashboard/api/session/signout-everywhere', { csrf: null })).status).toBe(403);
     expect((await h.get('/dashboard/api/session')).status).toBe(200);
+  });
+});
+
+describe('control API: priority and sentiment settings', () => {
+  const PATH = '/dashboard/api/settings/priority';
+  const LISTS = { critical: ['urgent'], major: [], medium: [], low: ['no rush'] };
+
+  it('needs a signed-in owner to read, and answers the lists, the switch and the limits', async () => {
+    const { h } = await boot();
+    expect((await h.get(PATH, { cookie: null })).status).toBe(401);
+    expect(await h.get(PATH)).toMatchObject({
+      status: 200, json: { sentimentEnabled: false, keywords: { critical: expect.any(Array) }, source: { priorityKeywords: 'default' }, limits: { perLevel: 30, maxChars: 40 } },
+    });
+  });
+
+  it('saves keywords and the switch only with the owner, the Origin and CSRF, and audits each', async () => {
+    const { db, h } = await boot();
+    expect((await h.post(PATH, { cookie: null, body: { key: 'sentimentEnabled', value: true } })).status).toBe(401);
+    expect((await h.post(PATH, { origin: 'https://evil.example', body: { key: 'sentimentEnabled', value: true } })).status).toBe(403);
+    expect((await h.post(PATH, { csrf: null, body: { key: 'sentimentEnabled', value: true } })).status).toBe(403);
+    expect(auditRows(db)).toEqual([]);
+    expect(await h.post(PATH, { body: { key: 'priorityKeywords', value: LISTS } })).toMatchObject({ status: 200, json: { keywords: LISTS, source: { priorityKeywords: 'dashboard' } } });
+    expect(await h.post(PATH, { body: { key: 'sentimentEnabled', value: true } })).toMatchObject({ status: 200, json: { sentimentEnabled: true } });
+    expect(auditRows(db)).toEqual([
+      { actor: OWNER, event: 'settings.priorityKeywords', kind: 'config', detail: 'Priority keywords saved (Critical 1, Major 0, Medium 0, Low 1)' },
+      { actor: OWNER, event: 'settings.sentimentEnabled', kind: 'config', detail: 'Sentiment analysis switched on' },
+    ]);
+    expect(requestIds(db).every((r) => typeof r === 'string' && r.length > 0)).toBe(true);
+  });
+
+  it('refuses bad keys and values with 422, naming the field', async () => {
+    const { db, h } = await boot();
+    expect(await h.post(PATH, { body: { key: 'reportEnabled', value: true } })).toMatchObject({ status: 422, json: { error: { field: 'key' } } });
+    expect(await h.post(PATH, { body: { key: 'sentimentEnabled', value: 'on' } })).toMatchObject({ status: 422, json: { error: { field: 'sentimentEnabled' } } });
+    expect(await h.post(PATH, { body: { key: 'priorityKeywords', value: { ...LISTS, major: ['Urgent'] } } }))
+      .toMatchObject({ status: 422, json: { error: { field: 'major', message: 'Major keyword 1 is already in Critical: keep each keyword in one list' } } });
+    expect((await h.post(PATH, { body: [] })).status).toBe(422);
+    expect((await h.post(PATH, { body: { value: true } })).status).toBe(422);
+    expect(auditRows(db)).toEqual([]);
   });
 });
 

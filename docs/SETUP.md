@@ -326,7 +326,7 @@ Monday to Friday at 06:00 IST, the founder gets one short WhatsApp message from 
 
 `Good morning. 5 open tasks, 2 overdue. Today's tracker: https://drive.google.com/file/d/…/view`
 
-With no active clients it reads `Good morning. No open tasks. Today's tracker: …`; with active clients and nothing open it reads `Good morning. 0 open tasks, 0 overdue. Today's tracker: …`. No file is attached: the link opens `Tracker.xlsx` on its **Today** tab (the first tab), which lists, per active client, how many tasks are open and overdue and the 3 most urgent open tasks (tagged `us` or `client`). It makes no AI call, so it costs nothing.
+With no active clients it reads `Good morning. No open tasks. Today's tracker: …`; with active clients and nothing open it reads `Good morning. 0 open tasks, 0 overdue. Today's tracker: …`. When open tasks are critical, the message starts with how many, for example `Good morning. 2 critical, 5 open tasks, 2 overdue. Today's tracker: …`. No file is attached: the link opens `Tracker.xlsx` on its **Today** tab (the first tab), which lists, per active client, how many tasks are open and overdue and the 3 most urgent open tasks (tagged `us` or `client`), critical ones first. It makes no AI call, so it costs nothing.
 
 - No report goes out on Saturday or Sunday. `REPORT_DAYS` changes the days (see step 4 below). `report send-now` still works on any day.
 - The founder needs view access to `Tracker.xlsx` on Drive, or the link asks for access (step 6 below).
@@ -519,6 +519,18 @@ The agent always writes one tracker file, `Tracker.xlsx` in the `WA Agent` folde
 - **Go back to the old file:** on **Connections**, press **Reconnect** on the Google card and sign in with the account that owns the old file (Drive shows a file's owner in its details). Then check on the **Tracker** screen which file it writes.
 - **Keep the new file:** do nothing. The agent goes on with it, and the old file stays in Drive as it was.
 
+### Priority and sentiment
+
+Every task has a priority: **Critical**, **Major**, **Medium** or **Low**. It shows as a coloured pill on **Tasks**, in the task panel and in a client's panel, and in the tracker's **Priority level** column. Tasks from before this version show `—` until the agent next touches them or a keyword sets one. The tracker's old **Priority** column (High, Medium, Low) stays where it was; Critical and Major count as High there.
+
+What sets a priority:
+
+1. **You.** In the task panel, **Edit owner, deadline or priority**, or `npm run cli -- task edit <code> --priority critical`. A priority you set stays until you hand the task back with **unlock**.
+2. **Your keywords.** On **Settings**, under **Priority & sentiment**, four lists of words: one per priority. When a task's messages contain one of the words, that sets its priority straight away, at no cost. A word matches as a whole word in any case, in English, Hinglish or Hindi (`urgent` does not match `urgently`), and the most urgent list with a match wins. Once a task exists, a keyword in later messages can only raise its priority, never lower it. Add spelling variants as separate words (`zaroori`, `zaruri`). Avoid words that also appear in "no hurry" phrases: with `jaldi` in Critical, "koi jaldi nahi" would be critical too.
+3. **The agent**, when no keyword matched. It reads the priority from the chat in the same AI call that finds the tasks: no extra call.
+
+**Sentiment** (off at first) is how the client feels: positive, neutral, negative or frustrated, judged from the client's own words and reactions in new messages. Switch it on under **Settings › Priority & sentiment**. It then shows as a small label on tasks, in a client's panel ("Client mood") and in the tracker's **Sentiment** column. It adds a little to each AI read (a few words per change it returns). Switched off, the agent does not ask for it and no mood is shown anywhere. Every change to the keywords or the switch is recorded in **Audit logs**, and both apply from the next messages read.
+
 ## Everyday commands (run in the waagent window)
 
 | Command | What it does |
@@ -552,7 +564,7 @@ Notes:
   - *not uploaded to Drive*: uploads that gave up (see "Status "files could not be uploaded to Drive"" below).
   - Voice notes count as files here too. With a paid speech-to-text service the line can end with `· including N voice notes waiting (speech key refused)` (see "Voice notes" below).
   - The counts leave out clients removed from the allow-list. Their files wait, untouched, until the client is added back.
-- **`task edit`** options: `--title`, `--side` (us or client), `--category` (design, development, content, payment, approval, other), `--priority` (high, medium, low), `--assigned-to`, `--asked-by`, `--deadline` (YYYY-MM-DD or `none`), `--latest-progress`. Fields you fix by hand stay fixed until you run `task unlock`.
+- **`task edit`** options: `--title`, `--side` (us or client), `--category` (design, development, content, payment, approval, other), `--priority` (critical, major, medium, low), `--assigned-to`, `--asked-by`, `--deadline` (YYYY-MM-DD or `none`), `--latest-progress`. Fields you fix by hand stay fixed until you run `task unlock`.
 - **`person set <number> <team|client>`**: use the full number with country code and no `+` or spaces (for example `919812345678`). A WhatsApp id (it contains `@`) also works. People who show no number in the People section cannot be fixed with `person set` yet. Add `--client ABC` to change the role in one client group only.
 - **`task unlock`** and **`phase unlock`** let the AI change that task or phase again.
 - **`rebuild`** shows up in Drive within about a minute (a 30-second check, then a 60-second upload wait).

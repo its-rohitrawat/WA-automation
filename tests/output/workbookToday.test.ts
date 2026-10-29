@@ -42,11 +42,11 @@ function body(ws: ExcelJS.Worksheet): unknown[][] {
  */
 function fixture(): Db {
   const db = seededDb();
-  createTask(db, task({ title: 'Homepage copy', priority: 'high', deadline: '2026-10-25' }), NOW);
+  createTask(db, task({ title: 'Homepage copy', priority: 'major', deadline: '2026-10-25' }), NOW);
   createTask(db, task({ side: 'client', title: 'Send logo files', priority: 'low', deadline: '2026-10-18' }), NOW);
   createTask(db, task({ title: 'Inner pages', deadline: '2026-10-19' }), NOW);
-  createTask(db, task({ title: 'Domain setup', priority: 'high', raisedOn: '2026-10-05' }), NOW);
-  const done = createTask(db, task({ title: 'Moodboard', priority: 'high', deadline: '2026-10-01' }), NOW);
+  createTask(db, task({ title: 'Domain setup', priority: 'major', raisedOn: '2026-10-05' }), NOW);
+  const done = createTask(db, task({ title: 'Moodboard', priority: 'major', deadline: '2026-10-01' }), NOW);
   setTaskStatus(db, done.id, 'done', '2026-10-15', NOW, 'ai');
   const maybe = createTask(db, task({ title: 'Contact form' }), NOW);
   setTaskStatus(db, maybe.id, 'maybe_done', '2026-10-15', NOW, 'ai');
@@ -72,7 +72,7 @@ describe('Today tab', () => {
       ['Sharma Interiors', 5, 1, '', '', '', '', ''],
       ['', '', '', 'client', 'SHA-002', 'Send logo files', date('2026-10-18'), 'overdue'],
       ['', '', '', 'us', 'SHA-003', 'Inner pages', date('2026-10-19'), 'due today'],
-      ['', '', '', 'us', 'SHA-004', 'Domain setup', '', 'high priority'],
+      ['', '', '', 'us', 'SHA-004', 'Domain setup', '', 'major'],
       ['Total', 6, 1, '', '', '', '', ''],
     ]);
   });
@@ -92,14 +92,14 @@ describe('Today tab', () => {
 
   it('lists maybe done tasks and all four notes', async () => {
     const db = seededDb();
-    const t = createTask(db, task({ title: 'Launch', priority: 'high', deadline: '2026-10-19' }), NOW);
+    const t = createTask(db, task({ title: 'Launch', priority: 'major', deadline: '2026-10-19' }), NOW);
     setTaskStatus(db, t.id, 'maybe_done', '2026-10-19', NOW, 'ai');
-    createTask(db, task({ title: 'Old one', priority: 'high', deadline: '2026-10-02' }), NOW);
+    createTask(db, task({ title: 'Old one', priority: 'major', deadline: '2026-10-02' }), NOW);
     createTask(db, task({ title: 'Later', deadline: '2026-10-25' }), NOW);
     const rows = body(await today(db)).filter((r) => r[4] !== '');
     expect(rows.map((r) => [r[4], r[6], r[7]])).toEqual([
-      ['SHA-002', date('2026-10-02'), 'overdue, high priority'],
-      ['SHA-001', date('2026-10-19'), 'due today, high priority, maybe done'],
+      ['SHA-002', date('2026-10-02'), 'overdue, major'],
+      ['SHA-001', date('2026-10-19'), 'due today, major, maybe done'],
       ['SHA-003', date('2026-10-25'), ''],
     ]);
   });

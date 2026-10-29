@@ -333,4 +333,20 @@ CREATE INDEX task_events_task ON task_events(task_id, at, id);
 ALTER TABLE uptime_log ADD COLUMN reason TEXT CHECK (reason IS NULL OR length(reason) BETWEEN 1 AND 100);
 `,
   },
+  {
+    // Priority and sentiment (29 Oct 2026). priority_level is the four-level priority every screen shows; the old
+    // priority column (high/medium/low, NOT NULL) stays and is kept in step (critical and major are high), so nothing
+    // that reads it changes. priority_source says what set the level, priority_keyword the owner's keyword that did.
+    // sentiment: the client's mood about a task, and the client's mood in its latest batch. Tasks from before this stay
+    // without a level ("—") until a keyword or the AI sets one. Additive only.
+    version: 11,
+    sql: `
+ALTER TABLE tasks ADD COLUMN priority_level TEXT CHECK (priority_level IS NULL OR priority_level IN ('critical', 'major', 'medium', 'low'));
+ALTER TABLE tasks ADD COLUMN priority_source TEXT CHECK (priority_source IS NULL OR priority_source IN ('keyword', 'ai', 'human'));
+ALTER TABLE tasks ADD COLUMN priority_keyword TEXT CHECK (priority_keyword IS NULL OR length(priority_keyword) BETWEEN 1 AND 200);
+ALTER TABLE tasks ADD COLUMN sentiment TEXT CHECK (sentiment IS NULL OR sentiment IN ('positive', 'neutral', 'negative', 'frustrated'));
+ALTER TABLE clients ADD COLUMN sentiment TEXT CHECK (sentiment IS NULL OR sentiment IN ('positive', 'neutral', 'negative', 'frustrated'));
+ALTER TABLE clients ADD COLUMN sentiment_at TEXT;
+`,
+  },
 ];

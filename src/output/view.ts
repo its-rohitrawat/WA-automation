@@ -5,7 +5,8 @@ import { listClientFiles } from '../store/media.ts';
 import { lastMeetingByClient, listClientMeetings, listUnassigned, meetingStats } from '../store/meetings.ts';
 import { lastActivity } from '../store/messages.ts';
 import { listPeople, type PersonRow } from '../store/people.ts';
-import { listDecisions, listTasks, type DecisionRow, type TaskRow } from '../store/tasks.ts';
+import { readSentimentEnabled } from '../config/prioritySettings.ts';
+import { listDecisions, listTasks, priorityRank, type DecisionRow, type TaskRow } from '../store/tasks.ts';
 import { istDate } from '../util/time.ts';
 import { uniqueSheetNames } from './sheetNames.ts';
 
@@ -77,18 +78,18 @@ export interface TrackerView {
   /** All unassigned meetings; more than unassigned holds past UNASSIGNED_LIMIT. */
   unassignedTotal: number;
   clients: ClientView[];
+  /** Sentiment is switched on: the tracker shows each task's mood. Off or absent: the Sentiment column stays empty. */
+  sentiment?: boolean;
 }
 
 export function isOverdue(t: TaskRow, today: string): boolean {
   return t.status !== 'done' && t.deadline !== null && t.deadline < today;
 }
 
-const PRIORITY_RANK: Record<TaskRow['priority'], number> = { high: 0, medium: 1, low: 2 };
-
-/** Priority high to low, earliest deadline first (none last), then task code. */
+/** Priority critical to low (a task without a level by its old one), earliest deadline first (none last), then task code. */
 function byUrgency(a: TaskRow, b: TaskRow): number {
   return (
-    PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] ||
+    priorityRank(a) - priorityRank(b) ||
     (a.deadline ?? '9999-99-99').localeCompare(b.deadline ?? '9999-99-99') ||
     a.id - b.id
   );
@@ -111,6 +112,7 @@ export function loadTrackerView(db: Db, now: Date, health: HealthLine): TrackerV
   const ordered = [...clients].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.id - b.id);
   return {
     generatedAt: now,
+    sentiment: readSentimentEnabled(db),
     today,
     health,
     unassigned: listUnassigned(db, UNASSIGNED_LIMIT).map((m) => ({ id: m.id, date: istDate(new Date(m.startedAt)), seconds: m.seconds })),

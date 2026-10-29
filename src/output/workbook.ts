@@ -16,6 +16,12 @@ const FILL_MAYBE = 'FFFFF1B8';
 const FILL_DONE = 'FFD8F5DD';
 
 const TASK_HEADERS = ['ID', 'Task', 'Category', 'Priority', 'Assigned to', 'Asked by', 'Raised', 'Deadline', 'Age (days)', 'Latest progress', 'Reminders', 'Status', 'Source message'];
+/**
+ * Appended after every existing column (29 Oct 2026), so no column a sheet formula or filter uses moves: the four-level
+ * priority ("—" for a task from before it) and the client's mood (empty while sentiment is off). Priority (D) keeps the
+ * old high, medium or low.
+ */
+const ADDED_TASK_HEADERS = ['Priority level', 'Sentiment'];
 const STATUS_TEXT: Record<TaskRow['status'], string> = { open: 'Open', maybe_done: 'Maybe done (please check)', done: 'Done' };
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -79,20 +85,28 @@ export function taskCells(t: TaskRow, today: string): Cell[] {
         ? ''
         : sourceLabel(t.origin);
   return [
-    t.code, t.title, cap(t.category), cap(t.priority), t.assignedTo ?? '', t.askedBy ?? '', isoToDate(t.raisedOn),
+    t.code, t.title, cap(t.category), cap(t.legacyPriority), t.assignedTo ?? '', t.askedBy ?? '', isoToDate(t.raisedOn),
     t.deadline ? isoToDate(t.deadline) : '', daysBetween(t.raisedOn, t.closedOn ?? today), t.latestProgress ?? '', reminders, STATUS_TEXT[t.status], source,
   ];
 }
 
-function addTaskTable(ws: ExcelJS.Worksheet, title: string, tasks: TaskRow[], today: string, opts: { closedOn?: boolean; autoFilter?: boolean } = {}): void {
+/** The appended cells: the priority level and, while sentiment is on, the mood. */
+export function addedTaskCells(t: TaskRow, sentiment: boolean): Cell[] {
+  return [t.priority ? cap(t.priority) : '—', sentiment && t.sentiment ? cap(t.sentiment) : ''];
+}
+
+function addTaskTable(
+  ws: ExcelJS.Worksheet, title: string, tasks: TaskRow[], today: string, opts: { closedOn?: boolean; autoFilter?: boolean; sentiment?: boolean } = {},
+): void {
   sectionTitle(ws, title);
-  const headers = opts.closedOn ? [...TASK_HEADERS, 'Closed on'] : TASK_HEADERS;
+  const headers = [...TASK_HEADERS, ...(opts.closedOn ? ['Closed on'] : []), ...ADDED_TASK_HEADERS];
   const header = ws.addRow(headers);
   styleHeader(header);
   if (tasks.length === 0) noneRow(ws);
   for (const t of tasks) {
     const cells = taskCells(t, today);
     if (opts.closedOn) cells.push(t.closedOn ? isoToDate(t.closedOn) : '');
+    cells.push(...addedTaskCells(t, opts.sentiment === true));
     const row = ws.addRow(cells);
     formatDates(row);
     row.alignment = { vertical: 'top', wrapText: true };
@@ -109,8 +123,11 @@ const DRIVE_ID = /^[A-Za-z0-9_-]{1,200}$/;
 /** A Drive file's or Google Doc's link, or null when the id is missing or not a plain Drive id. */
 const driveUrl = (id: string | null): string | null => (id !== null && DRIVE_ID.test(id) ? `https://drive.google.com/file/d/${id}/view` : null);
 const docUrl = (id: string | null): string | null => (id !== null && DRIVE_ID.test(id) ? `https://docs.google.com/document/d/${id}/edit` : null);
-/** Client tab column widths, A to N. Excel counts a width in characters: the width of the digit 0 in the default 11 pt Calibri. */
-const CLIENT_COLUMN_WIDTHS = [14, 38, 13, 10, 14, 16, 10, 10, 10, 32, 16, 22, 44, 11];
+/**
+ * Client tab column widths, A to P. Excel counts a width in characters: the width of the digit 0 in the default 11 pt Calibri.
+ * O and P hold the appended Priority level and Sentiment (N of an open task table holds Priority level, of Done its Closed on).
+ */
+const CLIENT_COLUMN_WIDTHS = [14, 38, 13, 10, 14, 16, 10, 10, 10, 32, 16, 22, 44, 13, 13, 12];
 /**
  * Files received columns. Column D alone is narrow (it is the tasks' Priority column), so the description spans D to L and long
  * descriptions stay a few lines tall instead of a very tall row. The Drive link is in M.
@@ -247,7 +264,7 @@ const TODAY_HEADERS = ['Client', 'Open', 'Overdue', 'Side', 'ID', 'Task', 'Deadl
 const TODAY_COLUMN_WIDTHS = [30, 8, 9, 8, 10, 50, 12, 36];
 
 /**
- * The task notes for the Today tab: overdue, due today, high priority, maybe done. A later deadline is already in the Deadline
+ * The task notes for the Today tab: overdue, due today, critical or major, maybe done. A later deadline is already in the Deadline
  * column, so its "due 21 Oct" note is left out.
  */
 const todayNotes = (t: TaskRow, today: string): string =>
@@ -288,7 +305,7 @@ function addToday(wb: ExcelJS.Workbook, view: TrackerView): void {
   total.border = { top: { style: 'thin' } };
 }
 
-function addClientSheet(wb: ExcelJS.Workbook, c: ClientView, today: string): void {
+function addClientSheet(wb: ExcelJS.Workbook, c: ClientView, today: string, sentiment: boolean): void {
   const ws = wb.addWorksheet(c.sheetName, { views: [{ state: 'frozen', ySplit: 1 }] });
   ws.columns = CLIENT_COLUMN_WIDTHS.map((width) => ({ width }));
   ws.addRow([`${c.client.name}${c.client.active ? '' : ' (inactive)'} (${c.client.code})`]).font = { bold: true, size: 16 };
@@ -308,8 +325,8 @@ function addClientSheet(wb: ExcelJS.Workbook, c: ClientView, today: string): voi
   c.client.phases.forEach((p, i) => ws.addRow([p, i < current ? '✅ Done' : i === current ? '🔄 Current' : '⏳ Upcoming']));
   ws.addRow([]);
 
-  addTaskTable(ws, 'Our pending tasks', c.usOpen, today, { autoFilter: true });
-  addTaskTable(ws, 'Waiting on client', c.clientOpen, today);
+  addTaskTable(ws, 'Our pending tasks', c.usOpen, today, { autoFilter: true, sentiment });
+  addTaskTable(ws, 'Waiting on client', c.clientOpen, today, { sentiment });
 
   sectionTitle(ws, 'Decisions');
   styleHeader(ws.addRow(['Date', 'Decision', 'Source']));
@@ -324,7 +341,7 @@ function addClientSheet(wb: ExcelJS.Workbook, c: ClientView, today: string): voi
   ws.addRow([]);
 
   addFilesTable(ws, c.files);
-  addTaskTable(ws, 'Done', c.done, today, { closedOn: true });
+  addTaskTable(ws, 'Done', c.done, today, { closedOn: true, sentiment });
   addMeetingsTable(ws, c.meetings);
 
   sectionTitle(ws, 'People');
@@ -371,7 +388,7 @@ export async function buildWorkbook(view: TrackerView): Promise<Buffer> {
   wb.created = view.generatedAt;
   addToday(wb, view);
   addOverview(wb, view);
-  for (const c of view.clients) addClientSheet(wb, c, view.today);
+  for (const c of view.clients) addClientSheet(wb, c, view.today, view.sentiment === true);
   cleanText(wb);
   return Buffer.from((await wb.xlsx.writeBuffer()) as unknown as ArrayBuffer);
 }

@@ -6,6 +6,7 @@ import type { MediaAi } from './brain/mediaClient.ts';
 import type { MeetingAi } from './brain/meetingClient.ts';
 import { Reconciler, type ReconcileOutcome } from './brain/reconciler.ts';
 import type { ClientConfig } from './config/groups.ts';
+import type { PriorityConfig } from './config/prioritySettings.ts';
 import { Health, type VoiceProblem } from './health/health.ts';
 import { defaultFreeBytes } from './health/health.ts';
 import { createExtractor, type Extractor } from './media/extract.ts';
@@ -103,6 +104,8 @@ export interface ReportRunner {
 
 export interface AppDeps {
   db: Db;
+  /** The owner's priority keywords and the sentiment switch, read at each batch (src/config/prioritySettings.ts). Default: none, off. */
+  priority?: () => PriorityConfig;
   clock: Clock;
   log: Logger;
   /** The founder's gateway: the SwitchableGateway around WhatsAppGateway in the service (D3). */
@@ -282,6 +285,7 @@ export function createApp(d: AppDeps): App {
     },
     // A meeting's tracker step holds the client's run flag, so it never interleaves with a WhatsApp run (Task 9).
     exclusive: (clientId, fn) => debouncer.runExclusive(clientId, fn),
+    ...(d.priority ? { priority: d.priority } : {}),
   });
   /** Reads a newly approved group's last 7 days (src/wa/historyBackfill.ts); only with a gateway that can ask. */
   let backfill: HistoryBackfill | undefined;

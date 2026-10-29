@@ -553,7 +553,7 @@ describe('Reconciler with shared files', () => {
     });
 
     describe('cli reprocess of a message whose file was still being read (12h)', () => {
-      const ADD = op({ op: 'add_task', side: 'client', title: 'Send the payment', category: 'payment', priority: 'high', sourceMessageIds: ['I1'] });
+      const ADD = op({ op: 'add_task', side: 'client', title: 'Send the payment', category: 'payment', priority: 'major', sourceMessageIds: ['I1'] });
 
       /**
        * P0 before the reprocess window, I1 inside it and P2 after it. A first run went ahead with I1's file still being
@@ -614,7 +614,7 @@ describe('Reconciler with shared files', () => {
     });
 
     it('guards a file re-check like a reaction re-check: its task is not added again, but it can close a task', async () => {
-      const add = op({ op: 'add_task', side: 'client', title: 'Send the payment', category: 'payment', priority: 'high', sourceMessageIds: ['I1'] });
+      const add = op({ op: 'add_task', side: 'client', title: 'Send the payment', category: 'payment', priority: 'major', sourceMessageIds: ['I1'] });
       const close = op({ op: 'close_task', taskCode: 'SHA-001', sourceMessageIds: ['I1'] });
       const { db, ai, r } = setup();
       ai.push({ ops: [add] }, { ops: [add, close] });
@@ -629,7 +629,7 @@ describe('Reconciler with shared files', () => {
     it('a late read never re-closes a task the founder closed and then reopened after the file was sent (12h, I2)', async () => {
       const { db, ai, clock, r } = setup();
       createTask(db, {
-        clientId: 1, side: 'client', title: 'Send the payment receipt', category: 'payment', priority: 'high', assignedTo: null, askedBy: null, raisedOn: '2026-10-18',
+        clientId: 1, side: 'client', title: 'Send the payment receipt', category: 'payment', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-18',
         deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp',
       }, NOW);
       ai.push({ ops: [] }, { ops: [op({ op: 'close_task', taskCode: 'SHA-001', sourceMessageIds: ['I1'] })] });

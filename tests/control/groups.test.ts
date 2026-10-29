@@ -245,7 +245,7 @@ describe('groupsOverview', () => {
 
   it('a client with tasks has hasTasks; a client row in the DB locks the code; a new approved client does not', () => {
     const db = seededDb();
-    createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'high', assignedTo: null, askedBy: null,
+    createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null,
       raisedOn: '2026-10-10', deadline: null, latestProgress: null, sourceQuote: 'q', sourceDate: '2026-10-10', sourceWaId: 'W1', origin: 'whatsapp' }, NOW);
     const fresh: ClientConfig = { ...SHARMA, groupId: gid(99), name: 'Desai Foods', code: 'DES' };
     const o = groupsOverview({ db, listing: listing([]), configs: [SHARMA, MEHTA, fresh] });

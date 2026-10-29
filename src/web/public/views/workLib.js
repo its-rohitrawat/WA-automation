@@ -6,8 +6,8 @@ const IST = 'Asia/Kolkata';
 
 export const TASK_STATUSES = ['overdue', 'open', 'review', 'done'];
 export const TASK_DEADLINES = ['past', 'week', 'none'];
-export const TASK_PRIORITIES = ['high', 'medium', 'low'];
-export const TASK_SORTS = ['deadline', 'code', 'client', 'owner', 'status'];
+export const TASK_PRIORITIES = ['critical', 'major', 'medium', 'low'];
+export const TASK_SORTS = ['deadline', 'code', 'client', 'owner', 'status', 'priority'];
 
 /**
  * @typedef {{ q?: string, client?: string, status?: string, owner?: string, deadline?: string, priority?: string, sort: string, dir: 'asc' | 'desc' }} TaskFilter
@@ -68,6 +68,33 @@ const TASK_PILLS = {
 };
 /** A task status's pill: its class (the colour) and its word (status is never shown by colour alone). @param {string} s */
 export const taskPill = (s) => TASK_PILLS[s] ?? { cls: 'p-muted', label: 'Unknown' };
+
+/** @type {Record<string, { cls: string, label: string }>} */
+const PRIORITY_PILLS = {
+  critical: { cls: 'p-critical', label: 'Critical' }, major: { cls: 'p-major', label: 'Major' }, medium: { cls: 'p-medium', label: 'Medium' },
+  low: { cls: 'p-low', label: 'Low' },
+};
+/**
+ * A task priority's pill (colour and word). A task from before priority levels has none: "—", in a muted pill.
+ * @param {string | null | undefined} p
+ */
+export const priorityPill = (p) => (p && PRIORITY_PILLS[p]) || { cls: 'p-muted', label: '—' };
+
+/** @type {Record<string, string>} */
+const MOOD_WORDS = { positive: 'Positive', neutral: 'Neutral', negative: 'Negative', frustrated: 'Frustrated' };
+/**
+ * The client's mood as a small label: its word and class, or null when there is none (sentiment off, or not judged).
+ * @param {string | null | undefined} s @returns {{ cls: string, label: string } | null}
+ */
+export const moodLabel = (s) => (s && MOOD_WORDS[s] ? { cls: `mood mood-${s}`, label: MOOD_WORDS[s] } : null);
+
+/** What set a priority, for the task drawer. @param {string | null | undefined} source @param {string | null | undefined} keyword */
+export function prioritySourceText(source, keyword) {
+  if (source === 'keyword') return keyword ? `from the keyword "${keyword}"` : 'from a keyword';
+  if (source === 'human') return 'set by the owner';
+  if (source === 'ai') return 'set by the agent';
+  return 'not set yet';
+}
 
 /** @type {Record<string, { icon: string, label: string }>} */
 const SOURCES = { whatsapp: { icon: 'bubble', label: 'WhatsApp' }, meeting: { icon: 'video', label: 'Meeting' }, voice: { icon: 'mic', label: 'Voice note' } };

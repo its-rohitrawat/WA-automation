@@ -12,7 +12,7 @@ const OWNER = 'owner@example.com';
 
 function withTask(): Db {
   const db = seededDb();
-  createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'high', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
+  createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
     deadline: null, latestProgress: null, sourceQuote: 'send the banner', sourceDate: '2026-10-10', sourceWaId: null, origin: 'whatsapp' }, NOW);
   return db;
 }
@@ -131,8 +131,8 @@ describe('parseTaskEdit', () => {
   };
 
   it('takes each allowed field, trimming text and lower-casing the choices', () => {
-    expect(parseTaskEdit({ title: '  Logo  ', assignedTo: 'Rahul', deadline: '2026-10-30', priority: 'HIGH', side: 'Client', category: 'payment',
-      latestProgress: 'Half done' })).toEqual({ title: 'Logo', assignedTo: 'Rahul', deadline: '2026-10-30', priority: 'high', side: 'client',
+    expect(parseTaskEdit({ title: '  Logo  ', assignedTo: 'Rahul', deadline: '2026-10-30', priority: 'MAJOR', side: 'Client', category: 'payment',
+      latestProgress: 'Half done' })).toEqual({ title: 'Logo', assignedTo: 'Rahul', deadline: '2026-10-30', priority: 'major', side: 'client',
       category: 'payment', latestProgress: 'Half done' });
     expect(parseTaskEdit({ deadline: null, assignedTo: ' ', latestProgress: null })).toEqual({ deadline: '', assignedTo: '', latestProgress: '' });
   });
@@ -156,7 +156,7 @@ describe('parseTaskEdit', () => {
     bad({ category: 'misc' }, 'category');
     bad({ assignedTo: 'x'.repeat(101) }, 'assignedTo');
     bad({ latestProgress: 'x'.repeat(1001) }, 'latestProgress');
-    expect(bad({ priority: 'urgent' }, 'priority').message).toBe('priority must be one of: high, medium, low');
+    expect(bad({ priority: 'urgent' }, 'priority').message).toBe('priority must be one of: critical, major, medium, low');
   });
 
   it('accepts the longest title and a title called none is refused like the CLI', () => {
