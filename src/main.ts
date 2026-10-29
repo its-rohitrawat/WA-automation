@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import Anthropic from '@anthropic-ai/sdk';
 import { createApp, type AppReportDeps } from './app.ts';
 import type { AppMeetingsDeps } from './app.ts';
+import { ClaudeAssistantClient } from './brain/assistantClient.ts';
 import { ClaudeClient, keepConnectTimeoutCode } from './brain/claudeClient.ts';
 import { ClaudeMediaClient } from './brain/mediaClient.ts';
 import { ClaudeMeetingClient } from './brain/meetingClient.ts';
@@ -389,6 +390,9 @@ async function main(): Promise<void> {
             ...(heartbeat ? { heartbeat } : {}),
           },
           links: phoneLinks,
+          ...(env.DASHBOARD_ASSISTANT
+            ? { assistant: { ai: new ClaudeAssistantClient({ apiKey, model: env.AI_MODEL, effort: env.AI_EFFORT, prices }), paid: app.paidCalls, prices } }
+            : {}),
         }),
       };
     }

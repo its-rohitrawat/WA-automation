@@ -42,7 +42,7 @@ export function neverSent(e: Error): boolean {
  * Returns the dollars booked (0 when the reservation was released).
  */
 export function settleFailedCall(
-  spend: SpendGuard,
+  spend: Pick<SpendGuard, 'settle' | 'release'>,
   rid: number,
   e: unknown,
   estimate: number,
@@ -78,7 +78,7 @@ export function settleFailedCall(
  * `onFailureBooked`: told what a failed call booked (settleFailedCall's amount) before the error is thrown again.
  */
 export async function withReservation<T extends { costUsd: number; fallbackUsed: boolean }>(
-  spend: SpendGuard,
+  spend: Pick<SpendGuard, 'reserve' | 'settle' | 'release' | 'fitsIgnoringHolds'>,
   estimate: number,
   label: string,
   call: () => Promise<T>,

@@ -171,6 +171,11 @@ export interface App {
   report: ReportScheduler | undefined;
   /** A read-only view of the daily spend guard (the owner dashboard reads it; nothing here can book or reserve). */
   spend: SpendView;
+  /**
+   * The dashboard assistant's paid calls: reserve and book under the same guard, so its calls count against the same
+   * daily cap and a call still running at shutdown is booked like the agent's own.
+   */
+  paidCalls: Pick<SpendGuard, 'reserve' | 'settle' | 'release' | 'fitsIgnoringHolds'>;
 }
 
 export interface SpendView {
@@ -584,6 +589,12 @@ export function createApp(d: AppDeps): App {
         return spend.capUsd;
       },
       isPaused: () => spend.isPaused(),
+    },
+    paidCalls: {
+      reserve: (usd, kind, onBooked) => spend.reserve(usd, kind, onBooked),
+      settle: (id, kind, usd, detail) => spend.settle(id, kind, usd, detail),
+      release: (id) => spend.release(id),
+      fitsIgnoringHolds: (usd) => spend.fitsIgnoringHolds(usd),
     },
     start() {
       if (poll) return; // already started: a second interval would outlive stop()

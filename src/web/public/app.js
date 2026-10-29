@@ -3,7 +3,8 @@ import { get, me, poll, setSignedOutHandler, signOut } from './api.js';
 import { problems, readOverview, readStatus } from './contract.js';
 import { $, $$, esc, gsap, icon, installTooltip, paint, reduceMotion, toast } from './dom.js';
 import { initials } from './format.js';
-import { NAV, navigate, onPopState, parsePath, SCREENS } from './router.js';
+import { NAV, navigate, onPopState, parsePath, pathFor, SCREENS } from './router.js';
+import { ASSISTANT_CHANGED, ASSISTANT_GO, mountAssistant, unmountAssistant } from './views/assistant.js';
 import { mountClients } from './views/clients.js';
 import { CONNECTIONS_CHANGED, openFix, runAction } from './views/connect.js';
 import { mountConnections } from './views/connections.js';
@@ -19,6 +20,21 @@ SCREEN_MOUNTS.set('connections', mountConnections);
 // After a link, a reconnect or a quick action: the health pill now (an open dialog stays; Connections reloads itself).
 addEventListener(CONNECTIONS_CHANGED, () => {
   if (owner) void refreshStatus();
+});
+// The assistant opens a screen with its filters in the address; the screen reads them as from a link.
+addEventListener(ASSISTANT_GO, (e) => {
+  const d = /** @type {CustomEvent<{ screen?: unknown, search?: unknown }>} */ (e).detail;
+  if (!owner || typeof d?.screen !== 'string' || !SCREENS.has(d.screen)) return;
+  history.pushState(null, '', pathFor(d.screen, null) + (typeof d.search === 'string' ? d.search : ''));
+  current = { screen: '', sub: null }; // drawn again even when it is the screen already showing
+  show(d.screen, null, { fromHistory: true });
+});
+// A change confirmed in the assistant: the screen showing is drawn again with it.
+addEventListener(ASSISTANT_CHANGED, () => {
+  if (!owner || !current.screen) return;
+  const { screen, sub } = current;
+  current = { screen: '', sub: null };
+  show(screen, sub, { fromHistory: true });
 });
 import { hideSignin, showSignin } from './views/signin.js';
 
@@ -298,6 +314,7 @@ function enterApp() {
   $('#me-name').textContent = owner?.name || 'Owner';
   $('#me-email').textContent = owner?.email ?? '';
   statusPoll = poll(refreshStatus, STATUS_MS);
+  mountAssistant();
   const { screen, sub } = parsePath(location.pathname);
   show(screen, sub, { replace: true });
   if (!reduceMotion && gsap) {
@@ -316,6 +333,7 @@ function leaveApp(signedOut) {
   onStatus = () => {};
   closeDrawer(true);
   resetGroups();
+  unmountAssistant();
   owner = null;
   status = null;
   current = { screen: '', sub: null };

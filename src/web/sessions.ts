@@ -71,13 +71,36 @@ function cleanLabel(label: string | undefined): string | null {
  * The owner's signed-in sessions in `web_sessions` (migration v9). Only SHA-256 hashes of the session id and of the
  * per-session CSRF token are stored; the raw values exist only in the browser (cookie, and the token in page memory).
  */
+/** A session that ended: by its id's hash (sign-out, expiry), or every session of an email (sign out everywhere). */
+export type SessionEnd = { idHash: string } | { email: string };
+
 export class SessionStore {
   readonly #db: Db;
   readonly #clock: Clock;
+  readonly #ended = new Set<(e: SessionEnd) => void>();
 
   constructor(db: Db, clock: Clock) {
     this.#db = db;
     this.#clock = clock;
+  }
+
+  /**
+   * Told when a session ends here (sign-out, sign out everywhere, or found expired), so what is kept in memory for it
+   * (the assistant's chat) goes with it. A listener that throws changes nothing. Returns the function that removes it.
+   */
+  onEnd(fn: (e: SessionEnd) => void): () => void {
+    this.#ended.add(fn);
+    return () => this.#ended.delete(fn);
+  }
+
+  #tell(e: SessionEnd): void {
+    for (const fn of this.#ended) {
+      try {
+        fn(e);
+      } catch {
+        // a listener's failure must not stop the sign-out
+      }
+    }
   }
 
   /** Starts a session. The returned id goes only into the cookie and the CSRF token only to the signed-in page. */
@@ -112,6 +135,7 @@ export class SessionStore {
     // Fail closed: a row whose times cannot be read is treated as ended, never as live forever.
     if (!Number.isFinite(expires) || !Number.isFinite(lastSeen) || now >= expires || now - lastSeen > IDLE_TIMEOUT_MS) {
       this.#db.prepare('DELETE FROM web_sessions WHERE id_hash = ?').run(idHash);
+      this.#tell({ idHash });
       return undefined;
     }
     if (now - lastSeen >= TOUCH_EVERY_MS) {
@@ -124,11 +148,14 @@ export class SessionStore {
   destroy(id: string): void {
     if (!isToken(id)) return;
     this.#db.prepare('DELETE FROM web_sessions WHERE id_hash = ?').run(hashToken(id));
+    this.#tell({ idHash: hashToken(id) });
   }
 
   /** Ends every session of this owner. Returns how many ended. */
   destroyAllFor(email: string): number {
-    return this.#db.prepare('DELETE FROM web_sessions WHERE email = ?').run(email.trim().toLowerCase()).changes;
+    const n = this.#db.prepare('DELETE FROM web_sessions WHERE email = ?').run(email.trim().toLowerCase()).changes;
+    this.#tell({ email: email.trim().toLowerCase() });
+    return n;
   }
 
   /** Removes expired and idle sessions (the web server calls this hourly). Returns how many were removed. */

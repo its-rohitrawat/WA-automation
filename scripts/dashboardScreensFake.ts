@@ -13,11 +13,16 @@ import { setKv } from '../src/store/kv.ts';
 import { insertFound } from '../src/store/meetings.ts';
 import { createTask } from '../src/store/tasks.ts';
 import { systemClock } from '../src/util/clock.ts';
+import { silentLogger } from '../src/util/logger.ts';
 import { AuditLog } from '../src/web/audit.ts';
 import type { Guard, OwnerSession } from '../src/web/guard.ts';
 import { HttpError } from '../src/web/http.ts';
 import { registerControlApi } from '../src/web/routes/controlScreens.ts';
 import { registerWorkApi } from '../src/web/routes/work.ts';
+import { Assistant } from '../src/assistant/assistant.ts';
+import { PendingActions } from '../src/assistant/proposals.ts';
+import { registerAssistantApi } from '../src/web/routes/assistant.ts';
+import { ScriptedAssistantAi } from './assistantFake.ts';
 import type { WebServer } from '../src/web/server.ts';
 
 const PHASES = ['Discovery', 'Design', 'Development', 'Review', 'Launch'];
@@ -72,4 +77,12 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
     ...action, db, clock, audit, spend, voiceLocal: true, uptime: { log: uptime }, isOwner: (e) => e === OWNER, settings,
     sessions: { destroyAllFor: () => 0 }, secureFor: () => false,
   });
+  // The assistant with a scripted Claude (scripts/assistantFake.ts): no API call is ever made.
+  const pending = new PendingActions(clock);
+  const status = { at: day(0), up: true, line: { ok: true, text: 'All good' }, parts: [], lastMessageAt: day(0.01), spentToday: 0.42, capUsd: 3 };
+  const assistant = new Assistant({
+    ai: new ScriptedAssistantAi(), paid: spend, prices: { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.4 }, pending, settings,
+    log: silentLogger(), clock, db, control: { status: () => status }, spend, voiceLocal: true,
+  });
+  registerAssistantApi(web.router, { ...action, db, clock, assistant, pending, settings, audit });
 }

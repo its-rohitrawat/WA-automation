@@ -26,6 +26,11 @@ import type { RequestContext } from './router.ts';
 import { hashToken } from './sessions.ts';
 import type { DashboardMount } from './start.ts';
 import type { LinkSessions } from '../wa/linkSession.ts';
+import { Assistant, type AssistantAi } from '../assistant/assistant.ts';
+import { PendingActions } from '../assistant/proposals.ts';
+import type { App } from '../app.ts';
+import type { Prices } from '../spend/pricing.ts';
+import { registerAssistantApi } from './routes/assistant.ts';
 
 // Every agent route of the dashboard, registered behind D1's guard (startDashboard's mount). Reads need a signed-in
 // owner; changes also the Origin and CSRF checks and the shared action limit (actionSession). The D2/D3 handlers are
@@ -52,6 +57,8 @@ export interface AgentRoutesDeps {
   google: Omit<GoogleConnectDeps, 'audit'>;
   actions: Omit<ActionDeps, 'audit'>;
   links: LinkSessions;
+  /** The AI assistant (DASHBOARD_ASSISTANT): its Claude client, the agent's spend guard and the prices. None: no assistant. */
+  assistant?: { ai: AssistantAi; paid: App['paidCalls']; prices: Prices };
 }
 
 /** The owner's context for a D2/D3 handler. sessionId is the session's hash, never the cookie value. */
@@ -136,6 +143,18 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
     const s = actionSession(ctx, action);
     send(ctx.res, await actionHandler(ctx.params.name!, actions, ownerOf(ctx, s)));
   });
+
+  // The AI assistant: answers, opens screens, and drafts changes that run only on the owner's Confirm. A session that
+  // ends takes its chat and its waiting cards with it.
+  if (d.assistant) {
+    const pending = new PendingActions(d.clock);
+    const assistant = new Assistant({
+      ai: d.assistant.ai, paid: d.assistant.paid, prices: d.assistant.prices, pending, settings: d.settings, log: d.log, clock: d.clock,
+      db: d.db, control: d.control, spend: d.spend, voiceLocal: d.voiceLocal, health: d.health, ...(d.accountOf ? { accountOf: d.accountOf } : {}),
+    });
+    m.sessions.onEnd((e) => assistant.forget(e));
+    registerAssistantApi(router, { ...action, db: d.db, clock: d.clock, assistant, pending, settings: d.settings, audit: m.audit });
+  }
 
   // Phone links (D3): start, cancel, and the QR stream (server-sent events).
   const links = new WhatsAppLinkRoutes({ sessions: d.links });
