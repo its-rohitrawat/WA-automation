@@ -105,7 +105,7 @@ export function prioritySourceText(source, keyword) {
 }
 
 /** @type {Record<string, { icon: string, label: string }>} */
-const SOURCES = { whatsapp: { icon: 'bubble', label: 'WhatsApp' }, meeting: { icon: 'video', label: 'Meeting' }, voice: { icon: 'mic', label: 'Voice note' } };
+const SOURCES = { whatsapp: { icon: 'bubble', label: 'WhatsApp' }, meeting: { icon: 'video', label: 'Meeting' }, voice: { icon: 'mic', label: 'Voice note' }, dashboard: { icon: 'user', label: 'Added by you' } };
 /** @param {string} s */
 export const sourceLabel = (s) => SOURCES[s] ?? SOURCES.whatsapp;
 

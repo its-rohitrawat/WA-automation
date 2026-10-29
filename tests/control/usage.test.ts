@@ -110,3 +110,13 @@ describe('usageSummary review fixes', () => {
     expect(s.byUse.map((u) => u.use)).toEqual(['messages', 'meetings', 'files', 'speech']);
   });
 });
+
+describe('usageSummary: the dashboard assistant', () => {
+  it('lists the assistant\'s answers as their own use, only once something was booked', () => {
+    const t = setup();
+    expect(t.summary().byUse.map((u) => u.use)).not.toContain('assistant');
+    spend(t.db, '2026-10-19', 'ai', 0.04, 'assistant call');
+    spend(t.db, '2026-10-19', 'ai', 0.02, 'assistant call');
+    expect(t.summary().byUse.find((u) => u.use === 'assistant')).toEqual({ use: 'assistant', label: 'Dashboard assistant', usd: 0.06 });
+  });
+});

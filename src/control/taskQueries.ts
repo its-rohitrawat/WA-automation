@@ -16,7 +16,7 @@ export const TASK_SORTS = ['deadline', 'code', 'client', 'owner', 'status', 'pri
 export const TASK_CLOSED = ['7d'] as const;
 /** removed=1: also the tasks of removed (inactive) clients. Left out, only active clients' tasks: the Overview's scope. */
 export const TASK_REMOVED = ['1'] as const;
-export type TaskSource = 'whatsapp' | 'meeting' | 'voice';
+export type TaskSource = 'whatsapp' | 'meeting' | 'voice' | 'dashboard';
 
 export const TASK_LIMIT_DEFAULT = 100;
 export const TASK_LIMIT_MAX = 500;
@@ -137,7 +137,7 @@ const STATUS_RANK_SQL = `CASE ${STATUS_SQL} WHEN 'overdue' THEN 0 WHEN 'open' TH
 /** The number after the dash, so SHA-1000 sorts after SHA-999. */
 const CODE_NUMBER_SQL = `CAST(substr(t.code, instr(t.code, '-') + 1) AS INTEGER)`;
 /** A meeting's task, a voice note's task (its source message, in the same group, carries a voice note), or WhatsApp. */
-const SOURCE_SQL = `CASE WHEN t.meeting_id IS NOT NULL OR t.origin = 'meeting' THEN 'meeting'
+const SOURCE_SQL = `CASE WHEN t.origin = 'dashboard' THEN 'dashboard' WHEN t.meeting_id IS NOT NULL OR t.origin = 'meeting' THEN 'meeting'
   WHEN t.source_wa_id IS NOT NULL AND EXISTS (SELECT 1 FROM messages m JOIN media md ON md.message_id = m.id
     WHERE m.client_id = t.client_id AND m.wa_id = t.source_wa_id AND md.kind = 'voice') THEN 'voice'
   ELSE 'whatsapp' END`;
@@ -277,7 +277,9 @@ function fieldWords(detail: string): string {
   return names.length > 0 ? ` (${names.join(', ')})` : '';
 }
 
-const CREATED_FROM: Record<TaskSource, string> = { whatsapp: 'Created from WhatsApp', meeting: 'Created from a meeting', voice: 'Created from a voice note' };
+const CREATED_FROM: Record<TaskSource, string> = {
+  whatsapp: 'Created from WhatsApp', meeting: 'Created from a meeting', voice: 'Created from a voice note', dashboard: 'Added by the owner',
+};
 
 function historyWords(op: string, actor: 'agent' | 'owner', detail: string, source: TaskSource): string {
   const by = actor === 'owner' ? ' by the owner' : '';

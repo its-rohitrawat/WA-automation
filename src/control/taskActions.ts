@@ -1,7 +1,8 @@
-import { closeTask, CorrectionError, editTask, reopenTask, unlockTask, type EditOptions } from '../cli/corrections.ts';
+import { closeTask, CorrectionError, editTask, humanEvent, reopenTask, requestRebuild, unlockTask, type EditOptions } from '../cli/corrections.ts';
+import { getClientByCode } from '../store/clients.ts';
 import { tx, type Db } from '../store/db.ts';
-import { CATEGORIES, getTaskByCode, PRIORITIES, SIDES, TASK_FIELDS, type TaskField } from '../store/tasks.ts';
-import { isIsoDate } from '../util/time.ts';
+import { CATEGORIES, createTask, getTaskByCode, PRIORITIES, SIDES, TASK_FIELDS, updateTaskFields, type TaskField } from '../store/tasks.ts';
+import { isIsoDate, istDate } from '../util/time.ts';
 import { ControlError, type Audit } from './errors.ts';
 import { FIELD_WORDS, taskDetail, type DashboardTaskDetail } from './taskQueries.ts';
 
@@ -112,5 +113,58 @@ export function runTaskAction(
     if (e instanceof CorrectionError) throw fromCorrection(e);
     throw e;
   }
+  return taskDetail(db, code, now)!;
+}
+
+/** What a new task may be given (the dashboard assistant's proposal, confirmed by the owner). */
+export interface NewTaskInput {
+  client: string;
+  title: string;
+  assignedTo?: string;
+  deadline?: string;
+  priority?: string;
+  category?: string;
+  side?: string;
+}
+
+/**
+ * Checks a new task as parseTaskEdit checks an edit, and finds its approved client. Throws ControlError: 404 no approved
+ * client with that code, 422 an invalid field.
+ */
+export function parseNewTask(db: Db, input: NewTaskInput): { clientId: number; clientCode: string; fields: EditOptions & { title: string } } {
+  const code = typeof input.client === 'string' ? input.client.trim().toUpperCase() : '';
+  const known = /^[A-Z]{3,4}$/.test(code);
+  const client = known ? getClientByCode(db, code) : undefined;
+  if (!client || !client.active) throw new ControlError(404, known ? `No approved client called ${code}` : 'No client with that code', 'client');
+  const given = Object.fromEntries(
+    (['title', 'assignedTo', 'deadline', 'priority', 'category', 'side'] as const).filter((k) => input[k] !== undefined && input[k] !== '').map((k) => [k, input[k]]),
+  );
+  const fields = parseTaskEdit({ priority: 'medium', category: 'other', side: 'us', ...given });
+  if (!fields.title) throw invalid('title', 'title cannot be empty');
+  return { clientId: client.id, clientCode: client.code, fields: { ...fields, title: fields.title } };
+}
+
+/**
+ * Adds a task as the owner (origin 'dashboard'): the fields given are locked against the AI, as an edit locks them, and
+ * the tracker is rebuilt. The task and its audit line are one transaction. Returns the new task's detail.
+ */
+export function createTaskAction(db: Db, input: NewTaskInput, ctx: { actor: string; now: Date; audit: Audit }): DashboardTaskDetail {
+  const { clientId, fields } = parseNewTask(db, input);
+  const { now } = ctx;
+  const at = now.toISOString();
+  const code = tx(db, () => {
+    const t = createTask(db, {
+      clientId, side: fields.side as (typeof SIDES)[number], title: fields.title, category: fields.category as (typeof CATEGORIES)[number],
+      priority: fields.priority as (typeof PRIORITIES)[number], assignedTo: fields.assignedTo || null, askedBy: null, raisedOn: istDate(now),
+      deadline: fields.deadline || null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'dashboard',
+      prioritySource: 'human', // the owner chose it, as the task panel's edit records it
+    }, at);
+    const locked = Object.fromEntries(TASK_FIELDS.filter((f) => fields[f] !== undefined && fields[f] !== '').map((f) => [f, fields[f]!]));
+    updateTaskFields(db, t.id, locked, at, 'human');
+    humanEvent(db, t.id, clientId, 'add_task', { fields: Object.keys(locked) }, now);
+    requestRebuild(db, now);
+    ctx.audit({ actor: ctx.actor, event: 'task.create', kind: 'task', detail: `Task ${t.code} added` });
+    return t.code;
+  });
   return taskDetail(db, code, now)!;
 }

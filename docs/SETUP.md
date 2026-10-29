@@ -534,6 +534,17 @@ What sets a priority:
 
 **Sentiment** (off at first) is how the client feels: positive, neutral, negative or frustrated, judged from the client's own words and reactions in new messages. Switch it on under **Settings › Priority & sentiment**. It then shows as a small label on tasks, in a client's panel ("Client mood") and in the tracker's **Sentiment** column. It adds a little to each AI read (a few words per change it returns). Switched off, the agent does not ask for it and no mood is shown anywhere. Every change to the keywords or the switch is recorded in **Audit logs**, and both apply from the next messages read.
 
+### The AI assistant
+
+The **Ask** button at the bottom right of every dashboard screen opens the assistant: a panel at the side on a laptop, the whole screen on a phone. Type a question, or pick one of the suggestions.
+
+- **It answers** questions about clients, tasks, messages, meetings, AI spend and the agent's health, from the same data the screens show. It can summarise today, say what needs your attention, explain a number, find a message, summarise a meeting, and draft a reply as text for you to copy. **It never sends a WhatsApp message.**
+- **It opens screens.** "Show Acme's overdue tasks" opens Tasks with those filters.
+- **It drafts changes, and you decide.** It can change a task's status, assignee, deadline or priority (critical, major, medium or low), add a task, or change a morning briefing setting (on or off, the days, the time). Each change shows as a card with **Confirm** and **Cancel**. Nothing changes until you press **Confirm**. A card waits 10 minutes, and runs once. The change goes through the same checks as the screens, and **Audit logs** shows it with "via assistant". The founder's number is changed only on **Automations**.
+- **Cost.** Each answer is a Claude call, shown under it ("≈ $0.03"). It counts toward the daily AI cap (`DAILY_SPEND_CAP_USD`), and **AI usage** lists it as "Dashboard assistant". A typical question costs a few US cents. At the cap, the assistant pauses until the next day. It uses the same model and effort as the agent (`AI_MODEL`, `AI_EFFORT`). You can ask up to 30 questions an hour.
+- **Privacy.** It never sees phone numbers or WhatsApp ids. What clients write is treated as data, never as instructions: a message cannot make it change anything. The chat stays in the agent's memory only, and is gone when you press **New chat**, sign out, or leave it for two hours. Questions and answers are never written to the logs.
+- **To switch it off,** set `DASHBOARD_ASSISTANT=false` in `.env` and restart the service.
+
 ## Everyday commands (run in the waagent window)
 
 | Command | What it does |

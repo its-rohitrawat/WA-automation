@@ -279,3 +279,24 @@ describe('session cookie', () => {
     expect(secureFor('http://127.0.0.1:8787')).toBe(false);
   });
 });
+
+describe('SessionStore: onEnd (the assistant forgets a chat that ended)', () => {
+  it('tells listeners of a sign-out, of sign out everywhere and of a session found expired; a failing listener changes nothing', () => {
+    const { clock, store } = setup();
+    const seen: unknown[] = [];
+    store.onEnd(() => {
+      throw new Error('listener bug');
+    });
+    const off = store.onEnd((e) => seen.push(e));
+    const a = store.create('owner@example.com');
+    store.destroy(a.id);
+    store.destroyAllFor('Owner@Example.com');
+    const b = store.create('owner@example.com');
+    clock.set(new Date(Date.parse(T0) + SESSION_TTL_MS + HOUR).toISOString());
+    expect(store.get(b.id)).toBeUndefined();
+    expect(seen).toEqual([{ idHash: hashToken(a.id) }, { email: 'owner@example.com' }, { idHash: hashToken(b.id) }]);
+    off();
+    store.destroy(store.create('owner@example.com').id);
+    expect(seen).toHaveLength(3);
+  });
+});
