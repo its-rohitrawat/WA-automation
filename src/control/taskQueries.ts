@@ -11,6 +11,8 @@ export const TASK_STATUSES = ['overdue', 'open', 'review', 'done'] as const;
 export type DashboardTaskStatus = (typeof TASK_STATUSES)[number];
 export const TASK_DEADLINES = ['past', 'week', 'none'] as const;
 export const TASK_SORTS = ['deadline', 'code', 'client', 'owner', 'status'] as const;
+/** closed=7d: done tasks closed in the last 7 IST days, today included (the Overview's "Done this week", queries.ts). */
+export const TASK_CLOSED = ['7d'] as const;
 export type TaskSource = 'whatsapp' | 'meeting' | 'voice';
 
 export const TASK_LIMIT_DEFAULT = 100;
@@ -24,6 +26,7 @@ export interface TaskQuery {
   owner?: string;
   deadline?: (typeof TASK_DEADLINES)[number];
   priority?: Priority;
+  closed?: (typeof TASK_CLOSED)[number];
   sort: (typeof TASK_SORTS)[number];
   dir: 'asc' | 'desc';
   limit: number;
@@ -105,6 +108,8 @@ export function parseTaskQuery(p: URLSearchParams): TaskQuery {
   if (deadline) out.deadline = deadline;
   const priority = oneOf('priority', p.get('priority'), PRIORITIES);
   if (priority) out.priority = priority;
+  const closed = oneOf('closed', p.get('closed'), TASK_CLOSED);
+  if (closed) out.closed = closed;
   return out;
 }
 
@@ -214,6 +219,11 @@ export function listDashboardTasks(db: Db, f: TaskQuery, now: Date): { total: nu
   if (f.priority !== undefined) {
     where.push('t.priority = @priority');
     params.priority = f.priority;
+  }
+  // The same days as the Overview's count: today and the six before it (IST).
+  if (f.closed === '7d') {
+    where.push("t.status = 'done' AND t.closed_on BETWEEN @closedFrom AND @today");
+    params.closedFrom = addDays(today, -6);
   }
   const whereSql = where.length > 0 ? ` WHERE ${where.join(' AND ')}` : '';
   const total = (db.prepare(`SELECT COUNT(*) AS n FROM tasks t JOIN clients c ON c.id = t.client_id${whereSql}`).get(params) as { n: number }).n;

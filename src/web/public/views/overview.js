@@ -87,7 +87,7 @@ export function kpiTiles(clients, t) {
     { id: 'review', label: 'Needs review', icon: 'info', n: t.review, delta: 'Marked maybe done', glow: 'rgba(61,143,217,.16)', cls: '',
       go: 'tasks', query: '?status=review', info: 'Tasks the agent thinks may be done: check each one and close it or keep it open.' },
     { id: 'done', label: 'Done this week', icon: 'ok', n: t.doneThisWeek, delta: 'Closed in the last 7 days', glow: 'rgba(43,170,74,.16)', cls: '',
-      go: 'tasks', query: '?status=done', info: 'Tasks closed in the last 7 days, today included.' },
+      go: 'tasks', query: '?status=done&closed=7d', info: 'Tasks closed in the last 7 days, today included.' },
   ];
 }
 

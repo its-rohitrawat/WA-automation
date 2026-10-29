@@ -517,3 +517,8 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
   .selbar > span { flex: 1 0 100%; text-align: center; }
 }
 @media (prefers-reduced-motion: reduce) { .kpi-tip, .selbar, .kpi .num { transition: none; } }
+
+/* Tasks: a filter set from elsewhere (the Overview's Done count), shown as a chip that removes it */
+.fchip { display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px 7px 12px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--s-done) 45%, var(--line));
+  background: color-mix(in srgb, var(--s-done) 10%, var(--panel)); color: var(--text); font: 500 13px/1 var(--font); cursor: pointer; }
+.fchip svg { color: var(--muted); } .fchip:hover svg { color: var(--text); }

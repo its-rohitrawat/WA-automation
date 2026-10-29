@@ -151,7 +151,7 @@ async function main() {
         // what the number means (hover on a laptop, a tap on a phone, keyboard focus on both).
         where = `overview counts ${tag}`;
         const hrefs = await p.locator('.kpi-link').evaluateAll((els) => els.map((a) => a.getAttribute('href')));
-        const want = ['/dashboard/clients', '/dashboard/tasks?status=open', '/dashboard/tasks?status=overdue', '/dashboard/tasks?status=review', '/dashboard/tasks?status=done'];
+        const want = ['/dashboard/clients', '/dashboard/tasks?status=open', '/dashboard/tasks?status=overdue', '/dashboard/tasks?status=review', '/dashboard/tasks?status=done&closed=7d'];
         if (JSON.stringify(hrefs) !== JSON.stringify(want)) fail(where, `links are ${JSON.stringify(hrefs)}`);
         if ((await p.locator('.kpi .kpi-link .kpi-i').count()) !== 0) fail(where, 'an info button is inside a link');
         const tip = p.locator('#kpi-tip-overdue');
@@ -188,6 +188,19 @@ async function main() {
         if ((await p.locator('select[data-f="status"]').inputValue()) !== 'overdue') fail(where, 'Tasks did not open filtered to overdue');
         await p.goBack();
         await p.waitForURL(/\/dashboard$/);
+        await p.locator('.kpis').waitFor();
+        // Done: the tasks closed in the last 7 days (the count's own days), as a chip that removes that filter.
+        where = `overview done ${tag}`;
+        await p.locator('.kpi-link[data-query="?status=done&closed=7d"]').click();
+        await p.waitForURL('**/dashboard/tasks?status=done&closed=7d');
+        await p.locator('.fchip[data-clear="closed"]', { hasText: 'Done · last 7 days' }).waitFor();
+        await p.locator('#view .skel').first().waitFor({ state: 'detached' });
+        await p.waitForTimeout(400);
+        await p.screenshot({ path: join(OUT, `tasks-done-7d-${tag}.png`) });
+        await p.locator('.fchip[data-clear="closed"]').click();
+        await p.waitForURL((u) => u.pathname === '/dashboard/tasks' && u.search === '?status=done');
+        if ((await p.locator('.fchip').count()) !== 0) fail(where, 'the chip stayed after removing it');
+        await p.goto(`${base}/dashboard`);
         await p.locator('.kpis').waitFor();
 
         where = `connections ${tag}`;

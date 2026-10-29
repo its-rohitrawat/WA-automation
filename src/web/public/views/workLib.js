@@ -8,9 +8,11 @@ export const TASK_STATUSES = ['overdue', 'open', 'review', 'done'];
 export const TASK_DEADLINES = ['past', 'week', 'none'];
 export const TASK_PRIORITIES = ['high', 'medium', 'low'];
 export const TASK_SORTS = ['deadline', 'code', 'client', 'owner', 'status'];
+/** closed=7d: closed in the last 7 days (the Overview's Done count). */
+export const TASK_CLOSED = ['7d'];
 
 /**
- * @typedef {{ q?: string, client?: string, status?: string, owner?: string, deadline?: string, priority?: string, sort: string, dir: 'asc' | 'desc' }} TaskFilter
+ * @typedef {{ q?: string, client?: string, status?: string, owner?: string, deadline?: string, priority?: string, closed?: string, sort: string, dir: 'asc' | 'desc' }} TaskFilter
  */
 
 /** The Tasks screen's filters from the address's query: unknown values are dropped. @param {string} search @returns {TaskFilter} */
@@ -35,6 +37,8 @@ export function taskQueryFromSearch(search) {
   if (deadline) out.deadline = deadline;
   const priority = pick('priority', TASK_PRIORITIES);
   if (priority) out.priority = priority;
+  const closed = pick('closed', TASK_CLOSED);
+  if (closed) out.closed = closed;
   out.sort = pick('sort', TASK_SORTS) ?? 'deadline';
   out.dir = p.get('dir') === 'desc' ? 'desc' : 'asc';
   return out;
@@ -43,7 +47,7 @@ export function taskQueryFromSearch(search) {
 /** The query for these filters: "" when nothing is set; the default sort is left out. @param {TaskFilter} f */
 export function taskQueryToSearch(f) {
   const p = new URLSearchParams();
-  for (const k of /** @type {const} */ (['q', 'client', 'status', 'owner', 'deadline', 'priority'])) {
+  for (const k of /** @type {const} */ (['q', 'client', 'status', 'owner', 'deadline', 'priority', 'closed'])) {
     const v = f[k];
     if (v) p.set(k, v);
   }

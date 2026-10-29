@@ -90,7 +90,7 @@ function wireShell() {
       e.preventDefault();
       closeMenu(false);
       // A filter for the screen (the Overview's counts): only a query string, nothing else.
-      const query = /^\?[a-z]+=[a-z_]+$/.test(go.dataset.query ?? '') ? go.dataset.query : undefined;
+      const query = /^\?[a-z]+=[a-z0-9_]+(&[a-z]+=[a-z0-9_]+)*$/.test(go.dataset.query ?? '') ? go.dataset.query : undefined;
       show(go.dataset.go ?? 'overview', null, { query });
       return;
     }
