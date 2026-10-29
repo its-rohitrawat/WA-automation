@@ -29,6 +29,7 @@ const SEARCH_WORDS = ['Nair', 'Joshi', 'Patel', 'Gupta'];
 /** The screens drawn from src/web/public/views/screens.js. */
 const WORK_SCREENS = ['tasks', 'meetings', 'activity', 'tracker', 'usage', 'automations', 'audit', 'settings'];
 let round = 0;
+let timeRound = 0;
 
 const state: FakeState = { signedIn: false, empty: false };
 const web = fakeDashboard({ port: 0, state });
@@ -140,6 +141,8 @@ async function main() {
         where = `overview ${tag}`;
         await p.goto(`${base}/dashboard`);
         await check(p, where, '.kpis', `overview-${tag}`);
+        // The uptime strip lists the newest outages with their exact times ("Off from 02:14 to 06:33 (4 h 19 min)").
+        if ((await p.locator('[data-uptime-outages] li', { hasText: / to \d\d:\d\d \(/ }).count()) < 1) fail(where, 'no outage with its exact times');
         if ((await p.locator('#view b', { hasText: '<b>' }).count()) !== 1) fail(where, 'agent text was not shown as plain text');
         const htmlTheme = await p.evaluate(() => document.documentElement.dataset.theme ?? 'dark');
         if (htmlTheme !== theme) fail(where, `theme is ${htmlTheme}`);
@@ -173,6 +176,17 @@ async function main() {
             if ((await p.locator('#view a[href^="https://drive.google.com/file/d/"]', { hasText: 'Open in Drive' }).count()) !== 1) fail(where, 'has no Open in Drive');
           }
           if (screen === 'automations') {
+            // The send time is saved with its own button (a new one each round: a time already in force saves nothing),
+            // and the next report follows it.
+            where = `automations send time ${tag}`;
+            const hm = `07:${String(10 + timeRound++).padStart(2, '0')}`;
+            await p.locator('#view [data-timeform] input').fill(hm);
+            await p.locator('#view [data-timeform] button[type="submit"]').click();
+            await p.locator('.toast', { hasText: 'Briefing time saved' }).first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'no saved toast'));
+            const next = await p.locator('#view [data-next]').innerText();
+            if (!next.includes(hm) && !next.includes('due now')) fail(where, `the next report does not follow the new time: ${next}`);
+            await p.waitForTimeout(300);
+            await p.screenshot({ path: join(OUT, `automations-time-${tag}.png`), fullPage: true });
             // Link phone opens the spare phone's first-link dialog right here, not Connections.
             where = `automations link phone ${tag}`;
             await p.locator('#view [data-fix="spare-link"]').click();

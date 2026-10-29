@@ -1,5 +1,6 @@
 // Automations (D5 Task 5): the morning briefing. The switch stays off until the spare phone is linked (Link phone opens
 // the link dialog); switching on asks "Start sending to the founder?" and sends the confirmation the agent requires.
+// The send time is a time field saved with its own button (the server checks it), with the next report under it.
 // Days are a select. Change number takes the number twice; the page only ever shows it masked, and the typed number
 // is cleared from the form at once. The preview uses today's real counts.
 import { get, post } from '../api.js';
@@ -9,7 +10,7 @@ import { confirmDialog, errorText, failed, listen, loading, pill } from './ui.js
 import { numbersMatch } from './workLib.js';
 
 /** @typedef {import('./registry.js').ScreenCtx} ScreenCtx */
-/** @typedef {{ reportEnabled: boolean, reportDays: string, recipientMasked: string | null, sendAt: string, deadline: string, source: Record<string, 'env' | 'dashboard'> }} Settings */
+/** @typedef {{ reportEnabled: boolean, reportDays: string, recipientMasked: string | null, sendAt: string, deadline: string, nextReport: string | null, source: Record<string, 'env' | 'dashboard'> }} Settings */
 
 const STATE_PILL = { ok: 'p-done', warn: 'p-warn', down: 'p-overdue', off: 'p-muted' };
 
@@ -28,7 +29,10 @@ function render(d, problem = '') {
   return `<div class="grid"><section class="card col-7"><div class="card-head"><h3>Morning briefing</h3>${s.reportEnabled ? pill({ cls: /** @type {Record<string, string>} */ (STATE_PILL)[d.report?.state ?? 'ok'] ?? 'p-done', label: d.report?.label && d.report.label !== 'Off' ? `On · ${d.report.label}` : 'On' }) : pill({ cls: 'p-warn', label: 'Off' })}</div>
     <div class="brief-toggle"><div><b>Send the morning briefing</b><small>${!linked ? 'Link the spare phone first.' : !s.recipientMasked ? "Set the founder's number first (Change number)." : esc(`One message to the founder, ${dayWords.toLowerCase()}.`)}</small></div>
       <button class="switch" type="button" role="switch" data-brief aria-checked="${String(Boolean(s.reportEnabled))}" aria-label="Send the morning briefing"${s.reportEnabled || (linked && s.recipientMasked) ? '' : ' disabled'}></button></div>
-    <dl class="kv kv-top"><dt>Sends at</dt><dd>${esc(`${s.sendAt} IST, catches up until ${s.deadline}`)}</dd><dt>Days</dt><dd><select class="sel" data-days aria-label="Briefing days">${DAYS.map(([k, l]) => `<option value="${k}"${s.reportDays === k ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>
+    <dl class="kv kv-top"><dt>Sends at</dt><dd><form class="row-gap" data-timeform method="post" novalidate><input class="sel time-in" type="time" name="t" step="60" required value="${esc(s.sendAt)}" aria-label="Briefing send time, IST">
+        <span>IST</span><button class="btn btn-ghost btn-sm" type="submit">Save time</button></form>
+        <small class="faint">${esc(`Catches up until ${s.deadline}`)}${s.source.reportTime === 'env' ? " · from the Mac's settings" : ''}</small></dd>
+      <dt>Next report</dt><dd data-next>${esc(s.nextReport ?? 'none while the briefing is off')}</dd><dt>Days</dt><dd><select class="sel" data-days aria-label="Briefing days">${DAYS.map(([k, l]) => `<option value="${k}"${s.reportDays === k ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>
         ${s.source.reportDays === 'env' ? '<small class="faint"> · from the Mac\'s settings</small>' : ''}</dd>
       <dt>Time zone</dt><dd>Asia/Kolkata</dd>
       <dt>To</dt><dd>Founder's WhatsApp · ${esc(s.recipientMasked ?? 'not set')} <button class="link" type="button" data-number>Change number</button></dd>
@@ -86,13 +90,26 @@ export function mountAutomations(ctx) {
 
   ctx.redraw(loading('Loading the briefing settings…'));
   void load();
-  // Redraw only when the briefing's own line changed: a redraw on every status refresh would close an open select.
+  /** A number being typed, or a time changed and not saved yet: a redraw would lose it. */
+  const editing = () => {
+    const time = /** @type {HTMLInputElement | null} */ ($('[data-timeform] input', ctx.view));
+    return Boolean($('[data-numform]:not([hidden])', ctx.view)) || (time !== null && (document.activeElement === time || time.value !== d?.settings.sendAt));
+  };
+  // Redraw only when the briefing's own line changed: a redraw on every status refresh would close an open select. The
+  // settings are read again then, so the next report moves on once today's has gone.
   ctx.onStatus(() => {
     if (!d) return;
     const next = reportPart(ctx);
     if (JSON.stringify(next) === JSON.stringify(d.report)) return;
     d.report = next;
-    if (!$('[data-numform]:not([hidden])', ctx.view)) ctx.redraw(render(d));
+    void get('/settings')
+      .then((/** @type {Settings} */ s) => {
+        if (d) d.settings = s;
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (d && ctx.live() && !editing()) ctx.redraw(render(d));
+      });
   });
 
   // A phone linked from the dialog (Link phone): load again, so the switch unlocks.
@@ -134,6 +151,13 @@ export function mountAutomations(ctx) {
     submit: async (e) => {
       e.preventDefault();
       const form = /** @type {HTMLFormElement} */ (e.target);
+      if (form.matches('[data-timeform]')) {
+        const value = /** @type {HTMLInputElement} */ (form.elements.namedItem('t')).value;
+        if (!/^\d{2}:\d{2}$/.test(value)) return void toast('Pick a time, for example 07:30.');
+        if (value === d?.settings.sendAt) return;
+        if (await save({ key: 'reportTime', value }) && d) toast(`Briefing time saved. Next report: ${d.settings.nextReport ?? 'none while the briefing is off'}.`);
+        return;
+      }
       const a = /** @type {HTMLInputElement} */ (form.elements.namedItem('n1')).value;
       const b = /** @type {HTMLInputElement} */ (form.elements.namedItem('n2')).value;
       // The typed number leaves the page's form at once, whatever happens next.

@@ -51,9 +51,14 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
   audit.record({ actor: 'agent', event: 'Tracker uploaded', kind: 'ops', detail: 'Tracker.xlsx uploaded to Drive' });
   const spend = new SpendGuard({ db, clock, capUsd: 3 });
   spend.record('ai', 0.42, 'batch');
+  // Made-up outages for the uptime strip's exact times: one this morning, one around midnight two days ago.
+  const put = db.prepare('INSERT INTO uptime_log (at, up, reason) VALUES (?, ?, ?)');
+  const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
+  for (const [h, up, reason] of [[60, 1, null], [48.5, 0, 'whatsapp_disconnected'], [48, 1, null], [6, 0, 'stopped'], [1.7, 1, null]] as const) put.run(hoursAgo(h), up, reason);
   const uptime = new UptimeLog(db, clock);
   uptime.start(true);
-  const settings = new SettingsStore({ db, env: parseEnv({ REPORT_RECIPIENT: '919800000000' }), clock, spareLinked: () => false });
+  // The briefing is on from .env (the spare phone's link is gone in the fake), so the screen shows the next report.
+  const settings = new SettingsStore({ db, env: parseEnv({ REPORT_ENABLED: 'true', REPORT_RECIPIENT: '919800000000' }), clock, spareLinked: () => false });
 
   const session = (): OwnerSession => {
     if (!o.signedIn()) throw new HttpError(401, 'unauthenticated', 'Sign in first.');

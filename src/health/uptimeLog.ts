@@ -1,6 +1,6 @@
 import { tx, type Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
-import { fromIstDate, istDate } from '../util/time.ts';
+import { fromIstDate, istDate, istDayLabel, istTime, meetingLength } from '../util/time.ts';
 
 // The agent's own up/down history (D5 Task 3, spec 4.8), for the vitals strip when UptimeRobot's read-only API is not
 // set. One uptime_log row at every service start, one each time Health.isUp() changes, and a down row at a clean stop,
@@ -94,6 +94,33 @@ export function dailyDown(intervals: readonly Interval[], now: number, days: num
     }
     return { day, downMinutes: minutes(total), longestMinutes: minutes(longest) };
   });
+}
+
+/**
+ * One outage in plain words, IST: "Off from 02:14 to 06:33 (4 h 19 min)" today, "Off Mon 27 Oct, 23:50 to 00:20
+ * (30 min)" on another day (the end's day only when it is not the start's day or the next one), and "Still off since
+ * 09:12 (2 h 05 min)" while it is going.
+ */
+export function outageText(start: number, end: number | null, now: number): string {
+  const today = istDate(new Date(now));
+  const at = (t: number) => (istDate(new Date(t)) === today ? istTime(new Date(t)) : `${istDayLabel(new Date(t))}, ${istTime(new Date(t))}`);
+  const length = meetingLength(((end ?? now) - start) / 1000);
+  if (end === null) return `Still off since ${at(start)} (${length})`;
+  const startDay = istDate(new Date(start));
+  const endDay = istDate(new Date(end));
+  const nextDay = minusDays(endDay, 1) === startDay && end - start < DAY_MS;
+  const until = endDay === startDay || nextDay ? istTime(new Date(end)) : at(end);
+  return startDay === today ? `Off from ${istTime(new Date(start))} to ${until} (${length})` : `Off ${at(start)} to ${until} (${length})`;
+}
+
+/** The outages that reach into an IST day, oldest first, in plain words (outageText). */
+export function dayOutages(intervals: readonly Interval[], day: string, now: number): string[] {
+  const from = fromIstDate(day).getTime();
+  const to = from + DAY_MS;
+  return [...intervals]
+    .filter((iv) => iv.start < to && (iv.end ?? now) > from)
+    .sort((x, y) => x.start - y.start)
+    .map((iv) => outageText(iv.start, iv.end, now));
 }
 
 /**

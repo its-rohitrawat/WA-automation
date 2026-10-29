@@ -2,7 +2,7 @@ import { Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import type { HealthLine } from '../../src/output/view.ts';
 import {
-  describeReport, isReportDay, reasonText, ReportScheduler, retryWaitMs, SENDER_WARNINGS, UNKNOWN_WARNING, type ReportPayload,
+  describeReport, isReportDay, nextReport, reasonText, ReportScheduler, retryWaitMs, SENDER_WARNINGS, UNKNOWN_WARNING, type ReportPayload,
 } from '../../src/report/scheduler.ts';
 import { TRACKER_ID_KEY } from '../../src/report/morningReport.ts';
 import type { ReportSettings, SendResult } from '../../src/report/types.ts';
@@ -934,5 +934,50 @@ describe('replaceSender', () => {
     const { s, sender } = setup();
     s.replaceSender(sender);
     expect(sender.stopped).toBe(0);
+  });
+});
+
+describe('nextReport (the Automations screen, 29 Oct 2026)', () => {
+  const now = (hm: string, date = DAY) => new Date(`${date}T${hm}:00.000+05:30`);
+  const row = (db: Db) => reportFor(db, DAY);
+
+  it('is null while off, and today while today is still to come', () => {
+    const db = seededDb();
+    expect(nextReport(undefined, now('05:00'), { ...ON, enabled: false })).toBeNull();
+    expect(nextReport(row(db), now('05:00'), ON)).toBe('today 06:00');
+    expect(nextReport(row(db), now('07:00'), ON)).toBe('today, due now');
+    claimReport(db, DAY, iso('06:00'));
+    expect(nextReport(row(db), now('06:00'), ON)).toBe('today, sending now');
+  });
+
+  it('after a send, a skip, an unknown outcome or the deadline: the next report day, at the later time', () => {
+    const db = seededDb();
+    expect(nextReport(undefined, now('12:00'), ON)).toBe('Mon 26 Oct, 06:00'); // Friday: the weekend is skipped
+    claimReport(db, DAY, iso('06:00'));
+    finishReport(db, DAY, 'sent', 'msg-1', iso('06:01'));
+    expect(nextReport(row(db), now('07:00'), ON, '07:30')).toBe('Mon 26 Oct, 07:30');
+    expect(nextReport(row(db), now('07:00'), { ...ON, days: 'mon-sat' })).toBe('tomorrow 06:00');
+    expect(nextReport(row(db), now('07:00', '2026-10-22'), ON)).toBe('tomorrow 06:00');
+    const unknown = seededDb();
+    claimReport(unknown, DAY, iso('06:00'));
+    finishReport(unknown, DAY, 'unknown', 'timeout', iso('06:03'));
+    expect(nextReport(row(unknown), now('07:00'), ON)).toBe('Mon 26 Oct, 06:00');
+    const stale = seededDb();
+    claimReport(stale, DAY, iso('06:00'));
+    expect(nextReport(row(stale), now('06:30'), ON)).toBe('Mon 26 Oct, 06:00'); // its outcome was never recorded
+  });
+
+  it('a retry gives its next try, or the next report day when none is left before the deadline', () => {
+    const db = seededDb();
+    claimReport(db, DAY, iso('06:00'));
+    retryReport(db, DAY, 'connect_timeout', iso('07:10'), iso('06:01'));
+    expect(nextReport(row(db), now('07:00'), ON)).toBe('today 07:10');
+    expect(nextReport(row(db), now('07:20'), ON)).toBe('today, due now');
+    // A wait over before today's (later) time: the try waits for the time.
+    expect(nextReport(row(db), now('07:00'), { ...ON, time: '08:00' })).toBe('today 08:00');
+    const late = seededDb();
+    claimReport(late, DAY, iso('11:50'));
+    retryReport(late, DAY, 'connect_timeout', iso('12:05'), iso('11:55'));
+    expect(nextReport(row(late), now('11:56'), ON)).toBe('Mon 26 Oct, 06:00');
   });
 });

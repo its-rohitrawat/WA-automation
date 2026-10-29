@@ -41,6 +41,12 @@ export function istWeekday(d: Date): string {
   return parts(d, { weekday: 'long' }).weekday ?? '';
 }
 
+/** "Mon 27 Oct": the short weekday and date in India. */
+export function istDayLabel(d: Date): string {
+  const p = parts(d, { weekday: 'short', day: 'numeric', month: 'short' });
+  return `${p.weekday} ${p.day} ${p.month}`;
+}
+
 /** "2026-10-19 14:05", used in AI prompts. */
 export function istDateTime(d: Date): string {
   return `${istDate(d)} ${istTime(d)}`;

@@ -83,7 +83,8 @@ function monitor(status) {
         <div><canvas id="ecg" aria-hidden="true"></canvas>
           <div class="eyebrow mon-eyebrow">Uptime · last 30 days</div>
           <div class="strip" data-uptime-strip aria-hidden="true"></div>
-          <p class="strip-note" data-uptime-note>Loading the uptime history…</p></div>
+          <p class="strip-note" data-uptime-note>Loading the uptime history…</p>
+          <div class="outages" data-uptime-outages hidden><div class="eyebrow mon-eyebrow">Recent outages</div><ul></ul></div></div>
         <div class="readouts">
           <div class="readout"><div class="t">Status</div><div class="v">${esc(word)}</div><div class="s">${esc(status ? (p.length ? p.length === 1 ? '1 part needs you' : `${p.length} parts need you` : 'every part answering') : '…')}</div></div>
           <div class="readout"><div class="t">Uptime 30 d</div><div class="v" data-uptime-ratio>—</div><div class="s" data-uptime-source>…</div></div>
@@ -141,14 +142,24 @@ export function afterOverview(root, status, opts = { animate: true }) {
   void fillUptime(root);
 }
 
-/** @typedef {{ source: 'uptimerobot' | 'agent', ratios: { d30: number | null }, days: { day: string, downMinutes: number, longestMinutes: number }[], knownSinceDay: string | null }} Uptime */
+/**
+ * @typedef {{ source: 'uptimerobot' | 'agent', ratios: { d30: number | null }, days: { day: string, downMinutes: number, longestMinutes: number, outages?: string[] }[],
+ *   outages?: { text?: string }[], knownSinceDay: string | null }} Uptime
+ */
+
+/** How many outages the list under the strip shows, newest first. */
+const OUTAGES_SHOWN = 3;
 
 /** How long one /uptime answer is reused across the Overview's redraws. */
 const UPTIME_TTL_MS = 5 * 60_000;
 /** @type {{ at: number, data: Promise<Uptime> } | null} */
 let uptimeCache = null;
 
-/** The 30-day strip and ratio: one square a day, green when never down, amber under an hour down, red from an hour. @param {HTMLElement} root */
+/**
+ * The 30-day strip and ratio: one square a day, green when never down, amber under an hour down, red from an hour. Each
+ * square's tip and the list under the strip give the outages' exact times ("Off from 02:14 to 06:33 (4 h 19 min)"),
+ * worded by the agent. @param {HTMLElement} root
+ */
 async function fillUptime(root) {
   const strip = $('[data-uptime-strip]', root);
   const note = $('[data-uptime-note]', root);
@@ -169,7 +180,8 @@ async function fillUptime(root) {
     const i = document.createElement('i');
     const unknown = known === null ? u.source === 'agent' : d.day < known;
     i.className = unknown ? 'u' : d.downMinutes === 0 ? '' : d.downMinutes < 60 ? 'w' : 'd';
-    i.setAttribute('data-tip', unknown ? `${d.day} · not recorded` : d.downMinutes === 0 ? `${d.day} · up all day` : `${d.day} · down ${d.downMinutes} min`);
+    const times = (d.outages ?? []).filter((x) => typeof x === 'string');
+    i.setAttribute('data-tip', unknown ? `${d.day} · not recorded` : d.downMinutes === 0 ? `${d.day} · up all day` : [`${d.day} · down ${d.downMinutes} min`, ...times].join(' · '));
     return i;
   }));
   const ratio = $('[data-uptime-ratio]', root);
@@ -179,6 +191,16 @@ async function fillUptime(root) {
   const firstDay = u.days[0]?.day;
   note.textContent = known !== null && firstDay !== undefined && known > firstDay ? `Recorded since ${known}.` : '';
   note.hidden = note.textContent === '';
+  const list = $('[data-uptime-outages]', root);
+  const texts = (u.outages ?? []).map((x) => x?.text).filter((t) => typeof t === 'string').slice(0, OUTAGES_SHOWN);
+  if (list) {
+    $('ul', list)?.replaceChildren(...texts.map((t) => {
+      const li = document.createElement('li');
+      li.textContent = t;
+      return li;
+    }));
+    list.hidden = texts.length === 0;
+  }
 }
 
 let ecgRaf = 0;

@@ -149,8 +149,12 @@ describe('uptimeReport', () => {
     expect(r).toEqual({
       source: 'uptimerobot',
       ratios: { d1: 100, d7: 99.5, d30: 98.25 },
-      days: [{ day: '2026-10-19', downMinutes: 10, longestMinutes: 10 }, { day: '2026-10-20', downMinutes: 10, longestMinutes: 10 }],
-      outages: [{ start: '2026-10-19T18:20:00.000Z', end: '2026-10-19T18:40:00.000Z', minutes: 20, reason: 'No heartbeat' }],
+      // 23:50 to 00:10 IST: the start's day is named, the end on the next day is not.
+      days: [
+        { day: '2026-10-19', downMinutes: 10, longestMinutes: 10, outages: ['Off Mon 19 Oct, 23:50 to 00:10 (20 min)'] },
+        { day: '2026-10-20', downMinutes: 10, longestMinutes: 10, outages: ['Off Mon 19 Oct, 23:50 to 00:10 (20 min)'] },
+      ],
+      outages: [{ start: '2026-10-19T18:20:00.000Z', end: '2026-10-19T18:40:00.000Z', minutes: 20, reason: 'No heartbeat', text: 'Off Mon 19 Oct, 23:50 to 00:10 (20 min)' }],
       knownSinceDay: null, // UptimeRobot keeps its own history
     });
   });
@@ -236,7 +240,8 @@ describe('uptimeReport review fixes', () => {
       { type: 1, datetime: old, duration: 60 },
     ] }] } })).fetch, { clock });
     const r = await uptimeReport({ log, robot, now: clock.now(), days: 1 });
-    expect(r.days).toEqual([{ day: '2026-10-20', downMinutes: 90, longestMinutes: 90 }]);
+    // The day's times come from the joined stretch, once: 08:30 to 10:00 IST.
+    expect(r.days).toEqual([{ day: '2026-10-20', downMinutes: 90, longestMinutes: 90, outages: ['Off from 08:30 to 10:00 (1 h 30 min)'] }]);
     expect(r.outages).toHaveLength(3);
   });
 });
