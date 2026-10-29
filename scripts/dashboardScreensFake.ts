@@ -62,8 +62,8 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
   setKv(db, TRACKER_NEW_FILE_KEY, day(1));
   setKv(db, 'google_account_email:main', OWNER);
   const audit = new AuditLog(db, clock);
-  audit.record({ actor: OWNER, event: 'Task closed · ACM-001', kind: 'task', detail: 'Closed from the dashboard' });
-  audit.record({ actor: 'agent', event: 'Tracker uploaded', kind: 'ops', detail: 'Tracker.xlsx uploaded to Drive' });
+  audit.recordSync({ actor: OWNER, event: 'Task closed · ACM-001', kind: 'task', detail: 'Closed from the dashboard' });
+  audit.recordSync({ actor: 'agent', event: 'Tracker uploaded', kind: 'ops', detail: 'Tracker.xlsx uploaded to Drive' });
   const spend = new SpendGuard({ db, clock, capUsd: 3 });
   spend.record('ai', 0.42, 'batch');
   // Made-up outages for the uptime strip's exact times: one this morning, one around midnight two days ago.
@@ -84,7 +84,7 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
     return { id: 'fake', email: OWNER, csrfHash: '', createdAt: new Date(now.getTime() - 300_000).toISOString(), expiresAt: new Date(now.getTime() + 6 * 86_400_000).toISOString() };
   };
   const guard: Pick<Guard, 'requireOwner' | 'requireCsrf'> = {
-    requireOwner: () => session(),
+    requireOwner: async () => session(),
     requireCsrf: (req) => {
       if (req.headers['x-csrf-token'] !== o.csrf) throw new HttpError(403, 'csrf', 'Refused.');
     },
@@ -93,7 +93,7 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
   registerWorkApi(web.router, { ...action, db, clock, audit, spend, health: () => ({ line: { ok: true, text: 'All good' }, lastPublishedAt: day(0.01), publishFailingSince: null }) });
   registerControlApi(web.router, {
     ...action, db, clock, audit, spend, voiceLocal: true, uptime: { log: uptime }, isOwner: (e) => e === OWNER, settings, priority,
-    sessions: { destroyAllFor: () => 0 }, secureFor: () => false,
+    sessions: { destroyAllFor: async () => 0 }, secureFor: () => false,
   });
   // The assistant with a scripted Claude (scripts/assistantFake.ts): no API call is ever made.
   const pending = new PendingActions(clock);
@@ -126,18 +126,18 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
     sendingOn: () => settings.get().dashboardSend, connected: () => true,
     groupSocket: (groupId) => (groupId === ACME ? socket : null),
     directory: { cachedGroups: () => [{ id: ACME, subject: 'Acme Traders x Studio' }] },
-    audit: (e) => audit.record({ ...e, detail: e.detail ?? '' }), log: silentLogger(),
+    audit: (e) => audit.recordSync({ ...e, detail: e.detail ?? '' }), log: silentLogger(),
   };
   const ownerCtx = { actor: OWNER, sessionId: 'fake', requestId: 'fake00000000' };
   const answer = (res: ServerResponse, r: { status: number; body: unknown }) => {
     res.writeHead(r.status, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify(r.body));
   };
   web.router.get('/dashboard/api/clients/:code/chat', async ({ req, res, params, url }) => {
-    guard.requireOwner(req);
+    await guard.requireOwner(req);
     answer(res, await chatReadHandler(chat, ownerCtx, params.code ?? '', { before: url.searchParams.get('before'), limit: url.searchParams.get('limit') }));
   });
   web.router.post('/dashboard/api/clients/:code/chat/send', async ({ req, res, params }) => {
-    guard.requireCsrf(req, guard.requireOwner(req));
+    guard.requireCsrf(req, await guard.requireOwner(req));
     let body: unknown = null;
     try {
       const chunks: Buffer[] = [];

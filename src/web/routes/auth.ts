@@ -20,6 +20,7 @@ import {
 } from '../oidc.ts';
 import type { CodeExchanger, IdTokenVerifier } from '../oidc.ts';
 import { clearSessionCookie, csrfFor, hashToken, secureFor, SESSION_COOKIE, sessionCookie } from '../sessions.ts';
+import type { Sql } from '../../store/db.ts';
 import type { SessionStore } from '../sessions.ts';
 
 /** The sign-out route (POST only, CSRF-checked). */
@@ -43,8 +44,8 @@ export interface AuthRouteDeps {
   publicUrl?: string;
   /** The port the dashboard listens on (for the localhost origins). */
   port: () => number | undefined;
-  /** Runs `fn` in one database transaction (production: `tx(db, fn)`): session writes and their audit row together. */
-  tx: <T>(fn: () => T) => T;
+  /** Runs `fn` in one database transaction (production: `db.tx`): session writes and their audit row together. */
+  tx: <T>(fn: (q: Sql) => Promise<T>) => Promise<T>;
   /** Code to ID token (production: `googleCodeExchanger`). */
   exchange: CodeExchanger;
   /** ID-token signature check (production: `googleIdVerifier`). */
@@ -163,10 +164,10 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
       // A browser signing in again leaves its earlier session behind: end it. One transaction with the new session and
       // its audit row, so a failed audit write leaves no orphan session and keeps the earlier one.
       const earlier = cookies[SESSION_COOKIE];
-      const s = d.tx(() => {
-        if (earlier !== undefined) d.sessions.destroy(earlier);
-        const created = d.sessions.create(who.email, label);
-        d.audit.record({ actor: who.email, event: 'Signed in', kind: 'auth', detail: label, requestId: ctx.requestId });
+      const s = await d.tx(async (q) => {
+        if (earlier !== undefined) await d.sessions.destroy(earlier, q);
+        const created = await d.sessions.create(who.email, label, q);
+        await d.audit.record({ actor: who.email, event: 'Signed in', kind: 'auth', detail: label, requestId: ctx.requestId }, q);
         return created;
       });
       if (earlier !== undefined) names.delete(hashToken(earlier));
@@ -179,7 +180,7 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
         const masked = maskEmail(err.email);
         const why = err.reason === 'unverified' ? 'email not verified' : 'not on the owner list';
         try {
-          d.audit.record({ actor: masked, event: 'Sign-in refused', kind: 'auth', detail: `${masked}, ${why}, ${label}`, requestId: ctx.requestId });
+          await d.audit.record({ actor: masked, event: 'Sign-in refused', kind: 'auth', detail: `${masked}, ${why}, ${label}`, requestId: ctx.requestId });
         } catch {
           // A refusal that cannot be audited still sends the browser to a page, never a bare JSON 500.
           failed(ctx, 'audit');
@@ -194,15 +195,15 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
     }
   });
 
-  d.router.post(SIGN_OUT_PATH, (ctx: RequestContext) => {
+  d.router.post(SIGN_OUT_PATH, async (ctx: RequestContext) => {
     const { req, res } = ctx;
     d.actionLimiter.hit(req, res);
-    const s = d.guard.requireOwner(req);
+    const s = await d.guard.requireOwner(req);
     d.guard.requireCsrf(req, s);
     const label = browserLabel(typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : undefined);
-    d.tx(() => {
-      d.sessions.destroy(s.id);
-      d.audit.record({ actor: s.email, event: 'Signed out', kind: 'auth', detail: label, requestId: ctx.requestId });
+    await d.tx(async (q) => {
+      await d.sessions.destroy(s.id, q);
+      await d.audit.record({ actor: s.email, event: 'Signed out', kind: 'auth', detail: label, requestId: ctx.requestId }, q);
     });
     names.delete(hashToken(s.id));
     res.statusCode = 204;
@@ -211,8 +212,8 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
     res.end();
   });
 
-  d.router.get('/dashboard/api/me', (ctx: RequestContext) => {
-    const s = d.guard.requireOwner(ctx.req);
+  d.router.get('/dashboard/api/me', async (ctx: RequestContext) => {
+    const s = await d.guard.requireOwner(ctx.req);
     sendJson(ctx.res, 200, {
       email: s.email,
       name: names.get(hashToken(s.id)) ?? null,

@@ -22,7 +22,7 @@ async function boot(o: { linked?: boolean; secureCookies?: boolean; actionCapaci
   const db = await seededDb();
   const clock = manualClock(NOW);
   const real = new AuditLog(db, clock);
-  const audit = o.auditThrows ? { record: () => { throw new Error('disk full'); } } : real;
+  const audit = o.auditThrows ? { record: async () => { throw new Error('disk full'); }, recordSync: () => { throw new Error('disk full'); } } : real;
   const spend = new SpendGuard({ db, clock, capUsd: 10 });
   const uptime = new UptimeLog(db, clock);
   uptime.start(true);
@@ -117,7 +117,7 @@ describe('control API: settings', () => {
 describe('control API: sign out everywhere', () => {
   it('ends every session of the owner, clears the cookie and audits it', async () => {
     const { db, h, sessions } = await boot();
-    const second = sessions.create(OWNER).id;
+    const second = (await sessions.create(OWNER)).id;
     const r = await h.post('/dashboard/api/session/signout-everywhere');
     expect(r).toMatchObject({ status: 200, json: { ended: 2 } });
     expect(String(r.headers['set-cookie'])).toMatch(/^wa_session=; HttpOnly; SameSite=Lax; Path=\/dashboard; Max-Age=0/);

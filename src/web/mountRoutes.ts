@@ -85,7 +85,7 @@ function redirect(res: ServerResponse, location: string): void {
 export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   const { router, guard } = m;
   const owners = new Set(d.ownerEmails);
-  const audit: AuditFn = (e) => m.audit.record({ ...e, detail: e.detail ?? '' });
+  const audit: AuditFn = (e) => m.audit.recordSync({ ...e, detail: e.detail ?? '' });
   const action = { guard, actions: m.actions };
 
   registerReadApi(router, { guard, control: d.control });
@@ -100,13 +100,13 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   // An owner read: the guard first, then the handler.
   const read = (path: string, answer: (ctx: RequestContext, o: OwnerContext) => ApiResult | Promise<ApiResult>) =>
     router.get(path, async (ctx) => {
-      const s = guard.requireOwner(ctx.req);
+      const s = await guard.requireOwner(ctx.req);
       send(ctx.res, await answer(ctx, ownerOf(ctx, s)));
     });
   // An owner change: guard, Origin and CSRF, the action limit, then the JSON body.
   const change = (path: string, answer: (ctx: RequestContext, o: OwnerContext, body: unknown) => ApiResult | Promise<ApiResult>) =>
     router.post(path, async (ctx) => {
-      const s = actionSession(ctx, action);
+      const s = await actionSession(ctx, action);
       send(ctx.res, await answer(ctx, ownerOf(ctx, s), await readBody(ctx)));
     });
 
@@ -133,7 +133,7 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   router.get(CALLBACK_PATH, async (ctx) => {
     let s: OwnerSession;
     try {
-      s = guard.requireOwner(ctx.req);
+      s = await guard.requireOwner(ctx.req);
     } catch (err) {
       if (err instanceof HttpError) return redirect(ctx.res, '/dashboard');
       throw err;
@@ -152,7 +152,7 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   // Quick actions (D3): upload the tracker now, test Claude, send a test heartbeat. Each has its own limit as well.
   const actions: ActionDeps = { ...d.actions, audit };
   router.post('/dashboard/api/actions/:name', async (ctx) => {
-    const s = actionSession(ctx, action);
+    const s = await actionSession(ctx, action);
     send(ctx.res, await actionHandler(ctx.params.name!, actions, ownerOf(ctx, s)));
   });
 
@@ -173,7 +173,7 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   change('/dashboard/api/whatsapp/link/start', (_ctx, o, body) => links.start(o, body));
   change('/dashboard/api/whatsapp/link/cancel', (_ctx, o, body) => links.cancel(o, body));
   router.get('/dashboard/api/whatsapp/link/stream', async (ctx) => {
-    const s = guard.requireOwner(ctx.req);
+    const s = await guard.requireOwner(ctx.req);
     const r = links.stream(ownerOf(ctx, s), ctx.url.searchParams.get('id') ?? '', ctx.res);
     if (r instanceof Promise) await r;
     else send(ctx.res, r);

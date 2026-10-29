@@ -24,7 +24,7 @@ export interface WorkApiDeps extends ActionGuard {
   guard: Pick<Guard, 'requireOwner' | 'requireCsrf'>;
   db: Db;
   clock: Clock;
-  audit: Pick<AuditLog, 'record'>;
+  audit: Pick<AuditLog, 'recordSync'>;
   spend: Pick<SpendView, 'isPaused'>;
   /** The live health snapshot, for the Tracker screen. */
   health?: () => Pick<HealthSnapshot, 'line' | 'lastPublishedAt' | 'publishFailingSince'>;
@@ -34,10 +34,10 @@ export interface WorkApiDeps extends ActionGuard {
 export function registerWorkApi(router: Router, d: WorkApiDeps): void {
   const read = (path: string, answer: (ctx: Parameters<Parameters<Router['get']>[1]>[0]) => unknown) =>
     router.get(path, controlled(async (ctx) => {
-      d.guard.requireOwner(ctx.req);
+      await d.guard.requireOwner(ctx.req);
       sendJson(ctx.res, 200, await answer(ctx));
     }));
-  const auditFor = (actor: string, requestId: string) => (e: AuditEntry) => d.audit.record({ ...e, actor, requestId });
+  const auditFor = (actor: string, requestId: string) => (e: AuditEntry) => d.audit.recordSync({ ...e, actor, requestId });
 
   read('/dashboard/api/tasks', async ({ url }) => await listDashboardTasks(d.db, parseTaskQuery(url.searchParams), d.clock.now()));
   read('/dashboard/api/tasks/:code', async ({ params }) => {
@@ -46,7 +46,7 @@ export function registerWorkApi(router: Router, d: WorkApiDeps): void {
     return t;
   });
   router.post('/dashboard/api/tasks/:code/:action', controlled(async (ctx) => {
-    const s = actionSession(ctx, d);
+    const s = await actionSession(ctx, d);
     const body = ctx.params.action === 'edit' ? await readBody(ctx) : undefined;
     const detail = await runTaskAction(d.db, { code: ctx.params.code!, action: ctx.params.action!, body },
       { actor: s.email, now: d.clock.now(), audit: auditFor(s.email, ctx.requestId) });
@@ -60,7 +60,7 @@ export function registerWorkApi(router: Router, d: WorkApiDeps): void {
     return m;
   });
   router.post('/dashboard/api/meetings/:id/:action', controlled(async (ctx) => {
-    const s = actionSession(ctx, d);
+    const s = await actionSession(ctx, d);
     const body = ctx.params.action === 'assign' ? await readBody(ctx) : undefined;
     const result = await runMeetingAction(d.db, { id: ctx.params.id!, action: ctx.params.action!, body }, {
       actor: s.email, now: d.clock.now(), audit: auditFor(s.email, ctx.requestId), spend: d.spend, ...(d.accountOf ? { accountOf: d.accountOf } : {}),

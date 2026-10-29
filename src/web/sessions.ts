@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
-import type { Db } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import { serializeCookie } from './http.ts';
 
@@ -103,18 +103,20 @@ export class SessionStore {
     }
   }
 
-  /** Starts a session. The returned id goes only into the cookie and the CSRF token only to the signed-in page. */
-  create(email: string, agentLabel?: string): { id: string; csrf: string } {
+  /**
+   * Starts a session. The returned id goes only into the cookie and the CSRF token only to the signed-in page. `q` is
+   * a transaction handle when the session must commit with something else (sign-in's audit row).
+   */
+  async create(email: string, agentLabel?: string, q: Sql = this.#db): Promise<{ id: string; csrf: string }> {
     const id = newToken();
     const csrf = csrfFor(id);
     const now = this.#clock.now();
     const at = now.toISOString();
-    this.#db
-      .raw.prepare(
-        `INSERT INTO web_sessions (id_hash, email, csrf_hash, created_at, expires_at, last_seen_at, agent_label)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(hashToken(id), email.trim().toLowerCase(), hashToken(csrf), at, new Date(now.getTime() + SESSION_TTL_MS).toISOString(), at, cleanLabel(agentLabel));
+    await q.run(
+      `INSERT INTO web_sessions (id_hash, email, csrf_hash, created_at, expires_at, last_seen_at, agent_label)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [hashToken(id), email.trim().toLowerCase(), hashToken(csrf), at, new Date(now.getTime() + SESSION_TTL_MS).toISOString(), at, cleanLabel(agentLabel)],
+    );
     return { id, csrf };
   }
 
@@ -122,49 +124,45 @@ export class SessionStore {
    * The live session for this id, or undefined when it is unknown, malformed, past its 7 days or idle for more than
    * 24 hours (such a row is removed at once). Marks the session as used, at most once a minute.
    */
-  get(id: string): Session | undefined {
+  async get(id: string): Promise<Session | undefined> {
     if (!isToken(id)) return undefined;
     const idHash = hashToken(id);
-    const row = this.#db
-      .raw.prepare('SELECT email, csrf_hash, created_at, expires_at, last_seen_at FROM web_sessions WHERE id_hash = ?')
-      .get(idHash) as Row | undefined;
+    const row = await this.#db.get<Row>('SELECT email, csrf_hash, created_at, expires_at, last_seen_at FROM web_sessions WHERE id_hash = ?', [idHash]);
     if (row === undefined) return undefined;
     const now = this.#clock.now().getTime();
     const expires = Date.parse(row.expires_at);
     const lastSeen = Date.parse(row.last_seen_at);
     // Fail closed: a row whose times cannot be read is treated as ended, never as live forever.
     if (!Number.isFinite(expires) || !Number.isFinite(lastSeen) || now >= expires || now - lastSeen > IDLE_TIMEOUT_MS) {
-      this.#db.raw.prepare('DELETE FROM web_sessions WHERE id_hash = ?').run(idHash);
+      await this.#db.run('DELETE FROM web_sessions WHERE id_hash = ?', [idHash]);
       this.#tell({ idHash });
       return undefined;
     }
     if (now - lastSeen >= TOUCH_EVERY_MS) {
-      this.#db.raw.prepare('UPDATE web_sessions SET last_seen_at = ? WHERE id_hash = ?').run(new Date(now).toISOString(), idHash);
+      await this.#db.run('UPDATE web_sessions SET last_seen_at = ? WHERE id_hash = ?', [new Date(now).toISOString(), idHash]);
     }
     return { email: row.email, csrfHash: row.csrf_hash, createdAt: row.created_at, expiresAt: row.expires_at };
   }
 
-  /** Ends one session (sign-out). An unknown id is a no-op. */
-  destroy(id: string): void {
+  /** Ends one session (sign-out). An unknown id is a no-op. `q`: as for `create`. */
+  async destroy(id: string, q: Sql = this.#db): Promise<void> {
     if (!isToken(id)) return;
-    this.#db.raw.prepare('DELETE FROM web_sessions WHERE id_hash = ?').run(hashToken(id));
+    await q.run('DELETE FROM web_sessions WHERE id_hash = ?', [hashToken(id)]);
     this.#tell({ idHash: hashToken(id) });
   }
 
-  /** Ends every session of this owner. Returns how many ended. */
-  destroyAllFor(email: string): number {
-    const n = this.#db.raw.prepare('DELETE FROM web_sessions WHERE email = ?').run(email.trim().toLowerCase()).changes;
+  /** Ends every session of this owner. Returns how many ended. `q`: as for `create`. */
+  async destroyAllFor(email: string, q: Sql = this.#db): Promise<number> {
+    const n = (await q.run('DELETE FROM web_sessions WHERE email = ?', [email.trim().toLowerCase()])).changes;
     this.#tell({ email: email.trim().toLowerCase() });
     return n;
   }
 
   /** Removes expired and idle sessions (the web server calls this hourly). Returns how many were removed. */
-  purgeExpired(): number {
+  async purgeExpired(): Promise<number> {
     const now = this.#clock.now().getTime();
     const idleCutoff = new Date(now - IDLE_TIMEOUT_MS).toISOString();
-    return this.#db
-      .raw.prepare('DELETE FROM web_sessions WHERE expires_at <= ? OR last_seen_at < ?')
-      .run(new Date(now).toISOString(), idleCutoff).changes;
+    return (await this.#db.run('DELETE FROM web_sessions WHERE expires_at <= ? OR last_seen_at < ?', [new Date(now).toISOString(), idleCutoff])).changes;
   }
 }
 

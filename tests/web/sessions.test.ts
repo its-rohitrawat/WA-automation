@@ -31,13 +31,13 @@ function rows(db: Db) {
 }
 
 describe('SessionStore: create and get', () => {
-  it('round-trips a session: email, CSRF hash, created and expiry (7 days)', () => {
+  it('round-trips a session: email, CSRF hash, created and expiry (7 days)', async () => {
     const { store } = setup();
-    const { id, csrf } = store.create('Owner@Example.com', 'Edge on Windows');
+    const { id, csrf } = await store.create('Owner@Example.com', 'Edge on Windows');
     expect(id).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(csrf).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(id).not.toBe(csrf);
-    expect(store.get(id)).toEqual({
+    expect(await store.get(id)).toEqual({
       email: 'owner@example.com',
       csrfHash: sha(csrf),
       createdAt: T0,
@@ -47,31 +47,31 @@ describe('SessionStore: create and get', () => {
     expect(IDLE_TIMEOUT_MS).toBe(24 * HOUR);
   });
 
-  it('gives a fresh random id and token every time', () => {
+  it('gives a fresh random id and token every time', async () => {
     const { store } = setup();
-    const a = store.create('a@example.com');
-    const b = store.create('a@example.com');
+    const a = await store.create('a@example.com');
+    const b = await store.create('a@example.com');
     expect(new Set([a.id, b.id, a.csrf, b.csrf]).size).toBe(4);
   });
 
-  it('the CSRF token is derived from the id, so /api/me can hand it out again without storing it', () => {
+  it('the CSRF token is derived from the id, so /api/me can hand it out again without storing it', async () => {
     const { store } = setup();
-    const { id, csrf } = store.create('a@example.com');
+    const { id, csrf } = await store.create('a@example.com');
     expect(csrfFor(id)).toBe(csrf);
-    expect(csrfFor(id)).not.toBe(csrfFor(store.create('a@example.com').id));
-    expect(store.get(id)!.csrfHash).toBe(sha(csrfFor(id)));
+    expect(csrfFor(id)).not.toBe(csrfFor((await store.create('a@example.com')).id));
+    expect((await store.get(id))!.csrfHash).toBe(sha(csrfFor(id)));
     expect(csrfFor(id)).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(csrfFor(id)).not.toBe(id);
     // Every character of the id counts, the last one included.
     const last = id.slice(-1) === 'A' ? 'B' : 'A';
     expect(csrfFor(`${id.slice(0, -1)}${last}`)).not.toBe(csrfFor(id));
-    const tokens = new Set(Array.from({ length: 50 }, () => csrfFor(store.create('a@example.com').id)));
+    const tokens = new Set(await Promise.all(Array.from({ length: 50 }, async () => csrfFor((await store.create('a@example.com')).id))));
     expect(tokens.size).toBe(50);
   });
 
-  it('stores only SHA-256 hashes: no column holds the raw id or CSRF token', () => {
+  it('stores only SHA-256 hashes: no column holds the raw id or CSRF token', async () => {
     const { db, store } = setup();
-    const { id, csrf } = store.create('owner@example.com', 'Safari on Mac');
+    const { id, csrf } = await store.create('owner@example.com', 'Safari on Mac');
     const [row] = rows(db);
     expect(row!.id_hash).toBe(sha(id));
     expect(row!.csrf_hash).toBe(sha(csrf));
@@ -82,41 +82,41 @@ describe('SessionStore: create and get', () => {
     expect(hashToken(id)).toBe(sha(id));
   });
 
-  it('keeps the browser label short and on one line', () => {
+  it('keeps the browser label short and on one line', async () => {
     const { db, store } = setup();
-    store.create('owner@example.com', `  Chrome\non\tLinux ${'x'.repeat(200)}  `);
+    await store.create('owner@example.com', `  Chrome\non\tLinux ${'x'.repeat(200)}  `);
     const label = rows(db)[0]!.agent_label!;
     expect(label.length).toBeLessThanOrEqual(60);
     expect(label).toMatch(/^Chrome on Linux x+$/);
   });
 
-  it('stores no label when none is given', () => {
+  it('stores no label when none is given', async () => {
     const { db, store } = setup();
-    store.create('owner@example.com');
+    await store.create('owner@example.com');
     expect(rows(db)[0]!.agent_label).toBeNull();
   });
 
-  it('an unknown, empty or malformed id gives undefined without throwing', () => {
+  it('an unknown, empty or malformed id gives undefined without throwing', async () => {
     const { store } = setup();
-    store.create('owner@example.com');
+    await store.create('owner@example.com');
     for (const bad of ['', 'abc', 'A'.repeat(43), 'A'.repeat(44), "x' OR 1=1 --", '../../etc']) {
-      expect(store.get(bad)).toBeUndefined();
+      expect(await store.get(bad)).toBeUndefined();
     }
   });
 
-  it('a malformed id is refused before any database work', () => {
+  it('a malformed id is refused before any database work', async () => {
     const { db, store } = setup();
-    store.create('owner@example.com');
+    await store.create('owner@example.com');
     const prepare = vi.spyOn(db.raw, 'prepare');
-    expect(store.get('A'.repeat(10_000))).toBeUndefined();
-    store.destroy('A'.repeat(10_000));
+    expect(await store.get('A'.repeat(10_000))).toBeUndefined();
+    await store.destroy('A'.repeat(10_000));
     expect(prepare).not.toHaveBeenCalled();
     prepare.mockRestore();
   });
 
-  it('removes the Unicode line breaks and bidi controls from the label', () => {
+  it('removes the Unicode line breaks and bidi controls from the label', async () => {
     const { db, store } = setup();
-    store.create('owner@example.com', 'Edge\u2028on\u0085Windows\u202e evil');
+    await store.create('owner@example.com', 'Edge\u2028on\u0085Windows\u202e evil');
     expect(rows(db)[0]!.agent_label).toBe('Edge on Windows evil');
   });
 });
@@ -138,125 +138,125 @@ describe('isToken', () => {
 });
 
 describe('SessionStore: expiry and idle timeout', () => {
-  it('expires after 7 days even when used all the time', () => {
+  it('expires after 7 days even when used all the time', async () => {
     const { store, clock } = setup();
-    const { id } = store.create('owner@example.com');
+    const { id } = await store.create('owner@example.com');
     for (let h = 12; h < 7 * 24; h += 12) {
       clock.set(new Date(Date.parse(T0) + h * HOUR).toISOString());
-      expect(store.get(id), `at ${h} h`).toBeDefined();
+      expect(await store.get(id), `at ${h} h`).toBeDefined();
     }
     clock.set(new Date(Date.parse(T0) + SESSION_TTL_MS - 1).toISOString());
-    expect(store.get(id)).toBeDefined();
+    expect(await store.get(id)).toBeDefined();
     clock.set(new Date(Date.parse(T0) + SESSION_TTL_MS).toISOString());
-    expect(store.get(id)).toBeUndefined();
+    expect(await store.get(id)).toBeUndefined();
   });
 
-  it('ends after more than 24 hours without use', () => {
+  it('ends after more than 24 hours without use', async () => {
     const { store, clock } = setup();
-    const a = store.create('owner@example.com');
+    const a = await store.create('owner@example.com');
     clock.advance(IDLE_TIMEOUT_MS);
-    expect(store.get(a.id)).toBeDefined();
-    const b = store.create('owner@example.com');
+    expect(await store.get(a.id)).toBeDefined();
+    const b = await store.create('owner@example.com');
     clock.advance(IDLE_TIMEOUT_MS + 1);
-    expect(store.get(b.id)).toBeUndefined();
+    expect(await store.get(b.id)).toBeUndefined();
   });
 
-  it('each use restarts the idle timer', () => {
+  it('each use restarts the idle timer', async () => {
     const { store, clock } = setup();
-    const { id } = store.create('owner@example.com');
+    const { id } = await store.create('owner@example.com');
     clock.advance(23 * HOUR);
-    expect(store.get(id)).toBeDefined();
+    expect(await store.get(id)).toBeDefined();
     clock.advance(23 * HOUR);
-    expect(store.get(id)).toBeDefined();
+    expect(await store.get(id)).toBeDefined();
     clock.advance(IDLE_TIMEOUT_MS + 1);
-    expect(store.get(id)).toBeUndefined();
+    expect(await store.get(id)).toBeUndefined();
   });
 
-  it('writes last_seen_at at most once a minute', () => {
+  it('writes last_seen_at at most once a minute', async () => {
     const { db, store, clock } = setup();
-    const { id } = store.create('owner@example.com');
+    const { id } = await store.create('owner@example.com');
     const seen = () => rows(db)[0]!.last_seen_at;
     clock.advance(30_000);
-    store.get(id);
+    await store.get(id);
     expect(seen()).toBe(T0);
     clock.advance(29_999);
-    store.get(id);
+    await store.get(id);
     expect(seen()).toBe(T0);
     clock.advance(1);
-    store.get(id);
+    await store.get(id);
     expect(seen()).toBe('2026-10-27T10:01:00.000Z');
   });
 
-  it('an expired or idle session row is removed when it is looked up', () => {
+  it('an expired or idle session row is removed when it is looked up', async () => {
     const { db, store, clock } = setup();
-    const { id } = store.create('owner@example.com');
+    const { id } = await store.create('owner@example.com');
     clock.advance(IDLE_TIMEOUT_MS + 1);
-    expect(store.get(id)).toBeUndefined();
+    expect(await store.get(id)).toBeUndefined();
     expect(rows(db)).toHaveLength(0);
   });
 
-  it('fails closed: a row whose times cannot be read is refused and removed', () => {
+  it('fails closed: a row whose times cannot be read is refused and removed', async () => {
     for (const column of ['expires_at', 'last_seen_at']) {
       const { db, store } = setup();
-      const { id } = store.create('owner@example.com');
+      const { id } = await store.create('owner@example.com');
       db.raw.prepare(`UPDATE web_sessions SET ${column} = ?`).run('not a date');
-      expect(store.get(id), column).toBeUndefined();
+      expect(await store.get(id), column).toBeUndefined();
       expect(rows(db), column).toHaveLength(0);
     }
   });
 });
 
 describe('SessionStore: destroy and purge', () => {
-  it('destroy makes get undefined and removes the row', () => {
+  it('destroy makes get undefined and removes the row', async () => {
     const { db, store } = setup();
-    const a = store.create('owner@example.com');
-    const b = store.create('owner@example.com');
-    store.destroy(a.id);
-    expect(store.get(a.id)).toBeUndefined();
-    expect(store.get(b.id)).toBeDefined();
+    const a = await store.create('owner@example.com');
+    const b = await store.create('owner@example.com');
+    await store.destroy(a.id);
+    expect(await store.get(a.id)).toBeUndefined();
+    expect(await store.get(b.id)).toBeDefined();
     expect(rows(db)).toHaveLength(1);
-    expect(() => store.destroy('not-a-session')).not.toThrow();
+    await expect(store.destroy('not-a-session')).resolves.toBeUndefined();
   });
 
-  it('destroyAllFor ends every session of that email only (any letter case)', () => {
+  it('destroyAllFor ends every session of that email only (any letter case)', async () => {
     const { store } = setup();
-    const a = store.create('owner@example.com');
-    const b = store.create('owner@example.com');
-    const other = store.create('second@example.com');
-    expect(store.destroyAllFor('OWNER@example.com')).toBe(2);
-    expect(store.get(a.id)).toBeUndefined();
-    expect(store.get(b.id)).toBeUndefined();
-    expect(store.get(other.id)).toBeDefined();
+    const a = await store.create('owner@example.com');
+    const b = await store.create('owner@example.com');
+    const other = await store.create('second@example.com');
+    expect(await store.destroyAllFor('OWNER@example.com')).toBe(2);
+    expect(await store.get(a.id)).toBeUndefined();
+    expect(await store.get(b.id)).toBeUndefined();
+    expect(await store.get(other.id)).toBeDefined();
   });
 
-  it('purgeExpired removes expired and idle rows and keeps live ones', () => {
+  it('purgeExpired removes expired and idle rows and keeps live ones', async () => {
     const { db, store, clock } = setup();
-    store.create('old@example.com');
+    await store.create('old@example.com');
     clock.advance(IDLE_TIMEOUT_MS - HOUR);
-    const live = store.create('live@example.com');
+    const live = await store.create('live@example.com');
     clock.advance(2 * HOUR);
-    expect(store.purgeExpired()).toBe(1);
+    expect(await store.purgeExpired()).toBe(1);
     expect(rows(db).map((r) => r.email)).toEqual(['live@example.com']);
-    expect(store.get(live.id)).toBeDefined();
-    expect(store.purgeExpired()).toBe(0);
+    expect(await store.get(live.id)).toBeDefined();
+    expect(await store.purgeExpired()).toBe(0);
   });
 
-  it('purgeExpired removes a session past its 7 days even when it was used recently', () => {
+  it('purgeExpired removes a session past its 7 days even when it was used recently', async () => {
     const { db, store, clock } = setup();
-    const { id } = store.create('owner@example.com');
+    const { id } = await store.create('owner@example.com');
     const at = (ms: number) => clock.set(new Date(Date.parse(T0) + ms).toISOString());
     // Keep it in use right up to the end, so only the 7-day expiry (not the idle timeout) can remove it.
     for (let h = 4; h < 7 * 24; h += 4) {
       at(h * HOUR);
-      expect(store.get(id), `at ${h} h`).toBeDefined();
-      expect(store.purgeExpired(), `at ${h} h`).toBe(0);
+      expect(await store.get(id), `at ${h} h`).toBeDefined();
+      expect(await store.purgeExpired(), `at ${h} h`).toBe(0);
     }
     at(SESSION_TTL_MS - 1);
-    expect(store.get(id)).toBeDefined();
-    expect(store.purgeExpired()).toBe(0);
+    expect(await store.get(id)).toBeDefined();
+    expect(await store.purgeExpired()).toBe(0);
     expect(Date.parse(rows(db)[0]!.last_seen_at!)).toBeGreaterThan(Date.parse(T0) + SESSION_TTL_MS - IDLE_TIMEOUT_MS);
     at(SESSION_TTL_MS);
-    expect(store.purgeExpired()).toBe(1);
+    expect(await store.purgeExpired()).toBe(1);
     expect(rows(db)).toHaveLength(0);
   });
 });
@@ -281,22 +281,22 @@ describe('session cookie', () => {
 });
 
 describe('SessionStore: onEnd (the assistant forgets a chat that ended)', () => {
-  it('tells listeners of a sign-out, of sign out everywhere and of a session found expired; a failing listener changes nothing', () => {
+  it('tells listeners of a sign-out, of sign out everywhere and of a session found expired; a failing listener changes nothing', async () => {
     const { clock, store } = setup();
     const seen: unknown[] = [];
     store.onEnd(() => {
       throw new Error('listener bug');
     });
     const off = store.onEnd((e) => seen.push(e));
-    const a = store.create('owner@example.com');
-    store.destroy(a.id);
-    store.destroyAllFor('Owner@Example.com');
-    const b = store.create('owner@example.com');
+    const a = await store.create('owner@example.com');
+    await store.destroy(a.id);
+    await store.destroyAllFor('Owner@Example.com');
+    const b = await store.create('owner@example.com');
     clock.set(new Date(Date.parse(T0) + SESSION_TTL_MS + HOUR).toISOString());
-    expect(store.get(b.id)).toBeUndefined();
+    expect(await store.get(b.id)).toBeUndefined();
     expect(seen).toEqual([{ idHash: hashToken(a.id) }, { email: 'owner@example.com' }, { idHash: hashToken(b.id) }]);
     off();
-    store.destroy(store.create('owner@example.com').id);
+    await store.destroy((await store.create('owner@example.com')).id);
     expect(seen).toHaveLength(3);
   });
 });

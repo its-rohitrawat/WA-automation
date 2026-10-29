@@ -55,7 +55,7 @@ export interface WebServerDeps {
   log: Logger;
   clock: Clock;
   /** The owner sessions (task 3): purged at start and then hourly while the server runs. */
-  sessions?: { purgeExpired(): number };
+  sessions?: { purgeExpired(): Promise<number> };
   /** Tests only: how often sessions are purged (default hourly). */
   purgeEveryMs?: number;
   /** Tests only: another public folder. */
@@ -177,10 +177,11 @@ export function createWebServer(deps: WebServerDeps): WebServer {
 
   /** Housekeeping must never stop the server: a failure is logged by its code only. */
   function purgeSessions(): void {
+    const failed = (err: unknown) => log.error({ code: (err as { code?: unknown }).code ?? 'unknown' }, 'dashboard session purge failed');
     try {
-      deps.sessions?.purgeExpired();
+      void deps.sessions?.purgeExpired().catch(failed);
     } catch (err) {
-      log.error({ code: (err as { code?: unknown }).code ?? 'unknown' }, 'dashboard session purge failed');
+      failed(err);
     }
   }
 

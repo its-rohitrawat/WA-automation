@@ -24,7 +24,7 @@ export interface GuardDeps {
 
 export interface Guard {
   /** The signed-in owner's session, or a 401 (`HttpError`, which the server sends as JSON). */
-  requireOwner(req: IncomingMessage): OwnerSession;
+  requireOwner(req: IncomingMessage): Promise<OwnerSession>;
   /**
    * For every request but GET and HEAD: the `Origin` header must be the public origin or the localhost origin, and the
    * `X-CSRF-Token` header must hash to the session's CSRF hash. Otherwise a 403.
@@ -62,13 +62,13 @@ export function createGuard(deps: GuardDeps): Guard {
   }
 
   return {
-    requireOwner(req) {
+    async requireOwner(req) {
       const id = parseCookies(header(req, 'cookie'))[SESSION_COOKIE];
       if (!isToken(id)) throw unauthorized();
-      const session = deps.sessions.get(id);
+      const session = await deps.sessions.get(id);
       if (session === undefined) throw unauthorized();
       if (!owners.has(session.email)) {
-        deps.sessions.destroy(id);
+        await deps.sessions.destroy(id);
         throw unauthorized();
       }
       return { ...session, id };

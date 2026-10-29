@@ -1,7 +1,6 @@
 import type { IncomingMessage } from 'node:http';
 import type { Env } from '../config/env.ts';
-import { txSync } from '../store/db.ts';
-import type { Db } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
 import { systemClock } from '../util/clock.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
@@ -86,7 +85,7 @@ export async function startDashboard(o: {
     clientId,
     ...publicUrl,
     port,
-    tx: <T>(fn: () => T): T => txSync(o.db, fn),
+    tx: <T>(fn: (q: Sql) => Promise<T>): Promise<T> => o.db.tx(fn),
     exchange:
       o.google?.exchange ??
       googleCodeExchanger({ clientId, clientSecret, ...(o.google?.tokenUrl === undefined ? {} : { tokenUrl: o.google.tokenUrl }) }),

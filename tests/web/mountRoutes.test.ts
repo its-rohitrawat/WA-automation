@@ -47,7 +47,7 @@ async function boot() {
   });
   servers.push(web!);
   const port = web!.address()!.port;
-  const session = new SessionStore(db, clock).create(OWNER);
+  const session = await new SessionStore(db, clock).create(OWNER);
   const post = (path: string, h: Record<string, string>, body = '{}') =>
     new Promise<{ status: number; cookie: string }>((resolve, reject) => {
       const r = request({ host: '127.0.0.1', port, path, method: 'POST', headers: { cookie: `wa_session=${session.id}`, 'content-type': 'application/json', ...h } }, (res) => {

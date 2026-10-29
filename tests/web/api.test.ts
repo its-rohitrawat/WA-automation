@@ -46,8 +46,8 @@ async function boot(o: { control?: Parameters<typeof registerReadApi>[1]['contro
   registerReadApi(server.router, { guard, control });
   servers.push(server);
   port = (await server.start()).port;
-  const owner = sessions.create(OWNER).id;
-  const other = sessions.create('someone@example.com').id;
+  const owner = (await sessions.create(OWNER)).id;
+  const other = (await sessions.create('someone@example.com')).id;
   return { port, owner, other, log: () => lines.join('') };
 }
 

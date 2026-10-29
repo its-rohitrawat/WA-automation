@@ -264,9 +264,9 @@ async function main(): Promise<void> {
       ...(meetings ? { meetings } : {}),
       report,
       ...(live ? { liveReport: live } : {}),
-      ...(auditLog ? { publishHooks: publisherAuditHooks((e) => auditLog.record(e), systemClock) } : {}),
+      ...(auditLog ? { publishHooks: publisherAuditHooks((e) => auditLog.recordSync(e), systemClock) } : {}),
       // The Activity row when a newly approved group's earlier messages were read: a count and the client's name.
-      ...(auditLog ? { onHistoryRead: ({ clientId, found }: { clientId: number; found: number }) => auditLog.record(historyReadEntry(found, getClient(historyDb, clientId).name)) } : {}),
+      ...(auditLog ? { onHistoryRead: ({ clientId, found }: { clientId: number; found: number }) => auditLog.recordSync(historyReadEntry(found, getClient(historyDb, clientId).name)) } : {}),
     });
 
     // watchGroupsFile catches a throwing onChange (including reloadClients conflicts) and calls onError.
@@ -347,7 +347,7 @@ async function main(): Promise<void> {
       });
       links = new LinkSessions({
         drivers: { founder, spare }, log,
-        audit: (event, actor) => audit.record({ actor, event, kind: 'connection', detail: '' }),
+        audit: (event, actor) => audit.recordSync({ actor, event, kind: 'connection', detail: '' }),
       });
       // The 30-day uptime strip: a row whenever up changes, and the daily retention of both logs.
       const log30 = new UptimeLog(db, systemClock);
@@ -359,8 +359,13 @@ async function main(): Promise<void> {
           const today = istDate(systemClock.now());
           if (today !== purgedDay) {
             log30.purgeOlderThan(UPTIME_KEEP_DAYS);
-            audit.purgeOlderThan(AUDIT_KEEP_DAYS);
-            purgedDay = today; // only once both ran: a failed purge is tried again at the next tick
+            // Chained, not awaited: the tick stays synchronous (and nothing is awaited before the stop handlers).
+            void audit.purgeOlderThan(AUDIT_KEEP_DAYS).then(
+              () => {
+                purgedDay = today; // only once both ran: a failed purge is tried again at the next tick
+              },
+              (err: unknown) => log.error({ err }, 'audit log purge failed'),
+            );
           }
         } catch (err) {
           log.error({ err }, 'uptime log update failed');

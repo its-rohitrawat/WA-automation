@@ -37,7 +37,7 @@ export async function bootDashboard(o: {
   const server: WebServer = createWebServer({ control: {}, env: { DASHBOARD_PORT: 0 }, log, clock: o.clock, publicDir: root });
   o.mount(server.router, { guard, actions, sessions });
   port = (await server.start()).port;
-  const { id, csrf } = sessions.create(OWNER);
+  const { id, csrf } = await sessions.create(OWNER);
   const origin = `http://127.0.0.1:${port}`;
 
   function send(method: string, path: string, x: { body?: unknown; raw?: string; cookie?: string | null; csrf?: string | null; origin?: string | null } = {}): Promise<Reply> {

@@ -768,7 +768,7 @@ describe('startDashboard', () => {
     const db = memDb();
     const clock = manualClock('2026-10-27T10:00:00Z');
     const store = new SessionStore(db, clock);
-    store.create('owner@example.com');
+    await store.create('owner@example.com');
     clock.advance(8 * 24 * 3_600_000);
     const c = capture();
     const web = await startDashboard({ env: dashEnv(0), db, log: c.log, control: {}, clock, google: fakeGoogle });
@@ -926,7 +926,7 @@ describe('startDashboard', () => {
 });
 
 describe('web server: session purge', () => {
-  async function bootWith(sessions: { purgeExpired(): number }, purgeEveryMs: number) {
+  async function bootWith(sessions: { purgeExpired(): Promise<number> }, purgeEveryMs: number) {
     const c = capture();
     const server = createWebServer({
       control: {},
@@ -943,7 +943,7 @@ describe('web server: session purge', () => {
 
   it('purges expired sessions at start and then on every interval, and stops with the server', async () => {
     let calls = 0;
-    const { server } = await bootWith({ purgeExpired: () => (calls++, 0) }, 20);
+    const { server } = await bootWith({ purgeExpired: async () => (calls++, 0) }, 20);
     expect(calls).toBe(1);
     await vi.waitFor(() => expect(calls).toBeGreaterThanOrEqual(3), { timeout: 2_000 });
     await server.stop();
@@ -954,7 +954,7 @@ describe('web server: session purge', () => {
 
   it('a purge that fails is logged by its code only and the server carries on', async () => {
     const { server, records, out } = await bootWith({
-      purgeExpired: () => {
+      purgeExpired: async () => {
         throw Object.assign(new Error('SQLITE_BUSY: wa_session=SECRETVALUE'), { code: 'SQLITE_BUSY' });
       },
     }, 60_000);

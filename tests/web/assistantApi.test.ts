@@ -120,7 +120,7 @@ describe('assistant API', () => {
     expect((await h.post('/dashboard/api/assistant/confirm', { body: { id: first.id } })).status).toBe(404);
     lines((await h.post('/dashboard/api/assistant/ask', { body: { question: 'b' } })).json);
     expect(pending.size()).toBe(1);
-    h.sessions.destroyAllFor(OWNER);
+    await h.sessions.destroyAllFor(OWNER);
     expect(pending.size()).toBe(0);
   });
 });

@@ -4,8 +4,8 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { DestinationStream } from 'pino';
-import { openDb, txSync } from '../../src/store/db.ts';
-import type { Db } from '../../src/store/db.ts';
+import { openDb } from '../../src/store/db.ts';
+import type { Db, Sql } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import type { ManualClock } from '../../src/util/clock.ts';
 import { createLogger } from '../../src/util/logger.ts';
@@ -125,7 +125,7 @@ async function boot(
     clientId: CLIENT_ID,
     ...(o.publicUrl === undefined ? {} : { publicUrl: o.publicUrl }),
     port,
-    tx: <T>(fn: () => T): T => txSync(db, fn),
+    tx: <T>(fn: (q: Sql) => Promise<T>): Promise<T> => db.tx(fn),
     exchange:
       o.exchangeThrows === undefined
         ? googleCodeExchanger({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, tokenUrl: ep.url })
@@ -238,7 +238,7 @@ describe('owner sign-in: happy path', () => {
 
     const rows = b.db.raw.prepare('SELECT email, agent_label FROM web_sessions').all() as { email: string; agent_label: string }[];
     expect(rows).toEqual([{ email: OWNER, agent_label: 'Edge on Windows' }]);
-    const audit = b.audit.list({});
+    const audit = await b.audit.list({});
     expect(audit).toHaveLength(1);
     expect(audit[0]).toMatchObject({ actor: OWNER, event: 'Signed in', kind: 'auth', detail: 'Edge on Windows' });
   });
@@ -496,7 +496,7 @@ describe('owner sign-in: refusals', () => {
     const r = await callback(b, l.state, l.signin);
     expect(r.headers.location).toBe('/dashboard?denied=1');
     expect(setCookies(r).some((s) => s.startsWith('wa_session='))).toBe(false);
-    const a = b.audit.list({});
+    const a = await b.audit.list({});
     expect(a).toHaveLength(1);
     expect(a[0]).toMatchObject({ event: 'Sign-in refused', kind: 'auth' });
     expect(a[0]!.detail).toContain('ow••••@example.com');
@@ -514,7 +514,7 @@ describe('owner sign-in: refusals', () => {
     expect(r.headers.location).toBe('/dashboard?denied=1');
     expect(setCookies(r)).toContain('wa_signin=; HttpOnly; SameSite=Lax; Path=/dashboard/auth; Max-Age=0');
     expect((b.db.raw.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
-    const a = b.audit.list({});
+    const a = await b.audit.list({});
     expect(a).toHaveLength(1);
     expect(a[0]).toMatchObject({ actor: 'st••••@gmail.com', event: 'Sign-in refused', kind: 'auth' });
     expect(a[0]!.detail).toContain('st••••@gmail.com');
@@ -647,7 +647,7 @@ describe('owner sign-out', () => {
     expect(setCookies(r)).toEqual(['wa_session=; HttpOnly; SameSite=Lax; Path=/dashboard; Max-Age=0']);
     expect((b.db.raw.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
     expect((await b.req('GET', '/dashboard/api/me', { cookie: `wa_session=${sid}` })).status).toBe(401);
-    const events = b.audit.list({}).map((e) => [e.actor, e.event, e.kind]);
+    const events = (await b.audit.list({})).map((e) => [e.actor, e.event, e.kind]);
     expect(events).toContainEqual([OWNER, 'Signed out', 'auth']);
   });
 });
@@ -703,7 +703,7 @@ describe('owner sign-in: limits and secrets', () => {
       expect(b.out()).not.toContain(secret);
     }
     for (const secret of [sid, csrf, l.signin, l2.signin, l.state]) expect(b.out()).not.toContain(secret);
-    const audit = JSON.stringify(b.audit.list({}));
+    const audit = JSON.stringify(await b.audit.list({}));
     for (const secret of [CODE, ID_TOKEN, ACCESS_TOKEN, sid, csrf]) expect(audit).not.toContain(secret);
   });
 });

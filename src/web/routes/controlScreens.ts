@@ -7,7 +7,7 @@ import { ControlError, type AuditEntry } from '../../control/errors.ts';
 import { usageSummary } from '../../control/usage.ts';
 import type { UptimeLog } from '../../health/uptimeLog.ts';
 import { uptimeReport, type UptimeRobotClient } from '../../health/uptimeRobot.ts';
-import { txSync, type Db } from '../../store/db.ts';
+import type { Db } from '../../store/db.ts';
 import type { Clock } from '../../util/clock.ts';
 import type { AuditLog } from '../audit.ts';
 import type { Guard } from '../guard.ts';
@@ -24,7 +24,7 @@ export interface ControlApiDeps extends ActionGuard {
   guard: Pick<Guard, 'requireOwner' | 'requireCsrf'>;
   db: Db;
   clock: Clock;
-  audit: Pick<AuditLog, 'record'>;
+  audit: Pick<AuditLog, 'record' | 'recordSync'>;
   spend: SpendView;
   /** VOICE_STT_PROVIDER is local: voice notes show at $0. */
   voiceLocal: boolean;
@@ -47,10 +47,10 @@ const digits = (v: unknown) => (typeof v === 'string' ? v.replace(/\D/g, '') : '
 export function registerControlApi(router: Router, d: ControlApiDeps): void {
   const read = (path: string, answer: (ctx: Parameters<Parameters<Router['get']>[1]>[0]) => unknown) =>
     router.get(path, controlled(async (ctx) => {
-      d.guard.requireOwner(ctx.req);
+      await d.guard.requireOwner(ctx.req);
       sendJson(ctx.res, 200, await answer(ctx));
     }));
-  const auditFor = (actor: string, requestId: string) => (e: AuditEntry) => d.audit.record({ ...e, actor, requestId });
+  const auditFor = (actor: string, requestId: string) => (e: AuditEntry) => d.audit.recordSync({ ...e, actor, requestId });
 
   read('/dashboard/api/usage', async () => await usageSummary(d.db, d.spend, d.clock.now(), { voiceLocal: d.voiceLocal }));
   read('/dashboard/api/uptime', () => uptimeReport({ log: d.uptime.log, robot: d.uptime.robot, now: d.clock.now() }));
@@ -58,7 +58,7 @@ export function registerControlApi(router: Router, d: ControlApiDeps): void {
   read('/dashboard/api/settings', () => d.settings.view());
 
   router.post('/dashboard/api/settings', controlled(async (ctx) => {
-    const s = actionSession(ctx, d);
+    const s = await actionSession(ctx, d);
     const body = await readBody(ctx);
     if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new ControlError(422, 'Send the setting as a JSON object', 'body');
     const { key, value, confirm } = body as Record<string, unknown>;
@@ -82,7 +82,7 @@ export function registerControlApi(router: Router, d: ControlApiDeps): void {
   // Priority keywords and the sentiment switch: the owner's own words and a boolean, checked by PrioritySettings.set.
   read('/dashboard/api/settings/priority', () => d.priority.view());
   router.post('/dashboard/api/settings/priority', controlled(async (ctx) => {
-    const s = actionSession(ctx, d);
+    const s = await actionSession(ctx, d);
     const body = await readBody(ctx);
     if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new ControlError(422, 'Send the setting as a JSON object', 'body');
     const { key, value } = body as Record<string, unknown>;
@@ -90,19 +90,19 @@ export function registerControlApi(router: Router, d: ControlApiDeps): void {
     sendJson(ctx.res, 200, d.priority.set(key, value, s.email, auditFor(s.email, ctx.requestId)));
   }));
 
-  read('/dashboard/api/session', ({ req }) => {
-    const s = d.guard.requireOwner(req);
+  read('/dashboard/api/session', async ({ req }) => {
+    const s = await d.guard.requireOwner(req);
     // The browser label sign-in saved (cleaned there, for example "Safari on macOS"); null for an older session.
-    const row = d.db.raw.prepare('SELECT agent_label FROM web_sessions WHERE id_hash = ?').get(hashToken(s.id)) as { agent_label: string | null } | undefined;
+    const row = await d.db.get<{ agent_label: string | null }>('SELECT agent_label FROM web_sessions WHERE id_hash = ?', [hashToken(s.id)]);
     return { email: s.email, createdAt: s.createdAt, expiresAt: s.expiresAt, browser: row?.agent_label ?? null };
   });
 
-  router.post('/dashboard/api/session/signout-everywhere', controlled((ctx) => {
-    const s = actionSession(ctx, d);
+  router.post('/dashboard/api/session/signout-everywhere', controlled(async (ctx) => {
+    const s = await actionSession(ctx, d);
     // The sessions end and the audit row is written together: if the row cannot be written, nothing ends.
-    const ended = txSync(d.db, () => {
-      const n = d.sessions.destroyAllFor(s.email);
-      d.audit.record({ actor: s.email, event: 'auth.signout_everywhere', kind: 'auth', detail: `Signed out everywhere (${n} ${n === 1 ? 'session' : 'sessions'})`, requestId: ctx.requestId });
+    const ended = await d.db.tx(async (q) => {
+      const n = await d.sessions.destroyAllFor(s.email, q);
+      await d.audit.record({ actor: s.email, event: 'auth.signout_everywhere', kind: 'auth', detail: `Signed out everywhere (${n} ${n === 1 ? 'session' : 'sessions'})`, requestId: ctx.requestId }, q);
       return n;
     });
     ctx.res.setHeader('Set-Cookie', clearSessionCookie({ secure: d.secureFor(ctx.req) }));

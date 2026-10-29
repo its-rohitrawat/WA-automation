@@ -29,7 +29,4 @@ wa/authState.ts
 wa/ingest.ts
 wa/linkSession.ts
 web/audit.ts
-web/routes/controlScreens.ts
 web/routes/groups.ts
-web/sessions.ts
-web/start.ts

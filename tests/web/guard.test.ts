@@ -54,60 +54,71 @@ function caught(fn: () => unknown): HttpError {
   throw new Error('expected an HttpError');
 }
 
+/** The HttpError a promise rejects with (requireOwner reads the session store, so it is async). */
+async function rejected(p: Promise<unknown>): Promise<HttpError> {
+  try {
+    await p;
+  } catch (e) {
+    if (e instanceof HttpError) return e;
+    throw e;
+  }
+  throw new Error('expected an HttpError');
+}
+
 describe('requireOwner', () => {
-  it('returns the session for a valid cookie', () => {
+  it('returns the session for a valid cookie', async () => {
     const { sessions, guard } = setup();
-    const { id } = sessions.create('owner@example.com');
-    const s = guard.requireOwner(fakeReq({ headers: { cookie: `other=1; wa_session=${id}` } }));
+    const { id } = await sessions.create('owner@example.com');
+    const s = await guard.requireOwner(fakeReq({ headers: { cookie: `other=1; wa_session=${id}` } }));
     expect(s.email).toBe('owner@example.com');
     expect(s.id).toBe(id);
   });
 
-  it('gives a 401 HttpError for no cookie, an unknown cookie or an expired session', () => {
+  it('gives a 401 HttpError for no cookie, an unknown cookie or an expired session', async () => {
     const { sessions, guard, clock } = setup();
     const cases: Record<string, string>[] = [{}, { cookie: 'wa_session=' }, { cookie: `wa_session=${'A'.repeat(43)}` }];
     for (const headers of cases) {
-      const e = caught(() => guard.requireOwner(fakeReq({ headers })));
+      const e = await rejected(guard.requireOwner(fakeReq({ headers })));
       expect(e.status).toBe(401);
       expect(e.code).toBe('unauthorized');
     }
-    const { id } = sessions.create('owner@example.com');
+    const { id } = await sessions.create('owner@example.com');
     clock.advance(25 * 3_600_000);
-    expect(caught(() => guard.requireOwner(fakeReq({ headers: { cookie: `wa_session=${id}` } }))).status).toBe(401);
+    expect((await rejected(guard.requireOwner(fakeReq({ headers: { cookie: `wa_session=${id}` } })))).status).toBe(401);
   });
 
-  it('refuses and ends a session whose email is no longer an owner', () => {
+  it('refuses and ends a session whose email is no longer an owner', async () => {
     const { sessions, db } = setup();
-    const { id } = sessions.create('former@example.com');
+    const { id } = await sessions.create('former@example.com');
     const guard = createGuard({ sessions, ownerEmails: ['owner@example.com'], publicUrl: PUBLIC, port: () => 8787 });
-    expect(caught(() => guard.requireOwner(fakeReq({ headers: { cookie: `wa_session=${id}` } }))).status).toBe(401);
+    expect((await rejected(guard.requireOwner(fakeReq({ headers: { cookie: `wa_session=${id}` } })))).status).toBe(401);
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM web_sessions').get()).toEqual({ n: 0 });
   });
 });
 
 describe('requireCsrf', () => {
-  function signedIn(o: Parameters<typeof setup>[0] = {}) {
+  async function signedIn(o: Parameters<typeof setup>[0] = {}) {
     const s = setup(o);
-    const { id, csrf } = s.sessions.create('owner@example.com');
-    const session = s.guard.requireOwner(fakeReq({ headers: { cookie: `wa_session=${id}` } }));
+    const { id, csrf } = await s.sessions.create('owner@example.com');
+    const session = await s.guard.requireOwner(fakeReq({ headers: { cookie: `wa_session=${id}` } }));
     return { ...s, session, csrf };
   }
   const post = (headers: Record<string, string>) => fakeReq({ method: 'POST', headers });
 
-  it('passes with the public origin and the right token', () => {
-    const { guard, session, csrf } = signedIn();
+  it('passes with the public origin and the right token', async () => {
+    const { guard, session, csrf } = await signedIn();
     expect(() => guard.requireCsrf(post({ origin: PUBLIC, 'x-csrf-token': csrf }), session)).not.toThrow();
   });
 
-  it('passes with the localhost origin on the dashboard port', () => {
-    const { guard, session, csrf } = signedIn({ port: 41234 });
+  it('passes with the localhost origin on the dashboard port', async () => {
+    const { guard, session, csrf } = await signedIn({ port: 41234 });
     expect(() => guard.requireCsrf(post({ origin: 'http://localhost:41234', 'x-csrf-token': csrf }), session)).not.toThrow();
     expect(() => guard.requireCsrf(post({ origin: 'http://127.0.0.1:41234', 'x-csrf-token': csrf }), session)).not.toThrow();
   });
 
-  it('a missing or wrong token gives 403', () => {
-    const { guard, session, csrf } = signedIn();
-    const other = signedIn().csrf;
+  it('a missing or wrong token gives 403', async () => {
+    const { guard, session, csrf } = await signedIn();
+    const other = (await signedIn()).csrf;
     for (const token of [undefined, '', 'x', other, csrf.slice(0, -1), `${csrf} `, csrf.toUpperCase()]) {
       const headers: Record<string, string> = { origin: PUBLIC };
       if (token !== undefined) headers['x-csrf-token'] = token;
@@ -117,8 +128,8 @@ describe('requireCsrf', () => {
     }
   });
 
-  it('a missing or wrong Origin gives 403', () => {
-    const { guard, session, csrf } = signedIn();
+  it('a missing or wrong Origin gives 403', async () => {
+    const { guard, session, csrf } = await signedIn();
     for (const origin of [undefined, 'null', 'https://evil.example.com', 'http://dash.example.com', 'https://dash.example.com:8443', `${PUBLIC}/`, 'http://localhost:9999', 'http://localhost']) {
       const headers: Record<string, string> = { 'x-csrf-token': csrf };
       if (origin !== undefined) headers.origin = origin;
@@ -126,14 +137,14 @@ describe('requireCsrf', () => {
     }
   });
 
-  it('without a public URL only the localhost origins pass', () => {
-    const { guard, session, csrf } = signedIn({ publicUrl: undefined });
+  it('without a public URL only the localhost origins pass', async () => {
+    const { guard, session, csrf } = await signedIn({ publicUrl: undefined });
     expect(caught(() => guard.requireCsrf(post({ origin: PUBLIC, 'x-csrf-token': csrf }), session)).status).toBe(403);
     expect(() => guard.requireCsrf(post({ origin: 'http://localhost:8787', 'x-csrf-token': csrf }), session)).not.toThrow();
   });
 
-  it('applies to every method but GET and HEAD', () => {
-    const { guard, session } = signedIn();
+  it('applies to every method but GET and HEAD', async () => {
+    const { guard, session } = await signedIn();
     expect(() => guard.requireCsrf(fakeReq({ method: 'GET' }), session)).not.toThrow();
     expect(() => guard.requireCsrf(fakeReq({ method: 'HEAD' }), session)).not.toThrow();
     for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
@@ -141,8 +152,8 @@ describe('requireCsrf', () => {
     }
   });
 
-  it('for POST, PUT, PATCH and DELETE checks both the Origin and the token', () => {
-    const { guard, session, csrf } = signedIn();
+  it('for POST, PUT, PATCH and DELETE checks both the Origin and the token', async () => {
+    const { guard, session, csrf } = await signedIn();
     for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
       const originOnly = fakeReq({ method, headers: { origin: PUBLIC } });
       expect(caught(() => guard.requireCsrf(originOnly, session)).status, `${method} without token`).toBe(403);
