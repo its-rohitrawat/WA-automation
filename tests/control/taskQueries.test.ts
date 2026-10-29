@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { closeTask, editTask, reopenTask, unlockTask } from '../../src/cli/corrections.ts';
 import { ControlError } from '../../src/control/errors.ts';
+import { overview } from '../../src/control/queries.ts';
 import { listDashboardTasks, parseTaskQuery, taskDetail, TASK_LIMIT_MAX } from '../../src/control/taskQueries.ts';
 import type { Db } from '../../src/store/db.ts';
 import { insertMedia, messageRowId } from '../../src/store/media.ts';
@@ -278,6 +279,55 @@ describe('listDashboardTasks review fixes', () => {
     const done = task(db, { deadline: '2026-10-01', status: 'done' });
     expect(codes(listDashboardTasks(db, q({ deadline: 'past' }), now))).toEqual([done]);
     expect(codes(listDashboardTasks(db, q({ status: 'overdue' }), now))).toEqual([]);
+  });
+
+  it('lists active clients only by default, as the Overview counts; removed=1 adds the removed clients\' tasks', () => {
+    const db = seededDb();
+    const sharma = task(db, { deadline: '2026-10-18' });
+    const mehta = task(db, { clientId: 2, deadline: '2026-10-18' });
+    db.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
+    expect(codes(listDashboardTasks(db, q({}), now))).toEqual([sharma]);
+    expect(codes(listDashboardTasks(db, q({ removed: '1' }), now)).sort()).toEqual([sharma, mehta].sort());
+    expect(() => q({ removed: 'yes' })).toThrowError(ControlError);
+  });
+
+  it('every Overview count equals the Tasks list its tile opens, with a removed client holding tasks in every bucket', () => {
+    const db = seededDb();
+    for (const clientId of [1, 2]) {
+      task(db, { clientId, deadline: '2026-10-18' }); // overdue
+      task(db, { clientId }); // open
+      task(db, { clientId, status: 'maybe_done' }); // review
+      const done = task(db, { clientId });
+      db.prepare("UPDATE tasks SET status = 'done', closed_on = '2026-10-17' WHERE code = ?").run(done);
+    }
+    db.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
+    const t = overview(db, now).tasks;
+    const total = (o: Record<string, string>) => listDashboardTasks(db, q(o), now).total;
+    expect(total({ status: 'overdue' })).toBe(t.overdue);
+    expect(total({ status: 'open' })).toBe(t.open);
+    expect(total({ status: 'review' })).toBe(t.review);
+    expect(total({ status: 'done', closed: '7d' })).toBe(t.doneThisWeek);
+    expect(t).toEqual({ open: 1, overdue: 1, review: 1, doneThisWeek: 1 });
+  });
+
+  it('closed=7d lists the done tasks closed today and the six days before (IST): the Overview\'s Done count, task for task', () => {
+    const db = seededDb();
+    const closedOn = (code: string, day: string) => db.prepare("UPDATE tasks SET status = 'done', closed_on = ? WHERE code = ?").run(day, code);
+    const today = task(db);
+    const sixth = task(db);
+    const older = task(db);
+    const reopened = task(db); // closed in the week, then reopened: not done, so not counted
+    task(db); // open
+    closedOn(today, '2026-10-19');
+    closedOn(sixth, '2026-10-13');
+    closedOn(older, '2026-10-12');
+    closedOn(reopened, '2026-10-15');
+    db.prepare("UPDATE tasks SET status = 'open' WHERE code = ?").run(reopened);
+    const r = listDashboardTasks(db, q({ status: 'done', closed: '7d' }), now);
+    expect(codes(r).sort()).toEqual([today, sixth].sort());
+    expect(r.total).toBe(overview(db, now).tasks.doneThisWeek);
+    expect(listDashboardTasks(db, q({ closed: '7d' }), now).total).toBe(2);
+    expect(() => q({ closed: '30d' })).toThrowError(ControlError);
   });
 });
 

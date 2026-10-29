@@ -136,6 +136,7 @@ interface FakeGroup {
   key: string;
   name: string;
   approved: boolean;
+  ignored?: boolean;
   client: FakeClient | null;
 }
 
@@ -153,6 +154,8 @@ function makeGroups(): FakeGroup[] {
     // A group removed earlier: the agent sends its former client so the code stays (src/control/groups.ts).
     { key: key(4), name: 'Old Client (left)', approved: false, client: { ...client('Old Client', 'OLD'), active: false } },
     { key: key(5), name: '<b>Not bold</b> & "quoted" group', approved: false, client: null },
+    // No Latin letters: a bulk approve cannot make a code for it, as the agent cannot (routes/groups.ts codeCandidates).
+    { key: key(6), name: 'शर्मा परिवार', approved: false, client: null },
   ];
   for (let i = 0; groups.length < 250; i++) {
     const a = WORDS[i % WORDS.length]!;
@@ -200,10 +203,14 @@ function fakeGroupsApi(state: FakeState) {
     const rows = groups
       .filter((g) => !q || fold(g.name).includes(fold(q)) || (g.client !== null && (fold(g.client.name).includes(fold(q)) || fold(g.client.code).includes(fold(q)))))
       // As the agent: a client row exists for every client here, so its code is locked; unapproved ones send no keywords.
-      .map((g) => ({ key: g.key, name: g.name, approved: g.approved, inWhatsApp: true, client: g.client && { ...g.client, codeLocked: true, ...(g.approved ? {} : { emailDomains: [], meetingKeywords: [] }) } }));
+      .map((g) => ({
+        key: g.key, name: g.name, approved: g.approved, inWhatsApp: true, ignored: !g.approved && Boolean(g.ignored),
+        client: g.client && { ...g.client, codeLocked: true, ...(g.approved ? {} : { emailDomains: [], meetingKeywords: [] }) },
+      }));
     const approved = groups.filter((g) => g.approved).length;
+    const ignored = groups.filter((g) => !g.approved && g.ignored).length;
     return {
-      rows, total: rows.length, counts: { all: groups.length, approved, notApproved: groups.length - approved },
+      rows, total: rows.length, counts: { all: groups.length, approved, notApproved: groups.length - approved - ignored, ignored },
       stale: Boolean(state.whatsappDown), reason: state.whatsappDown ? 'whatsapp_not_connected' : null, fetchedAt,
     };
   };
@@ -243,7 +250,26 @@ function fakeGroupsApi(state: FakeState) {
     }
     return null;
   };
-  const COUNTS = [{ open: 6, overdue: 2, review: 0, doneThisWeek: 3 }, { open: 6, overdue: 0, review: 1, doneThisWeek: 0 }, { open: 0, overdue: 0, review: 0, doneThisWeek: 3 }];
+  /** A bulk approve or ignore, group by group, as the agent's /groups/bulk: one failing does not stop the others. */
+  const bulk = (action: string, keys: string[]) =>
+    keys.map((key) => {
+      const g = groups.find((x) => x.key === key);
+      if (!g) return { key, ok: false, reason: 'Not in the list.' };
+      if (action !== 'approve') {
+        if (g.approved) return { key, ok: false, reason: 'It is tracked. Remove it from the agent first.' };
+        g.ignored = action === 'ignore';
+        return { key, ok: true, reason: null };
+      }
+      if (g.approved) return { key, ok: false, reason: 'It is tracked already.' };
+      const name = g.client?.name ?? (g.name.split(/\s+[x×–-]\s+/i)[0]?.trim() || g.name.trim()).slice(0, 80);
+      const code = g.client?.code ?? suggest(name);
+      if (!code) return { key, ok: false, reason: 'No code could be made from its name. Approve it on its own to choose one.' };
+      g.approved = true;
+      g.ignored = false;
+      g.client = g.client ? { ...g.client, active: true } : { name, code, active: false, hasTasks: false, emailDomains: [], meetingKeywords: [] };
+      return { key, ok: true, reason: null };
+    });
+  const COUNTS =[{ open: 6, overdue: 2, review: 0, doneThisWeek: 3 }, { open: 6, overdue: 0, review: 1, doneThisWeek: 0 }, { open: 0, overdue: 0, review: 0, doneThisWeek: 3 }];
   const clientCards = () =>
     state.empty
       ? []
@@ -277,7 +303,7 @@ function fakeGroupsApi(state: FakeState) {
       activity: activityFor(c),
     };
   };
-  return { overview, suggest, apply, clientCards, detail, refresh: () => (fetchedAt = at(0)) };
+  return { overview, suggest, apply, bulk, clientCards, detail, refresh: () => (fetchedAt = at(0)) };
 }
 
 /**
@@ -364,6 +390,16 @@ export function fakeDashboard(o: { port: number; state: FakeState; log?: Logger 
     const refused = g.apply((await readJson(req)) as Parameters<typeof g.apply>[0]);
     if (refused) return sendJson(res, 422, { error: { code: 'group_change', ...refused } });
     sendJson(res, 200, g.overview(''));
+  });
+  web.router.post('/dashboard/api/groups/bulk', async ({ req, res }) => {
+    if (!owner(req, res)) return;
+    const b = (await readJson(req)) as { action?: unknown; keys?: unknown };
+    const keys = Array.isArray(b.keys) ? b.keys.filter((k): k is string => typeof k === 'string') : [];
+    if (!['approve', 'ignore', 'unignore'].includes(String(b.action)) || keys.length === 0 || keys.length > 50) {
+      return sendError(res, 400, 'invalid', 'The changes are not valid.');
+    }
+    const results = g.bulk(String(b.action), keys);
+    setTimeout(() => sendJson(res, 200, { ...g.overview(''), results }), 400);
   });
   web.router.get('/dashboard/auth/login', ({ res, url }) => {
     const back = url.searchParams.get('return') ?? '';

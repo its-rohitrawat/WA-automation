@@ -23,6 +23,14 @@ describe('task filters in the URL', () => {
     expect(taskQueryFromSearch(taskQueryToSearch(q))).toEqual(q);
   });
 
+  it('keeps the Overview\'s closed=7d filter, and drops any other closed value', () => {
+    expect(taskQueryFromSearch('?status=done&closed=7d')).toEqual({ status: 'done', closed: '7d', sort: 'deadline', dir: 'asc' });
+    expect(taskQueryToSearch({ status: 'done', closed: '7d', sort: 'deadline', dir: 'asc' })).toBe('?status=done&closed=7d');
+    expect(taskQueryFromSearch('?closed=30d').closed).toBeUndefined();
+    expect(taskQueryFromSearch('?removed=1').removed).toBe('1');
+    expect(taskQueryFromSearch('?removed=yes').removed).toBeUndefined();
+  });
+
   it('reads a single list value from the URL against its allowed set', () => {
     expect(readList('?view=ready', 'view', ['all', 'ready'], 'all')).toBe('ready');
     expect(readList('?view=<x>', 'view', ['all', 'ready'], 'all')).toBe('all');

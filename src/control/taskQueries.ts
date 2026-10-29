@@ -12,6 +12,10 @@ export const TASK_STATUSES = ['overdue', 'open', 'review', 'done'] as const;
 export type DashboardTaskStatus = (typeof TASK_STATUSES)[number];
 export const TASK_DEADLINES = ['past', 'week', 'none'] as const;
 export const TASK_SORTS = ['deadline', 'code', 'client', 'owner', 'status', 'priority'] as const;
+/** closed=7d: done tasks closed in the last 7 IST days, today included (the Overview's "Done this week", queries.ts). */
+export const TASK_CLOSED = ['7d'] as const;
+/** removed=1: also the tasks of removed (inactive) clients. Left out, only active clients' tasks: the Overview's scope. */
+export const TASK_REMOVED = ['1'] as const;
 export type TaskSource = 'whatsapp' | 'meeting' | 'voice';
 
 export const TASK_LIMIT_DEFAULT = 100;
@@ -25,6 +29,8 @@ export interface TaskQuery {
   owner?: string;
   deadline?: (typeof TASK_DEADLINES)[number];
   priority?: Priority;
+  closed?: (typeof TASK_CLOSED)[number];
+  removed?: (typeof TASK_REMOVED)[number];
   sort: (typeof TASK_SORTS)[number];
   dir: 'asc' | 'desc';
   limit: number;
@@ -113,6 +119,10 @@ export function parseTaskQuery(p: URLSearchParams): TaskQuery {
   if (deadline) out.deadline = deadline;
   const priority = oneOf('priority', p.get('priority'), PRIORITIES);
   if (priority) out.priority = priority;
+  const closed = oneOf('closed', p.get('closed'), TASK_CLOSED);
+  if (closed) out.closed = closed;
+  const removed = oneOf('removed', p.get('removed'), TASK_REMOVED);
+  if (removed) out.removed = removed;
   return out;
 }
 
@@ -204,7 +214,8 @@ function likePattern(s: string): string {
 /** The Tasks screen's list: every filter, the sort and one page, with the total before paging. */
 export function listDashboardTasks(db: Db, f: TaskQuery, now: Date): { total: number; rows: DashboardTaskRow[] } {
   const today = istDate(now);
-  const where: string[] = [];
+  // Active clients only, as the Overview counts, unless the removed clients' tasks are asked for too.
+  const where: string[] = f.removed === '1' ? [] : ['c.active = 1'];
   const params: Record<string, string | number> = { today };
   if (f.q !== undefined) {
     where.push(`(t.code LIKE @q ESCAPE '\\' OR t.title LIKE @q ESCAPE '\\' OR c.name LIKE @q ESCAPE '\\' OR t.assigned_to LIKE @q ESCAPE '\\')`);
@@ -232,6 +243,11 @@ export function listDashboardTasks(db: Db, f: TaskQuery, now: Date): { total: nu
   if (f.priority !== undefined) {
     where.push('t.priority_level = @priority');
     params.priority = f.priority;
+  }
+  // The same days as the Overview's count: today and the six before it (IST).
+  if (f.closed === '7d') {
+    where.push("t.status = 'done' AND t.closed_on BETWEEN @closedFrom AND @today");
+    params.closedFrom = addDays(today, -6);
   }
   const whereSql = where.length > 0 ? ` WHERE ${where.join(' AND ')}` : '';
   const total = (db.prepare(`SELECT COUNT(*) AS n FROM tasks t JOIN clients c ON c.id = t.client_id${whereSql}`).get(params) as { n: number }).n;

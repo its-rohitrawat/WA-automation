@@ -475,6 +475,9 @@ With the dashboard on, this replaces editing `allowed-groups.json` by hand (step
    - **More: meeting matching** (optional): the same meeting keywords and email domains as in "Meeting summaries" below.
 3. Changes wait in a bar at the bottom ("1 change not saved"). Press **Save**: "Saved. The agent picks up the new groups within 2 seconds." No restart is needed. If a change is refused (for example a code already in use), the panel of that group opens and says why.
 4. To stop tracking a group, press **Remove** and **Save**. Nothing is deleted: its tasks are kept, and approving it again later brings it back with the same code.
+5. **Several groups at once:** tick the box on each untracked group (shift-click ticks a range; **Select all** ticks every group the search shows). A bar shows "<n> selected" with **Approve selected**, **Ignore selected** and **Clear**. On a computer, dragging a ticked group to the right moves all the ticked ones.
+   - **Approve selected** asks first, then approves each group straight away (no Save), with the client name and code the panel would suggest. Each group is approved on its own, so one that fails does not stop the others: the page says, for example, "4 approved, 1 failed: No code could be made from its name…". Approve such a group on its own to choose its code.
+   - **Ignore selected** sets groups aside (for example family groups): they leave **All** and **Not approved** and appear under **Ignored**, where **Show again** brings one back. Like any untracked group, the agent does not read them; ignoring changes nothing in WhatsApp, and their names are not saved.
 
 Every saved change is recorded in **Audit logs**. The dashboard writes the same `config/allowed-groups.json` file, so `npm run cli -- status` shows the new clients as before.
 

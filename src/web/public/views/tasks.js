@@ -53,6 +53,8 @@ export function mountTasks(ctx) {
     ${sel('owner', 'Any owner', owners.map((o) => [o, o]))}
     ${sel('deadline', 'Any deadline', [['past', 'Past deadline'], ['week', 'Due this week'], ['none', 'No deadline']])}
     ${sel('priority', 'Any priority', [['critical', 'Critical'], ['major', 'Major'], ['medium', 'Medium'], ['low', 'Low']])}
+    <button type="button" class="fchip ftoggle" data-removed aria-pressed="${f.removed === '1'}">${f.removed === '1' ? icon('tick', 13) : ''}Include removed clients</button>
+    ${f.closed === '7d' ? `<button type="button" class="fchip" data-clear="closed" aria-label="Remove the filter: done in the last 7 days">Done · last 7 days${icon('close', 13)}</button>` : ''}
     <span class="count-note" data-region="count"></span></div>`;
 
   const th = (/** @type {string} */ k, /** @type {string} */ l) => {
@@ -157,6 +159,26 @@ export function mountTasks(ctx) {
           f.sort = k;
           f.dir = 'asc';
         }
+        changed();
+        return;
+      }
+      // A chip filter (the Overview's Done count): removing it shows every task again under the other filters.
+      // Removed clients' tasks are left out unless asked for: the Overview counts active clients only.
+      if (t.closest('[data-removed]')) {
+        if (f.removed === '1') delete f.removed;
+        else f.removed = '1';
+        const bar = $('.toolbar', ctx.view);
+        if (bar) bar.outerHTML = toolbar();
+        /** @type {HTMLElement | null} */ ($('.toolbar [data-removed]', ctx.view))?.focus();
+        changed();
+        return;
+      }
+      const clear = /** @type {HTMLElement | null} */ (t.closest('[data-clear]'));
+      if (clear?.dataset.clear === 'closed') {
+        delete f.closed;
+        const bar = $('.toolbar', ctx.view);
+        if (bar) bar.outerHTML = toolbar();
+        /** @type {HTMLElement | null} */ ($('.toolbar [data-f="status"]', ctx.view))?.focus();
         changed();
         return;
       }

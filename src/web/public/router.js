@@ -32,14 +32,16 @@ export function pathFor(screen, sub = null) {
 }
 
 /**
- * Goes to a screen: a new history entry unless `replace`. @param {string} screen @param {string | null} sub
- * @param {{ replace?: boolean }} [opts]
+ * Goes to a screen: a new history entry unless `replace`. `query` ("?status=overdue") is added to the address; without
+ * one, the same screen's address is left as it is (its own filters stay).
+ * @param {string} screen @param {string | null} sub @param {{ replace?: boolean, query?: string }} [opts]
  */
 export function navigate(screen, sub, opts = {}) {
   const path = pathFor(screen, sub);
-  if (location.pathname === path) return;
-  if (opts.replace) history.replaceState(null, '', path);
-  else history.pushState(null, '', path);
+  const url = path + (opts.query ?? '');
+  if (opts.query ? location.pathname + location.search === url : location.pathname === path) return;
+  if (opts.replace) history.replaceState(null, '', url);
+  else history.pushState(null, '', url);
 }
 
 /** Calls fn with the screen on the browser's back and forward buttons. @param {(r: { screen: string, sub: string | null }) => void} fn */

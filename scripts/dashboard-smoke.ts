@@ -26,6 +26,9 @@ const VIEWPORTS = [
 ] as const;
 const THEMES = ['dark', 'light'] as const;
 const SEARCH_WORDS = ['Nair', 'Joshi', 'Patel', 'Gupta'];
+/** Another family per round for the bulk steps (each family's groups are approved or ignored by the end of its round). */
+const BULK_WORDS = ['Bose', 'Reddy', 'Sethi', 'Malhotra'];
+let bulkRound = 0;
 /** The screens drawn from src/web/public/views/screens.js. */
 const WORK_SCREENS = ['tasks', 'meetings', 'activity', 'tracker', 'usage', 'automations', 'audit', 'settings'];
 let round = 0;
@@ -146,6 +149,69 @@ async function main() {
         if ((await p.locator('#view b', { hasText: '<b>' }).count()) !== 1) fail(where, 'agent text was not shown as plain text');
         const htmlTheme = await p.evaluate(() => document.documentElement.dataset.theme ?? 'dark');
         if (htmlTheme !== theme) fail(where, `theme is ${htmlTheme}`);
+
+        // Every count is a link to the screen that lists it, with the filter in the address; the "i" beside it says
+        // what the number means (hover on a laptop, a tap on a phone, keyboard focus on both).
+        where = `overview counts ${tag}`;
+        const hrefs = await p.locator('.kpi-link').evaluateAll((els) => els.map((a) => a.getAttribute('href')));
+        const want = ['/dashboard/clients', '/dashboard/tasks?status=open', '/dashboard/tasks?status=overdue', '/dashboard/tasks?status=review', '/dashboard/tasks?status=done&closed=7d'];
+        if (JSON.stringify(hrefs) !== JSON.stringify(want)) fail(where, `links are ${JSON.stringify(hrefs)}`);
+        if ((await p.locator('.kpi .kpi-link .kpi-i').count()) !== 0) fail(where, 'an info button is inside a link');
+        const tip = p.locator('#kpi-tip-overdue');
+        if (vp.name === 'phone') await p.locator('[data-kpi-info="overdue"]').click();
+        else await p.locator('[data-kpi-info="overdue"]').hover();
+        await tip.waitFor({ state: 'visible' });
+        if ((await tip.textContent()) !== 'Tasks past their deadline that are not done yet.') fail(where, `the overdue sentence is "${await tip.textContent()}"`);
+        await p.waitForTimeout(300);
+        await p.screenshot({ path: join(OUT, `overview-info-${tag}.png`) });
+        if (vp.name === 'phone') {
+          await p.locator('[data-kpi-info="overdue"]').click(); // a second tap closes it
+          await p.locator('[data-kpi-info="overdue"][aria-expanded="false"]').waitFor();
+          // This test browser reports a mouse that can hover (a phone has none): move it off before checking.
+          await p.mouse.move(5, 5);
+          await tip.waitFor({ state: 'hidden' });
+        } else await p.mouse.move(5, 5);
+        // Keyboard: Tab to the review tile's "i" (past its link) shows its sentence, and Esc closes an open one.
+        await p.locator('[data-kpi-info="overdue"]').focus();
+        await p.keyboard.press('Tab');
+        await p.keyboard.press('Tab');
+        await p.locator('#kpi-tip-review').waitFor({ state: 'visible' });
+        const ring = await p.locator('.kpi-link[data-query="?status=review"]').evaluate((a) => {
+          a.focus();
+          return getComputedStyle(a).outlineStyle;
+        });
+        if (ring !== 'solid') fail(where, `a focused count has no focus ring (${ring})`);
+        await p.locator('[data-kpi-info="done"]').click();
+        await p.locator('.kpi.info-open #kpi-tip-done').waitFor({ state: 'visible' });
+        await p.keyboard.press('Escape');
+        await p.locator('.kpi.info-open').waitFor({ state: 'detached' });
+        await p.locator('.kpi-link[data-query="?status=overdue"]').click();
+        await p.waitForURL('**/dashboard/tasks?status=overdue');
+        await p.locator('select[data-f="status"]').waitFor();
+        if ((await p.locator('select[data-f="status"]').inputValue()) !== 'overdue') fail(where, 'Tasks did not open filtered to overdue');
+        await p.goBack();
+        await p.waitForURL(/\/dashboard$/);
+        await p.locator('.kpis').waitFor();
+        // Done: the tasks closed in the last 7 days (the count's own days), as a chip that removes that filter.
+        where = `overview done ${tag}`;
+        await p.locator('.kpi-link[data-query="?status=done&closed=7d"]').click();
+        await p.waitForURL('**/dashboard/tasks?status=done&closed=7d');
+        await p.locator('.fchip[data-clear="closed"]', { hasText: 'Done · last 7 days' }).waitFor();
+        // Active clients only, as the Overview counts; removed clients' tasks only when asked for.
+        await p.locator('.fchip[data-removed][aria-pressed="false"]', { hasText: 'Include removed clients' }).waitFor();
+        await p.locator('#view .skel').first().waitFor({ state: 'detached' });
+        await p.waitForTimeout(400);
+        await p.screenshot({ path: join(OUT, `tasks-done-7d-${tag}.png`) });
+        await p.locator('.fchip[data-removed]').click();
+        await p.waitForURL((u) => u.search === '?status=done&closed=7d&removed=1');
+        await p.locator('.fchip[data-removed][aria-pressed="true"]').waitFor();
+        await p.locator('.fchip[data-removed]').click();
+        await p.waitForURL((u) => u.search === '?status=done&closed=7d');
+        await p.locator('.fchip[data-clear="closed"]').click();
+        await p.waitForURL((u) => u.pathname === '/dashboard/tasks' && u.search === '?status=done');
+        if ((await p.locator('.fchip').count()) !== 0) fail(where, 'the chip stayed after removing it');
+        await p.goto(`${base}/dashboard`);
+        await p.locator('.kpis').waitFor();
 
         where = `connections ${tag}`;
         if (vp.name === 'phone') {
@@ -296,6 +362,52 @@ async function main() {
         await p.locator('#g-save').click();
         await p.locator('.toast', { hasText: 'Saved' }).waitFor();
         await p.locator('.savebar').waitFor({ state: 'detached' });
+
+        // Several at once: a shift-click range, approved together. The fake makes codes as the agent does: the third
+        // group of a family has none left, so it fails on its own and the others still go through.
+        where = `manage groups bulk ${tag}`;
+        const family = BULK_WORDS[bulkRound++ % BULK_WORDS.length]!;
+        await p.locator('#g-q').fill(family);
+        await p.waitForURL(new RegExp(`q=${family}`));
+        await p.waitForFunction((w) => [...document.querySelectorAll('.g-row')].every((r) => (r.textContent ?? '').includes(w)), family);
+        const ticks = p.locator('[data-select]');
+        await ticks.nth(0).click();
+        await ticks.nth(2).click({ modifiers: ['Shift'] });
+        await p.locator('.selbar', { hasText: '3 selected' }).waitFor();
+        if ((await p.locator('.g-row.selected').count()) !== 3) fail(where, 'the shift-click range did not tick 3 groups');
+        await p.waitForTimeout(500);
+        await p.screenshot({ path: join(OUT, `groups-selected-${tag}.png`) });
+        if (vp.name === 'laptop' && theme === 'dark') {
+          // Dragging a ticked group carries all three: dropped on the right, it asks to approve the three (cancelled here).
+          where = `manage groups drag selection ${tag}`;
+          await p.locator('.g-row.selected').first().dragTo(p.locator('.board.on'), { targetPosition: { x: 60, y: 30 } });
+          await p.locator('.modal h2', { hasText: 'Track 3 groups?' }).waitFor();
+          await p.locator('.modal [data-no]').click();
+          await p.locator('.modal').waitFor({ state: 'detached' });
+          where = `manage groups bulk ${tag}`;
+        }
+        await p.locator('#g-bulk-approve').click();
+        await p.locator('.modal h2', { hasText: 'Track 3 groups?' }).waitFor();
+        await p.locator('.modal [data-yes]').click();
+        await p.locator('.g-outcome', { hasText: '2 approved, 1 failed: No code could be made from its name' }).waitFor();
+        if ((await p.locator('.g-row.selected').count()) !== 1) fail(where, 'the group that failed is not still ticked');
+        await p.waitForTimeout(500);
+        await p.screenshot({ path: join(OUT, `groups-bulk-result-${tag}.png`), fullPage: true });
+
+        // Select all, ignore them, then show one again from the Ignored list.
+        where = `manage groups ignore ${tag}`;
+        await p.locator('#g-all').check();
+        const many = Number(await p.locator('.selbar b').textContent());
+        if (!(many > 3)) fail(where, `Select all ticked ${many}`);
+        await p.locator('#g-bulk-ignore').click();
+        await p.locator('.g-outcome', { hasText: `${many} groups ignored.` }).waitFor();
+        await p.locator('.selbar').waitFor({ state: 'detached' });
+        await p.locator('[data-filter="ignored"]').click();
+        await p.locator('[data-unignore]').first().waitFor();
+        await p.locator('[data-unignore]').first().click();
+        await p.locator('.g-outcome', { hasText: '1 group shown again.' }).waitFor();
+        await p.waitForTimeout(400);
+        await p.screenshot({ path: join(OUT, `groups-ignored-${tag}.png`), fullPage: true });
 
         where = `fix now ${tag}`;
         await p.goto(`${base}/dashboard`);
