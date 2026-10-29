@@ -126,9 +126,9 @@ describe('the briefing send time set from the dashboard', () => {
     expect(t.sender.calls).toHaveLength(1);
   });
 
-  it('refuses a time that is not HH:MM, or at or after the deadline, saving and auditing nothing', () => {
+  it('refuses a time that is not HH:MM, saving and auditing nothing', () => {
     const t = setup();
-    for (const v of ['7:30', '24:00', '07:60', '07:30:00', '', 730, null, '12:00', '13:15']) {
+    for (const v of ['7:30', '24:00', '07:60', '07:30:00', '', 730, null]) {
       let e: unknown;
       try {
         t.setTime(THU, '05:00', v);
@@ -143,10 +143,24 @@ describe('the briefing send time set from the dashboard', () => {
     expect(t.audits).toEqual([]);
   });
 
-  it('a stored time the deadline no longer allows falls back to .env, and the screen says so', () => {
+  it('takes any time of day: a time from the deadline on catches up for 3 hours, never past 23:59', () => {
     const t = setup();
-    t.db.prepare('INSERT INTO settings (k, v, updated_at, updated_by) VALUES (?, ?, ?, ?)').run('reportTime', '"12:30"', at(THU, '05:00'), OWNER);
-    expect(t.store().view()).toMatchObject({ sendAt: '06:00', source: { reportTime: 'env' } });
-    expect(t.store().reportSettings().time).toBe('06:00');
+    t.setTime(THU, '05:00', '13:15');
+    expect(t.store().view()).toMatchObject({ sendAt: '13:15', deadline: '16:15', source: { reportTime: 'dashboard' } });
+    expect(t.store().reportSettings()).toMatchObject({ time: '13:15', deadline: '16:15' });
+    t.setTime(THU, '05:00', '22:30');
+    expect(t.store().reportSettings()).toMatchObject({ time: '22:30', deadline: '23:59' });
+    t.setTime(THU, '05:00', '07:30');
+    expect(t.store().reportSettings()).toMatchObject({ time: '07:30', deadline: '12:00' });
+  });
+
+  it('sends an evening report once, at the evening time', async () => {
+    const t = setup();
+    t.setTime(THU, '05:00', '19:00');
+    await t.tick(THU, '18:59');
+    expect(t.sender.calls).toHaveLength(0);
+    await t.tick(THU, '19:00');
+    await t.tick(THU, '19:30');
+    expect(t.sender.calls).toHaveLength(1);
   });
 });

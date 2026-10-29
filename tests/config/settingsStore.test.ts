@@ -110,7 +110,7 @@ describe('SettingsStore.set', () => {
       ['reportDays', 'sundays', 422], ['reportDays', 1, 422], ['reportEnabled', 'true', 422], ['reportEnabled', 1, 422],
       ['reportRecipient', '9812345678', 422], ['reportRecipient', '911234567890', 422], ['reportRecipient', 919812345678, 422],
       ['reportRecipient', '91 98123 4567x', 422], ['reportRecipient', '', 422], ['dailySpendCap', 50, 422], ['reportDeadline', '13:00', 422],
-      ['reportTimeToday', '05:00', 422], ['reportTime', '25:00', 422], ['reportTime', '12:00', 422],
+      ['reportTimeToday', '05:00', 422], ['reportTime', '25:00', 422],
     ];
     for (const [key, value, status] of bad) {
       const e = refusal(() => store.set(key, value, OWNER, audit));

@@ -82,7 +82,7 @@ describe('control API: settings', () => {
     const time = { key: 'reportTime', value: '07:30' };
     expect((await h.post('/dashboard/api/settings', { body: time, csrf: null })).status).toBe(403);
     expect((await h.post('/dashboard/api/settings', { body: time, cookie: null })).status).toBe(401);
-    for (const value of ['7:30', '07:30:00', '25:00', '12:00', 730]) {
+    for (const value of ['7:30', '07:30:00', '25:00', 730]) {
       expect(await h.post('/dashboard/api/settings', { body: { key: 'reportTime', value } }), String(value)).toMatchObject({ status: 422, json: { error: { field: 'reportTime' } } });
     }
     expect(auditRows(db)).toEqual([]);

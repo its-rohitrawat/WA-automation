@@ -11,7 +11,7 @@ import { HHMM, INDIAN_MOBILE, maskNumber, type Env } from './env.ts';
 // Runtime settings (D5 Task 1, spec 4.7): the values the owner changes from the dashboard, kept in the settings table
 // (migration v9) as JSON. .env gives the defaults; a dashboard value wins. Only these four keys exist: the spend cap and
 // the catch-up deadline stay .env-only, so raising a limit stays a deliberate step on the Mac. The send time joined them
-// on the owner's request (29 Oct 2026): it must be before the deadline, and a time set after it has passed today starts
+// on the owner's request (29 Oct 2026): any time of day (its deadline follows it, see deadlineFor), and a time set after it has passed today starts
 // tomorrow, as today keeps the time it had (TODAY_KEY), so a change never sends a day twice nor drops one.
 // The founder's number is never put in an error or an audit line in full: maskNumber shows its last 4 digits.
 
@@ -23,6 +23,20 @@ const REPORT_DAYS: readonly ReportDays[] = ['weekdays', 'mon-sat', 'daily'];
 const DAYS_WORDS: Record<ReportDays, string> = { weekdays: 'Monday to Friday', 'mon-sat': 'Monday to Saturday', daily: 'every day' };
 /** Not a setting (set() refuses it): today's send time, kept when the time was changed after today's had passed. */
 const TODAY_KEY = 'reportTimeToday';
+
+/** How long after a send time at or after REPORT_DEADLINE a day not yet sent is still tried. */
+const LATE_CATCH_UP_MINUTES = 180;
+
+/**
+ * The deadline for a send time: REPORT_DEADLINE while the time is before it (the morning rule, unchanged), else the
+ * time plus LATE_CATCH_UP_MINUTES, never past 23:59 IST, so any time of day can be picked and a day still ends.
+ */
+export function deadlineFor(time: string, envDeadline: string): string {
+  if (time < envDeadline) return envDeadline;
+  const [h, m] = time.split(':').map(Number) as [number, number];
+  const total = Math.min(h * 60 + m + LATE_CATCH_UP_MINUTES, 23 * 60 + 59);
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
 
 export interface RuntimeSettings {
   reportEnabled: boolean;
@@ -113,9 +127,9 @@ export class SettingsStore {
     const enabled = this.#stored('reportEnabled');
     const days = this.#stored('reportDays');
     const recipient = this.#stored('reportRecipient');
-    // A stored time at or after the deadline (the deadline in .env moved earlier since) never sends: .env's time instead.
+    // Any stored HH:MM is used: its deadline follows it (deadlineFor).
     const time = this.#stored('reportTime');
-    const timeOk = time !== undefined && (time.value as string) < this.#env.REPORT_DEADLINE;
+    const timeOk = time !== undefined;
     return {
       reportEnabled: enabled ? (enabled.value as boolean) : this.#env.REPORT_ENABLED,
       reportDays: days ? (days.value as ReportDays) : this.#env.REPORT_DAYS,
@@ -136,7 +150,7 @@ export class SettingsStore {
       const v = JSON.parse(r.v) as unknown;
       if (typeof v !== 'object' || v === null) return undefined;
       const { date: d, time } = v as Record<string, unknown>;
-      return d === date && typeof time === 'string' && HHMM.test(time) && time < this.#env.REPORT_DEADLINE ? time : undefined;
+      return d === date && typeof time === 'string' && HHMM.test(time) ? time : undefined;
     } catch {
       return undefined;
     }
@@ -148,7 +162,7 @@ export class SettingsStore {
     const now = this.#clock.now();
     return {
       reportEnabled: s.reportEnabled, reportDays: s.reportDays, recipientMasked: s.reportRecipient ? maskNumber(s.reportRecipient) : null,
-      sendAt: s.reportTime, deadline: this.#env.REPORT_DEADLINE,
+      sendAt: s.reportTime, deadline: deadlineFor(s.reportTime, this.#env.REPORT_DEADLINE),
       nextReport: nextReport(reportFor(this.#db, istDate(now)), now, this.reportSettings(), s.reportTime), source: s.source,
     };
   }
@@ -157,7 +171,7 @@ export class SettingsStore {
   reportSettings(): ReportSettings {
     const s = this.get();
     const time = this.#todayTime(istDate(this.#clock.now())) ?? s.reportTime;
-    return { enabled: s.reportEnabled, time, deadline: this.#env.REPORT_DEADLINE, days: s.reportDays };
+    return { enabled: s.reportEnabled, time, deadline: deadlineFor(time, this.#env.REPORT_DEADLINE), days: s.reportDays };
   }
 
   /** Called after each saved change. Returns the function that removes the listener. */
@@ -183,9 +197,6 @@ export class SettingsStore {
         reportTime: 'The time must be HH:MM, for example 07:30',
       }[key];
       throw new ControlError(422, message, key);
-    }
-    if (key === 'reportTime' && (value as string) >= this.#env.REPORT_DEADLINE) {
-      throw new ControlError(422, `The time must be before ${this.#env.REPORT_DEADLINE}, when a day not yet sent is skipped`, key);
     }
     const current = this.get();
     if (key === 'reportEnabled' && value === true) {
