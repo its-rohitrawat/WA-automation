@@ -18,7 +18,10 @@ Date: 29 Oct 2026. Status: draft for the owner's approval. No code is written fr
 | Priority and sentiment | Keywords plus the same AI call (built separately) |
 | AI assistant | Answers, and acts only after a confirm (built separately) |
 
-Still open, to decide before the matching phase starts (section 12): the customer limit, who pays for Claude, and Google's review of the Gmail sending permission.
+| Who pays for Claude | **Each customer brings their own Anthropic API key** (29 Oct) |
+| Customer limit | Up to 20 active customers on this Mac (29 Oct) |
+| Gmail invites | Test users only (up to 100) until Google approves `gmail.send` (29 Oct) |
+| Billing | Not in this release (29 Oct) |
 
 ## 3. Today, in one paragraph
 
@@ -104,22 +107,25 @@ The founder has no "view as customer" button. If one is needed later, it becomes
 The checklist has five steps, each with a status and a button:
 
 1. **Connect WhatsApp.** A QR code in the browser, the same as the owner's screen now, per customer.
-2. **Add the spare number** (optional, used for the morning report). A QR code for the second phone.
-3. **Connect Google Drive**, for the customer's own tracker. This is the customer's own Google account, with its own token, encrypted.
-4. **Approve groups.** Manage groups, with the new multi-select.
-5. **Set the morning report time.**
+2. **Add your Anthropic API key**, tested and stored encrypted (section 7). The AI work starts only after this.
+3. **Add the spare number** (optional, used for the morning report). A QR code for the second phone.
+4. **Connect Google Drive**, for the customer's own tracker. This is the customer's own Google account, with its own token, encrypted.
+5. **Approve groups.** Manage groups, with the new multi-select.
+6. **Set the morning report time.**
 
-The customer becomes `active` once step 1 is done. The rest can follow.
+The customer becomes `active` once steps 1 and 2 are done. The rest can follow.
 
 ## 7. One process, many customers
 
 - A **Supervisor** starts one **CustomerRuntime** for each `active` customer and stops it when that customer is paused or removed. If one runtime crashes, it's restarted with backoff, and the others keep running.
 - Each runtime holds its own Baileys socket (auth state in Postgres, encrypted), its batcher and timers, its Drive publisher, its morning report sender and its meetings. Each one runs every database call through `withTenant(its id)`.
 - **Encryption keys per customer.** Each customer gets its own data key, encrypted by the Mac's master key. Customer secrets (WhatsApp auth, Google tokens, pointers to files) are encrypted with that customer's data key.
-- **Claude spend:**
-  - each customer has its own daily cap (today's `spend` table, per customer);
-  - a global daily cap protects the founder's bill;
-  - whoever's API key pays, as decided in section 12.
+- **Claude: each customer's own key.**
+  - In onboarding, the customer pastes their own Anthropic API key (a new step 2 in section 6).
+  - The server tests it once with the cheapest possible call, then stores it encrypted with that customer's data key. It's never shown again, only "configured" or "missing", and can be replaced or removed.
+  - Every Claude call for that customer (batches, meetings, the assistant, voice notes if they use Claude) uses only that key. No customer ever falls back to the founder's key, and the founder's `.env` key is used only for customer #1.
+  - With no key or a refused key, that customer's AI work pauses and the checklist says why. Their messages are still saved.
+  - Each customer sets their own daily cap. The `spend` table is per customer.
 - **Capacity:** each WhatsApp socket uses roughly 60 to 120 MB of memory. We start with a limit of **20 active customers**, change it with a setting, and show memory use on the Customers screen.
 
 ## 8. Moving from SQLite to Postgres safely
@@ -162,7 +168,7 @@ Rough size: **2 to 3 weeks** with three or four sessions working in parallel and
 - Invite tokens: hashed, single-use, expiring, bound to an email, rate-limited.
 - Sign-up accepts only Google-verified emails that match the invite.
 - No customer data in logs. Error messages don't reveal whether an invite or customer exists.
-- Customer secrets are encrypted with that customer's own data key.
+- Customer secrets, including their Anthropic key, are encrypted with that customer's own data key. The key never reaches the browser.
 - The founder can't read customer content.
 - Postgres listens on 127.0.0.1 only. Its passwords live in `.env` on the Mac only.
 
@@ -179,9 +185,9 @@ The other new features are built now on SQLite, and S1 and S2 then carry them ov
 
 For **Open chat with sending**, each customer can only send from their own linked WhatsApp. It's off by default, every message needs a confirm, and every send is audit-logged and rate-limited.
 
-## 12. Questions for the owner before S4 and S5
+## 12. Owner answers (29 Oct)
 
-1. **Customer limit:** start at 20 active customers on this Mac?
-2. **Who pays for Claude?** The founder's API key with a cap per customer (simplest), or each customer brings their own key?
-3. **Gmail sending:** while Google's review of the `gmail.send` permission is pending, invites work only for test users, up to 100, added in the Google console. Fine for now?
-4. **Billing:** left out of this release?
+1. Customer limit: start at 20 active customers.
+2. Claude: each customer brings their own Anthropic key.
+3. Gmail sending: test users only until Google's review.
+4. Billing: not in this release.
