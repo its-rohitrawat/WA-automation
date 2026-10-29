@@ -194,9 +194,16 @@ async function main() {
         await p.locator('.kpi-link[data-query="?status=done&closed=7d"]').click();
         await p.waitForURL('**/dashboard/tasks?status=done&closed=7d');
         await p.locator('.fchip[data-clear="closed"]', { hasText: 'Done · last 7 days' }).waitFor();
+        // Active clients only, as the Overview counts; removed clients' tasks only when asked for.
+        await p.locator('.fchip[data-removed][aria-pressed="false"]', { hasText: 'Include removed clients' }).waitFor();
         await p.locator('#view .skel').first().waitFor({ state: 'detached' });
         await p.waitForTimeout(400);
         await p.screenshot({ path: join(OUT, `tasks-done-7d-${tag}.png`) });
+        await p.locator('.fchip[data-removed]').click();
+        await p.waitForURL((u) => u.search === '?status=done&closed=7d&removed=1');
+        await p.locator('.fchip[data-removed][aria-pressed="true"]').waitFor();
+        await p.locator('.fchip[data-removed]').click();
+        await p.waitForURL((u) => u.search === '?status=done&closed=7d');
         await p.locator('.fchip[data-clear="closed"]').click();
         await p.waitForURL((u) => u.pathname === '/dashboard/tasks' && u.search === '?status=done');
         if ((await p.locator('.fchip').count()) !== 0) fail(where, 'the chip stayed after removing it');

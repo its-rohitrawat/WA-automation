@@ -27,6 +27,8 @@ describe('task filters in the URL', () => {
     expect(taskQueryFromSearch('?status=done&closed=7d')).toEqual({ status: 'done', closed: '7d', sort: 'deadline', dir: 'asc' });
     expect(taskQueryToSearch({ status: 'done', closed: '7d', sort: 'deadline', dir: 'asc' })).toBe('?status=done&closed=7d');
     expect(taskQueryFromSearch('?closed=30d').closed).toBeUndefined();
+    expect(taskQueryFromSearch('?removed=1').removed).toBe('1');
+    expect(taskQueryFromSearch('?removed=yes').removed).toBeUndefined();
   });
 
   it('reads a single list value from the URL against its allowed set', () => {

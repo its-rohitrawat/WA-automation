@@ -522,3 +522,5 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
 .fchip { display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px 7px 12px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--s-done) 45%, var(--line));
   background: color-mix(in srgb, var(--s-done) 10%, var(--panel)); color: var(--text); font: 500 13px/1 var(--font); cursor: pointer; }
 .fchip svg { color: var(--muted); } .fchip:hover svg { color: var(--text); }
+.fchip.ftoggle { border-color: var(--line); background: var(--panel); color: var(--muted); } .fchip.ftoggle[aria-pressed="true"] { border-color: color-mix(in srgb, var(--s-done) 45%, var(--line)); background: color-mix(in srgb, var(--s-done) 10%, var(--panel)); color: var(--text); }
+.fchip:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
