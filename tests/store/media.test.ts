@@ -69,8 +69,8 @@ describe('media store', () => {
     expect(MIGRATIONS[4]!.sql.trim()).toBe('ALTER TABLE media ADD COLUMN requeued_for_text INTEGER NOT NULL DEFAULT 0;');
   });
 
-  it('stores one row per message and reads it back without the sealed details', () => {
-    const db = seededDb();
+  it('stores one row per message and reads it back without the sealed details', async () => {
+    const db = await seededDb();
     const m1 = message(db, 'IMG1');
     const id = insertMedia(db, media(m1));
     const row = getMedia(db, id)!;
@@ -92,8 +92,8 @@ describe('media store', () => {
     expect(getMedia(db, video)).toMatchObject({ kind: 'video', status: 'metadata', fileName: null, seconds: 42, hasRef: false, errorCode: null });
   });
 
-  it('refuses a file whose client is not its message\'s client, and stores nothing (T1-09)', () => {
-    const db = seededDb();
+  it('refuses a file whose client is not its message\'s client, and stores nothing (T1-09)', async () => {
+    const db = await seededDb();
     const sharmaMessage = message(db, 'A'); // client 1
     expect(() => insertMedia(db, media(sharmaMessage, { clientId: 2 }))).toThrow(/not a message of client 2/);
     expect(() => insertMedia(db, media(9999))).toThrow(/not a message of client 1/); // no such message at all
@@ -103,8 +103,8 @@ describe('media store', () => {
     expect(getMedia(db, id)).toMatchObject({ messageId: sharmaMessage, clientId: 1 });
   });
 
-  it('refuses an unknown kind, status or text kind', () => {
-    const db = seededDb();
+  it('refuses an unknown kind, status or text kind', async () => {
+    const db = await seededDb();
     expect(() => insertMedia(db, media(message(db, 'K'), { kind: 'gif' as MediaKind }))).toThrow(/CHECK/);
     expect(() => insertMedia(db, media(message(db, 'S'), { status: 'queued' as MediaStatus }))).toThrow(/CHECK/);
     const id = insertMedia(db, media(message(db, 'T')));
@@ -112,8 +112,8 @@ describe('media store', () => {
     expect(getMedia(db, id)).toMatchObject({ status: 'pending', textKind: null });
   });
 
-  it('keeps whether a file was forwarded', () => {
-    const db = seededDb();
+  it('keeps whether a file was forwarded', async () => {
+    const db = await seededDb();
     const f = message(db, 'FWD');
     const fwd = insertMedia(db, media(f, { forwarded: true }));
     const own = insertMedia(db, media(message(db, 'OWN')));
@@ -122,15 +122,15 @@ describe('media store', () => {
     expect(mediaForMessages(db, [f], 100).get(f)!.forwarded).toBe(true);
   });
 
-  it('finds the row id of a message', () => {
-    const db = seededDb();
+  it('finds the row id of a message', async () => {
+    const db = await seededDb();
     const id = message(db, 'IMG1');
     expect(messageRowId(db, 1, 'IMG1')).toBe(id);
     expect(messageRowId(db, 2, 'IMG1')).toBeUndefined();
   });
 
-  it('lists due pending files oldest first, skipping later retries and other statuses', () => {
-    const db = seededDb();
+  it('lists due pending files oldest first, skipping later retries and other statuses', async () => {
+    const db = await seededDb();
     const a = insertMedia(db, media(message(db, 'A')));
     const b = insertMedia(db, media(message(db, 'B')));
     insertMedia(db, media(message(db, 'C'), { status: 'metadata', refEnc: null }));
@@ -142,8 +142,8 @@ describe('media store', () => {
     expect(getMedia(db, b)).toMatchObject({ attempts: 1, errorCode: 'network', nextAttemptAt: '2026-10-19T08:05:00.000Z' });
   });
 
-  it('lists due files in the order their messages were sent, even when history arrives out of order', () => {
-    const db = seededDb();
+  it('lists due files in the order their messages were sent, even when history arrives out of order', async () => {
+    const db = await seededDb();
     const late = insertMedia(db, media(message(db, 'LATE', { ts: '2026-10-10T09:00:00.000Z' })));
     const early = insertMedia(db, media(message(db, 'EARLY', { ts: '2026-10-10T07:00:00.000Z' })));
     const sameTime = insertMedia(db, media(message(db, 'SAME', { ts: '2026-10-10T09:00:00.000Z' })));
@@ -151,8 +151,8 @@ describe('media store', () => {
     expect(dueMediaIds(db, NOW, 1)).toEqual([early]);
   });
 
-  it('holds back the files of an inactive client until the client is active again', () => {
-    const db = seededDb();
+  it('holds back the files of an inactive client until the client is active again', async () => {
+    const db = await seededDb();
     const sha = insertMedia(db, media(message(db, 'A')));
     const meh = insertMedia(db, media(message(db, 'B', { clientId: 2 }), { clientId: 2 }));
     syncClients(db, [SHARMA]); // Mehta's group was taken off the allow-list
@@ -162,8 +162,8 @@ describe('media store', () => {
     expect(dueMediaIds(db, NOW, 10)).toEqual([sha, meh]);
   });
 
-  it('wipes the sealed details once the original is saved', () => {
-    const db = seededDb();
+  it('wipes the sealed details once the original is saved', async () => {
+    const db = await seededDb();
     const id = insertMedia(db, media(message(db, 'A')));
     markDownloaded(db, id, { localPath: 'media/SHA/2026-10/A.jpg', sha256: 'ab'.repeat(32), fileSize: 2048, at: LATER });
     expect(getMediaRef(db, id)).toBeNull();
@@ -174,24 +174,24 @@ describe('media store', () => {
     expect(getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'description', text: 'A blue banner', textChars: 13, errorCode: null, nextAttemptAt: null });
   });
 
-  it('wipes the sealed details when a file is finished without a saved original', () => {
-    const db = seededDb();
+  it('wipes the sealed details when a file is finished without a saved original', async () => {
+    const db = await seededDb();
     const id = insertMedia(db, media(message(db, 'A')));
     finishMedia(db, id, { textKind: null, text: null, pageCount: null, note: null, at: NOW });
     expect(getMediaRef(db, id)).toBeNull();
     expect(getMedia(db, id)).toMatchObject({ status: 'done', hasRef: false, localPath: null });
   });
 
-  it('finishing a file clears an earlier deferral', () => {
-    const db = seededDb();
+  it('finishing a file clears an earlier deferral', async () => {
+    const db = await seededDb();
     const id = insertMedia(db, media(message(db, 'A')));
     deferMedia(db, id, { errorCode: 'spend_cap', nextAttemptAt: '2026-10-19T08:10:00.000Z', countAttempt: false, at: NOW });
     finishMedia(db, id, { textKind: 'description', text: 'A blue banner', pageCount: null, note: null, at: LATER });
     expect(getMedia(db, id)).toMatchObject({ status: 'done', errorCode: null, nextAttemptAt: null, updatedAt: LATER });
   });
 
-  it('a deferral keeps the details; a final failure wipes them', () => {
-    const db = seededDb();
+  it('a deferral keeps the details; a final failure wipes them', async () => {
+    const db = await seededDb();
     const id = insertMedia(db, media(message(db, 'A')));
     deferMedia(db, id, { errorCode: 'spend_cap', nextAttemptAt: '2026-10-19T09:10:00.000Z', countAttempt: false, at: LATER });
     expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'spend_cap', attempts: 0, hasRef: true, createdAt: NOW, updatedAt: LATER });
@@ -201,8 +201,8 @@ describe('media store', () => {
   });
 
   // Final review FR1: the processor claims a file in a committed write before anything is decoded or paid for.
-  it('a claim counts the attempt and moves the next attempt ahead, only while the file is pending', () => {
-    const db = seededDb();
+  it('a claim counts the attempt and moves the next attempt ahead, only while the file is pending', async () => {
+    const db = await seededDb();
     const id = insertMedia(db, media(message(db, 'A')));
     deferMedia(db, id, { errorCode: 'ai_unavailable', nextAttemptAt: '2026-10-19T08:05:00.000Z', countAttempt: false, at: NOW });
     expect(claimMedia(db, id, { nextAttemptAt: '2026-10-19T09:15:00.000Z', at: LATER })).toBe(true);
@@ -215,8 +215,8 @@ describe('media store', () => {
     expect(getMedia(db, id)).toMatchObject({ status: 'failed', attempts: 1, nextAttemptAt: null });
   });
 
-  it('a deferral can store the attempts exactly, as they were before a claim', () => {
-    const db = seededDb();
+  it('a deferral can store the attempts exactly, as they were before a claim', async () => {
+    const db = await seededDb();
     const id = insertMedia(db, media(message(db, 'A')));
     claimMedia(db, id, { nextAttemptAt: '2026-10-19T08:15:00.000Z', at: NOW });
     claimMedia(db, id, { nextAttemptAt: '2026-10-19T08:15:00.000Z', at: NOW });
@@ -226,8 +226,8 @@ describe('media store', () => {
     expect(getMedia(db, id)!.attempts).toBe(2);
   });
 
-  it('a final failure keeps an original that was already saved', () => {
-    const db = seededDb();
+  it('a final failure keeps an original that was already saved', async () => {
+    const db = await seededDb();
     const id = insertMedia(db, pdf(message(db, 'A', { mediaType: 'document' })));
     markDownloaded(db, id, { localPath: 'media/SHA/2026-10/A.pdf', sha256: 'cd'.repeat(32), fileSize: 4096, at: NOW });
     failMedia(db, id, { status: 'failed', errorCode: 'not_pdf', at: LATER });
@@ -237,8 +237,8 @@ describe('media store', () => {
     });
   });
 
-  it('maps files to their messages and gives a job its context', () => {
-    const db = seededDb();
+  it('maps files to their messages and gives a job its context', async () => {
+    const db = await seededDb();
     const m1 = message(db, 'A');
     const m2 = message(db, 'B', { clientId: 2 });
     const t1 = message(db, 'T', { mediaType: null });
@@ -253,8 +253,8 @@ describe('media store', () => {
     expect(mediaJob(db, id)!.revoked).toBe(true);
   });
 
-  it('keys files by message row id, which is not the file row id', () => {
-    const db = seededDb();
+  it('keys files by message row id, which is not the file row id', async () => {
+    const db = await seededDb();
     for (const waId of ['T1', 'T2', 'T3']) message(db, waId, { mediaType: null }); // text messages take the first message row ids
     const mA = message(db, 'A');
     const mB = message(db, 'B', { mediaType: 'document' });
@@ -266,8 +266,8 @@ describe('media store', () => {
     expect(map.get(mB)).toMatchObject({ id: fileB, messageId: mB, kind: 'document' });
   });
 
-  it('reads only the start of a long file text for the prompt, with the full length', () => {
-    const db = seededDb();
+  it('reads only the start of a long file text for the prompt, with the full length', async () => {
+    const db = await seededDb();
     const m1 = message(db, 'A', { mediaType: 'document' });
     const id = insertMedia(db, pdf(m1));
     finishMedia(db, id, { textKind: 'extract', text: 'x'.repeat(1_000_000), pageCount: 250, note: 'first_pages_only', at: NOW });
@@ -277,8 +277,8 @@ describe('media store', () => {
     expect(getMedia(db, id)).toMatchObject({ textChars: 1_000_000, pageCount: 250, note: 'first_pages_only' });
   });
 
-  it('cuts and counts file text by characters, so a cut never splits one', () => {
-    const db = seededDb();
+  it('cuts and counts file text by characters, so a cut never splits one', async () => {
+    const db = await seededDb();
     const m1 = message(db, 'A');
     const id = insertMedia(db, media(m1));
     // The emoji is one character but two UTF-16 code units.
@@ -287,8 +287,8 @@ describe('media store', () => {
     expect(mediaForMessages(db, [m1], 100).get(m1)).toMatchObject({ text: 'ab😀cdef', textChars: 7 });
   });
 
-  it('stores NUL characters, which SQLite would take as the end of the text, as spaces so the words around them stay apart', () => {
-    const db = seededDb();
+  it('stores NUL characters, which SQLite would take as the end of the text, as spaces so the words around them stay apart', async () => {
+    const db = await seededDb();
     const m1 = message(db, 'A', { mediaType: 'document' });
     const id = insertMedia(db, pdf(m1));
     finishMedia(db, id, { textKind: 'extract', text: 'Page 1\u0000Total: 42,000', pageCount: 1, note: null, at: NOW });
@@ -299,8 +299,8 @@ describe('media store', () => {
 
 describe('a file read after its message was processed (12h)', () => {
   /** A message with a pending file, marked processed at NOW (it went ahead with "still being read"). */
-  function processedWithFile(o: Partial<NewMedia> = {}) {
-    const db = seededDb();
+  async function processedWithFile(o: Partial<NewMedia> = {}) {
+    const db = await seededDb();
     const messageId = message(db, 'A', { mediaType: o.kind ?? 'image' });
     const id = insertMedia(db, media(messageId, o));
     markProcessed(db, [messageId], NOW);
@@ -314,8 +314,8 @@ describe('a file read after its message was processed (12h)', () => {
   it.each([
     { textKind: 'description' as const, text: 'A payment receipt. Visible text: Paid ₹42,000', kind: 'image' as const },
     { textKind: 'extract' as const, text: 'Quotation No. 17\nTotal 42,000', kind: 'document' as const },
-  ])('a $textKind read late queues the message again: processed_at cleared, version bumped, file flagged', ({ textKind, text, kind }) => {
-    const { db, id, messageId } = processedWithFile({ kind, mimeType: kind === 'image' ? 'image/jpeg' : 'application/pdf' });
+  ])('a $textKind read late queues the message again: processed_at cleared, version bumped, file flagged', async ({ textKind, text, kind }) => {
+    const { db, id, messageId } = await processedWithFile({ kind, mimeType: kind === 'image' ? 'image/jpeg' : 'application/pdf' });
     expect(stateOf(db, messageId, id)).toEqual({ processedAt: NOW, version: 0, requeuedForText: false });
     finishMedia(db, id, { textKind, text, pageCount: null, note: null, at: LATER });
     expect(stateOf(db, messageId, id)).toEqual({ processedAt: null, version: 1, requeuedForText: true });
@@ -323,16 +323,16 @@ describe('a file read after its message was processed (12h)', () => {
     expect(getMedia(db, id)).toMatchObject({ status: 'done', textKind, text, updatedAt: LATER });
   });
 
-  it('re-queues in the same transaction as the finish: a failed re-queue leaves the file pending', () => {
-    const { db, id, messageId } = processedWithFile();
+  it('re-queues in the same transaction as the finish: a failed re-queue leaves the file pending', async () => {
+    const { db, id, messageId } = await processedWithFile();
     db.raw.exec("CREATE TRIGGER fail_requeue BEFORE UPDATE OF processed_at ON messages BEGIN SELECT RAISE(ABORT, 'test failure'); END");
     expect(() => finishMedia(db, id, { textKind: 'description', text: 'A receipt', pageCount: null, note: null, at: LATER })).toThrow(/test failure/);
     expect(getMedia(db, id)).toMatchObject({ status: 'pending', text: null, requeuedForText: false });
     expect(stateOf(db, messageId, id)).toEqual({ processedAt: NOW, version: 0, requeuedForText: false });
   });
 
-  it('flags a message already queued again for a reaction, keeping its reaction marker', () => {
-    const { db, id, messageId } = processedWithFile();
+  it('flags a message already queued again for a reaction, keeping its reaction marker', async () => {
+    const { db, id, messageId } = await processedWithFile();
     upsertReaction(db, { clientId: 1, targetWaId: 'A', reactorJid: 'r1', emoji: '✅', ts: NOW });
     expect(stateOf(db, messageId, id)).toEqual({ processedAt: null, version: 1, requeuedForText: false });
     finishMedia(db, id, { textKind: 'description', text: 'A receipt', pageCount: null, note: null, at: LATER });
@@ -340,8 +340,8 @@ describe('a file read after its message was processed (12h)', () => {
     expect(listUnprocessed(db, 1)[0]).toMatchObject({ id: messageId, requeueReason: 'reaction' });
   });
 
-  it('does not flag a message that was never processed; only its version moves, so a run holding it notices', () => {
-    const db = seededDb();
+  it('does not flag a message that was never processed; only its version moves, so a run holding it notices', async () => {
+    const db = await seededDb();
     const messageId = message(db, 'A');
     const id = insertMedia(db, media(messageId));
     finishMedia(db, id, { textKind: 'description', text: 'A receipt', pageCount: null, note: null, at: LATER });
@@ -349,32 +349,32 @@ describe('a file read after its message was processed (12h)', () => {
     expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ id: messageId, requeueReason: null })]);
   });
 
-  it.each(['voice', 'audio'] as const)('kind %s: a transcript read late queues the message again, exactly as the description of a picture does (V1)', (kind) => {
-    const { db, id, messageId } = processedWithFile({ kind, mimeType: 'audio/ogg; codecs=opus' });
+  it.each(['voice', 'audio'] as const)('kind %s: a transcript read late queues the message again, exactly as the description of a picture does (V1)', async (kind) => {
+    const { db, id, messageId } = await processedWithFile({ kind, mimeType: 'audio/ogg; codecs=opus' });
     finishMedia(db, id, { textKind: 'extract', text: 'Payment done, please check', pageCount: null, note: null, at: LATER });
     expect(getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'extract', text: 'Payment done, please check', backlog: false });
     expect(stateOf(db, messageId, id)).toEqual({ processedAt: null, version: 1, requeuedForText: true });
     expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ id: messageId, requeueReason: null })]);
   });
 
-  it.each(['video', 'sticker'] as const)('kind %s: a file that finishes with text re-queues nothing (M1)', (kind) => {
-    const { db, id, messageId } = processedWithFile({ kind, mimeType: null });
+  it.each(['video', 'sticker'] as const)('kind %s: a file that finishes with text re-queues nothing (M1)', async (kind) => {
+    const { db, id, messageId } = await processedWithFile({ kind, mimeType: null });
     finishMedia(db, id, { textKind: 'extract', text: 'Payment done, please check', pageCount: null, note: null, at: LATER });
     expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'Payment done, please check' });
     expect(stateOf(db, messageId, id)).toEqual({ processedAt: NOW, version: 0, requeuedForText: false });
     expect(listUnprocessed(db, 1)).toEqual([]);
   });
 
-  it.each(['voice', 'audio'] as const)('kind %s: a transcript of a message never processed moves only its version, as a picture does (V1)', (kind) => {
-    const db = seededDb();
+  it.each(['voice', 'audio'] as const)('kind %s: a transcript of a message never processed moves only its version, as a picture does (V1)', async (kind) => {
+    const db = await seededDb();
     const messageId = message(db, 'A', { mediaType: kind });
     const id = insertMedia(db, media(messageId, { kind, mimeType: null }));
     finishMedia(db, id, { textKind: 'extract', text: 'Payment done', pageCount: null, note: null, at: LATER });
     expect(stateOf(db, messageId, id)).toEqual({ processedAt: null, version: 1, requeuedForText: false });
   });
 
-  it.each(['voice', 'audio'] as const)('kind %s: a backlog transcript is stored for the record and never queues its message again (V6)', (kind) => {
-    const db = seededDb();
+  it.each(['voice', 'audio'] as const)('kind %s: a backlog transcript is stored for the record and never queues its message again (V6)', async (kind) => {
+    const db = await seededDb();
     const messageId = message(db, 'A', { mediaType: kind });
     const id = insertMedia(db, media(messageId, { kind, mimeType: null, refEnc: null }));
     markDownloaded(db, id, { localPath: 'media/SHA/2026-10/A-1.ogg', sha256: 'x', fileSize: 9000, at: NOW });
@@ -397,8 +397,8 @@ describe('a file read after its message was processed (12h)', () => {
       },
       state: { processedAt: null, version: 2, requeuedForText: true }, // the reaction moved the version once, the transcript once
     },
-  ])('a 2a file queued while its message is $why is queued as a live file: its transcript is read with the message (review B)', ({ after, state }) => {
-    const db = seededDb();
+  ])('a 2a file queued while its message is $why is queued as a live file: its transcript is read with the message (review B)', async ({ after, state }) => {
+    const db = await seededDb();
     const messageId = message(db, 'A', { mediaType: 'voice' });
     const id = insertMedia(db, media(messageId, { kind: 'voice', mimeType: null, refEnc: null }));
     markDownloaded(db, id, { localPath: 'media/SHA/2026-10/A-1.ogg', sha256: 'x', fileSize: 9000, at: NOW });
@@ -411,8 +411,8 @@ describe('a file read after its message was processed (12h)', () => {
     expect(listUnprocessed(db, 1).map((m) => m.id)).toEqual([messageId]);
   });
 
-  it('never re-queues a message deleted for everyone', () => {
-    const { db, id, messageId } = processedWithFile();
+  it('never re-queues a message deleted for everyone', async () => {
+    const { db, id, messageId } = await processedWithFile();
     applyRevoke(db, 1, 'A');
     finishMedia(db, id, { textKind: 'description', text: 'A receipt', pageCount: null, note: null, at: LATER });
     expect(stateOf(db, messageId, id)).toEqual({ processedAt: NOW, version: 0, requeuedForText: false });
@@ -427,21 +427,21 @@ describe('a file read after its message was processed (12h)', () => {
     ['an empty description', (db: Db, id: number) => finishMedia(db, id, { textKind: 'description', text: '', pageCount: null, note: null, at: LATER })],
     ['an extract with no text', (db: Db, id: number) => finishMedia(db, id, { textKind: 'extract', text: null, pageCount: 2, note: null, at: LATER })],
     ['text without a text kind', (db: Db, id: number) => finishMedia(db, id, { textKind: null, text: 'x', pageCount: null, note: null, at: LATER })],
-  ])('re-queues nothing when the file ends without text: %s', (_why, end) => {
-    const { db, id, messageId } = processedWithFile();
+  ])('re-queues nothing when the file ends without text: %s', async (_why, end) => {
+    const { db, id, messageId } = await processedWithFile();
     end(db, id);
     expect(stateOf(db, messageId, id)).toEqual({ processedAt: NOW, version: 0, requeuedForText: false });
     expect(listUnprocessed(db, 1)).toEqual([]);
   });
 
-  it('a view-once file is never read, so it never re-queues its message', () => {
-    const { db, id, messageId } = processedWithFile({ status: 'metadata', errorCode: 'view_once', refEnc: null });
+  it('a view-once file is never read, so it never re-queues its message', async () => {
+    const { db, id, messageId } = await processedWithFile({ status: 'metadata', errorCode: 'view_once', refEnc: null });
     expect(dueMediaIds(db, LATER, 10)).toEqual([]);
     expect(stateOf(db, messageId, id)).toEqual({ processedAt: NOW, version: 0, requeuedForText: false });
   });
 
-  it('a second finish of the same file does nothing: the version moves once and the first result stays (12h hardening)', () => {
-    const { db, id, messageId } = processedWithFile();
+  it('a second finish of the same file does nothing: the version moves once and the first result stays (12h hardening)', async () => {
+    const { db, id, messageId } = await processedWithFile();
     finishMedia(db, id, { textKind: 'description', text: 'A receipt', pageCount: null, note: null, at: LATER });
     expect(stateOf(db, messageId, id)).toEqual({ processedAt: null, version: 1, requeuedForText: true });
     finishMedia(db, id, { textKind: 'extract', text: 'Another text', pageCount: 2, note: 'x', at: '2026-10-19T10:00:00.000Z' });
@@ -449,8 +449,8 @@ describe('a file read after its message was processed (12h)', () => {
     expect(getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'description', text: 'A receipt', pageCount: null, note: null, updatedAt: LATER });
   });
 
-  it('a second finish after the re-check was processed queues nothing again (12h hardening)', () => {
-    const { db, id, messageId } = processedWithFile();
+  it('a second finish after the re-check was processed queues nothing again (12h hardening)', async () => {
+    const { db, id, messageId } = await processedWithFile();
     finishMedia(db, id, { textKind: 'description', text: 'A receipt', pageCount: null, note: null, at: LATER });
     expect(markProcessedIfUnchanged(db, [{ id: messageId, version: 1, fileShown: true }], LATER)).toBe(0);
     expect(stateOf(db, messageId, id)).toEqual({ processedAt: LATER, version: 1, requeuedForText: false });
@@ -464,23 +464,23 @@ describe('a file read after its message was processed (12h)', () => {
     ['only NULs', '\u0000\u0000\u0000'],
     ['only zero-width characters', '\u200B\u200C\u200D\u2060\uFEFF'],
     ['spaces, NULs and zero-width characters', ' \u0000\u200B \u200D\u0000 '],
-  ])('stores text with nothing visible (%s) as no text, and re-queues nothing (12h hardening)', (_why, text) => {
-    const { db, id, messageId } = processedWithFile({ kind: 'document', mimeType: 'application/pdf' });
+  ])('stores text with nothing visible (%s) as no text, and re-queues nothing (12h hardening)', async (_why, text) => {
+    const { db, id, messageId } = await processedWithFile({ kind: 'document', mimeType: 'application/pdf' });
     finishMedia(db, id, { textKind: 'extract', text, pageCount: 1, note: null, at: LATER });
     expect(getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'extract', text: null, textChars: null, pageCount: 1 });
     expect(stateOf(db, messageId, id)).toEqual({ processedAt: NOW, version: 0, requeuedForText: false });
     expect(listUnprocessed(db, 1)).toEqual([]);
   });
 
-  it('keeps text that shows something next to hidden characters, NULs as spaces (12h hardening)', () => {
-    const { db, id, messageId } = processedWithFile({ kind: 'document', mimeType: 'application/pdf' });
+  it('keeps text that shows something next to hidden characters, NULs as spaces (12h hardening)', async () => {
+    const { db, id, messageId } = await processedWithFile({ kind: 'document', mimeType: 'application/pdf' });
     finishMedia(db, id, { textKind: 'extract', text: '\u200B\u0000Total 42,000\u200D', pageCount: 1, note: null, at: LATER });
     expect(getMedia(db, id)).toMatchObject({ text: '\u200B Total 42,000\u200D' });
     expect(stateOf(db, messageId, id)).toEqual({ processedAt: null, version: 1, requeuedForText: true });
   });
 
-  it('mediaForMessages carries the flag', () => {
-    const { db, id, messageId } = processedWithFile();
+  it('mediaForMessages carries the flag', async () => {
+    const { db, id, messageId } = await processedWithFile();
     expect(mediaForMessages(db, [messageId], 0).get(messageId)!.requeuedForText).toBe(false);
     finishMedia(db, id, { textKind: 'description', text: 'A receipt', pageCount: null, note: null, at: LATER });
     expect(mediaForMessages(db, [messageId], 0).get(messageId)).toMatchObject({ id, requeuedForText: true, updatedAt: LATER });
@@ -511,8 +511,8 @@ const forgets = (db: Db) =>
 
 describe('finishMedia: the speech provider\'s stored copy of a transcript (N1)', () => {
   // Task 6: the copy an unreadable answer named (Phase 3's M7), noted by the processor when the error ends a run.
-  it('noteMediaForget notes a copy without finishing the file, once per provider and ref', () => {
-    const db = seededDb();
+  it('noteMediaForget notes a copy without finishing the file, once per provider and ref', async () => {
+    const db = await seededDb();
     const id = savedVoice(db, 'A');
     noteMediaForget(db, id, { provider: 'elevenlabs', ref: 'tr_9', at: NOW });
     noteMediaForget(db, id, { provider: 'elevenlabs', ref: 'tr_9', at: LATER });
@@ -521,16 +521,16 @@ describe('finishMedia: the speech provider\'s stored copy of a transcript (N1)',
     expect(() => noteMediaForget(db, id, { provider: 'elevenlabs', ref: '', at: NOW })).toThrow();
   });
 
-  it('notes the copy to delete in the same write as the finish', () => {
-    const db = seededDb();
+  it('notes the copy to delete in the same write as the finish', async () => {
+    const db = await seededDb();
     const id = savedVoice(db, 'A');
     finishMedia(db, id, { ...TRANSCRIPT, forget: { provider: 'elevenlabs', ref: 'tr_1' } });
     expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'Payment done, please check' });
     expect(forgets(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_1', createdAt: LATER, attempts: 0, nextTryAt: null }]);
   });
 
-  it('a second finish with the same copy notes nothing more; one with another copy notes it, though its transcript is not stored (review F)', () => {
-    const db = seededDb();
+  it('a second finish with the same copy notes nothing more; one with another copy notes it, though its transcript is not stored (review F)', async () => {
+    const db = await seededDb();
     const id = savedVoice(db, 'A');
     finishMedia(db, id, { ...TRANSCRIPT, forget: { provider: 'elevenlabs', ref: 'tr_1' } });
     finishMedia(db, id, { ...TRANSCRIPT, forget: { provider: 'elevenlabs', ref: 'tr_1' } });
@@ -540,8 +540,8 @@ describe('finishMedia: the speech provider\'s stored copy of a transcript (N1)',
     expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'Payment done, please check' });
   });
 
-  it('a finish of a file that already failed still notes its copy (review F)', () => {
-    const db = seededDb();
+  it('a finish of a file that already failed still notes its copy (review F)', async () => {
+    const db = await seededDb();
     const id = savedVoice(db, 'A');
     failMedia(db, id, { status: 'failed', errorCode: 'stt_failed', at: NOW });
     finishMedia(db, id, { ...TRANSCRIPT, forget: { provider: 'openai', ref: 'resp_1' } });
@@ -549,15 +549,15 @@ describe('finishMedia: the speech provider\'s stored copy of a transcript (N1)',
     expect(forgets(db)).toEqual([expect.objectContaining({ mediaId: id, provider: 'openai', ref: 'resp_1' })]);
   });
 
-  it('notes nothing without a copy', () => {
-    const db = seededDb();
+  it('notes nothing without a copy', async () => {
+    const db = await seededDb();
     finishMedia(db, savedVoice(db, 'A'), TRANSCRIPT);
     finishMedia(db, savedVoice(db, 'B'), { ...TRANSCRIPT, forget: null });
     expect(forgets(db)).toEqual([]);
   });
 
-  it('a copy that cannot be noted leaves the file pending, so the finish and the note never part', () => {
-    const db = seededDb();
+  it('a copy that cannot be noted leaves the file pending, so the finish and the note never part', async () => {
+    const db = await seededDb();
     const id = savedVoice(db, 'A');
     expect(() => finishMedia(db, id, { ...TRANSCRIPT, forget: { provider: 'elevenlabs', ref: '' } })).toThrow(/CHECK/);
     expect(getMedia(db, id)).toMatchObject({ status: 'pending', text: null });
@@ -566,8 +566,8 @@ describe('finishMedia: the speech provider\'s stored copy of a transcript (N1)',
 });
 
 describe('the 2a voice backlog (V6, N2)', () => {
-  it('lists saved voice notes and audio files that have no transcript, a format_not_supported note included', () => {
-    const db = seededDb();
+  it('lists saved voice notes and audio files that have no transcript, a format_not_supported note included', async () => {
+    const db = await seededDb();
     const voice = backlogVoice(db, 'V', { fileSize: 12_000 });
     const audio = backlogVoice(db, 'AU', { kind: 'audio', fileSize: 40_000 });
     const m4a = backlogVoice(db, 'M4A', { kind: 'audio', mimeType: 'audio/mp4', note: 'format_not_supported' });
@@ -583,8 +583,8 @@ describe('the 2a voice backlog (V6, N2)', () => {
     expect(voiceBacklog(db, { clientId: 1 }).map((r) => r.id)).toEqual([voice, audio, m4a]);
   });
 
-  it('skips files with another note, with text, without a saved file, with an error, still pending, queued, or of another kind', () => {
-    const db = seededDb();
+  it('skips files with another note, with text, without a saved file, with an error, still pending, queued, or of another kind', async () => {
+    const db = await seededDb();
     backlogVoice(db, 'LONG', { note: 'too_long' });
     backlogVoice(db, 'FWD', { note: 'forwarded_not_transcribed' });
     backlogVoice(db, 'SILENT', { note: 'no_speech' });
@@ -604,8 +604,8 @@ describe('the 2a voice backlog (V6, N2)', () => {
     expect(voiceBacklog(db)).toEqual([]);
   });
 
-  it('skips a message deleted for everyone and a client no longer on the allow-list', () => {
-    const db = seededDb();
+  it('skips a message deleted for everyone and a client no longer on the allow-list', async () => {
+    const db = await seededDb();
     backlogVoice(db, 'A');
     applyRevoke(db, 1, 'A');
     const mehta = backlogVoice(db, 'B', { clientId: 2 });
@@ -616,8 +616,8 @@ describe('the 2a voice backlog (V6, N2)', () => {
     expect(voiceBacklog(db).map((r) => r.id)).toEqual([mehta]);
   });
 
-  it('queues exactly the given files for transcription as backlog, in one write, and says how many', () => {
-    const db = seededDb();
+  it('queues exactly the given files for transcription as backlog, in one write, and says how many', async () => {
+    const db = await seededDb();
     const a = backlogVoice(db, 'A');
     const b = backlogVoice(db, 'B', { kind: 'audio', note: 'format_not_supported' });
     const c = backlogVoice(db, 'C');
@@ -632,8 +632,8 @@ describe('the 2a voice backlog (V6, N2)', () => {
     expect(queueVoiceBacklog(db, [], LATER)).toBe(0);
   });
 
-  it('leaves alone a file that changed since it was listed, or that never qualified', () => {
-    const db = seededDb();
+  it('leaves alone a file that changed since it was listed, or that never qualified', async () => {
+    const db = await seededDb();
     const revoked = backlogVoice(db, 'A');
     const transcribed = backlogVoice(db, 'B');
     const fine = backlogVoice(db, 'C');
@@ -649,8 +649,8 @@ describe('the 2a voice backlog (V6, N2)', () => {
     expect(getMedia(db, image)).toMatchObject({ status: 'pending', backlog: false });
   });
 
-  it('getMedia and mediaForMessages read backlog', () => {
-    const db = seededDb();
+  it('getMedia and mediaForMessages read backlog', async () => {
+    const db = await seededDb();
     const id = backlogVoice(db, 'A');
     const messageId = getMedia(db, id)!.messageId;
     expect(getMedia(db, id)!.backlog).toBe(false);
@@ -660,8 +660,8 @@ describe('the 2a voice backlog (V6, N2)', () => {
     expect(mediaForMessages(db, [messageId], 10).get(messageId)!.backlog).toBe(true);
   });
 
-  it('a queued file counts its waits from the queueing, not from its arrival days before, and is never stale (review A, round 2)', () => {
-    const db = seededDb();
+  it('a queued file counts its waits from the queueing, not from its arrival days before, and is never stale (review A, round 2)', async () => {
+    const db = await seededDb();
     const id = backlogVoice(db, 'A'); // arrived at NOW
     const queuedAt = '2026-10-22T08:00:00.000Z';
     expect(queueVoiceBacklog(db, [id], queuedAt)).toBe(1);
@@ -671,8 +671,8 @@ describe('the 2a voice backlog (V6, N2)', () => {
     expect(mediaStats(db, new Date('2026-10-22T08:31:00.000Z'))).toMatchObject({ pending: 1, stale: 0 });
   });
 
-  it('a file that finished format_not_supported after it was queued is listed again, and can be queued again (review C)', () => {
-    const db = seededDb();
+  it('a file that finished format_not_supported after it was queued is listed again, and can be queued again (review C)', async () => {
+    const db = await seededDb();
     const id = backlogVoice(db, 'A', { kind: 'audio', mimeType: 'audio/mp4', note: 'format_not_supported' });
     expect(queueVoiceBacklog(db, [id], LATER)).toBe(1);
     expect(getMedia(db, id)).toMatchObject({ status: 'pending', backlog: true, note: null });
@@ -685,8 +685,8 @@ describe('the 2a voice backlog (V6, N2)', () => {
 
   // Phase 2b final review: a backlog file that finished with no transcriber (voice notes switched off while it waited)
   // has no text and no note. It used to be left out for good (backlog = 1); it is listed again.
-  it('round trip: queued, then finished with no transcriber, it is listed again and can be queued again', () => {
-    const db = seededDb();
+  it('round trip: queued, then finished with no transcriber, it is listed again and can be queued again', async () => {
+    const db = await seededDb();
     const id = backlogVoice(db, 'A');
     expect(voiceBacklog(db).map((r) => r.id)).toEqual([id]);
     expect(queueVoiceBacklog(db, [id], LATER)).toBe(1);
@@ -707,8 +707,8 @@ describe('the 2a voice backlog (V6, N2)', () => {
     ['no_speech', { textKind: null, text: null, note: 'no_speech' }],
     ['too_costly', { textKind: null, text: null, note: 'too_costly' }],
     ['revoked', { textKind: null, text: null, note: 'revoked' }],
-  ])('a queued backlog file that finished %s is never listed again', (_what, x) => {
-    const db = seededDb();
+  ])('a queued backlog file that finished %s is never listed again', async (_what, x) => {
+    const db = await seededDb();
     const id = backlogVoice(db, 'A');
     expect(queueVoiceBacklog(db, [id], LATER)).toBe(1);
     finishMedia(db, id, { ...x, pageCount: null, at: LATER });
@@ -717,16 +717,16 @@ describe('the 2a voice backlog (V6, N2)', () => {
     expect(queueVoiceBacklog(db, [id], '2026-10-19T10:00:00.000Z')).toBe(0);
   });
 
-  it('a live file transcribed as text that shows nothing is not listed: it was transcribed', () => {
-    const db = seededDb();
+  it('a live file transcribed as text that shows nothing is not listed: it was transcribed', async () => {
+    const db = await seededDb();
     const id = savedVoice(db, 'A');
     finishMedia(db, id, { ...TRANSCRIPT, text: '   ' });
     expect(getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'extract', text: null });
     expect(voiceBacklog(db)).toEqual([]);
   });
 
-  it('lists live pending files before backlog files, so a long backlog never holds up a new voice note (review D)', () => {
-    const db = seededDb();
+  it('lists live pending files before backlog files, so a long backlog never holds up a new voice note (review D)', async () => {
+    const db = await seededDb();
     const old1 = backlogVoice(db, 'OLD1');
     const old2 = backlogVoice(db, 'OLD2');
     expect(queueVoiceBacklog(db, [old1, old2], NOW)).toBe(2);
@@ -735,8 +735,8 @@ describe('the 2a voice backlog (V6, N2)', () => {
     expect(dueMediaIds(db, LATER, 10)).toEqual([live, old1, old2]);
   });
 
-  it('lists only voice notes and audio files, or only the other files, when asked (the voice lane, Task 10)', () => {
-    const db = seededDb();
+  it('lists only voice notes and audio files, or only the other files, when asked (the voice lane, Task 10)', async () => {
+    const db = await seededDb();
     const voice = savedVoice(db, 'V', { ts: '2026-10-19T07:00:00.000Z' });
     const image = insertMedia(db, media(message(db, 'I', { mediaType: 'image', ts: '2026-10-19T07:01:00.000Z' })));
     const audio = savedVoice(db, 'A', { kind: 'audio', mimeType: 'audio/mpeg', ts: '2026-10-19T07:02:00.000Z' });
@@ -760,8 +760,8 @@ describe('voice notes that failed on this computer', () => {
     return id;
   }
 
-  it('lists failures of the local engine and of ffmpeg, never of a paid provider, and only voice notes and audio files', () => {
-    const db = seededDb();
+  it('lists failures of the local engine and of ffmpeg, never of a paid provider, and only voice notes and audio files', async () => {
+    const db = await seededDb();
     const empty = failedVoice(db, 'A', 'local_empty_output');
     const timeout = failedVoice(db, 'B', 'local_timeout', { kind: 'audio' });
     const exit = failedVoice(db, 'C', 'local_exit_1');
@@ -782,8 +782,8 @@ describe('voice notes that failed on this computer', () => {
     expect(failedLocalVoice(db, { clientId: 2 })).toEqual([{ id: split, clientId: 2, fileSize: 9000, mimeType: 'audio/ogg; codecs=opus' }]);
   });
 
-  it('skips a file without its original, a message deleted for everyone, a client no longer on the allow-list, and a pending or done file', () => {
-    const db = seededDb();
+  it('skips a file without its original, a message deleted for everyone, a client no longer on the allow-list, and a pending or done file', async () => {
+    const db = await seededDb();
     const unsaved = insertMedia(db, media(message(db, 'NOFILE', { mediaType: 'voice' }), { kind: 'voice', mimeType: 'audio/ogg' }));
     failMedia(db, unsaved, { status: 'failed', errorCode: 'local_timeout', at: NOW });
     failedVoice(db, 'REV', 'local_timeout');
@@ -796,8 +796,8 @@ describe('voice notes that failed on this computer', () => {
     expect(failedLocalVoice(db)).toEqual([]);
   });
 
-  it('queues them again as queueVoiceBacklog does: pending, attempts 0, no error, note or next attempt, created now, backlog by the same rule', () => {
-    const db = seededDb();
+  it('queues them again as queueVoiceBacklog does: pending, attempts 0, no error, note or next attempt, created now, backlog by the same rule', async () => {
+    const db = await seededDb();
     const processed = failedVoice(db, 'A', 'local_empty_output');
     const unprocessed = failedVoice(db, 'B', 'audio_convert_failed');
     db.raw.prepare('UPDATE messages SET processed_at = NULL WHERE id = ?').run(getMedia(db, unprocessed)!.messageId);
@@ -818,8 +818,8 @@ describe('voice notes that failed on this computer', () => {
     expect(mediaStats(db, new Date('2026-10-22T08:10:00.000Z'))).toMatchObject({ pending: 3, stale: 0 });
   });
 
-  it('never queues a file that failed at a paid provider, or one that changed since it was listed', () => {
-    const db = seededDb();
+  it('never queues a file that failed at a paid provider, or one that changed since it was listed', async () => {
+    const db = await seededDb();
     const paid = failedVoice(db, 'A', 'stt_partial');
     const unbooked = failedVoice(db, 'B', 'stt_paid_unbooked');
     const changed = failedVoice(db, 'C', 'local_timeout');
@@ -835,8 +835,8 @@ describe('voice notes that failed on this computer', () => {
     expect(getMedia(db, fine)).toMatchObject({ status: 'pending', attempts: 0 });
   });
 
-  it('mediaStats counts them under voiceFailed for 24 hours, of active clients only, and never a paid failure', () => {
-    const db = seededDb();
+  it('mediaStats counts them under voiceFailed for 24 hours, of active clients only, and never a paid failure', async () => {
+    const db = await seededDb();
     const now = new Date('2026-10-19T08:00:00.000Z');
     failedVoice(db, 'A', 'local_empty_output', { at: '2026-10-19T07:00:00.000Z' });
     failedVoice(db, 'B', 'audio_no_duration', { kind: 'audio', at: '2026-10-18T08:00:00.000Z' }); // exactly 24 h ago: counted
@@ -856,8 +856,8 @@ describe('the queue of provider copies to delete (N1)', () => {
   const T0 = '2026-10-19T10:00:00.000Z';
   const T1 = '2026-10-19T10:15:00.000Z';
   /** Three transcribed voice notes, each with a copy to delete (ids 1 to 3 in media_stt_forget). */
-  function threeCopies() {
-    const db = seededDb();
+  async function threeCopies() {
+    const db = await seededDb();
     const ids = ['A', 'B', 'C'].map((waId, i) => {
       const id = savedVoice(db, waId);
       finishMedia(db, id, { ...TRANSCRIPT, forget: { provider: 'elevenlabs', ref: `tr_${i + 1}` } });
@@ -866,8 +866,8 @@ describe('the queue of provider copies to delete (N1)', () => {
     return { db, ids };
   }
 
-  it('lists the copies due, oldest first, and only one file\'s when asked', () => {
-    const { db, ids } = threeCopies();
+  it('lists the copies due, oldest first, and only one file\'s when asked', async () => {
+    const { db, ids } = await threeCopies();
     expect(pendingMediaForgets(db, { nowIso: T0, maxAttempts: 5 })).toEqual([
       { id: 1, mediaId: ids[0], provider: 'elevenlabs', ref: 'tr_1', attempts: 0 },
       { id: 2, mediaId: ids[1], provider: 'elevenlabs', ref: 'tr_2', attempts: 0 },
@@ -878,8 +878,8 @@ describe('the queue of provider copies to delete (N1)', () => {
     ]);
   });
 
-  it('counts a try and holds the copy back until its next try is due', () => {
-    const { db } = threeCopies();
+  it('counts a try and holds the copy back until its next try is due', async () => {
+    const { db } = await threeCopies();
     countMediaForgetAttempt(db, 2, T1);
     expect(db.raw.prepare('SELECT attempts, next_try_at AS nextTryAt FROM media_stt_forget WHERE id = 2').get()).toEqual({ attempts: 1, nextTryAt: T1 });
     expect(pendingMediaForgets(db, { nowIso: T0, maxAttempts: 5 }).map((f) => f.id)).toEqual([1, 3]);
@@ -888,21 +888,21 @@ describe('the queue of provider copies to delete (N1)', () => {
     ]);
   });
 
-  it('stops listing a copy once its tries are used up', () => {
-    const { db } = threeCopies();
+  it('stops listing a copy once its tries are used up', async () => {
+    const { db } = await threeCopies();
     for (let i = 0; i < 5; i++) countMediaForgetAttempt(db, 1, T0);
     expect(pendingMediaForgets(db, { nowIso: T1, maxAttempts: 5 }).map((f) => f.id)).toEqual([2, 3]);
     expect(pendingMediaForgets(db, { nowIso: T1, maxAttempts: 6 }).map((f) => f.id)).toEqual([1, 2, 3]);
   });
 
-  it('removes a copy once the provider has deleted it', () => {
-    const { db } = threeCopies();
+  it('removes a copy once the provider has deleted it', async () => {
+    const { db } = await threeCopies();
     deleteMediaForget(db, 2);
     expect(pendingMediaForgets(db, { nowIso: T0, maxAttempts: 5 }).map((f) => f.id)).toEqual([1, 3]);
     expect(forgets(db)).toHaveLength(2);
   });
-  it('counts the copies given up: last try used, or a provider that is not set up now (status, Task 9)', () => {
-    const db = seededDb();
+  it('counts the copies given up: last try used, or a provider that is not set up now (status, Task 9)', async () => {
+    const db = await seededDb();
     const add = (waId: string, provider: 'elevenlabs' | 'openai', ref: string) => {
       const id = savedVoice(db, waId);
       finishMedia(db, id, { ...TRANSCRIPT, forget: { provider, ref } });

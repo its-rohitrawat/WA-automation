@@ -26,8 +26,8 @@ function file(
   });
 }
 
-function seed(): Db {
-  const db = seededDb();
+async function seed(): Promise<Db> {
+  const db = await seededDb();
   upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
   setRole(db, 1, SHARMA_PN, 'client', 'human');
   upsertPerson(db, { clientId: 1, jid: RAHUL_PN, number: '919800000002', name: 'Rahul', fromMe: false });
@@ -64,7 +64,7 @@ function rowWhere(ws: ExcelJS.Worksheet, pred: (r: ExcelJS.Row) => boolean): Exc
 const mediaIdOf = (db: Db, waId: string): number =>
   (db.raw.prepare('SELECT m.id FROM media m JOIN messages msg ON msg.id = m.message_id WHERE msg.wa_id = ?').get(waId) as { id: number }).id;
 
-/** Gives a file that seed() already finished another text. finishMedia finishes a file only once, so this writes the row directly. */
+/** Gives a file that await seed() already finished another text. finishMedia finishes a file only once, so this writes the row directly. */
 const replaceText = (db: Db, waId: string, text: string): void => {
   db.raw.prepare('UPDATE media SET text = ? WHERE id = ?').run(text, mediaIdOf(db, waId));
 };
@@ -72,8 +72,8 @@ const replaceText = (db: Db, waId: string, text: string): void => {
 const sharmaFiles = (db: Db) => loadTrackerView(db, now, healthy).clients.find((c) => c.client.code === 'SHA')!.files;
 
 describe('Files received', () => {
-  it('lists files from client members only, newest first, with a description and Drive id', () => {
-    expect(sharmaFiles(seed())).toEqual([
+  it('lists files from client members only, newest first, with a description and Drive id', async () => {
+    expect(sharmaFiles(await seed())).toEqual([
       { date: '2026-10-16', sentBy: 'Mr. Sharma', name: 'image-2026-10-16-1130-2.jpg', description: 'A payment receipt. Visible text: Paid ₹42,000', driveFileId: null },
       { date: '2026-10-15', sentBy: 'Mr. Sharma', name: 'brief.pdf', description: 'PDF, 3 pages: Homepage brief Hero banner with the new logo', driveFileId: 'drivefile123' },
       { date: '2026-10-14', sentBy: 'Mr. Sharma', name: '=HYPERLINK(_http___evil_)', description: 'PDF, being read', driveFileId: null },
@@ -81,7 +81,7 @@ describe('Files received', () => {
   });
 
   it('adds the section between Decisions and Done, with Drive links and plain-string names', async () => {
-    const ws = await sheet(seed(), 'Sharma Interiors');
+    const ws = await sheet(await seed(), 'Sharma Interiors');
     const title = (t: string) => rowWhere(ws, (r) => r.getCell(1).value === t).number;
     expect(title('Decisions')).toBeLessThan(title('Files received'));
     expect(title('Files received')).toBeLessThan(title('Done'));
@@ -99,7 +99,7 @@ describe('Files received', () => {
   });
 
   it('merges the description over columns D to L, in the header and in every file row (amendment 14a)', async () => {
-    const ws = await sheet(seed(), 'Sharma Interiors');
+    const ws = await sheet(await seed(), 'Sharma Interiors');
     const header = rowWhere(ws, (r) => r.getCell(1).value === 'Files received').number + 1;
     const merges = (ws.model as unknown as { merges: string[] }).merges;
     for (const r of [header, header + 1, header + 2, header + 3]) {
@@ -112,7 +112,7 @@ describe('Files received', () => {
   });
 
   it('sets each file row tall enough for its wrapped name and description, since merged cells do not auto-fit', async () => {
-    const db = seed();
+    const db = await seed();
     replaceText(db, 'D1', 'word '.repeat(80));
     const ws = await sheet(db, 'Sharma Interiors');
     const header = rowWhere(ws, (r) => r.getCell(1).value === 'Files received').number + 1;
@@ -156,7 +156,7 @@ describe('Files received', () => {
   });
 
   it('gives the workbook row the estimated height, with wrap text on (D4)', async () => {
-    const view = loadTrackerView(seed(), now, healthy);
+    const view = loadTrackerView(await seed(), now, healthy);
     const files = view.clients.find((c) => c.client.code === 'SHA')!.files;
     const brief = files.find((f) => f.name === 'brief.pdf')!;
     brief.description = 'word '.repeat(80);
@@ -174,20 +174,20 @@ describe('Files received', () => {
   });
 
   it('does not link a Drive id that is not a plain id', async () => {
-    const db = seed();
+    const db = await seed();
     markUploaded(db, mediaIdOf(db, 'F1'), 'abc/../evil?x=1');
     const ws = await sheet(db, 'Sharma Interiors');
     expect(rowWhere(ws, (r) => r.getCell(3).value === '=HYPERLINK(_http___evil_)').getCell(13).value).toBeNull();
   });
 
   it('shows (none) for a client without files', async () => {
-    const ws = await sheet(seed(), 'Mehta Foods');
+    const ws = await sheet(await seed(), 'Mehta Foods');
     const at = rowWhere(ws, (r) => r.getCell(1).value === 'Files received').number;
     expect(ws.getRow(at + 2).getCell(1).value).toBe('(none)');
   });
 
-  it('keeps a file deleted for everyone in the list, with (deleted by sender) and no Drive link (amendment 14b, D3)', () => {
-    const db = seed();
+  it('keeps a file deleted for everyone in the list, with (deleted by sender) and no Drive link (amendment 14b, D3)', async () => {
+    const db = await seed();
     applyRevoke(db, 1, 'D1');
     expect(sharmaFiles(db).find((f) => f.name === 'brief.pdf')).toEqual({
       date: '2026-10-15', sentBy: 'Mr. Sharma', name: 'brief.pdf', description: '(deleted by sender)', driveFileId: null,
@@ -196,7 +196,7 @@ describe('Files received', () => {
   });
 
   it('does not link or describe an uploaded file that was then deleted for everyone, but still links other uploaded files (D3)', async () => {
-    const db = seed();
+    const db = await seed();
     markUploaded(db, mediaIdOf(db, 'I1'), 'driveimage456');
     applyRevoke(db, 1, 'D1');
     const ws = await sheet(db, 'Sharma Interiors');
@@ -211,8 +211,8 @@ describe('Files received', () => {
     expect(texts.filter((t) => t.includes('drivefile123') || t.includes('Homepage'))).toEqual([]);
   });
 
-  it('says (forwarded image) and (forwarded scanned PDF) for forwarded files that were not described (D2, amendment 14c)', () => {
-    const db = seed();
+  it('says (forwarded image) and (forwarded scanned PDF) for forwarded files that were not described (D2, amendment 14c)', async () => {
+    const db = await seed();
     const img = file(db, { waId: 'FW1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'image', fileName: null, mimeType: 'image/jpeg', ts: '2026-10-18T06:00:00.000Z', forwarded: true });
     finishMedia(db, img, { textKind: null, text: null, pageCount: null, note: 'forwarded_not_described', at: NOW });
     const scan = file(db, { waId: 'FW2', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'scan.pdf', mimeType: 'application/pdf', ts: '2026-10-18T05:00:00.000Z', forwarded: true });
@@ -226,8 +226,8 @@ describe('Files received', () => {
     ]);
   });
 
-  it('says a file over the download limit was too large to download, from the stored error code (T14-03)', () => {
-    const db = seed();
+  it('says a file over the download limit was too large to download, from the stored error code (T14-03)', async () => {
+    const db = await seed();
     file(db, {
       waId: 'BIG', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'site plan.pdf', mimeType: 'application/pdf', ts: '2026-10-18T06:00:00.000Z',
       status: 'unavailable', errorCode: 'too_large',
@@ -242,8 +242,8 @@ describe('Files received', () => {
     ]);
   });
 
-  it('never lists view-once media, the founder’s own files, stickers, voice notes or audio, but lists videos', () => {
-    const db = seed();
+  it('never lists view-once media, the founder’s own files, stickers, voice notes or audio, but lists videos', async () => {
+    const db = await seed();
     upsertPerson(db, { clientId: 1, jid: FOUNDER, number: '919800000099', name: 'Founder', fromMe: true });
     // Even if the founder's own number is marked client, what the founder sent is never listed.
     setRole(db, 1, FOUNDER, 'client', 'human');
@@ -258,8 +258,8 @@ describe('Files received', () => {
     expect(files[0]!.description).toBe('Video, 0:42 (not downloaded)');
   });
 
-  it('uses a person’s role in the file’s own client only', () => {
-    const db = seed();
+  it('uses a person’s role in the file’s own client only', async () => {
+    const db = await seed();
     // Rahul is team in Sharma but a client in Mehta; Mr. Sharma is a client in both.
     upsertPerson(db, { clientId: 2, jid: RAHUL_PN, number: '919800000002', name: 'Rahul', fromMe: false });
     setRole(db, 2, RAHUL_PN, 'client', 'human');
@@ -270,8 +270,8 @@ describe('Files received', () => {
     expect(files.map((f) => f.name)).toEqual(['image-2026-10-16-1130-2.jpg', 'brief.pdf', '=HYPERLINK(_http___evil_)']);
   });
 
-  it('lists files sent at the same moment with the later one first', () => {
-    const db = seed();
+  it('lists files sent at the same moment with the later one first', async () => {
+    const db = await seed();
     const ts = '2026-10-18T06:00:00.000Z';
     const first = file(db, { waId: 'S1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'first.pdf', mimeType: 'application/pdf', ts });
     const second = file(db, { waId: 'S2', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'second.pdf', mimeType: 'application/pdf', ts });
@@ -279,8 +279,8 @@ describe('Files received', () => {
     expect(sharmaFiles(db).slice(0, 2).map((f) => f.name)).toEqual(['second.pdf', 'first.pdf']);
   });
 
-  it('shows at most the newest CLIENT_FILES_LIMIT files in the client tab', () => {
-    const db = seed();
+  it('shows at most the newest CLIENT_FILES_LIMIT files in the client tab', async () => {
+    const db = await seed();
     for (let i = 0; i < CLIENT_FILES_LIMIT - 2; i++) {
       const ts = new Date(Date.UTC(2026, 9, 18, 0, 0, i)).toISOString();
       file(db, { waId: `N${i}`, jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: `n${i}.pdf`, mimeType: 'application/pdf', ts });
@@ -290,27 +290,27 @@ describe('Files received', () => {
     expect(files.at(-1)!.name).toBe('brief.pdf');
   });
 
-  it('includes earlier files of someone who becomes a client', () => {
-    const db = seed();
+  it('includes earlier files of someone who becomes a client', async () => {
+    const db = await seed();
     expect(sharmaFiles(db).some((f) => f.name === 'team-only.pdf')).toBe(false);
     setRole(db, 1, RAHUL_PN, 'client', 'human');
     expect(sharmaFiles(db)[0]).toMatchObject({ name: 'team-only.pdf', sentBy: 'Rahul', description: 'PDF, being read' });
   });
 
-  it('reads only the start of a long text from the store', () => {
-    const db = seed();
+  it('reads only the start of a long text from the store', async () => {
+    const db = await seed();
     replaceText(db, 'D1', 'z'.repeat(5_000));
     const row = listClientFiles(db, 1).find((f) => f.fileName === 'brief.pdf')!;
     expect(row.textStart).toBe('z'.repeat(400));
     expect(row.revoked).toBe(false);
   });
 
-  it('limits the list to the newest files', () => {
-    expect(listClientFiles(seed(), 1, 2).map((f) => f.fileName)).toEqual([null, 'brief.pdf']);
+  it('limits the list to the newest files', async () => {
+    expect(listClientFiles(await seed(), 1, 2).map((f) => f.fileName)).toEqual([null, 'brief.pdf']);
   });
 
   it('keeps the workbook readable when a file name, file text or sender name holds characters XML does not allow', async () => {
-    const db = seed();
+    const db = await seed();
     upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: null, name: 'Mr.\uFFFF Sharma', fromMe: false });
     const id = file(db, { waId: 'X1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'a\uFFFF.pdf', mimeType: 'application/pdf', ts: '2026-10-18T06:00:00.000Z' });
     finishMedia(db, id, { textKind: 'extract', text: 'Paid\uFFFE amount \u202E000,24', pageCount: 1, note: null, at: NOW });

@@ -394,8 +394,8 @@ describe('voiceTranscriber: OpenAI parts', () => {
   });
 
   describe('inside withSttHold, with a real SpendGuard', () => {
-    const setup = () => {
-      const db = seededDb();
+    const setup = async () => {
+      const db = await seededDb();
       const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 1 });
       const rows = () => db.raw.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
       return { spend, rows };
@@ -418,7 +418,7 @@ describe('voiceTranscriber: OpenAI parts', () => {
     };
 
     it('part 1 billed and part 2 failing with 503: exactly one stt row at the ceiling, and the error is an SttPartialError', async () => {
-      const { spend, rows } = setup();
+      const { spend, rows } = await setup();
       const p = new FakeProvider('openai');
       const err = new SttHttpError(503, 'down');
       p.script = [async () => result(said('a'), 210), async () => {
@@ -433,7 +433,7 @@ describe('voiceTranscriber: OpenAI parts', () => {
     });
 
     it('part 1 failing with 503 books nothing, as before', async () => {
-      const { spend, rows } = setup();
+      const { spend, rows } = await setup();
       const p = new FakeProvider('openai');
       const err = new SttHttpError(503, 'down');
       p.script = [async () => {

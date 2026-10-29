@@ -32,8 +32,8 @@ const openTask = (db: Db, code: string): TaskRow => {
 };
 
 describe('buildShortMorningText', () => {
-  it('gives the totals and the link in one line, many open and overdue tasks', () => {
-    const db = seededDb();
+  it('gives the totals and the link in one line, many open and overdue tasks', async () => {
+    const db = await seededDb();
     createTask(db, task({ title: 'Fix contact form', priority: 'major' }), NOW.toISOString());
     createTask(db, task({ side: 'client', title: 'Send logo files', deadline: '2026-10-20' }), NOW.toISOString());
     createTask(db, task({ title: 'Write about page', deadline: TODAY }), NOW.toISOString());
@@ -42,8 +42,8 @@ describe('buildShortMorningText', () => {
     expect(text(db)).toBe(`Good morning. 5 open tasks, 2 overdue. Today's tracker: ${LINK}`);
   });
 
-  it('leads with the critical count when there are critical open tasks, and leaves done ones out', () => {
-    const db = seededDb();
+  it('leads with the critical count when there are critical open tasks, and leaves done ones out', async () => {
+    const db = await seededDb();
     createTask(db, task({ title: 'Site down', priority: 'critical' }), NOW.toISOString());
     createTask(db, task({ clientId: 2, side: 'client', title: 'Payment', priority: 'critical' }), NOW.toISOString());
     const done = createTask(db, task({ title: 'Fixed', priority: 'critical' }), NOW.toISOString());
@@ -52,21 +52,21 @@ describe('buildShortMorningText', () => {
     expect(text(db)).toBe(`Good morning. 2 critical, 3 open tasks, 0 overdue. Today's tracker: ${LINK}`);
   });
 
-  it('uses the singular for 1 open task and 1 overdue', () => {
-    const db = seededDb();
+  it('uses the singular for 1 open task and 1 overdue', async () => {
+    const db = await seededDb();
     createTask(db, task({ side: 'client', title: 'Send logo files', deadline: '2026-10-20' }), NOW.toISOString());
     expect(text(db)).toBe(`Good morning. 1 open task, 1 overdue. Today's tracker: ${LINK}`);
   });
 
-  it('says 0 open tasks, 0 overdue when the active clients have nothing open, and leaves done tasks out', () => {
-    const db = seededDb();
+  it('says 0 open tasks, 0 overdue when the active clients have nothing open, and leaves done tasks out', async () => {
+    const db = await seededDb();
     const done = createTask(db, task({ title: 'Share moodboard', deadline: '2026-10-01' }), NOW.toISOString());
     setTaskStatus(db, done.id, 'done', '2026-10-15', NOW.toISOString(), 'ai');
     expect(text(db)).toBe(`Good morning. 0 open tasks, 0 overdue. Today's tracker: ${LINK}`);
   });
 
-  it('counts maybe-done tasks as open, like the tracker does, on our side and on the client side', () => {
-    const db = seededDb();
+  it('counts maybe-done tasks as open, like the tracker does, on our side and on the client side', async () => {
+    const db = await seededDb();
     const maybe = createTask(db, task({ title: 'Maybe finished', deadline: '2026-10-22' }), NOW.toISOString());
     setTaskStatus(db, maybe.id, 'maybe_done', TODAY, NOW.toISOString(), 'ai');
     const clientMaybe = createTask(db, task({ side: 'client', title: 'Client maybe', deadline: '2026-10-22' }), NOW.toISOString());
@@ -75,23 +75,23 @@ describe('buildShortMorningText', () => {
     expect(text(db)).toBe(`Good morning. 3 open tasks, 2 overdue. Today's tracker: ${LINK}`);
   });
 
-  it('leaves inactive clients out of the totals', () => {
-    const db = seededDb();
+  it('leaves inactive clients out of the totals', async () => {
+    const db = await seededDb();
     createTask(db, task({ clientId: 2, title: 'Mehta menu', deadline: '2026-10-01' }), NOW.toISOString());
     createTask(db, task({ title: 'Sharma task' }), NOW.toISOString());
     syncClients(db, [SHARMA]); // Mehta taken off the allow-list
     expect(text(db)).toBe(`Good morning. 1 open task, 0 overdue. Today's tracker: ${LINK}`);
   });
 
-  it('says no open tasks when there are no active clients', () => {
-    const db = seededDb();
+  it('says no open tasks when there are no active clients', async () => {
+    const db = await seededDb();
     createTask(db, task({ title: 'Left behind' }), NOW.toISOString());
     syncClients(db, []);
     expect(text(db)).toBe(`Good morning. No open tasks. Today's tracker: ${LINK}`);
   });
 
-  it('carries no client name, task title or code, and leaves the view it is given unchanged', () => {
-    const db = seededDb();
+  it('carries no client name, task title or code, and leaves the view it is given unchanged', async () => {
+    const db = await seededDb();
     createTask(db, task({ title: 'Secret banner work', priority: 'major' }), NOW.toISOString());
     createTask(db, task({ side: 'client', title: 'Client overdue', deadline: '2026-10-21' }), NOW.toISOString());
     const v = view(db);
@@ -104,29 +104,29 @@ describe('buildShortMorningText', () => {
 });
 
 describe('trackerLink', () => {
-  it('builds the Drive view link from the tracker id the publisher stored', () => {
-    const db = seededDb();
+  it('builds the Drive view link from the tracker id the publisher stored', async () => {
+    const db = await seededDb();
     setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
     expect(trackerLink(db)).toBe(LINK);
   });
 
-  it('accepts an id of exactly 10 safe characters', () => {
-    const db = seededDb();
+  it('accepts an id of exactly 10 safe characters', async () => {
+    const db = await seededDb();
     setKv(db, TRACKER_ID_KEY, 'aZ09_-aZ09');
     expect(trackerLink(db)).toBe('https://drive.google.com/file/d/aZ09_-aZ09/view');
   });
 
-  it('gives undefined when the tracker was never uploaded', () => {
-    expect(trackerLink(seededDb())).toBeUndefined();
+  it('gives undefined when the tracker was never uploaded', async () => {
+    expect(trackerLink(await seededDb())).toBeUndefined();
   });
 
-  it('gives undefined for an id that is short, empty or holds anything but letters, digits, _ and -', () => {
+  it('gives undefined for an id that is short, empty or holds anything but letters, digits, _ and -', async () => {
     const bad = [
       '', 'file-1', 'aZ09_-aZ0', '1AbCdEfGhIj/../x', '1AbCdEfGhIj?x=y', '1AbCdEfGhIj Kl', '1AbCdEfGhIjKl\n', 'https://evil.example/1AbCdEfGhIj',
       '1AbCdEfGhIj.kl',
     ];
     for (const id of bad) {
-      const db = seededDb();
+      const db = await seededDb();
       setKv(db, TRACKER_ID_KEY, id);
       expect(trackerLink(db), JSON.stringify(id)).toBeUndefined();
     }
@@ -134,8 +134,8 @@ describe('trackerLink', () => {
 });
 
 describe('byMorningUrgency', () => {
-  it('orders overdue first, then due today, then priority, then oldest raised', () => {
-    const db = seededDb();
+  it('orders overdue first, then due today, then priority, then oldest raised', async () => {
+    const db = await seededDb();
     createTask(db, task({ title: 'Fix contact form', priority: 'major', raisedOn: '2026-10-01' }), NOW.toISOString()); // SHA-001
     createTask(db, task({ side: 'client', title: 'Send logo files', priority: 'low', deadline: '2026-10-20', raisedOn: '2026-10-15' }), NOW.toISOString()); // SHA-002
     createTask(db, task({ title: 'Write about page', deadline: TODAY, raisedOn: '2026-10-05' }), NOW.toISOString()); // SHA-003
@@ -145,16 +145,16 @@ describe('byMorningUrgency', () => {
     expect(TOP_TASKS).toBe(3);
   });
 
-  it('ranks high priority above older tasks', () => {
-    const db = seededDb();
+  it('ranks high priority above older tasks', async () => {
+    const db = await seededDb();
     createTask(db, task({ title: 'Oldest', raisedOn: '2026-09-01' }), NOW.toISOString()); // SHA-001
     createTask(db, task({ title: 'Urgent one', priority: 'major', raisedOn: '2026-10-20' }), NOW.toISOString()); // SHA-002
     createTask(db, task({ title: 'Later', raisedOn: '2026-10-02' }), NOW.toISOString()); // SHA-003
     expect(urgent(db)).toEqual(['SHA-002', 'SHA-001', 'SHA-003']);
   });
 
-  it('puts critical tasks first, even before overdue ones, and ranks a task from before levels by its old priority', () => {
-    const db = seededDb();
+  it('puts critical tasks first, even before overdue ones, and ranks a task from before levels by its old priority', async () => {
+    const db = await seededDb();
     createTask(db, task({ title: 'Overdue', deadline: '2026-10-20' }), NOW.toISOString()); // SHA-001
     createTask(db, task({ title: 'Critical', priority: 'critical', raisedOn: '2026-10-20' }), NOW.toISOString()); // SHA-002
     createTask(db, task({ title: 'Old high', priority: 'major', raisedOn: '2026-10-21' }), NOW.toISOString()); // SHA-003
@@ -163,8 +163,8 @@ describe('byMorningUrgency', () => {
     expect(urgent(db)).toEqual(['SHA-002', 'SHA-001', 'SHA-003', 'SHA-004']);
   });
 
-  it('breaks a full tie by task id, whichever side each task is on', () => {
-    const db = seededDb();
+  it('breaks a full tie by task id, whichever side each task is on', async () => {
+    const db = await seededDb();
     createTask(db, task({ side: 'client', title: 'Client first' }), NOW.toISOString()); // SHA-001
     createTask(db, task({ title: 'Us second' }), NOW.toISOString()); // SHA-002
     createTask(db, task({ title: 'Us third' }), NOW.toISOString()); // SHA-003
@@ -173,8 +173,8 @@ describe('byMorningUrgency', () => {
 });
 
 describe('taskNotes', () => {
-  it('notes critical, and a task without a level (from before levels) gets no priority note', () => {
-    const db = seededDb();
+  it('notes critical, and a task without a level (from before levels) gets no priority note', async () => {
+    const db = await seededDb();
     createTask(db, task({ title: 'Down', priority: 'critical' }), NOW.toISOString()); // SHA-001
     createTask(db, task({ title: 'Old high', priority: 'major' }), NOW.toISOString()); // SHA-002
     db.raw.prepare("UPDATE tasks SET priority_level = NULL WHERE code = 'SHA-002'").run();
@@ -182,8 +182,8 @@ describe('taskNotes', () => {
     expect(taskNotes(openTask(db, 'SHA-002'), TODAY)).toEqual([]);
   });
 
-  it('notes due today, a later deadline, overdue, major and maybe done', () => {
-    const db = seededDb();
+  it('notes due today, a later deadline, overdue, major and maybe done', async () => {
+    const db = await seededDb();
     createTask(db, task({ title: 'Today', deadline: TODAY }), NOW.toISOString()); // SHA-001
     createTask(db, task({ title: 'Late', priority: 'major', deadline: '2026-10-21' }), NOW.toISOString()); // SHA-002
     const maybe = createTask(db, task({ title: 'Maybe', deadline: '2026-10-30' }), NOW.toISOString()); // SHA-003

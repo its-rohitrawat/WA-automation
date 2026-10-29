@@ -26,8 +26,8 @@ function meeting(db: Db, startedAt: string, title = `Meeting ${++n}`) {
 }
 
 describe('overview', () => {
-  it('counts active clients and the four task numbers, split as the Tasks screen splits them', () => {
-    const db = seededDb();
+  it('counts active clients and the four task numbers, split as the Tasks screen splits them', async () => {
+    const db = await seededDb();
     task(db, 1); // open
     task(db, 1, { deadline: '2026-10-18' }); // overdue
     task(db, 1, { status: 'maybe_done', deadline: '2026-10-18' }); // overdue (not review)
@@ -37,15 +37,15 @@ describe('overview', () => {
     expect(overview(db, now)).toMatchObject({ clients: 2, tasks: { open: 1, overdue: 2, review: 1, doneThisWeek: 1 } });
   });
 
-  it('dates overdue by the IST day at the midnight edges', () => {
-    const db = seededDb();
+  it('dates overdue by the IST day at the midnight edges', async () => {
+    const db = await seededDb();
     task(db, 1, { deadline: '2026-10-19' });
     expect(overview(db, new Date('2026-10-19T18:29:00Z')).tasks).toMatchObject({ overdue: 0, open: 1 }); // 23:59 IST on the 19th
     expect(overview(db, new Date('2026-10-19T18:30:00Z')).tasks).toMatchObject({ overdue: 1, open: 0 }); // 00:00 IST on the 20th
   });
 
-  it('leaves inactive clients and their tasks out', () => {
-    const db = seededDb();
+  it('leaves inactive clients and their tasks out', async () => {
+    const db = await seededDb();
     task(db, 1);
     task(db, 2, { deadline: '2026-10-01' });
     syncClients(db, [SHARMA]); // Mehta leaves the allow-list
@@ -55,8 +55,8 @@ describe('overview', () => {
     expect(o.byClient.map((c) => c.client.code)).toEqual(['SHA']);
   });
 
-  it('gives each active client its segments in the agreed stack order: overdue, open, review, done', () => {
-    const db = seededDb();
+  it('gives each active client its segments in the agreed stack order: overdue, open, review, done', async () => {
+    const db = await seededDb();
     syncClients(db, [SHARMA, MEHTA, { ...SHARMA, groupId: '120363000000000003@g.us', code: 'AAA', name: 'Aarav Tiles' }]);
     task(db, 1, { deadline: '2026-10-01' });
     task(db, 1);
@@ -70,16 +70,16 @@ describe('overview', () => {
     ]);
   });
 
-  it('lists the latest 4 meetings, newest first, with their plain status', () => {
-    const db = seededDb();
+  it('lists the latest 4 meetings, newest first, with their plain status', async () => {
+    const db = await seededDb();
     const ids = ['2026-10-10', '2026-10-11', '2026-10-12', '2026-10-13', '2026-10-14'].map((d) => meeting(db, `${d}T05:00:00.000Z`));
     const m = overview(db, now).meetings;
     expect(m.map((x) => x.id)).toEqual(ids.slice(1).reverse());
     expect(m[0]).toEqual({ id: ids[4], title: expect.any(String), status: 'queued', stageLabel: 'Downloading the recording', when: '2026-10-14T05:00:00.000Z', minutes: 30 });
   });
 
-  it('merges the latest 5 activity items from batches and task events only, newest first', () => {
-    const db = seededDb();
+  it('merges the latest 5 activity items from batches and task events only, newest first', async () => {
+    const db = await seededDb();
     const t = task(db, 1);
     const at = (m: number) => `2026-10-19T05:0${m}:00.000Z`;
     for (const i of [0, 2, 4]) {
@@ -94,8 +94,8 @@ describe('overview', () => {
     expect(a.map((x) => x.id)).toEqual(['e:3', 'b:3', 'e:2', 'b:2', 'e:1']);
   });
 
-  it('gives the last upload and the health line for the tracker card', () => {
-    const db = seededDb();
+  it('gives the last upload and the health line for the tracker card', async () => {
+    const db = await seededDb();
     db.raw.prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES ('2026-10-19T07:00:00.000Z', 'agent', 'tracker.published', 'ops', 'x')").run();
     expect(overview(db, now).tracker).toEqual({ lastPublishedAt: '2026-10-19T07:00:00.000Z', health: null });
     const health = { line: { ok: true, text: '✅ Connected' }, lastPublishedAt: '2026-10-19T07:30:00.000Z', publishFailingSince: null };

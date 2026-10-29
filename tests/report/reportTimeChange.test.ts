@@ -20,8 +20,8 @@ const THU = '2026-10-22';
 const FRI = '2026-10-23';
 const at = (date: string, hm: string) => `${date}T${hm}:00.000+05:30`;
 
-function setup(env: Record<string, string> = {}) {
-  const db = seededDb();
+async function setup(env: Record<string, string> = {}) {
+  const db = await seededDb();
   setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
   const clock = manualClock(at(THU, '05:00'));
   const audits: AuditEntry[] = [];
@@ -55,7 +55,7 @@ function setup(env: Record<string, string> = {}) {
 
 describe('the briefing send time set from the dashboard', () => {
   it('a time still ahead applies today without a restart, and the next report is shown', async () => {
-    const t = setup();
+    const t = await setup();
     t.setTime(THU, '05:00', '07:30');
     expect(t.store().view()).toMatchObject({ sendAt: '07:30', nextReport: 'today 07:30', source: { reportTime: 'dashboard' } });
     await t.tick(THU, '06:00');
@@ -73,7 +73,7 @@ describe('the briefing send time set from the dashboard', () => {
   });
 
   it('a later time after today was sent never sends a second time; the next report is tomorrow', async () => {
-    const t = setup();
+    const t = await setup();
     await t.tick(THU, '06:00');
     expect(t.sender.calls).toHaveLength(1);
     t.setTime(THU, '09:00', '10:00');
@@ -85,7 +85,7 @@ describe('the briefing send time set from the dashboard', () => {
   });
 
   it('a time that has already passed starts tomorrow, and today keeps its time so it is not missed', async () => {
-    const t = setup({ REPORT_TIME: '09:00' });
+    const t = await setup({ REPORT_TIME: '09:00' });
     t.setTime(THU, '08:00', '07:30'); // 07:30 has passed; today's 09:00 has not
     expect(t.audits.at(-1)?.detail).toBe('Morning briefing time set to 07:30 IST, from tomorrow');
     expect(t.store().reportSettings().time).toBe('09:00');
@@ -103,7 +103,7 @@ describe('the briefing send time set from the dashboard', () => {
   });
 
   it('an earlier time after today was sent sends nothing more today, and goes out tomorrow at the new time', async () => {
-    const t = setup();
+    const t = await setup();
     await t.tick(THU, '06:00');
     t.setTime(THU, '07:00', '05:00');
     expect(t.store().view().nextReport).toBe('tomorrow 05:00');
@@ -114,7 +114,7 @@ describe('the briefing send time set from the dashboard', () => {
   });
 
   it("today's kept time outlasts a restart, and a time changed back ahead applies today again", async () => {
-    const t = setup({ REPORT_TIME: '09:00' });
+    const t = await setup({ REPORT_TIME: '09:00' });
     t.setTime(THU, '08:00', '07:00');
     t.restart();
     expect(t.store().reportSettings().time).toBe('09:00');
@@ -126,8 +126,8 @@ describe('the briefing send time set from the dashboard', () => {
     expect(t.sender.calls).toHaveLength(1);
   });
 
-  it('refuses a time that is not HH:MM, saving and auditing nothing', () => {
-    const t = setup();
+  it('refuses a time that is not HH:MM, saving and auditing nothing', async () => {
+    const t = await setup();
     for (const v of ['7:30', '24:00', '07:60', '07:30:00', '', 730, null]) {
       let e: unknown;
       try {
@@ -143,8 +143,8 @@ describe('the briefing send time set from the dashboard', () => {
     expect(t.audits).toEqual([]);
   });
 
-  it('takes any time of day: a time from the deadline on catches up for 3 hours, never past 23:59', () => {
-    const t = setup();
+  it('takes any time of day: a time from the deadline on catches up for 3 hours, never past 23:59', async () => {
+    const t = await setup();
     t.setTime(THU, '05:00', '13:15');
     expect(t.store().view()).toMatchObject({ sendAt: '13:15', deadline: '16:15', source: { reportTime: 'dashboard' } });
     expect(t.store().reportSettings()).toMatchObject({ time: '13:15', deadline: '16:15' });
@@ -155,7 +155,7 @@ describe('the briefing send time set from the dashboard', () => {
   });
 
   it('sends an evening report once, at the evening time', async () => {
-    const t = setup();
+    const t = await setup();
     t.setTime(THU, '05:00', '19:00');
     await t.tick(THU, '18:59');
     expect(t.sender.calls).toHaveLength(0);

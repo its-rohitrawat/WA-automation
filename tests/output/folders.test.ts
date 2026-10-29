@@ -12,8 +12,8 @@ const SHARMA = { clientId: 1, clientName: 'Sharma Interiors' };
 const folderOf = (db: Db, drive: FakeDrive, c: FolderClient, kind: ClientSubfolder): Promise<string> =>
   withClientSubfolder(db, drive, c, kind, async (id) => id);
 
-function setup(root = true) {
-  const db = seededDb();
+async function setup(root = true) {
+  const db = await seededDb();
   const drive = new FakeDrive();
   if (root) setKv(db, 'drive_root_id', 'root-1');
   return { db, drive };
@@ -21,7 +21,7 @@ function setup(root = true) {
 
 describe('withClientSubfolder: the folder chain', () => {
   it('makes WA Agent/Clients/<Client>/Meetings once and caches every level', async () => {
-    const { db, drive } = setup();
+    const { db, drive } = await setup();
     const id = await folderOf(db, drive, SHARMA, 'Meetings');
     expect(await folderOf(db, drive, SHARMA, 'Meetings')).toBe(id);
     expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Meetings']);
@@ -33,7 +33,7 @@ describe('withClientSubfolder: the folder chain', () => {
   });
 
   it('puts Files and Meetings side by side in the same client folder, with their own keys', async () => {
-    const { db, drive } = setup();
+    const { db, drive } = await setup();
     const files = await folderOf(db, drive, SHARMA, 'Files');
     const meetings = await folderOf(db, drive, SHARMA, 'Meetings');
     expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Files', 'Meetings']);
@@ -43,13 +43,13 @@ describe('withClientSubfolder: the folder chain', () => {
   });
 
   it('cleans the client folder name and falls back to "Client <id>"', async () => {
-    const { db, drive } = setup();
+    const { db, drive } = await setup();
     await folderOf(db, drive, { clientId: 7, clientName: '...' }, 'Meetings');
     expect(drive.folders).toEqual(['Clients', 'Client 7', 'Meetings']);
   });
 
   it('throws DriveRootMissingError, and makes nothing, before the publisher has made the WA Agent folder', async () => {
-    const { db, drive } = setup(false);
+    const { db, drive } = await setup(false);
     await expect(folderOf(db, drive, SHARMA, 'Meetings')).rejects.toBeInstanceOf(DriveRootMissingError);
     expect(drive.folders).toEqual([]);
   });
@@ -59,7 +59,7 @@ describe('withClientSubfolder', () => {
   const putDoc = (drive: FakeDrive) => (folder: string) => drive.createDoc('Doc', '<p>x</p>', folder);
 
   it('re-creates only a removed Meetings folder, inside the same client folder', async () => {
-    const { db, drive } = setup();
+    const { db, drive } = await setup();
     await folderOf(db, drive, SHARMA, 'Meetings');
     drive.missing.add('folder-3');
     const id = await withClientSubfolder(db, drive, SHARMA, 'Meetings', putDoc(drive));
@@ -70,7 +70,7 @@ describe('withClientSubfolder', () => {
   });
 
   it('re-creates a removed client folder and its Meetings folder once, but not the Clients folder', async () => {
-    const { db, drive } = setup();
+    const { db, drive } = await setup();
     await folderOf(db, drive, SHARMA, 'Meetings');
     for (const id of ['folder-2', 'folder-3']) drive.missing.add(id);
     await withClientSubfolder(db, drive, SHARMA, 'Meetings', putDoc(drive));
@@ -82,7 +82,7 @@ describe('withClientSubfolder', () => {
   });
 
   it('fails without rebuilding when the Doc is refused in a Meetings folder made just now', async () => {
-    const { db, drive } = setup();
+    const { db, drive } = await setup();
     drive.fileParentsMissing = true;
     await expect(withClientSubfolder(db, drive, SHARMA, 'Meetings', putDoc(drive))).rejects.toBeInstanceOf(DriveNotFoundError);
     expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Meetings']);
@@ -90,7 +90,7 @@ describe('withClientSubfolder', () => {
   });
 
   it('gives up after rebuilding every level when the WA Agent folder itself is gone', async () => {
-    const { db, drive } = setup();
+    const { db, drive } = await setup();
     drive.missing.add('root-1');
     await expect(withClientSubfolder(db, drive, SHARMA, 'Meetings', putDoc(drive))).rejects.toBeInstanceOf(DriveNotFoundError);
     expect(drive.folders).toEqual([]);
@@ -98,7 +98,7 @@ describe('withClientSubfolder', () => {
   });
 
   it('passes other errors through without clearing anything', async () => {
-    const { db, drive } = setup();
+    const { db, drive } = await setup();
     await folderOf(db, drive, SHARMA, 'Meetings');
     drive.failNext = 1;
     await expect(withClientSubfolder(db, drive, SHARMA, 'Meetings', putDoc(drive))).rejects.toThrow('Drive unavailable');

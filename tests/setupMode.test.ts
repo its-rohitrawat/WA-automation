@@ -124,7 +124,7 @@ describe('buildGoogle', () => {
   };
 
   it('no main token: not connected, and Drive fails as a sign-in problem; a reconnect fixes both at once', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const key = randomBytes(32);
     const hub = new GoogleAuthHub({ db, key, credentials: { desktop: { clientId: 'd', clientSecret: 's' } }, newClient: fakeClient });
     const g = buildGoogle({ db, key, credentials: {}, meetingsEnabled: false, log, hub });
@@ -138,8 +138,8 @@ describe('buildGoogle', () => {
     expect(await g.drive.createFolder('WA Agent')).toBe('folder-1');
   });
 
-  it('logs an account it cannot use by label and reason only', () => {
-    const db = seededDb();
+  it('logs an account it cannot use by label and reason only', async () => {
+    const db = await seededDb();
     new TokenStore(db, randomBytes(32)).save('rt-secret-value'); // written with another key
     const lines: string[] = [];
     const capture = createLogger('debug', { write: (l: string) => void lines.push(l) });
@@ -151,7 +151,7 @@ describe('buildGoogle', () => {
   });
 
   it('meetings on: the live API is rebuilt when an account is reconnected', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const key = randomBytes(32);
     new TokenStore(db, key).save('rt');
     saveGrantedScopes(db, DRIVE_SCOPES[0]!);
@@ -168,8 +168,8 @@ describe('buildGoogle', () => {
 });
 
 describe('setup mode health', () => {
-  function health() {
-    const db = seededDb();
+  async function health() {
+    const db = await seededDb();
     const clock = manualClock('2026-10-27T08:00:00Z');
     const h = new Health({ db, clock, spend: new SpendGuard({ db, clock, capUsd: 15 }), freeBytes: () => 200e9 });
     return { h, clock };
@@ -180,8 +180,8 @@ describe('setup mode health', () => {
     ['not_linked', true, "❌ WhatsApp is not linked. Open the dashboard → Connections and link the founder's phone."],
     ['linking', true, "⏳ WhatsApp is being linked from the dashboard. Reading resumes once the founder's phone has scanned the code."],
     ['open', false, '❌ Google is not connected. Open the dashboard → Connections and connect Google.'],
-  ] as const)('WhatsApp %s, Google connected %s: its own line, ranked first, and not up', (state, google, text) => {
-    const { h } = health();
+  ] as const)('WhatsApp %s, Google connected %s: its own line, ranked first, and not up', async (state, google, text) => {
+    const { h } = await health();
     h.setWhatsApp(status(state));
     h.setGoogleConnected(google);
     expect(h.isUp()).toBe(false); // the setup state alone
@@ -192,8 +192,8 @@ describe('setup mode health', () => {
     expect(setupLine(state, google)).toEqual({ ok: false, text });
   });
 
-  it('all set up: no setup line, and up as before', () => {
-    const { h } = health();
+  it('all set up: no setup line, and up as before', async () => {
+    const { h } = await health();
     h.setWhatsApp(status('open'));
     h.setGoogleConnected(true);
     expect(setupLine('open', true)).toBeNull();
@@ -204,7 +204,7 @@ describe('setup mode health', () => {
 
 describe('the app in setup mode', () => {
   it('starts and stops with no WhatsApp link and no Google: nothing to read, the health line says why', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const gateway = founderGateway({ linked: false, build: () => { throw new Error('never'); } });
     const app = createApp({
       db, clock: systemClock, log, gateway, allow: new AllowList([SHARMA.groupId]), ai: new FakeAi(), drive: new FakeDrive(),

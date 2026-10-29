@@ -35,8 +35,8 @@ describe('maskEmail', () => {
 });
 
 describe('listAudit', () => {
-  it('lists newest first, without the request id, showing owners in full and masking anyone else', () => {
-    const db = seededDb();
+  it('lists newest first, without the request id, showing owners in full and masking anyone else', async () => {
+    const db = await seededDb();
     row(db, t('05:00'));
     row(db, t('06:00'), { actor: 'stranger@gmail.com', event: 'auth.refused', kind: 'auth', detail: "This account can't open the dashboard" });
     row(db, t('07:00'), { actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'Tracker.xlsx uploaded to Drive' });
@@ -52,16 +52,16 @@ describe('listAudit', () => {
     expect(JSON.stringify(r)).not.toContain('req-1');
   });
 
-  it('filters by kind', () => {
-    const db = seededDb();
+  it('filters by kind', async () => {
+    const db = await seededDb();
     row(db, t('05:00'));
     row(db, t('06:00'), { kind: 'auth', event: 'auth.signin' });
     expect(listAudit(db, params({ kind: 'auth' }), isOwner).rows.map((r) => r.id)).toEqual([2]);
     expect(listAudit(db, params({ kind: 'task' }), isOwner).rows.map((r) => r.id)).toEqual([1]);
   });
 
-  it('pages with before, keeping rows that share a time', () => {
-    const db = seededDb();
+  it('pages with before, keeping rows that share a time', async () => {
+    const db = await seededDb();
     for (let i = 0; i < 3; i++) row(db, t('05:00'));
     row(db, t('04:00'));
     const first = listAudit(db, params({ limit: '2' }), isOwner);
@@ -74,8 +74,8 @@ describe('listAudit', () => {
 });
 
 describe('purgeAuditOlderThan', () => {
-  it('removes only rows older than the given days, and says how many', () => {
-    const db = seededDb();
+  it('removes only rows older than the given days, and says how many', async () => {
+    const db = await seededDb();
     const now = new Date('2026-10-19T00:00:00.000Z');
     row(db, '2026-07-20T23:59:59.000Z'); // 90 days and a second
     row(db, '2026-07-21T00:00:00.000Z'); // exactly 90 days: kept
@@ -85,14 +85,15 @@ describe('purgeAuditOlderThan', () => {
     expect(purgeAuditOlderThan(db, 90, now)).toBe(0);
   });
 
-  it('refuses a retention shorter than a day', () => {
-    expect(() => purgeAuditOlderThan(seededDb(), 0, new Date())).toThrowError();
+  it('refuses a retention shorter than a day', async () => {
+    const db = await seededDb();
+    expect(() => purgeAuditOlderThan(db, 0, new Date())).toThrowError();
   });
 });
 
 describe('audit review fixes', () => {
-  it('a page shorter than the limit has no next', () => {
-    const db = seededDb();
+  it('a page shorter than the limit has no next', async () => {
+    const db = await seededDb();
     row(db, t('05:00'));
     expect(listAudit(db, params({ limit: '2' }), isOwner).next).toBeNull();
   });

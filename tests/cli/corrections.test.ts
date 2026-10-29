@@ -13,8 +13,8 @@ import { NOW, seededDb } from '../helpers/db.ts';
 
 const now = new Date('2026-10-19T08:00:00Z');
 
-function withTask() {
-  const db = seededDb();
+async function withTask() {
+  const db = await seededDb();
   createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
     deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp' }, NOW);
   return db;
@@ -36,8 +36,8 @@ function processAll(db: Db, clientId = 1) {
 }
 
 describe('task close / reopen', () => {
-  it('closes and reopens tasks as a human, with events and a rebuild request', () => {
-    const db = withTask();
+  it('closes and reopens tasks as a human, with events and a rebuild request', async () => {
+    const db = await withTask();
     expect(closeTask(db, 'sha-001', now)).toMatchObject({ status: 'done', closedOn: '2026-10-19', statusLockedAt: now.toISOString() });
     expect(rebuilt(db)).toBe(true);
     expect(reopenTask(db, 'SHA-001', now)).toMatchObject({ status: 'open', closedOn: null, statusLockedAt: now.toISOString() });
@@ -48,8 +48,8 @@ describe('task close / reopen', () => {
     expect(() => closeTask(db, 'SHA-999', now)).toThrowError(CorrectionError);
   });
 
-  it('refuses to repeat a status, changing nothing', () => {
-    const db = withTask();
+  it('refuses to repeat a status, changing nothing', async () => {
+    const db = await withTask();
     expect(() => reopenTask(db, 'SHA-001', now)).toThrowError('Task SHA-001 is already open');
     expect(events(db)).toHaveLength(0);
     expect(getKv(db, 'rebuild_requested')).toBeUndefined();
@@ -60,29 +60,29 @@ describe('task close / reopen', () => {
 });
 
 describe('task edit', () => {
-  it('edits and locks fields, recording the event', () => {
-    const db = withTask();
+  it('edits and locks fields, recording the event', async () => {
+    const db = await withTask();
     expect(editTask(db, 'SHA-001', { deadline: '2026-10-25', assignedTo: 'Rahul' }, now)).toMatchObject({ deadline: '2026-10-25', assignedTo: 'Rahul' });
     expect([...(getTaskByCode(db, 'SHA-001')?.lockedFields ?? [])].sort()).toEqual(['assignedTo', 'deadline']);
     expect(events(db)[0]).toMatchObject({ op: 'update_task', detail: { deadline: '2026-10-25', assignedTo: 'Rahul' } });
     expect(rebuilt(db)).toBe(true);
   });
 
-  it('clears optional fields with none or an empty string', () => {
-    const db = withTask();
+  it('clears optional fields with none or an empty string', async () => {
+    const db = await withTask();
     editTask(db, 'SHA-001', { deadline: '2026-10-25', assignedTo: 'Rahul', askedBy: 'Sharma', latestProgress: 'half' }, now);
     expect(editTask(db, 'SHA-001', { deadline: 'none', assignedTo: '', askedBy: ' ', latestProgress: 'NONE' }, now)).toMatchObject({
       deadline: null, assignedTo: null, askedBy: null, latestProgress: null,
     });
   });
 
-  it('matches enums case-insensitively and stores them lower-case', () => {
-    const db = withTask();
+  it('matches enums case-insensitively and stores them lower-case', async () => {
+    const db = await withTask();
     expect(editTask(db, 'SHA-001', { priority: 'LOW', side: 'Client', category: 'Payment' }, now)).toMatchObject({ priority: 'low', side: 'client', category: 'payment' });
   });
 
-  it('validates values and keeps chat text out of errors', () => {
-    const db = withTask();
+  it('validates values and keeps chat text out of errors', async () => {
+    const db = await withTask();
     expect(() => editTask(db, 'SHA-001', { priority: 'urgent' }, now)).toThrowError(/priority must be one of/);
     expect(() => editTask(db, 'SHA-001', { deadline: '25 Oct' }, now)).toThrowError(/YYYY-MM-DD/);
     expect(() => editTask(db, 'SHA-001', {}, now)).toThrowError(/Nothing to change/);
@@ -95,8 +95,8 @@ describe('task edit', () => {
 });
 
 describe('task unlock', () => {
-  it('clears field and status locks and records an event', () => {
-    const db = withTask();
+  it('clears field and status locks and records an event', async () => {
+    const db = await withTask();
     editTask(db, 'SHA-001', { deadline: '2026-10-25' }, now);
     closeTask(db, 'SHA-001', now);
     expect(unlockTask(db, 'sha-001', now)).toMatchObject({ lockedFields: [], statusLockedAt: null, status: 'done' });
@@ -107,15 +107,15 @@ describe('task unlock', () => {
 });
 
 describe('person set', () => {
-  function people() {
-    const db = withTask();
+  async function people() {
+    const db = await withTask();
     upsertPerson(db, { clientId: 1, jid: '919800000002@s.whatsapp.net', number: '919800000002', name: 'Rahul', fromMe: false });
     upsertPerson(db, { clientId: 2, jid: '919800000002@s.whatsapp.net', number: '919800000002', name: 'Rahul', fromMe: false });
     return db;
   }
 
-  it('sets a role by phone number in every client group', () => {
-    const db = people();
+  it('sets a role by phone number in every client group', async () => {
+    const db = await people();
     expect(setPersonRole(db, '+91 98000-00002', 'Team', undefined, now)).toBe(2);
     expect(listPeople(db, 1)[0]).toMatchObject({ role: 'team', roleSetBy: 'human' });
     expect(listPeople(db, 2)[0]).toMatchObject({ role: 'team', roleSetBy: 'human' });
@@ -123,27 +123,27 @@ describe('person set', () => {
     expect(rebuilt(db)).toBe(true);
   });
 
-  it('scopes to one client with --client', () => {
-    const db = people();
+  it('scopes to one client with --client', async () => {
+    const db = await people();
     expect(setPersonRole(db, '919800000002', 'client', 'meh', now)).toBe(1);
     expect(listPeople(db, 1)[0]).toMatchObject({ role: 'unknown' });
     expect(listPeople(db, 2)[0]).toMatchObject({ role: 'client', roleSetBy: 'human' });
   });
 
-  it('accepts a WhatsApp id', () => {
-    const db = people();
+  it('accepts a WhatsApp id', async () => {
+    const db = await people();
     expect(setPersonRole(db, '919800000002@s.whatsapp.net', 'team', 'SHA', now)).toBe(1);
     expect(listPeople(db, 1)[0]).toMatchObject({ role: 'team' });
     expect(events(db)[0]).toMatchObject({ detail: { jid: '919800000002@s.whatsapp.net', role: 'team' } });
     expect(() => setPersonRole(db, 'nobody@lid', 'team', undefined, now)).toThrowError('No one with that WhatsApp id has posted in an allowed group yet');
   });
 
-  it('gives clear errors', () => {
-    const db = people();
+  it('gives clear errors', async () => {
+    const db = await people();
     expect(() => setPersonRole(db, 'abc', 'team', undefined, now)).toThrowError(/full phone number with country code/);
     expect(() => setPersonRole(db, '+91 1', 'team', undefined, now)).toThrowError('No one with that number has posted in an allowed group yet');
     expect(() => setPersonRole(db, '919800000002', 'boss', undefined, now)).toThrowError(/team or client/);
-    const db2 = withTask();
+    const db2 = await withTask();
     upsertPerson(db2, { clientId: 2, jid: '919800000003@s.whatsapp.net', number: '919800000003', name: 'X', fromMe: false });
     expect(() => setPersonRole(db2, '919800000003', 'team', 'SHA', now)).toThrowError('That number has posted, but not in client SHA');
     expect(() => setPersonRole(db2, '919800000003', 'team', 'ZZZ', now)).toThrowError(/No client with code/);
@@ -151,8 +151,8 @@ describe('person set', () => {
 });
 
 describe('phase set / unlock', () => {
-  it('sets a phase case-insensitively, locked, with an event', () => {
-    const db = withTask();
+  it('sets a phase case-insensitively, locked, with an event', async () => {
+    const db = await withTask();
     setClientPhase(db, 'sha', 'development', now);
     expect(getClient(db, 1)).toMatchObject({ currentPhase: 'Development', phaseLocked: true });
     expect(events(db)[0]).toMatchObject({ op: 'set_phase', task_id: null, client_id: 1, detail: { phase: 'Development' } });
@@ -160,8 +160,8 @@ describe('phase set / unlock', () => {
     expect(() => setClientPhase(db, 'SHA', 'Party', now)).toThrowError(/must be one of/);
   });
 
-  it('unlocks the phase for the AI', () => {
-    const db = withTask();
+  it('unlocks the phase for the AI', async () => {
+    const db = await withTask();
     setClientPhase(db, 'SHA', 'Design', now);
     unlockClientPhase(db, 'sha', now);
     expect(getClient(db, 1)).toMatchObject({ currentPhase: 'Design', phaseLocked: false });
@@ -171,8 +171,8 @@ describe('phase set / unlock', () => {
 });
 
 describe('reprocess', () => {
-  it('re-queues only processed messages in the window', () => {
-    const db = withTask();
+  it('re-queues only processed messages in the window', async () => {
+    const db = await withTask();
     msg(db, 'old', '2026-10-05T08:00:00.000Z');
     msg(db, 'm1', '2026-10-12T08:00:00.000Z');
     msg(db, 'm2', '2026-10-15T08:00:00.000Z');
@@ -187,8 +187,8 @@ describe('reprocess', () => {
     expect(rebuilt(db)).toBe(true);
   });
 
-  it('validates dates and the client', () => {
-    const db = withTask();
+  it('validates dates and the client', async () => {
+    const db = await withTask();
     expect(() => requestReprocess(db, 'SHA', 'yesterday', now)).toThrowError(/YYYY-MM-DD/);
     expect(() => requestReprocess(db, 'SHA', '2026-10-11', now, 'soon')).toThrowError(/YYYY-MM-DD/);
     expect(() => requestReprocess(db, 'SHA', '2026-10-11', now, '2026-10-10')).toThrowError(/on or after/);
@@ -198,8 +198,8 @@ describe('reprocess', () => {
     expect(() => countReprocess(db, 'SHA', '2026-10-11')).toThrowError(/not in the allow-list/);
   });
 
-  it('previews large jobs and changes nothing without --yes', () => {
-    const db = withTask();
+  it('previews large jobs and changes nothing without --yes', async () => {
+    const db = await withTask();
     const n = REPROCESS_CONFIRM_ABOVE + 1;
     for (let i = 0; i < n; i++) msg(db, `b${i}`, '2026-10-12T08:00:00.000Z');
     processAll(db);
@@ -211,8 +211,8 @@ describe('reprocess', () => {
     expect(listUnprocessed(db, 1, 1000)).toHaveLength(n);
   });
 
-  it('re-queues small jobs without --yes and reports zero', () => {
-    const db = withTask();
+  it('re-queues small jobs without --yes and reports zero', async () => {
+    const db = await withTask();
     expect(reprocess(db, 'SHA', '2026-10-11', undefined, false, now)).toMatchObject({ count: 0, queued: 0, needsConfirm: false });
     msg(db, 'm1', '2026-10-12T08:00:00.000Z');
     processAll(db);

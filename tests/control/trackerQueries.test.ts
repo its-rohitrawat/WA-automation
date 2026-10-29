@@ -22,8 +22,8 @@ function audit(db: Db, at: string, event: string, detail: string) {
 }
 
 describe('trackerSummary', () => {
-  it('says the tracker is not uploaded while no Drive id is stored, or the stored one is not a Drive id', () => {
-    const db = seededDb();
+  it('says the tracker is not uploaded while no Drive id is stored, or the stored one is not a Drive id', async () => {
+    const db = await seededDb();
     expect(trackerSummary(db, now)).toMatchObject({ uploaded: false, url: null });
     for (const bad of ['short', 'https://evil.example/x', '1AbCdEfGhIj/../x', '1AbCdEfGhIj?x=1']) {
       setKv(db, TRACKER_ID_KEY, bad);
@@ -31,30 +31,30 @@ describe('trackerSummary', () => {
     }
   });
 
-  it('links the workbook from the stored Drive id', () => {
-    const db = seededDb();
+  it('links the workbook from the stored Drive id', async () => {
+    const db = await seededDb();
     setKv(db, TRACKER_ID_KEY, ID);
     expect(trackerSummary(db, now)).toMatchObject({ uploaded: true, url: `https://drive.google.com/file/d/${ID}/view` });
   });
 
-  it('names the file it writes: Tracker.xlsx in the WA Agent folder, and the main account when its email is known', () => {
-    const db = seededDb();
+  it('names the file it writes: Tracker.xlsx in the WA Agent folder, and the main account when its email is known', async () => {
+    const db = await seededDb();
     expect(trackerSummary(db, now)).toMatchObject({ file: { name: 'Tracker.xlsx', folder: 'WA Agent', account: null }, newFileAt: null });
     setKv(db, 'google_account_email:main', 'owner@example.com');
     setKv(db, 'google_account_email:org2', 'meetings@example.org');
     expect(trackerSummary(db, now).file).toEqual({ name: 'Tracker.xlsx', folder: 'WA Agent', account: 'owner@example.com' });
   });
 
-  it('carries the date a new tracker file had to be started, when one was', () => {
-    const db = seededDb();
+  it('carries the date a new tracker file had to be started, when one was', async () => {
+    const db = await seededDb();
     setKv(db, TRACKER_NEW_FILE_KEY, '2026-10-28T05:00:00.000Z');
     expect(trackerSummary(db, now).newFileAt).toBe('2026-10-28T05:00:00.000Z');
     setKv(db, TRACKER_NEW_FILE_KEY, 'not a date');
     expect(trackerSummary(db, now).newFileAt).toBeNull();
   });
 
-  it('counts Today (active clients) and each active client in tab order, using the workbook sheet names', () => {
-    const db = seededDb();
+  it('counts Today (active clients) and each active client in tab order, using the workbook sheet names', async () => {
+    const db = await seededDb();
     syncClients(db, [SHARMA, MEHTA, { ...SHARMA, groupId: '120363000000000003@g.us', code: 'SHB' }]); // a second "Sharma Interiors"
     task(db, 1); // open
     task(db, 1, { deadline: '2026-10-18' }); // overdue
@@ -72,8 +72,8 @@ describe('trackerSummary', () => {
     ]);
   });
 
-  it('leaves inactive clients out of Today and the list, without moving the others\' sheet names', () => {
-    const db = seededDb();
+  it('leaves inactive clients out of Today and the list, without moving the others\' sheet names', async () => {
+    const db = await seededDb();
     syncClients(db, [SHARMA, MEHTA, { ...SHARMA, groupId: '120363000000000003@g.us', code: 'SHB' }]);
     task(db, 1);
     syncClients(db, [MEHTA, { ...SHARMA, groupId: '120363000000000003@g.us', code: 'SHB' }]); // SHA leaves the allow-list
@@ -84,8 +84,8 @@ describe('trackerSummary', () => {
     ]);
   });
 
-  it('reports the last upload and the last failure with its plain reason, and the health line', () => {
-    const db = seededDb();
+  it('reports the last upload and the last failure with its plain reason, and the health line', async () => {
+    const db = await seededDb();
     expect(trackerSummary(db, now)).toMatchObject({ lastPublishedAt: null, lastFailure: null, failingSince: null, health: null });
     audit(db, '2026-10-19T06:00:00.000Z', 'tracker.published', 'Tracker.xlsx uploaded to Drive');
     audit(db, '2026-10-19T07:00:00.000Z', 'tracker.publish_failed', 'Tracker upload failed: Google sign-in expired');
@@ -100,8 +100,8 @@ describe('trackerSummary', () => {
     });
   });
 
-  it('takes the later of the health snapshot and the audit log for the last upload', () => {
-    const db = seededDb();
+  it('takes the later of the health snapshot and the audit log for the last upload', async () => {
+    const db = await seededDb();
     audit(db, '2026-10-19T06:00:00.000Z', 'tracker.published', 'x');
     const health = { line: { ok: true, text: '✅' }, lastPublishedAt: '2026-10-19T07:30:00.000Z', publishFailingSince: null };
     expect(trackerSummary(db, now, health).lastPublishedAt).toBe('2026-10-19T07:30:00.000Z');
@@ -110,14 +110,14 @@ describe('trackerSummary', () => {
 });
 
 describe('trackerSummary review fixes', () => {
-  it('counts a task due today as open, not overdue', () => {
-    const db = seededDb();
+  it('counts a task due today as open, not overdue', async () => {
+    const db = await seededDb();
     task(db, 1, { deadline: '2026-10-19' });
     expect(trackerSummary(db, now).sheets[0]).toMatchObject({ notDone: 1, overdue: 0 });
   });
 
-  it('takes the newest failure, and ignores tracker rows not written by the agent', () => {
-    const db = seededDb();
+  it('takes the newest failure, and ignores tracker rows not written by the agent', async () => {
+    const db = await seededDb();
     audit(db, '2026-10-19T05:00:00.000Z', 'tracker.publish_failed', 'Tracker upload failed: Drive did not accept the upload');
     audit(db, '2026-10-19T07:00:00.000Z', 'tracker.publish_failed', 'Tracker upload failed: Google sign-in expired');
     audit(db, '2026-10-19T06:00:00.000Z', 'tracker.publish_failed', 'Tracker upload failed: the workbook could not be built');

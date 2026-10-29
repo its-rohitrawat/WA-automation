@@ -24,8 +24,8 @@ class FakeSource implements GroupSource {
   }
 }
 
-function setup() {
-  const db = seededDb();
+async function setup() {
+  const db = await seededDb();
   createTask(
     db,
     {
@@ -46,7 +46,7 @@ function setup() {
 
 describe('clientsListHandler', () => {
   it('lists the active clients with their counts; the group name comes from the last list without asking WhatsApp', async () => {
-    const { deps, src } = setup();
+    const { deps, src } = await setup();
     const before = clientsListHandler(deps, CTX);
     expect(before.status).toBe(200);
     const cards = (before.body as { clients: { code: string; groupName: string; counts: unknown }[] }).clients;
@@ -62,8 +62,8 @@ describe('clientsListHandler', () => {
 });
 
 describe('clientDetailHandler', () => {
-  it('gives the client drawer; its counts match the card', () => {
-    const { deps } = setup();
+  it('gives the client drawer; its counts match the card', async () => {
+    const { deps } = await setup();
     const r = clientDetailHandler(deps, CTX, 'SHA');
     expect(r.status).toBe(200);
     const d = (r.body as { client: { counts: unknown; openTasks: unknown[] } }).client;
@@ -72,8 +72,8 @@ describe('clientDetailHandler', () => {
     expect(d.openTasks).toEqual([{ code: 'SHA-001', title: 'Send the moodboard', assignedTo: 'Ravi', deadline: '2026-10-25', status: 'open', priority: 'major', sentiment: null }]);
   });
 
-  it('sends moods, the task\'s and the client\'s, only while sentiment is switched on', () => {
-    const { deps } = setup();
+  it('sends moods, the task\'s and the client\'s, only while sentiment is switched on', async () => {
+    const { deps } = await setup();
     const db = deps.db;
     db.raw.prepare("UPDATE tasks SET sentiment = 'frustrated' WHERE code = 'SHA-001'").run();
     db.raw.prepare("UPDATE clients SET sentiment = 'negative', sentiment_at = '2026-10-19T08:00:00.000Z' WHERE code = 'SHA'").run();
@@ -85,8 +85,8 @@ describe('clientDetailHandler', () => {
     expect(detail().openTasks[0]!.sentiment).toBe('frustrated');
   });
 
-  it('an unknown or malformed code gives 404 not_found', () => {
-    const { deps } = setup();
+  it('an unknown or malformed code gives 404 not_found', async () => {
+    const { deps } = await setup();
     for (const code of ['ZZZ', 'sha', '', 'SHA-001', "SHA' OR 1=1"]) {
       const r = clientDetailHandler(deps, CTX, code);
       expect(r.status).toBe(404);
@@ -94,8 +94,8 @@ describe('clientDetailHandler', () => {
     }
   });
 
-  it('no response carries quotes, phone numbers or WhatsApp ids; message text only in the drawer latest messages', () => {
-    const { deps } = setup();
+  it('no response carries quotes, phone numbers or WhatsApp ids; message text only in the drawer latest messages', async () => {
+    const { deps } = await setup();
     const list = clientsListHandler(deps, CTX);
     const detail = clientDetailHandler(deps, CTX, 'SHA');
     const all = JSON.stringify([list, detail, clientDetailHandler(deps, CTX, 'MEH')]);

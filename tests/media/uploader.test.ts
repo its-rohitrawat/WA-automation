@@ -21,10 +21,10 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
-function setup(o: { root?: boolean; batchSize?: number; log?: Logger } = {}) {
+async function setup(o: { root?: boolean; batchSize?: number; log?: Logger } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'wa-up-'));
   dirs.push(dataDir);
-  const db = seededDb();
+  const db = await seededDb();
   const drive = new FakeDrive();
   const clock = manualClock('2026-10-19T08:00:00Z');
   const onUploaded = vi.fn();
@@ -103,7 +103,7 @@ const driveState = (db: Db, id: number) =>
 
 describe('DriveFileUploader', () => {
   it('uploads client files into WA Agent/Clients/<Client>/Files, creating the folders once', async () => {
-    const { db, dataDir, drive, onUploaded, up } = setup();
+    const { db, dataDir, drive, onUploaded, up } = await setup();
     const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
     const b = savedFile(db, dataDir, { waId: 'B', role: 'client' });
     await up.run();
@@ -122,7 +122,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('gives each file upload the long per-request timeout (600 s), not the tracker upload default', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     savedFile(db, dataDir, { waId: 'A', role: 'client' });
     await up.run();
     expect(FILE_UPLOAD_TIMEOUT_MS).toBe(600_000);
@@ -130,7 +130,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('uploads only files from people marked client, including earlier files once someone becomes client', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     savedFile(db, dataDir, { waId: 'T', jid: RAHUL_PN, role: 'team' });
     const u = savedFile(db, dataDir, { waId: 'U', jid: '919811111111@s.whatsapp.net' });
     await up.run();
@@ -142,7 +142,7 @@ describe('DriveFileUploader', () => {
   });
 
   it("checks the sender's role in the file's own client group, and files each client's uploads in its own folder", async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     const both = '919811111111@s.whatsapp.net'; // team in Sharma's group, client in Mehta's
     const s = savedFile(db, dataDir, { waId: 'S', role: 'client' });
     const t = savedFile(db, dataDir, { waId: 'T', jid: both, role: 'team' });
@@ -161,7 +161,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('leaves out files whose original is not saved yet, and uploads them once saved', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     const a = savedFile(db, dataDir, { waId: 'A', role: 'client', saved: false });
     await up.run();
     expect(drive.createFileCalls).toBe(0);
@@ -174,7 +174,7 @@ describe('DriveFileUploader', () => {
   });
 
   it("never uploads the founder's own files, voice notes, or files of an inactive client", async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     savedFile(db, dataDir, { waId: 'ME', jid: '919899999999@s.whatsapp.net', role: 'client', fromMe: true });
     savedFile(db, dataDir, { waId: 'V', role: 'client', kind: 'voice', fileName: null, mimeType: 'audio/ogg' });
     const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
@@ -188,7 +188,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('uploads forwarded client images and documents too: being forwarded only skips the paid description (D2)', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     const doc = savedFile(db, dataDir, { waId: 'A', role: 'client', forwarded: true });
     const img = savedFile(db, dataDir, { waId: 'B', role: 'client', kind: 'image', fileName: null, mimeType: 'image/jpeg', forwarded: true });
     expect([getMedia(db, doc)!.forwarded, getMedia(db, img)!.forwarded]).toEqual([true, true]);
@@ -199,7 +199,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('skips files whose message was deleted for everyone', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     savedFile(db, dataDir, { waId: 'R', role: 'client' });
     applyRevoke(db, 1, 'R');
     await up.run();
@@ -212,7 +212,7 @@ describe('DriveFileUploader', () => {
     ['its sender is no longer marked client', (db: Db) => setRole(db, 1, OTHER, 'team', 'human')],
     ['its client is made inactive', (db: Db) => db.raw.prepare('UPDATE clients SET active = 0 WHERE id = 1').run()],
   ])('checks each file again just before uploading it: skips a file when %s during the pass, counting no attempt', async (_, change) => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
     const b = savedFile(db, dataDir, { waId: 'B', jid: OTHER, role: 'client' });
     let release!: () => void;
@@ -228,14 +228,14 @@ describe('DriveFileUploader', () => {
   });
 
   it('waits until the publisher has created the root folder', async () => {
-    const { db, dataDir, drive, up } = setup({ root: false });
+    const { db, dataDir, drive, up } = await setup({ root: false });
     savedFile(db, dataDir, { waId: 'A', role: 'client' });
     await up.run();
     expect(drive.folders).toEqual([]);
   });
 
   it('uses safe Drive names', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     savedFile(db, dataDir, { waId: 'A', role: 'client', fileName: 'Q3/brief:final\u202E.pdf' });
     const img = savedFile(db, dataDir, { waId: 'B', role: 'client', kind: 'image', fileName: null, mimeType: 'image/jpeg' });
     await up.run();
@@ -248,7 +248,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('retries with growing delays, gives up after the last attempt, and a restart tries again', async () => {
-    const { db, dataDir, drive, clock, up } = setup();
+    const { db, dataDir, drive, clock, up } = await setup();
     const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
     drive.failNext = 100;
     await up.run();
@@ -281,7 +281,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('clears the next-try time once a retried file reaches Drive', async () => {
-    const { db, dataDir, drive, clock, up } = setup();
+    const { db, dataDir, drive, clock, up } = await setup();
     const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
     drive.failNext = 1;
     await up.run();
@@ -293,7 +293,7 @@ describe('DriveFileUploader', () => {
 
   it('pauses all uploads for 15 minutes when a failed try cannot be saved, instead of uploading the file again every tick', async () => {
     const { lines, log } = capturingLogger();
-    const { db, dataDir, drive, clock, up } = setup({ log });
+    const { db, dataDir, drive, clock, up } = await setup({ log });
     savedFile(db, dataDir, { waId: 'A', role: 'client' });
     await up.run(); // the folders exist from here, so the next failure is the file upload itself
     const b = savedFile(db, dataDir, { waId: 'B', role: 'client' });
@@ -317,7 +317,7 @@ describe('DriveFileUploader', () => {
 
   it('when Drive took a file but its id cannot be saved, pauses, then saves that id and never uploads the file again', async () => {
     const { lines, log } = capturingLogger();
-    const { db, dataDir, drive, clock, onUploaded, up } = setup({ log });
+    const { db, dataDir, drive, clock, onUploaded, up } = await setup({ log });
     const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
     const b = savedFile(db, dataDir, { waId: 'B', role: 'client' });
     let restore = failWritesTo(db, 'drive_file_id');
@@ -347,7 +347,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('tells the workbook about an id saved at the start of a pass, even when that pass then stops early', async () => {
-    const { db, dataDir, drive, clock, onUploaded, up } = setup();
+    const { db, dataDir, drive, clock, onUploaded, up } = await setup();
     const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
     const restore = failWritesTo(db, 'drive_file_id');
     await up.run();
@@ -361,7 +361,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('stop() saves a Drive id that a pass could not save, so a restart does not upload the file again', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
     const restore = failWritesTo(db, 'drive_file_id');
     await up.run();
@@ -374,7 +374,7 @@ describe('DriveFileUploader', () => {
 
   it('stop() tries an unsaved Drive id once and ignores a failure', async () => {
     const { lines, log } = capturingLogger();
-    const { db, dataDir, up } = setup({ log });
+    const { db, dataDir, up } = await setup({ log });
     const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
     failWritesTo(db, 'drive_file_id');
     await up.run();
@@ -392,7 +392,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('a sign-in problem is not counted against the file and stops the pass', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
     const b = savedFile(db, dataDir, { waId: 'B', role: 'client' });
     drive.failNextWith = Object.assign(new Error('unauthorized'), { code: 401 });
@@ -405,7 +405,7 @@ describe('DriveFileUploader', () => {
 
   it('pauses all uploads for 15 minutes after a sign-in failure, then tries again', async () => {
     const { lines, log } = capturingLogger();
-    const { db, dataDir, drive, clock, up } = setup({ log });
+    const { db, dataDir, drive, clock, up } = await setup({ log });
     const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
     const b = savedFile(db, dataDir, { waId: 'B', role: 'client' });
     const folder = vi.spyOn(drive, 'createFolder');
@@ -425,7 +425,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('re-creates only a Files folder that was removed in Drive, inside the same client folder, in the same pass', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     savedFile(db, dataDir, { waId: 'A', role: 'client' });
     await up.run();
     drive.missing.add('folder-3');
@@ -439,7 +439,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('re-creates a client folder that was removed in Drive, and its Files folder, but not the Clients folder', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     savedFile(db, dataDir, { waId: 'A', role: 'client' });
     await up.run();
     // Removing the client folder in Drive removes its Files folder too.
@@ -453,7 +453,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('re-creates the Clients folder too when it was removed in Drive, in the same pass', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     savedFile(db, dataDir, { waId: 'A', role: 'client' });
     await up.run();
     // Removing WA Agent/Clients in Drive removes everything under it.
@@ -467,7 +467,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('counts one failed attempt when the WA Agent folder itself is missing, and creates no folders', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
     drive.missing.add('root-1');
     await up.run();
@@ -476,7 +476,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('moves up a folder level only when creating a folder fails: a missing-folder answer for the file in a fresh Files folder fails the try', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     savedFile(db, dataDir, { waId: 'A', role: 'client' });
     await up.run(); // the folders exist from here
     const before = drive.createFileCalls;
@@ -491,7 +491,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('fails the try without rebuilding anything when the file is refused right after its folders were first made', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
     drive.fileParentsMissing = true;
     await up.run();
@@ -501,7 +501,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('sends Drive a clean MIME type: lower case, no parameters, and octet-stream for anything malformed', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     savedFile(db, dataDir, { waId: 'A', role: 'client', mimeType: 'Application/PDF; charset=x' });
     savedFile(db, dataDir, { waId: 'B', role: 'client', mimeType: 'a/b<script>' });
     savedFile(db, dataDir, { waId: 'C', role: 'client', mimeType: 'not a mime' });
@@ -511,13 +511,13 @@ describe('DriveFileUploader', () => {
   });
 
   it('cleans the client folder name, and falls back to "Client <id>" when nothing is left', async () => {
-    const first = setup();
+    const first = await setup();
     first.db.raw.prepare('UPDATE clients SET name = ? WHERE id = 1').run('A/B:\u202EC');
     savedFile(first.db, first.dataDir, { waId: 'A', role: 'client' });
     await first.up.run();
     expect(first.drive.folders).toEqual(['Clients', 'A_B_C', 'Files']);
 
-    const second = setup();
+    const second = await setup();
     second.db.raw.prepare('UPDATE clients SET name = ? WHERE id = 1').run('\u0001\u200B\u202E');
     savedFile(second.db, second.dataDir, { waId: 'A', role: 'client' });
     await second.up.run();
@@ -525,21 +525,21 @@ describe('DriveFileUploader', () => {
   });
 
   it('uploads at most batchSize files per pass (5 by default)', async () => {
-    const small = setup({ batchSize: 2 });
+    const small = await setup({ batchSize: 2 });
     for (const w of ['A', 'B', 'C']) savedFile(small.db, small.dataDir, { waId: w, role: 'client' });
     await small.up.run();
     expect(small.drive.created).toHaveLength(2);
     await small.up.run();
     expect(small.drive.created).toHaveLength(3);
 
-    const dflt = setup();
+    const dflt = await setup();
     for (const w of ['A', 'B', 'C', 'D', 'E', 'F']) savedFile(dflt.db, dflt.dataDir, { waId: w, role: 'client' });
     await dflt.up.run();
     expect(dflt.drive.created).toHaveLength(5);
   });
 
   it('run() resolves even when the pass itself fails, and the next run() starts a new pass', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     savedFile(db, dataDir, { waId: 'A', role: 'client' });
     const prepare = vi.spyOn(db.raw, 'prepare').mockImplementation(() => {
       throw new Error('database unavailable');
@@ -552,14 +552,14 @@ describe('DriveFileUploader', () => {
   });
 
   it('runs one pass at a time', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     savedFile(db, dataDir, { waId: 'A', role: 'client' });
     await Promise.all([up.run(), up.run()]);
     expect(drive.created).toHaveLength(1);
   });
 
   it('gives up at once when the saved original is missing', async () => {
-    const { db, dataDir, up } = setup();
+    const { db, dataDir, up } = await setup();
     const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
     unlinkSync(join(dataDir, 'media', 'SHA', '2026-10', 'A.bin'));
     await up.run();
@@ -567,7 +567,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('starts nothing after stop()', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     savedFile(db, dataDir, { waId: 'A', role: 'client' });
     await up.stop(1_000);
     await up.run();
@@ -575,7 +575,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('stop() during a pass waits for the upload in flight and starts no further file', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     const a = savedFile(db, dataDir, { waId: 'A', role: 'client' });
     const b = savedFile(db, dataDir, { waId: 'B', role: 'client' });
     let release!: () => void;
@@ -595,7 +595,7 @@ describe('DriveFileUploader', () => {
   });
 
   it('stop() returns after its time limit when an upload never finishes', async () => {
-    const { db, dataDir, drive, up } = setup();
+    const { db, dataDir, drive, up } = await setup();
     savedFile(db, dataDir, { waId: 'A', role: 'client' });
     let release!: () => void;
     drive.gate = new Promise<void>((r) => (release = r));

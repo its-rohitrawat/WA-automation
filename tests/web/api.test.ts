@@ -29,7 +29,7 @@ afterEach(async () => {
 async function boot(o: { control?: Parameters<typeof registerReadApi>[1]['control'] } = {}) {
   const lines: string[] = [];
   const log = createLogger('info', { write: (s: string) => { lines.push(s); } } as unknown as DestinationStream);
-  const db = seededDb();
+  const db = await seededDb();
   const clock = manualClock(NOW);
   const spend = new SpendGuard({ db, clock, capUsd: 10 });
   const health = new Health({ db, clock, spend, freeBytes: () => 200e9 });

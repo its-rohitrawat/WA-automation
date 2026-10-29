@@ -64,8 +64,8 @@ describe('meetingItemLines title', () => {
 });
 
 describe('Reconciler.runMeeting spend logs', () => {
-  function setup(capUsd: number) {
-    const db = seededDb();
+  async function setup(capUsd: number) {
+    const db = await seededDb();
     const clock = manualClock('2026-10-20T08:00:00Z');
     const spend = new SpendGuard({ db, clock, capUsd });
     const log = silentLogger();
@@ -75,7 +75,7 @@ describe('Reconciler.runMeeting spend logs', () => {
   }
 
   it('a meeting kept out by the cap logs its meeting id, not a WhatsApp run pause', async () => {
-    const { db, info, r } = setup(0.001);
+    const { db, info, r } = await setup(0.001);
     const m = meetingAt(db);
     await expect(r.runMeeting(1, m)).rejects.toMatchObject({ code: 'spend_cap' });
     expect(info).toHaveBeenCalledWith({ clientId: 1, meetingId: m.id }, 'spend cap: meeting deferred');
@@ -83,7 +83,7 @@ describe('Reconciler.runMeeting spend logs', () => {
   });
 
   it('a meeting kept out by holds logs its meeting id, not a WhatsApp run deferral', async () => {
-    const { db, spend, info, r } = setup(15);
+    const { db, spend, info, r } = await setup(15);
     expect(spend.reserve(15 - (MAX_OUTPUT_TOKENS * P.outputPerMTok) / 1_000_000 / 2)).not.toBeNull();
     const m = meetingAt(db);
     await expect(r.runMeeting(1, m)).rejects.toMatchObject({ code: 'spend_busy' });

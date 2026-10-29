@@ -7,8 +7,8 @@ import { SttBookingError, withSttHold, type SttBooking } from '../../src/stt/pai
 import { manualClock } from '../../src/util/clock.ts';
 import { seededDb } from '../helpers/db.ts';
 
-function setup(capUsd = 1) {
-  const db = seededDb();
+async function setup(capUsd = 1) {
+  const db = await seededDb();
   const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd });
   const rows = () => db.raw.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
   return { spend, rows };
@@ -18,7 +18,7 @@ const expectNoHold = (spend: SpendGuard) => expect(spend.reserve(spend.capUsd - 
 
 describe('withSttHold', () => {
   it('books what the call reports as stt and returns the result', async () => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     const booked: SttBooking[] = [];
     const out = await withSttHold(spend, 0.2, 'meeting 4 part 1', async () => ({ result: 'segments', costUsd: 0.05 }), { onBooked: (b) => booked.push(b) });
     expect(out).toEqual({ result: 'segments', costUsd: 0.05 });
@@ -28,7 +28,7 @@ describe('withSttHold', () => {
   });
 
   it('holds the ceiling as stt while the call runs', async () => {
-    const { spend } = setup(1);
+    const { spend } = await setup(1);
     let canSpendDuring: boolean | undefined;
     await withSttHold(spend, 0.7, 'meeting 4 part 1', async () => {
       canSpendDuring = spend.canSpend(0.31);
@@ -38,7 +38,7 @@ describe('withSttHold', () => {
   });
 
   it('does not call, and says whether only holds are in the way, when the ceiling does not fit', async () => {
-    const { spend } = setup(0.5);
+    const { spend } = await setup(0.5);
     const call = vi.fn(async () => ({ result: null, costUsd: 0 }));
     const capped = await withSttHold(spend, 0.6, 'meeting 4 part 1', call).catch((e: unknown) => e);
     expect(capped).toBeInstanceOf(SpendCapReachedError);
@@ -50,7 +50,7 @@ describe('withSttHold', () => {
   });
 
   it('releases the hold on a refusal or failure the provider answered (SttHttpError): not billed', async () => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     const booked: SttBooking[] = [];
     const err = new SttHttpError(500);
     await expect(withSttHold(spend, 0.2, 'meeting 4 part 1', () => Promise.reject(err), { onBooked: (b) => booked.push(b) })).rejects.toBe(err);
@@ -65,7 +65,7 @@ describe('withSttHold', () => {
     ['a failed job', new SttJobError('failed'), 'meeting 4 part 1 (job failed, estimated)'],
     ['anything else', new TypeError('boom'), 'meeting 4 part 1 (unknown, estimated)'],
   ])('books the ceiling as stt on %s, then throws it again', async (_name, err, detail) => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     const booked: SttBooking[] = [];
     await expect(withSttHold(spend, 0.2, 'meeting 4 part 1', () => Promise.reject(err), { onBooked: (b) => booked.push(b) })).rejects.toBe(err);
     expect(rows()).toEqual([{ kind: 'stt', usd: 0.2, detail }]);
@@ -75,7 +75,7 @@ describe('withSttHold', () => {
 
   // Callers without hooks (Phase 2b's voice notes) must get the same booking as callers with them.
   it('releases the hold on an SttHttpError when no hooks are given', async () => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     const err = new SttHttpError(401);
     await expect(withSttHold(spend, 0.2, 'media 7', () => Promise.reject(err))).rejects.toBe(err);
     expect(rows()).toEqual([]);
@@ -87,14 +87,14 @@ describe('withSttHold', () => {
     ['a failed job', new SttJobError('failed'), 'media 7 (job failed, estimated)'],
     ['anything else', new TypeError('boom'), 'media 7 (unknown, estimated)'],
   ])('books the ceiling on %s when no hooks are given', async (_name, err, detail) => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     await expect(withSttHold(spend, 0.2, 'media 7', () => Promise.reject(err))).rejects.toBe(err);
     expect(rows()).toEqual([{ kind: 'stt', usd: 0.2, detail }]);
     expectNoHold(spend);
   });
 
   it('a hold booked at shutdown is booked as stt, its owner is told, and the late answer is not booked again', async () => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     let finish: (v: { result: string; costUsd: number }) => void = () => {};
     const shutdown = vi.fn();
     const p = withSttHold<string>(spend, 0.2, 'meeting 4 part 1', () => new Promise((resolve) => (finish = resolve)), { onBookedAtShutdown: shutdown });
@@ -107,7 +107,7 @@ describe('withSttHold', () => {
   });
 
   it('writes the booking and the owner record in one step: a failing owner write takes the booking with it', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 1 });
     const ownerFailed = new Error('part write refused');
     const err = await withSttHold(spend, 0.2, 'meeting 4 part 1', async () => ({ result: 'x', costUsd: 0.05 }), {
@@ -123,7 +123,7 @@ describe('withSttHold', () => {
   });
 
   it('a spend write that throws is thrown, and the owner is not told anything was booked', async () => {
-    const { spend } = setup();
+    const { spend } = await setup();
     const broken = new Error('disk I/O error');
     vi.spyOn(spend, 'record').mockImplementationOnce(() => {
       throw broken;
@@ -137,7 +137,7 @@ describe('withSttHold', () => {
     ['a refusal', new SttHttpError(401)],
     ['no answer', new SttNoAnswerError('timeout')],
   ])('after %s, a booking write that throws is an SttBookingError whose cause is the call error', async (_name, callErr) => {
-    const { spend } = setup();
+    const { spend } = await setup();
     const writeErr = new Error('part write refused');
     const err = await withSttHold(spend, 0.2, 'meeting 4 part 1', () => Promise.reject(callErr), {
       onBooked: () => {

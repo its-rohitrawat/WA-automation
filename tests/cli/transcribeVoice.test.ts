@@ -23,8 +23,8 @@ let db: Db;
 let lines: string[];
 let ffmpegAsked: (string | undefined)[];
 
-beforeEach(() => {
-  db = seededDb();
+beforeEach(async () => {
+  db = await seededDb();
   lines = [];
   ffmpegAsked = [];
 });

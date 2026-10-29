@@ -19,7 +19,7 @@ afterEach(async () => {
 const NUMBER = '919812345678';
 
 async function boot(o: { linked?: boolean; secureCookies?: boolean; actionCapacity?: number; auditThrows?: boolean } = {}) {
-  const db = seededDb();
+  const db = await seededDb();
   const clock = manualClock(NOW);
   const real = new AuditLog(db, clock);
   const audit = o.auditThrows ? { record: () => { throw new Error('disk full'); } } : real;

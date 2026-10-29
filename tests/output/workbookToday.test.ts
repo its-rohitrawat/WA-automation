@@ -40,8 +40,8 @@ function body(ws: ExcelJS.Worksheet): unknown[][] {
  * Sharma: five open tasks (one on the client side, one maybe done) and one done. Mehta: one open task.
  * Urgency for Sharma: SHA-002 (overdue), SHA-003 (due today), SHA-004 (high, raised 5 Oct), SHA-001 (high, raised 10 Oct), SHA-006.
  */
-function fixture(): Db {
-  const db = seededDb();
+async function fixture(): Promise<Db> {
+  const db = await seededDb();
   createTask(db, task({ title: 'Homepage copy', priority: 'major', deadline: '2026-10-25' }), NOW);
   createTask(db, task({ side: 'client', title: 'Send logo files', priority: 'low', deadline: '2026-10-18' }), NOW);
   createTask(db, task({ title: 'Inner pages', deadline: '2026-10-19' }), NOW);
@@ -58,12 +58,12 @@ const date = (iso: string) => new Date(`${iso}T00:00:00Z`);
 
 describe('Today tab', () => {
   it('is the first sheet, before Overview', async () => {
-    const wb = await build(fixture());
+    const wb = await build(await fixture());
     expect(wb.worksheets.map((w) => w.name)).toEqual(['Today', 'Overview', 'Mehta Foods', 'Sharma Interiors']);
   });
 
   it('has the title, the header, counts per active client, the top 3 open tasks and a totals row', async () => {
-    const ws = await today(fixture());
+    const ws = await today(await fixture());
     expect(ws.getCell('A1').value).toBe('Today · 19 Oct · built 13:30 IST');
     expect(ws.getRow(2).values).toEqual([undefined, 'Client', 'Open', 'Overdue', 'Side', 'ID', 'Task', 'Deadline', 'Notes']);
     expect(body(ws)).toEqual([
@@ -78,7 +78,7 @@ describe('Today tab', () => {
   });
 
   it('formats deadlines as dates and follows the workbook style', async () => {
-    const ws = await today(fixture());
+    const ws = await today(await fixture());
     expect(ws.getCell('G6').numFmt).toBe('d mmm yyyy');
     expect((ws.getCell('A2').fill as ExcelJS.FillPattern).fgColor?.argb).toBe('FF0D0D0D');
     expect((ws.getCell('H2').fill as ExcelJS.FillPattern).fgColor?.argb).toBe('FF0D0D0D');
@@ -91,7 +91,7 @@ describe('Today tab', () => {
   });
 
   it('lists maybe done tasks and all four notes', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const t = createTask(db, task({ title: 'Launch', priority: 'major', deadline: '2026-10-19' }), NOW);
     setTaskStatus(db, t.id, 'maybe_done', '2026-10-19', NOW, 'ai');
     createTask(db, task({ title: 'Old one', priority: 'major', deadline: '2026-10-02' }), NOW);
@@ -105,7 +105,7 @@ describe('Today tab', () => {
   });
 
   it('leaves out inactive clients', async () => {
-    const db = fixture();
+    const db = await fixture();
     syncClients(db, [SHARMA]);
     const ws = await today(db);
     const names = body(ws).map((r) => r[0]).filter((v) => v !== '');
@@ -115,7 +115,7 @@ describe('Today tab', () => {
   });
 
   it('shows a client with no open tasks with zero counts and no task rows', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const t = createTask(db, task({ clientId: 2 }), NOW);
     setTaskStatus(db, t.id, 'done', '2026-10-15', NOW, 'ai');
     expect(body(await today(db))).toEqual([
@@ -135,13 +135,13 @@ describe('Today tab', () => {
       ['Total', 0, 0, '', '', '', '', ''],
     ]);
 
-    const inactive = seededDb();
+    const inactive = await seededDb();
     syncClients(inactive, []);
     expect(body(await today(inactive))[0]![0]).toBe('(none)');
   });
 
   it('cuts long titles like the old message', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const long = `${'word '.repeat(30)}end`;
     createTask(db, task({ title: long }), NOW);
     const title = body(await today(db)).find((r) => r[4] === 'SHA-001')![5] as string;
@@ -150,7 +150,7 @@ describe('Today tab', () => {
   });
 
   it('keeps a title starting with = as text, never a formula', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     createTask(db, task({ title: '=HYPERLINK("http://x","y")' }), NOW);
     createTask(db, task({ title: '+1', priority: 'low' }), NOW);
     const ws = await today(db);
@@ -163,7 +163,7 @@ describe('Today tab', () => {
   });
 
   it('removes characters XML does not allow from task titles', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     createTask(db, task({ title: 'Kick\x01off\uFFFE' }), NOW);
     const ws = await today(db);
     expect(ws.getCell('F5').value).toBe('Kickoff');

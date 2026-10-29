@@ -10,8 +10,8 @@ import { NOW, seededDb } from '../helpers/db.ts';
 const now = new Date('2026-10-19T08:00:00Z');
 const OWNER = 'owner@example.com';
 
-function withMeeting(status: MeetingStatus, clientId: number | null = null): Db {
-  const db = seededDb();
+async function withMeeting(status: MeetingStatus, clientId: number | null = null): Promise<Db> {
+  const db = await seededDb();
   insertFound(db, {
     recording: 'conferenceRecords/a/recordings/b', conference: 'conferenceRecords/a', driveFileId: 'drive1', meetingCode: null,
     title: status === 'internal' ? '' : 'Weekly sync', startedAt: NOW, endedAt: null, attendees: [], participants: [], clientId,
@@ -48,9 +48,9 @@ function refusal(fn: () => unknown): ControlError {
 }
 
 describe('runMeetingAction matches the CLI', () => {
-  it('assign', () => {
-    const web = withMeeting('unassigned');
-    const cli = withMeeting('unassigned');
+  it('assign', async () => {
+    const web = await withMeeting('unassigned');
+    const cli = await withMeeting('unassigned');
     const { result, audits } = run(web, '1', 'assign', { client: 'sha' });
     assignMeetingToClient(cli, '1', 'SHA', now);
     expect(state(web)).toEqual(state(cli));
@@ -59,9 +59,9 @@ describe('runMeetingAction matches the CLI', () => {
     expect(audits).toEqual([{ actor: OWNER, event: 'meeting.assign', kind: 'meeting', detail: 'Meeting 1 assigned to SHA' }]);
   });
 
-  it('skip', () => {
-    const web = withMeeting('unassigned');
-    const cli = withMeeting('unassigned');
+  it('skip', async () => {
+    const web = await withMeeting('unassigned');
+    const cli = await withMeeting('unassigned');
     const { result, audits } = run(web, '1', 'skip');
     skipMeetingById(cli, '1', now);
     expect(state(web)).toEqual(state(cli));
@@ -69,9 +69,9 @@ describe('runMeetingAction matches the CLI', () => {
     expect(audits).toEqual([{ actor: OWNER, event: 'meeting.skip', kind: 'meeting', detail: 'Meeting 1 skipped' }]);
   });
 
-  it('retry, with the cost warning', () => {
-    const web = withMeeting('failed', 1);
-    const cli = withMeeting('failed', 1);
+  it('retry, with the cost warning', async () => {
+    const web = await withMeeting('failed', 1);
+    const cli = await withMeeting('failed', 1);
     const { result, audits } = run(web, '1', 'retry');
     retryMeetingById(cli, '1', now);
     expect(state(web)).toEqual(state(cli));
@@ -80,9 +80,9 @@ describe('runMeetingAction matches the CLI', () => {
     expect(audits).toEqual([{ actor: OWNER, event: 'meeting.retry', kind: 'meeting', detail: 'Meeting 1 queued again' }]);
   });
 
-  it('retry of a meeting without a client puts it back to unassigned, as the CLI does', () => {
-    const web = withMeeting('no_access');
-    const cli = withMeeting('no_access');
+  it('retry of a meeting without a client puts it back to unassigned, as the CLI does', async () => {
+    const web = await withMeeting('no_access');
+    const cli = await withMeeting('no_access');
     const { result, audits } = run(web, '1', 'retry');
     retryMeetingById(cli, '1', now);
     expect(state(web)).toEqual(state(cli));
@@ -90,15 +90,15 @@ describe('runMeetingAction matches the CLI', () => {
     expect(audits[0]!.detail).toBe('Meeting 1 has no client, so it is unassigned again');
   });
 
-  it('never puts the title in the audit line', () => {
-    const { audits } = run(withMeeting('unassigned'), '1', 'assign', { client: 'SHA' });
+  it('never puts the title in the audit line', async () => {
+    const { audits } = run(await withMeeting('unassigned'), '1', 'assign', { client: 'SHA' });
     expect(JSON.stringify(audits)).not.toContain('Weekly');
   });
 });
 
 describe('runMeetingAction refusals', () => {
-  it('refuses a retry while the daily spend cap is reached, changing and auditing nothing', () => {
-    const db = withMeeting('failed', 1);
+  it('refuses a retry while the daily spend cap is reached, changing and auditing nothing', async () => {
+    const db = await withMeeting('failed', 1);
     const before = state(db);
     const audits: AuditEntry[] = [];
     const e = refusal(() => runMeetingAction(db, { id: '1', action: 'retry' }, { actor: OWNER, now, audit: (x) => audits.push(x), spend: paused }));
@@ -107,23 +107,24 @@ describe('runMeetingAction refusals', () => {
     expect(audits).toEqual([]);
   });
 
-  it('assign and skip still work at the cap: the pipeline itself waits for the budget', () => {
-    expect(run(withMeeting('unassigned'), '1', 'skip', undefined, paused).result.meeting.status).toBe('skipped');
-    expect(run(withMeeting('unassigned'), '1', 'assign', { client: 'SHA' }, paused).result.meeting.status).toBe('queued');
+  it('assign and skip still work at the cap: the pipeline itself waits for the budget', async () => {
+    expect(run(await withMeeting('unassigned'), '1', 'skip', undefined, paused).result.meeting.status).toBe('skipped');
+    expect(run(await withMeeting('unassigned'), '1', 'assign', { client: 'SHA' }, paused).result.meeting.status).toBe('queued');
   });
 
-  it('404 for an unknown or badly formed id', () => {
-    const db = withMeeting('unassigned');
+  it('404 for an unknown or badly formed id', async () => {
+    const db = await withMeeting('unassigned');
     expect(refusal(() => run(db, '9', 'skip'))).toMatchObject({ status: 404, message: 'No meeting 9' });
     for (const bad of ['0', 'x', '1 OR 1=1', '']) expect(refusal(() => run(db, bad, 'skip')).status, bad).toBe(404);
   });
 
-  it('400 for an unknown action', () => {
-    expect(refusal(() => run(withMeeting('unassigned'), '1', 'delete'))).toMatchObject({ status: 400, field: 'action' });
+  it('400 for an unknown action', async () => {
+    const db = await withMeeting('unassigned');
+    expect(refusal(() => run(db, '1', 'delete'))).toMatchObject({ status: 400, field: 'action' });
   });
 
-  it('409 when the meeting is not in a state that allows it', () => {
-    const db = withMeeting('done', 1);
+  it('409 when the meeting is not in a state that allows it', async () => {
+    const db = await withMeeting('done', 1);
     const before = state(db);
     expect(refusal(() => run(db, '1', 'skip'))).toMatchObject({ status: 409 });
     expect(refusal(() => run(db, '1', 'retry'))).toMatchObject({ status: 409 });
@@ -131,8 +132,8 @@ describe('runMeetingAction refusals', () => {
     expect(state(db)).toEqual(before);
   });
 
-  it('422 for a bad, unknown or inactive client', () => {
-    const db = withMeeting('unassigned');
+  it('422 for a bad, unknown or inactive client', async () => {
+    const db = await withMeeting('unassigned');
     for (const body of [undefined, null, {}, { client: 5 }, { client: 'SH' }, { client: 'SHA1' }, [], 'SHA']) {
       expect(refusal(() => run(db, '1', 'assign', body)), JSON.stringify(body)).toMatchObject({ status: 422, field: 'client' });
     }
@@ -141,8 +142,8 @@ describe('runMeetingAction refusals', () => {
     expect(refusal(() => run(db, '1', 'assign', { client: 'MEH' }))).toMatchObject({ status: 422, field: 'client' });
   });
 
-  it('rolls the change back when the audit cannot be written', () => {
-    const db = withMeeting('unassigned');
+  it('rolls the change back when the audit cannot be written', async () => {
+    const db = await withMeeting('unassigned');
     const before = state(db);
     expect(() => runMeetingAction(db, { id: '1', action: 'skip' }, { actor: OWNER, now, audit: () => { throw new Error('disk full'); }, spend: notPaused }))
       .toThrowError('disk full');
@@ -151,12 +152,12 @@ describe('runMeetingAction refusals', () => {
 });
 
 describe('runMeetingAction review fixes', () => {
-  it('a skip carries no cost warning', () => {
-    expect(run(withMeeting('unassigned'), '1', 'skip').result.warning).toBeUndefined();
+  it('a skip carries no cost warning', async () => {
+    expect(run(await withMeeting('unassigned'), '1', 'skip').result.warning).toBeUndefined();
   });
 
-  it("puts a meeting that changed meanwhile in the dashboard's words", () => {
-    const db = withMeeting('unassigned');
+  it("puts a meeting that changed meanwhile in the dashboard's words", async () => {
+    const db = await withMeeting('unassigned');
     // As if another writer took the meeting between the check and the change.
     db.raw.exec('CREATE TRIGGER grab BEFORE UPDATE ON meetings BEGIN SELECT RAISE(IGNORE); END');
     const e = refusal(() => run(db, '1', 'skip'));

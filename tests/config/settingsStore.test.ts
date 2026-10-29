@@ -10,8 +10,8 @@ const OWNER = 'owner@example.com';
 const NUMBER = '919812345678';
 const OTHER = '917012349999';
 
-function setup(o: { env?: Record<string, string>; linked?: boolean } = {}) {
-  const db = seededDb();
+async function setup(o: { env?: Record<string, string>; linked?: boolean } = {}) {
+  const db = await seededDb();
   const env = parseEnv({ ...o.env });
   const clock = manualClock(NOW);
   let linked = o.linked ?? true;
@@ -34,17 +34,17 @@ function refusal(fn: () => unknown): ControlError {
 }
 
 describe('SettingsStore.get', () => {
-  it('takes the .env defaults when the dashboard changed nothing', () => {
-    const { store } = setup({ env: { REPORT_ENABLED: 'true', REPORT_RECIPIENT: NUMBER, REPORT_DAYS: 'mon-sat' } });
+  it('takes the .env defaults when the dashboard changed nothing', async () => {
+    const { store } = await setup({ env: { REPORT_ENABLED: 'true', REPORT_RECIPIENT: NUMBER, REPORT_DAYS: 'mon-sat' } });
     expect(store.get()).toEqual({
       reportEnabled: true, reportDays: 'mon-sat', reportRecipient: NUMBER, reportTime: '06:00',
       dashboardSend: false, source: { reportEnabled: 'env', reportDays: 'env', reportRecipient: 'env', reportTime: 'env', dashboardSend: 'env' },
     });
-    expect(setup().store.get()).toMatchObject({ reportEnabled: false, reportDays: 'weekdays', reportRecipient: undefined });
+    expect((await setup()).store.get()).toMatchObject({ reportEnabled: false, reportDays: 'weekdays', reportRecipient: undefined });
   });
 
-  it('a dashboard value wins over .env, and the source says so', () => {
-    const { store, audit } = setup({ env: { REPORT_ENABLED: 'true', REPORT_RECIPIENT: NUMBER } });
+  it('a dashboard value wins over .env, and the source says so', async () => {
+    const { store, audit } = await setup({ env: { REPORT_ENABLED: 'true', REPORT_RECIPIENT: NUMBER } });
     store.set('reportDays', 'daily', OWNER, audit);
     store.set('reportEnabled', false, OWNER, audit);
     expect(store.get()).toEqual({
@@ -53,8 +53,8 @@ describe('SettingsStore.get', () => {
     });
   });
 
-  it('falls back to .env for a stored value that is not valid', () => {
-    const { db, store } = setup({ env: { REPORT_DAYS: 'mon-sat' } });
+  it('falls back to .env for a stored value that is not valid', async () => {
+    const { db, store } = await setup({ env: { REPORT_DAYS: 'mon-sat' } });
     const put = db.raw.prepare('INSERT INTO settings (k, v, updated_at, updated_by) VALUES (?, ?, ?, ?)');
     put.run('reportDays', '"sundays"', NOW, OWNER);
     put.run('reportEnabled', 'not json', NOW, OWNER);
@@ -66,16 +66,16 @@ describe('SettingsStore.get', () => {
     });
   });
 
-  it('builds the scheduler settings with the .env send time and deadline when the dashboard set no time', () => {
-    const { store, audit } = setup({ env: { REPORT_TIME: '07:00', REPORT_DEADLINE: '11:00', REPORT_RECIPIENT: NUMBER } });
+  it('builds the scheduler settings with the .env send time and deadline when the dashboard set no time', async () => {
+    const { store, audit } = await setup({ env: { REPORT_TIME: '07:00', REPORT_DEADLINE: '11:00', REPORT_RECIPIENT: NUMBER } });
     store.set('reportEnabled', true, OWNER, audit);
     expect(store.reportSettings()).toEqual({ enabled: true, time: '07:00', deadline: '11:00', days: 'weekdays' });
   });
 });
 
 describe('SettingsStore: sending from the dashboard (Open chat)', () => {
-  it('is off by default with no .env value, switches on and off from the dashboard, audited each time', () => {
-    const { db, store, audits, audit } = setup({ env: { REPORT_RECIPIENT: NUMBER } });
+  it('is off by default with no .env value, switches on and off from the dashboard, audited each time', async () => {
+    const { db, store, audits, audit } = await setup({ env: { REPORT_RECIPIENT: NUMBER } });
     expect(store.get().dashboardSend).toBe(false);
     expect(store.view().dashboardSend).toBe(false);
     store.set('dashboardSend', true, OWNER, audit);
@@ -91,8 +91,8 @@ describe('SettingsStore: sending from the dashboard (Open chat)', () => {
 });
 
 describe('SettingsStore.set', () => {
-  it('writes the row with who and when, audits in plain words and returns the new settings', () => {
-    const { db, store, audits, audit } = setup({ env: { REPORT_RECIPIENT: NUMBER } });
+  it('writes the row with who and when, audits in plain words and returns the new settings', async () => {
+    const { db, store, audits, audit } = await setup({ env: { REPORT_RECIPIENT: NUMBER } });
     expect(store.set('reportDays', 'mon-sat', OWNER, audit).reportDays).toBe('mon-sat');
     store.set('reportEnabled', true, OWNER, audit);
     store.set('reportEnabled', false, OWNER, audit);
@@ -107,8 +107,8 @@ describe('SettingsStore.set', () => {
     ]);
   });
 
-  it('audits a number change masked to its last 4 digits, and never shows the full number', () => {
-    const { db, store, audits, audit } = setup({ env: { REPORT_RECIPIENT: NUMBER } });
+  it('audits a number change masked to its last 4 digits, and never shows the full number', async () => {
+    const { db, store, audits, audit } = await setup({ env: { REPORT_RECIPIENT: NUMBER } });
     store.set('reportRecipient', '+91 70123 49999', OWNER, audit);
     expect(store.get().reportRecipient).toBe(OTHER);
     expect(rows(db)).toMatchObject([{ k: 'reportRecipient', v: `"${OTHER}"` }]);
@@ -121,8 +121,8 @@ describe('SettingsStore.set', () => {
     expect(JSON.stringify(store.view())).not.toContain(OTHER);
   });
 
-  it('validates every key, writing and auditing nothing on a refusal', () => {
-    const { db, store, audits, audit } = setup({ env: { REPORT_RECIPIENT: NUMBER } });
+  it('validates every key, writing and auditing nothing on a refusal', async () => {
+    const { db, store, audits, audit } = await setup({ env: { REPORT_RECIPIENT: NUMBER } });
     const bad: [string, unknown, number][] = [
       ['reportDays', 'sundays', 422], ['reportDays', 1, 422], ['reportEnabled', 'true', 422], ['reportEnabled', 1, 422],
       ['reportRecipient', '9812345678', 422], ['reportRecipient', '911234567890', 422], ['reportRecipient', 919812345678, 422],
@@ -139,10 +139,10 @@ describe('SettingsStore.set', () => {
     expect(audits).toEqual([]);
   });
 
-  it('refuses to switch on without a number, or before the spare phone is linked', () => {
-    const noNumber = setup({ linked: true });
+  it('refuses to switch on without a number, or before the spare phone is linked', async () => {
+    const noNumber = await setup({ linked: true });
     expect(refusal(() => noNumber.store.set('reportEnabled', true, OWNER, noNumber.audit))).toMatchObject({ status: 409, field: 'reportEnabled' });
-    const unlinked = setup({ env: { REPORT_RECIPIENT: NUMBER }, linked: false });
+    const unlinked = await setup({ env: { REPORT_RECIPIENT: NUMBER }, linked: false });
     expect(refusal(() => unlinked.store.set('reportEnabled', true, OWNER, unlinked.audit))).toMatchObject({
       status: 409, field: 'reportEnabled', message: 'Link the spare phone first',
     });
@@ -153,15 +153,15 @@ describe('SettingsStore.set', () => {
     expect(noNumber.store.set('reportEnabled', true, OWNER, noNumber.audit).reportEnabled).toBe(true);
   });
 
-  it('without a spare-phone check it never switches on', () => {
-    const db = seededDb();
+  it('without a spare-phone check it never switches on', async () => {
+    const db = await seededDb();
     const env = parseEnv({ REPORT_RECIPIENT: NUMBER });
     const store = new SettingsStore({ db, env, clock: manualClock(NOW) });
     expect(refusal(() => store.set('reportEnabled', true, OWNER, () => {})).status).toBe(409);
   });
 
-  it('changes nothing, audits nothing and tells no one when the value is already in force', () => {
-    const { db, store, audits, audit } = setup({ env: { REPORT_DAYS: 'mon-sat' } });
+  it('changes nothing, audits nothing and tells no one when the value is already in force', async () => {
+    const { db, store, audits, audit } = await setup({ env: { REPORT_DAYS: 'mon-sat' } });
     let told = 0;
     store.onChange(() => told++);
     store.set('reportDays', 'mon-sat', OWNER, audit);
@@ -170,8 +170,8 @@ describe('SettingsStore.set', () => {
     expect(told).toBe(0);
   });
 
-  it('tells listeners after the change is saved; a failing listener changes nothing for the others', () => {
-    const { store, audit } = setup({ env: { REPORT_RECIPIENT: NUMBER } });
+  it('tells listeners after the change is saved; a failing listener changes nothing for the others', async () => {
+    const { store, audit } = await setup({ env: { REPORT_RECIPIENT: NUMBER } });
     const seen: string[] = [];
     store.onChange(() => {
       throw new Error('listener bug');
@@ -183,8 +183,8 @@ describe('SettingsStore.set', () => {
     expect(seen).toEqual(['reportDays:daily']);
   });
 
-  it('rolls the row back when the audit cannot be written', () => {
-    const { db, store } = setup();
+  it('rolls the row back when the audit cannot be written', async () => {
+    const { db, store } = await setup();
     expect(() => store.set('reportDays', 'daily', OWNER, () => {
       throw new Error('disk full');
     })).toThrowError('disk full');
@@ -192,8 +192,8 @@ describe('SettingsStore.set', () => {
     expect(store.get().reportDays).toBe('weekdays');
   });
 
-  it('records the time from the clock', () => {
-    const { db, store, clock, audit } = setup();
+  it('records the time from the clock', async () => {
+    const { db, store, clock, audit } = await setup();
     clock.set('2026-10-20T01:02:03.000Z');
     store.set('reportDays', 'daily', OWNER, audit);
     expect(rows(db)).toMatchObject([{ updatedAt: '2026-10-20T01:02:03.000Z' }]);

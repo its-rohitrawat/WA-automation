@@ -29,7 +29,8 @@ const ON = { enabled: true, time: '06:00', deadline: '12:00', days: 'weekdays' }
 const TRACKER_ID = '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123';
 const LINK = `https://drive.google.com/file/d/${TRACKER_ID}/view`;
 
-function setup(report?: AppReportDeps, db: Db = seededDb(), o: { log?: Logger; freeBytes?: () => number; trackerId?: null } = {}) {
+async function setup(report?: AppReportDeps, dbIn?: Db, o: { log?: Logger; freeBytes?: () => number; trackerId?: null } = {}) {
+  const db = dbIn ?? (await seededDb());
   if (o.trackerId !== null) setKv(db, TRACKER_ID_KEY, TRACKER_ID); // null: the tracker was never uploaded
   const sockets: FakeSocket[] = [];
   const auth = useEncryptedAuthState(openSessionDb(':memory:'), randomBytes(32));
@@ -75,7 +76,7 @@ describe('app and the morning report', () => {
 
   it('sends the report from the tick at 06:00, shows it in Health, and the founder-number gateway still sends nothing', async () => {
     const sender = new FakeReportSender();
-    const { db, app, sockets } = setup({ sender, settings: ON });
+    const { db, app, sockets } = await setup({ sender, settings: ON });
     for (let i = 0; i < 30 && reportFor(db, DAY)?.status !== 'sent'; i++) await vi.advanceTimersByTimeAsync(1_000);
     expect(sender.calls).toHaveLength(1);
     expect(sender.calls).toEqual([{ text: `Good morning. 0 open tasks, 0 overdue. Today's tracker: ${LINK}` }]);
@@ -89,10 +90,10 @@ describe('app and the morning report', () => {
   });
 
   it('turns a send cut off by a crash into unknown at start, sends nothing, and warns in Health', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     claimReport(db, DAY, '2026-10-23T00:29:00.000Z');
     const sender = new FakeReportSender();
-    const { app } = setup({ sender, settings: ON }, db);
+    const { app } = await setup({ sender, settings: ON }, db);
     expect(reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'interrupted' });
     await vi.advanceTimersByTimeAsync(30_000);
     expect(sender.calls).toHaveLength(0);
@@ -103,7 +104,7 @@ describe('app and the morning report', () => {
   });
 
   it('without report settings there is no scheduler, no report row and no report line', async () => {
-    const { db, app } = setup();
+    const { db, app } = await setup();
     await vi.advanceTimersByTimeAsync(30_000);
     expect(app.report).toBeUndefined();
     expect(readHealthSnapshot(db)!.report).toBeUndefined();
@@ -115,7 +116,7 @@ describe('app and the morning report', () => {
     // main.ts passes auth undefined when data/sender-session.db cannot be opened or decrypted.
     const factory = vi.fn(() => new FakeSocket());
     const sender = new SenderGateway({ recipient: '919800000000', factory, auth: undefined });
-    const { db, app, sockets } = setup({ sender, settings: ON });
+    const { db, app, sockets } = await setup({ sender, settings: ON });
     await vi.advanceTimersByTimeAsync(30_000);
     expect(factory).not.toHaveBeenCalled(); // the spare number is never connected
     expect(reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'session_unreadable' });
@@ -139,7 +140,7 @@ describe('app and the morning report', () => {
     sender.gate = new Promise<void>((r) => {
       release = r;
     });
-    const { db, app } = setup({ sender, settings: ON });
+    const { db, app } = await setup({ sender, settings: ON });
     for (let i = 0; i < 30 && sender.calls.length === 0; i++) await vi.advanceTimersByTimeAsync(1_000);
     expect(sender.calls).toHaveLength(1);
     let done = false;
@@ -162,7 +163,7 @@ describe('app and the morning report', () => {
   it('stop() gives a send that never ends a bounded wait, then resolves with the row still sending', async () => {
     const sender = new FakeReportSender();
     sender.gate = new Promise<void>(() => {});
-    const { db, app } = setup({ sender, settings: ON });
+    const { db, app } = await setup({ sender, settings: ON });
     for (let i = 0; i < 30 && sender.calls.length === 0; i++) await vi.advanceTimersByTimeAsync(1_000);
     expect(sender.calls).toHaveLength(1);
     let done = false;
@@ -194,7 +195,7 @@ describe('app and the morning report', () => {
     };
     const auth = { ...useSenderAuthState(openSessionDb(':memory:'), randomBytes(32)), hasSession: true };
     const sender = new SenderGateway({ recipient: '919800000000', factory, auth }); // production timeouts and linger
-    const { db, app } = setup({ sender, settings: ON });
+    const { db, app } = await setup({ sender, settings: ON });
     for (let i = 0; i < 30 && (sockets[0]?.sendMessage.mock.calls.length ?? 0) < 1; i++) await vi.advanceTimersByTimeAsync(1_000);
     expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(1);
     let done = false;
@@ -222,7 +223,7 @@ describe('app and the morning report', () => {
     };
     const auth = { ...useSenderAuthState(openSessionDb(':memory:'), randomBytes(32)), hasSession: true };
     const sender = new SenderGateway({ recipient: '919800000000', factory, auth }); // production timeouts and linger
-    const { db, app } = setup({ sender, settings: ON });
+    const { db, app } = await setup({ sender, settings: ON });
     for (let i = 0; i < 30 && (sockets[0]?.sendMessage.mock.calls.length ?? 0) < 1; i++) await vi.advanceTimersByTimeAsync(1_000);
     expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(1);
     let done = false;
@@ -244,13 +245,13 @@ describe('app and the morning report', () => {
   });
 
   it('a recovery that failed at start is tried again at the next tick: the cut-off send becomes unknown, nothing is sent', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     claimReport(db, DAY, '2026-10-23T00:29:00.000Z');
     vi.spyOn(ReportScheduler.prototype, 'recover').mockImplementationOnce(() => {
       throw new Error('database is locked');
     });
     const sender = new FakeReportSender();
-    const { app } = setup({ sender, settings: ON }, db);
+    const { app } = await setup({ sender, settings: ON }, db);
     await vi.advanceTimersByTimeAsync(30_000);
     expect(reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'interrupted' });
     expect(sender.calls).toHaveLength(0);
@@ -262,8 +263,8 @@ describe('app and the morning report', () => {
 
   it('without a stored tracker id the report is not sent: it waits for a retry with the no_tracker_link reason', async () => {
     const sender = new FakeReportSender();
-    const db = seededDb();
-    const { app } = setup({ sender, settings: ON }, db, { trackerId: null });
+    const db = await seededDb();
+    const { app } = await setup({ sender, settings: ON }, db, { trackerId: null });
     await vi.advanceTimersByTimeAsync(30_000);
     expect(sender.calls).toHaveLength(0);
     expect(reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'no_tracker_link' });
@@ -277,7 +278,7 @@ describe('app and the morning report', () => {
     const lines: string[] = [];
     const log = createLogger('info', { write: (s: string) => { lines.push(s); } } as unknown as DestinationStream);
     const sender = new FakeReportSender();
-    const { app, sockets } = setup({ sender, settings: ON }, seededDb(), { log }); // start() did not throw
+    const { app, sockets } = await setup({ sender, settings: ON }, await seededDb(), { log }); // start() did not throw
     expect(sockets).toHaveLength(1);
     expect(app.health.workbookLine().ok).toBe(true); // connected
     const errors = lines.map((l) => JSON.parse(l) as { level: number; msg: string }).filter((l) => l.level === 50);

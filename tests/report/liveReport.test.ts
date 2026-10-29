@@ -15,8 +15,8 @@ const ON: ReportSettings = { enabled: true, time: '06:00', deadline: '12:00', da
 const A = '919812345678';
 const B = '917012349999';
 
-function setup(initial: LiveReportSettings, o: { failOpen?: number } = {}) {
-  const db = seededDb();
+async function setup(initial: LiveReportSettings, o: { failOpen?: number } = {}) {
+  const db = await seededDb();
   setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
   const clock = manualClock(at('05:00'));
   let current = initial;
@@ -48,14 +48,14 @@ const sent = (o: { sender: FakeReportSender }[]) => o.reduce((n, x) => n + x.sen
 
 describe('LiveReport', () => {
   it('opens nothing while the briefing is off, and says so', async () => {
-    const t = setup({ report: { ...ON, enabled: false }, recipient: A });
+    const t = await setup({ report: { ...ON, enabled: false }, recipient: A });
     await t.tick('06:30');
     expect(t.opened).toHaveLength(0);
     expect(t.live.health()).toEqual({ text: 'Morning report: off', warning: null });
   });
 
   it('turning on at runtime opens the module once, and sends within the window', async () => {
-    const t = setup({ report: { ...ON, enabled: false }, recipient: A });
+    const t = await setup({ report: { ...ON, enabled: false }, recipient: A });
     await t.tick('06:00');
     t.set({ report: ON, recipient: A });
     await t.tick('06:30');
@@ -68,7 +68,7 @@ describe('LiveReport', () => {
   });
 
   it('turning off skips the next send; the opened sender stays for a later switch-on', async () => {
-    const t = setup({ report: ON, recipient: A });
+    const t = await setup({ report: ON, recipient: A });
     await t.tick('05:30');
     t.set({ report: { ...ON, enabled: false }, recipient: A });
     await t.tick('06:30');
@@ -81,7 +81,7 @@ describe('LiveReport', () => {
   });
 
   it('a number change stops and closes the old sender, then makes a new one for the new number', async () => {
-    const t = setup({ report: ON, recipient: A });
+    const t = await setup({ report: ON, recipient: A });
     await t.tick('05:30');
     t.set({ report: ON, recipient: B });
     await t.tick('05:31');
@@ -93,7 +93,7 @@ describe('LiveReport', () => {
   });
 
   it('a new sender never sends a second report on a date already sent', async () => {
-    const t = setup({ report: ON, recipient: A });
+    const t = await setup({ report: ON, recipient: A });
     await t.tick('06:30');
     t.set({ report: ON, recipient: B });
     await t.tick('07:00');
@@ -102,7 +102,7 @@ describe('LiveReport', () => {
   });
 
   it('a send cut off mid-way reads unknown under the new sender and is never retried', async () => {
-    const t = setup({ report: ON, recipient: A });
+    const t = await setup({ report: ON, recipient: A });
     await t.tick('05:30');
     claimReport(t.db, '2026-10-23', new Date(at('06:00')).toISOString()); // as if a send had started and the outcome was lost
     t.set({ report: ON, recipient: B });
@@ -113,7 +113,7 @@ describe('LiveReport', () => {
   });
 
   it('a failed open is logged and tried again on the next tick', async () => {
-    const t = setup({ report: ON, recipient: A }, { failOpen: 1 });
+    const t = await setup({ report: ON, recipient: A }, { failOpen: 1 });
     await t.tick('06:30');
     expect(t.opened).toHaveLength(0);
     expect(t.live.health().text).toBe('Morning report: starting');
@@ -123,13 +123,13 @@ describe('LiveReport', () => {
   });
 
   it('switched on without a number, it opens nothing', async () => {
-    const t = setup({ report: ON, recipient: undefined });
+    const t = await setup({ report: ON, recipient: undefined });
     await t.tick('06:30');
     expect(t.opened).toHaveLength(0);
   });
 
   it('a tick while one is running does nothing', async () => {
-    const t = setup({ report: ON, recipient: A });
+    const t = await setup({ report: ON, recipient: A });
     await t.tick('05:30');
     let release!: () => void;
     t.opened[0]!.sender.gate = new Promise((r) => (release = r));
@@ -141,7 +141,7 @@ describe('LiveReport', () => {
   });
 
   it('stop stops the scheduler and closes the sender; later ticks do nothing', async () => {
-    const t = setup({ report: ON, recipient: A });
+    const t = await setup({ report: ON, recipient: A });
     await t.tick('05:30');
     await t.live.stop(1000);
     expect(t.opened.map((o) => [o.sender.stopped, o.closed])).toEqual([[1, 1]]);
@@ -165,7 +165,7 @@ describe('LiveReport review fixes', () => {
   const settle = () => new Promise((r) => setTimeout(r, 10));
 
   it('the old sender is closed before the new one opens', async () => {
-    const t = setup({ report: ON, recipient: A });
+    const t = await setup({ report: ON, recipient: A });
     await t.tick('05:30');
     const release = gateStop(t.opened[0]!.sender);
     t.set({ report: ON, recipient: B });
@@ -179,7 +179,7 @@ describe('LiveReport review fixes', () => {
 
   it('reads the number again after the close: a second change meanwhile opens for the latest number only', async () => {
     const C = '919900001111';
-    const t = setup({ report: ON, recipient: A });
+    const t = await setup({ report: ON, recipient: A });
     await t.tick('05:30');
     const release = gateStop(t.opened[0]!.sender);
     t.set({ report: ON, recipient: B });
@@ -193,7 +193,7 @@ describe('LiveReport review fixes', () => {
   });
 
   it('switched off during the close, it opens nothing new', async () => {
-    const t = setup({ report: ON, recipient: A });
+    const t = await setup({ report: ON, recipient: A });
     await t.tick('05:30');
     const release = gateStop(t.opened[0]!.sender);
     t.set({ report: ON, recipient: B });
@@ -206,7 +206,7 @@ describe('LiveReport review fixes', () => {
   });
 
   it('stop during a rebuild waits for the old session file to close, and opens nothing new', async () => {
-    const t = setup({ report: ON, recipient: A });
+    const t = await setup({ report: ON, recipient: A });
     await t.tick('05:30');
     const release = gateStop(t.opened[0]!.sender);
     t.set({ report: ON, recipient: B });
@@ -223,7 +223,7 @@ describe('LiveReport review fixes', () => {
   });
 
   it('a number change during a send waits: the old sender is not stopped and nothing opens until the send ends', async () => {
-    const t = setup({ report: ON, recipient: A });
+    const t = await setup({ report: ON, recipient: A });
     await t.tick('05:30');
     let release!: () => void;
     t.opened[0]!.sender.gate = new Promise((r) => (release = r));
@@ -242,7 +242,7 @@ describe('LiveReport review fixes', () => {
   });
 
   it('waits longer after each failed open, and warns the owner after three', async () => {
-    const t = setup({ report: ON, recipient: A }, { failOpen: 3 });
+    const t = await setup({ report: ON, recipient: A }, { failOpen: 3 });
     await t.tick('06:00'); // 1st failure: next try in 1 min
     await t.tick('06:00');
     await t.tick('06:01'); // 2nd: in 2 min
@@ -258,7 +258,7 @@ describe('LiveReport review fixes', () => {
   });
 
   it('health never throws when the settings cannot be read', async () => {
-    const t = setup({ report: ON, recipient: A });
+    const t = await setup({ report: ON, recipient: A });
     t.set(undefined as unknown as LiveReportSettings);
     expect(t.live.health().text).toBe('Morning report: settings could not be read');
   });
@@ -266,7 +266,7 @@ describe('LiveReport review fixes', () => {
 
 describe('LiveReport stop during a rebuild (review round 2)', () => {
   it('stop does not resolve while the old sender is still closing, even past its own short wait', async () => {
-    const t = setup({ report: ON, recipient: A });
+    const t = await setup({ report: ON, recipient: A });
     await t.tick('05:30');
     const old = t.opened[0]!.sender;
     let release!: () => void;
@@ -291,7 +291,7 @@ describe('LiveReport stop during a rebuild (review round 2)', () => {
 
 describe('LiveReport pause (a spare-phone link from the dashboard)', () => {
   it('opens, ticks and sends nothing while paused, and goes on once released', async () => {
-    const t = setup({ report: ON, recipient: A });
+    const t = await setup({ report: ON, recipient: A });
     const release = await t.live.pause();
     await t.tick('06:30');
     expect(t.opened).toHaveLength(0);
@@ -305,7 +305,7 @@ describe('LiveReport pause (a spare-phone link from the dashboard)', () => {
   });
 
   it('a pause that comes while a number change closes the old sender opens no new one until released', async () => {
-    const t = setup({ report: ON, recipient: A });
+    const t = await setup({ report: ON, recipient: A });
     await t.tick('05:30'); // opens A before the send time
     t.set({ report: ON, recipient: B });
     const ticking = t.tick('05:31'); // closes A for the new number

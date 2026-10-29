@@ -50,8 +50,8 @@ let audits: Parameters<AuditFn>[0][];
 let logLines: string[];
 let deps: ChatDeps;
 
-beforeEach(() => {
-  db = seededDb();
+beforeEach(async () => {
+  db = await seededDb();
   clock = manualClock(NOW);
   sock = new FakeSocket(db);
   on = true;

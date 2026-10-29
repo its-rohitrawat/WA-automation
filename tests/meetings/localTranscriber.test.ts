@@ -172,10 +172,10 @@ describe('the local meeting transcriber', () => {
     db, spend, transcriber: t, ffmpeg: new Ffmpeg('ffmpeg.exe', ff.run), dataDir, clock, log: silentLogger(), ...o,
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     dataDir = mkdtempSync(join(tmpdir(), 'meet-local-'));
     dirs.push(dataDir);
-    db = seededDb();
+    db = await seededDb();
     spend = new SpendGuard({ db, clock, capUsd: 5 });
   });
 

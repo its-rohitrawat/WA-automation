@@ -13,15 +13,15 @@ const message = (o: Partial<Extract<NormalizedEvent, { kind: 'message' }>> = {})
   fromMe: false, ts, text: 'hello', quotedWaId: null, mediaType: null, ...o,
 });
 
-function setup() {
-  const db = seededDb();
+async function setup() {
+  const db = await seededDb();
   const onNew = vi.fn();
   return { db, onNew, ing: new Ingestor({ db, onNewMessages: onNew }) };
 }
 
 describe('Ingestor', () => {
-  it('stores a new message, records the sender and signals once', () => {
-    const { db, onNew, ing } = setup();
+  it('stores a new message, records the sender and signals once', async () => {
+    const { db, onNew, ing } = await setup();
     ing.handle(message());
     ing.handle(message());
     expect(listUnprocessed(db, 1)).toHaveLength(1);
@@ -30,22 +30,22 @@ describe('Ingestor', () => {
     expect(onNew).toHaveBeenCalledWith(1);
   });
 
-  it('ignores groups that are not configured clients', () => {
-    const { db, onNew, ing } = setup();
+  it('ignores groups that are not configured clients', async () => {
+    const { db, onNew, ing } = await setup();
     ing.handle(message({ groupId: OTHER_GROUP }));
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM messages').get()).toEqual({ n: 0 });
     expect(onNew).not.toHaveBeenCalled();
   });
 
-  it('ignores clients that were removed from the allow-list', () => {
-    const { db, ing } = setup();
+  it('ignores clients that were removed from the allow-list', async () => {
+    const { db, ing } = await setup();
     syncClients(db, [MEHTA]);
     ing.handle(message());
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM messages').get()).toEqual({ n: 0 });
   });
 
-  it('applies edits, reactions and revokes', () => {
-    const { db, onNew, ing } = setup();
+  it('applies edits, reactions and revokes', async () => {
+    const { db, onNew, ing } = await setup();
     ing.handle(message());
     onNew.mockClear();
     ing.handle({ kind: 'edit', groupId: SHARMA.groupId, waId: 'm1', text: 'hello again', ts });

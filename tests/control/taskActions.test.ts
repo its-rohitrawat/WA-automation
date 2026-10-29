@@ -10,8 +10,8 @@ import { NOW, seededDb } from '../helpers/db.ts';
 const now = new Date('2026-10-19T08:00:00Z');
 const OWNER = 'owner@example.com';
 
-function withTask(): Db {
-  const db = seededDb();
+async function withTask(): Promise<Db> {
+  const db = await seededDb();
   createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
     deadline: null, latestProgress: null, sourceQuote: 'send the banner', sourceDate: '2026-10-10', sourceWaId: null, origin: 'whatsapp' }, NOW);
   return db;
@@ -43,9 +43,9 @@ function refusal(fn: () => unknown): ControlError {
 }
 
 describe('runTaskAction matches the CLI', () => {
-  it('done, reopen and unlock change the row exactly as the CLI does, set rebuild_requested and audit with the code', () => {
-    const web = withTask();
-    const cli = withTask();
+  it('done, reopen and unlock change the row exactly as the CLI does, set rebuild_requested and audit with the code', async () => {
+    const web = await withTask();
+    const cli = await withTask();
     const steps: [string, (db: Db) => unknown, string][] = [
       ['done', (db) => closeTask(db, 'SHA-001', now), 'Task SHA-001 marked done'],
       ['reopen', (db) => reopenTask(db, 'SHA-001', now), 'Task SHA-001 reopened'],
@@ -61,14 +61,14 @@ describe('runTaskAction matches the CLI', () => {
     }
   });
 
-  it('returns the fresh detail', () => {
-    const db = withTask();
+  it('returns the fresh detail', async () => {
+    const db = await withTask();
     expect(run(db, 'SHA-001', 'done').detail).toMatchObject({ code: 'SHA-001', status: 'done', history: [{ actor: 'owner', what: 'Marked done by the owner' }] });
   });
 
-  it('edit matches the CLI and audits the field names only', () => {
-    const web = withTask();
-    const cli = withTask();
+  it('edit matches the CLI and audits the field names only', async () => {
+    const web = await withTask();
+    const cli = await withTask();
     const { detail, audits } = run(web, 'SHA-001', 'edit', { deadline: '2026-10-30', assignedTo: 'Rahul', latestProgress: 'secret words' });
     editTask(cli, 'SHA-001', { deadline: '2026-10-30', assignedTo: 'Rahul', latestProgress: 'secret words' }, now);
     expect(state(web)).toEqual(state(cli));
@@ -78,9 +78,9 @@ describe('runTaskAction matches the CLI', () => {
     expect(JSON.stringify(audits)).not.toContain('Rahul');
   });
 
-  it('edit clears optional fields with null or an empty string, as the CLI does with none', () => {
-    const web = withTask();
-    const cli = withTask();
+  it('edit clears optional fields with null or an empty string, as the CLI does with none', async () => {
+    const web = await withTask();
+    const cli = await withTask();
     run(web, 'SHA-001', 'edit', { deadline: '2026-10-30', assignedTo: 'Rahul' });
     editTask(cli, 'SHA-001', { deadline: '2026-10-30', assignedTo: 'Rahul' }, now);
     run(web, 'SHA-001', 'edit', { deadline: null, assignedTo: '' });
@@ -90,8 +90,8 @@ describe('runTaskAction matches the CLI', () => {
 });
 
 describe('runTaskAction refusals', () => {
-  it('404 for an unknown task, before anything changes or is audited', () => {
-    const db = withTask();
+  it('404 for an unknown task, before anything changes or is audited', async () => {
+    const db = await withTask();
     const audits: AuditEntry[] = [];
     const e = refusal(() => runTaskAction(db, { code: 'SHA-999', action: 'done' }, { actor: OWNER, now, audit: (x) => audits.push(x) }));
     expect(e).toMatchObject({ status: 404, message: 'No task called SHA-999' });
@@ -99,8 +99,8 @@ describe('runTaskAction refusals', () => {
     expect(audits).toEqual([]);
   });
 
-  it('409 for a status it already has, with nothing changed or audited', () => {
-    const db = withTask();
+  it('409 for a status it already has, with nothing changed or audited', async () => {
+    const db = await withTask();
     const before = state(db);
     const audits: AuditEntry[] = [];
     expect(refusal(() => runTaskAction(db, { code: 'SHA-001', action: 'reopen' }, { actor: OWNER, now, audit: (x) => audits.push(x) })))
@@ -109,12 +109,13 @@ describe('runTaskAction refusals', () => {
     expect(audits).toEqual([]);
   });
 
-  it('400 for an unknown action', () => {
-    expect(refusal(() => run(withTask(), 'SHA-001', 'delete'))).toMatchObject({ status: 400, field: 'action' });
+  it('400 for an unknown action', async () => {
+    const db = await withTask();
+    expect(refusal(() => run(db, 'SHA-001', 'delete'))).toMatchObject({ status: 400, field: 'action' });
   });
 
-  it('rolls the change back when the audit cannot be written', () => {
-    const db = withTask();
+  it('rolls the change back when the audit cannot be written', async () => {
+    const db = await withTask();
     const before = state(db);
     expect(() => runTaskAction(db, { code: 'SHA-001', action: 'done' }, { actor: OWNER, now, audit: () => { throw new Error('disk full'); } }))
       .toThrowError('disk full');
@@ -159,14 +160,14 @@ describe('parseTaskEdit', () => {
     expect(bad({ priority: 'urgent' }, 'priority').message).toBe('priority must be one of: critical, major, medium, low');
   });
 
-  it('accepts the longest title and a title called none is refused like the CLI', () => {
+  it('accepts the longest title and a title called none is refused like the CLI', async () => {
     expect(parseTaskEdit({ title: 'x'.repeat(200) }).title).toHaveLength(200);
-    const db = withTask();
+    const db = await withTask();
     expect(refusal(() => run(db, 'SHA-001', 'edit', { title: 'none' }))).toMatchObject({ status: 422, field: 'title' });
   });
 
-  it('an edit body on done, reopen or unlock is ignored', () => {
-    const db = withTask();
+  it('an edit body on done, reopen or unlock is ignored', async () => {
+    const db = await withTask();
     expect(run(db, 'SHA-001', 'done', { title: 'ignored' }).detail).toMatchObject({ title: 'Banner', status: 'done' });
   });
 });

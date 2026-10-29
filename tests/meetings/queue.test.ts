@@ -41,10 +41,10 @@ class FakeProcessor {
   }
 }
 
-function setup(o: { meetings?: number; transcriber?: MeetingTranscriber | null } = {}) {
+async function setup(o: { meetings?: number; transcriber?: MeetingTranscriber | null } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'meet-queue-'));
   dirs.push(dataDir);
-  const db = seededDb();
+  const db = await seededDb();
   const clock = manualClock(NOW);
   const spend = new SpendGuard({ db, clock, capUsd: 15 });
   const ids = Array.from({ length: o.meetings ?? 1 }, (_, i) => insertFound(db, queuedMeeting({ startedAt: `2026-11-01T0${i + 1}:00:00.000Z` }))!);
@@ -68,7 +68,7 @@ const spendRows = (db: Db) => db.raw.prepare('SELECT kind, detail FROM spend ORD
 
 describe('MeetingQueue', () => {
   it('at start books parts left in flight, deletes provider copies and cleans work files before any meeting runs', async () => {
-    const { db, ids, processor, queue, dataDir, stt } = setup();
+    const { db, ids, processor, queue, dataDir, stt } = await setup();
     const id = ids[0]!;
     setSttParts(db, id, [{ index: 0, provider: 'elevenlabs', file: null, offset: 0, seconds: 600, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
     addSttForget(db, { meetingId: id, provider: 'elevenlabs', ref: 'tr-9', at: NOW });
@@ -98,13 +98,13 @@ describe('MeetingQueue', () => {
     const IN_AN_HOUR = '2026-11-01T13:00:00.000Z';
     const local = () => localMeetingTranscriber({ transcribe: async () => ({ text: 'namaste' }) }, { engine: 'voxtral', ffmpeg: null, tmpDir: tmpdir(), inrPerUsd: 88 });
     /** Meeting ids[0] waits stt_none for an hour, as the processor left it while STT_PROVIDER was none; ids[1] waits low_disk. */
-    const waiting = (s: ReturnType<typeof setup>) => {
+    const waiting = (s: Awaited<ReturnType<typeof setup>>) => {
       deferMeeting(s.db, s.ids[0]!, { errorCode: 'stt_none', nextAttemptAt: IN_AN_HOUR, at: NOW, attempts: 0 });
       deferMeeting(s.db, s.ids[1]!, { errorCode: 'low_disk', nextAttemptAt: IN_AN_HOUR, at: NOW, attempts: 0 });
     };
 
     it('with the local engine, they are due at once at start, not an hour later; other waits are kept', async () => {
-      const s = setup({ meetings: 2, transcriber: local() });
+      const s = await setup({ meetings: 2, transcriber: local() });
       waiting(s);
       s.queue.start();
       await vi.waitFor(() => expect(s.processor.calls.map((c) => c.id)).toEqual([s.ids[0]]), WAIT);
@@ -118,7 +118,7 @@ describe('MeetingQueue', () => {
       ['no transcriber (STT_PROVIDER none, or the local engine not set up)', () => null],
       ['a paid provider (unchanged: it books spend, so its timing stays as before)', () => meetingTranscriber(new FakeSttProvider(), 88)],
     ])('with %s they keep waiting their hour', async (_name, make) => {
-      const s = setup({ meetings: 2, transcriber: make() });
+      const s = await setup({ meetings: 2, transcriber: make() });
       waiting(s);
       s.queue.start();
       await ticks();
@@ -130,7 +130,7 @@ describe('MeetingQueue', () => {
   });
 
   it('runs one meeting at a time, oldest first, and goes on to the next when one ends', async () => {
-    const { ids, processor, queue, settled } = setup({ meetings: 2 });
+    const { ids, processor, queue, settled } = await setup({ meetings: 2 });
     processor.result = (id) => ({ outcome: 'done', clientId: id });
     queue.start();
     await vi.waitFor(() => expect(processor.calls).toHaveLength(1), WAIT);
@@ -153,7 +153,7 @@ describe('MeetingQueue', () => {
   });
 
   it('stop aborts the running meeting and starts nothing more; drain waits for it', async () => {
-    const { processor, queue } = setup({ meetings: 2 });
+    const { processor, queue } = await setup({ meetings: 2 });
     queue.start();
     await vi.waitFor(() => expect(processor.calls).toHaveLength(1), WAIT);
     const { signal } = processor.calls[0]!;
@@ -175,7 +175,7 @@ describe('MeetingQueue', () => {
   });
 
   it('drain gives up after its time and leaves no timer', async () => {
-    const { processor, queue } = setup();
+    const { processor, queue } = await setup();
     queue.start();
     await vi.waitFor(() => expect(processor.calls).toHaveLength(1), WAIT);
     vi.useFakeTimers();
@@ -192,7 +192,7 @@ describe('MeetingQueue', () => {
   });
 
   it('a crashed run (the database failed) is held back, not retried on every kick', async () => {
-    const { processor, queue, clock } = setup();
+    const { processor, queue, clock } = await setup();
     processor.hold = false;
     processor.result = () => new Error('database is locked');
     queue.start();

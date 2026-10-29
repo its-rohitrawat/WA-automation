@@ -11,8 +11,8 @@ import { NOW, seededDb } from '../helpers/db.ts';
 const OWNER = 'owner@example.com';
 const EMPTY = { critical: [], major: [], medium: [], low: [] };
 
-function setup() {
-  const db = seededDb();
+async function setup() {
+  const db = await seededDb();
   const clock = manualClock(NOW);
   const store = new PrioritySettings({ db, clock });
   const audits: AuditEntry[] = [];
@@ -32,8 +32,8 @@ function refusal(fn: () => unknown): ControlError {
 }
 
 describe('PrioritySettings', () => {
-  it('starts with the starting lists and sentiment off, and says they are the defaults', () => {
-    const { db, store } = setup();
+  it('starts with the starting lists and sentiment off, and says they are the defaults', async () => {
+    const { db, store } = await setup();
     expect(store.get()).toEqual({ keywords: DEFAULT_KEYWORDS, sentimentEnabled: false });
     expect(store.view()).toEqual({
       keywords: DEFAULT_KEYWORDS, sentimentEnabled: false, source: { priorityKeywords: 'default', sentimentEnabled: 'default' },
@@ -42,8 +42,8 @@ describe('PrioritySettings', () => {
     expect(readSentimentEnabled(db)).toBe(false);
   });
 
-  it('saves the cleaned lists and audits counts only, in one transaction', () => {
-    const { db, store, audits, audit } = setup();
+  it('saves the cleaned lists and audits counts only, in one transaction', async () => {
+    const { db, store, audits, audit } = await setup();
     const view = store.set('priorityKeywords', { critical: ['  Site   down ', 'URGENT', 'urgent', ''], major: ['zaroori'], medium: [], low: ['no rush'] }, OWNER, audit);
     expect(view.keywords).toEqual({ critical: ['Site down', 'URGENT'], major: ['zaroori'], medium: [], low: ['no rush'] });
     expect(view.source.priorityKeywords).toBe('dashboard');
@@ -52,14 +52,14 @@ describe('PrioritySettings', () => {
     expect(rows(db)).toEqual([{ k: 'priorityKeywords', v: JSON.stringify(view.keywords), by: OWNER }]);
   });
 
-  it('lets the owner empty every list', () => {
-    const { store, audit } = setup();
+  it('lets the owner empty every list', async () => {
+    const { store, audit } = await setup();
     expect(store.set('priorityKeywords', EMPTY, OWNER, audit).keywords).toEqual(EMPTY);
     expect(store.get().keywords).toEqual(EMPTY);
   });
 
-  it('switches sentiment on and off, audits it and asks for a tracker rebuild', () => {
-    const { db, store, audits, audit } = setup();
+  it('switches sentiment on and off, audits it and asks for a tracker rebuild', async () => {
+    const { db, store, audits, audit } = await setup();
     expect(store.set('sentimentEnabled', true, OWNER, audit).sentimentEnabled).toBe(true);
     expect(readSentimentEnabled(db)).toBe(true);
     expect(getKv(db, 'rebuild_requested')).toBe(NOW);
@@ -68,16 +68,16 @@ describe('PrioritySettings', () => {
     expect(audits.map((a) => a.detail)).toEqual(['Sentiment analysis switched on', 'Sentiment analysis switched off']);
   });
 
-  it('changes nothing for a value already saved, and does save the default once it is chosen on purpose', () => {
-    const { store, audits, audit } = setup();
+  it('changes nothing for a value already saved, and does save the default once it is chosen on purpose', async () => {
+    const { store, audits, audit } = await setup();
     store.set('sentimentEnabled', false, OWNER, audit);
     store.set('sentimentEnabled', false, OWNER, audit);
     expect(audits).toHaveLength(1);
     expect(store.view().source.sentimentEnabled).toBe('dashboard');
   });
 
-  it('refuses unknown keys and bad values, naming the level and place but never the keyword, and saves nothing', () => {
-    const { db, store, audit, audits } = setup();
+  it('refuses unknown keys and bad values, naming the level and place but never the keyword, and saves nothing', async () => {
+    const { db, store, audit, audits } = await setup();
     expect(refusal(() => store.set('apiKey', 'x', OWNER, audit)).status).toBe(422);
     expect(refusal(() => store.set('sentimentEnabled', 'yes', OWNER, audit)).message).toBe('sentimentEnabled must be true or false');
     const long = 'x'.repeat(KEYWORD_MAX_CHARS + 1);
@@ -108,15 +108,15 @@ describe('PrioritySettings', () => {
       .toHaveLength(KEYWORDS_PER_LEVEL);
   });
 
-  it('falls back to the defaults when a stored row is damaged', () => {
-    const { db, store } = setup();
+  it('falls back to the defaults when a stored row is damaged', async () => {
+    const { db, store } = await setup();
     db.raw.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('priorityKeywords', '{\"critical\":5}', ?, 'x'), ('sentimentEnabled', 'nope', ?, 'x')").run(NOW, NOW);
     expect(store.get()).toEqual({ keywords: DEFAULT_KEYWORDS, sentimentEnabled: false });
     expect(store.view().source).toEqual({ priorityKeywords: 'default', sentimentEnabled: 'default' });
   });
 
-  it('writes nothing when the audit row cannot be written', () => {
-    const { db, store } = setup();
+  it('writes nothing when the audit row cannot be written', async () => {
+    const { db, store } = await setup();
     expect(() => store.set('sentimentEnabled', true, OWNER, () => { throw new Error('disk full'); })).toThrow('disk full');
     expect(rows(db)).toEqual([]);
     expect(readSentimentEnabled(db)).toBe(false);

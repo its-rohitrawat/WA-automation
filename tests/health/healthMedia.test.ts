@@ -5,8 +5,8 @@ import { setKv } from '../../src/store/kv.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { seededDb } from '../helpers/db.ts';
 
-function setup(freeBytes: () => number | null = () => 200e9) {
-  const db = seededDb();
+async function setup(freeBytes: () => number | null = () => 200e9) {
+  const db = await seededDb();
   const clock = manualClock('2026-10-19T08:00:00Z');
   const spend = new SpendGuard({ db, clock, capUsd: 1 });
   const h = new Health({ db, clock, spend, freeBytes });
@@ -25,45 +25,45 @@ const MEETINGS_FAILED = {
 };
 
 describe('Health and shared files', () => {
-  it('warns when shared files wait more than 30 minutes', () => {
-    const { h } = setup();
+  it('warns when shared files wait more than 30 minutes', async () => {
+    const { h } = await setup();
     h.setMedia(counts({ pending: 3, stale: 2 }));
     expect(h.line()).toEqual({ ok: false, text: '⚠️ 2 shared files waiting over 30 minutes to be read. See docs/SETUP.md.' });
     h.setMedia(counts({ pending: 3 }));
     expect(h.line().ok).toBe(true);
   });
 
-  it('warns about files that could not be uploaded', () => {
-    const { h } = setup();
+  it('warns about files that could not be uploaded', async () => {
+    const { h } = await setup();
     h.setMedia(counts({ uploadFailed: 1 }));
     expect(h.line()).toEqual({ ok: false, text: '⚠️ 1 file could not be uploaded to Drive. See docs/SETUP.md.' });
     h.setMedia(counts({ uploadFailed: 2 }));
     expect(h.line().text).toBe('⚠️ 2 files could not be uploaded to Drive. See docs/SETUP.md.');
   });
 
-  it('a long wait outranks uploads that gave up', () => {
-    const { h } = setup();
+  it('a long wait outranks uploads that gave up', async () => {
+    const { h } = await setup();
     h.setMedia(counts({ stale: 1, uploadFailed: 1 }));
     expect(h.line().text).toBe('⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.');
   });
 
-  it('lost messages outrank files waiting over 30 minutes and uploads that gave up (15h)', () => {
-    const { h } = setup();
+  it('lost messages outrank files waiting over 30 minutes and uploads that gave up (15h)', async () => {
+    const { h } = await setup();
     h.setMedia(counts({ stale: 1, uploadFailed: 1 }));
     h.setIngestFailures(1);
     expect(h.line().text).toBe('⚠️ 1 incoming message could not be saved. See docs/SETUP.md.');
   });
 
-  it('an AI error outranks the media warnings, which outrank low disk', () => {
-    const { h } = setup(() => 5e9);
+  it('an AI error outranks the media warnings, which outrank low disk', async () => {
+    const { h } = await setup(() => 5e9);
     h.setMedia(counts({ stale: 1 }));
     expect(h.line().text).toBe('⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.');
     h.recordOutcome(1, { status: 'failed', errorCode: 'refusal' });
     expect(h.line().text).toBe('⚠️ 1 group waiting (AI error)');
   });
 
-  it('files waiting for the daily budget get their own line while the cap is not reached (15b, review round 1)', () => {
-    const { h } = setup(() => 5e9);
+  it('files waiting for the daily budget get their own line while the cap is not reached (15b, review round 1)', async () => {
+    const { h } = await setup(() => 5e9);
     // A scan holds about $4 while it is read, so it can wait for the budget long before the cap is reached.
     h.setMedia(counts({ pending: 1, spendCap: 1 }));
     expect(h.line()).toEqual({ ok: false, text: budgetLine(1) });
@@ -83,8 +83,8 @@ describe('Health and shared files', () => {
     expect(h.line().text).toBe('⚠️ 1 group waiting (AI error)');
   });
 
-  it('files waiting for the budget show the spend-cap line only when the cap is really reached (15b)', () => {
-    const { h, spend } = setup();
+  it('files waiting for the budget show the spend-cap line only when the cap is really reached (15b)', async () => {
+    const { h, spend } = await setup();
     h.recordOutcome(1, { status: 'failed', errorCode: 'refusal' });
     h.setMedia(counts({ pending: 1, spendCap: 1 }));
     expect(h.line().text).toBe('⚠️ 1 group waiting (AI error)');
@@ -93,8 +93,8 @@ describe('Health and shared files', () => {
     expect(h.workbookLine()).toEqual({ ok: false, text: SPEND_LINE });
   });
 
-  it('a waiting run changes nothing in the media warnings (15c)', () => {
-    const { db, h } = setup();
+  it('a waiting run changes nothing in the media warnings (15c)', async () => {
+    const { db, h } = await setup();
     h.setMedia(counts({ pending: 1, stale: 1 }));
     // A group with an AI error stays failed: waiting for a file is not a success that clears it.
     h.recordOutcome(1, { status: 'failed', errorCode: 'refusal' });
@@ -115,8 +115,8 @@ describe('Health and shared files', () => {
     expect(readHealthSnapshot(db)!.media).toEqual(counts({ pending: 1, stale: 1 }));
   });
 
-  it('a run kept out only by another paid call’s hold is ignored, like waiting: no spend-cap line (Task 15 review round 3)', () => {
-    const { h } = setup();
+  it('a run kept out only by another paid call’s hold is ignored, like waiting: no spend-cap line (Task 15 review round 3)', async () => {
+    const { h } = await setup();
     h.recordOutcome(1, { status: 'busy' });
     expect(h.line()).toEqual({ ok: true, text: '✅ Connected · waiting for new messages' });
     // It clears nothing either: a failed group stays failed, a paused one stays paused.
@@ -128,8 +128,8 @@ describe('Health and shared files', () => {
     expect(h.line().text).toBe(SPEND_LINE);
   });
 
-  it('warns when voice notes wait because the speech-to-text key was refused (Phase 2b)', () => {
-    const { h } = setup();
+  it('warns when voice notes wait because the speech-to-text key was refused (Phase 2b)', async () => {
+    const { h } = await setup();
     h.setMedia(counts({ pending: 2, sttRefused: 2 }));
     expect(h.line()).toEqual({ ok: false, text: STT_REFUSED_LINE });
     expect(h.workbookLine()).toEqual({ ok: false, text: STT_REFUSED_LINE });
@@ -141,8 +141,8 @@ describe('Health and shared files', () => {
 
   // Phase 2b final polish: notes waiting on a refused key give up after 24 hours, so the key-refused line sits above the
   // budget line (as in Task 9), and so above the morning report, the meeting lines, low disk and the other voice lines.
-  it('the key-refused line comes after the file lines and before the budget line, the report, meetings and low disk (Phase 2b final polish)', () => {
-    const { h } = setup(() => 5e9);
+  it('the key-refused line comes after the file lines and before the budget line, the report, meetings and low disk (Phase 2b final polish)', async () => {
+    const { h } = await setup(() => 5e9);
     h.setMedia(counts({ pending: 3, stale: 1, sttRefused: 1, spendCap: 1 }));
     expect(h.line().text).toBe('⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.');
     h.setMedia(counts({ pending: 2, uploadFailed: 1, sttRefused: 1, spendCap: 1 }));
@@ -158,23 +158,23 @@ describe('Health and shared files', () => {
     expect(h.line().text).toBe(REPORT_UNKNOWN.warning);
   });
 
-  it('the budget line shows once the key is no longer refused (Phase 2b final polish)', () => {
-    const { h } = setup();
+  it('the budget line shows once the key is no longer refused (Phase 2b final polish)', async () => {
+    const { h } = await setup();
     h.setMedia(counts({ pending: 2, sttRefused: 1, spendCap: 1 }));
     expect(h.line().text).toBe(STT_REFUSED_LINE);
     h.setMedia(counts({ pending: 1, spendCap: 1 }));
     expect(h.line().text).toBe(budgetLine(1));
   });
 
-  it('the key-refused line yields to the spend-cap line when the cap is reached (Phase 2b)', () => {
-    const { h, spend } = setup();
+  it('the key-refused line yields to the spend-cap line when the cap is reached (Phase 2b)', async () => {
+    const { h, spend } = await setup();
     h.setMedia(counts({ pending: 1, sttRefused: 1 }));
     spend.record('ai', 1, 'batch 1');
     expect(h.line().text).toBe(SPEND_LINE);
   });
 
-  it('reads older snapshots whose media counts have no sttRefused, and refuses one that is not a number (Phase 2b)', () => {
-    const { db, h } = setup();
+  it('reads older snapshots whose media counts have no sttRefused, and refuses one that is not a number (Phase 2b)', async () => {
+    const { db, h } = await setup();
     h.setMedia(counts({ pending: 2, sttRefused: 1 }));
     h.persist();
     expect(readHealthSnapshot(db)!.media).toEqual(counts({ pending: 2, sttRefused: 1 }));
@@ -190,8 +190,8 @@ describe('Health and shared files', () => {
     }
   });
 
-  it('keeps the counts in the snapshot and still reads older snapshots without them', () => {
-    const { db, h } = setup();
+  it('keeps the counts in the snapshot and still reads older snapshots without them', async () => {
+    const { db, h } = await setup();
     h.setMedia(counts({ pending: 2, failedRecent: 1 }));
     h.persist();
     expect(readHealthSnapshot(db)!.media).toEqual(counts({ pending: 2, failedRecent: 1 }));
@@ -215,8 +215,8 @@ describe('Health and voice notes that cannot be transcribed (Phase 2b Task 10)',
   const NOT_SET_UP_MODEL = '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_MODEL)';
   const NO_FFMPEG = '⚠️ Voice notes are not being transcribed: ffmpeg not found';
 
-  it('says the local speech engine is not set up, naming the setting, or that ffmpeg is missing', () => {
-    const { h } = setup();
+  it('says the local speech engine is not set up, naming the setting, or that ffmpeg is missing', async () => {
+    const { h } = await setup();
     h.setVoiceProblem('local_not_set_up_bin');
     expect(h.line()).toEqual({ ok: false, text: NOT_SET_UP });
     expect(h.workbookLine()).toEqual({ ok: false, text: NOT_SET_UP });
@@ -233,8 +233,8 @@ describe('Health and voice notes that cannot be transcribed (Phase 2b Task 10)',
   // Phase 2b final review: these voice lines come last, below the morning report, the meeting lines and low disk, so
   // they never hide those. Among themselves: not set up, then notes that failed. The key-refused line is not among them
   // (final polish): it sits above the budget line.
-  it('the lines come after the file lines, the budget line, the morning report, the meeting lines and low disk', () => {
-    const { h } = setup(() => 5e9);
+  it('the lines come after the file lines, the budget line, the morning report, the meeting lines and low disk', async () => {
+    const { h } = await setup(() => 5e9);
     h.setVoiceProblem('local_not_set_up_bin');
     h.setMedia(counts({ pending: 3, stale: 1, spendCap: 1, voiceFailed: 1 }));
     expect(h.line().text).toBe('⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.');
@@ -252,8 +252,8 @@ describe('Health and voice notes that cannot be transcribed (Phase 2b Task 10)',
     expect(h.line().text).toBe('⚠️ Low disk: 5.0 GB free');
   });
 
-  it('among the voice lines: the key refused first (above the budget line), then not set up, then notes that failed', () => {
-    const { h } = setup();
+  it('among the voice lines: the key refused first (above the budget line), then not set up, then notes that failed', async () => {
+    const { h } = await setup();
     h.setVoiceProblem('no_ffmpeg');
     h.setMedia(counts({ sttRefused: 1, voiceFailed: 2 }));
     expect(h.line().text).toBe(STT_REFUSED_LINE);
@@ -267,8 +267,8 @@ describe('Health and voice notes that cannot be transcribed (Phase 2b Task 10)',
     expect(h.line().ok).toBe(true);
   });
 
-  it('a voice setup line yields to the budget line and to low disk', () => {
-    const { h } = setup(() => 5e9);
+  it('a voice setup line yields to the budget line and to low disk', async () => {
+    const { h } = await setup(() => 5e9);
     h.setVoiceProblem('no_ffmpeg');
     h.setMedia(counts({ pending: 1, spendCap: 1 }));
     expect(h.line().text).toBe(budgetLine(1));
@@ -277,8 +277,8 @@ describe('Health and voice notes that cannot be transcribed (Phase 2b Task 10)',
   });
 
   // Phase 2b final review: a note that could not be transcribed on this computer is visible (final polish: the wording).
-  it('says how many voice notes could not be transcribed on this computer in the last 24 hours, one or many', () => {
-    const { h } = setup();
+  it('says how many voice notes could not be transcribed on this computer in the last 24 hours, one or many', async () => {
+    const { h } = await setup();
     h.setMedia(counts({ failedRecent: 1, voiceFailed: 1 }));
     expect(h.line()).toEqual({ ok: false, text: '⚠️ 1 voice note could not be transcribed on this computer. See docs/SETUP.md, Voice notes' });
     expect(h.workbookLine()).toEqual({ ok: false, text: voiceFailedLine(1) });
@@ -289,8 +289,8 @@ describe('Health and voice notes that cannot be transcribed (Phase 2b Task 10)',
     expect(h.line().ok).toBe(true);
   });
 
-  it('keeps voiceFailed in the snapshot, reads snapshots written before it, and refuses one that is not a number', () => {
-    const { db, h } = setup();
+  it('keeps voiceFailed in the snapshot, reads snapshots written before it, and refuses one that is not a number', async () => {
+    const { db, h } = await setup();
     h.setMedia(counts({ failedRecent: 1, voiceFailed: 1 }));
     h.persist();
     expect(readHealthSnapshot(db)!.media).toEqual(counts({ failedRecent: 1, voiceFailed: 1 }));
@@ -308,15 +308,15 @@ describe('Health and voice notes that cannot be transcribed (Phase 2b Task 10)',
     }
   });
 
-  it('yields to the spend-cap line when the cap is reached', () => {
-    const { h, spend } = setup();
+  it('yields to the spend-cap line when the cap is reached', async () => {
+    const { h, spend } = await setup();
     h.setVoiceProblem('no_ffmpeg');
     spend.record('ai', 1, 'batch 1');
     expect(h.line().text).toBe(SPEND_LINE);
   });
 
-  it('keeps the problem in the snapshot only when there is one, and reads snapshots without it', () => {
-    const { db, h } = setup();
+  it('keeps the problem in the snapshot only when there is one, and reads snapshots without it', async () => {
+    const { db, h } = await setup();
     h.persist();
     expect(readHealthSnapshot(db)).toBeDefined();
     expect('voiceProblem' in readHealthSnapshot(db)!).toBe(false);

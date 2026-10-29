@@ -155,8 +155,8 @@ describe('storedMeetingAccounts', () => {
     return c;
   };
 
-  it('the main account, then each extra account with every meeting scope; one without them is left out (no calls)', () => {
-    const db = seededDb();
+  it('the main account, then each extra account with every meeting scope; one without them is left out (no calls)', async () => {
+    const db = await seededDb();
     const key = randomBytes(32);
     saveGrantedScopes(db, ALL);
     saveMeetingAccount(db, key, 'company2', 'rt-2', ALL);
@@ -168,27 +168,27 @@ describe('storedMeetingAccounts', () => {
     expect(clients[0]!.credentials.refresh_token).toBe('rt-2');
   });
 
-  it('only extra accounts have the scopes: the main one is left out', () => {
-    const db = seededDb();
+  it('only extra accounts have the scopes: the main one is left out', async () => {
+    const db = await seededDb();
     const key = randomBytes(32);
     saveGrantedScopes(db, 'https://www.googleapis.com/auth/drive.file');
     saveMeetingAccount(db, key, 'company2', 'rt-2', ALL);
     expect(storedMeetingAccounts({ db, key, main: createOAuthClient('id', 'secret'), newClient, log }).map((a) => a.label)).toEqual(['company2']);
   });
 
-  it('an extra token this key cannot read is skipped; none usable gives the main account (still paused, no calls)', () => {
-    const db = seededDb();
+  it('an extra token this key cannot read is skipped; none usable gives the main account (still paused, no calls)', async () => {
+    const db = await seededDb();
     saveMeetingAccount(db, randomBytes(32), 'company2', 'rt-2', ALL);
     const accounts = storedMeetingAccounts({ db, key: randomBytes(32), main: createOAuthClient('id', 'secret'), newClient, log });
     expect(accounts.map((a) => a.label)).toEqual(['main']);
   });
 
-  it('an extra token copied under another account\'s key does not open (the key name is bound in)', () => {
-    const db = seededDb();
+  it('an extra token copied under another account\'s key does not open (the key name is bound in)', async () => {
+    const db = await seededDb();
     const key = randomBytes(32);
     saveMeetingAccount(db, key, 'company2', 'rt-2', ALL);
     saveMeetingAccount(db, key, 'company3', 'rt-3', ALL);
-    const db2 = seededDb();
+    const db2 = await seededDb();
     new TokenStore(db2, key, 'company2').save('rt-2');
     // Move company2's ciphertext into company3's slot.
     setKv(db2, 'google_refresh_token:company3', String(db2.raw.prepare("SELECT v FROM kv WHERE k = 'google_refresh_token:company2'").pluck().get()));
@@ -200,8 +200,8 @@ describe('hubMeetingAccounts and LiveMeetingsApi', () => {
   const ALL = MEETING_SCOPES.join(' ');
   const client = () => createOAuthClient('id', 'secret');
 
-  it('takes each account that has a client and every meeting scope, main first', () => {
-    const db = seededDb();
+  it('takes each account that has a client and every meeting scope, main first', async () => {
+    const db = await seededDb();
     const key = randomBytes(32);
     saveGrantedScopes(db, ALL);
     saveMeetingAccount(db, key, 'company2', 'rt-2', ALL);

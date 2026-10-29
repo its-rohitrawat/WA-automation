@@ -56,8 +56,8 @@ describe('parseActivityParams', () => {
 });
 
 describe('listActivity', () => {
-  it('merges every source, newest first, in plain words', () => {
-    const db = seededDb();
+  it('merges every source, newest first, in plain words', async () => {
+    const db = await seededDb();
     batch(db, { at: at('05:00'), status: 'ok', messages: 18, accepted: 2, clientId: 2 });
     const t = task(db, 'Revise <b>landing</b> page');
     recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'add_task', detail: { title: 'chat words' }, reason: null, sourceIds: [], at: at('05:10') });
@@ -90,8 +90,8 @@ describe('listActivity', () => {
     expect(JSON.stringify(r)).not.toContain('chat words');
   });
 
-  it('labels the meeting states the owner cares about', () => {
-    const db = seededDb();
+  it('labels the meeting states the owner cares about', async () => {
+    const db = await seededDb();
     meeting(db, 'unassigned', at('05:00'), { title: 'Client call' });
     meeting(db, 'queued', at('05:01'));
     meeting(db, 'skipped', at('05:02'));
@@ -106,8 +106,8 @@ describe('listActivity', () => {
     ]);
   });
 
-  it('filters by kind', () => {
-    const db = seededDb();
+  it('filters by kind', async () => {
+    const db = await seededDb();
     batch(db, { at: at('05:00'), status: 'ok', messages: 3 });
     batch(db, { at: at('05:01'), status: 'failed', messages: 3 });
     const t = task(db, 'Logo');
@@ -124,8 +124,8 @@ describe('listActivity', () => {
     expect(listActivity(db, params()).items).toHaveLength(7);
   });
 
-  it('pages with before, never losing items that share a time', () => {
-    const db = seededDb();
+  it('pages with before, never losing items that share a time', async () => {
+    const db = await seededDb();
     for (let i = 0; i < 5; i++) batch(db, { at: at('05:00'), status: 'ok', messages: i + 1 });
     audit(db, { at: at('05:00'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'x' });
     batch(db, { at: at('04:00'), status: 'ok', messages: 9 });
@@ -142,15 +142,15 @@ describe('listActivity', () => {
     expect(titles(listActivity(db, params({ before: at('05:00') })))).toEqual(['9 messages read']);
   });
 
-  it('gives next only when the page is full', () => {
-    const db = seededDb();
+  it('gives next only when the page is full', async () => {
+    const db = await seededDb();
     batch(db, { at: at('05:00'), status: 'ok', messages: 1 });
     expect(listActivity(db, params({ limit: '1' })).next).toBe(`${at('05:00')}|b|1`);
     expect(listActivity(db, params({ limit: '2' })).next).toBeNull();
   });
 
-  it('skips running batches and events not about a task', () => {
-    const db = seededDb();
+  it('skips running batches and events not about a task', async () => {
+    const db = await seededDb();
     startBatch(db, 1, 5, at('05:00'));
     recordEvent(db, { taskId: null, clientId: 1, actor: 'ai', op: 'set_status', detail: { status: 'chat words' }, reason: null, sourceIds: [], at: at('05:01') });
     expect(listActivity(db, params()).items).toEqual([]);
@@ -159,7 +159,7 @@ describe('listActivity', () => {
 
 describe('publisherAuditHooks', () => {
   async function publish(api: FakeDrive, hooks: ReturnType<typeof publisherAuditHooks>) {
-    const db = seededDb();
+    const db = await seededDb();
     const p = new DrivePublisher({ db, api, build: async () => Buffer.from('x'), log: silentLogger(), minIntervalMs: 0, ...hooks });
     await p.publishNow();
     await p.stop(1000);
@@ -181,7 +181,7 @@ describe('publisherAuditHooks', () => {
   it('writes one ops row, with no ids or emails, when the old tracker file could not be reached and a new one was made', async () => {
     const entries: AuditEntry[] = [];
     const hooks = publisherAuditHooks((e) => entries.push(e), manualClock(NOW));
-    const db = seededDb();
+    const db = await seededDb();
     const drive = new FakeDrive();
     const p = new DrivePublisher({ db, api: drive, build: async () => Buffer.from('x'), log: silentLogger(), minIntervalMs: 0, ...hooks });
     await p.publishNow();
@@ -204,8 +204,8 @@ describe('publisherAuditHooks', () => {
 });
 
 describe('activity review fixes', () => {
-  it('says where a task came from: a voice note or a meeting', () => {
-    const db = seededDb();
+  it('says where a task came from: a voice note or a meeting', async () => {
+    const db = await seededDb();
     db.raw.prepare("INSERT INTO messages (wa_id, client_id, sender_jid, ts, media_type) VALUES ('V1', 1, 'x', ?, 'audio')").run(NOW);
     db.raw.prepare("INSERT INTO media (message_id, client_id, kind, status, created_at, updated_at) VALUES (1, 1, 'voice', 'done', ?, ?)").run(NOW, NOW);
     const voice = createTask(db, { clientId: 1, side: 'us', title: 'From voice', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,
@@ -224,22 +224,22 @@ describe('activity review fixes', () => {
     }
   });
 
-  it('ignores tracker rows not written by the agent', () => {
-    const db = seededDb();
+  it('ignores tracker rows not written by the agent', async () => {
+    const db = await seededDb();
     audit(db, { at: at('05:00'), actor: 'owner@example.com', event: 'tracker.published', kind: 'ops', detail: 'x' });
     audit(db, { at: at('05:01'), actor: 'owner@example.com', event: 'tracker.publish_failed', kind: 'ops', detail: 'x' });
     expect(listActivity(db, params()).items).toEqual([]);
   });
 
-  it('leaves out a no-access meeting found as internal', () => {
-    const db = seededDb();
+  it('leaves out a no-access meeting found as internal', async () => {
+    const db = await seededDb();
     const id = meeting(db, 'no_access', at('05:00'), { title: '' });
     db.raw.prepare("UPDATE meetings SET note = 'found_internal', client_id = NULL WHERE id = ?").run(id);
     expect(listActivity(db, params()).items).toEqual([]);
   });
 
-  it('pages correctly when one source has more rows than the page', () => {
-    const db = seededDb();
+  it('pages correctly when one source has more rows than the page', async () => {
+    const db = await seededDb();
     for (let i = 0; i < 4; i++) batch(db, { at: at(`05:0${i}`), status: 'ok', messages: i + 1 });
     audit(db, { at: at('05:02'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'x' });
     const first = listActivity(db, params({ limit: '2' }));
@@ -272,8 +272,8 @@ describe('publisherAuditHooks review fixes', () => {
 });
 
 describe('Activity: a newly approved group\'s earlier messages', () => {
-  it('one row when they were read: the count and the client, under All and Messages, nowhere else', () => {
-    const db = seededDb();
+  it('one row when they were read: the count and the client, under All and Messages, nowhere else', async () => {
+    const db = await seededDb();
     const e = historyReadEntry(42, 'Sharma Interiors');
     expect(e).toEqual({ actor: 'agent', event: 'history.read', kind: 'ops', detail: '42 earlier messages read · Sharma Interiors' });
     db.raw.prepare('INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, ?, ?, ?, ?)').run(NOW, e.actor, e.event, e.kind, e.detail);

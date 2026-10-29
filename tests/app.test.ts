@@ -63,10 +63,10 @@ async function overviewTexts(buf: Buffer): Promise<string[]> {
   return out;
 }
 
-function setup(o: { ai?: FakeAi; drive?: FakeDrive; log?: Logger; drainMs?: number } = {}) {
+async function setup(o: { ai?: FakeAi; drive?: FakeDrive; log?: Logger; drainMs?: number } = {}) {
   const ai = o.ai ?? new FakeAi();
   const drive = o.drive ?? new FakeDrive();
-  const db = seededDb();
+  const db = await seededDb();
   const allow = new AllowList([SHARMA.groupId, MEHTA.groupId]);
   const sockets: FakeSocket[] = [];
   const auth = useEncryptedAuthState(openSessionDb(':memory:'), randomBytes(32));
@@ -146,7 +146,7 @@ describe('app end to end', () => {
   it('stores only allowed messages, reconciles them and publishes the tracker', async () => {
     const ai = new FakeAi([{ ops: [bannerTask()] }]);
     const { lines, log } = capturingLogger();
-    const { db, drive, app, sock } = setup({ ai, log });
+    const { db, drive, app, sock } = await setup({ ai, log });
     sock.emit('messages.upsert', { type: 'notify', messages: [
       waText('m1', 'Rahul, homepage banner thoda bright karo. 18 tak chahiye.'),
       waText('x1', 'private family plans', { group: OTHER_GROUP }),
@@ -174,7 +174,7 @@ describe('app end to end', () => {
   });
 
   it('applies a new allow-list without a restart', async () => {
-    const { db, app, sock } = setup();
+    const { db, app, sock } = await setup();
     app.reloadClients([SHARMA]);
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
     expect(db.raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 0 });
@@ -182,7 +182,7 @@ describe('app end to end', () => {
   });
 
   it('republishes when the CLI requests a rebuild', async () => {
-    const { db, drive, app } = setup();
+    const { db, drive, app } = await setup();
     await vi.advanceTimersByTimeAsync(1_000);
     const before = drive.uploads;
     setKv(db, 'rebuild_requested', new Date().toISOString());
@@ -206,7 +206,7 @@ describe('app shutdown', () => {
     ai.gate = new Promise<void>((r) => {
       release = r;
     });
-    const { db, app, sock } = setup({ ai });
+    const { db, app, sock } = await setup({ ai });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls).toHaveLength(1);
@@ -230,7 +230,7 @@ describe('app shutdown', () => {
     const g = gate();
     ai.gate = g.promise;
     const drive = new CapturingDrive();
-    const { app, sock } = setup({ ai, drive });
+    const { app, sock } = await setup({ ai, drive });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
     await vi.advanceTimersByTimeAsync(239_000);
     expect(drive.uploads).toBe(1);
@@ -256,7 +256,7 @@ describe('app shutdown', () => {
     const aiCall = gate();
     ai.gate = aiCall.promise;
     const drive = new CapturingDrive();
-    const { db, app, sock } = setup({ ai, drive });
+    const { db, app, sock } = await setup({ ai, drive });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
     await vi.advanceTimersByTimeAsync(241_000);
     expect(ai.calls).toHaveLength(1);
@@ -285,7 +285,7 @@ describe('app shutdown', () => {
     const ai = new FakeAi();
     ai.gate = new Promise<void>(() => {});
     const { lines, log } = capturingLogger();
-    const { db, app, sock } = setup({ ai, drainMs: 5_000, log });
+    const { db, app, sock } = await setup({ ai, drainMs: 5_000, log });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls).toHaveLength(1);
@@ -304,7 +304,7 @@ describe('app shutdown', () => {
     const ai = new FakeAi([{ ops: [bannerTask()] }]);
     const aiCall = gate();
     ai.gate = aiCall.promise;
-    const { db, app, sock } = setup({ ai });
+    const { db, app, sock } = await setup({ ai });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
     await vi.advanceTimersByTimeAsync(241_000);
     const stop = stopping(app);
@@ -314,7 +314,7 @@ describe('app shutdown', () => {
   });
 
   it('starting twice leaves no extra timer behind', async () => {
-    const { app } = setup();
+    const { app } = await setup();
     app.start();
     await stopApp(app);
     expect(vi.getTimerCount()).toBe(0);
@@ -323,7 +323,7 @@ describe('app shutdown', () => {
   it('gives up on a hung AI call after 120 seconds by default', async () => {
     const ai = new FakeAi();
     ai.gate = new Promise<void>(() => {});
-    const { app, sock } = setup({ ai });
+    const { app, sock } = await setup({ ai });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls).toHaveLength(1);
@@ -340,7 +340,7 @@ describe('app shutdown', () => {
   it('gives up on a hung AI call after drainMs', async () => {
     const ai = new FakeAi();
     ai.gate = new Promise<void>(() => {});
-    const { app, sock } = setup({ ai, drainMs: 5_000 });
+    const { app, sock } = await setup({ ai, drainMs: 5_000 });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
     await vi.advanceTimersByTimeAsync(240_000);
 
@@ -354,7 +354,7 @@ describe('app shutdown', () => {
   });
 
   it('waits at most 5 seconds for a gateway that never stops', async () => {
-    const { app, gateway } = setup();
+    const { app, gateway } = await setup();
     const realStop = gateway.stop.bind(gateway);
     vi.spyOn(gateway, 'stop').mockImplementation(() => {
       void realStop(); // clears the gateway's own timers; the caller still never sees it finish
@@ -374,7 +374,7 @@ describe('app shutdown', () => {
   it('waits at most 10 seconds for a hung Drive upload', async () => {
     const drive = new FakeDrive();
     drive.gate = new Promise<void>(() => {});
-    const { app } = setup({ drive });
+    const { app } = await setup({ drive });
     await vi.advanceTimersByTimeAsync(1_000);
     expect(drive.folders).toEqual(['WA Agent']); // the upload itself is hanging
 
@@ -396,7 +396,7 @@ describe('app allow-list changes', () => {
 
   it('cancels a removed group: no AI call and no reconcile run for it', async () => {
     const run = vi.spyOn(Reconciler.prototype, 'run');
-    const { db, ai, app, sock } = setup();
+    const { db, ai, app, sock } = await setup();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
     expect(db.raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 1 });
 
@@ -408,7 +408,7 @@ describe('app allow-list changes', () => {
   });
 
   it('clears the health warning of a failed group once it is removed', async () => {
-    const { db, app, sock } = setup({ ai: new FakeAi([new Error('boom')]) });
+    const { db, app, sock } = await setup({ ai: new FakeAi([new Error('boom')]) });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
     await vi.advanceTimersByTimeAsync(240_000);
     expect(app.health.line()).toEqual({ ok: false, text: '⚠️ 1 group waiting (AI error)' });
@@ -423,7 +423,7 @@ describe('app allow-list changes', () => {
     const ai = new FakeAi([new Error('boom')]);
     const g = gate();
     ai.gate = g.promise;
-    const { db, drive, app, sock } = setup({ ai });
+    const { db, drive, app, sock } = await setup({ ai });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls).toHaveLength(1);
@@ -442,7 +442,7 @@ describe('app allow-list changes', () => {
   it('ignores the crash of a group removed while its run was in flight', async () => {
     const g = gate<never>();
     vi.spyOn(Reconciler.prototype, 'run').mockImplementationOnce(() => g.promise);
-    const { db, app, sock } = setup();
+    const { db, app, sock } = await setup();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
     await vi.advanceTimersByTimeAsync(240_000);
 
@@ -455,7 +455,7 @@ describe('app allow-list changes', () => {
   });
 
   it('keeps the old allow-list when the new config conflicts with the database', async () => {
-    const { db, app, sock } = setup();
+    const { db, app, sock } = await setup();
     expect(() => app.reloadClients([SHARMA, { ...MEHTA, code: 'MEX' }])).toThrow(/codes are permanent/);
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
     expect(db.raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 1 });
@@ -463,7 +463,7 @@ describe('app allow-list changes', () => {
   });
 
   it('picks up the waiting messages of a group that is added back', async () => {
-    const { ai, app, sock } = setup();
+    const { ai, app, sock } = await setup();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
     app.reloadClients([SHARMA]);
     await vi.advanceTimersByTimeAsync(1_300_000);
@@ -486,7 +486,7 @@ describe('app ingest failures', () => {
 
   it('logs a failed database write without the chat text and still counts it', async () => {
     const { lines, log } = capturingLogger();
-    const { db, app, sock, gateway } = setup({ log });
+    const { db, app, sock, gateway } = await setup({ log });
     db.raw.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store: banner thoda bright'); END");
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
 
@@ -497,7 +497,7 @@ describe('app ingest failures', () => {
   });
 
   it('records the count of unsaved messages on the next tick and warns in health', async () => {
-    const { db, app, sock, gateway } = setup();
+    const { db, app, sock, gateway } = await setup();
     db.raw.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
     expect(gateway.failedCount()).toBe(1);
@@ -517,7 +517,7 @@ describe('app health and publishing', () => {
 
   it('publishes after a failed reconcile so the workbook shows the problem', async () => {
     const drive = new CapturingDrive();
-    const { app, sock } = setup({ ai: new FakeAi([new Error('boom')]), drive });
+    const { app, sock } = await setup({ ai: new FakeAi([new Error('boom')]), drive });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
     await vi.advanceTimersByTimeAsync(239_000);
     expect(drive.uploads).toBe(1);
@@ -533,7 +533,7 @@ describe('app health and publishing', () => {
 
   it('a run that waits for a shared file calls no AI and publishes nothing, and goes ahead once the file stops blocking (12d)', async () => {
     const run = vi.spyOn(Reconciler.prototype, 'run');
-    const { db, ai, drive, app, sock } = setup();
+    const { db, ai, drive, app, sock } = await setup();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'see this')] });
     // A file of this message is still being read (the media queue is wired in Task 15).
     insertMedia(db, {
@@ -563,7 +563,7 @@ describe('app health and publishing', () => {
   it('logs a crashed reconcile without its message, records it and publishes', async () => {
     vi.spyOn(Reconciler.prototype, 'run').mockRejectedValueOnce(new Error('Rahul said the secret banner text'));
     const { lines, log } = capturingLogger();
-    const { db, drive, app, sock } = setup({ log });
+    const { db, drive, app, sock } = await setup({ log });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
     await vi.advanceTimersByTimeAsync(239_000);
     expect(drive.uploads).toBe(1);
@@ -580,7 +580,7 @@ describe('app health and publishing', () => {
 
   it('keeps ticking when saving the health snapshot fails', async () => {
     const { lines, log } = capturingLogger();
-    const { db, drive, app } = setup({ log });
+    const { db, drive, app } = await setup({ log });
     await vi.advanceTimersByTimeAsync(1_000);
     const persist = vi.spyOn(app.health, 'persist').mockImplementation(() => {
       throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
@@ -603,7 +603,7 @@ describe('app health and publishing', () => {
 
   it('reports Drive failures in health, keeps them out of the uploaded workbook, and clears them after an upload', async () => {
     const drive = new CapturingDrive();
-    const { db, app } = setup({ drive });
+    const { db, app } = await setup({ drive });
     await vi.advanceTimersByTimeAsync(1_000);
     expect(drive.created).toHaveLength(1);
 
@@ -629,7 +629,7 @@ describe('app health and publishing', () => {
 
   it('refreshes the workbook when the source message of a task is deleted', async () => {
     const drive = new CapturingDrive();
-    const { db, app, sock } = setup({ ai: new FakeAi([{ ops: [bannerTask()] }]), drive });
+    const { db, app, sock } = await setup({ ai: new FakeAi([{ ops: [bannerTask()] }]), drive });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
     await vi.advanceTimersByTimeAsync(300_000); // reconciled at 240 s and uploaded
     expect(listTasks(db, 1).map((t) => t.code)).toEqual(['SHA-001']);
@@ -648,7 +648,7 @@ describe('app health and publishing', () => {
 
   it('publishes once when only the workbook health line changes, and not again while it stays the same (final review)', async () => {
     const drive = new CapturingDrive();
-    const { db, app, sock } = setup({ drive });
+    const { db, app, sock } = await setup({ drive });
     await vi.advanceTimersByTimeAsync(1_000);
     expect(drive.uploads).toBe(1); // the start publish
     await vi.advanceTimersByTimeAsync(60_000); // two ticks with the same line publish nothing
@@ -671,7 +671,7 @@ describe('app health and publishing', () => {
   it('republishes once after IST midnight with no other event, so the Today tab carries the new date (Task 3 review round 2)', async () => {
     const drive = new CapturingDrive();
     vi.setSystemTime(new Date('2026-10-19T18:00:00Z')); // 23:30 IST on 19 Oct
-    const { app } = setup({ drive });
+    const { app } = await setup({ drive });
     await vi.advanceTimersByTimeAsync(1_000);
     expect(drive.uploads).toBe(1); // the start publish, built on 19 Oct
     const first = drive.last!;
@@ -695,7 +695,7 @@ describe('app health and publishing', () => {
   });
 
   it('points to the safe procedure when WhatsApp unlinks the device', async () => {
-    const { app, sock } = setup();
+    const { app, sock } = await setup();
     closeWith(sock, 401);
     expect(app.health.line()).toEqual({ ok: false, text: '❌ WhatsApp unlinked since 19 Oct 12:30. Follow docs/SETUP.md → "Status logged_out".' });
     await stopApp(app);
@@ -715,7 +715,7 @@ describe('app: a newly approved group\'s earlier messages (history backfill)', (
   const ON_DEMAND = proto.HistorySync.HistorySyncType.ON_DEMAND;
 
   it('pages back from the first new message, holds the AI meanwhile, then reads old and new together in time order', async () => {
-    const { db, ai, app, sock } = setup();
+    const { db, ai, app, sock } = await setup();
     // seededDb approved Sharma at 07:00: no message yet, so it waits for the first new one.
     expect(sock.fetchMessageHistory).not.toHaveBeenCalled();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('L1', 'NEW: send the final logo today', { ts: sec('2026-10-19T07:00:30Z') })] });
@@ -739,7 +739,7 @@ describe('app: a newly approved group\'s earlier messages (history backfill)', (
   });
 
   it('asks for nothing for a group that is not approved, and stops a group that is removed', async () => {
-    const { app, sock } = setup();
+    const { app, sock } = await setup();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('X1', 'not ours', { group: OTHER_GROUP, ts: sec('2026-10-19T07:00:30Z') })] });
     app.reloadClients([MEHTA]); // Sharma removed before its first message
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('L1', 'after removal', { ts: sec('2026-10-19T07:00:40Z') })] });

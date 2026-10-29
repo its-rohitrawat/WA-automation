@@ -137,10 +137,10 @@ describe('transcribeMeeting', () => {
     dataDir, clock, log: silentLogger(), ...o,
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     dataDir = mkdtempSync(join(tmpdir(), 'meet-stt-'));
     dirs.push(dataDir);
-    db = seededDb();
+    db = await seededDb();
     spend = new SpendGuard({ db, clock, capUsd: 5 });
   });
 

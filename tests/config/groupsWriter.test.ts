@@ -48,7 +48,7 @@ const entryText = (all: string, groupId: string) => {
 
 describe('applyGroupChanges', () => {
   it('approve adds only the new entry; the others keep their exact content; the result names what changed', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const before = readFileSync(file, 'utf8');
     const r = await applyGroupChanges(file, { approve: [{ groupId: DESAI, name: 'Desai Foods', code: 'DES' }] }, { db });
     const after = readFileSync(file, 'utf8');
@@ -61,7 +61,7 @@ describe('applyGroupChanges', () => {
   });
 
   it('approve keeps optional meeting fields, and leaves out empty ones', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     await applyGroupChanges(file, {
       approve: [
         { groupId: DESAI, name: 'Desai Foods', code: 'DES', emailDomains: ['desai.in'], meetingKeywords: ['desai launch'] },
@@ -75,7 +75,7 @@ describe('applyGroupChanges', () => {
   });
 
   it('unapprove removes only that entry', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const before = readFileSync(file, 'utf8');
     const r = await applyGroupChanges(file, { unapprove: [MEHTA.groupId] }, { db });
     expect(read().clients.map((c) => c.groupId)).toEqual([SHARMA.groupId]);
@@ -84,7 +84,7 @@ describe('applyGroupChanges', () => {
   });
 
   it('edit changes only the given fields of one entry; phases and other fields stay', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const r = await applyGroupChanges(file, { edit: [{ groupId: SHARMA.groupId, name: 'Sharma Interiors Pvt', emailDomains: ['sharma.in'] }] }, { db });
     expect(read().clients[0]).toEqual({
       groupId: SHARMA.groupId, name: 'Sharma Interiors Pvt', code: 'SHA', phases: ['Brief', 'Build'], meetingKeywords: ['sharma project'], emailDomains: ['sharma.in'],
@@ -96,7 +96,7 @@ describe('applyGroupChanges', () => {
   });
 
   it('applies unapprove, then edit, then approve, in that order', async () => {
-    const db = openFreshDb();
+    const db = await openFreshDb();
     // Mehta's code freed in the file and never stored in the DB, so a new group may take it in the same save.
     await applyGroupChanges(file, { approve: [{ groupId: DESAI, name: 'Desai', code: 'MEH' }], unapprove: [MEHTA.groupId] }, { db });
     expect(read().clients.map((c) => c.code)).toEqual(['SHA', 'MEH']);
@@ -104,7 +104,7 @@ describe('applyGroupChanges', () => {
   });
 
   it('keeps the previous file as .bak', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const before = readFileSync(file, 'utf8');
     await applyGroupChanges(file, { unapprove: [MEHTA.groupId] }, { db });
     expect(readFileSync(`${file}.bak`, 'utf8')).toBe(before);
@@ -115,7 +115,7 @@ describe('applyGroupChanges', () => {
   });
 
   it('a validation failure writes nothing: the file and .bak are untouched', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     writeFileSync(`${file}.bak`, 'old backup');
     const before = readFileSync(file, 'utf8');
     const err = await applyGroupChanges(file, { approve: [{ groupId: DESAI, name: 'Desai', code: 'DES', meetingKeywords: ['c++'] }] }, { db })
@@ -129,7 +129,7 @@ describe('applyGroupChanges', () => {
   });
 
   it('a failing rename leaves the original and .bak intact, removes the temporary files, and shows no path', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     writeFileSync(`${file}.bak`, 'old backup');
     const before = readFileSync(file, 'utf8');
     const ops: Partial<FileOps> = { rename: (from) => { throw Object.assign(new Error(`EBUSY: rename '${from}'`), { code: 'EBUSY' }); } };
@@ -144,7 +144,7 @@ describe('applyGroupChanges', () => {
   });
 
   it('a failure on the final rename only: the original intact, .bak holds that same version', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const before = readFileSync(file, 'utf8');
     const ops: Partial<FileOps> = {
       rename: (from, to) => {
@@ -160,27 +160,27 @@ describe('applyGroupChanges', () => {
 
   it('a missing file is a GroupChangeError with no path in the message', async () => {
     rmSync(file);
-    const err = await applyGroupChanges(file, { unapprove: [MEHTA.groupId] }, { db: seededDb() }).then(unexpected, (e: unknown) => e as GroupChangeError);
+    const err = await applyGroupChanges(file, { unapprove: [MEHTA.groupId] }, { db: await seededDb() }).then(unexpected, (e: unknown) => e as GroupChangeError);
     expect(err).toMatchObject({ name: 'GroupChangeError', field: 'file' });
     expect(err.message).not.toContain(dir);
   });
 
   it('an entry without a group id, name or code is refused as a file problem', async () => {
     writeFileSync(file, text({ clients: [null, ORIGINAL.clients[1]] }));
-    await expect(applyGroupChanges(file, { unapprove: [MEHTA.groupId] }, { db: seededDb() })).rejects.toMatchObject({ field: 'file' });
+    await expect(applyGroupChanges(file, { unapprove: [MEHTA.groupId] }, { db: await seededDb() })).rejects.toMatchObject({ field: 'file' });
     writeFileSync(file, text({ clients: [{ groupId: SHARMA.groupId, name: 5, code: 'SHA' }] }));
-    await expect(applyGroupChanges(file, { approve: [{ groupId: DESAI, name: 'D', code: 'DES' }] }, { db: seededDb() })).rejects.toMatchObject({ field: 'file' });
+    await expect(applyGroupChanges(file, { approve: [{ groupId: DESAI, name: 'D', code: 'DES' }] }, { db: await seededDb() })).rejects.toMatchObject({ field: 'file' });
   });
 
   it('the example group id is refused, with a dashboard message (no terminal advice), and nothing is written', async () => {
     const before = readFileSync(file, 'utf8');
-    await expect(applyGroupChanges(file, { approve: [{ groupId: '120363000000000001@g.us', name: 'X', code: 'XYZ' }] }, { db: seededDb() }))
+    await expect(applyGroupChanges(file, { approve: [{ groupId: '120363000000000001@g.us', name: 'X', code: 'XYZ' }] }, { db: await seededDb() }))
       .rejects.toThrow('This is the example group id, not a real WhatsApp group.');
     expect(readFileSync(file, 'utf8')).toBe(before);
   });
 
   it('edit runs after unapprove and before approve: editing a group removed or added in the same save is refused', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     await expect(applyGroupChanges(file, { unapprove: [MEHTA.groupId], edit: [{ groupId: MEHTA.groupId, name: 'M' }] }, { db }))
       .rejects.toThrow('This group is not approved.');
     await expect(applyGroupChanges(file, { approve: [{ groupId: DESAI, name: 'Desai', code: 'DES' }], edit: [{ groupId: DESAI, name: 'D' }] }, { db }))
@@ -188,7 +188,7 @@ describe('applyGroupChanges', () => {
   });
 
   it('an edit that changes nothing gives no edited line; two edits of one group give one line with the final values', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const same = await applyGroupChanges(file, { edit: [{ groupId: MEHTA.groupId, name: 'Mehta Foods' }] }, { db });
     expect(same.edited).toEqual([]);
     const twice = await applyGroupChanges(file, { edit: [{ groupId: MEHTA.groupId, name: 'Mehta 1' }, { groupId: MEHTA.groupId, name: 'Mehta 2' }] }, { db });
@@ -196,7 +196,7 @@ describe('applyGroupChanges', () => {
   });
 
   it('a bad email domain names the field and the group in plain words', async () => {
-    const err = await applyGroupChanges(file, { approve: [{ groupId: DESAI, name: 'Desai', code: 'DES', emailDomains: ['not a domain'] }] }, { db: seededDb() })
+    const err = await applyGroupChanges(file, { approve: [{ groupId: DESAI, name: 'Desai', code: 'DES', emailDomains: ['not a domain'] }] }, { db: await seededDb() })
       .then(unexpected, (e: unknown) => e as GroupChangeError);
     expect(err).toMatchObject({ name: 'GroupChangeError', field: 'emailDomains', groupId: DESAI });
     expect(err.message).toMatch(/^Email domain /);
@@ -204,14 +204,14 @@ describe('applyGroupChanges', () => {
   });
 
   it('a list that is not a list of strings is a GroupChangeError, not a crash', async () => {
-    await expect(applyGroupChanges(file, { edit: [{ groupId: MEHTA.groupId, emailDomains: 'mehta.in' as unknown as string[] }] }, { db: seededDb() }))
+    await expect(applyGroupChanges(file, { edit: [{ groupId: MEHTA.groupId, emailDomains: 'mehta.in' as unknown as string[] }] }, { db: await seededDb() }))
       .rejects.toMatchObject({ name: 'GroupChangeError', field: 'emailDomains', groupId: MEHTA.groupId });
-    await expect(applyGroupChanges(file, { approve: [{ groupId: DESAI, name: 'D', code: 'DES', meetingKeywords: [5] as unknown as string[] }] }, { db: seededDb() }))
+    await expect(applyGroupChanges(file, { approve: [{ groupId: DESAI, name: 'D', code: 'DES', meetingKeywords: [5] as unknown as string[] }] }, { db: await seededDb() }))
       .rejects.toMatchObject({ name: 'GroupChangeError', field: 'meetingKeywords' });
   });
 
   it('edits that end where they started change nothing: no edited line, and the file and .bak are not rewritten', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     writeFileSync(`${file}.bak`, 'old backup');
     const before = readFileSync(file, 'utf8');
     const r = await applyGroupChanges(file, { edit: [{ groupId: MEHTA.groupId, name: 'Other' }, { groupId: MEHTA.groupId, name: 'Mehta Foods' }] }, { db });
@@ -221,29 +221,29 @@ describe('applyGroupChanges', () => {
   });
 
   it('trims the code, the name and list items, and drops blank list items', async () => {
-    await applyGroupChanges(file, { approve: [{ groupId: DESAI, name: '  Desai  ', code: ' DES ', meetingKeywords: ['  desai launch ', '  '] }] }, { db: seededDb() });
+    await applyGroupChanges(file, { approve: [{ groupId: DESAI, name: '  Desai  ', code: ' DES ', meetingKeywords: ['  desai launch ', '  '] }] }, { db: await seededDb() });
     expect(read().clients.at(-1)).toEqual({ groupId: DESAI, name: 'Desai', code: 'DES', meetingKeywords: ['desai launch'] });
   });
 
   describe('code rules', () => {
     it.each(['de', 'DESAI', 'D3S', 'des', 'DE S'])('refuses the code %j', async (code) => {
-      await expect(applyGroupChanges(file, { approve: [{ groupId: DESAI, name: 'Desai', code }] }, { db: seededDb() }))
+      await expect(applyGroupChanges(file, { approve: [{ groupId: DESAI, name: 'Desai', code }] }, { db: await seededDb() }))
         .rejects.toMatchObject({ name: 'GroupChangeError', field: 'code', groupId: DESAI });
     });
 
     it('refuses a code another group in the file has', async () => {
-      await expect(applyGroupChanges(file, { approve: [{ groupId: DESAI, name: 'Desai', code: 'SHA' }] }, { db: seededDb() }))
+      await expect(applyGroupChanges(file, { approve: [{ groupId: DESAI, name: 'Desai', code: 'SHA' }] }, { db: await seededDb() }))
         .rejects.toThrow('Code SHA is already used by Sharma Interiors');
     });
 
     it('refuses a code two new groups both take', async () => {
       await expect(applyGroupChanges(file, {
         approve: [{ groupId: DESAI, name: 'Desai', code: 'DES' }, { groupId: PATEL, name: 'Patel', code: 'DES' }],
-      }, { db: seededDb() })).rejects.toThrow('Code DES is already used by Desai');
+      }, { db: await seededDb() })).rejects.toThrow('Code DES is already used by Desai');
     });
 
     it('refuses a code a client in the database used, even an inactive one', async () => {
-      const db = seededDb();
+      const db = await seededDb();
       syncClients(db, [SHARMA]); // Mehta inactive
       writeFileSync(file, text({ clients: [ORIGINAL.clients[0]] }));
       await expect(applyGroupChanges(file, { approve: [{ groupId: DESAI, name: 'Desai', code: 'MEH' }] }, { db }))
@@ -251,7 +251,7 @@ describe('applyGroupChanges', () => {
     });
 
     it('re-approving a removed group must keep its stored code', async () => {
-      const db = seededDb();
+      const db = await seededDb();
       writeFileSync(file, text({ clients: [ORIGINAL.clients[0]] }));
       await expect(applyGroupChanges(file, { approve: [{ groupId: MEHTA.groupId, name: 'Mehta Foods', code: 'MEF' }] }, { db }))
         .rejects.toThrow('Client codes are permanent because task IDs use them. Keep code MEH for Mehta Foods.');
@@ -260,7 +260,7 @@ describe('applyGroupChanges', () => {
     });
 
     it('refuses approving a group that is already approved, and changing an unknown group', async () => {
-      const db = seededDb();
+      const db = await seededDb();
       await expect(applyGroupChanges(file, { approve: [{ groupId: SHARMA.groupId, name: 'S', code: 'SHA' }] }, { db }))
         .rejects.toThrow('This group is already approved');
       await expect(applyGroupChanges(file, { unapprove: [DESAI] }, { db })).rejects.toThrow('This group is not approved');
@@ -269,7 +269,7 @@ describe('applyGroupChanges', () => {
   });
 
   it('refuses a name that is empty or too long, naming the field', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     await expect(applyGroupChanges(file, { approve: [{ groupId: DESAI, name: '  ', code: 'DES' }] }, { db }))
       .rejects.toMatchObject({ field: 'name', message: 'Enter a client name (1 to 80 characters).' });
     await expect(applyGroupChanges(file, { edit: [{ groupId: SHARMA.groupId, name: 'x'.repeat(81) }] }, { db }))
@@ -278,18 +278,18 @@ describe('applyGroupChanges', () => {
 
   it('reads a file saved with a byte-order mark', async () => {
     writeFileSync(file, `﻿${text(ORIGINAL)}`);
-    await applyGroupChanges(file, { unapprove: [MEHTA.groupId] }, { db: seededDb() });
+    await applyGroupChanges(file, { unapprove: [MEHTA.groupId] }, { db: await seededDb() });
     expect(parseGroupsFile(readFileSync(file, 'utf8')).map((c) => c.code)).toEqual(['SHA']);
   });
 
   it('a file that is not valid JSON is refused, and left as it is', async () => {
     writeFileSync(file, '{ "clients": [');
-    await expect(applyGroupChanges(file, { unapprove: [MEHTA.groupId] }, { db: seededDb() })).rejects.toBeInstanceOf(GroupChangeError);
+    await expect(applyGroupChanges(file, { unapprove: [MEHTA.groupId] }, { db: await seededDb() })).rejects.toBeInstanceOf(GroupChangeError);
     expect(readFileSync(file, 'utf8')).toBe('{ "clients": [');
   });
 
   it('concurrent calls run one after the other, in call order', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const a = applyGroupChanges(file, { approve: [{ groupId: DESAI, name: 'Desai', code: 'DES' }] }, { db });
     const b = applyGroupChanges(file, { approve: [{ groupId: PATEL, name: 'Patel', code: 'PAT' }] }, { db });
     const c = applyGroupChanges(file, { approve: [{ groupId: PATEL, name: 'Patel again', code: 'PAX' }] }, { db });
@@ -300,15 +300,15 @@ describe('applyGroupChanges', () => {
   });
 
   it('a failed call does not block the next one', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     await expect(applyGroupChanges(file, { unapprove: [DESAI] }, { db })).rejects.toThrow();
     await applyGroupChanges(file, { unapprove: [MEHTA.groupId] }, { db });
     expect(read().clients).toHaveLength(1);
   });
 });
 
-function openFreshDb() {
-  const db = seededDb();
+async function openFreshDb() {
+  const db = await seededDb();
   db.raw.exec('DELETE FROM clients');
   return db;
 }

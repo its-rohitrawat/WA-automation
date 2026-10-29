@@ -127,9 +127,9 @@ describe('prepareAudio', () => {
   });
   const row = () => getMeeting(db, id)!;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     dataDir = tempDir('meet-audio-');
-    db = seededDb();
+    db = await seededDb();
     api = new FakeMeetingsApi();
     api.files.set(FILE_ID, { info: { name: 'rec.mp4', size: 4000, mimeType: 'video/mp4', durationMs: 2_700_000 }, bytes: Buffer.from('video-bytes') });
     ff = fakeFfmpeg();
@@ -367,9 +367,9 @@ describe('cleanupTemp', () => {
     return id;
   };
 
-  beforeEach(() => {
+  beforeEach(async () => {
     dataDir = tempDir('meet-clean-');
-    db = seededDb();
+    db = await seededDb();
     mkdirSync(tmp(), { recursive: true });
   });
 

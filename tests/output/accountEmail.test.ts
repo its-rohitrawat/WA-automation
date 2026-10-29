@@ -14,8 +14,8 @@ const fakeClient = () => {
   return c as unknown as OAuth2Client;
 };
 
-function setup() {
-  const db = seededDb();
+async function setup() {
+  const db = await seededDb();
   const key = randomBytes(32);
   new TokenStore(db, key).save('main-token');
   saveGrantedScopes(db, DRIVE_SCOPES[0]!);
@@ -26,8 +26,8 @@ function setup() {
 }
 
 describe('account emails', () => {
-  it('stores one lower-cased address per account and refuses anything else', () => {
-    const { db } = setup();
+  it('stores one lower-cased address per account and refuses anything else', async () => {
+    const { db } = await setup();
     expect(saveAccountEmail(db, 'main', ' Owner@Studio.IN ')).toBe(true);
     expect(accountEmail(db, 'main')).toBe('owner@studio.in');
     for (const bad of ['', 'no-at-sign', 'a@b', 'two@at@x.com', 'sp ace@x.com', `${'x'.repeat(65)}@x.com`]) {
@@ -36,8 +36,8 @@ describe('account emails', () => {
     expect(accountEmail(db, 'org2')).toBeNull();
   });
 
-  it('a new sign-in for the account forgets its email; removing an account forgets it too', () => {
-    const { db, key } = setup();
+  it('a new sign-in for the account forgets its email; removing an account forgets it too', async () => {
+    const { db, key } = await setup();
     saveAccountEmail(db, 'main', 'owner@studio.in');
     new TokenStore(db, key).save('another-main-token');
     expect(accountEmail(db, 'main')).toBeNull();
@@ -50,7 +50,7 @@ describe('account emails', () => {
 
 describe('fillAccountEmails', () => {
   it('fills an older account once from Drive, and asks no more once it is known', async () => {
-    const t = setup();
+    const t = await setup();
     const hub = t.hub();
     let asked = 0;
     const lookup = async () => {
@@ -64,7 +64,7 @@ describe('fillAccountEmails', () => {
   });
 
   it('skips an account without a Drive scope, and one without a usable client', async () => {
-    const t = setup();
+    const t = await setup();
     saveGrantedScopes(t.db, 'openid');
     let asked = 0;
     await fillAccountEmails({ db: t.db, hub: t.hub(), log: t.log, lookup: async () => (asked++, 'x@y.in') });
@@ -73,7 +73,7 @@ describe('fillAccountEmails', () => {
   });
 
   it('a failing lookup leaves it empty and logs only the label and the error type', async () => {
-    const t = setup();
+    const t = await setup();
     const err = Object.assign(new Error('owner@studio.in is not allowed'), { name: 'GaxiosError' });
     expect(await fillAccountEmails({ db: t.db, hub: t.hub(), log: t.log, lookup: async () => { throw err; } })).toBe(0);
     expect(accountEmail(t.db, 'main')).toBeNull();
@@ -83,7 +83,7 @@ describe('fillAccountEmails', () => {
   });
 
   it('an answer that arrives after a reconnect is dropped: the reconnect has its own email', async () => {
-    const t = setup();
+    const t = await setup();
     const hub = t.hub();
     const lookup = async () => {
       // The owner reconnects while Drive answers: a new client, and the new account's email from its ID token.

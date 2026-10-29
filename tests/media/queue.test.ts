@@ -53,8 +53,8 @@ function logLines(): { log: Logger; lines: string[] } {
 }
 
 /** A processor whose calls wait until the test finishes them; finishing also updates the row like the real one. */
-function setup(o: { log?: Logger; onSettled?: (clientId: number) => void; concurrency?: number; voiceLane?: number } = {}) {
-  const db = seededDb();
+async function setup(o: { log?: Logger; onSettled?: (clientId: number) => void; concurrency?: number; voiceLane?: number } = {}) {
+  const db = await seededDb();
   const started: number[] = [];
   const waiting = new Map<number, (r: ProcessResult) => void>();
   const processor = {
@@ -77,7 +77,7 @@ function setup(o: { log?: Logger; onSettled?: (clientId: number) => void; concur
 
 describe('MediaQueue', () => {
   it('runs at most two files at once, oldest first, and starts the next when one finishes', async () => {
-    const { db, started, queue, finish } = setup();
+    const { db, started, queue, finish } = await setup();
     const [a, b, c] = [pending(db, 'A'), pending(db, 'B'), pending(db, 'C')];
     queue.kick();
     queue.kick();
@@ -90,7 +90,7 @@ describe('MediaQueue', () => {
 
   // After a file finishes, the refill reads more rows than there are slots: it must still start only as many as are free.
   it('never runs more than two files at once, however many are due', async () => {
-    const { db, started, queue, finish } = setup();
+    const { db, started, queue, finish } = await setup();
     const [a, b, c, d] = ['A', 'B', 'C', 'D', 'E'].map((w) => pending(db, w));
     queue.kick();
     await flush();
@@ -104,7 +104,7 @@ describe('MediaQueue', () => {
   });
 
   it('a kick with one file in flight starts one more, not every due file', async () => {
-    const { db, started, queue } = setup();
+    const { db, started, queue } = await setup();
     const [a, b, c, d] = [pending(db, 'A'), pending(db, 'B'), pending(db, 'C'), pending(db, 'D')];
     // Only D is due at first, so it is in flight while the older A, B and C come due.
     db.raw.prepare("UPDATE media SET next_attempt_at = '2099-01-01T00:00:00.000Z' WHERE id IN (?, ?, ?)").run(a, b, c);
@@ -125,7 +125,7 @@ describe('MediaQueue', () => {
     { outcome: 'deferred', settles: false },
     { outcome: 'skipped', settles: false },
   ] satisfies { outcome: ProcessOutcome; settles: boolean }[])('a file that ends $outcome wakes the debouncer: $settles', async ({ outcome, settles }) => {
-    const { db, onSettled, queue, finish } = setup();
+    const { db, onSettled, queue, finish } = await setup();
     const a = pending(db, 'A');
     queue.kick();
     await flush();
@@ -139,7 +139,7 @@ describe('MediaQueue', () => {
   });
 
   it('a final state without a client wakes nothing', async () => {
-    const { db, onSettled, queue, finish } = setup();
+    const { db, onSettled, queue, finish } = await setup();
     const a = pending(db, 'A');
     queue.kick();
     await flush();
@@ -148,7 +148,7 @@ describe('MediaQueue', () => {
   });
 
   it('tells the debouncer about files that reached a final state only', async () => {
-    const { db, onSettled, queue, finish } = setup();
+    const { db, onSettled, queue, finish } = await setup();
     const [a, b] = [pending(db, 'A'), pending(db, 'B')];
     queue.kick();
     await flush();
@@ -160,7 +160,7 @@ describe('MediaQueue', () => {
   });
 
   it('stop() starts nothing new; drain() waits for the files in flight', async () => {
-    const { db, started, queue, finish } = setup();
+    const { db, started, queue, finish } = await setup();
     const [a, b] = [pending(db, 'A'), pending(db, 'B')];
     pending(db, 'C');
     queue.kick();
@@ -177,7 +177,7 @@ describe('MediaQueue', () => {
   });
 
   it('drain() gives up at its timeout', async () => {
-    const { db, queue } = setup();
+    const { db, queue } = await setup();
     pending(db, 'A');
     queue.kick();
     await flush();
@@ -189,7 +189,7 @@ describe('MediaQueue', () => {
   it('drain() leaves no timer behind when the files finish first', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
-      const { db, queue, finish } = setup();
+      const { db, queue, finish } = await setup();
       const a = pending(db, 'A');
       queue.kick();
       await flush();
@@ -206,7 +206,7 @@ describe('MediaQueue', () => {
   // A crash means a broken database: every other due file would crash too, so nothing more starts until the next tick.
   it('logs a crash, starts nothing else until the next tick, and keeps the crashed file back while the others go on', async () => {
     const { log, lines } = logLines();
-    const { db, processor, queue, finish } = setup({ log, concurrency: 1 });
+    const { db, processor, queue, finish } = await setup({ log, concurrency: 1 });
     const [a, b] = [pending(db, 'A'), pending(db, 'B')];
     processor.process.mockRejectedValueOnce(Object.assign(new Error('SQLITE_BUSY'), { code: 'SQLITE_BUSY' }));
     queue.kick();
@@ -225,7 +225,7 @@ describe('MediaQueue', () => {
   // Final review FR1: a crashed run may have paid Claude without booking it, so it must not start again on every tick.
   it('keeps a crashed file back for 15 minutes, then twice as long after each crash, up to 2 hours', async () => {
     const { log, lines } = logLines();
-    const { db, clock, processor, queue } = setup({ log, concurrency: 1 });
+    const { db, clock, processor, queue } = await setup({ log, concurrency: 1 });
     pending(db, 'A');
     const starts = () => processor.process.mock.calls.length;
     const tick = async () => {
@@ -261,7 +261,7 @@ describe('MediaQueue', () => {
   });
 
   it('a crashed file held back does not keep a due file behind it waiting', async () => {
-    const { db, processor, queue } = setup({ concurrency: 1 });
+    const { db, processor, queue } = await setup({ concurrency: 1 });
     const [a, b] = ['A', 'B'].map((w) => pending(db, w));
     processor.process.mockRejectedValueOnce(new Error('disk full'));
     queue.kick();
@@ -273,7 +273,7 @@ describe('MediaQueue', () => {
   });
 
   it('a throwing onSettled does not break the queue', async () => {
-    const { db, started, queue, finish } = setup({ onSettled: () => { throw new Error('boom'); } });
+    const { db, started, queue, finish } = await setup({ onSettled: () => { throw new Error('boom'); } });
     const [a] = [pending(db, 'A'), pending(db, 'B'), pending(db, 'C')];
     queue.kick();
     await flush();
@@ -284,7 +284,7 @@ describe('MediaQueue', () => {
   // The ingestor calls kick() after it commits a message: a throw there would count a stored message as lost.
   it('kick() never throws, even when the database cannot be read', async () => {
     const { log, lines } = logLines();
-    const { db, queue } = setup({ log });
+    const { db, queue } = await setup({ log });
     db.raw.close();
     expect(() => queue.kick()).not.toThrow();
     await flush();
@@ -302,10 +302,10 @@ describe('MediaQueue never retries a file in a loop', () => {
   });
 
   /** The real processor behind the queue, wired as the app wires them: the ingestor kicks the queue for each file it stores. */
-  function withProcessor(o: { fetcher?: MediaFetcher; extract?: Extractor; extractFor?: (db: Db, clock: Clock) => Extractor } = {}) {
+  async function withProcessor(o: { fetcher?: MediaFetcher; extract?: Extractor; extractFor?: (db: Db, clock: Clock) => Extractor } = {}) {
     const dataDir = mkdtempSync(join(tmpdir(), 'wa-queue-'));
     dirs.push(dataDir);
-    const db = seededDb();
+    const db = await seededDb();
     const clock = manualClock('2026-10-19T08:00:00Z');
     const sealer = new MediaRefSealer(Buffer.alloc(32, 5));
     const real = new MediaProcessor({
@@ -325,7 +325,7 @@ describe('MediaQueue never retries a file in a loop', () => {
   }
 
   it('a file the processor cannot handle is attempted once, then failed, and not tried again', async () => {
-    const { db, processor, onSettled, queue } = withProcessor();
+    const { db, processor, onSettled, queue } = await withProcessor();
     const id = pending(db, 'A');
     queue.kick();
     await queue.drain(5_000);
@@ -344,7 +344,7 @@ describe('MediaQueue never retries a file in a loop', () => {
     const fake = new FakeMediaAi();
     const prepareImage = async (): Promise<PreparedImage> => ({ data: Buffer.from('small'), mediaType: 'image/jpeg', width: 10, height: 10 });
     let spend!: SpendGuard;
-    const { db, clock, processor, queue, share } = withProcessor({
+    const { db, clock, processor, queue, share } = await withProcessor({
       extractFor: (db, clock) => {
         spend = new SpendGuard({ db, clock, capUsd: 15 });
         const ai: MediaAi = {
@@ -375,7 +375,7 @@ describe('MediaQueue never retries a file in a loop', () => {
   });
 
   it('a refill never restarts a file that stays due; the next kick tries it once more', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const [a, b, c, d] = [pending(db, 'A'), pending(db, 'B'), pending(db, 'C'), pending(db, 'D')];
     const calls: number[] = [];
     // A broken processor: it answers at once and leaves A, B and C pending and due. After 50 calls it stops answering,
@@ -408,7 +408,7 @@ describe('MediaQueue never retries a file in a loop', () => {
     { why: 'Claude unavailable (529)', o: { extract: async () => { throw Anthropic.APIError.generate(529, undefined, 'overloaded', new Headers()); } }, waitMs: 5 * MINUTE, errorCode: 'ai_unavailable' },
     { why: 'the daily spend cap', o: { extract: async () => { throw new SpendCapReachedError(); } }, waitMs: 10 * MINUTE, errorCode: 'spend_cap' },
   ])('a file deferred for $why is not started again until it is due', async ({ o, waitMs, errorCode }) => {
-    const { db, clock, processor, onSettled, queue, share } = withProcessor(o);
+    const { db, clock, processor, onSettled, queue, share } = await withProcessor(o);
     const id = share('IMG1'); // the ingestor kicks the queue
     expect(queue.active).toBe(1);
     await queue.drain(5_000);
@@ -429,7 +429,7 @@ describe('MediaQueue never retries a file in a loop', () => {
 
 describe('MediaQueue voice lane (Phase 2b Task 10)', () => {
   it('with voiceLane 1, three voice notes and two images due with concurrency 3: one voice note and both images run', async () => {
-    const { db, started, queue, finish } = setup({ concurrency: 3, voiceLane: 1 });
+    const { db, started, queue, finish } = await setup({ concurrency: 3, voiceLane: 1 });
     const [v1, v2, v3] = [pendingOf(db, 'V1', 'voice'), pendingOf(db, 'V2', 'voice'), pendingOf(db, 'V3', 'audio')];
     const [i1, i2] = [pendingOf(db, 'I1', 'image'), pendingOf(db, 'I2', 'document')];
     queue.kick();
@@ -449,7 +449,7 @@ describe('MediaQueue voice lane (Phase 2b Task 10)', () => {
   });
 
   it('the lane holds across kicks, and a later image still gets a free slot', async () => {
-    const { db, started, queue } = setup({ concurrency: 3, voiceLane: 1 });
+    const { db, started, queue } = await setup({ concurrency: 3, voiceLane: 1 });
     const v1 = pendingOf(db, 'V1', 'voice');
     pendingOf(db, 'V2', 'voice');
     queue.kick();
@@ -463,7 +463,7 @@ describe('MediaQueue voice lane (Phase 2b Task 10)', () => {
   });
 
   it('the lane never takes the queue past its concurrency: one voice note and three images due, concurrency 3, run 3', async () => {
-    const { db, started, queue, finish } = setup({ concurrency: 3, voiceLane: 1 });
+    const { db, started, queue, finish } = await setup({ concurrency: 3, voiceLane: 1 });
     const v1 = pendingOf(db, 'V1', 'voice');
     const [i1, i2, i3] = [pendingOf(db, 'I1', 'image'), pendingOf(db, 'I2', 'image'), pendingOf(db, 'I3', 'image')];
     queue.kick();
@@ -480,7 +480,7 @@ describe('MediaQueue voice lane (Phase 2b Task 10)', () => {
   });
 
   it('the lane takes only voice notes and audio files: an image due before them does not take it', async () => {
-    const { db, started, queue, finish } = setup({ concurrency: 3, voiceLane: 1 });
+    const { db, started, queue, finish } = await setup({ concurrency: 3, voiceLane: 1 });
     const early = '2026-10-19T07:00:00.000Z';
     const i0 = pendingOf(db, 'I0', 'image', early); // due first, in time and in order
     const [v1, v2] = [pendingOf(db, 'V1', 'voice'), pendingOf(db, 'V2', 'audio')];
@@ -499,7 +499,7 @@ describe('MediaQueue voice lane (Phase 2b Task 10)', () => {
   });
 
   it('without a lane, voice notes take every slot as before', async () => {
-    const { db, started, queue } = setup({ concurrency: 3 });
+    const { db, started, queue } = await setup({ concurrency: 3 });
     const ids = [pendingOf(db, 'V1', 'voice'), pendingOf(db, 'V2', 'voice'), pendingOf(db, 'V3', 'voice')];
     pendingOf(db, 'I1', 'image');
     queue.kick();

@@ -19,8 +19,8 @@ import { SHARMA_PN } from '../helpers/wa.ts';
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
 const KEYWORDS: PriorityKeywords = { ...NO_KEYWORDS, critical: ['urgent', 'site down'], major: ['important'], low: ['no rush'] };
 
-function setup(responses: FakeResponse[], config: PriorityConfig | (() => PriorityConfig) = { keywords: KEYWORDS, sentimentEnabled: false }) {
-  const db = seededDb();
+async function setup(responses: FakeResponse[], config: PriorityConfig | (() => PriorityConfig) = { keywords: KEYWORDS, sentimentEnabled: false }) {
+  const db = await seededDb();
   const clock = manualClock('2026-10-19T08:00:00Z');
   const spend = new SpendGuard({ db, clock, capUsd: 15 });
   const ai = new FakeAi(responses);
@@ -50,7 +50,7 @@ const row = (db: Db, code: string) =>
 
 describe('Reconciler: priority keywords', () => {
   it('a keyword in a new task\'s message wins over the AI\'s guess, even a more urgent guess, and is recorded', async () => {
-    const { db, r } = setup([{ ops: [add(['A1'], 'low'), add(['A2'], 'critical', { title: 'Logo' })] }]);
+    const { db, r } = await setup([{ ops: [add(['A1'], 'low'), add(['A2'], 'critical', { title: 'Logo' })] }]);
     store(db, 'A1', 'Footer theek karo, URGENT hai');
     store(db, 'A2', 'Logo, no rush');
     await r.run(1);
@@ -59,14 +59,14 @@ describe('Reconciler: priority keywords', () => {
   });
 
   it('without a keyword the AI\'s level is kept, with the old column in step', async () => {
-    const { db, r } = setup([{ ops: [add(['A1'], 'major')] }]);
+    const { db, r } = await setup([{ ops: [add(['A1'], 'major')] }]);
     store(db, 'A1', 'Footer ka kaam');
     await r.run(1);
     expect(row(db, 'SHA-001')).toEqual({ priority: 'high', level: 'major', source: 'ai', keyword: null, sentiment: null });
   });
 
   it('matches the keyword in a cited context message as well', async () => {
-    const { db, r } = setup([{ ops: [add(['A2', 'A1'])] }]);
+    const { db, r } = await setup([{ ops: [add(['A2', 'A1'])] }]);
     store(db, 'A1', 'site down hai', '2026-10-19T06:00:00.000Z');
     db.raw.prepare("UPDATE messages SET processed_at = ? WHERE wa_id = 'A1'").run(NOW);
     store(db, 'A2', 'please fix');
@@ -75,7 +75,7 @@ describe('Reconciler: priority keywords', () => {
   });
 
   it('after a task is made, a keyword only raises its priority, on an update and on a reminder', async () => {
-    const { db, r } = setup([
+    const { db, r } = await setup([
       { ops: [op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['A1'] })] },
       { ops: [op({ op: 'update_task', taskCode: 'SHA-001', sourceMessageIds: ['A2'], latestProgress: 'v2 sent' })] },
     ]);
@@ -96,7 +96,7 @@ describe('Reconciler: priority keywords', () => {
   });
 
   it('gives a task from before priority levels its first level from a keyword', async () => {
-    const { db, r } = setup([{ ops: [op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['A1'] })] }]);
+    const { db, r } = await setup([{ ops: [op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['A1'] })] }]);
     banner(db, null);
     expect(row(db, 'SHA-001')).toMatchObject({ level: null, priority: 'high' });
     store(db, 'A1', 'no rush, but banner?');
@@ -105,7 +105,7 @@ describe('Reconciler: priority keywords', () => {
   });
 
   it('never lowers a keyword\'s priority on the AI\'s guess, but lets the AI raise it', async () => {
-    const { db, r } = setup([
+    const { db, r } = await setup([
       { ops: [op({ op: 'update_task', taskCode: 'SHA-001', sourceMessageIds: ['A1'], priority: 'low', latestProgress: 'started' })] },
       { ops: [op({ op: 'update_task', taskCode: 'SHA-001', sourceMessageIds: ['A2'], priority: 'critical' })] },
     ]);
@@ -120,7 +120,7 @@ describe('Reconciler: priority keywords', () => {
   });
 
   it('never changes a priority the owner set, keyword or not', async () => {
-    const { db, r } = setup([{ ops: [op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['A1'] })] }]);
+    const { db, r } = await setup([{ ops: [op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['A1'] })] }]);
     banner(db, 'medium');
     updateTaskFields(db, 1, { priority: 'low' }, NOW, 'human');
     store(db, 'A1', 'URGENT: banner?');
@@ -129,7 +129,7 @@ describe('Reconciler: priority keywords', () => {
   });
 
   it('runs without keywords when the settings cannot be read', async () => {
-    const { db, r } = setup([{ ops: [add(['A1'], 'medium')] }], () => {
+    const { db, r } = await setup([{ ops: [add(['A1'], 'medium')] }], () => {
       throw new Error('settings table locked');
     });
     store(db, 'A1', 'urgent footer');
@@ -140,7 +140,7 @@ describe('Reconciler: priority keywords', () => {
 
 describe('Reconciler: sentiment', () => {
   it('switched off: the read asks for none, the prompt has no sentiment rules, and a stray mood is not stored', async () => {
-    const { db, ai, r } = setup([{ ops: [add(['A1'], 'medium', { sentiment: 'frustrated' }), op({ op: 'set_status', sourceMessageIds: ['A1'], text: 'Footer in progress.', sentiment: 'negative' })] }]);
+    const { db, ai, r } = await setup([{ ops: [add(['A1'], 'medium', { sentiment: 'frustrated' }), op({ op: 'set_status', sourceMessageIds: ['A1'], text: 'Footer in progress.', sentiment: 'negative' })] }]);
     store(db, 'A1', 'footer abhi tak nahi hua?!');
     await r.run(1);
     expect(ai.options).toEqual([{ sentiment: false }]);
@@ -150,7 +150,7 @@ describe('Reconciler: sentiment', () => {
   });
 
   it('switched on: the read asks for it, the task keeps its mood and set_status gives the client\'s', async () => {
-    const { db, ai, r } = setup([{
+    const { db, ai, r } = await setup([{
       ops: [add(['A1'], 'medium', { sentiment: 'frustrated' }), op({ op: 'set_status', sourceMessageIds: ['A1'], text: 'Footer late.', sentiment: 'negative' })],
     }], { keywords: NO_KEYWORDS, sentimentEnabled: true });
     store(db, 'A1', 'footer abhi tak nahi hua?!');
@@ -162,7 +162,7 @@ describe('Reconciler: sentiment', () => {
   });
 
   it('switched on: an update with only a new mood is applied, and a mood left empty changes nothing', async () => {
-    const { db, r } = setup([
+    const { db, r } = await setup([
       { ops: [op({ op: 'update_task', taskCode: 'SHA-001', sourceMessageIds: ['A1'], sentiment: 'positive' })] },
       { ops: [op({ op: 'update_task', taskCode: 'SHA-001', sourceMessageIds: ['A2'], latestProgress: 'v3', sentiment: null })] },
     ], { keywords: NO_KEYWORDS, sentimentEnabled: true });
@@ -177,7 +177,7 @@ describe('Reconciler: sentiment', () => {
 
   it('a change of the switch applies to the next batch', async () => {
     let on = false;
-    const { db, ai, r } = setup([{ ops: [] }, { ops: [] }], () => ({ keywords: NO_KEYWORDS, sentimentEnabled: on }));
+    const { db, ai, r } = await setup([{ ops: [] }, { ops: [] }], () => ({ keywords: NO_KEYWORDS, sentimentEnabled: on }));
     store(db, 'A1', 'hello');
     await r.run(1);
     on = true;

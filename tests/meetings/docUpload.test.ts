@@ -18,8 +18,8 @@ const meeting: MeetingDocInput = {
   transcriptCut: false,
 };
 
-function setup() {
-  const db = seededDb();
+async function setup() {
+  const db = await seededDb();
   const drive = new FakeDrive();
   setKv(db, 'drive_root_id', 'root-1');
   return { db, drive };
@@ -27,7 +27,7 @@ function setup() {
 
 describe('uploadMeetingDoc', () => {
   it('makes the Meetings folder once and creates each Doc in it, returning the Doc id', async () => {
-    const { db, drive } = setup();
+    const { db, drive } = await setup();
     const first = await uploadMeetingDoc({ db, api: drive }, meeting);
     const second = await uploadMeetingDoc({ db, api: drive }, { ...meeting, title: 'Second' });
     expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Meetings']);
@@ -39,7 +39,7 @@ describe('uploadMeetingDoc', () => {
   });
 
   it('re-creates the Meetings folder once when the saved one is gone', async () => {
-    const { db, drive } = setup();
+    const { db, drive } = await setup();
     await uploadMeetingDoc({ db, api: drive }, meeting);
     drive.missing.add(getKv(db, 'drive_meetings_folder:1')!);
     await uploadMeetingDoc({ db, api: drive }, meeting);
@@ -48,7 +48,7 @@ describe('uploadMeetingDoc', () => {
   });
 
   it('passes a sign-in failure through as it came', async () => {
-    const { db, drive } = setup();
+    const { db, drive } = await setup();
     const auth = Object.assign(new Error('unauthorized'), { code: 401 });
     drive.failNextWith = auth;
     await expect(uploadMeetingDoc({ db, api: drive }, meeting)).rejects.toBe(auth);

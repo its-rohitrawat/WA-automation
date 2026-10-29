@@ -12,14 +12,14 @@ const newTask = (o: Partial<NewTask> = {}): NewTask => ({
 });
 
 describe('tasks repository', () => {
-  it('creates tasks with per-client codes', () => {
-    const db = seededDb();
+  it('creates tasks with per-client codes', async () => {
+    const db = await seededDb();
     expect(createTask(db, newTask(), NOW)).toMatchObject({ code: 'SHA-001', status: 'open', reminderCount: 0, lockedFields: [], statusLockedAt: null });
     expect(createTask(db, newTask({ clientId: 2 }), NOW).code).toBe('MEH-001');
   });
 
-  it('updates fields, and human edits lock them', () => {
-    const db = seededDb();
+  it('updates fields, and human edits lock them', async () => {
+    const db = await seededDb();
     const t = createTask(db, newTask(), NOW);
     updateTaskFields(db, t.id, { deadline: '2026-10-25' }, NOW, 'ai');
     expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ deadline: '2026-10-25', lockedFields: [] });
@@ -27,8 +27,8 @@ describe('tasks repository', () => {
     expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ title: 'Brighter banner', lockedFields: ['title'], updatedAt: LATER });
   });
 
-  it('closes and reopens; human status changes are timestamped', () => {
-    const db = seededDb();
+  it('closes and reopens; human status changes are timestamped', async () => {
+    const db = await seededDb();
     const t = createTask(db, newTask(), NOW);
     setTaskStatus(db, t.id, 'done', '2026-10-19', NOW, 'ai');
     expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-19', statusLockedAt: null });
@@ -36,8 +36,8 @@ describe('tasks repository', () => {
     expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open', closedOn: null, statusLockedAt: LATER });
   });
 
-  it('counts reminders and filters by status', () => {
-    const db = seededDb();
+  it('counts reminders and filters by status', async () => {
+    const db = await seededDb();
     const a = createTask(db, newTask(), NOW);
     createTask(db, newTask({ title: 'Send logo files', side: 'client' }), NOW);
     logReminder(db, a.id, '2026-10-13', NOW);
@@ -48,16 +48,16 @@ describe('tasks repository', () => {
     expect(listTasks(db, 1).map((t) => t.code)).toEqual(['SHA-001', 'SHA-002']);
   });
 
-  it('never moves the last reminder date back: a file read late can log an older reminder (final review)', () => {
-    const db = seededDb();
+  it('never moves the last reminder date back: a file read late can log an older reminder (final review)', async () => {
+    const db = await seededDb();
     const a = createTask(db, newTask(), NOW);
     logReminder(db, a.id, '2026-10-02', NOW);
     logReminder(db, a.id, '2026-10-01', LATER);
     expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ reminderCount: 2, lastReminderOn: '2026-10-02', updatedAt: LATER });
   });
 
-  it('records events and decisions', () => {
-    const db = seededDb();
+  it('records events and decisions', async () => {
+    const db = await seededDb();
     const t = createTask(db, newTask(), NOW);
     recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'add_task', detail: { code: t.code }, reason: 'asked in chat', sourceIds: ['m1'], at: NOW });
     expect(db.raw.prepare('SELECT actor, op, source_ids FROM task_events').get()).toEqual({ actor: 'ai', op: 'add_task', source_ids: '["m1"]' });
@@ -67,8 +67,8 @@ describe('tasks repository', () => {
     expect(listDecisions(db, 1, 1)).toHaveLength(1);
   });
 
-  it('taskSourceIds covers every message any event of a task cited, whatever the op or actor', () => {
-    const db = seededDb();
+  it('taskSourceIds covers every message any event of a task cited, whatever the op or actor', async () => {
+    const db = await seededDb();
     const t = createTask(db, newTask({ sourceWaId: 'm1' }), NOW);
     const other = createTask(db, newTask({ clientId: 2, sourceWaId: 'z1' }), NOW);
     const ev = (taskId: number | null, clientId: number, actor: 'ai' | 'human', op: string, sourceIds: string[]) =>
@@ -85,8 +85,8 @@ describe('tasks repository', () => {
     expect([...taskSourceIds(db, 1)].sort()).toEqual(['m1', 'm2', 'm3', 'm4', 'm5', 'm6']);
   });
 
-  it('records batches and reports the latest per client', () => {
-    const db = seededDb();
+  it('records batches and reports the latest per client', async () => {
+    const db = await seededDb();
     const a = startBatch(db, 1, 3, NOW);
     finishBatch(db, a, { status: 'ok', errorCode: null, accepted: 2, rejected: 0, at: NOW });
     const b = startBatch(db, 1, 1, LATER);

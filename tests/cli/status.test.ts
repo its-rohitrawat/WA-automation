@@ -16,10 +16,10 @@ const now = new Date('2026-10-19T08:00:00Z');
 const base = { clients: [], batches: [], unprocessed: new Map<number, number>(), now };
 
 describe('formatStatus', () => {
-  it('summarises health, spend, disk and each client', () => {
+  it('summarises health, spend, disk and each client', async () => {
     const out = formatStatus({
       snapshot,
-      clients: listClients(seededDb(), false),
+      clients: listClients(await seededDb(), false),
       batches: [{ clientId: 2, status: 'failed', errorCode: 'network', finishedAt: '2026-10-19T07:50:00.000Z' }],
       unprocessed: new Map([[2, 3]]),
       now,

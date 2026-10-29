@@ -13,8 +13,8 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function setup(build: () => Promise<Buffer> = vi.fn(async () => Buffer.from('xlsx-bytes')), log = silentLogger()) {
-  const db = seededDb();
+async function setup(build: () => Promise<Buffer> = vi.fn(async () => Buffer.from('xlsx-bytes')), log = silentLogger()) {
+  const db = await seededDb();
   const drive = new FakeDrive();
   publisher = new DrivePublisher({ db, api: drive, build, log, minIntervalMs: 60_000 });
   return { db, drive, build, p: publisher };
@@ -33,7 +33,7 @@ function capturingLogger() {
 
 describe('DrivePublisher', () => {
   it('creates the folder and file once, then updates the same file', async () => {
-    const { db, drive, p } = setup();
+    const { db, drive, p } = await setup();
     await p.publishNow();
     await p.publishNow();
     expect(drive.folders).toEqual(['WA Agent']);
@@ -43,7 +43,7 @@ describe('DrivePublisher', () => {
   });
 
   it('recreates the file if someone removed it from Drive', async () => {
-    const { drive, p } = setup();
+    const { drive, p } = await setup();
     await p.publishNow();
     drive.missing.add(drive.created[0]!.id);
     await p.publishNow();
@@ -52,7 +52,7 @@ describe('DrivePublisher', () => {
 
   it('publishes at most once a minute, with one trailing run', async () => {
     vi.useFakeTimers();
-    const { build, p } = setup();
+    const { build, p } = await setup();
     p.schedule();
     await vi.advanceTimersByTimeAsync(0);
     expect(build).toHaveBeenCalledTimes(1);
@@ -67,7 +67,7 @@ describe('DrivePublisher', () => {
 
   it('backs off after a failure and then recovers', async () => {
     vi.useFakeTimers();
-    const { drive, p } = setup();
+    const { drive, p } = await setup();
     drive.failNext = 1;
     p.schedule();
     await vi.advanceTimersByTimeAsync(0);
@@ -81,7 +81,7 @@ describe('DrivePublisher', () => {
     const build = vi.fn(async (): Promise<Buffer> => {
       throw new Error('secret-detail-in-message');
     });
-    const { drive, p } = setup(build, log);
+    const { drive, p } = await setup(build, log);
     await p.publishNow();
     expect(drive.folders).toEqual([]);
     expect(drive.uploads).toBe(0);
@@ -94,7 +94,7 @@ describe('DrivePublisher', () => {
 
   it('logs a non-404 Drive failure as step drive at warn level', async () => {
     const { lines, log } = capturingLogger();
-    const { drive, p } = setup(undefined, log);
+    const { drive, p } = await setup(undefined, log);
     await p.publishNow();
     drive.failUpdateWith = Object.assign(new Error('token-echo-abc'), { code: 500 });
     await p.publishNow();
@@ -112,7 +112,7 @@ describe('DrivePublisher', () => {
       stamps.push(Date.now());
       throw new Error('x');
     });
-    const { p } = setup(build);
+    const { p } = await setup(build);
     await p.publishNow();
     await vi.advanceTimersByTimeAsync(60_000 + 120_000 + 240_000 + 480_000 + 900_000 + 900_000);
     const gaps = stamps.slice(1).map((t, i) => t - stamps[i]!);
@@ -121,7 +121,7 @@ describe('DrivePublisher', () => {
 
   it('schedule() during a run gives exactly one follow-up run', async () => {
     vi.useFakeTimers();
-    const { drive, p } = setup();
+    const { drive, p } = await setup();
     let release!: () => void;
     drive.gate = new Promise<void>((r) => (release = r));
     p.schedule();
@@ -140,7 +140,7 @@ describe('DrivePublisher', () => {
   });
 
   it('publishNow() during a run does not start a second run', async () => {
-    const { drive, build, p } = setup();
+    const { drive, build, p } = await setup();
     let release!: () => void;
     drive.gate = new Promise<void>((r) => (release = r));
     const first = p.publishNow();
@@ -155,22 +155,22 @@ describe('DrivePublisher', () => {
 
   describe('publishNow() result', () => {
     it('resolves true when the run it started published', async () => {
-      const { p } = setup();
+      const { p } = await setup();
       await expect(p.publishNow()).resolves.toBe(true);
     });
 
     it('resolves false when the run failed (build or Drive)', async () => {
-      const failingBuild = setup(vi.fn(async (): Promise<Buffer> => { throw new Error('boom'); }));
+      const failingBuild = await setup(vi.fn(async (): Promise<Buffer> => { throw new Error('boom'); }));
       await expect(failingBuild.p.publishNow()).resolves.toBe(false);
       await failingBuild.p.stop();
 
-      const { drive, p } = setup();
+      const { drive, p } = await setup();
       drive.failNext = 1;
       await expect(p.publishNow()).resolves.toBe(false);
     });
 
     it('during a run, resolves with that run’s result', async () => {
-      const { drive, p } = setup();
+      const { drive, p } = await setup();
       let release!: () => void;
       drive.gate = new Promise<void>((r) => (release = r));
       const first = p.publishNow();
@@ -183,7 +183,7 @@ describe('DrivePublisher', () => {
     it('during a run that fails, both calls resolve false', async () => {
       let release!: () => void;
       const gate = new Promise<void>((r) => (release = r));
-      const { p } = setup(vi.fn(async (): Promise<Buffer> => {
+      const { p } = await setup(vi.fn(async (): Promise<Buffer> => {
         await gate;
         throw new Error('boom');
       }));
@@ -196,7 +196,7 @@ describe('DrivePublisher', () => {
     });
 
     it('resolves false once stopped, and starts nothing', async () => {
-      const { build, p } = setup();
+      const { build, p } = await setup();
       await p.stop();
       await expect(p.publishNow()).resolves.toBe(false);
       expect(build).not.toHaveBeenCalled();
@@ -204,7 +204,7 @@ describe('DrivePublisher', () => {
   });
 
   it('await stop() waits for an in-flight create and the file id is saved', async () => {
-    const { db, drive, p } = setup();
+    const { db, drive, p } = await setup();
     let release!: () => void;
     drive.gate = new Promise<void>((r) => (release = r));
     void p.publishNow();
@@ -217,7 +217,7 @@ describe('DrivePublisher', () => {
 
   it('stop() with a hung run resolves at its timeout and leaves no timers', async () => {
     vi.useFakeTimers();
-    const { drive, p } = setup();
+    const { drive, p } = await setup();
     drive.gate = new Promise<void>(() => {});
     void p.publishNow();
     await vi.advanceTimersByTimeAsync(0);
@@ -233,7 +233,7 @@ describe('DrivePublisher', () => {
   describe('flush()', () => {
     it('waits for the upload in flight, then makes exactly one more for changes that arrived meanwhile', async () => {
       vi.useFakeTimers();
-      const { drive, build, p } = setup();
+      const { drive, build, p } = await setup();
       let release!: () => void;
       drive.gate = new Promise<void>((r) => (release = r));
       p.schedule();
@@ -255,7 +255,7 @@ describe('DrivePublisher', () => {
 
     it('runs a scheduled publish at once instead of waiting for the throttle', async () => {
       vi.useFakeTimers();
-      const { drive, p } = setup();
+      const { drive, p } = await setup();
       await p.publishNow();
       p.schedule(); // throttled: would wait 60 s
       expect(vi.getTimerCount()).toBe(1);
@@ -266,7 +266,7 @@ describe('DrivePublisher', () => {
 
     it('uploads nothing more when nothing is pending or scheduled', async () => {
       vi.useFakeTimers();
-      const { drive, p } = setup();
+      const { drive, p } = await setup();
       await p.publishNow();
       await p.flush(10_000);
       expect(drive.uploads).toBe(1);
@@ -282,7 +282,7 @@ describe('DrivePublisher', () => {
         await held;
         throw new Error('x');
       });
-      const { drive, p } = setup(build);
+      const { drive, p } = await setup(build);
       p.schedule();
       await vi.advanceTimersByTimeAsync(0); // the failing run is in flight
       let done = false;
@@ -297,7 +297,7 @@ describe('DrivePublisher', () => {
 
     it('resolves at its timeout when the upload hangs, and leaves no timers', async () => {
       vi.useFakeTimers();
-      const { drive, p } = setup();
+      const { drive, p } = await setup();
       drive.gate = new Promise<void>(() => {});
       p.schedule();
       await vi.advanceTimersByTimeAsync(0);
@@ -313,7 +313,7 @@ describe('DrivePublisher', () => {
 
     it('blocks new runs afterwards, like stop()', async () => {
       vi.useFakeTimers();
-      const { build, p } = setup();
+      const { build, p } = await setup();
       await p.flush(10_000);
       p.schedule();
       await p.publishNow();
@@ -325,7 +325,7 @@ describe('DrivePublisher', () => {
 
   it('recovers from a deleted root folder in one run', async () => {
     const { lines, log } = capturingLogger();
-    const { drive, p } = setup(undefined, log);
+    const { drive, p } = await setup(undefined, log);
     await p.publishNow();
     drive.missing.add('folder-1');
     drive.missing.add(drive.created[0]!.id);
@@ -338,7 +338,7 @@ describe('DrivePublisher', () => {
 
   it('an onPublished that throws is logged and does not cause a re-upload', async () => {
     const { lines, log } = capturingLogger();
-    const db = seededDb();
+    const db = await seededDb();
     const drive = new FakeDrive();
     publisher = new DrivePublisher({
       db,
@@ -357,7 +357,7 @@ describe('DrivePublisher', () => {
 
   it('a 401 from updateFile becomes DriveAuthError and calls onFailure with auth true', async () => {
     const { lines, log } = capturingLogger();
-    const db = seededDb();
+    const db = await seededDb();
     const drive = new FakeDrive();
     const failures: { step: string; auth: boolean }[] = [];
     publisher = new DrivePublisher({ db, api: drive, build: async () => Buffer.from('x'), log, onFailure: (f) => failures.push(f) });
@@ -371,7 +371,7 @@ describe('DrivePublisher', () => {
   });
 
   it('invalid_grant in the response body counts as an auth failure; other failures do not', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const drive = new FakeDrive();
     const failures: { step: string; auth: boolean }[] = [];
     publisher = new DrivePublisher({ db, api: drive, build: async () => Buffer.from('x'), log: silentLogger(), onFailure: (f) => failures.push(f) });
@@ -388,8 +388,8 @@ describe('DrivePublisher', () => {
 describe('DrivePublisher keeps one tracker file', () => {
   const AT = new Date('2026-10-28T05:00:00.000Z');
 
-  function keep(log = silentLogger()) {
-    const db = seededDb();
+  async function keep(log = silentLogger()) {
+    const db = await seededDb();
     const drive = new FakeDrive();
     const newFiles: number[] = [];
     publisher = new DrivePublisher({
@@ -399,7 +399,7 @@ describe('DrivePublisher keeps one tracker file', () => {
   }
 
   it('repeated publishes update the same id and never look for or create a second file', async () => {
-    const { db, drive, newFiles, p } = keep();
+    const { db, drive, newFiles, p } = await keep();
     for (let i = 0; i < 4; i++) expect(await p.publishNow()).toBe(true);
     expect(drive.created).toHaveLength(1);
     expect(drive.updated.map((u) => u.id)).toEqual(Array(3).fill(drive.created[0]!.id));
@@ -410,7 +410,7 @@ describe('DrivePublisher keeps one tracker file', () => {
   });
 
   it('a 404 with a visible Tracker.xlsx in the folder reuses the newest one and stores its id', async () => {
-    const { db, drive, newFiles, p } = keep();
+    const { db, drive, newFiles, p } = await keep();
     await p.publishNow();
     const old = drive.created[0]!.id;
     drive.missing.add(old); // the login changed: the stored file is invisible now
@@ -429,7 +429,7 @@ describe('DrivePublisher keeps one tracker file', () => {
   });
 
   it('a stored folder with no stored file id looks in it first', async () => {
-    const { db, drive, newFiles, p } = keep();
+    const { db, drive, newFiles, p } = await keep();
     setKv(db, 'drive_root_id', 'root-a');
     drive.visible.push({ id: 'seen-1', name: 'Tracker.xlsx', parentId: 'root-a' });
     await p.publishNow();
@@ -439,7 +439,7 @@ describe('DrivePublisher keeps one tracker file', () => {
   });
 
   it('a 404 with none visible creates one, keeps its id, calls onNewFile once and sets the note date', async () => {
-    const { db, drive, newFiles, p } = keep();
+    const { db, drive, newFiles, p } = await keep();
     await p.publishNow();
     drive.missing.add(drive.created[0]!.id);
     await p.publishNow();
@@ -455,7 +455,7 @@ describe('DrivePublisher keeps one tracker file', () => {
   });
 
   it('the first file ever made is no new-file event', async () => {
-    const { db, drive, newFiles, p } = keep();
+    const { db, drive, newFiles, p } = await keep();
     setKv(db, 'drive_root_id', 'root-a');
     await p.publishNow();
     expect(drive.findCalls).toHaveLength(1);
@@ -465,7 +465,7 @@ describe('DrivePublisher keeps one tracker file', () => {
   });
 
   it('the folder-gone path re-creates the folder and the file in one run, as before, and notes the new file', async () => {
-    const { db, drive, newFiles, p } = keep();
+    const { db, drive, newFiles, p } = await keep();
     await p.publishNow();
     drive.missing.add('folder-1');
     drive.missing.add(drive.created[0]!.id);
@@ -479,7 +479,7 @@ describe('DrivePublisher keeps one tracker file', () => {
   });
 
   it('when the stored folder and file are both invisible, a Tracker.xlsx in another visible WA Agent folder is reused', async () => {
-    const { db, drive, newFiles, p } = keep();
+    const { db, drive, newFiles, p } = await keep();
     await p.publishNow();
     drive.missing.add('folder-1'); // another login: the old folder and its file cannot be seen
     drive.missing.add(drive.created[0]!.id);
@@ -498,7 +498,7 @@ describe('DrivePublisher keeps one tracker file', () => {
   });
 
   it('switching back to the first login finds the original file again instead of making a third', async () => {
-    const { db, drive, newFiles, p } = keep();
+    const { db, drive, newFiles, p } = await keep();
     await p.publishNow();
     const first = { folder: 'folder-1', file: drive.created[0]!.id };
     drive.missing.add(first.folder); // login B: nothing of login A can be seen
@@ -523,7 +523,7 @@ describe('DrivePublisher keeps one tracker file', () => {
   });
 
   it('a visible WA Agent folder without a Tracker.xlsx is not adopted: the file is made in the stored folder', async () => {
-    const { db, drive, p } = keep();
+    const { db, drive, p } = await keep();
     await p.publishNow();
     drive.missing.add(drive.created[0]!.id);
     drive.visibleFolders.push({ id: 'empty-one', name: 'WA Agent' });
@@ -534,7 +534,7 @@ describe('DrivePublisher keeps one tracker file', () => {
   });
 
   it('a failed look-up fails the run like any Drive error, and keeps the stored id', async () => {
-    const { db, drive, newFiles, p } = keep();
+    const { db, drive, newFiles, p } = await keep();
     await p.publishNow();
     const old = drive.created[0]!.id;
     drive.missing.add(old);
@@ -552,7 +552,7 @@ describe('DrivePublisher keeps one tracker file', () => {
 
   it('an onNewFile that throws is logged and the run still counts as published', async () => {
     const { lines, log } = capturingLogger();
-    const db = seededDb();
+    const db = await seededDb();
     const drive = new FakeDrive();
     publisher = new DrivePublisher({ db, api: drive, build: async () => Buffer.from('x'), log, onNewFile: () => {
       throw new Error('hook-bug');
@@ -566,7 +566,7 @@ describe('DrivePublisher keeps one tracker file', () => {
 
   it('no file or folder id reaches the logs on any of these paths', async () => {
     const { lines, log } = capturingLogger();
-    const { drive, p } = keep(log);
+    const { drive, p } = await keep(log);
     await p.publishNow();
     const ids = ['folder-1', drive.created[0]!.id, 'seen-newest'];
     drive.missing.add(drive.created[0]!.id);

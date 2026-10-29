@@ -40,7 +40,7 @@ class ProposingAi implements AssistantAi {
 }
 
 async function boot(o: { askCapacity?: number } = {}) {
-  const db = seededDb();
+  const db = await seededDb();
   const clock = manualClock(NOW);
   createTask(db, {
     clientId: 1, side: 'us', title: 'Send the revised quote', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,

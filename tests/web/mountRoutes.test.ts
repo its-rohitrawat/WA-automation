@@ -22,7 +22,7 @@ afterEach(async () => {
 });
 
 /** Only what the requests below reach is real; the rest is never called. */
-function deps(db: ReturnType<typeof seededDb>, clock: ReturnType<typeof manualClock>, started: string[]): AgentRoutesDeps {
+function deps(db: Awaited<ReturnType<typeof seededDb>>, clock: ReturnType<typeof manualClock>, started: string[]): AgentRoutesDeps {
   const never = {} as never;
   return {
     db, clock, log: silentLogger(), control: never, spend: new SpendGuard({ db, clock, capUsd: 10 }) as never, health: never,
@@ -33,7 +33,7 @@ function deps(db: ReturnType<typeof seededDb>, clock: ReturnType<typeof manualCl
 }
 
 async function boot() {
-  const db = seededDb();
+  const db = await seededDb();
   const clock = manualClock(NOW);
   const started: string[] = [];
   const web = await startDashboard({

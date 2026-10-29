@@ -28,14 +28,14 @@ const TO = { recipientMasked: '…1234' };
 const TRACKER_ID = '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123';
 const LINK = `https://drive.google.com/file/d/${TRACKER_ID}/view`;
 
-function setup(
+async function setup(
   o: {
     settings?: ReportSettings; build?: (now: Date) => Promise<ReportPayload>; log?: Logger; healthLine?: () => HealthLine;
     /** The stored tracker id; null leaves it unset, as before the first upload. Default TRACKER_ID. */
     trackerId?: string | null;
   } = {},
 ) {
-  const db = seededDb();
+  const db = await seededDb();
   if (o.trackerId !== null) setKv(db, TRACKER_ID_KEY, o.trackerId ?? TRACKER_ID);
   const clock = manualClock(IST('05:00'));
   const sender = new FakeReportSender();
@@ -82,7 +82,7 @@ const settle = () => new Promise<void>((r) => setImmediate(r));
 
 describe('ReportScheduler', () => {
   it('sends once at 06:00: the short text with the tracker link, and records its one message id', async () => {
-    const { db, sender, at } = setup();
+    const { db, sender, at } = await setup();
     await at('05:59');
     expect(sender.calls).toHaveLength(0);
     expect(reportFor(db, DAY)).toBeUndefined();
@@ -94,14 +94,14 @@ describe('ReportScheduler', () => {
   });
 
   it('catches up at 09:30 after downtime', async () => {
-    const { db, sender, at } = setup();
+    const { db, sender, at } = await setup();
     await at('09:30');
     expect(sender.calls).toHaveLength(1);
     expect(reportFor(db, DAY)!.status).toBe('sent');
   });
 
   it('skips the day after 12:00 and says why', async () => {
-    const { db, sender, s, at } = setup();
+    const { db, sender, s, at } = await setup();
     await at('12:00');
     expect(sender.calls).toHaveLength(0);
     expect(reportFor(db, DAY)).toMatchObject({ status: 'skipped', detail: 'not_running' });
@@ -109,7 +109,7 @@ describe('ReportScheduler', () => {
   });
 
   it('retries a definite failure after 2, 5, then 10 minutes', async () => {
-    const { db, sender, s, at } = setup();
+    const { db, sender, s, at } = await setup();
     sender.results = [failed('connect_timeout'), failed('connect_timeout'), failed('closed'), failed('closed')];
     await at('06:00');
     expect(reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'connect_timeout', nextAttemptAt: iso('06:02') });
@@ -130,7 +130,7 @@ describe('ReportScheduler', () => {
   });
 
   it('stops retrying at 12:00 and keeps the last reason', async () => {
-    const { db, sender, at } = setup();
+    const { db, sender, at } = await setup();
     sender.results = [failed('not_linked'), failed('not_linked')];
     await at('11:55');
     await at('12:00');
@@ -139,7 +139,7 @@ describe('ReportScheduler', () => {
   });
 
   it("a send whose outcome could not be recorded reads unknown after 10 minutes, and at the deadline becomes unknown, never skipped or sent again", async () => {
-    const { db, clock, sender, s, at } = setup();
+    const { db, clock, sender, s, at } = await setup();
     await at('05:00'); // recovered: nothing was cut off
     const prepare = db.raw.prepare.bind(db.raw);
     const spy = vi.spyOn(db.raw, 'prepare').mockImplementation(((sql: string) => {
@@ -167,7 +167,7 @@ describe('ReportScheduler', () => {
   });
 
   it("leaves a 'sending' row that is not yet 10 minutes old at the deadline as it is", async () => {
-    const { db, at } = setup();
+    const { db, at } = await setup();
     await at('05:00');
     claimReport(db, DAY, iso('11:55'));
     await at('12:00');
@@ -177,7 +177,7 @@ describe('ReportScheduler', () => {
   });
 
   it('never retries an unknown outcome', async () => {
-    const { db, sender, s, at } = setup();
+    const { db, sender, s, at } = await setup();
     sender.results = [{ status: 'unknown', code: 'timeout' }];
     await at('06:00');
     for (const hm of ['06:30', '11:00', '12:30']) await at(hm);
@@ -187,7 +187,7 @@ describe('ReportScheduler', () => {
   });
 
   it('turns a crash mid-send into unknown at start, and does not send that day again', async () => {
-    const { db, clock, sender, s, at } = setup();
+    const { db, clock, sender, s, at } = await setup();
     claimReport(db, DAY, iso('06:00')); // the previous run died while sending
     clock.set(IST('06:20'));
     s.recover(clock.now());
@@ -197,7 +197,7 @@ describe('ReportScheduler', () => {
   });
 
   it('counts as recovered only once the cut-off row is marked unknown: a recovery that failed runs again at the next tick', async () => {
-    const { db, clock, sender, s, at } = setup();
+    const { db, clock, sender, s, at } = await setup();
     claimReport(db, DAY, iso('06:00')); // the previous run died while sending
     const prepare = db.raw.prepare.bind(db.raw);
     const spy = vi.spyOn(db.raw, 'prepare').mockImplementation(((sql: string) => {
@@ -217,7 +217,7 @@ describe('ReportScheduler', () => {
   });
 
   it('does nothing when disabled, and drops a send-now request', async () => {
-    const { db, sender, s, at } = setup({ settings: { ...ON, enabled: false } });
+    const { db, sender, s, at } = await setup({ settings: { ...ON, enabled: false } });
     request(db, '06:00');
     await at('06:00');
     expect(sender.calls).toHaveLength(0);
@@ -227,7 +227,7 @@ describe('ReportScheduler', () => {
   });
 
   it('runs one send at a time', async () => {
-    const { db, clock, sender, s } = setup();
+    const { db, clock, sender, s } = await setup();
     const g = gate();
     sender.gate = g.promise;
     clock.set(IST('06:00'));
@@ -247,19 +247,19 @@ describe('ReportScheduler', () => {
   });
 
   it('records a sender crash as unknown and a build failure as a retry', async () => {
-    const crash = setup();
+    const crash = await setup();
     crash.sender.throwNext = true;
     await crash.at('06:00');
     expect(reportFor(crash.db, DAY)).toMatchObject({ status: 'unknown', detail: 'crash' });
 
-    const broken = setup({ build: async () => Promise.reject(new Error('disk full')) });
+    const broken = await setup({ build: async () => Promise.reject(new Error('disk full')) });
     await broken.at('06:00');
     expect(broken.sender.calls).toHaveLength(0);
     expect(reportFor(broken.db, DAY)).toMatchObject({ status: 'retry', detail: 'build_failed', nextAttemptAt: iso('06:02') });
   });
 
   it('sends on a send-now request at any time, also after an unknown outcome, but never a second time', async () => {
-    const { db, sender, at } = setup();
+    const { db, sender, at } = await setup();
     claimReport(db, DAY, iso('06:00'));
     finishReport(db, DAY, 'unknown', 'timeout', iso('06:01'));
     request(db, '15:00');
@@ -273,7 +273,7 @@ describe('ReportScheduler', () => {
   });
 
   it("a send-now request takes a 'sending' row older than 10 minutes (its outcome was lost), but not a younger one", async () => {
-    const { db, sender, at } = setup();
+    const { db, sender, at } = await setup();
     await at('05:00');
     claimReport(db, DAY, iso('06:00')); // the 06:00 send ran, then recording its outcome failed
     request(db, '06:05'); // too soon: the row may still be a send in progress
@@ -288,7 +288,7 @@ describe('ReportScheduler', () => {
   });
 
   it('a send-now request confirmed before a scheduled send that ends unknown is not used: nothing is sent twice', async () => {
-    const { db, clock, sender, s, at } = setup();
+    const { db, clock, sender, s, at } = await setup();
     const g = gate();
     sender.gate = g.promise;
     sender.results = [{ status: 'unknown', code: 'timeout' }];
@@ -307,7 +307,7 @@ describe('ReportScheduler', () => {
   });
 
   it('ignores a send-now request whose confirmed state no longer matches the row, and the old date-only form', async () => {
-    const { db, sender, at } = setup();
+    const { db, sender, at } = await setup();
     claimReport(db, DAY, iso('06:00'));
     retryReport(db, DAY, 'closed', iso('06:02'), iso('06:00'));
     request(db, '06:03'); // confirmed while the row was 'retry'
@@ -323,7 +323,7 @@ describe('ReportScheduler', () => {
   });
 
   it('clears a send-now request exactly once, as it takes it', async () => {
-    const { db, sender, at } = setup();
+    const { db, sender, at } = await setup();
     request(db, '05:00');
     const writes: string[] = [];
     const prepare = db.raw.prepare.bind(db.raw);
@@ -343,7 +343,7 @@ describe('ReportScheduler', () => {
   });
 
   it('a send-now request after the deadline that fails gets one try, then the day is skipped with that reason', async () => {
-    const { db, clock, sender, s } = setup();
+    const { db, clock, sender, s } = await setup();
     sender.results = [failed('connect_timeout')];
     request(db, '15:00');
     clock.set(IST('15:00'));
@@ -356,7 +356,7 @@ describe('ReportScheduler', () => {
   });
 
   it('a send-now request before the report time that fails waits for the report time', async () => {
-    const { db, sender, at } = setup();
+    const { db, sender, at } = await setup();
     sender.results = [failed('closed')];
     request(db, '05:00');
     await at('05:00');
@@ -370,7 +370,7 @@ describe('ReportScheduler', () => {
   });
 
   it('uses the IST date between 00:00 and 05:30 IST, for health and for a send-now request', async () => {
-    const { db, clock, sender, s } = setup();
+    const { db, clock, sender, s } = await setup();
     claimReport(db, '2026-10-22', '2026-10-22T00:30:00.000Z');
     finishReport(db, '2026-10-22', 'sent', 'msg-0', '2026-10-22T00:31:00.000Z');
     clock.set(IST('02:00'));
@@ -383,7 +383,7 @@ describe('ReportScheduler', () => {
 
   it('without a tracker link (never uploaded, or a bad id) retries with the usual waits, then skips at the deadline, never sending', async () => {
     for (const trackerId of [null, '', 'file-1', '../../evil?x=1']) {
-      const { db, sender, s, at } = setup({ trackerId });
+      const { db, sender, s, at } = await setup({ trackerId });
       await at('06:00');
       expect(reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'no_tracker_link', attempts: 1, nextAttemptAt: iso('06:02') });
       expect(s.health()).toEqual({
@@ -405,7 +405,7 @@ describe('ReportScheduler', () => {
   });
 
   it('sends once the tracker has been uploaded after a no_tracker_link try', async () => {
-    const { db, sender, at } = setup({ trackerId: null });
+    const { db, sender, at } = await setup({ trackerId: null });
     await at('06:00');
     expect(reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'no_tracker_link' });
     setKv(db, TRACKER_ID_KEY, TRACKER_ID); // the Drive publisher uploads the tracker
@@ -416,7 +416,7 @@ describe('ReportScheduler', () => {
 
   it('records the time the send finished, not the time it started', async () => {
     for (const fails of [false, true]) {
-      const one = setup();
+      const one = await setup();
       one.sender.results = fails ? [failed('connect_timeout')] : [];
       const send = one.sender.sendReport.bind(one.sender);
       one.sender.sendReport = async (text) => {
@@ -432,7 +432,7 @@ describe('ReportScheduler', () => {
   });
 
   it('ignores a send-now request left from an earlier day', async () => {
-    const { db, sender, at } = setup();
+    const { db, sender, at } = await setup();
     setKv(db, REPORT_REQUEST_KEY, reportRequest('2026-10-22', undefined, new Date(IST('15:00'))));
     await at('15:00');
     expect(sender.calls).toHaveLength(0);
@@ -440,13 +440,13 @@ describe('ReportScheduler', () => {
   });
 
   it('a send-now request expires after 5 minutes: an older one (left behind by a stopping service) is ignored and cleared', async () => {
-    const fresh = setup();
+    const fresh = await setup();
     request(fresh.db, '05:00');
     await fresh.at('05:05'); // exactly 5 minutes: still honoured
     expect(fresh.sender.calls).toHaveLength(1);
 
     const { lines, log } = capturingLogger();
-    const old = setup({ log });
+    const old = await setup({ log });
     request(old.db, '05:00'); // written while the service was stopping; it starts again 10 minutes later
     await old.at('05:10');
     expect(old.sender.calls).toHaveLength(0);
@@ -458,7 +458,7 @@ describe('ReportScheduler', () => {
     expect(line!.date).toBe(DAY);
 
     // A request without its time (the form before requests expired) is never honoured either.
-    const untimed = setup();
+    const untimed = await setup();
     setKv(untimed.db, REPORT_REQUEST_KEY, `${DAY}|none|`);
     await untimed.at('05:00');
     expect(untimed.sender.calls).toHaveLength(0);
@@ -466,7 +466,7 @@ describe('ReportScheduler', () => {
   });
 
   it('stop waits for the send in flight, stops the sender and starts no new send', async () => {
-    const { db, clock, sender, s, at } = setup();
+    const { db, clock, sender, s, at } = await setup();
     const g = gate();
     sender.gate = g.promise;
     clock.set(IST('06:00'));
@@ -486,7 +486,7 @@ describe('ReportScheduler', () => {
   });
 
   it('starts no new send once stopped, also on a send-now request', async () => {
-    const { db, sender, s, at } = setup();
+    const { db, sender, s, at } = await setup();
     await s.stop(1_000);
     expect(sender.stopped).toBe(1);
     request(db, '06:00');
@@ -497,7 +497,7 @@ describe('ReportScheduler', () => {
   });
 
   it('stop leaves no timer once the send in flight has finished', async () => {
-    const { clock, sender, s } = setup();
+    const { clock, sender, s } = await setup();
     const g = gate();
     sender.gate = g.promise;
     clock.set(IST('06:00'));
@@ -517,7 +517,7 @@ describe('ReportScheduler', () => {
   });
 
   it('stop gives up on a hung send after waitMs and still stops the sender', async () => {
-    const { clock, sender, s } = setup();
+    const { clock, sender, s } = await setup();
     sender.gate = new Promise<void>(() => {}); // never settles
     clock.set(IST('06:00'));
     void s.tick(clock.now());
@@ -529,7 +529,7 @@ describe('ReportScheduler', () => {
   });
 
   it('after stopping the sender, waits briefly for the send it ended, so a report in its linger is recorded as sent', async () => {
-    const { db, clock, sender, s } = setup();
+    const { db, clock, sender, s } = await setup();
     let release!: () => void;
     sender.gate = new Promise<void>((r) => {
       release = r;
@@ -548,7 +548,7 @@ describe('ReportScheduler', () => {
   });
 
   it('claims the row before the send goes out', async () => {
-    const { db, sender, at } = setup();
+    const { db, sender, at } = await setup();
     const seen: (ReportRow | undefined)[] = [];
     const send = sender.sendReport.bind(sender);
     sender.sendReport = async (text) => {
@@ -561,7 +561,7 @@ describe('ReportScheduler', () => {
   });
 
   it('a crash and restart during a send leaves the day unknown, and it is not sent again', async () => {
-    const { db, clock, sender, s, at } = setup();
+    const { db, clock, sender, s, at } = await setup();
     const g = gate();
     sender.gate = g.promise;
     clock.set(IST('06:00'));
@@ -583,7 +583,7 @@ describe('ReportScheduler', () => {
       built = true;
       return { text: 'report text' };
     };
-    const { db, clock, sender, s } = setup({ build });
+    const { db, clock, sender, s } = await setup({ build });
     clock.set(IST('06:00'));
     const first = s.tick(clock.now());
     await settle();
@@ -599,15 +599,15 @@ describe('ReportScheduler', () => {
   });
 
   it('stop resolves even when stopping the sender fails', async () => {
-    const { sender, s } = setup();
+    const { sender, s } = await setup();
     sender.stop = async () => {
       throw new Error('socket already closed');
     };
     await expect(s.stop(100)).resolves.toBeUndefined();
   });
 
-  it("health shows the sender's warning when the owner has to act", () => {
-    const { sender, s, clock } = setup();
+  it("health shows the sender's warning when the owner has to act", async () => {
+    const { sender, s, clock } = await setup();
     clock.set(IST('07:00'));
     sender.state = { ...sender.state, state: 'not_linked' };
     expect(s.health().warning).toContain('npm run cli -- link-sender');
@@ -617,8 +617,8 @@ describe('ReportScheduler', () => {
     expect(s.health().warning).toBeNull();
   });
 
-  it("health carries the sender's masked recipient (last 4 digits only), so the CLI can compare it with .env", () => {
-    const { sender, s } = setup();
+  it("health carries the sender's masked recipient (last 4 digits only), so the CLI can compare it with .env", async () => {
+    const { sender, s } = await setup();
     sender.recipientMasked = '…9876';
     expect(s.health().recipientMasked).toBe('…9876');
   });
@@ -640,29 +640,29 @@ describe('ReportScheduler', () => {
 
     // sent, then failed (retry), then unknown, then a sender crash
     for (const results of [[], [failed('connect_timeout')], [{ status: 'unknown', code: 'timeout' } as SendResult]]) {
-      const one = setup({ log });
+      const one = await setup({ log });
       one.sender.results = results;
       await one.at('06:00');
       texts.push(...one.sender.calls.map((c) => c.text));
     }
-    const crash = setup({ log });
+    const crash = await setup({ log });
     crash.sender.throwNext = true;
     await crash.at('06:00');
     texts.push(...crash.sender.calls.map((c) => c.text));
 
     // a build failure whose error message names a client and the file
-    const broken = setup({ log, build: async () => Promise.reject(new Error(`Sharma Interiors Tracker-${DAY}.xlsx`)) });
+    const broken = await setup({ log, build: async () => Promise.reject(new Error(`Sharma Interiors Tracker-${DAY}.xlsx`)) });
     await broken.at('06:00');
 
     // no tracker link yet: a retry, then skipped at the deadline
-    const noLink = setup({ log, trackerId: null });
+    const noLink = await setup({ log, trackerId: null });
     await noLink.at('06:00');
     await noLink.at('12:00');
 
     // skipped after the deadline, and a crash mid-send found at start
-    const late = setup({ log });
+    const late = await setup({ log });
     await late.at('12:00');
-    const cut = setup({ log });
+    const cut = await setup({ log });
     claimReport(cut.db, DAY, iso('06:00'));
     cut.s.recover(new Date(IST('06:20')));
 
@@ -672,7 +672,7 @@ describe('ReportScheduler', () => {
   });
 
   it("closes an earlier day's retry row as skipped and keeps its reason", async () => {
-    const { db, at } = setup();
+    const { db, at } = await setup();
     const before = '2026-10-22T06:00:00.000Z';
     claimReport(db, '2026-10-22', before);
     retryReport(db, '2026-10-22', 'connect_timeout', '2026-10-22T06:02:00.000Z', before);
@@ -681,7 +681,7 @@ describe('ReportScheduler', () => {
   });
 
   it('never throws from tick, and the next tick still runs', async () => {
-    const { db, sender, s, clock } = setup();
+    const { db, sender, s, clock } = await setup();
     const prepare = vi.spyOn(db.raw, 'prepare').mockImplementationOnce(() => {
       throw new Error('database is locked');
     });
@@ -695,7 +695,7 @@ describe('ReportScheduler', () => {
   });
 
   it('never throws from tick when the database is closed', async () => {
-    const { db, s, clock } = setup();
+    const { db, s, clock } = await setup();
     db.raw.close();
     clock.set(IST('06:00'));
     await expect(s.tick(clock.now())).resolves.toBeUndefined();
@@ -804,8 +804,8 @@ describe('report days (REPORT_DAYS)', () => {
     expect(week.map((d) => isReportDay(d, 'daily'))).toEqual([true, true, true, true, true, true, true]);
   });
 
-  function weekSetup(settings: ReportSettings = ON) {
-    const db = seededDb();
+  async function weekSetup(settings: ReportSettings = ON) {
+    const db = await seededDb();
     setKv(db, TRACKER_ID_KEY, TRACKER_ID);
     const clock = manualClock(at(SAT, '05:00').toISOString());
     const sender = new FakeReportSender();
@@ -818,7 +818,7 @@ describe('report days (REPORT_DAYS)', () => {
   }
 
   it('on Saturday and Sunday the scheduled ticks at 06:00, 09:00 and after the deadline create no row and send nothing; Monday sends', async () => {
-    const { db, sender, s, tick } = weekSetup();
+    const { db, sender, s, tick } = await weekSetup();
     for (const date of [SAT, SUN]) {
       for (const hm of ['05:59', '06:00', '09:00', '11:59', '12:00', '23:59']) await tick(date, hm);
       expect(reportFor(db, date)).toBeUndefined();
@@ -831,7 +831,7 @@ describe('report days (REPORT_DAYS)', () => {
   });
 
   it('the Friday 23:59 IST tick is Friday and the 00:00 IST tick is Saturday', async () => {
-    const { db, sender, tick } = weekSetup({ ...ON, time: '00:00', deadline: '23:59' });
+    const { db, sender, tick } = await weekSetup({ ...ON, time: '00:00', deadline: '23:59' });
     await tick(FRI, '23:58');
     expect(reportFor(db, FRI)!.status).toBe('sent');
     await tick(SAT, '00:00');
@@ -840,20 +840,20 @@ describe('report days (REPORT_DAYS)', () => {
   });
 
   it('mon-sat sends on Saturday but not on Sunday; daily sends on Sunday', async () => {
-    const monSat = weekSetup({ ...ON, days: 'mon-sat' });
+    const monSat = await weekSetup({ ...ON, days: 'mon-sat' });
     await monSat.tick(SAT, '06:00');
     await monSat.tick(SUN, '06:00');
     await monSat.tick(SUN, '12:00');
     expect(monSat.sender.calls).toHaveLength(1);
     expect(reportFor(monSat.db, SAT)!.status).toBe('sent');
     expect(reportFor(monSat.db, SUN)).toBeUndefined();
-    const daily = weekSetup({ ...ON, days: 'daily' });
+    const daily = await weekSetup({ ...ON, days: 'daily' });
     await daily.tick(SUN, '06:00');
     expect(reportFor(daily.db, SUN)!.status).toBe('sent');
   });
 
   it('a send-now request on a Sunday sends once, and is never sent a second time that day', async () => {
-    const { db, sender, s, tick } = weekSetup();
+    const { db, sender, s, tick } = await weekSetup();
     await tick(SUN, '10:00');
     expect(sender.calls).toHaveLength(0);
     setKv(db, REPORT_REQUEST_KEY, reportRequest(SUN, reportFor(db, SUN), at(SUN, '10:00')));
@@ -867,7 +867,7 @@ describe('report days (REPORT_DAYS)', () => {
   });
 
   it('a send-now request on a Sunday that fails keeps the normal retry and deadline rules for that row', async () => {
-    const { db, sender, tick } = weekSetup();
+    const { db, sender, tick } = await weekSetup();
     sender.results = [failed('connect_timeout'), failed('closed')];
     setKv(db, REPORT_REQUEST_KEY, reportRequest(SUN, undefined, at(SUN, '10:00')));
     await tick(SUN, '10:00');
@@ -904,7 +904,7 @@ describe('report days (REPORT_DAYS)', () => {
 
 describe('replaceSender', () => {
   it('the next tick sends with the new sender; the old one is stopped', async () => {
-    const { s, at, sender } = setup();
+    const { s, at, sender } = await setup();
     const next = new FakeReportSender();
     next.recipientMasked = '…9999';
     s.replaceSender(next);
@@ -916,7 +916,7 @@ describe('replaceSender', () => {
   });
 
   it('a send in flight finishes with its own sender, which is not stopped under it', async () => {
-    const { s, clock, sender } = setup();
+    const { s, clock, sender } = await setup();
     const g = gate();
     sender.gate = g.promise;
     clock.set(IST('06:00'));
@@ -930,8 +930,8 @@ describe('replaceSender', () => {
     expect(next.calls).toHaveLength(0);
   });
 
-  it('replacing with the same sender changes nothing', () => {
-    const { s, sender } = setup();
+  it('replacing with the same sender changes nothing', async () => {
+    const { s, sender } = await setup();
     s.replaceSender(sender);
     expect(sender.stopped).toBe(0);
   });
@@ -941,8 +941,8 @@ describe('nextReport (the Automations screen, 29 Oct 2026)', () => {
   const now = (hm: string, date = DAY) => new Date(`${date}T${hm}:00.000+05:30`);
   const row = (db: Db) => reportFor(db, DAY);
 
-  it('is null while off, and today while today is still to come', () => {
-    const db = seededDb();
+  it('is null while off, and today while today is still to come', async () => {
+    const db = await seededDb();
     expect(nextReport(undefined, now('05:00'), { ...ON, enabled: false })).toBeNull();
     expect(nextReport(row(db), now('05:00'), ON)).toBe('today 06:00');
     expect(nextReport(row(db), now('07:00'), ON)).toBe('today, due now');
@@ -950,32 +950,32 @@ describe('nextReport (the Automations screen, 29 Oct 2026)', () => {
     expect(nextReport(row(db), now('06:00'), ON)).toBe('today, sending now');
   });
 
-  it('after a send, a skip, an unknown outcome or the deadline: the next report day, at the later time', () => {
-    const db = seededDb();
+  it('after a send, a skip, an unknown outcome or the deadline: the next report day, at the later time', async () => {
+    const db = await seededDb();
     expect(nextReport(undefined, now('12:00'), ON)).toBe('Mon 26 Oct, 06:00'); // Friday: the weekend is skipped
     claimReport(db, DAY, iso('06:00'));
     finishReport(db, DAY, 'sent', 'msg-1', iso('06:01'));
     expect(nextReport(row(db), now('07:00'), ON, '07:30')).toBe('Mon 26 Oct, 07:30');
     expect(nextReport(row(db), now('07:00'), { ...ON, days: 'mon-sat' })).toBe('tomorrow 06:00');
     expect(nextReport(row(db), now('07:00', '2026-10-22'), ON)).toBe('tomorrow 06:00');
-    const unknown = seededDb();
+    const unknown = await seededDb();
     claimReport(unknown, DAY, iso('06:00'));
     finishReport(unknown, DAY, 'unknown', 'timeout', iso('06:03'));
     expect(nextReport(row(unknown), now('07:00'), ON)).toBe('Mon 26 Oct, 06:00');
-    const stale = seededDb();
+    const stale = await seededDb();
     claimReport(stale, DAY, iso('06:00'));
     expect(nextReport(row(stale), now('06:30'), ON)).toBe('Mon 26 Oct, 06:00'); // its outcome was never recorded
   });
 
-  it('a retry gives its next try, or the next report day when none is left before the deadline', () => {
-    const db = seededDb();
+  it('a retry gives its next try, or the next report day when none is left before the deadline', async () => {
+    const db = await seededDb();
     claimReport(db, DAY, iso('06:00'));
     retryReport(db, DAY, 'connect_timeout', iso('07:10'), iso('06:01'));
     expect(nextReport(row(db), now('07:00'), ON)).toBe('today 07:10');
     expect(nextReport(row(db), now('07:20'), ON)).toBe('today, due now');
     // A wait over before today's (later) time: the try waits for the time.
     expect(nextReport(row(db), now('07:00'), { ...ON, time: '08:00' })).toBe('today 08:00');
-    const late = seededDb();
+    const late = await seededDb();
     claimReport(late, DAY, iso('11:50'));
     retryReport(late, DAY, 'connect_timeout', iso('12:05'), iso('11:55'));
     expect(nextReport(row(late), now('11:56'), ON)).toBe('Mon 26 Oct, 06:00');

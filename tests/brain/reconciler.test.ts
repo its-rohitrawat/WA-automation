@@ -22,8 +22,8 @@ const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, ca
 /** The output part of every estimate; the prompt part is far smaller. */
 const OUTPUT_ESTIMATE = (MAX_OUTPUT_TOKENS * P.outputPerMTok) / 1_000_000;
 
-function setup(responses: FakeResponse[], capUsd = 15, log: Logger = silentLogger()) {
-  const db = seededDb();
+async function setup(responses: FakeResponse[], capUsd = 15, log: Logger = silentLogger()) {
+  const db = await seededDb();
   const clock = manualClock('2026-10-19T08:00:00Z');
   const spend = new SpendGuard({ db, clock, capUsd });
   const ai = new FakeAi(responses);
@@ -66,7 +66,7 @@ function expectNoReservation(spend: SpendGuard): void {
 
 describe('Reconciler', () => {
   it('skips an inactive client without calling the AI', async () => {
-    const { db, ai, r } = setup([]);
+    const { db, ai, r } = await setup([]);
     store(db, 'A1', 'hello');
     db.raw.prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
     expect(await r.run(1)).toEqual({ status: 'noop' });
@@ -74,13 +74,13 @@ describe('Reconciler', () => {
   });
 
   it('does nothing when there are no new messages', async () => {
-    const { ai, r } = setup([]);
+    const { ai, r } = await setup([]);
     expect(await r.run(1)).toEqual({ status: 'noop' });
     expect(ai.calls).toHaveLength(0);
   });
 
   it('applies accepted operations in one go and marks the batch processed', async () => {
-    const { db, ai, r, onChanged, spend } = setup([{ ops: [
+    const { db, ai, r, onChanged, spend } = await setup([{ ops: [
       op({ op: 'add_task', side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'major', assignedTo: 'Rahul', deadline: '2026-10-18', sourceMessageIds: ['m1'] }),
       op({ op: 'add_decision', text: 'Blue theme chosen', sourceMessageIds: ['m2'] }),
       op({ op: 'set_status', text: 'Homepage banner is being revised.', sourceMessageIds: ['m1'] }),
@@ -108,7 +108,7 @@ describe('Reconciler', () => {
   });
 
   it('updates, reminds about and closes existing tasks', async () => {
-    const { db, r } = setup([{ ops: [
+    const { db, r } = await setup([{ ops: [
       op({ op: 'update_task', taskCode: 'SHA-001', latestProgress: 'v2 shared', sourceMessageIds: ['m3'] }),
       op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['m3'] }),
       op({ op: 'close_task', taskCode: 'SHA-001', sourceMessageIds: ['m4'] }),
@@ -121,7 +121,7 @@ describe('Reconciler', () => {
   });
 
   it('creates a task that is already done, closed on the date of its last source message', async () => {
-    const { db, ai, r } = setup([{ ops: [
+    const { db, ai, r } = await setup([{ ops: [
       op({ op: 'add_task', side: 'client', title: 'Send logo files', category: 'content', priority: 'medium', status: 'done', sourceMessageIds: ['m1', 'm2'] }),
     ] }]);
     store(db, 'm1', 'Logo files bhej dijiye', '2026-10-17T05:00:00.000Z');
@@ -134,7 +134,7 @@ describe('Reconciler', () => {
   });
 
   it('reopens a maybe-done task', async () => {
-    const { db, r } = setup([{ ops: [op({ op: 'reopen_task', taskCode: 'SHA-001', sourceMessageIds: ['m1'] })] }]);
+    const { db, r } = await setup([{ ops: [op({ op: 'reopen_task', taskCode: 'SHA-001', sourceMessageIds: ['m1'] })] }]);
     banner(db);
     setTaskStatus(db, getTaskByCode(db, 'SHA-001')!.id, 'maybe_done', '2026-10-18', NOW, 'ai');
     store(db, 'm1', 'abhi bhi dark hai');
@@ -143,7 +143,7 @@ describe('Reconciler', () => {
   });
 
   it('closes a task on the processing date when the evidence is a new reaction to an old message', async () => {
-    const { db, r } = setup([{ ops: [op({ op: 'close_task', taskCode: 'SHA-001', sourceMessageIds: ['m1'] })] }]);
+    const { db, r } = await setup([{ ops: [op({ op: 'close_task', taskCode: 'SHA-001', sourceMessageIds: ['m1'] })] }]);
     banner(db);
     store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
     markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-12T06:00:00.000Z');
@@ -157,7 +157,7 @@ describe('Reconciler', () => {
   it('logs how many operations the model got wrong, never their content', async () => {
     const log = silentLogger();
     const warn = vi.spyOn(log, 'warn');
-    const { db, r } = setup([{ output: { ops: [] }, invalidOps: 2 }], 15, log);
+    const { db, r } = await setup([{ output: { ops: [] }, invalidOps: 2 }], 15, log);
     store(db, 'm1', 'hello');
     expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 0 });
     expect(warn).toHaveBeenCalledWith(expect.objectContaining({ clientId: 1, invalidOps: 2 }), 'model returned invalid operations');
@@ -165,7 +165,7 @@ describe('Reconciler', () => {
   });
 
   it('applies nothing and keeps the messages queued when applying fails part-way', async () => {
-    const { db, r, onChanged } = setup([{ ops: [
+    const { db, r, onChanged } = await setup([{ ops: [
       op({ op: 'add_task', side: 'us', title: 'Revise banner', category: 'design', priority: 'major', sourceMessageIds: ['m1'] }),
       op({ op: 'add_decision', text: 'Blue theme chosen', sourceMessageIds: ['m1'] }),
     ] }]);
@@ -183,7 +183,7 @@ describe('Reconciler', () => {
   });
 
   it('retries once on unparseable output, then fails and leaves messages queued', async () => {
-    const { db, ai, r, spend } = setup([new AiInvalidOutputError('bad', null), new AiInvalidOutputError('bad', null)]);
+    const { db, ai, r, spend } = await setup([new AiInvalidOutputError('bad', null), new AiInvalidOutputError('bad', null)]);
     store(db, 'm1', 'hello');
     expect(await r.run(1)).toEqual({ status: 'failed', errorCode: 'invalid_output' });
     expect(ai.calls).toHaveLength(2);
@@ -194,7 +194,7 @@ describe('Reconciler', () => {
   });
 
   it('does not retry a refusal, and still records what it cost', async () => {
-    const { db, ai, r, spend } = setup([new AiRefusalError('cyber', FAKE_USAGE, 0.02)]);
+    const { db, ai, r, spend } = await setup([new AiRefusalError('cyber', FAKE_USAGE, 0.02)]);
     store(db, 'm1', 'hello');
     expect(await r.run(1)).toEqual({ status: 'failed', errorCode: 'refusal' });
     expect(ai.calls).toHaveLength(1);
@@ -205,7 +205,7 @@ describe('Reconciler', () => {
   it('pauses without calling the AI when the spend cap would be exceeded', async () => {
     const log = silentLogger();
     const info = vi.spyOn(log, 'info');
-    const { db, ai, r } = setup([], 0.0001, log);
+    const { db, ai, r } = await setup([], 0.0001, log);
     store(db, 'm1', 'hello');
     expect(await r.run(1)).toEqual({ status: 'paused' });
     expect(ai.calls).toHaveLength(0);
@@ -214,7 +214,7 @@ describe('Reconciler', () => {
   });
 
   it("keeps other clients' chat out of the prompt", async () => {
-    const { db, ai, r } = setup([]);
+    const { db, ai, r } = await setup([]);
     store(db, 'm1', 'hello from Sharma');
     store(db, 'z1', 'Mehta private pricing', '2026-10-19T07:00:00.000Z', 2);
     await r.run(1);
@@ -223,7 +223,7 @@ describe('Reconciler', () => {
   });
 
   it('lets only one of two parallel runs reserve when the cap fits one estimate', async () => {
-    const { db, ai, r } = setup([], OUTPUT_ESTIMATE * 1.5);
+    const { db, ai, r } = await setup([], OUTPUT_ESTIMATE * 1.5);
     const open = hold(ai);
     store(db, 'm1', 'hello from Sharma');
     store(db, 'z1', 'hello from Mehta', '2026-10-19T07:00:00.000Z', 2);
@@ -242,7 +242,7 @@ describe('Reconciler', () => {
     it('is busy, not paused, when only a hold of a call in flight keeps it out', async () => {
       const log = silentLogger();
       const info = vi.spyOn(log, 'info');
-      const { db, ai, r, spend } = setup([], 15, log);
+      const { db, ai, r, spend } = await setup([], 15, log);
       spend.record('ai', 10, 'earlier runs');
       const scan = spend.reserve(4.9)!; // a scanned PDF being read
       store(db, 'm1', 'hello');
@@ -257,7 +257,7 @@ describe('Reconciler', () => {
     });
 
     it('is paused when what is spent today leaves no room for it, hold or not', async () => {
-      const { db, ai, r, spend } = setup([], 15);
+      const { db, ai, r, spend } = await setup([], 15);
       spend.record('ai', 14.8, 'earlier runs');
       spend.reserve(0.1);
       store(db, 'm1', 'hello');
@@ -269,7 +269,7 @@ describe('Reconciler', () => {
       const log = silentLogger();
       const info = vi.spyOn(log, 'info');
       // The invalid first answer costs about what it reserved, so the retry needs a fresh reservation.
-      const { db, ai, r, spend } = setup([new AiInvalidOutputError('bad', FAKE_USAGE, OUTPUT_ESTIMATE)], 5, log);
+      const { db, ai, r, spend } = await setup([new AiInvalidOutputError('bad', FAKE_USAGE, OUTPUT_ESTIMATE)], 5, log);
       store(db, 'm1', 'hello');
       const open = hold(ai);
       const run = r.run(1);
@@ -289,7 +289,7 @@ describe('Reconciler', () => {
   it('pauses when the retry no longer fits under the cap', async () => {
     const log = silentLogger();
     const info = vi.spyOn(log, 'info');
-    const { db, ai, r } = setup([new AiInvalidOutputError('bad', FAKE_USAGE, 14.9)], 15, log);
+    const { db, ai, r } = await setup([new AiInvalidOutputError('bad', FAKE_USAGE, 14.9)], 15, log);
     store(db, 'm1', 'hello');
     expect(await r.run(1)).toEqual({ status: 'paused' });
     expect(info).toHaveBeenCalledWith({ clientId: 1 }, 'spend cap: run paused');
@@ -299,7 +299,7 @@ describe('Reconciler', () => {
   });
 
   it('books a timeout at the estimate for every SDK attempt', async () => {
-    const { db, ai, r, spend } = setup([new Anthropic.APIConnectionTimeoutError()]);
+    const { db, ai, r, spend } = await setup([new Anthropic.APIConnectionTimeoutError()]);
     store(db, 'm1', 'hello');
     expect(await r.run(1)).toEqual({ status: 'failed', errorCode: 'timeout' });
     expect(spend.spentToday()).toBeCloseTo(estimateOf(ai) * (SDK_MAX_RETRIES + 1), 9);
@@ -308,7 +308,7 @@ describe('Reconciler', () => {
 
   it('books a connection reset at the estimate for every SDK attempt', async () => {
     const reset = new Anthropic.APIConnectionError({ message: 'Connection error.', cause: Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }) });
-    const { db, ai, r, spend } = setup([reset]);
+    const { db, ai, r, spend } = await setup([reset]);
     store(db, 'm1', 'hello');
     expect(await r.run(1)).toEqual({ status: 'failed', errorCode: 'network' });
     expect(spend.spentToday()).toBeCloseTo(estimateOf(ai) * 3, 9);
@@ -317,7 +317,7 @@ describe('Reconciler', () => {
 
   it('books nothing when the request never left the machine', async () => {
     const dns = new Anthropic.APIConnectionError({ message: 'Connection error.', cause: new TypeError('fetch failed', { cause: { code: 'ENOTFOUND' } }) });
-    const { db, r, spend } = setup([dns]);
+    const { db, r, spend } = await setup([dns]);
     store(db, 'm1', 'hello');
     expect(await r.run(1)).toEqual({ status: 'failed', errorCode: 'network' });
     expect(spend.spentToday()).toBe(0);
@@ -325,7 +325,7 @@ describe('Reconciler', () => {
   });
 
   it('books nothing when the server answers with an error status', async () => {
-    const { db, r, spend } = setup([new Anthropic.APIError(500, undefined, 'server error', new Headers())]);
+    const { db, r, spend } = await setup([new Anthropic.APIError(500, undefined, 'server error', new Headers())]);
     store(db, 'm1', 'hello');
     expect(await r.run(1)).toEqual({ status: 'failed', errorCode: 'api_500' });
     expect(spend.spentToday()).toBe(0);
@@ -333,7 +333,7 @@ describe('Reconciler', () => {
   });
 
   it('marks a fallback answer in the spend record', async () => {
-    const { db, r, spend } = setup([{ output: { ops: [] }, costUsd: 0.05, fallbackUsed: true }]);
+    const { db, r, spend } = await setup([{ output: { ops: [] }, costUsd: 0.05, fallbackUsed: true }]);
     store(db, 'm1', 'hello');
     await r.run(1);
     const rows = db.raw.prepare('SELECT usd, detail FROM spend').all() as { usd: number; detail: string }[];
@@ -344,7 +344,7 @@ describe('Reconciler', () => {
   });
 
   it('books an unexpected error at the estimate', async () => {
-    const { db, ai, r, spend } = setup([new Error('boom')]);
+    const { db, ai, r, spend } = await setup([new Error('boom')]);
     store(db, 'm1', 'hello');
     expect(await r.run(1)).toEqual({ status: 'failed', errorCode: 'unknown' });
     expect(spend.spentToday()).toBeCloseTo(estimateOf(ai), 9);
@@ -354,7 +354,7 @@ describe('Reconciler', () => {
   });
 
   it('uses the processing date when any source is a re-checked message', async () => {
-    const { db, r } = setup([{ ops: [op({ op: 'close_task', taskCode: 'SHA-001', sourceMessageIds: ['m1', 'm2'] })] }]);
+    const { db, r } = await setup([{ ops: [op({ op: 'close_task', taskCode: 'SHA-001', sourceMessageIds: ['m1', 'm2'] })] }]);
     banner(db);
     store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
     markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-12T06:00:00.000Z');
@@ -376,7 +376,7 @@ describe('Reconciler', () => {
     }
 
     it('accepts a close backed by a ✅ reaction made after the human reopened the task', async () => {
-      const { db, r } = setup([{ ops: [close()] }]);
+      const { db, r } = await setup([{ ops: [close()] }]);
       reopenedWithOldDelivery(db);
       upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '✅', ts: '2026-10-19T07:00:00.000Z' });
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
@@ -384,7 +384,7 @@ describe('Reconciler', () => {
     });
 
     it('still rejects a close backed by a reaction made before the human reopened the task', async () => {
-      const { db, r } = setup([{ ops: [close()] }]);
+      const { db, r } = await setup([{ ops: [close()] }]);
       banner(db);
       store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
       markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-12T06:00:00.000Z');
@@ -396,7 +396,7 @@ describe('Reconciler', () => {
     });
 
     it('accepts a close backed by an edit made after the human reopened the task', async () => {
-      const { db, r } = setup([{ ops: [close()] }]);
+      const { db, r } = await setup([{ ops: [close()] }]);
       reopenedWithOldDelivery(db);
       applyEdit(db, 1, 'm1', 'Banner v4 attached, final', '2026-10-19T07:00:00.000Z');
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
@@ -411,7 +411,7 @@ describe('Reconciler', () => {
     const readAt = (db: Db, id: number, at: string) => finishMedia(db, id, { textKind: 'description', text: 'Banner v3, final colours', pageCount: null, note: null, at });
 
     it('rejects a close backed by a file read after the human reopened the task, when the message was sent before (12h, I2)', async () => {
-      const { db, r } = setup([{ ops: [close()] }]);
+      const { db, r } = await setup([{ ops: [close()] }]);
       reopenedWithOldDelivery(db);
       readAt(db, fileOf(db), '2026-10-19T07:00:00.000Z');
       expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: null })]);
@@ -420,7 +420,7 @@ describe('Reconciler', () => {
     });
 
     it('accepts a close backed by a file sent after the human reopened the task and read later, closed on the day it was sent (12h, I2)', async () => {
-      const { db, r } = setup([{ ops: [close()] }]);
+      const { db, r } = await setup([{ ops: [close()] }]);
       banner(db);
       closeTask(db, 'SHA-001', new Date('2026-10-17T05:00:00Z'));
       reopenTask(db, 'SHA-001', new Date('2026-10-17T06:00:00Z'));
@@ -433,7 +433,7 @@ describe('Reconciler', () => {
     });
 
     it('closes on the day the message was sent, not the processing date, when its only re-check is a file read late (12h, I2)', async () => {
-      const { db, r } = setup([{ ops: [close()] }]);
+      const { db, r } = await setup([{ ops: [close()] }]);
       banner(db);
       store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
       const id = fileOf(db);
@@ -444,7 +444,7 @@ describe('Reconciler', () => {
     });
 
     it('never closes a task before the day it was raised: a file re-check of an earlier message closes a task raised later on its raised day (12h)', async () => {
-      const { db, r } = setup([{ ops: [close()] }]);
+      const { db, r } = await setup([{ ops: [close()] }]);
       store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
       const id = fileOf(db);
       store(db, 'm2', 'Homepage banner bhi chahiye', '2026-10-15T05:00:00.000Z');
@@ -458,7 +458,7 @@ describe('Reconciler', () => {
     });
 
     it('a reminder in a file read late counts, but never moves the last reminder date back (12h, final review)', async () => {
-      const { db, r } = setup([{ ops: [op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['m1'] })] }]);
+      const { db, r } = await setup([{ ops: [op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['m1'] })] }]);
       banner(db);
       store(db, 'm1', 'Banner ka kya hua?', '2026-10-12T05:00:00.000Z');
       const id = fileOf(db);
@@ -471,7 +471,7 @@ describe('Reconciler', () => {
     });
 
     it('still rejects a close backed by a file read before the human reopened the task (12h)', async () => {
-      const { db, r } = setup([{ ops: [close()] }]);
+      const { db, r } = await setup([{ ops: [close()] }]);
       banner(db);
       store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
       const id = fileOf(db);
@@ -488,7 +488,7 @@ describe('Reconciler', () => {
       { fileRead: '2026-10-19T07:00:00.000Z', reacted: '2026-10-19T05:30:00.000Z', accepted: 0 },
       { fileRead: '2026-10-19T05:30:00.000Z', reacted: '2026-10-19T05:45:00.000Z', accepted: 0 },
     ])('a file re-check that also got a reaction counts from the reaction, never from the file read (file $fileRead, reaction $reacted) (12h, I2)', async ({ fileRead, reacted, accepted }) => {
-      const { db, r } = setup([{ ops: [close()] }]);
+      const { db, r } = await setup([{ ops: [close()] }]);
       reopenedWithOldDelivery(db); // reopened by a human at 06:00Z
       readAt(db, fileOf(db), fileRead);
       upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '✅', ts: reacted });
@@ -501,7 +501,7 @@ describe('Reconciler', () => {
       { fileRead: '2026-10-19T05:30:00.000Z', edited: '2026-10-19T07:00:00.000Z', accepted: 1 },
       { fileRead: '2026-10-19T07:00:00.000Z', edited: '2026-10-19T05:30:00.000Z', accepted: 0 },
     ])('a file re-check that is also an edit re-check counts from the edit, closing on the processing date (file $fileRead, edit $edited) (12h, I2)', async ({ fileRead, edited, accepted }) => {
-      const { db, r } = setup([{ ops: [close()] }]);
+      const { db, r } = await setup([{ ops: [close()] }]);
       reopenedWithOldDelivery(db); // reopened by a human at 06:00Z
       readAt(db, fileOf(db), fileRead);
       applyEdit(db, 1, 'm1', 'Banner v4 attached, final', edited);
@@ -516,7 +516,7 @@ describe('Reconciler', () => {
     const contextOf = (ai: FakeAi): string => ai.calls[0]!.user.split('<recent_context>')[1]!.split('</recent_context>')[0]!;
 
     it('takes the context of a reprocess window from before the window', async () => {
-      const { db, ai, r } = setup([]);
+      const { db, ai, r } = await setup([]);
       store(db, 'p1', 'before one', '2026-10-14T05:00:00.000Z');
       store(db, 'p2', 'before two', '2026-10-15T05:00:00.000Z');
       store(db, 'w1', 'inside the window', '2026-10-16T05:00:00.000Z');
@@ -534,7 +534,7 @@ describe('Reconciler', () => {
     });
 
     it('keeps the latest context when the batch also holds a reaction re-check of an old message', async () => {
-      const { db, ai, r } = setup([]);
+      const { db, ai, r } = await setup([]);
       store(db, 'o1', 'old delivery', '2026-10-12T05:00:00.000Z');
       store(db, 'p1', 'recent chat', '2026-10-18T05:00:00.000Z');
       markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-18T06:00:00.000Z');
@@ -548,7 +548,7 @@ describe('Reconciler', () => {
   });
 
   it('cuts the source quote by characters, never inside an emoji', async () => {
-    const { db, r } = setup([{ ops: [op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'low', sourceMessageIds: ['m1'] })] }]);
+    const { db, r } = await setup([{ ops: [op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'low', sourceMessageIds: ['m1'] })] }]);
     store(db, 'm1', '👍'.repeat(130));
     await r.run(1);
     expect(getTaskByCode(db, 'SHA-001')!.sourceQuote).toBe('👍'.repeat(120));
@@ -556,7 +556,7 @@ describe('Reconciler', () => {
 
   describe('changes that land while the AI call is in flight', () => {
     it('keeps a field a human locked during the call', async () => {
-      const { db, ai, r } = setup([{ ops: [op({ op: 'update_task', taskCode: 'SHA-001', title: 'AI title', sourceMessageIds: ['m1'] })] }]);
+      const { db, ai, r } = await setup([{ ops: [op({ op: 'update_task', taskCode: 'SHA-001', title: 'AI title', sourceMessageIds: ['m1'] })] }]);
       banner(db);
       store(db, 'm1', 'Banner ka naam badlo');
       const open = hold(ai);
@@ -568,7 +568,7 @@ describe('Reconciler', () => {
     });
 
     it('keeps a role a human set during the call', async () => {
-      const { db, ai, r } = setup([{ ops: [op({ op: 'set_person_role', personJid: SHARMA_PN, role: 'team', sourceMessageIds: ['m1'] })] }]);
+      const { db, ai, r } = await setup([{ ops: [op({ op: 'set_person_role', personJid: SHARMA_PN, role: 'team', sourceMessageIds: ['m1'] })] }]);
       store(db, 'm1', 'hello');
       const open = hold(ai);
       const run = r.run(1);
@@ -581,7 +581,7 @@ describe('Reconciler', () => {
     it('queues a message edited during the call again, marked as an edit', async () => {
       const log = silentLogger();
       const info = vi.spyOn(log, 'info');
-      const { db, ai, r } = setup([], 15, log);
+      const { db, ai, r } = await setup([], 15, log);
       store(db, 'm1', 'Banner bright karo');
       store(db, 'm2', 'Aur logo bhi', '2026-10-19T07:01:00.000Z');
       const open = hold(ai);
@@ -595,7 +595,7 @@ describe('Reconciler', () => {
     });
 
     it('queues a message that got a reaction during the call again, marked as a reaction', async () => {
-      const { db, ai, r } = setup([]);
+      const { db, ai, r } = await setup([]);
       store(db, 'm1', 'Banner v3 attached');
       store(db, 'm2', 'Logo bhi bhej diya', '2026-10-19T07:01:00.000Z');
       const open = hold(ai);
@@ -608,7 +608,7 @@ describe('Reconciler', () => {
     });
 
     it('processes a message edited before the run normally, with no re-check marker left', async () => {
-      const { db, r } = setup([]);
+      const { db, r } = await setup([]);
       store(db, 'm1', 'Banner bright karo');
       applyEdit(db, 1, 'm1', 'Banner dark karo', '2026-10-19T07:05:00.000Z');
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 0 });
@@ -634,7 +634,7 @@ describe('Reconciler', () => {
           },
         },
       ])('$why that gets a reaction during the call is queued again as a reaction re-check, so its task is not added again', async ({ before }) => {
-        const { db, ai, r } = setup([{ ops: [ADD] }, { ops: [ADD] }]);
+        const { db, ai, r } = await setup([{ ops: [ADD] }, { ops: [ADD] }]);
         store(db, 'm1', 'print 500');
         before(db);
         const open = hold(ai);
@@ -656,7 +656,7 @@ describe('Reconciler', () => {
         { why: 'an edit before the first run', before: (db: Db) => edit(db, 'print 500, A5', '2026-10-19T07:05:00.000Z') },
         { why: 'a reaction before the first run', before: (db: Db) => react(db, '2026-10-19T07:05:00.000Z') },
       ])('a message edited during the call after $why is queued again as an edit re-check, which may add new work', async ({ before }) => {
-        const { db, ai, r } = setup([{ ops: [ADD] }, { ops: [MORE] }]);
+        const { db, ai, r } = await setup([{ ops: [ADD] }, { ops: [MORE] }]);
         store(db, 'm1', 'print 500');
         before(db);
         const open = hold(ai);
@@ -673,7 +673,7 @@ describe('Reconciler', () => {
     });
 
     it('flags a new task whose source message was deleted during the call', async () => {
-      const { db, ai, r } = setup([{ ops: [op({ op: 'add_task', side: 'us', title: 'Revise banner', category: 'design', priority: 'major', sourceMessageIds: ['m1'] })] }]);
+      const { db, ai, r } = await setup([{ ops: [op({ op: 'add_task', side: 'us', title: 'Revise banner', category: 'design', priority: 'major', sourceMessageIds: ['m1'] })] }]);
       store(db, 'm1', 'Banner bright karo');
       const open = hold(ai);
       const run = r.run(1);
@@ -686,7 +686,7 @@ describe('Reconciler', () => {
 
   it('does not re-create a task a human closed when the message is reprocessed', async () => {
     const add = op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'major', sourceMessageIds: ['m1'] });
-    const { db, r } = setup([{ ops: [add] }, { ops: [add] }]);
+    const { db, r } = await setup([{ ops: [add] }, { ops: [add] }]);
     store(db, 'm1', 'banner chahiye');
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
     closeTask(db, 'SHA-001', new Date('2026-10-19T08:30:00Z'));
@@ -702,7 +702,7 @@ describe('Reconciler', () => {
     const replay = op({ op: 'add_task', side: 'us', title: 'Banner update', category: 'design', priority: 'major', sourceMessageIds: ['m2'] });
     const log = silentLogger();
     const info = vi.spyOn(log, 'info');
-    const { db, r } = setup([{ ops: [add] }, { ops: [remind] }, { ops: [replay] }], 15, log);
+    const { db, r } = await setup([{ ops: [add] }, { ops: [remind] }, { ops: [replay] }], 15, log);
     store(db, 'm1', 'banner chahiye', '2026-10-18T05:00:00.000Z');
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
     store(db, 'm2', 'banner ka update?', '2026-10-19T05:00:00.000Z');
@@ -718,7 +718,7 @@ describe('Reconciler', () => {
 
   it('does not count a chaser again when it later gets a 👍 reaction', async () => {
     const remind = op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['m1'] });
-    const { db, r } = setup([{ ops: [remind] }, { ops: [remind] }]);
+    const { db, r } = await setup([{ ops: [remind] }, { ops: [remind] }]);
     banner(db);
     store(db, 'm1', 'Banner ka update?', '2026-10-19T05:00:00.000Z');
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
@@ -732,7 +732,7 @@ describe('Reconciler', () => {
   it('still creates a task from an edit re-check that adds new work', async () => {
     const banner1 = op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'major', sourceMessageIds: ['m1'] });
     const logo = op({ op: 'add_task', side: 'us', title: 'Logo', category: 'design', priority: 'medium', sourceMessageIds: ['m1'] });
-    const { db, r } = setup([{ ops: [banner1] }, { ops: [logo] }]);
+    const { db, r } = await setup([{ ops: [banner1] }, { ops: [logo] }]);
     store(db, 'm1', 'Banner bright karo', '2026-10-19T05:00:00.000Z');
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
     applyEdit(db, 1, 'm1', 'Banner bright karo, aur logo bhi', '2026-10-19T07:30:00.000Z');
@@ -745,7 +745,7 @@ describe('Reconciler', () => {
   it('blocks a replay that cites only a later message of the original task (GapB)', async () => {
     const first = op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'major', sourceMessageIds: ['m1', 'm2'] });
     const replay = op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'major', sourceMessageIds: ['m2'] });
-    const { db, r } = setup([{ ops: [first] }, { ops: [replay] }]);
+    const { db, r } = await setup([{ ops: [first] }, { ops: [replay] }]);
     store(db, 'm1', 'banner');
     store(db, 'm2', 'urgent', '2026-10-19T07:10:00.000Z');
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });

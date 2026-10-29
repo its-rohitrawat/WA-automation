@@ -65,8 +65,8 @@ const allText = (ws: ExcelJS.Worksheet): string => {
 const sharma = (db: Db) => loadTrackerView(db, now, healthy).clients.find((c) => c.client.code === 'SHA')!;
 
 describe('meetings in the view', () => {
-  it('lists a client’s done meetings newest first, with IST date, title, length, Doc id and action items', () => {
-    const db = seededDb();
+  it('lists a client’s done meetings newest first, with IST date, title, length, Doc id and action items', async () => {
+    const db = await seededDb();
     const a = done(db, { startedAt: '2026-10-20T19:00:00.000Z', title: 'Kickoff', seconds: 3725, docFileId: 'docA', actionItems: 3 });
     const b = done(db, { startedAt: '2026-10-22T06:00:00.000Z', title: 'Review', seconds: null, docFileId: 'docB', actionItems: 0 });
     found(db, { startedAt: '2026-10-23T06:00:00.000Z', status: 'queued' });
@@ -81,14 +81,14 @@ describe('meetings in the view', () => {
     expect(mehta.meetings).toHaveLength(1);
   });
 
-  it('gives no meetings and no last meeting to a client without done meetings', () => {
-    const db = seededDb();
+  it('gives no meetings and no last meeting to a client without done meetings', async () => {
+    const db = await seededDb();
     found(db, { startedAt: '2026-10-23T06:00:00.000Z', status: 'failed' });
     expect(sharma(db)).toMatchObject({ meetings: [], lastMeeting: null });
   });
 
-  it('never gives as Last meeting a meeting the client tab hides', () => {
-    const db = seededDb();
+  it('never gives as Last meeting a meeting the client tab hides', async () => {
+    const db = await seededDb();
     done(db, { startedAt: '2026-10-20T06:00:00.000Z' });
     const hidden = done(db, { startedAt: '2026-10-22T06:00:00.000Z' });
     db.raw.prepare("UPDATE meetings SET summary = '{not json' WHERE id = ?").run(hidden);
@@ -96,15 +96,15 @@ describe('meetings in the view', () => {
     expect(sharma(db).lastMeeting).toBe('2026-10-20');
   });
 
-  it('shows at most CLIENT_MEETINGS_LIMIT meetings', () => {
-    const db = seededDb();
+  it('shows at most CLIENT_MEETINGS_LIMIT meetings', async () => {
+    const db = await seededDb();
     for (let i = 0; i <= CLIENT_MEETINGS_LIMIT; i++) done(db, { startedAt: new Date(Date.UTC(2026, 5, 1) + i * 86_400_000).toISOString() });
     expect(CLIENT_MEETINGS_LIMIT).toBe(100);
     expect(sharma(db).meetings).toHaveLength(100);
   });
 
-  it('lists unassigned meetings by id, IST date and length only, never internal ones, at most UNASSIGNED_LIMIT', () => {
-    const db = seededDb();
+  it('lists unassigned meetings by id, IST date and length only, never internal ones, at most UNASSIGNED_LIMIT', async () => {
+    const db = await seededDb();
     const u = found(db, { startedAt: '2026-10-23T06:00:00.000Z', status: 'unassigned', title: 'Secret pitch', clientId: null, seconds: 47 });
     found(db, { startedAt: '2026-10-24T06:00:00.000Z', status: 'internal', title: '', clientId: null });
     const view = loadTrackerView(db, now, healthy);
@@ -117,7 +117,7 @@ describe('meetings in the view', () => {
 
 describe('Overview', () => {
   it('adds an 11th column, Last meeting, with the date or blank, and no block when nothing is unassigned', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     done(db, { startedAt: '2026-10-22T06:00:00.000Z' });
     found(db, { startedAt: '2026-10-24T06:00:00.000Z', status: 'internal', title: '', clientId: null });
     const ov = (await book(db)).getWorksheet('Overview')!;
@@ -135,7 +135,7 @@ describe('Overview', () => {
   });
 
   it('shows an Unassigned meetings block below the client table: id, IST short date and length, no titles', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const a = found(db, { startedAt: '2026-10-23T06:00:00.000Z', status: 'unassigned', title: 'Secret pitch to Acme', clientId: null, seconds: 2820 });
     const b = found(db, { startedAt: '2026-10-24T18:45:00.000Z', status: 'unassigned', title: 'Another secret', clientId: null, seconds: 3725 });
     const c = found(db, { startedAt: '2026-10-25T06:00:00.000Z', status: 'unassigned', title: 'Third secret', clientId: null, seconds: null });
@@ -161,7 +161,7 @@ describe('Overview', () => {
   });
 
   it('says 1 unassigned meeting in the singular, and under 1 min for a very short one', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const id = found(db, { startedAt: '2026-10-23T06:00:00.000Z', status: 'unassigned', clientId: null, seconds: 20 });
     const ov = (await book(db)).getWorksheet('Overview')!;
     expect(ov.getCell('A2').text).toMatch(/ IST · 1 unassigned meeting \(see below\)$/);
@@ -169,7 +169,7 @@ describe('Overview', () => {
   });
 
   it('adds a +N more row past UNASSIGNED_LIMIT, and counts them all on the Built line', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     for (let i = 0; i < UNASSIGNED_LIMIT + 3; i++) found(db, { startedAt: new Date(Date.UTC(2026, 6, 1) + i * 86_400_000).toISOString(), status: 'unassigned', clientId: null });
     const view = loadTrackerView(db, now, healthy);
     expect(view.unassigned).toHaveLength(50);
@@ -182,7 +182,7 @@ describe('Overview', () => {
   });
 
   it('keeps the unassigned rows as plain text', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     found(db, { startedAt: '2026-10-23T06:00:00.000Z', status: 'unassigned', clientId: null, seconds: 47 });
     const ov = (await book(db)).getWorksheet('Overview')!;
     expect(ov.getCell('A8').type).toBe(ExcelJS.ValueType.String);
@@ -192,7 +192,7 @@ describe('Overview', () => {
 
 describe('Meetings section on the client tab', () => {
   it('comes after Done and before People, with date, title, length, action items and a Doc link', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     done(db, { startedAt: '2026-10-20T06:00:00.000Z', title: 'Kickoff', seconds: 3725, docFileId: 'docA_1-x', actionItems: 3 });
     done(db, { startedAt: '2026-10-22T06:00:00.000Z', title: '=HYPERLINK("http://evil")', seconds: 2820, docFileId: 'docB', actionItems: 0 });
     const ws = (await book(db)).getWorksheet('Sharma Interiors')!;
@@ -218,12 +218,12 @@ describe('Meetings section on the client tab', () => {
   });
 
   it('shows (none) for a client without meetings', async () => {
-    const ws = (await book(seededDb())).getWorksheet('Sharma Interiors')!;
+    const ws = (await book(await seededDb())).getWorksheet('Sharma Interiors')!;
     expect(ws.getRow(rowOf(ws, 'Meetings').number + 2).getCell(1).value).toBe('(none)');
   });
 
   it('does not link a Doc id that is not a plain id, or a missing one', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     done(db, { startedAt: '2026-10-22T06:00:00.000Z', docFileId: 'x/../evil?a=1' });
     const ws = (await book(db)).getWorksheet('Sharma Interiors')!;
     const row = ws.getRow(rowOf(ws, 'Meetings').number + 2);
@@ -232,7 +232,7 @@ describe('Meetings section on the client tab', () => {
   });
 
   it('keeps the workbook readable when a meeting title holds characters XML does not allow', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const id = done(db, { startedAt: '2026-10-22T06:00:00.000Z' });
     db.raw.prepare('UPDATE meetings SET title = ? WHERE id = ?').run('Kick￾off\x01 call￿', id);
     const ws = (await book(db)).getWorksheet('Sharma Interiors')!;
@@ -242,7 +242,7 @@ describe('Meetings section on the client tab', () => {
 
 describe('meeting decisions', () => {
   it('shows Source Meeting linked to the meeting’s Doc, only for a valid Doc id', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const good = done(db, { startedAt: '2026-10-22T06:00:00.000Z', docFileId: 'docGood' });
     const bad = done(db, { startedAt: '2026-10-21T06:00:00.000Z', docFileId: 'bad id' });
     addDecision(db, { clientId: 1, text: 'Blue theme chosen', decidedOn: '2026-10-22', source: 'meeting', sourceWaId: null, meetingId: good }, NOW);
@@ -255,8 +255,8 @@ describe('meeting decisions', () => {
     expect(rowWhere(ws, (r) => r.getCell(2).value === 'Logo approved').getCell(3).value).toBe('WhatsApp');
   });
 
-  it('puts the meeting’s Doc id on its decisions in the view', () => {
-    const db = seededDb();
+  it('puts the meeting’s Doc id on its decisions in the view', async () => {
+    const db = await seededDb();
     const m = done(db, { startedAt: '2026-10-22T06:00:00.000Z', docFileId: 'docGood' });
     addDecision(db, { clientId: 1, text: 'Blue theme chosen', decidedOn: '2026-10-22', source: 'meeting', sourceWaId: null, meetingId: m }, NOW);
     addDecision(db, { clientId: 1, text: 'Logo approved', decidedOn: '2026-10-20', source: 'whatsapp', sourceWaId: 'm1' }, NOW);

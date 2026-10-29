@@ -16,8 +16,8 @@ import { seededDb } from '../helpers/db.ts';
 const NOW = '2026-10-19T08:00:00.000Z';
 const KEY = Buffer.alloc(32, 7);
 
-function setup(o: { env?: Record<string, string>; sender?: SenderState; heartbeat?: Date | null | 'none'; cap?: number; spareLinked?: () => boolean } = {}) {
-  const db = seededDb();
+async function setup(o: { env?: Record<string, string>; sender?: SenderState; heartbeat?: Date | null | 'none'; cap?: number; spareLinked?: () => boolean } = {}) {
+  const db = await seededDb();
   const clock = manualClock(NOW);
   const spend = new SpendGuard({ db, clock, capUsd: o.cap ?? 10 });
   const health = new Health({ db, clock, spend, freeBytes: () => 200e9 });
@@ -43,8 +43,8 @@ function setup(o: { env?: Record<string, string>; sender?: SenderState; heartbea
   return { db, clock, spend, health, control, setGateway, setSender: (s: SenderState) => (senderState = s) };
 }
 
-const part = (t: ReturnType<typeof setup>, key: string) => t.control.status().parts.find((p) => p.key === key)!;
-const state = (t: ReturnType<typeof setup>, key: string): PartState => part(t, key).state;
+const part = (t: Awaited<ReturnType<typeof setup>>, key: string) => t.control.status().parts.find((p) => p.key === key)!;
+const state = (t: Awaited<ReturnType<typeof setup>>, key: string): PartState => part(t, key).state;
 
 function meetings(over: Partial<MeetingsHealth> = {}): MeetingsHealth {
   return {
@@ -54,8 +54,8 @@ function meetings(over: Partial<MeetingsHealth> = {}): MeetingsHealth {
 }
 
 describe('AgentControl.status', () => {
-  it('gives the line, up, every part, the last message time and the spend', () => {
-    const t = setup();
+  it('gives the line, up, every part, the last message time and the spend', async () => {
+    const t = await setup();
     insertMessage(t.db, { waId: 'w1', clientId: 1, senderJid: 'x', senderNumber: '919812345678', senderName: null, fromMe: false, ts: '2026-10-19T07:00:00.000Z',
       text: 'hello', quotedWaId: null, mediaType: null });
     t.spend.record('ai', 1.25, 'batch 1');
@@ -65,8 +65,8 @@ describe('AgentControl.status', () => {
     for (const p of s.parts) expect(['ok', 'warn', 'down', 'off']).toContain(p.state);
   });
 
-  it('maps WhatsApp: open, closed within and past the grace period, unlinked, replaced, refused', () => {
-    const t = setup();
+  it('maps WhatsApp: open, closed within and past the grace period, unlinked, replaced, refused', async () => {
+    const t = await setup();
     expect(part(t, 'whatsapp')).toMatchObject({ state: 'ok', label: 'Connected' });
     t.setGateway('closed');
     expect(part(t, 'whatsapp')).toMatchObject({ state: 'warn', label: 'Reconnecting' });
@@ -79,8 +79,8 @@ describe('AgentControl.status', () => {
     }
   });
 
-  it('shows setup mode and a dashboard link in progress, on Overview and Connections alike', () => {
-    const t = setup();
+  it('shows setup mode and a dashboard link in progress, on Overview and Connections alike', async () => {
+    const t = await setup();
     t.setGateway('not_linked');
     expect(part(t, 'whatsapp')).toMatchObject({ state: 'down', label: 'Not linked' });
     expect(t.control.connections().founder).toMatchObject({ state: 'down', label: 'Not linked' });
@@ -89,8 +89,8 @@ describe('AgentControl.status', () => {
     expect(t.control.connections().founder).toMatchObject({ state: 'warn', label: 'Linking from the dashboard' });
   });
 
-  it('maps the tracker: updated, failing, failing for over an hour, and a Google sign-in failure', () => {
-    const t = setup();
+  it('maps the tracker: updated, failing, failing for over an hour, and a Google sign-in failure', async () => {
+    const t = await setup();
     expect(part(t, 'tracker')).toMatchObject({ state: 'ok' });
     t.health.markPublishFailed({ step: 'drive', auth: false });
     expect(part(t, 'tracker')).toMatchObject({ state: 'warn', label: 'Upload failing' });
@@ -101,9 +101,9 @@ describe('AgentControl.status', () => {
     expect(part(t, 'tracker')).toMatchObject({ state: 'down', label: 'Google sign-in expired' });
   });
 
-  it('maps meetings: off, paused, lost accounts, failed, waiting for speech-to-text, working', () => {
-    expect(state(setup(), 'meetings')).toBe('off');
-    const t = setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' } });
+  it('maps meetings: off, paused, lost accounts, failed, waiting for speech-to-text, working', async () => {
+    expect(state(await setup(), 'meetings')).toBe('off');
+    const t = await setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' } });
     t.health.setMeetings(meetings());
     expect(part(t, 'meetings')).toMatchObject({ state: 'ok', label: 'Working' });
     t.health.setMeetings(meetings({ paused: 'google_auth' }));
@@ -118,8 +118,8 @@ describe('AgentControl.status', () => {
     expect(part(t, 'meetings')).toMatchObject({ state: 'warn', label: 'Waiting: speech-to-text is not set up' });
   });
 
-  it('meetings on the local engine (Task 3): working, or waiting with the same "local speech engine is not set up" as voice notes', () => {
-    const t = setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' } });
+  it('meetings on the local engine (Task 3): working, or waiting with the same "local speech engine is not set up" as voice notes', async () => {
+    const t = await setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' } });
     t.health.setMeetings(meetings({ sttProvider: 'local', stats: { ...meetings().stats, waiting: 2 } }));
     expect(part(t, 'meetings')).toMatchObject({ state: 'ok', label: 'Working' });
     for (const sttProblem of ['local_not_set_up_bin', 'local_not_set_up_model'] as const) {
@@ -131,9 +131,9 @@ describe('AgentControl.status', () => {
     expect(part(t, 'meetings')).toMatchObject({ state: 'down', label: 'Paused: ffmpeg not found' });
   });
 
-  it('maps voice notes: off, a missing engine or ffmpeg, a refused key, failures, working', () => {
-    expect(state(setup(), 'voice')).toBe('off');
-    const t = setup({ env: { VOICE_STT_PROVIDER: 'sarvam', STT_PROVIDER: 'sarvam', STT_API_KEY: 'test-key-not-real' } });
+  it('maps voice notes: off, a missing engine or ffmpeg, a refused key, failures, working', async () => {
+    expect(state(await setup(), 'voice')).toBe('off');
+    const t = await setup({ env: { VOICE_STT_PROVIDER: 'sarvam', STT_PROVIDER: 'sarvam', STT_API_KEY: 'test-key-not-real' } });
     expect(part(t, 'voice')).toMatchObject({ state: 'ok', label: 'Working' });
     t.health.setVoiceProblem('no_ffmpeg');
     expect(part(t, 'voice')).toMatchObject({ state: 'warn', label: 'ffmpeg not found' });
@@ -146,8 +146,8 @@ describe('AgentControl.status', () => {
     expect(part(t, 'voice')).toMatchObject({ state: 'warn', label: '1 voice note could not be transcribed' });
   });
 
-  it('maps the morning report: off, sent, and a warning', () => {
-    const t = setup();
+  it('maps the morning report: off, sent, and a warning', async () => {
+    const t = await setup();
     expect(part(t, 'report')).toMatchObject({ state: 'off', label: 'Off' });
     t.health.setReport({ text: 'Morning report: off', warning: null });
     expect(part(t, 'report')).toMatchObject({ state: 'off', label: 'Off' });
@@ -157,8 +157,8 @@ describe('AgentControl.status', () => {
     expect(part(t, 'report')).toMatchObject({ state: 'warn', label: 'Unknown, check WhatsApp' });
   });
 
-  it('maps the spend: within budget, near the limit, at the limit', () => {
-    const t = setup({ cap: 10 });
+  it('maps the spend: within budget, near the limit, at the limit', async () => {
+    const t = await setup({ cap: 10 });
     expect(part(t, 'spend')).toMatchObject({ state: 'ok', label: 'Within the daily limit' });
     t.spend.record('ai', 8, 'batch 1');
     expect(part(t, 'spend')).toMatchObject({ state: 'warn', label: 'Near the daily limit' });
@@ -168,8 +168,8 @@ describe('AgentControl.status', () => {
 });
 
 describe('AgentControl.connections', () => {
-  it('describes each card', () => {
-    const t = setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' }, sender: 'idle', heartbeat: new Date('2026-10-19T07:55:00.000Z') });
+  it('describes each card', async () => {
+    const t = await setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' }, sender: 'idle', heartbeat: new Date('2026-10-19T07:55:00.000Z') });
     saveMeetingAccount(t.db, KEY, 'company2', 'refresh-token-not-real', 'https://www.googleapis.com/auth/meetings.space.readonly');
     t.health.setMeetings(meetings({ lostAccounts: ['company2'] }));
     insertMessage(t.db, { waId: 'w1', clientId: 1, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts: '2026-10-19T07:00:00.000Z',
@@ -193,8 +193,8 @@ describe('AgentControl.connections', () => {
     });
   });
 
-  it('the Drive card names the file, its folder, its link and the main account it is written with', () => {
-    const t = setup();
+  it('the Drive card names the file, its folder, its link and the main account it is written with', async () => {
+    const t = await setup();
     setKv(t.db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qr-st');
     setKv(t.db, 'google_account_email:main', 'owner@example.com');
     expect(t.control.connections().drive).toMatchObject({
@@ -202,8 +202,8 @@ describe('AgentControl.connections', () => {
     });
   });
 
-  it("shows each Google account's stored email, and names the main one on the Drive card", () => {
-    const t = setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' } });
+  it("shows each Google account's stored email, and names the main one on the Drive card", async () => {
+    const t = await setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' } });
     saveMeetingAccount(t.db, KEY, 'company2', 'refresh-token-not-real', 'https://www.googleapis.com/auth/meetings.space.readonly');
     saveAccountEmail(t.db, 'main', 'owner@studio.in');
     const c = t.control.connections();
@@ -211,17 +211,17 @@ describe('AgentControl.connections', () => {
     expect(c.drive.account).toBe('owner@studio.in');
   });
 
-  it('maps the spare phone states, and has no spare card state without the report', () => {
-    expect(setup().control.connections().spare).toEqual({ state: 'off', label: 'Switched off', device: 'WA Agent - Morning report', recipientMasked: null });
+  it('maps the spare phone states, and has no spare card state without the report', async () => {
+    expect((await setup()).control.connections().spare).toEqual({ state: 'off', label: 'Switched off', device: 'WA Agent - Morning report', recipientMasked: null });
     // With the dashboard, the briefing may be off with no sender open: the saved link decides (Automations' switch needs it).
     let saved = true;
-    const off = setup({ spareLinked: () => saved });
+    const off = await setup({ spareLinked: () => saved });
     expect(off.control.connections().spare).toEqual({ state: 'ok', label: 'Linked', device: 'WA Agent - Morning report', recipientMasked: null });
     saved = false;
     expect(off.control.connections().spare).toEqual({ state: 'warn', label: 'Not linked', device: 'WA Agent - Morning report', recipientMasked: null });
     // An open sender's own state comes first.
-    expect(setup({ sender: 'logged_out', spareLinked: () => true }).control.connections().spare).toMatchObject({ state: 'down', label: 'Logged out' });
-    const t = setup({ sender: 'not_linked' });
+    expect((await setup({ sender: 'logged_out', spareLinked: () => true })).control.connections().spare).toMatchObject({ state: 'down', label: 'Logged out' });
+    const t = await setup({ sender: 'not_linked' });
     const spare = () => t.control.connections().spare;
     expect(spare()).toMatchObject({ state: 'warn', label: 'Not linked' });
     for (const [s, st] of [['open', 'ok'], ['connecting', 'ok'], ['unreadable', 'down'], ['unavailable', 'down'], ['self_send', 'down'], ['logged_out', 'down'],
@@ -231,8 +231,8 @@ describe('AgentControl.connections', () => {
     }
   });
 
-  it("main's Google state follows a publish sign-in failure and the meetings' Google pause", () => {
-    const t = setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' } });
+  it("main's Google state follows a publish sign-in failure and the meetings' Google pause", async () => {
+    const t = await setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' } });
     t.health.markPublishFailed({ step: 'drive', auth: true });
     expect(t.control.connections().google[0]).toMatchObject({ label: 'main', state: 'down', stateLabel: 'Sign-in expired' });
     t.health.markPublished();
@@ -240,19 +240,19 @@ describe('AgentControl.connections', () => {
     expect(t.control.connections().google[0]).toMatchObject({ state: 'warn', stateLabel: 'Needs meeting access' });
   });
 
-  it('monitoring is off without a heartbeat, and has no beat before the first one', () => {
-    expect(setup().control.connections().monitoring).toEqual({ on: false, lastBeatAt: null });
-    expect(setup({ heartbeat: null }).control.connections().monitoring).toEqual({ on: true, lastBeatAt: null });
+  it('monitoring is off without a heartbeat, and has no beat before the first one', async () => {
+    expect((await setup()).control.connections().monitoring).toEqual({ on: false, lastBeatAt: null });
+    expect((await setup({ heartbeat: null })).control.connections().monitoring).toEqual({ on: true, lastBeatAt: null });
   });
 });
 
-function db_publish(db: ReturnType<typeof seededDb>) {
+function db_publish(db: Awaited<ReturnType<typeof seededDb>>) {
   db.raw.prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES ('2026-10-19T06:00:00.000Z', 'agent', 'tracker.published', 'ops', 'x')").run();
 }
 
 describe('AgentControl answers carry no secrets', () => {
-  it('no token, key or full phone number in any answer', () => {
-    const t = setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com', HEARTBEAT_URL: 'https://heartbeat.uptimerobot.com/secret-hb-token' },
+  it('no token, key or full phone number in any answer', async () => {
+    const t = await setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com', HEARTBEAT_URL: 'https://heartbeat.uptimerobot.com/secret-hb-token' },
       sender: 'open', heartbeat: new Date(NOW) });
     saveMeetingAccount(t.db, KEY, 'company2', 'refresh-token-not-real', 'scope');
     insertMessage(t.db, { waId: 'w1', clientId: 1, senderJid: '919812345678@s.whatsapp.net', senderNumber: '919812345678', senderName: 'Ravi', fromMe: false,
@@ -266,8 +266,8 @@ describe('AgentControl answers carry no secrets', () => {
 });
 
 describe('AgentControl review fixes', () => {
-  it('shows the tracker and Google problem even while WhatsApp is down for another cause', () => {
-    const t = setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' } });
+  it('shows the tracker and Google problem even while WhatsApp is down for another cause', async () => {
+    const t = await setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' } });
     t.setGateway('logged_out');
     t.health.markPublishFailed({ step: 'drive', auth: true });
     expect(part(t, 'tracker')).toMatchObject({ state: 'down', label: 'Google sign-in expired' });
@@ -278,23 +278,23 @@ describe('AgentControl review fixes', () => {
     expect(part(t, 'tracker')).toMatchObject({ state: 'down', label: 'Uploads failing for over an hour' });
   });
 
-  it('warns when meetings wait for a refused speech-to-text key, and is ok with no speech-to-text and nothing waiting', () => {
-    const t = setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' } });
+  it('warns when meetings wait for a refused speech-to-text key, and is ok with no speech-to-text and nothing waiting', async () => {
+    const t = await setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' } });
     t.health.setMeetings(meetings({ stats: { ...meetings().stats, deferred: { stt_unavailable: 1 } } }));
     expect(part(t, 'meetings')).toMatchObject({ state: 'warn', label: 'Waiting: the speech-to-text key was refused' });
     t.health.setMeetings(meetings({ sttProvider: 'none' }));
     expect(part(t, 'meetings')).toMatchObject({ state: 'ok', label: 'Working' });
   });
 
-  it('labels the tracker from the last recorded upload, which survives a restart', () => {
-    const t = setup();
+  it('labels the tracker from the last recorded upload, which survives a restart', async () => {
+    const t = await setup();
     expect(part(t, 'tracker')).toMatchObject({ state: 'ok', label: 'Waiting for the first upload' });
     db_publish(t.db);
     expect(part(t, 'tracker')).toMatchObject({ state: 'ok', label: 'Updated' });
   });
 
-  it('warns while the WhatsApp session cannot be saved, and says Starting before the gateway runs', () => {
-    const t = setup();
+  it('warns while the WhatsApp session cannot be saved, and says Starting before the gateway runs', async () => {
+    const t = await setup();
     t.health.setWhatsApp({ state: 'open', since: NOW, lastErrorCode: null, credsSaveFailures: 1 });
     const gw = { state: 'open' as const, since: NOW, lastErrorCode: null, credsSaveFailures: 1 };
     const c = new AgentControl({ app: { health: t.health, spend: t.spend }, db: t.db, gateway: { status: () => gw }, env: parseEnv({}), clock: t.clock });
@@ -303,15 +303,15 @@ describe('AgentControl review fixes', () => {
     expect(part(t, 'whatsapp')).toMatchObject({ state: 'warn', label: 'Starting' });
   });
 
-  it('counts approved groups only, and main is used for the tracker only while meetings are off', () => {
-    const t = setup();
+  it('counts approved groups only, and main is used for the tracker only while meetings are off', async () => {
+    const t = await setup();
     t.db.raw.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
     expect(t.control.connections().founder.groups).toBe(1);
     expect(t.control.connections().google).toEqual([{ label: 'main', email: null, usedFor: ['Tracker on Drive'], state: 'ok', stateLabel: 'Connected' }]);
   });
 
-  it('the last message is the newest one stored', () => {
-    const t = setup();
+  it('the last message is the newest one stored', async () => {
+    const t = await setup();
     for (const [waId, ts] of [['a', '2026-10-19T06:00:00.000Z'], ['b', '2026-10-19T07:30:00.000Z']] as const) {
       insertMessage(t.db, { waId, clientId: 1, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts, text: 'x', quotedWaId: null, mediaType: null });
     }
@@ -320,8 +320,8 @@ describe('AgentControl review fixes', () => {
 });
 
 describe('AgentControl review round 2', () => {
-  it('the last message is the newest one even when older messages are stored after it (catch-up after a reconnect)', () => {
-    const t = setup();
+  it('the last message is the newest one even when older messages are stored after it (catch-up after a reconnect)', async () => {
+    const t = await setup();
     for (const [waId, ts] of [['new', '2026-10-19T07:30:00.000Z'], ['old', '2026-10-18T22:00:00.000Z']] as const) {
       insertMessage(t.db, { waId, clientId: 1, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts, text: 'x', quotedWaId: null, mediaType: null });
     }

@@ -485,7 +485,7 @@ describe('morning report documentation: short message with the tracker link (27 
     expect(saysAttached(section)).toBe(false);
   });
 
-  it('the spec has the 27 Oct 2026 amendment with D1 to D4', () => {
+  it('the spec has the 27 Oct 2026 amendment with D1 to D4', async () => {
     const spec = read('docs/superpowers/specs/2026-10-23-morning-report-design.md');
     const amendment = spec.slice(spec.indexOf('\n## Amendment, 27 Oct 2026\n'));
     expect(spec).toContain('\n## Amendment, 27 Oct 2026\n');
@@ -520,7 +520,7 @@ describe('morning report documentation: short message with the tracker link (27 
     ]) expect(amendment, rule).toContain(rule);
     expect(amendment).not.toMatch(/every client|active or not|with a warning/i);
     // The documented link format is the one the code builds.
-    const db = seededDb();
+    const db = await seededDb();
     setKv(db, TRACKER_ID_KEY, 'IDPLACEHOLDER');
     const link = trackerLink(db)!.replace('IDPLACEHOLDER', '{id}');
     expect(link).toBe('https://drive.google.com/file/d/{id}/view');

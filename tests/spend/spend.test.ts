@@ -27,9 +27,9 @@ describe('pricing', () => {
 });
 
 describe('SpendGuard', () => {
-  it('sums spend per India day and enforces the cap', () => {
+  it('sums spend per India day and enforces the cap', async () => {
     const clock = manualClock('2026-10-19T10:00:00Z');
-    const guard = new SpendGuard({ db: seededDb(), clock, capUsd: 1 });
+    const guard = new SpendGuard({ db: await seededDb(), clock, capUsd: 1 });
     guard.record('ai', 0.6, 'batch 1');
     expect(guard.spentToday()).toBeCloseTo(0.6);
     expect(guard.canSpend(0.3)).toBe(true);
@@ -42,13 +42,13 @@ describe('SpendGuard', () => {
     expect(guard.isPaused()).toBe(false);
   });
 
-  const make = (cap = 1, start = '2026-10-19T10:00:00Z') => {
+  const make = async (cap = 1, start = '2026-10-19T10:00:00Z') => {
     const clock = manualClock(start);
-    return { clock, guard: new SpendGuard({ db: seededDb(), clock, capUsd: cap }) };
+    return { clock, guard: new SpendGuard({ db: await seededDb(), clock, capUsd: cap }) };
   };
 
-  it('treats spend exactly at the cap correctly', () => {
-    const { guard } = make();
+  it('treats spend exactly at the cap correctly', async () => {
+    const { guard } = await make();
     guard.record('ai', 0.6, 'a');
     expect(guard.canSpend(0.4)).toBe(true);
     expect(guard.canSpend(0.41)).toBe(false);
@@ -57,31 +57,31 @@ describe('SpendGuard', () => {
     expect(guard.canSpend(0)).toBe(false);
   });
 
-  it('switches day at midnight IST', () => {
-    const { clock, guard } = make(1, '2026-10-19T18:29:59Z');
+  it('switches day at midnight IST', async () => {
+    const { clock, guard } = await make(1, '2026-10-19T18:29:59Z');
     guard.record('ai', 0.5, 'a');
     expect(guard.spentToday()).toBeCloseTo(0.5);
     clock.set('2026-10-19T18:30:00Z');
     expect(guard.spentToday()).toBe(0);
   });
 
-  it.each([NaN, Infinity, -5])('pauses the day on bad amount %s', (bad) => {
-    const { guard } = make();
+  it.each([NaN, Infinity, -5])('pauses the day on bad amount %s', async (bad) => {
+    const { guard } = await make();
     guard.record('ai', 0.2, 'ok');
     expect(() => guard.record('ai', bad, 'batch 1')).not.toThrow();
     expect(guard.spentToday()).toBeGreaterThanOrEqual(1);
     expect(guard.isPaused()).toBe(true);
   });
 
-  it('rejects bad estimates', () => {
-    const { guard } = make();
+  it('rejects bad estimates', async () => {
+    const { guard } = await make();
     expect(guard.canSpend(NaN)).toBe(false);
     expect(guard.canSpend(-1)).toBe(false);
     expect(guard.reserve(NaN)).toBeNull();
   });
 
-  it('reserves, releases and settles in-flight calls', () => {
-    const { guard } = make();
+  it('reserves, releases and settles in-flight calls', async () => {
+    const { guard } = await make();
     const id = guard.reserve(0.6);
     expect(id).not.toBeNull();
     expect(guard.reserve(0.6)).toBeNull();
@@ -93,8 +93,8 @@ describe('SpendGuard', () => {
     expect(guard.reserve(0.75)).not.toBeNull();
   });
 
-  it('stops counting a reservation after 45 minutes', () => {
-    const { clock, guard } = make();
+  it('stops counting a reservation after 45 minutes', async () => {
+    const { clock, guard } = await make();
     expect(guard.reserve(0.6)).not.toBeNull();
     clock.advance(45 * 60_000);
     expect(guard.reserve(0.6)).toBeNull();
@@ -103,8 +103,8 @@ describe('SpendGuard', () => {
     expect(guard.reserve(0.6)).not.toBeNull();
   });
 
-  it('settlePending books every live reservation at its estimate and frees it', () => {
-    const db = seededDb();
+  it('settlePending books every live reservation at its estimate and frees it', async () => {
+    const db = await seededDb();
     const clock = manualClock('2026-10-19T10:00:00Z');
     const guard = new SpendGuard({ db, clock, capUsd: 1 });
     expect(guard.reserve(0.1)).not.toBeNull();
@@ -120,23 +120,23 @@ describe('SpendGuard', () => {
     expect(guard.reserve(0.01)).toBeNull(); // closed after shutdown booking
   });
 
-  it('reserve returns null after settlePending, so a late retry does not start a paid call', () => {
-    const { guard } = make();
+  it('reserve returns null after settlePending, so a late retry does not start a paid call', async () => {
+    const { guard } = await make();
     expect(guard.reserve(0.01)).not.toBeNull();
     guard.settlePending('shutdown (estimated)');
     expect(guard.reserve(0.01)).toBeNull();
   });
 
-  it('settlePending records nothing when nothing is pending', () => {
-    const { guard } = make();
+  it('settlePending records nothing when nothing is pending', async () => {
+    const { guard } = await make();
     const id = guard.reserve(0.2)!;
     guard.settle(id, 'ai', 0.1, 'batch 1');
     expect(guard.settlePending('shutdown (estimated)')).toBe(0);
     expect(guard.spentToday()).toBeCloseTo(0.1);
   });
 
-  it('a call that finishes after settlePending is not booked twice', () => {
-    const { guard } = make();
+  it('a call that finishes after settlePending is not booked twice', async () => {
+    const { guard } = await make();
     const a = guard.reserve(0.2)!;
     const b = guard.reserve(0.3)!;
     guard.settlePending('shutdown (estimated)');
@@ -145,8 +145,8 @@ describe('SpendGuard', () => {
     expect(guard.spentToday()).toBeCloseTo(0.5);
   });
 
-  it('tells a cap that is reached apart from holds of calls still in flight (Task 15 review round 3)', () => {
-    const { guard } = make();
+  it('tells a cap that is reached apart from holds of calls still in flight (Task 15 review round 3)', async () => {
+    const { guard } = await make();
     guard.record('ai', 0.4, 'batch 1');
     const rid = guard.reserve(0.5)!; // a scan read in flight
     expect(guard.canSpend(0.2)).toBe(false);
@@ -161,8 +161,8 @@ describe('SpendGuard', () => {
     expect(guard.fitsIgnoringHolds(0)).toBe(false);
   });
 
-  it('a hold keeps its kind: settlePending books a speech hold as stt and an AI hold as ai (Phase 3 Task 6)', () => {
-    const db = seededDb();
+  it('a hold keeps its kind: settlePending books a speech hold as stt and an AI hold as ai (Phase 3 Task 6)', async () => {
+    const db = await seededDb();
     const guard = new SpendGuard({ db, clock: manualClock('2026-10-19T10:00:00Z'), capUsd: 1 });
     expect(guard.reserve(0.1)).not.toBeNull(); // the default kind stays 'ai'
     expect(guard.reserve(0.2, 'stt')).not.toBeNull();
@@ -175,8 +175,8 @@ describe('SpendGuard', () => {
     ]);
   });
 
-  it('settlePending tells a hold its owner booked it; a failing owner does not stop the other bookings', () => {
-    const db = seededDb();
+  it('settlePending tells a hold its owner booked it; a failing owner does not stop the other bookings', async () => {
+    const db = await seededDb();
     const guard = new SpendGuard({ db, clock: manualClock('2026-10-19T10:00:00Z'), capUsd: 1 });
     const told: string[] = [];
     guard.reserve(0.1, 'stt', () => {
@@ -189,8 +189,8 @@ describe('SpendGuard', () => {
     expect((db.raw.prepare('SELECT COUNT(*) AS n FROM spend').get() as { n: number }).n).toBe(2);
   });
 
-  it('settlePending writes the booking and the owner record in one transaction; a failing owner write is rolled back', () => {
-    const db = seededDb();
+  it('settlePending writes the booking and the owner record in one transaction; a failing owner write is rolled back', async () => {
+    const db = await seededDb();
     const guard = new SpendGuard({ db, clock: manualClock('2026-10-19T10:00:00Z'), capUsd: 1 });
     guard.reserve(0.1, 'stt', () => db.raw.prepare("INSERT INTO kv (k, v) VALUES ('ok', 'x')").run());
     guard.reserve(0.2, 'stt', () => {
@@ -202,8 +202,8 @@ describe('SpendGuard', () => {
     expect(db.raw.prepare('SELECT usd FROM spend ORDER BY id').all()).toEqual([{ usd: 0.1 }, { usd: 0.2 }]); // both still booked
   });
 
-  it('records on settle with an unknown id and ignores unknown release', () => {
-    const { guard } = make();
+  it('records on settle with an unknown id and ignores unknown release', async () => {
+    const { guard } = await make();
     guard.release(999);
     guard.settle(999, 'ai', 0.3, 'x');
     expect(guard.spentToday()).toBeCloseTo(0.3);

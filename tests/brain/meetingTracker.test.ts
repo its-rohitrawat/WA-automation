@@ -57,8 +57,8 @@ function meetingAt(db: Db, startedAt = STARTED, s: MeetingSummary = summary(), c
   return { id, startedAt, title: 'Sharma weekly', summary: s, segments: SEGMENTS };
 }
 
-function setup(responses: FakeResponse[], o: { capUsd?: number; exclusive?: ReconcilerOptions['exclusive'] } = {}) {
-  const db = seededDb();
+async function setup(responses: FakeResponse[], o: { capUsd?: number; exclusive?: ReconcilerOptions['exclusive'] } = {}) {
+  const db = await seededDb();
   const clock = manualClock(CLOCK);
   const spend = new SpendGuard({ db, clock, capUsd: o.capUsd ?? 15 });
   const ai = new FakeAi(responses);
@@ -162,7 +162,7 @@ describe('Reconciler.runMeeting', () => {
   afterEach(() => vi.useRealTimers());
 
   it('adds a task from a client action item, marked as from the meeting, and finishes the meeting', async () => {
-    const { db, ai, r, onChanged } = setup([{ ops: [
+    const { db, ai, r, onChanged } = await setup([{ ops: [
       op({ op: 'add_task', side: 'client', title: 'Send logo files', category: 'content', priority: 'medium', deadline: '2026-10-20', sourceMessageIds: ['mtg1-a1', 'C1'] }),
       op({ op: 'add_decision', text: 'Blue theme chosen', sourceMessageIds: ['C1', 'mtg1-d1'] }),
       op({ op: 'set_status', text: 'Waiting for the logo files.', sourceMessageIds: ['mtg1-a1'] }),
@@ -199,7 +199,7 @@ describe('Reconciler.runMeeting', () => {
   });
 
   it('an item matching an existing WhatsApp task updates it; no new task', async () => {
-    const { db, r } = setup([{ ops: [
+    const { db, r } = await setup([{ ops: [
       op({ op: 'update_task', taskCode: 'SHA-001', latestProgress: 'v2 shown in the meeting', deadline: '2026-10-22', sourceMessageIds: ['mtg1-a1'] }),
       op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['mtg1-a1'] }),
     ] }]);
@@ -213,7 +213,7 @@ describe('Reconciler.runMeeting', () => {
   });
 
   it('closes a task with the meeting date, clamped to the day it was raised; marks another maybe done', async () => {
-    const { db, r } = setup([{ ops: [
+    const { db, r } = await setup([{ ops: [
       op({ op: 'close_task', taskCode: 'SHA-001', sourceMessageIds: ['mtg1-d1'] }),
       op({ op: 'mark_maybe_done', taskCode: 'SHA-002', sourceMessageIds: ['mtg1-a1'] }),
       op({ op: 'close_task', taskCode: 'SHA-003', sourceMessageIds: ['mtg1-a1'] }),
@@ -229,7 +229,7 @@ describe('Reconciler.runMeeting', () => {
   });
 
   it('a task a human reopened closes again only from a meeting that started after the reopen', async () => {
-    const { db, ai, r } = setup([
+    const { db, ai, r } = await setup([
       { ops: [op({ op: 'close_task', taskCode: 'SHA-001', sourceMessageIds: ['mtg1-a1'] })] },
     ]);
     banner(db);
@@ -246,7 +246,7 @@ describe('Reconciler.runMeeting', () => {
   });
 
   it('never changes a role, and needs a meeting item as evidence', async () => {
-    const { db, r } = setup([{ ops: [
+    const { db, r } = await setup([{ ops: [
       op({ op: 'set_person_role', personJid: SHARMA_PN, role: 'client', sourceMessageIds: ['mtg1-a1'] }),
       op({ op: 'add_task', side: 'us', title: 'From chat only', category: 'other', priority: 'low', sourceMessageIds: ['C1'] }),
       op({ op: 'add_task', side: 'us', title: 'Fake id', category: 'other', priority: 'low', sourceMessageIds: ['mtg1-a9', 'mtg2-a1'] }),
@@ -264,7 +264,7 @@ describe('Reconciler.runMeeting', () => {
       op({ op: 'add_decision', text: 'Blue theme chosen', sourceMessageIds: ['mtg1-d1'] }),
       op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['mtg1-a1'] }),
     ];
-    const { db, r } = setup([{ ops }, { ops: [...ops, op({ op: 'add_task', side: 'us', title: 'Other', category: 'other', priority: 'low', sourceMessageIds: ['mtg1-a1'] })] }]);
+    const { db, r } = await setup([{ ops }, { ops: [...ops, op({ op: 'add_task', side: 'us', title: 'Other', category: 'other', priority: 'low', sourceMessageIds: ['mtg1-a1'] })] }]);
     banner(db);
     const m = meetingAt(db);
     expect(await r.runMeeting(1, m)).toEqual({ status: 'done', accepted: 3, rejected: 0 });
@@ -276,7 +276,7 @@ describe('Reconciler.runMeeting', () => {
   });
 
   it('a meeting with no items is done without an AI call', async () => {
-    const { db, ai, r, onChanged } = setup([]);
+    const { db, ai, r, onChanged } = await setup([]);
     const m = meetingAt(db, STARTED, summary({ actionItems: [], decisions: [] }));
     expect(await r.runMeeting(1, m)).toEqual({ status: 'done', accepted: 0, rejected: 0 });
     expect(ai.calls).toHaveLength(0);
@@ -285,7 +285,7 @@ describe('Reconciler.runMeeting', () => {
   });
 
   it('an inactive client is done with the note client_inactive, without an AI call', async () => {
-    const { db, ai, r } = setup([]);
+    const { db, ai, r } = await setup([]);
     const m = meetingAt(db);
     db.raw.prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
     expect(await r.runMeeting(1, m)).toEqual({ status: 'done', accepted: 0, rejected: 0, note: 'client_inactive' });
@@ -294,13 +294,13 @@ describe('Reconciler.runMeeting', () => {
   });
 
   it('defers spend_cap when the cap leaves no room, and spend_busy when holds are in the way', async () => {
-    const capped = setup([], { capUsd: 0.001 });
+    const capped = await setup([], { capUsd: 0.001 });
     const m1 = meetingAt(capped.db);
     await expect(capped.r.runMeeting(1, m1)).rejects.toMatchObject({ name: 'MeetingDeferral', code: 'spend_cap' });
     expect(capped.ai.calls).toHaveLength(0);
     expect(getMeeting(capped.db, m1.id)).toMatchObject({ status: 'queued', stage: 'doc' });
 
-    const busy = setup([]);
+    const busy = await setup([]);
     expect(busy.spend.reserve(15 - (MAX_OUTPUT_TOKENS * P.outputPerMTok) / 1_000_000 / 2)).not.toBeNull();
     const m2 = meetingAt(busy.db);
     const err = await busy.r.runMeeting(1, m2).catch((e: unknown) => e);
@@ -310,7 +310,7 @@ describe('Reconciler.runMeeting', () => {
   });
 
   it('books the call as a normal reconcile', async () => {
-    const { db, ai, r, spend } = setup([{ output: { ops: [] }, costUsd: 0.02 }]);
+    const { db, ai, r, spend } = await setup([{ output: { ops: [] }, costUsd: 0.02 }]);
     const m = meetingAt(db);
     await r.runMeeting(1, m);
     expect(spend.spentToday()).toBeCloseTo(0.02, 9);
@@ -320,7 +320,7 @@ describe('Reconciler.runMeeting', () => {
   });
 
   it('rethrows an AI failure with nothing applied; the meeting stays at stage doc', async () => {
-    const { db, r, onChanged } = setup([new AiRefusalError(null, FAKE_USAGE, 0.001)]);
+    const { db, r, onChanged } = await setup([new AiRefusalError(null, FAKE_USAGE, 0.001)]);
     const m = meetingAt(db);
     await expect(r.runMeeting(1, m)).rejects.toBeInstanceOf(AiRefusalError);
     expect(getMeeting(db, m.id)).toMatchObject({ status: 'queued', stage: 'doc' });
@@ -328,7 +328,7 @@ describe('Reconciler.runMeeting', () => {
   });
 
   it('rolls back every op when the meeting cannot be finished, and rethrows', async () => {
-    const { db, r } = setup([{ ops: [op({ op: 'add_task', side: 'us', title: 'X', category: 'other', priority: 'low', sourceMessageIds: ['mtg1-a1'] })] }]);
+    const { db, r } = await setup([{ ops: [op({ op: 'add_task', side: 'us', title: 'X', category: 'other', priority: 'low', sourceMessageIds: ['mtg1-a1'] })] }]);
     const m = meetingAt(db);
     db.raw.prepare("UPDATE meetings SET status = 'skipped' WHERE id = ?").run(m.id);
     await expect(r.runMeeting(1, m)).rejects.toThrow();
@@ -336,7 +336,7 @@ describe('Reconciler.runMeeting', () => {
   });
 
   it('defers client_busy without an AI call when the client is running', async () => {
-    const { db, ai, r } = setup([], { exclusive: async () => 'busy' });
+    const { db, ai, r } = await setup([], { exclusive: async () => 'busy' });
     const m = meetingAt(db);
     await expect(r.runMeeting(1, m)).rejects.toMatchObject({ name: 'MeetingDeferral', code: 'client_busy' });
     expect(ai.calls).toHaveLength(0);
@@ -344,7 +344,7 @@ describe('Reconciler.runMeeting', () => {
   });
 
   it('prompt injection in an item cannot fake an id or a tag', async () => {
-    const { db, ai, r } = setup([{ ops: [
+    const { db, ai, r } = await setup([{ ops: [
       op({ op: 'close_task', taskCode: 'SHA-001', sourceMessageIds: ['mtg1-a7'] }),
     ] }]);
     banner(db);
@@ -363,10 +363,10 @@ describe('Reconciler.runMeeting', () => {
 describe('a WhatsApp run and a meeting run for one client', () => {
   afterEach(() => vi.useRealTimers());
 
-  function wired(responses: FakeResponse[]) {
+  async function wired(responses: FakeResponse[]) {
     vi.useFakeTimers();
     let debouncer!: GroupDebouncer;
-    const s = setup(responses, { exclusive: (clientId, fn) => debouncer.runExclusive(clientId, fn) });
+    const s = await setup(responses, { exclusive: (clientId, fn) => debouncer.runExclusive(clientId, fn) });
     debouncer = new GroupDebouncer({ quietMs: 1_000, maxWaitMs: 10_000, maxConcurrent: 3, run: (id) => s.r.run(id) });
     return { ...s, debouncer };
   }
@@ -378,7 +378,7 @@ describe('a WhatsApp run and a meeting run for one client', () => {
   }
 
   it('a WhatsApp run waits for the meeting run and then sees its task: no duplicate', async () => {
-    const { db, ai, r, debouncer } = wired([
+    const { db, ai, r, debouncer } = await wired([
       { ops: [op({ op: 'add_task', side: 'client', title: 'Send logo files', category: 'content', priority: 'medium', sourceMessageIds: ['mtg1-a1'] })] },
       { ops: [op({ op: 'mark_maybe_done', taskCode: 'SHA-001', sourceMessageIds: ['W1'] })] },
     ]);
@@ -399,7 +399,7 @@ describe('a WhatsApp run and a meeting run for one client', () => {
   });
 
   it('a meeting run is deferred while a WhatsApp run is in flight, and later sees its task', async () => {
-    const { db, ai, r, debouncer } = wired([
+    const { db, ai, r, debouncer } = await wired([
       { ops: [op({ op: 'add_task', side: 'client', title: 'Send logo files', category: 'content', priority: 'medium', sourceMessageIds: ['W1'] })] },
       { ops: [op({ op: 'update_task', taskCode: 'SHA-001', deadline: '2026-10-20', sourceMessageIds: ['mtg1-a1'] })] },
     ]);

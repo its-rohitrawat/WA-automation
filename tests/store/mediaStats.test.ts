@@ -35,8 +35,8 @@ function gaveUpUpload(db: Db, waId: string, clientId = 1): number {
 const ZERO = { pending: 0, stale: 0, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0 };
 
 describe('mediaStats', () => {
-  it('counts waiting, long-waiting, budget-waiting and recently failed files and uploads that gave up', () => {
-    const db = seededDb();
+  it('counts waiting, long-waiting, budget-waiting and recently failed files and uploads that gave up', async () => {
+    const db = await seededDb();
     add(db, 'A');
     add(db, 'B', { createdAt: '2026-10-19T07:00:00.000Z' });
     add(db, 'C', { createdAt: '2026-10-19T06:00:00.000Z', errorCode: 'spend_cap' });
@@ -46,8 +46,8 @@ describe('mediaStats', () => {
     expect(mediaStats(db, new Date('2026-10-19T08:00:00.000Z'))).toEqual({ pending: 3, stale: 1, spendCap: 1, failedRecent: 1, uploadFailed: 1, sttRefused: 0, voiceFailed: 0 });
   });
 
-  it('counts pending files waiting because the speech-to-text key was refused (sttRefused), of active clients only', () => {
-    const db = seededDb();
+  it('counts pending files waiting because the speech-to-text key was refused (sttRefused), of active clients only', async () => {
+    const db = await seededDb();
     const a = add(db, 'A', { errorCode: 'stt_unavailable' });
     add(db, 'B', { errorCode: 'stt_unavailable' });
     add(db, 'C', { errorCode: 'ai_unavailable' });
@@ -60,27 +60,27 @@ describe('mediaStats', () => {
     expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 2, failedRecent: 1, sttRefused: 1 });
   });
 
-  it('counts a file waiting for the speech-to-text key under sttRefused, not as waiting too long, so Health shows the key line (review E)', () => {
-    const db = seededDb();
+  it('counts a file waiting for the speech-to-text key under sttRefused, not as waiting too long, so Health shows the key line (review E)', async () => {
+    const db = await seededDb();
     add(db, 'A', { createdAt: '2026-10-19T06:00:00.000Z', errorCode: 'stt_unavailable' });
     add(db, 'B', { createdAt: '2026-10-19T06:00:00.000Z', errorCode: 'ai_unavailable' });
     expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 2, stale: 1, sttRefused: 1 });
   });
 
-  it('never counts a queued backlog file as waiting too long: a long backlog run is not a fault (review round 2)', () => {
-    const db = seededDb();
+  it('never counts a queued backlog file as waiting too long: a long backlog run is not a fault (review round 2)', async () => {
+    const db = await seededDb();
     const id = add(db, 'A', { createdAt: '2026-10-19T06:00:00.000Z' });
     db.raw.prepare('UPDATE media SET backlog = 1 WHERE id = ?').run(id);
     add(db, 'B', { createdAt: '2026-10-19T06:00:00.000Z' });
     expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 2, stale: 1 });
   });
 
-  it('is all zeros on an empty table', () => {
-    expect(mediaStats(seededDb(), new Date(NOW))).toEqual(ZERO);
+  it('is all zeros on an empty table', async () => {
+    expect(mediaStats(await seededDb(), new Date(NOW))).toEqual(ZERO);
   });
 
-  it('counts a long wait from the service start when that is later than the file (15a)', () => {
-    const db = seededDb();
+  it('counts a long wait from the service start when that is later than the file (15a)', async () => {
+    const db = await seededDb();
     add(db, 'A', { createdAt: '2026-10-19T06:00:00.000Z' });
     const startedAt = new Date('2026-10-19T07:45:00.000Z');
     expect(mediaStats(db, new Date('2026-10-19T08:00:00.000Z'), startedAt)).toMatchObject({ pending: 1, stale: 0 });
@@ -88,15 +88,15 @@ describe('mediaStats', () => {
     expect(mediaStats(db, new Date('2026-10-19T08:15:00.001Z'), startedAt)).toMatchObject({ pending: 1, stale: 1 });
   });
 
-  it('takes the wait as a parameter', () => {
-    const db = seededDb();
+  it('takes the wait as a parameter', async () => {
+    const db = await seededDb();
     add(db, 'A', { createdAt: '2026-10-19T07:50:00.000Z' });
     expect(mediaStats(db, new Date(NOW), new Date(0), 5 * 60_000).stale).toBe(1);
     expect(mediaStats(db, new Date(NOW), new Date(0), 15 * 60_000).stale).toBe(0);
   });
 
-  it('counts a file waiting for the daily budget under spendCap, not as waiting too long, until it is tried again (15b)', () => {
-    const db = seededDb();
+  it('counts a file waiting for the daily budget under spendCap, not as waiting too long, until it is tried again (15b)', async () => {
+    const db = await seededDb();
     const id = add(db, 'A', { createdAt: '2026-10-19T06:00:00.000Z' });
     deferMedia(db, id, { errorCode: 'spend_cap', nextAttemptAt: '2026-10-19T08:10:00.000Z', countAttempt: false, at: NOW });
     expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 1, spendCap: 1 });
@@ -107,24 +107,24 @@ describe('mediaStats', () => {
   });
 
   // Final review FR3c: a file waiting only for paid calls in flight is read within minutes, not after midnight.
-  it('does not count a file waiting for paid calls in flight (spend_busy) under spendCap', () => {
-    const db = seededDb();
+  it('does not count a file waiting for paid calls in flight (spend_busy) under spendCap', async () => {
+    const db = await seededDb();
     const id = add(db, 'A', { createdAt: '2026-10-19T07:55:00.000Z' });
     deferMedia(db, id, { errorCode: 'spend_busy', nextAttemptAt: '2026-10-19T08:10:00.000Z', countAttempt: false, at: NOW });
     expect(mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 1 });
     expect(mediaStats(db, new Date('2026-10-19T08:30:00.000Z'))).toEqual({ ...ZERO, pending: 1, stale: 1 });
   });
 
-  it('does not count an upload that gave up once the file is in Drive', () => {
-    const db = seededDb();
+  it('does not count an upload that gave up once the file is in Drive', async () => {
+    const db = await seededDb();
     const id = gaveUpUpload(db, 'A');
     expect(mediaStats(db, new Date(NOW)).uploadFailed).toBe(1);
     markUploaded(db, id, 'drive-1');
     expect(mediaStats(db, new Date(NOW)).uploadFailed).toBe(0);
   });
 
-  it('does not count an upload that gave up once its message is deleted for everyone (D3)', () => {
-    const db = seededDb();
+  it('does not count an upload that gave up once its message is deleted for everyone (D3)', async () => {
+    const db = await seededDb();
     gaveUpUpload(db, 'A');
     gaveUpUpload(db, 'B');
     expect(mediaStats(db, new Date(NOW)).uploadFailed).toBe(2);
@@ -132,8 +132,8 @@ describe('mediaStats', () => {
     expect(mediaStats(db, new Date(NOW)).uploadFailed).toBe(1);
   });
 
-  it('does not count an upload that gave up while its sender is not a client member', () => {
-    const db = seededDb();
+  it('does not count an upload that gave up while its sender is not a client member', async () => {
+    const db = await seededDb();
     gaveUpUpload(db, 'A');
     setRole(db, 1, CLIENT_JID, 'team', 'human');
     expect(mediaStats(db, new Date(NOW)).uploadFailed).toBe(0);
@@ -141,8 +141,8 @@ describe('mediaStats', () => {
     expect(mediaStats(db, new Date(NOW)).uploadFailed).toBe(1);
   });
 
-  it('counts exactly the uploads that gave up and that a restart tries again', () => {
-    const db = seededDb();
+  it('counts exactly the uploads that gave up and that a restart tries again', async () => {
+    const db = await seededDb();
     gaveUpUpload(db, 'A');
     gaveUpUpload(db, 'B');
     applyRevoke(db, 1, 'B');
@@ -152,8 +152,8 @@ describe('mediaStats', () => {
     expect(counted).toBe(1);
   });
 
-  it('leaves out the files of a client no longer on the allow-list, which wait untouched until it is back', () => {
-    const db = seededDb();
+  it('leaves out the files of a client no longer on the allow-list, which wait untouched until it is back', async () => {
+    const db = await seededDb();
     add(db, 'A', { clientId: 1, createdAt: '2026-10-19T06:00:00.000Z' });
     add(db, 'B', { clientId: 1, createdAt: '2026-10-19T06:00:00.000Z', errorCode: 'spend_cap' });
     gaveUpUpload(db, 'C', 1);
