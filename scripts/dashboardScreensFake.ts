@@ -99,7 +99,7 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
   const status = { at: day(0), up: true, line: { ok: true, text: 'All good' }, parts: [], lastMessageAt: day(0.01), spentToday: 0.42, capUsd: 3 };
   const assistant = new Assistant({
     ai: new ScriptedAssistantAi(), paid: spend, prices: { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.4 }, pending, settings,
-    log: silentLogger(), clock, db, control: { status: () => status }, spend, voiceLocal: true,
+    log: silentLogger(), clock, db, control: { status: async () => status }, spend, voiceLocal: true,
   });
   registerAssistantApi(web.router, { ...action, db, clock, assistant, pending, settings, audit });
 
@@ -131,9 +131,9 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
   const answer = (res: ServerResponse, r: { status: number; body: unknown }) => {
     res.writeHead(r.status, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify(r.body));
   };
-  web.router.get('/dashboard/api/clients/:code/chat', ({ req, res, params, url }) => {
+  web.router.get('/dashboard/api/clients/:code/chat', async ({ req, res, params, url }) => {
     guard.requireOwner(req);
-    answer(res, chatReadHandler(chat, ownerCtx, params.code ?? '', { before: url.searchParams.get('before'), limit: url.searchParams.get('limit') }));
+    answer(res, await chatReadHandler(chat, ownerCtx, params.code ?? '', { before: url.searchParams.get('before'), limit: url.searchParams.get('limit') }));
   });
   web.router.post('/dashboard/api/clients/:code/chat/send', async ({ req, res, params }) => {
     guard.requireCsrf(req, guard.requireOwner(req));

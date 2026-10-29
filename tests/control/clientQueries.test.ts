@@ -65,7 +65,7 @@ async function world(): Promise<Db> {
 describe('clientCards', () => {
   it('counts open, overdue, review and done this week per active client, with phases, last activity and sheet name', async () => {
     const db = await world();
-    const cards = clientCards(db, NOW);
+    const cards = await clientCards(db, NOW);
     expect(cards.map((c) => c.code)).toEqual(['MEH', 'SHA']);
     expect(cards[1]).toEqual({
       code: 'SHA', name: 'Sharma Interiors', groupName: 'Sharma Interiors',
@@ -80,7 +80,7 @@ describe('clientCards', () => {
   });
 
   it('a client with no tasks or messages has zero counts and no last activity', async () => {
-    const cards = clientCards(await seededDb(), NOW);
+    const cards = await clientCards(await seededDb(), NOW);
     expect(cards.every((c) => c.lastActivity === null && Object.values(c.counts).every((n) => n === 0))).toBe(true);
   });
 
@@ -89,16 +89,16 @@ describe('clientCards', () => {
     task(db, 1, { status: 'done', closedOn: '2026-10-25' });
     task(db, 1, { status: 'done', closedOn: '2026-10-26' });
     // 00:10 IST on Monday 26 Oct is still Sunday in UTC.
-    expect(clientCards(db, new Date('2026-10-25T18:40:00.000Z')).find((c) => c.code === 'SHA')!.counts.doneThisWeek).toBe(1);
+    expect((await clientCards(db, new Date('2026-10-25T18:40:00.000Z'))).find((c) => c.code === 'SHA')!.counts.doneThisWeek).toBe(1);
     // 23:50 IST on Sunday 25 Oct: the week began on Monday 19 Oct.
-    expect(clientCards(db, new Date('2026-10-25T18:20:00.000Z')).find((c) => c.code === 'SHA')!.counts.doneThisWeek).toBe(2);
+    expect((await clientCards(db, new Date('2026-10-25T18:20:00.000Z'))).find((c) => c.code === 'SHA')!.counts.doneThisWeek).toBe(2);
   });
 
   it('overdue uses the date in India: a deadline of yesterday IST is overdue just after midnight IST', async () => {
     const db = await seededDb();
     task(db, 1, { deadline: '2026-10-27' });
-    expect(clientCards(db, new Date('2026-10-27T18:29:00.000Z')).find((c) => c.code === 'SHA')!.counts.overdue).toBe(0);
-    expect(clientCards(db, new Date('2026-10-27T18:31:00.000Z')).find((c) => c.code === 'SHA')!.counts.overdue).toBe(1);
+    expect((await clientCards(db, new Date('2026-10-27T18:29:00.000Z'))).find((c) => c.code === 'SHA')!.counts.overdue).toBe(0);
+    expect((await clientCards(db, new Date('2026-10-27T18:31:00.000Z'))).find((c) => c.code === 'SHA')!.counts.overdue).toBe(1);
   });
 
   it('leaves out inactive clients; the group name comes from the live list when given', async () => {
@@ -106,7 +106,7 @@ describe('clientCards', () => {
     const desai: ClientConfig = { ...MEHTA, groupId: '120363000000000003@g.us', name: 'Desai Foods', code: 'DES' };
     syncClients(db, [SHARMA, MEHTA, desai]);
     syncClients(db, [SHARMA, MEHTA]);
-    const cards = clientCards(db, NOW, new Map([[SHARMA.groupId, 'Sharma x Studio']]));
+    const cards = await clientCards(db, NOW, new Map([[SHARMA.groupId, 'Sharma x Studio']]));
     expect(cards.map((c) => c.code)).toEqual(['MEH', 'SHA']);
     expect(cards.find((c) => c.code === 'SHA')!.groupName).toBe('Sharma x Studio');
     expect(cards.find((c) => c.code === 'MEH')!.groupName).toBe('Mehta Foods');
@@ -117,7 +117,7 @@ describe('clientCards', () => {
     const twin: ClientConfig = { ...MEHTA, groupId: '120363000000000004@g.us', name: 'Sharma Interiors', code: 'SHI' };
     const long: ClientConfig = { ...MEHTA, groupId: '120363000000000005@g.us', name: 'A very long client name: over thirty-one characters', code: 'LON' };
     syncClients(db, [SHARMA, MEHTA, twin, long]);
-    const byCode = new Map(clientCards(db, NOW).map((c) => [c.code, c.sheetName]));
+    const byCode = new Map((await clientCards(db, NOW)).map((c) => [c.code, c.sheetName]));
     expect(byCode.get('SHA')).toBe('Sharma Interiors');
     expect(byCode.get('SHI')).toBe('Sharma Interiors (2)');
     expect(byCode.get('LON')).toBe('A very long client name over th');
@@ -137,8 +137,8 @@ describe('clientDetail', () => {
     finishBatch(db, b2, { status: 'ok', errorCode: null, accepted: 1, rejected: 0, at: '2026-10-28T05:00:40.000Z' });
     startBatch(db, 2, 1, '2026-10-28T05:30:00.000Z');
 
-    const d = clientDetail(db, 'SHA', NOW)!;
-    const card = clientCards(db, NOW).find((c) => c.code === 'SHA')!;
+    const d = (await clientDetail(db, 'SHA', NOW))!;
+    const card = (await clientCards(db, NOW)).find((c) => c.code === 'SHA')!;
     expect(d.counts).toEqual(card.counts);
     expect(d.openTasks).toHaveLength(d.counts.open);
     expect(d.openTasks.filter((t) => t.status === 'maybe_done')).toHaveLength(d.counts.review);
@@ -154,15 +154,15 @@ describe('clientDetail', () => {
     expect(d.lastSyncAt).toBe('2026-10-28T05:00:40.000Z');
     expect(d).toMatchObject({ code: 'SHA', name: 'Sharma Interiors', sheetName: card.sheetName, lastActivity: card.lastActivity });
     // A batch still running gives its start time.
-    expect(clientDetail(db, 'MEH', NOW)!.lastSyncAt).toBe('2026-10-28T05:30:00.000Z');
+    expect((await clientDetail(db, 'MEH', NOW))!.lastSyncAt).toBe('2026-10-28T05:30:00.000Z');
   });
 
   it('no batch gives no sync time; an unknown or inactive code gives null', async () => {
     const db = await seededDb();
-    expect(clientDetail(db, 'SHA', NOW)!.lastSyncAt).toBeNull();
-    expect(clientDetail(db, 'ZZZ', NOW)).toBeNull();
+    expect((await clientDetail(db, 'SHA', NOW))!.lastSyncAt).toBeNull();
+    expect(await clientDetail(db, 'ZZZ', NOW)).toBeNull();
     syncClients(db, [MEHTA]);
-    expect(clientDetail(db, 'SHA', NOW)).toBeNull();
+    expect(await clientDetail(db, 'SHA', NOW)).toBeNull();
   });
 
   it('the last sync time ignores failed batches', async () => {
@@ -171,17 +171,17 @@ describe('clientDetail', () => {
     finishBatch(db, ok, { status: 'ok', errorCode: null, accepted: 1, rejected: 0, at: '2026-10-27T09:00:30.000Z' });
     const bad = startBatch(db, 1, 2, '2026-10-28T05:00:00.000Z');
     finishBatch(db, bad, { status: 'failed', errorCode: 'ai_error', accepted: null, rejected: null, at: '2026-10-28T05:00:10.000Z' });
-    expect(clientDetail(db, 'SHA', NOW)!.lastSyncAt).toBe('2026-10-27T09:00:30.000Z');
+    expect((await clientDetail(db, 'SHA', NOW))!.lastSyncAt).toBe('2026-10-27T09:00:30.000Z');
     const onlyFailed = startBatch(db, 2, 1, '2026-10-28T05:00:00.000Z');
     finishBatch(db, onlyFailed, { status: 'failed', errorCode: 'ai_error', accepted: null, rejected: null, at: '2026-10-28T05:00:10.000Z' });
-    expect(clientDetail(db, 'MEH', NOW)!.lastSyncAt).toBeNull();
+    expect((await clientDetail(db, 'MEH', NOW))!.lastSyncAt).toBeNull();
   });
 
   it(`lists at most MEETINGS_LIMIT (${MEETINGS_LIMIT}) meetings, the newest`, async () => {
     expect(MEETINGS_LIMIT).toBe(50);
     const db = await seededDb();
     const ids = Array.from({ length: 51 }, (_, i) => meeting(db, i + 1, 1, `Call ${i}`, new Date(Date.parse('2026-09-01T06:00:00.000Z') + i * 86_400_000).toISOString()));
-    const d = clientDetail(db, 'SHA', NOW)!;
+    const d = (await clientDetail(db, 'SHA', NOW))!;
     expect(d.meetings).toHaveLength(50);
     expect(d.meetings[0]!.id).toBe(ids[50]);
     expect(d.meetings.map((m) => m.id)).not.toContain(ids[0]);
@@ -190,9 +190,9 @@ describe('clientDetail', () => {
   it('never carries quotes, progress notes, attendees, participant names or a phone number; cards carry no message text', async () => {
     const db = await world();
     meeting(db, 1, 1, 'Sharma weekly', '2026-10-20T06:00:00.000Z');
-    const all = JSON.stringify([clientCards(db, NOW), clientDetail(db, 'SHA', NOW)]);
+    const all = JSON.stringify([await clientCards(db, NOW), await clientDetail(db, 'SHA', NOW)]);
     for (const s of [QUOTE, 'progress words', 'Attendee Name', 'Participant Name', 'a@client.com', '919800000001', '@s.whatsapp.net']) expect(all).not.toContain(s);
-    expect(JSON.stringify(clientCards(db, NOW))).not.toContain(MESSAGE);
+    expect(JSON.stringify(await clientCards(db, NOW))).not.toContain(MESSAGE);
   });
 });
 
@@ -224,7 +224,7 @@ describe('the client drawer: what the agent has seen (owner decision, 28 Oct 202
     say(db, 5, '2026-10-28T05:00:00.000Z', { person: 1, text: `Line one\nline two ${'x'.repeat(300)}` });
     say(db, 6, '2026-10-28T05:30:00.000Z', { fromMe: true, person: 9, text: 'from the founder' });
     db.raw.prepare("UPDATE messages SET revoked = 1 WHERE wa_id = 'D6'").run();
-    const a = clientDetail(db, 'SHA', NOW)!.activity;
+    const a = (await clientDetail(db, 'SHA', NOW))!.activity;
     expect(a.week).toEqual({ messages: 4, people: 3, files: 1, voice: 1 });
     expect(a.latest.map((m) => [m.sender, m.kind])).toEqual([['Rahul', 'text'], ['Someone', 'voice'], ['Someone', 'image']]);
     expect(a.latest[0]!.text.startsWith('Line one line two x')).toBe(true);
@@ -248,14 +248,14 @@ describe('the client drawer: what the agent has seen (owner decision, 28 Oct 202
     recordEvent(db, { taskId: null, clientId: 1, actor: 'ai', op: 'add_decision', detail: {}, reason: null, sourceIds: [], at: '2026-10-28T05:20:00.000Z' });
     const failed = startBatch(db, 1, 1, '2026-10-28T05:40:00.000Z');
     finishBatch(db, failed, { status: 'failed', errorCode: 'x', accepted: null, rejected: null, at: '2026-10-28T05:41:00.000Z' });
-    const a = clientDetail(db, 'SHA', NOW, undefined, 5)!.activity;
+    const a = (await clientDetail(db, 'SHA', NOW, undefined, 5))!.activity;
     expect(a.pending).toBe(1);
     expect(a.quietMinutes).toBe(5);
     expect(a.lastBatch).toEqual({ at: '2026-10-28T05:20:00.000Z', messages: 6, taskChanges: 2 });
     expect(a.history).toMatchObject({ state: 'waiting' });
     expect(a.taskCount).toBe(1);
     expect(a.approvedAt).toEqual(expect.any(String));
-    const card = clientCards(db, NOW, undefined, 5).find((c) => c.code === 'SHA')!;
+    const card = (await clientCards(db, NOW, undefined, 5)).find((c) => c.code === 'SHA')!;
     expect(card.pulse).toEqual({ pending: 1, lastReadAt: '2026-10-28T05:20:00.000Z', quietMinutes: 5 });
   });
 
@@ -268,17 +268,17 @@ describe('the client drawer: what the agent has seen (owner decision, 28 Oct 202
     say(db, 1, '2026-10-28T05:00:00.000Z', { person: 1, text: `ok ${family} क्‍ष` });
     say(db, 2, '2026-10-28T05:01:00.000Z', { person: 2, text: family.repeat(200) });
     say(db, 3, '2026-10-28T05:02:00.000Z', { person: 3, text: null, mediaType: 'location' });
-    const [loc, long, short] = clientDetail(db, 'SHA', NOW)!.activity.latest;
+    const [loc, long, short] = (await clientDetail(db, 'SHA', NOW))!.activity.latest;
     expect(loc).toMatchObject({ sender: 'Kavya 👩‍💻', kind: 'location', text: '' });
     expect(long!.sender).toBe('Someone');
     expect(short!.sender).toBe('Someone');
     expect(short!.text).toBe(`ok ${family} क्‍ष`);
     expect(long!.text).toBe(`${family.repeat(MESSAGE_CHARS - 1)}…`);
-    expect(JSON.stringify(clientDetail(db, 'SHA', NOW))).not.toMatch(/98765|9876543210/);
+    expect(JSON.stringify(await clientDetail(db, 'SHA', NOW))).not.toMatch(/98765|9876543210/);
   });
 
   it('a group with no messages: zero numbers, nothing latest, no last batch', async () => {
-    const a = clientDetail(await seededDb(), 'MEH', NOW)!.activity;
+    const a = (await clientDetail(await seededDb(), 'MEH', NOW))!.activity;
     expect(a).toMatchObject({ pending: 0, lastBatch: null, week: { messages: 0, people: 0, files: 0, voice: 0 }, latest: [] });
   });
 });

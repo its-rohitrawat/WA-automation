@@ -149,11 +149,11 @@ function toRow(r: RawRow, now: Date, accountOf: AccountOf | undefined): Dashboar
 }
 
 /** One page of a view, newest first, with the view's total before paging. */
-export function listDashboardMeetings(db: Db, p: MeetingListParams, now: Date, accountOf?: AccountOf): { total: number; rows: DashboardMeetingRow[] } {
+export async function listDashboardMeetings(db: Db, p: MeetingListParams, now: Date, accountOf?: AccountOf): Promise<{ total: number; rows: DashboardMeetingRow[] }> {
   const statuses = p.view === 'all' ? MEETING_STATUSES : VIEW_STATUSES[p.view];
   const where = `WHERE m.status IN (${statuses.map(() => '?').join(', ')})`;
-  const total = (db.raw.prepare(`SELECT COUNT(*) AS n FROM meetings m ${where}`).get(...statuses) as { n: number }).n;
-  const rows = db.raw.prepare(`${SELECT_SQL} ${where} ORDER BY m.started_at DESC, m.id DESC LIMIT ? OFFSET ?`).all(...statuses, p.limit, p.offset) as RawRow[];
+  const total = (await db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM meetings m ${where}`, [...statuses]))!.n;
+  const rows = await db.all<RawRow>(`${SELECT_SQL} ${where} ORDER BY m.started_at DESC, m.id DESC LIMIT ? OFFSET ?`, [...statuses, p.limit, p.offset]);
   return { total, rows: rows.map((r) => toRow(r, now, accountOf)) };
 }
 
@@ -182,10 +182,10 @@ export function parseMeetingId(raw: string): number | undefined {
 }
 
 /** One meeting with its summary and the tasks made from it; undefined when there is no such meeting. */
-export function meetingDetail(db: Db, rawId: string, now: Date, accountOf?: AccountOf): DashboardMeetingDetail | undefined {
+export async function meetingDetail(db: Db, rawId: string, now: Date, accountOf?: AccountOf): Promise<DashboardMeetingDetail | undefined> {
   const id = parseMeetingId(rawId);
   if (id === undefined) return undefined;
-  const r = db.raw.prepare(`${SELECT_SQL} WHERE m.id = ?`).get(id) as RawRow | undefined;
+  const r = await db.get<RawRow>(`${SELECT_SQL} WHERE m.id = ?`, [id]);
   if (!r) return undefined;
-  return { ...toRow(r, now, accountOf), summary: summaryOf(db, id), actionItemTasks: tasksForMeeting(db, id, now) };
+  return { ...toRow(r, now, accountOf), summary: summaryOf(db, id), actionItemTasks: await tasksForMeeting(db, id, now) };
 }

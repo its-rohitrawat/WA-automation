@@ -59,7 +59,7 @@ describe('listDashboardTasks', () => {
   it('returns the row shape, with the client and plain status', async () => {
     const db = await seededDb();
     task(db, { title: 'Logo', assignedTo: 'Rahul', askedBy: 'Mr Sharma', deadline: '2026-10-25', priority: 'major' });
-    expect(listDashboardTasks(db, q({}), now)).toEqual({
+    expect(await listDashboardTasks(db, q({}), now)).toEqual({
       total: 1,
       rows: [{
         code: 'SHA-001', title: 'Logo', client: { code: 'SHA', name: 'Sharma Interiors' }, side: 'us', owner: 'Rahul', askedBy: 'Mr Sharma',
@@ -75,11 +75,11 @@ describe('listDashboardTasks', () => {
     const open = task(db, { deadline: '2026-10-19' }); // due today: not overdue
     const review = task(db, { status: 'maybe_done' });
     const done = task(db, { deadline: '2026-10-01', status: 'done' }); // a done task is never overdue
-    expect(codes(listDashboardTasks(db, q({ status: 'overdue' }), now))).toEqual([late, lateReview]);
-    expect(codes(listDashboardTasks(db, q({ status: 'open' }), now))).toEqual([open]);
-    expect(codes(listDashboardTasks(db, q({ status: 'review' }), now))).toEqual([review]);
-    expect(codes(listDashboardTasks(db, q({ status: 'done' }), now))).toEqual([done]);
-    const all = listDashboardTasks(db, q({ sort: 'code' }), now).rows;
+    expect(codes(await listDashboardTasks(db, q({ status: 'overdue' }), now))).toEqual([late, lateReview]);
+    expect(codes(await listDashboardTasks(db, q({ status: 'open' }), now))).toEqual([open]);
+    expect(codes(await listDashboardTasks(db, q({ status: 'review' }), now))).toEqual([review]);
+    expect(codes(await listDashboardTasks(db, q({ status: 'done' }), now))).toEqual([done]);
+    const all = (await listDashboardTasks(db, q({ sort: 'code' }), now)).rows;
     expect(all.map((r) => [r.code, r.status, r.overdue])).toEqual([
       [late, 'overdue', true], [lateReview, 'overdue', true], [open, 'open', false], [review, 'review', false], [done, 'done', false],
     ]);
@@ -89,9 +89,9 @@ describe('listDashboardTasks', () => {
     const db = await seededDb();
     const code = task(db, { deadline: '2026-10-19' });
     // 23:30 IST on the 19th: still due today.
-    expect(codes(listDashboardTasks(db, q({ status: 'overdue' }), new Date('2026-10-19T18:00:00Z')))).toEqual([]);
+    expect(codes(await listDashboardTasks(db, q({ status: 'overdue' }), new Date('2026-10-19T18:00:00Z')))).toEqual([]);
     // 00:15 IST on the 20th (still the 19th in UTC): overdue.
-    expect(codes(listDashboardTasks(db, q({ status: 'overdue' }), new Date('2026-10-19T18:45:00Z')))).toEqual([code]);
+    expect(codes(await listDashboardTasks(db, q({ status: 'overdue' }), new Date('2026-10-19T18:45:00Z')))).toEqual([code]);
   });
 
   it('filters deadlines: past, this week (today to today + 6, IST) and none', async () => {
@@ -101,11 +101,11 @@ describe('listDashboardTasks', () => {
     const sixth = task(db, { deadline: '2026-10-25' });
     const later = task(db, { deadline: '2026-10-26' });
     const none = task(db);
-    expect(codes(listDashboardTasks(db, q({ deadline: 'past' }), now))).toEqual([past]);
-    expect(codes(listDashboardTasks(db, q({ deadline: 'week' }), now))).toEqual([today, sixth]);
-    expect(codes(listDashboardTasks(db, q({ deadline: 'none' }), now))).toEqual([none]);
+    expect(codes(await listDashboardTasks(db, q({ deadline: 'past' }), now))).toEqual([past]);
+    expect(codes(await listDashboardTasks(db, q({ deadline: 'week' }), now))).toEqual([today, sixth]);
+    expect(codes(await listDashboardTasks(db, q({ deadline: 'none' }), now))).toEqual([none]);
     // Late on the 25th IST the week runs to the 31st.
-    expect(codes(listDashboardTasks(db, q({ deadline: 'week' }), new Date('2026-10-24T19:00:00Z')))).toEqual([sixth, later]);
+    expect(codes(await listDashboardTasks(db, q({ deadline: 'week' }), new Date('2026-10-24T19:00:00Z')))).toEqual([sixth, later]);
   });
 
   it('filters by client, owner (any case) and priority', async () => {
@@ -113,10 +113,10 @@ describe('listDashboardTasks', () => {
     const a = task(db, { assignedTo: 'Rahul', priority: 'major' });
     const b = task(db, { clientId: 2, assignedTo: 'rahul' });
     task(db, { assignedTo: 'Priya' });
-    expect(codes(listDashboardTasks(db, q({ client: 'MEH' }), now))).toEqual([b]);
-    expect(codes(listDashboardTasks(db, q({ owner: 'RAHUL', sort: 'code' }), now))).toEqual([b, a]);
-    expect(codes(listDashboardTasks(db, q({ priority: 'major' }), now))).toEqual([a]);
-    expect(listDashboardTasks(db, q({ client: 'XYZ' }), now)).toEqual({ total: 0, rows: [] });
+    expect(codes(await listDashboardTasks(db, q({ client: 'MEH' }), now))).toEqual([b]);
+    expect(codes(await listDashboardTasks(db, q({ owner: 'RAHUL', sort: 'code' }), now))).toEqual([b, a]);
+    expect(codes(await listDashboardTasks(db, q({ priority: 'major' }), now))).toEqual([a]);
+    expect(await listDashboardTasks(db, q({ client: 'XYZ' }), now)).toEqual({ total: 0, rows: [] });
   });
 
   it('searches code, title, client name and owner, any case', async () => {
@@ -124,10 +124,10 @@ describe('listDashboardTasks', () => {
     const a = task(db, { title: 'New LOGO' });
     const b = task(db, { clientId: 2, title: 'Menu' });
     const c = task(db, { title: 'Brochure', assignedTo: 'Rahul' });
-    expect(codes(listDashboardTasks(db, q({ q: 'logo' }), now))).toEqual([a]);
-    expect(codes(listDashboardTasks(db, q({ q: 'mehta' }), now))).toEqual([b]);
-    expect(codes(listDashboardTasks(db, q({ q: 'rah' }), now))).toEqual([c]);
-    expect(codes(listDashboardTasks(db, q({ q: 'sha-002' }), now))).toEqual([c]);
+    expect(codes(await listDashboardTasks(db, q({ q: 'logo' }), now))).toEqual([a]);
+    expect(codes(await listDashboardTasks(db, q({ q: 'mehta' }), now))).toEqual([b]);
+    expect(codes(await listDashboardTasks(db, q({ q: 'rah' }), now))).toEqual([c]);
+    expect(codes(await listDashboardTasks(db, q({ q: 'sha-002' }), now))).toEqual([c]);
   });
 
   it('treats % _ and \\ in the search as plain characters', async () => {
@@ -136,10 +136,10 @@ describe('listDashboardTasks', () => {
     const pct = task(db, { title: '50% off' });
     const und = task(db, { title: 'file_v2' });
     const back = task(db, { title: 'a\\b' });
-    expect(codes(listDashboardTasks(db, q({ q: '%' }), now))).toEqual([pct]);
-    expect(codes(listDashboardTasks(db, q({ q: '_' }), now))).toEqual([und]);
-    expect(codes(listDashboardTasks(db, q({ q: '\\' }), now))).toEqual([back]);
-    expect(codes(listDashboardTasks(db, q({ q: "'; DROP TABLE tasks; --" }), now))).toEqual([]);
+    expect(codes(await listDashboardTasks(db, q({ q: '%' }), now))).toEqual([pct]);
+    expect(codes(await listDashboardTasks(db, q({ q: '_' }), now))).toEqual([und]);
+    expect(codes(await listDashboardTasks(db, q({ q: '\\' }), now))).toEqual([back]);
+    expect(codes(await listDashboardTasks(db, q({ q: "'; DROP TABLE tasks; --" }), now))).toEqual([]);
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM tasks').get()).toEqual({ n: 4 });
   });
 
@@ -149,16 +149,16 @@ describe('listDashboardTasks', () => {
     const b = task(db, { clientId: 2, deadline: '2026-10-21' }); // MEH-001
     const c = task(db, { assignedTo: 'Amit', status: 'done' }); // SHA-002
     const d = task(db, { deadline: '2026-10-01', assignedTo: 'Ben' }); // SHA-003, overdue
-    const sort = (s: string, dir = 'asc') => codes(listDashboardTasks(db, q({ sort: s, dir }), now));
-    expect(sort('deadline')).toEqual([d, b, a, c]);
-    expect(sort('deadline', 'desc')).toEqual([a, b, d, c]);
-    expect(sort('code')).toEqual([b, a, c, d]);
-    expect(sort('code', 'desc')).toEqual([d, c, a, b]);
-    expect(sort('client')).toEqual([b, a, c, d]); // Mehta before Sharma, then the code
-    expect(sort('owner')).toEqual([c, d, a, b]);
-    expect(sort('owner', 'desc')).toEqual([a, d, c, b]);
-    expect(sort('status')).toEqual([d, b, a, c]); // overdue, open (code order), done
-    expect(sort('status', 'desc')).toEqual([c, b, a, d]);
+    const sort = async (s: string, dir = 'asc') => codes(await listDashboardTasks(db, q({ sort: s, dir }), now));
+    expect(await sort('deadline')).toEqual([d, b, a, c]);
+    expect(await sort('deadline', 'desc')).toEqual([a, b, d, c]);
+    expect(await sort('code')).toEqual([b, a, c, d]);
+    expect(await sort('code', 'desc')).toEqual([d, c, a, b]);
+    expect(await sort('client')).toEqual([b, a, c, d]); // Mehta before Sharma, then the code
+    expect(await sort('owner')).toEqual([c, d, a, b]);
+    expect(await sort('owner', 'desc')).toEqual([a, d, c, b]);
+    expect(await sort('status')).toEqual([d, b, a, c]); // overdue, open (code order), done
+    expect(await sort('status', 'desc')).toEqual([c, b, a, d]);
   });
 
   it('sorts codes by their number, so SHA-1000 comes after SHA-999', async () => {
@@ -167,14 +167,14 @@ describe('listDashboardTasks', () => {
     const a = task(db);
     const b = task(db);
     expect([a, b]).toEqual(['SHA-999', 'SHA-1000']);
-    expect(codes(listDashboardTasks(db, q({ sort: 'code' }), now))).toEqual([a, b]);
+    expect(codes(await listDashboardTasks(db, q({ sort: 'code' }), now))).toEqual([a, b]);
   });
 
   it('pages with limit and offset, and counts the total before paging', async () => {
     const db = await seededDb();
     const all = Array.from({ length: 5 }, () => task(db));
-    expect(listDashboardTasks(db, q({ sort: 'code', limit: '2', offset: '2' }), now)).toMatchObject({ total: 5, rows: [{ code: all[2] }, { code: all[3] }] });
-    expect(listDashboardTasks(db, q({ sort: 'code', limit: '2', offset: '9' }), now)).toEqual({ total: 5, rows: [] });
+    expect(await listDashboardTasks(db, q({ sort: 'code', limit: '2', offset: '2' }), now)).toMatchObject({ total: 5, rows: [{ code: all[2] }, { code: all[3] }] });
+    expect(await listDashboardTasks(db, q({ sort: 'code', limit: '2', offset: '9' }), now)).toEqual({ total: 5, rows: [] });
   });
 
   it('names the source: a meeting, a voice note, or WhatsApp', async () => {
@@ -195,7 +195,7 @@ describe('listDashboardTasks', () => {
     insertMedia(db, { messageId: messageRowId(db, 2, 'V2')!, clientId: 2, kind: 'voice', status: 'done', mimeType: 'audio/ogg', fileName: null, fileSize: 1, seconds: 4,
       forwarded: false, refEnc: null, errorCode: null, createdAt: NOW });
     const otherGroup = task(db, { sourceWaId: 'V2' });
-    const sources = Object.fromEntries(listDashboardTasks(db, q({}), now).rows.map((r) => [r.code, r.source]));
+    const sources = Object.fromEntries((await listDashboardTasks(db, q({}), now)).rows.map((r) => [r.code, r.source]));
     expect(sources).toEqual({ [fromMeeting]: 'meeting', [fromVoice]: 'voice', [fromText]: 'whatsapp', [otherGroup]: 'whatsapp' });
   });
 });
@@ -204,8 +204,8 @@ describe('taskDetail', () => {
   it('returns undefined for an unknown or badly formed code', async () => {
     const db = await seededDb();
     task(db);
-    expect(taskDetail(db, 'SHA-999', now)).toBeUndefined();
-    expect(taskDetail(db, "x' OR 1=1 --", now)).toBeUndefined();
+    expect(await taskDetail(db, 'SHA-999', now)).toBeUndefined();
+    expect(await taskDetail(db, "x' OR 1=1 --", now)).toBeUndefined();
   });
 
   it('adds the source quote, progress, reminders and history in plain words', async () => {
@@ -225,7 +225,7 @@ describe('taskDetail', () => {
     ai('close_task', { status: 'done' }, '2026-10-18T05:00:00.000Z');
     ai('reopen_task', { status: 'open' }, '2026-10-18T06:00:00.000Z');
     ai('some_new_op', { text: 'secret words from chat' }, '2026-10-18T07:00:00.000Z');
-    const d = taskDetail(db, code.toLowerCase(), now)!;
+    const d = (await taskDetail(db, code.toLowerCase(), now))!;
     expect(d).toMatchObject({
       code, sourceQuote: 'Please send the <b>logo</b>', sourceDate: '2026-10-10', sourceRevoked: true, latestProgress: 'Draft sent', remindedCount: 2,
     });
@@ -251,7 +251,7 @@ describe('taskDetail', () => {
     recordEvent(db, { taskId: 1, clientId: 1, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: NOW });
     recordEvent(db, { taskId: 1, clientId: 1, actor: 'ai', op: 'update_task', detail: {}, reason: null, sourceIds: [], at: NOW });
     db.raw.prepare("INSERT INTO task_events (task_id, client_id, actor, op, detail, at) VALUES (1, 1, 'human', 'update_task', 'not json', ?)").run(NOW);
-    expect(taskDetail(db, code, now)!.history.map((h) => h.what)).toEqual(['Created from a meeting', 'Updated', 'Edited by the owner']);
+    expect((await taskDetail(db, code, now))!.history.map((h) => h.what)).toEqual(['Created from a meeting', 'Updated', 'Edited by the owner']);
   });
 });
 
@@ -262,8 +262,8 @@ describe('listDashboardTasks review fixes', () => {
     const review = task(db, { status: 'maybe_done' });
     const open = task(db);
     const late = task(db, { deadline: '2026-10-01' });
-    expect(codes(listDashboardTasks(db, q({ sort: 'status' }), now))).toEqual([late, open, review, done]);
-    expect(codes(listDashboardTasks(db, q({ sort: 'status', dir: 'desc' }), now))).toEqual([done, review, open, late]);
+    expect(codes(await listDashboardTasks(db, q({ sort: 'status' }), now))).toEqual([late, open, review, done]);
+    expect(codes(await listDashboardTasks(db, q({ sort: 'status', dir: 'desc' }), now))).toEqual([done, review, open, late]);
   });
 
   it('sorts client names without regard to case', async () => {
@@ -271,14 +271,14 @@ describe('listDashboardTasks review fixes', () => {
     db.raw.prepare("UPDATE clients SET name = 'mehta foods' WHERE id = 2").run();
     const sharma = task(db);
     const mehta = task(db, { clientId: 2 });
-    expect(codes(listDashboardTasks(db, q({ sort: 'client' }), now))).toEqual([mehta, sharma]);
+    expect(codes(await listDashboardTasks(db, q({ sort: 'client' }), now))).toEqual([mehta, sharma]);
   });
 
   it('counts done tasks with an old deadline under deadline=past', async () => {
     const db = await seededDb();
     const done = task(db, { deadline: '2026-10-01', status: 'done' });
-    expect(codes(listDashboardTasks(db, q({ deadline: 'past' }), now))).toEqual([done]);
-    expect(codes(listDashboardTasks(db, q({ status: 'overdue' }), now))).toEqual([]);
+    expect(codes(await listDashboardTasks(db, q({ deadline: 'past' }), now))).toEqual([done]);
+    expect(codes(await listDashboardTasks(db, q({ status: 'overdue' }), now))).toEqual([]);
   });
 
   it('lists active clients only by default, as the Overview counts; removed=1 adds the removed clients\' tasks', async () => {
@@ -286,8 +286,8 @@ describe('listDashboardTasks review fixes', () => {
     const sharma = task(db, { deadline: '2026-10-18' });
     const mehta = task(db, { clientId: 2, deadline: '2026-10-18' });
     db.raw.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
-    expect(codes(listDashboardTasks(db, q({}), now))).toEqual([sharma]);
-    expect(codes(listDashboardTasks(db, q({ removed: '1' }), now)).sort()).toEqual([sharma, mehta].sort());
+    expect(codes(await listDashboardTasks(db, q({}), now))).toEqual([sharma]);
+    expect(codes(await listDashboardTasks(db, q({ removed: '1' }), now)).sort()).toEqual([sharma, mehta].sort());
     expect(() => q({ removed: 'yes' })).toThrowError(ControlError);
   });
 
@@ -301,12 +301,12 @@ describe('listDashboardTasks review fixes', () => {
       db.raw.prepare("UPDATE tasks SET status = 'done', closed_on = '2026-10-17' WHERE code = ?").run(done);
     }
     db.raw.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
-    const t = overview(db, now).tasks;
-    const total = (o: Record<string, string>) => listDashboardTasks(db, q(o), now).total;
-    expect(total({ status: 'overdue' })).toBe(t.overdue);
-    expect(total({ status: 'open' })).toBe(t.open);
-    expect(total({ status: 'review' })).toBe(t.review);
-    expect(total({ status: 'done', closed: '7d' })).toBe(t.doneThisWeek);
+    const t = (await overview(db, now)).tasks;
+    const total = async (o: Record<string, string>) => (await listDashboardTasks(db, q(o), now)).total;
+    expect(await total({ status: 'overdue' })).toBe(t.overdue);
+    expect(await total({ status: 'open' })).toBe(t.open);
+    expect(await total({ status: 'review' })).toBe(t.review);
+    expect(await total({ status: 'done', closed: '7d' })).toBe(t.doneThisWeek);
     expect(t).toEqual({ open: 1, overdue: 1, review: 1, doneThisWeek: 1 });
   });
 
@@ -323,10 +323,10 @@ describe('listDashboardTasks review fixes', () => {
     closedOn(older, '2026-10-12');
     closedOn(reopened, '2026-10-15');
     db.raw.prepare("UPDATE tasks SET status = 'open' WHERE code = ?").run(reopened);
-    const r = listDashboardTasks(db, q({ status: 'done', closed: '7d' }), now);
+    const r = await listDashboardTasks(db, q({ status: 'done', closed: '7d' }), now);
     expect(codes(r).sort()).toEqual([today, sixth].sort());
-    expect(r.total).toBe(overview(db, now).tasks.doneThisWeek);
-    expect(listDashboardTasks(db, q({ closed: '7d' }), now).total).toBe(2);
+    expect(r.total).toBe((await overview(db, now)).tasks.doneThisWeek);
+    expect((await listDashboardTasks(db, q({ closed: '7d' }), now)).total).toBe(2);
     expect(() => q({ closed: '30d' })).toThrowError(ControlError);
   });
 });
@@ -341,20 +341,20 @@ describe('listDashboardTasks: priority levels and sentiment', () => {
     const old = task(db, { priority: 'major' });
     db.raw.prepare('UPDATE tasks SET priority_level = NULL, priority_source = NULL WHERE code = ?').run(old);
     const major = task(db, { priority: 'major' });
-    expect(codes(listDashboardTasks(db, q({ sort: 'priority' }), now))).toEqual([critical, major, low, old]);
-    expect(codes(listDashboardTasks(db, q({ sort: 'priority', dir: 'desc' }), now))).toEqual([old, low, major, critical]);
-    expect(codes(listDashboardTasks(db, q({ priority: 'critical' }), now))).toEqual([critical]);
-    expect(listDashboardTasks(db, q({ priority: 'major' }), now).rows.map((r) => [r.code, r.priority])).toEqual([[major, 'major']]);
-    expect(listDashboardTasks(db, q({}), now).rows.find((r) => r.code === old)).toMatchObject({ priority: null, prioritySource: null });
+    expect(codes(await listDashboardTasks(db, q({ sort: 'priority' }), now))).toEqual([critical, major, low, old]);
+    expect(codes(await listDashboardTasks(db, q({ sort: 'priority', dir: 'desc' }), now))).toEqual([old, low, major, critical]);
+    expect(codes(await listDashboardTasks(db, q({ priority: 'critical' }), now))).toEqual([critical]);
+    expect((await listDashboardTasks(db, q({ priority: 'major' }), now)).rows.map((r) => [r.code, r.priority])).toEqual([[major, 'major']]);
+    expect((await listDashboardTasks(db, q({}), now)).rows.find((r) => r.code === old)).toMatchObject({ priority: null, prioritySource: null });
   });
 
   it('sends a task\'s mood only while sentiment is switched on, and says what set the priority', async () => {
     const db = await seededDb();
     const code = task(db, { priority: 'critical', prioritySource: 'keyword', priorityKeyword: 'urgent', sentiment: 'frustrated' });
-    expect(listDashboardTasks(db, q({}), now).rows[0]).toMatchObject({ priority: 'critical', prioritySource: 'keyword', sentiment: null });
-    expect(taskDetail(db, code, now)).toMatchObject({ priorityKeyword: 'urgent', sentiment: null });
+    expect((await listDashboardTasks(db, q({}), now)).rows[0]).toMatchObject({ priority: 'critical', prioritySource: 'keyword', sentiment: null });
+    expect(await taskDetail(db, code, now)).toMatchObject({ priorityKeyword: 'urgent', sentiment: null });
     sentimentOn(db);
-    expect(listDashboardTasks(db, q({}), now).rows[0]).toMatchObject({ sentiment: 'frustrated' });
-    expect(taskDetail(db, code, now)).toMatchObject({ sentiment: 'frustrated' });
+    expect((await listDashboardTasks(db, q({}), now)).rows[0]).toMatchObject({ sentiment: 'frustrated' });
+    expect(await taskDetail(db, code, now)).toMatchObject({ sentiment: 'frustrated' });
   });
 });

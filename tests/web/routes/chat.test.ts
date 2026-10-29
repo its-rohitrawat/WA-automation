@@ -236,7 +236,7 @@ describe('sending from the dashboard', () => {
     const waId = outboxRows()[0]!.wa_id!;
     // Before it comes back the chat shows the dashboard's own row.
     const sha = getClientByCode(db, 'SHA')!;
-    expect(chatPage(db, sha, clock.now()).outbox.map((o) => o.state)).toEqual(['sent']);
+    expect((await chatPage(db, sha, clock.now())).outbox.map((o) => o.state)).toEqual(['sent']);
     const ingest = new Ingestor({ db, onNewMessages: () => {}, clock });
     const echo = normalizeMessage({
       key: { remoteJid: SHARMA.groupId, fromMe: true, id: waId }, message: { conversation: 'Hello team' }, messageTimestamp: Date.parse(NOW) / 1000,
@@ -245,7 +245,7 @@ describe('sending from the dashboard', () => {
     ingest.handle(echo!);
     ingest.handle(echo!); // Baileys' own event, then the phone's copy of the same message
     expect((db.raw.prepare('SELECT COUNT(*) AS n FROM messages WHERE wa_id = ?').get(waId) as { n: number }).n).toBe(1);
-    const page = chatPage(db, sha, clock.now());
+    const page = await chatPage(db, sha, clock.now());
     expect(page.outbox).toEqual([]);
     expect(page.messages.filter((m) => m.text === 'Hello team')).toEqual([expect.objectContaining({ mine: true, sender: 'Founder' })]);
   });
@@ -284,47 +284,47 @@ describe('resending to a phone that could not read a message (getMessage)', () =
 });
 
 describe('reading the chat', () => {
-  const read = (search: { before?: string; limit?: string } = {}, code = 'SHA') => chatReadHandler(deps, CTX, code, search);
+  const read = async (search: { before?: string; limit?: string } = {}, code = 'SHA') => await chatReadHandler(deps, CTX, code, search);
   const view = (r: { body: unknown }) => r.body as { messages: { id: number; text: string; mine: boolean; sender: string; kind: string; deleted: boolean; transcript: string | null; quote: unknown }[]; hasOlder: boolean; client: { groupName: string }; sendingOn: boolean };
 
-  it('pages newest first with no phone number, JID or WhatsApp id; text as stored, lines kept', () => {
+  it('pages newest first with no phone number, JID or WhatsApp id; text as stored, lines kept', async () => {
     upsertPerson(db, { clientId: 1, jid: '919812345678@s.whatsapp.net', number: '919812345678', name: 'Rahul +91 98123 45678', fromMe: false });
     upsertPerson(db, { clientId: 1, jid: '919800000001@s.whatsapp.net', number: '919800000001', name: 'Neha', fromMe: false });
     for (let i = 0; i < 5; i++) say(`MSG000000000000${i}`, { ts: `2026-10-19T07:0${i}:00.000Z`, text: `line one ${i}\nline two <b>x</b>`, jid: i % 2 ? '919800000001@s.whatsapp.net' : undefined });
-    const first = read({ limit: '2' });
+    const first = await read({ limit: '2' });
     expect(first.status).toBe(200);
     const v = view(first);
     expect(v.messages.map((m) => m.text)).toEqual(['line one 4\nline two <b>x</b>', 'line one 3\nline two <b>x</b>']);
     expect(v.messages.map((m) => m.sender)).toEqual(['Someone', 'Neha']);
     expect(v.hasOlder).toBe(true);
     expect(v.client.groupName).toBe('Sharma x Studio');
-    const older = view(read({ before: String(v.messages[1]!.id), limit: '2' }));
+    const older = view(await read({ before: String(v.messages[1]!.id), limit: '2' }));
     expect(older.messages.map((m) => m.text.slice(0, 10))).toEqual(['line one 2', 'line one 1']);
-    const last = view(read({ before: String(older.messages[1]!.id), limit: '2' }));
+    const last = view(await read({ before: String(older.messages[1]!.id), limit: '2' }));
     expect(last.messages).toHaveLength(1);
     expect(last.hasOlder).toBe(false);
     expect(JSON.stringify([v, older, last])).not.toMatch(/@s\.whatsapp|@g\.us|9198|98123|MSG0000/);
   });
 
-  it('a deleted message has no text; a voice note shows its transcript; a reply shows its quote', () => {
+  it('a deleted message has no text; a voice note shows its transcript; a reply shows its quote', async () => {
     const gone = say('GONE000000000001', { text: 'secret' });
     db.raw.prepare('UPDATE messages SET revoked = 1 WHERE id = ?').run(gone);
     const voice = say('VOICE00000000001', { text: null, media: 'voice', ts: '2026-10-19T07:01:00.000Z' });
     db.raw.prepare("INSERT INTO media (message_id, client_id, kind, status, seconds, text_kind, text, created_at, updated_at) VALUES (?, 1, 'voice', 'done', 42, 'extract', 'Please call me', '2026-10-19T07:01:00.000Z', '2026-10-19T07:01:00.000Z')").run(voice);
     say('QUOTER0000000001', { ts: '2026-10-19T07:02:00.000Z', text: 'yes' });
     db.raw.prepare("UPDATE messages SET quoted_wa_id = 'VOICE00000000001' WHERE wa_id = 'QUOTER0000000001'").run();
-    const [reply, note, deleted] = view(read()).messages;
+    const [reply, note, deleted] = view(await read()).messages;
     expect(deleted).toMatchObject({ deleted: true, text: '' });
     expect(note).toMatchObject({ kind: 'voice', transcript: 'Please call me' });
     expect(reply!.quote).toEqual({ sender: 'Someone', text: '', kind: 'voice' });
-    expect(JSON.stringify(view(read()))).not.toContain('secret');
+    expect(JSON.stringify(view(await read()))).not.toContain('secret');
   });
 
-  it('only an approved client, and whole numbers only', () => {
-    expect(read({}, 'ZZZ').status).toBe(404);
-    expect(read({}, '120363000000000001@g.us').status).toBe(404);
-    expect(read({ before: '1; DROP TABLE messages' }).status).toBe(400);
-    expect(read({ limit: '-1' }).status).toBe(400);
-    expect(view(read()).sendingOn).toBe(true);
+  it('only an approved client, and whole numbers only', async () => {
+    expect((await read({}, 'ZZZ')).status).toBe(404);
+    expect((await read({}, '120363000000000001@g.us')).status).toBe(404);
+    expect((await read({ before: '1; DROP TABLE messages' })).status).toBe(400);
+    expect((await read({ limit: '-1' })).status).toBe(400);
+    expect(view(await read()).sendingOn).toBe(true);
   });
 });

@@ -107,7 +107,7 @@ export class AgentControl {
   }
 
   /** The tracker upload's own state (Health.publishProblem), shown even while WhatsApp is down for another cause. */
-  #tracker(snap: HealthSnapshot): { state: PartState; label: string } {
+  async #tracker(snap: HealthSnapshot): Promise<{ state: PartState; label: string }> {
     switch (this.#d.app.health.publishProblem()) {
       case 'google_signin':
         return { state: 'down', label: 'Google sign-in expired' };
@@ -117,7 +117,7 @@ export class AgentControl {
         return { state: 'warn', label: 'Upload failing' };
       case null:
         // The audit log keeps the last upload across a restart; the snapshot's time lives in memory only.
-        return { state: 'ok', label: lastTrackerUpload(this.#d.db, snap.lastPublishedAt) === null ? 'Waiting for the first upload' : 'Updated' };
+        return { state: 'ok', label: (await lastTrackerUpload(this.#d.db, snap.lastPublishedAt)) === null ? 'Waiting for the first upload' : 'Updated' };
     }
   }
 
@@ -160,19 +160,19 @@ export class AgentControl {
     return { state: 'ok', label: 'Within the daily limit' };
   }
 
-  #lastMessageAt(): string | null {
+  async #lastMessageAt(): Promise<string | null> {
     // The newest message time among the last 500 stored, found through the primary key (MAX(ts) over the whole table
     // would read a whole index on every poll). Not simply the last row: the catch-up after a reconnect stores older
     // messages last.
-    return (this.#d.db.raw.prepare('SELECT MAX(ts) AS ts FROM (SELECT ts FROM messages ORDER BY id DESC LIMIT 500)').get() as { ts: string | null }).ts;
+    return (await this.#d.db.get<{ ts: string | null }>('SELECT MAX(ts) AS ts FROM (SELECT ts FROM messages ORDER BY id DESC LIMIT 500)'))!.ts;
   }
 
-  status(): AgentStatus {
+  async status(): Promise<AgentStatus> {
     const { health, spend } = this.#d.app;
     const snap = health.snapshot();
     const parts: StatusPart[] = [
       { key: 'whatsapp', name: 'WhatsApp', ...this.#whatsapp() },
-      { key: 'tracker', name: 'Tracker on Drive', ...this.#tracker(snap) },
+      { key: 'tracker', name: 'Tracker on Drive', ...(await this.#tracker(snap)) },
       { key: 'meetings', name: 'Meetings', ...this.#meetings(snap) },
       { key: 'voice', name: 'Voice notes', ...this.#voice(snap) },
       { key: 'report', name: 'Morning briefing', ...this.#report(snap) },
@@ -183,23 +183,23 @@ export class AgentControl {
       up: health.isUp(),
       line: { ok: snap.line.ok, text: snap.line.text },
       parts,
-      lastMessageAt: this.#lastMessageAt(),
+      lastMessageAt: await this.#lastMessageAt(),
       spentToday: spend.spentToday(),
       capUsd: spend.capUsd,
     };
   }
 
-  overview(): Overview {
-    return overview(this.#d.db, this.#d.clock.now(), this.#d.app.health.snapshot());
+  async overview(): Promise<Overview> {
+    return await overview(this.#d.db, this.#d.clock.now(), this.#d.app.health.snapshot());
   }
 
-  connections(): Connections {
+  async connections(): Promise<Connections> {
     const { db, env, clock, heartbeat } = this.#d;
     const sender = typeof this.#d.sender === 'function' ? this.#d.sender() : this.#d.sender;
     const { health, spend } = this.#d.app;
     const snap = health.snapshot();
     const now = clock.now();
-    const groups = (db.raw.prepare('SELECT COUNT(*) AS n FROM clients WHERE active = 1').get() as { n: number }).n;
+    const groups = (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM clients WHERE active = 1'))!.n;
     const lost = new Set(snap.meetings?.lostAccounts ?? []);
     const signInExpired = health.publishProblem() === 'google_signin';
     const meetingAccess = snap.meetings?.paused === 'google_auth' || snap.meetings?.paused === 'google_scopes';
@@ -213,18 +213,18 @@ export class AgentControl {
         ...(lost.has(label) ? { state: 'down' as const, stateLabel: 'Sign-in lost' } : { state: 'ok' as const, stateLabel: 'Connected' }),
       })),
     ];
-    const calls = (db.raw.prepare("SELECT COUNT(*) AS n FROM spend WHERE day = ? AND kind = 'ai'").get(istDate(now)) as { n: number }).n;
+    const calls = (await db.get<{ n: number }>("SELECT COUNT(*) AS n FROM spend WHERE day = ? AND kind = 'ai'", [istDate(now)]))!.n;
     const beat = heartbeat?.lastBeatAt() ?? null;
     const file = trackerFile(db);
     return {
-      founder: { ...this.#whatsapp(), groups, lastActivityAt: this.#lastMessageAt(), device: FOUNDER_DEVICE },
+      founder: { ...this.#whatsapp(), groups, lastActivityAt: await this.#lastMessageAt(), device: FOUNDER_DEVICE },
       spare: sender ? { ...spareState(sender.status()), device: SPARE_DEVICE, recipientMasked: sender.maskedRecipient() }
         : this.#d.spareLinked
           ? { ...(this.#d.spareLinked() ? { state: 'ok' as const, label: 'Linked' } : { state: 'warn' as const, label: 'Not linked' }), device: SPARE_DEVICE, recipientMasked: null }
           : { state: 'off', label: 'Switched off', device: SPARE_DEVICE, recipientMasked: null },
       google,
       drive: {
-        ...this.#tracker(snap), lastUploadAt: lastTrackerUpload(db, snap.lastPublishedAt), file: file.name, folder: file.folder, account: file.account,
+        ...(await this.#tracker(snap)), lastUploadAt: await lastTrackerUpload(db, snap.lastPublishedAt), file: file.name, folder: file.folder, account: file.account,
         url: trackerLink(db) ?? null,
       },
       claude: { callsToday: calls, spentToday: spend.spentToday(), capUsd: spend.capUsd },

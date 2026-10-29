@@ -47,11 +47,11 @@ function fromCorrection(e: CorrectionError): ControlError {
  * refused while today's spend cap is reached. Throws ControlError: 400 an unknown action, 404 no such meeting, 409 the
  * meeting's status does not allow it or the cap is reached, 422 a bad client.
  */
-export function runMeetingAction(
+export async function runMeetingAction(
   db: Db,
   req: { id: string; action: string; body?: unknown },
   ctx: { actor: string; now: Date; audit: Audit; spend: Pick<SpendGuard, 'isPaused'>; accountOf?: AccountOf },
-): MeetingActionResult {
+): Promise<MeetingActionResult> {
   if (!(MEETING_ACTIONS as readonly string[]).includes(req.action)) {
     throw new ControlError(400, `action must be one of: ${MEETING_ACTIONS.join(', ')}`, 'action');
   }
@@ -87,6 +87,6 @@ export function runMeetingAction(
     if (e instanceof CorrectionError) throw fromCorrection(e);
     throw e;
   }
-  const meeting = meetingDetail(db, String(id), now, ctx.accountOf)!;
+  const meeting = (await meetingDetail(db, String(id), now, ctx.accountOf))!;
   return action === 'skip' ? { meeting } : { meeting, warning: MEETING_COST_WARNING };
 }

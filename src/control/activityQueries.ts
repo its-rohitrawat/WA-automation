@@ -1,4 +1,4 @@
-import type { Db } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
 import { FOUND_INTERNAL_NOTE, type MeetingStatus } from '../store/meetings.ts';
 import type { Clock } from '../util/clock.ts';
 import { ControlError, type Audit, type AuditEntry } from './errors.ts';
@@ -101,9 +101,12 @@ function sourcesFor(kind: ActivityFilter | 'work', cursor: (at: string, src: Sou
 
 const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`;
 
-function batchItem(db: Db, id: number): Omit<ActivityItem, 'id' | 'at'> {
-  const b = db.raw.prepare(`SELECT b.status, b.message_count AS messages, b.accepted, c.name AS client FROM batches b JOIN clients c ON c.id = b.client_id
-    WHERE b.id = ?`).get(id) as { status: string; messages: number; accepted: number | null; client: string };
+async function batchItem(db: Sql, id: number): Promise<Omit<ActivityItem, 'id' | 'at'>> {
+  const b = (await db.get<{ status: string; messages: number; accepted: number | null; client: string }>(
+    `SELECT b.status, b.message_count AS messages, b.accepted, c.name AS client FROM batches b JOIN clients c ON c.id = b.client_id
+    WHERE b.id = ?`,
+    [id],
+  ))!;
   return b.status === 'ok'
     ? { kind: 'msg', title: `${plural(b.messages, 'message')} read`, detail: b.client, who: `${plural(b.accepted ?? 0, 'change')}` }
     : { kind: 'issue', title: `Could not read ${plural(b.messages, 'message')}`, detail: b.client, who: 'the agent tries again' };
@@ -114,13 +117,16 @@ const TASK_TITLES: Record<(typeof TASK_OPS)[number], string> = {
   unlock: 'Handed back to the agent', log_reminder: 'Reminder noted',
 };
 
-function taskItem(db: Db, id: number): Omit<ActivityItem, 'id' | 'at'> {
-  const e = db.raw.prepare(`SELECT e.op, e.actor, t.code, t.title, t.origin, t.meeting_id AS meetingId, c.name AS client,
+async function taskItem(db: Sql, id: number): Promise<Omit<ActivityItem, 'id' | 'at'>> {
+  const e = (await db.get<{
+    op: (typeof TASK_OPS)[number]; actor: 'ai' | 'human'; code: string; title: string; origin: string; meetingId: number | null; client: string; voice: number;
+  }>(
+    `SELECT e.op, e.actor, t.code, t.title, t.origin, t.meeting_id AS meetingId, c.name AS client,
       EXISTS (SELECT 1 FROM messages m JOIN media md ON md.message_id = m.id
         WHERE m.client_id = t.client_id AND m.wa_id = t.source_wa_id AND md.kind = 'voice') AS voice
-    FROM task_events e JOIN tasks t ON t.id = e.task_id JOIN clients c ON c.id = t.client_id WHERE e.id = ?`).get(id) as {
-    op: (typeof TASK_OPS)[number]; actor: 'ai' | 'human'; code: string; title: string; origin: string; meetingId: number | null; client: string; voice: number;
-  };
+    FROM task_events e JOIN tasks t ON t.id = e.task_id JOIN clients c ON c.id = t.client_id WHERE e.id = ?`,
+    [id],
+  ))!;
   let who: string;
   if (e.op === 'add_task') {
     const from = e.meetingId !== null || e.origin === 'meeting' ? 'from a meeting' : e.voice === 1 ? 'from a voice note' : 'from WhatsApp';
@@ -136,12 +142,13 @@ const MEETING_TITLES: Record<string, string> = {
   too_long: 'Meeting too long to process', no_access: 'No access to a meeting recording', failed: 'Meeting could not be processed',
 };
 
-function meetingItem(db: Db, id: number): Omit<ActivityItem, 'id' | 'at'> {
-  const m = db.raw.prepare(`SELECT m.status, m.title, COALESCE(m.audio_seconds, m.drive_seconds) AS seconds, c.name AS client,
+async function meetingItem(db: Sql, id: number): Promise<Omit<ActivityItem, 'id' | 'at'>> {
+  const m = (await db.get<{ status: MeetingStatus; title: string; seconds: number | null; client: string | null; items: number }>(
+    `SELECT m.status, m.title, COALESCE(m.audio_seconds, m.drive_seconds) AS seconds, c.name AS client,
       (SELECT COUNT(*) FROM tasks t WHERE t.meeting_id = m.id) AS items
-    FROM meetings m LEFT JOIN clients c ON c.id = m.client_id WHERE m.id = ?`).get(id) as {
-    status: MeetingStatus; title: string; seconds: number | null; client: string | null; items: number;
-  };
+    FROM meetings m LEFT JOIN clients c ON c.id = m.client_id WHERE m.id = ?`,
+    [id],
+  ))!;
   const issue = (ISSUE_STATUSES as readonly string[]).includes(m.status);
   let detail = m.client === null ? m.title : `${m.title} · ${m.client}`;
   if (m.status === 'too_long' && m.seconds !== null) detail += ` (${Math.round(m.seconds / 60)} min)`;
@@ -149,8 +156,8 @@ function meetingItem(db: Db, id: number): Omit<ActivityItem, 'id' | 'at'> {
   return { kind: issue ? 'issue' : 'meet', title: MEETING_TITLES[m.status] ?? 'Meeting changed', detail, who };
 }
 
-function auditItem(db: Db, id: number): Omit<ActivityItem, 'id' | 'at'> {
-  const a = db.raw.prepare('SELECT actor, event, kind, detail FROM audit_log WHERE id = ?').get(id) as { actor: string; event: string; kind: string; detail: string };
+async function auditItem(db: Sql, id: number): Promise<Omit<ActivityItem, 'id' | 'at'>> {
+  const a = (await db.get<{ actor: string; event: string; kind: string; detail: string }>('SELECT actor, event, kind, detail FROM audit_log WHERE id = ?', [id]))!;
   // The owner's email is not repeated on every line: the Audit logs screen names who did what.
   const who = a.actor === 'agent' ? 'by the agent' : 'by the owner';
   if (a.event === PUBLISHED) return { kind: 'tracker', title: 'Tracker updated', detail: a.detail, who };
@@ -165,10 +172,10 @@ function auditItem(db: Db, id: number): Omit<ActivityItem, 'id' | 'at'> {
     : { kind: 'connection', title: 'Connection changed', detail: a.detail, who };
 }
 
-const ITEMS: Record<Source, (db: Db, id: number) => Omit<ActivityItem, 'id' | 'at'>> = { a: auditItem, b: batchItem, e: taskItem, m: meetingItem };
+const ITEMS: Record<Source, (db: Sql, id: number) => Promise<Omit<ActivityItem, 'id' | 'at'>>> = { a: auditItem, b: batchItem, e: taskItem, m: meetingItem };
 
 /** One page of the feed (kind 'work': batches and task events only, for the Overview), newest first. next: the cursor for the following page, or null when this page is the last. */
-export function listActivity(db: Db, p: ActivityParams | (Omit<ActivityParams, 'kind'> & { kind: 'work' })): { items: ActivityItem[]; next: string | null } {
+export async function listActivity(db: Db, p: ActivityParams | (Omit<ActivityParams, 'kind'> & { kind: 'work' })): Promise<{ items: ActivityItem[]; next: string | null }> {
   const params: Record<string, string | number> = { limit: p.limit };
   const b = p.before;
   if (b) {
@@ -182,14 +189,13 @@ export function listActivity(db: Db, p: ActivityParams | (Omit<ActivityParams, '
   const cursor = (at: string, src: Source) => (!b ? '' : b.src === undefined ? `${at} < @at` : `(${at}, '${src}', id) < (@at, @src, @id)`);
   const union = sourcesFor(p.kind, cursor).join(' UNION ALL ');
   // One read transaction: the page and the lines it shows come from the same moment.
-  return db.raw.transaction(() => {
-    const rows = db.raw.prepare(`SELECT at, src, id FROM (${union}) ORDER BY at DESC, src DESC, id DESC LIMIT @limit`).all(params) as {
-      at: string; src: Source; id: number;
-    }[];
-    const items = rows.map((r) => ({ id: `${r.src}:${r.id}`, ...ITEMS[r.src](db, r.id), at: r.at }));
+  return db.tx(async (q) => {
+    const rows = await q.all<{ at: string; src: Source; id: number }>(`SELECT at, src, id FROM (${union}) ORDER BY at DESC, src DESC, id DESC LIMIT @limit`, params);
+    const items: ActivityItem[] = [];
+    for (const r of rows) items.push({ id: `${r.src}:${r.id}`, ...(await ITEMS[r.src](q, r.id)), at: r.at });
     const last = rows.at(-1);
     return { items, next: rows.length === p.limit && last ? `${last.at}|${last.src}|${last.id}` : null };
-  })();
+  });
 }
 
 const FAILURE_WORDS = (f: { step: 'build' | 'drive'; auth: boolean }): string =>

@@ -83,7 +83,7 @@ export function registerAssistantApi(router: Router, d: AssistantApiDeps): void 
     const body = await readBody(ctx);
     const id = typeof body === 'object' && body !== null ? (body as Record<string, unknown>).id : undefined;
     const p = d.pending.take(id, ownerOf(s).key);
-    const done = runProposal(p.action, {
+    const done = await runProposal(p.action, {
       db: d.db, clock: d.clock, settings: d.settings, actor: s.email,
       audit: (e) => d.audit.record({ ...e, actor: s.email, requestId: ctx.requestId }),
     });

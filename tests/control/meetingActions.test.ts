@@ -31,15 +31,15 @@ function state(db: Db) {
 const notPaused = { isPaused: () => false };
 const paused = { isPaused: () => true };
 
-function run(db: Db, id: string, action: string, body?: unknown, spend = notPaused) {
+async function run(db: Db, id: string, action: string, body?: unknown, spend = notPaused) {
   const audits: AuditEntry[] = [];
-  const result = runMeetingAction(db, { id, action, body }, { actor: OWNER, now, audit: (e) => audits.push(e), spend });
+  const result = await runMeetingAction(db, { id, action, body }, { actor: OWNER, now, audit: (e) => audits.push(e), spend });
   return { result, audits };
 }
 
-function refusal(fn: () => unknown): ControlError {
+async function refusal(fn: () => unknown): Promise<ControlError> {
   try {
-    fn();
+    await fn();
   } catch (e) {
     if (e instanceof ControlError) return e;
     throw e;
@@ -51,7 +51,7 @@ describe('runMeetingAction matches the CLI', () => {
   it('assign', async () => {
     const web = await withMeeting('unassigned');
     const cli = await withMeeting('unassigned');
-    const { result, audits } = run(web, '1', 'assign', { client: 'sha' });
+    const { result, audits } = await run(web, '1', 'assign', { client: 'sha' });
     assignMeetingToClient(cli, '1', 'SHA', now);
     expect(state(web)).toEqual(state(cli));
     expect(result.meeting).toMatchObject({ id: 1, status: 'queued', client: { code: 'SHA' } });
@@ -62,7 +62,7 @@ describe('runMeetingAction matches the CLI', () => {
   it('skip', async () => {
     const web = await withMeeting('unassigned');
     const cli = await withMeeting('unassigned');
-    const { result, audits } = run(web, '1', 'skip');
+    const { result, audits } = await run(web, '1', 'skip');
     skipMeetingById(cli, '1', now);
     expect(state(web)).toEqual(state(cli));
     expect(result.meeting.status).toBe('skipped');
@@ -72,7 +72,7 @@ describe('runMeetingAction matches the CLI', () => {
   it('retry, with the cost warning', async () => {
     const web = await withMeeting('failed', 1);
     const cli = await withMeeting('failed', 1);
-    const { result, audits } = run(web, '1', 'retry');
+    const { result, audits } = await run(web, '1', 'retry');
     retryMeetingById(cli, '1', now);
     expect(state(web)).toEqual(state(cli));
     expect(result).toMatchObject({ meeting: { status: 'queued' }, warning: MEETING_COST_WARNING });
@@ -83,7 +83,7 @@ describe('runMeetingAction matches the CLI', () => {
   it('retry of a meeting without a client puts it back to unassigned, as the CLI does', async () => {
     const web = await withMeeting('no_access');
     const cli = await withMeeting('no_access');
-    const { result, audits } = run(web, '1', 'retry');
+    const { result, audits } = await run(web, '1', 'retry');
     retryMeetingById(cli, '1', now);
     expect(state(web)).toEqual(state(cli));
     expect(result.meeting.status).toBe('unassigned');
@@ -91,7 +91,7 @@ describe('runMeetingAction matches the CLI', () => {
   });
 
   it('never puts the title in the audit line', async () => {
-    const { audits } = run(await withMeeting('unassigned'), '1', 'assign', { client: 'SHA' });
+    const { audits } = await run(await withMeeting('unassigned'), '1', 'assign', { client: 'SHA' });
     expect(JSON.stringify(audits)).not.toContain('Weekly');
   });
 });
@@ -101,66 +101,66 @@ describe('runMeetingAction refusals', () => {
     const db = await withMeeting('failed', 1);
     const before = state(db);
     const audits: AuditEntry[] = [];
-    const e = refusal(() => runMeetingAction(db, { id: '1', action: 'retry' }, { actor: OWNER, now, audit: (x) => audits.push(x), spend: paused }));
+    const e = await refusal(async () => await runMeetingAction(db, { id: '1', action: 'retry' }, { actor: OWNER, now, audit: (x) => audits.push(x), spend: paused }));
     expect(e).toMatchObject({ status: 409, message: "Today's AI spending limit is reached. Try again after midnight IST." });
     expect(state(db)).toEqual(before);
     expect(audits).toEqual([]);
   });
 
   it('assign and skip still work at the cap: the pipeline itself waits for the budget', async () => {
-    expect(run(await withMeeting('unassigned'), '1', 'skip', undefined, paused).result.meeting.status).toBe('skipped');
-    expect(run(await withMeeting('unassigned'), '1', 'assign', { client: 'SHA' }, paused).result.meeting.status).toBe('queued');
+    expect((await run(await withMeeting('unassigned'), '1', 'skip', undefined, paused)).result.meeting.status).toBe('skipped');
+    expect((await run(await withMeeting('unassigned'), '1', 'assign', { client: 'SHA' }, paused)).result.meeting.status).toBe('queued');
   });
 
   it('404 for an unknown or badly formed id', async () => {
     const db = await withMeeting('unassigned');
-    expect(refusal(() => run(db, '9', 'skip'))).toMatchObject({ status: 404, message: 'No meeting 9' });
-    for (const bad of ['0', 'x', '1 OR 1=1', '']) expect(refusal(() => run(db, bad, 'skip')).status, bad).toBe(404);
+    expect(await refusal(async () => await run(db, '9', 'skip'))).toMatchObject({ status: 404, message: 'No meeting 9' });
+    for (const bad of ['0', 'x', '1 OR 1=1', '']) expect((await refusal(async () => await run(db, bad, 'skip'))).status, bad).toBe(404);
   });
 
   it('400 for an unknown action', async () => {
     const db = await withMeeting('unassigned');
-    expect(refusal(() => run(db, '1', 'delete'))).toMatchObject({ status: 400, field: 'action' });
+    expect(await refusal(async () => await run(db, '1', 'delete'))).toMatchObject({ status: 400, field: 'action' });
   });
 
   it('409 when the meeting is not in a state that allows it', async () => {
     const db = await withMeeting('done', 1);
     const before = state(db);
-    expect(refusal(() => run(db, '1', 'skip'))).toMatchObject({ status: 409 });
-    expect(refusal(() => run(db, '1', 'retry'))).toMatchObject({ status: 409 });
-    expect(refusal(() => run(db, '1', 'assign', { client: 'SHA' }))).toMatchObject({ status: 409 });
+    expect(await refusal(async () => await run(db, '1', 'skip'))).toMatchObject({ status: 409 });
+    expect(await refusal(async () => await run(db, '1', 'retry'))).toMatchObject({ status: 409 });
+    expect(await refusal(async () => await run(db, '1', 'assign', { client: 'SHA' }))).toMatchObject({ status: 409 });
     expect(state(db)).toEqual(before);
   });
 
   it('422 for a bad, unknown or inactive client', async () => {
     const db = await withMeeting('unassigned');
     for (const body of [undefined, null, {}, { client: 5 }, { client: 'SH' }, { client: 'SHA1' }, [], 'SHA']) {
-      expect(refusal(() => run(db, '1', 'assign', body)), JSON.stringify(body)).toMatchObject({ status: 422, field: 'client' });
+      expect(await refusal(async () => await run(db, '1', 'assign', body)), JSON.stringify(body)).toMatchObject({ status: 422, field: 'client' });
     }
-    expect(refusal(() => run(db, '1', 'assign', { client: 'XYZ' }))).toMatchObject({ status: 422, field: 'client', message: 'No client with code XYZ' });
+    expect(await refusal(async () => await run(db, '1', 'assign', { client: 'XYZ' }))).toMatchObject({ status: 422, field: 'client', message: 'No client with code XYZ' });
     db.raw.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
-    expect(refusal(() => run(db, '1', 'assign', { client: 'MEH' }))).toMatchObject({ status: 422, field: 'client' });
+    expect(await refusal(async () => await run(db, '1', 'assign', { client: 'MEH' }))).toMatchObject({ status: 422, field: 'client' });
   });
 
   it('rolls the change back when the audit cannot be written', async () => {
     const db = await withMeeting('unassigned');
     const before = state(db);
-    expect(() => runMeetingAction(db, { id: '1', action: 'skip' }, { actor: OWNER, now, audit: () => { throw new Error('disk full'); }, spend: notPaused }))
-      .toThrowError('disk full');
+    await expect(runMeetingAction(db, { id: '1', action: 'skip' }, { actor: OWNER, now, audit: () => { throw new Error('disk full'); }, spend: notPaused }))
+      .rejects.toThrowError('disk full');
     expect(state(db)).toEqual(before);
   });
 });
 
 describe('runMeetingAction review fixes', () => {
   it('a skip carries no cost warning', async () => {
-    expect(run(await withMeeting('unassigned'), '1', 'skip').result.warning).toBeUndefined();
+    expect((await run(await withMeeting('unassigned'), '1', 'skip')).result.warning).toBeUndefined();
   });
 
   it("puts a meeting that changed meanwhile in the dashboard's words", async () => {
     const db = await withMeeting('unassigned');
     // As if another writer took the meeting between the check and the change.
     db.raw.exec('CREATE TRIGGER grab BEFORE UPDATE ON meetings BEGIN SELECT RAISE(IGNORE); END');
-    const e = refusal(() => run(db, '1', 'skip'));
+    const e = await refusal(async () => await run(db, '1', 'skip'));
     expect(e).toMatchObject({ status: 409, message: 'Meeting 1 changed meanwhile; refresh the list and try again' });
   });
 });

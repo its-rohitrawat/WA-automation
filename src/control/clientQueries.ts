@@ -153,36 +153,41 @@ export function senderLabel(name: string | null, fromMe: boolean): string {
 }
 
 /** What the drawer shows about the client's group (see ClientActivity). Parameterised reads only. */
-export function clientActivity(db: Db, c: ClientRow, now: Date, quietMinutes: number): ClientActivity {
+export async function clientActivity(db: Db, c: ClientRow, now: Date, quietMinutes: number): Promise<ClientActivity> {
   const since = new Date(now.getTime() - WEEK_MS).toISOString();
-  const pending = (db.raw.prepare('SELECT COUNT(*) AS n FROM messages WHERE client_id = ? AND processed_at IS NULL AND revoked = 0').get(c.id) as { n: number }).n;
-  const batch = db
-    .raw.prepare("SELECT finished_at AS at, message_count AS messages FROM batches WHERE client_id = ? AND status = 'ok' AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1")
-    .get(c.id) as { at: string; messages: number } | undefined;
+  const pending = (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM messages WHERE client_id = ? AND processed_at IS NULL AND revoked = 0', [c.id]))!.n;
+  const batch = await db.get<{ at: string; messages: number }>(
+    "SELECT finished_at AS at, message_count AS messages FROM batches WHERE client_id = ? AND status = 'ok' AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1",
+    [c.id],
+  );
   // The batch's own task changes: its task events carry its finish time (reconciler: one appliedAt for both). Decisions,
   // phases, people's roles and reminders are not task changes.
   const taskChanges = batch
-    ? (db.raw.prepare("SELECT COUNT(*) AS n FROM task_events WHERE client_id = ? AND actor = 'ai' AND at = ? AND task_id IS NOT NULL AND op <> 'log_reminder'")
-      .get(c.id, batch.at) as { n: number }).n
+    ? (await db.get<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM task_events WHERE client_id = ? AND actor = 'ai' AND at = ? AND task_id IS NOT NULL AND op <> 'log_reminder'",
+      [c.id, batch.at],
+    ))!.n
     : 0;
-  const taskCount = (db.raw.prepare('SELECT COUNT(*) AS n FROM tasks WHERE client_id = ?').get(c.id) as { n: number }).n;
-  const week = db
-    .raw.prepare(`SELECT COUNT(*) AS messages, COUNT(DISTINCT m.sender_jid) AS people,
+  const taskCount = (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM tasks WHERE client_id = ?', [c.id]))!.n;
+  const week = (await db.get<{ messages: number; people: number; files: number | null; voice: number | null }>(
+    `SELECT COUNT(*) AS messages, COUNT(DISTINCT m.sender_jid) AS people,
         SUM(COALESCE(md.kind, m.media_type) IN ('image', 'video', 'document', 'audio')) AS files, SUM(COALESCE(md.kind, m.media_type) = 'voice') AS voice
       FROM messages m LEFT JOIN media md ON md.message_id = m.id
-      WHERE m.client_id = ? AND m.revoked = 0 AND m.ts >= ?`)
-    .get(c.id, since) as { messages: number; people: number; files: number | null; voice: number | null };
-  const rows = db
-    .raw.prepare(`SELECT m.ts AS at, m.text, m.from_me AS fromMe, m.media_type AS mediaType, p.name AS name,
+      WHERE m.client_id = ? AND m.revoked = 0 AND m.ts >= ?`,
+    [c.id, since],
+  ))!;
+  const rows = await db.all<{
+    at: string; text: string | null; fromMe: number; mediaType: string | null; name: string | null;
+    kind: string | null; seconds: number | null; mediaStatus: string | null; hasText: number | null;
+  }>(
+    `SELECT m.ts AS at, m.text, m.from_me AS fromMe, m.media_type AS mediaType, p.name AS name,
         md.kind, md.seconds, md.status AS mediaStatus, md.text IS NOT NULL AS hasText
       FROM messages m
       LEFT JOIN people p ON p.client_id = m.client_id AND p.jid = m.sender_jid
       LEFT JOIN media md ON md.message_id = m.id
-      WHERE m.client_id = ? AND m.revoked = 0 ORDER BY m.ts DESC, m.id DESC LIMIT ?`)
-    .all(c.id, LATEST_MESSAGES) as {
-      at: string; text: string | null; fromMe: number; mediaType: string | null; name: string | null;
-      kind: string | null; seconds: number | null; mediaStatus: string | null; hasText: number | null;
-    }[];
+      WHERE m.client_id = ? AND m.revoked = 0 ORDER BY m.ts DESC, m.id DESC LIMIT ?`,
+    [c.id, LATEST_MESSAGES],
+  );
   const latest = rows.map((r): ClientMessage => {
     const kind = messageKind(r.kind, r.mediaType);
     const sender = senderLabel(r.name, r.fromMe === 1);
@@ -221,25 +226,24 @@ const COUNTS = `SUM(status <> 'done') AS open,
   SUM(status = 'done' AND closed_on >= @monday) AS doneThisWeek`;
 
 /** Every client's counts, in one pass over tasks. */
-function countsByClient(db: Db, now: Date): Map<number, ClientCounts> {
-  const rows = db
-    .raw.prepare(`SELECT client_id AS id, ${COUNTS} FROM tasks GROUP BY client_id`)
-    .all({ today: istDate(now), monday: weekStart(now) }) as (ClientCounts & { id: number })[];
+async function countsByClient(db: Db, now: Date): Promise<Map<number, ClientCounts>> {
+  const rows = await db.all<ClientCounts & { id: number }>(`SELECT client_id AS id, ${COUNTS} FROM tasks GROUP BY client_id`, { today: istDate(now), monday: weekStart(now) });
   return new Map(rows.map(({ id, ...c }) => [id, c]));
 }
 
 /** One client's counts: its own WHERE client_id = ?, so the tasks_client_status index is used. */
-function countsForClient(db: Db, now: Date, clientId: number): Map<number, ClientCounts> {
-  const row = db
-    .raw.prepare(`SELECT ${COUNTS} FROM tasks WHERE client_id = @clientId`)
-    .get({ today: istDate(now), monday: weekStart(now), clientId }) as { [K in keyof ClientCounts]: number | null };
+async function countsForClient(db: Db, now: Date, clientId: number): Promise<Map<number, ClientCounts>> {
+  const row = (await db.get<{ [K in keyof ClientCounts]: number | null }>(
+    `SELECT ${COUNTS} FROM tasks WHERE client_id = @clientId`,
+    { today: istDate(now), monday: weekStart(now), clientId },
+  ))!;
   // SUM over no rows is NULL.
   return new Map([[clientId, { open: row.open ?? 0, overdue: row.overdue ?? 0, review: row.review ?? 0, doneThisWeek: row.doneThisWeek ?? 0 }]]);
 }
 
 /** The latest message time per client, in one statement. */
-function lastActivityByClient(db: Db): Map<number, string> {
-  const rows = db.raw.prepare('SELECT client_id AS id, MAX(ts) AS ts FROM messages GROUP BY client_id').all() as { id: number; ts: string }[];
+async function lastActivityByClient(db: Db): Promise<Map<number, string>> {
+  const rows = await db.all<{ id: number; ts: string }>('SELECT client_id AS id, MAX(ts) AS ts FROM messages GROUP BY client_id');
   return new Map(rows.map((r) => [r.id, r.ts]));
 }
 
@@ -251,14 +255,14 @@ function sheetNames(db: Db): Map<number, string> {
 }
 
 /** Unread messages per client, in one statement (the messages_unprocessed index). */
-function pendingByClient(db: Db): Map<number, number> {
-  const rows = db.raw.prepare('SELECT client_id AS id, COUNT(*) AS n FROM messages WHERE processed_at IS NULL AND revoked = 0 GROUP BY client_id').all() as { id: number; n: number }[];
+async function pendingByClient(db: Db): Promise<Map<number, number>> {
+  const rows = await db.all<{ id: number; n: number }>('SELECT client_id AS id, COUNT(*) AS n FROM messages WHERE processed_at IS NULL AND revoked = 0 GROUP BY client_id');
   return new Map(rows.map((r) => [r.id, r.n]));
 }
 
 /** When each client's latest batch that worked finished, in one statement. */
-function lastReadByClient(db: Db): Map<number, string> {
-  const rows = db.raw.prepare("SELECT client_id AS id, MAX(finished_at) AS at FROM batches WHERE status = 'ok' AND finished_at IS NOT NULL GROUP BY client_id").all() as { id: number; at: string }[];
+async function lastReadByClient(db: Db): Promise<Map<number, string>> {
+  const rows = await db.all<{ id: number; at: string }>("SELECT client_id AS id, MAX(finished_at) AS at FROM batches WHERE status = 'ok' AND finished_at IS NOT NULL GROUP BY client_id");
   return new Map(rows.map((r) => [r.id, r.at]));
 }
 
@@ -286,36 +290,39 @@ function card(
 }
 
 /** One card per active client, by name. groupNames: group id → WhatsApp group name, from the last live list. */
-export function clientCards(db: Db, now: Date, groupNames?: ReadonlyMap<string, string>, quietMinutes = 4): ClientCard[] {
-  const counts = countsByClient(db, now);
-  const latest = lastActivityByClient(db);
+export async function clientCards(db: Db, now: Date, groupNames?: ReadonlyMap<string, string>, quietMinutes = 4): Promise<ClientCard[]> {
+  const counts = await countsByClient(db, now);
+  const latest = await lastActivityByClient(db);
   const sheets = sheetNames(db);
-  const pending = pendingByClient(db);
-  const read = lastReadByClient(db);
+  const pending = await pendingByClient(db);
+  const read = await lastReadByClient(db);
   return listClients(db, true).map((c) =>
     card(c, counts, latest, sheets, groupNames, backfillStatus(db, c.id, now), { pending: pending.get(c.id) ?? 0, lastReadAt: read.get(c.id) ?? null, quietMinutes }),
   );
 }
 
 /** The client drawer for an active client; null for an unknown or inactive code. */
-export function clientDetail(db: Db, code: string, now: Date, groupNames?: ReadonlyMap<string, string>, quietMinutes = 4): ClientDetail | null {
+export async function clientDetail(db: Db, code: string, now: Date, groupNames?: ReadonlyMap<string, string>, quietMinutes = 4): Promise<ClientDetail | null> {
   const c = getClientByCode(db, code);
   if (!c || !c.active) return null;
-  const activity = clientActivity(db, c, now, quietMinutes);
+  const activity = await clientActivity(db, c, now, quietMinutes);
   const pulse = { pending: activity.pending, lastReadAt: activity.lastBatch?.at ?? null, quietMinutes };
-  const base = card(c, countsForClient(db, now, c.id), new Map([[c.id, lastActivity(db, c.id)]]), sheetNames(db), groupNames, backfillStatus(db, c.id, now), pulse);
+  const base = card(c, await countsForClient(db, now, c.id), new Map([[c.id, lastActivity(db, c.id)]]), sheetNames(db), groupNames, backfillStatus(db, c.id, now), pulse);
   // Sentiment is shown only while it is switched on: off, none leaves here.
   const moods = readSentimentEnabled(db);
-  const openTasks = (db
-    .raw.prepare(`SELECT code, title, assigned_to AS assignedTo, deadline, status, priority_level AS priority, sentiment FROM tasks
-      WHERE client_id = ? AND status <> 'done' ORDER BY deadline IS NULL, deadline, id`)
-    .all(c.id) as ClientOpenTask[]).map((t) => (moods ? t : { ...t, sentiment: null }));
-  const meetings = db
-    .raw.prepare('SELECT id, started_at AS startedAt, title, status FROM meetings WHERE client_id = ? ORDER BY started_at DESC, id DESC LIMIT ?')
-    .all(c.id, MEETINGS_LIMIT) as ClientMeeting[];
-  const batch = db
-    .raw.prepare("SELECT started_at AS startedAt, finished_at AS finishedAt FROM batches WHERE client_id = ? AND status <> 'failed' ORDER BY id DESC LIMIT 1")
-    .get(c.id) as { startedAt: string; finishedAt: string | null } | undefined;
+  const openTasks = (await db.all<ClientOpenTask>(
+    `SELECT code, title, assigned_to AS assignedTo, deadline, status, priority_level AS priority, sentiment FROM tasks
+      WHERE client_id = ? AND status <> 'done' ORDER BY deadline IS NULL, deadline, id`,
+    [c.id],
+  )).map((t) => (moods ? t : { ...t, sentiment: null }));
+  const meetings = await db.all<ClientMeeting>(
+    'SELECT id, started_at AS startedAt, title, status FROM meetings WHERE client_id = ? ORDER BY started_at DESC, id DESC LIMIT ?',
+    [c.id, MEETINGS_LIMIT],
+  );
+  const batch = await db.get<{ startedAt: string; finishedAt: string | null }>(
+    "SELECT started_at AS startedAt, finished_at AS finishedAt FROM batches WHERE client_id = ? AND status <> 'failed' ORDER BY id DESC LIMIT 1",
+    [c.id],
+  );
   const sentiment = moods && c.sentiment ? { mood: c.sentiment, at: c.sentimentAt } : null;
   return { ...base, sentiment, openTasks, meetings, lastSyncAt: batch ? (batch.finishedAt ?? batch.startedAt) : null, activity };
 }

@@ -62,7 +62,7 @@ export type ChatView = ChatPage & {
 };
 
 /** GET /dashboard/api/clients/:code/chat?before=<message>&limit=<1..100> */
-export function chatReadHandler(deps: ChatDeps, _ctx: OwnerContext, code: string, search: { before?: string | null; limit?: string | null }): ApiResult<ChatView | ApiError> {
+export async function chatReadHandler(deps: ChatDeps, _ctx: OwnerContext, code: string, search: { before?: string | null; limit?: string | null }): Promise<ApiResult<ChatView | ApiError>> {
   const c = approvedClient(deps, code);
   if (!c) return notFound();
   const whole = (v: string | null | undefined) => (v && /^\d{1,9}$/.test(v) ? Number(v) : undefined);
@@ -71,7 +71,7 @@ export function chatReadHandler(deps: ChatDeps, _ctx: OwnerContext, code: string
   }
   const before = whole(search.before);
   const limit = whole(search.limit);
-  const page = chatPage(deps.db, c, deps.clock.now(), { ...(before !== undefined ? { before } : {}), ...(limit !== undefined ? { limit } : {}) });
+  const page = await chatPage(deps.db, c, deps.clock.now(), { ...(before !== undefined ? { before } : {}), ...(limit !== undefined ? { limit } : {}) });
   const groupName = (deps.directory.cachedGroups() ?? []).find((g) => g.id === c.groupId)?.subject || c.name;
   return ok({ client: { code: c.code, name: c.name, groupName }, sendingOn: deps.sendingOn(), connected: deps.connected(), ...page });
 }
@@ -118,12 +118,12 @@ export async function chatSendHandler(deps: ChatDeps, ctx: OwnerContext, code: s
   const replyTo = parsed.data.replyTo ?? null;
 
   // The same uuid again: the first request's message, never a second send.
-  const replay = (row: OutboxRow): ApiResult<SendView | ApiError> =>
+  const replay = async (row: OutboxRow): Promise<ApiResult<SendView | ApiError>> =>
     row.clientId === c.id && row.text === text && row.replyTo === replyTo
-      ? ok({ message: outboxItem(deps.db, row), replayed: true })
+      ? ok({ message: await outboxItem(deps.db, row), replayed: true })
       : fail(409, 'uuid_reused', 'This message id was already used for another message. Write the message again.');
   const earlier = outboxByUuid(deps.db, uuid);
-  if (earlier) return replay(earlier);
+  if (earlier) return await replay(earlier);
 
   let quoted: QuotedMessage | null = null;
   if (replyTo !== null) {
@@ -149,7 +149,7 @@ export async function chatSendHandler(deps: ChatDeps, ctx: OwnerContext, code: s
     }
     return { row: claimOutbox(deps.db, { uuid, clientId: c.id, text, replyTo, actor: ctx.actor, at: now.toISOString() }) };
   });
-  if ('taken' in claim) return replay(claim.taken);
+  if ('taken' in claim) return await replay(claim.taken);
   if ('limited' in claim) return claim.limited;
 
   // Logged before WhatsApp is asked: a crash mid-send leaves the row "sending" (unknown at the next start), and this line.
@@ -170,5 +170,5 @@ export async function chatSendHandler(deps: ChatDeps, ctx: OwnerContext, code: s
   } catch (e) {
     deps.log.warn({ code: (e as Error | null)?.name ?? 'Error', requestId: ctx.requestId }, 'audit line for a dashboard send could not be written');
   }
-  return ok({ message: outboxItem(deps.db, done), replayed: false });
+  return ok({ message: await outboxItem(deps.db, done), replayed: false });
 }

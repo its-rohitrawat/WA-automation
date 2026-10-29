@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type { SettingsStore } from '../config/settingsStore.ts';
 import { SETTING_KEYS } from '../config/settingsStore.ts';
 import { ControlError, type Audit } from '../control/errors.ts';
-import { createTaskAction, parseNewTask, parseTaskEdit, runTaskAction } from '../control/taskActions.ts';
+import { applyTaskAction, createTaskAction, parseNewTask, parseTaskEdit } from '../control/taskActions.ts';
 import { taskDetail } from '../control/taskQueries.ts';
 import { txSync, type Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
@@ -56,10 +56,10 @@ const show = (v: string | null | undefined) => (v === null || v === undefined ||
  * Checks a propose_ tool's input against the database as the confirm will, and words the card. Throws ControlError
  * (404 no such task or client, 409 nothing would change, 422 a bad value) or a zod error for a malformed input.
  */
-export function draftProposal(tool: 'propose_task_change' | 'propose_new_task' | 'propose_setting', raw: unknown, d: { db: Db; clock: Clock; settings: Pick<SettingsStore, 'view'> }): { action: ProposalAction; title: string; lines: string[] } {
+export async function draftProposal(tool: 'propose_task_change' | 'propose_new_task' | 'propose_setting', raw: unknown, d: { db: Db; clock: Clock; settings: Pick<SettingsStore, 'view'> }): Promise<{ action: ProposalAction; title: string; lines: string[] }> {
   if (tool === 'propose_task_change') {
     const i = INPUTS.propose_task_change.parse(raw);
-    const t = taskDetail(d.db, i.code, d.clock.now());
+    const t = await taskDetail(d.db, i.code, d.clock.now());
     if (!t) throw new ControlError(404, `No task called ${i.code}`);
     const edit: Record<string, string> = {};
     if (i.assignedTo !== undefined) edit.assignedTo = i.assignedTo;
@@ -176,20 +176,20 @@ export interface RunDeps {
 }
 
 /** Runs a confirmed card through the screens' own code. Returns what changed in words. Throws ControlError as they do. */
-export function runProposal(action: ProposalAction, d: RunDeps): { message: string; task?: string } {
+export async function runProposal(action: ProposalAction, d: RunDeps): Promise<{ message: string; task?: string }> {
   const audit: Audit = (e) => d.audit({ ...e, detail: `${e.detail} · via assistant` });
   const ctx = { actor: d.actor, now: d.clock.now(), audit };
   switch (action.kind) {
     case 'task_change': {
-      // The edit and the status change are one transaction: both happen or neither.
+      // The edit and the status change are one transaction: both happen or neither (applyTaskAction throws at once).
       txSync(d.db, () => {
-        if (action.edit) runTaskAction(d.db, { code: action.code, action: 'edit', body: action.edit }, ctx);
-        if (action.status) runTaskAction(d.db, { code: action.code, action: action.status === 'done' ? 'done' : 'reopen' }, ctx);
+        if (action.edit) applyTaskAction(d.db, { code: action.code, action: 'edit', body: action.edit }, ctx);
+        if (action.status) applyTaskAction(d.db, { code: action.code, action: action.status === 'done' ? 'done' : 'reopen' }, ctx);
       });
       return { message: `${action.code} updated.`, task: action.code };
     }
     case 'task_create': {
-      const t = createTaskAction(d.db, action.input, ctx);
+      const t = await createTaskAction(d.db, action.input, ctx);
       return { message: `${t.code} added.`, task: t.code };
     }
     case 'setting':

@@ -52,9 +52,9 @@ export function registerControlApi(router: Router, d: ControlApiDeps): void {
     }));
   const auditFor = (actor: string, requestId: string) => (e: AuditEntry) => d.audit.record({ ...e, actor, requestId });
 
-  read('/dashboard/api/usage', () => usageSummary(d.db, d.spend, d.clock.now(), { voiceLocal: d.voiceLocal }));
+  read('/dashboard/api/usage', async () => await usageSummary(d.db, d.spend, d.clock.now(), { voiceLocal: d.voiceLocal }));
   read('/dashboard/api/uptime', () => uptimeReport({ log: d.uptime.log, robot: d.uptime.robot, now: d.clock.now() }));
-  read('/dashboard/api/audit', ({ url }) => listAudit(d.db, parseAuditParams(url.searchParams), d.isOwner));
+  read('/dashboard/api/audit', async ({ url }) => await listAudit(d.db, parseAuditParams(url.searchParams), d.isOwner));
   read('/dashboard/api/settings', () => d.settings.view());
 
   router.post('/dashboard/api/settings', controlled(async (ctx) => {

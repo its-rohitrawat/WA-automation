@@ -41,16 +41,16 @@ const USE_LABELS = {
  * The AI usage screen. voiceLocal: voice notes are transcribed on the Mac (VOICE_STT_PROVIDER=local), so they are shown
  * as a line at $0.
  */
-export function usageSummary(
+export async function usageSummary(
   db: Db,
   spend: Pick<SpendGuard, 'spentToday' | 'spentTodayByKind' | 'capUsd' | 'isPaused'>,
   now: Date,
   o: { voiceLocal: boolean },
-): UsageSummary {
+): Promise<UsageSummary> {
   const today = istDate(now);
   const first = minusDays(today, USAGE_DAYS - 1);
   const totals = new Map(
-    (db.raw.prepare('SELECT day, SUM(usd) AS usd FROM spend WHERE day BETWEEN ? AND ? GROUP BY day').all(first, today) as { day: string; usd: number }[])
+    (await db.all<{ day: string; usd: number }>('SELECT day, SUM(usd) AS usd FROM spend WHERE day BETWEEN ? AND ? GROUP BY day', [first, today]))
       .map((r) => [r.day, r.usd]),
   );
   const days = Array.from({ length: USAGE_DAYS }, (_, i) => {
@@ -59,7 +59,7 @@ export function usageSummary(
   });
 
   const uses = new Map(
-    (db.raw.prepare(`SELECT ${USE_SQL} AS use, SUM(usd) AS usd FROM spend WHERE day = ? GROUP BY 1`).all(today) as { use: string; usd: number }[])
+    (await db.all<{ use: string; usd: number }>(`SELECT ${USE_SQL} AS use, SUM(usd) AS usd FROM spend WHERE day = ? GROUP BY 1`, [today]))
       .map((r) => [r.use, r.usd]),
   );
   const byUse: UsageSummary['byUse'] = [];
@@ -75,9 +75,10 @@ export function usageSummary(
 
   const from = fromIstDate(today);
   const to = new Date(from.getTime() + 86_400_000);
-  const b = db
-    .raw.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(message_count), 0) AS messages FROM batches WHERE status = 'ok' AND finished_at >= ? AND finished_at < ?")
-    .get(from.toISOString(), to.toISOString()) as { n: number; messages: number };
+  const b = (await db.get<{ n: number; messages: number }>(
+    "SELECT COUNT(*) AS n, COALESCE(SUM(message_count), 0) AS messages FROM batches WHERE status = 'ok' AND finished_at >= ? AND finished_at < ?",
+    [from.toISOString(), to.toISOString()],
+  ))!;
 
   const spent = spend.spentToday();
   const byKind = spend.spentTodayByKind();

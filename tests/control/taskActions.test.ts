@@ -26,15 +26,15 @@ function state(db: Db) {
   };
 }
 
-function run(db: Db, code: string, action: string, body?: unknown) {
+async function run(db: Db, code: string, action: string, body?: unknown) {
   const audits: AuditEntry[] = [];
-  const detail = runTaskAction(db, { code, action, body }, { actor: OWNER, now, audit: (e) => audits.push(e) });
+  const detail = await runTaskAction(db, { code, action, body }, { actor: OWNER, now, audit: (e) => audits.push(e) });
   return { detail, audits };
 }
 
-function refusal(fn: () => unknown): ControlError {
+async function refusal(fn: () => unknown): Promise<ControlError> {
   try {
-    fn();
+    await fn();
   } catch (e) {
     if (e instanceof ControlError) return e;
     throw e;
@@ -52,7 +52,7 @@ describe('runTaskAction matches the CLI', () => {
       ['unlock', (db) => unlockTask(db, 'SHA-001', now), 'Task SHA-001 handed back to the agent'],
     ];
     for (const [action, viaCli, line] of steps) {
-      const { detail, audits } = run(web, 'sha-001', action);
+      const { detail, audits } = await run(web, 'sha-001', action);
       viaCli(cli);
       expect(state(web)).toEqual(state(cli));
       expect(getKv(web, 'rebuild_requested')).toBe(now.toISOString());
@@ -63,13 +63,13 @@ describe('runTaskAction matches the CLI', () => {
 
   it('returns the fresh detail', async () => {
     const db = await withTask();
-    expect(run(db, 'SHA-001', 'done').detail).toMatchObject({ code: 'SHA-001', status: 'done', history: [{ actor: 'owner', what: 'Marked done by the owner' }] });
+    expect((await run(db, 'SHA-001', 'done')).detail).toMatchObject({ code: 'SHA-001', status: 'done', history: [{ actor: 'owner', what: 'Marked done by the owner' }] });
   });
 
   it('edit matches the CLI and audits the field names only', async () => {
     const web = await withTask();
     const cli = await withTask();
-    const { detail, audits } = run(web, 'SHA-001', 'edit', { deadline: '2026-10-30', assignedTo: 'Rahul', latestProgress: 'secret words' });
+    const { detail, audits } = await run(web, 'SHA-001', 'edit', { deadline: '2026-10-30', assignedTo: 'Rahul', latestProgress: 'secret words' });
     editTask(cli, 'SHA-001', { deadline: '2026-10-30', assignedTo: 'Rahul', latestProgress: 'secret words' }, now);
     expect(state(web)).toEqual(state(cli));
     expect(detail).toMatchObject({ deadline: '2026-10-30', owner: 'Rahul', latestProgress: 'secret words' });
@@ -81,9 +81,9 @@ describe('runTaskAction matches the CLI', () => {
   it('edit clears optional fields with null or an empty string, as the CLI does with none', async () => {
     const web = await withTask();
     const cli = await withTask();
-    run(web, 'SHA-001', 'edit', { deadline: '2026-10-30', assignedTo: 'Rahul' });
+    await run(web, 'SHA-001', 'edit', { deadline: '2026-10-30', assignedTo: 'Rahul' });
     editTask(cli, 'SHA-001', { deadline: '2026-10-30', assignedTo: 'Rahul' }, now);
-    run(web, 'SHA-001', 'edit', { deadline: null, assignedTo: '' });
+    await run(web, 'SHA-001', 'edit', { deadline: null, assignedTo: '' });
     editTask(cli, 'SHA-001', { deadline: 'none', assignedTo: 'none' }, now);
     expect(state(web)).toEqual(state(cli));
   });
@@ -93,9 +93,9 @@ describe('runTaskAction refusals', () => {
   it('404 for an unknown task, before anything changes or is audited', async () => {
     const db = await withTask();
     const audits: AuditEntry[] = [];
-    const e = refusal(() => runTaskAction(db, { code: 'SHA-999', action: 'done' }, { actor: OWNER, now, audit: (x) => audits.push(x) }));
+    const e = await refusal(async () => await runTaskAction(db, { code: 'SHA-999', action: 'done' }, { actor: OWNER, now, audit: (x) => audits.push(x) }));
     expect(e).toMatchObject({ status: 404, message: 'No task called SHA-999' });
-    expect(refusal(() => run(db, "x'--", 'done'))).toMatchObject({ status: 404 });
+    expect(await refusal(async () => await run(db, "x'--", 'done'))).toMatchObject({ status: 404 });
     expect(audits).toEqual([]);
   });
 
@@ -103,7 +103,7 @@ describe('runTaskAction refusals', () => {
     const db = await withTask();
     const before = state(db);
     const audits: AuditEntry[] = [];
-    expect(refusal(() => runTaskAction(db, { code: 'SHA-001', action: 'reopen' }, { actor: OWNER, now, audit: (x) => audits.push(x) })))
+    expect(await refusal(async () => await runTaskAction(db, { code: 'SHA-001', action: 'reopen' }, { actor: OWNER, now, audit: (x) => audits.push(x) })))
       .toMatchObject({ status: 409, message: 'Task SHA-001 is already open' });
     expect(state(db)).toEqual(before);
     expect(audits).toEqual([]);
@@ -111,21 +111,21 @@ describe('runTaskAction refusals', () => {
 
   it('400 for an unknown action', async () => {
     const db = await withTask();
-    expect(refusal(() => run(db, 'SHA-001', 'delete'))).toMatchObject({ status: 400, field: 'action' });
+    expect(await refusal(async () => await run(db, 'SHA-001', 'delete'))).toMatchObject({ status: 400, field: 'action' });
   });
 
   it('rolls the change back when the audit cannot be written', async () => {
     const db = await withTask();
     const before = state(db);
-    expect(() => runTaskAction(db, { code: 'SHA-001', action: 'done' }, { actor: OWNER, now, audit: () => { throw new Error('disk full'); } }))
-      .toThrowError('disk full');
+    await expect(runTaskAction(db, { code: 'SHA-001', action: 'done' }, { actor: OWNER, now, audit: () => { throw new Error('disk full'); } }))
+      .rejects.toThrowError('disk full');
     expect(state(db)).toEqual(before);
   });
 });
 
 describe('parseTaskEdit', () => {
-  const bad = (body: unknown, field: string) => {
-    const e = refusal(() => parseTaskEdit(body));
+  const bad = async (body: unknown, field: string) => {
+    const e = await refusal(() => parseTaskEdit(body));
     expect(e.status, JSON.stringify(body)).toBe(422);
     expect(e.field, JSON.stringify(body)).toBe(field);
     return e;
@@ -138,50 +138,50 @@ describe('parseTaskEdit', () => {
     expect(parseTaskEdit({ deadline: null, assignedTo: ' ', latestProgress: null })).toEqual({ deadline: '', assignedTo: '', latestProgress: '' });
   });
 
-  it('refuses each bad value with the field named', () => {
-    bad(null, 'body');
-    bad('title=x', 'body');
-    bad([], 'body');
-    bad({}, 'body');
-    bad({ askedBy: 'x' }, 'askedBy');
-    bad({ status: 'done' }, 'status');
-    bad({ title: '' }, 'title');
-    bad({ title: null }, 'title');
-    bad({ title: 'x'.repeat(201) }, 'title');
-    bad({ title: 5 }, 'title');
-    bad({ deadline: '2026-02-30' }, 'deadline');
-    bad({ deadline: '30/10/2026' }, 'deadline');
-    bad({ priority: 'urgent' }, 'priority');
-    bad({ priority: null }, 'priority');
-    bad({ side: 'them' }, 'side');
-    bad({ category: 'misc' }, 'category');
-    bad({ assignedTo: 'x'.repeat(101) }, 'assignedTo');
-    bad({ latestProgress: 'x'.repeat(1001) }, 'latestProgress');
-    expect(bad({ priority: 'urgent' }, 'priority').message).toBe('priority must be one of: critical, major, medium, low');
+  it('refuses each bad value with the field named', async () => {
+    await bad(null, 'body');
+    await bad('title=x', 'body');
+    await bad([], 'body');
+    await bad({}, 'body');
+    await bad({ askedBy: 'x' }, 'askedBy');
+    await bad({ status: 'done' }, 'status');
+    await bad({ title: '' }, 'title');
+    await bad({ title: null }, 'title');
+    await bad({ title: 'x'.repeat(201) }, 'title');
+    await bad({ title: 5 }, 'title');
+    await bad({ deadline: '2026-02-30' }, 'deadline');
+    await bad({ deadline: '30/10/2026' }, 'deadline');
+    await bad({ priority: 'urgent' }, 'priority');
+    await bad({ priority: null }, 'priority');
+    await bad({ side: 'them' }, 'side');
+    await bad({ category: 'misc' }, 'category');
+    await bad({ assignedTo: 'x'.repeat(101) }, 'assignedTo');
+    await bad({ latestProgress: 'x'.repeat(1001) }, 'latestProgress');
+    expect((await bad({ priority: 'urgent' }, 'priority')).message).toBe('priority must be one of: critical, major, medium, low');
   });
 
   it('accepts the longest title and a title called none is refused like the CLI', async () => {
     expect(parseTaskEdit({ title: 'x'.repeat(200) }).title).toHaveLength(200);
     const db = await withTask();
-    expect(refusal(() => run(db, 'SHA-001', 'edit', { title: 'none' }))).toMatchObject({ status: 422, field: 'title' });
+    expect(await refusal(async () => await run(db, 'SHA-001', 'edit', { title: 'none' }))).toMatchObject({ status: 422, field: 'title' });
   });
 
   it('an edit body on done, reopen or unlock is ignored', async () => {
     const db = await withTask();
-    expect(run(db, 'SHA-001', 'done', { title: 'ignored' }).detail).toMatchObject({ title: 'Banner', status: 'done' });
+    expect((await run(db, 'SHA-001', 'done', { title: 'ignored' })).detail).toMatchObject({ title: 'Banner', status: 'done' });
   });
 });
 
 describe('parseTaskEdit review fixes', () => {
-  it('never repeats an unknown key in the message, and names it only when it is a short plain word', () => {
+  it('never repeats an unknown key in the message, and names it only when it is a short plain word', async () => {
     const long = `x${'<script>'.repeat(20)}`;
-    expect(refusal(() => parseTaskEdit({ [long]: 'a' }))).toMatchObject({ status: 422, field: 'body', message: 'That field cannot be changed here' });
-    expect(refusal(() => parseTaskEdit({ askedBy: 'a' }))).toMatchObject({ field: 'askedBy', message: 'That field cannot be changed here' });
+    expect(await refusal(() => parseTaskEdit({ [long]: 'a' }))).toMatchObject({ status: 422, field: 'body', message: 'That field cannot be changed here' });
+    expect(await refusal(() => parseTaskEdit({ askedBy: 'a' }))).toMatchObject({ field: 'askedBy', message: 'That field cannot be changed here' });
   });
 
-  it('refuses the word none, which editTask would read as clearing the field', () => {
+  it('refuses the word none, which editTask would read as clearing the field', async () => {
     for (const field of ['assignedTo', 'latestProgress', 'title']) {
-      expect(refusal(() => parseTaskEdit({ [field]: ' None ' })), field).toMatchObject({ status: 422, field });
+      expect(await refusal(() => parseTaskEdit({ [field]: ' None ' })), field).toMatchObject({ status: 422, field });
     }
   });
 });

@@ -179,13 +179,13 @@ const params = (o: Record<string, string | number | undefined>) =>
   new URLSearchParams(Object.entries(o).flatMap(([k, v]) => (v === undefined ? [] : [[k, String(v)]])));
 
 /** A read tool's answer (plain data, scrubbed later by asData). Throws ControlError for a bad filter or a missing row. */
-export function runReadTool(name: Exclude<ToolName, 'open_screen' | (typeof PROPOSE_TOOLS)[number]>, raw: unknown, d: ToolDeps): unknown {
+export async function runReadTool(name: Exclude<ToolName, 'open_screen' | (typeof PROPOSE_TOOLS)[number]>, raw: unknown, d: ToolDeps): Promise<unknown> {
   const now = d.clock.now();
   switch (name) {
     case 'get_overview': {
       INPUTS.get_overview.parse(raw);
-      const ov = overview(d.db, now, d.health?.());
-      const s = d.control.status();
+      const ov = await overview(d.db, now, d.health?.());
+      const s = (await d.control.status());
       return {
         now: now.toISOString(), clients: ov.clients, tasks: ov.tasks, byClient: ov.byClient, latestMeetings: ov.meetings, tracker: ov.tracker,
         agent: { up: s.up, line: s.line.text, parts: s.parts.map((p) => ({ part: p.name, state: p.state, label: p.label })), lastMessageAt: s.lastMessageAt },
@@ -194,12 +194,12 @@ export function runReadTool(name: Exclude<ToolName, 'open_screen' | (typeof PROP
     }
     case 'list_clients':
       INPUTS.list_clients.parse(raw);
-      return clientCards(d.db, now).map((c) => ({
+      return (await clientCards(d.db, now)).map((c) => ({
         code: c.code, name: c.name, phase: c.currentPhase, counts: c.counts, lastMessageAt: c.lastActivity, messagesWaitingForAi: c.pulse.pending,
       }));
     case 'get_client': {
       const i = INPUTS.get_client.parse(raw);
-      const c = clientDetail(d.db, i.code, now);
+      const c = await clientDetail(d.db, i.code, now);
       if (!c) throw new ControlError(404, `No client called ${i.code}`);
       return {
         code: c.code, name: c.name, phase: c.currentPhase, phases: c.phases, counts: c.counts, openTasks: c.openTasks, meetings: c.meetings.slice(0, 10),
@@ -208,7 +208,7 @@ export function runReadTool(name: Exclude<ToolName, 'open_screen' | (typeof PROP
     }
     case 'list_tasks': {
       const i = INPUTS.list_tasks.parse(raw);
-      const r = listDashboardTasks(d.db, parseTaskQuery(params({
+      const r = await listDashboardTasks(d.db, parseTaskQuery(params({
         client: i.client, status: i.status, deadline: i.deadline, priority: i.priority, owner: i.owner, q: i.text, closed: i.closed,
         removed: i.includeRemovedClients ? '1' : undefined, limit: i.limit ?? 25,
       })), now);
@@ -216,7 +216,7 @@ export function runReadTool(name: Exclude<ToolName, 'open_screen' | (typeof PROP
     }
     case 'get_task': {
       const i = INPUTS.get_task.parse(raw);
-      const t = taskDetail(d.db, i.code, now);
+      const t = await taskDetail(d.db, i.code, now);
       if (!t) throw new ControlError(404, `No task called ${i.code}`);
       return t;
     }
@@ -224,22 +224,22 @@ export function runReadTool(name: Exclude<ToolName, 'open_screen' | (typeof PROP
       return searchMessages(d.db, INPUTS.search_messages.parse(raw), now);
     case 'list_meetings': {
       const i = INPUTS.list_meetings.parse(raw);
-      const r = listDashboardMeetings(d.db, parseMeetingList(params({ view: i.view, limit: i.limit ?? 10 })), now, d.accountOf);
+      const r = await listDashboardMeetings(d.db, parseMeetingList(params({ view: i.view, limit: i.limit ?? 10 })), now, d.accountOf);
       return { total: r.total, rows: r.rows.map(({ docUrl: _docUrl, ...m }) => m) };
     }
     case 'get_meeting': {
       const i = INPUTS.get_meeting.parse(raw);
-      const m = meetingDetail(d.db, String(i.id), now, d.accountOf);
+      const m = await meetingDetail(d.db, String(i.id), now, d.accountOf);
       if (!m) throw new ControlError(404, `No meeting ${i.id}`);
       return m;
     }
     case 'get_activity': {
       const i = INPUTS.get_activity.parse(raw);
-      return listActivity(d.db, parseActivityParams(params({ kind: i.kind, limit: i.limit ?? 15 }))).items;
+      return (await listActivity(d.db, parseActivityParams(params({ kind: i.kind, limit: i.limit ?? 15 })))).items;
     }
     case 'get_ai_usage':
       INPUTS.get_ai_usage.parse(raw);
-      return usageSummary(d.db, d.spend, now, { voiceLocal: d.voiceLocal });
+      return await usageSummary(d.db, d.spend, now, { voiceLocal: d.voiceLocal });
   }
 }
 

@@ -17,7 +17,7 @@ async function setup(cap = 15, now = NOW) {
   const db = await seededDb();
   const clock = manualClock(now);
   const guard = new SpendGuard({ db, clock, capUsd: cap });
-  return { db, clock, guard, summary: (o: { voiceLocal?: boolean } = {}) => usageSummary(db, guard, clock.now(), { voiceLocal: o.voiceLocal ?? false }) };
+  return { db, clock, guard, summary: async (o: { voiceLocal?: boolean } = {}) => await usageSummary(db, guard, clock.now(), { voiceLocal: o.voiceLocal ?? false }) };
 }
 
 describe('usageSummary', () => {
@@ -25,13 +25,13 @@ describe('usageSummary', () => {
     const t = await setup(15);
     spend(t.db, '2026-10-19', 'ai', 2.5, 'batch 1');
     spend(t.db, '2026-10-19', 'stt', 0.75, 'meeting 3 part 0');
-    expect(t.summary().today).toEqual({ spent: 3.25, byKind: { ai: 2.5, stt: 0.75 }, capUsd: 15, remaining: 11.75, paused: false });
+    expect((await t.summary()).today).toEqual({ spent: 3.25, byKind: { ai: 2.5, stt: 0.75 }, capUsd: 15, remaining: 11.75, paused: false });
   });
 
   it('never shows a negative remainder, and reports the pause at the cap', async () => {
     const t = await setup(5);
     spend(t.db, '2026-10-19', 'ai', 6.2, 'batch 1');
-    expect(t.summary().today).toMatchObject({ spent: 6.2, remaining: 0, paused: true });
+    expect((await t.summary()).today).toMatchObject({ spent: 6.2, remaining: 0, paused: true });
   });
 
   it('gives 14 IST days ending today, zero-filled, oldest first', async () => {
@@ -42,7 +42,7 @@ describe('usageSummary', () => {
     spend(t.db, '2026-10-06', 'ai', 9, 'batch 3'); // 13 days back: the first day
     spend(t.db, '2026-10-05', 'ai', 99, 'batch 4'); // 14 days back: left out
     spend(t.db, '2026-10-20', 'ai', 99, 'batch 5'); // tomorrow: left out
-    const days = t.summary().days;
+    const days = (await t.summary()).days;
     expect(days).toHaveLength(14);
     expect(days[0]).toEqual({ day: '2026-10-06', usd: 9 });
     expect(days.at(-1)).toEqual({ day: '2026-10-19', usd: 1.5 });
@@ -54,7 +54,7 @@ describe('usageSummary', () => {
     const t = await setup(15, '2026-10-19T18:45:00.000Z'); // 00:15 IST on the 20th
     spend(t.db, '2026-10-20', 'ai', 1, 'batch 1');
     spend(t.db, '2026-10-19', 'ai', 4, 'batch 2');
-    const s = t.summary();
+    const s = (await t.summary());
     expect(s.today.spent).toBe(1);
     expect(s.days.at(-1)).toEqual({ day: '2026-10-20', usd: 1 });
     expect(s.days.at(-2)).toEqual({ day: '2026-10-19', usd: 4 });
@@ -69,7 +69,7 @@ describe('usageSummary', () => {
     spend(t.db, '2026-10-19', 'stt', 0.75, 'meeting 4 part 0');
     spend(t.db, '2026-10-19', 'ai', 0.1, 'shutdown before the paid call finished (estimated)');
     spend(t.db, '2026-10-18', 'ai', 50, 'batch 9'); // yesterday
-    expect(t.summary({ voiceLocal: true }).byUse).toEqual([
+    expect((await t.summary({ voiceLocal: true })).byUse).toEqual([
       { use: 'messages', label: 'Messages to tasks', usd: 1.5 },
       { use: 'meetings', label: 'Meeting summaries', usd: 2 },
       { use: 'files', label: 'Reading shared files', usd: 0.25 },
@@ -77,7 +77,7 @@ describe('usageSummary', () => {
       { use: 'voice', label: 'Voice notes (on this computer)', usd: 0 },
       { use: 'other', label: 'Other', usd: 0.1 },
     ]);
-    expect(t.summary().byUse.map((u) => u.use)).toEqual(['messages', 'meetings', 'files', 'speech', 'other']);
+    expect((await t.summary()).byUse.map((u) => u.use)).toEqual(['messages', 'meetings', 'files', 'speech', 'other']);
   });
 
   it("counts today's finished batches and the messages they read, by the IST day", async () => {
@@ -88,15 +88,15 @@ describe('usageSummary', () => {
     batch('2026-10-18T18:29:00.000Z', 99); // 23:59 IST on the 18th
     batch('2026-10-19T07:30:00.000Z', 7, 'failed'); // not read
     startBatch(t.db, 1, 4, '2026-10-19T07:45:00.000Z'); // still running
-    expect(t.summary().batches).toEqual({ today: 2, messagesRead: 15 });
+    expect((await t.summary()).batches).toEqual({ today: 2, messagesRead: 15 });
   });
 
   it('rounds to a hundredth of a cent', async () => {
     const t = await setup();
     spend(t.db, '2026-10-19', 'ai', 0.1, 'batch 1');
     spend(t.db, '2026-10-19', 'ai', 0.2, 'batch 2');
-    expect(t.summary().today.spent).toBe(0.3);
-    expect(t.summary().days.at(-1)!.usd).toBe(0.3);
+    expect((await t.summary()).today.spent).toBe(0.3);
+    expect((await t.summary()).days.at(-1)!.usd).toBe(0.3);
   });
 });
 
@@ -105,7 +105,7 @@ describe('usageSummary review fixes', () => {
     const t = await setup();
     finishBatch(t.db, startBatch(t.db, 1, 8, '2026-10-19T18:30:00.000Z'), { status: 'ok', errorCode: null, accepted: 0, rejected: 0, at: '2026-10-19T18:30:00.000Z' });
     spend(t.db, '2026-10-19', 'ai', 1, 'batch 1');
-    const s = t.summary();
+    const s = (await t.summary());
     expect(s.batches).toEqual({ today: 0, messagesRead: 0 });
     expect(s.byUse.map((u) => u.use)).toEqual(['messages', 'meetings', 'files', 'speech']);
   });
@@ -114,9 +114,9 @@ describe('usageSummary review fixes', () => {
 describe('usageSummary: the dashboard assistant', () => {
   it('lists the assistant\'s answers as their own use, only once something was booked', async () => {
     const t = await setup();
-    expect(t.summary().byUse.map((u) => u.use)).not.toContain('assistant');
+    expect((await t.summary()).byUse.map((u) => u.use)).not.toContain('assistant');
     spend(t.db, '2026-10-19', 'ai', 0.04, 'assistant call');
     spend(t.db, '2026-10-19', 'ai', 0.02, 'assistant call');
-    expect(t.summary().byUse.find((u) => u.use === 'assistant')).toEqual({ use: 'assistant', label: 'Dashboard assistant', usd: 0.06 });
+    expect((await t.summary()).byUse.find((u) => u.use === 'assistant')).toEqual({ use: 'assistant', label: 'Dashboard assistant', usd: 0.06 });
   });
 });

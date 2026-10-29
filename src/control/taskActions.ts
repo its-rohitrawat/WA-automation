@@ -69,14 +69,27 @@ function changedWords(opts: EditOptions): string {
 
 /**
  * Runs one task action and returns the fresh detail. The change and its audit line are one transaction: if the audit
- * cannot be written, nothing changes. Throws ControlError: 400 an unknown action, 404 no such task, 409 the task already
- * has that status, 422 an invalid edit.
+ * cannot be written, nothing changes. Rejects with ControlError: 400 an unknown action, 404 no such task, 409 the task
+ * already has that status, 422 an invalid edit.
  */
-export function runTaskAction(
+export async function runTaskAction(
   db: Db,
   req: { code: string; action: string; body?: unknown },
   ctx: { actor: string; now: Date; audit: Audit },
-): DashboardTaskDetail {
+): Promise<DashboardTaskDetail> {
+  const code = applyTaskAction(db, req, ctx);
+  return (await taskDetail(db, code, ctx.now))!;
+}
+
+/**
+ * The change itself, synchronous until S1.11 converts the task store: it throws ControlError at once, so a caller's own
+ * transaction (the assistant's two-step change) rolls back. Returns the task's code.
+ */
+export function applyTaskAction(
+  db: Db,
+  req: { code: string; action: string; body?: unknown },
+  ctx: { actor: string; now: Date; audit: Audit },
+): string {
   if (!(TASK_ACTIONS as readonly string[]).includes(req.action)) throw new ControlError(400, `action must be one of: ${TASK_ACTIONS.join(', ')}`, 'action');
   const action = req.action as TaskAction;
   const raw = req.code.trim().toUpperCase();
@@ -113,7 +126,7 @@ export function runTaskAction(
     if (e instanceof CorrectionError) throw fromCorrection(e);
     throw e;
   }
-  return taskDetail(db, code, now)!;
+  return code;
 }
 
 /** What a new task may be given (the dashboard assistant's proposal, confirmed by the owner). */
@@ -148,7 +161,7 @@ export function parseNewTask(db: Db, input: NewTaskInput): { clientId: number; c
  * Adds a task as the owner (origin 'dashboard'): the fields given are locked against the AI, as an edit locks them, and
  * the tracker is rebuilt. The task and its audit line are one transaction. Returns the new task's detail.
  */
-export function createTaskAction(db: Db, input: NewTaskInput, ctx: { actor: string; now: Date; audit: Audit }): DashboardTaskDetail {
+export async function createTaskAction(db: Db, input: NewTaskInput, ctx: { actor: string; now: Date; audit: Audit }): Promise<DashboardTaskDetail> {
   const { clientId, fields } = parseNewTask(db, input);
   const { now } = ctx;
   const at = now.toISOString();
@@ -166,5 +179,5 @@ export function createTaskAction(db: Db, input: NewTaskInput, ctx: { actor: stri
     ctx.audit({ actor: ctx.actor, event: 'task.create', kind: 'task', detail: `Task ${t.code} added` });
     return t.code;
   });
-  return taskDetail(db, code, now)!;
+  return (await taskDetail(db, code, now))!;
 }

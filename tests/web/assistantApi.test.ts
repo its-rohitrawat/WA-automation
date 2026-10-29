@@ -51,7 +51,7 @@ async function boot(o: { askCapacity?: number } = {}) {
   const pending = new PendingActions(clock);
   const ai = new ProposingAi();
   const status: AgentStatus = { at: NOW, up: true, line: { ok: true, text: 'ok' }, parts: [], lastMessageAt: null, spentToday: 0, capUsd: 10 };
-  const assistant = new Assistant({ ai, paid: spend, prices: PRICES, pending, settings, log: silentLogger(), clock, db, control: { status: () => status }, spend, voiceLocal: false });
+  const assistant = new Assistant({ ai, paid: spend, prices: PRICES, pending, settings, log: silentLogger(), clock, db, control: { status: async () => status }, spend, voiceLocal: false });
   const audit = new AuditLog(db, clock);
   const h = await bootDashboard({
     db, clock,

@@ -18,7 +18,7 @@ export function registerReadApi(router: Router, d: ReadApiDeps): void {
       d.guard.requireOwner(req); // before any work: a request without an owner session reads nothing
       sendJson(res, 200, await answer());
     });
-  read('/dashboard/api/status', () => d.control.status());
-  read('/dashboard/api/overview', () => d.control.overview());
-  read('/dashboard/api/connections', () => d.control.connections());
+  read('/dashboard/api/status', async () => (await d.control.status()));
+  read('/dashboard/api/overview', async () => (await d.control.overview()));
+  read('/dashboard/api/connections', async () => (await d.control.connections()));
 }

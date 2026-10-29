@@ -110,8 +110,8 @@ function toMessage(r: RawMessage): ChatMessage {
 }
 
 /** One stored message of this client, as the chat shows it, or null (a quote for a reply). */
-function messageQuote(db: Db, clientId: number, id: number): ChatOutboxItem['quote'] {
-  const r = db.raw.prepare(`${SELECT} WHERE m.client_id = ? AND m.id = ?`).get(clientId, id) as RawMessage | undefined;
+async function messageQuote(db: Db, clientId: number, id: number): Promise<ChatOutboxItem['quote']> {
+  const r = await db.get<RawMessage>(`${SELECT} WHERE m.client_id = ? AND m.id = ?`, [clientId, id]);
   if (!r) return null;
   const m = toMessage(r);
   return { sender: m.sender, text: oneLine(m.text, QUOTE_MAX), kind: m.kind };
@@ -121,24 +121,27 @@ function messageQuote(db: Db, clientId: number, id: number): ChatOutboxItem['quo
  * A page of the chat: the `limit` messages before the message `before` (by time, then row), newest first, or the newest
  * when `before` is not given; and the dashboard's own messages still to show. Parameterised reads only.
  */
-export function chatPage(db: Db, c: ClientRow, now: Date, o: { before?: number; limit?: number } = {}): ChatPage {
+export async function chatPage(db: Db, c: ClientRow, now: Date, o: { before?: number; limit?: number } = {}): Promise<ChatPage> {
   const limit = Math.max(1, Math.min(CHAT_PAGE_MAX, Math.floor(o.limit ?? CHAT_PAGE)));
   let rows: RawMessage[];
   if (o.before !== undefined) {
-    const cursor = db.raw.prepare('SELECT ts, id FROM messages WHERE client_id = ? AND id = ?').get(c.id, o.before) as { ts: string; id: number } | undefined;
+    const cursor = await db.get<{ ts: string; id: number }>('SELECT ts, id FROM messages WHERE client_id = ? AND id = ?', [c.id, o.before]);
     rows = cursor
-      ? (db.raw.prepare(`${SELECT} WHERE m.client_id = @client AND (m.ts < @ts OR (m.ts = @ts AND m.id < @id)) ORDER BY m.ts DESC, m.id DESC LIMIT @limit`)
-        .all({ client: c.id, ts: cursor.ts, id: cursor.id, limit: limit + 1 }) as RawMessage[])
+      ? await db.all<RawMessage>(
+        `${SELECT} WHERE m.client_id = @client AND (m.ts < @ts OR (m.ts = @ts AND m.id < @id)) ORDER BY m.ts DESC, m.id DESC LIMIT @limit`,
+        { client: c.id, ts: cursor.ts, id: cursor.id, limit: limit + 1 },
+      )
       : [];
   } else {
-    rows = db.raw.prepare(`${SELECT} WHERE m.client_id = ? ORDER BY m.ts DESC, m.id DESC LIMIT ?`).all(c.id, limit + 1) as RawMessage[];
+    rows = await db.all<RawMessage>(`${SELECT} WHERE m.client_id = ? ORDER BY m.ts DESC, m.id DESC LIMIT ?`, [c.id, limit + 1]);
   }
   const since = new Date(now.getTime() - OUTBOX_DAYS * 86_400_000).toISOString();
-  const outbox = o.before === undefined ? outboxToShow(db, c.id, since).map((row) => outboxItem(db, row)) : [];
+  const outbox: ChatOutboxItem[] = [];
+  if (o.before === undefined) for (const row of outboxToShow(db, c.id, since)) outbox.push(await outboxItem(db, row));
   return { messages: rows.slice(0, limit).map(toMessage), hasOlder: rows.length > limit, outbox };
 }
 
 /** A dashboard message as the chat shows it. */
-export function outboxItem(db: Db, row: OutboxRow): ChatOutboxItem {
-  return { uuid: row.uuid, at: row.createdAt, text: row.text, state: row.state, quote: row.replyTo === null ? null : messageQuote(db, row.clientId, row.replyTo) };
+export async function outboxItem(db: Db, row: OutboxRow): Promise<ChatOutboxItem> {
+  return { uuid: row.uuid, at: row.createdAt, text: row.text, state: row.state, quote: row.replyTo === null ? null : await messageQuote(db, row.clientId, row.replyTo) };
 }

@@ -117,12 +117,12 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   change('/dashboard/api/groups/apply', (_ctx, o, body) => groupsApplyHandler(groups, o, body));
   change('/dashboard/api/groups/bulk', (_ctx, o, body) => groupsBulkHandler(groups, o, body));
   read('/dashboard/api/groups/suggest-code', ({ url }, o) => suggestCodeHandler(groups, o, url.searchParams.get('name') ?? ''));
-  read('/dashboard/api/clients', (_ctx, o) => clientsListHandler(d.clients, o));
-  read('/dashboard/api/clients/:code', ({ params }, o) => clientDetailHandler(d.clients, o, params.code!));
+  read('/dashboard/api/clients', async (_ctx, o) => await clientsListHandler(d.clients, o));
+  read('/dashboard/api/clients/:code', async ({ params }, o) => await clientDetailHandler(d.clients, o, params.code!));
   if (d.chat) {
     const chat: ChatDeps = { ...d.chat, audit };
-    read('/dashboard/api/clients/:code/chat', ({ params, url }, o) =>
-      chatReadHandler(chat, o, params.code!, { before: url.searchParams.get('before'), limit: url.searchParams.get('limit') }));
+    read('/dashboard/api/clients/:code/chat', async ({ params, url }, o) =>
+      await chatReadHandler(chat, o, params.code!, { before: url.searchParams.get('before'), limit: url.searchParams.get('limit') }));
     change('/dashboard/api/clients/:code/chat/send', ({ params }, o, body) => chatSendHandler(chat, o, params.code!, body));
   }
 

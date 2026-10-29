@@ -72,7 +72,7 @@ describe('listActivity', () => {
     audit(db, { at: at('06:40'), actor: 'owner@example.com', event: 'settings.report', kind: 'config', detail: 'Morning briefing switched on' });
     audit(db, { at: at('06:50'), actor: 'owner@example.com', event: 'auth.signin', kind: 'auth', detail: 'Signed in' }); // not activity
     meeting(db, 'internal', at('07:00')); // never listed
-    const r = listActivity(db, params());
+    const r = await listActivity(db, params());
     expect(r.items.map(({ kind, title, detail, who }) => ({ kind, title, detail, who }))).toEqual([
       { kind: 'config', title: 'Setting changed', detail: 'Morning briefing switched on', who: 'by the owner' },
       { kind: 'connection', title: 'Connection changed', detail: "Founder's phone relinked", who: 'by the owner' },
@@ -97,7 +97,7 @@ describe('listActivity', () => {
     meeting(db, 'skipped', at('05:02'));
     meeting(db, 'no_access', at('05:03'));
     meeting(db, 'failed', at('05:04'));
-    expect(listActivity(db, params()).items.map(({ kind, title, detail }) => [kind, title, detail])).toEqual([
+    expect((await listActivity(db, params())).items.map(({ kind, title, detail }) => [kind, title, detail])).toEqual([
       ['issue', 'Meeting could not be processed', 'Weekly sync · Sharma Interiors'],
       ['issue', 'No access to a meeting recording', 'Weekly sync · Sharma Interiors'],
       ['meet', 'Meeting skipped', 'Weekly sync · Sharma Interiors'],
@@ -116,12 +116,12 @@ describe('listActivity', () => {
     meeting(db, 'failed', at('05:04'));
     audit(db, { at: at('05:05'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'Tracker.xlsx uploaded to Drive' });
     audit(db, { at: at('05:06'), actor: 'agent', event: 'tracker.publish_failed', kind: 'ops', detail: 'Tracker upload failed' });
-    expect(titles(listActivity(db, params({ kind: 'msg' })))).toEqual(['3 messages read']);
-    expect(titles(listActivity(db, params({ kind: 'task' })))).toEqual(['Task created']);
-    expect(titles(listActivity(db, params({ kind: 'meet' })))).toEqual(['Meeting summary ready']);
-    expect(titles(listActivity(db, params({ kind: 'tracker' })))).toEqual(['Tracker updated']);
-    expect(titles(listActivity(db, params({ kind: 'issue' })))).toEqual(['Tracker upload failed', 'Meeting could not be processed', 'Could not read 3 messages']);
-    expect(listActivity(db, params()).items).toHaveLength(7);
+    expect(titles(await listActivity(db, params({ kind: 'msg' })))).toEqual(['3 messages read']);
+    expect(titles(await listActivity(db, params({ kind: 'task' })))).toEqual(['Task created']);
+    expect(titles(await listActivity(db, params({ kind: 'meet' })))).toEqual(['Meeting summary ready']);
+    expect(titles(await listActivity(db, params({ kind: 'tracker' })))).toEqual(['Tracker updated']);
+    expect(titles(await listActivity(db, params({ kind: 'issue' })))).toEqual(['Tracker upload failed', 'Meeting could not be processed', 'Could not read 3 messages']);
+    expect((await listActivity(db, params())).items).toHaveLength(7);
   });
 
   it('pages with before, never losing items that share a time', async () => {
@@ -132,28 +132,28 @@ describe('listActivity', () => {
     const seen: string[] = [];
     let before: string | undefined;
     for (let page = 0; page < 10; page++) {
-      const r = listActivity(db, params({ limit: '2', ...(before ? { before } : {}) }));
+      const r = await listActivity(db, params({ limit: '2', ...(before ? { before } : {}) }));
       seen.push(...r.items.map((i) => i.id));
       if (!r.next) break;
       before = r.next;
     }
     expect(seen).toEqual(['b:5', 'b:4', 'b:3', 'b:2', 'b:1', 'a:1', 'b:6']);
     // A plain time: everything strictly before it.
-    expect(titles(listActivity(db, params({ before: at('05:00') })))).toEqual(['9 messages read']);
+    expect(titles(await listActivity(db, params({ before: at('05:00') })))).toEqual(['9 messages read']);
   });
 
   it('gives next only when the page is full', async () => {
     const db = await seededDb();
     batch(db, { at: at('05:00'), status: 'ok', messages: 1 });
-    expect(listActivity(db, params({ limit: '1' })).next).toBe(`${at('05:00')}|b|1`);
-    expect(listActivity(db, params({ limit: '2' })).next).toBeNull();
+    expect((await listActivity(db, params({ limit: '1' }))).next).toBe(`${at('05:00')}|b|1`);
+    expect((await listActivity(db, params({ limit: '2' }))).next).toBeNull();
   });
 
   it('skips running batches and events not about a task', async () => {
     const db = await seededDb();
     startBatch(db, 1, 5, at('05:00'));
     recordEvent(db, { taskId: null, clientId: 1, actor: 'ai', op: 'set_status', detail: { status: 'chat words' }, reason: null, sourceIds: [], at: at('05:01') });
-    expect(listActivity(db, params()).items).toEqual([]);
+    expect((await listActivity(db, params())).items).toEqual([]);
   });
 });
 
@@ -215,7 +215,7 @@ describe('activity review fixes', () => {
       raisedOn: '2026-10-19', deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'meeting', meetingId: mid }, NOW);
     recordEvent(db, { taskId: voice.id, clientId: 1, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: at('05:00') });
     recordEvent(db, { taskId: fromMeeting.id, clientId: 1, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: at('05:01') });
-    expect(listActivity(db, params({ kind: 'task' })).items.map((i) => i.who)).toEqual(['from a meeting · Sharma Interiors', 'from a voice note · Sharma Interiors']);
+    expect((await listActivity(db, params({ kind: 'task' }))).items.map((i) => i.who)).toEqual(['from a meeting · Sharma Interiors', 'from a voice note · Sharma Interiors']);
   });
 
   it('refuses a before that is a date only or not in UTC', () => {
@@ -228,23 +228,23 @@ describe('activity review fixes', () => {
     const db = await seededDb();
     audit(db, { at: at('05:00'), actor: 'owner@example.com', event: 'tracker.published', kind: 'ops', detail: 'x' });
     audit(db, { at: at('05:01'), actor: 'owner@example.com', event: 'tracker.publish_failed', kind: 'ops', detail: 'x' });
-    expect(listActivity(db, params()).items).toEqual([]);
+    expect((await listActivity(db, params())).items).toEqual([]);
   });
 
   it('leaves out a no-access meeting found as internal', async () => {
     const db = await seededDb();
     const id = meeting(db, 'no_access', at('05:00'), { title: '' });
     db.raw.prepare("UPDATE meetings SET note = 'found_internal', client_id = NULL WHERE id = ?").run(id);
-    expect(listActivity(db, params()).items).toEqual([]);
+    expect((await listActivity(db, params())).items).toEqual([]);
   });
 
   it('pages correctly when one source has more rows than the page', async () => {
     const db = await seededDb();
     for (let i = 0; i < 4; i++) batch(db, { at: at(`05:0${i}`), status: 'ok', messages: i + 1 });
     audit(db, { at: at('05:02'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'x' });
-    const first = listActivity(db, params({ limit: '2' }));
-    const second = listActivity(db, params({ limit: '2', before: first.next! }));
-    const third = listActivity(db, params({ limit: '2', before: second.next! }));
+    const first = await listActivity(db, params({ limit: '2' }));
+    const second = await listActivity(db, params({ limit: '2', before: first.next! }));
+    const third = await listActivity(db, params({ limit: '2', before: second.next! }));
     expect([...first.items, ...second.items, ...third.items].map((i) => i.id)).toEqual(['b:4', 'b:3', 'a:1', 'b:2', 'b:1']);
   });
 });
@@ -278,9 +278,9 @@ describe('Activity: a newly approved group\'s earlier messages', () => {
     expect(e).toEqual({ actor: 'agent', event: 'history.read', kind: 'ops', detail: '42 earlier messages read · Sharma Interiors' });
     db.raw.prepare('INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, ?, ?, ?, ?)').run(NOW, e.actor, e.event, e.kind, e.detail);
     const row = { kind: 'msg', title: '42 earlier messages read', detail: 'Sharma Interiors', who: 'by the agent' };
-    expect(listActivity(db, params()).items).toEqual([expect.objectContaining(row)]);
-    expect(listActivity(db, params({ kind: 'msg' })).items).toEqual([expect.objectContaining(row)]);
-    for (const kind of ['task', 'meet', 'tracker', 'issue']) expect(listActivity(db, params({ kind })).items, kind).toEqual([]);
+    expect((await listActivity(db, params())).items).toEqual([expect.objectContaining(row)]);
+    expect((await listActivity(db, params({ kind: 'msg' }))).items).toEqual([expect.objectContaining(row)]);
+    for (const kind of ['task', 'meet', 'tracker', 'issue']) expect((await listActivity(db, params({ kind }))).items, kind).toEqual([]);
     expect(historyReadEntry(1, 'A · B').detail).toBe('1 earlier message read · A · B');
   });
 });

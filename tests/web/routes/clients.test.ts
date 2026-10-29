@@ -47,7 +47,7 @@ async function setup() {
 describe('clientsListHandler', () => {
   it('lists the active clients with their counts; the group name comes from the last list without asking WhatsApp', async () => {
     const { deps, src } = await setup();
-    const before = clientsListHandler(deps, CTX);
+    const before = await clientsListHandler(deps, CTX);
     expect(before.status).toBe(200);
     const cards = (before.body as { clients: { code: string; groupName: string; counts: unknown }[] }).clients;
     expect(cards.map((c) => c.code)).toEqual(['MEH', 'SHA']);
@@ -55,7 +55,7 @@ describe('clientsListHandler', () => {
     expect(src.calls).toBe(0);
 
     await deps.directory.list();
-    const after = (clientsListHandler(deps, CTX).body as { clients: { code: string; groupName: string }[] }).clients;
+    const after = ((await clientsListHandler(deps, CTX)).body as { clients: { code: string; groupName: string }[] }).clients;
     expect(after.find((c) => c.code === 'SHA')!.groupName).toBe('Sharma x Studio');
     expect(src.calls).toBe(1);
   });
@@ -64,10 +64,10 @@ describe('clientsListHandler', () => {
 describe('clientDetailHandler', () => {
   it('gives the client drawer; its counts match the card', async () => {
     const { deps } = await setup();
-    const r = clientDetailHandler(deps, CTX, 'SHA');
+    const r = await clientDetailHandler(deps, CTX, 'SHA');
     expect(r.status).toBe(200);
     const d = (r.body as { client: { counts: unknown; openTasks: unknown[] } }).client;
-    const card = (clientsListHandler(deps, CTX).body as { clients: { code: string; counts: unknown }[] }).clients.find((c) => c.code === 'SHA')!;
+    const card = ((await clientsListHandler(deps, CTX)).body as { clients: { code: string; counts: unknown }[] }).clients.find((c) => c.code === 'SHA')!;
     expect(d.counts).toEqual(card.counts);
     expect(d.openTasks).toEqual([{ code: 'SHA-001', title: 'Send the moodboard', assignedTo: 'Ravi', deadline: '2026-10-25', status: 'open', priority: 'major', sentiment: null }]);
   });
@@ -77,18 +77,18 @@ describe('clientDetailHandler', () => {
     const db = deps.db;
     db.raw.prepare("UPDATE tasks SET sentiment = 'frustrated' WHERE code = 'SHA-001'").run();
     db.raw.prepare("UPDATE clients SET sentiment = 'negative', sentiment_at = '2026-10-19T08:00:00.000Z' WHERE code = 'SHA'").run();
-    const detail = () => (clientDetailHandler(deps, CTX, 'SHA').body as { client: { sentiment: unknown; openTasks: { sentiment: unknown }[] } }).client;
-    expect(detail().sentiment).toBeNull();
-    expect(detail().openTasks[0]!.sentiment).toBeNull();
+    const detail = async () => ((await clientDetailHandler(deps, CTX, 'SHA')).body as { client: { sentiment: unknown; openTasks: { sentiment: unknown }[] } }).client;
+    expect((await detail()).sentiment).toBeNull();
+    expect((await detail()).openTasks[0]!.sentiment).toBeNull();
     db.raw.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', '2026-10-19T08:00:00.000Z', 'o')").run();
-    expect(detail().sentiment).toEqual({ mood: 'negative', at: '2026-10-19T08:00:00.000Z' });
-    expect(detail().openTasks[0]!.sentiment).toBe('frustrated');
+    expect((await detail()).sentiment).toEqual({ mood: 'negative', at: '2026-10-19T08:00:00.000Z' });
+    expect((await detail()).openTasks[0]!.sentiment).toBe('frustrated');
   });
 
   it('an unknown or malformed code gives 404 not_found', async () => {
     const { deps } = await setup();
     for (const code of ['ZZZ', 'sha', '', 'SHA-001', "SHA' OR 1=1"]) {
-      const r = clientDetailHandler(deps, CTX, code);
+      const r = await clientDetailHandler(deps, CTX, code);
       expect(r.status).toBe(404);
       expect((r.body as { error: { code: string } }).error.code).toBe('not_found');
     }
@@ -96,9 +96,9 @@ describe('clientDetailHandler', () => {
 
   it('no response carries quotes, phone numbers or WhatsApp ids; message text only in the drawer latest messages', async () => {
     const { deps } = await setup();
-    const list = clientsListHandler(deps, CTX);
-    const detail = clientDetailHandler(deps, CTX, 'SHA');
-    const all = JSON.stringify([list, detail, clientDetailHandler(deps, CTX, 'MEH')]);
+    const list = await clientsListHandler(deps, CTX);
+    const detail = await clientDetailHandler(deps, CTX, 'SHA');
+    const all = JSON.stringify([list, detail, await clientDetailHandler(deps, CTX, 'MEH')]);
     for (const s of [QUOTE, '919800000001', '@s.whatsapp.net']) expect(all).not.toContain(s);
     expect(JSON.stringify(list)).not.toContain(MESSAGE);
     // The owner chose to see the group's last three messages in the drawer (28 Oct 2026): there, and nowhere else.
