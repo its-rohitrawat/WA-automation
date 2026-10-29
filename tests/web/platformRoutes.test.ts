@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { inviteForSignup } from '../../src/platform/invites.ts';
+import { inviteForSignup, redeemInvite } from '../../src/platform/invites.ts';
 import type { InviteEmail, InviteMailer, MailOutcome } from '../../src/platform/mailer.ts';
 import { ensurePlatformSchema } from '../../src/platform/schema.ts';
 import { SqliteDb } from '../../src/store/engine/sqlite.ts';
@@ -154,6 +154,18 @@ describe('the platform routes', () => {
     expect(cancelled.invite.status).toBe('cancelled');
     expect(await inviteForSignup({ db, clock }, tokenOf(mailer.sent[0]!.link))).toBeNull();
     expect((await call('POST', `/dashboard/api/platform/invites/${first.invite.id}/cancel`)).status).toBe(409);
+  });
+
+  it('Getting started: a member sees the checklist of their own workspace; someone with no workspace gets none', async () => {
+    expect((await call('GET', '/dashboard/api/platform/onboarding', CUSTOMER)).status).toBe(404);
+    const made = body(await invite(false));
+    await redeemInvite({ db, clock }, { token: tokenOf(made.link), email: 'kapoor.studio@example.com' });
+    const r = await call('GET', '/dashboard/api/platform/onboarding', CUSTOMER);
+    expect(r.status).toBe(200);
+    expect(body(r)).toMatchObject({ business: 'Kapoor Design Studio', status: 'onboarding', done: 0, total: 6, founderName: 'Rohit' });
+    expect((body(r).steps as { state: string }[]).map((x) => x.state)).toEqual(['coming', 'coming', 'locked', 'locked', 'locked', 'locked']);
+    // The founder has no membership in this customer: no checklist (and never the customer's content).
+    expect((await call('GET', '/dashboard/api/platform/onboarding', FOUNDER)).status).toBe(404);
   });
 
   it('refuses a bad body, a bad address, an unknown invite, and the daily limit, with plain messages', async () => {

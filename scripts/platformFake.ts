@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInvite, markSending, recordSend, redeemInvite } from '../src/platform/invites.ts';
 import type { InviteEmail, InviteMailer, MailOutcome } from '../src/platform/mailer.ts';
+import type { OnboardingProbes, ProbeState, StepId } from '../src/platform/onboarding.ts';
 import { ensurePlatformSchema } from '../src/platform/schema.ts';
 import { ensureFounderTenant } from '../src/platform/store.ts';
 import { SqliteDb } from '../src/store/engine/sqlite.ts';
@@ -25,10 +26,13 @@ export function patchedShell(): { app: string; router: string } {
   const router = readFileSync(join(PUBLIC_DIR, 'router.js'), 'utf8');
   const appAnchor = "import './views/screens.js';";
   const navAnchor = "['System', [['connections', 'Connections', 'plug'],";
-  if (!app.includes(appAnchor) || !router.includes(navAnchor)) throw new Error('the shell changed: update the hookups doc and this patch');
+  const workAnchor = "['Workspace', [['overview', 'Overview', 'dash'],";
+  if (!app.includes(appAnchor) || !router.includes(navAnchor) || !router.includes(workAnchor)) throw new Error('the shell changed: update the hookups doc and this patch');
   return {
     app: app.replace(appAnchor, `${appAnchor}\nimport './views/platform.js';`),
-    router: router.replace(navAnchor, "['System', [['customers', 'Customers', 'store'], ['invite', 'Invite a customer', 'mail'], ['connections', 'Connections', 'plug'],"),
+    router: router
+      .replace(navAnchor, "['System', [['customers', 'Customers', 'store'], ['invite', 'Invite a customer', 'mail'], ['connections', 'Connections', 'plug'],")
+      .replace(workAnchor, "['Workspace', [['onboarding', 'Getting started', 'flash'], ['overview', 'Overview', 'dash'],"),
   };
 }
 
@@ -59,7 +63,13 @@ async function seed(db: SqliteDb): Promise<void> {
   await redeemInvite({ db, clock: at(2, 16) }, { token: nair.token, email: 'nair.digital@example.com', name: 'Nair' });
   await sent('Gupta Events Co.', 'gupta.events@example.com', 0.2, { state: 'unknown', code: 'timeout' });
   await sent('Kapoor Design Studio', 'kapoor.studio@example.com', 0.1, { state: 'sent' });
+  const joshi = await sent('Joshi Interiors', FOUNDER, 1, { state: 'sent' });
+  await redeemInvite({ db, clock: at(1, 15) }, { token: joshi.token, email: FOUNDER, name: 'Test Owner' });
 }
+
+/** What each onboarding step reports in the preview: coming until the test says otherwise. */
+export const fakeSteps: Partial<Record<StepId, ProbeState>> = {};
+const previewProbes: OnboardingProbes = { state: async (_t, step) => fakeSteps[step] ?? 'coming' };
 
 /**
  * Adds the platform screens to a fake dashboard: the patched shell, the platform routes behind the fake's owner check
@@ -98,7 +108,7 @@ export async function addPlatform(web: WebServer, o: { signedIn: () => boolean; 
   };
   mountPlatformRoutes(m, {
     db, clock: systemClock, log: silentLogger(), publicUrl: 'https://agent.example.com', founderName: 'Rohit',
-    isFounder: (x) => x.actor === FOUNDER, mailer: () => (o.gmail === false ? null : mailer),
+    isFounder: (x) => x.actor === FOUNDER, mailer: () => (o.gmail === false ? null : mailer), probes: previewProbes,
   });
   return { mailer, db };
 }

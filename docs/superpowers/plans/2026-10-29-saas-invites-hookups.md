@@ -184,3 +184,34 @@ customer `onboarding`) is complete and tested without it.
 ### 4.3 `src/web/oidc.ts` (lane A)
 
 Nothing to change: the sign-up reuses `PendingSignIns`, `authorizeUrl`, `checkClaims` and the verifier as they are.
+
+## 5. Getting started: the onboarding checklist (piece e)
+
+`src/platform/onboarding.ts` builds the checklist (design section 6), `views/onboarding.js` draws it, and
+`GET /dashboard/api/platform/onboarding` (mounted with the other platform routes, 2.1) answers it for the signed-in
+person's own workspace (their membership). A customer becomes `active` once WhatsApp and the API key are both done.
+
+### 5.1 The nav (lane A)
+
+- `src/web/public/router.js`: a `Getting started` entry, `['onboarding', 'Getting started', 'flash']`. For a **customer**
+  session it is the first Workspace entry, and Clients, Tasks, Meetings and Tracker are shown locked until the
+  workspace is active (the approved demo's customer nav). For the founder it is not shown. This needs the shell to know
+  the session's role, which arrives with customer sessions (4.2), so it is one change there.
+- `src/web/oidc.ts` `DASHBOARD_SCREENS`: add `'onboarding'` (see 2.5).
+
+### 5.2 The step probes (S4, the customer runtimes)
+
+`mountPlatformRoutes` takes `probes?: OnboardingProbes`. Today none is passed, so every step says
+"coming with the customer workspace" and steps 3 to 6 stay locked. S4 passes real probes, one answer per step:
+
+| Step | Done when |
+|---|---|
+| `whatsapp` | the customer's runtime has a linked WhatsApp session |
+| `key` | the customer's Anthropic key is stored and passed its test call |
+| `spare` | the customer's spare number is linked |
+| `drive` | the customer's own Google token is stored |
+| `groups` | at least one group is approved in the customer's allow-list |
+| `report` | the customer saved a report time |
+
+A step that exists but is not done answers `todo`; the screen then needs that step's own panel (the QR code, the key
+form and so on), which S4 adds to `views/onboarding.js` in place of the "coming" note.

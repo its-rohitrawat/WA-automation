@@ -10,7 +10,7 @@ import { chromium, type Page } from 'playwright-core';
 import { FAKE_CSRF, fakeDashboard, type FakeState } from './dashboardFake.ts';
 import { createInvite } from '../src/platform/invites.ts';
 import { systemClock } from '../src/util/clock.ts';
-import { addPlatform, addSignup, fakeGoogle } from './platformFake.ts';
+import { addPlatform, addSignup, fakeGoogle, fakeSteps } from './platformFake.ts';
 
 const arg = (name: string) => {
   const i = process.argv.indexOf(`--${name}`);
@@ -176,6 +176,31 @@ try {
       if (await p.locator('#gbtn').isVisible()) fail(where, 'Continue with Google offered for a used link');
       await shot(p, where, `signup-invalid-${tag}`, false);
       state.signedIn = true;
+      // (e) Getting started: before the customer workspace exists (the needed steps coming, the rest locked), then with
+      // WhatsApp and the key done (the customer becomes active and the rest unlock).
+      where = `onboarding ${tag}`;
+      for (const k of Object.keys(fakeSteps) as (keyof typeof fakeSteps)[]) delete fakeSteps[k];
+      await platformDb.run("UPDATE tenants SET status = 'onboarding' WHERE name = 'Joshi Interiors'");
+      await p.goto(`${base}/dashboard/onboarding`);
+      await p.locator('.pf-step').nth(5).waitFor();
+      if ((await p.locator('.pf-step.locked').count()) !== 4) fail(where, 'expected 4 locked steps');
+      await p.locator('.pf-step.open .pf-coming', { hasText: 'Coming with the customer workspace.' }).waitFor();
+      await p.locator('.pf-ob-prog', { hasText: '0 of 6 done' }).waitFor();
+      // A locked step is aria-disabled (so Playwright will not click it by itself); a person can still tap it.
+      await p.locator('.pf-step.locked .pf-step-head').first().click({ force: true });
+      await p.locator('.toast', { hasText: 'Finish WhatsApp and your API key first.' }).waitFor();
+      await shot(p, where, `onboarding-${tag}`);
+
+      where = `onboarding active ${tag}`;
+      fakeSteps.whatsapp = 'done';
+      fakeSteps.key = 'done';
+      await p.reload();
+      await p.locator('.pf-ob-prog', { hasText: '2 of 6 done' }).waitFor();
+      await p.locator('.pf-ob-prog .pill', { hasText: 'Active' }).waitFor();
+      if ((await p.locator('.pf-step.locked').count()) !== 0) fail(where, 'steps still locked');
+      if ((await p.locator('.pf-step.done').count()) !== 2) fail(where, 'expected 2 done steps');
+      await shot(p, where, `onboarding-active-${tag}`);
+      for (const k of Object.keys(fakeSteps) as (keyof typeof fakeSteps)[]) delete fakeSteps[k];
       await ctx.close();
     }
   }

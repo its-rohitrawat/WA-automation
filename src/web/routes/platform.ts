@@ -7,7 +7,8 @@ import {
   cancelInvite, createInvite, inviteForSignup, INVITES_PER_DAY, linksLeftToday, listInvites, markSending, newLink, recordSend, redeemInvite, type InviteView,
 } from '../../platform/invites.ts';
 import type { InviteMailer, MailOutcome } from '../../platform/mailer.ts';
-import { platformAudit } from '../../platform/store.ts';
+import { onboardingFor, type OnboardingProbes } from '../../platform/onboarding.ts';
+import { membershipsFor, platformAudit } from '../../platform/store.ts';
 import { inviteTokenHash } from '../../platform/tokens.ts';
 import type { Sql } from '../../store/engine/types.ts';
 import type { Clock } from '../../util/clock.ts';
@@ -39,6 +40,8 @@ export interface PlatformRouteDeps {
    * reconnect with the permission applies at once.
    */
   mailer: () => InviteMailer | null;
+  /** Each onboarding step's state for a customer (default: every step coming, until the customer workspace, S4). */
+  probes?: OnboardingProbes;
 }
 
 /** How the dashboard's own registrars look (src/web/mountRoutes.ts). */
@@ -132,6 +135,14 @@ export function mountPlatformRoutes(m: PlatformMount, d: PlatformRouteDeps): voi
     const sent = await email(o, made.invite, made.token);
     return ok({ invite: (await listInvites(d)).find((v) => v.id === made.invite.id), email: sent });
   }));
+
+  // Getting started: the signed-in person's own workspace checklist (any member, not only the founder).
+  m.read('/dashboard/api/platform/onboarding', async (_ctx, o) => {
+    const tenantId = (await membershipsFor(d.db, o.actor.trim().toLowerCase()))[0]?.tenantId;
+    const v = tenantId ? await onboardingFor(d, tenantId, d.probes) : null;
+    if (!v) return fail(404, 'no_workspace', 'There is no workspace to set up for this account.');
+    return ok({ ...v, founderName: d.founderName });
+  });
 
   m.change('/dashboard/api/platform/invites/:id/cancel', ({ params }, o) => answer(async () => {
     if (!d.isFounder(o)) return notFounder();
