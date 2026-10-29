@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   Assistant, MAX_CALLS, SYSTEM_PROMPT, type AssistantAi, type AssistantBlock, type AssistantEvent, type AssistantMessage, type AssistantTurn,
 } from '../../src/assistant/assistant.ts';
-import { PENDING_TTL_MS, PendingActions, runProposal, type ProposalCard } from '../../src/assistant/proposals.ts';
+import { ASSISTANT_SETTINGS, PENDING_TTL_MS, PendingActions, runProposal, type ProposalCard } from '../../src/assistant/proposals.ts';
 import { asData, scrub } from '../../src/assistant/tools.ts';
 import { parseEnv } from '../../src/config/env.ts';
 import { SettingsStore } from '../../src/config/settingsStore.ts';
@@ -271,6 +271,27 @@ describe('Assistant: changes wait for the owner\'s Confirm', () => {
     const { pending, run } = setup({ ai });
     await run('try things');
     expect(pending.size()).toBe(0);
+  });
+
+  it('never switches on sending from the dashboard: no draft, and a card for it is refused when it would run', async () => {
+    const ai = new FakeAi([
+      () => ({ content: [use('propose_setting', { key: 'dashboardSend', value: true })] }),
+      (m) => {
+        expect(results(m).map((r) => [r.is_error, r.content])).toEqual([[true, 'The assistant can change only: reportEnabled, reportDays, reportTime']]);
+        return { content: [text('none')] };
+      },
+    ]);
+    const { db, clock, pending, settings, run } = setup({ ai });
+    await run('turn on sending from the dashboard');
+    expect(pending.size()).toBe(0);
+    expect(ASSISTANT_SETTINGS).not.toContain('dashboardSend');
+    // Even a card made some other way (an older one, or a bug) cannot run it.
+    const audits: AuditEntry[] = [];
+    const crafted = () => runProposal({ kind: 'setting', key: 'dashboardSend', value: true }, { db, clock, settings, actor: OWNER.email, audit: (e) => audits.push(e) });
+    expect(crafted).toThrowError(ControlError);
+    expect(crafted).toThrowError('Only you can change this setting');
+    expect(settings.get().dashboardSend).toBe(false);
+    expect(audits).toEqual([]);
   });
 
   it('a new task runs on Confirm as the owner\'s, locked against the AI and shown as added from the dashboard', async () => {

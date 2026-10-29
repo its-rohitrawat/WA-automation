@@ -4,6 +4,7 @@ import { ApiError, get } from '../api.js';
 import { readClientDetail, readClients } from '../contract.js';
 import { esc, icon } from '../dom.js';
 import { ago, clock, when } from '../format.js';
+import { chatOpen, openChat, refreshChat } from './chat.js';
 import { CONNECTIONS_CHANGED, quickButton } from './connect.js';
 import { openDrawer, openDrawerElement } from './drawer.js';
 import { mountGroups } from './groups.js';
@@ -132,9 +133,15 @@ async function clientDrawer(code) {
     body.innerHTML = panelBody(c);
     body.scrollTop = 0;
   }
-  // The foot holds only Close and Open tracker; Sync now is at the end of the body.
+  // The foot holds Close, Open chat and Open tracker; Sync now is at the end of the body.
   const foot = d.querySelector('.dr-foot');
-  if (foot) foot.insertAdjacentHTML('beforeend', `<button class="btn btn-primary" type="button" data-go="tracker">${icon('xls', 16)}Open tracker</button>`);
+  if (foot) {
+    foot.insertAdjacentHTML('beforeend', `<button class="btn btn-ghost" type="button" data-open-chat>${icon('bubble', 16)}Open chat</button><button class="btn btn-primary" type="button" data-go="tracker">${icon('xls', 16)}Open tracker</button>`);
+  }
+  d.addEventListener('click', (e) => {
+    // The chat replaces the panel; its Back brings the panel back.
+    if (/** @type {Element} */ (e.target).closest('[data-open-chat]')) openChat(code, () => void clientDrawer(code));
+  });
 }
 
 /** "0:42" from 42 seconds. @param {number} s */
@@ -275,7 +282,7 @@ export function mountClients(ctx) {
   addEventListener(CONNECTIONS_CHANGED, onSynced);
   ctx.poll(async () => {
     try {
-      const [answer] = await Promise.all([get('/clients'), loadTrackerAt(), panelCode ? refreshPanel(panelCode) : undefined]);
+      const [answer] = await Promise.all([get('/clients'), loadTrackerAt(), panelCode ? refreshPanel(panelCode) : undefined, chatOpen() ? refreshChat() : undefined]);
       const next = readClients(answer);
       if (!ctx.live()) return;
       clients = next;

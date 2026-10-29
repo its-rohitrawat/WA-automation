@@ -2,6 +2,7 @@
 // for the smoke test and the local preview: the real route code (src/web/routes/work.ts and controlScreens.ts) on an
 // in-memory database of made-up clients, tasks and meetings. No file is opened; nothing reaches the agent, WhatsApp,
 // Google or any data folder. The owner session is the fake's flag, checked by a stand-in for D1's guard.
+import type { ServerResponse } from 'node:http';
 import { parseEnv } from '../src/config/env.ts';
 import { PrioritySettings } from '../src/config/prioritySettings.ts';
 import { SettingsStore } from '../src/config/settingsStore.ts';
@@ -9,15 +10,18 @@ import { UptimeLog } from '../src/health/uptimeLog.ts';
 import { SpendGuard } from '../src/spend/spendGuard.ts';
 import { TRACKER_ID_KEY, TRACKER_NEW_FILE_KEY } from '../src/output/trackerKey.ts';
 import { syncClients } from '../src/store/clients.ts';
-import { openDb } from '../src/store/db.ts';
+import { openDb, type Db } from '../src/store/db.ts';
 import { setKv } from '../src/store/kv.ts';
 import { insertFound } from '../src/store/meetings.ts';
+import { insertMessage } from '../src/store/messages.ts';
+import { upsertPerson } from '../src/store/people.ts';
 import { createTask, PRIORITIES, SENTIMENTS } from '../src/store/tasks.ts';
 import { systemClock } from '../src/util/clock.ts';
 import { silentLogger } from '../src/util/logger.ts';
 import { AuditLog } from '../src/web/audit.ts';
 import type { Guard, OwnerSession } from '../src/web/guard.ts';
 import { HttpError } from '../src/web/http.ts';
+import { chatReadHandler, chatSendHandler, type ChatDeps } from '../src/web/routes/chat.ts';
 import { registerControlApi } from '../src/web/routes/controlScreens.ts';
 import { registerWorkApi } from '../src/web/routes/work.ts';
 import { Assistant } from '../src/assistant/assistant.ts';
@@ -98,4 +102,84 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
     log: silentLogger(), clock, db, control: { status: () => status }, spend, voiceLocal: true,
   });
   registerAssistantApi(web.router, { ...action, db, clock, assistant, pending, settings, audit });
+
+  // Open chat: the real chat routes (src/web/routes/chat.ts) on this database, with a stand-in socket that reaches no
+  // one. It answers with a made-up message id and, a moment later, stores the founder's own copy, as WhatsApp does.
+  seedChat(db);
+  const ACME = '120363000000000101@g.us';
+  let sent = 0;
+  const socket = {
+    sendMessage: async (_jid: string, content: { text: string }) => {
+      const id = `FAKESENT${String(++sent).padStart(12, '0')}`;
+      setTimeout(() => {
+        insertMessage(db, { waId: id, clientId: 1, senderJid: 'me', senderNumber: null, senderName: null, fromMe: true, ts: new Date().toISOString(), text: content.text, quotedWaId: null, mediaType: null });
+      }, 1500);
+      return { key: { id } };
+    },
+  };
+  const chat: ChatDeps = {
+    db, clock, configs: () => [
+      { groupId: ACME, name: 'Acme Traders', code: 'ACM', phases: PHASES, emailDomains: [], meetingKeywords: [] },
+      { groupId: '120363000000000102@g.us', name: 'Mehta Foods <b>', code: 'MEH', phases: PHASES, emailDomains: [], meetingKeywords: [] },
+    ],
+    sendingOn: () => settings.get().dashboardSend, connected: () => true,
+    groupSocket: (groupId) => (groupId === ACME ? socket : null),
+    directory: { cachedGroups: () => [{ id: ACME, subject: 'Acme Traders x Studio' }] },
+    audit: (e) => audit.record({ ...e, detail: e.detail ?? '' }), log: silentLogger(),
+  };
+  const ownerCtx = { actor: OWNER, sessionId: 'fake', requestId: 'fake00000000' };
+  const answer = (res: ServerResponse, r: { status: number; body: unknown }) => {
+    res.writeHead(r.status, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify(r.body));
+  };
+  web.router.get('/dashboard/api/clients/:code/chat', ({ req, res, params, url }) => {
+    guard.requireOwner(req);
+    answer(res, chatReadHandler(chat, ownerCtx, params.code ?? '', { before: url.searchParams.get('before'), limit: url.searchParams.get('limit') }));
+  });
+  web.router.post('/dashboard/api/clients/:code/chat/send', async ({ req, res, params }) => {
+    guard.requireCsrf(req, guard.requireOwner(req));
+    let body: unknown = null;
+    try {
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    } catch {
+      body = null;
+    }
+    answer(res, await chatSendHandler(chat, ownerCtx, params.code ?? '', body));
+  });
+}
+
+/** About 70 made-up messages in Acme's group over three days: names, a photo, a file, a voice note with its words, a reply, a deleted one. */
+function seedChat(db: Db): void {
+  const people: [string, string][] = [['919800000011@s.whatsapp.net', 'Rahul Kapoor'], ['919800000012@s.whatsapp.net', 'Neha'], ['919800000013@s.whatsapp.net', 'Ajay Jain']];
+  for (const [jid, name] of people) upsertPerson(db, { clientId: 1, jid, number: null, name, fromMe: false });
+  const lines = [
+    'Morning! Did the revised quote go out?', 'Sending it today after lunch.', 'Can we move the site visit to Thursday?', 'Thursday works for us.',
+    'Sharing the moodboard v2 now', 'Looks great, small change on the colours', 'Will update and resend by evening', 'Thanks!',
+    'Please check the footer on mobile, it overlaps', 'Noted, fixing it', 'नमस्ते, कल की मीटिंग 11 बजे है', 'Done ✅ footer fixed 👍',
+  ];
+  let n = 0;
+  const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
+  const put = (o: { minutesAgo: number; who: number; text: string | null; media?: string; quoted?: string }) => {
+    const waId = `FAKEMSG${String(++n).padStart(13, '0')}`;
+    const mine = o.who === -1;
+    const jid = mine ? 'me' : people[o.who]![0];
+    insertMessage(db, { waId, clientId: 1, senderJid: jid, senderNumber: null, senderName: null, fromMe: mine, ts: at(o.minutesAgo), text: o.text, quotedWaId: o.quoted ?? null, mediaType: o.media ?? null });
+    return waId;
+  };
+  for (let i = 0; i < 60; i++) put({ minutesAgo: 3 * 24 * 60 - i * 70, who: i % 4 === 3 ? -1 : i % 3, text: lines[i % lines.length]! });
+  const photo = put({ minutesAgo: 95, who: 0, text: 'Site photos from today', media: 'image' });
+  const voice = put({ minutesAgo: 80, who: 2, text: null, media: 'voice' });
+  const rowId = (waId: string) => (db.prepare('SELECT id FROM messages WHERE wa_id = ?').get(waId) as { id: number }).id;
+  const stamp = at(80);
+  db.prepare("INSERT INTO media (message_id, client_id, kind, status, created_at, updated_at) VALUES (?, 1, 'image', 'done', ?, ?)").run(rowId(photo), stamp, stamp);
+  db.prepare("INSERT INTO media (message_id, client_id, kind, status, seconds, text_kind, text, created_at, updated_at) VALUES (?, 1, 'voice', 'done', 42, 'extract', ?, ?, ?)")
+    .run(rowId(voice), 'Hi, I checked the samples. The blue one works, please go ahead with it and send the final invoice.', stamp, stamp);
+  put({ minutesAgo: 70, who: 1, text: 'Quote attached', media: 'document' });
+  const gone = put({ minutesAgo: 60, who: 1, text: 'wrong group, sorry' });
+  db.prepare('UPDATE messages SET revoked = 1 WHERE wa_id = ?').run(gone);
+  put({ minutesAgo: 45, who: -1, text: 'Going with the blue one 👍', quoted: voice });
+  put({ minutesAgo: 30, who: 0, text: 'Text with <b>tags</b> stays text, and a very long line that has to wrap inside the bubble on a phone without scrolling sideways at all' });
+  const edited = put({ minutesAgo: 12, who: 2, text: 'See you at 11 tomorrow\nAddress: 2nd floor, the usual place' });
+  db.prepare('UPDATE messages SET edited_at = ? WHERE wa_id = ?').run(at(11), edited);
 }

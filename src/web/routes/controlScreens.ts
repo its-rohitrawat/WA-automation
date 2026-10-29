@@ -71,6 +71,10 @@ export function registerControlApi(router: Router, d: ControlApiDeps): void {
     if (key === 'reportEnabled' && value === true && confirm !== true) {
       throw new ControlError(422, 'Confirm that the morning briefing should start sending', 'confirm');
     }
+    // Sending from the dashboard puts messages on the founder's WhatsApp: the warning must have been confirmed.
+    if (key === 'dashboardSend' && value === true && confirm !== true) {
+      throw new ControlError(422, "Confirm that the dashboard may send from the founder's WhatsApp", 'confirm');
+    }
     d.settings.set(key, value, s.email, auditFor(s.email, ctx.requestId));
     sendJson(ctx.res, 200, d.settings.view());
   }));

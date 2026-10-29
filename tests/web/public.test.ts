@@ -7,7 +7,7 @@ import { VENDOR_FILES } from '../../src/web/server.ts';
 // The front end is plain browser modules; these four need no DOM. Their JSDoc types are checked by tsconfig.web.json,
 // which this project's tsconfig does not include, so the imports are untyped here.
 // @ts-expect-error -- browser module (see above)
-import { problems, readBulk, readClientDetail, readClients, readConnections, readGroups, readOverview, readStatus } from '../../src/web/public/contract.js';
+import { problems, readBulk, readChat, readClientDetail, readClients, readConnections, readGroups, readOverview, readSendResult, readStatus } from '../../src/web/public/contract.js';
 // @ts-expect-error -- browser module (see above)
 import { PUBLIC_MAIL_DOMAINS as BROWSER_PUBLIC, fieldProblem } from '../../src/web/public/views/rules.js';
 import { PUBLIC_MAIL_DOMAINS } from '../../src/config/domains.ts';
@@ -328,6 +328,24 @@ describe('Clients and Manage groups (D2)', () => {
       { key: 'b'.repeat(24), ok: false, reason: 'No code could be made from its name.' },
     ]);
     expect(readBulk(null).results).toEqual([]);
+  });
+
+  it('reads a chat page: odd kinds and states are made safe, a message without an id or time is dropped', () => {
+    const c = readChat({
+      client: { code: 'SHA', name: 'Sharma', groupName: 'Sharma x Studio' }, sendingOn: true, connected: 'yes', hasOlder: true,
+      messages: [
+        { id: 7, at: '2026-10-29T08:00:00Z', mine: false, sender: 'Rahul', text: '<b>hi</b>', kind: 'voice', seconds: 42, transcript: 'call me', quote: { sender: 'Neha', text: 'q', kind: 'weird' } },
+        { id: 0, at: '2026-10-29T08:00:00Z' }, { id: 8, at: 'not a time' }, { id: 9, at: '2026-10-29T08:01:00Z', kind: 'script', sender: '' },
+      ],
+      outbox: [{ uuid: 'u1', at: '2026-10-29T08:02:00Z', text: 'x', state: 'exploded' }, { uuid: '', at: '2026-10-29T08:02:00Z' }],
+    });
+    expect(c).toMatchObject({ client: { groupName: 'Sharma x Studio' }, sendingOn: true, connected: false, hasOlder: true });
+    expect(c.messages.map((m: { id: number }) => m.id)).toEqual([7, 9]);
+    expect(c.messages[0]).toMatchObject({ text: '<b>hi</b>', kind: 'voice', seconds: 42, transcript: 'call me', quote: { sender: 'Neha', kind: 'text' } });
+    expect(c.messages[1]).toMatchObject({ kind: 'text', sender: 'Someone', quote: null });
+    expect(c.outbox).toEqual([{ uuid: 'u1', at: '2026-10-29T08:02:00Z', text: 'x', state: 'unknown', quote: null }]);
+    expect(readSendResult({ message: { uuid: 'u1', at: '2026-10-29T08:02:00Z', text: 'x', state: 'sent' }, replayed: true })).toMatchObject({ message: { state: 'sent' }, replayed: true });
+    expect(() => readChat(null)).not.toThrow();
   });
 
   it('reads clients and a client, with the phase position', () => {

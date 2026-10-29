@@ -324,7 +324,7 @@ async function main() {
         await p.locator('.drawer .bub p', { hasText: 'Voice note · 0:42 · transcribed' }).waitFor();
         await p.locator('.drawer .lastread', { hasText: '2 task changes' }).waitFor();
         if ((await p.locator('.drawer .syncline [data-action="upload-tracker"]').count()) !== 1) fail(where, 'the panel has no Sync now');
-        if ((await p.locator('.drawer .dr-foot button').count()) !== 2) fail(where, 'the panel foot should hold only Close and Open tracker');
+        if ((await p.locator('.drawer .dr-foot button').count()) !== 3) fail(where, 'the panel foot should hold Close, Open chat and Open tracker');
         await p.waitForTimeout(600); // the drawer slides in
         await p.screenshot({ path: join(OUT, `client-drawer-${tag}.png`) });
         await p.keyboard.press('Escape');
@@ -339,6 +339,91 @@ async function main() {
         await p.screenshot({ path: join(OUT, `client-panel-no-tasks-${tag}.png`) });
         await p.keyboard.press('Escape');
         await p.locator('.drawer').waitFor({ state: 'detached' });
+
+        // Open chat. Sending is off at first: the chat says so and has no text box.
+        where = `open chat, sending off ${tag}`;
+        const openAcmeChat = async () => {
+          await p.locator('.ccard', { hasText: 'Acme Traders' }).click();
+          await p.locator('.drawer [data-open-chat]').click();
+          await p.locator('.chat-sheet .ch-row').first().waitFor();
+          await p.locator('.chat-sheet .ch-head h2', { hasText: 'Acme Traders x Studio' }).waitFor();
+          await p.waitForTimeout(500); // the sheet comes in
+          // It opens at the newest message.
+          const fromEnd = await p.locator('.chat-sheet .ch-body').evaluate((b) => b.scrollHeight - b.scrollTop - b.clientHeight);
+          if (fromEnd > 80) fail(where, `the chat did not open at its newest message (${fromEnd}px from the end)`);
+        };
+        await openAcmeChat();
+        await p.locator('.chat-sheet .ch-off', { hasText: 'Sending is off' }).waitFor();
+        if ((await p.locator('.chat-sheet #ch-text').count()) !== 0) fail(where, 'a text box while sending is off');
+        if ((await p.locator('.chat-sheet .ch-reply').count()) !== 0) fail(where, 'Reply buttons while sending is off');
+        await p.screenshot({ path: join(OUT, `chat-off-${tag}.png`) });
+        // The stored messages: bubbles, days, names, tags, the voice note's words; text shown as text.
+        where = `open chat ${tag}`;
+        if ((await p.locator('.chat-sheet .ch-row').count()) < 40) fail(where, 'expected a page of messages');
+        if ((await p.locator('.chat-sheet .ch-day').count()) < 2) fail(where, 'expected day separators');
+        await p.locator('.chat-sheet .ch-bub p', { hasText: 'Text with <b>tags</b> stays text' }).waitFor();
+        await p.locator('.chat-sheet .ch-tag', { hasText: 'Voice note · 0:42' }).waitFor();
+        await p.locator('.chat-sheet .ch-tr', { hasText: 'The blue one works' }).waitFor();
+        await p.locator('.chat-sheet .ch-gone', { hasText: 'This message was deleted' }).waitFor();
+        const page1 = await p.locator('.chat-sheet .ch-row[data-msg]').count();
+        // Scrolling up with the wheel, as the owner would, loads the page before.
+        await p.locator('.chat-sheet .ch-body').hover();
+        for (let i = 0; i < 12; i++) {
+          await p.mouse.wheel(0, -800);
+          await p.waitForTimeout(80);
+        }
+        await p.waitForFunction((n) => document.querySelectorAll('.chat-sheet .ch-row[data-msg]').length > n, page1);
+        // Back to the client's panel.
+        await p.locator('.chat-sheet [data-chat-back]').click();
+        await p.locator('.drawer h2', { hasText: 'Acme Traders' }).waitFor();
+        await p.keyboard.press('Escape');
+        await p.locator('.drawer').waitFor({ state: 'detached' });
+
+        // Settings: switching sending on asks first, with the ban risk.
+        where = `settings, sending ${tag}`;
+        await p.goto(`${base}/dashboard/settings`);
+        await p.locator('#send-card [data-send-switch][aria-checked="false"]').waitFor();
+        await p.locator('#send-card').scrollIntoViewIfNeeded();
+        await p.screenshot({ path: join(OUT, `settings-sending-${tag}.png`), fullPage: true });
+        await p.locator('[data-send-switch]').click();
+        await p.locator('.modal h2', { hasText: "Allow sending from the founder's WhatsApp?" }).waitFor();
+        await p.locator('.modal [data-yes]').click();
+        await p.locator('#send-card [data-send-switch][aria-checked="true"]').waitFor();
+
+        // Reply to a message: the confirm dialog shows the exact text and the group; Send, then the bubble says Sent.
+        where = `open chat, send ${tag}`;
+        await p.goto(`${base}/dashboard/clients`);
+        await p.locator('.ccard').first().waitFor();
+        await openAcmeChat();
+        await p.waitForTimeout(300);
+        await p.screenshot({ path: join(OUT, `chat-${tag}.png`) });
+        const target = p.locator('.chat-sheet .ch-row[data-msg]', { hasText: 'See you at 11 tomorrow' });
+        await target.hover();
+        await target.locator('.ch-reply').click();
+        await p.locator('.chat-sheet .ch-replying .ch-quote', { hasText: 'See you at 11 tomorrow' }).waitFor();
+        const words = `See you there ${tag}\nI'll bring the samples`;
+        await p.locator('#ch-text').fill(words);
+        await p.locator('#ch-text').press('Enter');
+        await p.locator('.modal h2', { hasText: 'Send this from your WhatsApp to Acme Traders x Studio?' }).waitFor();
+        if ((await p.locator('.modal .m-quote').textContent()) !== words) fail(where, 'the dialog does not show the exact text');
+        await p.waitForTimeout(300);
+        await p.screenshot({ path: join(OUT, `chat-confirm-${tag}.png`) });
+        await p.locator('.modal [data-yes]').click();
+        await p.locator('.chat-sheet .ch-own.ok .ch-state', { hasText: 'Sent' }).waitFor();
+        await p.locator('.chat-sheet .ch-own .ch-quote', { hasText: 'See you at 11 tomorrow' }).waitFor();
+        if ((await p.locator('#ch-text').inputValue()) !== '') fail(where, 'the text box was not emptied');
+        await p.waitForTimeout(300);
+        await p.screenshot({ path: join(OUT, `chat-sent-${tag}.png`) });
+        await p.keyboard.press('Escape');
+        await p.locator('.chat-sheet').waitFor({ state: 'detached' });
+
+        // Off again, so the next round starts as the owner would: sending off. Switching off asks nothing.
+        where = `settings, sending off ${tag}`;
+        await p.goto(`${base}/dashboard/settings`);
+        await p.locator('[data-send-switch][aria-checked="true"]').click();
+        await p.locator('#send-card [data-send-switch][aria-checked="false"]').waitFor();
+        await p.goto(`${base}/dashboard/clients`);
+        await p.locator('.ccard').first().waitFor();
 
         where = `sync tracker ${tag}`;
         await p.locator('.synch', { hasText: 'Tracker updated' }).waitFor();

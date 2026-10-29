@@ -13,6 +13,7 @@ import type { ClientConfig } from './config/groups.ts';
 import { masterKeyPath, sessionDbPath, trackerDbPath } from './config/paths.ts';
 import { PrioritySettings } from './config/prioritySettings.ts';
 import { SettingsStore } from './config/settingsStore.ts';
+import { sentTextFor, settleInterrupted } from './store/outbox.ts';
 import { ActionRateLimiter, claudeModelsCheck } from './control/actions.ts';
 import { historyReadEntry, publisherAuditHooks } from './control/activityQueries.ts';
 import { GroupDirectory } from './control/groups.ts';
@@ -217,10 +218,13 @@ async function main(): Promise<void> {
 
     const prices = pricesFromEnv(env);
     const apiKey = requireKey(env, 'ANTHROPIC_API_KEY');
+    // A member's phone that could not read a message asks for it again: only messages sent from Open chat are answered.
+    const outboxDb = db;
+    const sentText = (waId: string, groupId: string) => sentTextFor(outboxDb, waId, groupId);
     // The founder's gateway inside its holder, so a relink from the dashboard replaces it in place. None in setup mode.
     const gateway = founderGateway({
       linked: plan.whatsapp === 'linked',
-      build: () => new WhatsAppGateway({ allow, factory: baileysSocketFactory(silentLogger()), auth: auth.state, saveCreds: auth.saveCreds }),
+      build: () => new WhatsAppGateway({ allow, factory: baileysSocketFactory(silentLogger(), sentText), auth: auth.state, saveCreds: auth.saveCreds }),
     });
     // One start time for every wait that counts from the service start: the reconciler's wait for a file, the
     // processor's 24 hours of waits for Claude, and Health's long-wait count (amendments 10f, 12a, 15a, 15f).
@@ -331,7 +335,7 @@ async function main(): Promise<void> {
       const founder = founderLinkDriver({
         sessionDb, trackerDb: db, key, switchable: gateway, log,
         buildGateway: (a, onQr) => new WhatsAppGateway({
-          allow, factory: baileysSocketFactory(silentLogger()), auth: a.state, saveCreds: a.saveCreds, ...(onQr ? { onQr } : {}),
+          allow, factory: baileysSocketFactory(silentLogger(), sentText), auth: a.state, saveCreds: a.saveCreds, ...(onQr ? { onQr } : {}),
         }),
       });
       links = new LinkSessions({
@@ -364,6 +368,10 @@ async function main(): Promise<void> {
       uptimeTimer = setInterval(keepUptime, UPTIME_TICK_MS);
       uptimeTimer.unref();
       const directory = new GroupDirectory({ gateway, clock: systemClock });
+      // Open chat: a message the last run claimed but never asked WhatsApp for is failed; one it was asking about may
+      // have gone and stays unknown. Neither is ever sent again.
+      const settled = settleInterrupted(trackerStore, systemClock.now().toISOString());
+      if (settled.failed + settled.unknown > 0) log.warn(settled, 'dashboard messages interrupted by the last stop');
       const meetingsApi = google.meetings;
       const phoneLinks = links;
       agentRoutes = {
@@ -382,6 +390,13 @@ async function main(): Promise<void> {
             groupKey: makeGroupKey(deriveSubkey(key, GROUP_KEY_INFO)), log, clock: systemClock,
           },
           clients: { db: trackerStore, directory, clock: systemClock, quietMinutes: env.QUIET_MINUTES },
+          // Open chat. Sending goes through the founder gateway's own check (an approved group, while open) and only
+          // while the owner has it switched on in Settings.
+          chat: {
+            db: trackerStore, configs: () => currentConfigs, sendingOn: () => store.get().dashboardSend,
+            connected: () => gateway.status().state === 'open', groupSocket: (groupId) => gateway.groupSocket(groupId),
+            directory, log, clock: systemClock,
+          },
           google: {
             db: trackerStore, hub: google.hub, publicUrl: env.DASHBOARD_PUBLIC_URL ?? `http://localhost:${env.DASHBOARD_PORT}`,
             web: googleCredentials(env).web, meetingsEnabled: env.MEETINGS_ENABLED, log, clock: systemClock,

@@ -188,7 +188,8 @@ const dialogs = new Set();
  * Asks before something that costs money or reaches the founder. Resolves true for the confirm button, false for
  * Cancel, Esc or the scrim. Title and text are fixed words from the screen, escaped all the same. While it is open,
  * everything behind it (a drawer too) is inert, so a second dialog cannot be opened under it.
- * @param {{ eyebrow?: string, title: string, text: string, yes: string }} o @returns {Promise<boolean>}
+ * `quote`: text to show exactly as it is (lines kept), such as the message about to be sent.
+ * @param {{ eyebrow?: string, title: string, text: string, yes: string, quote?: string }} o @returns {Promise<boolean>}
  */
 export function confirmDialog(o) {
   return new Promise((resolve) => {
@@ -200,7 +201,7 @@ export function confirmDialog(o) {
     m.setAttribute('role', 'alertdialog');
     m.setAttribute('aria-modal', 'true');
     m.innerHTML = `<div class="m-head"><div>${o.eyebrow ? `<span class="eyebrow">${esc(o.eyebrow)}</span>` : ''}<h2 id="m-title">${esc(o.title)}</h2></div></div>
-      <p class="m-p">${esc(o.text)}</p><div class="m-foot"><button class="btn btn-ghost" type="button" data-no>Cancel</button><button class="btn btn-primary" type="button" data-yes>${esc(o.yes)}</button></div>`;
+      <p class="m-p">${esc(o.text)}</p>${o.quote === undefined ? '' : `<blockquote class="m-quote">${esc(o.quote)}</blockquote>`}<div class="m-foot"><button class="btn btn-ghost" type="button" data-no>Cancel</button><button class="btn btn-primary" type="button" data-yes>${esc(o.yes)}</button></div>`;
     m.setAttribute('aria-labelledby', 'm-title');
     document.body.append(scrim, m);
     let done = false;

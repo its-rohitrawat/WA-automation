@@ -21,8 +21,12 @@ export const PENDING_TTL_MS = 10 * 60_000;
 /** Cards waiting per session, at most (the oldest goes first). */
 const PENDING_MAX = 20;
 
-/** The settings the assistant may draft: the dashboard's own, except the founder's number (typed twice on its screen). */
-export const ASSISTANT_SETTINGS = SETTING_KEYS.filter((k) => k !== 'reportRecipient') as readonly string[];
+/**
+ * The settings the assistant may draft: the dashboard's own, except the founder's number (typed twice on its screen) and
+ * Open chat's sending (dashboardSend): putting messages on the founder's WhatsApp is only ever the owner's own click.
+ */
+export const OWNER_ONLY_SETTINGS: readonly string[] = ['reportRecipient', 'dashboardSend'];
+export const ASSISTANT_SETTINGS = SETTING_KEYS.filter((k) => !OWNER_ONLY_SETTINGS.includes(k)) as readonly string[];
 
 export type ProposalAction =
   | { kind: 'task_change'; code: string; status?: 'done' | 'open'; edit?: Record<string, string> }
@@ -189,6 +193,8 @@ export function runProposal(action: ProposalAction, d: RunDeps): { message: stri
       return { message: `${t.code} added.`, task: t.code };
     }
     case 'setting':
+      // Checked again here, not only when the card was drafted: an owner-only setting is never changed through a card.
+      if (!ASSISTANT_SETTINGS.includes(action.key)) throw new ControlError(422, 'Only you can change this setting, on its own screen.', 'key');
       d.settings.set(action.key, action.value, d.actor, audit);
       return { message: 'Setting saved.' };
   }

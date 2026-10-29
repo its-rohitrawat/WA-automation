@@ -9,13 +9,14 @@ import { istDate, istTime } from '../util/time.ts';
 import { HHMM, INDIAN_MOBILE, maskNumber, type Env } from './env.ts';
 
 // Runtime settings (D5 Task 1, spec 4.7): the values the owner changes from the dashboard, kept in the settings table
-// (migration v9) as JSON. .env gives the defaults; a dashboard value wins. Only these four keys exist: the spend cap and
+// (migration v9) as JSON. .env gives the defaults; a dashboard value wins. Only these five keys exist: the spend cap and
 // the catch-up deadline stay .env-only, so raising a limit stays a deliberate step on the Mac. The send time joined them
 // on the owner's request (29 Oct 2026): any time of day (its deadline follows it, see deadlineFor), and a time set after it has passed today starts
 // tomorrow, as today keeps the time it had (TODAY_KEY), so a change never sends a day twice nor drops one.
+// dashboardSend (Open chat) has no .env value: it is off until the owner switches it on in Settings.
 // The founder's number is never put in an error or an audit line in full: maskNumber shows its last 4 digits.
 
-export const SETTING_KEYS = ['reportEnabled', 'reportDays', 'reportRecipient', 'reportTime'] as const;
+export const SETTING_KEYS = ['reportEnabled', 'reportDays', 'reportRecipient', 'reportTime', 'dashboardSend'] as const;
 export type SettingKey = (typeof SETTING_KEYS)[number];
 export type SettingSource = 'env' | 'dashboard';
 
@@ -45,6 +46,8 @@ export interface RuntimeSettings {
   reportRecipient: string | undefined;
   /** The send time, IST "HH:MM". */
   reportTime: string;
+  /** Open chat may send from the founder's WhatsApp. Off by default. */
+  dashboardSend: boolean;
   source: Record<SettingKey, SettingSource>;
 }
 
@@ -58,6 +61,7 @@ export interface SettingsView {
   deadline: string;
   /** When the next report goes out ("tomorrow 07:30", see nextReport), or null while the briefing is off. */
   nextReport: string | null;
+  dashboardSend: boolean;
   source: Record<SettingKey, SettingSource>;
 }
 
@@ -68,6 +72,7 @@ function check(key: SettingKey, v: unknown): boolean | ReportDays | string | und
   if (key === 'reportTime') return typeof v === 'string' && HHMM.test(v) ? v : undefined;
   switch (key) {
     case 'reportEnabled':
+    case 'dashboardSend':
       return typeof v === 'boolean' ? v : undefined;
     case 'reportDays':
       return typeof v === 'string' && (REPORT_DAYS as readonly string[]).includes(v) ? (v as ReportDays) : undefined;
@@ -130,14 +135,16 @@ export class SettingsStore {
     // Any stored HH:MM is used: its deadline follows it (deadlineFor).
     const time = this.#stored('reportTime');
     const timeOk = time !== undefined;
+    const send = this.#stored('dashboardSend');
     return {
       reportEnabled: enabled ? (enabled.value as boolean) : this.#env.REPORT_ENABLED,
       reportDays: days ? (days.value as ReportDays) : this.#env.REPORT_DAYS,
       reportRecipient: recipient ? (recipient.value as string) : this.#env.REPORT_RECIPIENT,
       reportTime: timeOk ? (time.value as string) : this.#env.REPORT_TIME,
+      dashboardSend: send ? (send.value as boolean) : false,
       source: {
         reportEnabled: enabled ? 'dashboard' : 'env', reportDays: days ? 'dashboard' : 'env', reportRecipient: recipient ? 'dashboard' : 'env',
-        reportTime: timeOk ? 'dashboard' : 'env',
+        reportTime: timeOk ? 'dashboard' : 'env', dashboardSend: send ? 'dashboard' : 'env',
       },
     };
   }
@@ -163,7 +170,8 @@ export class SettingsStore {
     return {
       reportEnabled: s.reportEnabled, reportDays: s.reportDays, recipientMasked: s.reportRecipient ? maskNumber(s.reportRecipient) : null,
       sendAt: s.reportTime, deadline: deadlineFor(s.reportTime, this.#env.REPORT_DEADLINE),
-      nextReport: nextReport(reportFor(this.#db, istDate(now)), now, this.reportSettings(), s.reportTime), source: s.source,
+      nextReport: nextReport(reportFor(this.#db, istDate(now)), now, this.reportSettings(), s.reportTime), dashboardSend: s.dashboardSend,
+      source: s.source,
     };
   }
 
@@ -192,6 +200,7 @@ export class SettingsStore {
     if (value === undefined) {
       const message = {
         reportEnabled: 'reportEnabled must be true or false',
+        dashboardSend: 'dashboardSend must be true or false',
         reportDays: `reportDays must be one of: ${REPORT_DAYS.join(', ')}`,
         reportRecipient: 'The number must be an Indian mobile number with 91 in front, for example 91 98765 43210',
         reportTime: 'The time must be HH:MM, for example 07:30',
@@ -210,6 +219,7 @@ export class SettingsStore {
     const keepToday = key === 'reportTime' && (value as string) <= istTime(now) ? { date: istDate(now), time: this.reportSettings().time } : null;
     const detail =
       key === 'reportEnabled' ? `Morning briefing switched ${value ? 'on' : 'off'}`
+      : key === 'dashboardSend' ? `Sending from the dashboard switched ${value ? 'on' : 'off'}`
       : key === 'reportDays' ? `Morning briefing days set to ${DAYS_WORDS[value as ReportDays]}`
       : key === 'reportTime' ? `Morning briefing time set to ${value as string} IST${keepToday ? ', from tomorrow' : ''}`
       : `Morning briefing number changed to ${maskNumber(value as string)}`;

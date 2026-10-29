@@ -349,4 +349,30 @@ ALTER TABLE clients ADD COLUMN sentiment TEXT CHECK (sentiment IS NULL OR sentim
 ALTER TABLE clients ADD COLUMN sentiment_at TEXT;
 `,
   },
+  {
+    // Open chat (owner request, 29 Oct 2026): the dashboard's messages to an approved group, one row per message the
+    // owner confirmed, keyed by the browser's uuid so a repeated request never sends twice. The row is claimed before
+    // anything is sent and marked sending before WhatsApp is asked; sent, failed (surely not sent) or unknown (it may
+    // have gone) after. Unknown is never retried. wa_id: WhatsApp's id of the sent message, which the founder's own copy
+    // comes back with. It comes after v11 (priority and sentiment). Additive only.
+    version: 12,
+    sql: `
+CREATE TABLE outbox (
+  id INTEGER PRIMARY KEY,
+  uuid TEXT NOT NULL UNIQUE CHECK (length(uuid) = 36),
+  client_id INTEGER NOT NULL REFERENCES clients(id),
+  text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 4096),
+  reply_to INTEGER REFERENCES messages(id),
+  state TEXT NOT NULL CHECK (state IN ('claimed', 'sending', 'sent', 'failed', 'unknown')),
+  wa_id TEXT,
+  error_code TEXT CHECK (error_code IS NULL OR length(error_code) BETWEEN 1 AND 60),
+  actor TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  attempted_at TEXT,
+  finished_at TEXT
+);
+CREATE INDEX outbox_client ON outbox(client_id, created_at);
+CREATE INDEX outbox_created ON outbox(created_at);
+`,
+  },
 ];
