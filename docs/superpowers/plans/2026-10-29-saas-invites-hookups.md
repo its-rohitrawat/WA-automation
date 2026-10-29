@@ -92,3 +92,51 @@ In `NAV`, the `System` group (line 10), at its start:
 
 In `DASHBOARD_SCREENS`, add `'customers'` and `'invite'` (and `'onboarding'`, piece e), so a founder signed out on one of
 these screens comes back to it after signing in.
+
+## 3. Sending invites from the founder's Gmail (piece c)
+
+The sender is `src/platform/gmailSender.ts`: Gmail's `messages.send` through the founder's existing Google sign-in
+(`OAuth2Client.request` from google-auth-library, which refreshes the token), so **no new package**. It needs the
+`gmail.send` permission. Until these hookups are applied, `mailer` stays `() => null` and invites go by Copy link.
+
+### 3.1 `src/output/googleAuth.ts` (lane B): ask for `gmail.send` on the main account
+
+`requestedScopes` (line 32) decides what the main account's Google connect asks for, in the dashboard
+(`src/web/routes/google.ts`, line 108) and in `cli google-auth`. Add the send permission when invites by email are on:
+
+```ts
+import { GMAIL_SEND_SCOPE } from '../platform/gmailSender.ts';
+// …
+export function requestedScopes(env: Pick<Env, 'MEETINGS_ENABLED' | 'INVITES_GMAIL'>): string[] {
+  return [...DRIVE_SCOPES, ...(env.MEETINGS_ENABLED ? MEETING_SCOPES : []), ...(env.INVITES_GMAIL ? [GMAIL_SEND_SCOPE] : [])];
+}
+```
+
+and in `SCOPE_NAMES`: `[GMAIL_SEND_SCOPE]: 'Send email as you (invites only)'`.
+
+- `INVITES_GMAIL` is a new optional boolean in `src/config/env.ts` (default false): turning it on asks the founder to
+  approve `gmail.send` once, at the next Google connect. Google allows it for **test users only** (up to 100) until it
+  reviews the app (design section 2).
+- `src/web/routes/google.ts` line 108 passes `{ MEETINGS_ENABLED: …, INVITES_GMAIL: … }` (lane A).
+
+### 3.2 `src/main.ts` (lane A): the mailer
+
+Replace `mailer: null` from 2.2 with:
+
+```ts
+import { founderMailer, oauthGmailTransport } from './platform/gmailSender.ts';
+// …
+mailer: () => {
+  const client = google.hub.client(MAIN_ACCOUNT);
+  if (!client) return null;
+  return founderMailer({
+    grantedScopes: grantedScopes(trackerStore, MAIN_ACCOUNT),
+    from: accountEmail(trackerStore, MAIN_ACCOUNT),
+    transport: oauthGmailTransport(() => google.hub.client(MAIN_ACCOUNT)!),
+  });
+},
+```
+
+The getter runs on every request, so a reconnect that grants `gmail.send` applies at once. If `grantedScopes` and
+`accountEmail` become async in S1 (lane B, S1.12), read both at start and after each Google reconnect into a variable,
+and have the getter read that variable.

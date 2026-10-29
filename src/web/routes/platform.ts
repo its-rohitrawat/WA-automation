@@ -25,8 +25,11 @@ export interface PlatformRouteDeps {
   founderName: string;
   /** Whether this signed-in owner is the platform owner (the founder). */
   isFounder: (o: OwnerContext) => boolean;
-  /** The founder's Gmail, when connected with gmail.send; null: invites go by Copy link only. */
-  mailer: InviteMailer | null;
+  /**
+   * The founder's Gmail, when connected with gmail.send; null: invites go by Copy link only. Read on every request, so a
+   * reconnect with the permission applies at once.
+   */
+  mailer: () => InviteMailer | null;
 }
 
 /** How the dashboard's own registrars look (src/web/mountRoutes.ts). */
@@ -67,7 +70,7 @@ export function mountPlatformRoutes(m: PlatformMount, d: PlatformRouteDeps): voi
 
   const view = async (o: OwnerContext): Promise<InvitesView> => ({
     invites: await listInvites(d), left: await linksLeftToday(d, o.actor), perDay: INVITES_PER_DAY,
-    gmail: { connected: d.mailer !== null, from: d.mailer?.from ?? null },
+    gmail: { connected: d.mailer() !== null, from: d.mailer()?.from ?? null },
   });
 
   /**
@@ -75,12 +78,13 @@ export function mountPlatformRoutes(m: PlatformMount, d: PlatformRouteDeps): voi
    * outcome. Never retried here: an unclear answer is 'unknown'.
    */
   const email = async (o: OwnerContext, invite: InviteView, token: string): Promise<EmailResult> => {
-    if (!d.mailer) return 'not_connected';
+    const mailer = d.mailer();
+    if (!mailer) return 'not_connected';
     await markSending(d, o.actor, invite.id, o.requestId);
     d.log.info({ invite: invite.id, requestId: o.requestId }, 'invite email: asking Gmail');
     let outcome: MailOutcome;
     try {
-      outcome = await d.mailer.send({ to: invite.email, business: invite.business, founderName: d.founderName, link: link(token), expiresAt: invite.expiresAt });
+      outcome = await mailer.send({ to: invite.email, business: invite.business, founderName: d.founderName, link: link(token), expiresAt: invite.expiresAt });
     } catch {
       // A sender that throws gave no clear answer. No error text is kept: it can hold the address.
       outcome = { state: 'unknown', code: 'send_error' };
@@ -114,7 +118,7 @@ export function mountPlatformRoutes(m: PlatformMount, d: PlatformRouteDeps): voi
   m.change('/dashboard/api/platform/invites/:id/resend', ({ params }, o) => answer(async () => {
     if (!d.isFounder(o)) return notFounder();
     if (!ID.test(params.id ?? '')) return notFound();
-    if (!d.mailer) return fail(409, 'gmail_not_connected', 'Gmail is not connected. Use Copy link and send it yourself.');
+    if (!d.mailer()) return fail(409, 'gmail_not_connected', 'Gmail is not connected. Use Copy link and send it yourself.');
     const made = await newLink(d, o.actor, params.id!, o.requestId);
     const sent = await email(o, made.invite, made.token);
     return ok({ invite: (await listInvites(d)).find((v) => v.id === made.invite.id), email: sent });

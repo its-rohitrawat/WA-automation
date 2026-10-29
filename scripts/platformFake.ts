@@ -98,7 +98,7 @@ export async function addPlatform(web: WebServer, o: { signedIn: () => boolean; 
   };
   mountPlatformRoutes(m, {
     db, clock: systemClock, log: silentLogger(), publicUrl: 'https://agent.example.com', founderName: 'Rohit',
-    isFounder: (x) => x.actor === FOUNDER, mailer: o.gmail === false ? null : mailer,
+    isFounder: (x) => x.actor === FOUNDER, mailer: () => (o.gmail === false ? null : mailer),
   });
   return { mailer, db };
 }

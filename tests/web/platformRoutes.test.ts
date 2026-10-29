@@ -50,7 +50,7 @@ function mount(o: Partial<PlatformRouteDeps> = {}) {
   };
   mountPlatformRoutes(m, {
     db, clock, log: createLogger('debug', { write: (l: string) => void logLines.push(l) }), publicUrl: `${SITE}/`, founderName: 'Rohit',
-    isFounder: (x) => x.actor === FOUNDER.actor, mailer, ...o,
+    isFounder: (x) => x.actor === FOUNDER.actor, mailer: () => mailer, ...o,
   });
 }
 
@@ -132,7 +132,7 @@ describe('the platform routes', () => {
   });
 
   it('without Gmail: Copy link still works, Send invite says not connected, Resend is refused', async () => {
-    mount({ mailer: null });
+    mount({ mailer: () => null });
     const b = body(await invite(false));
     expect(b.link).toContain('/signup?invite=');
     expect(body(await invite(true, 'other@example.com')).email).toBe('not_connected');
