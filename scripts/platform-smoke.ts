@@ -8,7 +8,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium, type Page } from 'playwright-core';
 import { FAKE_CSRF, fakeDashboard, type FakeState } from './dashboardFake.ts';
-import { addPlatform } from './platformFake.ts';
+import { createInvite } from '../src/platform/invites.ts';
+import { systemClock } from '../src/util/clock.ts';
+import { addPlatform, addSignup, fakeGoogle } from './platformFake.ts';
 
 const arg = (name: string) => {
   const i = process.argv.indexOf(`--${name}`);
@@ -22,7 +24,7 @@ const WAIT_MS = 60_000;
 
 const state: FakeState = { signedIn: true, empty: false };
 const web = fakeDashboard({ port: 0, state });
-const { mailer } = await addPlatform(web, { signedIn: () => state.signedIn, csrf: FAKE_CSRF });
+const { mailer, db: platformDb } = await addPlatform(web, { signedIn: () => state.signedIn, csrf: FAKE_CSRF });
 
 const failures: string[] = [];
 const fail = (where: string, what: string) => failures.push(`${where}: ${what}`);
@@ -33,7 +35,9 @@ function watch(page: Page, where: () => string) {
     if (m.type() === 'error' && !m.text().startsWith('Failed to load resource')) fail(where(), `console: ${m.text()}`);
   });
   page.on('response', (r) => {
-    if (r.status() >= 400) fail(where(), `${r.status()} ${new URL(r.url()).pathname}`);
+    const path = new URL(r.url()).pathname;
+    if (r.status() === 404 && path === '/signup/api/invite' && where().startsWith('signup used link')) return;
+    if (r.status() >= 400) fail(where(), `${r.status()} ${path}`);
   });
 }
 
@@ -58,6 +62,7 @@ async function launch() {
 mkdirSync(OUT, { recursive: true });
 const { port } = await web.start();
 const base = `http://127.0.0.1:${port}`;
+addSignup(web, { db: platformDb, signIn: () => (state.signedIn = true), publicUrl: base });
 const browser = await launch();
 let round = 0;
 try {
@@ -68,6 +73,11 @@ try {
       const ctx = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
       ctx.setDefaultTimeout(WAIT_MS);
       await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: base });
+      // Nothing may reach Google: such a request fails the smoke, and is stopped.
+      await ctx.route(/^https:\/\/([a-z0-9-]+\.)*(google|googleapis|gstatic)\.com\//, (route) => {
+        fail(`round ${tag}`, `a request to ${new URL(route.request().url()).host}`);
+        return route.abort();
+      });
       await ctx.addInitScript((t) => {
         try {
           localStorage.setItem('wa-agent-theme', t);
@@ -127,6 +137,45 @@ try {
       await p.locator('.modal [data-yes]').click();
       await p.locator('.pf-inv tbody tr', { hasText: `Joshi Interiors ${round}` }).locator('.pill', { hasText: 'Cancelled' }).waitFor();
       await shot(p, where, `invite-cancelled-${tag}`);
+      // (d) Sign-up: the page for a working link, another Google account, the invited one, then the used link.
+      where = `signup ${tag}`;
+      const made = await createInvite({ db: platformDb, clock: systemClock }, 'owner@example.com', { business: `Kapoor Design Studio ${round}`, email: `kapoor${round}@example.com` });
+      // Google is never reached: the agent's own answer to Continue with Google (a redirect to Google's page) is turned
+      // into what Google would do, a redirect straight back to the callback with the same state. (A navigation that
+      // arrives by redirect cannot be caught on its way to Google, so it is caught here, before it leaves.)
+      await ctx.route(`${base}/signup/google**`, async (route) => {
+        const answer = await route.fetch({ maxRedirects: 0 });
+        const to = answer.headers()['location'] ?? '';
+        if (!to.startsWith('https://accounts.google.com/')) return route.fulfill({ response: answer });
+        const u = new URL(to);
+        fakeGoogle.nonce = u.searchParams.get('nonce') ?? '';
+        return route.fulfill({ response: answer, headers: { ...answer.headers(), location: `${base}/signup/callback?code=fake&state=${u.searchParams.get('state') ?? ''}` } });
+      });
+      state.signedIn = false;
+      await p.goto(`${base}/signup?invite=${made.token}`);
+      await p.locator('#su-title', { hasText: 'Rohit invited you to WA Agent' }).waitFor();
+      await p.locator('#su-sub b', { hasText: `Kapoor Design Studio ${round}` }).waitFor();
+      await shot(p, where, `signup-${tag}`, false);
+
+      where = `signup wrong account ${tag}`;
+      fakeGoogle.email = 'someone.else@example.com';
+      await p.locator('#gbtn').click();
+      await p.locator('#su-wrong').waitFor({ state: 'visible' });
+      if (state.signedIn) fail(where, 'signed in with another account');
+      await shot(p, where, `signup-wrong-${tag}`, false);
+
+      where = `signup invited account ${tag}`;
+      fakeGoogle.email = `KAPOOR${round}@example.com`;
+      await p.locator('#gbtn').click();
+      await p.waitForURL('**/dashboard/onboarding');
+      if (!state.signedIn) fail(where, 'no session started');
+
+      where = `signup used link ${tag}`;
+      await p.goto(`${base}/signup?invite=${made.token}`);
+      await p.locator('#su-title', { hasText: 'This invite link does not work' }).waitFor();
+      if (await p.locator('#gbtn').isVisible()) fail(where, 'Continue with Google offered for a used link');
+      await shot(p, where, `signup-invalid-${tag}`, false);
+      state.signedIn = true;
       await ctx.close();
     }
   }

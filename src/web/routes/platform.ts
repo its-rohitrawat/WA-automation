@@ -1,16 +1,25 @@
+import { readFile } from 'node:fs/promises';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { join } from 'node:path';
 import { z } from 'zod';
 import { PlatformError } from '../../platform/errors.ts';
 import {
-  cancelInvite, createInvite, INVITES_PER_DAY, linksLeftToday, listInvites, markSending, newLink, recordSend, type InviteView,
+  cancelInvite, createInvite, inviteForSignup, INVITES_PER_DAY, linksLeftToday, listInvites, markSending, newLink, recordSend, redeemInvite, type InviteView,
 } from '../../platform/invites.ts';
 import type { InviteMailer, MailOutcome } from '../../platform/mailer.ts';
+import { platformAudit } from '../../platform/store.ts';
+import { inviteTokenHash } from '../../platform/tokens.ts';
 import type { Sql } from '../../store/engine/types.ts';
 import type { Clock } from '../../util/clock.ts';
 import type { Logger } from '../../util/logger.ts';
-import type { RequestContext } from '../router.ts';
+import { clientAddress, RateLimiter, SIGNIN_LIMIT, type RateLimit } from '../guard.ts';
+import { parseCookies, sendError, sendJson, serializeCookie } from '../http.ts';
+import { authorizeUrl, checkClaims, PendingSignIns, SignInError, SignInRefused, type CodeExchanger, type IdTokenVerifier, type Pending } from '../oidc.ts';
+import type { RequestContext, Router } from '../router.ts';
+import { PUBLIC_DIR } from '../server.ts';
 import { fail, ok, type ApiResult, type OwnerContext } from './context.ts';
 
-// The platform API (SaaS S5): the founder's invites, and later the Customers screen. Plain handlers, mounted through the
+// The platform API (SaaS S5): the founder's invites, the public sign-up (mountSignupRoutes), and later the Customers screen. Plain handlers, mounted through the
 // dashboard's own read/change registrars (owner guard; for a change also Origin, CSRF and the action limit), so this file
 // adds no route of its own until mountRoutes.ts calls mountPlatformRoutes (see the hookups doc). Founder only.
 // The invite link (it holds the token) goes only to the founder, in the answer that made it; it is never logged.
@@ -129,4 +138,149 @@ export function mountPlatformRoutes(m: PlatformMount, d: PlatformRouteDeps): voi
     if (!ID.test(params.id ?? '')) return notFound();
     return ok({ invite: await cancelInvite(d, o.actor, params.id!, o.requestId) });
   }));
+}
+
+// ---------------------------------------------------------------- sign-up (design section 5, step 3)
+
+/** The sign-up attempt in flight (the key into PendingSignIns), only on /signup paths. */
+export const SIGNUP_COOKIE = 'wa_signup';
+/** Sign-in attempts (Continue with Google) per invite link: 5 at once, then one every 2 minutes. */
+export const SIGNUP_TOKEN_LIMIT: Readonly<RateLimit> = Object.freeze({ capacity: 5, refillPerSec: 1 / 120 });
+const SIGNUP_PAGE = 'signup.html';
+
+export interface SignupDeps {
+  db: Sql;
+  clock: Clock;
+  log: Logger;
+  /** The site's public address (the callback is <publicUrl>/signup/callback). */
+  publicUrl: string;
+  founderName: string;
+  /** Google sign-in (the same web client as the owner's). null: sign-up is not set up, and the page says so. */
+  google: { clientId: string; exchange: CodeExchanger; verify: IdTokenVerifier } | null;
+  /**
+   * Starts the new customer owner's dashboard session (sets its cookie on ctx.res). Supplied by the owning lane
+   * (hookups doc, section 4): the dashboard's sessions are owner-only until customer sessions exist.
+   */
+  startSession: (ctx: RequestContext, o: { email: string; name?: string; tenantId: string; userId: string }) => Promise<void>;
+  /** Whether the request came over https (the cookie's Secure flag). */
+  secure: (req: IncomingMessage) => boolean;
+  /** The public folder (tests: the real one). */
+  publicDir?: string;
+  /** Tests and the preview only: other rate limits (per address, per link). */
+  limits?: { perIp?: RateLimit; perToken?: RateLimit };
+}
+
+/** Plain words for the page: the codes in its address (no detail on why a link does not work). */
+export type SignupNote = 'invalid' | 'wrong_account' | 'retry' | 'busy' | 'unavailable';
+
+/**
+ * The public sign-up routes: the page, what it shows about a link, the start of Google sign-in and its callback. Not
+ * behind the owner guard (the visitor has no session yet): each is rate-limited per address, the link ones per link too,
+ * and a link that does not work is never told apart from another.
+ */
+export function mountSignupRoutes(router: Router, d: SignupDeps): void {
+  const pending = new PendingSignIns(d.clock);
+  const perIp = new RateLimiter({ ...(d.limits?.perIp ?? SIGNIN_LIMIT), clock: d.clock });
+  const perToken = new RateLimiter({ ...(d.limits?.perToken ?? SIGNUP_TOKEN_LIMIT), clock: d.clock });
+  const base = d.publicUrl.replace(/\/+$/, '');
+  const invites = { db: d.db, clock: d.clock };
+  const page = (note?: SignupNote, token?: string) => {
+    const q = new URLSearchParams();
+    if (token) q.set('invite', token);
+    if (note) q.set('error', note);
+    const s = q.toString();
+    return `/signup${s ? `?${s}` : ''}`;
+  };
+  const redirect = (res: ServerResponse, location: string, cookie?: string) => {
+    res.writeHead(302, { Location: location, 'Cache-Control': 'no-store', ...(cookie ? { 'Set-Cookie': cookie } : {}) }).end();
+  };
+  /**
+   * False (and the answer sent) when this address, or for a sign-in attempt (`attempt`) this link, is over its limit.
+   * Opening the page again costs a link nothing.
+   */
+  const allowed = (ctx: RequestContext, token: string | null, html: boolean, attempt = false): boolean => {
+    const ip = clientAddress(ctx.req);
+    const hash = inviteTokenHash(token);
+    if (perIp.take(ip) && (!attempt || perToken.take(hash ?? 'malformed'))) return true;
+    if (html) redirect(ctx.res, page('busy', hash ? token! : undefined));
+    else sendError(ctx.res, 429, 'rate_limited', 'Too many tries. Wait a few minutes and try again.');
+    return false;
+  };
+  const audit = async (event: string, detail: string, requestId: string) => {
+    try {
+      await platformAudit(d.db, { at: d.clock.now().toISOString(), actor: 'visitor', event, detail, requestId });
+    } catch (e) {
+      d.log.warn({ code: (e as Error | null)?.name ?? 'Error', requestId }, 'sign-up audit line could not be written');
+    }
+  };
+
+  // The page. The invite stays in the address (it works once anyway); no Referer leaves the page, so it goes nowhere.
+  router.get('/signup', async ({ res }) => {
+    const body = await readFile(join(d.publicDir ?? PUBLIC_DIR, SIGNUP_PAGE));
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' }).end(body);
+  });
+
+  // What the page shows: the business and who invited them, or 404 for any link that does not work.
+  router.get('/signup/api/invite', async (ctx) => {
+    const token = ctx.url.searchParams.get('invite');
+    if (!allowed(ctx, token, false)) return;
+    const info = await inviteForSignup(invites, token);
+    if (!info || !d.google) return sendError(ctx.res, 404, d.google ? 'invalid' : 'unavailable', d.google ? 'This invite link does not work any more. Ask for a new one.' : 'Sign-up is not available yet.');
+    sendJson(ctx.res, 200, { business: info.business, founderName: d.founderName, expiresAt: info.expiresAt });
+  });
+
+  // Continue with Google: a sign-in in flight (state, nonce, PKCE), keyed by a cookie only /signup sees.
+  router.get('/signup/google', async (ctx) => {
+    const token = ctx.url.searchParams.get('invite');
+    if (!allowed(ctx, token, true, true)) return;
+    if (!d.google) return redirect(ctx.res, page('unavailable'));
+    if (!(await inviteForSignup(invites, token))) return redirect(ctx.res, page('invalid'));
+    let started: ReturnType<PendingSignIns['add']>;
+    try {
+      // PendingSignIns keeps returnTo as given: here it carries the invite, which never leaves the server.
+      started = pending.add({ redirectUri: `${base}/signup/callback`, returnTo: token!, client: clientAddress(ctx.req) });
+    } catch {
+      return redirect(ctx.res, page('busy', token!));
+    }
+    const cookie = serializeCookie(SIGNUP_COOKIE, started.key, { httpOnly: true, sameSite: 'Lax', path: '/signup', maxAge: 600, secure: d.secure(ctx.req) });
+    redirect(ctx.res, authorizeUrl({ clientId: d.google.clientId, redirectUri: `${base}/signup/callback`, state: started.state, nonce: started.nonce, challenge: started.challenge }), cookie);
+  });
+
+  // Back from Google: the invite is redeemed only for Google's verified email, and only when it is the invited one.
+  router.get('/signup/callback', async (ctx) => {
+    if (!allowed(ctx, null, true)) return;
+    const clear = serializeCookie(SIGNUP_COOKIE, '', { httpOnly: true, sameSite: 'Lax', path: '/signup', maxAge: 0, secure: d.secure(ctx.req) });
+    const key = parseCookies(ctx.req.headers.cookie)[SIGNUP_COOKIE];
+    let p: Pending;
+    try {
+      p = pending.take(key, ctx.url.searchParams.get('state'));
+    } catch {
+      await audit('signup.failed', 'no_pending', ctx.requestId);
+      return redirect(ctx.res, page('retry'), clear);
+    }
+    const token = p.returnTo;
+    const code = ctx.url.searchParams.get('code');
+    if (!d.google || !code || ctx.url.searchParams.has('error')) {
+      await audit('signup.failed', 'no_code', ctx.requestId);
+      return redirect(ctx.res, page('retry', token), clear);
+    }
+    let who: { email: string; name?: string };
+    try {
+      const idToken = await d.google.exchange({ code, verifier: p.verifier, redirectUri: p.redirectUri });
+      who = checkClaims(await d.google.verify(idToken), { clientId: d.google.clientId, nonce: p.nonce, now: d.clock.now().getTime() });
+    } catch (e) {
+      // An email Google has not verified is never matched: the page says only that the account is not the invited one.
+      if (e instanceof SignInRefused) {
+        await audit('signup.wrong_account', 'unverified', ctx.requestId);
+        return redirect(ctx.res, page('wrong_account', token), clear);
+      }
+      await audit('signup.failed', e instanceof SignInError ? e.code : 'google', ctx.requestId);
+      return redirect(ctx.res, page('retry', token), clear);
+    }
+    const r = await redeemInvite(invites, { token, email: who.email, name: who.name ?? null, requestId: ctx.requestId });
+    if (!r.ok) return redirect(ctx.res, r.reason === 'wrong_account' ? page('wrong_account', token) : page('invalid'), clear);
+    await d.startSession(ctx, { email: who.email, ...(who.name ? { name: who.name } : {}), tenantId: r.tenantId, userId: r.userId });
+    d.log.info({ requestId: ctx.requestId }, 'sign-up: an invite was used');
+    redirect(ctx.res, '/dashboard/onboarding', clear);
+  });
 }

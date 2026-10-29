@@ -14,7 +14,7 @@ import { manualClock, systemClock, type Clock } from '../src/util/clock.ts';
 import { silentLogger } from '../src/util/logger.ts';
 import { HttpError, readJson, sendError, sendJson } from '../src/web/http.ts';
 import type { ApiResult, OwnerContext } from '../src/web/routes/context.ts';
-import { mountPlatformRoutes, type PlatformMount } from '../src/web/routes/platform.ts';
+import { mountPlatformRoutes, mountSignupRoutes, type PlatformMount } from '../src/web/routes/platform.ts';
 import { PUBLIC_DIR, type WebServer } from '../src/web/server.ts';
 
 const FOUNDER = 'owner@example.com';
@@ -101,4 +101,31 @@ export async function addPlatform(web: WebServer, o: { signedIn: () => boolean; 
     isFounder: (x) => x.actor === FOUNDER, mailer: () => (o.gmail === false ? null : mailer),
   });
   return { mailer, db };
+}
+
+/** Who the fake Google says signed in, for the next sign-up callback. */
+export const fakeGoogle = { email: 'kapoor.studio@example.com', verified: true, nonce: '' };
+const FAKE_CLIENT_ID = 'preview-client.apps.googleusercontent.com';
+
+/**
+ * The public sign-up on the fake dashboard, with a fake Google: Continue with Google goes to Google's real address (the
+ * smoke test answers it with a redirect back, as Google would), and the code exchange and ID-token check answer with
+ * fakeGoogle's account. A successful sign-up signs the fake session in.
+ */
+export function addSignup(web: WebServer, o: { db: SqliteDb; signIn: () => void; publicUrl: string }): void {
+  mountSignupRoutes(web.router, {
+    db: o.db, clock: systemClock, log: silentLogger(), publicUrl: o.publicUrl, founderName: 'Rohit',
+    google: {
+      clientId: FAKE_CLIENT_ID,
+      exchange: async ({ code }) => `fake-id-token-${code}`,
+      verify: async () => ({
+        iss: 'https://accounts.google.com', aud: FAKE_CLIENT_ID, exp: Math.floor(Date.now() / 1000) + 600, nonce: fakeGoogle.nonce,
+        email: fakeGoogle.email, email_verified: fakeGoogle.verified, name: 'Asha Kapoor',
+      }),
+    },
+    startSession: async () => o.signIn(),
+    secure: () => false,
+    // One address (127.0.0.1) runs every round of the smoke test.
+    limits: { perIp: { capacity: 500, refillPerSec: 50 } },
+  });
 }

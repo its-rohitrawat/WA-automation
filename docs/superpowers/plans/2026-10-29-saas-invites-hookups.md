@@ -140,3 +140,47 @@ mailer: () => {
 The getter runs on every request, so a reconnect that grants `gmail.send` applies at once. If `grantedScopes` and
 `accountEmail` become async in S1 (lane B, S1.12), read both at start and after each Google reconnect into a variable,
 and have the getter read that variable.
+
+## 4. The public sign-up: `/signup` (piece d)
+
+`mountSignupRoutes(router, deps)` in `src/web/routes/platform.ts` adds four public routes: `GET /signup` (the page,
+`public/signup.html` + `views/signup.js`), `GET /signup/api/invite`, `GET /signup/google` and `GET /signup/callback`.
+They take no owner session (the visitor has none yet). Each is rate-limited per address, and sign-in attempts per link
+too. The router is matched before the website, so `/signup` needs no change to `src/web/site.ts`.
+
+### 4.1 Where to mount it (lane A)
+
+In `src/web/start.ts` (or `mountAgentRoutes`, which receives `m.router`), once, when the platform is on:
+
+```ts
+import { mountSignupRoutes } from './routes/platform.ts';
+// …
+mountSignupRoutes(m.router, {
+  db: d.db, clock: d.clock, log: d.log,
+  publicUrl: env.DASHBOARD_PUBLIC_URL!,   // the Google client's redirect URI list must include <publicUrl>/signup/callback
+  founderName: 'Rohit',
+  google: web ? { clientId: web.clientId, exchange: googleCodeExchanger(web), verify: googleIdVerifier(web.clientId) } : null,
+  startSession: (ctx, o) => …, // 4.2
+  secure: m.secureFor,         // the same Secure-cookie rule as the owner's session
+});
+```
+
+`web` is `googleCredentials(env).web` (as for the owner sign-in). In the Google Cloud console, add
+`<DASHBOARD_PUBLIC_URL>/signup/callback` to the web client's authorised redirect URIs.
+
+### 4.2 Starting the customer's session (lane A, with S4)
+
+`startSession` receives `{ email, name?, tenantId, userId }` after the invite is redeemed. Today's sessions are for
+owners on `DASHBOARD_OWNER_EMAILS` only, so a customer session needs:
+
+- the session record to carry `tenantId` (and the role, `owner` of that tenant);
+- the guard to accept a session whose email has a membership (`membershipsFor`), not only the owner list;
+- every data route to run through `withTenant(tenantId)` (S2), so the customer sees only their own data.
+
+Until then, `startSession` can create the session (`SessionStore.create`) for the email with the tenant noted, and the
+guard keeps refusing it everywhere except the onboarding screen (piece e). The sign-up itself (invite used, membership,
+customer `onboarding`) is complete and tested without it.
+
+### 4.3 `src/web/oidc.ts` (lane A)
+
+Nothing to change: the sign-up reuses `PendingSignIns`, `authorizeUrl`, `checkClaims` and the verifier as they are.
