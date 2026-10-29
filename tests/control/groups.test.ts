@@ -186,13 +186,13 @@ describe('groupsOverview', () => {
     const groups = [...live(248), { id: SHARMA.groupId, subject: 'Sharma x Studio' }, { id: MEHTA.groupId, subject: 'Mehta – Studio' }];
     const o = groupsOverview({ db, listing: listing(groups), configs: [SHARMA, MEHTA] });
     expect(o.total).toBe(250);
-    expect(o.counts).toEqual({ all: 250, approved: 2, notApproved: 248 });
+    expect(o.counts).toEqual({ all: 250, approved: 2, notApproved: 248, ignored: 0 });
     expect(o.rows.slice(0, 2).map((r) => r.groupId)).toEqual([MEHTA.groupId, SHARMA.groupId]);
     expect(o.rows[0]).toEqual({
-      groupId: MEHTA.groupId, name: 'Mehta – Studio', approved: true, inWhatsApp: true,
+      groupId: MEHTA.groupId, name: 'Mehta – Studio', approved: true, inWhatsApp: true, ignored: false,
       client: { name: 'Mehta Foods', code: 'MEH', active: true, hasTasks: false, codeLocked: true, emailDomains: [], meetingKeywords: [] },
     });
-    expect(o.rows[2]).toEqual({ groupId: gid(10), name: 'Group 000', approved: false, inWhatsApp: true, client: null });
+    expect(o.rows[2]).toEqual({ groupId: gid(10), name: 'Group 000', approved: false, inWhatsApp: true, ignored: false, client: null });
     expect(o.rows.at(-1)!.name).toBe('Group 247');
   });
 
@@ -205,7 +205,19 @@ describe('groupsOverview', () => {
     expect(not.rows).toHaveLength(5);
     expect(not.rows.every((r) => !r.approved)).toBe(true);
     expect(not.total).toBe(30);
-    expect(not.counts).toEqual({ all: 31, approved: 1, notApproved: 30 });
+    expect(not.counts).toEqual({ all: 31, approved: 1, notApproved: 30, ignored: 0 });
+  });
+
+  it('ignored groups leave Not approved for their own filter; an approved group is never ignored', () => {
+    const db = seededDb();
+    const groups = [...live(5), { id: SHARMA.groupId, subject: 'Sharma' }];
+    const ignored = (id: string) => id === gid(10) || id === gid(11) || id === SHARMA.groupId;
+    const at = (filter: 'all' | 'not_approved' | 'ignored' | 'approved') => groupsOverview({ db, listing: listing(groups), configs: [SHARMA], filter, ignored });
+    expect(at('all').counts).toEqual({ all: 6, approved: 1, notApproved: 3, ignored: 2 });
+    expect(at('all').rows).toHaveLength(6);
+    expect(at('ignored').rows.map((r) => r.groupId)).toEqual([gid(10), gid(11)]);
+    expect(at('not_approved').rows.map((r) => r.groupId)).toEqual([gid(12), gid(13), gid(14)]);
+    expect(at('approved').rows[0]).toMatchObject({ groupId: SHARMA.groupId, ignored: false });
   });
 
   it('two groups with the same name are ordered by id; a limit that is not a number means 500', () => {

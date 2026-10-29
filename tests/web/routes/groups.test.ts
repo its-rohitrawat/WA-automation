@@ -12,7 +12,7 @@ import { createLogger } from '../../../src/util/logger.ts';
 import type { GatewayState } from '../../../src/wa/gateway.ts';
 import type { AuditFn, OwnerContext } from '../../../src/web/routes/context.ts';
 import {
-  codeCandidates, groupsApplyHandler, groupsListHandler, makeGroupKey, suggestCodeHandler, type GroupsDeps,
+  codeCandidates, groupsApplyHandler, groupsBulkHandler, groupsListHandler, makeGroupKey, suggestCodeHandler, type GroupsDeps,
 } from '../../../src/web/routes/groups.ts';
 import { MEHTA as MEHTA_HELPER, SHARMA as SHARMA_HELPER } from '../../helpers/db.ts';
 
@@ -109,7 +109,7 @@ describe('groupsListHandler', () => {
     expect(r.status).toBe(200);
     expect(body(r)).toMatchObject({ total: 4, counts: { all: 4, approved: 2, notApproved: 2 }, stale: false, reason: null, fetchedAt: T0 });
     expect(rows(r).map((x) => x.key).sort()).toEqual([SHARMA.groupId, MEHTA.groupId, DESAI, PATEL].map(k).sort());
-    expect(rows(r).find((x) => x.key === k(PATEL))).toEqual({ key: k(PATEL), name: 'Patel Builders', approved: false, inWhatsApp: true, client: null });
+    expect(rows(r).find((x) => x.key === k(PATEL))).toEqual({ key: k(PATEL), name: 'Patel Builders', approved: false, inWhatsApp: true, ignored: false, client: null });
     noRawIds(r);
   });
 
@@ -170,7 +170,7 @@ describe('groupsApplyHandler', () => {
       { actor: CTX.actor, event: 'Client edited · Sharma Interiors Pvt (SHA)', kind: 'config', requestId: CTX.requestId },
     ]);
     expect(loadGroupsFile(file).map((c) => [c.groupId, c.code])).toEqual([[SHARMA.groupId, 'SHA'], [DESAI, 'DES']]);
-    expect(body(r).counts).toEqual({ all: 4, approved: 2, notApproved: 2 });
+    expect(body(r).counts).toEqual({ all: 4, approved: 2, notApproved: 2, ignored: 0 });
     expect(rows(r).find((x) => x.key === k(DESAI))).toMatchObject({ approved: true, client: { name: 'Desai Foods', emailDomains: ['desaifoods.com'] } });
     expect(rows(r).find((x) => x.key === k(MEHTA.groupId))!.approved).toBe(false);
     expect(rows(r).find((x) => x.key === k(SHARMA.groupId))!.client!.name).toBe('Sharma Interiors Pvt');
@@ -338,6 +338,113 @@ describe('groupsApplyHandler', () => {
     await expect(groupsApplyHandler(deps, CTX, approve())).rejects.toThrow();
     expect(audits).toEqual([]);
     db = openDb(':memory:');
+  });
+});
+
+describe('groupsBulkHandler', () => {
+  const HINDI = '120363888000000009@g.us';
+  const EXPORTS = '120363888000000010@g.us';
+  const bulk = (action: string, keys: string[]) => groupsBulkHandler(deps, CTX, { action, keys });
+  const results = (r: { body: unknown }) => (r.body as { results: { key: string; ok: boolean; reason: string | null }[] }).results;
+  // The ignore rows only (the kv table also holds each client's history read).
+  const kvRows = () => db.prepare("SELECT k, v FROM kv WHERE k GLOB 'group_ignored:*'").all() as { k: string; v: string }[];
+  beforeEach(async () => {
+    src.groups.push({ id: HINDI, subject: 'शर्मा परिवार' }, { id: EXPORTS, subject: 'Desai Exports' });
+    await deps.directory.list();
+  });
+
+  it('approves each group with the name and code the form would suggest; one audit line each; codes never clash', async () => {
+    const r = await bulk('approve', [k(DESAI), k(EXPORTS), k(PATEL)]);
+    expect(r.status).toBe(200);
+    expect(results(r)).toEqual([
+      { key: k(DESAI), ok: true, reason: null }, { key: k(EXPORTS), ok: true, reason: null }, { key: k(PATEL), ok: true, reason: null },
+    ]);
+    // Desai Exports comes after Desai Foods took DES: its code is the next free one.
+    expect(loadGroupsFile(file).map((c) => [c.name, c.code])).toEqual([
+      ['Sharma Interiors', 'SHA'], ['Mehta Foods', 'MEH'], ['Desai Foods', 'DES'], ['Desai Exports', 'DESA'], ['Patel Builders', 'PAT'],
+    ]);
+    expect(audits.map((a) => a.event)).toEqual(['Group approved · Desai Foods (DES)', 'Group approved · Desai Exports (DESA)', 'Group approved · Patel Builders (PAT)']);
+    expect(audits.every((a) => a.actor === CTX.actor && a.kind === 'config' && a.requestId === CTX.requestId)).toBe(true);
+    expect(body(r).counts).toMatchObject({ approved: 5, notApproved: 1 });
+    noRawIds(r);
+  });
+
+  it('one group failing does not stop the others, and each says why', async () => {
+    const r = await bulk('approve', [k(HINDI), k(SHARMA.groupId), k(DESAI)]);
+    expect(r.status).toBe(200);
+    expect(results(r)).toEqual([
+      { key: k(HINDI), ok: false, reason: 'No code could be made from its name. Approve it on its own to choose one.' },
+      { key: k(SHARMA.groupId), ok: false, reason: 'It is tracked already.' },
+      { key: k(DESAI), ok: true, reason: null },
+    ]);
+    expect(loadGroupsFile(file).map((c) => c.code)).toEqual(['SHA', 'MEH', 'DES']);
+    expect(audits.map((a) => a.event)).toEqual(['Group approved · Desai Foods (DES)']);
+  });
+
+  it('a former client comes back with its own name and code', async () => {
+    await groupsApplyHandler(deps, CTX, { unapprove: [k(MEHTA.groupId)] });
+    const r = await bulk('approve', [k(MEHTA.groupId)]);
+    expect(results(r)[0]!.ok).toBe(true);
+    expect(loadGroupsFile(file).find((c) => c.groupId === MEHTA.groupId)).toMatchObject({ name: 'Mehta Foods', code: 'MEH' });
+  });
+
+  it('a refused write is that group\'s reason, without any group id', async () => {
+    // The file on disk is not valid JSON any more (the running agent keeps the list it last read): the writer refuses each
+    // group, and says so in words.
+    const last = deps.configs();
+    deps.configs = () => last;
+    writeFileSync(file, '{ not json');
+    const r = await bulk('approve', [k(DESAI), k(PATEL)]);
+    expect(r.status).toBe(200);
+    expect(results(r).map((x) => x.ok)).toEqual([false, false]);
+    expect(results(r)[0]!.reason).toBeTruthy();
+    expect(audits).toEqual([]);
+    noRawIds(r);
+  });
+
+  it('refuses the whole request before writing anything: bad action, no keys, more than 50, a repeat, an unknown key', async () => {
+    const before = readFileSync(file, 'utf8');
+    const many = Array.from({ length: 51 }, (_, i) => i.toString(16).padStart(24, '0'));
+    for (const b of [
+      { action: 'delete', keys: [k(DESAI)] }, { action: 'approve', keys: [] }, { action: 'approve', keys: many },
+      { action: 'approve', keys: [k(DESAI), k(DESAI)] }, { action: 'approve', keys: [k(DESAI), 'f'.repeat(24)] },
+      { action: 'approve', keys: [DESAI] }, { action: 'approve', keys: [k(DESAI)], extra: 1 }, null,
+    ]) {
+      const r = await groupsBulkHandler(deps, CTX, b);
+      expect(r.status, JSON.stringify(b)).toBe(400);
+      noRawIds(r);
+    }
+    expect(readFileSync(file, 'utf8')).toBe(before);
+    expect(audits).toEqual([]);
+    expect(kvRows()).toEqual([]);
+  });
+
+  it('ignore sets untracked groups aside by key (no id, no name on disk); unignore brings them back', async () => {
+    const r = await bulk('ignore', [k(DESAI), k(SHARMA.groupId), k(PATEL)]);
+    expect(results(r)).toEqual([
+      { key: k(DESAI), ok: true, reason: null },
+      { key: k(SHARMA.groupId), ok: false, reason: 'It is tracked. Remove it from the agent first.' },
+      { key: k(PATEL), ok: true, reason: null },
+    ]);
+    expect(body(r).counts).toEqual({ all: 6, approved: 2, notApproved: 2, ignored: 2 });
+    expect(rows(r).find((x) => x.key === k(DESAI))).toMatchObject({ ignored: true });
+    expect(kvRows().map((x) => x.k).sort()).toEqual([`group_ignored:${k(DESAI)}`, `group_ignored:${k(PATEL)}`].sort());
+    expect(JSON.stringify(kvRows())).not.toMatch(/@g\.us|919812345678|Desai|Patel/);
+    expect(audits.map((a) => a.event)).toEqual(['Group ignored', 'Group ignored']);
+    expect(rows(await groupsListHandler(deps, CTX, { filter: 'ignored' })).map((x) => x.key)).toEqual([k(DESAI), k(PATEL)]);
+    expect(rows(await groupsListHandler(deps, CTX, { filter: 'not_approved' })).map((x) => x.key)).not.toContain(k(DESAI));
+
+    const back = await bulk('unignore', [k(PATEL)]);
+    expect(results(back)).toEqual([{ key: k(PATEL), ok: true, reason: null }]);
+    expect(body(back).counts).toMatchObject({ ignored: 1 });
+    expect(audits.at(-1)!.event).toBe('Group shown again');
+  });
+
+  it('approving an ignored group (bulk or Save) clears its ignore', async () => {
+    await bulk('ignore', [k(DESAI), k(PATEL)]);
+    await bulk('approve', [k(DESAI)]);
+    await groupsApplyHandler(deps, CTX, { approve: [{ key: k(PATEL), name: 'Patel Builders', code: 'PAT' }] });
+    expect(kvRows()).toEqual([]);
   });
 });
 

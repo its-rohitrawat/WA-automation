@@ -475,3 +475,45 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
 .setup-cta { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; padding: 26px; border-color: color-mix(in srgb, var(--green) 35%, var(--line)); }
 .setup-cta h3 { margin: 0 0 6px; font-size: 19px; letter-spacing: -0.02em; } .setup-cta .m-p { max-width: 62ch; }
 .setup-cta .badge { width: 54px; height: 54px; border-radius: 16px; display: grid; place-items: center; color: var(--accent); background: linear-gradient(160deg, rgba(37,211,102,.18), rgba(7,94,84,.4)); border: 1px solid rgba(37,211,102,.25); }
+/* Overview counts: the whole tile links to its screen; the "i" beside the link opens one sentence on what it counts */
+.kpi { padding: 0; transition: border-color 160ms ease; }
+.kpi-link { position: relative; z-index: 1; display: block; padding: 18px 20px; color: inherit; text-decoration: none; border-radius: inherit; }
+.kpi-link .lab { padding-right: 30px; } .kpi-link .num, .kpi-link .delta { display: block; }
+.kpi-link:focus-visible { outline: 2px solid var(--link); outline-offset: -3px; }
+.kpi-link:active .num { transform: scale(0.98); transform-origin: left center; } .kpi .num { transition: transform 140ms var(--ease-out); }
+.kpi-i { position: absolute; top: 12px; right: 12px; z-index: 2; width: 28px; height: 28px; display: grid; place-items: center; padding: 0; border-radius: 50%;
+  border: 1px solid var(--line); background: var(--panel); color: var(--muted); cursor: pointer; transition: color 140ms ease, border-color 140ms ease; }
+.kpi.info-open .kpi-i { color: var(--text); border-color: var(--line-2); }
+.kpi-i:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+.kpi-tip { position: absolute; left: 12px; right: 12px; top: 46px; z-index: 3; padding: 10px 12px; border-radius: 12px; background: var(--raise); border: 1px solid var(--line-2);
+  box-shadow: var(--shadow); color: var(--text); font-size: 12.5px; line-height: 1.45; pointer-events: none;
+  opacity: 0; visibility: hidden; transform: translateY(-4px); transition: opacity 140ms ease, transform 160ms var(--ease-out), visibility 0s linear 160ms; }
+.kpi.info-open .kpi-tip, .kpi-i:focus-visible + .kpi-tip { opacity: 1; visibility: visible; transform: none; transition-delay: 0s; }
+@media (hover: hover) {
+  .kpi:hover { border-color: var(--line-2); } .kpi-i:hover { color: var(--text); border-color: var(--line-2); }
+  .kpi-i:hover + .kpi-tip { opacity: 1; visibility: visible; transform: none; transition-delay: 0s; }
+}
+
+/* Manage groups: ticking untracked groups, the selection bar, and what a bulk change did */
+.grow.has-check { grid-template-columns: 18px 18px minmax(0, 1fr) auto; }
+.g-check { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.g-row.selected { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: color-mix(in srgb, var(--accent) 8%, var(--panel-2)); }
+.li.g-row.selected { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.li .g-ic { background: transparent; }
+.g-all { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); cursor: pointer; user-select: none; }
+.g-all input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
+.g-phone-head { display: flex; justify-content: flex-end; margin: 0 4px 8px; }
+.g-ignored-list .li:first-child { border-top: 0; }
+.selbar { flex-wrap: wrap; justify-content: center; transition: bottom 220ms var(--ease-out); }
+.selbar.lift { bottom: calc(max(18px, env(safe-area-inset-bottom)) + 60px); }
+.g-outcome { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 12px; padding: 12px 14px; border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--s-done) 40%, var(--line)); background: color-mix(in srgb, var(--s-done) 8%, var(--panel)); }
+.g-outcome.bad { border-color: color-mix(in srgb, var(--s-overdue) 45%, var(--line)); background: color-mix(in srgb, var(--s-overdue) 8%, var(--panel)); }
+.g-outcome > svg { flex: none; margin-top: 2px; color: var(--s-done); } .g-outcome.bad > svg { color: var(--s-overdue); }
+.g-outcome ul { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; } .g-outcome li { overflow-wrap: anywhere; }
+.g-dragcount { position: fixed; top: -100px; left: -100px; padding: 6px 12px; border-radius: 999px; background: var(--green); color: #06251a; font: 600 13px/1.2 var(--font); }
+@media (max-width: 960px) {
+  .selbar { left: 16px; right: 16px; transform: none; max-width: none; padding: 8px; }
+  .selbar > span { flex: 1 0 100%; text-align: center; }
+}
+@media (prefers-reduced-motion: reduce) { .kpi-tip, .selbar, .kpi .num { transition: none; } }

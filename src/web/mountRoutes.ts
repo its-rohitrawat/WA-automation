@@ -18,7 +18,7 @@ import { clientDetailHandler, clientsListHandler, type ClientsDeps } from './rou
 import type { ApiResult, AuditFn, OwnerContext } from './routes/context.ts';
 import { registerControlApi } from './routes/controlScreens.ts';
 import { CALLBACK_PATH, GoogleConnectRoutes, type GoogleConnectDeps } from './routes/google.ts';
-import { groupsApplyHandler, groupsListHandler, suggestCodeHandler, type GroupsDeps } from './routes/groups.ts';
+import { groupsApplyHandler, groupsBulkHandler, groupsListHandler, suggestCodeHandler, type GroupsDeps } from './routes/groups.ts';
 import { actionSession, readBody } from './routes/respond.ts';
 import { WhatsAppLinkRoutes } from './routes/whatsapp.ts';
 import { registerWorkApi } from './routes/work.ts';
@@ -103,6 +103,7 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   read('/dashboard/api/groups', ({ url }, o) =>
     groupsListHandler(groups, o, { q: url.searchParams.get('q'), filter: url.searchParams.get('filter'), refresh: url.searchParams.get('refresh') }));
   change('/dashboard/api/groups/apply', (_ctx, o, body) => groupsApplyHandler(groups, o, body));
+  change('/dashboard/api/groups/bulk', (_ctx, o, body) => groupsBulkHandler(groups, o, body));
   read('/dashboard/api/groups/suggest-code', ({ url }, o) => suggestCodeHandler(groups, o, url.searchParams.get('name') ?? ''));
   read('/dashboard/api/clients', (_ctx, o) => clientsListHandler(d.clients, o));
   read('/dashboard/api/clients/:code', ({ params }, o) => clientDetailHandler(d.clients, o, params.code!));

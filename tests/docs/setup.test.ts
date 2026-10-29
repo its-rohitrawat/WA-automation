@@ -904,3 +904,18 @@ describe('earlier messages of a newly approved group (Task 4, 28 Oct 2026)', () 
     expect(setup).toContain('Removing the group stops it.');
   });
 });
+
+describe('SETUP.md, choosing several groups at once', () => {
+  it('names the bar, its buttons and the failure reason as the screen and the agent say them', () => {
+    const setup = read('docs/SETUP.md');
+    const groups = read('src/web/public/views/groups.js');
+    const route = read('src/web/routes/groups.ts');
+    for (const text of ['Approve selected', 'Ignore selected', 'Show again', 'Select all']) {
+      expect(setup, text).toContain(`**${text}**`);
+      expect(groups, text).toContain(text);
+    }
+    expect(setup).toContain('"4 approved, 1 failed: No code could be made from its name…"');
+    expect(route).toContain("'No code could be made from its name. Approve it on its own to choose one.'");
+    expect(groups).toContain('${done.length} ${verb}, ${bad.length} failed');
+  });
+});

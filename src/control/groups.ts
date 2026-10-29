@@ -123,7 +123,7 @@ export function searchKey(s: string): string {
   return s.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
-export type GroupFilter = 'all' | 'approved' | 'not_approved';
+export type GroupFilter = 'all' | 'approved' | 'not_approved' | 'ignored';
 
 export interface GroupClientInfo {
   name: string;
@@ -144,6 +144,8 @@ export interface GroupRow {
   approved: boolean;
   /** False only for an approved group that a fresh list no longer has ("No longer in WhatsApp"). */
   inWhatsApp: boolean;
+  /** The owner set this untracked group aside (Ignore): it leaves the Not approved list. Never true for an approved group. */
+  ignored: boolean;
   client: GroupClientInfo | null;
 }
 
@@ -151,8 +153,8 @@ export interface GroupsOverview {
   rows: GroupRow[];
   /** Rows matching the search and filter, before the limit. */
   total: number;
-  /** Over every group, ignoring search and filter. */
-  counts: { all: number; approved: number; notApproved: number };
+  /** Over every group, ignoring search and filter. all counts ignored groups too; notApproved does not. */
+  counts: { all: number; approved: number; notApproved: number; ignored: number };
   stale: boolean;
   reason: ListingReason | null;
   fetchedAt: string | null;
@@ -162,7 +164,8 @@ const collator = new Intl.Collator('en', { sensitivity: 'base', numeric: true })
 
 /**
  * The Manage groups list: the live groups merged with the allow-list (configs) and the clients table. Approved groups
- * first, then by name. Search matches the group name and the client name, ignoring case and accents.
+ * first, then by name. Search matches the group name and the client name, ignoring case and accents. `ignored` says
+ * which untracked groups the owner set aside: the not_approved filter leaves them out, the ignored filter shows only them.
  */
 export function groupsOverview(o: {
   db: Db;
@@ -171,8 +174,10 @@ export function groupsOverview(o: {
   q?: string;
   filter?: GroupFilter;
   limit?: number;
+  ignored?: (groupId: string) => boolean;
 }): GroupsOverview {
   const { db, listing } = o;
+  const isIgnored = o.ignored ?? (() => false);
   const byGroup = new Map(listClients(db, false).map((c) => [c.groupId, c]));
   const withTasks = new Set((db.prepare('SELECT DISTINCT client_id AS id FROM tasks').all() as { id: number }[]).map((r) => r.id));
   const approved = new Map(o.configs.map((c) => [c.groupId, c]));
@@ -194,28 +199,32 @@ export function groupsOverview(o: {
 
   const rows: GroupRow[] = listing.groups.map((g) => {
     const c = approved.get(g.id);
-    return { groupId: g.id, name: g.subject, approved: c !== undefined, inWhatsApp: true, client: c ? clientInfo(c) : formerClient(g.id) };
+    return {
+      groupId: g.id, name: g.subject, approved: c !== undefined, inWhatsApp: true, ignored: c === undefined && isIgnored(g.id),
+      client: c ? clientInfo(c) : formerClient(g.id),
+    };
   });
   for (const c of o.configs) {
     if (liveIds.has(c.groupId)) continue;
     // A stale list says nothing about whether the group still exists.
-    rows.push({ groupId: c.groupId, name: c.name, approved: true, inWhatsApp: listing.stale, client: clientInfo(c) });
+    rows.push({ groupId: c.groupId, name: c.name, approved: true, inWhatsApp: listing.stale, ignored: false, client: clientInfo(c) });
   }
   rows.sort((a, b) => Number(b.approved) - Number(a.approved) || collator.compare(a.name, b.name) || a.groupId.localeCompare(b.groupId));
 
   const approvedCount = rows.filter((r) => r.approved).length;
+  const ignoredCount = rows.filter((r) => r.ignored).length;
   const q = searchKey(o.q ?? '');
   const filter = o.filter ?? 'all';
+  const inFilter = (r: GroupRow) =>
+    filter === 'all' || (filter === 'approved' ? r.approved : filter === 'ignored' ? r.ignored : !r.approved && !r.ignored);
   const matching = rows.filter(
-    (r) =>
-      (filter === 'all' || r.approved === (filter === 'approved')) &&
-      (q === '' || searchKey(r.name).includes(q) || (r.client !== null && searchKey(r.client.name).includes(q))),
+    (r) => inFilter(r) && (q === '' || searchKey(r.name).includes(q) || (r.client !== null && searchKey(r.client.name).includes(q))),
   );
   const limit = Number.isFinite(o.limit) ? Math.max(0, Math.floor(o.limit!)) : DEFAULT_LIMIT;
   return {
     rows: matching.slice(0, limit),
     total: matching.length,
-    counts: { all: rows.length, approved: approvedCount, notApproved: rows.length - approvedCount },
+    counts: { all: rows.length, approved: approvedCount, notApproved: rows.length - approvedCount - ignoredCount, ignored: ignoredCount },
     stale: listing.stale,
     reason: listing.reason,
     fetchedAt: listing.fetchedAt,

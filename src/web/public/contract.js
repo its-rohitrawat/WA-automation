@@ -245,7 +245,7 @@ const strings = (v) => arr(v).map(str).filter(Boolean);
 
 /**
  * One row of Manage groups. `key` is the agent's opaque key for the group (never its WhatsApp id).
- * @typedef {{ key: string, name: string, approved: boolean, inWhatsApp: boolean,
+ * @typedef {{ key: string, name: string, approved: boolean, inWhatsApp: boolean, ignored: boolean,
  *   client: { name: string, code: string, active: boolean, hasTasks: boolean, codeLocked: boolean, emailDomains: string[], meetingKeywords: string[] } | null }} GroupRow
  */
 
@@ -265,6 +265,7 @@ export function readGroups(raw) {
           name: str(o.name),
           approved: o.approved === true,
           inWhatsApp: o.inWhatsApp !== false,
+          ignored: o.ignored === true && o.approved !== true,
           client: cl
             ? { name: str(cl.name), code: str(cl.code), active: cl.active === true, hasTasks: cl.hasTasks === true, codeLocked: cl.codeLocked === true, emailDomains: strings(cl.emailDomains), meetingKeywords: strings(cl.meetingKeywords) }
             : null,
@@ -272,9 +273,25 @@ export function readGroups(raw) {
       })
       .filter((row) => row.key),
     total: num(r.total),
-    counts: { all: num(c.all), approved: num(c.approved), notApproved: num(c.notApproved) },
+    counts: { all: num(c.all), approved: num(c.approved), notApproved: num(c.notApproved), ignored: num(c.ignored) },
     stale: r.stale === true,
     reason: reason === 'whatsapp_not_connected' || reason === 'list_failed' ? reason : null,
     fetchedAt: iso(r.fetchedAt),
+  };
+}
+
+/**
+ * The answer to POST /groups/bulk: the new list and one result per group (the reason is the agent's plain sentence).
+ * @param {unknown} raw
+ */
+export function readBulk(raw) {
+  return {
+    list: readGroups(raw),
+    results: arr(obj(raw).results)
+      .map((x) => {
+        const o = obj(x);
+        return { key: str(o.key), ok: o.ok === true, reason: str(o.reason).slice(0, 300) };
+      })
+      .filter((r) => /^[0-9a-f]{24}$/.test(r.key)),
   };
 }

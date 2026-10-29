@@ -7,7 +7,7 @@ import { VENDOR_FILES } from '../../src/web/server.ts';
 // The front end is plain browser modules; these four need no DOM. Their JSDoc types are checked by tsconfig.web.json,
 // which this project's tsconfig does not include, so the imports are untyped here.
 // @ts-expect-error -- browser module (see above)
-import { problems, readClientDetail, readClients, readConnections, readGroups, readOverview, readStatus } from '../../src/web/public/contract.js';
+import { problems, readBulk, readClientDetail, readClients, readConnections, readGroups, readOverview, readStatus } from '../../src/web/public/contract.js';
 // @ts-expect-error -- browser module (see above)
 import { PUBLIC_MAIL_DOMAINS as BROWSER_PUBLIC, fieldProblem } from '../../src/web/public/views/rules.js';
 import { PUBLIC_MAIL_DOMAINS } from '../../src/config/domains.ts';
@@ -309,9 +309,25 @@ describe('Clients and Manage groups (D2)', () => {
     });
     expect(g.rows.map((r: { key: string }) => r.key)).toEqual(['a'.repeat(24), 'b'.repeat(24)]);
     expect(g.rows[0].client).toMatchObject({ code: 'DES', codeLocked: true, emailDomains: ['desai.in'] });
-    expect(g.rows[1]).toEqual({ key: 'b'.repeat(24), name: '', approved: false, inWhatsApp: false, client: null });
+    expect(g.rows[1]).toEqual({ key: 'b'.repeat(24), name: '', approved: false, inWhatsApp: false, ignored: false, client: null });
     expect(g).toMatchObject({ counts: { all: 250, approved: 1, notApproved: 249 }, stale: true, reason: null });
     expect(() => readGroups(null)).not.toThrow();
+    // An approved row is never shown as ignored, whatever the answer says.
+    expect(readGroups({ rows: [{ key: 'c'.repeat(24), name: 'x', approved: true, ignored: true }] }).rows[0].ignored).toBe(false);
+  });
+
+  it('reads a bulk answer: the list, and one result per group with a well-formed key', () => {
+    const b = readBulk({
+      rows: [{ key: 'a'.repeat(24), name: 'Desai Foods', approved: false, ignored: true }], counts: { all: 3, approved: 1, notApproved: 1, ignored: 1 },
+      results: [{ key: 'a'.repeat(24), ok: true, reason: null }, { key: 'b'.repeat(24), ok: 'yes', reason: 'No code could be made from its name.' }, { key: 'raw@g.us', ok: true }],
+    });
+    expect(b.list.rows[0]).toMatchObject({ ignored: true });
+    expect(b.list.counts).toEqual({ all: 3, approved: 1, notApproved: 1, ignored: 1 });
+    expect(b.results).toEqual([
+      { key: 'a'.repeat(24), ok: true, reason: '' },
+      { key: 'b'.repeat(24), ok: false, reason: 'No code could be made from its name.' },
+    ]);
+    expect(readBulk(null).results).toEqual([]);
   });
 
   it('reads clients and a client, with the phase position', () => {
