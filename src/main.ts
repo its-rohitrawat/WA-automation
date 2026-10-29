@@ -158,7 +158,7 @@ async function main(): Promise<void> {
     const allow = new AllowList(configs.map((c) => c.groupId));
 
     // openSessionDb has already restored a session left by a dashboard link that never finished (D3).
-    const auth = useEncryptedAuthState(sessionDb, key);
+    const auth = await useEncryptedAuthState(sessionDb, key);
     // Setup mode (src/setupMode.ts, tested): with the dashboard off, a missing link or token stops the service as before,
     // in the same order (the link is checked before the token is read). With it on, the service starts and the dashboard
     // links what is missing; an unreadable token waits the same way.
@@ -209,7 +209,7 @@ async function main(): Promise<void> {
       });
       briefing.live = live;
     } else if (env.REPORT_ENABLED) {
-      const started = openMorningReport({
+      const started = await openMorningReport({
         env, masterKey: key, log, factory: baileysSenderSocketFactory(silentLogger()), founderNumber: linkedNumber(auth),
       });
       senderDb = started.senderDb;

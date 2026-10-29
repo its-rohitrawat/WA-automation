@@ -27,6 +27,5 @@ store/reports.ts
 store/tasks.ts
 wa/authState.ts
 wa/ingest.ts
-wa/linkSession.ts
 web/audit.ts
 web/routes/groups.ts

@@ -25,7 +25,7 @@ async function setup(initial: LiveReportSettings, o: { failOpen?: number } = {})
   const live = new LiveReport({
     db, clock, log: silentLogger(), healthLine: () => ({ ok: true, text: '✅' }),
     settings: () => current,
-    open: (recipient) => {
+    open: async (recipient) => {
       if (failOpen > 0) {
         failOpen--;
         throw new Error('session file locked');
@@ -34,7 +34,7 @@ async function setup(initial: LiveReportSettings, o: { failOpen?: number } = {})
       sender.recipientMasked = `…${recipient.slice(-4)}`;
       const entry = { recipient, sender, closed: 0 };
       opened.push(entry);
-      return { sender, close: () => entry.closed++ };
+      return { sender, close: async () => void entry.closed++ };
     },
   });
   const tick = async (hm: string) => {

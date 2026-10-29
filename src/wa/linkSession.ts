@@ -308,7 +308,7 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
   /** The rows exactly as they were, and the service reconnected with them (or holding none, if it had none). */
   const restore = async (wasLinked: boolean): Promise<void> => {
     try {
-      restoreBackup(d.sessionDb);
+      await restoreBackup(d.sessionDb);
     } catch (err) {
       // The backup stays in the database; the next start restores it (recoverInterruptedLink).
       d.log.error({ err }, 'founder session could not be restored now; it is restored at the next start');
@@ -320,7 +320,7 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
       return;
     }
     try {
-      await d.switchable.swap(d.buildGateway(useEncryptedAuthState(d.sessionDb, d.key)));
+      await d.switchable.swap(d.buildGateway(await useEncryptedAuthState(d.sessionDb, d.key)));
     } catch (err) {
       // The rows are back as they were; only the reconnect failed (it would fail the same way at the next start).
       d.log.error({ err }, 'founder session restored, but reconnecting with it failed');
@@ -332,8 +332,8 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
     async run(hooks, signal) {
       const wasLinked = d.switchable.hasGateway();
       // Read only when there are rows: on an empty table useEncryptedAuthState would write its canary row.
-      const hasRows = (d.sessionDb.raw.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n > 0;
-      const before = hasRows ? numberOf(() => useEncryptedAuthState(d.sessionDb, d.key)) : undefined;
+      const hasRows = (await d.sessionDb.get<{ n: number }>('SELECT COUNT(*) AS n FROM auth'))!.n > 0;
+      const before = hasRows ? await numberOf(() => useEncryptedAuthState(d.sessionDb, d.key)) : undefined;
       let gw: GatewayLike | undefined;
       let onAbort: (() => void) | undefined;
       let backedUp = false;
@@ -342,10 +342,10 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
       try {
         await d.switchable.clear('linking');
         if (signal.aborted) throw new Aborted();
-        backupAndReset(d.sessionDb);
+        await backupAndReset(d.sessionDb);
         backedUp = true;
         // Its writes stop once the link is undone, so the closing socket never writes over the restored rows.
-        auth = guardAuth(useEncryptedAuthState(d.sessionDb, d.key), () => undone);
+        auth = guardAuth(await useEncryptedAuthState(d.sessionDb, d.key), () => undone);
         const linkAuth = auth;
         const outcome = await new Promise<LinkOutcome>((resolve) => {
           let qrSeen = false;
@@ -372,7 +372,7 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
           return outcome.ok ? { ok: false, code: 'aborted' } : outcome;
         }
         // Committed from here: the new session is kept, whatever comes next.
-        dropBackup(d.sessionDb);
+        await dropBackup(d.sessionDb);
       } catch (err) {
         if (!(err instanceof Aborted)) d.log.error({ err }, 'founder relink failed; restoring the saved session');
         undone = true;
@@ -392,7 +392,7 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
       } catch (err) {
         d.log.error({ err }, 'session_reset_at could not be recorded');
       }
-      const linked = auth ? numberOf(() => auth!) : undefined;
+      const linked = auth ? await numberOf(async () => auth!) : undefined;
       if (before && linked && before !== linked) {
         d.log.warn({ before: maskNumber(before), after: maskNumber(linked) }, "founder's WhatsApp was relinked from a different number");
       }
@@ -401,7 +401,7 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
       async function reconnectAsBefore(): Promise<void> {
         // Nothing was reset (the abort or error came before the backup): reconnect with the untouched session.
         try {
-          await d.switchable.swap(d.buildGateway(useEncryptedAuthState(d.sessionDb, d.key)));
+          await d.switchable.swap(d.buildGateway(await useEncryptedAuthState(d.sessionDb, d.key)));
         } catch (err) {
           d.log.error({ err }, 'reconnecting with the untouched founder session failed');
           await d.switchable.clear('not_linked');
@@ -414,9 +414,9 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
 class Aborted extends Error {}
 
 /** The phone number in a session's creds, or undefined (no link, or the session cannot be read). */
-function numberOf(load: () => EncryptedAuth): string | undefined {
+async function numberOf(load: () => Promise<EncryptedAuth>): Promise<string | undefined> {
   try {
-    const id = load().state.creds.me?.id;
+    const id = (await load()).state.creds.me?.id;
     return id ? id.split(/[:@]/)[0] : undefined;
   } catch {
     return undefined;

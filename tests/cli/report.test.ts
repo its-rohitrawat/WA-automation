@@ -104,7 +104,7 @@ async function writeSnapshot(at: Date, opts: { reportOn?: boolean; recipientMask
 
 async function seedSender(key: Buffer = KEY): Promise<void> {
   const sdb = openSessionDb(senderSessionDbPath(dataDir));
-  const auth = useSenderAuthState(sdb, key);
+  const auth = await useSenderAuthState(sdb, key);
   auth.state.creds.me = { id: '919800000099:2@s.whatsapp.net', name: 'Spare' };
   await auth.saveCreds();
   sdb.raw.close();
@@ -116,7 +116,7 @@ const FOUNDER = '919811112222';
 /** Writes the founder's linked session (data/session.db, the master key itself), as `cli link` does. */
 async function seedFounder(key: Buffer = KEY): Promise<void> {
   const db = openSessionDb(sessionDbPath(dataDir));
-  const auth = useEncryptedAuthState(db, key);
+  const auth = await useEncryptedAuthState(db, key);
   auth.state.creds.me = { id: `${FOUNDER}:7@s.whatsapp.net`, name: 'Founder' };
   await auth.saveCreds();
   db.raw.close();
@@ -137,10 +137,10 @@ function scannedBy(number: string): SenderSocketFactory {
   };
 }
 
-const senderLinked = (): boolean => {
+const senderLinked = async (): Promise<boolean> => {
   const sdb = openSessionDb(senderSessionDbPath(dataDir));
   try {
-    return useSenderAuthState(sdb, KEY).hasSession;
+    return (await useSenderAuthState(sdb, KEY)).hasSession;
   } finally {
     sdb.raw.close();
   }
@@ -185,7 +185,7 @@ describe('cli link-sender', () => {
     expect(existsSync(sessionDbPath(dataDir))).toBe(false);
     expect(sockets).toHaveLength(2);
     for (const s of sockets) for (const name of SEND_METHODS) expect(s[name]).not.toHaveBeenCalled();
-    expect(senderLinked()).toBe(false); // the fake socket never sets creds.me; the file is the spare number's own
+    expect(await senderLinked()).toBe(false); // the fake socket never sets creds.me; the file is the spare number's own
     const lock = await acquireLock(dataDir); // released by the command
     await lock.release();
   });
@@ -214,7 +214,7 @@ describe('cli link-sender', () => {
     await linkSenderCommand({ reset: true }, deps());
     expect(confirm.mock.calls[0]![0]).toContain('data/sender-session.db');
     expect(out()).toContain('Nothing was changed.');
-    expect(senderLinked()).toBe(true);
+    expect(await senderLinked()).toBe(true);
     expect(sockets).toHaveLength(0);
   });
 
@@ -223,7 +223,7 @@ describe('cli link-sender', () => {
     confirm.mockRejectedValue(new ConfirmCancelled());
     await linkSenderCommand({ reset: true }, deps());
     expect(out()).toContain('Cancelled. Nothing was changed.');
-    expect(senderLinked()).toBe(true);
+    expect(await senderLinked()).toBe(true);
     expect(sockets).toHaveLength(0);
   });
 
@@ -283,7 +283,7 @@ describe('cli link-sender', () => {
     expect(message).toContain('"WA Agent - Tracker"');
     expect(message).not.toContain(NUMBER);
     expect(out()).not.toContain('Spare number linked.');
-    expect(senderLinked()).toBe(false);
+    expect(await senderLinked()).toBe(false);
     expect(sockets).toHaveLength(1);
     for (const s of sockets) for (const name of SEND_METHODS) expect(s[name]).not.toHaveBeenCalled();
     const lock = await acquireLock(dataDir); // released after the failure
@@ -307,7 +307,7 @@ describe('cli link-sender', () => {
       expect(message).toContain('SPARE phone');
       expect(message).not.toContain(FOUNDER);
       expect(out()).not.toContain('Spare number linked.');
-      expect(senderLinked()).toBe(false); // the spare number's session rows were cleared
+      expect(await senderLinked()).toBe(false); // the spare number's session rows were cleared
       for (const s of sockets) for (const name of SEND_METHODS) expect(s[name]).not.toHaveBeenCalled();
       // The founder's session was only read: the file is byte for byte the same, with no -wal or -shm left beside it.
       expect(readFileSync(sessionDbPath(dataDir)).equals(founderFile)).toBe(true);
@@ -320,7 +320,7 @@ describe('cli link-sender', () => {
     const founderFile = readFileSync(sessionDbPath(dataDir));
     await linkSenderCommand({ reset: false }, { ...deps(), senderSocketFactory: scannedBy('919800000099') });
     expect(out()).toContain('Spare number linked.');
-    expect(senderLinked()).toBe(true);
+    expect(await senderLinked()).toBe(true);
     expect(readFileSync(sessionDbPath(dataDir)).equals(founderFile)).toBe(true);
     expect(readdirSync(dataDir).filter((f) => f.startsWith('session.db'))).toEqual(['session.db']);
   });
@@ -356,7 +356,7 @@ describe('cli link-sender', () => {
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(out()).toContain('Reset: the saved spare-number session was deleted.');
     expect(out()).toContain('Spare number linked.');
-    expect(senderLinked()).toBe(false); // readable with this key now
+    expect(await senderLinked()).toBe(false); // readable with this key now
     expect(existsSync(sessionDbPath(dataDir))).toBe(false);
   });
 
@@ -384,7 +384,7 @@ describe('cli link-sender', () => {
     expect(out()).toContain('Spare number linked.');
     expect(sockets).toHaveLength(1);
     expect(existsSync(sessionDbPath(dataDir))).toBe(false);
-    expect(senderLinked()).toBe(false); // the fresh file is readable with the spare number's own key
+    expect(await senderLinked()).toBe(false); // the fresh file is readable with the spare number's own key
   });
 
   it('a damaged session file: its -wal and -shm files move with it, and an earlier damaged copy is never overwritten', async () => {
@@ -400,7 +400,7 @@ describe('cli link-sender', () => {
     expect(readFileSync(`${file}-wal.damaged-20261023T090000-2`).toString()).toBe('wal bytes');
     expect(readFileSync(`${file}-shm.damaged-20261023T090000-2`).toString()).toBe('shm bytes');
     expect(out()).toContain('Spare number linked.');
-    expect(senderLinked()).toBe(false);
+    expect(await senderLinked()).toBe(false);
   });
 
   it('a damaged session file: an earlier damaged -wal copy is never overwritten, even with no earlier main-file copy', async () => {

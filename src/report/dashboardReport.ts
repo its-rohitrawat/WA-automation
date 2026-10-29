@@ -3,7 +3,7 @@ import { senderSessionDbPath } from '../config/paths.ts';
 import type { SettingsStore } from '../config/settingsStore.ts';
 import type { Db } from '../store/db.ts';
 import type { Logger } from '../util/logger.ts';
-import { openSenderSession } from '../wa/authState.ts';
+import { senderSessionLinkedSync } from '../wa/authState.ts';
 import type { LinkDriver } from '../wa/linkSession.ts';
 import { SenderGateway, type SenderSocketFactory } from '../wa/senderGateway.ts';
 import type { LiveReport, LiveReportSettings } from './liveReport.ts';
@@ -26,13 +26,8 @@ export function spareLinked(o: { dataDir: string; key: Buffer; briefing: Pick<Li
     if (open) return LINKED.has(open.status().state);
     const file = senderSessionDbPath(o.dataDir);
     if (!existsSync(file)) return false;
-    const s = openSenderSession(file, o.key);
-    if (!s.ok) return false;
-    try {
-      return s.auth.hasSession;
-    } finally {
-      s.db.raw.close();
-    }
+    // Synchronous until the settings view that reads it is async (S1.5).
+    return senderSessionLinkedSync(file, o.key);
   };
 }
 

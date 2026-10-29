@@ -41,45 +41,45 @@ describe('sender session store', () => {
 
     // Written by useSenderAuthState, readable with the pinned subkey.
     const db = openSessionDb(':memory:');
-    const a = useSenderAuthState(db, fixedMaster);
+    const a = await useSenderAuthState(db, fixedMaster);
     a.state.creds.me = { id: '919800000099:3@s.whatsapp.net', name: 'S' };
     await a.saveCreds();
-    const viaExpected = useEncryptedAuthState(db, expected);
+    const viaExpected = await useEncryptedAuthState(db, expected);
     expect(viaExpected.hasSession).toBe(true);
     expect(viaExpected.state.creds.me?.id).toBe('919800000099:3@s.whatsapp.net');
     // Not the media-ref key: the two subsystems never share a key.
-    expect(() => useEncryptedAuthState(db, deriveSubkey(fixedMaster, 'whatsapp-media-ref'))).toThrow(SessionDecryptError);
+    await expect(useEncryptedAuthState(db, deriveSubkey(fixedMaster, 'whatsapp-media-ref'))).rejects.toThrow(SessionDecryptError);
 
     // Written with the pinned subkey, readable by useSenderAuthState.
     const db2 = openSessionDb(':memory:');
-    const b = useEncryptedAuthState(db2, expected);
+    const b = await useEncryptedAuthState(db2, expected);
     b.state.creds.me = { id: '919800000099:3@s.whatsapp.net', name: 'S' };
     await b.saveCreds();
-    const viaSender = useSenderAuthState(db2, fixedMaster);
+    const viaSender = await useSenderAuthState(db2, fixedMaster);
     expect(viaSender.hasSession).toBe(true);
     expect(viaSender.state.creds.me?.id).toBe('919800000099:3@s.whatsapp.net');
   });
 
   it('persists the spare number session and restores it with the same master key', async () => {
     const db = openSessionDb(':memory:');
-    const a = useSenderAuthState(db, MASTER);
+    const a = await useSenderAuthState(db, MASTER);
     expect(a.hasSession).toBe(false);
     a.state.creds.me = { id: '919800000099:3@s.whatsapp.net', name: 'Spare' };
     await a.saveCreds();
     for (const { v } of db.raw.prepare('SELECT v FROM auth').all() as { v: Buffer }[]) expect(v.toString('latin1')).not.toContain('Spare');
-    expect(useSenderAuthState(db, MASTER).hasSession).toBe(true);
+    expect((await useSenderAuthState(db, MASTER)).hasSession).toBe(true);
   });
 
   it('cannot be opened with the founder session key, and cannot open the founder session', async () => {
     const senderDb = openSessionDb(':memory:');
-    await useSenderAuthState(senderDb, MASTER).saveCreds();
-    expect(() => useEncryptedAuthState(senderDb, MASTER)).toThrow(SessionDecryptError);
+    await (await useSenderAuthState(senderDb, MASTER)).saveCreds();
+    await expect(useEncryptedAuthState(senderDb, MASTER)).rejects.toThrow(SessionDecryptError);
 
     const founderDb = openSessionDb(':memory:');
-    await useEncryptedAuthState(founderDb, MASTER).saveCreds();
+    await (await useEncryptedAuthState(founderDb, MASTER)).saveCreds();
     let thrown: unknown;
     try {
-      useSenderAuthState(founderDb, MASTER);
+      await useSenderAuthState(founderDb, MASTER);
     } catch (err) {
       thrown = err;
     }
@@ -88,14 +88,14 @@ describe('sender session store', () => {
     expect((thrown as Error).cause).toBeInstanceOf(SessionDecryptError);
   });
 
-  it('does not relabel SQLite errors as decrypt errors', () => {
+  it('does not relabel SQLite errors as decrypt errors', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'wa-sender-sess-'));
     try {
       const db = openSessionDb(join(dir, 'sender-session.db'));
       db.raw.close();
       let thrown: unknown;
       try {
-        useSenderAuthState(db, MASTER);
+        await useSenderAuthState(db, MASTER);
       } catch (err) {
         thrown = err;
       }
@@ -109,7 +109,7 @@ describe('sender session store', () => {
 
   it('names link-sender --reset when another master key wrote the file', async () => {
     const db = openSessionDb(':memory:');
-    await useSenderAuthState(db, MASTER).saveCreds();
-    expect(() => useSenderAuthState(db, randomBytes(32))).toThrow(/link-sender --reset/);
+    await (await useSenderAuthState(db, MASTER)).saveCreds();
+    await expect(useSenderAuthState(db, randomBytes(32))).rejects.toThrow(/link-sender --reset/);
   });
 });

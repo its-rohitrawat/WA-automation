@@ -69,7 +69,7 @@ async function setup(o: { ai?: FakeAi; drive?: FakeDrive; log?: Logger; drainMs?
   const db = await seededDb();
   const allow = new AllowList([SHARMA.groupId, MEHTA.groupId]);
   const sockets: FakeSocket[] = [];
-  const auth = useEncryptedAuthState(openSessionDb(':memory:'), randomBytes(32));
+  const auth = await useEncryptedAuthState(openSessionDb(':memory:'), randomBytes(32));
   const gateway = new WhatsAppGateway({
     allow,
     factory: () => {

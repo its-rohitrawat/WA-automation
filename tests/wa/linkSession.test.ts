@@ -23,7 +23,7 @@ async function setup(o: { linked?: boolean; timeoutMs?: number } = {}) {
   const sessionDb = openSessionDb(':memory:');
   const trackerDb = openDb(':memory:');
   if (o.linked !== false) {
-    const first = useEncryptedAuthState(sessionDb, key);
+    const first = await useEncryptedAuthState(sessionDb, key);
     first.state.creds.me = { id: '919800000001:3@s.whatsapp.net', name: 'Founder' };
     await first.saveCreds();
   }
@@ -46,7 +46,7 @@ async function setup(o: { linked?: boolean; timeoutMs?: number } = {}) {
     });
   };
   const switchable = new SwitchableGateway(
-    o.linked === false ? { initialState: 'not_linked' } : { inner: buildGateway(useEncryptedAuthState(sessionDb, key)) },
+    o.linked === false ? { initialState: 'not_linked' } : { inner: buildGateway(await useEncryptedAuthState(sessionDb, key)) },
   );
   const statuses: string[] = [];
   switchable.onStatus((s) => statuses.push(s.state));
@@ -262,10 +262,10 @@ describe('founder relink', () => {
     expect(t.rows()).not.toEqual(before);
     expect(t.backupRows()).toBeGreaterThan(0);
     // What the next start does, before it reads the session:
-    expect(recoverInterruptedLink(t.sessionDb)).toBe(true);
+    expect(await recoverInterruptedLink(t.sessionDb)).toBe(true);
     expect(t.rows()).toEqual(before);
     expect(t.backupRows()).toBe(0);
-    expect(recoverInterruptedLink(t.sessionDb)).toBe(false);
+    expect(await recoverInterruptedLink(t.sessionDb)).toBe(false);
     t.sessions.cancel(link.id);
     await t.sessions.settled(link.id);
     expect(t.rows()).toEqual(before);
@@ -280,7 +280,7 @@ describe('founder relink', () => {
     await t.sessions.settled(link.id);
     const after = t.rows();
     expect(t.backupRows()).toBe(0);
-    expect(recoverInterruptedLink(t.sessionDb)).toBe(false);
+    expect(await recoverInterruptedLink(t.sessionDb)).toBe(false);
     expect(t.rows()).toEqual(after);
   });
 
@@ -375,7 +375,7 @@ describe('session backup helpers', () => {
   it('guardAuth drops writes once stopped, and passes them before', async () => {
     const db = openSessionDb(':memory:');
     const key = randomBytes(32);
-    const auth = useEncryptedAuthState(db, key);
+    const auth = await useEncryptedAuthState(db, key);
     let stopped = false;
     const guarded = guardAuth(auth, () => stopped);
     const count = () => (db.raw.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n;
@@ -388,12 +388,12 @@ describe('session backup helpers', () => {
     expect(count()).toBe(start + 1);
   });
 
-  it("resetSession (the CLI's --reset) also drops a backup left by an unfinished dashboard link", () => {
+  it("resetSession (the CLI's --reset) also drops a backup left by an unfinished dashboard link", async () => {
     const db = openSessionDb(':memory:');
-    useEncryptedAuthState(db, randomBytes(32)); // the canary row
-    backupAndReset(db);
-    resetSession(db);
-    expect(recoverInterruptedLink(db)).toBe(false);
+    await useEncryptedAuthState(db, randomBytes(32)); // the canary row
+    await backupAndReset(db);
+    await resetSession(db);
+    expect(await recoverInterruptedLink(db)).toBe(false);
     expect((db.raw.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n).toBe(0);
   });
 

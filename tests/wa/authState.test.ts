@@ -9,28 +9,28 @@ import { SessionDecryptError, openSessionDb, readFounderNumber, resetSession, us
 const key = randomBytes(32);
 
 describe('encrypted auth state', () => {
-  it('starts with fresh credentials and no session', () => {
-    const a = useEncryptedAuthState(openSessionDb(':memory:'), key);
+  it('starts with fresh credentials and no session', async () => {
+    const a = await useEncryptedAuthState(openSessionDb(':memory:'), key);
     expect(a.hasSession).toBe(false);
     expect(a.state.creds.noiseKey.private).toBeInstanceOf(Uint8Array);
   });
 
   it('persists credentials encrypted and restores binary fields', async () => {
     const db = openSessionDb(':memory:');
-    const a = useEncryptedAuthState(db, key);
+    const a = await useEncryptedAuthState(db, key);
     a.state.creds.me = { id: '919800000000:5@s.whatsapp.net', name: 'Founder' };
     await a.saveCreds();
     for (const { v } of db.raw.prepare('SELECT v FROM auth').all() as { v: Buffer }[]) {
       const text = v.toString('latin1');
       for (const marker of ['noiseKey', 'Founder', '"type":"Buffer"']) expect(text).not.toContain(marker);
     }
-    const b = useEncryptedAuthState(db, key);
+    const b = await useEncryptedAuthState(db, key);
     expect(b.hasSession).toBe(true);
     expect(Buffer.from(b.state.creds.noiseKey.private).equals(Buffer.from(a.state.creds.noiseKey.private))).toBe(true);
   });
 
   it('stores, reads and rotates signal keys', async () => {
-    const a = useEncryptedAuthState(openSessionDb(':memory:'), key);
+    const a = await useEncryptedAuthState(openSessionDb(':memory:'), key);
     await a.state.keys.set({ 'pre-key': { '1': { public: Buffer.from('pub'), private: Buffer.from('priv') } } });
     const got = await a.state.keys.get('pre-key', ['1', '2']);
     expect(Buffer.from(got['1']!.private).toString()).toBe('priv');
@@ -41,13 +41,13 @@ describe('encrypted auth state', () => {
 
   it('cannot be opened with a different key', async () => {
     const db = openSessionDb(':memory:');
-    await useEncryptedAuthState(db, key).saveCreds();
-    expect(() => useEncryptedAuthState(db, randomBytes(32))).toThrow(SessionDecryptError);
+    await (await useEncryptedAuthState(db, key)).saveCreds();
+    await expect(useEncryptedAuthState(db, randomBytes(32))).rejects.toThrow(SessionDecryptError);
   });
 
   it('keeps no plaintext row names in the database', async () => {
     const db = openSessionDb(':memory:');
-    const a = useEncryptedAuthState(db, key);
+    const a = await useEncryptedAuthState(db, key);
     await a.saveCreds();
     await a.state.keys.set({ session: { '919800000001.0': Buffer.from('priv') } });
     const rows = db.raw.prepare('SELECT k FROM auth').all() as { k: string }[];
@@ -61,7 +61,7 @@ describe('encrypted auth state', () => {
 
   it('encrypts signal key values', async () => {
     const db = openSessionDb(':memory:');
-    const a = useEncryptedAuthState(db, key);
+    const a = await useEncryptedAuthState(db, key);
     await a.state.keys.set({ 'pre-key': { '1': { public: Buffer.from('pub'), private: Buffer.from('priv') } } });
     const rows = db.raw.prepare('SELECT v FROM auth').all() as { v: Buffer }[];
     expect(rows.length).toBeGreaterThan(1);
@@ -72,7 +72,7 @@ describe('encrypted auth state', () => {
   });
 
   it('round-trips app-state-sync-key as an object with binary keyData', async () => {
-    const a = useEncryptedAuthState(openSessionDb(':memory:'), key);
+    const a = await useEncryptedAuthState(openSessionDb(':memory:'), key);
     await a.state.keys.set({
       'app-state-sync-key': { k1: { keyData: Buffer.from('kd'), fingerprint: { rawId: 1, currentIndex: 0 }, timestamp: 5 } },
     });
@@ -83,7 +83,7 @@ describe('encrypted auth state', () => {
   });
 
   it('rolls back keys.set when one entry fails', async () => {
-    const a = useEncryptedAuthState(openSessionDb(':memory:'), key);
+    const a = await useEncryptedAuthState(openSessionDb(':memory:'), key);
     const bad = { public: Buffer.from('p'), private: BigInt(1) } as unknown as { public: Buffer; private: Buffer };
     await expect(
       a.state.keys.set({ 'pre-key': { '1': { public: Buffer.from('p'), private: Buffer.from('q') }, '2': bad } }),
@@ -93,7 +93,7 @@ describe('encrypted auth state', () => {
 
   it('rejects a blob copied into another row', async () => {
     const db = openSessionDb(':memory:');
-    const a = useEncryptedAuthState(db, key);
+    const a = await useEncryptedAuthState(db, key);
     await a.saveCreds();
     await a.state.keys.set({
       'pre-key': {
@@ -110,7 +110,7 @@ describe('encrypted auth state', () => {
     expect(outcomes).toContain('err');
     // a key blob copied over the creds row
     db.raw.prepare('UPDATE auth SET v = ? WHERE k = ?').run(rows[2]!.v, rows[1]!.k);
-    expect(() => useEncryptedAuthState(db, key)).toThrow(SessionDecryptError);
+    await expect(useEncryptedAuthState(db, key)).rejects.toThrow(SessionDecryptError);
   });
 
   it('uses WAL for a file-backed session db', () => {
@@ -126,45 +126,45 @@ describe('encrypted auth state', () => {
 
   it('can be reset and then linked again', async () => {
     const db = openSessionDb(':memory:');
-    const first = useEncryptedAuthState(db, key);
+    const first = await useEncryptedAuthState(db, key);
     first.state.creds.me = { id: '919800000000:5@s.whatsapp.net', name: 'Founder' };
     await first.saveCreds();
-    resetSession(db);
+    await resetSession(db);
     expect((db.raw.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n).toBe(0);
-    const second = useEncryptedAuthState(db, key);
+    const second = await useEncryptedAuthState(db, key);
     expect(second.hasSession).toBe(false);
     second.state.creds.me = { id: '919800000001:5@s.whatsapp.net', name: 'Founder' };
     await second.saveCreds();
-    expect(useEncryptedAuthState(db, key).hasSession).toBe(true);
+    expect((await useEncryptedAuthState(db, key)).hasSession).toBe(true);
   });
 
   it('rejects a corrupted canary', async () => {
     const db = openSessionDb(':memory:');
-    await useEncryptedAuthState(db, key).saveCreds();
+    await (await useEncryptedAuthState(db, key)).saveCreds();
     const first = db.raw.prepare('SELECT k, v FROM auth ORDER BY rowid LIMIT 1').get() as { k: string; v: Buffer };
     const bad = Buffer.from(first.v);
     bad[bad.length - 1] = bad[bad.length - 1]! ^ 0xff;
     db.raw.prepare('UPDATE auth SET v = ? WHERE k = ?').run(bad, first.k);
-    expect(() => useEncryptedAuthState(db, key)).toThrow(SessionDecryptError);
+    await expect(useEncryptedAuthState(db, key)).rejects.toThrow(SessionDecryptError);
   });
 
   it('leaves the database unchanged when opened with the wrong key', async () => {
     const db = openSessionDb(':memory:');
-    await useEncryptedAuthState(db, key).saveCreds();
+    await (await useEncryptedAuthState(db, key)).saveCreds();
     const count = () => (db.raw.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n;
     const before = count();
-    expect(() => useEncryptedAuthState(db, randomBytes(32))).toThrow(SessionDecryptError);
+    await expect(useEncryptedAuthState(db, randomBytes(32))).rejects.toThrow(SessionDecryptError);
     expect(count()).toBe(before);
   });
 
-  it('does not relabel SQLite errors as decrypt errors', () => {
+  it('does not relabel SQLite errors as decrypt errors', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'wa-sess-'));
     try {
       const db = openSessionDb(join(dir, 'session.db'));
       db.raw.close();
       let thrown: unknown;
       try {
-        useEncryptedAuthState(db, key);
+        await useEncryptedAuthState(db, key);
       } catch (err) {
         thrown = err;
       }
@@ -186,7 +186,7 @@ describe("readFounderNumber (link-sender's read of the founder's session)", () =
       expect(readFounderNumber(file, key)).toBeUndefined(); // no file: nothing is created
       expect(files(dir)).toEqual([]);
       const db = openSessionDb(file);
-      const a = useEncryptedAuthState(db, key);
+      const a = await useEncryptedAuthState(db, key);
       expect(readFounderNumber(file, key)).toBeUndefined(); // not linked yet
       a.state.creds.me = { id: '919811112222:7@s.whatsapp.net', name: 'Founder' };
       await a.saveCreds();

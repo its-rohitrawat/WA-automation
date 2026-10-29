@@ -192,7 +192,7 @@ export async function linkCommand(opts: { reset: boolean }, deps: CliDeps): Prom
     if (opts.reset) {
       let hasSession: boolean;
       try {
-        hasSession = useEncryptedAuthState(sessionDb, key).hasSession;
+        hasSession = (await useEncryptedAuthState(sessionDb, key)).hasSession;
       } catch (e) {
         if (!(e instanceof SessionDecryptError)) throw e;
         hasSession = true; // a stored session this key cannot read: exactly what a reset is for
@@ -215,12 +215,12 @@ export async function linkCommand(opts: { reset: boolean }, deps: CliDeps): Prom
           return;
         }
         // Only the agent's own WhatsApp session rows (session.db) are deleted. tracker.db keeps its data.
-        resetSession(sessionDb);
+        await resetSession(sessionDb);
         setKv(db, 'session_reset_at', new Date().toISOString());
         out('Reset: the saved WhatsApp session was deleted. Your tasks, messages and tracker data were NOT touched.');
       }
     }
-    const auth = useEncryptedAuthState(sessionDb, key);
+    const auth = await useEncryptedAuthState(sessionDb, key);
     if (auth.hasSession) {
       out('WhatsApp is already linked. Use --reset only after WhatsApp has unlinked this device.');
       return;
@@ -263,7 +263,7 @@ export async function listGroupsCommand(deps: CliDeps): Promise<void> {
     db = openDb(trackerDbPath(env.DATA_DIR));
     sessionDb = openSessionDb(sessionDbPath(env.DATA_DIR));
     syncClients(db, configs);
-    const auth = useEncryptedAuthState(sessionDb, key);
+    const auth = await useEncryptedAuthState(sessionDb, key);
     if (!auth.hasSession) {
       out('WhatsApp is not linked yet. Run: npm run cli -- link');
       return;
@@ -383,7 +383,7 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
   try {
     const key = deps.keyProvider.getKey();
     const file = senderSessionDbPath(env.DATA_DIR);
-    const opened = openSenderSession(file, key);
+    const opened = await openSenderSession(file, key);
     let auth: EncryptedAuth | undefined;
     if (opened.ok) {
       senderDb = opened.db;
@@ -408,7 +408,7 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
         const movedTo = moveDamagedSession(file, new Date());
         out(`Moved aside: the damaged data/sender-session.db is now ${movedTo} (not deleted). The founder's link and the tracker were NOT touched.`);
         senderDb = openSessionDb(file);
-        auth = useSenderAuthState(senderDb, key);
+        auth = await useSenderAuthState(senderDb, key);
       } else {
         // A linked session, or one written with another master key: exactly what a reset is for.
         const yes = await confirmChange(
@@ -417,9 +417,9 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
         );
         if (!yes) return;
         senderDb ??= openSessionDb(file);
-        resetSession(senderDb); // the spare number's session rows only
+        await resetSession(senderDb); // the spare number's session rows only
         out("Reset: the saved spare-number session was deleted. The founder's link and the tracker were NOT touched.");
-        auth = useSenderAuthState(senderDb, key);
+        auth = await useSenderAuthState(senderDb, key);
       }
     }
     if (!auth) throw new Error(SENDER_DAMAGED); // unreachable: every path without a session returned or threw above
@@ -445,7 +445,7 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
     const linked = linkedNumber(auth);
     const founder = readFounderNumber(sessionDbPath(env.DATA_DIR), key);
     if (linked !== undefined && ((env.REPORT_RECIPIENT && linked === env.REPORT_RECIPIENT) || linked === founder)) {
-      resetSession(senderDb!); // the spare number's session rows only: this link is never used
+      await resetSession(senderDb!); // the spare number's session rows only: this link is never used
       throw new Error(
         `That QR code was scanned with the founder's phone. On the founder's phone remove the device named "${SENDER_DEVICE_NAME}" (keep "${TRACKER_DEVICE_NAME}", which the tracker uses), then run link-sender again and scan with the SPARE phone.`,
       );

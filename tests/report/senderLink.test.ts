@@ -68,7 +68,7 @@ function fakeScheduler(idle?: Promise<void>) {
 
 /** A spare session already linked to OLD_SPARE, on disk. */
 async function linkedBefore(): Promise<void> {
-  const opened = openSenderSession(file(), key);
+  const opened = await openSenderSession(file(), key);
   if (!opened.ok) throw new Error('could not create the session');
   opened.auth.state.creds.me = { id: `${OLD_SPARE}:3@s.whatsapp.net`, name: 'Old spare' };
   await opened.auth.saveCreds();
@@ -76,8 +76,8 @@ async function linkedBefore(): Promise<void> {
 }
 
 /** The number the spare session on disk is linked to now. */
-function linkedOnDisk(): string | undefined {
-  const opened = openSenderSession(file(), key);
+async function linkedOnDisk(): Promise<string | undefined> {
+  const opened = await openSenderSession(file(), key);
   if (!opened.ok) return `unreadable:${opened.code}`;
   const n = linkedNumber(opened.auth);
   opened.db.raw.close();
@@ -109,7 +109,7 @@ describe('spare phone link', () => {
     const link = t.s.start({ target: 'spare', actor: 'owner@studio.in' });
     await t.s.settled(link.id);
     expect(t.s.info(link.id)).toMatchObject({ state: 'linked', device: SENDER_DEVICE_NAME });
-    expect(linkedOnDisk()).toBe(NEW_SPARE);
+    expect(await linkedOnDisk()).toBe(NEW_SPARE);
     expect(t.audits).toEqual(['Spare phone linked']);
     for (const s of t.sockets) expect(s.sendMessage).not.toHaveBeenCalled();
     expect(t.lines.join('\n')).not.toContain('QR-SPARE-SECRET');
@@ -117,7 +117,7 @@ describe('spare phone link', () => {
 
   it("with a running report: its sender steps aside while linking, then gets the new one, on the report's own database", async () => {
     await linkedBefore();
-    const opened = openSenderSession(file(), key);
+    const opened = await openSenderSession(file(), key);
     if (!opened.ok) throw new Error('open failed');
     const f = fakeScheduler();
     const made = new FakeReportSender();
@@ -138,12 +138,12 @@ describe('spare phone link', () => {
     expect(f.replaced[1]).toBe(made);
     expect(opened.db.raw.open).toBe(true); // the report's database stays open for it
     opened.db.raw.close();
-    expect(linkedOnDisk()).toBe(NEW_SPARE);
+    expect(await linkedOnDisk()).toBe(NEW_SPARE);
   });
 
   it('waits for a report send in flight before touching the shared session', async () => {
     await linkedBefore();
-    const opened = openSenderSession(file(), key);
+    const opened = await openSenderSession(file(), key);
     if (!opened.ok) throw new Error('open failed');
     let idle!: () => void;
     const f = fakeScheduler(new Promise<void>((r) => (idle = r)));
@@ -160,7 +160,7 @@ describe('spare phone link', () => {
 
   it("a refused link gives the report back a sender on the restored session, never on the founder's", async () => {
     await linkedBefore();
-    const opened = openSenderSession(file(), key);
+    const opened = await openSenderSession(file(), key);
     if (!opened.ok) throw new Error('open failed');
     const f = fakeScheduler();
     const madeFor: (string | undefined)[] = [];
@@ -177,7 +177,7 @@ describe('spare phone link', () => {
     expect(t.s.info(link.id)!.errorCode).toBe('founder_number');
     expect(madeFor).toEqual([OLD_SPARE]);
     opened.db.raw.close();
-    expect(linkedOnDisk()).toBe(OLD_SPARE);
+    expect(await linkedOnDisk()).toBe(OLD_SPARE);
   });
 
   it('a database the driver opened is handed over when a scheduler takes the new sender (no stand-in: it shared nothing)', async () => {
@@ -208,11 +208,11 @@ describe('spare phone link', () => {
     const link = t.s.start({ target: 'spare', actor: 'a@b.in' });
     await t.s.settled(link.id);
     expect(t.s.info(link.id)!.state).toBe('linked');
-    expect(linkedOnDisk()).toBe(NEW_SPARE);
+    expect(await linkedOnDisk()).toBe(NEW_SPARE);
   });
 
   it('a session written with another key is reset, not moved aside', async () => {
-    const other = openSenderSession(file(), randomBytes(32));
+    const other = await openSenderSession(file(), randomBytes(32));
     if (!other.ok) throw new Error('open failed');
     await other.auth.saveCreds();
     other.db.raw.close();
@@ -221,7 +221,7 @@ describe('spare phone link', () => {
     await t.s.settled(link.id);
     expect(t.s.info(link.id)!.state).toBe('linked');
     expect(readdirSync(dir).some((f) => f.includes('.damaged-'))).toBe(false);
-    expect(linkedOnDisk()).toBe(NEW_SPARE);
+    expect(await linkedOnDisk()).toBe(NEW_SPARE);
   });
 
   it('a session file that cannot be opened is left alone', async () => {
@@ -267,7 +267,7 @@ describe('spare phone link', () => {
     const link = t.s.start({ target: 'spare', actor: 'a@b.in' });
     await t.s.settled(link.id);
     expect(t.s.info(link.id)).toMatchObject({ state: 'failed', errorCode: 'founder_number' });
-    expect(linkedOnDisk()).toBe(OLD_SPARE);
+    expect(await linkedOnDisk()).toBe(OLD_SPARE);
     expect(t.audits).toEqual(['Spare phone link failed (founder_number)']);
     expect(SPARE_LINK_MESSAGES.founder_number).toMatch(/scanned with the founder's phone/);
   });
@@ -286,7 +286,7 @@ describe('spare phone link', () => {
     await t.s.settled(link.id);
     expect(t.s.info(link.id)!.state).toBe('linked');
     expect(readdirSync(dir).some((f) => f.startsWith('sender-session.db.damaged-'))).toBe(true);
-    expect(linkedOnDisk()).toBe(NEW_SPARE);
+    expect(await linkedOnDisk()).toBe(NEW_SPARE);
   });
 
   it('the timeout restores the previous spare session', async () => {
@@ -295,7 +295,7 @@ describe('spare phone link', () => {
     const link = t.s.start({ target: 'spare', actor: 'a@b.in' });
     await t.s.settled(link.id);
     expect(t.s.info(link.id)).toMatchObject({ state: 'timed_out' });
-    expect(linkedOnDisk()).toBe(OLD_SPARE);
+    expect(await linkedOnDisk()).toBe(OLD_SPARE);
     expect(t.sockets[0]!.end).toHaveBeenCalled();
     expect(t.audits).toEqual(['Spare phone link timed out']);
   });
@@ -308,7 +308,7 @@ describe('spare phone link', () => {
     t.s.cancel(link.id);
     await t.s.settled(link.id);
     expect(t.s.info(link.id)).toMatchObject({ state: 'cancelled' });
-    expect(linkedOnDisk()).toBe(OLD_SPARE);
+    expect(await linkedOnDisk()).toBe(OLD_SPARE);
   });
 
   it('WhatsApp refusing the link restores the previous session and gives its code', async () => {
@@ -317,7 +317,7 @@ describe('spare phone link', () => {
     const link = t.s.start({ target: 'spare', actor: 'a@b.in' });
     await t.s.settled(link.id);
     expect(t.s.info(link.id)).toMatchObject({ state: 'failed', errorCode: 'forbidden' });
-    expect(linkedOnDisk()).toBe(OLD_SPARE);
+    expect(await linkedOnDisk()).toBe(OLD_SPARE);
     expect(SPARE_LINK_MESSAGES.forbidden).toBeTruthy();
   });
 
@@ -338,6 +338,6 @@ describe('spare phone link', () => {
     const t = sessions(scan(NEW_SPARE));
     const link = t.s.start({ target: 'spare', actor: 'a@b.in' });
     await t.s.settled(link.id);
-    expect(linkedOnDisk()).toBe(NEW_SPARE);
+    expect(await linkedOnDisk()).toBe(NEW_SPARE);
   });
 });

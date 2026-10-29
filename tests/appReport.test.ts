@@ -33,7 +33,7 @@ async function setup(report?: AppReportDeps, dbIn?: Db, o: { log?: Logger; freeB
   const db = dbIn ?? (await seededDb());
   if (o.trackerId !== null) setKv(db, TRACKER_ID_KEY, TRACKER_ID); // null: the tracker was never uploaded
   const sockets: FakeSocket[] = [];
-  const auth = useEncryptedAuthState(openSessionDb(':memory:'), randomBytes(32));
+  const auth = await useEncryptedAuthState(openSessionDb(':memory:'), randomBytes(32));
   const allow = new AllowList([SHARMA.groupId, MEHTA.groupId]);
   const gateway = new WhatsAppGateway({
     allow,
@@ -193,7 +193,7 @@ describe('app and the morning report', () => {
       queueMicrotask(() => s.emit('connection.update', { connection: 'open' }));
       return s;
     };
-    const auth = { ...useSenderAuthState(openSessionDb(':memory:'), randomBytes(32)), hasSession: true };
+    const auth = { ...(await useSenderAuthState(openSessionDb(':memory:'), randomBytes(32))), hasSession: true };
     const sender = new SenderGateway({ recipient: '919800000000', factory, auth }); // production timeouts and linger
     const { db, app } = await setup({ sender, settings: ON });
     for (let i = 0; i < 30 && (sockets[0]?.sendMessage.mock.calls.length ?? 0) < 1; i++) await vi.advanceTimersByTimeAsync(1_000);
@@ -221,7 +221,7 @@ describe('app and the morning report', () => {
       queueMicrotask(() => s.emit('connection.update', { connection: 'open' }));
       return s;
     };
-    const auth = { ...useSenderAuthState(openSessionDb(':memory:'), randomBytes(32)), hasSession: true };
+    const auth = { ...(await useSenderAuthState(openSessionDb(':memory:'), randomBytes(32))), hasSession: true };
     const sender = new SenderGateway({ recipient: '919800000000', factory, auth }); // production timeouts and linger
     const { db, app } = await setup({ sender, settings: ON });
     for (let i = 0; i < 30 && (sockets[0]?.sendMessage.mock.calls.length ?? 0) < 1; i++) await vi.advanceTimersByTimeAsync(1_000);

@@ -22,15 +22,15 @@ export interface MorningReportStart {
  * founderNumber: the number the founder-number reader is linked to (main.ts reads it from session.db). A spare-number
  * link to it, or to REPORT_RECIPIENT, never sends ('self_send').
  */
-export function openMorningReport(o: {
+export async function openMorningReport(o: {
   env: Env;
   masterKey: Buffer;
   log: Logger;
   factory: SenderSocketFactory;
   founderNumber?: string | (() => string | undefined);
-}): MorningReportStart {
+}): Promise<MorningReportStart> {
   const recipient = reportRecipient(o.env);
-  const opened = openSenderSession(senderSessionDbPath(o.env.DATA_DIR), o.masterKey);
+  const opened = await openSenderSession(senderSessionDbPath(o.env.DATA_DIR), o.masterKey);
   let authProblem: 'unreadable' | 'unavailable' | undefined;
   if (!opened.ok) {
     authProblem = opened.transient ? 'unavailable' : 'unreadable';
@@ -42,7 +42,7 @@ export function openMorningReport(o: {
   try {
     sender = new SenderGateway({ recipient, founderNumber: o.founderNumber, factory: o.factory, auth, authProblem });
   } catch (err) {
-    if (opened.ok) opened.db.raw.close(); // the caller never receives the handle
+    if (opened.ok) await opened.db.close(); // the caller never receives the handle
     throw err;
   }
   // recipientLast4, not recipient: the logger censors any field named recipient.
@@ -62,9 +62,9 @@ export function senderOpener(o: {
   log: Logger;
   factory: SenderSocketFactory;
   founderNumber?: string | (() => string | undefined);
-}): (recipient: string) => { sender: ReportSender; close: () => void; db: Db | undefined } {
-  return (recipient) => {
-    const r = openMorningReport({ ...o, env: { ...o.env, REPORT_ENABLED: true, REPORT_RECIPIENT: recipient } });
-    return { sender: r.report.sender, close: () => r.senderDb?.raw.close(), db: r.senderDb };
+}): (recipient: string) => Promise<{ sender: ReportSender; close: () => Promise<void>; db: Db | undefined }> {
+  return async (recipient) => {
+    const r = await openMorningReport({ ...o, env: { ...o.env, REPORT_ENABLED: true, REPORT_RECIPIENT: recipient } });
+    return { sender: r.report.sender, close: async () => await r.senderDb?.close(), db: r.senderDb };
   };
 }

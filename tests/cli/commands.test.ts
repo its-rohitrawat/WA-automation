@@ -58,7 +58,7 @@ function seedTracker(): void {
 
 async function seedSession(): Promise<void> {
   const sdb = openSessionDb(sessionDbPath(dataDir));
-  const auth = useEncryptedAuthState(sdb, KEY);
+  const auth = await useEncryptedAuthState(sdb, KEY);
   auth.state.creds.me = { id: '919800000000:1@s.whatsapp.net', name: 'Founder' };
   await auth.saveCreds();
   sdb.raw.close();

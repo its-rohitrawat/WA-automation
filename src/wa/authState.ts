@@ -6,7 +6,7 @@ import { BufferJSON, initAuthCreds, proto } from 'baileys';
 import type { AuthenticationCreds, AuthenticationState, SignalDataSet, SignalDataTypeMap } from 'baileys';
 import { decrypt, encrypt } from '../crypto/envelope.ts';
 import { deriveSubkey } from '../crypto/keyProvider.ts';
-import type { Db } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
 import { SqliteDb } from '../store/engine/sqlite.ts';
 
 export class SessionDecryptError extends Error {
@@ -44,7 +44,12 @@ export function openSessionDb(file: string): Db {
     raw.exec('CREATE TABLE IF NOT EXISTS auth (k TEXT PRIMARY KEY, v BLOB NOT NULL)');
     // A copy of the rows while a dashboard link runs (src/wa/linkSession.ts); empty otherwise.
     raw.exec('CREATE TABLE IF NOT EXISTS auth_backup (k TEXT PRIMARY KEY, v BLOB NOT NULL)');
-    restoreBackup(db); // a link that never finished: the session from before it comes back
+    // A link that never finished: the session from before it comes back. On the file's own handle, like the pragmas
+    // above, before the Db is handed out, so opening stays synchronous.
+    raw.transaction(() => {
+      if (!raw.prepare(HAS_BACKUP).get(BACKUP_MARKER)) return;
+      for (const sql of RESTORE) raw.prepare(sql).run(...(sql.includes('?') ? [BACKUP_MARKER] : []));
+    })();
   } catch (err) {
     raw.close();
     throw err;
@@ -60,47 +65,48 @@ export function openSessionDb(file: string): Db {
 
 /** Marks a backup as present even when the session it copied was empty. Row names are hex hashes, so it cannot collide. */
 const BACKUP_MARKER = '#link-in-progress';
+const HAS_BACKUP = 'SELECT 1 FROM auth_backup WHERE k = ?';
+/** The backed-up rows replace auth, and the backup is dropped (the one `?` is the marker). */
+const RESTORE = ['DELETE FROM auth', 'INSERT INTO auth (k, v) SELECT k, v FROM auth_backup WHERE k <> ?', 'DELETE FROM auth_backup'];
 
 /** In one transaction: copies every row to auth_backup, then empties auth (the reset for a new link). */
-export function backupAndReset(db: Db): void {
-  db.raw.transaction(() => {
-    db.raw.prepare('DELETE FROM auth_backup').run();
-    db.raw.prepare('INSERT INTO auth_backup (k, v) SELECT k, v FROM auth').run();
-    db.raw.prepare('INSERT INTO auth_backup (k, v) VALUES (?, ?)').run(BACKUP_MARKER, Buffer.alloc(0));
-    db.raw.prepare('DELETE FROM auth').run();
-  })();
+export async function backupAndReset(db: Db): Promise<void> {
+  await db.tx(async (q) => {
+    await q.run('DELETE FROM auth_backup');
+    await q.run('INSERT INTO auth_backup (k, v) SELECT k, v FROM auth');
+    await q.run('INSERT INTO auth_backup (k, v) VALUES (?, ?)', [BACKUP_MARKER, Buffer.alloc(0)]);
+    await q.run('DELETE FROM auth');
+  });
 }
 
 /** In one transaction: the backed-up rows replace auth, and the backup is dropped. False when there was no backup. */
-export function restoreBackup(db: Db): boolean {
-  return db.raw.transaction(() => {
-    if (!db.raw.prepare('SELECT 1 FROM auth_backup WHERE k = ?').get(BACKUP_MARKER)) return false;
-    db.raw.prepare('DELETE FROM auth').run();
-    db.raw.prepare('INSERT INTO auth (k, v) SELECT k, v FROM auth_backup WHERE k <> ?').run(BACKUP_MARKER);
-    db.raw.prepare('DELETE FROM auth_backup').run();
+export async function restoreBackup(db: Db): Promise<boolean> {
+  return db.tx(async (q) => {
+    if (!(await q.get(HAS_BACKUP, [BACKUP_MARKER]))) return false;
+    for (const sql of RESTORE) await q.run(sql, sql.includes('?') ? [BACKUP_MARKER] : []);
     return true;
-  })();
+  });
 }
 
 /** The new link is kept: the backup is no longer needed. */
-export function dropBackup(db: Db): void {
-  db.raw.prepare('DELETE FROM auth_backup').run();
+export async function dropBackup(db: Db): Promise<void> {
+  await db.run('DELETE FROM auth_backup');
 }
 
 /** A link that never finished left its backup: the session rows from before it come back. True when it restored them. */
-export function recoverInterruptedLink(db: Db): boolean {
-  return restoreBackup(db);
+export async function recoverInterruptedLink(db: Db): Promise<boolean> {
+  return await restoreBackup(db);
 }
 
 /**
  * Discards the stored session (the agent's own key material) so a new QR scan can start fresh. A backup left by a
  * dashboard link that never finished goes too: otherwise the next start would restore it over this new link.
  */
-export function resetSession(db: Db): void {
-  db.raw.transaction(() => {
-    db.raw.prepare('DELETE FROM auth').run();
-    db.raw.prepare('DELETE FROM auth_backup').run();
-  })();
+export async function resetSession(db: Db): Promise<void> {
+  await db.tx(async (q) => {
+    await q.run('DELETE FROM auth');
+    await q.run('DELETE FROM auth_backup');
+  });
 }
 
 export interface EncryptedAuth {
@@ -123,55 +129,52 @@ function sessionCodec(key: Buffer) {
 }
 
 /** Writes the canary row when the table is empty. */
-export function useEncryptedAuthState(db: Db, key: Buffer): EncryptedAuth {
-  const getStmt = db.raw.prepare('SELECT v FROM auth WHERE k = ?');
-  const putStmt = db.raw.prepare('INSERT INTO auth (k, v) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v');
-  const getCount = db.raw.prepare('SELECT COUNT(*) AS n FROM auth');
-  const delStmt = db.raw.prepare('DELETE FROM auth WHERE k = ?');
-
+export async function useEncryptedAuthState(db: Db, key: Buffer): Promise<EncryptedAuth> {
   const { valueKey, rowId, open } = sessionCodec(key);
-  const read = (name: string): unknown => {
+  const blob = async (id: string): Promise<Buffer | undefined> => (await db.get<{ v: Buffer }>('SELECT v FROM auth WHERE k = ?', [id]))?.v;
+  const read = async (name: string): Promise<unknown> => {
     const id = rowId(name);
-    const row = getStmt.get(id) as { v: Buffer } | undefined;
-    if (!row) return null;
-    return open(id, row.v);
+    const v = await blob(id);
+    if (!v) return null;
+    return open(id, v);
   };
   // Like read, but only decrypt/parse failures become SessionDecryptError; SQLite errors pass through.
-  const readChecked = (name: string): unknown => {
+  const readChecked = async (name: string): Promise<unknown> => {
     const id = rowId(name);
-    const row = getStmt.get(id) as { v: Buffer } | undefined;
-    if (!row) return null;
+    const v = await blob(id);
+    if (!v) return null;
     try {
-      return open(id, row.v);
+      return open(id, v);
     } catch (cause) {
       throw new SessionDecryptError({ cause });
     }
   };
-  const write = (name: string, value: unknown): void => {
+  const write = async (q: Sql, name: string, value: unknown): Promise<void> => {
     const id = rowId(name);
-    putStmt.run(id, encrypt(valueKey, Buffer.from(JSON.stringify(value, BufferJSON.replacer), 'utf8'), Buffer.from(id)));
+    const sealed = encrypt(valueKey, Buffer.from(JSON.stringify(value, BufferJSON.replacer), 'utf8'), Buffer.from(id));
+    await q.run('INSERT INTO auth (k, v) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v', [id, sealed]);
   };
-  const remove = (name: string): void => {
-    delStmt.run(rowId(name));
+  const remove = async (q: Sql, name: string): Promise<void> => {
+    await q.run('DELETE FROM auth WHERE k = ?', [rowId(name)]);
   };
 
   // Row names are keyed hashes, so a wrong master key finds no rows rather than failing to decrypt.
   // A canary row tells "empty database" apart from "database written with another key".
-  const hasRows = (getCount.get() as { n: number }).n > 0;
-  if (readChecked('canary') === null) {
+  const hasRows = (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM auth'))!.n > 0;
+  if ((await readChecked('canary')) === null) {
     if (hasRows) throw new SessionDecryptError();
-    write('canary', 'ok');
+    await write(db, 'canary', 'ok');
   }
-  const loaded = readChecked('creds') as AuthenticationCreds | null;
+  const loaded = (await readChecked('creds')) as AuthenticationCreds | null;
   const creds = loaded ?? initAuthCreds();
 
   return {
     hasSession: Boolean(creds.me?.id),
     saveCreds: async () => {
-      db.raw.transaction(() => {
-        write('canary', 'ok');
-        write('creds', creds);
-      })();
+      await db.tx(async (q) => {
+        await write(q, 'canary', 'ok');
+        await write(q, 'creds', creds);
+      });
     },
     state: {
       creds,
@@ -179,23 +182,23 @@ export function useEncryptedAuthState(db: Db, key: Buffer): EncryptedAuth {
         get: async <T extends keyof SignalDataTypeMap>(type: T, ids: string[]) => {
           const out: { [id: string]: SignalDataTypeMap[T] } = {};
           for (const id of ids) {
-            let value = read(`${type}:${id}`);
+            let value = await read(`${type}:${id}`);
             if (type === 'app-state-sync-key' && value) value = proto.Message.AppStateSyncKeyData.fromObject(value as object);
             if (value !== null) out[id] = value as SignalDataTypeMap[T];
           }
           return out;
         },
         set: async (data: SignalDataSet) => {
-          db.raw.transaction(() => {
+          await db.tx(async (q) => {
             for (const category of Object.keys(data) as (keyof SignalDataSet)[]) {
               for (const [id, value] of Object.entries(data[category] ?? {})) {
                 const name = `${category}:${id}`;
                 // A null value means the protocol rotated this key out.
-                if (value) write(name, value);
-                else remove(name);
+                if (value) await write(q, name, value);
+                else await remove(q, name);
               }
             }
-          })();
+          });
         },
       },
     },
@@ -206,9 +209,9 @@ export function useEncryptedAuthState(db: Db, key: Buffer): EncryptedAuth {
  * The spare number's session: the same encrypted store, keyed by its own HKDF subkey of the master key, in its own file
  * (data/sender-session.db). The founder's session key cannot open it, and this key cannot open the founder's session.
  */
-export function useSenderAuthState(db: Db, masterKey: Buffer): EncryptedAuth {
+export async function useSenderAuthState(db: Db, masterKey: Buffer): Promise<EncryptedAuth> {
   try {
-    return useEncryptedAuthState(db, deriveSubkey(masterKey, SENDER_SESSION_INFO));
+    return await useEncryptedAuthState(db, deriveSubkey(masterKey, SENDER_SESSION_INFO));
   } catch (cause) {
     if (cause instanceof SessionDecryptError) throw new SenderSessionDecryptError({ cause });
     throw cause;
@@ -314,21 +317,51 @@ function probeDamage(file: string): string | undefined {
 }
 
 /**
+ * Whether this spare-number session file holds a link, read synchronously for the Automations switch until the settings
+ * view that reads it is async (S1.5). The same answer as openSenderSession and then hasSession, without writing the
+ * canary row into an empty file; any failure is false. Goes in S1.5.
+ */
+export function senderSessionLinkedSync(file: string, masterKey: Buffer): boolean {
+  if (probeDamage(file)) return false;
+  let db: Db | undefined;
+  try {
+    db = openSessionDb(file);
+    const { rowId, open } = sessionCodec(deriveSubkey(masterKey, SENDER_SESSION_INFO));
+    const value = (name: string): unknown => {
+      const id = rowId(name);
+      const row = db!.raw.prepare('SELECT v FROM auth WHERE k = ?').get(id) as { v: Buffer } | undefined;
+      return row ? open(id, row.v) : null;
+    };
+    // No canary: an empty file (no link) or rows sealed with another key.
+    if (value('canary') === null) return false;
+    return Boolean((value('creds') as AuthenticationCreds | null)?.me?.id);
+  } catch {
+    return false;
+  } finally {
+    try {
+      db?.raw.close();
+    } catch {
+      // best effort
+    }
+  }
+}
+
+/**
  * Opens the spare number's session at service start. A file that is damaged, not a database, or written with another
  * master key is reported, not thrown, and left as it is: a bad spare-number session never stops the service (only
  * link-sender --reset replaces it). Any other SQLite error (a lock, a read-only file, a disk error) is reported as
  * transient. Any other error is thrown.
  */
-export function openSenderSession(file: string, masterKey: Buffer): SenderSession {
+export async function openSenderSession(file: string, masterKey: Buffer): Promise<SenderSession> {
   const damage = probeDamage(file);
   if (damage) return { ok: false, code: damage };
   let db: Db | undefined;
   try {
     db = openSessionDb(file);
-    return { ok: true, db, auth: useSenderAuthState(db, masterKey) };
+    return { ok: true, db, auth: await useSenderAuthState(db, masterKey) };
   } catch (err) {
     try {
-      db?.raw.close();
+      await db?.close();
     } catch {
       // best effort
     }

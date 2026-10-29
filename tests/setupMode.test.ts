@@ -229,15 +229,15 @@ describe('openSessionDb recovers a link that never finished', () => {
     const file = join(dir, 'session.db');
     const key = randomBytes(32);
     const first = openSessionDb(file);
-    const auth = useEncryptedAuthState(first, key);
+    const auth = await useEncryptedAuthState(first, key);
     auth.state.creds.me = { id: '919800000001:3@s.whatsapp.net', name: 'Founder' };
     await auth.saveCreds();
     const before = first.raw.prepare('SELECT k, v FROM auth ORDER BY k').all();
-    backupAndReset(first);
+    await backupAndReset(first);
     first.raw.close(); // the process stops mid-link
     const again = openSessionDb(file);
     expect(again.raw.prepare('SELECT k, v FROM auth ORDER BY k').all()).toEqual(before);
-    expect(useEncryptedAuthState(again, key).hasSession).toBe(true);
+    expect((await useEncryptedAuthState(again, key)).hasSession).toBe(true);
     again.raw.close();
   });
 });
