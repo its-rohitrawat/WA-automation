@@ -26,7 +26,69 @@ Each entry gives: the file, its owner, where, and the change. Nothing here is ap
   import { ensureFounderTenant } from './platform/store.ts';
   // …
   await ensurePlatformSchema(db);
-  await ensureFounderTenant(db, { name: env.PLATFORM_FOUNDER_NAME ?? 'Your business', at: systemClock.now().toISOString() });
+  // PLATFORM_FOUNDER_NAME would be a new optional .env setting (src/config/env.ts); until then the literal.
+  await ensureFounderTenant(db, { name: 'Your business', at: systemClock.now().toISOString() });
   ```
 
   Until this is applied, nothing in the running agent reads or writes the platform tables.
+
+## 2. The invite API and the Invite screen (piece b)
+
+### 2.1 `src/web/mountRoutes.ts` (lane A): register the platform routes
+
+- Imports, with the other route imports:
+
+  ```ts
+  import { mountPlatformRoutes, type PlatformRouteDeps } from './routes/platform.ts';
+  ```
+
+- `AgentRoutesDeps`, after `links: LinkSessions;`:
+
+  ```ts
+  /** The platform screens (SaaS S5): invites, later customers. Absent: no platform routes. */
+  platform?: Omit<PlatformRouteDeps, 'isFounder'>;
+  ```
+
+- In `mountAgentRoutes`, after the `read`/`change` registrars are defined (next to the clients routes,
+  `read('/dashboard/api/clients', …)`):
+
+  ```ts
+  // The platform owner is a dashboard owner (DASHBOARD_OWNER_EMAILS) until customer sessions exist.
+  if (d.platform) mountPlatformRoutes({ read, change }, { ...d.platform, isFounder: (o) => owners.has(o.actor.trim().toLowerCase()) });
+  ```
+
+### 2.2 `src/main.ts` (lane A): the platform deps
+
+In the `mount: (m) => mountAgentRoutes(m, { … })` object, next to `clients:`:
+
+```ts
+platform: {
+  db: trackerStore, clock: systemClock, log,
+  publicUrl: env.DASHBOARD_PUBLIC_URL ?? `http://localhost:${env.DASHBOARD_PORT}`,
+  founderName: 'Rohit', // or a new optional .env setting, PLATFORM_FOUNDER_NAME (src/config/env.ts)
+  mailer: null, // piece c: the founder's Gmail sender, once gmail.send is granted (section 3)
+},
+```
+
+### 2.3 `src/web/public/app.js` (lane A): the platform screens
+
+After line 16, `import './views/screens.js';`:
+
+```js
+import './views/platform.js';
+```
+
+### 2.4 `src/web/public/router.js` (lane A): the nav entries
+
+In `NAV`, the `System` group (line 10), at its start:
+
+```js
+['System', [['customers', 'Customers', 'store'], ['invite', 'Invite a customer', 'mail'], ['connections', 'Connections', 'plug'], …
+```
+
+(The preview and smoke test apply exactly 2.3 and 2.4 to the copies they serve: `scripts/platformFake.ts`, `patchedShell`.)
+
+### 2.5 `src/web/oidc.ts` (lane A): the screens a sign-in may return to
+
+In `DASHBOARD_SCREENS`, add `'customers'` and `'invite'` (and `'onboarding'`, piece e), so a founder signed out on one of
+these screens comes back to it after signing in.
