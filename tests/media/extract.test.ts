@@ -303,7 +303,7 @@ describe('createExtractor', () => {
   describe('a file deleted for everyone before the paid call', () => {
     it('an image is decoded but not described, and nothing is reserved or booked', async () => {
       const { db, ai, prepareImage, extract, input, reserve } = await setup();
-      const revoked = vi.fn(() => true);
+      const revoked = vi.fn(async () => true);
       expect(await extract(input({ revoked }))).toEqual({ ...NONE, note: 'revoked' });
       expect(prepareImage).toHaveBeenCalledTimes(1);
       expect(revoked).toHaveBeenCalledTimes(1);
@@ -314,7 +314,7 @@ describe('createExtractor', () => {
 
     it('a scanned PDF is not read', async () => {
       const { db, ai, extract, input, reserve } = await setup({ parse: { text: '', pageCount: 3 } });
-      expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF, revoked: () => true }))).toEqual({ ...NONE, note: 'revoked' });
+      expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF, revoked: async () => true }))).toEqual({ ...NONE, note: 'revoked' });
       expect(reserve).not.toHaveBeenCalled();
       expect(ai.calls).toHaveLength(0);
       expect(spendRows(db)).toEqual([]);
@@ -322,7 +322,7 @@ describe('createExtractor', () => {
 
     it('a file still wanted is read as usual, and a free read never asks', async () => {
       const { ai, extract, input } = await setup({ parse: { text: 'Quotation 17\nTotal 1,20,000 for the full website build', pageCount: 2 } });
-      const revoked = vi.fn(() => false);
+      const revoked = vi.fn(async () => false);
       expect((await extract(input({ revoked }))).textKind).toBe('description');
       expect(revoked).toHaveBeenCalledTimes(1);
       expect((await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF, revoked }))).textKind).toBe('extract');
@@ -821,7 +821,7 @@ describe('voice and audio', () => {
     it('a note deleted for everyone before the run is revoked, not transcribed, and disposed', async () => {
       const v = new FakeLocalVoiceTranscriber();
       const { extract, input } = await voiceSetup(v);
-      const revoked = vi.fn(() => true);
+      const revoked = vi.fn(async () => true);
       expect(await extract(input(note({ revoked })))).toEqual({ ...NONE, note: 'revoked' });
       expect(revoked).toHaveBeenCalledTimes(1);
       expect(v.transcribed).toBe(0);
@@ -964,7 +964,7 @@ describe('voice and audio', () => {
   it('does not send a note deleted for everyone just before the call, and disposes it', async () => {
     const v = new FakeVoiceTranscriber();
     const { db, extract, input, reserve } = await voiceSetup(v);
-    const revoked = vi.fn(() => true);
+    const revoked = vi.fn(async () => true);
     expect(await extract(input(note({ revoked })))).toEqual({ ...NONE, note: 'revoked' });
     expect(v.prepared).toHaveLength(1);
     expect(revoked).toHaveBeenCalledTimes(1);

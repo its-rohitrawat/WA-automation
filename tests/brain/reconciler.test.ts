@@ -49,10 +49,12 @@ function estimateOf(ai: FakeAi): number {
 }
 
 /** Holds the fake AI call open until the returned function is called; run() has read its batch by then. */
-function hold(ai: FakeAi): () => void {
+/** Holds the next AI call until the returned function is called. started() resolves once that call is in flight. */
+function hold(ai: FakeAi): (() => void) & { started: () => Promise<void> } {
   let open!: () => void;
+  const before = ai.calls.length;
   ai.gate = new Promise<void>((resolve) => { open = resolve; });
-  return () => open();
+  return Object.assign(() => open(), { started: () => vi.waitFor(() => expect(ai.calls.length).toBeGreaterThan(before)) });
 }
 
 function processedAt(db: Db, waId: string): string | null {
@@ -273,6 +275,7 @@ describe('Reconciler', () => {
       store(db, 'm1', 'hello');
       const open = hold(ai);
       const run = r.run(1);
+      await open.started();
       expect(ai.calls).toHaveLength(1);
       // A scanned PDF read starts during the call. It fits next to this call's hold, but not next to the retry's.
       expect(spend.reserve(5 - estimateOf(ai) - OUTPUT_ESTIMATE / 2)).not.toBeNull();
@@ -413,7 +416,7 @@ describe('Reconciler', () => {
     it('rejects a close backed by a file read after the human reopened the task, when the message was sent before (12h, I2)', async () => {
       const { db, r } = await setup([{ ops: [close()] }]);
       reopenedWithOldDelivery(db);
-      readAt(db, fileOf(db), '2026-10-19T07:00:00.000Z');
+      await readAt(db, fileOf(db), '2026-10-19T07:00:00.000Z');
       expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: null })]);
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
       expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open' });
@@ -427,7 +430,7 @@ describe('Reconciler', () => {
       store(db, 'm1', 'Banner v3 attached', '2026-10-18T05:00:00.000Z');
       const id = fileOf(db);
       markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-18T06:00:00.000Z'); // the file was still being read
-      readAt(db, id, '2026-10-19T07:00:00.000Z');
+      await readAt(db, id, '2026-10-19T07:00:00.000Z');
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
       expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-18' });
     });
@@ -438,7 +441,7 @@ describe('Reconciler', () => {
       store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
       const id = fileOf(db);
       markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-12T06:00:00.000Z');
-      readAt(db, id, '2026-10-19T07:00:00.000Z');
+      await readAt(db, id, '2026-10-19T07:00:00.000Z');
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
       expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-12' });
     });
@@ -451,7 +454,7 @@ describe('Reconciler', () => {
       markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-15T06:00:00.000Z'); // m1's file was still being read
       createTask(db, { clientId: 1, side: 'us', title: 'Homepage banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-15',
         deadline: null, latestProgress: null, sourceQuote: null, sourceDate: '2026-10-15', sourceWaId: 'm2', origin: 'whatsapp' }, NOW); // raised by the later m2
-      readAt(db, id, '2026-10-19T07:00:00.000Z');
+      await readAt(db, id, '2026-10-19T07:00:00.000Z');
       expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: null })]);
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
       expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', raisedOn: '2026-10-15', closedOn: '2026-10-15' });
@@ -464,7 +467,7 @@ describe('Reconciler', () => {
       const id = fileOf(db);
       markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-12T06:00:00.000Z'); // the file was still being read
       logReminder(db, getTaskByCode(db, 'SHA-001')!.id, '2026-10-15', NOW); // a later chase, in text
-      readAt(db, id, '2026-10-19T07:00:00.000Z');
+      await readAt(db, id, '2026-10-19T07:00:00.000Z');
       expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: null })]);
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
       expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ reminderCount: 2, lastReminderOn: '2026-10-15' });
@@ -476,7 +479,7 @@ describe('Reconciler', () => {
       store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
       const id = fileOf(db);
       markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-12T06:00:00.000Z');
-      readAt(db, id, '2026-10-19T04:00:00.000Z');
+      await readAt(db, id, '2026-10-19T04:00:00.000Z');
       closeTask(db, 'SHA-001', new Date('2026-10-19T05:00:00Z'));
       reopenTask(db, 'SHA-001', new Date('2026-10-19T06:00:00Z'));
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
@@ -490,7 +493,7 @@ describe('Reconciler', () => {
     ])('a file re-check that also got a reaction counts from the reaction, never from the file read (file $fileRead, reaction $reacted) (12h, I2)', async ({ fileRead, reacted, accepted }) => {
       const { db, r } = await setup([{ ops: [close()] }]);
       reopenedWithOldDelivery(db); // reopened by a human at 06:00Z
-      readAt(db, fileOf(db), fileRead);
+      await readAt(db, fileOf(db), fileRead);
       upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '✅', ts: reacted });
       expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: 'reaction' })]);
       expect(await r.run(1)).toEqual({ status: 'ok', accepted, rejected: 1 - accepted });
@@ -503,7 +506,7 @@ describe('Reconciler', () => {
     ])('a file re-check that is also an edit re-check counts from the edit, closing on the processing date (file $fileRead, edit $edited) (12h, I2)', async ({ fileRead, edited, accepted }) => {
       const { db, r } = await setup([{ ops: [close()] }]);
       reopenedWithOldDelivery(db); // reopened by a human at 06:00Z
-      readAt(db, fileOf(db), fileRead);
+      await readAt(db, fileOf(db), fileRead);
       applyEdit(db, 1, 'm1', 'Banner v4 attached, final', edited);
       expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: 'edit' })]);
       expect(await r.run(1)).toEqual({ status: 'ok', accepted, rejected: 1 - accepted });
@@ -561,6 +564,7 @@ describe('Reconciler', () => {
       store(db, 'm1', 'Banner ka naam badlo');
       const open = hold(ai);
       const run = r.run(1);
+      await open.started();
       updateTaskFields(db, getTaskByCode(db, 'SHA-001')!.id, { title: 'Human title' }, LATER, 'human');
       open();
       expect(await run).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
@@ -572,6 +576,7 @@ describe('Reconciler', () => {
       store(db, 'm1', 'hello');
       const open = hold(ai);
       const run = r.run(1);
+      await open.started();
       setRole(db, 1, SHARMA_PN, 'client', 'human');
       open();
       expect(await run).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
@@ -586,6 +591,7 @@ describe('Reconciler', () => {
       store(db, 'm2', 'Aur logo bhi', '2026-10-19T07:01:00.000Z');
       const open = hold(ai);
       const run = r.run(1);
+      await open.started();
       applyEdit(db, 1, 'm1', 'Banner dark karo', '2026-10-19T08:00:30.000Z');
       open();
       expect(await run).toEqual({ status: 'ok', accepted: 0, rejected: 0 });
@@ -600,6 +606,7 @@ describe('Reconciler', () => {
       store(db, 'm2', 'Logo bhi bhej diya', '2026-10-19T07:01:00.000Z');
       const open = hold(ai);
       const run = r.run(1);
+      await open.started();
       upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '✅', ts: '2026-10-19T08:00:30.000Z' });
       open();
       expect(await run).toEqual({ status: 'ok', accepted: 0, rejected: 0 });
@@ -639,6 +646,7 @@ describe('Reconciler', () => {
         before(db);
         const open = hold(ai);
         const run = r.run(1);
+        await open.started();
         react(db, '2026-10-19T08:00:10.000Z');
         open();
         expect(await run).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
@@ -661,6 +669,7 @@ describe('Reconciler', () => {
         before(db);
         const open = hold(ai);
         const run = r.run(1);
+        await open.started();
         edit(db, 'print 600, A5', '2026-10-19T08:00:10.000Z');
         open();
         expect(await run).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
@@ -677,6 +686,7 @@ describe('Reconciler', () => {
       store(db, 'm1', 'Banner bright karo');
       const open = hold(ai);
       const run = r.run(1);
+      await open.started();
       applyRevoke(db, 1, 'm1');
       open();
       expect(await run).toEqual({ status: 'ok', accepted: 1, rejected: 0 });

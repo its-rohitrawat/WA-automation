@@ -34,10 +34,10 @@ async function seed(): Promise<Db> {
   setRole(db, 1, RAHUL_PN, 'team', 'human');
   // The message carries the sender's own WhatsApp name; the workbook shows the name in People instead.
   const pdf = file(db, { waId: 'D1', jid: SHARMA_PN, name: 'Sharma ji', kind: 'document', fileName: 'brief.pdf', mimeType: 'application/pdf', ts: '2026-10-15T06:00:00.000Z' });
-  finishMedia(db, pdf, { textKind: 'extract', text: 'Homepage brief\nHero banner with the new logo', pageCount: 3, note: null, at: NOW });
-  markUploaded(db, pdf, 'drivefile123');
+  await finishMedia(db, pdf, { textKind: 'extract', text: 'Homepage brief\nHero banner with the new logo', pageCount: 3, note: null, at: NOW });
+  await markUploaded(db, pdf, 'drivefile123');
   const img = file(db, { waId: 'I1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'image', fileName: null, mimeType: 'image/jpeg', ts: '2026-10-16T06:00:00.000Z' });
-  finishMedia(db, img, { textKind: 'description', text: 'A payment receipt. Visible text: Paid ₹42,000', pageCount: null, note: null, at: NOW });
+  await finishMedia(db, img, { textKind: 'description', text: 'A payment receipt. Visible text: Paid ₹42,000', pageCount: null, note: null, at: NOW });
   file(db, { waId: 'T1', jid: RAHUL_PN, name: 'Rahul', kind: 'document', fileName: 'team-only.pdf', mimeType: 'application/pdf', ts: '2026-10-17T06:00:00.000Z' });
   file(db, { waId: 'F1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: '=HYPERLINK("http://evil")', mimeType: 'application/pdf', ts: '2026-10-14T06:00:00.000Z' });
   return db;
@@ -175,7 +175,7 @@ describe('Files received', () => {
 
   it('does not link a Drive id that is not a plain id', async () => {
     const db = await seed();
-    markUploaded(db, mediaIdOf(db, 'F1'), 'abc/../evil?x=1');
+    await markUploaded(db, mediaIdOf(db, 'F1'), 'abc/../evil?x=1');
     const ws = await sheet(db, 'Sharma Interiors');
     expect(rowWhere(ws, (r) => r.getCell(3).value === '=HYPERLINK(_http___evil_)').getCell(13).value).toBeNull();
   });
@@ -197,7 +197,7 @@ describe('Files received', () => {
 
   it('does not link or describe an uploaded file that was then deleted for everyone, but still links other uploaded files (D3)', async () => {
     const db = await seed();
-    markUploaded(db, mediaIdOf(db, 'I1'), 'driveimage456');
+    await markUploaded(db, mediaIdOf(db, 'I1'), 'driveimage456');
     applyRevoke(db, 1, 'D1');
     const ws = await sheet(db, 'Sharma Interiors');
     const deleted = rowWhere(ws, (r) => r.getCell(3).value === 'brief.pdf');
@@ -214,11 +214,11 @@ describe('Files received', () => {
   it('says (forwarded image) and (forwarded scanned PDF) for forwarded files that were not described (D2, amendment 14c)', async () => {
     const db = await seed();
     const img = file(db, { waId: 'FW1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'image', fileName: null, mimeType: 'image/jpeg', ts: '2026-10-18T06:00:00.000Z', forwarded: true });
-    finishMedia(db, img, { textKind: null, text: null, pageCount: null, note: 'forwarded_not_described', at: NOW });
+    await finishMedia(db, img, { textKind: null, text: null, pageCount: null, note: 'forwarded_not_described', at: NOW });
     const scan = file(db, { waId: 'FW2', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'scan.pdf', mimeType: 'application/pdf', ts: '2026-10-18T05:00:00.000Z', forwarded: true });
-    finishMedia(db, scan, { textKind: null, text: null, pageCount: 2, note: 'forwarded_not_described', at: NOW });
+    await finishMedia(db, scan, { textKind: null, text: null, pageCount: 2, note: 'forwarded_not_described', at: NOW });
     const text = file(db, { waId: 'FW3', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'quote.pdf', mimeType: 'application/pdf', ts: '2026-10-18T04:00:00.000Z', forwarded: true });
-    finishMedia(db, text, { textKind: 'extract', text: 'Quotation No. 17', pageCount: 1, note: null, at: NOW });
+    await finishMedia(db, text, { textKind: 'extract', text: 'Quotation No. 17', pageCount: 1, note: null, at: NOW });
     expect((await sharmaFiles(db)).slice(0, 3).map((f) => [f.name, f.description])).toEqual([
       [`image-2026-10-18-1130-${img}.jpg`, '(forwarded image)'],
       ['scan.pdf', '(forwarded scanned PDF)'],
@@ -300,20 +300,20 @@ describe('Files received', () => {
   it('reads only the start of a long text from the store', async () => {
     const db = await seed();
     replaceText(db, 'D1', 'z'.repeat(5_000));
-    const row = listClientFiles(db, 1).find((f) => f.fileName === 'brief.pdf')!;
+    const row = (await listClientFiles(db, 1)).find((f) => f.fileName === 'brief.pdf')!;
     expect(row.textStart).toBe('z'.repeat(400));
     expect(row.revoked).toBe(false);
   });
 
   it('limits the list to the newest files', async () => {
-    expect(listClientFiles(await seed(), 1, 2).map((f) => f.fileName)).toEqual([null, 'brief.pdf']);
+    expect((await listClientFiles(await seed(), 1, 2)).map((f) => f.fileName)).toEqual([null, 'brief.pdf']);
   });
 
   it('keeps the workbook readable when a file name, file text or sender name holds characters XML does not allow', async () => {
     const db = await seed();
     upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: null, name: 'Mr.\uFFFF Sharma', fromMe: false });
     const id = file(db, { waId: 'X1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'a\uFFFF.pdf', mimeType: 'application/pdf', ts: '2026-10-18T06:00:00.000Z' });
-    finishMedia(db, id, { textKind: 'extract', text: 'Paid\uFFFE amount \u202E000,24', pageCount: 1, note: null, at: NOW });
+    await finishMedia(db, id, { textKind: 'extract', text: 'Paid\uFFFE amount \u202E000,24', pageCount: 1, note: null, at: NOW });
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load((await buildWorkbook(await loadTrackerView(db, now, healthy))) as unknown as ExcelJS.Buffer);
     const ws = wb.getWorksheet('Sharma Interiors')!;

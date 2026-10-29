@@ -194,6 +194,7 @@ describe('MediaQueue', () => {
       queue.kick();
       await flush();
       const d = queue.drain(60_000);
+      await flush(); // drain first waits for the fills asked for
       expect(vi.getTimerCount()).toBe(1);
       await finish(a, 'done');
       await d;
@@ -330,7 +331,7 @@ describe('MediaQueue never retries a file in a loop', () => {
     queue.kick();
     await queue.drain(5_000);
     expect(processor.process).toHaveBeenCalledTimes(1);
-    expect(getMedia(db, id)).toMatchObject({ status: 'unavailable', errorCode: 'ref_unreadable', hasRef: false });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'unavailable', errorCode: 'ref_unreadable', hasRef: false });
     expect(onSettled).toHaveBeenCalledWith(1);
     queue.kick();
     await flush();
@@ -370,7 +371,7 @@ describe('MediaQueue never retries a file in a loop', () => {
     }
     expect(fake.calls).toHaveLength(1);
     expect(processor.process.mock.calls.length).toBeLessThanOrEqual(2); // the run that paid, and one claim that could not be written
-    expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1 });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1 });
     expect(spend.spentToday()).toBe(0);
   });
 
@@ -410,10 +411,11 @@ describe('MediaQueue never retries a file in a loop', () => {
   ])('a file deferred for $why is not started again until it is due', async ({ o, waitMs, errorCode }) => {
     const { db, clock, processor, onSettled, queue, share } = await withProcessor(o);
     const id = share('IMG1'); // the ingestor kicks the queue
+    await queue.idle();
     expect(queue.active).toBe(1);
     await queue.drain(5_000);
     expect(processor.process).toHaveBeenCalledTimes(1);
-    expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode, nextAttemptAt: new Date(Date.parse('2026-10-19T08:00:00Z') + waitMs).toISOString() });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode, nextAttemptAt: new Date(Date.parse('2026-10-19T08:00:00Z') + waitMs).toISOString() });
     queue.kick();
     clock.advance(waitMs - 1);
     queue.kick();

@@ -48,6 +48,7 @@ export class MediaQueue {
    */
   readonly #crashed = new Map<number, { until: number; waitMs: number }>();
   readonly #drainWaiters: (() => void)[] = [];
+  #filling: Promise<void> = Promise.resolve();
   #stopped = false;
 
   constructor(o: MediaQueueOptions) {
@@ -67,7 +68,17 @@ export class MediaQueue {
     this.#fill();
   }
 
+  /** Fills run one after another, so two kicks never start a file twice. Never throws. */
   #fill(): void {
+    this.#filling = this.#filling.then(() => this.#fillOnce());
+  }
+
+  /** Resolves once the fills asked for so far have run (tests). */
+  async idle(): Promise<void> {
+    await this.#filling;
+  }
+
+  async #fillOnce(): Promise<void> {
     if (this.#stopped) return;
     const free = this.#o.concurrency - this.#inFlight.size;
     if (free <= 0) return;
@@ -79,15 +90,15 @@ export class MediaQueue {
     const lane = this.#o.voiceLane;
     try {
       if (lane === undefined) {
-        for (const id of startable(dueMediaIds(this.#o.db, now.toISOString(), limit)).slice(0, free)) this.#start(id, false);
+        for (const id of startable(await dueMediaIds(this.#o.db, now.toISOString(), limit)).slice(0, free)) this.#start(id, false);
         return;
       }
       // The voice lane: voice notes and audio files first (a client's update may wait for one, V1), up to the lane's free
       // places, then the other files in the slots left. Each list is read on its own, so a long run of due voice notes
       // never hides the images behind them.
       const laneFree = Math.max(0, lane - this.#voiceInFlight.size);
-      const voice = laneFree > 0 ? startable(dueMediaIds(this.#o.db, now.toISOString(), limit, { audio: true })).slice(0, Math.min(laneFree, free)) : [];
-      const others = free > voice.length ? startable(dueMediaIds(this.#o.db, now.toISOString(), limit, { audio: false })).slice(0, free - voice.length) : [];
+      const voice = laneFree > 0 ? startable(await dueMediaIds(this.#o.db, now.toISOString(), limit, { audio: true })).slice(0, Math.min(laneFree, free)) : [];
+      const others = free > voice.length ? startable(await dueMediaIds(this.#o.db, now.toISOString(), limit, { audio: false })).slice(0, free - voice.length) : [];
       for (const id of voice) this.#start(id, true);
       for (const id of others) this.#start(id, false);
     } catch (err) {
@@ -100,9 +111,10 @@ export class MediaQueue {
     this.#stopped = true;
   }
 
-  /** Resolves when no file is in flight, or after timeoutMs. Leaves no timer. */
-  drain(timeoutMs: number): Promise<void> {
-    if (this.#inFlight.size === 0) return Promise.resolve();
+  /** Resolves when the fills asked for so far have run and no file is in flight, or after timeoutMs. Leaves no timer. */
+  async drain(timeoutMs: number): Promise<void> {
+    await this.#filling;
+    if (this.#inFlight.size === 0) return;
     return new Promise<void>((resolve) => {
       const done = () => {
         clearTimeout(timer);

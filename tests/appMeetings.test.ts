@@ -39,7 +39,7 @@ interface SetupOptions {
   /** false: the stored sign-in has no meeting scopes. */
   scopes?: boolean;
   drainMs?: number;
-  prepare?: (db: Db) => void;
+  prepare?: (db: Db) => unknown;
   stt?: FakeSttProvider;
   /** Replaces the paid fake transcriber (null: none), built with the test's data folder. */
   transcriber?: (dataDir: string) => MeetingTranscriber | null;
@@ -67,7 +67,7 @@ async function setup(o: SetupOptions = {}) {
   const drive = new FakeDrive();
   const db = await seededDb();
   if (o.scopes !== false) saveGrantedScopes(db, [...MEETING_SCOPES, 'https://www.googleapis.com/auth/drive.file'].join(' '));
-  o.prepare?.(db);
+  await o.prepare?.(db);
   const api = new FakeMeetingsApi();
   addConference(api);
   const stt = o.stt ?? new FakeSttProvider();
@@ -152,7 +152,7 @@ describe('app with meetings', () => {
   });
 
   it('without the meeting scopes: paused google_scopes, and no Google meeting call even for a queued meeting', async () => {
-    const { app, api, health, db } = await setup({ scopes: false, prepare: (d) => void insertFound(d, queuedMeeting()) });
+    const { app, api, health, db } = await setup({ scopes: false, prepare: (d) => insertFound(d, queuedMeeting()) });
     await vi.waitFor(async () => expect((await getMeeting(db, 1))?.errorCode).toBe('google_scopes'), SLOW_IO);
     await vi.advanceTimersByTimeAsync(20 * MINUTE);
     expect(api.calls).toEqual([]);

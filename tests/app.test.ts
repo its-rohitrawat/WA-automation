@@ -415,6 +415,7 @@ describe('app allow-list changes', () => {
 
     app.reloadClients([SHARMA]);
     expect(app.health.line().ok).toBe(true);
+    await vi.advanceTimersByTimeAsync(0); // the snapshot is saved after the file counts are read again
     expect(readHealthSnapshot(db)!.failed).toEqual([]);
     await stopApp(app);
   });

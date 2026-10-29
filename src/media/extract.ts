@@ -44,7 +44,7 @@ export interface ExtractInput {
    * Asked just before a paid call: true when the file's message was deleted for everyone meanwhile, for example during
    * the decode. The file is then not sent to Claude and comes back with note 'revoked' (final review FR3a).
    */
-  revoked?: () => boolean;
+  revoked?: () => Promise<boolean>;
 }
 
 export interface Extraction {
@@ -234,7 +234,7 @@ export function createExtractor(d: ExtractorDeps): Extractor {
     // The budget is checked before decoding, so an image deferred by the cap is not decoded again on every retry.
     if (!d.spend.canSpend(ceiling)) throw new SpendCapReachedError({ busy: d.spend.fitsIgnoringHolds(ceiling) });
     const img = await prepareImage(input.bytes);
-    if (input.revoked?.()) return REVOKED;
+    if (await input.revoked?.()) return REVOKED;
     const r = await withReservation(d.spend, imageEstimateUsd(img, d.prices), label(input), () => d.ai.describeImage(img), MEDIA_ATTEMPTS);
     return { textKind: 'description', text: capStored(r.text), pageCount: null, note: null };
   };
@@ -259,7 +259,7 @@ export function createExtractor(d: ExtractorDeps): Extractor {
     // Claude reads every real page whatever the file claims, so every scan reserves the same ceiling.
     const ceiling = scannedPdfCeilingUsd(d.prices);
     if (ceiling > d.spend.capUsd) return { ...NONE, pageCount: pages, note: TOO_COSTLY };
-    if (input.revoked?.()) return REVOKED;
+    if (await input.revoked?.()) return REVOKED;
     const r = await withReservation(d.spend, ceiling, label(input), () => d.ai.readScannedPdf(input.bytes), MEDIA_ATTEMPTS).catch(scanReadFailed);
     return { textKind: 'extract', text: capStored(r.text), pageCount: pages, note: 'scan_read_by_ai' };
   };
@@ -352,7 +352,7 @@ export function createExtractor(d: ExtractorDeps): Extractor {
       // The measured length is trusted and capped by prepare; the tolerance is headroom over a provider's billed rounding.
       const ceiling = v.ceilingUsd(prepared.measuredSeconds + VOICE_LENGTH_TOLERANCE_S);
       if (ceiling > d.spend.capUsd) return { ...NONE, note: TOO_COSTLY };
-      if (input.revoked?.()) return REVOKED;
+      if (await input.revoked?.()) return REVOKED;
       // Kept outside the hold, so a booking that fails after the provider answered is still known to be paid (Fix 3).
       const paid: { result?: VoiceResult; costUsd?: number } = {};
       let result: VoiceResult;
@@ -389,7 +389,7 @@ export function createExtractor(d: ExtractorDeps): Extractor {
    * aborted, ...) goes to the processor unchanged, which retries it at no cost. The caller disposes.
    */
   const transcribeFree = async (v: LocalVoiceTranscriber, prepared: PreparedVoice, input: ExtractInput): Promise<Extraction> => {
-    if (input.revoked?.()) return REVOKED;
+    if (await input.revoked?.()) return REVOKED;
     const result = await v.transcribe(prepared, d.signal);
     if (result.text === '') return { ...NONE, note: NO_SPEECH };
     return { textKind: 'extract', text: capStored(result.text), pageCount: null, note: null };

@@ -621,7 +621,7 @@ describe('status command', () => {
     add('elevenlabs', 'tr-1', MAX_FORGET_ATTEMPTS); // last try used
     add('elevenlabs', 'tr-2', 1); // still being tried
     add('openai', 'tr-3', 0); // not the provider set up now
-    expect(mediaSttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'elevenlabs' })).toBe(2);
+    expect(await mediaSttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'elevenlabs' })).toBe(2);
     db.raw.close();
     await statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', VOICE_STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
     expect(out()).toContain('Voice copies: 2 speech-to-text copies of voice notes could not be deleted from the provider; see SETUP (Voice notes)');

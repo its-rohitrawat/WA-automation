@@ -13,7 +13,7 @@ import { NOW, seededDb } from '../helpers/db.ts';
 import { FakeVoiceTranscriber } from '../helpers/voice.ts';
 
 /** A transcribed voice note whose provider kept a copy named `ref`, noted by finishMedia (N1). Returns the media id. */
-function copied(db: Db, waId: string, ref: string, provider: ProviderId = 'elevenlabs'): number {
+async function copied(db: Db, waId: string, ref: string, provider: ProviderId = 'elevenlabs'): Promise<number> {
   insertMessage(db, {
     waId, clientId: 1, senderJid: '919800000001@s.whatsapp.net', senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false,
     ts: '2026-10-10T08:00:00.000Z', text: null, quotedWaId: null, mediaType: 'voice',
@@ -22,8 +22,8 @@ function copied(db: Db, waId: string, ref: string, provider: ProviderId = 'eleve
     messageId: messageRowId(db, 1, waId)!, clientId: 1, kind: 'voice', status: 'pending', mimeType: 'audio/ogg; codecs=opus', fileName: null, fileSize: 9000,
     seconds: 14, forwarded: false, refEnc: Buffer.from('sealed'), errorCode: null, createdAt: NOW,
   });
-  markDownloaded(db, id, { localPath: `media/SHA/2026-10/${waId}-${id}.ogg`, sha256: 'x', fileSize: 9000, at: NOW });
-  finishMedia(db, id, { textKind: 'extract', text: 'payment bhej diya', pageCount: null, note: null, at: NOW, forget: { provider, ref } });
+  await markDownloaded(db, id, { localPath: `media/SHA/2026-10/${waId}-${id}.ogg`, sha256: 'x', fileSize: 9000, at: NOW });
+  await finishMedia(db, id, { textKind: 'extract', text: 'payment bhej diya', pageCount: null, note: null, at: NOW, forget: { provider, ref } });
   return id;
 }
 
@@ -43,8 +43,8 @@ function capturingLogger() {
 describe('forgetVoiceCopies (N1)', () => {
   it('deletes every due copy through the transcriber and removes its row', async () => {
     const db = await seededDb();
-    const a = copied(db, 'A', 'tr_1');
-    copied(db, 'B', 'tr_2');
+    const a = await copied(db, 'A', 'tr_1');
+    await copied(db, 'B', 'tr_2');
     const v = new FakeVoiceTranscriber({ provider: 'elevenlabs' });
     expect(rows(db).map((r) => r.mediaId)).toContain(a);
     expect(await forgetVoiceCopies(db, v, silentLogger(), { clock: manualClock(NOW) })).toBe(2);
@@ -54,8 +54,8 @@ describe('forgetVoiceCopies (N1)', () => {
 
   it('with a media id, deletes only that file\'s copies', async () => {
     const db = await seededDb();
-    copied(db, 'A', 'tr_1');
-    const b = copied(db, 'B', 'tr_2');
+    await copied(db, 'A', 'tr_1');
+    const b = await copied(db, 'B', 'tr_2');
     const v = new FakeVoiceTranscriber({ provider: 'elevenlabs' });
     expect(await forgetVoiceCopies(db, v, silentLogger(), { mediaId: b, clock: manualClock(NOW) })).toBe(1);
     expect(v.forgotten).toEqual(['tr_2']);
@@ -64,7 +64,7 @@ describe('forgetVoiceCopies (N1)', () => {
 
   it('a 404 means the copy is already gone: the row is removed', async () => {
     const db = await seededDb();
-    copied(db, 'A', 'tr_1');
+    await copied(db, 'A', 'tr_1');
     const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', forgetError: new SttHttpError(404) });
     expect(await forgetVoiceCopies(db, v, silentLogger(), { clock: manualClock(NOW) })).toBe(1);
     expect(v.forgotten).toEqual(['tr_1']);
@@ -73,7 +73,7 @@ describe('forgetVoiceCopies (N1)', () => {
 
   it('counts each try, with the time of the next one, before the provider is asked', async () => {
     const db = await seededDb();
-    copied(db, 'A', 'tr_1');
+    await copied(db, 'A', 'tr_1');
     const seen: { attempts: number; nextTryAt: string | null }[] = [];
     class Watching extends FakeVoiceTranscriber {
       override async forget(ref: string): Promise<void> {
@@ -90,7 +90,7 @@ describe('forgetVoiceCopies (N1)', () => {
 
   it('waits 15 minutes, 1 hour, 6 hours, then daily between tries, and stops after the last', async () => {
     const db = await seededDb();
-    copied(db, 'A', 'tr_1');
+    await copied(db, 'A', 'tr_1');
     const clock = manualClock(NOW);
     const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', forgetError: new SttNoAnswerError('timeout') });
     const { lines, log } = capturingLogger();
@@ -117,8 +117,8 @@ describe('forgetVoiceCopies (N1)', () => {
 
   it('one copy that fails does not stop the others', async () => {
     const db = await seededDb();
-    copied(db, 'A', 'tr_1');
-    copied(db, 'B', 'tr_2');
+    await copied(db, 'A', 'tr_1');
+    await copied(db, 'B', 'tr_2');
     class FailsFirst extends FakeVoiceTranscriber {
       override async forget(ref: string): Promise<void> {
         await super.forget(ref);
@@ -132,7 +132,7 @@ describe('forgetVoiceCopies (N1)', () => {
 
   it('skips, without counting a try, copies whose provider is not the one set up now, or when there is none', async () => {
     const db = await seededDb();
-    const id = copied(db, 'A', 'tr_1');
+    const id = await copied(db, 'A', 'tr_1');
     const { lines, log } = capturingLogger();
     const openai = new FakeVoiceTranscriber({ provider: 'openai' });
     const noCopies = new FakeVoiceTranscriber({ provider: 'elevenlabs' });
@@ -151,7 +151,7 @@ describe('forgetVoiceCopies (N1)', () => {
 
   it('with a warned set (the service\'s), warns provider_unavailable once per row, still skipping it each time without counting', async () => {
     const db = await seededDb();
-    const a = copied(db, 'A', 'tr_1');
+    const a = await copied(db, 'A', 'tr_1');
     const { lines, log } = capturingLogger();
     const warned = new Set<number>();
     const openai = new FakeVoiceTranscriber({ provider: 'openai' });
@@ -162,7 +162,7 @@ describe('forgetVoiceCopies (N1)', () => {
     const unavailable = (id: number) => lines.filter((l) => l.includes('"code":"provider_unavailable"') && l.includes(`"mediaId":${id}`));
     expect(unavailable(a)).toHaveLength(1);
     // A row noted later is warned about once too.
-    const b = copied(db, 'B', 'tr_2');
+    const b = await copied(db, 'B', 'tr_2');
     expect(await forgetVoiceCopies(db, openai, log, { clock, warned })).toBe(0);
     expect(await forgetVoiceCopies(db, openai, log, { clock, warned })).toBe(0);
     expect(unavailable(a)).toHaveLength(1);
@@ -175,7 +175,7 @@ describe('forgetVoiceCopies (N1)', () => {
 
   it('logs the media id, provider and a code only: never the copy\'s id', async () => {
     const db = await seededDb();
-    const id = copied(db, 'A', 'tr_secret_1');
+    const id = await copied(db, 'A', 'tr_secret_1');
     const { lines, log } = capturingLogger();
     const failing = new FakeVoiceTranscriber({ provider: 'elevenlabs', forgetError: new SttHttpError(500, 'server_error') });
     const clock = manualClock(NOW);

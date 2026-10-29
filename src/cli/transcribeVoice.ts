@@ -89,8 +89,8 @@ function localEngineMissing(deps: TranscribeVoiceDeps): 'STT_LOCAL_BIN' | 'STT_L
 
 /** What differs between the backlog and --failed: which files, how they are queued, and the words. */
 interface Listing {
-  rows: (db: Db, o: { clientId?: number }) => VoiceBacklogRow[];
-  queue: (db: Db, ids: number[], at: string) => number;
+  rows: (db: Db, o: { clientId?: number }) => Promise<VoiceBacklogRow[]>;
+  queue: (db: Db, ids: number[], at: string) => Promise<number>;
   nothing: string;
   /** The first line: "To transcribe: ..." with the count (and the minutes, when there are files to send). */
   count: (n: string) => string;
@@ -150,7 +150,7 @@ export async function transcribeVoiceCommand(opts: { client?: string; yes: boole
       if (!c.active) throw new CorrectionError(`Client ${c.code} is not in the allow-list`);
       clientId = c.id;
     }
-    const rows = listing.rows(db, clientId === undefined ? {} : { clientId });
+    const rows = await listing.rows(db, clientId === undefined ? {} : { clientId });
     if (rows.length === 0) {
       out(listing.nothing);
       return;
@@ -191,7 +191,7 @@ export async function transcribeVoiceCommand(opts: { client?: string; yes: boole
       out(listing.rerun);
       return;
     }
-    const queued = listing.queue(db, send.map((r) => r.id), (deps.clock ?? systemClock).now().toISOString());
+    const queued = await listing.queue(db, send.map((r) => r.id), (deps.clock ?? systemClock).now().toISOString());
     out(listing.queued(queued, cap));
     if (queued < send.length) out(`${send.length - queued} changed since they were counted and were left alone.`);
   } finally {

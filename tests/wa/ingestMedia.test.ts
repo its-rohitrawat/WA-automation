@@ -36,9 +36,9 @@ describe('Ingestor with shared files', () => {
     ing.handle(image('IMG1'));
     const ids = mediaIds(db);
     expect(ids).toHaveLength(1);
-    const row = getMedia(db, ids[0]!)!;
+    const row = (await getMedia(db, ids[0]!))!;
     expect(row).toMatchObject({ clientId: 1, kind: 'image', status: 'pending', mimeType: 'image/jpeg', forwarded: false, hasRef: true, createdAt: '2026-10-19T08:00:00.000Z' });
-    expect(sealer.open(getMediaRef(db, row.id)!, mediaRefAad(1, 'IMG1')).mediaKey).toBe(MEDIA_KEY.toString('base64'));
+    expect(sealer.open((await getMediaRef(db, row.id))!, mediaRefAad(1, 'IMG1')).mediaKey).toBe(MEDIA_KEY.toString('base64'));
     expect(onQueued).toHaveBeenCalledTimes(1);
     expect(onQueued).toHaveBeenCalledWith(row.id);
     expect(onNew).toHaveBeenCalledTimes(1);
@@ -107,7 +107,7 @@ describe('Ingestor with shared files', () => {
     ing.handle(image('F1', { contextInfo: { isForwarded: true } }));
     ing.handle(image('F2', { contextInfo: { forwardingScore: 4 } }));
     ing.handle(image('F3'));
-    expect(mediaIds(db).map((id) => getMedia(db, id)!).map((r) => [r.forwarded, r.status, r.hasRef])).toEqual([
+    expect((await Promise.all(mediaIds(db).map(async (id) => (await getMedia(db, id))!))).map((r) => [r.forwarded, r.status, r.hasRef])).toEqual([
       [true, 'pending', true],
       [true, 'pending', true],
       [false, 'pending', true],
@@ -147,7 +147,7 @@ describe('Ingestor with shared files', () => {
     expect(() => ing.handle(image('IMG1'))).toThrow('listener failed');
     expect(inTransaction).toBe(false);
     expect(messageCount(db)).toBe(1);
-    expect(getMedia(db, mediaIds(db)[0]!)).toMatchObject({ status: 'pending', hasRef: true });
+    expect(await getMedia(db, mediaIds(db)[0]!)).toMatchObject({ status: 'pending', hasRef: true });
     expect(onNew).toHaveBeenCalledTimes(1);
   });
 
@@ -157,7 +157,7 @@ describe('Ingestor with shared files', () => {
     ing.handle(image('U2', { url: 'https://evil.example/steal' }));
     ing.handle(image('U3', { url: 'https://10.0.0.5:8443/x' }));
     ing.handle(image('U4', { url: `https://mmg.whatsapp.net/${'a'.repeat(3_000)}` }));
-    const opened = mediaIds(db).map((id, i) => sealer.open(getMediaRef(db, id)!, mediaRefAad(1, `U${i + 1}`)));
+    const opened = await Promise.all(mediaIds(db).map(async (id, i) => sealer.open((await getMediaRef(db, id))!, mediaRefAad(1, `U${i + 1}`))));
     const mediaKey = MEDIA_KEY.toString('base64');
     expect(opened).toEqual([
       // What WhatsApp sends is kept as it is.
@@ -167,7 +167,7 @@ describe('Ingestor with shared files', () => {
       { contentType: 'imageMessage', url: null, directPath: '/v/t1', mediaKey },
     ]);
     // The file is still downloaded from the direct path.
-    expect(mediaIds(db).map((id) => getMedia(db, id)!.status)).toEqual(['pending', 'pending', 'pending', 'pending']);
+    expect(await Promise.all(mediaIds(db).map(async (id) => (await getMedia(db, id))!.status))).toEqual(['pending', 'pending', 'pending', 'pending']);
   });
 
   it('refuses an overlong direct path and never seals it', async () => {

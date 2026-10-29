@@ -265,7 +265,7 @@ export function createApp(d: AppDeps): App {
    * Gives Health the current shared-file counts. Called before a publish that a file change or a client change asked
    * for, so the workbook's health line does not show counts from the last tick (final review).
    */
-  const refreshMedia = () => health.setMedia(mediaStats(d.db, d.clock.now(), startedAt, MEDIA_MAX_WAIT_MS));
+  const refreshMedia = async () => health.setMedia(await mediaStats(d.db, d.clock.now(), startedAt, MEDIA_MAX_WAIT_MS));
   /** False once reloadClients removed the client. If the lookup itself fails, assume active and record as usual. */
   const stillActive = (clientId: number): boolean => {
     try {
@@ -384,8 +384,8 @@ export function createApp(d: AppDeps): App {
         // member's file can go to Drive now.
         onSettled: (clientId) => {
           debouncer.notify(clientId);
-          safely(refreshMedia); // a "waiting" warning about this file must not reach the workbook it settles
-          publisher.schedule();
+          // a "waiting" warning about this file must not reach the workbook it settles
+          void safelyAsync(refreshMedia).then(() => publisher.schedule());
           void uploader?.run();
         },
       })
@@ -550,7 +550,7 @@ export function createApp(d: AppDeps): App {
   };
 
   let poll: ReturnType<typeof setInterval> | undefined;
-  const tick = () => {
+  const tick = async () => {
     // An uncaught throw inside setInterval would exit the service.
     try {
       if (getKv(d.db, 'rebuild_requested')) {
@@ -564,9 +564,9 @@ export function createApp(d: AppDeps): App {
       void uploader?.run(); // retries that are due
       meetings?.tick(); // discovery when due (MEETING_POLL_MINUTES), then the next due meeting
       backfill?.tick(); // a group waiting for WhatsApp, the spend cap or its first message
-      void safelyAsync(refreshMeetings);
+      await safelyAsync(refreshMeetings);
       health.setIngestFailures(d.gateway.failedCount());
-      refreshMedia();
+      await safelyAsync(refreshMedia);
       if (reportRunner) {
         // tick() never throws. A send runs on in the background; the claim is already written when it returns.
         void reportRunner.tick(d.clock.now());
@@ -574,7 +574,9 @@ export function createApp(d: AppDeps): App {
       }
       // A line that changes with no other change (a file waiting too long, an upload that gave up, a message that could
       // not be saved) would otherwise reach the workbook only with an unrelated publish, possibly hours later.
-      if (health.workbookLine().text !== publishedLine) publisher.schedule();
+      // A publish in flight that took the same line is enough; if it fails, the publisher's own retry rebuilds it.
+      const line = health.workbookLine().text;
+      if (line !== publishedLine && line !== buildingLine) publisher.schedule();
       // The Today tab's counts, notes and order are worked out for the day it was built. After a quiet night the 06:00
       // link would show yesterday's: republish once when the IST date changes (Task 3 review round 2).
       if (publishedDay !== undefined && istDate(d.clock.now()) !== publishedDay) publisher.schedule();
@@ -615,11 +617,9 @@ export function createApp(d: AppDeps): App {
         }
       }
       if (uploader) {
-        try {
-          resetUploadFailures(d.db); // a restart gives uploads that gave up a fresh set of attempts
-        } catch (err) {
-          d.log.error({ err }, 'upload reset failed');
-        }
+        // A restart gives uploads that gave up a fresh set of attempts. Not awaited (start is synchronous): the engine runs
+        // statements in order, so the reset lands before the first upload pass reads.
+        resetUploadFailures(d.db).catch((err: unknown) => d.log.error({ err }, 'upload reset failed'));
       }
       if (m) {
         // Before the first tick, so no voice note being converted now can lose its folder.
@@ -630,8 +630,8 @@ export function createApp(d: AppDeps): App {
       d.gateway.start();
       meetings?.start(); // books speech parts left in flight and cleans work files before any meeting runs
       backfill?.start(); // carries on with a group whose earlier messages were being read at the last stop
-      tick();
-      poll = setInterval(tick, d.pollMs ?? 30_000);
+      void tick();
+      poll = setInterval(() => void tick(), d.pollMs ?? 30_000);
       publisher.schedule();
     },
     async stop() {
@@ -693,9 +693,11 @@ export function createApp(d: AppDeps): App {
         debouncer.cancel(id);
         health.forget(id);
       }
-      safely(refreshMedia); // a removed client's files leave the counts before the publish
-      safely(() => health.persist());
-      publisher.schedule();
+      // a removed client's files leave the counts before the publish
+      void safelyAsync(refreshMedia).then(() => {
+        safely(() => health.persist());
+        publisher.schedule();
+      });
       backfill?.tick(); // a newly approved group starts reading its earlier messages; a removed one stops
     },
   };

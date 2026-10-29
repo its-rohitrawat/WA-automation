@@ -129,7 +129,7 @@ export async function loadTrackerView(db: Db, now: Date, health: HealthLine): Pr
         clientOpen: notDone.filter((t) => t.side === 'client').sort(byUrgency),
         done: all.filter((t) => t.status === 'done').sort(byClosed),
         decisions: listDecisions(db, client.id),
-        files: listClientFiles(db, client.id).map((f) => ({
+        files: (await listClientFiles(db, client.id)).map((f) => ({
           date: istDate(new Date(f.ts)),
           sentBy: f.sender ?? 'Unknown',
           name: displayName({ kind: f.kind, fileName: f.fileName, mimeType: f.mimeType, ts: f.ts, mediaId: f.id }),

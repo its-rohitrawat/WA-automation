@@ -103,7 +103,7 @@ export class DriveFileUploader {
     }
     for (const [id, u] of this.#unsaved) {
       try {
-        markUploaded(this.#o.db, id, u.fileId);
+        await markUploaded(this.#o.db, id, u.fileId);
         this.#unsaved.delete(id);
       } catch (err) {
         this.#o.log.warn({ mediaId: id, clientId: u.clientId, step: 'save_id', err }, 'file upload result could not be saved');
@@ -122,18 +122,18 @@ export class DriveFileUploader {
     try {
       // First the ids that could not be saved last time. Those files are already in Drive and are never uploaded again.
       for (const [id, u] of this.#unsaved) {
-        if (!this.#save(id, u.clientId, 'save_id', () => markUploaded(db, id, u.fileId))) return;
+        if (!(await this.#save(id, u.clientId, 'save_id', () => markUploaded(db, id, u.fileId)))) return;
         this.#unsaved.delete(id);
         uploaded++;
       }
       const root = getKv(db, 'drive_root_id');
       if (!root) return; // the publisher creates the root folder on its first upload
       const nowIso = clock.now().toISOString();
-      for (const c of uploadCandidates(db, nowIso, this.#o.batchSize ?? 5)) {
+      for (const c of await uploadCandidates(db, nowIso, this.#o.batchSize ?? 5)) {
         if (this.#stopped) break;
         // An upload can take minutes: the file may have been deleted for everyone, its sender may no longer be a
         // client, or its client may be inactive by now. Such a file is skipped without counting an attempt.
-        if (!isUploadCandidate(db, c.id, nowIso)) continue;
+        if (!(await isUploadCandidate(db, c.id, nowIso))) continue;
         let fileId: string;
         try {
           const bytes = await readFile(join(dataDir, ...c.localPath.split('/')));
@@ -151,11 +151,11 @@ export class DriveFileUploader {
           const attempts = c.driveAttempts + 1;
           const failed = (e as NodeJS.ErrnoException).code === 'ENOENT' || attempts >= UPLOAD_MAX_ATTEMPTS;
           log.warn({ mediaId: c.id, clientId: c.clientId, step: 'upload', attempts, err: e }, 'file upload to Drive failed');
-          if (!this.#save(c.id, c.clientId, 'save_failure', () =>
-            markUploadFailed(db, c.id, { failed, nextAt: failed ? null : new Date(now + retryMs(attempts)).toISOString() }))) break;
+          if (!(await this.#save(c.id, c.clientId, 'save_failure', () =>
+            markUploadFailed(db, c.id, { failed, nextAt: failed ? null : new Date(now + retryMs(attempts)).toISOString() })))) break;
           continue;
         }
-        if (!this.#save(c.id, c.clientId, 'save_id', () => markUploaded(db, c.id, fileId))) {
+        if (!(await this.#save(c.id, c.clientId, 'save_id', () => markUploaded(db, c.id, fileId)))) {
           this.#unsaved.set(c.id, { clientId: c.clientId, fileId });
           break;
         }
@@ -176,9 +176,9 @@ export class DriveFileUploader {
    * Saves one upload result. When the database cannot write, it logs ids and the error (the logger keeps its type and
    * code, never its message), pauses the uploader and returns false: the pass must stop.
    */
-  #save(mediaId: number, clientId: number, step: 'save_id' | 'save_failure', write: () => void): boolean {
+  async #save(mediaId: number, clientId: number, step: 'save_id' | 'save_failure', write: () => Promise<void>): Promise<boolean> {
     try {
-      write();
+      await write();
       return true;
     } catch (err) {
       this.#o.log.warn({ mediaId, clientId, step, err }, 'file upload result could not be saved');

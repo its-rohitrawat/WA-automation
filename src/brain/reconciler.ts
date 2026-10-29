@@ -235,7 +235,7 @@ export class Reconciler {
     // §6.1: a shared file is read before the AI sees its message. Messages from the first file still being read onward
     // wait for a later run; the media queue tells the debouncer when that file is done, or the app tick re-runs it once
     // the wait runs out. Blocking needs no text (maxChars 0).
-    const queuedMedia = mediaForMessages(db, queued.map((m) => m.id), 0);
+    const queuedMedia = await mediaForMessages(db, queued.map((m) => m.id), 0);
     const batch = readyPrefix(queued, queuedMedia, now, this.#startedAt, { voiceOn: this.#o.voiceTranscriptionOn ?? true });
     if (batch.length === 0) {
       this.#waiting.add(clientId);
@@ -259,7 +259,7 @@ export class Reconciler {
     const openTasks = listTasks(db, clientId, ['open', 'maybe_done']);
     const decisions = listDecisions(db, clientId, 20);
     const reactions = reactionsFor(db, clientId, [...recent, ...batch].map((m) => m.waId));
-    const media = mediaForPrompt(db, batch, recent);
+    const media = await mediaForPrompt(db, batch, recent);
     const mediaText = mediaPromptTexts(media, batch, recent);
     const user = buildUserContent({
       client, people, openTasks, decisions, recent, batch, reactions, today: istDate(now), mediaText, fileRechecks,
@@ -377,7 +377,7 @@ export class Reconciler {
       batch: [],
       reactions,
       today: istDate(now),
-      mediaText: mediaPromptTexts(mediaForPrompt(db, [], recent), [], recent),
+      mediaText: mediaPromptTexts(await mediaForPrompt(db, [], recent), [], recent),
       meetingLines: meetingItemLines(items, meeting.startedAt, meeting.title),
     });
 

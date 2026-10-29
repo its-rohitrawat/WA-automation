@@ -31,7 +31,7 @@ export async function forgetVoiceCopies(
   o: { mediaId?: number; clock?: Clock; warned?: Set<number> } = {},
 ): Promise<number> {
   const clock = o.clock ?? systemClock;
-  const rows = pendingMediaForgets(db, {
+  const rows = await pendingMediaForgets(db, {
     nowIso: clock.now().toISOString(),
     maxAttempts: MAX_FORGET_ATTEMPTS,
     ...(o.mediaId !== undefined ? { mediaId: o.mediaId } : {}),
@@ -46,7 +46,7 @@ export async function forgetVoiceCopies(
     }
     const attempts = f.attempts + 1;
     const wait = FORGET_WAITS_MS[Math.min(attempts, FORGET_WAITS_MS.length) - 1]!;
-    countMediaForgetAttempt(db, f.id, new Date(clock.now().getTime() + wait).toISOString());
+    await countMediaForgetAttempt(db, f.id, new Date(clock.now().getTime() + wait).toISOString());
     try {
       await voice.forget(f.ref);
     } catch (e) {
@@ -57,7 +57,7 @@ export async function forgetVoiceCopies(
         continue;
       }
     }
-    deleteMediaForget(db, f.id);
+    await deleteMediaForget(db, f.id);
     deleted++;
   }
   return deleted;

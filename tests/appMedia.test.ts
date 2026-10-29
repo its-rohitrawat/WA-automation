@@ -86,7 +86,7 @@ interface SetupOptions {
   /** The workbook publish throttle. Default: the publisher's (60 s). */
   publishIntervalMs?: number;
   /** Runs on the database and the data folder before the app is made. */
-  prepare?: (db: Db, dataDir: string) => void;
+  prepare?: (db: Db, dataDir: string) => unknown;
 }
 
 async function setup(o: SetupOptions = {}) {
@@ -95,7 +95,7 @@ async function setup(o: SetupOptions = {}) {
   const ai = new FakeAi();
   const drive = new FakeDrive();
   const db = await seededDb();
-  o.prepare?.(db, dataDir);
+  await o.prepare?.(db, dataDir);
   const allow = new AllowList([SHARMA.groupId, MEHTA.groupId]);
   const sockets: FakeSocket[] = [];
   const auth = useEncryptedAuthState(openSessionDb(':memory:'), randomBytes(32));
@@ -175,7 +175,7 @@ function storedImage(db: Db, sealer: MediaRefSealer, createdAt: string): void {
  * A PDF of client SHA's client member, read and saved before the app starts, but not yet in Drive. Its message is
  * processed, so no reconcile (and no publish after one) runs in the test. Returns the media id.
  */
-function storedClientDoc(db: Db, dataDir: string): number {
+async function storedClientDoc(db: Db, dataDir: string): Promise<number> {
   insertMessage(db, {
     waId: 'DOC1', clientId: 1, senderJid: SHARMA_PN, senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false,
     ts: '2026-10-10T08:00:00.000Z', text: null, quotedWaId: null, mediaType: 'document',
@@ -188,8 +188,8 @@ function storedClientDoc(db: Db, dataDir: string): number {
   });
   mkdirSync(join(dataDir, 'media', 'SHA', '2026-10'), { recursive: true });
   writeFileSync(join(dataDir, 'media', 'SHA', '2026-10', `DOC1-${id}.pdf`), 'pdf');
-  markDownloaded(db, id, { localPath: `media/SHA/2026-10/DOC1-${id}.pdf`, sha256: 'x', fileSize: 3, at: '2026-10-10T08:00:01.000Z' });
-  finishMedia(db, id, { textKind: null, text: null, pageCount: null, note: null, at: '2026-10-10T08:00:02.000Z' });
+  await markDownloaded(db, id, { localPath: `media/SHA/2026-10/DOC1-${id}.pdf`, sha256: 'x', fileSize: 3, at: '2026-10-10T08:00:01.000Z' });
+  await finishMedia(db, id, { textKind: null, text: null, pageCount: null, note: null, at: '2026-10-10T08:00:02.000Z' });
   markProcessed(db, [messageRowId(db, 1, 'DOC1')!], '2026-10-10T08:05:00.000Z');
   return id;
 }
@@ -210,11 +210,13 @@ describe('app with shared files', () => {
   it('downloads a shared image right away, and the AI sees its description', async () => {
     const { db, ai, app, sock, fetcher, dataDir } = await setup();
     shareImage(sock);
-    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'));
+    // The event, not the clock: the file's run has ended (a cold first run can take over a second under load).
+    await app.mediaQueue!.drain(60_000);
+    expect((await getMedia(db, 1))?.status).toBe('done');
     expect(fetcher).toHaveBeenCalledTimes(1);
     // Amendment 15d: saved as <message id>-<media id>.<ext>.
     expect(existsSync(join(dataDir, 'media', 'SHA', '2026-10', 'IMG1-1.jpg'))).toBe(true);
-    expect(getMedia(db, 1)?.localPath).toBe('media/SHA/2026-10/IMG1-1.jpg');
+    expect((await getMedia(db, 1))?.localPath).toBe('media/SHA/2026-10/IMG1-1.jpg');
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls).toHaveLength(1);
     expect(ai.calls[0]!.user).toContain(': new banner {image: A blue homepage banner. Visible text: SALE 50%}');
@@ -226,10 +228,11 @@ describe('app with shared files', () => {
   it('uploads a client member’s file into Clients/<Client>/Files', async () => {
     const { db, drive, app, sock } = await setup();
     shareImage(sock);
-    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'));
+    await app.mediaQueue!.drain(60_000); // the file's run has ended
+    expect((await getMedia(db, 1))?.status).toBe('done');
     setRole(db, 1, SHARMA_PN, 'client', 'human');
     await vi.advanceTimersByTimeAsync(61_000);
-    await vi.waitFor(() => expect(getMedia(db, 1)?.driveFileId).toBeTruthy());
+    await vi.waitFor(async () => expect((await getMedia(db, 1))?.driveFileId).toBeTruthy());
     expect(drive.folders).toEqual(['WA Agent', 'Clients', 'Sharma Interiors', 'Files']);
     expect(drive.created.map((f) => f.name)).toContain('image-2026-10-10-1330-1.jpg');
     await stopApp(app);
@@ -238,7 +241,7 @@ describe('app with shared files', () => {
   it('without the media pipeline, records the file as not downloaded and does not hold up the batch', async () => {
     const { db, ai, app, sock } = await setup({ media: null });
     shareImage(sock);
-    expect(getMedia(db, 1)).toMatchObject({ status: 'unavailable', errorCode: 'not_downloaded' });
+    expect(await getMedia(db, 1)).toMatchObject({ status: 'unavailable', errorCode: 'not_downloaded' });
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls[0]!.user).toContain(': new banner {image, could not be downloaded}');
     expect(app.mediaQueue).toBeUndefined();
@@ -254,7 +257,7 @@ describe('app with shared files', () => {
     const { db, app, sock } = await setup({ log, media: { fetcher } });
     shareImage(sock);
     // The error code is written when the run ends (the claim before it counts the attempt already).
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ attempts: 1, errorCode: 'unknown' }));
+    await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ attempts: 1, errorCode: 'unknown' }));
     await stopApp(app);
     const out = lines.join('');
     expect(out).toContain('shared file will be retried');
@@ -270,7 +273,7 @@ describe('app with shared files', () => {
     await stopApp(app);
     const out = lines.join('');
     expect(out).toContain('ingest failed');
-    expect(getMedia(db, 1)).toBeUndefined();
+    expect(await getMedia(db, 1)).toBeUndefined();
     for (const s of ['mmg.whatsapp.net', '/v/t1', MEDIA_KEY.toString('base64'), 'new banner', '919800000001', SHARMA.groupId]) {
       expect(out).not.toContain(s);
     }
@@ -294,7 +297,7 @@ describe('app with shared files', () => {
     g.release();
     for (let i = 0; i < 30 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
     await p;
-    expect(getMedia(db, 1)?.status).toBe('done');
+    expect((await getMedia(db, 1))?.status).toBe('done');
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -317,9 +320,9 @@ describe('app with shared files', () => {
     for (let i = 0; i < 12 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
     expect(stopped).toBe(true);
     await p;
-    expect(getMedia(db, 1)?.status).toBe('pending');
+    expect((await getMedia(db, 1))?.status).toBe('pending');
     g.release();
-    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'));
+    await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('done'));
   });
 
   it('stop() starts no other file while it waits for the one in flight', async () => {
@@ -340,13 +343,13 @@ describe('app with shared files', () => {
     });
     g.release();
     // Saving the download is real file I/O: wait for it, not for fake time.
-    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'));
+    await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('done'));
     await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0));
     for (let i = 0; i < 30 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
     await p;
     // The second file is downloaded after the next start, not during the shutdown.
     expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(getMedia(db, 2)).toMatchObject({ status: 'pending', attempts: 0, localPath: null });
+    expect(await getMedia(db, 2)).toMatchObject({ status: 'pending', attempts: 0, localPath: null });
   });
 
   it('reads three files at once by default (Phase 2b Task 10)', async () => {
@@ -362,13 +365,15 @@ describe('app with shared files', () => {
     expect(fetcher).toHaveBeenCalledTimes(3);
     expect(app.mediaQueue!.active).toBe(3);
     g.release();
-    await vi.waitFor(() => expect([1, 2, 3, 4].map((id) => getMedia(db, id)?.status)).toEqual(['done', 'done', 'done', 'done']));
+    await vi.waitFor(async () => expect(await Promise.all([1, 2, 3, 4].map(async (id) => (await getMedia(db, id))?.status))).toEqual(['done', 'done', 'done', 'done']));
     await stopApp(app);
   });
 
   it('a file that settles during the shutdown drain is not uploaded during the shutdown (it stays due for the next start)', async () => {
     const g = gate();
+    const reading = gate();
     const extract = vi.fn<Extractor>(async () => {
+      reading.release();
       await g.promise;
       return NOTHING_READ;
     });
@@ -377,7 +382,7 @@ describe('app with shared files', () => {
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('T1', 'hello')] });
     setRole(db, 1, SHARMA_PN, 'client', 'human');
     shareImage(sock);
-    await vi.waitFor(() => expect(extract).toHaveBeenCalled());
+    await reading.promise; // the event, not the clock: the file is being read
     let stopped = false;
     const p = app.stop().then(() => {
       stopped = true;
@@ -385,7 +390,7 @@ describe('app with shared files', () => {
     g.release();
     for (let i = 0; i < 30 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
     await p;
-    expect(getMedia(db, 1)).toMatchObject({ status: 'done', driveFileId: null });
+    expect(await getMedia(db, 1)).toMatchObject({ status: 'done', driveFileId: null });
     expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']);
     expect(db.raw.prepare('SELECT drive_attempts FROM media').get()).toEqual({ drive_attempts: 0 });
   });
@@ -414,7 +419,7 @@ describe('app media spend (review round 1)', () => {
       prepare: (db) => new SpendGuard({ db, clock: systemClock, capUsd: 15 }).record('ai', 14.99, 'batch 1'),
     });
     shareImage(sock);
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'spend_cap', attempts: 0 }));
+    await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'spend_cap', attempts: 0 }));
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(ai.calls).toHaveLength(0);
     expect(ledger(db)).toHaveLength(1);
@@ -452,7 +457,7 @@ describe('app media spend (review round 1)', () => {
     expect(booked[0]!.usd).toBeCloseTo(imageEstimateUsd(REAL_JPEG_SIZE, P), 10);
     // The answer arrives after all: the call is already booked, so it is not booked again.
     g.release();
-    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'));
+    await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('done'));
     expect(ledger(db)).toEqual(booked);
   });
 });
@@ -472,12 +477,12 @@ describe('app media wiring (15g)', () => {
     const fetcher = vi.fn<MediaFetcher>().mockRejectedValueOnce(new MediaDownloadError('http_503')).mockResolvedValue(Buffer.from('jpeg-bytes'));
     const { db, app, sock } = await setup({ media: { fetcher } });
     shareImage(sock);
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'http_503' }));
+    await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'http_503' }));
     // Retried a minute later, on the first tick after that.
     await vi.advanceTimersByTimeAsync(55_000);
     expect(fetcher).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(40_000);
-    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'));
+    await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('done'));
     expect(fetcher).toHaveBeenCalledTimes(2);
     await stopApp(app);
   });
@@ -489,7 +494,7 @@ describe('app media wiring (15g)', () => {
     const run = vi.spyOn(Reconciler.prototype, 'run');
     const { db, ai, app, sock } = await setup({ media: { extract } });
     shareImage(sock);
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0 }));
+    await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0 }));
     await vi.advanceTimersByTimeAsync(241_000);
     await expect(run.mock.results[0]!.value).resolves.toEqual({ status: 'waiting' });
     expect(ai.calls).toHaveLength(0);
@@ -498,7 +503,7 @@ describe('app media wiring (15g)', () => {
     expect(ai.calls).toHaveLength(1);
     expect(ai.calls[0]!.user).toContain(': new banner {image, still being read}');
     await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0));
-    expect(getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable' });
+    expect(await getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable' });
     await vi.advanceTimersByTimeAsync(30_000);
     expect(readHealthSnapshot(db)!.media).toEqual({ pending: 1, stale: 1, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0 });
     expect(readHealthSnapshot(db)!.line).toEqual({ ok: false, text: '⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.' });
@@ -510,7 +515,7 @@ describe('app media wiring (15g)', () => {
     const { db, app, sock } = await setup();
     shareImage(sock);
     const notify = vi.spyOn(app.debouncer, 'notify');
-    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'));
+    await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('done'));
     expect(notify).toHaveBeenCalledWith(1);
     await stopApp(app);
   });
@@ -542,7 +547,7 @@ describe('app media wiring (15g)', () => {
     g.release();
     await vi.waitFor(() => expect(drive.updated).toHaveLength(published + 1), SLOW_IO);
     expect(Date.now()).toBeLessThan(Date.parse('2026-10-19T07:00:29Z')); // before the first tick after start
-    expect(getMedia(db, 1)).toMatchObject({ status: 'done', textKind: null, driveFileId: null });
+    expect(await getMedia(db, 1)).toMatchObject({ status: 'done', textKind: null, driveFileId: null });
     expect(listUnprocessed(db, 1)).toEqual([]);
     expect(run).not.toHaveBeenCalled();
     expect(ai.calls).toHaveLength(0);
@@ -555,7 +560,7 @@ describe('app media wiring (15g)', () => {
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('T1', 'hello')] });
     setRole(db, 1, SHARMA_PN, 'client', 'human');
     shareImage(sock);
-    await vi.waitFor(() => expect(getMedia(db, 1)?.driveFileId).toBeTruthy());
+    await vi.waitFor(async () => expect((await getMedia(db, 1))?.driveFileId).toBeTruthy());
     expect(Date.now()).toBeLessThan(Date.parse('2026-10-19T07:00:29Z')); // before the first tick after start
     expect(drive.created.map((f) => f.name)).toContain('image-2026-10-10-1330-1.jpg');
     await stopApp(app);
@@ -592,15 +597,15 @@ describe('app media wiring (15g)', () => {
 
   it('stop() waits for the file upload in flight, so its Drive id is saved before stop() returns', async () => {
     let id = 0;
-    const { db, drive, app } = await setup({ prepare: (db, dataDir) => void (id = storedClientDoc(db, dataDir)) });
+    const { db, drive, app } = await setup({ prepare: async (db, dataDir) => void (id = await storedClientDoc(db, dataDir)) });
     const upload = gateClientUpload(drive);
     // The first publish creates the Drive root, then the uploader starts on the file.
     await vi.waitFor(() => expect(upload.inFlight).toBe(true), SLOW_IO);
     let stopped = false;
     let idWhenStopped: string | null | undefined;
-    const p = app.stop().then(() => {
+    const p = app.stop().then(async () => {
       stopped = true;
-      idWhenStopped = getMedia(db, id)?.driveFileId;
+      idWhenStopped = (await getMedia(db, id))?.driveFileId;
     });
     await vi.advanceTimersByTimeAsync(8_000);
     expect(stopped).toBe(false);
@@ -615,7 +620,7 @@ describe('app media wiring (15g)', () => {
 
   it('stop() gives up on a file upload that never finishes after 10 s', async () => {
     let id = 0;
-    const { db, drive, app } = await setup({ prepare: (db, dataDir) => void (id = storedClientDoc(db, dataDir)) });
+    const { db, drive, app } = await setup({ prepare: async (db, dataDir) => void (id = await storedClientDoc(db, dataDir)) });
     const upload = gateClientUpload(drive);
     await vi.waitFor(() => expect(upload.inFlight).toBe(true), SLOW_IO);
     let stopped = false;
@@ -627,14 +632,14 @@ describe('app media wiring (15g)', () => {
     await vi.advanceTimersByTimeAsync(2_000);
     expect(stopped).toBe(true);
     await p;
-    expect(getMedia(db, id)?.driveFileId).toBeNull();
+    expect((await getMedia(db, id))?.driveFileId).toBeNull();
     expect(vi.getTimerCount()).toBe(0);
     upload.release(); // the late answer still saves its id (the database is open in this test)
-    await vi.waitFor(() => expect(getMedia(db, id)?.driveFileId).toBeTruthy(), SLOW_IO);
+    await vi.waitFor(async () => expect((await getMedia(db, id))?.driveFileId).toBeTruthy(), SLOW_IO);
   });
 
   it('the tick retries a file upload that is due, and the finished upload publishes the workbook', async () => {
-    const { db, drive, app } = await setup({ prepare: (db, dataDir) => void storedClientDoc(db, dataDir) });
+    const { db, drive, app } = await setup({ prepare: (db, dataDir) => storedClientDoc(db, dataDir) });
     // Only the client file's first try fails; the tracker uploads go through.
     const createFile = drive.createFile.bind(drive);
     let failures = 1;
@@ -650,11 +655,11 @@ describe('app media wiring (15g)', () => {
     // Due again 2 minutes later. Nothing else happens meanwhile: no message, no file, no publish.
     const { nextAt } = db.raw.prepare('SELECT drive_next_at AS nextAt FROM media').get() as { nextAt: string };
     await vi.advanceTimersByTimeAsync(Date.parse(nextAt) - Date.now() - 1_000);
-    expect(getMedia(db, 1)?.driveFileId).toBeNull();
+    expect((await getMedia(db, 1))?.driveFileId).toBeNull();
     expect(drive.uploads).toBe(1);
     // The first tick after that retries it.
     await vi.advanceTimersByTimeAsync(31_000);
-    await vi.waitFor(() => expect(getMedia(db, 1)?.driveFileId).toBeTruthy());
+    await vi.waitFor(async () => expect((await getMedia(db, 1))?.driveFileId).toBeTruthy());
     expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx', 'brief.pdf']);
     // onUploaded schedules a publish, so Files received gets the Drive link without waiting for another change.
     await vi.waitFor(() => expect(drive.updated).toHaveLength(1));
@@ -663,11 +668,11 @@ describe('app media wiring (15g)', () => {
 
   it('a start gives uploads that gave up a fresh set of attempts', async () => {
     const { db, drive, app } = await setup({
-      prepare: (db, dataDir) => markUploadFailed(db, storedClientDoc(db, dataDir), { failed: true, nextAt: null }),
+      prepare: async (db, dataDir) => markUploadFailed(db, await storedClientDoc(db, dataDir), { failed: true, nextAt: null }),
     });
     expect(db.raw.prepare('SELECT drive_failed, drive_attempts FROM media').get()).toEqual({ drive_failed: 0, drive_attempts: 0 });
     await vi.advanceTimersByTimeAsync(1_000);
-    await vi.waitFor(() => expect(getMedia(db, 1)?.driveFileId).toBeTruthy());
+    await vi.waitFor(async () => expect((await getMedia(db, 1))?.driveFileId).toBeTruthy());
     expect(drive.created.map((f) => f.name)).toContain('brief.pdf');
     await stopApp(app);
   });
@@ -720,7 +725,7 @@ describe('app spend holds (Task 15 review round 3)', () => {
     expect(readHealthSnapshot(db)!.line.text).not.toBe(SPEND_LINE);
     // The read finishes and frees its hold.
     g.release();
-    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'));
+    await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('done'));
     expect(app.health.line().text).not.toBe(SPEND_LINE);
     await vi.advanceTimersByTimeAsync(10 * MINUTE);
     expect(ai.calls.filter((c) => c.user.includes('please send the quote'))).toHaveLength(1);
@@ -758,7 +763,7 @@ describe('app start time (15a, 15f)', () => {
     if (expected.blocks) expect(ai.calls).toHaveLength(0);
     else expect(ai.calls[0]!.user).toContain(': old banner {image, still being read}');
     g.release();
-    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'));
+    await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('done'));
     await stopApp(app);
   });
 
@@ -773,7 +778,7 @@ describe('app start time (15a, 15f)', () => {
     const { db, app } = await setup({ startedAt, media: { sealer, extract }, prepare: (db) => storedImage(db, sealer, minutesBefore(26 * 60).toISOString()) });
     // 10 s, not the default 1 s: under a busy full suite the first attempt can take longer to settle. The fake clock
     // moves at most 10 s here, far short of the 5-minute ai_unavailable wait, so the expected state cannot change.
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ ...expected, errorCode: 'ai_unavailable' }), { timeout: 10_000 });
+    await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ ...expected, errorCode: 'ai_unavailable' }), { timeout: 10_000 });
     await stopApp(app);
   });
 });
@@ -847,7 +852,7 @@ describe('app health line with fresh file counts (final review)', () => {
     g.release();
     await vi.waitFor(() => expect(bodies).toHaveLength(published + 1), SLOW_IO);
     expect(Date.now()).toBeLessThan(Date.parse('2026-10-19T07:00:29Z')); // before the first tick after start
-    expect(getMedia(db, 1)).toMatchObject({ status: 'done', textKind: null });
+    expect(await getMedia(db, 1)).toMatchObject({ status: 'done', textKind: null });
     const before = bodies[published - 1]!;
     const after = bodies[published]!;
     await stopApp(app);
@@ -869,12 +874,54 @@ describe('app health line with fresh file counts (final review)', () => {
       startedAt: minutesBefore(40),
       prepare: (db) => storedImage(db, sealer, minutesBefore(40).toISOString()),
     });
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable' }), SLOW_IO);
+    await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable' }), SLOW_IO);
     expect(app.health.workbookLine().text).toBe(STALE_LINE);
 
     app.reloadClients([MEHTA]); // Sharma, whose file it is, is removed
+    await vi.advanceTimersByTimeAsync(0); // the file counts are read again before the publish is asked for
     expect(app.health.workbookLine()).toEqual({ ok: true, text: '✅ Connected · waiting for new messages' });
     expect(readHealthSnapshot(db)!.media).toMatchObject({ pending: 0, stale: 0 });
+    await stopApp(app);
+  });
+
+  /** Holds the first workbook upload at a gate; `fail` makes it throw once released. Counts workbook uploads tried. */
+  function holdFirstWorkbook(drive: FakeDrive, o: { fail: boolean }) {
+    const g = gate();
+    const tries = { n: 0 };
+    const createFile = drive.createFile.bind(drive);
+    vi.spyOn(drive, 'createFile').mockImplementation(async (name, mime, body, parentId, timeoutMs) => {
+      if (name === 'Tracker.xlsx' && tries.n++ === 0) {
+        await g.promise;
+        if (o.fail) throw new Error('Drive unavailable');
+      }
+      return createFile(name, mime, body, parentId, timeoutMs);
+    });
+    return { release: g.release, tries };
+  }
+
+  it('a tick while a publish of the same line is in flight queues no second upload', async () => {
+    const { drive, app } = await setup();
+    const first = holdFirstWorkbook(drive, { fail: false });
+    await vi.waitFor(() => expect(first.tries.n).toBe(1)); // the start's publish is in flight
+    await vi.advanceTimersByTimeAsync(30_000); // a tick: the line is the one being published
+    first.release();
+    await vi.waitFor(() => expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']));
+    await vi.advanceTimersByTimeAsync(5 * MINUTE); // more ticks, nothing changed
+    expect(drive.uploads).toBe(1);
+    await stopApp(app);
+  });
+
+  it('a publish that fails after a tick left it alone is retried, so its line still reaches the workbook', async () => {
+    const { drive, app } = await setup();
+    const first = holdFirstWorkbook(drive, { fail: true });
+    await vi.waitFor(() => expect(first.tries.n).toBe(1));
+    await vi.advanceTimersByTimeAsync(30_000); // a tick during the publish asks for nothing more
+    first.release(); // the upload fails
+    await vi.advanceTimersByTimeAsync(0);
+    expect(drive.created).toEqual([]);
+    await vi.advanceTimersByTimeAsync(MINUTE); // the publisher's own retry, after its first backoff
+    await vi.waitFor(() => expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']));
+    expect(first.tries.n).toBe(2);
     await stopApp(app);
   });
 });
@@ -954,7 +1001,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const voice = new FakeLocalVoiceTranscriber({ results: [{ text: 'payment bhej diya' }] });
     const { db, ai, app, sock } = await setup({ media: { voice, maxVoiceSeconds: 300, extract: undefined } });
     shareVoice(sock);
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'done', kind: 'voice', text: 'payment bhej diya' }), SLOW_IO);
+    await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'done', kind: 'voice', text: 'payment bhej diya' }), SLOW_IO);
     expect(voice.prepared[0]!.maxSeconds).toBe(300); // maxVoiceSeconds reaches the extractor
     expect(voice.signals[0]).toBeInstanceOf(AbortSignal); // the stop signal reaches the local run
     expect(voice.signals[0]!.aborted).toBe(false);
@@ -971,7 +1018,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const voice = new FakeVoiceTranscriber({ provider: 'sarvam', results: [{ text: 'kal tak bhej dena' }] });
     const { db, app, sock } = await setup({ media: { voice, extract: undefined } });
     shareVoice(sock);
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'done', text: 'kal tak bhej dena' }), SLOW_IO);
+    await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'done', text: 'kal tak bhej dena' }), SLOW_IO);
     expect(voice.transcribed).toBe(1);
     expect(ledger(db).map((r) => r.kind)).toEqual(['stt']);
     await stopApp(app);
@@ -980,7 +1027,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
   it('without a voice transcriber, a voice note finishes without text, as in 2a', async () => {
     const { db, ai, app, sock } = await setup({ media: { extract: undefined } });
     shareVoice(sock);
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'done', text: null, note: null }), SLOW_IO);
+    await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'done', text: null, note: null }), SLOW_IO);
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls[0]!.user).toContain('{voice note, 0:14, not transcribed}');
     await stopApp(app);
@@ -1004,7 +1051,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
       const { db, ai, app, fetcher, release } = await stuckVoice(null);
       await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce(), SLOW_IO);
       await vi.advanceTimersByTimeAsync(240_000);
-      expect(getMedia(db, 1)).toMatchObject({ status: 'pending' });
+      expect(await getMedia(db, 1)).toMatchObject({ status: 'pending' });
       expect(ai.calls).toHaveLength(1);
       expect(ai.calls[0]!.user).toContain('{voice note, 0:14, being transcribed}');
       release();
@@ -1018,7 +1065,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
       await vi.advanceTimersByTimeAsync(240_000);
       expect(ai.calls).toHaveLength(0);
       await vi.advanceTimersByTimeAsync(20 * MINUTE);
-      expect(getMedia(db, 1)).toMatchObject({ status: 'pending' });
+      expect(await getMedia(db, 1)).toMatchObject({ status: 'pending' });
       expect(ai.calls).toHaveLength(0);
       await vi.advanceTimersByTimeAsync(12 * MINUTE); // past 30 minutes, the next tick and the quiet time
       expect(ai.calls).toHaveLength(1);
@@ -1035,9 +1082,9 @@ describe('app voice notes (Phase 2b Task 10)', () => {
    * counted) let the fake clock move before the run ended: the deferral then counted from the moved clock, and the next
    * run never came within the test's advance (Phase 2b final review, the flaky tests).
    */
-  const deferredAfter = (db: Db, transcribed: () => number, runs: number, delayMs: number, errorCode: string) => {
+  const deferredAfter = async (db: Db, transcribed: () => number, runs: number, delayMs: number, errorCode: string) => {
     expect(transcribed()).toBe(runs);
-    const m = getMedia(db, 1)!;
+    const m = (await getMedia(db, 1))!;
     expect(m).toMatchObject({ status: 'pending', attempts: runs, errorCode });
     expect(Date.parse(m.nextAttemptAt!) - Date.parse(m.updatedAt)).toBe(delayMs);
   };
@@ -1050,7 +1097,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     await vi.advanceTimersByTimeAsync(2 * MINUTE);
     await vi.waitFor(() => deferredAfter(db, () => voice.transcribed, 2, 5 * MINUTE, 'local_timeout'), SLOW_IO);
     await vi.advanceTimersByTimeAsync(6 * MINUTE);
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'failed', attempts: 3, errorCode: 'local_timeout' }), SLOW_IO);
+    await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'failed', attempts: 3, errorCode: 'local_timeout' }), SLOW_IO);
     expect(voice.transcribed).toBe(3);
     await stopApp(app);
     // Three runs, each awaited by a vi.waitFor of up to 10 s (SLOW_IO) on real file I/O, plus stopApp: on a busy PC
@@ -1063,7 +1110,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     shareVoice(sock);
     await vi.waitFor(() => deferredAfter(db, () => voice.transcribed, 1, MINUTE, 'local_exit_1'), SLOW_IO);
     await vi.advanceTimersByTimeAsync(2 * MINUTE);
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'failed', attempts: 2 }), SLOW_IO);
+    await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'failed', attempts: 2 }), SLOW_IO);
     expect(voice.transcribed).toBe(2);
     await stopApp(app);
     // Two runs, each awaited by a vi.waitFor of up to 10 s (SLOW_IO), plus stopApp: see the test above.
@@ -1120,7 +1167,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     for (let i = 0; i < 20 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
     expect(stopped).toBe(true);
     await p;
-    expect(getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'local_aborted' });
+    expect(await getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'local_aborted' });
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -1141,7 +1188,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     expect(stopped).toBe(true);
     await p;
     expect(voice.transcribed).toBe(0);
-    expect(getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'local_aborted' });
+    expect(await getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'local_aborted' });
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -1227,7 +1274,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const voice = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ text: 'theek hai', forgetRef: 'tr-1' }] });
     const { db, app, sock } = await setup({ media: { voice, extract: undefined } });
     shareVoice(sock);
-    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'), SLOW_IO);
+    await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('done'), SLOW_IO);
     await vi.waitFor(() => expect(voice.forgotten).toEqual(['tr-1']));
     expect(forgetHook.calls.some((o) => o?.mediaId === 1)).toBe(true);
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM media_stt_forget').get()).toEqual({ n: 0 });
@@ -1238,7 +1285,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const voice = new FakeLocalVoiceTranscriber();
     const { db, app, sock } = await setup({ media: { voice, extract: undefined } });
     shareVoice(sock);
-    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'), SLOW_IO);
+    await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('done'), SLOW_IO);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(forgetHook.calls.some((o) => o?.mediaId !== undefined)).toBe(false);
     await stopApp(app);
@@ -1253,7 +1300,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const voice = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ text: 'theek hai', forgetRef: 'tr-1' }] });
     const { db, app, sock } = await setup({ log, media: { voice, extract: undefined } });
     shareVoice(sock);
-    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'), SLOW_IO);
+    await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('done'), SLOW_IO);
     await vi.waitFor(() => expect(out()).toContain('voice note speech copy not deleted yet'));
     expect(out()).toContain('"code":"SQLITE_BUSY"');
     expect(out()).not.toContain('secret');
@@ -1339,7 +1386,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
         WHEN NEW.status = 'done' AND NEW.kind = 'voice' BEGIN SELECT RAISE(ABORT, 'finish refused'); END`),
     });
     shareVoice(sock);
-    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('failed'), SLOW_IO);
+    await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('failed'), SLOW_IO);
     await vi.waitFor(() => expect(voice.forgotten).toEqual(['tr-1']));
     expect(voice.transcribed).toBe(1); // never paid again
     expect(forgetHook.calls.some((o) => o?.mediaId === 1)).toBe(true);
@@ -1409,11 +1456,11 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     });
     const { db, app, sock } = await setup({ media: { voice: null, fetcher, extract: undefined } });
     shareVoice(sock);
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'http_503' }), SLOW_IO);
+    await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'http_503' }), SLOW_IO);
     await vi.advanceTimersByTimeAsync(2 * MINUTE);
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 2 }), SLOW_IO);
+    await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 2 }), SLOW_IO);
     await vi.advanceTimersByTimeAsync(6 * MINUTE);
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'failed', attempts: 3, errorCode: 'http_503' }), SLOW_IO);
+    await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'failed', attempts: 3, errorCode: 'http_503' }), SLOW_IO);
     expect(fetcher).toHaveBeenCalledTimes(3);
     await stopApp(app);
   });
@@ -1481,7 +1528,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const voice = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ text: 'theek hai', forgetRef: 'tr-1' }] });
     const { db, app, sock } = await setup({ media: { voice, extract: undefined } });
     shareVoice(sock);
-    await vi.waitFor(() => expect(getMedia(db, 1)?.status).toBe('done'), SLOW_IO);
+    await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('done'), SLOW_IO);
     await vi.waitFor(() => expect(forgetHook.calls.some((o) => o?.mediaId === 1)).toBe(true));
     const s = stopping(app);
     await vi.advanceTimersByTimeAsync(3_000);
@@ -1519,7 +1566,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     expect(ai.calls[0]!.user).not.toContain('(re-check: file now read)');
     expect(listUnprocessed(db, 1)).toEqual([]);
     voice.g.release();
-    await vi.waitFor(() => expect(getMedia(db, 1)).toMatchObject({ status: 'done', text: 'payment kal tak ho jayega' }), SLOW_IO);
+    await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'done', text: 'payment kal tak ho jayega' }), SLOW_IO);
     await vi.waitFor(() => expect(listUnprocessed(db, 1)).toHaveLength(1));
     await vi.advanceTimersByTimeAsync(241_000);
     expect(ai.calls).toHaveLength(2);

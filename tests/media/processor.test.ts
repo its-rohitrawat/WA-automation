@@ -156,9 +156,9 @@ describe('MediaProcessor', () => {
       mediaId: id, kind: 'image', mimeType: 'image/jpeg', fileName: null, forwarded: false, bytes: Buffer.from('jpeg-bytes'), path: saved(dataDir, rel(id)),
       revoked: expect.any(Function),
     });
-    expect(getMediaRef(db, id)).toBeNull();
-    expect(getMedia(db, id)).toMatchObject({ status: 'done', localPath: rel(id), fileSize: 10, textKind: 'description', text: 'A blue banner with the new logo' });
-    expect(getMedia(db, id)!.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(await getMediaRef(db, id)).toBeNull();
+    expect(await getMedia(db, id)).toMatchObject({ status: 'done', localPath: rel(id), fileSize: 10, textKind: 'description', text: 'A blue banner with the new logo' });
+    expect((await getMedia(db, id))!.sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
   });
 
@@ -175,11 +175,11 @@ describe('MediaProcessor', () => {
     disk.failNextWrite = true;
     expect((await p.process(id)).outcome).toBe('deferred');
     // A full disk may pass: the file waits without counting an attempt (final review FR2).
-    expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'disk_ENOSPC', nextAttemptAt: at(5 * MINUTE), localPath: null, hasRef: true });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'disk_ENOSPC', nextAttemptAt: at(5 * MINUTE), localPath: null, hasRef: true });
     expect(readdirSync(folder)).toEqual([]); // no partial original and no temp file left behind
     clock.advance(5 * MINUTE);
     expect((await p.process(id)).outcome).toBe('done');
-    expect(getMedia(db, id)).toMatchObject({ status: 'done', localPath: rel(id), fileSize: 10, errorCode: null });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'done', localPath: rel(id), fileSize: 10, errorCode: null });
     expect(readFileSync(saved(dataDir, rel(id)), 'utf8')).toBe('jpeg-bytes');
     expect(readdirSync(folder)).toEqual([basename(saved(dataDir, rel(id)))]);
     expect(fetcher).toHaveBeenCalledTimes(2);
@@ -190,10 +190,10 @@ describe('MediaProcessor', () => {
     const { db, dataDir, p, share } = await setup();
     const id = share();
     const atSync: { hasRef: boolean; inPlace: boolean }[] = [];
-    disk.onSync = () => atSync.push({ hasRef: getMediaRef(db, id) !== null, inPlace: existsSync(saved(dataDir, rel(id))) });
+    disk.onSync = async () => atSync.push({ hasRef: (await getMediaRef(db, id)) !== null, inPlace: existsSync(saved(dataDir, rel(id))) });
     expect((await p.process(id)).outcome).toBe('done');
     expect(atSync).toEqual([{ hasRef: true, inPlace: false }]);
-    expect(getMediaRef(db, id)).toBeNull();
+    expect(await getMediaRef(db, id)).toBeNull();
     expect(readFileSync(saved(dataDir, rel(id)), 'utf8')).toBe('jpeg-bytes');
   });
 
@@ -209,7 +209,7 @@ describe('MediaProcessor', () => {
     const { db, dataDir, p, share } = await setup({ fetcher: async () => { throw new MediaUnavailableError('expired'); } });
     const id = share();
     expect(await p.process(id)).toEqual({ outcome: 'unavailable', clientId: 1 });
-    expect(getMedia(db, id)).toMatchObject({ status: 'unavailable', errorCode: 'expired', hasRef: false, localPath: null });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'unavailable', errorCode: 'expired', hasRef: false, localPath: null });
     expect(existsSync(join(dataDir, 'media'))).toBe(false);
   });
 
@@ -217,13 +217,13 @@ describe('MediaProcessor', () => {
     const { db, clock, p, fetcher, share } = await setup({ fetcher: async () => { throw new MediaDownloadError('http_503'); } });
     const id = share();
     expect((await p.process(id)).outcome).toBe('deferred');
-    expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'http_503', nextAttemptAt: '2026-10-19T08:01:00.000Z', hasRef: true });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'http_503', nextAttemptAt: '2026-10-19T08:01:00.000Z', hasRef: true });
     clock.advance(60_000);
     expect((await p.process(id)).outcome).toBe('deferred');
-    expect(getMedia(db, id)).toMatchObject({ attempts: 2, nextAttemptAt: '2026-10-19T08:06:00.000Z' });
+    expect(await getMedia(db, id)).toMatchObject({ attempts: 2, nextAttemptAt: '2026-10-19T08:06:00.000Z' });
     clock.advance(300_000);
     expect((await p.process(id)).outcome).toBe('failed');
-    expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'http_503', hasRef: false });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'http_503', hasRef: false });
     expect(fetcher).toHaveBeenCalledTimes(3);
   });
 
@@ -241,7 +241,7 @@ describe('MediaProcessor', () => {
       let elapsed = 0;
       for (const wait of [5, 15, 30, 60, 60, 60]) {
         expect(await p.process(id)).toEqual({ outcome: 'deferred', clientId: 1 });
-        expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: code, nextAttemptAt: at(elapsed + wait * MINUTE), hasRef: true, localPath: null });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: code, nextAttemptAt: at(elapsed + wait * MINUTE), hasRef: true, localPath: null });
         elapsed += wait * MINUTE;
         clock.advance(wait * MINUTE);
       }
@@ -254,10 +254,10 @@ describe('MediaProcessor', () => {
       const id = share();
       clock.advance(24 * 60 * MINUTE); // exactly 24 hours: still waits
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'network', attempts: 0, hasRef: true });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'network', attempts: 0, hasRef: true });
       clock.advance(5 * MINUTE);
       expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'network', nextAttemptAt: null, hasRef: false });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'network', nextAttemptAt: null, hasRef: false });
     });
 
     it('counts the 24 hours from the service start for a file saved before it (10f)', async () => {
@@ -268,7 +268,7 @@ describe('MediaProcessor', () => {
       expect(await p.process(id)).toEqual({ outcome: 'deferred', clientId: 1 });
       clock.advance(24 * 60 * MINUTE + 1);
       expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'timeout', hasRef: false });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'timeout', hasRef: false });
     });
 
     it('a 7-minute outage during a backlog loses nothing: every file is read once the line is back', async () => {
@@ -283,10 +283,10 @@ describe('MediaProcessor', () => {
       // As the queue runs: on every 30-second tick, the two oldest due files. The line drops a minute in, for 7 minutes.
       for (let t = 0; t <= 2 * 60 * MINUTE; t += 30_000) {
         down = t >= MINUTE && t < 8 * MINUTE;
-        for (const id of dueMediaIds(db, clock.now().toISOString(), 2)) await p.process(id);
+        for (const id of await dueMediaIds(db, clock.now().toISOString(), 2)) await p.process(id);
         clock.advance(30_000);
       }
-      for (const id of ids) expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'A blue banner with the new logo', hasRef: false });
+      for (const id of ids) expect(await getMedia(db, id)).toMatchObject({ status: 'done', text: 'A blue banner with the new logo', hasRef: false });
       expect(fetcher.mock.calls.length).toBeLessThan(30);
     });
 
@@ -294,7 +294,7 @@ describe('MediaProcessor', () => {
       const { db, p, share } = await setup({ extract: async () => { throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }); } });
       const id = share();
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'disk_EBUSY', nextAttemptAt: at(MINUTE) });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'disk_EBUSY', nextAttemptAt: at(MINUTE) });
     });
   });
 
@@ -308,14 +308,14 @@ describe('MediaProcessor', () => {
     });
     const id = share();
     expect((await p.process(id)).outcome).toBe('deferred');
-    expect(getMedia(db, id)).toMatchObject({
+    expect(await getMedia(db, id)).toMatchObject({
       status: 'pending', attempts: 0, errorCode: 'spend_cap', nextAttemptAt: '2026-10-19T08:10:00.000Z', localPath: rel(id), hasRef: false,
     });
     capped = false;
     clock.advance(600_000);
     expect((await p.process(id)).outcome).toBe('done');
     expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'A receipt', errorCode: null });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'done', text: 'A receipt', errorCode: null });
   });
 
   // Final review FR3c: only holds of paid calls still in flight are in the way, not the cap itself.
@@ -329,11 +329,11 @@ describe('MediaProcessor', () => {
     });
     const id = share();
     expect((await p.process(id)).outcome).toBe('deferred');
-    expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'spend_busy', nextAttemptAt: at(10 * MINUTE), localPath: rel(id) });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'spend_busy', nextAttemptAt: at(10 * MINUTE), localPath: rel(id) });
     busy = false;
     clock.advance(10 * MINUTE);
     expect((await p.process(id)).outcome).toBe('done');
-    expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'A receipt', errorCode: null });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'done', text: 'A receipt', errorCode: null });
   });
 
   it('tells a scan in flight holding the budget (spend_busy) from the daily cap (spend_cap), with the real extractor', async () => {
@@ -352,11 +352,11 @@ describe('MediaProcessor', () => {
     expect(hold).not.toBeNull();
     const a = share('IMG1');
     expect((await p.process(a)).outcome).toBe('deferred');
-    expect(getMedia(db, a)).toMatchObject({ errorCode: 'spend_busy', attempts: 0 });
+    expect(await getMedia(db, a)).toMatchObject({ errorCode: 'spend_busy', attempts: 0 });
     spend.settle(hold!, 'ai', 4.15, 'media 99'); // the scan cost about that after all: now the cap itself is in the way
     const b = share('IMG2');
     expect((await p.process(b)).outcome).toBe('deferred');
-    expect(getMedia(db, b)).toMatchObject({ errorCode: 'spend_cap', attempts: 0 });
+    expect(await getMedia(db, b)).toMatchObject({ errorCode: 'spend_cap', attempts: 0 });
     expect(ai.calls).toEqual([]);
   });
 
@@ -364,7 +364,7 @@ describe('MediaProcessor', () => {
     const { db, dataDir, p, share } = await setup({ extract: async () => { throw new ParseError('not_pdf'); } });
     const id = share();
     expect((await p.process(id)).outcome).toBe('failed');
-    expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'not_pdf', localPath: rel(id) });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'not_pdf', localPath: rel(id) });
     expect(existsSync(saved(dataDir, rel(id)))).toBe(true);
   });
 
@@ -373,7 +373,7 @@ describe('MediaProcessor', () => {
     const id = share();
     applyRevoke(db, 1, 'IMG1');
     expect((await p.process(id)).outcome).toBe('unavailable');
-    expect(getMedia(db, id)).toMatchObject({ errorCode: 'revoked', hasRef: false });
+    expect(await getMedia(db, id)).toMatchObject({ errorCode: 'revoked', hasRef: false });
     expect(fetcher).not.toHaveBeenCalled();
   });
 
@@ -384,7 +384,7 @@ describe('MediaProcessor', () => {
     applyRevoke(db, 1, 'IMG1');
     clock.advance(10 * MINUTE);
     expect(await p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
-    expect(getMedia(db, id)).toMatchObject({ status: 'done', note: 'revoked', text: null, textKind: null, localPath: rel(id) });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'done', note: 'revoked', text: null, textKind: null, localPath: rel(id) });
     expect(extract).toHaveBeenCalledTimes(1);
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(existsSync(saved(dataDir, rel(id)))).toBe(true);
@@ -405,7 +405,7 @@ describe('MediaProcessor', () => {
       db = s.db;
       const id = s.share();
       expect(await s.p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'done', note: 'revoked', text: null, textKind: null, localPath: rel(id), hasRef: false });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'done', note: 'revoked', text: null, textKind: null, localPath: rel(id), hasRef: false });
       expect(s.extract).not.toHaveBeenCalled();
       expect(existsSync(saved(s.dataDir, rel(id)))).toBe(true);
     });
@@ -436,15 +436,15 @@ describe('MediaProcessor', () => {
       db = s.db;
       const id = kind === 'pdf' ? s.shareFile('DOC1', 'application/pdf', 'scan.pdf') : s.share('IMG1');
       expect(await s.p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'done', note: 'revoked', text: null, textKind: null, pageCount: null });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'done', note: 'revoked', text: null, textKind: null, pageCount: null });
       expect(ai.calls).toEqual([]);
       expect(spend.spentToday()).toBe(0);
     });
   });
 
   it.each([
-    ['cannot be opened', 'ref_unreadable', (db: Db, id: number) => {
-      const blob = getMediaRef(db, id)!;
+    ['cannot be opened', 'ref_unreadable', async (db: Db, id: number) => {
+      const blob = (await getMediaRef(db, id))!;
       blob.writeUInt8(blob.readUInt8(blob.length - 1) ^ 1, blob.length - 1); // one flipped bit: the seal no longer opens
       db.raw.prepare('UPDATE media SET ref_enc = ? WHERE id = ?').run(blob, id);
     }],
@@ -454,7 +454,7 @@ describe('MediaProcessor', () => {
     const id = share();
     spoil(db, id);
     expect(await p.process(id)).toEqual({ outcome: 'unavailable', clientId: 1 });
-    expect(getMedia(db, id)).toMatchObject({ status: 'unavailable', errorCode: code, hasRef: false, localPath: null });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'unavailable', errorCode: code, hasRef: false, localPath: null });
     expect(fetcher).not.toHaveBeenCalled();
   });
 
@@ -464,7 +464,7 @@ describe('MediaProcessor', () => {
     mkdirSync(dirname(saved(a.dataDir, rel(idA))), { recursive: true });
     writeFileSync(saved(a.dataDir, rel(idA)), 'other-bytes');
     expect((await a.p.process(idA)).outcome).toBe('failed');
-    expect(getMedia(a.db, idA)).toMatchObject({ errorCode: 'path_conflict', localPath: null });
+    expect(await getMedia(a.db, idA)).toMatchObject({ errorCode: 'path_conflict', localPath: null });
     expect(readFileSync(saved(a.dataDir, rel(idA)), 'utf8')).toBe('other-bytes');
 
     const b = await setup();
@@ -472,7 +472,7 @@ describe('MediaProcessor', () => {
     mkdirSync(dirname(saved(b.dataDir, rel(idB))), { recursive: true });
     writeFileSync(saved(b.dataDir, rel(idB)), 'jpeg-bytes');
     expect((await b.p.process(idB)).outcome).toBe('done');
-    expect(getMedia(b.db, idB)).toMatchObject({ status: 'done', localPath: rel(idB) });
+    expect(await getMedia(b.db, idB)).toMatchObject({ status: 'done', localPath: rel(idB) });
   });
 
   describe('logs ids and codes only: no description, caption, address, key or error text', () => {
@@ -526,7 +526,7 @@ describe('MediaProcessor', () => {
     const id = share();
     syncClients(db, [MEHTA]); // Sharma is no longer in the allow-list
     expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
-    expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: null, nextAttemptAt: null, hasRef: true, localPath: null });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: null, nextAttemptAt: null, hasRef: true, localPath: null });
     expect(fetcher).not.toHaveBeenCalled();
     expect(extract).not.toHaveBeenCalled();
 
@@ -542,7 +542,7 @@ describe('MediaProcessor', () => {
     db.raw.prepare("DELETE FROM messages WHERE wa_id = 'IMG1'").run();
     db.raw.pragma('foreign_keys = ON');
     expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-    expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'no_job', hasRef: false, nextAttemptAt: null });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'no_job', hasRef: false, nextAttemptAt: null });
     expect(fetcher).not.toHaveBeenCalled();
     expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
   });
@@ -551,7 +551,7 @@ describe('MediaProcessor', () => {
   it('never downloads view-once media', async () => {
     const { db, dataDir, p, fetcher, extract, share } = await setup();
     const id = share('VO1', { viewOnce: true });
-    expect(getMedia(db, id)).toMatchObject({ status: 'metadata', errorCode: 'view_once', hasRef: false });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'metadata', errorCode: 'view_once', hasRef: false });
     expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
     expect(fetcher).not.toHaveBeenCalled();
     expect(extract).not.toHaveBeenCalled();
@@ -575,7 +575,7 @@ describe('MediaProcessor', () => {
     const { db, dataDir, p, share } = await setup({ extract: createExtractor({ ai, spend, prices: P, prepareImage }) });
     const id = share('FW2', { contextInfo: { isForwarded: true } });
     expect(await p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
-    expect(getMedia(db, id)).toMatchObject({ status: 'done', forwarded: true, note: 'forwarded_not_described', text: null, localPath: rel(id, 'FW2') });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'done', forwarded: true, note: 'forwarded_not_described', text: null, localPath: rel(id, 'FW2') });
     expect(readFileSync(saved(dataDir, rel(id, 'FW2')), 'utf8')).toBe('jpeg-bytes');
     expect(ai.calls).toEqual([]);
     expect(prepareImage).not.toHaveBeenCalled();
@@ -598,7 +598,7 @@ describe('MediaProcessor', () => {
       let elapsed = 0;
       for (const wait of [5, 15, 30, 60, 60, 60]) {
         expect(await p.process(id)).toEqual({ outcome: 'deferred', clientId: 1 });
-        expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'ai_unavailable', nextAttemptAt: at(elapsed + wait * MINUTE), localPath: rel(id) });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'ai_unavailable', nextAttemptAt: at(elapsed + wait * MINUTE), localPath: rel(id) });
         elapsed += wait * MINUTE;
         clock.advance(wait * MINUTE);
       }
@@ -611,10 +611,10 @@ describe('MediaProcessor', () => {
       const id = share();
       clock.advance(24 * 60 * MINUTE); // exactly 24 hours: still waits
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0 });
       clock.advance(5 * MINUTE);
       expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'ai_unavailable', nextAttemptAt: null, localPath: rel(id) });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'ai_unavailable', nextAttemptAt: null, localPath: rel(id) });
       expect(existsSync(saved(dataDir, rel(id)))).toBe(true);
     });
 
@@ -625,12 +625,12 @@ describe('MediaProcessor', () => {
       const id = share(); // created 3 days before the start
       clock.set(startedAt.toISOString());
       expect(await p.process(id)).toEqual({ outcome: 'deferred', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0 });
       clock.advance(24 * 60 * MINUTE); // exactly 24 hours after the start: still waits
       expect((await p.process(id)).outcome).toBe('deferred');
       clock.advance(5 * MINUTE);
       expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'ai_unavailable', nextAttemptAt: null });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'ai_unavailable', nextAttemptAt: null });
     });
 
     it('reads the file once Claude is back', async () => {
@@ -647,7 +647,7 @@ describe('MediaProcessor', () => {
       clock.advance(5 * MINUTE);
       expect((await p.process(id)).outcome).toBe('done');
       // The waits counted nothing; the run that read it counts one attempt.
-      expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'A receipt', errorCode: null, attempts: 1 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'done', text: 'A receipt', errorCode: null, attempts: 1 });
     });
 
     it('starts the waits again at 5 minutes after a different problem', async () => {
@@ -657,13 +657,13 @@ describe('MediaProcessor', () => {
       await p.process(id); // 5 minutes
       clock.advance(5 * MINUTE);
       await p.process(id); // 15 minutes
-      expect(getMedia(db, id)!.nextAttemptAt).toBe(at(20 * MINUTE));
+      expect((await getMedia(db, id))!.nextAttemptAt).toBe(at(20 * MINUTE));
       clock.advance(15 * MINUTE);
       await p.process(id); // spend cap: 10 minutes
-      expect(getMedia(db, id)).toMatchObject({ errorCode: 'spend_cap', nextAttemptAt: at(30 * MINUTE) });
+      expect(await getMedia(db, id)).toMatchObject({ errorCode: 'spend_cap', nextAttemptAt: at(30 * MINUTE) });
       clock.advance(10 * MINUTE);
       await p.process(id);
-      expect(getMedia(db, id)).toMatchObject({ errorCode: 'ai_unavailable', nextAttemptAt: at(35 * MINUTE), attempts: 0 });
+      expect(await getMedia(db, id)).toMatchObject({ errorCode: 'ai_unavailable', nextAttemptAt: at(35 * MINUTE), attempts: 0 });
     });
 
     it('books nothing for a 529 from the real extractor', async () => {
@@ -675,7 +675,7 @@ describe('MediaProcessor', () => {
       const { db, p, share } = await setup({ extract: createExtractor({ ai, spend, prices: P, prepareImage }) });
       const id = share();
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ errorCode: 'ai_unavailable', attempts: 0 });
+      expect(await getMedia(db, id)).toMatchObject({ errorCode: 'ai_unavailable', attempts: 0 });
       expect(ai.calls).toHaveLength(1);
       expect(spend.spentToday()).toBe(0);
     });
@@ -694,7 +694,7 @@ describe('MediaProcessor', () => {
       const { db, p, share } = await setup({ extract: async () => { throw error(); } });
       const id = share();
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
     });
   });
 
@@ -727,7 +727,7 @@ describe('MediaProcessor', () => {
       const { db, dataDir, clock, p, shareFile } = await setup({ fetcher: async () => PDF, extract, log });
       const id = shareFile('DOC1', 'application/pdf', 'site-plan-scan.pdf');
       expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: 1, nextAttemptAt: null, localPath: rel(id, 'DOC1', 'pdf') });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: 1, nextAttemptAt: null, localPath: rel(id, 'DOC1', 'pdf') });
       expect(existsSync(saved(dataDir, rel(id, 'DOC1', 'pdf')))).toBe(true);
       clock.advance(10 * MINUTE);
       expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
@@ -749,10 +749,10 @@ describe('MediaProcessor', () => {
         const s = await setup({ extract: (await realExtractor(ai)).extract });
         const id = shareIt(s);
         expect((await s.p.process(id)).outcome).toBe('deferred');
-        expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
+        expect(await getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
         s.clock.advance(MINUTE);
         expect((await s.p.process(id)).outcome).toBe('done');
-        expect(getMedia(s.db, id)).toMatchObject({ status: 'done', textKind: 'description', errorCode: null });
+        expect(await getMedia(s.db, id)).toMatchObject({ status: 'done', textKind: 'description', errorCode: null });
         expect(ai.calls.map((c) => c.kind)).toEqual(['image', 'image']);
       },
     );
@@ -770,11 +770,11 @@ describe('MediaProcessor', () => {
         const s = await setup({ fetcher: async () => (kind === 'pdf' ? PDF : Buffer.from('jpeg-bytes')), extract });
         const id = shareIt(s);
         expect((await s.p.process(id)).outcome).toBe('deferred');
-        expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0, nextAttemptAt: at(5 * MINUTE) });
+        expect(await getMedia(s.db, id)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0, nextAttemptAt: at(5 * MINUTE) });
         expect(spend.spentToday()).toBe(0);
         s.clock.advance(5 * MINUTE);
         expect((await s.p.process(id)).outcome).toBe('done');
-        expect(getMedia(s.db, id)).toMatchObject({ status: 'done', errorCode: null, attempts: 1 }); // the wait counted nothing
+        expect(await getMedia(s.db, id)).toMatchObject({ status: 'done', errorCode: null, attempts: 1 }); // the wait counted nothing
         expect(ai.calls.map((c) => c.kind)).toEqual([kind, kind]);
       },
     );
@@ -786,7 +786,7 @@ describe('MediaProcessor', () => {
       const { db, p, shareFile } = await setup({ fetcher: async () => PDF, extract });
       const id = shareFile('DOC1', 'application/pdf', 'scan.pdf');
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'spend_cap', attempts: 0 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'spend_cap', attempts: 0 });
       expect(ai.calls).toEqual([]);
     });
   });
@@ -817,8 +817,8 @@ describe('MediaProcessor', () => {
       expect(ai.calls).toHaveLength(1); // the first, busy, call only
       expect(x.prepareImage).toHaveBeenCalledTimes(1);
       expect(s.fetcher).toHaveBeenCalledTimes(1); // IMG2 was never downloaded
-      expect(getMedia(s.db, saved)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'ai_unavailable', nextAttemptAt: at(5 * MINUTE) });
-      expect(getMedia(s.db, fresh)).toMatchObject({ status: 'pending', attempts: 0, hasRef: true, localPath: null });
+      expect(await getMedia(s.db, saved)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'ai_unavailable', nextAttemptAt: at(5 * MINUTE) });
+      expect(await getMedia(s.db, fresh)).toMatchObject({ status: 'pending', attempts: 0, hasRef: true, localPath: null });
     });
 
     it('a run that never ends is tried again 15 minutes later, after a restart too; after 3 such runs the file fails as crashed', async () => {
@@ -831,11 +831,11 @@ describe('MediaProcessor', () => {
         // Each run is a fresh start of the service: nothing about the earlier runs is kept in memory.
         void s.restart().process(id);
         await vi.waitFor(() => expect(s.extract).toHaveBeenCalledTimes(run));
-        expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: run, nextAttemptAt: at(run * 15 * MINUTE), localPath: rel(id) });
+        expect(await getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: run, nextAttemptAt: at(run * 15 * MINUTE), localPath: rel(id) });
         s.clock.advance(15 * MINUTE);
       }
       expect(await s.restart(log).process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(s.db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed', attempts: MEDIA_MAX_ATTEMPTS, nextAttemptAt: null, localPath: rel(id) });
+      expect(await getMedia(s.db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed', attempts: MEDIA_MAX_ATTEMPTS, nextAttemptAt: null, localPath: rel(id) });
       expect(s.extract).toHaveBeenCalledTimes(MEDIA_MAX_ATTEMPTS);
       expect(s.fetcher).toHaveBeenCalledTimes(1);
       expect(lines.map((l) => JSON.parse(l) as unknown)).toEqual([
@@ -851,14 +851,14 @@ describe('MediaProcessor', () => {
       const seen: [string | null, number][] = [];
       while (errors.length > 0) {
         await p.process(id);
-        const row = getMedia(db, id)!;
+        const row = (await getMedia(db, id))!;
         seen.push([row.errorCode, row.attempts]);
         clock.advance(60 * MINUTE);
       }
       expect(seen).toEqual([
         ['ai_invalid_output', 1], ['ai_unavailable', 1], ['spend_cap', 1], ['ai_unavailable', 1], ['ai_invalid_output', 2], ['spend_busy', 2], ['ai_invalid_output', 3],
       ]);
-      expect(getMedia(db, id)!.status).toBe('failed'); // the third counted attempt, not the seventh run
+      expect((await getMedia(db, id))!.status).toBe('failed'); // the third counted attempt, not the seventh run
     });
   });
 
@@ -867,7 +867,7 @@ describe('MediaProcessor', () => {
     const { db, dataDir, clock, p, fetcher, extract, share } = await setup({ extract: async () => { throw new AiRefusalError(null, usage); } });
     const id = share();
     expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-    expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'ai_refusal', attempts: 1, nextAttemptAt: null, localPath: rel(id) });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'ai_refusal', attempts: 1, nextAttemptAt: null, localPath: rel(id) });
     expect(existsSync(saved(dataDir, rel(id)))).toBe(true);
     clock.advance(10 * MINUTE);
     expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
@@ -928,7 +928,7 @@ describe('MediaProcessor: voice notes', () => {
       const { db, clock, p, shareVoice } = await setup({ extract });
       const id = shareVoice();
       expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1, nextAttemptAt: null, localPath: VOICE_REL(id) });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1, nextAttemptAt: null, localPath: VOICE_REL(id) });
       clock.advance(60 * MINUTE);
       expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
       expect(v.transcribed).toBe(1);
@@ -946,7 +946,7 @@ describe('MediaProcessor: voice notes', () => {
       const { db, p, shareVoice } = await setup({ extract: (await realExtractor(v)).extract });
       const id = shareVoice();
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1 });
       expect(v.transcribed).toBe(1);
     });
 
@@ -961,7 +961,7 @@ describe('MediaProcessor: voice notes', () => {
       const { db, p, shareVoice } = await setup({ extract: (await realExtractor(v)).extract });
       const id = shareVoice();
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1, nextAttemptAt: null });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1, nextAttemptAt: null });
       expect(v.transcribed).toBe(1);
     });
 
@@ -981,7 +981,7 @@ describe('MediaProcessor: voice notes', () => {
       const { db, clock, p, shareVoice } = await setup({ extract });
       const id = shareVoice();
       expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1, nextAttemptAt: null });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1, nextAttemptAt: null });
       expect(record).toHaveBeenCalledExactlyOnceWith('stt', v.ceilingUsd(50), `media ${id} (booked late)`);
       clock.advance(60 * MINUTE);
       expect((await p.process(id)).outcome).toBe('skipped');
@@ -998,7 +998,7 @@ describe('MediaProcessor: voice notes', () => {
       const { db, p, shareVoice } = await setup({ extract });
       const id = shareVoice();
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_unavailable', attempts: 0 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_unavailable', attempts: 0 });
       expect(record).not.toHaveBeenCalled();
     });
   });
@@ -1021,12 +1021,12 @@ describe('MediaProcessor: voice notes', () => {
       const id = s.shareVoice();
       refuseFail(s.db);
       await expect(s.p.process(id)).rejects.toThrow('disk full');
-      expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: 1 });
+      expect(await getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: 1 });
       s.clock.advance(60 * MINUTE);
       expect(await s.p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
       expect(s.extract).toHaveBeenCalledTimes(1);
       expect(v.transcribed).toBe(1);
-      expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: 1 }); // not claimed again
+      expect(await getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: 1 }); // not claimed again
     });
 
     it.each([
@@ -1075,15 +1075,15 @@ describe('MediaProcessor: voice notes', () => {
   ] as const)('%s whose runs never end fails as crashed after 2 runs, not 3', async (_name, kind) => {
     const s = await setup({ extract: () => new Promise<Extraction>(() => {}) });
     const id = kind === 'voice' ? s.shareVoice() : s.shareAudio();
-    expect(getMedia(s.db, id)!.kind).toBe(kind);
+    expect((await getMedia(s.db, id))!.kind).toBe(kind);
     for (let run = 1; run <= STT_NO_ANSWER_MAX_ATTEMPTS; run++) {
       void s.restart().process(id);
       await vi.waitFor(() => expect(s.extract).toHaveBeenCalledTimes(run));
-      expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: run });
+      expect(await getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: run });
       s.clock.advance(15 * MINUTE);
     }
     expect(await s.restart().process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-    expect(getMedia(s.db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed', attempts: STT_NO_ANSWER_MAX_ATTEMPTS });
+    expect(await getMedia(s.db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed', attempts: STT_NO_ANSWER_MAX_ATTEMPTS });
     expect(s.extract).toHaveBeenCalledTimes(STT_NO_ANSWER_MAX_ATTEMPTS);
   });
 
@@ -1096,7 +1096,7 @@ describe('MediaProcessor: voice notes', () => {
       refuseCopies(db);
       expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
       expect(v.forgotten).toEqual(['tr_1']);
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1, text: null, nextAttemptAt: null });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1, text: null, nextAttemptAt: null });
       expect(afterFinish).not.toHaveBeenCalled();
       clock.advance(60 * MINUTE);
       expect((await p.process(id)).outcome).toBe('skipped');
@@ -1114,7 +1114,7 @@ describe('MediaProcessor: voice notes', () => {
       const id = shareVoice();
       refuseCopies(db);
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
       expect(v?.forgotten ?? null).toEqual(forgotten);
     });
 
@@ -1130,7 +1130,7 @@ describe('MediaProcessor: voice notes', () => {
         const id = shareVoice();
         refuseFinish(db);
         expect((await p.process(id)).outcome).toBe('failed');
-        expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
         expect(v.forgotten).toEqual(['tr_1']);
         expect(forgetRows(db)).toEqual([]);
       });
@@ -1154,7 +1154,7 @@ describe('MediaProcessor: voice notes', () => {
         const id = shareVoice();
         refuseFinish(db);
         expect((await p.process(id)).outcome).toBe('failed');
-        expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
         expect(forget).not.toHaveBeenCalled();
         expect(forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_1', attempts: 0 }]);
       });
@@ -1167,7 +1167,7 @@ describe('MediaProcessor: voice notes', () => {
         const id = shareVoice();
         refuseCopies(db);
         expect((await p.process(id)).outcome).toBe('failed');
-        expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
         expect(forget).not.toHaveBeenCalled();
       });
     });
@@ -1177,7 +1177,7 @@ describe('MediaProcessor: voice notes', () => {
       const id = shareVoice();
       db.raw.exec(`CREATE TRIGGER refuse_finish BEFORE UPDATE OF status ON media WHEN NEW.status = 'done' BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'unknown', attempts: 1 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'unknown', attempts: 1 });
     });
   });
 
@@ -1193,7 +1193,7 @@ describe('MediaProcessor: voice notes', () => {
       let elapsed = 0;
       for (const wait of [5, 15, 30, 60, 60, 60]) {
         expect(await p.process(id)).toEqual({ outcome: 'deferred', clientId: 1 });
-        expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'stt_unavailable', nextAttemptAt: at(elapsed + wait * MINUTE) });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'stt_unavailable', nextAttemptAt: at(elapsed + wait * MINUTE) });
         elapsed += wait * MINUTE;
         clock.advance(wait * MINUTE);
       }
@@ -1205,10 +1205,10 @@ describe('MediaProcessor: voice notes', () => {
       const id = shareVoice();
       clock.advance(24 * 60 * MINUTE); // exactly 24 hours: still waits
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_unavailable', attempts: 0 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_unavailable', attempts: 0 });
       clock.advance(5 * MINUTE);
       expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_unavailable', nextAttemptAt: null, localPath: VOICE_REL(id) });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_unavailable', nextAttemptAt: null, localPath: VOICE_REL(id) });
     });
 
     it('counts the 24 hours from the service start for a file saved before it', async () => {
@@ -1219,7 +1219,7 @@ describe('MediaProcessor: voice notes', () => {
       expect((await p.process(id)).outcome).toBe('deferred');
       clock.advance(24 * 60 * MINUTE + 1);
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_unavailable' });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_unavailable' });
     });
 
     it('keeps its waits apart from ai_unavailable: a change of problem starts again at 5 minutes', async () => {
@@ -1229,13 +1229,13 @@ describe('MediaProcessor: voice notes', () => {
       await p.process(id);
       clock.advance(5 * MINUTE);
       await p.process(id);
-      expect(getMedia(db, id)).toMatchObject({ errorCode: 'stt_unavailable', nextAttemptAt: at(20 * MINUTE) });
+      expect(await getMedia(db, id)).toMatchObject({ errorCode: 'stt_unavailable', nextAttemptAt: at(20 * MINUTE) });
       clock.advance(15 * MINUTE);
       await p.process(id);
-      expect(getMedia(db, id)).toMatchObject({ errorCode: 'ai_unavailable', nextAttemptAt: at(25 * MINUTE) });
+      expect(await getMedia(db, id)).toMatchObject({ errorCode: 'ai_unavailable', nextAttemptAt: at(25 * MINUTE) });
       clock.advance(5 * MINUTE);
       await p.process(id);
-      expect(getMedia(db, id)).toMatchObject({ errorCode: 'stt_unavailable', nextAttemptAt: at(30 * MINUTE), attempts: 0 });
+      expect(await getMedia(db, id)).toMatchObject({ errorCode: 'stt_unavailable', nextAttemptAt: at(30 * MINUTE), attempts: 0 });
     });
   });
 
@@ -1252,7 +1252,7 @@ describe('MediaProcessor: voice notes', () => {
       const { db, clock, p, extract, shareVoice } = await setup({ extract: throwing(error) });
       const id = shareVoice();
       expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: 1, nextAttemptAt: null, localPath: VOICE_REL(id) });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: 1, nextAttemptAt: null, localPath: VOICE_REL(id) });
       clock.advance(60 * MINUTE);
       expect((await p.process(id)).outcome).toBe('skipped');
       expect(extract).toHaveBeenCalledTimes(1);
@@ -1267,10 +1267,10 @@ describe('MediaProcessor: voice notes', () => {
       const { db, clock, p, extract, shareVoice } = await setup({ extract: throwing(error) });
       const id = shareVoice();
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
       clock.advance(MINUTE);
       expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: STT_NO_ANSWER_MAX_ATTEMPTS, nextAttemptAt: null });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: STT_NO_ANSWER_MAX_ATTEMPTS, nextAttemptAt: null });
       expect(extract).toHaveBeenCalledTimes(2);
     });
 
@@ -1279,11 +1279,11 @@ describe('MediaProcessor: voice notes', () => {
       const { db, clock, p, shareVoice } = await setup({ extract: (await realExtractor(v)).extract });
       const id = shareVoice();
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_no_answer_unreadable_body', attempts: 1 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_no_answer_unreadable_body', attempts: 1 });
       expect(forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_9', attempts: 0 }]);
       clock.advance(MINUTE);
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_no_answer_unreadable_body' });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_no_answer_unreadable_body' });
       expect(forgetRows(db)).toHaveLength(1);
     });
 
@@ -1297,7 +1297,7 @@ describe('MediaProcessor: voice notes', () => {
       const { db, p, shareVoice } = await setup({ extract });
       const id = shareVoice();
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1 });
       expect(forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_9', attempts: 0 }]);
     });
 
@@ -1312,7 +1312,7 @@ describe('MediaProcessor: voice notes', () => {
       const { db, p, shareVoice } = await setup({ extract, voice: v });
       const id = shareVoice();
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1 });
       await vi.waitFor(() => expect(forgetRows(db)).toEqual([]));
       expect(v.forgotten).toEqual(['tr_9']);
     });
@@ -1333,7 +1333,7 @@ describe('MediaProcessor: voice notes', () => {
       const id = shareVoice();
       expect((await p.process(id)).outcome).toBe('deferred');
       await vi.waitFor(() => expect(forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_9', attempts: 1 }]));
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_no_answer_unreadable_body', attempts: 1 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_no_answer_unreadable_body', attempts: 1 });
     });
 
     it('a transcriber that keeps no copies is not asked: the row waits for one that does', async () => {
@@ -1353,7 +1353,7 @@ describe('MediaProcessor: voice notes', () => {
       const id = shareVoice();
       refuseCopies(db);
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_no_answer_unreadable_body', attempts: 1 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_no_answer_unreadable_body', attempts: 1 });
       expect(forgetRows(db)).toEqual([]);
     });
   });
@@ -1369,10 +1369,10 @@ describe('MediaProcessor: voice notes', () => {
       const { db, clock, p, extract, shareVoice } = await setup({ extract: throwing(error) });
       const id = shareVoice();
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
       clock.advance(MINUTE);
       expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: STT_NO_ANSWER_MAX_ATTEMPTS });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: STT_NO_ANSWER_MAX_ATTEMPTS });
       expect(extract).toHaveBeenCalledTimes(2);
     });
   });
@@ -1381,7 +1381,7 @@ describe('MediaProcessor: voice notes', () => {
     const { db, p, shareVoice } = await setup({ extract: throwing(() => new SpendCapReachedError({ busy: true })) });
     const id = shareVoice();
     expect((await p.process(id)).outcome).toBe('deferred');
-    expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'spend_busy', attempts: 0, nextAttemptAt: at(10 * MINUTE) });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'spend_busy', attempts: 0, nextAttemptAt: at(10 * MINUTE) });
   });
 
   // Phase 2b amendment L2: the local engine costs nothing, so its failures are retried freely, and a stop gives the try back.
@@ -1396,13 +1396,13 @@ describe('MediaProcessor: voice notes', () => {
       const { db, clock, p, extract, shareVoice } = await setup({ extract: throwing(() => new LocalEngineError(engineCode)), voicePaid: false });
       const id = shareVoice();
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
       clock.advance(MINUTE);
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 2, errorCode: code, nextAttemptAt: at(6 * MINUTE) });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 2, errorCode: code, nextAttemptAt: at(6 * MINUTE) });
       clock.advance(5 * MINUTE);
       expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: MEDIA_MAX_ATTEMPTS, nextAttemptAt: null });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: MEDIA_MAX_ATTEMPTS, nextAttemptAt: null });
       expect(extract).toHaveBeenCalledTimes(3);
     });
 
@@ -1414,7 +1414,7 @@ describe('MediaProcessor: voice notes', () => {
         clock.advance(wait);
       }
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_timeout', attempts: 3 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_timeout', attempts: 3 });
       expect(extract).toHaveBeenCalledTimes(3);
     });
 
@@ -1430,7 +1430,7 @@ describe('MediaProcessor: voice notes', () => {
       expect((await p.process(id)).outcome).toBe('deferred');
       clock.advance(5 * MINUTE);
       expect((await p.process(id)).outcome).toBe('done');
-      expect(getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'extract', text: 'kal milte hain', note: null });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'extract', text: 'kal milte hain', note: null });
       expect(v.transcribed).toBe(3);
       expect(forgetRows(db)).toEqual([]);
       expect(spendDb.raw.prepare('SELECT COUNT(*) AS n FROM spend').get()).toEqual({ n: 0 });
@@ -1441,7 +1441,7 @@ describe('MediaProcessor: voice notes', () => {
       const id = shareVoice();
       for (let run = 1; run <= 5; run++) {
         expect((await p.process(id)).outcome).toBe('deferred');
-        expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'local_aborted', nextAttemptAt: at(run * MINUTE) });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'local_aborted', nextAttemptAt: at(run * MINUTE) });
         clock.advance(MINUTE);
       }
       expect(extract).toHaveBeenCalledTimes(5);
@@ -1459,7 +1459,7 @@ describe('MediaProcessor: voice notes', () => {
       expect((await p.process(id)).outcome).toBe('deferred');
       clock.advance(MINUTE);
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'local_aborted' });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'local_aborted' });
     });
 
     it.each(['voice', 'audio'] as const)('with voicePaid false, a %s file whose runs never end fails as crashed after 3 runs, as images do', async (kind) => {
@@ -1468,11 +1468,11 @@ describe('MediaProcessor: voice notes', () => {
       for (let run = 1; run <= MEDIA_MAX_ATTEMPTS; run++) {
         void s.restart().process(id);
         await vi.waitFor(() => expect(s.extract).toHaveBeenCalledTimes(run));
-        expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: run });
+        expect(await getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: run });
         s.clock.advance(15 * MINUTE);
       }
       expect(await s.restart().process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(s.db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed', attempts: MEDIA_MAX_ATTEMPTS });
+      expect(await getMedia(s.db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed', attempts: MEDIA_MAX_ATTEMPTS });
       expect(s.extract).toHaveBeenCalledTimes(MEDIA_MAX_ATTEMPTS);
     });
 
@@ -1482,7 +1482,7 @@ describe('MediaProcessor: voice notes', () => {
       expect((await p.process(id)).outcome).toBe('deferred');
       clock.advance(MINUTE);
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_timeout', attempts: STT_NO_ANSWER_MAX_ATTEMPTS });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_timeout', attempts: STT_NO_ANSWER_MAX_ATTEMPTS });
       expect(extract).toHaveBeenCalledTimes(2);
     });
 
@@ -1492,7 +1492,7 @@ describe('MediaProcessor: voice notes', () => {
         const { db, clock, p, extract, shareVoice } = await setup({ extract: throwing(() => new LocalEngineError('timeout')), ...(voice !== undefined ? { voice } : {}) });
         const id = shareVoice();
         for (let i = 0; i < 5 && (await p.process(id)).outcome === 'deferred'; i++) clock.advance(5 * MINUTE);
-        expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_timeout' });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_timeout' });
         return extract.mock.calls.length;
       };
 
@@ -1521,7 +1521,7 @@ describe('MediaProcessor: voice notes', () => {
         expect((await b.p.process(idb)).outcome).toBe('deferred');
         b.clock.advance(5 * MINUTE);
         expect((await b.p.process(idb)).outcome).toBe('failed');
-        expect(getMedia(b.db, idb)).toMatchObject({ attempts: MEDIA_MAX_ATTEMPTS });
+        expect(await getMedia(b.db, idb)).toMatchObject({ attempts: MEDIA_MAX_ATTEMPTS });
       });
 
       it('a local voice transcriber with voicePaid unset: a voice note whose runs never end fails as crashed after 3 runs', async () => {
@@ -1533,7 +1533,7 @@ describe('MediaProcessor: voice notes', () => {
           s.clock.advance(15 * MINUTE);
         }
         expect(await s.restart().process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-        expect(getMedia(s.db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed', attempts: MEDIA_MAX_ATTEMPTS });
+        expect(await getMedia(s.db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed', attempts: MEDIA_MAX_ATTEMPTS });
       });
     });
 
@@ -1544,7 +1544,7 @@ describe('MediaProcessor: voice notes', () => {
         const id = shareVoice();
         clock.advance(24 * 60 * MINUTE); // exactly 24 hours: still waits
         expect((await p.process(id)).outcome).toBe('deferred');
-        expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'local_aborted', nextAttemptAt: at(24 * 60 * MINUTE + MINUTE) });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'local_aborted', nextAttemptAt: at(24 * 60 * MINUTE + MINUTE) });
         expect(extract).toHaveBeenCalledTimes(1);
       });
 
@@ -1554,7 +1554,7 @@ describe('MediaProcessor: voice notes', () => {
         expect((await p.process(id)).outcome).toBe('deferred');
         clock.advance(24 * 60 * MINUTE + 1);
         expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-        expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_aborted', nextAttemptAt: null });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_aborted', nextAttemptAt: null });
       });
 
       it('counts the 24 hours from the service start for a file saved before it', async () => {
@@ -1565,7 +1565,7 @@ describe('MediaProcessor: voice notes', () => {
         expect((await p.process(id)).outcome).toBe('deferred');
         clock.advance(24 * 60 * MINUTE + 1);
         expect((await p.process(id)).outcome).toBe('failed');
-        expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_aborted' });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_aborted' });
       });
     });
 
@@ -1577,7 +1577,7 @@ describe('MediaProcessor: voice notes', () => {
         clock.advance(wait);
       }
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ errorCode: 'ai_invalid_output', attempts: MEDIA_MAX_ATTEMPTS });
+      expect(await getMedia(db, id)).toMatchObject({ errorCode: 'ai_invalid_output', attempts: MEDIA_MAX_ATTEMPTS });
     });
 
     it('logs ids and codes only', async () => {
@@ -1598,10 +1598,10 @@ describe('MediaProcessor: voice notes', () => {
   describe('afterFinish', () => {
     it('is told the file and its extraction once the transcript and its copy are stored', async () => {
       const seen: unknown[] = [];
-      const s = await setup({ extract: async () => TRANSCRIPT, afterFinish: (mediaId, x) => void seen.push({ mediaId, x, status: getMedia(s.db, mediaId)?.status, copies: forgetRows(s.db).length }) });
+      const s = await setup({ extract: async () => TRANSCRIPT, afterFinish: async (mediaId, x) => void seen.push({ mediaId, x, status: (await getMedia(s.db, mediaId))?.status, copies: forgetRows(s.db).length }) });
       const id = s.shareVoice();
       expect((await s.p.process(id)).outcome).toBe('done');
-      expect(seen).toEqual([{ mediaId: id, x: TRANSCRIPT, status: 'done', copies: 1 }]);
+      await vi.waitFor(() => expect(seen).toEqual([{ mediaId: id, x: TRANSCRIPT, status: 'done', copies: 1 }]));
     });
 
     it('is called for any file read, with or without a copy', async () => {
@@ -1621,7 +1621,7 @@ describe('MediaProcessor: voice notes', () => {
       });
       const id = shareVoice();
       expect(await p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'payment bhej diya', errorCode: null });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'done', text: 'payment bhej diya', errorCode: null });
     });
 
     // Review round 1, fix 4: it may be async; neither a sync throw nor a rejection escapes, and both are logged.
@@ -1639,7 +1639,7 @@ describe('MediaProcessor: voice notes', () => {
       const id = shareVoice();
       expect(await p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
       await vi.waitFor(() => expect(lines.some((l) => l.includes('"errorCode":"after_finish"'))).toBe(true));
-      expect(getMedia(db, id)).toMatchObject({ status: 'done', errorCode: null });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'done', errorCode: null });
       expect(lines.join('')).not.toContain('forget run failed');
     });
 
