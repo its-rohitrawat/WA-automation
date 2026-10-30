@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
+import { onSqlite } from '../helpers/db.ts';
 import { migrate, openDb } from '../../src/store/db.ts';
 import { MIGRATIONS } from '../../src/store/migrations.ts';
 import {
@@ -13,7 +14,8 @@ const T0 = '2026-10-23T00:30:00.000Z'; // 06:00 IST
 const T1 = '2026-10-23T00:32:00.000Z';
 const T2 = '2026-10-23T00:33:00.000Z';
 
-describe('migration v6', () => {
+// SQLite only (S2.7): SQLite's migration v6 and its CHECK message.
+describe.runIf(onSqlite)('migration v6', () => {
   it('upgrades a version-5 database and keeps its data', () => {
     const db = new Database(':memory:');
     db.exec('CREATE TABLE schema_version (version INTEGER NOT NULL)');

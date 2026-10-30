@@ -9,7 +9,7 @@ import {
 } from '../../src/store/media.ts';
 import { MIGRATIONS } from '../../src/store/migrations.ts';
 import { applyRevoke, insertMessage, listUnprocessed, markProcessed, markProcessedIfUnchanged, upsertReaction } from '../../src/store/messages.ts';
-import { LATER, MEHTA, NOW, SHARMA, seededDb } from '../helpers/db.ts';
+import { LATER, MEHTA, NOW, onSqlite, SHARMA, seededDb } from '../helpers/db.ts';
 
 async function message(db: Db, waId: string, o: { clientId?: number; mediaType?: string | null; ts?: string } = {}): Promise<number> {
   const clientId = o.clientId ?? 1;
@@ -28,7 +28,8 @@ const media = (messageId: number, o: Partial<NewMedia> = {}): NewMedia => ({
 const pdf = (messageId: number): NewMedia => media(messageId, { kind: 'document', mimeType: 'application/pdf', fileName: 'brief.pdf' });
 
 describe('media store', () => {
-  it('upgrades a version-3 database and keeps its messages', () => {
+  // SQLite only (S2.7): SQLite's migrations 3 to 5.
+  it.runIf(onSqlite)('upgrades a version-3 database and keeps its messages', () => {
     const db = new Database(':memory:');
     db.exec('CREATE TABLE schema_version (version INTEGER NOT NULL)');
     for (const m of MIGRATIONS.filter((x) => x.version <= 3)) {
@@ -45,7 +46,8 @@ describe('media store', () => {
       .toEqual({ required: 1, dflt: '0' });
   });
 
-  it('upgrades a version-4 database: its files get requeued_for_text 0 and no message is queued again (12h)', async () => {
+  // SQLite only (S2.7): SQLite's migrations 3 to 5.
+  it.runIf(onSqlite)('upgrades a version-4 database: its files get requeued_for_text 0 and no message is queued again (12h)', async () => {
     const db = new Database(':memory:');
     db.exec('CREATE TABLE schema_version (version INTEGER NOT NULL)');
     for (const m of MIGRATIONS.filter((x) => x.version <= 4)) {
@@ -64,7 +66,8 @@ describe('media store', () => {
     expect(db.prepare("SELECT processed_at AS p, version FROM messages WHERE wa_id = 'm1'").get()).toEqual({ p: '2026-10-10T00:05:00Z', version: 0 });
   });
 
-  it('adds version 5 as a new migration after version 4', () => {
+  // SQLite only (S2.7): SQLite's migrations 3 to 5.
+  it.runIf(onSqlite)('adds version 5 as a new migration after version 4', () => {
     expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     expect(MIGRATIONS[4]!.sql.trim()).toBe('ALTER TABLE media ADD COLUMN requeued_for_text INTEGER NOT NULL DEFAULT 0;');
   });

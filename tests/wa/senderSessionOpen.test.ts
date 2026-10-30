@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { onSqlite } from '../helpers/db.ts';
 import { senderSessionDbPath, sessionDbPath } from '../../src/config/paths.ts';
 import { openSenderSession, openSessionDb, useEncryptedAuthState, useSenderAuthState } from '../../src/wa/authState.ts';
 import { rawOf } from '../../src/store/engine/sqlite.ts';
@@ -27,7 +28,8 @@ async function linkedSenderFile(dir: string, master: Buffer): Promise<string> {
   return file;
 }
 
-describe('openSenderSession (service start)', () => {
+// SQLite only (S2.7): the spare phone's session file (Postgres: tests/wa/authStatePg.test.ts).
+describe.runIf(onSqlite)('openSenderSession (service start)', () => {
   it('opens a new or a linked spare-number session', async () => {
     const dir = tempDir();
     const fresh = await openSenderSession(senderSessionDbPath(dir), randomBytes(32));

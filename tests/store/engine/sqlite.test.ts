@@ -3,11 +3,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { onSqlite } from '../../helpers/db.ts';
 import { SqliteDb, TxMisuseError, rawOf } from '../../../src/store/engine/sqlite.ts';
 
 const open = () => SqliteDb.open(':memory:', { txMaxMs: 1_000 });
 
-describe('SqliteDb.open read-only (S3.3)', () => {
+// SQLite only (S2.7), like every block in this file: the SQLite engine itself.
+describe.runIf(onSqlite)('SqliteDb.open read-only (S3.3)', () => {
   let tmp: string;
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), 'wa-ro-'));
@@ -39,7 +41,7 @@ describe('SqliteDb.open read-only (S3.3)', () => {
   });
 });
 
-describe('SqliteDb', () => {
+describe.runIf(onSqlite)('SqliteDb', () => {
   it('runs get, all and run with positional and named values', async () => {
     const db = open();
     await db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, k TEXT, n INTEGER)');

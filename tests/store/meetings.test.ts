@@ -9,7 +9,7 @@ import {
   type MeetingStatus, type NewMeeting, type SttPartRow,
 } from '../../src/store/meetings.ts';
 import { MIGRATIONS } from '../../src/store/migrations.ts';
-import { LATER, NOW, seededDb } from '../helpers/db.ts';
+import { LATER, NOW, onSqlite, seededDb } from '../helpers/db.ts';
 
 const CONF = 'conferenceRecords/c1';
 const LATEST = '2026-10-19T10:00:00.000Z';
@@ -441,7 +441,8 @@ describe('meetings store', () => {
   });
 });
 
-describe('migration 7', () => {
+// SQLite only (S2.7): SQLite's migration 7.
+describe.runIf(onSqlite)('migration 7', () => {
   it('upgrades a version-6 database with data in it: old rows unchanged, new columns null, links valid', async () => {
     const db = new Database(':memory:');
     db.pragma('foreign_keys = ON');

@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { onSqlite } from '../helpers/db.ts';
 import { openDb } from '../../src/store/db.ts';
 import { rawOf } from '../../src/store/engine/sqlite.ts';
 
@@ -11,7 +12,8 @@ afterEach(() => {
   dir = undefined;
 });
 
-describe('tx', () => {
+// SQLite only (S2.7): the database file's write lock (BEGIN IMMEDIATE, busy_timeout).
+describe.runIf(onSqlite)('tx', () => {
   it('takes the write lock at BEGIN, so a second writer cannot slip in after a read', async () => {
     dir = mkdtempSync(join(tmpdir(), 'wa-tx-'));
     const file = join(dir, 'a.db');

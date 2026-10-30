@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { onSqlite } from '../helpers/db.ts';
 import { senderSessionDbPath, sessionDbPath } from '../../src/config/paths.ts';
 import { deriveSubkey } from '../../src/crypto/keyProvider.ts';
 import {
@@ -12,7 +13,8 @@ import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const MASTER = randomBytes(32);
 
-describe('sender session store', () => {
+// SQLite only (S2.7): the spare phone's session file (Postgres: tests/wa/authStatePg.test.ts).
+describe.runIf(onSqlite)('sender session store', () => {
   it('lives in its own file next to the founder session', () => {
     expect(senderSessionDbPath('data')).toBe(join('data', 'sender-session.db'));
     expect(senderSessionDbPath('data')).not.toBe(sessionDbPath('data'));

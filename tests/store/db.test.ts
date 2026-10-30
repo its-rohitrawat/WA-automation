@@ -1,11 +1,13 @@
 import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
+import { onSqlite } from '../helpers/db.ts';
 import { migrate, openDb } from '../../src/store/db.ts';
 import { MIGRATIONS, type Migration } from '../../src/store/migrations.ts';
 import { rawOf } from '../../src/store/engine/sqlite.ts';
 
-describe('openDb', () => {
+// SQLite only (S2.7), like every block in this file: openDb and SQLite's own migrations (Postgres: tests/store/pg).
+describe.runIf(onSqlite)('openDb', () => {
   it('creates every table', () => {
     const db = openDb(':memory:');
     const tables = (rawOf(db).prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]).map((t) => t.name);
@@ -45,7 +47,7 @@ describe('openDb', () => {
   });
 });
 
-describe('migrate: a skipped migration', () => {
+describe.runIf(onSqlite)('migrate: a skipped migration', () => {
   // A database made before main's v6 (the reports table) reached this branch is recorded at 1 to 5 and 7 onwards.
   const withoutV6 = MIGRATIONS.filter((m) => m.version !== 6);
   const FAKE_V13: Migration = { version: 13, sql: 'CREATE TABLE fake_later (id INTEGER PRIMARY KEY);' };
@@ -90,7 +92,7 @@ describe('migrate: a skipped migration', () => {
   });
 });
 
-describe('migration v8 (Phase 2b: voice notes)', () => {
+describe.runIf(onSqlite)('migration v8 (Phase 2b: voice notes)', () => {
   const versions = (db: Database.Database) =>
     (db.prepare('SELECT version FROM schema_version ORDER BY version').all() as { version: number }[]).map((r) => r.version);
   /** Up to v8 only, so these keep testing v8 itself once later versions exist. */
@@ -150,7 +152,7 @@ describe('migration v8 (Phase 2b: voice notes)', () => {
   });
 });
 
-describe('migration v9 (owner dashboard)', () => {
+describe.runIf(onSqlite)('migration v9 (owner dashboard)', () => {
   const versions = (db: Database.Database) =>
     (db.prepare('SELECT version FROM schema_version ORDER BY version').all() as { version: number }[]).map((r) => r.version);
   const columns = (db: Database.Database, table: string) =>
@@ -294,7 +296,7 @@ describe('migration v9 (owner dashboard)', () => {
   });
 });
 
-describe('migration v10 (dashboard: task history index, outage reasons)', () => {
+describe.runIf(onSqlite)('migration v10 (dashboard: task history index, outage reasons)', () => {
   const versions = (db: Database.Database) =>
     (db.prepare('SELECT version FROM schema_version ORDER BY version').all() as { version: number }[]).map((r) => r.version);
   const columns = (db: Database.Database, table: string) =>
@@ -364,7 +366,7 @@ describe('migration v10 (dashboard: task history index, outage reasons)', () => 
   });
 });
 
-describe('migration v11 (priority levels and sentiment)', () => {
+describe.runIf(onSqlite)('migration v11 (priority levels and sentiment)', () => {
   const versions = (db: Database.Database) =>
     (db.prepare('SELECT version FROM schema_version ORDER BY version').all() as { version: number }[]).map((r) => r.version);
 
@@ -413,7 +415,7 @@ describe('migration v11 (priority levels and sentiment)', () => {
   });
 });
 
-describe('migration v12 (Open chat: the outbox)', () => {
+describe.runIf(onSqlite)('migration v12 (Open chat: the outbox)', () => {
   const put = (db: Database.Database, o: Record<string, unknown> = {}) =>
     db.prepare(`INSERT INTO outbox (uuid, client_id, text, state, actor, created_at) VALUES (@uuid, @client, @text, @state, 'owner@example.com', '2026-10-29T08:00:00Z')`)
       .run({ uuid: '00000000-0000-4000-8000-000000000001', client: 1, text: 'Hello', state: 'claimed', ...o });
@@ -448,7 +450,7 @@ describe('migration v12 (Open chat: the outbox)', () => {
   });
 });
 
-describe('applied migrations never change', () => {
+describe.runIf(onSqlite)('applied migrations never change', () => {
   it('v1 to v10 stay byte for byte as written (a change goes in a new version after them, never an edit)', () => {
     const text = MIGRATIONS.filter((m) => m.version <= 10).map((m) => `${m.version}\n${m.sql}`).join('\n---\n');
     expect(createHash('sha256').update(text).digest('hex')).toBe('b8f67ddeff8d2f33bda23181a83a4c7b6609c60b9efd8312f0c0ededacf8fb51');

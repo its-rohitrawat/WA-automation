@@ -4,12 +4,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { proto } from 'baileys';
 import { describe, expect, it } from 'vitest';
+import { onSqlite } from '../helpers/db.ts';
 import { SessionDecryptError, openSessionDb, readFounderNumber, resetSession, useEncryptedAuthState } from '../../src/wa/authState.ts';
 import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const key = randomBytes(32);
 
-describe('encrypted auth state', () => {
+// SQLite only (S2.7), like every block in this file: the session file (Postgres: tests/wa/authStatePg.test.ts).
+describe.runIf(onSqlite)('encrypted auth state', () => {
   it('starts with fresh credentials and no session', async () => {
     const a = await useEncryptedAuthState(openSessionDb(':memory:'), key);
     expect(a.hasSession).toBe(false);
@@ -177,7 +179,7 @@ describe('encrypted auth state', () => {
   });
 });
 
-describe("readFounderNumber (link-sender's read of the founder's session)", () => {
+describe.runIf(onSqlite)("readFounderNumber (link-sender's read of the founder's session)", () => {
   const files = (dir: string) => readdirSync(dir).sort();
 
   it('reads the linked number without changing session.db or leaving any file beside it', async () => {
