@@ -162,7 +162,8 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
   });
 
   it('the runtime passes the report to createApp when REPORT_ENABLED, and closes the spare-number database only after app.stop() or on a failed start', () => {
-    const src = readFileSync(join(import.meta.dirname, '../../src/runtime/customerRuntime.ts'), 'utf8');
+    // Either line ending: the checks below look for line starts.
+    const src = readFileSync(join(import.meta.dirname, '../../src/runtime/customerRuntime.ts'), 'utf8').replace(/\r\n/g, '\n');
     // The report is built only under REPORT_ENABLED, and the openMorningReport result is what reaches createApp.
     expect(src).toMatch(/if \(env\.REPORT_ENABLED\) \{/);
     expect(src).toMatch(/const (\w+) = await openMorningReport\([\s\S]*?\breport = \1\.report;/);
