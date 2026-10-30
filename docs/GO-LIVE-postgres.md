@@ -14,15 +14,16 @@ each kept apart. You run every step yourself, on the Mac, with the Mac assistant
 - **Placeholders** look like `<this>`. Replace each one, including the `<` and `>`. Never paste a password into a chat,
   an email or a screenshot.
 
-> **To confirm at S2.** Some names below come from the plan and are fixed only when the Postgres code (S2) is
-> finished. Each place is marked **[confirm at S2]**. Check these names against the released version before the
-> evening of the switch:
+> **To confirm at S2.** Some names below are fixed only when the Postgres code (S2) is finished, at its last step
+> (S2.10). Each place is marked **[confirm at S2]**. Check these against the released version before the evening of
+> the switch:
 > - the commands `db-bootstrap`, `db-migrate`, `migrate-to-postgres` and `export-to-sqlite`;
-> - how `db-bootstrap` asks for the `postgres` password (it should ask, never take it on the command line);
-> - the `.env` names `DB_ENGINE`, `DATABASE_URL`, `DATABASE_OWNER_URL` and `DATABASE_PLATFORM_URL`;
-> - the role names `wa_owner`, `wa_app` and `wa_platform`, and the migrations P1 to P3;
-> - the `status` line that names the database engine;
-> - that the nightly dump runs as the `postgres` superuser (part 5).
+> - that `db-bootstrap` asks for the `postgres` password and shows nothing as you type (it never takes it on the command
+>   line);
+> - the `.env` names `DB_ENGINE`, `DATABASE_URL`, `DATABASE_OWNER_URL`, `DATABASE_PLATFORM_URL` and
+>   `DATABASE_BACKUP_URL`;
+> - the role names `wa_owner`, `wa_app`, `wa_platform` and `wa_backup`, and the migrations P1 to P3;
+> - the `status` line that names the database engine.
 
 ---
 
@@ -50,7 +51,7 @@ outside the Mac can reach it.
    ```
 
 3. **Make the `postgres` superuser password** (normal window): `openssl rand -hex 24`. Save it in your password
-   manager as "WA Agent Postgres superuser". You need it in step 4, part 2 and part 5.
+   manager as "WA Agent Postgres superuser". You need it in step 4, in part 2 and for the restore test in part 5.
 
 4. **Create the database cluster** (waagent window). It asks for the password from step 3, twice, and shows nothing
    as you type:
@@ -125,34 +126,38 @@ outside the Mac can reach it.
 
 ## Part 2. The roles and the empty database (once, about 10 minutes)
 
-The agent connects with its own limited roles, never the superuser:
+The agent and its jobs connect with their own limited roles, never the superuser:
 - `wa_app`, for the customers' data, which row level security keeps apart;
 - `wa_platform`, for the customers list and invites;
-- `wa_owner`, which owns the tables and runs the upgrades.
+- `wa_owner`, which owns the tables and runs the upgrades;
+- `wa_backup`, which may only read, for the nightly backup (part 5).
 
 **[confirm at S2]**
 
-1. **Make three passwords** (normal window), each with `openssl rand -hex 24`. Save them in your password manager as
-   "WA Agent Postgres app", "… platform" and "… owner". Hex keeps them safe inside an address.
+1. **Make four passwords** (normal window), each with `openssl rand -hex 24`. Save them in your password manager as
+   "WA Agent Postgres app", "… platform", "… owner" and "… backup". Hex keeps them safe inside an address.
 
-2. **Add them to `.env`** (waagent window, `nano .env`). Add these four lines, with your passwords in place of the
-   placeholders. Leave `DB_ENGINE` on `sqlite` for now: nothing changes yet. **[confirm at S2]**
+2. **Add them to `.env`** (waagent window, `nano .env`). Add these five lines, with your passwords in place of the
+   placeholders. `db-bootstrap` reads them to set each role's password. Leave `DB_ENGINE` on `sqlite` for now: nothing
+   changes yet. **[confirm at S2]**
 
    ```env
    DB_ENGINE=sqlite
    DATABASE_URL=postgres://wa_app:<app password>@127.0.0.1:5432/wa_agent
    DATABASE_PLATFORM_URL=postgres://wa_platform:<platform password>@127.0.0.1:5432/wa_agent
    DATABASE_OWNER_URL=postgres://wa_owner:<owner password>@127.0.0.1:5432/wa_agent
+   DATABASE_BACKUP_URL=postgres://wa_backup:<backup password>@127.0.0.1:5432/wa_agent
    ```
 
-3. **Create the roles and the database** (waagent window). It asks for the `postgres` password from part 1, step 3:
+3. **Create the roles and the database** (waagent window). It asks for the `postgres` password from part 1, step 3, and
+   shows nothing as you type:
 
    ```sh
    npm run cli -- db-bootstrap
    npm run cli -- db-migrate
    ```
 
-   You should see that the three roles and the database `wa_agent` are ready, then `P1, P2, P3 applied`. No password
+   You should see that the four roles and the database `wa_agent` are ready, then `P1, P2, P3 applied`. No password
    is ever printed. **[confirm at S2]**
 
 4. **Check that nothing changed for the agent** (waagent window): `npm run cli -- status`. It is still on SQLite, as
@@ -275,17 +280,19 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/com.wa-agent.plist
 
 The dumps hold every business's data: keep them on this Mac only. FileVault protects them at rest.
 
-1. **The password file** for the dumps (waagent window). Run `nano ~/.pgpass`, type this one line, and save:
+1. **The password file** for the dumps (waagent window). Run `nano ~/.pgpass`, type this one line with the "… backup"
+   password from part 2, and save:
 
    ```text
-   127.0.0.1:5432:*:postgres:<postgres password>
+   127.0.0.1:5432:wa_agent:wa_backup:<backup password>
    ```
 
    Then `chmod 600 ~/.pgpass`. Type the password with `nano`, never with `echo`, which would keep it in the shell
    history.
 
-   The dumps run as the `postgres` superuser, because the table owner can't dump tables whose row level security is
-   forced. **[confirm at S2]**
+   The dumps run as `wa_backup`, a role that may only read. It still sees every business's rows, which a full backup
+   needs: the owner role can't, because row level security applies to it too. The dump job reads only this file, never
+   the agent's `.env`. **[confirm at S2]**
 
 2. **The nightly job** (normal window). It runs at 02:30 and keeps one dump per weekday, so seven rolling files:
 
@@ -309,7 +316,7 @@ The dumps hold every business's data: keep them on this Mac only. FileVault prot
      <array>
        <string>/bin/sh</string>
        <string>-c</string>
-       <string>/usr/local/opt/postgresql@17/bin/pg_dump -h 127.0.0.1 -U postgres -Fc -f /opt/wa-agent-db/backups/wa-$(date +%a).dump wa_agent</string>
+       <string>/usr/local/opt/postgresql@17/bin/pg_dump -h 127.0.0.1 -U wa_backup -Fc -f /opt/wa-agent-db/backups/wa-$(date +%a).dump wa_agent</string>
      </array>
      <key>StartCalendarInterval</key>
      <dict>
@@ -334,14 +341,14 @@ The dumps hold every business's data: keep them on this Mac only. FileVault prot
    After a minute, `sudo ls -l /opt/wa-agent-db/backups` shows today's `wa-<Day>.dump`, larger than zero.
 
 3. **The restore test**, once right after the switch and then once a month (waagent window). A backup that has never
-   been restored is not a recovery plan.
+   been restored is not a recovery plan. The commands that use `-U postgres` ask for the `postgres` password each time.
 
    ```sh
    B=/usr/local/opt/postgresql@17/bin
    $B/createdb -h 127.0.0.1 -U postgres wa_restore_test
    $B/pg_restore -h 127.0.0.1 -U postgres -d wa_restore_test /opt/wa-agent-db/backups/wa-$(date +%a).dump
    $B/psql -h 127.0.0.1 -U postgres -d wa_restore_test -tAc "select count(*) from messages"
-   $B/psql -h 127.0.0.1 -U postgres -d wa_agent -tAc "select count(*) from messages"
+   $B/psql -h 127.0.0.1 -U wa_backup -d wa_agent -tAc "select count(*) from messages"
    $B/dropdb -h 127.0.0.1 -U postgres wa_restore_test
    ```
 
