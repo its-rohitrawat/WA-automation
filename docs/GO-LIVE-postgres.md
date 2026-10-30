@@ -23,6 +23,7 @@ each kept apart. You run every step yourself, on the Mac, with the Mac assistant
 > - the `.env` names `DB_ENGINE`, `DATABASE_URL`, `DATABASE_OWNER_URL` and `DATABASE_PLATFORM_URL` (the backup password
 >   is never in `.env`);
 > - the role names `wa_owner`, `wa_app`, `wa_platform` and `wa_backup`, and the migrations P1 to P3;
+> - the switch for the customer parts, `PLATFORM_ENABLED` (off by default, part 7);
 > - the `status` line that names the database engine.
 
 ---
@@ -394,25 +395,47 @@ Postgres days with you.
 
 4. `nano .env`, set `DB_ENGINE=sqlite`, and save. Start the agent (4.7), and check (4.8).
 
-## Part 7. Google, for customer invites (once, any time)
+## Part 7. Turning on customer invites (once, when you are ready)
 
-These steps let you email invites from your own Gmail, and let invited businesses sign up. They work on SQLite too,
-before the switch.
+Until you turn it on, WA Agent is your business only. The customer parts are **off**, and they stay off by default:
+there is no Customers or Invite a customer page, no sign-up page, and no entry for them in the dashboard's menu.
 
-1. **The sign-up address.** In Google Cloud console, open APIs & Services, then Credentials, then the dashboard's web
-   client. Under Authorized redirect URIs, add `<DASHBOARD_PUBLIC_URL>/signup/callback`, for example
+You can do this part before or after the switch to Postgres. A business you invite can sign up either way, but its
+workspace opens only on Postgres (a business that signs up earlier is told it opens after an upgrade).
+
+Do the steps in this order: Google first (1 to 3), then the switch (4). The sign-up page must not go live before
+Google knows its address.
+
+1. **The sign-up address, in Google.** In Google Cloud console, open APIs & Services, then Credentials, then the
+   dashboard's web client. Under Authorized redirect URIs, add `<DASHBOARD_PUBLIC_URL>/signup/callback`, for example
    `https://<your dashboard address>/signup/callback`, and save.
-2. **The Gmail API.** In APIs & Services, then Library, find "Gmail API" and make sure it is enabled.
-   **[confirm at S2]**
-3. **Test users.** Until Google reviews the app, Gmail sending works only for test users, up to 100. In OAuth consent
-   screen, then Test users, add each business's Gmail address before you invite them.
-4. **Turn it on.**
-   - Waagent window: `nano .env` and add `INVITES_GMAIL=true`.
+   - Without it, an invited business that presses "Continue with Google" gets an error from Google, and cannot sign up.
+2. **Test users.** Until Google reviews the app, only test users can sign in to it or receive its emails, up to 100. In
+   OAuth consent screen, then Test users, add each business's Gmail address before you invite them.
+3. **The Gmail API** (only if you want invites emailed from your Gmail). In APIs & Services, then Library, find
+   "Gmail API" and make sure it is enabled. **[confirm at S2]**
+4. **Turn the customer parts on.**
+   - Waagent window: `nano .env`, add `PLATFORM_ENABLED=true`, and save. **[confirm at S2]**
+   - To email invites from your Gmail, also add `INVITES_GMAIL=true`.
    - Normal window: `sudo launchctl kickstart -k system/com.wa-agent`.
-   - In the dashboard, open Connections, then Google, and reconnect your account once. Approve "Send email as you
-     (invites only)".
-5. **Check:** the Invite a customer screen says the invites are sent from your Gmail. Without these steps, **Copy
-   link** still works: you send the link yourself.
+   - If you added `INVITES_GMAIL=true`, open Connections in the dashboard, then Google, and reconnect your account once.
+     Approve "Send email as you (invites only)".
+
+   **What changes when `PLATFORM_ENABLED` is on:**
+   - The menu shows **Customers** and **Invite a customer** under System, for you only.
+   - The sign-up page, `<DASHBOARD_PUBLIC_URL>/signup`, answers the links in your invites. Without an invite link it
+     shows only that the link does not work.
+   - Nothing else changes: your own business, its data and its screens are as before.
+5. **Check:**
+   - The menu shows Customers and Invite a customer.
+   - Make one invite to a test user's address, open its link in a private window, and press "Continue with Google".
+     Google's sign-in page opens. You can cancel there; the link still works afterwards.
+   - With `INVITES_GMAIL=true`, the Invite a customer screen says the invites are sent from your Gmail. Without it,
+     **Copy link** works, and you send the link yourself.
+
+**To turn the customer parts off again:** remove `PLATFORM_ENABLED=true` (or set it to `false`) and restart. The pages
+and the menu entries go away, and nothing is deleted: the invites and the businesses are still there when you turn it
+on again.
 
 ## Part 8. When something looks wrong
 

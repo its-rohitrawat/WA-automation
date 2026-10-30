@@ -63,6 +63,17 @@ describe('GO-LIVE-postgres.md', () => {
     expect(guide).not.toMatch(/sk-ant|[0-9a-f]{32,}|[A-Za-z0-9+/]{40,}={0,2}/);
   });
 
+  it('turns the customer parts on only by a deliberate switch, after Google knows the sign-up address', () => {
+    const part7 = guide.slice(guide.indexOf('## Part 7.'), guide.indexOf('## Part 8.'));
+    expect(part7).toContain('PLATFORM_ENABLED=true');
+    expect(part7).toContain('**off**, and they stay off by default');
+    // The redirect URI is step 1; the switch is step 4.
+    expect(part7.indexOf('<DASHBOARD_PUBLIC_URL>/signup/callback')).toBeLessThan(part7.indexOf('PLATFORM_ENABLED=true'));
+    expect(part7).toContain('**What changes when `PLATFORM_ENABLED` is on:**');
+    expect(part7).toContain('**To turn the customer parts off again:**');
+    expect(guide).toContain('`PLATFORM_ENABLED` (off by default, part 7)');
+  });
+
   it('says when to use each way back, and never sends a secret to Claude', () => {
     expect(guide).toMatch(/### A\. Flip back to SQLite[\s\S]*\*\*Use it when:\*\*/);
     expect(guide).toMatch(/### B\. Bring the Postgres days back to SQLite[\s\S]*\*\*Use it when:\*\*/);
