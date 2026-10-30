@@ -57,7 +57,7 @@ async function withDb<T>(fn: (db: Db) => T | Promise<T>): Promise<T> {
   try {
     return await fn(db);
   } finally {
-    db.raw.close();
+    await db.close();
   }
 }
 
