@@ -1,4 +1,5 @@
 import type { Db, Sql } from '../store/db.ts';
+import type { GlobalSpend } from './globalSpend.ts';
 import type { Clock } from '../util/clock.ts';
 import { istDate } from '../util/time.ts';
 
@@ -36,6 +37,12 @@ export interface SpendGuardOptions {
   clock: Clock;
   capUsd: number;
   onError?: (err: unknown) => void;
+  /**
+   * A customer runtime's place under the platform-wide ceiling (S4.3). With it, every check (canSpend, reserve,
+   * isPaused, fitsIgnoringHolds) must also pass the ceiling; without it (the founder until S4.4, and tests), nothing
+   * changes. SpendGuard.open joins after loading today's totals, so a restarted runtime is never counted at zero.
+   */
+  platform?: { global: GlobalSpend; tenantId: string };
 }
 
 function totals(day: string, rows: { kind: string; total: number }[]): Today {
@@ -68,6 +75,7 @@ export class SpendGuard {
   /** Rows booked without a transaction handle that are still being written (see record, flushed). */
   readonly #writes = new Set<Promise<void>>();
   readonly #onError: (err: unknown) => void;
+  #global: GlobalSpend | undefined;
 
   /**
    * Starts at zero for today: `SpendGuard.open` makes one and loads today's totals. onError: told when a row booked
@@ -79,12 +87,20 @@ export class SpendGuard {
     this.#cap = opts.capUsd;
     this.#today = { day: istDate(this.#clock.now()), ai: 0, stt: 0 };
     this.#onError = opts.onError ?? ((err) => console.error('spend row not written', err));
+    if (opts.platform) this.#join(opts.platform);
   }
 
   static async open(opts: SpendGuardOptions): Promise<SpendGuard> {
-    const guard = new SpendGuard(opts);
+    const { platform, ...own } = opts;
+    const guard = new SpendGuard(own);
     await guard.refresh();
+    if (platform) guard.#join(platform);
     return guard;
+  }
+
+  #join(p: { global: GlobalSpend; tenantId: string }): void {
+    this.#global = p.global;
+    p.global.join(p.tenantId, this);
   }
 
   /** Reads today's totals again (another process may have booked spend). */
@@ -124,6 +140,18 @@ export class SpendGuard {
     return { ai: t.ai, stt: t.stt };
   }
 
+  /** Today's live reservations, at their estimates (expired ones forgotten). Read by the platform ceiling. */
+  heldUsd(): number {
+    return this.#pendingTotal();
+  }
+
+  /** Why spending is paused: this customer's own cap, the platform ceiling, or null when it is not. */
+  pauseReason(): 'cap' | 'platform' | null {
+    if (this.spentToday() >= this.#cap) return 'cap';
+    if (this.#global?.isPaused()) return 'platform';
+    return null;
+  }
+
   /** Sums live reservations and forgets expired ones. */
   #pendingTotal(): number {
     const now = this.#clock.now().getTime();
@@ -138,11 +166,12 @@ export class SpendGuard {
   canSpend(estimateUsd: number): boolean {
     if (this.isPaused()) return false;
     if (!Number.isFinite(estimateUsd) || estimateUsd < 0) return false;
-    return this.spentToday() + this.#pendingTotal() + estimateUsd <= this.#cap;
+    return this.spentToday() + this.#pendingTotal() + estimateUsd <= this.#cap && (this.#global?.fits(estimateUsd) ?? true);
   }
 
+  /** This customer's cap reached, or the platform ceiling (see pauseReason). */
   isPaused(): boolean {
-    return this.spentToday() >= this.#cap;
+    return this.pauseReason() !== null;
   }
 
   /**
@@ -153,7 +182,7 @@ export class SpendGuard {
   fitsIgnoringHolds(estimateUsd: number): boolean {
     if (this.isPaused()) return false;
     if (!Number.isFinite(estimateUsd) || estimateUsd < 0) return false;
-    return this.spentToday() + estimateUsd <= this.#cap;
+    return this.spentToday() + estimateUsd <= this.#cap && (this.#global?.fitsIgnoringHolds(estimateUsd) ?? true);
   }
 
   /**
