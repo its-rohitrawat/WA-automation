@@ -256,3 +256,48 @@ customer's WhatsApp reader and AI work, `active` or `onboarding` starts them aga
 
 It comes from the `key` onboarding probe (5.2): `done` shows Configured, `todo` shows Missing, and "coming" shows "—".
 The key itself is never read or shown.
+
+## 7. S2 amendments: the Postgres platform tables (task A3, lane A)
+
+The plan is [2026-10-29-saas-s3-s6.md](2026-10-29-saas-s3-s6.md), section 3. Lane C wrote the SQL in
+`src/platform/pgSchema.ts` (`PLATFORM_PG_SQL`, `PLATFORM_TABLES`, `S2_TENANT_COLUMNS`), and
+`tests/platform/pgSchema.test.ts` checks it against the SQLite platform tables column by column. Lane A applies these
+when it writes S2.4:
+
+### 7.1 `src/store/pg/migrations.ts`: P3
+
+P1 keeps S2's four-column `tenants` (`S2_TENANT_COLUMNS`) and its customer #1 seed. P3 is the platform SQL, followed by
+A4's grants (decision D1, 30 Oct: the `wa_platform` role):
+
+```ts
+import { PLATFORM_PG_SQL } from '../../platform/pgSchema.ts';
+// …after P2:
+{
+  version: 3,
+  sql: `${PLATFORM_PG_SQL}
+REVOKE ALL ON tenants, users, memberships, invites, platform_audit, tenant_keys, web_sessions FROM wa_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON tenants, users, memberships, invites, platform_audit, tenant_keys, web_sessions TO wa_platform;
+GRANT USAGE, SELECT ON SEQUENCE platform_audit_id_seq TO wa_platform;`,
+},
+```
+
+`web_sessions` must exist before these grants: A4 step 3 creates it in P3's position as a platform table (with
+`tenant_id uuid NOT NULL REFERENCES tenants (id)`, no RLS), and takes it out of `CUSTOMER_TABLES`.
+
+### 7.2 `tests/store/pg/rls.test.ts`: the catalog test skips the platform tables
+
+In S2.9's last test, `c.relname NOT IN ('tenants', 'pg_schema_version')` becomes:
+
+```ts
+import { PLATFORM_TABLES } from '../../../src/platform/pgSchema.ts';
+// …
+WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname <> 'pg_schema_version' AND NOT (c.relname = ANY($1))`, [[...PLATFORM_TABLES]]
+```
+
+and the `REVOKE ALL ON tenants, pg_schema_version FROM wa_app;` line in P2 stays as it is (P3 revokes the rest).
+
+### 7.3 `tests/helpers/pg.ts`: lane C's Postgres test for P3
+
+With S2.7's test server in place, lane C adds the run-on-Postgres half of `tests/platform/pgSchema.test.ts` (the
+`describe.runIf(process.env.DB_ENGINE === 'postgres')` test in the plan, task A3 step 1). It needs `ownerClient()`
+from `tests/helpers/pg.ts`, which S2.4's own schema test also uses; lane A owns that helper.

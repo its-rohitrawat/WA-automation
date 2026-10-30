@@ -51,7 +51,8 @@ export async function getTenant(q: Sql, id: string): Promise<TenantRow | undefin
 }
 
 export async function listTenants(q: Sql): Promise<TenantRow[]> {
-  return (await q.all<RawTenant>("SELECT * FROM tenants ORDER BY kind = 'founder' DESC, created_at, id")).map(toTenant);
+  // 'removed' exists on Postgres (S2's tenants) and never on SQLite; a removed customer is never listed.
+  return (await q.all<RawTenant>("SELECT * FROM tenants WHERE status <> 'removed' ORDER BY kind = 'founder' DESC, created_at, id")).map(toTenant);
 }
 
 /** Moves a tenant from one status to another; false when it was not in `from` (someone else changed it). */
