@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ensurePlatformSchema } from '../../src/platform/schema.ts';
 import { createTenant, ensureFounderTenant, FOUNDER_TENANT_ID, type TenantStatus } from '../../src/platform/store.ts';
 import { guarded } from '../../src/runtime/context.ts';
-import { Supervisor, type RuntimeFactory, type RuntimeHandle, type RuntimeStart, type SupervisorDeps } from '../../src/runtime/supervisor.ts';
+import { Supervisor, type RuntimeFactory, type RuntimeFacts, type RuntimeHandle, type RuntimeStart, type SupervisorDeps } from '../../src/runtime/supervisor.ts';
 import { SqliteDb } from '../../src/store/engine/sqlite.ts';
 import { manualClock, type ManualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
@@ -18,7 +18,7 @@ class FakeFactory implements RuntimeFactory {
     this.started.push([t.id, t.setupOnly]);
     if (this.failStart.has(t.id)) throw Object.assign(new Error(`no socket for ${t.id} at kapoor.studio@example.com`), { code: 'E_SOCK' });
     this.report.set(t.id, t.crashed);
-    return { stop: async () => void this.stopped.push(t.id) };
+    return { stop: async () => void this.stopped.push(t.id), facts: () => ({ ...NO_FACTS, whatsappLinked: t.id !== FOUNDER_TENANT_ID }) };
   }
   startsOf(id: string) {
     return this.started.filter(([x]) => x === id).length;
@@ -247,4 +247,20 @@ describe('the Supervisor', () => {
     await s.reconcile();
     expect(Object.fromEntries(s.states())).toEqual({ [F]: 'running', [a]: 'refused:limit' });
   });
+
+  it("gives a runtime's setup facts only while it runs", async () => {
+    const a = await tenant('Alpha One', 'active');
+    const b = await tenant('Beta Two', 'active');
+    const s = supervisor({ maxActive: 2 });
+    await s.reconcile();
+    expect(s.facts(a)).toMatchObject({ whatsappLinked: true });
+    expect(s.facts(b)).toBeNull(); // refused: no runtime
+    await s.crashed(a, new Error('x'));
+    expect(s.facts(a)).toBeNull(); // restarting
+    await timers.fire(s);
+    expect(s.facts(a)).toMatchObject({ whatsappLinked: true });
+    expect(s.facts('00000000-0000-4000-8000-0000000000ff')).toBeNull();
+  });
 });
+
+const NO_FACTS: RuntimeFacts = { whatsappLinked: false, spareLinked: false, driveConnected: false, groupsApproved: 0, reportTimeSet: false, aiKey: 'missing' };

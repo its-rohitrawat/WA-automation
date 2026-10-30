@@ -24,8 +24,11 @@ let sessions: { email: string; tenantId: string }[];
 /** The claims the fake Google gives for the next sign-in (the nonce is filled from the sign-in it started). */
 let claims: (nonce: string) => IdClaims;
 let lastNonce = '';
+/** How many times the routes told the Supervisor a customer's status changed. */
+let pokes = 0;
 
 async function start(o: Partial<SignupDeps> = {}) {
+  pokes = 0;
   web = createWebServer({ control: {}, env: { DASHBOARD_PORT: 0 }, log: createLogger('debug', { write: (l: string) => void logLines.push(l) }), clock } as never);
   mountSignupRoutes(web.router, {
     db, clock, log: createLogger('debug', { write: (l: string) => void logLines.push(l) }), publicUrl: SITE, founderName: 'Rohit',
@@ -35,6 +38,7 @@ async function start(o: Partial<SignupDeps> = {}) {
       ctx.res.setHeader('Set-Cookie', 'wa_session=fake-session; HttpOnly; SameSite=Lax; Path=/');
     },
     secure: () => false,
+    poke: () => void pokes++,
     ...o,
   });
   const { port } = await web.start();
@@ -116,6 +120,7 @@ describe('signing up with Google', () => {
     expect(r.headers.get('location')).toBe('/dashboard/onboarding');
     const tenantId = (await listInvites({ db, clock }))[0]!.tenantId;
     expect(sessions).toEqual([{ email: 'kapoor.studio@example.com', tenantId }]);
+    expect(pokes).toBe(1); // the Supervisor starts the new customer's setup runtime
     expect(await getTenant(db, tenantId)).toMatchObject({ status: 'onboarding' });
     expect(await membershipsFor(db, 'kapoor.studio@example.com')).toEqual([{ tenantId, role: 'owner', status: 'onboarding' }]);
     expect(r.headers.get('set-cookie')).toContain(`${SIGNUP_COOKIE}=; HttpOnly; SameSite=Lax; Path=/signup; Max-Age=0`);

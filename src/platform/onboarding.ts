@@ -59,6 +59,8 @@ export interface OnboardingView {
   total: number;
   /** WhatsApp and the key are both done: the workspace is reading. */
   live: boolean;
+  /** This call moved the customer from onboarding to active (the caller pokes the Supervisor). */
+  activated: boolean;
   /** What works now (the "What works now" list). */
   works: { saving: boolean; ai: boolean; screens: boolean; tracker: boolean; report: boolean };
 }
@@ -74,6 +76,7 @@ export async function onboardingFor(d: { db: Sql; clock: Clock }, tenantId: stri
   for (const s of STEPS) raw.set(s.id, await probes.state(tenantId, s.id));
   const live = raw.get('whatsapp') === 'done' && raw.get('key') === 'done';
   let status = tenant.status;
+  let activated = false;
   if (live && status === 'onboarding') {
     const at = d.clock.now().toISOString();
     const moved = await d.db.tx(async (q) => {
@@ -81,13 +84,16 @@ export async function onboardingFor(d: { db: Sql; clock: Clock }, tenantId: stri
       if (ok) await platformAudit(q, { at, actor: 'platform', event: 'tenant.active', tenantId, detail: tenant.name });
       return ok;
     });
-    if (moved) status = 'active';
+    if (moved) {
+      status = 'active';
+      activated = true;
+    }
   }
   const steps = STEPS.map((s) => ({ ...s, state: (!s.need && !live ? 'locked' : raw.get(s.id)!) as StepState }));
   const done = [...raw.values()].filter((x) => x === 'done').length;
   const isDone = (id: StepId) => raw.get(id) === 'done';
   return {
-    tenantId, business: tenant.name, status, steps, done, total: STEPS.length, live,
+    tenantId, business: tenant.name, status, steps, done, total: STEPS.length, live, activated,
     works: {
       saving: isDone('whatsapp'), ai: live, screens: live, tracker: live && isDone('drive'), report: live && isDone('spare') && isDone('report'),
     },

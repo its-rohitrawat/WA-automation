@@ -53,6 +53,8 @@ export interface PlatformRouteDeps {
    * that customer's workspace runs (S4); the screen then says it is being prepared.
    */
   aiKeys?: (tenantId: string) => AiKeys | null;
+  /** Tells the Supervisor a customer's status changed (S4.5): after a pause, a resume or an activation. */
+  poke?: () => void;
 }
 
 /** How the dashboard's own registrars look (src/web/mountRoutes.ts). */
@@ -154,12 +156,14 @@ export function mountPlatformRoutes(m: PlatformMount, d: PlatformRouteDeps): voi
     if (!d.isFounder(o)) return notFounder();
     if (!ID.test(params.id ?? '')) return fail(404, 'not_found', 'There is no such customer.');
     await pauseCustomer(d, o.actor, params.id!, o.requestId);
+    d.poke?.();
     return ok(await listCustomers(d));
   }));
   m.change('/dashboard/api/platform/customers/:id/resume', ({ params }, o) => answer(async () => {
     if (!d.isFounder(o)) return notFounder();
     if (!ID.test(params.id ?? '')) return fail(404, 'not_found', 'There is no such customer.');
     await resumeCustomer(d, o.actor, params.id!, o.requestId);
+    d.poke?.();
     return ok(await listCustomers(d));
   }));
 
@@ -168,6 +172,7 @@ export function mountPlatformRoutes(m: PlatformMount, d: PlatformRouteDeps): voi
     const tenantId = (await membershipsFor(d.db, o.actor.trim().toLowerCase()))[0]?.tenantId;
     const v = tenantId ? await onboardingFor(d, tenantId, d.probes) : null;
     if (!v) return fail(404, 'no_workspace', 'There is no workspace to set up for this account.');
+    if (v.activated) d.poke?.(); // WhatsApp and the key are done: a full runtime replaces the setup one
     return ok({ ...v, founderName: d.founderName });
   });
 
@@ -227,6 +232,8 @@ export interface SignupDeps {
   publicDir?: string;
   /** Tests and the preview only: other rate limits (per address, per link). */
   limits?: { perIp?: RateLimit; perToken?: RateLimit };
+  /** Tells the Supervisor a customer's status changed (S4.5): a new sign-up gets its setup runtime. */
+  poke?: () => void;
 }
 
 /** Plain words for the page: the codes in its address (no detail on why a link does not work). */
@@ -338,6 +345,7 @@ export function mountSignupRoutes(router: Router, d: SignupDeps): void {
     }
     const r = await redeemInvite(invites, { token, email: who.email, name: who.name ?? null, requestId: ctx.requestId });
     if (!r.ok) return redirect(ctx.res, r.reason === 'wrong_account' ? page('wrong_account', token) : page('invalid'), clear);
+    d.poke?.(); // the customer is onboarding now: the Supervisor starts their setup runtime
     await d.startSession(ctx, { email: who.email, ...(who.name ? { name: who.name } : {}), tenantId: r.tenantId, userId: r.userId });
     d.log.info({ requestId: ctx.requestId }, 'sign-up: an invite was used');
     redirect(ctx.res, '/dashboard/onboarding', clear);

@@ -10,7 +10,7 @@ import { chromium, type Page } from 'playwright-core';
 import { FAKE_CSRF, fakeDashboard, type FakeState } from './dashboardFake.ts';
 import { createInvite } from '../src/platform/invites.ts';
 import { systemClock } from '../src/util/clock.ts';
-import { addPlatform, addSignup, fakeGoogle, fakeSteps, previewAs } from './platformFake.ts';
+import { addPlatform, addSignup, fakeGoogle, fakeRuntimes, fakeSteps, previewAs } from './platformFake.ts';
 
 const arg = (name: string) => {
   const i = process.argv.indexOf(`--${name}`);
@@ -252,6 +252,9 @@ try {
 
       // (f) Customers: setup and health only; pause and resume a customer.
       where = `customers ${tag}`;
+      // (S4.9) A runtime state from the Supervisor shows under the status: here Nair's runtime keeps crashing.
+      const nairId = (await platformDb.get<{ id: string }>("SELECT id FROM tenants WHERE name = 'Nair Digital Works'"))!.id;
+      fakeRuntimes[nairId] = 'failing';
       await p.goto(`${base}/dashboard/customers`);
       await p.locator('.pf-cust tbody tr').nth(4).waitFor();
       for (const label of ['Active', 'Onboarding', 'Invited', 'Paused']) {
@@ -259,7 +262,10 @@ try {
       }
       if ((await p.locator('.pf-cust tbody tr', { hasText: 'Your studio' }).locator('[data-pause]').count()) !== 0) fail(where, 'the founder can be paused');
       if ((await p.locator('#nav [data-go="customers"]').count()) !== 1) fail(where, 'no nav entry');
+      if ((await p.locator('.pf-cust tbody tr', { hasText: 'Nair Digital Works' }).locator('.pf-run', { hasText: 'Keeps crashing' }).count()) !== 1) fail(where, 'no runtime note');
+      if ((await p.locator('.pf-cust .pf-run').count()) !== 1) fail(where, 'a runtime note on a customer without one');
       await shot(p, where, `customers-${tag}`);
+      delete fakeRuntimes[nairId];
       await clearOfAsk(p, where);
 
       where = `customers pause ${tag}`;

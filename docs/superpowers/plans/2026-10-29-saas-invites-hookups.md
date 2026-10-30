@@ -360,3 +360,27 @@ for (const event of ['uncaughtException', 'unhandledRejection'] as const) {
 - Platform deps (hookup 6.2): `poke: () => supervisor.poke()`, called by the platform routes after a pause, a resume or an
   activation. That is one optional dep in `src/web/routes/platform.ts` (lane C adds it with S4.9).
 - `env.PLATFORM_MAX_RSS_MB` (default 4096) is new in `src/config/env.ts` (D4), next to `PLATFORM_MAX_ACTIVE` (S5H.3).
+
+## 10. Probes, health and pokes from the Supervisor (S4.9, lane A with S4.4)
+
+`src/runtime/probes.ts` (`runtimeProbes`, `runtimeHealth`), `Supervisor.facts(id)` and the `poke` deps of both route
+groups are done and tested. This replaces the placeholders in 5.2, 6.1 and 9. In `src/main.ts`:
+
+```ts
+import { runtimeHealth, runtimeProbes } from './runtime/probes.ts';
+// …before supervisor.reconcile() (section 9), so the share counts only what the runtimes add:
+const baselineMb = process.memoryUsage.rss() / 1_048_576;
+// …in the platform deps (2.2):
+probes: runtimeProbes(supervisor),
+health: runtimeHealth(supervisor, { rssMb: () => process.memoryUsage.rss() / 1_048_576, baselineMb }),
+maxActive: env.PLATFORM_MAX_ACTIVE,
+poke: () => supervisor.poke(),
+// …and in the sign-up deps (4.1):
+poke: () => supervisor.poke(),
+```
+
+- Each customer runtime (S4.4) returns `facts()` from its handle (`RuntimeFacts` in `src/runtime/supervisor.ts`):
+  whatsapp linked, spare linked, Drive connected, groups approved, report time set, and the AI key's state. They are read
+  synchronously from what the runtime holds in memory; nothing in a probe touches the network.
+- The routes poke after a pause, a resume, a sign-up (setup runtime) and an activation (full runtime). The 60 s tick in
+  section 9 catches anything else.

@@ -10,7 +10,7 @@ import { confirmDialog, failed, listen, loading, pill } from './ui.js';
 /**
  * @typedef {{ id: string, name: string, founder: boolean, status: string, createdAt: string, signedUpAt: string | null,
  *   updatedAt: string, lastActivityAt: string | null, onboarding: { done: number, total: number, next: string | null } | null,
- *   memoryMb: number | null, aiKey: 'configured' | 'missing' | null }} Customer
+ *   memoryMb: number | null, aiKey: 'configured' | 'missing' | null, runtime: string | null }} Customer
  */
 
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -31,12 +31,25 @@ function readCustomers(raw) {
         ? { done: num(x.onboarding.done) ?? 0, total: num(x.onboarding.total) ?? 6, next: x.onboarding.next ? str(x.onboarding.next).slice(0, 80) : null }
         : null,
       memoryMb: num(x?.memoryMb), aiKey: x?.aiKey === 'configured' || x?.aiKey === 'missing' ? x.aiKey : null,
+      runtime: typeof x?.runtime === 'string' && x.runtime in RUNTIME_NOTE ? x.runtime : null,
     })).filter((/** @type {Customer} */ x) => ID.test(x.id)),
     maxActive: num(r.maxActive) ?? 20,
     counts: { active: num(c.active) ?? 0, onboarding: num(c.onboarding) ?? 0, invited: num(c.invited) ?? 0, paused: num(c.paused) ?? 0 },
     memoryMb: num(r.memoryMb),
   };
 }
+
+/** The Supervisor's runtime states worth a word under the status (running and stopped need none). */
+const RUNTIME_NOTE = /** @type {Record<string, string>} */ ({
+  starting: 'Starting',
+  backoff: 'Restarting after a crash',
+  failing: 'Keeps crashing; retried every 5 min',
+  'refused:limit': 'Over the active limit',
+  'refused:memory': 'Not enough memory to start',
+  'refused:postgres': 'Needs the Postgres switch',
+  running: '',
+  stopped: '',
+});
 
 const STATUS_PILL = /** @type {Record<string, { cls: string, label: string }>} */ ({
   active: { cls: 'p-done', label: 'Active' }, onboarding: { cls: 'p-warn', label: 'Onboarding' }, invited: { cls: 'p-review', label: 'Invited' }, paused: { cls: 'p-muted', label: 'Paused' },
@@ -71,10 +84,10 @@ function render(d) {
   const rows = d.customers.map((c) => {
     const key = c.aiKey === 'configured' ? pill({ cls: 'p-done', label: 'Configured' }) : c.aiKey === 'missing' ? pill({ cls: 'p-muted', label: 'Missing' }) : '<span class="pf-faint">—</span>';
     return `<tr><td data-label="Customer"><b>${esc(c.name)}</b><small class="pf-sub">${esc(note(c))}</small></td>
-      <td data-label="Status">${pill(STATUS_PILL[c.status] ?? STATUS_PILL.paused)}</td>
+      <td data-label="Status">${pill(STATUS_PILL[c.status] ?? STATUS_PILL.paused)}${c.runtime && RUNTIME_NOTE[c.runtime] ? `<small class="pf-sub pf-run">${esc(RUNTIME_NOTE[c.runtime])}</small>` : ''}</td>
       <td data-label="Onboarding">${esc(onboardingText(c))}</td>
       <td data-label="Last activity">${esc(c.lastActivityAt ? ago(c.lastActivityAt) : '—')}</td>
-      <td data-label="Memory" class="pf-num-cell">${c.memoryMb === null ? '—' : `${esc(c.memoryMb)} MB`}</td>
+      <td data-label="Memory (share)" class="pf-num-cell">${c.memoryMb === null ? '—' : `${esc(c.memoryMb)} MB`}</td>
       <td data-label="AI key">${key}</td><td data-label="">${action(c)}</td></tr>`;
   }).join('');
   const share = Math.round((d.counts.active / Math.max(1, d.maxActive)) * 100);
@@ -82,12 +95,12 @@ function render(d) {
       <div class="card pf-kpi"><span class="eyebrow">Active</span><b>${d.counts.active}<small> of ${d.maxActive} max</small></b><div class="pf-bar"><i data-progress="${share}"></i></div></div>
       <div class="card pf-kpi"><span class="eyebrow">Onboarding</span><b>${d.counts.onboarding}</b><small>signed up, setting up</small></div>
       <div class="card pf-kpi"><span class="eyebrow">Invited</span><b>${d.counts.invited}</b><small>not signed up yet</small></div>
-      <div class="card pf-kpi"><span class="eyebrow">Memory in use</span><b>${d.memoryMb === null ? '—' : `${d.memoryMb}<small> MB</small>`}</b><small>${d.memoryMb === null ? 'shown once customer workspaces run' : 'about 60 to 120 MB per active customer'}</small></div>
+      <div class="card pf-kpi"><span class="eyebrow">Memory in use</span><b>${d.memoryMb === null ? '—' : `${d.memoryMb}<small> MB</small>`}</b><small>${d.memoryMb === null ? 'shown once customer workspaces run' : 'each running customer’s share; about 60 to 120 MB each'}</small></div>
     </div>
     <section class="card flush"><div class="card-head pf-cust-head"><h3>Customers</h3><div class="act"><a class="btn btn-primary btn-sm" href="/dashboard/invite" data-go="invite">${icon('mail', 15)}Invite a customer</a></div></div>
       <div class="tbl-wrap"><table class="tbl tbl-cards pf-cust"><caption class="sr-only">Customers</caption>
-        <thead><tr><th>Customer</th><th>Status</th><th>Onboarding</th><th>Last activity</th><th>Memory</th><th>AI key</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></section>
-    <div class="note">${icon('lock', 16)}<span>This screen shows only setup and health. Each customer's messages, tasks, files and keys stay in their own workspace and are never shown here. The limit of ${d.maxActive} active customers is a setting on the Mac.</span></div>`;
+        <thead><tr><th>Customer</th><th>Status</th><th>Onboarding</th><th>Last activity</th><th>Memory (share)</th><th>AI key</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></section>
+    <div class="note">${icon('lock', 16)}<span>This screen shows only setup and health. Each customer's messages, tasks, files and keys stay in their own workspace and are never shown here. Memory is each running customer's share of what the workspaces add: one program cannot measure one customer alone. The limit of ${d.maxActive} active customers is a setting on the Mac.</span></div>`;
 }
 
 /** @param {ScreenCtx} ctx */

@@ -170,7 +170,19 @@ describe('the platform routes', () => {
     expect((await call('GET', '/dashboard/api/platform/onboarding', FOUNDER)).status).toBe(404);
   });
 
-  it('Customers: the founder only; pause and resume through the routes', async () => {
+  it('Getting started tells the Supervisor once, when WhatsApp and the key make the customer active', async () => {
+    let pokes = 0;
+    mount({ poke: () => void pokes++, probes: { state: async (_t, step) => (step === 'whatsapp' || step === 'key' ? 'done' : 'todo') } });
+    const made = body(await invite(false));
+    await redeemInvite({ db, clock }, { token: tokenOf(made.link), email: 'kapoor.studio@example.com' });
+    expect(body(await call('GET', '/dashboard/api/platform/onboarding', CUSTOMER))).toMatchObject({ status: 'active', activated: true });
+    expect(body(await call('GET', '/dashboard/api/platform/onboarding', CUSTOMER))).toMatchObject({ status: 'active', activated: false });
+    expect(pokes).toBe(1);
+  });
+
+  it('Customers: the founder only; pause and resume through the routes, each telling the Supervisor', async () => {
+    let pokes = 0;
+    mount({ poke: () => void pokes++ });
     expect((await call('GET', '/dashboard/api/platform/customers', CUSTOMER)).status).toBe(403);
     const made = body(await invite(false));
     await redeemInvite({ db, clock }, { token: tokenOf(made.link), email: 'kapoor.studio@example.com' });
@@ -178,8 +190,13 @@ describe('the platform routes', () => {
     expect(list.customers).toHaveLength(1);
     const id = list.customers[0].id;
     expect((await call('POST', `/dashboard/api/platform/customers/${id}/pause`, CUSTOMER)).status).toBe(403);
+    expect(pokes).toBe(0);
     expect(body(await call('POST', `/dashboard/api/platform/customers/${id}/pause`)).customers[0].status).toBe('paused');
+    expect(pokes).toBe(1);
+    expect((await call('POST', `/dashboard/api/platform/customers/${id}/pause`)).status).toBe(409); // refused: no poke
+    expect(pokes).toBe(1);
     expect(body(await call('POST', `/dashboard/api/platform/customers/${id}/resume`)).customers[0].status).toBe('onboarding');
+    expect(pokes).toBe(2);
     expect((await call('POST', '/dashboard/api/platform/customers/00000000-0000-4000-8000-000000000000/pause')).status).toBe(404);
   });
 

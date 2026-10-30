@@ -89,7 +89,9 @@ async function seed(db: SqliteDb): Promise<void> {
 export const fakeSteps: Partial<Record<StepId, ProbeState>> = {};
 const previewProbes: OnboardingProbes = { state: async (tenantId, step) => (doneTenants.has(tenantId) ? 'done' : fakeSteps[step] ?? 'coming') };
 /** Memory as a runtime would report it, for the preview's active customers. */
-const previewHealth: CustomerHealth = { memoryMb: (tenantId) => (doneTenants.has(tenantId) ? 96 : 118) };
+/** The Supervisor's runtime state per customer id, as a test sets it (none by default). */
+export const fakeRuntimes: Record<string, string> = {};
+const previewHealth: CustomerHealth = { memoryMb: (tenantId) => (doneTenants.has(tenantId) ? 96 : 118), runtime: (tenantId) => fakeRuntimes[tenantId] ?? null };
 
 /**
  * Adds the platform screens to a fake dashboard: the patched shell, the platform routes behind the fake's owner check

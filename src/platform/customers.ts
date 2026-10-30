@@ -15,6 +15,8 @@ export const MAX_ACTIVE_DEFAULT = 20;
 /** What the S4 runtimes will report; null until they exist. */
 export interface CustomerHealth {
   memoryMb(tenantId: string): number | null;
+  /** The customer's runtime state as the Supervisor reports it ('running', 'backoff', 'refused:limit', …); null: none. */
+  runtime?(tenantId: string): string | null;
 }
 export const NO_HEALTH: CustomerHealth = { memoryMb: () => null };
 
@@ -32,6 +34,8 @@ export interface CustomerRow {
   memoryMb: number | null;
   /** From the key step: configured, missing, or null when that part is not built yet. */
   aiKey: 'configured' | 'missing' | null;
+  /** The Supervisor's state for this customer's runtime (CustomerHealth.runtime); null: none, or not wired in yet. */
+  runtime: string | null;
 }
 
 export interface CustomersView {
@@ -70,6 +74,7 @@ export async function listCustomers(d: CustomersDeps): Promise<CustomersView> {
       onboarding: states ? { done: [...states.values()].filter((x) => x === 'done').length, total: STEPS.length, next: next?.title ?? null } : null,
       memoryMb: t.status === 'active' ? health.memoryMb(t.id) : null,
       aiKey: founder ? 'configured' : key === 'done' ? 'configured' : key === 'todo' ? 'missing' : null,
+      runtime: health.runtime?.(t.id) ?? null,
     });
   }
   const count = (s: TenantStatus) => rows.filter((r) => r.status === s).length;

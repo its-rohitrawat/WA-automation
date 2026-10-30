@@ -59,7 +59,18 @@ describe('the Customers list', () => {
     expect(v.counts).toEqual({ active: 1, onboarding: 1, invited: 1, paused: 0 });
     expect(v).toMatchObject({ maxActive: 20, memoryMb: null });
     // Exactly these fields: nothing from a customer's own data.
-    expect(Object.keys(v.customers[1]!).sort()).toEqual(['aiKey', 'createdAt', 'founder', 'id', 'lastActivityAt', 'memoryMb', 'name', 'onboarding', 'signedUpAt', 'status', 'updatedAt']);
+    expect(Object.keys(v.customers[1]!).sort()).toEqual(['aiKey', 'createdAt', 'founder', 'id', 'lastActivityAt', 'memoryMb', 'name', 'onboarding', 'runtime', 'signedUpAt', 'status', 'updatedAt']);
+    expect(v.customers.map((c) => c.runtime)).toEqual([null, null, null]); // no runtimes until S4 wires them in
+  });
+
+  it("each customer's runtime state comes from the Supervisor, for every customer, the founder included", async () => {
+    const a = await customer('Alpha One');
+    const b = await customer('Beta Two', false);
+    const states: Record<string, string> = { [a]: 'backoff' };
+    const founder = (await listCustomers(d)).customers[0]!.id;
+    states[founder] = 'running';
+    const v = await listCustomers({ ...d, health: { memoryMb: () => null, runtime: (id) => states[id] ?? null } });
+    expect(v.customers.map((c) => [c.id, c.runtime])).toEqual([[founder, 'running'], [a, 'backoff'], [b, null]]);
   });
 
   it('the AI key: configured when that step is done, missing when it is to do, unknown (—) until it exists', async () => {

@@ -41,13 +41,14 @@ describe('the onboarding checklist', () => {
 
   it('WhatsApp alone saves messages but starts nothing; with the key too the customer becomes active, once, and the rest unlock', async () => {
     let v = (await onboardingFor({ db, clock }, tenantId, probes({ whatsapp: 'done' })))!;
-    expect(v).toMatchObject({ status: 'onboarding', live: false, done: 1, works: { saving: true, ai: false } });
+    expect(v).toMatchObject({ status: 'onboarding', live: false, done: 1, activated: false, works: { saving: true, ai: false } });
     expect(v.steps.slice(2).every((s) => s.state === 'locked')).toBe(true);
     v = (await onboardingFor({ db, clock }, tenantId, probes({ whatsapp: 'done', key: 'done' })))!;
-    expect(v).toMatchObject({ status: 'active', live: true, done: 2, works: { saving: true, ai: true, screens: true, tracker: false, report: false } });
+    // activated: this call made the customer active, so the caller tells the Supervisor (a full runtime replaces setup).
+    expect(v).toMatchObject({ status: 'active', live: true, done: 2, activated: true, works: { saving: true, ai: true, screens: true, tracker: false, report: false } });
     expect(v.steps.map((s) => s.state)).toEqual(['done', 'done', 'todo', 'todo', 'todo', 'todo']);
     expect((await getTenant(db, tenantId))!.status).toBe('active');
-    await onboardingFor({ db, clock }, tenantId, probes({ whatsapp: 'done', key: 'done' }));
+    expect((await onboardingFor({ db, clock }, tenantId, probes({ whatsapp: 'done', key: 'done' })))!.activated).toBe(false);
     expect(await db.all('SELECT event FROM platform_audit WHERE event = ?', ['tenant.active'])).toHaveLength(1);
   });
 

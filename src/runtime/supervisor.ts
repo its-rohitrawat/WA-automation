@@ -24,8 +24,20 @@ export interface RuntimeStart {
   /** How the runtime reports a crash of its own (its guarded() entry points use it). */
   crashed: (e: unknown) => void;
 }
+/** What a running customer runtime knows about its setup: the onboarding probes read these (src/runtime/probes.ts). */
+export interface RuntimeFacts {
+  whatsappLinked: boolean;
+  spareLinked: boolean;
+  driveConnected: boolean;
+  groupsApproved: number;
+  reportTimeSet: boolean;
+  aiKey: 'configured' | 'missing';
+}
+
 export interface RuntimeHandle {
   stop(): Promise<void>;
+  /** The runtime's setup facts, read synchronously from what it holds in memory. */
+  facts?(): RuntimeFacts;
 }
 export interface RuntimeFactory {
   start(t: RuntimeStart): Promise<RuntimeHandle>;
@@ -80,6 +92,12 @@ export class Supervisor {
   /** Every customer the Supervisor has a state for. */
   states(): ReadonlyMap<string, RuntimeState> {
     return new Map([...this.#slots].map(([id, s]) => [id, s.state]));
+  }
+
+  /** A running runtime's setup facts; null when that customer has no runtime running (refused, stopped, restarting). */
+  facts(id: string): RuntimeFacts | null {
+    const slot = this.#slots.get(id);
+    return slot?.state === 'running' && slot.handle?.facts ? slot.handle.facts() : null;
   }
 
   /** Brings the runtimes in line with the tenants table. */
