@@ -12,7 +12,8 @@ import type { Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import type { AuditLog } from './audit.ts';
-import type { OwnerSession } from './guard.ts';
+import { FOUNDER_TENANT_ID } from '../config/env.ts';
+import type { Guard, OwnerSession } from './guard.ts';
 import { HttpError, sendJson } from './http.ts';
 import { registerReadApi } from './routes/api.ts';
 import { chatReadHandler, chatSendHandler, type ChatDeps } from './routes/chat.ts';
@@ -40,6 +41,11 @@ import { registerAssistantApi } from './routes/assistant.ts';
 // plain functions (src/web/routes/context.ts): they get the owner's context here and their ApiResult is sent as JSON.
 
 export interface AgentRoutesDeps {
+  /**
+   * The customer whose runtime these deps are (Phase B 4): only a session of that customer reaches them; any other is
+   * answered 503. Default: the founder.
+   */
+  tenantId?: string;
   db: Db;
   clock: Clock;
   log: Logger;
@@ -77,11 +83,12 @@ const ownerOf = (ctx: RequestContext, s: OwnerSession): OwnerContext => ({
 });
 
 /**
- * These routes serve this runtime's customer, the founder, until the Supervisor gives each customer its own (S4.5): a
- * customer's session is answered 503 workspace_starting, never the founder's data.
+ * These routes serve one runtime's customer (Phase B 4): a session of any other customer is answered 503
+ * workspace_starting, never this customer's data. The dashboard sends each session to its own customer's routes; this is
+ * the check behind that.
  */
-function inScope(s: OwnerSession): void {
-  if (s.role !== 'founder') throw new HttpError(503, 'workspace_starting', 'Your workspace is starting. Try again in a minute.');
+function inScope(s: OwnerSession, tenantId: string): void {
+  if (s.tenantId !== tenantId) throw new HttpError(503, 'workspace_starting', 'Your workspace is starting. Try again in a minute.');
 }
 
 function send(res: ServerResponse, r: ApiResult): void {
@@ -98,7 +105,17 @@ function redirect(res: ServerResponse, location: string): void {
 }
 
 export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
-  const { router, guard } = m;
+  const { router, guard: memberGuard } = m;
+  const tenant = d.tenantId ?? FOUNDER_TENANT_ID;
+  // Every agent route goes through this guard: a session of this runtime's customer, the founder's for the founder's runtime.
+  const guard: Guard = {
+    ...memberGuard,
+    requireOwner: async (req) => {
+      const s = await memberGuard.requireSession(req);
+      inScope(s, tenant);
+      return s;
+    },
+  };
   const owners = new Set(d.ownerEmails);
   const audit: AuditFn = (e) => m.audit.record({ ...e, detail: e.detail ?? '' });
   const action = { guard, actions: m.actions };
@@ -123,14 +140,14 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   const read = (path: string, answer: (ctx: RequestContext, o: OwnerContext) => ApiResult | Promise<ApiResult>) =>
     router.get(path, async (ctx) => {
       const s = await guard.requireSession(ctx.req);
-      inScope(s);
+      inScope(s, tenant);
       send(ctx.res, await answer(ctx, ownerOf(ctx, s)));
     });
   // A change: the session, Origin and CSRF, the action limit, its scope, then the JSON body.
   const change = (path: string, answer: (ctx: RequestContext, o: OwnerContext, body: unknown) => ApiResult | Promise<ApiResult>) =>
     router.post(path, async (ctx) => {
       const s = await memberAction(ctx);
-      inScope(s);
+      inScope(s, tenant);
       send(ctx.res, await answer(ctx, ownerOf(ctx, s), await readBody(ctx)));
     });
   // The platform's routes: any member (a customer reaches Getting started and its own key), no runtime scope; each

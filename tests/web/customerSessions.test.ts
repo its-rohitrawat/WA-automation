@@ -196,11 +196,13 @@ describe('the customer comes from the session record only (S4.8)', () => {
 });
 
 describe('change routes: the CSRF token is the session’s, and the role still decides (S4.8)', () => {
-  it('a customer’s own valid token cannot drive a founder change route: 403, and 503 on the agent’s routes', async () => {
-    for (const path of ['/dashboard/api/platform/invites', '/dashboard/api/settings', '/dashboard/api/session/signout-everywhere', '/dashboard/api/actions/publish']) {
-      expect((await call('POST', path, customer)).status, path).toBe(403);
+  it('a customer’s own valid token cannot drive a founder change route: 403 on the platform’s, 503 on the founder runtime’s', async () => {
+    // The platform's founder-only routes refuse by role.
+    expect((await call('POST', '/dashboard/api/platform/invites', customer)).status).toBe(403);
+    // The founder runtime's routes refuse any other customer's session by scope (Phase B 4): its own runtime has its own.
+    for (const path of ['/dashboard/api/settings', '/dashboard/api/session/signout-everywhere', '/dashboard/api/actions/publish', '/dashboard/api/groups/apply']) {
+      expect((await call('POST', path, customer)).status, path).toBe(503);
     }
-    expect((await call('POST', '/dashboard/api/groups/apply', customer)).status).toBe(503);
   });
 
   it('a token from another session is refused (403 csrf), either way round', async () => {
