@@ -36,6 +36,7 @@ async function start(o: Partial<SignupDeps> = {}) {
     startSession: async (ctx, s) => {
       sessions.push({ email: s.email, tenantId: s.tenantId });
       ctx.res.setHeader('Set-Cookie', 'wa_session=fake-session; HttpOnly; SameSite=Lax; Path=/');
+      return true;
     },
     secure: () => false,
     poke: () => void pokes++,
@@ -129,6 +130,22 @@ describe('signing up with Google', () => {
     expect(again.headers.get('location')).toBe('/signup?error=invalid');
     // Nothing in the logs: no token, no address.
     expect(logLines.join('')).not.toMatch(new RegExp(`${token}|kapoor|@example`, 'i'));
+  });
+
+  it('before the Postgres switch (no customer sessions yet): signed up all the same, and sent to the waiting page', async () => {
+    await web.stop();
+    await start({ startSession: async () => false }); // what the agent's startSession says on SQLite (hookups 11)
+    const token = await invite();
+    const s = await startGoogle(token);
+    const r = await get(`/signup/callback?code=good&state=${s.state}`, s.cookie);
+    expect(r.status).toBe(302);
+    expect(r.headers.get('location')).toBe('/signup?note=waiting'); // no token in it: the invite is used up
+    const tenantId = (await listInvites({ db, clock }))[0]!.tenantId;
+    expect(await getTenant(db, tenantId)).toMatchObject({ status: 'onboarding' });
+    expect(await membershipsFor(db, 'kapoor.studio@example.com')).toEqual([{ tenantId, role: 'owner', status: 'onboarding' }]);
+    expect(r.headers.get('set-cookie')).not.toContain('wa_session');
+    expect(pokes).toBe(1);
+    expect((await get(`/signup/google?invite=${token}`)).headers.get('location')).toBe('/signup?error=invalid');
   });
 
   it('another Google account: "a different Google account", nothing made, the invite still open for the right one', async () => {

@@ -384,3 +384,24 @@ poke: () => supervisor.poke(),
   synchronously from what the runtime holds in memory; nothing in a probe touches the network.
 - The routes poke after a pause, a resume, a sign-up (setup runtime) and an activation (full runtime). The 60 s tick in
   section 9 catches anything else.
+
+## 11. `startSession` says whether it started a session (lane A, with S5H.6 and S4.8)
+
+`SignupDeps.startSession` now returns `Promise<boolean>`. Customer sessions exist on Postgres only (plan S4.8 step 1,
+decided 30 Oct). On `false` the sign-up callback sends the new customer to `/signup?note=waiting`, a "You're signed up;
+your workspace opens once WA Agent has finished an upgrade" card. The invite is still used, the membership made, and the
+customer `onboarding`. Both paths are tested (`tests/web/platformSignup.test.ts`).
+
+In the sign-up deps (4.1), lane A's `startSession`:
+
+```ts
+startSession: async (ctx, s) => {
+  if (env.DB_ENGINE !== 'postgres') return false; // SQLite: founder-only sessions; the customer gets the waiting page
+  // Postgres (S4.8): the sign-in's audit row in the customer's own Db first, then the session row in the platform Db,
+  // which cannot share one transaction (lane A's note, 30 Oct). A failed session write leaves the audit row.
+  // …audit, then sessions.create({ email: s.email, tenantId: s.tenantId, role: 'owner' }), then the cookie on ctx.res…
+  return true;
+},
+```
+
+Until S5H.6 is applied nothing calls it. Before S4.8, with `DB_ENGINE=sqlite`, it is just the first line.

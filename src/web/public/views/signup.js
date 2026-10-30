@@ -79,6 +79,19 @@ async function open() {
   show(note === 'wrong_account' || note === 'retry' || note === 'busy' ? note : null);
 }
 
+/**
+ * Signed up before the agent runs customer workspaces (it is still on its first database, before the Postgres switch):
+ * the invite is used and the workspace is theirs, but there is nothing to sign in to yet. No button, no note.
+ */
+function waiting() {
+  $('#su-title').textContent = "You're signed up";
+  $('#su-sub').textContent = 'Your workspace opens once WA Agent has finished an upgrade. The person who invited you will tell you when it is ready. Then open WA Agent and sign in with this same Google account.';
+  $('#su-expiry').textContent = 'Your invite has been used. You will not need it again.';
+  /** @type {HTMLElement} */ ($('#gbtn')).hidden = true;
+  show(null);
+}
+
 // Back from Google's account chooser, the browser may restore this page as it was: the button works again.
 addEventListener('pageshow', () => $('#gbtn').removeAttribute('aria-busy'));
-void open();
+if (params.get('note') === 'waiting') waiting();
+else void open();

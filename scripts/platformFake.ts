@@ -145,6 +145,9 @@ export async function addPlatform(web: WebServer, o: { signedIn: () => boolean; 
   return { mailer, db };
 }
 
+/** Whether the preview starts a customer session at sign-up (true), or sends them to the waiting page as on SQLite. */
+export const previewSessions = { on: true };
+
 /** Who the fake Google says signed in, for the next sign-up callback. */
 export const fakeGoogle = { email: 'kapoor.studio@example.com', verified: true, nonce: '' };
 const FAKE_CLIENT_ID = 'preview-client.apps.googleusercontent.com';
@@ -165,7 +168,10 @@ export function addSignup(web: WebServer, o: { db: SqliteDb; signIn: () => void;
         email: fakeGoogle.email, email_verified: fakeGoogle.verified, name: 'Asha Kapoor',
       }),
     },
-    startSession: async () => o.signIn(),
+    startSession: async () => {
+      await o.signIn();
+      return previewSessions.on; // false: as on SQLite, before the Postgres switch
+    },
     secure: () => false,
     // One address (127.0.0.1) runs every round of the smoke test.
     limits: { perIp: { capacity: 500, refillPerSec: 50 } },

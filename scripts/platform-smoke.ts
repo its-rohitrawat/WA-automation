@@ -195,6 +195,15 @@ try {
       await p.locator('#su-title', { hasText: 'This invite link does not work' }).waitFor();
       if (await p.locator('#gbtn').isVisible()) fail(where, 'Continue with Google offered for a used link');
       await shot(p, where, `signup-invalid-${tag}`, false);
+
+      // Signed up before the Postgres switch (no customer sessions yet): the waiting card, with nothing to press.
+      where = `signup waiting ${tag}`;
+      await p.goto(`${base}/signup?note=waiting`);
+      await p.locator('#su-title', { hasText: "You're signed up" }).waitFor();
+      await p.locator('#su-sub', { hasText: 'Your workspace opens once WA Agent has finished an upgrade.' }).waitFor();
+      if (await p.locator('#gbtn').isVisible()) fail(where, 'Continue with Google offered on the waiting page');
+      if ((await p.locator('.si-denied:visible, .si-error:visible').count()) !== 0) fail(where, 'a note shows on the waiting page');
+      await shot(p, where, `signup-waiting-${tag}`, false);
       state.signedIn = true;
       // (e) Getting started: before the customer workspace exists (the needed steps coming, the rest locked), then with
       // WhatsApp and the key done (the customer becomes active and the rest unlock).

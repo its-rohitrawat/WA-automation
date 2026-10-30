@@ -222,10 +222,11 @@ export interface SignupDeps {
   /** Google sign-in (the same web client as the owner's). null: sign-up is not set up, and the page says so. */
   google: { clientId: string; exchange: CodeExchanger; verify: IdTokenVerifier } | null;
   /**
-   * Starts the new customer owner's dashboard session (sets its cookie on ctx.res). Supplied by the owning lane
-   * (hookups doc, section 4): the dashboard's sessions are owner-only until customer sessions exist.
+   * Starts the new customer owner's dashboard session (sets its cookie on ctx.res) and says true. Supplied by the owning
+   * lane (hookups doc, sections 4 and 11). Customer sessions exist on Postgres only (plan S4.8): on SQLite it starts none
+   * and says false, and the new customer is sent to the waiting page.
    */
-  startSession: (ctx: RequestContext, o: { email: string; name?: string; tenantId: string; userId: string }) => Promise<void>;
+  startSession: (ctx: RequestContext, o: { email: string; name?: string; tenantId: string; userId: string }) => Promise<boolean>;
   /** Whether the request came over https (the cookie's Secure flag). */
   secure: (req: IncomingMessage) => boolean;
   /** The public folder (tests: the real one). */
@@ -346,8 +347,9 @@ export function mountSignupRoutes(router: Router, d: SignupDeps): void {
     const r = await redeemInvite(invites, { token, email: who.email, name: who.name ?? null, requestId: ctx.requestId });
     if (!r.ok) return redirect(ctx.res, r.reason === 'wrong_account' ? page('wrong_account', token) : page('invalid'), clear);
     d.poke?.(); // the customer is onboarding now: the Supervisor starts their setup runtime
-    await d.startSession(ctx, { email: who.email, ...(who.name ? { name: who.name } : {}), tenantId: r.tenantId, userId: r.userId });
-    d.log.info({ requestId: ctx.requestId }, 'sign-up: an invite was used');
-    redirect(ctx.res, '/dashboard/onboarding', clear);
+    const started = await d.startSession(ctx, { email: who.email, ...(who.name ? { name: who.name } : {}), tenantId: r.tenantId, userId: r.userId });
+    d.log.info({ requestId: ctx.requestId, session: started }, 'sign-up: an invite was used');
+    // No session yet (before the Postgres switch): signed up all the same, and told the workspace opens later.
+    redirect(ctx.res, started ? '/dashboard/onboarding' : '/signup?note=waiting', clear);
   });
 }
