@@ -309,7 +309,7 @@ export async function clientDetail(db: Db, code: string, now: Date, groupNames?:
   const pulse = { pending: activity.pending, lastReadAt: activity.lastBatch?.at ?? null, quietMinutes };
   const base = card(c, await countsForClient(db, now, c.id), new Map([[c.id, await lastActivity(db, c.id)]]), await sheetNames(db), groupNames, await backfillStatus(db, c.id, now), pulse);
   // Sentiment is shown only while it is switched on: off, none leaves here.
-  const moods = readSentimentEnabled(db);
+  const moods = await readSentimentEnabled(db);
   const openTasks = (await db.all<ClientOpenTask>(
     `SELECT code, title, assigned_to AS assignedTo, deadline, status, priority_level AS priority, sentiment FROM tasks
       WHERE client_id = ? AND status <> 'done' ORDER BY deadline IS NULL, deadline, id`,

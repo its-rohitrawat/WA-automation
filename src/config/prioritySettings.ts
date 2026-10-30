@@ -1,6 +1,6 @@
 import type { PriorityKeywords } from '../brain/priorityKeywords.ts';
 import { ControlError, type Audit } from '../control/errors.ts';
-import type { Db } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
 import { setKv } from '../store/kv.ts';
 import { PRIORITIES, type Priority } from '../store/tasks.ts';
 import type { Clock } from '../util/clock.ts';
@@ -206,9 +206,10 @@ export class PrioritySettings {
 
 /**
  * Whether sentiment is switched on, for the screens and the tracker that only show it then. Read straight from the
- * settings table, like PrioritySettings.get().
+ * settings table (not PrioritySettings' memory: the readers here have only the database). `db` may be a transaction
+ * handle.
  */
-export function readSentimentEnabled(db: Db): boolean {
-  const r = db.raw.prepare("SELECT v FROM settings WHERE k = 'sentimentEnabled'").get() as { v: string } | undefined;
+export async function readSentimentEnabled(db: Sql): Promise<boolean> {
+  const r = await db.get<{ v: string }>("SELECT v FROM settings WHERE k = 'sentimentEnabled'");
   return r?.v === 'true';
 }

@@ -252,7 +252,7 @@ export async function listDashboardTasks(db: Db, f: TaskQuery, now: Date): Promi
   const whereSql = where.length > 0 ? ` WHERE ${where.join(' AND ')}` : '';
   const total = (await db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM tasks t JOIN clients c ON c.id = t.client_id${whereSql}`, params))!.n;
   const rows = await db.all<RawRow>(`${SELECT_SQL}${whereSql} ORDER BY ${orderBy(f.sort, f.dir)} LIMIT @limit OFFSET @offset`, { ...params, limit: f.limit, offset: f.offset });
-  const moods = readSentimentEnabled(db);
+  const moods = await readSentimentEnabled(db);
   return { total, rows: rows.map((r) => toRow(r, moods)) };
 }
 
@@ -312,7 +312,7 @@ export async function taskDetail(db: Db, rawCode: string, now: Date): Promise<Da
     [r.id],
   );
   return {
-    ...toRow(r, readSentimentEnabled(db)),
+    ...toRow(r, await readSentimentEnabled(db)),
     priorityKeyword: r.priorityKeyword,
     sourceQuote: r.sourceQuote,
     sourceDate: r.sourceDate,

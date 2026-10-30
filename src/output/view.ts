@@ -112,7 +112,7 @@ export async function loadTrackerView(db: Db, now: Date, health: HealthLine): Pr
   const ordered = [...clients].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.id - b.id);
   return {
     generatedAt: now,
-    sentiment: readSentimentEnabled(db),
+    sentiment: await readSentimentEnabled(db),
     today,
     health,
     unassigned: (await listUnassigned(db, UNASSIGNED_LIMIT)).map((m) => ({ id: m.id, date: istDate(new Date(m.startedAt)), seconds: m.seconds })),

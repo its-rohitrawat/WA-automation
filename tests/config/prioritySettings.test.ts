@@ -39,7 +39,7 @@ describe('PrioritySettings', () => {
       keywords: DEFAULT_KEYWORDS, sentimentEnabled: false, source: { priorityKeywords: 'default', sentimentEnabled: 'default' },
       limits: { perLevel: KEYWORDS_PER_LEVEL, maxChars: KEYWORD_MAX_CHARS },
     });
-    expect(readSentimentEnabled(db)).toBe(false);
+    expect(await readSentimentEnabled(db)).toBe(false);
   });
 
   it('saves the cleaned lists and audits counts only, in one transaction', async () => {
@@ -61,10 +61,10 @@ describe('PrioritySettings', () => {
   it('switches sentiment on and off, audits it and asks for a tracker rebuild', async () => {
     const { db, store, audits, audit } = await setup();
     expect((await store.set('sentimentEnabled', true, OWNER, audit)).sentimentEnabled).toBe(true);
-    expect(readSentimentEnabled(db)).toBe(true);
+    expect(await readSentimentEnabled(db)).toBe(true);
     expect(await getKv(db, 'rebuild_requested')).toBe(NOW);
     await store.set('sentimentEnabled', false, OWNER, audit);
-    expect(readSentimentEnabled(db)).toBe(false);
+    expect(await readSentimentEnabled(db)).toBe(false);
     expect(audits.map((a) => a.detail)).toEqual(['Sentiment analysis switched on', 'Sentiment analysis switched off']);
   });
 
@@ -120,6 +120,6 @@ describe('PrioritySettings', () => {
     const { db, store } = await setup();
     await expect(store.set('sentimentEnabled', true, OWNER, () => { throw new Error('disk full'); })).rejects.toThrow('disk full');
     expect(rows(db)).toEqual([]);
-    expect(readSentimentEnabled(db)).toBe(false);
+    expect(await readSentimentEnabled(db)).toBe(false);
   });
 });
