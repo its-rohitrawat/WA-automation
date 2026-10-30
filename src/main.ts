@@ -154,7 +154,7 @@ async function main(): Promise<void> {
     sessionDb = openSessionDb(sessionDbPath(env.DATA_DIR));
 
     const configs = loadGroupsFile(env.GROUPS_FILE);
-    syncClients(db, configs, systemClock.now()); // a group approved while the service was stopped gets its history queued
+    await syncClients(db, configs, systemClock.now()); // a group approved while the service was stopped gets its history queued
     const allow = new AllowList(configs.map((c) => c.groupId));
 
     // openSessionDb has already restored a session left by a dashboard link that never finished (D3).

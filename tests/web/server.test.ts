@@ -709,6 +709,12 @@ describe('main.ts dashboard wiring', () => {
     expect(gap).not.toMatch(/\bawait\b/);
   });
 
+  it('waits for the groups to be synced before anything reads the clients (S1 review N1)', () => {
+    const start = src.slice(0, src.indexOf('app.start();'));
+    expect(start).toMatch(/await syncClients\(db, configs, systemClock\.now\(\)\);/);
+    expect(start).not.toMatch(/(?<!await )syncClients\(db,/);
+  });
+
   it('stops the web server before app.stop() on shutdown', () => {
     const shutdown = src.slice(src.indexOf('const shutdown = () => {'), src.indexOf("process.on('SIGINT', shutdown);"));
     expect(shutdown).toMatch(/const webStopped = webReady\s*\.then\(\(w\) => w\?\.stop\(\)\)/);

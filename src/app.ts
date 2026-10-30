@@ -190,6 +190,15 @@ export interface SpendView {
 }
 
 /**
+ * The same promise with a handler attached now: awaited later it still rejects as before, but a rejection that comes
+ * while something else is awaited first never counts as unhandled (which would stop the service).
+ */
+function handled<T>(p: Promise<T>): Promise<T> {
+  p.catch(() => undefined);
+  return p;
+}
+
+/**
  * Wires gateway -> ingestor -> media queue / debouncer -> reconciler -> publisher. The founder-number gateway never sends
  * anything. The only sender is the optional morning report's, on the spare number, to REPORT_RECIPIENT only.
  */
@@ -561,11 +570,13 @@ export async function createApp(d: AppDeps): Promise<App> {
     // An uncaught throw inside setInterval would exit the service.
     try {
       // Read now, used after the synchronous kicks below (as unprocessed), so the tick's synchronous start is as before.
-      const rebuild = getKv(d.db, 'rebuild_requested');
+      // Each read gets a handler at once (handled), so a failure while the other is awaited is never an unhandled
+      // rejection, which would stop the service; its await below still throws into this try (S1 review N2).
+      const rebuild = handled(getKv(d.db, 'rebuild_requested'));
       // Also re-runs a client waiting for a file that never settles (deferred for Claude or the budget) once its wait
       // is over, and a message queued again because its file was read late (amendment 15g). Read now, used after the
       // synchronous kicks below, so the tick's synchronous start is as before.
-      const unprocessed = clientIdsWithUnprocessed(d.db);
+      const unprocessed = handled(clientIdsWithUnprocessed(d.db));
       mediaQueue?.kick(); // retries that are due, and files saved by cli link
       void uploader?.run(); // retries that are due
       meetings?.tick(); // discovery when due (MEETING_POLL_MINUTES), then the next due meeting
