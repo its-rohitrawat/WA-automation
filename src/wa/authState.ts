@@ -1,13 +1,12 @@
 import { createHmac, hkdfSync } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
-import { dirname } from 'node:path';
-import Database from 'better-sqlite3';
 import { BufferJSON, initAuthCreds, proto } from 'baileys';
 import type { AuthenticationCreds, AuthenticationState, SignalDataSet, SignalDataTypeMap } from 'baileys';
 import { decrypt, encrypt } from '../crypto/envelope.ts';
 import { deriveSubkey } from '../crypto/keyProvider.ts';
 import type { Db, Sql } from '../store/db.ts';
-import { SqliteDb } from '../store/engine/sqlite.ts';
+import {
+  BACKUP_MARKER, HAS_BACKUP, isDamageCode, openSessionFile, probeDamage, readSessionRow, RESTORE, sqliteErrorCode,
+} from '../store/engine/sessionFile.ts';
 
 export class SessionDecryptError extends Error {
   constructor(options?: ErrorOptions) {
@@ -32,29 +31,12 @@ export class SenderSessionDecryptError extends Error {
   }
 }
 
-/** The session file, behind the same Db interface as the tracker, with its own pragmas. */
+/**
+ * The session file, behind the same Db interface as the tracker, with its own pragmas and tables; a link that never
+ * finished has its backup restored before the Db is handed out (src/store/engine/sessionFile.ts).
+ */
 export function openSessionDb(file: string): Db {
-  if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
-  const raw = new Database(file);
-  const db = SqliteDb.wrap(raw);
-  try {
-    raw.pragma('journal_mode = WAL');
-    // Wipe rotated-out keys from free pages.
-    raw.pragma('secure_delete = ON');
-    raw.exec('CREATE TABLE IF NOT EXISTS auth (k TEXT PRIMARY KEY, v BLOB NOT NULL)');
-    // A copy of the rows while a dashboard link runs (src/wa/linkSession.ts); empty otherwise.
-    raw.exec('CREATE TABLE IF NOT EXISTS auth_backup (k TEXT PRIMARY KEY, v BLOB NOT NULL)');
-    // A link that never finished: the session from before it comes back. On the file's own handle, like the pragmas
-    // above, before the Db is handed out, so opening stays synchronous.
-    raw.transaction(() => {
-      if (!raw.prepare(HAS_BACKUP).get(BACKUP_MARKER)) return;
-      for (const sql of RESTORE) raw.prepare(sql).run(...(sql.includes('?') ? [BACKUP_MARKER] : []));
-    })();
-  } catch (err) {
-    raw.close();
-    throw err;
-  }
-  return db;
+  return openSessionFile(file);
 }
 
 // The session backup. A dashboard link copies the session rows into auth_backup (same file) in the transaction that
@@ -62,12 +44,6 @@ export function openSessionDb(file: string): Db {
 // or once the old rows are back. openSessionDb restores a backup it finds (a link that never finished) before anything
 // reads the session. Only the holder of the data-folder lock opens a session file (the service, or a CLI command with the
 // service stopped), so this never runs beside a link in progress.
-
-/** Marks a backup as present even when the session it copied was empty. Row names are hex hashes, so it cannot collide. */
-const BACKUP_MARKER = '#link-in-progress';
-const HAS_BACKUP = 'SELECT 1 FROM auth_backup WHERE k = ?';
-/** The backed-up rows replace auth, and the backup is dropped (the one `?` is the marker). */
-const RESTORE = ['DELETE FROM auth', 'INSERT INTO auth (k, v) SELECT k, v FROM auth_backup WHERE k <> ?', 'DELETE FROM auth_backup'];
 
 /** In one transaction: copies every row to auth_backup, then empties auth (the reset for a new link). */
 export async function backupAndReset(db: Db): Promise<void> {
@@ -228,34 +204,15 @@ export async function useSenderAuthState(db: Db, masterKey: Buffer): Promise<Enc
  * compares again at every start, where it reads the founder's session anyway.
  */
 export function readFounderNumber(file: string, key: Buffer): string | undefined {
-  if (!existsSync(file)) return undefined;
-  let db: Database.Database | undefined;
   try {
-    const wal = `${file}-wal`;
-    if (existsSync(wal) && statSync(wal).size > 0) {
-      db = new Database(file, { readonly: true, fileMustExist: true });
-    } else {
-      const bytes = readFileSync(file);
-      // Bytes 18 and 19 mark a WAL-mode file. SQLite opens an in-memory copy only with the legacy (rollback) marks; the
-      // copy is changed, never the file.
-      if (bytes.length >= 20 && bytes[18] === 2 && bytes[19] === 2) bytes[18] = bytes[19] = 1;
-      db = new Database(bytes, { readonly: true });
-    }
-    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'auth'").get()) return undefined;
     const { rowId, open } = sessionCodec(key);
     const id = rowId('creds');
-    const row = db.prepare('SELECT v FROM auth WHERE k = ?').get(id) as { v: Buffer } | undefined;
-    if (!row) return undefined;
-    const me = (open(id, row.v) as AuthenticationCreds | null)?.me?.id;
+    const v = readSessionRow(file, id);
+    if (!v) return undefined;
+    const me = (open(id, v) as AuthenticationCreds | null)?.me?.id;
     return me ? me.split(/[:@]/)[0] : undefined;
   } catch {
     return undefined;
-  } finally {
-    try {
-      db?.close();
-    } catch {
-      // best effort
-    }
   }
 }
 
@@ -265,56 +222,6 @@ export function readFounderNumber(file: string, key: Buffer): string | undefined
  * aside with link-sender --reset would be the wrong fix.
  */
 export type SenderSession = { ok: true; db: Db; auth: EncryptedAuth } | { ok: false; code: string; transient?: true };
-
-/** SQLite codes that mean the file itself is damaged or not a database. Every other SQLite error may pass. */
-function isDamage(code: string): boolean {
-  return code === 'SQLITE_NOTADB' || code.startsWith('SQLITE_CORRUPT');
-}
-
-/** The first 16 bytes of every SQLite database file. */
-const SQLITE_HEADER = Buffer.from('SQLite format 3\0', 'latin1');
-
-/**
- * Checks an existing file for damage before any read-write open. A read-write open of a damaged file (journal_mode =
- * WAL) makes SQLite delete the -wal and -shm files next to it when it is closed, so link-sender --reset could not move
- * them aside with the file. A file that does not start with the SQLite header is not a database (SQLite itself answers
- * SQLITE_NOTADB): that is told from its first bytes, with no SQLite connection at all. Damage further in is found with a
- * read-only connection, which never deletes the -wal file (it may rebuild the -shm file, SQLite's index of the -wal,
- * which holds no data of its own). Returns the SQLite damage code, or undefined. Any other error is left to the normal
- * open: a read-only open of a healthy WAL file can fail for harmless reasons (such as a missing -shm file).
- */
-function probeDamage(file: string): string | undefined {
-  if (file === ':memory:') return undefined;
-  try {
-    if (!statSync(file).isFile()) return undefined;
-    const head = Buffer.alloc(SQLITE_HEADER.length);
-    const fd = openSync(file, 'r');
-    let n: number;
-    try {
-      n = readSync(fd, head, 0, head.length, 0);
-    } finally {
-      closeSync(fd);
-    }
-    // An empty file is a new, empty database. Any other file, however short, must start with the header.
-    if (n > 0 && !(n === head.length && head.equals(SQLITE_HEADER))) return 'SQLITE_NOTADB';
-  } catch {
-    return undefined; // missing, a folder, no permission: the normal open reports it
-  }
-  let probe: Database.Database | undefined;
-  try {
-    probe = new Database(file, { readonly: true, fileMustExist: true });
-    probe.prepare('SELECT 1 FROM sqlite_master').get();
-    return undefined;
-  } catch (err) {
-    return err instanceof Database.SqliteError && isDamage(err.code) ? err.code : undefined;
-  } finally {
-    try {
-      probe?.close();
-    } catch {
-      // best effort
-    }
-  }
-}
 
 /**
  * Opens the spare number's session at service start. A file that is damaged, not a database, or written with another
@@ -336,7 +243,8 @@ export async function openSenderSession(file: string, masterKey: Buffer): Promis
       // best effort
     }
     if (err instanceof SenderSessionDecryptError) return { ok: false, code: 'decrypt_failed' };
-    if (err instanceof Database.SqliteError) return isDamage(err.code) ? { ok: false, code: err.code } : { ok: false, code: err.code, transient: true };
+    const code = sqliteErrorCode(err);
+    if (code !== undefined) return isDamageCode(code) ? { ok: false, code } : { ok: false, code, transient: true };
     throw err;
   }
 }

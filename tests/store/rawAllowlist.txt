@@ -11,6 +11,5 @@ spend/spendGuard.ts
 store/clients.ts
 store/db.ts
 store/kv.ts
-wa/authState.ts
 web/audit.ts
 web/routes/groups.ts
