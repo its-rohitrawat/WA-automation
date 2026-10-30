@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import pg from 'pg';
+import { createRequire } from 'node:module';
+import type PgModule from 'pg';
 import { TxMisuseError } from './errors.ts';
 import { translate } from './translate.ts';
 import type { Db, Params, RunResult, Sql } from './types.ts';
@@ -9,10 +10,23 @@ import type { Db, Params, RunResult, Sql } from './types.ts';
 // one transaction with app.tenant_id set for that transaction alone, so a pooled connection never carries one
 // customer's id into the next use, and row-level security (P2) sees exactly that customer.
 
-// Numbers as numbers, as SQLite gives them: int8 (COUNT(*), the identity ids, SUM of integers) and numeric (SUM of a
-// bigint, ROUND). Every count, id and amount here stays far below 2^53.
-pg.types.setTypeParser(20, (v) => Number(v));
-pg.types.setTypeParser(1700, (v) => Number(v));
+const require = createRequire(import.meta.url);
+let loaded: typeof PgModule | undefined;
+
+/**
+ * The pg package, loaded on the first Postgres pool or connection only (merge-readiness R1): on SQLite the service
+ * never loads it, so a missing package can never stop it from starting. Numbers come back as numbers, as SQLite gives
+ * them: int8 (COUNT(*), the identity ids, SUM of integers) and numeric (SUM of a bigint, ROUND). Every count, id and
+ * amount here stays far below 2^53.
+ */
+function pg(): typeof PgModule {
+  if (!loaded) {
+    loaded = require('pg') as typeof PgModule;
+    loaded.types.setTypeParser(20, (v) => Number(v));
+    loaded.types.setTypeParser(1700, (v) => Number(v));
+  }
+  return loaded;
+}
 
 /** A customer id: a UUID (customer #1's is 00000000-0000-4000-8000-000000000001). */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -34,7 +48,7 @@ export interface PgClient {
  * that drops (the server restarted) is reported here, not left to crash the process. The URL is never logged.
  */
 export function openPgPool(url: string, o: { max?: number; onError?: (err: Error) => void } = {}): PgPool {
-  const pool = new pg.Pool({ connectionString: url, max: o.max ?? 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000, application_name: 'wa-agent' });
+  const pool = new (pg().Pool)({ connectionString: url, max: o.max ?? 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000, application_name: 'wa-agent' });
   pool.on('error', o.onError ?? ((err) => console.error('postgres: an idle connection failed', err.message)));
   return pool;
 }
@@ -207,7 +221,7 @@ export interface AdminConnection {
 
 /** Connects as the role in `url` (the superuser for db-bootstrap, wa_owner for db-migrate). The URL is never logged. */
 export async function openAdminConnection(url: string): Promise<AdminConnection> {
-  const c = new pg.Client({ connectionString: url, application_name: 'wa-agent-admin', connectionTimeoutMillis: 10_000 });
+  const c = new (pg().Client)({ connectionString: url, application_name: 'wa-agent-admin', connectionTimeoutMillis: 10_000 });
   await c.connect();
   return { sql: (text, values) => c.query(text, values), end: () => c.end() };
 }

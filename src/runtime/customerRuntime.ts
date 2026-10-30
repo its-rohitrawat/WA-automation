@@ -379,9 +379,10 @@ export async function buildCustomerRuntime(
       ai: new ClaudeClient({ apiKey, model: env.AI_MODEL, effort: env.AI_EFFORT, prices }),
       drive: google.drive,
       prices,
-      // The founder: DAILY_SPEND_CAP_USD (.env only), under the platform ceiling. A customer: its own limit, on its own key.
+      // The founder: DAILY_SPEND_CAP_USD (.env only), under the platform ceiling when the platform is on (R2: off, that
+      // one cap alone, as before). A customer: its own limit, on its own key.
       spendCapUsd: t.founder ? env.DAILY_SPEND_CAP_USD : (settings?.get().dailySpendCapUsd ?? CUSTOMER_DEFAULT_CAP_USD),
-      ...(t.founder && d.globalSpend ? { platformSpend: { global: d.globalSpend, tenantId: t.id } } : {}),
+      ...(t.founder && env.PLATFORM_ENABLED && d.globalSpend ? { platformSpend: { global: d.globalSpend, tenantId: t.id } } : {}),
       quietMs: env.QUIET_MINUTES * 60_000,
       maxWaitMs: env.MAX_WAIT_MINUTES * 60_000,
       maxConcurrent: env.MAX_PARALLEL_CLIENTS,

@@ -90,8 +90,9 @@ async function main(): Promise<void> {
 
     // The founder's runtime (S4.4, src/runtime/customerRuntime.ts): everything for customer #1 between the databases
     // and the web server. On a failure it closes the databases and releases the lock itself, then throws to the catch.
-    // The platform-wide daily ceiling (S4.3, D3) over spend billed to the founder: the founder's runtime joins it.
-    const globalSpend = new GlobalSpend({ capUsd: env.PLATFORM_DAILY_SPEND_CAP_USD });
+    // The platform-wide daily ceiling (S4.3, D3) over spend billed to the founder: the founder's runtime joins it. Only
+    // with the platform on (merge-readiness R2): off, the founder has exactly its one DAILY_SPEND_CAP_USD, as before.
+    const globalSpend = env.PLATFORM_ENABLED ? new GlobalSpend({ capUsd: env.PLATFORM_DAILY_SPEND_CAP_USD }) : undefined;
     handedOver = true;
     const rt = await startFounderRuntime({
       tenantId: env.TENANT_ID, env, log, db: runtimeDb(db), platformDb, key, configs, lock, globalSpend, ...(customerDbsOf(db) ? { customerDb: customerDbsOf(db)! } : {}),

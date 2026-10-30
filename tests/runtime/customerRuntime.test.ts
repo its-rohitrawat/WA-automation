@@ -107,9 +107,21 @@ describe('buildCustomerRuntime', () => {
     expect(Object.keys(globalSpend.spentTodayByTenant())).toEqual([]);
     await customer.stop();
 
-    const founder = await buildCustomerRuntime({ id: FOUNDER, founder: true }, { ...fakeShared(), db: founderDb, configs: [], globalSpend });
+    const founder = await buildCustomerRuntime({ id: FOUNDER, founder: true }, { ...fakeShared({ PLATFORM_ENABLED: 'true' }), db: founderDb, configs: [], globalSpend });
     expect(globalSpend.spentTodayByTenant()).toEqual({ [FOUNDER]: 2 }); // the founder's own spend only
     expect(globalSpend.spentToday()).toBe(2);
+    await founder.stop();
+  });
+
+  it('with the platform off the founder never joins the ceiling: its one DAILY_SPEND_CAP_USD, as before (R2)', async () => {
+    const db = await seededDb();
+    opened.push(db);
+    // Above the platform's $100 default today, under the founder's own $150.
+    await db.run('INSERT INTO spend (day, kind, usd, detail, at) VALUES (?, ?, ?, ?, ?)', [istDate(new Date()), 'ai', 120, 'founder call', new Date().toISOString()]);
+    const globalSpend = new GlobalSpend({ capUsd: 100 });
+    const founder = await buildCustomerRuntime({ id: FOUNDER, founder: true }, { ...fakeShared({ DAILY_SPEND_CAP_USD: '150' }), db, configs: [], globalSpend });
+    expect(globalSpend.spentTodayByTenant()).toEqual({}); // not joined, so its $100 cannot stop the founder
+    expect(globalSpend.spentToday()).toBe(0);
     await founder.stop();
   });
 });
