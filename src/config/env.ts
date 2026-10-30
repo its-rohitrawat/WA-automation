@@ -62,6 +62,11 @@ const EnvSchema = z.object({
    * Claude calls and any later founder-paid service. Customers use their own Anthropic key under their own limit.
    */
   PLATFORM_DAILY_SPEND_CAP_USD: z.coerce.number().positive().default(100),
+  /**
+   * The platform (SaaS S5): the Invite and Customers screens and the public sign-up page (/signup). Off by default: none
+   * of it exists, and the platform tables are not made, until the owner switches it on.
+   */
+  PLATFORM_ENABLED: Flag.default(false),
   /** The founder's name on invite emails and the sign-up page (SaaS S5). */
   PLATFORM_FOUNDER_NAME: z.string().min(1).max(100).default('WA Agent'),
   GOOGLE_OAUTH_CLIENT_ID: z.string().min(1).optional(),

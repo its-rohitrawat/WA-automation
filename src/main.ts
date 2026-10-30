@@ -60,10 +60,12 @@ async function main(): Promise<void> {
     const onPoolError = (err: Error) => log.error({ err }, 'a Postgres connection failed while idle');
     db = await openStore(env, { onPoolError });
     platformDb = openPlatformStore(env, db, { onPoolError });
-    // The platform tables (S5H.1): on SQLite in tracker.db, made here if missing; on Postgres P3 made them (db-migrate).
-    // Then customer #1, the founder, is there before anything reads them.
-    if (platformDb.engine === 'sqlite') await ensurePlatformSchema(platformDb);
-    await ensureFounderTenant(platformDb, { name: 'Your business', at: new Date().toISOString() });
+    // The platform tables (S5H.1), only with PLATFORM_ENABLED (off: tracker.db stays as it was): on SQLite in tracker.db,
+    // made here if missing; on Postgres P3 made them (db-migrate). Then customer #1, the founder, is there.
+    if (env.PLATFORM_ENABLED) {
+      if (platformDb.engine === 'sqlite') await ensurePlatformSchema(platformDb);
+      await ensureFounderTenant(platformDb, { name: 'Your business', at: new Date().toISOString() });
+    }
     const configs = loadGroupsFile(env.GROUPS_FILE);
 
     // The founder's runtime (S4.4, src/runtime/customerRuntime.ts): everything for customer #1 between the databases
@@ -76,7 +78,7 @@ async function main(): Promise<void> {
     rt.start();
     // Owner dashboard: off (the default) means no web server and no port. Not awaited here, so the stop handlers below
     // are in place before anything else is awaited. It never rejects: a dashboard that cannot start resolves to undefined.
-    const webReady = env.DASHBOARD_ENABLED ? startDashboard({ env, db, platformDb, log, control, ...agentRoutes }) : Promise.resolve(undefined);
+    const webReady = env.DASHBOARD_ENABLED ? startDashboard({ env, db, platformDb, log, control, platform: rt.platform, ...agentRoutes }) : Promise.resolve(undefined);
 
     const trackerDb = db;
     const platformStore = platformDb !== db ? platformDb : undefined;

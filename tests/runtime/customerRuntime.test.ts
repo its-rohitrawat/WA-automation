@@ -114,39 +114,53 @@ describe('buildCustomerRuntime', () => {
   });
 });
 
-describe('the platform on the founder’s dashboard (S5H.1, 2.2, 4.1)', () => {
+describe('the platform on the founder’s dashboard (S5H.1, 2.2, 4.1; PLATFORM_ENABLED)', () => {
   const fakeGoogle = { exchange: () => Promise.reject(new Error('no Google in tests')), verifier: () => Promise.reject(new Error('no Google in tests')) };
 
   /** The runtime's routes on a real dashboard (port 0), as main.ts starts it; what two paths answer without a session. */
-  async function answers(t: { id: string; founder: boolean }, withPlatform: boolean): Promise<{ signup: number; invites: number }> {
+  async function answers(
+    t: { id: string; founder: boolean },
+    o: { withPlatform: boolean; enabled: boolean },
+  ): Promise<{ signup: number; invites: number; platform: boolean }> {
     const db = await seededDb();
     opened.push(db);
-    // As main.ts does at start: the platform tables in tracker.db, then customer #1.
+    // As main.ts does at start with PLATFORM_ENABLED: the platform tables in tracker.db, then customer #1.
     await ensurePlatformSchema(db);
     await ensureFounderTenant(db, { name: 'Your business', at: new Date().toISOString() });
-    const shared = fakeShared();
-    const rt = await buildCustomerRuntime(t, { ...shared, db, configs: [], ...(withPlatform ? { platformDb: db } : {}) });
-    const web = await startDashboard({ env: { ...shared.env, DASHBOARD_PORT: 0 }, db, platformDb: db, log: silentLogger(), control: rt.control, ...rt.agentRoutes, google: fakeGoogle });
+    const shared = fakeShared(o.enabled ? { PLATFORM_ENABLED: 'true' } : {});
+    const rt = await buildCustomerRuntime(t, { ...shared, db, configs: [], ...(o.withPlatform ? { platformDb: db } : {}) });
+    const web = await startDashboard({
+      env: { ...shared.env, DASHBOARD_PORT: 0 }, db, platformDb: db, log: silentLogger(), control: rt.control, platform: rt.platform, ...rt.agentRoutes, google: fakeGoogle,
+    });
     try {
       const base = `http://127.0.0.1:${web!.address()!.port}`;
       const signup = (await fetch(`${base}/signup`, { redirect: 'manual' })).status;
       const invites = (await fetch(`${base}/dashboard/api/platform/invites`, { redirect: 'manual' })).status;
-      return { signup, invites };
+      return { signup, invites, platform: rt.platform };
     } finally {
       await web?.stop();
       await rt.stop();
     }
   }
 
-  it('the founder with the platform Db: the sign-up page answers without a session, the invite API needs the owner', async () => {
-    expect(await answers({ id: FOUNDER, founder: true }, true)).toEqual({ signup: 200, invites: 401 });
+  it('off by default: no sign-up page, no platform API, and the shell is told platform: false', async () => {
+    expect(parseEnv({}).PLATFORM_ENABLED).toBe(false);
+    const a = await answers({ id: FOUNDER, founder: true }, { withPlatform: true, enabled: false });
+    expect(a.signup).not.toBe(200);
+    expect(a.invites).not.toBe(401);
+    expect(a.platform).toBe(false); // what main.ts passes to startDashboard, and /dashboard/api/me then says
   });
 
-  it('without the platform Db, and on a customer runtime even with it, neither is there', async () => {
+  it('on, for the founder with the platform Db: the sign-up page answers without a session, the invite API needs the owner', async () => {
+    expect(await answers({ id: FOUNDER, founder: true }, { withPlatform: true, enabled: true })).toEqual({ signup: 200, invites: 401, platform: true });
+  });
+
+  it('on, but without the platform Db, or on a customer runtime even with it: neither is there', async () => {
     for (const [t, withPlatform] of [[{ id: FOUNDER, founder: true }, false], [{ id: CUSTOMER, founder: false }, true]] as const) {
-      const a = await answers(t, withPlatform);
+      const a = await answers(t, { withPlatform, enabled: true });
       expect(a.signup, JSON.stringify(t)).not.toBe(200);
       expect(a.invites, JSON.stringify(t)).not.toBe(401);
+      expect(a.platform, JSON.stringify(t)).toBe(false);
     }
   });
 });

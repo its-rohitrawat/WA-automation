@@ -45,6 +45,8 @@ export async function startDashboard(o: {
   env: DashboardEnv;
   /** The tracker database (audit_log; on SQLite web_sessions too, migration v9). */
   db: Db;
+  /** The shell shows the platform screens (GET /dashboard/api/me says so): the runtime mounted them. */
+  platform?: boolean;
   /** The platform tables' Db (decision D1), which holds web_sessions on Postgres. Defaults to db (SQLite: the same file). */
   platformDb?: Db;
   log: Logger;
@@ -89,6 +91,7 @@ export async function startDashboard(o: {
     ...publicUrl,
     port,
     audited: auditedWrite(o.db, platformDb),
+    platform: o.platform === true,
     exchange:
       o.google?.exchange ??
       googleCodeExchanger({ clientId, clientSecret, ...(o.google?.tokenUrl === undefined ? {} : { tokenUrl: o.google.tokenUrl }) }),

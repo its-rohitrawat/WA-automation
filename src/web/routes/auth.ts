@@ -67,6 +67,8 @@ export interface AuthRouteDeps {
   port: () => number | undefined;
   /** Session writes with their audit row, the audit row first (production: `auditedWrite(db, platformDb)`). */
   audited: AuditedWrite;
+  /** Whether the platform screens are on (PLATFORM_ENABLED, and mounted): /dashboard/api/me says so to the shell. */
+  platform?: boolean;
   /** Code to ID token (production: `googleCodeExchanger`). */
   exchange: CodeExchanger;
   /** ID-token signature check (production: `googleIdVerifier`). */
@@ -242,6 +244,8 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
       signedInAt: s.createdAt,
       expiresAt: s.expiresAt,
       csrf: csrfFor(s.id),
+      // The shell shows the platform nav (Invite, Customers) only when this is true.
+      platform: d.platform === true,
     });
   });
 }

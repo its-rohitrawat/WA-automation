@@ -83,6 +83,8 @@ interface Boot {
 async function boot(
   o: {
     owners?: string[];
+    /** The platform screens are on (PLATFORM_ENABLED): /dashboard/api/me says so. */
+    platform?: boolean;
     publicUrl?: string;
     verifierThrows?: boolean;
     /** The code exchange rejects with this plain Error (not a SignInError). */
@@ -127,6 +129,7 @@ async function boot(
     ...(o.publicUrl === undefined ? {} : { publicUrl: o.publicUrl }),
     port,
     audited: auditedWrite(db, db),
+    ...(o.platform === undefined ? {} : { platform: o.platform }),
     exchange:
       o.exchangeThrows === undefined
         ? googleCodeExchanger({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, tokenUrl: ep.url })
@@ -244,6 +247,14 @@ describe('owner sign-in: happy path', () => {
     expect(audit[0]).toMatchObject({ actor: OWNER, event: 'Signed in', kind: 'auth', detail: 'Edge on Windows' });
   });
 
+  it('/api/me says platform: true only when the platform screens are on, and nothing more about them', async () => {
+    const b = await boot({ platform: true });
+    const sid = await signIn(b);
+    const me = JSON.parse((await b.req('GET', '/dashboard/api/me', { cookie: `wa_session=${sid}` })).body) as Record<string, unknown>;
+    expect(me.platform).toBe(true);
+    expect(Object.keys(me).sort()).toEqual(['csrf', 'email', 'expiresAt', 'name', 'platform', 'signedInAt']);
+  });
+
   it('/api/me gives the owner, the times and the CSRF token that matches the stored hash; 401 without a session', async () => {
     const b = await boot();
     expect((await b.req('GET', '/dashboard/api/me')).status).toBe(401);
@@ -252,7 +263,8 @@ describe('owner sign-in: happy path', () => {
     expect(r.status).toBe(200);
     expect(r.headers['cache-control']).toBe('no-store');
     const me = JSON.parse(r.body) as Record<string, string>;
-    expect(Object.keys(me).sort()).toEqual(['csrf', 'email', 'expiresAt', 'name', 'signedInAt']);
+    expect(Object.keys(me).sort()).toEqual(['csrf', 'email', 'expiresAt', 'name', 'platform', 'signedInAt']);
+    expect(me.platform).toBe(false); // PLATFORM_ENABLED is off by default: the shell shows no platform screens
     expect(me.email).toBe(OWNER);
     expect(me.name).toBe('The Owner');
     expect(me.signedInAt).toBe(T0);

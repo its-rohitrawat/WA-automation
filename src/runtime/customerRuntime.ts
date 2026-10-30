@@ -154,6 +154,8 @@ export interface CustomerRuntime {
   readonly control: AgentControl;
   /** What startDashboard gets besides its own parts: the shared audit log and the agent's routes (dashboard on). */
   readonly agentRoutes: { audit: AuditLog; mount: (m: DashboardMount) => void } | undefined;
+  /** Whether this runtime's dashboard has the platform routes and the sign-up (the founder's, with PLATFORM_ENABLED). */
+  readonly platform: boolean;
   /** Starts the app, the heartbeat and the uptime log. Synchronous: nothing is awaited after it before the stop handlers. */
   start(): void;
   /** The synchronous first step of a stop: the heartbeat and the groups file watcher stop at once. */
@@ -224,10 +226,10 @@ export async function buildCustomerRuntime(t: { id: string; founder: boolean }, 
     if (plan.google === 'not_connected') log.warn('setup mode: Google is not connected; connect it in the dashboard');
     // One Google client per account, swapped in place on a reconnect: Drive and meetings read theirs on every call.
     const google = await buildGoogle({ db, key, credentials: googleCredentials(env), meetingsEnabled: env.MEETINGS_ENABLED, log });
-    // The platform (S5H) is the founder's: its screens and the public sign-up, on the platform Db. Invites go from the founder's
+    // The platform (S5H, PLATFORM_ENABLED) is the founder's: its screens and the public sign-up, on the platform Db. Invites go from the founder's
     // Gmail once the main account has gmail.send: its scopes and address are async reads, so they are read now and after
     // each reconnect of the main account, and the mailer getter (run on every request) reads what was last read.
-    const platformDb = t.founder ? d.platformDb : undefined;
+    const platformDb = t.founder && env.PLATFORM_ENABLED ? d.platformDb : undefined;
     let gmail: { scopes: readonly string[]; from: string | null } = { scopes: [], from: null };
     const readGmail = async () => {
       gmail = { scopes: await grantedScopes(db, MAIN_ACCOUNT), from: await accountEmail(db, MAIN_ACCOUNT) };
@@ -531,6 +533,7 @@ export async function buildCustomerRuntime(t: { id: string; founder: boolean }, 
       app,
       control,
       agentRoutes,
+      platform: platformDb !== undefined && agentRoutes !== undefined,
       start: () => {
         app.start();
         log.info({ groups: configs.length }, 'WA Agent started');
