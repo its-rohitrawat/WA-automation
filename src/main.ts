@@ -78,7 +78,9 @@ async function main(): Promise<void> {
     rt.start();
     // Owner dashboard: off (the default) means no web server and no port. Not awaited here, so the stop handlers below
     // are in place before anything else is awaited. It never rejects: a dashboard that cannot start resolves to undefined.
-    const webReady = env.DASHBOARD_ENABLED ? startDashboard({ env, db, platformDb, log, control, platform: rt.platform, ...agentRoutes }) : Promise.resolve(undefined);
+    const webReady = env.DASHBOARD_ENABLED ? startDashboard({
+      env, db, platformDb, log, control, platform: rt.platform, customerSessions: env.DB_ENGINE === 'postgres' && rt.platform, ...agentRoutes,
+    }) : Promise.resolve(undefined);
 
     const trackerDb = db;
     const platformStore = platformDb !== db ? platformDb : undefined;

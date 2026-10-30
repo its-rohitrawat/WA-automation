@@ -26,6 +26,8 @@ export interface Router {
   match(method: string, pathname: string): RouteMatch | undefined;
   /** The methods some route answers for this path (GET also stands for HEAD); empty when none does. */
   methodsFor(pathname: string): ('GET' | 'POST')[];
+  /** Every route, in registration order (the route sweep test reads it, so a new route is covered by itself). */
+  routes(): { method: 'GET' | 'POST'; pattern: string }[];
 }
 
 type Segment = { literal: string } | { param: string };
@@ -106,5 +108,6 @@ export function createRouter(): Router {
     post: (path, handler) => add('POST', path, handler),
     match,
     methodsFor: (pathname) => (['GET', 'POST'] as const).filter((m) => match(m, pathname) !== undefined),
+    routes: () => routes.map((r) => ({ method: r.method, pattern: r.pattern })),
   };
 }

@@ -86,7 +86,7 @@ export async function mountFakeScreens(web: WebServer, o: { signedIn: () => bool
   const session = (): OwnerSession => {
     if (!o.signedIn()) throw new HttpError(401, 'unauthenticated', 'Sign in first.');
     const now = new Date();
-    return { id: 'fake', email: OWNER, tenantId: FOUNDER_TENANT_ID, csrfHash: '', createdAt: new Date(now.getTime() - 300_000).toISOString(), expiresAt: new Date(now.getTime() + 6 * 86_400_000).toISOString() };
+    return { id: 'fake', email: OWNER, tenantId: FOUNDER_TENANT_ID, role: 'founder', csrfHash: '', createdAt: new Date(now.getTime() - 300_000).toISOString(), expiresAt: new Date(now.getTime() + 6 * 86_400_000).toISOString() };
   };
   const guard: Pick<Guard, 'requireOwner' | 'requireCsrf'> = {
     requireOwner: async () => session(),

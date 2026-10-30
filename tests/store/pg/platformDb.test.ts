@@ -40,7 +40,7 @@ const ALLOWED: Record<string, RegExp[]> = {
     /^await ensureFounderTenant\(platformDb, \{/,
     // Handed to the founder's runtime (its platform and sign-up deps) and to the dashboard (SessionStore).
     /^const rt = await startFounderRuntime\(\{[^}]*\bplatformDb\b/,
-    /^const webReady = env\.DASHBOARD_ENABLED \? startDashboard\(\{[^}]*\bplatformDb\b/,
+    /^env, db, platformDb, log, control, platform: rt\.platform, customerSessions:/,
     // Closed at shutdown and on a failed start, when it is its own pool.
     /^const platformStore = platformDb !== db \? platformDb : undefined;$/,
     /^Promise\.all\(\[trackerDb\.close\(\), platformStore\?\.close\(\)\]/,
@@ -67,6 +67,8 @@ const ALLOWED: Record<string, RegExp[]> = {
     /^const sessions = new SessionStore\(platformDb, clock\);$/,
     // The sign-in's audited write: the audit row on the customer's Db, then the session on this one (SessionStore).
     /^audited: auditedWrite\(o\.db, platformDb\),$/,
+    // The member guard's membership lookup (S4.8): a customer's memberships, from the platform tables.
+    /^\(await membershipsFor\(platformDb, email\)\)\.filter/,
   ],
 };
 

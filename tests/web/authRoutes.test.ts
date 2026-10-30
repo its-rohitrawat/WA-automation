@@ -252,7 +252,7 @@ describe('owner sign-in: happy path', () => {
     const sid = await signIn(b);
     const me = JSON.parse((await b.req('GET', '/dashboard/api/me', { cookie: `wa_session=${sid}` })).body) as Record<string, unknown>;
     expect(me.platform).toBe(true);
-    expect(Object.keys(me).sort()).toEqual(['csrf', 'email', 'expiresAt', 'name', 'platform', 'signedInAt']);
+    expect(Object.keys(me).sort()).toEqual(['csrf', 'email', 'expiresAt', 'name', 'platform', 'role', 'signedInAt']);
   });
 
   it('/api/me gives the owner, the times and the CSRF token that matches the stored hash; 401 without a session', async () => {
@@ -263,8 +263,9 @@ describe('owner sign-in: happy path', () => {
     expect(r.status).toBe(200);
     expect(r.headers['cache-control']).toBe('no-store');
     const me = JSON.parse(r.body) as Record<string, string>;
-    expect(Object.keys(me).sort()).toEqual(['csrf', 'email', 'expiresAt', 'name', 'platform', 'signedInAt']);
+    expect(Object.keys(me).sort()).toEqual(['csrf', 'email', 'expiresAt', 'name', 'platform', 'role', 'signedInAt']);
     expect(me.platform).toBe(false); // PLATFORM_ENABLED is off by default: the shell shows no platform screens
+    expect(me.role).toBe('founder'); // an owner-list email in the founder's workspace
     expect(me.email).toBe(OWNER);
     expect(me.name).toBe('The Owner');
     expect(me.signedInAt).toBe(T0);

@@ -4,6 +4,7 @@ import type { Db } from '../store/db.ts';
 import { systemClock } from '../util/clock.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
+import { membershipsFor } from '../platform/store.ts';
 import { AuditLog } from './audit.ts';
 import { ACTION_LIMIT, createGuard, RateLimiter, SIGNIN_LIMIT } from './guard.ts';
 import type { Guard } from './guard.ts';
@@ -49,6 +50,11 @@ export async function startDashboard(o: {
   platform?: boolean;
   /** The platform tables' Db (decision D1), which holds web_sessions on Postgres. Defaults to db (SQLite: the same file). */
   platformDb?: Db;
+  /**
+   * Customer sessions are possible (S4.8: Postgres, with the platform on): the guard then accepts a customer owner's
+   * session while its membership holds. Otherwise only the founder's.
+   */
+  customerSessions?: boolean;
   log: Logger;
   control: object;
   clock?: Clock;
@@ -76,7 +82,11 @@ export async function startDashboard(o: {
   const web = createWebServer({ control: o.control, env, log, clock, sessions, siteDir: SITE_DIR });
   const port = () => web.address()?.port;
   const publicUrl = env.DASHBOARD_PUBLIC_URL === undefined ? {} : { publicUrl: env.DASHBOARD_PUBLIC_URL };
-  const guard = createGuard({ sessions, ownerEmails: env.DASHBOARD_OWNER_EMAILS, port, ...publicUrl });
+  // A customer's memberships, from the platform Db: a customer that was removed no longer counts (Postgres's tenants
+  // allow 'removed', which TenantStatus does not name yet, so it is compared as text).
+  const memberships = async (email: string) =>
+    (await membershipsFor(platformDb, email)).filter((m) => (m.status as string) !== 'removed').map((m) => m.tenantId);
+  const guard = createGuard({ sessions, ownerEmails: env.DASHBOARD_OWNER_EMAILS, port, ...publicUrl, ...(o.customerSessions ? { memberships } : {}) });
   const audit = o.audit ?? new AuditLog(o.db, clock);
   const actions = new RateLimiter({ ...ACTION_LIMIT, clock });
   registerAuthRoutes({

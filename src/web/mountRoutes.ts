@@ -72,7 +72,17 @@ export interface AgentRoutesDeps {
 }
 
 /** The owner's context for a D2/D3 handler. sessionId is the session's hash, never the cookie value. */
-const ownerOf = (ctx: RequestContext, s: OwnerSession): OwnerContext => ({ actor: s.email, sessionId: hashToken(s.id), requestId: ctx.requestId });
+const ownerOf = (ctx: RequestContext, s: OwnerSession): OwnerContext => ({
+  actor: s.email, sessionId: hashToken(s.id), requestId: ctx.requestId, tenantId: s.tenantId, role: s.role,
+});
+
+/**
+ * These routes serve this runtime's customer, the founder, until the Supervisor gives each customer its own (S4.5): a
+ * customer's session is answered 503 workspace_starting, never the founder's data.
+ */
+function inScope(s: OwnerSession): void {
+  if (s.role !== 'founder') throw new HttpError(503, 'workspace_starting', 'Your workspace is starting. Try again in a minute.');
+}
 
 function send(res: ServerResponse, r: ApiResult): void {
   const retry = (r.body as { error?: { retryAfterSec?: unknown } } | null)?.error?.retryAfterSec;
@@ -102,16 +112,37 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
     isOwner: (email) => owners.has(email.trim().toLowerCase()), settings: d.settings, priority: d.priority, sessions: m.sessions, secureFor: m.secureFor,
   });
 
-  // An owner read: the guard first, then the handler.
+  // A change by any signed-in member: the session, Origin and CSRF (bound to that session), then the action limit.
+  const memberAction = async (ctx: RequestContext): Promise<OwnerSession> => {
+    const s = await guard.requireSession(ctx.req);
+    guard.requireCsrf(ctx.req, s);
+    m.actions.hit(ctx.req, ctx.res);
+    return s;
+  };
+  // A read: the session, its scope (this runtime's customer), then the handler.
   const read = (path: string, answer: (ctx: RequestContext, o: OwnerContext) => ApiResult | Promise<ApiResult>) =>
     router.get(path, async (ctx) => {
-      const s = await guard.requireOwner(ctx.req);
+      const s = await guard.requireSession(ctx.req);
+      inScope(s);
       send(ctx.res, await answer(ctx, ownerOf(ctx, s)));
     });
-  // An owner change: guard, Origin and CSRF, the action limit, then the JSON body.
+  // A change: the session, Origin and CSRF, the action limit, its scope, then the JSON body.
   const change = (path: string, answer: (ctx: RequestContext, o: OwnerContext, body: unknown) => ApiResult | Promise<ApiResult>) =>
     router.post(path, async (ctx) => {
-      const s = await actionSession(ctx, action);
+      const s = await memberAction(ctx);
+      inScope(s);
+      send(ctx.res, await answer(ctx, ownerOf(ctx, s), await readBody(ctx)));
+    });
+  // The platform's routes: any member (a customer reaches Getting started and its own key), no runtime scope; each
+  // founder-only route checks the role itself (isFounder).
+  const memberRead = (path: string, answer: (ctx: RequestContext, o: OwnerContext) => ApiResult | Promise<ApiResult>) =>
+    router.get(path, async (ctx) => {
+      const s = await guard.requireSession(ctx.req);
+      send(ctx.res, await answer(ctx, ownerOf(ctx, s)));
+    });
+  const memberChange = (path: string, answer: (ctx: RequestContext, o: OwnerContext, body: unknown) => ApiResult | Promise<ApiResult>) =>
+    router.post(path, async (ctx) => {
+      const s = await memberAction(ctx);
       send(ctx.res, await answer(ctx, ownerOf(ctx, s), await readBody(ctx)));
     });
 
@@ -124,8 +155,9 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   read('/dashboard/api/groups/suggest-code', ({ url }, o) => suggestCodeHandler(groups, o, url.searchParams.get('name') ?? ''));
   read('/dashboard/api/clients', async (_ctx, o) => await clientsListHandler(d.clients, o));
   read('/dashboard/api/clients/:code', async ({ params }, o) => await clientDetailHandler(d.clients, o, params.code!));
-  // The platform (SaaS S5). Its owner is a dashboard owner (DASHBOARD_OWNER_EMAILS) until customer sessions exist (S4.8).
-  if (d.platform) mountPlatformRoutes({ read, change }, { ...d.platform, isFounder: (o) => owners.has(o.actor.trim().toLowerCase()) });
+  // The platform (SaaS S5). Its owner is the founder: the session's role, which the guard gives only to an owner-list
+  // email in the founder's workspace (S4.8). A hand-made context without a role is never the founder.
+  if (d.platform) mountPlatformRoutes({ read: memberRead, change: memberChange }, { ...d.platform, isFounder: (o) => o.role === 'founder' });
   if (d.signup) mountSignupRoutes(router, d.signup);
   if (d.chat) {
     const chat: ChatDeps = { ...d.chat, audit };

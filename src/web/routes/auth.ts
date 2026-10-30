@@ -222,7 +222,8 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
   d.router.post(SIGN_OUT_PATH, async (ctx: RequestContext) => {
     const { req, res } = ctx;
     d.actionLimiter.hit(req, res);
-    const s = await d.guard.requireOwner(req);
+    // Any member signs out (a customer too). The CSRF token is the session's own.
+    const s = await d.guard.requireSession(req);
     d.guard.requireCsrf(req, s);
     const label = browserLabel(typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : undefined);
     await d.audited(
@@ -237,15 +238,18 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
   });
 
   d.router.get('/dashboard/api/me', async (ctx: RequestContext) => {
-    const s = await d.guard.requireOwner(ctx.req);
+    // Any member: the shell reads who is signed in, and as what.
+    const s = await d.guard.requireSession(ctx.req);
     sendJson(ctx.res, 200, {
       email: s.email,
       name: names.get(hashToken(s.id)) ?? null,
       signedInAt: s.createdAt,
       expiresAt: s.expiresAt,
       csrf: csrfFor(s.id),
-      // The shell shows the platform nav (Invite, Customers) only when this is true.
-      platform: d.platform === true,
+      // founder or owner (a customer's): the shell's nav follows it (S4.8). Nothing about the customer goes with it.
+      role: s.role,
+      // The shell shows the platform nav (Invite, Customers) only when this is true: the founder's, with the platform on.
+      platform: d.platform === true && s.role === 'founder',
     });
   });
 }
