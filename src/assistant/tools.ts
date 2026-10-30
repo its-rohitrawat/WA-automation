@@ -221,7 +221,7 @@ export async function runReadTool(name: Exclude<ToolName, 'open_screen' | (typeo
       return t;
     }
     case 'search_messages':
-      return searchMessages(d.db, INPUTS.search_messages.parse(raw), now);
+      return await searchMessages(d.db, INPUTS.search_messages.parse(raw), now);
     case 'list_meetings': {
       const i = INPUTS.list_meetings.parse(raw);
       const r = await listDashboardMeetings(d.db, parseMeetingList(params({ view: i.view, limit: i.limit ?? 10 })), now, d.accountOf);
@@ -246,16 +246,17 @@ export async function runReadTool(name: Exclude<ToolName, 'open_screen' | (typeo
 /** The sender's saved name, "Founder" for the founder's own, else "Someone": never a number (as the client drawer). */
 const HAS_NUMBER = /(?:\d[\s().+-]*){7,}/;
 
-function searchMessages(db: Db, i: z.infer<typeof INPUTS.search_messages>, now: Date): unknown {
+async function searchMessages(db: Db, i: z.infer<typeof INPUTS.search_messages>, now: Date): Promise<unknown> {
   const since = new Date(now.getTime() - (i.days ?? 30) * 86_400_000).toISOString();
   const like = `%${i.text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
-  const rows = db
-    .raw.prepare(`SELECT m.ts AS at, m.text, m.from_me AS fromMe, p.name AS name, c.code AS client
+  const rows = await db.all<{ at: string; text: string; fromMe: number; name: string | null; client: string }>(
+    `SELECT m.ts AS at, m.text, m.from_me AS fromMe, p.name AS name, c.code AS client
       FROM messages m JOIN clients c ON c.id = m.client_id
       LEFT JOIN people p ON p.client_id = m.client_id AND p.jid = m.sender_jid
       WHERE c.active = 1 AND m.revoked = 0 AND m.ts >= @since AND m.text LIKE @like ESCAPE '\\' AND (@client IS NULL OR c.code = @client)
-      ORDER BY m.ts DESC, m.id DESC LIMIT @limit`)
-    .all({ since, like, client: i.client ?? null, limit: i.limit ?? 10 }) as { at: string; text: string; fromMe: number; name: string | null; client: string }[];
+      ORDER BY m.ts DESC, m.id DESC LIMIT @limit`,
+    { since, like, client: i.client ?? null, limit: i.limit ?? 10 },
+  );
   return {
     found: rows.length,
     messages: rows.map((r) => {

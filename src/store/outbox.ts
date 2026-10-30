@@ -106,12 +106,13 @@ export async function outboxToShow(db: Sql, clientId: number, since: string): Pr
 
 /**
  * The text of a message the dashboard sent to this group, by WhatsApp's id; undefined for any other message. Baileys asks
- * this when a member's phone could not read the message and asks for it again (a retry receipt). Synchronous on raw until
- * the gateway's sentText callback (src/wa/gateway.ts, lane B) may return a promise.
+ * this when a member's phone could not read the message and asks for it again (a retry receipt); the gateway's
+ * retryMessage awaits it.
  */
-export function sentTextFor(db: Db, waId: string, groupId: string): string | undefined {
-  const r = db
-    .raw.prepare("SELECT o.text FROM outbox o JOIN clients c ON c.id = o.client_id WHERE o.wa_id = ? AND c.group_id = ? AND o.state = 'sent'")
-    .get(waId, groupId) as { text: string } | undefined;
+export async function sentTextFor(db: Sql, waId: string, groupId: string): Promise<string | undefined> {
+  const r = await db.get<{ text: string }>(
+    "SELECT o.text FROM outbox o JOIN clients c ON c.id = o.client_id WHERE o.wa_id = ? AND c.group_id = ? AND o.state = 'sent'",
+    [waId, groupId],
+  );
   return r?.text;
 }
