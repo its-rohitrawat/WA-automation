@@ -168,16 +168,20 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
     // The spare-number session is closed after app.stop(), and on the startup-failure path, and nowhere else: closing it
     // while the sender runs would make its credential saves fail.
     const count = (sub: string) => src.split(sub).length - 1;
-    expect(count('senderDb?.raw.close()')).toBe(1);
+    // The start-up failure path closes each opened database, the spare-number one included, in one loop.
+    const startupClose = /for \(const d of \[\.\.\.adoptedDbs, db, sessionDb, senderDb\]\) await d\?\.close\(\)/;
+    expect(src).toMatch(startupClose);
     const catchAt = src.indexOf('} catch (e) {');
     expect(catchAt).toBeGreaterThan(0);
     const catchBlock = src.slice(catchAt, src.indexOf('process.exit(2)', catchAt));
-    expect(catchBlock).toContain('senderDb?.raw.close()');
-    expect(count('senderStore?.raw.close()')).toBe(1);
+    expect(catchBlock).toMatch(startupClose);
+    expect(count('senderDb?.close(') + count('senderDb.close(') + count('senderDb?.raw') + count('senderDb.raw')).toBe(0);
+    expect(count('senderStore?.close()')).toBe(1);
+    expect(count('senderStore.close(') + count('senderStore?.raw') + count('senderStore.raw')).toBe(0);
     const stopAt = src.indexOf('.stop()');
     expect(stopAt).toBeGreaterThan(0);
     const afterStop = src.slice(stopAt, src.indexOf('process.exit', stopAt));
-    expect(afterStop).toMatch(/\.finally\(\(\) => \{[\s\S]*senderStore\?\.raw\.close\(\)/);
+    expect(afterStop).toMatch(/\.finally\(\(\) => \{[\s\S]*senderStore\?\.close\(\)/);
     const startup = src.slice(src.indexOf('await openMorningReport('), src.indexOf('createApp({'));
     expect(startup.length).toBeGreaterThan(0);
     expect(startup).not.toMatch(/\.close\(/);

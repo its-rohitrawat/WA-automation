@@ -466,21 +466,17 @@ async function main(): Promise<void> {
           // Databases are closed only after app.stop() has settled, so after the morning report's stop() has returned.
           // The uptime log keeps recording through the drain; the stopped time then counts as down.
           clearInterval(uptimeTimer);
-          const bestEffort = (fn: () => void) => {
-            try {
-              fn();
-            } catch {
-              // best effort: the next close still runs
-            }
-          };
+          // Each close waits for its database's queue to empty; one that fails never stops the next (best effort).
+          const closeAll = () =>
+            Promise.all(
+              [...adoptedDbs.map((d) => d.close()), trackerDb.close(), sessionStore.close(), senderStore?.close()]
+                .map((p) => Promise.resolve(p).catch(() => undefined)),
+            );
           // The stop row is written before the databases close (best effort: a failure is not retried).
           void Promise.resolve(uptime?.stop())
             .catch(() => undefined)
+            .then(closeAll)
             .then(() => {
-              for (const d of adoptedDbs) bestEffort(() => d.raw.close());
-              bestEffort(() => trackerDb.raw.close());
-              bestEffort(() => sessionStore.raw.close());
-              bestEffort(() => senderStore?.raw.close());
               void startedLock.release().finally(() => process.exit(0));
             });
           setTimeout(() => process.exit(0), 2000).unref();
@@ -489,14 +485,8 @@ async function main(): Promise<void> {
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
   } catch (e) {
-    try {
-      for (const d of adoptedDbs) d.raw.close();
-      db?.raw.close();
-      sessionDb?.raw.close();
-      senderDb?.raw.close();
-    } catch {
-      // best effort
-    }
+    // Start-up failed: each database that was opened is closed, best effort (one that fails never stops the next).
+    for (const d of [...adoptedDbs, db, sessionDb, senderDb]) await d?.close().catch(() => undefined);
     const known =
       e instanceof StartupExit ||
       e instanceof AlreadyRunningError ||
