@@ -98,7 +98,7 @@ export async function mountFakeScreens(web: WebServer, o: { signedIn: () => bool
   registerWorkApi(web.router, { ...action, db, clock, audit, spend, health: () => ({ line: { ok: true, text: 'All good' }, lastPublishedAt: day(0.01), publishFailingSince: null }) });
   registerControlApi(web.router, {
     ...action, db, clock, audit, spend, voiceLocal: true, uptime: { log: uptime }, isOwner: (e) => e === OWNER, settings, priority,
-    sessions: { destroyAllFor: async () => 0 }, secureFor: () => false,
+    sessions: { destroyAllFor: async () => 0, countFor: async () => 0, agentLabel: async () => null }, secureFor: () => false,
   });
   // The assistant with a scripted Claude (scripts/assistantFake.ts): no API call is ever made.
   const pending = new PendingActions(clock);

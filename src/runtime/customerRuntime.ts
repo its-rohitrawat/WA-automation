@@ -7,7 +7,7 @@ import { ClaudeMeetingClient } from '../brain/meetingClient.ts';
 import { parseEnv, requireKey } from '../config/env.ts';
 import type { Env } from '../config/env.ts';
 import { watchGroupsFile } from '../config/groups.ts';
-import { fileGroupsStore } from '../config/groupsStore.ts';
+import { dbGroupsStore, fileGroupsStore } from '../config/groupsStore.ts';
 import type { ClientConfig } from '../config/groups.ts';
 import { sessionDbPath } from '../config/paths.ts';
 import { PrioritySettings } from '../config/prioritySettings.ts';
@@ -58,6 +58,7 @@ import type { IncomingMessage } from 'node:http';
 import type { RequestContext } from '../web/router.ts';
 import { SESSION_COOKIE, sessionCookie, type SessionStore } from '../web/sessions.ts';
 import { makeGroupKey } from '../web/routes/groups.ts';
+import type { OAuthCredentials } from '../output/googleAuthHub.ts';
 import type { GoogleConnectDeps } from '../web/routes/google.ts';
 import type { PlatformRouteDeps } from '../web/routes/platform.ts';
 import type { DashboardMount } from '../web/start.ts';
@@ -174,6 +175,8 @@ export interface RuntimeDeps {
    * the active limit, each customer's AiKeys (its setup shell's), and the poke after a change. Only with PLATFORM_ENABLED.
    */
   platformHooks?: Pick<PlatformRouteDeps, 'probes' | 'health' | 'maxActive' | 'aiKeys' | 'poke' | 'restart'>;
+  /** The platform's web OAuth client, for a customer's Google (F3): in memory only, never in its env. */
+  googleWeb?: OAuthCredentials;
   /** A customer's Google connect (a0's S4.7 A1), from the Supervisor: given to this runtime's Google routes. */
   googleHooks?: Pick<GoogleConnectDeps, 'stateKey' | 'customer' | 'onCustomerToken'>;
   /** Told the name of each database this runtime closes (tests). */
@@ -265,7 +268,9 @@ export async function buildCustomerRuntime(
     if (plan.whatsapp === 'not_linked') log.warn('setup mode: WhatsApp is not linked; link the founder\'s phone in the dashboard');
     if (plan.google === 'not_connected') log.warn('setup mode: Google is not connected; connect it in the dashboard');
     // One Google client per account, swapped in place on a reconnect: Drive and meetings read theirs on every call.
-    const google = await buildGoogle({ db, key, credentials: googleCredentials(env), meetingsEnabled: env.MEETINGS_ENABLED, log });
+    // The founder's OAuth clients from its env; a customer's is the platform's web client, given in memory (F3).
+    const credentials = t.founder ? googleCredentials(env) : { ...(d.googleWeb ? { web: d.googleWeb } : {}) };
+    const google = await buildGoogle({ db, key, credentials, meetingsEnabled: env.MEETINGS_ENABLED, log });
     // The platform (S5H, PLATFORM_ENABLED) is the founder's: its screens and the public sign-up, on the platform Db. Invites go from the founder's
     // Gmail once the main account has gmail.send: its scopes and address are async reads, so they are read now and after
     // each reconnect of the main account, and the mailer getter (run on every request) reads what was last read.
@@ -436,7 +441,7 @@ export async function buildCustomerRuntime(
       if (settled.failed + settled.unknown > 0) log.warn(settled, 'dashboard messages interrupted by the last stop');
     }
     // The 30-day uptime strip's log, opened here (it reads its last row): nothing is awaited after app.start().
-    const uptimeLog = env.DASHBOARD_ENABLED && live && settings && auditLog ? await UptimeLog.open(db, systemClock) : undefined;
+    const uptimeLog = env.DASHBOARD_ENABLED && (live || !t.founder) && settings && auditLog ? await UptimeLog.open(db, systemClock) : undefined;
     // Optional uptime heartbeat: visits HEARTBEAT_URL (never logged) every 5 minutes while the agent is up. The founder's
     // only: it watches this machine's service.
     const heartbeat = t.founder && env.HEARTBEAT_URL ? new Heartbeat({ url: env.HEARTBEAT_URL, isUp: () => app.health.isUp(), log }) : undefined;
@@ -459,27 +464,29 @@ export async function buildCustomerRuntime(
     /** Starts the uptime strip's log: its start row, then a tick every 30 s (set when the dashboard is on). */
     let startUptime: (() => void) | undefined;
     let agentRoutes: CustomerRuntime['agentRoutes'];
-    if (t.founder && env.DASHBOARD_ENABLED && live && settings && auditLog && uptimeLog) {
+    // The dashboard's routes for this runtime's customer (Phase B 4: the dashboard sends each session to its own
+    // customer's). A customer's have no spare phone or founder phone driver yet (its own linking comes with S4.6 A).
+    if (env.DASHBOARD_ENABLED && (live || !t.founder) && settings && auditLog && uptimeLog) {
       const store = settings;
       const audit = auditLog;
       const trackerStore = db;
       // Phone links from the dashboard (D3), one at a time. The founder's relinks the gateway in place; the spare one
       // pauses the briefing while it resets the session file the sender may be using, then hands it the new sender.
-      const spare = spareDriver({
+      const spare = t.founder && live ? spareDriver({
         dataDir: env.DATA_DIR, sessions, key, factory: senderFactory, founderNumber, briefing: live,
         settingsNumber: () => store.get().reportRecipient,
         adoptDb: (a) => adoptedDbs.push(a),
         linking: (on) => (spareLinking = on),
         log,
-      });
-      const founder = founderLinkDriver({
+      }) : undefined;
+      const founder = !t.founder ? undefined : founderLinkDriver({
         sessionDb, trackerDb: db, key, switchable: gateway, log,
         buildGateway: (a, onQr) => new WhatsAppGateway({
           allow, factory: baileysSocketFactory(silentLogger(), sentText), auth: a.state, saveCreds: a.saveCreds, ...(onQr ? { onQr } : {}),
         }),
       });
       links = new LinkSessions({
-        drivers: { founder, spare }, log,
+        drivers: { ...(founder ? { founder } : {}), ...(spare ? { spare } : {}) }, log,
         audit: (event, actor) => auditOutside(audit)({ actor, event, kind: 'connection', detail: '' }),
       });
       // The 30-day uptime strip: a row whenever up changes, and the daily retention of both logs.
@@ -517,15 +524,23 @@ export async function buildCustomerRuntime(
         audit,
         // On the guard, session store and limiter startDashboard builds: every route shares them.
         mount: (m) => mountAgentRoutes(m, {
+          tenantId: t.id,
           db: trackerStore, clock: systemClock, log, control, spend: app.spend, health: () => app.health.snapshot(),
           ...(meetingsApi ? { accountOf: (c: string) => meetingsApi.accountOf(c) } : {}),
           voiceLocal: env.VOICE_STT_PROVIDER === 'local',
           uptime: { log: log30, ...(env.UPTIMEROBOT_READ_KEY ? { robot: new UptimeRobotClient({ apiKey: env.UPTIMEROBOT_READ_KEY, clock: systemClock, log }) } : {}) },
-          ownerEmails: env.DASHBOARD_OWNER_EMAILS,
+          ownerEmails: env.DASHBOARD_OWNER_EMAILS ?? [], // a customer's env has none
           settings: store,
           priority: prioritySettings,
           groups: {
-            db: trackerStore, directory, store: fileGroupsStore(env.GROUPS_FILE, { db: trackerStore }), configs: () => currentConfigs,
+            db: trackerStore, directory, configs: () => currentConfigs,
+            // The founder's allow-list file; a customer's own list in its own database, its runtime reloaded on a change.
+            store: t.founder
+              ? fileGroupsStore(env.GROUPS_FILE, { db: trackerStore })
+              : dbGroupsStore({ db: trackerStore, log, onChange: async (next) => {
+                await app.reloadClients(next);
+                currentConfigs = next;
+              } }),
             groupKey: makeGroupKey(deriveSubkey(key, GROUP_KEY_INFO)), log, clock: systemClock,
           },
           clients: { db: trackerStore, directory, clock: systemClock, quietMinutes: env.QUIET_MINUTES },
@@ -538,10 +553,10 @@ export async function buildCustomerRuntime(
           },
           google: {
             db: trackerStore, hub: google.hub, publicUrl: env.DASHBOARD_PUBLIC_URL ?? `http://localhost:${env.DASHBOARD_PORT}`,
-            web: googleCredentials(env).web, meetingsEnabled: env.MEETINGS_ENABLED, invitesGmail: env.INVITES_GMAIL, log, clock: systemClock,
+            web: credentials.web, meetingsEnabled: env.MEETINGS_ENABLED, invitesGmail: env.INVITES_GMAIL, log, clock: systemClock,
             ...d.googleHooks,
             // The chosen account's email comes from its ID token, checked like the owner sign-in's.
-            ...(googleCredentials(env).web ? { verifier: googleIdVerifier(googleCredentials(env).web!.clientId) } : {}),
+            ...(credentials.web ? { verifier: googleIdVerifier(credentials.web.clientId) } : {}),
           },
           actions: {
             publisher: app.publisher, clock: systemClock, limiter: new ActionRateLimiter(systemClock),

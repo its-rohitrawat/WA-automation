@@ -167,11 +167,34 @@ export class SessionStore {
     this.#tell({ idHash: hashToken(id) });
   }
 
-  /** Ends every session of this owner. Returns how many ended. `q`: as for `create`. */
-  async destroyAllFor(email: string, q: Sql = this.#db): Promise<number> {
-    const n = (await q.run('DELETE FROM web_sessions WHERE email = ?', [email.trim().toLowerCase()])).changes;
+  /**
+   * Ends every session of this email in one customer's workspace (tenantId; the founder's by default). Returns how many
+   * ended. On Postgres web_sessions holds every customer's sessions (a platform table), so the customer always bounds
+   * the delete: a customer signing out everywhere never ends the founder's or another customer's sessions. On SQLite
+   * every session is the founder's. `q`: as for `create`.
+   */
+  async destroyAllFor(email: string, q: Sql = this.#db, tenantId: string = FOUNDER_TENANT_ID): Promise<number> {
+    const who = email.trim().toLowerCase();
+    const n = (this.#db.engine === 'postgres'
+      ? await q.run('DELETE FROM web_sessions WHERE email = ? AND tenant_id = ?', [who, tenantId])
+      : await q.run('DELETE FROM web_sessions WHERE email = ?', [who])).changes;
     this.#tell({ email: email.trim().toLowerCase() });
     return n;
+  }
+
+  /** How many sessions destroyAllFor(email, …, tenantId) would end now (the same bound). */
+  async countFor(email: string, tenantId: string = FOUNDER_TENANT_ID): Promise<number> {
+    const who = email.trim().toLowerCase();
+    const row = this.#db.engine === 'postgres'
+      ? await this.#db.get<{ n: number }>('SELECT COUNT(*) AS n FROM web_sessions WHERE email = ? AND tenant_id = ?', [who, tenantId])
+      : await this.#db.get<{ n: number }>('SELECT COUNT(*) AS n FROM web_sessions WHERE email = ?', [who]);
+    return row?.n ?? 0;
+  }
+
+  /** The browser label sign-in saved for this session ("Safari on macOS"), or null. */
+  async agentLabel(id: string): Promise<string | null> {
+    if (!isToken(id)) return null;
+    return (await this.#db.get<{ agent_label: string | null }>('SELECT agent_label FROM web_sessions WHERE id_hash = ?', [hashToken(id)]))?.agent_label ?? null;
   }
 
   /** Removes expired and idle sessions (the web server calls this hourly). Returns how many were removed. */

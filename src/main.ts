@@ -16,6 +16,7 @@ import { acquireLock, AlreadyRunningError } from './util/lock.ts';
 import { systemClock } from './util/clock.ts';
 import { createLogger } from './util/logger.ts';
 import { SessionDecryptError } from './wa/authState.ts';
+import { googleCredentials } from './setupMode.ts';
 import { startDashboard } from './web/start.ts';
 
 // The service (npm start): what the process has once (env, the master key, the instance lock, the stores, the web
@@ -83,6 +84,7 @@ async function main(): Promise<void> {
       platform = platformSupervisor({
         env, log, clock: systemClock, platformDb, master: key, customerDb: customerDbsOf(db), localEngine,
         oauthStateKey: deriveSubkey(key, 'wa-agent oauth state v1'),
+        ...(googleCredentials(env).web ? { googleWeb: googleCredentials(env).web! } : {}),
       });
     }
 
@@ -104,6 +106,7 @@ async function main(): Promise<void> {
     // are in place before anything else is awaited. It never rejects: a dashboard that cannot start resolves to undefined.
     const webReady = env.DASHBOARD_ENABLED ? startDashboard({
       env, db, platformDb, log, control, platform: rt.platform, customerSessions: env.DB_ENGINE === 'postgres' && rt.platform, ...agentRoutes,
+      ...(platform ? { tenants: platform.tenants } : {}),
     }) : Promise.resolve(undefined);
 
     const trackerDb = db;

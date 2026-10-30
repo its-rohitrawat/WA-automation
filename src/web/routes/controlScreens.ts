@@ -13,7 +13,9 @@ import type { AuditLog } from '../audit.ts';
 import type { Guard } from '../guard.ts';
 import { sendJson } from '../http.ts';
 import type { Router } from '../router.ts';
-import { clearSessionCookie, hashToken, type SessionStore } from '../sessions.ts';
+import { FOUNDER_TENANT_ID } from '../../config/env.ts';
+import { clearSessionCookie, type SessionStore } from '../sessions.ts';
+import { auditedWrite, type AuditedWrite } from './auth.ts';
 import { actionSession, controlled, readBody, type ActionGuard } from './respond.ts';
 
 // The control screens' API (D5 Task 1-4 logic, served here): AI usage, uptime, audit logs, the morning briefing's
@@ -34,7 +36,14 @@ export interface ControlApiDeps extends ActionGuard {
   settings: Pick<SettingsStore, 'view' | 'set'>;
   /** The priority keywords and the sentiment switch (Settings screen). */
   priority: Pick<PrioritySettings, 'view' | 'set'>;
-  sessions: Pick<SessionStore, 'destroyAllFor'>;
+  sessions: Pick<SessionStore, 'destroyAllFor' | 'countFor' | 'agentLabel'>;
+  /** The customer these routes serve (Phase B 4): sign-out-everywhere ends its sessions only. Default: the founder. */
+  tenantId?: string;
+  /**
+   * Sign-out-everywhere's audit row and its sessions (auditedWrite): one transaction on one Db, the audit row first on
+   * two (the customer's Db, then the platform Db, where web_sessions is). Default: one transaction on db.
+   */
+  audited?: AuditedWrite;
   /**
    * Whether this request came in over the https public address (secureRequest): the session cookie is cleared with the
    * attributes sign-in set it with, so a browser on http://localhost (where Secure cookies are dropped) is signed out too.
@@ -93,18 +102,19 @@ export function registerControlApi(router: Router, d: ControlApiDeps): void {
   read('/dashboard/api/session', async ({ req }) => {
     const s = await d.guard.requireOwner(req);
     // The browser label sign-in saved (cleaned there, for example "Safari on macOS"); null for an older session.
-    const row = await d.db.get<{ agent_label: string | null }>('SELECT agent_label FROM web_sessions WHERE id_hash = ?', [hashToken(s.id)]);
-    return { email: s.email, createdAt: s.createdAt, expiresAt: s.expiresAt, browser: row?.agent_label ?? null };
+    return { email: s.email, createdAt: s.createdAt, expiresAt: s.expiresAt, browser: await d.sessions.agentLabel(s.id) };
   });
 
   router.post('/dashboard/api/session/signout-everywhere', controlled(async (ctx) => {
     const s = await actionSession(ctx, d);
-    // The sessions end and the audit row is written together: if the row cannot be written, nothing ends.
-    const ended = await d.db.tx(async (q) => {
-      const n = await d.sessions.destroyAllFor(s.email, q);
-      await d.audit.record({ actor: s.email, event: 'auth.signout_everywhere', kind: 'auth', detail: `Signed out everywhere (${n} ${n === 1 ? 'session' : 'sessions'})`, requestId: ctx.requestId }, q);
-      return n;
-    });
+    // The audit row first, then this customer's sessions of this email end: if the row cannot be written, nothing ends.
+    const tenant = d.tenantId ?? FOUNDER_TENANT_ID;
+    const n = await d.sessions.countFor(s.email, tenant);
+    const audited = d.audited ?? auditedWrite(d.db, d.db);
+    const ended = await audited(
+      (q) => d.audit.record({ actor: s.email, event: 'auth.signout_everywhere', kind: 'auth', detail: `Signed out everywhere (${n} ${n === 1 ? 'session' : 'sessions'})`, requestId: ctx.requestId }, q),
+      (q) => d.sessions.destroyAllFor(s.email, q, tenant),
+    );
     ctx.res.setHeader('Set-Cookie', clearSessionCookie({ secure: d.secureFor(ctx.req) }));
     sendJson(ctx.res, 200, { ended });
   }));

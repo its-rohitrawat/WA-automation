@@ -9,6 +9,8 @@ import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { crashOwner } from './context.ts';
 import type { LocalEngine } from '../stt/local.ts';
+import type { OAuthCredentials } from '../output/googleAuthHub.ts';
+import type { TenantRouteEntry, TenantRoutes } from '../web/start.ts';
 import { customerProfile } from './customerProfile.ts';
 import { buildCustomerRuntime, type RuntimeDeps } from './customerRuntime.ts';
 import { runtimeHealth, runtimeProbes } from './probes.ts';
@@ -33,6 +35,8 @@ export interface PlatformSupervisor {
    * customer's own Db and data key (null when its runtime is not running: 503), and a restart once its token is in.
    */
   readonly google: { stateKey: Buffer; customer: (tenantId: string) => Promise<{ db: Db; key: Buffer } | null>; onCustomerToken: (tenantId: string) => void };
+  /** Each running full customer runtime's dashboard routes (Phase B 4): what the dashboard sends that customer's requests to. */
+  readonly tenants: TenantRoutes;
   /** The first reconcile, then one every 60 s. */
   start(): Promise<void>;
   /** The 60 s tick ends, then every customer's shell stops (each within 10 s). The founder's runtime is main.ts's. */
@@ -55,6 +59,8 @@ export function platformSupervisor(o: {
   master: Buffer;
   /** The Google connect state's signing key (deriveSubkey(master, 'wa-agent oauth state v1'), made in main.ts). */
   oauthStateKey?: Buffer;
+  /** The platform's web OAuth client (F3): given in memory to each customer runtime, never in its env. */
+  googleWeb?: OAuthCredentials;
   /** Each customer's own Db (Postgres; undefined on SQLite, where no customer starts). */
   customerDb: ((tenantId: string) => Db) | undefined;
   /** Checks a key a customer adds (default: one models list call with that key). Tests: a fake. */
@@ -74,6 +80,7 @@ export function platformSupervisor(o: {
   const keyTester = o.keyTester ?? modelsListTester((apiKey) => new Anthropic({ apiKey }));
   /** Each started customer's AiKeys (its shell's), for the ai-key route; a full runtime keeps its shell's. */
   const keys = new Map<string, AiKeys>();
+  const routes = new Map<string, TenantRouteEntry>();
   const build = o.build ?? buildCustomerRuntime;
   /** A customer's AiKeys: its running runtime's, or one that only reads whether a key is stored (its own kv). */
   const keysOf = (tenantId: string): AiKeys | null =>
@@ -99,8 +106,10 @@ export function platformSupervisor(o: {
         if (t.founder) return founder;
         if (!o.customerDb) throw new Error('A customer runtime needs Postgres.');
         const db = o.customerDb(t.id);
+        // F8: a customer's lines carry its id (only its id).
+        const log = o.log.child({ tenant: t.id });
         const shell: SetupShell = await startSetupShell({
-          tenantId: t.id, db, platform: o.platformDb, dataKey: () => tenantKeys.dataKey(t.id), keyTester, clock: o.clock, log: o.log,
+          tenantId: t.id, db, platform: o.platformDb, dataKey: () => tenantKeys.dataKey(t.id), keyTester, clock: o.clock, log,
         });
         keys.set(t.id, shell.aiKeys);
         const aiKey = t.setupOnly ? null : await shell.aiKeys.load(); // the Supervisor asked wantsFull; a key that will not load stays a shell
@@ -120,15 +129,19 @@ export function platformSupervisor(o: {
           const rt = await build(
             { id: t.id, founder: false, crashed: t.crashed },
             {
-              env: customerProfile(o.env, { tenantId: t.id, aiKey }), log: o.log, db, key: await tenantKeys.dataKey(t.id),
+              env: customerProfile(o.env, { tenantId: t.id, aiKey }), log, db, key: await tenantKeys.dataKey(t.id),
+              ...(o.googleWeb ? { googleWeb: o.googleWeb } : {}),
               // Its allow-list as stored in its own database: what its start syncs in (a0's reload_failed recovery).
               configs: await dbGroupsStore({ db, onChange: () => undefined, log: o.log }).list(), localEngine: o.localEngine,
             },
           );
           rt.start();
+          // Its dashboard routes, mounted by the dashboard on its first request (a restart gives a new entry).
+          if (rt.agentRoutes) routes.set(t.id, { db, audit: rt.agentRoutes.audit, mount: rt.agentRoutes.mount });
           return {
             facts: () => rt.facts(),
             stop: async () => {
+              routes.delete(t.id);
               keys.delete(t.id);
               rt.beginStop();
               await rt.stop();
@@ -153,6 +166,7 @@ export function platformSupervisor(o: {
       // After a customer's Claude key is saved or removed: its runtime starts again as the kind it now should be.
       restart: (tenantId) => void supervisor.restart(tenantId),
     },
+    tenants: { get: (tenantId) => routes.get(tenantId) },
     google: {
       stateKey: o.oauthStateKey ?? Buffer.alloc(0),
       customer: async (tenantId) => {

@@ -80,6 +80,8 @@ const ALLOWED: Record<string, RegExp[]> = {
     /^audited: auditedWrite\(o\.db, platformDb\),$/,
     // The member guard's membership lookup (S4.8): a customer's memberships, from the platform tables.
     /^\(await membershipsFor\(platformDb, email\)\)\.filter/,
+    // Each mount's session writes with their audit row (sign-out everywhere): that runtime's Db, then this one.
+    /^router, guard, sessions, audit: auditLog, actions, secureFor, port, audited: auditedWrite\(db, platformDb\),$/,
   ],
 };
 

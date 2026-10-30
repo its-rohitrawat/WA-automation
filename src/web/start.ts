@@ -11,7 +11,11 @@ import type { Guard } from './guard.ts';
 import { googleCodeExchanger, googleIdVerifier } from './oidc.ts';
 import { secureRequest } from './origin.ts';
 import type { CodeExchanger, IdTokenVerifier } from './oidc.ts';
-import { auditedWrite, registerAuthRoutes } from './routes/auth.ts';
+import { FOUNDER_TENANT_ID } from '../config/env.ts';
+import { HttpError } from './http.ts';
+import type { OwnerSession } from './guard.ts';
+import { createRouter, type RequestContext } from './router.ts';
+import { auditedWrite, registerAuthRoutes, type AuditedWrite } from './routes/auth.ts';
 import { createWebServer } from './server.ts';
 import type { Router } from './router.ts';
 import type { WebServer } from './server.ts';
@@ -30,7 +34,24 @@ export interface DashboardMount {
   secureFor: (req: IncomingMessage) => boolean;
   /** The bound port, once listening. */
   port: () => number | undefined;
+  /** A session change with its audit row, for this mount's customer (auditedWrite: its Db, then the platform Db). */
+  audited: AuditedWrite;
 }
+
+/** A running customer's dashboard routes (Phase B 4): its own Db, its audit log and the mount its runtime gives. */
+export interface TenantRouteEntry {
+  db: Db;
+  audit: AuditLog;
+  mount: (m: DashboardMount) => void;
+}
+
+/** The customers whose runtimes give dashboard routes now (the Supervisor keeps it): one entry per running customer. */
+export interface TenantRoutes {
+  get(tenantId: string): TenantRouteEntry | undefined;
+}
+
+/** Routes every member reaches on the founder's runtime: the platform's own (they check the role themselves) and the sign-up. */
+const sharedRoute = (pattern: string): boolean => pattern.startsWith('/dashboard/api/platform/') || pattern === '/signup' || pattern.startsWith('/signup/');
 
 export type DashboardEnv = Pick<
   Env,
@@ -60,6 +81,11 @@ export async function startDashboard(o: {
   clock?: Clock;
   /** Registers the agent's routes after sign-in's, before the server listens. A throw stops the dashboard only. */
   mount?: (m: DashboardMount) => void;
+  /**
+   * Each running customer's own routes (Phase B 4). A request with a customer's session is sent to that customer's
+   * routes (503 workspace_starting while it has none); the founder's, and one with no session, to the founder's.
+   */
+  tenants?: TenantRoutes;
   /** The audit log the agent also writes to (phone links, uploads); one is made on db when not given. */
   audit?: AuditLog;
   /**
@@ -109,8 +135,51 @@ export async function startDashboard(o: {
     signinLimiter: new RateLimiter({ ...SIGNIN_LIMIT, clock }),
     actionLimiter: actions,
   });
+  const secureFor = secureRequest({ ...publicUrl, port });
+  const mountFor = (router: Router, db: Db, auditLog: AuditLog): DashboardMount => ({
+    router, guard, sessions, audit: auditLog, actions, secureFor, port, audited: auditedWrite(db, platformDb),
+  });
   try {
-    o.mount?.({ router: web.router, guard, sessions, audit, actions, secureFor: secureRequest({ ...publicUrl, port }), port });
+    // The founder's routes go on a router of their own; each pattern is then registered once on the server's router,
+    // sending each request to the routes of its session's customer.
+    const founderRoutes = createRouter();
+    o.mount?.(mountFor(founderRoutes, o.db, audit));
+    const customers = new Map<string, { entry: TenantRouteEntry; router: Router }>();
+    const routesOf = (tenantId: string): Router | undefined => {
+      const entry = o.tenants?.get(tenantId);
+      if (!entry) {
+        customers.delete(tenantId);
+        return undefined;
+      }
+      const known = customers.get(tenantId);
+      if (known?.entry === entry) return known.router;
+      const router = createRouter(); // a restarted runtime gives a new entry: its routes are mounted again
+      entry.mount(mountFor(router, entry.db, entry.audit));
+      customers.set(tenantId, { entry, router });
+      return router;
+    };
+    for (const r of founderRoutes.routes()) {
+      const shared = sharedRoute(r.pattern);
+      const dispatch = async (ctx: RequestContext): Promise<void> => {
+        let routes: Router = founderRoutes;
+        if (!shared) {
+          let s: OwnerSession | undefined;
+          try {
+            s = await guard.requireSession(ctx.req);
+          } catch (err) {
+            if (!(err instanceof HttpError) || err.status !== 401) throw err; // a membership that cannot be checked: 503
+          }
+          // A running customer's own routes. One whose runtime is not running stays on the founder's, which refuse any
+          // other customer's session by scope (503 workspace_starting, or a navigation's redirect home).
+          if (s && s.tenantId !== FOUNDER_TENANT_ID) routes = routesOf(s.tenantId) ?? founderRoutes;
+        }
+        const hit = routes.match(ctx.req.method ?? 'GET', ctx.url.pathname);
+        if (!hit) throw new HttpError(404, 'not_found', 'Not found.');
+        await hit.handler({ ...ctx, params: hit.params });
+      };
+      if (r.method === 'GET') web.router.get(r.pattern, dispatch);
+      else web.router.post(r.pattern, dispatch);
+    }
   } catch (err) {
     log.error({ err }, 'dashboard not started: its routes could not be set up; the agent carries on without it');
     return undefined;

@@ -127,6 +127,7 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   registerControlApi(router, {
     ...action, db: d.db, clock: d.clock, audit: m.audit, spend: d.spend, voiceLocal: d.voiceLocal, uptime: d.uptime,
     isOwner: (email) => owners.has(email.trim().toLowerCase()), settings: d.settings, priority: d.priority, sessions: m.sessions, secureFor: m.secureFor,
+    tenantId: tenant, audited: m.audited,
   });
 
   // A change by any signed-in member: the session, Origin and CSRF (bound to that session), then the action limit.
