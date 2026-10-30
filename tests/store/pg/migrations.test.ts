@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PLATFORM_TABLES } from '../../../src/platform/pgSchema.ts';
 import { openDb, type Db } from '../../../src/store/db.ts';
-import { CUSTOMER_TABLES, FOUNDER_TENANT_ID, P1_SQL, P2_SQL, P3_GRANTS_SQL, P3_SQL, PG_MIGRATIONS, WEB_SESSIONS_PG_SQL } from '../../../src/store/pg/migrations.ts';
+import {
+  CUSTOMER_TABLES, FOUNDER_TENANT_ID, P1_SQL, P2_SQL, P3_GRANTS_SQL, P3_SQL, PG_LATEST, PG_MIGRATIONS, SCHEMA_VERSION_FN_SQL, WEB_SESSIONS_PG_SQL,
+} from '../../../src/store/pg/migrations.ts';
 
 // Until S2's test server exists (S2.7), the Postgres schema is checked against the migrated SQLite schema by reading
 // it: the same tables and columns with the right types, NOT NULL and defaults, every unique key and index per customer
@@ -188,6 +190,15 @@ describe('the Postgres schema (P1 to P3) against the SQLite schema', () => {
     expect(FOUNDER_TENANT_ID).toBe('00000000-0000-4000-8000-000000000001');
     expect(P1_SQL).toContain(`VALUES ('${FOUNDER_TENANT_ID}', 'Founder', 'active'`);
     expect(WEB.get('web_sessions')!.columns.find((c) => c.name === 'tenant_id')!.def).toBe(`tenant_id uuid NOT NULL DEFAULT '${FOUNDER_TENANT_ID}' REFERENCES tenants (id)`);
+  });
+
+  it('P2 gives the agent roles the schema version through one locked-down function, and PG_LATEST is the last migration', () => {
+    expect(P2_SQL.endsWith(SCHEMA_VERSION_FN_SQL)).toBe(true);
+    expect(SCHEMA_VERSION_FN_SQL).toMatch(/SECURITY DEFINER SET search_path = pg_catalog, public/);
+    expect(SCHEMA_VERSION_FN_SQL).toContain('REVOKE ALL ON FUNCTION wa_schema_version() FROM PUBLIC;');
+    expect(SCHEMA_VERSION_FN_SQL).toContain('GRANT EXECUTE ON FUNCTION wa_schema_version() TO wa_app, wa_platform;');
+    expect(SCHEMA_VERSION_FN_SQL).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/);
+    expect(PG_LATEST).toBe(3);
   });
 
   it('P2 enables, forces and scopes row-level security on every customer table, and only those', () => {

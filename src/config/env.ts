@@ -21,6 +21,21 @@ export const INDIAN_MOBILE = /^91[6-9]\d{9}$/;
  * https anywhere, or plain http only on this machine and with an explicit port (http://localhost:8787).
  * Never a user name or password: the value becomes links and redirects, so credentials in it would leak.
  */
+/** Customer #1, the founder's business: the fixed id S2's P1 seeds and src/platform/store.ts's FOUNDER_TENANT_ID. */
+export const FOUNDER_TENANT_ID = '00000000-0000-4000-8000-000000000001';
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/** A Postgres URL on this machine only (design 10): postgres:// or postgresql:// to 127.0.0.1, localhost or ::1. */
+function isLocalPgUrl(raw: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  return (u.protocol === 'postgres:' || u.protocol === 'postgresql:') && ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname);
+}
+
 function isDashboardUrl(raw: string): boolean {
   let u: URL;
   try {
@@ -131,7 +146,30 @@ const EnvSchema = z.object({
   DASHBOARD_GOOGLE_CLIENT_SECRET: z.string().min(1).optional(),
   /** UptimeRobot read-only API key, for the uptime history. Secret: never logged. */
   UPTIMEROBOT_READ_KEY: z.string().min(1).optional(),
+  // SaaS S2: where the agent's data lives. sqlite (the default): data/tracker.db, as before. postgres: the server on
+  // this machine, every customer's rows under row-level security.
+  DB_ENGINE: z.enum(['sqlite', 'postgres']).default('sqlite'),
+  /** wa_app's URL, the agent's only role for customer data. Secret: never logged. Required, and local only, with postgres. */
+  DATABASE_URL: z.string().min(1).optional(),
+  /** wa_platform's URL, for the platform tables (decision D1). Secret: never logged. Required with postgres. */
+  DATABASE_PLATFORM_URL: z.string().min(1).optional(),
+  /** wa_owner's URL, read only by db-migrate. Secret: never logged. */
+  DATABASE_OWNER_URL: z.string().min(1).optional(),
+  /** The customer this agent runs as on Postgres: customer #1 by default. */
+  TENANT_ID: z.string().regex(UUID).default(FOUNDER_TENANT_ID),
 }).superRefine((env, ctx) => {
+  // The URLs hold passwords: the messages name the setting, never its value.
+  for (const name of ['DATABASE_URL', 'DATABASE_PLATFORM_URL', 'DATABASE_OWNER_URL'] as const) {
+    const url = env[name];
+    if (url !== undefined && !isLocalPgUrl(url)) {
+      ctx.addIssue({ code: 'custom', path: [name], message: 'must be a postgres:// URL to 127.0.0.1 or localhost (the database stays on this machine)' });
+    }
+  }
+  if (env.DB_ENGINE === 'postgres') {
+    for (const name of ['DATABASE_URL', 'DATABASE_PLATFORM_URL'] as const) {
+      if (env[name] === undefined) ctx.addIssue({ code: 'custom', path: [name], message: 'is required when DB_ENGINE is postgres' });
+    }
+  }
   if (env.MEETINGS_ENABLED && env.TEAM_EMAIL_DOMAINS.length === 0) {
     ctx.addIssue({ code: 'custom', path: ['TEAM_EMAIL_DOMAINS'], message: 'is required when MEETINGS_ENABLED is true' });
   }

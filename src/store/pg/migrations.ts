@@ -424,7 +424,20 @@ CREATE POLICY ${t}_tenant ON ${t}
   return `\n${per.join('\n')}\nREVOKE ALL ON tenants, pg_schema_version FROM wa_app;\n`;
 }
 
-export const P2_SQL = rlsSql();
+/**
+ * The schema version for the agent's roles, which cannot read pg_schema_version itself: SECURITY DEFINER (it runs as
+ * its owner, wa_owner, who ran the migrations), a fixed search_path, and EXECUTE for the two agent roles only.
+ * openStore checks it before the agent starts on Postgres.
+ */
+export const SCHEMA_VERSION_FN_SQL = `
+CREATE FUNCTION wa_schema_version() RETURNS integer
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public
+  AS 'SELECT max(version) FROM public.pg_schema_version';
+REVOKE ALL ON FUNCTION wa_schema_version() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION wa_schema_version() TO wa_app, wa_platform;
+`;
+
+export const P2_SQL = `${rlsSql()}${SCHEMA_VERSION_FN_SQL}`;
 
 /**
  * The dashboard sessions, a platform table (A4): a session must be found before its customer is known. tenant_id is
@@ -466,3 +479,6 @@ export const PG_MIGRATIONS: readonly { version: number; sql: string }[] = [
   { version: 2, sql: P2_SQL },
   { version: 3, sql: P3_SQL },
 ];
+
+/** The version this code needs: openStore refuses a database at any other one (run db-migrate first). */
+export const PG_LATEST = PG_MIGRATIONS[PG_MIGRATIONS.length - 1]!.version;
