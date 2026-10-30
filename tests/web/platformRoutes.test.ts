@@ -16,6 +16,8 @@ import type { RequestContext } from '../../src/web/router.ts';
 
 const FOUNDER: OwnerContext = { actor: 'founder@example.com', sessionId: 's-hash', requestId: 'a1b2c3d4e5f6' };
 const CUSTOMER: OwnerContext = { actor: 'kapoor.studio@example.com', sessionId: 's-hash-2', requestId: 'f6e5d4c3b2a1' };
+/** CUSTOMER's session in one workspace, as S4.8's sessions carry it (OwnerContext gains tenantId and role then). */
+const customerIn = (tenantId: string): OwnerContext => ({ ...CUSTOMER, tenantId, role: 'owner' }) as OwnerContext;
 const SITE = 'https://agent.example.com';
 
 /** Records every email; answers as told. `stateDuring`: the invite's send state when Gmail is asked. */
@@ -162,7 +164,9 @@ describe('the platform routes', () => {
     expect((await call('GET', '/dashboard/api/platform/onboarding', CUSTOMER)).status).toBe(404);
     const made = body(await invite(false));
     await redeemInvite({ db, clock }, { token: tokenOf(made.link), email: 'kapoor.studio@example.com' });
-    const r = await call('GET', '/dashboard/api/platform/onboarding', CUSTOMER);
+    // A member, but a session that names no workspace (every session before S4.8): none is chosen for it.
+    expect((await call('GET', '/dashboard/api/platform/onboarding', CUSTOMER)).status).toBe(404);
+    const r = await call('GET', '/dashboard/api/platform/onboarding', customerIn(made.invite.tenantId));
     expect(r.status).toBe(200);
     expect(body(r)).toMatchObject({ business: 'Kapoor Design Studio', status: 'onboarding', done: 0, total: 6, founderName: 'Rohit' });
     expect((body(r).steps as { state: string }[]).map((x) => x.state)).toEqual(['coming', 'coming', 'locked', 'locked', 'locked', 'locked']);
@@ -175,8 +179,9 @@ describe('the platform routes', () => {
     mount({ poke: () => void pokes++, probes: { state: async (_t, step) => (step === 'whatsapp' || step === 'key' ? 'done' : 'todo') } });
     const made = body(await invite(false));
     await redeemInvite({ db, clock }, { token: tokenOf(made.link), email: 'kapoor.studio@example.com' });
-    expect(body(await call('GET', '/dashboard/api/platform/onboarding', CUSTOMER))).toMatchObject({ status: 'active', activated: true });
-    expect(body(await call('GET', '/dashboard/api/platform/onboarding', CUSTOMER))).toMatchObject({ status: 'active', activated: false });
+    const mine = customerIn(made.invite.tenantId);
+    expect(body(await call('GET', '/dashboard/api/platform/onboarding', mine))).toMatchObject({ status: 'active', activated: true });
+    expect(body(await call('GET', '/dashboard/api/platform/onboarding', mine))).toMatchObject({ status: 'active', activated: false });
     expect(pokes).toBe(1);
   });
 
@@ -200,6 +205,33 @@ describe('the platform routes', () => {
     expect((await call('POST', '/dashboard/api/platform/customers/00000000-0000-4000-8000-000000000000/pause')).status).toBe(404);
   });
 
+  it("one person in two workspaces only ever gets the session's own, and none it is not a member of", async () => {
+    await db.exec('CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)');
+    // One open invite per address at a time: the first is used before the second is made.
+    const a = body(await invite(false, 'kapoor.studio@example.com'));
+    await redeemInvite({ db, clock }, { token: tokenOf(a.link), email: 'kapoor.studio@example.com' });
+    clock.advance(60_000);
+    const b = body(await call('POST', '/dashboard/api/platform/invites', FOUNDER, { business: 'Kapoor Events', email: 'kapoor.studio@example.com', send: false }));
+    await redeemInvite({ db, clock }, { token: tokenOf(b.link), email: 'kapoor.studio@example.com' });
+    expect((await membershipsFor(db, CUSTOMER.actor)).map((x) => x.tenantId).sort()).toEqual([a.invite.tenantId, b.invite.tenantId].sort());
+    const asked: string[] = [];
+    mount({ aiKeys: (id) => (asked.push(id), new AiKeys({ db, platform: db, tenantId: id, dataKey: async () => Buffer.alloc(32, 7), tester: async () => 'ok', clock })) });
+
+    // Each session gets its own workspace, whatever order the memberships come in.
+    expect(body(await call('GET', '/dashboard/api/platform/onboarding', customerIn(b.invite.tenantId))).business).toBe('Kapoor Events');
+    expect(body(await call('GET', '/dashboard/api/platform/onboarding', customerIn(a.invite.tenantId))).business).toBe('Kapoor Design Studio');
+    await call('POST', '/dashboard/api/platform/ai-key', customerIn(b.invite.tenantId), { key: 'sk-ant-test-0000' });
+    expect(asked).toEqual([b.invite.tenantId]);
+
+    // A workspace the email is not a member of (another business, or the founder's) is refused, even named by the session.
+    const other = body(await call('POST', '/dashboard/api/platform/invites', FOUNDER, { business: 'Gupta Events', email: 'gupta@example.com', send: false }));
+    for (const t of [other.invite.tenantId, '00000000-0000-4000-8000-000000000001']) {
+      expect((await call('GET', '/dashboard/api/platform/onboarding', customerIn(t))).status).toBe(404);
+      expect(body(await call('POST', '/dashboard/api/platform/ai-key', customerIn(t), { key: 'sk-ant-test-0000' })).error.code).toBe('no_workspace');
+    }
+    expect(asked).toEqual([b.invite.tenantId]);
+  });
+
   it("the customer's AI key: set and removed for their own workspace only, never echoed or logged", async () => {
     const FAKE = 'sk-ant-test-0000'; // an obvious fake; the tester below is a fake too (nothing calls Anthropic)
     await db.exec('CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)'); // the customer's own table (theirs on Postgres)
@@ -207,8 +239,9 @@ describe('the platform routes', () => {
     // Not signed up yet: no workspace. Signed up, but before S4 wires the runtimes in: no key store yet.
     expect(body(await call('POST', '/dashboard/api/platform/ai-key', CUSTOMER, { key: FAKE })).error.code).toBe('no_workspace');
     await redeemInvite({ db, clock }, { token: tokenOf(made.link), email: 'kapoor.studio@example.com' });
-    expect(body(await call('POST', '/dashboard/api/platform/ai-key', CUSTOMER, { key: FAKE })).error.code).toBe('not_ready');
     const tenantId = (await membershipsFor(db, CUSTOMER.actor))[0]!.tenantId;
+    const mine = customerIn(tenantId);
+    expect(body(await call('POST', '/dashboard/api/platform/ai-key', mine, { key: FAKE })).error.code).toBe('not_ready');
     const asked: string[] = [];
     mount({ aiKeys: (id) => (asked.push(id), new AiKeys({ db, platform: db, tenantId: id, dataKey: async () => Buffer.alloc(32, 7), tester: async () => 'ok', clock })) });
 
@@ -216,16 +249,16 @@ describe('the platform routes', () => {
     expect((await call('POST', '/dashboard/api/platform/ai-key', nobody, { key: FAKE })).status).toBe(404);
     expect(body(await call('POST', '/dashboard/api/platform/ai-key', FOUNDER, { key: FAKE })).error.code).toBe('founder_env');
     // The customer comes from the session, never the body.
-    expect((await call('POST', '/dashboard/api/platform/ai-key', CUSTOMER, { key: FAKE, tenantId: '00000000-0000-4000-8000-000000000001' })).status).toBe(400);
-    const bad = await call('POST', '/dashboard/api/platform/ai-key', CUSTOMER, { key: 'not-a-key-zzz' });
+    expect((await call('POST', '/dashboard/api/platform/ai-key', mine, { key: FAKE, tenantId: '00000000-0000-4000-8000-000000000001' })).status).toBe(400);
+    const bad = await call('POST', '/dashboard/api/platform/ai-key', mine, { key: 'not-a-key-zzz' });
     expect(bad.status).toBe(400);
     expect(JSON.stringify(bad.body)).not.toContain('zzz');
 
-    const set = await call('POST', '/dashboard/api/platform/ai-key', CUSTOMER, { key: FAKE });
+    const set = await call('POST', '/dashboard/api/platform/ai-key', mine, { key: FAKE });
     expect(set.status).toBe(200);
     expect(body(set)).toEqual({ aiKey: 'configured' });
     expect(asked.every((id) => id === tenantId)).toBe(true);
-    expect(body(await call('POST', '/dashboard/api/platform/ai-key/remove', CUSTOMER))).toEqual({ aiKey: 'missing' });
+    expect(body(await call('POST', '/dashboard/api/platform/ai-key/remove', mine))).toEqual({ aiKey: 'missing' });
     expect(logLines.join('\n')).not.toContain(FAKE);
   });
 

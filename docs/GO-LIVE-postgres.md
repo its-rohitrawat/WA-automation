@@ -14,11 +14,8 @@ each kept apart. You run every step yourself, on the Mac, with the Mac assistant
 - **Placeholders** look like `<this>`. Replace each one, including the `<` and `>`. Never paste a password into a chat,
   an email or a screenshot.
 
-> **To confirm at S2.** One thing is not settled yet, until the Postgres work's last step (S2.10). It is marked
-> **[confirm at S2]**. Check it before the evening of the switch:
-> - the `status` line that names the database engine (part 4.8).
->
-> **Already real** (checked against the code, 30 Oct):
+> **Checked against the code** (30 Oct): the commands, settings and outputs this guide names are the ones the agent
+> has.
 > - `db-bootstrap`: asks for the `postgres` password, then the new `wa_backup` password twice, and shows nothing as you
 >   type. It never takes a password on the command line. `--superuser <name>` defaults to `postgres`.
 > - `db-migrate`, which applies the migrations P1 to P3.
@@ -29,6 +26,8 @@ each kept apart. You run every step yourself, on the Mac, with the Mac assistant
 > - The roles `wa_owner`, `wa_app`, `wa_platform` and `wa_backup`.
 > - The switch for the customer parts, `PLATFORM_ENABLED` (off by default, part 7), and the name on invites,
 >   `PLATFORM_FOUNDER_NAME` (optional, default "WA Agent").
+> - The first line of `npm run cli -- status` names the database: `Database: SQLite (data/tracker.db)` before the
+>   switch, `Database: Postgres (127.0.0.1:5432/wa_agent as wa_app)` after it. Never a password.
 
 ---
 
@@ -167,7 +166,8 @@ The agent and its jobs connect with their own limited roles, never the superuser
 
    No password is ever printed.
 
-4. **Check that nothing changed for the agent** (waagent window): `npm run cli -- status`. It is still on SQLite, as
+4. **Check that nothing changed for the agent** (waagent window): `npm run cli -- status`. Its first line still says
+   `Database: SQLite (data/tracker.db)`, and the rest is as
    before.
 
 ## Part 3. A rehearsal on a copy (about 15 minutes, no downtime)
@@ -273,8 +273,9 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/com.wa-agent.plist
 ```
 
 **4.8 Check** (about 10 minutes, after waiting one minute):
-1. Waagent window: `npm run cli -- status`. You should see `Health: ✅ Connected…`, the `WhatsApp:` line saying `open`,
-   and the database engine `postgres`. **[confirm at S2]**
+1. Waagent window: `npm run cli -- status`. The first line should say
+   `Database: Postgres (127.0.0.1:5432/wa_agent as wa_app)`, then `Health: ✅ Connected…` and the `WhatsApp:` line
+   saying `open`.
 2. Dashboard: **sign in again.** Sign-in sessions are not copied. The Overview shows the same numbers you wrote down in
    4.1, and Activity's newest message is the same one.
 3. Send a short test message in an approved group. It should appear in Activity within a minute.

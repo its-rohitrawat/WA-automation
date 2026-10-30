@@ -11,7 +11,7 @@ import type { InviteEmail, InviteMailer, MailOutcome } from '../src/platform/mai
 import type { CustomerHealth } from '../src/platform/customers.ts';
 import type { OnboardingProbes, ProbeState, StepId } from '../src/platform/onboarding.ts';
 import { ensurePlatformSchema } from '../src/platform/schema.ts';
-import { ensureFounderTenant } from '../src/platform/store.ts';
+import { ensureFounderTenant, membershipsFor } from '../src/platform/store.ts';
 import { SqliteDb } from '../src/store/engine/sqlite.ts';
 import { manualClock, systemClock, type Clock } from '../src/util/clock.ts';
 import { silentLogger } from '../src/util/logger.ts';
@@ -108,9 +108,11 @@ export async function addPlatform(web: WebServer, o: { signedIn: () => boolean; 
   await db.exec('CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)'); // a customer's own table, for the key
   const mailer = new PreviewMailer();
   const previewDataKey = Buffer.alloc(32, 1);
+  // The session's customer, as S4.8's sessions carry it: the preview's one person is a member of Joshi Interiors.
+  const workspace = (await membershipsFor(db, FOUNDER))[0]?.tenantId;
   const owner = (): OwnerContext => {
     if (!o.signedIn()) throw new HttpError(401, 'unauthenticated', 'Sign in first.');
-    return { actor: FOUNDER, sessionId: 'fake', requestId: 'fake00000000' };
+    return { actor: FOUNDER, sessionId: 'fake', requestId: 'fake00000000', tenantId: workspace, role: previewAs.founder ? 'founder' : 'owner' } as OwnerContext;
   };
   const send = (res: Parameters<typeof sendJson>[0], r: ApiResult) => {
     if (r.status >= 400) {

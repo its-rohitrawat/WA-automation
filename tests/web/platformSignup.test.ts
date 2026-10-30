@@ -124,7 +124,12 @@ describe('signing up with Google', () => {
     expect(pokes).toBe(1); // the Supervisor starts the new customer's setup runtime
     expect(await getTenant(db, tenantId)).toMatchObject({ status: 'onboarding' });
     expect(await membershipsFor(db, 'kapoor.studio@example.com')).toEqual([{ tenantId, role: 'owner', status: 'onboarding' }]);
-    expect(r.headers.get('set-cookie')).toContain(`${SIGNUP_COOKIE}=; HttpOnly; SameSite=Lax; Path=/signup; Max-Age=0`);
+    // Both cookies reach the browser: the session startSession set, and the cleared sign-up cookie. (The redirect used
+    // to replace the first with the second, so the new customer arrived signed out.)
+    const cookies = r.headers.getSetCookie();
+    expect(cookies).toContain('wa_session=fake-session; HttpOnly; SameSite=Lax; Path=/');
+    expect(cookies).toContain(`${SIGNUP_COOKIE}=; HttpOnly; SameSite=Lax; Path=/signup; Max-Age=0`);
+    expect(cookies).toHaveLength(2);
     // The link is used up: a second sign-up with it says only that the link does not work.
     const again = await get(`/signup/google?invite=${token}`);
     expect(again.headers.get('location')).toBe('/signup?error=invalid');

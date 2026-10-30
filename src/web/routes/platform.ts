@@ -65,6 +65,12 @@ export interface PlatformMount {
 
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+/**
+ * What S4.8 adds to OwnerContext (lane A's type, set from the session record by mountRoutes): the session's customer
+ * and role. Read as optional, so this file works before and after S4.8 lands; without it, no workspace is chosen.
+ */
+type SessionScope = { tenantId?: string; role?: 'founder' | 'owner' };
+
 const notFounder = () => fail(403, 'forbidden', 'Only the platform owner can do this.');
 const notFound = () => fail(404, 'not_found', 'There is no such invite.');
 
@@ -167,20 +173,33 @@ export function mountPlatformRoutes(m: PlatformMount, d: PlatformRouteDeps): voi
     return ok(await listCustomers(d));
   }));
 
+  /**
+   * The workspace a request acts on (S4.8, "the customer only from the session"): the session's own customer, and only
+   * while the signed-in email is still a member of it. Never taken from the body, a parameter, or the first of several
+   * memberships. A session without a customer (every session before S4.8) gets none: fail closed.
+   */
+  const sessionWorkspace = async (o: OwnerContext): Promise<string | null> => {
+    const tenantId = (o as OwnerContext & SessionScope).tenantId;
+    if (!tenantId) return null;
+    const mine = await membershipsFor(d.db, o.actor.trim().toLowerCase());
+    return mine.some((x) => x.tenantId === tenantId) ? tenantId : null;
+  };
+
   // Getting started: the signed-in person's own workspace checklist (any member, not only the founder).
   m.read('/dashboard/api/platform/onboarding', async (_ctx, o) => {
-    const tenantId = (await membershipsFor(d.db, o.actor.trim().toLowerCase()))[0]?.tenantId;
+    const tenantId = await sessionWorkspace(o);
     const v = tenantId ? await onboardingFor(d, tenantId, d.probes) : null;
     if (!v) return fail(404, 'no_workspace', 'There is no workspace to set up for this account.');
     if (v.activated) d.poke?.(); // WhatsApp and the key are done: a full runtime replaces the setup one
     return ok({ ...v, founderName: d.founderName });
   });
 
-  // The customer's own Anthropic key (Getting started, step 2): { key }. The workspace comes from the signed-in person's
-  // membership, never from the body. The key is never echoed, logged or audited; only 'configured' or 'missing' comes back.
+  // The customer's own Anthropic key (Getting started, step 2): { key }. The workspace comes from the session (and the
+  // membership behind it), never from the body. The key is never echoed, logged or audited; only 'configured' or
+  // 'missing' comes back.
   const keyStore = async (o: OwnerContext): Promise<AiKeys | ApiResult> => {
     if (d.isFounder(o)) return fail(409, 'founder_env', "Your own business's key is set on the Mac, in its .env file.");
-    const tenantId = (await membershipsFor(d.db, o.actor.trim().toLowerCase()))[0]?.tenantId;
+    const tenantId = await sessionWorkspace(o);
     if (!tenantId) return fail(404, 'no_workspace', 'There is no workspace to set up for this account.');
     return d.aiKeys?.(tenantId) ?? fail(409, 'not_ready', 'Your workspace is being prepared. Add your key once it is ready.');
   };
@@ -259,7 +278,10 @@ export function mountSignupRoutes(router: Router, d: SignupDeps): void {
     return `/signup${s ? `?${s}` : ''}`;
   };
   const redirect = (res: ServerResponse, location: string, cookie?: string) => {
-    res.writeHead(302, { Location: location, 'Cache-Control': 'no-store', ...(cookie ? { 'Set-Cookie': cookie } : {}) }).end();
+    // writeHead replaces a Set-Cookie set earlier with setHeader (startSession's session cookie), so it is merged here.
+    const prior = res.getHeader('Set-Cookie');
+    const cookies = [...(prior === undefined ? [] : [prior].flat().map(String)), ...(cookie ? [cookie] : [])];
+    res.writeHead(302, { Location: location, 'Cache-Control': 'no-store', ...(cookies.length ? { 'Set-Cookie': cookies } : {}) }).end();
   };
   /**
    * False (and the answer sent) when this address, or for a sign-in attempt (`attempt`) this link, is over its limit.

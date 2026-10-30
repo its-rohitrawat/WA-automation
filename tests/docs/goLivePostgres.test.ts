@@ -12,7 +12,7 @@ const cli = read('src/cli.ts');
 
 /** The commands S2 and S3 bring; the guide lists them under "To confirm at S2" until they exist. */
 const S2_COMMANDS = ['db-bootstrap', 'db-migrate', 'migrate-to-postgres', 'export-to-sqlite'];
-const confirmBox = guide.slice(guide.indexOf('> **To confirm at S2.**'), guide.indexOf('\n---\n'));
+const confirmBox = guide.slice(guide.indexOf('> **Checked against the code**'), guide.indexOf('\n---\n'));
 
 describe('GO-LIVE-postgres.md', () => {
   it('names only CLI commands that exist, or that it lists as still to confirm at S2', () => {
@@ -79,6 +79,14 @@ describe('GO-LIVE-postgres.md', () => {
     // The optional name on invites, a placeholder only, with its default said.
     expect(part7).toContain("`PLATFORM_FOUNDER_NAME=<your name or your business's name>`");
     expect(guide).toContain('`PLATFORM_FOUNDER_NAME` (optional, default "WA Agent")');
+  });
+
+  it('has nothing left to confirm, and quotes the status line the code prints (src/store/open.ts databaseLine)', () => {
+    expect(guide).not.toContain('confirm at S2');
+    expect(confirmBox).toContain('> **Checked against the code**');
+    expect(guide).toContain('`Database: SQLite (data/tracker.db)`');
+    expect(guide).toContain('`Database: Postgres (127.0.0.1:5432/wa_agent as wa_app)`');
+    expect(read('src/store/open.ts')).toContain("`Database: Postgres (${u.hostname}:${u.port || '5432'}${decodeURIComponent(u.pathname)} as ${decodeURIComponent(u.username)})`");
   });
 
   it('says when to use each way back, and never sends a secret to Claude', () => {
