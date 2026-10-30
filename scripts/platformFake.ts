@@ -5,6 +5,7 @@
 // nothing reaches Gmail, Google, the agent or any data folder.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { AiKeys } from '../src/platform/aiKey.ts';
 import { createInvite, markSending, recordSend, redeemInvite } from '../src/platform/invites.ts';
 import type { InviteEmail, InviteMailer, MailOutcome } from '../src/platform/mailer.ts';
 import type { CustomerHealth } from '../src/platform/customers.ts';
@@ -94,6 +95,12 @@ const previewHealth: CustomerHealth = { memoryMb: (tenantId) => (doneTenants.has
  * Adds the platform screens to a fake dashboard: the patched shell, the platform routes behind the fake's owner check
  * and CSRF token, and a seeded in-memory platform database. Returns the mailer, so a test can change its answer.
  */
+/**
+ * The preview's one signed-in person is both the founder and a customer's member (Joshi). The founder's own key lives in
+ * .env, so the key route refuses the founder; a test sets founder to false to act as the customer for that step.
+ */
+export const previewAs = { founder: true };
+
 export async function addPlatform(web: WebServer, o: { signedIn: () => boolean; csrf: string; gmail?: boolean }): Promise<{ mailer: PreviewMailer; db: SqliteDb }> {
   const shell = patchedShell();
   for (const [path, body] of [['/dashboard/static/app.js', shell.app], ['/dashboard/static/router.js', shell.router]] as const) {
@@ -104,7 +111,9 @@ export async function addPlatform(web: WebServer, o: { signedIn: () => boolean; 
   const db = SqliteDb.open(':memory:');
   await ensurePlatformSchema(db);
   await seed(db);
+  await db.exec('CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)'); // a customer's own table, for the key
   const mailer = new PreviewMailer();
+  const previewDataKey = Buffer.alloc(32, 1);
   const owner = (): OwnerContext => {
     if (!o.signedIn()) throw new HttpError(401, 'unauthenticated', 'Sign in first.');
     return { actor: FOUNDER, sessionId: 'fake', requestId: 'fake00000000' };
@@ -127,7 +136,9 @@ export async function addPlatform(web: WebServer, o: { signedIn: () => boolean; 
   };
   mountPlatformRoutes(m, {
     db, clock: systemClock, log: silentLogger(), publicUrl: 'https://agent.example.com', founderName: 'Rohit',
-    isFounder: (x) => x.actor === FOUNDER, mailer: () => (o.gmail === false ? null : mailer), probes: previewProbes, health: previewHealth,
+    isFounder: (x) => x.actor === FOUNDER && previewAs.founder, mailer: () => (o.gmail === false ? null : mailer), probes: previewProbes, health: previewHealth,
+    // A fake tester: the preview never calls Anthropic, and says yes to any key that looks like one.
+    aiKeys: (tenantId) => new AiKeys({ db, platform: db, tenantId, dataKey: async () => previewDataKey, tester: async () => 'ok', clock: systemClock }),
   });
   return { mailer, db };
 }

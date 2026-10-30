@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { AiKeys } from '../../src/platform/aiKey.ts';
 import { inviteForSignup, redeemInvite } from '../../src/platform/invites.ts';
 import type { InviteEmail, InviteMailer, MailOutcome } from '../../src/platform/mailer.ts';
 import { ensurePlatformSchema } from '../../src/platform/schema.ts';
+import { membershipsFor } from '../../src/platform/store.ts';
 import { SqliteDb } from '../../src/store/engine/sqlite.ts';
 import { manualClock, type ManualClock } from '../../src/util/clock.ts';
 import { createLogger } from '../../src/util/logger.ts';
@@ -179,6 +181,35 @@ describe('the platform routes', () => {
     expect(body(await call('POST', `/dashboard/api/platform/customers/${id}/pause`)).customers[0].status).toBe('paused');
     expect(body(await call('POST', `/dashboard/api/platform/customers/${id}/resume`)).customers[0].status).toBe('onboarding');
     expect((await call('POST', '/dashboard/api/platform/customers/00000000-0000-4000-8000-000000000000/pause')).status).toBe(404);
+  });
+
+  it("the customer's AI key: set and removed for their own workspace only, never echoed or logged", async () => {
+    const FAKE = 'sk-ant-test-0000'; // an obvious fake; the tester below is a fake too (nothing calls Anthropic)
+    await db.exec('CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)'); // the customer's own table (theirs on Postgres)
+    const made = body(await invite(false));
+    // Not signed up yet: no workspace. Signed up, but before S4 wires the runtimes in: no key store yet.
+    expect(body(await call('POST', '/dashboard/api/platform/ai-key', CUSTOMER, { key: FAKE })).error.code).toBe('no_workspace');
+    await redeemInvite({ db, clock }, { token: tokenOf(made.link), email: 'kapoor.studio@example.com' });
+    expect(body(await call('POST', '/dashboard/api/platform/ai-key', CUSTOMER, { key: FAKE })).error.code).toBe('not_ready');
+    const tenantId = (await membershipsFor(db, CUSTOMER.actor))[0]!.tenantId;
+    const asked: string[] = [];
+    mount({ aiKeys: (id) => (asked.push(id), new AiKeys({ db, platform: db, tenantId: id, dataKey: async () => Buffer.alloc(32, 7), tester: async () => 'ok', clock })) });
+
+    const nobody: OwnerContext = { actor: 'nobody@example.com', sessionId: 's-3', requestId: 'r3' };
+    expect((await call('POST', '/dashboard/api/platform/ai-key', nobody, { key: FAKE })).status).toBe(404);
+    expect(body(await call('POST', '/dashboard/api/platform/ai-key', FOUNDER, { key: FAKE })).error.code).toBe('founder_env');
+    // The customer comes from the session, never the body.
+    expect((await call('POST', '/dashboard/api/platform/ai-key', CUSTOMER, { key: FAKE, tenantId: '00000000-0000-4000-8000-000000000001' })).status).toBe(400);
+    const bad = await call('POST', '/dashboard/api/platform/ai-key', CUSTOMER, { key: 'not-a-key-zzz' });
+    expect(bad.status).toBe(400);
+    expect(JSON.stringify(bad.body)).not.toContain('zzz');
+
+    const set = await call('POST', '/dashboard/api/platform/ai-key', CUSTOMER, { key: FAKE });
+    expect(set.status).toBe(200);
+    expect(body(set)).toEqual({ aiKey: 'configured' });
+    expect(asked.every((id) => id === tenantId)).toBe(true);
+    expect(body(await call('POST', '/dashboard/api/platform/ai-key/remove', CUSTOMER))).toEqual({ aiKey: 'missing' });
+    expect(logLines.join('\n')).not.toContain(FAKE);
   });
 
   it('refuses a bad body, a bad address, an unknown invite, and the daily limit, with plain messages', async () => {

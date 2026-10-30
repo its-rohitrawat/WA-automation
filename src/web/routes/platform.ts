@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { AiKeys } from '../../platform/aiKey.ts';
 import { listCustomers, pauseCustomer, resumeCustomer, type CustomerHealth } from '../../platform/customers.ts';
 import { PlatformError } from '../../platform/errors.ts';
 import {
@@ -47,6 +48,11 @@ export interface PlatformRouteDeps {
   health?: CustomerHealth;
   /** Active customers this Mac runs at most (default 20). */
   maxActive?: number;
+  /**
+   * A customer's Anthropic key store (S4.2), from their runtime: their own tables and data key. Absent or null until
+   * that customer's workspace runs (S4); the screen then says it is being prepared.
+   */
+  aiKeys?: (tenantId: string) => AiKeys | null;
 }
 
 /** How the dashboard's own registrars look (src/web/mountRoutes.ts). */
@@ -71,6 +77,7 @@ async function answer(fn: () => Promise<ApiResult>): Promise<ApiResult> {
 }
 
 const NewInvite = z.strictObject({ business: z.string().max(200), email: z.string().max(300), send: z.boolean() });
+const NewAiKey = z.strictObject({ key: z.string().max(400) });
 
 export type EmailResult = MailOutcome['state'] | 'not_connected';
 
@@ -163,6 +170,27 @@ export function mountPlatformRoutes(m: PlatformMount, d: PlatformRouteDeps): voi
     if (!v) return fail(404, 'no_workspace', 'There is no workspace to set up for this account.');
     return ok({ ...v, founderName: d.founderName });
   });
+
+  // The customer's own Anthropic key (Getting started, step 2): { key }. The workspace comes from the signed-in person's
+  // membership, never from the body. The key is never echoed, logged or audited; only 'configured' or 'missing' comes back.
+  const keyStore = async (o: OwnerContext): Promise<AiKeys | ApiResult> => {
+    if (d.isFounder(o)) return fail(409, 'founder_env', "Your own business's key is set on the Mac, in its .env file.");
+    const tenantId = (await membershipsFor(d.db, o.actor.trim().toLowerCase()))[0]?.tenantId;
+    if (!tenantId) return fail(404, 'no_workspace', 'There is no workspace to set up for this account.');
+    return d.aiKeys?.(tenantId) ?? fail(409, 'not_ready', 'Your workspace is being prepared. Add your key once it is ready.');
+  };
+  m.change('/dashboard/api/platform/ai-key', (_ctx, o, body) => answer(async () => {
+    const parsed = NewAiKey.safeParse(body);
+    if (!parsed.success) return fail(400, 'invalid', 'Send your Anthropic API key.');
+    const keys = await keyStore(o);
+    if (!(keys instanceof AiKeys)) return keys;
+    return ok({ aiKey: await keys.set(parsed.data.key, o.actor, o.requestId) });
+  }));
+  m.change('/dashboard/api/platform/ai-key/remove', (_ctx, o) => answer(async () => {
+    const keys = await keyStore(o);
+    if (!(keys instanceof AiKeys)) return keys;
+    return ok({ aiKey: await keys.remove(o.actor, o.requestId) });
+  }));
 
   m.change('/dashboard/api/platform/invites/:id/cancel', ({ params }, o) => answer(async () => {
     if (!d.isFounder(o)) return notFounder();

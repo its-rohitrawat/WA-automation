@@ -301,3 +301,26 @@ and the `REVOKE ALL ON tenants, pg_schema_version FROM wa_app;` line in P2 stays
 With S2.7's test server in place, lane C adds the run-on-Postgres half of `tests/platform/pgSchema.test.ts` (the
 `describe.runIf(process.env.DB_ENGINE === 'postgres')` test in the plan, task A3 step 1). It needs `ownerClient()`
 from `tests/helpers/pg.ts`, which S2.4's own schema test also uses; lane A owns that helper.
+
+## 8. The customer's own Anthropic key (S4.2, lane A with S4.4)
+
+`src/platform/aiKey.ts` (`AiKeys`, `modelsListTester`) and two routes in `src/web/routes/platform.ts`
+(`POST /dashboard/api/platform/ai-key` with `{ key }`, and `POST /dashboard/api/platform/ai-key/remove`) are done and
+tested with fakes. The routes answer `not_ready` until `main.ts` passes `aiKeys`. With S4.4, in the platform deps
+(2.2):
+
+```ts
+import Anthropic from '@anthropic-ai/sdk';
+import { AiKeys, modelsListTester } from './platform/aiKey.ts';
+import { keepConnectTimeoutCode } from './brain/claudeClient.ts';
+// …once, at start:
+const keyTester = modelsListTester((apiKey) => new Anthropic({ apiKey, fetch: keepConnectTimeoutCode }));
+// …in the platform deps:
+aiKeys: (tenantId) => {
+  const rt = supervisor.runtimeDb(tenantId); // that customer's PgTenantDb; null when their runtime is not built
+  return rt ? new AiKeys({ db: rt, platform: platformDb, tenantId, dataKey: () => tenantKeys.dataKey(tenantId), tester: keyTester, clock: systemClock }) : null;
+},
+```
+
+The customer runtime (S4.4) builds its Claude clients from `await aiKeys.load()`, and never from `ANTHROPIC_API_KEY`;
+`null` means no AI work for that customer (design 7). The founder's runtime keeps `ANTHROPIC_API_KEY`.

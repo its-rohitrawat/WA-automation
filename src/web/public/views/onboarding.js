@@ -1,9 +1,9 @@
 // Getting started (SaaS design section 6): the new customer's checklist. Six steps: WhatsApp and the API key are needed,
 // the spare number is optional, and the rest unlock once those two are done. Steps whose part of the customer workspace
 // is not built yet say so ("coming with the customer workspace"). Every value from the agent goes through esc().
-import { get } from '../api.js';
+import { ApiError, get, post } from '../api.js';
 import { esc, icon, toast } from '../dom.js';
-import { failed, listen, loading, pill } from './ui.js';
+import { confirmDialog, failed, listen, loading, pill } from './ui.js';
 
 /** @typedef {import('./registry.js').ScreenCtx} ScreenCtx */
 /**
@@ -41,8 +41,25 @@ function statePill(s) {
   return s.need ? pill({ cls: 'p-warn', label: 'Needed' }) : pill({ cls: 'p-review', label: 'To do' });
 }
 
+/**
+ * Step 2, the customer's own Anthropic key: a password field, tested and stored encrypted by the agent. The key is never
+ * shown again or put back in the page; the field is emptied as soon as it is sent. @param {Step} s
+ */
+function keyPanel(s) {
+  const done = s.state === 'done';
+  return `<form class="pf-stack" data-key-form autocomplete="off">
+      <p class="muted-p">${done
+        ? `${icon('ok', 16)} Your key is set. It is never shown again; you can replace or remove it.`
+        : 'Paste a key from console.anthropic.com, under API keys. WA Agent tests it once, then stores it encrypted for your workspace only. It is never shown again, and the AI work bills to it.'}</p>
+      <label class="pf-lbl"><span>${done ? 'A new key' : 'Your Anthropic API key'}</span>
+        <input class="pf-inp" type="password" name="key" maxlength="400" placeholder="sk-ant-…" autocomplete="off" spellcheck="false" required></label>
+      <div class="pf-row"><button class="btn btn-primary btn-sm" type="submit">${icon('key', 15)}${done ? 'Test and replace' : 'Test and save'}</button>
+        ${done ? '<button class="btn btn-ghost btn-sm pf-danger" type="button" data-key-remove>Remove key</button>' : ''}</div></form>`;
+}
+
 /** @param {Step} s */
 function body(s) {
+  if (s.id === 'key' && (s.state === 'todo' || s.state === 'done')) return keyPanel(s);
   if (s.state === 'done') return `<p class="pf-faint">${icon('ok', 16)} Done.</p>`;
   return `<div class="pf-coming">${icon('clock', 16)}<span><b>Coming with the customer workspace.</b> ${esc(s.coming)}</span></div>`;
 }
@@ -92,12 +109,17 @@ export function mountOnboarding(ctx) {
     const bar = /** @type {HTMLElement | null} */ (ctx.view.querySelector('[data-progress]'));
     if (bar) bar.style.width = `${Number(bar.dataset.progress) || 0}%`;
   };
+  /** Someone is typing a key: the 30 s refresh must not redraw the field away. */
+  const typing = () => {
+    const input = /** @type {HTMLInputElement | null} */ (ctx.view.querySelector('[data-key-form] input'));
+    return input !== null && (input.value !== '' || document.activeElement === input);
+  };
   const load = async () => {
     try {
       const next = readOnboarding(await get('/platform/onboarding'));
       if (!ctx.live()) return;
       data = next;
-      draw();
+      if (!typing()) draw();
     } catch (e) {
       if (ctx.live() && !data) ctx.redraw(failed(e));
     }
@@ -107,10 +129,45 @@ export function mountOnboarding(ctx) {
   void load();
   ctx.poll(load, 30_000);
 
+  /** @param {unknown} err */
+  const refused = (err) => toast(err instanceof ApiError ? err.message : 'That did not work. Try again.', false);
+
   return listen(ctx.view, {
-    click: (e) => {
+    submit: async (e) => {
+      const form = /** @type {HTMLFormElement} */ (e.target);
+      if (!form.matches('[data-key-form]')) return;
+      e.preventDefault();
+      const input = /** @type {HTMLInputElement} */ (form.elements.namedItem('key'));
+      const button = /** @type {HTMLButtonElement} */ (form.querySelector('[type="submit"]'));
+      const key = input.value.trim();
+      input.value = ''; // never kept in the page, whatever the answer
+      if (!key || button.disabled) return;
+      button.disabled = true;
+      try {
+        await post('/platform/ai-key', { key });
+        toast('Key tested and saved. It is never shown again.');
+        await load();
+      } catch (err) {
+        refused(err);
+      } finally {
+        button.disabled = false;
+      }
+    },
+    click: async (e) => {
       const t = /** @type {Element} */ (e.target);
       if (t.closest('[data-retry]')) return void load();
+      if (t.closest('[data-key-remove]')) {
+        const yes = await confirmDialog({ eyebrow: 'Your API key', title: 'Remove your key?', yes: 'Remove', text: 'The AI work stops until you add a key again. Your saved messages are kept.' });
+        if (!yes) return;
+        try {
+          await post('/platform/ai-key/remove', {});
+          toast('Key removed.');
+          await load();
+        } catch (err) {
+          refused(err);
+        }
+        return;
+      }
       const head = /** @type {HTMLElement | null} */ (t.closest('[data-open]'));
       if (!head) return;
       if (head.getAttribute('aria-disabled') === 'true') return toast('Finish WhatsApp and your API key first.', false);

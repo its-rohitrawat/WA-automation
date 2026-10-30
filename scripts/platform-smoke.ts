@@ -10,7 +10,7 @@ import { chromium, type Page } from 'playwright-core';
 import { FAKE_CSRF, fakeDashboard, type FakeState } from './dashboardFake.ts';
 import { createInvite } from '../src/platform/invites.ts';
 import { systemClock } from '../src/util/clock.ts';
-import { addPlatform, addSignup, fakeGoogle, fakeSteps } from './platformFake.ts';
+import { addPlatform, addSignup, fakeGoogle, fakeSteps, previewAs } from './platformFake.ts';
 
 const arg = (name: string) => {
   const i = process.argv.indexOf(`--${name}`);
@@ -37,6 +37,7 @@ function watch(page: Page, where: () => string) {
   page.on('response', (r) => {
     const path = new URL(r.url()).pathname;
     if (r.status() === 404 && path === '/signup/api/invite' && where().startsWith('signup used link')) return;
+    if (r.status() === 409 && path === '/dashboard/api/platform/ai-key' && where().startsWith('onboarding key founder')) return;
     if (r.status() >= 400) fail(where(), `${r.status()} ${path}`);
   });
 }
@@ -210,6 +211,32 @@ try {
       await p.locator('.toast', { hasText: 'Finish WhatsApp and your API key first.' }).waitFor();
       await shot(p, where, `onboarding-${tag}`);
       await clearOfAsk(p, where);
+
+      // (S4.2) The customer's own Anthropic key: an obvious fake, and the preview's tester never calls Anthropic. The
+      // founder is refused (their key is in .env); the customer saves it; it leaves the field and never reaches the page.
+      where = `onboarding key founder ${tag}`;
+      const FAKE_KEY = 'sk-ant-test-0000';
+      fakeSteps.key = 'todo';
+      await p.reload();
+      await p.locator('.pf-step-head', { hasText: 'Anthropic' }).click();
+      const keyField = p.locator('[data-key-form] input[name="key"]');
+      await keyField.fill(FAKE_KEY);
+      await p.locator('[data-key-form] [type="submit"]').click();
+      await p.locator('.toast', { hasText: 'is set on the Mac' }).waitFor();
+      if ((await keyField.inputValue()) !== '') fail(where, 'the key stayed in the field after a refusal');
+      where = `onboarding key ${tag}`;
+      previewAs.founder = false;
+      await keyField.fill(FAKE_KEY);
+      await shot(p, where, `onboarding-key-${tag}`, false);
+      await p.locator('[data-key-form] [type="submit"]').click();
+      await p.locator('.toast', { hasText: 'Key tested and saved' }).waitFor();
+      if ((await keyField.inputValue()) !== '') fail(where, 'the key stayed in the field');
+      if ((await p.content()).includes(FAKE_KEY)) fail(where, 'the key is in the page');
+      const sealed = await platformDb.get<{ v: string }>("SELECT v FROM kv WHERE k = 'secret.anthropic'");
+      if (!sealed || sealed.v.includes('sk-ant')) fail(where, 'the key was not stored encrypted');
+      await platformDb.run("DELETE FROM kv WHERE k = 'secret.anthropic'");
+      previewAs.founder = true;
+      delete fakeSteps.key;
 
       where = `onboarding active ${tag}`;
       fakeSteps.whatsapp = 'done';
