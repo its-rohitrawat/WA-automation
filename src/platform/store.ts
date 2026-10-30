@@ -93,9 +93,12 @@ export async function addMembership(q: Sql, o: { tenantId: string; userId: strin
   ]);
 }
 
-/** The tenants a verified email belongs to, with the role there (design 4.2: "find the memberships for a verified email"). */
+/**
+ * The tenants a verified email belongs to, with the role there (design 4.2: "find the memberships for a verified email").
+ * Oldest membership first, ties by tenant id, so someone in several workspaces always lands in the same first one.
+ */
 export async function membershipsFor(q: Sql, email: string): Promise<{ tenantId: string; role: 'owner' | 'member'; status: TenantStatus }[]> {
-  return q.all('SELECT m.tenant_id AS tenantId, m.role, t.status FROM memberships m JOIN users u ON u.id = m.user_id JOIN tenants t ON t.id = m.tenant_id WHERE u.email = ? ORDER BY m.created_at', [email]);
+  return q.all('SELECT m.tenant_id AS tenantId, m.role, t.status FROM memberships m JOIN users u ON u.id = m.user_id JOIN tenants t ON t.id = m.tenant_id WHERE u.email = ? ORDER BY m.created_at, m.tenant_id', [email]);
 }
 
 /** One platform audit line. `detail` is plain words: never a token, a full email of someone refused, or customer content. */

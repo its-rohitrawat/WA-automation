@@ -181,6 +181,20 @@ describe('redeeming an invite at sign-up', () => {
     expect(await inviteForSignup(d, token)).toBeNull();
   });
 
+  it('several workspaces: listed oldest membership first, ties by workspace id, so the first one is always the same', async () => {
+    const join = async (business: string) => {
+      const { token } = await invite(business);
+      const r = await redeemInvite(d, { token, email: 'kapoor.studio@example.com' });
+      if (!r.ok) throw new Error(r.reason);
+      return r.tenantId;
+    };
+    const same = [await join('Kapoor One'), await join('Kapoor Two'), await join('Kapoor Three')]; // all joined at T0
+    clock.advance(60_000);
+    const later = await join('Kapoor Four');
+    const order = (await membershipsFor(db, 'kapoor.studio@example.com')).map((m) => m.tenantId);
+    expect(order).toEqual([...same.sort(), later]);
+  });
+
   it('a link that does not work says only "invalid": unknown, malformed, cancelled or used', async () => {
     const { invite: v, token } = await invite();
     for (const t of ['nonsense', newInviteToken().token, '', undefined]) expect(await redeemInvite(d, { token: t, email: 'kapoor.studio@example.com' })).toEqual({ ok: false, reason: 'invalid' });
