@@ -89,9 +89,10 @@ In `NAV`, the `System` group (line 10), at its start:
 These two System entries are for the founder only. The Getting started entry is not part of 2.4: it is for customer
 sessions only (5.1), never the founder.
 
-(The preview and smoke test apply 2.3, 2.4 and the 5.1 entry to the copies they serve: `scripts/platformFake.ts`,
-`patchedShell`. The preview shows Getting started to the founder too, only because its one signed-in person is both the
-founder and a customer's member, and the shell has no session role yet.)
+(Applied: 2.3 and 2.4 in 8780882, and 5.1 with the role nav in 06ad12b. The preview and the smoke now use the real
+shell, unpatched. The smoke's /me says `platform` and the `role` of each step, and it checks both navs: the founder's,
+with Customers and Invite; and a customer's, with Getting started first and Clients, Tasks, Meetings and Tracker locked
+until the workspace is active.)
 
 ### 2.5 `src/web/oidc.ts` (lane A): the screens a sign-in may return to
 

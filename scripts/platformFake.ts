@@ -1,10 +1,7 @@
 // The platform screens (SaaS S5) on the fake dashboard (scripts/dashboardFake.ts), for the preview and the smoke test.
-// Nothing here edits another lane's file: the hookups the owning lanes will apply (docs/superpowers/plans/
-// 2026-10-29-saas-invites-hookups.md) are applied here only to the copies this server sends, app.js (one import) and
-// router.js (the nav entries). The platform routes run on an in-memory database with made-up invites and a fake mailer:
-// nothing reaches Gmail, Google, the agent or any data folder.
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+// The shell is the real one, unpatched: it shows each role's nav itself (router.js navFor) from /me's `role` and
+// `platform`, which the smoke sets per step (previewAs below). The platform routes run on an in-memory database with
+// made-up invites and a fake mailer: nothing reaches Gmail, Google, the agent or any data folder.
 import { AiKeys } from '../src/platform/aiKey.ts';
 import { createInvite, markSending, recordSend, redeemInvite } from '../src/platform/invites.ts';
 import type { InviteEmail, InviteMailer, MailOutcome } from '../src/platform/mailer.ts';
@@ -18,23 +15,9 @@ import { silentLogger } from '../src/util/logger.ts';
 import { HttpError, readJson, sendError, sendJson } from '../src/web/http.ts';
 import type { ApiResult, OwnerContext } from '../src/web/routes/context.ts';
 import { mountPlatformRoutes, mountSignupRoutes, type PlatformMount } from '../src/web/routes/platform.ts';
-import { PUBLIC_DIR, type WebServer } from '../src/web/server.ts';
+import type { WebServer } from '../src/web/server.ts';
 
 const FOUNDER = 'owner@example.com';
-
-/**
- * The one hookup the shell does not have yet: the Getting started entry (5.1). The real shell already imports the
- * platform screens (2.3, app.js) and adds Customers and Invite a customer when /me says `platform: true` (2.4, router.js's
- * navFor and showPlatform); the smoke makes the preview's /me say so (scripts/platform-smoke.ts). Getting started is for
- * customer sessions only (5.1, with S4.8); the preview shows it to everyone because its one signed-in person is both the
- * founder and a customer's member.
- */
-export function patchedShell(): { router: string } {
-  const router = readFileSync(join(PUBLIC_DIR, 'router.js'), 'utf8');
-  const workAnchor = "['Workspace', [['overview', 'Overview', 'dash'],";
-  if (!router.includes(workAnchor)) throw new Error('the shell changed: update the hookups doc and this patch');
-  return { router: router.replace(workAnchor, "['Workspace', [['onboarding', 'Getting started', 'flash'], ['overview', 'Overview', 'dash'],") };
-}
 
 /** A mailer that sends nothing: it says sent (or what the preview sets). */
 export class PreviewMailer implements InviteMailer {
@@ -92,16 +75,13 @@ const previewHealth: CustomerHealth = { memoryMb: (tenantId) => (doneTenants.has
  * and CSRF token, and a seeded in-memory platform database. Returns the mailer, so a test can change its answer.
  */
 /**
- * The preview's one signed-in person is both the founder and a customer's member (Joshi). The founder's own key lives in
- * .env, so the key route refuses the founder; a test sets founder to false to act as the customer for that step.
+ * Who the preview's one signed-in person is: the founder (Customers, Invite a customer), or the owner of Joshi
+ * Interiors, a customer (Getting started, with the Workspace locked until it is active). It is both, so a test picks one
+ * per step: the server's routes follow it (isFounder, the session's role), and the smoke's /me says the same `role`.
  */
 export const previewAs = { founder: true };
 
 export async function addPlatform(web: WebServer, o: { signedIn: () => boolean; csrf: string; gmail?: boolean }): Promise<{ mailer: PreviewMailer; db: SqliteDb }> {
-  const shell = patchedShell();
-  web.router.get('/dashboard/static/router.js', ({ res }) => {
-    res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache' }).end(shell.router);
-  });
   const db = SqliteDb.open(':memory:');
   await ensurePlatformSchema(db);
   await seed(db);

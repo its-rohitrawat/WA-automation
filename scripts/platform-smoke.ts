@@ -37,7 +37,6 @@ function watch(page: Page, where: () => string) {
   page.on('response', (r) => {
     const path = new URL(r.url()).pathname;
     if (r.status() === 404 && path === '/signup/api/invite' && where().startsWith('signup used link')) return;
-    if (r.status() === 409 && path === '/dashboard/api/platform/ai-key' && where().startsWith('onboarding key founder')) return;
     if (r.status() >= 400) fail(where(), `${r.status()} ${path}`);
   });
 }
@@ -47,6 +46,18 @@ async function shot(page: Page, where: string, name: string, full = true) {
   const sideways = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   if (sideways > 1) fail(where, `scrolls sideways by ${sideways}px`);
   await page.screenshot({ path: join(OUT, `${name}.png`), fullPage: full });
+}
+
+/** The sidebar as the shell drew it: each group's entries in order (screen ids), and the locked ones. */
+async function navOf(page: Page): Promise<{ group(name: string): string[]; all: string[]; locked: string[] }> {
+  const groups = await page.evaluate(() =>
+    [...document.querySelectorAll('#nav .nav-group')].map((g) => ({
+      name: (g.querySelector('.nav-label')?.textContent ?? '').trim().toLowerCase(),
+      ids: [...g.querySelectorAll<HTMLElement>('[data-go]')].map((a) => a.dataset.go ?? ''),
+    })),
+  );
+  const locked = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('#nav [data-go].locked')].map((a) => a.dataset.go ?? ''));
+  return { group: (name) => groups.find((g) => g.name === name)?.ids ?? [], all: groups.flatMap((g) => g.ids), locked: locked.sort() };
 }
 
 /** The floating Ask button never covers a control: row actions sit outside its lane, and the screen's end scrolls clear of it. */
@@ -97,12 +108,13 @@ try {
         fail(`round ${tag}`, `a request to ${new URL(route.request().url()).host}`);
         return route.abort();
       });
-      // The platform is on in this preview, as the agent says it with PLATFORM_ENABLED: the shell then shows Customers and
-      // Invite a customer itself. The fake dashboard's /me is the shared one, so the flag is added on its way here.
+      // /me as the agent answers it with the platform on (PLATFORM_ENABLED), for whoever the step signs in as: the founder
+      // or the owner of a customer (previewAs). The shell builds that role's nav itself. The fake dashboard's /me is the
+      // shared one, so `platform` and `role` are added on its way here.
       await ctx.route(`${base}/dashboard/api/me`, async (route) => {
         const res = await route.fetch();
         if (res.status() !== 200) return route.fulfill({ response: res });
-        return route.fulfill({ response: res, json: { ...(await res.json()), platform: true } });
+        return route.fulfill({ response: res, json: { ...(await res.json()), platform: true, role: previewAs.founder ? 'founder' : 'owner' } });
       });
       await ctx.addInitScript((t) => {
         try {
@@ -117,8 +129,14 @@ try {
 
       // (b) Invite a customer: the list, a new invite by Copy link and by email, a row's new link, a cancel.
       where = `invite ${tag}`;
+      previewAs.founder = true;
       await p.goto(`${base}/dashboard/invite`);
       await p.locator('.pf-inv tbody tr').nth(3).waitFor();
+      // The founder's nav: Customers and Invite a customer first in System, no Getting started, nothing locked.
+      const founderNav = await navOf(p);
+      if (founderNav.group('system').slice(0, 2).join() !== 'customers,invite') fail(where, `founder's System starts ${founderNav.group('system').slice(0, 2)}`);
+      if (founderNav.all.includes('onboarding')) fail(where, "Getting started in the founder's nav");
+      if (founderNav.locked.length > 0) fail(where, `locked in the founder's nav: ${founderNav.locked}`);
       for (const label of ['Sent', 'Accepted', 'Expired', 'Unknown, check Gmail']) {
         if ((await p.locator('.pf-inv .pill', { hasText: label }).count()) < 1) fail(where, `no "${label}" invite`);
       }
@@ -214,11 +232,19 @@ try {
       state.signedIn = true;
       // (e) Getting started: before the customer workspace exists (the needed steps coming, the rest locked), then with
       // WhatsApp and the key done (the customer becomes active and the rest unlock).
+      // As the owner of Joshi Interiors, a customer: the shell shows a customer's nav.
       where = `onboarding ${tag}`;
+      previewAs.founder = false;
       for (const k of Object.keys(fakeSteps) as (keyof typeof fakeSteps)[]) delete fakeSteps[k];
       await platformDb.run("UPDATE tenants SET status = 'onboarding' WHERE name = 'Joshi Interiors'");
       await p.goto(`${base}/dashboard/onboarding`);
       await p.locator('.pf-step').nth(5).waitFor();
+      // A customer's nav: Getting started first, Clients, Tasks, Meetings and Tracker locked until the workspace is
+      // active, and none of the founder's screens.
+      const customerNav = await navOf(p);
+      if (customerNav.group('workspace')[0] !== 'onboarding') fail(where, `the customer's Workspace starts with ${customerNav.group('workspace')[0]}`);
+      if (customerNav.locked.join() !== 'clients,meetings,tasks,tracker') fail(where, `locked: ${customerNav.locked}`);
+      for (const id of ['customers', 'invite', 'connections', 'usage']) if (customerNav.all.includes(id)) fail(where, `${id} in a customer's nav`);
       if ((await p.locator('.pf-step.locked').count()) !== 4) fail(where, 'expected 4 locked steps');
       await p.locator('.pf-step.open .pf-coming', { hasText: 'Coming with the customer workspace.' }).waitFor();
       await p.locator('.pf-ob-prog', { hasText: '0 of 6 done' }).waitFor();
@@ -228,20 +254,15 @@ try {
       await shot(p, where, `onboarding-${tag}`);
       await clearOfAsk(p, where);
 
-      // (S4.2) The customer's own Anthropic key: an obvious fake, and the preview's tester never calls Anthropic. The
-      // founder is refused (their key is in .env); the customer saves it; it leaves the field and never reaches the page.
-      where = `onboarding key founder ${tag}`;
+      // (S4.2) The customer's own Anthropic key: an obvious fake, and the preview's tester never calls Anthropic. It
+      // leaves the field and never reaches the page. (The founder, whose key is in .env, has no Getting started at all;
+      // the route's refusal of the founder is tested in tests/web/platformRoutes.test.ts.)
+      where = `onboarding key ${tag}`;
       const FAKE_KEY = 'sk-ant-test-0000';
       fakeSteps.key = 'todo';
       await p.reload();
       await p.locator('.pf-step-head', { hasText: 'Anthropic' }).click();
       const keyField = p.locator('[data-key-form] input[name="key"]');
-      await keyField.fill(FAKE_KEY);
-      await p.locator('[data-key-form] [type="submit"]').click();
-      await p.locator('.toast', { hasText: 'is set on the Mac' }).waitFor();
-      if ((await keyField.inputValue()) !== '') fail(where, 'the key stayed in the field after a refusal');
-      where = `onboarding key ${tag}`;
-      previewAs.founder = false;
       await keyField.fill(FAKE_KEY);
       await shot(p, where, `onboarding-key-${tag}`, false);
       await p.locator('[data-key-form] [type="submit"]').click();
@@ -251,7 +272,6 @@ try {
       const sealed = await platformDb.get<{ v: string }>("SELECT v FROM kv WHERE k = 'secret.anthropic'");
       if (!sealed || sealed.v.includes('sk-ant')) fail(where, 'the key was not stored encrypted');
       await platformDb.run("DELETE FROM kv WHERE k = 'secret.anthropic'");
-      previewAs.founder = true;
       delete fakeSteps.key;
 
       where = `onboarding active ${tag}`;
@@ -262,9 +282,12 @@ try {
       await p.locator('.pf-ob-prog .pill', { hasText: 'Active' }).waitFor();
       if ((await p.locator('.pf-step.locked').count()) !== 0) fail(where, 'steps still locked');
       if ((await p.locator('.pf-step.done').count()) !== 2) fail(where, 'expected 2 done steps');
+      // Active: the customer's Workspace unlocks.
+      await p.waitForFunction(() => document.querySelectorAll('#nav [data-go].locked').length === 0);
       await shot(p, where, `onboarding-active-${tag}`);
       for (const k of Object.keys(fakeSteps) as (keyof typeof fakeSteps)[]) delete fakeSteps[k];
       await platformDb.run("UPDATE tenants SET status = 'onboarding' WHERE name = 'Joshi Interiors'");
+      previewAs.founder = true; // the founder again, for Customers
 
       // (f) Customers: setup and health only; pause and resume a customer.
       where = `customers ${tag}`;
