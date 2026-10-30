@@ -18,10 +18,10 @@ each kept apart. You run every step yourself, on the Mac, with the Mac assistant
 > (S2.10). Each place is marked **[confirm at S2]**. Check these against the released version before the evening of
 > the switch:
 > - the commands `db-bootstrap`, `db-migrate`, `migrate-to-postgres` and `export-to-sqlite`;
-> - that `db-bootstrap` asks for the `postgres` password and shows nothing as you type (it never takes it on the command
->   line);
-> - the `.env` names `DB_ENGINE`, `DATABASE_URL`, `DATABASE_OWNER_URL`, `DATABASE_PLATFORM_URL` and
->   `DATABASE_BACKUP_URL`;
+> - that `db-bootstrap` asks for the `postgres` password, then the backup password twice, and shows nothing as you type
+>   (it never takes a password on the command line);
+> - the `.env` names `DB_ENGINE`, `DATABASE_URL`, `DATABASE_OWNER_URL` and `DATABASE_PLATFORM_URL` (the backup password
+>   is never in `.env`);
 > - the role names `wa_owner`, `wa_app`, `wa_platform` and `wa_backup`, and the migrations P1 to P3;
 > - the `status` line that names the database engine.
 
@@ -137,20 +137,19 @@ The agent and its jobs connect with their own limited roles, never the superuser
 1. **Make four passwords** (normal window), each with `openssl rand -hex 24`. Save them in your password manager as
    "WA Agent Postgres app", "… platform", "… owner" and "… backup". Hex keeps them safe inside an address.
 
-2. **Add them to `.env`** (waagent window, `nano .env`). Add these five lines, with your passwords in place of the
-   placeholders. `db-bootstrap` reads them to set each role's password. Leave `DB_ENGINE` on `sqlite` for now: nothing
-   changes yet. **[confirm at S2]**
+2. **Add three of them to `.env`** (waagent window, `nano .env`). Add these four lines, with your passwords in place of
+   the placeholders. `db-bootstrap` reads them to set those roles' passwords. The backup password does **not** go in
+   `.env`: the agent never uses it. Leave `DB_ENGINE` on `sqlite` for now: nothing changes yet. **[confirm at S2]**
 
    ```env
    DB_ENGINE=sqlite
    DATABASE_URL=postgres://wa_app:<app password>@127.0.0.1:5432/wa_agent
    DATABASE_PLATFORM_URL=postgres://wa_platform:<platform password>@127.0.0.1:5432/wa_agent
    DATABASE_OWNER_URL=postgres://wa_owner:<owner password>@127.0.0.1:5432/wa_agent
-   DATABASE_BACKUP_URL=postgres://wa_backup:<backup password>@127.0.0.1:5432/wa_agent
    ```
 
-3. **Create the roles and the database** (waagent window). It asks for the `postgres` password from part 1, step 3, and
-   shows nothing as you type:
+3. **Create the roles and the database** (waagent window). It asks for the `postgres` password from part 1, step 3,
+   then for the "… backup" password, twice. It shows nothing as you type:
 
    ```sh
    npm run cli -- db-bootstrap

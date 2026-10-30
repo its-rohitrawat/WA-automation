@@ -52,9 +52,11 @@ describe('GO-LIVE-postgres.md', () => {
 
   it('holds no secret: every database address is a placeholder on 127.0.0.1, and no key or token appears', () => {
     const urls = [...guide.matchAll(/postgres:\/\/[^\n`]+/g)].map((m) => m[0].trim()); // placeholders hold spaces
-    expect(urls).toHaveLength(4);
-    for (const u of urls) expect(u).toMatch(/^postgres:\/\/wa_(app|platform|owner|backup):<(app|platform|owner|backup) password>@127\.0\.0\.1:5432\/wa_agent$/);
-    // The nightly dump reads only its own password file, as the read-only wa_backup role, never the agent's .env.
+    expect(urls).toHaveLength(3);
+    for (const u of urls) expect(u).toMatch(/^postgres:\/\/wa_(app|platform|owner):<(app|platform|owner) password>@127\.0\.0\.1:5432\/wa_agent$/);
+    // The nightly dump reads only its own password file, as the read-only wa_backup role; its password is never in the
+    // agent's .env (lane A's S2 decision, b405561).
+    expect(guide).not.toContain('DATABASE_BACKUP_URL=');
     expect(guide).toContain('127.0.0.1:5432:wa_agent:wa_backup:<backup password>');
     expect(guide).toContain('pg_dump -h 127.0.0.1 -U wa_backup');
     expect(guide).not.toContain(':postgres:<'); // no superuser password file
