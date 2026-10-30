@@ -4,6 +4,8 @@ import { GROUPS_FILE_MISSING_MESSAGE, loadGroupsFile } from './config/groups.ts'
 import { masterKeyPath } from './config/paths.ts';
 import { DpapiKeyProvider, MasterKeyError } from './crypto/keyProvider.ts';
 import { TokenDecryptError } from './output/googleAuth.ts';
+import { ensurePlatformSchema } from './platform/schema.ts';
+import { ensureFounderTenant } from './platform/store.ts';
 import { startFounderRuntime, StartupExit } from './runtime/customerRuntime.ts';
 import { GlobalSpend } from './spend/globalSpend.ts';
 import type { Db } from './store/db.ts';
@@ -58,6 +60,10 @@ async function main(): Promise<void> {
     const onPoolError = (err: Error) => log.error({ err }, 'a Postgres connection failed while idle');
     db = await openStore(env, { onPoolError });
     platformDb = openPlatformStore(env, db, { onPoolError });
+    // The platform tables (S5H.1): on SQLite in tracker.db, made here if missing; on Postgres P3 made them (db-migrate).
+    // Then customer #1, the founder, is there before anything reads them.
+    if (platformDb.engine === 'sqlite') await ensurePlatformSchema(platformDb);
+    await ensureFounderTenant(platformDb, { name: 'Your business', at: new Date().toISOString() });
     const configs = loadGroupsFile(env.GROUPS_FILE);
 
     // The founder's runtime (S4.4, src/runtime/customerRuntime.ts): everything for customer #1 between the databases

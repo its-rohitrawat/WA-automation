@@ -5,7 +5,10 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseEnv } from '../../src/config/env.ts';
 import { buildCustomerRuntime, startFounderRuntime, sttEnvFor, type CustomerRuntime } from '../../src/runtime/customerRuntime.ts';
+import { ensurePlatformSchema } from '../../src/platform/schema.ts';
+import { ensureFounderTenant } from '../../src/platform/store.ts';
 import { GlobalSpend } from '../../src/spend/globalSpend.ts';
+import { startDashboard } from '../../src/web/start.ts';
 import type { Db } from '../../src/store/db.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { istDate } from '../../src/util/time.ts';
@@ -108,6 +111,43 @@ describe('buildCustomerRuntime', () => {
     expect(globalSpend.spentTodayByTenant()).toEqual({ [FOUNDER]: 2 }); // the founder's own spend only
     expect(globalSpend.spentToday()).toBe(2);
     await founder.stop();
+  });
+});
+
+describe('the platform on the founder’s dashboard (S5H.1, 2.2, 4.1)', () => {
+  const fakeGoogle = { exchange: () => Promise.reject(new Error('no Google in tests')), verifier: () => Promise.reject(new Error('no Google in tests')) };
+
+  /** The runtime's routes on a real dashboard (port 0), as main.ts starts it; what two paths answer without a session. */
+  async function answers(t: { id: string; founder: boolean }, withPlatform: boolean): Promise<{ signup: number; invites: number }> {
+    const db = await seededDb();
+    opened.push(db);
+    // As main.ts does at start: the platform tables in tracker.db, then customer #1.
+    await ensurePlatformSchema(db);
+    await ensureFounderTenant(db, { name: 'Your business', at: new Date().toISOString() });
+    const shared = fakeShared();
+    const rt = await buildCustomerRuntime(t, { ...shared, db, configs: [], ...(withPlatform ? { platformDb: db } : {}) });
+    const web = await startDashboard({ env: { ...shared.env, DASHBOARD_PORT: 0 }, db, platformDb: db, log: silentLogger(), control: rt.control, ...rt.agentRoutes, google: fakeGoogle });
+    try {
+      const base = `http://127.0.0.1:${web!.address()!.port}`;
+      const signup = (await fetch(`${base}/signup`, { redirect: 'manual' })).status;
+      const invites = (await fetch(`${base}/dashboard/api/platform/invites`, { redirect: 'manual' })).status;
+      return { signup, invites };
+    } finally {
+      await web?.stop();
+      await rt.stop();
+    }
+  }
+
+  it('the founder with the platform Db: the sign-up page answers without a session, the invite API needs the owner', async () => {
+    expect(await answers({ id: FOUNDER, founder: true }, true)).toEqual({ signup: 200, invites: 401 });
+  });
+
+  it('without the platform Db, and on a customer runtime even with it, neither is there', async () => {
+    for (const [t, withPlatform] of [[{ id: FOUNDER, founder: true }, false], [{ id: CUSTOMER, founder: false }, true]] as const) {
+      const a = await answers(t, withPlatform);
+      expect(a.signup, JSON.stringify(t)).not.toBe(200);
+      expect(a.invites, JSON.stringify(t)).not.toBe(401);
+    }
   });
 });
 

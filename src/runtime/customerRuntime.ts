@@ -24,7 +24,8 @@ import { MediaRefSealer } from '../media/ref.ts';
 import type { LiveMeetingsApi } from '../meetings/multiAccount.ts';
 import { buildMeetingTranscriber } from '../meetings/transcribe.ts';
 import { fillAccountEmails } from '../output/accountEmail.ts';
-import { meetingsReady, TokenDecryptError, TokenStore } from '../output/googleAuth.ts';
+import { accountEmail, grantedScopes, MAIN_ACCOUNT, meetingsReady, TokenDecryptError, TokenStore } from '../output/googleAuth.ts';
+import { founderMailer, oauthGmailTransport } from '../platform/gmailSender.ts';
 import { briefingSettings, spareDriver, spareLinked } from '../report/dashboardReport.ts';
 import { LiveReport } from '../report/liveReport.ts';
 import { openMorningReport, senderOpener } from '../report/start.ts';
@@ -50,7 +51,7 @@ import { founderLinkDriver, LinkSessions } from '../wa/linkSession.ts';
 import { baileysSenderSocketFactory, linkedNumber } from '../wa/senderGateway.ts';
 import { AuditLog, type AuditInput } from '../web/audit.ts';
 import { mountAgentRoutes } from '../web/mountRoutes.ts';
-import { googleIdVerifier } from '../web/oidc.ts';
+import { googleCodeExchanger, googleIdVerifier } from '../web/oidc.ts';
 import { makeGroupKey } from '../web/routes/groups.ts';
 import type { DashboardMount } from '../web/start.ts';
 
@@ -137,6 +138,11 @@ export interface RuntimeDeps {
    * can never pause the founder or another customer.
    */
   globalSpend?: GlobalSpend;
+  /**
+   * The platform tables' Db (decision D1): the tracker itself on SQLite, wa_platform's pool on Postgres. Given to the founder's
+   * runtime only: its dashboard hosts the platform screens (invites, customers) and the public sign-up (S5H).
+   */
+  platformDb?: Db;
   /** Told the name of each database this runtime closes (tests). */
   onClose?: (name: string) => void;
 }
@@ -218,6 +224,22 @@ export async function buildCustomerRuntime(t: { id: string; founder: boolean }, 
     if (plan.google === 'not_connected') log.warn('setup mode: Google is not connected; connect it in the dashboard');
     // One Google client per account, swapped in place on a reconnect: Drive and meetings read theirs on every call.
     const google = await buildGoogle({ db, key, credentials: googleCredentials(env), meetingsEnabled: env.MEETINGS_ENABLED, log });
+    // The platform (S5H) is the founder's: its screens and the public sign-up, on the platform Db. Invites go from the founder's
+    // Gmail once the main account has gmail.send: its scopes and address are async reads, so they are read now and after
+    // each reconnect of the main account, and the mailer getter (run on every request) reads what was last read.
+    const platformDb = t.founder ? d.platformDb : undefined;
+    let gmail: { scopes: readonly string[]; from: string | null } = { scopes: [], from: null };
+    const readGmail = async () => {
+      gmail = { scopes: await grantedScopes(db, MAIN_ACCOUNT), from: await accountEmail(db, MAIN_ACCOUNT) };
+    };
+    const refreshGmail = () => {
+      if (platformDb) void readGmail().catch((err: unknown) => log.error({ err }, "the founder's Gmail permission could not be read"));
+    };
+    if (platformDb) await readGmail();
+    const mailer = () => {
+      if (!google.hub.client(MAIN_ACCOUNT)) return null;
+      return founderMailer({ grantedScopes: gmail.scopes, from: gmail.from, transport: oauthGmailTransport(() => google.hub.client(MAIN_ACCOUNT)!) });
+    };
 
     // Phase 2c: the morning report from the spare number. A missing, damaged or undecryptable spare-number session never
     // stops the service: the founder-number reader runs as usual, each day's report fails until the deadline and is then
@@ -343,9 +365,14 @@ export async function buildCustomerRuntime(t: { id: string; founder: boolean }, 
     if (env.DASHBOARD_ENABLED) app.health.setGoogleConnected(google.connected());
     // Older accounts' emails (for the owner's Connections screen), once; never awaited, never fatal.
     const emailDb = db;
-    void fillAccountEmails({ db: emailDb, hub: google.hub, log }).catch(() => {});
+    // The founder's Gmail address is among them: it is read again once they are filled in.
+    void fillAccountEmails({ db: emailDb, hub: google.hub, log }).catch(() => {}).then(refreshGmail);
     google.hub.onChange((label) => {
-      void fillAccountEmails({ db: emailDb, hub: google.hub, log, labels: [label] }).catch(() => {});
+      void fillAccountEmails({ db: emailDb, hub: google.hub, log, labels: [label] })
+        .catch(() => {})
+        .then(() => {
+          if (label === MAIN_ACCOUNT) refreshGmail();
+        });
       if (env.DASHBOARD_ENABLED) app.health.setGoogleConnected(google.connected());
       // A reconnected main account uploads now, not after the failure backoff (up to 15 minutes).
       if (label === 'main') void app.publisher.publishNow().catch((err: unknown) => log.error({ err }, 'upload after the Google reconnect failed'));
@@ -431,6 +458,8 @@ export async function buildCustomerRuntime(t: { id: string; founder: boolean }, 
         uptimeTimer.unref();
       };
       const directory = new GroupDirectory({ gateway, clock: systemClock });
+      const sitePublicUrl = env.DASHBOARD_PUBLIC_URL ?? `http://localhost:${env.DASHBOARD_PORT}`;
+      const web = googleCredentials(env).web;
       const meetingsApi = google.meetings;
       const phoneLinks = links;
       agentRoutes = {
@@ -469,6 +498,19 @@ export async function buildCustomerRuntime(t: { id: string; founder: boolean }, 
             ...(heartbeat ? { heartbeat } : {}),
           },
           links: phoneLinks,
+          // The platform (S5H.2 2.2) and the public sign-up (S5H.6 4.1): the founder's dashboard only, on the platform Db.
+          ...(platformDb ? {
+            platform: { db: platformDb, clock: systemClock, log, publicUrl: sitePublicUrl, founderName: env.PLATFORM_FOUNDER_NAME, mailer },
+            signup: {
+              db: platformDb, clock: systemClock, log, publicUrl: sitePublicUrl, founderName: env.PLATFORM_FOUNDER_NAME,
+              // The owner sign-in's web client; its redirect URIs must include <DASHBOARD_PUBLIC_URL>/signup/callback.
+              google: web ? { clientId: web.clientId, exchange: googleCodeExchanger(web), verify: googleIdVerifier(web.clientId) } : null,
+              // Customer sessions exist on Postgres only and come with S4.8: until then none is started, and the new
+              // customer gets the waiting page (the invite is still used and the customer is onboarding).
+              startSession: async () => false,
+              secure: m.secureFor,
+            },
+          } : {}),
           ...(env.DASHBOARD_ASSISTANT
             ? { assistant: { ai: new ClaudeAssistantClient({ apiKey, model: env.AI_MODEL, effort: env.AI_EFFORT, prices }), paid: app.paidCalls, prices } }
             : {}),
@@ -530,7 +572,7 @@ export async function buildCustomerRuntime(t: { id: string; founder: boolean }, 
  * process exits anyway), and the error is rethrown for main.ts to report. The lock is released exactly once.
  */
 export async function startFounderRuntime(
-  d: RuntimeDeps & { tenantId: string; platformDb?: Db; lock: { release(): Promise<void> } },
+  d: RuntimeDeps & { tenantId: string; lock: { release(): Promise<void> } },
 ): Promise<CustomerRuntime> {
   try {
     return await buildCustomerRuntime({ id: d.tenantId, founder: true }, d);
