@@ -33,10 +33,10 @@ export async function overview(db: Db, now: Date, health?: Pick<HealthSnapshot, 
   const today = istDate(now);
   const rows = await db.all<{ code: string; name: string; overdue: number; open: number; review: number; done: number }>(
     `SELECT c.code, c.name,
-        COALESCE(SUM(t.status <> 'done' AND t.deadline IS NOT NULL AND t.deadline < @today), 0) AS overdue,
-        COALESCE(SUM(t.status = 'open' AND NOT (t.deadline IS NOT NULL AND t.deadline < @today)), 0) AS open,
-        COALESCE(SUM(t.status = 'maybe_done' AND NOT (t.deadline IS NOT NULL AND t.deadline < @today)), 0) AS review,
-        COALESCE(SUM(t.status = 'done' AND t.closed_on BETWEEN @weekStart AND @today), 0) AS done
+        COALESCE(SUM(CASE WHEN t.status <> 'done' AND t.deadline IS NOT NULL AND t.deadline < @today THEN 1 ELSE 0 END), 0) AS overdue,
+        COALESCE(SUM(CASE WHEN t.status = 'open' AND NOT (t.deadline IS NOT NULL AND t.deadline < @today) THEN 1 ELSE 0 END), 0) AS open,
+        COALESCE(SUM(CASE WHEN t.status = 'maybe_done' AND NOT (t.deadline IS NOT NULL AND t.deadline < @today) THEN 1 ELSE 0 END), 0) AS review,
+        COALESCE(SUM(CASE WHEN t.status = 'done' AND t.closed_on BETWEEN @weekStart AND @today THEN 1 ELSE 0 END), 0) AS done
       FROM clients c LEFT JOIN tasks t ON t.client_id = c.id
       WHERE c.active = 1
       GROUP BY c.id ORDER BY lower(c.name), c.id`,

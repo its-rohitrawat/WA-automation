@@ -94,10 +94,10 @@ export async function trackerSummary(
   const counts = new Map(
     (await db.all<Omit<TrackerSheet, 'name' | 'client'> & { clientId: number }>(
       `SELECT client_id AS clientId,
-        COALESCE(SUM(status <> 'done' AND deadline IS NOT NULL AND deadline < @today), 0) AS overdue,
-        COALESCE(SUM(status = 'maybe_done' AND NOT (deadline IS NOT NULL AND deadline < @today)), 0) AS review,
-        COALESCE(SUM(status <> 'done'), 0) AS notDone,
-        COALESCE(SUM(status = 'done' AND closed_on BETWEEN @weekStart AND @today), 0) AS doneThisWeek
+        COALESCE(SUM(CASE WHEN status <> 'done' AND deadline IS NOT NULL AND deadline < @today THEN 1 ELSE 0 END), 0) AS overdue,
+        COALESCE(SUM(CASE WHEN status = 'maybe_done' AND NOT (deadline IS NOT NULL AND deadline < @today) THEN 1 ELSE 0 END), 0) AS review,
+        COALESCE(SUM(CASE WHEN status <> 'done' THEN 1 ELSE 0 END), 0) AS notDone,
+        COALESCE(SUM(CASE WHEN status = 'done' AND closed_on BETWEEN @weekStart AND @today THEN 1 ELSE 0 END), 0) AS doneThisWeek
       FROM tasks GROUP BY client_id`,
       { today, weekStart: minusDays(today, 6) },
     )).map((r) => [r.clientId, r]),

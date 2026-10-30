@@ -40,11 +40,13 @@ if (!docker(['info', '--format', '{{.ServerVersion}}']).ok) fail('the Docker eng
 if (docker(['container', 'inspect', NAME]).ok) {
   fail(`a container named ${NAME} is already there (an earlier run). Nothing was changed. Once you are sure it is not needed: docker rm -f ${NAME}`);
 }
-if (!docker(['image', 'inspect', IMAGE]).ok) fail(`${IMAGE} is not downloaded. Download it first (about 430 MB on disk): docker pull ${IMAGE}`);
+if (!docker(['image', 'inspect', IMAGE]).ok) fail(`${IMAGE} is not downloaded. Download it first (about 650 MB on disk): docker pull ${IMAGE}`);
 
 // -e POSTGRES_PASSWORD with no value: docker reads it from its own environment, so it is not on the command line.
+// 200 connections: each test file keeps a few (tests/helpers/pg.ts), times the parallel workers, plus the tests that
+// open their own pools on purpose; the server's default 100 ran out in the first run.
 const started = docker(
-  ['run', '-d', '--name', NAME, '--label', 'wa-agent=test-pg', '-p', `127.0.0.1:${PORT}:5432`, '-e', 'POSTGRES_PASSWORD', IMAGE],
+  ['run', '-d', '--name', NAME, '--label', 'wa-agent=test-pg', '-p', `127.0.0.1:${PORT}:5432`, '-e', 'POSTGRES_PASSWORD', IMAGE, '-c', 'max_connections=200'],
   { env: { ...process.env, POSTGRES_PASSWORD: pw.postgres } },
 );
 if (!started.ok) fail(`${NAME} did not start (is port ${PORT} free? set TEST_PG_PORT to use another)`);
@@ -75,6 +77,8 @@ try {
     TEST_PG_OWNER_URL: url('wa_owner', DB),
     TEST_PG_PLATFORM_URL: url('wa_platform', DB),
     TEST_PG_BACKUP_URL: url('wa_backup', DB),
+    // This throwaway container's superuser, for the copy tests that make a fresh database of their own (c7's copyPg).
+    TEST_PG_SERVER_URL: url('postgres', 'postgres'),
   };
   const args = process.argv.slice(2).filter((a) => a !== '--');
   code = spawnSync(process.execPath, [VITEST, 'run', ...args], { stdio: 'inherit', env }).status ?? 1;

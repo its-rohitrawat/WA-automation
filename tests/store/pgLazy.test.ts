@@ -52,5 +52,5 @@ process.stdout.write(JSON.stringify({ sqlite, platformIsTracker: platform === db
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 60_000); // a fresh Node process importing the whole app: about 4 s alone, far more on a busy full run
 });

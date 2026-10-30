@@ -171,7 +171,8 @@ export async function clientActivity(db: Db, c: ClientRow, now: Date, quietMinut
   const taskCount = (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM tasks WHERE client_id = ?', [c.id]))!.n;
   const week = (await db.get<{ messages: number; people: number; files: number | null; voice: number | null }>(
     `SELECT COUNT(*) AS messages, COUNT(DISTINCT m.sender_jid) AS people,
-        SUM(COALESCE(md.kind, m.media_type) IN ('image', 'video', 'document', 'audio')) AS files, SUM(COALESCE(md.kind, m.media_type) = 'voice') AS voice
+        SUM(CASE WHEN COALESCE(md.kind, m.media_type) IN ('image', 'video', 'document', 'audio') THEN 1 ELSE 0 END) AS files,
+        SUM(CASE WHEN COALESCE(md.kind, m.media_type) = 'voice' THEN 1 ELSE 0 END) AS voice
       FROM messages m LEFT JOIN media md ON md.message_id = m.id
       WHERE m.client_id = ? AND m.revoked = 0 AND m.ts >= ?`,
     [c.id, since],
@@ -220,10 +221,11 @@ function weekStart(now: Date): string {
 
 const ZERO: ClientCounts = { open: 0, overdue: 0, review: 0, doneThisWeek: 0 };
 
-const COUNTS = `SUM(status <> 'done') AS open,
-  SUM(status <> 'done' AND deadline IS NOT NULL AND deadline < @today) AS overdue,
-  SUM(status = 'maybe_done') AS review,
-  SUM(status = 'done' AND closed_on >= @monday) AS doneThisWeek`;
+// CASE WHEN … THEN 1 ELSE 0: a count both engines run (Postgres has no SUM of a comparison, which SQLite sums as 0 or 1).
+const COUNTS = `SUM(CASE WHEN status <> 'done' THEN 1 ELSE 0 END) AS open,
+  SUM(CASE WHEN status <> 'done' AND deadline IS NOT NULL AND deadline < @today THEN 1 ELSE 0 END) AS overdue,
+  SUM(CASE WHEN status = 'maybe_done' THEN 1 ELSE 0 END) AS review,
+  SUM(CASE WHEN status = 'done' AND closed_on >= @monday THEN 1 ELSE 0 END) AS doneThisWeek`;
 
 /** Every client's counts, in one pass over tasks. */
 async function countsByClient(db: Db, now: Date): Promise<Map<number, ClientCounts>> {

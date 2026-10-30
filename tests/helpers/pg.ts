@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { openAdminConnection, openPgPool, PgPlatformDb, PgTenantDb } from '../../src/store/engine/pg.ts';
+import { openPgPool, PgPlatformDb, PgTenantDb, type PgPool } from '../../src/store/engine/pg.ts';
 
 // The Postgres test server (S2.7), when scripts/test-pg.ts started one. Its URLs come only from the TEST_ variables
 // that script sets for vitest, with passwords made at run time: never in .env, a file, a log or a commit. Without them
@@ -33,24 +33,35 @@ function requireTestPg(): TestPg {
   return t;
 }
 
-/**
- * A new customer on the test server and its Db as wa_app, on a small pool of its own (closing the Db ends it). Each
- * call is another customer, so RLS keeps every test's rows apart.
- */
-export async function openTestTenantDb(name = 'test'): Promise<PgTenantDb> {
-  const t = requireTestPg();
-  const id = randomUUID();
-  const now = new Date().toISOString();
-  const owner = await openAdminConnection(t.ownerUrl);
-  try {
-    await owner.sql("INSERT INTO tenants (id, name, status, created_at, updated_at) VALUES ($1, $2, 'active', $3, $3)", [id, name, now]);
-  } finally {
-    await owner.end();
-  }
-  return new PgTenantDb(openPgPool(t.appUrl, { max: 2 }), id);
+// One small pool per role for each test file (the first test:pg run: a pool per test ran the server out of its
+// connections). Each test still gets its own customer, so RLS keeps every test's rows apart. The setup file
+// (tests/setup/pgPools.ts) ends the pools after the file. A Db handed out here never ends its pool: closing it is free.
+const pools: { app?: PgPool; owner?: PgPool; platform?: PgPool } = {};
+const pool = (role: keyof typeof pools, url: (t: TestPg) => string): PgPool => (pools[role] ??= openPgPool(url(requireTestPg()), { max: 2 }));
+/** The pool behind a Db that must not end it (PgPlatformDb ends its pool on close). */
+const borrowed = (p: PgPool): PgPool => ({ connect: () => p.connect(), end: async () => {} });
+
+/** Ends this file's pools (the setup file, after each test file). Nothing to do on SQLite. */
+export async function closeTestPools(): Promise<void> {
+  const open = Object.values(pools);
+  for (const k of Object.keys(pools) as (keyof typeof pools)[]) delete pools[k];
+  await Promise.all(open.map((p) => p!.end().catch(() => undefined)));
 }
 
-/** The platform tables as wa_platform, on a small pool of its own. */
+/** A new customer on the test server and its Db as wa_app, on this file's pool. Each call is another customer. */
+export async function openTestTenantDb(name = 'test'): Promise<PgTenantDb> {
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const c = await pool('owner', (t) => t.ownerUrl).connect();
+  try {
+    await c.query("INSERT INTO tenants (id, name, status, created_at, updated_at) VALUES ($1, $2, 'active', $3, $3)", [id, name, now]);
+  } finally {
+    c.release();
+  }
+  return new PgTenantDb(pool('app', (t) => t.appUrl), id, { ownsPool: false });
+}
+
+/** The platform tables as wa_platform, on this file's pool. */
 export function openTestPlatformDb(): PgPlatformDb {
-  return new PgPlatformDb(openPgPool(requireTestPg().platformUrl, { max: 2 }));
+  return new PgPlatformDb(borrowed(pool('platform', (t) => t.platformUrl)));
 }
