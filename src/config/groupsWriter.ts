@@ -1,6 +1,6 @@
 import { closeSync, copyFileSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeSync } from 'node:fs';
 import { getClientByCode, getClientByGroupId } from '../store/clients.ts';
-import type { Db } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
 import { parseGroupsFile, type ClientConfig } from './groups.ts';
 
 // Writes config/allowed-groups.json for the dashboard (D2), the safe way: the raw JSON is read so the fields of untouched
@@ -42,6 +42,11 @@ export interface GroupChangeResult {
   edited: ChangedGroup[];
   /** The new list, as the watcher will read it. */
   configs: ClientConfig[];
+  /**
+   * Set by a customer's store (src/config/groupsStore.ts) when the change was saved but the clients could not be
+   * reloaded at once: the next runtime start syncs them from the saved list.
+   */
+  warning?: 'reload_failed';
 }
 
 export type GroupChangeField = 'code' | 'name' | 'groupId' | 'emailDomains' | 'meetingKeywords' | 'file';
@@ -94,6 +99,22 @@ async function apply(path: string, changes: GroupChanges, o: { db: Db; ops?: Par
   } catch (e) {
     throw new GroupChangeError('The groups file could not be read on the Mac. Nothing was changed.', 'file', null, { cause: e });
   }
+  const { text, result, differs } = await applyToDocument(original, changes, o);
+  if (differs) write(path, text, o.ops);
+  return result;
+}
+
+/**
+ * The changes applied to an allow-list document's text: the same rules for the founder's file and a customer's stored
+ * list (src/config/groupsStore.ts). The raw JSON is changed so untouched fields stay as they are; the result is checked
+ * with parseGroupsFile and the clients-table code rules (read through `db`, which may be a transaction's handle). Writes
+ * nothing. `differs` is false when the new text is the same as the old (for example an edit back to the same name).
+ */
+export async function applyToDocument(
+  original: string,
+  changes: GroupChanges,
+  o: { db: Sql },
+): Promise<{ text: string; result: GroupChangeResult; differs: boolean }> {
   const doc = parseRaw(original);
   const entries = doc.clients;
   const result: GroupChangeResult = { approved: [], removed: [], edited: [], configs: [] };
@@ -154,8 +175,8 @@ async function apply(path: string, changes: GroupChanges, o: { db: Db; ops?: Par
     throw new GroupChangeError(friendly(message), fieldOf(message), groupId);
   }
   // Nothing to change (for example an edit back to the same name): the file and its .bak stay as they are.
-  if (text.replace(/\r\n/g, '\n') !== original.replace(/^﻿/, '').replace(/\r\n/g, '\n')) write(path, text, o.ops);
-  return result;
+  const differs = text.replace(/\r\n/g, '\n') !== original.replace(/^﻿/, '').replace(/\r\n/g, '\n');
+  return { text, result, differs };
 }
 
 function parseRaw(text: string): { clients: RawEntry[] } & Record<string, unknown> {
