@@ -14,6 +14,8 @@ export interface TablePlan {
   /** Values the target needs that the source has no column for (wa_auth's phone and slot). */
   fixed: Record<string, string>;
   platform: boolean;
+  /** The primary key's columns: a platform table's rows are checked by the keys the copy wrote (they hold every customer). */
+  key: string[];
 }
 
 export const SKIPPED: Readonly<Record<string, string>> = {
@@ -44,16 +46,17 @@ export async function copyPlan(tracker: Sql): Promise<TablePlan[]> {
 
   const out: TablePlan[] = [];
   for (const t of order) {
-    const columns = (await tracker.all<{ name: string }>(`SELECT name FROM pragma_table_info(${lit(t)}) ORDER BY cid`)).map((c) => c.name);
-    out.push({ source: 'tracker', table: t, target: t, columns, fixed: {}, platform: (PLATFORM_TABLES as readonly string[]).includes(t) });
+    const info = await tracker.all<{ name: string; pk: number }>(`SELECT name, pk FROM pragma_table_info(${lit(t)}) ORDER BY cid`);
+    const key = info.filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name);
+    out.push({ source: 'tracker', table: t, target: t, columns: info.map((c) => c.name), fixed: {}, platform: (PLATFORM_TABLES as readonly string[]).includes(t), key });
   }
   return out;
 }
 
 /** The WhatsApp session files (session.db, sender-session.db) into wa_auth: each phone, live and backup (gap G2). */
 export const SESSION_PLANS: readonly TablePlan[] = [
-  { source: 'session', table: 'auth', target: 'wa_auth', columns: ['k', 'v'], fixed: { phone: 'founder', slot: 'live' }, platform: false },
-  { source: 'session', table: 'auth_backup', target: 'wa_auth', columns: ['k', 'v'], fixed: { phone: 'founder', slot: 'backup' }, platform: false },
-  { source: 'sender', table: 'auth', target: 'wa_auth', columns: ['k', 'v'], fixed: { phone: 'spare', slot: 'live' }, platform: false },
-  { source: 'sender', table: 'auth_backup', target: 'wa_auth', columns: ['k', 'v'], fixed: { phone: 'spare', slot: 'backup' }, platform: false },
+  { source: 'session', table: 'auth', target: 'wa_auth', columns: ['k', 'v'], fixed: { phone: 'founder', slot: 'live' }, platform: false, key: ['k'] },
+  { source: 'session', table: 'auth_backup', target: 'wa_auth', columns: ['k', 'v'], fixed: { phone: 'founder', slot: 'backup' }, platform: false, key: ['k'] },
+  { source: 'sender', table: 'auth', target: 'wa_auth', columns: ['k', 'v'], fixed: { phone: 'spare', slot: 'live' }, platform: false, key: ['k'] },
+  { source: 'sender', table: 'auth_backup', target: 'wa_auth', columns: ['k', 'v'], fixed: { phone: 'spare', slot: 'backup' }, platform: false, key: ['k'] },
 ];

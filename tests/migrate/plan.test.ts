@@ -44,6 +44,11 @@ describe('the copy plan', () => {
     // The wrapped data keys (S4.1) go across as they are: they stay wrapped by the same master key.
     expect(plan.findIndex((p) => p.table === 'tenants')).toBeLessThan(plan.findIndex((p) => p.table === 'tenant_keys'));
     expect(plan.every((p) => Object.keys(p.fixed).length === 0)).toBe(true);
+    // Each table's primary key, in key order: the copy checks a platform table by the keys it wrote.
+    expect(Object.fromEntries(plan.filter((p) => p.platform).map((p) => [p.table, p.key]))).toEqual({
+      tenants: ['id'], users: ['id'], memberships: ['tenant_id', 'user_id'], invites: ['id'], platform_audit: ['id'], tenant_keys: ['tenant_id'],
+    });
+    expect(plan.find((p) => p.table === 'kv')!.key).toEqual(['k']);
   });
 
   it('never copies the sign-in sessions or SQLite\'s own migration record', async () => {

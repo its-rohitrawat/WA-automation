@@ -405,3 +405,92 @@ startSession: async (ctx, s) => {
 ```
 
 Until S5H.6 is applied nothing calls it. Before S4.8, with `DB_ENGINE=sqlite`, it is just the first line.
+
+## 12. The copy tool's commands (S3.6, lane A)
+
+`src/migrate/copy.ts` (`copyToPostgres`), `src/migrate/exportBack.ts` (`exportToSqlite`), `src/migrate/report.ts`
+(`formatReport`) and `src/migrate/target.ts` (`postgresTarget`) are done and tested:
+- `tests/migrate/copy.test.ts` and `exportBack.test.ts` run against a SQLite stand-in for Postgres, with no server;
+- `tests/migrate/copyPg.test.ts` runs on the real server under `npm run test:pg`.
+
+Lane A wires the two commands, following `db-migrate`'s pattern.
+
+### 12.1 `src/cli/migrate.ts` (new, lane A)
+
+```ts
+import type { Env } from '../config/env.ts';
+import { roleOf } from '../store/pg/admin.ts';
+import { copyToPostgres } from '../migrate/copy.ts';
+import { exportToSqlite } from '../migrate/exportBack.ts';
+import { formatReport } from '../migrate/report.ts';
+import { postgresTarget } from '../migrate/target.ts';
+
+/** Exit code: 0 when every table matched (and, with --apply, the copy committed); 1 otherwise. */
+export async function migrateToPostgresCommand(env: Env, opts: { apply?: boolean; backupDir?: string; dataDir?: string }): Promise<number> {
+  roleOf('DATABASE_OWNER_URL', env.DATABASE_OWNER_URL, 'wa_owner'); // set, and the owner's URL; never printed
+  const target = postgresTarget(env.DATABASE_OWNER_URL!);
+  try {
+    const r = await copyToPostgres({ dataDir: opts.dataDir ?? env.DATA_DIR, tenantId: env.TENANT_ID, apply: opts.apply === true, ...(opts.backupDir ? { backupDir: opts.backupDir } : {}) }, target);
+    console.log(formatReport(r, 'copy'));
+    return r.ok && (r.applied || opts.apply !== true) ? 0 : 1;
+  } finally {
+    await target.close();
+  }
+}
+
+export async function exportToSqliteCommand(env: Env, opts: { out: string; dataDir?: string }): Promise<number> {
+  roleOf('DATABASE_OWNER_URL', env.DATABASE_OWNER_URL, 'wa_owner');
+  const source = postgresTarget(env.DATABASE_OWNER_URL!);
+  try {
+    const r = await exportToSqlite({ dataDir: opts.dataDir ?? env.DATA_DIR, tenantId: env.TENANT_ID, out: opts.out }, source);
+    console.log(formatReport(r, 'export'));
+    return r.ok ? 0 : 1;
+  } finally {
+    await source.close();
+  }
+}
+```
+
+### 12.2 `src/cli.ts`, next to `db-migrate`
+
+```ts
+import { exportToSqliteCommand, migrateToPostgresCommand } from './cli/migrate.ts';
+// …
+program
+  .command('migrate-to-postgres')
+  .description('Copy the SQLite data into Postgres as customer #1: a dry run that writes nothing, unless --apply')
+  .option('--apply', 'write for real, after a checked backup (needs --backup-dir)')
+  .option('--backup-dir <dir>', 'a folder that does not exist yet, for the checked backup')
+  .option('--data-dir <dir>', 'another data folder (the rehearsal copy); default DATA_DIR')
+  .action(async (o: { apply?: boolean; backupDir?: string; dataDir?: string }) => {
+    process.exitCode = await migrateToPostgresCommand(loadEnv(), o);
+  });
+program
+  .command('export-to-sqlite')
+  .description("Write customer #1's Postgres rows into new SQLite files (rollback B); data/ is not touched")
+  .requiredOption('--out <dir>', 'a folder that does not exist yet')
+  .option('--data-dir <dir>', 'the data folder whose agent must be stopped; default DATA_DIR')
+  .action(async (o: { out: string; dataDir?: string }) => {
+    process.exitCode = await exportToSqliteCommand(loadEnv(), o);
+  });
+```
+
+- Errors (the agent running, a folder that exists, a version) are thrown with plain messages and printed by
+  `cli.ts`'s existing `parseAsync().catch`. No URL or password is ever in a message.
+- The tenant is `env.TENANT_ID` (default customer #1). The owner's URL is the only connection used.
+
+### 12.3 Tests (lane A)
+
+`tests/cli/migrate.test.ts` covers the argument rules:
+- no flags means a dry run;
+- `--apply` without `--backup-dir` is refused, with the copy's own message;
+- `DATABASE_OWNER_URL` missing, or not wa_owner's, is refused by `roleOf`, without the URL in the message;
+- the exit code is 1 on a mismatch.
+
+It uses `copyToPostgres` with a stand-in target. `tests/migrate/fakeTarget.ts` (lane C) can be imported.
+
+### 12.4 `docs/GO-LIVE-postgres.md`
+
+The guide's `npm run cli -- migrate-to-postgres` and `export-to-sqlite` lines then become real commands. Lane C's
+`tests/docs/goLivePostgres.test.ts` already accepts them, since they are listed under "To confirm at S2" until
+`cli.ts` registers them.
