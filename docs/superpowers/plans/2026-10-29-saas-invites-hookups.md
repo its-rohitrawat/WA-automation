@@ -530,3 +530,33 @@ It uses `copyToPostgres` with a stand-in target. `tests/migrate/fakeTarget.ts` (
 The guide's `npm run cli -- migrate-to-postgres` and `export-to-sqlite` lines then become real commands. Lane C's
 `tests/docs/goLivePostgres.test.ts` already accepts them, since they are listed under "To confirm at S2" until
 `cli.ts` registers them.
+
+## 13. A customer's own WhatsApp link on Getting started (S4.6 C; needs lane A's S4.6 A)
+
+`src/web/public/views/linkQr.js` (`mountLinkQr`, `DASHBOARD_LINKS`) shows a link inline in steps 1 and 3 of Getting
+started:
+- the steps to take on the phone;
+- the QR, as it is renewed;
+- "Scanned. Linking…", then "Linked as …";
+- Cancel, and Try again.
+
+It talks to a `LinkApi`. The default, `DASHBOARD_LINKS`, is today's routes, so the screen side needs no new route,
+only these to answer for the session's own customer.
+
+What S4.6 A provides, for a **customer** session (`role: 'owner'`, `tenantId` from the session, never from the body):
+- `POST /dashboard/api/whatsapp/link/start` with `{ target: 'founder' | 'spare', confirm: true }` starts a link of
+  **that customer's** phone. `founder` is their main number (step 1), `spare` their spare (step 3). The answer is
+  `{ linkId }`, 32 hex characters.
+- `GET /dashboard/api/whatsapp/link/stream?id=<linkId>` sends the same server-sent events as the founder's link:
+  - `qr` `{ svg }`;
+  - `state` `{ state: 'waiting_qr' | 'opening' | … }`;
+  - `done` `{ device }`;
+  - `error` `{ code, message }`.
+- `POST /dashboard/api/whatsapp/link/cancel` with `{ linkId }`.
+- A link id from another customer's session is refused (404), like any other unknown id.
+- When the link ends, the customer runtime's `facts().whatsappLinked` (or `spareLinked`) turns true, so the step
+  shows done at the screen's next load (S4.9 probes).
+
+The preview drives it with the fake dashboard's link (two codes, a scan, done). The platform smoke runs it as the owner
+of Joshi Interiors: it shows the code, cancels, shows it again, and waits for "WhatsApp linked as …". If S4.6 A
+needs other routes, only `DASHBOARD_LINKS` changes, in lane C's file.

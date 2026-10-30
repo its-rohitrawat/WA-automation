@@ -51,6 +51,13 @@
 .pf-step-body { padding: 4px 14px 16px 60px; display: grid; gap: 12px; font-size: 13.5px; }
 .pf-coming { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 12px; background: var(--panel-2); border: 1px dashed var(--line-2); color: var(--muted); }
 .pf-coming svg { flex: none; margin-top: 1px; color: var(--faint); }
+/* The inline WhatsApp link (views/linkQr.js): its button row, and the result lines. */
+.pf-link-foot { justify-content: center; margin-top: 4px; }
+.pf-link-done, .pf-link-fail { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 12px; font-size: 13.5px; }
+.pf-link-done { background: rgba(43, 170, 74, .12); border: 1px solid rgba(43, 170, 74, .35); }
+.pf-link-done svg { flex: none; color: #4cc56b; }
+.pf-link-fail { margin-bottom: 10px; background: color-mix(in srgb, var(--s-overdue) 12%, var(--panel)); border: 1px solid color-mix(in srgb, var(--s-overdue) 40%, var(--line)); }
+.pf-link-fail svg { flex: none; color: var(--s-overdue); }
 .pf-unlock { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; font-size: 13.5px; }
 .pf-unlock li { display: flex; gap: 10px; align-items: flex-start; color: var(--muted); } .pf-unlock li svg { flex: none; margin-top: 1px; color: var(--faint); }
 .pf-unlock li.yes { color: var(--text); } .pf-unlock li.yes svg { color: var(--green); }

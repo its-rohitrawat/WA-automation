@@ -3,6 +3,7 @@
 // is not built yet say so ("coming with the customer workspace"). Every value from the agent goes through esc().
 import { ApiError, get, post } from '../api.js';
 import { esc, icon, toast } from '../dom.js';
+import { mountLinkQr } from './linkQr.js';
 import { confirmDialog, failed, listen, loading, pill } from './ui.js';
 
 /** @typedef {import('./registry.js').ScreenCtx} ScreenCtx */
@@ -57,9 +58,20 @@ function keyPanel(s) {
         ${done ? '<button class="btn btn-ghost btn-sm pf-danger" type="button" data-key-remove>Remove key</button>' : ''}</div></form>`;
 }
 
+/**
+ * Steps 1 and 3, the customer's own phones (S4.6 C): a button that shows the link inline (views/linkQr.js), in place of
+ * the button. @param {Step} s
+ */
+function linkPanel(s) {
+  // The step's own line above says which phone; the panel starts with the button.
+  const target = s.id === 'whatsapp' ? 'founder' : 'spare';
+  return `<div data-link-box><button class="btn btn-primary btn-sm" type="button" data-link="${target}">${icon('link', 15)}Show QR code</button></div>`;
+}
+
 /** @param {Step} s */
 function body(s) {
   if (s.id === 'key' && (s.state === 'todo' || s.state === 'done')) return keyPanel(s);
+  if ((s.id === 'whatsapp' || s.id === 'spare') && s.state === 'todo') return linkPanel(s);
   if (s.state === 'done') return `<p class="pf-faint">${icon('ok', 16)} Done.</p>`;
   return `<div class="pf-coming">${icon('clock', 16)}<span><b>Coming with the customer workspace.</b> ${esc(s.coming)}</span></div>`;
 }
@@ -100,9 +112,14 @@ export function mountOnboarding(ctx) {
   let data = null;
   /** The open step: the first one not done and not locked, until the owner picks another. @type {string | null | undefined} */
   let open;
+  /** A WhatsApp link showing in a step (steps 1 and 3), until it is linked, cancelled or left. @type {{ stop(): void } | null} */
+  let linking = null;
 
   const draw = () => {
     if (!ctx.live() || !data) return;
+    // A redraw replaces the step bodies: a link still waiting for its scan is cancelled first (the phone stays as it was).
+    linking?.stop();
+    linking = null;
     if (open === undefined) open = data.steps.find((s) => s.state !== 'done' && s.state !== 'locked')?.id ?? null;
     ctx.redraw(render(data, open));
     // The bar's width is set here, not in the markup: the page allows no inline styles.
@@ -119,7 +136,7 @@ export function mountOnboarding(ctx) {
       const next = readOnboarding(await get('/platform/onboarding'));
       if (!ctx.live()) return;
       data = next;
-      if (!typing()) draw();
+      if (!typing() && !linking) draw(); // never under someone typing a key or scanning a code
     } catch (e) {
       if (ctx.live() && !data) ctx.redraw(failed(e));
     }
@@ -132,7 +149,7 @@ export function mountOnboarding(ctx) {
   /** @param {unknown} err */
   const refused = (err) => toast(err instanceof ApiError ? err.message : 'That did not work. Try again.', false);
 
-  return listen(ctx.view, {
+  const off = listen(ctx.view, {
     submit: async (e) => {
       const form = /** @type {HTMLFormElement} */ (e.target);
       if (!form.matches('[data-key-form]')) return;
@@ -156,6 +173,24 @@ export function mountOnboarding(ctx) {
     click: async (e) => {
       const t = /** @type {Element} */ (e.target);
       if (t.closest('[data-retry]')) return void load();
+      const linkButton = /** @type {HTMLElement | null} */ (t.closest('[data-link]'));
+      const linkBox = /** @type {HTMLElement | null} */ (linkButton?.closest('[data-link-box]') ?? null);
+      if (linkButton && linkBox && !linking) {
+        const target = linkButton.dataset.link === 'spare' ? 'spare' : 'founder';
+        linking = mountLinkQr(linkBox, {
+          target,
+          onDone: (device) => {
+            linking = null;
+            toast(`WhatsApp linked as "${device}".`);
+            void load();
+          },
+          onCancel: () => {
+            linking = null;
+            draw();
+          },
+        });
+        return;
+      }
       if (t.closest('[data-key-remove]')) {
         const yes = await confirmDialog({ eyebrow: 'Your API key', title: 'Remove your key?', yes: 'Remove', text: 'The AI work stops until you add a key again. Your saved messages are kept.' });
         if (!yes) return;
@@ -175,4 +210,9 @@ export function mountOnboarding(ctx) {
       draw();
     },
   });
+  // Leaving the screen cancels a link still waiting for its scan.
+  return () => {
+    linking?.stop();
+    off();
+  };
 }

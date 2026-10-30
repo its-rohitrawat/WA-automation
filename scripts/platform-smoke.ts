@@ -254,6 +254,21 @@ try {
       await shot(p, where, `onboarding-${tag}`);
       await clearOfAsk(p, where);
 
+      // (S4.6 C) Step 1, the customer's own WhatsApp: the QR shows inline; Cancel gives the button back; a scan links.
+      // The preview's link is the fake dashboard's (two codes, a scan, done); the real one is the customer's own link
+      // session (S4.6 A), on the same routes.
+      where = `onboarding whatsapp ${tag}`;
+      fakeSteps.whatsapp = 'todo';
+      await p.reload();
+      await p.locator('[data-link="founder"]').click();
+      await p.locator('[data-link-cancel]').click();
+      await p.locator('[data-link="founder"]').waitFor();
+      await p.locator('[data-link="founder"]').click();
+      await p.locator('[data-link-box] [data-link-qr] img').waitFor();
+      await shot(p, where, `onboarding-whatsapp-${tag}`, false);
+      await p.locator('.toast', { hasText: 'WhatsApp linked as "WA Agent - Tracker".' }).waitFor();
+      delete fakeSteps.whatsapp;
+
       // (S4.2) The customer's own Anthropic key: an obvious fake, and the preview's tester never calls Anthropic. It
       // leaves the field and never reaches the page. (The founder, whose key is in .env, has no Getting started at all;
       // the route's refusal of the founder is tested in tests/web/platformRoutes.test.ts.)
