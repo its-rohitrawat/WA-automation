@@ -481,6 +481,7 @@ describe('the local meeting transcriber', () => {
       sarvam(2, { state: 'inflight', jobId: 'job-2', booked: 'ceiling' }),
     ], NOW);
     spend.record('stt', 0.12, `meeting ${id} part 2 (job accepted)`);
+    await spend.flushed();
     const before = rows();
     expect(before).toHaveLength(1);
 
@@ -489,6 +490,7 @@ describe('the local meeting transcriber', () => {
     await transcribeMeeting(id, deps(t, ff));
     expect(engine.calls).toHaveLength(1);
     expect(ff.wavInputs).toEqual([join(partsDir(), 'part-001.mp3')]);
+    await spend.flushed();
     expect(rows()).toEqual(before); // nothing booked again, nothing new
     expect((await getMeeting(db, id))!.transcript).toEqual([
       { start: 0, end: 600, speaker: 'p1:A', text: 'pehle Sarvam ne suna' },

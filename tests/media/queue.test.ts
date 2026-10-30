@@ -354,7 +354,7 @@ describe('MediaQueue never retries a file in a loop', () => {
     let spend!: SpendGuard;
     const { db, clock, processor, queue, share } = await withProcessor({
       extractFor: (db, clock) => {
-        spend = new SpendGuard({ db, clock, capUsd: 15 });
+        spend = new SpendGuard({ db, clock, capUsd: 15, onError: () => {} });
         const ai: MediaAi = {
           describeImage: async (img) => {
             const r = await fake.describeImage(img);
@@ -379,7 +379,8 @@ describe('MediaQueue never retries a file in a loop', () => {
     expect(fake.calls).toHaveLength(1);
     expect(processor.process.mock.calls.length).toBeLessThanOrEqual(2); // the run that paid, and one claim that could not be written
     expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1 });
-    expect(spend.spentToday()).toBe(0);
+    // A booking whose row the full disk refused stays counted in memory: the call was paid (the safe side under the cap).
+    expect(spend.spentToday()).toBeCloseTo(0.01);
   });
 
   it('a refill never restarts a file that stays due; the next kick tries it once more', async () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { parseEnv } from '../../src/config/env.ts';
 import { FALLBACK_PRICES, costUsd, estimateCostUsd, pricesFromEnv, type Prices } from '../../src/spend/pricing.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
@@ -44,11 +44,37 @@ describe('SpendGuard: today in memory (S1.5)', () => {
     expect(guard.isPaused()).toBe(false);
   });
 
-  it('loads what was booked before it was made', async () => {
+  it('open() loads what was booked before it was made; new starts at zero (S1.15)', async () => {
     const db = await seededDb();
-    new SpendGuard({ db, clock: manualClock(NOW), capUsd: 1 }).record('stt', 0.25, 'earlier run');
+    const earlier = new SpendGuard({ db, clock: manualClock(NOW), capUsd: 1 });
+    earlier.record('stt', 0.25, 'earlier run');
+    await earlier.flushed();
     expect((await SpendGuard.open({ db, clock: manualClock(NOW), capUsd: 1 })).spentTodayByKind()).toEqual({ ai: 0, stt: 0.25 });
-    expect(new SpendGuard({ db, clock: manualClock(NOW), capUsd: 1 }).spentToday()).toBe(0.25);
+    expect(new SpendGuard({ db, clock: manualClock(NOW), capUsd: 1 }).spentToday()).toBe(0);
+  });
+
+  it('a booking without a handle is counted at once, written behind the call, and flushed() waits for it (S1.15)', async () => {
+    const db = await seededDb();
+    const guard = await SpendGuard.open({ db, clock: manualClock(NOW), capUsd: 1 });
+    guard.record('ai', 0.3, 'batch 1');
+    expect(guard.spentToday()).toBeCloseTo(0.3);
+    await guard.flushed();
+    expect(await db.all('SELECT usd FROM spend')).toEqual([{ usd: 0.3 }]);
+    // A refresh right after a booking reads it: the row went to the queue first.
+    guard.record('ai', 0.2, 'batch 2');
+    await guard.refresh();
+    expect(guard.spentToday()).toBeCloseTo(0.5);
+  });
+
+  it('a failed write is told to onError and stays counted (the safe side)', async () => {
+    const db = await seededDb();
+    const errors: unknown[] = [];
+    const guard = await SpendGuard.open({ db, clock: manualClock(NOW), capUsd: 1, onError: (err) => errors.push(err) });
+    vi.spyOn(db, 'run').mockRejectedValueOnce(new Error('database is locked'));
+    guard.record('ai', 0.4, 'batch 1');
+    await guard.flushed();
+    expect(errors).toHaveLength(1);
+    expect(guard.spentToday()).toBeCloseTo(0.4);
   });
 
   it('with a transaction handle, the booking commits or rolls back with the change; memory over-counts until a refresh', async () => {
@@ -178,6 +204,7 @@ describe('SpendGuard', () => {
     expect(guard.reserve(0.2)).not.toBeNull();
     expect(guard.reserve(0.3)).not.toBeNull();
     expect(await guard.settlePending('shutdown (estimated)')).toBe(2);
+    await guard.flushed();
     expect(guard.spentToday()).toBeCloseTo(0.5);
     expect(db.raw.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all()).toEqual([
       { kind: 'ai', usd: 0.2, detail: 'shutdown (estimated)' },
@@ -190,6 +217,7 @@ describe('SpendGuard', () => {
     const { guard } = await make();
     expect(guard.reserve(0.01)).not.toBeNull();
     await guard.settlePending('shutdown (estimated)');
+    await guard.flushed();
     expect(guard.reserve(0.01)).toBeNull();
   });
 
@@ -198,6 +226,7 @@ describe('SpendGuard', () => {
     const id = guard.reserve(0.2)!;
     guard.settle(id, 'ai', 0.1, 'batch 1');
     expect(await guard.settlePending('shutdown (estimated)')).toBe(0);
+    await guard.flushed();
     expect(guard.spentToday()).toBeCloseTo(0.1);
   });
 
@@ -206,6 +235,7 @@ describe('SpendGuard', () => {
     const a = guard.reserve(0.2)!;
     const b = guard.reserve(0.3)!;
     await guard.settlePending('shutdown (estimated)');
+    await guard.flushed();
     guard.settle(a, 'ai', 0.25, 'batch 1');
     guard.release(b);
     expect(guard.spentToday()).toBeCloseTo(0.5);
@@ -234,6 +264,7 @@ describe('SpendGuard', () => {
     expect(guard.reserve(0.2, 'stt')).not.toBeNull();
     expect(guard.reserve(0.3, 'ai')).not.toBeNull();
     expect(await guard.settlePending('shutdown (estimated)')).toBe(3);
+    await guard.flushed();
     expect(db.raw.prepare('SELECT kind, usd FROM spend ORDER BY id').all()).toEqual([
       { kind: 'ai', usd: 0.1 },
       { kind: 'stt', usd: 0.2 },
@@ -251,6 +282,7 @@ describe('SpendGuard', () => {
     });
     guard.reserve(0.2, 'stt', () => told.push('b'));
     expect(await guard.settlePending('shutdown (estimated)')).toBe(2);
+    await guard.flushed();
     expect(told).toEqual(['a', 'b']);
     expect((db.raw.prepare('SELECT COUNT(*) AS n FROM spend').get() as { n: number }).n).toBe(2);
   });
@@ -264,6 +296,7 @@ describe('SpendGuard', () => {
       throw new Error('owner write failed');
     });
     await guard.settlePending('shutdown (estimated)');
+    await guard.flushed();
     expect(db.raw.prepare("SELECT k FROM kv WHERE k IN ('ok', 'half') ORDER BY k").all()).toEqual([{ k: 'ok' }]); // the half-done owner write is gone
     expect(db.raw.prepare('SELECT usd FROM spend ORDER BY id').all()).toEqual([{ usd: 0.1 }, { usd: 0.2 }]); // both still booked
   });

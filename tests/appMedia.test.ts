@@ -423,7 +423,7 @@ describe('app media spend (review round 1)', () => {
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 
-  const ledger = (db: Db) => db.raw.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
+  const ledger = (db: Db) => db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend ORDER BY id');
 
   it('paid file reads use the app’s daily cap: an image whose hold does not fit waits for the budget, and Health says so', async () => {
     const ai = new FakeMediaAi();
@@ -440,7 +440,7 @@ describe('app media spend (review round 1)', () => {
     await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'spend_cap', attempts: 0 }), { timeout: 10_000 });
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(ai.calls).toHaveLength(0);
-    expect(ledger(db)).toHaveLength(1);
+    expect(await ledger(db)).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(30_000);
     // The tick's media refresh and its snapshot write run on after the timer fires: wait for the snapshot they write.
     await vi.waitFor(async () => {
@@ -464,7 +464,7 @@ describe('app media spend (review round 1)', () => {
     shareImage(sock);
     await settled();
     await vi.waitFor(() => expect(describeImage).toHaveBeenCalled());
-    expect(ledger(db)).toEqual([]);
+    expect(await ledger(db)).toEqual([]);
     let stopped = false;
     const p = app.stop().then(() => {
       stopped = true;
@@ -474,14 +474,14 @@ describe('app media spend (review round 1)', () => {
     for (let i = 0; i < 12 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
     expect(stopped).toBe(true);
     await p;
-    const booked = ledger(db);
+    const booked = await ledger(db);
     expect(booked).toHaveLength(1);
     expect(booked[0]).toMatchObject({ kind: 'ai', detail: 'shutdown before the paid call finished (estimated)' });
     expect(booked[0]!.usd).toBeCloseTo(imageEstimateUsd(REAL_JPEG_SIZE, P), 10);
     // The answer arrives after all: the call is already booked, so it is not booked again.
     g.release();
     await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('done'));
-    expect(ledger(db)).toEqual(booked);
+    expect(await ledger(db)).toEqual(booked);
   });
 });
 
@@ -1003,7 +1003,7 @@ class UntilAbortedLocalVoice extends FakeLocalVoiceTranscriber {
 
 describe('app voice notes (Phase 2b Task 10)', () => {
   const HOUR = 60 * MINUTE;
-  const ledger = (db: Db) => db.raw.prepare('SELECT kind FROM spend ORDER BY id').all() as { kind: string }[];
+  const ledger = (db: Db) => db.all<{ kind: string }>('SELECT kind FROM spend ORDER BY id');
   const sweeps = () => forgetHook.calls.filter((o) => o?.mediaId === undefined).length;
   const capture = () => {
     const lines: string[] = [];
@@ -1036,11 +1036,11 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     expect(voice.signals[0]).toBeInstanceOf(AbortSignal); // the stop signal reaches the local run
     expect(voice.signals[0]!.aborted).toBe(false);
     expect(voice.priced).toBe(0);
-    expect(ledger(db)).toEqual([]); // free: no spend row
+    expect(await ledger(db)).toEqual([]); // free: no spend row
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls).toHaveLength(1);
     expect(ai.calls[0]!.user).toContain('{voice note, 0:14, transcript: payment bhej diya}');
-    expect(ledger(db).map((r) => r.kind)).toEqual(['ai']); // only the reconcile
+    expect((await ledger(db)).map((r) => r.kind)).toEqual(['ai']); // only the reconcile
     await stopApp(app);
   });
 
@@ -1051,7 +1051,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     await settled();
     await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'done', text: 'kal tak bhej dena' }), SLOW_IO);
     expect(voice.transcribed).toBe(1);
-    expect(ledger(db).map((r) => r.kind)).toEqual(['stt']);
+    expect((await ledger(db)).map((r) => r.kind)).toEqual(['stt']);
     await stopApp(app);
   });
 

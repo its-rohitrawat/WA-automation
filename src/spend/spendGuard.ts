@@ -8,10 +8,7 @@ import { istDate } from '../util/time.ts';
  */
 const RESERVATION_TTL_MS = 45 * 60_000;
 
-/**
- * Called by settlePending inside the transaction that books a hold at shutdown, with its handle. A synchronous owner
- * that writes on the raw connection (S1) still commits with it, since that runs inside the same transaction.
- */
+/** Called by settlePending inside the transaction that books a hold at shutdown, with its handle. */
 export type BookedAtShutdown = (q: Sql) => unknown;
 
 /** A live reservation: its estimate, when it was taken, what kind of spend it books as, and who to tell if shutdown books it. */
@@ -34,6 +31,13 @@ interface Today {
 const INSERT = 'INSERT INTO spend (day, kind, usd, detail, at) VALUES (?, ?, ?, ?, ?)';
 const SUMS = 'SELECT kind, COALESCE(SUM(usd), 0) AS total FROM spend WHERE day = ? GROUP BY kind';
 
+export interface SpendGuardOptions {
+  db: Db;
+  clock: Clock;
+  capUsd: number;
+  onError?: (err: unknown) => void;
+}
+
 function totals(day: string, rows: { kind: string; total: number }[]): Today {
   const t: Today = { day, ai: 0, stt: 0 };
   for (const r of rows) if (r.kind === 'ai' || r.kind === 'stt') t[r.kind] = r.total;
@@ -44,9 +48,9 @@ function totals(day: string, rows: { kind: string; total: number }[]): Today {
  * Daily cap on AI and transcription spend. The day resets at midnight IST.
  *
  * Today's totals are kept in memory, so every check (isPaused, canSpend, reserve) stays synchronous. They are loaded
- * when the guard is made, added to by every record, and read again by refresh() (the app tick, at most every 30 s),
- * which picks up spend another process booked (the CLI). A booking whose transaction rolls back stays counted until the
- * next refresh: an over-count, the safe side under a cap.
+ * by SpendGuard.open, added to by every record, and read again by refresh() (the app tick, at most every 30 s), which
+ * picks up spend another process booked (the CLI). A booking whose transaction rolls back, or whose write fails, stays
+ * counted until the next refresh: an over-count, the safe side under a cap.
  */
 export class SpendGuard {
   readonly #db: Db;
@@ -61,17 +65,23 @@ export class SpendGuard {
   #today: Today;
   /** Bumped by every record: a refresh that overlapped one keeps the larger total, never the smaller. */
   #recorded = 0;
+  /** Rows booked without a transaction handle that are still being written (see record, flushed). */
+  readonly #writes = new Set<Promise<void>>();
+  readonly #onError: (err: unknown) => void;
 
-  /** Loads today's totals synchronously (S1 only, on the raw connection); `SpendGuard.open` is the async way. */
-  constructor(opts: { db: Db; clock: Clock; capUsd: number }) {
+  /**
+   * Starts at zero for today: `SpendGuard.open` makes one and loads today's totals. onError: told when a row booked
+   * without a transaction handle could not be written (unset: tests; the console then).
+   */
+  constructor(opts: SpendGuardOptions) {
     this.#db = opts.db;
     this.#clock = opts.clock;
     this.#cap = opts.capUsd;
-    const day = istDate(this.#clock.now());
-    this.#today = totals(day, this.#db.raw.prepare(SUMS).all(day) as { kind: string; total: number }[]);
+    this.#today = { day: istDate(this.#clock.now()), ai: 0, stt: 0 };
+    this.#onError = opts.onError ?? ((err) => console.error('spend row not written', err));
   }
 
-  static async open(opts: { db: Db; clock: Clock; capUsd: number }): Promise<SpendGuard> {
+  static async open(opts: SpendGuardOptions): Promise<SpendGuard> {
     const guard = new SpendGuard(opts);
     await guard.refresh();
     return guard;
@@ -163,7 +173,7 @@ export class SpendGuard {
 
   /**
    * Records the actual cost and frees the reservation (the reservation is freed even if recording fails). With `q`, the
-   * row is written through that transaction handle; without it, synchronously as before (S1 only, see `record`).
+   * row is written through that transaction handle; without it, behind the call (see `record`).
    */
   settle(id: number, kind: SpendKind, usd: number, detail: string): void;
   settle(id: number, kind: SpendKind, usd: number, detail: string, q: Sql): Promise<void>;
@@ -175,6 +185,11 @@ export class SpendGuard {
     } finally {
       this.#pending.delete(id);
     }
+  }
+
+  /** Resolves once every row booked without a transaction handle has been written (or its failure told to onError). */
+  async flushed(): Promise<void> {
+    await Promise.all([...this.#writes]);
   }
 
   /** Frees a reservation without recording anything (the call was never billed). */
@@ -203,12 +218,11 @@ export class SpendGuard {
           });
         } catch {
           // The owner's write failed and took the booking with it: book alone. The owner's record still says nothing is
-          // booked, so its recovery books the call once more (the safe side). If this throws too, the id is not marked
-          // booked, so a late settle() still records.
+          // booked, so its recovery books the call once more (the safe side).
           this.record(r.kind, r.usd, detail);
         }
       } else {
-        this.record(r.kind, r.usd, detail); // if this throws, the id is not marked booked, so a late settle() still records
+        this.record(r.kind, r.usd, detail);
       }
       this.#bookedAtEstimate.add(id);
       n++;
@@ -221,8 +235,9 @@ export class SpendGuard {
    * `detail`: IDs and counts only, never message text.
    *
    * With `q`, the row is written through that transaction handle (it commits or rolls back with the caller's change).
-   * Without it, the row is written synchronously on the raw connection, as before: S1 only, for the callers that book
-   * inside their own transaction without passing its handle yet (src/meetings/sttParts.ts); it goes in S1.15.
+   * Without it (a booking outside any transaction), it is counted at once and its row goes to the database queue at once,
+   * so a later refresh() reads it; a failed write is told to onError and stays counted. Never call it without `q`
+   * inside a transaction: the engine refuses the write there (TxMisuseError), and it is lost (told to onError).
    */
   record(kind: SpendKind, usd: number, detail: string): void;
   record(kind: SpendKind, usd: number, detail: string, q: Sql): Promise<void>;
@@ -241,7 +256,15 @@ export class SpendGuard {
       count();
       return q.run(INSERT, row).then(() => undefined);
     }
-    this.#db.raw.prepare(INSERT).run(...row);
     count();
+    let w: Promise<void>;
+    try {
+      w = this.#db.run(INSERT, row).then(() => undefined, (err: unknown) => this.#onError(err));
+    } catch (err) {
+      this.#onError(err); // refused at once (inside a transaction): a bug, logged
+      return;
+    }
+    this.#writes.add(w);
+    void w.finally(() => this.#writes.delete(w));
   }
 }

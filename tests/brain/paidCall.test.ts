@@ -27,6 +27,7 @@ describe('withReservation', () => {
     const { spend, rows } = await setup();
     expect((await withReservation(spend, 0.1, 'media 7', ok(0.02), MEDIA_ATTEMPTS)).text).toBe('x');
     await withReservation(spend, 0.1, 'media 8', ok(0.03, true), MEDIA_ATTEMPTS);
+    await spend.flushed();
     expect(rows()).toEqual([{ usd: 0.02, detail: 'media 7' }, { usd: 0.03, detail: 'media 8 (fallback)' }]);
     expectNoReservation(spend);
   });
@@ -146,6 +147,7 @@ describe('withReservation', () => {
     await fail(new Anthropic.APIConnectionTimeoutError());
     await withReservation(spend, 0.1, 'meeting 2', ok(0.02), 1, (usd) => booked.push(usd));
     expect(booked).toEqual([0.004, 0.1, 0, 0, 0.1]);
+    await spend.flushed();
     expect(rows().map((r) => r.usd)).toEqual([0.004, 0.1, 0.1, 0.02]);
   });
 });

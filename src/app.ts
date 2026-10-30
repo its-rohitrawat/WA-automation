@@ -204,7 +204,9 @@ function handled<T>(p: Promise<T>): Promise<T> {
  */
 export async function createApp(d: AppDeps): Promise<App> {
   const startedAt = d.startedAt ?? d.clock.now();
-  const spend = await SpendGuard.open({ db: d.db, clock: d.clock, capUsd: d.spendCapUsd });
+  const spend = await SpendGuard.open({
+    db: d.db, clock: d.clock, capUsd: d.spendCapUsd, onError: (err) => d.log.error({ err }, 'spend row not written'),
+  });
   const health = new Health({
     db: d.db, clock: d.clock, spend, dataDir: d.dataDir, freeBytes: d.freeBytes, onError: (err) => d.log.error({ err }, 'health snapshot not saved'),
   });
@@ -697,6 +699,7 @@ export async function createApp(d: AppDeps): Promise<App> {
       try {
         const count = await spend.settlePending('shutdown before the paid call finished (estimated)');
         if (count > 0) d.log.warn({ count }, 'AI calls still running at shutdown; booked at their estimate');
+        await spend.flushed(); // every booking's row is written before main.ts closes the database
       } catch (err) {
         d.log.error({ err }, 'booking unfinished AI calls failed');
       }

@@ -302,7 +302,7 @@ describe('app shutdown', () => {
 
     await stopApp(app);
     const c = ai.calls[0]!;
-    const rows = db.raw.prepare('SELECT kind, usd, detail FROM spend').all() as { kind: string; usd: number; detail: string }[];
+    const rows = await db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend');
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ kind: 'ai', detail: 'shutdown before the paid call finished (estimated)' });
     expect(rows[0]!.usd).toBeCloseTo(estimateCostUsd(c.system.length + c.user.length, P, MAX_OUTPUT_TOKENS), 9);
@@ -321,7 +321,7 @@ describe('app shutdown', () => {
     const stop = stopping(app);
     aiCall.resolve();
     await finish(stop);
-    expect(db.raw.prepare('SELECT detail FROM spend').all()).toEqual([{ detail: 'batch 1' }]);
+    expect(await db.all('SELECT detail FROM spend')).toEqual([{ detail: 'batch 1' }]);
   });
 
   it('starting twice leaves no extra timer behind', async () => {

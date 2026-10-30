@@ -128,7 +128,7 @@ function watchSchedules(app: Awaited<ReturnType<typeof setup>>['app'], db: Db): 
   return seen;
 }
 
-const spendRows = (db: Db) => db.raw.prepare('SELECT kind, detail FROM spend ORDER BY id').all() as { kind: string; detail: string }[];
+const spendRows = (db: Db) => db.all<{ kind: string; detail: string }>('SELECT kind, detail FROM spend ORDER BY id');
 
 describe('app with meetings', () => {
   beforeEach(() => {
@@ -183,7 +183,7 @@ describe('app with meetings', () => {
     expect(m.docFileId).toBe(drive.docs[0]!.id);
     expect(ai.calls).toHaveLength(1); // the tracker step
     expect((await listTasks(db, 1)).map((t) => [t.title, t.origin])).toEqual([['Send the logo files', 'meeting']]);
-    expect(spendRows(db).map((s) => s.kind)).toEqual(['stt', 'ai', 'ai']);
+    expect((await spendRows(db)).map((s) => s.kind)).toEqual(['stt', 'ai', 'ai']);
 
     // The finished meeting asks for a rebuild.
     expect(statusAtSchedule).toContain('done');
@@ -264,7 +264,7 @@ describe('app with meetings', () => {
     expect(done).toBe(true);
     await stop;
     expect(await getMeeting(db, 1)).toMatchObject({ status: 'queued', stage: 'found', errorCode: 'stopped', attempts: 0 });
-    expect(spendRows(db)).toEqual([]);
+    expect(await spendRows(db)).toEqual([]);
   });
 
   it('stop lets a speech call finish within the drain and stores it, starting no further stage', async () => {
@@ -283,7 +283,7 @@ describe('app with meetings', () => {
     for (let i = 0; i < 200 && !done; i++) await vi.advanceTimersByTimeAsync(1_000);
     await stop;
     expect((await getMeeting(db, 1))?.stage).toBe('transcribed');
-    expect(spendRows(db).map((s) => s.kind)).toEqual(['stt']);
+    expect((await spendRows(db)).map((s) => s.kind)).toEqual(['stt']);
     expect(meetingAi.calls).toEqual([]);
   });
 
@@ -293,7 +293,7 @@ describe('app with meetings', () => {
     const { app, db } = await setup({ stt, drainMs: 20_000 });
     await vi.waitFor(() => expect(stt.calls).toHaveLength(1), SLOW_IO);
     await stopApp(app);
-    expect(spendRows(db)).toEqual([expect.objectContaining({ kind: 'stt' })]);
+    expect(await spendRows(db)).toEqual([expect.objectContaining({ kind: 'stt' })]);
     expect((await getMeeting(db, 1))?.sttParts[0]).toMatchObject({ booked: 'ceiling' });
   });
 
@@ -330,7 +330,7 @@ describe('app with meetings', () => {
       expect(said.n).toBe(5);
       expect(m.sttParts.map((p) => [p.provider, p.booked])).toEqual(Array.from({ length: 5 }, () => ['local', 'none']));
       expect(m.transcript!.map((x) => [x.start, x.speaker])).toEqual([[0, null], [540, null], [1080, null], [1620, null], [2160, null]]);
-      expect(spendRows(db).map((r) => r.kind)).toEqual(['ai', 'ai']);
+      expect((await spendRows(db)).map((r) => r.kind)).toEqual(['ai', 'ai']);
 
       // Claude gets plain lines with times and the "Speaker" label for unlabelled speech: never null or undefined.
       const user = meetingAi.calls[0]!.user;
@@ -358,7 +358,7 @@ describe('app with meetings', () => {
       await vi.waitFor(async () => expect(await getMeeting(db, 1)).toMatchObject({ status: 'queued', errorCode: 'stt_none' }), SLOW_IO);
       await vi.waitFor(() => expect(health.at(-1)).toMatchObject({ sttProvider: 'local', sttProblem: 'local_not_set_up_model' }), SLOW_IO);
       expect(app.health.line()).toEqual({ ok: false, text: MEETING_STT_PROBLEM_LINES.local_not_set_up_model });
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
       await stopApp(app);
     });
   });
