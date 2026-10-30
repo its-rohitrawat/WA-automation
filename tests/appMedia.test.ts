@@ -89,6 +89,9 @@ interface SetupOptions {
   prepare?: (db: Db, dataDir: string) => unknown;
 }
 
+/** Waits until the events the last setup's gateway was handed are stored (the gateway hands them over in order). */
+let settled: () => Promise<void> = async () => {};
+
 async function setup(o: SetupOptions = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'wa-app-media-'));
   dirs.push(dataDir);
@@ -109,6 +112,7 @@ async function setup(o: SetupOptions = {}) {
     auth: auth.state,
     saveCreds: auth.saveCreds,
   });
+  settled = () => gateway.idle();
   const fetcher = vi.fn<MediaFetcher>(async () => Buffer.from('jpeg-bytes'));
   const extract = vi.fn<Extractor>(async () => ({ textKind: 'description', text: 'A blue homepage banner. Visible text: SALE 50%', pageCount: null, note: null }));
   const media: AppMediaDeps | undefined =
@@ -159,14 +163,14 @@ function gate() {
 }
 
 /** A pending image of client SHA stored before the app starts, as `cli link` leaves it: sealed details, created at `createdAt`. */
-function storedImage(db: Db, sealer: MediaRefSealer, createdAt: string): void {
-  insertMessage(db, {
+async function storedImage(db: Db, sealer: MediaRefSealer, createdAt: string): Promise<void> {
+  await insertMessage(db, {
     waId: 'IMG0', clientId: 1, senderJid: SHARMA_PN, senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false, ts: createdAt,
     text: 'old banner', quotedWaId: null, mediaType: 'image',
   });
   const ref = { contentType: 'imageMessage' as const, url: null, directPath: '/v/t0', mediaKey: MEDIA_KEY.toString('base64') };
-  insertMedia(db, {
-    messageId: messageRowId(db, 1, 'IMG0')!, clientId: 1, kind: 'image', status: 'pending', mimeType: 'image/jpeg', fileName: null, fileSize: 10,
+  await insertMedia(db, {
+    messageId: (await messageRowId(db, 1, 'IMG0'))!, clientId: 1, kind: 'image', status: 'pending', mimeType: 'image/jpeg', fileName: null, fileSize: 10,
     seconds: null, forwarded: false, refEnc: sealer.seal(ref, mediaRefAad(1, 'IMG0')), errorCode: null, createdAt,
   });
 }
@@ -176,21 +180,21 @@ function storedImage(db: Db, sealer: MediaRefSealer, createdAt: string): void {
  * processed, so no reconcile (and no publish after one) runs in the test. Returns the media id.
  */
 async function storedClientDoc(db: Db, dataDir: string): Promise<number> {
-  insertMessage(db, {
+  await insertMessage(db, {
     waId: 'DOC1', clientId: 1, senderJid: SHARMA_PN, senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false,
     ts: '2026-10-10T08:00:00.000Z', text: null, quotedWaId: null, mediaType: 'document',
   });
-  upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
+  await upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
   setRole(db, 1, SHARMA_PN, 'client', 'human');
-  const id = insertMedia(db, {
-    messageId: messageRowId(db, 1, 'DOC1')!, clientId: 1, kind: 'document', status: 'pending', mimeType: 'application/pdf', fileName: 'brief.pdf',
+  const id = await insertMedia(db, {
+    messageId: (await messageRowId(db, 1, 'DOC1'))!, clientId: 1, kind: 'document', status: 'pending', mimeType: 'application/pdf', fileName: 'brief.pdf',
     fileSize: 3, seconds: null, forwarded: false, refEnc: null, errorCode: null, createdAt: '2026-10-10T08:00:00.000Z',
   });
   mkdirSync(join(dataDir, 'media', 'SHA', '2026-10'), { recursive: true });
   writeFileSync(join(dataDir, 'media', 'SHA', '2026-10', `DOC1-${id}.pdf`), 'pdf');
   await markDownloaded(db, id, { localPath: `media/SHA/2026-10/DOC1-${id}.pdf`, sha256: 'x', fileSize: 3, at: '2026-10-10T08:00:01.000Z' });
   await finishMedia(db, id, { textKind: null, text: null, pageCount: null, note: null, at: '2026-10-10T08:00:02.000Z' });
-  markProcessed(db, [messageRowId(db, 1, 'DOC1')!], '2026-10-10T08:05:00.000Z');
+  await markProcessed(db, [(await messageRowId(db, 1, 'DOC1'))!], '2026-10-10T08:05:00.000Z');
   return id;
 }
 
@@ -210,6 +214,7 @@ describe('app with shared files', () => {
   it('downloads a shared image right away, and the AI sees its description', async () => {
     const { db, ai, app, sock, fetcher, dataDir } = await setup();
     shareImage(sock);
+    await settled();
     // The event, not the clock: the file's run has ended (a cold first run can take over a second under load).
     await app.mediaQueue!.drain(60_000);
     expect((await getMedia(db, 1))?.status).toBe('done');
@@ -228,6 +233,7 @@ describe('app with shared files', () => {
   it('uploads a client member’s file into Clients/<Client>/Files', async () => {
     const { db, drive, app, sock } = await setup();
     shareImage(sock);
+    await settled();
     await app.mediaQueue!.drain(60_000); // the file's run has ended
     expect((await getMedia(db, 1))?.status).toBe('done');
     setRole(db, 1, SHARMA_PN, 'client', 'human');
@@ -241,6 +247,7 @@ describe('app with shared files', () => {
   it('without the media pipeline, records the file as not downloaded and does not hold up the batch', async () => {
     const { db, ai, app, sock } = await setup({ media: null });
     shareImage(sock);
+    await settled();
     expect(await getMedia(db, 1)).toMatchObject({ status: 'unavailable', errorCode: 'not_downloaded' });
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls[0]!.user).toContain(': new banner {image, could not be downloaded}');
@@ -256,6 +263,7 @@ describe('app with shared files', () => {
     });
     const { db, app, sock } = await setup({ log, media: { fetcher } });
     shareImage(sock);
+    await settled();
     // The error code is written when the run ends (the claim before it counts the attempt already).
     await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ attempts: 1, errorCode: 'unknown' }));
     await stopApp(app);
@@ -270,6 +278,7 @@ describe('app with shared files', () => {
     const { db, app, sock } = await setup({ log });
     db.raw.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
     shareImage(sock);
+    await settled();
     await stopApp(app);
     const out = lines.join('');
     expect(out).toContain('ingest failed');
@@ -281,13 +290,16 @@ describe('app with shared files', () => {
 
   it('stop() waits for a file being read and leaves no timers', async () => {
     const g = gate();
+    const reading = gate();
     const extract = vi.fn<Extractor>(async () => {
+      reading.release();
       await g.promise;
       return { textKind: null, text: null, pageCount: null, note: null };
     });
     const { db, app, sock } = await setup({ media: { extract } });
     shareImage(sock);
-    await vi.waitFor(() => expect(extract).toHaveBeenCalled());
+    await settled();
+    await reading.promise; // the event, not the clock: the file is being read
     let stopped = false;
     const p = app.stop().then(() => {
       stopped = true;
@@ -309,6 +321,7 @@ describe('app with shared files', () => {
     });
     const { db, app, sock } = await setup({ media: { extract }, drainMs: 5_000 });
     shareImage(sock);
+    await settled();
     await vi.waitFor(() => expect(extract).toHaveBeenCalled());
     let stopped = false;
     const p = app.stop().then(() => {
@@ -335,6 +348,7 @@ describe('app with shared files', () => {
     const { db, app, sock } = await setup({ media: { fetcher, concurrency: 1 } });
     shareImage(sock, 'IMG1');
     shareImage(sock, 'IMG2');
+    await settled();
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
     expect(app.mediaQueue!.active).toBe(1);
     let stopped = false;
@@ -380,8 +394,10 @@ describe('app with shared files', () => {
     const { db, drive, app, sock } = await setup({ media: { extract } });
     await vi.advanceTimersByTimeAsync(1_000); // the first publish creates the Drive root folder
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('T1', 'hello')] });
+    await settled();
     setRole(db, 1, SHARMA_PN, 'client', 'human');
     shareImage(sock);
+    await settled();
     await reading.promise; // the event, not the clock: the file is being read
     let stopped = false;
     const p = app.stop().then(() => {
@@ -419,6 +435,7 @@ describe('app media spend (review round 1)', () => {
       prepare: (db) => new SpendGuard({ db, clock: systemClock, capUsd: 15 }).record('ai', 14.99, 'batch 1'),
     });
     shareImage(sock);
+    await settled();
     await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'spend_cap', attempts: 0 }));
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(ai.calls).toHaveLength(0);
@@ -440,6 +457,7 @@ describe('app media spend (review round 1)', () => {
     const fetcher = vi.fn<MediaFetcher>(async () => jpeg);
     const { db, app, sock } = await setup({ media: { ai, fetcher, extract: undefined }, drainMs: 5_000 });
     shareImage(sock);
+    await settled();
     await vi.waitFor(() => expect(describeImage).toHaveBeenCalled());
     expect(ledger(db)).toEqual([]);
     let stopped = false;
@@ -477,6 +495,7 @@ describe('app media wiring (15g)', () => {
     const fetcher = vi.fn<MediaFetcher>().mockRejectedValueOnce(new MediaDownloadError('http_503')).mockResolvedValue(Buffer.from('jpeg-bytes'));
     const { db, app, sock } = await setup({ media: { fetcher } });
     shareImage(sock);
+    await settled();
     await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'http_503' }));
     // Retried a minute later, on the first tick after that.
     await vi.advanceTimersByTimeAsync(55_000);
@@ -494,6 +513,7 @@ describe('app media wiring (15g)', () => {
     const run = vi.spyOn(Reconciler.prototype, 'run');
     const { db, ai, app, sock } = await setup({ media: { extract } });
     shareImage(sock);
+    await settled();
     await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0 }));
     await vi.advanceTimersByTimeAsync(241_000);
     await expect(run.mock.results[0]!.value).resolves.toEqual({ status: 'waiting' });
@@ -514,6 +534,7 @@ describe('app media wiring (15g)', () => {
   it('a finished file wakes its client’s reconcile', async () => {
     const { db, app, sock } = await setup();
     shareImage(sock);
+    await settled();
     const notify = vi.spyOn(app.debouncer, 'notify');
     await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('done'));
     expect(notify).toHaveBeenCalledWith(1);
@@ -532,9 +553,9 @@ describe('app media wiring (15g)', () => {
     const { db, ai, drive, app } = await setup({
       media: { sealer, extract },
       publishIntervalMs: 1_000,
-      prepare: (db) => {
-        storedImage(db, sealer, '2026-10-19T06:55:00.000Z');
-        markProcessed(db, [messageRowId(db, 1, 'IMG0')!], '2026-10-19T06:56:00.000Z');
+      prepare: async (db) => {
+        await storedImage(db, sealer, '2026-10-19T06:55:00.000Z');
+        await markProcessed(db, [(await messageRowId(db, 1, 'IMG0'))!], '2026-10-19T06:56:00.000Z');
       },
     });
     await vi.advanceTimersByTimeAsync(1_000); // the first publish
@@ -548,7 +569,7 @@ describe('app media wiring (15g)', () => {
     await vi.waitFor(() => expect(drive.updated).toHaveLength(published + 1), SLOW_IO);
     expect(Date.now()).toBeLessThan(Date.parse('2026-10-19T07:00:29Z')); // before the first tick after start
     expect(await getMedia(db, 1)).toMatchObject({ status: 'done', textKind: null, driveFileId: null });
-    expect(listUnprocessed(db, 1)).toEqual([]);
+    expect(await listUnprocessed(db, 1)).toEqual([]);
     expect(run).not.toHaveBeenCalled();
     expect(ai.calls).toHaveLength(0);
     await stopApp(app);
@@ -558,8 +579,10 @@ describe('app media wiring (15g)', () => {
     const { db, drive, app, sock } = await setup();
     await vi.advanceTimersByTimeAsync(1_000); // the first publish creates the Drive root folder
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('T1', 'hello')] });
+    await settled();
     setRole(db, 1, SHARMA_PN, 'client', 'human');
     shareImage(sock);
+    await settled();
     await vi.waitFor(async () => expect((await getMedia(db, 1))?.driveFileId).toBeTruthy());
     expect(Date.now()).toBeLessThan(Date.parse('2026-10-19T07:00:29Z')); // before the first tick after start
     expect(drive.created.map((f) => f.name)).toContain('image-2026-10-10-1330-1.jpg');
@@ -715,6 +738,7 @@ describe('app spend holds (Task 15 review round 3)', () => {
     await vi.waitFor(() => expect(readScan).toHaveBeenCalled(), SLOW_IO);
     // Another client writes. Its run is due four minutes later, while the scan is still being read.
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('M1', 'please send the quote', { group: MEHTA.groupId })] });
+    await settled();
     await vi.advanceTimersByTimeAsync(241_000);
     const mehta = run.mock.calls.findIndex(([clientId]) => clientId === 2);
     expect(mehta).toBeGreaterThanOrEqual(0);
@@ -729,7 +753,7 @@ describe('app spend holds (Task 15 review round 3)', () => {
     expect(app.health.line().text).not.toBe(SPEND_LINE);
     await vi.advanceTimersByTimeAsync(10 * MINUTE);
     expect(ai.calls.filter((c) => c.user.includes('please send the quote'))).toHaveLength(1);
-    expect(listUnprocessed(db, 2)).toEqual([]);
+    expect(await listUnprocessed(db, 2)).toEqual([]);
     expect(app.health.line().text).not.toBe(SPEND_LINE);
     await stopApp(app);
   });
@@ -838,9 +862,9 @@ describe('app health line with fresh file counts (final review)', () => {
       media: { sealer, extract },
       publishIntervalMs: 1_000,
       startedAt: minutesBefore(40),
-      prepare: (db) => {
-        storedImage(db, sealer, minutesBefore(40).toISOString());
-        markProcessed(db, [messageRowId(db, 1, 'IMG0')!], minutesBefore(39).toISOString());
+      prepare: async (db) => {
+        await storedImage(db, sealer, minutesBefore(40).toISOString());
+        await markProcessed(db, [(await messageRowId(db, 1, 'IMG0'))!], minutesBefore(39).toISOString());
       },
     });
     const bodies = workbookUploads(drive);
@@ -1001,6 +1025,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const voice = new FakeLocalVoiceTranscriber({ results: [{ text: 'payment bhej diya' }] });
     const { db, ai, app, sock } = await setup({ media: { voice, maxVoiceSeconds: 300, extract: undefined } });
     shareVoice(sock);
+    await settled();
     await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'done', kind: 'voice', text: 'payment bhej diya' }), SLOW_IO);
     expect(voice.prepared[0]!.maxSeconds).toBe(300); // maxVoiceSeconds reaches the extractor
     expect(voice.signals[0]).toBeInstanceOf(AbortSignal); // the stop signal reaches the local run
@@ -1018,6 +1043,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const voice = new FakeVoiceTranscriber({ provider: 'sarvam', results: [{ text: 'kal tak bhej dena' }] });
     const { db, app, sock } = await setup({ media: { voice, extract: undefined } });
     shareVoice(sock);
+    await settled();
     await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'done', text: 'kal tak bhej dena' }), SLOW_IO);
     expect(voice.transcribed).toBe(1);
     expect(ledger(db).map((r) => r.kind)).toEqual(['stt']);
@@ -1027,6 +1053,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
   it('without a voice transcriber, a voice note finishes without text, as in 2a', async () => {
     const { db, ai, app, sock } = await setup({ media: { extract: undefined } });
     shareVoice(sock);
+    await settled();
     await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'done', text: null, note: null }), SLOW_IO);
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls[0]!.user).toContain('{voice note, 0:14, not transcribed}');
@@ -1044,6 +1071,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
       });
       const s = await setup({ media: { voice, fetcher, extract: undefined } });
       shareVoice(s.sock);
+      await settled();
       return { ...s, fetcher, release: () => g.release() };
     };
 
@@ -1093,6 +1121,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const voice = new FakeLocalVoiceTranscriber({ results: [new LocalEngineError('timeout'), new LocalEngineError('timeout'), new LocalEngineError('timeout')] });
     const { db, app, sock } = await setup({ media: { voice, extract: undefined } });
     shareVoice(sock);
+    await settled();
     await vi.waitFor(() => deferredAfter(db, () => voice.transcribed, 1, MINUTE, 'local_timeout'), SLOW_IO);
     await vi.advanceTimersByTimeAsync(2 * MINUTE);
     await vi.waitFor(() => deferredAfter(db, () => voice.transcribed, 2, 5 * MINUTE, 'local_timeout'), SLOW_IO);
@@ -1108,6 +1137,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const voice = new FakeVoiceTranscriber({ provider: 'sarvam', results: [new LocalEngineError('exit_1'), new LocalEngineError('exit_1'), new LocalEngineError('exit_1')] });
     const { db, app, sock } = await setup({ media: { voice, extract: undefined } });
     shareVoice(sock);
+    await settled();
     await vi.waitFor(() => deferredAfter(db, () => voice.transcribed, 1, MINUTE, 'local_exit_1'), SLOW_IO);
     await vi.advanceTimersByTimeAsync(2 * MINUTE);
     await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'failed', attempts: 2 }), SLOW_IO);
@@ -1145,6 +1175,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const { app, sock } = await setup({ media: { voice: new FakeVoiceTranscriber(), fetcher, extract: undefined } });
     for (const id of ['VN1', 'VN2', 'VN3']) shareVoice(sock, id);
     shareImage(sock, 'IMG1');
+    await settled();
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
     expect(fetcher.mock.calls.map(([ref]) => ref.contentType)).toEqual(['audioMessage', 'audioMessage', 'audioMessage']);
     g.release();
@@ -1156,6 +1187,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const voice = new UntilAbortedLocalVoice();
     const { db, app, sock } = await setup({ media: { voice, extract: undefined }, drainMs: 60_000 });
     shareVoice(sock);
+    await settled();
     await vi.waitFor(() => expect(voice.entered).toBe(1), SLOW_IO);
     expect(voice.signals[0]!.aborted).toBe(false);
     let stopped = false;
@@ -1176,6 +1208,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const voice = new UntilAbortedConversion();
     const { db, app, sock } = await setup({ media: { voice, extract: undefined }, drainMs: 60_000 });
     shareVoice(sock);
+    await settled();
     await vi.waitFor(() => expect(voice.entered).toBe(1), SLOW_IO);
     expect(voice.prepareSignals[0]).toBeInstanceOf(AbortSignal);
     expect(voice.prepareSignals[0]!.aborted).toBe(false);
@@ -1209,13 +1242,13 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const voice = new FakeVoiceTranscriber({ provider: 'elevenlabs' });
     const { db, app } = await setup({
       media: { voice },
-      prepare: (db) => {
-        insertMessage(db, {
+      prepare: async (db) => {
+        await insertMessage(db, {
           waId: 'V0', clientId: 1, senderJid: SHARMA_PN, senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T06:00:00.000Z', text: null,
           quotedWaId: null, mediaType: 'voice',
         });
-        const mediaId = insertMedia(db, {
-          messageId: messageRowId(db, 1, 'V0')!, clientId: 1, kind: 'voice', status: 'done', mimeType: 'audio/ogg', fileName: null, fileSize: 9000, seconds: 12,
+        const mediaId = await insertMedia(db, {
+          messageId: (await messageRowId(db, 1, 'V0'))!, clientId: 1, kind: 'voice', status: 'done', mimeType: 'audio/ogg', fileName: null, fileSize: 9000, seconds: 12,
           forwarded: false, refEnc: null, errorCode: null, createdAt: '2026-10-19T06:00:00.000Z',
         });
         db.raw.prepare('INSERT INTO media_stt_forget (media_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, 0)').run(mediaId, 'elevenlabs', 'tr-old', '2026-10-19T06:00:00.000Z');
@@ -1274,6 +1307,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const voice = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ text: 'theek hai', forgetRef: 'tr-1' }] });
     const { db, app, sock } = await setup({ media: { voice, extract: undefined } });
     shareVoice(sock);
+    await settled();
     await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('done'), SLOW_IO);
     await vi.waitFor(() => expect(voice.forgotten).toEqual(['tr-1']));
     expect(forgetHook.calls.some((o) => o?.mediaId === 1)).toBe(true);
@@ -1285,6 +1319,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const voice = new FakeLocalVoiceTranscriber();
     const { db, app, sock } = await setup({ media: { voice, extract: undefined } });
     shareVoice(sock);
+    await settled();
     await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('done'), SLOW_IO);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(forgetHook.calls.some((o) => o?.mediaId !== undefined)).toBe(false);
@@ -1300,6 +1335,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const voice = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ text: 'theek hai', forgetRef: 'tr-1' }] });
     const { db, app, sock } = await setup({ log, media: { voice, extract: undefined } });
     shareVoice(sock);
+    await settled();
     await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('done'), SLOW_IO);
     await vi.waitFor(() => expect(out()).toContain('voice note speech copy not deleted yet'));
     expect(out()).toContain('"code":"SQLITE_BUSY"');
@@ -1386,6 +1422,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
         WHEN NEW.status = 'done' AND NEW.kind = 'voice' BEGIN SELECT RAISE(ABORT, 'finish refused'); END`),
     });
     shareVoice(sock);
+    await settled();
     await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('failed'), SLOW_IO);
     await vi.waitFor(() => expect(voice.forgotten).toEqual(['tr-1']));
     expect(voice.transcribed).toBe(1); // never paid again
@@ -1456,6 +1493,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     });
     const { db, app, sock } = await setup({ media: { voice: null, fetcher, extract: undefined } });
     shareVoice(sock);
+    await settled();
     await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'http_503' }), SLOW_IO);
     await vi.advanceTimersByTimeAsync(2 * MINUTE);
     await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 2 }), SLOW_IO);
@@ -1470,13 +1508,13 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const { app } = await setup({
       log,
       media: { voice: new FakeLocalVoiceTranscriber() }, // switched to local: the elevenlabs copy cannot be deleted now
-      prepare: (db) => {
-        insertMessage(db, {
+      prepare: async (db) => {
+        await insertMessage(db, {
           waId: 'V0', clientId: 1, senderJid: SHARMA_PN, senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T06:00:00.000Z', text: null,
           quotedWaId: null, mediaType: 'voice',
         });
-        const mediaId = insertMedia(db, {
-          messageId: messageRowId(db, 1, 'V0')!, clientId: 1, kind: 'voice', status: 'done', mimeType: 'audio/ogg', fileName: null, fileSize: 9000, seconds: 12,
+        const mediaId = await insertMedia(db, {
+          messageId: (await messageRowId(db, 1, 'V0'))!, clientId: 1, kind: 'voice', status: 'done', mimeType: 'audio/ogg', fileName: null, fileSize: 9000, seconds: 12,
           forwarded: false, refEnc: null, errorCode: null, createdAt: '2026-10-19T06:00:00.000Z',
         });
         db.raw.prepare('INSERT INTO media_stt_forget (media_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, 0)').run(mediaId, 'elevenlabs', 'tr-old', '2026-10-19T06:00:00.000Z');
@@ -1528,6 +1566,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const voice = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ text: 'theek hai', forgetRef: 'tr-1' }] });
     const { db, app, sock } = await setup({ media: { voice, extract: undefined } });
     shareVoice(sock);
+    await settled();
     await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('done'), SLOW_IO);
     await vi.waitFor(() => expect(forgetHook.calls.some((o) => o?.mediaId === 1)).toBe(true));
     const s = stopping(app);
@@ -1558,16 +1597,17 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const voice = new GatedLocalVoice({ results: [{ text: 'payment kal tak ho jayega' }] });
     const { db, ai, app, sock } = await setup({ media: { voice, extract: undefined } });
     shareVoice(sock);
+    await settled();
     await vi.waitFor(() => expect(voice.entered).toBe(1), SLOW_IO);
     // V1: the note blocks its client's update for 30 minutes, then the update goes on without it.
     await vi.advanceTimersByTimeAsync(36 * MINUTE); // the wait, then the debouncer's quiet time
     expect(ai.calls).toHaveLength(1);
     expect(ai.calls[0]!.user).toContain('{voice note, 0:14, being transcribed}');
     expect(ai.calls[0]!.user).not.toContain('(re-check: file now read)');
-    expect(listUnprocessed(db, 1)).toEqual([]);
+    expect(await listUnprocessed(db, 1)).toEqual([]);
     voice.g.release();
     await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'done', text: 'payment kal tak ho jayega' }), SLOW_IO);
-    await vi.waitFor(() => expect(listUnprocessed(db, 1)).toHaveLength(1));
+    await vi.waitFor(async () => expect(await listUnprocessed(db, 1)).toHaveLength(1));
     await vi.advanceTimersByTimeAsync(241_000);
     expect(ai.calls).toHaveLength(2);
     expect(ai.calls[1]!.user).toContain('(re-check: file now read)');

@@ -31,9 +31,9 @@ async function setup(responses: FakeResponse[], config: PriorityConfig | (() => 
   return { db, ai, r, log };
 }
 
-function store(db: Db, waId: string, text: string, ts = '2026-10-19T07:00:00.000Z'): void {
-  insertMessage(db, { waId, clientId: 1, senderJid: SHARMA_PN, senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false, ts, text, quotedWaId: null, mediaType: null });
-  upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
+async function store(db: Db, waId: string, text: string, ts = '2026-10-19T07:00:00.000Z'): Promise<void> {
+  await insertMessage(db, { waId, clientId: 1, senderJid: SHARMA_PN, senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false, ts, text, quotedWaId: null, mediaType: null });
+  await upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
 }
 
 /** SHA-001, made before this batch with the given level (null: made before priority levels). */
@@ -51,8 +51,8 @@ const row = (db: Db, code: string) =>
 describe('Reconciler: priority keywords', () => {
   it('a keyword in a new task\'s message wins over the AI\'s guess, even a more urgent guess, and is recorded', async () => {
     const { db, r } = await setup([{ ops: [add(['A1'], 'low'), add(['A2'], 'critical', { title: 'Logo' })] }]);
-    store(db, 'A1', 'Footer theek karo, URGENT hai');
-    store(db, 'A2', 'Logo, no rush');
+    await store(db, 'A1', 'Footer theek karo, URGENT hai');
+    await store(db, 'A2', 'Logo, no rush');
     await r.run(1);
     expect(row(db, 'SHA-001')).toEqual({ priority: 'high', level: 'critical', source: 'keyword', keyword: 'urgent', sentiment: null });
     expect(row(db, 'SHA-002')).toEqual({ priority: 'low', level: 'low', source: 'keyword', keyword: 'no rush', sentiment: null });
@@ -60,16 +60,16 @@ describe('Reconciler: priority keywords', () => {
 
   it('without a keyword the AI\'s level is kept, with the old column in step', async () => {
     const { db, r } = await setup([{ ops: [add(['A1'], 'major')] }]);
-    store(db, 'A1', 'Footer ka kaam');
+    await store(db, 'A1', 'Footer ka kaam');
     await r.run(1);
     expect(row(db, 'SHA-001')).toEqual({ priority: 'high', level: 'major', source: 'ai', keyword: null, sentiment: null });
   });
 
   it('matches the keyword in a cited context message as well', async () => {
     const { db, r } = await setup([{ ops: [add(['A2', 'A1'])] }]);
-    store(db, 'A1', 'site down hai', '2026-10-19T06:00:00.000Z');
+    await store(db, 'A1', 'site down hai', '2026-10-19T06:00:00.000Z');
     db.raw.prepare("UPDATE messages SET processed_at = ? WHERE wa_id = 'A1'").run(NOW);
-    store(db, 'A2', 'please fix');
+    await store(db, 'A2', 'please fix');
     await r.run(1);
     expect(row(db, 'SHA-001')).toMatchObject({ level: 'critical', keyword: 'site down' });
   });
@@ -80,7 +80,7 @@ describe('Reconciler: priority keywords', () => {
       { ops: [op({ op: 'update_task', taskCode: 'SHA-001', sourceMessageIds: ['A2'], latestProgress: 'v2 sent' })] },
     ]);
     banner(db, 'medium');
-    store(db, 'A1', 'Banner ka kya hua? important hai');
+    await store(db, 'A1', 'Banner ka kya hua? important hai');
     await r.run(1);
     expect(row(db, 'SHA-001')).toMatchObject({ level: 'major', source: 'keyword', keyword: 'important' });
     const events = db.raw.prepare("SELECT op, detail, reason FROM task_events WHERE task_id = 1 ORDER BY id").all();
@@ -89,7 +89,7 @@ describe('Reconciler: priority keywords', () => {
       { op: 'update_task', detail: JSON.stringify({ priority: 'major' }), reason: 'priority keyword' },
     ]);
     // A less urgent keyword later never lowers it.
-    store(db, 'A2', 'no rush on the banner now', '2026-10-19T07:30:00.000Z');
+    await store(db, 'A2', 'no rush on the banner now', '2026-10-19T07:30:00.000Z');
     await r.run(1);
     expect(row(db, 'SHA-001')).toMatchObject({ level: 'major', source: 'keyword', keyword: 'important' });
     expect(getTaskByCode(db, 'SHA-001')!.latestProgress).toBe('v2 sent');
@@ -99,7 +99,7 @@ describe('Reconciler: priority keywords', () => {
     const { db, r } = await setup([{ ops: [op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['A1'] })] }]);
     banner(db, null);
     expect(row(db, 'SHA-001')).toMatchObject({ level: null, priority: 'high' });
-    store(db, 'A1', 'no rush, but banner?');
+    await store(db, 'A1', 'no rush, but banner?');
     await r.run(1);
     expect(row(db, 'SHA-001')).toEqual({ priority: 'low', level: 'low', source: 'keyword', keyword: 'no rush', sentiment: null });
   });
@@ -110,11 +110,11 @@ describe('Reconciler: priority keywords', () => {
       { ops: [op({ op: 'update_task', taskCode: 'SHA-001', sourceMessageIds: ['A2'], priority: 'critical' })] },
     ]);
     banner(db, 'major', 'keyword');
-    store(db, 'A1', 'started on it');
+    await store(db, 'A1', 'started on it');
     await r.run(1);
     expect(row(db, 'SHA-001')).toMatchObject({ level: 'major', source: 'keyword' });
     expect(getTaskByCode(db, 'SHA-001')!.latestProgress).toBe('started');
-    store(db, 'A2', 'client is waiting', '2026-10-19T07:30:00.000Z');
+    await store(db, 'A2', 'client is waiting', '2026-10-19T07:30:00.000Z');
     await r.run(1);
     expect(row(db, 'SHA-001')).toMatchObject({ level: 'critical', source: 'ai', keyword: null, priority: 'high' });
   });
@@ -123,7 +123,7 @@ describe('Reconciler: priority keywords', () => {
     const { db, r } = await setup([{ ops: [op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['A1'] })] }]);
     banner(db, 'medium');
     updateTaskFields(db, 1, { priority: 'low' }, NOW, 'human');
-    store(db, 'A1', 'URGENT: banner?');
+    await store(db, 'A1', 'URGENT: banner?');
     await r.run(1);
     expect(row(db, 'SHA-001')).toEqual({ priority: 'low', level: 'low', source: 'human', keyword: null, sentiment: null });
   });
@@ -132,7 +132,7 @@ describe('Reconciler: priority keywords', () => {
     const { db, r } = await setup([{ ops: [add(['A1'], 'medium')] }], () => {
       throw new Error('settings table locked');
     });
-    store(db, 'A1', 'urgent footer');
+    await store(db, 'A1', 'urgent footer');
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
     expect(row(db, 'SHA-001')).toMatchObject({ level: 'medium', source: 'ai' });
   });
@@ -141,7 +141,7 @@ describe('Reconciler: priority keywords', () => {
 describe('Reconciler: sentiment', () => {
   it('switched off: the read asks for none, the prompt has no sentiment rules, and a stray mood is not stored', async () => {
     const { db, ai, r } = await setup([{ ops: [add(['A1'], 'medium', { sentiment: 'frustrated' }), op({ op: 'set_status', sourceMessageIds: ['A1'], text: 'Footer in progress.', sentiment: 'negative' })] }]);
-    store(db, 'A1', 'footer abhi tak nahi hua?!');
+    await store(db, 'A1', 'footer abhi tak nahi hua?!');
     await r.run(1);
     expect(ai.options).toEqual([{ sentiment: false }]);
     expect(ai.calls[0]!.system).toBe(SYSTEM_PROMPT);
@@ -153,7 +153,7 @@ describe('Reconciler: sentiment', () => {
     const { db, ai, r } = await setup([{
       ops: [add(['A1'], 'medium', { sentiment: 'frustrated' }), op({ op: 'set_status', sourceMessageIds: ['A1'], text: 'Footer late.', sentiment: 'negative' })],
     }], { keywords: NO_KEYWORDS, sentimentEnabled: true });
-    store(db, 'A1', 'footer abhi tak nahi hua?!');
+    await store(db, 'A1', 'footer abhi tak nahi hua?!');
     await r.run(1);
     expect(ai.options).toEqual([{ sentiment: true }]);
     expect(ai.calls[0]!.system).toBe(`${SYSTEM_PROMPT}${SENTIMENT_RULES}`);
@@ -167,10 +167,10 @@ describe('Reconciler: sentiment', () => {
       { ops: [op({ op: 'update_task', taskCode: 'SHA-001', sourceMessageIds: ['A2'], latestProgress: 'v3', sentiment: null })] },
     ], { keywords: NO_KEYWORDS, sentimentEnabled: true });
     banner(db);
-    store(db, 'A1', 'perfect, thanks!');
+    await store(db, 'A1', 'perfect, thanks!');
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1, rejected: 0 });
     expect(row(db, 'SHA-001')).toMatchObject({ sentiment: 'positive' });
-    store(db, 'A2', 'v3 shared', '2026-10-19T07:30:00.000Z');
+    await store(db, 'A2', 'v3 shared', '2026-10-19T07:30:00.000Z');
     await r.run(1);
     expect(row(db, 'SHA-001')).toMatchObject({ sentiment: 'positive' });
   });
@@ -178,10 +178,10 @@ describe('Reconciler: sentiment', () => {
   it('a change of the switch applies to the next batch', async () => {
     let on = false;
     const { db, ai, r } = await setup([{ ops: [] }, { ops: [] }], () => ({ keywords: NO_KEYWORDS, sentimentEnabled: on }));
-    store(db, 'A1', 'hello');
+    await store(db, 'A1', 'hello');
     await r.run(1);
     on = true;
-    store(db, 'A2', 'hello again', '2026-10-19T07:30:00.000Z');
+    await store(db, 'A2', 'hello again', '2026-10-19T07:30:00.000Z');
     await r.run(1);
     expect(ai.options).toEqual([{ sentiment: false }, { sentiment: true }]);
   });

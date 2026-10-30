@@ -170,16 +170,17 @@ function reprocessWindow(db: Db, clientCode: string, since: string, until: strin
 }
 
 /** How many processed messages a reprocess would queue. Changes nothing. */
-export function countReprocess(db: Db, clientCode: string, since: string, until?: string): number {
+export async function countReprocess(db: Db, clientCode: string, since: string, until?: string): Promise<number> {
   const w = reprocessWindow(db, clientCode, since, until);
   return countProcessedBetween(db, w.clientId, w.sinceIso, w.untilIso);
 }
 
 /** Re-queues processed messages in the window for the AI. Returns how many were actually re-queued. */
-export function requestReprocess(db: Db, clientCode: string, since: string, now: Date, until?: string): number {
+export async function requestReprocess(db: Db, clientCode: string, since: string, now: Date, until?: string): Promise<number> {
   const w = reprocessWindow(db, clientCode, since, until);
-  return txSync(db, () => {
-    const n = resetProcessedSince(db, w.clientId, w.sinceIso, w.untilIso);
+  // humanEvent and requestRebuild are not converted yet (S1.11): on raw, which is allowed inside this transaction.
+  return db.tx(async (q) => {
+    const n = await resetProcessedSince(q, w.clientId, w.sinceIso, w.untilIso);
     humanEvent(db, null, w.clientId, 'reprocess', { since, until: until ?? null, messages: n }, now);
     requestRebuild(db, now);
     return n;
@@ -194,10 +195,10 @@ export interface ReprocessResult {
 }
 
 /** Preview first; only re-queue when the job is small or the operator passed --yes. */
-export function reprocess(db: Db, clientCode: string, since: string, until: string | undefined, yes: boolean, now: Date): ReprocessResult {
-  const count = countReprocess(db, clientCode, since, until);
+export async function reprocess(db: Db, clientCode: string, since: string, until: string | undefined, yes: boolean, now: Date): Promise<ReprocessResult> {
+  const count = await countReprocess(db, clientCode, since, until);
   const maxCostUsd = Math.ceil(count / 200) * 0.5;
   if (count === 0) return { count, queued: 0, needsConfirm: false, maxCostUsd };
   if (count > REPROCESS_CONFIRM_ABOVE && !yes) return { count, queued: 0, needsConfirm: true, maxCostUsd };
-  return { count, queued: requestReprocess(db, clientCode, since, now, until), needsConfirm: false, maxCostUsd };
+  return { count, queued: await requestReprocess(db, clientCode, since, now, until), needsConfirm: false, maxCostUsd };
 }

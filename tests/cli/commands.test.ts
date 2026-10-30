@@ -49,10 +49,10 @@ function deps(over: Partial<CliDeps> = {}): CliDeps {
 
 const out = () => lines.join('\n');
 
-function seedTracker(): void {
+async function seedTracker(): Promise<void> {
   const db = openDb(trackerDbPath(dataDir));
   syncClients(db, [MEHTA]);
-  insertMessage(db, { waId: 'seed1', clientId: 1, senderJid: 'a@s.whatsapp.net', senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T08:00:00.000Z', text: 'hi', quotedWaId: null, mediaType: null });
+  await insertMessage(db, { waId: 'seed1', clientId: 1, senderJid: 'a@s.whatsapp.net', senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T08:00:00.000Z', text: 'hi', quotedWaId: null, mediaType: null });
   db.raw.close();
 }
 
@@ -113,7 +113,7 @@ const sendCalls = () => sockets.flatMap((s) => SEND_METHODS.map((m) => s[m].mock
 
 describe('link --reset', () => {
   it('confirmed: deletes only the session rows and records session_reset_at', async () => {
-    seedTracker();
+    await seedTracker();
     await seedSession();
     const keyBefore = readFileSync(masterKeyPath(dataDir), 'utf8');
     const msgsBefore = trackerMessages();
@@ -160,7 +160,7 @@ describe('link --reset', () => {
   });
 
   it('not confirmed: nothing is deleted', async () => {
-    seedTracker();
+    await seedTracker();
     await seedSession();
     const before = sessionRows();
     confirm.mockResolvedValue(false);
@@ -205,7 +205,7 @@ describe('link --reset', () => {
 
 describe('link with an existing session', () => {
   it('says already linked, never opens a socket, deletes nothing', async () => {
-    seedTracker();
+    await seedTracker();
     await seedSession();
     const before = sessionRows();
     await linkCommand({ reset: false }, deps());
@@ -334,7 +334,7 @@ describe('link connection flow', () => {
   });
 
   it('says plainly when allowed messages could not be saved', async () => {
-    seedTracker();
+    await seedTracker();
     const tdb = openDb(trackerDbPath(dataDir));
     tdb.raw.exec("CREATE TRIGGER block_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'blocked'); END");
     tdb.raw.close();
@@ -611,9 +611,9 @@ describe('status command', () => {
     lines.length = 0;
     const db = openDb(trackerDbPath(dataDir));
     syncClients(db, [MEHTA]);
-    insertMessage(db, { waId: 'v1', clientId: 1, senderJid: 'a@s.whatsapp.net', senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T08:00:00.000Z', text: null, quotedWaId: null, mediaType: 'voice' });
-    const mediaId = insertMedia(db, {
-      messageId: messageRowId(db, 1, 'v1')!, clientId: 1, kind: 'voice', status: 'done', mimeType: 'audio/ogg; codecs=opus', fileName: null, fileSize: 9000, seconds: 12,
+    await insertMessage(db, { waId: 'v1', clientId: 1, senderJid: 'a@s.whatsapp.net', senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T08:00:00.000Z', text: null, quotedWaId: null, mediaType: 'voice' });
+    const mediaId = await insertMedia(db, {
+      messageId: (await messageRowId(db, 1, 'v1'))!, clientId: 1, kind: 'voice', status: 'done', mimeType: 'audio/ogg; codecs=opus', fileName: null, fileSize: 9000, seconds: 12,
       forwarded: false, refEnc: null, errorCode: null, createdAt: '2026-10-19T08:00:00.000Z',
     });
     const add = (provider: 'elevenlabs' | 'openai', ref: string, attempts: number) =>

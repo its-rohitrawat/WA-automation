@@ -37,8 +37,11 @@ export const HOLD_MAX_MS = 15 * 60_000;
 export interface HistoryBackfillOptions {
   db: Db;
   gateway: Pick<GatewayLike, 'status'> & Required<Pick<GatewayLike, 'fetchHistory' | 'onHistory'>>;
-  /** The app's ingest of a live event (the same path). May throw; a failure is counted, never the event logged. */
-  ingest: (e: NormalizedEvent) => void;
+  /**
+   * The app's ingest of a live event (the same path), awaited event by event. May throw or reject; a failure is
+   * counted, never the event logged.
+   */
+  ingest: (e: NormalizedEvent) => unknown;
   /** The day's spend cap is reached: no more requests until it resets. */
   spendPaused: () => boolean;
   clock: Clock;
@@ -213,7 +216,7 @@ export class HistoryBackfill {
             continue;
           }
           try {
-            this.#o.ingest(e);
+            await this.#o.ingest(e);
           } catch {
             failed++;
           }

@@ -22,9 +22,9 @@ async function setup() {
 describe('Ingestor', () => {
   it('stores a new message, records the sender and signals once', async () => {
     const { db, onNew, ing } = await setup();
-    ing.handle(message());
-    ing.handle(message());
-    expect(listUnprocessed(db, 1)).toHaveLength(1);
+    await ing.handle(message());
+    await ing.handle(message());
+    expect(await listUnprocessed(db, 1)).toHaveLength(1);
     expect((await listPeople(db, 1))[0]).toMatchObject({ jid: SHARMA_PN, name: 'Mr. Sharma', role: 'unknown' });
     expect(onNew).toHaveBeenCalledTimes(1);
     expect(onNew).toHaveBeenCalledWith(1);
@@ -32,7 +32,7 @@ describe('Ingestor', () => {
 
   it('ignores groups that are not configured clients', async () => {
     const { db, onNew, ing } = await setup();
-    ing.handle(message({ groupId: OTHER_GROUP }));
+    await ing.handle(message({ groupId: OTHER_GROUP }));
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM messages').get()).toEqual({ n: 0 });
     expect(onNew).not.toHaveBeenCalled();
   });
@@ -40,20 +40,20 @@ describe('Ingestor', () => {
   it('ignores clients that were removed from the allow-list', async () => {
     const { db, ing } = await setup();
     syncClients(db, [MEHTA]);
-    ing.handle(message());
+    await ing.handle(message());
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM messages').get()).toEqual({ n: 0 });
   });
 
   it('applies edits, reactions and revokes', async () => {
     const { db, onNew, ing } = await setup();
-    ing.handle(message());
+    await ing.handle(message());
     onNew.mockClear();
-    ing.handle({ kind: 'edit', groupId: SHARMA.groupId, waId: 'm1', text: 'hello again', ts });
+    await ing.handle({ kind: 'edit', groupId: SHARMA.groupId, waId: 'm1', text: 'hello again', ts });
     expect(onNew).toHaveBeenCalledTimes(1);
-    ing.handle({ kind: 'reaction', groupId: SHARMA.groupId, targetWaId: 'm1', reactorJid: RAHUL_PN, fromMe: false, emoji: '✅', ts });
-    expect(reactionsFor(db, 1, ['m1'])).toHaveLength(1);
+    await ing.handle({ kind: 'reaction', groupId: SHARMA.groupId, targetWaId: 'm1', reactorJid: RAHUL_PN, fromMe: false, emoji: '✅', ts });
+    expect(await reactionsFor(db, 1, ['m1'])).toHaveLength(1);
     expect(onNew).toHaveBeenCalledTimes(2);
-    ing.handle({ kind: 'revoke', groupId: SHARMA.groupId, waId: 'm1', ts });
-    expect(listUnprocessed(db, 1)).toHaveLength(0);
+    await ing.handle({ kind: 'revoke', groupId: SHARMA.groupId, waId: 'm1', ts });
+    expect(await listUnprocessed(db, 1)).toHaveLength(0);
   });
 });

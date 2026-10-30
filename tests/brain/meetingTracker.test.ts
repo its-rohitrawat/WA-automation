@@ -67,15 +67,15 @@ async function setup(responses: FakeResponse[], o: { capUsd?: number; exclusive?
   return { db, clock, spend, ai, onChanged, r };
 }
 
-function store(db: Db, waId: string, text: string, ts = '2026-10-18T07:00:00.000Z'): void {
-  insertMessage(db, { waId, clientId: 1, senderJid: SHARMA_PN, senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false, ts, text, quotedWaId: null, mediaType: null });
-  upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
+async function store(db: Db, waId: string, text: string, ts = '2026-10-18T07:00:00.000Z'): Promise<void> {
+  await insertMessage(db, { waId, clientId: 1, senderJid: SHARMA_PN, senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false, ts, text, quotedWaId: null, mediaType: null });
+  await upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
 }
 
 /** A WhatsApp message already processed: context for a meeting run. */
-function context(db: Db, waId: string, text: string, ts = '2026-10-18T07:00:00.000Z'): void {
-  store(db, waId, text, ts);
-  markProcessed(db, listUnprocessed(db, 1).map((m) => m.id), '2026-10-18T08:00:00.000Z');
+async function context(db: Db, waId: string, text: string, ts = '2026-10-18T07:00:00.000Z'): Promise<void> {
+  await store(db, waId, text, ts);
+  await markProcessed(db, (await listUnprocessed(db, 1)).map((m) => m.id), '2026-10-18T08:00:00.000Z');
 }
 
 function banner(db: Db, raisedOn = '2026-10-10', origin = 'whatsapp'): void {
@@ -167,8 +167,8 @@ describe('Reconciler.runMeeting', () => {
       op({ op: 'add_decision', text: 'Blue theme chosen', sourceMessageIds: ['C1', 'mtg1-d1'] }),
       op({ op: 'set_status', text: 'Waiting for the logo files.', sourceMessageIds: ['mtg1-a1'] }),
     ] }]);
-    context(db, 'C1', 'Logo ke baare mein meeting mein baat karte hain');
-    store(db, 'Q1', 'still queued');
+    await context(db, 'C1', 'Logo ke baare mein meeting mein baat karte hain');
+    await store(db, 'Q1', 'still queued');
     const m = await meetingAt(db);
     expect(await r.runMeeting(1, m)).toEqual({ status: 'done', accepted: 3, rejected: 0 });
 
@@ -195,7 +195,7 @@ describe('Reconciler.runMeeting', () => {
     expect(call.user).toMatch(/<meeting_items>\nMeeting started 2026-10-19 11:30, title "Sharma weekly"\n\[mtg1-a1\] 2026-10-19 11:30 · Meeting: Action item/);
     expect(call.user.endsWith('[mtg1-d1] 2026-10-19 11:30 · Meeting: Decision: Blue theme chosen\n</meeting_items>')).toBe(true);
     // WhatsApp messages stay untouched: the queued one is still queued.
-    expect(listUnprocessed(db, 1).map((x) => x.waId)).toEqual(['Q1']);
+    expect((await listUnprocessed(db, 1)).map((x) => x.waId)).toEqual(['Q1']);
   });
 
   it('an item matching an existing WhatsApp task updates it; no new task', async () => {
@@ -251,7 +251,7 @@ describe('Reconciler.runMeeting', () => {
       op({ op: 'add_task', side: 'us', title: 'From chat only', category: 'other', priority: 'low', sourceMessageIds: ['C1'] }),
       op({ op: 'add_task', side: 'us', title: 'Fake id', category: 'other', priority: 'low', sourceMessageIds: ['mtg1-a9', 'mtg2-a1'] }),
     ] }]);
-    context(db, 'C1', 'hello');
+    await context(db, 'C1', 'hello');
     const m = await meetingAt(db);
     expect(await r.runMeeting(1, m)).toEqual({ status: 'done', accepted: 0, rejected: 3 });
     expect((await listPeople(db, 1))[0]).toMatchObject({ role: 'unknown' });
@@ -385,7 +385,7 @@ describe('a WhatsApp run and a meeting run for one client', () => {
     const m = await meetingAt(db);
     const release = hold(ai);
     const meeting = r.runMeeting(1, m);
-    store(db, 'W1', 'Logo files bhej diye', '2026-10-20T07:00:00.000Z');
+    await store(db, 'W1', 'Logo files bhej diye', '2026-10-20T07:00:00.000Z');
     debouncer.notify(1);
     await vi.advanceTimersByTimeAsync(20_000); // past the quiet and max waits
     expect(ai.calls).toHaveLength(1); // only the meeting's call
@@ -404,7 +404,7 @@ describe('a WhatsApp run and a meeting run for one client', () => {
       { ops: [op({ op: 'update_task', taskCode: 'SHA-001', deadline: '2026-10-20', sourceMessageIds: ['mtg1-a1'] })] },
     ]);
     const m = await meetingAt(db);
-    store(db, 'W1', 'Logo files bhej dijiye', '2026-10-18T07:00:00.000Z');
+    await store(db, 'W1', 'Logo files bhej dijiye', '2026-10-18T07:00:00.000Z');
     const release = hold(ai);
     debouncer.notify(1);
     await vi.advanceTimersByTimeAsync(1_000);

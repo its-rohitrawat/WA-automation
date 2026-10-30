@@ -136,8 +136,8 @@ async function connectAndIngest(o: {
   });
   const ingestor = new Ingestor({ db: o.db, onNewMessages: () => {}, media: { sealer: o.mediaRefs } });
   let lastEvent = Date.now();
-  gateway.onEvent((e) => {
-    ingestor.handle(e);
+  gateway.onEvent(async (e) => {
+    await ingestor.handle(e);
     lastEvent = Date.now();
   });
   try {
@@ -299,7 +299,7 @@ export async function statusCommand(deps: CliDeps): Promise<void> {
         snapshot: readHealthSnapshot(db),
         clients: listClients(db, false),
         batches: await latestBatches(db),
-        unprocessed: unprocessedCounts(db),
+        unprocessed: await unprocessedCounts(db),
         now: new Date(),
         sttCopiesLeft: await sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: deps.env.STT_PROVIDER }),
         // Voice-note copies are deleted through the voice transcriber, so VOICE_STT_PROVIDER decides (Task 10), not STT_PROVIDER.

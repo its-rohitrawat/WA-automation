@@ -32,8 +32,8 @@ const messageCount = (db: Db) => (db.raw.prepare('SELECT COUNT(*) AS n FROM mess
 describe('Ingestor with shared files', () => {
   it('records a pending image with sealed download details and queues it once', async () => {
     const { db, onNew, onQueued, sealer, ing } = await setup();
-    ing.handle(image('IMG1'));
-    ing.handle(image('IMG1'));
+    await ing.handle(image('IMG1'));
+    await ing.handle(image('IMG1'));
     const ids = mediaIds(db);
     expect(ids).toHaveLength(1);
     const row = (await getMedia(db, ids[0]!))!;
@@ -46,7 +46,7 @@ describe('Ingestor with shared files', () => {
 
   it('stores no media key or address in plain text in any column', async () => {
     const { db, ing } = await setup();
-    ing.handle(image('IMG1'));
+    await ing.handle(image('IMG1'));
     const row = db.raw.prepare('SELECT * FROM media').get() as Record<string, unknown>;
     for (const v of Object.values(row)) {
       const s = Buffer.isBuffer(v) ? v.toString('latin1') : String(v);
@@ -58,9 +58,9 @@ describe('Ingestor with shared files', () => {
 
   it('keeps metadata only for videos, stickers and view-once media, and never queues them', async () => {
     const { db, onQueued, seal, ing } = await setup();
-    ing.handle(normalizeMessage(waRaw('V1', { videoMessage: { url: 'u', mediaKey: MEDIA_KEY, seconds: 42, mimetype: 'video/mp4' } }))!);
-    ing.handle(normalizeMessage(waRaw('S1', { stickerMessage: { url: 'u', mediaKey: MEDIA_KEY } }))!);
-    ing.handle(normalizeMessage(waRaw('O1', { viewOnceMessageV2: { message: { imageMessage: { url: 'u', mediaKey: MEDIA_KEY } } } }))!);
+    await ing.handle(normalizeMessage(waRaw('V1', { videoMessage: { url: 'u', mediaKey: MEDIA_KEY, seconds: 42, mimetype: 'video/mp4' } }))!);
+    await ing.handle(normalizeMessage(waRaw('S1', { stickerMessage: { url: 'u', mediaKey: MEDIA_KEY } }))!);
+    await ing.handle(normalizeMessage(waRaw('O1', { viewOnceMessageV2: { message: { imageMessage: { url: 'u', mediaKey: MEDIA_KEY } } } }))!);
     expect(db.raw.prepare('SELECT kind, status, error_code AS errorCode, seconds, ref_enc AS ref FROM media ORDER BY id').all()).toEqual([
       { kind: 'video', status: 'metadata', errorCode: null, seconds: 42, ref: null },
       { kind: 'sticker', status: 'metadata', errorCode: null, seconds: null, ref: null },
@@ -72,8 +72,8 @@ describe('Ingestor with shared files', () => {
 
   it('marks files it cannot download', async () => {
     const { db, ing } = await setup();
-    ing.handle(image('BIG', { fileLength: 60 * 1024 * 1024 }));
-    ing.handle(normalizeMessage(waRaw('NOKEY', { imageMessage: { url: 'u' } }))!);
+    await ing.handle(image('BIG', { fileLength: 60 * 1024 * 1024 }));
+    await ing.handle(normalizeMessage(waRaw('NOKEY', { imageMessage: { url: 'u' } }))!);
     expect(db.raw.prepare('SELECT status, error_code AS e FROM media ORDER BY id').all()).toEqual([
       { status: 'unavailable', e: 'too_large' },
       { status: 'unavailable', e: 'no_ref' },
@@ -82,12 +82,12 @@ describe('Ingestor with shared files', () => {
 
   it('refuses download addresses that do not point at WhatsApp, and never seals them (amendment 3a)', async () => {
     const { db, onNew, onQueued, seal, ing } = await setup();
-    ing.handle(normalizeMessage(waRaw('A1', { imageMessage: { url: 'http://192.168.1.1/x', mediaKey: MEDIA_KEY } }))!);
-    ing.handle(normalizeMessage(waRaw('A2', { imageMessage: { directPath: '@evil.com/x', mediaKey: MEDIA_KEY } }))!);
-    ing.handle(normalizeMessage(waRaw('A3', { documentMessage: { directPath: 'evil.com/x', mediaKey: MEDIA_KEY, fileName: 'a.pdf' } }))!);
-    ing.handle(normalizeMessage(waRaw('A4', { audioMessage: { url: 'https://evil.com/x', mediaKey: MEDIA_KEY, ptt: true } }))!);
+    await ing.handle(normalizeMessage(waRaw('A1', { imageMessage: { url: 'http://192.168.1.1/x', mediaKey: MEDIA_KEY } }))!);
+    await ing.handle(normalizeMessage(waRaw('A2', { imageMessage: { directPath: '@evil.com/x', mediaKey: MEDIA_KEY } }))!);
+    await ing.handle(normalizeMessage(waRaw('A3', { documentMessage: { directPath: 'evil.com/x', mediaKey: MEDIA_KEY, fileName: 'a.pdf' } }))!);
+    await ing.handle(normalizeMessage(waRaw('A4', { audioMessage: { url: 'https://evil.com/x', mediaKey: MEDIA_KEY, ptt: true } }))!);
     // A good url does not make a bad direct path safe: Baileys downloads from the direct path when there is one.
-    ing.handle(image('A5', { directPath: '.evil.example/x' }));
+    await ing.handle(image('A5', { directPath: '.evil.example/x' }));
     expect(db.raw.prepare('SELECT kind, status, error_code AS e, ref_enc AS r FROM media ORDER BY id').all()).toEqual([
       { kind: 'image', status: 'unavailable', e: 'bad_address', r: null },
       { kind: 'image', status: 'unavailable', e: 'bad_address', r: null },
@@ -104,9 +104,9 @@ describe('Ingestor with shared files', () => {
 
   it('records whether a file was forwarded, and still downloads forwarded files (owner decision D2)', async () => {
     const { db, onQueued, ing } = await setup();
-    ing.handle(image('F1', { contextInfo: { isForwarded: true } }));
-    ing.handle(image('F2', { contextInfo: { forwardingScore: 4 } }));
-    ing.handle(image('F3'));
+    await ing.handle(image('F1', { contextInfo: { isForwarded: true } }));
+    await ing.handle(image('F2', { contextInfo: { forwardingScore: 4 } }));
+    await ing.handle(image('F3'));
     expect((await Promise.all(mediaIds(db).map(async (id) => (await getMedia(db, id))!))).map((r) => [r.forwarded, r.status, r.hasRef])).toEqual([
       [true, 'pending', true],
       [true, 'pending', true],
@@ -117,13 +117,13 @@ describe('Ingestor with shared files', () => {
 
   it('without a media pipeline, records the file as not downloaded', async () => {
     const { db, ing } = await setup(false);
-    ing.handle(image('IMG1'));
+    await ing.handle(image('IMG1'));
     expect(db.raw.prepare('SELECT status, error_code AS e, ref_enc AS r FROM media').get()).toEqual({ status: 'unavailable', e: 'not_downloaded', r: null });
   });
 
   it('stores nothing for a group that is not an active client', async () => {
     const { db, onQueued, ing } = await setup();
-    ing.handle(image('X1', {}, OTHER_GROUP));
+    await ing.handle(image('X1', {}, OTHER_GROUP));
     expect(mediaIds(db)).toEqual([]);
     expect(onQueued).not.toHaveBeenCalled();
   });
@@ -131,7 +131,7 @@ describe('Ingestor with shared files', () => {
   it('writes the message and its file row together: when the file row fails, the message is not stored either', async () => {
     const { db, onNew, onQueued, ing } = await setup();
     db.raw.exec("CREATE TRIGGER block_media BEFORE INSERT ON media BEGIN SELECT RAISE(ABORT, 'blocked'); END");
-    expect(() => ing.handle(image('IMG1'))).toThrow('blocked');
+    await expect(ing.handle(image('IMG1'))).rejects.toThrow('blocked');
     expect(messageCount(db)).toBe(0);
     expect(onNew).not.toHaveBeenCalled();
     expect(onQueued).not.toHaveBeenCalled();
@@ -144,7 +144,7 @@ describe('Ingestor with shared files', () => {
       inTransaction = db.raw.inTransaction;
       throw new Error('listener failed');
     });
-    expect(() => ing.handle(image('IMG1'))).toThrow('listener failed');
+    await expect(ing.handle(image('IMG1'))).rejects.toThrow('listener failed');
     expect(inTransaction).toBe(false);
     expect(messageCount(db)).toBe(1);
     expect(await getMedia(db, mediaIds(db)[0]!)).toMatchObject({ status: 'pending', hasRef: true });
@@ -153,10 +153,10 @@ describe('Ingestor with shared files', () => {
 
   it('seals only addresses that pass the check: beside a direct path, a url that is not on WhatsApp is dropped, not stored', async () => {
     const { db, sealer, ing } = await setup();
-    ing.handle(image('U1'));
-    ing.handle(image('U2', { url: 'https://evil.example/steal' }));
-    ing.handle(image('U3', { url: 'https://10.0.0.5:8443/x' }));
-    ing.handle(image('U4', { url: `https://mmg.whatsapp.net/${'a'.repeat(3_000)}` }));
+    await ing.handle(image('U1'));
+    await ing.handle(image('U2', { url: 'https://evil.example/steal' }));
+    await ing.handle(image('U3', { url: 'https://10.0.0.5:8443/x' }));
+    await ing.handle(image('U4', { url: `https://mmg.whatsapp.net/${'a'.repeat(3_000)}` }));
     const opened = await Promise.all(mediaIds(db).map(async (id, i) => sealer.open((await getMediaRef(db, id))!, mediaRefAad(1, `U${i + 1}`))));
     const mediaKey = MEDIA_KEY.toString('base64');
     expect(opened).toEqual([
@@ -172,7 +172,7 @@ describe('Ingestor with shared files', () => {
 
   it('refuses an overlong direct path and never seals it', async () => {
     const { db, seal, onQueued, ing } = await setup();
-    ing.handle(image('L1', { directPath: `/${'a'.repeat(10_000)}` }));
+    await ing.handle(image('L1', { directPath: `/${'a'.repeat(10_000)}` }));
     expect(db.raw.prepare('SELECT status, error_code AS e, ref_enc AS r FROM media').get()).toEqual({ status: 'unavailable', e: 'bad_address', r: null });
     expect(seal).not.toHaveBeenCalled();
     expect(onQueued).not.toHaveBeenCalled();

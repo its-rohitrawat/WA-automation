@@ -39,8 +39,8 @@ async function meeting(db: Db, n: number, clientId: number | null, title: string
   }))!;
 }
 
-function message(db: Db, clientId: number, waId: string, ts: string) {
-  insertMessage(db, {
+async function message(db: Db, clientId: number, waId: string, ts: string) {
+  await insertMessage(db, {
     waId, clientId, senderJid: '919800000001@s.whatsapp.net', senderNumber: '919800000001', senderName: 'Sender', fromMe: false, ts, text: MESSAGE,
     quotedWaId: null, mediaType: null,
   });
@@ -55,9 +55,9 @@ async function world(): Promise<Db> {
   task(db, 1, { title: 'Done Monday', deadline: '2026-10-01', status: 'done', closedOn: '2026-10-26' });
   task(db, 1, { title: 'Done Sunday', status: 'done', closedOn: '2026-10-25' });
   task(db, 2, { title: 'Mehta done', status: 'done', closedOn: '2026-10-28' });
-  message(db, 1, 'M1', '2026-10-27T10:00:00.000Z');
-  message(db, 1, 'M2', '2026-10-28T04:00:00.000Z');
-  message(db, 2, 'M3', '2026-10-20T04:00:00.000Z');
+  await message(db, 1, 'M1', '2026-10-27T10:00:00.000Z');
+  await message(db, 1, 'M2', '2026-10-28T04:00:00.000Z');
+  await message(db, 2, 'M3', '2026-10-20T04:00:00.000Z');
   setPhase(db, 1, 'Design', 'ai');
   return db;
 }
@@ -199,15 +199,15 @@ describe('clientDetail', () => {
 
 describe('the client drawer: what the agent has seen (owner decision, 28 Oct 2026)', () => {
   const JID = (n: number) => `9198000000${String(n).padStart(2, '0')}@s.whatsapp.net`;
-  function say(db: Db, n: number, ts: string, o: { text?: string | null; person?: number; fromMe?: boolean; media?: 'image' | 'voice' | 'document'; mediaType?: string } = {}) {
+  async function say(db: Db, n: number, ts: string, o: { text?: string | null; person?: number; fromMe?: boolean; media?: 'image' | 'voice' | 'document'; mediaType?: string } = {}) {
     const person = o.person ?? 1;
-    insertMessage(db, {
+    await insertMessage(db, {
       waId: `D${n}`, clientId: 1, senderJid: JID(person), senderNumber: `9198000000${String(person).padStart(2, '0')}`, senderName: 'Push Name',
       fromMe: o.fromMe ?? false, ts, text: o.text === undefined ? `message ${n}` : o.text, quotedWaId: null, mediaType: o.media ?? o.mediaType ?? null,
     });
     const id = (db.raw.prepare("SELECT id FROM messages WHERE wa_id = ?").get(`D${n}`) as { id: number }).id;
     if (o.media) {
-      insertMedia(db, { messageId: id, clientId: 1, kind: o.media, status: 'done', mimeType: null, fileName: 'secret-file-name.pdf', fileSize: 10,
+      await insertMedia(db, { messageId: id, clientId: 1, kind: o.media, status: 'done', mimeType: null, fileName: 'secret-file-name.pdf', fileSize: 10,
         seconds: o.media === 'voice' ? 42 : null, forwarded: false, refEnc: null, errorCode: null, createdAt: ts });
       if (o.media === 'voice') db.raw.prepare("UPDATE media SET text = 'TRANSCRIPT-never-sent', text_kind = 'extract' WHERE message_id = ?").run(id);
     }
@@ -216,14 +216,14 @@ describe('the client drawer: what the agent has seen (owner decision, 28 Oct 202
 
   it('counts the last 7 days, names senders from the people table, and shows the last 3 messages as one line each', async () => {
     const db = await seededDb();
-    upsertPerson(db, { clientId: 1, jid: JID(1), number: '919800000001', name: 'Rahul', fromMe: false });
-    upsertPerson(db, { clientId: 1, jid: JID(2), number: '919800000002', name: '+91 98000 00002', fromMe: false });
-    say(db, 1, '2026-10-19T06:00:00.000Z'); // older than 7 days: not counted
-    say(db, 2, '2026-10-27T06:00:00.000Z', { person: 1 });
-    say(db, 3, '2026-10-27T07:00:00.000Z', { person: 2, media: 'image', text: null });
-    say(db, 4, '2026-10-27T08:00:00.000Z', { person: 3, media: 'voice', text: null });
-    say(db, 5, '2026-10-28T05:00:00.000Z', { person: 1, text: `Line one\nline two ${'x'.repeat(300)}` });
-    say(db, 6, '2026-10-28T05:30:00.000Z', { fromMe: true, person: 9, text: 'from the founder' });
+    await upsertPerson(db, { clientId: 1, jid: JID(1), number: '919800000001', name: 'Rahul', fromMe: false });
+    await upsertPerson(db, { clientId: 1, jid: JID(2), number: '919800000002', name: '+91 98000 00002', fromMe: false });
+    await say(db, 1, '2026-10-19T06:00:00.000Z'); // older than 7 days: not counted
+    await say(db, 2, '2026-10-27T06:00:00.000Z', { person: 1 });
+    await say(db, 3, '2026-10-27T07:00:00.000Z', { person: 2, media: 'image', text: null });
+    await say(db, 4, '2026-10-27T08:00:00.000Z', { person: 3, media: 'voice', text: null });
+    await say(db, 5, '2026-10-28T05:00:00.000Z', { person: 1, text: `Line one\nline two ${'x'.repeat(300)}` });
+    await say(db, 6, '2026-10-28T05:30:00.000Z', { fromMe: true, person: 9, text: 'from the founder' });
     db.raw.prepare("UPDATE messages SET revoked = 1 WHERE wa_id = 'D6'").run();
     const a = (await clientDetail(db, 'SHA', NOW))!.activity;
     expect(a.week).toEqual({ messages: 4, people: 3, files: 1, voice: 1 });
@@ -238,8 +238,8 @@ describe('the client drawer: what the agent has seen (owner decision, 28 Oct 202
 
   it('pending messages, the last batch (messages read, task changes), and the approval and history state', async () => {
     const db = await seededDb();
-    say(db, 1, '2026-10-28T05:00:00.000Z');
-    say(db, 2, '2026-10-28T05:10:00.000Z');
+    await say(db, 1, '2026-10-28T05:00:00.000Z');
+    await say(db, 2, '2026-10-28T05:10:00.000Z');
     db.raw.prepare("UPDATE messages SET processed_at = '2026-10-28T05:20:00.000Z' WHERE wa_id = 'D1'").run();
     const b = await startBatch(db, 1, 6, '2026-10-28T05:19:00.000Z');
     // Three accepted ops: two on tasks, one a decision (no task): two task changes.
@@ -262,13 +262,13 @@ describe('the client drawer: what the agent has seen (owner decision, 28 Oct 202
 
   it('keeps emoji sequences and Indic conjuncts whole, cuts by grapheme, and never shows a number hidden in a name', async () => {
     const db = await seededDb();
-    upsertPerson(db, { clientId: 1, jid: JID(1), number: null, name: '\u202A+91 98765 43210\u202C', fromMe: false });
-    upsertPerson(db, { clientId: 1, jid: JID(2), number: null, name: 'Ramesh Plumber 9876543210', fromMe: false });
-    upsertPerson(db, { clientId: 1, jid: JID(3), number: null, name: 'Kavya 👩‍💻', fromMe: false });
+    await upsertPerson(db, { clientId: 1, jid: JID(1), number: null, name: '\u202A+91 98765 43210\u202C', fromMe: false });
+    await upsertPerson(db, { clientId: 1, jid: JID(2), number: null, name: 'Ramesh Plumber 9876543210', fromMe: false });
+    await upsertPerson(db, { clientId: 1, jid: JID(3), number: null, name: 'Kavya 👩‍💻', fromMe: false });
     const family = '👨‍👩‍👧';
-    say(db, 1, '2026-10-28T05:00:00.000Z', { person: 1, text: `ok ${family} क्‍ष` });
-    say(db, 2, '2026-10-28T05:01:00.000Z', { person: 2, text: family.repeat(200) });
-    say(db, 3, '2026-10-28T05:02:00.000Z', { person: 3, text: null, mediaType: 'location' });
+    await say(db, 1, '2026-10-28T05:00:00.000Z', { person: 1, text: `ok ${family} क्‍ष` });
+    await say(db, 2, '2026-10-28T05:01:00.000Z', { person: 2, text: family.repeat(200) });
+    await say(db, 3, '2026-10-28T05:02:00.000Z', { person: 3, text: null, mediaType: 'location' });
     const [loc, long, short] = (await clientDetail(db, 'SHA', NOW))!.activity.latest;
     expect(loc).toMatchObject({ sender: 'Kavya 👩‍💻', kind: 'location', text: '' });
     expect(long!.sender).toBe('Someone');

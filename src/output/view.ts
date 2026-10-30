@@ -146,7 +146,7 @@ export async function loadTrackerView(db: Db, now: Date, health: HealthLine): Pr
           actionItemCount: m.actionItemCount,
         })),
         people: await listPeople(db, client.id),
-        lastActivity: lastActivity(db, client.id),
+        lastActivity: await lastActivity(db, client.id),
         lastMeeting: last === undefined ? null : istDate(new Date(last)),
         percentDone: all.length ? Math.floor((100 * (all.length - notDone.length)) / all.length) : null,
         overdue: notDone.filter((t) => isOverdue(t, today)).length,

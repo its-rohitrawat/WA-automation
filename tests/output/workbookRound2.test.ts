@@ -135,7 +135,7 @@ describe('workbook round 2', () => {
     logReminder(db, createTask(db, task(), NOW).id, '2026-10-13', NOW);
     setPhase(db, 1, 'Design', 'human');
     addDecision(db, { clientId: 1, text: 'Use the blue theme', decidedOn: '2026-10-12', source: 'whatsapp', sourceWaId: null }, NOW);
-    upsertPerson(db, { clientId: 1, jid: '9199@s.whatsapp.net', number: '9199', name: 'Mr. Sharma', fromMe: false });
+    await upsertPerson(db, { clientId: 1, jid: '9199@s.whatsapp.net', number: '9199', name: 'Mr. Sharma', fromMe: false });
     const ws = (await build(db)).getWorksheet('Sharma Interiors')!;
     expect(findByCell(ws, 1, 'Discovery').getCell(2).value).toBe('✅ Done');
     expect(findByCell(ws, 1, 'Design').getCell(2).value).toBe('🔄 Current');
@@ -158,7 +158,7 @@ describe('workbook round 2', () => {
     const db = await seededDb();
     addDecision(db, { clientId: 1, text: '=1+1', decidedOn: '2026-10-12', source: 'whatsapp', sourceWaId: null }, NOW);
     setStatus(db, 1, '=SUM(1,2)', NOW);
-    upsertPerson(db, { clientId: 1, jid: 'j1', number: null, name: '+cmd', fromMe: false });
+    await upsertPerson(db, { clientId: 1, jid: 'j1', number: null, name: '+cmd', fromMe: false });
     const wb = await build(db);
     const ws = wb.getWorksheet('Sharma Interiors')!;
     for (const [col, v] of [[2, '=1+1'], [2, '=SUM(1,2)'], [1, '+cmd']] as const) {

@@ -14,12 +14,12 @@ import { FakeVoiceTranscriber } from '../helpers/voice.ts';
 
 /** A transcribed voice note whose provider kept a copy named `ref`, noted by finishMedia (N1). Returns the media id. */
 async function copied(db: Db, waId: string, ref: string, provider: ProviderId = 'elevenlabs'): Promise<number> {
-  insertMessage(db, {
+  await insertMessage(db, {
     waId, clientId: 1, senderJid: '919800000001@s.whatsapp.net', senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false,
     ts: '2026-10-10T08:00:00.000Z', text: null, quotedWaId: null, mediaType: 'voice',
   });
-  const id = insertMedia(db, {
-    messageId: messageRowId(db, 1, waId)!, clientId: 1, kind: 'voice', status: 'pending', mimeType: 'audio/ogg; codecs=opus', fileName: null, fileSize: 9000,
+  const id = await insertMedia(db, {
+    messageId: (await messageRowId(db, 1, waId))!, clientId: 1, kind: 'voice', status: 'pending', mimeType: 'audio/ogg; codecs=opus', fileName: null, fileSize: 9000,
     seconds: 14, forwarded: false, refEnc: Buffer.from('sealed'), errorCode: null, createdAt: NOW,
   });
   await markDownloaded(db, id, { localPath: `media/SHA/2026-10/${waId}-${id}.ogg`, sha256: 'x', fileSize: 9000, at: NOW });

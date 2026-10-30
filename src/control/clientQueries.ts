@@ -307,7 +307,7 @@ export async function clientDetail(db: Db, code: string, now: Date, groupNames?:
   if (!c || !c.active) return null;
   const activity = await clientActivity(db, c, now, quietMinutes);
   const pulse = { pending: activity.pending, lastReadAt: activity.lastBatch?.at ?? null, quietMinutes };
-  const base = card(c, await countsForClient(db, now, c.id), new Map([[c.id, lastActivity(db, c.id)]]), sheetNames(db), groupNames, await backfillStatus(db, c.id, now), pulse);
+  const base = card(c, await countsForClient(db, now, c.id), new Map([[c.id, await lastActivity(db, c.id)]]), sheetNames(db), groupNames, await backfillStatus(db, c.id, now), pulse);
   // Sentiment is shown only while it is switched on: off, none leaves here.
   const moods = readSentimentEnabled(db);
   const openTasks = (await db.all<ClientOpenTask>(

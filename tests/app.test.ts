@@ -63,6 +63,9 @@ async function overviewTexts(buf: Buffer): Promise<string[]> {
   return out;
 }
 
+/** Waits until the events the last setup's gateway was handed are stored (the gateway hands them over in order). */
+let settled: () => Promise<void> = async () => {};
+
 async function setup(o: { ai?: FakeAi; drive?: FakeDrive; log?: Logger; drainMs?: number } = {}) {
   const ai = o.ai ?? new FakeAi();
   const drive = o.drive ?? new FakeDrive();
@@ -80,6 +83,7 @@ async function setup(o: { ai?: FakeAi; drive?: FakeDrive; log?: Logger; drainMs?
     auth: auth.state,
     saveCreds: auth.saveCreds,
   });
+  settled = () => gateway.idle();
   const app = createApp({
     db, clock: systemClock, log: o.log ?? silentLogger(), gateway, allow, ai, drive, prices: P, spendCapUsd: 15,
     quietMs: 240_000, maxWaitMs: 1_200_000, maxConcurrent: 3, dataDir: '.', freeBytes: () => 500e9, pollMs: 30_000,
@@ -152,6 +156,7 @@ describe('app end to end', () => {
       waText('x1', 'private family plans', { group: OTHER_GROUP }),
       waText('p1', 'personal chat', { group: '919811111111@s.whatsapp.net' }),
     ] });
+    await settled();
     expect(db.raw.prepare('SELECT wa_id FROM messages').all()).toEqual([{ wa_id: 'm1' }]);
 
     await vi.advanceTimersByTimeAsync(240_000);
@@ -177,6 +182,7 @@ describe('app end to end', () => {
     const { db, app, sock } = await setup();
     app.reloadClients([SHARMA]);
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
+    await settled();
     expect(db.raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 0 });
     await stopApp(app);
   });
@@ -208,6 +214,7 @@ describe('app shutdown', () => {
     });
     const { db, app, sock } = await setup({ ai });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
+    await settled();
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls).toHaveLength(1);
 
@@ -232,6 +239,7 @@ describe('app shutdown', () => {
     const drive = new CapturingDrive();
     const { app, sock } = await setup({ ai, drive });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
+    await settled();
     await vi.advanceTimersByTimeAsync(239_000);
     expect(drive.uploads).toBe(1);
     await vi.advanceTimersByTimeAsync(2_000);
@@ -258,6 +266,7 @@ describe('app shutdown', () => {
     const drive = new CapturingDrive();
     const { db, app, sock } = await setup({ ai, drive });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
+    await settled();
     await vi.advanceTimersByTimeAsync(241_000);
     expect(ai.calls).toHaveLength(1);
     expect(drive.uploads).toBe(1);
@@ -287,6 +296,7 @@ describe('app shutdown', () => {
     const { lines, log } = capturingLogger();
     const { db, app, sock } = await setup({ ai, drainMs: 5_000, log });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
+    await settled();
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls).toHaveLength(1);
 
@@ -306,6 +316,7 @@ describe('app shutdown', () => {
     ai.gate = aiCall.promise;
     const { db, app, sock } = await setup({ ai });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
+    await settled();
     await vi.advanceTimersByTimeAsync(241_000);
     const stop = stopping(app);
     aiCall.resolve();
@@ -325,6 +336,7 @@ describe('app shutdown', () => {
     ai.gate = new Promise<void>(() => {});
     const { app, sock } = await setup({ ai });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
+    await settled();
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls).toHaveLength(1);
 
@@ -342,6 +354,7 @@ describe('app shutdown', () => {
     ai.gate = new Promise<void>(() => {});
     const { app, sock } = await setup({ ai, drainMs: 5_000 });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
+    await settled();
     await vi.advanceTimersByTimeAsync(240_000);
 
     const t0 = Date.now();
@@ -398,6 +411,7 @@ describe('app allow-list changes', () => {
     const run = vi.spyOn(Reconciler.prototype, 'run');
     const { db, ai, app, sock } = await setup();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
+    await settled();
     expect(db.raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 1 });
 
     app.reloadClients([SHARMA]);
@@ -410,6 +424,7 @@ describe('app allow-list changes', () => {
   it('clears the health warning of a failed group once it is removed', async () => {
     const { db, app, sock } = await setup({ ai: new FakeAi([new Error('boom')]) });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
+    await settled();
     await vi.advanceTimersByTimeAsync(240_000);
     expect(app.health.line()).toEqual({ ok: false, text: '⚠️ 1 group waiting (AI error)' });
 
@@ -426,6 +441,7 @@ describe('app allow-list changes', () => {
     ai.gate = g.promise;
     const { db, drive, app, sock } = await setup({ ai });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
+    await settled();
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls).toHaveLength(1);
 
@@ -445,6 +461,7 @@ describe('app allow-list changes', () => {
     vi.spyOn(Reconciler.prototype, 'run').mockImplementationOnce(() => g.promise);
     const { db, app, sock } = await setup();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
+    await settled();
     await vi.advanceTimersByTimeAsync(240_000);
 
     app.reloadClients([SHARMA]);
@@ -459,6 +476,7 @@ describe('app allow-list changes', () => {
     const { db, app, sock } = await setup();
     expect(() => app.reloadClients([SHARMA, { ...MEHTA, code: 'MEX' }])).toThrow(/codes are permanent/);
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
+    await settled();
     expect(db.raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 1 });
     await stopApp(app);
   });
@@ -466,6 +484,7 @@ describe('app allow-list changes', () => {
   it('picks up the waiting messages of a group that is added back', async () => {
     const { ai, app, sock } = await setup();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
+    await settled();
     app.reloadClients([SHARMA]);
     await vi.advanceTimersByTimeAsync(1_300_000);
     expect(ai.calls).toEqual([]);
@@ -490,6 +509,7 @@ describe('app ingest failures', () => {
     const { db, app, sock, gateway } = await setup({ log });
     db.raw.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store: banner thoda bright'); END");
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
+    await settled();
 
     expect(gateway.failedCount()).toBe(1);
     expect(lines.find((l) => l.msg === 'ingest failed')).toMatchObject({ err: { type: 'SqliteError' } });
@@ -501,6 +521,7 @@ describe('app ingest failures', () => {
     const { db, app, sock, gateway } = await setup();
     db.raw.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
+    await settled();
     expect(gateway.failedCount()).toBe(1);
     await vi.advanceTimersByTimeAsync(30_000);
     expect(readHealthSnapshot(db)!.ingestFailures).toBe(1);
@@ -520,6 +541,7 @@ describe('app health and publishing', () => {
     const drive = new CapturingDrive();
     const { app, sock } = await setup({ ai: new FakeAi([new Error('boom')]), drive });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
+    await settled();
     await vi.advanceTimersByTimeAsync(239_000);
     expect(drive.uploads).toBe(1);
 
@@ -536,9 +558,10 @@ describe('app health and publishing', () => {
     const run = vi.spyOn(Reconciler.prototype, 'run');
     const { db, ai, drive, app, sock } = await setup();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'see this')] });
+    await settled();
     // A file of this message is still being read (the media queue is wired in Task 15).
-    insertMedia(db, {
-      messageId: messageRowId(db, 1, 'm1')!, clientId: 1, kind: 'image', status: 'pending', mimeType: 'image/jpeg', fileName: null, fileSize: 1000,
+    await insertMedia(db, {
+      messageId: (await messageRowId(db, 1, 'm1'))!, clientId: 1, kind: 'image', status: 'pending', mimeType: 'image/jpeg', fileName: null, fileSize: 1000,
       seconds: null, forwarded: false, refEnc: null, errorCode: null, createdAt: new Date().toISOString(),
     });
     await vi.advanceTimersByTimeAsync(239_000);
@@ -566,6 +589,7 @@ describe('app health and publishing', () => {
     const { lines, log } = capturingLogger();
     const { db, drive, app, sock } = await setup({ log });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
+    await settled();
     await vi.advanceTimersByTimeAsync(239_000);
     expect(drive.uploads).toBe(1);
 
@@ -632,11 +656,13 @@ describe('app health and publishing', () => {
     const drive = new CapturingDrive();
     const { db, app, sock } = await setup({ ai: new FakeAi([{ ops: [bannerTask()] }]), drive });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
+    await settled();
     await vi.advanceTimersByTimeAsync(300_000); // reconciled at 240 s and uploaded
     expect(listTasks(db, 1).map((t) => t.code)).toEqual(['SHA-001']);
     const before = drive.uploads;
 
     sock.emit('messages.update', [{ key: { remoteJid: SHARMA.groupId, id: 'm1' }, update: { messageStubType: WAMessageStubType.REVOKE } } as WAMessageUpdate]);
+    await settled();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(drive.uploads).toBe(before + 1);
     const uploaded = drive.last!;
@@ -658,6 +684,7 @@ describe('app health and publishing', () => {
     // A message that cannot be saved changes only the health line: no reconcile, no file, no other publish.
     db.raw.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
+    await settled();
     await vi.advanceTimersByTimeAsync(31_000); // the next tick sees the new line
     expect(drive.uploads).toBe(2);
     const uploaded = drive.last!;
@@ -720,15 +747,18 @@ describe('app: a newly approved group\'s earlier messages (history backfill)', (
     // seededDb approved Sharma at 07:00: no message yet, so it waits for the first new one.
     expect(sock.fetchMessageHistory).not.toHaveBeenCalled();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('L1', 'NEW: send the final logo today', { ts: sec('2026-10-19T07:00:30Z') })] });
+    await settled();
     await vi.advanceTimersByTimeAsync(30_000); // the tick
     expect(sock.fetchMessageHistory).toHaveBeenCalledExactlyOnceWith(50, { remoteJid: SHARMA.groupId, fromMe: false, id: 'L1' }, Date.parse('2026-10-19T07:00:30Z'));
     sock.emit('messaging-history.set', { chats: [], contacts: [], syncType: ON_DEMAND, messages: [waText('E1', 'OLD: please make a logo', { ts: sec('2026-10-17T09:00:00Z') })] });
+    await settled();
     await vi.advanceTimersByTimeAsync(4_000); // the gap, then the next page from the new oldest message
     expect(sock.fetchMessageHistory).toHaveBeenCalledTimes(2);
     expect(sock.fetchMessageHistory.mock.calls[1]![1]).toEqual({ remoteJid: SHARMA.groupId, fromMe: false, id: 'E1' });
     expect(ai.calls).toEqual([]); // held: nothing is reconciled while earlier messages are being read
     // Older than 7 days: dropped, and the backfill ends.
     sock.emit('messaging-history.set', { chats: [], contacts: [], syncType: ON_DEMAND, messages: [waText('E0', 'TOO OLD', { ts: sec('2026-10-10T09:00:00Z') })] });
+    await settled();
     expect(db.raw.prepare("SELECT 1 FROM messages WHERE wa_id = 'E0'").get()).toBeUndefined();
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls).toHaveLength(1);
@@ -742,8 +772,10 @@ describe('app: a newly approved group\'s earlier messages (history backfill)', (
   it('asks for nothing for a group that is not approved, and stops a group that is removed', async () => {
     const { app, sock } = await setup();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('X1', 'not ours', { group: OTHER_GROUP, ts: sec('2026-10-19T07:00:30Z') })] });
+    await settled();
     app.reloadClients([MEHTA]); // Sharma removed before its first message
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('L1', 'after removal', { ts: sec('2026-10-19T07:00:40Z') })] });
+    await settled();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(sock.fetchMessageHistory).not.toHaveBeenCalled();
     await stopApp(app);

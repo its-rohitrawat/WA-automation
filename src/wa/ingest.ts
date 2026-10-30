@@ -1,7 +1,7 @@
 import { isSafeMediaAddress, isSafeMediaUrl, mediaRefAad, type MediaRefSealer } from '../media/ref.ts';
 import { MEDIA_LIMITS, type MediaInfo, type MediaRef } from '../media/types.ts';
 import { getClientByGroupId } from '../store/clients.ts';
-import { txSync, type Db } from '../store/db.ts';
+import type { Db } from '../store/db.ts';
 import { insertMedia, messageRowId, type MediaStatus } from '../store/media.ts';
 import { applyEdit, applyRevoke, insertMessage, upsertReaction } from '../store/messages.ts';
 import { upsertPerson } from '../store/people.ts';
@@ -49,7 +49,8 @@ export class Ingestor {
     this.#media = opts.media;
   }
 
-  handle(e: NormalizedEvent): void {
+  /** The gateways hand events over one after another, waiting for each (src/wa/gateway.ts), so they are stored in order. */
+  async handle(e: NormalizedEvent): Promise<void> {
     const db = this.#db;
     // Second line of defence after the gateway's allow-list.
     const client = getClientByGroupId(db, e.groupId);
@@ -58,8 +59,8 @@ export class Ingestor {
     switch (e.kind) {
       case 'message': {
         // The message and its file row are written together, so a file is never left without its message.
-        const result = txSync(db, () => {
-          const isNew = insertMessage(db, {
+        const result = await db.tx(async (q) => {
+          const isNew = await insertMessage(q, {
             waId: e.waId,
             clientId: client.id,
             senderJid: e.senderJid,
@@ -72,11 +73,11 @@ export class Ingestor {
             mediaType: e.mediaType,
           });
           let queued: number | null = null;
-          const messageId = isNew && e.media ? messageRowId(db, client.id, e.waId) : undefined;
+          const messageId = isNew && e.media ? await messageRowId(q, client.id, e.waId) : undefined;
           if (e.media && messageId !== undefined) {
             const sealer = this.#media?.sealer;
             const plan = planMedia(e.media, sealer ? (ref) => sealer.seal(ref, mediaRefAad(client.id, e.waId)) : null);
-            const id = insertMedia(db, {
+            const id = await insertMedia(q, {
               messageId,
               clientId: client.id,
               kind: e.media.kind,
@@ -94,20 +95,20 @@ export class Ingestor {
           }
           return { isNew, queued };
         });
-        upsertPerson(db, { clientId: client.id, jid: e.senderJid, number: e.senderNumber, name: e.senderName, fromMe: e.fromMe });
+        await upsertPerson(db, { clientId: client.id, jid: e.senderJid, number: e.senderNumber, name: e.senderName, fromMe: e.fromMe });
         if (result.isNew) this.#onNew(client.id);
         if (result.queued !== null) this.#media?.onQueued?.(result.queued);
         return;
       }
       case 'edit':
-        if (applyEdit(db, client.id, e.waId, e.text, e.ts.toISOString())) this.#onNew(client.id);
+        if (await applyEdit(db, client.id, e.waId, e.text, e.ts.toISOString())) this.#onNew(client.id);
         return;
       case 'revoke':
-        applyRevoke(db, client.id, e.waId);
+        await applyRevoke(db, client.id, e.waId);
         return;
       case 'reaction':
-        upsertReaction(db, { clientId: client.id, targetWaId: e.targetWaId, reactorJid: e.reactorJid, emoji: e.emoji, ts: e.ts.toISOString() });
-        upsertPerson(db, { clientId: client.id, jid: e.reactorJid, number: null, name: null, fromMe: e.fromMe });
+        await upsertReaction(db, { clientId: client.id, targetWaId: e.targetWaId, reactorJid: e.reactorJid, emoji: e.emoji, ts: e.ts.toISOString() });
+        await upsertPerson(db, { clientId: client.id, jid: e.reactorJid, number: null, name: null, fromMe: e.fromMe });
         if (e.emoji) this.#onNew(client.id);
         return;
     }

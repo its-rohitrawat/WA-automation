@@ -53,15 +53,18 @@ export const TRACKER_DEVICE_NAME = 'WA Agent - Tracker';
  * Only a message this agent sent from the dashboard (Open chat, src/wa/groupSend.ts), found by its id in that group
  * (sentText reads the outbox), and only as its text. Anything else: undefined, as before.
  */
-export function retryMessage(sentText?: (waId: string, groupId: string) => string | undefined): (key: { id?: string | null; remoteJid?: string | null }) => Promise<{ conversation: string } | undefined> {
+export function retryMessage(sentText?: SentText): (key: { id?: string | null; remoteJid?: string | null }) => Promise<{ conversation: string } | undefined> {
   return async (key) => {
-    const text = sentText && key.id && key.remoteJid ? sentText(key.id, key.remoteJid) : undefined;
+    const text = sentText && key.id && key.remoteJid ? await sentText(key.id, key.remoteJid) : undefined;
     return text === undefined ? undefined : { conversation: text };
   };
 }
 
+/** The outbox lookup for retryMessage: the text the agent sent as this message, if any. May read the database (a promise). */
+export type SentText = (waId: string, groupId: string) => string | undefined | Promise<string | undefined>;
+
 /** sentText: the outbox lookup for retryMessage (left out: getMessage answers nothing). */
-export function baileysSocketFactory(logger: BaileysLogger, sentText?: (waId: string, groupId: string) => string | undefined): SocketFactory {
+export function baileysSocketFactory(logger: BaileysLogger, sentText?: SentText): SocketFactory {
   return (auth, cachedGroupMetadata) =>
     makeWASocket({
       auth: { creds: auth.creds, keys: makeCacheableSignalKeyStore(auth.keys, logger) },
@@ -89,9 +92,18 @@ export interface GatewayStatus {
   credsSaveFailures: number;
 }
 
+/**
+ * An event handler. A promise it returns is awaited before the next event is handed over, so events are handled one
+ * after another, in the order they came (SaaS S1.10: the ingest awaits the database). A throw or a rejection counts the
+ * event as failed (failedCount).
+ */
+export type EventHandler = (e: NormalizedEvent) => unknown;
+
 /** What the app and the dashboard use of a founder gateway: WhatsAppGateway, or the SwitchableGateway holding one. */
 export interface GatewayLike {
-  onEvent(fn: (e: NormalizedEvent) => void): void;
+  onEvent(fn: EventHandler): void;
+  /** Resolves once the events handed over so far are handled (shutdown waits for it before the database closes). */
+  idle?(): Promise<void>;
   onStatus(fn: (s: GatewayStatus) => void): void;
   status(): GatewayStatus;
   start(): void;
@@ -148,6 +160,11 @@ export class WhatsAppGateway implements GatewayLike {
   #status: Omit<GatewayStatus, 'credsSaveFailures'>;
   #dropped = 0;
   #failed = 0;
+  readonly #eventFns: EventHandler[] = [];
+  /** Events waiting for the handler of an earlier one to finish. */
+  readonly #pending: NormalizedEvent[] = [];
+  #handing = false;
+  #handed: Promise<void> = Promise.resolve();
   #credsSaveFailures = 0;
   #stopped = false;
 
@@ -158,8 +175,12 @@ export class WhatsAppGateway implements GatewayLike {
     this.#status = { state: 'stopped', since: this.#clock.now().toISOString(), lastErrorCode: null };
   }
 
-  onEvent(fn: (e: NormalizedEvent) => void): void {
-    this.#emitter.on('event', fn);
+  onEvent(fn: EventHandler): void {
+    this.#eventFns.push(fn);
+  }
+
+  idle(): Promise<void> {
+    return this.#handed;
   }
 
   onStatus(fn: (s: GatewayStatus) => void): void {
@@ -317,14 +338,40 @@ export class WhatsAppGateway implements GatewayLike {
     return false;
   }
 
-  /** Normalise and emit one already-allowed item. A failure never escapes into Baileys. */
+  /** Normalise and hand over one already-allowed item. A failure never escapes into Baileys. */
   #deliver(build: () => NormalizedEvent | null): void {
     if (this.#stopped) return;
+    let e: NormalizedEvent | null;
     try {
-      const e = build();
-      if (e) this.#emitter.emit('event', e);
+      e = build();
     } catch {
       this.#failed++;
+      return;
+    }
+    if (!e) return;
+    this.#pending.push(e);
+    if (!this.#handing) this.#handed = this.#handOver();
+  }
+
+  /**
+   * Hands the waiting events to the handlers, one after another. With synchronous handlers it all runs before
+   * #deliver returns; a handler's promise makes the rest wait for it, and events that come meanwhile queue behind.
+   */
+  async #handOver(): Promise<void> {
+    this.#handing = true;
+    try {
+      for (let e = this.#pending.shift(); e !== undefined; e = this.#pending.shift()) {
+        try {
+          for (const fn of this.#eventFns) {
+            const r = fn(e);
+            if (r instanceof Promise) await r;
+          }
+        } catch {
+          this.#failed++;
+        }
+      }
+    } finally {
+      this.#handing = false;
     }
   }
 

@@ -16,13 +16,10 @@ spend/spendGuard.ts
 store/clients.ts
 store/db.ts
 store/kv.ts
-store/media.ts
-store/messages.ts
 store/outbox.ts
 store/people.ts
 store/reports.ts
 store/tasks.ts
 wa/authState.ts
-wa/ingest.ts
 web/audit.ts
 web/routes/groups.ts

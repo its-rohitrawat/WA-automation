@@ -60,22 +60,22 @@ async function backlogVoice(o: { clientId?: number; kind?: MediaKind; fileSize?:
   const clientId = o.clientId ?? 1;
   const kind = o.kind ?? 'voice';
   const waId = `W${++seq}`;
-  insertMessage(db, {
+  await insertMessage(db, {
     waId, clientId, senderJid: '919800000001@s.whatsapp.net', senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false,
     ts: '2026-10-10T08:00:00.000Z', text: null, quotedWaId: null, mediaType: kind,
   });
-  const messageId = messageRowId(db, clientId, waId)!;
+  const messageId = (await messageRowId(db, clientId, waId))!;
   const row: NewMedia = {
     messageId, clientId, kind, status: 'pending', mimeType: o.mimeType === undefined ? OGG : o.mimeType, fileName: FILE_NAME, fileSize: 1000,
     seconds: 5, forwarded: false, refEnc: Buffer.from('sealed'), errorCode: null, createdAt: NOW,
   };
-  const id = insertMedia(db, row);
+  const id = await insertMedia(db, row);
   await markDownloaded(db, id, { localPath: `media/SHA/2026-10/${waId}-${id}.ogg`, sha256: 'x', fileSize: o.fileSize ?? 90_000, at: NOW });
   await claimMedia(db, id, { nextAttemptAt: LATER, at: NOW });
   await finishMedia(db, id, {
     textKind: o.text === undefined ? null : 'extract', text: o.text ?? null, pageCount: null, note: o.note ?? null, at: NOW,
   });
-  markProcessed(db, [messageId], NOW);
+  await markProcessed(db, [messageId], NOW);
   return id;
 }
 
@@ -84,19 +84,19 @@ async function failedVoice(errorCode: string, o: { clientId?: number; kind?: Med
   const clientId = o.clientId ?? 1;
   const kind = o.kind ?? 'voice';
   const waId = `F${++seq}`;
-  insertMessage(db, {
+  await insertMessage(db, {
     waId, clientId, senderJid: '919800000001@s.whatsapp.net', senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false,
     ts: '2026-10-25T08:00:00.000Z', text: null, quotedWaId: null, mediaType: kind,
   });
-  const messageId = messageRowId(db, clientId, waId)!;
-  const id = insertMedia(db, {
+  const messageId = (await messageRowId(db, clientId, waId))!;
+  const id = await insertMedia(db, {
     messageId, clientId, kind, status: 'pending', mimeType: OGG, fileName: FILE_NAME, fileSize: 1000, seconds: 5, forwarded: false,
     refEnc: Buffer.from('sealed'), errorCode: null, createdAt: NOW,
   });
   await markDownloaded(db, id, { localPath: `media/SHA/2026-10/${waId}-${id}.ogg`, sha256: 'x', fileSize: o.fileSize ?? 90_000, at: NOW });
   await claimMedia(db, id, { nextAttemptAt: LATER, at: NOW });
   await failMedia(db, id, { status: 'failed', errorCode, at: NOW });
-  markProcessed(db, [messageId], NOW);
+  await markProcessed(db, [messageId], NOW);
   return id;
 }
 
@@ -393,8 +393,8 @@ describe('transcribe-voice --yes', () => {
 
     // A fake extractor finishes them: the transcripts are stored and no message is queued or flagged again.
     for (const id of [a, b, large, amr]) await finishMedia(db, id, { textKind: 'extract', text: TRANSCRIPT, pageCount: null, note: null, at: LATER });
-    expect(listUnprocessed(db, 1)).toEqual([]);
-    expect(listUnprocessed(db, 2)).toEqual([]);
+    expect(await listUnprocessed(db, 1)).toEqual([]);
+    expect(await listUnprocessed(db, 2)).toEqual([]);
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM messages WHERE processed_at IS NULL').get()).toEqual({ n: 0 });
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM media WHERE requeued_for_text = 1').get()).toEqual({ n: 0 });
     // Once transcribed, nothing is left to queue.

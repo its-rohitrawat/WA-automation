@@ -229,7 +229,7 @@ export class Reconciler {
     const wasWaiting = this.#waiting.delete(clientId);
     const client = getClient(db, clientId);
     if (!client.active) return { status: 'noop' };
-    const queued = listUnprocessed(db, clientId);
+    const queued = await listUnprocessed(db, clientId);
     if (queued.length === 0) return { status: 'noop' };
     const now = clock.now();
     // §6.1: a shared file is read before the AI sees its message. Messages from the first file still being read onward
@@ -254,11 +254,11 @@ export class Reconciler {
     // Context comes from before the first new or reprocessed message, so a reprocess window does not see later chat.
     // Re-checks (edits, reactions, files read late) of old messages are skipped here: they must not pull the context back in time.
     const firstNew = batch.find((m) => !isRecheck(m));
-    const recent = listRecentProcessed(db, clientId, 30, firstNew?.ts);
+    const recent = await listRecentProcessed(db, clientId, 30, firstNew?.ts);
     const people = await listPeople(db, clientId);
     const openTasks = listTasks(db, clientId, ['open', 'maybe_done']);
     const decisions = listDecisions(db, clientId, 20);
-    const reactions = reactionsFor(db, clientId, [...recent, ...batch].map((m) => m.waId));
+    const reactions = await reactionsFor(db, clientId, [...recent, ...batch].map((m) => m.waId));
     const media = await mediaForPrompt(db, batch, recent);
     const mediaText = mediaPromptTexts(media, batch, recent);
     const user = buildUserContent({
@@ -275,7 +275,7 @@ export class Reconciler {
 
     // Job C, P2: only an edit or a reaction made during the call may label a message queued again, never one from before
     // this run. The version check keeps any touch made since the batch was listed (the media reads above await).
-    clearTouches(db, batch.map((m) => ({ id: m.id, version: m.version })));
+    await clearTouches(db, batch.map((m) => ({ id: m.id, version: m.version })));
     const batchId = await startBatch(db, clientId, batch.length, now.toISOString());
     let result: { output: AiOutput; invalidOps: number };
     try {
@@ -317,8 +317,8 @@ export class Reconciler {
         const seen = batch.map((m) => ({
           id: m.id, version: m.version, fileUnread: queuedMedia.get(m.id)?.status === 'pending', fileShown: fileRechecks.has(m.id),
         }));
-        const requeued = markProcessedIfUnchanged(db, seen, appliedAt.toISOString());
-        flagRevokedSources(db, clientId); // a source message deleted during the call
+        const requeued = await markProcessedIfUnchanged(q, seen, appliedAt.toISOString());
+        await flagRevokedSources(q, clientId); // a source message deleted during the call
         await finishBatch(q, batchId, { status: 'ok', errorCode: null, accepted: accepted.length, rejected: rejected.length, at: appliedAt.toISOString() });
         return { accepted, rejected, requeued };
       });
@@ -367,8 +367,8 @@ export class Reconciler {
     const client = getClient(db, clientId);
     const now = clock.now();
     // Only processed messages: one still queued is the next WhatsApp run's evidence, and that run sees this one's tasks.
-    const recent = listRecentProcessed(db, clientId, 30);
-    const reactions = reactionsFor(db, clientId, recent.map((m) => m.waId));
+    const recent = await listRecentProcessed(db, clientId, 30);
+    const reactions = await reactionsFor(db, clientId, recent.map((m) => m.waId));
     const user = buildUserContent({
       client,
       people: await listPeople(db, clientId),

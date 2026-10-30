@@ -76,11 +76,11 @@ async function savedFile(
   const jid = o.jid ?? SHARMA_PN;
   const kind = o.kind ?? 'document';
   const fromMe = o.fromMe ?? false;
-  insertMessage(db, { waId: o.waId, clientId, senderJid: jid, senderNumber: null, senderName: 'Mr. Sharma', fromMe, ts: '2026-10-10T08:00:00.000Z', text: null, quotedWaId: null, mediaType: kind });
-  upsertPerson(db, { clientId, jid, number: null, name: 'Mr. Sharma', fromMe });
+  await insertMessage(db, { waId: o.waId, clientId, senderJid: jid, senderNumber: null, senderName: 'Mr. Sharma', fromMe, ts: '2026-10-10T08:00:00.000Z', text: null, quotedWaId: null, mediaType: kind });
+  await upsertPerson(db, { clientId, jid, number: null, name: 'Mr. Sharma', fromMe });
   if (o.role) setRole(db, clientId, jid, o.role, 'human');
-  const id = insertMedia(db, {
-    messageId: messageRowId(db, clientId, o.waId)!, clientId, kind, status: 'pending', mimeType: o.mimeType ?? 'application/pdf',
+  const id = await insertMedia(db, {
+    messageId: (await messageRowId(db, clientId, o.waId))!, clientId, kind, status: 'pending', mimeType: o.mimeType ?? 'application/pdf',
     fileName: o.fileName === undefined ? 'brief.pdf' : o.fileName, fileSize: 9, seconds: null, forwarded: o.forwarded ?? false, refEnc: null, errorCode: null,
     createdAt: NOW,
   });
@@ -201,7 +201,7 @@ describe('DriveFileUploader', () => {
   it('skips files whose message was deleted for everyone', async () => {
     const { db, dataDir, drive, up } = await setup();
     await savedFile(db, dataDir, { waId: 'R', role: 'client' });
-    applyRevoke(db, 1, 'R');
+    await applyRevoke(db, 1, 'R');
     await up.run();
     expect(drive.created).toHaveLength(0);
   });

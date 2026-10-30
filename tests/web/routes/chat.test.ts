@@ -79,8 +79,8 @@ const errorOf = (r: { body: unknown }) => (r.body as { error: { code: string; me
 const sent = (r: { body: unknown }) => r.body as { message: { uuid: string; state: string; text: string; quote: unknown }; replayed: boolean };
 const outboxRows = () => db.raw.prepare('SELECT * FROM outbox').all() as { state: string; wa_id: string | null; error_code: string | null }[];
 
-function say(waId: string, o: { text?: string | null; fromMe?: boolean; ts?: string; jid?: string; media?: string } = {}): number {
-  insertMessage(db, {
+async function say(waId: string, o: { text?: string | null; fromMe?: boolean; ts?: string; jid?: string; media?: string } = {}): Promise<number> {
+  await insertMessage(db, {
     waId, clientId: 1, senderJid: o.jid ?? '919812345678@s.whatsapp.net', senderNumber: o.fromMe ? null : '919812345678', senderName: null,
     fromMe: o.fromMe ?? false, ts: o.ts ?? '2026-10-19T07:00:00.000Z', text: o.text === undefined ? `text of ${waId}` : o.text, quotedWaId: null, mediaType: o.media ?? null,
   });
@@ -213,14 +213,14 @@ describe('sending from the dashboard', () => {
   });
 
   it('a reply quotes the stored message by its row, only within this client', async () => {
-    const id = say('ABCDEF0123456789', { text: 'Can you send the quote?' });
+    const id = await say('ABCDEF0123456789', { text: 'Can you send the quote?' });
     const r = await send({ replyTo: id, text: 'Sending it today' });
     expect(sent(r).message.quote).toEqual({ sender: 'Someone', text: 'Can you send the quote?', kind: 'text' });
     expect(sock.calls[0]!.quoted).toEqual({
       key: { remoteJid: SHARMA.groupId, id: 'ABCDEF0123456789', fromMe: false, participant: '919812345678@s.whatsapp.net' },
       message: { conversation: 'Can you send the quote?' },
     });
-    insertMessage(db, {
+    await insertMessage(db, {
       waId: 'MEHTA00000000001', clientId: 2, senderJid: 'x@s.whatsapp.net', senderNumber: null, senderName: null, fromMe: false,
       ts: NOW, text: 'other client', quotedWaId: null, mediaType: null,
     });
@@ -242,8 +242,8 @@ describe('sending from the dashboard', () => {
       key: { remoteJid: SHARMA.groupId, fromMe: true, id: waId }, message: { conversation: 'Hello team' }, messageTimestamp: Date.parse(NOW) / 1000,
     } as Parameters<typeof normalizeMessage>[0]);
     expect(echo).not.toBeNull();
-    ingest.handle(echo!);
-    ingest.handle(echo!); // Baileys' own event, then the phone's copy of the same message
+    await ingest.handle(echo!);
+    await ingest.handle(echo!); // Baileys' own event, then the phone's copy of the same message
     expect((db.raw.prepare('SELECT COUNT(*) AS n FROM messages WHERE wa_id = ?').get(waId) as { n: number }).n).toBe(1);
     const page = await chatPage(db, sha, clock.now());
     expect(page.outbox).toEqual([]);
@@ -267,7 +267,7 @@ describe('resending to a phone that could not read a message (getMessage)', () =
     const waId = outboxRows()[0]!.wa_id!;
     expect(await getMessage({ id: waId, remoteJid: SHARMA.groupId })).toEqual({ conversation: 'Hello team' });
     // A message the agent only read (stored, not in the outbox), the right id in another group, an unknown id, no id.
-    const read = say('READ000000000001', { text: 'a member wrote this' });
+    const read = await say('READ000000000001', { text: 'a member wrote this' });
     const readWaId = (db.raw.prepare('SELECT wa_id AS w FROM messages WHERE id = ?').get(read) as { w: string }).w;
     expect(await getMessage({ id: readWaId, remoteJid: SHARMA.groupId })).toBeUndefined();
     expect(await getMessage({ id: waId, remoteJid: MEHTA.groupId })).toBeUndefined();
@@ -288,9 +288,9 @@ describe('reading the chat', () => {
   const view = (r: { body: unknown }) => r.body as { messages: { id: number; text: string; mine: boolean; sender: string; kind: string; deleted: boolean; transcript: string | null; quote: unknown }[]; hasOlder: boolean; client: { groupName: string }; sendingOn: boolean };
 
   it('pages newest first with no phone number, JID or WhatsApp id; text as stored, lines kept', async () => {
-    upsertPerson(db, { clientId: 1, jid: '919812345678@s.whatsapp.net', number: '919812345678', name: 'Rahul +91 98123 45678', fromMe: false });
-    upsertPerson(db, { clientId: 1, jid: '919800000001@s.whatsapp.net', number: '919800000001', name: 'Neha', fromMe: false });
-    for (let i = 0; i < 5; i++) say(`MSG000000000000${i}`, { ts: `2026-10-19T07:0${i}:00.000Z`, text: `line one ${i}\nline two <b>x</b>`, jid: i % 2 ? '919800000001@s.whatsapp.net' : undefined });
+    await upsertPerson(db, { clientId: 1, jid: '919812345678@s.whatsapp.net', number: '919812345678', name: 'Rahul +91 98123 45678', fromMe: false });
+    await upsertPerson(db, { clientId: 1, jid: '919800000001@s.whatsapp.net', number: '919800000001', name: 'Neha', fromMe: false });
+    for (let i = 0; i < 5; i++) await say(`MSG000000000000${i}`, { ts: `2026-10-19T07:0${i}:00.000Z`, text: `line one ${i}\nline two <b>x</b>`, jid: i % 2 ? '919800000001@s.whatsapp.net' : undefined });
     const first = await read({ limit: '2' });
     expect(first.status).toBe(200);
     const v = view(first);
@@ -307,11 +307,11 @@ describe('reading the chat', () => {
   });
 
   it('a deleted message has no text; a voice note shows its transcript; a reply shows its quote', async () => {
-    const gone = say('GONE000000000001', { text: 'secret' });
+    const gone = await say('GONE000000000001', { text: 'secret' });
     db.raw.prepare('UPDATE messages SET revoked = 1 WHERE id = ?').run(gone);
-    const voice = say('VOICE00000000001', { text: null, media: 'voice', ts: '2026-10-19T07:01:00.000Z' });
+    const voice = await say('VOICE00000000001', { text: null, media: 'voice', ts: '2026-10-19T07:01:00.000Z' });
     db.raw.prepare("INSERT INTO media (message_id, client_id, kind, status, seconds, text_kind, text, created_at, updated_at) VALUES (?, 1, 'voice', 'done', 42, 'extract', 'Please call me', '2026-10-19T07:01:00.000Z', '2026-10-19T07:01:00.000Z')").run(voice);
-    say('QUOTER0000000001', { ts: '2026-10-19T07:02:00.000Z', text: 'yes' });
+    await say('QUOTER0000000001', { ts: '2026-10-19T07:02:00.000Z', text: 'yes' });
     db.raw.prepare("UPDATE messages SET quoted_wa_id = 'VOICE00000000001' WHERE wa_id = 'QUOTER0000000001'").run();
     const [reply, note, deleted] = view(await read()).messages;
     expect(deleted).toMatchObject({ deleted: true, text: '' });

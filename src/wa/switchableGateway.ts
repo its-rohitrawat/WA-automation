@@ -1,5 +1,5 @@
 import { systemClock, type Clock } from '../util/clock.ts';
-import type { GatewayLike, GatewayState, GatewayStatus, HistoryAnchor, HistoryAnswer } from './gateway.ts';
+import type { EventHandler, GatewayLike, GatewayState, GatewayStatus, HistoryAnchor, HistoryAnswer } from './gateway.ts';
 import type { GroupSendSocket } from './groupSend.ts';
 import type { NormalizedEvent } from './normalize.ts';
 
@@ -24,7 +24,7 @@ const STOP_CAP_MS = 5_000;
 export class SwitchableGateway implements GatewayLike {
   readonly #clock: Clock;
   readonly #stopCapMs: number;
-  readonly #eventFns: ((e: NormalizedEvent) => void)[] = [];
+  readonly #eventFns: EventHandler[] = [];
   readonly #statusFns: ((s: GatewayStatus) => void)[] = [];
   readonly #historyFns: ((a: HistoryAnswer) => void)[] = [];
   #inner: GatewayLike | undefined;
@@ -45,8 +45,13 @@ export class SwitchableGateway implements GatewayLike {
     if (o.inner) this.#install(o.inner);
   }
 
-  onEvent(fn: (e: NormalizedEvent) => void): void {
+  onEvent(fn: EventHandler): void {
     this.#eventFns.push(fn);
+  }
+
+  /** The current gateway's idle(); resolved without one. */
+  idle(): Promise<void> {
+    return this.#inner?.idle?.() ?? Promise.resolve();
   }
 
   onStatus(fn: (s: GatewayStatus) => void): void {
@@ -132,9 +137,7 @@ export class SwitchableGateway implements GatewayLike {
 
   #install(inner: GatewayLike): void {
     this.#inner = inner;
-    inner.onEvent((e) => {
-      if (this.#inner === inner) this.#emitEvent(e);
-    });
+    inner.onEvent((e) => (this.#inner === inner ? this.#emitEvent(e) : undefined));
     inner.onStatus((s) => {
       if (this.#inner === inner) this.#emitStatus(s);
     });
@@ -168,9 +171,18 @@ export class SwitchableGateway implements GatewayLike {
     }
   }
 
-  #emitEvent(e: NormalizedEvent): void {
+  /** The handlers in turn; a promise one returns is waited for (and returned), so the inner gateway keeps the order. */
+  #emitEvent(e: NormalizedEvent): unknown {
     // The app's event handler rethrows on failure so the gateway can count it; keep that, as WhatsAppGateway does.
-    for (const fn of this.#eventFns) fn(e);
+    let chain: Promise<unknown> | undefined;
+    for (const fn of this.#eventFns) {
+      if (chain) chain = chain.then(() => fn(e));
+      else {
+        const r = fn(e);
+        if (r instanceof Promise) chain = r;
+      }
+    }
+    return chain;
   }
 
   #emitStatus(s: GatewayStatus): void {

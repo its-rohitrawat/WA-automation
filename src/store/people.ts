@@ -33,17 +33,14 @@ const toRow = (r: RawPerson): PersonRow => ({
   roleSetBy: r.role_set_by,
 });
 
-/**
- * The founder (fromMe) is always team and cannot be changed by the AI ('system'). S1: synchronous, on raw, until S1.10 (the
- * ingest calls it synchronously from the Baileys handlers).
- */
-export function upsertPerson(db: Db, p: { clientId: number; jid: string; number: string | null; name: string | null; fromMe: boolean }): void {
-  db.raw.prepare(`INSERT INTO people (client_id, jid, number, name, role, role_set_by) VALUES (@clientId, @jid, @number, @name, @role, @setBy)
+/** The founder (fromMe) is always team and cannot be changed by the AI ('system'). */
+export async function upsertPerson(db: Sql, p: { clientId: number; jid: string; number: string | null; name: string | null; fromMe: boolean }): Promise<void> {
+  await db.run(`INSERT INTO people (client_id, jid, number, name, role, role_set_by) VALUES (@clientId, @jid, @number, @name, @role, @setBy)
     ON CONFLICT (client_id, jid) DO UPDATE SET
       number = COALESCE(excluded.number, people.number),
       name = COALESCE(excluded.name, people.name),
       role = CASE WHEN excluded.role_set_by = 'system' THEN 'team' ELSE people.role END,
-      role_set_by = CASE WHEN excluded.role_set_by = 'system' THEN 'system' ELSE people.role_set_by END`).run({
+      role_set_by = CASE WHEN excluded.role_set_by = 'system' THEN 'system' ELSE people.role_set_by END`, {
     clientId: p.clientId,
     jid: p.jid,
     number: p.number,

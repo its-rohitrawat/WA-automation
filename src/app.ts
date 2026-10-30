@@ -423,9 +423,10 @@ export function createApp(d: AppDeps): App {
     media: m ? { sealer: m.sealer, onQueued: () => mediaQueue?.kick() } : undefined,
   });
 
-  const handleEvent = (e: NormalizedEvent) => {
+  // The gateway hands events over one after another and waits for each, so they are stored in the order they came.
+  const handleEvent = async (e: NormalizedEvent) => {
     try {
-      ingestor.handle(e);
+      await ingestor.handle(e);
     } catch (err) {
       d.log.error({ err }, 'ingest failed'); // never the event: it holds chat text and media keys
       throw err; // the gateway counts it in failedCount()
@@ -558,12 +559,14 @@ export function createApp(d: AppDeps): App {
         publisher.schedule();
       }
       // Also re-runs a client waiting for a file that never settles (deferred for Claude or the budget) once its wait
-      // is over, and a message queued again because its file was read late (amendment 15g).
-      for (const clientId of clientIdsWithUnprocessed(d.db)) debouncer.ensure(clientId);
+      // is over, and a message queued again because its file was read late (amendment 15g). Read now, used after the
+      // synchronous kicks below, so the tick's synchronous start is as before.
+      const unprocessed = clientIdsWithUnprocessed(d.db);
       mediaQueue?.kick(); // retries that are due, and files saved by cli link
       void uploader?.run(); // retries that are due
       meetings?.tick(); // discovery when due (MEETING_POLL_MINUTES), then the next due meeting
       backfill?.tick(); // a group waiting for WhatsApp, the spend cap or its first message
+      for (const clientId of await unprocessed) debouncer.ensure(clientId);
       // Spend another process booked (the CLI) reaches the cap checks by the next tick. After the kicks above, so the
       // tick's synchronous start is as before. A failed read keeps the totals in memory, which hold this process's own.
       try {
@@ -688,6 +691,10 @@ export function createApp(d: AppDeps): App {
       } finally {
         clearTimeout(timer);
       }
+      // The events handed over before the gateway stopped, and a history answer still being stored, are stored before the
+      // database closes. Not earlier: everything above this stop's first await runs at once (a local run is aborted).
+      await d.gateway.idle?.();
+      await backfill?.idle();
     },
     reloadClients(configs) {
       const wasActive = listClients(d.db).map((c) => c.id);

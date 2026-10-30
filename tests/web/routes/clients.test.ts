@@ -34,7 +34,7 @@ async function setup() {
     },
     '2026-10-20T05:00:00.000Z',
   );
-  insertMessage(db, {
+  await insertMessage(db, {
     waId: 'M1', clientId: 1, senderJid: '919800000001@s.whatsapp.net', senderNumber: '919800000001', senderName: 'Sender', fromMe: false,
     ts: '2026-10-27T05:00:00.000Z', text: MESSAGE, quotedWaId: null, mediaType: null,
   });

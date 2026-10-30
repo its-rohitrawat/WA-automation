@@ -106,14 +106,15 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
 
   // Open chat: the real chat routes (src/web/routes/chat.ts) on this database, with a stand-in socket that reaches no
   // one. It answers with a made-up message id and, a moment later, stores the founder's own copy, as WhatsApp does.
-  seedChat(db);
+  // Not awaited (this setup is synchronous): the engine runs statements in order, so every route reads the chat.
+  void seedChat(db);
   const ACME = '120363000000000101@g.us';
   let sent = 0;
   const socket = {
     sendMessage: async (_jid: string, content: { text: string }) => {
       const id = `FAKESENT${String(++sent).padStart(12, '0')}`;
       setTimeout(() => {
-        insertMessage(db, { waId: id, clientId: 1, senderJid: 'me', senderNumber: null, senderName: null, fromMe: true, ts: new Date().toISOString(), text: content.text, quotedWaId: null, mediaType: null });
+        void insertMessage(db, { waId: id, clientId: 1, senderJid: 'me', senderNumber: null, senderName: null, fromMe: true, ts: new Date().toISOString(), text: content.text, quotedWaId: null, mediaType: null });
       }, 1500);
       return { key: { id } };
     },
@@ -151,9 +152,9 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
 }
 
 /** About 70 made-up messages in Acme's group over three days: names, a photo, a file, a voice note with its words, a reply, a deleted one. */
-function seedChat(db: Db): void {
+async function seedChat(db: Db): Promise<void> {
   const people: [string, string][] = [['919800000011@s.whatsapp.net', 'Rahul Kapoor'], ['919800000012@s.whatsapp.net', 'Neha'], ['919800000013@s.whatsapp.net', 'Ajay Jain']];
-  for (const [jid, name] of people) upsertPerson(db, { clientId: 1, jid, number: null, name, fromMe: false });
+  for (const [jid, name] of people) await upsertPerson(db, { clientId: 1, jid, number: null, name, fromMe: false });
   const lines = [
     'Morning! Did the revised quote go out?', 'Sending it today after lunch.', 'Can we move the site visit to Thursday?', 'Thursday works for us.',
     'Sharing the moodboard v2 now', 'Looks great, small change on the colours', 'Will update and resend by evening', 'Thanks!',
@@ -161,26 +162,30 @@ function seedChat(db: Db): void {
   ];
   let n = 0;
   const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
-  const put = (o: { minutesAgo: number; who: number; text: string | null; media?: string; quoted?: string }) => {
+  const put = async (o: { minutesAgo: number; who: number; text: string | null; media?: string; quoted?: string }) => {
     const waId = `FAKEMSG${String(++n).padStart(13, '0')}`;
     const mine = o.who === -1;
     const jid = mine ? 'me' : people[o.who]![0];
-    insertMessage(db, { waId, clientId: 1, senderJid: jid, senderNumber: null, senderName: null, fromMe: mine, ts: at(o.minutesAgo), text: o.text, quotedWaId: o.quoted ?? null, mediaType: o.media ?? null });
+    await insertMessage(db, { waId, clientId: 1, senderJid: jid, senderNumber: null, senderName: null, fromMe: mine, ts: at(o.minutesAgo), text: o.text, quotedWaId: o.quoted ?? null, mediaType: o.media ?? null });
     return waId;
   };
-  for (let i = 0; i < 60; i++) put({ minutesAgo: 3 * 24 * 60 - i * 70, who: i % 4 === 3 ? -1 : i % 3, text: lines[i % lines.length]! });
-  const photo = put({ minutesAgo: 95, who: 0, text: 'Site photos from today', media: 'image' });
-  const voice = put({ minutesAgo: 80, who: 2, text: null, media: 'voice' });
-  const rowId = (waId: string) => (db.raw.prepare('SELECT id FROM messages WHERE wa_id = ?').get(waId) as { id: number }).id;
+  for (let i = 0; i < 60; i++) await put({ minutesAgo: 3 * 24 * 60 - i * 70, who: i % 4 === 3 ? -1 : i % 3, text: lines[i % lines.length]! });
+  const photo = await put({ minutesAgo: 95, who: 0, text: 'Site photos from today', media: 'image' });
+  const voice = await put({ minutesAgo: 80, who: 2, text: null, media: 'voice' });
+  const rowId = async (waId: string) => (await db.get<{ id: number }>('SELECT id FROM messages WHERE wa_id = ?', [waId]))!.id;
   const stamp = at(80);
-  db.raw.prepare("INSERT INTO media (message_id, client_id, kind, status, created_at, updated_at) VALUES (?, 1, 'image', 'done', ?, ?)").run(rowId(photo), stamp, stamp);
-  db.raw.prepare("INSERT INTO media (message_id, client_id, kind, status, seconds, text_kind, text, created_at, updated_at) VALUES (?, 1, 'voice', 'done', 42, 'extract', ?, ?, ?)")
-    .run(rowId(voice), 'Hi, I checked the samples. The blue one works, please go ahead with it and send the final invoice.', stamp, stamp);
-  put({ minutesAgo: 70, who: 1, text: 'Quote attached', media: 'document' });
-  const gone = put({ minutesAgo: 60, who: 1, text: 'wrong group, sorry' });
-  db.raw.prepare('UPDATE messages SET revoked = 1 WHERE wa_id = ?').run(gone);
-  put({ minutesAgo: 45, who: -1, text: 'Going with the blue one 👍', quoted: voice });
-  put({ minutesAgo: 30, who: 0, text: 'Text with <b>tags</b> stays text, and a very long line that has to wrap inside the bubble on a phone without scrolling sideways at all' });
-  const edited = put({ minutesAgo: 12, who: 2, text: 'See you at 11 tomorrow\nAddress: 2nd floor, the usual place' });
-  db.raw.prepare('UPDATE messages SET edited_at = ? WHERE wa_id = ?').run(at(11), edited);
+  await db.run("INSERT INTO media (message_id, client_id, kind, status, created_at, updated_at) VALUES (?, 1, 'image', 'done', ?, ?)", [await rowId(photo), stamp, stamp]);
+  await db.run("INSERT INTO media (message_id, client_id, kind, status, seconds, text_kind, text, created_at, updated_at) VALUES (?, 1, 'voice', 'done', 42, 'extract', ?, ?, ?)", [
+    await rowId(voice),
+    'Hi, I checked the samples. The blue one works, please go ahead with it and send the final invoice.',
+    stamp,
+    stamp,
+  ]);
+  await put({ minutesAgo: 70, who: 1, text: 'Quote attached', media: 'document' });
+  const gone = await put({ minutesAgo: 60, who: 1, text: 'wrong group, sorry' });
+  await db.run('UPDATE messages SET revoked = 1 WHERE wa_id = ?', [gone]);
+  await put({ minutesAgo: 45, who: -1, text: 'Going with the blue one 👍', quoted: voice });
+  await put({ minutesAgo: 30, who: 0, text: 'Text with <b>tags</b> stays text, and a very long line that has to wrap inside the bubble on a phone without scrolling sideways at all' });
+  const edited = await put({ minutesAgo: 12, who: 2, text: 'See you at 11 tomorrow\nAddress: 2nd floor, the usual place' });
+  await db.run('UPDATE messages SET edited_at = ? WHERE wa_id = ?', [at(11), edited]);
 }

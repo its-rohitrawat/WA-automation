@@ -184,15 +184,15 @@ describe('listDashboardTasks', () => {
       startedAt: NOW, endedAt: null, attendees: [], participants: [], clientId: 1, matchKind: 'title', status: 'done', driveSeconds: 60, createdAt: NOW,
     }))!;
     const fromMeeting = task(db, { origin: 'meeting', meetingId });
-    insertMessage(db, { waId: 'V1', clientId: 1, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts: NOW, text: null, quotedWaId: null, mediaType: 'audio' });
-    insertMedia(db, { messageId: messageRowId(db, 1, 'V1')!, clientId: 1, kind: 'voice', status: 'done', mimeType: 'audio/ogg', fileName: null, fileSize: 1, seconds: 4,
+    await insertMessage(db, { waId: 'V1', clientId: 1, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts: NOW, text: null, quotedWaId: null, mediaType: 'audio' });
+    await insertMedia(db, { messageId: (await messageRowId(db, 1, 'V1'))!, clientId: 1, kind: 'voice', status: 'done', mimeType: 'audio/ogg', fileName: null, fileSize: 1, seconds: 4,
       forwarded: false, refEnc: null, errorCode: null, createdAt: NOW });
     const fromVoice = task(db, { sourceWaId: 'V1' });
-    insertMessage(db, { waId: 'T1', clientId: 1, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts: NOW, text: 'hi', quotedWaId: null, mediaType: null });
+    await insertMessage(db, { waId: 'T1', clientId: 1, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts: NOW, text: 'hi', quotedWaId: null, mediaType: null });
     const fromText = task(db, { sourceWaId: 'T1' });
     // The same message id in another client's group is not this task's source.
-    insertMessage(db, { waId: 'V2', clientId: 2, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts: NOW, text: null, quotedWaId: null, mediaType: 'audio' });
-    insertMedia(db, { messageId: messageRowId(db, 2, 'V2')!, clientId: 2, kind: 'voice', status: 'done', mimeType: 'audio/ogg', fileName: null, fileSize: 1, seconds: 4,
+    await insertMessage(db, { waId: 'V2', clientId: 2, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts: NOW, text: null, quotedWaId: null, mediaType: 'audio' });
+    await insertMedia(db, { messageId: (await messageRowId(db, 2, 'V2'))!, clientId: 2, kind: 'voice', status: 'done', mimeType: 'audio/ogg', fileName: null, fileSize: 1, seconds: 4,
       forwarded: false, refEnc: null, errorCode: null, createdAt: NOW });
     const otherGroup = task(db, { sourceWaId: 'V2' });
     const sources = Object.fromEntries((await listDashboardTasks(db, q({}), now)).rows.map((r) => [r.code, r.source]));

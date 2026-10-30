@@ -43,13 +43,13 @@ async function setup(o: { startedAt?: string | null; log?: Logger; voiceTranscri
     db, ai, spend, prices: P, clock, log: o.log ?? silentLogger(), onChanged: vi.fn(), startedAt,
     ...(o.voiceTranscriptionOn === undefined ? {} : { voiceTranscriptionOn: o.voiceTranscriptionOn }),
   });
-  upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
+  await upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
   return { db, ai, spend, clock, r };
 }
 
-function say(db: Db, waId: string, ts: string, text: string | null = 'hello', mediaType: string | null = null): number {
-  insertMessage(db, { waId, clientId: 1, senderJid: SHARMA_PN, senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false, ts, text, quotedWaId: null, mediaType });
-  return messageRowId(db, 1, waId)!;
+async function say(db: Db, waId: string, ts: string, text: string | null = 'hello', mediaType: string | null = null): Promise<number> {
+  await insertMessage(db, { waId, clientId: 1, senderJid: SHARMA_PN, senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false, ts, text, quotedWaId: null, mediaType });
+  return (await messageRowId(db, 1, waId))!;
 }
 
 interface FileOpts {
@@ -70,8 +70,8 @@ interface FileOpts {
 
 async function file(db: Db, waId: string, ts: string, o: FileOpts = {}): Promise<number> {
   const kind = o.kind ?? 'image';
-  const messageId = say(db, waId, ts, o.text !== undefined ? o.text : kind === 'voice' ? null : 'see this', kind);
-  const id = insertMedia(db, {
+  const messageId = await say(db, waId, ts, o.text !== undefined ? o.text : kind === 'voice' ? null : 'see this', kind);
+  const id = await insertMedia(db, {
     messageId, clientId: 1, kind, status: 'pending', mimeType: o.mimeType ?? 'image/jpeg', fileName: o.fileName ?? null, fileSize: 1000, seconds: o.seconds ?? null,
     forwarded: o.forwarded ?? false, refEnc: null, errorCode: null, createdAt: o.createdAt ?? '2026-10-19T07:59:00.000Z',
   });
@@ -97,9 +97,9 @@ function hold(ai: FakeAi): (() => void) & { started: () => Promise<void> } {
 describe('Reconciler with shared files', () => {
   it('reconciles the messages before a file that is still being read and leaves the rest queued', async () => {
     const { db, ai, r } = await setup();
-    say(db, 'A1', '2026-10-19T07:00:00.000Z');
+    await say(db, 'A1', '2026-10-19T07:00:00.000Z');
     await image(db, 'I2', '2026-10-19T07:01:00.000Z');
-    say(db, 'A3', '2026-10-19T07:02:00.000Z', 'fix it');
+    await say(db, 'A3', '2026-10-19T07:02:00.000Z', 'fix it');
     expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 0 });
     expect(ai.calls[0]!.user).toContain('[A1]');
     expect(ai.calls[0]!.user).not.toContain('[I2]');
@@ -112,7 +112,7 @@ describe('Reconciler with shared files', () => {
   it('waits without calling the AI, spending or starting a batch when the first queued message has a file being read (12d)', async () => {
     const { db, ai, spend, r } = await setup();
     await image(db, 'I1', '2026-10-19T07:01:00.000Z');
-    say(db, 'A2', '2026-10-19T07:02:00.000Z');
+    await say(db, 'A2', '2026-10-19T07:02:00.000Z');
     expect(await r.run(1)).toEqual({ status: 'waiting' });
     expect(ai.calls).toHaveLength(0);
     expect(spend.spentToday()).toBe(0);
@@ -123,7 +123,7 @@ describe('Reconciler with shared files', () => {
   it('a waiting run never checks or holds spend, so a group at the daily cap still reads as waiting, not paused (12d)', async () => {
     const { db, ai, spend, r } = await setup();
     await image(db, 'I1', '2026-10-19T07:01:00.000Z');
-    say(db, 'A2', '2026-10-19T07:02:00.000Z');
+    await say(db, 'A2', '2026-10-19T07:02:00.000Z');
     // The whole day's budget is held, so canSpend is false for any paid call.
     expect(spend.reserve(15)).not.toBeNull();
     const canSpend = vi.spyOn(spend, 'canSpend');
@@ -189,8 +189,8 @@ describe('Reconciler with shared files', () => {
     await file(db, 'D0', '2026-10-19T06:00:00.000Z', {
       kind: 'document', mimeType: 'application/pdf', fileName: 'old.pdf', read: { textKind: 'extract', text: 'y'.repeat(1_000), pageCount: 1 },
     });
-    markProcessed(db, [messageRowId(db, 1, 'D0')!], NOW);
-    say(db, 'A1', '2026-10-19T07:00:00.000Z');
+    await markProcessed(db, [(await messageRowId(db, 1, 'D0'))!], NOW);
+    await say(db, 'A1', '2026-10-19T07:00:00.000Z');
     await r.run(1);
     const user = ai.calls[0]!.user;
     const context = user.slice(user.indexOf('<recent_context>'), user.indexOf('</recent_context>'));
@@ -201,7 +201,7 @@ describe('Reconciler with shared files', () => {
     const { db } = await setup();
     const ctx = await file(db, 'D0', '2026-10-19T06:00:00.000Z', { kind: 'document', mimeType: 'application/pdf', read: { textKind: 'extract', text: 'y'.repeat(30_000) } });
     const neu = await file(db, 'D1', '2026-10-19T07:00:00.000Z', { kind: 'document', mimeType: 'application/pdf', read: { textKind: 'extract', text: 'z'.repeat(30_000) } });
-    const rows = await mediaForPrompt(db, [{ id: messageRowId(db, 1, 'D1')! }], [{ id: messageRowId(db, 1, 'D0')! }]);
+    const rows = await mediaForPrompt(db, [{ id: (await messageRowId(db, 1, 'D1'))! }], [{ id: (await messageRowId(db, 1, 'D0'))! }]);
     const byId = new Map([...rows.values()].map((m) => [m.id, m]));
     expect(byId.get(neu)).toMatchObject({ textChars: 30_000 });
     expect(byId.get(neu)!.text).toHaveLength(20_001);
@@ -213,9 +213,9 @@ describe('Reconciler with shared files', () => {
   it('loads enough of a context voice note for its 1,200-character excerpt, and shows that much (Phase 2b)', async () => {
     const { db, ai, r } = await setup();
     const ctx = await file(db, 'V0', '2026-10-19T06:00:00.000Z', { kind: 'voice', mimeType: 'audio/ogg', seconds: 300, read: { textKind: 'extract', text: 'v'.repeat(3_000) } });
-    markProcessed(db, [messageRowId(db, 1, 'V0')!], NOW);
-    say(db, 'A1', '2026-10-19T07:00:00.000Z');
-    const rows = await mediaForPrompt(db, [{ id: messageRowId(db, 1, 'A1')! }], [{ id: messageRowId(db, 1, 'V0')! }]);
+    await markProcessed(db, [(await messageRowId(db, 1, 'V0'))!], NOW);
+    await say(db, 'A1', '2026-10-19T07:00:00.000Z');
+    const rows = await mediaForPrompt(db, [{ id: (await messageRowId(db, 1, 'A1'))! }], [{ id: (await messageRowId(db, 1, 'V0'))! }]);
     const row = [...rows.values()].find((m) => m.id === ctx)!;
     expect(row).toMatchObject({ textChars: 3_000 });
     expect(row.text).toHaveLength(1_201);
@@ -228,8 +228,8 @@ describe('Reconciler with shared files', () => {
   it('loads 1,200 characters of a context voice note when the limits passed leave perContextVoice out (Phase 2b)', async () => {
     const { db } = await setup();
     const ctx = await file(db, 'V0', '2026-10-19T06:00:00.000Z', { kind: 'voice', mimeType: 'audio/ogg', seconds: 300, read: { textKind: 'extract', text: 'v'.repeat(3_000) } });
-    say(db, 'A1', '2026-10-19T07:00:00.000Z');
-    const rows = await mediaForPrompt(db, [{ id: messageRowId(db, 1, 'A1')! }], [{ id: messageRowId(db, 1, 'V0')! }], { perMessage: 20, perBatch: 25, perContextMessage: 5 });
+    await say(db, 'A1', '2026-10-19T07:00:00.000Z');
+    const rows = await mediaForPrompt(db, [{ id: (await messageRowId(db, 1, 'A1'))! }], [{ id: (await messageRowId(db, 1, 'V0'))! }], { perMessage: 20, perBatch: 25, perContextMessage: 5 });
     const row = [...rows.values()].find((m) => m.id === ctx)!;
     expect(row).toMatchObject({ textChars: 3_000 });
     expect(row.text).toHaveLength(1_201);
@@ -259,7 +259,7 @@ describe('Reconciler with shared files', () => {
     const { db, ai, clock, r } = await setup();
     // Arrived at 13:15 IST and deferred at 13:20 IST, long before midnight IST, when a file waiting for the budget could be read.
     await image(db, 'I1', '2026-10-19T07:45:00.000Z', undefined, { createdAt: '2026-10-19T07:45:00.000Z', deferred: { errorCode, at: '2026-10-19T07:50:00.000Z' } });
-    say(db, 'A2', '2026-10-19T07:46:00.000Z', 'fix it');
+    await say(db, 'A2', '2026-10-19T07:46:00.000Z', 'fix it');
     expect(await r.run(1)).toEqual({ status: 'waiting' });
     clock.set('2026-10-19T08:14:59.999Z');
     expect(await r.run(1)).toEqual({ status: 'waiting' });
@@ -289,7 +289,7 @@ describe('Reconciler with shared files', () => {
 
   it('a voice note or audio file being transcribed holds up its message for 30 minutes, like a picture (V1)', async () => {
     const { db, ai, clock, r } = await setup();
-    say(db, 'A0', '2026-10-19T07:44:00.000Z');
+    await say(db, 'A0', '2026-10-19T07:44:00.000Z');
     await file(db, 'V1', '2026-10-19T07:45:00.000Z', { kind: 'voice', mimeType: 'audio/ogg', seconds: 42, createdAt: '2026-10-19T07:45:00.000Z' });
     await file(db, 'U2', '2026-10-19T07:46:00.000Z', { kind: 'audio', mimeType: 'audio/mpeg', seconds: 65, createdAt: '2026-10-19T07:46:00.000Z' });
     expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 0 });
@@ -310,7 +310,7 @@ describe('Reconciler with shared files', () => {
   // Phase 2b final review: with VOICE_STT_PROVIDER=none, voice notes never hold up the tracker (as in 2a).
   it('with voice transcription off, a pending voice note or audio file holds up nothing; a picture still does', async () => {
     const { db, ai, r } = await setup({ voiceTranscriptionOn: false });
-    say(db, 'A0', '2026-10-19T07:44:00.000Z');
+    await say(db, 'A0', '2026-10-19T07:44:00.000Z');
     await file(db, 'V1', '2026-10-19T07:59:00.000Z', { kind: 'voice', mimeType: 'audio/ogg', seconds: 42, createdAt: '2026-10-19T07:59:00.000Z' });
     await file(db, 'U2', '2026-10-19T07:59:10.000Z', { kind: 'audio', mimeType: 'audio/mpeg', seconds: 65, createdAt: '2026-10-19T07:59:10.000Z' });
     await file(db, 'I3', '2026-10-19T07:59:20.000Z', { createdAt: '2026-10-19T07:59:20.000Z' });
@@ -376,7 +376,7 @@ describe('Reconciler with shared files', () => {
     ])('after $why, a file read once its message went ahead as "still being read" queues the message again as a re-check', async ({ deferred }) => {
       const { db, ai, clock, r } = await setup();
       const id = await image(db, 'I1', '2026-10-19T07:45:00.000Z', undefined, { createdAt: '2026-10-19T07:45:00.000Z', deferred });
-      say(db, 'A2', '2026-10-19T07:46:00.000Z', 'fix it');
+      await say(db, 'A2', '2026-10-19T07:46:00.000Z', 'fix it');
       clock.set('2026-10-19T08:15:00.000Z'); // the 30-minute wait is over
       expect(await r.run(1)).toMatchObject({ status: 'ok' });
       expect(lineOf(newMessages(ai.calls[0]!.user), 'I1')).toMatch(/[^)]: see this \{image, still being read\}$/);
@@ -402,7 +402,7 @@ describe('Reconciler with shared files', () => {
       const info = vi.spyOn(log, 'info');
       const { db, ai, r } = await setup({ log });
       const id = await image(db, 'I1', '2026-10-19T07:01:00.000Z', undefined, { createdAt: '2026-10-19T07:20:00.000Z' });
-      say(db, 'A2', '2026-10-19T07:02:00.000Z', 'fix it');
+      await say(db, 'A2', '2026-10-19T07:02:00.000Z', 'fix it');
       const open = hold(ai);
       const run = r.run(1);
       await open.started();
@@ -497,7 +497,7 @@ describe('Reconciler with shared files', () => {
       const { db, ai, r } = await setup();
       const id = await image(db, 'I1', '2026-10-19T07:01:00.000Z', undefined, { createdAt: '2026-10-19T07:20:00.000Z' });
       expect(await r.run(1)).toMatchObject({ status: 'ok' });
-      applyRevoke(db, 1, 'I1');
+      await applyRevoke(db, 1, 'I1');
       await read(db, id, '2026-10-19T08:10:00.000Z');
       expect(await flagOf(db, id)).toBe(false);
       expect(await r.run(1)).toEqual({ status: 'noop' });
@@ -511,7 +511,7 @@ describe('Reconciler with shared files', () => {
       await read(db, id, '2026-10-19T08:10:00.000Z');
       expect(await r.run(1)).toMatchObject({ status: 'ok' });
       expect(ai.calls[1]!.user).toContain('(re-check: file now read)');
-      say(db, 'A3', '2026-10-19T07:30:00.000Z', 'thanks');
+      await say(db, 'A3', '2026-10-19T07:30:00.000Z', 'thanks');
       expect(await r.run(1)).toMatchObject({ status: 'ok' });
       const third = ai.calls[2]!.user;
       expect(third).not.toContain('re-check');
@@ -522,10 +522,10 @@ describe('Reconciler with shared files', () => {
     it('keeps the latest context when the batch holds a file re-check of an old message', async () => {
       const { db, ai, r } = await setup();
       const id = await image(db, 'I0', '2026-10-12T05:00:00.000Z', undefined, { createdAt: '2026-10-12T05:00:00.000Z' });
-      say(db, 'P1', '2026-10-18T05:00:00.000Z', 'recent chat');
-      markProcessed(db, [messageRowId(db, 1, 'I0')!, messageRowId(db, 1, 'P1')!], '2026-10-18T06:00:00.000Z');
+      await say(db, 'P1', '2026-10-18T05:00:00.000Z', 'recent chat');
+      await markProcessed(db, [(await messageRowId(db, 1, 'I0'))!, (await messageRowId(db, 1, 'P1'))!], '2026-10-18T06:00:00.000Z');
       await read(db, id, '2026-10-19T07:00:00.000Z');
-      say(db, 'N1', '2026-10-19T07:30:00.000Z', 'new message');
+      await say(db, 'N1', '2026-10-19T07:30:00.000Z', 'new message');
       expect(await r.run(1)).toMatchObject({ status: 'ok' });
       const user = ai.calls[0]!.user;
       expect(contextOf(user)).toContain('recent chat');
@@ -536,7 +536,7 @@ describe('Reconciler with shared files', () => {
       const { db, ai, r } = await setup();
       const id = await image(db, 'I1', '2026-10-19T07:01:00.000Z', undefined, { createdAt: '2026-10-19T07:20:00.000Z' });
       expect(await r.run(1)).toMatchObject({ status: 'ok' }); // the file is still being read
-      say(db, 'N1', '2026-10-19T07:30:00.000Z', 'any update?');
+      await say(db, 'N1', '2026-10-19T07:30:00.000Z', 'any update?');
       const open = hold(ai);
       const run = r.run(1);
       await open.started();
@@ -549,7 +549,7 @@ describe('Reconciler with shared files', () => {
       expect(processedAt(db, 'N1')).not.toBeNull();
       expect(processedAt(db, 'I1')).toBeNull();
       expect(await flagOf(db, id)).toBe(true);
-      expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: null })]);
+      expect(await listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: null })]);
 
       expect(await r.run(1)).toMatchObject({ status: 'ok' });
       expect(lineOf(newMessages(ai.calls[2]!.user), 'I1')).toContain(' (re-check: file now read): see this {image: A payment receipt');
@@ -567,13 +567,13 @@ describe('Reconciler with shared files', () => {
       async function reprocessedWindow() {
         const s = await setup();
         s.ai.push({ ops: [ADD] }, { ops: [ADD] }, { ops: [ADD] });
-        say(s.db, 'P0', '2026-10-17T05:00:00.000Z', 'before the window');
+        await say(s.db, 'P0', '2026-10-17T05:00:00.000Z', 'before the window');
         const id = await image(s.db, 'I1', '2026-10-18T05:00:00.000Z', undefined, { createdAt: '2026-10-18T05:00:00.000Z' });
-        say(s.db, 'P2', '2026-10-19T05:00:00.000Z', 'after the window');
+        await say(s.db, 'P2', '2026-10-19T05:00:00.000Z', 'after the window');
         expect(await s.r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
         expect(lineOf(newMessages(s.ai.calls[0]!.user), 'I1')).toContain('{image, still being read}');
-        expect(requestReprocess(s.db, 'SHA', '2026-10-18', new Date('2026-10-19T08:05:00Z'), '2026-10-18')).toBe(1);
-        expect(listUnprocessed(s.db, 1).map((m) => m.waId)).toEqual(['I1']);
+        expect(await requestReprocess(s.db, 'SHA', '2026-10-18', new Date('2026-10-19T08:05:00Z'), '2026-10-18')).toBe(1);
+        expect((await listUnprocessed(s.db, 1)).map((m) => m.waId)).toEqual(['I1']);
         return { ...s, id };
       }
 
@@ -581,7 +581,7 @@ describe('Reconciler with shared files', () => {
         const { db, ai, r, id } = await reprocessedWindow();
         await read(db, id, '2026-10-19T08:10:00.000Z');
         expect(await flagOf(db, id)).toBe(false);
-        expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: null })]);
+        expect(await listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: null })]);
 
         expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 }); // the same add_task again
         const user = ai.calls[1]!.user;
@@ -609,7 +609,7 @@ describe('Reconciler with shared files', () => {
         expect(contextOf(during)).not.toContain('after the window');
         expect(processedAt(db, 'I1')).toBeNull();
         expect(await flagOf(db, id)).toBe(true);
-        expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: null })]);
+        expect(await listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: null })]);
 
         expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 }); // guarded: the same add_task again
         expect(lineOf(newMessages(ai.calls[2]!.user), 'I1')).toContain(' (re-check: file now read): see this {image: A payment receipt');
@@ -668,14 +668,14 @@ describe('Reconciler with shared files', () => {
         const { db, ai, r } = await setup();
         ai.push({ ops: [ADD] }, { ops: [ADD] });
         const id = await lateImage(db);
-        before(db);
+        await before(db);
         const open = hold(ai);
         const run = r.run(1);
         await open.started();
         await read(db, id, '2026-10-19T08:00:30.000Z');
         open();
         expect(await run).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
-        expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: null })]);
+        expect(await listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: null })]);
 
         expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 }); // the same add_task again
         const line = lineOf(newMessages(ai.calls[1]!.user), 'I1');
@@ -694,7 +694,7 @@ describe('Reconciler with shared files', () => {
         ai.push({ ops: [ADD] }, { ops: [] }, { ops: [ADD] });
         const id = await lateImage(db);
         expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 }); // the file is still being read
-        change(db);
+        await change(db);
         const open = hold(ai);
         const run = r.run(1);
         await open.started();
@@ -704,7 +704,7 @@ describe('Reconciler with shared files', () => {
         const during = lineOf(newMessages(ai.calls[1]!.user), 'I1');
         expect(during).toContain(` ${marker}: see this`);
         expect(during).toContain('{image, still being read}');
-        expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: null })]);
+        expect(await listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: null })]);
 
         expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
         const after = lineOf(newMessages(ai.calls[2]!.user), 'I1');
@@ -718,15 +718,15 @@ describe('Reconciler with shared files', () => {
         const { db, ai, r } = await setup();
         ai.push({ ops: [ADD] }, { ops: [ADD] });
         const id = await lateImage(db);
-        edit(db, '2026-10-19T07:05:00.000Z');
+        await edit(db, '2026-10-19T07:05:00.000Z');
         const open = hold(ai);
         const run = r.run(1);
         await open.started();
-        react(db, '2026-10-19T08:00:10.000Z');
+        await react(db, '2026-10-19T08:00:10.000Z');
         await read(db, id, '2026-10-19T08:00:30.000Z');
         open();
         expect(await run).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
-        expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: 'reaction' })]);
+        expect(await listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: 'reaction' })]);
         expect(await flagOf(db, id)).toBe(true);
 
         expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 }); // the same add_task again
@@ -745,11 +745,11 @@ describe('Reconciler with shared files', () => {
         const open = hold(ai);
         const run = r.run(1);
         await open.started();
-        edit(db, '2026-10-19T08:00:10.000Z');
+        await edit(db, '2026-10-19T08:00:10.000Z');
         await read(db, id, '2026-10-19T08:00:30.000Z');
         open();
         expect(await run).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
-        expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: 'edit' })]);
+        expect(await listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: 'edit' })]);
 
         expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
         expect(lineOf(newMessages(ai.calls[1]!.user), 'I1')).toContain(' (re-check: edited) (re-check: file now read): see this, 600 copies {image: A payment receipt');
@@ -762,8 +762,8 @@ describe('Reconciler with shared files', () => {
         const id = await lateImage(db);
         expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 }); // the file is still being read
         await read(db, id, '2026-10-19T08:10:00.000Z');
-        edit(db, '2026-10-19T08:11:00.000Z');
-        expect(listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: 'edit' })]);
+        await edit(db, '2026-10-19T08:11:00.000Z');
+        expect(await listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'I1', requeueReason: 'edit' })]);
 
         expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
         expect(lineOf(newMessages(ai.calls[1]!.user), 'I1')).toContain(' (re-check: edited) (re-check: file now read): see this, 600 copies {image: A payment receipt');
@@ -782,7 +782,7 @@ describe('Reconciler with shared files', () => {
         const open = hold(ai);
         const run = r.run(1);
         await open.started();
-        change(db);
+        await change(db);
         open();
         expect(await run).toMatchObject({ status: 'ok' });
         expect(lineOf(newMessages(ai.calls[1]!.user), 'I1')).toContain(' (re-check: file now read): see this {image: A payment receipt');
@@ -829,7 +829,7 @@ describe('Reconciler with shared files', () => {
           ai.push({ ops: [] }, response());
           const id = await lateImage(db);
           expect(await r.run(1)).toMatchObject({ status: 'ok' }); // the file is still being read
-          react(db, '2026-10-19T08:00:10.000Z');
+          await react(db, '2026-10-19T08:00:10.000Z');
           const open = hold(ai);
           const run = r.run(1);
           await open.started();
@@ -919,8 +919,8 @@ describe('Reconciler with shared files', () => {
     it('a transcribed voice note in the context, cited first by date, gives the quote too', async () => {
       const { db, ai, r } = await setup();
       await voice(db, 'V0', '2026-10-19T06:00:00.000Z', { read: { textKind: 'extract', text: 'Logo files kal tak bhej dunga' } });
-      markProcessed(db, [messageRowId(db, 1, 'V0')!], NOW);
-      say(db, 'A1', '2026-10-19T07:00:00.000Z', null, 'image');
+      await markProcessed(db, [(await messageRowId(db, 1, 'V0'))!], NOW);
+      await say(db, 'A1', '2026-10-19T07:00:00.000Z', null, 'image');
       ai.push({ ops: [add('A1', 'V0')] });
       await r.run(1);
       expect(quote(db)).toBe('Logo files kal tak bhej dunga');

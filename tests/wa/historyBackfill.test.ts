@@ -112,7 +112,7 @@ describe('history backfill: the anchor', () => {
     await step();
     expect(asked).toEqual([]);
     expect(await backfillStatus(db, 1, at(0))).toEqual({ state: 'waiting', found: 0 });
-    live(SHARMA.groupId, 'FIRST', at(-0.01));
+    await live(SHARMA.groupId, 'FIRST', at(-0.01));
     await step();
     expect(asked).toEqual([{ groupId: SHARMA.groupId, anchor: { waId: 'FIRST', fromMe: false, ts: at(-0.01) }, count: 50 }]);
     expect(getBackfill(db, SHARMA.groupId)).toMatchObject({ state: 'fetching', requests: 1 });
@@ -121,9 +121,9 @@ describe('history backfill: the anchor', () => {
 
   it('uses the oldest message since the approval, not one kept from an earlier approval', async () => {
     const { bf, asked, live, step } = setup();
-    live(SHARMA.groupId, 'LATER', at(0, -9));
-    live(SHARMA.groupId, 'FIRST', at(0, -5));
-    live(SHARMA.groupId, 'KEPT', at(1)); // stored while the group was approved before: the days after it are read too
+    await live(SHARMA.groupId, 'LATER', at(0, -9));
+    await live(SHARMA.groupId, 'FIRST', at(0, -5));
+    await live(SHARMA.groupId, 'KEPT', at(1)); // stored while the group was approved before: the days after it are read too
     bf.start();
     await step();
     expect(asked[0]!.anchor).toEqual({ waId: 'FIRST', fromMe: false, ts: at(0, -5) });
@@ -133,7 +133,7 @@ describe('history backfill: the anchor', () => {
 describe('history backfill: paging', () => {
   it('pages back from the new oldest message, keeps the 7 days, drops older ones and then ends', async () => {
     const { db, bf, asked, live, answer, count, s, finished, step } = setup();
-    live(SHARMA.groupId, 'A', at(0, -10));
+    await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
     await answer({ groups: [{ groupId: SHARMA.groupId, events: [msg(SHARMA.groupId, 'B', at(3)), msg(SHARMA.groupId, 'C', at(2))] }] });
@@ -154,7 +154,7 @@ describe('history backfill: paging', () => {
 
   it('ends after two answers in a row bring nothing older: duplicates only, then an empty one', async () => {
     const { db, bf, asked, live, answer, count, s, step } = setup();
-    live(SHARMA.groupId, 'A', at(0, -10));
+    await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
     await answer({ groups: [{ groupId: SHARMA.groupId, events: [msg(SHARMA.groupId, 'A', at(0, -10))] }] }); // a duplicate
@@ -170,7 +170,7 @@ describe('history backfill: paging', () => {
 
   it(`a phone that does not answer is asked again after a longer wait, and given up on after ${TIMEOUTS_TO_FINISH} tries`, async () => {
     const { db, bf, asked, live, s, step } = setup();
-    live(SHARMA.groupId, 'A', at(0, -10));
+    await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
     await s.advance(ANSWER_TIMEOUT_MS);
@@ -186,7 +186,7 @@ describe('history backfill: paging', () => {
 
   it('a late answer, after its timeout, goes on after the short gap', async () => {
     const { bf, asked, live, answer, s, step } = setup();
-    live(SHARMA.groupId, 'A', at(0, -10));
+    await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
     await s.advance(ANSWER_TIMEOUT_MS);
@@ -202,7 +202,7 @@ describe('history backfill: paging', () => {
       asked.push({ groupId, anchor, count });
       return false;
     });
-    live(SHARMA.groupId, 'A', at(0, -10));
+    await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
     expect(getBackfill(db, SHARMA.groupId)).toMatchObject({ failures: 1, requests: 0 });
@@ -217,7 +217,7 @@ describe('history backfill: paging', () => {
 
   it('an empty answer counts as nothing older', async () => {
     const { db, bf, live, answer, step } = setup();
-    live(SHARMA.groupId, 'A', at(0, -10));
+    await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
     await answer({ groups: [] });
@@ -226,7 +226,7 @@ describe('history backfill: paging', () => {
 
   it(`asks at most ${MAX_REQUESTS} times for a group`, async () => {
     const { db, bf, asked, live, answer, s, step } = setup();
-    live(SHARMA.groupId, 'A', at(0, -10));
+    await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
     for (let i = 1; i <= MAX_REQUESTS + 2; i++) {
@@ -241,7 +241,7 @@ describe('history backfill: paging', () => {
 describe('history backfill: the privacy rules', () => {
   it('never asks for an unapproved group, and stops when a group is removed', async () => {
     const { db, clock, bf, asked, live, answer, count, step, finished } = setup();
-    live(SHARMA.groupId, 'A', at(0, -10));
+    await live(SHARMA.groupId, 'A', at(0, -10));
     syncClients(db, [], clock.now()); // removed before anything was asked
     bf.start();
     await step();
@@ -265,7 +265,7 @@ describe('history backfill: the privacy rules', () => {
 
   it('asks nothing while WhatsApp is not open, nor at the spend cap; carries on after', async () => {
     const { bf, g, asked, live, spend, step } = setup({ state: 'closed', paused: true });
-    live(SHARMA.groupId, 'A', at(0, -10));
+    await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
     g.state = 'open';
@@ -278,7 +278,7 @@ describe('history backfill: the privacy rules', () => {
 
   it('logs no message text, name or number', async () => {
     const { bf, live, answer, s, step, lines } = setup();
-    live(SHARMA.groupId, 'A', at(0, -10));
+    await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
     await answer({ groups: [{ groupId: SHARMA.groupId, events: [msg(SHARMA.groupId, 'B', at(8))] }] });
@@ -292,7 +292,7 @@ describe('history backfill: the privacy rules', () => {
 describe('history backfill: restart and the hold', () => {
   it('a restart carries on where it stopped', async () => {
     const { db, bf, make, asked, live, step } = setup();
-    live(SHARMA.groupId, 'A', at(0, -10));
+    await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
     bf.stop();
@@ -308,7 +308,7 @@ describe('history backfill: restart and the hold', () => {
   it('holds the client while fetching and WhatsApp is open, never longer than the cap', async () => {
     const { clock, bf, g, live, step } = setup();
     expect(bf.held(1)).toBe(false);
-    live(SHARMA.groupId, 'A', at(0, -10));
+    await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
     expect(bf.held(1)).toBe(true);
@@ -329,7 +329,7 @@ describe('history backfill: the hold ends when the backfill cannot go on, and a 
     bf.start();
     await step();
     expect(bf.held(1)).toBe(false); // waiting for the first message
-    live(SHARMA.groupId, 'A', at(0, -10));
+    await live(SHARMA.groupId, 'A', at(0, -10));
     await step();
     expect(bf.held(1)).toBe(true); // asked
     await answer({ groups: [{ groupId: SHARMA.groupId, events: [msg(SHARMA.groupId, 'B', at(2))] }] });
@@ -343,14 +343,14 @@ describe('history backfill: the hold ends when the backfill cannot go on, and a 
   it('a group approved again pages back from its new messages and counts only what it stored itself', async () => {
     const { db, clock, bf, asked, live, answer, s, step, finished } = setup();
     // Read before, under an earlier approval: messages kept, backfill done.
-    live(SHARMA.groupId, 'KEPT1', at(5));
-    live(SHARMA.groupId, 'KEPT2', at(3)); // inside the new 7 days
+    await live(SHARMA.groupId, 'KEPT1', at(5));
+    await live(SHARMA.groupId, 'KEPT2', at(3)); // inside the new 7 days
     saveBackfill(db, { ...getBackfill(db, SHARMA.groupId)!, state: 'done', finishedAt: APPROVED });
     syncClients(db, [], clock.now()); // removed for three days
     clock.set(new Date(Date.parse(APPROVED) + 3 * 86_400_000).toISOString());
     syncClients(db, [SHARMA], clock.now()); // approved again
     const again = getBackfill(db, SHARMA.groupId)!;
-    live(SHARMA.groupId, 'NEW', new Date(Date.parse(again.until) + 60_000));
+    await live(SHARMA.groupId, 'NEW', new Date(Date.parse(again.until) + 60_000));
     bf.start();
     await step();
     expect(asked[0]!.anchor.waId).toBe('NEW');

@@ -12,34 +12,34 @@ import { RAHUL_PN, SHARMA_PN } from '../helpers/wa.ts';
 
 const FOUNDER = '919800000099@s.whatsapp.net';
 
-function file(
+async function file(
   db: Db,
   o: {
     waId: string; jid: string; name: string; kind: MediaKind; fileName: string | null; mimeType: string; ts: string;
     status?: MediaStatus; errorCode?: string | null; forwarded?: boolean; fromMe?: boolean; seconds?: number | null;
   },
-): number {
-  insertMessage(db, { waId: o.waId, clientId: 1, senderJid: o.jid, senderNumber: null, senderName: o.name, fromMe: o.fromMe ?? false, ts: o.ts, text: null, quotedWaId: null, mediaType: o.kind });
+): Promise<number> {
+  await insertMessage(db, { waId: o.waId, clientId: 1, senderJid: o.jid, senderNumber: null, senderName: o.name, fromMe: o.fromMe ?? false, ts: o.ts, text: null, quotedWaId: null, mediaType: o.kind });
   return insertMedia(db, {
-    messageId: messageRowId(db, 1, o.waId)!, clientId: 1, kind: o.kind, status: o.status ?? 'pending', mimeType: o.mimeType, fileName: o.fileName, fileSize: 24_576,
+    messageId: (await messageRowId(db, 1, o.waId))!, clientId: 1, kind: o.kind, status: o.status ?? 'pending', mimeType: o.mimeType, fileName: o.fileName, fileSize: 24_576,
     seconds: o.seconds ?? null, forwarded: o.forwarded ?? false, refEnc: null, errorCode: o.errorCode ?? null, createdAt: NOW,
   });
 }
 
 async function seed(): Promise<Db> {
   const db = await seededDb();
-  upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
+  await upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
   setRole(db, 1, SHARMA_PN, 'client', 'human');
-  upsertPerson(db, { clientId: 1, jid: RAHUL_PN, number: '919800000002', name: 'Rahul', fromMe: false });
+  await upsertPerson(db, { clientId: 1, jid: RAHUL_PN, number: '919800000002', name: 'Rahul', fromMe: false });
   setRole(db, 1, RAHUL_PN, 'team', 'human');
   // The message carries the sender's own WhatsApp name; the workbook shows the name in People instead.
-  const pdf = file(db, { waId: 'D1', jid: SHARMA_PN, name: 'Sharma ji', kind: 'document', fileName: 'brief.pdf', mimeType: 'application/pdf', ts: '2026-10-15T06:00:00.000Z' });
+  const pdf = await file(db, { waId: 'D1', jid: SHARMA_PN, name: 'Sharma ji', kind: 'document', fileName: 'brief.pdf', mimeType: 'application/pdf', ts: '2026-10-15T06:00:00.000Z' });
   await finishMedia(db, pdf, { textKind: 'extract', text: 'Homepage brief\nHero banner with the new logo', pageCount: 3, note: null, at: NOW });
   await markUploaded(db, pdf, 'drivefile123');
-  const img = file(db, { waId: 'I1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'image', fileName: null, mimeType: 'image/jpeg', ts: '2026-10-16T06:00:00.000Z' });
+  const img = await file(db, { waId: 'I1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'image', fileName: null, mimeType: 'image/jpeg', ts: '2026-10-16T06:00:00.000Z' });
   await finishMedia(db, img, { textKind: 'description', text: 'A payment receipt. Visible text: Paid ₹42,000', pageCount: null, note: null, at: NOW });
-  file(db, { waId: 'T1', jid: RAHUL_PN, name: 'Rahul', kind: 'document', fileName: 'team-only.pdf', mimeType: 'application/pdf', ts: '2026-10-17T06:00:00.000Z' });
-  file(db, { waId: 'F1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: '=HYPERLINK("http://evil")', mimeType: 'application/pdf', ts: '2026-10-14T06:00:00.000Z' });
+  await file(db, { waId: 'T1', jid: RAHUL_PN, name: 'Rahul', kind: 'document', fileName: 'team-only.pdf', mimeType: 'application/pdf', ts: '2026-10-17T06:00:00.000Z' });
+  await file(db, { waId: 'F1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: '=HYPERLINK("http://evil")', mimeType: 'application/pdf', ts: '2026-10-14T06:00:00.000Z' });
   return db;
 }
 
@@ -188,7 +188,7 @@ describe('Files received', () => {
 
   it('keeps a file deleted for everyone in the list, with (deleted by sender) and no Drive link (amendment 14b, D3)', async () => {
     const db = await seed();
-    applyRevoke(db, 1, 'D1');
+    await applyRevoke(db, 1, 'D1');
     expect((await sharmaFiles(db)).find((f) => f.name === 'brief.pdf')).toEqual({
       date: '2026-10-15', sentBy: 'Mr. Sharma', name: 'brief.pdf', description: '(deleted by sender)', driveFileId: null,
     });
@@ -198,7 +198,7 @@ describe('Files received', () => {
   it('does not link or describe an uploaded file that was then deleted for everyone, but still links other uploaded files (D3)', async () => {
     const db = await seed();
     await markUploaded(db, mediaIdOf(db, 'I1'), 'driveimage456');
-    applyRevoke(db, 1, 'D1');
+    await applyRevoke(db, 1, 'D1');
     const ws = await sheet(db, 'Sharma Interiors');
     const deleted = rowWhere(ws, (r) => r.getCell(3).value === 'brief.pdf');
     expect(deleted.getCell(4).value).toBe('(deleted by sender)');
@@ -213,11 +213,11 @@ describe('Files received', () => {
 
   it('says (forwarded image) and (forwarded scanned PDF) for forwarded files that were not described (D2, amendment 14c)', async () => {
     const db = await seed();
-    const img = file(db, { waId: 'FW1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'image', fileName: null, mimeType: 'image/jpeg', ts: '2026-10-18T06:00:00.000Z', forwarded: true });
+    const img = await file(db, { waId: 'FW1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'image', fileName: null, mimeType: 'image/jpeg', ts: '2026-10-18T06:00:00.000Z', forwarded: true });
     await finishMedia(db, img, { textKind: null, text: null, pageCount: null, note: 'forwarded_not_described', at: NOW });
-    const scan = file(db, { waId: 'FW2', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'scan.pdf', mimeType: 'application/pdf', ts: '2026-10-18T05:00:00.000Z', forwarded: true });
+    const scan = await file(db, { waId: 'FW2', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'scan.pdf', mimeType: 'application/pdf', ts: '2026-10-18T05:00:00.000Z', forwarded: true });
     await finishMedia(db, scan, { textKind: null, text: null, pageCount: 2, note: 'forwarded_not_described', at: NOW });
-    const text = file(db, { waId: 'FW3', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'quote.pdf', mimeType: 'application/pdf', ts: '2026-10-18T04:00:00.000Z', forwarded: true });
+    const text = await file(db, { waId: 'FW3', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'quote.pdf', mimeType: 'application/pdf', ts: '2026-10-18T04:00:00.000Z', forwarded: true });
     await finishMedia(db, text, { textKind: 'extract', text: 'Quotation No. 17', pageCount: 1, note: null, at: NOW });
     expect((await sharmaFiles(db)).slice(0, 3).map((f) => [f.name, f.description])).toEqual([
       [`image-2026-10-18-1130-${img}.jpg`, '(forwarded image)'],
@@ -228,11 +228,11 @@ describe('Files received', () => {
 
   it('says a file over the download limit was too large to download, from the stored error code (T14-03)', async () => {
     const db = await seed();
-    file(db, {
+    await file(db, {
       waId: 'BIG', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'site plan.pdf', mimeType: 'application/pdf', ts: '2026-10-18T06:00:00.000Z',
       status: 'unavailable', errorCode: 'too_large',
     });
-    file(db, {
+    await file(db, {
       waId: 'OLD', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'old.pdf', mimeType: 'application/pdf', ts: '2026-10-18T05:00:00.000Z',
       status: 'unavailable', errorCode: 'expired',
     });
@@ -244,15 +244,15 @@ describe('Files received', () => {
 
   it('never lists view-once media, the founder’s own files, stickers, voice notes or audio, but lists videos', async () => {
     const db = await seed();
-    upsertPerson(db, { clientId: 1, jid: FOUNDER, number: '919800000099', name: 'Founder', fromMe: true });
+    await upsertPerson(db, { clientId: 1, jid: FOUNDER, number: '919800000099', name: 'Founder', fromMe: true });
     // Even if the founder's own number is marked client, what the founder sent is never listed.
     setRole(db, 1, FOUNDER, 'client', 'human');
-    file(db, { waId: 'VO1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'image', fileName: null, mimeType: 'image/jpeg', ts: '2026-10-18T06:00:00.000Z', status: 'metadata', errorCode: 'view_once' });
-    file(db, { waId: 'ME1', jid: FOUNDER, name: 'Founder', kind: 'document', fileName: 'mine.pdf', mimeType: 'application/pdf', ts: '2026-10-18T06:00:00.000Z', fromMe: true });
-    file(db, { waId: 'ST1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'sticker', fileName: null, mimeType: 'image/webp', ts: '2026-10-18T06:00:00.000Z', status: 'metadata' });
-    file(db, { waId: 'VN1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'voice', fileName: null, mimeType: 'audio/ogg', ts: '2026-10-18T06:00:00.000Z' });
-    file(db, { waId: 'AU1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'audio', fileName: 'song.mp3', mimeType: 'audio/mpeg', ts: '2026-10-18T06:00:00.000Z' });
-    const video = file(db, { waId: 'VI1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'video', fileName: null, mimeType: 'video/mp4', ts: '2026-10-18T07:00:00.000Z', status: 'metadata', seconds: 42 });
+    await file(db, { waId: 'VO1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'image', fileName: null, mimeType: 'image/jpeg', ts: '2026-10-18T06:00:00.000Z', status: 'metadata', errorCode: 'view_once' });
+    await file(db, { waId: 'ME1', jid: FOUNDER, name: 'Founder', kind: 'document', fileName: 'mine.pdf', mimeType: 'application/pdf', ts: '2026-10-18T06:00:00.000Z', fromMe: true });
+    await file(db, { waId: 'ST1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'sticker', fileName: null, mimeType: 'image/webp', ts: '2026-10-18T06:00:00.000Z', status: 'metadata' });
+    await file(db, { waId: 'VN1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'voice', fileName: null, mimeType: 'audio/ogg', ts: '2026-10-18T06:00:00.000Z' });
+    await file(db, { waId: 'AU1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'audio', fileName: 'song.mp3', mimeType: 'audio/mpeg', ts: '2026-10-18T06:00:00.000Z' });
+    const video = await file(db, { waId: 'VI1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'video', fileName: null, mimeType: 'video/mp4', ts: '2026-10-18T07:00:00.000Z', status: 'metadata', seconds: 42 });
     const files = await sharmaFiles(db);
     expect(files.map((f) => f.name)).toEqual([`video-2026-10-18-1230-${video}.mp4`, 'image-2026-10-16-1130-2.jpg', 'brief.pdf', '=HYPERLINK(_http___evil_)']);
     expect(files[0]!.description).toBe('Video, 0:42 (not downloaded)');
@@ -261,9 +261,9 @@ describe('Files received', () => {
   it('uses a person’s role in the file’s own client only', async () => {
     const db = await seed();
     // Rahul is team in Sharma but a client in Mehta; Mr. Sharma is a client in both.
-    upsertPerson(db, { clientId: 2, jid: RAHUL_PN, number: '919800000002', name: 'Rahul', fromMe: false });
+    await upsertPerson(db, { clientId: 2, jid: RAHUL_PN, number: '919800000002', name: 'Rahul', fromMe: false });
     setRole(db, 2, RAHUL_PN, 'client', 'human');
-    upsertPerson(db, { clientId: 2, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
+    await upsertPerson(db, { clientId: 2, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
     setRole(db, 2, SHARMA_PN, 'client', 'human');
     const files = await sharmaFiles(db);
     expect(files.some((f) => f.name === 'team-only.pdf')).toBe(false);
@@ -273,8 +273,8 @@ describe('Files received', () => {
   it('lists files sent at the same moment with the later one first', async () => {
     const db = await seed();
     const ts = '2026-10-18T06:00:00.000Z';
-    const first = file(db, { waId: 'S1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'first.pdf', mimeType: 'application/pdf', ts });
-    const second = file(db, { waId: 'S2', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'second.pdf', mimeType: 'application/pdf', ts });
+    const first = await file(db, { waId: 'S1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'first.pdf', mimeType: 'application/pdf', ts });
+    const second = await file(db, { waId: 'S2', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'second.pdf', mimeType: 'application/pdf', ts });
     expect(second).toBeGreaterThan(first);
     expect((await sharmaFiles(db)).slice(0, 2).map((f) => f.name)).toEqual(['second.pdf', 'first.pdf']);
   });
@@ -283,7 +283,7 @@ describe('Files received', () => {
     const db = await seed();
     for (let i = 0; i < CLIENT_FILES_LIMIT - 2; i++) {
       const ts = new Date(Date.UTC(2026, 9, 18, 0, 0, i)).toISOString();
-      file(db, { waId: `N${i}`, jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: `n${i}.pdf`, mimeType: 'application/pdf', ts });
+      await file(db, { waId: `N${i}`, jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: `n${i}.pdf`, mimeType: 'application/pdf', ts });
     }
     const files = await sharmaFiles(db);
     expect(files).toHaveLength(CLIENT_FILES_LIMIT);
@@ -311,8 +311,8 @@ describe('Files received', () => {
 
   it('keeps the workbook readable when a file name, file text or sender name holds characters XML does not allow', async () => {
     const db = await seed();
-    upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: null, name: 'Mr.\uFFFF Sharma', fromMe: false });
-    const id = file(db, { waId: 'X1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'a\uFFFF.pdf', mimeType: 'application/pdf', ts: '2026-10-18T06:00:00.000Z' });
+    await upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: null, name: 'Mr.\uFFFF Sharma', fromMe: false });
+    const id = await file(db, { waId: 'X1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'a\uFFFF.pdf', mimeType: 'application/pdf', ts: '2026-10-18T06:00:00.000Z' });
     await finishMedia(db, id, { textKind: 'extract', text: 'Paid\uFFFE amount \u202E000,24', pageCount: 1, note: null, at: NOW });
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load((await buildWorkbook(await loadTrackerView(db, now, healthy))) as unknown as ExcelJS.Buffer);

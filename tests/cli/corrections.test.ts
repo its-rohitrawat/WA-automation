@@ -28,11 +28,11 @@ function events(db: Db): Ev[] {
 
 const rebuilt = (db: Db) => getKv(db, 'rebuild_requested') === now.toISOString();
 
-function msg(db: Db, waId: string, ts: string, clientId = 1) {
-  insertMessage(db, { waId, clientId, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts, text: 'a', quotedWaId: null, mediaType: null });
+async function msg(db: Db, waId: string, ts: string, clientId = 1) {
+  await insertMessage(db, { waId, clientId, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts, text: 'a', quotedWaId: null, mediaType: null });
 }
-function processAll(db: Db, clientId = 1) {
-  markProcessed(db, listUnprocessed(db, clientId, 100000).map((m) => m.id), NOW);
+async function processAll(db: Db, clientId = 1) {
+  await markProcessed(db, (await listUnprocessed(db, clientId, 100000)).map((m) => m.id), NOW);
 }
 
 describe('task close / reopen', () => {
@@ -109,8 +109,8 @@ describe('task unlock', () => {
 describe('person set', () => {
   async function people() {
     const db = await withTask();
-    upsertPerson(db, { clientId: 1, jid: '919800000002@s.whatsapp.net', number: '919800000002', name: 'Rahul', fromMe: false });
-    upsertPerson(db, { clientId: 2, jid: '919800000002@s.whatsapp.net', number: '919800000002', name: 'Rahul', fromMe: false });
+    await upsertPerson(db, { clientId: 1, jid: '919800000002@s.whatsapp.net', number: '919800000002', name: 'Rahul', fromMe: false });
+    await upsertPerson(db, { clientId: 2, jid: '919800000002@s.whatsapp.net', number: '919800000002', name: 'Rahul', fromMe: false });
     return db;
   }
 
@@ -144,7 +144,7 @@ describe('person set', () => {
     await expect(setPersonRole(db, '+91 1', 'team', undefined, now)).rejects.toThrowError('No one with that number has posted in an allowed group yet');
     await expect(setPersonRole(db, '919800000002', 'boss', undefined, now)).rejects.toThrowError(/team or client/);
     const db2 = await withTask();
-    upsertPerson(db2, { clientId: 2, jid: '919800000003@s.whatsapp.net', number: '919800000003', name: 'X', fromMe: false });
+    await upsertPerson(db2, { clientId: 2, jid: '919800000003@s.whatsapp.net', number: '919800000003', name: 'X', fromMe: false });
     await expect(setPersonRole(db2, '919800000003', 'team', 'SHA', now)).rejects.toThrowError('That number has posted, but not in client SHA');
     await expect(setPersonRole(db2, '919800000003', 'team', 'ZZZ', now)).rejects.toThrowError(/No client with code/);
   });
@@ -173,49 +173,49 @@ describe('phase set / unlock', () => {
 describe('reprocess', () => {
   it('re-queues only processed messages in the window', async () => {
     const db = await withTask();
-    msg(db, 'old', '2026-10-05T08:00:00.000Z');
-    msg(db, 'm1', '2026-10-12T08:00:00.000Z');
-    msg(db, 'm2', '2026-10-15T08:00:00.000Z');
-    msg(db, 'late', '2026-10-18T08:00:00.000Z');
-    processAll(db);
-    msg(db, 'fresh', '2026-10-13T08:00:00.000Z'); // never processed: not counted
-    expect(countReprocess(db, 'SHA', '2026-10-11', '2026-10-15')).toBe(2);
+    await msg(db, 'old', '2026-10-05T08:00:00.000Z');
+    await msg(db, 'm1', '2026-10-12T08:00:00.000Z');
+    await msg(db, 'm2', '2026-10-15T08:00:00.000Z');
+    await msg(db, 'late', '2026-10-18T08:00:00.000Z');
+    await processAll(db);
+    await msg(db, 'fresh', '2026-10-13T08:00:00.000Z'); // never processed: not counted
+    expect(await countReprocess(db, 'SHA', '2026-10-11', '2026-10-15')).toBe(2);
     expect(getKv(db, 'rebuild_requested')).toBeUndefined(); // counting changes nothing
-    expect(requestReprocess(db, 'SHA', '2026-10-11', now, '2026-10-15')).toBe(2);
-    expect(listUnprocessed(db, 1).map((m) => m.waId).sort()).toEqual(['fresh', 'm1', 'm2']);
+    expect(await requestReprocess(db, 'SHA', '2026-10-11', now, '2026-10-15')).toBe(2);
+    expect((await listUnprocessed(db, 1)).map((m) => m.waId).sort()).toEqual(['fresh', 'm1', 'm2']);
     expect(events(db)[0]).toMatchObject({ op: 'reprocess', client_id: 1, detail: { since: '2026-10-11', until: '2026-10-15', messages: 2 } });
     expect(rebuilt(db)).toBe(true);
   });
 
   it('validates dates and the client', async () => {
     const db = await withTask();
-    expect(() => requestReprocess(db, 'SHA', 'yesterday', now)).toThrowError(/YYYY-MM-DD/);
-    expect(() => requestReprocess(db, 'SHA', '2026-10-11', now, 'soon')).toThrowError(/YYYY-MM-DD/);
-    expect(() => requestReprocess(db, 'SHA', '2026-10-11', now, '2026-10-10')).toThrowError(/on or after/);
-    expect(() => requestReprocess(db, 'ZZZ', '2026-10-11', now)).toThrowError(/No client/);
+    await expect(requestReprocess(db, 'SHA', 'yesterday', now)).rejects.toThrowError(/YYYY-MM-DD/);
+    await expect(requestReprocess(db, 'SHA', '2026-10-11', now, 'soon')).rejects.toThrowError(/YYYY-MM-DD/);
+    await expect(requestReprocess(db, 'SHA', '2026-10-11', now, '2026-10-10')).rejects.toThrowError(/on or after/);
+    await expect(requestReprocess(db, 'ZZZ', '2026-10-11', now)).rejects.toThrowError(/No client/);
     db.raw.prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
-    expect(() => requestReprocess(db, 'SHA', '2026-10-11', now)).toThrowError('Client SHA is not in the allow-list; nothing to reprocess');
-    expect(() => countReprocess(db, 'SHA', '2026-10-11')).toThrowError(/not in the allow-list/);
+    await expect(requestReprocess(db, 'SHA', '2026-10-11', now)).rejects.toThrowError('Client SHA is not in the allow-list; nothing to reprocess');
+    await expect(countReprocess(db, 'SHA', '2026-10-11')).rejects.toThrowError(/not in the allow-list/);
   });
 
   it('previews large jobs and changes nothing without --yes', async () => {
     const db = await withTask();
     const n = REPROCESS_CONFIRM_ABOVE + 1;
-    for (let i = 0; i < n; i++) msg(db, `b${i}`, '2026-10-12T08:00:00.000Z');
-    processAll(db);
-    expect(reprocess(db, 'SHA', '2026-10-11', undefined, false, now)).toEqual({ count: n, queued: 0, needsConfirm: true, maxCostUsd: 1 });
-    expect(listUnprocessed(db, 1, 1000)).toHaveLength(0);
+    for (let i = 0; i < n; i++) await msg(db, `b${i}`, '2026-10-12T08:00:00.000Z');
+    await processAll(db);
+    expect(await reprocess(db, 'SHA', '2026-10-11', undefined, false, now)).toEqual({ count: n, queued: 0, needsConfirm: true, maxCostUsd: 1 });
+    expect(await listUnprocessed(db, 1, 1000)).toHaveLength(0);
     expect(events(db)).toHaveLength(0);
     expect(getKv(db, 'rebuild_requested')).toBeUndefined();
-    expect(reprocess(db, 'SHA', '2026-10-11', undefined, true, now)).toMatchObject({ queued: n, needsConfirm: false });
-    expect(listUnprocessed(db, 1, 1000)).toHaveLength(n);
+    expect(await reprocess(db, 'SHA', '2026-10-11', undefined, true, now)).toMatchObject({ queued: n, needsConfirm: false });
+    expect(await listUnprocessed(db, 1, 1000)).toHaveLength(n);
   });
 
   it('re-queues small jobs without --yes and reports zero', async () => {
     const db = await withTask();
-    expect(reprocess(db, 'SHA', '2026-10-11', undefined, false, now)).toMatchObject({ count: 0, queued: 0, needsConfirm: false });
-    msg(db, 'm1', '2026-10-12T08:00:00.000Z');
-    processAll(db);
-    expect(reprocess(db, 'SHA', '2026-10-11', undefined, false, now)).toMatchObject({ count: 1, queued: 1, needsConfirm: false });
+    expect(await reprocess(db, 'SHA', '2026-10-11', undefined, false, now)).toMatchObject({ count: 0, queued: 0, needsConfirm: false });
+    await msg(db, 'm1', '2026-10-12T08:00:00.000Z');
+    await processAll(db);
+    expect(await reprocess(db, 'SHA', '2026-10-11', undefined, false, now)).toMatchObject({ count: 1, queued: 1, needsConfirm: false });
   });
 });
