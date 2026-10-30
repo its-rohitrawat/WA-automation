@@ -52,7 +52,7 @@ export class Ingestor {
   /**
    * Live events: the gateways hand them over one after another, waiting for each (src/wa/gateway.ts), so they are stored
    * in order. Earlier messages read on demand come through src/wa/historyBackfill.ts on its own chain, so they can
-   * interleave with live ones; a message stored twice is ignored (INSERT OR IGNORE).
+   * interleave with live ones; a message stored twice is skipped (ON CONFLICT DO NOTHING).
    */
   async handle(e: NormalizedEvent): Promise<void> {
     const db = this.#db;

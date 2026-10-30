@@ -20,6 +20,12 @@ describe('messages repository', () => {
     expect(await listUnprocessed(db, 1)).toHaveLength(1);
   });
 
+  it('skips only a duplicate: a message missing a required field is an error, not dropped in silence', async () => {
+    const db = await seededDb();
+    await expect(insertMessage(db, msg({ senderJid: null as unknown as string }))).rejects.toThrow(/NOT NULL/);
+    expect(await listUnprocessed(db, 1)).toEqual([]);
+  });
+
   it('keeps the edit history and queues the message again', async () => {
     const db = await seededDb();
     await insertMessage(db, msg());

@@ -75,10 +75,14 @@ function toRow(r: RawMessage): MessageRow {
   };
 }
 
-/** Returns true when the message was new. */
+/**
+ * Returns true when the message was new. A message already stored (the same client and WhatsApp id) is skipped by ON
+ * CONFLICT DO NOTHING, which SQLite and Postgres both run (S2.5); unlike INSERT OR IGNORE, any other broken row throws.
+ */
 export async function insertMessage(db: Sql, m: NewMessage): Promise<boolean> {
-  const r = await db.run(`INSERT OR IGNORE INTO messages (wa_id, client_id, sender_jid, sender_number, sender_name, from_me, ts, text, quoted_wa_id, media_type)
-      VALUES (@waId, @clientId, @senderJid, @senderNumber, @senderName, @fromMe, @ts, @text, @quotedWaId, @mediaType)`, { ...m, fromMe: m.fromMe ? 1 : 0 });
+  const r = await db.run(`INSERT INTO messages (wa_id, client_id, sender_jid, sender_number, sender_name, from_me, ts, text, quoted_wa_id, media_type)
+      VALUES (@waId, @clientId, @senderJid, @senderNumber, @senderName, @fromMe, @ts, @text, @quotedWaId, @mediaType)
+      ON CONFLICT DO NOTHING`, { ...m, fromMe: m.fromMe ? 1 : 0 });
   return r.changes === 1;
 }
 
