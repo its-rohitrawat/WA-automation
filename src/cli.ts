@@ -14,6 +14,7 @@ import {
 } from './cli/meetings.ts';
 import { transcribeVoiceCommand } from './cli/transcribeVoice.ts';
 import { dbBootstrapCommand, dbMigrateCommand, defaultDbDeps } from './cli/db.ts';
+import { exportToSqliteCommand, migrateToPostgresCommand } from './cli/migrate.ts';
 
 // Without these Node prints the raw error (Boom data, gaxios request config), bypassing any redaction.
 function fatal(err: unknown): void {
@@ -193,6 +194,23 @@ program
   .command('db-migrate')
   .description('Postgres: apply the schema changes this version needs, as wa_owner')
   .action(async () => dbMigrateCommand(loadEnv(), defaultDbDeps()));
+program
+  .command('migrate-to-postgres')
+  .description('Copy the SQLite data into Postgres as customer #1: a dry run that writes nothing, unless --apply')
+  .option('--apply', 'write for real, after a checked backup (needs --backup-dir)')
+  .option('--backup-dir <dir>', 'a folder that does not exist yet, for the checked backup')
+  .option('--data-dir <dir>', 'another data folder (the rehearsal copy); default DATA_DIR')
+  .action(async (o: { apply?: boolean; backupDir?: string; dataDir?: string }) => {
+    process.exitCode = await migrateToPostgresCommand(loadEnv(), o);
+  });
+program
+  .command('export-to-sqlite')
+  .description("Write customer #1's Postgres rows into new SQLite files (rollback B); data/ is not touched")
+  .requiredOption('--out <dir>', 'a folder that does not exist yet')
+  .option('--data-dir <dir>', 'the data folder whose agent must be stopped; default DATA_DIR')
+  .action(async (o: { out: string; dataDir?: string }) => {
+    process.exitCode = await exportToSqliteCommand(loadEnv(), o);
+  });
 
 program.parseAsync(process.argv).catch((e: unknown) => {
   console.error(e instanceof Error ? e.message : 'Command failed');
