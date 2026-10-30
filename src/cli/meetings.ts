@@ -4,7 +4,6 @@ import { MEETING_SYSTEM_PROMPT, MEETING_TRANSCRIPT_MAX_CHARS } from '../brain/me
 import { MEETING_TRACKER_PROMPT } from '../brain/meetingTracker.ts';
 import { requireKey, type Env } from '../config/env.ts';
 import { loadGroupsFile, type ClientConfig } from '../config/groups.ts';
-import { trackerDbPath } from '../config/paths.ts';
 import type { KeyProvider } from '../crypto/keyProvider.ts';
 import type { MeetingsGoogleApi } from '../meetings/googleApi.ts';
 import { combineMeetingAccounts, MultiAccountMeetingsApi, storedMeetingAccounts } from '../meetings/multiAccount.ts';
@@ -12,7 +11,8 @@ import { MeetingWatcher, type FoundMeeting } from '../meetings/watcher.ts';
 import { createOAuthClient, MAIN_ACCOUNT, meetingsReady, TokenStore } from '../output/googleAuth.ts';
 import { estimateCostUsd, pricesFromEnv, type Prices } from '../spend/pricing.ts';
 import { getClientByCode, getClientByGroupId, listClients, syncClients } from '../store/clients.ts';
-import { openDb, type Db, type Sql } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
+import { openStore } from '../store/open.ts';
 import {
   assignMeeting, getMeetingState, listMeetingsByStatus, retryMeeting, skipMeeting, type MeetingStatus, type MeetingState,
 } from '../store/meetings.ts';
@@ -275,7 +275,7 @@ export async function meetingBackfillCommand(opts: { since: string; yes: boolean
   try {
     const key = deps.keyProvider.getKey();
     const configs = loadGroupsFile(env.GROUPS_FILE);
-    db = openDb(trackerDbPath(env.DATA_DIR));
+    db = await openStore(env);
     if (!(await meetingsReady(db))) throw new CorrectionError(NO_SCOPES);
     const api = await deps.googleApi(db, key);
     const run = async (sql: Sql) => {
@@ -333,7 +333,7 @@ export async function meetingCheckCommand(deps: MeetingCliDeps): Promise<void> {
   if (!env.MEETINGS_ENABLED) throw new CorrectionError(NOT_ENABLED);
   const key = deps.keyProvider.getKey();
   const configs = loadGroupsFile(env.GROUPS_FILE);
-  const db = openDb(trackerDbPath(env.DATA_DIR));
+  const db = await openStore(env);
   try {
     if (!(await meetingsReady(db))) throw new CorrectionError(NO_SCOPES);
     const api = await deps.googleApi(db, key);
