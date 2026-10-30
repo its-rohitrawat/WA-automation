@@ -20,14 +20,11 @@ const ENUM_FIELDS = new Set<TaskField>(['side', 'category', 'priority']);
 
 export type EditOptions = Partial<Record<TaskField, string>>;
 
-export function requestRebuild(db: Db, now: Date): void {
-  setKv(db, 'rebuild_requested', now.toISOString());
+export async function requestRebuild(db: Sql, now: Date): Promise<void> {
+  await setKv(db, 'rebuild_requested', now.toISOString());
 }
 
-/**
- * Runs fn in the caller's transaction q, or in a new one: a dashboard action writes its audit line in the same
- * transaction. S1: db stays for kv and the client store, on raw until S1.12 (allowed inside the transaction).
- */
+/** Runs fn in the caller's transaction q, or in a new one: a dashboard action writes its audit line in the same transaction. */
 function inTx<T>(db: Db, q: Sql | undefined, fn: (q: Sql) => Promise<T>): Promise<T> {
   return q ? fn(q) : db.tx(fn);
 }
@@ -54,7 +51,7 @@ async function setStatusAsHuman(db: Db, code: string, status: 'open' | 'done', n
   await inTx(db, q, async (q) => {
     await setTaskStatus(q, t.id, status, istDate(now), now.toISOString(), 'human');
     await humanEvent(q, t.id, t.clientId, status === 'done' ? 'close_task' : 'reopen_task', { status }, now);
-    requestRebuild(db, now);
+    await requestRebuild(q, now);
   });
   return findTask(q ?? db, t.code);
 }
@@ -85,7 +82,7 @@ export async function editTask(db: Db, code: string, opts: EditOptions, now: Dat
   await inTx(db, q, async (q) => {
     await updateTaskFields(q, t.id, fields, now.toISOString(), 'human');
     await humanEvent(q, t.id, t.clientId, 'update_task', fields, now);
-    requestRebuild(db, now);
+    await requestRebuild(q, now);
   });
   return findTask(q ?? db, t.code);
 }
@@ -95,7 +92,7 @@ export async function unlockTask(db: Db, code: string, now: Date, q?: Sql): Prom
   await inTx(db, q, async (q) => {
     await clearTaskLocks(q, t.id, now.toISOString());
     await humanEvent(q, t.id, t.clientId, 'unlock', { lockedFields: t.lockedFields, statusLocked: t.statusLockedAt !== null }, now);
-    requestRebuild(db, now);
+    await requestRebuild(q, now);
   });
   return findTask(q ?? db, t.code);
 }
@@ -131,7 +128,7 @@ export async function setPersonRole(db: Db, who: string, roleInput: string, clie
       await setRole(q, p.clientId, p.jid, role, 'human');
       await humanEvent(q, null, p.clientId, 'set_person_role', { ...detailKey, role }, now);
     }
-    requestRebuild(db, now);
+    await requestRebuild(q, now);
   });
   return chosen.length;
 }
@@ -143,7 +140,7 @@ export async function setClientPhase(db: Db, clientCode: string, phase: string, 
   await db.tx(async (q) => {
     await setPhase(q, c.id, match, 'human');
     await humanEvent(q, null, c.id, 'set_phase', { phase: match }, now);
-    requestRebuild(db, now);
+    await requestRebuild(q, now);
   });
 }
 
@@ -152,7 +149,7 @@ export async function unlockClientPhase(db: Db, clientCode: string, now: Date): 
   await db.tx(async (q) => {
     await clearPhaseLock(q, c.id);
     await humanEvent(q, null, c.id, 'unlock_phase', { phase: c.currentPhase }, now);
-    requestRebuild(db, now);
+    await requestRebuild(q, now);
   });
 }
 
@@ -187,11 +184,10 @@ export async function countReprocess(db: Db, clientCode: string, since: string, 
 /** Re-queues processed messages in the window for the AI. Returns how many were actually re-queued. */
 export async function requestReprocess(db: Db, clientCode: string, since: string, now: Date, until?: string): Promise<number> {
   const w = await reprocessWindow(db, clientCode, since, until);
-  // requestRebuild writes kv, on raw until S1.12, which is allowed inside this transaction.
   return db.tx(async (q) => {
     const n = await resetProcessedSince(q, w.clientId, w.sinceIso, w.untilIso);
     await humanEvent(q, null, w.clientId, 'reprocess', { since, until: until ?? null, messages: n }, now);
-    requestRebuild(db, now);
+    await requestRebuild(q, now);
     return n;
   });
 }

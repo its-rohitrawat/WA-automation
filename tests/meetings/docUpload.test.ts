@@ -21,7 +21,7 @@ const meeting: MeetingDocInput = {
 async function setup() {
   const db = await seededDb();
   const drive = new FakeDrive();
-  setKv(db, 'drive_root_id', 'root-1');
+  await setKv(db, 'drive_root_id', 'root-1');
   return { db, drive };
 }
 
@@ -41,7 +41,7 @@ describe('uploadMeetingDoc', () => {
   it('re-creates the Meetings folder once when the saved one is gone', async () => {
     const { db, drive } = await setup();
     await uploadMeetingDoc({ db, api: drive }, meeting);
-    drive.missing.add(getKv(db, 'drive_meetings_folder:1')!);
+    drive.missing.add((await getKv(db, 'drive_meetings_folder:1'))!);
     await uploadMeetingDoc({ db, api: drive }, meeting);
     expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Meetings', 'Meetings']);
     expect(drive.docs.map((d) => d.parentId)).toEqual(['folder-3', 'folder-5']);

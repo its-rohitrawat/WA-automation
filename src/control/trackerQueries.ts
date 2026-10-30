@@ -53,13 +53,13 @@ function minusDays(date: string, n: number): string {
 const FAILURE_PREFIX = 'Tracker upload failed: ';
 
 /** The tracker file the agent writes, for the Tracker screen and the Connections Drive card. */
-export function trackerFile(db: Db): TrackerFile {
-  return { name: TRACKER_FILE_NAME, folder: DRIVE_ROOT_NAME, account: accountEmail(db, MAIN_ACCOUNT) };
+export async function trackerFile(db: Db): Promise<TrackerFile> {
+  return { name: TRACKER_FILE_NAME, folder: DRIVE_ROOT_NAME, account: await accountEmail(db, MAIN_ACCOUNT) };
 }
 
 /** The stored new-file time, when it is a valid time. */
-function newFileAt(db: Db): string | null {
-  const v = getKv(db, TRACKER_NEW_FILE_KEY);
+async function newFileAt(db: Db): Promise<string | null> {
+  const v = await getKv(db, TRACKER_NEW_FILE_KEY);
   return v && !Number.isNaN(Date.parse(v)) ? v : null;
 }
 
@@ -82,7 +82,7 @@ export async function trackerSummary(
   health?: Pick<HealthSnapshot, 'line' | 'lastPublishedAt' | 'publishFailingSince'>,
 ): Promise<TrackerSummary> {
   const today = istDate(now);
-  const url = trackerLink(db) ?? null;
+  const url = (await trackerLink(db)) ?? null;
   const failure = await db.get<{ at: string; detail: string }>(
     "SELECT at, detail FROM audit_log WHERE actor = 'agent' AND event = 'tracker.publish_failed' ORDER BY at DESC, id DESC LIMIT 1",
   );
@@ -116,8 +116,8 @@ export async function trackerSummary(
   return {
     uploaded: url !== null,
     url,
-    file: trackerFile(db),
-    newFileAt: newFileAt(db),
+    file: await trackerFile(db),
+    newFileAt: await newFileAt(db),
     lastPublishedAt: await lastTrackerUpload(db, health?.lastPublishedAt),
     lastFailure: failure
       ? { at: failure.at, reason: failure.detail.startsWith(FAILURE_PREFIX) ? failure.detail.slice(FAILURE_PREFIX.length) : failure.detail }

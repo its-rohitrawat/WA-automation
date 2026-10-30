@@ -196,7 +196,7 @@ export async function groupsApplyHandler(deps: GroupsDeps, ctx: OwnerContext, bo
     for (const g of groups) auditLine(deps, ctx, `${what} · ${g.name} (${g.code})`);
   }
   // A group approved is no longer set aside.
-  for (const g of result.approved) deleteKv(deps.db, IGNORED + deps.groupKey(g.groupId));
+  for (const g of result.approved) await deleteKv(deps.db, IGNORED + deps.groupKey(g.groupId));
   // From the cached list: the answer never waits on WhatsApp.
   return ok(await cachedView(deps, result.configs));
 }
@@ -249,16 +249,16 @@ export async function groupsBulkHandler(deps: GroupsDeps, ctx: OwnerContext, bod
   if (action !== 'approve') {
     const tracked = new Set(configs.map((c) => c.groupId));
     const at = deps.clock.now().toISOString();
-    deps.db.raw.transaction(() => {
+    await deps.db.tx(async (q) => {
       for (const key of keys) {
         if (tracked.has(index.get(key)!)) failed(key, 'It is tracked. Remove it from the agent first.');
         else {
-          if (action === 'ignore') setKv(deps.db, IGNORED + key, at);
-          else deleteKv(deps.db, IGNORED + key);
+          if (action === 'ignore') await setKv(q, IGNORED + key, at);
+          else await deleteKv(q, IGNORED + key);
           done(key);
         }
       }
-    })();
+    });
     // No name: an untracked group's name never reaches disk.
     for (const r of results) if (r.ok) auditLine(deps, ctx, action === 'ignore' ? 'Group ignored' : 'Group shown again');
     return ok({ ...await cachedView(deps, configs), results });
@@ -286,7 +286,7 @@ export async function groupsBulkHandler(deps: GroupsDeps, ctx: OwnerContext, bod
     try {
       const result = await applyGroupChanges(deps.groupsFile, { approve: [{ groupId, name, code }] }, { db: deps.db });
       configs = result.configs;
-      deleteKv(deps.db, IGNORED + key);
+      await deleteKv(deps.db, IGNORED + key);
       for (const g of result.approved) auditLine(deps, ctx, `Group approved · ${g.name} (${g.code})`);
       done(key);
     } catch (e) {

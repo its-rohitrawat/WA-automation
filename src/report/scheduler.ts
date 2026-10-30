@@ -325,11 +325,10 @@ export class ReportScheduler {
       const date = istDate(now);
       const at = now.toISOString();
       // Taking the request, checking it and the forced claim are one transaction, so a request written meanwhile is
-      // never wiped unread, and the row cannot change between the check and the claim. The send comes after it. (kv is
-      // still synchronous on raw until S1.12; the engine allows raw inside its own transaction.)
+      // never wiped unread, and the row cannot change between the check and the claim. The send comes after it.
       const step = await db.tx(async (q): Promise<'send' | 'done' | 'schedule'> => {
-        const requested = getKv(db, REPORT_REQUEST_KEY);
-        if (requested) setKv(db, REPORT_REQUEST_KEY, ''); // a request is used once, whatever happens next
+        const requested = await getKv(q, REPORT_REQUEST_KEY);
+        if (requested) await setKv(q, REPORT_REQUEST_KEY, ''); // a request is used once, whatever happens next
         if (!settings.enabled) return 'done';
         await closeOldRetries(q, date, at);
         if (!requested) return 'schedule';
@@ -429,7 +428,7 @@ export class ReportScheduler {
 
   /** Throws ReportBuildError('no_tracker_link') while the tracker is not on Drive: the text has nothing to link to. */
   async #build(now: Date): Promise<ReportPayload> {
-    const link = trackerLink(this.#o.db);
+    const link = await trackerLink(this.#o.db);
     if (!link) throw new ReportBuildError('no_tracker_link');
     const view = await loadTrackerView(this.#o.db, now, this.#o.healthLine());
     return { text: buildShortMorningText(view, view.today, link) };

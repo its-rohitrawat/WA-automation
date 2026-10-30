@@ -388,7 +388,7 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
         d.log.error({ err }, 'the relinked gateway could not be handed over; it connects at the next start');
       }
       try {
-        setKv(d.trackerDb, 'session_reset_at', clock.now().toISOString());
+        await setKv(d.trackerDb, 'session_reset_at', clock.now().toISOString());
       } catch (err) {
         d.log.error({ err }, 'session_reset_at could not be recorded');
       }

@@ -98,12 +98,12 @@ describe('Health and shared files', () => {
     h.setMedia(counts({ pending: 1, stale: 1 }));
     // A group with an AI error stays failed: waiting for a file is not a success that clears it.
     h.recordOutcome(1, { status: 'failed', errorCode: 'refusal' });
-    const failed = readHealthSnapshot(db)!;
+    const failed = (await readHealthSnapshot(db))!;
     expect(failed.line.text).toBe('⚠️ 1 group waiting (AI error)');
     h.recordOutcome(1, { status: 'waiting' });
     expect(h.line().text).toBe('⚠️ 1 group waiting (AI error)');
     expect(h.snapshot().media).toEqual(counts({ pending: 1, stale: 1 }));
-    expect(readHealthSnapshot(db)).toEqual(failed);
+    expect(await readHealthSnapshot(db)).toEqual(failed);
     // A paused group stays paused too.
     h.recordOutcome(2, { status: 'paused' });
     h.recordOutcome(2, { status: 'waiting' });
@@ -112,7 +112,7 @@ describe('Health and shared files', () => {
     h.recordOutcome(1, { status: 'noop' });
     h.recordOutcome(2, { status: 'noop' });
     expect(h.line().text).toBe('⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.');
-    expect(readHealthSnapshot(db)!.media).toEqual(counts({ pending: 1, stale: 1 }));
+    expect((await readHealthSnapshot(db))!.media).toEqual(counts({ pending: 1, stale: 1 }));
   });
 
   it('a run kept out only by another paid call’s hold is ignored, like waiting: no spend-cap line (Task 15 review round 3)', async () => {
@@ -176,37 +176,37 @@ describe('Health and shared files', () => {
   it('reads older snapshots whose media counts have no sttRefused, and refuses one that is not a number (Phase 2b)', async () => {
     const { db, h } = await setup();
     h.setMedia(counts({ pending: 2, sttRefused: 1 }));
-    h.persist();
-    expect(readHealthSnapshot(db)!.media).toEqual(counts({ pending: 2, sttRefused: 1 }));
+    await h.persist();
+    expect((await readHealthSnapshot(db))!.media).toEqual(counts({ pending: 2, sttRefused: 1 }));
     const old = JSON.parse(JSON.stringify(h.snapshot())) as Record<string, unknown>;
     const { sttRefused: _gone, ...before2b } = counts({ pending: 2 });
-    setKv(db, 'health', JSON.stringify({ ...old, media: before2b }));
-    expect(readHealthSnapshot(db)).toBeDefined();
-    expect(readHealthSnapshot(db)!.media).toEqual(before2b);
-    expect(readHealthSnapshot(db)!.media!.sttRefused).toBeUndefined();
+    await setKv(db, 'health', JSON.stringify({ ...old, media: before2b }));
+    expect(await readHealthSnapshot(db)).toBeDefined();
+    expect((await readHealthSnapshot(db))!.media).toEqual(before2b);
+    expect((await readHealthSnapshot(db))!.media!.sttRefused).toBeUndefined();
     for (const bad of ['1', null, true, {}]) {
-      setKv(db, 'health', JSON.stringify({ ...old, media: { ...before2b, sttRefused: bad } }));
-      expect(readHealthSnapshot(db)).toBeUndefined();
+      await setKv(db, 'health', JSON.stringify({ ...old, media: { ...before2b, sttRefused: bad } }));
+      expect(await readHealthSnapshot(db)).toBeUndefined();
     }
   });
 
   it('keeps the counts in the snapshot and still reads older snapshots without them', async () => {
     const { db, h } = await setup();
     h.setMedia(counts({ pending: 2, failedRecent: 1 }));
-    h.persist();
-    expect(readHealthSnapshot(db)!.media).toEqual(counts({ pending: 2, failedRecent: 1 }));
+    await h.persist();
+    expect((await readHealthSnapshot(db))!.media).toEqual(counts({ pending: 2, failedRecent: 1 }));
     const old = JSON.parse(JSON.stringify(h.snapshot())) as Record<string, unknown>;
     delete old.media;
-    setKv(db, 'health', JSON.stringify(old));
-    expect(readHealthSnapshot(db)).toBeDefined();
-    expect(readHealthSnapshot(db)!.media).toBeUndefined();
-    setKv(db, 'health', JSON.stringify({ ...old, media: { pending: 'x' } }));
-    expect(readHealthSnapshot(db)).toBeUndefined();
-    setKv(db, 'health', JSON.stringify({ ...old, media: null }));
-    expect(readHealthSnapshot(db)).toBeUndefined();
+    await setKv(db, 'health', JSON.stringify(old));
+    expect(await readHealthSnapshot(db)).toBeDefined();
+    expect((await readHealthSnapshot(db))!.media).toBeUndefined();
+    await setKv(db, 'health', JSON.stringify({ ...old, media: { pending: 'x' } }));
+    expect(await readHealthSnapshot(db)).toBeUndefined();
+    await setKv(db, 'health', JSON.stringify({ ...old, media: null }));
+    expect(await readHealthSnapshot(db)).toBeUndefined();
     const { spendCap: _left, ...noSpendCap } = counts({ pending: 2 });
-    setKv(db, 'health', JSON.stringify({ ...old, media: noSpendCap }));
-    expect(readHealthSnapshot(db)).toBeUndefined();
+    await setKv(db, 'health', JSON.stringify({ ...old, media: noSpendCap }));
+    expect(await readHealthSnapshot(db)).toBeUndefined();
   });
 });
 
@@ -292,19 +292,19 @@ describe('Health and voice notes that cannot be transcribed (Phase 2b Task 10)',
   it('keeps voiceFailed in the snapshot, reads snapshots written before it, and refuses one that is not a number', async () => {
     const { db, h } = await setup();
     h.setMedia(counts({ failedRecent: 1, voiceFailed: 1 }));
-    h.persist();
-    expect(readHealthSnapshot(db)!.media).toEqual(counts({ failedRecent: 1, voiceFailed: 1 }));
+    await h.persist();
+    expect((await readHealthSnapshot(db))!.media).toEqual(counts({ failedRecent: 1, voiceFailed: 1 }));
     const old = JSON.parse(JSON.stringify(h.snapshot())) as Record<string, unknown>;
     const { voiceFailed: _gone, ...before } = counts({ failedRecent: 1 });
-    setKv(db, 'health', JSON.stringify({ ...old, media: before }));
-    expect(readHealthSnapshot(db)!.media).toEqual(before);
-    expect(readHealthSnapshot(db)!.media!.voiceFailed).toBeUndefined();
+    await setKv(db, 'health', JSON.stringify({ ...old, media: before }));
+    expect((await readHealthSnapshot(db))!.media).toEqual(before);
+    expect((await readHealthSnapshot(db))!.media!.voiceFailed).toBeUndefined();
     const { sttRefused: _also, ...before2b } = before;
-    setKv(db, 'health', JSON.stringify({ ...old, media: before2b }));
-    expect(readHealthSnapshot(db)!.media).toEqual(before2b);
+    await setKv(db, 'health', JSON.stringify({ ...old, media: before2b }));
+    expect((await readHealthSnapshot(db))!.media).toEqual(before2b);
     for (const bad of ['1', null, true, {}]) {
-      setKv(db, 'health', JSON.stringify({ ...old, media: { ...before, voiceFailed: bad } }));
-      expect(readHealthSnapshot(db)).toBeUndefined();
+      await setKv(db, 'health', JSON.stringify({ ...old, media: { ...before, voiceFailed: bad } }));
+      expect(await readHealthSnapshot(db)).toBeUndefined();
     }
   });
 
@@ -317,33 +317,33 @@ describe('Health and voice notes that cannot be transcribed (Phase 2b Task 10)',
 
   it('keeps the problem in the snapshot only when there is one, and reads snapshots without it', async () => {
     const { db, h } = await setup();
-    h.persist();
-    expect(readHealthSnapshot(db)).toBeDefined();
-    expect('voiceProblem' in readHealthSnapshot(db)!).toBe(false);
+    await h.persist();
+    expect(await readHealthSnapshot(db)).toBeDefined();
+    expect('voiceProblem' in (await readHealthSnapshot(db))!).toBe(false);
     h.setVoiceProblem('local_not_set_up_bin');
-    h.persist();
-    expect(readHealthSnapshot(db)!.voiceProblem).toBe('local_not_set_up_bin');
-    expect(readHealthSnapshot(db)!.line.text).toBe(NOT_SET_UP);
+    await h.persist();
+    expect((await readHealthSnapshot(db))!.voiceProblem).toBe('local_not_set_up_bin');
+    expect((await readHealthSnapshot(db))!.line.text).toBe(NOT_SET_UP);
     h.setVoiceProblem('local_not_set_up_model');
-    h.persist();
-    expect(readHealthSnapshot(db)!.voiceProblem).toBe('local_not_set_up_model');
-    expect(readHealthSnapshot(db)!.line.text).toBe(NOT_SET_UP_MODEL);
+    await h.persist();
+    expect((await readHealthSnapshot(db))!.voiceProblem).toBe('local_not_set_up_model');
+    expect((await readHealthSnapshot(db))!.line.text).toBe(NOT_SET_UP_MODEL);
     h.setVoiceProblem('no_ffmpeg');
-    h.persist();
-    expect(readHealthSnapshot(db)!.voiceProblem).toBe('no_ffmpeg');
+    await h.persist();
+    expect((await readHealthSnapshot(db))!.voiceProblem).toBe('no_ffmpeg');
     // An older snapshot (before Task 10) has no voiceProblem and still reads.
     const old = JSON.parse(JSON.stringify(h.snapshot())) as Record<string, unknown>;
     delete old.voiceProblem;
-    setKv(db, 'health', JSON.stringify(old));
-    expect(readHealthSnapshot(db)).toBeDefined();
-    expect(readHealthSnapshot(db)!.voiceProblem).toBeUndefined();
+    await setKv(db, 'health', JSON.stringify(old));
+    expect(await readHealthSnapshot(db)).toBeDefined();
+    expect((await readHealthSnapshot(db))!.voiceProblem).toBeUndefined();
     // A value this version does not know (a newer writer) drops only that field, not the snapshot.
     // 'local_not_set_up' is the value written before the problem named its setting: dropped the same way.
     // So are the names every object inherits ("toString", "__proto__"): only the table's own keys count.
     for (const unknown of ['engine_on_fire', 'local_not_set_up', 'toString', '__proto__', 'constructor', 'hasOwnProperty', 1, null, {}]) {
-      setKv(db, 'health', JSON.stringify({ ...old, voiceProblem: unknown }));
-      expect(readHealthSnapshot(db)).toBeDefined();
-      expect(readHealthSnapshot(db)!.voiceProblem).toBeUndefined();
+      await setKv(db, 'health', JSON.stringify({ ...old, voiceProblem: unknown }));
+      expect(await readHealthSnapshot(db)).toBeDefined();
+      expect((await readHealthSnapshot(db))!.voiceProblem).toBeUndefined();
     }
   });
 });

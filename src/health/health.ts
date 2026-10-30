@@ -106,6 +106,7 @@ export class Health {
   readonly #spend: SpendGuard;
   readonly #dataDir: string;
   readonly #freeBytes: (dir: string) => number | null;
+  readonly #onError: (err: unknown) => void;
   #wa: GatewayStatus;
   #downSince: Date | null;
   #failed = new Map<number, string>();
@@ -122,8 +123,15 @@ export class Health {
   /** Setup mode (D3): false while the main Google account has no usable client. */
   #googleConnected = true;
 
-  constructor(o: { db: Db; clock: Clock; spend: SpendGuard; dataDir?: string; freeBytes?: (dir: string) => number | null }) {
+  /**
+   * onError: told when a snapshot write started by a change (not awaited) fails, so it leaves a log line. Unset (tests):
+   * console.error.
+   */
+  constructor(o: {
+    db: Db; clock: Clock; spend: SpendGuard; dataDir?: string; freeBytes?: (dir: string) => number | null; onError?: (err: unknown) => void;
+  }) {
     this.#db = o.db;
+    this.#onError = o.onError ?? ((err) => console.error('health snapshot not saved', err));
     this.#clock = o.clock;
     this.#spend = o.spend;
     this.#dataDir = o.dataDir ?? '.';
@@ -136,14 +144,14 @@ export class Health {
   /** Setup mode (D3): whether the main Google account is connected (main.ts sets it at start and on each reconnect). */
   setGoogleConnected(ok: boolean): void {
     this.#googleConnected = ok;
-    this.persist();
+    this.#persistSoon();
   }
 
   setWhatsApp(s: GatewayStatus): void {
     this.#wa = s;
     if (s.state === 'open') this.#downSince = null;
     else this.#downSince ??= new Date(s.since);
-    this.persist();
+    this.#persistSoon();
   }
 
   recordOutcome(clientId: number, o: ReconcileOutcome): void {
@@ -158,7 +166,7 @@ export class Health {
       else this.#failed.delete(clientId);
     }
     if (o.status === 'ok') this.#lastSuccess = this.#clock.now();
-    this.persist();
+    this.#persistSoon();
   }
 
   /** Stores the count of incoming messages that could not be saved; the next persist() records it. */
@@ -194,14 +202,14 @@ export class Health {
   markPublishFailed(f: { step: 'build' | 'drive'; auth: boolean }): void {
     this.#publishFailedSince ??= this.#clock.now();
     this.#publishAuthFailed = f.auth;
-    this.persist();
+    this.#persistSoon();
   }
 
   markPublished(): void {
     this.#lastPublished = this.#clock.now();
     this.#publishFailedSince = null;
     this.#publishAuthFailed = false;
-    this.persist();
+    this.#persistSoon();
   }
 
   #hasPaused(now: Date): boolean {
@@ -370,8 +378,13 @@ export class Health {
     };
   }
 
-  persist(): void {
-    setKv(this.#db, 'health', JSON.stringify(this.snapshot()));
+  /** A change's snapshot write, not awaited: the engine keeps the writes in order; a failure goes to onError. */
+  #persistSoon(): void {
+    this.persist().catch((err: unknown) => this.#onError(err));
+  }
+
+  async persist(): Promise<void> {
+    await setKv(this.#db, 'health', JSON.stringify(this.snapshot()));
   }
 }
 
@@ -421,8 +434,8 @@ const isReportHealth = (r: unknown): r is ReportHealth => {
 
 const isVoiceProblem = (p: unknown): p is VoiceProblem => typeof p === 'string' && Object.hasOwn(VOICE_PROBLEM_LINES, p);
 
-export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
-  const v = getKv(db, 'health');
+export async function readHealthSnapshot(db: Db): Promise<HealthSnapshot | undefined> {
+  const v = await getKv(db, 'health');
   if (!v) return undefined;
   try {
     const o = JSON.parse(v) as Partial<HealthSnapshot> | null;

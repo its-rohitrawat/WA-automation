@@ -96,10 +96,10 @@ export class GoogleConnectRoutes {
     try {
       if (typeof a === 'string') {
         label = a === MAIN_ACCOUNT ? MAIN_ACCOUNT : checkAccountLabel(a);
-        if (label !== MAIN_ACCOUNT && !meetingAccounts(this.#d.db).includes(label)) return fail(404, 'not_found', `There is no Google account named ${label}.`);
+        if (label !== MAIN_ACCOUNT && !(await meetingAccounts(this.#d.db)).includes(label)) return fail(404, 'not_found', `There is no Google account named ${label}.`);
       } else {
         label = checkAccountLabel(a.add.trim());
-        if (meetingAccounts(this.#d.db).includes(label)) return fail(409, 'exists', `A Google account named ${label} is already connected.`);
+        if ((await meetingAccounts(this.#d.db)).includes(label)) return fail(409, 'exists', `A Google account named ${label} is already connected.`);
         isNew = true;
       }
     } catch (e) {
@@ -142,7 +142,7 @@ export class GoogleConnectRoutes {
     // The account list may have changed since connect (another tab, or the CLI): an add must still be new, and a
     // reconnect must still have its account. Otherwise a live account's token could be overwritten, or a removed one revived.
     if (pending.label !== MAIN_ACCOUNT) {
-      const listed = meetingAccounts(this.#d.db).includes(pending.label);
+      const listed = (await meetingAccounts(this.#d.db)).includes(pending.label);
       if (pending.isNew && listed) return refuse('exists');
       if (!pending.isNew && !listed) return refuse('not_found');
     }
@@ -163,12 +163,12 @@ export class GoogleConnectRoutes {
     // and its email are then stored back to back: two reconnects at once can never pair one's token with the other's email.
     const email = await this.#verifiedEmail(tokens.id_token, pending);
     try {
-      this.#d.hub.setToken(pending.label, tokens.refresh_token, 'web', scope); // forgets the account's old email
+      await this.#d.hub.setToken(pending.label, tokens.refresh_token, 'web', scope); // forgets the account's old email
     } catch (err) {
       this.#d.log.error({ account: pending.label, code: (err as Error | null)?.name ?? 'Error' }, 'reconnected Google account could not be saved');
       return refuse('save');
     }
-    if (email !== null) saveAccountEmail(this.#d.db, pending.label, email);
+    if (email !== null) await saveAccountEmail(this.#d.db, pending.label, email);
     const who = email === null ? '' : ` · ${maskEmail(email)}`;
     this.#d.audit({
       actor: ctx.actor, kind: 'connection', requestId: ctx.requestId,

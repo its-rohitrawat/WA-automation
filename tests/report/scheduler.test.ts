@@ -36,7 +36,7 @@ async function setup(
   } = {},
 ) {
   const db = await seededDb();
-  if (o.trackerId !== null) setKv(db, TRACKER_ID_KEY, o.trackerId ?? TRACKER_ID);
+  if (o.trackerId !== null) await setKv(db, TRACKER_ID_KEY, o.trackerId ?? TRACKER_ID);
   const clock = manualClock(IST('05:00'));
   const sender = new FakeReportSender();
   const s = new ReportScheduler({
@@ -74,7 +74,7 @@ function capturingLogger() {
  * the request (an IST time today). The service honours it for 5 minutes.
  */
 async function request(db: Db, hm: string, date = DAY): Promise<void> {
-  setKv(db, REPORT_REQUEST_KEY, reportRequest(date, await reportFor(db, date), new Date(IST(hm))));
+  await setKv(db, REPORT_REQUEST_KEY, reportRequest(date, await reportFor(db, date), new Date(IST(hm))));
 }
 
 /** Lets pending promise callbacks run, so a step that would happen at once has happened. */
@@ -222,7 +222,7 @@ describe('ReportScheduler', () => {
     await at('06:00');
     expect(sender.calls).toHaveLength(0);
     expect(await reportFor(db, DAY)).toBeUndefined();
-    expect(getKv(db, REPORT_REQUEST_KEY)).toBe('');
+    expect(await getKv(db, REPORT_REQUEST_KEY)).toBe('');
     expect(await s.health()).toEqual({ text: 'Morning report: off', warning: null, ...TO });
   });
 
@@ -233,10 +233,10 @@ describe('ReportScheduler', () => {
     clock.set(IST('06:00'));
     const first = s.tick(clock.now());
     await vi.waitFor(() => expect(sender.calls).toHaveLength(1));
-    setKv(db, REPORT_REQUEST_KEY, `${DAY}|none|`);
+    await setKv(db, REPORT_REQUEST_KEY, `${DAY}|none|`);
     await s.tick(clock.now());
     expect(sender.calls).toHaveLength(1);
-    expect(getKv(db, REPORT_REQUEST_KEY)).toBe(`${DAY}|none|`); // the second tick returned before reading the request
+    expect(await getKv(db, REPORT_REQUEST_KEY)).toBe(`${DAY}|none|`); // the second tick returned before reading the request
     const stopping = s.stop(5_000);
     await settle();
     expect(sender.stopped).toBe(0); // the first send is still tracked, so stop waits for it
@@ -266,7 +266,7 @@ describe('ReportScheduler', () => {
     await at('15:00');
     expect(sender.calls).toHaveLength(1);
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'sent', forced: true, attempts: 2 });
-    expect(getKv(db, REPORT_REQUEST_KEY)).toBe('');
+    expect(await getKv(db, REPORT_REQUEST_KEY)).toBe('');
     await request(db, '15:01');
     await at('15:01');
     expect(sender.calls).toHaveLength(1);
@@ -284,7 +284,7 @@ describe('ReportScheduler', () => {
     await at('06:15');
     expect(sender.calls).toHaveLength(1);
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'sent', forced: true, attempts: 2 });
-    expect(getKv(db, REPORT_REQUEST_KEY)).toBe('');
+    expect(await getKv(db, REPORT_REQUEST_KEY)).toBe('');
   });
 
   it('a send-now request confirmed before a scheduled send that ends unknown is not used: nothing is sent twice', async () => {
@@ -296,14 +296,14 @@ describe('ReportScheduler', () => {
     const first = s.tick(clock.now());
     await vi.waitFor(() => expect(sender.calls).toHaveLength(1));
     // the owner confirmed while the CLI saw no row, and the request lands while the scheduled send is out
-    setKv(db, REPORT_REQUEST_KEY, reportRequest(DAY, undefined, new Date(IST('06:00'))));
+    await setKv(db, REPORT_REQUEST_KEY, reportRequest(DAY, undefined, new Date(IST('06:00'))));
     g.release();
     await first;
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'timeout' });
     await at('06:01');
     expect(sender.calls).toHaveLength(1);
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'timeout', attempts: 1, forced: false });
-    expect(getKv(db, REPORT_REQUEST_KEY)).toBe('');
+    expect(await getKv(db, REPORT_REQUEST_KEY)).toBe('');
   });
 
   it('ignores a send-now request whose confirmed state no longer matches the row, and the old date-only form', async () => {
@@ -316,30 +316,24 @@ describe('ReportScheduler', () => {
     await at('06:04');
     expect(sender.calls).toHaveLength(0);
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'unknown', attempts: 2 });
-    setKv(db, REPORT_REQUEST_KEY, DAY);
+    await setKv(db, REPORT_REQUEST_KEY, DAY);
     await at('06:05');
     expect(sender.calls).toHaveLength(0);
-    expect(getKv(db, REPORT_REQUEST_KEY)).toBe('');
+    expect(await getKv(db, REPORT_REQUEST_KEY)).toBe('');
   });
 
   it('clears a send-now request exactly once, as it takes it', async () => {
     const { db, sender, at } = await setup();
     await request(db, '05:00');
-    const writes: string[] = [];
-    const prepare = db.raw.prepare.bind(db.raw);
-    const spy = vi.spyOn(db.raw, 'prepare').mockImplementation(((sql: string) => {
-      if (/INSERT INTO kv/.test(sql)) writes.push(sql);
-      return prepare(sql);
-    }) as typeof db.raw.prepare);
-    try {
-      await at('05:00');
-      await at('05:01');
-    } finally {
-      spy.mockRestore();
-    }
+    // Every write of the request key, whichever way it is made (a new row or an upsert's update).
+    await db.exec(`CREATE TEMP TABLE kv_writes (v TEXT);
+      CREATE TEMP TRIGGER kv_write_insert AFTER INSERT ON kv WHEN NEW.k = '${REPORT_REQUEST_KEY}' BEGIN INSERT INTO kv_writes VALUES (NEW.v); END;
+      CREATE TEMP TRIGGER kv_write_update AFTER UPDATE ON kv WHEN NEW.k = '${REPORT_REQUEST_KEY}' BEGIN INSERT INTO kv_writes VALUES (NEW.v); END;`);
+    await at('05:00');
+    await at('05:01');
     expect(sender.calls).toHaveLength(1);
-    expect(writes).toHaveLength(1);
-    expect(getKv(db, REPORT_REQUEST_KEY)).toBe('');
+    expect(await db.all('SELECT v FROM kv_writes')).toHaveLength(1);
+    expect(await getKv(db, REPORT_REQUEST_KEY)).toBe('');
   });
 
   it('a send-now request after the deadline that fails gets one try, then the day is skipped with that reason', async () => {
@@ -408,7 +402,7 @@ describe('ReportScheduler', () => {
     const { db, sender, at } = await setup({ trackerId: null });
     await at('06:00');
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'no_tracker_link' });
-    setKv(db, TRACKER_ID_KEY, TRACKER_ID); // the Drive publisher uploads the tracker
+    await setKv(db, TRACKER_ID_KEY, TRACKER_ID); // the Drive publisher uploads the tracker
     await at('06:02');
     expect(sender.calls).toEqual([{ text: `Good morning. 0 open tasks, 0 overdue. Today's tracker: ${LINK}` }]);
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'sent', detail: 'msg-1', attempts: 2 });
@@ -433,10 +427,10 @@ describe('ReportScheduler', () => {
 
   it('ignores a send-now request left from an earlier day', async () => {
     const { db, sender, at } = await setup();
-    setKv(db, REPORT_REQUEST_KEY, reportRequest('2026-10-22', undefined, new Date(IST('15:00'))));
+    await setKv(db, REPORT_REQUEST_KEY, reportRequest('2026-10-22', undefined, new Date(IST('15:00'))));
     await at('15:00');
     expect(sender.calls).toHaveLength(0);
-    expect(getKv(db, REPORT_REQUEST_KEY)).toBe('');
+    expect(await getKv(db, REPORT_REQUEST_KEY)).toBe('');
   });
 
   it('a send-now request expires after 5 minutes: an older one (left behind by a stopping service) is ignored and cleared', async () => {
@@ -451,7 +445,7 @@ describe('ReportScheduler', () => {
     await old.at('05:10');
     expect(old.sender.calls).toHaveLength(0);
     expect(await reportFor(old.db, DAY)).toBeUndefined();
-    expect(getKv(old.db, REPORT_REQUEST_KEY)).toBe('');
+    expect(await getKv(old.db, REPORT_REQUEST_KEY)).toBe('');
     const line = lines.map((l) => JSON.parse(l) as Record<string, unknown>).find((l) => String(l.msg).includes('expired'));
     expect(line).toBeDefined();
     expect(Object.keys(line!).sort()).toEqual(['date', 'level', 'msg', 'time']);
@@ -459,10 +453,10 @@ describe('ReportScheduler', () => {
 
     // A request without its time (the form before requests expired) is never honoured either.
     const untimed = await setup();
-    setKv(untimed.db, REPORT_REQUEST_KEY, `${DAY}|none|`);
+    await setKv(untimed.db, REPORT_REQUEST_KEY, `${DAY}|none|`);
     await untimed.at('05:00');
     expect(untimed.sender.calls).toHaveLength(0);
-    expect(getKv(untimed.db, REPORT_REQUEST_KEY)).toBe('');
+    expect(await getKv(untimed.db, REPORT_REQUEST_KEY)).toBe('');
   });
 
   it('stop waits for the send in flight, stops the sender and starts no new send', async () => {
@@ -806,7 +800,7 @@ describe('report days (REPORT_DAYS)', () => {
 
   async function weekSetup(settings: ReportSettings = ON) {
     const db = await seededDb();
-    setKv(db, TRACKER_ID_KEY, TRACKER_ID);
+    await setKv(db, TRACKER_ID_KEY, TRACKER_ID);
     const clock = manualClock(at(SAT, '05:00').toISOString());
     const sender = new FakeReportSender();
     const s = new ReportScheduler({ db, clock, log: silentLogger(), sender, settings, healthLine: () => ({ ok: true, text: '✅ Connected' }) });
@@ -856,12 +850,12 @@ describe('report days (REPORT_DAYS)', () => {
     const { db, sender, s, tick } = await weekSetup();
     await tick(SUN, '10:00');
     expect(sender.calls).toHaveLength(0);
-    setKv(db, REPORT_REQUEST_KEY, reportRequest(SUN, await reportFor(db, SUN), at(SUN, '10:00')));
+    await setKv(db, REPORT_REQUEST_KEY, reportRequest(SUN, await reportFor(db, SUN), at(SUN, '10:00')));
     await tick(SUN, '10:01');
     expect(sender.calls).toHaveLength(1);
     expect(await reportFor(db, SUN)).toMatchObject({ status: 'sent', forced: true });
     expect((await s.health(at(SUN, '10:02'))).text).toBe('Morning report: sent at 10:01 IST');
-    setKv(db, REPORT_REQUEST_KEY, reportRequest(SUN, await reportFor(db, SUN), at(SUN, '10:05')));
+    await setKv(db, REPORT_REQUEST_KEY, reportRequest(SUN, await reportFor(db, SUN), at(SUN, '10:05')));
     for (const hm of ['10:05', '10:06', '12:00']) await tick(SUN, hm);
     expect(sender.calls).toHaveLength(1);
   });
@@ -869,7 +863,7 @@ describe('report days (REPORT_DAYS)', () => {
   it('a send-now request on a Sunday that fails keeps the normal retry and deadline rules for that row', async () => {
     const { db, sender, tick } = await weekSetup();
     sender.results = [failed('connect_timeout'), failed('closed')];
-    setKv(db, REPORT_REQUEST_KEY, reportRequest(SUN, undefined, at(SUN, '10:00')));
+    await setKv(db, REPORT_REQUEST_KEY, reportRequest(SUN, undefined, at(SUN, '10:00')));
     await tick(SUN, '10:00');
     expect(await reportFor(db, SUN)).toMatchObject({ status: 'retry', detail: 'connect_timeout' });
     await tick(SUN, '10:02');

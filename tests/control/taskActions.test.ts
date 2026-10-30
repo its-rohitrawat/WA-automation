@@ -18,11 +18,11 @@ async function withTask(): Promise<Db> {
 }
 
 /** Everything a correction changes: the task row, its events and the rebuild request. */
-function state(db: Db) {
+async function state(db: Db) {
   return {
     task: db.raw.prepare('SELECT * FROM tasks').all(),
     events: db.raw.prepare('SELECT task_id, client_id, actor, op, detail, reason, source_ids, at FROM task_events ORDER BY id').all(),
-    rebuild: getKv(db, 'rebuild_requested'),
+    rebuild: await getKv(db, 'rebuild_requested'),
   };
 }
 
@@ -54,8 +54,8 @@ describe('runTaskAction matches the CLI', () => {
     for (const [action, viaCli, line] of steps) {
       const { detail, audits } = await run(web, 'sha-001', action);
       await viaCli(cli);
-      expect(state(web)).toEqual(state(cli));
-      expect(getKv(web, 'rebuild_requested')).toBe(now.toISOString());
+      expect(await state(web)).toEqual(await state(cli));
+      expect(await getKv(web, 'rebuild_requested')).toBe(now.toISOString());
       expect(audits).toEqual([{ actor: OWNER, event: `task.${action}`, kind: 'task', detail: line }]);
       expect(detail.code).toBe('SHA-001');
     }
@@ -71,7 +71,7 @@ describe('runTaskAction matches the CLI', () => {
     const cli = await withTask();
     const { detail, audits } = await run(web, 'SHA-001', 'edit', { deadline: '2026-10-30', assignedTo: 'Rahul', latestProgress: 'secret words' });
     await editTask(cli, 'SHA-001', { deadline: '2026-10-30', assignedTo: 'Rahul', latestProgress: 'secret words' }, now);
-    expect(state(web)).toEqual(state(cli));
+    expect(await state(web)).toEqual(await state(cli));
     expect(detail).toMatchObject({ deadline: '2026-10-30', owner: 'Rahul', latestProgress: 'secret words' });
     expect(audits).toEqual([{ actor: OWNER, event: 'task.edit', kind: 'task', detail: 'Task SHA-001 edited (owner, deadline, progress)' }]);
     expect(JSON.stringify(audits)).not.toContain('secret');
@@ -85,7 +85,7 @@ describe('runTaskAction matches the CLI', () => {
     await editTask(cli, 'SHA-001', { deadline: '2026-10-30', assignedTo: 'Rahul' }, now);
     await run(web, 'SHA-001', 'edit', { deadline: null, assignedTo: '' });
     await editTask(cli, 'SHA-001', { deadline: 'none', assignedTo: 'none' }, now);
-    expect(state(web)).toEqual(state(cli));
+    expect(await state(web)).toEqual(await state(cli));
   });
 });
 
@@ -101,11 +101,11 @@ describe('runTaskAction refusals', () => {
 
   it('409 for a status it already has, with nothing changed or audited', async () => {
     const db = await withTask();
-    const before = state(db);
+    const before = await state(db);
     const audits: AuditEntry[] = [];
     expect(await refusal(async () => await runTaskAction(db, { code: 'SHA-001', action: 'reopen' }, { actor: OWNER, now, audit: (x) => audits.push(x) })))
       .toMatchObject({ status: 409, message: 'Task SHA-001 is already open' });
-    expect(state(db)).toEqual(before);
+    expect(await state(db)).toEqual(before);
     expect(audits).toEqual([]);
   });
 
@@ -116,10 +116,10 @@ describe('runTaskAction refusals', () => {
 
   it('rolls the change back when the audit cannot be written', async () => {
     const db = await withTask();
-    const before = state(db);
+    const before = await state(db);
     await expect(runTaskAction(db, { code: 'SHA-001', action: 'done' }, { actor: OWNER, now, audit: () => { throw new Error('disk full'); } }))
       .rejects.toThrowError('disk full');
-    expect(state(db)).toEqual(before);
+    expect(await state(db)).toEqual(before);
   });
 });
 

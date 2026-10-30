@@ -96,11 +96,10 @@ export async function assignMeetingToClient(
     );
   }
   const r = { id: m.id, code: c.code };
-  // requestRebuild writes kv, on raw until S1.12, which is allowed inside this transaction.
   await db.tx(async (q) => {
     if (!(await assignMeeting(q, m.id, c.id, now.toISOString()))) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
     await humanEvent(q, null, c.id, 'assign_meeting', { meetingId: m.id }, now);
-    requestRebuild(db, now);
+    await requestRebuild(q, now);
     await inTx?.(q, r);
   });
   return r;
@@ -112,7 +111,7 @@ export async function skipMeetingById(db: Db, rawId: string, now: Date, inTx?: I
   if (m.status !== 'unassigned') throw new CorrectionError(`Meeting ${m.id} is ${LABELS[m.status]}; only unassigned meetings can be skipped`);
   await db.tx(async (q) => {
     if (!(await skipMeeting(q, m.id, now.toISOString()))) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
-    requestRebuild(db, now); // the workbook lists unassigned meetings
+    await requestRebuild(q, now); // the workbook lists unassigned meetings
     await inTx?.(q, m.id);
   });
   return m.id;
@@ -137,7 +136,7 @@ export async function retryMeetingById(
   return db.tx(async (q) => {
     const status = await retryMeeting(q, m.id, now.toISOString());
     if (status === null) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
-    if (status === 'unassigned') requestRebuild(db, now);
+    if (status === 'unassigned') await requestRebuild(q, now);
     const r = { id: m.id, status };
     await inTx?.(q, r);
     return r;
@@ -159,7 +158,7 @@ export interface MeetingCliDeps {
   out: (line: string) => void;
   clock: Clock;
   /** Builds the Meet, Calendar and Drive client; tests pass a FakeMeetingsApi. */
-  googleApi: (db: Db, key: Buffer) => MeetingsGoogleApi;
+  googleApi: (db: Db, key: Buffer) => MeetingsGoogleApi | Promise<MeetingsGoogleApi>;
   /**
    * The speech list price of one meeting of this length; null when STT_PROVIDER is none. Not given: built from the
    * env's prices by backfill only (speechCeilingFromEnv), so no command needs STT_API_KEY.
@@ -186,15 +185,15 @@ export function speechCeilingFromEnv(env: Pick<Env, 'STT_PROVIDER' | 'INR_PER_US
 }
 
 /** The main sign-in and every extra meetings account, as the service builds them (one account: unchanged). */
-export function storedGoogleApi(env: Env): (db: Db, key: Buffer) => MeetingsGoogleApi {
-  return (db, key) => {
-    const token = new TokenStore(db, key).load();
+export function storedGoogleApi(env: Env): (db: Db, key: Buffer) => Promise<MeetingsGoogleApi> {
+  return async (db, key) => {
+    const token = await new TokenStore(db, key).load();
     if (!token) throw new CorrectionError('Google is not connected. Run: npm run cli -- google-auth');
     const newClient = () => createOAuthClient(requireKey(env, 'GOOGLE_OAUTH_CLIENT_ID'), requireKey(env, 'GOOGLE_OAUTH_CLIENT_SECRET'));
     const main = newClient();
     main.setCredentials({ refresh_token: token });
     const log = silentLogger();
-    return combineMeetingAccounts(storedMeetingAccounts({ db, key, main, newClient, log }), log).api;
+    return combineMeetingAccounts(await storedMeetingAccounts({ db, key, main, newClient, log }), log).api;
   };
 }
 
@@ -218,7 +217,7 @@ export function meetingAiCeilingUsd(seconds: number, prices: Prices): number {
   return summary + tracker;
 }
 
-function watcherFor(deps: MeetingCliDeps, db: Db, api: MeetingsGoogleApi, clients: ClientConfig[]): MeetingWatcher {
+function watcherFor(deps: MeetingCliDeps, db: Sql, api: MeetingsGoogleApi, clients: ClientConfig[]): MeetingWatcher {
   const { env } = deps;
   return new MeetingWatcher({
     db,
@@ -229,6 +228,9 @@ function watcherFor(deps: MeetingCliDeps, db: Db, api: MeetingsGoogleApi, client
     clients,
   });
 }
+
+/** Thrown to roll the backfill preview's transaction back: it stores nothing. */
+class DryRun extends Error {}
 
 const count = (found: readonly FoundMeeting[], s: MeetingStatus) => found.filter((f) => f.status === s).length;
 
@@ -274,27 +276,28 @@ export async function meetingBackfillCommand(opts: { since: string; yes: boolean
     const key = deps.keyProvider.getKey();
     const configs = loadGroupsFile(env.GROUPS_FILE);
     db = openDb(trackerDbPath(env.DATA_DIR));
-    if (!meetingsReady(db)) throw new CorrectionError(NO_SCOPES);
-    const api = deps.googleApi(db, key);
-    const run = async () => {
+    if (!(await meetingsReady(db))) throw new CorrectionError(NO_SCOPES);
+    const api = await deps.googleApi(db, key);
+    const run = async (sql: Sql) => {
       // The groups file's clients are synced first, so a newly added client matches in the preview as in the real run.
-      await syncClients(db!, configs);
-      return watcherFor(deps, db!, api, configs).backfill(from.toISOString(), now.toISOString(), deps.signal ?? new AbortController().signal, {
+      await syncClients(sql, configs);
+      return watcherFor(deps, sql, api, configs).backfill(from.toISOString(), now.toISOString(), deps.signal ?? new AbortController().signal, {
         dryRun: !opts.yes,
       });
     };
-    let r: Awaited<ReturnType<typeof run>>;
+    let r!: Awaited<ReturnType<typeof run>>;
     if (opts.yes) {
-      r = await run();
+      r = await run(db);
     } else {
-      // The preview syncs inside a transaction that is always rolled back, so it stores nothing. The lock is held (the
-      // service is stopped), so no other writer waits on it. S1 only: a raw transaction, because the preview calls Google
-      // inside it and the watcher reads through db; S1.12 moves it onto db.tx once the clients store is converted.
-      db.raw.exec('BEGIN');
+      // The preview syncs and reads inside a transaction that is always rolled back (DryRun), so it stores nothing. It
+      // spans the Google calls: the lock is held (the service is stopped), so nothing else waits on the database.
       try {
-        r = await run();
-      } finally {
-        db.raw.exec('ROLLBACK');
+        await db.tx(async (q) => {
+          r = await run(q);
+          throw new DryRun();
+        });
+      } catch (e) {
+        if (!(e instanceof DryRun)) throw e;
       }
     }
     const f = r.found;
@@ -310,7 +313,7 @@ export async function meetingBackfillCommand(opts: { since: string; yes: boolean
       out(f.length > 0 ? 'Nothing was changed. Re-run with --yes to store them.' : 'Nothing was changed.');
       return;
     }
-    if (r.added > 0) requestRebuild(db, now);
+    if (r.added > 0) await requestRebuild(db, now);
     out('Next: start the service (net start wa-agent); it processes the queued meetings. See them with: npm run cli -- meeting list');
   } finally {
     db?.raw.close();
@@ -332,8 +335,8 @@ export async function meetingCheckCommand(deps: MeetingCliDeps): Promise<void> {
   const configs = loadGroupsFile(env.GROUPS_FILE);
   const db = openDb(trackerDbPath(env.DATA_DIR));
   try {
-    if (!meetingsReady(db)) throw new CorrectionError(NO_SCOPES);
-    const api = deps.googleApi(db, key);
+    if (!(await meetingsReady(db))) throw new CorrectionError(NO_SCOPES);
+    const api = await deps.googleApi(db, key);
     const now = deps.clock.now();
     const from = new Date(now.getTime() - CHECK_DAYS * 86_400_000);
     const r = await watcherFor(deps, db, api, configs).backfill(from.toISOString(), now.toISOString(), deps.signal ?? new AbortController().signal, {

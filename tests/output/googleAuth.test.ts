@@ -28,21 +28,21 @@ describe('TokenStore', () => {
   it('round-trips and stores the token encrypted', async () => {
     const db = await seededDb();
     const store = new TokenStore(db, randomBytes(32));
-    store.save(TOKEN);
-    expect(getKv(db, 'google_refresh_token')).not.toContain('refresh-token-value');
-    expect(store.load()).toBe(TOKEN);
+    await store.save(TOKEN);
+    expect(await getKv(db, 'google_refresh_token')).not.toContain('refresh-token-value');
+    expect(await store.load()).toBe(TOKEN);
   });
 
   it('returns undefined before sign-in', async () => {
-    expect(new TokenStore(await seededDb(), randomBytes(32)).load()).toBeUndefined();
+    expect(await new TokenStore(await seededDb(), randomBytes(32)).load()).toBeUndefined();
   });
 
   it('a different master key gives TokenDecryptError without leaking the token', async () => {
     const db = await seededDb();
-    new TokenStore(db, randomBytes(32)).save(TOKEN);
+    await new TokenStore(db, randomBytes(32)).save(TOKEN);
     let err: unknown;
     try {
-      new TokenStore(db, randomBytes(32)).load();
+      await new TokenStore(db, randomBytes(32)).load();
     } catch (e) {
       err = e;
     }
@@ -54,19 +54,19 @@ describe('TokenStore', () => {
   it('a tampered stored value gives TokenDecryptError', async () => {
     const db = await seededDb();
     const store = new TokenStore(db, randomBytes(32));
-    store.save(TOKEN);
-    const blob = Buffer.from(getKv(db, 'google_refresh_token')!, 'base64');
+    await store.save(TOKEN);
+    const blob = Buffer.from((await getKv(db, 'google_refresh_token'))!, 'base64');
     blob[blob.length - 1] = blob[blob.length - 1]! ^ 0xff;
-    setKv(db, 'google_refresh_token', blob.toString('base64'));
-    expect(() => store.load()).toThrowError(TokenDecryptError);
-    expect(() => store.load()).toThrowError(/google-auth/);
+    await setKv(db, 'google_refresh_token', blob.toString('base64'));
+    await expect(store.load()).rejects.toThrowError(TokenDecryptError);
+    await expect(store.load()).rejects.toThrowError(/google-auth/);
   });
 
   it('uses a derived key: the raw master key cannot decrypt the stored value', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    new TokenStore(db, key).save(TOKEN);
-    const blob = Buffer.from(getKv(db, 'google_refresh_token')!, 'base64');
+    await new TokenStore(db, key).save(TOKEN);
+    const blob = Buffer.from((await getKv(db, 'google_refresh_token'))!, 'base64');
     expect(() => decrypt(key, blob)).toThrow();
     expect(() => decrypt(key, blob, Buffer.from('google_refresh_token'))).toThrow();
   });
@@ -126,32 +126,32 @@ describe('scopes', () => {
 describe('granted scopes', () => {
   it('an old token with nothing recorded counts as Drive only', async () => {
     const db = await seededDb();
-    new TokenStore(db, randomBytes(32)).save(TOKEN);
-    expect(getKv(db, 'google_scopes')).toBeUndefined();
-    expect(hasMeetingScopes(db)).toBe(false);
+    await new TokenStore(db, randomBytes(32)).save(TOKEN);
+    expect(await getKv(db, 'google_scopes')).toBeUndefined();
+    expect(await hasMeetingScopes(db)).toBe(false);
   });
 
   it('stores the granted scope string and reads it back', async () => {
     const db = await seededDb();
-    saveGrantedScopes(db, ALL_SCOPES.join(' '));
-    expect(getKv(db, 'google_scopes')).toBe(ALL_SCOPES.join(' '));
-    expect(hasMeetingScopes(db)).toBe(true);
+    await saveGrantedScopes(db, ALL_SCOPES.join(' '));
+    expect(await getKv(db, 'google_scopes')).toBe(ALL_SCOPES.join(' '));
+    expect(await hasMeetingScopes(db)).toBe(true);
   });
 
   it('is true only when every meeting scope is recorded', async () => {
     const db = await seededDb();
-    saveGrantedScopes(db, DRIVE_SCOPES.join(' '));
-    expect(hasMeetingScopes(db)).toBe(false);
-    saveGrantedScopes(db, [...DRIVE_SCOPES, MEETING_SCOPES[0], MEETING_SCOPES[2]].join(' '));
-    expect(hasMeetingScopes(db)).toBe(false);
-    saveGrantedScopes(db, ['openid', ...MEETING_SCOPES.toReversed(), ...DRIVE_SCOPES].join(' '));
-    expect(hasMeetingScopes(db)).toBe(true);
+    await saveGrantedScopes(db, DRIVE_SCOPES.join(' '));
+    expect(await hasMeetingScopes(db)).toBe(false);
+    await saveGrantedScopes(db, [...DRIVE_SCOPES, MEETING_SCOPES[0], MEETING_SCOPES[2]].join(' '));
+    expect(await hasMeetingScopes(db)).toBe(false);
+    await saveGrantedScopes(db, ['openid', ...MEETING_SCOPES.toReversed(), ...DRIVE_SCOPES].join(' '));
+    expect(await hasMeetingScopes(db)).toBe(true);
   });
 
   it('a near-miss scope does not count', async () => {
     const db = await seededDb();
-    saveGrantedScopes(db, NEAR_MISS);
-    expect(hasMeetingScopes(db)).toBe(false);
+    await saveGrantedScopes(db, NEAR_MISS);
+    expect(await hasMeetingScopes(db)).toBe(false);
   });
 });
 
@@ -340,50 +340,50 @@ describe('extra meeting accounts', () => {
   it('stores each account under its own key, leaves the main token alone, and lists them in order', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    new TokenStore(db, key).save(TOKEN);
-    saveMeetingAccount(db, key, 'company2', 'rt-2', ALL);
-    saveMeetingAccount(db, key, 'company3', 'rt-3', ALL);
-    saveMeetingAccount(db, key, 'company2', 'rt-2b', ALL); // signing in again replaces, keeps the place
-    expect(meetingAccounts(db)).toEqual(['company2', 'company3']);
-    expect(new TokenStore(db, key).load()).toBe(TOKEN);
-    expect(new TokenStore(db, key, 'company2').load()).toBe('rt-2b');
-    expect(new TokenStore(db, key, 'company3').load()).toBe('rt-3');
-    expect(getKv(db, 'google_refresh_token:company3')).not.toContain('rt-3');
+    await new TokenStore(db, key).save(TOKEN);
+    await saveMeetingAccount(db, key, 'company2', 'rt-2', ALL);
+    await saveMeetingAccount(db, key, 'company3', 'rt-3', ALL);
+    await saveMeetingAccount(db, key, 'company2', 'rt-2b', ALL); // signing in again replaces, keeps the place
+    expect(await meetingAccounts(db)).toEqual(['company2', 'company3']);
+    expect(await new TokenStore(db, key).load()).toBe(TOKEN);
+    expect(await new TokenStore(db, key, 'company2').load()).toBe('rt-2b');
+    expect(await new TokenStore(db, key, 'company3').load()).toBe('rt-3');
+    expect(await getKv(db, 'google_refresh_token:company3')).not.toContain('rt-3');
   });
 
   it('meetingsReady: the main sign-in or any extra account with every meeting scope', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    saveGrantedScopes(db, DRIVE_SCOPES[0]!);
-    expect(meetingsReady(db)).toBe(false);
-    saveMeetingAccount(db, key, 'company2', 'rt-2', MEETING_SCOPES.slice(1).join(' '));
-    expect(meetingsReady(db)).toBe(false);
-    saveMeetingAccount(db, key, 'company3', 'rt-3', ALL);
-    expect(meetingsReady(db)).toBe(true);
-    expect(hasMeetingScopes(db)).toBe(false); // the main sign-in alone is unchanged
+    await saveGrantedScopes(db, DRIVE_SCOPES[0]!);
+    expect(await meetingsReady(db)).toBe(false);
+    await saveMeetingAccount(db, key, 'company2', 'rt-2', MEETING_SCOPES.slice(1).join(' '));
+    expect(await meetingsReady(db)).toBe(false);
+    await saveMeetingAccount(db, key, 'company3', 'rt-3', ALL);
+    expect(await meetingsReady(db)).toBe(true);
+    expect(await hasMeetingScopes(db)).toBe(false); // the main sign-in alone is unchanged
   });
 
   it('remove forgets the token, scopes and list entry of that account only', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    new TokenStore(db, key).save(TOKEN);
-    saveMeetingAccount(db, key, 'company2', 'rt-2', ALL);
-    saveMeetingAccount(db, key, 'company3', 'rt-3', ALL);
-    expect(removeMeetingAccount(db, 'company2')).toBe(true);
-    expect(removeMeetingAccount(db, 'company2')).toBe(false);
-    expect(meetingAccounts(db)).toEqual(['company3']);
-    expect(getKv(db, 'google_refresh_token:company2')).toBeUndefined();
-    expect(getKv(db, 'google_scopes:company2')).toBeUndefined();
-    expect(new TokenStore(db, key).load()).toBe(TOKEN);
-    expect(new TokenStore(db, key, 'company3').load()).toBe('rt-3');
+    await new TokenStore(db, key).save(TOKEN);
+    await saveMeetingAccount(db, key, 'company2', 'rt-2', ALL);
+    await saveMeetingAccount(db, key, 'company3', 'rt-3', ALL);
+    expect(await removeMeetingAccount(db, 'company2')).toBe(true);
+    expect(await removeMeetingAccount(db, 'company2')).toBe(false);
+    expect(await meetingAccounts(db)).toEqual(['company3']);
+    expect(await getKv(db, 'google_refresh_token:company2')).toBeUndefined();
+    expect(await getKv(db, 'google_scopes:company2')).toBeUndefined();
+    expect(await new TokenStore(db, key).load()).toBe(TOKEN);
+    expect(await new TokenStore(db, key, 'company3').load()).toBe('rt-3');
   });
 
   it('a damaged account list reads as no extra accounts', async () => {
     const db = await seededDb();
-    setKv(db, 'google_meeting_accounts', '{not json');
-    expect(meetingAccounts(db)).toEqual([]);
-    setKv(db, 'google_meeting_accounts', JSON.stringify(['ok-1', 'main', 'Bad', 7]));
-    expect(meetingAccounts(db)).toEqual(['ok-1']);
+    await setKv(db, 'google_meeting_accounts', '{not json');
+    expect(await meetingAccounts(db)).toEqual([]);
+    await setKv(db, 'google_meeting_accounts', JSON.stringify(['ok-1', 'main', 'Bad', 7]));
+    expect(await meetingAccounts(db)).toEqual(['ok-1']);
   });
 
   it('runLoopbackConsent with requireDrive false accepts the meeting scopes without Drive', async () => {

@@ -17,7 +17,7 @@ const B = '917012349999';
 
 async function setup(initial: LiveReportSettings, o: { failOpen?: number } = {}) {
   const db = await seededDb();
-  setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
+  await setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
   const clock = manualClock(at('05:00'));
   let current = initial;
   let failOpen = o.failOpen ?? 0;

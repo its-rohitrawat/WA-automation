@@ -1,6 +1,7 @@
 import { getClient } from '../store/clients.ts';
 import type { Db } from '../store/db.ts';
-import { firstAnchor, listBackfills, messageCount, saveBackfill, type Backfill } from '../store/historyBackfill.ts';
+import { firstAnchor, listBackfills, saveBackfill, type Backfill } from '../store/historyBackfill.ts';
+import { messageRowId } from '../store/media.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import type { GatewayLike, HistoryAnswer, Scheduler } from './gateway.ts';
@@ -75,7 +76,8 @@ export class HistoryBackfill {
     this.#o = o;
     this.#schedule = o.scheduler ?? defaultScheduler;
     o.gateway.onHistory((a) => {
-      this.#answers = this.#answers.then(() => this.#onAnswer(a));
+      // A failure is logged and the chain goes on, so one bad answer never stops the later ones.
+      this.#answers = this.#answers.then(() => this.#onAnswer(a)).catch((err: unknown) => this.#o.log.error({ err }, 'history backfill answer failed'));
     });
   }
 
@@ -140,7 +142,7 @@ export class HistoryBackfill {
     for (const b of await listBackfills(db)) {
       if (b.state !== 'waiting' && b.state !== 'fetching') continue;
       if (!(await this.#stillApproved(b))) {
-        this.#finish(b, true);
+        await this.#finish(b, true);
         continue;
       }
       if (gateway.status().state !== 'open' || this.#o.spendPaused()) return; // waits; the tick tries again
@@ -148,12 +150,12 @@ export class HistoryBackfill {
       const anchor = b.cursor ?? (await firstAnchor(db, b.clientId, b.until));
       if (!anchor) continue; // waiting for the group's first message
       if (anchor.ts <= b.since || b.requests >= MAX_REQUESTS || b.empties >= EMPTIES_TO_FINISH || b.timeouts >= TIMEOUTS_TO_FINISH || b.failures >= FAILURES_TO_FINISH) {
-        this.#finish(b, false);
+        await this.#finish(b, false);
         continue;
       }
       const now = clock.now();
       const asking: Backfill = { ...b, state: 'fetching', fetchingSince: b.fetchingSince ?? now.toISOString(), requests: b.requests + 1, cursor: anchor };
-      saveBackfill(db, asking);
+      await saveBackfill(db, asking);
       const timeout = this.#schedule(() => void this.#timedOut(b.groupId), ANSWER_TIMEOUT_MS);
       this.#outstanding = { groupId: b.groupId, timeout };
       this.#active = b.clientId;
@@ -165,7 +167,7 @@ export class HistoryBackfill {
         this.#outstanding.timeout.cancel();
         this.#outstanding = undefined;
         this.#active = undefined;
-        saveBackfill(db, { ...asking, requests: b.requests, failures: b.failures + 1 });
+        await saveBackfill(db, { ...asking, requests: b.requests, failures: b.failures + 1 });
         this.#soon(REQUEST_GAP_MS * 2 ** Math.min(b.failures + 1, 8));
       }
       return; // one request at a time
@@ -187,7 +189,7 @@ export class HistoryBackfill {
     this.#active = undefined; // no answer: the group's processing goes on meanwhile
     try {
       const b = (await listBackfills(this.#o.db)).find((x) => x.groupId === groupId);
-      if (b && b.state === 'fetching') saveBackfill(this.#o.db, { ...b, timeouts: b.timeouts + 1 });
+      if (b && b.state === 'fetching') await saveBackfill(this.#o.db, { ...b, timeouts: b.timeouts + 1 });
     } catch (err) {
       this.#o.log.error({ err }, 'history backfill timeout could not be recorded');
     }
@@ -204,7 +206,8 @@ export class HistoryBackfill {
         const b = (await listBackfills(db)).find((x) => x.groupId === g.groupId);
         if (!b || (b.state !== 'fetching' && b.state !== 'waiting') || !(await this.#stillApproved(b))) continue; // dropped
         handled = true;
-        const before = await messageCount(db, b.clientId);
+        // Counted per message this answer stored: live messages stored meanwhile (the gateway's own chain) do not count.
+        let added = 0;
         let reachedSince = false;
         let failed = 0;
         let cursor = b.cursor;
@@ -215,17 +218,20 @@ export class HistoryBackfill {
             reachedSince = true; // older than 7 days: dropped
             continue;
           }
+          const known = e.kind === 'message' && (await messageRowId(db, b.clientId, e.waId)) !== undefined;
           try {
             await this.#o.ingest(e);
           } catch {
             failed++;
+            continue;
           }
+          if (e.kind === 'message' && !known && (await messageRowId(db, b.clientId, e.waId)) !== undefined) added++;
         }
         if (failed) log.warn({ clientId: b.clientId, failed }, 'history backfill: some earlier messages could not be saved');
         const older = cursor !== null && cursor !== b.cursor;
-        const next: Backfill = { ...b, cursor, found: b.found + Math.max(0, (await messageCount(db, b.clientId)) - before), empties: older ? 0 : b.empties + 1 };
-        saveBackfill(db, next);
-        if (reachedSince) this.#finish(next, false);
+        const next: Backfill = { ...b, cursor, found: b.found + added, empties: older ? 0 : b.empties + 1 };
+        await saveBackfill(db, next);
+        if (reachedSince) await this.#finish(next, false);
       }
     } catch (err) {
       log.error({ err }, 'history backfill answer failed');
@@ -237,7 +243,7 @@ export class HistoryBackfill {
       if (a.groups.length === 0) {
         try {
           const b = (await listBackfills(db)).find((x) => x.groupId === out.groupId);
-          if (b && b.state === 'fetching') saveBackfill(db, { ...b, empties: b.empties + 1 });
+          if (b && b.state === 'fetching') await saveBackfill(db, { ...b, empties: b.empties + 1 });
         } catch (err) {
           log.error({ err }, 'history backfill empty answer could not be recorded');
         }
@@ -248,10 +254,10 @@ export class HistoryBackfill {
     }
   }
 
-  #finish(b: Backfill, stopped: boolean): void {
+  async #finish(b: Backfill, stopped: boolean): Promise<void> {
     const { db, clock, log } = this.#o;
     if (this.#active === b.clientId) this.#active = undefined;
-    saveBackfill(db, { ...b, state: stopped ? 'stopped' : 'done', finishedAt: clock.now().toISOString() });
+    await saveBackfill(db, { ...b, state: stopped ? 'stopped' : 'done', finishedAt: clock.now().toISOString() });
     const found = stopped ? 0 : b.found;
     log.info({ clientId: b.clientId, found, requests: b.requests, stopped }, stopped ? 'history backfill stopped: the group is no longer approved' : 'history backfill finished');
     try {

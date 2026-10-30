@@ -170,7 +170,7 @@ describe('AgentControl.status', () => {
 describe('AgentControl.connections', () => {
   it('describes each card', async () => {
     const t = await setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' }, sender: 'idle', heartbeat: new Date('2026-10-19T07:55:00.000Z') });
-    saveMeetingAccount(t.db, KEY, 'company2', 'refresh-token-not-real', 'https://www.googleapis.com/auth/meetings.space.readonly');
+    await saveMeetingAccount(t.db, KEY, 'company2', 'refresh-token-not-real', 'https://www.googleapis.com/auth/meetings.space.readonly');
     t.health.setMeetings(meetings({ lostAccounts: ['company2'] }));
     await insertMessage(t.db, { waId: 'w1', clientId: 1, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts: '2026-10-19T07:00:00.000Z',
       text: 'hi', quotedWaId: null, mediaType: null });
@@ -195,8 +195,8 @@ describe('AgentControl.connections', () => {
 
   it('the Drive card names the file, its folder, its link and the main account it is written with', async () => {
     const t = await setup();
-    setKv(t.db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qr-st');
-    setKv(t.db, 'google_account_email:main', 'owner@example.com');
+    await setKv(t.db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qr-st');
+    await setKv(t.db, 'google_account_email:main', 'owner@example.com');
     expect((await t.control.connections()).drive).toMatchObject({
       file: 'Tracker.xlsx', folder: 'WA Agent', account: 'owner@example.com', url: 'https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp_qr-st/view',
     });
@@ -204,8 +204,8 @@ describe('AgentControl.connections', () => {
 
   it("shows each Google account's stored email, and names the main one on the Drive card", async () => {
     const t = await setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' } });
-    saveMeetingAccount(t.db, KEY, 'company2', 'refresh-token-not-real', 'https://www.googleapis.com/auth/meetings.space.readonly');
-    saveAccountEmail(t.db, 'main', 'owner@studio.in');
+    await saveMeetingAccount(t.db, KEY, 'company2', 'refresh-token-not-real', 'https://www.googleapis.com/auth/meetings.space.readonly');
+    await saveAccountEmail(t.db, 'main', 'owner@studio.in');
     const c = (await t.control.connections());
     expect(c.google.map((g) => [g.label, g.email])).toEqual([['main', 'owner@studio.in'], ['company2', null]]);
     expect(c.drive.account).toBe('owner@studio.in');
@@ -254,7 +254,7 @@ describe('AgentControl answers carry no secrets', () => {
   it('no token, key or full phone number in any answer', async () => {
     const t = await setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com', HEARTBEAT_URL: 'https://heartbeat.uptimerobot.com/secret-hb-token' },
       sender: 'open', heartbeat: new Date(NOW) });
-    saveMeetingAccount(t.db, KEY, 'company2', 'refresh-token-not-real', 'scope');
+    await saveMeetingAccount(t.db, KEY, 'company2', 'refresh-token-not-real', 'scope');
     await insertMessage(t.db, { waId: 'w1', clientId: 1, senderJid: '919812345678@s.whatsapp.net', senderNumber: '919812345678', senderName: 'Ravi', fromMe: false,
       ts: '2026-10-19T07:00:00.000Z', text: 'secret chat words', quotedWaId: null, mediaType: null });
     t.health.setReport({ text: 'Morning report: sent at 06:00 IST', warning: null, recipientMasked: '…5678' });

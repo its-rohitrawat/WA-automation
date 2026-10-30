@@ -1,13 +1,9 @@
 cli/commands.ts
-cli/meetings.ts
 config/prioritySettings.ts
 config/settingsStore.ts
 health/uptimeLog.ts
 media/extract.ts
-output/googleAuth.ts
-output/googleAuthHub.ts
 spend/spendGuard.ts
 store/db.ts
-store/kv.ts
 web/audit.ts
 web/routes/groups.ts

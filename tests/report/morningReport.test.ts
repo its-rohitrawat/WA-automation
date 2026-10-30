@@ -106,18 +106,18 @@ describe('buildShortMorningText', () => {
 describe('trackerLink', () => {
   it('builds the Drive view link from the tracker id the publisher stored', async () => {
     const db = await seededDb();
-    setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
-    expect(trackerLink(db)).toBe(LINK);
+    await setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
+    expect(await trackerLink(db)).toBe(LINK);
   });
 
   it('accepts an id of exactly 10 safe characters', async () => {
     const db = await seededDb();
-    setKv(db, TRACKER_ID_KEY, 'aZ09_-aZ09');
-    expect(trackerLink(db)).toBe('https://drive.google.com/file/d/aZ09_-aZ09/view');
+    await setKv(db, TRACKER_ID_KEY, 'aZ09_-aZ09');
+    expect(await trackerLink(db)).toBe('https://drive.google.com/file/d/aZ09_-aZ09/view');
   });
 
   it('gives undefined when the tracker was never uploaded', async () => {
-    expect(trackerLink(await seededDb())).toBeUndefined();
+    expect(await trackerLink(await seededDb())).toBeUndefined();
   });
 
   it('gives undefined for an id that is short, empty or holds anything but letters, digits, _ and -', async () => {
@@ -127,8 +127,8 @@ describe('trackerLink', () => {
     ];
     for (const id of bad) {
       const db = await seededDb();
-      setKv(db, TRACKER_ID_KEY, id);
-      expect(trackerLink(db), JSON.stringify(id)).toBeUndefined();
+      await setKv(db, TRACKER_ID_KEY, id);
+      expect(await trackerLink(db), JSON.stringify(id)).toBeUndefined();
     }
   });
 });

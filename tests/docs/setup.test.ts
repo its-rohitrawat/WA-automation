@@ -521,8 +521,8 @@ describe('morning report documentation: short message with the tracker link (27 
     expect(amendment).not.toMatch(/every client|active or not|with a warning/i);
     // The documented link format is the one the code builds.
     const db = await seededDb();
-    setKv(db, TRACKER_ID_KEY, 'IDPLACEHOLDER');
-    const link = trackerLink(db)!.replace('IDPLACEHOLDER', '{id}');
+    await setKv(db, TRACKER_ID_KEY, 'IDPLACEHOLDER');
+    const link = (await trackerLink(db))!.replace('IDPLACEHOLDER', '{id}');
     expect(link).toBe('https://drive.google.com/file/d/{id}/view');
     expect(amendment).toContain(`\`{link}\` is \`${link}\``);
     expect(amendment).not.toMatch(PUBLIC_SHARING);

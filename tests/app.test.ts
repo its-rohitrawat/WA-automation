@@ -191,10 +191,10 @@ describe('app end to end', () => {
     const { db, drive, app } = await setup();
     await vi.advanceTimersByTimeAsync(1_000);
     const before = drive.uploads;
-    setKv(db, 'rebuild_requested', new Date().toISOString());
+    await setKv(db, 'rebuild_requested', new Date().toISOString());
     await vi.advanceTimersByTimeAsync(90_000);
     expect(drive.uploads).toBeGreaterThan(before);
-    expect(getKv(db, 'rebuild_requested')).toBe('');
+    expect(await getKv(db, 'rebuild_requested')).toBe('');
     await stopApp(app);
   });
 });
@@ -431,7 +431,7 @@ describe('app allow-list changes', () => {
     await app.reloadClients([SHARMA]);
     expect(app.health.line().ok).toBe(true);
     await vi.advanceTimersByTimeAsync(0); // the snapshot is saved after the file counts are read again
-    expect(readHealthSnapshot(db)!.failed).toEqual([]);
+    expect((await readHealthSnapshot(db))!.failed).toEqual([]);
     await stopApp(app);
   });
 
@@ -451,7 +451,7 @@ describe('app allow-list changes', () => {
     g.resolve();
     await vi.advanceTimersByTimeAsync(120_000);
     expect(app.health.line().ok).toBe(true);
-    expect(readHealthSnapshot(db)!.failed).toEqual([]);
+    expect((await readHealthSnapshot(db))!.failed).toEqual([]);
     expect(drive.uploads).toBe(uploads); // no publish scheduled for the removed group
     await stopApp(app);
   });
@@ -468,7 +468,7 @@ describe('app allow-list changes', () => {
     g.reject(new Error('boom'));
     await vi.advanceTimersByTimeAsync(1_000);
     expect(app.health.line().ok).toBe(true);
-    expect(readHealthSnapshot(db)!.failed).toEqual([]);
+    expect((await readHealthSnapshot(db))!.failed).toEqual([]);
     await stopApp(app);
   });
 
@@ -524,7 +524,7 @@ describe('app ingest failures', () => {
     await settled();
     expect(gateway.failedCount()).toBe(1);
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(readHealthSnapshot(db)!.ingestFailures).toBe(1);
+    expect((await readHealthSnapshot(db))!.ingestFailures).toBe(1);
     expect(app.health.line()).toEqual({ ok: false, text: '⚠️ 1 incoming message could not be saved. See docs/SETUP.md.' });
     await stopApp(app);
   });
@@ -573,7 +573,7 @@ describe('app health and publishing', () => {
     await expect(run.mock.results[0]!.value).resolves.toEqual({ status: 'waiting' });
     expect(ai.calls).toHaveLength(0);
     expect(drive.uploads).toBe(1);
-    expect(readHealthSnapshot(db)!.failed).toEqual([]);
+    expect((await readHealthSnapshot(db))!.failed).toEqual([]);
 
     // 30 minutes after the file arrived it no longer holds up its message: a later run goes ahead and publishes. The
     // file, still pending, now counts as waiting too long, and that change to the health line publishes too (final review).
@@ -598,7 +598,7 @@ describe('app health and publishing', () => {
     const crash = lines.find((l) => l.msg === 'reconcile crashed');
     expect(crash).toMatchObject({ clientId: 1, err: { type: 'Error' } });
     expect(JSON.stringify(lines)).not.toContain('secret banner text');
-    expect(readHealthSnapshot(db)!.failed).toEqual([{ clientId: 1, errorCode: 'crash' }]);
+    expect((await readHealthSnapshot(db))!.failed).toEqual([{ clientId: 1, errorCode: 'crash' }]);
     expect(drive.uploads).toBe(2);
     await stopApp(app);
   });
@@ -614,11 +614,11 @@ describe('app health and publishing', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(lines.filter((l) => l.msg === 'tick failed')).toHaveLength(1);
     const before = drive.uploads;
-    setKv(db, 'rebuild_requested', new Date().toISOString());
+    await setKv(db, 'rebuild_requested', new Date().toISOString());
     await vi.advanceTimersByTimeAsync(60_000);
     expect(lines.filter((l) => l.msg === 'tick failed').length).toBeGreaterThanOrEqual(2);
     expect(lines.find((l) => l.msg === 'tick failed')).toMatchObject({ err: { type: 'Error', code: 'SQLITE_BUSY' } });
-    expect(getKv(db, 'rebuild_requested')).toBe('');
+    expect(await getKv(db, 'rebuild_requested')).toBe('');
     expect(drive.uploads).toBeGreaterThan(before);
 
     persist.mockRestore();
@@ -637,13 +637,13 @@ describe('app health and publishing', () => {
     await vi.advanceTimersByTimeAsync(1_000);
     await failed;
     expect(app.health.line()).toEqual({ ok: false, text: '❌ Google sign-in expired. Run: npm run cli -- google-auth, then restart the service' });
-    expect(readHealthSnapshot(db)!.publishFailingSince).not.toBeNull();
+    expect((await readHealthSnapshot(db))!.publishFailingSince).not.toBeNull();
 
     drive.failUpdateWith = undefined;
     await vi.advanceTimersByTimeAsync(60_000); // the publisher's backoff retry
     expect(drive.updated).toHaveLength(1);
     expect(app.health.line().ok).toBe(true);
-    expect(readHealthSnapshot(db)!.publishFailingSince).toBeNull();
+    expect((await readHealthSnapshot(db))!.publishFailingSince).toBeNull();
     await stopApp(app);
 
     vi.useRealTimers();

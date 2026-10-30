@@ -113,14 +113,14 @@ describe('Health and meetings', () => {
     const { db, h } = await setup();
     const m = meetings({ sttProvider: 'local', sttProblem: 'local_not_set_up_bin' }, { waiting: 1, deferred: { stt_none: 1 } });
     h.setMeetings(m);
-    h.persist();
-    expect(readHealthSnapshot(db)!.meetings).toEqual(m);
+    await h.persist();
+    expect((await readHealthSnapshot(db))!.meetings).toEqual(m);
     h.setMeetings(meetings({ sttProvider: 'local' }));
-    h.persist();
-    expect(readHealthSnapshot(db)!.meetings).toEqual(meetings({ sttProvider: 'local' }));
+    await h.persist();
+    expect((await readHealthSnapshot(db))!.meetings).toEqual(meetings({ sttProvider: 'local' }));
     const snap = JSON.parse(JSON.stringify(h.snapshot())) as Record<string, unknown>;
-    setKv(db, 'health', JSON.stringify({ ...snap, meetings: { ...meetings({ sttProvider: 'local' }), sttProblem: 'local_broken' } }));
-    const read = readHealthSnapshot(db);
+    await setKv(db, 'health', JSON.stringify({ ...snap, meetings: { ...meetings({ sttProvider: 'local' }), sttProblem: 'local_broken' } }));
+    const read = await readHealthSnapshot(db);
     expect(read).toBeDefined();
     expect('meetings' in read!).toBe(false);
   });
@@ -188,12 +188,12 @@ describe('Health and meetings', () => {
     // Both live side by side in the snapshot; a meeting state this version does not know drops only the meetings.
     h.setMeetings(meetings({ paused: 'google_scopes' }));
     h.setReport(report);
-    h.persist();
-    const read = readHealthSnapshot(db)!;
+    await h.persist();
+    const read = (await readHealthSnapshot(db))!;
     expect(read.meetings).toEqual(meetings({ paused: 'google_scopes' }));
     expect(read.report).toEqual(report);
-    setKv(db, 'health', JSON.stringify({ ...read, meetings: { ...meetings(), paused: 'some_new_reason' } }));
-    const again = readHealthSnapshot(db)!;
+    await setKv(db, 'health', JSON.stringify({ ...read, meetings: { ...meetings(), paused: 'some_new_reason' } }));
+    const again = (await readHealthSnapshot(db))!;
     expect(again.meetings).toBeUndefined();
     expect(again.report).toEqual(report);
   });
@@ -202,8 +202,8 @@ describe('Health and meetings', () => {
     const { db, h } = await setup();
     const m = meetings({ paused: 'no_ffmpeg', sttProvider: 'none' }, { done: 4, waiting: 1, unassigned: 2, deferred: { stt_none: 1 } });
     h.setMeetings(m);
-    h.persist();
-    expect(readHealthSnapshot(db)!.meetings).toEqual(m);
+    await h.persist();
+    expect((await readHealthSnapshot(db))!.meetings).toEqual(m);
     // A later change to the object given does not change what Health stored.
     m.stats.deferred.stt_none = 9;
     expect(h.snapshot().meetings!.stats.deferred).toEqual({ stt_none: 1 });
@@ -214,9 +214,9 @@ describe('Health and meetings', () => {
     h.setMeetings(meetings());
     const snap = JSON.parse(JSON.stringify(h.snapshot())) as Record<string, unknown>;
     const { meetings: _m, ...old } = snap;
-    setKv(db, 'health', JSON.stringify(old));
-    expect(readHealthSnapshot(db)).toBeDefined();
-    expect(readHealthSnapshot(db)!.meetings).toBeUndefined();
+    await setKv(db, 'health', JSON.stringify(old));
+    expect(await readHealthSnapshot(db)).toBeDefined();
+    expect((await readHealthSnapshot(db))!.meetings).toBeUndefined();
     const bad: unknown[] = [
       null,
       { ...meetings(), stats: { ...stats(), done: '1' } },
@@ -225,8 +225,8 @@ describe('Health and meetings', () => {
       { paused: null, sttProvider: 'none' },
     ];
     for (const m of bad) {
-      setKv(db, 'health', JSON.stringify({ ...old, meetings: m }));
-      expect(readHealthSnapshot(db)).toBeUndefined();
+      await setKv(db, 'health', JSON.stringify({ ...old, meetings: m }));
+      expect(await readHealthSnapshot(db)).toBeUndefined();
     }
   });
 
@@ -235,8 +235,8 @@ describe('Health and meetings', () => {
     h.setMeetings(meetings());
     const snap = JSON.parse(JSON.stringify(h.snapshot())) as Record<string, unknown>;
     for (const m of [{ ...meetings(), paused: 'other' }, { ...meetings(), sttProvider: 'whisper' }]) {
-      setKv(db, 'health', JSON.stringify({ ...snap, meetings: m }));
-      const read = readHealthSnapshot(db);
+      await setKv(db, 'health', JSON.stringify({ ...snap, meetings: m }));
+      const read = await readHealthSnapshot(db);
       expect(read).toBeDefined();
       expect(read!.meetings).toBeUndefined();
       expect('meetings' in read!).toBe(false);
@@ -250,12 +250,12 @@ describe('Health and meetings', () => {
     spend.record('stt', 0.1, 'test');
     spend.record('ai', 0.05, 'test');
     expect(h.snapshot().spendByKind).toEqual({ ai: 0.3, stt: 0.1 });
-    h.persist();
-    expect(readHealthSnapshot(db)!.spendByKind).toEqual({ ai: 0.3, stt: 0.1 });
+    await h.persist();
+    expect((await readHealthSnapshot(db))!.spendByKind).toEqual({ ai: 0.3, stt: 0.1 });
     const { spendByKind: _s, ...old } = JSON.parse(JSON.stringify(h.snapshot())) as Record<string, unknown>;
-    setKv(db, 'health', JSON.stringify(old));
-    expect(readHealthSnapshot(db)!.spendByKind).toBeUndefined();
-    setKv(db, 'health', JSON.stringify({ ...old, spendByKind: { ai: 1 } }));
-    expect(readHealthSnapshot(db)).toBeUndefined();
+    await setKv(db, 'health', JSON.stringify(old));
+    expect((await readHealthSnapshot(db))!.spendByKind).toBeUndefined();
+    await setKv(db, 'health', JSON.stringify({ ...old, spendByKind: { ai: 1 } }));
+    expect(await readHealthSnapshot(db)).toBeUndefined();
   });
 });

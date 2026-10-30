@@ -47,11 +47,11 @@ describe('GoogleAuthHub', () => {
   it('loads the main token and each meeting account; a missing issuer means desktop', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    new TokenStore(db, key).save('rt-main');
-    saveMeetingAccount(db, key, 'company2', 'rt-2', MEETING_SCOPES.join(' '));
-    setKv(db, 'google_client:company2', 'web');
+    await new TokenStore(db, key).save('rt-main');
+    await saveMeetingAccount(db, key, 'company2', 'rt-2', MEETING_SCOPES.join(' '));
+    await setKv(db, 'google_client:company2', 'web');
     const f = fakeClients();
-    const hub = new GoogleAuthHub({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: f.newClient });
+    const hub = await GoogleAuthHub.open({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: f.newClient });
     expect(hub.labels()).toEqual(['main', 'company2']);
     expect(hub.issuer('main')).toBe('desktop');
     expect(hub.issuer('company2')).toBe('web');
@@ -61,7 +61,7 @@ describe('GoogleAuthHub', () => {
   });
 
   it('no main token (setup mode): no main client, and its getter throws GoogleNotConnectedError', async () => {
-    const hub = new GoogleAuthHub({ db: await seededDb(), key: randomBytes(32), credentials: { desktop: DESKTOP }, newClient: fakeClients().newClient });
+    const hub = await GoogleAuthHub.open({ db: await seededDb(), key: randomBytes(32), credentials: { desktop: DESKTOP }, newClient: fakeClients().newClient });
     expect(hub.labels()).toEqual([]);
     expect(hub.client('main')).toBeUndefined();
     expect(() => hub.getter('main')()).toThrow(GoogleNotConnectedError);
@@ -71,22 +71,22 @@ describe('GoogleAuthHub', () => {
   it('setToken saves the token encrypted, records the issuer, replaces the client and tells the listeners', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    new TokenStore(db, key).save('rt-old');
+    await new TokenStore(db, key).save('rt-old');
     const f = fakeClients();
-    const hub = new GoogleAuthHub({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: f.newClient });
+    const hub = await GoogleAuthHub.open({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: f.newClient });
     const before = hub.client('main');
     const changes: string[] = [];
     hub.onChange((label) => changes.push(label));
-    hub.setToken('main', 'rt-new', 'web', SCOPE);
+    await hub.setToken('main', 'rt-new', 'web', SCOPE);
     expect(hub.client('main')).not.toBe(before);
     expect(tokenOf(hub.client('main'))).toBe('rt-new');
     expect(f.built.at(-1)!.creds).toEqual(WEB);
-    expect(getKv(db, 'google_client:main')).toBe('web');
-    expect(getKv(db, 'google_refresh_token')).not.toContain('rt-new');
-    expect(new TokenStore(db, key).load()).toBe('rt-new');
+    expect(await getKv(db, 'google_client:main')).toBe('web');
+    expect(await getKv(db, 'google_refresh_token')).not.toContain('rt-new');
+    expect(await new TokenStore(db, key).load()).toBe('rt-new');
     expect(changes).toEqual(['main']);
     // A new hub (a restart) builds the same thing from what was stored.
-    const again = new GoogleAuthHub({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: f.newClient });
+    const again = await GoogleAuthHub.open({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: f.newClient });
     expect(again.issuer('main')).toBe('web');
     expect(tokenOf(again.client('main'))).toBe('rt-new');
   });
@@ -94,12 +94,12 @@ describe('GoogleAuthHub', () => {
   it('the next Drive call uses the new client, through a getter', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    new TokenStore(db, key).save('rt-old');
+    await new TokenStore(db, key).save('rt-old');
     const f = fakeClients();
-    const hub = new GoogleAuthHub({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: f.newClient });
+    const hub = await GoogleAuthHub.open({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: f.newClient });
     const drive = googleDriveApi(hub.getter('main'));
     await drive.createFolder('A');
-    hub.setToken('main', 'rt-new', 'web', SCOPE);
+    await hub.setToken('main', 'rt-new', 'web', SCOPE);
     await drive.createFolder('B');
     expect(f.seen).toEqual(['rt-old', 'rt-new']);
   });
@@ -107,34 +107,34 @@ describe('GoogleAuthHub', () => {
   it('a token for a new label is stored under that label only, and the label is checked', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    new TokenStore(db, key).save('rt-main');
-    const hub = new GoogleAuthHub({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: fakeClients().newClient });
-    hub.setToken('company3', 'rt-3', 'web', SCOPE);
-    expect(new TokenStore(db, key, 'company3').load()).toBe('rt-3');
-    expect(new TokenStore(db, key).load()).toBe('rt-main');
+    await new TokenStore(db, key).save('rt-main');
+    const hub = await GoogleAuthHub.open({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: fakeClients().newClient });
+    await hub.setToken('company3', 'rt-3', 'web', SCOPE);
+    expect(await new TokenStore(db, key, 'company3').load()).toBe('rt-3');
+    expect(await new TokenStore(db, key).load()).toBe('rt-main');
     expect(hub.labels()).toEqual(['main', 'company3']);
-    expect(() => hub.setToken('Bad Label', 'x', 'web', SCOPE)).toThrow(/account name/);
-    expect(() => hub.setToken('a:b', 'x', 'web', SCOPE)).toThrow(/account name/);
+    await expect(hub.setToken('Bad Label', 'x', 'web', SCOPE)).rejects.toThrow(/account name/);
+    await expect(hub.setToken('a:b', 'x', 'web', SCOPE)).rejects.toThrow(/account name/);
   });
 
   it('refuses a web token when the web client is not configured, and changes nothing', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    new TokenStore(db, key).save('rt-main');
-    const hub = new GoogleAuthHub({ db, key, credentials: { desktop: DESKTOP }, newClient: fakeClients().newClient });
-    expect(() => hub.setToken('main', 'rt-new', 'web', SCOPE)).toThrow('The dashboard Google client is not set up');
-    expect(new TokenStore(db, key).load()).toBe('rt-main');
-    expect(getKv(db, 'google_client:main')).toBeUndefined();
+    await new TokenStore(db, key).save('rt-main');
+    const hub = await GoogleAuthHub.open({ db, key, credentials: { desktop: DESKTOP }, newClient: fakeClients().newClient });
+    await expect(hub.setToken('main', 'rt-new', 'web', SCOPE)).rejects.toThrow('The dashboard Google client is not set up');
+    expect(await new TokenStore(db, key).load()).toBe('rt-main');
+    expect(await getKv(db, 'google_client:main')).toBeUndefined();
   });
 
   it('a stored token the key cannot read, or whose issuing client is not configured, gives no client and a problem', async () => {
     const db = await seededDb();
-    new TokenStore(db, randomBytes(32)).save('rt-main');
-    saveMeetingAccount(db, randomBytes(32), 'company2', 'rt-2', MEETING_SCOPES.join(' '));
+    await new TokenStore(db, randomBytes(32)).save('rt-main');
+    await saveMeetingAccount(db, randomBytes(32), 'company2', 'rt-2', MEETING_SCOPES.join(' '));
     const key = randomBytes(32);
-    new TokenStore(db, key, 'company2').save('rt-2');
-    setKv(db, 'google_client:company2', 'web');
-    const hub = new GoogleAuthHub({ db, key, credentials: { desktop: DESKTOP }, newClient: fakeClients().newClient });
+    await new TokenStore(db, key, 'company2').save('rt-2');
+    await setKv(db, 'google_client:company2', 'web');
+    const hub = await GoogleAuthHub.open({ db, key, credentials: { desktop: DESKTOP }, newClient: fakeClients().newClient });
     expect(hub.client('main')).toBeUndefined();
     expect(hub.problem('main')).toBe('unreadable');
     expect(hub.client('company2')).toBeUndefined();
@@ -145,58 +145,58 @@ describe('GoogleAuthHub', () => {
   it('an unknown issuer value is read as desktop', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    new TokenStore(db, key).save('rt-main');
-    setKv(db, 'google_client:main', 'something-else');
-    const hub = new GoogleAuthHub({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: fakeClients().newClient });
+    await new TokenStore(db, key).save('rt-main');
+    await setKv(db, 'google_client:main', 'something-else');
+    const hub = await GoogleAuthHub.open({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: fakeClients().newClient });
     expect(hub.issuer('main')).toBe('desktop');
   });
 
   it('a listener that throws does not stop the others; unsubscribe works', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    const hub = new GoogleAuthHub({ db, key, credentials: { desktop: DESKTOP }, newClient: fakeClients().newClient });
+    const hub = await GoogleAuthHub.open({ db, key, credentials: { desktop: DESKTOP }, newClient: fakeClients().newClient });
     const seen: string[] = [];
     hub.onChange(() => {
       throw new Error('bug');
     });
     const off = hub.onChange((l) => seen.push(l));
-    hub.setToken('main', 'rt', 'desktop', SCOPE);
+    await hub.setToken('main', 'rt', 'desktop', SCOPE);
     off();
-    hub.setToken('main', 'rt2', 'desktop', SCOPE);
+    await hub.setToken('main', 'rt2', 'desktop', SCOPE);
     expect(seen).toEqual(['main']);
   });
 
   it('records the granted scopes with the token; a meeting account also joins the account list', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    saveGrantedScopes(db, 'scope-a');
-    const hub = new GoogleAuthHub({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: fakeClients().newClient });
-    hub.setToken('main', 'rt', 'desktop', SCOPE);
-    expect(getKv(db, 'google_scopes')).toBe(SCOPE);
-    hub.setToken('company4', 'rt-4', 'web', MEETING_SCOPES.join(' '));
-    expect(meetingAccounts(db)).toEqual(['company4']);
-    expect(hasMeetingScopes(db, 'company4')).toBe(true);
-    expect(getKv(db, 'google_refresh_token:company4')).not.toContain('rt-4'); // encrypted at rest
-    expect(new TokenStore(db, key, 'company4').load()).toBe('rt-4');
+    await saveGrantedScopes(db, 'scope-a');
+    const hub = await GoogleAuthHub.open({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: fakeClients().newClient });
+    await hub.setToken('main', 'rt', 'desktop', SCOPE);
+    expect(await getKv(db, 'google_scopes')).toBe(SCOPE);
+    await hub.setToken('company4', 'rt-4', 'web', MEETING_SCOPES.join(' '));
+    expect(await meetingAccounts(db)).toEqual(['company4']);
+    expect(await hasMeetingScopes(db, 'company4')).toBe(true);
+    expect(await getKv(db, 'google_refresh_token:company4')).not.toContain('rt-4'); // encrypted at rest
+    expect(await new TokenStore(db, key, 'company4').load()).toBe('rt-4');
   });
 
   it('a write that fails changes nothing: the old client stays, and no listener runs', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    new TokenStore(db, key).save('rt-old');
-    const hub = new GoogleAuthHub({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: fakeClients().newClient });
+    await new TokenStore(db, key).save('rt-old');
+    const hub = await GoogleAuthHub.open({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: fakeClients().newClient });
     const before = hub.client('main');
     let calls = 0;
     hub.onChange(() => calls++);
     db.raw.exec("CREATE TRIGGER no_issuer BEFORE INSERT ON kv WHEN NEW.k = 'google_client:main' BEGIN SELECT RAISE(ABORT, 'disk full'); END");
-    expect(() => hub.setToken('main', 'rt-new', 'web', SCOPE)).toThrow('disk full');
+    await expect(hub.setToken('main', 'rt-new', 'web', SCOPE)).rejects.toThrow('disk full');
     expect(hub.client('main')).toBe(before);
     expect(calls).toBe(0);
-    expect(new TokenStore(db, key).load()).toBe('rt-old'); // rolled back with the issuer
+    expect(await new TokenStore(db, key).load()).toBe('rt-old'); // rolled back with the issuer
   });
 
   it('an unknown label has issuer desktop and problem not_connected', async () => {
-    const hub = new GoogleAuthHub({ db: await seededDb(), key: randomBytes(32), credentials: { desktop: DESKTOP }, newClient: fakeClients().newClient });
+    const hub = await GoogleAuthHub.open({ db: await seededDb(), key: randomBytes(32), credentials: { desktop: DESKTOP }, newClient: fakeClients().newClient });
     expect(hub.issuer('nobody')).toBe('desktop');
     expect(hub.problem('nobody')).toBe('not_connected');
   });
@@ -204,28 +204,30 @@ describe('GoogleAuthHub', () => {
   it('an error other than an unreadable token is not swallowed at load', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    new TokenStore(db, key).save('rt');
+    await new TokenStore(db, key).save('rt');
     const newClient = () => {
       throw new Error('bad client');
     };
-    expect(() => new GoogleAuthHub({ db, key, credentials: { desktop: DESKTOP }, newClient })).toThrow('bad client');
+    await expect(GoogleAuthHub.open({ db, key, credentials: { desktop: DESKTOP }, newClient })).rejects.toThrow('bad client');
   });
 
   it('a reconnect rebuilds the meetings API: a new meeting account is used without a restart', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    new TokenStore(db, key).save('rt-main');
-    saveGrantedScopes(db, SCOPE); // Drive only: main finds no meetings
-    const hub = new GoogleAuthHub({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: fakeClients().newClient });
+    await new TokenStore(db, key).save('rt-main');
+    await saveGrantedScopes(db, SCOPE); // Drive only: main finds no meetings
+    const hub = await GoogleAuthHub.open({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: fakeClients().newClient });
     const built: string[][] = [];
-    const live = new LiveMeetingsApi(() => {
-      const accounts = hubMeetingAccounts(db, hub);
+    const live = new LiveMeetingsApi(async () => {
+      const accounts = await hubMeetingAccounts(db, hub);
       built.push(accounts.map((a) => a.label));
       return accounts;
     }, silentLogger());
-    hub.onChange(() => live.rebuild());
+    hub.onChange(() => void live.rebuild());
+    await live.idle();
     expect(built).toEqual([[]]);
-    hub.setToken('company2', 'rt-2', 'web', MEETING_SCOPES.join(' '));
+    await hub.setToken('company2', 'rt-2', 'web', MEETING_SCOPES.join(' '));
+    await live.idle();
     expect(built).toEqual([[], ['company2']]);
   });
 
@@ -236,13 +238,13 @@ describe('GoogleAuthHub', () => {
   it('a CLI sign-in of a meeting account resets its issuer to desktop; removing the account forgets it', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    const hub = new GoogleAuthHub({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: fakeClients().newClient });
-    hub.setToken('company2', 'rt-web', 'web', MEETING_SCOPES.join(' '));
-    expect(getKv(db, 'google_client:company2')).toBe('web');
-    saveMeetingAccount(db, key, 'company2', 'rt-cli', MEETING_SCOPES.join(' ')); // what google-auth --account does
-    expect(getKv(db, 'google_client:company2')).toBe('desktop');
-    expect(new GoogleAuthHub({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: fakeClients().newClient }).issuer('company2')).toBe('desktop');
-    removeMeetingAccount(db, 'company2');
-    expect(getKv(db, 'google_client:company2')).toBeUndefined();
+    const hub = await GoogleAuthHub.open({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: fakeClients().newClient });
+    await hub.setToken('company2', 'rt-web', 'web', MEETING_SCOPES.join(' '));
+    expect(await getKv(db, 'google_client:company2')).toBe('web');
+    await saveMeetingAccount(db, key, 'company2', 'rt-cli', MEETING_SCOPES.join(' ')); // what google-auth --account does
+    expect(await getKv(db, 'google_client:company2')).toBe('desktop');
+    expect((await GoogleAuthHub.open({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: fakeClients().newClient })).issuer('company2')).toBe('desktop');
+    await removeMeetingAccount(db, 'company2');
+    expect(await getKv(db, 'google_client:company2')).toBeUndefined();
   });
 });

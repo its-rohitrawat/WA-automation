@@ -126,24 +126,24 @@ describe('buildGoogle', () => {
   it('no main token: not connected, and Drive fails as a sign-in problem; a reconnect fixes both at once', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    const hub = new GoogleAuthHub({ db, key, credentials: { desktop: { clientId: 'd', clientSecret: 's' } }, newClient: fakeClient });
-    const g = buildGoogle({ db, key, credentials: {}, meetingsEnabled: false, log, hub });
+    const hub = await GoogleAuthHub.open({ db, key, credentials: { desktop: { clientId: 'd', clientSecret: 's' } }, newClient: fakeClient });
+    const g = await buildGoogle({ db, key, credentials: {}, meetingsEnabled: false, log, hub });
     expect(g.connected()).toBe(false);
     expect(g.meetings).toBeUndefined();
     const err = await g.drive.createFolder('WA Agent').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(GoogleNotConnectedError);
     expect(isAuthFailure(err)).toBe(true);
-    hub.setToken('main', 'rt', 'desktop', DRIVE_SCOPES[0]!);
+    await hub.setToken('main', 'rt', 'desktop', DRIVE_SCOPES[0]!);
     expect(g.connected()).toBe(true);
     expect(await g.drive.createFolder('WA Agent')).toBe('folder-1');
   });
 
   it('logs an account it cannot use by label and reason only', async () => {
     const db = await seededDb();
-    new TokenStore(db, randomBytes(32)).save('rt-secret-value'); // written with another key
+    await new TokenStore(db, randomBytes(32)).save('rt-secret-value'); // written with another key
     const lines: string[] = [];
     const capture = createLogger('debug', { write: (l: string) => void lines.push(l) });
-    buildGoogle({ db, key: randomBytes(32), credentials: { desktop: { clientId: 'd', clientSecret: 's' } }, meetingsEnabled: false, log: capture });
+    await buildGoogle({ db, key: randomBytes(32), credentials: { desktop: { clientId: 'd', clientSecret: 's' } }, meetingsEnabled: false, log: capture });
     const warn = lines.find((l) => l.includes('cannot be used'));
     expect(warn).toContain('"account":"main"');
     expect(warn).toContain('"code":"unreadable"');
@@ -153,15 +153,15 @@ describe('buildGoogle', () => {
   it('meetings on: the live API is rebuilt when an account is reconnected', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    new TokenStore(db, key).save('rt');
-    saveGrantedScopes(db, DRIVE_SCOPES[0]!);
-    const hub = new GoogleAuthHub({ db, key, credentials: { desktop: { clientId: 'd', clientSecret: 's' } }, newClient: fakeClient });
-    const g = buildGoogle({ db, key, credentials: {}, meetingsEnabled: true, log, hub });
+    await new TokenStore(db, key).save('rt');
+    await saveGrantedScopes(db, DRIVE_SCOPES[0]!);
+    const hub = await GoogleAuthHub.open({ db, key, credentials: { desktop: { clientId: 'd', clientSecret: 's' } }, newClient: fakeClient });
+    const g = await buildGoogle({ db, key, credentials: {}, meetingsEnabled: true, log, hub });
     const signal = new AbortController().signal;
     await expect(g.meetings!.listConferences('2026-10-20T00:00:00Z', '2026-10-27T00:00:00Z', signal))
       .rejects.toMatchObject({ code: 'not_connected' }); // main has no meeting scopes: no account yet
-    saveMeetingAccount(db, key, 'company2', 'rt-2', MEETING_SCOPES.join(' '));
-    hub.setToken('company2', 'rt-2', 'desktop', MEETING_SCOPES.join(' '));
+    await saveMeetingAccount(db, key, 'company2', 'rt-2', MEETING_SCOPES.join(' '));
+    await hub.setToken('company2', 'rt-2', 'desktop', MEETING_SCOPES.join(' '));
     // Rebuilt with company2: the call now reaches Google's client (the fake answers no list, which is not a refusal).
     await expect(g.meetings!.listConferences('2026-10-20T00:00:00Z', '2026-10-27T00:00:00Z', signal)).resolves.toBeDefined();
   });

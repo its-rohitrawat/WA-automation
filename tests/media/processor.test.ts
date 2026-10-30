@@ -1328,6 +1328,21 @@ describe('MediaProcessor: voice notes', () => {
       await vi.waitFor(() => expect(forgetRows(db)).toEqual([]));
     });
 
+    // S1 review: the note is awaited before the deletion starts (on Postgres an un-awaited note could lose that race).
+    it('a copy that could not be noted for deletion is never sent for deletion, and the failure is logged', async () => {
+      const lines: string[] = [];
+      const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
+      const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable('tr_9')] });
+      const { db, p, shareVoice } = await setup({ extract: (await realExtractor(v)).extract, voice: v, log });
+      await db.exec("CREATE TRIGGER no_forget BEFORE INSERT ON media_stt_forget BEGIN SELECT RAISE(ABORT, 'refused'); END");
+      const id = await shareVoice();
+      expect((await p.process(id)).outcome).toBe('deferred');
+      await new Promise((r) => setTimeout(r, 20)); // a deletion started without waiting would have run by now
+      expect(forgetRows(db)).toEqual([]);
+      expect(v.forgotten).toEqual([]);
+      expect(lines.map((l) => (JSON.parse(l) as { errorCode?: string }).errorCode)).toContain('forget_not_noted');
+    });
+
     it('a deletion that fails leaves the row, counted, for the sweep; the outcome is the same', async () => {
       const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable('tr_9')], forgetError: new SttHttpError(500) });
       const { db, p, shareVoice } = await setup({ extract: (await realExtractor(v)).extract, voice: v });

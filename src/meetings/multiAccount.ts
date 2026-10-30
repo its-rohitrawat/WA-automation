@@ -34,20 +34,20 @@ function worst(errors: GoogleError[]): GoogleError {
  * token this key cannot read is skipped and logged by label. No account qualifies: the main one, so the API exists and
  * the service stays paused (google_scopes) without calling Google.
  */
-export function storedMeetingAccounts(o: {
+export async function storedMeetingAccounts(o: {
   db: Db;
   key: Buffer;
   main: OAuth2Client;
   newClient: () => OAuth2Client;
   log: Logger;
-}): MeetingAccount[] {
+}): Promise<MeetingAccount[]> {
   const out: MeetingAccount[] = [];
-  if (hasMeetingScopes(o.db)) out.push({ label: MAIN_ACCOUNT, api: googleMeetingsApi(o.main) });
-  for (const label of meetingAccounts(o.db)) {
-    if (!hasMeetingScopes(o.db, label)) continue;
+  if ((await hasMeetingScopes(o.db))) out.push({ label: MAIN_ACCOUNT, api: googleMeetingsApi(o.main) });
+  for (const label of await meetingAccounts(o.db)) {
+    if (!(await hasMeetingScopes(o.db, label))) continue;
     let token: string | undefined;
     try {
-      token = new TokenStore(o.db, o.key, label).load();
+      token = await new TokenStore(o.db, o.key, label).load();
     } catch (e) {
       if (!(e instanceof TokenDecryptError)) throw e;
       o.log.warn({ account: label, code: 'token_unreadable' }, 'meeting account skipped: its stored sign-in cannot be read');
@@ -71,11 +71,11 @@ export interface MeetingClients {
  * and a client, then each meeting account that has both. An account without either gets no call at all. Unlike
  * storedMeetingAccounts there is no fallback: with no account, LiveMeetingsApi refuses each call as not connected.
  */
-export function hubMeetingAccounts(db: Db, hub: MeetingClients): MeetingAccount[] {
+export async function hubMeetingAccounts(db: Db, hub: MeetingClients): Promise<MeetingAccount[]> {
   const out: MeetingAccount[] = [];
-  for (const label of [MAIN_ACCOUNT, ...meetingAccounts(db)]) {
+  for (const label of [MAIN_ACCOUNT, ...await meetingAccounts(db)]) {
     const client = hub.client(label);
-    if (!client || !hasMeetingScopes(db, label === MAIN_ACCOUNT ? undefined : label)) continue;
+    if (!client || !(await hasMeetingScopes(db, label === MAIN_ACCOUNT ? undefined : label))) continue;
     out.push({ label, api: googleMeetingsApi(client) });
   }
   return out;
@@ -87,19 +87,37 @@ export function hubMeetingAccounts(db: Db, hub: MeetingClients): MeetingAccount[
  * account listed which item; the router then tries the accounts in order, as after a restart.
  */
 export class LiveMeetingsApi implements MeetingsGoogleApi {
-  readonly #build: () => MeetingAccount[];
+  readonly #build: () => Promise<MeetingAccount[]>;
   readonly #log: Logger;
   #current: { api: MeetingsGoogleApi; router: MultiAccountMeetingsApi | null } | null = null;
+  #building: Promise<void> = Promise.resolve();
 
-  constructor(build: () => MeetingAccount[], log: Logger) {
+  constructor(build: () => Promise<MeetingAccount[]>, log: Logger) {
     this.#build = build;
     this.#log = log;
-    this.rebuild();
+    void this.rebuild();
   }
 
-  rebuild(): void {
-    const accounts = this.#build();
-    this.#current = accounts.length === 0 ? null : combineMeetingAccounts(accounts, this.#log);
+  /**
+   * Reads the accounts again (they are stored in kv), after any build still running, so the latest call's accounts win.
+   * Every call waits for the latest build. Never rejects: accounts that cannot be read leave none, logged, as not connected.
+   */
+  rebuild(): Promise<void> {
+    this.#building = this.#building.then(() => this.#build()).then(
+      (accounts) => {
+        this.#current = accounts.length === 0 ? null : combineMeetingAccounts(accounts, this.#log);
+      },
+      (err: unknown) => {
+        this.#current = null;
+        this.#log.error({ err }, 'meeting accounts could not be read');
+      },
+    );
+    return this.#building;
+  }
+
+  /** Resolves once the latest build has finished. */
+  idle(): Promise<void> {
+    return this.#building;
   }
 
   /** As MultiAccountMeetingsApi.lostAccounts; empty with one account (the meetings service shows that one as paused). */
@@ -111,31 +129,32 @@ export class LiveMeetingsApi implements MeetingsGoogleApi {
     return this.#current?.router?.accountOf(conference) ?? null;
   }
 
-  #api(): MeetingsGoogleApi {
+  async #api(): Promise<MeetingsGoogleApi> {
+    await this.#building;
     if (!this.#current) throw new GoogleAccessError('not_connected');
     return this.#current.api;
   }
 
   async listConferences(fromIso: string, toIso: string, signal: AbortSignal): Promise<ConferenceRef[]> {
-    return this.#api().listConferences(fromIso, toIso, signal);
+    return (await this.#api()).listConferences(fromIso, toIso, signal);
   }
   async listRecordings(conference: string, signal: AbortSignal): Promise<RecordingRef[]> {
-    return this.#api().listRecordings(conference, signal);
+    return (await this.#api()).listRecordings(conference, signal);
   }
   async listSignedInNames(conference: string, signal: AbortSignal): Promise<string[]> {
-    return this.#api().listSignedInNames(conference, signal);
+    return (await this.#api()).listSignedInNames(conference, signal);
   }
   async meetingCode(space: string, signal: AbortSignal): Promise<string | null> {
-    return this.#api().meetingCode(space, signal);
+    return (await this.#api()).meetingCode(space, signal);
   }
   async findInvite(code: string, startIso: string, signal: AbortSignal): Promise<InviteInfo | null> {
-    return this.#api().findInvite(code, startIso, signal);
+    return (await this.#api()).findInvite(code, startIso, signal);
   }
   async videoInfo(fileId: string, signal: AbortSignal): Promise<DriveVideoInfo> {
-    return this.#api().videoInfo(fileId, signal);
+    return (await this.#api()).videoInfo(fileId, signal);
   }
   async download(fileId: string, dest: string, maxBytes: number, signal: AbortSignal): Promise<number> {
-    return this.#api().download(fileId, dest, maxBytes, signal);
+    return (await this.#api()).download(fileId, dest, maxBytes, signal);
   }
 }
 

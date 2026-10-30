@@ -70,7 +70,7 @@ async function world(o: { capUsd?: number; meeting?: Partial<NewMeeting> } = {})
   const dataDir = mkdtempSync(join(tmpdir(), 'meet-proc-'));
   dirs.push(dataDir);
   const db = await seededDb();
-  setKv(db, 'drive_root_id', 'root'); // the publisher has made the WA Agent folder
+  await setKv(db, 'drive_root_id', 'root'); // the publisher has made the WA Agent folder
   const clock = manualClock(NOW);
   const api = new FakeMeetingsApi();
   addRecordingFile(api);
@@ -397,8 +397,8 @@ describe('MeetingProcessor: deferrals', () => {
   it('drive_root waits 5 minutes for the publisher to make the WA Agent folder', async () => {
     const w = await world();
     await at(w, 'summarised');
-    setKv(w.db, 'drive_root_id', '');
-    expect(getKv(w.db, 'drive_root_id')).toBeFalsy();
+    await setKv(w.db, 'drive_root_id', '');
+    expect(await getKv(w.db, 'drive_root_id')).toBeFalsy();
     await deferred(w, processor(w), 'drive_root', 5 * MINUTE);
     expect(w.drive.docs).toEqual([]);
   });

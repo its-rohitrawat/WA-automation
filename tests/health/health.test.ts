@@ -62,7 +62,7 @@ describe('Health', () => {
   it('persists a snapshot for cli status', async () => {
     const { db, h } = await setup();
     h.setWhatsApp(status('open'));
-    expect(readHealthSnapshot(db)).toMatchObject({ whatsapp: { state: 'open' }, line: { ok: true }, capUsd: 1 });
+    expect(await readHealthSnapshot(db)).toMatchObject({ whatsapp: { state: 'open' }, line: { ok: true }, capUsd: 1 });
   });
 
   it('shows the cap message while the reconciler is paused below the cap', async () => {
@@ -83,7 +83,7 @@ describe('Health', () => {
     h.recordOutcome(1, { status: 'failed', errorCode: 'refusal' });
     h.recordOutcome(1, { status: 'waiting' });
     expect(h.line().text).toBe('⚠️ 1 group waiting (AI error)');
-    expect(readHealthSnapshot(db)!.failed).toEqual([{ clientId: 1, errorCode: 'refusal' }]);
+    expect((await readHealthSnapshot(db))!.failed).toEqual([{ clientId: 1, errorCode: 'refusal' }]);
     h.recordOutcome(2, { status: 'paused' });
     h.recordOutcome(2, { status: 'waiting' });
     expect(h.line().text).toBe('⚠️ Daily spend cap reached. Paused until midnight IST');
@@ -178,8 +178,8 @@ describe('Health', () => {
     expect(h.snapshot().ingestFailures).toBe(0);
     h.setIngestFailures(2);
     expect(h.snapshot().ingestFailures).toBe(2);
-    h.persist();
-    expect(readHealthSnapshot(db)!.ingestFailures).toBe(2);
+    await h.persist();
+    expect((await readHealthSnapshot(db))!.ingestFailures).toBe(2);
   });
 
   it('the latest publish failure decides whether it is an auth problem', async () => {
@@ -217,13 +217,13 @@ describe('Health', () => {
 
   it('readHealthSnapshot never throws and round-trips', async () => {
     const { db, h } = await setup();
-    setKv(db, 'health', '{not json');
-    expect(readHealthSnapshot(db)).toBeUndefined();
-    setKv(db, 'health', '{}');
-    expect(readHealthSnapshot(db)).toBeUndefined();
+    await setKv(db, 'health', '{not json');
+    expect(await readHealthSnapshot(db)).toBeUndefined();
+    await setKv(db, 'health', '{}');
+    expect(await readHealthSnapshot(db)).toBeUndefined();
     h.setWhatsApp(status('open'));
     h.markPublishFailed({ step: 'drive', auth: false });
-    const snap = readHealthSnapshot(db);
+    const snap = await readHealthSnapshot(db);
     expect(snap?.publishFailingSince).toBe('2026-10-19T08:00:00.000Z');
     expect(snap).toEqual(JSON.parse(JSON.stringify(h.snapshot())));
   });
@@ -236,7 +236,7 @@ describe('readHealthSnapshot shape checks', () => {
   };
   const read = async (v: unknown) => {
     const db = await seededDb();
-    setKv(db, 'health', JSON.stringify(v));
+    await setKv(db, 'health', JSON.stringify(v));
     return readHealthSnapshot(db);
   };
 

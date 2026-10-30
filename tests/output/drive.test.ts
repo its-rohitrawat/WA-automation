@@ -39,7 +39,7 @@ describe('DrivePublisher', () => {
     expect(drive.folders).toEqual(['WA Agent']);
     expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']);
     expect(drive.updated).toHaveLength(1);
-    expect(getKv(db, 'drive_tracker_id')).toBe(drive.created[0]!.id);
+    expect(await getKv(db, 'drive_tracker_id')).toBe(drive.created[0]!.id);
   });
 
   it('recreates the file if someone removed it from Drive', async () => {
@@ -212,7 +212,7 @@ describe('DrivePublisher', () => {
     const stopped = p.stop();
     setTimeout(release, 20);
     await stopped;
-    expect(getKv(db, 'drive_tracker_id')).toBe(drive.created[0]!.id);
+    expect(await getKv(db, 'drive_tracker_id')).toBe(drive.created[0]!.id);
   });
 
   it('stop() with a hung run resolves at its timeout and leaves no timers', async () => {
@@ -404,8 +404,8 @@ describe('DrivePublisher keeps one tracker file', () => {
     expect(drive.created).toHaveLength(1);
     expect(drive.updated.map((u) => u.id)).toEqual(Array(3).fill(drive.created[0]!.id));
     expect(drive.findCalls).toEqual([]); // the first run made the folder just now: nothing to look for in it
-    expect(getKv(db, TRACKER_ID_KEY)).toBe(drive.created[0]!.id);
-    expect(getKv(db, TRACKER_NEW_FILE_KEY)).toBeUndefined();
+    expect(await getKv(db, TRACKER_ID_KEY)).toBe(drive.created[0]!.id);
+    expect(await getKv(db, TRACKER_NEW_FILE_KEY)).toBeUndefined();
     expect(newFiles).toEqual([]);
   });
 
@@ -420,8 +420,8 @@ describe('DrivePublisher keeps one tracker file', () => {
     expect(drive.findCalls).toEqual([{ name: 'Tracker.xlsx', parentId: 'folder-1' }]);
     expect(drive.created).toHaveLength(1);
     expect(drive.updated.map((u) => u.id)).toEqual(['seen-newest']);
-    expect(getKv(db, TRACKER_ID_KEY)).toBe('seen-newest');
-    expect(getKv(db, TRACKER_NEW_FILE_KEY)).toBeUndefined();
+    expect(await getKv(db, TRACKER_ID_KEY)).toBe('seen-newest');
+    expect(await getKv(db, TRACKER_NEW_FILE_KEY)).toBeUndefined();
     expect(newFiles).toEqual([]);
     await p.publishNow(); // from now on the found file is the one
     expect(drive.updated.map((u) => u.id)).toEqual(['seen-newest', 'seen-newest']);
@@ -430,11 +430,11 @@ describe('DrivePublisher keeps one tracker file', () => {
 
   it('a stored folder with no stored file id looks in it first', async () => {
     const { db, drive, newFiles, p } = await keep();
-    setKv(db, 'drive_root_id', 'root-a');
+    await setKv(db, 'drive_root_id', 'root-a');
     drive.visible.push({ id: 'seen-1', name: 'Tracker.xlsx', parentId: 'root-a' });
     await p.publishNow();
     expect(drive.created).toEqual([]);
-    expect(getKv(db, TRACKER_ID_KEY)).toBe('seen-1');
+    expect(await getKv(db, TRACKER_ID_KEY)).toBe('seen-1');
     expect(newFiles).toEqual([]);
   });
 
@@ -446,8 +446,8 @@ describe('DrivePublisher keeps one tracker file', () => {
     expect(drive.findCalls).toHaveLength(1);
     expect(drive.created).toHaveLength(2);
     expect(drive.created[1]!.parentId).toBe('folder-1');
-    expect(getKv(db, TRACKER_ID_KEY)).toBe(drive.created[1]!.id);
-    expect(getKv(db, TRACKER_NEW_FILE_KEY)).toBe(AT.toISOString());
+    expect(await getKv(db, TRACKER_ID_KEY)).toBe(drive.created[1]!.id);
+    expect(await getKv(db, TRACKER_NEW_FILE_KEY)).toBe(AT.toISOString());
     expect(newFiles).toEqual([1]);
     await p.publishNow();
     expect(drive.created).toHaveLength(2);
@@ -456,11 +456,11 @@ describe('DrivePublisher keeps one tracker file', () => {
 
   it('the first file ever made is no new-file event', async () => {
     const { db, drive, newFiles, p } = await keep();
-    setKv(db, 'drive_root_id', 'root-a');
+    await setKv(db, 'drive_root_id', 'root-a');
     await p.publishNow();
     expect(drive.findCalls).toHaveLength(1);
     expect(drive.created).toHaveLength(1);
-    expect(getKv(db, TRACKER_NEW_FILE_KEY)).toBeUndefined();
+    expect(await getKv(db, TRACKER_NEW_FILE_KEY)).toBeUndefined();
     expect(newFiles).toEqual([]);
   });
 
@@ -473,8 +473,8 @@ describe('DrivePublisher keeps one tracker file', () => {
     expect(drive.folders).toEqual(['WA Agent', 'WA Agent']);
     expect(drive.created).toHaveLength(2);
     expect(drive.created[1]!.parentId).not.toBe('folder-1');
-    expect(getKv(db, 'drive_root_id')).toBe(drive.created[1]!.parentId);
-    expect(getKv(db, TRACKER_ID_KEY)).toBe(drive.created[1]!.id);
+    expect(await getKv(db, 'drive_root_id')).toBe(drive.created[1]!.parentId);
+    expect(await getKv(db, TRACKER_ID_KEY)).toBe(drive.created[1]!.id);
     expect(newFiles).toEqual([1]);
   });
 
@@ -491,9 +491,9 @@ describe('DrivePublisher keeps one tracker file', () => {
     expect(drive.folders).toEqual(['WA Agent']);
     expect(drive.created).toHaveLength(1);
     expect(drive.updated.map((u) => u.id)).toEqual(['kept-file']);
-    expect(getKv(db, 'drive_root_id')).toBe('other-older');
-    expect(getKv(db, TRACKER_ID_KEY)).toBe('kept-file');
-    expect(getKv(db, TRACKER_NEW_FILE_KEY)).toBeUndefined();
+    expect(await getKv(db, 'drive_root_id')).toBe('other-older');
+    expect(await getKv(db, TRACKER_ID_KEY)).toBe('kept-file');
+    expect(await getKv(db, TRACKER_NEW_FILE_KEY)).toBeUndefined();
     expect(newFiles).toEqual([]);
   });
 
@@ -506,7 +506,7 @@ describe('DrivePublisher keeps one tracker file', () => {
     await p.publishNow();
     expect(drive.created).toHaveLength(2);
     expect(newFiles).toEqual([1]);
-    const second = { folder: getKv(db, 'drive_root_id')!, file: getKv(db, TRACKER_ID_KEY)! };
+    const second = { folder: (await getKv(db, 'drive_root_id'))!, file: (await getKv(db, TRACKER_ID_KEY))! };
     drive.missing.clear(); // back to login A: its folder and file are visible again, login B's are not
     drive.missing.add(second.folder);
     drive.missing.add(second.file);
@@ -514,8 +514,8 @@ describe('DrivePublisher keeps one tracker file', () => {
     expect(drive.created).toHaveLength(2);
     expect(drive.folders).toHaveLength(2);
     expect(drive.updated.at(-1)!.id).toBe(first.file);
-    expect(getKv(db, 'drive_root_id')).toBe(first.folder);
-    expect(getKv(db, TRACKER_ID_KEY)).toBe(first.file);
+    expect(await getKv(db, 'drive_root_id')).toBe(first.folder);
+    expect(await getKv(db, TRACKER_ID_KEY)).toBe(first.file);
     expect(newFiles).toEqual([1]);
     await p.publishNow(); // and it stays on the original
     expect(drive.updated.at(-1)!.id).toBe(first.file);
@@ -530,7 +530,7 @@ describe('DrivePublisher keeps one tracker file', () => {
     await p.publishNow();
     expect(drive.created).toHaveLength(2);
     expect(drive.created[1]!.parentId).toBe('folder-1');
-    expect(getKv(db, 'drive_root_id')).toBe('folder-1');
+    expect(await getKv(db, 'drive_root_id')).toBe('folder-1');
   });
 
   it('a failed look-up fails the run like any Drive error, and keeps the stored id', async () => {
@@ -545,7 +545,7 @@ describe('DrivePublisher keeps one tracker file', () => {
     };
     expect(await p.publishNow()).toBe(false);
     expect(drive.created).toHaveLength(1);
-    expect(getKv(db, TRACKER_ID_KEY)).toBe(old);
+    expect(await getKv(db, TRACKER_ID_KEY)).toBe(old);
     expect(newFiles).toEqual([]);
     await p.stop(1000);
   });
@@ -561,7 +561,7 @@ describe('DrivePublisher keeps one tracker file', () => {
     drive.missing.add(drive.created[0]!.id);
     expect(await publisher.publishNow()).toBe(true);
     expect(lines.some((l) => l.msg === 'onNewFile failed' && l.level === 50)).toBe(true);
-    expect(getKv(db, TRACKER_NEW_FILE_KEY)).toEqual(expect.any(String));
+    expect(await getKv(db, TRACKER_NEW_FILE_KEY)).toEqual(expect.any(String));
   });
 
   it('no file or folder id reaches the logs on any of these paths', async () => {

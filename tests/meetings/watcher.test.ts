@@ -486,13 +486,13 @@ describe('MeetingWatcher.backfill', () => {
 });
 
 describe('meetingsSince (M3)', () => {
-  it('is MEETINGS_SINCE when set, else the IST day meetings were first seen on, kept across restarts', () => {
+  it('is MEETINGS_SINCE when set, else the IST day meetings were first seen on, kept across restarts', async () => {
     const db = openDb(':memory:');
-    expect(meetingsSince(db, '2026-09-01', new Date('2026-10-23T06:00:00.000Z'))).toBe('2026-09-01');
-    expect(getKv(db, 'meetings_since')).toBeUndefined();
+    expect(await meetingsSince(db, '2026-09-01', new Date('2026-10-23T06:00:00.000Z'))).toBe('2026-09-01');
+    expect(await getKv(db, 'meetings_since')).toBeUndefined();
     // 20:00 UTC on 23 Oct is 01:30 on 24 Oct in India.
-    expect(meetingsSince(db, undefined, new Date('2026-10-23T20:00:00.000Z'))).toBe('2026-10-24');
-    expect(meetingsSince(db, undefined, new Date('2026-11-05T06:00:00.000Z'))).toBe('2026-10-24');
+    expect(await meetingsSince(db, undefined, new Date('2026-10-23T20:00:00.000Z'))).toBe('2026-10-24');
+    expect(await meetingsSince(db, undefined, new Date('2026-11-05T06:00:00.000Z'))).toBe('2026-10-24');
   });
 });
 

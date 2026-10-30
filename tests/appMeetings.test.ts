@@ -66,7 +66,7 @@ async function setup(o: SetupOptions = {}) {
   const ai = new FakeAi([{ ops: [op({ op: 'add_task', side: 'client', title: 'Send the logo files', category: 'content', priority: 'medium', sourceMessageIds: ['mtg1-a1'] })] }]);
   const drive = new FakeDrive();
   const db = await seededDb();
-  if (o.scopes !== false) saveGrantedScopes(db, [...MEETING_SCOPES, 'https://www.googleapis.com/auth/drive.file'].join(' '));
+  if (o.scopes !== false) await saveGrantedScopes(db, [...MEETING_SCOPES, 'https://www.googleapis.com/auth/drive.file'].join(' '));
   await o.prepare?.(db);
   const api = new FakeMeetingsApi();
   addConference(api);
@@ -147,7 +147,7 @@ describe('app with meetings', () => {
     expect(app.meetings).toBeUndefined();
     expect(health.length).toBeGreaterThan(1);
     expect(health.every((h) => h === null)).toBe(true);
-    expect(getKv(db, 'meetings_since')).toBeUndefined();
+    expect(await getKv(db, 'meetings_since')).toBeUndefined();
     await stopApp(app);
   });
 

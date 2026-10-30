@@ -2,7 +2,7 @@ import { sanitizeInline } from '../brain/prompt.ts';
 import { isDomain } from '../config/domains.ts';
 import type { ClientConfig } from '../config/groups.ts';
 import { getClientByGroupId } from '../store/clients.ts';
-import type { Db } from '../store/db.ts';
+import type { Sql } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import { insertFound, knownRecordings, type MeetingAttendee, type MeetingStatus, type NewMeeting } from '../store/meetings.ts';
 import type { Clock } from '../util/clock.ts';
@@ -28,7 +28,7 @@ export interface WatcherSettings {
 }
 
 export interface MeetingWatcherDeps {
-  db: Db;
+  db: Sql;
   api: MeetingsGoogleApi;
   clock: Clock;
   log: Logger;
@@ -142,12 +142,12 @@ const SINCE_KEY = 'meetings_since';
  * MEETINGS_SINCE when it is set; otherwise the day (IST) meetings were first seen switched on, stored in kv
  * 'meetings_since' the first time this runs, so a restart does not move it (M3).
  */
-export function meetingsSince(db: Db, configured: string | undefined, now: Date): string {
+export async function meetingsSince(db: Sql, configured: string | undefined, now: Date): Promise<string> {
   if (configured !== undefined) return configured;
-  const stored = getKv(db, SINCE_KEY);
+  const stored = await getKv(db, SINCE_KEY);
   if (stored) return stored;
   const today = istDate(now);
-  setKv(db, SINCE_KEY, today);
+  await setKv(db, SINCE_KEY, today);
   return today;
 }
 
@@ -211,7 +211,7 @@ const isConferenceError = (e: unknown): e is GoogleTransientError | GoogleNoAcce
   e instanceof GoogleTransientError || e instanceof GoogleNoAccessError;
 
 export class MeetingWatcher {
-  #db: Db;
+  #db: Sql;
   #api: MeetingsGoogleApi;
   #clock: Clock;
   #log: Logger;

@@ -26,7 +26,7 @@ function events(db: Db): Ev[] {
   return rows.map((e) => ({ ...e, detail: JSON.parse(e.detail) as unknown }));
 }
 
-const rebuilt = (db: Db) => getKv(db, 'rebuild_requested') === now.toISOString();
+const rebuilt = async (db: Db) => (await getKv(db, 'rebuild_requested')) === now.toISOString();
 
 async function msg(db: Db, waId: string, ts: string, clientId = 1) {
   await insertMessage(db, { waId, clientId, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts, text: 'a', quotedWaId: null, mediaType: null });
@@ -39,7 +39,7 @@ describe('task close / reopen', () => {
   it('closes and reopens tasks as a human, with events and a rebuild request', async () => {
     const db = await withTask();
     expect(await closeTask(db, 'sha-001', now)).toMatchObject({ status: 'done', closedOn: '2026-10-19', statusLockedAt: now.toISOString() });
-    expect(rebuilt(db)).toBe(true);
+    expect(await rebuilt(db)).toBe(true);
     expect(await reopenTask(db, 'SHA-001', now)).toMatchObject({ status: 'open', closedOn: null, statusLockedAt: now.toISOString() });
     expect(events(db)).toMatchObject([
       { op: 'close_task', task_id: 1, client_id: 1, detail: { status: 'done' } },
@@ -52,7 +52,7 @@ describe('task close / reopen', () => {
     const db = await withTask();
     await expect(reopenTask(db, 'SHA-001', now)).rejects.toThrowError('Task SHA-001 is already open');
     expect(events(db)).toHaveLength(0);
-    expect(getKv(db, 'rebuild_requested')).toBeUndefined();
+    expect(await getKv(db, 'rebuild_requested')).toBeUndefined();
     await closeTask(db, 'SHA-001', now);
     await expect(closeTask(db, 'SHA-001', now)).rejects.toThrowError('Task SHA-001 is already done');
     expect(events(db)).toHaveLength(1);
@@ -65,7 +65,7 @@ describe('task edit', () => {
     expect(await editTask(db, 'SHA-001', { deadline: '2026-10-25', assignedTo: 'Rahul' }, now)).toMatchObject({ deadline: '2026-10-25', assignedTo: 'Rahul' });
     expect([...((await getTaskByCode(db, 'SHA-001'))?.lockedFields ?? [])].sort()).toEqual(['assignedTo', 'deadline']);
     expect(events(db)[0]).toMatchObject({ op: 'update_task', detail: { deadline: '2026-10-25', assignedTo: 'Rahul' } });
-    expect(rebuilt(db)).toBe(true);
+    expect(await rebuilt(db)).toBe(true);
   });
 
   it('clears optional fields with none or an empty string', async () => {
@@ -90,7 +90,7 @@ describe('task edit', () => {
     await expect(editTask(db, 'SHA-001', { title: '' }, now)).rejects.toThrowError(/title/);
     await expect(editTask(db, 'SHA-001', { priority: 'secret client words' }, now)).rejects.toThrowError(/^(?!.*secret client words)/);
     expect(events(db)).toHaveLength(0);
-    expect(getKv(db, 'rebuild_requested')).toBeUndefined();
+    expect(await getKv(db, 'rebuild_requested')).toBeUndefined();
   });
 });
 
@@ -101,7 +101,7 @@ describe('task unlock', () => {
     await closeTask(db, 'SHA-001', now);
     expect(await unlockTask(db, 'sha-001', now)).toMatchObject({ lockedFields: [], statusLockedAt: null, status: 'done' });
     expect(events(db).at(-1)).toMatchObject({ op: 'unlock', task_id: 1, client_id: 1, detail: { lockedFields: ['deadline'], statusLocked: true } });
-    expect(rebuilt(db)).toBe(true);
+    expect(await rebuilt(db)).toBe(true);
     await expect(unlockTask(db, 'SHA-999', now)).rejects.toThrowError(CorrectionError);
   });
 });
@@ -120,7 +120,7 @@ describe('person set', () => {
     expect((await listPeople(db, 1))[0]).toMatchObject({ role: 'team', roleSetBy: 'human' });
     expect((await listPeople(db, 2))[0]).toMatchObject({ role: 'team', roleSetBy: 'human' });
     expect(events(db)).toMatchObject([{ op: 'set_person_role', client_id: 1, detail: { number: '919800000002', role: 'team' } }, { op: 'set_person_role', client_id: 2, detail: { number: '919800000002', role: 'team' } }]);
-    expect(rebuilt(db)).toBe(true);
+    expect(await rebuilt(db)).toBe(true);
   });
 
   it('scopes to one client with --client', async () => {
@@ -156,7 +156,7 @@ describe('phase set / unlock', () => {
     await setClientPhase(db, 'sha', 'development', now);
     expect(await getClient(db, 1)).toMatchObject({ currentPhase: 'Development', phaseLocked: true });
     expect(events(db)[0]).toMatchObject({ op: 'set_phase', task_id: null, client_id: 1, detail: { phase: 'Development' } });
-    expect(rebuilt(db)).toBe(true);
+    expect(await rebuilt(db)).toBe(true);
     await expect(setClientPhase(db, 'SHA', 'Party', now)).rejects.toThrowError(/must be one of/);
   });
 
@@ -166,7 +166,7 @@ describe('phase set / unlock', () => {
     await unlockClientPhase(db, 'sha', now);
     expect(await getClient(db, 1)).toMatchObject({ currentPhase: 'Design', phaseLocked: false });
     expect(events(db).at(-1)).toMatchObject({ op: 'unlock_phase', client_id: 1, detail: { phase: 'Design' } });
-    expect(rebuilt(db)).toBe(true);
+    expect(await rebuilt(db)).toBe(true);
   });
 });
 
@@ -180,11 +180,11 @@ describe('reprocess', () => {
     await processAll(db);
     await msg(db, 'fresh', '2026-10-13T08:00:00.000Z'); // never processed: not counted
     expect(await countReprocess(db, 'SHA', '2026-10-11', '2026-10-15')).toBe(2);
-    expect(getKv(db, 'rebuild_requested')).toBeUndefined(); // counting changes nothing
+    expect(await getKv(db, 'rebuild_requested')).toBeUndefined(); // counting changes nothing
     expect(await requestReprocess(db, 'SHA', '2026-10-11', now, '2026-10-15')).toBe(2);
     expect((await listUnprocessed(db, 1)).map((m) => m.waId).sort()).toEqual(['fresh', 'm1', 'm2']);
     expect(events(db)[0]).toMatchObject({ op: 'reprocess', client_id: 1, detail: { since: '2026-10-11', until: '2026-10-15', messages: 2 } });
-    expect(rebuilt(db)).toBe(true);
+    expect(await rebuilt(db)).toBe(true);
   });
 
   it('validates dates and the client', async () => {
@@ -206,7 +206,7 @@ describe('reprocess', () => {
     expect(await reprocess(db, 'SHA', '2026-10-11', undefined, false, now)).toEqual({ count: n, queued: 0, needsConfirm: true, maxCostUsd: 1 });
     expect(await listUnprocessed(db, 1, 1000)).toHaveLength(0);
     expect(events(db)).toHaveLength(0);
-    expect(getKv(db, 'rebuild_requested')).toBeUndefined();
+    expect(await getKv(db, 'rebuild_requested')).toBeUndefined();
     expect(await reprocess(db, 'SHA', '2026-10-11', undefined, true, now)).toMatchObject({ queued: n, needsConfirm: false });
     expect(await listUnprocessed(db, 1, 1000)).toHaveLength(n);
   });

@@ -106,7 +106,7 @@ beforeEach(async () => {
   api = new FakeMeetingsApi();
   db = openDb(trackerDbPath(dataDir));
   await syncClients(db, [{ ...SHARMA, phases: PHASES, meetingKeywords: [] }, { ...MEHTA, phases: PHASES, meetingKeywords: [] }]);
-  saveGrantedScopes(db, [...DRIVE_SCOPES, ...MEETING_SCOPES].join(' '));
+  await saveGrantedScopes(db, [...DRIVE_SCOPES, ...MEETING_SCOPES].join(' '));
   seq = 0;
 });
 
@@ -166,7 +166,7 @@ describe('meeting assign', () => {
     const id = await meeting('unassigned', { clientId: null, matchKind: null });
     expect(await assignMeetingToClient(db, String(id), 'meh', now)).toEqual({ id, code: 'MEH' });
     expect(await getMeeting(db, id)).toMatchObject({ status: 'queued', clientId: 2, matchKind: 'human' });
-    expect(getKv(db, 'rebuild_requested')).toBe(NOW);
+    expect(await getKv(db, 'rebuild_requested')).toBe(NOW);
     expect(events()).toEqual([{ clientId: 2, op: 'assign_meeting', detail: JSON.stringify({ meetingId: id }) }]);
   });
 
@@ -213,7 +213,7 @@ describe('meeting skip and retry', () => {
     const id = await meeting('unassigned', { clientId: null, matchKind: null });
     expect(await skipMeetingById(db, String(id), now)).toBe(id);
     expect((await getMeeting(db, id))!.status).toBe('skipped');
-    expect(getKv(db, 'rebuild_requested')).toBe(NOW);
+    expect(await getKv(db, 'rebuild_requested')).toBe(NOW);
     for (const s of ['internal', 'queued', 'done', 'skipped', 'too_long', 'no_access', 'failed'] as const) {
       const other = await meeting(s);
       await expect(skipMeetingById(db, String(other), now)).rejects.toThrow(/only unassigned meetings can be skipped/);
@@ -231,7 +231,7 @@ describe('meeting skip and retry', () => {
     expect(await getMeeting(db, f)).toMatchObject({ status: 'queued', attempts: 0, errorCode: null });
     expect((await getMeeting(db, n))!.status).toBe('queued');
     // The workbook lists only unassigned and done meetings, so a retry asks for no rebuild.
-    expect(getKv(db, 'rebuild_requested')).toBeUndefined();
+    expect(await getKv(db, 'rebuild_requested')).toBeUndefined();
     for (const s of ['unassigned', 'internal', 'queued', 'done', 'skipped', 'too_long'] as const) {
       const other = await meeting(s);
       await expect(retryMeetingById(db, String(other), now)).rejects.toThrow(/only failed or no-access meetings can be retried/);
@@ -249,7 +249,7 @@ describe('meeting retry of a meeting without a client', () => {
     expect(await retryMeetingById(db, String(u), now)).toEqual({ id: u, status: 'unassigned' });
     expect(await getMeeting(db, i)).toMatchObject({ status: 'unassigned', clientId: null, errorCode: null, attempts: 0, note: null, title: '' });
     expect(await getMeeting(db, u)).toMatchObject({ status: 'unassigned', clientId: null, errorCode: null });
-    expect(getKv(db, 'rebuild_requested')).toBe(NOW); // the workbook lists unassigned meetings
+    expect(await getKv(db, 'rebuild_requested')).toBe(NOW); // the workbook lists unassigned meetings
     expect(retryLine(r)).toBe(
       `Meeting ${i} has no client, so it cannot be processed; it is unassigned again. Assign it to a client with: npm run cli -- meeting assign ${i} <CODE>`,
     );
@@ -302,7 +302,7 @@ describe('meeting backfill', () => {
   it('with --yes stores the rows and requests a rebuild', async () => {
     await meetingBackfillCommand({ since: '2026-10-01', yes: true }, deps());
     expect((await rows()).map((r) => [r.status, r.clientId])).toEqual([['queued', 1], ['internal', null], ['unassigned', null], ['queued', 2]]);
-    expect(getKv(db, 'rebuild_requested')).toBe(NOW);
+    expect(await getKv(db, 'rebuild_requested')).toBe(NOW);
     expect(api.callsOf('download')).toEqual([]);
     expect(lines[0]).toBe('Stored 4 recordings from 2026-10-01 (IST) not stored before.');
     lines = [];
@@ -316,11 +316,11 @@ describe('meeting backfill', () => {
     );
     await expect(meetingBackfillCommand({ since: '2026-13-01', yes: true }, deps())).rejects.toThrow('--since must be YYYY-MM-DD');
     await expect(meetingBackfillCommand({ since: '2026-10-24', yes: true }, deps())).rejects.toThrow('--since must be in the past');
-    saveGrantedScopes(db, DRIVE_SCOPES.join(' '));
+    await saveGrantedScopes(db, DRIVE_SCOPES.join(' '));
     await expect(meetingBackfillCommand({ since: '2026-10-01', yes: true }, deps())).rejects.toThrow(
       'Google sign-in needs meeting access. Run: npm run cli -- google-auth',
     );
-    saveGrantedScopes(db, [...DRIVE_SCOPES, ...MEETING_SCOPES].join(' '));
+    await saveGrantedScopes(db, [...DRIVE_SCOPES, ...MEETING_SCOPES].join(' '));
     const lock = await acquireLock(dataDir);
     try {
       await expect(meetingBackfillCommand({ since: '2026-10-01', yes: true }, deps())).rejects.toThrow(/Another WA Agent process/);
@@ -409,18 +409,18 @@ describe('meeting check', () => {
 
   it('needs meetings on and the meeting scopes, and asks Google nothing otherwise', async () => {
     await expect(meetingCheckCommand(deps({ env: env({ MEETINGS_ENABLED: 'false' }) }))).rejects.toThrow(/Meetings are switched off/);
-    saveGrantedScopes(db, DRIVE_SCOPES.join(' '));
+    await saveGrantedScopes(db, DRIVE_SCOPES.join(' '));
     await expect(meetingCheckCommand(deps())).rejects.toThrow('Google sign-in needs meeting access');
     expect(api.calls).toEqual([]);
   });
 });
 
 describe('storedGoogleApi', () => {
-  it('needs a stored sign-in, and builds a client without calling Google', () => {
+  it('needs a stored sign-in, and builds a client without calling Google', async () => {
     const e = env({ GOOGLE_OAUTH_CLIENT_ID: 'test-id', GOOGLE_OAUTH_CLIENT_SECRET: 'test-secret' });
-    expect(() => storedGoogleApi(e)(db, KEY)).toThrow('Google is not connected. Run: npm run cli -- google-auth');
-    new TokenStore(db, KEY).save('rt-test');
-    const client = storedGoogleApi(e)(db, KEY);
+    await expect(storedGoogleApi(e)(db, KEY)).rejects.toThrow('Google is not connected. Run: npm run cli -- google-auth');
+    await new TokenStore(db, KEY).save('rt-test');
+    const client = await storedGoogleApi(e)(db, KEY);
     expect(typeof client.listConferences).toBe('function');
   });
 });

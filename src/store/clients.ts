@@ -56,8 +56,7 @@ function toRow(r: RawClient): ClientRow {
  * active here (new, or approved again) gets its last 7 days of messages queued for reading, in the same transaction
  * (src/wa/historyBackfill.ts reads them). Returns those group ids.
  */
-export async function syncClients(db: Db, configs: ClientConfig[], now: Date = new Date()): Promise<string[]> {
-  // queueBackfill writes kv, on raw until kv is converted (later in S1.12), which is allowed inside this transaction.
+export async function syncClients(db: Sql, configs: ClientConfig[], now: Date = new Date()): Promise<string[]> {
   return db.tx(async (q) => {
     for (const c of configs) {
       const existing = await q.get<{ code: string; name: string }>('SELECT code, name FROM clients WHERE group_id = ?', [c.groupId]);
@@ -81,7 +80,7 @@ export async function syncClients(db: Db, configs: ClientConfig[], now: Date = n
     const approved = configs.map((c) => c.groupId).filter((g) => !wasActive.has(g));
     for (const groupId of approved) {
       const { id } = (await q.get<{ id: number }>('SELECT id FROM clients WHERE group_id = ?', [groupId]))!;
-      queueBackfill(db, groupId, id, now);
+      await queueBackfill(q, groupId, id, now);
     }
     return approved;
   });

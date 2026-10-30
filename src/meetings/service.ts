@@ -79,9 +79,13 @@ export class MeetingService {
   #googleAuthLost = false;
   #stopped = false;
 
-  constructor(d: MeetingServiceDeps) {
+  /** The service, with the start of meeting discovery read (or stored the first time) in kv. */
+  static async open(d: MeetingServiceDeps): Promise<MeetingService> {
+    return new MeetingService(d, await meetingsSince(d.db, d.settings.since, d.clock.now()));
+  }
+
+  private constructor(d: MeetingServiceDeps, since: string) {
     this.#d = d;
-    const since = meetingsSince(d.db, d.settings.since, d.clock.now());
     this.#watcher = new MeetingWatcher({
       db: d.db, api: d.api, clock: d.clock, log: d.log, clients: d.clients,
       settings: { teamDomains: d.settings.teamDomains, maxMinutes: d.settings.maxMinutes, since },

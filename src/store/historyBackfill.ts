@@ -62,20 +62,20 @@ function parse(groupId: string, v: string | undefined): Backfill | undefined {
 }
 
 /** Queues (or restarts) the backfill of a group approved now: the 7 days before now. */
-export function queueBackfill(db: Db, groupId: string, clientId: number, now: Date): void {
-  saveBackfill(db, {
+export async function queueBackfill(db: Sql, groupId: string, clientId: number, now: Date): Promise<void> {
+  await saveBackfill(db, {
     groupId, clientId, since: new Date(now.getTime() - BACKFILL_DAYS * 86_400_000).toISOString(), until: now.toISOString(),
     state: 'waiting', requests: 0, empties: 0, timeouts: 0, failures: 0, cursor: null, found: 0, fetchingSince: null, finishedAt: null,
   });
 }
 
-export function getBackfill(db: Db, groupId: string): Backfill | undefined {
-  return parse(groupId, getKv(db, key(groupId)));
+export async function getBackfill(db: Sql, groupId: string): Promise<Backfill | undefined> {
+  return parse(groupId, await getKv(db, key(groupId)));
 }
 
-export function saveBackfill(db: Db, b: Backfill): void {
+export async function saveBackfill(db: Sql, b: Backfill): Promise<void> {
   const { groupId, ...rest } = b;
-  setKv(db, key(groupId), JSON.stringify(rest));
+  await setKv(db, key(groupId), JSON.stringify(rest));
 }
 
 /** Every backfill entry, finished ones too. */
@@ -92,11 +92,6 @@ export async function listBackfills(db: Sql): Promise<Backfill[]> {
 export async function firstAnchor(db: Sql, clientId: number, until: string): Promise<{ waId: string; fromMe: boolean; ts: string } | undefined> {
   const r = await db.get<{ wa_id: string; from_me: number; ts: string }>('SELECT wa_id, from_me, ts FROM messages WHERE client_id = ? AND ts >= ? ORDER BY ts, id LIMIT 1', [clientId, until]);
   return r ? { waId: r.wa_id, fromMe: r.from_me === 1, ts: r.ts } : undefined;
-}
-
-/** The client's stored messages, to count what an answer added. */
-export async function messageCount(db: Sql, clientId: number): Promise<number> {
-  return (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM messages WHERE client_id = ?', [clientId]))!.n;
 }
 
 /** How long a finished backfill shows on the Clients card. */

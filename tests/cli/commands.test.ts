@@ -142,7 +142,7 @@ describe('link --reset', () => {
     expect(trackerMessages()).toBe(msgsBefore);
     expect(readFileSync(masterKeyPath(dataDir), 'utf8')).toBe(keyBefore);
     const db = openDb(trackerDbPath(dataDir));
-    expect(getKv(db, 'session_reset_at')).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(await getKv(db, 'session_reset_at')).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     db.raw.close();
     expect(out()).toContain('tracker data were NOT touched');
     await lockIsFree();
@@ -169,7 +169,7 @@ describe('link --reset', () => {
     expect(sessionRows()).toBe(before);
     expect(factory).not.toHaveBeenCalled();
     const db = openDb(trackerDbPath(dataDir));
-    expect(getKv(db, 'session_reset_at')).toBeUndefined();
+    expect(await getKv(db, 'session_reset_at')).toBeUndefined();
     db.raw.close();
     await lockIsFree();
   });
@@ -464,10 +464,10 @@ describe('google-auth', () => {
     await vi.waitFor(() => expect(lines.some((l) => l.startsWith('http://127.0.0.1'))).toBe(true));
     await fetch(lines.find((l) => l.startsWith('http://127.0.0.1'))!);
   };
-  const kv = (k: string) => {
+  const kv = async (k: string) => {
     const db = openDb(trackerDbPath(dataDir));
     try {
-      return getKv(db, k);
+      return await getKv(db, k);
     } finally {
       db.raw.close();
     }
@@ -478,10 +478,10 @@ describe('google-auth', () => {
     await visit();
     await p;
     const db = openDb(trackerDbPath(dataDir));
-    const raw = getKv(db, 'google_refresh_token')!;
+    const raw = (await getKv(db, 'google_refresh_token'))!;
     expect(raw).toBeTruthy();
     expect(raw).not.toContain(REFRESH_TOKEN);
-    expect(new TokenStore(db, KEY).load()).toBe(REFRESH_TOKEN);
+    expect(await new TokenStore(db, KEY).load()).toBe(REFRESH_TOKEN);
     db.raw.close();
     expect(out()).not.toContain(REFRESH_TOKEN);
     expect(out()).toContain('Google Drive connected. If the WA Agent service is running, restart it so it uses the new sign-in: net stop wa-agent, then net start wa-agent');
@@ -489,12 +489,12 @@ describe('google-auth', () => {
 
   it('records the desktop client as the issuer of the main token, replacing one left by a dashboard reconnect', async () => {
     const pre = openDb(trackerDbPath(dataDir));
-    setKv(pre, 'google_client:main', 'web');
+    await setKv(pre, 'google_client:main', 'web');
     pre.raw.close();
     const p = googleAuthCommand(deps({ createConsentClient: consentClient() }));
     await visit();
     await p;
-    expect(kv('google_client:main')).toBe('desktop');
+    expect(await kv('google_client:main')).toBe('desktop');
   });
 
   it('with meetings off asks for Drive only, says so before the link, and records the granted scope', async () => {
@@ -507,9 +507,9 @@ describe('google-auth', () => {
     expect(perm).toBeGreaterThanOrEqual(0);
     expect(perm).toBeLessThan(urlIndex());
     expect(out()).not.toContain('Calendar invites');
-    expect(kv('google_scopes')).toBe(DRIVE_SCOPES[0]);
+    expect(await kv('google_scopes')).toBe(DRIVE_SCOPES[0]);
     const db = openDb(trackerDbPath(dataDir));
-    expect(hasMeetingScopes(db)).toBe(false);
+    expect(await hasMeetingScopes(db)).toBe(false);
     db.raw.close();
   });
 
@@ -526,10 +526,10 @@ describe('google-auth', () => {
       expect(i).toBeLessThan(urlIndex());
     }
     expect(out()).not.toContain('googleapis.com/auth');
-    expect(kv('google_scopes')).toBe(granted);
+    expect(await kv('google_scopes')).toBe(granted);
     const db = openDb(trackerDbPath(dataDir));
-    expect(new TokenStore(db, KEY).load()).toBe(REFRESH_TOKEN);
-    expect(hasMeetingScopes(db)).toBe(true);
+    expect(await new TokenStore(db, KEY).load()).toBe(REFRESH_TOKEN);
+    expect(await hasMeetingScopes(db)).toBe(true);
     db.raw.close();
     expect(out()).not.toContain(REFRESH_TOKEN);
     expect(out()).toContain('Google Drive, Meet and Calendar connected. If the WA Agent service is running, restart it so it uses the new sign-in: net stop wa-agent, then net start wa-agent');
@@ -544,8 +544,8 @@ describe('google-auth', () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toContain('Meet files in Drive');
     expect(err.message).not.toContain(REFRESH_TOKEN);
-    expect(kv('google_refresh_token')).toBeUndefined();
-    expect(kv('google_scopes')).toBeUndefined();
+    expect(await kv('google_refresh_token')).toBeUndefined();
+    expect(await kv('google_scopes')).toBeUndefined();
     expect(out()).not.toContain(REFRESH_TOKEN);
     expect(out()).not.toContain('connected');
   });
@@ -554,13 +554,13 @@ describe('google-auth', () => {
     const first = googleAuthCommand(deps({ createConsentClient: consentClient() }));
     await visit();
     await first;
-    const before = { token: kv('google_refresh_token'), scopes: kv('google_scopes') };
+    const before = { token: await kv('google_refresh_token'), scopes: await kv('google_scopes') };
     lines = [];
     const p = googleAuthCommand(deps({ env: meetingsOn(), createConsentClient: consentClient({ scope: DRIVE_SCOPES[0] }) }));
     const caught = p.catch((e: Error) => e);
     await visit();
     expect(await caught).toBeInstanceOf(Error);
-    expect({ token: kv('google_refresh_token'), scopes: kv('google_scopes') }).toEqual(before);
+    expect({ token: await kv('google_refresh_token'), scopes: await kv('google_scopes') }).toEqual(before);
   });
 
   it('stores nothing when the code exchange fails', async () => {
@@ -571,7 +571,7 @@ describe('google-auth', () => {
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).not.toContain(REFRESH_TOKEN);
     const db = openDb(trackerDbPath(dataDir));
-    expect(getKv(db, 'google_refresh_token')).toBeUndefined();
+    expect(await getKv(db, 'google_refresh_token')).toBeUndefined();
     db.raw.close();
     expect(out()).not.toContain(REFRESH_TOKEN);
   });

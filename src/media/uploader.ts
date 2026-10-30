@@ -126,7 +126,7 @@ export class DriveFileUploader {
         this.#unsaved.delete(id);
         uploaded++;
       }
-      const root = getKv(db, 'drive_root_id');
+      const root = await getKv(db, 'drive_root_id');
       if (!root) return; // the publisher creates the root folder on its first upload
       const nowIso = clock.now().toISOString();
       for (const c of await uploadCandidates(db, nowIso, this.#o.batchSize ?? 5)) {

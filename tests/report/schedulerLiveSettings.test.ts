@@ -16,7 +16,7 @@ const ON: ReportSettings = { enabled: true, time: '06:00', deadline: '12:00', da
 
 async function setup(initial: ReportSettings) {
   const db = await seededDb();
-  setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
+  await setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
   const clock = manualClock(at('2026-10-24', '05:00'));
   const sender = new FakeReportSender();
   let current = initial;
@@ -84,7 +84,7 @@ describe('ReportScheduler with a settings getter', () => {
 
   it('a settings object still works as before', async () => {
     const db = await seededDb();
-    setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
+    await setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
     const clock = manualClock(at('2026-10-23', '06:30'));
     const sender = new FakeReportSender();
     const s = new ReportScheduler({ db, clock, log: silentLogger(), sender, settings: ON, healthLine: () => ({ ok: true, text: '✅' }) });
@@ -97,7 +97,7 @@ describe('ReportScheduler with a settings getter', () => {
 describe('ReportScheduler with a getter that throws', () => {
   it('tick resolves, sends nothing and logs; health gives a plain line', async () => {
     const db = await seededDb();
-    setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
+    await setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
     const clock = manualClock(at('2026-10-23', '06:30'));
     const sender = new FakeReportSender();
     const errors: string[] = [];

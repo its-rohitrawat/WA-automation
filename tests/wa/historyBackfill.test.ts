@@ -46,7 +46,7 @@ function scheduler() {
   };
 }
 
-async function setup(o: { configs?: typeof SHARMA[]; state?: GatewayState; paused?: boolean } = {}) {
+async function setup(o: { configs?: typeof SHARMA[]; state?: GatewayState; paused?: boolean; beforeIngest?: (e: NormalizedEvent) => Promise<void> } = {}) {
   const db = openDb(':memory:');
   const clock = manualClock(APPROVED);
   await syncClients(db, o.configs ?? [SHARMA], clock.now());
@@ -68,7 +68,7 @@ async function setup(o: { configs?: typeof SHARMA[]; state?: GatewayState; pause
   const finished: { clientId: number; found: number; stopped: boolean }[] = [];
   const s = scheduler();
   const make = () => new HistoryBackfill({
-    db, clock, log, gateway: g, ingest: (e) => ingestor.handle(e), spendPaused: () => spend.paused,
+    db, clock, log, gateway: g, ingest: async (e) => { await o.beforeIngest?.(e); return ingestor.handle(e); }, spendPaused: () => spend.paused,
     onFinished: (f) => finished.push(f), scheduler: s.schedule,
   });
   const bf = make();
@@ -88,20 +88,20 @@ async function setup(o: { configs?: typeof SHARMA[]; state?: GatewayState; pause
 describe('history backfill: queued on approve', () => {
   it('a newly approved group is queued for the 7 days before its approval; one already approved is not queued again', async () => {
     const { db, clock } = await setup();
-    expect(getBackfill(db, SHARMA.groupId)).toMatchObject({ clientId: 1, state: 'waiting', since: at(7).toISOString(), until: APPROVED, requests: 0 });
+    expect(await getBackfill(db, SHARMA.groupId)).toMatchObject({ clientId: 1, state: 'waiting', since: at(7).toISOString(), until: APPROVED, requests: 0 });
     clock.set('2026-10-29T06:00:00.000Z');
     expect(await syncClients(db, [SHARMA, MEHTA], clock.now())).toEqual([MEHTA.groupId]);
-    expect(getBackfill(db, SHARMA.groupId)?.until).toBe(APPROVED);
-    expect(getBackfill(db, MEHTA.groupId)?.until).toBe('2026-10-29T06:00:00.000Z');
+    expect((await getBackfill(db, SHARMA.groupId))?.until).toBe(APPROVED);
+    expect((await getBackfill(db, MEHTA.groupId))?.until).toBe('2026-10-29T06:00:00.000Z');
   });
 
   it('approving a removed group again queues it again', async () => {
     const { db, clock } = await setup();
-    saveBackfill(db, { ...getBackfill(db, SHARMA.groupId)!, state: 'done', finishedAt: APPROVED });
+    await saveBackfill(db, { ...(await getBackfill(db, SHARMA.groupId))!, state: 'done', finishedAt: APPROVED });
     await syncClients(db, [], clock.now());
     clock.set('2026-10-30T06:00:00.000Z');
     expect(await syncClients(db, [SHARMA], clock.now())).toEqual([SHARMA.groupId]);
-    expect(getBackfill(db, SHARMA.groupId)).toMatchObject({ state: 'waiting', until: '2026-10-30T06:00:00.000Z', requests: 0 });
+    expect(await getBackfill(db, SHARMA.groupId)).toMatchObject({ state: 'waiting', until: '2026-10-30T06:00:00.000Z', requests: 0 });
   });
 });
 
@@ -115,7 +115,7 @@ describe('history backfill: the anchor', () => {
     await live(SHARMA.groupId, 'FIRST', at(-0.01));
     await step();
     expect(asked).toEqual([{ groupId: SHARMA.groupId, anchor: { waId: 'FIRST', fromMe: false, ts: at(-0.01) }, count: 50 }]);
-    expect(getBackfill(db, SHARMA.groupId)).toMatchObject({ state: 'fetching', requests: 1 });
+    expect(await getBackfill(db, SHARMA.groupId)).toMatchObject({ state: 'fetching', requests: 1 });
     expect(await backfillStatus(db, 1, at(0))).toEqual({ state: 'reading', found: 0 });
   });
 
@@ -144,12 +144,24 @@ describe('history backfill: paging', () => {
     await answer({ groups: [{ groupId: SHARMA.groupId, events: [msg(SHARMA.groupId, 'D', at(6)), msg(SHARMA.groupId, 'OLDER', at(8))] }] });
     expect(count()).toBe(4);
     expect(db.raw.prepare("SELECT 1 FROM messages WHERE wa_id = 'OLDER'").get()).toBeUndefined();
-    expect(getBackfill(db, SHARMA.groupId)?.state).toBe('done');
+    expect((await getBackfill(db, SHARMA.groupId))?.state).toBe('done');
     // Found: what the backfill stored itself (B, C, D), not the new message it started from.
     expect(finished).toEqual([{ clientId: 1, found: 3, stopped: false }]);
     expect(await backfillStatus(db, 1, at(0))).toEqual({ state: 'done', found: 3 });
     await s.advance(REQUEST_GAP_MS * 3);
     expect(asked).toHaveLength(2);
+  });
+
+  it('a live message stored while an answer is being stored is not counted as found', async () => {
+    let during: (() => Promise<unknown>) | undefined;
+    const t = await setup({ beforeIngest: async (e) => { if (e.kind === 'message' && e.waId === 'B') await during?.(); } });
+    during = () => t.live(SHARMA.groupId, 'LIVE', at(-0.02));
+    await t.live(SHARMA.groupId, 'A', at(0, -10));
+    t.bf.start();
+    await t.step();
+    await t.answer({ groups: [{ groupId: SHARMA.groupId, events: [msg(SHARMA.groupId, 'B', at(3)), msg(SHARMA.groupId, 'C', at(2))] }] });
+    expect(t.count()).toBe(4); // A, LIVE, B and C are all stored
+    expect((await getBackfill(t.db, SHARMA.groupId))?.found).toBe(2); // only B and C came from the answer
   });
 
   it('ends after two answers in a row bring nothing older: duplicates only, then an empty one', async () => {
@@ -159,12 +171,12 @@ describe('history backfill: paging', () => {
     await step();
     await answer({ groups: [{ groupId: SHARMA.groupId, events: [msg(SHARMA.groupId, 'A', at(0, -10))] }] }); // a duplicate
     expect(count()).toBe(1);
-    expect(getBackfill(db, SHARMA.groupId)?.empties).toBe(1);
+    expect((await getBackfill(db, SHARMA.groupId))?.empties).toBe(1);
     await s.advance(REQUEST_GAP_MS);
     expect(asked).toHaveLength(2);
     await answer({ groups: [] });
     await s.advance(REQUEST_GAP_MS);
-    expect(getBackfill(db, SHARMA.groupId)?.state).toBe('done');
+    expect((await getBackfill(db, SHARMA.groupId))?.state).toBe('done');
     expect(asked).toHaveLength(2);
   });
 
@@ -174,13 +186,13 @@ describe('history backfill: paging', () => {
     bf.start();
     await step();
     await s.advance(ANSWER_TIMEOUT_MS);
-    expect(getBackfill(db, SHARMA.groupId)).toMatchObject({ state: 'fetching', timeouts: 1, empties: 0 });
+    expect(await getBackfill(db, SHARMA.groupId)).toMatchObject({ state: 'fetching', timeouts: 1, empties: 0 });
     await s.advance(REQUEST_GAP_MS);
     expect(asked).toHaveLength(1); // not after the short gap
     await s.advance(TIMEOUT_GAP_MS);
     expect(asked).toHaveLength(2);
     for (let i = 0; i < TIMEOUTS_TO_FINISH; i++) await s.advance(ANSWER_TIMEOUT_MS + TIMEOUT_GAP_MS);
-    expect(getBackfill(db, SHARMA.groupId)?.state).toBe('done');
+    expect((await getBackfill(db, SHARMA.groupId))?.state).toBe('done');
     expect(asked).toHaveLength(TIMEOUTS_TO_FINISH);
   });
 
@@ -205,13 +217,13 @@ describe('history backfill: paging', () => {
     await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
-    expect(getBackfill(db, SHARMA.groupId)).toMatchObject({ failures: 1, requests: 0 });
+    expect(await getBackfill(db, SHARMA.groupId)).toMatchObject({ failures: 1, requests: 0 });
     await s.advance(REQUEST_GAP_MS * 2);
     expect(asked).toHaveLength(2);
     await s.advance(REQUEST_GAP_MS * 2);
     expect(asked).toHaveLength(2); // the wait doubled
     for (let i = 0; i < 10; i++) await s.advance(REQUEST_GAP_MS * 2 ** 9);
-    expect(getBackfill(db, SHARMA.groupId)?.state).toBe('done');
+    expect((await getBackfill(db, SHARMA.groupId))?.state).toBe('done');
     expect(asked).toHaveLength(FAILURES_TO_FINISH);
   });
 
@@ -221,7 +233,7 @@ describe('history backfill: paging', () => {
     bf.start();
     await step();
     await answer({ groups: [] });
-    expect(getBackfill(db, SHARMA.groupId)?.empties).toBe(1);
+    expect((await getBackfill(db, SHARMA.groupId))?.empties).toBe(1);
   });
 
   it(`asks at most ${MAX_REQUESTS} times for a group`, async () => {
@@ -234,7 +246,7 @@ describe('history backfill: paging', () => {
       await s.advance(REQUEST_GAP_MS);
     }
     expect(asked).toHaveLength(MAX_REQUESTS);
-    expect(getBackfill(db, SHARMA.groupId)).toMatchObject({ state: 'done', requests: MAX_REQUESTS });
+    expect(await getBackfill(db, SHARMA.groupId)).toMatchObject({ state: 'done', requests: MAX_REQUESTS });
   });
 });
 
@@ -246,7 +258,7 @@ describe('history backfill: the privacy rules', () => {
     bf.start();
     await step();
     expect(asked).toEqual([]);
-    expect(getBackfill(db, SHARMA.groupId)?.state).toBe('stopped');
+    expect((await getBackfill(db, SHARMA.groupId))?.state).toBe('stopped');
     expect(finished).toEqual([{ clientId: 1, found: 0, stopped: true }]);
     // A late answer for it is not stored.
     await answer({ groups: [{ groupId: SHARMA.groupId, events: [msg(SHARMA.groupId, 'B', at(2))] }] });
@@ -256,7 +268,7 @@ describe('history backfill: the privacy rules', () => {
   it('stores nothing from an answer for a group with no backfill under way', async () => {
     const { db, clock, bf, answer, step } = await setup({ configs: [SHARMA] });
     await syncClients(db, [SHARMA, MEHTA], clock.now());
-    saveBackfill(db, { ...getBackfill(db, MEHTA.groupId)!, state: 'done', finishedAt: APPROVED });
+    await saveBackfill(db, { ...(await getBackfill(db, MEHTA.groupId))!, state: 'done', finishedAt: APPROVED });
     bf.start();
     await step();
     await answer({ groups: [{ groupId: MEHTA.groupId, events: [msg(MEHTA.groupId, 'X', at(1))] }] });
@@ -301,7 +313,7 @@ describe('history backfill: restart and the hold', () => {
     again.tick();
     await new Promise((r) => setImmediate(r));
     expect(asked).toHaveLength(2);
-    expect(getBackfill(db, SHARMA.groupId)?.requests).toBe(2);
+    expect((await getBackfill(db, SHARMA.groupId))?.requests).toBe(2);
     expect(await listBackfills(db)).toHaveLength(1);
   });
 
@@ -345,11 +357,11 @@ describe('history backfill: the hold ends when the backfill cannot go on, and a 
     // Read before, under an earlier approval: messages kept, backfill done.
     await live(SHARMA.groupId, 'KEPT1', at(5));
     await live(SHARMA.groupId, 'KEPT2', at(3)); // inside the new 7 days
-    saveBackfill(db, { ...getBackfill(db, SHARMA.groupId)!, state: 'done', finishedAt: APPROVED });
+    await saveBackfill(db, { ...(await getBackfill(db, SHARMA.groupId))!, state: 'done', finishedAt: APPROVED });
     await syncClients(db, [], clock.now()); // removed for three days
     clock.set(new Date(Date.parse(APPROVED) + 3 * 86_400_000).toISOString());
     await syncClients(db, [SHARMA], clock.now()); // approved again
-    const again = getBackfill(db, SHARMA.groupId)!;
+    const again = (await getBackfill(db, SHARMA.groupId))!;
     await live(SHARMA.groupId, 'NEW', new Date(Date.parse(again.until) + 60_000));
     bf.start();
     await step();

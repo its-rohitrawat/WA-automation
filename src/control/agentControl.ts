@@ -207,15 +207,15 @@ export class AgentControl {
       ? { state: 'down' as const, stateLabel: 'Sign-in expired' }
       : meetingAccess ? { state: 'warn' as const, stateLabel: 'Needs meeting access' } : { state: 'ok' as const, stateLabel: 'Connected' };
     const google = [
-      { label: MAIN_ACCOUNT, email: accountEmail(db, MAIN_ACCOUNT), usedFor: ['Tracker on Drive', ...(env.MEETINGS_ENABLED ? ['Meetings'] : [])], ...mainState },
-      ...meetingAccounts(db).map((label) => ({
-        label, email: accountEmail(db, label), usedFor: ['Meetings'],
+      { label: MAIN_ACCOUNT, email: await accountEmail(db, MAIN_ACCOUNT), usedFor: ['Tracker on Drive', ...(env.MEETINGS_ENABLED ? ['Meetings'] : [])], ...mainState },
+      ...(await Promise.all((await meetingAccounts(db)).map(async (label) => ({
+        label, email: await accountEmail(db, label), usedFor: ['Meetings'],
         ...(lost.has(label) ? { state: 'down' as const, stateLabel: 'Sign-in lost' } : { state: 'ok' as const, stateLabel: 'Connected' }),
-      })),
+      })))),
     ];
     const calls = (await db.get<{ n: number }>("SELECT COUNT(*) AS n FROM spend WHERE day = ? AND kind = 'ai'", [istDate(now)]))!.n;
     const beat = heartbeat?.lastBeatAt() ?? null;
-    const file = trackerFile(db);
+    const file = await trackerFile(db);
     return {
       founder: { ...this.#whatsapp(), groups, lastActivityAt: await this.#lastMessageAt(), device: FOUNDER_DEVICE },
       spare: sender ? { ...spareState(sender.status()), device: SPARE_DEVICE, recipientMasked: sender.maskedRecipient() }
@@ -225,7 +225,7 @@ export class AgentControl {
       google,
       drive: {
         ...(await this.#tracker(snap)), lastUploadAt: await lastTrackerUpload(db, snap.lastPublishedAt), file: file.name, folder: file.folder, account: file.account,
-        url: trackerLink(db) ?? null,
+        url: (await trackerLink(db)) ?? null,
       },
       claude: { callsToday: calls, spentToday: spend.spentToday(), capUsd: spend.capUsd },
       monitoring: { on: heartbeat !== undefined, lastBeatAt: beat === null ? null : beat.toISOString() },

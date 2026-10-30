@@ -66,9 +66,9 @@ describe('clients repository', () => {
 
   it('stores key/value pairs', async () => {
     const db = await seededDb();
-    setKv(db, 'a', '1');
-    setKv(db, 'a', '2');
-    expect(getKv(db, 'a')).toBe('2');
-    expect(getKv(db, 'missing')).toBeUndefined();
+    await setKv(db, 'a', '1');
+    await setKv(db, 'a', '2');
+    expect(await getKv(db, 'a')).toBe('2');
+    expect(await getKv(db, 'missing')).toBeUndefined();
   });
 });

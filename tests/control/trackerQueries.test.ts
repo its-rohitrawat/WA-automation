@@ -26,30 +26,30 @@ describe('trackerSummary', () => {
     const db = await seededDb();
     expect(await trackerSummary(db, now)).toMatchObject({ uploaded: false, url: null });
     for (const bad of ['short', 'https://evil.example/x', '1AbCdEfGhIj/../x', '1AbCdEfGhIj?x=1']) {
-      setKv(db, TRACKER_ID_KEY, bad);
+      await setKv(db, TRACKER_ID_KEY, bad);
       expect(await trackerSummary(db, now), bad).toMatchObject({ uploaded: false, url: null });
     }
   });
 
   it('links the workbook from the stored Drive id', async () => {
     const db = await seededDb();
-    setKv(db, TRACKER_ID_KEY, ID);
+    await setKv(db, TRACKER_ID_KEY, ID);
     expect(await trackerSummary(db, now)).toMatchObject({ uploaded: true, url: `https://drive.google.com/file/d/${ID}/view` });
   });
 
   it('names the file it writes: Tracker.xlsx in the WA Agent folder, and the main account when its email is known', async () => {
     const db = await seededDb();
     expect(await trackerSummary(db, now)).toMatchObject({ file: { name: 'Tracker.xlsx', folder: 'WA Agent', account: null }, newFileAt: null });
-    setKv(db, 'google_account_email:main', 'owner@example.com');
-    setKv(db, 'google_account_email:org2', 'meetings@example.org');
+    await setKv(db, 'google_account_email:main', 'owner@example.com');
+    await setKv(db, 'google_account_email:org2', 'meetings@example.org');
     expect((await trackerSummary(db, now)).file).toEqual({ name: 'Tracker.xlsx', folder: 'WA Agent', account: 'owner@example.com' });
   });
 
   it('carries the date a new tracker file had to be started, when one was', async () => {
     const db = await seededDb();
-    setKv(db, TRACKER_NEW_FILE_KEY, '2026-10-28T05:00:00.000Z');
+    await setKv(db, TRACKER_NEW_FILE_KEY, '2026-10-28T05:00:00.000Z');
     expect((await trackerSummary(db, now)).newFileAt).toBe('2026-10-28T05:00:00.000Z');
-    setKv(db, TRACKER_NEW_FILE_KEY, 'not a date');
+    await setKv(db, TRACKER_NEW_FILE_KEY, 'not a date');
     expect((await trackerSummary(db, now)).newFileAt).toBeNull();
   });
 

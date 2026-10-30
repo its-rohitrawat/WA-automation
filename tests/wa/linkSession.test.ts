@@ -106,7 +106,7 @@ describe('founder relink', () => {
     expect(t.sessions.info(link.id)).toMatchObject({ state: 'linked', device: TRACKER_DEVICE_NAME, errorCode: null });
     expect(t.switchable.status().state).toBe('open');
     expect(t.sockets).toHaveLength(2); // handed over as it is: no third connection
-    expect(getKv(t.trackerDb, 'session_reset_at')).toBeTruthy();
+    expect(await getKv(t.trackerDb, 'session_reset_at')).toBeTruthy();
     expect(t.audits).toEqual([{ event: "WhatsApp relinked · founder's phone", actor: 'owner@studio.in' }]);
     // The service now reads from the new gateway.
     let seen = 0;
@@ -130,7 +130,7 @@ describe('founder relink', () => {
     expect(t.switchable.status().state).toBe('connecting');
     expect(t.sessions.info(link.id)).toMatchObject({ state: 'cancelled', errorCode: 'cancelled' });
     expect(t.audits.map((a) => a.event)).toEqual(['WhatsApp relink cancelled']);
-    expect(getKv(t.trackerDb, 'session_reset_at')).toBeUndefined();
+    expect(await getKv(t.trackerDb, 'session_reset_at')).toBeUndefined();
   });
 
   it('the 5-minute timeout restores the session', async () => {

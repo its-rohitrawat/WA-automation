@@ -15,7 +15,7 @@ import {
 import { describeReport, isStaleSending, reasonText } from '../report/scheduler.ts';
 import { latestBatches } from '../store/batches.ts';
 import { listClients, syncClients } from '../store/clients.ts';
-import { openDb, txSync, type Db } from '../store/db.ts';
+import { openDb, type Db } from '../store/db.ts';
 import { setKv } from '../store/kv.ts';
 import { mediaSttForgetsGivenUp } from '../store/media.ts';
 import { sttForgetsGivenUp } from '../store/meetings.ts';
@@ -216,7 +216,7 @@ export async function linkCommand(opts: { reset: boolean }, deps: CliDeps): Prom
         }
         // Only the agent's own WhatsApp session rows (session.db) are deleted. tracker.db keeps its data.
         await resetSession(sessionDb);
-        setKv(db, 'session_reset_at', new Date().toISOString());
+        await setKv(db, 'session_reset_at', new Date().toISOString());
         out('Reset: the saved WhatsApp session was deleted. Your tasks, messages and tracker data were NOT touched.');
       }
     }
@@ -296,7 +296,7 @@ export async function statusCommand(deps: CliDeps): Promise<void> {
   try {
     deps.out(
       formatStatus({
-        snapshot: readHealthSnapshot(db),
+        snapshot: await readHealthSnapshot(db),
         clients: await listClients(db, false),
         batches: await latestBatches(db),
         unprocessed: await unprocessedCounts(db),
@@ -332,13 +332,12 @@ export async function googleAuthCommand(deps: CliDeps): Promise<void> {
         out(url);
       },
     });
-    const tokens = new TokenStore(db, key);
     // Both or neither: the scope record must describe the token beside it.
-    txSync(db, () => {
-      tokens.save(refreshToken);
-      saveGrantedScopes(db, scope);
+    await db.tx(async (q) => {
+      await new TokenStore(q, key).save(refreshToken);
+      await saveGrantedScopes(q, scope);
       // Issued by the desktop client: a 'web' left from an earlier dashboard reconnect would pair it with the wrong client.
-      saveTokenIssuer(db, MAIN_ACCOUNT, 'desktop');
+      await saveTokenIssuer(q, MAIN_ACCOUNT, 'desktop');
     });
     out(`${env.MEETINGS_ENABLED ? 'Google Drive, Meet and Calendar' : 'Google Drive'} connected. If the WA Agent service is running, restart it so it uses the new sign-in: net stop wa-agent, then net start wa-agent`);
   } finally {
@@ -465,7 +464,7 @@ export async function reportStatusCommand(deps: CliDeps): Promise<void> {
   const today = istDate(now);
   const db = openDb(trackerDbPath(env.DATA_DIR));
   try {
-    const snap = readHealthSnapshot(db);
+    const snap = await readHealthSnapshot(db);
     const fresh = snap !== undefined && now.getTime() - Date.parse(snap.at) <= SERVICE_FRESH_MS;
     if (settings.enabled) {
       // A running service sends to the number it was started with; .env may name another one since.
@@ -536,7 +535,7 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
       out(refusal);
       return;
     }
-    const snap = readHealthSnapshot(db);
+    const snap = await readHealthSnapshot(db);
     if (!snap || now.getTime() - Date.parse(snap.at) > SERVICE_FRESH_MS) {
       out('The service is not running, so nothing can be sent. Start it first (net start wa-agent), then run this again.');
       return;
@@ -591,7 +590,7 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
         return `Today's report changed while you were answering (now: ${nowText}). Nothing was sent. Check with: npm run cli -- report status, then run this again if it is still needed.`;
       }
       // Stamped with the time of the yes: the service drops a request older than 5 minutes.
-      setKv(db, REPORT_REQUEST_KEY, reportRequest(today, current, at));
+      await setKv(q, REPORT_REQUEST_KEY, reportRequest(today, current, at));
       return undefined;
     });
     out(answer ?? 'Requested. The service sends it within about a minute. Check with: npm run cli -- report status');
@@ -617,15 +616,15 @@ export async function googleAccountCommand(opts: { account: string; remove: bool
   const db = openDb(trackerDbPath(env.DATA_DIR));
   try {
     if (opts.remove) {
-      if (!meetingAccounts(db).includes(label)) {
-        out(`No Google account named ${label} is connected. Connected: ${meetingAccounts(db).join(', ') || 'none besides the main one'}.`);
+      if (!(await meetingAccounts(db)).includes(label)) {
+        out(`No Google account named ${label} is connected. Connected: ${(await meetingAccounts(db)).join(', ') || 'none besides the main one'}.`);
         return;
       }
       if (!(await deps.confirm(`Forget Google account ${label} here? Its meetings are no longer found. Type yes to continue: `))) {
         out('Nothing was changed.');
         return;
       }
-      removeMeetingAccount(db, label);
+      await removeMeetingAccount(db, label);
       out(`Google account ${label} forgotten here. To end its access at Google too, remove WA Agent at myaccount.google.com/permissions while signed in as that account.`);
       out(RESTART);
       return;
@@ -644,8 +643,8 @@ export async function googleAccountCommand(opts: { account: string; remove: bool
         out(url);
       },
     });
-    saveMeetingAccount(db, key, label, refreshToken, scope);
-    out(`Google account ${label} connected for meetings (read only). Connected accounts: main, ${meetingAccounts(db).join(', ')}.`);
+    await saveMeetingAccount(db, key, label, refreshToken, scope);
+    out(`Google account ${label} connected for meetings (read only). Connected accounts: main, ${(await meetingAccounts(db)).join(', ')}.`);
     out(RESTART);
   } finally {
     db.raw.close();

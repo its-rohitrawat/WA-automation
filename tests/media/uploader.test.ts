@@ -31,7 +31,7 @@ async function setup(o: { root?: boolean; batchSize?: number; log?: Logger } = {
   const up = new DriveFileUploader({
     db, api: drive, dataDir, clock, log: o.log ?? silentLogger(), onUploaded, ...(o.batchSize === undefined ? {} : { batchSize: o.batchSize }),
   });
-  if (o.root !== false) setKv(db, 'drive_root_id', 'root-1');
+  if (o.root !== false) await setKv(db, 'drive_root_id', 'root-1');
   return { db, dataDir, drive, clock, onUploaded, up };
 }
 
@@ -353,7 +353,7 @@ describe('DriveFileUploader', () => {
     await up.run();
     restore();
     expect(onUploaded).not.toHaveBeenCalled();
-    setKv(db, 'drive_root_id', ''); // the pass that saves the id returns right after it, before any upload
+    await setKv(db, 'drive_root_id', ''); // the pass that saves the id returns right after it, before any upload
     await ticks(clock, up, 15);
     expect((await getMedia(db, a))!.driveFileId).toBe('file-4');
     expect(drive.createFileCalls).toBe(1);

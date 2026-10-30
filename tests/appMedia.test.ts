@@ -441,8 +441,8 @@ describe('app media spend (review round 1)', () => {
     expect(ai.calls).toHaveLength(0);
     expect(ledger(db)).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(readHealthSnapshot(db)!.media).toMatchObject({ pending: 1, spendCap: 1 });
-    expect(readHealthSnapshot(db)!.line).toEqual({ ok: false, text: BUDGET_LINE });
+    expect((await readHealthSnapshot(db))!.media).toMatchObject({ pending: 1, spendCap: 1 });
+    expect((await readHealthSnapshot(db))!.line).toEqual({ ok: false, text: BUDGET_LINE });
     await stopApp(app);
   });
 
@@ -525,8 +525,8 @@ describe('app media wiring (15g)', () => {
     await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0));
     expect(await getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable' });
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(readHealthSnapshot(db)!.media).toEqual({ pending: 1, stale: 1, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0 });
-    expect(readHealthSnapshot(db)!.line).toEqual({ ok: false, text: '⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.' });
+    expect((await readHealthSnapshot(db))!.media).toEqual({ pending: 1, stale: 1, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0 });
+    expect((await readHealthSnapshot(db))!.line).toEqual({ ok: false, text: '⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.' });
     await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0));
     await stopApp(app);
   });
@@ -746,7 +746,7 @@ describe('app spend holds (Task 15 review round 3)', () => {
     expect(ai.calls).toHaveLength(0);
     expect(app.health.line()).toEqual({ ok: true, text: '✅ Connected · waiting for new messages' });
     await vi.advanceTimersByTimeAsync(30_000); // a tick saves the health report
-    expect(readHealthSnapshot(db)!.line.text).not.toBe(SPEND_LINE);
+    expect((await readHealthSnapshot(db))!.line.text).not.toBe(SPEND_LINE);
     // The read finishes and frees its hold.
     g.release();
     await vi.waitFor(async () => expect((await getMedia(db, 1))?.status).toBe('done'));
@@ -782,7 +782,7 @@ describe('app start time (15a, 15f)', () => {
     });
     const { db, ai, app } = await setup({ startedAt, media: { sealer, fetcher }, prepare: (db) => storedImage(db, sealer, minutesBefore(120).toISOString()) });
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalled());
-    expect(readHealthSnapshot(db)!.media).toEqual({ pending: 1, stale: expected.stale, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0 });
+    expect((await readHealthSnapshot(db))!.media).toEqual({ pending: 1, stale: expected.stale, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0 });
     await vi.advanceTimersByTimeAsync(241_000);
     if (expected.blocks) expect(ai.calls).toHaveLength(0);
     else expect(ai.calls[0]!.user).toContain(': old banner {image, still being read}');
@@ -904,7 +904,7 @@ describe('app health line with fresh file counts (final review)', () => {
     await app.reloadClients([MEHTA]); // Sharma, whose file it is, is removed
     await vi.advanceTimersByTimeAsync(0); // the file counts are read again before the publish is asked for
     expect(app.health.workbookLine()).toEqual({ ok: true, text: '✅ Connected · waiting for new messages' });
-    expect(readHealthSnapshot(db)!.media).toMatchObject({ pending: 0, stale: 0 });
+    expect((await readHealthSnapshot(db))!.media).toMatchObject({ pending: 0, stale: 0 });
     await stopApp(app);
   });
 
@@ -1434,11 +1434,11 @@ describe('app voice notes (Phase 2b Task 10)', () => {
 
   it('the voice problem found at start reaches the health line', async () => {
     const { db, app } = await setup({ media: { voiceProblem: 'local_not_set_up_bin' } });
-    expect(readHealthSnapshot(db)!.voiceProblem).toBe('local_not_set_up_bin');
-    expect(readHealthSnapshot(db)!.line.text).toBe(NOT_SET_UP);
+    expect((await readHealthSnapshot(db))!.voiceProblem).toBe('local_not_set_up_bin');
+    expect((await readHealthSnapshot(db))!.line.text).toBe(NOT_SET_UP);
     await stopApp(app);
     const other = await setup({ media: { voiceProblem: 'no_ffmpeg' } });
-    expect(readHealthSnapshot(other.db)!.line.text).toBe('⚠️ Voice notes are not being transcribed: ffmpeg not found');
+    expect((await readHealthSnapshot(other.db))!.line.text).toBe('⚠️ Voice notes are not being transcribed: ffmpeg not found');
     await stopApp(other.app);
   });
 

@@ -22,7 +22,7 @@ const at = (date: string, hm: string) => `${date}T${hm}:00.000+05:30`;
 
 async function setup(env: Record<string, string> = {}) {
   const db = await seededDb();
-  setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
+  await setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
   const clock = manualClock(at(THU, '05:00'));
   const audits: AuditEntry[] = [];
   const audit = (e: AuditEntry) => audits.push(e);

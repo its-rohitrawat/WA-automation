@@ -45,12 +45,12 @@ function fakeGoogle(answer: { refresh_token?: string | null; scope?: string; id_
 async function setup(o: { answer?: Parameters<typeof fakeGoogle>[0]; meetingsEnabled?: boolean; web?: typeof WEB | undefined; verifier?: IdTokenVerifier } = {}) {
   const db = await seededDb();
   const key = randomBytes(32);
-  new TokenStore(db, key).save('old-main-token');
+  await new TokenStore(db, key).save('old-main-token');
   const fakeClient = () => {
     const c = { credentials: {} as Record<string, unknown>, setCredentials(x: Record<string, unknown>) { this.credentials = x; } };
     return c as unknown as OAuth2Client;
   };
-  const hub = new GoogleAuthHub({ db, key, credentials: { desktop: { clientId: 'd', clientSecret: 's' }, web: WEB }, newClient: fakeClient });
+  const hub = await GoogleAuthHub.open({ db, key, credentials: { desktop: { clientId: 'd', clientSecret: 's' }, web: WEB }, newClient: fakeClient });
   const g = fakeGoogle(o.answer);
   const audits: unknown[] = [];
   const lines: string[] = [];
@@ -89,33 +89,33 @@ describe('GoogleConnectRoutes', () => {
     expect(t.g.seen.tokenArgs).toEqual([{ code: CODE, codeVerifier: 'verifier-SECRET' }]);
     expect(t.hub.client('main')).not.toBe(before);
     expect(t.hub.issuer('main')).toBe('web');
-    expect(new TokenStore(t.db, t.key).load()).toBe(REFRESH);
+    expect(await new TokenStore(t.db, t.key).load()).toBe(REFRESH);
     expect(t.audits).toEqual([{ actor: 'owner@studio.in', kind: 'connection', requestId: 'aaaaaaaaaaaa', event: 'Google account reconnected · main' }]);
   });
 
   it('an existing meeting account: meeting scopes only', async () => {
     const t = await setup({ answer: { refresh_token: REFRESH, scope: ALL_MEETING } });
-    saveMeetingAccount(t.db, t.key, 'company2', 'old', ALL_MEETING);
+    await saveMeetingAccount(t.db, t.key, 'company2', 'old', ALL_MEETING);
     const state = await t.begin(owner, 'company2');
     expect(t.g.seen.authOpts[0]!.scope).toEqual([...MEETING_SCOPES, 'openid', 'email']);
     expect(await t.routes.callback(owner, { state, code: CODE })).toEqual({ status: 302, location: '/dashboard/connections?connected=company2' });
-    expect(new TokenStore(t.db, t.key, 'company2').load()).toBe(REFRESH);
-    expect(getKv(t.db, 'google_client:company2')).toBe('web');
+    expect(await new TokenStore(t.db, t.key, 'company2').load()).toBe(REFRESH);
+    expect(await getKv(t.db, 'google_client:company2')).toBe('web');
   });
 
   it('a new account: added to the list with its scopes, and audited as added', async () => {
     const t = await setup({ answer: { refresh_token: REFRESH, scope: ALL_MEETING } });
     const state = await t.begin(owner, { add: 'company3' });
     await t.routes.callback(owner, { state, code: CODE });
-    expect(meetingAccounts(t.db)).toEqual(['company3']);
-    expect(hasMeetingScopes(t.db, 'company3')).toBe(true);
+    expect(await meetingAccounts(t.db)).toEqual(['company3']);
+    expect(await hasMeetingScopes(t.db, 'company3')).toBe(true);
     expect(t.audits).toEqual([expect.objectContaining({ event: 'Google account added · company3' })]);
   });
 
   it('refuses an unknown label, a label that exists already, a bad label, and no web client', async () => {
     const t = await setup();
     expect(await t.routes.connect(owner, { account: 'nobody' })).toMatchObject({ status: 404 });
-    saveMeetingAccount(t.db, t.key, 'company2', 'old', ALL_MEETING);
+    await saveMeetingAccount(t.db, t.key, 'company2', 'old', ALL_MEETING);
     expect(await t.routes.connect(owner, { account: { add: 'company2' } })).toMatchObject({ status: 409, body: { error: { code: 'exists' } } });
     expect(await t.routes.connect(owner, { account: { add: 'Bad Name' } })).toMatchObject({ status: 400, body: { error: { code: 'invalid_label' } } });
     expect(await t.routes.connect(owner, { account: 5 })).toMatchObject({ status: 400 });
@@ -133,7 +133,7 @@ describe('GoogleConnectRoutes', () => {
     const state = await t.begin(owner, 'main');
     expect(await t.routes.callback(owner, { state, code: CODE })).toEqual({ status: 302, location: `/dashboard/connections?google_error=${code}` });
     expect(t.hub.client('main')).toBe(before);
-    expect(new TokenStore(t.db, t.key).load()).toBe('old-main-token');
+    expect(await new TokenStore(t.db, t.key).load()).toBe('old-main-token');
     expect(t.audits).toEqual([]);
   });
 
@@ -173,7 +173,7 @@ describe('GoogleConnectRoutes', () => {
     const acct = await setup({ answer: { refresh_token: REFRESH, scope: MEETING_SCOPES.slice(0, 2).join(' ') } });
     const s2 = await acct.begin(owner, { add: 'company3' });
     expect((await acct.routes.callback(owner, { state: s2, code: CODE })).location).toContain('google_error=missing_scope');
-    expect(meetingAccounts(acct.db)).toEqual([]);
+    expect(await meetingAccounts(acct.db)).toEqual([]);
   });
 
   it('the account list is checked again at the callback: a second add of one name, and a reconnect of a removed account', async () => {
@@ -182,17 +182,17 @@ describe('GoogleConnectRoutes', () => {
     const second = await t.begin(owner, { add: 'company3' }); // another tab
     expect((await t.routes.callback(owner, { state: first, code: CODE })).location).toContain('connected=company3');
     expect((await t.routes.callback(owner, { state: second, code: CODE })).location).toContain('google_error=exists');
-    expect(new TokenStore(t.db, t.key, 'company3').load()).toBe(REFRESH);
+    expect(await new TokenStore(t.db, t.key, 'company3').load()).toBe(REFRESH);
     const again = await t.begin(owner, 'company3');
-    removeMeetingAccount(t.db, 'company3'); // the CLI removed it meanwhile
+    await removeMeetingAccount(t.db, 'company3'); // the CLI removed it meanwhile
     expect((await t.routes.callback(owner, { state: again, code: CODE })).location).toContain('google_error=not_found');
-    expect(meetingAccounts(t.db)).toEqual([]);
+    expect(await meetingAccounts(t.db)).toEqual([]);
   });
 
   it('refuses to start without PKCE', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    const hub = new GoogleAuthHub({ db, key, credentials: { web: WEB }, newClient: () => ({ setCredentials() {} }) as unknown as OAuth2Client });
+    const hub = await GoogleAuthHub.open({ db, key, credentials: { web: WEB }, newClient: () => ({ setCredentials() {} }) as unknown as OAuth2Client });
     const routes = new GoogleConnectRoutes({
       db, hub, publicUrl: 'https://waagent.example', web: WEB, meetingsEnabled: false, audit: () => {}, log: createLogger('silent'),
       createClient: () => ({
@@ -245,7 +245,7 @@ describe('GoogleConnectRoutes: the account email (owner fix 3)', () => {
     const t = await withVerifier();
     const state = await t.begin(owner, 'main');
     expect((await t.routes.callback(owner, { state, code: CODE })).location).toBe('/dashboard/connections?connected=main');
-    expect(accountEmail(t.db, 'main')).toBe('meetings@studio.in');
+    expect(await accountEmail(t.db, 'main')).toBe('meetings@studio.in');
     expect(JSON.stringify(t.audits)).toContain('me••••@studio.in');
     expect(JSON.stringify(t.audits)).not.toContain('meetings@studio.in');
     expect(t.lines.join('\n')).not.toMatch(/meetings@|studio\.in|SECRET/i);
@@ -261,7 +261,7 @@ describe('GoogleConnectRoutes: the account email (owner fix 3)', () => {
     const t = await withVerifier(over as Partial<IdClaims>);
     const state = await t.begin(owner, 'main');
     expect((await t.routes.callback(owner, { state, code: CODE })).location).toBe('/dashboard/connections?connected=main');
-    expect(accountEmail(t.db, 'main')).toBeNull();
+    expect(await accountEmail(t.db, 'main')).toBeNull();
     expect(t.lines.join('\n')).not.toMatch(/meetings@|SECRET/i);
   });
 
@@ -269,11 +269,11 @@ describe('GoogleConnectRoutes: the account email (owner fix 3)', () => {
     const forged = await withVerifier({}, { refresh_token: REFRESH, scope: DRIVE_SCOPES[0], id_token: 'forged' });
     let state = await forged.begin(owner, 'main');
     await forged.routes.callback(owner, { state, code: CODE });
-    expect(accountEmail(forged.db, 'main')).toBeNull();
+    expect(await accountEmail(forged.db, 'main')).toBeNull();
     const none = await withVerifier({}, { refresh_token: REFRESH, scope: DRIVE_SCOPES[0] });
     state = await none.begin(owner, 'main');
     await none.routes.callback(owner, { state, code: CODE });
-    expect(accountEmail(none.db, 'main')).toBeNull();
+    expect(await accountEmail(none.db, 'main')).toBeNull();
   });
 
   it('a reconnect forgets the old email before storing the new one', async () => {
@@ -281,6 +281,6 @@ describe('GoogleConnectRoutes: the account email (owner fix 3)', () => {
     t.db.raw.prepare('INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)').run('google_account_email:main', 'old@studio.in');
     const state = await t.begin(owner, 'main');
     await t.routes.callback(owner, { state, code: CODE });
-    expect(accountEmail(t.db, 'main')).toBeNull();
+    expect(await accountEmail(t.db, 'main')).toBeNull();
   });
 });

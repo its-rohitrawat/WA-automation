@@ -15,7 +15,7 @@ const folderOf = (db: Db, drive: FakeDrive, c: FolderClient, kind: ClientSubfold
 async function setup(root = true) {
   const db = await seededDb();
   const drive = new FakeDrive();
-  if (root) setKv(db, 'drive_root_id', 'root-1');
+  if (root) await setKv(db, 'drive_root_id', 'root-1');
   return { db, drive };
 }
 
@@ -26,9 +26,9 @@ describe('withClientSubfolder: the folder chain', () => {
     expect(await folderOf(db, drive, SHARMA, 'Meetings')).toBe(id);
     expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Meetings']);
     expect(drive.folderParents).toEqual(['root-1', 'folder-1', 'folder-2']);
-    expect(getKv(db, 'drive_clients_folder')).toBe('folder-1');
-    expect(getKv(db, 'drive_client_folder:1')).toBe('folder-2');
-    expect(getKv(db, 'drive_meetings_folder:1')).toBe('folder-3');
+    expect(await getKv(db, 'drive_clients_folder')).toBe('folder-1');
+    expect(await getKv(db, 'drive_client_folder:1')).toBe('folder-2');
+    expect(await getKv(db, 'drive_meetings_folder:1')).toBe('folder-3');
     expect(id).toBe('folder-3');
   });
 
@@ -38,8 +38,8 @@ describe('withClientSubfolder: the folder chain', () => {
     const meetings = await folderOf(db, drive, SHARMA, 'Meetings');
     expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Files', 'Meetings']);
     expect(drive.folderParents).toEqual(['root-1', 'folder-1', 'folder-2', 'folder-2']);
-    expect(getKv(db, 'drive_files_folder:1')).toBe(files);
-    expect(getKv(db, 'drive_meetings_folder:1')).toBe(meetings);
+    expect(await getKv(db, 'drive_files_folder:1')).toBe(files);
+    expect(await getKv(db, 'drive_meetings_folder:1')).toBe(meetings);
   });
 
   it('cleans the client folder name and falls back to "Client <id>"', async () => {
@@ -66,7 +66,7 @@ describe('withClientSubfolder', () => {
     expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Meetings', 'Meetings']);
     expect(drive.folderParents).toEqual(['root-1', 'folder-1', 'folder-2', 'folder-2']);
     expect(drive.docs).toEqual([{ id, name: 'Doc', parentId: 'folder-4', html: '<p>x</p>' }]);
-    expect(getKv(db, 'drive_meetings_folder:1')).toBe('folder-4');
+    expect(await getKv(db, 'drive_meetings_folder:1')).toBe('folder-4');
   });
 
   it('re-creates a removed client folder and its Meetings folder once, but not the Clients folder', async () => {
@@ -78,7 +78,7 @@ describe('withClientSubfolder', () => {
     expect(drive.folderParents).toEqual(['root-1', 'folder-1', 'folder-2', 'folder-1', 'folder-4']);
     expect(drive.docs).toHaveLength(1);
     expect(drive.docs[0]).toMatchObject({ parentId: 'folder-5' });
-    expect(getKv(db, 'drive_client_folder:1')).toBe('folder-4');
+    expect(await getKv(db, 'drive_client_folder:1')).toBe('folder-4');
   });
 
   it('fails without rebuilding when the Doc is refused in a Meetings folder made just now', async () => {
@@ -102,6 +102,6 @@ describe('withClientSubfolder', () => {
     await folderOf(db, drive, SHARMA, 'Meetings');
     drive.failNext = 1;
     await expect(withClientSubfolder(db, drive, SHARMA, 'Meetings', putDoc(drive))).rejects.toThrow('Drive unavailable');
-    expect(getKv(db, 'drive_meetings_folder:1')).toBe('folder-3');
+    expect(await getKv(db, 'drive_meetings_folder:1')).toBe('folder-3');
   });
 });

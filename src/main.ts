@@ -79,7 +79,7 @@ async function meetingDeps(
   },
 ): Promise<AppMeetingsDeps> {
   const { env, log, api } = o;
-  if (!meetingsReady(o.db)) log.warn({ code: 'google_scopes' }, 'meetings paused: Google sign-in needs meeting access. Run: npm run cli -- google-auth');
+  if (!(await meetingsReady(o.db))) log.warn({ code: 'google_scopes' }, 'meetings paused: Google sign-in needs meeting access. Run: npm run cli -- google-auth');
   // The main sign-in plus every extra account (google-auth --account), from the hub: rebuilt when one is reconnected.
   let exe: string | null = null;
   try {
@@ -165,7 +165,7 @@ async function main(): Promise<void> {
     if (!env.DASHBOARD_ENABLED && !auth.hasSession) exitEarly(WHATSAPP_NOT_LINKED_EXIT);
     let googleToken: boolean;
     try {
-      googleToken = new TokenStore(db, key).load() !== undefined;
+      googleToken = (await new TokenStore(db, key).load()) !== undefined;
     } catch (e) {
       if (!(env.DASHBOARD_ENABLED && e instanceof TokenDecryptError)) throw e;
       googleToken = false;
@@ -175,7 +175,7 @@ async function main(): Promise<void> {
     if (plan.whatsapp === 'not_linked') log.warn('setup mode: WhatsApp is not linked; link the founder\'s phone in the dashboard');
     if (plan.google === 'not_connected') log.warn('setup mode: Google is not connected; connect it in the dashboard');
     // One Google client per account, swapped in place on a reconnect: Drive and meetings read theirs on every call.
-    const google = buildGoogle({ db, key, credentials: googleCredentials(env), meetingsEnabled: env.MEETINGS_ENABLED, log });
+    const google = await buildGoogle({ db, key, credentials: googleCredentials(env), meetingsEnabled: env.MEETINGS_ENABLED, log });
 
     // Phase 2c: the morning report from the spare number. A missing, damaged or undecryptable spare-number session never
     // stops the service: the founder-number reader runs as usual, each day's report fails until the deadline and is then

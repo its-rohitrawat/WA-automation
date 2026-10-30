@@ -62,7 +62,7 @@ describe('PrioritySettings', () => {
     const { db, store, audits, audit } = await setup();
     expect((await store.set('sentimentEnabled', true, OWNER, audit)).sentimentEnabled).toBe(true);
     expect(readSentimentEnabled(db)).toBe(true);
-    expect(getKv(db, 'rebuild_requested')).toBe(NOW);
+    expect(await getKv(db, 'rebuild_requested')).toBe(NOW);
     await store.set('sentimentEnabled', false, OWNER, audit);
     expect(readSentimentEnabled(db)).toBe(false);
     expect(audits.map((a) => a.detail)).toEqual(['Sentiment analysis switched on', 'Sentiment analysis switched off']);

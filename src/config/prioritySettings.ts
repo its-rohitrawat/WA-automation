@@ -197,8 +197,7 @@ export class PrioritySettings {
       // Synchronous (src/control/errors.ts): it writes on the same connection, inside this transaction.
       audit({ actor, event: `settings.${key}`, kind: 'config', detail });
       // The tracker's Sentiment column fills or empties with the switch: rebuild it at the next tick, as a task edit does.
-      // kv is still synchronous (S1.12): on the same connection, inside this transaction.
-      if (key === 'sentimentEnabled') setKv(this.#db, 'rebuild_requested', this.#clock.now().toISOString());
+      if (key === 'sentimentEnabled') await setKv(q, 'rebuild_requested', this.#clock.now().toISOString());
     });
     this.#rows.set(key, JSON.stringify(value)); // committed: memory follows
     return this.view();

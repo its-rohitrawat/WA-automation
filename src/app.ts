@@ -196,7 +196,9 @@ export interface SpendView {
 export async function createApp(d: AppDeps): Promise<App> {
   const startedAt = d.startedAt ?? d.clock.now();
   const spend = await SpendGuard.open({ db: d.db, clock: d.clock, capUsd: d.spendCapUsd });
-  const health = new Health({ db: d.db, clock: d.clock, spend, dataDir: d.dataDir, freeBytes: d.freeBytes });
+  const health = new Health({
+    db: d.db, clock: d.clock, spend, dataDir: d.dataDir, freeBytes: d.freeBytes, onError: (err) => d.log.error({ err }, 'health snapshot not saved'),
+  });
   const reportScheduler = d.report && !d.liveReport
     ? new ReportScheduler({
         db: d.db, clock: d.clock, log: d.log, sender: d.report.sender, settings: d.report.settings, healthLine: () => health.workbookLine(),
@@ -393,13 +395,16 @@ export async function createApp(d: AppDeps): Promise<App> {
     : undefined;
 
   const mt = d.meetings;
+  // The meetings read this synchronously: the scopes are read here and again on every tick, so a scope granted from the
+  // CLI (another process) is seen within one tick (30 s).
+  let meetingScopes = mt ? await meetingsReady(d.db) : false;
   const meetings = mt
-    ? new MeetingService({
+    ? await MeetingService.open({
         db: d.db, clock: d.clock, log: d.log, dataDir: d.dataDir, spend, prices: d.prices, drive: d.drive, api: mt.api, ai: mt.ai,
         transcriber: mt.transcriber, ...(mt.sttProblem ? { sttProblem: mt.sttProblem } : {}), ffmpeg: mt.ffmpeg, settings: mt.settings, clients: mt.clients, freeBytes: d.freeBytes ?? defaultFreeBytes,
         // The tracker step holds the client's run flag through the reconciler's exclusive (debouncer.runExclusive).
         track: (clientId, meeting) => reconciler.runMeeting(clientId, meeting),
-        hasMeetingScopes: () => meetingsReady(d.db),
+        hasMeetingScopes: () => meetingScopes,
         ...(mt.lostAccounts ? { lostAccounts: mt.lostAccounts } : {}),
         // A finished or failed meeting, or new rows: the workbook is rebuilt, with the meeting counts of now (not the
         // last tick's), as refreshMedia does for files.
@@ -555,10 +560,8 @@ export async function createApp(d: AppDeps): Promise<App> {
   const tick = async () => {
     // An uncaught throw inside setInterval would exit the service.
     try {
-      if (getKv(d.db, 'rebuild_requested')) {
-        setKv(d.db, 'rebuild_requested', '');
-        publisher.schedule();
-      }
+      // Read now, used after the synchronous kicks below (as unprocessed), so the tick's synchronous start is as before.
+      const rebuild = getKv(d.db, 'rebuild_requested');
       // Also re-runs a client waiting for a file that never settles (deferred for Claude or the budget) once its wait
       // is over, and a message queued again because its file was read late (amendment 15g). Read now, used after the
       // synchronous kicks below, so the tick's synchronous start is as before.
@@ -568,12 +571,23 @@ export async function createApp(d: AppDeps): Promise<App> {
       meetings?.tick(); // discovery when due (MEETING_POLL_MINUTES), then the next due meeting
       backfill?.tick(); // a group waiting for WhatsApp, the spend cap or its first message
       for (const clientId of await unprocessed) debouncer.ensure(clientId);
+      if (await rebuild) {
+        await setKv(d.db, 'rebuild_requested', '');
+        publisher.schedule();
+      }
       // Spend another process booked (the CLI) reaches the cap checks by the next tick. After the kicks above, so the
       // tick's synchronous start is as before. A failed read keeps the totals in memory, which hold this process's own.
       try {
         await spend.refresh();
       } catch (err) {
         d.log.error({ err }, 'spend totals could not be read again');
+      }
+      if (mt) {
+        try {
+          meetingScopes = await meetingsReady(d.db);
+        } catch (err) {
+          d.log.error({ err }, 'meeting scopes could not be read again'); // the last value stays
+        }
       }
       await safelyAsync(refreshMeetings);
       health.setIngestFailures(d.gateway.failedCount());
@@ -591,7 +605,7 @@ export async function createApp(d: AppDeps): Promise<App> {
       // The Today tab's counts, notes and order are worked out for the day it was built. After a quiet night the 06:00
       // link would show yesterday's: republish once when the IST date changes (Task 3 review round 2).
       if (publishedDay !== undefined && istDate(d.clock.now()) !== publishedDay) publisher.schedule();
-      health.persist();
+      await health.persist();
     } catch (err) {
       d.log.error({ err }, 'tick failed');
     }
@@ -713,8 +727,8 @@ export async function createApp(d: AppDeps): Promise<App> {
         health.forget(id);
       }
       // a removed client's files leave the counts before the publish
-      void safelyAsync(refreshMedia).then(() => {
-        safely(() => health.persist());
+      void safelyAsync(refreshMedia).then(async () => {
+        await safelyAsync(() => health.persist());
         publisher.schedule();
       });
       backfill?.tick(); // a newly approved group starts reading its earlier messages; a removed one stops

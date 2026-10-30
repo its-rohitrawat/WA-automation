@@ -62,9 +62,9 @@ export async function mountFakeScreens(web: WebServer, o: { signedIn: () => bool
     startedAt: day(1), endedAt: null, attendees: [], participants: [], clientId: null, matchKind: null, status: 'unassigned', driveSeconds: 1800, createdAt: day(1),
   });
   // A tracker that had to be started again after the Google login changed, written as the main account's made-up email.
-  setKv(db, TRACKER_ID_KEY, '1FakeTrackerFileId_000');
-  setKv(db, TRACKER_NEW_FILE_KEY, day(1));
-  setKv(db, 'google_account_email:main', OWNER);
+  await setKv(db, TRACKER_ID_KEY, '1FakeTrackerFileId_000');
+  await setKv(db, TRACKER_NEW_FILE_KEY, day(1));
+  await setKv(db, 'google_account_email:main', OWNER);
   const audit = new AuditLog(db, clock);
   audit.recordSync({ actor: OWNER, event: 'Task closed · ACM-001', kind: 'task', detail: 'Closed from the dashboard' });
   audit.recordSync({ actor: 'agent', event: 'Tracker uploaded', kind: 'ops', detail: 'Tracker.xlsx uploaded to Drive' });

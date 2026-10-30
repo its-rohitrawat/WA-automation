@@ -158,11 +158,11 @@ describe('storedMeetingAccounts', () => {
   it('the main account, then each extra account with every meeting scope; one without them is left out (no calls)', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    saveGrantedScopes(db, ALL);
-    saveMeetingAccount(db, key, 'company2', 'rt-2', ALL);
-    saveMeetingAccount(db, key, 'company3', 'rt-3', 'https://www.googleapis.com/auth/calendar.events.readonly');
+    await saveGrantedScopes(db, ALL);
+    await saveMeetingAccount(db, key, 'company2', 'rt-2', ALL);
+    await saveMeetingAccount(db, key, 'company3', 'rt-3', 'https://www.googleapis.com/auth/calendar.events.readonly');
     clients.length = 0;
-    const accounts = storedMeetingAccounts({ db, key, main: createOAuthClient('id', 'secret'), newClient, log });
+    const accounts = await storedMeetingAccounts({ db, key, main: createOAuthClient('id', 'secret'), newClient, log });
     expect(accounts.map((a) => a.label)).toEqual(['main', 'company2']);
     expect(clients).toHaveLength(1);
     expect(clients[0]!.credentials.refresh_token).toBe('rt-2');
@@ -171,28 +171,28 @@ describe('storedMeetingAccounts', () => {
   it('only extra accounts have the scopes: the main one is left out', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    saveGrantedScopes(db, 'https://www.googleapis.com/auth/drive.file');
-    saveMeetingAccount(db, key, 'company2', 'rt-2', ALL);
-    expect(storedMeetingAccounts({ db, key, main: createOAuthClient('id', 'secret'), newClient, log }).map((a) => a.label)).toEqual(['company2']);
+    await saveGrantedScopes(db, 'https://www.googleapis.com/auth/drive.file');
+    await saveMeetingAccount(db, key, 'company2', 'rt-2', ALL);
+    expect((await storedMeetingAccounts({ db, key, main: createOAuthClient('id', 'secret'), newClient, log })).map((a) => a.label)).toEqual(['company2']);
   });
 
   it('an extra token this key cannot read is skipped; none usable gives the main account (still paused, no calls)', async () => {
     const db = await seededDb();
-    saveMeetingAccount(db, randomBytes(32), 'company2', 'rt-2', ALL);
-    const accounts = storedMeetingAccounts({ db, key: randomBytes(32), main: createOAuthClient('id', 'secret'), newClient, log });
+    await saveMeetingAccount(db, randomBytes(32), 'company2', 'rt-2', ALL);
+    const accounts = await storedMeetingAccounts({ db, key: randomBytes(32), main: createOAuthClient('id', 'secret'), newClient, log });
     expect(accounts.map((a) => a.label)).toEqual(['main']);
   });
 
   it('an extra token copied under another account\'s key does not open (the key name is bound in)', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    saveMeetingAccount(db, key, 'company2', 'rt-2', ALL);
-    saveMeetingAccount(db, key, 'company3', 'rt-3', ALL);
+    await saveMeetingAccount(db, key, 'company2', 'rt-2', ALL);
+    await saveMeetingAccount(db, key, 'company3', 'rt-3', ALL);
     const db2 = await seededDb();
-    new TokenStore(db2, key, 'company2').save('rt-2');
+    await new TokenStore(db2, key, 'company2').save('rt-2');
     // Move company2's ciphertext into company3's slot.
-    setKv(db2, 'google_refresh_token:company3', String(db2.raw.prepare("SELECT v FROM kv WHERE k = 'google_refresh_token:company2'").pluck().get()));
-    expect(() => new TokenStore(db2, key, 'company3').load()).toThrow(/google-auth --account company3/);
+    await setKv(db2, 'google_refresh_token:company3', String(db2.raw.prepare("SELECT v FROM kv WHERE k = 'google_refresh_token:company2'").pluck().get()));
+    await expect(new TokenStore(db2, key, 'company3').load()).rejects.toThrow(/google-auth --account company3/);
   });
 });
 
@@ -203,23 +203,23 @@ describe('hubMeetingAccounts and LiveMeetingsApi', () => {
   it('takes each account that has a client and every meeting scope, main first', async () => {
     const db = await seededDb();
     const key = randomBytes(32);
-    saveGrantedScopes(db, ALL);
-    saveMeetingAccount(db, key, 'company2', 'rt-2', ALL);
-    saveMeetingAccount(db, key, 'company3', 'rt-3', 'https://www.googleapis.com/auth/drive.file');
+    await saveGrantedScopes(db, ALL);
+    await saveMeetingAccount(db, key, 'company2', 'rt-2', ALL);
+    await saveMeetingAccount(db, key, 'company3', 'rt-3', 'https://www.googleapis.com/auth/drive.file');
     const clients = new Map([['main', client()], ['company2', client()], ['company3', client()]]);
-    expect(hubMeetingAccounts(db, { client: (l) => clients.get(l) }).map((a) => a.label)).toEqual(['main', 'company2']);
+    expect((await hubMeetingAccounts(db, { client: (l) => clients.get(l) })).map((a) => a.label)).toEqual(['main', 'company2']);
     clients.delete('main');
-    expect(hubMeetingAccounts(db, { client: (l) => clients.get(l) }).map((a) => a.label)).toEqual(['company2']);
+    expect((await hubMeetingAccounts(db, { client: (l) => clients.get(l) })).map((a) => a.label)).toEqual(['company2']);
   });
 
   it('with no account every call is refused as not connected; a rebuild picks up a reconnected account', async () => {
     let accounts: { label: string; api: FakeMeetingsApi }[] = [];
-    const live = new LiveMeetingsApi(() => accounts, log);
+    const live = new LiveMeetingsApi(async () => accounts, log);
     await expect(live.listConferences(FROM, TO, signal)).rejects.toMatchObject({ name: 'GoogleAccessError', code: 'not_connected' });
     const a = new FakeMeetingsApi();
     a.conferences = [conference('c1')];
     accounts = [{ label: 'main', api: a }];
-    live.rebuild();
+    await live.rebuild();
     expect((await live.listConferences(FROM, TO, signal)).map((c) => c.name)).toEqual(['conferenceRecords/c1']);
     expect(live.lostAccounts()).toEqual([]);
   });
@@ -227,7 +227,7 @@ describe('hubMeetingAccounts and LiveMeetingsApi', () => {
   it('several accounts go through the router: lostAccounts and accountOf come from it', async () => {
     const { a, b } = twoAccounts();
     b.failWith.set('listConferences', new GoogleAccessError('invalid_grant'));
-    const live = new LiveMeetingsApi(() => [{ label: 'main', api: a }, { label: 'company2', api: b }], log);
+    const live = new LiveMeetingsApi(async () => [{ label: 'main', api: a }, { label: 'company2', api: b }], log);
     await live.listConferences(FROM, TO, signal);
     expect(live.lostAccounts()).toEqual(['company2']);
     expect(live.accountOf('conferenceRecords/c1')).toBe('main');

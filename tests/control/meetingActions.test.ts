@@ -20,11 +20,11 @@ async function withMeeting(status: MeetingStatus, clientId: number | null = null
   return db;
 }
 
-function state(db: Db) {
+async function state(db: Db) {
   return {
     meetings: db.raw.prepare('SELECT * FROM meetings').all(),
     events: db.raw.prepare('SELECT task_id, client_id, actor, op, detail, reason, at FROM task_events ORDER BY id').all(),
-    rebuild: getKv(db, 'rebuild_requested'),
+    rebuild: await getKv(db, 'rebuild_requested'),
   };
 }
 
@@ -53,7 +53,7 @@ describe('runMeetingAction matches the CLI', () => {
     const cli = await withMeeting('unassigned');
     const { result, audits } = await run(web, '1', 'assign', { client: 'sha' });
     await assignMeetingToClient(cli, '1', 'SHA', now);
-    expect(state(web)).toEqual(state(cli));
+    expect(await state(web)).toEqual(await state(cli));
     expect(result.meeting).toMatchObject({ id: 1, status: 'queued', client: { code: 'SHA' } });
     expect(result.warning).toBe(MEETING_COST_WARNING); // assigning queues the meeting for paid processing
     expect(audits).toEqual([{ actor: OWNER, event: 'meeting.assign', kind: 'meeting', detail: 'Meeting 1 assigned to SHA' }]);
@@ -64,7 +64,7 @@ describe('runMeetingAction matches the CLI', () => {
     const cli = await withMeeting('unassigned');
     const { result, audits } = await run(web, '1', 'skip');
     await skipMeetingById(cli, '1', now);
-    expect(state(web)).toEqual(state(cli));
+    expect(await state(web)).toEqual(await state(cli));
     expect(result.meeting.status).toBe('skipped');
     expect(audits).toEqual([{ actor: OWNER, event: 'meeting.skip', kind: 'meeting', detail: 'Meeting 1 skipped' }]);
   });
@@ -74,7 +74,7 @@ describe('runMeetingAction matches the CLI', () => {
     const cli = await withMeeting('failed', 1);
     const { result, audits } = await run(web, '1', 'retry');
     await retryMeetingById(cli, '1', now);
-    expect(state(web)).toEqual(state(cli));
+    expect(await state(web)).toEqual(await state(cli));
     expect(result).toMatchObject({ meeting: { status: 'queued' }, warning: MEETING_COST_WARNING });
     expect(MEETING_COST_WARNING).toBe('Processing a meeting costs money');
     expect(audits).toEqual([{ actor: OWNER, event: 'meeting.retry', kind: 'meeting', detail: 'Meeting 1 queued again' }]);
@@ -85,7 +85,7 @@ describe('runMeetingAction matches the CLI', () => {
     const cli = await withMeeting('no_access');
     const { result, audits } = await run(web, '1', 'retry');
     await retryMeetingById(cli, '1', now);
-    expect(state(web)).toEqual(state(cli));
+    expect(await state(web)).toEqual(await state(cli));
     expect(result.meeting.status).toBe('unassigned');
     expect(audits[0]!.detail).toBe('Meeting 1 has no client, so it is unassigned again');
   });
@@ -99,11 +99,11 @@ describe('runMeetingAction matches the CLI', () => {
 describe('runMeetingAction refusals', () => {
   it('refuses a retry while the daily spend cap is reached, changing and auditing nothing', async () => {
     const db = await withMeeting('failed', 1);
-    const before = state(db);
+    const before = await state(db);
     const audits: AuditEntry[] = [];
     const e = await refusal(async () => await runMeetingAction(db, { id: '1', action: 'retry' }, { actor: OWNER, now, audit: (x) => audits.push(x), spend: paused }));
     expect(e).toMatchObject({ status: 409, message: "Today's AI spending limit is reached. Try again after midnight IST." });
-    expect(state(db)).toEqual(before);
+    expect(await state(db)).toEqual(before);
     expect(audits).toEqual([]);
   });
 
@@ -125,11 +125,11 @@ describe('runMeetingAction refusals', () => {
 
   it('409 when the meeting is not in a state that allows it', async () => {
     const db = await withMeeting('done', 1);
-    const before = state(db);
+    const before = await state(db);
     expect(await refusal(async () => await run(db, '1', 'skip'))).toMatchObject({ status: 409 });
     expect(await refusal(async () => await run(db, '1', 'retry'))).toMatchObject({ status: 409 });
     expect(await refusal(async () => await run(db, '1', 'assign', { client: 'SHA' }))).toMatchObject({ status: 409 });
-    expect(state(db)).toEqual(before);
+    expect(await state(db)).toEqual(before);
   });
 
   it('422 for a bad, unknown or inactive client', async () => {
@@ -144,10 +144,10 @@ describe('runMeetingAction refusals', () => {
 
   it('rolls the change back when the audit cannot be written', async () => {
     const db = await withMeeting('unassigned');
-    const before = state(db);
+    const before = await state(db);
     await expect(runMeetingAction(db, { id: '1', action: 'skip' }, { actor: OWNER, now, audit: () => { throw new Error('disk full'); }, spend: notPaused }))
       .rejects.toThrowError('disk full');
-    expect(state(db)).toEqual(before);
+    expect(await state(db)).toEqual(before);
   });
 });
 

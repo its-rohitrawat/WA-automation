@@ -178,7 +178,7 @@ export async function createTaskAction(db: Db, input: NewTaskInput, ctx: { actor
     const locked = Object.fromEntries(TASK_FIELDS.filter((f) => fields[f] !== undefined && fields[f] !== '').map((f) => [f, fields[f]!]));
     await updateTaskFields(q, t.id, locked, at, 'human');
     await humanEvent(q, t.id, clientId, 'add_task', { fields: Object.keys(locked) }, now);
-    requestRebuild(db, now);
+    await requestRebuild(q, now);
     ctx.audit({ actor: ctx.actor, event: 'task.create', kind: 'task', detail: `Task ${t.code} added` });
     return t.code;
   });

@@ -1,5 +1,5 @@
 import { auth } from '@googleapis/drive';
-import { txSync, type Db } from '../store/db.ts';
+import type { Db } from '../store/db.ts';
 import { getKv } from '../store/kv.ts';
 import type { Logger } from '../util/logger.ts';
 import {
@@ -61,16 +61,22 @@ export class GoogleAuthHub {
   readonly #listeners = new Set<(label: string) => void>();
   readonly #log: Logger | undefined;
 
-  constructor(o: GoogleAuthHubOptions) {
+  private constructor(o: GoogleAuthHubOptions) {
     this.#log = o.log;
     this.#db = o.db;
     this.#key = o.key;
     this.#credentials = o.credentials;
     this.#newClient = o.newClient ?? ((c) => new auth.OAuth2(c.clientId, c.clientSecret));
-    for (const label of [MAIN_ACCOUNT, ...meetingAccounts(o.db)]) {
-      const account = this.#load(label);
-      if (account) this.#accounts.set(label, account);
+  }
+
+  /** The hub with every stored account loaded (the tokens are read from kv). */
+  static async open(o: GoogleAuthHubOptions): Promise<GoogleAuthHub> {
+    const hub = new GoogleAuthHub(o);
+    for (const label of [MAIN_ACCOUNT, ...(await meetingAccounts(o.db))]) {
+      const account = await hub.#load(label);
+      if (account) hub.#accounts.set(label, account);
     }
+    return hub;
   }
 
   /** Labels with a stored token (usable or not), main first, then in the order they were added. */
@@ -109,7 +115,7 @@ export class GoogleAuthHub {
    * scopes and label. Throws, changing nothing, when the issuing client is not configured or the write fails. Checking
    * that the scopes are the required ones is the caller's job (as runLoopbackConsent does for google-auth).
    */
-  setToken(label: string, refreshToken: string, issuer: TokenIssuer, scope: string): void {
+  async setToken(label: string, refreshToken: string, issuer: TokenIssuer, scope: string): Promise<void> {
     tokenIssuerKey(label); // checks the label before anything else
     const creds = this.#credentials[issuer];
     if (!creds) {
@@ -117,14 +123,14 @@ export class GoogleAuthHub {
     }
     const client = this.#newClient(creds);
     client.setCredentials({ refresh_token: refreshToken });
-    txSync(this.#db, () => {
+    await this.#db.tx(async (q) => {
       if (label === MAIN_ACCOUNT) {
-        new TokenStore(this.#db, this.#key).save(refreshToken);
-        saveGrantedScopes(this.#db, scope);
+        await new TokenStore(q, this.#key).save(refreshToken);
+        await saveGrantedScopes(q, scope);
+        await saveTokenIssuer(q, MAIN_ACCOUNT, issuer);
       } else {
-        saveMeetingAccount(this.#db, this.#key, label, refreshToken, scope, issuer); // token, scopes, issuer and list entry
+        await saveMeetingAccount(q, this.#key, label, refreshToken, scope, issuer); // token, scopes, issuer and list entry
       }
-      if (label === MAIN_ACCOUNT) saveTokenIssuer(this.#db, MAIN_ACCOUNT, issuer);
     });
     this.#accounts.set(label, { client, issuer, problem: null });
     for (const fn of [...this.#listeners]) {
@@ -143,12 +149,12 @@ export class GoogleAuthHub {
     return () => this.#listeners.delete(fn);
   }
 
-  #load(label: string): Account | undefined {
-    const stored = getKv(this.#db, tokenIssuerKey(label));
+  async #load(label: string): Promise<Account | undefined> {
+    const stored = await getKv(this.#db, tokenIssuerKey(label));
     const issuer: TokenIssuer = stored === 'web' ? 'web' : 'desktop';
     let token: string | undefined;
     try {
-      token = new TokenStore(this.#db, this.#key, label === MAIN_ACCOUNT ? undefined : label).load();
+      token = await new TokenStore(this.#db, this.#key, label === MAIN_ACCOUNT ? undefined : label).load();
     } catch (e) {
       if (!(e instanceof TokenDecryptError)) throw e;
       return { client: undefined, issuer, problem: 'unreadable' };

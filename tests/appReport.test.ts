@@ -31,7 +31,7 @@ const LINK = `https://drive.google.com/file/d/${TRACKER_ID}/view`;
 
 async function setup(report?: AppReportDeps, dbIn?: Db, o: { log?: Logger; freeBytes?: () => number; trackerId?: null } = {}) {
   const db = dbIn ?? (await seededDb());
-  if (o.trackerId !== null) setKv(db, TRACKER_ID_KEY, TRACKER_ID); // null: the tracker was never uploaded
+  if (o.trackerId !== null) await setKv(db, TRACKER_ID_KEY, TRACKER_ID); // null: the tracker was never uploaded
   const sockets: FakeSocket[] = [];
   const auth = await useEncryptedAuthState(openSessionDb(':memory:'), randomBytes(32));
   const allow = new AllowList([SHARMA.groupId, MEHTA.groupId]);
@@ -82,7 +82,7 @@ describe('app and the morning report', () => {
     expect(sender.calls).toEqual([{ text: `Good morning. 0 open tasks, 0 overdue. Today's tracker: ${LINK}` }]);
     expect(app.report).toBeDefined();
     await vi.advanceTimersByTimeAsync(30_000); // the next tick records the line
-    expect(readHealthSnapshot(db)!.report).toEqual({ text: 'Morning report: sent at 06:00 IST', warning: null, recipientMasked: '…1234' });
+    expect((await readHealthSnapshot(db))!.report).toEqual({ text: 'Morning report: sent at 06:00 IST', warning: null, recipientMasked: '…1234' });
     for (const name of SEND_METHODS) expect(sockets[0]![name]).not.toHaveBeenCalled();
     await stopApp(app);
     expect(sender.stopped).toBe(1);
@@ -97,7 +97,7 @@ describe('app and the morning report', () => {
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'interrupted' });
     await vi.advanceTimersByTimeAsync(30_000);
     expect(sender.calls).toHaveLength(0);
-    const snap = readHealthSnapshot(db)!;
+    const snap = (await readHealthSnapshot(db))!;
     expect(snap.line.text).toBe(UNKNOWN_WARNING);
     expect(snap.report?.warning).toBe(UNKNOWN_WARNING);
     await stopApp(app);
@@ -107,7 +107,7 @@ describe('app and the morning report', () => {
     const { db, app } = await setup();
     await vi.advanceTimersByTimeAsync(30_000);
     expect(app.report).toBeUndefined();
-    expect(readHealthSnapshot(db)!.report).toBeUndefined();
+    expect((await readHealthSnapshot(db))!.report).toBeUndefined();
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM reports').get()).toEqual({ n: 0 });
     await stopApp(app);
   });
@@ -120,7 +120,7 @@ describe('app and the morning report', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(factory).not.toHaveBeenCalled(); // the spare number is never connected
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'session_unreadable' });
-    const snap = readHealthSnapshot(db)!;
+    const snap = (await readHealthSnapshot(db))!;
     expect(snap.whatsapp.state).toBe('open'); // the founder-number reader is unaffected
     expect(snap.line.text).toContain('npm run cli -- link-sender --reset');
     expect(snap.report?.warning).toBe(snap.line.text);
@@ -255,7 +255,7 @@ describe('app and the morning report', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'interrupted' });
     expect(sender.calls).toHaveLength(0);
-    const snap = readHealthSnapshot(db)!;
+    const snap = (await readHealthSnapshot(db))!;
     expect(snap.line.text).toBe(UNKNOWN_WARNING);
     expect(snap.report?.warning).toBe(UNKNOWN_WARNING);
     await stopApp(app);
