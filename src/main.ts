@@ -195,7 +195,7 @@ async function main(): Promise<void> {
     /** A spare-phone link from the dashboard is running: the session file is being reset, so it is not read meanwhile. */
     let spareLinking = false;
     /** Whether the spare phone is linked: the open sender's state, else its saved session (the briefing may be off). */
-    let spareCheck: (() => boolean) | undefined;
+    let spareCheck: (() => Promise<boolean>) | undefined;
     if (env.DASHBOARD_ENABLED) {
       const briefing: { live?: LiveReport } = {};
       spareCheck = spareLinked({ dataDir: env.DATA_DIR, key, briefing: { sender: () => briefing.live?.sender() }, linking: () => spareLinking });

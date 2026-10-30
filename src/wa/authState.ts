@@ -317,36 +317,6 @@ function probeDamage(file: string): string | undefined {
 }
 
 /**
- * Whether this spare-number session file holds a link, read synchronously for the Automations switch until the settings
- * view that reads it is async (S1.5). The same answer as openSenderSession and then hasSession, without writing the
- * canary row into an empty file; any failure is false. Goes in S1.5.
- */
-export function senderSessionLinkedSync(file: string, masterKey: Buffer): boolean {
-  if (probeDamage(file)) return false;
-  let db: Db | undefined;
-  try {
-    db = openSessionDb(file);
-    const { rowId, open } = sessionCodec(deriveSubkey(masterKey, SENDER_SESSION_INFO));
-    const value = (name: string): unknown => {
-      const id = rowId(name);
-      const row = db!.raw.prepare('SELECT v FROM auth WHERE k = ?').get(id) as { v: Buffer } | undefined;
-      return row ? open(id, row.v) : null;
-    };
-    // No canary: an empty file (no link) or rows sealed with another key.
-    if (value('canary') === null) return false;
-    return Boolean((value('creds') as AuthenticationCreds | null)?.me?.id);
-  } catch {
-    return false;
-  } finally {
-    try {
-      db?.raw.close();
-    } catch {
-      // best effort
-    }
-  }
-}
-
-/**
  * Opens the spare number's session at service start. A file that is damaged, not a database, or written with another
  * master key is reported, not thrown, and left as it is: a bad spare-number session never stops the service (only
  * link-sender --reset replaces it). Any other SQLite error (a lock, a read-only file, a disk error) is reported as

@@ -247,7 +247,7 @@ describe('app and the morning report', () => {
   it('a recovery that failed at start is tried again at the next tick: the cut-off send becomes unknown, nothing is sent', async () => {
     const db = await seededDb();
     await claimReport(db, DAY, '2026-10-23T00:29:00.000Z');
-    vi.spyOn(ReportScheduler.prototype, 'recover').mockImplementationOnce(() => {
+    vi.spyOn(ReportScheduler.prototype, 'recover').mockImplementationOnce(async () => {
       throw new Error('database is locked');
     });
     const sender = new FakeReportSender();
@@ -272,7 +272,7 @@ describe('app and the morning report', () => {
   });
 
   it('a failed recovery at start is logged and the founder-number reader still connects', async () => {
-    vi.spyOn(ReportScheduler.prototype, 'recover').mockImplementation(() => {
+    vi.spyOn(ReportScheduler.prototype, 'recover').mockImplementation(async () => {
       throw new Error('database is locked');
     });
     const lines: string[] = [];

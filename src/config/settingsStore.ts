@@ -96,7 +96,7 @@ export interface SettingsStoreOptions {
   db: Db;
   env: Pick<Env, 'REPORT_ENABLED' | 'REPORT_DAYS' | 'REPORT_RECIPIENT' | 'REPORT_TIME' | 'REPORT_DEADLINE'>;
   clock: Clock;
-  spareLinked?: () => boolean;
+  spareLinked?: () => boolean | Promise<boolean>;
   log?: Logger;
 }
 
@@ -104,7 +104,7 @@ export class SettingsStore {
   readonly #db: Db;
   readonly #env: Pick<Env, 'REPORT_ENABLED' | 'REPORT_DAYS' | 'REPORT_RECIPIENT' | 'REPORT_TIME' | 'REPORT_DEADLINE'>;
   readonly #clock: Clock;
-  readonly #spareLinked: () => boolean;
+  readonly #spareLinked: () => boolean | Promise<boolean>;
   readonly #log: Logger | undefined;
   readonly #listeners = new Set<Listener>();
   /** The settings rows (k to v), kept in memory: only set() writes them, and it updates this after its commit. */
@@ -244,7 +244,7 @@ export class SettingsStore {
     const current = this.get();
     if (key === 'reportEnabled' && value === true) {
       if (!current.reportRecipient) throw new ControlError(409, "Set the founder's number first", key);
-      if (!this.#spareLinked()) throw new ControlError(409, 'Link the spare phone first', key);
+      if (!(await this.#spareLinked())) throw new ControlError(409, 'Link the spare phone first', key);
     }
     if (current[key] === value) return current;
     const now = this.#clock.now();

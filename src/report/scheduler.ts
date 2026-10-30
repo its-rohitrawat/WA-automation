@@ -2,7 +2,7 @@ import { loadTrackerView, type HealthLine } from '../output/view.ts';
 import type { Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import {
-  claimReport, closeOldRetries, finishReport, markInterruptedReportsSync, parseReportRequest, REPORT_REQUEST_KEY, REPORT_REQUEST_MAX_AGE_MS, reportFor, reportForSync,
+  claimReport, closeOldRetries, finishReport, markInterruptedReports, parseReportRequest, REPORT_REQUEST_KEY, REPORT_REQUEST_MAX_AGE_MS, reportFor,
   reportRequestValue, retryReport, skipReport, type ReportRow,
 } from '../store/reports.ts';
 import type { Clock } from '../util/clock.ts';
@@ -232,9 +232,8 @@ export class ReportScheduler {
   }
 
   /** At service start: a row still 'sending' was cut off by a crash or a stop mid-send, so its outcome is unknown. */
-  recover(now: Date = this.#o.clock.now()): void {
-    // Synchronous until S1.5, when app.ts awaits it (app.ts calls it before anything can send).
-    const count = markInterruptedReportsSync(this.#o.db, now.toISOString());
+  async recover(now: Date = this.#o.clock.now()): Promise<void> {
+    const count = await markInterruptedReports(this.#o.db, now.toISOString());
     this.#recovered = true; // only after the rows are marked (tests/report/scheduler.test.ts)
     if (count > 0) this.#o.log.warn({ count }, 'morning report was cut off mid-send; marked unknown, not retried');
   }
@@ -246,7 +245,7 @@ export class ReportScheduler {
       // The recovery at service start failed (for example the database was locked). Until it succeeds, a row cut off
       // mid-send would read 'sending now' all day and hide a report that may already have gone out, so send nothing.
       try {
-        this.recover(now);
+        await this.recover(now);
       } catch (err) {
         this.#o.log.error({ err }, 'morning report recovery failed again; nothing is sent until it succeeds');
         return;
@@ -268,7 +267,7 @@ export class ReportScheduler {
   }
 
   /** Today's line for Health. Never throws: a settings getter that fails gives a plain line. */
-  health(now: Date = this.#o.clock.now()): ReportHealth {
+  async health(now: Date = this.#o.clock.now()): Promise<ReportHealth> {
     const recipientMasked = this.#sender.maskedRecipient();
     let settings: ReportSettings;
     try {
@@ -278,8 +277,7 @@ export class ReportScheduler {
       return { text: 'Morning report: settings could not be read', warning: null, recipientMasked };
     }
     if (!settings.enabled) return { text: 'Morning report: off', warning: null, recipientMasked };
-    // Synchronous until S1.5 (the Health line reads it on every snapshot).
-    return { ...describeReport(reportForSync(this.#o.db, istDate(now)), now, settings, this.#sender.status().state), recipientMasked };
+    return { ...describeReport(await reportFor(this.#o.db, istDate(now)), now, settings, this.#sender.status().state), recipientMasked };
   }
 
   /**

@@ -28,7 +28,7 @@ async function setup(initial: ReportSettings) {
       return current;
     },
   });
-  s.recover();
+  await s.recover();
   const tick = async (date: string, hm: string) => {
     clock.set(at(date, hm));
     await s.tick(clock.now());
@@ -52,9 +52,9 @@ describe('ReportScheduler with a settings getter', () => {
     const t = await setup({ ...ON, enabled: false });
     await t.tick('2026-10-23', '06:30');
     expect(t.sender.calls).toHaveLength(0);
-    expect(t.s.health().text).toBe('Morning report: off');
+    expect((await t.s.health()).text).toBe('Morning report: off');
     t.set(ON);
-    expect(t.s.health().text).toBe('Morning report: due now');
+    expect((await t.s.health()).text).toBe('Morning report: due now');
     await t.tick('2026-10-23', '06:31');
     expect(t.sender.calls).toHaveLength(1);
     t.set({ ...ON, enabled: false });
@@ -88,7 +88,7 @@ describe('ReportScheduler with a settings getter', () => {
     const clock = manualClock(at('2026-10-23', '06:30'));
     const sender = new FakeReportSender();
     const s = new ReportScheduler({ db, clock, log: silentLogger(), sender, settings: ON, healthLine: () => ({ ok: true, text: '✅' }) });
-    s.recover();
+    await s.recover();
     await s.tick();
     expect(sender.calls).toHaveLength(1);
   });
@@ -108,10 +108,10 @@ describe('ReportScheduler with a getter that throws', () => {
         throw new Error('database is locked');
       },
     });
-    s.recover();
+    await s.recover();
     await expect(s.tick()).resolves.toBeUndefined();
     expect(sender.calls).toHaveLength(0);
     expect(errors).toContain('morning report tick failed');
-    expect(s.health()).toEqual({ text: 'Morning report: settings could not be read', warning: null, recipientMasked: '…1234' });
+    expect(await s.health()).toEqual({ text: 'Morning report: settings could not be read', warning: null, recipientMasked: '…1234' });
   });
 });

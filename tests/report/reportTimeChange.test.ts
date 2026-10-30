@@ -27,15 +27,15 @@ async function setup(env: Record<string, string> = {}) {
   const audits: AuditEntry[] = [];
   const audit = (e: AuditEntry) => audits.push(e);
   const sender = new FakeReportSender();
-  const make = (d: Db) => {
+  const make = async (d: Db) => {
     const store = new SettingsStore({
       db: d, env: parseEnv({ REPORT_ENABLED: 'true', REPORT_RECIPIENT: '919812345678', ...env }), clock, spareLinked: () => true,
     });
     const s = new ReportScheduler({ db: d, clock, log: silentLogger(), sender, healthLine: () => ({ ok: true, text: '✅ Connected' }), settings: () => store.reportSettings() });
-    s.recover();
+    await s.recover();
     return { store, s };
   };
-  let { store, s } = make(db);
+  let { store, s } = await make(db);
   return {
     db, clock, sender, audits,
     store: () => store,
@@ -49,7 +49,7 @@ async function setup(env: Record<string, string> = {}) {
       return store.set('reportTime', value, OWNER, audit);
     },
     /** A service restart: a new store and scheduler on the same database. */
-    restart: () => ({ store, s } = make(db)),
+    restart: async () => ({ store, s } = await make(db)),
   };
 }
 
@@ -116,7 +116,7 @@ describe('the briefing send time set from the dashboard', () => {
   it("today's kept time outlasts a restart, and a time changed back ahead applies today again", async () => {
     const t = await setup({ REPORT_TIME: '09:00' });
     await t.setTime(THU, '08:00', '07:00');
-    t.restart();
+    await t.restart();
     expect(t.store().reportSettings().time).toBe('09:00');
     await t.setTime(THU, '08:10', '08:45'); // ahead again: today goes at 08:45, and the kept time is gone
     expect(t.store().reportSettings().time).toBe('08:45');

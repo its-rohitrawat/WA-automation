@@ -132,7 +132,7 @@ export class LiveReport {
       settings: () => this.#o.settings().report,
     });
     try {
-      scheduler.recover();
+      await scheduler.recover();
     } catch (err) {
       log.error({ err }, 'morning report recovery failed; the scheduler tries again before any send');
     }
@@ -186,8 +186,8 @@ export class LiveReport {
   }
 
   /** Today's line for Health. Never throws: settings that cannot be read give a plain line. */
-  health(now: Date = this.#o.clock.now()): ReportHealth {
-    if (this.#current) return this.#current.scheduler.health(now);
+  async health(now: Date = this.#o.clock.now()): Promise<ReportHealth> {
+    if (this.#current) return await this.#current.scheduler.health(now);
     try {
       const s = this.#o.settings();
       if (!s.report.enabled) return { text: 'Morning report: off', warning: null };

@@ -3,7 +3,7 @@ import { senderSessionDbPath } from '../config/paths.ts';
 import type { SettingsStore } from '../config/settingsStore.ts';
 import type { Db } from '../store/db.ts';
 import type { Logger } from '../util/logger.ts';
-import { senderSessionLinkedSync } from '../wa/authState.ts';
+import { openSenderSession } from '../wa/authState.ts';
 import type { LinkDriver } from '../wa/linkSession.ts';
 import { SenderGateway, type SenderSocketFactory } from '../wa/senderGateway.ts';
 import type { LiveReport, LiveReportSettings } from './liveReport.ts';
@@ -19,15 +19,20 @@ const LINKED: ReadonlySet<string> = new Set(['idle', 'connecting', 'open']);
  * Whether the spare phone is linked, for the switch on the Automations screen: the open briefing's sender when there is
  * one, else the saved session (opened and closed again; a missing file is never made). False while a link runs.
  */
-export function spareLinked(o: { dataDir: string; key: Buffer; briefing: Pick<LiveReport, 'sender'>; linking: () => boolean }): () => boolean {
-  return () => {
+export function spareLinked(o: { dataDir: string; key: Buffer; briefing: Pick<LiveReport, 'sender'>; linking: () => boolean }): () => Promise<boolean> {
+  return async () => {
     if (o.linking()) return false;
     const open = o.briefing.sender();
     if (open) return LINKED.has(open.status().state);
     const file = senderSessionDbPath(o.dataDir);
     if (!existsSync(file)) return false;
-    // Synchronous until the settings view that reads it is async (S1.5).
-    return senderSessionLinkedSync(file, o.key);
+    const s = await openSenderSession(file, o.key);
+    if (!s.ok) return false;
+    try {
+      return s.auth.hasSession;
+    } finally {
+      await s.db.close();
+    }
   };
 }
 

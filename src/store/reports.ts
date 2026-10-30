@@ -140,17 +140,3 @@ export async function markInterruptedReports(db: Sql, at: string): Promise<numbe
 export async function closeOldRetries(db: Sql, beforeDate: string, at: string): Promise<number> {
   return (await db.run("UPDATE reports SET status = 'skipped', next_attempt_at = NULL, updated_at = @at WHERE status = 'retry' AND date < @beforeDate", { beforeDate, at })).changes;
 }
-
-/**
- * S1 only, removed in S1.5: reportFor and markInterruptedReports on raw, for the two synchronous readers left (the
- * Health line through ReportScheduler.health() and SettingsStore.view(), and the start-up recovery app.ts calls).
- */
-export function reportForSync(db: Db, date: string): ReportRow | undefined {
-  const r = db.raw.prepare('SELECT * FROM reports WHERE date = ?').get(date) as RawReport | undefined;
-  return r ? toRow(r) : undefined;
-}
-
-/** S1 only, removed in S1.5: see reportForSync. */
-export function markInterruptedReportsSync(db: Db, at: string): number {
-  return db.raw.prepare("UPDATE reports SET status = 'unknown', detail = 'interrupted', updated_at = ? WHERE status = 'sending'").run(at).changes;
-}

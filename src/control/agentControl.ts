@@ -61,7 +61,7 @@ export interface AgentControlDeps {
    * With the dashboard: whether the spare phone has a saved link, for while no sender is open (the briefing is off). Not
    * given: the spare phone shows as switched off then, as before.
    */
-  spareLinked?: () => boolean;
+  spareLinked?: () => boolean | Promise<boolean>;
   /** The uptime heartbeat, when HEARTBEAT_URL is set. */
   heartbeat?: { lastBeatAt(): Date | null };
 }
@@ -220,7 +220,7 @@ export class AgentControl {
       founder: { ...this.#whatsapp(), groups, lastActivityAt: await this.#lastMessageAt(), device: FOUNDER_DEVICE },
       spare: sender ? { ...spareState(sender.status()), device: SPARE_DEVICE, recipientMasked: sender.maskedRecipient() }
         : this.#d.spareLinked
-          ? { ...(this.#d.spareLinked() ? { state: 'ok' as const, label: 'Linked' } : { state: 'warn' as const, label: 'Not linked' }), device: SPARE_DEVICE, recipientMasked: null }
+          ? { ...((await this.#d.spareLinked()) ? { state: 'ok' as const, label: 'Linked' } : { state: 'warn' as const, label: 'Not linked' }), device: SPARE_DEVICE, recipientMasked: null }
           : { state: 'off', label: 'Switched off', device: SPARE_DEVICE, recipientMasked: null },
       google,
       drive: {

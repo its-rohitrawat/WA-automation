@@ -105,7 +105,7 @@ describe('ReportScheduler', () => {
     await at('12:00');
     expect(sender.calls).toHaveLength(0);
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'skipped', detail: 'not_running' });
-    expect(s.health()).toEqual({ text: 'Morning report skipped today (the service was not running in time)', warning: null, ...TO });
+    expect(await s.health()).toEqual({ text: 'Morning report skipped today (the service was not running in time)', warning: null, ...TO });
   });
 
   it('retries a definite failure after 2, 5, then 10 minutes', async () => {
@@ -113,7 +113,7 @@ describe('ReportScheduler', () => {
     sender.results = [failed('connect_timeout'), failed('connect_timeout'), failed('closed'), failed('closed')];
     await at('06:00');
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'connect_timeout', nextAttemptAt: iso('06:02') });
-    expect(s.health().text).toBe('Morning report: not sent yet (could not connect to WhatsApp), next try 06:02 IST');
+    expect((await s.health()).text).toBe('Morning report: not sent yet (could not connect to WhatsApp), next try 06:02 IST');
     await at('06:01');
     expect(sender.calls).toHaveLength(1);
     await at('06:02');
@@ -154,9 +154,9 @@ describe('ReportScheduler', () => {
     expect(sender.calls).toHaveLength(1);
     expect((await reportFor(db, DAY))!.status).toBe('sending');
     clock.set(IST('06:05'));
-    expect(s.health().text).toBe('Morning report: sending now');
+    expect((await s.health()).text).toBe('Morning report: sending now');
     for (const hm of ['06:11', '09:00', '11:59']) await at(hm);
-    expect(s.health()).toEqual({ text: 'Morning report: unknown, check WhatsApp', warning: UNKNOWN_WARNING, ...TO });
+    expect(await s.health()).toEqual({ text: 'Morning report: unknown, check WhatsApp', warning: UNKNOWN_WARNING, ...TO });
     expect((await reportFor(db, DAY))!.status).toBe('sending');
     await at('12:00');
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'not_recorded', attempts: 1 });
@@ -183,14 +183,14 @@ describe('ReportScheduler', () => {
     for (const hm of ['06:30', '11:00', '12:30']) await at(hm);
     expect(sender.calls).toHaveLength(1);
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'timeout' });
-    expect(s.health()).toEqual({ text: 'Morning report: unknown, check WhatsApp', warning: UNKNOWN_WARNING, ...TO });
+    expect(await s.health()).toEqual({ text: 'Morning report: unknown, check WhatsApp', warning: UNKNOWN_WARNING, ...TO });
   });
 
   it('turns a crash mid-send into unknown at start, and does not send that day again', async () => {
     const { db, clock, sender, s, at } = await setup();
     await claimReport(db, DAY, iso('06:00')); // the previous run died while sending
     clock.set(IST('06:20'));
-    s.recover(clock.now());
+    await s.recover(clock.now());
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'interrupted' });
     await at('06:30');
     expect(sender.calls).toHaveLength(0);
@@ -206,7 +206,7 @@ describe('ReportScheduler', () => {
     }) as typeof db.raw.prepare);
     clock.set(IST('06:20'));
     try {
-      expect(() => s.recover(clock.now())).toThrow('database is locked');
+      await expect(s.recover(clock.now())).rejects.toThrow('database is locked');
     } finally {
       spy.mockRestore();
     }
@@ -223,7 +223,7 @@ describe('ReportScheduler', () => {
     expect(sender.calls).toHaveLength(0);
     expect(await reportFor(db, DAY)).toBeUndefined();
     expect(getKv(db, REPORT_REQUEST_KEY)).toBe('');
-    expect(s.health()).toEqual({ text: 'Morning report: off', warning: null, ...TO });
+    expect(await s.health()).toEqual({ text: 'Morning report: off', warning: null, ...TO });
   });
 
   it('runs one send at a time', async () => {
@@ -374,7 +374,7 @@ describe('ReportScheduler', () => {
     await claimReport(db, '2026-10-22', '2026-10-22T00:30:00.000Z');
     await finishReport(db, '2026-10-22', 'sent', 'msg-0', '2026-10-22T00:31:00.000Z');
     clock.set(IST('02:00'));
-    expect(s.health().text).toBe('Morning report: due at 06:00 IST');
+    expect((await s.health()).text).toBe('Morning report: due at 06:00 IST');
     await request(db, '02:00');
     await s.tick(clock.now());
     expect(sender.calls).toHaveLength(1);
@@ -386,7 +386,7 @@ describe('ReportScheduler', () => {
       const { db, sender, s, at } = await setup({ trackerId });
       await at('06:00');
       expect(await reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'no_tracker_link', attempts: 1, nextAttemptAt: iso('06:02') });
-      expect(s.health()).toEqual({
+      expect(await s.health()).toEqual({
         text: 'Morning report: not sent yet (the tracker is not on Google Drive yet (run google-auth and let it upload once)), next try 06:02 IST',
         warning: null,
         ...TO,
@@ -397,7 +397,7 @@ describe('ReportScheduler', () => {
       expect((await reportFor(db, DAY))!.nextAttemptAt).toBe(iso('06:17'));
       await at('12:00');
       expect(await reportFor(db, DAY)).toMatchObject({ status: 'skipped', detail: 'no_tracker_link' });
-      expect(s.health().text).toBe('Morning report skipped today (the tracker is not on Google Drive yet (run google-auth and let it upload once))');
+      expect((await s.health()).text).toBe('Morning report skipped today (the tracker is not on Google Drive yet (run google-auth and let it upload once))');
       await at('12:30');
       expect(sender.calls).toHaveLength(0);
     }
@@ -610,17 +610,17 @@ describe('ReportScheduler', () => {
     const { sender, s, clock } = await setup();
     clock.set(IST('07:00'));
     sender.state = { ...sender.state, state: 'not_linked' };
-    expect(s.health().warning).toContain('npm run cli -- link-sender');
+    expect((await s.health()).warning).toContain('npm run cli -- link-sender');
     sender.state = { ...sender.state, state: 'logged_out' };
-    expect(s.health().warning).toContain('link-sender --reset');
+    expect((await s.health()).warning).toContain('link-sender --reset');
     sender.state = { ...sender.state, state: 'idle' };
-    expect(s.health().warning).toBeNull();
+    expect((await s.health()).warning).toBeNull();
   });
 
   it("health carries the sender's masked recipient (last 4 digits only), so the CLI can compare it with .env", async () => {
     const { sender, s } = await setup();
     sender.recipientMasked = '…9876';
-    expect(s.health().recipientMasked).toBe('…9876');
+    expect((await s.health()).recipientMasked).toBe('…9876');
   });
 
   it('logs only dates, codes, times and counts: never the report text, a client name or the file name', async () => {
@@ -664,7 +664,7 @@ describe('ReportScheduler', () => {
     await late.at('12:00');
     const cut = await setup({ log });
     await claimReport(cut.db, DAY, iso('06:00'));
-    cut.s.recover(new Date(IST('06:20')));
+    await cut.s.recover(new Date(IST('06:20')));
 
     expect(texts.length).toBeGreaterThan(0);
     expect(lines.length).toBeGreaterThanOrEqual(7);
@@ -824,7 +824,7 @@ describe('report days (REPORT_DAYS)', () => {
       expect(await reportFor(db, date)).toBeUndefined();
     }
     expect(sender.calls).toHaveLength(0);
-    expect(s.health(at(SUN, '07:00'))).toEqual({ text: 'Morning report: no report today (weekend)', warning: null, ...TO });
+    expect(await s.health(at(SUN, '07:00'))).toEqual({ text: 'Morning report: no report today (weekend)', warning: null, ...TO });
     await tick(MON, '06:00');
     expect(sender.calls).toHaveLength(1);
     expect(await reportFor(db, MON)).toMatchObject({ status: 'sent', attempts: 1, forced: false });
@@ -860,7 +860,7 @@ describe('report days (REPORT_DAYS)', () => {
     await tick(SUN, '10:01');
     expect(sender.calls).toHaveLength(1);
     expect(await reportFor(db, SUN)).toMatchObject({ status: 'sent', forced: true });
-    expect(s.health(at(SUN, '10:02')).text).toBe('Morning report: sent at 10:01 IST');
+    expect((await s.health(at(SUN, '10:02'))).text).toBe('Morning report: sent at 10:01 IST');
     setKv(db, REPORT_REQUEST_KEY, reportRequest(SUN, await reportFor(db, SUN), at(SUN, '10:05')));
     for (const hm of ['10:05', '10:06', '12:00']) await tick(SUN, hm);
     expect(sender.calls).toHaveLength(1);
@@ -912,7 +912,7 @@ describe('replaceSender', () => {
     await at('06:00');
     expect(sender.calls).toHaveLength(0);
     expect(next.calls).toHaveLength(1);
-    expect(s.health(new Date(IST('06:01'))).recipientMasked).toBe('…9999');
+    expect((await s.health(new Date(IST('06:01')))).recipientMasked).toBe('…9999');
   });
 
   it('a send in flight finishes with its own sender, which is not stopped under it', async () => {

@@ -96,10 +96,11 @@ export interface AppReportDeps {
 export interface ReportRunner {
   /** Never throws; a send runs on in the background. */
   tick(now: Date): Promise<void>;
-  health(now: Date): ReportHealth;
+  /** Never throws. */
+  health(now: Date): Promise<ReportHealth>;
   stop(waitMs: number): Promise<void>;
   /** At start: a send cut off by a crash becomes unknown. LiveReport does this itself before each sender's first send. */
-  recover?(now: Date): void;
+  recover?(now: Date): Promise<void>;
 }
 
 export interface AppDeps {
@@ -580,7 +581,7 @@ export function createApp(d: AppDeps): App {
       if (reportRunner) {
         // tick() never throws. A send runs on in the background; the claim is already written when it returns.
         void reportRunner.tick(d.clock.now());
-        health.setReport(reportRunner.health(d.clock.now()));
+        health.setReport(await reportRunner.health(d.clock.now()));
       }
       // A line that changes with no other change (a file waiting too long, an upload that gave up, a message that could
       // not be saved) would otherwise reach the workbook only with an unrelated publish, possibly hours later.
@@ -620,10 +621,14 @@ export function createApp(d: AppDeps): App {
     start() {
       if (poll) return; // already started: a second interval would outlive stop()
       if (reportRunner?.recover) {
+        // A send cut off by a crash becomes unknown, never sent again by itself. Not awaited (start is synchronous): its
+        // UPDATE is queued before anything the first tick does, and the scheduler sends nothing until a recovery has
+        // succeeded (it tries again itself).
+        const failed = (err: unknown) => d.log.error({ err }, 'morning report recovery failed');
         try {
-          reportRunner.recover(d.clock.now()); // a send cut off by a crash becomes unknown, never sent again by itself
+          void reportRunner.recover(d.clock.now()).catch(failed);
         } catch (err) {
-          d.log.error({ err }, 'morning report recovery failed');
+          failed(err); // start() never throws for it
         }
       }
       if (uploader) {

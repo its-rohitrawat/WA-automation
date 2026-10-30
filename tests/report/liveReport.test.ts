@@ -51,7 +51,7 @@ describe('LiveReport', () => {
     const t = await setup({ report: { ...ON, enabled: false }, recipient: A });
     await t.tick('06:30');
     expect(t.opened).toHaveLength(0);
-    expect(t.live.health()).toEqual({ text: 'Morning report: off', warning: null });
+    expect(await t.live.health()).toEqual({ text: 'Morning report: off', warning: null });
   });
 
   it('turning on at runtime opens the module once, and sends within the window', async () => {
@@ -64,7 +64,7 @@ describe('LiveReport', () => {
     expect(t.opened.map((o) => o.recipient)).toEqual([A]);
     expect(sent(t.opened)).toBe(1);
     expect((await reportFor(t.db, '2026-10-23'))?.status).toBe('sent');
-    expect(t.live.health()).toMatchObject({ text: expect.stringMatching(/^Morning report: sent at/), recipientMasked: '…5678' });
+    expect(await t.live.health()).toMatchObject({ text: expect.stringMatching(/^Morning report: sent at/), recipientMasked: '…5678' });
   });
 
   it('turning off skips the next send; the opened sender stays for a later switch-on', async () => {
@@ -73,7 +73,7 @@ describe('LiveReport', () => {
     t.set({ report: { ...ON, enabled: false }, recipient: A });
     await t.tick('06:30');
     expect(sent(t.opened)).toBe(0);
-    expect(t.live.health().text).toBe('Morning report: off');
+    expect((await t.live.health()).text).toBe('Morning report: off');
     t.set({ report: ON, recipient: A });
     await t.tick('06:31');
     expect(sent(t.opened)).toBe(1);
@@ -89,7 +89,7 @@ describe('LiveReport', () => {
     await t.tick('06:30');
     expect(t.opened[0]!.sender.calls).toHaveLength(0);
     expect(t.opened[1]!.sender.calls).toHaveLength(1);
-    expect(t.live.health().recipientMasked).toBe('…9999');
+    expect((await t.live.health()).recipientMasked).toBe('…9999');
   });
 
   it('a new sender never sends a second report on a date already sent', async () => {
@@ -116,7 +116,7 @@ describe('LiveReport', () => {
     const t = await setup({ report: ON, recipient: A }, { failOpen: 1 });
     await t.tick('06:30');
     expect(t.opened).toHaveLength(0);
-    expect(t.live.health().text).toBe('Morning report: starting');
+    expect((await t.live.health()).text).toBe('Morning report: starting');
     await t.tick('06:31');
     expect(t.opened).toHaveLength(1);
     expect(sent(t.opened)).toBe(1);
@@ -246,21 +246,21 @@ describe('LiveReport review fixes', () => {
     await t.tick('06:00'); // 1st failure: next try in 1 min
     await t.tick('06:00');
     await t.tick('06:01'); // 2nd: in 2 min
-    expect(t.live.health()).toEqual({ text: 'Morning report: starting', warning: null });
+    expect(await t.live.health()).toEqual({ text: 'Morning report: starting', warning: null });
     await t.tick('06:02');
     await t.tick('06:03'); // 3rd: in 4 min
-    expect(t.live.health().warning).toBe(OPEN_FAILED_WARNING);
+    expect((await t.live.health()).warning).toBe(OPEN_FAILED_WARNING);
     await t.tick('06:06');
     expect(t.opened).toHaveLength(0);
     await t.tick('06:07');
     expect(t.opened).toHaveLength(1);
-    expect(t.live.health().warning).toBeNull();
+    expect((await t.live.health()).warning).toBeNull();
   });
 
   it('health never throws when the settings cannot be read', async () => {
     const t = await setup({ report: ON, recipient: A });
     t.set(undefined as unknown as LiveReportSettings);
-    expect(t.live.health().text).toBe('Morning report: settings could not be read');
+    expect((await t.live.health()).text).toBe('Morning report: settings could not be read');
   });
 });
 
