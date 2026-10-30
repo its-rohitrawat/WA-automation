@@ -1,4 +1,4 @@
-import { txSync, type Db } from '../store/db.ts';
+import type { Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import { fromIstDate, istDate, istDayLabel, istTime, meetingLength } from '../util/time.ts';
 
@@ -135,38 +135,58 @@ export function uptimeRatio(intervals: readonly Interval[], knownSince: number |
   return Math.round(10_000 * (1 - down / (now - from))) / 100;
 }
 
+const LAST = 'SELECT up FROM uptime_log ORDER BY at DESC, id DESC LIMIT 1';
+
 export class UptimeLog {
   readonly #db: Db;
   readonly #clock: Clock;
   #last: boolean | undefined;
 
+  /** Reads the last row synchronously (S1 only, on the raw connection); `UptimeLog.open` is the async way. */
   constructor(db: Db, clock: Clock) {
     this.#db = db;
     this.#clock = clock;
-    const r = db.raw.prepare('SELECT up FROM uptime_log ORDER BY at DESC, id DESC LIMIT 1').get() as { up: number } | undefined;
+    const r = db.raw.prepare(LAST).get() as { up: number } | undefined;
     this.#last = r === undefined ? undefined : r.up === 1;
   }
 
-  /** An up row never keeps a reason; a down row keeps one only when it is a known code. */
-  #write(up: boolean, reason: DownReason | null): void {
+  static async open(db: Db, clock: Clock): Promise<UptimeLog> {
+    const log = new UptimeLog(db, clock);
+    const r = await db.get<{ up: number }>(LAST);
+    log.#last = r === undefined ? undefined : r.up === 1;
+    return log;
+  }
+
+  /**
+   * An up row never keeps a reason; a down row keeps one only when it is a known code. The state is noted before the
+   * write (so a tick right after start() does not write the same row again) and put back if the write fails (so the next
+   * tick tries again).
+   */
+  async #write(up: boolean, reason: DownReason | null): Promise<void> {
     const r = !up && isReason(reason) ? reason : null;
-    this.#db.raw.prepare('INSERT INTO uptime_log (at, up, reason) VALUES (?, ?, ?)').run(this.#clock.now().toISOString(), up ? 1 : 0, r);
+    const before = this.#last;
     this.#last = up;
+    try {
+      await this.#db.run('INSERT INTO uptime_log (at, up, reason) VALUES (?, ?, ?)', [this.#clock.now().toISOString(), up ? 1 : 0, r]);
+    } catch (e) {
+      if (this.#last === up) this.#last = before;
+      throw e;
+    }
   }
 
   /** At service start: always one row, so the time since a stop row ends the outage it began. */
-  start(up: boolean, reason: DownReason | null = null): void {
-    this.#write(up, reason);
+  async start(up: boolean, reason: DownReason | null = null): Promise<void> {
+    await this.#write(up, reason);
   }
 
   /** From the app tick: a row only when up changed. reason: Health.downReason(). */
-  tick(up: boolean, reason: DownReason | null = null): void {
-    if (up !== this.#last) this.#write(up, reason);
+  async tick(up: boolean, reason: DownReason | null = null): Promise<void> {
+    if (up !== this.#last) await this.#write(up, reason);
   }
 
   /** At a clean stop: the stopped time counts as down. */
-  stop(): void {
-    if (this.#last !== false) this.#write(false, 'stopped');
+  async stop(): Promise<void> {
+    if (this.#last !== false) await this.#write(false, 'stopped');
   }
 
   /**
@@ -174,22 +194,22 @@ export class UptimeLog {
    * one is down, the row where its outage began), so the state at the window's start and an outage's start stay known.
    * Returns how many went.
    */
-  purgeOlderThan(days: number): number {
+  async purgeOlderThan(days: number): Promise<number> {
     if (!Number.isInteger(days) || days < 1) throw new Error('the uptime log keeps at least one day');
     const cutoff = new Date(this.#clock.now().getTime() - days * DAY_MS).toISOString();
-    return txSync(this.#db, () => {
-      const last = this.#db.raw.prepare('SELECT id, up FROM uptime_log WHERE at < ? ORDER BY at DESC, id DESC LIMIT 1').get(cutoff) as
-        { id: number; up: number } | undefined;
+    return this.#db.tx(async (q) => {
+      const last = await q.get<{ id: number; up: number }>('SELECT id, up FROM uptime_log WHERE at < ? ORDER BY at DESC, id DESC LIMIT 1', [cutoff]);
       if (!last) return 0;
       const keep = [last.id];
       if (last.up === 0) {
-        const began = this.#db
-          .raw.prepare(`SELECT id FROM uptime_log WHERE at < @cutoff AND up = 0
-            AND at > COALESCE((SELECT MAX(at) FROM uptime_log WHERE at < @cutoff AND up = 1), '') ORDER BY at, id LIMIT 1`)
-          .get({ cutoff }) as { id: number };
+        const began = (await q.get<{ id: number }>(
+          `SELECT id FROM uptime_log WHERE at < @cutoff AND up = 0
+            AND at > COALESCE((SELECT MAX(at) FROM uptime_log WHERE at < @cutoff AND up = 1), '') ORDER BY at, id LIMIT 1`,
+          { cutoff },
+        ))!;
         keep.push(began.id);
       }
-      return this.#db.raw.prepare('DELETE FROM uptime_log WHERE at < ? AND id NOT IN (SELECT value FROM json_each(?))').run(cutoff, JSON.stringify(keep)).changes;
+      return (await q.run('DELETE FROM uptime_log WHERE at < ? AND id NOT IN (SELECT value FROM json_each(?))', [cutoff, JSON.stringify(keep)])).changes;
     });
   }
 

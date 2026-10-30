@@ -84,7 +84,7 @@ async function setup(o: { ai?: FakeAi; drive?: FakeDrive; log?: Logger; drainMs?
     saveCreds: auth.saveCreds,
   });
   settled = () => gateway.idle();
-  const app = createApp({
+  const app = await createApp({
     db, clock: systemClock, log: o.log ?? silentLogger(), gateway, allow, ai, drive, prices: P, spendCapUsd: 15,
     quietMs: 240_000, maxWaitMs: 1_200_000, maxConcurrent: 3, dataDir: '.', freeBytes: () => 500e9, pollMs: 30_000,
     drainMs: o.drainMs,

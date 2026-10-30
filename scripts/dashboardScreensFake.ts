@@ -71,7 +71,7 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
   const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
   for (const [h, up, reason] of [[60, 1, null], [48.5, 0, 'whatsapp_disconnected'], [48, 1, null], [6, 0, 'stopped'], [1.7, 1, null]] as const) put.run(hoursAgo(h), up, reason);
   const uptime = new UptimeLog(db, clock);
-  uptime.start(true);
+  void uptime.start(true); // not awaited (this setup is synchronous): the engine runs statements in order
   // The briefing is on from .env (the spare phone's link is gone in the fake), so the screen shows the next report.
   const settings = new SettingsStore({ db, env: parseEnv({ REPORT_ENABLED: 'true', REPORT_RECIPIENT: '919800000000' }), clock, spareLinked: () => false });
   // Sentiment on, so every screen shows the moods; the switch on Settings turns it off again.

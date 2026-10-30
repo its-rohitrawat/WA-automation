@@ -199,7 +199,7 @@ async function main(): Promise<void> {
     if (env.DASHBOARD_ENABLED) {
       const briefing: { live?: LiveReport } = {};
       spareCheck = spareLinked({ dataDir: env.DATA_DIR, key, briefing: { sender: () => briefing.live?.sender() }, linking: () => spareLinking });
-      const store = new SettingsStore({ db, env, clock: systemClock, log, spareLinked: spareCheck });
+      const store = await SettingsStore.open({ db, env, clock: systemClock, log, spareLinked: spareCheck });
       settings = store;
       live = new LiveReport({
         db, clock: systemClock, log,
@@ -241,8 +241,8 @@ async function main(): Promise<void> {
     const auditLog = env.DASHBOARD_ENABLED ? new AuditLog(db, systemClock) : undefined;
     const historyDb = db;
     // Priority keywords and the sentiment switch: the dashboard changes them, every batch reads them (defaults without it).
-    const prioritySettings = new PrioritySettings({ db, clock: systemClock });
-    const app = createApp({
+    const prioritySettings = await PrioritySettings.open({ db, clock: systemClock });
+    const app = await createApp({
       db,
       clock: systemClock,
       log,
@@ -353,30 +353,24 @@ async function main(): Promise<void> {
       const log30 = new UptimeLog(db, systemClock);
       uptime = log30;
       let purgedDay = '';
+      // Chained, not awaited: the timer callback stays synchronous, and nothing is awaited before the stop handlers.
       const keepUptime = () => {
-        try {
-          log30.tick(app.health.isUp(), app.health.downReason());
-          const today = istDate(systemClock.now());
-          if (today !== purgedDay) {
-            log30.purgeOlderThan(UPTIME_KEEP_DAYS);
-            // Chained, not awaited: the tick stays synchronous (and nothing is awaited before the stop handlers).
-            void audit.purgeOlderThan(AUDIT_KEEP_DAYS).then(
-              () => {
-                purgedDay = today; // only once both ran: a failed purge is tried again at the next tick
-              },
-              (err: unknown) => log.error({ err }, 'audit log purge failed'),
-            );
-          }
-        } catch (err) {
-          log.error({ err }, 'uptime log update failed');
-        }
+        void log30
+          .tick(app.health.isUp(), app.health.downReason())
+          .then(() => {
+            const today = istDate(systemClock.now());
+            if (today === purgedDay) return;
+            return Promise.all([log30.purgeOlderThan(UPTIME_KEEP_DAYS), audit.purgeOlderThan(AUDIT_KEEP_DAYS)]).then(() => {
+              purgedDay = today; // only once both ran: a failed purge is tried again at the next tick
+            });
+          })
+          .catch((err: unknown) => log.error({ err }, 'uptime log update failed'));
       };
-      try {
-        log30.start(app.health.isUp(), app.health.downReason());
-      } catch (err) {
-        log.error({ err }, 'uptime log could not start');
-      }
-      keepUptime();
+      // The start row first, then the first tick (which then has nothing to add unless up changed meanwhile).
+      void log30
+        .start(app.health.isUp(), app.health.downReason())
+        .catch((err: unknown) => log.error({ err }, 'uptime log could not start'))
+        .then(keepUptime);
       uptimeTimer = setInterval(keepUptime, UPTIME_TICK_MS);
       uptimeTimer.unref();
       const directory = new GroupDirectory({ gateway, clock: systemClock });
@@ -465,12 +459,16 @@ async function main(): Promise<void> {
               // best effort: the next close still runs
             }
           };
-          bestEffort(() => uptime?.stop());
-          for (const d of adoptedDbs) bestEffort(() => d.raw.close());
-          bestEffort(() => trackerDb.raw.close());
-          bestEffort(() => sessionStore.raw.close());
-          bestEffort(() => senderStore?.raw.close());
-          void startedLock.release().finally(() => process.exit(0));
+          // The stop row is written before the databases close (best effort: a failure is not retried).
+          void Promise.resolve(uptime?.stop())
+            .catch(() => undefined)
+            .then(() => {
+              for (const d of adoptedDbs) bestEffort(() => d.raw.close());
+              bestEffort(() => trackerDb.raw.close());
+              bestEffort(() => sessionStore.raw.close());
+              bestEffort(() => senderStore?.raw.close());
+              void startedLock.release().finally(() => process.exit(0));
+            });
           setTimeout(() => process.exit(0), 2000).unref();
         });
     };

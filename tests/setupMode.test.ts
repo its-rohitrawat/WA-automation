@@ -206,7 +206,7 @@ describe('the app in setup mode', () => {
   it('starts and stops with no WhatsApp link and no Google: nothing to read, the health line says why', async () => {
     const db = await seededDb();
     const gateway = founderGateway({ linked: false, build: () => { throw new Error('never'); } });
-    const app = createApp({
+    const app = await createApp({
       db, clock: systemClock, log, gateway, allow: new AllowList([SHARMA.groupId]), ai: new FakeAi(), drive: new FakeDrive(),
       prices: P, spendCapUsd: 15, quietMs: 240_000, maxWaitMs: 1_200_000, maxConcurrent: 3, dataDir: '.', freeBytes: () => 500e9, pollMs: 30_000,
     });

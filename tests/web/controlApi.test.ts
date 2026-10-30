@@ -25,7 +25,7 @@ async function boot(o: { linked?: boolean; secureCookies?: boolean; actionCapaci
   const audit = o.auditThrows ? { record: async () => { throw new Error('disk full'); }, recordSync: () => { throw new Error('disk full'); } } : real;
   const spend = new SpendGuard({ db, clock, capUsd: 10 });
   const uptime = new UptimeLog(db, clock);
-  uptime.start(true);
+  await uptime.start(true);
   const settings = new SettingsStore({ db, env: parseEnv({ REPORT_RECIPIENT: NUMBER }), clock, spareLinked: () => o.linked ?? true });
   let sessions!: Parameters<Parameters<typeof bootDashboard>[0]['mount']>[1]['sessions'];
   const h = await bootDashboard({

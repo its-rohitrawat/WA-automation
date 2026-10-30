@@ -193,9 +193,9 @@ export interface SpendView {
  * Wires gateway -> ingestor -> media queue / debouncer -> reconciler -> publisher. The founder-number gateway never sends
  * anything. The only sender is the optional morning report's, on the spare number, to REPORT_RECIPIENT only.
  */
-export function createApp(d: AppDeps): App {
+export async function createApp(d: AppDeps): Promise<App> {
   const startedAt = d.startedAt ?? d.clock.now();
-  const spend = new SpendGuard({ db: d.db, clock: d.clock, capUsd: d.spendCapUsd });
+  const spend = await SpendGuard.open({ db: d.db, clock: d.clock, capUsd: d.spendCapUsd });
   const health = new Health({ db: d.db, clock: d.clock, spend, dataDir: d.dataDir, freeBytes: d.freeBytes });
   const reportScheduler = d.report && !d.liveReport
     ? new ReportScheduler({

@@ -45,7 +45,7 @@ async function setup(report?: AppReportDeps, dbIn?: Db, o: { log?: Logger; freeB
     auth: auth.state,
     saveCreds: auth.saveCreds,
   });
-  const app = createApp({
+  const app = await createApp({
     db, clock: systemClock, log: o.log ?? silentLogger(), gateway, allow, ai: new FakeAi(), drive: new FakeDrive(), prices: P, spendCapUsd: 15,
     quietMs: 240_000, maxWaitMs: 1_200_000, maxConcurrent: 3, dataDir: '.', freeBytes: o.freeBytes ?? (() => 500e9), pollMs: 30_000, report,
   });

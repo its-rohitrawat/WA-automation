@@ -117,7 +117,7 @@ async function setup(o: SetupOptions = {}) {
   const extract = vi.fn<Extractor>(async () => ({ textKind: 'description', text: 'A blue homepage banner. Visible text: SALE 50%', pageCount: null, note: null }));
   const media: AppMediaDeps | undefined =
     o.media === null ? undefined : { sealer: new MediaRefSealer(randomBytes(32)), fetcher, ai: new FakeMediaAi(), extract, ...o.media };
-  const app = createApp({
+  const app = await createApp({
     db, clock: systemClock, log: o.log ?? silentLogger(), gateway, allow, ai, drive, prices: P, spendCapUsd: 15,
     quietMs: 240_000, maxWaitMs: 1_200_000, maxConcurrent: 3, dataDir, freeBytes: () => 500e9, pollMs: 30_000, media, startedAt: o.startedAt,
     drainMs: o.drainMs, publishIntervalMs: o.publishIntervalMs,

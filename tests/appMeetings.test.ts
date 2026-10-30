@@ -96,7 +96,7 @@ async function setup(o: SetupOptions = {}) {
           settings: { teamDomains: ['studio.example'], pollMinutes: 5, maxMinutes: 180, since: '2026-11-01', inrPerUsd: 88 },
           clients: [SHARMA, MEHTA],
         };
-  const app = createApp({
+  const app = await createApp({
     db, clock: systemClock, log: silentLogger(), gateway, allow, ai, drive, prices: P, spendCapUsd: 15,
     quietMs: 240_000, maxWaitMs: 1_200_000, maxConcurrent: 3, dataDir, freeBytes: () => 500e9, pollMs: 30_000, drainMs: o.drainMs,
     ...(meetings ? { meetings } : {}),

@@ -129,21 +129,21 @@ describe('UptimeRobotClient', () => {
 });
 
 describe('uptimeReport', () => {
-  function agentLog() {
+  async function agentLog() {
     const db = openDb(':memory:');
     const clock = manualClock('2026-10-20T00:00:00.000+05:30');
     const log = new UptimeLog(db, clock);
-    log.start(true);
+    await log.start(true);
     clock.set('2026-10-20T01:00:00.000+05:30');
-    log.tick(false);
+    await log.tick(false);
     clock.set('2026-10-20T01:30:00.000+05:30');
-    log.tick(true);
+    await log.tick(true);
     clock.set(NOW);
     return { log, clock };
   }
 
   it('uses UptimeRobot when it answers, with days built from its outages', async () => {
-    const { log, clock } = agentLog();
+    const { log, clock } = await agentLog();
     const { robot } = client(fakeFetch(() => ({ status: 200, json: GOOD })).fetch, { clock });
     const r = await uptimeReport({ log, robot, now: clock.now(), days: 2 });
     expect(r).toEqual({
@@ -160,7 +160,7 @@ describe('uptimeReport', () => {
   });
 
   it("falls back to the agent's own log when UptimeRobot fails, or no key is set", async () => {
-    const { log, clock } = agentLog();
+    const { log, clock } = await agentLog();
     const { robot } = client(fakeFetch(() => ({ status: 500, json: {} })).fetch, { clock });
     for (const r of [await uptimeReport({ log, robot, now: clock.now(), days: 1 }), await uptimeReport({ log, now: clock.now(), days: 1 })]) {
       expect(r).toMatchObject({
