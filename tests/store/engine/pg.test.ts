@@ -1,7 +1,7 @@
 import pg from 'pg';
 import { describe, expect, it } from 'vitest';
 import { TxMisuseError } from '../../../src/store/engine/errors.ts';
-import { PgPlatformDb, PgTenantDb, withTenant, type PgClient, type PgPool } from '../../../src/store/engine/pg.ts';
+import { openPgPool, PgPlatformDb, PgTenantDb, withTenant, type PgClient, type PgPool } from '../../../src/store/engine/pg.ts';
 
 // The Postgres engine with no server: a fake pool records every statement each connection receives. The same rules on
 // a real Postgres (RLS, the lock, a pooled connection carrying no customer) are S2.7's and S2.9's tests.
@@ -148,7 +148,10 @@ describe('PgPlatformDb: the platform tables, no customer', () => {
 });
 
 describe('numbers come back as numbers, as on SQLite', () => {
-  it('int8 (COUNT, ids) and numeric (SUM of a bigint) are parsed', () => {
+  it('int8 (COUNT, ids) and numeric (SUM of a bigint) are parsed once a pool is made (pg loads then: R1)', async () => {
+    // A pool object only: no connection is made, nothing reaches a server.
+    const pool = openPgPool('postgres://wa_app@127.0.0.1:9/none');
+    await pool.end();
     expect(pg.types.getTypeParser(20)('42')).toBe(42);
     expect(pg.types.getTypeParser(1700)('1.25')).toBe(1.25);
   });
