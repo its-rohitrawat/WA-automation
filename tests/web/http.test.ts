@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CONTENT_SECURITY_POLICY,
   HttpError,
+  jsonText,
   parseCookies,
   requestId,
   securityHeaders,
@@ -55,6 +56,18 @@ describe('sendJson and sendError', () => {
     expect(headers['content-type']).toBe('application/json; charset=utf-8');
     expect(headers['cache-control']).toBe('no-store');
     expect(headers['content-length']).toBe(Buffer.byteLength(out.body));
+  });
+
+  it('refuses a Promise anywhere in a body (a missing await), naming its key, and sends nothing', () => {
+    const pending = Promise.resolve({ name: 'Acme' });
+    for (const [body, where] of [[pending, ''], [{ client: pending }, ' at "client"'], [{ a: { b: [1, pending] } }, ' at "1"']] as const) {
+      expect(() => jsonText(body), where).toThrow(new TypeError(`response body is a Promise${where}: missing await`));
+      const { res, out } = fakeRes();
+      expect(() => sendJson(res, 200, body)).toThrow(TypeError);
+      expect(out.body, where).toBe(''); // nothing went out, not even {}
+    }
+    // A plain object with a then that is not a function is data, not a Promise.
+    expect(jsonText({ then: 'later', n: null })).toBe('{"then":"later","n":null}');
   });
 
   it('sendError uses the { error: { code, message } } shape', () => {

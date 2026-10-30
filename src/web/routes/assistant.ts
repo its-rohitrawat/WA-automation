@@ -5,7 +5,7 @@ import { ControlError } from '../../control/errors.ts';
 import type { Db } from '../../store/db.ts';
 import type { Clock } from '../../util/clock.ts';
 import type { AuditLog } from '../audit.ts';
-import { readJson, sendJson } from '../http.ts';
+import { jsonText, readJson, sendJson } from '../http.ts';
 import { RateLimiter, type RateLimit } from '../guard.ts';
 import type { Router } from '../router.ts';
 import { hashToken } from '../sessions.ts';
@@ -72,7 +72,7 @@ export function registerAssistantApi(router: Router, d: AssistantApiDeps): void 
       if (!res.writableEnded) gone.abort();
     });
     const emit = (e: AssistantEvent) => {
-      if (!res.destroyed && !res.writableEnded) res.write(`${JSON.stringify(e)}\n`);
+      if (!res.destroyed && !res.writableEnded) res.write(`${jsonText(e)}\n`);
     };
     await d.assistant.ask(owner, question, emit, gone.signal);
     if (!res.writableEnded) res.end();
