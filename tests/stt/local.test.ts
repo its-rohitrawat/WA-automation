@@ -6,7 +6,8 @@ import { parseEnv } from '../../src/config/env.ts';
 import { localMeetingTmpDir } from '../../src/meetings/localTranscriber.ts';
 import { minimalEnv } from '../../src/stt/audio.ts';
 import {
-  checkLocalEngineFiles, LocalEngine, LocalEngineError, localEngineArgs, localEngineTmpDir, runLocalEngine, sharedLocalEngine,
+  checkLocalEngineFiles, LocalEngine, LocalEngineError, localEngineArgs, localEngineTmpDir, processLocalEngine, runLocalEngine, sharedLocalEngine,
+  tenantsDataDir, workDirAllowed,
   type LocalEngineOptions, type LocalRunFile as RunFile, type LocalRunOptions as RunOptions,
 } from '../../src/stt/local.ts';
 
@@ -560,5 +561,71 @@ describe('sharedLocalEngine (meetings on the local engine, Task 3)', () => {
     expect(calls[0]!.file).toBe(BIN);
     // A folder outside DATA_DIR/tmp is still refused.
     await expect(engine.transcribe(join(dataDir, 'meetings', 'tmp', 'a.wav'), { workDir: join(dataDir, 'meetings', 'tmp') })).rejects.toThrow(/inside its temporary folder/);
+  });
+});
+
+describe('processLocalEngine: one engine for every runtime (Phase B)', () => {
+  let dataDir: string;
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'wa-process-engine-'));
+  });
+  afterEach(() => rmSync(dataDir, { recursive: true, force: true }));
+  const A = '00000000-0000-4000-8000-000000000001'; // the founder's fixed id; any customer id has this shape
+  const B = '6f1c2e9a-3b4d-4c5e-8f60-718293a4b5c6';
+  const env = () => parseEnv({ DATA_DIR: dataDir, STT_LOCAL_BIN: BIN, STT_LOCAL_MODEL: MODEL, VOICE_STT_PROVIDER: 'local' });
+
+  it('is undefined when no setting uses the local engine', () => {
+    expect(processLocalEngine(parseEnv({ DATA_DIR: dataDir }))).toBeUndefined();
+  });
+
+  it('two runtimes’ runs wait in one line: never two models at once', async () => {
+    let running = 0;
+    let most = 0;
+    const order: string[] = [];
+    const run: RunFile = async (_file, args) => {
+      running++;
+      most = Math.max(most, running);
+      order.push(`start ${outputOf(args)}`);
+      await new Promise((r) => setTimeout(r, 20));
+      writeFileSync(outputOf(args), 'namaste');
+      order.push(`end ${outputOf(args)}`);
+      running--;
+      return { code: 0, stderr: '' };
+    };
+    const engine = processLocalEngine(env(), { localRun: run })!;
+    const founderWork = join(localEngineTmpDir(dataDir), 'voice', 'v1');
+    const customerWork = join(tenantsDataDir(dataDir), B, 'tmp', 'voice', 'v2');
+    for (const d of [founderWork, customerWork]) mkdirSync(d, { recursive: true });
+    const results = await Promise.all([
+      engine.transcribe(join(founderWork, 'a.wav'), { workDir: founderWork }),
+      engine.transcribe(join(customerWork, 'b.wav'), { workDir: customerWork }),
+      engine.transcribe(join(founderWork, 'c.wav'), { workDir: founderWork }),
+    ]);
+    expect(results).toEqual([{ text: 'namaste' }, { text: 'namaste' }, { text: 'namaste' }]);
+    expect(most).toBe(1);
+    expect(order.filter((s) => s.startsWith('start'))).toHaveLength(3);
+    for (let i = 0; i < order.length; i += 2) expect(order[i + 1]).toBe(order[i]!.replace('start', 'end')); // each run ends before the next starts
+  });
+
+  it('a work folder outside DATA_DIR/tmp and the customers’ own tmp folders is refused, ../ tricks included', async () => {
+    const { run, calls } = fakeRun();
+    const engine = processLocalEngine(env(), { localRun: run })!;
+    const roots = { tmpDir: localEngineTmpDir(dataDir), tenantsDir: tenantsDataDir(dataDir) };
+    const tenants = tenantsDataDir(dataDir);
+    const allowed = [join(dataDir, 'tmp', 'voice', 'x'), join(tenants, A, 'tmp', 'x'), join(tenants, B, 'tmp', 'meetings-local', 'part-1')];
+    const refused = [
+      dataDir, join(dataDir, 'tmp'), join(dataDir, 'tmpx', 'x'), join(dataDir, 'meetings', 'x'),
+      join(tenants, B), join(tenants, B, 'tmp'), join(tenants, B, 'media', 'x'), join(tenants, 'not-a-customer', 'tmp', 'x'),
+      join(tenants, B, 'tmp', '..', '..', A, 'media', 'x'), join(tenants, B, 'tmp', '..', 'x'), join(dataDir, 'tmp', '..', 'tracker.db'),
+      join(tmpdir(), 'elsewhere'), `${tenants}${'/'}${B}/tmp/../../../outside`,
+    ];
+    for (const d of allowed) expect(workDirAllowed(d, roots), d).toBe(true);
+    for (const d of refused) {
+      expect(workDirAllowed(d, roots), d).toBe(false);
+      await expect(engine.transcribe(join(dataDir, 'a.wav'), { workDir: d })).rejects.toThrow(/inside its temporary folder/);
+    }
+    expect(calls).toEqual([]);
+    // Without tenantsDir (every engine before Phase B) only tmpDir counts.
+    expect(workDirAllowed(join(tenants, B, 'tmp', 'x'), { tmpDir: roots.tmpDir })).toBe(false);
   });
 });
