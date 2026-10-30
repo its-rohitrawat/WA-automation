@@ -198,7 +198,13 @@ describe('the Postgres schema (P1 to P3) against the SQLite schema', () => {
     expect(SCHEMA_VERSION_FN_SQL).toContain('REVOKE ALL ON FUNCTION wa_schema_version() FROM PUBLIC;');
     expect(SCHEMA_VERSION_FN_SQL).toContain('GRANT EXECUTE ON FUNCTION wa_schema_version() TO wa_app, wa_platform;');
     expect(SCHEMA_VERSION_FN_SQL).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/);
-    expect(PG_LATEST).toBe(3);
+    expect(PG_LATEST).toBe(4);
+  });
+
+  it('P4 drops the founder default from web_sessions.tenant_id, and only that (P3 is never edited)', () => {
+    expect(PG_MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4]);
+    expect(PG_MIGRATIONS[3]!.sql.trim()).toBe('ALTER TABLE web_sessions ALTER COLUMN tenant_id DROP DEFAULT;');
+    expect(PG_MIGRATIONS[2]!.sql).toContain(`tenant_id uuid NOT NULL DEFAULT '${FOUNDER_TENANT_ID}' REFERENCES tenants (id)`); // P3 as it was
   });
 
   it('P2 enables, forces and scopes row-level security on every customer table, and only those', () => {
@@ -220,6 +226,6 @@ describe('the Postgres schema (P1 to P3) against the SQLite schema', () => {
     expect(P3_GRANTS_SQL).toContain(`GRANT SELECT, INSERT, UPDATE, DELETE ON ${list} TO wa_platform;`);
     expect(P3_GRANTS_SQL).not.toMatch(/GRANT [^;]*(INSERT|UPDATE|DELETE|TRUNCATE)[^;]* TO wa_backup/);
     expect(P3_GRANTS_SQL).toMatch(/GRANT SELECT ON ALL TABLES IN SCHEMA public TO wa_backup;/);
-    expect(PG_MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3]);
+    expect(PG_MIGRATIONS.map((m) => m.version).slice(0, 3)).toEqual([1, 2, 3]);
   });
 });

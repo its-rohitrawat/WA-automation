@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
+import { FOUNDER_TENANT_ID } from '../config/env.ts';
 import type { Db, Sql } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import { serializeCookie } from './http.ts';
@@ -17,6 +18,11 @@ const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 
 export interface Session {
   email: string;
+  /**
+   * The customer this session belongs to (S4.8). Postgres: web_sessions.tenant_id, a platform column. SQLite: always the
+   * founder's (no column; customer sessions exist on Postgres only).
+   */
+  tenantId: string;
   /** SHA-256 (hex) of the session's CSRF token. */
   csrfHash: string;
   createdAt: string;
@@ -25,6 +31,8 @@ export interface Session {
 
 interface Row {
   email: string;
+  /** Postgres only. */
+  tenant_id?: string;
   csrf_hash: string;
   created_at: string;
   expires_at: string;
@@ -105,17 +113,24 @@ export class SessionStore {
 
   /**
    * Starts a session. The returned id goes only into the cookie and the CSRF token only to the signed-in page. `q` is
-   * a transaction handle when the session must commit with something else (sign-in's audit row).
+   * a transaction handle when the session must commit with something else (sign-in's audit row). `tenantId`: whose
+   * session it is, the founder by default. On SQLite only the founder's can be made (customer sessions are Postgres-only).
    */
-  async create(email: string, agentLabel?: string, q: Sql = this.#db): Promise<{ id: string; csrf: string }> {
+  async create(email: string, agentLabel?: string, q: Sql = this.#db, tenantId: string = FOUNDER_TENANT_ID): Promise<{ id: string; csrf: string }> {
+    const pg = this.#db.engine === 'postgres';
+    if (!pg && tenantId !== FOUNDER_TENANT_ID) throw new Error('customer sessions exist on Postgres only');
     const id = newToken();
     const csrf = csrfFor(id);
     const now = this.#clock.now();
     const at = now.toISOString();
+    const values = [hashToken(id), email.trim().toLowerCase(), hashToken(csrf), at, new Date(now.getTime() + SESSION_TTL_MS).toISOString(), at, cleanLabel(agentLabel)];
     await q.run(
-      `INSERT INTO web_sessions (id_hash, email, csrf_hash, created_at, expires_at, last_seen_at, agent_label)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [hashToken(id), email.trim().toLowerCase(), hashToken(csrf), at, new Date(now.getTime() + SESSION_TTL_MS).toISOString(), at, cleanLabel(agentLabel)],
+      pg
+        ? `INSERT INTO web_sessions (id_hash, email, csrf_hash, created_at, expires_at, last_seen_at, agent_label, tenant_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        : `INSERT INTO web_sessions (id_hash, email, csrf_hash, created_at, expires_at, last_seen_at, agent_label)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      pg ? [...values, tenantId] : values,
     );
     return { id, csrf };
   }
@@ -127,7 +142,8 @@ export class SessionStore {
   async get(id: string): Promise<Session | undefined> {
     if (!isToken(id)) return undefined;
     const idHash = hashToken(id);
-    const row = await this.#db.get<Row>('SELECT email, csrf_hash, created_at, expires_at, last_seen_at FROM web_sessions WHERE id_hash = ?', [idHash]);
+    const cols = this.#db.engine === 'postgres' ? ', tenant_id' : '';
+    const row = await this.#db.get<Row>(`SELECT email, csrf_hash, created_at, expires_at, last_seen_at${cols} FROM web_sessions WHERE id_hash = ?`, [idHash]);
     if (row === undefined) return undefined;
     const now = this.#clock.now().getTime();
     const expires = Date.parse(row.expires_at);
@@ -141,7 +157,7 @@ export class SessionStore {
     if (now - lastSeen >= TOUCH_EVERY_MS) {
       await this.#db.run('UPDATE web_sessions SET last_seen_at = ? WHERE id_hash = ?', [new Date(now).toISOString(), idHash]);
     }
-    return { email: row.email, csrfHash: row.csrf_hash, createdAt: row.created_at, expiresAt: row.expires_at };
+    return { email: row.email, tenantId: row.tenant_id ?? FOUNDER_TENANT_ID, csrfHash: row.csrf_hash, createdAt: row.created_at, expiresAt: row.expires_at };
   }
 
   /** Ends one session (sign-out). An unknown id is a no-op. `q`: as for `create`. */

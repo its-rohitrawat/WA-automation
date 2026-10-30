@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
+import { FOUNDER_TENANT_ID } from '../../src/config/env.ts';
 import { openDb } from '../../src/store/db.ts';
 import type { Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
@@ -40,12 +41,19 @@ describe('SessionStore: create and get', () => {
     expect(id).not.toBe(csrf);
     expect(await store.get(id)).toEqual({
       email: 'owner@example.com',
+      tenantId: FOUNDER_TENANT_ID, // SQLite: every session is the founder's
       csrfHash: sha(csrf),
       createdAt: T0,
       expiresAt: '2026-11-03T10:00:00.000Z',
     });
     expect(SESSION_TTL_MS).toBe(7 * 24 * HOUR);
     expect(IDLE_TIMEOUT_MS).toBe(24 * HOUR);
+  });
+
+  it("on SQLite only the founder's session can be made: a customer's is refused, nothing written (S4.8)", async () => {
+    const { store, db } = setup();
+    await expect(store.create('owner@example.com', undefined, undefined, '00000000-0000-4000-8000-0000000000c2')).rejects.toThrow('customer sessions exist on Postgres only');
+    expect(await db.get('SELECT COUNT(*) AS n FROM web_sessions')).toEqual({ n: 0 });
   });
 
   it('gives a fresh random id and token every time', async () => {

@@ -473,11 +473,21 @@ GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO wa_backup;
 
 export const P3_SQL = `${PLATFORM_PG_SQL}${WEB_SESSIONS_PG_SQL}${P3_GRANTS_SQL}`;
 
+/**
+ * P4 (S4.8): customer sessions. P3 gave web_sessions.tenant_id the founder's id as a default, so S2 needed no change to
+ * SessionStore; from here every session names its customer (SessionStore.create writes tenant_id on Postgres), so a
+ * session written without one fails instead of silently becoming the founder's.
+ */
+export const P4_SQL = `
+ALTER TABLE web_sessions ALTER COLUMN tenant_id DROP DEFAULT;
+`;
+
 /** In order; recorded in pg_schema_version by the runner (S2.4). Never edited once applied: a change is a new entry. */
 export const PG_MIGRATIONS: readonly { version: number; sql: string }[] = [
   { version: 1, sql: P1_SQL },
   { version: 2, sql: P2_SQL },
   { version: 3, sql: P3_SQL },
+  { version: 4, sql: P4_SQL },
 ];
 
 /** The version this code needs: openStore refuses a database at any other one (run db-migrate first). */

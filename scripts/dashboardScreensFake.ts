@@ -3,7 +3,7 @@
 // in-memory database of made-up clients, tasks and meetings. No file is opened; nothing reaches the agent, WhatsApp,
 // Google or any data folder. The owner session is the fake's flag, checked by a stand-in for D1's guard.
 import type { ServerResponse } from 'node:http';
-import { parseEnv } from '../src/config/env.ts';
+import { FOUNDER_TENANT_ID, parseEnv } from '../src/config/env.ts';
 import { PrioritySettings } from '../src/config/prioritySettings.ts';
 import { SettingsStore } from '../src/config/settingsStore.ts';
 import { UptimeLog } from '../src/health/uptimeLog.ts';
@@ -86,7 +86,7 @@ export async function mountFakeScreens(web: WebServer, o: { signedIn: () => bool
   const session = (): OwnerSession => {
     if (!o.signedIn()) throw new HttpError(401, 'unauthenticated', 'Sign in first.');
     const now = new Date();
-    return { id: 'fake', email: OWNER, csrfHash: '', createdAt: new Date(now.getTime() - 300_000).toISOString(), expiresAt: new Date(now.getTime() + 6 * 86_400_000).toISOString() };
+    return { id: 'fake', email: OWNER, tenantId: FOUNDER_TENANT_ID, csrfHash: '', createdAt: new Date(now.getTime() - 300_000).toISOString(), expiresAt: new Date(now.getTime() + 6 * 86_400_000).toISOString() };
   };
   const guard: Pick<Guard, 'requireOwner' | 'requireCsrf'> = {
     requireOwner: async () => session(),

@@ -122,7 +122,7 @@ describe('migrate', () => {
     expect(o.lines).toEqual([`Already at P${PG_MIGRATIONS.at(-1)!.version}: nothing to apply`]);
 
     const part = fakeServer({ versions: [1] });
-    expect(await migrate(part.conn('wa_agent'), { now, out: () => {} })).toEqual([2, 3]);
+    expect(await migrate(part.conn('wa_agent'), { now, out: () => {} })).toEqual(PG_MIGRATIONS.slice(1).map((m) => m.version));
     expect(part.sent.some((x) => x.text === PG_MIGRATIONS[0]!.sql)).toBe(false);
   });
 
