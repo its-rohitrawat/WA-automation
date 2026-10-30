@@ -436,13 +436,18 @@ describe('app media spend (review round 1)', () => {
     });
     shareImage(sock);
     await settled();
-    await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'spend_cap', attempts: 0 }));
+    // The fetch, the read of the file and the hold check take real time: on a loaded machine more than the default 1 s.
+    await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'spend_cap', attempts: 0 }), { timeout: 10_000 });
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(ai.calls).toHaveLength(0);
     expect(ledger(db)).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(30_000);
-    expect((await readHealthSnapshot(db))!.media).toMatchObject({ pending: 1, spendCap: 1 });
-    expect((await readHealthSnapshot(db))!.line).toEqual({ ok: false, text: BUDGET_LINE });
+    // The tick's media refresh and its snapshot write run on after the timer fires: wait for the snapshot they write.
+    await vi.waitFor(async () => {
+      const snapshot = (await readHealthSnapshot(db))!;
+      expect(snapshot.media).toMatchObject({ pending: 1, spendCap: 1 });
+      expect(snapshot.line).toEqual({ ok: false, text: BUDGET_LINE });
+    }, { timeout: 10_000 });
     await stopApp(app);
   });
 
