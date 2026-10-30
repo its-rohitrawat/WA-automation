@@ -284,8 +284,8 @@ function fakeGroupsApi(state: FakeState) {
             history: i === 1 ? { state: 'reading', found: 18 } : null,
             pulse: { pending: i === 0 ? 3 : 0, lastReadAt: i < 3 ? at([20, 30, 3][i]!) : null, quietMinutes: 4 },
           }));
-  const detail = async (code: string) => {
-    const c = (await clientCards()).find((x) => x.code === code);
+  const detail = (code: string) => {
+    const c = clientCards().find((x) => x.code === code);
     if (!c) return null;
     return {
       ...c,
