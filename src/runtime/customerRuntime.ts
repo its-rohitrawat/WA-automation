@@ -51,7 +51,11 @@ import { founderLinkDriver, LinkSessions } from '../wa/linkSession.ts';
 import { baileysSenderSocketFactory, linkedNumber } from '../wa/senderGateway.ts';
 import { AuditLog, type AuditInput } from '../web/audit.ts';
 import { mountAgentRoutes } from '../web/mountRoutes.ts';
-import { googleCodeExchanger, googleIdVerifier } from '../web/oidc.ts';
+import { parseCookies } from '../web/http.ts';
+import { browserLabel, googleCodeExchanger, googleIdVerifier } from '../web/oidc.ts';
+import type { IncomingMessage } from 'node:http';
+import type { RequestContext } from '../web/router.ts';
+import { SESSION_COOKIE, sessionCookie, type SessionStore } from '../web/sessions.ts';
 import { makeGroupKey } from '../web/routes/groups.ts';
 import type { DashboardMount } from '../web/start.ts';
 
@@ -143,6 +147,11 @@ export interface RuntimeDeps {
    * runtime only: its dashboard hosts the platform screens (invites, customers) and the public sign-up (S5H).
    */
   platformDb?: Db;
+  /**
+   * Each customer's own Db (Postgres: customerDbsOf, on the tracker's pool). Customer sessions need it for their sign-in's audit
+   * row; absent (SQLite) none is started.
+   */
+  customerDb?: (tenantId: string) => Db;
   /** Told the name of each database this runtime closes (tests). */
   onClose?: (name: string) => void;
 }
@@ -507,9 +516,9 @@ export async function buildCustomerRuntime(t: { id: string; founder: boolean }, 
               db: platformDb, clock: systemClock, log, publicUrl: sitePublicUrl, founderName: env.PLATFORM_FOUNDER_NAME,
               // The owner sign-in's web client; its redirect URIs must include <DASHBOARD_PUBLIC_URL>/signup/callback.
               google: web ? { clientId: web.clientId, exchange: googleCodeExchanger(web), verify: googleIdVerifier(web.clientId) } : null,
-              // Customer sessions exist on Postgres only and come with S4.8: until then none is started, and the new
-              // customer gets the waiting page (the invite is still used and the customer is onboarding).
-              startSession: async () => false,
+              // Customer sessions exist on Postgres only (S4.8): on SQLite none is started, and the new customer gets the
+              // waiting page (the invite is still used and the customer is onboarding).
+              startSession: customerSessionStarter({ customerDb: d.customerDb, sessions: m.sessions, secureFor: m.secureFor }),
               secure: m.secureFor,
             },
           } : {}),
@@ -567,6 +576,31 @@ export async function buildCustomerRuntime(t: { id: string; founder: boolean }, 
     await closeOwn();
     throw err;
   }
+}
+
+/**
+ * The sign-up's startSession (S4.8): a new customer owner's dashboard session, on Postgres only. Without customerDb
+ * (SQLite) it starts none and says false, and the sign-up sends the customer to the waiting page. Otherwise: the sign-in's
+ * audit row first, in the customer's own Db, then the session on the platform Db (the two cannot share a transaction, so
+ * a failed session write leaves an audit row for an attempt, the safe side); a new session id every time (a session this
+ * browser had is ended first: no fixation), and the same cookie as the owner's (HttpOnly, SameSite, Secure over https).
+ */
+export function customerSessionStarter(o: {
+  customerDb: ((tenantId: string) => Db) | undefined;
+  sessions: Pick<SessionStore, 'create' | 'destroy'>;
+  secureFor: (req: IncomingMessage) => boolean;
+}): (ctx: RequestContext, s: { email: string; tenantId: string }) => Promise<boolean> {
+  return async (ctx, s) => {
+    if (!o.customerDb) return false;
+    const label = browserLabel(typeof ctx.req.headers['user-agent'] === 'string' ? ctx.req.headers['user-agent'] : undefined);
+    await new AuditLog(o.customerDb(s.tenantId), systemClock)
+      .record({ actor: s.email, event: 'Signed in', kind: 'auth', detail: label, requestId: ctx.requestId });
+    const earlier = parseCookies(typeof ctx.req.headers.cookie === 'string' ? ctx.req.headers.cookie : undefined)[SESSION_COOKIE];
+    if (earlier !== undefined) await o.sessions.destroy(earlier);
+    const created = await o.sessions.create(s.email, label, undefined, s.tenantId);
+    ctx.res.setHeader('Set-Cookie', sessionCookie(created.id, { secure: o.secureFor(ctx.req) }));
+    return true;
+  };
 }
 
 /**

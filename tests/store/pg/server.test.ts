@@ -3,7 +3,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { Db } from '../../../src/store/db.ts';
 import { PG_LATEST } from '../../../src/store/pg/migrations.ts';
 import { founderNumberIn, openPhoneSession, useEncryptedAuthState } from '../../../src/wa/authState.ts';
-import { onPg, openTestTenantDb, testPg } from '../../helpers/pg.ts';
+import { onPg, openTestPlatformDb, openTestTenantDb, testPg } from '../../helpers/pg.ts';
+import { AuditLog } from '../../../src/web/audit.ts';
+import { SessionStore } from '../../../src/web/sessions.ts';
 
 // The first tests on a real Postgres (S2.7): only inside npm run test:pg (scripts/test-pg.ts); skipped by npm test.
 
@@ -60,5 +62,33 @@ describe.runIf(onPg)('on the Postgres test server', () => {
     expect(await founderNumberIn({ engine: 'postgres', db: a }, key)).toBe('919800000000');
     expect(await founderNumberIn({ engine: 'postgres', db: b }, key)).toBeUndefined(); // another customer's rows
     expect((await useEncryptedAuthState(await openPhoneSession({ engine: 'postgres', db: a }, 'spare'), key)).hasSession).toBe(false);
+  });
+});
+
+describe.runIf(onPg)('customer sessions on the Postgres test server (S4.8)', () => {
+  const open: Db[] = [];
+  afterEach(async () => {
+    for (const db of open.splice(0)) await db.close();
+  });
+
+  it('a session keeps its customer, and P4 refuses one written without a customer', async () => {
+    const customer = await openTestTenantDb('session test');
+    const platform = openTestPlatformDb();
+    open.push(customer, platform);
+    const sessions = new SessionStore(platform, { now: () => new Date() });
+    const s = await sessions.create('customer@example.com', 'Test', undefined, customer.tenantId);
+    expect((await sessions.get(s.id))?.tenantId).toBe(customer.tenantId);
+    await expect(
+      platform.run("INSERT INTO web_sessions (id_hash, email, csrf_hash, created_at, expires_at, last_seen_at) VALUES ('h', 'e@example.com', 'c', 't', 't', 't')"),
+    ).rejects.toThrow(/tenant_id/);
+  });
+
+  it('the sign-in audit row lands in the customer’s own tables only (RLS), through forTenant on the shared pool', async () => {
+    const a = await openTestTenantDb('a');
+    const b = await openTestTenantDb('b');
+    open.push(a, b);
+    await new AuditLog(a.forTenant(b.tenantId), { now: () => new Date() }).record({ actor: 'x@example.com', event: 'Signed in', kind: 'auth', detail: 'Test' });
+    expect((await b.get<{ n: number }>("SELECT COUNT(*) AS n FROM audit_log WHERE event = 'Signed in'"))!.n).toBe(1);
+    expect((await a.get<{ n: number }>("SELECT COUNT(*) AS n FROM audit_log WHERE event = 'Signed in'"))!.n).toBe(0);
   });
 });

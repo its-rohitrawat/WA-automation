@@ -9,7 +9,7 @@ import { ensureFounderTenant } from './platform/store.ts';
 import { startFounderRuntime, StartupExit } from './runtime/customerRuntime.ts';
 import { GlobalSpend } from './spend/globalSpend.ts';
 import type { Db } from './store/db.ts';
-import { openPlatformStore, openStore } from './store/open.ts';
+import { customerDbsOf, openPlatformStore, openStore } from './store/open.ts';
 import { acquireLock, AlreadyRunningError } from './util/lock.ts';
 import { createLogger } from './util/logger.ts';
 import { SessionDecryptError } from './wa/authState.ts';
@@ -73,7 +73,9 @@ async function main(): Promise<void> {
     // The platform-wide daily ceiling (S4.3, D3) over spend billed to the founder: the founder's runtime joins it.
     const globalSpend = new GlobalSpend({ capUsd: env.PLATFORM_DAILY_SPEND_CAP_USD });
     handedOver = true;
-    const rt = await startFounderRuntime({ tenantId: env.TENANT_ID, env, log, db, platformDb, key, configs, lock, globalSpend });
+    const rt = await startFounderRuntime({
+      tenantId: env.TENANT_ID, env, log, db, platformDb, key, configs, lock, globalSpend, ...(customerDbsOf(db) ? { customerDb: customerDbsOf(db)! } : {}),
+    });
     const { control, agentRoutes } = rt;
     rt.start();
     // Owner dashboard: off (the default) means no web server and no port. Not awaited here, so the stop handlers below

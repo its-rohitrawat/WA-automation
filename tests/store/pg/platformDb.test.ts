@@ -39,7 +39,7 @@ const ALLOWED: Record<string, RegExp[]> = {
     /^if \(platformDb\.engine === 'sqlite'\) await ensurePlatformSchema\(platformDb\);$/,
     /^await ensureFounderTenant\(platformDb, \{/,
     // Handed to the founder's runtime (its platform and sign-up deps) and to the dashboard (SessionStore).
-    /^const rt = await startFounderRuntime\(\{[^}]*\bplatformDb\b/,
+    /^tenantId: env\.TENANT_ID, env, log, db, platformDb, key, configs, lock, globalSpend,/,
     /^env, db, platformDb, log, control, platform: rt\.platform, customerSessions:/,
     // Closed at shutdown and on a failed start, when it is its own pool.
     /^const platformStore = platformDb !== db \? platformDb : undefined;$/,
@@ -94,7 +94,7 @@ describe('the platform Db reaches the platform code and SessionStore only (S2.8,
       const lines = codeLines(readFileSync(join(SRC, path), 'utf8'));
       for (const re of rules) expect(lines.some((l) => re.test(l)), `${path}: ${re}`).toBe(true);
     }
-    expect(readFileSync(join(SRC, 'main.ts'), 'utf8')).toMatch(/import \{ openPlatformStore, openStore \} from '\.\/store\/open\.ts';/);
+    expect(readFileSync(join(SRC, 'main.ts'), 'utf8')).toMatch(/import \{[^}]*\bopenPlatformStore\b[^}]*\} from '\.\/store\/open\.ts';/);
   });
 
   it('catches a new opener, a new consumer, an alias and a use in another file, and lets comments through', () => {

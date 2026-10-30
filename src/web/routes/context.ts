@@ -11,7 +11,7 @@ export interface OwnerContext {
   /** 12 hex characters: ties the audit line to the request log. */
   requestId: string;
   /**
-   * The session's customer and role (S4.8), from the session record only: never from the URL, query, body or a header.
+   * The session's customer and role (S4.8), from the session record only: never from the request's URL, body or headers.
    * Set by the mounting code; absent (a test's hand-made context) is never the founder.
    */
   tenantId?: string;

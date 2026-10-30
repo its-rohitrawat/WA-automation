@@ -110,12 +110,20 @@ export async function withTenant<T>(pool: PgPool, tenantId: string, fn: (q: Sql)
 export class PgTenantDb implements Db {
   readonly engine = 'postgres' as const;
   readonly #pool: PgPool;
+  readonly #ownsPool: boolean;
   readonly tenantId: string;
 
-  constructor(pool: PgPool, tenantId: string) {
+  /** ownsPool false: a customer's Db on a pool another Db owns (forTenant); its close() leaves the pool open. */
+  constructor(pool: PgPool, tenantId: string, o: { ownsPool?: boolean } = {}) {
     if (!UUID.test(tenantId)) throw new Error('PgTenantDb needs a customer id (a UUID)');
     this.#pool = pool;
+    this.#ownsPool = o.ownsPool !== false;
     this.tenantId = tenantId;
+  }
+
+  /** Another customer's Db on this one's pool (wa_app, RLS by that customer). Closing it never ends the pool. */
+  forTenant(tenantId: string): PgTenantDb {
+    return new PgTenantDb(this.#pool, tenantId, { ownsPool: false });
   }
 
   #outside(): void {
@@ -143,8 +151,9 @@ export class PgTenantDb implements Db {
     this.#outside();
     return withTenant(this.#pool, this.tenantId, fn, { write: true, owner: this });
   }
+  /** Ends the pool, unless another Db owns it (forTenant). */
   async close(): Promise<void> {
-    await this.#pool.end();
+    if (this.#ownsPool) await this.#pool.end();
   }
 }
 

@@ -44,6 +44,19 @@ const SET = "SELECT set_config('app.tenant_id', $1, true)";
 const LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('wa:' || $1, 0))";
 
 describe('PgTenantDb: one customer, every call its own withTenant transaction', () => {
+  it('forTenant: another customer on the same pool, scoped to that customer; closing it never ends the pool (S4.8)', async () => {
+    const pool = new FakePool();
+    const founder = new PgTenantDb(pool, T1);
+    const other = founder.forTenant('00000000-0000-4000-8000-0000000000c2');
+    await other.get('SELECT n FROM t');
+    expect(pool.connections[0]!.log[1]).toEqual([SET, ['00000000-0000-4000-8000-0000000000c2']]);
+    await other.close();
+    expect(pool.ended).toBe(false);
+    expect(() => founder.forTenant('founder')).toThrow(/UUID/);
+    await founder.close();
+    expect(pool.ended).toBe(true);
+  });
+
   it('a read: BEGIN, the customer for this transaction only, the statement translated, COMMIT, released; no lock', async () => {
     const pool = new FakePool();
     const db = new PgTenantDb(pool, T1);

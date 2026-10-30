@@ -2,6 +2,14 @@ import type { Env } from '../config/env.ts';
 import { trackerDbPath } from '../config/paths.ts';
 import { openDb, type Db } from './db.ts';
 import { openPgPool, PgPlatformDb, PgTenantDb, type PgPool } from './engine/pg.ts';
+
+/**
+ * Each customer's own Db on the tracker's pool (Postgres: wa_app, RLS by customer), for writes into a customer's tables made
+ * outside its runtime (the sign-in's audit row, S4.8). SQLite: undefined (one customer, the founder).
+ */
+export function customerDbsOf(tracker: Db): ((tenantId: string) => Db) | undefined {
+  return tracker instanceof PgTenantDb ? (tenantId) => tracker.forTenant(tenantId) : undefined;
+}
 import { PG_LATEST } from './pg/migrations.ts';
 
 // The engine switch (SaaS S2, plan 4.7): DB_ENGINE=sqlite (the default) keeps data/tracker.db as before;
