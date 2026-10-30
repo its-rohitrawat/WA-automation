@@ -2,6 +2,7 @@ import { request } from 'node:http';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { UptimeLog } from '../../src/health/uptimeLog.ts';
+import { ensurePlatformSchema } from '../../src/platform/schema.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { mountAgentRoutes, type AgentRoutesDeps } from '../../src/web/mountRoutes.ts';
@@ -32,8 +33,9 @@ function deps(db: Awaited<ReturnType<typeof seededDb>>, clock: ReturnType<typeof
   };
 }
 
-async function boot() {
+async function boot(extra: (db: Awaited<ReturnType<typeof seededDb>>, clock: ReturnType<typeof manualClock>) => Partial<AgentRoutesDeps> = () => ({})) {
   const db = await seededDb();
+  await ensurePlatformSchema(db); // what main.ts does before the platform routes are mounted (S5H.1)
   const clock = manualClock(NOW);
   const started: string[] = [];
   const web = await startDashboard({
@@ -43,7 +45,7 @@ async function boot() {
     },
     db, log: silentLogger(), control: {}, clock,
     google: { exchange: () => Promise.reject(new Error('no Google')), verifier: () => Promise.reject(new Error('no Google')) },
-    mount: (m) => mountAgentRoutes(m, deps(db, clock, started)),
+    mount: (m) => mountAgentRoutes(m, { ...deps(db, clock, started), ...extra(db, clock) }),
   });
   servers.push(web!);
   const port = web!.address()!.port;
@@ -57,7 +59,16 @@ async function boot() {
       r.on('error', reject);
       r.end(body);
     });
-  return { port, session, post, started };
+  const get = (path: string, signedIn = true) =>
+    new Promise<{ status: number; type: string }>((resolve, reject) => {
+      const r = request({ host: '127.0.0.1', port, path, headers: signedIn ? { cookie: `wa_session=${session.id}` } : {} }, (res) => {
+        res.resume();
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, type: String(res.headers['content-type'] ?? '') }));
+      });
+      r.on('error', reject);
+      r.end();
+    });
+  return { db, port, session, post, get, started };
 }
 
 describe('the combined dashboard routes', () => {
@@ -85,6 +96,36 @@ describe('the combined dashboard routes', () => {
     const local = await post2(path, { origin: PUBLIC, 'x-csrf-token': s2.csrf });
     expect(local.status).toBe(200);
     expect(local.cookie).not.toContain('Secure');
+  });
+});
+
+describe('the platform and sign-up routes (SaaS S5H.2, S5H.6): mounted only when their deps are given', () => {
+  const INVITES = '/dashboard/api/platform/invites';
+
+  it('without them (today’s main.ts) neither the invite API nor the sign-up page is there', async () => {
+    const { get } = await boot();
+    expect((await get(INVITES)).status).toBe(404);
+    expect((await get('/signup/api/invite?invite=x')).status).toBe(404);
+  });
+
+  it('with the platform deps the founder (a dashboard owner) reads the invites, behind the owner guard', async () => {
+    const { get } = await boot((db, clock) => ({
+      platform: { db, clock, log: silentLogger(), publicUrl: PUBLIC, founderName: 'Founder', mailer: () => null },
+    }));
+    const signedIn = await get(INVITES);
+    expect(signedIn.status).toBe(200);
+    expect(signedIn.type).toContain('application/json');
+    expect((await get(INVITES, false)).status).toBe(401);
+  });
+
+  it('with the sign-up deps the public sign-up answers without an owner session', async () => {
+    const { get } = await boot((db, clock) => ({
+      signup: { db, clock, log: silentLogger(), publicUrl: PUBLIC, founderName: 'Founder', google: null, startSession: async () => false, secure: () => true },
+    }));
+    const page = await get('/signup', false);
+    expect(page.status).toBe(200);
+    expect(page.type).toContain('text/html');
+    expect((await get('/signup/api/invite?invite=x', false)).type).toContain('application/json');
   });
 });
 

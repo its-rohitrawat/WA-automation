@@ -21,6 +21,7 @@ import type { ApiResult, AuditFn, OwnerContext } from './routes/context.ts';
 import { registerControlApi } from './routes/controlScreens.ts';
 import { CALLBACK_PATH, GoogleConnectRoutes, type GoogleConnectDeps } from './routes/google.ts';
 import { groupsApplyHandler, groupsBulkHandler, groupsListHandler, suggestCodeHandler, type GroupsDeps } from './routes/groups.ts';
+import { mountPlatformRoutes, mountSignupRoutes, type PlatformRouteDeps, type SignupDeps } from './routes/platform.ts';
 import { actionSession, readBody } from './routes/respond.ts';
 import { WhatsAppLinkRoutes } from './routes/whatsapp.ts';
 import { registerWorkApi } from './routes/work.ts';
@@ -64,6 +65,10 @@ export interface AgentRoutesDeps {
   links: LinkSessions;
   /** The AI assistant (DASHBOARD_ASSISTANT): its Claude client, the agent's spend guard and the prices. None: no assistant. */
   assistant?: { ai: AssistantAi; paid: App['paidCalls']; prices: Prices };
+  /** The platform screens (SaaS S5): invites, customers, onboarding. Absent: no platform routes. */
+  platform?: Omit<PlatformRouteDeps, 'isFounder'>;
+  /** The public sign-up (/signup, SaaS S5H.6): no owner session, rate-limited per address. Absent: no sign-up routes. */
+  signup?: SignupDeps;
 }
 
 /** The owner's context for a D2/D3 handler. sessionId is the session's hash, never the cookie value. */
@@ -119,6 +124,9 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   read('/dashboard/api/groups/suggest-code', ({ url }, o) => suggestCodeHandler(groups, o, url.searchParams.get('name') ?? ''));
   read('/dashboard/api/clients', async (_ctx, o) => await clientsListHandler(d.clients, o));
   read('/dashboard/api/clients/:code', async ({ params }, o) => await clientDetailHandler(d.clients, o, params.code!));
+  // The platform (SaaS S5). Its owner is a dashboard owner (DASHBOARD_OWNER_EMAILS) until customer sessions exist (S4.8).
+  if (d.platform) mountPlatformRoutes({ read, change }, { ...d.platform, isFounder: (o) => owners.has(o.actor.trim().toLowerCase()) });
+  if (d.signup) mountSignupRoutes(router, d.signup);
   if (d.chat) {
     const chat: ChatDeps = { ...d.chat, audit };
     read('/dashboard/api/clients/:code/chat', async ({ params, url }, o) =>
