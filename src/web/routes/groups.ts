@@ -1,9 +1,9 @@
 import { createHmac } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import { DomainSchema } from '../../config/domains.ts';
-import { parseGroupsFile, type ClientConfig } from '../../config/groups.ts';
-import { applyGroupChanges, GroupChangeError, type GroupChangeResult, type GroupChanges } from '../../config/groupsWriter.ts';
+import type { ClientConfig } from '../../config/groups.ts';
+import type { GroupsStore } from '../../config/groupsStore.ts';
+import { GroupChangeError, type GroupChangeResult, type GroupChanges } from '../../config/groupsWriter.ts';
 import { groupsOverview, type GroupDirectory, type GroupFilter, type GroupRow, type GroupsOverview } from '../../control/groups.ts';
 import { getClientByGroupId, listClients } from '../../store/clients.ts';
 import type { Db } from '../../store/db.ts';
@@ -21,8 +21,11 @@ import { fail, ok, type ApiError, type ApiResult, type AuditFn, type OwnerContex
 export interface GroupsDeps {
   db: Db;
   directory: GroupDirectory;
-  /** config/allowed-groups.json */
-  groupsFile: string;
+  /**
+   * Where the allow-list is kept (Phase B): the founder's config/allowed-groups.json (fileGroupsStore), or a customer's
+   * own database (dbGroupsStore). Every change goes through it, under the same rules.
+   */
+  store: GroupsStore;
   /** The current parsed allow-list. */
   configs: () => ClientConfig[];
   /** The opaque key the browser gets for a group id (makeGroupKey with a server secret). */
@@ -180,7 +183,7 @@ export async function groupsApplyHandler(deps: GroupsDeps, ctx: OwnerContext, bo
 
   let result: GroupChangeResult;
   try {
-    result = await applyGroupChanges(deps.groupsFile, changes, { db: deps.db });
+    result = await deps.store.apply(changes);
   } catch (e) {
     if (e instanceof GroupChangeError) {
       return fail(422, 'group_change', withoutIds(e.message), { field: e.field, key: e.groupId === null ? null : deps.groupKey(e.groupId) });
@@ -225,15 +228,16 @@ export function clientPart(name: string): string {
   return (name.split(/\s+[x×–-]\s+/i)[0]?.trim() || name.trim()).slice(0, NAME_MAX).trim();
 }
 
-/** The first code for this name not used in the allow-list file nor by any client row, or null. */
+/** The first code for this name not used in the allow-list (a list that cannot be read gives none) nor by any client row, or null. */
 async function freeCode(deps: GroupsDeps, name: string): Promise<string | null> {
-  const used = new Set([...fileCodes(deps.groupsFile), ...(await listClients(deps.db, false)).map((c) => c.code)]);
+  const listed = await deps.store.list().catch(() => [] as ClientConfig[]);
+  const used = new Set([...listed.map((c) => c.code), ...(await listClients(deps.db, false)).map((c) => c.code)]);
   return codeCandidates(name).find((c) => !used.has(c)) ?? null;
 }
 
 /**
  * POST /dashboard/api/groups/bulk with { action: 'approve' | 'ignore' | 'unignore', keys }: up to 50 groups, each on its
- * own. An approve is the single approve's own write (applyGroupChanges, one group at a time, in order), with the name and
+ * own. An approve is the single approve's own write (the store's apply, one group at a time, in order), with the name and
  * code the approve form would suggest (a former client keeps its name and code); one group failing does not stop the
  * others, and each result says why. Ignore sets an untracked group aside; unignore brings it back.
  */
@@ -286,7 +290,7 @@ export async function groupsBulkHandler(deps: GroupsDeps, ctx: OwnerContext, bod
       continue;
     }
     try {
-      const result = await applyGroupChanges(deps.groupsFile, { approve: [{ groupId, name, code }] }, { db: deps.db });
+      const result = await deps.store.apply({ approve: [{ groupId, name, code }] });
       configs = result.configs;
       await deleteKv(deps.db, IGNORED + key);
       for (const g of result.approved) await auditLine(deps, ctx, `Group approved · ${g.name} (${g.code})`);
@@ -328,15 +332,6 @@ export function codeCandidates(name: string): string[] {
   add(letters.slice(0, 4));
   if (letters.length >= 2) for (let i = 0; i < 26; i++) add(letters.slice(0, 2) + String.fromCharCode(65 + i));
   return out;
-}
-
-/** The codes in the allow-list file as it is on disk now; a missing or bad file gives none. */
-function fileCodes(path: string): string[] {
-  try {
-    return parseGroupsFile(readFileSync(path, 'utf8').replace(/^﻿/, '')).map((c) => c.code);
-  } catch {
-    return [];
-  }
 }
 
 /** GET /dashboard/api/groups/suggest-code?name= : the first code not used in the allow-list file nor by any client row. */

@@ -1,3 +1,4 @@
+import { dbGroupsStore } from '../config/groupsStore.ts';
 import { AiKeys, type KeyTester } from '../platform/aiKey.ts';
 import type { Db } from '../store/db.ts';
 import type { Sql } from '../store/engine/types.ts';
@@ -41,10 +42,11 @@ const NONE: RuntimeFacts = { whatsappLinked: false, spareLinked: false, driveCon
 
 export async function startSetupShell(d: SetupShellDeps): Promise<SetupShell> {
   const aiKeys = new AiKeys({ db: d.db, platform: d.platform, tenantId: d.tenantId, dataKey: d.dataKey, tester: d.keyTester, clock: d.clock });
+  const groups = dbGroupsStore({ db: d.db, onChange: () => undefined, log: d.log });
   let facts: RuntimeFacts = NONE;
   const read = async (): Promise<RuntimeFacts> => ({
     ...NONE,
-    groupsApproved: (await d.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM clients WHERE active = 1'))?.n ?? 0, // its approved groups
+    groupsApproved: (await groups.list()).length, // its allow-list, as stored in its own database
     reportTimeSet: (await d.db.get("SELECT 1 AS x FROM settings WHERE k = 'reportTime'")) !== undefined,
     aiKey: await aiKeys.state(),
   });

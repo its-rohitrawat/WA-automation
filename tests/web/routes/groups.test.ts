@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadGroupsFile, type ClientConfig } from '../../../src/config/groups.ts';
+import { fileGroupsStore } from '../../../src/config/groupsStore.ts';
 import { GroupDirectory, type GroupSource } from '../../../src/control/groups.ts';
 import { syncClients } from '../../../src/store/clients.ts';
 import { openDb, type Db } from '../../../src/store/db.ts';
@@ -75,7 +76,7 @@ beforeEach(async () => {
   deps = {
     db,
     directory: new GroupDirectory({ gateway: src, clock }),
-    groupsFile: file,
+    store: fileGroupsStore(file, { db }),
     configs: () => loadGroupsFile(file),
     groupKey: k,
     audit: async (e) => { audits.push(e); },

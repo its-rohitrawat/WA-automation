@@ -14,6 +14,7 @@ import type { Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { seededDb } from '../helpers/db.ts';
+import { dbGroupsStore } from '../../src/config/groupsStore.ts';
 
 // A customer's FULL runtime (Phase B 2 and 3), on fakes: SQLite stands in for each customer's Postgres Db (with wa_auth
 // as Postgres has it), and the Supervisor is told it is on Postgres. Every key here is a placeholder.
@@ -72,6 +73,8 @@ async function setup(o: { keyFor: ('a' | 'b')[] }) {
   for (const k of ['a', 'b'] as const) {
     const db = await seededDb(); // its own two groups
     await db.exec(WA_AUTH);
+    // Its own allow-list, approved through its own groups store (a0's dbGroupsStore): the source a runtime starts from.
+    await dbGroupsStore({ db, onChange: () => undefined, log: silentLogger() }).apply({ approve: [{ groupId: '120363111111111111@g.us', name: 'Acme Ltd', code: 'ACM' }, { groupId: '120363222222222222@g.us', name: 'Blue Bay', code: 'BLU' }] });
     opened.push(db);
     dbs[ids[k]] = db;
     if (o.keyFor.includes(k)) {

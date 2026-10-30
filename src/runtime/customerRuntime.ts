@@ -7,6 +7,7 @@ import { ClaudeMeetingClient } from '../brain/meetingClient.ts';
 import { parseEnv, requireKey } from '../config/env.ts';
 import type { Env } from '../config/env.ts';
 import { watchGroupsFile } from '../config/groups.ts';
+import { fileGroupsStore } from '../config/groupsStore.ts';
 import type { ClientConfig } from '../config/groups.ts';
 import { sessionDbPath } from '../config/paths.ts';
 import { PrioritySettings } from '../config/prioritySettings.ts';
@@ -238,9 +239,9 @@ export async function buildCustomerRuntime(
     sessionDb = await openPhoneSession(sessions, 'founder', founderWatch ? { onChange: founderWatch.refresh } : {});
     await founderWatch?.start();
 
-    // The founder's groups file is synced in (a group approved while the service was stopped gets its history queued); a
-    // customer's groups are its own clients rows already (Phase B: no file).
-    if (t.founder) await syncClients(db, configs, systemClock.now());
+    // The allow-list is synced in (a group approved while the service was stopped gets its history queued): the founder's
+    // from its groups file, a customer's from its own database (dbGroupsStore.list(), read by the Supervisor).
+    await syncClients(db, configs, systemClock.now());
     const allow = new AllowList(configs.map((c) => c.groupId));
 
     // openPhoneSession has already restored a session left by a dashboard link that never finished (D3).
@@ -521,7 +522,7 @@ export async function buildCustomerRuntime(
           settings: store,
           priority: prioritySettings,
           groups: {
-            db: trackerStore, directory, groupsFile: env.GROUPS_FILE, configs: () => currentConfigs,
+            db: trackerStore, directory, store: fileGroupsStore(env.GROUPS_FILE, { db: trackerStore }), configs: () => currentConfigs,
             groupKey: makeGroupKey(deriveSubkey(key, GROUP_KEY_INFO)), log, clock: systemClock,
           },
           clients: { db: trackerStore, directory, clock: systemClock, quietMinutes: env.QUIET_MINUTES },

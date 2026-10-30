@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { Env } from '../config/env.ts';
 import { FOUNDER_TENANT_ID } from '../config/env.ts';
-import type { ClientConfig } from '../config/groups.ts';
+import { dbGroupsStore } from '../config/groupsStore.ts';
 import { modelsListTester, type AiKeys, type KeyTester } from '../platform/aiKey.ts';
 import { TenantKeys } from '../platform/tenantKeys.ts';
 import type { Db } from '../store/db.ts';
@@ -21,7 +21,7 @@ import { Supervisor, type RuntimeHandle } from './supervisor.ts';
 // - A customer gets a SETUP SHELL (src/runtime/setupShell.ts): its Getting started facts from its own Db and its AiKeys,
 //   no AI work, no WhatsApp socket, no Google. An ACTIVE customer that has added its own Anthropic key gets its FULL
 //   runtime instead (Phase B): built from its profile (customerProfile: deny by default), its own Db, its data key and
-//   its groups from its own clients rows. Its dashboard routes come with scope (Phase B 4). On SQLite the Supervisor
+//   its allow-list from its own database (dbGroupsStore). Its dashboard routes come with scope (Phase B 4). On SQLite the Supervisor
 //   itself refuses every customer (refused:postgres), so only the founder "runs".
 
 export interface PlatformSupervisor {
@@ -37,14 +37,6 @@ export interface PlatformSupervisor {
    * runtime is restarted alone); false for the founder's or no one's, which keeps today's exit.
    */
   crashed(e: unknown): boolean;
-}
-
-/** A customer's groups: its own active clients rows (no file). Meetings are off for customers in Phase B. */
-export async function customerConfigs(db: Db): Promise<ClientConfig[]> {
-  const rows = await db.all<{ code: string; name: string; groupId: string; phases: string }>(
-    'SELECT code, name, group_id AS groupId, phases FROM clients WHERE active = 1 ORDER BY id',
-  );
-  return rows.map((r) => ({ code: r.code, name: r.name, groupId: r.groupId, phases: JSON.parse(r.phases) as string[], emailDomains: [], meetingKeywords: [] }));
 }
 
 export function platformSupervisor(o: {
@@ -108,7 +100,8 @@ export function platformSupervisor(o: {
             { id: t.id, founder: false, crashed: t.crashed },
             {
               env: customerProfile(o.env, { tenantId: t.id, aiKey }), log: o.log, db, key: await tenantKeys.dataKey(t.id),
-              configs: await customerConfigs(db), localEngine: o.localEngine,
+              // Its allow-list as stored in its own database: what its start syncs in (a0's reload_failed recovery).
+              configs: await dbGroupsStore({ db, onChange: () => undefined, log: o.log }).list(), localEngine: o.localEngine,
             },
           );
           rt.start();

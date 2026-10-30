@@ -11,6 +11,7 @@ import type { Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { seededDb } from '../helpers/db.ts';
+import { dbGroupsStore } from '../../src/config/groupsStore.ts';
 
 // The Supervisor as main.ts runs it (S4.5 Phase A, S4.9), on fakes: SQLite stands in for the platform tables and for the
 // customer's own Db, and the Supervisor is told it is on Postgres so a customer starts. A customer gets only a setup
@@ -45,7 +46,9 @@ function watchedEnv(engine: 'sqlite' | 'postgres') {
 
 async function setup(engine: 'sqlite' | 'postgres' = 'postgres') {
   const platformDb = await seededDb();
-  const customerDb = await seededDb(); // Sharma and Mehta: two approved groups
+  const customerDb = await seededDb();
+    // Its own allow-list, approved through its own groups store (a0's dbGroupsStore): the source a runtime starts from.
+    await dbGroupsStore({ db: customerDb, onChange: () => undefined, log: silentLogger() }).apply({ approve: [{ groupId: '120363111111111111@g.us', name: 'Acme Ltd', code: 'ACM' }, { groupId: '120363222222222222@g.us', name: 'Blue Bay', code: 'BLU' }] });
   opened.push(platformDb, customerDb);
   await ensurePlatformSchema(platformDb);
   await ensureFounderTenant(platformDb, { name: 'Your business', at: AT });
