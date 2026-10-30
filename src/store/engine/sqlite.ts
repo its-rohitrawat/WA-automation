@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
 import type { Migration } from '../migrations.ts';
+import { TxMisuseError } from './errors.ts';
 import { SerialQueue } from './queue.ts';
 import { migrate } from './sqliteMigrate.ts';
 import type { Db, Params, RunResult, Sql } from './types.ts';
@@ -24,13 +25,7 @@ export function rawOf(db: Db | undefined): Database.Database | undefined {
 // FIFO queue, which makes today's single writer explicit: an async transaction (BEGIN IMMEDIATE … COMMIT) holds the
 // queue across its awaits, so nothing else on the connection runs inside it. A nested transaction is a savepoint.
 
-/** Using the outer handle inside a transaction, or raw while another flow holds one. */
-export class TxMisuseError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'TxMisuseError';
-  }
-}
+export { TxMisuseError };
 
 const inTx = new AsyncLocalStorage<SqliteDb>();
 const STATEMENTS_MAX = 500;
