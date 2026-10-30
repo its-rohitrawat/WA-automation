@@ -11,6 +11,7 @@ import { platformSupervisor, type PlatformSupervisor } from './runtime/platformS
 import { GlobalSpend } from './spend/globalSpend.ts';
 import type { Db } from './store/db.ts';
 import { customerDbsOf, openPlatformStore, openStore } from './store/open.ts';
+import { processLocalEngine } from './stt/local.ts';
 import { acquireLock, AlreadyRunningError } from './util/lock.ts';
 import { systemClock } from './util/clock.ts';
 import { createLogger } from './util/logger.ts';
@@ -74,10 +75,12 @@ async function main(): Promise<void> {
       await ensureFounderTenant(platformDb, { name: 'Your business', at: new Date().toISOString() });
     }
     const configs = loadGroupsFile(env.GROUPS_FILE);
+    // The one local speech engine for the process (every runtime shares it: one model on the CPU at a time).
+    const localEngine = processLocalEngine(env);
     // The Supervisor (S4.5 Phase A), only with the platform on: the founder adopted, a setup shell for each customer
     // (Postgres only: on SQLite the Supervisor refuses every customer).
     if (env.PLATFORM_ENABLED) {
-      platform = platformSupervisor({ env, log, clock: systemClock, platformDb, master: key, customerDb: customerDbsOf(db) });
+      platform = platformSupervisor({ env, log, clock: systemClock, platformDb, master: key, customerDb: customerDbsOf(db), localEngine });
     }
 
     // The founder's runtime (S4.4, src/runtime/customerRuntime.ts): everything for customer #1 between the databases
@@ -88,6 +91,7 @@ async function main(): Promise<void> {
     const rt = await startFounderRuntime({
       tenantId: env.TENANT_ID, env, log, db, platformDb, key, configs, lock, globalSpend, ...(customerDbsOf(db) ? { customerDb: customerDbsOf(db)! } : {}),
       ...(platform ? { platformHooks: platform.hooks } : {}),
+      localEngine,
     });
     const { control, agentRoutes } = rt;
     // The first reconcile (the founder adopted, customers' shells), awaited here: nothing is awaited after rt.start().

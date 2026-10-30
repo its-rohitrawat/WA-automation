@@ -158,6 +158,11 @@ export interface RuntimeDeps {
    */
   platformDb?: Db;
   /**
+   * The process's one local speech engine (processLocalEngine, made once in main.ts), shared by every runtime so only
+   * one model runs on the CPU at a time; undefined when no setting is local. Not given (tests): this runtime makes its own.
+   */
+  localEngine?: LocalEngine | undefined;
+  /**
    * Each customer's own Db (Postgres: customerDbsOf, on the tracker's pool). Customer sessions need it for their sign-in's audit
    * row; absent (SQLite) none is started.
    */
@@ -337,7 +342,9 @@ export async function buildCustomerRuntime(
     // Phase 3: off (the default) means no meeting dependency is built and no meeting call of any kind is made.
     // One local engine for voice notes and meetings (STT_PROVIDER or VOICE_STT_PROVIDER local), so only one model runs on
     // the CPU at a time; each one's work folder is inside its DATA_DIR/tmp. It checks no file and runs nothing yet.
-    const localEngine = sharedLocalEngine(env);
+    const ownSpeechLocal = env.STT_PROVIDER === 'local' || env.VOICE_STT_PROVIDER === 'local';
+    // A runtime's work folders are inside its DATA_DIR/tmp (a customer's: DATA_DIR/tenants/<id>/tmp), which the engine allows.
+    const localEngine = Object.hasOwn(d, 'localEngine') ? (ownSpeechLocal ? d.localEngine : undefined) : sharedLocalEngine(env);
     const meetings = env.MEETINGS_ENABLED ? await meetingDeps({ env, db, api: google.meetings!, apiKey, prices, configs, log, localEngine }) : undefined;
     // Phase 2b: the voice transcriber VOICE_STT_PROVIDER names (src/voiceDeps.ts, tested). A local engine that is not set
     // up, or no ffmpeg, never stops the service: voice notes are then kept, not transcribed, and Health says why.

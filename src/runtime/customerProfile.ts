@@ -47,7 +47,8 @@ export function customerProfile(env: Env, o: { tenantId: string; aiKey: string |
   if (o.makeDir !== false) mkdirSync(join(dataDir), { recursive: true, mode: 0o700 });
   const copied: Partial<Record<keyof Env, unknown>> = {};
   for (const k of CUSTOMER_KEYS) if (env[k] !== undefined) copied[k] = env[k];
-  const speech = sttEnvFor({ ...env, ...copied } as Env, false);
+  // Only the two speech settings are read here: a spread of the founder's env would read every key, its secrets too.
+  const speech = sttEnvFor({ ...copied, STT_PROVIDER: env.STT_PROVIDER, VOICE_STT_PROVIDER: env.VOICE_STT_PROVIDER } as Env, false);
   const out: Partial<Record<keyof Env, unknown>> = {
     ...copied,
     ...OFF,
