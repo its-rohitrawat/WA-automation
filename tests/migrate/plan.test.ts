@@ -40,7 +40,9 @@ describe('the copy plan', () => {
     const plan = await copyPlan(db);
     const clients = plan.find((p) => p.table === 'clients')!;
     expect(clients.columns).toEqual((await db.all<{ name: string }>("SELECT name FROM pragma_table_info('clients') ORDER BY cid")).map((c) => c.name));
-    expect(plan.filter((p) => p.platform).map((p) => p.table).sort()).toEqual(['invites', 'memberships', 'platform_audit', 'tenants', 'users']);
+    expect(plan.filter((p) => p.platform).map((p) => p.table).sort()).toEqual(['invites', 'memberships', 'platform_audit', 'tenant_keys', 'tenants', 'users']);
+    // The wrapped data keys (S4.1) go across as they are: they stay wrapped by the same master key.
+    expect(plan.findIndex((p) => p.table === 'tenants')).toBeLessThan(plan.findIndex((p) => p.table === 'tenant_keys'));
     expect(plan.every((p) => Object.keys(p.fixed).length === 0)).toBe(true);
   });
 
