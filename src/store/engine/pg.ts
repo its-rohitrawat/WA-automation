@@ -192,7 +192,7 @@ export class PgPlatformDb implements Db {
 
 /** A single connection for db-bootstrap and db-migrate: plain SQL (DDL, roles), no translation, no customer. */
 export interface AdminConnection {
-  query(text: string, values?: readonly unknown[]): Promise<{ rows: Record<string, unknown>[]; rowCount: number | null }>;
+  sql(text: string, values?: readonly unknown[]): Promise<{ rows: Record<string, unknown>[]; rowCount: number | null }>;
   end(): Promise<void>;
 }
 
@@ -200,5 +200,5 @@ export interface AdminConnection {
 export async function openAdminConnection(url: string): Promise<AdminConnection> {
   const c = new pg.Client({ connectionString: url, application_name: 'wa-agent-admin', connectionTimeoutMillis: 10_000 });
   await c.connect();
-  return c;
+  return { sql: (text, values) => c.query(text, values), end: () => c.end() };
 }

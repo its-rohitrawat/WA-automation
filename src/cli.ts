@@ -12,6 +12,7 @@ import {
   assignMeetingToClient, defaultMeetingDeps, meetingBackfillCommand, meetingCheckCommand, meetingListLines, retryLine, retryMeetingById, skipMeetingById,
 } from './cli/meetings.ts';
 import { transcribeVoiceCommand } from './cli/transcribeVoice.ts';
+import { dbBootstrapCommand, dbMigrateCommand, defaultDbDeps } from './cli/db.ts';
 
 // Without these Node prints the raw error (Boom data, gaxios request config), bypassing any redaction.
 function fatal(err: unknown): void {
@@ -181,6 +182,16 @@ meeting
   .command('check')
   .description("Read-only: the last 7 days' recordings, their client match and whether each file opens")
   .action(async () => meetingCheckCommand(meetingDeps()));
+
+program
+  .command('db-bootstrap')
+  .description('Postgres, once: create the agent roles and the database (asks for the superuser and wa_backup passwords)')
+  .option('--superuser <name>', 'the Postgres superuser', 'postgres')
+  .action(async (opts: { superuser: string }) => dbBootstrapCommand(loadEnv(), opts, defaultDbDeps()));
+program
+  .command('db-migrate')
+  .description('Postgres: apply the schema changes this version needs, as wa_owner')
+  .action(async () => dbMigrateCommand(loadEnv(), defaultDbDeps()));
 
 program.parseAsync(process.argv).catch((e: unknown) => {
   console.error(e instanceof Error ? e.message : 'Command failed');
