@@ -249,7 +249,7 @@ function safely(fn: (e: LinkEvent) => void, e: LinkEvent): void {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The session backup helpers live in authState.ts (openSessionDb restores an unfinished link's backup); re-exported here.
+// The session backup helpers live in authState.ts (openPhoneSession restores an unfinished link's backup); re-exported here.
 export { backupAndReset, dropBackup, recoverInterruptedLink, restoreBackup } from './authState.ts';
 
 /**

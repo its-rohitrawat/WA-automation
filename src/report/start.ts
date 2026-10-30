@@ -2,7 +2,7 @@ import { maskNumber, reportRecipient, reportSettings, type Env } from '../config
 import { senderSessionDbPath } from '../config/paths.ts';
 import type { Db } from '../store/db.ts';
 import type { Logger } from '../util/logger.ts';
-import { openSenderSession } from '../wa/authState.ts';
+import { openSenderSession, type SessionHome } from '../wa/authState.ts';
 import { SenderGateway, type SenderSocketFactory } from '../wa/senderGateway.ts';
 import type { ReportSender, ReportSettings } from './types.ts';
 
@@ -28,9 +28,11 @@ export async function openMorningReport(o: {
   log: Logger;
   factory: SenderSocketFactory;
   founderNumber?: string | (() => string | undefined);
+  /** Where the sessions live (sessionHomeOf); data/sender-session.db when not given. */
+  sessions?: SessionHome;
 }): Promise<MorningReportStart> {
   const recipient = reportRecipient(o.env);
-  const opened = await openSenderSession(senderSessionDbPath(o.env.DATA_DIR), o.masterKey);
+  const opened = await openSenderSession(o.sessions ?? senderSessionDbPath(o.env.DATA_DIR), o.masterKey);
   let authProblem: 'unreadable' | 'unavailable' | undefined;
   if (!opened.ok) {
     authProblem = opened.transient ? 'unavailable' : 'unreadable';
@@ -62,6 +64,7 @@ export function senderOpener(o: {
   log: Logger;
   factory: SenderSocketFactory;
   founderNumber?: string | (() => string | undefined);
+  sessions?: SessionHome;
 }): (recipient: string) => Promise<{ sender: ReportSender; close: () => Promise<void>; db: Db | undefined }> {
   return async (recipient) => {
     const r = await openMorningReport({ ...o, env: { ...o.env, REPORT_ENABLED: true, REPORT_RECIPIENT: recipient } });

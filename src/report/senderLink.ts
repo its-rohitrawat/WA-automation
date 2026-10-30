@@ -2,7 +2,7 @@ import { senderSessionDbPath } from '../config/paths.ts';
 import type { Db } from '../store/db.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
-import { openSenderSession, openSessionDb, useSenderAuthState, type EncryptedAuth } from '../wa/authState.ts';
+import { openPhoneSession, openSenderSession, useSenderAuthState, type EncryptedAuth, type SessionHome } from '../wa/authState.ts';
 import { TRACKER_DEVICE_NAME } from '../wa/gateway.ts';
 import { backupAndReset, dropBackup, guardAuth, restoreBackup, type LinkDriver, type LinkOutcome } from '../wa/linkSession.ts';
 import { linkedNumber, linkSender, SENDER_DEVICE_NAME, type SenderSocketFactory } from '../wa/senderGateway.ts';
@@ -63,6 +63,8 @@ export interface SenderScheduler {
 
 export interface SpareLinkDeps {
   dataDir: string;
+  /** Where the sessions live (sessionHomeOf); the data folder's files when not given. */
+  sessions?: SessionHome;
   /** The master key; the spare session's own key is derived from it (useSenderAuthState). */
   key: Buffer;
   factory: SenderSocketFactory;
@@ -92,6 +94,7 @@ export function spareLinkDriver(d: SpareLinkDeps): LinkDriver {
   return {
     async run(hooks, signal): Promise<LinkOutcome> {
       const file = senderSessionDbPath(d.dataDir);
+      const home: SessionHome = d.sessions ?? { engine: 'sqlite', dataDir: d.dataDir };
       const scheduler = d.makeSender ? d.scheduler?.() : undefined;
       let db = d.reportDb?.();
       let own = false;
@@ -114,7 +117,7 @@ export function spareLinkDriver(d: SpareLinkDeps): LinkDriver {
         }
       };
       if (!db) {
-        const opened = await openSenderSession(file, d.key);
+        const opened = await openSenderSession(home, d.key);
         if (opened.ok) {
           db = opened.db;
         } else if (opened.transient) {
@@ -123,10 +126,11 @@ export function spareLinkDriver(d: SpareLinkDeps): LinkDriver {
           return { ok: false, code: 'session_unavailable' }; // the stand-in stays: the session cannot be read anyway
         } else {
           if (opened.code !== 'decrypt_failed') {
+            // Only a file can be damaged: on Postgres the one failure reported is another master key.
             moveDamagedSession(file, clock.now()); // renamed aside, not deleted
             d.log.warn({ code: opened.code }, 'spare phone link: the damaged session file was moved aside');
           }
-          db = openSessionDb(file);
+          db = await openPhoneSession(home, 'spare');
         }
         own = true;
       }

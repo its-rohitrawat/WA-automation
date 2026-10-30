@@ -37,7 +37,7 @@ import { pricesFromEnv } from './spend/pricing.ts';
 import type { Prices } from './spend/pricing.ts';
 import { getClient, syncClients } from './store/clients.ts';
 import type { Db } from './store/db.ts';
-import { openPlatformStore, openStore, storeWarning } from './store/open.ts';
+import { openPlatformStore, openStore } from './store/open.ts';
 import { Ffmpeg, findFfmpeg } from './stt/audio.ts';
 import { sharedLocalEngine, type LocalEngine } from './stt/local.ts';
 import { systemClock } from './util/clock.ts';
@@ -46,7 +46,9 @@ import { createLogger, silentLogger } from './util/logger.ts';
 import type { Logger } from './util/logger.ts';
 import { istDate } from './util/time.ts';
 import { AllowList } from './wa/allowlist.ts';
-import { openSessionDb, readFounderNumber, SessionDecryptError, useEncryptedAuthState } from './wa/authState.ts';
+import {
+  FounderNumberWatch, openPhoneSession, readFounderNumber, SessionDecryptError, sessionHomeOf, useEncryptedAuthState,
+} from './wa/authState.ts';
 import { baileysSocketFactory, WhatsAppGateway } from './wa/gateway.ts';
 import { founderLinkDriver, LinkSessions } from './wa/linkSession.ts';
 import { baileysSenderSocketFactory, linkedNumber } from './wa/senderGateway.ts';
@@ -158,9 +160,15 @@ async function main(): Promise<void> {
     const onPoolError = (err: Error) => log.error({ err }, 'a Postgres connection failed while idle');
     db = await openStore(env, { onPoolError });
     platformDb = openPlatformStore(env, db, { onPoolError });
-    const engineWarning = storeWarning(env);
-    if (engineWarning) log.warn(engineWarning);
-    sessionDb = openSessionDb(sessionDbPath(env.DATA_DIR));
+    // The WhatsApp sessions (S2.6c2): data/session.db and data/sender-session.db, or wa_auth on the customer's Db.
+    const sessions = sessionHomeOf(env, db);
+    // On Postgres the founder's number is not read from a file at each check: FounderNumberWatch reads it at start and
+    // again after every committed write to the founder's rows (a relink from the dashboard).
+    const founderWatch = sessions.engine === 'postgres'
+      ? new FounderNumberWatch(sessions, key, (err) => log.error({ err }, "the founder's linked number could not be read"))
+      : undefined;
+    sessionDb = await openPhoneSession(sessions, 'founder', founderWatch ? { onChange: founderWatch.refresh } : {});
+    await founderWatch?.start();
 
     const configs = loadGroupsFile(env.GROUPS_FILE);
     await syncClients(db, configs, systemClock.now()); // a group approved while the service was stopped gets its history queued
@@ -195,7 +203,8 @@ async function main(): Promise<void> {
     let report: AppReportDeps | undefined;
     // The founder reader's number at each check, so a relink from the dashboard is followed (falls back to the number
     // linked at start when the file cannot be read: refusing that one too is the safe side).
-    const founderNumber = () => readFounderNumber(sessionDbPath(env.DATA_DIR), key) ?? linkedNumber(auth);
+    const founderNumber = () =>
+      (founderWatch ? founderWatch.current() : readFounderNumber(sessionDbPath(env.DATA_DIR), key)) ?? linkedNumber(auth);
     const senderFactory = baileysSenderSocketFactory(silentLogger());
     // With the dashboard: the briefing's settings are changed on its Automations screen (tracker.db; .env gives the
     // defaults), and LiveReport opens the spare number's sender only once it is on with a number (tested). Off: as before.
@@ -207,19 +216,19 @@ async function main(): Promise<void> {
     let spareCheck: (() => Promise<boolean>) | undefined;
     if (env.DASHBOARD_ENABLED) {
       const briefing: { live?: LiveReport } = {};
-      spareCheck = spareLinked({ dataDir: env.DATA_DIR, key, briefing: { sender: () => briefing.live?.sender() }, linking: () => spareLinking });
+      spareCheck = spareLinked({ dataDir: env.DATA_DIR, sessions, key, briefing: { sender: () => briefing.live?.sender() }, linking: () => spareLinking });
       const store = await SettingsStore.open({ db, env, clock: systemClock, log, spareLinked: spareCheck });
       settings = store;
       live = new LiveReport({
         db, clock: systemClock, log,
         settings: briefingSettings(store),
-        open: senderOpener({ env, masterKey: key, log, factory: senderFactory, founderNumber }),
+        open: senderOpener({ env, sessions, masterKey: key, log, factory: senderFactory, founderNumber }),
         healthLine: () => app.health.workbookLine(),
       });
       briefing.live = live;
     } else if (env.REPORT_ENABLED) {
       const started = await openMorningReport({
-        env, masterKey: key, log, factory: baileysSenderSocketFactory(silentLogger()), founderNumber: linkedNumber(auth),
+        env, sessions, masterKey: key, log, factory: baileysSenderSocketFactory(silentLogger()), founderNumber: linkedNumber(auth),
       });
       senderDb = started.senderDb;
       report = started.report;
@@ -356,7 +365,7 @@ async function main(): Promise<void> {
       // Phone links from the dashboard (D3), one at a time. The founder's relinks the gateway in place; the spare one
       // pauses the briefing while it resets the session file the sender may be using, then hands it the new sender.
       const spare = spareDriver({
-        dataDir: env.DATA_DIR, key, factory: senderFactory, founderNumber, briefing: live,
+        dataDir: env.DATA_DIR, sessions, key, factory: senderFactory, founderNumber, briefing: live,
         settingsNumber: () => store.get().reportRecipient,
         adoptDb: (d) => adoptedDbs.push(d),
         linking: (on) => (spareLinking = on),

@@ -31,12 +31,6 @@ export async function openStore(env: Pick<Env, 'DATA_DIR' | 'DB_ENGINE' | 'DATAB
   return db;
 }
 
-/** The start-up warning for the engine, if any. Until S2.6c2 (wa_auth), Postgres keeps the WhatsApp sessions in files. */
-export function storeWarning(env: Env): string | undefined {
-  if (env.DB_ENGINE !== 'postgres') return undefined;
-  return 'DB_ENGINE=postgres: the tracker is on Postgres, but the WhatsApp sessions are still in data/session.db and data/sender-session.db until wa_auth (S2.6c2)';
-}
-
 /**
  * The platform tables' database (decision D1). On SQLite they live in tracker.db, so it is the tracker Db itself; on
  * Postgres, wa_platform's own pool. Only src/main.ts calls this, and its Db reaches only src/platform/**,

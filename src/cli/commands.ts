@@ -3,7 +3,7 @@ import type { Command } from 'commander';
 import qrcode from 'qrcode-terminal';
 import { maskNumber, reportRecipient, reportSettings, requireKey, type Env } from '../config/env.ts';
 import { loadGroupsFile, type ClientConfig } from '../config/groups.ts';
-import { masterKeyPath, senderSessionDbPath, sessionDbPath } from '../config/paths.ts';
+import { masterKeyPath, senderSessionDbPath } from '../config/paths.ts';
 import { DpapiKeyProvider, type KeyProvider } from '../crypto/keyProvider.ts';
 import { MediaRefSealer } from '../media/ref.ts';
 import { readHealthSnapshot } from '../health/health.ts';
@@ -28,7 +28,8 @@ import { silentLogger } from '../util/logger.ts';
 import { istDate, istShortDate, istTime } from '../util/time.ts';
 import { AllowList } from '../wa/allowlist.ts';
 import {
-  openSenderSession, openSessionDb, readFounderNumber, resetSession, SenderSessionDecryptError, SessionDecryptError, useEncryptedAuthState,
+  founderNumberIn, openPhoneSession, openSenderSession, resetSession, SenderSessionDecryptError, SessionDecryptError, sessionHomeOf,
+  useEncryptedAuthState, type SessionHome,
   useSenderAuthState, type EncryptedAuth,
 } from '../wa/authState.ts';
 import { baileysSocketFactory, TRACKER_DEVICE_NAME, WhatsAppGateway, type GatewayState, type SocketFactory } from '../wa/gateway.ts';
@@ -188,7 +189,7 @@ export async function linkCommand(opts: { reset: boolean }, deps: CliDeps): Prom
     const key = deps.keyProvider.getKey();
     const configs = loadGroupsFile(env.GROUPS_FILE);
     db = await openStore(env);
-    sessionDb = openSessionDb(sessionDbPath(env.DATA_DIR));
+    sessionDb = await openPhoneSession(sessionHomeOf(env, db), 'founder');
     await syncClients(db, configs);
     if (opts.reset) {
       let hasSession: boolean;
@@ -262,7 +263,7 @@ export async function listGroupsCommand(deps: CliDeps): Promise<void> {
     const key = deps.keyProvider.getKey();
     const configs = loadGroupsFile(env.GROUPS_FILE);
     db = await openStore(env);
-    sessionDb = openSessionDb(sessionDbPath(env.DATA_DIR));
+    sessionDb = await openPhoneSession(sessionHomeOf(env, db), 'founder');
     await syncClients(db, configs);
     const auth = await useEncryptedAuthState(sessionDb, key);
     if (!auth.hasSession) {
@@ -380,10 +381,15 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
   // The lock comes first: with the service stopped, only one process ever uses the spare number's session.
   const lock = await acquireLock(env.DATA_DIR);
   let senderDb: Db | undefined;
+  /** Postgres only: wa_auth is on the customer's Db. On SQLite the tracker is never opened here. */
+  let trackerDb: Db | undefined;
   try {
     const key = deps.keyProvider.getKey();
     const file = senderSessionDbPath(env.DATA_DIR);
-    const opened = await openSenderSession(file, key);
+    const sessions: SessionHome = env.DB_ENGINE === 'postgres'
+      ? { engine: 'postgres', db: (trackerDb = await openStore(env)) }
+      : { engine: 'sqlite', dataDir: env.DATA_DIR };
+    const opened = await openSenderSession(sessions, key);
     let auth: EncryptedAuth | undefined;
     if (opened.ok) {
       senderDb = opened.db;
@@ -407,7 +413,7 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
         if (!yes) return;
         const movedTo = moveDamagedSession(file, new Date());
         out(`Moved aside: the damaged data/sender-session.db is now ${movedTo} (not deleted). The founder's link and the tracker were NOT touched.`);
-        senderDb = openSessionDb(file);
+        senderDb = await openPhoneSession(sessions, 'spare');
         auth = await useSenderAuthState(senderDb, key);
       } else {
         // A linked session, or one written with another master key: exactly what a reset is for.
@@ -416,7 +422,7 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
           "This removes the saved link of the spare number (data/sender-session.db) only. The founder's WhatsApp link and all tracker data are not touched. You will scan a new QR code from the spare phone. Type yes to continue:",
         );
         if (!yes) return;
-        senderDb ??= openSessionDb(file);
+        senderDb ??= await openPhoneSession(sessions, 'spare');
         await resetSession(senderDb); // the spare number's session rows only
         out("Reset: the saved spare-number session was deleted. The founder's link and the tracker were NOT touched.");
         auth = await useSenderAuthState(senderDb, key);
@@ -443,7 +449,7 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
     // founder reader is linked to (session.db, only read here). SenderGateway checks both again at service start and at
     // send time.
     const linked = linkedNumber(auth);
-    const founder = readFounderNumber(sessionDbPath(env.DATA_DIR), key);
+    const founder = await founderNumberIn(sessions, key);
     if (linked !== undefined && ((env.REPORT_RECIPIENT && linked === env.REPORT_RECIPIENT) || linked === founder)) {
       await resetSession(senderDb!); // the spare number's session rows only: this link is never used
       throw new Error(
@@ -453,6 +459,7 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
     out('Spare number linked. Next: set REPORT_RECIPIENT and REPORT_ENABLED=true in .env, then start the service (net start wa-agent).');
   } finally {
     await senderDb?.close();
+    await trackerDb?.close();
     await lock.release();
   }
 }
