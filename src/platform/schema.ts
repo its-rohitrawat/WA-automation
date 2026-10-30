@@ -64,6 +64,12 @@ const STATEMENTS = [
   )`,
   `CREATE INDEX IF NOT EXISTS platform_audit_at ON platform_audit (at)`,
   `CREATE INDEX IF NOT EXISTS platform_audit_actor ON platform_audit (actor, event, at)`,
+  // Each customer's data key, wrapped by the master key (S4.1, src/platform/tenantKeys.ts). None for the founder.
+  `CREATE TABLE IF NOT EXISTS tenant_keys (
+    tenant_id TEXT PRIMARY KEY REFERENCES tenants (id),
+    wrapped BLOB NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
 ];
 
 /** Creates the platform tables when they are missing. Safe to run at every start; changes nothing that exists. */
