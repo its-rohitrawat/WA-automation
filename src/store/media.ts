@@ -602,15 +602,15 @@ export interface MediaStats {
 export async function mediaStats(db: Sql, now: Date, startedAt: Date = new Date(0), staleMs = 30 * 60_000): Promise<MediaStats> {
   const staleBefore = new Date(now.getTime() - staleMs).toISOString();
   return (await db.get<MediaStats>(`SELECT
-        COALESCE(SUM(m.status = 'pending'), 0) AS pending,
-        COALESCE(SUM(m.status = 'pending' AND m.backlog = 0 AND m.created_at < @staleBefore AND @startedAt < @staleBefore
-          AND COALESCE(m.error_code, '') NOT IN ('spend_cap', 'stt_unavailable')), 0) AS stale,
-        COALESCE(SUM(m.status = 'pending' AND m.error_code = 'spend_cap'), 0) AS spendCap,
-        COALESCE(SUM(m.status = 'failed' AND m.updated_at >= @dayAgo), 0) AS failedRecent,
-        COALESCE(SUM(m.drive_failed = 1 AND EXISTS (SELECT 1 FROM messages msg
+        COALESCE(SUM(CASE WHEN m.status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
+        COALESCE(SUM(CASE WHEN m.status = 'pending' AND m.backlog = 0 AND m.created_at < @staleBefore AND @startedAt < @staleBefore
+          AND COALESCE(m.error_code, '') NOT IN ('spend_cap', 'stt_unavailable') THEN 1 ELSE 0 END), 0) AS stale,
+        COALESCE(SUM(CASE WHEN m.status = 'pending' AND m.error_code = 'spend_cap' THEN 1 ELSE 0 END), 0) AS spendCap,
+        COALESCE(SUM(CASE WHEN m.status = 'failed' AND m.updated_at >= @dayAgo THEN 1 ELSE 0 END), 0) AS failedRecent,
+        COALESCE(SUM(CASE WHEN m.drive_failed = 1 AND EXISTS (SELECT 1 FROM messages msg
           JOIN people p ON p.client_id = m.client_id AND p.jid = msg.sender_jid
-          WHERE msg.id = m.message_id AND ${UPLOADABLE})), 0) AS uploadFailed,
-        COALESCE(SUM(m.status = 'pending' AND m.error_code = 'stt_unavailable'), 0) AS sttRefused,
-        COALESCE(SUM(m.kind IN ('voice', 'audio') AND m.status = 'failed' AND m.updated_at >= @dayAgo AND ${LOCAL_FAILURE}), 0) AS voiceFailed
+          WHERE msg.id = m.message_id AND ${UPLOADABLE}) THEN 1 ELSE 0 END), 0) AS uploadFailed,
+        COALESCE(SUM(CASE WHEN m.status = 'pending' AND m.error_code = 'stt_unavailable' THEN 1 ELSE 0 END), 0) AS sttRefused,
+        COALESCE(SUM(CASE WHEN m.kind IN ('voice', 'audio') AND m.status = 'failed' AND m.updated_at >= @dayAgo AND ${LOCAL_FAILURE} THEN 1 ELSE 0 END), 0) AS voiceFailed
       FROM media m JOIN clients c ON c.id = m.client_id AND c.active = 1`, { staleBefore, startedAt: startedAt.toISOString(), dayAgo: new Date(now.getTime() - 86_400_000).toISOString() }))!;
 }

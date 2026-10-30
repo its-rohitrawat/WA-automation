@@ -657,11 +657,22 @@ export async function listUnassigned(db: Sql, limit: number): Promise<Unassigned
 }
 
 /**
- * The done meetings a client tab lists: a meeting whose stored summary is not JSON, or has no actionItems list, is left
- * out. Shared by listClientMeetings and lastMeetingByClient, so "Last meeting" never names a meeting the tab hides.
+ * Whether a client tab lists a done meeting, and with how many action items: a meeting without a summary is listed with
+ * none; one whose stored summary is not JSON, or has no actionItems list, is left out (null). Shared by
+ * listClientMeetings and lastMeetingByClient, so "Last meeting" never names a meeting the tab hides. Checked here, after
+ * the read, not in SQL: SQLite's json_valid and json_type have no Postgres equivalent that runs on both (S2.5).
  */
-const LISTED_DONE = `status = 'done'
-        AND CASE WHEN summary IS NULL THEN 1 WHEN json_valid(summary) THEN json_type(summary, '$.actionItems') = 'array' ELSE 0 END`;
+function listedActionItems(summary: string | null): number | null {
+  if (summary === null) return 0;
+  let v: unknown;
+  try {
+    v = JSON.parse(summary);
+  } catch {
+    return null;
+  }
+  const items = v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as { actionItems?: unknown }).actionItems : undefined;
+  return Array.isArray(items) ? items.length : null;
+}
 
 export interface ClientMeeting {
   id: number;
@@ -674,26 +685,34 @@ export interface ClientMeeting {
 
 /**
  * A client's done meetings, newest first. A meeting whose stored summary is not JSON, or has no actionItems list, is
- * left out, in SQL, so the limit counts only listed meetings. The summary itself is not read here.
+ * left out (listedActionItems) before the limit, so the limit counts only listed meetings.
  */
 export async function listClientMeetings(db: Sql, clientId: number, limit: number): Promise<ClientMeeting[]> {
-  return db.all<ClientMeeting>(
-    `SELECT id, started_at AS startedAt, title, COALESCE(audio_seconds, drive_seconds) AS seconds, doc_file_id AS docFileId,
-        CASE WHEN summary IS NULL THEN 0 ELSE json_array_length(summary, '$.actionItems') END AS actionItemCount
+  const rows = await db.all<Omit<ClientMeeting, 'actionItemCount'> & { summary: string | null }>(
+    `SELECT id, started_at AS startedAt, title, COALESCE(audio_seconds, drive_seconds) AS seconds, doc_file_id AS docFileId, summary
       FROM meetings
-      WHERE client_id = ? AND ${LISTED_DONE}
-      ORDER BY started_at DESC, id DESC LIMIT ?`,
-    [clientId, limit],
+      WHERE client_id = ? AND status = 'done'
+      ORDER BY started_at DESC, id DESC`,
+    [clientId],
   );
+  const out: ClientMeeting[] = [];
+  for (const { summary, ...m } of rows) {
+    if (out.length >= limit) break;
+    const actionItemCount = listedActionItems(summary);
+    if (actionItemCount !== null) out.push({ ...m, actionItemCount });
+  }
+  return out;
 }
 
 /** Each client's latest done meeting that its tab lists: client id → its start. */
 export async function lastMeetingByClient(db: Sql): Promise<Map<number, string>> {
-  const rows = await db.all<{ clientId: number; startedAt: string }>(
-    `SELECT client_id AS clientId, MAX(started_at) AS startedAt FROM meetings WHERE client_id IS NOT NULL AND ${LISTED_DONE}
-      GROUP BY client_id`,
+  const rows = await db.all<{ clientId: number; startedAt: string; summary: string | null }>(
+    `SELECT client_id AS clientId, started_at AS startedAt, summary FROM meetings
+      WHERE client_id IS NOT NULL AND status = 'done' ORDER BY started_at DESC, id DESC`,
   );
-  return new Map(rows.map((r) => [r.clientId, r.startedAt]));
+  const out = new Map<number, string>();
+  for (const r of rows) if (!out.has(r.clientId) && listedActionItems(r.summary) !== null) out.set(r.clientId, r.startedAt);
+  return out;
 }
 
 export interface MeetingStats {
@@ -716,13 +735,13 @@ export interface MeetingStats {
 export async function meetingStats(db: Sql, nowIso: string): Promise<MeetingStats> {
   const counts = (await db.get<Omit<MeetingStats, 'deferred'>>(
     `SELECT
-        COALESCE(SUM(status = 'done'), 0) AS done,
-        COALESCE(SUM(status = 'queued'), 0) AS waiting,
-        COALESCE(SUM(status = 'unassigned'), 0) AS unassigned,
-        COALESCE(SUM(status = 'failed'), 0) AS failed,
-        COALESCE(SUM(status = 'no_access'), 0) AS noAccess,
-        COALESCE(SUM(status = 'too_long'), 0) AS tooLong,
-        COALESCE(SUM(status = 'internal'), 0) AS internal
+        COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0) AS done,
+        COALESCE(SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END), 0) AS waiting,
+        COALESCE(SUM(CASE WHEN status = 'unassigned' THEN 1 ELSE 0 END), 0) AS unassigned,
+        COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+        COALESCE(SUM(CASE WHEN status = 'no_access' THEN 1 ELSE 0 END), 0) AS noAccess,
+        COALESCE(SUM(CASE WHEN status = 'too_long' THEN 1 ELSE 0 END), 0) AS tooLong,
+        COALESCE(SUM(CASE WHEN status = 'internal' THEN 1 ELSE 0 END), 0) AS internal
       FROM meetings`,
   ))!;
   const deferred = await db.all<{ code: string; n: number }>(
