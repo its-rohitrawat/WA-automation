@@ -33,8 +33,14 @@ const toTenant = (r: RawTenant): TenantRow => ({
   lastActivityAt: r.last_activity_at,
 });
 
-export async function createTenant(q: Sql, o: { name: string; kind?: 'founder' | 'customer'; status: TenantStatus; at: string }): Promise<TenantRow> {
-  const id = randomUUID();
+/**
+ * The founder's business, customer #1: the fixed id S2 seeds in Postgres (P1), so the copy tool (S3) and TENANT_ID put the
+ * founder's data and their platform row under one id.
+ */
+export const FOUNDER_TENANT_ID = '00000000-0000-4000-8000-000000000001';
+
+export async function createTenant(q: Sql, o: { name: string; kind?: 'founder' | 'customer'; status: TenantStatus; at: string; id?: string }): Promise<TenantRow> {
+  const id = o.id ?? randomUUID();
   await q.run('INSERT INTO tenants (id, kind, name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)', [id, o.kind ?? 'customer', o.name, o.status, o.at, o.at]);
   return (await getTenant(q, id))!;
 }
@@ -59,7 +65,7 @@ export async function setTenantStatus(q: Sql, id: string, from: readonly TenantS
 export async function ensureFounderTenant(q: Sql, o: { name: string; at: string }): Promise<TenantRow> {
   const r = await q.get<RawTenant>("SELECT * FROM tenants WHERE kind = 'founder'");
   if (r) return toTenant(r);
-  return createTenant(q, { name: o.name, kind: 'founder', status: 'active', at: o.at });
+  return createTenant(q, { name: o.name, kind: 'founder', status: 'active', at: o.at, id: FOUNDER_TENANT_ID });
 }
 
 export interface UserRow {

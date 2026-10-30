@@ -6,7 +6,7 @@ import {
   type InviteDeps,
 } from '../../src/platform/invites.ts';
 import { ensurePlatformSchema } from '../../src/platform/schema.ts';
-import { ensureFounderTenant, getTenant, listTenants, membershipsFor } from '../../src/platform/store.ts';
+import { ensureFounderTenant, FOUNDER_TENANT_ID, getTenant, listTenants, membershipsFor } from '../../src/platform/store.ts';
 import { INVITE_TTL_MS, inviteTokenHash, newInviteToken, normalizeEmail } from '../../src/platform/tokens.ts';
 import { SqliteDb } from '../../src/store/engine/sqlite.ts';
 import { manualClock, type ManualClock } from '../../src/util/clock.ts';
@@ -66,6 +66,9 @@ describe('the platform tables', () => {
     const a = await ensureFounderTenant(db, { name: 'Your studio', at: T0 });
     const b = await ensureFounderTenant(db, { name: 'Another name', at: T0 });
     expect(b.id).toBe(a.id);
+    // The fixed id S2 seeds in Postgres (gap G1), so the copy tool and TENANT_ID agree on customer #1.
+    expect(a.id).toBe('00000000-0000-4000-8000-000000000001');
+    expect(FOUNDER_TENANT_ID).toBe(a.id);
     expect(a).toMatchObject({ kind: 'founder', status: 'active', name: 'Your studio' });
     await expect(db.run("INSERT INTO tenants (id, kind, name, status, created_at, updated_at) VALUES ('00000000-0000-4000-8000-000000000009', 'founder', 'x', 'active', ?, ?)", [T0, T0])).rejects.toThrow(/UNIQUE/);
   });
