@@ -23,23 +23,17 @@ import { PUBLIC_DIR, type WebServer } from '../src/web/server.ts';
 const FOUNDER = 'owner@example.com';
 
 /**
- * The hookups, as the owning lanes will apply them: the platform screens' import (2.3) and their nav entries (2.4, 5.1).
- * Getting started (5.1) is for customer sessions only; the preview shows it to everyone because its one signed-in person
- * is both the founder and a customer's member, and the shell has no session role until customer sessions exist (4.2).
+ * The one hookup the shell does not have yet: the Getting started entry (5.1). The real shell already imports the
+ * platform screens (2.3, app.js) and adds Customers and Invite a customer when /me says `platform: true` (2.4, router.js's
+ * navFor and showPlatform); the smoke makes the preview's /me say so (scripts/platform-smoke.ts). Getting started is for
+ * customer sessions only (5.1, with S4.8); the preview shows it to everyone because its one signed-in person is both the
+ * founder and a customer's member.
  */
-export function patchedShell(): { app: string; router: string } {
-  const app = readFileSync(join(PUBLIC_DIR, 'app.js'), 'utf8');
+export function patchedShell(): { router: string } {
   const router = readFileSync(join(PUBLIC_DIR, 'router.js'), 'utf8');
-  const appAnchor = "import './views/screens.js';";
-  const navAnchor = "['System', [['connections', 'Connections', 'plug'],";
   const workAnchor = "['Workspace', [['overview', 'Overview', 'dash'],";
-  if (!app.includes(appAnchor) || !router.includes(navAnchor) || !router.includes(workAnchor)) throw new Error('the shell changed: update the hookups doc and this patch');
-  return {
-    app: app.replace(appAnchor, `${appAnchor}\nimport './views/platform.js';`),
-    router: router
-      .replace(navAnchor, "['System', [['customers', 'Customers', 'store'], ['invite', 'Invite a customer', 'mail'], ['connections', 'Connections', 'plug'],")
-      .replace(workAnchor, "['Workspace', [['onboarding', 'Getting started', 'flash'], ['overview', 'Overview', 'dash'],"),
-  };
+  if (!router.includes(workAnchor)) throw new Error('the shell changed: update the hookups doc and this patch');
+  return { router: router.replace(workAnchor, "['Workspace', [['onboarding', 'Getting started', 'flash'], ['overview', 'Overview', 'dash'],") };
 }
 
 /** A mailer that sends nothing: it says sent (or what the preview sets). */
@@ -105,11 +99,9 @@ export const previewAs = { founder: true };
 
 export async function addPlatform(web: WebServer, o: { signedIn: () => boolean; csrf: string; gmail?: boolean }): Promise<{ mailer: PreviewMailer; db: SqliteDb }> {
   const shell = patchedShell();
-  for (const [path, body] of [['/dashboard/static/app.js', shell.app], ['/dashboard/static/router.js', shell.router]] as const) {
-    web.router.get(path, ({ res }) => {
-      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache' }).end(body);
-    });
-  }
+  web.router.get('/dashboard/static/router.js', ({ res }) => {
+    res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache' }).end(shell.router);
+  });
   const db = SqliteDb.open(':memory:');
   await ensurePlatformSchema(db);
   await seed(db);

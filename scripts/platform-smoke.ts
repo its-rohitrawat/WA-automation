@@ -97,6 +97,13 @@ try {
         fail(`round ${tag}`, `a request to ${new URL(route.request().url()).host}`);
         return route.abort();
       });
+      // The platform is on in this preview, as the agent says it with PLATFORM_ENABLED: the shell then shows Customers and
+      // Invite a customer itself. The fake dashboard's /me is the shared one, so the flag is added on its way here.
+      await ctx.route(`${base}/dashboard/api/me`, async (route) => {
+        const res = await route.fetch();
+        if (res.status() !== 200) return route.fulfill({ response: res });
+        return route.fulfill({ response: res, json: { ...(await res.json()), platform: true } });
+      });
       await ctx.addInitScript((t) => {
         try {
           localStorage.setItem('wa-agent-theme', t);

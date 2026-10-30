@@ -14,18 +14,22 @@ each kept apart. You run every step yourself, on the Mac, with the Mac assistant
 - **Placeholders** look like `<this>`. Replace each one, including the `<` and `>`. Never paste a password into a chat,
   an email or a screenshot.
 
-> **To confirm at S2.** Some names below are fixed only when the Postgres code (S2) is finished, at its last step
-> (S2.10). Each place is marked **[confirm at S2]**. Check these against the released version before the evening of
-> the switch:
-> - the commands `db-bootstrap`, `db-migrate`, `migrate-to-postgres` and `export-to-sqlite`;
-> - that `db-bootstrap` asks for the `postgres` password, then the backup password twice, and shows nothing as you type
->   (it never takes a password on the command line);
-> - the `.env` names `DB_ENGINE`, `DATABASE_URL`, `DATABASE_OWNER_URL` and `DATABASE_PLATFORM_URL` (the backup password
->   is never in `.env`);
-> - the role names `wa_owner`, `wa_app`, `wa_platform` and `wa_backup`, and the migrations P1 to P3;
-> - the switch for the customer parts, `PLATFORM_ENABLED` (off by default, part 7), and the name on invites,
->   `PLATFORM_FOUNDER_NAME` (optional, default "WA Agent");
-> - the `status` line that names the database engine.
+> **To confirm at S2.** Two things are not settled yet, until the Postgres work's last step (S2.10). Each place is
+> marked **[confirm at S2]**. Check them before the evening of the switch:
+> - the `status` line that names the database engine (part 4.8);
+> - whether Google needs the Gmail API switched on for Gmail invites (part 7, step 3).
+>
+> **Already real** (checked against the code, 30 Oct):
+> - `db-bootstrap`: asks for the `postgres` password, then the new `wa_backup` password twice, and shows nothing as you
+>   type. It never takes a password on the command line. `--superuser <name>` defaults to `postgres`.
+> - `db-migrate`, which applies the migrations P1 to P3.
+> - `migrate-to-postgres`, with `--apply`, `--backup-dir <new folder>` and `--data-dir <folder>`.
+> - `export-to-sqlite`, with `--out <new folder>` (required) and `--data-dir <folder>`.
+> - The `.env` names `DB_ENGINE`, `DATABASE_URL`, `DATABASE_OWNER_URL` and `DATABASE_PLATFORM_URL`. The backup password
+>   is never in `.env`.
+> - The roles `wa_owner`, `wa_app`, `wa_platform` and `wa_backup`.
+> - The switch for the customer parts, `PLATFORM_ENABLED` (off by default, part 7), and the name on invites,
+>   `PLATFORM_FOUNDER_NAME` (optional, default "WA Agent").
 
 ---
 
@@ -134,14 +138,12 @@ The agent and its jobs connect with their own limited roles, never the superuser
 - `wa_owner`, which owns the tables and runs the upgrades;
 - `wa_backup`, which may only read, for the nightly backup (part 5).
 
-**[confirm at S2]**
-
 1. **Make four passwords** (normal window), each with `openssl rand -hex 24`. Save them in your password manager as
    "WA Agent Postgres app", "… platform", "… owner" and "… backup". Hex keeps them safe inside an address.
 
 2. **Add three of them to `.env`** (waagent window, `nano .env`). Add these four lines, with your passwords in place of
    the placeholders. `db-bootstrap` reads them to set those roles' passwords. The backup password does **not** go in
-   `.env`: the agent never uses it. Leave `DB_ENGINE` on `sqlite` for now: nothing changes yet. **[confirm at S2]**
+   `.env`: the agent never uses it. Leave `DB_ENGINE` on `sqlite` for now: nothing changes yet.
 
    ```env
    DB_ENGINE=sqlite
@@ -158,8 +160,13 @@ The agent and its jobs connect with their own limited roles, never the superuser
    npm run cli -- db-migrate
    ```
 
-   You should see that the four roles and the database `wa_agent` are ready, then `P1, P2, P3 applied`. No password
-   is ever printed. **[confirm at S2]**
+   You should see:
+   - from `db-bootstrap`: `Created role wa_owner`, then the same for `wa_app`, `wa_platform` and `wa_backup`
+     (`Updated role …` if you run it again), `Created database wa_agent, owned by wa_owner`, a `Granted wa_agent: …`
+     line and `Next: npm run cli -- db-migrate`;
+   - from `db-migrate`: `Applied P1`, `Applied P2` and `Applied P3` (`Already at P3: nothing to apply` the next time).
+
+   No password is ever printed.
 
 4. **Check that nothing changed for the agent** (waagent window): `npm run cli -- status`. It is still on SQLite, as
    before.
@@ -185,9 +192,9 @@ agent keeps running, and nothing in Postgres or in `data/` changes. Do it a day 
    time npm run cli -- migrate-to-postgres --data-dir /opt/wa-agent-db/rehearsal
    ```
 
-   **[confirm at S2]** You should see:
+   You should see:
    - one line per table, each ending in `OK`;
-   - then `DRY RUN: every table matched. Nothing was written.`
+   - then `DRY RUN: every table matched. Nothing was written. Run again with --apply --backup-dir <a new folder>.`
 
    Write down how long it took: the switch takes about that long, twice over.
 
@@ -242,7 +249,7 @@ Keep both until at least a week after the switch.
 npm run cli -- migrate-to-postgres
 ```
 
-Every line should say `OK`, and the last one `DRY RUN … Nothing was written`. **[confirm at S2]**
+Every line should say `OK`, and the last one `DRY RUN: every table matched. Nothing was written. …`.
 
 **4.5 The copy** (waagent window). The tool makes one more backup, checks it against the files, and refuses a folder
 that already exists:
@@ -251,13 +258,13 @@ that already exists:
 npm run cli -- migrate-to-postgres --apply --backup-dir /opt/wa-agent-db/copy-backup-$(date +%Y%m%d-%H%M)
 ```
 
-Every line should say `OK`, and the last one `APPLIED`. **[confirm at S2]**
+Every line should say `OK`, and the last one `APPLIED: every table matched, and the copy is committed. The checked
+backup is in …`.
 
 **If any line says `MISMATCH`, nothing was written.** Start the agent again as it was, still on SQLite (4.7), and send
 the report to Claude.
 
 **4.6 Switch the engine** (waagent window): `nano .env`, change `DB_ENGINE=sqlite` to `DB_ENGINE=postgres`, and save.
-**[confirm at S2]**
 
 **4.7 Start the agent** (normal window):
 
@@ -293,7 +300,7 @@ The dumps hold every business's data: keep them on this Mac only. FileVault prot
 
    The dumps run as `wa_backup`, a role that may only read. It still sees every business's rows, which a full backup
    needs: the owner role can't, because row level security applies to it too. The dump job reads only this file, never
-   the agent's `.env`. **[confirm at S2]**
+   the agent's `.env`.
 
 2. **The nightly job** (normal window). It runs at 02:30 and keeps one dump per weekday, so seven rolling files:
 
@@ -384,7 +391,8 @@ Postgres days with you.
    npm run cli -- export-to-sqlite --out /opt/wa-agent-db/from-postgres-$(date +%Y%m%d-%H%M)
    ```
 
-   Every line should say `OK`. **[confirm at S2]** If any says `MISMATCH`, stop and use A instead.
+   Every line should say `OK`, and the last one `EXPORTED: every table matched. …`. If any says `MISMATCH`, stop and
+   use A instead (a `DO-NOT-USE.txt` is then beside the files).
 3. Waagent window: move today's files aside (nothing is deleted), then put the exported ones in place:
 
    ```sh
@@ -416,10 +424,10 @@ Google knows its address.
 3. **The Gmail API** (only if you want invites emailed from your Gmail). In APIs & Services, then Library, find
    "Gmail API" and make sure it is enabled. **[confirm at S2]**
 4. **Turn the customer parts on.**
-   - Waagent window: `nano .env`, add `PLATFORM_ENABLED=true`, and save. **[confirm at S2]**
+   - Waagent window: `nano .env`, add `PLATFORM_ENABLED=true`, and save.
    - To email invites from your Gmail, also add `INVITES_GMAIL=true`.
    - Optional: `PLATFORM_FOUNDER_NAME=<your name or your business's name>`. It's the name the invite emails and the
-     sign-up page show, as in "<name> invited you to WA Agent". Without it they say "WA Agent". **[confirm at S2]**
+     sign-up page show, as in "<name> invited you to WA Agent". Without it they say "WA Agent".
    - Normal window: `sudo launchctl kickstart -k system/com.wa-agent`.
    - If you added `INVITES_GMAIL=true`, open Connections in the dashboard, then Google, and reconnect your account once.
      Approve "Send email as you (invites only)".
