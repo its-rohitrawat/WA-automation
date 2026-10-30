@@ -3,7 +3,7 @@ import { migrate as migrateFile } from './engine/sqliteMigrate.ts';
 import type { Db as DbInterface } from './engine/types.ts';
 import { MIGRATIONS, type Migration } from './migrations.ts';
 
-/** The database the agent uses: the async engine (src/store/engine/). Every query goes through it. */
+/** The database the agent uses: the async engine (src/store/engine/). Every statement goes through it. */
 export type Db = DbInterface;
 export type { Sql } from './engine/types.ts';
 
