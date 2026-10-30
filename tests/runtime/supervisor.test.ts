@@ -263,4 +263,109 @@ describe('the Supervisor', () => {
   });
 });
 
+describe('restart(): a customer runtime started again, as the kind it should now be', () => {
+  /** A customer whose key the test adds: wantsFull says full for an active customer, or for one with a key. */
+  const keyed = new Set<string>();
+  const wantsFull = async (id: string, status: string) => status === 'active' || keyed.has(id);
+  beforeEach(() => keyed.clear());
+  const stopsOf = (id: string) => factory.stopped.filter((x) => x === id).length;
+  const crashes = () => db.all("SELECT tenant_id FROM platform_audit WHERE event = 'runtime.crashed'");
+
+  it('a setup shell becomes a full runtime: stopped, started again, no crash counted, no backoff', async () => {
+    const a = await tenant('Alpha One', 'onboarding');
+    const s = supervisor({ wantsFull });
+    await s.reconcile();
+    expect(factory.started).toEqual([[F, false], [a, true]]);
+    keyed.add(a); // the customer added their Claude key
+    await s.restart(a);
+    expect(factory.started.at(-1)).toEqual([a, false]);
+    expect(stopsOf(a)).toBe(1);
+    expect(s.state(a)).toBe('running');
+    expect(timers.pending).toEqual([]);
+    expect(await crashes()).toEqual([]);
+    // reconcile agrees with what restart started: it leaves it as it is.
+    await s.reconcile();
+    expect(factory.startsOf(a)).toBe(2);
+  });
+
+  it('a full runtime of a customer still onboarding counts toward the active limit (reconcile and restart alike)', async () => {
+    const a = await tenant('Alpha One', 'onboarding');
+    const b = await tenant('Beta Two', 'active');
+    keyed.add(a);
+    const s = supervisor({ wantsFull, maxActive: 2 });
+    await s.reconcile();
+    expect([s.state(F), s.state(a), s.state(b)]).toEqual(['running', 'running', 'refused:limit']); // the founder and A are full
+  });
+
+  it('a restart that would pass the active limit, or the memory ceiling, is refused like a start', async () => {
+    const a = await tenant('Alpha One', 'onboarding');
+    await tenant('Beta Two', 'active');
+    const s = supervisor({ wantsFull, maxActive: 2 }); // the founder and B are the two full runtimes
+    await s.reconcile();
+    keyed.add(a);
+    await s.restart(a);
+    expect(s.state(a)).toBe('refused:limit');
+    expect(stopsOf(a)).toBe(1);
+    expect(factory.startsOf(a)).toBe(1);
+
+    const c = await tenant('Gamma Three', 'onboarding');
+    let rss = 500;
+    const m = supervisor({ wantsFull, rssMb: () => rss });
+    await m.reconcile();
+    keyed.add(c);
+    rss = 5_000;
+    await m.restart(c);
+    expect(m.state(c)).toBe('refused:memory');
+    expect(await crashes()).toEqual([]);
+  });
+
+  it('never touches the founder (adopted), a refused slot, a paused or unknown customer', async () => {
+    const a = await tenant('Alpha One', 'active');
+    const b = await tenant('Beta Two', 'paused');
+    const s = supervisor({ wantsFull, maxActive: 1 });
+    await s.reconcile();
+    for (const id of [F, a, b, '00000000-0000-4000-8000-0000000000ff']) await s.restart(id);
+    expect(factory.startsOf(F)).toBe(1);
+    expect(factory.stopped).toEqual([]);
+    expect([s.state(F), s.state(a), s.state(b)]).toEqual(['running', 'refused:limit', 'stopped']);
+  });
+
+  it('during a backoff it changes nothing: the backoff starts it again, as the kind it should now be', async () => {
+    const a = await tenant('Alpha One', 'onboarding');
+    const s = supervisor({ wantsFull });
+    await s.reconcile();
+    await s.crashed(a, new Error('x'));
+    keyed.add(a);
+    await s.restart(a);
+    expect(s.state(a)).toBe('backoff');
+    expect(factory.startsOf(a)).toBe(1);
+    await timers.fire(s);
+    expect(factory.started.at(-1)).toEqual([a, false]);
+    expect(s.state(a)).toBe('running');
+  });
+
+  it('restart and reconcile at once run one after the other: one runtime for the customer, never two', async () => {
+    const a = await tenant('Alpha One', 'onboarding');
+    const s = supervisor({ wantsFull });
+    await s.reconcile();
+    keyed.add(a);
+    await Promise.all([s.restart(a), s.reconcile(), s.restart(a), s.poke()]);
+    await s.settled();
+    expect(factory.startsOf(a) - stopsOf(a)).toBe(1); // exactly one running
+    expect(factory.started.at(-1)).toEqual([a, false]);
+    expect(s.state(a)).toBe('running');
+  });
+
+  it('a start that fails during a restart is a crash like any other start (audited, backoff)', async () => {
+    const a = await tenant('Alpha One', 'onboarding');
+    const s = supervisor({ wantsFull });
+    await s.reconcile();
+    keyed.add(a);
+    factory.failStart.add(a);
+    await s.restart(a);
+    expect(s.state(a)).toBe('backoff');
+    expect(await crashes()).toHaveLength(1);
+  });
+});
+
 const NO_FACTS: RuntimeFacts = { whatsappLinked: false, spareLinked: false, driveConnected: false, groupsApproved: 0, reportTimeSet: false, aiKey: 'missing' };

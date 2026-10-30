@@ -243,7 +243,8 @@ describe('the platform routes', () => {
     const mine = customerIn(tenantId);
     expect(body(await call('POST', '/dashboard/api/platform/ai-key', mine, { key: FAKE })).error.code).toBe('not_ready');
     const asked: string[] = [];
-    mount({ aiKeys: (id) => (asked.push(id), new AiKeys({ db, platform: db, tenantId: id, dataKey: async () => Buffer.alloc(32, 7), tester: async () => 'ok', clock })) });
+    const restarts: string[] = [];
+    mount({ restart: (id) => void restarts.push(id), aiKeys: (id) => (asked.push(id), new AiKeys({ db, platform: db, tenantId: id, dataKey: async () => Buffer.alloc(32, 7), tester: async () => 'ok', clock })) });
 
     const nobody: OwnerContext = { actor: 'nobody@example.com', sessionId: 's-3', requestId: 'r3' };
     expect((await call('POST', '/dashboard/api/platform/ai-key', nobody, { key: FAKE })).status).toBe(404);
@@ -253,12 +254,15 @@ describe('the platform routes', () => {
     const bad = await call('POST', '/dashboard/api/platform/ai-key', mine, { key: 'not-a-key-zzz' });
     expect(bad.status).toBe(400);
     expect(JSON.stringify(bad.body)).not.toContain('zzz');
+    expect(restarts).toEqual([]); // refused: the runtime is left as it is
 
     const set = await call('POST', '/dashboard/api/platform/ai-key', mine, { key: FAKE });
     expect(set.status).toBe(200);
     expect(body(set)).toEqual({ aiKey: 'configured' });
     expect(asked.every((id) => id === tenantId)).toBe(true);
+    expect(restarts).toEqual([tenantId]); // the key is in: started again as a full runtime
     expect(body(await call('POST', '/dashboard/api/platform/ai-key/remove', mine))).toEqual({ aiKey: 'missing' });
+    expect(restarts).toEqual([tenantId, tenantId]); // removed: back to a setup shell
     expect(logLines.join('\n')).not.toContain(FAKE);
   });
 

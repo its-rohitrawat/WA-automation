@@ -61,6 +61,12 @@ export interface SupervisorDeps {
   clearTimer?: (t: ReturnType<typeof setTimeout>) => void;
   /** How long one runtime's stop may take before it is left behind (10 s). */
   stopTimeoutMs?: number;
+  /**
+   * Whether this customer should run a FULL runtime (it counts toward maxActive) rather than a setup shell. Default: when
+   * the customer is active. Phase B also says yes for a customer still onboarding whose Claude key is in, so that the
+   * active limit counts it and a reconcile never turns it back into a shell. The factory gets the answer as setupOnly.
+   */
+  wantsFull?: (tenantId: string, status: string) => boolean | Promise<boolean>;
 }
 
 interface Slot {
@@ -110,6 +116,19 @@ export class Supervisor {
     void this.reconcile();
   }
 
+  /**
+   * Stops a customer's running runtime and starts it again, as the kind it should now be (wantsFull): a setup shell
+   * becomes a full runtime once the customer's Claude key is in. Not a crash: no crash is counted and no backoff starts
+   * (a start that fails here is a crash, as any start). Within the limits: a full start that would pass the active
+   * limit, or a start above the memory ceiling, is refused like any start (the slot then shows refused). Changes nothing
+   * for the founder (adopted: main.ts owns its runtime), for a slot that is not running (refused, stopped, or waiting
+   * out a backoff, whose own restart then starts the right kind), or for a customer not active or onboarding. Run one
+   * step at a time with the others.
+   */
+  restart(id: string): Promise<void> {
+    return this.#queue(() => this.#restart(id));
+  }
+
   /** A runtime reports a crash (its guarded() entry points, or the process's handlers through crashOwner()). */
   crashed(id: string, e: unknown): Promise<void> {
     return this.#queue(() => this.#crash(id, e));
@@ -133,6 +152,29 @@ export class Supervisor {
     return this.#chain;
   }
 
+  #wantsFull(tenantId: string, status: string): boolean | Promise<boolean> {
+    return this.#d.wantsFull ? this.#d.wantsFull(tenantId, status) : status === 'active';
+  }
+
+  async #restart(id: string): Promise<void> {
+    const slot = this.#slots.get(id);
+    if (!slot || slot.state !== 'running') return;
+    const r = await this.#d.db.get<{ kind: string; status: string }>('SELECT kind, status FROM tenants WHERE id = ?', [id]);
+    if (!r || r.kind === 'founder' || (r.status !== 'active' && r.status !== 'onboarding')) return;
+    const setupOnly = !(await this.#wantsFull(id, r.status));
+    // The full runtimes without this one, which is stopped first.
+    const others = [...this.#slots].filter(([x, s]) => x !== id && s.handle && !s.setupOnly).length;
+    const refused: RuntimeState | null = !setupOnly && others >= this.#d.maxActive
+      ? 'refused:limit'
+      : this.#d.rssMb() > this.#d.maxRssMb ? 'refused:memory' : null;
+    await this.#stop(id, 'stopped');
+    if (refused) {
+      this.#set(id, refused, setupOnly);
+      return;
+    }
+    await this.#start(id, false, setupOnly);
+  }
+
   async #reconcile(): Promise<void> {
     const rows = await this.#d.db.all<{ id: string; kind: string; status: string }>(
       "SELECT id, kind, status FROM tenants WHERE status <> 'removed' ORDER BY kind = 'founder' DESC, created_at, id",
@@ -144,7 +186,7 @@ export class Supervisor {
     let full = [...this.#slots.values()].filter((s) => s.handle && !s.setupOnly).length;
     for (const r of want.values()) {
       const founder = r.kind === 'founder';
-      const setupOnly = r.status === 'onboarding';
+      const setupOnly = !(await this.#wantsFull(r.id, r.status));
       const slot = this.#slots.get(r.id);
       // Running, or waiting out a backoff (its timer reconciles again): leave it. Refused or stopped: try again here.
       if (slot && (slot.handle || slot.timer) && slot.setupOnly === setupOnly) continue;

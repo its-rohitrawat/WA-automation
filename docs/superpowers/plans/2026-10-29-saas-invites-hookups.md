@@ -386,6 +386,40 @@ poke: () => supervisor.poke(),
 - The routes poke after a pause, a resume, a sign-up (setup runtime) and an activation (full runtime). The 60 s tick in
   section 9 catches anything else.
 
+### 10.1 Starting a customer again after their key changes (lane A, with S4.6)
+
+`Supervisor.restart(id)` and two new deps are done and tested (`tests/runtime/supervisor.test.ts`, "restart()";
+`tests/web/platformRoutes.test.ts`, the AI key test):
+
+- `SupervisorDeps.wantsFull(tenantId, status)`: whether the customer gets a FULL runtime (it counts toward
+  `maxActive`) or a setup shell. Left out, it is today's rule: `status === 'active'`. Reconcile and restart both use it,
+  so they always agree.
+- `PlatformRouteDeps.restart(tenantId)`: the AI key routes call it after a key is saved or removed, never after a
+  refusal, with the customer from the session.
+- `restart(id)` stops that customer (its 10 s stop limit as usual) and starts it again as the kind `wantsFull` now says,
+  in the Supervisor's queue. No crash is counted and the backoff is not touched. It does nothing for the founder, for an
+  unknown or paused customer, or for a slot that is not running (a backoff starts it again by itself). If a full
+  runtime would pass `maxActive` or the memory ceiling, the slot is left `refused:limit` or `refused:memory`, as a
+  refused start is.
+
+In `src/runtime/platformSupervisor.ts`, once Phase B's full runtime exists:
+
+```ts
+const supervisor = new Supervisor({
+  // …as now, plus:
+  wantsFull: async (tenantId, status) => status === 'active' || (await keyIsSet(tenantId)), // the customer's key is in
+  factory: { start: async (t) => (t.founder ? founder : t.setupOnly ? startShell(t) : startFullRuntime(t)) },
+});
+// …in the hooks:
+restart: (tenantId) => void supervisor.restart(tenantId),
+```
+
+- `keyIsSet` reads the key's state (configured or not) from what `AiKeys` stores; it never decrypts the key.
+- `aiKeys` in the hooks must then come from whichever runtime is running for the customer (shell or full), not only
+  from `shells`, or the key screen says "not ready" while the full runtime runs.
+- Until Phase B, leave `wantsFull` out: a customer with a key would otherwise count toward `maxActive` while still
+  running the setup shell. `restart` can be wired now; with the default rule it rebuilds the same shell.
+
 ## 11. `startSession` says whether it started a session (lane A, with S5H.6 and S4.8)
 
 `SignupDeps.startSession` now returns `Promise<boolean>`. Customer sessions exist on Postgres only (plan S4.8 step 1,

@@ -55,6 +55,11 @@ export interface PlatformRouteDeps {
   aiKeys?: (tenantId: string) => AiKeys | null;
   /** Tells the Supervisor a customer's status changed (S4.5): after a pause, a resume or an activation. */
   poke?: () => void;
+  /**
+   * Starts a customer's runtime again as the kind it should now be (Supervisor.restart): after their Claude key is saved
+   * (the setup shell becomes a full runtime) or removed (the other way). Not after a refusal.
+   */
+  restart?: (tenantId: string) => void;
 }
 
 /** How the dashboard's own registrars look (src/web/mountRoutes.ts). */
@@ -197,23 +202,28 @@ export function mountPlatformRoutes(m: PlatformMount, d: PlatformRouteDeps): voi
   // The customer's own Anthropic key (Getting started, step 2): { key }. The workspace comes from the session (and the
   // membership behind it), never from the body. The key is never echoed, logged or audited; only 'configured' or
   // 'missing' comes back.
-  const keyStore = async (o: OwnerContext): Promise<AiKeys | ApiResult> => {
+  const keyStore = async (o: OwnerContext): Promise<{ keys: AiKeys; tenantId: string } | ApiResult> => {
     if (d.isFounder(o)) return fail(409, 'founder_env', "Your own business's key is set on the Mac, in its .env file.");
     const tenantId = await sessionWorkspace(o);
     if (!tenantId) return fail(404, 'no_workspace', 'There is no workspace to set up for this account.');
-    return d.aiKeys?.(tenantId) ?? fail(409, 'not_ready', 'Your workspace is being prepared. Add your key once it is ready.');
+    const keys = d.aiKeys?.(tenantId);
+    return keys ? { keys, tenantId } : fail(409, 'not_ready', 'Your workspace is being prepared. Add your key once it is ready.');
   };
   m.change('/dashboard/api/platform/ai-key', (_ctx, o, body) => answer(async () => {
     const parsed = NewAiKey.safeParse(body);
     if (!parsed.success) return fail(400, 'invalid', 'Send your Anthropic API key.');
-    const keys = await keyStore(o);
-    if (!(keys instanceof AiKeys)) return keys;
-    return ok({ aiKey: await keys.set(parsed.data.key, o.actor, o.requestId) });
+    const s = await keyStore(o);
+    if (!('keys' in s)) return s;
+    const aiKey = await s.keys.set(parsed.data.key, o.actor, o.requestId); // a refused key throws: no restart
+    d.restart?.(s.tenantId); // the key is in: the setup shell becomes a full runtime
+    return ok({ aiKey });
   }));
   m.change('/dashboard/api/platform/ai-key/remove', (_ctx, o) => answer(async () => {
-    const keys = await keyStore(o);
-    if (!(keys instanceof AiKeys)) return keys;
-    return ok({ aiKey: await keys.remove(o.actor, o.requestId) });
+    const s = await keyStore(o);
+    if (!('keys' in s)) return s;
+    const aiKey = await s.keys.remove(o.actor, o.requestId);
+    d.restart?.(s.tenantId); // no key: back to a setup shell
+    return ok({ aiKey });
   }));
 
   m.change('/dashboard/api/platform/invites/:id/cancel', ({ params }, o) => answer(async () => {
