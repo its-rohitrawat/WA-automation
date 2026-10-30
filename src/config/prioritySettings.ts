@@ -113,11 +113,10 @@ export class PrioritySettings {
   /** Saves run one at a time, so each one compares against the value the one before it saved. */
   #saving: Promise<unknown> = Promise.resolve();
 
-  /** Loads its rows synchronously (S1 only, on the raw connection); `PrioritySettings.open` is the async way. */
+  /** Starts with no rows: `PrioritySettings.open` makes one and loads them. */
   constructor(o: { db: Db; clock: Clock }) {
     this.#db = o.db;
     this.#clock = o.clock;
-    this.#fill(this.#db.raw.prepare(ROWS).all(...PRIORITY_SETTING_KEYS) as { k: string; v: string }[]);
   }
 
   static async open(o: { db: Db; clock: Clock }): Promise<PrioritySettings> {
@@ -126,7 +125,7 @@ export class PrioritySettings {
     return store;
   }
 
-  /** Reads its rows again (only a test that writes them directly needs this). */
+  /** Reads its rows (open() does; a test that writes them directly calls it again). */
   async load(): Promise<void> {
     this.#fill(await this.#db.all<{ k: string; v: string }>(ROWS, [...PRIORITY_SETTING_KEYS]));
   }

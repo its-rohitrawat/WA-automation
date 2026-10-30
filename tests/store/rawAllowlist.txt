@@ -1,6 +1,3 @@
-config/prioritySettings.ts
-config/settingsStore.ts
-health/uptimeLog.ts
 media/extract.ts
 spend/spendGuard.ts
 store/db.ts

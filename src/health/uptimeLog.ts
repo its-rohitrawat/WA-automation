@@ -142,12 +142,10 @@ export class UptimeLog {
   readonly #clock: Clock;
   #last: boolean | undefined;
 
-  /** Reads the last row synchronously (S1 only, on the raw connection); `UptimeLog.open` is the async way. */
+  /** Knows no last state: `UptimeLog.open` makes one and reads the last row. */
   constructor(db: Db, clock: Clock) {
     this.#db = db;
     this.#clock = clock;
-    const r = db.raw.prepare(LAST).get() as { up: number } | undefined;
-    this.#last = r === undefined ? undefined : r.up === 1;
   }
 
   static async open(db: Db, clock: Clock): Promise<UptimeLog> {

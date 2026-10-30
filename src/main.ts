@@ -312,6 +312,8 @@ async function main(): Promise<void> {
       const settled = await settleInterrupted(db, systemClock.now().toISOString());
       if (settled.failed + settled.unknown > 0) log.warn(settled, 'dashboard messages interrupted by the last stop');
     }
+    // The 30-day uptime strip's log, opened here (it reads its last row): nothing is awaited after app.start().
+    const uptimeLog = env.DASHBOARD_ENABLED && live && settings && auditLog ? await UptimeLog.open(db, systemClock) : undefined;
     app.start();
     log.info({ groups: configs.length }, 'WA Agent started');
     // Optional uptime heartbeat: visits HEARTBEAT_URL (never logged) every 5 minutes while the agent is up.
@@ -338,7 +340,7 @@ async function main(): Promise<void> {
     let uptimeTimer: NodeJS.Timeout | undefined;
     /** What startDashboard gets besides its own parts: the shared audit log and the agent's routes. */
     let agentRoutes: { audit: AuditLog; mount: (m: DashboardMount) => void } | undefined;
-    if (env.DASHBOARD_ENABLED && live && settings && auditLog) {
+    if (env.DASHBOARD_ENABLED && live && settings && auditLog && uptimeLog) {
       const store = settings;
       const audit = auditLog;
       const trackerStore = db;
@@ -362,7 +364,7 @@ async function main(): Promise<void> {
         audit: (event, actor) => auditOutside(audit)({ actor, event, kind: 'connection', detail: '' }),
       });
       // The 30-day uptime strip: a row whenever up changes, and the daily retention of both logs.
-      const log30 = new UptimeLog(db, systemClock);
+      const log30 = uptimeLog;
       uptime = log30;
       let purgedDay = '';
       // Chained, not awaited: the timer callback stays synchronous, and nothing is awaited before the stop handlers.

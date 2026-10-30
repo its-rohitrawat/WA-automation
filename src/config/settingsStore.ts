@@ -114,8 +114,7 @@ export class SettingsStore {
 
   /**
    * spareLinked: whether the spare phone is linked (the briefing's sender has a session). Not given: never, so the
-   * briefing cannot be switched on. Loads the rows synchronously (S1 only, on the raw connection); `SettingsStore.open`
-   * is the async way.
+   * briefing cannot be switched on. Starts with no rows: `SettingsStore.open` makes one and loads them.
    */
   constructor(o: SettingsStoreOptions) {
     this.#db = o.db;
@@ -123,7 +122,6 @@ export class SettingsStore {
     this.#clock = o.clock;
     this.#spareLinked = o.spareLinked ?? (() => false);
     this.#log = o.log;
-    this.#fill(this.#db.raw.prepare(ROWS).all() as { k: string; v: string }[]);
   }
 
   static async open(o: SettingsStoreOptions): Promise<SettingsStore> {
@@ -132,7 +130,7 @@ export class SettingsStore {
     return store;
   }
 
-  /** Reads the rows again (only a test that writes them directly needs this). */
+  /** Reads the rows (open() does; a test that writes them directly calls it again). */
   async load(): Promise<void> {
     this.#fill(await this.#db.all<{ k: string; v: string }>(ROWS));
   }

@@ -75,12 +75,12 @@ export async function mountFakeScreens(web: WebServer, o: { signedIn: () => bool
   for (const [h, up, reason] of [[60, 1, null], [48.5, 0, 'whatsapp_disconnected'], [48, 1, null], [6, 0, 'stopped'], [1.7, 1, null]] as const) {
     await db.run('INSERT INTO uptime_log (at, up, reason) VALUES (?, ?, ?)', [hoursAgo(h), up, reason]);
   }
-  const uptime = new UptimeLog(db, clock);
+  const uptime = await UptimeLog.open(db, clock);
   await uptime.start(true);
   // The briefing is on from .env (the spare phone's link is gone in the fake), so the screen shows the next report.
-  const settings = new SettingsStore({ db, env: parseEnv({ REPORT_ENABLED: 'true', REPORT_RECIPIENT: '919800000000' }), clock, spareLinked: () => false });
+  const settings = await SettingsStore.open({ db, env: parseEnv({ REPORT_ENABLED: 'true', REPORT_RECIPIENT: '919800000000' }), clock, spareLinked: () => false });
   // Sentiment on, so every screen shows the moods; the switch on Settings turns it off again.
-  const priority = new PrioritySettings({ db, clock });
+  const priority = await PrioritySettings.open({ db, clock });
   await priority.set('sentimentEnabled', true, OWNER, async () => {});
 
   const session = (): OwnerSession => {

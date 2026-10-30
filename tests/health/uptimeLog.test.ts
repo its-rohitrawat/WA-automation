@@ -71,7 +71,7 @@ describe('UptimeLog writes (S1.5)', () => {
     expect(rows(db).map((r) => (r as { up: number }).up)).toEqual([1, 0]);
   });
 
-  it('open() reads the last row, as the constructor does', async () => {
+  it('open() reads the last row, so a still-down tick adds nothing', async () => {
     const { db, clock, log } = setup();
     await log.start(false);
     const again = await UptimeLog.open(db, clock);
