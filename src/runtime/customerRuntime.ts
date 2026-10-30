@@ -58,6 +58,7 @@ import type { IncomingMessage } from 'node:http';
 import type { RequestContext } from '../web/router.ts';
 import { SESSION_COOKIE, sessionCookie, type SessionStore } from '../web/sessions.ts';
 import { makeGroupKey } from '../web/routes/groups.ts';
+import type { GoogleConnectDeps } from '../web/routes/google.ts';
 import type { PlatformRouteDeps } from '../web/routes/platform.ts';
 import type { DashboardMount } from '../web/start.ts';
 import type { RuntimeFacts } from './supervisor.ts';
@@ -172,7 +173,9 @@ export interface RuntimeDeps {
    * The Supervisor's parts for the platform screens (S4.5, S4.9): the onboarding probes, each customer's runtime and memory,
    * the active limit, each customer's AiKeys (its setup shell's), and the poke after a change. Only with PLATFORM_ENABLED.
    */
-  platformHooks?: Pick<PlatformRouteDeps, 'probes' | 'health' | 'maxActive' | 'aiKeys' | 'poke'>;
+  platformHooks?: Pick<PlatformRouteDeps, 'probes' | 'health' | 'maxActive' | 'aiKeys' | 'poke' | 'restart'>;
+  /** A customer's Google connect (a0's S4.7 A1), from the Supervisor: given to this runtime's Google routes. */
+  googleHooks?: Pick<GoogleConnectDeps, 'stateKey' | 'customer' | 'onCustomerToken'>;
   /** Told the name of each database this runtime closes (tests). */
   onClose?: (name: string) => void;
 }
@@ -536,6 +539,7 @@ export async function buildCustomerRuntime(
           google: {
             db: trackerStore, hub: google.hub, publicUrl: env.DASHBOARD_PUBLIC_URL ?? `http://localhost:${env.DASHBOARD_PORT}`,
             web: googleCredentials(env).web, meetingsEnabled: env.MEETINGS_ENABLED, invitesGmail: env.INVITES_GMAIL, log, clock: systemClock,
+            ...d.googleHooks,
             // The chosen account's email comes from its ID token, checked like the owner sign-in's.
             ...(googleCredentials(env).web ? { verifier: googleIdVerifier(googleCredentials(env).web!.clientId) } : {}),
           },

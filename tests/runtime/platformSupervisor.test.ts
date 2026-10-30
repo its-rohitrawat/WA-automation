@@ -70,7 +70,7 @@ describe('platformSupervisor (S4.5 Phase A)', () => {
     await ps.start();
     expect(ps.supervisor.state(FOUNDER_TENANT_ID)).toBe('running');
     expect(ps.supervisor.state(customer)).toBe('running');
-    expect(asked).toEqual([customer]); // only the customer's own Db, only for the customer
+    expect(new Set(asked)).toEqual(new Set([customer])); // only the customer's own Db, only for the customer (its key check and its shell)
     expect(ps.supervisor.facts(customer)).toEqual({
       whatsappLinked: false, spareLinked: false, driveConnected: false, // S4.6 and S4.7
       groupsApproved: 2, reportTimeSet: true, aiKey: 'missing',

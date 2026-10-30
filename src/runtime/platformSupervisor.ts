@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { Env } from '../config/env.ts';
 import { FOUNDER_TENANT_ID } from '../config/env.ts';
 import { dbGroupsStore } from '../config/groupsStore.ts';
-import { modelsListTester, type AiKeys, type KeyTester } from '../platform/aiKey.ts';
+import { AiKeys, modelsListTester, type KeyTester } from '../platform/aiKey.ts';
 import { TenantKeys } from '../platform/tenantKeys.ts';
 import type { Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
@@ -28,6 +28,11 @@ export interface PlatformSupervisor {
   readonly supervisor: Supervisor;
   /** What the founder runtime's platform and sign-up routes take (RuntimeDeps.platformHooks). */
   readonly hooks: NonNullable<RuntimeDeps['platformHooks']>;
+  /**
+   * What every runtime's Google connect routes take for a customer (a0's S4.7 A1): the signed-state key, a running
+   * customer's own Db and data key (null when its runtime is not running: 503), and a restart once its token is in.
+   */
+  readonly google: { stateKey: Buffer; customer: (tenantId: string) => Promise<{ db: Db; key: Buffer } | null>; onCustomerToken: (tenantId: string) => void };
   /** The first reconcile, then one every 60 s. */
   start(): Promise<void>;
   /** The 60 s tick ends, then every customer's shell stops (each within 10 s). The founder's runtime is main.ts's. */
@@ -48,6 +53,8 @@ export function platformSupervisor(o: {
   platformDb: Db;
   /** The Mac's master key: each customer's data key is wrapped by a key derived from it (S4.1). */
   master: Buffer;
+  /** The Google connect state's signing key (deriveSubkey(master, 'wa-agent oauth state v1'), made in main.ts). */
+  oauthStateKey?: Buffer;
   /** Each customer's own Db (Postgres; undefined on SQLite, where no customer starts). */
   customerDb: ((tenantId: string) => Db) | undefined;
   /** Checks a key a customer adds (default: one models list call with that key). Tests: a fake. */
@@ -68,11 +75,25 @@ export function platformSupervisor(o: {
   /** Each started customer's AiKeys (its shell's), for the ai-key route; a full runtime keeps its shell's. */
   const keys = new Map<string, AiKeys>();
   const build = o.build ?? buildCustomerRuntime;
+  /** A customer's AiKeys: its running runtime's, or one that only reads whether a key is stored (its own kv). */
+  const keysOf = (tenantId: string): AiKeys | null =>
+    keys.get(tenantId) ?? (o.customerDb
+      ? new AiKeys({ db: o.customerDb(tenantId), platform: o.platformDb, tenantId, dataKey: () => tenantKeys.dataKey(tenantId), tester: keyTester, clock: o.clock })
+      : null);
   const founder: RuntimeHandle = { stop: async () => {} }; // adopted: main.ts owns its start and its stop
 
   const supervisor = new Supervisor({
     db: o.platformDb, clock: o.clock, log: o.log, engine: o.env.DB_ENGINE,
     maxActive: o.env.PLATFORM_MAX_ACTIVE, maxRssMb: o.env.PLATFORM_MAX_RSS_MB, rssMb,
+    // A FULL runtime only for an active customer that has its own Claude key: the factory's rule, so that a reconcile
+    // and a restart agree and a keyed setup shell never counts toward the active limit wrongly.
+    // The founder (adopted) by its status alone; a key that cannot be read is no key (a setup shell, never a failed
+    // reconcile for everyone).
+    wantsFull: async (tenantId, status) => {
+      if (status !== 'active') return false;
+      if (tenantId === FOUNDER_TENANT_ID) return true;
+      return (await keysOf(tenantId)?.state().catch(() => 'missing' as const)) === 'configured';
+    },
     factory: {
       start: async (t) => {
         if (t.founder) return founder;
@@ -82,7 +103,7 @@ export function platformSupervisor(o: {
           tenantId: t.id, db, platform: o.platformDb, dataKey: () => tenantKeys.dataKey(t.id), keyTester, clock: o.clock, log: o.log,
         });
         keys.set(t.id, shell.aiKeys);
-        const aiKey = t.setupOnly ? null : await shell.aiKeys.load();
+        const aiKey = t.setupOnly ? null : await shell.aiKeys.load(); // the Supervisor asked wantsFull; a key that will not load stays a shell
         if (!aiKey) {
           // Onboarding, or active without its own key yet: the setup shell only.
           return {
@@ -129,6 +150,17 @@ export function platformSupervisor(o: {
       maxActive: o.env.PLATFORM_MAX_ACTIVE,
       aiKeys: (tenantId) => keys.get(tenantId) ?? null,
       poke: () => supervisor.poke(),
+      // After a customer's Claude key is saved or removed: its runtime starts again as the kind it now should be.
+      restart: (tenantId) => void supervisor.restart(tenantId),
+    },
+    google: {
+      stateKey: o.oauthStateKey ?? Buffer.alloc(0),
+      customer: async (tenantId) => {
+        if (!o.customerDb || !keys.has(tenantId)) return null; // not running: 503
+        return { db: o.customerDb(tenantId), key: await tenantKeys.dataKey(tenantId) };
+      },
+      // Its hub reads its tokens when it opens: the runtime starts again with the new one.
+      onCustomerToken: (tenantId) => void supervisor.restart(tenantId),
     },
     start: async () => {
       await supervisor.reconcile();

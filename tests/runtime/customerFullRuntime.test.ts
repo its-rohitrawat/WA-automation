@@ -134,3 +134,33 @@ describe('a customer’s full runtime (Phase B 2 and 3)', () => {
     expect(ps.supervisor.state(FOUNDER_TENANT_ID)).toBe('running'); // adopted, untouched
   });
 });
+
+describe('restart and the Google hooks (c7’s Supervisor.restart, a0’s S4.7 A1)', () => {
+  it('a key added turns the setup shell into the full runtime on restart; removed, back to the shell', async () => {
+    const { ps, ids } = await setup({ keyFor: [] });
+    await ps.start();
+    expect(ps.supervisor.facts(ids.a)?.aiKey).toBe('missing');
+    await ps.hooks.aiKeys!(ids.a)!.set('sk-ant-customer-a-placeholder', 'owner@example.com');
+    ps.hooks.restart!(ids.a);
+    await ps.supervisor.settled();
+    expect(ps.supervisor.state(ids.a)).toBe('running');
+    expect(ps.supervisor.facts(ids.a)).toMatchObject({ aiKey: 'configured', groupsApproved: 2 });
+    expect(sdk.keys).toContain('sk-ant-customer-a-placeholder');
+    await ps.hooks.aiKeys!(ids.a)!.remove('owner@example.com');
+    ps.hooks.restart!(ids.a);
+    await ps.supervisor.settled();
+    expect(ps.supervisor.facts(ids.a)?.aiKey).toBe('missing'); // its setup shell again
+    expect(ps.supervisor.state(ids.b)).toBe('running'); // B untouched throughout
+  });
+
+  it('the Google resolver gives a running customer’s own Db and data key, and nothing for anyone else', async () => {
+    const { ps, ids, dbs, tenantKeys } = await setup({ keyFor: ['a'] });
+    await ps.start();
+    const a = await ps.google.customer(ids.a);
+    expect(a?.db).toBe(dbs[ids.a]);
+    expect(a?.key.equals(await tenantKeys.dataKey(ids.a))).toBe(true);
+    expect(await ps.google.customer('00000000-0000-4000-8000-0000000000ff')).toBeNull(); // not running
+    await ps.stop();
+    expect(await ps.google.customer(ids.a)).toBeNull(); // stopped
+  });
+});

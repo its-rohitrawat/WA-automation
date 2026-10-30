@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { loadEnv } from './config/env.ts';
 import { GROUPS_FILE_MISSING_MESSAGE, loadGroupsFile } from './config/groups.ts';
 import { masterKeyPath } from './config/paths.ts';
-import { DpapiKeyProvider, MasterKeyError } from './crypto/keyProvider.ts';
+import { deriveSubkey, DpapiKeyProvider, MasterKeyError } from './crypto/keyProvider.ts';
 import { TokenDecryptError } from './output/googleAuth.ts';
 import { ensurePlatformSchema } from './platform/schema.ts';
 import { ensureFounderTenant } from './platform/store.ts';
@@ -80,7 +80,10 @@ async function main(): Promise<void> {
     // The Supervisor (S4.5 Phase A), only with the platform on: the founder adopted, a setup shell for each customer
     // (Postgres only: on SQLite the Supervisor refuses every customer).
     if (env.PLATFORM_ENABLED) {
-      platform = platformSupervisor({ env, log, clock: systemClock, platformDb, master: key, customerDb: customerDbsOf(db), localEngine });
+      platform = platformSupervisor({
+        env, log, clock: systemClock, platformDb, master: key, customerDb: customerDbsOf(db), localEngine,
+        oauthStateKey: deriveSubkey(key, 'wa-agent oauth state v1'),
+      });
     }
 
     // The founder's runtime (S4.4, src/runtime/customerRuntime.ts): everything for customer #1 between the databases
@@ -90,7 +93,7 @@ async function main(): Promise<void> {
     handedOver = true;
     const rt = await startFounderRuntime({
       tenantId: env.TENANT_ID, env, log, db, platformDb, key, configs, lock, globalSpend, ...(customerDbsOf(db) ? { customerDb: customerDbsOf(db)! } : {}),
-      ...(platform ? { platformHooks: platform.hooks } : {}),
+      ...(platform ? { platformHooks: platform.hooks, googleHooks: platform.google } : {}),
       localEngine,
     });
     const { control, agentRoutes } = rt;

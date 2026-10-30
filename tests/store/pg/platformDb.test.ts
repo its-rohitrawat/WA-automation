@@ -42,7 +42,7 @@ const ALLOWED: Record<string, RegExp[]> = {
     /^tenantId: env\.TENANT_ID, env, log, db, platformDb, key, configs, lock, globalSpend,/,
     /^env, db, platformDb, log, control, platform: rt\.platform, customerSessions:/,
     // The Supervisor (S4.5): it reads the tenants table.
-    /^platform = platformSupervisor\(\{ env, log, clock: systemClock, platformDb, master: key, customerDb: customerDbsOf\(db\), localEngine \}\);$/,
+    /^env, log, clock: systemClock, platformDb, master: key, customerDb: customerDbsOf\(db\), localEngine,$/,
     // Closed at shutdown and on a failed start, when it is its own pool.
     /^const platformStore = platformDb !== db \? platformDb : undefined;$/,
     /^Promise\.all\(\[trackerDb\.close\(\), platformStore\?\.close\(\)\]/,
@@ -69,6 +69,8 @@ const ALLOWED: Record<string, RegExp[]> = {
     /^const tenantKeys = new TenantKeys\(\{ db: o\.platformDb, master: o\.master, clock: o\.clock \}\);$/,
     /^db: o\.platformDb, clock: o\.clock, log: o\.log, engine: o\.env\.DB_ENGINE,$/,
     /^tenantId: t\.id, db, platform: o\.platformDb, dataKey:/,
+    // The key check behind wantsFull: a customer's AiKeys (its key is in its own kv; AiKeys audits into platform_audit).
+    /^\? new AiKeys\(\{ db: o\.customerDb\(tenantId\), platform: o\.platformDb, tenantId, dataKey:/,
   ],
   'web/start.ts': [
     /^platformDb\?: Db;$/,
