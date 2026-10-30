@@ -23,7 +23,8 @@ each kept apart. You run every step yourself, on the Mac, with the Mac assistant
 > - the `.env` names `DB_ENGINE`, `DATABASE_URL`, `DATABASE_OWNER_URL` and `DATABASE_PLATFORM_URL` (the backup password
 >   is never in `.env`);
 > - the role names `wa_owner`, `wa_app`, `wa_platform` and `wa_backup`, and the migrations P1 to P3;
-> - the switch for the customer parts, `PLATFORM_ENABLED` (off by default, part 7);
+> - the switch for the customer parts, `PLATFORM_ENABLED` (off by default, part 7), and the name on invites,
+>   `PLATFORM_FOUNDER_NAME` (optional, default "WA Agent");
 > - the `status` line that names the database engine.
 
 ---
@@ -417,6 +418,8 @@ Google knows its address.
 4. **Turn the customer parts on.**
    - Waagent window: `nano .env`, add `PLATFORM_ENABLED=true`, and save. **[confirm at S2]**
    - To email invites from your Gmail, also add `INVITES_GMAIL=true`.
+   - Optional: `PLATFORM_FOUNDER_NAME=<your name or your business's name>`. It's the name the invite emails and the
+     sign-up page show, as in "<name> invited you to WA Agent". Without it they say "WA Agent". **[confirm at S2]**
    - Normal window: `sudo launchctl kickstart -k system/com.wa-agent`.
    - If you added `INVITES_GMAIL=true`, open Connections in the dashboard, then Google, and reconnect your account once.
      Approve "Send email as you (invites only)".

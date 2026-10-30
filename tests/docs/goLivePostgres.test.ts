@@ -72,6 +72,9 @@ describe('GO-LIVE-postgres.md', () => {
     expect(part7).toContain('**What changes when `PLATFORM_ENABLED` is on:**');
     expect(part7).toContain('**To turn the customer parts off again:**');
     expect(guide).toContain('`PLATFORM_ENABLED` (off by default, part 7)');
+    // The optional name on invites, a placeholder only, with its default said.
+    expect(part7).toContain("`PLATFORM_FOUNDER_NAME=<your name or your business's name>`");
+    expect(guide).toContain('`PLATFORM_FOUNDER_NAME` (optional, default "WA Agent")');
   });
 
   it('says when to use each way back, and never sends a secret to Claude', () => {
