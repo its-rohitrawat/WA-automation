@@ -26,6 +26,7 @@ import { FakeDrive } from './helpers/fakeDrive.ts';
 import { FakeMeetingsApi } from './helpers/fakeMeetings.ts';
 import { FakeSocket } from './helpers/fakeSocket.ts';
 import { addRecordingFile, fakeFfmpeg, FakeMeetingAi, FakeSttProvider, FILE_ID, queuedMeeting, STARTED } from './helpers/meetingPipeline.ts';
+import { rawOf } from '../src/store/engine/sqlite.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
 const MINUTE = 60_000;
@@ -192,7 +193,7 @@ describe('app with meetings', () => {
     // A later discovery pass stores nothing twice.
     await vi.advanceTimersByTimeAsync(10 * MINUTE);
     expect(api.callsOf('listConferences').length).toBeGreaterThan(1);
-    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM meetings').get()).toEqual({ n: 1 });
+    expect(rawOf(db).prepare('SELECT COUNT(*) AS n FROM meetings').get()).toEqual({ n: 1 });
     await stopApp(app);
   });
 
@@ -323,7 +324,7 @@ describe('app with meetings', () => {
       await vi.advanceTimersByTimeAsync(6 * MINUTE); // past the Doc's wait for the WA Agent folder
       await vi.waitFor(async () => expect((await getMeeting(db, 1))?.status).toBe('done'), SLOW_IO);
       expect(Date.now()).toBeLessThan(Date.parse('2026-11-01T13:00:00.000Z'));
-      expect(db.raw.prepare('SELECT COUNT(*) AS n FROM meetings').get()).toEqual({ n: 1 });
+      expect(rawOf(db).prepare('SELECT COUNT(*) AS n FROM meetings').get()).toEqual({ n: 1 });
 
       // 45 minutes in five ten-minute-or-less parts, no speech spend: only the summary and the tracker step are booked.
       const m = (await getMeeting(db, 1))!;

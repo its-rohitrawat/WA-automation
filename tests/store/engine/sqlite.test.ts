@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { SqliteDb, TxMisuseError } from '../../../src/store/engine/sqlite.ts';
+import { SqliteDb, TxMisuseError, rawOf } from '../../../src/store/engine/sqlite.ts';
 
 const open = () => SqliteDb.open(':memory:', { txMaxMs: 1_000 });
 
@@ -104,22 +104,22 @@ describe('SqliteDb', () => {
     await db.exec('CREATE TABLE t (k TEXT)');
     let release!: () => void;
     const held = db.tx(async (q) => {
-      db.raw.prepare('INSERT INTO t VALUES (?)').run('inside'); // same transaction: allowed
+      rawOf(db).prepare('INSERT INTO t VALUES (?)').run('inside'); // same transaction: allowed
       await new Promise<void>((r) => (release = r));
       await q.run('INSERT INTO t VALUES (?)', ['after']);
     });
     await new Promise((r) => setTimeout(r, 0));
-    expect(() => db.raw).toThrow(TxMisuseError);
+    expect(() => rawOf(db)).toThrow(TxMisuseError);
     release();
     await held;
-    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM t').get()).toEqual({ n: 2 });
+    expect(rawOf(db).prepare('SELECT COUNT(*) AS n FROM t').get()).toEqual({ n: 2 });
   });
 
   it('wraps a handle opened elsewhere, keeping its own pragmas', async () => {
     const raw = new Database(':memory:');
     raw.pragma('busy_timeout = 1234');
     const db = SqliteDb.wrap(raw);
-    expect(db.raw).toBe(raw);
+    expect(rawOf(db)).toBe(raw);
     expect(raw.pragma('busy_timeout', { simple: true })).toBe(1234); // wrap sets nothing (open sets 5000)
     await db.exec('CREATE TABLE t (k TEXT)');
     await db.run('INSERT INTO t VALUES (?)', ['a']);

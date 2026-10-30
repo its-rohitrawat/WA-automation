@@ -5,6 +5,7 @@ import type { Db } from '../../src/store/db.ts';
 import { insertFound, type MeetingStage, type MeetingStatus } from '../../src/store/meetings.ts';
 import { createTask } from '../../src/store/tasks.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const now = new Date(NOW);
 const DOC = 'abcdefghij_KLMNOP-123';
@@ -34,7 +35,7 @@ async function meeting(db: Db, o: Over = {}): Promise<number> {
     attendees: [], participants: [], clientId: o.clientId === undefined ? (status === 'unassigned' || internal ? null : 1) : o.clientId,
     matchKind: 'title', status, driveSeconds: o.seconds === undefined ? 1800 : o.seconds, createdAt: NOW,
   }))!;
-  db.raw.prepare(`UPDATE meetings SET stage = COALESCE(?, stage), audio_seconds = ?, doc_file_id = ?, summary = ?, error_code = ?, next_attempt_at = ?
+  rawOf(db).prepare(`UPDATE meetings SET stage = COALESCE(?, stage), audio_seconds = ?, doc_file_id = ?, summary = ?, error_code = ?, next_attempt_at = ?
     WHERE id = ?`).run(o.stage ?? (status === 'done' ? 'tracked' : null), o.audioSeconds ?? null, o.doc ?? null, o.summary ?? null, o.errorCode ?? null,
     o.nextAttemptAt ?? null, id);
   return id;
@@ -181,7 +182,7 @@ describe('meeting review fixes', () => {
   it('labels a no-access meeting found as internal like the CLI does', async () => {
     const db = await seededDb();
     const id = await meeting(db, { status: 'no_access', clientId: null, title: '' });
-    db.raw.prepare("UPDATE meetings SET note = 'found_internal' WHERE id = ?").run(id);
+    rawOf(db).prepare("UPDATE meetings SET note = 'found_internal' WHERE id = ?").run(id);
     expect((await list(db)).rows[0]!.stageLabel).toBe('Internal, no access to the recording');
   });
 

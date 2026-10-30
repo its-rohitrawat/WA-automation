@@ -7,6 +7,7 @@ import type { Db } from '../../src/store/db.ts';
 import { getKv } from '../../src/store/kv.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const OWNER = 'owner@example.com';
 const EMPTY = { critical: [], major: [], medium: [], low: [] };
@@ -19,7 +20,7 @@ async function setup() {
   return { db, clock, store, audits, audit: async (_q: unknown, e: AuditEntry) => { audits.push(e); } };
 }
 
-const rows = (db: Db) => db.raw.prepare('SELECT k, v, updated_by AS by FROM settings ORDER BY k').all();
+const rows = (db: Db) => rawOf(db).prepare('SELECT k, v, updated_by AS by FROM settings ORDER BY k').all();
 
 async function refusal(fn: () => unknown): Promise<ControlError> {
   try {
@@ -110,7 +111,7 @@ describe('PrioritySettings', () => {
 
   it('falls back to the defaults when a stored row is damaged', async () => {
     const { db, store } = await setup();
-    db.raw.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('priorityKeywords', '{\"critical\":5}', ?, 'x'), ('sentimentEnabled', 'nope', ?, 'x')").run(NOW, NOW);
+    rawOf(db).prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('priorityKeywords', '{\"critical\":5}', ?, 'x'), ('sentimentEnabled', 'nope', ?, 'x')").run(NOW, NOW);
     await store.load(); // written behind the store's back: it reads them again
     expect(store.get()).toEqual({ keywords: DEFAULT_KEYWORDS, sentimentEnabled: false });
     expect((await store.view()).source).toEqual({ priorityKeywords: 'default', sentimentEnabled: 'default' });

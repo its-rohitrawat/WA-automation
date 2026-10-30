@@ -11,6 +11,7 @@ import { manualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger } from '../../src/util/logger.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
 import { FakeVoiceTranscriber } from '../helpers/voice.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 /** A transcribed voice note whose provider kept a copy named `ref`, noted by finishMedia (N1). Returns the media id. */
 async function copied(db: Db, waId: string, ref: string, provider: ProviderId = 'elevenlabs'): Promise<number> {
@@ -28,7 +29,7 @@ async function copied(db: Db, waId: string, ref: string, provider: ProviderId = 
 }
 
 const rows = (db: Db) =>
-  db.raw.prepare('SELECT media_id AS mediaId, provider, ref, attempts, next_try_at AS nextTryAt FROM media_stt_forget ORDER BY id').all() as {
+  rawOf(db).prepare('SELECT media_id AS mediaId, provider, ref, attempts, next_try_at AS nextTryAt FROM media_stt_forget ORDER BY id').all() as {
     mediaId: number; provider: string; ref: string; attempts: number; nextTryAt: string | null;
   }[];
 

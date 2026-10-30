@@ -2,8 +2,23 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
+import type { Migration } from '../migrations.ts';
 import { SerialQueue } from './queue.ts';
+import { migrate } from './sqliteMigrate.ts';
 import type { Db, Params, RunResult, Sql } from './types.ts';
+
+/**
+ * TESTS AND SCRIPTS ONLY: the better-sqlite3 handle under a SQLite Db, to set up or inspect a database directly. Nothing
+ * in src may call it outside src/store/engine (tests/store/dbAccess.test.ts enforces that): the agent reaches the
+ * database only through the async Db interface, which Postgres serves too (S2). While another flow holds a transaction
+ * it throws TxMisuseError, as a synchronous statement then would break that transaction's isolation.
+ */
+export function rawOf<T extends Db | undefined>(db: T): T extends undefined ? undefined : Database.Database;
+export function rawOf(db: Db | undefined): Database.Database | undefined {
+  if (db === undefined) return undefined;
+  if (!(db instanceof SqliteDb)) throw new Error('rawOf: not a SQLite database');
+  return SqliteDb.rawOf(db);
+}
 
 // better-sqlite3 behind the async Db interface (SaaS S1, plan section 2). One connection; every call waits its turn in one
 // FIFO queue, which makes today's single writer explicit: an async transaction (BEGIN IMMEDIATE … COMMIT) holds the
@@ -40,11 +55,12 @@ export class SqliteDb implements Db {
   }
 
   /**
-   * Opens the file with today's pragmas. The caller migrates (store/db.ts). `readonly` (the copy tool, S3): the file
-   * must exist, every write is refused, and the pragmas that write (journal_mode, secure_delete) and the folder creation
-   * are skipped; a -wal or -shm file SQLite itself needs may still appear beside a WAL file.
+   * Opens the file with today's pragmas. `migrations` (store/db.ts's openDb): applied on the file's own handle before the
+   * Db is handed out, so opening stays synchronous. `readonly` (the copy tool, S3): the file must exist, every write is
+   * refused, and the pragmas that write (journal_mode, secure_delete) and the folder creation are skipped; a -wal or -shm
+   * file SQLite itself needs may still appear beside a WAL file.
    */
-  static open(file: string, o: { txMaxMs?: number; readonly?: boolean } = {}): SqliteDb {
+  static open(file: string, o: { txMaxMs?: number; readonly?: boolean; migrations?: readonly Migration[] } = {}): SqliteDb {
     const readonly = o.readonly === true;
     if (file !== ':memory:' && !readonly) mkdirSync(dirname(file), { recursive: true });
     const raw = readonly ? new Database(file, { readonly: true, fileMustExist: true }) : new Database(file);
@@ -54,6 +70,7 @@ export class SqliteDb implements Db {
       raw.pragma('busy_timeout = 5000');
       // Deleted content is overwritten, so wiped download details (media.ref_enc) do not stay in free pages.
       if (!readonly) raw.pragma('secure_delete = ON');
+      if (o.migrations) migrate(raw, o.migrations);
     } catch (e) {
       raw.close();
       throw e;
@@ -66,10 +83,10 @@ export class SqliteDb implements Db {
     return new SqliteDb(raw, o);
   }
 
-  /** S1 only (removed in S1.15): the better-sqlite3 handle, for code not converted yet. */
-  get raw(): Database.Database {
-    if (this.#held && inTx.getStore() !== this) throw new TxMisuseError('a synchronous statement ran while another flow holds a transaction');
-    return this.#raw;
+  /** The better-sqlite3 handle, for tests only: see rawOf. */
+  static rawOf(db: SqliteDb): Database.Database {
+    if (db.#held && inTx.getStore() !== db) throw new TxMisuseError('a synchronous statement ran while another flow holds a transaction');
+    return db.#raw;
   }
 
   #stmt(sql: string): Database.Statement {

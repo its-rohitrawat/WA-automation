@@ -11,6 +11,7 @@ import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { FakeDrive } from '../helpers/fakeDrive.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const at = (hhmm: string) => `2026-10-19T${hhmm}:00.000Z`;
 
@@ -32,12 +33,12 @@ async function meeting(db: Db, status: MeetingStatus, updatedAt: string, o: { ti
     title: status === 'internal' ? '' : (o.title ?? 'Weekly sync'), startedAt: NOW, endedAt: null, attendees: [], participants: [],
     clientId: status === 'unassigned' || status === 'internal' ? null : 1, matchKind: null, status, driveSeconds: o.seconds ?? 1800, createdAt: NOW,
   }))!;
-  db.raw.prepare("UPDATE meetings SET updated_at = ?, stage = CASE WHEN status = 'done' THEN 'tracked' ELSE stage END WHERE id = ?").run(updatedAt, id);
+  rawOf(db).prepare("UPDATE meetings SET updated_at = ?, stage = CASE WHEN status = 'done' THEN 'tracked' ELSE stage END WHERE id = ?").run(updatedAt, id);
   return id;
 }
 
 function audit(db: Db, a: { at: string; actor: string; event: string; kind: string; detail: string }) {
-  db.raw.prepare('INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, ?, ?, ?, ?)').run(a.at, a.actor, a.event, a.kind, a.detail);
+  rawOf(db).prepare('INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, ?, ?, ?, ?)').run(a.at, a.actor, a.event, a.kind, a.detail);
 }
 
 const params = (o: Record<string, string> = {}) => parseActivityParams(new URLSearchParams(o));
@@ -206,8 +207,8 @@ describe('publisherAuditHooks', () => {
 describe('activity review fixes', () => {
   it('says where a task came from: a voice note or a meeting', async () => {
     const db = await seededDb();
-    db.raw.prepare("INSERT INTO messages (wa_id, client_id, sender_jid, ts, media_type) VALUES ('V1', 1, 'x', ?, 'audio')").run(NOW);
-    db.raw.prepare("INSERT INTO media (message_id, client_id, kind, status, created_at, updated_at) VALUES (1, 1, 'voice', 'done', ?, ?)").run(NOW, NOW);
+    rawOf(db).prepare("INSERT INTO messages (wa_id, client_id, sender_jid, ts, media_type) VALUES ('V1', 1, 'x', ?, 'audio')").run(NOW);
+    rawOf(db).prepare("INSERT INTO media (message_id, client_id, kind, status, created_at, updated_at) VALUES (1, 1, 'voice', 'done', ?, ?)").run(NOW, NOW);
     const voice = await createTask(db, { clientId: 1, side: 'us', title: 'From voice', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,
       raisedOn: '2026-10-19', deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: 'V1', origin: 'whatsapp' }, NOW);
     const mid = await meeting(db, 'done', at('04:00'));
@@ -234,7 +235,7 @@ describe('activity review fixes', () => {
   it('leaves out a no-access meeting found as internal', async () => {
     const db = await seededDb();
     const id = await meeting(db, 'no_access', at('05:00'), { title: '' });
-    db.raw.prepare("UPDATE meetings SET note = 'found_internal', client_id = NULL WHERE id = ?").run(id);
+    rawOf(db).prepare("UPDATE meetings SET note = 'found_internal', client_id = NULL WHERE id = ?").run(id);
     expect((await listActivity(db, params())).items).toEqual([]);
   });
 
@@ -276,7 +277,7 @@ describe('Activity: a newly approved group\'s earlier messages', () => {
     const db = await seededDb();
     const e = historyReadEntry(42, 'Sharma Interiors');
     expect(e).toEqual({ actor: 'agent', event: 'history.read', kind: 'ops', detail: '42 earlier messages read · Sharma Interiors' });
-    db.raw.prepare('INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, ?, ?, ?, ?)').run(NOW, e.actor, e.event, e.kind, e.detail);
+    rawOf(db).prepare('INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, ?, ?, ?, ?)').run(NOW, e.actor, e.event, e.kind, e.detail);
     const row = { kind: 'msg', title: '42 earlier messages read', detail: 'Sharma Interiors', who: 'by the agent' };
     expect((await listActivity(db, params())).items).toEqual([expect.objectContaining(row)]);
     expect((await listActivity(db, params({ kind: 'msg' }))).items).toEqual([expect.objectContaining(row)]);

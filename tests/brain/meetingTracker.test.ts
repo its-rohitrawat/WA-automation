@@ -21,6 +21,7 @@ import { silentLogger } from '../../src/util/logger.ts';
 import { FAKE_USAGE, FakeAi, op, type FakeResponse } from '../helpers/ai.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
 import { SHARMA_PN } from '../helpers/wa.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
 /** 11:30 IST on 2026-10-19; the clock says 2026-10-20, so a date from "today" would show. */
@@ -84,11 +85,11 @@ async function banner(db: Db, raisedOn = '2026-10-10', origin = 'whatsapp'): Pro
 }
 
 const meetingIdOf = (db: Db, table: 'tasks' | 'decisions', id: number) =>
-  (db.raw.prepare(`SELECT meeting_id AS m FROM ${table} WHERE id = ?`).get(id) as { m: number | null }).m;
+  (rawOf(db).prepare(`SELECT meeting_id AS m FROM ${table} WHERE id = ?`).get(id) as { m: number | null }).m;
 
 /** Puts a finished meeting back to queued at stage doc, as if the tracker step ran again. */
 function requeue(db: Db, id: number): void {
-  db.raw.prepare("UPDATE meetings SET status = 'queued', stage = 'doc' WHERE id = ?").run(id);
+  rawOf(db).prepare("UPDATE meetings SET status = 'queued', stage = 'doc' WHERE id = ?").run(id);
 }
 
 describe('meetingItems', () => {
@@ -183,7 +184,7 @@ describe('Reconciler.runMeeting', () => {
     expect(meetingIdOf(db, 'decisions', d.id)).toBe(m.id);
     expect((await getClient(db, 1)).statusText).toBe('Waiting for the logo files.');
     expect(await getMeeting(db, m.id)).toMatchObject({ status: 'done', stage: 'tracked' });
-    const ev = db.raw.prepare("SELECT source_ids AS ids FROM task_events WHERE op = 'add_task'").get() as { ids: string };
+    const ev = rawOf(db).prepare("SELECT source_ids AS ids FROM task_events WHERE op = 'add_task'").get() as { ids: string };
     expect(JSON.parse(ev.ids)).toEqual(['mtg1-a1', 'C1']);
     expect(onChanged).toHaveBeenCalledTimes(1);
 
@@ -287,7 +288,7 @@ describe('Reconciler.runMeeting', () => {
   it('an inactive client is done with the note client_inactive, without an AI call', async () => {
     const { db, ai, r } = await setup([]);
     const m = await meetingAt(db);
-    db.raw.prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
+    rawOf(db).prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
     expect(await r.runMeeting(1, m)).toEqual({ status: 'done', accepted: 0, rejected: 0, note: 'client_inactive' });
     expect(ai.calls).toHaveLength(0);
     expect(await getMeeting(db, m.id)).toMatchObject({ status: 'done', stage: 'tracked', note: 'client_inactive' });
@@ -330,7 +331,7 @@ describe('Reconciler.runMeeting', () => {
   it('rolls back every op when the meeting cannot be finished, and rethrows', async () => {
     const { db, r } = await setup([{ ops: [op({ op: 'add_task', side: 'us', title: 'X', category: 'other', priority: 'low', sourceMessageIds: ['mtg1-a1'] })] }]);
     const m = await meetingAt(db);
-    db.raw.prepare("UPDATE meetings SET status = 'skipped' WHERE id = ?").run(m.id);
+    rawOf(db).prepare("UPDATE meetings SET status = 'skipped' WHERE id = ?").run(m.id);
     await expect(r.runMeeting(1, m)).rejects.toThrow();
     expect(await listTasks(db, 1)).toHaveLength(0);
   });

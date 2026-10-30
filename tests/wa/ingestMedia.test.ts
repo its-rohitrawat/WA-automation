@@ -9,6 +9,7 @@ import { Ingestor, planMedia } from '../../src/wa/ingest.ts';
 import { normalizeMessage } from '../../src/wa/normalize.ts';
 import { OTHER_GROUP, seededDb } from '../helpers/db.ts';
 import { waRaw } from '../helpers/wa.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const MEDIA_KEY = Buffer.alloc(32, 9);
 const KEY = randomBytes(32);
@@ -26,8 +27,8 @@ async function setup(withSealer = true) {
   return { db, onNew, onQueued, sealer, seal, ing };
 }
 
-const mediaIds = (db: Db) => (db.raw.prepare('SELECT id FROM media ORDER BY id').all() as { id: number }[]).map((r) => r.id);
-const messageCount = (db: Db) => (db.raw.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n;
+const mediaIds = (db: Db) => (rawOf(db).prepare('SELECT id FROM media ORDER BY id').all() as { id: number }[]).map((r) => r.id);
+const messageCount = (db: Db) => (rawOf(db).prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n;
 
 describe('Ingestor with shared files', () => {
   it('records a pending image with sealed download details and queues it once', async () => {
@@ -47,7 +48,7 @@ describe('Ingestor with shared files', () => {
   it('stores no media key or address in plain text in any column', async () => {
     const { db, ing } = await setup();
     await ing.handle(image('IMG1'));
-    const row = db.raw.prepare('SELECT * FROM media').get() as Record<string, unknown>;
+    const row = rawOf(db).prepare('SELECT * FROM media').get() as Record<string, unknown>;
     for (const v of Object.values(row)) {
       const s = Buffer.isBuffer(v) ? v.toString('latin1') : String(v);
       expect(s).not.toContain(MEDIA_KEY.toString('base64'));
@@ -61,7 +62,7 @@ describe('Ingestor with shared files', () => {
     await ing.handle(normalizeMessage(waRaw('V1', { videoMessage: { url: 'u', mediaKey: MEDIA_KEY, seconds: 42, mimetype: 'video/mp4' } }))!);
     await ing.handle(normalizeMessage(waRaw('S1', { stickerMessage: { url: 'u', mediaKey: MEDIA_KEY } }))!);
     await ing.handle(normalizeMessage(waRaw('O1', { viewOnceMessageV2: { message: { imageMessage: { url: 'u', mediaKey: MEDIA_KEY } } } }))!);
-    expect(db.raw.prepare('SELECT kind, status, error_code AS errorCode, seconds, ref_enc AS ref FROM media ORDER BY id').all()).toEqual([
+    expect(rawOf(db).prepare('SELECT kind, status, error_code AS errorCode, seconds, ref_enc AS ref FROM media ORDER BY id').all()).toEqual([
       { kind: 'video', status: 'metadata', errorCode: null, seconds: 42, ref: null },
       { kind: 'sticker', status: 'metadata', errorCode: null, seconds: null, ref: null },
       { kind: 'image', status: 'metadata', errorCode: 'view_once', seconds: null, ref: null },
@@ -74,7 +75,7 @@ describe('Ingestor with shared files', () => {
     const { db, ing } = await setup();
     await ing.handle(image('BIG', { fileLength: 60 * 1024 * 1024 }));
     await ing.handle(normalizeMessage(waRaw('NOKEY', { imageMessage: { url: 'u' } }))!);
-    expect(db.raw.prepare('SELECT status, error_code AS e FROM media ORDER BY id').all()).toEqual([
+    expect(rawOf(db).prepare('SELECT status, error_code AS e FROM media ORDER BY id').all()).toEqual([
       { status: 'unavailable', e: 'too_large' },
       { status: 'unavailable', e: 'no_ref' },
     ]);
@@ -88,7 +89,7 @@ describe('Ingestor with shared files', () => {
     await ing.handle(normalizeMessage(waRaw('A4', { audioMessage: { url: 'https://evil.com/x', mediaKey: MEDIA_KEY, ptt: true } }))!);
     // A good url does not make a bad direct path safe: Baileys downloads from the direct path when there is one.
     await ing.handle(image('A5', { directPath: '.evil.example/x' }));
-    expect(db.raw.prepare('SELECT kind, status, error_code AS e, ref_enc AS r FROM media ORDER BY id').all()).toEqual([
+    expect(rawOf(db).prepare('SELECT kind, status, error_code AS e, ref_enc AS r FROM media ORDER BY id').all()).toEqual([
       { kind: 'image', status: 'unavailable', e: 'bad_address', r: null },
       { kind: 'image', status: 'unavailable', e: 'bad_address', r: null },
       { kind: 'document', status: 'unavailable', e: 'bad_address', r: null },
@@ -118,7 +119,7 @@ describe('Ingestor with shared files', () => {
   it('without a media pipeline, records the file as not downloaded', async () => {
     const { db, ing } = await setup(false);
     await ing.handle(image('IMG1'));
-    expect(db.raw.prepare('SELECT status, error_code AS e, ref_enc AS r FROM media').get()).toEqual({ status: 'unavailable', e: 'not_downloaded', r: null });
+    expect(rawOf(db).prepare('SELECT status, error_code AS e, ref_enc AS r FROM media').get()).toEqual({ status: 'unavailable', e: 'not_downloaded', r: null });
   });
 
   it('stores nothing for a group that is not an active client', async () => {
@@ -130,7 +131,7 @@ describe('Ingestor with shared files', () => {
 
   it('writes the message and its file row together: when the file row fails, the message is not stored either', async () => {
     const { db, onNew, onQueued, ing } = await setup();
-    db.raw.exec("CREATE TRIGGER block_media BEFORE INSERT ON media BEGIN SELECT RAISE(ABORT, 'blocked'); END");
+    rawOf(db).exec("CREATE TRIGGER block_media BEFORE INSERT ON media BEGIN SELECT RAISE(ABORT, 'blocked'); END");
     await expect(ing.handle(image('IMG1'))).rejects.toThrow('blocked');
     expect(messageCount(db)).toBe(0);
     expect(onNew).not.toHaveBeenCalled();
@@ -141,7 +142,7 @@ describe('Ingestor with shared files', () => {
     const { db, onNew, onQueued, ing } = await setup();
     let inTransaction: boolean | undefined;
     onQueued.mockImplementation(() => {
-      inTransaction = db.raw.inTransaction;
+      inTransaction = rawOf(db).inTransaction;
       throw new Error('listener failed');
     });
     await expect(ing.handle(image('IMG1'))).rejects.toThrow('listener failed');
@@ -173,7 +174,7 @@ describe('Ingestor with shared files', () => {
   it('refuses an overlong direct path and never seals it', async () => {
     const { db, seal, onQueued, ing } = await setup();
     await ing.handle(image('L1', { directPath: `/${'a'.repeat(10_000)}` }));
-    expect(db.raw.prepare('SELECT status, error_code AS e, ref_enc AS r FROM media').get()).toEqual({ status: 'unavailable', e: 'bad_address', r: null });
+    expect(rawOf(db).prepare('SELECT status, error_code AS e, ref_enc AS r FROM media').get()).toEqual({ status: 'unavailable', e: 'bad_address', r: null });
     expect(seal).not.toHaveBeenCalled();
     expect(onQueued).not.toHaveBeenCalled();
   });

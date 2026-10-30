@@ -6,6 +6,7 @@ import { MIGRATIONS } from '../../src/store/migrations.ts';
 import {
   claimReport, closeOldRetries, finishReport, markInterruptedReports, recentReports, reportFor, retryReport, skipReport,
 } from '../../src/store/reports.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const DAY = '2026-10-23';
 const T0 = '2026-10-23T00:30:00.000Z'; // 06:00 IST
@@ -37,7 +38,7 @@ describe('migration v6', () => {
 
   it('rejects a status outside the known list', async () => {
     const db = openDb(':memory:');
-    const insert = db.raw.prepare("INSERT INTO reports (date, status, created_at, updated_at) VALUES (@date, @status, @at, @at)");
+    const insert = rawOf(db).prepare("INSERT INTO reports (date, status, created_at, updated_at) VALUES (@date, @status, @at, @at)");
     expect(() => insert.run({ date: DAY, status: 'bogus', at: T0 })).toThrow(/CHECK constraint failed/);
     expect(() => insert.run({ date: DAY, status: 'send', at: T0 })).toThrow(/CHECK constraint failed/);
     expect(await reportFor(db, DAY)).toBeUndefined();

@@ -17,6 +17,7 @@ import { createLogger, silentLogger, type Logger } from '../../src/util/logger.t
 import { FAKE_USAGE, FakeAi, op, type FakeResponse } from '../helpers/ai.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
 import { SHARMA_PN } from '../helpers/wa.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
 /** Well before every file in these tests, so only the file's own arrival time counts (amendment 12a is tested on its own). */
@@ -83,7 +84,7 @@ async function file(db: Db, waId: string, ts: string, o: FileOpts = {}): Promise
 const image = (db: Db, waId: string, ts: string, description?: string, o: FileOpts = {}) =>
   file(db, waId, ts, description === undefined ? o : { ...o, read: { textKind: 'description', text: description } });
 
-const processedAt = (db: Db, waId: string) => (db.raw.prepare('SELECT processed_at AS p FROM messages WHERE wa_id = ?').get(waId) as { p: string | null }).p;
+const processedAt = (db: Db, waId: string) => (rawOf(db).prepare('SELECT processed_at AS p FROM messages WHERE wa_id = ?').get(waId) as { p: string | null }).p;
 
 /** Holds the fake AI call open until the returned function is called; run() has read its batch by then. */
 /** Holds the next AI call until the returned function is called. started() resolves once that call is in flight. */
@@ -363,7 +364,7 @@ describe('Reconciler with shared files', () => {
   describe('a file read after its message was processed (12h)', () => {
     const RECEIPT = 'A payment receipt. Visible text: Paid ₹42,000';
     const read = (db: Db, id: number, at: string) => finishMedia(db, id, { textKind: 'description', text: RECEIPT, pageCount: null, note: null, at });
-    const version = (db: Db, waId: string) => (db.raw.prepare('SELECT version FROM messages WHERE wa_id = ?').get(waId) as { version: number }).version;
+    const version = (db: Db, waId: string) => (rawOf(db).prepare('SELECT version FROM messages WHERE wa_id = ?').get(waId) as { version: number }).version;
     const flagOf = async (db: Db, id: number) => (await getMedia(db, id))!.requeuedForText;
     const newMessages = (user: string) => user.slice(user.indexOf('<new_messages>'));
     const contextOf = (user: string) => user.slice(user.indexOf('<recent_context>'), user.indexOf('</recent_context>'));
@@ -485,7 +486,7 @@ describe('Reconciler with shared files', () => {
       const id = await file(db, 'V1', '2026-10-19T07:01:00.000Z', { kind, mimeType: 'audio/ogg', createdAt: '2026-10-19T07:01:00.000Z' });
       expect(await r.run(1)).toMatchObject({ status: 'ok' });
       expect(processedAt(db, 'V1')).not.toBeNull();
-      db.raw.prepare('UPDATE media SET backlog = 1 WHERE id = ?').run(id); // queued by `cli transcribe-voice`
+      rawOf(db).prepare('UPDATE media SET backlog = 1 WHERE id = ?').run(id); // queued by `cli transcribe-voice`
       await finishMedia(db, id, { textKind: 'extract', text: 'Payment done, please check', pageCount: null, note: null, at: '2026-10-19T08:10:00.000Z' });
       expect(await flagOf(db, id)).toBe(false);
       expect(processedAt(db, 'V1')).not.toBeNull();

@@ -6,6 +6,7 @@ import type { Db } from '../../src/store/db.ts';
 import { insertFound } from '../../src/store/meetings.ts';
 import { createTask, recordEvent } from '../../src/store/tasks.ts';
 import { MEHTA, NOW, seededDb, SHARMA } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 // 13:30 IST on Monday 19 Oct.
 const now = new Date(NOW);
@@ -13,7 +14,7 @@ const now = new Date(NOW);
 async function task(db: Db, clientId: number, o: { status?: 'open' | 'maybe_done' | 'done'; deadline?: string; closedOn?: string } = {}) {
   const t = await createTask(db, { clientId, side: 'us', title: 'Task', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-01',
     deadline: o.deadline ?? null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp' }, NOW);
-  db.raw.prepare('UPDATE tasks SET status = ?, closed_on = ? WHERE id = ?').run(o.status ?? 'open', o.closedOn ?? null, t.id);
+  rawOf(db).prepare('UPDATE tasks SET status = ?, closed_on = ? WHERE id = ?').run(o.status ?? 'open', o.closedOn ?? null, t.id);
   return t;
 }
 
@@ -89,15 +90,15 @@ describe('overview', () => {
     }
     for (const i of [1, 3, 5]) await recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'update_task', detail: {}, reason: null, sourceIds: [], at: at(i) });
     await meeting(db, at(6)); // never in the Overview's activity
-    db.raw.prepare("UPDATE meetings SET updated_at = ? WHERE id = 1").run(at(9));
-    db.raw.prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, 'agent', 'tracker.published', 'ops', 'x')").run(at(8));
+    rawOf(db).prepare("UPDATE meetings SET updated_at = ? WHERE id = 1").run(at(9));
+    rawOf(db).prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, 'agent', 'tracker.published', 'ops', 'x')").run(at(8));
     const a = (await overview(db, now)).activity;
     expect(a.map((x) => x.id)).toEqual(['e:3', 'b:3', 'e:2', 'b:2', 'e:1']);
   });
 
   it('gives the last upload and the health line for the tracker card', async () => {
     const db = await seededDb();
-    db.raw.prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES ('2026-10-19T07:00:00.000Z', 'agent', 'tracker.published', 'ops', 'x')").run();
+    rawOf(db).prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES ('2026-10-19T07:00:00.000Z', 'agent', 'tracker.published', 'ops', 'x')").run();
     expect((await overview(db, now)).tracker).toEqual({ lastPublishedAt: '2026-10-19T07:00:00.000Z', health: null });
     const health = { line: { ok: true, text: '✅ Connected' }, lastPublishedAt: '2026-10-19T07:30:00.000Z', publishFailingSince: null };
     expect((await overview(db, now, health)).tracker).toEqual({ lastPublishedAt: '2026-10-19T07:30:00.000Z', health: { ok: true, text: '✅ Connected' } });

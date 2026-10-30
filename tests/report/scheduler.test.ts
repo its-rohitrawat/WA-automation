@@ -16,6 +16,7 @@ import { createLogger, silentLogger, type Logger } from '../../src/util/logger.t
 import { istDate } from '../../src/util/time.ts';
 import { MEHTA, seededDb, SHARMA } from '../helpers/db.ts';
 import { FakeReportSender } from '../helpers/fakeReportSender.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const DAY = '2026-10-23';
 const IST = (hm: string) => `${DAY}T${hm}:00.000+05:30`;
@@ -141,11 +142,11 @@ describe('ReportScheduler', () => {
   it("a send whose outcome could not be recorded reads unknown after 10 minutes, and at the deadline becomes unknown, never skipped or sent again", async () => {
     const { db, clock, sender, s, at } = await setup();
     await at('05:00'); // recovered: nothing was cut off
-    const prepare = db.raw.prepare.bind(db.raw);
-    const spy = vi.spyOn(db.raw, 'prepare').mockImplementation(((sql: string) => {
+    const prepare = rawOf(db).prepare.bind(rawOf(db));
+    const spy = vi.spyOn(rawOf(db), 'prepare').mockImplementation(((sql: string) => {
       if (/SET status = @status/.test(sql)) throw new Error('disk I/O error'); // finishReport fails
       return prepare(sql);
-    }) as typeof db.raw.prepare);
+    }) as typeof prepare);
     try {
       await at('06:00');
     } finally {
@@ -199,11 +200,11 @@ describe('ReportScheduler', () => {
   it('counts as recovered only once the cut-off row is marked unknown: a recovery that failed runs again at the next tick', async () => {
     const { db, clock, sender, s, at } = await setup();
     await claimReport(db, DAY, iso('06:00')); // the previous run died while sending
-    const prepare = db.raw.prepare.bind(db.raw);
-    const spy = vi.spyOn(db.raw, 'prepare').mockImplementation(((sql: string) => {
+    const prepare = rawOf(db).prepare.bind(rawOf(db));
+    const spy = vi.spyOn(rawOf(db), 'prepare').mockImplementation(((sql: string) => {
       if (/detail = 'interrupted'/.test(sql)) throw new Error('database is locked'); // markInterruptedReports fails
       return prepare(sql);
-    }) as typeof db.raw.prepare);
+    }) as typeof prepare);
     clock.set(IST('06:20'));
     try {
       await expect(s.recover(clock.now())).rejects.toThrow('database is locked');
@@ -676,7 +677,7 @@ describe('ReportScheduler', () => {
 
   it('never throws from tick, and the next tick still runs', async () => {
     const { db, sender, s, clock } = await setup();
-    const prepare = vi.spyOn(db.raw, 'prepare').mockImplementationOnce(() => {
+    const prepare = vi.spyOn(rawOf(db), 'prepare').mockImplementationOnce(() => {
       throw new Error('database is locked');
     });
     clock.set(IST('06:00'));
@@ -690,7 +691,7 @@ describe('ReportScheduler', () => {
 
   it('never throws from tick when the database is closed', async () => {
     const { db, s, clock } = await setup();
-    db.raw.close();
+    rawOf(db).close();
     clock.set(IST('06:00'));
     await expect(s.tick(clock.now())).resolves.toBeUndefined();
   });

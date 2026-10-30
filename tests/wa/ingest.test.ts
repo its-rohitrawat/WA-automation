@@ -6,6 +6,7 @@ import { Ingestor } from '../../src/wa/ingest.ts';
 import type { NormalizedEvent } from '../../src/wa/normalize.ts';
 import { MEHTA, OTHER_GROUP, seededDb, SHARMA } from '../helpers/db.ts';
 import { RAHUL_PN, SHARMA_PN } from '../helpers/wa.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const ts = new Date('2026-10-10T08:00:00Z');
 const message = (o: Partial<Extract<NormalizedEvent, { kind: 'message' }>> = {}): NormalizedEvent => ({
@@ -33,7 +34,7 @@ describe('Ingestor', () => {
   it('ignores groups that are not configured clients', async () => {
     const { db, onNew, ing } = await setup();
     await ing.handle(message({ groupId: OTHER_GROUP }));
-    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM messages').get()).toEqual({ n: 0 });
+    expect(rawOf(db).prepare('SELECT COUNT(*) AS n FROM messages').get()).toEqual({ n: 0 });
     expect(onNew).not.toHaveBeenCalled();
   });
 
@@ -41,7 +42,7 @@ describe('Ingestor', () => {
     const { db, ing } = await setup();
     await syncClients(db, [MEHTA]);
     await ing.handle(message());
-    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM messages').get()).toEqual({ n: 0 });
+    expect(rawOf(db).prepare('SELECT COUNT(*) AS n FROM messages').get()).toEqual({ n: 0 });
   });
 
   it('applies edits, reactions and revokes', async () => {

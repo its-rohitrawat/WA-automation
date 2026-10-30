@@ -10,6 +10,7 @@ import { insertMessage, listUnprocessed, markProcessed } from '../../src/store/m
 import { listPeople, upsertPerson } from '../../src/store/people.ts';
 import { createTask, getTaskByCode } from '../../src/store/tasks.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const now = new Date('2026-10-19T08:00:00Z');
 
@@ -22,7 +23,7 @@ async function withTask() {
 
 interface Ev { op: string; actor: string; detail: unknown; task_id: number | null; client_id: number }
 function events(db: Db): Ev[] {
-  const rows = db.raw.prepare("SELECT op, actor, detail, task_id, client_id FROM task_events WHERE actor = 'human' ORDER BY id").all() as (Omit<Ev, 'detail'> & { detail: string })[];
+  const rows = rawOf(db).prepare("SELECT op, actor, detail, task_id, client_id FROM task_events WHERE actor = 'human' ORDER BY id").all() as (Omit<Ev, 'detail'> & { detail: string })[];
   return rows.map((e) => ({ ...e, detail: JSON.parse(e.detail) as unknown }));
 }
 
@@ -193,7 +194,7 @@ describe('reprocess', () => {
     await expect(requestReprocess(db, 'SHA', '2026-10-11', now, 'soon')).rejects.toThrowError(/YYYY-MM-DD/);
     await expect(requestReprocess(db, 'SHA', '2026-10-11', now, '2026-10-10')).rejects.toThrowError(/on or after/);
     await expect(requestReprocess(db, 'ZZZ', '2026-10-11', now)).rejects.toThrowError(/No client/);
-    db.raw.prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
+    rawOf(db).prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
     await expect(requestReprocess(db, 'SHA', '2026-10-11', now)).rejects.toThrowError('Client SHA is not in the allow-list; nothing to reprocess');
     await expect(countReprocess(db, 'SHA', '2026-10-11')).rejects.toThrowError(/not in the allow-list/);
   });

@@ -15,6 +15,7 @@ import {
   codeCandidates, groupsApplyHandler, groupsBulkHandler, groupsListHandler, makeGroupKey, suggestCodeHandler, type GroupsDeps,
 } from '../../../src/web/routes/groups.ts';
 import { MEHTA as MEHTA_HELPER, SHARMA as SHARMA_HELPER } from '../../helpers/db.ts';
+import { rawOf } from '../../../src/store/engine/sqlite.ts';
 
 // These tests write a real allow-list file, which refuses the shared helpers' example group id: own ids here. The old
 // group id form (<phone>-<time>@g.us) is used for Patel, to prove no raw id reaches a response.
@@ -83,7 +84,7 @@ beforeEach(async () => {
   };
 });
 afterEach(() => {
-  db.raw.close();
+  rawOf(db).close();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -334,7 +335,7 @@ describe('groupsApplyHandler', () => {
   });
 
   it('any other error is thrown, not turned into a response', async () => {
-    db.raw.close();
+    rawOf(db).close();
     await expect(groupsApplyHandler(deps, CTX, approve())).rejects.toThrow();
     expect(audits).toEqual([]);
     db = openDb(':memory:');
@@ -347,7 +348,7 @@ describe('groupsBulkHandler', () => {
   const bulk = (action: string, keys: string[]) => groupsBulkHandler(deps, CTX, { action, keys });
   const results = (r: { body: unknown }) => (r.body as { results: { key: string; ok: boolean; reason: string | null }[] }).results;
   // The ignore rows only (the kv table also holds each client's history read).
-  const kvRows = () => db.raw.prepare("SELECT k, v FROM kv WHERE k GLOB 'group_ignored:*'").all() as { k: string; v: string }[];
+  const kvRows = () => rawOf(db).prepare("SELECT k, v FROM kv WHERE k GLOB 'group_ignored:*'").all() as { k: string; v: string }[];
   beforeEach(async () => {
     src.groups.push({ id: HINDI, subject: 'शर्मा परिवार' }, { id: EXPORTS, subject: 'Desai Exports' });
     await deps.directory.list();

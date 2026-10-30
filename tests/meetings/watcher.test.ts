@@ -13,6 +13,7 @@ import { getMeeting, insertFound } from '../../src/store/meetings.ts';
 import { manualClock, type ManualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
 import { FakeMeetingsApi } from '../helpers/fakeMeetings.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const PHASES = ['Discovery', 'Design', 'Development', 'Review', 'Launch'];
 const SHARMA: ClientConfig = {
@@ -74,10 +75,10 @@ function addConference(api: FakeMeetingsApi, s: ConfSpec): void {
   }
 }
 
-const rowCount = (db: Db): number => (db.raw.prepare('SELECT COUNT(*) AS n FROM meetings').get() as { n: number }).n;
+const rowCount = (db: Db): number => (rawOf(db).prepare('SELECT COUNT(*) AS n FROM meetings').get() as { n: number }).n;
 const allRows = async (db: Db) => {
   const rows = [];
-  for (const r of db.raw.prepare('SELECT id FROM meetings ORDER BY id').all() as { id: number }[]) rows.push((await getMeeting(db, r.id))!);
+  for (const r of rawOf(db).prepare('SELECT id FROM meetings ORDER BY id').all() as { id: number }[]) rows.push((await getMeeting(db, r.id))!);
   return rows;
 };
 

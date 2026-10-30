@@ -12,6 +12,7 @@ import { insertMessage } from '../../src/store/messages.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import type { GatewayState, GatewayStatus } from '../../src/wa/gateway.ts';
 import { seededDb } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const NOW = '2026-10-19T08:00:00.000Z';
 const KEY = Buffer.alloc(32, 7);
@@ -247,7 +248,7 @@ describe('AgentControl.connections', () => {
 });
 
 function db_publish(db: Awaited<ReturnType<typeof seededDb>>) {
-  db.raw.prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES ('2026-10-19T06:00:00.000Z', 'agent', 'tracker.published', 'ops', 'x')").run();
+  rawOf(db).prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES ('2026-10-19T06:00:00.000Z', 'agent', 'tracker.published', 'ops', 'x')").run();
 }
 
 describe('AgentControl answers carry no secrets', () => {
@@ -305,7 +306,7 @@ describe('AgentControl review fixes', () => {
 
   it('counts approved groups only, and main is used for the tracker only while meetings are off', async () => {
     const t = await setup();
-    t.db.raw.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
+    rawOf(t.db).prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
     expect((await t.control.connections()).founder.groups).toBe(1);
     expect((await t.control.connections()).google).toEqual([{ label: 'main', email: null, usedFor: ['Tracker on Drive'], state: 'ok', stateLabel: 'Connected' }]);
   });

@@ -21,6 +21,7 @@ import { MEHTA, OTHER_GROUP, seededDb, SHARMA } from './helpers/db.ts';
 import { FakeDrive } from './helpers/fakeDrive.ts';
 import { closeWith, FakeSocket, SEND_METHODS } from './helpers/fakeSocket.ts';
 import { waText } from './helpers/wa.ts';
+import { rawOf } from '../src/store/engine/sqlite.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
 
@@ -157,7 +158,7 @@ describe('app end to end', () => {
       waText('p1', 'personal chat', { group: '919811111111@s.whatsapp.net' }),
     ] });
     await settled();
-    expect(db.raw.prepare('SELECT wa_id FROM messages').all()).toEqual([{ wa_id: 'm1' }]);
+    expect(rawOf(db).prepare('SELECT wa_id FROM messages').all()).toEqual([{ wa_id: 'm1' }]);
 
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls).toHaveLength(1);
@@ -183,7 +184,7 @@ describe('app end to end', () => {
     await app.reloadClients([SHARMA]);
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
     await settled();
-    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 0 });
+    expect(rawOf(db).prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 0 });
     await stopApp(app);
   });
 
@@ -227,7 +228,7 @@ describe('app shutdown', () => {
     release();
     await finish(stop);
     expect((await listTasks(db, 1)).map((t) => t.code)).toEqual(['SHA-001']);
-    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM messages WHERE processed_at IS NULL').get()).toEqual({ n: 0 });
+    expect(rawOf(db).prepare('SELECT COUNT(*) AS n FROM messages WHERE processed_at IS NULL').get()).toEqual({ n: 0 });
     expect(sock.end).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -412,7 +413,7 @@ describe('app allow-list changes', () => {
     const { db, ai, app, sock } = await setup();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
     await settled();
-    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 1 });
+    expect(rawOf(db).prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 1 });
 
     await app.reloadClients([SHARMA]);
     await vi.advanceTimersByTimeAsync(1_300_000);
@@ -477,7 +478,7 @@ describe('app allow-list changes', () => {
     await expect(app.reloadClients([SHARMA, { ...MEHTA, code: 'MEX' }])).rejects.toThrow(/codes are permanent/);
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
     await settled();
-    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 1 });
+    expect(rawOf(db).prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 1 });
     await stopApp(app);
   });
 
@@ -507,7 +508,7 @@ describe('app ingest failures', () => {
   it('logs a failed database write without the chat text and still counts it', async () => {
     const { lines, log } = capturingLogger();
     const { db, app, sock, gateway } = await setup({ log });
-    db.raw.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store: banner thoda bright'); END");
+    rawOf(db).exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store: banner thoda bright'); END");
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
     await settled();
 
@@ -519,7 +520,7 @@ describe('app ingest failures', () => {
 
   it('records the count of unsaved messages on the next tick and warns in health', async () => {
     const { db, app, sock, gateway } = await setup();
-    db.raw.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
+    rawOf(db).exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
     await settled();
     expect(gateway.failedCount()).toBe(1);
@@ -682,7 +683,7 @@ describe('app health and publishing', () => {
     expect(drive.uploads).toBe(1);
 
     // A message that cannot be saved changes only the health line: no reconcile, no file, no other publish.
-    db.raw.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
+    rawOf(db).exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
     await settled();
     await vi.advanceTimersByTimeAsync(31_000); // the next tick sees the new line
@@ -759,7 +760,7 @@ describe('app: a newly approved group\'s earlier messages (history backfill)', (
     // Older than 7 days: dropped, and the backfill ends.
     sock.emit('messaging-history.set', { chats: [], contacts: [], syncType: ON_DEMAND, messages: [waText('E0', 'TOO OLD', { ts: sec('2026-10-10T09:00:00Z') })] });
     await settled();
-    expect(db.raw.prepare("SELECT 1 FROM messages WHERE wa_id = 'E0'").get()).toBeUndefined();
+    expect(rawOf(db).prepare("SELECT 1 FROM messages WHERE wa_id = 'E0'").get()).toBeUndefined();
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls).toHaveLength(1);
     const user = ai.calls[0]!.user;

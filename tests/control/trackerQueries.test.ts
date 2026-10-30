@@ -6,6 +6,7 @@ import type { Db } from '../../src/store/db.ts';
 import { setKv } from '../../src/store/kv.ts';
 import { createTask } from '../../src/store/tasks.ts';
 import { MEHTA, NOW, seededDb, SHARMA } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 // 13:30 IST on Monday 19 Oct.
 const now = new Date(NOW);
@@ -14,11 +15,11 @@ const ID = '1AbCdEfGhIjKlMnOp_qr-st';
 async function task(db: Db, clientId: number, o: { status?: 'open' | 'maybe_done' | 'done'; deadline?: string; closedOn?: string } = {}) {
   const t = await createTask(db, { clientId, side: 'us', title: 'x', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-01',
     deadline: o.deadline ?? null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp' }, NOW);
-  db.raw.prepare('UPDATE tasks SET status = ?, closed_on = ? WHERE id = ?').run(o.status ?? 'open', o.closedOn ?? null, t.id);
+  rawOf(db).prepare('UPDATE tasks SET status = ?, closed_on = ? WHERE id = ?').run(o.status ?? 'open', o.closedOn ?? null, t.id);
 }
 
 function audit(db: Db, at: string, event: string, detail: string) {
-  db.raw.prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, 'agent', ?, 'ops', ?)").run(at, event, detail);
+  rawOf(db).prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, 'agent', ?, 'ops', ?)").run(at, event, detail);
 }
 
 describe('trackerSummary', () => {
@@ -121,7 +122,7 @@ describe('trackerSummary review fixes', () => {
     audit(db, '2026-10-19T05:00:00.000Z', 'tracker.publish_failed', 'Tracker upload failed: Drive did not accept the upload');
     audit(db, '2026-10-19T07:00:00.000Z', 'tracker.publish_failed', 'Tracker upload failed: Google sign-in expired');
     audit(db, '2026-10-19T06:00:00.000Z', 'tracker.publish_failed', 'Tracker upload failed: the workbook could not be built');
-    const owner = db.raw.prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, 'owner@example.com', ?, 'ops', 'x')");
+    const owner = rawOf(db).prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, 'owner@example.com', ?, 'ops', 'x')");
     owner.run('2026-10-19T09:00:00.000Z', 'tracker.published');
     owner.run('2026-10-19T09:00:00.000Z', 'tracker.publish_failed');
     expect(await trackerSummary(db, now)).toMatchObject({ lastPublishedAt: null, lastFailure: { at: '2026-10-19T07:00:00.000Z', reason: 'Google sign-in expired' } });

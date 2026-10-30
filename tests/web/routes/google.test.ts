@@ -13,6 +13,7 @@ import { CALLBACK_PATH, GoogleConnectRoutes } from '../../../src/web/routes/goog
 import type { IdClaims, IdTokenVerifier } from '../../../src/web/oidc.ts';
 import { accountEmail } from '../../../src/output/googleAuth.ts';
 import { seededDb } from '../../helpers/db.ts';
+import { rawOf } from '../../../src/store/engine/sqlite.ts';
 
 const owner: OwnerContext = { actor: 'owner@studio.in', sessionId: 'session-a', requestId: 'aaaaaaaaaaaa' };
 const other: OwnerContext = { actor: 'second@studio.in', sessionId: 'session-b', requestId: 'bbbbbbbbbbbb' };
@@ -278,7 +279,7 @@ describe('GoogleConnectRoutes: the account email (owner fix 3)', () => {
 
   it('a reconnect forgets the old email before storing the new one', async () => {
     const t = await withVerifier({ email_verified: false });
-    t.db.raw.prepare('INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)').run('google_account_email:main', 'old@studio.in');
+    rawOf(t.db).prepare('INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)').run('google_account_email:main', 'old@studio.in');
     const state = await t.begin(owner, 'main');
     await t.routes.callback(owner, { state, code: CODE });
     expect(await accountEmail(t.db, 'main')).toBeNull();

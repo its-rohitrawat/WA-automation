@@ -6,6 +6,7 @@ import type { Db } from '../../src/store/db.ts';
 import { getKv } from '../../src/store/kv.ts';
 import { insertFound, type MeetingStatus } from '../../src/store/meetings.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const now = new Date('2026-10-19T08:00:00Z');
 const OWNER = 'owner@example.com';
@@ -22,8 +23,8 @@ async function withMeeting(status: MeetingStatus, clientId: number | null = null
 
 async function state(db: Db) {
   return {
-    meetings: db.raw.prepare('SELECT * FROM meetings').all(),
-    events: db.raw.prepare('SELECT task_id, client_id, actor, op, detail, reason, at FROM task_events ORDER BY id').all(),
+    meetings: rawOf(db).prepare('SELECT * FROM meetings').all(),
+    events: rawOf(db).prepare('SELECT task_id, client_id, actor, op, detail, reason, at FROM task_events ORDER BY id').all(),
     rebuild: await getKv(db, 'rebuild_requested'),
   };
 }
@@ -138,7 +139,7 @@ describe('runMeetingAction refusals', () => {
       expect(await refusal(async () => await run(db, '1', 'assign', body)), JSON.stringify(body)).toMatchObject({ status: 422, field: 'client' });
     }
     expect(await refusal(async () => await run(db, '1', 'assign', { client: 'XYZ' }))).toMatchObject({ status: 422, field: 'client', message: 'No client with code XYZ' });
-    db.raw.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
+    rawOf(db).prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
     expect(await refusal(async () => await run(db, '1', 'assign', { client: 'MEH' }))).toMatchObject({ status: 422, field: 'client' });
   });
 
@@ -159,7 +160,7 @@ describe('runMeetingAction review fixes', () => {
   it("puts a meeting that changed meanwhile in the dashboard's words", async () => {
     const db = await withMeeting('unassigned');
     // As if another writer took the meeting between the check and the change.
-    db.raw.exec('CREATE TRIGGER grab BEFORE UPDATE ON meetings BEGIN SELECT RAISE(IGNORE); END');
+    rawOf(db).exec('CREATE TRIGGER grab BEFORE UPDATE ON meetings BEGIN SELECT RAISE(IGNORE); END');
     const e = await refusal(async () => await run(db, '1', 'skip'));
     expect(e).toMatchObject({ status: 409, message: 'Meeting 1 changed meanwhile; refresh the list and try again' });
   });

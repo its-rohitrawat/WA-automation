@@ -22,6 +22,7 @@ import { advanceStage, getMeeting, insertFound, setSttParts, type NewMeeting, ty
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 /*
  * Meetings on the local engine (plan 2026-10-28-meetings-local-stt.md, Task 2), with a fake ffmpeg and a fake engine
@@ -645,8 +646,8 @@ describe('the local meeting transcriber', () => {
   });
 
   describe('parts the engine cannot hear (review fixes 1 and 2)', () => {
-    const attemptsOf = () => (db.raw.prepare('SELECT attempts FROM meetings WHERE id = ?').get(id) as { attempts: number }).attempts;
-    const setAttempts = (n: number) => db.raw.prepare('UPDATE meetings SET attempts = ? WHERE id = ?').run(n, id);
+    const attemptsOf = () => (rawOf(db).prepare('SELECT attempts FROM meetings WHERE id = ?').get(id) as { attempts: number }).attempts;
+    const setAttempts = (n: number) => rawOf(db).prepare('UPDATE meetings SET attempts = ? WHERE id = ?').run(n, id);
     /** One run of the stage over a fresh fake engine; what it threw, or its result. */
     const runWith = async (ff: ReturnType<typeof fakeFfmpeg>, steps: Step[], timeoutMs?: number) => {
       const { t } = timeoutMs === undefined ? fromEnv(ff, steps) : withTimeout(ff, steps, timeoutMs);

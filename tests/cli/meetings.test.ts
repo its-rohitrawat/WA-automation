@@ -20,6 +20,7 @@ import { getMeeting, insertFound, type MeetingStatus, type NewMeeting } from '..
 import { manualClock } from '../../src/util/clock.ts';
 import { acquireLock } from '../../src/util/lock.ts';
 import { FakeMeetingsApi } from '../helpers/fakeMeetings.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const KEY = Buffer.alloc(32, 7);
 const NOW = '2026-10-23T06:00:00.000Z';
@@ -86,13 +87,13 @@ function conference(id: string, o: { start: string; attendees?: string[] | null;
 
 /** Every table's rows, to prove a command wrote nothing. */
 function dump(d: Db): string {
-  const tables = (d.raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]).map((t) => t.name);
-  return JSON.stringify(tables.map((t) => [t, d.raw.prepare(`SELECT * FROM "${t}"`).all()]));
+  const tables = (rawOf(d).prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]).map((t) => t.name);
+  return JSON.stringify(tables.map((t) => [t, rawOf(d).prepare(`SELECT * FROM "${t}"`).all()]));
 }
 
 const rows = async () => {
   const out = [];
-  for (const r of db.raw.prepare('SELECT id FROM meetings ORDER BY id').all() as { id: number }[]) out.push((await getMeeting(db, r.id))!);
+  for (const r of rawOf(db).prepare('SELECT id FROM meetings ORDER BY id').all() as { id: number }[]) out.push((await getMeeting(db, r.id))!);
   return out;
 };
 
@@ -111,12 +112,12 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
-  db.raw.close();
+  rawOf(db).close();
   rmSync(dir, { recursive: true, force: true });
 });
 
 const now = new Date(NOW);
-const events = () => db.raw.prepare("SELECT client_id AS clientId, op, detail FROM task_events WHERE op = 'assign_meeting'").all();
+const events = () => rawOf(db).prepare("SELECT client_id AS clientId, op, detail FROM task_events WHERE op = 'assign_meeting'").all();
 
 describe('meeting list', () => {
   it('shows the meetings that need the owner by default, newest first, with date, client, status and title', async () => {
@@ -179,7 +180,7 @@ describe('meeting assign', () => {
   it('queues a no-access meeting without a client (found as internal or unassigned), with fresh attempts', async () => {
     const i = await meeting('no_access', { clientId: null, matchKind: null, title: '', errorCode: 'http_404', foundInternal: true });
     const u = await meeting('no_access', { clientId: null, matchKind: null, errorCode: 'http_403' });
-    db.raw.prepare('UPDATE meetings SET attempts = 2 WHERE id = ?').run(u);
+    rawOf(db).prepare('UPDATE meetings SET attempts = 2 WHERE id = ?').run(u);
     expect(await assignMeetingToClient(db, String(i), 'SHA', now)).toEqual({ id: i, code: 'SHA' });
     expect(await assignMeetingToClient(db, String(u), 'MEH', now)).toEqual({ id: u, code: 'MEH' });
     expect(await getMeeting(db, i)).toMatchObject({ status: 'queued', clientId: 1, matchKind: 'human', errorCode: null, attempts: 0, note: null });
@@ -274,7 +275,7 @@ describe('meeting backfill', () => {
   });
 
   it('without --yes prints the count, hours and cost ceiling and changes nothing', async () => {
-    db.raw.close();
+    rawOf(db).close();
     db = openDb(trackerDbPath(dataDir));
     const before = dump(db);
     await meetingBackfillCommand({ since: '2026-10-01', yes: false }, deps());
@@ -342,7 +343,7 @@ describe('meeting backfill', () => {
     lines = [];
     await meetingBackfillCommand({ since: '2026-10-01', yes: true }, deps());
     expect(lines[1]).toBe('  3 for a client, 1 unassigned, 1 internal, 0 no access, 0 too long');
-    const gupta = db.raw.prepare("SELECT id FROM clients WHERE code = 'GUP'").get() as { id: number };
+    const gupta = rawOf(db).prepare("SELECT id FROM clients WHERE code = 'GUP'").get() as { id: number };
     expect((await rows()).at(-1)).toMatchObject({ status: 'queued', clientId: gupta.id, matchKind: 'domain' });
   });
 

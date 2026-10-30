@@ -17,6 +17,7 @@ import { createTask, getTaskByCode } from '../../src/store/tasks.ts';
 import { manualClock, type ManualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { NOW, seededDb, SHARMA } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 // The dashboard assistant with a fake Claude: no call ever reaches the real API. The fake plays a script of turns and
 // records what each call was sent.
@@ -369,8 +370,8 @@ describe('Assistant: priority levels, sentiment and the combine\'s filters (29 O
       },
     ]);
     const { db, run } = await setup({ ai });
-    db.raw.prepare("UPDATE tasks SET sentiment = 'frustrated' WHERE code = 'SHA-001'").run();
-    db.raw.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
+    rawOf(db).prepare("UPDATE tasks SET sentiment = 'frustrated' WHERE code = 'SHA-001'").run();
+    rawOf(db).prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
     await createTask(db, {
       clientId: 2, side: 'us', title: 'Old client task', category: 'other', priority: 'low', assignedTo: null, askedBy: null, raisedOn: '2026-10-18',
       deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp',
@@ -382,7 +383,7 @@ describe('Assistant: priority levels, sentiment and the combine\'s filters (29 O
     expect(seen[0]).not.toContain('MEH-001');
     expect(seen[1]).toContain('MEH-001'); // includeRemovedClients
     expect(seen[2]).toContain('"total":0'); // nothing closed in the last 7 days
-    db.raw.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', ?, 'owner@example.com')").run(NOW);
+    rawOf(db).prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', ?, 'owner@example.com')").run(NOW);
     await run('and SHA-1?');
     expect(seen[3]).toContain('"sentiment":"frustrated"');
   });

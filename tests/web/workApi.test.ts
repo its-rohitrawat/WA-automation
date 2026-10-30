@@ -7,6 +7,7 @@ import { AuditLog } from '../../src/web/audit.ts';
 import { registerWorkApi } from '../../src/web/routes/work.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
 import { bootDashboard, OWNER } from '../helpers/web.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const closers: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -35,7 +36,7 @@ async function boot(o: { paused?: boolean; actionCapacity?: number } = {}) {
   return { db, h };
 }
 
-const auditRows = (db: Db) => db.raw.prepare('SELECT actor, event, kind, detail, request_id AS requestId FROM audit_log ORDER BY id').all() as Record<string, string>[];
+const auditRows = (db: Db) => rawOf(db).prepare('SELECT actor, event, kind, detail, request_id AS requestId FROM audit_log ORDER BY id').all() as Record<string, string>[];
 
 describe('work API: reads', () => {
   it('needs a signed-in owner for every read', async () => {
@@ -127,7 +128,7 @@ describe('work API review fixes', () => {
       const r = await h.post('/dashboard/api/meetings/1/skip', x);
       expect(r.status, JSON.stringify(x)).toBe(x.cookie === null ? 401 : 403);
     }
-    expect(db.raw.prepare('SELECT status FROM meetings WHERE id = 1').get()).toEqual({ status: 'unassigned' });
+    expect(rawOf(db).prepare('SELECT status FROM meetings WHERE id = 1').get()).toEqual({ status: 'unassigned' });
     expect(auditRows(db)).toEqual([]);
   });
 

@@ -11,6 +11,7 @@ import { GoogleAuthHub, GoogleNotConnectedError, type OAuthCredentials } from '.
 import { getKv, setKv } from '../../src/store/kv.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { seededDb } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const DESKTOP: OAuthCredentials = { clientId: 'desktop-id', clientSecret: 'desktop-secret' };
 const WEB: OAuthCredentials = { clientId: 'web-id', clientSecret: 'web-secret' };
@@ -188,7 +189,7 @@ describe('GoogleAuthHub', () => {
     const before = hub.client('main');
     let calls = 0;
     hub.onChange(() => calls++);
-    db.raw.exec("CREATE TRIGGER no_issuer BEFORE INSERT ON kv WHEN NEW.k = 'google_client:main' BEGIN SELECT RAISE(ABORT, 'disk full'); END");
+    rawOf(db).exec("CREATE TRIGGER no_issuer BEFORE INSERT ON kv WHEN NEW.k = 'google_client:main' BEGIN SELECT RAISE(ABORT, 'disk full'); END");
     await expect(hub.setToken('main', 'rt-new', 'web', SCOPE)).rejects.toThrow('disk full');
     expect(hub.client('main')).toBe(before);
     expect(calls).toBe(0);

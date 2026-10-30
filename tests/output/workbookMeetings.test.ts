@@ -7,6 +7,7 @@ import type { Db } from '../../src/store/db.ts';
 import { advanceStage, finishMeeting, insertFound, type MeetingStatus } from '../../src/store/meetings.ts';
 import { addDecision } from '../../src/store/tasks.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const now = new Date('2026-10-26T08:00:00Z');
 const healthy = { ok: true, text: '✅ Connected · waiting for new messages' };
@@ -91,7 +92,7 @@ describe('meetings in the view', () => {
     const db = await seededDb();
     await done(db, { startedAt: '2026-10-20T06:00:00.000Z' });
     const hidden = await done(db, { startedAt: '2026-10-22T06:00:00.000Z' });
-    db.raw.prepare("UPDATE meetings SET summary = '{not json' WHERE id = ?").run(hidden);
+    rawOf(db).prepare("UPDATE meetings SET summary = '{not json' WHERE id = ?").run(hidden);
     expect((await sharma(db)).meetings).toHaveLength(1);
     expect((await sharma(db)).lastMeeting).toBe('2026-10-20');
   });
@@ -234,7 +235,7 @@ describe('Meetings section on the client tab', () => {
   it('keeps the workbook readable when a meeting title holds characters XML does not allow', async () => {
     const db = await seededDb();
     const id = await done(db, { startedAt: '2026-10-22T06:00:00.000Z' });
-    db.raw.prepare('UPDATE meetings SET title = ? WHERE id = ?').run('Kick￾off\x01 call￿', id);
+    rawOf(db).prepare('UPDATE meetings SET title = ? WHERE id = ?').run('Kick￾off\x01 call￿', id);
     const ws = (await book(db)).getWorksheet('Sharma Interiors')!;
     expect(ws.getRow(rowOf(ws, 'Meetings').number + 2).getCell(2).value).toBe('Kickoff call');
   });

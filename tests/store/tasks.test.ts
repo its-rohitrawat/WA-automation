@@ -4,6 +4,7 @@ import {
   addDecision, createTask, getTaskByCode, listDecisions, listTasks, logReminder, recordEvent, setTaskStatus, taskSourceIds, updateTaskFields, type NewTask,
 } from '../../src/store/tasks.ts';
 import { LATER, NOW, seededDb } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const newTask = (o: Partial<NewTask> = {}): NewTask => ({
   clientId: 1, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'major', assignedTo: 'Rahul', askedBy: 'Mr. Sharma',
@@ -60,7 +61,7 @@ describe('tasks repository', () => {
     const db = await seededDb();
     const t = await createTask(db, newTask(), NOW);
     await recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'add_task', detail: { code: t.code }, reason: 'asked in chat', sourceIds: ['m1'], at: NOW });
-    expect(db.raw.prepare('SELECT actor, op, source_ids FROM task_events').get()).toEqual({ actor: 'ai', op: 'add_task', source_ids: '["m1"]' });
+    expect(rawOf(db).prepare('SELECT actor, op, source_ids FROM task_events').get()).toEqual({ actor: 'ai', op: 'add_task', source_ids: '["m1"]' });
     await addDecision(db, { clientId: 1, text: 'Blue theme', decidedOn: '2026-10-14', source: 'whatsapp', sourceWaId: 'm5' }, NOW);
     await addDecision(db, { clientId: 1, text: 'Launch 1 Nov', decidedOn: '2026-10-15', source: 'whatsapp', sourceWaId: 'm6' }, NOW);
     expect((await listDecisions(db, 1)).map((d) => d.text)).toEqual(['Launch 1 Nov', 'Blue theme']);

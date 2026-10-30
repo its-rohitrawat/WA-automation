@@ -15,6 +15,7 @@ import { createLogger, silentLogger, type Logger } from '../../src/util/logger.t
 import { NOW, seededDb } from '../helpers/db.ts';
 import { FakeDrive } from '../helpers/fakeDrive.ts';
 import { RAHUL_PN, SHARMA_PN } from '../helpers/wa.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -48,8 +49,8 @@ function capturingLogger() {
 
 /** Makes every write to the given media column fail, as when the database cannot write (disk full, a lock held too long). */
 function failWritesTo(db: Db, column: 'drive_file_id' | 'drive_attempts'): () => void {
-  db.raw.exec(`CREATE TRIGGER fail_${column} BEFORE UPDATE OF ${column} ON media BEGIN SELECT RAISE(ABORT, 'database cannot write'); END`);
-  return () => db.raw.exec(`DROP TRIGGER fail_${column}`);
+  rawOf(db).exec(`CREATE TRIGGER fail_${column} BEFORE UPDATE OF ${column} ON media BEGIN SELECT RAISE(ABORT, 'database cannot write'); END`);
+  return () => rawOf(db).exec(`DROP TRIGGER fail_${column}`);
 }
 
 /** 30 s ticks, as the service runs the uploader, for the given number of minutes. */
@@ -99,7 +100,7 @@ async function saveOriginal(db: Db, dataDir: string, id: number, clientId: numbe
 }
 
 const driveState = (db: Db, id: number) =>
-  db.raw.prepare('SELECT drive_file_id AS fileId, drive_attempts AS attempts, drive_failed AS failed, drive_next_at AS nextAt FROM media WHERE id = ?').get(id);
+  rawOf(db).prepare('SELECT drive_file_id AS fileId, drive_attempts AS attempts, drive_failed AS failed, drive_next_at AS nextAt FROM media WHERE id = ?').get(id);
 
 describe('DriveFileUploader', () => {
   it('uploads client files into WA Agent/Clients/<Client>/Files, creating the folders once', async () => {
@@ -178,10 +179,10 @@ describe('DriveFileUploader', () => {
     await savedFile(db, dataDir, { waId: 'ME', jid: '919899999999@s.whatsapp.net', role: 'client', fromMe: true });
     await savedFile(db, dataDir, { waId: 'V', role: 'client', kind: 'voice', fileName: null, mimeType: 'audio/ogg' });
     const a = await savedFile(db, dataDir, { waId: 'A', role: 'client' });
-    db.raw.prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
+    rawOf(db).prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
     await up.run();
     expect(drive.created).toHaveLength(0);
-    db.raw.prepare('UPDATE clients SET active = 1 WHERE id = 1').run();
+    rawOf(db).prepare('UPDATE clients SET active = 1 WHERE id = 1').run();
     await up.run();
     expect(drive.created).toHaveLength(1);
     expect((await getMedia(db, a))!.driveFileId).toBe(drive.created[0]!.id);
@@ -210,7 +211,7 @@ describe('DriveFileUploader', () => {
   it.each([
     ['its message is deleted for everyone', (db: Db) => applyRevoke(db, 1, 'B')],
     ['its sender is no longer marked client', (db: Db) => setRole(db, 1, OTHER, 'team', 'human')],
-    ['its client is made inactive', (db: Db) => db.raw.prepare('UPDATE clients SET active = 0 WHERE id = 1').run()],
+    ['its client is made inactive', (db: Db) => rawOf(db).prepare('UPDATE clients SET active = 0 WHERE id = 1').run()],
   ])('checks each file again just before uploading it: skips a file when %s during the pass, counting no attempt', async (_, change) => {
     const { db, dataDir, drive, up } = await setup();
     const a = await savedFile(db, dataDir, { waId: 'A', role: 'client' });
@@ -512,13 +513,13 @@ describe('DriveFileUploader', () => {
 
   it('cleans the client folder name, and falls back to "Client <id>" when nothing is left', async () => {
     const first = await setup();
-    first.db.raw.prepare('UPDATE clients SET name = ? WHERE id = 1').run('A/B:\u202EC');
+    rawOf(first.db).prepare('UPDATE clients SET name = ? WHERE id = 1').run('A/B:\u202EC');
     await savedFile(first.db, first.dataDir, { waId: 'A', role: 'client' });
     await first.up.run();
     expect(first.drive.folders).toEqual(['Clients', 'A_B_C', 'Files']);
 
     const second = await setup();
-    second.db.raw.prepare('UPDATE clients SET name = ? WHERE id = 1').run('\u0001\u200B\u202E');
+    rawOf(second.db).prepare('UPDATE clients SET name = ? WHERE id = 1').run('\u0001\u200B\u202E');
     await savedFile(second.db, second.dataDir, { waId: 'A', role: 'client' });
     await second.up.run();
     expect(second.drive.folders).toEqual(['Clients', 'Client 1', 'Files']);
@@ -541,7 +542,7 @@ describe('DriveFileUploader', () => {
   it('run() resolves even when the pass itself fails, and the next run() starts a new pass', async () => {
     const { db, dataDir, drive, up } = await setup();
     await savedFile(db, dataDir, { waId: 'A', role: 'client' });
-    const prepare = vi.spyOn(db.raw, 'prepare').mockImplementation(() => {
+    const prepare = vi.spyOn(rawOf(db), 'prepare').mockImplementation(() => {
       throw new Error('database unavailable');
     });
     await expect(up.run()).resolves.toBeUndefined();

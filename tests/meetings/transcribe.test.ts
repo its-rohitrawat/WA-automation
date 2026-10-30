@@ -21,6 +21,7 @@ import { advanceStage, failMeeting, getMeeting, insertFound, setSttParts, type N
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -121,7 +122,7 @@ describe('transcribeMeeting', () => {
   const rows = () => db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend ORDER BY id');
   const parts = async () => (await getMeeting(db, id))!.sttParts;
   const later = (ms: number) => manualClock(new Date(clock.now().getTime() + ms).toISOString());
-  const forgets = () => db.raw.prepare('SELECT * FROM stt_forget ORDER BY id').all() as { id: number; meeting_id: number; provider: string; ref: string; attempts: number }[];
+  const forgets = () => rawOf(db).prepare('SELECT * FROM stt_forget ORDER BY id').all() as { id: number; meeting_id: number; provider: string; ref: string; attempts: number }[];
   const partsDir = () => join(dataDir, 'meetings', 'tmp', `${id}-parts`);
 
   const prepare = async (audioSeconds: number) => {
@@ -459,7 +460,7 @@ describe('transcribeMeeting', () => {
     const p = new FakeProvider('elevenlabs', 36_000);
     p.script = [
       async () => {
-        db.raw.prepare("UPDATE meetings SET status = 'failed' WHERE id = ?").run(id); // the part write after the call is refused
+        rawOf(db).prepare("UPDATE meetings SET status = 'failed' WHERE id = ?").run(id); // the part write after the call is refused
         return result(said('x'), 1200);
       },
     ];
@@ -548,7 +549,7 @@ describe('transcribeMeeting', () => {
       throw new SttNoAnswerError('timeout');
     };
     await transcribeMeeting(id, deps(el));
-    db.raw.prepare('UPDATE stt_forget SET attempts = 0, next_try_at = NULL').run();
+    rawOf(db).prepare('UPDATE stt_forget SET attempts = 0, next_try_at = NULL').run();
     const { lines, log } = capturingLogger();
     const openai = new FakeProvider('openai', 300);
     expect(await forgetPending(db, meetingTranscriber(openai, INR), log, { clock })).toBe(0);
@@ -565,7 +566,7 @@ describe('transcribeMeeting', () => {
     const p = new FakeProvider('elevenlabs', 36_000);
     p.script = [
       async () => {
-        db.raw.prepare("UPDATE meetings SET status = 'failed' WHERE id = ?").run(id);
+        rawOf(db).prepare("UPDATE meetings SET status = 'failed' WHERE id = ?").run(id);
         throw new SttHttpError(401);
       },
     ];
@@ -573,7 +574,7 @@ describe('transcribeMeeting', () => {
     const err = await transcribeMeeting(id, deps(p, { log })).catch((e: unknown) => e);
     expect((err as MeetingDeferral).code).toBe('stt_unavailable');
     expect(lines.some((l) => l.includes('"code":"http_401"') && l.includes('"writeCode"'))).toBe(true);
-    db.raw.prepare("UPDATE meetings SET status = 'queued' WHERE id = ?").run(id);
+    rawOf(db).prepare("UPDATE meetings SET status = 'queued' WHERE id = ?").run(id);
     expect((await parts())[0]).toMatchObject({ state: 'inflight', booked: 'none' }); // left for bookStuckParts (the safe side)
   });
 
@@ -684,7 +685,7 @@ describe('transcribeMeeting', () => {
     expect(forgets()[0]).toMatchObject({ attempts: MAX_FORGET_ATTEMPTS });
     expect(lines.some((l) => l.includes('no more tries') && l.includes(`"meetingId":${id}`) && l.includes('"code":"timeout"'))).toBe(true);
 
-    db.raw.prepare('UPDATE stt_forget SET attempts = 0, next_try_at = NULL').run();
+    rawOf(db).prepare('UPDATE stt_forget SET attempts = 0, next_try_at = NULL').run();
     p.forgetImpl = async () => {
       throw new SttHttpError(404);
     };
@@ -716,13 +717,13 @@ describe('transcribeMeeting', () => {
     const p = new FakeProvider('openai', 36_000);
     p.script = [
       async () => {
-        db.raw.prepare("UPDATE meetings SET status = 'failed' WHERE id = ?").run(id); // the part write will be refused
+        rawOf(db).prepare("UPDATE meetings SET status = 'failed' WHERE id = ?").run(id); // the part write will be refused
         return result(said('x'), 1200);
       },
     ];
     await expect(transcribeMeeting(id, deps(p))).rejects.toThrow();
     expect(await rows()).toEqual([]);
-    db.raw.prepare("UPDATE meetings SET status = 'queued' WHERE id = ?").run(id);
+    rawOf(db).prepare("UPDATE meetings SET status = 'queued' WHERE id = ?").run(id);
     expect((await parts())[0]).toMatchObject({ state: 'inflight', booked: 'none' });
     expect(await recoverInflightParts(db, spend, INR, silentLogger())).toBe(1);
   });

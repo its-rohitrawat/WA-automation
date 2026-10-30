@@ -22,6 +22,7 @@ import { NotConnectedError } from '../src/wa/switchableGateway.ts';
 import { FakeAi } from './helpers/ai.ts';
 import { seededDb, SHARMA } from './helpers/db.ts';
 import { FakeDrive } from './helpers/fakeDrive.ts';
+import { rawOf } from '../src/store/engine/sqlite.ts';
 
 const log = silentLogger();
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
@@ -232,12 +233,12 @@ describe('openSessionDb recovers a link that never finished', () => {
     const auth = await useEncryptedAuthState(first, key);
     auth.state.creds.me = { id: '919800000001:3@s.whatsapp.net', name: 'Founder' };
     await auth.saveCreds();
-    const before = first.raw.prepare('SELECT k, v FROM auth ORDER BY k').all();
+    const before = rawOf(first).prepare('SELECT k, v FROM auth ORDER BY k').all();
     await backupAndReset(first);
-    first.raw.close(); // the process stops mid-link
+    rawOf(first).close(); // the process stops mid-link
     const again = openSessionDb(file);
-    expect(again.raw.prepare('SELECT k, v FROM auth ORDER BY k').all()).toEqual(before);
+    expect(rawOf(again).prepare('SELECT k, v FROM auth ORDER BY k').all()).toEqual(before);
     expect((await useEncryptedAuthState(again, key)).hasSession).toBe(true);
-    again.raw.close();
+    rawOf(again).close();
   });
 });

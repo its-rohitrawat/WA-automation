@@ -10,6 +10,7 @@ import { ANSWER_TIMEOUT_MS, FAILURES_TO_FINISH, HistoryBackfill, HOLD_MAX_MS, MA
 import { Ingestor } from '../../src/wa/ingest.ts';
 import type { NormalizedEvent } from '../../src/wa/normalize.ts';
 import { MEHTA, SHARMA } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const APPROVED = '2026-10-28T06:00:00.000Z';
 const at = (daysBefore: number, minutes = 0) => new Date(Date.parse(APPROVED) - daysBefore * 86_400_000 - minutes * 60_000);
@@ -77,7 +78,7 @@ async function setup(o: { configs?: typeof SHARMA[]; state?: GatewayState; pause
     await new Promise((r) => setImmediate(r));
   };
   const live = (groupId: string, waId: string, ts: Date) => ingestor.handle(msg(groupId, waId, ts));
-  const count = (clientId = 1) => (db.raw.prepare('SELECT COUNT(*) AS n FROM messages WHERE client_id = ?').get(clientId) as { n: number }).n;
+  const count = (clientId = 1) => (rawOf(db).prepare('SELECT COUNT(*) AS n FROM messages WHERE client_id = ?').get(clientId) as { n: number }).n;
   const step = async () => {
     bf.tick();
     await new Promise((r) => setImmediate(r));
@@ -143,7 +144,7 @@ describe('history backfill: paging', () => {
     // Older than 7 days: dropped, and the backfill ends.
     await answer({ groups: [{ groupId: SHARMA.groupId, events: [msg(SHARMA.groupId, 'D', at(6)), msg(SHARMA.groupId, 'OLDER', at(8))] }] });
     expect(count()).toBe(4);
-    expect(db.raw.prepare("SELECT 1 FROM messages WHERE wa_id = 'OLDER'").get()).toBeUndefined();
+    expect(rawOf(db).prepare("SELECT 1 FROM messages WHERE wa_id = 'OLDER'").get()).toBeUndefined();
     expect((await getBackfill(db, SHARMA.groupId))?.state).toBe('done');
     // Found: what the backfill stored itself (B, C, D), not the new message it started from.
     expect(finished).toEqual([{ clientId: 1, found: 3, stopped: false }]);
@@ -272,7 +273,7 @@ describe('history backfill: the privacy rules', () => {
     bf.start();
     await step();
     await answer({ groups: [{ groupId: MEHTA.groupId, events: [msg(MEHTA.groupId, 'X', at(1))] }] });
-    expect(db.raw.prepare("SELECT 1 FROM messages WHERE wa_id = 'X'").get()).toBeUndefined();
+    expect(rawOf(db).prepare("SELECT 1 FROM messages WHERE wa_id = 'X'").get()).toBeUndefined();
   });
 
   it('asks nothing while WhatsApp is not open, nor at the spend cap; carries on after', async () => {

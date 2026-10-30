@@ -8,6 +8,7 @@ import { openDb } from '../../src/store/db.ts';
 import { upsertPerson } from '../../src/store/people.ts';
 import { addDecision, createTask, logReminder, setTaskStatus, type NewTask } from '../../src/store/tasks.ts';
 import { NOW, seededDb, SHARMA } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const task = (o: Partial<NewTask> = {}): NewTask => ({
   clientId: 1, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'major', assignedTo: 'Rahul', askedBy: 'Mr. Sharma',
@@ -124,7 +125,7 @@ describe('workbook round 2', () => {
     const db = await seededDb();
     const a = await createTask(db, task({ title: 'no quote', sourceQuote: null, sourceDate: null, sourceWaId: 'r1' }), NOW);
     const b = await createTask(db, task({ title: 'with quote', sourceWaId: 'r2' }), NOW);
-    db.raw.prepare('UPDATE tasks SET source_revoked = 1 WHERE id IN (?, ?)').run(a.id, b.id);
+    rawOf(db).prepare('UPDATE tasks SET source_revoked = 1 WHERE id IN (?, ?)').run(a.id, b.id);
     const ws = (await build(db)).getWorksheet('Sharma Interiors')!;
     expect(findByCell(ws, 1, 'SHA-001').getCell(13).value).toBe('source message deleted by sender');
     expect(findByCell(ws, 1, 'SHA-002').getCell(13).value).toBe('"banner thoda bright karo" (10 Oct) (source message deleted by sender)');

@@ -10,6 +10,7 @@ import { openMorningReport, senderOpener } from '../../src/report/start.ts';
 import { createLogger } from '../../src/util/logger.ts';
 import { openSessionDb, useEncryptedAuthState, useSenderAuthState } from '../../src/wa/authState.ts';
 import { FakeSocket } from '../helpers/fakeSocket.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const RECIPIENT = '919800001234';
 
@@ -43,7 +44,7 @@ async function linkedFile(file: string, master: Buffer, open: typeof useSenderAu
   const a = await open(db, master);
   a.state.creds.me = { id: '919800000099:3@s.whatsapp.net', name: 'S' };
   await a.saveCreds();
-  db.raw.close();
+  rawOf(db).close();
 }
 
 /** The full number, or any 5 of its digits in a row, must not reach the log. */
@@ -66,7 +67,7 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
       expect(line).toMatchObject({ recipientLast4: '…1234', linked: false });
       expectNoNumber(r.out());
     } finally {
-      r.senderDb?.raw.close();
+      rawOf(r.senderDb)?.close();
     }
   });
 
@@ -79,7 +80,7 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
       expect(r.report.sender.status().state).toBe('idle');
       expect(r.records().find((l) => l.msg === 'morning report enabled')).toMatchObject({ linked: true });
     } finally {
-      r.senderDb?.raw.close();
+      rawOf(r.senderDb)?.close();
     }
   });
 
@@ -94,10 +95,10 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
       expect(r.factory).not.toHaveBeenCalled();
       for (let i = 0; i + 5 <= 12; i++) expect(r.out()).not.toContain('919800000099'.slice(i, i + 5));
     } finally {
-      r.senderDb?.raw.close();
+      rawOf(r.senderDb)?.close();
     }
     const other = await start(tempDir(), master, '919800000099');
-    other.senderDb?.raw.close();
+    rawOf(other.senderDb)?.close();
     expect(other.report.sender.status().state).toBe('not_linked');
   });
 
@@ -121,7 +122,7 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
       expect(r.report.sender.status().state).toBe('not_linked');
       expect(readFileSync(sessionDbPath(dir)).equals(before)).toBe(true);
     } finally {
-      r.senderDb?.raw.close();
+      rawOf(r.senderDb)?.close();
     }
   });
 

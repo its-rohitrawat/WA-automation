@@ -12,6 +12,7 @@ import {
 } from '../../src/web/guard.ts';
 import { SessionStore } from '../../src/web/sessions.ts';
 import { HttpError } from '../../src/web/http.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const T0 = '2026-10-27T10:00:00.000Z';
 const PUBLIC = 'https://dash.example.com';
@@ -92,7 +93,7 @@ describe('requireOwner', () => {
     const { id } = await sessions.create('former@example.com');
     const guard = createGuard({ sessions, ownerEmails: ['owner@example.com'], publicUrl: PUBLIC, port: () => 8787 });
     expect((await rejected(guard.requireOwner(fakeReq({ headers: { cookie: `wa_session=${id}` } })))).status).toBe(401);
-    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM web_sessions').get()).toEqual({ n: 0 });
+    expect(rawOf(db).prepare('SELECT COUNT(*) AS n FROM web_sessions').get()).toEqual({ n: 0 });
   });
 });
 

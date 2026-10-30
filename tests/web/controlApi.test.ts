@@ -10,6 +10,7 @@ import { AuditLog } from '../../src/web/audit.ts';
 import { registerControlApi } from '../../src/web/routes/controlScreens.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
 import { bootDashboard, OWNER } from '../helpers/web.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const closers: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -42,8 +43,8 @@ async function boot(o: { linked?: boolean; secureCookies?: boolean; actionCapaci
   return { db, h, audit: real, sessions };
 }
 
-const auditRows = (db: Db) => db.raw.prepare('SELECT actor, event, kind, detail FROM audit_log ORDER BY id').all();
-const requestIds = (db: Db) => (db.raw.prepare('SELECT request_id AS r FROM audit_log ORDER BY id').all() as { r: string | null }[]).map((x) => x.r);
+const auditRows = (db: Db) => rawOf(db).prepare('SELECT actor, event, kind, detail FROM audit_log ORDER BY id').all();
+const requestIds = (db: Db) => (rawOf(db).prepare('SELECT request_id AS r FROM audit_log ORDER BY id').all() as { r: string | null }[]).map((x) => x.r);
 
 describe('control API: reads', () => {
   it('needs a signed-in owner', async () => {

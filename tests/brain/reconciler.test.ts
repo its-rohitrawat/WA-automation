@@ -17,6 +17,7 @@ import { silentLogger, type Logger } from '../../src/util/logger.ts';
 import { FAKE_USAGE, FakeAi, op, type FakeResponse } from '../helpers/ai.ts';
 import { LATER, NOW, seededDb } from '../helpers/db.ts';
 import { SHARMA_PN } from '../helpers/wa.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
 /** The output part of every estimate; the prompt part is far smaller. */
@@ -58,7 +59,7 @@ function hold(ai: FakeAi): (() => void) & { started: () => Promise<void> } {
 }
 
 function processedAt(db: Db, waId: string): string | null {
-  return (db.raw.prepare('SELECT processed_at AS p FROM messages WHERE wa_id = ?').get(waId) as { p: string | null }).p;
+  return (rawOf(db).prepare('SELECT processed_at AS p FROM messages WHERE wa_id = ?').get(waId) as { p: string | null }).p;
 }
 
 /** Every reservation was settled or released: the whole rest of the cap can be reserved (1e-9 absorbs float rounding). */
@@ -70,7 +71,7 @@ describe('Reconciler', () => {
   it('skips an inactive client without calling the AI', async () => {
     const { db, ai, r } = await setup([]);
     await store(db, 'A1', 'hello');
-    db.raw.prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
+    rawOf(db).prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
     expect(await r.run(1)).toEqual({ status: 'noop' });
     expect(ai.calls).toHaveLength(0);
   });
@@ -101,7 +102,7 @@ describe('Reconciler', () => {
     expect((await getClient(db, 1)).statusText).toBe('Homepage banner is being revised.');
     expect((await listPeople(db, 1))[0]).toMatchObject({ role: 'client', roleSetBy: 'ai' });
     expect(await listUnprocessed(db, 1)).toHaveLength(0);
-    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM task_events').get()).toEqual({ n: 4 });
+    expect(rawOf(db).prepare('SELECT COUNT(*) AS n FROM task_events').get()).toEqual({ n: 4 });
     expect((await latestBatches(db))[0]).toMatchObject({ status: 'ok' });
     expect(spend.spentToday()).toBeCloseTo(0.01, 9);
     expectNoReservation(spend);
@@ -131,7 +132,7 @@ describe('Reconciler', () => {
     expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
     expect(ai.calls[0]!.user).toMatch(/^\[m2\] .*\]: \{document\}$/m);
     expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', raisedOn: '2026-10-17', closedOn: '2026-10-18' });
-    const ev = db.raw.prepare('SELECT detail FROM task_events').get() as { detail: string };
+    const ev = rawOf(db).prepare('SELECT detail FROM task_events').get() as { detail: string };
     expect(JSON.parse(ev.detail)).toMatchObject({ code: 'SHA-001', status: 'done' });
   });
 
@@ -172,11 +173,11 @@ describe('Reconciler', () => {
       op({ op: 'add_decision', text: 'Blue theme chosen', sourceMessageIds: ['m1'] }),
     ] }]);
     await store(db, 'm1', 'Banner bright karo, blue theme final');
-    db.raw.exec("CREATE TRIGGER fail_decisions BEFORE INSERT ON decisions BEGIN SELECT RAISE(ABORT, 'test failure'); END");
+    rawOf(db).exec("CREATE TRIGGER fail_decisions BEFORE INSERT ON decisions BEGIN SELECT RAISE(ABORT, 'test failure'); END");
 
     expect(await r.run(1)).toEqual({ status: 'failed', errorCode: 'apply_failed' });
     expect(await listTasks(db, 1)).toHaveLength(0);
-    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM task_events').get()).toEqual({ n: 0 });
+    expect(rawOf(db).prepare('SELECT COUNT(*) AS n FROM task_events').get()).toEqual({ n: 0 });
     expect(await listUnprocessed(db, 1)).toHaveLength(1);
     expect((await latestBatches(db))[0]).toMatchObject({ status: 'failed', errorCode: 'apply_failed' });
     expect(onChanged).not.toHaveBeenCalled();
@@ -621,7 +622,7 @@ describe('Reconciler', () => {
       await applyEdit(db, 1, 'm1', 'Banner dark karo', '2026-10-19T07:05:00.000Z');
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 0 });
       expect(await listUnprocessed(db, 1)).toHaveLength(0);
-      expect(db.raw.prepare("SELECT touch_reason AS touch, requeue_reason AS requeue FROM messages WHERE wa_id = 'm1'").get()).toEqual({ touch: null, requeue: null });
+      expect(rawOf(db).prepare("SELECT touch_reason AS touch, requeue_reason AS requeue FROM messages WHERE wa_id = 'm1'").get()).toEqual({ touch: null, requeue: null });
     });
 
     describe('a touch from before the run never labels the message queued again (Job C: P2)', () => {

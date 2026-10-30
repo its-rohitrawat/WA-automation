@@ -5,6 +5,7 @@ import { ControlError, type AuditEntry } from '../../src/control/errors.ts';
 import type { Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const OWNER = 'owner@example.com';
 const NUMBER = '919812345678';
@@ -23,7 +24,7 @@ async function setup(o: { env?: Record<string, string>; linked?: boolean } = {})
   return { db, store, clock, audits, audit, setLinked: (v: boolean) => (linked = v) };
 }
 
-const rows = (db: Db) => db.raw.prepare('SELECT k, v, updated_at AS updatedAt, updated_by AS updatedBy FROM settings ORDER BY k').all();
+const rows = (db: Db) => rawOf(db).prepare('SELECT k, v, updated_at AS updatedAt, updated_by AS updatedBy FROM settings ORDER BY k').all();
 
 async function refusal(fn: () => unknown): Promise<ControlError> {
   try {
@@ -57,7 +58,7 @@ describe('SettingsStore.get', () => {
 
   it('falls back to .env for a stored value that is not valid', async () => {
     const { db, store } = await setup({ env: { REPORT_DAYS: 'mon-sat' } });
-    const put = db.raw.prepare('INSERT INTO settings (k, v, updated_at, updated_by) VALUES (?, ?, ?, ?)');
+    const put = rawOf(db).prepare('INSERT INTO settings (k, v, updated_at, updated_by) VALUES (?, ?, ?, ?)');
     put.run('reportDays', '"sundays"', NOW, OWNER);
     put.run('reportEnabled', 'not json', NOW, OWNER);
     put.run('reportRecipient', '"12345"', NOW, OWNER);

@@ -1,4 +1,4 @@
-import { SqliteDb } from '../../src/store/engine/sqlite.ts';
+import { SqliteDb, rawOf } from '../../src/store/engine/sqlite.ts';
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import type { MeetingSummary } from '../../src/brain/meetingSchema.ts';
@@ -73,7 +73,7 @@ describe('meetings store', () => {
     const id = await insertFound(db, m);
     expect(id).toBeTypeOf('number');
     expect(await insertFound(db, { ...m, title: 'Other' })).toBeNull();
-    expect((db.raw.prepare('SELECT COUNT(*) AS n FROM meetings').get() as { n: number }).n).toBe(1);
+    expect((rawOf(db).prepare('SELECT COUNT(*) AS n FROM meetings').get() as { n: number }).n).toBe(1);
     expect(await getMeeting(db, id!)).toMatchObject({
       id, recording: m.recording, conference: CONF, driveFileId: m.driveFileId, meetingCode: 'abc-defg-hij', title: 'Sharma weekly',
       startedAt: m.startedAt, endedAt: m.endedAt, attendees: m.attendees, participants: ['Mr. Sharma'], clientId: 1, matchKind: 'title',
@@ -224,7 +224,7 @@ describe('meetings store', () => {
     const extra = { ...summary(1), mood: 'happy' } as unknown as MeetingSummary;
     await expect(advanceStage(db, id, 'summarised', { summary: extra }, NOW)).rejects.toThrow(/summary value does not have the stored shape/);
     expect(await getMeeting(db, id)).toMatchObject({ stage: 'found', summary: null });
-    db.raw.prepare('UPDATE meetings SET summary = ? WHERE id = ?').run(JSON.stringify(extra), id);
+    rawOf(db).prepare('UPDATE meetings SET summary = ? WHERE id = ?').run(JSON.stringify(extra), id);
     await expect(getMeeting(db, id)).rejects.toThrow(new RegExp(`meeting ${id}.*summary`));
   });
 
@@ -355,7 +355,7 @@ describe('meetings store', () => {
     const old = await withStatus(db, 'unassigned', { startedAt: '2026-10-10T10:00:00.000Z', driveSeconds: 100 });
     const recent = await withStatus(db, 'unassigned', { startedAt: '2026-10-12T10:00:00.000Z', driveSeconds: null });
     await withStatus(db, 'internal');
-    db.raw.prepare('UPDATE meetings SET audio_seconds = 95.5 WHERE id = ?').run(old); // the audio's length wins over Drive's
+    rawOf(db).prepare('UPDATE meetings SET audio_seconds = 95.5 WHERE id = ?').run(old); // the audio's length wins over Drive's
     const rows = await listUnassigned(db, 10);
     expect(rows).toEqual([
       { id: recent, startedAt: '2026-10-12T10:00:00.000Z', seconds: null },
@@ -422,9 +422,9 @@ describe('meetings store', () => {
     const bad = await doneMeeting(db, { startedAt: '2026-10-11T10:00:00.000Z' }, { summary: summary(1) });
     const badSummary = await doneMeeting(db, { startedAt: '2026-10-12T10:00:00.000Z' }, { summary: summary(1) });
     const noList = await doneMeeting(db, { startedAt: '2026-10-13T10:00:00.000Z' }, { summary: summary(1) });
-    db.raw.prepare("UPDATE meetings SET attendees = '[{\"email\": 42, \"secret\": \"Mr Sharma private\"}]' WHERE id = ?").run(bad);
-    db.raw.prepare("UPDATE meetings SET summary = '{not json: private words' WHERE id = ?").run(badSummary);
-    db.raw.prepare(`UPDATE meetings SET summary = '{"actionItems": "private"}' WHERE id = ?`).run(noList);
+    rawOf(db).prepare("UPDATE meetings SET attendees = '[{\"email\": 42, \"secret\": \"Mr Sharma private\"}]' WHERE id = ?").run(bad);
+    rawOf(db).prepare("UPDATE meetings SET summary = '{not json: private words' WHERE id = ?").run(badSummary);
+    rawOf(db).prepare(`UPDATE meetings SET summary = '{"actionItems": "private"}' WHERE id = ?`).run(noList);
     await expect(getMeeting(db, bad)).rejects.toThrow(new RegExp(`meeting ${bad}.*attendees`));
     await expect(getMeeting(db, bad)).rejects.not.toThrow(/private/);
     await expect(getMeeting(db, badSummary)).rejects.toThrow(new RegExp(`meeting ${badSummary}.*summary`));
@@ -493,18 +493,18 @@ describe('migration 7', () => {
 
   it('a fresh database has migration 7, with its indexes, and the table refuses unknown statuses and stages', async () => {
     const db = await seededDb();
-    expect(db.raw.prepare('SELECT version FROM schema_version WHERE version = 7').get()).toEqual({ version: 7 });
-    expect((db.raw.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(12); // the latest: v12 is Open chat's outbox, after v11 (priority and sentiment)
-    const idx = (db.raw.prepare("SELECT tbl_name || '.' || name AS n FROM sqlite_master WHERE type = 'index'").all() as { n: string }[]).map((i) => i.n);
+    expect(rawOf(db).prepare('SELECT version FROM schema_version WHERE version = 7').get()).toEqual({ version: 7 });
+    expect((rawOf(db).prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(12); // the latest: v12 is Open chat's outbox, after v11 (priority and sentiment)
+    const idx = (rawOf(db).prepare("SELECT tbl_name || '.' || name AS n FROM sqlite_master WHERE type = 'index'").all() as { n: string }[]).map((i) => i.n);
     expect(idx).toEqual(expect.arrayContaining([
       'meetings.meetings_due', 'meetings.meetings_conference', 'meetings.meetings_client', 'tasks.tasks_meeting', 'decisions.decisions_meeting',
     ]));
-    expect(db.raw.prepare("SELECT name FROM pragma_index_info('meetings_client') ORDER BY seqno").all()).toEqual([
+    expect(rawOf(db).prepare("SELECT name FROM pragma_index_info('meetings_client') ORDER BY seqno").all()).toEqual([
       { name: 'client_id' }, { name: 'status' }, { name: 'started_at' },
     ]);
     await expect(insertFound(db, meeting({ status: 'pending' as MeetingStatus }))).rejects.toThrow(/CHECK/);
     const id = await withStatus(db, 'queued');
-    expect(() => db.raw.prepare("UPDATE meetings SET stage = 'uploaded' WHERE id = ?").run(id)).toThrow(/CHECK/);
+    expect(() => rawOf(db).prepare("UPDATE meetings SET stage = 'uploaded' WHERE id = ?").run(id)).toThrow(/CHECK/);
     await expect(insertFound(db, meeting({ clientId: 999 }))).rejects.toThrow(/FOREIGN KEY/);
   });
 
@@ -516,7 +516,7 @@ describe('migration 7', () => {
     await expect(insertFound(db, meeting({ ...internal, attendees: [{ email: 'r@us.example', name: null, team: true }] }))).rejects.toThrow(/CHECK/);
     await expect(insertFound(db, meeting({ ...internal, participants: ['Rohit'] }))).rejects.toThrow(/CHECK/);
     const queued = await withStatus(db, 'queued');
-    expect(() => db.raw.prepare("UPDATE meetings SET status = 'internal' WHERE id = ?").run(queued)).toThrow(/CHECK/);
+    expect(() => rawOf(db).prepare("UPDATE meetings SET status = 'internal' WHERE id = ?").run(queued)).toThrow(/CHECK/);
   });
 });
 

@@ -8,6 +8,7 @@ import { deriveSubkey } from '../../src/crypto/keyProvider.ts';
 import {
   openSessionDb, SENDER_SESSION_INFO, SenderSessionDecryptError, SessionDecryptError, useEncryptedAuthState, useSenderAuthState,
 } from '../../src/wa/authState.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const MASTER = randomBytes(32);
 
@@ -66,7 +67,7 @@ describe('sender session store', () => {
     expect(a.hasSession).toBe(false);
     a.state.creds.me = { id: '919800000099:3@s.whatsapp.net', name: 'Spare' };
     await a.saveCreds();
-    for (const { v } of db.raw.prepare('SELECT v FROM auth').all() as { v: Buffer }[]) expect(v.toString('latin1')).not.toContain('Spare');
+    for (const { v } of rawOf(db).prepare('SELECT v FROM auth').all() as { v: Buffer }[]) expect(v.toString('latin1')).not.toContain('Spare');
     expect((await useSenderAuthState(db, MASTER)).hasSession).toBe(true);
   });
 
@@ -92,7 +93,7 @@ describe('sender session store', () => {
     const dir = mkdtempSync(join(tmpdir(), 'wa-sender-sess-'));
     try {
       const db = openSessionDb(join(dir, 'sender-session.db'));
-      db.raw.close();
+      rawOf(db).close();
       let thrown: unknown;
       try {
         await useSenderAuthState(db, MASTER);

@@ -5,12 +5,13 @@ import { finishBatch, startBatch } from '../../src/store/batches.ts';
 import type { Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { seededDb } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 // 2026-10-19 08:00 UTC is 13:30 IST on the 19th.
 const NOW = '2026-10-19T08:00:00.000Z';
 
 function spend(db: Db, day: string, kind: 'ai' | 'stt', usd: number, detail: string) {
-  db.raw.prepare('INSERT INTO spend (day, kind, usd, detail, at) VALUES (?, ?, ?, ?, ?)').run(day, kind, usd, detail, NOW);
+  rawOf(db).prepare('INSERT INTO spend (day, kind, usd, detail, at) VALUES (?, ?, ?, ?, ?)').run(day, kind, usd, detail, NOW);
 }
 
 async function setup(cap = 15, now = NOW) {

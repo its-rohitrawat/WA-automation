@@ -21,6 +21,7 @@ import { MEHTA, seededDb, SHARMA } from './helpers/db.ts';
 import { FakeDrive } from './helpers/fakeDrive.ts';
 import { FakeReportSender } from './helpers/fakeReportSender.ts';
 import { FakeSocket, SEND_METHODS } from './helpers/fakeSocket.ts';
+import { rawOf } from '../src/store/engine/sqlite.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
 const DAY = '2026-10-23';
@@ -108,7 +109,7 @@ describe('app and the morning report', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(app.report).toBeUndefined();
     expect((await readHealthSnapshot(db))!.report).toBeUndefined();
-    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM reports').get()).toEqual({ n: 0 });
+    expect(rawOf(db).prepare('SELECT COUNT(*) AS n FROM reports').get()).toEqual({ n: 0 });
     await stopApp(app);
   });
 

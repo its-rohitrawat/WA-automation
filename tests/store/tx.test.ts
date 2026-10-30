@@ -2,7 +2,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { openDb, txSync } from '../../src/store/db.ts';
+import { openDb } from '../../src/store/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 let dir: string | undefined;
 afterEach(() => {
@@ -11,22 +12,22 @@ afterEach(() => {
 });
 
 describe('tx', () => {
-  it('takes the write lock at BEGIN, so a second writer cannot slip in after a read', () => {
+  it('takes the write lock at BEGIN, so a second writer cannot slip in after a read', async () => {
     dir = mkdtempSync(join(tmpdir(), 'wa-tx-'));
     const file = join(dir, 'a.db');
     const a = openDb(file);
     const b = openDb(file);
-    b.raw.pragma('busy_timeout = 0');
+    rawOf(b).pragma('busy_timeout = 0');
     try {
-      txSync(a, () => {
-        a.raw.prepare('SELECT COUNT(*) FROM kv').get();
+      await a.tx(async (q) => {
+        await q.get('SELECT COUNT(*) FROM kv');
         // With a deferred BEGIN this write would succeed and A's later write would hit SQLITE_BUSY_SNAPSHOT.
-        expect(() => b.raw.prepare("INSERT INTO kv (k, v) VALUES ('x', '1')").run()).toThrowError(/locked|busy/i);
+        expect(() => rawOf(b).prepare("INSERT INTO kv (k, v) VALUES ('x', '1')").run()).toThrowError(/locked|busy/i);
       });
-      b.raw.prepare("INSERT INTO kv (k, v) VALUES ('x', '1')").run();
+      rawOf(b).prepare("INSERT INTO kv (k, v) VALUES ('x', '1')").run();
     } finally {
-      a.raw.close();
-      b.raw.close();
+      await a.close();
+      await b.close();
     }
   });
 });

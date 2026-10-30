@@ -7,6 +7,7 @@ import { applyGroupChanges, GroupChangeError, type FileOps } from '../../src/con
 import { syncClients } from '../../src/store/clients.ts';
 import { openDb } from '../../src/store/db.ts';
 import { MEHTA as MEHTA_HELPER, SHARMA as SHARMA_HELPER } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 // The shared test helpers use the example group id for Sharma, which the parser refuses on purpose; these tests write
 // real files, so they use their own ids.
@@ -309,7 +310,7 @@ describe('applyGroupChanges', () => {
 
 async function openFreshDb() {
   const db = await seededDb();
-  db.raw.exec('DELETE FROM clients');
+  rawOf(db).exec('DELETE FROM clients');
   return db;
 }
 

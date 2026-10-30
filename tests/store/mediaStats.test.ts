@@ -7,6 +7,7 @@ import {
 import { applyRevoke, insertMessage } from '../../src/store/messages.ts';
 import { setRole, upsertPerson } from '../../src/store/people.ts';
 import { MEHTA, NOW, SHARMA, seededDb } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 async function add(db: Db, waId: string, o: { clientId?: number; createdAt?: string; errorCode?: string; senderJid?: string } = {}): Promise<number> {
   const clientId = o.clientId ?? 1;
@@ -70,7 +71,7 @@ describe('mediaStats', () => {
   it('never counts a queued backlog file as waiting too long: a long backlog run is not a fault (review round 2)', async () => {
     const db = await seededDb();
     const id = await add(db, 'A', { createdAt: '2026-10-19T06:00:00.000Z' });
-    db.raw.prepare('UPDATE media SET backlog = 1 WHERE id = ?').run(id);
+    rawOf(db).prepare('UPDATE media SET backlog = 1 WHERE id = ?').run(id);
     await add(db, 'B', { createdAt: '2026-10-19T06:00:00.000Z' });
     expect(await mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 2, stale: 1 });
   });

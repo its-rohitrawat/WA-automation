@@ -15,6 +15,7 @@ import {
   secureFor,
   sessionCookie,
 } from '../../src/web/sessions.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const T0 = '2026-10-27T10:00:00.000Z';
 const HOUR = 3_600_000;
@@ -27,7 +28,7 @@ function setup() {
 }
 
 function rows(db: Db) {
-  return db.raw.prepare('SELECT * FROM web_sessions').all() as Record<string, string | null>[];
+  return rawOf(db).prepare('SELECT * FROM web_sessions').all() as Record<string, string | null>[];
 }
 
 describe('SessionStore: create and get', () => {
@@ -107,7 +108,7 @@ describe('SessionStore: create and get', () => {
   it('a malformed id is refused before any database work', async () => {
     const { db, store } = setup();
     await store.create('owner@example.com');
-    const prepare = vi.spyOn(db.raw, 'prepare');
+    const prepare = vi.spyOn(rawOf(db), 'prepare');
     expect(await store.get('A'.repeat(10_000))).toBeUndefined();
     await store.destroy('A'.repeat(10_000));
     expect(prepare).not.toHaveBeenCalled();
@@ -199,7 +200,7 @@ describe('SessionStore: expiry and idle timeout', () => {
     for (const column of ['expires_at', 'last_seen_at']) {
       const { db, store } = setup();
       const { id } = await store.create('owner@example.com');
-      db.raw.prepare(`UPDATE web_sessions SET ${column} = ?`).run('not a date');
+      rawOf(db).prepare(`UPDATE web_sessions SET ${column} = ?`).run('not a date');
       expect(await store.get(id), column).toBeUndefined();
       expect(rows(db), column).toHaveLength(0);
     }

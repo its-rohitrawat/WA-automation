@@ -8,6 +8,7 @@ import type { Db } from '../../src/store/db.ts';
 import { setKv } from '../../src/store/kv.ts';
 import { createTask, setTaskStatus, type NewTask, type TaskRow } from '../../src/store/tasks.ts';
 import { seededDb, SHARMA } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const NOW = new Date('2026-10-23T00:30:00.000Z'); // 06:00 IST
 const TODAY = '2026-10-23';
@@ -158,7 +159,7 @@ describe('byMorningUrgency', () => {
     await createTask(db, task({ title: 'Overdue', deadline: '2026-10-20' }), NOW.toISOString()); // SHA-001
     await createTask(db, task({ title: 'Critical', priority: 'critical', raisedOn: '2026-10-20' }), NOW.toISOString()); // SHA-002
     await createTask(db, task({ title: 'Old high', priority: 'major', raisedOn: '2026-10-21' }), NOW.toISOString()); // SHA-003
-    db.raw.prepare("UPDATE tasks SET priority_level = NULL WHERE code = 'SHA-003'").run(); // old column stays 'high'
+    rawOf(db).prepare("UPDATE tasks SET priority_level = NULL WHERE code = 'SHA-003'").run(); // old column stays 'high'
     await createTask(db, task({ title: 'Medium', raisedOn: '2026-09-01' }), NOW.toISOString()); // SHA-004
     expect(await urgent(db)).toEqual(['SHA-002', 'SHA-001', 'SHA-003', 'SHA-004']);
   });
@@ -177,7 +178,7 @@ describe('taskNotes', () => {
     const db = await seededDb();
     await createTask(db, task({ title: 'Down', priority: 'critical' }), NOW.toISOString()); // SHA-001
     await createTask(db, task({ title: 'Old high', priority: 'major' }), NOW.toISOString()); // SHA-002
-    db.raw.prepare("UPDATE tasks SET priority_level = NULL WHERE code = 'SHA-002'").run();
+    rawOf(db).prepare("UPDATE tasks SET priority_level = NULL WHERE code = 'SHA-002'").run();
     expect(taskNotes(await openTask(db, 'SHA-001'), TODAY)).toEqual(['critical']);
     expect(taskNotes(await openTask(db, 'SHA-002'), TODAY)).toEqual([]);
   });

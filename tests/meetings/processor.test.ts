@@ -31,6 +31,7 @@ import { FakeMeetingsApi } from '../helpers/fakeMeetings.ts';
 import {
   addRecordingFile, fakeFfmpeg, FakeMeetingAi, FakeSttProvider, gate, queuedMeeting, SAID, SUMMARY_WIRE, type FakeFfmpeg,
 } from '../helpers/meetingPipeline.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
 const NOW = '2026-11-01T12:00:00.000Z'; // 17:30 IST
@@ -114,7 +115,7 @@ async function at(w: World, stage: MeetingStage): Promise<void> {
   }
 }
 
-const setAttempts = (w: World, n: number) => w.db.raw.prepare('UPDATE meetings SET attempts = ? WHERE id = ?').run(n, w.id);
+const setAttempts = (w: World, n: number) => rawOf(w.db).prepare('UPDATE meetings SET attempts = ? WHERE id = ?').run(n, w.id);
 
 describe('MeetingProcessor: found to done', () => {
   it('takes one meeting through every stage with each result stored, one Doc, the tracker updated and the meeting done', async () => {
@@ -143,7 +144,7 @@ describe('MeetingProcessor: found to done', () => {
     expect(w.stt.forgotten).toEqual(['tr-1']);
 
     expect((await listTasks(w.db, 1)).map((t) => ({ title: t.title, origin: t.origin }))).toEqual([{ title: 'Send the logo files', origin: 'meeting' }]);
-    expect(w.db.raw.prepare('SELECT meeting_id AS meetingId FROM tasks').all()).toEqual([{ meetingId: w.id }]);
+    expect(rawOf(w.db).prepare('SELECT meeting_id AS meetingId FROM tasks').all()).toEqual([{ meetingId: w.id }]);
     expect(await listDecisions(w.db, 1, 10)).toEqual([]);
 
     expect((await spendRows(w)).map((s) => [s.kind, s.detail])).toEqual([

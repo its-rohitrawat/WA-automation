@@ -11,6 +11,7 @@ import {
 } from '../../src/wa/linkSession.ts';
 import { SwitchableGateway } from '../../src/wa/switchableGateway.ts';
 import { closeWith, FakeSocket } from '../helpers/fakeSocket.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const QR1 = 'QR-SECRET-one-2@abc';
 const QR2 = 'QR-SECRET-two-2@def';
@@ -59,10 +60,10 @@ async function setup(o: { linked?: boolean; timeoutMs?: number } = {}) {
     audit: async (event, actor) => { audits.push({ event, actor }); },
     ...(o.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : {}),
   });
-  const rows = () => sessionDb.raw.prepare('SELECT k, v FROM auth ORDER BY k').all() as { k: string; v: Buffer }[];
+  const rows = () => rawOf(sessionDb).prepare('SELECT k, v FROM auth ORDER BY k').all() as { k: string; v: Buffer }[];
   const backupRows = () => {
-    sessionDb.raw.exec('CREATE TABLE IF NOT EXISTS auth_backup (k TEXT PRIMARY KEY, v BLOB NOT NULL)');
-    return (sessionDb.raw.prepare('SELECT COUNT(*) AS n FROM auth_backup').get() as { n: number }).n;
+    rawOf(sessionDb).exec('CREATE TABLE IF NOT EXISTS auth_backup (k TEXT PRIMARY KEY, v BLOB NOT NULL)');
+    return (rawOf(sessionDb).prepare('SELECT COUNT(*) AS n FROM auth_backup').get() as { n: number }).n;
   };
   return { key, sessionDb, trackerDb, sockets, auths, lines, switchable, statuses, audits, sessions, rows, backupRows };
 }
@@ -378,7 +379,7 @@ describe('session backup helpers', () => {
     const auth = await useEncryptedAuthState(db, key);
     let stopped = false;
     const guarded = guardAuth(auth, () => stopped);
-    const count = () => (db.raw.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n;
+    const count = () => (rawOf(db).prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n;
     const start = count();
     await guarded.state.keys.set({ 'pre-key': { '1': { public: Buffer.alloc(32), private: Buffer.alloc(32) } } });
     expect(count()).toBe(start + 1);
@@ -394,7 +395,7 @@ describe('session backup helpers', () => {
     await backupAndReset(db);
     await resetSession(db);
     expect(await recoverInterruptedLink(db)).toBe(false);
-    expect((db.raw.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n).toBe(0);
+    expect((rawOf(db).prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n).toBe(0);
   });
 
   it('a cancelled founder link leaves no backup behind', async () => {

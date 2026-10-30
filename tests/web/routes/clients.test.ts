@@ -7,6 +7,7 @@ import type { GatewayState } from '../../../src/wa/gateway.ts';
 import { clientDetailHandler, clientsListHandler, type ClientsDeps } from '../../../src/web/routes/clients.ts';
 import type { OwnerContext } from '../../../src/web/routes/context.ts';
 import { seededDb, SHARMA } from '../../helpers/db.ts';
+import { rawOf } from '../../../src/store/engine/sqlite.ts';
 
 const CTX: OwnerContext = { actor: 'owner@example.com', sessionId: 'session-hash', requestId: 'a1b2c3d4e5f6' };
 const MESSAGE = 'MESSAGE-TEXT-never-sent';
@@ -75,12 +76,12 @@ describe('clientDetailHandler', () => {
   it('sends moods, the task\'s and the client\'s, only while sentiment is switched on', async () => {
     const { deps } = await setup();
     const db = deps.db;
-    db.raw.prepare("UPDATE tasks SET sentiment = 'frustrated' WHERE code = 'SHA-001'").run();
-    db.raw.prepare("UPDATE clients SET sentiment = 'negative', sentiment_at = '2026-10-19T08:00:00.000Z' WHERE code = 'SHA'").run();
+    rawOf(db).prepare("UPDATE tasks SET sentiment = 'frustrated' WHERE code = 'SHA-001'").run();
+    rawOf(db).prepare("UPDATE clients SET sentiment = 'negative', sentiment_at = '2026-10-19T08:00:00.000Z' WHERE code = 'SHA'").run();
     const detail = async () => ((await clientDetailHandler(deps, CTX, 'SHA')).body as { client: { sentiment: unknown; openTasks: { sentiment: unknown }[] } }).client;
     expect((await detail()).sentiment).toBeNull();
     expect((await detail()).openTasks[0]!.sentiment).toBeNull();
-    db.raw.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', '2026-10-19T08:00:00.000Z', 'o')").run();
+    rawOf(db).prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', '2026-10-19T08:00:00.000Z', 'o')").run();
     expect((await detail()).sentiment).toEqual({ mood: 'negative', at: '2026-10-19T08:00:00.000Z' });
     expect((await detail()).openTasks[0]!.sentiment).toBe('frustrated');
   });

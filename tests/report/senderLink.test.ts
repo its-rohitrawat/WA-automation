@@ -14,6 +14,7 @@ import { LinkSessions } from '../../src/wa/linkSession.ts';
 import { linkedNumber, SENDER_DEVICE_NAME } from '../../src/wa/senderGateway.ts';
 import { closeWith, FakeSocket } from '../helpers/fakeSocket.ts';
 import { FakeReportSender } from '../helpers/fakeReportSender.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const OLD_SPARE = '919811111111';
 const NEW_SPARE = '919822222222';
@@ -72,7 +73,7 @@ async function linkedBefore(): Promise<void> {
   if (!opened.ok) throw new Error('could not create the session');
   opened.auth.state.creds.me = { id: `${OLD_SPARE}:3@s.whatsapp.net`, name: 'Old spare' };
   await opened.auth.saveCreds();
-  opened.db.raw.close();
+  rawOf(opened.db).close();
 }
 
 /** The number the spare session on disk is linked to now. */
@@ -80,7 +81,7 @@ async function linkedOnDisk(): Promise<string | undefined> {
   const opened = await openSenderSession(file(), key);
   if (!opened.ok) return `unreadable:${opened.code}`;
   const n = linkedNumber(opened.auth);
-  opened.db.raw.close();
+  rawOf(opened.db).close();
   return n;
 }
 
@@ -136,8 +137,8 @@ describe('spare phone link', () => {
     expect(await f.replaced[0]!.sendReport('x')).toEqual({ status: 'failed', code: 'linking' });
     expect(f.replaced[0]!.maskedRecipient()).toBe('…0009');
     expect(f.replaced[1]).toBe(made);
-    expect(opened.db.raw.open).toBe(true); // the report's database stays open for it
-    opened.db.raw.close();
+    expect(rawOf(opened.db).open).toBe(true); // the report's database stays open for it
+    rawOf(opened.db).close();
     expect(await linkedOnDisk()).toBe(NEW_SPARE);
   });
 
@@ -155,7 +156,7 @@ describe('spare phone link', () => {
     idle();
     await t.s.settled(link.id);
     expect(t.s.info(link.id)!.state).toBe('linked');
-    opened.db.raw.close();
+    rawOf(opened.db).close();
   });
 
   it("a refused link gives the report back a sender on the restored session, never on the founder's", async () => {
@@ -176,7 +177,7 @@ describe('spare phone link', () => {
     await t.s.settled(link.id);
     expect(t.s.info(link.id)!.errorCode).toBe('founder_number');
     expect(madeFor).toEqual([OLD_SPARE]);
-    opened.db.raw.close();
+    rawOf(opened.db).close();
     expect(await linkedOnDisk()).toBe(OLD_SPARE);
   });
 
@@ -193,8 +194,8 @@ describe('spare phone link', () => {
     expect(f.replaced).toHaveLength(1);
     expect(f.replaced[0]).not.toBeInstanceOf(LinkingSender);
     expect(adopted).toHaveLength(1);
-    expect(adopted[0]!.raw.open).toBe(true);
-    adopted[0]!.raw.close();
+    expect(rawOf(adopted[0]!).open).toBe(true);
+    rawOf(adopted[0]!).close();
   });
 
   it('a failure after the commit (building the sender) does not undo or fail the link', async () => {
@@ -215,7 +216,7 @@ describe('spare phone link', () => {
     const other = await openSenderSession(file(), randomBytes(32));
     if (!other.ok) throw new Error('open failed');
     await other.auth.saveCreds();
-    other.db.raw.close();
+    rawOf(other.db).close();
     const t = sessions(scan(NEW_SPARE));
     const link = t.s.start({ target: 'spare', actor: 'a@b.in' });
     await t.s.settled(link.id);
@@ -242,8 +243,8 @@ describe('spare phone link', () => {
     t.s.cancel(link.id);
     await t.s.settled(link.id);
     const db = openSessionDb(file());
-    expect((db.raw.prepare('SELECT COUNT(*) AS n FROM auth_backup').get() as { n: number }).n).toBe(0);
-    db.raw.close();
+    expect((rawOf(db).prepare('SELECT COUNT(*) AS n FROM auth_backup').get() as { n: number }).n).toBe(0);
+    rawOf(db).close();
   });
 
   it('shows "opening" once the phone has scanned (WhatsApp asks for its restart)', async () => {

@@ -316,7 +316,7 @@ export async function meetingBackfillCommand(opts: { since: string; yes: boolean
     if (r.added > 0) await requestRebuild(db, now);
     out('Next: start the service (net start wa-agent); it processes the queued meetings. See them with: npm run cli -- meeting list');
   } finally {
-    db?.raw.close();
+    await db?.close();
     await lock.release();
   }
 }
@@ -365,6 +365,6 @@ export async function meetingCheckCommand(deps: MeetingCliDeps): Promise<void> {
     }
     out('Nothing was downloaded or stored.');
   } finally {
-    db.raw.close();
+    await db.close();
   }
 }

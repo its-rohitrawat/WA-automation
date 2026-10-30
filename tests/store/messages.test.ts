@@ -6,6 +6,7 @@ import {
   markProcessed, markProcessedIfUnchanged, reactionsFor, resetProcessedSince, unprocessedCounts, upsertReaction, type NewMessage,
 } from '../../src/store/messages.ts';
 import { LATER, NOW, seededDb } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const msg = (o: Partial<NewMessage> = {}): NewMessage => ({
   waId: 'm1', clientId: 1, senderJid: '919800000001@s.whatsapp.net', senderNumber: '919800000001', senderName: 'Mr. Sharma',
@@ -32,19 +33,19 @@ describe('messages repository', () => {
     await markProcessed(db, [(await listUnprocessed(db, 1))[0]!.id], NOW);
     expect(await applyEdit(db, 1, 'm1', 'hello edited', '2026-10-10T09:00:00.000Z')).toBe(true);
     expect((await listUnprocessed(db, 1))[0]).toMatchObject({ text: 'hello edited', editedAt: '2026-10-10T09:00:00.000Z', processedAt: null });
-    expect(db.raw.prepare('SELECT previous_text FROM message_edits').get()).toEqual({ previous_text: 'hello' });
+    expect(rawOf(db).prepare('SELECT previous_text FROM message_edits').get()).toEqual({ previous_text: 'hello' });
     expect(await applyEdit(db, 1, 'm1', 'hello edited', '2026-10-10T09:05:00.000Z')).toBe(false);
   });
 
   it('flags revoked messages without deleting them and marks their tasks', async () => {
     const db = await seededDb();
     await insertMessage(db, msg());
-    db.raw.prepare(`INSERT INTO tasks (code, client_id, side, title, category, priority, raised_on, source_wa_id, created_at, updated_at)
+    rawOf(db).prepare(`INSERT INTO tasks (code, client_id, side, title, category, priority, raised_on, source_wa_id, created_at, updated_at)
       VALUES ('SHA-001', 1, 'us', 't', 'design', 'high', '2026-10-10', 'm1', ?, ?)`).run(NOW, NOW);
     expect(await applyRevoke(db, 1, 'm1')).toBe(true);
     expect(await listUnprocessed(db, 1)).toHaveLength(0);
-    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM messages').get()).toEqual({ n: 1 });
-    expect(db.raw.prepare('SELECT source_revoked FROM tasks').get()).toEqual({ source_revoked: 1 });
+    expect(rawOf(db).prepare('SELECT COUNT(*) AS n FROM messages').get()).toEqual({ n: 1 });
+    expect(rawOf(db).prepare('SELECT source_revoked FROM tasks').get()).toEqual({ source_revoked: 1 });
   });
 
   it('lists recent processed messages oldest first', async () => {
@@ -123,7 +124,7 @@ describe('messages repository', () => {
       await markProcessed(db, [(await listUnprocessed(db, 1))[0]!.id], NOW);
       await upsertReaction(db, rx('✅'));
       expect(await listUnprocessed(db, 1)).toHaveLength(0);
-      expect(db.raw.prepare("SELECT processed_at AS p FROM messages WHERE wa_id = 'm1'").get()).toEqual({ p: NOW });
+      expect(rawOf(db).prepare("SELECT processed_at AS p FROM messages WHERE wa_id = 'm1'").get()).toEqual({ p: NOW });
     });
 
     it('changing a reaction re-queues', async () => {
@@ -158,7 +159,7 @@ describe('messages repository', () => {
   describe('versions for changes during an AI call', () => {
     const rx = (emoji: string, targetWaId = 'm1') => ({ clientId: 1, targetWaId, reactorJid: 'r1', emoji, ts: NOW });
     const version = (db: Awaited<ReturnType<typeof seededDb>>, waId = 'm1') =>
-      db.raw.prepare('SELECT version, touch_reason AS touch FROM messages WHERE wa_id = ?').get(waId) as { version: number; touch: string | null };
+      rawOf(db).prepare('SELECT version, touch_reason AS touch FROM messages WHERE wa_id = ?').get(waId) as { version: number; touch: string | null };
 
     it('starts at version 0 and an edit bumps it', async () => {
       const db = await seededDb();
@@ -312,7 +313,7 @@ describe('a file read after its message was processed (12h)', () => {
    */
   const seenBy = async (db: Db, o: { fileUnread?: boolean; fileShown?: boolean } = {}) =>
     (await listUnprocessed(db, 1)).map((m) => ({ id: m.id, version: m.version, ...o }));
-  const reasons = (db: Db) => db.raw.prepare("SELECT requeue_reason AS requeue, touch_reason AS touch FROM messages WHERE wa_id = 'm1'").get();
+  const reasons = (db: Db) => rawOf(db).prepare("SELECT requeue_reason AS requeue, touch_reason AS touch FROM messages WHERE wa_id = 'm1'").get();
   const react = (db: Db, ts: string) => upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: 'r1', emoji: '✅', ts });
 
   it('markProcessedIfUnchanged clears the flag when it marks the message processed', async () => {
@@ -443,7 +444,7 @@ describe('a file read after its message was processed (12h)', () => {
 
     it.each(['voice', 'audio'] as const)('kind %s: a backlog transcript that arrives during the call leaves its message to be marked processed (V6)', async (kind) => {
       const { db, fileId } = await withFile(kind);
-      db.raw.prepare('UPDATE media SET backlog = 1 WHERE id = ?').run(fileId);
+      rawOf(db).prepare('UPDATE media SET backlog = 1 WHERE id = ?').run(fileId);
       const seen = await seenBy(db, { fileUnread: true });
       await finishMedia(db, fileId, TRANSCRIPT);
       expect(await markProcessedIfUnchanged(db, seen, LATER)).toBe(0);

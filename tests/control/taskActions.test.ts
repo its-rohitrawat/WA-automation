@@ -6,6 +6,7 @@ import type { Db } from '../../src/store/db.ts';
 import { getKv } from '../../src/store/kv.ts';
 import { createTask } from '../../src/store/tasks.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const now = new Date('2026-10-19T08:00:00Z');
 const OWNER = 'owner@example.com';
@@ -20,8 +21,8 @@ async function withTask(): Promise<Db> {
 /** Everything a correction changes: the task row, its events and the rebuild request. */
 async function state(db: Db) {
   return {
-    task: db.raw.prepare('SELECT * FROM tasks').all(),
-    events: db.raw.prepare('SELECT task_id, client_id, actor, op, detail, reason, source_ids, at FROM task_events ORDER BY id').all(),
+    task: rawOf(db).prepare('SELECT * FROM tasks').all(),
+    events: rawOf(db).prepare('SELECT task_id, client_id, actor, op, detail, reason, source_ids, at FROM task_events ORDER BY id').all(),
     rebuild: await getKv(db, 'rebuild_requested'),
   };
 }

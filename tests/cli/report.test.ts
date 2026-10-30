@@ -17,6 +17,7 @@ import { acquireLock } from '../../src/util/lock.ts';
 import { openSessionDb, SenderSessionDecryptError, useEncryptedAuthState, useSenderAuthState } from '../../src/wa/authState.ts';
 import type { SenderSocketFactory } from '../../src/wa/senderGateway.ts';
 import { closeWith, FakeSocket, SEND_METHODS } from '../helpers/fakeSocket.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 /** renameSync passes through, except that it fails for the one path in failRename (a file another program has locked). */
 const fsSeam = vi.hoisted(() => ({ failRename: undefined as string | undefined }));
@@ -80,7 +81,7 @@ async function withTracker<T>(fn: (db: Db) => T | Promise<T>): Promise<T> {
   try {
     return await fn(db);
   } finally {
-    db.raw.close();
+    rawOf(db).close();
   }
 }
 
@@ -107,7 +108,7 @@ async function seedSender(key: Buffer = KEY): Promise<void> {
   const auth = await useSenderAuthState(sdb, key);
   auth.state.creds.me = { id: '919800000099:2@s.whatsapp.net', name: 'Spare' };
   await auth.saveCreds();
-  sdb.raw.close();
+  rawOf(sdb).close();
 }
 
 /** The founder reader's own number (session.db), deliberately not REPORT_RECIPIENT. */
@@ -119,7 +120,7 @@ async function seedFounder(key: Buffer = KEY): Promise<void> {
   const auth = await useEncryptedAuthState(db, key);
   auth.state.creds.me = { id: `${FOUNDER}:7@s.whatsapp.net`, name: 'Founder' };
   await auth.saveCreds();
-  db.raw.close();
+  rawOf(db).close();
 }
 
 /** A spare-number socket factory whose QR code is scanned by the phone with this number. */
@@ -142,7 +143,7 @@ const senderLinked = async (): Promise<boolean> => {
   try {
     return (await useSenderAuthState(sdb, KEY)).hasSession;
   } finally {
-    sdb.raw.close();
+    rawOf(sdb).close();
   }
 };
 

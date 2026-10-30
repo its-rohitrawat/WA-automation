@@ -14,6 +14,7 @@ import { RateLimiter } from '../../src/web/guard.ts';
 import { registerAssistantApi } from '../../src/web/routes/assistant.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
 import { bootDashboard, OWNER } from '../helpers/web.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 // The assistant's routes on the real dashboard server, with a fake Claude (no real API call): the owner's guard, CSRF,
 // the question limit, the streamed answer, and Confirm running a card once.
@@ -69,7 +70,7 @@ async function boot(o: { askCapacity?: number } = {}) {
 
 /** The answer's events, one JSON object per line. */
 const lines = (raw: unknown) => String(raw).trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
-const auditRows = (db: Db) => db.raw.prepare('SELECT actor, event, detail, request_id AS requestId FROM audit_log ORDER BY id').all() as Record<string, string | null>[];
+const auditRows = (db: Db) => rawOf(db).prepare('SELECT actor, event, detail, request_id AS requestId FROM audit_log ORDER BY id').all() as Record<string, string | null>[];
 
 describe('assistant API', () => {
   it('needs the signed-in owner, and CSRF for anything that asks or changes', async () => {

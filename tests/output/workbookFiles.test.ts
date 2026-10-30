@@ -9,6 +9,7 @@ import { applyRevoke, insertMessage } from '../../src/store/messages.ts';
 import { setRole, upsertPerson } from '../../src/store/people.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
 import { RAHUL_PN, SHARMA_PN } from '../helpers/wa.ts';
+import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const FOUNDER = '919800000099@s.whatsapp.net';
 
@@ -62,11 +63,11 @@ function rowWhere(ws: ExcelJS.Worksheet, pred: (r: ExcelJS.Row) => boolean): Exc
 }
 
 const mediaIdOf = (db: Db, waId: string): number =>
-  (db.raw.prepare('SELECT m.id FROM media m JOIN messages msg ON msg.id = m.message_id WHERE msg.wa_id = ?').get(waId) as { id: number }).id;
+  (rawOf(db).prepare('SELECT m.id FROM media m JOIN messages msg ON msg.id = m.message_id WHERE msg.wa_id = ?').get(waId) as { id: number }).id;
 
 /** Gives a file that await seed() already finished another text. finishMedia finishes a file only once, so this writes the row directly. */
 const replaceText = (db: Db, waId: string, text: string): void => {
-  db.raw.prepare('UPDATE media SET text = ? WHERE id = ?').run(text, mediaIdOf(db, waId));
+  rawOf(db).prepare('UPDATE media SET text = ? WHERE id = ?').run(text, mediaIdOf(db, waId));
 };
 
 const sharmaFiles = async (db: Db) => (await loadTrackerView(db, now, healthy)).clients.find((c) => c.client.code === 'SHA')!.files;
