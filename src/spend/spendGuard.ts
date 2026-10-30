@@ -38,9 +38,10 @@ export interface SpendGuardOptions {
   capUsd: number;
   onError?: (err: unknown) => void;
   /**
-   * A customer runtime's place under the platform-wide ceiling (S4.3). With it, every check (canSpend, reserve,
-   * isPaused, fitsIgnoringHolds) must also pass the ceiling; without it (the founder until S4.4, and tests), nothing
-   * changes. SpendGuard.open joins after loading today's totals, so a restarted runtime is never counted at zero.
+   * This guard's place under the platform-wide ceiling (S4.3), for spend billed to the founder only (the founder's
+   * runtime). With it, every check (canSpend, reserve, isPaused, fitsIgnoringHolds) must also pass the ceiling; without
+   * it (a customer on their own key, the founder until S4.4, and tests), only the own cap counts. SpendGuard.open joins
+   * after loading today's totals, so a restarted runtime is never counted at zero.
    */
   platform?: { global: GlobalSpend; tenantId: string };
 }

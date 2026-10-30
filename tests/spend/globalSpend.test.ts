@@ -4,14 +4,15 @@ import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { manualClock, type Clock } from '../../src/util/clock.ts';
 import { seededDb } from '../helpers/db.ts';
 
-// Two customers on separate databases (each customer's spend rows are its own), one platform ceiling (S4.3, D3).
+// Two members on separate databases (each tenant's spend rows are its own) under one platform ceiling (S4.3, D3). The
+// mechanics take any number of members; in the wiring only founder-billed spend joins (owner, 30 Oct).
 const NOW = '2026-10-19T10:00:00.000Z'; // 15:30 IST on the 19th
 
 async function guard(o: { clock: Clock; capUsd: number; global: GlobalSpend; tenantId: string }) {
   return SpendGuard.open({ db: await seededDb(), clock: o.clock, capUsd: o.capUsd, platform: { global: o.global, tenantId: o.tenantId } });
 }
 
-describe('GlobalSpend: the platform ceiling over every customer (S4.3)', () => {
+describe('GlobalSpend: the platform ceiling over its members (S4.3)', () => {
   it('a reservation must fit both the customer cap and the platform ceiling', async () => {
     const clock = manualClock(NOW);
     const global = new GlobalSpend({ capUsd: 1 });

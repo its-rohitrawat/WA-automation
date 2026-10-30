@@ -1,9 +1,10 @@
-// The platform-wide daily ceiling (SaaS S4.3, owner decision D3: US$100 a day by default). Each runtime's SpendGuard,
-// the founder's included, joins it under its customer's id, and every reservation must then fit the customer's own cap
-// and this ceiling. It stops a runaway bug across all runtimes, even though customers pay their own Claude bills.
+// The platform-wide daily ceiling (SaaS S4.3, owner decision D3: US$100 a day by default) over spend billed to the
+// founder (owner, 30 Oct): today that is the founder's runtime. A guard that joins it under its tenant id must then fit
+// both its own cap and this ceiling. Customers pay their own Claude bills on their own key, so their guards never join:
+// each is limited by its own daily cap only, and one busy customer can never pause anyone else.
 //
 // Nothing is kept here but the members: the total is the sum of their in-memory totals (each loaded from that
-// customer's own spend rows by SpendGuard.open, and reset at the IST day change by the guard itself), plus their live
+// tenant's own spend rows by SpendGuard.open, and reset at the IST day change by the guard itself), plus their live
 // reservations. So it counts what was booked (a settled call's actual cost, not its estimate), resets with the day,
 // and is never written to the database. A runtime that restarts joins again under the same id and replaces its old
 // guard, so its spend is never counted twice; a stopped runtime's guard stays counted until then (the safe side).
