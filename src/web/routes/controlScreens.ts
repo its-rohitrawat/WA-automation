@@ -75,8 +75,8 @@ export function registerControlApi(router: Router, d: ControlApiDeps): void {
     if (key === 'dashboardSend' && value === true && confirm !== true) {
       throw new ControlError(422, "Confirm that the dashboard may send from the founder's WhatsApp", 'confirm');
     }
-    d.settings.set(key, value, s.email, auditFor(s.email, ctx.requestId));
-    sendJson(ctx.res, 200, d.settings.view());
+    await d.settings.set(key, value, s.email, auditFor(s.email, ctx.requestId));
+    sendJson(ctx.res, 200, await d.settings.view());
   }));
 
   // Priority keywords and the sentiment switch: the owner's own words and a boolean, checked by PrioritySettings.set.
@@ -87,7 +87,7 @@ export function registerControlApi(router: Router, d: ControlApiDeps): void {
     if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new ControlError(422, 'Send the setting as a JSON object', 'body');
     const { key, value } = body as Record<string, unknown>;
     if (typeof key !== 'string') throw new ControlError(422, 'key must be the name of a setting', 'key');
-    sendJson(ctx.res, 200, d.priority.set(key, value, s.email, auditFor(s.email, ctx.requestId)));
+    sendJson(ctx.res, 200, await d.priority.set(key, value, s.email, auditFor(s.email, ctx.requestId)));
   }));
 
   read('/dashboard/api/session', async ({ req }) => {

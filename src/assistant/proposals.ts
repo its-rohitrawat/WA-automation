@@ -102,7 +102,7 @@ export async function draftProposal(tool: 'propose_task_change' | 'propose_new_t
     : i.key === 'reportTime' ? typeof i.value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(i.value) : true;
   if (!valid) throw new ControlError(422, `That is not a value ${i.key} can take`, 'value');
   const words: Record<string, string> = { reportEnabled: 'Morning briefing', reportDays: 'Briefing days', reportTime: 'Briefing time' };
-  const now = (d.settings.view() as unknown as Record<string, unknown>)[i.key === 'reportTime' ? 'sendAt' : i.key];
+  const now = ((await d.settings.view()) as unknown as Record<string, unknown>)[i.key === 'reportTime' ? 'sendAt' : i.key];
   const word = (v: unknown) => (v === true ? 'on' : v === false ? 'off' : String(v ?? 'not set'));
   if (now === i.value) throw new ControlError(409, `${words[i.key] ?? i.key} is already ${word(i.value)}`);
   return {
@@ -195,7 +195,7 @@ export async function runProposal(action: ProposalAction, d: RunDeps): Promise<{
     case 'setting':
       // Checked again here, not only when the card was drafted: an owner-only setting is never changed through a card.
       if (!ASSISTANT_SETTINGS.includes(action.key)) throw new ControlError(422, 'Only you can change this setting, on its own screen.', 'key');
-      d.settings.set(action.key, action.value, d.actor, audit);
+      await d.settings.set(action.key, action.value, d.actor, audit);
       return { message: 'Setting saved.' };
   }
 }

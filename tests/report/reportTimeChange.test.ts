@@ -56,19 +56,19 @@ async function setup(env: Record<string, string> = {}) {
 describe('the briefing send time set from the dashboard', () => {
   it('a time still ahead applies today without a restart, and the next report is shown', async () => {
     const t = await setup();
-    t.setTime(THU, '05:00', '07:30');
-    expect(t.store().view()).toMatchObject({ sendAt: '07:30', nextReport: 'today 07:30', source: { reportTime: 'dashboard' } });
+    await t.setTime(THU, '05:00', '07:30');
+    expect(await t.store().view()).toMatchObject({ sendAt: '07:30', nextReport: 'today 07:30', source: { reportTime: 'dashboard' } });
     await t.tick(THU, '06:00');
     await t.tick(THU, '07:29');
     expect(t.sender.calls).toHaveLength(0);
     await t.tick(THU, '07:30');
     expect(t.sender.calls).toHaveLength(1);
-    expect(t.store().view().nextReport).toBe('tomorrow 07:30');
+    expect((await t.store().view()).nextReport).toBe('tomorrow 07:30');
     await t.tick(FRI, '07:29');
     expect(t.sender.calls).toHaveLength(1);
     await t.tick(FRI, '07:30');
     expect(t.sender.calls).toHaveLength(2);
-    expect(t.store().view().nextReport).toBe('Mon 26 Oct, 07:30'); // weekdays: Saturday and Sunday are skipped
+    expect((await t.store().view()).nextReport).toBe('Mon 26 Oct, 07:30'); // weekdays: Saturday and Sunday are skipped
     expect(t.audits).toEqual([{ actor: OWNER, event: 'settings.reportTime', kind: 'config', detail: 'Morning briefing time set to 07:30 IST' }]);
   });
 
@@ -76,8 +76,8 @@ describe('the briefing send time set from the dashboard', () => {
     const t = await setup();
     await t.tick(THU, '06:00');
     expect(t.sender.calls).toHaveLength(1);
-    t.setTime(THU, '09:00', '10:00');
-    expect(t.store().view().nextReport).toBe('tomorrow 10:00');
+    await t.setTime(THU, '09:00', '10:00');
+    expect((await t.store().view()).nextReport).toBe('tomorrow 10:00');
     for (const hm of ['10:00', '10:30', '11:59']) await t.tick(THU, hm);
     expect(t.sender.calls).toHaveLength(1);
     await t.tick(FRI, '10:00');
@@ -86,15 +86,15 @@ describe('the briefing send time set from the dashboard', () => {
 
   it('a time that has already passed starts tomorrow, and today keeps its time so it is not missed', async () => {
     const t = await setup({ REPORT_TIME: '09:00' });
-    t.setTime(THU, '08:00', '07:30'); // 07:30 has passed; today's 09:00 has not
+    await t.setTime(THU, '08:00', '07:30'); // 07:30 has passed; today's 09:00 has not
     expect(t.audits.at(-1)?.detail).toBe('Morning briefing time set to 07:30 IST, from tomorrow');
     expect(t.store().reportSettings().time).toBe('09:00');
-    expect(t.store().view()).toMatchObject({ sendAt: '07:30', nextReport: 'today 09:00' });
+    expect(await t.store().view()).toMatchObject({ sendAt: '07:30', nextReport: 'today 09:00' });
     await t.tick(THU, '08:30');
     expect(t.sender.calls).toHaveLength(0); // not sent at once
     await t.tick(THU, '09:00');
     expect(t.sender.calls).toHaveLength(1);
-    expect(t.store().view().nextReport).toBe('tomorrow 07:30');
+    expect((await t.store().view()).nextReport).toBe('tomorrow 07:30');
     await t.tick(FRI, '07:29');
     expect(t.sender.calls).toHaveLength(1);
     await t.tick(FRI, '07:30');
@@ -105,8 +105,8 @@ describe('the briefing send time set from the dashboard', () => {
   it('an earlier time after today was sent sends nothing more today, and goes out tomorrow at the new time', async () => {
     const t = await setup();
     await t.tick(THU, '06:00');
-    t.setTime(THU, '07:00', '05:00');
-    expect(t.store().view().nextReport).toBe('tomorrow 05:00');
+    await t.setTime(THU, '07:00', '05:00');
+    expect((await t.store().view()).nextReport).toBe('tomorrow 05:00');
     for (const hm of ['07:00', '08:00', '11:00']) await t.tick(THU, hm);
     expect(t.sender.calls).toHaveLength(1);
     await t.tick(FRI, '05:00');
@@ -115,10 +115,10 @@ describe('the briefing send time set from the dashboard', () => {
 
   it("today's kept time outlasts a restart, and a time changed back ahead applies today again", async () => {
     const t = await setup({ REPORT_TIME: '09:00' });
-    t.setTime(THU, '08:00', '07:00');
+    await t.setTime(THU, '08:00', '07:00');
     t.restart();
     expect(t.store().reportSettings().time).toBe('09:00');
-    t.setTime(THU, '08:10', '08:45'); // ahead again: today goes at 08:45, and the kept time is gone
+    await t.setTime(THU, '08:10', '08:45'); // ahead again: today goes at 08:45, and the kept time is gone
     expect(t.store().reportSettings().time).toBe('08:45');
     expect(t.db.raw.prepare("SELECT k FROM settings WHERE k = 'reportTimeToday'").all()).toEqual([]);
     await t.tick(THU, '08:45');
@@ -131,7 +131,7 @@ describe('the briefing send time set from the dashboard', () => {
     for (const v of ['7:30', '24:00', '07:60', '07:30:00', '', 730, null]) {
       let e: unknown;
       try {
-        t.setTime(THU, '05:00', v);
+        await t.setTime(THU, '05:00', v);
       } catch (err) {
         e = err;
       }
@@ -145,18 +145,18 @@ describe('the briefing send time set from the dashboard', () => {
 
   it('takes any time of day: a time from the deadline on catches up for 3 hours, never past 23:59', async () => {
     const t = await setup();
-    t.setTime(THU, '05:00', '13:15');
-    expect(t.store().view()).toMatchObject({ sendAt: '13:15', deadline: '16:15', source: { reportTime: 'dashboard' } });
+    await t.setTime(THU, '05:00', '13:15');
+    expect(await t.store().view()).toMatchObject({ sendAt: '13:15', deadline: '16:15', source: { reportTime: 'dashboard' } });
     expect(t.store().reportSettings()).toMatchObject({ time: '13:15', deadline: '16:15' });
-    t.setTime(THU, '05:00', '22:30');
+    await t.setTime(THU, '05:00', '22:30');
     expect(t.store().reportSettings()).toMatchObject({ time: '22:30', deadline: '23:59' });
-    t.setTime(THU, '05:00', '07:30');
+    await t.setTime(THU, '05:00', '07:30');
     expect(t.store().reportSettings()).toMatchObject({ time: '07:30', deadline: '12:00' });
   });
 
   it('sends an evening report once, at the evening time', async () => {
     const t = await setup();
-    t.setTime(THU, '05:00', '19:00');
+    await t.setTime(THU, '05:00', '19:00');
     await t.tick(THU, '18:59');
     expect(t.sender.calls).toHaveLength(0);
     await t.tick(THU, '19:00');

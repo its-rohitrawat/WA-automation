@@ -76,7 +76,7 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
   const settings = new SettingsStore({ db, env: parseEnv({ REPORT_ENABLED: 'true', REPORT_RECIPIENT: '919800000000' }), clock, spareLinked: () => false });
   // Sentiment on, so every screen shows the moods; the switch on Settings turns it off again.
   const priority = new PrioritySettings({ db, clock });
-  priority.set('sentimentEnabled', true, OWNER, () => {});
+  void priority.set('sentimentEnabled', true, OWNER, () => {}); // not awaited (this setup is synchronous): the engine runs statements in order
 
   const session = (): OwnerSession => {
     if (!o.signedIn()) throw new HttpError(401, 'unauthenticated', 'Sign in first.');

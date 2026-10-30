@@ -1,8 +1,8 @@
 import { ControlError, type Audit } from '../control/errors.ts';
 import { nextReport } from '../report/scheduler.ts';
 import type { ReportDays, ReportSettings } from '../report/types.ts';
-import { txSync, type Db } from '../store/db.ts';
-import { reportForSync } from '../store/reports.ts';
+import type { Db } from '../store/db.ts';
+import { reportFor } from '../store/reports.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { istDate, istTime } from '../util/time.ts';
@@ -88,6 +88,18 @@ function typedNumber(v: unknown): string | undefined {
   return INDIAN_MOBILE.test(digits) ? digits : undefined;
 }
 
+const ROWS = 'SELECT k, v FROM settings';
+const PUT =
+  'INSERT INTO settings (k, v, updated_at, updated_by) VALUES (?, ?, ?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at, updated_by = excluded.updated_by';
+
+export interface SettingsStoreOptions {
+  db: Db;
+  env: Pick<Env, 'REPORT_ENABLED' | 'REPORT_DAYS' | 'REPORT_RECIPIENT' | 'REPORT_TIME' | 'REPORT_DEADLINE'>;
+  clock: Clock;
+  spareLinked?: () => boolean;
+  log?: Logger;
+}
+
 export class SettingsStore {
   readonly #db: Db;
   readonly #env: Pick<Env, 'REPORT_ENABLED' | 'REPORT_DAYS' | 'REPORT_RECIPIENT' | 'REPORT_TIME' | 'REPORT_DEADLINE'>;
@@ -95,32 +107,48 @@ export class SettingsStore {
   readonly #spareLinked: () => boolean;
   readonly #log: Logger | undefined;
   readonly #listeners = new Set<Listener>();
+  /** The settings rows (k to v), kept in memory: only set() writes them, and it updates this after its commit. */
+  readonly #rows = new Map<string, string>();
+  /** Saves run one at a time, so each one checks against the value the one before it saved. */
+  #saving: Promise<unknown> = Promise.resolve();
 
   /**
    * spareLinked: whether the spare phone is linked (the briefing's sender has a session). Not given: never, so the
-   * briefing cannot be switched on.
+   * briefing cannot be switched on. Loads the rows synchronously (S1 only, on the raw connection); `SettingsStore.open`
+   * is the async way.
    */
-  constructor(o: {
-    db: Db;
-    env: Pick<Env, 'REPORT_ENABLED' | 'REPORT_DAYS' | 'REPORT_RECIPIENT' | 'REPORT_TIME' | 'REPORT_DEADLINE'>;
-    clock: Clock;
-    spareLinked?: () => boolean;
-    log?: Logger;
-  }) {
+  constructor(o: SettingsStoreOptions) {
     this.#db = o.db;
     this.#env = o.env;
     this.#clock = o.clock;
     this.#spareLinked = o.spareLinked ?? (() => false);
     this.#log = o.log;
+    this.#fill(this.#db.raw.prepare(ROWS).all() as { k: string; v: string }[]);
+  }
+
+  static async open(o: SettingsStoreOptions): Promise<SettingsStore> {
+    const store = new SettingsStore(o);
+    await store.load();
+    return store;
+  }
+
+  /** Reads the rows again (only a test that writes them directly needs this). */
+  async load(): Promise<void> {
+    this.#fill(await this.#db.all<{ k: string; v: string }>(ROWS));
+  }
+
+  #fill(rows: { k: string; v: string }[]): void {
+    this.#rows.clear();
+    for (const r of rows) this.#rows.set(r.k, r.v);
   }
 
   /** The value stored from the dashboard, when there is a valid one. */
   #stored(key: SettingKey): { value: boolean | ReportDays | string } | undefined {
-    const r = this.#db.raw.prepare('SELECT v FROM settings WHERE k = ?').get(key) as { v: string } | undefined;
-    if (!r) return undefined;
+    const v = this.#rows.get(key);
+    if (v === undefined) return undefined;
     let parsed: unknown;
     try {
-      parsed = JSON.parse(r.v);
+      parsed = JSON.parse(v);
     } catch {
       return undefined;
     }
@@ -151,10 +179,10 @@ export class SettingsStore {
 
   /** Today's send time when the time was changed after today's had passed (the old one, kept for today), else undefined. */
   #todayTime(date: string): string | undefined {
-    const r = this.#db.raw.prepare('SELECT v FROM settings WHERE k = ?').get(TODAY_KEY) as { v: string } | undefined;
-    if (!r) return undefined;
+    const stored = this.#rows.get(TODAY_KEY);
+    if (stored === undefined) return undefined;
     try {
-      const v = JSON.parse(r.v) as unknown;
+      const v = JSON.parse(stored) as unknown;
       if (typeof v !== 'object' || v === null) return undefined;
       const { date: d, time } = v as Record<string, unknown>;
       return d === date && typeof time === 'string' && HHMM.test(time) ? time : undefined;
@@ -164,13 +192,13 @@ export class SettingsStore {
   }
 
   /** The settings as the browser may see them. */
-  view(): SettingsView {
+  async view(): Promise<SettingsView> {
     const s = this.get();
     const now = this.#clock.now();
     return {
       reportEnabled: s.reportEnabled, reportDays: s.reportDays, recipientMasked: s.reportRecipient ? maskNumber(s.reportRecipient) : null,
       sendAt: s.reportTime, deadline: deadlineFor(s.reportTime, this.#env.REPORT_DEADLINE),
-      nextReport: nextReport(reportForSync(this.#db, istDate(now)), now, this.reportSettings(), s.reportTime), dashboardSend: s.dashboardSend,
+      nextReport: nextReport(await reportFor(this.#db, istDate(now)), now, this.reportSettings(), s.reportTime), dashboardSend: s.dashboardSend,
       source: s.source,
     };
   }
@@ -193,7 +221,13 @@ export class SettingsStore {
    * already in force changes nothing. Throws ControlError: 422 an unknown key or a bad value, 409 switching on without a
    * number or before the spare phone is linked.
    */
-  set(rawKey: string, raw: unknown, actor: string, audit: Audit): RuntimeSettings {
+  set(rawKey: string, raw: unknown, actor: string, audit: Audit): Promise<RuntimeSettings> {
+    const run = this.#saving.then(() => this.#set(rawKey, raw, actor, audit));
+    this.#saving = run.catch(() => undefined);
+    return run;
+  }
+
+  async #set(rawKey: string, raw: unknown, actor: string, audit: Audit): Promise<RuntimeSettings> {
     if (!(SETTING_KEYS as readonly string[]).includes(rawKey)) throw new ControlError(422, 'That setting cannot be changed here', 'key');
     const key = rawKey as SettingKey;
     const value = key === 'reportRecipient' ? typedNumber(raw) : check(key, raw);
@@ -223,15 +257,18 @@ export class SettingsStore {
       : key === 'reportDays' ? `Morning briefing days set to ${DAYS_WORDS[value as ReportDays]}`
       : key === 'reportTime' ? `Morning briefing time set to ${value as string} IST${keepToday ? ', from tomorrow' : ''}`
       : `Morning briefing number changed to ${maskNumber(value as string)}`;
-    txSync(this.#db, () => {
-      const put = this.#db.raw.prepare(
-        'INSERT INTO settings (k, v, updated_at, updated_by) VALUES (?, ?, ?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at, updated_by = excluded.updated_by',
-      );
-      put.run(key, JSON.stringify(value), now.toISOString(), actor);
-      if (keepToday) put.run(TODAY_KEY, JSON.stringify(keepToday), now.toISOString(), actor);
-      else if (key === 'reportTime') this.#db.raw.prepare('DELETE FROM settings WHERE k = ?').run(TODAY_KEY);
+    const at = now.toISOString();
+    await this.#db.tx(async (q) => {
+      await q.run(PUT, [key, JSON.stringify(value), at, actor]);
+      if (keepToday) await q.run(PUT, [TODAY_KEY, JSON.stringify(keepToday), at, actor]);
+      else if (key === 'reportTime') await q.run('DELETE FROM settings WHERE k = ?', [TODAY_KEY]);
+      // Synchronous (src/control/errors.ts): it writes on the same connection, inside this transaction.
       audit({ actor, event: `settings.${key}`, kind: 'config', detail });
     });
+    // Committed: memory follows.
+    this.#rows.set(key, JSON.stringify(value));
+    if (keepToday) this.#rows.set(TODAY_KEY, JSON.stringify(keepToday));
+    else if (key === 'reportTime') this.#rows.delete(TODAY_KEY);
     const next = this.get();
     for (const fn of this.#listeners) {
       try {
