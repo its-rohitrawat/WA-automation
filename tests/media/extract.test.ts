@@ -39,6 +39,9 @@ const NOTE_PATH = '/data/media/acme/2026-10/wa1-7.ogg';
 /** A Buffer that owns its whole memory, as files read from disk do, so a transfer really moves it. */
 const owned = (b: Uint8Array): Buffer => Buffer.from(new Uint8Array(b).buffer);
 
+/** Each test database's spend guard, so a spend read first waits for the guard's bookings written behind the call. */
+const guards = new WeakMap<Db, SpendGuard>();
+
 async function setup(
   o: {
     parse?: ParseResult; capUsd?: number; ai?: FakeMediaAi; realParse?: boolean; realImage?: boolean; voice?: VoiceTranscriber | null; maxVoiceSeconds?: number;
@@ -47,6 +50,7 @@ async function setup(
 ) {
   const db = await seededDb();
   const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: o.capUsd ?? 15 });
+  guards.set(db, spend);
   const ai = o.ai ?? new FakeMediaAi();
   // Behaves like parseFile: with transfer, bytes that own their memory are moved away and the caller's view is
   // emptied. Bytes that share memory (a pooled Buffer) are copied instead, so they stay intact.
@@ -68,7 +72,12 @@ async function setup(
   const reserve = vi.spyOn(spend, 'reserve');
   return { db, spend, ai, parse, prepareImage, extract, input, reserve };
 }
-const spendRows = (db: Db) => db.all<{ usd: number; detail: string }>('SELECT usd, detail FROM spend');
+// A booking made without a transaction handle is written behind the call: wait for it (on Postgres's pool a read can
+// otherwise run first).
+const spendRows = async (db: Db) => {
+  await guards.get(db)?.flushed();
+  return db.all<{ usd: number; detail: string }>('SELECT usd, detail FROM spend');
+};
 
 describe('createExtractor', () => {
   it('describes an image through Claude and books the actual cost', async () => {
@@ -508,7 +517,10 @@ describe('voice and audio', () => {
   /** 90,000 bytes: a size bound of 60 seconds. */
   const note = (i: Partial<ExtractInput> = {}): Partial<ExtractInput> => ({ kind: 'voice', mimeType: OGG, bytes: Buffer.alloc(90_000), ...i });
   const voiceSetup = async (v: VoiceTranscriber | null = new FakeVoiceTranscriber(), o: { capUsd?: number; maxVoiceSeconds?: number; signal?: AbortSignal } = {}) => await setup({ voice: v, ...o });
-  const sttRows = (db: Db) => db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend');
+  const sttRows = async (db: Db) => {
+    await guards.get(db)?.flushed();
+    return db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend');
+  };
   const caught = async (run: Promise<unknown>): Promise<unknown> => run.then(() => null, (e: unknown) => e);
   /** A folder of its own for the real transcriber's conversions, removed after each test. */
   const dirs: string[] = [];

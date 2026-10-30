@@ -13,7 +13,12 @@ import { seededDb } from '../helpers/db.ts';
 async function setup(capUsd = 1) {
   const db = await seededDb();
   const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd });
-  const rows = () => db.all<{ usd: number; detail: string }>('SELECT usd, detail FROM spend ORDER BY id');
+  // A booking made without a transaction handle is written behind the call: wait for it (on Postgres's pool a read can
+  // otherwise run first).
+  const rows = async () => {
+    await spend.flushed();
+    return db.all<{ usd: number; detail: string }>('SELECT usd, detail FROM spend ORDER BY id');
+  };
   return { spend, rows };
 }
 const ok = (costUsd: number, fallbackUsed = false) => async () => ({ costUsd, fallbackUsed, text: 'x' });
