@@ -11,6 +11,7 @@
     "cli": "node src/cli.ts",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:pg": "node scripts/test-pg.ts",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.web.json",
     "golden": "node scripts/golden.ts",
     "stt:local-check": "node scripts/stt-local-check.ts",
