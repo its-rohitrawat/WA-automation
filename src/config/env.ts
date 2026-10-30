@@ -103,6 +103,11 @@ const EnvSchema = z.object({
   DASHBOARD_ENABLED: Flag.default(false),
   /** The dashboard's AI assistant (owner request, 29 Oct 2026): on with the dashboard unless set to false. Its answers are paid calls under DAILY_SPEND_CAP_USD. */
   DASHBOARD_ASSISTANT: Flag.default(true),
+  /**
+   * Invites sent from the founder's Gmail (SaaS S5H.3). Off: invites go by Copy link. On, the main Google connect also
+   * asks for gmail.send, which Google allows only for the app's test users until it reviews the app.
+   */
+  INVITES_GMAIL: Flag.default(false),
   DASHBOARD_PORT: z.coerce.number().int().min(1024).max(65535).default(8787),
   /**
    * The address owners open: https, or http on this machine (localhost or 127.0.0.1 with a port). Kept as its origin
