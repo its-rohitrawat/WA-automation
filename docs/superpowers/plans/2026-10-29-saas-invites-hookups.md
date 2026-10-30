@@ -402,12 +402,12 @@ poke: () => supervisor.poke(),
   runtime would pass `maxActive` or the memory ceiling, the slot is left `refused:limit` or `refused:memory`, as a
   refused start is.
 
-In `src/runtime/platformSupervisor.ts`, once Phase B's full runtime exists:
+Phase B's full runtime has landed, so in `src/runtime/platformSupervisor.ts` (or `src/main.ts`, where 15 builds it):
 
 ```ts
 const supervisor = new Supervisor({
   // …as now, plus:
-  wantsFull: async (tenantId, status) => status === 'active' || (await keyIsSet(tenantId)), // the customer's key is in
+  wantsFull: async (tenantId, status) => status === 'active' && (await keyIsSet(tenantId)), // active AND the customer's key is in
   factory: { start: async (t) => (t.founder ? founder : t.setupOnly ? startShell(t) : startFullRuntime(t)) },
 });
 // …in the hooks:
@@ -417,8 +417,9 @@ restart: (tenantId) => void supervisor.restart(tenantId),
 - `keyIsSet` reads the key's state (configured or not) from what `AiKeys` stores; it never decrypts the key.
 - `aiKeys` in the hooks must then come from whichever runtime is running for the customer (shell or full), not only
   from `shells`, or the key screen says "not ready" while the full runtime runs.
-- Until Phase B, leave `wantsFull` out: a customer with a key would otherwise count toward `maxActive` while still
-  running the setup shell. `restart` can be wired now; with the default rule it rebuilds the same shell.
+- Phase B has landed: wire `wantsFull` and `restart` now. An active customer without a key, and any customer still
+  onboarding, gets the setup shell and does not count toward `maxActive`; saving or removing the key restarts them as
+  the right kind.
 
 ## 11. `startSession` says whether it started a session (lane A, with S5H.6 and S4.8)
 
