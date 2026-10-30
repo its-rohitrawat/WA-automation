@@ -89,7 +89,7 @@ export function defaultDeps(env: Env): CliDeps {
   };
 }
 
-const countMessages = (db: Db) => (db.raw.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n;
+const countMessages = async (db: Db) => (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM messages'))!.n;
 
 const ADVICE_LOGGED_OUT = 'WhatsApp refused this session (logged out). Follow docs/SETUP.md → "Status logged_out" before running link --reset.';
 const ADVICE_FORBIDDEN = "WhatsApp refused this device (403). Check the founder's phone for a WhatsApp warning; do not reset the link.";
@@ -226,7 +226,7 @@ export async function linkCommand(opts: { reset: boolean }, deps: CliDeps): Prom
       return;
     }
     if (configs.length === 0) out('Note: the allow-list is empty, so nothing will be stored. Run list-groups next.');
-    const before = countMessages(db);
+    const before = await countMessages(db);
     await connectAndIngest({
       deps,
       db,
@@ -243,11 +243,11 @@ export async function linkCommand(opts: { reset: boolean }, deps: CliDeps): Prom
         qrcode.generate(qr, { small: true }, (art: string) => out(art));
       },
     });
-    out(`Linked. ${countMessages(db) - before} messages saved from the allowed groups.`);
+    out(`Linked. ${(await countMessages(db)) - before} messages saved from the allowed groups.`);
     out('Next: npm run cli -- list-groups (if you still need group ids), then start the service: net start wa-agent');
   } finally {
-    sessionDb?.raw.close();
-    db?.raw.close();
+    await sessionDb?.close();
+    await db?.close();
     await lock.release();
   }
 }
@@ -285,8 +285,8 @@ export async function listGroupsCommand(deps: CliDeps): Promise<void> {
       },
     });
   } finally {
-    sessionDb?.raw.close();
-    db?.raw.close();
+    await sessionDb?.close();
+    await db?.close();
     await lock.release();
   }
 }
@@ -307,7 +307,7 @@ export async function statusCommand(deps: CliDeps): Promise<void> {
       }),
     );
   } finally {
-    db.raw.close();
+    await db.close();
   }
 }
 
@@ -341,7 +341,7 @@ export async function googleAuthCommand(deps: CliDeps): Promise<void> {
     });
     out(`${env.MEETINGS_ENABLED ? 'Google Drive, Meet and Calendar' : 'Google Drive'} connected. If the WA Agent service is running, restart it so it uses the new sign-in: net stop wa-agent, then net start wa-agent`);
   } finally {
-    db.raw.close();
+    await db.close();
   }
 }
 
@@ -451,7 +451,7 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
     }
     out('Spare number linked. Next: set REPORT_RECIPIENT and REPORT_ENABLED=true in .env, then start the service (net start wa-agent).');
   } finally {
-    senderDb?.raw.close();
+    await senderDb?.close();
     await lock.release();
   }
 }
@@ -494,7 +494,7 @@ export async function reportStatusCommand(deps: CliDeps): Promise<void> {
       out(snap.report.warning);
     }
   } finally {
-    db.raw.close();
+    await db.close();
   }
 }
 
@@ -595,7 +595,7 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
     });
     out(answer ?? 'Requested. The service sends it within about a minute. Check with: npm run cli -- report status');
   } finally {
-    db.raw.close();
+    await db.close();
   }
 }
 
@@ -647,7 +647,7 @@ export async function googleAccountCommand(opts: { account: string; remove: bool
     out(`Google account ${label} connected for meetings (read only). Connected accounts: main, ${(await meetingAccounts(db)).join(', ')}.`);
     out(RESTART);
   } finally {
-    db.raw.close();
+    await db.close();
   }
 }
 

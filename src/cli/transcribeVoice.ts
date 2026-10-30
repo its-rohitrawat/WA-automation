@@ -195,6 +195,6 @@ export async function transcribeVoiceCommand(opts: { client?: string; yes: boole
     out(listing.queued(queued, cap));
     if (queued < send.length) out(`${send.length - queued} changed since they were counted and were left alone.`);
   } finally {
-    if (deps.db === undefined) db.raw.close();
+    if (deps.db === undefined) await db.close();
   }
 }
