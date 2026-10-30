@@ -4,7 +4,7 @@ import { ClaudeAssistantClient } from '../brain/assistantClient.ts';
 import { ClaudeClient, keepConnectTimeoutCode } from '../brain/claudeClient.ts';
 import { ClaudeMediaClient } from '../brain/mediaClient.ts';
 import { ClaudeMeetingClient } from '../brain/meetingClient.ts';
-import { requireKey } from '../config/env.ts';
+import { parseEnv, requireKey } from '../config/env.ts';
 import type { Env } from '../config/env.ts';
 import { watchGroupsFile } from '../config/groups.ts';
 import type { ClientConfig } from '../config/groups.ts';
@@ -59,11 +59,20 @@ import { SESSION_COOKIE, sessionCookie, type SessionStore } from '../web/session
 import { makeGroupKey } from '../web/routes/groups.ts';
 import type { PlatformRouteDeps } from '../web/routes/platform.ts';
 import type { DashboardMount } from '../web/start.ts';
+import type { RuntimeFacts } from './supervisor.ts';
 
 // One customer's runtime (SaaS S4.4): everything main.ts used to build for the founder between opening the databases
 // and starting the web server, behind one function, with no behaviour change for the founder. main.ts keeps what the
 // process has once (env, the master key, the instance lock, the stores, the web server, the signals and the shutdown
-// order); this file builds the rest for one customer. In S4 the founder is the only customer it is built for.
+// order); this file builds the rest for one customer. For a customer (Phase B) it is built from that customer's profile
+// (src/runtime/customerProfile.ts), its own Db and data key: its groups are its own clients rows, its gateway opens only
+// a session already linked, and it has no report, spare phone, heartbeat or dashboard routes yet (scope, Phase B 4).
+
+/** A customer's settings store falls back to these (neutral, never the founder's), given to the store only. */
+const CUSTOMER_REPORT_DEFAULTS = (() => {
+  const e = parseEnv({});
+  return { REPORT_ENABLED: false, REPORT_DAYS: e.REPORT_DAYS, REPORT_RECIPIENT: undefined, REPORT_TIME: e.REPORT_TIME, REPORT_DEADLINE: e.REPORT_DEADLINE };
+})();
 
 /** Expected startup refusal. The message is safe to print. */
 export class StartupExit extends Error {}
@@ -171,6 +180,8 @@ export interface CustomerRuntime {
   readonly agentRoutes: { audit: AuditLog; mount: (m: DashboardMount) => void } | undefined;
   /** Whether this runtime's dashboard has the platform routes and the sign-up (the founder's, with PLATFORM_ENABLED). */
   readonly platform: boolean;
+  /** What the Getting started checklist reads (S4.9): from what this runtime holds in memory. */
+  facts(): RuntimeFacts;
   /** Starts the app, the heartbeat and the uptime log. Synchronous: nothing is awaited after it before the stop handlers. */
   start(): void;
   /** The synchronous first step of a stop: the heartbeat and the groups file watcher stop at once. */
@@ -187,7 +198,10 @@ export interface CustomerRuntime {
  * Builds one customer's runtime (S4.4). On a failure while building, the session databases it opened are closed and the
  * error is rethrown; the tracker Db is the caller's.
  */
-export async function buildCustomerRuntime(t: { id: string; founder: boolean }, d: RuntimeDeps): Promise<CustomerRuntime> {
+export async function buildCustomerRuntime(
+  t: { id: string; founder: boolean; /** A customer's: where its gateway reports a crash (the Supervisor). */ crashed?: (e: unknown) => void },
+  d: RuntimeDeps,
+): Promise<CustomerRuntime> {
   const { log, db, key, configs } = d;
   const env = sttEnvFor(d.env, t.founder);
   let sessionDb: Db | undefined;
@@ -213,13 +227,15 @@ export async function buildCustomerRuntime(t: { id: string; founder: boolean }, 
     const sessions = sessionHomeOf(env, db);
     // On Postgres the founder's number is not read from a file at each check: FounderNumberWatch reads it at start and
     // again after every committed write to the founder's rows (a relink from the dashboard).
-    const founderWatch = sessions.engine === 'postgres'
+    const founderWatch = t.founder && sessions.engine === 'postgres'
       ? new FounderNumberWatch(sessions, key, (err) => log.error({ err }, "the founder's linked number could not be read"))
       : undefined;
     sessionDb = await openPhoneSession(sessions, 'founder', founderWatch ? { onChange: founderWatch.refresh } : {});
     await founderWatch?.start();
 
-    await syncClients(db, configs, systemClock.now()); // a group approved while the service was stopped gets its history queued
+    // The founder's groups file is synced in (a group approved while the service was stopped gets its history queued); a
+    // customer's groups are its own clients rows already (Phase B: no file).
+    if (t.founder) await syncClients(db, configs, systemClock.now());
     const allow = new AllowList(configs.map((c) => c.groupId));
 
     // openPhoneSession has already restored a session left by a dashboard link that never finished (D3).
@@ -268,7 +284,7 @@ export async function buildCustomerRuntime(t: { id: string; founder: boolean }, 
     // The founder reader's number at each check, so a relink from the dashboard is followed (falls back to the number
     // linked at start when the file cannot be read: refusing that one too is the safe side).
     const founderNumber = () =>
-      (founderWatch ? founderWatch.current() : readFounderNumber(sessionDbPath(env.DATA_DIR), key)) ?? linkedNumber(auth);
+      (!t.founder ? undefined : founderWatch ? founderWatch.current() : readFounderNumber(sessionDbPath(env.DATA_DIR), key)) ?? linkedNumber(auth);
     const senderFactory = baileysSenderSocketFactory(silentLogger());
     // With the dashboard: the briefing's settings are changed on its Automations screen (tracker.db; .env gives the
     // defaults), and LiveReport opens the spare number's sender only once it is on with a number (tested). Off: as before.
@@ -278,7 +294,11 @@ export async function buildCustomerRuntime(t: { id: string; founder: boolean }, 
     let spareLinking = false;
     /** Whether the spare phone is linked: the open sender's state, else its saved session (the briefing may be off). */
     let spareCheck: (() => Promise<boolean>) | undefined;
-    if (env.DASHBOARD_ENABLED) {
+    if (!t.founder) {
+      // No report, so no spare phone and no briefing: the store holds the customer's own settings (its daily Claude
+      // limit). The report defaults it falls back to are neutral, given to the store only, never in the customer's env.
+      settings = await SettingsStore.open({ db, env: CUSTOMER_REPORT_DEFAULTS, clock: systemClock, log, customer: true });
+    } else if (env.DASHBOARD_ENABLED) {
       const briefing: { live?: LiveReport } = {};
       spareCheck = spareLinked({ dataDir: env.DATA_DIR, sessions, key, briefing: { sender: () => briefing.live?.sender() }, linking: () => spareLinking });
       const store = await SettingsStore.open({ db, env, clock: systemClock, log, spareLinked: spareCheck, customer: !t.founder });
@@ -306,7 +326,10 @@ export async function buildCustomerRuntime(t: { id: string; founder: boolean }, 
     // The founder's gateway inside its holder, so a relink from the dashboard replaces it in place. None in setup mode.
     const gateway = founderGateway({
       linked: plan.whatsapp === 'linked',
-      build: () => new WhatsAppGateway({ allow, factory: baileysSocketFactory(silentLogger(), sentText), auth: auth.state, saveCreds: auth.saveCreds }),
+      build: () => new WhatsAppGateway({
+        allow, factory: baileysSocketFactory(silentLogger(), sentText), auth: auth.state, saveCreds: auth.saveCreds,
+        ...(!t.founder && t.crashed ? { tenantId: t.id, report: (_id: string, e: unknown) => t.crashed!(e) } : {}),
+      }),
     });
     // One start time for every wait that counts from the service start: the reconciler's wait for a file, the
     // processor's 24 hours of waits for Claude, and Health's long-wait count (amendments 10f, 12a, 15a, 15f).
@@ -367,7 +390,7 @@ export async function buildCustomerRuntime(t: { id: string; founder: boolean }, 
 
     // watchGroupsFile catches a throwing onChange (including reloadClients conflicts) and calls onError.
     let currentConfigs = configs;
-    const stopWatching = watchGroupsFile(
+    const stopWatching = !t.founder ? () => {} : watchGroupsFile(
       env.GROUPS_FILE,
       async (next) => {
         await app.reloadClients(next);
@@ -425,7 +448,7 @@ export async function buildCustomerRuntime(t: { id: string; founder: boolean }, 
     /** Starts the uptime strip's log: its start row, then a tick every 30 s (set when the dashboard is on). */
     let startUptime: (() => void) | undefined;
     let agentRoutes: CustomerRuntime['agentRoutes'];
-    if (env.DASHBOARD_ENABLED && live && settings && auditLog && uptimeLog) {
+    if (t.founder && env.DASHBOARD_ENABLED && live && settings && auditLog && uptimeLog) {
       const store = settings;
       const audit = auditLog;
       const trackerStore = db;
@@ -550,6 +573,14 @@ export async function buildCustomerRuntime(t: { id: string; founder: boolean }, 
       control,
       agentRoutes,
       platform: platformDb !== undefined && agentRoutes !== undefined,
+      facts: () => ({
+        whatsappLinked: gateway.status().state !== 'not_linked',
+        spareLinked: false, // the spare phone is the founder's in Phase B
+        driveConnected: google.connected(),
+        groupsApproved: currentConfigs.length,
+        reportTimeSet: settings?.get().source.reportTime === 'dashboard',
+        aiKey: 'configured', // a runtime that runs has its Claude key: a customer without one stays in its setup shell
+      }),
       start: () => {
         app.start();
         log.info({ groups: configs.length }, 'WA Agent started');
