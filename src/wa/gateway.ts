@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import makeWASocket, { DisconnectReason, makeCacheableSignalKeyStore, proto } from 'baileys';
 import type { AuthenticationState, BaileysEventMap, GroupMetadata } from 'baileys';
+import { guarded, type CrashReport } from '../runtime/context.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { AllowList } from './allowlist.ts';
 import { backoffMs } from './backoff.ts';
@@ -143,7 +144,17 @@ export interface GatewayOptions {
   clock?: Clock;
   scheduler?: Scheduler;
   onQr?: (qr: string) => void;
+  /**
+   * The customer this gateway belongs to, and where a crash in it is reported (S4.6): every socket event handler and
+   * timer runs through guarded(tenantId, report), so a throw there restarts that customer's runtime and nothing else.
+   * Left out (the founder's gateway before S4.4), a throw goes where it went before.
+   */
+  tenantId?: string;
+  report?: CrashReport;
 }
+
+type Guard = <A extends unknown[], R>(fn: (...a: A) => R) => (...a: A) => R | undefined;
+const unguarded: Guard = (fn) => fn;
 
 export class WhatsAppGateway implements GatewayLike {
   readonly #opts: GatewayOptions;
@@ -152,6 +163,7 @@ export class WhatsAppGateway implements GatewayLike {
   readonly #groupCache = new Map<string, GroupMetadata>();
   readonly #clock: Clock;
   readonly #schedule: Scheduler;
+  readonly #guard: Guard;
   #sock: SocketLike | undefined;
   #attempt = 0;
   #restarts = 0;
@@ -172,6 +184,7 @@ export class WhatsAppGateway implements GatewayLike {
     this.#opts = opts;
     this.#clock = opts.clock ?? systemClock;
     this.#schedule = opts.scheduler ?? defaultScheduler;
+    this.#guard = opts.tenantId !== undefined && opts.report ? guarded(opts.tenantId, opts.report) : unguarded;
     this.#status = { state: 'stopped', since: this.#clock.now().toISOString(), lastErrorCode: null };
   }
 
@@ -263,7 +276,8 @@ export class WhatsAppGateway implements GatewayLike {
     if (this.#stopped || this.#sock) return; // stopped, or a re-entrant start() already connected
     const sock = this.#opts.factory(this.#opts.auth, async (jid) => this.#groupCache.get(jid));
     this.#sock = sock;
-    sock.ev.on('creds.update', () => {
+    const g = this.#guard;
+    sock.ev.on('creds.update', g(() => {
       void this.#opts.saveCreds().then(
         () => {
           if (this.#credsSaveFailures === 0) return;
@@ -275,36 +289,36 @@ export class WhatsAppGateway implements GatewayLike {
           this.#emitStatus();
         },
       );
-    });
-    sock.ev.on('connection.update', (u) => this.#onConnection(sock, u));
-    sock.ev.on('messages.upsert', ({ messages }) => {
+    }));
+    sock.ev.on('connection.update', g((u) => this.#onConnection(sock, u)));
+    sock.ev.on('messages.upsert', g(({ messages }) => {
       for (const m of messages) {
         if (!this.#allowed(m.key.remoteJid)) continue;
         this.#deliver(() => normalizeMessage(m));
       }
-    });
-    sock.ev.on('messaging-history.set', ({ messages, syncType }) => {
+    }));
+    sock.ev.on('messaging-history.set', g(({ messages, syncType }) => {
       if (syncType === proto.HistorySync.HistorySyncType.ON_DEMAND) return this.#onDemand(messages);
       for (const m of messages) {
         if (!this.#allowed(m.key.remoteJid)) continue;
         this.#deliver(() => normalizeMessage(m));
       }
-    });
-    sock.ev.on('messages.update', (updates) => {
+    }));
+    sock.ev.on('messages.update', g((updates) => {
       for (const u of updates) {
         if (!this.#allowed(u.key.remoteJid)) continue;
         this.#deliver(() => normalizeUpdate(u));
       }
-    });
-    sock.ev.on('messages.reaction', (reactions) => {
+    }));
+    sock.ev.on('messages.reaction', g((reactions) => {
       for (const r of reactions) {
         if (!this.#allowed(r.key.remoteJid)) continue;
         this.#deliver(() => normalizeReaction(r));
       }
-    });
-    sock.ev.on('groups.upsert', (groups) => {
-      for (const g of groups) if (this.#opts.allow.has(g.id)) this.#groupCache.set(g.id, g);
-    });
+    }));
+    sock.ev.on('groups.upsert', g((groups) => {
+      for (const group of groups) if (this.#opts.allow.has(group.id)) this.#groupCache.set(group.id, group);
+    }));
   }
 
   /** An answer to fetchHistory: the allowed groups' events, grouped, on the history channel only. */
@@ -382,11 +396,11 @@ export class WhatsAppGateway implements GatewayLike {
       this.#setStatus('open', null);
       if (this.#stopped) return;
       this.#stable?.cancel();
-      this.#stable = this.#schedule(() => {
+      this.#stable = this.#schedule(this.#guard(() => {
         this.#stable = undefined;
         this.#attempt = 0;
         this.#restarts = 0;
-      }, STABLE_OPEN_MS);
+      }), STABLE_OPEN_MS);
       return;
     }
     if (u.connection !== 'close') return;
@@ -407,10 +421,10 @@ export class WhatsAppGateway implements GatewayLike {
     this.#setStatus('closed', code);
     if (this.#stopped || this.#sock) return; // stopped, or a listener already started a new connection
     const delay = code === DisconnectReason.restartRequired && this.#restarts++ === 0 ? 0 : backoffMs(this.#attempt++);
-    this.#reconnect = this.#schedule(() => {
+    this.#reconnect = this.#schedule(this.#guard(() => {
       this.#reconnect = undefined;
       this.#connect();
-    }, delay);
+    }), delay);
   }
 
   #setStatus(state: GatewayState, code: number | null): void {

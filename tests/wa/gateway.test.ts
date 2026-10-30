@@ -3,9 +3,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { proto, WAMessageStubType, type WAMessageUpdate } from 'baileys';
 import { AllowList } from '../../src/wa/allowlist.ts';
 import { openSessionDb, useEncryptedAuthState } from '../../src/wa/authState.ts';
-import { WhatsAppGateway } from '../../src/wa/gateway.ts';
+import { WhatsAppGateway, type GatewayOptions } from '../../src/wa/gateway.ts';
+import { Ingestor } from '../../src/wa/ingest.ts';
 import type { NormalizedEvent } from '../../src/wa/normalize.ts';
-import { OTHER_GROUP, SHARMA } from '../helpers/db.ts';
+import { OTHER_GROUP, seededDb, SHARMA } from '../helpers/db.ts';
 import { closeWith, FakeSocket, SEND_METHODS } from '../helpers/fakeSocket.ts';
 import { RAHUL_LID, waText } from '../helpers/wa.ts';
 
@@ -351,5 +352,82 @@ describe('WhatsAppGateway: earlier messages on demand (history backfill)', () =>
     // The sync at link time (not on demand) is delivered as before.
     sock.emit('messaging-history.set', { chats: [], contacts: [], isLatest: true, messages: [waText('h4', 'link time')] });
     expect(events).toEqual([expect.objectContaining({ waId: 'h4' })]);
+  });
+});
+
+describe('WhatsAppGateway per customer, guarded (S4.6)', () => {
+  async function customer(o: Partial<GatewayOptions> & { fail?: () => boolean } = {}) {
+    const sockets: FakeSocket[] = [];
+    const scheduled: (() => void)[] = [];
+    const auth = await useEncryptedAuthState(openSessionDb(':memory:'), randomBytes(32));
+    const gw = new WhatsAppGateway({
+      allow: new AllowList([SHARMA.groupId]),
+      factory: () => {
+        if (o.fail?.()) throw new Error('socket could not be made');
+        const s = new FakeSocket();
+        sockets.push(s);
+        return s;
+      },
+      auth: auth.state,
+      saveCreds: auth.saveCreds,
+      scheduler: (fn) => {
+        scheduled.push(fn);
+        return { cancel: () => {} };
+      },
+      ...o,
+    });
+    const events: string[] = [];
+    gw.onEvent((e) => void (e.kind === 'message' && events.push(e.waId)));
+    gw.start();
+    return { gw, sock: sockets[0]!, sockets, scheduled, events };
+  }
+  const crashes = () => {
+    const seen: { tenantId: string; message: string }[] = [];
+    return { seen, report: (tenantId: string, e: unknown) => void seen.push({ tenantId, message: (e as Error).message }) };
+  };
+
+  it('a throw in a socket event handler is reported once, for its customer, and goes no further', async () => {
+    const c = crashes();
+    const { sock } = await customer({ tenantId: 'A', report: c.report, onQr: () => { throw new Error('qr screen gone'); } });
+    expect(() => sock.emit('connection.update', { qr: 'QR-1' })).not.toThrow();
+    expect(c.seen).toEqual([{ tenantId: 'A', message: 'qr screen gone' }]);
+  });
+
+  it('a throw in a timer is reported for its customer', async () => {
+    const c = crashes();
+    let failing = false;
+    const { sock, scheduled } = await customer({ tenantId: 'A', report: c.report, fail: () => failing });
+    closeWith(sock, 428); // a reconnect is scheduled
+    failing = true;
+    expect(() => scheduled.at(-1)!()).not.toThrow();
+    expect(c.seen).toEqual([{ tenantId: 'A', message: 'socket could not be made' }]);
+  });
+
+  it('another customer’s gateway goes on: its events are delivered after the first one crashed', async () => {
+    const c = crashes();
+    const a = await customer({ tenantId: 'A', report: c.report, onQr: () => { throw new Error('boom'); } });
+    const b = await customer({ tenantId: 'B', report: c.report });
+    a.sock.emit('connection.update', { qr: 'QR-1' });
+    b.sock.emit('messages.upsert', { type: 'notify', messages: [waText('b1', 'hello')] });
+    await b.gw.idle();
+    expect(c.seen.map((s) => s.tenantId)).toEqual(['A']);
+    expect(b.events).toEqual(['b1']);
+  });
+
+  it('without a customer (the founder before S4.4) a throw goes where it went before', async () => {
+    const { sock } = await customer({ onQr: () => { throw new Error('qr screen gone'); } });
+    expect(() => sock.emit('connection.update', { qr: 'QR-1' })).toThrow('qr screen gone');
+  });
+
+  it('an insert that fails is one failed event: the next one is stored, and the chain does not stall', async () => {
+    const db = await seededDb();
+    await db.exec(`CREATE TRIGGER refuse_a1 BEFORE INSERT ON messages WHEN NEW.wa_id = 'a1' BEGIN SELECT RAISE(ABORT, 'refused'); END`);
+    const ingestor = new Ingestor({ db, onNewMessages: () => {} });
+    const { gw, sock } = await customer({ tenantId: 'A', report: () => { throw new Error('not a crash'); } });
+    gw.onEvent((e) => ingestor.handle(e));
+    sock.emit('messages.upsert', { type: 'notify', messages: [waText('a1', 'one'), waText('a2', 'two')] });
+    await gw.idle();
+    expect(gw.failedCount()).toBe(1);
+    expect((await db.all<{ wa_id: string }>('SELECT wa_id FROM messages')).map((r) => r.wa_id)).toEqual(['a2']);
   });
 });
