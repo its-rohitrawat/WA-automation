@@ -14,10 +14,9 @@ each kept apart. You run every step yourself, on the Mac, with the Mac assistant
 - **Placeholders** look like `<this>`. Replace each one, including the `<` and `>`. Never paste a password into a chat,
   an email or a screenshot.
 
-> **To confirm at S2.** Two things are not settled yet, until the Postgres work's last step (S2.10). Each place is
-> marked **[confirm at S2]**. Check them before the evening of the switch:
-> - the `status` line that names the database engine (part 4.8);
-> - whether Google needs the Gmail API switched on for Gmail invites (part 7, step 3).
+> **To confirm at S2.** One thing is not settled yet, until the Postgres work's last step (S2.10). It is marked
+> **[confirm at S2]**. Check it before the evening of the switch:
+> - the `status` line that names the database engine (part 4.8).
 >
 > **Already real** (checked against the code, 30 Oct):
 > - `db-bootstrap`: asks for the `postgres` password, then the new `wa_backup` password twice, and shows nothing as you
@@ -421,8 +420,10 @@ Google knows its address.
    - Without it, an invited business that presses "Continue with Google" gets an error from Google, and cannot sign up.
 2. **Test users.** Until Google reviews the app, only test users can sign in to it or receive its emails, up to 100. In
    OAuth consent screen, then Test users, add each business's Gmail address before you invite them.
-3. **The Gmail API** (only if you want invites emailed from your Gmail). In APIs & Services, then Library, find
-   "Gmail API" and make sure it is enabled. **[confirm at S2]**
+3. **The Gmail API** (only if you want invites emailed from your Gmail). In the same Google Cloud project as the
+   dashboard's web client, open APIs & Services, then Library, find "Gmail API" and press **Enable**.
+   - Without it, every invite email fails with Google's answer "Gmail API has not been used in project … or it is
+     disabled", and the invite shows "Not sent". **Copy link** still works.
 4. **Turn the customer parts on.**
    - Waagent window: `nano .env`, add `PLATFORM_ENABLED=true`, and save.
    - To email invites from your Gmail, also add `INVITES_GMAIL=true`.

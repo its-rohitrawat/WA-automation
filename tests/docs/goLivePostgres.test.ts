@@ -72,6 +72,10 @@ describe('GO-LIVE-postgres.md', () => {
     expect(part7).toContain('**What changes when `PLATFORM_ENABLED` is on:**');
     expect(part7).toContain('**To turn the customer parts off again:**');
     expect(guide).toContain('`PLATFORM_ENABLED` (off by default, part 7)');
+    // The Gmail API is enabled in Google before the switch, with what fails without it (settled 30 Oct).
+    expect(part7.indexOf('find "Gmail API" and press **Enable**')).toBeGreaterThan(-1);
+    expect(part7.indexOf('find "Gmail API" and press **Enable**')).toBeLessThan(part7.indexOf('PLATFORM_ENABLED=true'));
+    expect(part7).toContain('Gmail API has not been used in project');
     // The optional name on invites, a placeholder only, with its default said.
     expect(part7).toContain("`PLATFORM_FOUNDER_NAME=<your name or your business's name>`");
     expect(guide).toContain('`PLATFORM_FOUNDER_NAME` (optional, default "WA Agent")');
