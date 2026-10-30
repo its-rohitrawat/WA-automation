@@ -174,6 +174,15 @@ export async function copyToPostgres(o: CopyOptions, target: CopyTarget): Promis
             : (await targetRows(q, p)).length;
           if (n > 0) throw new Error(`Postgres already has data in ${p.target}. Nothing was changed.`);
         }
+        // The ids are kept, and Postgres gives ids out across every customer: a sequence that has given out any could
+        // clash with rows this transaction cannot see. So the copy goes only into a fresh database.
+        for (const p of plans) {
+          if (rowsBy.get(p)!.length === 0 || !identity.has(p.target) || !(await target.idsGivenOut(q, p.target))) continue;
+          throw new Error(
+            `Postgres has already given out ids in ${p.target} (another customer's rows, or an earlier copy). The copy keeps every id, ` +
+              'so it must go into a fresh database, before any customer exists (docs/GO-LIVE-postgres.md, part 4). Nothing was changed.',
+          );
+        }
         for (const p of plans) {
           const rows = rowsBy.get(p)!;
           if (p.target === 'tenants') await upsertTenants(q, target, p, rows);

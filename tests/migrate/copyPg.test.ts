@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { trackerDbPath } from '../../src/config/paths.ts';
 import { tableChecksum } from '../../src/migrate/canonical.ts';
 import { copyToPostgres } from '../../src/migrate/copy.ts';
@@ -9,12 +9,13 @@ import { copyPlan } from '../../src/migrate/plan.ts';
 import { postgresTarget } from '../../src/migrate/target.ts';
 import { openAdminConnection, openPgPool, PgTenantDb } from '../../src/store/engine/pg.ts';
 import { SqliteDb } from '../../src/store/engine/sqlite.ts';
-import { onPg, testPg } from '../helpers/pg.ts';
+import { onPg } from '../helpers/pg.ts';
 import { fixture } from './fixture.ts';
+import { freshPg, type FreshPg } from './freshPg.ts';
 
-// The copy and the export back on a real Postgres 17 (npm run test:pg; skipped otherwise). Each test copies into a new
-// customer of its own: the test server is shared, so the founder's row and the platform tables (which every test uses)
-// are left alone, and the fixture has no platform rows.
+// The copy and the export back on a real Postgres 17 (npm run test:pg; skipped otherwise). The copy keeps every id, so
+// it goes only into a fresh database (docs/GO-LIVE-postgres.md, part 4): each test gets a database of its own, made and
+// migrated as the real one is, and dropped after it. The fixture has no platform rows.
 
 async function newTenant(ownerUrl: string): Promise<string> {
   const id = randomUUID();
@@ -41,8 +42,16 @@ async function customerSums(file: string): Promise<Record<string, string>> {
 }
 
 describe.runIf(onPg)('migrate-to-postgres and export-to-sqlite on a real Postgres', () => {
+  let pg: FreshPg;
+  beforeEach(async () => {
+    pg = await freshPg();
+  });
+  afterEach(async () => {
+    await pg.drop();
+  });
+
   it('a dry run keeps nothing; --apply keeps every id; the export gives the same tables back; new ids come after', async () => {
-    const t = testPg()!;
+    const t = pg.urls;
     const tenantId = await newTenant(t.ownerUrl);
     const f = await fixture({ sender: true, platform: false });
     const target = postgresTarget(t.ownerUrl);
@@ -81,8 +90,8 @@ describe.runIf(onPg)('migrate-to-postgres and export-to-sqlite on a real Postgre
     }
   });
 
-  it("another customer sees none of the copied rows, and copying twice into one customer is refused", async () => {
-    const t = testPg()!;
+  it("another customer sees none of the copied rows; copying twice, or a second customer's copy, is refused", async () => {
+    const t = pg.urls;
     const a = await newTenant(t.ownerUrl);
     const b = await newTenant(t.ownerUrl);
     const f = await fixture({ platform: false });
@@ -93,6 +102,9 @@ describe.runIf(onPg)('migrate-to-postgres and export-to-sqlite on a real Postgre
       expect(await other.get('SELECT count(*) AS n FROM messages')).toEqual({ n: 0 });
       expect(await other.get('SELECT count(*) AS n FROM wa_auth')).toEqual({ n: 0 });
       await expect(copyToPostgres({ dataDir: f.data, tenantId: a, apply: true, backupDir: join(f.dir, 'b2') }, target)).rejects.toThrow(/already has data in clients/);
+      // Another customer's copy into the same database: its ids would clash with A's, so it is refused, plainly.
+      await expect(copyToPostgres({ dataDir: f.data, tenantId: b, apply: true, backupDir: join(f.dir, 'b3') }, target)).rejects.toThrow(/already given out ids in w+.*fresh database, before any customer exists/);
+      expect(await other.get('SELECT count(*) AS n FROM messages')).toEqual({ n: 0 });
     } finally {
       await other.close();
       await target.close();

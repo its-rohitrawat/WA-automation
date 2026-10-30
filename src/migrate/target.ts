@@ -22,6 +22,11 @@ export interface CopyTarget {
   identityTables(q: Sql): Promise<Set<string>>;
   /** `INSERT INTO t (cols)`, with what keeps the given ids, up to `VALUES`. */
   insertPrefix(table: string, columns: readonly string[], keepIds: boolean): string;
+  /**
+   * Whether the table's identity sequence has given out ids already (another customer's rows, which RLS hides, or an
+   * earlier copy). The copy keeps every id, so it needs a table whose ids are all still free.
+   */
+  idsGivenOut(q: Sql, table: string): Promise<boolean>;
   /** Moves the table's identity sequence past its highest id, so new rows get new ids. */
   setval(q: Sql, table: string): Promise<void>;
   /** Tests only: a change made after the inserts and before the checks (the mismatch path). Never set in production. */
@@ -39,6 +44,9 @@ export function postgresTarget(ownerUrl: string): CopyTarget {
     identityTables: async (q) =>
       new Set((await q.all<{ t: string }>("SELECT table_name AS t FROM information_schema.columns WHERE table_schema = 'public' AND column_name = 'id' AND is_identity = 'YES'")).map((r) => r.t)),
     insertPrefix: (table, columns, keepIds) => `INSERT INTO ${table} (${columns.join(', ')})${keepIds ? ' OVERRIDING SYSTEM VALUE' : ''} VALUES`,
+    // NULL until the sequence gives out its first id (a fresh database: inserts that keep ids do not move it).
+    idsGivenOut: async (q, table) =>
+      (await q.get<{ used: boolean }>(`SELECT pg_sequence_last_value(pg_get_serial_sequence(?, 'id')::regclass) IS NOT NULL AS used`, [table]))?.used === true,
     setval: async (q, table) => {
       // The ids are shared by every customer, but RLS shows this transaction only this customer's rows: max(id) may be
       // below ids other customers already have. So the sequence only ever moves forward: past this customer's highest

@@ -14,6 +14,8 @@ export class FakeTarget implements CopyTarget {
   latestVersion = 3;
   version = 3;
   readonly setvals: string[] = [];
+  /** Tables whose ids Postgres would already have given out (another customer's rows); setval adds its table too. */
+  readonly idsUsed = new Set<string>();
   tenants: string[] = [];
   beforeVerify?: (q: Sql) => Promise<void>;
 
@@ -52,8 +54,13 @@ export class FakeTarget implements CopyTarget {
     return `INSERT INTO ${table} (${columns.join(', ')}) VALUES`;
   }
 
+  async idsGivenOut(_q: Sql, table: string): Promise<boolean> {
+    return this.idsUsed.has(table);
+  }
+
   async setval(_q: Sql, table: string): Promise<void> {
     this.setvals.push(table);
+    this.idsUsed.add(table);
   }
 
   async close(): Promise<void> {

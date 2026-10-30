@@ -100,6 +100,14 @@ describe('migrate-to-postgres --apply', () => {
     expect(e.message).toMatch(/already has data in clients/);
     expect(await target.count('messages')).toBe(5); // the first copy stays, untouched
   });
+
+  it('refuses a database that has already given out ids (another customer exists): the copy needs a fresh one', async () => {
+    target.idsUsed.add('clients');
+    const e = await refusal(run({ apply: true, backupDir: join(f.dir, 'b1') }));
+    expect(e.message).toMatch(/already given out ids in clients/);
+    expect(e.message).toMatch(/fresh database, before any customer exists/);
+    expect(await target.count('messages')).toBe(0);
+  });
 });
 
 describe('what stops the copy before it writes anything', () => {

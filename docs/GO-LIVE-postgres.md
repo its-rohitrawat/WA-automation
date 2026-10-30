@@ -204,6 +204,11 @@ agent keeps running, and nothing in Postgres or in `data/` changes. Do it a day 
 
 ## Part 4. The switch (about 30 minutes of downtime)
 
+**Your copy goes into a fresh database, before any customer exists.** The copy keeps every id your data already has
+(client 1 stays client 1), and Postgres shares its ids across every business on it. So use the empty database from
+part 2, with no customer invited yet (part 7 comes after this) and no earlier copy in it. The tool checks this and
+refuses otherwise, writing nothing.
+
 **4.1 Before you stop.** Open the dashboard and write down:
 - the number of clients and of open tasks on the Overview;
 - the time of the newest message in Activity.
@@ -262,6 +267,10 @@ backup is in …`.
 
 **If any line says `MISMATCH`, nothing was written.** Start the agent again as it was, still on SQLite (4.7), and send
 the report to Claude.
+
+**If it says `Postgres has already given out ids in …` or `Postgres already has data in …`, nothing was written.** This
+database is not fresh: a customer or an earlier copy is in it. Start the agent again as it was, still on SQLite (4.7),
+and send that one line to Claude.
 
 **4.6 Switch the engine** (waagent window): `nano .env`, change `DB_ENGINE=sqlite` to `DB_ENGINE=postgres`, and save.
 
