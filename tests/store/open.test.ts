@@ -3,10 +3,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { FOUNDER_TENANT_ID as ENV_FOUNDER, parseEnv } from '../../src/config/env.ts';
+import { trackerDbPath } from '../../src/config/paths.ts';
 import { FOUNDER_TENANT_ID } from '../../src/platform/store.ts';
 import { PgPlatformDb, PgTenantDb, type PgClient, type PgPool } from '../../src/store/engine/pg.ts';
 import { SqliteDb } from '../../src/store/engine/sqlite.ts';
-import { openPlatformStore, openStore } from '../../src/store/open.ts';
+import { databaseLine, openPlatformStore, openStore } from '../../src/store/open.ts';
 import { PG_LATEST } from '../../src/store/pg/migrations.ts';
 
 // The engine switch (S2.6) with no server: Postgres is a fake pool answering wa_schema_version().
@@ -80,6 +81,16 @@ describe('openStore: DB_ENGINE', () => {
       await expect(openStore(env, { pool }), String(v)).rejects.toThrow(/db-migrate/);
       expect(pool.ended, String(v)).toBe(true);
     }
+  });
+});
+
+describe('databaseLine (npm run cli -- status)', () => {
+  it("names the SQLite file, or Postgres's host, port, database and role, never the password", () => {
+    expect(databaseLine(parseEnv({ DATA_DIR: 'data' }))).toBe(`Database: SQLite (${trackerDbPath('data')})`); // data/tracker.db on the Mac
+    const pg = parseEnv({ DB_ENGINE: 'postgres', DATABASE_URL: 'postgres://wa_app:s3cret-placeholder@127.0.0.1:5432/wa_agent', DATABASE_PLATFORM_URL: PLATFORM });
+    expect(databaseLine(pg)).toBe('Database: Postgres (127.0.0.1:5432/wa_agent as wa_app)');
+    expect(databaseLine({ ...pg, DATABASE_URL: 'postgresql://wa_app:x@localhost/wa_agent' })).toBe('Database: Postgres (localhost:5432/wa_agent as wa_app)');
+    expect(databaseLine(pg)).not.toContain('s3cret');
   });
 });
 

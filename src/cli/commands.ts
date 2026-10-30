@@ -16,7 +16,7 @@ import { describeReport, isStaleSending, reasonText } from '../report/scheduler.
 import { latestBatches } from '../store/batches.ts';
 import { listClients, syncClients } from '../store/clients.ts';
 import type { Db } from '../store/db.ts';
-import { openStore } from '../store/open.ts';
+import { databaseLine, openStore } from '../store/open.ts';
 import { setKv } from '../store/kv.ts';
 import { mediaSttForgetsGivenUp } from '../store/media.ts';
 import { sttForgetsGivenUp } from '../store/meetings.ts';
@@ -296,6 +296,7 @@ export async function listGroupsCommand(deps: CliDeps): Promise<void> {
 export async function statusCommand(deps: CliDeps): Promise<void> {
   const db = await openStore(deps.env);
   try {
+    deps.out(databaseLine(deps.env)); // which database: the SQLite file, or Postgres's host, port, database and role
     deps.out(
       formatStatus({
         snapshot: await readHealthSnapshot(db),

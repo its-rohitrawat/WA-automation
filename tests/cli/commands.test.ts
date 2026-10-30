@@ -581,6 +581,7 @@ describe('google-auth', () => {
 describe('status command', () => {
   it('prints no report yet on a fresh database', async () => {
     await statusCommand(deps());
+    expect(out().split('\n')[0]).toBe(`Database: SQLite (${trackerDbPath(dataDir)})`); // the engine first
     expect(out()).toContain('no report yet');
     expect(out()).not.toContain('Speech copies');
   });

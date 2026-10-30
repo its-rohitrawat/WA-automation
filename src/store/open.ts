@@ -32,6 +32,16 @@ export async function openStore(env: Pick<Env, 'DATA_DIR' | 'DB_ENGINE' | 'DATAB
 }
 
 /**
+ * One line naming the database the agent uses (npm run cli -- status): the SQLite file, or the Postgres host, port,
+ * database and role. Never the password or the full URL.
+ */
+export function databaseLine(env: Pick<Env, 'DATA_DIR' | 'DB_ENGINE' | 'DATABASE_URL'>): string {
+  if (env.DB_ENGINE !== 'postgres' || !env.DATABASE_URL) return `Database: SQLite (${trackerDbPath(env.DATA_DIR)})`;
+  const u = new URL(env.DATABASE_URL);
+  return `Database: Postgres (${u.hostname}:${u.port || '5432'}${decodeURIComponent(u.pathname)} as ${decodeURIComponent(u.username)})`;
+}
+
+/**
  * The platform tables' database (decision D1). On SQLite they live in tracker.db, so it is the tracker Db itself; on
  * Postgres, wa_platform's own pool. Only src/main.ts calls this, and its Db reaches only src/platform/**,
  * src/web/routes/platform.ts and SessionStore (S2.8).
