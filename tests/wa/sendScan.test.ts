@@ -163,7 +163,7 @@ describe('the one send from the founder’s WhatsApp (Open chat, 29 Oct 2026)', 
 
   it('only the dashboard’s chat route sends, and only the gateways hand out the socket', () => {
     expect(sources().filter((s) => /\bsendGroupText\(/.test(s.text)).map((s) => s.file).sort()).toEqual(['wa/groupSend.ts', 'web/routes/chat.ts']);
-    expect(sources().filter((s) => /\bgroupSocket\(/.test(s.text)).map((s) => s.file).sort()).toEqual(['main.ts', 'wa/gateway.ts', 'wa/switchableGateway.ts']);
+    expect(sources().filter((s) => /\bgroupSocket\(/.test(s.text)).map((s) => s.file).sort()).toEqual(['runtime/customerRuntime.ts', 'wa/gateway.ts', 'wa/switchableGateway.ts']);
   });
 
   it('the chat route checks the setting, the client and the limits, and claims the row before it sends', () => {
