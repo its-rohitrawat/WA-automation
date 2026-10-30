@@ -96,10 +96,10 @@ export async function assignMeetingToClient(
     );
   }
   const r = { id: m.id, code: c.code };
-  // humanEvent and requestRebuild are not converted yet (S1.11): on raw, which is allowed inside this transaction.
+  // requestRebuild writes kv, on raw until S1.12, which is allowed inside this transaction.
   await db.tx(async (q) => {
     if (!(await assignMeeting(q, m.id, c.id, now.toISOString()))) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
-    humanEvent(db, null, c.id, 'assign_meeting', { meetingId: m.id }, now);
+    await humanEvent(q, null, c.id, 'assign_meeting', { meetingId: m.id }, now);
     requestRebuild(db, now);
     await inTx?.(q, r);
   });

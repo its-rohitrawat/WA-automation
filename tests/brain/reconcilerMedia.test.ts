@@ -590,7 +590,7 @@ describe('Reconciler with shared files', () => {
         expect(line).not.toContain('re-check');
         expect(contextOf(user)).toContain('before the window');
         expect(contextOf(user)).not.toContain('after the window');
-        expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
+        expect(await getTaskByCode(db, 'SHA-002')).toBeUndefined();
         expect(processedAt(db, 'I1')).not.toBeNull();
         expect(await flagOf(db, id)).toBe(false);
       });
@@ -613,7 +613,7 @@ describe('Reconciler with shared files', () => {
 
         expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 }); // guarded: the same add_task again
         expect(lineOf(newMessages(ai.calls[2]!.user), 'I1')).toContain(' (re-check: file now read): see this {image: A payment receipt');
-        expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
+        expect(await getTaskByCode(db, 'SHA-002')).toBeUndefined();
         expect(processedAt(db, 'I1')).not.toBeNull();
         expect(await flagOf(db, id)).toBe(false);
       });
@@ -628,27 +628,27 @@ describe('Reconciler with shared files', () => {
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
       await read(db, id, '2026-10-19T08:10:00.000Z');
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 1 });
-      expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
-      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done' });
+      expect(await getTaskByCode(db, 'SHA-002')).toBeUndefined();
+      expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done' });
     });
 
     it('a late read never re-closes a task the founder closed and then reopened after the file was sent (12h, I2)', async () => {
       const { db, ai, clock, r } = await setup();
-      createTask(db, {
+      await createTask(db, {
         clientId: 1, side: 'client', title: 'Send the payment receipt', category: 'payment', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-18',
         deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp',
       }, NOW);
       ai.push({ ops: [] }, { ops: [op({ op: 'close_task', taskCode: 'SHA-001', sourceMessageIds: ['I1'] })] });
       const id = await image(db, 'I1', '2026-10-19T07:01:00.000Z', undefined, { createdAt: '2026-10-19T07:20:00.000Z' }); // the client shares the receipt
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 0 }); // still being read: nothing to act on yet
-      closeTask(db, 'SHA-001', new Date('2026-10-19T08:10:00Z'));
-      reopenTask(db, 'SHA-001', new Date('2026-10-19T08:20:00Z')); // the founder checked: not paid after all
+      await closeTask(db, 'SHA-001', new Date('2026-10-19T08:10:00Z'));
+      await reopenTask(db, 'SHA-001', new Date('2026-10-19T08:20:00Z')); // the founder checked: not paid after all
       await read(db, id, '2026-10-19T08:30:00.000Z');
       clock.set('2026-10-19T08:31:00.000Z');
 
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
       expect(lineOf(newMessages(ai.calls[1]!.user), 'I1')).toContain(' (re-check: file now read): see this {image: A payment receipt');
-      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open' });
+      expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open' });
       expect(processedAt(db, 'I1')).not.toBeNull();
     });
 
@@ -682,7 +682,7 @@ describe('Reconciler with shared files', () => {
         expect(line).toContain(' (re-check: file now read): see this');
         expect(line).toContain('{image: A payment receipt');
         expect(line).not.toMatch(OTHER_MARKERS);
-        expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
+        expect(await getTaskByCode(db, 'SHA-002')).toBeUndefined();
         expect(processedAt(db, 'I1')).not.toBeNull();
       });
 
@@ -711,7 +711,7 @@ describe('Reconciler with shared files', () => {
         expect(after).toContain(' (re-check: file now read): see this');
         expect(after).toContain('{image: A payment receipt');
         expect(after).not.toMatch(OTHER_MARKERS);
-        expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
+        expect(await getTaskByCode(db, 'SHA-002')).toBeUndefined();
       });
 
       it('an edit before the first run, then a reaction and the file read during it: the next run is a reaction and file re-check, still guarded (Job C: P2)', async () => {
@@ -733,7 +733,7 @@ describe('Reconciler with shared files', () => {
         const line = lineOf(newMessages(ai.calls[1]!.user), 'I1');
         expect(line).toContain(' (re-check: new reaction) (re-check: file now read): see this, 600 copies {image: A payment receipt');
         expect(line).not.toContain('re-check: edited');
-        expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
+        expect(await getTaskByCode(db, 'SHA-002')).toBeUndefined();
         expect(processedAt(db, 'I1')).not.toBeNull();
         expect(await flagOf(db, id)).toBe(false);
       });
@@ -753,7 +753,7 @@ describe('Reconciler with shared files', () => {
 
         expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
         expect(lineOf(newMessages(ai.calls[1]!.user), 'I1')).toContain(' (re-check: edited) (re-check: file now read): see this, 600 copies {image: A payment receipt');
-        expect(getTaskByCode(db, 'SHA-002')).toMatchObject({ title: 'Print 600 flyers' });
+        expect(await getTaskByCode(db, 'SHA-002')).toMatchObject({ title: 'Print 600 flyers' });
       });
 
       it('an edit of a message queued as a file re-check shows both markers, and the edit wins: a new task is allowed (M6)', async () => {
@@ -767,7 +767,7 @@ describe('Reconciler with shared files', () => {
 
         expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
         expect(lineOf(newMessages(ai.calls[1]!.user), 'I1')).toContain(' (re-check: edited) (re-check: file now read): see this, 600 copies {image: A payment receipt');
-        expect(getTaskByCode(db, 'SHA-002')).toMatchObject({ title: 'Print 600 flyers' });
+        expect(await getTaskByCode(db, 'SHA-002')).toMatchObject({ title: 'Print 600 flyers' });
         expect(await flagOf(db, id)).toBe(false);
       });
 
@@ -861,7 +861,7 @@ describe('Reconciler with shared files', () => {
   describe('the source quote of a task from a voice note (Phase 2b)', () => {
     const add = (...ids: string[]) =>
       op({ op: 'add_task', side: 'client', title: 'Send the logo files', category: 'content', priority: 'medium', sourceMessageIds: ids });
-    const quote = (db: Db) => getTaskByCode(db, 'SHA-001')!.sourceQuote;
+    const quote = async (db: Db) => (await getTaskByCode(db, 'SHA-001'))!.sourceQuote;
     const voice = (db: Db, waId: string, ts: string, o: FileOpts = {}) => file(db, waId, ts, { kind: 'voice', mimeType: 'audio/ogg', seconds: 42, ...o });
     // 248 code points and more UTF-16 units: the cut counts code points, so the emoji and the joiner stay whole.
     const SAID = `Logo files kal tak bhej dunga, क्‍ष 😀 ${'x'.repeat(190)} and the rest is cut`;
@@ -871,7 +871,7 @@ describe('Reconciler with shared files', () => {
       await voice(db, 'V1', '2026-10-19T07:01:00.000Z', { read: { textKind: 'extract', text: SAID } });
       ai.push({ ops: [add('V1')] });
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
-      const q = quote(db)!;
+      const q = (await quote(db))!;
       expect(q).toBe([...SAID].slice(0, 200).join(''));
       expect([...q]).toHaveLength(200);
       expect(q).toContain('क्‍ष 😀');
@@ -882,7 +882,7 @@ describe('Reconciler with shared files', () => {
       await file(db, 'U1', '2026-10-19T07:01:00.000Z', { kind: 'audio', mimeType: 'audio/mpeg', text: null, read: { textKind: 'extract', text: 'Payment kar diya' } });
       ai.push({ ops: [add('U1')] });
       await r.run(1);
-      expect(quote(db)).toBe('Payment kar diya');
+      expect(await quote(db)).toBe('Payment kar diya');
     });
 
     it('with message text, the text wins, cut to 120 as before', async () => {
@@ -890,7 +890,7 @@ describe('Reconciler with shared files', () => {
       await voice(db, 'V1', '2026-10-19T07:01:00.000Z', { text: 't'.repeat(150), read: { textKind: 'extract', text: SAID } });
       ai.push({ ops: [add('V1')] });
       await r.run(1);
-      expect(quote(db)).toBe('t'.repeat(120));
+      expect(await quote(db)).toBe('t'.repeat(120));
     });
 
     it.each([
@@ -902,7 +902,7 @@ describe('Reconciler with shared files', () => {
       await voice(db, 'V1', '2026-10-19T07:01:00.000Z', o);
       ai.push({ ops: [add('V1')] });
       expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
-      expect(quote(db)).toBeNull();
+      expect(await quote(db)).toBeNull();
     });
 
     it.each([
@@ -913,7 +913,7 @@ describe('Reconciler with shared files', () => {
       await file(db, 'F1', '2026-10-19T07:01:00.000Z', o);
       ai.push({ ops: [add('F1')] });
       expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
-      expect(quote(db)).toBeNull();
+      expect(await quote(db)).toBeNull();
     });
 
     it('a transcribed voice note in the context, cited first by date, gives the quote too', async () => {
@@ -923,7 +923,7 @@ describe('Reconciler with shared files', () => {
       await say(db, 'A1', '2026-10-19T07:00:00.000Z', null, 'image');
       ai.push({ ops: [add('A1', 'V0')] });
       await r.run(1);
-      expect(quote(db)).toBe('Logo files kal tak bhej dunga');
+      expect(await quote(db)).toBe('Logo files kal tak bhej dunga');
     });
   });
 });

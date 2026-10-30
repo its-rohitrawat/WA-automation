@@ -15,7 +15,7 @@ const now = new Date('2026-10-19T08:00:00Z');
 
 async function withTask() {
   const db = await seededDb();
-  createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
+  await createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
     deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp' }, NOW);
   return db;
 }
@@ -38,23 +38,23 @@ async function processAll(db: Db, clientId = 1) {
 describe('task close / reopen', () => {
   it('closes and reopens tasks as a human, with events and a rebuild request', async () => {
     const db = await withTask();
-    expect(closeTask(db, 'sha-001', now)).toMatchObject({ status: 'done', closedOn: '2026-10-19', statusLockedAt: now.toISOString() });
+    expect(await closeTask(db, 'sha-001', now)).toMatchObject({ status: 'done', closedOn: '2026-10-19', statusLockedAt: now.toISOString() });
     expect(rebuilt(db)).toBe(true);
-    expect(reopenTask(db, 'SHA-001', now)).toMatchObject({ status: 'open', closedOn: null, statusLockedAt: now.toISOString() });
+    expect(await reopenTask(db, 'SHA-001', now)).toMatchObject({ status: 'open', closedOn: null, statusLockedAt: now.toISOString() });
     expect(events(db)).toMatchObject([
       { op: 'close_task', task_id: 1, client_id: 1, detail: { status: 'done' } },
       { op: 'reopen_task', task_id: 1, client_id: 1, detail: { status: 'open' } },
     ]);
-    expect(() => closeTask(db, 'SHA-999', now)).toThrowError(CorrectionError);
+    await expect(closeTask(db, 'SHA-999', now)).rejects.toThrowError(CorrectionError);
   });
 
   it('refuses to repeat a status, changing nothing', async () => {
     const db = await withTask();
-    expect(() => reopenTask(db, 'SHA-001', now)).toThrowError('Task SHA-001 is already open');
+    await expect(reopenTask(db, 'SHA-001', now)).rejects.toThrowError('Task SHA-001 is already open');
     expect(events(db)).toHaveLength(0);
     expect(getKv(db, 'rebuild_requested')).toBeUndefined();
-    closeTask(db, 'SHA-001', now);
-    expect(() => closeTask(db, 'SHA-001', now)).toThrowError('Task SHA-001 is already done');
+    await closeTask(db, 'SHA-001', now);
+    await expect(closeTask(db, 'SHA-001', now)).rejects.toThrowError('Task SHA-001 is already done');
     expect(events(db)).toHaveLength(1);
   });
 });
@@ -62,33 +62,33 @@ describe('task close / reopen', () => {
 describe('task edit', () => {
   it('edits and locks fields, recording the event', async () => {
     const db = await withTask();
-    expect(editTask(db, 'SHA-001', { deadline: '2026-10-25', assignedTo: 'Rahul' }, now)).toMatchObject({ deadline: '2026-10-25', assignedTo: 'Rahul' });
-    expect([...(getTaskByCode(db, 'SHA-001')?.lockedFields ?? [])].sort()).toEqual(['assignedTo', 'deadline']);
+    expect(await editTask(db, 'SHA-001', { deadline: '2026-10-25', assignedTo: 'Rahul' }, now)).toMatchObject({ deadline: '2026-10-25', assignedTo: 'Rahul' });
+    expect([...((await getTaskByCode(db, 'SHA-001'))?.lockedFields ?? [])].sort()).toEqual(['assignedTo', 'deadline']);
     expect(events(db)[0]).toMatchObject({ op: 'update_task', detail: { deadline: '2026-10-25', assignedTo: 'Rahul' } });
     expect(rebuilt(db)).toBe(true);
   });
 
   it('clears optional fields with none or an empty string', async () => {
     const db = await withTask();
-    editTask(db, 'SHA-001', { deadline: '2026-10-25', assignedTo: 'Rahul', askedBy: 'Sharma', latestProgress: 'half' }, now);
-    expect(editTask(db, 'SHA-001', { deadline: 'none', assignedTo: '', askedBy: ' ', latestProgress: 'NONE' }, now)).toMatchObject({
+    await editTask(db, 'SHA-001', { deadline: '2026-10-25', assignedTo: 'Rahul', askedBy: 'Sharma', latestProgress: 'half' }, now);
+    expect(await editTask(db, 'SHA-001', { deadline: 'none', assignedTo: '', askedBy: ' ', latestProgress: 'NONE' }, now)).toMatchObject({
       deadline: null, assignedTo: null, askedBy: null, latestProgress: null,
     });
   });
 
   it('matches enums case-insensitively and stores them lower-case', async () => {
     const db = await withTask();
-    expect(editTask(db, 'SHA-001', { priority: 'LOW', side: 'Client', category: 'Payment' }, now)).toMatchObject({ priority: 'low', side: 'client', category: 'payment' });
+    expect(await editTask(db, 'SHA-001', { priority: 'LOW', side: 'Client', category: 'Payment' }, now)).toMatchObject({ priority: 'low', side: 'client', category: 'payment' });
   });
 
   it('validates values and keeps chat text out of errors', async () => {
     const db = await withTask();
-    expect(() => editTask(db, 'SHA-001', { priority: 'urgent' }, now)).toThrowError(/priority must be one of/);
-    expect(() => editTask(db, 'SHA-001', { deadline: '25 Oct' }, now)).toThrowError(/YYYY-MM-DD/);
-    expect(() => editTask(db, 'SHA-001', {}, now)).toThrowError(/Nothing to change/);
-    expect(() => editTask(db, 'SHA-001', { title: 'none' }, now)).toThrowError(/title/);
-    expect(() => editTask(db, 'SHA-001', { title: '' }, now)).toThrowError(/title/);
-    expect(() => editTask(db, 'SHA-001', { priority: 'secret client words' }, now)).toThrowError(/^(?!.*secret client words)/);
+    await expect(editTask(db, 'SHA-001', { priority: 'urgent' }, now)).rejects.toThrowError(/priority must be one of/);
+    await expect(editTask(db, 'SHA-001', { deadline: '25 Oct' }, now)).rejects.toThrowError(/YYYY-MM-DD/);
+    await expect(editTask(db, 'SHA-001', {}, now)).rejects.toThrowError(/Nothing to change/);
+    await expect(editTask(db, 'SHA-001', { title: 'none' }, now)).rejects.toThrowError(/title/);
+    await expect(editTask(db, 'SHA-001', { title: '' }, now)).rejects.toThrowError(/title/);
+    await expect(editTask(db, 'SHA-001', { priority: 'secret client words' }, now)).rejects.toThrowError(/^(?!.*secret client words)/);
     expect(events(db)).toHaveLength(0);
     expect(getKv(db, 'rebuild_requested')).toBeUndefined();
   });
@@ -97,12 +97,12 @@ describe('task edit', () => {
 describe('task unlock', () => {
   it('clears field and status locks and records an event', async () => {
     const db = await withTask();
-    editTask(db, 'SHA-001', { deadline: '2026-10-25' }, now);
-    closeTask(db, 'SHA-001', now);
-    expect(unlockTask(db, 'sha-001', now)).toMatchObject({ lockedFields: [], statusLockedAt: null, status: 'done' });
+    await editTask(db, 'SHA-001', { deadline: '2026-10-25' }, now);
+    await closeTask(db, 'SHA-001', now);
+    expect(await unlockTask(db, 'sha-001', now)).toMatchObject({ lockedFields: [], statusLockedAt: null, status: 'done' });
     expect(events(db).at(-1)).toMatchObject({ op: 'unlock', task_id: 1, client_id: 1, detail: { lockedFields: ['deadline'], statusLocked: true } });
     expect(rebuilt(db)).toBe(true);
-    expect(() => unlockTask(db, 'SHA-999', now)).toThrowError(CorrectionError);
+    await expect(unlockTask(db, 'SHA-999', now)).rejects.toThrowError(CorrectionError);
   });
 });
 
@@ -153,17 +153,17 @@ describe('person set', () => {
 describe('phase set / unlock', () => {
   it('sets a phase case-insensitively, locked, with an event', async () => {
     const db = await withTask();
-    setClientPhase(db, 'sha', 'development', now);
+    await setClientPhase(db, 'sha', 'development', now);
     expect(getClient(db, 1)).toMatchObject({ currentPhase: 'Development', phaseLocked: true });
     expect(events(db)[0]).toMatchObject({ op: 'set_phase', task_id: null, client_id: 1, detail: { phase: 'Development' } });
     expect(rebuilt(db)).toBe(true);
-    expect(() => setClientPhase(db, 'SHA', 'Party', now)).toThrowError(/must be one of/);
+    await expect(setClientPhase(db, 'SHA', 'Party', now)).rejects.toThrowError(/must be one of/);
   });
 
   it('unlocks the phase for the AI', async () => {
     const db = await withTask();
-    setClientPhase(db, 'SHA', 'Design', now);
-    unlockClientPhase(db, 'sha', now);
+    await setClientPhase(db, 'SHA', 'Design', now);
+    await unlockClientPhase(db, 'sha', now);
     expect(getClient(db, 1)).toMatchObject({ currentPhase: 'Design', phaseLocked: false });
     expect(events(db).at(-1)).toMatchObject({ op: 'unlock_phase', client_id: 1, detail: { phase: 'Design' } });
     expect(rebuilt(db)).toBe(true);

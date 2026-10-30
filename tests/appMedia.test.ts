@@ -185,7 +185,7 @@ async function storedClientDoc(db: Db, dataDir: string): Promise<number> {
     ts: '2026-10-10T08:00:00.000Z', text: null, quotedWaId: null, mediaType: 'document',
   });
   await upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
-  setRole(db, 1, SHARMA_PN, 'client', 'human');
+  await setRole(db, 1, SHARMA_PN, 'client', 'human');
   const id = await insertMedia(db, {
     messageId: (await messageRowId(db, 1, 'DOC1'))!, clientId: 1, kind: 'document', status: 'pending', mimeType: 'application/pdf', fileName: 'brief.pdf',
     fileSize: 3, seconds: null, forwarded: false, refEnc: null, errorCode: null, createdAt: '2026-10-10T08:00:00.000Z',
@@ -236,7 +236,7 @@ describe('app with shared files', () => {
     await settled();
     await app.mediaQueue!.drain(60_000); // the file's run has ended
     expect((await getMedia(db, 1))?.status).toBe('done');
-    setRole(db, 1, SHARMA_PN, 'client', 'human');
+    await setRole(db, 1, SHARMA_PN, 'client', 'human');
     await vi.advanceTimersByTimeAsync(61_000);
     await vi.waitFor(async () => expect((await getMedia(db, 1))?.driveFileId).toBeTruthy());
     expect(drive.folders).toEqual(['WA Agent', 'Clients', 'Sharma Interiors', 'Files']);
@@ -395,7 +395,7 @@ describe('app with shared files', () => {
     await vi.advanceTimersByTimeAsync(1_000); // the first publish creates the Drive root folder
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('T1', 'hello')] });
     await settled();
-    setRole(db, 1, SHARMA_PN, 'client', 'human');
+    await setRole(db, 1, SHARMA_PN, 'client', 'human');
     shareImage(sock);
     await settled();
     await reading.promise; // the event, not the clock: the file is being read
@@ -580,7 +580,7 @@ describe('app media wiring (15g)', () => {
     await vi.advanceTimersByTimeAsync(1_000); // the first publish creates the Drive root folder
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('T1', 'hello')] });
     await settled();
-    setRole(db, 1, SHARMA_PN, 'client', 'human');
+    await setRole(db, 1, SHARMA_PN, 'client', 'human');
     shareImage(sock);
     await settled();
     await vi.waitFor(async () => expect((await getMedia(db, 1))?.driveFileId).toBeTruthy());

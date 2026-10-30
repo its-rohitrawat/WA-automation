@@ -4,7 +4,7 @@ import { SpendCapReachedError } from '../brain/paidCall.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
 import type { Sql } from '../store/db.ts';
 import {
-  addSttForget, getMeeting, noteMeetingProgress, PART_FILE, setSttParts, sttPartsJson, writeStuckSttParts, type SttPartRow,
+  addSttForget, getMeeting, noteMeetingProgress, PART_FILE, setSttParts, writeStuckSttParts, type SttPartRow,
 } from '../store/meetings.ts';
 import { AudioError } from '../stt/audio.ts';
 import { SttHttpError, SttJobError, SttJobLostError, SttNoAnswerError } from '../stt/http.ts';
@@ -54,7 +54,7 @@ export async function bookStuckParts(db: Sql, spend: SpendGuard, meetingId: numb
     const counts = { n: m.sttParts.filter(paid).length, runAgain: m.sttParts.filter(local).length };
     if (counts.n === 0 && counts.runAgain === 0) return counts;
     for (const p of m.sttParts.filter(paid)) {
-      spend.record('stt', partCeilingFor(p.provider, p.seconds, o.inrPerUsd), `meeting ${meetingId} part ${p.index} (unknown, estimated)`);
+      await spend.record('stt', partCeilingFor(p.provider, p.seconds, o.inrPerUsd), `meeting ${meetingId} part ${p.index} (unknown, estimated)`, q);
     }
     const parts = m.sttParts.map((p): SttPartRow => (paid(p) ? { ...p, state: 'unknown', booked: 'ceiling' } : local(p) ? { ...p, state: 'todo' } : p));
     await writeStuckSttParts(q, meetingId, parts, (o.clock ?? systemClock).now().toISOString());
@@ -78,11 +78,6 @@ export interface PartContext {
   save(q?: Sql): Promise<void>;
   /** Changes part i and stores the parts at once; on a failed write the part stays as it was. */
   put(i: number, patch: Partial<SttPartRow>, q?: Sql): Promise<void>;
-  /**
-   * S1 only, until SpendGuard books through a transaction handle (S1.5): put for settlePending's onBookedAtShutdown, which
-   * runs inside SpendGuard's synchronous transaction, so the part is written there, synchronously.
-   */
-  putAtShutdown(i: number, patch: Partial<SttPartRow>): void;
   /**
    * Runs fn in one transaction (a savepoint inside another). A booking and the part state it goes with are written here,
    * so they are kept or lost together; on a failure the parts in memory go back to what is stored.
@@ -110,18 +105,6 @@ export function partContext(id: number, parts: SttPartRow[], t: MeetingTranscrib
       throw e;
     }
   };
-  const putAtShutdown = (i: number, patch: Partial<SttPartRow>) => {
-    const prev = parts[i]!;
-    parts[i] = { ...prev, ...patch };
-    try {
-      const n = db.raw.prepare("UPDATE meetings SET stt_parts = ?, updated_at = ? WHERE id = ? AND status = 'queued'")
-        .run(sttPartsJson('putAtShutdown', parts), clock.now().toISOString(), id).changes;
-      if (n === 0) throw new Error(`putAtShutdown: meeting ${id} is not queued`);
-    } catch (e) {
-      parts[i] = prev;
-      throw e;
-    }
-  };
   const atomically = async (fn: (q: Sql) => Promise<void>) => {
     const stored = [...parts];
     try {
@@ -144,7 +127,7 @@ export function partContext(id: number, parts: SttPartRow[], t: MeetingTranscrib
     if (!PART_FILE.test(p.file) || !p.file.startsWith(`${id}-parts`)) throw new Error(`meeting ${id}: a stored part file name is not valid`);
     return join(tmp, ...p.file.split('/'));
   };
-  return { id, parts, t, deps, whole, save, put, putAtShutdown, atomically, markDone, forget, pathOf };
+  return { id, parts, t, deps, whole, save, put, atomically, markDone, forget, pathOf };
 }
 
 const todo = (index: number, provider: ProviderOrLocal, offset: number, seconds: number, file: string | null): SttPartRow => ({
@@ -269,9 +252,9 @@ export async function heldPart(ctx: PartContext, i: number): Promise<void> {
             await ctx.forget(lostRef, q);
           }
         },
-        onBookedAtShutdown: () => {
+        onBookedAtShutdown: async (q) => {
           bookedAtShutdown = true; // booked even when the write below fails (settlePending then books the hold alone)
-          ctx.putAtShutdown(i, { state: 'unknown', booked: 'ceiling' });
+          await put(i, { state: 'unknown', booked: 'ceiling' }, q);
         },
       },
     ));
@@ -304,7 +287,7 @@ export async function sarvamPart(ctx: PartContext, i: number): Promise<void> {
     if (before.booked === 'none') {
       // Never written this way (the id and the booking are stored together), but a job id means a job was started.
       await atomically(async (q) => {
-        spend.record('stt', ceiling, label);
+        await spend.record('stt', ceiling, label, q);
         await put(i, { booked: 'ceiling' }, q);
       });
     }
@@ -313,7 +296,7 @@ export async function sarvamPart(ctx: PartContext, i: number): Promise<void> {
     checkPartFile(audio.path);
     // A new job: what was booked before belongs to an earlier job.
     await put(i, { state: 'inflight', booked: 'none' });
-    hold = spend.reserve(ceiling, 'stt', () => ctx.putAtShutdown(i, { state: 'unknown', booked: 'ceiling' }));
+    hold = spend.reserve(ceiling, 'stt', (q) => put(i, { state: 'unknown', booked: 'ceiling' }, q));
     if (hold === null) {
       await put(i, before);
       throw new SpendCapReachedError({ busy: spend.fitsIgnoringHolds(ceiling) });
@@ -327,7 +310,7 @@ export async function sarvamPart(ctx: PartContext, i: number): Promise<void> {
     seenJobId = jobId;
     // settle books nothing when shutdown already booked the hold.
     await atomically(async (q) => {
-      spend.settle(h, 'stt', ceiling, label);
+      await spend.settle(h, 'stt', ceiling, label, q);
       await put(i, { jobId, booked: 'ceiling' }, q);
     });
     hold = null;
@@ -338,7 +321,7 @@ export async function sarvamPart(ctx: PartContext, i: number): Promise<void> {
     const r = await t.transcribePart(audio, resumeJobId !== undefined ? { resumeJobId } : { onJobId });
     const h = hold;
     await atomically(async (q) => {
-      if (h !== null) spend.settle(h, 'stt', ceiling, label); // an answer without a job id first: booked now
+      if (h !== null) await spend.settle(h, 'stt', ceiling, label, q); // an answer without a job id first: booked now
       await ctx.markDone(i, r, h !== null ? 'ceiling' : undefined, q);
     });
     hold = null;
@@ -354,7 +337,7 @@ export async function sarvamPart(ctx: PartContext, i: number): Promise<void> {
           await put(i, { state: 'todo', booked: 'none', jobId: null });
         } else {
           await atomically(async (q) => {
-            spend.settle(h, 'stt', ceiling, `${label} (unknown, estimated)`);
+            await spend.settle(h, 'stt', ceiling, `${label} (unknown, estimated)`, q);
             await put(i, { state: 'unknown', booked: 'ceiling', jobId: seenJobId }, q);
           });
         }

@@ -1,6 +1,6 @@
 import { closeTask, CorrectionError, editTask, humanEvent, reopenTask, requestRebuild, unlockTask, type EditOptions } from '../cli/corrections.ts';
 import { getClientByCode } from '../store/clients.ts';
-import { txSync, type Db } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
 import { CATEGORIES, createTask, getTaskByCode, PRIORITIES, SIDES, TASK_FIELDS, updateTaskFields, type TaskField } from '../store/tasks.ts';
 import { isIsoDate, istDate } from '../util/time.ts';
 import { ControlError, type Audit } from './errors.ts';
@@ -77,51 +77,54 @@ export async function runTaskAction(
   req: { code: string; action: string; body?: unknown },
   ctx: { actor: string; now: Date; audit: Audit },
 ): Promise<DashboardTaskDetail> {
-  const code = applyTaskAction(db, req, ctx);
+  const code = await applyTaskAction(db, req, ctx);
   return (await taskDetail(db, code, ctx.now))!;
 }
 
 /**
- * The change itself, synchronous until S1.11 converts the task store: it throws ControlError at once, so a caller's own
- * transaction (the assistant's two-step change) rolls back. Returns the task's code.
+ * The change itself and its audit line, in the caller's transaction q (the assistant's two-step change: one rejection
+ * rolls both back) or in a new one. Rejects with ControlError. Returns the task's code.
  */
-export function applyTaskAction(
+export async function applyTaskAction(
   db: Db,
   req: { code: string; action: string; body?: unknown },
   ctx: { actor: string; now: Date; audit: Audit },
-): string {
+  q?: Sql,
+): Promise<string> {
   if (!(TASK_ACTIONS as readonly string[]).includes(req.action)) throw new ControlError(400, `action must be one of: ${TASK_ACTIONS.join(', ')}`, 'action');
   const action = req.action as TaskAction;
   const raw = req.code.trim().toUpperCase();
   const known = /^[A-Z]{3,4}-\d{1,9}$/.test(raw);
-  const task = known ? getTaskByCode(db, raw) : undefined;
+  const task = known ? await getTaskByCode(q ?? db, raw) : undefined;
   if (!task) throw new ControlError(404, known ? `No task called ${raw}` : 'No task with that code');
   const code = task.code;
   const edit = action === 'edit' ? parseTaskEdit(req.body) : undefined;
   const { now } = ctx;
+  // The audit callback writes on raw (recordSync) until the audit log takes the transaction handle: allowed in here.
+  const change = async (q: Sql) => {
+    let line: string;
+    switch (action) {
+      case 'done':
+        await closeTask(db, code, now, q);
+        line = `Task ${code} marked done`;
+        break;
+      case 'reopen':
+        await reopenTask(db, code, now, q);
+        line = `Task ${code} reopened`;
+        break;
+      case 'unlock':
+        await unlockTask(db, code, now, q);
+        line = `Task ${code} handed back to the agent`;
+        break;
+      case 'edit':
+        await editTask(db, code, edit!, now, q);
+        line = `Task ${code} edited (${changedWords(edit!)})`;
+        break;
+    }
+    ctx.audit({ actor: ctx.actor, event: `task.${action}`, kind: 'task', detail: line });
+  };
   try {
-    txSync(db, () => {
-      let line: string;
-      switch (action) {
-        case 'done':
-          closeTask(db, code, now);
-          line = `Task ${code} marked done`;
-          break;
-        case 'reopen':
-          reopenTask(db, code, now);
-          line = `Task ${code} reopened`;
-          break;
-        case 'unlock':
-          unlockTask(db, code, now);
-          line = `Task ${code} handed back to the agent`;
-          break;
-        case 'edit':
-          editTask(db, code, edit!, now);
-          line = `Task ${code} edited (${changedWords(edit!)})`;
-          break;
-      }
-      ctx.audit({ actor: ctx.actor, event: `task.${action}`, kind: 'task', detail: line });
-    });
+    await (q ? change(q) : db.tx(change));
   } catch (e) {
     if (e instanceof CorrectionError) throw fromCorrection(e);
     throw e;
@@ -165,16 +168,16 @@ export async function createTaskAction(db: Db, input: NewTaskInput, ctx: { actor
   const { clientId, fields } = parseNewTask(db, input);
   const { now } = ctx;
   const at = now.toISOString();
-  const code = txSync(db, () => {
-    const t = createTask(db, {
+  const code = await db.tx(async (q) => {
+    const t = await createTask(q, {
       clientId, side: fields.side as (typeof SIDES)[number], title: fields.title, category: fields.category as (typeof CATEGORIES)[number],
       priority: fields.priority as (typeof PRIORITIES)[number], assignedTo: fields.assignedTo || null, askedBy: null, raisedOn: istDate(now),
       deadline: fields.deadline || null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'dashboard',
       prioritySource: 'human', // the owner chose it, as the task panel's edit records it
     }, at);
     const locked = Object.fromEntries(TASK_FIELDS.filter((f) => fields[f] !== undefined && fields[f] !== '').map((f) => [f, fields[f]!]));
-    updateTaskFields(db, t.id, locked, at, 'human');
-    humanEvent(db, t.id, clientId, 'add_task', { fields: Object.keys(locked) }, now);
+    await updateTaskFields(q, t.id, locked, at, 'human');
+    await humanEvent(q, t.id, clientId, 'add_task', { fields: Object.keys(locked) }, now);
     requestRebuild(db, now);
     ctx.audit({ actor: ctx.actor, event: 'task.create', kind: 'task', detail: `Task ${t.code} added` });
     return t.code;

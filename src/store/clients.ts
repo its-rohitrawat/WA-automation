@@ -1,5 +1,5 @@
 import type { ClientConfig } from '../config/groups.ts';
-import type { Db } from './db.ts';
+import type { Db, Sql } from './db.ts';
 import { queueBackfill } from './historyBackfill.ts';
 import type { Sentiment } from './tasks.ts';
 
@@ -106,10 +106,10 @@ export function listClients(db: Db, activeOnly = true): ClientRow[] {
   return (db.raw.prepare(sql).all() as RawClient[]).map(toRow);
 }
 
-export function nextTaskCode(db: Db, clientId: number): string {
-  const r = db
-    .raw.prepare('UPDATE clients SET next_task_seq = next_task_seq + 1 WHERE id = ? RETURNING code, next_task_seq - 1 AS seq')
-    .get(clientId) as { code: string; seq: number } | undefined;
+export async function nextTaskCode(db: Sql, clientId: number): Promise<string> {
+  const r = await db.get<{ code: string; seq: number }>('UPDATE clients SET next_task_seq = next_task_seq + 1 WHERE id = ? RETURNING code, next_task_seq - 1 AS seq', [
+    clientId,
+  ]);
   if (!r) throw new Error(`Unknown client id ${clientId}`);
   return `${r.code}-${String(r.seq).padStart(3, '0')}`;
 }

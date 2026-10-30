@@ -12,7 +12,7 @@ const OWNER = 'owner@example.com';
 
 async function withTask(): Promise<Db> {
   const db = await seededDb();
-  createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
+  await createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
     deadline: null, latestProgress: null, sourceQuote: 'send the banner', sourceDate: '2026-10-10', sourceWaId: null, origin: 'whatsapp' }, NOW);
   return db;
 }
@@ -53,7 +53,7 @@ describe('runTaskAction matches the CLI', () => {
     ];
     for (const [action, viaCli, line] of steps) {
       const { detail, audits } = await run(web, 'sha-001', action);
-      viaCli(cli);
+      await viaCli(cli);
       expect(state(web)).toEqual(state(cli));
       expect(getKv(web, 'rebuild_requested')).toBe(now.toISOString());
       expect(audits).toEqual([{ actor: OWNER, event: `task.${action}`, kind: 'task', detail: line }]);
@@ -70,7 +70,7 @@ describe('runTaskAction matches the CLI', () => {
     const web = await withTask();
     const cli = await withTask();
     const { detail, audits } = await run(web, 'SHA-001', 'edit', { deadline: '2026-10-30', assignedTo: 'Rahul', latestProgress: 'secret words' });
-    editTask(cli, 'SHA-001', { deadline: '2026-10-30', assignedTo: 'Rahul', latestProgress: 'secret words' }, now);
+    await editTask(cli, 'SHA-001', { deadline: '2026-10-30', assignedTo: 'Rahul', latestProgress: 'secret words' }, now);
     expect(state(web)).toEqual(state(cli));
     expect(detail).toMatchObject({ deadline: '2026-10-30', owner: 'Rahul', latestProgress: 'secret words' });
     expect(audits).toEqual([{ actor: OWNER, event: 'task.edit', kind: 'task', detail: 'Task SHA-001 edited (owner, deadline, progress)' }]);
@@ -82,9 +82,9 @@ describe('runTaskAction matches the CLI', () => {
     const web = await withTask();
     const cli = await withTask();
     await run(web, 'SHA-001', 'edit', { deadline: '2026-10-30', assignedTo: 'Rahul' });
-    editTask(cli, 'SHA-001', { deadline: '2026-10-30', assignedTo: 'Rahul' }, now);
+    await editTask(cli, 'SHA-001', { deadline: '2026-10-30', assignedTo: 'Rahul' }, now);
     await run(web, 'SHA-001', 'edit', { deadline: null, assignedTo: '' });
-    editTask(cli, 'SHA-001', { deadline: 'none', assignedTo: 'none' }, now);
+    await editTask(cli, 'SHA-001', { deadline: 'none', assignedTo: 'none' }, now);
     expect(state(web)).toEqual(state(cli));
   });
 });

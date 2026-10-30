@@ -29,9 +29,9 @@ async function file(
 async function seed(): Promise<Db> {
   const db = await seededDb();
   await upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
-  setRole(db, 1, SHARMA_PN, 'client', 'human');
+  await setRole(db, 1, SHARMA_PN, 'client', 'human');
   await upsertPerson(db, { clientId: 1, jid: RAHUL_PN, number: '919800000002', name: 'Rahul', fromMe: false });
-  setRole(db, 1, RAHUL_PN, 'team', 'human');
+  await setRole(db, 1, RAHUL_PN, 'team', 'human');
   // The message carries the sender's own WhatsApp name; the workbook shows the name in People instead.
   const pdf = await file(db, { waId: 'D1', jid: SHARMA_PN, name: 'Sharma ji', kind: 'document', fileName: 'brief.pdf', mimeType: 'application/pdf', ts: '2026-10-15T06:00:00.000Z' });
   await finishMedia(db, pdf, { textKind: 'extract', text: 'Homepage brief\nHero banner with the new logo', pageCount: 3, note: null, at: NOW });
@@ -246,7 +246,7 @@ describe('Files received', () => {
     const db = await seed();
     await upsertPerson(db, { clientId: 1, jid: FOUNDER, number: '919800000099', name: 'Founder', fromMe: true });
     // Even if the founder's own number is marked client, what the founder sent is never listed.
-    setRole(db, 1, FOUNDER, 'client', 'human');
+    await setRole(db, 1, FOUNDER, 'client', 'human');
     await file(db, { waId: 'VO1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'image', fileName: null, mimeType: 'image/jpeg', ts: '2026-10-18T06:00:00.000Z', status: 'metadata', errorCode: 'view_once' });
     await file(db, { waId: 'ME1', jid: FOUNDER, name: 'Founder', kind: 'document', fileName: 'mine.pdf', mimeType: 'application/pdf', ts: '2026-10-18T06:00:00.000Z', fromMe: true });
     await file(db, { waId: 'ST1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'sticker', fileName: null, mimeType: 'image/webp', ts: '2026-10-18T06:00:00.000Z', status: 'metadata' });
@@ -262,9 +262,9 @@ describe('Files received', () => {
     const db = await seed();
     // Rahul is team in Sharma but a client in Mehta; Mr. Sharma is a client in both.
     await upsertPerson(db, { clientId: 2, jid: RAHUL_PN, number: '919800000002', name: 'Rahul', fromMe: false });
-    setRole(db, 2, RAHUL_PN, 'client', 'human');
+    await setRole(db, 2, RAHUL_PN, 'client', 'human');
     await upsertPerson(db, { clientId: 2, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
-    setRole(db, 2, SHARMA_PN, 'client', 'human');
+    await setRole(db, 2, SHARMA_PN, 'client', 'human');
     const files = await sharmaFiles(db);
     expect(files.some((f) => f.name === 'team-only.pdf')).toBe(false);
     expect(files.map((f) => f.name)).toEqual(['image-2026-10-16-1130-2.jpg', 'brief.pdf', '=HYPERLINK(_http___evil_)']);
@@ -293,7 +293,7 @@ describe('Files received', () => {
   it('includes earlier files of someone who becomes a client', async () => {
     const db = await seed();
     expect((await sharmaFiles(db)).some((f) => f.name === 'team-only.pdf')).toBe(false);
-    setRole(db, 1, RAHUL_PN, 'client', 'human');
+    await setRole(db, 1, RAHUL_PN, 'client', 'human');
     expect((await sharmaFiles(db))[0]).toMatchObject({ name: 'team-only.pdf', sentBy: 'Rahul', description: 'PDF, being read' });
   });
 

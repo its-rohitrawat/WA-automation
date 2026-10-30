@@ -11,8 +11,8 @@ import { MEHTA, NOW, seededDb, SHARMA } from '../helpers/db.ts';
 const now = new Date(NOW);
 const ID = '1AbCdEfGhIjKlMnOp_qr-st';
 
-function task(db: Db, clientId: number, o: { status?: 'open' | 'maybe_done' | 'done'; deadline?: string; closedOn?: string } = {}) {
-  const t = createTask(db, { clientId, side: 'us', title: 'x', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-01',
+async function task(db: Db, clientId: number, o: { status?: 'open' | 'maybe_done' | 'done'; deadline?: string; closedOn?: string } = {}) {
+  const t = await createTask(db, { clientId, side: 'us', title: 'x', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-01',
     deadline: o.deadline ?? null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp' }, NOW);
   db.raw.prepare('UPDATE tasks SET status = ?, closed_on = ? WHERE id = ?').run(o.status ?? 'open', o.closedOn ?? null, t.id);
 }
@@ -56,14 +56,14 @@ describe('trackerSummary', () => {
   it('counts Today (active clients) and each active client in tab order, using the workbook sheet names', async () => {
     const db = await seededDb();
     syncClients(db, [SHARMA, MEHTA, { ...SHARMA, groupId: '120363000000000003@g.us', code: 'SHB' }]); // a second "Sharma Interiors"
-    task(db, 1); // open
-    task(db, 1, { deadline: '2026-10-18' }); // overdue
-    task(db, 1, { status: 'maybe_done', deadline: '2026-10-18' }); // overdue, not review
-    task(db, 1, { status: 'maybe_done' }); // review
-    task(db, 1, { status: 'done', closedOn: '2026-10-13' }); // done 6 days ago: this week
-    task(db, 1, { status: 'done', closedOn: '2026-10-12' }); // 7 days ago: not
-    task(db, 2, { status: 'done', closedOn: '2026-10-19' });
-    task(db, 3);
+    await task(db, 1); // open
+    await task(db, 1, { deadline: '2026-10-18' }); // overdue
+    await task(db, 1, { status: 'maybe_done', deadline: '2026-10-18' }); // overdue, not review
+    await task(db, 1, { status: 'maybe_done' }); // review
+    await task(db, 1, { status: 'done', closedOn: '2026-10-13' }); // done 6 days ago: this week
+    await task(db, 1, { status: 'done', closedOn: '2026-10-12' }); // 7 days ago: not
+    await task(db, 2, { status: 'done', closedOn: '2026-10-19' });
+    await task(db, 3);
     expect((await trackerSummary(db, now)).sheets).toEqual([
       { name: 'Today', client: null, notDone: 5, overdue: 2, review: 1, doneThisWeek: 2 },
       { name: 'Mehta Foods', client: { code: 'MEH', name: 'Mehta Foods' }, notDone: 0, overdue: 0, review: 0, doneThisWeek: 1 },
@@ -75,7 +75,7 @@ describe('trackerSummary', () => {
   it('leaves inactive clients out of Today and the list, without moving the others\' sheet names', async () => {
     const db = await seededDb();
     syncClients(db, [SHARMA, MEHTA, { ...SHARMA, groupId: '120363000000000003@g.us', code: 'SHB' }]);
-    task(db, 1);
+    await task(db, 1);
     syncClients(db, [MEHTA, { ...SHARMA, groupId: '120363000000000003@g.us', code: 'SHB' }]); // SHA leaves the allow-list
     expect((await trackerSummary(db, now)).sheets).toEqual([
       { name: 'Today', client: null, notDone: 0, overdue: 0, review: 0, doneThisWeek: 0 },
@@ -112,7 +112,7 @@ describe('trackerSummary', () => {
 describe('trackerSummary review fixes', () => {
   it('counts a task due today as open, not overdue', async () => {
     const db = await seededDb();
-    task(db, 1, { deadline: '2026-10-19' });
+    await task(db, 1, { deadline: '2026-10-19' });
     expect((await trackerSummary(db, now)).sheets[0]).toMatchObject({ notDone: 1, overdue: 0 });
   });
 

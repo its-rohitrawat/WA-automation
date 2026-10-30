@@ -37,8 +37,8 @@ async function store(db: Db, waId: string, text: string, ts = '2026-10-19T07:00:
 }
 
 /** SHA-001, made before this batch with the given level (null: made before priority levels). */
-function banner(db: Db, priority: Priority | null = 'medium', source: 'ai' | 'keyword' = 'ai'): void {
-  createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: priority ?? 'medium', prioritySource: source, assignedTo: null, askedBy: null,
+async function banner(db: Db, priority: Priority | null = 'medium', source: 'ai' | 'keyword' = 'ai'): Promise<void> {
+  await createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: priority ?? 'medium', prioritySource: source, assignedTo: null, askedBy: null,
     raisedOn: '2026-10-10', deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp' }, NOW);
   if (priority === null) db.raw.prepare("UPDATE tasks SET priority_level = NULL, priority_source = NULL, priority = 'high' WHERE code = 'SHA-001'").run();
 }
@@ -79,7 +79,7 @@ describe('Reconciler: priority keywords', () => {
       { ops: [op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['A1'] })] },
       { ops: [op({ op: 'update_task', taskCode: 'SHA-001', sourceMessageIds: ['A2'], latestProgress: 'v2 sent' })] },
     ]);
-    banner(db, 'medium');
+    await banner(db, 'medium');
     await store(db, 'A1', 'Banner ka kya hua? important hai');
     await r.run(1);
     expect(row(db, 'SHA-001')).toMatchObject({ level: 'major', source: 'keyword', keyword: 'important' });
@@ -92,12 +92,12 @@ describe('Reconciler: priority keywords', () => {
     await store(db, 'A2', 'no rush on the banner now', '2026-10-19T07:30:00.000Z');
     await r.run(1);
     expect(row(db, 'SHA-001')).toMatchObject({ level: 'major', source: 'keyword', keyword: 'important' });
-    expect(getTaskByCode(db, 'SHA-001')!.latestProgress).toBe('v2 sent');
+    expect((await getTaskByCode(db, 'SHA-001'))!.latestProgress).toBe('v2 sent');
   });
 
   it('gives a task from before priority levels its first level from a keyword', async () => {
     const { db, r } = await setup([{ ops: [op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['A1'] })] }]);
-    banner(db, null);
+    await banner(db, null);
     expect(row(db, 'SHA-001')).toMatchObject({ level: null, priority: 'high' });
     await store(db, 'A1', 'no rush, but banner?');
     await r.run(1);
@@ -109,11 +109,11 @@ describe('Reconciler: priority keywords', () => {
       { ops: [op({ op: 'update_task', taskCode: 'SHA-001', sourceMessageIds: ['A1'], priority: 'low', latestProgress: 'started' })] },
       { ops: [op({ op: 'update_task', taskCode: 'SHA-001', sourceMessageIds: ['A2'], priority: 'critical' })] },
     ]);
-    banner(db, 'major', 'keyword');
+    await banner(db, 'major', 'keyword');
     await store(db, 'A1', 'started on it');
     await r.run(1);
     expect(row(db, 'SHA-001')).toMatchObject({ level: 'major', source: 'keyword' });
-    expect(getTaskByCode(db, 'SHA-001')!.latestProgress).toBe('started');
+    expect((await getTaskByCode(db, 'SHA-001'))!.latestProgress).toBe('started');
     await store(db, 'A2', 'client is waiting', '2026-10-19T07:30:00.000Z');
     await r.run(1);
     expect(row(db, 'SHA-001')).toMatchObject({ level: 'critical', source: 'ai', keyword: null, priority: 'high' });
@@ -121,8 +121,8 @@ describe('Reconciler: priority keywords', () => {
 
   it('never changes a priority the owner set, keyword or not', async () => {
     const { db, r } = await setup([{ ops: [op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['A1'] })] }]);
-    banner(db, 'medium');
-    updateTaskFields(db, 1, { priority: 'low' }, NOW, 'human');
+    await banner(db, 'medium');
+    await updateTaskFields(db, 1, { priority: 'low' }, NOW, 'human');
     await store(db, 'A1', 'URGENT: banner?');
     await r.run(1);
     expect(row(db, 'SHA-001')).toEqual({ priority: 'low', level: 'low', source: 'human', keyword: null, sentiment: null });
@@ -166,7 +166,7 @@ describe('Reconciler: sentiment', () => {
       { ops: [op({ op: 'update_task', taskCode: 'SHA-001', sourceMessageIds: ['A1'], sentiment: 'positive' })] },
       { ops: [op({ op: 'update_task', taskCode: 'SHA-001', sourceMessageIds: ['A2'], latestProgress: 'v3', sentiment: null })] },
     ], { keywords: NO_KEYWORDS, sentimentEnabled: true });
-    banner(db);
+    await banner(db);
     await store(db, 'A1', 'perfect, thanks!');
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1, rejected: 0 });
     expect(row(db, 'SHA-001')).toMatchObject({ sentiment: 'positive' });

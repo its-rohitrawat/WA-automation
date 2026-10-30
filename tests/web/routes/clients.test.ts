@@ -26,7 +26,7 @@ class FakeSource implements GroupSource {
 
 async function setup() {
   const db = await seededDb();
-  createTask(
+  await createTask(
     db,
     {
       clientId: 1, side: 'us', title: 'Send the moodboard', category: 'design', priority: 'major', assignedTo: 'Ravi', askedBy: null, raisedOn: '2026-10-20',

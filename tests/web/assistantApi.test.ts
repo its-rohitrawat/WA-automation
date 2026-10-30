@@ -42,7 +42,7 @@ class ProposingAi implements AssistantAi {
 async function boot(o: { askCapacity?: number } = {}) {
   const db = await seededDb();
   const clock = manualClock(NOW);
-  createTask(db, {
+  await createTask(db, {
     clientId: 1, side: 'us', title: 'Send the revised quote', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,
     raisedOn: '2026-10-18', deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp',
   }, NOW);
@@ -101,11 +101,11 @@ describe('assistant API', () => {
     const events = lines(r.json);
     expect(events.map((e) => e.type)).toEqual(['tool', 'proposal', 'text', 'done']);
     const card = events[1]!.card as { id: string };
-    expect(getTaskByCode(db, 'SHA-001')?.status).toBe('open'); // nothing changes before Confirm
+    expect((await getTaskByCode(db, 'SHA-001'))?.status).toBe('open'); // nothing changes before Confirm
     expect(auditRows(db)).toEqual([]);
 
     expect(await h.post('/dashboard/api/assistant/confirm', { body: { id: card.id } })).toMatchObject({ status: 200, json: { ok: true, message: 'SHA-001 updated.', task: 'SHA-001' } });
-    expect(getTaskByCode(db, 'SHA-001')?.status).toBe('done');
+    expect((await getTaskByCode(db, 'SHA-001'))?.status).toBe('done');
     expect(auditRows(db)).toEqual([{ actor: OWNER, event: 'task.done', detail: 'Task SHA-001 marked done · via assistant', requestId: expect.any(String) }]);
     // A replayed Confirm is refused and changes nothing more.
     expect(await h.post('/dashboard/api/assistant/confirm', { body: { id: card.id } })).toMatchObject({ status: 404, json: { error: { field: 'id' } } });

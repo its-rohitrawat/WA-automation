@@ -505,11 +505,6 @@ export async function sttForgetsGivenUp(db: Sql, o: { maxAttempts: number; provi
   return (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM stt_forget WHERE attempts >= ? OR provider <> ?', [o.maxAttempts, o.provider]))!.n;
 }
 
-/** The stt_parts column value, checked against the stored shape. S1 only: for the shutdown write in src/meetings/sttParts.ts. */
-export function sttPartsJson(what: string, parts: SttPartRow[]): string {
-  return toJson(what, 'stt_parts', SttPartsSchema, parts);
-}
-
 /** Stores a queued meeting's speech-part bookkeeping as it is now (written before and after every part's call). Throws when not queued. */
 export async function setSttParts(db: Sql, id: number, parts: SttPartRow[], at: string): Promise<void> {
   const json = toJson('setSttParts', 'stt_parts', SttPartsSchema, parts);

@@ -17,12 +17,12 @@ const task = (o: Partial<NewTask> = {}): NewTask => ({
 
 async function fixture() {
   const db = await seededDb();
-  const a = createTask(db, task(), NOW);
-  logReminder(db, a.id, '2026-10-13', NOW);
-  logReminder(db, a.id, '2026-10-17', NOW);
-  createTask(db, task({ side: 'client', title: 'Send logo files', category: 'content', deadline: '2026-10-22' }), NOW);
-  const done = createTask(db, task({ title: 'Share moodboard', deadline: null }), NOW);
-  setTaskStatus(db, done.id, 'done', '2026-10-15', NOW, 'ai');
+  const a = await createTask(db, task(), NOW);
+  await logReminder(db, a.id, '2026-10-13', NOW);
+  await logReminder(db, a.id, '2026-10-17', NOW);
+  await createTask(db, task({ side: 'client', title: 'Send logo files', category: 'content', deadline: '2026-10-22' }), NOW);
+  const done = await createTask(db, task({ title: 'Share moodboard', deadline: null }), NOW);
+  await setTaskStatus(db, done.id, 'done', '2026-10-15', NOW, 'ai');
   setStatus(db, 1, 'Homepage approved, building inner pages', NOW);
   return db;
 }
@@ -123,7 +123,7 @@ describe('buildWorkbook', () => {
 
   it('keeps chat-derived text as plain strings, never formulas', async () => {
     const db = await seededDb();
-    createTask(db, task({ title: '=1+1', latestProgress: '+cmd', sourceQuote: '=HYPERLINK("http://x")' }), NOW);
+    await createTask(db, task({ title: '=1+1', latestProgress: '+cmd', sourceQuote: '=HYPERLINK("http://x")' }), NOW);
     const ws = (await load(await buildWorkbook(await loadTrackerView(db, now, healthy)))).getWorksheet('Sharma Interiors')!;
     const row = findRow(ws, 'SHA-001');
     const cell = row.getCell(2);

@@ -1,4 +1,4 @@
-import type { Db, Sql } from './db.ts';
+import type { Sql } from './db.ts';
 
 export type Role = 'team' | 'client' | 'unknown';
 export type RoleSetBy = 'ai' | 'human' | 'system';
@@ -54,9 +54,8 @@ export async function listPeople(db: Sql, clientId: number): Promise<PersonRow[]
   return (await db.all<RawPerson>('SELECT * FROM people WHERE client_id = ? ORDER BY id', [clientId])).map(toRow);
 }
 
-/** S1: synchronous, on raw, until S1.11 (the reconciler and the corrections set roles inside their synchronous transactions). */
-export function setRole(db: Db, clientId: number, jid: string, role: Role, by: RoleSetBy): void {
-  db.raw.prepare('UPDATE people SET role = ?, role_set_by = ? WHERE client_id = ? AND jid = ?').run(role, by, clientId, jid);
+export async function setRole(db: Sql, clientId: number, jid: string, role: Role, by: RoleSetBy): Promise<void> {
+  await db.run('UPDATE people SET role = ?, role_set_by = ? WHERE client_id = ? AND jid = ?', [role, by, clientId, jid]);
 }
 
 export async function findPeopleByNumber(db: Sql, number: string): Promise<PersonRow[]> {

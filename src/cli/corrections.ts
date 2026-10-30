@@ -1,5 +1,5 @@
 import { clearPhaseLock, getClientByCode, setPhase, type ClientRow } from '../store/clients.ts';
-import { txSync, type Db } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
 import { setKv } from '../store/kv.ts';
 import { countProcessedBetween, resetProcessedSince } from '../store/messages.ts';
 import { findPeopleByJid, findPeopleByNumber, setRole, type PersonRow } from '../store/people.ts';
@@ -24,8 +24,16 @@ export function requestRebuild(db: Db, now: Date): void {
   setKv(db, 'rebuild_requested', now.toISOString());
 }
 
-function findTask(db: Db, code: string): TaskRow {
-  const t = getTaskByCode(db, code.trim().toUpperCase());
+/**
+ * Runs fn in the caller's transaction q, or in a new one: a dashboard action writes its audit line in the same
+ * transaction. S1: db stays for kv and the client store, on raw until S1.12 (allowed inside the transaction).
+ */
+function inTx<T>(db: Db, q: Sql | undefined, fn: (q: Sql) => Promise<T>): Promise<T> {
+  return q ? fn(q) : db.tx(fn);
+}
+
+async function findTask(db: Sql, code: string): Promise<TaskRow> {
+  const t = await getTaskByCode(db, code.trim().toUpperCase());
   if (!t) throw new CorrectionError(`No task called ${code}`);
   return t;
 }
@@ -36,26 +44,27 @@ function findClient(db: Db, code: string): ClientRow {
   return c;
 }
 
-export function humanEvent(db: Db, taskId: number | null, clientId: number, op: string, detail: object, now: Date): void {
-  recordEvent(db, { taskId, clientId, actor: 'human', op, detail, reason: 'cli', sourceIds: [], at: now.toISOString() });
+export async function humanEvent(db: Sql, taskId: number | null, clientId: number, op: string, detail: object, now: Date): Promise<void> {
+  await recordEvent(db, { taskId, clientId, actor: 'human', op, detail, reason: 'cli', sourceIds: [], at: now.toISOString() });
 }
 
-function setStatusAsHuman(db: Db, code: string, status: 'open' | 'done', now: Date): TaskRow {
-  const t = findTask(db, code);
+async function setStatusAsHuman(db: Db, code: string, status: 'open' | 'done', now: Date, q?: Sql): Promise<TaskRow> {
+  const t = await findTask(q ?? db, code);
   if (t.status === status) throw new CorrectionError(`Task ${t.code} is already ${status}`);
-  txSync(db, () => {
-    setTaskStatus(db, t.id, status, istDate(now), now.toISOString(), 'human');
-    humanEvent(db, t.id, t.clientId, status === 'done' ? 'close_task' : 'reopen_task', { status }, now);
+  await inTx(db, q, async (q) => {
+    await setTaskStatus(q, t.id, status, istDate(now), now.toISOString(), 'human');
+    await humanEvent(q, t.id, t.clientId, status === 'done' ? 'close_task' : 'reopen_task', { status }, now);
     requestRebuild(db, now);
   });
-  return findTask(db, t.code);
+  return findTask(q ?? db, t.code);
 }
 
-export const closeTask = (db: Db, code: string, now: Date): TaskRow => setStatusAsHuman(db, code, 'done', now);
-export const reopenTask = (db: Db, code: string, now: Date): TaskRow => setStatusAsHuman(db, code, 'open', now);
+/** q: the caller's transaction, when the change is part of a larger one (src/control/taskActions.ts). */
+export const closeTask = (db: Db, code: string, now: Date, q?: Sql): Promise<TaskRow> => setStatusAsHuman(db, code, 'done', now, q);
+export const reopenTask = (db: Db, code: string, now: Date, q?: Sql): Promise<TaskRow> => setStatusAsHuman(db, code, 'open', now, q);
 
-export function editTask(db: Db, code: string, opts: EditOptions, now: Date): TaskRow {
-  const t = findTask(db, code);
+export async function editTask(db: Db, code: string, opts: EditOptions, now: Date, q?: Sql): Promise<TaskRow> {
+  const t = await findTask(q ?? db, code);
   const fields: Partial<Record<TaskField, string | null>> = {};
   for (const f of TASK_FIELDS) {
     const raw = opts[f];
@@ -73,22 +82,22 @@ export function editTask(db: Db, code: string, opts: EditOptions, now: Date): Ta
   check('priority', PRIORITIES);
   if (fields.title === null) throw new CorrectionError('title cannot be empty');
   if (fields.deadline != null && !isIsoDate(fields.deadline)) throw new CorrectionError('deadline must be YYYY-MM-DD, or none');
-  txSync(db, () => {
-    updateTaskFields(db, t.id, fields, now.toISOString(), 'human');
-    humanEvent(db, t.id, t.clientId, 'update_task', fields, now);
+  await inTx(db, q, async (q) => {
+    await updateTaskFields(q, t.id, fields, now.toISOString(), 'human');
+    await humanEvent(q, t.id, t.clientId, 'update_task', fields, now);
     requestRebuild(db, now);
   });
-  return findTask(db, t.code);
+  return findTask(q ?? db, t.code);
 }
 
-export function unlockTask(db: Db, code: string, now: Date): TaskRow {
-  const t = findTask(db, code);
-  txSync(db, () => {
-    clearTaskLocks(db, t.id, now.toISOString());
-    humanEvent(db, t.id, t.clientId, 'unlock', { lockedFields: t.lockedFields, statusLocked: t.statusLockedAt !== null }, now);
+export async function unlockTask(db: Db, code: string, now: Date, q?: Sql): Promise<TaskRow> {
+  const t = await findTask(q ?? db, code);
+  await inTx(db, q, async (q) => {
+    await clearTaskLocks(q, t.id, now.toISOString());
+    await humanEvent(q, t.id, t.clientId, 'unlock', { lockedFields: t.lockedFields, statusLocked: t.statusLockedAt !== null }, now);
     requestRebuild(db, now);
   });
-  return findTask(db, t.code);
+  return findTask(q ?? db, t.code);
 }
 
 /** Accepts a phone number (any punctuation) or a WhatsApp id (contains @). Returns how many group memberships changed. */
@@ -117,32 +126,32 @@ export async function setPersonRole(db: Db, who: string, roleInput: string, clie
     if (people.length === 0) throw new CorrectionError(`That number has posted, but not in client ${c.code}`);
   }
   const chosen = people;
-  txSync(db, () => {
+  await db.tx(async (q) => {
     for (const p of chosen) {
-      setRole(db, p.clientId, p.jid, role, 'human');
-      humanEvent(db, null, p.clientId, 'set_person_role', { ...detailKey, role }, now);
+      await setRole(q, p.clientId, p.jid, role, 'human');
+      await humanEvent(q, null, p.clientId, 'set_person_role', { ...detailKey, role }, now);
     }
     requestRebuild(db, now);
   });
   return chosen.length;
 }
 
-export function setClientPhase(db: Db, clientCode: string, phase: string, now: Date): void {
+export async function setClientPhase(db: Db, clientCode: string, phase: string, now: Date): Promise<void> {
   const c = findClient(db, clientCode);
   const match = c.phases.find((p) => p.toLowerCase() === phase.trim().toLowerCase());
   if (!match) throw new CorrectionError(`Phase must be one of: ${c.phases.join(', ')}`);
-  txSync(db, () => {
+  await db.tx(async (q) => {
     setPhase(db, c.id, match, 'human');
-    humanEvent(db, null, c.id, 'set_phase', { phase: match }, now);
+    await humanEvent(q, null, c.id, 'set_phase', { phase: match }, now);
     requestRebuild(db, now);
   });
 }
 
-export function unlockClientPhase(db: Db, clientCode: string, now: Date): void {
+export async function unlockClientPhase(db: Db, clientCode: string, now: Date): Promise<void> {
   const c = findClient(db, clientCode);
-  txSync(db, () => {
+  await db.tx(async (q) => {
     clearPhaseLock(db, c.id);
-    humanEvent(db, null, c.id, 'unlock_phase', { phase: c.currentPhase }, now);
+    await humanEvent(q, null, c.id, 'unlock_phase', { phase: c.currentPhase }, now);
     requestRebuild(db, now);
   });
 }
@@ -178,10 +187,10 @@ export async function countReprocess(db: Db, clientCode: string, since: string, 
 /** Re-queues processed messages in the window for the AI. Returns how many were actually re-queued. */
 export async function requestReprocess(db: Db, clientCode: string, since: string, now: Date, until?: string): Promise<number> {
   const w = reprocessWindow(db, clientCode, since, until);
-  // humanEvent and requestRebuild are not converted yet (S1.11): on raw, which is allowed inside this transaction.
+  // requestRebuild writes kv, on raw until S1.12, which is allowed inside this transaction.
   return db.tx(async (q) => {
     const n = await resetProcessedSince(q, w.clientId, w.sinceIso, w.untilIso);
-    humanEvent(db, null, w.clientId, 'reprocess', { since, until: until ?? null, messages: n }, now);
+    await humanEvent(q, null, w.clientId, 'reprocess', { since, until: until ?? null, messages: n }, now);
     requestRebuild(db, now);
     return n;
   });

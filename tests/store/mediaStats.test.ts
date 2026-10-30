@@ -24,7 +24,7 @@ const CLIENT_JID = '919800000001@s.whatsapp.net';
 /** A saved image from a client member of `clientId` whose Drive upload gave up: one the uploader tries again after a restart. */
 async function gaveUpUpload(db: Db, waId: string, clientId = 1): Promise<number> {
   await upsertPerson(db, { clientId, jid: CLIENT_JID, number: null, name: null, fromMe: false });
-  setRole(db, clientId, CLIENT_JID, 'client', 'human');
+  await setRole(db, clientId, CLIENT_JID, 'client', 'human');
   const id = await add(db, waId, { clientId, senderJid: CLIENT_JID });
   await markDownloaded(db, id, { localPath: `media/x/${waId}-${id}.jpg`, sha256: 'x', fileSize: 1, at: NOW });
   await finishMedia(db, id, { textKind: null, text: null, pageCount: null, note: null, at: NOW });
@@ -135,9 +135,9 @@ describe('mediaStats', () => {
   it('does not count an upload that gave up while its sender is not a client member', async () => {
     const db = await seededDb();
     await gaveUpUpload(db, 'A');
-    setRole(db, 1, CLIENT_JID, 'team', 'human');
+    await setRole(db, 1, CLIENT_JID, 'team', 'human');
     expect((await mediaStats(db, new Date(NOW))).uploadFailed).toBe(0);
-    setRole(db, 1, CLIENT_JID, 'client', 'human');
+    await setRole(db, 1, CLIENT_JID, 'client', 'human');
     expect((await mediaStats(db, new Date(NOW))).uploadFailed).toBe(1);
   });
 

@@ -78,7 +78,7 @@ async function savedFile(
   const fromMe = o.fromMe ?? false;
   await insertMessage(db, { waId: o.waId, clientId, senderJid: jid, senderNumber: null, senderName: 'Mr. Sharma', fromMe, ts: '2026-10-10T08:00:00.000Z', text: null, quotedWaId: null, mediaType: kind });
   await upsertPerson(db, { clientId, jid, number: null, name: 'Mr. Sharma', fromMe });
-  if (o.role) setRole(db, clientId, jid, o.role, 'human');
+  if (o.role) await setRole(db, clientId, jid, o.role, 'human');
   const id = await insertMedia(db, {
     messageId: (await messageRowId(db, clientId, o.waId))!, clientId, kind, status: 'pending', mimeType: o.mimeType ?? 'application/pdf',
     fileName: o.fileName === undefined ? 'brief.pdf' : o.fileName, fileSize: 9, seconds: null, forwarded: o.forwarded ?? false, refEnc: null, errorCode: null,
@@ -135,7 +135,7 @@ describe('DriveFileUploader', () => {
     const u = await savedFile(db, dataDir, { waId: 'U', jid: '919811111111@s.whatsapp.net' });
     await up.run();
     expect(drive.created).toHaveLength(0);
-    setRole(db, 1, '919811111111@s.whatsapp.net', 'client', 'ai');
+    await setRole(db, 1, '919811111111@s.whatsapp.net', 'client', 'ai');
     await up.run();
     expect(drive.created).toHaveLength(1);
     expect((await getMedia(db, u))!.driveFileId).not.toBeNull();

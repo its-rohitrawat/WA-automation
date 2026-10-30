@@ -118,7 +118,7 @@ export async function loadTrackerView(db: Db, now: Date, health: HealthLine): Pr
     unassigned: (await listUnassigned(db, UNASSIGNED_LIMIT)).map((m) => ({ id: m.id, date: istDate(new Date(m.startedAt)), seconds: m.seconds })),
     unassignedTotal: (await meetingStats(db, now.toISOString())).unassigned,
     clients: await Promise.all(ordered.map(async (client) => {
-      const all = listTasks(db, client.id);
+      const all = await listTasks(db, client.id);
       const notDone = all.filter((t) => t.status !== 'done');
       const last = lastMeetings.get(client.id);
       const deadlines = notDone.map((t) => t.deadline).filter((d): d is string => d !== null).sort();
@@ -128,7 +128,7 @@ export async function loadTrackerView(db: Db, now: Date, health: HealthLine): Pr
         usOpen: notDone.filter((t) => t.side === 'us').sort(byUrgency),
         clientOpen: notDone.filter((t) => t.side === 'client').sort(byUrgency),
         done: all.filter((t) => t.status === 'done').sort(byClosed),
-        decisions: listDecisions(db, client.id),
+        decisions: await listDecisions(db, client.id),
         files: (await listClientFiles(db, client.id)).map((f) => ({
           date: istDate(new Date(f.ts)),
           sentBy: f.sender ?? 'Unknown',

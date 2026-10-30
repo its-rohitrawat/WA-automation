@@ -16,8 +16,8 @@ const NOW = new Date('2026-10-28T06:00:00.000Z');
 const QUOTE = 'QUOTE-TEXT-never-sent';
 const MESSAGE = 'MESSAGE-TEXT-never-sent';
 
-function task(db: Db, clientId: number, o: { title?: string; deadline?: string | null; status?: Status; closedOn?: string; assignedTo?: string | null }) {
-  const t = createTask(
+async function task(db: Db, clientId: number, o: { title?: string; deadline?: string | null; status?: Status; closedOn?: string; assignedTo?: string | null }) {
+  const t = await createTask(
     db,
     {
       clientId, side: 'us', title: o.title ?? 'A task', category: 'design', priority: 'medium', assignedTo: o.assignedTo ?? null, askedBy: null,
@@ -26,7 +26,7 @@ function task(db: Db, clientId: number, o: { title?: string; deadline?: string |
     },
     '2026-10-01T05:00:00.000Z',
   );
-  if (o.status && o.status !== 'open') setTaskStatus(db, t.id, o.status, o.closedOn ?? '2026-10-27', '2026-10-27T05:00:00.000Z', 'human');
+  if (o.status && o.status !== 'open') await setTaskStatus(db, t.id, o.status, o.closedOn ?? '2026-10-27', '2026-10-27T05:00:00.000Z', 'human');
   return t;
 }
 
@@ -49,12 +49,12 @@ async function message(db: Db, clientId: number, waId: string, ts: string) {
 /** Sharma (1): 3 open (2 overdue, 1 in review), 1 done this week, 1 done last week. Mehta (2): one done task. */
 async function world(): Promise<Db> {
   const db = await seededDb();
-  task(db, 1, { title: 'Overdue open', deadline: '2026-10-27', assignedTo: 'Ravi' });
-  task(db, 1, { title: 'Due today', deadline: '2026-10-28' });
-  task(db, 1, { title: 'In review, overdue', deadline: '2026-10-20', status: 'maybe_done' });
-  task(db, 1, { title: 'Done Monday', deadline: '2026-10-01', status: 'done', closedOn: '2026-10-26' });
-  task(db, 1, { title: 'Done Sunday', status: 'done', closedOn: '2026-10-25' });
-  task(db, 2, { title: 'Mehta done', status: 'done', closedOn: '2026-10-28' });
+  await task(db, 1, { title: 'Overdue open', deadline: '2026-10-27', assignedTo: 'Ravi' });
+  await task(db, 1, { title: 'Due today', deadline: '2026-10-28' });
+  await task(db, 1, { title: 'In review, overdue', deadline: '2026-10-20', status: 'maybe_done' });
+  await task(db, 1, { title: 'Done Monday', deadline: '2026-10-01', status: 'done', closedOn: '2026-10-26' });
+  await task(db, 1, { title: 'Done Sunday', status: 'done', closedOn: '2026-10-25' });
+  await task(db, 2, { title: 'Mehta done', status: 'done', closedOn: '2026-10-28' });
   await message(db, 1, 'M1', '2026-10-27T10:00:00.000Z');
   await message(db, 1, 'M2', '2026-10-28T04:00:00.000Z');
   await message(db, 2, 'M3', '2026-10-20T04:00:00.000Z');
@@ -86,8 +86,8 @@ describe('clientCards', () => {
 
   it('the week starts on Monday in India, not in UTC', async () => {
     const db = await seededDb();
-    task(db, 1, { status: 'done', closedOn: '2026-10-25' });
-    task(db, 1, { status: 'done', closedOn: '2026-10-26' });
+    await task(db, 1, { status: 'done', closedOn: '2026-10-25' });
+    await task(db, 1, { status: 'done', closedOn: '2026-10-26' });
     // 00:10 IST on Monday 26 Oct is still Sunday in UTC.
     expect((await clientCards(db, new Date('2026-10-25T18:40:00.000Z'))).find((c) => c.code === 'SHA')!.counts.doneThisWeek).toBe(1);
     // 23:50 IST on Sunday 25 Oct: the week began on Monday 19 Oct.
@@ -96,7 +96,7 @@ describe('clientCards', () => {
 
   it('overdue uses the date in India: a deadline of yesterday IST is overdue just after midnight IST', async () => {
     const db = await seededDb();
-    task(db, 1, { deadline: '2026-10-27' });
+    await task(db, 1, { deadline: '2026-10-27' });
     expect((await clientCards(db, new Date('2026-10-27T18:29:00.000Z'))).find((c) => c.code === 'SHA')!.counts.overdue).toBe(0);
     expect((await clientCards(db, new Date('2026-10-27T18:31:00.000Z'))).find((c) => c.code === 'SHA')!.counts.overdue).toBe(1);
   });
@@ -244,9 +244,9 @@ describe('the client drawer: what the agent has seen (owner decision, 28 Oct 202
     const b = await startBatch(db, 1, 6, '2026-10-28T05:19:00.000Z');
     // Three accepted ops: two on tasks, one a decision (no task): two task changes.
     await finishBatch(db, b, { status: 'ok', errorCode: null, accepted: 3, rejected: 0, at: '2026-10-28T05:20:00.000Z' });
-    const t = task(db, 1, {});
-    for (const op of ['create_task', 'update_task']) recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op, detail: {}, reason: null, sourceIds: [], at: '2026-10-28T05:20:00.000Z' });
-    recordEvent(db, { taskId: null, clientId: 1, actor: 'ai', op: 'add_decision', detail: {}, reason: null, sourceIds: [], at: '2026-10-28T05:20:00.000Z' });
+    const t = await task(db, 1, {});
+    for (const op of ['create_task', 'update_task']) await recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op, detail: {}, reason: null, sourceIds: [], at: '2026-10-28T05:20:00.000Z' });
+    await recordEvent(db, { taskId: null, clientId: 1, actor: 'ai', op: 'add_decision', detail: {}, reason: null, sourceIds: [], at: '2026-10-28T05:20:00.000Z' });
     const failed = await startBatch(db, 1, 1, '2026-10-28T05:40:00.000Z');
     await finishBatch(db, failed, { status: 'failed', errorCode: 'x', accepted: null, rejected: null, at: '2026-10-28T05:41:00.000Z' });
     const a = (await clientDetail(db, 'SHA', NOW, undefined, 5))!.activity;

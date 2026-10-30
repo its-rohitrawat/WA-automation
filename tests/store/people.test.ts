@@ -23,7 +23,7 @@ describe('people repository', () => {
   it('sets roles and finds people by number', async () => {
     const db = await seededDb();
     await upsertPerson(db, { clientId: 1, jid: 'a@s.whatsapp.net', number: '911', name: 'Rahul', fromMe: false });
-    setRole(db, 1, 'a@s.whatsapp.net', 'team', 'human');
+    await setRole(db, 1, 'a@s.whatsapp.net', 'team', 'human');
     expect((await listPeople(db, 1))[0]).toMatchObject({ role: 'team', roleSetBy: 'human' });
     expect(await findPeopleByNumber(db, '911')).toHaveLength(1);
   });

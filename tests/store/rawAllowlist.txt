@@ -1,15 +1,11 @@
-assistant/proposals.ts
 assistant/tools.ts
 cli/commands.ts
-cli/corrections.ts
 cli/meetings.ts
 config/prioritySettings.ts
 config/settingsStore.ts
 control/groups.ts
-control/taskActions.ts
 health/uptimeLog.ts
 media/extract.ts
-meetings/sttParts.ts
 output/googleAuth.ts
 output/googleAuthHub.ts
 spend/spendGuard.ts
@@ -17,8 +13,6 @@ store/clients.ts
 store/db.ts
 store/kv.ts
 store/outbox.ts
-store/people.ts
-store/tasks.ts
 wa/authState.ts
 web/audit.ts
 web/routes/groups.ts

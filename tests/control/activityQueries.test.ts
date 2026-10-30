@@ -59,10 +59,10 @@ describe('listActivity', () => {
   it('merges every source, newest first, in plain words', async () => {
     const db = await seededDb();
     await batch(db, { at: at('05:00'), status: 'ok', messages: 18, accepted: 2, clientId: 2 });
-    const t = task(db, 'Revise <b>landing</b> page');
-    recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'add_task', detail: { title: 'chat words' }, reason: null, sourceIds: [], at: at('05:10') });
-    recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'mark_maybe_done', detail: {}, reason: null, sourceIds: [], at: at('05:20') });
-    closeTask(db, t.code, new Date(at('05:30')));
+    const t = await task(db, 'Revise <b>landing</b> page');
+    await recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'add_task', detail: { title: 'chat words' }, reason: null, sourceIds: [], at: at('05:10') });
+    await recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'mark_maybe_done', detail: {}, reason: null, sourceIds: [], at: at('05:20') });
+    await closeTask(db, t.code, new Date(at('05:30')));
     await meeting(db, 'done', at('05:40'));
     audit(db, { at: at('05:50'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'Tracker.xlsx uploaded to Drive' });
     await meeting(db, 'too_long', at('06:00'), { title: 'Launch prep', seconds: 196 * 60 });
@@ -110,8 +110,8 @@ describe('listActivity', () => {
     const db = await seededDb();
     await batch(db, { at: at('05:00'), status: 'ok', messages: 3 });
     await batch(db, { at: at('05:01'), status: 'failed', messages: 3 });
-    const t = task(db, 'Logo');
-    recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: at('05:02') });
+    const t = await task(db, 'Logo');
+    await recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: at('05:02') });
     await meeting(db, 'done', at('05:03'));
     await meeting(db, 'failed', at('05:04'));
     audit(db, { at: at('05:05'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'Tracker.xlsx uploaded to Drive' });
@@ -152,7 +152,7 @@ describe('listActivity', () => {
   it('skips running batches and events not about a task', async () => {
     const db = await seededDb();
     await startBatch(db, 1, 5, at('05:00'));
-    recordEvent(db, { taskId: null, clientId: 1, actor: 'ai', op: 'set_status', detail: { status: 'chat words' }, reason: null, sourceIds: [], at: at('05:01') });
+    await recordEvent(db, { taskId: null, clientId: 1, actor: 'ai', op: 'set_status', detail: { status: 'chat words' }, reason: null, sourceIds: [], at: at('05:01') });
     expect((await listActivity(db, params())).items).toEqual([]);
   });
 });
@@ -208,13 +208,13 @@ describe('activity review fixes', () => {
     const db = await seededDb();
     db.raw.prepare("INSERT INTO messages (wa_id, client_id, sender_jid, ts, media_type) VALUES ('V1', 1, 'x', ?, 'audio')").run(NOW);
     db.raw.prepare("INSERT INTO media (message_id, client_id, kind, status, created_at, updated_at) VALUES (1, 1, 'voice', 'done', ?, ?)").run(NOW, NOW);
-    const voice = createTask(db, { clientId: 1, side: 'us', title: 'From voice', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,
+    const voice = await createTask(db, { clientId: 1, side: 'us', title: 'From voice', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,
       raisedOn: '2026-10-19', deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: 'V1', origin: 'whatsapp' }, NOW);
     const mid = await meeting(db, 'done', at('04:00'));
-    const fromMeeting = createTask(db, { clientId: 1, side: 'us', title: 'From meeting', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,
+    const fromMeeting = await createTask(db, { clientId: 1, side: 'us', title: 'From meeting', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,
       raisedOn: '2026-10-19', deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'meeting', meetingId: mid }, NOW);
-    recordEvent(db, { taskId: voice.id, clientId: 1, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: at('05:00') });
-    recordEvent(db, { taskId: fromMeeting.id, clientId: 1, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: at('05:01') });
+    await recordEvent(db, { taskId: voice.id, clientId: 1, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: at('05:00') });
+    await recordEvent(db, { taskId: fromMeeting.id, clientId: 1, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: at('05:01') });
     expect((await listActivity(db, params({ kind: 'task' }))).items.map((i) => i.who)).toEqual(['from a meeting · Sharma Interiors', 'from a voice note · Sharma Interiors']);
   });
 

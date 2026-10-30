@@ -10,8 +10,8 @@ import { MEHTA, NOW, seededDb, SHARMA } from '../helpers/db.ts';
 // 13:30 IST on Monday 19 Oct.
 const now = new Date(NOW);
 
-function task(db: Db, clientId: number, o: { status?: 'open' | 'maybe_done' | 'done'; deadline?: string; closedOn?: string } = {}) {
-  const t = createTask(db, { clientId, side: 'us', title: 'Task', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-01',
+async function task(db: Db, clientId: number, o: { status?: 'open' | 'maybe_done' | 'done'; deadline?: string; closedOn?: string } = {}) {
+  const t = await createTask(db, { clientId, side: 'us', title: 'Task', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-01',
     deadline: o.deadline ?? null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp' }, NOW);
   db.raw.prepare('UPDATE tasks SET status = ?, closed_on = ? WHERE id = ?').run(o.status ?? 'open', o.closedOn ?? null, t.id);
   return t;
@@ -28,26 +28,26 @@ async function meeting(db: Db, startedAt: string, title = `Meeting ${++n}`): Pro
 describe('overview', () => {
   it('counts active clients and the four task numbers, split as the Tasks screen splits them', async () => {
     const db = await seededDb();
-    task(db, 1); // open
-    task(db, 1, { deadline: '2026-10-18' }); // overdue
-    task(db, 1, { status: 'maybe_done', deadline: '2026-10-18' }); // overdue (not review)
-    task(db, 1, { status: 'maybe_done' }); // review
-    task(db, 2, { status: 'done', closedOn: '2026-10-13' }); // done this week (6 days ago)
-    task(db, 2, { status: 'done', closedOn: '2026-10-12' }); // 7 days ago: not this week
+    await task(db, 1); // open
+    await task(db, 1, { deadline: '2026-10-18' }); // overdue
+    await task(db, 1, { status: 'maybe_done', deadline: '2026-10-18' }); // overdue (not review)
+    await task(db, 1, { status: 'maybe_done' }); // review
+    await task(db, 2, { status: 'done', closedOn: '2026-10-13' }); // done this week (6 days ago)
+    await task(db, 2, { status: 'done', closedOn: '2026-10-12' }); // 7 days ago: not this week
     expect(await overview(db, now)).toMatchObject({ clients: 2, tasks: { open: 1, overdue: 2, review: 1, doneThisWeek: 1 } });
   });
 
   it('dates overdue by the IST day at the midnight edges', async () => {
     const db = await seededDb();
-    task(db, 1, { deadline: '2026-10-19' });
+    await task(db, 1, { deadline: '2026-10-19' });
     expect((await overview(db, new Date('2026-10-19T18:29:00Z'))).tasks).toMatchObject({ overdue: 0, open: 1 }); // 23:59 IST on the 19th
     expect((await overview(db, new Date('2026-10-19T18:30:00Z'))).tasks).toMatchObject({ overdue: 1, open: 0 }); // 00:00 IST on the 20th
   });
 
   it('leaves inactive clients and their tasks out', async () => {
     const db = await seededDb();
-    task(db, 1);
-    task(db, 2, { deadline: '2026-10-01' });
+    await task(db, 1);
+    await task(db, 2, { deadline: '2026-10-01' });
     syncClients(db, [SHARMA]); // Mehta leaves the allow-list
     const o = await overview(db, now);
     expect(o.clients).toBe(1);
@@ -58,11 +58,11 @@ describe('overview', () => {
   it('gives each active client its segments in the agreed stack order: overdue, open, review, done', async () => {
     const db = await seededDb();
     syncClients(db, [SHARMA, MEHTA, { ...SHARMA, groupId: '120363000000000003@g.us', code: 'AAA', name: 'Aarav Tiles' }]);
-    task(db, 1, { deadline: '2026-10-01' });
-    task(db, 1);
-    task(db, 1);
-    task(db, 1, { status: 'maybe_done' });
-    task(db, 1, { status: 'done', closedOn: '2026-10-19' });
+    await task(db, 1, { deadline: '2026-10-01' });
+    await task(db, 1);
+    await task(db, 1);
+    await task(db, 1, { status: 'maybe_done' });
+    await task(db, 1, { status: 'done', closedOn: '2026-10-19' });
     expect((await overview(db, now)).byClient).toEqual([
       { client: { code: 'AAA', name: 'Aarav Tiles' }, segments: [{ key: 'overdue', count: 0 }, { key: 'open', count: 0 }, { key: 'review', count: 0 }, { key: 'done', count: 0 }] },
       { client: { code: 'MEH', name: 'Mehta Foods' }, segments: [{ key: 'overdue', count: 0 }, { key: 'open', count: 0 }, { key: 'review', count: 0 }, { key: 'done', count: 0 }] },
@@ -81,13 +81,13 @@ describe('overview', () => {
 
   it('merges the latest 5 activity items from batches and task events only, newest first', async () => {
     const db = await seededDb();
-    const t = task(db, 1);
+    const t = await task(db, 1);
     const at = (m: number) => `2026-10-19T05:0${m}:00.000Z`;
     for (const i of [0, 2, 4]) {
       const b = await startBatch(db, 1, i + 1, at(i));
       await finishBatch(db, b, { status: 'ok', errorCode: null, accepted: 0, rejected: 0, at: at(i) });
     }
-    for (const i of [1, 3, 5]) recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'update_task', detail: {}, reason: null, sourceIds: [], at: at(i) });
+    for (const i of [1, 3, 5]) await recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'update_task', detail: {}, reason: null, sourceIds: [], at: at(i) });
     await meeting(db, at(6)); // never in the Overview's activity
     db.raw.prepare("UPDATE meetings SET updated_at = ? WHERE id = 1").run(at(9));
     db.raw.prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, 'agent', 'tracker.published', 'ops', 'x')").run(at(8));

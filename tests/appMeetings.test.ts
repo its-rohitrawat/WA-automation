@@ -182,7 +182,7 @@ describe('app with meetings', () => {
     expect(drive.docs).toHaveLength(1);
     expect(m.docFileId).toBe(drive.docs[0]!.id);
     expect(ai.calls).toHaveLength(1); // the tracker step
-    expect(listTasks(db, 1).map((t) => [t.title, t.origin])).toEqual([['Send the logo files', 'meeting']]);
+    expect((await listTasks(db, 1)).map((t) => [t.title, t.origin])).toEqual([['Send the logo files', 'meeting']]);
     expect(spendRows(db).map((s) => s.kind)).toEqual(['stt', 'ai', 'ai']);
 
     // The finished meeting asks for a rebuild.

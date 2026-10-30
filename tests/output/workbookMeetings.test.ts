@@ -245,9 +245,9 @@ describe('meeting decisions', () => {
     const db = await seededDb();
     const good = await done(db, { startedAt: '2026-10-22T06:00:00.000Z', docFileId: 'docGood' });
     const bad = await done(db, { startedAt: '2026-10-21T06:00:00.000Z', docFileId: 'bad id' });
-    addDecision(db, { clientId: 1, text: 'Blue theme chosen', decidedOn: '2026-10-22', source: 'meeting', sourceWaId: null, meetingId: good }, NOW);
-    addDecision(db, { clientId: 1, text: 'Launch on 1 Nov', decidedOn: '2026-10-21', source: 'meeting', sourceWaId: null, meetingId: bad }, NOW);
-    addDecision(db, { clientId: 1, text: 'Logo approved', decidedOn: '2026-10-20', source: 'whatsapp', sourceWaId: 'm1' }, NOW);
+    await addDecision(db, { clientId: 1, text: 'Blue theme chosen', decidedOn: '2026-10-22', source: 'meeting', sourceWaId: null, meetingId: good }, NOW);
+    await addDecision(db, { clientId: 1, text: 'Launch on 1 Nov', decidedOn: '2026-10-21', source: 'meeting', sourceWaId: null, meetingId: bad }, NOW);
+    await addDecision(db, { clientId: 1, text: 'Logo approved', decidedOn: '2026-10-20', source: 'whatsapp', sourceWaId: 'm1' }, NOW);
     const ws = (await book(db)).getWorksheet('Sharma Interiors')!;
     const linked = rowWhere(ws, (r) => r.getCell(2).value === 'Blue theme chosen').getCell(3);
     expect(linked.value).toEqual({ text: 'Meeting', hyperlink: 'https://docs.google.com/document/d/docGood/edit' });
@@ -258,8 +258,8 @@ describe('meeting decisions', () => {
   it('puts the meeting’s Doc id on its decisions in the view', async () => {
     const db = await seededDb();
     const m = await done(db, { startedAt: '2026-10-22T06:00:00.000Z', docFileId: 'docGood' });
-    addDecision(db, { clientId: 1, text: 'Blue theme chosen', decidedOn: '2026-10-22', source: 'meeting', sourceWaId: null, meetingId: m }, NOW);
-    addDecision(db, { clientId: 1, text: 'Logo approved', decidedOn: '2026-10-20', source: 'whatsapp', sourceWaId: 'm1' }, NOW);
+    await addDecision(db, { clientId: 1, text: 'Blue theme chosen', decidedOn: '2026-10-22', source: 'meeting', sourceWaId: null, meetingId: m }, NOW);
+    await addDecision(db, { clientId: 1, text: 'Logo approved', decidedOn: '2026-10-20', source: 'whatsapp', sourceWaId: 'm1' }, NOW);
     expect((await sharma(db)).decisions.map((d) => [d.text, d.docFileId])).toEqual([['Blue theme chosen', 'docGood'], ['Logo approved', null]]);
   });
 });

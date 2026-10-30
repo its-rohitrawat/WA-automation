@@ -41,8 +41,8 @@ describe('workbook round 2', () => {
   it('floors % done so 199 of 200 is 99%', async () => {
     const db = await seededDb();
     for (let i = 0; i < 200; i++) {
-      const t = createTask(db, task({ title: `t${i}` }), NOW);
-      if (i < 199) setTaskStatus(db, t.id, 'done', '2026-10-15', NOW, 'ai');
+      const t = await createTask(db, task({ title: `t${i}` }), NOW);
+      if (i < 199) await setTaskStatus(db, t.id, 'done', '2026-10-15', NOW, 'ai');
     }
     const ov = (await build(db)).getWorksheet('Overview')!;
     expect(ov.getCell('C5').value).toBe(0.99);
@@ -50,33 +50,33 @@ describe('workbook round 2', () => {
 
   it('stops age at the closing date', async () => {
     const db = await seededDb();
-    const t = createTask(db, task(), NOW);
-    setTaskStatus(db, t.id, 'done', '2026-10-15', NOW, 'ai');
+    const t = await createTask(db, task(), NOW);
+    await setTaskStatus(db, t.id, 'done', '2026-10-15', NOW, 'ai');
     const ws = (await build(db)).getWorksheet('Sharma Interiors')!;
     expect(findByCell(ws, 1, 'SHA-001').getCell(9).value).toBe(5);
   });
 
   it('keeps maybe-done yellow even when overdue', async () => {
     const db = await seededDb();
-    const t = createTask(db, task(), NOW);
-    setTaskStatus(db, t.id, 'maybe_done', '2026-10-15', NOW, 'ai');
+    const t = await createTask(db, task(), NOW);
+    await setTaskStatus(db, t.id, 'maybe_done', '2026-10-15', NOW, 'ai');
     const ws = (await build(db)).getWorksheet('Sharma Interiors')!;
     expect((findByCell(ws, 1, 'SHA-001').getCell(1).fill as ExcelJS.FillPattern).fgColor?.argb).toBe('FFFFF1B8');
   });
 
   it('orders open tasks by priority, deadline (none last) and code; done by newest close', async () => {
     const db = await seededDb();
-    createTask(db, task({ title: 'low early', priority: 'low', deadline: '2026-10-01' }), NOW); // 001
-    createTask(db, task({ title: 'high none', priority: 'major', deadline: null }), NOW); // 002
-    createTask(db, task({ title: 'high late', priority: 'major', deadline: '2026-10-30' }), NOW); // 003
-    createTask(db, task({ title: 'high early', priority: 'major', deadline: '2026-10-20' }), NOW); // 004
-    createTask(db, task({ title: 'med', priority: 'medium', deadline: '2026-10-05' }), NOW); // 005
-    const d1 = createTask(db, task({ title: 'd1' }), NOW); // 006
-    const d2 = createTask(db, task({ title: 'd2' }), NOW); // 007
-    const d3 = createTask(db, task({ title: 'd3' }), NOW); // 008
-    setTaskStatus(db, d1.id, 'done', '2026-10-12', NOW, 'ai');
-    setTaskStatus(db, d2.id, 'done', '2026-10-16', NOW, 'ai');
-    setTaskStatus(db, d3.id, 'done', '2026-10-16', NOW, 'ai');
+    await createTask(db, task({ title: 'low early', priority: 'low', deadline: '2026-10-01' }), NOW); // 001
+    await createTask(db, task({ title: 'high none', priority: 'major', deadline: null }), NOW); // 002
+    await createTask(db, task({ title: 'high late', priority: 'major', deadline: '2026-10-30' }), NOW); // 003
+    await createTask(db, task({ title: 'high early', priority: 'major', deadline: '2026-10-20' }), NOW); // 004
+    await createTask(db, task({ title: 'med', priority: 'medium', deadline: '2026-10-05' }), NOW); // 005
+    const d1 = await createTask(db, task({ title: 'd1' }), NOW); // 006
+    const d2 = await createTask(db, task({ title: 'd2' }), NOW); // 007
+    const d3 = await createTask(db, task({ title: 'd3' }), NOW); // 008
+    await setTaskStatus(db, d1.id, 'done', '2026-10-12', NOW, 'ai');
+    await setTaskStatus(db, d2.id, 'done', '2026-10-16', NOW, 'ai');
+    await setTaskStatus(db, d3.id, 'done', '2026-10-16', NOW, 'ai');
     const v = (await loadTrackerView(db, now, healthy)).clients.find((c) => c.client.code === 'SHA')!;
     expect(v.usOpen.map((t) => t.code)).toEqual(['SHA-004', 'SHA-003', 'SHA-002', 'SHA-005', 'SHA-001']);
     expect(v.done.map((t) => t.code)).toEqual(['SHA-007', 'SHA-008', 'SHA-006']);
@@ -114,7 +114,7 @@ describe('workbook round 2', () => {
 
   it('breaks ties by creation order, not by text of the code', async () => {
     const db = await seededDb();
-    for (let i = 0; i < 1000; i++) createTask(db, task({ title: `t${i}`, deadline: null }), NOW);
+    for (let i = 0; i < 1000; i++) await createTask(db, task({ title: `t${i}`, deadline: null }), NOW);
     const codes = (await loadTrackerView(db, now, healthy)).clients.find((c) => c.client.code === 'SHA')!.usOpen.map((t) => t.code);
     expect(codes[998]).toBe('SHA-999');
     expect(codes[999]).toBe('SHA-1000');
@@ -122,8 +122,8 @@ describe('workbook round 2', () => {
 
   it('shows the revoked note with or without a quote', async () => {
     const db = await seededDb();
-    const a = createTask(db, task({ title: 'no quote', sourceQuote: null, sourceDate: null, sourceWaId: 'r1' }), NOW);
-    const b = createTask(db, task({ title: 'with quote', sourceWaId: 'r2' }), NOW);
+    const a = await createTask(db, task({ title: 'no quote', sourceQuote: null, sourceDate: null, sourceWaId: 'r1' }), NOW);
+    const b = await createTask(db, task({ title: 'with quote', sourceWaId: 'r2' }), NOW);
     db.raw.prepare('UPDATE tasks SET source_revoked = 1 WHERE id IN (?, ?)').run(a.id, b.id);
     const ws = (await build(db)).getWorksheet('Sharma Interiors')!;
     expect(findByCell(ws, 1, 'SHA-001').getCell(13).value).toBe('source message deleted by sender');
@@ -132,9 +132,9 @@ describe('workbook round 2', () => {
 
   it('renders milestones, decisions and people', async () => {
     const db = await seededDb();
-    logReminder(db, createTask(db, task(), NOW).id, '2026-10-13', NOW);
+    await logReminder(db, (await createTask(db, task(), NOW)).id, '2026-10-13', NOW);
     setPhase(db, 1, 'Design', 'human');
-    addDecision(db, { clientId: 1, text: 'Use the blue theme', decidedOn: '2026-10-12', source: 'whatsapp', sourceWaId: null }, NOW);
+    await addDecision(db, { clientId: 1, text: 'Use the blue theme', decidedOn: '2026-10-12', source: 'whatsapp', sourceWaId: null }, NOW);
     await upsertPerson(db, { clientId: 1, jid: '9199@s.whatsapp.net', number: '9199', name: 'Mr. Sharma', fromMe: false });
     const ws = (await build(db)).getWorksheet('Sharma Interiors')!;
     expect(findByCell(ws, 1, 'Discovery').getCell(2).value).toBe('✅ Done');
@@ -156,7 +156,7 @@ describe('workbook round 2', () => {
 
   it('keeps decisions, status text and people as text, never formulas', async () => {
     const db = await seededDb();
-    addDecision(db, { clientId: 1, text: '=1+1', decidedOn: '2026-10-12', source: 'whatsapp', sourceWaId: null }, NOW);
+    await addDecision(db, { clientId: 1, text: '=1+1', decidedOn: '2026-10-12', source: 'whatsapp', sourceWaId: null }, NOW);
     setStatus(db, 1, '=SUM(1,2)', NOW);
     await upsertPerson(db, { clientId: 1, jid: 'j1', number: null, name: '+cmd', fromMe: false });
     const wb = await build(db);
@@ -180,7 +180,7 @@ describe('workbook round 2', () => {
 
   it('limits the AutoFilter to the header and data rows', async () => {
     const db = await seededDb();
-    createTask(db, task(), NOW);
+    await createTask(db, task(), NOW);
     const wb = await build(db);
     const ws = wb.getWorksheet('Sharma Interiors')!;
     const header = findByCell(ws, 1, 'ID').number;

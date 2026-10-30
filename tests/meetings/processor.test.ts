@@ -142,9 +142,9 @@ describe('MeetingProcessor: found to done', () => {
     expect(w.trackerAi.calls).toHaveLength(1);
     expect(w.stt.forgotten).toEqual(['tr-1']);
 
-    expect(listTasks(w.db, 1).map((t) => ({ title: t.title, origin: t.origin }))).toEqual([{ title: 'Send the logo files', origin: 'meeting' }]);
+    expect((await listTasks(w.db, 1)).map((t) => ({ title: t.title, origin: t.origin }))).toEqual([{ title: 'Send the logo files', origin: 'meeting' }]);
     expect(w.db.raw.prepare('SELECT meeting_id AS meetingId FROM tasks').all()).toEqual([{ meetingId: w.id }]);
-    expect(listDecisions(w.db, 1, 10)).toEqual([]);
+    expect(await listDecisions(w.db, 1, 10)).toEqual([]);
 
     expect(spendRows(w).map((s) => [s.kind, s.detail])).toEqual([
       ['stt', `meeting ${w.id} part 1`],
@@ -270,7 +270,7 @@ describe('MeetingProcessor: resuming', () => {
     expect(w.drive.docs).toHaveLength(1);
     expect(w.trackerAi.calls).toHaveLength(1);
     expect(spendRows(w).map((s) => s.kind)).toEqual(['stt', 'ai', 'ai']);
-    expect(listTasks(w.db, 1)).toHaveLength(1);
+    expect(await listTasks(w.db, 1)).toHaveLength(1);
   });
 
   it('a stage cut off by a crash waits out its claim, with the attempt counted', async () => {
@@ -490,7 +490,7 @@ describe('MeetingProcessor: failures', () => {
     expect(await row(w)).toMatchObject({ status: 'failed', errorCode: 'ai_invalid_output', stage: 'doc' });
     expect(w.trackerAi.calls).toHaveLength(2);
     expect(spendRows(w).map((r) => r.kind)).toEqual(['ai', 'ai']);
-    expect(listTasks(w.db, 1)).toEqual([]);
+    expect(await listTasks(w.db, 1)).toEqual([]);
   });
 
   it('a row missing what its stage needs is retried with a real code, and a plain Error is stored as unknown', async () => {

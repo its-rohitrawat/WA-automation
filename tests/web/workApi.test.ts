@@ -16,7 +16,7 @@ afterEach(async () => {
 async function boot(o: { paused?: boolean; actionCapacity?: number } = {}) {
   const db = await seededDb();
   const clock = manualClock(NOW);
-  createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
+  await createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
     deadline: null, latestProgress: null, sourceQuote: 'secret words from the chat', sourceDate: '2026-10-10', sourceWaId: null, origin: 'whatsapp' }, NOW);
   await insertFound(db, {
     recording: 'conferenceRecords/a/recordings/b', conference: 'conferenceRecords/a', driveFileId: 'd1', meetingCode: null, title: 'Weekly sync',
@@ -73,7 +73,7 @@ describe('work API: changes', () => {
       const r = await h.post('/dashboard/api/tasks/SHA-001/done', x);
       expect(r.status, JSON.stringify(x)).toBe(x.cookie === null ? 401 : 403);
     }
-    expect(getTaskByCode(db, 'SHA-001')?.status).toBe('open');
+    expect((await getTaskByCode(db, 'SHA-001'))?.status).toBe('open');
     expect(auditRows(db)).toEqual([]);
   });
 
@@ -81,7 +81,7 @@ describe('work API: changes', () => {
     const { db, h } = await boot();
     const r = await h.post('/dashboard/api/tasks/SHA-001/done');
     expect(r).toMatchObject({ status: 200, json: { code: 'SHA-001', status: 'done' } });
-    expect(getTaskByCode(db, 'SHA-001')?.status).toBe('done');
+    expect((await getTaskByCode(db, 'SHA-001'))?.status).toBe('done');
     const rows = auditRows(db);
     expect(rows).toEqual([{ actor: OWNER, event: 'task.done', kind: 'task', detail: 'Task SHA-001 marked done', requestId: expect.stringMatching(/^[0-9a-f]{12}$/) }]);
     expect(JSON.stringify(rows)).not.toContain('secret');
@@ -98,7 +98,7 @@ describe('work API: changes', () => {
     });
     expect((await h.post('/dashboard/api/tasks/SHA-001/edit')).status).toBe(400); // no JSON body
     expect((await h.post('/dashboard/api/tasks/SHA-001/delete')).status).toBe(400);
-    expect(getTaskByCode(db, 'SHA-001')?.deadline).toBe('2026-10-30');
+    expect((await getTaskByCode(db, 'SHA-001'))?.deadline).toBe('2026-10-30');
   });
 
   it('assigns a meeting with the cost warning, and refuses a retry at the spend cap', async () => {

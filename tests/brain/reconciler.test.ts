@@ -37,8 +37,8 @@ async function store(db: Db, waId: string, text: string | null, ts = '2026-10-19
   await upsertPerson(db, { clientId, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
 }
 
-function banner(db: Db): void {
-  createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
+async function banner(db: Db): Promise<void> {
+  await createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
     deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp' }, NOW);
 }
 
@@ -93,11 +93,11 @@ describe('Reconciler', () => {
     await store(db, 'm2', 'Blue theme final karte hain', '2026-10-19T07:30:00.000Z');
 
     expect(await r.run(1)).toEqual({ status: 'ok', accepted: 4, rejected: 1 });
-    expect(listTasks(db, 1)[0]).toMatchObject({
+    expect((await listTasks(db, 1))[0]).toMatchObject({
       code: 'SHA-001', title: 'Revise homepage banner', side: 'us', assignedTo: 'Rahul', askedBy: 'Mr. Sharma', raisedOn: '2026-10-19',
       deadline: '2026-10-18', sourceQuote: 'Rahul, homepage banner thoda bright karo. 18 tak chahiye.', sourceWaId: 'm1', status: 'open',
     });
-    expect(listDecisions(db, 1)[0]).toMatchObject({ text: 'Blue theme chosen', decidedOn: '2026-10-19', source: 'whatsapp' });
+    expect((await listDecisions(db, 1))[0]).toMatchObject({ text: 'Blue theme chosen', decidedOn: '2026-10-19', source: 'whatsapp' });
     expect(getClient(db, 1).statusText).toBe('Homepage banner is being revised.');
     expect((await listPeople(db, 1))[0]).toMatchObject({ role: 'client', roleSetBy: 'ai' });
     expect(await listUnprocessed(db, 1)).toHaveLength(0);
@@ -115,11 +115,11 @@ describe('Reconciler', () => {
       op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['m3'] }),
       op({ op: 'close_task', taskCode: 'SHA-001', sourceMessageIds: ['m4'] }),
     ] }]);
-    banner(db);
+    await banner(db);
     await store(db, 'm3', 'Banner ka update?', '2026-10-18T05:00:00.000Z');
     await store(db, 'm4', 'Perfect, approved 👍', '2026-10-18T19:00:00.000Z');
     await r.run(1);
-    expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ latestProgress: 'v2 shared', reminderCount: 1, lastReminderOn: '2026-10-18', status: 'done', closedOn: '2026-10-19' });
+    expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ latestProgress: 'v2 shared', reminderCount: 1, lastReminderOn: '2026-10-18', status: 'done', closedOn: '2026-10-19' });
   });
 
   it('creates a task that is already done, closed on the date of its last source message', async () => {
@@ -130,30 +130,30 @@ describe('Reconciler', () => {
     await store(db, 'm2', null, '2026-10-18T05:00:00.000Z', 1, 'document');
     expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
     expect(ai.calls[0]!.user).toMatch(/^\[m2\] .*\]: \{document\}$/m);
-    expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', raisedOn: '2026-10-17', closedOn: '2026-10-18' });
+    expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', raisedOn: '2026-10-17', closedOn: '2026-10-18' });
     const ev = db.raw.prepare('SELECT detail FROM task_events').get() as { detail: string };
     expect(JSON.parse(ev.detail)).toMatchObject({ code: 'SHA-001', status: 'done' });
   });
 
   it('reopens a maybe-done task', async () => {
     const { db, r } = await setup([{ ops: [op({ op: 'reopen_task', taskCode: 'SHA-001', sourceMessageIds: ['m1'] })] }]);
-    banner(db);
-    setTaskStatus(db, getTaskByCode(db, 'SHA-001')!.id, 'maybe_done', '2026-10-18', NOW, 'ai');
+    await banner(db);
+    await setTaskStatus(db, (await getTaskByCode(db, 'SHA-001'))!.id, 'maybe_done', '2026-10-18', NOW, 'ai');
     await store(db, 'm1', 'abhi bhi dark hai');
     expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
-    expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open', closedOn: null });
+    expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open', closedOn: null });
   });
 
   it('closes a task on the processing date when the evidence is a new reaction to an old message', async () => {
     const { db, r } = await setup([{ ops: [op({ op: 'close_task', taskCode: 'SHA-001', sourceMessageIds: ['m1'] })] }]);
-    banner(db);
+    await banner(db);
     await store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
     await markProcessed(db, (await listUnprocessed(db, 1)).map((m) => m.id), '2026-10-12T06:00:00.000Z');
     await upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '✅', ts: '2026-10-19T07:55:00.000Z' });
     expect((await listUnprocessed(db, 1))[0]).toMatchObject({ waId: 'm1', requeueReason: 'reaction' });
 
     expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
-    expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-19' });
+    expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-19' });
   });
 
   it('logs how many operations the model got wrong, never their content', async () => {
@@ -175,13 +175,13 @@ describe('Reconciler', () => {
     db.raw.exec("CREATE TRIGGER fail_decisions BEFORE INSERT ON decisions BEGIN SELECT RAISE(ABORT, 'test failure'); END");
 
     expect(await r.run(1)).toEqual({ status: 'failed', errorCode: 'apply_failed' });
-    expect(listTasks(db, 1)).toHaveLength(0);
+    expect(await listTasks(db, 1)).toHaveLength(0);
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM task_events').get()).toEqual({ n: 0 });
     expect(await listUnprocessed(db, 1)).toHaveLength(1);
     expect((await latestBatches(db))[0]).toMatchObject({ status: 'failed', errorCode: 'apply_failed' });
     expect(onChanged).not.toHaveBeenCalled();
-    banner(db);
-    expect(listTasks(db, 1)[0]!.code).toBe('SHA-001'); // the task-code counter rolled back too
+    await banner(db);
+    expect((await listTasks(db, 1))[0]!.code).toBe('SHA-001'); // the task-code counter rolled back too
   });
 
   it('retries once on unparseable output, then fails and leaves messages queued', async () => {
@@ -359,24 +359,24 @@ describe('Reconciler', () => {
 
   it('uses the processing date when any source is a re-checked message', async () => {
     const { db, r } = await setup([{ ops: [op({ op: 'close_task', taskCode: 'SHA-001', sourceMessageIds: ['m1', 'm2'] })] }]);
-    banner(db);
+    await banner(db);
     await store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
     await markProcessed(db, (await listUnprocessed(db, 1)).map((m) => m.id), '2026-10-12T06:00:00.000Z');
     await upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '✅', ts: '2026-10-19T07:55:00.000Z' });
     await store(db, 'm2', 'Thanks team', '2026-10-18T05:00:00.000Z'); // the latest source is a fresh message from yesterday
     expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
-    expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-19' });
+    expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-19' });
   });
 
   describe('human status lock and re-checked evidence', () => {
     const close = () => op({ op: 'close_task', taskCode: 'SHA-001', sourceMessageIds: ['m1'] });
     /** SHA-001 reopened by a human at 06:00Z; m1 is an old delivery message (sent before that) that was already processed. */
     async function reopenedWithOldDelivery(db: Db): Promise<void> {
-      banner(db);
+      await banner(db);
       await store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
       await markProcessed(db, (await listUnprocessed(db, 1)).map((m) => m.id), '2026-10-12T06:00:00.000Z');
-      closeTask(db, 'SHA-001', new Date('2026-10-19T05:00:00Z'));
-      reopenTask(db, 'SHA-001', new Date('2026-10-19T06:00:00Z'));
+      await closeTask(db, 'SHA-001', new Date('2026-10-19T05:00:00Z'));
+      await reopenTask(db, 'SHA-001', new Date('2026-10-19T06:00:00Z'));
     }
 
     it('accepts a close backed by a ✅ reaction made after the human reopened the task', async () => {
@@ -384,19 +384,19 @@ describe('Reconciler', () => {
       await reopenedWithOldDelivery(db);
       await upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '✅', ts: '2026-10-19T07:00:00.000Z' });
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
-      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done' });
+      expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done' });
     });
 
     it('still rejects a close backed by a reaction made before the human reopened the task', async () => {
       const { db, r } = await setup([{ ops: [close()] }]);
-      banner(db);
+      await banner(db);
       await store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
       await markProcessed(db, (await listUnprocessed(db, 1)).map((m) => m.id), '2026-10-12T06:00:00.000Z');
       await upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '✅', ts: '2026-10-19T04:00:00.000Z' });
-      closeTask(db, 'SHA-001', new Date('2026-10-19T05:00:00Z'));
-      reopenTask(db, 'SHA-001', new Date('2026-10-19T06:00:00Z'));
+      await closeTask(db, 'SHA-001', new Date('2026-10-19T05:00:00Z'));
+      await reopenTask(db, 'SHA-001', new Date('2026-10-19T06:00:00Z'));
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
-      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open' });
+      expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open' });
     });
 
     it('accepts a close backed by an edit made after the human reopened the task', async () => {
@@ -404,7 +404,7 @@ describe('Reconciler', () => {
       await reopenedWithOldDelivery(db);
       await applyEdit(db, 1, 'm1', 'Banner v4 attached, final', '2026-10-19T07:00:00.000Z');
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
-      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done' });
+      expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done' });
     });
 
     /** A shared image of m1, still pending. */
@@ -420,31 +420,31 @@ describe('Reconciler', () => {
       await readAt(db, await fileOf(db), '2026-10-19T07:00:00.000Z');
       expect(await listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: null })]);
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
-      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open' });
+      expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open' });
     });
 
     it('accepts a close backed by a file sent after the human reopened the task and read later, closed on the day it was sent (12h, I2)', async () => {
       const { db, r } = await setup([{ ops: [close()] }]);
-      banner(db);
-      closeTask(db, 'SHA-001', new Date('2026-10-17T05:00:00Z'));
-      reopenTask(db, 'SHA-001', new Date('2026-10-17T06:00:00Z'));
+      await banner(db);
+      await closeTask(db, 'SHA-001', new Date('2026-10-17T05:00:00Z'));
+      await reopenTask(db, 'SHA-001', new Date('2026-10-17T06:00:00Z'));
       await store(db, 'm1', 'Banner v3 attached', '2026-10-18T05:00:00.000Z');
       const id = await fileOf(db);
       await markProcessed(db, (await listUnprocessed(db, 1)).map((m) => m.id), '2026-10-18T06:00:00.000Z'); // the file was still being read
       await readAt(db, id, '2026-10-19T07:00:00.000Z');
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
-      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-18' });
+      expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-18' });
     });
 
     it('closes on the day the message was sent, not the processing date, when its only re-check is a file read late (12h, I2)', async () => {
       const { db, r } = await setup([{ ops: [close()] }]);
-      banner(db);
+      await banner(db);
       await store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
       const id = await fileOf(db);
       await markProcessed(db, (await listUnprocessed(db, 1)).map((m) => m.id), '2026-10-12T06:00:00.000Z');
       await readAt(db, id, '2026-10-19T07:00:00.000Z');
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
-      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-12' });
+      expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', closedOn: '2026-10-12' });
     });
 
     it('never closes a task before the day it was raised: a file re-check of an earlier message closes a task raised later on its raised day (12h)', async () => {
@@ -453,38 +453,38 @@ describe('Reconciler', () => {
       const id = await fileOf(db);
       await store(db, 'm2', 'Homepage banner bhi chahiye', '2026-10-15T05:00:00.000Z');
       await markProcessed(db, (await listUnprocessed(db, 1)).map((m) => m.id), '2026-10-15T06:00:00.000Z'); // m1's file was still being read
-      createTask(db, { clientId: 1, side: 'us', title: 'Homepage banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-15',
+      await createTask(db, { clientId: 1, side: 'us', title: 'Homepage banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-15',
         deadline: null, latestProgress: null, sourceQuote: null, sourceDate: '2026-10-15', sourceWaId: 'm2', origin: 'whatsapp' }, NOW); // raised by the later m2
       await readAt(db, id, '2026-10-19T07:00:00.000Z');
       expect(await listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: null })]);
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
-      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', raisedOn: '2026-10-15', closedOn: '2026-10-15' });
+      expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', raisedOn: '2026-10-15', closedOn: '2026-10-15' });
     });
 
     it('a reminder in a file read late counts, but never moves the last reminder date back (12h, final review)', async () => {
       const { db, r } = await setup([{ ops: [op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['m1'] })] }]);
-      banner(db);
+      await banner(db);
       await store(db, 'm1', 'Banner ka kya hua?', '2026-10-12T05:00:00.000Z');
       const id = await fileOf(db);
       await markProcessed(db, (await listUnprocessed(db, 1)).map((m) => m.id), '2026-10-12T06:00:00.000Z'); // the file was still being read
-      logReminder(db, getTaskByCode(db, 'SHA-001')!.id, '2026-10-15', NOW); // a later chase, in text
+      await logReminder(db, (await getTaskByCode(db, 'SHA-001'))!.id, '2026-10-15', NOW); // a later chase, in text
       await readAt(db, id, '2026-10-19T07:00:00.000Z');
       expect(await listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: null })]);
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
-      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ reminderCount: 2, lastReminderOn: '2026-10-15' });
+      expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ reminderCount: 2, lastReminderOn: '2026-10-15' });
     });
 
     it('still rejects a close backed by a file read before the human reopened the task (12h)', async () => {
       const { db, r } = await setup([{ ops: [close()] }]);
-      banner(db);
+      await banner(db);
       await store(db, 'm1', 'Banner v3 attached', '2026-10-12T05:00:00.000Z');
       const id = await fileOf(db);
       await markProcessed(db, (await listUnprocessed(db, 1)).map((m) => m.id), '2026-10-12T06:00:00.000Z');
       await readAt(db, id, '2026-10-19T04:00:00.000Z');
-      closeTask(db, 'SHA-001', new Date('2026-10-19T05:00:00Z'));
-      reopenTask(db, 'SHA-001', new Date('2026-10-19T06:00:00Z'));
+      await closeTask(db, 'SHA-001', new Date('2026-10-19T05:00:00Z'));
+      await reopenTask(db, 'SHA-001', new Date('2026-10-19T06:00:00Z'));
       expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
-      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open' });
+      expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open' });
     });
 
     it.each([
@@ -498,7 +498,7 @@ describe('Reconciler', () => {
       await upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '✅', ts: reacted });
       expect(await listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: 'reaction' })]);
       expect(await r.run(1)).toEqual({ status: 'ok', accepted, rejected: 1 - accepted });
-      expect(getTaskByCode(db, 'SHA-001')).toMatchObject(accepted ? { status: 'done', closedOn: '2026-10-19' } : { status: 'open' });
+      expect(await getTaskByCode(db, 'SHA-001')).toMatchObject(accepted ? { status: 'done', closedOn: '2026-10-19' } : { status: 'open' });
     });
 
     it.each([
@@ -511,7 +511,7 @@ describe('Reconciler', () => {
       await applyEdit(db, 1, 'm1', 'Banner v4 attached, final', edited);
       expect(await listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: 'edit' })]);
       expect(await r.run(1)).toEqual({ status: 'ok', accepted, rejected: 1 - accepted });
-      expect(getTaskByCode(db, 'SHA-001')).toMatchObject(accepted ? { status: 'done', closedOn: '2026-10-19' } : { status: 'open' });
+      expect(await getTaskByCode(db, 'SHA-001')).toMatchObject(accepted ? { status: 'done', closedOn: '2026-10-19' } : { status: 'open' });
     });
   });
 
@@ -555,21 +555,21 @@ describe('Reconciler', () => {
     const { db, r } = await setup([{ ops: [op({ op: 'add_task', side: 'us', title: 'Banner', category: 'design', priority: 'low', sourceMessageIds: ['m1'] })] }]);
     await store(db, 'm1', '👍'.repeat(130));
     await r.run(1);
-    expect(getTaskByCode(db, 'SHA-001')!.sourceQuote).toBe('👍'.repeat(120));
+    expect((await getTaskByCode(db, 'SHA-001'))!.sourceQuote).toBe('👍'.repeat(120));
   });
 
   describe('changes that land while the AI call is in flight', () => {
     it('keeps a field a human locked during the call', async () => {
       const { db, ai, r } = await setup([{ ops: [op({ op: 'update_task', taskCode: 'SHA-001', title: 'AI title', sourceMessageIds: ['m1'] })] }]);
-      banner(db);
+      await banner(db);
       await store(db, 'm1', 'Banner ka naam badlo');
       const open = hold(ai);
       const run = r.run(1);
       await open.started();
-      updateTaskFields(db, getTaskByCode(db, 'SHA-001')!.id, { title: 'Human title' }, LATER, 'human');
+      await updateTaskFields(db, (await getTaskByCode(db, 'SHA-001'))!.id, { title: 'Human title' }, LATER, 'human');
       open();
       expect(await run).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
-      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ title: 'Human title', lockedFields: ['title'] });
+      expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ title: 'Human title', lockedFields: ['title'] });
     });
 
     it('keeps a role a human set during the call', async () => {
@@ -578,7 +578,7 @@ describe('Reconciler', () => {
       const open = hold(ai);
       const run = r.run(1);
       await open.started();
-      setRole(db, 1, SHARMA_PN, 'client', 'human');
+      await setRole(db, 1, SHARMA_PN, 'client', 'human');
       open();
       expect(await run).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
       expect((await listPeople(db, 1))[0]).toMatchObject({ role: 'client', roleSetBy: 'human' });
@@ -656,7 +656,7 @@ describe('Reconciler', () => {
         expect(await r.run(1)).toEqual({ status: 'ok', accepted: 0, rejected: 1 }); // the same add_task again
         expect(lineOf(ai, 1)).toContain(' (re-check: new reaction): print 500, A5');
         expect(lineOf(ai, 1)).not.toContain('re-check: edited');
-        expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
+        expect(await getTaskByCode(db, 'SHA-002')).toBeUndefined();
         expect(processedAt(db, 'm1')).not.toBeNull();
       });
 
@@ -678,7 +678,7 @@ describe('Reconciler', () => {
 
         expect(await r.run(1)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
         expect(lineOf(ai, 1)).toContain(' (re-check: edited): print 600, A5');
-        expect(getTaskByCode(db, 'SHA-002')).toMatchObject({ title: 'Print 600 flyers' });
+        expect(await getTaskByCode(db, 'SHA-002')).toMatchObject({ title: 'Print 600 flyers' });
       });
     });
 
@@ -691,7 +691,7 @@ describe('Reconciler', () => {
       await applyRevoke(db, 1, 'm1');
       open();
       expect(await run).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
-      expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ sourceWaId: 'm1', sourceRevoked: true });
+      expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ sourceWaId: 'm1', sourceRevoked: true });
     });
   });
 
@@ -700,11 +700,11 @@ describe('Reconciler', () => {
     const { db, r } = await setup([{ ops: [add] }, { ops: [add] }]);
     await store(db, 'm1', 'banner chahiye');
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
-    closeTask(db, 'SHA-001', new Date('2026-10-19T08:30:00Z'));
+    await closeTask(db, 'SHA-001', new Date('2026-10-19T08:30:00Z'));
     expect(await requestReprocess(db, 'SHA', '2026-10-19', new Date('2026-10-19T08:31:00Z'), undefined)).toBe(1);
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 0, rejected: 1 });
-    expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
-    expect(getTaskByCode(db, 'SHA-001')?.status).toBe('done');
+    expect(await getTaskByCode(db, 'SHA-002')).toBeUndefined();
+    expect((await getTaskByCode(db, 'SHA-001'))?.status).toBe('done');
   });
 
   it('does not turn a follow-up that logged a reminder into a new task after the task was closed', async () => {
@@ -718,26 +718,26 @@ describe('Reconciler', () => {
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
     await store(db, 'm2', 'banner ka update?', '2026-10-19T05:00:00.000Z');
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
-    expect(getTaskByCode(db, 'SHA-001')?.reminderCount).toBe(1);
-    closeTask(db, 'SHA-001', new Date('2026-10-19T08:30:00Z'));
+    expect((await getTaskByCode(db, 'SHA-001'))?.reminderCount).toBe(1);
+    await closeTask(db, 'SHA-001', new Date('2026-10-19T08:30:00Z'));
     expect(await requestReprocess(db, 'SHA', '2026-10-19', new Date('2026-10-19T08:31:00Z'))).toBe(1); // m2 only
 
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 0, rejected: 1 });
-    expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
+    expect(await getTaskByCode(db, 'SHA-002')).toBeUndefined();
     expect(info).toHaveBeenCalledWith(expect.objectContaining({ op: 'add_task', why: 'task already exists for this message' }), 'operation rejected');
   });
 
   it('does not count a chaser again when it later gets a 👍 reaction', async () => {
     const remind = op({ op: 'log_reminder', taskCode: 'SHA-001', sourceMessageIds: ['m1'] });
     const { db, r } = await setup([{ ops: [remind] }, { ops: [remind] }]);
-    banner(db);
+    await banner(db);
     await store(db, 'm1', 'Banner ka update?', '2026-10-19T05:00:00.000Z');
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
     await upsertReaction(db, { clientId: 1, targetWaId: 'm1', reactorJid: SHARMA_PN, emoji: '👍', ts: '2026-10-19T07:30:00.000Z' });
     expect(await listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: 'reaction' })]);
 
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 0, rejected: 1 });
-    expect(getTaskByCode(db, 'SHA-001')!.reminderCount).toBe(1);
+    expect((await getTaskByCode(db, 'SHA-001'))!.reminderCount).toBe(1);
   });
 
   it('still creates a task from an edit re-check that adds new work', async () => {
@@ -750,7 +750,7 @@ describe('Reconciler', () => {
     expect(await listUnprocessed(db, 1)).toEqual([expect.objectContaining({ waId: 'm1', requeueReason: 'edit' })]);
 
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1, rejected: 0 });
-    expect(getTaskByCode(db, 'SHA-002')).toMatchObject({ title: 'Logo' });
+    expect(await getTaskByCode(db, 'SHA-002')).toMatchObject({ title: 'Logo' });
   });
 
   it('blocks a replay that cites only a later message of the original task (GapB)', async () => {
@@ -760,9 +760,9 @@ describe('Reconciler', () => {
     await store(db, 'm1', 'banner');
     await store(db, 'm2', 'urgent', '2026-10-19T07:10:00.000Z');
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 1 });
-    closeTask(db, 'SHA-001', new Date('2026-10-19T08:30:00Z'));
+    await closeTask(db, 'SHA-001', new Date('2026-10-19T08:30:00Z'));
     expect(await requestReprocess(db, 'SHA', '2026-10-19', new Date('2026-10-19T08:31:00Z'))).toBe(2);
     expect(await r.run(1)).toMatchObject({ status: 'ok', accepted: 0, rejected: 1 });
-    expect(getTaskByCode(db, 'SHA-002')).toBeUndefined();
+    expect(await getTaskByCode(db, 'SHA-002')).toBeUndefined();
   });
 });

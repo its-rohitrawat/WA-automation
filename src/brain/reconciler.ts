@@ -256,8 +256,8 @@ export class Reconciler {
     const firstNew = batch.find((m) => !isRecheck(m));
     const recent = await listRecentProcessed(db, clientId, 30, firstNew?.ts);
     const people = await listPeople(db, clientId);
-    const openTasks = listTasks(db, clientId, ['open', 'maybe_done']);
-    const decisions = listDecisions(db, clientId, 20);
+    const openTasks = await listTasks(db, clientId, ['open', 'maybe_done']);
+    const decisions = await listDecisions(db, clientId, 20);
     const reactions = await reactionsFor(db, clientId, [...recent, ...batch].map((m) => m.waId));
     const media = await mediaForPrompt(db, batch, recent);
     const mediaText = mediaPromptTexts(media, batch, recent);
@@ -310,7 +310,7 @@ export class Reconciler {
         const fresh = getClient(db, clientId);
         const state = await this.#validationState(q, fresh, clientId, { batchIds, contextIds, messageTs, editedIds, source: 'whatsapp' });
         const { accepted, rejected } = validateOps(result.output.ops, state);
-        for (const op of accepted) this.#apply(fresh, op, evidence, appliedAt, rules);
+        for (const op of accepted) await this.#apply(q, fresh, op, evidence, appliedAt, rules);
         // fileUnread: the prompt showed the file as still being read. If it was read during the call, the message stays
         // queued as a "file now read" re-check. fileShown: the prompt showed the file's text as a "file now read"
         // re-check, so a message queued again for an edit or a reaction does not show it as one again (amendment 12h).
@@ -372,8 +372,8 @@ export class Reconciler {
     const user = buildUserContent({
       client,
       people: await listPeople(db, clientId),
-      openTasks: listTasks(db, clientId, ['open', 'maybe_done']),
-      decisions: listDecisions(db, clientId, 20),
+      openTasks: await listTasks(db, clientId, ['open', 'maybe_done']),
+      decisions: await listDecisions(db, clientId, 20),
       recent,
       batch: [],
       reactions,
@@ -413,7 +413,7 @@ export class Reconciler {
           source: 'meeting',
         });
         const { accepted, rejected } = validateOps(result.output.ops, state);
-        for (const op of accepted) this.#apply(fresh, op, evidence, appliedAt, rules);
+        for (const op of accepted) await this.#apply(q, fresh, op, evidence, appliedAt, rules);
         await finishMeeting(q, meeting.id, { at: appliedAt.toISOString() });
         return { accepted, rejected };
       });
@@ -455,19 +455,18 @@ export class Reconciler {
     clientId: number,
     run: Pick<ValidationState, 'batchIds' | 'contextIds' | 'messageTs' | 'editedIds' | 'source'>,
   ): Promise<ValidationState> {
-    const { db } = this.#o;
     return {
       clientCode: fresh.code,
       phases: fresh.phases,
       phaseLocked: fresh.phaseLocked,
-      tasksByCode: new Map(listTasks(db, clientId, ['open', 'maybe_done']).map((t) => [t.code, t])),
+      tasksByCode: new Map((await listTasks(q, clientId, ['open', 'maybe_done'])).map((t) => [t.code, t])),
       batchIds: run.batchIds,
       contextIds: run.contextIds,
       messageTs: run.messageTs,
       peopleByJid: new Map((await listPeople(q, clientId)).map((p) => [p.jid, p])),
-      taskSourceIds: taskSourceIds(db, clientId),
-      reminderSourceIds: reminderSourceIds(db, clientId),
-      decisionSourceIds: decisionSourceIds(db, clientId),
+      taskSourceIds: await taskSourceIds(q, clientId),
+      reminderSourceIds: await reminderSourceIds(q, clientId),
+      decisionSourceIds: await decisionSourceIds(q, clientId),
       editedIds: run.editedIds,
       source: run.source,
     };
@@ -525,7 +524,11 @@ export class Reconciler {
     return next && next.level !== t.priority ? next : null;
   }
 
-  #apply(client: ClientRow, op: AiOp, evidence: Map<string, Evidence>, at: Date, rules: RunRules): void {
+  /**
+   * Applies one validated op on the run's transaction handle q. The client functions are not converted yet (S1.12): they
+   * run on raw, which is allowed inside this transaction.
+   */
+  async #apply(q: Sql, client: ClientRow, op: AiOp, evidence: Map<string, Evidence>, at: Date, rules: RunRules): Promise<void> {
     const { db } = this.#o;
     const nowIso = at.toISOString();
     const cited = op.sourceMessageIds.map((id) => evidence.get(id)).filter((e): e is Evidence => e !== undefined);
@@ -544,16 +547,16 @@ export class Reconciler {
     // "file now read" re-check alone is not (amendment 12h): the file is dated like the message that shared it.
     const lastDate = sources.some((e) => e.kind === 'message' && e.recheck) ? istDate(at) : dateOf(last);
     const event = (taskId: number | null, detail: object) =>
-      recordEvent(db, { taskId, clientId: client.id, actor: 'ai', op: op.op, detail, reason: op.reason, sourceIds: op.sourceMessageIds, at: nowIso });
-    const taskFor = (code: string | null) => {
-      const t = code ? getTaskByCode(db, code) : undefined;
+      recordEvent(q, { taskId, clientId: client.id, actor: 'ai', op: op.op, detail, reason: op.reason, sourceIds: op.sourceMessageIds, at: nowIso });
+    const taskFor = async (code: string | null) => {
+      const t = code ? await getTaskByCode(q, code) : undefined;
       if (!t) throw new Error('validated task disappeared'); // cannot happen inside the transaction
       return t;
     };
 
     switch (op.op) {
       case 'add_task': {
-        const t = createTask(db, {
+        const t = await createTask(q, {
           clientId: client.id,
           side: op.side!,
           title: op.title!,
@@ -574,12 +577,12 @@ export class Reconciler {
           origin: item ? 'meeting' : 'whatsapp',
           meetingId: item?.meetingId ?? null,
         }, nowIso);
-        if (op.status) setTaskStatus(db, t.id, op.status, lastDate, nowIso, 'ai');
-        event(t.id, { code: t.code, title: t.title, side: t.side, status: op.status ?? 'open' });
+        if (op.status) await setTaskStatus(q, t.id, op.status, lastDate, nowIso, 'ai');
+        await event(t.id, { code: t.code, title: t.title, side: t.side, status: op.status ?? 'open' });
         return;
       }
       case 'update_task': {
-        const t = taskFor(op.taskCode);
+        const t = await taskFor(op.taskCode);
         const fields: Partial<Record<TaskField, string | null>> = {};
         for (const f of TASK_FIELDS) {
           const v = op[f];
@@ -587,41 +590,41 @@ export class Reconciler {
         }
         const change = this.#priorityChange(t, op.priority, kw);
         if (change) fields.priority = change.level;
-        updateTaskFields(db, t.id, fields, nowIso, 'ai', change?.keyword);
-        if (sentiment) setTaskSentiment(db, t.id, sentiment, nowIso);
-        event(t.id, sentiment ? { ...fields, sentiment } : fields);
+        await updateTaskFields(q, t.id, fields, nowIso, 'ai', change?.keyword);
+        if (sentiment) await setTaskSentiment(q, t.id, sentiment, nowIso);
+        await event(t.id, sentiment ? { ...fields, sentiment } : fields);
         return;
       }
       case 'close_task': {
-        const t = taskFor(op.taskCode);
+        const t = await taskFor(op.taskCode);
         // A task cannot close before it was raised. A file-only re-check dates the close by the day its message was sent
         // (amendment 12h), which can be before the day a later message raised the task. logReminder clamps the same way:
         // the last reminder date never moves back.
-        setTaskStatus(db, t.id, 'done', lastDate < t.raisedOn ? t.raisedOn : lastDate, nowIso, 'ai');
-        event(t.id, { status: 'done' });
+        await setTaskStatus(q, t.id, 'done', lastDate < t.raisedOn ? t.raisedOn : lastDate, nowIso, 'ai');
+        await event(t.id, { status: 'done' });
         return;
       }
       case 'mark_maybe_done': {
-        const t = taskFor(op.taskCode);
-        setTaskStatus(db, t.id, 'maybe_done', lastDate, nowIso, 'ai');
-        event(t.id, { status: 'maybe_done' });
+        const t = await taskFor(op.taskCode);
+        await setTaskStatus(q, t.id, 'maybe_done', lastDate, nowIso, 'ai');
+        await event(t.id, { status: 'maybe_done' });
         return;
       }
       case 'reopen_task': {
-        const t = taskFor(op.taskCode);
-        setTaskStatus(db, t.id, 'open', lastDate, nowIso, 'ai');
-        event(t.id, { status: 'open' });
+        const t = await taskFor(op.taskCode);
+        await setTaskStatus(q, t.id, 'open', lastDate, nowIso, 'ai');
+        await event(t.id, { status: 'open' });
         return;
       }
       case 'log_reminder': {
-        const t = taskFor(op.taskCode);
-        logReminder(db, t.id, lastDate, nowIso);
-        event(t.id, { reminder: lastDate });
+        const t = await taskFor(op.taskCode);
+        await logReminder(q, t.id, lastDate, nowIso);
+        await event(t.id, { reminder: lastDate });
         // A chase with a keyword in it raises the task's priority, as a separate change in its history.
         const change = this.#priorityChange(t, null, kw);
         if (change) {
-          updateTaskFields(db, t.id, { priority: change.level }, nowIso, 'ai', change.keyword);
-          recordEvent(db, {
+          await updateTaskFields(q, t.id, { priority: change.level }, nowIso, 'ai', change.keyword);
+          await recordEvent(q, {
             taskId: t.id, clientId: client.id, actor: 'ai', op: 'update_task', detail: { priority: change.level }, reason: 'priority keyword',
             sourceIds: op.sourceMessageIds, at: nowIso,
           });
@@ -629,24 +632,24 @@ export class Reconciler {
         return;
       }
       case 'add_decision':
-        addDecision(db, {
+        await addDecision(q, {
           clientId: client.id, text: op.text!, decidedOn: dateOf(first), source: item ? 'meeting' : 'whatsapp', sourceWaId: firstMessage?.waId ?? null,
           meetingId: item?.meetingId ?? null,
         }, nowIso);
-        event(null, { decision: op.text });
+        await event(null, { decision: op.text });
         return;
       case 'set_phase':
         setPhase(db, client.id, op.phase!, 'ai');
-        event(null, { phase: op.phase });
+        await event(null, { phase: op.phase });
         return;
       case 'set_status':
         setStatus(db, client.id, op.text!, nowIso);
         if (sentiment) setClientSentiment(db, client.id, sentiment, nowIso);
-        event(null, sentiment ? { status: op.text, sentiment } : { status: op.text });
+        await event(null, sentiment ? { status: op.text, sentiment } : { status: op.text });
         return;
       case 'set_person_role':
-        setRole(db, client.id, op.personJid!, op.role!, 'ai');
-        event(null, { personJid: op.personJid, role: op.role });
+        await setRole(q, client.id, op.personJid!, op.role!, 'ai');
+        await event(null, { personJid: op.personJid, role: op.role });
         return;
     }
   }

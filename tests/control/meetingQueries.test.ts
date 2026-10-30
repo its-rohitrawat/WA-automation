@@ -81,7 +81,7 @@ describe('listDashboardMeetings', () => {
   it('returns the row shape: minutes from the audio length when known, the client, the account label and the doc link', async () => {
     const db = await seededDb();
     const id = await meeting(db, { title: 'Weekly <b>sync</b>', seconds: 1800, audioSeconds: 1500, doc: DOC, summary: SUMMARY });
-    createTask(db, { clientId: 1, side: 'us', title: 'Send logo', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-18',
+    await createTask(db, { clientId: 1, side: 'us', title: 'Send logo', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-18',
       deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'meeting', meetingId: id }, NOW);
     expect((await list(db, {}, (c) => (c === `conferenceRecords/c${n}` ? 'company2' : null))).rows).toEqual([{
       id, title: 'Weekly <b>sync</b>', when: `2026-10-1${n % 10}T05:00:00.000Z`, minutes: 25, account: 'company2',
@@ -149,9 +149,9 @@ describe('meetingDetail', () => {
     const db = await seededDb();
     const id = await meeting(db, { summary: SUMMARY, doc: DOC });
     const other = await meeting(db);
-    createTask(db, { clientId: 1, side: 'us', title: 'Send logo', category: 'design', priority: 'major', assignedTo: 'Rahul', askedBy: null, raisedOn: '2026-10-18',
+    await createTask(db, { clientId: 1, side: 'us', title: 'Send logo', category: 'design', priority: 'major', assignedTo: 'Rahul', askedBy: null, raisedOn: '2026-10-18',
       deadline: '2026-10-01', latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'meeting', meetingId: id }, NOW);
-    createTask(db, { clientId: 1, side: 'us', title: 'Other', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-18',
+    await createTask(db, { clientId: 1, side: 'us', title: 'Other', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-18',
       deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'meeting', meetingId: other }, NOW);
     const d = (await meetingDetail(db, String(id), now))!;
     expect(d).toMatchObject({ id, status: 'done', docUrl: `https://docs.google.com/document/d/${DOC}/edit` });

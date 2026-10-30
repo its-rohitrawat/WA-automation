@@ -49,9 +49,9 @@ describe('clients repository', () => {
 
   it('issues task codes per client', async () => {
     const db = await seededDb();
-    expect(nextTaskCode(db, 1)).toBe('SHA-001');
-    expect(nextTaskCode(db, 1)).toBe('SHA-002');
-    expect(nextTaskCode(db, 2)).toBe('MEH-001');
+    expect(await nextTaskCode(db, 1)).toBe('SHA-001');
+    expect(await nextTaskCode(db, 1)).toBe('SHA-002');
+    expect(await nextTaskCode(db, 2)).toBe('MEH-001');
   });
 
   it('sets phase and status', async () => {

@@ -67,7 +67,7 @@ async function setup(o: { ai: FakeAi; cap?: number; clock?: ManualClock }) {
   const assistant = new Assistant({
     ai: o.ai, paid: spend, prices: PRICES, pending, settings, log: silentLogger(), clock, db, control: { status: async () => status }, spend, voiceLocal: false,
   });
-  const task = createTask(db, {
+  const task = await createTask(db, {
     clientId: 1, side: 'us', title: 'Send the revised quote', category: 'design', priority: 'medium', assignedTo: 'Rohit', askedBy: null,
     raisedOn: '2026-10-18', deadline: '2026-10-25', latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp',
   }, NOW);
@@ -191,12 +191,12 @@ describe('Assistant: changes wait for the owner\'s Confirm', () => {
     const card = (events.find((e) => e.type === 'proposal') as { card: ProposalCard }).card;
     expect(card).toMatchObject({ title: 'Change SHA-001 · Send the revised quote', lines: ['Status: mark done', 'Priority: medium → critical'] });
     expect(card.id).toMatch(/^[A-Za-z0-9_-]{24}$/);
-    expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open', priority: 'medium' });
+    expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'open', priority: 'medium' });
 
     const audits: AuditEntry[] = [];
     const p = pending.take(card.id, OWNER.key);
     expect(await runProposal(p.action, { db, clock, settings, actor: OWNER.email, audit: (e) => audits.push(e) })).toEqual({ message: 'SHA-001 updated.', task: 'SHA-001' });
-    expect(getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', priority: 'critical', prioritySource: 'human' });
+    expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', priority: 'critical', prioritySource: 'human' });
     expect(audits.map((a) => a.detail)).toEqual(['Task SHA-001 edited (priority) · via assistant', 'Task SHA-001 marked done · via assistant']);
     // A replay is refused: the card was taken.
     expect(() => pending.take(card.id, OWNER.key)).toThrowError(ControlError);
@@ -247,7 +247,7 @@ describe('Assistant: changes wait for the owner\'s Confirm', () => {
     // At most a card for the owner; the number setting is refused outright; the task is untouched.
     expect(events.filter((e) => e.type === 'proposal')).toHaveLength(1);
     expect(pending.size()).toBe(1);
-    expect(getTaskByCode(db, 'SHA-001')?.status).toBe('open');
+    expect((await getTaskByCode(db, 'SHA-001'))?.status).toBe('open');
   });
 
   it('checks a draft now: an unknown task, nothing to change, a bad deadline, an unknown client, the number setting', async () => {
@@ -302,7 +302,7 @@ describe('Assistant: changes wait for the owner\'s Confirm', () => {
     const audits: AuditEntry[] = [];
     expect((await runProposal(pending.take(card.id, OWNER.key).action, { db, clock, settings, actor: OWNER.email, audit: (e) => audits.push(e) })).task).toBe('SHA-002');
     expect(await taskDetail(db, 'SHA-002', clock.now())).toMatchObject({ title: 'Book the photo shoot', source: 'dashboard', priority: 'major', prioritySource: 'human', deadline: '2026-10-30' });
-    expect(getTaskByCode(db, 'SHA-002')?.lockedFields).toEqual(expect.arrayContaining(['title', 'deadline', 'priority']));
+    expect((await getTaskByCode(db, 'SHA-002'))?.lockedFields).toEqual(expect.arrayContaining(['title', 'deadline', 'priority']));
     expect(audits).toEqual([{ actor: OWNER.email, event: 'task.create', kind: 'task', detail: 'Task SHA-002 added · via assistant' }]);
   });
 
@@ -371,7 +371,7 @@ describe('Assistant: priority levels, sentiment and the combine\'s filters (29 O
     const { db, run } = await setup({ ai });
     db.raw.prepare("UPDATE tasks SET sentiment = 'frustrated' WHERE code = 'SHA-001'").run();
     db.raw.prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
-    createTask(db, {
+    await createTask(db, {
       clientId: 2, side: 'us', title: 'Old client task', category: 'other', priority: 'low', assignedTo: null, askedBy: null, raisedOn: '2026-10-18',
       deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp',
     }, NOW);

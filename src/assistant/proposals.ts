@@ -4,7 +4,7 @@ import { SETTING_KEYS } from '../config/settingsStore.ts';
 import { ControlError, type Audit } from '../control/errors.ts';
 import { applyTaskAction, createTaskAction, parseNewTask, parseTaskEdit } from '../control/taskActions.ts';
 import { taskDetail } from '../control/taskQueries.ts';
-import { txSync, type Db } from '../store/db.ts';
+import type { Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import type { SessionEnd } from '../web/sessions.ts';
 import { INPUTS } from './tools.ts';
@@ -181,10 +181,10 @@ export async function runProposal(action: ProposalAction, d: RunDeps): Promise<{
   const ctx = { actor: d.actor, now: d.clock.now(), audit };
   switch (action.kind) {
     case 'task_change': {
-      // The edit and the status change are one transaction: both happen or neither (applyTaskAction throws at once).
-      txSync(d.db, () => {
-        if (action.edit) applyTaskAction(d.db, { code: action.code, action: 'edit', body: action.edit }, ctx);
-        if (action.status) applyTaskAction(d.db, { code: action.code, action: action.status === 'done' ? 'done' : 'reopen' }, ctx);
+      // The edit and the status change are one transaction: both happen or neither.
+      await d.db.tx(async (q) => {
+        if (action.edit) await applyTaskAction(d.db, { code: action.code, action: 'edit', body: action.edit }, ctx, q);
+        if (action.status) await applyTaskAction(d.db, { code: action.code, action: action.status === 'done' ? 'done' : 'reopen' }, ctx, q);
       });
       return { message: `${action.code} updated.`, task: action.code };
     }

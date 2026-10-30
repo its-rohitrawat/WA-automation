@@ -164,7 +164,7 @@ describe('app end to end', () => {
     expect(ai.calls[0]!.user).toContain('banner thoda bright');
     expect(ai.calls[0]!.user).not.toContain('private family plans');
     expect(ai.calls[0]!.user).not.toContain('personal chat');
-    expect(listTasks(db, 1).map((t) => t.code)).toEqual(['SHA-001']);
+    expect((await listTasks(db, 1)).map((t) => t.code)).toEqual(['SHA-001']);
 
     await vi.advanceTimersByTimeAsync(60_000);
     expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']);
@@ -221,12 +221,12 @@ describe('app shutdown', () => {
     const stop = stopping(app);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(stop.state.done).toBe(false);
-    expect(listTasks(db, 1)).toEqual([]);
+    expect(await listTasks(db, 1)).toEqual([]);
     expect(sock.end).not.toHaveBeenCalled(); // WhatsApp stays connected during the drain
 
     release();
     await finish(stop);
-    expect(listTasks(db, 1).map((t) => t.code)).toEqual(['SHA-001']);
+    expect((await listTasks(db, 1)).map((t) => t.code)).toEqual(['SHA-001']);
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM messages WHERE processed_at IS NULL').get()).toEqual({ n: 0 });
     expect(sock.end).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
@@ -278,7 +278,7 @@ describe('app shutdown', () => {
     const stop = stopping(app);
     aiCall.resolve();
     await vi.advanceTimersByTimeAsync(1_000); // the drain applies the paid result
-    expect(listTasks(db, 1).map((t) => t.code)).toEqual(['SHA-001']);
+    expect((await listTasks(db, 1)).map((t) => t.code)).toEqual(['SHA-001']);
     expect(drive.uploads).toBe(1);
     drive.gate = undefined;
     upload.resolve();
@@ -658,7 +658,7 @@ describe('app health and publishing', () => {
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
     await settled();
     await vi.advanceTimersByTimeAsync(300_000); // reconciled at 240 s and uploaded
-    expect(listTasks(db, 1).map((t) => t.code)).toEqual(['SHA-001']);
+    expect((await listTasks(db, 1)).map((t) => t.code)).toEqual(['SHA-001']);
     const before = drive.uploads;
 
     sock.emit('messages.update', [{ key: { remoteJid: SHARMA.groupId, id: 'm1' }, update: { messageStubType: WAMessageStubType.REVOKE } } as WAMessageUpdate]);

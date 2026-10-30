@@ -1,5 +1,5 @@
 import { SpendCapReachedError } from '../brain/paidCall.ts';
-import type { SpendGuard } from '../spend/spendGuard.ts';
+import type { BookedAtShutdown, SpendGuard } from '../spend/spendGuard.ts';
 import type { Sql } from '../store/db.ts';
 import { SttHttpError, SttJobError } from './http.ts';
 
@@ -33,10 +33,10 @@ export interface SttHoldHooks<T> {
    */
   atomically?: (fn: (q?: Sql) => Promise<void>) => Promise<void>;
   /**
-   * Called inside settlePending's booking of the hold at shutdown, while the call is still running (see SpendGuard.reserve).
-   * The call's own settle then books nothing more.
+   * Called inside settlePending's booking of the hold at shutdown, with that transaction's handle, while the call is still
+   * running (see SpendGuard.reserve). The call's own settle then books nothing more.
    */
-  onBookedAtShutdown?: () => void;
+  onBookedAtShutdown?: BookedAtShutdown;
 }
 
 /**
@@ -73,7 +73,7 @@ export async function withSttHold<T>(
     try {
       // Booked as its own statement: inside `hooks.onBooked?.(…)` the booking would be skipped when there is no hook.
       await atomically(async (q) => {
-        const booked = settleFailedSttCall(spend, rid, e, ceilingUsd, label);
+        const booked = await settleFailedSttCall(spend, rid, e, ceilingUsd, label, q);
         await hooks.onBooked?.(booked, undefined, q);
       });
     } catch (writeErr) {
@@ -83,20 +83,26 @@ export async function withSttHold<T>(
   }
   const done = r;
   await atomically(async (q) => {
-    spend.settle(rid, 'stt', done.costUsd, label);
+    // With a transaction, the booking is written through it, so it is kept or lost with the owner's record.
+    if (q) await spend.settle(rid, 'stt', done.costUsd, label, q);
+    else spend.settle(rid, 'stt', done.costUsd, label);
     await hooks.onBooked?.({ outcome: 'actual', usd: done.costUsd }, done.result, q);
   });
   return r;
 }
 
-/** Books a speech call that ended in an error, as withSttHold describes, and returns what was booked. */
-export function settleFailedSttCall(spend: SpendGuard, rid: number, e: unknown, ceilingUsd: number, label: string): SttBooking {
+/**
+ * Books a speech call that ended in an error, as withSttHold describes, and returns what was booked. q: the transaction
+ * the booking is written through, when there is one.
+ */
+export async function settleFailedSttCall(spend: SpendGuard, rid: number, e: unknown, ceilingUsd: number, label: string, q?: Sql): Promise<SttBooking> {
   if (e instanceof SttHttpError) {
     spend.release(rid);
     return { outcome: 'none', usd: 0 };
   }
   // SttNoAnswerError and its SttJobLostError, and anything not known: may have been billed.
   const note = e instanceof SttJobError ? 'job failed, estimated' : 'unknown, estimated';
-  spend.settle(rid, 'stt', ceilingUsd, `${label} (${note})`);
+  if (q) await spend.settle(rid, 'stt', ceilingUsd, `${label} (${note})`, q);
+  else spend.settle(rid, 'stt', ceilingUsd, `${label} (${note})`);
   return { outcome: 'ceiling', usd: ceilingUsd };
 }
