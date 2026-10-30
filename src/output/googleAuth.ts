@@ -308,8 +308,9 @@ export async function runLoopbackConsent(o: {
           const scope = tokens.scope ?? '';
           const granted = new Set(scope.split(' '));
           if (o.requireDrive !== false && !granted.has(DRIVE_SCOPES[0]!)) throw new ConsentRefused(NO_DRIVE_SCOPE);
-          // Every requested scope, or no result at all (so the caller saves nothing).
-          const missing = o.scopes.filter((s) => !granted.has(s));
+          // Every requested scope, or no result at all (so the caller saves nothing). Except gmail.send: it is optional
+          // (decided 30 Oct), so a founder who unticks it is still connected and invites go by Copy link.
+          const missing = o.scopes.filter((s) => s !== GMAIL_SEND_SCOPE && !granted.has(s));
           if (missing.length > 0) throw new ConsentRefused(noMeetingScope(missing));
           finish(null, { refreshToken: tokens.refresh_token, scope });
         })

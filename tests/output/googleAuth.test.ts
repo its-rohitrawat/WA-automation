@@ -279,6 +279,15 @@ describe('runLoopbackConsent', () => {
     expect(await promise).toEqual({ refreshToken: 'rt-1', scope: granted });
   });
 
+  it('gmail.send is optional: a consent without it still connects, and the granted scopes say so', async () => {
+    const GMAIL = 'https://www.googleapis.com/auth/gmail.send';
+    const f = fakeClient({ scope: ALL_SCOPES.join(' ') });
+    const { promise, base, state } = await startConsent(f, undefined, [...ALL_SCOPES, GMAIL]);
+    expect(f.calls.authUrlOpts!.scope).toEqual([...ALL_SCOPES, GMAIL]);
+    await fetch(`${base}/?state=${state}&code=abc`);
+    expect(await promise).toEqual({ refreshToken: 'rt-1', scope: ALL_SCOPES.join(' ') });
+  });
+
   it('rejects a consent missing one meeting scope, naming it in plain words', async () => {
     const f = fakeClient({ scope: ALL_SCOPES.filter((s) => !s.endsWith('calendar.events.readonly')).join(' ') });
     const { promise, base, state } = await startConsent(f, undefined, ALL_SCOPES);
