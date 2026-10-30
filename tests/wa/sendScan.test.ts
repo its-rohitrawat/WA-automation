@@ -11,15 +11,24 @@ const SRC = fileURLToPath(new URL('../../src/', import.meta.url));
  * The scan matches whole words, also in comments: a comment in src/ that needs one of these words is reworded.
  * (updateMediaMessage and reuploadRequest are checked by tests/media/fetch.test.ts.)
  */
-const OUTBOUND = [
+const OUTBOUND_NAMES = [
   'relayMessage', 'sendPresenceUpdate', 'presenceSubscribe', 'readMessages', 'sendReceipt', 'sendReceipts', 'chatModify',
   'sendMessageAck', 'sendPeerDataOperationMessage', 'sendRetryRequest', 'rejectCall', 'updateProfile\\w*',
   'group(?:Create|Leave|ParticipantsUpdate|Update\\w*)', 'newsletter\\w*', 'sendWAMBuffer', 'sendNode', 'query', 'appPatch', 'star',
   'updateBlockStatus', 'logout', 'requestPairingCode', 'community\\w*',
-].join('|');
+];
+const OUTBOUND = OUTBOUND_NAMES.join('|');
 /** Every Baileys method that sends something to WhatsApp. */
 const SEND_NAMES = new RegExp(`\\b(sendMessage|${OUTBOUND})\\b`);
 const OTHER_OUTBOUND = new RegExp(`\\b(${OUTBOUND})\\b`);
+
+/**
+ * The Postgres engine (lane B ticket, S2.3): pg's own API is client.query(), so these two files are excused from the bare
+ * word query, and from nothing else. They never import Baileys (checked below), and tests/store/pg/noBypass.test.ts keeps
+ * .query( inside src/store/engine/pg.ts alone.
+ */
+const PG_ENGINE = ['store/engine/pg.ts', 'store/engine/pgModule.d.ts'];
+const SEND_NAMES_BUT_QUERY = new RegExp(`\\b(sendMessage|${OUTBOUND_NAMES.filter((n) => n !== 'query').join('|')})\\b`);
 
 /**
  * The dashboard's sign-out route is a URL path (spec section 8), not a Baileys call: that one exact string literal is
@@ -45,8 +54,21 @@ describe('who may send on WhatsApp', () => {
   });
 
   it('no module except src/wa/senderGateway.ts and src/wa/groupSend.ts names a Baileys send method', () => {
-    const offenders = sources().filter((s) => s.file !== 'wa/senderGateway.ts' && s.file !== 'wa/groupSend.ts' && SEND_NAMES.test(s.text)).map((s) => s.file);
+    const offenders = sources()
+      .filter((s) => s.file !== 'wa/senderGateway.ts' && s.file !== 'wa/groupSend.ts' && (PG_ENGINE.includes(s.file) ? SEND_NAMES_BUT_QUERY : SEND_NAMES).test(s.text))
+      .map((s) => s.file);
     expect(offenders).toEqual([]);
+  });
+
+  it('the Postgres engine, excused from the word query only, never imports Baileys and names no other send method', () => {
+    const engine = sources().filter((s) => PG_ENGINE.includes(s.file));
+    expect(engine.map((s) => s.file).sort()).toEqual([...PG_ENGINE].sort());
+    for (const s of engine) {
+      expect(s.text, s.file).not.toMatch(/baileys/i);
+      expect(s.text, s.file).not.toMatch(SEND_NAMES_BUT_QUERY);
+    }
+    expect('sock.query(x)').not.toMatch(SEND_NAMES_BUT_QUERY);
+    for (const name of ['sendMessage', 'sendNode', 'relayMessage', 'logout']) expect(`sock.${name}(x)`).toMatch(SEND_NAMES_BUT_QUERY);
   });
 
   it('senderGateway calls sendMessage in one place, and no other outbound method', () => {
