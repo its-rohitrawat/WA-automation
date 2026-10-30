@@ -10,14 +10,15 @@ import { getKv } from '../../../src/store/kv.ts';
 import { manualClock } from '../../../src/util/clock.ts';
 import { createLogger } from '../../../src/util/logger.ts';
 import type { OwnerContext } from '../../../src/web/routes/context.ts';
-import { CALLBACK_PATH, GoogleConnectRoutes } from '../../../src/web/routes/google.ts';
+import { CALLBACK_PATH, GoogleConnectRoutes, type GoogleConnectDeps } from '../../../src/web/routes/google.ts';
 import type { IdClaims, IdTokenVerifier } from '../../../src/web/oidc.ts';
 import { accountEmail } from '../../../src/output/googleAuth.ts';
 import { seededDb } from '../../helpers/db.ts';
 import { rawOf } from '../../../src/store/engine/sqlite.ts';
 
-const owner: OwnerContext = { actor: 'owner@studio.in', sessionId: 'session-a', requestId: 'aaaaaaaaaaaa' };
-const other: OwnerContext = { actor: 'second@studio.in', sessionId: 'session-b', requestId: 'bbbbbbbbbbbb' };
+const FOUNDER = '00000000-0000-4000-8000-000000000001'; // the founder's fixed id (src/platform/store.ts)
+const owner: OwnerContext = { actor: 'owner@studio.in', sessionId: 'session-a', requestId: 'aaaaaaaaaaaa', role: 'founder', tenantId: FOUNDER };
+const other: OwnerContext = { actor: 'second@studio.in', sessionId: 'session-b', requestId: 'bbbbbbbbbbbb', role: 'founder', tenantId: FOUNDER };
 const WEB = { clientId: 'web-id', clientSecret: 'web-secret' };
 const ALL_MEETING = MEETING_SCOPES.join(' ');
 const CODE = 'auth-code-SECRET';
@@ -44,7 +45,10 @@ function fakeGoogle(answer: { refresh_token?: string | null; scope?: string; id_
   return { seen, createClient };
 }
 
-async function setup(o: { answer?: Parameters<typeof fakeGoogle>[0]; meetingsEnabled?: boolean; invitesGmail?: boolean; web?: typeof WEB | undefined; verifier?: IdTokenVerifier } = {}) {
+async function setup(o: {
+  answer?: Parameters<typeof fakeGoogle>[0]; meetingsEnabled?: boolean; invitesGmail?: boolean; web?: typeof WEB | undefined; verifier?: IdTokenVerifier;
+  extra?: Partial<GoogleConnectDeps>;
+} = {}) {
   const db = await seededDb();
   const key = randomBytes(32);
   await new TokenStore(db, key).save('old-main-token');
@@ -61,6 +65,7 @@ async function setup(o: { answer?: Parameters<typeof fakeGoogle>[0]; meetingsEna
     db, hub, publicUrl: 'https://waagent.example/', web: 'web' in o ? o.web : WEB, meetingsEnabled: o.meetingsEnabled ?? false, invitesGmail: o.invitesGmail ?? false,
     audit: async (e) => { audits.push(e); }, log: createLogger('debug', { write: (l: string) => void lines.push(l) }), clock, createClient: g.createClient,
     ...(o.verifier ? { verifier: o.verifier } : {}),
+    ...o.extra,
   });
   /** connect, then the state from the URL. */
   const begin = async (ctx: OwnerContext, account: unknown) => {
@@ -305,5 +310,101 @@ describe('GoogleConnectRoutes: the account email (owner fix 3)', () => {
     const state = await t.begin(owner, 'main');
     await t.routes.callback(owner, { state, code: CODE });
     expect(await accountEmail(t.db, 'main')).toBeNull();
+  });
+});
+
+describe('GoogleConnectRoutes per customer (S4.7 A1): a signed state, and each customer’s token in their own database', () => {
+  const A = '6f1c2e9a-3b4d-4c5e-8f60-718293a4b5c6';
+  const B = '7a2d3f0b-4c5e-4d6f-9071-8293a4b5c6d7';
+  const custA: OwnerContext = { actor: 'a@customer.in', sessionId: 'session-ca', requestId: 'cccccccccccc', role: 'owner', tenantId: A };
+  const custB: OwnerContext = { actor: 'b@customer.in', sessionId: 'session-cb', requestId: 'dddddddddddd', role: 'owner', tenantId: B };
+
+  async function platform() {
+    const stateKey = randomBytes(32);
+    const customers = new Map([[A, { db: await seededDb(), key: randomBytes(32) }], [B, { db: await seededDb(), key: randomBytes(32) }]]);
+    const told: string[] = [];
+    const t = await setup({
+      answer: { refresh_token: REFRESH, scope: DRIVE_SCOPES[0]! },
+      extra: { stateKey, customer: async (id) => customers.get(id) ?? null, onCustomerToken: (id, label) => void told.push(`${id} ${label}`) },
+    });
+    const tokenOf = (id: string) => new TokenStore(customers.get(id)!.db, customers.get(id)!.key).load();
+    return { ...t, stateKey, customers, told, tokenOf };
+  }
+
+  it('a customer’s token is stored only in their own database, under their own key, and their runtime is told', async () => {
+    const t = await platform();
+    const state = await t.begin(custA, 'main');
+    expect(state).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/); // signed, not the random hex of before
+    expect(await t.routes.callback(custA, { state, code: CODE })).toEqual({ status: 302, location: '/dashboard/connections?connected=main' });
+    expect(await t.tokenOf(A)).toBe(REFRESH);
+    expect(await getKv(t.customers.get(A)!.db, 'google_client:main')).toBe('web');
+    expect(await t.tokenOf(B)).toBeUndefined();
+    expect(await new TokenStore(t.db, t.key).load()).toBe('old-main-token'); // the founder's untouched
+    expect(t.told).toEqual([`${A} main`]);
+  });
+
+  it('A’s callback carrying B’s state is refused, stores nothing, and leaves B’s own sign-in usable', async () => {
+    const t = await platform();
+    const bState = await t.begin(custB, 'main');
+    expect(await t.routes.callback(custA, { state: bState, code: CODE })).toEqual({ status: 302, location: '/dashboard/connections?google_error=state' });
+    expect(t.g.seen.tokenArgs).toEqual([]); // no code was exchanged
+    expect(await t.tokenOf(A)).toBeUndefined();
+    expect(await t.tokenOf(B)).toBeUndefined();
+    const logged = t.lines.join('\n');
+    expect(logged).toContain('state_other_workspace');
+    for (const secret of [A, B, bState, 'a@customer.in', 'b@customer.in']) expect(logged).not.toContain(secret);
+    // B's pending sign-in was not used up by A's try.
+    expect((await t.routes.callback(custB, { state: bState, code: CODE })).location).toBe('/dashboard/connections?connected=main');
+    expect(await t.tokenOf(B)).toBe(REFRESH);
+    expect(await t.tokenOf(A)).toBeUndefined();
+  });
+
+  it('an expired state (10 minutes and 1 ms) is refused before anything is looked up or stored', async () => {
+    const t = await platform();
+    const state = await t.begin(custA, 'main');
+    t.clock.advance(10 * 60_000 + 1);
+    expect((await t.routes.callback(custA, { state, code: CODE })).location).toBe('/dashboard/connections?google_error=state');
+    expect(t.lines.join('\n')).toContain('state_invalid');
+    expect(t.g.seen.tokenArgs).toEqual([]);
+    expect(await t.tokenOf(A)).toBeUndefined();
+  });
+
+  it('a forged state is refused: one character changed, or signed with another key for the right customer', async () => {
+    const t = await platform();
+    const state = await t.begin(custA, 'main');
+    const changed = state.slice(0, 5) + (state[5] === 'A' ? 'B' : 'A') + state.slice(6);
+    const { signOAuthState } = await import('../../../src/output/oauthState.ts');
+    const otherKey = signOAuthState(randomBytes(32), { tenantId: A, account: 'main', at: t.clock.now() });
+    for (const s of [changed, otherKey, '', 'not-a-state']) {
+      expect((await t.routes.callback(custA, { state: s, code: CODE })).location).toBe('/dashboard/connections?google_error=state');
+    }
+    expect(t.g.seen.tokenArgs).toEqual([]);
+    expect(await t.tokenOf(A)).toBeUndefined();
+    // The real one still works afterwards.
+    expect((await t.routes.callback(custA, { state, code: CODE })).location).toBe('/dashboard/connections?connected=main');
+  });
+
+  it('a customer is refused without a signing key or resolver, or with no role; a workspace not there yet answers 503', async () => {
+    const plain = await setup();
+    expect((await plain.routes.connect(custA, { account: 'main' })).status).toBe(403);
+    const noRole: OwnerContext = { actor: 'x@x.in', sessionId: 's', requestId: 'eeeeeeeeeeee' };
+    expect((await plain.routes.connect(noRole, { account: 'main' })).status).toBe(403);
+    const t = await platform();
+    const stranger: OwnerContext = { ...custA, tenantId: '8b3e4a1c-5d6f-4e70-a182-93a4b5c6d7e8' };
+    expect(await t.routes.connect(stranger, { account: 'main' })).toMatchObject({ status: 503, body: { error: { code: 'workspace_starting' } } });
+  });
+
+  it('the founder with the signing key: the state is signed with the founder’s id, and the token goes through the hub as before', async () => {
+    const t = await platform();
+    const state = await t.begin(owner, 'main');
+    expect(state).toContain('.');
+    expect((await t.routes.callback(owner, { state, code: CODE })).location).toBe('/dashboard/connections?connected=main');
+    expect(await new TokenStore(t.db, t.key).load()).toBe(REFRESH);
+    expect(t.hub.issuer('main')).toBe('web');
+    expect(await t.tokenOf(A)).toBeUndefined();
+    expect(t.told).toEqual([]);
+    // A customer cannot finish the founder's sign-in, even holding its state.
+    const founderState = await t.begin(owner, 'main');
+    expect((await t.routes.callback(custA, { state: founderState, code: CODE })).location).toBe('/dashboard/connections?google_error=state');
   });
 });
