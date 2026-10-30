@@ -415,7 +415,7 @@ async function main(): Promise<void> {
           },
           google: {
             db: trackerStore, hub: google.hub, publicUrl: env.DASHBOARD_PUBLIC_URL ?? `http://localhost:${env.DASHBOARD_PORT}`,
-            web: googleCredentials(env).web, meetingsEnabled: env.MEETINGS_ENABLED, log, clock: systemClock,
+            web: googleCredentials(env).web, meetingsEnabled: env.MEETINGS_ENABLED, invitesGmail: env.INVITES_GMAIL, log, clock: systemClock,
             // The chosen account's email comes from its ID token, checked like the owner sign-in's.
             ...(googleCredentials(env).web ? { verifier: googleIdVerifier(googleCredentials(env).web!.clientId) } : {}),
           },

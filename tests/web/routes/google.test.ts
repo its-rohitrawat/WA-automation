@@ -1,9 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
-  DRIVE_SCOPES, hasMeetingScopes, MEETING_SCOPES, meetingAccounts, removeMeetingAccount, saveMeetingAccount, TokenStore, type ConsentClient,
-  type OAuth2Client,
+  DRIVE_SCOPES, grantedScopes, hasMeetingScopes, MAIN_ACCOUNT, MEETING_SCOPES, meetingAccounts, removeMeetingAccount, saveMeetingAccount, TokenStore,
+  type ConsentClient, type OAuth2Client,
 } from '../../../src/output/googleAuth.ts';
+import { founderMailer, GMAIL_SEND_SCOPE } from '../../../src/platform/gmailSender.ts';
 import { GoogleAuthHub } from '../../../src/output/googleAuthHub.ts';
 import { getKv } from '../../../src/store/kv.ts';
 import { manualClock } from '../../../src/util/clock.ts';
@@ -43,7 +44,7 @@ function fakeGoogle(answer: { refresh_token?: string | null; scope?: string; id_
   return { seen, createClient };
 }
 
-async function setup(o: { answer?: Parameters<typeof fakeGoogle>[0]; meetingsEnabled?: boolean; web?: typeof WEB | undefined; verifier?: IdTokenVerifier } = {}) {
+async function setup(o: { answer?: Parameters<typeof fakeGoogle>[0]; meetingsEnabled?: boolean; invitesGmail?: boolean; web?: typeof WEB | undefined; verifier?: IdTokenVerifier } = {}) {
   const db = await seededDb();
   const key = randomBytes(32);
   await new TokenStore(db, key).save('old-main-token');
@@ -57,7 +58,7 @@ async function setup(o: { answer?: Parameters<typeof fakeGoogle>[0]; meetingsEna
   const lines: string[] = [];
   const clock = manualClock('2026-10-27T08:00:00Z');
   const routes = new GoogleConnectRoutes({
-    db, hub, publicUrl: 'https://waagent.example/', web: 'web' in o ? o.web : WEB, meetingsEnabled: o.meetingsEnabled ?? false,
+    db, hub, publicUrl: 'https://waagent.example/', web: 'web' in o ? o.web : WEB, meetingsEnabled: o.meetingsEnabled ?? false, invitesGmail: o.invitesGmail ?? false,
     audit: async (e) => { audits.push(e); }, log: createLogger('debug', { write: (l: string) => void lines.push(l) }), clock, createClient: g.createClient,
     ...(o.verifier ? { verifier: o.verifier } : {}),
   });
@@ -167,6 +168,27 @@ describe('GoogleConnectRoutes', () => {
     expect((await t.routes.callback(owner, { state: states[5]!, code: CODE })).location).toContain('connected=main');
   });
 
+  it('with invites by Gmail on, main also asks for gmail.send; a meeting account never does (S5H.4 A)', async () => {
+    const t = await setup({ invitesGmail: true });
+    await t.begin(owner, 'main');
+    expect(t.g.seen.authOpts[0]!.scope).toEqual([...DRIVE_SCOPES, GMAIL_SEND_SCOPE, 'openid', 'email']);
+    await t.begin(owner, { add: 'company4' });
+    expect(t.g.seen.authOpts[1]!.scope).not.toContain(GMAIL_SEND_SCOPE);
+  });
+
+  it('gmail.send is optional: a grant without it connects, and invites then have no Gmail mailer (Send invite off)', async () => {
+    const t = await setup({ invitesGmail: true, answer: { refresh_token: REFRESH, scope: DRIVE_SCOPES.join(' ') } });
+    const state = await t.begin(owner, 'main');
+    expect(await t.routes.callback(owner, { state, code: CODE })).toEqual({ status: 302, location: '/dashboard/connections?connected=main' });
+    const transport = {} as Parameters<typeof founderMailer>[0]['transport'];
+    expect(founderMailer({ grantedScopes: await grantedScopes(t.db, MAIN_ACCOUNT), from: 'owner@studio.in', transport })).toBeNull();
+    // Granted, the same account gets a mailer: the screen offers Send invite.
+    const g = await setup({ invitesGmail: true, answer: { refresh_token: REFRESH, scope: [...DRIVE_SCOPES, GMAIL_SEND_SCOPE].join(' ') } });
+    const s2 = await g.begin(owner, 'main');
+    expect((await g.routes.callback(owner, { state: s2, code: CODE })).location).toBe('/dashboard/connections?connected=main');
+    expect(founderMailer({ grantedScopes: await grantedScopes(g.db, MAIN_ACCOUNT), from: 'owner@studio.in', transport })).not.toBeNull();
+  });
+
   it('a missing meeting scope is refused too: main with meetings on, and a meeting account', async () => {
     const main = await setup({ meetingsEnabled: true, answer: { refresh_token: REFRESH, scope: [DRIVE_SCOPES[0], ...MEETING_SCOPES.slice(1)].join(' ') } });
     const s1 = await main.begin(owner, 'main');
@@ -195,7 +217,7 @@ describe('GoogleConnectRoutes', () => {
     const key = randomBytes(32);
     const hub = await GoogleAuthHub.open({ db, key, credentials: { web: WEB }, newClient: () => ({ setCredentials() {} }) as unknown as OAuth2Client });
     const routes = new GoogleConnectRoutes({
-      db, hub, publicUrl: 'https://waagent.example', web: WEB, meetingsEnabled: false, audit: async () => {}, log: createLogger('silent'),
+      db, hub, publicUrl: 'https://waagent.example', web: WEB, meetingsEnabled: false, invitesGmail: false, audit: async () => {}, log: createLogger('silent'),
       createClient: () => ({
         generateCodeVerifierAsync: async () => ({}),
         generateAuthUrl: () => 'https://accounts.google.com/x',

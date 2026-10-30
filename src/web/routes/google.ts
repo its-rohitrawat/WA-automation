@@ -5,6 +5,7 @@ import {
   type ConsentClient,
 } from '../../output/googleAuth.ts';
 import type { GoogleAuthHub, OAuthCredentials } from '../../output/googleAuthHub.ts';
+import { GMAIL_SEND_SCOPE } from '../../platform/gmailSender.ts';
 import type { Db } from '../../store/db.ts';
 import { systemClock, type Clock } from '../../util/clock.ts';
 import type { Logger } from '../../util/logger.ts';
@@ -54,6 +55,8 @@ export interface GoogleConnectDeps {
   /** The dashboard's web OAuth client; undefined when it is not set up on the Mac. */
   web: OAuthCredentials | undefined;
   meetingsEnabled: boolean;
+  /** INVITES_GMAIL: the main sign-in also asks for gmail.send (optional: a grant without it still connects). */
+  invitesGmail: boolean;
   audit: AuditFn;
   log: Logger;
   clock?: Clock;
@@ -105,7 +108,7 @@ export class GoogleConnectRoutes {
     } catch (e) {
       return fail(400, 'invalid_label', (e as Error).message);
     }
-    const scopes = label === MAIN_ACCOUNT ? requestedScopes({ MEETINGS_ENABLED: this.#d.meetingsEnabled }) : [...MEETING_SCOPES];
+    const scopes = label === MAIN_ACCOUNT ? requestedScopes({ MEETINGS_ENABLED: this.#d.meetingsEnabled, INVITES_GMAIL: this.#d.invitesGmail }) : [...MEETING_SCOPES];
     this.#prune();
     const mine = [...this.#pending.entries()].filter(([, p]) => p.sessionId === ctx.sessionId);
     while (mine.length >= PENDING_PER_SESSION) this.#pending.delete(mine.shift()![0]); // the oldest first
@@ -157,7 +160,9 @@ export class GoogleConnectRoutes {
     if (!tokens.refresh_token) return refuse('no_refresh_token');
     const scope = tokens.scope ?? '';
     const granted = new Set(scope.split(' '));
-    const required = pending.label === MAIN_ACCOUNT ? [...DRIVE_SCOPES, ...pending.scopes] : pending.scopes;
+    // Drive, and the meeting scopes when asked for, are required. gmail.send is optional (decided 30 Oct): unticked on
+    // Google's screen, the account still connects, and invites go by Copy link (founderMailer has no mailer then).
+    const required = (pending.label === MAIN_ACCOUNT ? [...DRIVE_SCOPES, ...pending.scopes] : pending.scopes).filter((s) => s !== GMAIL_SEND_SCOPE);
     if (!required.every((s) => granted.has(s))) return refuse('missing_scope');
     // The address the owner chose, from Google's signed ID token only. Checked before anything is saved, so the token
     // and its email are then stored back to back: two reconnects at once can never pair one's token with the other's email.
