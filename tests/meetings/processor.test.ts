@@ -94,7 +94,7 @@ function processor(w: World, o: Partial<MeetingProcessorDeps> & { exclusive?: Re
 }
 
 const row = async (w: World) => (await getMeeting(w.db, w.id))!;
-const spendRows = (w: World) => w.db.raw.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
+const spendRows = (w: World) => w.db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend ORDER BY id');
 const later = (w: World, ms: number) => w.clock.advance(ms);
 const signal = () => new AbortController().signal;
 const audioRel = (id: number) => `meetings/SHA/2026-11/${id}.mp3`;
@@ -146,7 +146,7 @@ describe('MeetingProcessor: found to done', () => {
     expect(w.db.raw.prepare('SELECT meeting_id AS meetingId FROM tasks').all()).toEqual([{ meetingId: w.id }]);
     expect(await listDecisions(w.db, 1, 10)).toEqual([]);
 
-    expect(spendRows(w).map((s) => [s.kind, s.detail])).toEqual([
+    expect((await spendRows(w)).map((s) => [s.kind, s.detail])).toEqual([
       ['stt', `meeting ${w.id} part 1`],
       ['ai', `meeting ${w.id}`],
       ['ai', `meeting ${w.id}`],
@@ -269,7 +269,7 @@ describe('MeetingProcessor: resuming', () => {
     expect(w.ai.calls).toHaveLength(1);
     expect(w.drive.docs).toHaveLength(1);
     expect(w.trackerAi.calls).toHaveLength(1);
-    expect(spendRows(w).map((s) => s.kind)).toEqual(['stt', 'ai', 'ai']);
+    expect((await spendRows(w)).map((s) => s.kind)).toEqual(['stt', 'ai', 'ai']);
     expect(await listTasks(w.db, 1)).toHaveLength(1);
   });
 
@@ -297,7 +297,7 @@ describe('MeetingProcessor: resuming', () => {
     expect(r.outcome).toBe('failed');
     expect(await row(w)).toMatchObject({ status: 'failed', errorCode: 'crashed', stage: 'audio' });
     expect((await row(w)).sttParts[0]).toMatchObject({ state: 'unknown', booked: 'ceiling' });
-    expect(spendRows(w)).toEqual([expect.objectContaining({ kind: 'stt', detail: `meeting ${w.id} part 0 (unknown, estimated)` })]);
+    expect(await spendRows(w)).toEqual([expect.objectContaining({ kind: 'stt', detail: `meeting ${w.id} part 0 (unknown, estimated)` })]);
     expect(w.stt.calls).toHaveLength(0);
   });
 
@@ -433,13 +433,13 @@ describe('MeetingProcessor: failures', () => {
       expect((await p.process(w.id, signal())).outcome).toBe('deferred');
       expect(await row(w)).toMatchObject({ status: 'queued', errorCode: 'convert_failed', attempts: n });
       expect((await row(w)).nextAttemptAt).toBe(new Date(w.clock.now().getTime() + wait * MINUTE).toISOString());
-      expect(spendRows(w)).toEqual([]);
+      expect(await spendRows(w)).toEqual([]);
       later(w, wait * MINUTE);
     }
     expect((await p.process(w.id, signal())).outcome).toBe('failed');
     expect(await row(w)).toMatchObject({ status: 'failed', errorCode: 'convert_failed', stage: 'found' });
     expect((await row(w)).sttParts[0]).toMatchObject({ booked: 'ceiling' });
-    expect(spendRows(w).map((s) => s.kind)).toEqual(['stt']);
+    expect((await spendRows(w)).map((s) => s.kind)).toEqual(['stt']);
     expect(w.ff.conversions).toBe(4);
     // Every attempt downloaded afresh and left nothing behind.
     expect(readdirSync(join(w.dataDir, 'meetings', 'tmp'))).toEqual([]);
@@ -454,7 +454,7 @@ describe('MeetingProcessor: failures', () => {
     expect(await row(w)).toMatchObject({ errorCode: 'http_503', attempts: 1 });
     later(w, MINUTE);
     expect((await p.process(w.id, signal())).outcome).toBe('done');
-    expect(spendRows(w).filter((s) => s.kind === 'stt')).toHaveLength(1);
+    expect((await spendRows(w)).filter((s) => s.kind === 'stt')).toHaveLength(1);
   });
 
   it('a file Google will not open is no_access; a too-long measured recording is too_long with its audio kept', async () => {
@@ -478,7 +478,7 @@ describe('MeetingProcessor: failures', () => {
     expect((await processor(w, { ai }).process(w.id, signal())).outcome).toBe('failed');
     expect(await row(w)).toMatchObject({ status: 'failed', errorCode: 'ai_invalid_output', stage: 'transcribed' });
     expect(ai.calls).toHaveLength(2);
-    expect(spendRows(w).map((r) => r.kind)).toEqual(['ai', 'ai']);
+    expect((await spendRows(w)).map((r) => r.kind)).toEqual(['ai', 'ai']);
   });
 
   it('an invalid tracker answer twice fails at once after exactly 2 booked calls', async () => {
@@ -489,7 +489,7 @@ describe('MeetingProcessor: failures', () => {
     expect((await processor(w).process(w.id, signal())).outcome).toBe('failed');
     expect(await row(w)).toMatchObject({ status: 'failed', errorCode: 'ai_invalid_output', stage: 'doc' });
     expect(w.trackerAi.calls).toHaveLength(2);
-    expect(spendRows(w).map((r) => r.kind)).toEqual(['ai', 'ai']);
+    expect((await spendRows(w)).map((r) => r.kind)).toEqual(['ai', 'ai']);
     expect(await listTasks(w.db, 1)).toEqual([]);
   });
 
@@ -562,7 +562,7 @@ describe('MeetingProcessor: stopping', () => {
     g.open();
     expect((await run).outcome).toBe('stopped');
     expect((await row(w)).stage).toBe('transcribed');
-    expect(spendRows(w).map((s) => s.kind)).toEqual(['stt']);
+    expect((await spendRows(w)).map((s) => s.kind)).toEqual(['stt']);
     expect(w.ai.calls).toEqual([]);
   });
 
@@ -578,7 +578,7 @@ describe('MeetingProcessor: stopping', () => {
     g.open();
     expect((await run).outcome).toBe('stopped');
     expect((await row(w)).stage).toBe('summarised');
-    expect(spendRows(w).map((s) => s.kind)).toEqual(['ai']);
+    expect((await spendRows(w)).map((s) => s.kind)).toEqual(['ai']);
     expect(w.drive.docs).toEqual([]);
   });
 
@@ -591,7 +591,7 @@ describe('MeetingProcessor: stopping', () => {
     await w.stt.started;
     ctl.abort();
     expect(await w.spend.settlePending('shutdown before the paid call finished (estimated)')).toBe(1);
-    expect(spendRows(w).map((s) => s.kind)).toEqual(['stt']);
+    expect((await spendRows(w)).map((s) => s.kind)).toEqual(['stt']);
     expect((await row(w)).sttParts[0]).toMatchObject({ booked: 'ceiling' });
   });
 });
@@ -656,7 +656,7 @@ describe('MeetingProcessor: the local engine (STT_PROVIDER=local)', () => {
     expect(await row(w)).toMatchObject({ status: 'queued', stage: 'audio', errorCode: 'timeout', attempts: 1 });
     expect(e.calls).toHaveLength(6);
     expect((await row(w)).sttParts.map((x) => [x.state, x.unheard ?? false])).toEqual([['done', false], ['done', true], ['todo', false], ['todo', false], ['todo', false]]);
-    expect(spendRows(w)).toEqual([]);
+    expect(await spendRows(w)).toEqual([]);
   });
 
   it('one passing failure on each of several parts never adds up: the meeting finishes', async () => {
@@ -714,14 +714,14 @@ describe('MeetingProcessor: the local engine (STT_PROVIDER=local)', () => {
     expect(e.calls[1]?.aborted).toBe(true);
     expect(await row(w)).toMatchObject({ status: 'queued', stage: 'audio', attempts: 0, errorCode: 'stopped', nextAttemptAt: NOW });
     expect((await row(w)).sttParts.map((x) => x.state)).toEqual(['done', 'todo', 'todo', 'todo', 'todo']);
-    expect(spendRows(w)).toEqual([]);
+    expect(await spendRows(w)).toEqual([]);
 
     // The restart runs the rest, part 2 included; part 1 is not run again.
     const again = engineOf(w, ['do', 'teen', 'char', 'paanch']);
     expect((await processor(w, { transcriber: again.transcriber, ffmpeg: again.ffmpeg }).process(w.id, signal())).outcome).toBe('done');
     expect(again.calls).toHaveLength(4);
     expect((await row(w)).transcript!.map((s) => s.text)).toEqual(['ek', 'do', 'teen', 'char', 'paanch']);
-    expect(spendRows(w).filter((s) => s.kind === 'stt')).toEqual([]);
+    expect((await spendRows(w)).filter((s) => s.kind === 'stt')).toEqual([]);
   });
 
   it('a crash with a local part in flight fails as crashed after the runs are used up, booking nothing', async () => {
@@ -733,6 +733,6 @@ describe('MeetingProcessor: the local engine (STT_PROVIDER=local)', () => {
     expect((await processor(w, { transcriber: e.transcriber, ffmpeg: e.ffmpeg }).process(w.id, signal())).outcome).toBe('failed');
     expect(await row(w)).toMatchObject({ status: 'failed', errorCode: 'crashed' });
     expect((await row(w)).sttParts[0]).toMatchObject({ state: 'todo', booked: 'none' });
-    expect(spendRows(w)).toEqual([]);
+    expect(await spendRows(w)).toEqual([]);
   });
 });

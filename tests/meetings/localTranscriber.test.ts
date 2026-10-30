@@ -137,7 +137,7 @@ describe('the local meeting transcriber', () => {
   let spend: SpendGuard;
   let id: number;
   const clock = manualClock('2026-11-01T10:00:00.000Z');
-  const rows = () => db.raw.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
+  const rows = () => db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend ORDER BY id');
   const parts = async () => (await getMeeting(db, id))!.sttParts;
   const partsDir = () => join(dataDir, 'meetings', 'tmp', `${id}-parts`);
   const work = () => join(dataDir, 'tmp', 'local');
@@ -226,7 +226,7 @@ describe('the local meeting transcriber', () => {
       [1, 'local', 'done', 'none', null], [2, 'local', 'done', 'none', null], [3, 'local', 'done', 'none', null],
     ]);
     // No spend rows, no hold left, no work folder or parts folder left behind.
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     expect(spend.canSpend(4.99)).toBe(true);
     expect(readdirSync(work())).toEqual([]);
     expect(existsSync(partsDir())).toBe(false);
@@ -240,7 +240,7 @@ describe('the local meeting transcriber', () => {
     expect(ff.segmentTimes).toEqual(['600.000']); // ten-minute parts
     expect(engine.calls).toHaveLength(18);
     expect((await getMeeting(db, id))!.transcript!.map((s) => s.start)).toEqual(Array.from({ length: 18 }, (_, i) => i * 600));
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
   });
 
   it('a short meeting is one part: the kept MP3 itself goes to the WAV conversion', async () => {
@@ -278,7 +278,7 @@ describe('the local meeting transcriber', () => {
     expect((err as LocalEngineError).code).toBe('timeout');
     expect(engine.calls[1]!.signal?.aborted).toBe(true); // the engine was stopped
     expect((await parts()).map((p) => [p.state, p.booked])).toEqual([['done', 'none'], ['todo', 'none'], ['todo', 'none']]);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     expect(readdirSync(work())).toEqual([]);
 
     const again = withTimeout(ff, ['two', 'three'], 50);
@@ -286,7 +286,7 @@ describe('the local meeting transcriber', () => {
     expect(again.engine.calls).toHaveLength(2);
     expect((await getMeeting(db, id))!.transcript!.map((s) => s.text)).toEqual(['one', 'two', 'three']);
     expect(ff.segmentRuns()).toBe(1); // the finished split is reused
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
   });
 
   it('an engine failure (exit code) is thrown for the processor to retry, with the part back to todo and nothing booked', async () => {
@@ -298,7 +298,7 @@ describe('the local meeting transcriber', () => {
     expect((err as LocalEngineError).code).toBe('exit_3');
     expect((err as Error).message).not.toContain('echoed');
     expect((await parts())[0]).toMatchObject({ state: 'todo', booked: 'none' });
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
   });
 
   it('a crash mid-part: recovery books nothing and sets only that part to run again; done parts are kept', async () => {
@@ -313,7 +313,7 @@ describe('the local meeting transcriber', () => {
     await setSttParts(db, id, [row(1, 'done', [{ start: 0, end: 500, speaker: null, text: 'pehle' }]), row(2, 'inflight'), row(3, 'todo')], NOW);
 
     expect(await recoverInflightParts(db, spend, 88, silentLogger())).toBe(0); // nothing booked
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     expect((await parts()).map((p) => p.state)).toEqual(['done', 'todo', 'todo']);
 
     const ff = fakeFfmpeg([500, 500, 500]);
@@ -322,7 +322,7 @@ describe('the local meeting transcriber', () => {
     expect(engine.calls).toHaveLength(2);
     expect(ff.wavInputs).toEqual([join(partsDir(), 'part-001.mp3'), join(partsDir(), 'part-002.mp3')]);
     expect((await getMeeting(db, id))!.transcript!.map((s) => s.text)).toEqual(['pehle', 'phir se', 'aakhri']);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
   });
 
   it('a local part left in flight is set to run again by transcribeMeeting itself, and bookStuckParts books nothing for it', async () => {
@@ -335,7 +335,7 @@ describe('the local meeting transcriber', () => {
     const { t, engine } = fromEnv(ff, ['dobara']);
     await transcribeMeeting(id, deps(t, ff));
     expect(engine.calls).toHaveLength(1);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
   });
 
   it('a stuck paid part next to a stuck local part: only the paid one is booked', async () => {
@@ -345,7 +345,7 @@ describe('the local meeting transcriber', () => {
       { index: 2, provider: 'local', file: null, offset: 600, seconds: 600, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null },
     ], NOW);
     expect(await bookStuckParts(db, spend, id, { inrPerUsd: 88 })).toBe(1);
-    expect(rows()).toEqual([{ kind: 'stt', usd: costUsd(modelFor('openai', true), 600, 88), detail: `meeting ${id} part 1 (unknown, estimated)` }]);
+    expect(await rows()).toEqual([{ kind: 'stt', usd: costUsd(modelFor('openai', true), 600, 88), detail: `meeting ${id} part 1 (unknown, estimated)` }]);
     expect((await parts()).map((p) => [p.state, p.booked])).toEqual([['unknown', 'ceiling'], ['todo', 'none']]);
   });
 
@@ -356,7 +356,7 @@ describe('the local meeting transcriber', () => {
     const { t, engine } = fromEnv(ff, ['ek', 'do']);
     await transcribeMeeting(id, deps(t, ff));
     expect(engine.calls).toHaveLength(2); // planned again into ten-minute parts
-    expect(rows()).toEqual([{ kind: 'stt', usd: costUsd(modelFor('elevenlabs', true), 1200, 88), detail: `meeting ${id} part 1 (unknown, estimated)` }]);
+    expect(await rows()).toEqual([{ kind: 'stt', usd: costUsd(modelFor('elevenlabs', true), 1200, 88), detail: `meeting ${id} part 1 (unknown, estimated)` }]);
     expect((await parts()).map((p) => p.provider)).toEqual(['local', 'local']);
   });
 
@@ -371,7 +371,7 @@ describe('the local meeting transcriber', () => {
     const { t } = fromEnv(ff, ['a', 'b', 'c']);
     await transcribeMeeting(id, deps(t, ff));
     expect((await getMeeting(db, id))!.stage).toBe('transcribed');
-    expect(rows().filter((r) => r.kind === 'stt')).toEqual([]);
+    expect((await rows()).filter((r) => r.kind === 'stt')).toEqual([]);
   });
 
   it('a stop during a part stops the engine, sets the part back to todo and throws the stop; the next run re-runs that part', async () => {
@@ -432,14 +432,14 @@ describe('the local meeting transcriber', () => {
     expect((err as LocalEngineError).code).toBe('empty_output');
     expect((await parts()).map((p) => [p.state, p.booked])).toEqual([['done', 'none'], ['todo', 'none'], ['todo', 'none']]);
     expect((await getMeeting(db, id))!.stage).toBe('audio');
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     expect(readdirSync(work())).toEqual([]);
 
     // The retry runs that part again; this time the engine hears it.
     const again = fromEnv(ff, ['beech', 'ant']);
     await transcribeMeeting(id, deps(again.t, ff));
     expect((await getMeeting(db, id))!.transcript!.map((s) => s.text)).toEqual(['shuru', 'beech', 'ant']);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
   });
 
   it('whisper markers on a loud part are empty_output too, never no_speech', async () => {
@@ -463,7 +463,7 @@ describe('the local meeting transcriber', () => {
     await expect(run).rejects.toBe(reason);
     expect(engine.calls).toHaveLength(1); // the engine never ran for the part being converted
     expect((await parts()).map((p) => [p.state, p.booked])).toEqual([['done', 'none'], ['todo', 'none'], ['todo', 'none']]);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     expect(readdirSync(work())).toEqual([]);
   });
 
@@ -481,8 +481,7 @@ describe('the local meeting transcriber', () => {
       sarvam(2, { state: 'inflight', jobId: 'job-2', booked: 'ceiling' }),
     ], NOW);
     spend.record('stt', 0.12, `meeting ${id} part 2 (job accepted)`);
-    await spend.flushed();
-    const before = rows();
+    const before = await rows();
     expect(before).toHaveLength(1);
 
     const ff = fakeFfmpeg([600, 600]);
@@ -490,8 +489,7 @@ describe('the local meeting transcriber', () => {
     await transcribeMeeting(id, deps(t, ff));
     expect(engine.calls).toHaveLength(1);
     expect(ff.wavInputs).toEqual([join(partsDir(), 'part-001.mp3')]);
-    await spend.flushed();
-    expect(rows()).toEqual(before); // nothing booked again, nothing new
+    expect(await rows()).toEqual(before); // nothing booked again, nothing new
     expect((await getMeeting(db, id))!.transcript).toEqual([
       { start: 0, end: 600, speaker: 'p1:A', text: 'pehle Sarvam ne suna' },
       { start: 600, end: 1200, speaker: null, text: 'phir local ne' },
@@ -643,7 +641,7 @@ describe('the local meeting transcriber', () => {
     const ff = fakeFfmpeg([]);
     await transcribeMeeting(id, deps(meetingTranscriber(provider, 88), ff), new AbortController().signal);
     expect(seen).toEqual([{ diarize: true }]);
-    expect(rows()).toHaveLength(1);
+    expect(await rows()).toHaveLength(1);
   });
 
   describe('parts the engine cannot hear (review fixes 1 and 2)', () => {
@@ -678,7 +676,7 @@ describe('the local meeting transcriber', () => {
       expect(m.sttParts[1]).toMatchObject({ state: 'done', booked: 'none', segments: [], unheard: true, tries: LOCAL_PART_MAX_TRIES });
       expect(m.sttParts[0]!.unheard).toBeUndefined();
       expect(m.sttParts[2]!.unheard).toBeUndefined();
-      expect(rows()).toEqual([]);
+      expect(await rows()).toEqual([]);
     });
 
     it('timeouts and exit codes on the same part count together, and give it up the same way once a part was heard', async () => {
@@ -716,7 +714,7 @@ describe('the local meeting transcriber', () => {
       expect((await parts())[0]!.tries).toBeUndefined();
       expect((await parts()).some((p) => p.unheard)).toBe(false);
       expect((await getMeeting(db, id))!.stage).toBe('audio');
-      expect(rows()).toEqual([]);
+      expect(await rows()).toEqual([]);
     });
 
     it('a meeting where nothing is heard but a part was given up fails (nothing_heard), its parts ready to run again', async () => {

@@ -65,7 +65,7 @@ const ticks = async () => {
   for (let i = 0; i < 5; i++) await flush();
 };
 const WAIT = { timeout: 10_000 };
-const spendRows = (db: Db) => db.raw.prepare('SELECT kind, detail FROM spend ORDER BY id').all();
+const spendRows = (db: Db) => db.all('SELECT kind, detail FROM spend ORDER BY id');
 
 describe('MeetingQueue', () => {
   it('at start books parts left in flight, deletes provider copies and cleans work files before any meeting runs', async () => {
@@ -80,7 +80,7 @@ describe('MeetingQueue', () => {
     mkdirSync(tmp, { recursive: true });
     writeFileSync(join(tmp, `${done}.mp4.part`), 'v');
     writeFileSync(join(tmp, 'notes.txt'), 'keep');
-    processor.onCall = async () => void processor.seen.push({ parts: (await getMeeting(db, id))!.sttParts[0]!.booked, spend: spendRows(db).length, forgotten: [...stt.forgotten] });
+    processor.onCall = async () => void processor.seen.push({ parts: (await getMeeting(db, id))!.sttParts[0]!.booked, spend: (await spendRows(db)).length, forgotten: [...stt.forgotten] });
 
     queue.kick(); // before start: nothing runs
     await ticks();

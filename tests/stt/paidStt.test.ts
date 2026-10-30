@@ -9,7 +9,7 @@ import { seededDb } from '../helpers/db.ts';
 async function setup(capUsd = 1) {
   const db = await seededDb();
   const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd });
-  const rows = () => db.raw.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
+  const rows = () => db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend ORDER BY id');
   return { spend, rows };
 }
 /** No hold is left: the whole remaining budget can still be reserved. */
@@ -21,7 +21,7 @@ describe('withSttHold', () => {
     const booked: SttBooking[] = [];
     const out = await withSttHold(spend, 0.2, 'meeting 4 part 1', async () => ({ result: 'segments', costUsd: 0.05 }), { onBooked: (b) => void booked.push(b) });
     expect(out).toEqual({ result: 'segments', costUsd: 0.05 });
-    expect(rows()).toEqual([{ kind: 'stt', usd: 0.05, detail: 'meeting 4 part 1' }]);
+    expect(await rows()).toEqual([{ kind: 'stt', usd: 0.05, detail: 'meeting 4 part 1' }]);
     expect(booked).toEqual([{ outcome: 'actual', usd: 0.05 }]);
     expectNoHold(spend);
   });
@@ -53,7 +53,7 @@ describe('withSttHold', () => {
     const booked: SttBooking[] = [];
     const err = new SttHttpError(500);
     await expect(withSttHold(spend, 0.2, 'meeting 4 part 1', () => Promise.reject(err), { onBooked: (b) => void booked.push(b) })).rejects.toBe(err);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     expect(booked).toEqual([{ outcome: 'none', usd: 0 }]);
     expectNoHold(spend);
   });
@@ -67,7 +67,7 @@ describe('withSttHold', () => {
     const { spend, rows } = await setup();
     const booked: SttBooking[] = [];
     await expect(withSttHold(spend, 0.2, 'meeting 4 part 1', () => Promise.reject(err), { onBooked: (b) => void booked.push(b) })).rejects.toBe(err);
-    expect(rows()).toEqual([{ kind: 'stt', usd: 0.2, detail }]);
+    expect(await rows()).toEqual([{ kind: 'stt', usd: 0.2, detail }]);
     expect(booked).toEqual([{ outcome: 'ceiling', usd: 0.2 }]);
     expectNoHold(spend);
   });
@@ -77,7 +77,7 @@ describe('withSttHold', () => {
     const { spend, rows } = await setup();
     const err = new SttHttpError(401);
     await expect(withSttHold(spend, 0.2, 'media 7', () => Promise.reject(err))).rejects.toBe(err);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     expectNoHold(spend);
   });
 
@@ -88,7 +88,7 @@ describe('withSttHold', () => {
   ])('books the ceiling on %s when no hooks are given', async (_name, err, detail) => {
     const { spend, rows } = await setup();
     await expect(withSttHold(spend, 0.2, 'media 7', () => Promise.reject(err))).rejects.toBe(err);
-    expect(rows()).toEqual([{ kind: 'stt', usd: 0.2, detail }]);
+    expect(await rows()).toEqual([{ kind: 'stt', usd: 0.2, detail }]);
     expectNoHold(spend);
   });
 
@@ -102,7 +102,7 @@ describe('withSttHold', () => {
     expect(shutdown).toHaveBeenCalledOnce();
     finish({ result: 'late', costUsd: 0.05 });
     expect((await p).result).toBe('late');
-    expect(rows()).toEqual([{ kind: 'stt', usd: 0.2, detail: 'shutdown (estimated)' }]);
+    expect(await rows()).toEqual([{ kind: 'stt', usd: 0.2, detail: 'shutdown (estimated)' }]);
   });
 
   it('writes the booking and the owner record in one step: a failing owner write takes the booking with it', async () => {
@@ -117,7 +117,7 @@ describe('withSttHold', () => {
       },
     }).catch((e: unknown) => e);
     expect(err).toBe(ownerFailed);
-    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM spend').get()).toEqual({ n: 0 }); // the owner's record still says "sent, nothing booked"
+    expect(await db.get('SELECT COUNT(*) AS n FROM spend')).toEqual({ n: 0 }); // the owner's record still says "sent, nothing booked"
     expectNoHold(spend);
   });
 

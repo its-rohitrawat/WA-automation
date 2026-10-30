@@ -13,7 +13,7 @@ import { seededDb } from '../helpers/db.ts';
 async function setup(capUsd = 1) {
   const db = await seededDb();
   const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd });
-  const rows = () => db.raw.prepare('SELECT usd, detail FROM spend ORDER BY id').all() as { usd: number; detail: string }[];
+  const rows = () => db.all<{ usd: number; detail: string }>('SELECT usd, detail FROM spend ORDER BY id');
   return { spend, rows };
 }
 const ok = (costUsd: number, fallbackUsed = false) => async () => ({ costUsd, fallbackUsed, text: 'x' });
@@ -27,8 +27,7 @@ describe('withReservation', () => {
     const { spend, rows } = await setup();
     expect((await withReservation(spend, 0.1, 'media 7', ok(0.02), MEDIA_ATTEMPTS)).text).toBe('x');
     await withReservation(spend, 0.1, 'media 8', ok(0.03, true), MEDIA_ATTEMPTS);
-    await spend.flushed();
-    expect(rows()).toEqual([{ usd: 0.02, detail: 'media 7' }, { usd: 0.03, detail: 'media 8 (fallback)' }]);
+    expect(await rows()).toEqual([{ usd: 0.02, detail: 'media 7' }, { usd: 0.03, detail: 'media 8 (fallback)' }]);
     expectNoReservation(spend);
   });
 
@@ -59,7 +58,7 @@ describe('withReservation', () => {
     const { spend, rows } = await setup();
     await expect(withReservation(spend, 0.1, 'media 7', async () => { throw new AiRefusalError('cyber', FAKE_USAGE, 0.004); }, MEDIA_ATTEMPTS)).rejects.toBeInstanceOf(AiRefusalError);
     await expect(withReservation(spend, 0.1, 'media 8', async () => { throw new AiInvalidOutputError('no text', FAKE_USAGE, null); }, MEDIA_ATTEMPTS)).rejects.toBeInstanceOf(AiInvalidOutputError);
-    expect(rows()).toEqual([{ usd: 0.004, detail: 'media 7 (failed)' }, { usd: 0.1, detail: 'media 8 (failed)' }]);
+    expect(await rows()).toEqual([{ usd: 0.004, detail: 'media 7 (failed)' }, { usd: 0.1, detail: 'media 8 (failed)' }]);
     expectNoReservation(spend);
   });
 
@@ -69,10 +68,10 @@ describe('withReservation', () => {
     await expect(withReservation(spend, 0.1, 'media 7', async () => { throw server; }, MEDIA_ATTEMPTS)).rejects.toBe(server);
     const dns = lostConnection(new TypeError('fetch failed', { cause: { code: 'ENOTFOUND' } }));
     await expect(withReservation(spend, 0.1, 'media 8', async () => { throw dns; }, MEDIA_ATTEMPTS)).rejects.toBe(dns);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     await expect(withReservation(spend, 0.1, 'media 9', async () => { throw new Anthropic.APIConnectionTimeoutError(); }, MEDIA_ATTEMPTS)).rejects.toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
     await expect(withReservation(spend, 0.05, 'media 10', async () => { throw new Error('boom'); }, MEDIA_ATTEMPTS)).rejects.toThrow('boom');
-    expect(rows()).toEqual([
+    expect(await rows()).toEqual([
       { usd: 0.1, detail: 'media 9 (connection lost, estimated)' },
       { usd: 0.05, detail: 'media 10 (unknown, estimated)' },
     ]);
@@ -83,7 +82,7 @@ describe('withReservation', () => {
     const { spend, rows } = await setup();
     const e = lostConnection(new TypeError('fetch failed', { cause: { code } }));
     await expect(withReservation(spend, 0.1, 'media 8', async () => { throw e; }, MEDIA_ATTEMPTS)).rejects.toBe(e);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     expectNoReservation(spend);
   });
 
@@ -92,7 +91,7 @@ describe('withReservation', () => {
     const { spend, rows } = await setup();
     const e = lostConnection(new TypeError('fetch failed', { cause: new Error('connect', { cause: new Error('socket', { cause: { code: 'ECONNREFUSED' } }) }) }));
     await expect(withReservation(spend, 0.1, 'media 8', async () => { throw e; }, MEDIA_ATTEMPTS)).rejects.toBe(e);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     expectNoReservation(spend);
   });
 
@@ -100,7 +99,7 @@ describe('withReservation', () => {
     const { spend, rows } = await setup();
     const e = lostConnection(new TypeError('fetch failed', { cause: { code: 'ECONNRESET' } }));
     await expect(withReservation(spend, 0.1, 'media 13', async () => { throw e; }, MEDIA_ATTEMPTS)).rejects.toBe(e);
-    expect(rows()).toEqual([{ usd: 0.1, detail: 'media 13 (connection lost, estimated)' }]);
+    expect(await rows()).toEqual([{ usd: 0.1, detail: 'media 13 (connection lost, estimated)' }]);
     expectNoReservation(spend);
   });
 
@@ -108,7 +107,7 @@ describe('withReservation', () => {
     const { spend, rows } = await setup();
     const timeout = new Anthropic.APIConnectionTimeoutError();
     await expect(withReservation(spend, 0.1, 'call 11', async () => { throw timeout; }, SDK_MAX_RETRIES + 1)).rejects.toBe(timeout);
-    expect(rows()).toEqual([{ usd: 0.1 * (SDK_MAX_RETRIES + 1), detail: 'call 11 (connection lost, estimated)' }]);
+    expect(await rows()).toEqual([{ usd: 0.1 * (SDK_MAX_RETRIES + 1), detail: 'call 11 (connection lost, estimated)' }]);
     expectNoReservation(spend);
   });
 
@@ -147,8 +146,7 @@ describe('withReservation', () => {
     await fail(new Anthropic.APIConnectionTimeoutError());
     await withReservation(spend, 0.1, 'meeting 2', ok(0.02), 1, (usd) => booked.push(usd));
     expect(booked).toEqual([0.004, 0.1, 0, 0, 0.1]);
-    await spend.flushed();
-    expect(rows().map((r) => r.usd)).toEqual([0.004, 0.1, 0.1, 0.02]);
+    expect((await rows()).map((r) => r.usd)).toEqual([0.004, 0.1, 0.1, 0.02]);
   });
 });
 
@@ -178,7 +176,7 @@ describe('a connection that timed out before the request was sent', () => {
     expect(err).toBeInstanceOf(Anthropic.APIConnectionError);
     expect(err).not.toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
     expect(fetch).toHaveBeenCalledTimes(MEDIA_ATTEMPTS);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     expectNoReservation(spend);
   });
 
@@ -192,7 +190,7 @@ describe('a connection that timed out before the request was sent', () => {
     expect(err).toBeInstanceOf(Anthropic.APIConnectionError);
     expect(err).not.toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
     expect(fetch).toHaveBeenCalledTimes(SDK_MAX_RETRIES + 1);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     expectNoReservation(spend);
   });
 
@@ -204,7 +202,7 @@ describe('a connection that timed out before the request was sent', () => {
     const err = await withReservation(spend, 4.2, 'media 13', () => media.readScannedPdf(Buffer.from('%PDF')), MEDIA_ATTEMPTS)
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
-    expect(rows()).toEqual([{ usd: 4.2, detail: 'media 13 (connection lost, estimated)' }]);
+    expect(await rows()).toEqual([{ usd: 4.2, detail: 'media 13 (connection lost, estimated)' }]);
     expectNoReservation(spend);
   });
 });

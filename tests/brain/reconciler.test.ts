@@ -340,7 +340,7 @@ describe('Reconciler', () => {
     const { db, r, spend } = await setup([{ output: { ops: [] }, costUsd: 0.05, fallbackUsed: true }]);
     await store(db, 'm1', 'hello');
     await r.run(1);
-    const rows = db.raw.prepare('SELECT usd, detail FROM spend').all() as { usd: number; detail: string }[];
+    const rows = await db.all<{ usd: number; detail: string }>('SELECT usd, detail FROM spend');
     expect(rows).toHaveLength(1);
     expect(rows[0]!.usd).toBeCloseTo(0.05, 9);
     expect(rows[0]!.detail).toMatch(/\(fallback\)$/);
@@ -352,7 +352,7 @@ describe('Reconciler', () => {
     await store(db, 'm1', 'hello');
     expect(await r.run(1)).toEqual({ status: 'failed', errorCode: 'unknown' });
     expect(spend.spentToday()).toBeCloseTo(estimateOf(ai), 9);
-    const row = db.raw.prepare('SELECT detail FROM spend').get() as { detail: string };
+    const row = (await db.get<{ detail: string }>('SELECT detail FROM spend'))!;
     expect(row.detail).toMatch(/^batch \d+ \(unknown, estimated\)$/);
     expectNoReservation(spend);
   });

@@ -154,7 +154,7 @@ const estimate = estimateFor(prompt);
 async function setup(capUsd = 5) {
   const db = await seededDb();
   const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd });
-  const rows = () => db.raw.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
+  const rows = () => db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend ORDER BY id');
   return { spend, rows };
 }
 const invalid = (cost: number | null) => new AiInvalidOutputError('Model output was not valid JSON', FAKE_USAGE, cost);
@@ -180,7 +180,7 @@ describe('summarizeMeeting', () => {
     expect(r.model).toBe('fake');
     expect(r.fallbackUsed).toBe(false);
     expect(r.usage).toEqual(FAKE_USAGE);
-    expect(rows()).toEqual([{ kind: 'ai', usd: 0.12, detail: 'meeting 7' }]);
+    expect(await rows()).toEqual([{ kind: 'ai', usd: 0.12, detail: 'meeting 7' }]);
   });
 
   it('reports the model and a fallback of the call that gave the summary', async () => {
@@ -190,7 +190,7 @@ describe('summarizeMeeting', () => {
     const r = await summarizeMeeting({ ai, spend, prices }, input);
     expect(r).toMatchObject({ model: 'claude-opus-5', fallbackUsed: true, usage, skipped: null });
     expect(r.costUsd).toBeCloseTo(0.11, 9);
-    expect(rows().map((x) => x.detail)).toEqual(['meeting 7 (failed)', 'meeting 7 (fallback)']);
+    expect((await rows()).map((x) => x.detail)).toEqual(['meeting 7 (failed)', 'meeting 7 (fallback)']);
   });
 
   // A blank summary would become an empty Doc and a meeting marked done with nothing in it.
@@ -201,7 +201,7 @@ describe('summarizeMeeting', () => {
     expect(ai.calls).toHaveLength(2);
     expect(r.summary.whatHappened).toBe('The client approved the logo.');
     expect(r.costUsd).toBeCloseTo(0.15, 9);
-    expect(rows()).toEqual([{ kind: 'ai', usd: 0.05, detail: 'meeting 7 (failed)' }, { kind: 'ai', usd: 0.1, detail: 'meeting 7' }]);
+    expect(await rows()).toEqual([{ kind: 'ai', usd: 0.05, detail: 'meeting 7 (failed)' }, { kind: 'ai', usd: 0.1, detail: 'meeting 7' }]);
   });
 
   it('never returns a blank summary: two empty answers fail', async () => {
@@ -209,7 +209,7 @@ describe('summarizeMeeting', () => {
     const ai = new FakeMeetingAi([{ costUsd: 0.05, output: wire({ whatHappened: '' }) }, { costUsd: 0.06, output: {} }, { costUsd: 0.1 }]);
     await expect(summarizeMeeting({ ai, spend, prices }, input)).rejects.toBeInstanceOf(AiInvalidOutputError);
     expect(ai.calls).toHaveLength(2);
-    expect(rows()).toEqual([{ kind: 'ai', usd: 0.05, detail: 'meeting 7 (failed)' }, { kind: 'ai', usd: 0.06, detail: 'meeting 7 (failed)' }]);
+    expect(await rows()).toEqual([{ kind: 'ai', usd: 0.05, detail: 'meeting 7 (failed)' }, { kind: 'ai', usd: 0.06, detail: 'meeting 7 (failed)' }]);
   });
 
   it('calls nothing when no transcript line can be sent', async () => {
@@ -218,7 +218,7 @@ describe('summarizeMeeting', () => {
       const ai = new FakeMeetingAi([]);
       const r = await summarizeMeeting({ ai, spend, prices }, { ...input, segments });
       expect(ai.calls).toHaveLength(0);
-      expect(rows()).toEqual([]);
+      expect(await rows()).toEqual([]);
       expect(r).toEqual({
         summary: { whatHappened: '', discussion: [], decisions: [], actionItems: [], openQuestions: [], conclusion: '', speakers: [] },
         skipped: 'no_lines',
@@ -255,7 +255,7 @@ describe('summarizeMeeting', () => {
     const ai = new FakeMeetingAi([]);
     await expect(summarizeMeeting({ ai, spend, prices }, input)).rejects.toBeInstanceOf(SpendCapReachedError);
     expect(ai.calls).toHaveLength(0);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
   });
 
   it('tries once more after an invalid output, booking both calls', async () => {
@@ -264,7 +264,7 @@ describe('summarizeMeeting', () => {
     const r = await summarizeMeeting({ ai, spend, prices }, input);
     expect(ai.calls).toHaveLength(2);
     expect(r.costUsd).toBeCloseTo(estimate + 0.1, 9);
-    expect(rows()).toEqual([
+    expect(await rows()).toEqual([
       { kind: 'ai', usd: estimate, detail: 'meeting 7 (failed)' },
       { kind: 'ai', usd: 0.1, detail: 'meeting 7' },
     ]);
@@ -276,7 +276,7 @@ describe('summarizeMeeting', () => {
     const ai = new FakeMeetingAi([invalid(0.03), second, { costUsd: 0.1 }]);
     await expect(summarizeMeeting({ ai, spend, prices }, input)).rejects.toBe(second);
     expect(ai.calls).toHaveLength(2);
-    expect(rows()).toEqual([
+    expect(await rows()).toEqual([
       { kind: 'ai', usd: 0.03, detail: 'meeting 7 (failed)' },
       { kind: 'ai', usd: 0.04, detail: 'meeting 7 (failed)' },
     ]);
@@ -287,7 +287,7 @@ describe('summarizeMeeting', () => {
     const ai = new FakeMeetingAi([invalid(null), { costUsd: 0.1 }]);
     await expect(summarizeMeeting({ ai, spend, prices }, input)).rejects.toBeInstanceOf(SpendCapReachedError);
     expect(ai.calls).toHaveLength(1);
-    expect(rows()).toEqual([{ kind: 'ai', usd: estimate, detail: 'meeting 7 (failed)' }]);
+    expect(await rows()).toEqual([{ kind: 'ai', usd: estimate, detail: 'meeting 7 (failed)' }]);
   });
 
   it('books a refusal at its cost and does not try again', async () => {
@@ -295,7 +295,7 @@ describe('summarizeMeeting', () => {
     const ai = new FakeMeetingAi([new AiRefusalError('cyber', FAKE_USAGE, 0.02), { costUsd: 0.1 }]);
     await expect(summarizeMeeting({ ai, spend, prices }, input)).rejects.toBeInstanceOf(AiRefusalError);
     expect(ai.calls).toHaveLength(1);
-    expect(rows()).toEqual([{ kind: 'ai', usd: 0.02, detail: 'meeting 7 (failed)' }]);
+    expect(await rows()).toEqual([{ kind: 'ai', usd: 0.02, detail: 'meeting 7 (failed)' }]);
   });
 
   // The client makes one SDK attempt, so a lost connection is booked at one estimate, not three.
@@ -304,7 +304,7 @@ describe('summarizeMeeting', () => {
     const ai = new FakeMeetingAi([new Anthropic.APIConnectionTimeoutError(), { costUsd: 0.1 }]);
     await expect(summarizeMeeting({ ai, spend, prices }, input)).rejects.toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
     expect(ai.calls).toHaveLength(1);
-    expect(rows()).toEqual([{ kind: 'ai', usd: estimate, detail: 'meeting 7 (connection lost, estimated)' }]);
+    expect(await rows()).toEqual([{ kind: 'ai', usd: estimate, detail: 'meeting 7 (connection lost, estimated)' }]);
   });
 
   it('reports a cut transcript and accepts only the segment ids that were sent', async () => {

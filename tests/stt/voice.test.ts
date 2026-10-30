@@ -397,7 +397,7 @@ describe('voiceTranscriber: OpenAI parts', () => {
     const setup = async () => {
       const db = await seededDb();
       const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 1 });
-      const rows = () => db.raw.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
+      const rows = () => db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend ORDER BY id');
       return { spend, rows };
     };
     /**
@@ -428,7 +428,7 @@ describe('voiceTranscriber: OpenAI parts', () => {
       expect(ceiling).toBe(voiceCeilingUsd('openai', 420, INR));
       expect(out).toBeInstanceOf(SttPartialError);
       expect((out as SttPartialError).cause).toBe(err);
-      expect(rows()).toEqual([{ kind: 'stt', usd: ceiling, detail: 'media 7 (unknown, estimated)' }]);
+      expect(await rows()).toEqual([{ kind: 'stt', usd: ceiling, detail: 'media 7 (unknown, estimated)' }]);
       expect(booked).toEqual([{ outcome: 'ceiling', usd: ceiling }]);
     });
 
@@ -441,7 +441,7 @@ describe('voiceTranscriber: OpenAI parts', () => {
       }];
       const { out, booked } = await held(p, spend);
       expect(out).toBe(err);
-      expect(rows()).toEqual([]);
+      expect(await rows()).toEqual([]);
       expect(booked).toEqual([{ outcome: 'none', usd: 0 }]);
     });
   });

@@ -118,7 +118,7 @@ describe('transcribeMeeting', () => {
   let id: number;
   let audioAbs: string;
   const clock = manualClock('2026-11-01T10:00:00.000Z');
-  const rows = () => db.raw.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
+  const rows = () => db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend ORDER BY id');
   const parts = async () => (await getMeeting(db, id))!.sttParts;
   const later = (ms: number) => manualClock(new Date(clock.now().getTime() + ms).toISOString());
   const forgets = () => db.raw.prepare('SELECT * FROM stt_forget ORDER BY id').all() as { id: number; meeting_id: number; provider: string; ref: string; attempts: number }[];
@@ -157,7 +157,7 @@ describe('transcribeMeeting', () => {
     expect(m.transcript).toEqual([{ start: 1, end: 2, speaker: 'A', text: 'namaste' }]);
     expect(m.note).toBeNull();
     expect(m.sttParts).toEqual([{ index: 1, provider: 'elevenlabs', file: null, offset: 0, seconds: 1200, state: 'done', jobId: null, booked: 'actual', segments: said('namaste'), billedSeconds: 1201 }]);
-    expect(rows()).toEqual([{ kind: 'stt', usd: ceiling('elevenlabs', 1201), detail: `meeting ${id} part 1` }]);
+    expect(await rows()).toEqual([{ kind: 'stt', usd: ceiling('elevenlabs', 1201), detail: `meeting ${id} part 1` }]);
   });
 
   it('splits a long meeting, moves times by each part offset and labels speakers per part', async () => {
@@ -176,8 +176,8 @@ describe('transcribeMeeting', () => {
       { start: 301, end: 302, speaker: 'p2:A', text: 'two' },
       { start: 601, end: 602, speaker: 'p3:A', text: 'three' },
     ]);
-    expect(rows().map((r) => r.detail)).toEqual([1, 2, 3].map((n) => `meeting ${id} part ${n}`));
-    expect(rows().every((r) => r.kind === 'stt')).toBe(true);
+    expect((await rows()).map((r) => r.detail)).toEqual([1, 2, 3].map((n) => `meeting ${id} part ${n}`));
+    expect((await rows()).every((r) => r.kind === 'stt')).toBe(true);
     expect(existsSync(partsDir())).toBe(false); // the parts folder is removed once the transcript is stored
   });
 
@@ -190,12 +190,12 @@ describe('transcribeMeeting', () => {
     const err = await transcribeMeeting(id, deps(p, { ffmpeg: new Ffmpeg('ffmpeg.exe', ff.run) })).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(SttHttpError); // 5xx: the processor retries
     expect((await parts()).map((x) => [x.state, x.booked])).toEqual([['done', 'actual'], ['done', 'actual'], ['todo', 'none'], ['todo', 'none'], ['todo', 'none']]);
-    expect(rows()).toHaveLength(2);
+    expect(await rows()).toHaveLength(2);
 
     p.script = [ok('3'), ok('4'), ok('5')];
     await transcribeMeeting(id, deps(p, { ffmpeg: new Ffmpeg('ffmpeg.exe', ff.run) }));
     expect(p.calls.map((c) => c.audio.offset)).toEqual([0, 300, 600, 600, 900, 1200]);
-    expect(rows().map((r) => r.detail)).toEqual([1, 2, 3, 4, 5].map((n) => `meeting ${id} part ${n}`));
+    expect((await rows()).map((r) => r.detail)).toEqual([1, 2, 3, 4, 5].map((n) => `meeting ${id} part ${n}`));
     expect(ff.segmentRuns()).toBe(1); // the finished split is reused
     expect((await getMeeting(db, id))!.transcript!.map((s) => s.text)).toEqual(['1', '2', '3', '4', '5']);
   });
@@ -207,15 +207,15 @@ describe('transcribeMeeting', () => {
     await setSttParts(db, id, [inflight], NOW);
     expect(await recoverInflightParts(db, spend, INR, silentLogger())).toBe(1);
     expect(await recoverInflightParts(db, spend, INR, silentLogger())).toBe(0); // never twice
-    expect(rows()).toEqual([{ kind: 'stt', usd: ceiling('elevenlabs', 1200), detail: `meeting ${id} part 1 (unknown, estimated)` }]);
+    expect(await rows()).toEqual([{ kind: 'stt', usd: ceiling('elevenlabs', 1200), detail: `meeting ${id} part 1 (unknown, estimated)` }]);
     expect((await parts())[0]).toMatchObject({ state: 'unknown', booked: 'ceiling' });
 
     p.script = [ok('again', 1200)];
     await transcribeMeeting(id, deps(p));
     expect(p.calls).toHaveLength(1);
     expect(p.calls[0]!.opts.resumeJobId).toBeUndefined();
-    expect(rows()).toHaveLength(2);
-    expect(rows()[1]).toEqual({ kind: 'stt', usd: ceiling('elevenlabs', 1200), detail: `meeting ${id} part 1` });
+    expect(await rows()).toHaveLength(2);
+    expect((await rows())[1]).toEqual({ kind: 'stt', usd: ceiling('elevenlabs', 1200), detail: `meeting ${id} part 1` });
     expect((await parts())[0]).toMatchObject({ state: 'done', booked: 'actual' });
   });
 
@@ -225,8 +225,8 @@ describe('transcribeMeeting', () => {
     await setSttParts(db, id, [{ index: 1, provider: 'openai', file: null, offset: 0, seconds: 1200, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
     p.script = [ok('x', 1200)];
     await transcribeMeeting(id, deps(p));
-    expect(rows().map((r) => r.detail)).toEqual([`meeting ${id} part 1 (unknown, estimated)`, `meeting ${id} part 1`]);
-    expect(rows().every((r) => r.kind === 'stt')).toBe(true);
+    expect((await rows()).map((r) => r.detail)).toEqual([`meeting ${id} part 1 (unknown, estimated)`, `meeting ${id} part 1`]);
+    expect((await rows()).every((r) => r.kind === 'stt')).toBe(true);
   });
 
   it('crash with a Sarvam job in flight: resumed by its job id with no second booking', async () => {
@@ -238,7 +238,7 @@ describe('transcribeMeeting', () => {
     p.script = [job('never-used')];
     await transcribeMeeting(id, deps(p));
     expect(p.calls[0]!.opts.resumeJobId).toBe('job-7');
-    expect(rows()).toHaveLength(1);
+    expect(await rows()).toHaveLength(1);
     expect((await parts())[0]).toMatchObject({ state: 'done', booked: 'ceiling', jobId: 'job-7' });
   });
 
@@ -249,14 +249,14 @@ describe('transcribeMeeting', () => {
     p.script = [
       async (_a, opts) => {
         await opts.onJobId!('job-1');
-        atAcceptance = { part: (await parts())[0]!, rows: rows() };
+        atAcceptance = { part: (await parts())[0]!, rows: await rows() };
         return result(said('namaste'));
       },
     ];
     await transcribeMeeting(id, deps(p));
     expect(atAcceptance!.part).toMatchObject({ state: 'inflight', jobId: 'job-1', booked: 'ceiling' });
     expect(atAcceptance!.rows).toEqual([{ kind: 'stt', usd: ceiling('sarvam', 3600), detail: `meeting ${id} part 1` }]);
-    expect(rows()).toHaveLength(1);
+    expect(await rows()).toHaveLength(1);
     expect((await parts())[0]).toMatchObject({ state: 'done', booked: 'ceiling' });
   });
 
@@ -267,7 +267,7 @@ describe('transcribeMeeting', () => {
     let atCall: unknown[] | undefined;
     p.script = [
       async (_a, opts) => {
-        atCall = rows(); // booked before the provider is asked
+        atCall = await rows(); // booked before the provider is asked
         expect(opts.onJobId).toBeUndefined();
         return result(said('namaste'));
       },
@@ -276,7 +276,7 @@ describe('transcribeMeeting', () => {
     expect(p.calls).toHaveLength(1);
     expect(p.calls[0]!.opts.resumeJobId).toBe('J1');
     expect(atCall).toEqual([{ kind: 'stt', usd: ceiling('sarvam', 3600), detail: `meeting ${id} part 1` }]);
-    expect(rows()).toEqual([{ kind: 'stt', usd: ceiling('sarvam', 3600), detail: `meeting ${id} part 1` }]);
+    expect(await rows()).toEqual([{ kind: 'stt', usd: ceiling('sarvam', 3600), detail: `meeting ${id} part 1` }]);
     expect((await parts())[0]).toMatchObject({ state: 'done', booked: 'ceiling', jobId: 'J1' });
   });
 
@@ -291,7 +291,7 @@ describe('transcribeMeeting', () => {
       },
     ];
     await transcribeMeeting(id, deps(p));
-    expect(rows()).toEqual([{ kind: 'stt', usd: ceiling('sarvam', 3600), detail: `meeting ${id} part 1` }]);
+    expect(await rows()).toEqual([{ kind: 'stt', usd: ceiling('sarvam', 3600), detail: `meeting ${id} part 1` }]);
     expect((await parts())[0]).toMatchObject({ state: 'done', booked: 'ceiling', jobId: 'J1' });
   });
 
@@ -309,7 +309,7 @@ describe('transcribeMeeting', () => {
     const busy = await transcribeMeeting(id, deps(p)).catch((e: unknown) => e);
     expect((busy as MeetingDeferral).code).toBe('spend_busy');
     expect(p.calls).toHaveLength(0);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
   });
 
   it('Sarvam: a lost job clears its id and stays booked; a later retry sends a new job, booked again', async () => {
@@ -318,12 +318,12 @@ describe('transcribeMeeting', () => {
     p.script = [job('job-1', fail(new SttJobLostError('status_http_404')))];
     await expect(transcribeMeeting(id, deps(p))).rejects.toBeInstanceOf(SttJobLostError);
     expect((await parts())[0]).toMatchObject({ state: 'unknown', jobId: null, booked: 'ceiling' });
-    expect(rows()).toHaveLength(1);
+    expect(await rows()).toHaveLength(1);
 
     p.script = [job('job-2')];
     await transcribeMeeting(id, deps(p));
     expect(p.calls[1]!.opts.resumeJobId).toBeUndefined();
-    expect(rows().map((r) => r.detail)).toEqual([`meeting ${id} part 1`, `meeting ${id} part 1`]); // a second job is a second charge
+    expect((await rows()).map((r) => r.detail)).toEqual([`meeting ${id} part 1`, `meeting ${id} part 1`]); // a second job is a second charge
     expect((await parts())[0]).toMatchObject({ state: 'done', jobId: 'job-2', booked: 'ceiling' });
   });
 
@@ -336,7 +336,7 @@ describe('transcribeMeeting', () => {
     p.script = [job('job-x')];
     await transcribeMeeting(id, deps(p));
     expect(p.calls[1]!.opts.resumeJobId).toBe('job-1');
-    expect(rows()).toHaveLength(1);
+    expect(await rows()).toHaveLength(1);
   });
 
   it('Sarvam: a refusal before any job id releases the hold and sets the part back to todo', async () => {
@@ -345,7 +345,7 @@ describe('transcribeMeeting', () => {
     p.script = [fail(new SttHttpError(503))];
     await expect(transcribeMeeting(id, deps(p))).rejects.toBeInstanceOf(SttHttpError);
     expect((await parts())[0]).toMatchObject({ state: 'todo', jobId: null, booked: 'none' });
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     expect(spend.canSpend(4.99)).toBe(true); // no hold left behind
   });
 
@@ -355,7 +355,7 @@ describe('transcribeMeeting', () => {
     p.script = [fail(new SttNoAnswerError('timeout'))];
     await expect(transcribeMeeting(id, deps(p))).rejects.toBeInstanceOf(SttNoAnswerError);
     expect((await parts())[0]).toMatchObject({ state: 'unknown', jobId: null, booked: 'ceiling' });
-    expect(rows()).toEqual([{ kind: 'stt', usd: ceiling('sarvam', 3600), detail: `meeting ${id} part 1 (unknown, estimated)` }]);
+    expect(await rows()).toEqual([{ kind: 'stt', usd: ceiling('sarvam', 3600), detail: `meeting ${id} part 1 (unknown, estimated)` }]);
   });
 
   it('Sarvam: a shutdown during the upload books the hold once; the job accepted afterwards is not booked again', async () => {
@@ -379,7 +379,7 @@ describe('transcribeMeeting', () => {
     expect((await parts())[0]).toMatchObject({ state: 'unknown', booked: 'ceiling', jobId: null });
     accept();
     await run;
-    expect(rows()).toEqual([{ kind: 'stt', usd: ceiling('sarvam', 3600), detail: 'shutdown (estimated)' }]);
+    expect(await rows()).toEqual([{ kind: 'stt', usd: ceiling('sarvam', 3600), detail: 'shutdown (estimated)' }]);
     expect((await parts())[0]).toMatchObject({ state: 'done', jobId: 'job-1', booked: 'ceiling' });
   });
 
@@ -389,10 +389,10 @@ describe('transcribeMeeting', () => {
     p.script = [fail(new SttNoAnswerError('timeout'))];
     await expect(transcribeMeeting(id, deps(p))).rejects.toBeInstanceOf(SttNoAnswerError);
     expect((await parts())[0]).toMatchObject({ state: 'unknown', booked: 'ceiling', jobId: null });
-    expect(rows()).toEqual([{ kind: 'stt', usd: ceiling('elevenlabs', 1200), detail: `meeting ${id} part 1 (unknown, estimated)` }]);
+    expect(await rows()).toEqual([{ kind: 'stt', usd: ceiling('elevenlabs', 1200), detail: `meeting ${id} part 1 (unknown, estimated)` }]);
     p.script = [ok('x', 1200)];
     await transcribeMeeting(id, deps(p));
-    expect(rows()).toHaveLength(2);
+    expect(await rows()).toHaveLength(2);
     expect((await parts())[0]).toMatchObject({ state: 'done', booked: 'actual' });
   });
 
@@ -429,7 +429,7 @@ describe('transcribeMeeting', () => {
     expect(await recoverInflightParts(db, spend, INR, silentLogger())).toBe(0);
     p.script = [ok('x', 1200)];
     await transcribeMeeting(id, deps(p));
-    expect(rows().map((r) => [r.kind, r.detail])).toEqual([['stt', 'shutdown (estimated)'], ['stt', `meeting ${id} part 1`]]);
+    expect((await rows()).map((r) => [r.kind, r.detail])).toEqual([['stt', 'shutdown (estimated)'], ['stt', `meeting ${id} part 1`]]);
   });
 
   it('an answer that arrives after the shutdown booking is stored and not booked again', async () => {
@@ -449,7 +449,7 @@ describe('transcribeMeeting', () => {
     await spend.settlePending('shutdown (estimated)');
     answer(result(said('late'), 1200));
     await run;
-    expect(rows()).toHaveLength(1);
+    expect(await rows()).toHaveLength(1);
     expect((await parts())[0]).toMatchObject({ state: 'done', booked: 'ceiling' }); // what was booked: the ceiling, at shutdown
     expect((await getMeeting(db, id))!.stage).toBe('transcribed');
   });
@@ -466,12 +466,12 @@ describe('transcribeMeeting', () => {
     await expect(transcribeMeeting(id, deps(p))).rejects.toThrow();
     expect((await getMeeting(db, id))!.status).toBe('failed');
     expect((await parts())[0]).toMatchObject({ state: 'inflight', booked: 'none' });
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     // The processor, before failMeeting (here the meeting is already failed): booked once, whatever the status.
     expect(await bookStuckParts(db, spend, id, { inrPerUsd: INR, clock })).toBe(1);
     expect(await bookStuckParts(db, spend, id, { inrPerUsd: INR, clock })).toBe(0);
     expect(await recoverInflightParts(db, spend, INR, silentLogger())).toBe(0);
-    expect(rows()).toEqual([{ kind: 'stt', usd: ceiling('elevenlabs', 1200), detail: `meeting ${id} part 1 (unknown, estimated)` }]);
+    expect(await rows()).toEqual([{ kind: 'stt', usd: ceiling('elevenlabs', 1200), detail: `meeting ${id} part 1 (unknown, estimated)` }]);
     expect((await parts())[0]).toMatchObject({ state: 'unknown', booked: 'ceiling' });
   });
 
@@ -481,7 +481,7 @@ describe('transcribeMeeting', () => {
     await failMeeting(db, id, { status: 'failed', errorCode: 'attempts', at: NOW });
     expect(await recoverInflightParts(db, spend, INR, silentLogger())).toBe(1);
     expect(await recoverInflightParts(db, spend, INR, silentLogger())).toBe(0);
-    expect(rows()).toEqual([{ kind: 'stt', usd: ceiling('openai', 1200), detail: `meeting ${id} part 1 (unknown, estimated)` }]);
+    expect(await rows()).toEqual([{ kind: 'stt', usd: ceiling('openai', 1200), detail: `meeting ${id} part 1 (unknown, estimated)` }]);
   });
 
   it('a stuck part is booked at the price of the provider it was sent to, not the one set up now', async () => {
@@ -490,7 +490,7 @@ describe('transcribeMeeting', () => {
     const p = new FakeProvider('elevenlabs', 36_000);
     p.script = [ok('x', 3600)];
     await transcribeMeeting(id, deps(p));
-    expect(rows()).toEqual([
+    expect(await rows()).toEqual([
       { kind: 'stt', usd: ceiling('sarvam', 3600), detail: `meeting ${id} part 1 (unknown, estimated)` },
       { kind: 'stt', usd: ceiling('elevenlabs', 3600), detail: `meeting ${id} part 1` },
     ]);
@@ -536,7 +536,7 @@ describe('transcribeMeeting', () => {
       [2, 'openai', 600, `${id}-parts-1/part-000.mp3`],
       [3, 'openai', 900, `${id}-parts-1/part-001.mp3`],
     ]);
-    expect(rows()).toHaveLength(4); // two Sarvam jobs at acceptance, two OpenAI parts
+    expect(await rows()).toHaveLength(4); // two Sarvam jobs at acceptance, two OpenAI parts
     expect(existsSync(again)).toBe(false);
     expect(existsSync(partsDir())).toBe(false);
   });
@@ -592,7 +592,7 @@ describe('transcribeMeeting', () => {
     const err = await transcribeMeeting(id, deps(p)).catch((e: unknown) => e);
     expect((err as MeetingDeferral).code).toBe('stt_unavailable');
     expect((await parts())[0]).toMatchObject({ state: 'todo', booked: 'none' });
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
   });
 
   it('429 is thrown as it is, for the processor to retry', async () => {
@@ -703,12 +703,12 @@ describe('transcribeMeeting', () => {
     await expect(transcribeMeeting(id, deps(p))).rejects.toBe(broken);
     record.mockRestore();
     expect((await parts())[0]).toMatchObject({ state: 'inflight', booked: 'none' });
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     expect(forgets()).toEqual([]); // the done write went with it
 
     p.script = [ok('x', 1200)];
     await transcribeMeeting(id, deps(p));
-    expect(rows().map((r) => r.detail)).toEqual([`meeting ${id} part 1 (unknown, estimated)`, `meeting ${id} part 1`]);
+    expect((await rows()).map((r) => r.detail)).toEqual([`meeting ${id} part 1 (unknown, estimated)`, `meeting ${id} part 1`]);
   });
 
   it('a part write that fails inside the booking transaction takes the booking with it', async () => {
@@ -721,7 +721,7 @@ describe('transcribeMeeting', () => {
       },
     ];
     await expect(transcribeMeeting(id, deps(p))).rejects.toThrow();
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     db.raw.prepare("UPDATE meetings SET status = 'queued' WHERE id = ?").run(id);
     expect((await parts())[0]).toMatchObject({ state: 'inflight', booked: 'none' });
     expect(await recoverInflightParts(db, spend, INR, silentLogger())).toBe(1);
@@ -734,7 +734,7 @@ describe('transcribeMeeting', () => {
     const err = await transcribeMeeting(id, deps(p)).catch((e: unknown) => e);
     expect((err as NodeJS.ErrnoException).code).toBe('ENOENT');
     expect(p.calls).toHaveLength(0);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     expect((await parts())[0]).toMatchObject({ state: 'todo', booked: 'none' });
   });
 
@@ -760,7 +760,7 @@ describe('transcribeMeeting', () => {
     ac.abort(reason);
     await expect(transcribeMeeting(id, deps(p), ac.signal)).rejects.toBe(reason);
     expect(p.calls).toHaveLength(0);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
   });
 
   it('logs ids, parts, provider, seconds and cost only: never the key or what was said', async () => {

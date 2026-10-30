@@ -1449,7 +1449,7 @@ describe('MediaProcessor: voice notes', () => {
       expect(await getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'extract', text: 'kal milte hain', note: null });
       expect(v.transcribed).toBe(3);
       expect(forgetRows(db)).toEqual([]);
-      expect(spendDb.raw.prepare('SELECT COUNT(*) AS n FROM spend').get()).toEqual({ n: 0 });
+      expect(await spendDb.get('SELECT COUNT(*) AS n FROM spend')).toEqual({ n: 0 });
     });
 
     it('an abort (the service stopping) gives the attempt back: it waits 1 minute and counts nothing, however often', async () => {

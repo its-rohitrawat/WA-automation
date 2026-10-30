@@ -68,7 +68,7 @@ async function setup(
   const reserve = vi.spyOn(spend, 'reserve');
   return { db, spend, ai, parse, prepareImage, extract, input, reserve };
 }
-const spendRows = (db: Db) => db.raw.prepare('SELECT usd, detail FROM spend').all() as { usd: number; detail: string }[];
+const spendRows = (db: Db) => db.all<{ usd: number; detail: string }>('SELECT usd, detail FROM spend');
 
 describe('createExtractor', () => {
   it('describes an image through Claude and books the actual cost', async () => {
@@ -76,7 +76,7 @@ describe('createExtractor', () => {
     expect(await extract(input())).toEqual({ textKind: 'description', text: 'A screenshot of a payment receipt. Visible text: Paid ₹42,000', pageCount: null, note: null });
     expect(prepareImage).toHaveBeenCalledWith(Buffer.from('img'));
     expect(ai.calls).toEqual([{ kind: 'image', bytes: Buffer.from('img-small') }]);
-    expect(spendRows(db)).toEqual([{ usd: 0.01, detail: 'media 7' }]);
+    expect(await spendRows(db)).toEqual([{ usd: 0.01, detail: 'media 7' }]);
     expect(reserve).toHaveBeenCalledExactlyOnceWith(imageEstimateUsd({ width: 1000, height: 750 }, P));
   });
 
@@ -133,7 +133,7 @@ describe('createExtractor', () => {
       textKind: 'extract', text: 'Quotation No. 17. Total ₹1,20,000', pageCount: 3, note: 'scan_read_by_ai',
     });
     expect(ai.calls).toEqual([{ kind: 'pdf', bytes: PDF }]);
-    expect(spendRows(db)).toEqual([{ usd: 0.01, detail: 'media 7' }]);
+    expect(await spendRows(db)).toEqual([{ usd: 0.01, detail: 'media 7' }]);
     expect(reserve).toHaveBeenCalledExactlyOnceWith(scannedPdfCeilingUsd(P));
   });
 
@@ -227,7 +227,7 @@ describe('createExtractor', () => {
       expect(await scan.extract(scan.input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toEqual({ ...NONE, pageCount: 3, note: 'too_costly' });
       expect(scan.reserve).not.toHaveBeenCalled();
       expect(scan.ai.calls).toHaveLength(0);
-      expect(spendRows(scan.db)).toEqual([]);
+      expect(await spendRows(scan.db)).toEqual([]);
     });
 
     it('still tries an image or a scan when the daily cap equals its ceiling', async () => {
@@ -295,7 +295,7 @@ describe('createExtractor', () => {
       spend.record('ai', 11, 'batch 1');
       await expect(extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).rejects.toBeInstanceOf(SpendCapReachedError);
       expect(ai.calls).toHaveLength(0);
-      expect(spendRows(db)).toEqual([{ usd: 11, detail: 'batch 1' }]);
+      expect(await spendRows(db)).toEqual([{ usd: 11, detail: 'batch 1' }]);
     });
   });
 
@@ -309,7 +309,7 @@ describe('createExtractor', () => {
       expect(revoked).toHaveBeenCalledTimes(1);
       expect(reserve).not.toHaveBeenCalled();
       expect(ai.calls).toHaveLength(0);
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
 
     it('a scanned PDF is not read', async () => {
@@ -317,7 +317,7 @@ describe('createExtractor', () => {
       expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF, revoked: async () => true }))).toEqual({ ...NONE, note: 'revoked' });
       expect(reserve).not.toHaveBeenCalled();
       expect(ai.calls).toHaveLength(0);
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
 
     it('a file still wanted is read as usual, and a free read never asks', async () => {
@@ -340,7 +340,7 @@ describe('createExtractor', () => {
       expect(prepareImage).not.toHaveBeenCalled();
       expect(reserve).not.toHaveBeenCalled();
       expect(ai.calls).toHaveLength(0);
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
 
     it('never sends a forwarded scan to Claude', async () => {
@@ -348,7 +348,7 @@ describe('createExtractor', () => {
       expect(await extract(input({ forwarded: true, kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toEqual({ ...NONE, pageCount: 3, note: 'forwarded_not_described' });
       expect(reserve).not.toHaveBeenCalled();
       expect(ai.calls).toHaveLength(0);
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
 
     it('settles a forwarded image before any budget check, so it is never deferred or listed as too costly', async () => {
@@ -476,7 +476,7 @@ describe('createExtractor', () => {
       const bytes = tinyPdf([['Page 1'], ['Page 2']], { count: 0 });
       await expect(extract(input({ kind: 'document', mimeType: 'application/pdf', bytes }))).rejects.toMatchObject({ name: 'ParseError', code: 'pdf_no_pages' });
       expect(ai.calls).toHaveLength(0);
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
   });
 
@@ -485,7 +485,7 @@ describe('createExtractor', () => {
     it('books an image estimate once', async () => {
       const { db, extract, input } = await setup({ ai: new FakeMediaAi([new Anthropic.APIConnectionTimeoutError()]) });
       await expect(extract(input())).rejects.toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
-      const rows = spendRows(db);
+      const rows = await spendRows(db);
       expect(rows).toHaveLength(1);
       expect(rows[0]!.detail).toBe('media 7 (connection lost, estimated)');
       expect(rows[0]!.usd).toBeCloseTo(imageEstimateUsd({ width: 1000, height: 750 }, P), 12);
@@ -494,7 +494,7 @@ describe('createExtractor', () => {
     it('books the scanned-PDF ceiling once', async () => {
       const { db, extract, input } = await setup({ ai: new FakeMediaAi([new Anthropic.APIConnectionTimeoutError()]), parse: { text: '', pageCount: 3 } });
       await expect(extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).rejects.toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
-      const rows = spendRows(db);
+      const rows = await spendRows(db);
       expect(rows).toHaveLength(1);
       expect(rows[0]!.detail).toBe('media 7 (connection lost, estimated)');
       expect(rows[0]!.usd).toBeCloseTo(scannedPdfCeilingUsd(P), 12);
@@ -508,7 +508,7 @@ describe('voice and audio', () => {
   /** 90,000 bytes: a size bound of 60 seconds. */
   const note = (i: Partial<ExtractInput> = {}): Partial<ExtractInput> => ({ kind: 'voice', mimeType: OGG, bytes: Buffer.alloc(90_000), ...i });
   const voiceSetup = async (v: VoiceTranscriber | null = new FakeVoiceTranscriber(), o: { capUsd?: number; maxVoiceSeconds?: number; signal?: AbortSignal } = {}) => await setup({ voice: v, ...o });
-  const sttRows = (db: Db) => db.raw.prepare('SELECT kind, usd, detail FROM spend').all() as { kind: string; usd: number; detail: string }[];
+  const sttRows = (db: Db) => db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend');
   const caught = async (run: Promise<unknown>): Promise<unknown> => run.then(() => null, (e: unknown) => e);
   /** A folder of its own for the real transcriber's conversions, removed after each test. */
   const dirs: string[] = [];
@@ -526,7 +526,7 @@ describe('voice and audio', () => {
     expect(await extract(input(note()))).toEqual(NONE);
     expect(await extract(input(note({ kind: 'audio', forwarded: true, bytes: Buffer.alloc(5_000_000) })))).toEqual(NONE);
     expect(reserve).not.toHaveBeenCalled();
-    expect(spendRows(db)).toEqual([]);
+    expect(await spendRows(db)).toEqual([]);
   });
 
   it('transcribes a voice note inside one stt hold and books its cost', async () => {
@@ -540,7 +540,7 @@ describe('voice and audio', () => {
     // Held at the measured length (45 s) plus the 5 s tolerance; the size bound (60 s) is only costUsd's last fallback.
     expect(reserve.mock.calls[0]!.slice(0, 2)).toEqual([v.ceilingUsd(45 + 5), 'stt']);
     expect(v.costCalls).toEqual([{ maxSeconds: 60, billedSeconds: 41, measuredSeconds: 45 }]);
-    expect(sttRows(db)).toEqual([{ kind: 'stt', usd: v.costUsd({ maxSeconds: 60, billedSeconds: 41, measuredSeconds: 45 }), detail: 'media 7' }]);
+    expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: v.costUsd({ maxSeconds: 60, billedSeconds: 41, measuredSeconds: 45 }), detail: 'media 7' }]);
     expect(v.disposals).toBe(1);
   });
 
@@ -558,8 +558,8 @@ describe('voice and audio', () => {
     const { db, extract, input } = await voiceSetup(v);
     // A caller that still passed the row's declared length: it is not read.
     expect(await extract({ ...input(note()), declaredSeconds: 0 } as ExtractInput)).toMatchObject({ textKind: 'extract', text: 'namaste' });
-    expect(sttRows(db)).toEqual([{ kind: 'stt', usd: voiceCeilingUsd('sarvam', 30, 88), detail: 'media 7' }]);
-    expect(sttRows(db)[0]!.usd).toBeGreaterThan(0);
+    expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: voiceCeilingUsd('sarvam', 30, 88), detail: 'media 7' }]);
+    expect((await sttRows(db))[0]!.usd).toBeGreaterThan(0);
   });
 
   it('the fake prices like the real one: billed, else measured, else the bound; never a negative, NaN or infinite length', () => {
@@ -580,7 +580,7 @@ describe('voice and audio', () => {
     expect(v.prepared).toEqual([]);
     expect(v.transcribed).toBe(0);
     expect(reserve).not.toHaveBeenCalled();
-    expect(spendRows(db)).toEqual([]);
+    expect(await spendRows(db)).toEqual([]);
   });
 
   // Task 5 review round 2: the file's size never refuses it. too_long comes only from prepare's measured check, and the
@@ -596,7 +596,7 @@ describe('voice and audio', () => {
       expect(reserve.mock.calls[0]!.slice(0, 2)).toEqual([v.ceilingUsd(65), 'stt']);
       // The bound is only costUsd's last fallback; the measured length is what is booked.
       expect(v.costCalls).toEqual([{ maxSeconds: 640, billedSeconds: null, measuredSeconds: 60 }]);
-      expect(sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(60), detail: 'media 7' }]);
+      expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(60), detail: 'media 7' }]);
     });
 
     it('with the real transcriber: a 960 KB file measured at 60 s is sent once, held at 65 s', async () => {
@@ -606,7 +606,7 @@ describe('voice and audio', () => {
       expect(await extract(input(note({ bytes: Buffer.alloc(960_000) })))).toMatchObject({ textKind: 'extract', note: null });
       expect(provider.calls).toHaveLength(1);
       expect(reserve.mock.calls[0]![0]).toBe(voiceCeilingUsd('sarvam', 65, 88));
-      expect(sttRows(db)).toEqual([{ kind: 'stt', usd: voiceCeilingUsd('sarvam', 60, 88), detail: 'media 7' }]);
+      expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: voiceCeilingUsd('sarvam', 60, 88), detail: 'media 7' }]);
     });
 
     it('with the real transcriber: a 1 MB file measured at 700 s with cap 600 is too_long via prepare, with no hold', async () => {
@@ -619,7 +619,7 @@ describe('voice and audio', () => {
       expect(ffmpeg.limits).toEqual([606]);
       expect(provider.calls).toHaveLength(0);
       expect(reserve).not.toHaveBeenCalled();
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
 
     it('follows the cap it is given', async () => {
@@ -661,7 +661,7 @@ describe('voice and audio', () => {
       expect(v.prepared).toHaveLength(1);
       expect(v.transcribed).toBe(0);
       expect(reserve).not.toHaveBeenCalled();
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
 
     // Review override: prepare is given the cap, not the size bound, so an honest note recorded below 12 kbit/s goes.
@@ -685,7 +685,7 @@ describe('voice and audio', () => {
       expect(reserve).toHaveBeenCalledTimes(1);
       expect(reserve.mock.calls[0]!.slice(0, 2)).toEqual([v.ceilingUsd(705), 'stt']);
       // Settled at the measured length: the fake provider reports no billed seconds.
-      expect(sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(700), detail: 'media 7' }]);
+      expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(700), detail: 'media 7' }]);
     });
 
     it('with the real transcriber: measured 906 s with cap 900 is too_long, with no provider call', async () => {
@@ -695,7 +695,7 @@ describe('voice and audio', () => {
       expect(await extract(input(note({ bytes: Buffer.alloc(900_000) })))).toEqual({ ...NONE, note: 'too_long' });
       expect(provider.calls).toHaveLength(0);
       expect(reserve).not.toHaveBeenCalled();
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
       // 905 s is inside the tolerance.
       const ok = await voiceSetup(voiceTranscriber(provider, { inrPerUsd: 88, ffmpeg: new MeasuringFfmpeg(905), tmpDir: workDir() }), { maxVoiceSeconds: 900 });
       expect(await ok.extract(ok.input(note({ bytes: Buffer.alloc(900_000) })))).toMatchObject({ textKind: 'extract' });
@@ -709,7 +709,7 @@ describe('voice and audio', () => {
     expect(await extract(input(note({ kind: 'audio', mimeType: 'audio/aac' })))).toEqual({ ...NONE, note: 'format_not_supported' });
     expect(v.prepared).toEqual([]);
     expect(reserve).not.toHaveBeenCalled();
-    expect(spendRows(db)).toEqual([]);
+    expect(await spendRows(db)).toEqual([]);
   });
 
   // Task 5 review round 1: every file is converted first, so without ffmpeg nothing is sent, not even a WhatsApp note.
@@ -722,7 +722,7 @@ describe('voice and audio', () => {
     }
     expect(provider.calls).toEqual([]);
     expect(reserve).not.toHaveBeenCalled();
-    expect(spendRows(db)).toEqual([]);
+    expect(await spendRows(db)).toEqual([]);
   });
 
   it('with the real transcriber and ffmpeg, a WhatsApp voice note is converted, stopped past the cap, and sent as mp3', async () => {
@@ -756,7 +756,7 @@ describe('voice and audio', () => {
       expect(v.priced).toBe(0);
       expect(reserve).not.toHaveBeenCalled();
       expect(canSpend).not.toHaveBeenCalled();
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
       expect(v.disposals).toBe(1);
     });
 
@@ -783,7 +783,7 @@ describe('voice and audio', () => {
       const { extract, input, db } = await voiceSetup(v, { signal: ac.signal });
       await expect(extract(input(note()))).rejects.toBe(aborted);
       expect(v.transcribed).toBe(0);
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
 
     it('is never too costly, and never waits for the spend cap: a tiny cap, or a cap used up', async () => {
@@ -793,7 +793,7 @@ describe('voice and audio', () => {
       used.spend.record('ai', 1, 'earlier calls');
       expect(used.spend.canSpend(0.01)).toBe(false);
       expect(await used.extract(used.input(note()))).toEqual(TRANSCRIPT);
-      expect(spendRows(used.db)).toEqual([{ usd: 1, detail: 'earlier calls' }]);
+      expect(await spendRows(used.db)).toEqual([{ usd: 1, detail: 'earlier calls' }]);
     });
 
     it('never transcribes a forwarded voice note (V4), before preparing it', async () => {
@@ -847,7 +847,7 @@ describe('voice and audio', () => {
         expect(isPaidVoiceError(e)).toBe(false);
         expect(voiceCopyOf(e)).toBeNull();
         expect(reserve).not.toHaveBeenCalled();
-        expect(spendRows(db)).toEqual([]);
+        expect(await spendRows(db)).toEqual([]);
         expect(v.disposals).toBe(1);
       },
     );
@@ -858,14 +858,14 @@ describe('voice and audio', () => {
       const { db, extract, input } = await voiceSetup(v);
       expect(await caught(extract(input(note())))).toBe(err);
       expect(v.transcribed).toBe(0);
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
 
     it('follows the same rules for kind audio', async () => {
       const v = new FakeLocalVoiceTranscriber({ results: [{ text: 'audio file' }] });
       const { db, extract, input } = await voiceSetup(v);
       expect(await extract(input(note({ kind: 'audio', mimeType: 'audio/mpeg' })))).toEqual({ ...TRANSCRIPT, text: 'audio file' });
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
 
     describe('with the real local transcriber, over the real LocalEngine with a fake runner and a fake ffmpeg', () => {
@@ -893,7 +893,7 @@ describe('voice and audio', () => {
         expect(runs).toHaveLength(1);
         expect(runs[0]!.at(-1)).toBe(join(tmp, 'voice', 'voice-7', 'audio.wav'));
         expect(reserve).not.toHaveBeenCalled();
-        expect(spendRows(db)).toEqual([]);
+        expect(await spendRows(db)).toEqual([]);
         expect(existsSync(join(tmp, 'voice', 'voice-7'))).toBe(false);
       });
 
@@ -936,7 +936,7 @@ describe('voice and audio', () => {
       expect(await caught(extract(input(note())))).toBe(error);
       expect(v.transcribed).toBe(0);
       expect(reserve).not.toHaveBeenCalled();
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
       expect(v.disposals).toBe(0); // nothing was prepared
     });
   });
@@ -948,7 +948,7 @@ describe('voice and audio', () => {
     expect(await extract(input(note()))).toEqual({ ...NONE, note: 'too_costly' });
     expect(v.transcribed).toBe(0);
     expect(reserve).not.toHaveBeenCalled();
-    expect(spendRows(db)).toEqual([]);
+    expect(await spendRows(db)).toEqual([]);
     expect(v.disposals).toBe(1);
   });
 
@@ -958,7 +958,7 @@ describe('voice and audio', () => {
     expect(await extract(input(note()))).toMatchObject({ textKind: 'extract', note: null });
     expect(v.transcribed).toBe(1);
     expect(reserve).toHaveBeenCalledTimes(1);
-    expect(sttRows(db)).toHaveLength(1);
+    expect(await sttRows(db)).toHaveLength(1);
   });
 
   it('does not send a note deleted for everyone just before the call, and disposes it', async () => {
@@ -970,7 +970,7 @@ describe('voice and audio', () => {
     expect(revoked).toHaveBeenCalledTimes(1);
     expect(v.transcribed).toBe(0);
     expect(reserve).not.toHaveBeenCalled();
-    expect(spendRows(db)).toEqual([]);
+    expect(await spendRows(db)).toEqual([]);
     expect(v.disposals).toBe(1);
   });
 
@@ -1011,7 +1011,7 @@ describe('voice and audio', () => {
     const TRANSCRIPT = 'payment bhej diya, ₹42,000';
     const answered = (o: { forgetError?: Error } = {}) =>
       new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ text: TRANSCRIPT, billedSeconds: 12, forgetRef: 'tr_1' }], ...o });
-    const lateRows = (db: Db) => sttRows(db).filter((r) => r.detail === 'media 7 (booked late)');
+    const lateRows = async (db: Db) => (await sttRows(db)).filter((r) => r.detail === 'media 7 (booked late)');
 
     it.each([
       // As the real settle does when its write throws: the hold is freed first.
@@ -1032,8 +1032,8 @@ describe('voice and audio', () => {
       expect((err as Error).message).toBe('database is locked');
       expect(v.transcribed).toBe(1);
       expect(record).toHaveBeenCalledWith('stt', v.costUsd({ maxSeconds: 60, billedSeconds: 12, measuredSeconds: 45 }), 'media 7 (booked late)');
-      expect(lateRows(db)).toEqual([{ kind: 'stt', usd: 12 * 0.0001, detail: 'media 7 (booked late)' }]);
-      expect(sttRows(db)).toHaveLength(1);
+      expect(await lateRows(db)).toEqual([{ kind: 'stt', usd: 12 * 0.0001, detail: 'media 7 (booked late)' }]);
+      expect(await sttRows(db)).toHaveLength(1);
       expect(v.forgotten).toEqual(['tr_1']);
       expect(isPaidVoiceError(err)).toBe(true);
       // Nothing the sender said, and no provider id, is in the error.
@@ -1055,7 +1055,7 @@ describe('voice and audio', () => {
       expect(isPaidVoiceError(err)).toBe(true);
       expect(v.transcribed).toBe(1);
       expect(v.forgotten).toEqual(['tr_1']);
-      expect(sttRows(db)).toEqual([]);
+      expect(await sttRows(db)).toEqual([]);
     });
 
     it('pricing that throws after the answer: withSttHold books the ceiling once, nothing late, the copy deleted, marked paid', async () => {
@@ -1068,7 +1068,7 @@ describe('voice and audio', () => {
       const err = await caught(extract(input(note())));
       expect(err).toBe(pricing);
       expect(isPaidVoiceError(err)).toBe(true);
-      expect(sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail: 'media 7 (unknown, estimated)' }]);
+      expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail: 'media 7 (unknown, estimated)' }]);
       expect(v.forgotten).toEqual(['tr_1']);
     });
 
@@ -1084,7 +1084,7 @@ describe('voice and audio', () => {
       const err = await caught(extract(input(note())));
       expect(err).toBeInstanceOf(SttBookingError);
       expect(isPaidVoiceError(err)).toBe(true);
-      expect(sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail: 'media 7 (booked late)' }]);
+      expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail: 'media 7 (booked late)' }]);
     });
 
     it('with no copy to delete, nothing is forgotten', async () => {
@@ -1118,7 +1118,7 @@ describe('voice and audio', () => {
     const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ text: '', billedSeconds: 12, forgetRef: 'tr_2' }] });
     const { db, extract, input } = await voiceSetup(v);
     expect(await extract(input(note()))).toEqual({ ...NONE, note: 'no_speech', forget: { provider: 'elevenlabs', ref: 'tr_2' } });
-    expect(sttRows(db)).toEqual([{ kind: 'stt', usd: 12 * 0.0001, detail: 'media 7' }]);
+    expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: 12 * 0.0001, detail: 'media 7' }]);
     expect(v.disposals).toBe(1);
   });
 
@@ -1142,7 +1142,7 @@ describe('voice and audio', () => {
     expect((e as SpendCapReachedError).busy).toBe(false);
     expect(v.transcribed).toBe(0);
     expect(v.disposals).toBe(2);
-    expect(sttRows(db).filter((r) => r.kind === 'stt')).toEqual([]);
+    expect((await sttRows(db)).filter((r) => r.kind === 'stt')).toEqual([]);
   });
 
   // withSttHold with no hooks: each failure is booked by its outcome (Phase 3's fix of paidStt.ts).
@@ -1152,7 +1152,7 @@ describe('voice and audio', () => {
       const v = new FakeVoiceTranscriber({ results: [error] });
       const { db, spend, extract, input } = await voiceSetup(v);
       expect(await caught(extract(input(note())))).toBe(error);
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
       expect(spend.canSpend(15)).toBe(true); // the hold is gone
       expect(v.disposals).toBe(1);
     });
@@ -1165,7 +1165,7 @@ describe('voice and audio', () => {
       const v = new FakeVoiceTranscriber({ results: [error] });
       const { db, extract, input } = await voiceSetup(v);
       expect(await caught(extract(input(note())))).toBe(error);
-      expect(sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail }]);
+      expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail }]);
       expect(v.disposals).toBe(1);
     });
   });
@@ -1193,7 +1193,7 @@ describe('voice and audio', () => {
       const err = await caught(extract(input(note())));
       expect(err).toBeInstanceOf(SttBookingError);
       expect(isPaidVoiceError(err)).toBe(true);
-      expect(sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail: lateDetail }]);
+      expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail: lateDetail }]);
       expect(v.transcribed).toBe(1);
       expect(v.disposals).toBe(1);
     });
@@ -1208,7 +1208,7 @@ describe('voice and audio', () => {
       const err = await caught(extract(input(note())));
       expect(err).toBeInstanceOf(SttBookingError);
       expect(isPaidVoiceError(err)).toBe(true);
-      expect(sttRows(db)).toEqual([]);
+      expect(await sttRows(db)).toEqual([]);
     });
 
     it('a refused key (SttHttpError 401) was never billed: nothing is booked late and the error is not marked paid', async () => {
@@ -1222,7 +1222,7 @@ describe('voice and audio', () => {
       expect(err).toBeInstanceOf(SttBookingError);
       expect((err as Error).cause).toBeInstanceOf(SttHttpError);
       expect(isPaidVoiceError(err)).toBe(false);
-      expect(sttRows(db)).toEqual([]);
+      expect(await sttRows(db)).toEqual([]);
     });
   });
 
@@ -1241,7 +1241,7 @@ describe('voice and audio', () => {
       expect(err).toBe(error);
       expect(voiceCopyOf(err)).toEqual({ provider: 'elevenlabs', ref: 'tr_9' });
       expect(isPaidVoiceError(err)).toBe(false);
-      expect(sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail: 'media 7 (unknown, estimated)' }]);
+      expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail: 'media 7 (unknown, estimated)' }]);
       expect(v.forgotten).toEqual([]); // noted by the processor, deleted by forgetVoiceCopies
     });
 
@@ -1323,7 +1323,7 @@ describe('voice and audio', () => {
     expect(await extract(audio())).toEqual({ textKind: 'extract', text: 'namaste', pageCount: null, note: null, forget: null });
     // The large file and the plain one were prepared and booked; the forwarded and amr ones never were.
     expect(v.prepared).toEqual([{ mediaId: 7, path: NOTE_PATH, maxSeconds: 600 }, { mediaId: 7, path: NOTE_PATH, maxSeconds: 600 }]);
-    expect(sttRows(db)).toEqual([
+    expect(await sttRows(db)).toEqual([
       { kind: 'stt', usd: v.ceilingUsd(45), detail: 'media 7' },
       { kind: 'stt', usd: v.ceilingUsd(45), detail: 'media 7' },
     ]);
