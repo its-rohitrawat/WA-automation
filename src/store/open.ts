@@ -16,8 +16,9 @@ export interface StoreOptions {
 }
 
 /** The customer's database. On Postgres, refused unless its schema is at the version this code needs. */
-export async function openStore(env: Env, o: StoreOptions = {}): Promise<Db> {
-  if (env.DB_ENGINE === 'sqlite') return openDb(trackerDbPath(env.DATA_DIR));
+export async function openStore(env: Pick<Env, 'DATA_DIR' | 'DB_ENGINE' | 'DATABASE_URL' | 'TENANT_ID'>, o: StoreOptions = {}): Promise<Db> {
+  // Only an explicit postgres leaves SQLite (an env built by hand in a test may not name the engine).
+  if (env.DB_ENGINE !== 'postgres') return openDb(trackerDbPath(env.DATA_DIR));
   const pool = o.pool ?? openPgPool(env.DATABASE_URL!, { ...(o.onPoolError ? { onError: o.onPoolError } : {}) });
   const db = new PgTenantDb(pool, env.TENANT_ID);
   try {
@@ -30,12 +31,18 @@ export async function openStore(env: Env, o: StoreOptions = {}): Promise<Db> {
   return db;
 }
 
+/** The start-up warning for the engine, if any. Until S2.6c2 (wa_auth), Postgres keeps the WhatsApp sessions in files. */
+export function storeWarning(env: Env): string | undefined {
+  if (env.DB_ENGINE !== 'postgres') return undefined;
+  return 'DB_ENGINE=postgres: the tracker is on Postgres, but the WhatsApp sessions are still in data/session.db and data/sender-session.db until wa_auth (S2.6c2)';
+}
+
 /**
  * The platform tables' database (decision D1). On SQLite they live in tracker.db, so it is the tracker Db itself; on
  * Postgres, wa_platform's own pool. Only src/main.ts calls this, and its Db reaches only src/platform/**,
  * src/web/routes/platform.ts and SessionStore (S2.8).
  */
-export function openPlatformStore(env: Env, tracker: Db, o: StoreOptions = {}): Db {
-  if (env.DB_ENGINE === 'sqlite') return tracker;
+export function openPlatformStore(env: Pick<Env, 'DB_ENGINE' | 'DATABASE_PLATFORM_URL'>, tracker: Db, o: StoreOptions = {}): Db {
+  if (env.DB_ENGINE !== 'postgres') return tracker;
   return new PgPlatformDb(o.pool ?? openPgPool(env.DATABASE_PLATFORM_URL!, { max: 4, ...(o.onPoolError ? { onError: o.onPoolError } : {}) }));
 }

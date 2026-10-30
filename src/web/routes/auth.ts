@@ -20,8 +20,29 @@ import {
 } from '../oidc.ts';
 import type { CodeExchanger, IdTokenVerifier } from '../oidc.ts';
 import { clearSessionCookie, csrfFor, hashToken, secureFor, SESSION_COOKIE, sessionCookie } from '../sessions.ts';
-import type { Sql } from '../../store/db.ts';
+import type { Db, Sql } from '../../store/db.ts';
 import type { SessionStore } from '../sessions.ts';
+
+/** A session change and its audit row: `audit` runs first, then `session`, whose result is returned. */
+export type AuditedWrite = <T>(audit: (q: Sql) => Promise<void>, session: (q: Sql) => Promise<T>) => Promise<T>;
+
+/**
+ * The audit row on the customer's Db, the session on the platform's (plan A4, decision D1). One Db (SQLite): both in one
+ * transaction, as before. Two (Postgres): the audit row's transaction, then the session's, so a failed session write
+ * leaves an audit row for a change that did not happen (the safe side), never a session change with no audit row.
+ */
+export function auditedWrite(customer: Db, platform: Db): AuditedWrite {
+  return async (audit, session) => {
+    if (customer === platform) {
+      return customer.tx(async (q) => {
+        await audit(q);
+        return session(q);
+      });
+    }
+    await customer.tx(audit);
+    return platform.tx(session);
+  };
+}
 
 /** The sign-out route (POST only, CSRF-checked). */
 export const SIGN_OUT_PATH = '/dashboard/auth/logout';
@@ -44,8 +65,8 @@ export interface AuthRouteDeps {
   publicUrl?: string;
   /** The port the dashboard listens on (for the localhost origins). */
   port: () => number | undefined;
-  /** Runs `fn` in one database transaction (production: `db.tx`): session writes and their audit row together. */
-  tx: <T>(fn: (q: Sql) => Promise<T>) => Promise<T>;
+  /** Session writes with their audit row, the audit row first (production: `auditedWrite(db, platformDb)`). */
+  audited: AuditedWrite;
   /** Code to ID token (production: `googleCodeExchanger`). */
   exchange: CodeExchanger;
   /** ID-token signature check (production: `googleIdVerifier`). */
@@ -161,15 +182,16 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
       const who = checkClaims(claims, { clientId: d.clientId, nonce: p.nonce, now: d.clock.now().getTime() });
       if (!owners.has(who.email)) throw new SignInRefused('not_owner', who.email);
 
-      // A browser signing in again leaves its earlier session behind: end it. One transaction with the new session and
-      // its audit row, so a failed audit write leaves no orphan session and keeps the earlier one.
+      // A browser signing in again leaves its earlier session behind: end it. The audit row is written first, so a
+      // failed audit write leaves no orphan session and keeps the earlier one.
       const earlier = cookies[SESSION_COOKIE];
-      const s = await d.tx(async (q) => {
-        if (earlier !== undefined) await d.sessions.destroy(earlier, q);
-        const created = await d.sessions.create(who.email, label, q);
-        await d.audit.record({ actor: who.email, event: 'Signed in', kind: 'auth', detail: label, requestId: ctx.requestId }, q);
-        return created;
-      });
+      const s = await d.audited(
+        (q) => d.audit.record({ actor: who.email, event: 'Signed in', kind: 'auth', detail: label, requestId: ctx.requestId }, q),
+        async (q) => {
+          if (earlier !== undefined) await d.sessions.destroy(earlier, q);
+          return d.sessions.create(who.email, label, q);
+        },
+      );
       if (earlier !== undefined) names.delete(hashToken(earlier));
       remember(s.id, who.name);
       res.setHeader('Set-Cookie', [clearSignin, sessionCookie(s.id, { secure })]);
@@ -201,10 +223,10 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
     const s = await d.guard.requireOwner(req);
     d.guard.requireCsrf(req, s);
     const label = browserLabel(typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : undefined);
-    await d.tx(async (q) => {
-      await d.sessions.destroy(s.id, q);
-      await d.audit.record({ actor: s.email, event: 'Signed out', kind: 'auth', detail: label, requestId: ctx.requestId }, q);
-    });
+    await d.audited(
+      (q) => d.audit.record({ actor: s.email, event: 'Signed out', kind: 'auth', detail: label, requestId: ctx.requestId }, q),
+      (q) => d.sessions.destroy(s.id, q),
+    );
     names.delete(hashToken(s.id));
     res.statusCode = 204;
     res.setHeader('Set-Cookie', clearSessionCookie({ secure: secureFor(origin(req)) }));

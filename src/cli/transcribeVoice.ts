@@ -1,7 +1,7 @@
 import type { Env } from '../config/env.ts';
-import { trackerDbPath } from '../config/paths.ts';
 import { getClientByCode } from '../store/clients.ts';
-import { openDb, type Db } from '../store/db.ts';
+import type { Db } from '../store/db.ts';
+import { openStore } from '../store/open.ts';
 import { failedLocalVoice, queueFailedLocalVoice, queueVoiceBacklog, voiceBacklog, type VoiceBacklogRow } from '../store/media.ts';
 import { findFfmpeg } from '../stt/audio.ts';
 import { checkLocalEngineFiles } from '../stt/local.ts';
@@ -140,7 +140,7 @@ export async function transcribeVoiceCommand(opts: { client?: string; yes: boole
     }
   }
   const listing = opts.failed === true ? FAILED : BACKLOG;
-  const db = deps.db ?? openDb(trackerDbPath(env.DATA_DIR));
+  const db = deps.db ?? await openStore(env);
   try {
     let clientId: number | undefined;
     if (opts.client !== undefined) {

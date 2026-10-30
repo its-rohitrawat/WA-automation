@@ -13,7 +13,7 @@ import { AuditLog } from '../../src/web/audit.ts';
 import { ACTION_LIMIT, createGuard, RateLimiter, SIGNIN_LIMIT } from '../../src/web/guard.ts';
 import { googleCodeExchanger, googleIdVerifier, PENDING_TTL_MS, PendingSignIns } from '../../src/web/oidc.ts';
 import type { IdClaims, IdTokenVerifier } from '../../src/web/oidc.ts';
-import { registerAuthRoutes } from '../../src/web/routes/auth.ts';
+import { auditedWrite, registerAuthRoutes } from '../../src/web/routes/auth.ts';
 import { createWebServer } from '../../src/web/server.ts';
 import type { WebServer } from '../../src/web/server.ts';
 import { SessionStore } from '../../src/web/sessions.ts';
@@ -126,7 +126,7 @@ async function boot(
     clientId: CLIENT_ID,
     ...(o.publicUrl === undefined ? {} : { publicUrl: o.publicUrl }),
     port,
-    tx: <T>(fn: (q: Sql) => Promise<T>): Promise<T> => db.tx(fn),
+    audited: auditedWrite(db, db),
     exchange:
       o.exchangeThrows === undefined
         ? googleCodeExchanger({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, tokenUrl: ep.url })

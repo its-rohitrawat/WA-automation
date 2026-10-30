@@ -6,7 +6,7 @@ import { FOUNDER_TENANT_ID as ENV_FOUNDER, parseEnv } from '../../src/config/env
 import { FOUNDER_TENANT_ID } from '../../src/platform/store.ts';
 import { PgPlatformDb, PgTenantDb, type PgClient, type PgPool } from '../../src/store/engine/pg.ts';
 import { SqliteDb } from '../../src/store/engine/sqlite.ts';
-import { openPlatformStore, openStore } from '../../src/store/open.ts';
+import { openPlatformStore, openStore, storeWarning } from '../../src/store/open.ts';
 import { PG_LATEST } from '../../src/store/pg/migrations.ts';
 
 // The engine switch (S2.6) with no server: Postgres is a fake pool answering wa_schema_version().
@@ -61,6 +61,18 @@ describe('openStore: DB_ENGINE', () => {
     expect(pool.sql).toContain('SELECT wa_schema_version() AS v');
     expect(pool.ended).toBe(false);
     expect(openPlatformStore(env, db, { pool: fakePool(PG_LATEST) })).toBeInstanceOf(PgPlatformDb);
+  });
+
+  it('only an explicit postgres leaves SQLite; on Postgres the start-up warns that the WhatsApp sessions are still files', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'wa-open-'));
+    const db = await openStore({ DATA_DIR: dir } as Parameters<typeof openStore>[0]);
+    try {
+      expect(db).toBeInstanceOf(SqliteDb);
+    } finally {
+      await db.close();
+    }
+    expect(storeWarning(parseEnv({}))).toBeUndefined();
+    expect(storeWarning(parseEnv({ DB_ENGINE: 'postgres', DATABASE_URL: LOCAL, DATABASE_PLATFORM_URL: PLATFORM }))).toMatch(/^DB_ENGINE=postgres: .*session\.db.*S2\.6c2/);
   });
 
   it('postgres at another schema version is refused, naming db-migrate, and its pool is closed', async () => {

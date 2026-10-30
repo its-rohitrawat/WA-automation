@@ -1,6 +1,6 @@
 import type { IncomingMessage } from 'node:http';
 import type { Env } from '../config/env.ts';
-import type { Db, Sql } from '../store/db.ts';
+import type { Db } from '../store/db.ts';
 import { systemClock } from '../util/clock.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
@@ -10,7 +10,7 @@ import type { Guard } from './guard.ts';
 import { googleCodeExchanger, googleIdVerifier } from './oidc.ts';
 import { secureRequest } from './origin.ts';
 import type { CodeExchanger, IdTokenVerifier } from './oidc.ts';
-import { registerAuthRoutes } from './routes/auth.ts';
+import { auditedWrite, registerAuthRoutes } from './routes/auth.ts';
 import { createWebServer } from './server.ts';
 import type { Router } from './router.ts';
 import type { WebServer } from './server.ts';
@@ -43,8 +43,10 @@ export type DashboardEnv = Pick<
  */
 export async function startDashboard(o: {
   env: DashboardEnv;
-  /** The tracker database (web_sessions and audit_log live there, migration v9). */
+  /** The tracker database (audit_log; on SQLite web_sessions too, migration v9). */
   db: Db;
+  /** The platform tables' Db (decision D1), which holds web_sessions on Postgres. Defaults to db (SQLite: the same file). */
+  platformDb?: Db;
   log: Logger;
   control: object;
   clock?: Clock;
@@ -67,7 +69,8 @@ export async function startDashboard(o: {
     log.error({ code: 'config' }, 'dashboard not started: DASHBOARD_GOOGLE_CLIENT_ID, DASHBOARD_GOOGLE_CLIENT_SECRET and DASHBOARD_OWNER_EMAILS are required');
     return undefined;
   }
-  const sessions = new SessionStore(o.db, clock);
+  const platformDb = o.platformDb ?? o.db;
+  const sessions = new SessionStore(platformDb, clock);
   const web = createWebServer({ control: o.control, env, log, clock, sessions, siteDir: SITE_DIR });
   const port = () => web.address()?.port;
   const publicUrl = env.DASHBOARD_PUBLIC_URL === undefined ? {} : { publicUrl: env.DASHBOARD_PUBLIC_URL };
@@ -85,7 +88,7 @@ export async function startDashboard(o: {
     clientId,
     ...publicUrl,
     port,
-    tx: <T>(fn: (q: Sql) => Promise<T>): Promise<T> => o.db.tx(fn),
+    audited: auditedWrite(o.db, platformDb),
     exchange:
       o.google?.exchange ??
       googleCodeExchanger({ clientId, clientSecret, ...(o.google?.tokenUrl === undefined ? {} : { tokenUrl: o.google.tokenUrl }) }),

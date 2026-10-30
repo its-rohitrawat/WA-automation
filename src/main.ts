@@ -10,7 +10,7 @@ import { loadEnv, requireKey } from './config/env.ts';
 import type { Env } from './config/env.ts';
 import { GROUPS_FILE_MISSING_MESSAGE, loadGroupsFile, watchGroupsFile } from './config/groups.ts';
 import type { ClientConfig } from './config/groups.ts';
-import { masterKeyPath, sessionDbPath, trackerDbPath } from './config/paths.ts';
+import { masterKeyPath, sessionDbPath } from './config/paths.ts';
 import { PrioritySettings } from './config/prioritySettings.ts';
 import { SettingsStore } from './config/settingsStore.ts';
 import { sentTextFor, settleInterrupted } from './store/outbox.ts';
@@ -36,7 +36,8 @@ import { openMorningReport, senderOpener } from './report/start.ts';
 import { pricesFromEnv } from './spend/pricing.ts';
 import type { Prices } from './spend/pricing.ts';
 import { getClient, syncClients } from './store/clients.ts';
-import { openDb, type Db } from './store/db.ts';
+import type { Db } from './store/db.ts';
+import { openPlatformStore, openStore, storeWarning } from './store/open.ts';
 import { Ffmpeg, findFfmpeg } from './stt/audio.ts';
 import { sharedLocalEngine, type LocalEngine } from './stt/local.ts';
 import { systemClock } from './util/clock.ts';
@@ -136,6 +137,8 @@ async function main(): Promise<void> {
 
   let lock: { release(): Promise<void> } | undefined;
   let db: Db | undefined;
+  /** The platform tables (decision D1): the tracker itself on SQLite, wa_platform's own pool on Postgres. */
+  let platformDb: Db | undefined;
   let sessionDb: Db | undefined;
   let senderDb: Db | undefined;
   /** Spare-number session files a dashboard link opened and handed to a new sender: closed after app.stop(). */
@@ -150,7 +153,13 @@ async function main(): Promise<void> {
     // The lock comes first: nothing opens a database while another instance may be running.
     lock = await acquireLock(env.DATA_DIR);
     const key = new DpapiKeyProvider(masterKeyPath(env.DATA_DIR)).getKey();
-    db = openDb(trackerDbPath(env.DATA_DIR));
+    // DB_ENGINE (S2.6): data/tracker.db by default; on Postgres, refused unless its schema is at this version's.
+    // A pooled connection that fails while idle (the server restarted) is logged and replaced on the next use.
+    const onPoolError = (err: Error) => log.error({ err }, 'a Postgres connection failed while idle');
+    db = await openStore(env, { onPoolError });
+    platformDb = openPlatformStore(env, db, { onPoolError });
+    const engineWarning = storeWarning(env);
+    if (engineWarning) log.warn(engineWarning);
     sessionDb = openSessionDb(sessionDbPath(env.DATA_DIR));
 
     const configs = loadGroupsFile(env.GROUPS_FILE);
@@ -432,9 +441,10 @@ async function main(): Promise<void> {
         }),
       };
     }
-    const webReady = env.DASHBOARD_ENABLED ? startDashboard({ env, db, log, control, ...agentRoutes }) : Promise.resolve(undefined);
+    const webReady = env.DASHBOARD_ENABLED ? startDashboard({ env, db, platformDb, log, control, ...agentRoutes }) : Promise.resolve(undefined);
 
     const trackerDb = db;
+    const platformStore = platformDb !== db ? platformDb : undefined;
     const sessionStore = sessionDb;
     const senderStore = senderDb;
     const startedLock = lock;
@@ -469,7 +479,7 @@ async function main(): Promise<void> {
           // Each close waits for its database's queue to empty; one that fails never stops the next (best effort).
           const closeAll = () =>
             Promise.all(
-              [...adoptedDbs.map((d) => d.close()), trackerDb.close(), sessionStore.close(), senderStore?.close()]
+              [...adoptedDbs.map((d) => d.close()), trackerDb.close(), platformStore?.close(), sessionStore.close(), senderStore?.close()]
                 .map((p) => Promise.resolve(p).catch(() => undefined)),
             );
           // The stop row is written before the databases close (best effort: a failure is not retried).
@@ -486,6 +496,7 @@ async function main(): Promise<void> {
     process.on('SIGTERM', shutdown);
   } catch (e) {
     // Start-up failed: each database that was opened is closed, best effort (one that fails never stops the next).
+    if (platformDb !== db) await platformDb?.close().catch(() => undefined); // Postgres only: wa_platform's own pool
     for (const d of [...adoptedDbs, db, sessionDb, senderDb]) await d?.close().catch(() => undefined);
     const known =
       e instanceof StartupExit ||

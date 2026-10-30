@@ -1,10 +1,11 @@
 import { Command } from 'commander';
 import { addReportCommands, defaultDeps, googleAccountCommand, googleAuthCommand, linkCommand, listGroupsCommand, statusCommand } from './cli/commands.ts';
 import { loadEnv } from './config/env.ts';
-import { masterKeyPath, trackerDbPath } from './config/paths.ts';
+import { masterKeyPath } from './config/paths.ts';
 import { DpapiKeyProvider } from './crypto/keyProvider.ts';
 import { systemClock } from './util/clock.ts';
-import { openDb, type Db } from './store/db.ts';
+import type { Db } from './store/db.ts';
+import { openStore } from './store/open.ts';
 import {
   closeTask, editTask, reopenTask, reprocess, requestRebuild, setClientPhase, setPersonRole, unlockClientPhase, unlockTask, type EditOptions,
 } from './cli/corrections.ts';
@@ -54,7 +55,7 @@ addReportCommands(program, deps);
 
 // No single-instance lock: the service and the CLI share the DB through WAL with a busy timeout.
 async function withDb<T>(fn: (db: Db) => T | Promise<T>): Promise<T> {
-  const db = openDb(trackerDbPath(loadEnv().DATA_DIR));
+  const db = await openStore(loadEnv());
   try {
     return await fn(db);
   } finally {

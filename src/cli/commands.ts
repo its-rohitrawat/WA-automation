@@ -3,7 +3,7 @@ import type { Command } from 'commander';
 import qrcode from 'qrcode-terminal';
 import { maskNumber, reportRecipient, reportSettings, requireKey, type Env } from '../config/env.ts';
 import { loadGroupsFile, type ClientConfig } from '../config/groups.ts';
-import { masterKeyPath, senderSessionDbPath, sessionDbPath, trackerDbPath } from '../config/paths.ts';
+import { masterKeyPath, senderSessionDbPath, sessionDbPath } from '../config/paths.ts';
 import { DpapiKeyProvider, type KeyProvider } from '../crypto/keyProvider.ts';
 import { MediaRefSealer } from '../media/ref.ts';
 import { readHealthSnapshot } from '../health/health.ts';
@@ -15,7 +15,8 @@ import {
 import { describeReport, isStaleSending, reasonText } from '../report/scheduler.ts';
 import { latestBatches } from '../store/batches.ts';
 import { listClients, syncClients } from '../store/clients.ts';
-import { openDb, type Db } from '../store/db.ts';
+import type { Db } from '../store/db.ts';
+import { openStore } from '../store/open.ts';
 import { setKv } from '../store/kv.ts';
 import { mediaSttForgetsGivenUp } from '../store/media.ts';
 import { sttForgetsGivenUp } from '../store/meetings.ts';
@@ -186,7 +187,7 @@ export async function linkCommand(opts: { reset: boolean }, deps: CliDeps): Prom
   try {
     const key = deps.keyProvider.getKey();
     const configs = loadGroupsFile(env.GROUPS_FILE);
-    db = openDb(trackerDbPath(env.DATA_DIR));
+    db = await openStore(env);
     sessionDb = openSessionDb(sessionDbPath(env.DATA_DIR));
     await syncClients(db, configs);
     if (opts.reset) {
@@ -260,7 +261,7 @@ export async function listGroupsCommand(deps: CliDeps): Promise<void> {
   try {
     const key = deps.keyProvider.getKey();
     const configs = loadGroupsFile(env.GROUPS_FILE);
-    db = openDb(trackerDbPath(env.DATA_DIR));
+    db = await openStore(env);
     sessionDb = openSessionDb(sessionDbPath(env.DATA_DIR));
     await syncClients(db, configs);
     const auth = await useEncryptedAuthState(sessionDb, key);
@@ -292,7 +293,7 @@ export async function listGroupsCommand(deps: CliDeps): Promise<void> {
 }
 
 export async function statusCommand(deps: CliDeps): Promise<void> {
-  const db = openDb(trackerDbPath(deps.env.DATA_DIR));
+  const db = await openStore(deps.env);
   try {
     deps.out(
       formatStatus({
@@ -314,7 +315,7 @@ export async function statusCommand(deps: CliDeps): Promise<void> {
 export async function googleAuthCommand(deps: CliDeps): Promise<void> {
   const { env, out } = deps;
   const key = deps.keyProvider.getKey();
-  const db = openDb(trackerDbPath(env.DATA_DIR));
+  const db = await openStore(env);
   try {
     const clientId = requireKey(env, 'GOOGLE_OAUTH_CLIENT_ID');
     const clientSecret = requireKey(env, 'GOOGLE_OAUTH_CLIENT_SECRET');
@@ -462,7 +463,7 @@ export async function reportStatusCommand(deps: CliDeps): Promise<void> {
   const settings = reportSettings(env);
   const now = new Date();
   const today = istDate(now);
-  const db = openDb(trackerDbPath(env.DATA_DIR));
+  const db = await openStore(env);
   try {
     const snap = await readHealthSnapshot(db);
     const fresh = snap !== undefined && now.getTime() - Date.parse(snap.at) <= SERVICE_FRESH_MS;
@@ -527,7 +528,7 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
   }
   const now = new Date();
   const today = istDate(now);
-  const db = openDb(trackerDbPath(env.DATA_DIR));
+  const db = await openStore(env);
   try {
     const row = await reportFor(db, today);
     const refusal = sendNowRefusal(row, now);
@@ -613,7 +614,7 @@ export async function googleAccountCommand(opts: { account: string; remove: bool
     throw new Error('Extra Google accounts are for meetings. Set MEETINGS_ENABLED=true in .env first.');
   }
   const key = deps.keyProvider.getKey();
-  const db = openDb(trackerDbPath(env.DATA_DIR));
+  const db = await openStore(env);
   try {
     if (opts.remove) {
       if (!(await meetingAccounts(db)).includes(label)) {
