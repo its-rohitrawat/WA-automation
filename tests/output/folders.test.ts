@@ -105,3 +105,22 @@ describe('withClientSubfolder', () => {
     expect(await getKv(db, 'drive_meetings_folder:1')).toBe('folder-3');
   });
 });
+
+describe('two customers (Phase B): folder ids are kept per database, never shared', () => {
+  it('the same client id in two customers’ databases gets each customer’s own folders in their own Drive', async () => {
+    const a = await setup();
+    const b = { db: await seededDb(), drive: new FakeDrive() };
+    await setKv(b.db, 'drive_root_id', 'root-B');
+    const idA = await folderOf(a.db, a.drive, SHARMA, 'Files');
+    const idB = await folderOf(b.db, b.drive, SHARMA, 'Files');
+    expect(b.drive.folderParents[0]).toBe('root-B'); // B's chain starts at B's own root
+    expect(b.drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Files']);
+    expect(await getKv(b.db, 'drive_files_folder:1')).toBe(idB);
+    expect(await getKv(a.db, 'drive_files_folder:1')).toBe(idA);
+    // A having its folders cached made B create its own: three in each Drive, each chain under its own root.
+    expect(a.drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Files']);
+    expect(a.drive.folderParents[0]).toBe('root-1');
+    expect(await folderOf(b.db, b.drive, SHARMA, 'Files')).toBe(idB); // B's cache, read again: still B's
+    expect(b.drive.folders).toHaveLength(3);
+  });
+});

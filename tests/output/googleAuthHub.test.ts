@@ -249,3 +249,31 @@ describe('GoogleAuthHub', () => {
     expect(await getKv(db, 'google_client:company2')).toBeUndefined();
   });
 });
+
+describe('two customers’ hubs (Phase B): nothing is shared by account label', () => {
+  it('each hub loads only its own database’s tokens with its own key, and a reconnect on one never reaches the other', async () => {
+    const [dbA, dbB] = [await seededDb(), await seededDb()];
+    const [keyA, keyB] = [randomBytes(32), randomBytes(32)];
+    await new TokenStore(dbA, keyA).save('rt-A');
+    await new TokenStore(dbB, keyB).save('rt-B');
+    await saveMeetingAccount(dbA, keyA, 'company2', 'rt-A2', MEETING_SCOPES.join(' '));
+    const f = fakeClients();
+    const a = await GoogleAuthHub.open({ db: dbA, key: keyA, credentials: { desktop: DESKTOP, web: WEB }, newClient: f.newClient });
+    const b = await GoogleAuthHub.open({ db: dbB, key: keyB, credentials: { desktop: DESKTOP, web: WEB }, newClient: f.newClient });
+    expect(tokenOf(a.client('main'))).toBe('rt-A');
+    expect(tokenOf(b.client('main'))).toBe('rt-B');
+    expect(a.client('main')).not.toBe(b.client('main'));
+    expect(a.labels()).toEqual(['main', 'company2']);
+    expect(b.labels()).toEqual(['main']); // the same label on A gives B nothing
+    const changedB: string[] = [];
+    b.onChange((label) => changedB.push(label));
+    await a.setToken('main', 'rt-A-new', 'web', SCOPE);
+    expect(tokenOf(a.client('main'))).toBe('rt-A-new');
+    expect(tokenOf(b.client('main'))).toBe('rt-B');
+    expect(changedB).toEqual([]);
+    expect(await new TokenStore(dbB, keyB).load()).toBe('rt-B');
+    // The meetings each hub would use come from its own database and clients only.
+    expect((await hubMeetingAccounts(dbA, a)).map((m) => m.label)).toEqual(['company2']);
+    expect((await hubMeetingAccounts(dbB, b)).map((m) => m.label)).toEqual([]);
+  });
+});
