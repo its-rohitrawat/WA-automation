@@ -67,17 +67,19 @@ function keyed(deps: GroupsDeps, o: GroupsOverview): GroupsView {
   return { ...o, rows: o.rows.map(({ groupId, ...row }) => ({ key: deps.groupKey(groupId), ...row })) };
 }
 
-/** Which groups the owner ignored: one read of the kv rows, then a check by key. */
-function ignoredCheck(deps: GroupsDeps): (groupId: string) => boolean {
-  const keys = new Set(
-    (deps.db.raw.prepare('SELECT k FROM kv WHERE k GLOB ?').all(`${IGNORED}*`) as { k: string }[]).map((r) => r.k.slice(IGNORED.length)),
-  );
+/**
+ * Which groups the owner ignored: one read of the kv rows, then a check by key. The prefix is matched with substr, which
+ * both engines run (GLOB is SQLite's only).
+ */
+async function ignoredCheck(deps: GroupsDeps): Promise<(groupId: string) => boolean> {
+  const rows = await deps.db.all<{ k: string }>(`SELECT k FROM kv WHERE substr(k, 1, ${IGNORED.length}) = ?`, [IGNORED]);
+  const keys = new Set(rows.map((r) => r.k.slice(IGNORED.length)));
   return (groupId) => keys.size > 0 && keys.has(deps.groupKey(groupId));
 }
 
 /** The list from the cached listing (never waiting on WhatsApp) with these configs. */
 async function cachedView(deps: GroupsDeps, configs: ClientConfig[]): Promise<GroupsView> {
-  return keyed(deps, await groupsOverview({ db: deps.db, listing: deps.directory.cachedListing(), configs, ignored: ignoredCheck(deps) }));
+  return keyed(deps, await groupsOverview({ db: deps.db, listing: deps.directory.cachedListing(), configs, ignored: await ignoredCheck(deps) }));
 }
 
 /** One audit line; a failing write is logged (by error type only) and the caller carries on. */
@@ -101,7 +103,7 @@ export async function groupsListHandler(deps: GroupsDeps, _ctx: OwnerContext, se
     refresh = fetchedAt === null || deps.clock.now().getTime() - Date.parse(fetchedAt) >= REFRESH_MIN_MS;
   }
   const listing = await deps.directory.list({ refresh });
-  return ok(keyed(deps, await groupsOverview({ db: deps.db, listing, configs: deps.configs(), q, filter: filter as GroupFilter, ignored: ignoredCheck(deps) })));
+  return ok(keyed(deps, await groupsOverview({ db: deps.db, listing, configs: deps.configs(), q, filter: filter as GroupFilter, ignored: await ignoredCheck(deps) })));
 }
 
 // The rules of ClientSchema (config/groups.ts), plus the matchable-keyword rule parseGroupsFile applies. The code is only

@@ -1,3 +1,2 @@
 media/extract.ts
 store/db.ts
-web/routes/groups.ts
