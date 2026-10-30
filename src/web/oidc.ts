@@ -35,6 +35,9 @@ export const DASHBOARD_SCREENS: readonly string[] = Object.freeze([
   'automations',
   'audit',
   'settings',
+  // The founder's platform screens (SaaS S5); the shell shows them only when the platform is on.
+  'customers',
+  'invite',
 ]);
 const NAME_MAX = 80;
 

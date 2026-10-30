@@ -16,7 +16,7 @@ import { ago, date, greeting, initials, usd, when } from '../../src/web/public/f
 // @ts-expect-error -- browser module (see above)
 import { HI } from '../../src/web/public/icons.js';
 // @ts-expect-error -- browser module (see above)
-import { NAV, SCREENS, parsePath, pathFor } from '../../src/web/public/router.js';
+import { NAV, PLATFORM_NAV, SCREENS, navFor, parsePath, pathFor, showPlatform } from '../../src/web/public/router.js';
 
 const PUBLIC = fileURLToPath(new URL('../../src/web/public/', import.meta.url));
 const publicFiles = (ext: string) =>
@@ -70,6 +70,7 @@ describe('front-end files and the Content-Security-Policy', () => {
       for (const m of text.matchAll(/^\s*\['[^']+', '([\w-]+)', /gm)) names.add(m[1]!);
     }
     for (const [, items] of NAV) for (const [, , ic] of items) names.add(ic);
+    for (const [, , ic] of PLATFORM_NAV) names.add(ic);
     expect(names.size).toBeGreaterThan(10);
     expect([...names].filter((n) => !(n in HI))).toEqual([]);
   });
@@ -126,6 +127,27 @@ describe('router', () => {
     expect(pathFor('overview')).toBe('/dashboard');
     expect(pathFor('clients', 'groups')).toBe('/dashboard/clients/groups');
     for (const screen of SCREENS.keys()) expect(parsePath(pathFor(screen))).toEqual({ screen, sub: null });
+  });
+
+  it('the platform screens (SaaS S5) only when the server says the platform is on', () => {
+    const ids = (platform: boolean) => (navFor(platform) as [string, [string][]][]).flatMap(([, items]) => items.map(([id]) => id));
+    // Off (PLATFORM_ENABLED unset, or a server without the platform): no entry, and no address opens them.
+    expect(ids(false)).not.toContain('customers');
+    expect(ids(false)).not.toContain('invite');
+    expect(parsePath('/dashboard/customers')).toEqual({ screen: 'overview', sub: null });
+    // On: both at the start of System; the rest is unchanged.
+    const system = (navFor(true) as [string, [string][]][]).find(([g]) => g === 'System')![1].map(([id]) => id);
+    expect(system.slice(0, 3)).toEqual(['customers', 'invite', 'connections']);
+    expect(ids(true).filter((id) => id !== 'customers' && id !== 'invite')).toEqual(ids(false));
+    try {
+      showPlatform(true);
+      expect(parsePath('/dashboard/customers')).toEqual({ screen: 'customers', sub: null });
+      expect(parsePath('/dashboard/invite')).toEqual({ screen: 'invite', sub: null });
+    } finally {
+      showPlatform(false);
+    }
+    expect(parsePath('/dashboard/invite')).toEqual({ screen: 'overview', sub: null });
+    expect([...SCREENS.keys()]).toHaveLength(11);
   });
 });
 

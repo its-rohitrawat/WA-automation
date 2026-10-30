@@ -102,14 +102,18 @@ export async function postLines(path, body, onEvent) {
 
 /**
  * The signed-in owner, or null when there is no session (401). Keeps the CSRF token in memory.
- * @returns {Promise<{ email: string, name: string, signedInAt: string, expiresAt: string } | null>}
+ * `platform`: the platform screens are on (SaaS S5: the founder's platform routes are mounted).
+ * @returns {Promise<{ email: string, name: string, signedInAt: string, expiresAt: string, platform: boolean } | null>}
  */
 export async function me() {
   const res = await fetch(BASE + '/me', { credentials: 'same-origin', headers: { Accept: 'application/json' } });
   if (res.status === 401) return null;
   const body = await parse(res);
   csrf = typeof body?.csrf === 'string' ? body.csrf : null;
-  return { email: String(body?.email ?? ''), name: String(body?.name ?? ''), signedInAt: String(body?.signedInAt ?? ''), expiresAt: String(body?.expiresAt ?? '') };
+  return {
+    email: String(body?.email ?? ''), name: String(body?.name ?? ''), signedInAt: String(body?.signedInAt ?? ''), expiresAt: String(body?.expiresAt ?? ''),
+    platform: body?.platform === true,
+  };
 }
 
 /** Ends the session on the agent (CSRF-checked). */

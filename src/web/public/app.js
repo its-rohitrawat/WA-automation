@@ -3,7 +3,7 @@ import { get, me, poll, setSignedOutHandler, signOut } from './api.js';
 import { problems, readOverview, readStatus } from './contract.js';
 import { $, $$, esc, gsap, icon, installTooltip, paint, reduceMotion, toast } from './dom.js';
 import { initials } from './format.js';
-import { NAV, navigate, onPopState, parsePath, pathFor, SCREENS } from './router.js';
+import { navFor, navigate, onPopState, parsePath, pathFor, SCREENS, showPlatform } from './router.js';
 import { ASSISTANT_CHANGED, ASSISTANT_GO, mountAssistant, unmountAssistant } from './views/assistant.js';
 import { mountClients } from './views/clients.js';
 import { CONNECTIONS_CHANGED, openFix, runAction } from './views/connect.js';
@@ -14,6 +14,7 @@ import { afterOverview, attentionBanner, closeKpiInfo, kpiInfoClick, renderOverv
 import { renderPlaceholder } from './views/placeholder.js';
 import { SCREEN_MOUNTS } from './views/registry.js';
 import './views/screens.js';
+import './views/platform.js';
 
 SCREEN_MOUNTS.set('clients', mountClients);
 SCREEN_MOUNTS.set('connections', mountConnections);
@@ -42,7 +43,7 @@ const STATUS_MS = 10_000;
 const OVERVIEW_MS = 30_000;
 const THEME_KEY = 'wa-agent-theme';
 
-/** @type {{ email: string, name: string } | null} */
+/** @type {{ email: string, name: string, platform?: boolean } | null} */
 let owner = null;
 /** @type {ReturnType<typeof readStatus> | null} */
 let status = null;
@@ -76,7 +77,7 @@ applyTheme(savedTheme());
 
 // ---------- the shell ----------
 function buildNav() {
-  $('#nav').innerHTML = NAV.map(([group, items]) => `<div class="nav-group"><div class="nav-label eyebrow">${esc(group)}</div>${items
+  $('#nav').innerHTML = navFor(owner?.platform === true).map(([group, items]) => `<div class="nav-group"><div class="nav-label eyebrow">${esc(group)}</div>${items
     .map((/** @type {readonly [string, string, string]} */ [id, label, ic]) => `<a href="${id === 'overview' ? '/dashboard' : `/dashboard/${id}`}" data-go="${id}" title="${esc(label)}">${icon(ic, 19)}<span>${esc(label)}</span></a>`)
     .join('')}</div>`).join('');
 }
@@ -367,6 +368,9 @@ async function boot() {
   } catch {
     owner = null;
   }
+  // The platform screens only when the server has them (SaaS S5): their entries and addresses.
+  showPlatform(owner?.platform === true);
+  buildNav();
   if (owner) enterApp();
   else showSignin();
 }

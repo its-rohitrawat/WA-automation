@@ -10,8 +10,36 @@ export const NAV = ([
   ['System', [['connections', 'Connections', 'plug'], ['usage', 'AI usage', 'ai'], ['automations', 'Automations', 'flow'], ['audit', 'Audit logs', 'audit'], ['settings', 'Settings', 'settings']]],
 ]);
 
+/**
+ * The founder's platform screens (SaaS S5), at the start of System. Only when the server says the platform is on (GET
+ * /dashboard/api/me's `platform`, true only when the platform routes are mounted): otherwise neither the entries nor
+ * their addresses exist, so nothing opens a screen whose API is not there.
+ * @type {[string, string, string][]}
+ */
+export const PLATFORM_NAV = [['customers', 'Customers', 'store'], ['invite', 'Invite a customer', 'mail']];
+
+/**
+ * The sidebar for this session: NAV, with the platform screens when `platform` is true.
+ * @param {boolean} platform
+ * @returns {[string, [string, string, string][]][]}
+ */
+export function navFor(platform) {
+  return platform ? NAV.map(([group, items]) => [group, group === 'System' ? [...PLATFORM_NAV, ...items] : items]) : NAV;
+}
+
 /** @type {Map<string, { group: string, label: string, icon: string }>} */
 export const SCREENS = new Map(NAV.flatMap(([group, items]) => items.map(([id, label, ic]) => [id, { group, label, icon: ic }])));
+
+/**
+ * Adds the platform screens to SCREENS (and so to parsePath), or takes them out. Called once the session is known.
+ * @param {boolean} on
+ */
+export function showPlatform(on) {
+  for (const [id, label, ic] of PLATFORM_NAV) {
+    if (on) SCREENS.set(id, { group: 'System', label, icon: ic });
+    else SCREENS.delete(id);
+  }
+}
 
 /**
  * The screen (and optional sub-screen) an address asks for; overview for /dashboard and anything unknown.
