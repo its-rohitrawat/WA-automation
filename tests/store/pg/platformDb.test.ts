@@ -41,6 +41,8 @@ const ALLOWED: Record<string, RegExp[]> = {
     // Handed to the founder's runtime (its platform and sign-up deps) and to the dashboard (SessionStore).
     /^tenantId: env\.TENANT_ID, env, log, db, platformDb, key, configs, lock, globalSpend,/,
     /^env, db, platformDb, log, control, platform: rt\.platform, customerSessions:/,
+    // The Supervisor (S4.5): it reads the tenants table.
+    /^platform = platformSupervisor\(\{ env, log, clock: systemClock, platformDb, master: key, customerDb: customerDbsOf\(db\) \}\);$/,
     // Closed at shutdown and on a failed start, when it is its own pool.
     /^const platformStore = platformDb !== db \? platformDb : undefined;$/,
     /^Promise\.all\(\[trackerDb\.close\(\), platformStore\?\.close\(\)\]/,
@@ -60,6 +62,13 @@ const ALLOWED: Record<string, RegExp[]> = {
     // startFounderRuntime's failed start closes it.
     /^if \(d\.platformDb && d\.platformDb !== d\.db\) \{$/,
     /^await d\.platformDb\.close\(\)/,
+  ],
+  'runtime/platformSupervisor.ts': [
+    /^platformDb: Db;$/,
+    // The customers' data keys (tenant_keys), the Supervisor (tenants, platform_audit) and AiKeys' audit (platform_audit).
+    /^const tenantKeys = new TenantKeys\(\{ db: o\.platformDb, master: o\.master, clock: o\.clock \}\);$/,
+    /^db: o\.platformDb, clock: o\.clock, log: o\.log, engine: o\.env\.DB_ENGINE,$/,
+    /^tenantId: t\.id, db: o\.customerDb\(t\.id\), platform: o\.platformDb, dataKey:/,
   ],
   'web/start.ts': [
     /^platformDb\?: Db;$/,

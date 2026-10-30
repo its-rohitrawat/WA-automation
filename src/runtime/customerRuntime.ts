@@ -57,6 +57,7 @@ import type { IncomingMessage } from 'node:http';
 import type { RequestContext } from '../web/router.ts';
 import { SESSION_COOKIE, sessionCookie, type SessionStore } from '../web/sessions.ts';
 import { makeGroupKey } from '../web/routes/groups.ts';
+import type { PlatformRouteDeps } from '../web/routes/platform.ts';
 import type { DashboardMount } from '../web/start.ts';
 
 // One customer's runtime (SaaS S4.4): everything main.ts used to build for the founder between opening the databases
@@ -152,6 +153,11 @@ export interface RuntimeDeps {
    * row; absent (SQLite) none is started.
    */
   customerDb?: (tenantId: string) => Db;
+  /**
+   * The Supervisor's parts for the platform screens (S4.5, S4.9): the onboarding probes, each customer's runtime and memory,
+   * the active limit, each customer's AiKeys (its setup shell's), and the poke after a change. Only with PLATFORM_ENABLED.
+   */
+  platformHooks?: Pick<PlatformRouteDeps, 'probes' | 'health' | 'maxActive' | 'aiKeys' | 'poke'>;
   /** Told the name of each database this runtime closes (tests). */
   onClose?: (name: string) => void;
 }
@@ -511,7 +517,7 @@ export async function buildCustomerRuntime(t: { id: string; founder: boolean }, 
           links: phoneLinks,
           // The platform (S5H.2 2.2) and the public sign-up (S5H.6 4.1): the founder's dashboard only, on the platform Db.
           ...(platformDb ? {
-            platform: { db: platformDb, clock: systemClock, log, publicUrl: sitePublicUrl, founderName: env.PLATFORM_FOUNDER_NAME, mailer },
+            platform: { db: platformDb, clock: systemClock, log, publicUrl: sitePublicUrl, founderName: env.PLATFORM_FOUNDER_NAME, mailer, ...d.platformHooks },
             signup: {
               db: platformDb, clock: systemClock, log, publicUrl: sitePublicUrl, founderName: env.PLATFORM_FOUNDER_NAME,
               // The owner sign-in's web client; its redirect URIs must include <DASHBOARD_PUBLIC_URL>/signup/callback.
@@ -520,6 +526,7 @@ export async function buildCustomerRuntime(t: { id: string; founder: boolean }, 
               // waiting page (the invite is still used and the customer is onboarding).
               startSession: customerSessionStarter({ customerDb: d.customerDb, sessions: m.sessions, secureFor: m.secureFor }),
               secure: m.secureFor,
+              ...(d.platformHooks?.poke ? { poke: d.platformHooks.poke } : {}),
             },
           } : {}),
           ...(env.DASHBOARD_ASSISTANT

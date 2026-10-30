@@ -7,10 +7,12 @@ import { TokenDecryptError } from './output/googleAuth.ts';
 import { ensurePlatformSchema } from './platform/schema.ts';
 import { ensureFounderTenant } from './platform/store.ts';
 import { startFounderRuntime, StartupExit } from './runtime/customerRuntime.ts';
+import { platformSupervisor, type PlatformSupervisor } from './runtime/platformSupervisor.ts';
 import { GlobalSpend } from './spend/globalSpend.ts';
 import type { Db } from './store/db.ts';
 import { customerDbsOf, openPlatformStore, openStore } from './store/open.ts';
 import { acquireLock, AlreadyRunningError } from './util/lock.ts';
+import { systemClock } from './util/clock.ts';
 import { createLogger } from './util/logger.ts';
 import { SessionDecryptError } from './wa/authState.ts';
 import { startDashboard } from './web/start.ts';
@@ -21,8 +23,12 @@ import { startDashboard } from './web/start.ts';
 async function main(): Promise<void> {
   const env = loadEnv();
   const log = createLogger(env.LOG_LEVEL);
+  /** The Supervisor, with the platform on (S4.5): customers' setup shells. */
+  let platform: PlatformSupervisor | undefined;
   // Without these Node prints the raw error (Boom data, gaxios request config), bypassing the logger's redaction.
+  // A throw from a customer's code restarts that customer alone (crashOwner); the founder's, or no one's, ends the process.
   process.on('uncaughtException', (err) => {
+    if (platform?.crashed(err)) return;
     try {
       log.fatal({ err }, 'uncaught exception');
     } finally {
@@ -30,6 +36,7 @@ async function main(): Promise<void> {
     }
   });
   process.on('unhandledRejection', (reason) => {
+    if (platform?.crashed(reason)) return;
     try {
       log.fatal({ err: reason }, 'unhandled rejection');
     } finally {
@@ -67,6 +74,11 @@ async function main(): Promise<void> {
       await ensureFounderTenant(platformDb, { name: 'Your business', at: new Date().toISOString() });
     }
     const configs = loadGroupsFile(env.GROUPS_FILE);
+    // The Supervisor (S4.5 Phase A), only with the platform on: the founder adopted, a setup shell for each customer
+    // (Postgres only: on SQLite the Supervisor refuses every customer).
+    if (env.PLATFORM_ENABLED) {
+      platform = platformSupervisor({ env, log, clock: systemClock, platformDb, master: key, customerDb: customerDbsOf(db) });
+    }
 
     // The founder's runtime (S4.4, src/runtime/customerRuntime.ts): everything for customer #1 between the databases
     // and the web server. On a failure it closes the databases and releases the lock itself, then throws to the catch.
@@ -75,8 +87,11 @@ async function main(): Promise<void> {
     handedOver = true;
     const rt = await startFounderRuntime({
       tenantId: env.TENANT_ID, env, log, db, platformDb, key, configs, lock, globalSpend, ...(customerDbsOf(db) ? { customerDb: customerDbsOf(db)! } : {}),
+      ...(platform ? { platformHooks: platform.hooks } : {}),
     });
     const { control, agentRoutes } = rt;
+    // The first reconcile (the founder adopted, customers' shells), awaited here: nothing is awaited after rt.start().
+    await platform?.start();
     rt.start();
     // Owner dashboard: off (the default) means no web server and no port. Not awaited here, so the stop handlers below
     // are in place before anything else is awaited. It never rejects: a dashboard that cannot start resolves to undefined.
@@ -105,7 +120,10 @@ async function main(): Promise<void> {
       // Then the runtime stops: a phone link still running is undone (at most 10 s), app.stop(), then its own databases.
       const webStopped = webReady
         .then((w) => w?.stop())
-        .catch((err: unknown) => log.error({ err }, 'error while stopping the dashboard'));
+        .catch((err: unknown) => log.error({ err }, 'error while stopping the dashboard'))
+        // The customers' shells stop before the databases close (the founder's runtime stops next, in rt.stop()).
+        .then(() => platform?.stop())
+        .catch((err: unknown) => log.error({ err }, 'error while stopping the customer runtimes'));
       void webStopped
         .then(() => rt.stop())
         .catch((err) => log.error({ err }, 'error while stopping'))

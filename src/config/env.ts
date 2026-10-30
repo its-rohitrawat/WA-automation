@@ -69,6 +69,10 @@ const EnvSchema = z.object({
   PLATFORM_ENABLED: Flag.default(false),
   /** The founder's name on invite emails and the sign-up page (SaaS S5). */
   PLATFORM_FOUNDER_NAME: z.string().min(1).max(100).default('WA Agent'),
+  /** Full runtimes at most, the founder's included (S4.5): a customer beyond it waits as refused:limit. */
+  PLATFORM_MAX_ACTIVE: z.coerce.number().int().min(1).max(500).default(20),
+  /** No customer runtime starts while the process uses more memory than this, in MB (S4.5, D4). */
+  PLATFORM_MAX_RSS_MB: z.coerce.number().int().min(256).default(4096),
   GOOGLE_OAUTH_CLIENT_ID: z.string().min(1).optional(),
   GOOGLE_OAUTH_CLIENT_SECRET: z.string().min(1).optional(),
   QUIET_MINUTES: z.coerce.number().positive().default(4),

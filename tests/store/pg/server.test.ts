@@ -6,6 +6,8 @@ import { founderNumberIn, openPhoneSession, useEncryptedAuthState } from '../../
 import { onPg, openTestPlatformDb, openTestTenantDb, testPg } from '../../helpers/pg.ts';
 import { AuditLog } from '../../../src/web/audit.ts';
 import { SessionStore } from '../../../src/web/sessions.ts';
+import { startSetupShell } from '../../../src/runtime/setupShell.ts';
+import { silentLogger } from '../../../src/util/logger.ts';
 
 // The first tests on a real Postgres (S2.7): only inside npm run test:pg (scripts/test-pg.ts); skipped by npm test.
 
@@ -90,5 +92,25 @@ describe.runIf(onPg)('customer sessions on the Postgres test server (S4.8)', () 
     await new AuditLog(a.forTenant(b.tenantId), { now: () => new Date() }).record({ actor: 'x@example.com', event: 'Signed in', kind: 'auth', detail: 'Test' });
     expect((await b.get<{ n: number }>("SELECT COUNT(*) AS n FROM audit_log WHERE event = 'Signed in'"))!.n).toBe(1);
     expect((await a.get<{ n: number }>("SELECT COUNT(*) AS n FROM audit_log WHERE event = 'Signed in'"))!.n).toBe(0);
+  });
+});
+
+describe.runIf(onPg)('a customer setup shell on the Postgres test server (S4.5 Phase A)', () => {
+  it('reads its facts from its own tables only (RLS): another customer’s groups never count', async () => {
+    const a = await openTestTenantDb('shell a');
+    const b = await openTestTenantDb('shell b');
+    const platform = openTestPlatformDb();
+    try {
+      await b.run("INSERT INTO clients (code, name, group_id, phases) VALUES ('BBB', 'B client', 'b@g.us', '[]')");
+      const shell = await startSetupShell({
+        tenantId: a.tenantId, db: a, platform, dataKey: async () => randomBytes(32), keyTester: async () => 'ok',
+        clock: { now: () => new Date() }, log: silentLogger(),
+      });
+      expect(shell.facts().groupsApproved).toBe(0);
+      expect(shell.facts().aiKey).toBe('missing');
+      await shell.stop();
+    } finally {
+      for (const db of [a, b, platform]) await db.close();
+    }
   });
 });
