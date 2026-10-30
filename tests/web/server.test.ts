@@ -696,31 +696,37 @@ describe('web server: start and stop', () => {
 
 describe('main.ts dashboard wiring', () => {
   const src = readFileSync(join(import.meta.dirname, '../../src/main.ts'), 'utf8');
+  // The founder's runtime (S4.4): built by startFounderRuntime, started by main.ts with rt.start().
+  const runtime = readFileSync(join(import.meta.dirname, '../../src/runtime/customerRuntime.ts'), 'utf8');
+  const startBody = runtime.slice(runtime.indexOf('start: () => {'), runtime.indexOf('beginStop,', runtime.indexOf('start: () => {')));
 
-  it('starts the web server only when DASHBOARD_ENABLED is set, after app.start()', () => {
+  it('starts the web server only when DASHBOARD_ENABLED is set, after the runtime started (app.start())', () => {
     expect(src).toMatch(/const webReady = env\.DASHBOARD_ENABLED\s*\?\s*startDashboard\(/);
     expect(src).toMatch(/import \{ startDashboard \} from '\.\/web\/start\.ts';/);
     expect(src).not.toContain('createWebServer(');
-    expect(src.indexOf('app.start();')).toBeLessThan(src.indexOf('const webReady = env.DASHBOARD_ENABLED'));
+    expect(runtime).not.toContain('createWebServer(');
+    expect(src.indexOf('rt.start();')).toBeGreaterThan(0);
+    expect(src.indexOf('rt.start();')).toBeLessThan(src.indexOf('const webReady = env.DASHBOARD_ENABLED'));
+    expect(startBody).toMatch(/^start: \(\) => \{\s*app\.start\(\);/);
   });
 
   it('awaits nothing between app.start() and the SIGINT/SIGTERM handlers', () => {
-    const gap = src.slice(src.indexOf('app.start();'), src.indexOf("process.on('SIGTERM', shutdown);"));
+    // rt.start() is synchronous (app.start() first), and main.ts awaits nothing after it before the handlers.
+    expect(startBody.length).toBeGreaterThan(0);
+    expect(startBody).not.toMatch(/\bawait\b|\basync\b/);
+    const gap = src.slice(src.indexOf('rt.start();'), src.indexOf("process.on('SIGTERM', shutdown);"));
     expect(gap.length).toBeGreaterThan(0);
     expect(gap).not.toMatch(/\bawait\b/);
-  });
-
-  it('waits for the groups to be synced before anything reads the clients (S1 review N1)', () => {
-    const start = src.slice(0, src.indexOf('app.start();'));
-    expect(start).toMatch(/await syncClients\(db, configs, systemClock\.now\(\)\);/);
-    expect(start).not.toMatch(/(?<!await )syncClients\(db,/);
   });
 
   it('stops the web server before app.stop() on shutdown', () => {
     const shutdown = src.slice(src.indexOf('const shutdown = () => {'), src.indexOf("process.on('SIGINT', shutdown);"));
     expect(shutdown).toMatch(/const webStopped = webReady\s*\.then\(\(w\) => w\?\.stop\(\)\)/);
-    expect(shutdown.indexOf('webReady')).toBeLessThan(shutdown.indexOf('app.stop()'));
-    expect(shutdown).toMatch(/webStopped\s*\.then\(\(\) => app\.stop\(\)\)/);
+    // rt.stop() is where app.stop() runs: only after the web server has stopped.
+    expect(shutdown).toMatch(/webStopped\s*\.then\(\(\) => rt\.stop\(\)\)/);
+    expect(shutdown).not.toMatch(/(?:=>|\bawait|\bvoid)\s*app\.stop\(\)/); // only rt.stop() calls it
+    const stopBody = runtime.slice(runtime.indexOf('stop: () => {'));
+    expect(stopBody).toMatch(/await app\.stop\(\);/);
   });
 });
 

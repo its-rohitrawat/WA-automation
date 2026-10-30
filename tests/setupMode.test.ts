@@ -46,8 +46,9 @@ describe('planStartup', () => {
     expect(GOOGLE_NOT_CONNECTED_EXIT).toBe('Google Drive is not connected. Run: npm run cli -- google-auth');
   });
 
-  it('main.ts stops on the plan, and only an unreadable token with the dashboard on is tolerated (source scan)', () => {
-    const src = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+  it('the runtime stops on the plan, and only an unreadable token with the dashboard on is tolerated (source scan)', () => {
+    // The founder's start-up half moved from main.ts to the runtime (S4.4).
+    const src = readFileSync(new URL('../src/runtime/customerRuntime.ts', import.meta.url), 'utf8');
     expect(src).toContain("const plan = planStartup({ dashboardEnabled: env.DASHBOARD_ENABLED, whatsappLinked: auth.hasSession, googleToken });");
     expect(src).toContain("if ('exit' in plan) exitEarly(plan.exit);");
     expect(src).toContain('if (!(env.DASHBOARD_ENABLED && e instanceof TokenDecryptError)) throw e;');

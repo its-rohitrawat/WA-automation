@@ -14,7 +14,24 @@ import { HHMM, INDIAN_MOBILE, maskNumber, type Env } from './env.ts';
 // on the owner's request (29 Oct 2026): any time of day (its deadline follows it, see deadlineFor), and a time set after it has passed today starts
 // tomorrow, as today keeps the time it had (TODAY_KEY), so a change never sends a day twice nor drops one.
 // dashboardSend (Open chat) has no .env value: it is off until the owner switches it on in Settings.
+// A customer's store has one more key, its daily Claude limit (DAILY_CAP_KEY, on its own key; S4.3). It applies when
+// that customer's runtime next starts.
 // The founder's number is never put in an error or an audit line in full: maskNumber shows its last 4 digits.
+
+/**
+ * A customer's daily Claude limit (S4.3, owner decision D3): on the customer's own Anthropic key, so the customer sets it.
+ * A customer store only: the founder's cap stays .env-only (DAILY_SPEND_CAP_USD), and the founder's store refuses this key.
+ */
+export const DAILY_CAP_KEY = 'dailySpendCapUsd';
+export const DAILY_CAP_LABEL = 'Daily Claude limit (your key)';
+export const CUSTOMER_DEFAULT_CAP_USD = 5;
+const DAILY_CAP_MIN = 1;
+const DAILY_CAP_MAX = 1000;
+
+/** A limit in US dollars, from 1 to 1000, to the cent; undefined when it is not one. */
+function checkCap(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) && v >= DAILY_CAP_MIN && v <= DAILY_CAP_MAX && Math.round(v * 100) === v * 100 ? v : undefined;
+}
 
 export const SETTING_KEYS = ['reportEnabled', 'reportDays', 'reportRecipient', 'reportTime', 'dashboardSend'] as const;
 export type SettingKey = (typeof SETTING_KEYS)[number];
@@ -48,6 +65,8 @@ export interface RuntimeSettings {
   reportTime: string;
   /** Open chat may send from the founder's WhatsApp. Off by default. */
   dashboardSend: boolean;
+  /** A customer store only: the customer's daily Claude limit, US$ (CUSTOMER_DEFAULT_CAP_USD until set). */
+  dailySpendCapUsd?: number;
   source: Record<SettingKey, SettingSource>;
 }
 
@@ -62,6 +81,8 @@ export interface SettingsView {
   /** When the next report goes out ("tomorrow 07:30", see nextReport), or null while the briefing is off. */
   nextReport: string | null;
   dashboardSend: boolean;
+  /** A customer store only. */
+  dailySpendCapUsd?: number;
   source: Record<SettingKey, SettingSource>;
 }
 
@@ -98,6 +119,8 @@ export interface SettingsStoreOptions {
   clock: Clock;
   spareLinked?: () => boolean | Promise<boolean>;
   log?: Logger;
+  /** A customer's store (not the founder's): it also has the customer's daily Claude limit (DAILY_CAP_KEY). */
+  customer?: boolean;
 }
 
 export class SettingsStore {
@@ -106,6 +129,7 @@ export class SettingsStore {
   readonly #clock: Clock;
   readonly #spareLinked: () => boolean | Promise<boolean>;
   readonly #log: Logger | undefined;
+  readonly #customer: boolean;
   readonly #listeners = new Set<Listener>();
   /** The settings rows (k to v), kept in memory: only set() writes them, and it updates this after its commit. */
   readonly #rows = new Map<string, string>();
@@ -122,6 +146,7 @@ export class SettingsStore {
     this.#clock = o.clock;
     this.#spareLinked = o.spareLinked ?? (() => false);
     this.#log = o.log;
+    this.#customer = o.customer === true;
   }
 
   static async open(o: SettingsStoreOptions): Promise<SettingsStore> {
@@ -168,11 +193,23 @@ export class SettingsStore {
       reportRecipient: recipient ? (recipient.value as string) : this.#env.REPORT_RECIPIENT,
       reportTime: timeOk ? (time.value as string) : this.#env.REPORT_TIME,
       dashboardSend: send ? (send.value as boolean) : false,
+      ...(this.#customer ? { dailySpendCapUsd: this.#storedCap() ?? CUSTOMER_DEFAULT_CAP_USD } : {}),
       source: {
         reportEnabled: enabled ? 'dashboard' : 'env', reportDays: days ? 'dashboard' : 'env', reportRecipient: recipient ? 'dashboard' : 'env',
         reportTime: timeOk ? 'dashboard' : 'env', dashboardSend: send ? 'dashboard' : 'env',
       },
     };
+  }
+
+  /** The customer's stored daily limit, when there is a valid one. */
+  #storedCap(): number | undefined {
+    const v = this.#rows.get(DAILY_CAP_KEY);
+    if (v === undefined) return undefined;
+    try {
+      return checkCap(JSON.parse(v));
+    } catch {
+      return undefined;
+    }
   }
 
   /** Today's send time when the time was changed after today's had passed (the old one, kept for today), else undefined. */
@@ -197,6 +234,7 @@ export class SettingsStore {
       reportEnabled: s.reportEnabled, reportDays: s.reportDays, recipientMasked: s.reportRecipient ? maskNumber(s.reportRecipient) : null,
       sendAt: s.reportTime, deadline: deadlineFor(s.reportTime, this.#env.REPORT_DEADLINE),
       nextReport: nextReport(await reportFor(this.#db, istDate(now)), now, this.reportSettings(), s.reportTime), dashboardSend: s.dashboardSend,
+      ...(s.dailySpendCapUsd !== undefined ? { dailySpendCapUsd: s.dailySpendCapUsd } : {}),
       source: s.source,
     };
   }
@@ -225,7 +263,24 @@ export class SettingsStore {
     return run;
   }
 
+  /** The customer's daily limit: checked, saved and audited in one transaction, then the listeners are told. */
+  async #setCap(raw: unknown, actor: string, audit: Audit): Promise<RuntimeSettings> {
+    const value = checkCap(raw);
+    if (value === undefined) {
+      throw new ControlError(422, `The daily Claude limit must be from US$${DAILY_CAP_MIN} to US$${DAILY_CAP_MAX}, to the cent`, DAILY_CAP_KEY);
+    }
+    if (this.get().dailySpendCapUsd === value) return this.get();
+    const at = this.#clock.now().toISOString();
+    await this.#db.tx(async (q) => {
+      await q.run(PUT, [DAILY_CAP_KEY, JSON.stringify(value), at, actor]);
+      await audit(q, { actor, event: `settings.${DAILY_CAP_KEY}`, kind: 'config', detail: `${DAILY_CAP_LABEL} set to US$${value}` });
+    });
+    this.#rows.set(DAILY_CAP_KEY, JSON.stringify(value));
+    return this.get();
+  }
+
   async #set(rawKey: string, raw: unknown, actor: string, audit: Audit): Promise<RuntimeSettings> {
+    if (rawKey === DAILY_CAP_KEY && this.#customer) return this.#setCap(raw, actor, audit);
     if (!(SETTING_KEYS as readonly string[]).includes(rawKey)) throw new ControlError(422, 'That setting cannot be changed here', 'key');
     const key = rawKey as SettingKey;
     const value = key === 'reportRecipient' ? typedNumber(raw) : check(key, raw);

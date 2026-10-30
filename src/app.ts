@@ -30,6 +30,7 @@ import { buildWorkbook } from './output/workbook.ts';
 import { ReportScheduler } from './report/scheduler.ts';
 import type { ReportHealth, ReportSender, ReportSettings } from './report/types.ts';
 import type { Prices } from './spend/pricing.ts';
+import type { GlobalSpend } from './spend/globalSpend.ts';
 import { SpendGuard } from './spend/spendGuard.ts';
 import { getClient, listClients, syncClients } from './store/clients.ts';
 import type { Db } from './store/db.ts';
@@ -116,6 +117,11 @@ export interface AppDeps {
   drive: DriveApi;
   prices: Prices;
   spendCapUsd: number;
+  /**
+   * The platform-wide ceiling this runtime's spend joins (S4.3): the founder's only, as only the founder's spend is billed
+   * to the founder. A customer runtime, on its own key, has its own cap and no ceiling.
+   */
+  platformSpend?: { global: GlobalSpend; tenantId: string };
   quietMs: number;
   maxWaitMs: number;
   maxConcurrent: number;
@@ -206,6 +212,7 @@ export async function createApp(d: AppDeps): Promise<App> {
   const startedAt = d.startedAt ?? d.clock.now();
   const spend = await SpendGuard.open({
     db: d.db, clock: d.clock, capUsd: d.spendCapUsd, onError: (err) => d.log.error({ err }, 'spend row not written'),
+    ...(d.platformSpend ? { platform: d.platformSpend } : {}),
   });
   const health = new Health({
     db: d.db, clock: d.clock, spend, dataDir: d.dataDir, freeBytes: d.freeBytes, onError: (err) => d.log.error({ err }, 'health snapshot not saved'),

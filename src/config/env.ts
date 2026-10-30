@@ -57,6 +57,11 @@ const EnvSchema = z.object({
   AI_PRICE_CACHE_WRITE_PER_MTOK: z.coerce.number().positive().default(5),
   AI_PRICE_CACHE_READ_PER_MTOK: z.coerce.number().positive().default(0.2),
   DAILY_SPEND_CAP_USD: z.coerce.number().positive().default(15),
+  /**
+   * The platform-wide daily ceiling (S4.3, owner decision D3), over spend billed to the founder only: the founder's
+   * Claude calls and any later founder-paid service. Customers use their own Anthropic key under their own limit.
+   */
+  PLATFORM_DAILY_SPEND_CAP_USD: z.coerce.number().positive().default(100),
   GOOGLE_OAUTH_CLIENT_ID: z.string().min(1).optional(),
   GOOGLE_OAUTH_CLIENT_SECRET: z.string().min(1).optional(),
   QUIET_MINUTES: z.coerce.number().positive().default(4),

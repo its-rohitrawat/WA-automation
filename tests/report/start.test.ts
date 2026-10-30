@@ -102,8 +102,9 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
     expect(other.report.sender.status().state).toBe('not_linked');
   });
 
-  it("main.ts passes the founder reader's linked number to openMorningReport as a forbidden sender", () => {
-    const src = readFileSync(join(import.meta.dirname, '../../src/main.ts'), 'utf8');
+  it("the founder's runtime passes the founder reader's linked number to openMorningReport as a forbidden sender", () => {
+    // The founder's start-up half moved from main.ts to src/runtime/customerRuntime.ts (S4.4).
+    const src = readFileSync(join(import.meta.dirname, '../../src/runtime/customerRuntime.ts'), 'utf8');
     const call = /openMorningReport\(\{([^}]*)\}\)/.exec(src);
     expect(call).not.toBeNull();
     expect(call![1]).toMatch(/(?:^|[\s,{])founderNumber: linkedNumber\(auth\)/);
@@ -150,15 +151,18 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
     expect(readFileSync(senderSessionDbPath(dir)).equals(junk)).toBe(true);
   });
 
-  it('main.ts opens the spare number only through openMorningReport, and logs no recipient field itself', () => {
-    const src = readFileSync(join(import.meta.dirname, '../../src/main.ts'), 'utf8');
+  it('the runtime opens the spare number only through openMorningReport, and logs no recipient field itself; main.ts opens no session', () => {
+    const src = readFileSync(join(import.meta.dirname, '../../src/runtime/customerRuntime.ts'), 'utf8');
     expect(src).toContain('await openMorningReport(');
     expect(src).not.toMatch(/openSenderSession|useSenderAuthState|new SenderGateway|senderSessionDbPath\(/);
     expect(src).not.toMatch(/\brecipient\b\s*:/);
+    const main = readFileSync(join(import.meta.dirname, '../../src/main.ts'), 'utf8');
+    expect(main).not.toMatch(/openMorningReport|openSenderSession|useSenderAuthState|new SenderGateway|senderSessionDbPath\(|openPhoneSession|openSessionDb/);
+    expect(main).not.toMatch(/\brecipient\b\s*:/);
   });
 
-  it('main.ts passes the report to createApp when REPORT_ENABLED, and closes the spare-number database on shutdown', () => {
-    const src = readFileSync(join(import.meta.dirname, '../../src/main.ts'), 'utf8');
+  it('the runtime passes the report to createApp when REPORT_ENABLED, and closes the spare-number database only after app.stop() or on a failed start', () => {
+    const src = readFileSync(join(import.meta.dirname, '../../src/runtime/customerRuntime.ts'), 'utf8');
     // The report is built only under REPORT_ENABLED, and the openMorningReport result is what reaches createApp.
     expect(src).toMatch(/if \(env\.REPORT_ENABLED\) \{/);
     expect(src).toMatch(/const (\w+) = await openMorningReport\([\s\S]*?\breport = \1\.report;/);
@@ -166,23 +170,19 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
     const call = /createApp\(\{([\s\S]*?)\n\s*\}\);/.exec(src);
     expect(call).not.toBeNull();
     expect(call![1]).toMatch(/^\s*report,?\s*$/m);
-    // The spare-number session is closed after app.stop(), and on the startup-failure path, and nowhere else: closing it
-    // while the sender runs would make its credential saves fail.
+    // The spare-number session is closed by closeOwn only, and closeOwn runs in two places: after app.stop() has settled,
+    // and on the start-up failure path. Closing it while the sender runs would make its credential saves fail.
     const count = (sub: string) => src.split(sub).length - 1;
-    // The start-up failure path closes each opened database, the spare-number one included, in one loop.
-    const startupClose = /for \(const d of \[\.\.\.adoptedDbs, db, sessionDb, senderDb\]\) await d\?\.close\(\)/;
-    expect(src).toMatch(startupClose);
-    const catchAt = src.indexOf('} catch (e) {');
-    expect(catchAt).toBeGreaterThan(0);
-    const catchBlock = src.slice(catchAt, src.indexOf('process.exit(2)', catchAt));
-    expect(catchBlock).toMatch(startupClose);
+    expect(src).toMatch(/\['sender', senderDb\] as const/);
     expect(count('senderDb?.close(') + count('senderDb.close(') + count('senderDb?.raw') + count('senderDb.raw')).toBe(0);
-    expect(count('senderStore?.close()')).toBe(1);
-    expect(count('senderStore.close(') + count('senderStore?.raw') + count('senderStore.raw')).toBe(0);
-    const stopAt = src.indexOf('.stop()');
+    expect(count('await closeOwn();')).toBe(2);
+    const stopAt = src.indexOf('await app.stop();');
     expect(stopAt).toBeGreaterThan(0);
-    const afterStop = src.slice(stopAt, src.indexOf('process.exit', stopAt));
-    expect(afterStop).toMatch(/\.finally\(\(\) => \{[\s\S]*senderStore\?\.close\(\)/);
+    const afterStop = src.slice(stopAt, src.indexOf('return stopped;', stopAt));
+    expect(afterStop).toMatch(/\} finally \{[\s\S]*await closeOwn\(\);/);
+    const catchAt = src.indexOf('  } catch (err) {\n    // Start-up failed');
+    expect(catchAt).toBeGreaterThan(stopAt);
+    expect(src.slice(catchAt, src.indexOf('throw err;', catchAt))).toContain('await closeOwn();');
     const startup = src.slice(src.indexOf('await openMorningReport('), src.indexOf('createApp({'));
     expect(startup.length).toBeGreaterThan(0);
     expect(startup).not.toMatch(/\.close\(/);
