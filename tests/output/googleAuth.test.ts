@@ -124,6 +124,14 @@ describe('scopes', () => {
     expect(requestedScopes(parseEnv({ MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'ourstudio.in' }))).toEqual(ALL_SCOPES);
   });
 
+  it('adds Gmail’s send permission only when invites go by email (S5H.4), and names it', () => {
+    const GMAIL = 'https://www.googleapis.com/auth/gmail.send';
+    expect(requestedScopes(parseEnv({ INVITES_GMAIL: 'true' }))).toEqual([...DRIVE_SCOPES, GMAIL]);
+    expect(requestedScopes(parseEnv({ INVITES_GMAIL: 'true', MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'ourstudio.in' }))).toEqual([...ALL_SCOPES, GMAIL]);
+    expect(requestedScopes({ MEETINGS_ENABLED: false })).toEqual(DRIVE_SCOPES); // left out: off
+    expect(scopeName(GMAIL)).toBe('Send email as you (invites only)');
+  });
+
   it('names every scope in plain words', () => {
     expect(ALL_SCOPES.map(scopeName)).toEqual([
       'Google Drive (only the files WA Agent creates)',

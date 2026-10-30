@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import { auth } from '@googleapis/drive';
 import type { Env } from '../config/env.ts';
 import { decrypt, encrypt } from '../crypto/envelope.ts';
+import { GMAIL_SEND_SCOPE } from '../platform/gmailSender.ts';
 import type { Sql } from '../store/db.ts';
 import { deleteKv, getKv, setKv } from '../store/kv.ts';
 
@@ -17,6 +18,7 @@ export const MEETING_SCOPES: readonly string[] = [
 ];
 
 const SCOPE_NAMES: Record<string, string> = {
+  [GMAIL_SEND_SCOPE]: 'Send email as you (invites only)',
   'https://www.googleapis.com/auth/drive.file': 'Google Drive (only the files WA Agent creates)',
   'https://www.googleapis.com/auth/meetings.space.readonly': 'Google Meet recordings list (read only)',
   'https://www.googleapis.com/auth/calendar.events.readonly': 'Calendar invites (read only)',
@@ -28,9 +30,12 @@ export function scopeName(scope: string): string {
   return SCOPE_NAMES[scope] ?? scope;
 }
 
-/** What google-auth asks for: Drive always, the meeting scopes only when meetings are on. */
-export function requestedScopes(env: Pick<Env, 'MEETINGS_ENABLED'>): string[] {
-  return env.MEETINGS_ENABLED ? [...DRIVE_SCOPES, ...MEETING_SCOPES] : [...DRIVE_SCOPES];
+/**
+ * What the main account's connect asks for: Drive always, the meeting scopes only when meetings are on, and Gmail's
+ * send permission only when invites go by email (S5H.4). INVITES_GMAIL left out counts as off.
+ */
+export function requestedScopes(env: Pick<Env, 'MEETINGS_ENABLED'> & Partial<Pick<Env, 'INVITES_GMAIL'>>): string[] {
+  return [...DRIVE_SCOPES, ...(env.MEETINGS_ENABLED ? MEETING_SCOPES : []), ...(env.INVITES_GMAIL ? [GMAIL_SEND_SCOPE] : [])];
 }
 
 /**
