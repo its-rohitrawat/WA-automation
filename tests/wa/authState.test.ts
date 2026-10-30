@@ -55,8 +55,8 @@ describe('encrypted auth state', () => {
     expect(rows.length).toBe(3);
     for (const { k } of rows) {
       expect(k).toMatch(/^[0-9a-f]{64}$/);
-      expect(k).not.toContain('9198');
-      expect(k).not.toContain('creds');
+      // The whole plaintext names: a 4-digit fragment would be found in a random hash by chance now and then.
+      for (const plain of ['919800000001', 'session:', 'creds']) expect(k).not.toContain(plain);
     }
   });
 

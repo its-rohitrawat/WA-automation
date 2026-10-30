@@ -67,6 +67,11 @@ export interface AuthRouteDeps {
   port: () => number | undefined;
   /** Session writes with their audit row, the audit row first (production: `auditedWrite(db, platformDb)`). */
   audited: AuditedWrite;
+  /**
+   * A member of a customer's workspace signing in through the dashboard (F7; Postgres with the platform on): its own
+   * session in its workspace (the audit row first, in its Db), or null when the email is no member. Absent: owners only.
+   */
+  memberSignIn?: (ctx: RequestContext, who: { email: string }) => Promise<{ id: string; csrf: string } | null>;
   /** Whether the platform screens are on (PLATFORM_ENABLED, and mounted): /dashboard/api/me says so to the shell. */
   platform?: boolean;
   /** Code to ID token (production: `googleCodeExchanger`). */
@@ -182,7 +187,17 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
         throw new SignInError('id_token_invalid');
       }
       const who = checkClaims(claims, { clientId: d.clientId, nonce: p.nonce, now: d.clock.now().getTime() });
-      if (!owners.has(who.email)) throw new SignInRefused('not_owner', who.email);
+      if (!owners.has(who.email)) {
+        // Not an owner: a member of a customer's workspace gets its own session there; anyone else is refused, as before.
+        const member = d.memberSignIn ? await d.memberSignIn(ctx, { email: who.email }) : null;
+        if (!member) throw new SignInRefused('not_owner', who.email);
+        const before = cookies[SESSION_COOKIE];
+        if (before !== undefined) names.delete(hashToken(before));
+        remember(member.id, who.name);
+        res.setHeader('Set-Cookie', [clearSignin, sessionCookie(member.id, { secure })]);
+        redirect(res, p.returnTo);
+        return;
+      }
 
       // A browser signing in again leaves its earlier session behind: end it. The audit row is written first, so a
       // failed audit write leaves no orphan session and keeps the earlier one.

@@ -85,6 +85,8 @@ async function boot(
     owners?: string[];
     /** The platform screens are on (PLATFORM_ENABLED): /dashboard/api/me says so. */
     platform?: boolean;
+    /** A member's dashboard sign-in (F7). */
+    memberSignIn?: (email: string) => Promise<{ id: string; csrf: string } | null>;
     publicUrl?: string;
     verifierThrows?: boolean;
     /** The code exchange rejects with this plain Error (not a SignInError). */
@@ -130,6 +132,7 @@ async function boot(
     port,
     audited: auditedWrite(db, db),
     ...(o.platform === undefined ? {} : { platform: o.platform }),
+    ...(o.memberSignIn ? { memberSignIn: async (_ctx: unknown, who: { email: string }) => o.memberSignIn!(who.email) } : {}),
     exchange:
       o.exchangeThrows === undefined
         ? googleCodeExchanger({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, tokenUrl: ep.url })
@@ -534,6 +537,34 @@ describe('owner sign-in: refusals', () => {
     expect(a[0]!.detail).toContain('st••••@gmail.com');
     expect(JSON.stringify(a).toLowerCase()).not.toContain('stranger@gmail.com');
     expect(b.out().toLowerCase()).not.toContain('stranger');
+  });
+});
+
+describe('a member signs in through the dashboard (F7)', () => {
+  it("a member of a customer's workspace gets the session its sign-in made; a non-member is still refused", async () => {
+    const asked: string[] = [];
+    let made: { id: string; csrf: string } | undefined;
+    const b = await boot({
+      memberSignIn: async (email) => {
+        asked.push(email);
+        if (email !== 'member@example.com') return null;
+        made = await new SessionStore(b.db, b.clock).create(email, 'Test');
+        return made;
+      },
+    });
+    b.claims.email = 'Member@Example.com';
+    const l = await login(b, '?return=/dashboard/onboarding');
+    const r = await callback(b, l.state, l.signin);
+    expect(r.status).toBe(302);
+    expect(r.headers.location).toBe('/dashboard/onboarding');
+    expect(cookieValue(r, 'wa_session')).toBe(made!.id);
+    expect(setCookies(r)).toContain('wa_signin=; HttpOnly; SameSite=Lax; Path=/dashboard/auth; Max-Age=0');
+    expect(asked).toEqual(['member@example.com']);
+    b.claims.email = 'stranger@gmail.com';
+    const l2 = await login(b);
+    const r2 = await callback(b, l2.state, l2.signin);
+    expect(r2.headers.location).toBe('/dashboard?denied=1');
+    expect(cookieValue(r2, 'wa_session')).toBeUndefined();
   });
 });
 

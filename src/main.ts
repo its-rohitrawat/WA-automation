@@ -10,7 +10,7 @@ import { startFounderRuntime, StartupExit } from './runtime/customerRuntime.ts';
 import { platformSupervisor, type PlatformSupervisor } from './runtime/platformSupervisor.ts';
 import { GlobalSpend } from './spend/globalSpend.ts';
 import type { Db } from './store/db.ts';
-import { customerDbsOf, openPlatformStore, openStore } from './store/open.ts';
+import { customerDbsOf, openPlatformStore, openStore, runtimeDb } from './store/open.ts';
 import { processLocalEngine } from './stt/local.ts';
 import { acquireLock, AlreadyRunningError } from './util/lock.ts';
 import { systemClock } from './util/clock.ts';
@@ -94,7 +94,7 @@ async function main(): Promise<void> {
     const globalSpend = new GlobalSpend({ capUsd: env.PLATFORM_DAILY_SPEND_CAP_USD });
     handedOver = true;
     const rt = await startFounderRuntime({
-      tenantId: env.TENANT_ID, env, log, db, platformDb, key, configs, lock, globalSpend, ...(customerDbsOf(db) ? { customerDb: customerDbsOf(db)! } : {}),
+      tenantId: env.TENANT_ID, env, log, db: runtimeDb(db), platformDb, key, configs, lock, globalSpend, ...(customerDbsOf(db) ? { customerDb: customerDbsOf(db)! } : {}),
       ...(platform ? { platformHooks: platform.hooks, googleHooks: platform.google } : {}),
       localEngine,
     });
@@ -107,6 +107,7 @@ async function main(): Promise<void> {
     const webReady = env.DASHBOARD_ENABLED ? startDashboard({
       env, db, platformDb, log, control, platform: rt.platform, customerSessions: env.DB_ENGINE === 'postgres' && rt.platform, ...agentRoutes,
       ...(platform ? { tenants: platform.tenants } : {}),
+      ...(customerDbsOf(db) ? { customerDb: customerDbsOf(db)! } : {}),
     }) : Promise.resolve(undefined);
 
     const trackerDb = db;

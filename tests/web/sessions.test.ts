@@ -309,3 +309,20 @@ describe('SessionStore: onEnd (the assistant forgets a chat that ended)', () => 
     expect(seen).toHaveLength(3);
   });
 });
+
+describe('a Postgres session without its customer (isolation review F4)', () => {
+  it('is ended at its next read, never taken for the founder’s', async () => {
+    const raw = openDb(':memory:');
+    await raw.exec('ALTER TABLE web_sessions ADD COLUMN tenant_id TEXT');
+    const pgLike: Db = {
+      engine: 'postgres', get: (s, p) => raw.get(s, p), all: (s, p) => raw.all(s, p), run: (s, p) => raw.run(s, p), exec: (s) => raw.exec(s), tx: (fn) => raw.tx(fn), close: async () => {},
+    };
+    const store = new SessionStore(pgLike, manualClock(T0));
+    const { id } = await store.create('owner@example.com', 'Test');
+    expect((await store.get(id))?.tenantId).toBe(FOUNDER_TENANT_ID); // written with its customer: read back as such
+    await raw.run('UPDATE web_sessions SET tenant_id = NULL');
+    expect(await store.get(id)).toBeUndefined();
+    expect(await raw.get('SELECT COUNT(*) AS n FROM web_sessions')).toEqual({ n: 0 });
+    await raw.close();
+  });
+});

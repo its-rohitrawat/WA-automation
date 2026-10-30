@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
-import { FOUNDER_TENANT_ID, type Env } from '../config/env.ts';
+import { isCustomerId } from '../config/customerId.ts';
+import type { Env } from '../config/env.ts';
 import { sttEnvFor } from './customerRuntime.ts';
 
 // A customer's profile (SaaS Phase B, docs/superpowers/plans/2026-10-30-phase-b.md): the env a customer's runtime is
@@ -24,11 +25,9 @@ export const CUSTOMER_KEYS = [
 /** Set to off for every customer runtime (Phase B): its own settings for these come later. */
 const OFF = { REPORT_ENABLED: false, MEETINGS_ENABLED: false, INVITES_GMAIL: false, PLATFORM_ENABLED: false, DASHBOARD_ASSISTANT: false } as const;
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-
 /** The customer's data folder: DATA_DIR/tenants/<id>, refused unless the id is a customer id and the path stays inside. */
 export function customerDataDir(dataDir: string, tenantId: string): string {
-  if (!UUID.test(tenantId) || tenantId === FOUNDER_TENANT_ID) throw new Error('A customer data folder needs a customer id (a UUID, not the founder).');
+  if (!isCustomerId(tenantId)) throw new Error('A customer data folder needs a customer id (a UUID, not the founder).');
   const root = resolve(dataDir, 'tenants');
   const dir = resolve(root, tenantId);
   const inside = relative(root, dir);

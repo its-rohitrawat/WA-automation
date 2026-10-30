@@ -157,7 +157,15 @@ export class SessionStore {
     if (now - lastSeen >= TOUCH_EVERY_MS) {
       await this.#db.run('UPDATE web_sessions SET last_seen_at = ? WHERE id_hash = ?', [new Date(now).toISOString(), idHash]);
     }
-    return { email: row.email, tenantId: row.tenant_id ?? FOUNDER_TENANT_ID, csrfHash: row.csrf_hash, createdAt: row.created_at, expiresAt: row.expires_at };
+    // SQLite keeps no customer (every session is the founder's). On Postgres a row without one is ended (fail closed): it
+    // is never taken for the founder's.
+    const pg = this.#db.engine === 'postgres';
+    if (pg && !row.tenant_id) {
+      await this.#db.run('DELETE FROM web_sessions WHERE id_hash = ?', [idHash]);
+      this.#tell({ idHash });
+      return undefined;
+    }
+    return { email: row.email, tenantId: pg ? row.tenant_id! : FOUNDER_TENANT_ID, csrfHash: row.csrf_hash, createdAt: row.created_at, expiresAt: row.expires_at };
   }
 
   /** Ends one session (sign-out). An unknown id is a no-op. `q`: as for `create`. */

@@ -8,7 +8,23 @@ import { openPgPool, PgPlatformDb, PgTenantDb, type PgPool } from './engine/pg.t
  * outside its runtime (the sign-in's audit row, S4.8). SQLite: undefined (one customer, the founder).
  */
 export function customerDbsOf(tracker: Db): ((tenantId: string) => Db) | undefined {
-  return tracker instanceof PgTenantDb ? (tenantId) => tracker.forTenant(tenantId) : undefined;
+  return tracker instanceof PgTenantDb ? (tenantId) => runtimeDb(tracker.forTenant(tenantId)) : undefined;
+}
+
+/**
+ * The Db a runtime is given (isolation review F5): the Db interface only, so nothing in a runtime can reach forTenant
+ * and switch to another customer. Only main.ts and the Supervisor hold the factory (customerDbsOf).
+ */
+export function runtimeDb(db: Db): Db {
+  return {
+    engine: db.engine,
+    get: (sql, p) => db.get(sql, p),
+    all: (sql, p) => db.all(sql, p),
+    run: (sql, p) => db.run(sql, p),
+    exec: (sql) => db.exec(sql),
+    tx: (fn) => db.tx(fn),
+    close: () => db.close(),
+  };
 }
 import { PG_LATEST } from './pg/migrations.ts';
 

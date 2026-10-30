@@ -16,6 +16,7 @@ import { HttpError } from './http.ts';
 import type { OwnerSession } from './guard.ts';
 import { createRouter, type RequestContext } from './router.ts';
 import { auditedWrite, registerAuthRoutes, type AuditedWrite } from './routes/auth.ts';
+import { customerSessionCreator } from './customerSession.ts';
 import { createWebServer } from './server.ts';
 import type { Router } from './router.ts';
 import type { WebServer } from './server.ts';
@@ -76,6 +77,8 @@ export async function startDashboard(o: {
    * session while its membership holds. Otherwise only the founder's.
    */
   customerSessions?: boolean;
+  /** Each customer's own Db (customerDbsOf): a member's dashboard sign-in writes its audit row there first (F7). */
+  customerDb?: (tenantId: string) => Db;
   log: Logger;
   control: object;
   clock?: Clock;
@@ -113,6 +116,7 @@ export async function startDashboard(o: {
   const memberships = async (email: string) =>
     (await membershipsFor(platformDb, email)).filter((m) => (m.status as string) !== 'removed').map((m) => m.tenantId);
   const guard = createGuard({ sessions, ownerEmails: env.DASHBOARD_OWNER_EMAILS, port, ...publicUrl, ...(o.customerSessions ? { memberships } : {}) });
+  const createCustomerSession = customerSessionCreator({ customerDb: o.customerDb, sessions });
   const audit = o.audit ?? new AuditLog(o.db, clock);
   const actions = new RateLimiter({ ...ACTION_LIMIT, clock });
   registerAuthRoutes({
@@ -128,6 +132,13 @@ export async function startDashboard(o: {
     port,
     audited: auditedWrite(o.db, platformDb),
     platform: o.platform === true,
+    // A member signs in to its first live workspace (a chooser for several comes later); never the founder's.
+    ...(o.customerSessions && o.customerDb ? {
+      memberSignIn: async (ctx: RequestContext, who: { email: string }) => {
+        const tenantId = (await memberships(who.email)).find((id) => id !== FOUNDER_TENANT_ID);
+        return tenantId ? createCustomerSession(ctx, { email: who.email, tenantId }) : null;
+      },
+    } : {}),
     exchange:
       o.google?.exchange ??
       googleCodeExchanger({ clientId, clientSecret, ...(o.google?.tokenUrl === undefined ? {} : { tokenUrl: o.google.tokenUrl }) }),

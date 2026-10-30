@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { afterEach, describe, expect, it } from 'vitest';
-import { customerSessionStarter } from '../../src/runtime/customerRuntime.ts';
+import { customerSessionStarter } from '../../src/web/customerSession.ts';
 import type { Db } from '../../src/store/db.ts';
 import type { RequestContext } from '../../src/web/router.ts';
 import { seededDb } from '../helpers/db.ts';

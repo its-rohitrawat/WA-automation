@@ -39,7 +39,7 @@ const ALLOWED: Record<string, RegExp[]> = {
     /^if \(platformDb\.engine === 'sqlite'\) await ensurePlatformSchema\(platformDb\);$/,
     /^await ensureFounderTenant\(platformDb, \{/,
     // Handed to the founder's runtime (its platform and sign-up deps) and to the dashboard (SessionStore).
-    /^tenantId: env\.TENANT_ID, env, log, db, platformDb, key, configs, lock, globalSpend,/,
+    /^tenantId: env\.TENANT_ID, env, log, db: runtimeDb\(db\), platformDb, key, configs, lock, globalSpend,/,
     /^env, db, platformDb, log, control, platform: rt\.platform, customerSessions:/,
     // The Supervisor (S4.5): it reads the tenants table.
     /^env, log, clock: systemClock, platformDb, master: key, customerDb: customerDbsOf\(db\), localEngine,$/,

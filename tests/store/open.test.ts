@@ -7,7 +7,8 @@ import { trackerDbPath } from '../../src/config/paths.ts';
 import { FOUNDER_TENANT_ID } from '../../src/platform/store.ts';
 import { PgPlatformDb, PgTenantDb, type PgClient, type PgPool } from '../../src/store/engine/pg.ts';
 import { SqliteDb } from '../../src/store/engine/sqlite.ts';
-import { databaseLine, openPlatformStore, openStore } from '../../src/store/open.ts';
+import { customerDbsOf, databaseLine, openPlatformStore, openStore, runtimeDb } from '../../src/store/open.ts';
+import { openDb } from '../../src/store/db.ts';
 import { PG_LATEST } from '../../src/store/pg/migrations.ts';
 
 // The engine switch (S2.6) with no server: Postgres is a fake pool answering wa_schema_version().
@@ -121,5 +122,16 @@ describe('the database settings', () => {
     for (const host of ['127.0.0.1', 'localhost', '[::1]']) {
       expect(parseEnv({ DATABASE_URL: `postgresql://wa_app:placeholder@${host}:5432/wa_agent` }).DATABASE_URL, host).toBeDefined();
     }
+  });
+});
+
+describe('a runtime’s Db cannot switch customer (isolation review F5)', () => {
+  it('customerDbsOf and runtimeDb give the Db interface only: no forTenant', async () => {
+    const founder = new PgTenantDb(fakePool(PG_LATEST), FOUNDER_TENANT_ID);
+    const customer = customerDbsOf(founder)!('00000000-0000-4000-8000-0000000000c2');
+    expect('forTenant' in customer).toBe(false);
+    expect('forTenant' in runtimeDb(founder)).toBe(false);
+    expect(customer.engine).toBe('postgres');
+    expect(customerDbsOf(openDb(':memory:'))).toBeUndefined(); // SQLite: no customer Db at all
   });
 });

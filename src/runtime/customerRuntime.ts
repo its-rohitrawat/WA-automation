@@ -52,11 +52,8 @@ import { founderLinkDriver, LinkSessions } from '../wa/linkSession.ts';
 import { baileysSenderSocketFactory, linkedNumber } from '../wa/senderGateway.ts';
 import { AuditLog, type AuditInput } from '../web/audit.ts';
 import { mountAgentRoutes } from '../web/mountRoutes.ts';
-import { parseCookies } from '../web/http.ts';
-import { browserLabel, googleCodeExchanger, googleIdVerifier } from '../web/oidc.ts';
-import type { IncomingMessage } from 'node:http';
-import type { RequestContext } from '../web/router.ts';
-import { SESSION_COOKIE, sessionCookie, type SessionStore } from '../web/sessions.ts';
+import { customerSessionStarter } from '../web/customerSession.ts';
+import { googleCodeExchanger, googleIdVerifier } from '../web/oidc.ts';
 import { makeGroupKey } from '../web/routes/groups.ts';
 import type { OAuthCredentials } from '../output/googleAuthHub.ts';
 import type { GoogleConnectDeps } from '../web/routes/google.ts';
@@ -641,31 +638,6 @@ export async function buildCustomerRuntime(
     await closeOwn();
     throw err;
   }
-}
-
-/**
- * The sign-up's startSession (S4.8): a new customer owner's dashboard session, on Postgres only. Without customerDb
- * (SQLite) it starts none and says false, and the sign-up sends the customer to the waiting page. Otherwise: the sign-in's
- * audit row first, in the customer's own Db, then the session on the platform Db (the two cannot share a transaction, so
- * a failed session write leaves an audit row for an attempt, the safe side); a new session id every time (a session this
- * browser had is ended first: no fixation), and the same cookie as the owner's (HttpOnly, SameSite, Secure over https).
- */
-export function customerSessionStarter(o: {
-  customerDb: ((tenantId: string) => Db) | undefined;
-  sessions: Pick<SessionStore, 'create' | 'destroy'>;
-  secureFor: (req: IncomingMessage) => boolean;
-}): (ctx: RequestContext, s: { email: string; tenantId: string }) => Promise<boolean> {
-  return async (ctx, s) => {
-    if (!o.customerDb) return false;
-    const label = browserLabel(typeof ctx.req.headers['user-agent'] === 'string' ? ctx.req.headers['user-agent'] : undefined);
-    await new AuditLog(o.customerDb(s.tenantId), systemClock)
-      .record({ actor: s.email, event: 'Signed in', kind: 'auth', detail: label, requestId: ctx.requestId });
-    const earlier = parseCookies(typeof ctx.req.headers.cookie === 'string' ? ctx.req.headers.cookie : undefined)[SESSION_COOKIE];
-    if (earlier !== undefined) await o.sessions.destroy(earlier);
-    const created = await o.sessions.create(s.email, label, undefined, s.tenantId);
-    ctx.res.setHeader('Set-Cookie', sessionCookie(created.id, { secure: o.secureFor(ctx.req) }));
-    return true;
-  };
 }
 
 /**
