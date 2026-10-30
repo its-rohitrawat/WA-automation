@@ -63,8 +63,8 @@ export interface SupervisorDeps {
   stopTimeoutMs?: number;
   /**
    * Whether this customer should run a FULL runtime (it counts toward maxActive) rather than a setup shell. Default: when
-   * the customer is active. Phase B also says yes for a customer still onboarding whose Claude key is in, so that the
-   * active limit counts it and a reconcile never turns it back into a shell. The factory gets the answer as setupOnly.
+   * the customer is active. Phase B narrows it: active AND the customer's Claude key is in; anyone else gets a setup shell.
+   * Reconcile and restart both ask it, so they always agree. The factory gets the answer as setupOnly.
    */
   wantsFull?: (tenantId: string, status: string) => boolean | Promise<boolean>;
 }
