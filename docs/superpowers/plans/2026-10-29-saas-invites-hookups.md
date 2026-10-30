@@ -324,3 +324,39 @@ aiKeys: (tenantId) => {
 
 The customer runtime (S4.4) builds its Claude clients from `await aiKeys.load()`, and never from `ANTHROPIC_API_KEY`;
 `null` means no AI work for that customer (design 7). The founder's runtime keeps `ANTHROPIC_API_KEY`.
+
+## 9. The Supervisor (S4.5, lane A with S4.4)
+
+`src/runtime/supervisor.ts` (`Supervisor`), `src/runtime/context.ts` (`tenantContext`, `crashOwner`, `guarded`) and
+`src/runtime/backoff.ts` are done and tested with fake runtimes (`tests/runtime`). On SQLite only the founder runs. In
+`src/main.ts`, once S4.4's `buildCustomerRuntime` exists:
+
+```ts
+import { crashOwner } from './runtime/context.ts';
+import { Supervisor } from './runtime/supervisor.ts';
+import { FOUNDER_TENANT_ID } from './platform/store.ts';
+// …after the platform store is open and before the web server starts:
+const supervisor = new Supervisor({
+  db: platformDb, clock: systemClock, log, engine: env.DB_ENGINE,
+  maxActive: env.PLATFORM_MAX_ACTIVE, maxRssMb: env.PLATFORM_MAX_RSS_MB, rssMb: () => process.memoryUsage.rss() / 1_048_576,
+  factory: { start: (t) => buildCustomerRuntime(t, shared) }, // t.crashed goes to the runtime's guarded() entry points (S4.6)
+});
+await supervisor.reconcile();
+const tick = setInterval(() => supervisor.poke(), 60_000);
+tick.unref();
+// A throw that reaches the process: the customer whose code threw is restarted alone; the founder's (or no one's)
+// keeps today's behaviour, exit, and launchd starts the agent again.
+for (const event of ['uncaughtException', 'unhandledRejection'] as const) {
+  process.on(event, (e: unknown) => {
+    const owner = crashOwner();
+    if (owner && owner !== FOUNDER_TENANT_ID) return void supervisor.crashed(owner, e);
+    log.fatal({ err: { name: (e as Error)?.name } }, event);
+    process.exit(1);
+  });
+}
+```
+
+- Shutdown: `await supervisor.stopAll()` in the stop handlers, before the database closes, and `clearInterval(tick)`.
+- Platform deps (hookup 6.2): `poke: () => supervisor.poke()`, called by the platform routes after a pause, a resume or an
+  activation. That is one optional dep in `src/web/routes/platform.ts` (lane C adds it with S4.9).
+- `env.PLATFORM_MAX_RSS_MB` (default 4096) is new in `src/config/env.ts` (D4), next to `PLATFORM_MAX_ACTIVE` (S5H.3).
