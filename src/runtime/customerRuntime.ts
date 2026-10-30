@@ -46,12 +46,10 @@ import { silentLogger } from '../util/logger.ts';
 import { istDate } from '../util/time.ts';
 import { buildVoiceDeps } from '../voiceDeps.ts';
 import { AllowList } from '../wa/allowlist.ts';
-import {
-  FounderNumberWatch, openPhoneSession, openSenderSession, readFounderNumber, sessionHomeOf, sessionStored, useEncryptedAuthState,
-} from '../wa/authState.ts';
+import { FounderNumberWatch, openPhoneSession, readFounderNumber, sessionHomeOf, useEncryptedAuthState } from '../wa/authState.ts';
 import { baileysSocketFactory, WhatsAppGateway, type SocketFactory } from '../wa/gateway.ts';
-import { founderLinkDriver, LinkSessions, type LinkDriver } from '../wa/linkSession.ts';
-import { spareLinkDriver } from '../report/senderLink.ts';
+import { founderLinkDriver, LinkSessions } from '../wa/linkSession.ts';
+import { customerSpare } from './customerSpare.ts';
 import { baileysSenderSocketFactory, linkedNumber, type SenderSocketFactory } from '../wa/senderGateway.ts';
 import { AuditLog, type AuditInput } from '../web/audit.ts';
 import { mountAgentRoutes } from '../web/mountRoutes.ts';
@@ -462,15 +460,8 @@ export async function buildCustomerRuntime(
       ...(heartbeat ? { heartbeat: { lastBeatAt: () => heartbeat.lastBeatAt() } } : {}),
       ...(spareCheck ? { spareLinked: spareCheck } : {}),
     });
-    /** A customer's spare phone is linked (its own session rows): read at start, set when its link succeeds. */
-    let spareLinkedNow = false;
-    if (!t.founder && (await sessionStored(sessions, 'spare'))) {
-      const s = await openSenderSession(sessions, key);
-      if (s.ok) {
-        spareLinkedNow = s.auth.hasSession;
-        await s.db.close();
-      }
-    }
+    // A customer's own spare phone (S4.6 A): linked from its dashboard into its own session rows (customerSpare.ts).
+    const ownSpare = t.founder ? undefined : await customerSpare({ dataDir: env.DATA_DIR, sessions, key, factory: senderFactory, founderNumber, log });
     let links: LinkSessions | undefined;
     let uptime: UptimeLog | undefined;
     let uptimeTimer: NodeJS.Timeout | undefined;
@@ -478,7 +469,7 @@ export async function buildCustomerRuntime(
     let startUptime: (() => void) | undefined;
     let agentRoutes: CustomerRuntime['agentRoutes'];
     // The dashboard's routes for this runtime's customer (Phase B 4: the dashboard sends each session to its own
-    // customer's). A customer's have no spare phone or founder phone driver yet (its own linking comes with S4.6 A).
+    // customer's). A customer's link its own phones (S4.6 A).
     if (env.DASHBOARD_ENABLED && (live || !t.founder) && settings && auditLog && uptimeLog) {
       const store = settings;
       const audit = auditLog;
@@ -486,19 +477,8 @@ export async function buildCustomerRuntime(
       // Phone links from the dashboard (D3), one at a time. The founder's relinks the gateway in place; the spare one
       // pauses the briefing while it resets the session file the sender may be using, then hands it the new sender.
       // A customer's (S4.6 A): its own phones, its own session rows (wa_auth through its Db) under its data key; its spare
-      // has no briefing to pause (the report is the founder's in Phase B), and its link marks the spare as linked.
-      const customerSpare = t.founder ? undefined : ((): LinkDriver => {
-        const inner = spareLinkDriver({ dataDir: env.DATA_DIR, sessions, key, factory: senderFactory, founderNumber, recipient: () => undefined, log });
-        return {
-          ...inner,
-          run: async (hooks, signal) => {
-            const r = await inner.run(hooks, signal);
-            if (r.ok) spareLinkedNow = true;
-            return r;
-          },
-        };
-      })();
-      const spare = !t.founder ? customerSpare : live ? spareDriver({
+      // has no briefing to pause (the report is the founder's in Phase B).
+      const spare = ownSpare ? ownSpare.driver : live ? spareDriver({
         dataDir: env.DATA_DIR, sessions, key, factory: senderFactory, founderNumber, briefing: live,
         settingsNumber: () => store.get().reportRecipient,
         adoptDb: (a) => adoptedDbs.push(a),
@@ -630,7 +610,7 @@ export async function buildCustomerRuntime(
       platform: platformDb !== undefined && agentRoutes !== undefined,
       facts: () => ({
         whatsappLinked: gateway.status().state !== 'not_linked',
-        spareLinked: !t.founder && spareLinkedNow, // a customer's own spare (the founder's is the briefing's)
+        spareLinked: ownSpare?.linked() ?? false, // a customer's own spare (the founder's is the briefing's)
         driveConnected: google.connected(),
         groupsApproved: currentConfigs.length,
         reportTimeSet: settings?.get().source.reportTime === 'dashboard',
