@@ -77,7 +77,7 @@ beforeEach(async () => {
     groupsFile: file,
     configs: () => loadGroupsFile(file),
     groupKey: k,
-    audit: (e) => audits.push(e),
+    audit: async (e) => { audits.push(e); },
     log: createLogger('debug', { write: (l: string) => void logLines.push(l) }),
     clock,
   };
@@ -319,7 +319,7 @@ describe('groupsApplyHandler', () => {
 
   it('a failing audit line does not undo a completed save: logged by error type only, the rest still written', async () => {
     const written: string[] = [];
-    deps.audit = (e) => {
+    deps.audit = async (e) => {
       if (e.event.startsWith('Group approved')) throw new Error('audit store failed with private details');
       written.push(e.event);
     };

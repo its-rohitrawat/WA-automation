@@ -33,7 +33,7 @@ const paused = { isPaused: () => true };
 
 async function run(db: Db, id: string, action: string, body?: unknown, spend = notPaused) {
   const audits: AuditEntry[] = [];
-  const result = await runMeetingAction(db, { id, action, body }, { actor: OWNER, now, audit: (e) => audits.push(e), spend });
+  const result = await runMeetingAction(db, { id, action, body }, { actor: OWNER, now, audit: async (_q, e) => { audits.push(e); }, spend });
   return { result, audits };
 }
 
@@ -101,7 +101,7 @@ describe('runMeetingAction refusals', () => {
     const db = await withMeeting('failed', 1);
     const before = await state(db);
     const audits: AuditEntry[] = [];
-    const e = await refusal(async () => await runMeetingAction(db, { id: '1', action: 'retry' }, { actor: OWNER, now, audit: (x) => audits.push(x), spend: paused }));
+    const e = await refusal(async () => await runMeetingAction(db, { id: '1', action: 'retry' }, { actor: OWNER, now, audit: async (_q, x) => { audits.push(x); }, spend: paused }));
     expect(e).toMatchObject({ status: 409, message: "Today's AI spending limit is reached. Try again after midnight IST." });
     expect(await state(db)).toEqual(before);
     expect(audits).toEqual([]);
@@ -145,7 +145,7 @@ describe('runMeetingAction refusals', () => {
   it('rolls the change back when the audit cannot be written', async () => {
     const db = await withMeeting('unassigned');
     const before = await state(db);
-    await expect(runMeetingAction(db, { id: '1', action: 'skip' }, { actor: OWNER, now, audit: () => { throw new Error('disk full'); }, spend: notPaused }))
+    await expect(runMeetingAction(db, { id: '1', action: 'skip' }, { actor: OWNER, now, audit: async () => { throw new Error('disk full'); }, spend: notPaused }))
       .rejects.toThrowError('disk full');
     expect(await state(db)).toEqual(before);
   });

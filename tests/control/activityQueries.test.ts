@@ -167,7 +167,7 @@ describe('publisherAuditHooks', () => {
 
   it('writes an agent row for a publish and for a failure, in fixed words only', async () => {
     const entries: AuditEntry[] = [];
-    const hooks = publisherAuditHooks((e) => entries.push(e), manualClock(NOW));
+    const hooks = publisherAuditHooks(async (e) => { entries.push(e); }, manualClock(NOW));
     await publish(new FakeDrive(), hooks);
     const failing = new FakeDrive();
     failing.failNextWith = new Error('secret words from a chat message');
@@ -180,7 +180,7 @@ describe('publisherAuditHooks', () => {
 
   it('writes one ops row, with no ids or emails, when the old tracker file could not be reached and a new one was made', async () => {
     const entries: AuditEntry[] = [];
-    const hooks = publisherAuditHooks((e) => entries.push(e), manualClock(NOW));
+    const hooks = publisherAuditHooks(async (e) => { entries.push(e); }, manualClock(NOW));
     const db = await seededDb();
     const drive = new FakeDrive();
     const p = new DrivePublisher({ db, api: drive, build: async () => Buffer.from('x'), log: silentLogger(), minIntervalMs: 0, ...hooks });
@@ -196,7 +196,7 @@ describe('publisherAuditHooks', () => {
 
   it('names each failure in plain words', () => {
     const entries: AuditEntry[] = [];
-    const { onFailure } = publisherAuditHooks((e) => entries.push(e), manualClock(NOW));
+    const { onFailure } = publisherAuditHooks(async (e) => { entries.push(e); }, manualClock(NOW));
     onFailure({ step: 'drive', auth: true });
     onFailure({ step: 'build', auth: false });
     expect(entries.map((e) => e.detail)).toEqual(['Tracker upload failed: Google sign-in expired', 'Tracker upload failed: the workbook could not be built']);
@@ -253,7 +253,7 @@ describe('publisherAuditHooks review fixes', () => {
   it('writes a row only when the state changes, and a success again after an hour', () => {
     const entries: AuditEntry[] = [];
     const clock = manualClock(NOW);
-    const h = publisherAuditHooks((e) => entries.push(e), clock);
+    const h = publisherAuditHooks(async (e) => { entries.push(e); }, clock);
     h.onPublished();
     clock.advance(60_000);
     h.onPublished(); // nothing new

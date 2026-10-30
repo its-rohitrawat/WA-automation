@@ -216,28 +216,31 @@ export function historyReadEntry(found: number, client: string): AuditEntry {
  * success). onNewFile writes one row each time the old Tracker.xlsx could not be reached and a new one was made (no ids,
  * no emails). The words are fixed: the error itself (which can hold anything) never reaches the audit log.
  */
-export function publisherAuditHooks(audit: Audit, clock: Clock): {
+export function publisherAuditHooks(audit: (entry: AuditEntry) => Promise<void>, clock: Clock): {
   onPublished: () => void;
   onFailure: (f: { step: 'build' | 'drive'; auth: boolean }) => void;
   onNewFile: () => void;
 } {
   const entry = (event: string, detail: string): AuditEntry => ({ actor: 'agent', event, kind: 'ops', detail });
+  // The hooks are synchronous (the publisher does not wait for them): the row is written behind them. main.ts's audit
+  // logs a failure itself; the catch here only keeps a rejection from going unhandled.
+  const write = (e: AuditEntry): void => void audit(e).catch(() => undefined);
   let lastOk: number | undefined;
   let failing: string | undefined;
   return {
     onPublished: () => {
       const now = clock.now().getTime();
       if (failing === undefined && lastOk !== undefined && now - lastOk < PUBLISHED_EVERY_MS) return;
-      audit(entry(PUBLISHED, 'Tracker.xlsx uploaded to Drive'));
+      write(entry(PUBLISHED, 'Tracker.xlsx uploaded to Drive'));
       lastOk = now;
       failing = undefined;
     },
     onFailure: (f) => {
       const words = FAILURE_WORDS(f);
       if (failing === words) return;
-      audit(entry(PUBLISH_FAILED, `Tracker upload failed: ${words}`));
+      write(entry(PUBLISH_FAILED, `Tracker upload failed: ${words}`));
       failing = words;
     },
-    onNewFile: () => audit(entry(NEW_FILE, 'The old tracker file could not be reached; a new Tracker.xlsx was made')),
+    onNewFile: () => write(entry(NEW_FILE, 'The old tracker file could not be reached; a new Tracker.xlsx was made')),
   };
 }

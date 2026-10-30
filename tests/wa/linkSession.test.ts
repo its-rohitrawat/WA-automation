@@ -56,7 +56,7 @@ async function setup(o: { linked?: boolean; timeoutMs?: number } = {}) {
   const sessions = new LinkSessions({
     drivers: { founder: founderLinkDriver({ sessionDb, trackerDb, key, switchable, buildGateway, log }) },
     log,
-    audit: (event, actor) => audits.push({ event, actor }),
+    audit: async (event, actor) => { audits.push({ event, actor }); },
     ...(o.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : {}),
   });
   const rows = () => sessionDb.raw.prepare('SELECT k, v FROM auth ORDER BY k').all() as { k: string; v: Buffer }[];
@@ -246,7 +246,7 @@ describe('founder relink', () => {
   it('a driver that throws ends the link as failed, never as linked', async () => {
     const driver: LinkDriver = { run: () => Promise.reject(new Error('boom')) };
     const audits: string[] = [];
-    const sessions = new LinkSessions({ drivers: { founder: driver }, log: createLogger('silent'), audit: (e) => audits.push(e) });
+    const sessions = new LinkSessions({ drivers: { founder: driver }, log: createLogger('silent'), audit: async (e) => { audits.push(e); } });
     const link = sessions.start({ target: 'founder', actor: 'a@b.in' });
     await sessions.settled(link.id);
     expect(sessions.info(link.id)).toMatchObject({ state: 'failed', errorCode: 'error' });
@@ -342,7 +342,7 @@ describe('founder relink', () => {
   it('a driver that commits after an abort is reported as linked (it is kept); one that undoes is not', async () => {
     let finish!: (o: { ok: true; device: string } | { ok: false; code: string }) => void;
     const driver: LinkDriver = { run: () => new Promise((r) => (finish = r)) };
-    const sessions = new LinkSessions({ drivers: { founder: driver }, log: createLogger('silent'), audit: () => {} });
+    const sessions = new LinkSessions({ drivers: { founder: driver }, log: createLogger('silent'), audit: async () => {} });
     const a = sessions.start({ target: 'founder', actor: 'a@b.in' });
     await tick(); // the driver starts on the next turn
     sessions.cancel(a.id);
@@ -363,7 +363,7 @@ describe('founder relink', () => {
         throw new Error('sync boom');
       },
     };
-    const sessions = new LinkSessions({ drivers: { founder: driver }, log: createLogger('silent'), audit: () => {} });
+    const sessions = new LinkSessions({ drivers: { founder: driver }, log: createLogger('silent'), audit: async () => {} });
     const a = sessions.start({ target: 'founder', actor: 'a@b.in' });
     await sessions.settled(a.id);
     expect(sessions.info(a.id)).toMatchObject({ state: 'failed', errorCode: 'error' });

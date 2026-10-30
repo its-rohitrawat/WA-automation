@@ -85,7 +85,7 @@ function redirect(res: ServerResponse, location: string): void {
 export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   const { router, guard } = m;
   const owners = new Set(d.ownerEmails);
-  const audit: AuditFn = (e) => m.audit.recordSync({ ...e, detail: e.detail ?? '' });
+  const audit: AuditFn = (e) => m.audit.record({ ...e, detail: e.detail ?? '' });
   const action = { guard, actions: m.actions };
 
   registerReadApi(router, { guard, control: d.control });

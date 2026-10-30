@@ -36,4 +36,4 @@ export type AuditKind = 'auth' | 'config' | 'connection' | 'task' | 'meeting' | 
  * Writes one audit line (D1's audit store, bound when the routes are mounted). event and detail are plain words, never
  * tokens, cookies, QR codes, full phone numbers or message text.
  */
-export type AuditFn = (entry: { actor: string; event: string; kind: AuditKind; detail?: string; requestId: string }) => void;
+export type AuditFn = (entry: { actor: string; event: string; kind: AuditKind; detail?: string; requestId: string }) => Promise<void>;

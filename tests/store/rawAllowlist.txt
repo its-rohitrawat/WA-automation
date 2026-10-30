@@ -4,5 +4,4 @@ health/uptimeLog.ts
 media/extract.ts
 spend/spendGuard.ts
 store/db.ts
-web/audit.ts
 web/routes/groups.ts

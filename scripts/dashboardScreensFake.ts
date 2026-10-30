@@ -66,8 +66,8 @@ export async function mountFakeScreens(web: WebServer, o: { signedIn: () => bool
   await setKv(db, TRACKER_NEW_FILE_KEY, day(1));
   await setKv(db, 'google_account_email:main', OWNER);
   const audit = new AuditLog(db, clock);
-  audit.recordSync({ actor: OWNER, event: 'Task closed · ACM-001', kind: 'task', detail: 'Closed from the dashboard' });
-  audit.recordSync({ actor: 'agent', event: 'Tracker uploaded', kind: 'ops', detail: 'Tracker.xlsx uploaded to Drive' });
+  await audit.record({ actor: OWNER, event: 'Task closed · ACM-001', kind: 'task', detail: 'Closed from the dashboard' });
+  await audit.record({ actor: 'agent', event: 'Tracker uploaded', kind: 'ops', detail: 'Tracker.xlsx uploaded to Drive' });
   const spend = new SpendGuard({ db, clock, capUsd: 3 });
   spend.record('ai', 0.42, 'batch');
   // Made-up outages for the uptime strip's exact times: one this morning, one around midnight two days ago.
@@ -81,7 +81,7 @@ export async function mountFakeScreens(web: WebServer, o: { signedIn: () => bool
   const settings = new SettingsStore({ db, env: parseEnv({ REPORT_ENABLED: 'true', REPORT_RECIPIENT: '919800000000' }), clock, spareLinked: () => false });
   // Sentiment on, so every screen shows the moods; the switch on Settings turns it off again.
   const priority = new PrioritySettings({ db, clock });
-  await priority.set('sentimentEnabled', true, OWNER, () => {});
+  await priority.set('sentimentEnabled', true, OWNER, async () => {});
 
   const session = (): OwnerSession => {
     if (!o.signedIn()) throw new HttpError(401, 'unauthenticated', 'Sign in first.');
@@ -131,7 +131,7 @@ export async function mountFakeScreens(web: WebServer, o: { signedIn: () => bool
     sendingOn: () => settings.get().dashboardSend, connected: () => true,
     groupSocket: (groupId) => (groupId === ACME ? socket : null),
     directory: { cachedGroups: () => [{ id: ACME, subject: 'Acme Traders x Studio' }] },
-    audit: (e) => audit.recordSync({ ...e, detail: e.detail ?? '' }), log: silentLogger(),
+    audit: (e) => audit.record({ ...e, detail: e.detail ?? '' }), log: silentLogger(),
   };
   const ownerCtx = { actor: OWNER, sessionId: 'fake', requestId: 'fake00000000' };
   const answer = (res: ServerResponse, r: { status: number; body: unknown }) => {

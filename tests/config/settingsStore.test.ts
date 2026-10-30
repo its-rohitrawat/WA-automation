@@ -17,7 +17,9 @@ async function setup(o: { env?: Record<string, string>; linked?: boolean } = {})
   let linked = o.linked ?? true;
   const store = new SettingsStore({ db, env, clock, spareLinked: () => linked });
   const audits: AuditEntry[] = [];
-  const audit = (e: AuditEntry) => audits.push(e);
+  const audit = async (_q: unknown, e: AuditEntry) => {
+    audits.push(e);
+  };
   return { db, store, clock, audits, audit, setLinked: (v: boolean) => (linked = v) };
 }
 
@@ -158,7 +160,7 @@ describe('SettingsStore.set', () => {
     const db = await seededDb();
     const env = parseEnv({ REPORT_RECIPIENT: NUMBER });
     const store = new SettingsStore({ db, env, clock: manualClock(NOW) });
-    expect((await refusal(() => store.set('reportEnabled', true, OWNER, () => {}))).status).toBe(409);
+    expect((await refusal(() => store.set('reportEnabled', true, OWNER, async () => {}))).status).toBe(409);
   });
 
   it('changes nothing, audits nothing and tells no one when the value is already in force', async () => {

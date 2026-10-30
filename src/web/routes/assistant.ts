@@ -35,7 +35,7 @@ export interface AssistantApiDeps extends ActionGuard {
   assistant: Assistant;
   pending: PendingActions;
   settings: Pick<SettingsStore, 'set'>;
-  audit: Pick<AuditLog, 'recordSync'>;
+  audit: Pick<AuditLog, 'record'>;
   /** The question limit; ASK_LIMIT when not given. */
   asks?: Pick<RateLimiter, 'hit'>;
 }
@@ -85,7 +85,7 @@ export function registerAssistantApi(router: Router, d: AssistantApiDeps): void 
     const p = d.pending.take(id, ownerOf(s).key);
     const done = await runProposal(p.action, {
       db: d.db, clock: d.clock, settings: d.settings, actor: s.email,
-      audit: (e) => d.audit.recordSync({ ...e, actor: s.email, requestId: ctx.requestId }),
+      audit: (q, e) => d.audit.record({ ...e, actor: s.email, requestId: ctx.requestId }, q),
     });
     sendJson(ctx.res, 200, { ok: true, ...done });
   }));

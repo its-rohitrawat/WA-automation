@@ -36,13 +36,6 @@ describe('AuditLog.record', () => {
     expect((await audit.list()).map((e) => e.event)).toEqual(['Kept']);
   });
 
-  it('recordSync writes the same row, checked the same way (until S1.15)', async () => {
-    const { audit } = setup();
-    audit.recordSync({ actor: 'agent', event: 'Sync', kind: 'ops', detail: 'a\nb', requestId: 'r1' });
-    expect(await audit.list()).toEqual([{ id: 1, at: T0, actor: 'agent', event: 'Sync', kind: 'ops', detail: 'a b', requestId: 'r1' }]);
-    expect(() => audit.recordSync({ actor: 'agent', event: 'X', kind: 'nope' as AuditKind, detail: '' })).toThrow(/kind/);
-  });
-
   it('keeps detail to one line of at most 300 characters', async () => {
     const { audit } = setup();
     await audit.record({ actor: 'agent', event: 'Note', kind: 'ops', detail: `line one\r\nline\ttwo ${'y'.repeat(400)}` });

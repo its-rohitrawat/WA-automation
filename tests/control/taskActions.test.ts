@@ -28,7 +28,7 @@ async function state(db: Db) {
 
 async function run(db: Db, code: string, action: string, body?: unknown) {
   const audits: AuditEntry[] = [];
-  const detail = await runTaskAction(db, { code, action, body }, { actor: OWNER, now, audit: (e) => audits.push(e) });
+  const detail = await runTaskAction(db, { code, action, body }, { actor: OWNER, now, audit: async (_q, e) => { audits.push(e); } });
   return { detail, audits };
 }
 
@@ -93,7 +93,7 @@ describe('runTaskAction refusals', () => {
   it('404 for an unknown task, before anything changes or is audited', async () => {
     const db = await withTask();
     const audits: AuditEntry[] = [];
-    const e = await refusal(async () => await runTaskAction(db, { code: 'SHA-999', action: 'done' }, { actor: OWNER, now, audit: (x) => audits.push(x) }));
+    const e = await refusal(async () => await runTaskAction(db, { code: 'SHA-999', action: 'done' }, { actor: OWNER, now, audit: async (_q, x) => { audits.push(x); } }));
     expect(e).toMatchObject({ status: 404, message: 'No task called SHA-999' });
     expect(await refusal(async () => await run(db, "x'--", 'done'))).toMatchObject({ status: 404 });
     expect(audits).toEqual([]);
@@ -103,7 +103,7 @@ describe('runTaskAction refusals', () => {
     const db = await withTask();
     const before = await state(db);
     const audits: AuditEntry[] = [];
-    expect(await refusal(async () => await runTaskAction(db, { code: 'SHA-001', action: 'reopen' }, { actor: OWNER, now, audit: (x) => audits.push(x) })))
+    expect(await refusal(async () => await runTaskAction(db, { code: 'SHA-001', action: 'reopen' }, { actor: OWNER, now, audit: async (_q, x) => { audits.push(x); } })))
       .toMatchObject({ status: 409, message: 'Task SHA-001 is already open' });
     expect(await state(db)).toEqual(before);
     expect(audits).toEqual([]);
@@ -117,7 +117,7 @@ describe('runTaskAction refusals', () => {
   it('rolls the change back when the audit cannot be written', async () => {
     const db = await withTask();
     const before = await state(db);
-    await expect(runTaskAction(db, { code: 'SHA-001', action: 'done' }, { actor: OWNER, now, audit: () => { throw new Error('disk full'); } }))
+    await expect(runTaskAction(db, { code: 'SHA-001', action: 'done' }, { actor: OWNER, now, audit: async () => { throw new Error('disk full'); } }))
       .rejects.toThrowError('disk full');
     expect(await state(db)).toEqual(before);
   });

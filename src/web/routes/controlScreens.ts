@@ -7,7 +7,7 @@ import { ControlError, type AuditEntry } from '../../control/errors.ts';
 import { usageSummary } from '../../control/usage.ts';
 import type { UptimeLog } from '../../health/uptimeLog.ts';
 import { uptimeReport, type UptimeRobotClient } from '../../health/uptimeRobot.ts';
-import type { Db } from '../../store/db.ts';
+import type { Db, Sql } from '../../store/db.ts';
 import type { Clock } from '../../util/clock.ts';
 import type { AuditLog } from '../audit.ts';
 import type { Guard } from '../guard.ts';
@@ -24,7 +24,7 @@ export interface ControlApiDeps extends ActionGuard {
   guard: Pick<Guard, 'requireOwner' | 'requireCsrf'>;
   db: Db;
   clock: Clock;
-  audit: Pick<AuditLog, 'record' | 'recordSync'>;
+  audit: Pick<AuditLog, 'record'>;
   spend: SpendView;
   /** VOICE_STT_PROVIDER is local: voice notes show at $0. */
   voiceLocal: boolean;
@@ -50,7 +50,7 @@ export function registerControlApi(router: Router, d: ControlApiDeps): void {
       await d.guard.requireOwner(ctx.req);
       sendJson(ctx.res, 200, await answer(ctx));
     }));
-  const auditFor = (actor: string, requestId: string) => (e: AuditEntry) => d.audit.recordSync({ ...e, actor, requestId });
+  const auditFor = (actor: string, requestId: string) => (q: Sql, e: AuditEntry) => d.audit.record({ ...e, actor, requestId }, q);
 
   read('/dashboard/api/usage', async () => await usageSummary(d.db, d.spend, d.clock.now(), { voiceLocal: d.voiceLocal }));
   read('/dashboard/api/uptime', () => uptimeReport({ log: d.uptime.log, robot: d.uptime.robot, now: d.clock.now() }));

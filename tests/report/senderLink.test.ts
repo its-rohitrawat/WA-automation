@@ -96,7 +96,7 @@ function sessions(scripts: Script[], over: Partial<SpareLinkDeps> = {}, timeoutM
       }),
     },
     log,
-    audit: (e) => audits.push(e),
+    audit: async (e) => { audits.push(e); },
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
   });
   return { s, sockets, audits, lines };
@@ -326,7 +326,7 @@ describe('spare phone link', () => {
     const busy = new LinkSessions({
       drivers: { spare: { run: () => new Promise(() => {}) }, founder: { run: () => new Promise(() => {}) } },
       log: silentLogger(),
-      audit: () => {},
+      audit: async () => {},
     });
     busy.start({ target: 'spare', actor: 'a@b.in' });
     expect(() => busy.start({ target: 'founder', actor: 'a@b.in' })).toThrow('already in progress');

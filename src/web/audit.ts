@@ -48,8 +48,6 @@ function oneLine(text: string): string {
 /**
  * Who did what, in `audit_log` (migration v9), for the dashboard's Audit screen. Never tokens, cookies, QR codes or
  * message text. `record` takes the action's transaction handle, so the row commits or rolls back with the change.
- * `recordSync` is the same write on the raw connection, for the actions still in a synchronous transaction (the
- * `Audit` callback of src/control/errors.ts) until they move to `db.tx`; it goes in S1.15.
  */
 export class AuditLog {
   readonly #db: Db;
@@ -62,10 +60,6 @@ export class AuditLog {
 
   async record(e: AuditInput, q: Sql = this.#db): Promise<void> {
     await q.run(INSERT, this.#row(e));
-  }
-
-  recordSync(e: AuditInput): void {
-    this.#db.raw.prepare(INSERT).run(...this.#row(e));
   }
 
   #row(e: AuditInput): [string, string, string, AuditKind, string, string | null] {

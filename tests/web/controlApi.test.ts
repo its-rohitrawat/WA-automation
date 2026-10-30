@@ -22,7 +22,7 @@ async function boot(o: { linked?: boolean; secureCookies?: boolean; actionCapaci
   const db = await seededDb();
   const clock = manualClock(NOW);
   const real = new AuditLog(db, clock);
-  const audit = o.auditThrows ? { record: async () => { throw new Error('disk full'); }, recordSync: () => { throw new Error('disk full'); } } : real;
+  const audit = o.auditThrows ? { record: async () => { throw new Error('disk full'); } } : real;
   const spend = new SpendGuard({ db, clock, capUsd: 10 });
   const uptime = new UptimeLog(db, clock);
   await uptime.start(true);

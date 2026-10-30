@@ -16,7 +16,7 @@ async function setup() {
   const clock = manualClock(NOW);
   const store = new PrioritySettings({ db, clock });
   const audits: AuditEntry[] = [];
-  return { db, clock, store, audits, audit: (e: AuditEntry) => audits.push(e) };
+  return { db, clock, store, audits, audit: async (_q: unknown, e: AuditEntry) => { audits.push(e); } };
 }
 
 const rows = (db: Db) => db.raw.prepare('SELECT k, v, updated_by AS by FROM settings ORDER BY k').all();

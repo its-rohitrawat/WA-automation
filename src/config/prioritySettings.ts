@@ -194,8 +194,7 @@ export class PrioritySettings {
     if (same && this.#read().source[key] === 'dashboard') return this.view();
     await this.#db.tx(async (q) => {
       await q.run(PUT, [key, JSON.stringify(value), this.#clock.now().toISOString(), actor]);
-      // Synchronous (src/control/errors.ts): it writes on the same connection, inside this transaction.
-      audit({ actor, event: `settings.${key}`, kind: 'config', detail });
+      await audit(q, { actor, event: `settings.${key}`, kind: 'config', detail }); // commits or rolls back with the row
       // The tracker's Sentiment column fills or empties with the switch: rebuild it at the next tick, as a task edit does.
       if (key === 'sentimentEnabled') await setKv(q, 'rebuild_requested', this.#clock.now().toISOString());
     });

@@ -100,7 +100,7 @@ export async function applyTaskAction(
   const code = task.code;
   const edit = action === 'edit' ? parseTaskEdit(req.body) : undefined;
   const { now } = ctx;
-  // The audit callback writes on raw (recordSync) until the audit log takes the transaction handle: allowed in here.
+  // The audit row is written through q, so it commits or rolls back with the change.
   const change = async (q: Sql) => {
     let line: string;
     switch (action) {
@@ -121,7 +121,7 @@ export async function applyTaskAction(
         line = `Task ${code} edited (${changedWords(edit!)})`;
         break;
     }
-    ctx.audit({ actor: ctx.actor, event: `task.${action}`, kind: 'task', detail: line });
+    await ctx.audit(q, { actor: ctx.actor, event: `task.${action}`, kind: 'task', detail: line });
   };
   try {
     await (q ? change(q) : db.tx(change));
@@ -179,7 +179,7 @@ export async function createTaskAction(db: Db, input: NewTaskInput, ctx: { actor
     await updateTaskFields(q, t.id, locked, at, 'human');
     await humanEvent(q, t.id, clientId, 'add_task', { fields: Object.keys(locked) }, now);
     await requestRebuild(q, now);
-    ctx.audit({ actor: ctx.actor, event: 'task.create', kind: 'task', detail: `Task ${t.code} added` });
+    await ctx.audit(q, { actor: ctx.actor, event: 'task.create', kind: 'task', detail: `Task ${t.code} added` });
     return t.code;
   });
   return (await taskDetail(db, code, now))!;

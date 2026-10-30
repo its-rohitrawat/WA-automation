@@ -57,7 +57,7 @@ async function setup(o: { answer?: Parameters<typeof fakeGoogle>[0]; meetingsEna
   const clock = manualClock('2026-10-27T08:00:00Z');
   const routes = new GoogleConnectRoutes({
     db, hub, publicUrl: 'https://waagent.example/', web: 'web' in o ? o.web : WEB, meetingsEnabled: o.meetingsEnabled ?? false,
-    audit: (e) => audits.push(e), log: createLogger('debug', { write: (l: string) => void lines.push(l) }), clock, createClient: g.createClient,
+    audit: async (e) => { audits.push(e); }, log: createLogger('debug', { write: (l: string) => void lines.push(l) }), clock, createClient: g.createClient,
     ...(o.verifier ? { verifier: o.verifier } : {}),
   });
   /** connect, then the state from the URL. */
@@ -194,7 +194,7 @@ describe('GoogleConnectRoutes', () => {
     const key = randomBytes(32);
     const hub = await GoogleAuthHub.open({ db, key, credentials: { web: WEB }, newClient: () => ({ setCredentials() {} }) as unknown as OAuth2Client });
     const routes = new GoogleConnectRoutes({
-      db, hub, publicUrl: 'https://waagent.example', web: WEB, meetingsEnabled: false, audit: () => {}, log: createLogger('silent'),
+      db, hub, publicUrl: 'https://waagent.example', web: WEB, meetingsEnabled: false, audit: async () => {}, log: createLogger('silent'),
       createClient: () => ({
         generateCodeVerifierAsync: async () => ({}),
         generateAuthUrl: () => 'https://accounts.google.com/x',

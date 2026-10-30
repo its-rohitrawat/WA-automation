@@ -25,7 +25,9 @@ async function setup(env: Record<string, string> = {}) {
   await setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
   const clock = manualClock(at(THU, '05:00'));
   const audits: AuditEntry[] = [];
-  const audit = (e: AuditEntry) => audits.push(e);
+  const audit = async (_q: unknown, e: AuditEntry) => {
+    audits.push(e);
+  };
   const sender = new FakeReportSender();
   const make = async (d: Db) => {
     const store = new SettingsStore({

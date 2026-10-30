@@ -177,7 +177,7 @@ export interface RunDeps {
 
 /** Runs a confirmed card through the screens' own code. Returns what changed in words. Throws ControlError as they do. */
 export async function runProposal(action: ProposalAction, d: RunDeps): Promise<{ message: string; task?: string }> {
-  const audit: Audit = (e) => d.audit({ ...e, detail: `${e.detail} · via assistant` });
+  const audit: Audit = (q, e) => d.audit(q, { ...e, detail: `${e.detail} · via assistant` });
   const ctx = { actor: d.actor, now: d.clock.now(), audit };
   switch (action.kind) {
     case 'task_change': {

@@ -67,7 +67,7 @@ export class LinkBusyError extends Error {
   }
 }
 
-export type LinkAudit = (event: string, actor: string) => void;
+export type LinkAudit = (event: string, actor: string) => Promise<void>;
 
 const AUDIT: Record<LinkTarget, { linked: string; cancelled: string; timedOut: string; failed: (code: string) => string }> = {
   founder: {
@@ -218,10 +218,11 @@ export class LinkSessions {
   }
 
   #record(event: string, actor: string): void {
+    const failed = (err: unknown) => this.#log.error({ err }, 'audit line for a phone link could not be written');
     try {
-      this.#audit(event, actor);
+      void this.#audit(event, actor).catch(failed);
     } catch (err) {
-      this.#log.error({ err }, 'audit line for a phone link could not be written');
+      failed(err);
     }
   }
 

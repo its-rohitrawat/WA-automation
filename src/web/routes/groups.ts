@@ -81,9 +81,9 @@ async function cachedView(deps: GroupsDeps, configs: ClientConfig[]): Promise<Gr
 }
 
 /** One audit line; a failing write is logged (by error type only) and the caller carries on. */
-function auditLine(deps: GroupsDeps, ctx: OwnerContext, event: string): void {
+async function auditLine(deps: GroupsDeps, ctx: OwnerContext, event: string): Promise<void> {
   try {
-    deps.audit({ actor: ctx.actor, event, kind: 'config', requestId: ctx.requestId });
+    await deps.audit({ actor: ctx.actor, event, kind: 'config', requestId: ctx.requestId });
   } catch (e) {
     deps.log.warn({ code: (e as Error | null)?.name ?? 'Error', requestId: ctx.requestId }, 'audit line for a group change could not be written');
   }
@@ -193,7 +193,7 @@ export async function groupsApplyHandler(deps: GroupsDeps, ctx: OwnerContext, bo
     ['Client edited', result.edited],
   ];
   for (const [what, groups] of lines) {
-    for (const g of groups) auditLine(deps, ctx, `${what} · ${g.name} (${g.code})`);
+    for (const g of groups) await auditLine(deps, ctx, `${what} · ${g.name} (${g.code})`);
   }
   // A group approved is no longer set aside.
   for (const g of result.approved) await deleteKv(deps.db, IGNORED + deps.groupKey(g.groupId));
@@ -260,7 +260,7 @@ export async function groupsBulkHandler(deps: GroupsDeps, ctx: OwnerContext, bod
       }
     });
     // No name: an untracked group's name never reaches disk.
-    for (const r of results) if (r.ok) auditLine(deps, ctx, action === 'ignore' ? 'Group ignored' : 'Group shown again');
+    for (const r of results) if (r.ok) await auditLine(deps, ctx, action === 'ignore' ? 'Group ignored' : 'Group shown again');
     return ok({ ...await cachedView(deps, configs), results });
   }
 
@@ -287,7 +287,7 @@ export async function groupsBulkHandler(deps: GroupsDeps, ctx: OwnerContext, bod
       const result = await applyGroupChanges(deps.groupsFile, { approve: [{ groupId, name, code }] }, { db: deps.db });
       configs = result.configs;
       await deleteKv(deps.db, IGNORED + key);
-      for (const g of result.approved) auditLine(deps, ctx, `Group approved · ${g.name} (${g.code})`);
+      for (const g of result.approved) await auditLine(deps, ctx, `Group approved · ${g.name} (${g.code})`);
       done(key);
     } catch (e) {
       if (e instanceof GroupChangeError) failed(key, withoutIds(e.message));

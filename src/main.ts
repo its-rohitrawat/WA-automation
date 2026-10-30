@@ -50,7 +50,7 @@ import { baileysSocketFactory, WhatsAppGateway } from './wa/gateway.ts';
 import { founderLinkDriver, LinkSessions } from './wa/linkSession.ts';
 import { baileysSenderSocketFactory, linkedNumber } from './wa/senderGateway.ts';
 import { buildVoiceDeps } from './voiceDeps.ts';
-import { AuditLog } from './web/audit.ts';
+import { AuditLog, type AuditInput } from './web/audit.ts';
 import { mountAgentRoutes } from './web/mountRoutes.ts';
 import { makeGroupKey } from './web/routes/groups.ts';
 import { startDashboard } from './web/start.ts';
@@ -239,6 +239,10 @@ async function main(): Promise<void> {
     const voiceDeps = await buildVoiceDeps(env, { findFfmpeg, log, ...(localEngine ? { localEngine } : {}) });
     // The dashboard's audit log (tracker.db audit_log): sign-in, the owner's changes, phone links and the agent's uploads.
     const auditLog = env.DASHBOARD_ENABLED ? new AuditLog(db, systemClock) : undefined;
+    // An audit row written outside any transaction (the publisher's hooks, phone links): it never rejects, a failure is
+    // logged, so a hook that does not wait for it can never leave an unhandled rejection.
+    const auditOutside = (a: AuditLog) => (e: AuditInput): Promise<void> =>
+      a.record(e).catch((err: unknown) => log.error({ err }, 'audit row not written'));
     const historyDb = db;
     // Priority keywords and the sentiment switch: the dashboard changes them, every batch reads them (defaults without it).
     const prioritySettings = await PrioritySettings.open({ db, clock: systemClock });
@@ -264,13 +268,13 @@ async function main(): Promise<void> {
       ...(meetings ? { meetings } : {}),
       report,
       ...(live ? { liveReport: live } : {}),
-      ...(auditLog ? { publishHooks: publisherAuditHooks((e) => auditLog.recordSync(e), systemClock) } : {}),
+      ...(auditLog ? { publishHooks: publisherAuditHooks(auditOutside(auditLog), systemClock) } : {}),
       // The Activity row when a newly approved group's earlier messages were read: a count and the client's name.
       ...(auditLog
         ? {
           onHistoryRead: ({ clientId, found }: { clientId: number; found: number }) => {
             void getClient(historyDb, clientId)
-              .then((c) => auditLog.recordSync(historyReadEntry(found, c.name)))
+              .then((c) => auditLog.record(historyReadEntry(found, c.name)))
               .catch((err: unknown) => log.error({ err }, 'history read audit failed'));
           },
         }
@@ -355,7 +359,7 @@ async function main(): Promise<void> {
       });
       links = new LinkSessions({
         drivers: { founder, spare }, log,
-        audit: (event, actor) => audit.recordSync({ actor, event, kind: 'connection', detail: '' }),
+        audit: (event, actor) => auditOutside(audit)({ actor, event, kind: 'connection', detail: '' }),
       });
       // The 30-day uptime strip: a row whenever up changes, and the daily retention of both logs.
       const log30 = new UptimeLog(db, systemClock);

@@ -1,7 +1,7 @@
 import { CorrectionError } from '../cli/corrections.ts';
 import { assignMeetingToClient, retryMeetingById, skipMeetingById } from '../cli/meetings.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
-import type { Db } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
 import { getMeetingState } from '../store/meetings.ts';
 import { ControlError, type Audit } from './errors.ts';
 import { meetingDetail, parseMeetingId, type AccountOf, type DashboardMeetingDetail } from './meetingQueries.ts';
@@ -63,18 +63,18 @@ export async function runMeetingAction(
   if (action === 'retry' && ctx.spend.isPaused()) throw new ControlError(409, SPEND_CAP_REFUSAL);
   const { now } = ctx;
   // The audit line is written inside the command's own transaction (inTx), so the change and the line are one write.
-  const audit = (line: string) => ctx.audit({ actor: ctx.actor, event: `meeting.${action}`, kind: 'meeting', detail: line });
+  const audit = (q: Sql, line: string) => ctx.audit(q, { actor: ctx.actor, event: `meeting.${action}`, kind: 'meeting', detail: line });
   try {
     switch (action) {
       case 'assign':
-        await assignMeetingToClient(db, String(id), code!, now, (_q, r) => audit(`Meeting ${id} assigned to ${r.code}`));
+        await assignMeetingToClient(db, String(id), code!, now, (q, r) => audit(q, `Meeting ${id} assigned to ${r.code}`));
         break;
       case 'skip':
-        await skipMeetingById(db, String(id), now, () => audit(`Meeting ${id} skipped`));
+        await skipMeetingById(db, String(id), now, (q) => audit(q, `Meeting ${id} skipped`));
         break;
       case 'retry':
-        await retryMeetingById(db, String(id), now, (_q, r) =>
-          audit(r.status === 'queued' ? `Meeting ${id} queued again` : `Meeting ${id} has no client, so it is unassigned again`));
+        await retryMeetingById(db, String(id), now, (q, r) =>
+          audit(q, r.status === 'queued' ? `Meeting ${id} queued again` : `Meeting ${id} has no client, so it is unassigned again`));
         break;
     }
   } catch (e) {

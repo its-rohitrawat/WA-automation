@@ -8,7 +8,7 @@ import { runTaskAction } from '../../control/taskActions.ts';
 import { listDashboardTasks, parseTaskQuery, taskDetail } from '../../control/taskQueries.ts';
 import { trackerSummary } from '../../control/trackerQueries.ts';
 import type { HealthSnapshot } from '../../health/health.ts';
-import type { Db } from '../../store/db.ts';
+import type { Db, Sql } from '../../store/db.ts';
 import type { Clock } from '../../util/clock.ts';
 import type { AuditLog } from '../audit.ts';
 import { sendJson } from '../http.ts';
@@ -24,7 +24,7 @@ export interface WorkApiDeps extends ActionGuard {
   guard: Pick<Guard, 'requireOwner' | 'requireCsrf'>;
   db: Db;
   clock: Clock;
-  audit: Pick<AuditLog, 'recordSync'>;
+  audit: Pick<AuditLog, 'record'>;
   spend: Pick<SpendView, 'isPaused'>;
   /** The live health snapshot, for the Tracker screen. */
   health?: () => Pick<HealthSnapshot, 'line' | 'lastPublishedAt' | 'publishFailingSince'>;
@@ -37,7 +37,7 @@ export function registerWorkApi(router: Router, d: WorkApiDeps): void {
       await d.guard.requireOwner(ctx.req);
       sendJson(ctx.res, 200, await answer(ctx));
     }));
-  const auditFor = (actor: string, requestId: string) => (e: AuditEntry) => d.audit.recordSync({ ...e, actor, requestId });
+  const auditFor = (actor: string, requestId: string) => (q: Sql, e: AuditEntry) => d.audit.record({ ...e, actor, requestId }, q);
 
   read('/dashboard/api/tasks', async ({ url }) => await listDashboardTasks(d.db, parseTaskQuery(url.searchParams), d.clock.now()));
   read('/dashboard/api/tasks/:code', async ({ params }) => {

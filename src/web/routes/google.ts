@@ -170,7 +170,7 @@ export class GoogleConnectRoutes {
     }
     if (email !== null) await saveAccountEmail(this.#d.db, pending.label, email);
     const who = email === null ? '' : ` · ${maskEmail(email)}`;
-    this.#d.audit({
+    await this.#d.audit({
       actor: ctx.actor, kind: 'connection', requestId: ctx.requestId,
       event: pending.isNew ? `Google account added · ${pending.label}${who}` : `Google account reconnected · ${pending.label}${who}`,
     });

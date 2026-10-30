@@ -67,7 +67,7 @@ beforeEach(async () => {
     // As the founder gateway: a socket only for an approved group while open.
     groupSocket: (groupId) => (open && configs.some((c) => c.groupId === groupId) ? sock : null),
     directory: { cachedGroups: () => [{ id: SHARMA.groupId, subject: 'Sharma x Studio' }] },
-    audit: (e) => audits.push(e),
+    audit: async (e) => { audits.push(e); },
     log: createLogger('debug', { write: (l: string) => void logLines.push(l) }),
     clock,
     sendTimeoutMs: 50,

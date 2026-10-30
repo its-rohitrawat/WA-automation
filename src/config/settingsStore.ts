@@ -262,8 +262,7 @@ export class SettingsStore {
       await q.run(PUT, [key, JSON.stringify(value), at, actor]);
       if (keepToday) await q.run(PUT, [TODAY_KEY, JSON.stringify(keepToday), at, actor]);
       else if (key === 'reportTime') await q.run('DELETE FROM settings WHERE k = ?', [TODAY_KEY]);
-      // Synchronous (src/control/errors.ts): it writes on the same connection, inside this transaction.
-      audit({ actor, event: `settings.${key}`, kind: 'config', detail });
+      await audit(q, { actor, event: `settings.${key}`, kind: 'config', detail }); // commits or rolls back with the row
     });
     // Committed: memory follows.
     this.#rows.set(key, JSON.stringify(value));

@@ -195,7 +195,7 @@ describe('Assistant: changes wait for the owner\'s Confirm', () => {
 
     const audits: AuditEntry[] = [];
     const p = pending.take(card.id, OWNER.key);
-    expect(await runProposal(p.action, { db, clock, settings, actor: OWNER.email, audit: (e) => audits.push(e) })).toEqual({ message: 'SHA-001 updated.', task: 'SHA-001' });
+    expect(await runProposal(p.action, { db, clock, settings, actor: OWNER.email, audit: async (_q, e) => { audits.push(e); } })).toEqual({ message: 'SHA-001 updated.', task: 'SHA-001' });
     expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ status: 'done', priority: 'critical', prioritySource: 'human' });
     expect(audits.map((a) => a.detail)).toEqual(['Task SHA-001 edited (priority) · via assistant', 'Task SHA-001 marked done · via assistant']);
     // A replay is refused: the card was taken.
@@ -287,7 +287,7 @@ describe('Assistant: changes wait for the owner\'s Confirm', () => {
     expect(ASSISTANT_SETTINGS).not.toContain('dashboardSend');
     // Even a card made some other way (an older one, or a bug) cannot run it.
     const audits: AuditEntry[] = [];
-    const crafted = async () => await runProposal({ kind: 'setting', key: 'dashboardSend', value: true }, { db, clock, settings, actor: OWNER.email, audit: (e) => audits.push(e) });
+    const crafted = async () => await runProposal({ kind: 'setting', key: 'dashboardSend', value: true }, { db, clock, settings, actor: OWNER.email, audit: async (_q, e) => { audits.push(e); } });
     await expect(crafted()).rejects.toThrowError(ControlError);
     await expect(crafted()).rejects.toThrowError('Only you can change this setting');
     expect(settings.get().dashboardSend).toBe(false);
@@ -300,7 +300,7 @@ describe('Assistant: changes wait for the owner\'s Confirm', () => {
     const card = ((await run('add a task')).find((e) => e.type === 'proposal') as { card: ProposalCard }).card;
     expect(card.lines).toEqual(['Title: Book the photo shoot', 'Assigned to: none', 'Deadline: 2026-10-30', 'Priority: major', 'Category: other']);
     const audits: AuditEntry[] = [];
-    expect((await runProposal(pending.take(card.id, OWNER.key).action, { db, clock, settings, actor: OWNER.email, audit: (e) => audits.push(e) })).task).toBe('SHA-002');
+    expect((await runProposal(pending.take(card.id, OWNER.key).action, { db, clock, settings, actor: OWNER.email, audit: async (_q, e) => { audits.push(e); } })).task).toBe('SHA-002');
     expect(await taskDetail(db, 'SHA-002', clock.now())).toMatchObject({ title: 'Book the photo shoot', source: 'dashboard', priority: 'major', prioritySource: 'human', deadline: '2026-10-30' });
     expect((await getTaskByCode(db, 'SHA-002'))?.lockedFields).toEqual(expect.arrayContaining(['title', 'deadline', 'priority']));
     expect(audits).toEqual([{ actor: OWNER.email, event: 'task.create', kind: 'task', detail: 'Task SHA-002 added · via assistant' }]);
@@ -312,7 +312,7 @@ describe('Assistant: changes wait for the owner\'s Confirm', () => {
     const card = ((await run('every day please')).find((e) => e.type === 'proposal') as { card: ProposalCard }).card;
     expect(card.lines).toEqual(['Briefing days: weekdays → daily']);
     const audits: AuditEntry[] = [];
-    await runProposal(pending.take(card.id, OWNER.key).action, { db, clock, settings, actor: OWNER.email, audit: (e) => audits.push(e) });
+    await runProposal(pending.take(card.id, OWNER.key).action, { db, clock, settings, actor: OWNER.email, audit: async (_q, e) => { audits.push(e); } });
     expect(settings.get().reportDays).toBe('daily');
     expect(audits[0]?.detail).toBe('Morning briefing days set to every day · via assistant');
   });
@@ -398,7 +398,7 @@ describe('Assistant: priority levels, sentiment and the combine\'s filters (29 O
     const { db, clock, pending, settings, run } = await setup({ ai });
     const card = ((await run('send it at 10:30 pm')).find((e) => e.type === 'proposal') as { card: ProposalCard }).card;
     expect(card.lines).toEqual(['Briefing time: 06:00 → 22:30']);
-    await runProposal(pending.take(card.id, OWNER.key).action, { db, clock, settings, actor: OWNER.email, audit: () => {} });
+    await runProposal(pending.take(card.id, OWNER.key).action, { db, clock, settings, actor: OWNER.email, audit: async () => {} });
     expect(settings.get().reportTime).toBe('22:30');
   });
 });

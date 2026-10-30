@@ -163,7 +163,7 @@ export async function chatSendHandler(deps: ChatDeps, ctx: OwnerContext, code: s
   });
   deps.log.info({ client: c.code, outbox: claim.row.id, outcome: outcome.state, code: outcome.state === 'sent' ? null : outcome.code, requestId: ctx.requestId }, 'dashboard send: done');
   try {
-    deps.audit({
+    await deps.audit({
       actor: ctx.actor, kind: 'ops', requestId: ctx.requestId,
       event: `Message ${OUTCOME_WORDS[outcome.state]} · ${c.name} (${c.code})`,
       detail: `${text.length} characters${replyTo !== null ? ', a reply' : ''}${outcome.state === 'sent' ? '' : ` · ${outcome.code}`}`,
