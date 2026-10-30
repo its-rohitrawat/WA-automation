@@ -46,10 +46,13 @@ import { silentLogger } from '../util/logger.ts';
 import { istDate } from '../util/time.ts';
 import { buildVoiceDeps } from '../voiceDeps.ts';
 import { AllowList } from '../wa/allowlist.ts';
-import { FounderNumberWatch, openPhoneSession, readFounderNumber, sessionHomeOf, useEncryptedAuthState } from '../wa/authState.ts';
-import { baileysSocketFactory, WhatsAppGateway } from '../wa/gateway.ts';
-import { founderLinkDriver, LinkSessions } from '../wa/linkSession.ts';
-import { baileysSenderSocketFactory, linkedNumber } from '../wa/senderGateway.ts';
+import {
+  FounderNumberWatch, openPhoneSession, openSenderSession, readFounderNumber, sessionHomeOf, sessionStored, useEncryptedAuthState,
+} from '../wa/authState.ts';
+import { baileysSocketFactory, WhatsAppGateway, type SocketFactory } from '../wa/gateway.ts';
+import { founderLinkDriver, LinkSessions, type LinkDriver } from '../wa/linkSession.ts';
+import { spareLinkDriver } from '../report/senderLink.ts';
+import { baileysSenderSocketFactory, linkedNumber, type SenderSocketFactory } from '../wa/senderGateway.ts';
 import { AuditLog, type AuditInput } from '../web/audit.ts';
 import { mountAgentRoutes } from '../web/mountRoutes.ts';
 import { customerSessionStarter } from '../web/customerSession.ts';
@@ -176,6 +179,8 @@ export interface RuntimeDeps {
   googleWeb?: OAuthCredentials;
   /** A customer's Google connect (a0's S4.7 A1), from the Supervisor: given to this runtime's Google routes. */
   googleHooks?: Pick<GoogleConnectDeps, 'stateKey' | 'customer' | 'onCustomerToken'>;
+  /** Tests only: fake WhatsApp socket factories in place of Baileys. */
+  waSockets?: { gateway?: SocketFactory; sender?: SenderSocketFactory };
   /** Told the name of each database this runtime closes (tests). */
   onClose?: (name: string) => void;
 }
@@ -296,7 +301,7 @@ export async function buildCustomerRuntime(
     // linked at start when the file cannot be read: refusing that one too is the safe side).
     const founderNumber = () =>
       (!t.founder ? undefined : founderWatch ? founderWatch.current() : readFounderNumber(sessionDbPath(env.DATA_DIR), key)) ?? linkedNumber(auth);
-    const senderFactory = baileysSenderSocketFactory(silentLogger());
+    const senderFactory = d.waSockets?.sender ?? baileysSenderSocketFactory(silentLogger());
     // With the dashboard: the briefing's settings are changed on its Automations screen (tracker.db; .env gives the
     // defaults), and LiveReport opens the spare number's sender only once it is on with a number (tested). Off: as before.
     let live: LiveReport | undefined;
@@ -334,11 +339,13 @@ export async function buildCustomerRuntime(
     // A member's phone that could not read a message asks for it again: only messages sent from Open chat are answered.
     const outboxDb = db;
     const sentText = (waId: string, groupId: string) => sentTextFor(outboxDb, waId, groupId);
+    // The WhatsApp sockets: Baileys; a test gives fakes (RuntimeDeps.waSockets), so no test ever reaches WhatsApp.
+    const gatewaySockets = () => d.waSockets?.gateway ?? baileysSocketFactory(silentLogger(), sentText);
     // The founder's gateway inside its holder, so a relink from the dashboard replaces it in place. None in setup mode.
     const gateway = founderGateway({
       linked: plan.whatsapp === 'linked',
       build: () => new WhatsAppGateway({
-        allow, factory: baileysSocketFactory(silentLogger(), sentText), auth: auth.state, saveCreds: auth.saveCreds,
+        allow, factory: gatewaySockets(), auth: auth.state, saveCreds: auth.saveCreds,
         ...(!t.founder && t.crashed ? { tenantId: t.id, report: (_id: string, e: unknown) => t.crashed!(e) } : {}),
       }),
     });
@@ -455,6 +462,15 @@ export async function buildCustomerRuntime(
       ...(heartbeat ? { heartbeat: { lastBeatAt: () => heartbeat.lastBeatAt() } } : {}),
       ...(spareCheck ? { spareLinked: spareCheck } : {}),
     });
+    /** A customer's spare phone is linked (its own session rows): read at start, set when its link succeeds. */
+    let spareLinkedNow = false;
+    if (!t.founder && (await sessionStored(sessions, 'spare'))) {
+      const s = await openSenderSession(sessions, key);
+      if (s.ok) {
+        spareLinkedNow = s.auth.hasSession;
+        await s.db.close();
+      }
+    }
     let links: LinkSessions | undefined;
     let uptime: UptimeLog | undefined;
     let uptimeTimer: NodeJS.Timeout | undefined;
@@ -469,17 +485,32 @@ export async function buildCustomerRuntime(
       const trackerStore = db;
       // Phone links from the dashboard (D3), one at a time. The founder's relinks the gateway in place; the spare one
       // pauses the briefing while it resets the session file the sender may be using, then hands it the new sender.
-      const spare = t.founder && live ? spareDriver({
+      // A customer's (S4.6 A): its own phones, its own session rows (wa_auth through its Db) under its data key; its spare
+      // has no briefing to pause (the report is the founder's in Phase B), and its link marks the spare as linked.
+      const customerSpare = t.founder ? undefined : ((): LinkDriver => {
+        const inner = spareLinkDriver({ dataDir: env.DATA_DIR, sessions, key, factory: senderFactory, founderNumber, recipient: () => undefined, log });
+        return {
+          ...inner,
+          run: async (hooks, signal) => {
+            const r = await inner.run(hooks, signal);
+            if (r.ok) spareLinkedNow = true;
+            return r;
+          },
+        };
+      })();
+      const spare = !t.founder ? customerSpare : live ? spareDriver({
         dataDir: env.DATA_DIR, sessions, key, factory: senderFactory, founderNumber, briefing: live,
         settingsNumber: () => store.get().reportRecipient,
         adoptDb: (a) => adoptedDbs.push(a),
         linking: (on) => (spareLinking = on),
         log,
       }) : undefined;
-      const founder = !t.founder ? undefined : founderLinkDriver({
+      const founder = founderLinkDriver({
         sessionDb, trackerDb: db, key, switchable: gateway, log,
         buildGateway: (a, onQr) => new WhatsAppGateway({
-          allow, factory: baileysSocketFactory(silentLogger(), sentText), auth: a.state, saveCreds: a.saveCreds, ...(onQr ? { onQr } : {}),
+          allow, factory: gatewaySockets(), auth: a.state, saveCreds: a.saveCreds, ...(onQr ? { onQr } : {}),
+          // A customer's gateway runs its handlers and timers guarded (S4.6 B): a throw restarts that customer alone.
+          ...(!t.founder && t.crashed ? { tenantId: t.id, report: (_id: string, e: unknown) => t.crashed!(e) } : {}),
         }),
       });
       links = new LinkSessions({
@@ -599,7 +630,7 @@ export async function buildCustomerRuntime(
       platform: platformDb !== undefined && agentRoutes !== undefined,
       facts: () => ({
         whatsappLinked: gateway.status().state !== 'not_linked',
-        spareLinked: false, // the spare phone is the founder's in Phase B
+        spareLinked: !t.founder && spareLinkedNow, // a customer's own spare (the founder's is the briefing's)
         driveConnected: google.connected(),
         groupsApproved: currentConfigs.length,
         reportTimeSet: settings?.get().source.reportTime === 'dashboard',

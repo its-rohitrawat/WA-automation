@@ -5,7 +5,7 @@ import type { Db } from '../store/db.ts';
 import { setKv } from '../store/kv.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
-import { backupAndReset, dropBackup, restoreBackup, useEncryptedAuthState, type EncryptedAuth } from './authState.ts';
+import { backupAndReset, dropBackup, hasSessionRows, restoreBackup, useEncryptedAuthState, type EncryptedAuth } from './authState.ts';
 import { TRACKER_DEVICE_NAME, type GatewayLike } from './gateway.ts';
 import type { SwitchableGateway } from './switchableGateway.ts';
 
@@ -333,7 +333,7 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
     async run(hooks, signal) {
       const wasLinked = d.switchable.hasGateway();
       // Read only when there are rows: on an empty table useEncryptedAuthState would write its canary row.
-      const hasRows = (await d.sessionDb.get<{ n: number }>('SELECT COUNT(*) AS n FROM auth'))!.n > 0;
+      const hasRows = await hasSessionRows(d.sessionDb);
       const before = hasRows ? await numberOf(() => useEncryptedAuthState(d.sessionDb, d.key)) : undefined;
       let gw: GatewayLike | undefined;
       let onAbort: (() => void) | undefined;

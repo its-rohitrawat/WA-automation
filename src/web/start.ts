@@ -12,6 +12,7 @@ import { googleCodeExchanger, googleIdVerifier } from './oidc.ts';
 import { secureRequest } from './origin.ts';
 import type { CodeExchanger, IdTokenVerifier } from './oidc.ts';
 import { FOUNDER_TENANT_ID } from '../config/env.ts';
+import { tenantContext } from '../runtime/context.ts';
 import { HttpError } from './http.ts';
 import type { OwnerSession } from './guard.ts';
 import { createRouter, type RequestContext } from './router.ts';
@@ -173,6 +174,7 @@ export async function startDashboard(o: {
       const shared = sharedRoute(r.pattern);
       const dispatch = async (ctx: RequestContext): Promise<void> => {
         let routes: Router = founderRoutes;
+        let customer: string | undefined;
         if (!shared) {
           let s: OwnerSession | undefined;
           try {
@@ -182,11 +184,18 @@ export async function startDashboard(o: {
           }
           // A running customer's own routes. One whose runtime is not running stays on the founder's, which refuse any
           // other customer's session by scope (503 workspace_starting, or a navigation's redirect home).
-          if (s && s.tenantId !== FOUNDER_TENANT_ID) routes = routesOf(s.tenantId) ?? founderRoutes;
+          if (s && s.tenantId !== FOUNDER_TENANT_ID) {
+            const own = routesOf(s.tenantId);
+            if (own) customer = s.tenantId;
+            routes = own ?? founderRoutes;
+          }
         }
         const hit = routes.match(ctx.req.method ?? 'GET', ctx.url.pathname);
         if (!hit) throw new HttpError(404, 'not_found', 'Not found.');
-        await hit.handler({ ...ctx, params: hit.params });
+        // A customer's request runs in its context (isolation review F2): whatever it starts (a phone link's socket, its
+        // timers) carries the customer's id, so a stray throw there restarts that customer alone, never the process.
+        if (customer) await tenantContext.run(customer, () => hit.handler({ ...ctx, params: hit.params }));
+        else await hit.handler({ ...ctx, params: hit.params });
       };
       if (r.method === 'GET') web.router.get(r.pattern, dispatch);
       else web.router.post(r.pattern, dispatch);

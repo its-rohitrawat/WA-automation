@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Db } from '../../src/store/db.ts';
 import {
-  backupAndReset, dropBackup, FounderNumberWatch, founderNumberIn, openPhoneSession, openSenderSession, openSessionDb, PgSessionDb,
+  backupAndReset, dropBackup, FounderNumberWatch, founderNumberIn, hasSessionRows, openPhoneSession, openSenderSession, openSessionDb, PgSessionDb,
   resetSession, restoreBackup, SessionDecryptError, sessionStored, useEncryptedAuthState, useSenderAuthState, type SessionHome,
 } from '../../src/wa/authState.ts';
 
@@ -102,6 +102,27 @@ describe('wa_auth sessions', () => {
     await a.saveCreds();
     expect(await founderNumberIn(h, key)).toBe('919811112222');
     expect(await founderNumberIn(h, randomBytes(32))).toBeUndefined();
+  });
+
+  it('hasSessionRows counts one phone’s live rows only (a dashboard link reads it first), on both engines', async () => {
+    const h = await home();
+    const founder = await openPhoneSession(h, 'founder');
+    const spare = await openPhoneSession(h, 'spare');
+    expect(await hasSessionRows(founder)).toBe(false);
+    await useSenderAuthState(spare, key); // the spare's canary
+    expect([await hasSessionRows(founder), await hasSessionRows(spare)]).toEqual([false, true]);
+    await useEncryptedAuthState(founder, key);
+    await backupAndReset(founder); // the backup slot is not live
+    expect(await hasSessionRows(founder)).toBe(false);
+    // The SQLite session file: its auth table.
+    const file = openSessionDb(':memory:');
+    try {
+      expect(await hasSessionRows(file)).toBe(false);
+      await useEncryptedAuthState(file, key);
+      expect(await hasSessionRows(file)).toBe(true);
+    } finally {
+      await file.close();
+    }
   });
 
   it('PgSessionDb names a phone, takes no multi-statement SQL, and reports each committed write only', async () => {

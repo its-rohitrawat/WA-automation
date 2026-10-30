@@ -147,6 +147,11 @@ export async function sessionStored(home: SessionHome, phone: Phone): Promise<bo
 // reads the session. Only the holder of the data-folder lock opens a session file (the service, or a CLI command with the
 // service stopped), so this never runs beside a link in progress. On Postgres the same, in the phone's 'backup' slot.
 
+/** Whether the session has any live rows (auth, or the phone's 'live' wa_auth rows), without writing any. */
+export async function hasSessionRows(db: Db): Promise<boolean> {
+  return Number((await db.get<{ n: number | string }>(authSql(db).count))!.n) > 0; // Postgres counts as a string
+}
+
 /** In one transaction: copies every row to auth_backup, then empties auth (the reset for a new link). */
 export async function backupAndReset(db: Db): Promise<void> {
   const s = authSql(db);
