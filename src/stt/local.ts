@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { isCustomerId } from '../config/customerId.ts';
 import type { Env } from '../config/env.ts';
 import { minimalEnv, type EnvChoice, type RunOptions } from './audio.ts';
 
@@ -156,9 +157,6 @@ const OUTPUT_NAME = 'transcript.txt';
 /** Trimmed, with line breaks and runs of whitespace as single spaces. Devanagari, Latin and their marks are kept as they are. */
 const tidy = (text: string): string => text.replace(/\s+/g, ' ').trim();
 
-/** A customer id as the platform makes it (a UUID): the only name a folder under tenantsDir may have. */
-const TENANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 /** True when `dir` (absolute) is strictly inside `root`. */
 const strictlyInside = (root: string, dir: string): boolean => {
   const rel = relative(resolve(root), dir);
@@ -174,7 +172,8 @@ export function workDirAllowed(workDir: string, roots: { tmpDir: string; tenants
   if (strictlyInside(roots.tmpDir, dir)) return true;
   if (roots.tenantsDir === undefined || !strictlyInside(roots.tenantsDir, dir)) return false;
   const [id, tmp, ...rest] = relative(resolve(roots.tenantsDir), dir).split(sep);
-  return id !== undefined && TENANT_ID.test(id) && tmp === 'tmp' && rest.length > 0;
+  // A folder under tenantsDir is a customer's only when named by a customer id (the founder's never is: config/customerId.ts).
+  return id !== undefined && isCustomerId(id) && tmp === 'tmp' && rest.length > 0;
 }
 
 const removeQuietly = (path: string): void => {

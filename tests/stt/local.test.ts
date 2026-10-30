@@ -570,7 +570,8 @@ describe('processLocalEngine: one engine for every runtime (Phase B)', () => {
     dataDir = mkdtempSync(join(tmpdir(), 'wa-process-engine-'));
   });
   afterEach(() => rmSync(dataDir, { recursive: true, force: true }));
-  const A = '00000000-0000-4000-8000-000000000001'; // the founder's fixed id; any customer id has this shape
+  const FOUNDER = '00000000-0000-4000-8000-000000000001'; // never a folder under tenants/ (isolation review F6)
+  const A = '1b2c3d4e-5f60-4a1b-9c2d-3e4f5a6b7c8d';
   const B = '6f1c2e9a-3b4d-4c5e-8f60-718293a4b5c6';
   const env = () => parseEnv({ DATA_DIR: dataDir, STT_LOCAL_BIN: BIN, STT_LOCAL_MODEL: MODEL, VOICE_STT_PROVIDER: 'local' });
 
@@ -618,6 +619,8 @@ describe('processLocalEngine: one engine for every runtime (Phase B)', () => {
       join(tenants, B), join(tenants, B, 'tmp'), join(tenants, B, 'media', 'x'), join(tenants, 'not-a-customer', 'tmp', 'x'),
       join(tenants, B, 'tmp', '..', '..', A, 'media', 'x'), join(tenants, B, 'tmp', '..', 'x'), join(dataDir, 'tmp', '..', 'tracker.db'),
       join(tmpdir(), 'elsewhere'), `${tenants}${'/'}${B}/tmp/../../../outside`,
+      // The same rule as customerDataDir: the founder's id, an upper-case or non-RFC 4122 id is not a customer's.
+      join(tenants, FOUNDER, 'tmp', 'x'), join(tenants, B.toUpperCase(), 'tmp', 'x'), join(tenants, '6f1c2e9a-3b4d-0c5e-8f60-718293a4b5c6', 'tmp', 'x'),
     ];
     for (const d of allowed) expect(workDirAllowed(d, roots), d).toBe(true);
     for (const d of refused) {
