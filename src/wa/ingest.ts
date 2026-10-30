@@ -53,7 +53,7 @@ export class Ingestor {
   async handle(e: NormalizedEvent): Promise<void> {
     const db = this.#db;
     // Second line of defence after the gateway's allow-list.
-    const client = getClientByGroupId(db, e.groupId);
+    const client = await getClientByGroupId(db, e.groupId);
     if (!client || !client.active) return;
 
     switch (e.kind) {

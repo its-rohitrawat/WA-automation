@@ -270,7 +270,7 @@ export class MeetingWatcher {
   async #pass(fromIso: string, toIso: string, signal: AbortSignal, dryRun: boolean): Promise<BackfillResult> {
     const nowMs = this.#clock.now().getTime();
     const createdAt = new Date(nowMs).toISOString();
-    const clients = this.#activeClients();
+    const clients = await this.#activeClients();
     const conferences = await this.#api.listConferences(fromIso, toIso, signal);
     const pending: NewMeeting[] = [];
     const matches: MatchResult['kind'][] = [];
@@ -323,10 +323,10 @@ export class MeetingWatcher {
   }
 
   /** Active clients with their tracker ids. A config whose row is missing or inactive never matches. */
-  #activeClients(): MatchableClient[] {
+  async #activeClients(): Promise<MatchableClient[]> {
     const out: MatchableClient[] = [];
     for (const c of this.#clients) {
-      const row = getClientByGroupId(this.#db, c.groupId);
+      const row = await getClientByGroupId(this.#db, c.groupId);
       if (row?.active) out.push({ clientId: row.id, name: c.name, emailDomains: c.emailDomains, meetingKeywords: c.meetingKeywords });
     }
     return out;

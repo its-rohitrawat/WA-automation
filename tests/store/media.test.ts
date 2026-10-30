@@ -155,10 +155,10 @@ describe('media store', () => {
     const db = await seededDb();
     const sha = await insertMedia(db, media(await message(db, 'A')));
     const meh = await insertMedia(db, media(await message(db, 'B', { clientId: 2 }), { clientId: 2 }));
-    syncClients(db, [SHARMA]); // Mehta's group was taken off the allow-list
+    await syncClients(db, [SHARMA]); // Mehta's group was taken off the allow-list
     expect(await dueMediaIds(db, NOW, 10)).toEqual([sha]);
     expect(await getMedia(db, meh)).toMatchObject({ status: 'pending', hasRef: true });
-    syncClients(db, [SHARMA, MEHTA]);
+    await syncClients(db, [SHARMA, MEHTA]);
     expect(await dueMediaIds(db, NOW, 10)).toEqual([sha, meh]);
   });
 
@@ -610,9 +610,9 @@ describe('the 2a voice backlog (V6, N2)', () => {
     await applyRevoke(db, 1, 'A');
     const mehta = await backlogVoice(db, 'B', { clientId: 2 });
     expect(await voiceBacklog(db)).toEqual([{ id: mehta, clientId: 2, fileSize: 9000, mimeType: 'audio/ogg; codecs=opus' }]);
-    syncClients(db, [SHARMA]);
+    await syncClients(db, [SHARMA]);
     expect(await voiceBacklog(db)).toEqual([]);
-    syncClients(db, [SHARMA, MEHTA]);
+    await syncClients(db, [SHARMA, MEHTA]);
     expect((await voiceBacklog(db)).map((r) => r.id)).toEqual([mehta]);
   });
 
@@ -792,7 +792,7 @@ describe('voice notes that failed on this computer', () => {
     await deferMedia(db, pending, { errorCode: 'local_timeout', nextAttemptAt: LATER, attempts: 1, at: NOW });
     const mehta = await failedVoice(db, 'M', 'local_timeout', { clientId: 2 });
     expect((await failedLocalVoice(db)).map((r) => r.id)).toEqual([mehta]);
-    syncClients(db, [SHARMA]);
+    await syncClients(db, [SHARMA]);
     expect(await failedLocalVoice(db)).toEqual([]);
   });
 
@@ -847,7 +847,7 @@ describe('voice notes that failed on this computer', () => {
     const image = await insertMedia(db, media(await message(db, 'IMG')));
     await failMedia(db, image, { status: 'failed', errorCode: 'local_timeout', at: '2026-10-19T07:00:00.000Z' });
     expect(await mediaStats(db, now)).toMatchObject({ voiceFailed: 3, failedRecent: 6 });
-    syncClients(db, [SHARMA]);
+    await syncClients(db, [SHARMA]);
     expect(await mediaStats(db, now)).toMatchObject({ voiceFailed: 2 });
   });
 });

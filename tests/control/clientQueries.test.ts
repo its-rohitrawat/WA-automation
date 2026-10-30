@@ -58,7 +58,7 @@ async function world(): Promise<Db> {
   await message(db, 1, 'M1', '2026-10-27T10:00:00.000Z');
   await message(db, 1, 'M2', '2026-10-28T04:00:00.000Z');
   await message(db, 2, 'M3', '2026-10-20T04:00:00.000Z');
-  setPhase(db, 1, 'Design', 'ai');
+  await setPhase(db, 1, 'Design', 'ai');
   return db;
 }
 
@@ -104,8 +104,8 @@ describe('clientCards', () => {
   it('leaves out inactive clients; the group name comes from the live list when given', async () => {
     const db = await seededDb();
     const desai: ClientConfig = { ...MEHTA, groupId: '120363000000000003@g.us', name: 'Desai Foods', code: 'DES' };
-    syncClients(db, [SHARMA, MEHTA, desai]);
-    syncClients(db, [SHARMA, MEHTA]);
+    await syncClients(db, [SHARMA, MEHTA, desai]);
+    await syncClients(db, [SHARMA, MEHTA]);
     const cards = await clientCards(db, NOW, new Map([[SHARMA.groupId, 'Sharma x Studio']]));
     expect(cards.map((c) => c.code)).toEqual(['MEH', 'SHA']);
     expect(cards.find((c) => c.code === 'SHA')!.groupName).toBe('Sharma x Studio');
@@ -116,7 +116,7 @@ describe('clientCards', () => {
     const db = await seededDb();
     const twin: ClientConfig = { ...MEHTA, groupId: '120363000000000004@g.us', name: 'Sharma Interiors', code: 'SHI' };
     const long: ClientConfig = { ...MEHTA, groupId: '120363000000000005@g.us', name: 'A very long client name: over thirty-one characters', code: 'LON' };
-    syncClients(db, [SHARMA, MEHTA, twin, long]);
+    await syncClients(db, [SHARMA, MEHTA, twin, long]);
     const byCode = new Map((await clientCards(db, NOW)).map((c) => [c.code, c.sheetName]));
     expect(byCode.get('SHA')).toBe('Sharma Interiors');
     expect(byCode.get('SHI')).toBe('Sharma Interiors (2)');
@@ -161,7 +161,7 @@ describe('clientDetail', () => {
     const db = await seededDb();
     expect((await clientDetail(db, 'SHA', NOW))!.lastSyncAt).toBeNull();
     expect(await clientDetail(db, 'ZZZ', NOW)).toBeNull();
-    syncClients(db, [MEHTA]);
+    await syncClients(db, [MEHTA]);
     expect(await clientDetail(db, 'SHA', NOW)).toBeNull();
   });
 

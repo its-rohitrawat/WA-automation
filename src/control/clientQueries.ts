@@ -248,8 +248,8 @@ async function lastActivityByClient(db: Db): Promise<Map<number, string>> {
 }
 
 /** Tracker tab names, assigned as the tracker does: in id order over every client, active or not (output/view.ts). */
-function sheetNames(db: Db): Map<number, string> {
-  const byId = listClients(db, false).sort((a, b) => a.id - b.id);
+async function sheetNames(db: Db): Promise<Map<number, string>> {
+  const byId = (await listClients(db, false)).sort((a, b) => a.id - b.id);
   const names = uniqueSheetNames(byId.map((c) => c.name));
   return new Map(byId.map((c, i) => [c.id, names[i]!]));
 }
@@ -293,21 +293,21 @@ function card(
 export async function clientCards(db: Db, now: Date, groupNames?: ReadonlyMap<string, string>, quietMinutes = 4): Promise<ClientCard[]> {
   const counts = await countsByClient(db, now);
   const latest = await lastActivityByClient(db);
-  const sheets = sheetNames(db);
+  const sheets = await sheetNames(db);
   const pending = await pendingByClient(db);
   const read = await lastReadByClient(db);
-  return Promise.all(listClients(db, true).map(async (c) =>
+  return Promise.all((await listClients(db, true)).map(async (c) =>
     card(c, counts, latest, sheets, groupNames, await backfillStatus(db, c.id, now), { pending: pending.get(c.id) ?? 0, lastReadAt: read.get(c.id) ?? null, quietMinutes }),
   ));
 }
 
 /** The client drawer for an active client; null for an unknown or inactive code. */
 export async function clientDetail(db: Db, code: string, now: Date, groupNames?: ReadonlyMap<string, string>, quietMinutes = 4): Promise<ClientDetail | null> {
-  const c = getClientByCode(db, code);
+  const c = await getClientByCode(db, code);
   if (!c || !c.active) return null;
   const activity = await clientActivity(db, c, now, quietMinutes);
   const pulse = { pending: activity.pending, lastReadAt: activity.lastBatch?.at ?? null, quietMinutes };
-  const base = card(c, await countsForClient(db, now, c.id), new Map([[c.id, await lastActivity(db, c.id)]]), sheetNames(db), groupNames, await backfillStatus(db, c.id, now), pulse);
+  const base = card(c, await countsForClient(db, now, c.id), new Map([[c.id, await lastActivity(db, c.id)]]), await sheetNames(db), groupNames, await backfillStatus(db, c.id, now), pulse);
   // Sentiment is shown only while it is switched on: off, none leaves here.
   const moods = readSentimentEnabled(db);
   const openTasks = (await db.all<ClientOpenTask>(

@@ -45,9 +45,9 @@ const CODE = /^[A-Z]{3,4}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 /** The approved, active client with this code, or null. */
-function approvedClient(deps: ChatDeps, code: string): ClientRow | null {
+async function approvedClient(deps: ChatDeps, code: string): Promise<ClientRow | null> {
   if (typeof code !== 'string' || !CODE.test(code)) return null;
-  const c = getClientByCode(deps.db, code);
+  const c = await getClientByCode(deps.db, code);
   if (!c || !c.active) return null;
   return deps.configs().some((x) => x.groupId === c.groupId && x.code === c.code) ? c : null;
 }
@@ -63,7 +63,7 @@ export type ChatView = ChatPage & {
 
 /** GET /dashboard/api/clients/:code/chat?before=<message>&limit=<1..100> */
 export async function chatReadHandler(deps: ChatDeps, _ctx: OwnerContext, code: string, search: { before?: string | null; limit?: string | null }): Promise<ApiResult<ChatView | ApiError>> {
-  const c = approvedClient(deps, code);
+  const c = await approvedClient(deps, code);
   if (!c) return notFound();
   const whole = (v: string | null | undefined) => (v && /^\d{1,9}$/.test(v) ? Number(v) : undefined);
   if ((search.before && whole(search.before) === undefined) || (search.limit && whole(search.limit) === undefined)) {
@@ -112,7 +112,7 @@ export async function chatSendHandler(deps: ChatDeps, ctx: OwnerContext, code: s
     return confirmMissing ? fail(400, 'not_confirmed', 'Confirm the message before it is sent.') : fail(400, 'invalid', problem(parsed.error));
   }
   if (!deps.sendingOn()) return fail(409, 'sending_off', 'Sending from the dashboard is switched off. Switch it on in Settings first.');
-  const c = approvedClient(deps, code);
+  const c = await approvedClient(deps, code);
   if (!c) return notFound();
   const { uuid, text } = parsed.data;
   const replyTo = parsed.data.replyTo ?? null;

@@ -96,7 +96,7 @@ const rows = async () => {
   return out;
 };
 
-beforeEach(() => {
+beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'wa-meet-cli-'));
   dataDir = join(dir, 'data');
   mkdirSync(dataDir);
@@ -105,7 +105,7 @@ beforeEach(() => {
   lines = [];
   api = new FakeMeetingsApi();
   db = openDb(trackerDbPath(dataDir));
-  syncClients(db, [{ ...SHARMA, phases: PHASES, meetingKeywords: [] }, { ...MEHTA, phases: PHASES, meetingKeywords: [] }]);
+  await syncClients(db, [{ ...SHARMA, phases: PHASES, meetingKeywords: [] }, { ...MEHTA, phases: PHASES, meetingKeywords: [] }]);
   saveGrantedScopes(db, [...DRIVE_SCOPES, ...MEETING_SCOPES].join(' '));
   seq = 0;
 });
@@ -197,7 +197,7 @@ describe('meeting assign', () => {
     const id = await meeting('unassigned', { clientId: null, matchKind: null });
     const before = dump(db);
     await expect(assignMeetingToClient(db, String(id), 'XYZ', now)).rejects.toThrow('No client with code XYZ');
-    syncClients(db, [{ ...SHARMA, phases: PHASES, meetingKeywords: [] }]);
+    await syncClients(db, [{ ...SHARMA, phases: PHASES, meetingKeywords: [] }]);
     const synced = dump(db);
     await expect(assignMeetingToClient(db, String(id), 'MEH', now)).rejects.toThrow('Client MEH is not in the allow-list');
     await expect(assignMeetingToClient(db, '999', 'SHA', now)).rejects.toThrow('No meeting 999');

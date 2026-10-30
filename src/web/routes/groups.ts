@@ -76,8 +76,8 @@ function ignoredCheck(deps: GroupsDeps): (groupId: string) => boolean {
 }
 
 /** The list from the cached listing (never waiting on WhatsApp) with these configs. */
-function cachedView(deps: GroupsDeps, configs: ClientConfig[]): GroupsView {
-  return keyed(deps, groupsOverview({ db: deps.db, listing: deps.directory.cachedListing(), configs, ignored: ignoredCheck(deps) }));
+async function cachedView(deps: GroupsDeps, configs: ClientConfig[]): Promise<GroupsView> {
+  return keyed(deps, await groupsOverview({ db: deps.db, listing: deps.directory.cachedListing(), configs, ignored: ignoredCheck(deps) }));
 }
 
 /** One audit line; a failing write is logged (by error type only) and the caller carries on. */
@@ -101,7 +101,7 @@ export async function groupsListHandler(deps: GroupsDeps, _ctx: OwnerContext, se
     refresh = fetchedAt === null || deps.clock.now().getTime() - Date.parse(fetchedAt) >= REFRESH_MIN_MS;
   }
   const listing = await deps.directory.list({ refresh });
-  return ok(keyed(deps, groupsOverview({ db: deps.db, listing, configs: deps.configs(), q, filter: filter as GroupFilter, ignored: ignoredCheck(deps) })));
+  return ok(keyed(deps, await groupsOverview({ db: deps.db, listing, configs: deps.configs(), q, filter: filter as GroupFilter, ignored: ignoredCheck(deps) })));
 }
 
 // The rules of ClientSchema (config/groups.ts), plus the matchable-keyword rule parseGroupsFile applies. The code is only
@@ -198,7 +198,7 @@ export async function groupsApplyHandler(deps: GroupsDeps, ctx: OwnerContext, bo
   // A group approved is no longer set aside.
   for (const g of result.approved) deleteKv(deps.db, IGNORED + deps.groupKey(g.groupId));
   // From the cached list: the answer never waits on WhatsApp.
-  return ok(cachedView(deps, result.configs));
+  return ok(await cachedView(deps, result.configs));
 }
 
 const BulkBody = z.strictObject({
@@ -224,8 +224,8 @@ export function clientPart(name: string): string {
 }
 
 /** The first code for this name not used in the allow-list file nor by any client row, or null. */
-function freeCode(deps: GroupsDeps, name: string): string | null {
-  const used = new Set([...fileCodes(deps.groupsFile), ...listClients(deps.db, false).map((c) => c.code)]);
+async function freeCode(deps: GroupsDeps, name: string): Promise<string | null> {
+  const used = new Set([...fileCodes(deps.groupsFile), ...(await listClients(deps.db, false)).map((c) => c.code)]);
   return codeCandidates(name).find((c) => !used.has(c)) ?? null;
 }
 
@@ -261,7 +261,7 @@ export async function groupsBulkHandler(deps: GroupsDeps, ctx: OwnerContext, bod
     })();
     // No name: an untracked group's name never reaches disk.
     for (const r of results) if (r.ok) auditLine(deps, ctx, action === 'ignore' ? 'Group ignored' : 'Group shown again');
-    return ok({ ...cachedView(deps, configs), results });
+    return ok({ ...await cachedView(deps, configs), results });
   }
 
   const subjects = new Map((deps.directory.cachedGroups() ?? []).map((g) => [g.id, g.subject]));
@@ -272,13 +272,13 @@ export async function groupsBulkHandler(deps: GroupsDeps, ctx: OwnerContext, bod
       continue;
     }
     // A group removed earlier keeps its client row: it comes back with that name and code, as in the approve form.
-    const former = getClientByGroupId(deps.db, groupId);
+    const former = await getClientByGroupId(deps.db, groupId);
     const name = former ? former.name.slice(0, NAME_MAX).trim() : clientPart(subjects.get(groupId) ?? '');
     if (!name) {
       failed(key, 'The group has no name. Approve it on its own to give the client one.');
       continue;
     }
-    const code = former?.code ?? freeCode(deps, name);
+    const code = former?.code ?? (await freeCode(deps, name));
     if (!code) {
       failed(key, 'No code could be made from its name. Approve it on its own to choose one.');
       continue;
@@ -297,7 +297,7 @@ export async function groupsBulkHandler(deps: GroupsDeps, ctx: OwnerContext, bod
       }
     }
   }
-  return ok({ ...cachedView(deps, configs), results });
+  return ok({ ...await cachedView(deps, configs), results });
 }
 
 /** Upper-case Latin letters of each word, accents removed; anything else (digits, other scripts) is dropped. */
@@ -338,8 +338,8 @@ function fileCodes(path: string): string[] {
 }
 
 /** GET /dashboard/api/groups/suggest-code?name= : the first code not used in the allow-list file nor by any client row. */
-export function suggestCodeHandler(deps: GroupsDeps, _ctx: OwnerContext, name: string): ApiResult<{ code: string | null } | ApiError> {
+export async function suggestCodeHandler(deps: GroupsDeps, _ctx: OwnerContext, name: string): Promise<ApiResult<{ code: string | null } | ApiError>> {
   const trimmed = typeof name === 'string' ? name.trim() : '';
   if (trimmed.length < 1 || trimmed.length > NAME_MAX) return fail(400, 'invalid', `Enter a client name (1 to ${NAME_MAX} characters).`);
-  return ok({ code: freeCode(deps, trimmed) });
+  return ok({ code: await freeCode(deps, trimmed) });
 }

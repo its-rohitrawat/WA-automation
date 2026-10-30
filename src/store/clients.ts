@@ -56,54 +56,56 @@ function toRow(r: RawClient): ClientRow {
  * active here (new, or approved again) gets its last 7 days of messages queued for reading, in the same transaction
  * (src/wa/historyBackfill.ts reads them). Returns those group ids.
  */
-export function syncClients(db: Db, configs: ClientConfig[], now: Date = new Date()): string[] {
-  const upsert = db.raw.prepare(`
-    INSERT INTO clients (code, name, group_id, phases, active) VALUES (@code, @name, @groupId, @phases, 1)
-    ON CONFLICT (group_id) DO UPDATE SET code = excluded.code, name = excluded.name, phases = excluded.phases, active = 1`);
-  const byGroup = db.raw.prepare('SELECT code, name FROM clients WHERE group_id = ?');
-  const byCode = db.raw.prepare('SELECT name, group_id FROM clients WHERE code = ?');
-  return db.raw.transaction(() => {
+export async function syncClients(db: Db, configs: ClientConfig[], now: Date = new Date()): Promise<string[]> {
+  // queueBackfill writes kv, on raw until kv is converted (later in S1.12), which is allowed inside this transaction.
+  return db.tx(async (q) => {
     for (const c of configs) {
-      const existing = byGroup.get(c.groupId) as { code: string; name: string } | undefined;
+      const existing = await q.get<{ code: string; name: string }>('SELECT code, name FROM clients WHERE group_id = ?', [c.groupId]);
       if (existing && existing.code !== c.code) {
         throw new Error(`Client codes are permanent because task IDs use them. Keep code ${existing.code} for ${c.name}.`);
       }
-      const other = byCode.get(c.code) as { name: string; group_id: string } | undefined;
+      const other = await q.get<{ name: string; group_id: string }>('SELECT name, group_id FROM clients WHERE code = ?', [c.code]);
       if (other && other.group_id !== c.groupId) {
         throw new Error(`Code ${c.code} is already used by ${other.name}. Pick a different code.`);
       }
     }
-    const wasActive = new Set((db.raw.prepare('SELECT group_id FROM clients WHERE active = 1').all() as { group_id: string }[]).map((r) => r.group_id));
-    db.raw.prepare('UPDATE clients SET active = 0').run();
-    for (const c of configs) upsert.run({ code: c.code, name: c.name, groupId: c.groupId, phases: JSON.stringify(c.phases) });
+    const wasActive = new Set((await q.all<{ group_id: string }>('SELECT group_id FROM clients WHERE active = 1')).map((r) => r.group_id));
+    await q.run('UPDATE clients SET active = 0');
+    for (const c of configs) {
+      await q.run(
+        `INSERT INTO clients (code, name, group_id, phases, active) VALUES (@code, @name, @groupId, @phases, 1)
+    ON CONFLICT (group_id) DO UPDATE SET code = excluded.code, name = excluded.name, phases = excluded.phases, active = 1`,
+        { code: c.code, name: c.name, groupId: c.groupId, phases: JSON.stringify(c.phases) },
+      );
+    }
     const approved = configs.map((c) => c.groupId).filter((g) => !wasActive.has(g));
     for (const groupId of approved) {
-      const { id } = db.raw.prepare('SELECT id FROM clients WHERE group_id = ?').get(groupId) as { id: number };
+      const { id } = (await q.get<{ id: number }>('SELECT id FROM clients WHERE group_id = ?', [groupId]))!;
       queueBackfill(db, groupId, id, now);
     }
     return approved;
-  }).immediate();
+  });
 }
 
-export function getClient(db: Db, id: number): ClientRow {
-  const r = db.raw.prepare('SELECT * FROM clients WHERE id = ?').get(id) as RawClient | undefined;
+export async function getClient(db: Sql, id: number): Promise<ClientRow> {
+  const r = await db.get<RawClient>('SELECT * FROM clients WHERE id = ?', [id]);
   if (!r) throw new Error(`Unknown client id ${id}`);
   return toRow(r);
 }
 
-export function getClientByGroupId(db: Db, groupId: string): ClientRow | undefined {
-  const r = db.raw.prepare('SELECT * FROM clients WHERE group_id = ?').get(groupId) as RawClient | undefined;
+export async function getClientByGroupId(db: Sql, groupId: string): Promise<ClientRow | undefined> {
+  const r = await db.get<RawClient>('SELECT * FROM clients WHERE group_id = ?', [groupId]);
   return r ? toRow(r) : undefined;
 }
 
-export function getClientByCode(db: Db, code: string): ClientRow | undefined {
-  const r = db.raw.prepare('SELECT * FROM clients WHERE code = ?').get(code) as RawClient | undefined;
+export async function getClientByCode(db: Sql, code: string): Promise<ClientRow | undefined> {
+  const r = await db.get<RawClient>('SELECT * FROM clients WHERE code = ?', [code]);
   return r ? toRow(r) : undefined;
 }
 
-export function listClients(db: Db, activeOnly = true): ClientRow[] {
+export async function listClients(db: Sql, activeOnly = true): Promise<ClientRow[]> {
   const sql = activeOnly ? 'SELECT * FROM clients WHERE active = 1 ORDER BY name' : 'SELECT * FROM clients ORDER BY name';
-  return (db.raw.prepare(sql).all() as RawClient[]).map(toRow);
+  return (await db.all<RawClient>(sql)).map(toRow);
 }
 
 export async function nextTaskCode(db: Sql, clientId: number): Promise<string> {
@@ -115,19 +117,19 @@ export async function nextTaskCode(db: Sql, clientId: number): Promise<string> {
 }
 
 /** A human-set phase is locked against AI changes until the next human change. */
-export function setPhase(db: Db, clientId: number, phase: string, by: 'ai' | 'human'): void {
-  db.raw.prepare('UPDATE clients SET current_phase = ?, phase_locked = ? WHERE id = ?').run(phase, by === 'human' ? 1 : 0, clientId);
+export async function setPhase(db: Sql, clientId: number, phase: string, by: 'ai' | 'human'): Promise<void> {
+  await db.run('UPDATE clients SET current_phase = ?, phase_locked = ? WHERE id = ?', [phase, by === 'human' ? 1 : 0, clientId]);
 }
 
-export function clearPhaseLock(db: Db, clientId: number): void {
-  db.raw.prepare('UPDATE clients SET phase_locked = 0 WHERE id = ?').run(clientId);
+export async function clearPhaseLock(db: Sql, clientId: number): Promise<void> {
+  await db.run('UPDATE clients SET phase_locked = 0 WHERE id = ?', [clientId]);
 }
 
-export function setStatus(db: Db, clientId: number, text: string, at: string): void {
-  db.raw.prepare('UPDATE clients SET status_text = ?, status_updated_at = ? WHERE id = ?').run(text, at, clientId);
+export async function setStatus(db: Sql, clientId: number, text: string, at: string): Promise<void> {
+  await db.run('UPDATE clients SET status_text = ?, status_updated_at = ? WHERE id = ?', [text, at, clientId]);
 }
 
 /** The client's mood in a batch, as the AI judged it (only while sentiment is switched on). */
-export function setClientSentiment(db: Db, clientId: number, sentiment: Sentiment, at: string): void {
-  db.raw.prepare('UPDATE clients SET sentiment = ?, sentiment_at = ? WHERE id = ?').run(sentiment, at, clientId);
+export async function setClientSentiment(db: Sql, clientId: number, sentiment: Sentiment, at: string): Promise<void> {
+  await db.run('UPDATE clients SET sentiment = ?, sentiment_at = ? WHERE id = ?', [sentiment, at, clientId]);
 }

@@ -87,7 +87,7 @@ export function applyGroupChanges(
   return run;
 }
 
-function apply(path: string, changes: GroupChanges, o: { db: Db; ops?: Partial<FileOps> }): GroupChangeResult {
+async function apply(path: string, changes: GroupChanges, o: { db: Db; ops?: Partial<FileOps> }): Promise<GroupChangeResult> {
   let original: string;
   try {
     original = readFileSync(path, 'utf8');
@@ -126,13 +126,13 @@ function apply(path: string, changes: GroupChanges, o: { db: Db; ops?: Partial<F
     if (index(a.groupId) >= 0) throw new GroupChangeError('This group is already approved.', 'groupId', a.groupId);
     const code = typeof a.code === 'string' ? a.code.trim() : '';
     if (!CODE.test(code)) throw new GroupChangeError('The code must be 3 or 4 capital letters, for example SHA.', 'code', a.groupId);
-    const stored = getClientByGroupId(o.db, a.groupId);
+    const stored = await getClientByGroupId(o.db, a.groupId);
     if (stored && stored.code !== code) {
       throw new GroupChangeError(`Client codes are permanent because task IDs use them. Keep code ${stored.code} for ${stored.name}.`, 'code', a.groupId);
     }
     const inFile = entries.find((x) => x.code === code);
     if (inFile) throw new GroupChangeError(`Code ${code} is already used by ${inFile.name}. Pick a different code.`, 'code', a.groupId);
-    const user = getClientByCode(o.db, code);
+    const user = await getClientByCode(o.db, code);
     if (user && user.groupId !== a.groupId) {
       throw new GroupChangeError(`Code ${code} is already used by ${user.name}. Pick a different code.`, 'code', a.groupId);
     }

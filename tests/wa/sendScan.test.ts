@@ -148,7 +148,7 @@ describe('the one send from the founder’s WhatsApp (Open chat, 29 Oct 2026)', 
     const text = readFileSync(join(SRC, 'web', 'routes', 'chat.ts'), 'utf8');
     const send = text.indexOf('await sendGroupText(');
     expect(send).toBeGreaterThan(-1);
-    for (const before of ['if (!deps.sendingOn()) return', 'const c = approvedClient(deps, code);', 'claimOutbox(tx,', 'markSending(deps.db,', "'dashboard send: asking WhatsApp'"]) {
+    for (const before of ['if (!deps.sendingOn()) return', 'const c = await approvedClient(deps, code);', 'claimOutbox(tx,', 'markSending(deps.db,', "'dashboard send: asking WhatsApp'"]) {
       expect(text.indexOf(before), before).toBeGreaterThan(-1);
       expect(text.indexOf(before), before).toBeLessThan(send);
     }

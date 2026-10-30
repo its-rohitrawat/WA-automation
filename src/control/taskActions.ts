@@ -147,10 +147,10 @@ export interface NewTaskInput {
  * Checks a new task as parseTaskEdit checks an edit, and finds its approved client. Throws ControlError: 404 no approved
  * client with that code, 422 an invalid field.
  */
-export function parseNewTask(db: Db, input: NewTaskInput): { clientId: number; clientCode: string; fields: EditOptions & { title: string } } {
+export async function parseNewTask(db: Db, input: NewTaskInput): Promise<{ clientId: number; clientCode: string; fields: EditOptions & { title: string } }> {
   const code = typeof input.client === 'string' ? input.client.trim().toUpperCase() : '';
   const known = /^[A-Z]{3,4}$/.test(code);
-  const client = known ? getClientByCode(db, code) : undefined;
+  const client = known ? (await getClientByCode(db, code)) : undefined;
   if (!client || !client.active) throw new ControlError(404, known ? `No approved client called ${code}` : 'No client with that code', 'client');
   const given = Object.fromEntries(
     (['title', 'assignedTo', 'deadline', 'priority', 'category', 'side'] as const).filter((k) => input[k] !== undefined && input[k] !== '').map((k) => [k, input[k]]),
@@ -165,7 +165,7 @@ export function parseNewTask(db: Db, input: NewTaskInput): { clientId: number; c
  * the tracker is rebuilt. The task and its audit line are one transaction. Returns the new task's detail.
  */
 export async function createTaskAction(db: Db, input: NewTaskInput, ctx: { actor: string; now: Date; audit: Audit }): Promise<DashboardTaskDetail> {
-  const { clientId, fields } = parseNewTask(db, input);
+  const { clientId, fields } = await parseNewTask(db, input);
   const { now } = ctx;
   const at = now.toISOString();
   const code = await db.tx(async (q) => {

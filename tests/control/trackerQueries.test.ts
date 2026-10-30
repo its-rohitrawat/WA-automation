@@ -55,7 +55,7 @@ describe('trackerSummary', () => {
 
   it('counts Today (active clients) and each active client in tab order, using the workbook sheet names', async () => {
     const db = await seededDb();
-    syncClients(db, [SHARMA, MEHTA, { ...SHARMA, groupId: '120363000000000003@g.us', code: 'SHB' }]); // a second "Sharma Interiors"
+    await syncClients(db, [SHARMA, MEHTA, { ...SHARMA, groupId: '120363000000000003@g.us', code: 'SHB' }]); // a second "Sharma Interiors"
     await task(db, 1); // open
     await task(db, 1, { deadline: '2026-10-18' }); // overdue
     await task(db, 1, { status: 'maybe_done', deadline: '2026-10-18' }); // overdue, not review
@@ -74,9 +74,9 @@ describe('trackerSummary', () => {
 
   it('leaves inactive clients out of Today and the list, without moving the others\' sheet names', async () => {
     const db = await seededDb();
-    syncClients(db, [SHARMA, MEHTA, { ...SHARMA, groupId: '120363000000000003@g.us', code: 'SHB' }]);
+    await syncClients(db, [SHARMA, MEHTA, { ...SHARMA, groupId: '120363000000000003@g.us', code: 'SHB' }]);
     await task(db, 1);
-    syncClients(db, [MEHTA, { ...SHARMA, groupId: '120363000000000003@g.us', code: 'SHB' }]); // SHA leaves the allow-list
+    await syncClients(db, [MEHTA, { ...SHARMA, groupId: '120363000000000003@g.us', code: 'SHB' }]); // SHA leaves the allow-list
     expect((await trackerSummary(db, now)).sheets).toEqual([
       { name: 'Today', client: null, notDone: 0, overdue: 0, review: 0, doneThisWeek: 0 },
       { name: 'Mehta Foods', client: { code: 'MEH', name: 'Mehta Foods' }, notDone: 0, overdue: 0, review: 0, doneThisWeek: 0 },

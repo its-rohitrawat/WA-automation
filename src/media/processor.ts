@@ -280,7 +280,7 @@ export class MediaProcessor {
     if (!row || row.status !== 'pending') return { outcome: 'skipped', clientId: row?.clientId ?? null };
     // A client taken off the allow-list: its files wait, untouched, until it is active again (amendment 10a).
     // The queue does not pick them up meanwhile (dueMediaIds), so this cannot loop.
-    if (!getClient(db, row.clientId).active) return { outcome: 'skipped', clientId: row.clientId };
+    if (!(await getClient(db, row.clientId)).active) return { outcome: 'skipped', clientId: row.clientId };
     const job = await mediaJob(db, mediaId);
     if (!job) {
       // Its message is gone: the file can never be processed, so it must not stay pending (amendment 10b).
@@ -475,7 +475,7 @@ export class MediaProcessor {
     const { db, log } = this.#o;
     const at = this.#now();
     const ids = { mediaId: row.id, clientId: row.clientId };
-    this.#noteUnansweredCopy(row, e, at);
+    await this.#noteUnansweredCopy(row, e, at);
     if (paidButUnstored(e)) {
       // The late booking and the copy deletion were already tried (by the extractor, or by #run).
       this.#neverPayAgain.add(row.id);
@@ -552,9 +552,9 @@ export class MediaProcessor {
    * without waiting, when a transcriber that keeps copies is set up (the sweep deletes it otherwise). Its failure is
    * logged with codes only.
    */
-  #noteUnansweredCopy(row: MediaRow, e: unknown, at: string): void {
+  async #noteUnansweredCopy(row: MediaRow, e: unknown, at: string): Promise<void> {
     const copy = voiceCopyOf(e);
-    if (copy === null || !this.#noteCopy(row, copy, at)) return;
+    if (copy === null || !(await this.#noteCopy(row, copy, at))) return;
     const { db, log, clock } = this.#o;
     const voice = this.#o.voice ?? null;
     if (voice === null || !voice.canForget) return;

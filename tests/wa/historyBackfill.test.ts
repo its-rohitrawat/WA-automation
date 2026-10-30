@@ -46,10 +46,10 @@ function scheduler() {
   };
 }
 
-function setup(o: { configs?: typeof SHARMA[]; state?: GatewayState; paused?: boolean } = {}) {
+async function setup(o: { configs?: typeof SHARMA[]; state?: GatewayState; paused?: boolean } = {}) {
   const db = openDb(':memory:');
   const clock = manualClock(APPROVED);
-  syncClients(db, o.configs ?? [SHARMA], clock.now());
+  await syncClients(db, o.configs ?? [SHARMA], clock.now());
   const lines: string[] = [];
   const log = createLogger('info', { write: (s: string) => void lines.push(s) } as unknown as DestinationStream);
   const listeners: ((a: HistoryAnswer) => void)[] = [];
@@ -86,28 +86,28 @@ function setup(o: { configs?: typeof SHARMA[]; state?: GatewayState; paused?: bo
 }
 
 describe('history backfill: queued on approve', () => {
-  it('a newly approved group is queued for the 7 days before its approval; one already approved is not queued again', () => {
-    const { db, clock } = setup();
+  it('a newly approved group is queued for the 7 days before its approval; one already approved is not queued again', async () => {
+    const { db, clock } = await setup();
     expect(getBackfill(db, SHARMA.groupId)).toMatchObject({ clientId: 1, state: 'waiting', since: at(7).toISOString(), until: APPROVED, requests: 0 });
     clock.set('2026-10-29T06:00:00.000Z');
-    expect(syncClients(db, [SHARMA, MEHTA], clock.now())).toEqual([MEHTA.groupId]);
+    expect(await syncClients(db, [SHARMA, MEHTA], clock.now())).toEqual([MEHTA.groupId]);
     expect(getBackfill(db, SHARMA.groupId)?.until).toBe(APPROVED);
     expect(getBackfill(db, MEHTA.groupId)?.until).toBe('2026-10-29T06:00:00.000Z');
   });
 
-  it('approving a removed group again queues it again', () => {
-    const { db, clock } = setup();
+  it('approving a removed group again queues it again', async () => {
+    const { db, clock } = await setup();
     saveBackfill(db, { ...getBackfill(db, SHARMA.groupId)!, state: 'done', finishedAt: APPROVED });
-    syncClients(db, [], clock.now());
+    await syncClients(db, [], clock.now());
     clock.set('2026-10-30T06:00:00.000Z');
-    expect(syncClients(db, [SHARMA], clock.now())).toEqual([SHARMA.groupId]);
+    expect(await syncClients(db, [SHARMA], clock.now())).toEqual([SHARMA.groupId]);
     expect(getBackfill(db, SHARMA.groupId)).toMatchObject({ state: 'waiting', until: '2026-10-30T06:00:00.000Z', requests: 0 });
   });
 });
 
 describe('history backfill: the anchor', () => {
   it('waits for the first message when the group has none, then pages back from it', async () => {
-    const { db, bf, asked, live, step } = setup();
+    const { db, bf, asked, live, step } = await setup();
     bf.start();
     await step();
     expect(asked).toEqual([]);
@@ -120,7 +120,7 @@ describe('history backfill: the anchor', () => {
   });
 
   it('uses the oldest message since the approval, not one kept from an earlier approval', async () => {
-    const { bf, asked, live, step } = setup();
+    const { bf, asked, live, step } = await setup();
     await live(SHARMA.groupId, 'LATER', at(0, -9));
     await live(SHARMA.groupId, 'FIRST', at(0, -5));
     await live(SHARMA.groupId, 'KEPT', at(1)); // stored while the group was approved before: the days after it are read too
@@ -132,7 +132,7 @@ describe('history backfill: the anchor', () => {
 
 describe('history backfill: paging', () => {
   it('pages back from the new oldest message, keeps the 7 days, drops older ones and then ends', async () => {
-    const { db, bf, asked, live, answer, count, s, finished, step } = setup();
+    const { db, bf, asked, live, answer, count, s, finished, step } = await setup();
     await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
@@ -153,7 +153,7 @@ describe('history backfill: paging', () => {
   });
 
   it('ends after two answers in a row bring nothing older: duplicates only, then an empty one', async () => {
-    const { db, bf, asked, live, answer, count, s, step } = setup();
+    const { db, bf, asked, live, answer, count, s, step } = await setup();
     await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
@@ -169,7 +169,7 @@ describe('history backfill: paging', () => {
   });
 
   it(`a phone that does not answer is asked again after a longer wait, and given up on after ${TIMEOUTS_TO_FINISH} tries`, async () => {
-    const { db, bf, asked, live, s, step } = setup();
+    const { db, bf, asked, live, s, step } = await setup();
     await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
@@ -185,7 +185,7 @@ describe('history backfill: paging', () => {
   });
 
   it('a late answer, after its timeout, goes on after the short gap', async () => {
-    const { bf, asked, live, answer, s, step } = setup();
+    const { bf, asked, live, answer, s, step } = await setup();
     await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
@@ -197,7 +197,7 @@ describe('history backfill: paging', () => {
   });
 
   it(`a request that cannot be sent waits longer each time and is given up after ${FAILURES_TO_FINISH} failures`, async () => {
-    const { db, bf, g, asked, live, s, step } = setup();
+    const { db, bf, g, asked, live, s, step } = await setup();
     g.fetchHistory.mockImplementation(async (groupId: string, anchor: HistoryAnchor, count: number) => {
       asked.push({ groupId, anchor, count });
       return false;
@@ -216,7 +216,7 @@ describe('history backfill: paging', () => {
   });
 
   it('an empty answer counts as nothing older', async () => {
-    const { db, bf, live, answer, step } = setup();
+    const { db, bf, live, answer, step } = await setup();
     await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
@@ -225,7 +225,7 @@ describe('history backfill: paging', () => {
   });
 
   it(`asks at most ${MAX_REQUESTS} times for a group`, async () => {
-    const { db, bf, asked, live, answer, s, step } = setup();
+    const { db, bf, asked, live, answer, s, step } = await setup();
     await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
@@ -240,9 +240,9 @@ describe('history backfill: paging', () => {
 
 describe('history backfill: the privacy rules', () => {
   it('never asks for an unapproved group, and stops when a group is removed', async () => {
-    const { db, clock, bf, asked, live, answer, count, step, finished } = setup();
+    const { db, clock, bf, asked, live, answer, count, step, finished } = await setup();
     await live(SHARMA.groupId, 'A', at(0, -10));
-    syncClients(db, [], clock.now()); // removed before anything was asked
+    await syncClients(db, [], clock.now()); // removed before anything was asked
     bf.start();
     await step();
     expect(asked).toEqual([]);
@@ -254,8 +254,8 @@ describe('history backfill: the privacy rules', () => {
   });
 
   it('stores nothing from an answer for a group with no backfill under way', async () => {
-    const { db, clock, bf, answer, step } = setup({ configs: [SHARMA] });
-    syncClients(db, [SHARMA, MEHTA], clock.now());
+    const { db, clock, bf, answer, step } = await setup({ configs: [SHARMA] });
+    await syncClients(db, [SHARMA, MEHTA], clock.now());
     saveBackfill(db, { ...getBackfill(db, MEHTA.groupId)!, state: 'done', finishedAt: APPROVED });
     bf.start();
     await step();
@@ -264,7 +264,7 @@ describe('history backfill: the privacy rules', () => {
   });
 
   it('asks nothing while WhatsApp is not open, nor at the spend cap; carries on after', async () => {
-    const { bf, g, asked, live, spend, step } = setup({ state: 'closed', paused: true });
+    const { bf, g, asked, live, spend, step } = await setup({ state: 'closed', paused: true });
     await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
@@ -277,7 +277,7 @@ describe('history backfill: the privacy rules', () => {
   });
 
   it('logs no message text, name or number', async () => {
-    const { bf, live, answer, s, step, lines } = setup();
+    const { bf, live, answer, s, step, lines } = await setup();
     await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
@@ -291,7 +291,7 @@ describe('history backfill: the privacy rules', () => {
 
 describe('history backfill: restart and the hold', () => {
   it('a restart carries on where it stopped', async () => {
-    const { db, bf, make, asked, live, step } = setup();
+    const { db, bf, make, asked, live, step } = await setup();
     await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
@@ -306,7 +306,7 @@ describe('history backfill: restart and the hold', () => {
   });
 
   it('holds the client while fetching and WhatsApp is open, never longer than the cap', async () => {
-    const { clock, bf, g, live, step } = setup();
+    const { clock, bf, g, live, step } = await setup();
     expect(bf.held(1)).toBe(false);
     await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
@@ -325,7 +325,7 @@ describe('history backfill: restart and the hold', () => {
 
 describe('history backfill: the hold ends when the backfill cannot go on, and a re-approved group', () => {
   it('holds only while a request is in flight or the next one follows an answer: never while waiting, never after a timeout', async () => {
-    const { bf, live, answer, s, step } = setup();
+    const { bf, live, answer, s, step } = await setup();
     bf.start();
     await step();
     expect(bf.held(1)).toBe(false); // waiting for the first message
@@ -341,14 +341,14 @@ describe('history backfill: the hold ends when the backfill cannot go on, and a 
   });
 
   it('a group approved again pages back from its new messages and counts only what it stored itself', async () => {
-    const { db, clock, bf, asked, live, answer, s, step, finished } = setup();
+    const { db, clock, bf, asked, live, answer, s, step, finished } = await setup();
     // Read before, under an earlier approval: messages kept, backfill done.
     await live(SHARMA.groupId, 'KEPT1', at(5));
     await live(SHARMA.groupId, 'KEPT2', at(3)); // inside the new 7 days
     saveBackfill(db, { ...getBackfill(db, SHARMA.groupId)!, state: 'done', finishedAt: APPROVED });
-    syncClients(db, [], clock.now()); // removed for three days
+    await syncClients(db, [], clock.now()); // removed for three days
     clock.set(new Date(Date.parse(APPROVED) + 3 * 86_400_000).toISOString());
-    syncClients(db, [SHARMA], clock.now()); // approved again
+    await syncClients(db, [SHARMA], clock.now()); // approved again
     const again = getBackfill(db, SHARMA.groupId)!;
     await live(SHARMA.groupId, 'NEW', new Date(Date.parse(again.until) + 60_000));
     bf.start();

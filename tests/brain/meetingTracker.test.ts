@@ -181,7 +181,7 @@ describe('Reconciler.runMeeting', () => {
     const d = (await listDecisions(db, 1))[0]!;
     expect(d).toMatchObject({ text: 'Blue theme chosen', decidedOn: '2026-10-19', source: 'meeting', sourceWaId: null });
     expect(meetingIdOf(db, 'decisions', d.id)).toBe(m.id);
-    expect(getClient(db, 1).statusText).toBe('Waiting for the logo files.');
+    expect((await getClient(db, 1)).statusText).toBe('Waiting for the logo files.');
     expect(await getMeeting(db, m.id)).toMatchObject({ status: 'done', stage: 'tracked' });
     const ev = db.raw.prepare("SELECT source_ids AS ids FROM task_events WHERE op = 'add_task'").get() as { ids: string };
     expect(JSON.parse(ev.ids)).toEqual(['mtg1-a1', 'C1']);

@@ -367,7 +367,7 @@ describe('app with meetings', () => {
     const { app } = await setup();
     const setClients = vi.spyOn(app.meetings!, 'setClients');
     const next = [{ ...SHARMA, meetingKeywords: ['interiors weekly'] }, MEHTA];
-    app.reloadClients(next);
+    await app.reloadClients(next);
     expect(setClients).toHaveBeenCalledWith(next);
     await stopApp(app);
   });

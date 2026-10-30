@@ -87,7 +87,7 @@ export async function trackerSummary(
     "SELECT at, detail FROM audit_log WHERE actor = 'agent' AND event = 'tracker.publish_failed' ORDER BY at DESC, id DESC LIMIT 1",
   );
 
-  const clients = listClients(db, false);
+  const clients = await listClients(db, false);
   const byId = [...clients].sort((a, b) => a.id - b.id);
   const assigned = uniqueSheetNames(byId.map((c) => c.name));
   const sheetName = new Map(byId.map((c, i) => [c.id, assigned[i]!]));

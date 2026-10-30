@@ -266,15 +266,23 @@ async function main(): Promise<void> {
       ...(live ? { liveReport: live } : {}),
       ...(auditLog ? { publishHooks: publisherAuditHooks((e) => auditLog.recordSync(e), systemClock) } : {}),
       // The Activity row when a newly approved group's earlier messages were read: a count and the client's name.
-      ...(auditLog ? { onHistoryRead: ({ clientId, found }: { clientId: number; found: number }) => auditLog.recordSync(historyReadEntry(found, getClient(historyDb, clientId).name)) } : {}),
+      ...(auditLog
+        ? {
+          onHistoryRead: ({ clientId, found }: { clientId: number; found: number }) => {
+            void getClient(historyDb, clientId)
+              .then((c) => auditLog.recordSync(historyReadEntry(found, c.name)))
+              .catch((err: unknown) => log.error({ err }, 'history read audit failed'));
+          },
+        }
+        : {}),
     });
 
     // watchGroupsFile catches a throwing onChange (including reloadClients conflicts) and calls onError.
     let currentConfigs = configs;
     const stopWatching = watchGroupsFile(
       env.GROUPS_FILE,
-      (next) => {
-        app.reloadClients(next);
+      async (next) => {
+        await app.reloadClients(next);
         currentConfigs = next;
         log.info({ groups: next.length }, 'allow-list reloaded');
       },

@@ -58,7 +58,7 @@ async function findMeeting(db: Db, raw: string): Promise<MeetingState> {
 export async function meetingListLines(db: Db, all: boolean): Promise<string[]> {
   const rows = await listMeetingsByStatus(db, all ? LIST_ALL : LIST_DEFAULT);
   if (rows.length === 0) return [all ? 'No meetings yet.' : 'No meetings need you. (npm run cli -- meeting list --all shows every meeting.)'];
-  const codes = new Map(listClients(db, false).map((c) => [c.id, c.code]));
+  const codes = new Map((await listClients(db, false)).map((c) => [c.id, c.code]));
   return rows.map((r) => {
     // A no_access meeting matched as internal keeps no title either, and is labelled internal.
     const internal = r.status === 'internal' || (r.clientId === null && r.foundInternal);
@@ -86,7 +86,7 @@ export async function assignMeetingToClient(
   inTx?: InTx<{ id: number; code: string }>,
 ): Promise<{ id: number; code: string }> {
   const m = await findMeeting(db, rawId);
-  const c = getClientByCode(db, clientCode.trim().toUpperCase());
+  const c = await getClientByCode(db, clientCode.trim().toUpperCase());
   if (!c) throw new CorrectionError(`No client with code ${clientCode}`);
   if (!c.active) throw new CorrectionError(`Client ${c.code} is not in the allow-list`);
   const clientlessNoAccess = m.status === 'no_access' && m.clientId === null;
@@ -276,9 +276,9 @@ export async function meetingBackfillCommand(opts: { since: string; yes: boolean
     db = openDb(trackerDbPath(env.DATA_DIR));
     if (!meetingsReady(db)) throw new CorrectionError(NO_SCOPES);
     const api = deps.googleApi(db, key);
-    const run = () => {
+    const run = async () => {
       // The groups file's clients are synced first, so a newly added client matches in the preview as in the real run.
-      syncClients(db!, configs);
+      await syncClients(db!, configs);
       return watcherFor(deps, db!, api, configs).backfill(from.toISOString(), now.toISOString(), deps.signal ?? new AbortController().signal, {
         dryRun: !opts.yes,
       });
@@ -339,9 +339,10 @@ export async function meetingCheckCommand(deps: MeetingCliDeps): Promise<void> {
     const r = await watcherFor(deps, db, api, configs).backfill(from.toISOString(), now.toISOString(), deps.signal ?? new AbortController().signal, {
       dryRun: true,
     });
-    const codes = new Map(listClients(db, false).map((c) => [c.id, c.code]));
+    const codes = new Map((await listClients(db, false)).map((c) => [c.id, c.code]));
     // Read only, with the service possibly running: clients are matched as stored, not synced from the groups file.
-    const unsynced = configs.filter((c) => getClientByGroupId(db, c.groupId)?.active !== true).length;
+    let unsynced = 0;
+    for (const c of configs) if ((await getClientByGroupId(db, c.groupId))?.active !== true) unsynced++;
     if (unsynced > 0) {
       out(`${unsynced} client${unsynced === 1 ? '' : 's'} in the groups file ${unsynced === 1 ? 'is' : 'are'} not stored yet; their meetings show as unassigned until the service restarts.`);
     }

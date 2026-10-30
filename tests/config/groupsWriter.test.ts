@@ -16,9 +16,9 @@ const DESAI = '120363777000000003@g.us';
 const PATEL = '120363777000000004@g.us';
 
 /** In-memory DB with Sharma (id 1) and Mehta (id 2) under this file's ids. */
-function seededDb() {
+async function seededDb() {
   const db = openDb(':memory:');
-  syncClients(db, [SHARMA, MEHTA]);
+  await syncClients(db, [SHARMA, MEHTA]);
   return db;
 }
 
@@ -244,7 +244,7 @@ describe('applyGroupChanges', () => {
 
     it('refuses a code a client in the database used, even an inactive one', async () => {
       const db = await seededDb();
-      syncClients(db, [SHARMA]); // Mehta inactive
+      await syncClients(db, [SHARMA]); // Mehta inactive
       writeFileSync(file, text({ clients: [ORIGINAL.clients[0]] }));
       await expect(applyGroupChanges(file, { approve: [{ groupId: DESAI, name: 'Desai', code: 'MEH' }] }, { db }))
         .rejects.toThrow('Code MEH is already used by Mehta Foods');

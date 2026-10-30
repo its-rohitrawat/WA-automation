@@ -23,7 +23,7 @@ const THEMES = ['dark', 'light'] as const;
 const WAIT_MS = 60_000;
 
 const state: FakeState = { signedIn: true, empty: false };
-const web = fakeDashboard({ port: 0, state });
+const web = await fakeDashboard({ port: 0, state });
 const { mailer, db: platformDb } = await addPlatform(web, { signedIn: () => state.signedIn, csrf: FAKE_CSRF });
 
 const failures: string[] = [];

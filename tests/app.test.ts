@@ -180,7 +180,7 @@ describe('app end to end', () => {
 
   it('applies a new allow-list without a restart', async () => {
     const { db, app, sock } = await setup();
-    app.reloadClients([SHARMA]);
+    await app.reloadClients([SHARMA]);
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
     await settled();
     expect(db.raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 0 });
@@ -414,7 +414,7 @@ describe('app allow-list changes', () => {
     await settled();
     expect(db.raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 1 });
 
-    app.reloadClients([SHARMA]);
+    await app.reloadClients([SHARMA]);
     await vi.advanceTimersByTimeAsync(1_300_000);
     expect(ai.calls).toEqual([]);
     expect(run).not.toHaveBeenCalled();
@@ -428,7 +428,7 @@ describe('app allow-list changes', () => {
     await vi.advanceTimersByTimeAsync(240_000);
     expect(app.health.line()).toEqual({ ok: false, text: '⚠️ 1 group waiting (AI error)' });
 
-    app.reloadClients([SHARMA]);
+    await app.reloadClients([SHARMA]);
     expect(app.health.line().ok).toBe(true);
     await vi.advanceTimersByTimeAsync(0); // the snapshot is saved after the file counts are read again
     expect(readHealthSnapshot(db)!.failed).toEqual([]);
@@ -445,7 +445,7 @@ describe('app allow-list changes', () => {
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls).toHaveLength(1);
 
-    app.reloadClients([SHARMA]);
+    await app.reloadClients([SHARMA]);
     await vi.advanceTimersByTimeAsync(60_000); // the publish that reloadClients scheduled
     const uploads = drive.uploads;
     g.resolve();
@@ -464,7 +464,7 @@ describe('app allow-list changes', () => {
     await settled();
     await vi.advanceTimersByTimeAsync(240_000);
 
-    app.reloadClients([SHARMA]);
+    await app.reloadClients([SHARMA]);
     g.reject(new Error('boom'));
     await vi.advanceTimersByTimeAsync(1_000);
     expect(app.health.line().ok).toBe(true);
@@ -474,7 +474,7 @@ describe('app allow-list changes', () => {
 
   it('keeps the old allow-list when the new config conflicts with the database', async () => {
     const { db, app, sock } = await setup();
-    expect(() => app.reloadClients([SHARMA, { ...MEHTA, code: 'MEX' }])).toThrow(/codes are permanent/);
+    await expect(app.reloadClients([SHARMA, { ...MEHTA, code: 'MEX' }])).rejects.toThrow(/codes are permanent/);
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
     await settled();
     expect(db.raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 1 });
@@ -485,11 +485,11 @@ describe('app allow-list changes', () => {
     const { ai, app, sock } = await setup();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
     await settled();
-    app.reloadClients([SHARMA]);
+    await app.reloadClients([SHARMA]);
     await vi.advanceTimersByTimeAsync(1_300_000);
     expect(ai.calls).toEqual([]);
 
-    app.reloadClients([SHARMA, MEHTA]);
+    await app.reloadClients([SHARMA, MEHTA]);
     await vi.advanceTimersByTimeAsync(30_000 + 240_000); // next tick, then the quiet period
     expect(ai.calls).toHaveLength(1);
     expect(ai.calls[0]!.user).toContain('Mehta message');
@@ -773,7 +773,7 @@ describe('app: a newly approved group\'s earlier messages (history backfill)', (
     const { app, sock } = await setup();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('X1', 'not ours', { group: OTHER_GROUP, ts: sec('2026-10-19T07:00:30Z') })] });
     await settled();
-    app.reloadClients([MEHTA]); // Sharma removed before its first message
+    await app.reloadClients([MEHTA]); // Sharma removed before its first message
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('L1', 'after removal', { ts: sec('2026-10-19T07:00:40Z') })] });
     await settled();
     await vi.advanceTimersByTimeAsync(60_000);

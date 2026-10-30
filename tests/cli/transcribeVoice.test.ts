@@ -367,7 +367,7 @@ describe('transcribe-voice --client', () => {
   it('refuses an unknown code by name, and a client no longer on the allow-list', async () => {
     await backlogVoice();
     await expect(run({ client: 'XYZ' })).rejects.toThrow(new CorrectionError('No client with code XYZ'));
-    syncClients(db, [SHARMA]);
+    await syncClients(db, [SHARMA]);
     await expect(run({ client: 'MEH', yes: true })).rejects.toThrow(new CorrectionError('Client MEH is not in the allow-list'));
     expect(lines).toEqual([]);
   });

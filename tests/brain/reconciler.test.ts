@@ -98,7 +98,7 @@ describe('Reconciler', () => {
       deadline: '2026-10-18', sourceQuote: 'Rahul, homepage banner thoda bright karo. 18 tak chahiye.', sourceWaId: 'm1', status: 'open',
     });
     expect((await listDecisions(db, 1))[0]).toMatchObject({ text: 'Blue theme chosen', decidedOn: '2026-10-19', source: 'whatsapp' });
-    expect(getClient(db, 1).statusText).toBe('Homepage banner is being revised.');
+    expect((await getClient(db, 1)).statusText).toBe('Homepage banner is being revised.');
     expect((await listPeople(db, 1))[0]).toMatchObject({ role: 'client', roleSetBy: 'ai' });
     expect(await listUnprocessed(db, 1)).toHaveLength(0);
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM task_events').get()).toEqual({ n: 4 });

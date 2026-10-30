@@ -145,7 +145,7 @@ export async function transcribeVoiceCommand(opts: { client?: string; yes: boole
     let clientId: number | undefined;
     if (opts.client !== undefined) {
       const code = opts.client.trim().toUpperCase();
-      const c = getClientByCode(db, code);
+      const c = await getClientByCode(db, code);
       if (!c) throw new CorrectionError(`No client with code ${opts.client}`);
       if (!c.active) throw new CorrectionError(`Client ${c.code} is not in the allow-list`);
       clientId = c.id;

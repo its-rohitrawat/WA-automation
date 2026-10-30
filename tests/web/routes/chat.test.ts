@@ -235,7 +235,7 @@ describe('sending from the dashboard', () => {
     await send({});
     const waId = outboxRows()[0]!.wa_id!;
     // Before it comes back the chat shows the dashboard's own row.
-    const sha = getClientByCode(db, 'SHA')!;
+    const sha = (await getClientByCode(db, 'SHA'))!;
     expect((await chatPage(db, sha, clock.now())).outbox.map((o) => o.state)).toEqual(['sent']);
     const ingest = new Ingestor({ db, onNewMessages: () => {}, clock });
     const echo = normalizeMessage({

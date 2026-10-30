@@ -227,7 +227,7 @@ export class Reconciler {
     const { db, spend, prices, clock, log } = this.#o;
     // Any outcome but 'waiting' ends a wait (it is added back below), including a run that throws.
     const wasWaiting = this.#waiting.delete(clientId);
-    const client = getClient(db, clientId);
+    const client = await getClient(db, clientId);
     if (!client.active) return { status: 'noop' };
     const queued = await listUnprocessed(db, clientId);
     if (queued.length === 0) return { status: 'noop' };
@@ -303,11 +303,10 @@ export class Reconciler {
     const appliedAt = clock.now();
     let applied: { accepted: AiOp[]; rejected: Rejection[]; requeued: number };
     try {
-      // The ops are still applied on raw (S1.11 converts them), which is allowed inside this transaction.
       applied = await db.tx(async (q) => {
         // The call can take minutes and a human can correct the tracker meanwhile, so validate against the
         // client, tasks and people as they are now. Nothing else runs on the database inside this transaction.
-        const fresh = getClient(db, clientId);
+        const fresh = await getClient(q, clientId);
         const state = await this.#validationState(q, fresh, clientId, { batchIds, contextIds, messageTs, editedIds, source: 'whatsapp' });
         const { accepted, rejected } = validateOps(result.output.ops, state);
         for (const op of accepted) await this.#apply(q, fresh, op, evidence, appliedAt, rules);
@@ -349,7 +348,7 @@ export class Reconciler {
       await finishMeeting(db, meeting.id, { at: clock.now().toISOString() });
       return { status: 'done', accepted: 0, rejected: 0 };
     }
-    if (!getClient(db, clientId).active) {
+    if (!(await getClient(db, clientId)).active) {
       await finishMeeting(db, meeting.id, { note: 'client_inactive', at: clock.now().toISOString() });
       return { status: 'done', accepted: 0, rejected: 0, note: 'client_inactive' };
     }
@@ -364,7 +363,7 @@ export class Reconciler {
 
   async #trackMeeting(clientId: number, meeting: MeetingForTracker, items: MeetingItem[]): Promise<MeetingTrackOutcome> {
     const { db, spend, prices, clock, log } = this.#o;
-    const client = getClient(db, clientId);
+    const client = await getClient(db, clientId);
     const now = clock.now();
     // Only processed messages: one still queued is the next WhatsApp run's evidence, and that run sees this one's tasks.
     const recent = await listRecentProcessed(db, clientId, 30);
@@ -402,9 +401,8 @@ export class Reconciler {
     const appliedAt = clock.now();
     let applied: { accepted: AiOp[]; rejected: Rejection[] };
     try {
-      // The ops are still applied on raw (S1.11 converts them), which is allowed inside this transaction.
       applied = await db.tx(async (q) => {
-        const fresh = getClient(db, clientId);
+        const fresh = await getClient(q, clientId);
         const state = await this.#validationState(q, fresh, clientId, {
           batchIds: new Set(items.map((it) => it.id)),
           contextIds: new Set(recent.map((m) => m.waId)),
@@ -524,10 +522,7 @@ export class Reconciler {
     return next && next.level !== t.priority ? next : null;
   }
 
-  /**
-   * Applies one validated op on the run's transaction handle q. The client functions are not converted yet (S1.12): they
-   * run on raw, which is allowed inside this transaction.
-   */
+  /** Applies one validated op on the run's transaction handle q. */
   async #apply(q: Sql, client: ClientRow, op: AiOp, evidence: Map<string, Evidence>, at: Date, rules: RunRules): Promise<void> {
     const { db } = this.#o;
     const nowIso = at.toISOString();
@@ -639,12 +634,12 @@ export class Reconciler {
         await event(null, { decision: op.text });
         return;
       case 'set_phase':
-        setPhase(db, client.id, op.phase!, 'ai');
+        await setPhase(q, client.id, op.phase!, 'ai');
         await event(null, { phase: op.phase });
         return;
       case 'set_status':
-        setStatus(db, client.id, op.text!, nowIso);
-        if (sentiment) setClientSentiment(db, client.id, sentiment, nowIso);
+        await setStatus(q, client.id, op.text!, nowIso);
+        if (sentiment) await setClientSentiment(q, client.id, sentiment, nowIso);
         await event(null, sentiment ? { status: op.text, sentiment } : { status: op.text });
         return;
       case 'set_person_role':

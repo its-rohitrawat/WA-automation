@@ -146,7 +146,7 @@ describe('Reconciler: sentiment', () => {
     expect(ai.options).toEqual([{ sentiment: false }]);
     expect(ai.calls[0]!.system).toBe(SYSTEM_PROMPT);
     expect(row(db, 'SHA-001')).toMatchObject({ sentiment: null });
-    expect(getClient(db, 1)).toMatchObject({ sentiment: null, sentimentAt: null });
+    expect(await getClient(db, 1)).toMatchObject({ sentiment: null, sentimentAt: null });
   });
 
   it('switched on: the read asks for it, the task keeps its mood and set_status gives the client\'s', async () => {
@@ -158,7 +158,7 @@ describe('Reconciler: sentiment', () => {
     expect(ai.options).toEqual([{ sentiment: true }]);
     expect(ai.calls[0]!.system).toBe(`${SYSTEM_PROMPT}${SENTIMENT_RULES}`);
     expect(row(db, 'SHA-001')).toMatchObject({ sentiment: 'frustrated' });
-    expect(getClient(db, 1)).toMatchObject({ sentiment: 'negative', sentimentAt: '2026-10-19T08:00:00.000Z' });
+    expect(await getClient(db, 1)).toMatchObject({ sentiment: 'negative', sentimentAt: '2026-10-19T08:00:00.000Z' });
   });
 
   it('switched on: an update with only a new mood is applied, and a mood left empty changes nothing', async () => {

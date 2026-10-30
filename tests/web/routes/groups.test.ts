@@ -61,12 +61,12 @@ let audits: Parameters<AuditFn>[0][];
 let logLines: string[];
 let deps: GroupsDeps;
 
-beforeEach(() => {
+beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'wa-groups-routes-'));
   file = join(dir, 'allowed-groups.json');
   writeFileSync(file, `${JSON.stringify(FILE, null, 2)}\n`);
   db = openDb(':memory:');
-  syncClients(db, loadGroupsFile(file));
+  await syncClients(db, loadGroupsFile(file));
   src = new FakeSource();
   audits = [];
   logLines = [];
@@ -485,8 +485,8 @@ describe('suggestCodeHandler', () => {
   it('skips codes used by any client row in the DB, including inactive ones', async () => {
     const desai: ClientConfig = { ...SHARMA, groupId: DESAI, name: 'Desai Old', code: 'DES' };
     const desa: ClientConfig = { ...SHARMA, groupId: '120363888000000005@g.us', name: 'Desa Old', code: 'DESA' };
-    syncClients(db, [...loadGroupsFile(file), desai, desa]);
-    syncClients(db, loadGroupsFile(file));
+    await syncClients(db, [...loadGroupsFile(file), desai, desa]);
+    await syncClients(db, loadGroupsFile(file));
     expect(await suggest('Desai Foods')).toBe('DEA');
   });
 

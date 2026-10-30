@@ -901,7 +901,7 @@ describe('app health line with fresh file counts (final review)', () => {
     await vi.waitFor(async () => expect(await getMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable' }), SLOW_IO);
     expect(app.health.workbookLine().text).toBe(STALE_LINE);
 
-    app.reloadClients([MEHTA]); // Sharma, whose file it is, is removed
+    await app.reloadClients([MEHTA]); // Sharma, whose file it is, is removed
     await vi.advanceTimersByTimeAsync(0); // the file counts are read again before the publish is asked for
     expect(app.health.workbookLine()).toEqual({ ok: true, text: '✅ Connected · waiting for new messages' });
     expect(readHealthSnapshot(db)!.media).toMatchObject({ pending: 0, stale: 0 });

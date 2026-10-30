@@ -154,7 +154,7 @@ describe('phase set / unlock', () => {
   it('sets a phase case-insensitively, locked, with an event', async () => {
     const db = await withTask();
     await setClientPhase(db, 'sha', 'development', now);
-    expect(getClient(db, 1)).toMatchObject({ currentPhase: 'Development', phaseLocked: true });
+    expect(await getClient(db, 1)).toMatchObject({ currentPhase: 'Development', phaseLocked: true });
     expect(events(db)[0]).toMatchObject({ op: 'set_phase', task_id: null, client_id: 1, detail: { phase: 'Development' } });
     expect(rebuilt(db)).toBe(true);
     await expect(setClientPhase(db, 'SHA', 'Party', now)).rejects.toThrowError(/must be one of/);
@@ -164,7 +164,7 @@ describe('phase set / unlock', () => {
     const db = await withTask();
     await setClientPhase(db, 'SHA', 'Design', now);
     await unlockClientPhase(db, 'sha', now);
-    expect(getClient(db, 1)).toMatchObject({ currentPhase: 'Design', phaseLocked: false });
+    expect(await getClient(db, 1)).toMatchObject({ currentPhase: 'Design', phaseLocked: false });
     expect(events(db).at(-1)).toMatchObject({ op: 'unlock_phase', client_id: 1, detail: { phase: 'Design' } });
     expect(rebuilt(db)).toBe(true);
   });

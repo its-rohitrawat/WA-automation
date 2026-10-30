@@ -96,9 +96,9 @@ function watcher(o: { log?: Logger; settings?: Partial<WatcherSettings>; clients
   return new MeetingWatcher({ db, api, clock, log: o.log ?? silentLogger(), settings: { ...SETTINGS, ...o.settings }, clients: o.clients ?? [SHARMA, MEHTA] });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   db = openDb(':memory:');
-  syncClients(db, [SHARMA, MEHTA]); // ids 1 and 2
+  await syncClients(db, [SHARMA, MEHTA]); // ids 1 and 2
   api = new FakeMeetingsApi();
   clock = manualClock(NOW);
 });
@@ -448,7 +448,7 @@ describe('MeetingWatcher.discover', () => {
     await w.discover(signal);
     expect((await allRows(db))[0]).toMatchObject({ status: 'unassigned' });
 
-    syncClients(db, [SHARMA, MEHTA, GUPTA]); // id 3
+    await syncClients(db, [SHARMA, MEHTA, GUPTA]); // id 3
     w.setClients([SHARMA, MEHTA, GUPTA]);
     addConference(api, { id: 'c2', start: ago(4), invite: { title: 'Gupta Traders intro', attendees: [] } });
     await w.discover(signal);
@@ -456,7 +456,7 @@ describe('MeetingWatcher.discover', () => {
   });
 
   it('ignores a configured client whose tracker row is inactive or missing', async () => {
-    syncClients(db, [MEHTA]); // Sharma becomes inactive
+    await syncClients(db, [MEHTA]); // Sharma becomes inactive
     addConference(api, { id: 'c1', start: ago(5) });
     addConference(api, { id: 'c2', start: ago(4), invite: { title: 'Gupta Traders intro', attendees: [] } });
     await watcher({ clients: [SHARMA, MEHTA, GUPTA] }).discover(signal);

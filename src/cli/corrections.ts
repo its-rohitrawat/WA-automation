@@ -38,8 +38,8 @@ async function findTask(db: Sql, code: string): Promise<TaskRow> {
   return t;
 }
 
-function findClient(db: Db, code: string): ClientRow {
-  const c = getClientByCode(db, code.trim().toUpperCase());
+async function findClient(db: Db, code: string): Promise<ClientRow> {
+  const c = await getClientByCode(db, code.trim().toUpperCase());
   if (!c) throw new CorrectionError(`No client with code ${code}`);
   return c;
 }
@@ -121,7 +121,7 @@ export async function setPersonRole(db: Db, who: string, roleInput: string, clie
   }
   if (people.length === 0) throw new CorrectionError(`No one with that ${target.includes('@') ? 'WhatsApp id' : 'number'} has posted in an allowed group yet`);
   if (clientCode) {
-    const c = findClient(db, clientCode);
+    const c = await findClient(db, clientCode);
     people = people.filter((p) => p.clientId === c.id);
     if (people.length === 0) throw new CorrectionError(`That number has posted, but not in client ${c.code}`);
   }
@@ -137,20 +137,20 @@ export async function setPersonRole(db: Db, who: string, roleInput: string, clie
 }
 
 export async function setClientPhase(db: Db, clientCode: string, phase: string, now: Date): Promise<void> {
-  const c = findClient(db, clientCode);
+  const c = await findClient(db, clientCode);
   const match = c.phases.find((p) => p.toLowerCase() === phase.trim().toLowerCase());
   if (!match) throw new CorrectionError(`Phase must be one of: ${c.phases.join(', ')}`);
   await db.tx(async (q) => {
-    setPhase(db, c.id, match, 'human');
+    await setPhase(q, c.id, match, 'human');
     await humanEvent(q, null, c.id, 'set_phase', { phase: match }, now);
     requestRebuild(db, now);
   });
 }
 
 export async function unlockClientPhase(db: Db, clientCode: string, now: Date): Promise<void> {
-  const c = findClient(db, clientCode);
+  const c = await findClient(db, clientCode);
   await db.tx(async (q) => {
-    clearPhaseLock(db, c.id);
+    await clearPhaseLock(q, c.id);
     await humanEvent(q, null, c.id, 'unlock_phase', { phase: c.currentPhase }, now);
     requestRebuild(db, now);
   });
@@ -165,13 +165,13 @@ interface ReprocessWindow {
   untilIso: string | undefined;
 }
 
-function reprocessWindow(db: Db, clientCode: string, since: string, until: string | undefined): ReprocessWindow {
+async function reprocessWindow(db: Db, clientCode: string, since: string, until: string | undefined): Promise<ReprocessWindow> {
   if (!isIsoDate(since)) throw new CorrectionError('--since must be YYYY-MM-DD');
   if (until !== undefined) {
     if (!isIsoDate(until)) throw new CorrectionError('--until must be YYYY-MM-DD');
     if (until < since) throw new CorrectionError('--until must be on or after --since');
   }
-  const c = findClient(db, clientCode);
+  const c = await findClient(db, clientCode);
   if (!c.active) throw new CorrectionError(`Client ${c.code} is not in the allow-list; nothing to reprocess`);
   // --until covers that whole India-time day, so the limit is the start of the next day.
   const untilIso = until === undefined ? undefined : new Date(fromIstDate(until).getTime() + 86_400_000).toISOString();
@@ -180,13 +180,13 @@ function reprocessWindow(db: Db, clientCode: string, since: string, until: strin
 
 /** How many processed messages a reprocess would queue. Changes nothing. */
 export async function countReprocess(db: Db, clientCode: string, since: string, until?: string): Promise<number> {
-  const w = reprocessWindow(db, clientCode, since, until);
+  const w = await reprocessWindow(db, clientCode, since, until);
   return countProcessedBetween(db, w.clientId, w.sinceIso, w.untilIso);
 }
 
 /** Re-queues processed messages in the window for the AI. Returns how many were actually re-queued. */
 export async function requestReprocess(db: Db, clientCode: string, since: string, now: Date, until?: string): Promise<number> {
-  const w = reprocessWindow(db, clientCode, since, until);
+  const w = await reprocessWindow(db, clientCode, since, until);
   // requestRebuild writes kv, on raw until S1.12, which is allowed inside this transaction.
   return db.tx(async (q) => {
     const n = await resetProcessedSince(q, w.clientId, w.sinceIso, w.untilIso);

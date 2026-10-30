@@ -23,7 +23,7 @@ async function fixture() {
   await createTask(db, task({ side: 'client', title: 'Send logo files', category: 'content', deadline: '2026-10-22' }), NOW);
   const done = await createTask(db, task({ title: 'Share moodboard', deadline: null }), NOW);
   await setTaskStatus(db, done.id, 'done', '2026-10-15', NOW, 'ai');
-  setStatus(db, 1, 'Homepage approved, building inner pages', NOW);
+  await setStatus(db, 1, 'Homepage approved, building inner pages', NOW);
   return db;
 }
 
@@ -115,7 +115,7 @@ describe('buildWorkbook', () => {
 
   it('shows (none) in empty sections and marks inactive clients', async () => {
     const db = await fixture();
-    syncClients(db, [SHARMA]);
+    await syncClients(db, [SHARMA]);
     const wb = await load(await buildWorkbook(await loadTrackerView(db, now, healthy)));
     expect(wb.getWorksheet('Overview')!.getCell('A4').text).toBe(`${MEHTA.name} (inactive)`);
     expect(findRow(wb.getWorksheet('Mehta Foods')!, '(none)')).toBeDefined();

@@ -79,14 +79,14 @@ describe('buildShortMorningText', () => {
     const db = await seededDb();
     await createTask(db, task({ clientId: 2, title: 'Mehta menu', deadline: '2026-10-01' }), NOW.toISOString());
     await createTask(db, task({ title: 'Sharma task' }), NOW.toISOString());
-    syncClients(db, [SHARMA]); // Mehta taken off the allow-list
+    await syncClients(db, [SHARMA]); // Mehta taken off the allow-list
     expect(await text(db)).toBe(`Good morning. 1 open task, 0 overdue. Today's tracker: ${LINK}`);
   });
 
   it('says no open tasks when there are no active clients', async () => {
     const db = await seededDb();
     await createTask(db, task({ title: 'Left behind' }), NOW.toISOString());
-    syncClients(db, []);
+    await syncClients(db, []);
     expect(await text(db)).toBe(`Good morning. No open tasks. Today's tracker: ${LINK}`);
   });
 

@@ -13,6 +13,6 @@ export const LATER = '2026-10-19T09:00:00.000Z';
 /** In-memory DB with Sharma (id 1) and Mehta (id 2). */
 export async function seededDb(): Promise<Db> {
   const db = openDb(':memory:');
-  syncClients(db, [SHARMA, MEHTA]);
+  await syncClients(db, [SHARMA, MEHTA]);
   return db;
 }

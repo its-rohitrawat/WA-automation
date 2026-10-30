@@ -34,26 +34,30 @@ const PHASES = ['Discovery', 'Design', 'Development', 'Review', 'Launch'];
 const OWNER = 'owner@example.com';
 const day = (daysAgo: number) => new Date(Date.now() - daysAgo * 86_400_000).toISOString();
 
-/** Adds the screens' routes to the fake server. `signedIn` and `csrf` are the fake's own session flag and token. */
-export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; csrf: string }): void {
+/**
+ * Adds the screens' routes to the fake server, once their made-up data is stored (every write awaited, in order).
+ * `signedIn` and `csrf` are the fake's own session flag and token.
+ */
+export async function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; csrf: string }): Promise<void> {
   const db = openDb(':memory:');
   const clock = systemClock;
-  syncClients(db, [
+  await syncClients(db, [
     { groupId: '120363000000000101@g.us', name: 'Acme Traders', code: 'ACM', phases: PHASES, emailDomains: [], meetingKeywords: [] },
     { groupId: '120363000000000102@g.us', name: 'Mehta Foods <b>', code: 'MEH', phases: PHASES, emailDomains: [], meetingKeywords: [] },
   ]);
   const titles = ['Send the revised quote', 'Share moodboard v2', 'Confirm the launch date', 'Fix the footer on mobile', 'Book the photo shoot', 'A very long task title that goes on and on to check that nothing scrolls sideways on a phone'];
-  titles.forEach((title, i) => createTask(db, {
+  for (const [i, title] of titles.entries()) {
+    await createTask(db, {
     clientId: (i % 2) + 1, side: i % 3 === 0 ? 'client' : 'us', title, category: 'design', priority: PRIORITIES[i % PRIORITIES.length]!,
     prioritySource: i === 0 ? 'keyword' : 'ai', priorityKeyword: i === 0 ? 'urgent' : null, sentiment: SENTIMENTS[i % SENTIMENTS.length]!,
     assignedTo: i % 2 ? 'Rohit' : null, askedBy: null, raisedOn: day(i + 1).slice(0, 10), deadline: i < 2 ? day(i - 2).slice(0, 10) : null,
     latestProgress: null, sourceQuote: 'made-up words', sourceDate: day(i + 1).slice(0, 10), sourceWaId: null, origin: 'whatsapp',
-  }, day(i + 1)));
+    }, day(i + 1));
+  }
   // One task from before priority levels: no level, shown as "—".
-  db.raw.prepare("UPDATE tasks SET priority_level = NULL, priority_source = NULL, sentiment = NULL WHERE id = 5").run();
-  db.raw.prepare("UPDATE clients SET sentiment = 'frustrated', sentiment_at = ? WHERE id = 1").run(day(0.1));
-  // Not awaited (this setup is synchronous): the engine runs statements in order, so every route reads it.
-  void insertFound(db, {
+  await db.run("UPDATE tasks SET priority_level = NULL, priority_source = NULL, sentiment = NULL WHERE id = 5");
+  await db.run("UPDATE clients SET sentiment = 'frustrated', sentiment_at = ? WHERE id = 1", [day(0.1)]);
+  await insertFound(db, {
     recording: 'conferenceRecords/a/recordings/b', conference: 'conferenceRecords/a', driveFileId: 'd1', meetingCode: null, title: 'Weekly sync',
     startedAt: day(1), endedAt: null, attendees: [], participants: [], clientId: null, matchKind: null, status: 'unassigned', driveSeconds: 1800, createdAt: day(1),
   });
@@ -67,16 +71,17 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
   const spend = new SpendGuard({ db, clock, capUsd: 3 });
   spend.record('ai', 0.42, 'batch');
   // Made-up outages for the uptime strip's exact times: one this morning, one around midnight two days ago.
-  const put = db.raw.prepare('INSERT INTO uptime_log (at, up, reason) VALUES (?, ?, ?)');
   const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
-  for (const [h, up, reason] of [[60, 1, null], [48.5, 0, 'whatsapp_disconnected'], [48, 1, null], [6, 0, 'stopped'], [1.7, 1, null]] as const) put.run(hoursAgo(h), up, reason);
+  for (const [h, up, reason] of [[60, 1, null], [48.5, 0, 'whatsapp_disconnected'], [48, 1, null], [6, 0, 'stopped'], [1.7, 1, null]] as const) {
+    await db.run('INSERT INTO uptime_log (at, up, reason) VALUES (?, ?, ?)', [hoursAgo(h), up, reason]);
+  }
   const uptime = new UptimeLog(db, clock);
-  void uptime.start(true); // not awaited (this setup is synchronous): the engine runs statements in order
+  await uptime.start(true);
   // The briefing is on from .env (the spare phone's link is gone in the fake), so the screen shows the next report.
   const settings = new SettingsStore({ db, env: parseEnv({ REPORT_ENABLED: 'true', REPORT_RECIPIENT: '919800000000' }), clock, spareLinked: () => false });
   // Sentiment on, so every screen shows the moods; the switch on Settings turns it off again.
   const priority = new PrioritySettings({ db, clock });
-  void priority.set('sentimentEnabled', true, OWNER, () => {}); // not awaited (this setup is synchronous): the engine runs statements in order
+  await priority.set('sentimentEnabled', true, OWNER, () => {});
 
   const session = (): OwnerSession => {
     if (!o.signedIn()) throw new HttpError(401, 'unauthenticated', 'Sign in first.');
@@ -106,8 +111,7 @@ export function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; c
 
   // Open chat: the real chat routes (src/web/routes/chat.ts) on this database, with a stand-in socket that reaches no
   // one. It answers with a made-up message id and, a moment later, stores the founder's own copy, as WhatsApp does.
-  // Not awaited (this setup is synchronous): the engine runs statements in order, so every route reads the chat.
-  void seedChat(db);
+  await seedChat(db);
   const ACME = '120363000000000101@g.us';
   let sent = 0;
   const socket = {

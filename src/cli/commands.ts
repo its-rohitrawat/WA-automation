@@ -188,7 +188,7 @@ export async function linkCommand(opts: { reset: boolean }, deps: CliDeps): Prom
     const configs = loadGroupsFile(env.GROUPS_FILE);
     db = openDb(trackerDbPath(env.DATA_DIR));
     sessionDb = openSessionDb(sessionDbPath(env.DATA_DIR));
-    syncClients(db, configs);
+    await syncClients(db, configs);
     if (opts.reset) {
       let hasSession: boolean;
       try {
@@ -262,7 +262,7 @@ export async function listGroupsCommand(deps: CliDeps): Promise<void> {
     const configs = loadGroupsFile(env.GROUPS_FILE);
     db = openDb(trackerDbPath(env.DATA_DIR));
     sessionDb = openSessionDb(sessionDbPath(env.DATA_DIR));
-    syncClients(db, configs);
+    await syncClients(db, configs);
     const auth = await useEncryptedAuthState(sessionDb, key);
     if (!auth.hasSession) {
       out('WhatsApp is not linked yet. Run: npm run cli -- link');
@@ -297,7 +297,7 @@ export async function statusCommand(deps: CliDeps): Promise<void> {
     deps.out(
       formatStatus({
         snapshot: readHealthSnapshot(db),
-        clients: listClients(db, false),
+        clients: await listClients(db, false),
         batches: await latestBatches(db),
         unprocessed: await unprocessedCounts(db),
         now: new Date(),

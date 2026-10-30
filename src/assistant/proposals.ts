@@ -83,7 +83,7 @@ export async function draftProposal(tool: 'propose_task_change' | 'propose_new_t
   }
   if (tool === 'propose_new_task') {
     const i = INPUTS.propose_new_task.parse(raw);
-    const { clientCode, fields } = parseNewTask(d.db, i);
+    const { clientCode, fields } = await parseNewTask(d.db, i);
     return {
       action: { kind: 'task_create', input: i },
       title: `Add a task for ${clientCode}`,

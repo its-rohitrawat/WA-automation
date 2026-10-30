@@ -106,7 +106,7 @@ describe('Today tab', () => {
 
   it('leaves out inactive clients', async () => {
     const db = await fixture();
-    syncClients(db, [SHARMA]);
+    await syncClients(db, [SHARMA]);
     const ws = await today(db);
     const names = body(ws).map((r) => r[0]).filter((v) => v !== '');
     expect(names).toEqual(['Sharma Interiors', 'Total']);
@@ -136,7 +136,7 @@ describe('Today tab', () => {
     ]);
 
     const inactive = await seededDb();
-    syncClients(inactive, []);
+    await syncClients(inactive, []);
     expect(body(await today(inactive))[0]![0]).toBe('(none)');
   });
 
@@ -172,7 +172,7 @@ describe('Today tab', () => {
   it('a client named Today gets its own tab next to the Today tab', async () => {
     const db = openDb(':memory:');
     const named = (name: string, code: string): ClientConfig => ({ ...MEHTA, groupId: `${code}@g.us`, name, code });
-    syncClients(db, [named('Today', 'TOD')]);
+    await syncClients(db, [named('Today', 'TOD')]);
     const wb = await build(db);
     expect(wb.worksheets.map((w) => w.name)).toEqual(['Today', 'Overview', 'Today (2)']);
     expect(body(wb.getWorksheet('Today')!)[0]![0]).toBe('Today');

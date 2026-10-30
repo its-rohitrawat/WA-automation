@@ -84,22 +84,22 @@ describe('workbook round 2', () => {
 
   it('orders clients by name case-insensitively', async () => {
     const db = openDb(':memory:');
-    syncClients(db, [cfg(1, 'zeta'), cfg(2, 'Alpha'), cfg(3, 'beta')]);
+    await syncClients(db, [cfg(1, 'zeta'), cfg(2, 'Alpha'), cfg(3, 'beta')]);
     expect((await loadTrackerView(db, now, healthy)).clients.map((c) => c.client.name)).toEqual(['Alpha', 'beta', 'zeta']);
   });
 
   it('keeps sheet-name suffixes stable by client id', async () => {
     const db = openDb(':memory:');
-    syncClients(db, [cfg(1, 'Acme'), cfg(2, 'acme')]);
+    await syncClients(db, [cfg(1, 'Acme'), cfg(2, 'acme')]);
     const names = async () => Object.fromEntries((await loadTrackerView(db, now, healthy)).clients.map((c) => [c.client.code, c.sheetName]));
     expect(await names()).toEqual({ C01: 'Acme', C02: 'acme (2)' });
-    syncClients(db, [cfg(1, 'Acme'), cfg(2, 'acme'), cfg(3, 'ACME')]);
+    await syncClients(db, [cfg(1, 'Acme'), cfg(2, 'acme'), cfg(3, 'ACME')]);
     expect(await names()).toMatchObject({ C01: 'Acme', C02: 'acme (2)' });
   });
 
   it('builds with awkward client names', async () => {
     const db = openDb(':memory:');
-    syncClients(db, [cfg(1, 'History'), cfg(2, "Sharma & Sons Interior Design' Studio"), cfg(3, `${'a'.repeat(30)}😀`)]);
+    await syncClients(db, [cfg(1, 'History'), cfg(2, "Sharma & Sons Interior Design' Studio"), cfg(3, `${'a'.repeat(30)}😀`)]);
     const wb = await build(db);
     expect(wb.worksheets).toHaveLength(5);
     for (const w of wb.worksheets) expect(w.name.endsWith("'")).toBe(false);
@@ -107,7 +107,7 @@ describe('workbook round 2', () => {
 
   it('builds with a backslash in a client name', async () => {
     const db = openDb(':memory:');
-    syncClients(db, [cfg(1, 'Sharma\\Mehta Designs')]);
+    await syncClients(db, [cfg(1, 'Sharma\\Mehta Designs')]);
     const wb = await build(db);
     expect(wb.worksheets.map((w) => w.name)).toEqual(['Today', 'Overview', 'Sharma Mehta Designs']);
   });
@@ -133,7 +133,7 @@ describe('workbook round 2', () => {
   it('renders milestones, decisions and people', async () => {
     const db = await seededDb();
     await logReminder(db, (await createTask(db, task(), NOW)).id, '2026-10-13', NOW);
-    setPhase(db, 1, 'Design', 'human');
+    await setPhase(db, 1, 'Design', 'human');
     await addDecision(db, { clientId: 1, text: 'Use the blue theme', decidedOn: '2026-10-12', source: 'whatsapp', sourceWaId: null }, NOW);
     await upsertPerson(db, { clientId: 1, jid: '9199@s.whatsapp.net', number: '9199', name: 'Mr. Sharma', fromMe: false });
     const ws = (await build(db)).getWorksheet('Sharma Interiors')!;
@@ -157,7 +157,7 @@ describe('workbook round 2', () => {
   it('keeps decisions, status text and people as text, never formulas', async () => {
     const db = await seededDb();
     await addDecision(db, { clientId: 1, text: '=1+1', decidedOn: '2026-10-12', source: 'whatsapp', sourceWaId: null }, NOW);
-    setStatus(db, 1, '=SUM(1,2)', NOW);
+    await setStatus(db, 1, '=SUM(1,2)', NOW);
     await upsertPerson(db, { clientId: 1, jid: 'j1', number: null, name: '+cmd', fromMe: false });
     const wb = await build(db);
     const ws = wb.getWorksheet('Sharma Interiors')!;
@@ -173,7 +173,7 @@ describe('workbook round 2', () => {
 
   it('puts (inactive) on the inactive tab title', async () => {
     const db = await seededDb();
-    syncClients(db, [SHARMA]);
+    await syncClients(db, [SHARMA]);
     const ws = (await build(db)).getWorksheet('Mehta Foods')!;
     expect(String(ws.getCell('A1').value)).toContain('(inactive)');
   });

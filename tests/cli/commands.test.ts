@@ -51,7 +51,7 @@ const out = () => lines.join('\n');
 
 async function seedTracker(): Promise<void> {
   const db = openDb(trackerDbPath(dataDir));
-  syncClients(db, [MEHTA]);
+  await syncClients(db, [MEHTA]);
   await insertMessage(db, { waId: 'seed1', clientId: 1, senderJid: 'a@s.whatsapp.net', senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T08:00:00.000Z', text: 'hi', quotedWaId: null, mediaType: null });
   db.raw.close();
 }
@@ -610,7 +610,7 @@ describe('status command', () => {
     expect(out()).not.toContain('Voice copies');
     lines.length = 0;
     const db = openDb(trackerDbPath(dataDir));
-    syncClients(db, [MEHTA]);
+    await syncClients(db, [MEHTA]);
     await insertMessage(db, { waId: 'v1', clientId: 1, senderJid: 'a@s.whatsapp.net', senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T08:00:00.000Z', text: null, quotedWaId: null, mediaType: 'voice' });
     const mediaId = await insertMedia(db, {
       messageId: (await messageRowId(db, 1, 'v1'))!, clientId: 1, kind: 'voice', status: 'done', mimeType: 'audio/ogg; codecs=opus', fileName: null, fileSize: 9000, seconds: 12,

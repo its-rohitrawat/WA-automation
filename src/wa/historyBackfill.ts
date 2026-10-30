@@ -139,7 +139,7 @@ export class HistoryBackfill {
     this.#active = undefined; // set again below only when a request goes out
     for (const b of await listBackfills(db)) {
       if (b.state !== 'waiting' && b.state !== 'fetching') continue;
-      if (!this.#stillApproved(b)) {
+      if (!(await this.#stillApproved(b))) {
         this.#finish(b, true);
         continue;
       }
@@ -172,9 +172,9 @@ export class HistoryBackfill {
     }
   }
 
-  #stillApproved(b: Backfill): boolean {
+  async #stillApproved(b: Backfill): Promise<boolean> {
     try {
-      const c = getClient(this.#o.db, b.clientId);
+      const c = await getClient(this.#o.db, b.clientId);
       return c.active && c.groupId === b.groupId;
     } catch {
       return false;
@@ -202,7 +202,7 @@ export class HistoryBackfill {
     try {
       for (const g of a.groups) {
         const b = (await listBackfills(db)).find((x) => x.groupId === g.groupId);
-        if (!b || (b.state !== 'fetching' && b.state !== 'waiting') || !this.#stillApproved(b)) continue; // dropped
+        if (!b || (b.state !== 'fetching' && b.state !== 'waiting') || !(await this.#stillApproved(b))) continue; // dropped
         handled = true;
         const before = await messageCount(db, b.clientId);
         let reachedSince = false;

@@ -56,7 +56,7 @@ describe('mediaStats', () => {
     expect(await mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 4, failedRecent: 1, sttRefused: 3 });
     await finishMedia(db, a, { textKind: 'extract', text: 'Payment done', pageCount: null, note: null, at: NOW });
     expect(await mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 3, failedRecent: 1, sttRefused: 2 });
-    syncClients(db, [SHARMA]);
+    await syncClients(db, [SHARMA]);
     expect(await mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 2, failedRecent: 1, sttRefused: 1 });
   });
 
@@ -159,7 +159,7 @@ describe('mediaStats', () => {
     await gaveUpUpload(db, 'C', 1);
     await failMedia(db, await add(db, 'D', { clientId: 1 }), { status: 'failed', errorCode: 'not_pdf', at: NOW });
     await add(db, 'M', { clientId: 2 });
-    syncClients(db, [MEHTA]);
+    await syncClients(db, [MEHTA]);
     expect(await mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 1 });
   });
 });

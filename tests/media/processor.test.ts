@@ -525,13 +525,13 @@ describe('MediaProcessor', () => {
   it('leaves the file of an inactive client pending, untouched, until the client is active again', async () => {
     const { db, p, fetcher, extract, share } = await setup();
     const id = await share();
-    syncClients(db, [MEHTA]); // Sharma is no longer in the allow-list
+    await syncClients(db, [MEHTA]); // Sharma is no longer in the allow-list
     expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
     expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: null, nextAttemptAt: null, hasRef: true, localPath: null });
     expect(fetcher).not.toHaveBeenCalled();
     expect(extract).not.toHaveBeenCalled();
 
-    syncClients(db, [SHARMA, MEHTA]);
+    await syncClients(db, [SHARMA, MEHTA]);
     expect(await p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
   });
 

@@ -284,7 +284,7 @@ export class MeetingProcessor {
   async #summarise(id: number): Promise<StageResult> {
     const d = this.#d;
     const m = await this.#meeting(id);
-    const client = getClient(d.db, m.clientId);
+    const client = await getClient(d.db, m.clientId);
     const r = await summarizeMeeting(
       { ai: d.ai, spend: d.spend, prices: d.prices },
       {
@@ -302,7 +302,7 @@ export class MeetingProcessor {
     const d = this.#d;
     const m = await this.#meeting(id);
     if (m.summary === null) throw new MeetingRowStateError('no_summary', id);
-    const client = getClient(d.db, m.clientId);
+    const client = await getClient(d.db, m.clientId);
     const docFileId = await uploadMeetingDoc(
       { db: d.db, api: d.drive },
       {

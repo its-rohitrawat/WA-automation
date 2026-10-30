@@ -48,7 +48,7 @@ describe('overview', () => {
     const db = await seededDb();
     await task(db, 1);
     await task(db, 2, { deadline: '2026-10-01' });
-    syncClients(db, [SHARMA]); // Mehta leaves the allow-list
+    await syncClients(db, [SHARMA]); // Mehta leaves the allow-list
     const o = await overview(db, now);
     expect(o.clients).toBe(1);
     expect(o.tasks).toEqual({ open: 1, overdue: 0, review: 0, doneThisWeek: 0 });
@@ -57,7 +57,7 @@ describe('overview', () => {
 
   it('gives each active client its segments in the agreed stack order: overdue, open, review, done', async () => {
     const db = await seededDb();
-    syncClients(db, [SHARMA, MEHTA, { ...SHARMA, groupId: '120363000000000003@g.us', code: 'AAA', name: 'Aarav Tiles' }]);
+    await syncClients(db, [SHARMA, MEHTA, { ...SHARMA, groupId: '120363000000000003@g.us', code: 'AAA', name: 'Aarav Tiles' }]);
     await task(db, 1, { deadline: '2026-10-01' });
     await task(db, 1);
     await task(db, 1);

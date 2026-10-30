@@ -6,45 +6,45 @@ import { MEHTA, NOW, SHARMA, seededDb } from '../helpers/db.ts';
 describe('clients repository', () => {
   it('syncs clients from config', async () => {
     const db = await seededDb();
-    expect(listClients(db).map((c) => c.code)).toEqual(['MEH', 'SHA']);
-    expect(getClientByGroupId(db, SHARMA.groupId)).toMatchObject({
+    expect((await listClients(db)).map((c) => c.code)).toEqual(['MEH', 'SHA']);
+    expect(await getClientByGroupId(db, SHARMA.groupId)).toMatchObject({
       id: 1, code: 'SHA', name: 'Sharma Interiors', phases: SHARMA.phases, currentPhase: null, phaseLocked: false, active: true,
     });
   });
 
   it('marks removed clients inactive but keeps their rows', async () => {
     const db = await seededDb();
-    syncClients(db, [SHARMA]);
-    expect(getClientByCode(db, 'MEH')?.active).toBe(false);
-    expect(listClients(db).map((c) => c.code)).toEqual(['SHA']);
-    expect(listClients(db, false)).toHaveLength(2);
+    await syncClients(db, [SHARMA]);
+    expect((await getClientByCode(db, 'MEH'))?.active).toBe(false);
+    expect((await listClients(db)).map((c) => c.code)).toEqual(['SHA']);
+    expect(await listClients(db, false)).toHaveLength(2);
   });
 
   it('updates a renamed client in place', async () => {
     const db = await seededDb();
-    syncClients(db, [{ ...SHARMA, name: 'Sharma Interiors Pvt Ltd' }]);
-    expect(getClient(db, 1).name).toBe('Sharma Interiors Pvt Ltd');
+    await syncClients(db, [{ ...SHARMA, name: 'Sharma Interiors Pvt Ltd' }]);
+    expect((await getClient(db, 1)).name).toBe('Sharma Interiors Pvt Ltd');
   });
 
   it('refuses to change a client code and writes nothing', async () => {
     const db = await seededDb();
-    expect(() => syncClients(db, [{ ...SHARMA, code: 'SHX' }])).toThrow(/permanent/);
-    expect(getClient(db, 1).code).toBe('SHA');
-    expect(getClientByCode(db, 'MEH')?.active).toBe(true);
+    await expect(syncClients(db, [{ ...SHARMA, code: 'SHX' }])).rejects.toThrow(/permanent/);
+    expect((await getClient(db, 1)).code).toBe('SHA');
+    expect((await getClientByCode(db, 'MEH'))?.active).toBe(true);
   });
 
   it('refuses to reuse the code of an inactive client for a new group', async () => {
     const db = await seededDb();
-    syncClients(db, [SHARMA]);
+    await syncClients(db, [SHARMA]);
     const fresh = { ...MEHTA, groupId: '120363000000000003@g.us' };
-    expect(() => syncClients(db, [SHARMA, fresh])).toThrow(/already used/);
+    await expect(syncClients(db, [SHARMA, fresh])).rejects.toThrow(/already used/);
   });
 
   it('reactivates a removed client re-added with the same code', async () => {
     const db = await seededDb();
-    syncClients(db, [SHARMA]);
-    syncClients(db, [SHARMA, MEHTA]);
-    expect(getClientByCode(db, 'MEH')?.active).toBe(true);
+    await syncClients(db, [SHARMA]);
+    await syncClients(db, [SHARMA, MEHTA]);
+    expect((await getClientByCode(db, 'MEH'))?.active).toBe(true);
   });
 
   it('issues task codes per client', async () => {
@@ -56,12 +56,12 @@ describe('clients repository', () => {
 
   it('sets phase and status', async () => {
     const db = await seededDb();
-    setPhase(db, 1, 'Design', 'human');
-    expect(getClient(db, 1)).toMatchObject({ currentPhase: 'Design', phaseLocked: true });
-    setPhase(db, 1, 'Development', 'ai');
-    expect(getClient(db, 1).phaseLocked).toBe(false);
-    setStatus(db, 1, 'Homepage approved', NOW);
-    expect(getClient(db, 1)).toMatchObject({ statusText: 'Homepage approved', statusUpdatedAt: NOW });
+    await setPhase(db, 1, 'Design', 'human');
+    expect(await getClient(db, 1)).toMatchObject({ currentPhase: 'Design', phaseLocked: true });
+    await setPhase(db, 1, 'Development', 'ai');
+    expect((await getClient(db, 1)).phaseLocked).toBe(false);
+    await setStatus(db, 1, 'Homepage approved', NOW);
+    expect(await getClient(db, 1)).toMatchObject({ statusText: 'Homepage approved', statusUpdatedAt: NOW });
   });
 
   it('stores key/value pairs', async () => {

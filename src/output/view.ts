@@ -103,7 +103,7 @@ function byClosed(a: TaskRow, b: TaskRow): number {
 /** Inactive clients stay in the workbook, marked "(inactive)". Tabs are in name order. */
 export async function loadTrackerView(db: Db, now: Date, health: HealthLine): Promise<TrackerView> {
   const today = istDate(now);
-  const clients = listClients(db, false);
+  const clients = await listClients(db, false);
   // Sheet names are assigned in id (creation) order so a new client never changes an existing suffix.
   const byId = [...clients].sort((a, b) => a.id - b.id);
   const assigned = uniqueSheetNames(byId.map((c) => c.name));

@@ -163,7 +163,7 @@ export interface App {
    */
   stop(): Promise<void>;
   /** Applies a new allow-list. Throws, leaving the old allow-list in place, if the config conflicts with the DB. */
-  reloadClients(configs: ClientConfig[]): void;
+  reloadClients(configs: ClientConfig[]): Promise<void>;
   health: Health;
   publisher: DrivePublisher;
   debouncer: GroupDebouncer;
@@ -268,17 +268,17 @@ export async function createApp(d: AppDeps): Promise<App> {
    */
   const refreshMedia = async () => health.setMedia(await mediaStats(d.db, d.clock.now(), startedAt, MEDIA_MAX_WAIT_MS));
   /** False once reloadClients removed the client. If the lookup itself fails, assume active and record as usual. */
-  const stillActive = (clientId: number): boolean => {
+  const stillActive = async (clientId: number): Promise<boolean> => {
     try {
-      return getClient(d.db, clientId).active;
+      return (await getClient(d.db, clientId)).active;
     } catch (err) {
       d.log.error({ clientId, err }, 'client lookup failed');
       return true;
     }
   };
-  const record = (clientId: number, outcome: ReconcileOutcome) => {
+  const record = async (clientId: number, outcome: ReconcileOutcome) => {
     // Removed while its run was in flight: reloadClients already forgot it, so its warning must not come back.
-    if (!stillActive(clientId)) return;
+    if (!(await stillActive(clientId))) return;
     safely(() => health.recordOutcome(clientId, outcome), { clientId });
     // The publisher is throttled, so this is cheap, and the workbook stops showing ✅ while groups fail.
     // A run that is waiting for shared files, or kept out by other paid calls in flight (busy), changed nothing, so it
@@ -309,13 +309,13 @@ export async function createApp(d: AppDeps): Promise<App> {
     maxConcurrent: d.maxConcurrent,
     run: async (clientId) => {
       const outcome = await reconciler.run(clientId);
-      record(clientId, outcome);
+      await record(clientId, outcome);
       return outcome;
     },
     onError: (clientId, err) => {
       // The logger's err serializer keeps type, code and stack frames, and drops the message.
       d.log.error({ clientId, err }, 'reconcile crashed');
-      record(clientId, { status: 'failed', errorCode: 'crash' });
+      void record(clientId, { status: 'failed', errorCode: 'crash' }); // never rejects
     },
   });
 
@@ -701,12 +701,12 @@ export async function createApp(d: AppDeps): Promise<App> {
       await d.gateway.idle?.();
       await backfill?.idle();
     },
-    reloadClients(configs) {
-      const wasActive = listClients(d.db).map((c) => c.id);
-      syncClients(d.db, configs, d.clock.now()); // throws on a code conflict, before anything else changes; queues new groups' history
+    async reloadClients(configs) {
+      const wasActive = (await listClients(d.db)).map((c) => c.id);
+      await syncClients(d.db, configs, d.clock.now()); // throws on a code conflict, before anything else changes; queues new groups' history
       d.allow.replace(configs.map((c) => c.groupId));
       meetings?.setClients(configs);
-      const active = new Set(listClients(d.db).map((c) => c.id));
+      const active = new Set((await listClients(d.db)).map((c) => c.id));
       for (const id of wasActive) {
         if (active.has(id)) continue;
         debouncer.cancel(id);

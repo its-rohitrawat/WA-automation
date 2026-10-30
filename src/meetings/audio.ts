@@ -167,7 +167,7 @@ export async function prepareAudio(
   signal.throwIfAborted();
   const { id } = meeting;
   if (meeting.clientId === null) throw new Error(`prepareAudio: meeting ${id} has no client`);
-  const audioPath = meetingAudioRelPath({ clientCode: getClient(deps.db, meeting.clientId).code, startedAt: meeting.startedAt, id });
+  const audioPath = meetingAudioRelPath({ clientCode: (await getClient(deps.db, meeting.clientId)).code, startedAt: meeting.startedAt, id });
   const finalAbs = join(deps.dataDir, ...audioPath.split('/'));
   const warn = (code: unknown) => deps.log.warn({ meetingId: id, code }, 'meeting work file could not be removed');
 

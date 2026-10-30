@@ -39,7 +39,7 @@ describe('Ingestor', () => {
 
   it('ignores clients that were removed from the allow-list', async () => {
     const { db, ing } = await setup();
-    syncClients(db, [MEHTA]);
+    await syncClients(db, [MEHTA]);
     await ing.handle(message());
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM messages').get()).toEqual({ n: 0 });
   });
