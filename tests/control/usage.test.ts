@@ -17,7 +17,12 @@ async function setup(cap = 15, now = NOW) {
   const db = await seededDb();
   const clock = manualClock(now);
   const guard = new SpendGuard({ db, clock, capUsd: cap });
-  return { db, clock, guard, summary: async (o: { voiceLocal?: boolean } = {}) => await usageSummary(db, guard, clock.now(), { voiceLocal: o.voiceLocal ?? false }) };
+  // The rows are written behind the guard's back (as the CLI would): it reads them again, as the app tick does.
+  const summary = async (o: { voiceLocal?: boolean } = {}) => {
+    await guard.refresh();
+    return await usageSummary(db, guard, clock.now(), { voiceLocal: o.voiceLocal ?? false });
+  };
+  return { db, clock, guard, summary };
 }
 
 describe('usageSummary', () => {

@@ -26,6 +26,72 @@ describe('pricing', () => {
   });
 });
 
+describe('SpendGuard: today in memory (S1.5)', () => {
+  const NOW = '2026-10-19T10:00:00.000Z'; // 15:30 IST on the 19th
+
+  it('keeps today in memory: the checks stay synchronous, and refresh picks up another writer', async () => {
+    const db = await seededDb();
+    const guard = await SpendGuard.open({ db, clock: manualClock(NOW), capUsd: 1 });
+    guard.record('ai', 0.4, 'batch 1');
+    expect(guard.spentToday()).toBe(0.4);
+    expect(guard.reserve(0.7)).toBeNull(); // 0.4 + 0.7 > 1
+    // Another process (the CLI) books spend: this guard sees it after a refresh, not before.
+    await db.run('INSERT INTO spend (day, kind, usd, detail, at) VALUES (?, ?, ?, ?, ?)', ['2026-10-19', 'stt', 0.5, 'cli', NOW]);
+    expect(guard.spentToday()).toBe(0.4);
+    await guard.refresh();
+    expect(guard.spentToday()).toBeCloseTo(0.9);
+    expect(guard.spentTodayByKind()).toEqual({ ai: 0.4, stt: 0.5 });
+    expect(guard.isPaused()).toBe(false);
+  });
+
+  it('loads what was booked before it was made', async () => {
+    const db = await seededDb();
+    new SpendGuard({ db, clock: manualClock(NOW), capUsd: 1 }).record('stt', 0.25, 'earlier run');
+    expect((await SpendGuard.open({ db, clock: manualClock(NOW), capUsd: 1 })).spentTodayByKind()).toEqual({ ai: 0, stt: 0.25 });
+    expect(new SpendGuard({ db, clock: manualClock(NOW), capUsd: 1 }).spentToday()).toBe(0.25);
+  });
+
+  it('with a transaction handle, the booking commits or rolls back with the change; memory over-counts until a refresh', async () => {
+    const db = await seededDb();
+    const guard = new SpendGuard({ db, clock: manualClock(NOW), capUsd: 1 });
+    await db.tx(async (q) => guard.record('ai', 0.2, 'kept', q));
+    await expect(db.tx(async (q) => {
+      await guard.record('ai', 0.3, 'rolled back', q);
+      throw new Error('the change failed');
+    })).rejects.toThrow('the change failed');
+    expect(await db.all('SELECT usd FROM spend ORDER BY id')).toEqual([{ usd: 0.2 }]);
+    expect(guard.spentToday()).toBeCloseTo(0.5); // the safe side under a cap
+    await guard.refresh();
+    expect(guard.spentToday()).toBeCloseTo(0.2);
+  });
+
+  it('settle with a handle books through it and frees the hold even when the write fails', async () => {
+    const db = await seededDb();
+    const guard = new SpendGuard({ db, clock: manualClock(NOW), capUsd: 1 });
+    const a = guard.reserve(0.5)!;
+    await db.tx(async (q) => guard.settle(a, 'ai', 0.1, 'call a', q));
+    const b = guard.reserve(0.5)!;
+    await expect(db.tx(async (q) => {
+      await guard.settle(b, 'ai', 0.1, 'call b', q);
+      throw new Error('rolled back');
+    })).rejects.toThrow('rolled back');
+    await guard.refresh();
+    expect(guard.spentToday()).toBeCloseTo(0.1);
+    expect(guard.canSpend(0.9)).toBe(true); // both holds are gone
+  });
+
+  it('a new IST day starts at zero without a read', async () => {
+    const db = await seededDb();
+    const clock = manualClock('2026-10-19T18:00:00.000Z'); // 23:30 IST
+    const guard = new SpendGuard({ db, clock, capUsd: 1 });
+    guard.record('ai', 1, 'all of it');
+    expect(guard.isPaused()).toBe(true);
+    clock.set('2026-10-19T18:31:00.000Z'); // 00:01 IST on the 20th
+    expect(guard.spentToday()).toBe(0);
+    expect(guard.isPaused()).toBe(false);
+  });
+});
+
 describe('SpendGuard', () => {
   it('sums spend per India day and enforces the cap', async () => {
     const clock = manualClock('2026-10-19T10:00:00Z');
@@ -111,7 +177,7 @@ describe('SpendGuard', () => {
     clock.advance(46 * 60_000); // past the 45-minute expiry: no longer counts, so not booked
     expect(guard.reserve(0.2)).not.toBeNull();
     expect(guard.reserve(0.3)).not.toBeNull();
-    expect(guard.settlePending('shutdown (estimated)')).toBe(2);
+    expect(await guard.settlePending('shutdown (estimated)')).toBe(2);
     expect(guard.spentToday()).toBeCloseTo(0.5);
     expect(db.raw.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all()).toEqual([
       { kind: 'ai', usd: 0.2, detail: 'shutdown (estimated)' },
@@ -123,7 +189,7 @@ describe('SpendGuard', () => {
   it('reserve returns null after settlePending, so a late retry does not start a paid call', async () => {
     const { guard } = await make();
     expect(guard.reserve(0.01)).not.toBeNull();
-    guard.settlePending('shutdown (estimated)');
+    await guard.settlePending('shutdown (estimated)');
     expect(guard.reserve(0.01)).toBeNull();
   });
 
@@ -131,7 +197,7 @@ describe('SpendGuard', () => {
     const { guard } = await make();
     const id = guard.reserve(0.2)!;
     guard.settle(id, 'ai', 0.1, 'batch 1');
-    expect(guard.settlePending('shutdown (estimated)')).toBe(0);
+    expect(await guard.settlePending('shutdown (estimated)')).toBe(0);
     expect(guard.spentToday()).toBeCloseTo(0.1);
   });
 
@@ -139,7 +205,7 @@ describe('SpendGuard', () => {
     const { guard } = await make();
     const a = guard.reserve(0.2)!;
     const b = guard.reserve(0.3)!;
-    guard.settlePending('shutdown (estimated)');
+    await guard.settlePending('shutdown (estimated)');
     guard.settle(a, 'ai', 0.25, 'batch 1');
     guard.release(b);
     expect(guard.spentToday()).toBeCloseTo(0.5);
@@ -167,7 +233,7 @@ describe('SpendGuard', () => {
     expect(guard.reserve(0.1)).not.toBeNull(); // the default kind stays 'ai'
     expect(guard.reserve(0.2, 'stt')).not.toBeNull();
     expect(guard.reserve(0.3, 'ai')).not.toBeNull();
-    expect(guard.settlePending('shutdown (estimated)')).toBe(3);
+    expect(await guard.settlePending('shutdown (estimated)')).toBe(3);
     expect(db.raw.prepare('SELECT kind, usd FROM spend ORDER BY id').all()).toEqual([
       { kind: 'ai', usd: 0.1 },
       { kind: 'stt', usd: 0.2 },
@@ -184,7 +250,7 @@ describe('SpendGuard', () => {
       throw new Error('owner write failed');
     });
     guard.reserve(0.2, 'stt', () => told.push('b'));
-    expect(guard.settlePending('shutdown (estimated)')).toBe(2);
+    expect(await guard.settlePending('shutdown (estimated)')).toBe(2);
     expect(told).toEqual(['a', 'b']);
     expect((db.raw.prepare('SELECT COUNT(*) AS n FROM spend').get() as { n: number }).n).toBe(2);
   });
@@ -197,7 +263,7 @@ describe('SpendGuard', () => {
       db.raw.prepare("INSERT INTO kv (k, v) VALUES ('half', 'x')").run();
       throw new Error('owner write failed');
     });
-    guard.settlePending('shutdown (estimated)');
+    await guard.settlePending('shutdown (estimated)');
     expect(db.raw.prepare("SELECT k FROM kv WHERE k IN ('ok', 'half') ORDER BY k").all()).toEqual([{ k: 'ok' }]); // the half-done owner write is gone
     expect(db.raw.prepare('SELECT usd FROM spend ORDER BY id').all()).toEqual([{ usd: 0.1 }, { usd: 0.2 }]); // both still booked
   });

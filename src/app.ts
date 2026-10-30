@@ -564,6 +564,13 @@ export function createApp(d: AppDeps): App {
       void uploader?.run(); // retries that are due
       meetings?.tick(); // discovery when due (MEETING_POLL_MINUTES), then the next due meeting
       backfill?.tick(); // a group waiting for WhatsApp, the spend cap or its first message
+      // Spend another process booked (the CLI) reaches the cap checks by the next tick. After the kicks above, so the
+      // tick's synchronous start is as before. A failed read keeps the totals in memory, which hold this process's own.
+      try {
+        await spend.refresh();
+      } catch (err) {
+        d.log.error({ err }, 'spend totals could not be read again');
+      }
       await safelyAsync(refreshMeetings);
       health.setIngestFailures(d.gateway.failedCount());
       await safelyAsync(refreshMedia);
@@ -603,7 +610,7 @@ export function createApp(d: AppDeps): App {
     },
     paidCalls: {
       reserve: (usd, kind, onBooked) => spend.reserve(usd, kind, onBooked),
-      settle: (id, kind, usd, detail) => spend.settle(id, kind, usd, detail),
+      settle: spend.settle.bind(spend), // bound, so both overloads (with and without a transaction handle) stay
       release: (id) => spend.release(id),
       fitsIgnoringHolds: (usd) => spend.fitsIgnoringHolds(usd),
     },
@@ -655,7 +662,7 @@ export function createApp(d: AppDeps): App {
       await Promise.all([debouncer.drain(drainMs), mediaQueue?.drain(drainMs), meetings?.drain(drainMs)]);
       // A call still running was probably billed: book it at its estimate. After a clean drain nothing is pending.
       try {
-        const count = spend.settlePending('shutdown before the paid call finished (estimated)');
+        const count = await spend.settlePending('shutdown before the paid call finished (estimated)');
         if (count > 0) d.log.warn({ count }, 'AI calls still running at shutdown; booked at their estimate');
       } catch (err) {
         d.log.error({ err }, 'booking unfinished AI calls failed');

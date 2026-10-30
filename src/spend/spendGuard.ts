@@ -1,4 +1,4 @@
-import { txSync, type Db } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import { istDate } from '../util/time.ts';
 
@@ -8,17 +8,46 @@ import { istDate } from '../util/time.ts';
  */
 const RESERVATION_TTL_MS = 45 * 60_000;
 
+/**
+ * Called by settlePending inside the transaction that books a hold at shutdown, with its handle. A synchronous owner
+ * that writes on the raw connection (S1) still commits with it, since that runs inside the same transaction.
+ */
+export type BookedAtShutdown = (q: Sql) => unknown;
+
 /** A live reservation: its estimate, when it was taken, what kind of spend it books as, and who to tell if shutdown books it. */
 interface Hold {
   usd: number;
   at: number;
   kind: SpendKind;
-  onBookedAtShutdown: (() => void) | undefined;
+  onBookedAtShutdown: BookedAtShutdown | undefined;
 }
 
 export type SpendKind = 'ai' | 'stt';
 
-/** Daily cap on AI and transcription spend. The day resets at midnight IST. */
+/** Today's totals by kind, for one IST day. */
+interface Today {
+  day: string;
+  ai: number;
+  stt: number;
+}
+
+const INSERT = 'INSERT INTO spend (day, kind, usd, detail, at) VALUES (?, ?, ?, ?, ?)';
+const SUMS = 'SELECT kind, COALESCE(SUM(usd), 0) AS total FROM spend WHERE day = ? GROUP BY kind';
+
+function totals(day: string, rows: { kind: string; total: number }[]): Today {
+  const t: Today = { day, ai: 0, stt: 0 };
+  for (const r of rows) if (r.kind === 'ai' || r.kind === 'stt') t[r.kind] = r.total;
+  return t;
+}
+
+/**
+ * Daily cap on AI and transcription spend. The day resets at midnight IST.
+ *
+ * Today's totals are kept in memory, so every check (isPaused, canSpend, reserve) stays synchronous. They are loaded
+ * when the guard is made, added to by every record, and read again by refresh() (the app tick, at most every 30 s),
+ * which picks up spend another process booked (the CLI). A booking whose transaction rolls back stays counted until the
+ * next refresh: an over-count, the safe side under a cap.
+ */
 export class SpendGuard {
   readonly #db: Db;
   readonly #clock: Clock;
@@ -29,11 +58,45 @@ export class SpendGuard {
   #nextId = 1;
   /** Set by settlePending() at shutdown: no new reservation after that, so a late retry pauses instead of starting a paid call. */
   #closed = false;
+  #today: Today;
+  /** Bumped by every record: a refresh that overlapped one keeps the larger total, never the smaller. */
+  #recorded = 0;
 
+  /** Loads today's totals synchronously (S1 only, on the raw connection); `SpendGuard.open` is the async way. */
   constructor(opts: { db: Db; clock: Clock; capUsd: number }) {
     this.#db = opts.db;
     this.#clock = opts.clock;
     this.#cap = opts.capUsd;
+    const day = istDate(this.#clock.now());
+    this.#today = totals(day, this.#db.raw.prepare(SUMS).all(day) as { kind: string; total: number }[]);
+  }
+
+  static async open(opts: { db: Db; clock: Clock; capUsd: number }): Promise<SpendGuard> {
+    const guard = new SpendGuard(opts);
+    await guard.refresh();
+    return guard;
+  }
+
+  /** Reads today's totals again (another process may have booked spend). */
+  async refresh(): Promise<void> {
+    const day = istDate(this.#clock.now());
+    const seen = this.#recorded;
+    const read = totals(day, await this.#db.all<{ kind: string; total: number }>(SUMS, [day]));
+    const now = this.#now();
+    if (now.day !== day) return; // the IST day changed during the read: today starts at zero
+    // A record during the read may or may not be in it: keep whichever total is larger.
+    if (this.#recorded !== seen) {
+      read.ai = Math.max(read.ai, now.ai);
+      read.stt = Math.max(read.stt, now.stt);
+    }
+    this.#today = read;
+  }
+
+  /** Today's totals; a new IST day starts at zero. */
+  #now(): Today {
+    const day = istDate(this.#clock.now());
+    if (this.#today.day !== day) this.#today = { day, ai: 0, stt: 0 };
+    return this.#today;
   }
 
   get capUsd(): number {
@@ -41,19 +104,14 @@ export class SpendGuard {
   }
 
   spentToday(): number {
-    const r = this.#db.raw.prepare('SELECT COALESCE(SUM(usd), 0) AS total FROM spend WHERE day = ?').get(istDate(this.#clock.now())) as { total: number };
-    return r.total;
+    const t = this.#now();
+    return t.ai + t.stt;
   }
 
   /** Today's spend by kind (IST day): AI calls and speech-to-text. */
   spentTodayByKind(): Record<SpendKind, number> {
-    const rows = this.#db.raw.prepare('SELECT kind, COALESCE(SUM(usd), 0) AS total FROM spend WHERE day = ? GROUP BY kind').all(istDate(this.#clock.now())) as {
-      kind: string;
-      total: number;
-    }[];
-    const out: Record<SpendKind, number> = { ai: 0, stt: 0 };
-    for (const r of rows) if (r.kind === 'ai' || r.kind === 'stt') out[r.kind] = r.total;
-    return out;
+    const t = this.#now();
+    return { ai: t.ai, stt: t.stt };
   }
 
   /** Sums live reservations and forgets expired ones. */
@@ -96,16 +154,22 @@ export class SpendGuard {
    * restart). If it throws, its writes and the booking roll back, the hold is booked alone, and the other holds are
    * still booked.
    */
-  reserve(estimateUsd: number, kind: SpendKind = 'ai', onBookedAtShutdown?: () => void): number | null {
+  reserve(estimateUsd: number, kind: SpendKind = 'ai', onBookedAtShutdown?: BookedAtShutdown): number | null {
     if (this.#closed || !this.canSpend(estimateUsd)) return null;
     const id = this.#nextId++;
     this.#pending.set(id, { usd: estimateUsd, at: this.#clock.now().getTime(), kind, onBookedAtShutdown });
     return id;
   }
 
-  /** Records the actual cost and frees the reservation (the reservation is freed even if recording throws). */
-  settle(id: number, kind: SpendKind, usd: number, detail: string): void {
-    if (this.#bookedAtEstimate.delete(id)) return;
+  /**
+   * Records the actual cost and frees the reservation (the reservation is freed even if recording fails). With `q`, the
+   * row is written through that transaction handle; without it, synchronously as before (S1 only, see `record`).
+   */
+  settle(id: number, kind: SpendKind, usd: number, detail: string): void;
+  settle(id: number, kind: SpendKind, usd: number, detail: string, q: Sql): Promise<void>;
+  settle(id: number, kind: SpendKind, usd: number, detail: string, q?: Sql): void | Promise<void> {
+    if (this.#bookedAtEstimate.delete(id)) return q ? Promise.resolve() : undefined;
+    if (q) return this.record(kind, usd, detail, q).finally(() => this.#pending.delete(id));
     try {
       this.record(kind, usd, detail);
     } finally {
@@ -123,7 +187,7 @@ export class SpendGuard {
    * At shutdown: books each live reservation (a call still in flight) at its estimate, with `detail`, under the hold's
    * own kind ('ai' or 'stt'), frees it and tells its owner. Returns how many were booked.
    */
-  settlePending(detail: string): number {
+  async settlePending(detail: string): Promise<number> {
     this.#closed = true;
     this.#pendingTotal(); // forgets expired reservations: they no longer count
     let n = 0;
@@ -133,9 +197,9 @@ export class SpendGuard {
       if (owner) {
         try {
           // The booking and the owner's own record of it (a meeting's speech part) are written together.
-          txSync(this.#db, () => {
-            this.record(r.kind, r.usd, detail);
-            owner();
+          await this.#db.tx(async (q) => {
+            await this.record(r.kind, r.usd, detail, q);
+            await owner(q);
           });
         } catch {
           // The owner's write failed and took the booking with it: book alone. The owner's record still says nothing is
@@ -155,12 +219,29 @@ export class SpendGuard {
   /**
    * A bad amount (NaN, Infinity, negative) is recorded as the cap, which pauses spending for the rest of the IST day.
    * `detail`: IDs and counts only, never message text.
+   *
+   * With `q`, the row is written through that transaction handle (it commits or rolls back with the caller's change).
+   * Without it, the row is written synchronously on the raw connection, as before: S1 only, for the callers that book
+   * inside their own transaction without passing its handle yet (src/meetings/sttParts.ts); it goes in S1.15.
    */
-  record(kind: SpendKind, usd: number, detail: string): void {
+  record(kind: SpendKind, usd: number, detail: string): void;
+  record(kind: SpendKind, usd: number, detail: string, q: Sql): Promise<void>;
+  record(kind: SpendKind, usd: number, detail: string, q?: Sql): void | Promise<void> {
     const bad = !Number.isFinite(usd) || usd < 0;
     const amount = bad ? this.#cap : usd;
     const note = bad ? `${detail} (invalid amount, recorded as the cap)` : detail;
     const now = this.#clock.now();
-    this.#db.raw.prepare('INSERT INTO spend (day, kind, usd, detail, at) VALUES (?, ?, ?, ?, ?)').run(istDate(now), kind, amount, note, now.toISOString());
+    const row = [istDate(now), kind, amount, note, now.toISOString()];
+    const count = () => {
+      this.#now()[kind] += amount;
+      this.#recorded++;
+    };
+    if (q) {
+      // Counted first: a check made while the write is in flight already sees it.
+      count();
+      return q.run(INSERT, row).then(() => undefined);
+    }
+    this.#db.raw.prepare(INSERT).run(...row);
+    count();
   }
 }

@@ -375,7 +375,7 @@ describe('transcribeMeeting', () => {
     ];
     const run = transcribeMeeting(id, deps(p));
     await inCall;
-    expect(spend.settlePending('shutdown (estimated)')).toBe(1);
+    expect(await spend.settlePending('shutdown (estimated)')).toBe(1);
     expect((await parts())[0]).toMatchObject({ state: 'unknown', booked: 'ceiling', jobId: null });
     accept();
     await run;
@@ -422,7 +422,7 @@ describe('transcribeMeeting', () => {
     ];
     void transcribeMeeting(id, deps(p));
     await inCall;
-    expect(spend.settlePending('shutdown (estimated)')).toBe(1);
+    expect(await spend.settlePending('shutdown (estimated)')).toBe(1);
     expect((await parts())[0]).toMatchObject({ state: 'unknown', booked: 'ceiling' });
 
     spend = new SpendGuard({ db, clock, capUsd: 5 }); // the restart
@@ -446,7 +446,7 @@ describe('transcribeMeeting', () => {
     ];
     const run = transcribeMeeting(id, deps(p));
     await inCall;
-    spend.settlePending('shutdown (estimated)');
+    await spend.settlePending('shutdown (estimated)');
     answer(result(said('late'), 1200));
     await run;
     expect(rows()).toHaveLength(1);

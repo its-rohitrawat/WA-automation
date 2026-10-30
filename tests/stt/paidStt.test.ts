@@ -98,7 +98,7 @@ describe('withSttHold', () => {
     const shutdown = vi.fn();
     const p = withSttHold<string>(spend, 0.2, 'meeting 4 part 1', () => new Promise((resolve) => (finish = resolve)), { onBookedAtShutdown: shutdown });
     await Promise.resolve();
-    expect(spend.settlePending('shutdown (estimated)')).toBe(1);
+    expect(await spend.settlePending('shutdown (estimated)')).toBe(1);
     expect(shutdown).toHaveBeenCalledOnce();
     finish({ result: 'late', costUsd: 0.05 });
     expect((await p).result).toBe('late');

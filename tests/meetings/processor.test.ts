@@ -590,7 +590,7 @@ describe('MeetingProcessor: stopping', () => {
     void processor(w).process(w.id, ctl.signal);
     await w.stt.started;
     ctl.abort();
-    expect(w.spend.settlePending('shutdown before the paid call finished (estimated)')).toBe(1);
+    expect(await w.spend.settlePending('shutdown before the paid call finished (estimated)')).toBe(1);
     expect(spendRows(w).map((s) => s.kind)).toEqual(['stt']);
     expect((await row(w)).sttParts[0]).toMatchObject({ booked: 'ceiling' });
   });
