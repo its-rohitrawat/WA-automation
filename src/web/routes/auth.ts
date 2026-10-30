@@ -4,7 +4,7 @@ import type { Logger } from '../../util/logger.ts';
 import type { AuditLog } from '../audit.ts';
 import { clientAddress } from '../guard.ts';
 import type { Guard, RateLimiter } from '../guard.ts';
-import { parseCookies, sendJson, serializeCookie } from '../http.ts';
+import { HttpError, parseCookies, readJson, sendJson, serializeCookie } from '../http.ts';
 import type { RequestContext, Router } from '../router.ts';
 import {
   authorizeUrl,
@@ -47,6 +47,9 @@ export function auditedWrite(customer: Db, platform: Db): AuditedWrite {
 /** The sign-out route (POST only, CSRF-checked). */
 export const SIGN_OUT_PATH = '/dashboard/auth/logout';
 const CALLBACK_PATH = '/dashboard/auth/callback';
+/** Where a member of several workspaces picks one. */
+const WORKSPACES_SCREEN = '/dashboard/workspaces';
+const TENANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const NAMES_MAX = 100;
 const CODE_MAX = 2048;
 
@@ -71,7 +74,15 @@ export interface AuthRouteDeps {
    * A member of a customer's workspace signing in through the dashboard (F7; Postgres with the platform on): its own
    * session in its workspace (the audit row first, in its Db), or null when the email is no member. Absent: owners only.
    */
-  memberSignIn?: (ctx: RequestContext, who: { email: string }) => Promise<{ id: string; csrf: string } | null>;
+  memberSignIn?: (ctx: RequestContext, who: { email: string }) => Promise<{ id: string; csrf: string; choose?: boolean } | null>;
+  /**
+   * A member's workspaces (customer sessions only): the live ones it is a member of, in the platform's order, and a
+   * switch to one of them (a new session there, the audit rows first, the browser's current session ended).
+   */
+  workspaces?: {
+    list: (email: string) => Promise<{ id: string; name: string }[]>;
+    open: (ctx: RequestContext, s: { email: string; tenantId: string; from: string }) => Promise<{ id: string; csrf: string } | null>;
+  };
   /** Whether the platform screens are on (PLATFORM_ENABLED, and mounted): /dashboard/api/me says so to the shell. */
   platform?: boolean;
   /** Code to ID token (production: `googleCodeExchanger`). */
@@ -195,7 +206,8 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
         if (before !== undefined) names.delete(hashToken(before));
         remember(member.id, who.name);
         res.setHeader('Set-Cookie', [clearSignin, sessionCookie(member.id, { secure })]);
-        redirect(res, p.returnTo);
+        // A member of several workspaces is signed in to the first, then picks one.
+        redirect(res, member.choose ? WORKSPACES_SCREEN : p.returnTo);
         return;
       }
 
@@ -265,6 +277,45 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
       role: s.role,
       // The shell shows the platform nav (Invite, Customers) only when this is true: the founder's, with the platform on.
       platform: d.platform === true && s.role === 'founder',
+      // A customer's member: how many workspaces it can switch between (a count, no names); the shell offers it from 2.
+      ...(s.role === 'owner' && d.workspaces ? { workspaces: (await d.workspaces.list(s.email)).length } : {}),
     });
+  });
+
+  // A member's workspaces: only those its own email is a member of, so no other customer's name ever shows here. The
+  // workspace is still only ever the session's: a switch makes a new session, it never reads a tenant from a request.
+  const workspaces = d.workspaces;
+  if (!workspaces) return;
+  const memberOnly = () => new HttpError(403, 'members_only', 'Only a member of a customer workspace can switch workspaces.');
+
+  d.router.get('/dashboard/api/workspaces', async (ctx: RequestContext) => {
+    const s = await d.guard.requireSession(ctx.req);
+    if (s.role !== 'owner') throw memberOnly();
+    const list = await workspaces.list(s.email);
+    sendJson(ctx.res, 200, { workspaces: list.map((w) => ({ id: w.id, name: w.name, current: w.id === s.tenantId })) });
+  });
+
+  d.router.post('/dashboard/api/workspaces/switch', async (ctx: RequestContext) => {
+    const { req, res } = ctx;
+    d.actionLimiter.hit(req, res);
+    const s = await d.guard.requireSession(req);
+    d.guard.requireCsrf(req, s);
+    if (s.role !== 'owner') throw memberOnly();
+    const body = await readJson(req, 1_024);
+    const tenantId = (body as { tenantId?: unknown } | null)?.tenantId;
+    if (typeof tenantId !== 'string' || !TENANT_ID.test(tenantId)) throw new HttpError(400, 'bad_request', 'Pick a workspace.');
+    // Not one of this member's: the same answer as one that does not exist.
+    if (!(await workspaces.list(s.email)).some((w) => w.id === tenantId)) throw new HttpError(404, 'not_found', 'Not found.');
+    if (tenantId === s.tenantId) {
+      sendJson(res, 200, { switched: false });
+      return;
+    }
+    const created = await workspaces.open(ctx, { email: s.email, tenantId, from: s.tenantId });
+    if (!created) throw new HttpError(404, 'not_found', 'Not found.');
+    const name = names.get(hashToken(s.id));
+    names.delete(hashToken(s.id));
+    remember(created.id, name);
+    res.setHeader('Set-Cookie', sessionCookie(created.id, { secure: secureFor(origin(req)) }));
+    sendJson(res, 200, { switched: true });
   });
 }

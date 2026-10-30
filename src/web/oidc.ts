@@ -40,6 +40,8 @@ export const DASHBOARD_SCREENS: readonly string[] = Object.freeze([
   'invite',
   // A customer's Getting started (SaaS S5, S4.8): the shell shows it to customer sessions only.
   'onboarding',
+  // A member of several customer workspaces picks one (the shell shows it from 2).
+  'workspaces',
 ]);
 const NAME_MAX = 80;
 

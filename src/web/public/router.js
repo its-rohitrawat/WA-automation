@@ -21,6 +21,9 @@ export const PLATFORM_NAV = [['customers', 'Customers', 'store'], ['invite', 'In
 /** A customer's first Workspace entry (SaaS S5, hookup 5.1). Never the founder's. @type {[string, string, string]} */
 export const ONBOARDING_NAV = ['onboarding', 'Getting started', 'flash'];
 
+/** A member's switch between its workspaces, at the start of System: only with 2 or more. @type {[string, string, string]} */
+export const WORKSPACES_NAV = ['workspaces', 'Switch workspace', 'brief'];
+
 /** The founder's own screens a customer never sees (plan S4.8 step 4); Customers and Invite are the founder's too. */
 const FOUNDER_ONLY = new Set(['connections', 'usage']);
 
@@ -29,19 +32,25 @@ export const LOCKED_UNTIL_ACTIVE = new Set(['clients', 'tasks', 'meetings', 'tra
 
 /**
  * Who is signed in, as GET /dashboard/api/me says: `role` 'owner' is a customer's owner; anything else is the founder
- * (on SQLite every session is the founder's). `platform`: the platform routes are mounted.
- * @typedef {{ role?: string, platform?: boolean }} Session
+ * (on SQLite every session is the founder's). `platform`: the platform routes are mounted. `workspaces`: how many
+ * workspaces a customer's member can switch between.
+ * @typedef {{ role?: string, platform?: boolean, workspaces?: number }} Session
  */
 
 /**
  * The sidebar for this session. The founder: NAV, with Customers and Invite when the platform is on. A customer:
- * Getting started first, then their Workspace, and System without the founder's own screens.
+ * Getting started first, then their Workspace, and System without the founder's own screens (with Switch workspace
+ * first for a member of several).
  * @param {Session} s
  * @returns {[string, [string, string, string][]][]}
  */
 export function navFor(s) {
   if (s.role === 'owner') {
-    return NAV.map(([group, items]) => [group, group === 'Workspace' ? [ONBOARDING_NAV, ...items] : items.filter(([id]) => !FOUNDER_ONLY.has(id))]);
+    const system = (/** @type {[string, string, string][]} */ items) => {
+      const own = items.filter(([id]) => !FOUNDER_ONLY.has(id));
+      return (s.workspaces ?? 1) > 1 ? [WORKSPACES_NAV, ...own] : own;
+    };
+    return NAV.map(([group, items]) => [group, group === 'Workspace' ? [ONBOARDING_NAV, ...items] : system(items)]);
   }
   return s.platform ? NAV.map(([group, items]) => [group, group === 'System' ? [...PLATFORM_NAV, ...items] : items]) : NAV;
 }

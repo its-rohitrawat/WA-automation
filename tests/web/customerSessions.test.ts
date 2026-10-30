@@ -66,6 +66,8 @@ beforeAll(async () => {
   const fakeGoogle = { exchange: () => Promise.reject(new Error('no Google in tests')), verifier: () => Promise.reject(new Error('no Google in tests')) };
   web = (await startDashboard({
     env: { ...env, DASHBOARD_PORT: 0 }, db, platformDb, log: silentLogger(), control: rt.control, platform: rt.platform, customerSessions: true,
+    // The customer's own Db, as main.ts gives it: the member sign-in and the workspace chooser are then mounted too.
+    customerDb: () => db,
     ...rt.agentRoutes, google: fakeGoogle,
   }))!;
   base = `http://127.0.0.1:${web.address()!.port}`;
@@ -121,6 +123,9 @@ const CUSTOMER_ALLOWED: Record<string, number[]> = {
   'GET /signup/callback': [302],
   // Google's return for the founder's reconnect: anyone else is only sent back to /dashboard (checked below).
   'GET /dashboard/connect/google/callback': [302],
+  // The workspace chooser: the customer's own workspaces (here its one), and a switch (an empty body is invalid).
+  'GET /dashboard/api/workspaces': [200],
+  'POST /dashboard/api/workspaces/switch': [400],
 };
 const REFUSED = [401, 403, 503];
 
@@ -153,6 +158,7 @@ describe('the route sweep: a customer session never gets a founder route (S4.8)'
     for (const r of web.router.routes()) {
       if (r.method !== 'GET' || r.pattern.startsWith('/signup') || r.pattern.startsWith('/dashboard/auth/')) continue;
       if (r.pattern === '/dashboard/api/whatsapp/link/stream') continue; // an event stream: it stays open
+      if (r.pattern === '/dashboard/api/workspaces') continue; // a customer member's own workspaces: the founder has none (403)
       const a = await call('GET', pathOf(r.pattern), founder);
       if (REFUSED.includes(a.status)) wrong.push(`GET ${r.pattern} -> ${a.status}`);
     }

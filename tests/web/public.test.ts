@@ -154,6 +154,12 @@ describe('router', () => {
     expect([...LOCKED_UNTIL_ACTIVE]).toEqual(['clients', 'tasks', 'meetings', 'tracker']);
   });
 
+  it('Switch workspace: first in System for a member of 2 or more workspaces only, never the founder’s', () => {
+    expect(group({ role: 'owner', workspaces: 2 }, 'System')).toEqual(['workspaces', 'automations', 'audit', 'settings']);
+    for (const s of [{ role: 'owner', workspaces: 1 }, { role: 'owner' }, { role: 'founder', platform: true, workspaces: 3 }]) expect(ids(s)).not.toContain('workspaces');
+    expect(LOCKED_UNTIL_ACTIVE.has('workspaces')).toBe(false); // a member can switch before its workspace is active
+  });
+
   it('only the session’s own screens have an address: anything else opens the overview', () => {
     try {
       showScreens({ role: 'owner', platform: true });

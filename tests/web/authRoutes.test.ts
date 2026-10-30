@@ -86,7 +86,7 @@ async function boot(
     /** The platform screens are on (PLATFORM_ENABLED): /dashboard/api/me says so. */
     platform?: boolean;
     /** A member's dashboard sign-in (F7). */
-    memberSignIn?: (email: string) => Promise<{ id: string; csrf: string } | null>;
+    memberSignIn?: (email: string) => Promise<{ id: string; csrf: string; choose?: boolean } | null>;
     publicUrl?: string;
     verifierThrows?: boolean;
     /** The code exchange rejects with this plain Error (not a SignInError). */
@@ -565,6 +565,17 @@ describe('a member signs in through the dashboard (F7)', () => {
     const r2 = await callback(b, l2.state, l2.signin);
     expect(r2.headers.location).toBe('/dashboard?denied=1');
     expect(cookieValue(r2, 'wa_session')).toBeUndefined();
+  });
+
+  it('a member of several workspaces is signed in to the first, then sent to pick one', async () => {
+    const b = await boot({
+      memberSignIn: async (email) => ({ ...(await new SessionStore(b.db, b.clock).create(email, 'Test')), choose: true }),
+    });
+    b.claims.email = 'member@example.com';
+    const l = await login(b, '?return=/dashboard/clients');
+    const r = await callback(b, l.state, l.signin);
+    expect(r.headers.location).toBe('/dashboard/workspaces');
+    expect(cookieValue(r, 'wa_session')).toBeDefined();
   });
 });
 

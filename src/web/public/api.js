@@ -116,8 +116,9 @@ export async function postLines(path, body, onEvent) {
 /**
  * The signed-in owner, or null when there is no session (401). Keeps the CSRF token in memory.
  * `platform`: the platform screens are on (SaaS S5: the founder's platform routes are mounted). `role`: 'founder', or
- * 'owner' for a customer's owner (S4.8); left out by a server before S4.8, which has only the founder.
- * @returns {Promise<{ email: string, name: string, signedInAt: string, expiresAt: string, platform: boolean, role: string } | null>}
+ * 'owner' for a customer's owner (S4.8); left out by a server before S4.8, which has only the founder. `workspaces`: how
+ * many workspaces a customer's member can switch between (1 when the server does not say).
+ * @returns {Promise<{ email: string, name: string, signedInAt: string, expiresAt: string, platform: boolean, role: string, workspaces: number } | null>}
  */
 export async function me() {
   const res = await fetch(BASE + '/me', { credentials: 'same-origin', headers: { Accept: 'application/json' } });
@@ -128,6 +129,7 @@ export async function me() {
     email: String(body?.email ?? ''), name: String(body?.name ?? ''), signedInAt: String(body?.signedInAt ?? ''), expiresAt: String(body?.expiresAt ?? ''),
     platform: body?.platform === true,
     role: body?.role === 'owner' ? 'owner' : 'founder',
+    workspaces: Number.isInteger(body?.workspaces) && body.workspaces > 0 ? body.workspaces : 1,
   };
 }
 

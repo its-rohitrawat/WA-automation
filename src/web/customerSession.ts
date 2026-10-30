@@ -18,13 +18,23 @@ export interface CustomerSessionDeps {
   sessions: Pick<SessionStore, 'create' | 'destroy'>;
 }
 
-/** Makes the session (no cookie); null without customerDb (SQLite). */
-export function customerSessionCreator(o: CustomerSessionDeps): (ctx: RequestContext, s: { email: string; tenantId: string }) => Promise<{ id: string; csrf: string } | null> {
+/**
+ * Makes the session (no cookie); null without customerDb (SQLite). `from`: a switch from another of the member's
+ * workspaces, whose audit log says the member left it (neither workspace is named in the other's log).
+ */
+export function customerSessionCreator(
+  o: CustomerSessionDeps,
+): (ctx: RequestContext, s: { email: string; tenantId: string; from?: string }) => Promise<{ id: string; csrf: string } | null> {
   return async (ctx, s) => {
     if (!o.customerDb) return null;
     const label = browserLabel(typeof ctx.req.headers['user-agent'] === 'string' ? ctx.req.headers['user-agent'] : undefined);
-    await new AuditLog(o.customerDb(s.tenantId), systemClock)
-      .record({ actor: s.email, event: 'Signed in', kind: 'auth', detail: label, requestId: ctx.requestId });
+    if (s.from !== undefined) {
+      await new AuditLog(o.customerDb(s.from), systemClock)
+        .record({ actor: s.email, event: 'Signed out', kind: 'auth', detail: `${label}, switched to another workspace`, requestId: ctx.requestId });
+    }
+    await new AuditLog(o.customerDb(s.tenantId), systemClock).record({
+      actor: s.email, event: 'Signed in', kind: 'auth', detail: s.from === undefined ? label : `${label}, switched from another workspace`, requestId: ctx.requestId,
+    });
     const earlier = parseCookies(typeof ctx.req.headers.cookie === 'string' ? ctx.req.headers.cookie : undefined)[SESSION_COOKIE];
     if (earlier !== undefined) await o.sessions.destroy(earlier);
     return o.sessions.create(s.email, label, undefined, s.tenantId);

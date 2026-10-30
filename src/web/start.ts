@@ -4,7 +4,7 @@ import type { Db } from '../store/db.ts';
 import { systemClock } from '../util/clock.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
-import { membershipsFor } from '../platform/store.ts';
+import { getTenant, membershipsFor } from '../platform/store.ts';
 import { AuditLog } from './audit.ts';
 import { ACTION_LIMIT, createGuard, RateLimiter, SIGNIN_LIMIT } from './guard.ts';
 import type { Guard } from './guard.ts';
@@ -118,6 +118,13 @@ export async function startDashboard(o: {
     (await membershipsFor(platformDb, email)).filter((m) => (m.status as string) !== 'removed').map((m) => m.tenantId);
   const guard = createGuard({ sessions, ownerEmails: env.DASHBOARD_OWNER_EMAILS, port, ...publicUrl, ...(o.customerSessions ? { memberships } : {}) });
   const createCustomerSession = customerSessionCreator({ customerDb: o.customerDb, sessions });
+  // A member's customer workspaces with their names, in the platform's order: only the ones its own email is in (the
+  // guard's memberships), never the founder's.
+  const workspacesOf = async (email: string) => {
+    const ids = (await memberships(email)).filter((id) => id !== FOUNDER_TENANT_ID);
+    const rows = await Promise.all(ids.map((id) => getTenant(platformDb, id)));
+    return rows.flatMap((t) => (t ? [{ id: t.id, name: t.name }] : []));
+  };
   const audit = o.audit ?? new AuditLog(o.db, clock);
   const actions = new RateLimiter({ ...ACTION_LIMIT, clock });
   registerAuthRoutes({
@@ -133,12 +140,14 @@ export async function startDashboard(o: {
     port,
     audited: auditedWrite(o.db, platformDb),
     platform: o.platform === true,
-    // A member signs in to its first live workspace (a chooser for several comes later); never the founder's.
+    // A member signs in to its first live workspace, never the founder's; with several, it then picks one (the switch).
     ...(o.customerSessions && o.customerDb ? {
       memberSignIn: async (ctx: RequestContext, who: { email: string }) => {
-        const tenantId = (await memberships(who.email)).find((id) => id !== FOUNDER_TENANT_ID);
-        return tenantId ? createCustomerSession(ctx, { email: who.email, tenantId }) : null;
+        const mine = await workspacesOf(who.email);
+        const created = mine[0] ? await createCustomerSession(ctx, { email: who.email, tenantId: mine[0].id }) : null;
+        return created ? { ...created, choose: mine.length > 1 } : null;
       },
+      workspaces: { list: workspacesOf, open: createCustomerSession },
     } : {}),
     exchange:
       o.google?.exchange ??

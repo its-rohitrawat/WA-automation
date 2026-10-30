@@ -15,6 +15,7 @@ import { renderPlaceholder, renderStarting } from './views/placeholder.js';
 import { SCREEN_MOUNTS } from './views/registry.js';
 import './views/screens.js';
 import './views/platform.js';
+import './views/workspaces.js';
 
 SCREEN_MOUNTS.set('clients', mountClients);
 SCREEN_MOUNTS.set('connections', mountConnections);
@@ -43,7 +44,7 @@ const STATUS_MS = 10_000;
 const OVERVIEW_MS = 30_000;
 const THEME_KEY = 'wa-agent-theme';
 
-/** @type {{ email: string, name: string, platform?: boolean, role?: string } | null} */
+/** @type {{ email: string, name: string, platform?: boolean, role?: string, workspaces?: number } | null} */
 let owner = null;
 /** A customer's workspace is active (GET /platform/onboarding): until then their Clients, Tasks, Meetings and Tracker are locked. */
 let active = false;
@@ -84,7 +85,7 @@ applyTheme(savedTheme());
 
 // ---------- the shell ----------
 /** This session, as the nav reads it. */
-const session = () => ({ role: owner?.role, platform: owner?.platform === true });
+const session = () => ({ role: owner?.role, platform: owner?.platform === true, workspaces: owner?.workspaces ?? 1 });
 
 /** A customer's screen that waits for their workspace to be active. */
 const locked = (/** @type {string} */ screen) => owner?.role === 'owner' && !active && LOCKED_UNTIL_ACTIVE.has(screen);
