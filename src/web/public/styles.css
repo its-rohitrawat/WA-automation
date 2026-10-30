@@ -137,6 +137,9 @@ a { color: inherit; text-decoration: none; }
 .nav a.on { color: var(--text); background: rgba(37,211,102,.12); }
 .nav a.on::before { content: ""; position: absolute; left: -12px; top: 9px; bottom: 9px; width: 3px; border-radius: 0 3px 3px 0; background: var(--green); box-shadow: 0 0 12px rgba(37,211,102,.7); }
 .nav a.on svg { color: var(--green); }
+/* A customer's screen that opens once their workspace is active (SaaS S4.8): dimmed, with a lock; a click opens Getting started. */
+.nav a.locked { opacity: .55; }
+.nav a.locked > svg:last-child { margin-left: auto; width: 14px; height: 14px; }
 .nav a .count { margin-left: auto; font: 600 11px var(--mono); padding: 2px 7px; border-radius: 999px; background: rgba(217,79,99,.16); color: #f07585; }
 .app.collapsed .nav a span, .app.collapsed .nav a .count, .app.collapsed .nav-label, .app.collapsed .side-top span, .app.collapsed .side-health div { display: none; }
 .app.collapsed .nav a { justify-content: center; padding: 10px; }

@@ -16,7 +16,7 @@ import { ago, date, greeting, initials, usd, when } from '../../src/web/public/f
 // @ts-expect-error -- browser module (see above)
 import { HI } from '../../src/web/public/icons.js';
 // @ts-expect-error -- browser module (see above)
-import { NAV, PLATFORM_NAV, SCREENS, navFor, parsePath, pathFor, showPlatform } from '../../src/web/public/router.js';
+import { LOCKED_UNTIL_ACTIVE, NAV, ONBOARDING_NAV, PLATFORM_NAV, SCREENS, navFor, parsePath, pathFor, showScreens } from '../../src/web/public/router.js';
 
 const PUBLIC = fileURLToPath(new URL('../../src/web/public/', import.meta.url));
 const publicFiles = (ext: string) =>
@@ -70,7 +70,8 @@ describe('front-end files and the Content-Security-Policy', () => {
       for (const m of text.matchAll(/^\s*\['[^']+', '([\w-]+)', /gm)) names.add(m[1]!);
     }
     for (const [, items] of NAV) for (const [, , ic] of items) names.add(ic);
-    for (const [, , ic] of PLATFORM_NAV) names.add(ic);
+    for (const [, , ic] of [...PLATFORM_NAV, ONBOARDING_NAV]) names.add(ic);
+    names.add('lock'); // a customer's locked screens (app.js)
     expect(names.size).toBeGreaterThan(10);
     expect([...names].filter((n) => !(n in HI))).toEqual([]);
   });
@@ -129,22 +130,40 @@ describe('router', () => {
     for (const screen of SCREENS.keys()) expect(parsePath(pathFor(screen))).toEqual({ screen, sub: null });
   });
 
-  it('the platform screens (SaaS S5) only when the server says the platform is on', () => {
-    const ids = (platform: boolean) => (navFor(platform) as [string, [string][]][]).flatMap(([, items]) => items.map(([id]) => id));
-    // Off (PLATFORM_ENABLED unset, or a server without the platform): no entry, and no address opens them.
-    expect(ids(false)).not.toContain('customers');
-    expect(ids(false)).not.toContain('invite');
-    expect(parsePath('/dashboard/customers')).toEqual({ screen: 'overview', sub: null });
-    // On: both at the start of System; the rest is unchanged.
-    const system = (navFor(true) as [string, [string][]][]).find(([g]) => g === 'System')![1].map(([id]) => id);
-    expect(system.slice(0, 3)).toEqual(['customers', 'invite', 'connections']);
-    expect(ids(true).filter((id) => id !== 'customers' && id !== 'invite')).toEqual(ids(false));
+  type Nav = [string, [string][]][];
+  const group = (s: object, g: string) => (navFor(s) as Nav).find(([name]) => name === g)![1].map(([id]) => id);
+  const ids = (s: object) => (navFor(s) as Nav).flatMap(([, items]) => items.map(([id]) => id));
+  const FOUNDER_ONLY = ['customers', 'invite', 'connections', 'usage'];
+
+  it('the founder: today’s nav, with Customers and Invite only when the platform is on (SaaS S5)', () => {
+    const today = (NAV as Nav).flatMap(([, items]) => items.map(([id]) => id));
+    // Off (PLATFORM_ENABLED unset), and a server before S4.8 that sends no role: exactly today's nav.
+    for (const s of [{ role: 'founder', platform: false }, {}]) expect(ids(s)).toEqual(today);
+    expect(group({ role: 'founder', platform: true }, 'System').slice(0, 3)).toEqual(['customers', 'invite', 'connections']);
+    expect(ids({ role: 'founder', platform: true }).filter((id) => id !== 'customers' && id !== 'invite')).toEqual(today);
+    expect(ids({ role: 'founder', platform: true })).not.toContain('onboarding');
+  });
+
+  it('a customer: Getting started first, their workspace, and never the founder’s screens, platform on or off', () => {
+    for (const platform of [false, true]) {
+      const s = { role: 'owner', platform };
+      expect(group(s, 'Workspace')).toEqual(['onboarding', 'overview', 'clients', 'tasks', 'meetings', 'activity', 'tracker']);
+      expect(group(s, 'System')).toEqual(['automations', 'audit', 'settings']);
+      for (const id of FOUNDER_ONLY) expect(ids(s)).not.toContain(id);
+    }
+    expect([...LOCKED_UNTIL_ACTIVE]).toEqual(['clients', 'tasks', 'meetings', 'tracker']);
+  });
+
+  it('only the session’s own screens have an address: anything else opens the overview', () => {
     try {
-      showPlatform(true);
+      showScreens({ role: 'owner', platform: true });
+      expect(parsePath('/dashboard/onboarding')).toEqual({ screen: 'onboarding', sub: null });
+      for (const id of FOUNDER_ONLY) expect(parsePath(`/dashboard/${id}`)).toEqual({ screen: 'overview', sub: null });
+      showScreens({ role: 'founder', platform: true });
       expect(parsePath('/dashboard/customers')).toEqual({ screen: 'customers', sub: null });
-      expect(parsePath('/dashboard/invite')).toEqual({ screen: 'invite', sub: null });
+      expect(parsePath('/dashboard/onboarding')).toEqual({ screen: 'overview', sub: null });
     } finally {
-      showPlatform(false);
+      showScreens({ role: 'founder', platform: false });
     }
     expect(parsePath('/dashboard/invite')).toEqual({ screen: 'overview', sub: null });
     expect([...SCREENS.keys()]).toHaveLength(11);

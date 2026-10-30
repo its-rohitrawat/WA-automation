@@ -18,27 +18,45 @@ export const NAV = ([
  */
 export const PLATFORM_NAV = [['customers', 'Customers', 'store'], ['invite', 'Invite a customer', 'mail']];
 
+/** A customer's first Workspace entry (SaaS S5, hookup 5.1). Never the founder's. @type {[string, string, string]} */
+export const ONBOARDING_NAV = ['onboarding', 'Getting started', 'flash'];
+
+/** The founder's own screens a customer never sees (plan S4.8 step 4); Customers and Invite are the founder's too. */
+const FOUNDER_ONLY = new Set(['connections', 'usage']);
+
+/** A customer's screens that stay locked until their workspace is active (plan S4.8 step 4). */
+export const LOCKED_UNTIL_ACTIVE = new Set(['clients', 'tasks', 'meetings', 'tracker']);
+
 /**
- * The sidebar for this session: NAV, with the platform screens when `platform` is true.
- * @param {boolean} platform
+ * Who is signed in, as GET /dashboard/api/me says: `role` 'owner' is a customer's owner; anything else is the founder
+ * (on SQLite every session is the founder's). `platform`: the platform routes are mounted.
+ * @typedef {{ role?: string, platform?: boolean }} Session
+ */
+
+/**
+ * The sidebar for this session. The founder: NAV, with Customers and Invite when the platform is on. A customer:
+ * Getting started first, then their Workspace, and System without the founder's own screens.
+ * @param {Session} s
  * @returns {[string, [string, string, string][]][]}
  */
-export function navFor(platform) {
-  return platform ? NAV.map(([group, items]) => [group, group === 'System' ? [...PLATFORM_NAV, ...items] : items]) : NAV;
+export function navFor(s) {
+  if (s.role === 'owner') {
+    return NAV.map(([group, items]) => [group, group === 'Workspace' ? [ONBOARDING_NAV, ...items] : items.filter(([id]) => !FOUNDER_ONLY.has(id))]);
+  }
+  return s.platform ? NAV.map(([group, items]) => [group, group === 'System' ? [...PLATFORM_NAV, ...items] : items]) : NAV;
 }
 
 /** @type {Map<string, { group: string, label: string, icon: string }>} */
 export const SCREENS = new Map(NAV.flatMap(([group, items]) => items.map(([id, label, ic]) => [id, { group, label, icon: ic }])));
 
 /**
- * Adds the platform screens to SCREENS (and so to parsePath), or takes them out. Called once the session is known.
- * @param {boolean} on
+ * Makes SCREENS (and so parsePath) exactly this session's screens: an address of a screen it does not have opens the
+ * overview. Called once the session is known.
+ * @param {Session} s
  */
-export function showPlatform(on) {
-  for (const [id, label, ic] of PLATFORM_NAV) {
-    if (on) SCREENS.set(id, { group: 'System', label, icon: ic });
-    else SCREENS.delete(id);
-  }
+export function showScreens(s) {
+  SCREENS.clear();
+  for (const [group, items] of navFor(s)) for (const [id, label, ic] of items) SCREENS.set(id, { group, label, icon: ic });
 }
 
 /**

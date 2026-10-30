@@ -38,6 +38,8 @@ export const DASHBOARD_SCREENS: readonly string[] = Object.freeze([
   // The founder's platform screens (SaaS S5); the shell shows them only when the platform is on.
   'customers',
   'invite',
+  // A customer's Getting started (SaaS S5, S4.8): the shell shows it to customer sessions only.
+  'onboarding',
 ]);
 const NAME_MAX = 80;
 
