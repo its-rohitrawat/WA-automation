@@ -39,16 +39,21 @@ export class SqliteDb implements Db {
     this.#txMaxMs = o.txMaxMs ?? (process.env.NODE_ENV === 'test' || process.env.VITEST ? 1_000 : 0);
   }
 
-  /** Opens the file with today's pragmas. The caller migrates (store/db.ts). */
-  static open(file: string, o: { txMaxMs?: number } = {}): SqliteDb {
-    if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
-    const raw = new Database(file);
+  /**
+   * Opens the file with today's pragmas. The caller migrates (store/db.ts). `readonly` (the copy tool, S3): the file
+   * must exist, every write is refused, and the pragmas that write (journal_mode, secure_delete) and the folder creation
+   * are skipped; a -wal or -shm file SQLite itself needs may still appear beside a WAL file.
+   */
+  static open(file: string, o: { txMaxMs?: number; readonly?: boolean } = {}): SqliteDb {
+    const readonly = o.readonly === true;
+    if (file !== ':memory:' && !readonly) mkdirSync(dirname(file), { recursive: true });
+    const raw = readonly ? new Database(file, { readonly: true, fileMustExist: true }) : new Database(file);
     try {
-      raw.pragma('journal_mode = WAL');
+      if (!readonly) raw.pragma('journal_mode = WAL');
       raw.pragma('foreign_keys = ON');
       raw.pragma('busy_timeout = 5000');
       // Deleted content is overwritten, so wiped download details (media.ref_enc) do not stay in free pages.
-      raw.pragma('secure_delete = ON');
+      if (!readonly) raw.pragma('secure_delete = ON');
     } catch (e) {
       raw.close();
       throw e;

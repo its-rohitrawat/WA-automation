@@ -1,8 +1,43 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SqliteDb, TxMisuseError } from '../../../src/store/engine/sqlite.ts';
 
 const open = () => SqliteDb.open(':memory:', { txMaxMs: 1_000 });
+
+describe('SqliteDb.open read-only (S3.3)', () => {
+  let tmp: string;
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'wa-ro-'));
+  });
+  afterEach(() => rmSync(tmp, { recursive: true, force: true }));
+
+  it('opens a file read-only: writes are refused and the file is not changed', async () => {
+    const file = join(tmp, 'ro.db');
+    const w = SqliteDb.open(file);
+    await w.exec('CREATE TABLE t (a INTEGER)');
+    await w.run('INSERT INTO t VALUES (7)');
+    await w.close();
+    const before = readFileSync(file);
+    const r = SqliteDb.open(file, { readonly: true });
+    try {
+      await expect(r.run('INSERT INTO t VALUES (1)')).rejects.toThrow(/readonly/);
+      await expect(r.exec('CREATE TABLE u (b INTEGER)')).rejects.toThrow(/readonly/);
+      expect(await r.all('SELECT a FROM t')).toEqual([{ a: 7 }]);
+    } finally {
+      await r.close(); // closed even when a check fails, so the folder can be removed
+    }
+    expect(readFileSync(file).equals(before)).toBe(true);
+  });
+
+  it('never creates a missing file or its folder', () => {
+    const file = join(tmp, 'missing', 'tracker.db');
+    expect(() => SqliteDb.open(file, { readonly: true })).toThrow();
+    expect(existsSync(join(tmp, 'missing'))).toBe(false);
+  });
+});
 
 describe('SqliteDb', () => {
   it('runs get, all and run with positional and named values', async () => {
