@@ -70,6 +70,17 @@ describe('TokenStore', () => {
     expect(() => decrypt(key, blob)).toThrow();
     expect(() => decrypt(key, blob, Buffer.from('google_refresh_token'))).toThrow();
   });
+
+  it('per customer (S4.7): a token saved with customer A’s data key opens only with it, even copied into B’s store', async () => {
+    const [dbA, dbB] = [await seededDb(), await seededDb()];
+    const [keyA, keyB] = [randomBytes(32), randomBytes(32)];
+    await new TokenStore(dbA, keyA).save(TOKEN);
+    await new TokenStore(dbB, keyB).save('b-token');
+    expect(await new TokenStore(dbA, keyA).load()).toBe(TOKEN);
+    await expect(new TokenStore(dbA, keyB).load()).rejects.toThrowError(TokenDecryptError);
+    await setKv(dbB, 'google_refresh_token', (await getKv(dbA, 'google_refresh_token'))!);
+    await expect(new TokenStore(dbB, keyB).load()).rejects.toThrowError(TokenDecryptError);
+  });
 });
 
 describe('parseCallback', () => {
