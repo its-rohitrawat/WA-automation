@@ -163,6 +163,13 @@ function gate() {
   return { promise, release };
 }
 
+/** Opens once hit() has been called n times: a test waits for the calls themselves, never for a clock under load. */
+function calls(n: number) {
+  const g = gate();
+  let left = n;
+  return { promise: g.promise, hit: () => void (--left === 0 && g.release()) };
+}
+
 /** A pending image of client SHA stored before the app starts, as `cli link` leaves it: sealed details, created at `createdAt`. */
 async function storedImage(db: Db, sealer: MediaRefSealer, createdAt: string): Promise<void> {
   await insertMessage(db, {
@@ -316,14 +323,16 @@ describe('app with shared files', () => {
 
   it('stop() gives up on a file read that never finishes once drainMs is over', async () => {
     const g = gate();
+    const reading = gate();
     const extract = vi.fn<Extractor>(async () => {
+      reading.release();
       await g.promise;
       return NOTHING_READ;
     });
     const { db, app, sock } = await setup({ media: { extract }, drainMs: 5_000 });
     shareImage(sock);
     await settled();
-    await vi.waitFor(() => expect(extract).toHaveBeenCalled());
+    await reading.promise; // the event, not the clock: the file is being read
     let stopped = false;
     const p = app.stop().then(() => {
       stopped = true;
@@ -342,15 +351,20 @@ describe('app with shared files', () => {
   it('stop() starts no other file while it waits for the one in flight', async () => {
     const g = gate();
     let n = 0;
+    const first = gate();
     const fetcher = vi.fn<MediaFetcher>(async () => {
-      if (++n === 1) await g.promise;
+      if (++n === 1) {
+        first.release();
+        await g.promise;
+      }
       return Buffer.from('jpeg-bytes');
     });
     const { db, app, sock } = await setup({ media: { fetcher, concurrency: 1 } });
     shareImage(sock, 'IMG1');
     shareImage(sock, 'IMG2');
     await settled();
-    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+    await first.promise; // the first download has started
+    expect(fetcher).toHaveBeenCalledTimes(1);
     expect(app.mediaQueue!.active).toBe(1);
     let stopped = false;
     const p = app.stop().then(() => {
@@ -369,13 +383,15 @@ describe('app with shared files', () => {
 
   it('reads three files at once by default (Phase 2b Task 10)', async () => {
     const g = gate();
+    const three = calls(3);
     const fetcher = vi.fn<MediaFetcher>(async () => {
+      three.hit();
       await g.promise;
       return Buffer.from('jpeg-bytes');
     });
     const { db, app, sock } = await setup({ media: { fetcher } });
     for (const id of ['IMG1', 'IMG2', 'IMG3', 'IMG4']) shareImage(sock, id);
-    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
+    await three.promise; // three downloads have started
     await vi.advanceTimersByTimeAsync(1_000);
     expect(fetcher).toHaveBeenCalledTimes(3);
     expect(app.mediaQueue!.active).toBe(3);
@@ -455,7 +471,9 @@ describe('app media spend (review round 1)', () => {
   it('a paid file read still running at shutdown is given up after drainMs and booked once, at its estimate', async () => {
     const g = gate();
     const ai = new FakeMediaAi();
+    const asked = gate();
     const describeImage = vi.spyOn(ai, 'describeImage').mockImplementation(async () => {
+      asked.release();
       await g.promise;
       return { text: 'A blue square', usage: ZERO_USAGE, costUsd: 0.01, fallbackUsed: false };
     });
@@ -464,7 +482,7 @@ describe('app media spend (review round 1)', () => {
     const { db, app, sock } = await setup({ media: { ai, fetcher, extract: undefined }, drainMs: 5_000 });
     shareImage(sock);
     await settled();
-    await vi.waitFor(() => expect(describeImage).toHaveBeenCalled());
+    await asked.promise; // the paid read has started
     expect(await ledger(db)).toEqual([]);
     let stopped = false;
     const p = app.stop().then(() => {
@@ -782,12 +800,14 @@ describe('app start time (15a, 15f)', () => {
   ])('the reconciler and the health counts share the start time (%s)', async (_name, startedAt, expected) => {
     const sealer = new MediaRefSealer(randomBytes(32));
     const g = gate();
+    const fetching = gate();
     const fetcher = vi.fn<MediaFetcher>(async () => {
+      fetching.release();
       await g.promise; // the file stays pending while the test looks
       return Buffer.from('jpeg-bytes');
     });
     const { db, ai, app } = await setup({ startedAt, media: { sealer, fetcher }, prepare: (db) => storedImage(db, sealer, minutesBefore(120).toISOString()) });
-    await vi.waitFor(() => expect(fetcher).toHaveBeenCalled());
+    await fetching.promise; // the download has started
     expect((await readHealthSnapshot(db))!.media).toEqual({ pending: 1, stale: expected.stale, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0 });
     await vi.advanceTimersByTimeAsync(241_000);
     if (expected.blocks) expect(ai.calls).toHaveLength(0);
@@ -1154,7 +1174,9 @@ describe('app voice notes (Phase 2b Task 10)', () => {
 
   it('with the local engine, one voice note at a time takes a media slot: images use the others', async () => {
     const g = gate();
+    const three = calls(3);
     const fetcher = vi.fn<MediaFetcher>(async () => {
+      three.hit();
       await g.promise;
       return Buffer.from('bytes');
     });
@@ -1162,7 +1184,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const { app, sock } = await setup({ media: { voice, fetcher, extract: undefined } });
     for (const id of ['VN1', 'VN2', 'VN3']) shareVoice(sock, id);
     for (const id of ['IMG1', 'IMG2']) shareImage(sock, id);
-    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
+    await three.promise; // three downloads have started
     await vi.advanceTimersByTimeAsync(1_000);
     expect(fetcher).toHaveBeenCalledTimes(3);
     expect(fetcher.mock.calls.map(([ref]) => ref.contentType).sort()).toEqual(['audioMessage', 'imageMessage', 'imageMessage']);
@@ -1174,7 +1196,9 @@ describe('app voice notes (Phase 2b Task 10)', () => {
 
   it('with a paid transcriber there is no voice lane: voice notes may take every slot', async () => {
     const g = gate();
+    const three = calls(3);
     const fetcher = vi.fn<MediaFetcher>(async () => {
+      three.hit();
       await g.promise;
       return Buffer.from('bytes');
     });
@@ -1182,7 +1206,8 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     for (const id of ['VN1', 'VN2', 'VN3']) shareVoice(sock, id);
     shareImage(sock, 'IMG1');
     await settled();
-    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
+    await three.promise; // three downloads have started
+    expect(fetcher).toHaveBeenCalledTimes(3);
     expect(fetcher.mock.calls.map(([ref]) => ref.contentType)).toEqual(['audioMessage', 'audioMessage', 'audioMessage']);
     g.release();
     await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0), SLOW_IO);
