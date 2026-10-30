@@ -19,12 +19,6 @@ function files(dir: string): string[] {
   return out.sort();
 }
 
-/**
- * Lane B's sites, which lane B fixes (the run's bug 1): at most this many each until then. A ceiling, so the fix
- * passes here unchanged; lane A then takes the entries out.
- */
-const PENDING: Record<string, number> = { 'store/media.ts': 7, 'store/meetings.ts': 7 };
-
 /** The text from `open` (just past a parenthesis) to its matching close, with quoted strings skipped. */
 function argument(text: string, open: number): string {
   let depth = 1;
@@ -66,13 +60,8 @@ function offences(path: string, text: string): string[] {
 }
 
 describe('every SUM( in src runs on both engines (S2.7, the first test:pg run)', () => {
-  it('no SUM over a comparison or a boolean, beyond lane B’s pending sites', () => {
-    const wrong: string[] = [];
-    for (const f of files(SRC)) {
-      const found = offences(f, readFileSync(join(SRC, f), 'utf8'));
-      if (found.length > (PENDING[f] ?? 0)) wrong.push(...found);
-    }
-    expect(wrong).toEqual([]);
+  it('no SUM over a comparison or a boolean anywhere in src', () => {
+    expect(files(SRC).flatMap((f) => offences(f, readFileSync(join(SRC, f), 'utf8')))).toEqual([]);
   });
 
   it('catches a comparison, a boolean, IN and EXISTS, also behind a function call; passes CASE, a value and JS sum()', () => {
@@ -87,13 +76,5 @@ describe('every SUM( in src runs on both engines (S2.7, the first test:pg run)',
     ]) expect(booleanSum(fine), fine).toBe(false);
     expect(offences('x.ts', "const a = `SELECT SUM(status = 'done') AS d FROM t`;")).toEqual(["x.ts:1: SUM(status = 'done')"]);
     expect(offences('x.ts', "// SUM(status = 'done') in a comment is fine\nconst n = sum('open');")).toEqual([]);
-  });
-
-  it('lane B’s allowance is only for its own two files, and no more than it has', () => {
-    for (const [f, n] of Object.entries(PENDING)) {
-      const found = offences(f, readFileSync(join(SRC, f), 'utf8')).length;
-      expect(found, f).toBeLessThanOrEqual(n);
-    }
-    expect(Object.keys(PENDING)).toEqual(['store/media.ts', 'store/meetings.ts']);
   });
 });
