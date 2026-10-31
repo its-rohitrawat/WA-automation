@@ -150,8 +150,9 @@ The agent and its jobs connect with their own limited roles, never the superuser
    DATABASE_OWNER_URL=postgres://wa_owner:<owner password>@127.0.0.1:5432/wa_agent
    ```
 
-3. **Create the roles and the database** (waagent window). It asks for the `postgres` password from part 1, step 3,
-   then for the "… backup" password, twice. It shows nothing as you type:
+3. **Create the roles and the database** (waagent window). `db-bootstrap` creates the database itself, with the right
+   settings (text compared byte by byte, as SQLite does). Never create the database by hand. It asks for the
+   `postgres` password from part 1, step 3, then for the "… backup" password, twice. It shows nothing as you type:
 
    ```sh
    npm run cli -- db-bootstrap
@@ -162,7 +163,8 @@ The agent and its jobs connect with their own limited roles, never the superuser
    - from `db-bootstrap`: `Created role wa_owner`, then the same for `wa_app`, `wa_platform` and `wa_backup`
      (`Updated role …` if you run it again), `Created database wa_agent, owned by wa_owner`, a `Granted wa_agent: …`
      line and `Next: npm run cli -- db-migrate`;
-   - from `db-migrate`: `Applied P1`, `Applied P2` and `Applied P3` (`Already at P3: nothing to apply` the next time).
+   - from `db-migrate`: `Applied P1`, `Applied P2`, `Applied P3` and `Applied P4` (`Already at P4: nothing to apply` the
+     next time).
 
    No password is ever printed.
 
@@ -460,6 +462,12 @@ and the menu entries go away, and nothing is deleted: the invites and the busine
 on again.
 
 ## Part 8. When something looks wrong
+
+**If a command says `This database must be created by db-bootstrap (byte-order collation C). Nothing was changed.`**
+The database was not made by `db-bootstrap` (part 2, step 3), so its text settings are wrong for the agent. Never
+change an existing database's settings (no `ALTER DATABASE`). It has to be made again, fresh, by `db-bootstrap`.
+Before the switch (part 4) nothing of yours is in it. If the agent already runs on it, use rollback A (part 6) first.
+Send Claude that one line for the steps.
 
 Send Claude:
 - the report lines from the command (table names, counts, OK or MISMATCH);
