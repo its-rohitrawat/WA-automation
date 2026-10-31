@@ -98,13 +98,17 @@ describe('Health and shared files', () => {
     h.setMedia(counts({ pending: 1, stale: 1 }));
     // A group with an AI error stays failed: waiting for a file is not a success that clears it.
     h.recordOutcome(1, { status: 'failed', errorCode: 'refusal' });
-    // Written behind the change, by itself: on Postgres it lands a moment later.
-    await vi.waitFor(async () => expect((await readHealthSnapshot(db))?.line.text).toBe('⚠️ 1 group waiting (AI error)'));
-    const failed = (await readHealthSnapshot(db))!;
+    // Written behind the change, by itself: on Postgres it lands a moment later, and a write that lands late may show
+    // the one before it until it is written again. So each read waits for the snapshot it expects.
+    let failed: Awaited<ReturnType<typeof readHealthSnapshot>>;
+    await vi.waitFor(async () => {
+      failed = await readHealthSnapshot(db);
+      expect(failed?.line.text).toBe('⚠️ 1 group waiting (AI error)');
+    });
     h.recordOutcome(1, { status: 'waiting' });
     expect(h.line().text).toBe('⚠️ 1 group waiting (AI error)');
     expect(h.snapshot().media).toEqual(counts({ pending: 1, stale: 1 }));
-    expect(await readHealthSnapshot(db)).toEqual(failed);
+    await vi.waitFor(async () => expect(await readHealthSnapshot(db)).toEqual(failed));
     // A paused group stays paused too.
     h.recordOutcome(2, { status: 'paused' });
     h.recordOutcome(2, { status: 'waiting' });

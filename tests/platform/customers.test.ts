@@ -3,7 +3,7 @@ import { listCustomers, pauseCustomer, resumeCustomer, type CustomersDeps } from
 import { PlatformError } from '../../src/platform/errors.ts';
 import { createInvite, redeemInvite } from '../../src/platform/invites.ts';
 import type { OnboardingProbes, ProbeState, StepId } from '../../src/platform/onboarding.ts';
-import { ensureFounderTenant, getTenant } from '../../src/platform/store.ts';
+import { ensureFounderTenant, FOUNDER_TENANT_ID, getTenant } from '../../src/platform/store.ts';
 import type { Db } from '../../src/store/db.ts';
 import { platformTestDb, type PlatformTestDb } from '../helpers/platformTestDb.ts';
 import { manualClock, type ManualClock } from '../../src/util/clock.ts';
@@ -52,8 +52,10 @@ describe('the Customers list', () => {
     await customer('Gupta Events', false);
     steps[kapoor] = { whatsapp: 'done', key: 'todo' };
     const v = await listCustomers(d);
+    // The founder's own name: what ensureFounderTenant gave it on SQLite, what P1 seeded on Postgres.
+    const founderName = (await getTenant(db, FOUNDER_TENANT_ID))!.name;
     expect(v.customers.map((c) => [c.name, c.status, c.founder])).toEqual([
-      ['Your studio', 'active', true], ['Kapoor Design Studio', 'onboarding', false], ['Gupta Events', 'invited', false],
+      [founderName, 'active', true], ['Kapoor Design Studio', 'onboarding', false], ['Gupta Events', 'invited', false],
     ]);
     expect(v.customers[1]).toMatchObject({ onboarding: { done: 1, total: 6, next: 'Add your Anthropic API key' }, aiKey: 'missing', memoryMb: null });
     expect(v.customers[2]).toMatchObject({ onboarding: null, aiKey: null });
