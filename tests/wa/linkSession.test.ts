@@ -478,6 +478,7 @@ describe('founder relink keeps every message already taken', () => {
     await tick();
     const fresh = t.sockets[1]!;
     upsert(fresh, 'c1'); // taken by the linking gateway
+    fresh.emit('messages.upsert', { type: 'notify', messages: [waText('y1', 'not ours', { group: OTHER_GROUP })] });
     t.sessions.cancel(link.id);
     await t.sessions.settled(link.id);
     upsert(fresh, 'c2'); // the undone gateway fires again: ignored
