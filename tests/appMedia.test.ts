@@ -28,7 +28,8 @@ import { AllowList } from '../src/wa/allowlist.ts';
 import { openSessionDb, useEncryptedAuthState } from '../src/wa/authState.ts';
 import { WhatsAppGateway } from '../src/wa/gateway.ts';
 import { FakeAi } from './helpers/ai.ts';
-import { idOf, MEHTA, onSqlite, row, seededDb, SHARMA } from './helpers/db.ts';
+import { DbWork, expectNoTimers } from './helpers/advance.ts';
+import { idOf, MEHTA, row, seededDb, SHARMA } from './helpers/db.ts';
 import { FakeDrive } from './helpers/fakeDrive.ts';
 import { tinyPdf } from './helpers/files.ts';
 import { FakeMediaAi } from './helpers/mediaAi.ts';
@@ -103,60 +104,9 @@ async function nthMedia(db: Db, n: number) {
   return id === undefined ? undefined : getMedia(db, id);
 }
 
-// Kept before any test fakes the timers: advance() waits on real I/O with these.
-const realImmediate = setImmediate;
-const realSetTimeout = setTimeout;
-
-/** The app's statements and transactions in flight (setup's Db counts them). */
-const inFlight = new Set<Promise<unknown>>();
-const track = <T>(p: Promise<T>): Promise<T> => {
-  const done = p.finally(() => void inFlight.delete(done));
-  inFlight.add(done);
-  return done;
-};
-
-/**
- * Resolves once the app's database has nothing in flight: two real turns of the event loop in a row with no statement
- * running (a statement's continuation starts the next one within the same turn). Waits at most 5 s for a statement.
- */
-async function dbQuiet(): Promise<void> {
-  const turn = () => new Promise<void>((r) => realImmediate(r));
-  for (let i = 0; i < 200; i++) {
-    await turn();
-    if (inFlight.size > 0) {
-      await Promise.race([Promise.allSettled([...inFlight]), new Promise((r) => realSetTimeout(r, 5_000))]);
-      continue;
-    }
-    await turn();
-    if (inFlight.size === 0) return;
-  }
-}
-
-/**
- * vi.advanceTimersByTimeAsync with the app's database work done between timers. Fake time does not wait for I/O: on
- * Postgres a statement is a real round trip, so a timer's work (and the timers that work sets) would otherwise land
- * after the time it was due. Moves timer by timer up to `ms` (a timer of its own marks the end), waiting for the
- * database after each.
- */
-async function advance(ms: number): Promise<void> {
-  const end = Date.now() + ms;
-  let reached = ms <= 0;
-  if (!reached) setTimeout(() => void (reached = true), ms);
-  while (!reached) {
-    await vi.advanceTimersToNextTimerAsync();
-    await dbQuiet();
-  }
-  await vi.advanceTimersByTimeAsync(Math.max(0, end - Date.now()));
-  await dbQuiet();
-}
-
-/**
- * No timer left behind. On Postgres the driver's pool keeps idle timers of its own (fake ones here), so the count is the
- * app's alone only on SQLite.
- */
-const expectNoTimers = () => {
-  if (onSqlite) expect(vi.getTimerCount()).toBe(0);
-};
+/** The app's statements in flight; advance() is fake time that waits for them (tests/helpers/advance.ts). */
+const work = new DbWork();
+const advance = (ms: number) => work.advance(ms);
 
 /** A statement the app's database refuses from now on, as a full or locked database would. */
 type Refusal = (sql: string, params: unknown) => boolean;
@@ -169,9 +119,9 @@ function refusing(db: Db, refusals: Refusal[]): Db {
       if (prop === 'run' || prop === 'get' || prop === 'all') {
         const fn = Reflect.get(target, prop) as (sql: string, params?: unknown) => Promise<unknown>;
         return (sql: string, params?: unknown) =>
-          track(refusals.some((r) => r(sql, params)) ? Promise.reject(new Error('database refused')) : fn.call(target, sql, params));
+          (refusals.some((r) => r(sql, params)) ? Promise.reject(new Error('database refused')) : fn.call(target, sql, params));
       }
-      if (prop === 'tx') return <T>(fn: (q: Sql) => Promise<T>) => track(target.tx((q) => fn(wrap(q))));
+      if (prop === 'tx') return <T>(fn: (q: Sql) => Promise<T>) => target.tx((q) => fn(wrap(q)));
       const v = Reflect.get(target, prop) as unknown;
       return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
     },
@@ -193,10 +143,11 @@ async function setup(o: SetupOptions = {}) {
   const plain = await seededDb();
   SHA = await idOf(plain, SHARMA.code);
   MEH = await idOf(plain, MEHTA.code);
-  // The app works through `db`, which refuses what a test switches on with refuse(); the test gets `plain`.
+  // The app works through `db`, which refuses what a test switches on with refuse() and counts its statements in flight
+  // for advance(); the test gets `plain`.
   const refusals: Refusal[] = [];
   refusalsOf.set(plain, refusals);
-  const db = refusing(plain, refusals);
+  const db = work.wrap(refusing(plain, refusals));
   await o.prepare?.(plain, dataDir);
   const allow = new AllowList([SHARMA.groupId, MEHTA.groupId]);
   const sockets: FakeSocket[] = [];
