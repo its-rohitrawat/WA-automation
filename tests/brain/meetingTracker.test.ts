@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AiRefusalError, MAX_OUTPUT_TOKENS, type AiCallResult, type ReconcileOptions } from '../../src/brain/claudeClient.ts';
+import { AiRefusalError, MAX_OUTPUT_TOKENS } from '../../src/brain/claudeClient.ts';
 import { GroupDebouncer } from '../../src/brain/debouncer.ts';
 import type { MeetingSummary } from '../../src/brain/meetingSchema.ts';
 import { MEETING_ITEM_MAX_QUOTE, MEETING_ITEM_MAX_TEXT, MEETING_TRACKER_PROMPT, meetingItemLines, meetingItems } from '../../src/brain/meetingTracker.ts';
@@ -20,6 +20,7 @@ import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { FAKE_USAGE, FakeAi, op, type FakeResponse } from '../helpers/ai.ts';
 import { idOf, MEHTA, NOW, row, seeded, SHARMA } from '../helpers/db.ts';
+import { MeetingAi } from '../helpers/meetingAi.ts';
 import { SHARMA_PN } from '../helpers/wa.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
@@ -29,21 +30,6 @@ const CLOCK = '2026-10-20T08:00:00Z';
 
 /** Sharma's real id in the test running now, set by setup() (on Postgres ids are shared by every customer). */
 let sharma = 0;
-
-/**
- * The meeting items' ids carry the meeting's row id (mtg<id>-a1). The scripted answers here are written as for
- * meeting 1, its id on SQLite; on Postgres ids are shared by every customer, so in each call about a meeting the
- * answer's "mtg1-" ids are read as that meeting (the id in its <meeting_items>). Other ids are left as written.
- */
-class MeetingAi extends FakeAi {
-  override async reconcile(system: string, user: string, opts?: ReconcileOptions): Promise<AiCallResult> {
-    const r = await super.reconcile(system, user, opts);
-    const id = /^\[mtg(\d+)-[ad]\d+\]/m.exec(user)?.[1];
-    if (!id) return r;
-    const ops = r.output.ops.map((o) => ({ ...o, sourceMessageIds: o.sourceMessageIds.map((x) => x.replace(/^mtg1-/, `mtg${id}-`)) }));
-    return { ...r, output: { ...r.output, ops } };
-  }
-}
 
 const SEGMENTS: Segment[] = [
   { start: 0, end: 4, speaker: 'A', text: 'Logo files   aap kal tak bhej dijiye' },

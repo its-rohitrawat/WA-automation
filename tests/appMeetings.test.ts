@@ -21,10 +21,11 @@ import { AllowList } from '../src/wa/allowlist.ts';
 import { openSessionDb, useEncryptedAuthState } from '../src/wa/authState.ts';
 import { WhatsAppGateway } from '../src/wa/gateway.ts';
 import { DbWork } from './helpers/advance.ts';
-import { FakeAi, op } from './helpers/ai.ts';
+import { op } from './helpers/ai.ts';
 import { idOf, MEHTA, row, seededDb, SHARMA } from './helpers/db.ts';
 import { FakeDrive } from './helpers/fakeDrive.ts';
 import { FakeMeetingsApi } from './helpers/fakeMeetings.ts';
+import { MeetingAi } from './helpers/meetingAi.ts';
 import { FakeSocket } from './helpers/fakeSocket.ts';
 import { addRecordingFile, fakeFfmpeg, FakeMeetingAi, FakeSttProvider, FILE_ID, queuedMeeting, STARTED } from './helpers/meetingPipeline.ts';
 
@@ -77,7 +78,8 @@ const advance = (ms: number) => work.advance(ms);
 async function setup(o: SetupOptions = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'wa-app-meet-'));
   dirs.push(dataDir);
-  const ai = new FakeAi([{ ops: [op({ op: 'add_task', side: 'client', title: 'Send the logo files', category: 'content', priority: 'medium', sourceMessageIds: ['mtg1-a1'] })] }]);
+  // A MeetingAi: its answer's mtg1-a1 is read as the meeting's real id (on Postgres not 1).
+  const ai = new MeetingAi([{ ops: [op({ op: 'add_task', side: 'client', title: 'Send the logo files', category: 'content', priority: 'medium', sourceMessageIds: ['mtg1-a1'] })] }]);
   const drive = new FakeDrive();
   const db = await seededDb();
   if (o.scopes !== false) await saveGrantedScopes(db, [...MEETING_SCOPES, 'https://www.googleapis.com/auth/drive.file'].join(' '));
