@@ -4,7 +4,7 @@ import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { finishBatch, startBatch } from '../../src/store/batches.ts';
 import type { Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
-import { seededDb } from '../helpers/db.ts';
+import { idOf, seededDb } from '../helpers/db.ts';
 
 // 2026-10-19 08:00 UTC is 13:30 IST on the 19th.
 const NOW = '2026-10-19T08:00:00.000Z';
@@ -87,12 +87,12 @@ describe('usageSummary', () => {
 
   it("counts today's finished batches and the messages they read, by the IST day", async () => {
     const t = await setup();
-    const batch = async (at: string, n: number, status: 'ok' | 'failed' = 'ok') => finishBatch(t.db, await startBatch(t.db, 1, n, at), { status, errorCode: null, accepted: 0, rejected: 0, at });
+    const batch = async (at: string, n: number, status: 'ok' | 'failed' = 'ok') => finishBatch(t.db, await startBatch(t.db, await idOf(t.db, 'SHA'), n, at), { status, errorCode: null, accepted: 0, rejected: 0, at });
     await batch('2026-10-19T07:00:00.000Z', 10);
     await batch('2026-10-18T18:31:00.000Z', 5); // 00:01 IST on the 19th
     await batch('2026-10-18T18:29:00.000Z', 99); // 23:59 IST on the 18th
     await batch('2026-10-19T07:30:00.000Z', 7, 'failed'); // not read
-    await startBatch(t.db, 1, 4, '2026-10-19T07:45:00.000Z'); // still running
+    await startBatch(t.db, await idOf(t.db, 'SHA'), 4, '2026-10-19T07:45:00.000Z'); // still running
     expect((await t.summary()).batches).toEqual({ today: 2, messagesRead: 15 });
   });
 
@@ -108,7 +108,7 @@ describe('usageSummary', () => {
 describe('usageSummary review fixes', () => {
   it('leaves out a batch finished just after the next IST midnight, and lists no other line without such spend', async () => {
     const t = await setup();
-    await finishBatch(t.db, await startBatch(t.db, 1, 8, '2026-10-19T18:30:00.000Z'), { status: 'ok', errorCode: null, accepted: 0, rejected: 0, at: '2026-10-19T18:30:00.000Z' });
+    await finishBatch(t.db, await startBatch(t.db, await idOf(t.db, 'SHA'), 8, '2026-10-19T18:30:00.000Z'), { status: 'ok', errorCode: null, accepted: 0, rejected: 0, at: '2026-10-19T18:30:00.000Z' });
     await spend(t.db, '2026-10-19', 'ai', 1, 'batch 1');
     const s = (await t.summary());
     expect(s.batches).toEqual({ today: 0, messagesRead: 0 });
