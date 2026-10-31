@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { dbBootstrapCommand, dbMigrateCommand, type DbCommandDeps } from '../../src/cli/db.ts';
 import { parseEnv } from '../../src/config/env.ts';
 import type { AdminConnection } from '../../src/store/engine/pg.ts';
+import { accessRefusedAfterMigrate, type CatalogRow } from '../../src/store/pg/accessRules.ts';
+import { healthyCatalog, isAccessQuery } from '../store/pg/catalogFake.ts';
 
 // The two CLI commands with scripted prompts and a fake connection: what they check before asking, and that no password
 // reaches the output.
@@ -19,7 +21,8 @@ const envWith = (over: Record<string, string> = {}) =>
     ...over,
   });
 
-function deps(answers: string[]) {
+/** `catalog`: what db-migrate's access check reads at its end (as db-migrate leaves a database, unless a test says otherwise). */
+function deps(answers: string[], catalog: CatalogRow[] = healthyCatalog()) {
   const urls: string[] = [];
   const asked: string[] = [];
   const lines: string[] = [];
@@ -27,6 +30,7 @@ function deps(answers: string[]) {
     async sql(text) {
       // A database made by db-bootstrap: its text order is C.
       if (text.includes('pg_database')) return { rows: [{ collate: 'C', ctype: 'C' }], rowCount: 1 };
+      if (isAccessQuery(text)) return { rows: catalog as unknown as Record<string, unknown>[], rowCount: catalog.length };
       return { rows: text.startsWith('SELECT format(') ? [{ sql: 'SELECT 1' }] : [], rowCount: 0 };
     },
     async end() {},
@@ -99,8 +103,17 @@ describe('db-migrate', () => {
     await dbMigrateCommand(envWith(), t.d);
     expect(t.urls.map((u) => new URL(u).username)).toEqual(['wa_owner']);
     expect(t.lines.join('\n')).not.toContain(P.owner);
+    // It ends checking the live access rules (security review S1, S2).
+    expect(t.lines.at(-1)).toBe('Access rules checked: row security on every customer table, nothing of the platform open to wa_app');
     const bad = deps([]);
     await expect(dbMigrateCommand(envWith({ DATABASE_OWNER_URL: `postgres://wa_app:${P.owner}@127.0.0.1:5432/wa_agent` }), bad.d)).rejects.toThrow('DATABASE_OWNER_URL must connect as wa_owner');
     expect(bad.urls).toEqual([]);
+  });
+
+  it('ends refusing, naming what is wrong, when the access rules do not hold after its migrations (review S1)', async () => {
+    const t = deps([], healthyCatalog().map((r) => (r.name === 'web_sessions' ? { ...r, app: true } : r)));
+    await expect(dbMigrateCommand(envWith(), t.d)).rejects.toThrow(accessRefusedAfterMigrate(['wa_app can reach platform table web_sessions']));
+    expect(t.lines).not.toContain('Access rules checked: row security on every customer table, nothing of the platform open to wa_app');
+    expect(t.lines.join('\n')).not.toContain(P.owner);
   });
 });
