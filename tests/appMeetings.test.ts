@@ -20,6 +20,7 @@ import { silentLogger } from '../src/util/logger.ts';
 import { AllowList } from '../src/wa/allowlist.ts';
 import { openSessionDb, useEncryptedAuthState } from '../src/wa/authState.ts';
 import { WhatsAppGateway } from '../src/wa/gateway.ts';
+import { DbWork } from './helpers/advance.ts';
 import { FakeAi, op } from './helpers/ai.ts';
 import { idOf, MEHTA, row, seededDb, SHARMA } from './helpers/db.ts';
 import { FakeDrive } from './helpers/fakeDrive.ts';
@@ -66,6 +67,13 @@ function addConference(api: FakeMeetingsApi): void {
   addRecordingFile(api);
 }
 
+/**
+ * Fake time and a real database (tests/helpers/advance.ts): the app's Db is wrapped so advance() waits for the statements
+ * a timer starts (on Postgres each is a real round trip) before moving to the next timer. On SQLite it is the same.
+ */
+const work = new DbWork();
+const advance = (ms: number) => work.advance(ms);
+
 async function setup(o: SetupOptions = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'wa-app-meet-'));
   dirs.push(dataDir);
@@ -103,7 +111,7 @@ async function setup(o: SetupOptions = {}) {
           clients: [SHARMA, MEHTA],
         };
   const app = await createApp({
-    db, clock: systemClock, log: silentLogger(), gateway, allow, ai, drive, prices: P, spendCapUsd: 15,
+    db: work.wrap(db), clock: systemClock, log: silentLogger(), gateway, allow, ai, drive, prices: P, spendCapUsd: 15,
     quietMs: 240_000, maxWaitMs: 1_200_000, maxConcurrent: 3, dataDir, freeBytes: () => 500e9, pollMs: 30_000, drainMs: o.drainMs,
     ...(meetings ? { meetings } : {}),
     onMeetingsHealth: (m) => health.push(m),
@@ -119,7 +127,7 @@ async function stopApp(app: { stop(): Promise<void> }): Promise<void> {
   const p = app.stop().then(() => {
     done = true;
   });
-  for (let i = 0; i < 200 && !done; i++) await vi.advanceTimersByTimeAsync(1_000);
+  for (let i = 0; i < 200 && !done; i++) await advance(1_000);
   await p;
 }
 
@@ -148,7 +156,7 @@ describe('app with meetings', () => {
 
   it('meetings off: no meeting call of any kind, and Health is told null', async () => {
     const { app, api, health, db } = await setup({ meetings: false });
-    await vi.advanceTimersByTimeAsync(20 * MINUTE);
+    await advance(20 * MINUTE);
     expect(api.calls).toEqual([]);
     expect(app.meetings).toBeUndefined();
     expect(health.length).toBeGreaterThan(1);
@@ -160,7 +168,7 @@ describe('app with meetings', () => {
   it('without the meeting scopes: paused google_scopes, and no Google meeting call even for a queued meeting', async () => {
     const { app, api, health, db } = await setup({ scopes: false, prepare: async (d) => insertFound(d, queuedMeeting({ clientId: await idOf(d, 'SHA') })) });
     await vi.waitFor(async () => expect((await theMeeting(db))?.errorCode).toBe('google_scopes'), SLOW_IO);
-    await vi.advanceTimersByTimeAsync(20 * MINUTE);
+    await advance(20 * MINUTE);
     expect(api.calls).toEqual([]);
     expect(health.at(-1)).toMatchObject({ paused: 'google_scopes', sttProvider: 'elevenlabs', stats: { waiting: 1 } });
     await stopApp(app);
@@ -168,7 +176,7 @@ describe('app with meetings', () => {
 
   it('without the meeting scopes the health line shows the meeting access warning', async () => {
     const { app } = await setup({ scopes: false });
-    await vi.advanceTimersByTimeAsync(30_000);
+    await advance(30_000);
     expect(app.health.line().text).toContain('Meetings paused: Google sign-in needs meeting access');
     await stopApp(app);
   });
@@ -178,7 +186,7 @@ describe('app with meetings', () => {
     const statusAtSchedule = watchSchedules(app, db);
     // The first Doc may wait for the publisher's first upload to make the WA Agent folder (drive_root, 5 minutes).
     await vi.waitFor(async () => expect(['summarised', 'tracked']).toContain((await theMeeting(db))?.stage), SLOW_IO);
-    await vi.advanceTimersByTimeAsync(6 * MINUTE); // past the wait and the next tick
+    await advance(6 * MINUTE); // past the wait and the next tick
     await vi.waitFor(async () => expect((await theMeeting(db))?.status).toBe('done'), SLOW_IO);
     const m = (await theMeeting(db))!;
     expect(m).toMatchObject({ clientId: await idOf(db, 'SHA'), matchKind: 'title', stage: 'tracked', title: 'Sharma Interiors weekly' });
@@ -196,7 +204,7 @@ describe('app with meetings', () => {
     await vi.waitFor(() => expect(health.at(-1)).toMatchObject({ paused: null, stats: { done: 1, waiting: 0 } }), SLOW_IO);
 
     // A later discovery pass stores nothing twice.
-    await vi.advanceTimersByTimeAsync(10 * MINUTE);
+    await advance(10 * MINUTE);
     expect(api.callsOf('listConferences').length).toBeGreaterThan(1);
     expect(await row(db, 'SELECT COUNT(*) AS n FROM meetings')).toEqual({ n: 1 });
     await stopApp(app);
@@ -217,7 +225,7 @@ describe('app with meetings', () => {
       schedule();
     });
     await vi.waitFor(async () => expect(['summarised', 'tracked']).toContain((await theMeeting(db))?.stage), SLOW_IO);
-    await vi.advanceTimersByTimeAsync(6 * MINUTE);
+    await advance(6 * MINUTE);
     await vi.waitFor(async () => expect((await theMeeting(db))?.status).toBe('done'), SLOW_IO);
     // Every request after the finish (the tracker step's, the service's) comes before any tick could refresh the counts.
     const afterDone = seen.filter((x) => x.status === 'done');
@@ -232,7 +240,7 @@ describe('app with meetings', () => {
     const { app, db, ai, meetingAi, drive } = await setup({ stt });
     const statusAtSchedule = watchSchedules(app, db);
     await vi.waitFor(async () => expect(['summarised', 'tracked']).toContain((await theMeeting(db))?.stage), SLOW_IO);
-    await vi.advanceTimersByTimeAsync(6 * MINUTE);
+    await advance(6 * MINUTE);
     await vi.waitFor(async () => expect(await theMeeting(db)).toMatchObject({ status: 'done', note: 'no_speech' }), SLOW_IO);
     expect(ai.calls).toEqual([]);
     expect(meetingAi.calls).toEqual([]);
@@ -244,9 +252,9 @@ describe('app with meetings', () => {
   it('discovery runs at most every MEETING_POLL_MINUTES', async () => {
     const { app, api } = await setup();
     await vi.waitFor(() => expect(api.callsOf('listConferences')).toHaveLength(1), SLOW_IO);
-    await vi.advanceTimersByTimeAsync(4 * MINUTE);
+    await advance(4 * MINUTE);
     expect(api.callsOf('listConferences')).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(MINUTE + 30_000);
+    await advance(MINUTE + 30_000);
     expect(api.callsOf('listConferences')).toHaveLength(2);
     await stopApp(app);
   });
@@ -266,7 +274,7 @@ describe('app with meetings', () => {
     const stop = app.stop().then(() => {
       done = true;
     });
-    for (let i = 0; i < 60 && !done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 60 && !done; i++) await advance(1_000);
     expect(done).toBe(true);
     await stop;
     expect(await theMeeting(db)).toMatchObject({ status: 'queued', stage: 'found', errorCode: 'stopped', attempts: 0 });
@@ -283,10 +291,10 @@ describe('app with meetings', () => {
     const stop = app.stop().then(() => {
       done = true;
     });
-    await vi.advanceTimersByTimeAsync(30_000);
+    await advance(30_000);
     expect(done).toBe(false); // the drain waits for the speech call
     release();
-    for (let i = 0; i < 200 && !done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 200 && !done; i++) await advance(1_000);
     await stop;
     expect((await theMeeting(db))?.stage).toBe('transcribed');
     expect((await spendRows(db)).map((s) => s.kind)).toEqual(['stt']);
@@ -326,7 +334,7 @@ describe('app with meetings', () => {
       const said = { n: 0 };
       const { app, db, meetingAi, drive, health } = await setup({ prepare: waitingForStt, transcriber: local(said) });
       await vi.waitFor(async () => expect(['summarised', 'tracked']).toContain((await theMeeting(db))?.stage), SLOW_IO);
-      await vi.advanceTimersByTimeAsync(6 * MINUTE); // past the Doc's wait for the WA Agent folder
+      await advance(6 * MINUTE); // past the Doc's wait for the WA Agent folder
       await vi.waitFor(async () => expect((await theMeeting(db))?.status).toBe('done'), SLOW_IO);
       expect(Date.now()).toBeLessThan(Date.parse('2026-11-01T13:00:00.000Z'));
       expect(await row(db, 'SELECT COUNT(*) AS n FROM meetings')).toEqual({ n: 1 });

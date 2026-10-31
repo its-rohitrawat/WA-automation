@@ -16,6 +16,7 @@ import { AllowList } from '../src/wa/allowlist.ts';
 import { openSessionDb, useEncryptedAuthState, useSenderAuthState } from '../src/wa/authState.ts';
 import { WhatsAppGateway } from '../src/wa/gateway.ts';
 import { SenderGateway } from '../src/wa/senderGateway.ts';
+import { DbWork, expectNoTimers } from './helpers/advance.ts';
 import { FakeAi } from './helpers/ai.ts';
 import { MEHTA, seededDb, SHARMA, row } from './helpers/db.ts';
 import { FakeDrive } from './helpers/fakeDrive.ts';
@@ -29,8 +30,15 @@ const ON = { enabled: true, time: '06:00', deadline: '12:00', days: 'weekdays' }
 const TRACKER_ID = '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123';
 const LINK = `https://drive.google.com/file/d/${TRACKER_ID}/view`;
 
+/**
+ * Fake time and a real database (tests/helpers/advance.ts): the app's Db is wrapped so advance() waits for the statements
+ * a timer starts (on Postgres each is a real round trip) before moving to the next timer. On SQLite it is the same.
+ */
+const work = new DbWork();
+const advance = (ms: number) => work.advance(ms);
+
 async function setup(report?: AppReportDeps, dbIn?: Db, o: { log?: Logger; freeBytes?: () => number; trackerId?: null } = {}) {
-  const db = dbIn ?? (await seededDb());
+  const db = work.wrap(dbIn ?? (await seededDb()));
   if (o.trackerId !== null) await setKv(db, TRACKER_ID_KEY, TRACKER_ID); // null: the tracker was never uploaded
   const sockets: FakeSocket[] = [];
   const auth = await useEncryptedAuthState(openSessionDb(':memory:'), randomBytes(32));
@@ -60,7 +68,7 @@ async function stopApp(app: App): Promise<void> {
   const p = app.stop().then(() => {
     done = true;
   });
-  for (let i = 0; i < 30 && !done; i++) await vi.advanceTimersByTimeAsync(1_000);
+  for (let i = 0; i < 30 && !done; i++) await advance(1_000);
   await p;
 }
 
@@ -77,16 +85,16 @@ describe('app and the morning report', () => {
   it('sends the report from the tick at 06:00, shows it in Health, and the founder-number gateway still sends nothing', async () => {
     const sender = new FakeReportSender();
     const { db, app, sockets } = await setup({ sender, settings: ON });
-    for (let i = 0; i < 30 && (await reportFor(db, DAY))?.status !== 'sent'; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 30 && (await reportFor(db, DAY))?.status !== 'sent'; i++) await advance(1_000);
     expect(sender.calls).toHaveLength(1);
     expect(sender.calls).toEqual([{ text: `Good morning. 0 open tasks, 0 overdue. Today's tracker: ${LINK}` }]);
     expect(app.report).toBeDefined();
-    await vi.advanceTimersByTimeAsync(30_000); // the next tick records the line
+    await advance(30_000); // the next tick records the line
     expect((await readHealthSnapshot(db))!.report).toEqual({ text: 'Morning report: sent at 06:00 IST', warning: null, recipientMasked: '…1234' });
     for (const name of SEND_METHODS) expect(sockets[0]![name]).not.toHaveBeenCalled();
     await stopApp(app);
     expect(sender.stopped).toBe(1);
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('turns a send cut off by a crash into unknown at start, sends nothing, and warns in Health', async () => {
@@ -95,7 +103,7 @@ describe('app and the morning report', () => {
     const sender = new FakeReportSender();
     const { app } = await setup({ sender, settings: ON }, db);
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'interrupted' });
-    await vi.advanceTimersByTimeAsync(30_000);
+    await advance(30_000);
     expect(sender.calls).toHaveLength(0);
     const snap = (await readHealthSnapshot(db))!;
     expect(snap.line.text).toBe(UNKNOWN_WARNING);
@@ -105,7 +113,7 @@ describe('app and the morning report', () => {
 
   it('without report settings there is no scheduler, no report row and no report line', async () => {
     const { db, app } = await setup();
-    await vi.advanceTimersByTimeAsync(30_000);
+    await advance(30_000);
     expect(app.report).toBeUndefined();
     expect((await readHealthSnapshot(db))!.report).toBeUndefined();
     expect(await row(db, 'SELECT COUNT(*) AS n FROM reports')).toEqual({ n: 0 });
@@ -117,7 +125,7 @@ describe('app and the morning report', () => {
     const factory = vi.fn(() => new FakeSocket());
     const sender = new SenderGateway({ recipient: '919800000000', factory, auth: undefined });
     const { db, app, sockets } = await setup({ sender, settings: ON });
-    await vi.advanceTimersByTimeAsync(30_000);
+    await advance(30_000);
     expect(factory).not.toHaveBeenCalled(); // the spare number is never connected
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'session_unreadable' });
     const snap = (await readHealthSnapshot(db))!;
@@ -131,7 +139,7 @@ describe('app and the morning report', () => {
     expect(out).toContain("Report:      Morning report: not sent yet (the spare number's saved session cannot be read)");
     for (const name of SEND_METHODS) expect(sockets[0]![name]).not.toHaveBeenCalled();
     await stopApp(app);
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('stop() waits for a report still being sent, so the row is sent before main.ts closes the databases', async () => {
@@ -141,7 +149,7 @@ describe('app and the morning report', () => {
       release = r;
     });
     const { db, app } = await setup({ sender, settings: ON });
-    for (let i = 0; i < 30 && sender.calls.length === 0; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 30 && sender.calls.length === 0; i++) await advance(1_000);
     expect(sender.calls).toHaveLength(1);
     let done = false;
     let statusAtStop: string | undefined;
@@ -149,22 +157,22 @@ describe('app and the morning report', () => {
       statusAtStop = (await reportFor(db, DAY))?.status; // main.ts closes the tracker database right here
       done = true;
     });
-    await vi.advanceTimersByTimeAsync(3_000);
+    await advance(3_000);
     expect(done).toBe(false);
     expect((await reportFor(db, DAY))?.status).toBe('sending');
     release();
-    for (let i = 0; i < 30 && !done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 30 && !done; i++) await advance(1_000);
     await p;
     expect(statusAtStop).toBe('sent');
     expect(sender.stopped).toBe(1);
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('stop() gives a send that never ends a bounded wait, then resolves with the row still sending', async () => {
     const sender = new FakeReportSender();
     sender.gate = new Promise<void>(() => {});
     const { db, app } = await setup({ sender, settings: ON });
-    for (let i = 0; i < 30 && sender.calls.length === 0; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 30 && sender.calls.length === 0; i++) await advance(1_000);
     expect(sender.calls).toHaveLength(1);
     let done = false;
     const t0 = Date.now();
@@ -173,14 +181,14 @@ describe('app and the morning report', () => {
       elapsed = Date.now() - t0;
       done = true;
     });
-    await vi.advanceTimersByTimeAsync(9_000);
+    await advance(9_000);
     expect(done).toBe(false);
-    for (let i = 0; i < 30 && !done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 30 && !done; i++) await advance(1_000);
     await p;
     expect(elapsed).toBeGreaterThanOrEqual(10_000);
     expect(elapsed).toBeLessThanOrEqual(13_000);
     expect((await reportFor(db, DAY))?.status).toBe('sending'); // the next start marks it unknown, never sent again
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('a real sender stopped during its 15 s linger still records the report as sent before stop() resolves', async () => {
@@ -196,7 +204,7 @@ describe('app and the morning report', () => {
     const auth = { ...(await useSenderAuthState(openSessionDb(':memory:'), randomBytes(32))), hasSession: true };
     const sender = new SenderGateway({ recipient: '919800000000', factory, auth }); // production timeouts and linger
     const { db, app } = await setup({ sender, settings: ON });
-    for (let i = 0; i < 30 && (sockets[0]?.sendMessage.mock.calls.length ?? 0) < 1; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 30 && (sockets[0]?.sendMessage.mock.calls.length ?? 0) < 1; i++) await advance(1_000);
     expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(1);
     let done = false;
     let statusAtStop: string | undefined;
@@ -204,11 +212,11 @@ describe('app and the morning report', () => {
       statusAtStop = (await reportFor(db, DAY))?.status;
       done = true;
     });
-    for (let i = 0; i < 30 && !done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 30 && !done; i++) await advance(1_000);
     await p;
     expect(statusAtStop).toBe('sent');
     expect(sockets[0]!.end).toHaveBeenCalledTimes(1);
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('stop() stays bounded when the spare-number socket never closes and the text send never answers', async () => {
@@ -224,7 +232,7 @@ describe('app and the morning report', () => {
     const auth = { ...(await useSenderAuthState(openSessionDb(':memory:'), randomBytes(32))), hasSession: true };
     const sender = new SenderGateway({ recipient: '919800000000', factory, auth }); // production timeouts and linger
     const { db, app } = await setup({ sender, settings: ON });
-    for (let i = 0; i < 30 && (sockets[0]?.sendMessage.mock.calls.length ?? 0) < 1; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 30 && (sockets[0]?.sendMessage.mock.calls.length ?? 0) < 1; i++) await advance(1_000);
     expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(1);
     let done = false;
     const t0 = Date.now();
@@ -234,14 +242,14 @@ describe('app and the morning report', () => {
       done = true;
     });
     // 10 s for the send in flight, 3 s to close the socket, 2 s to record the outcome; the founder-number gateway's 5 s.
-    for (let i = 0; i < 25 && !done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 25 && !done; i++) await advance(1_000);
     expect(done).toBe(true);
     expect(elapsed).toBeGreaterThanOrEqual(10_000);
     expect(elapsed).toBeLessThanOrEqual(10_000 + 3_000 + 2_000 + 5_000);
     expect((await reportFor(db, DAY))?.status).toBe('sending'); // the next start marks it unknown, never sent again
-    await vi.advanceTimersByTimeAsync(120_000); // the text send's own limit ends it
+    await advance(120_000); // the text send's own limit ends it
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'timeout' });
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('a recovery that failed at start is tried again at the next tick: the cut-off send becomes unknown, nothing is sent', async () => {
@@ -252,7 +260,7 @@ describe('app and the morning report', () => {
     });
     const sender = new FakeReportSender();
     const { app } = await setup({ sender, settings: ON }, db);
-    await vi.advanceTimersByTimeAsync(30_000);
+    await advance(30_000);
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'unknown', detail: 'interrupted' });
     expect(sender.calls).toHaveLength(0);
     const snap = (await readHealthSnapshot(db))!;
@@ -265,7 +273,7 @@ describe('app and the morning report', () => {
     const sender = new FakeReportSender();
     const db = await seededDb();
     const { app } = await setup({ sender, settings: ON }, db, { trackerId: null });
-    await vi.advanceTimersByTimeAsync(30_000);
+    await advance(30_000);
     expect(sender.calls).toHaveLength(0);
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'no_tracker_link' });
     await stopApp(app);
@@ -284,7 +292,7 @@ describe('app and the morning report', () => {
     const errors = lines.map((l) => JSON.parse(l) as { level: number; msg: string }).filter((l) => l.level === 50);
     expect(errors.map((l) => l.msg)).toContain('morning report recovery failed');
     // While recovery keeps failing, no report is sent: a row cut off mid-send could otherwise hide a report already out.
-    await vi.advanceTimersByTimeAsync(60_000);
+    await advance(60_000);
     expect(sender.calls).toHaveLength(0);
     await stopApp(app);
   });
