@@ -6,8 +6,7 @@ import { manualClock } from '../../../src/util/clock.ts';
 import type { GatewayState } from '../../../src/wa/gateway.ts';
 import { clientDetailHandler, clientsListHandler, type ClientsDeps } from '../../../src/web/routes/clients.ts';
 import type { OwnerContext } from '../../../src/web/routes/context.ts';
-import { seededDb, SHARMA } from '../../helpers/db.ts';
-import { rawOf } from '../../../src/store/engine/sqlite.ts';
+import { seeded, SHARMA } from '../../helpers/db.ts';
 
 const CTX: OwnerContext = { actor: 'owner@example.com', sessionId: 'session-hash', requestId: 'a1b2c3d4e5f6' };
 const MESSAGE = 'MESSAGE-TEXT-never-sent';
@@ -26,17 +25,17 @@ class FakeSource implements GroupSource {
 }
 
 async function setup() {
-  const db = await seededDb();
+  const { db, ids } = await seeded();
   await createTask(
     db,
     {
-      clientId: 1, side: 'us', title: 'Send the moodboard', category: 'design', priority: 'major', assignedTo: 'Ravi', askedBy: null, raisedOn: '2026-10-20',
+      clientId: ids.sharma, side: 'us', title: 'Send the moodboard', category: 'design', priority: 'major', assignedTo: 'Ravi', askedBy: null, raisedOn: '2026-10-20',
       deadline: '2026-10-25', latestProgress: null, sourceQuote: QUOTE, sourceDate: '2026-10-20', sourceWaId: 'W1', origin: 'whatsapp',
     },
     '2026-10-20T05:00:00.000Z',
   );
   await insertMessage(db, {
-    waId: 'M1', clientId: 1, senderJid: '919800000001@s.whatsapp.net', senderNumber: '919800000001', senderName: 'Sender', fromMe: false,
+    waId: 'M1', clientId: ids.sharma, senderJid: '919800000001@s.whatsapp.net', senderNumber: '919800000001', senderName: 'Sender', fromMe: false,
     ts: '2026-10-27T05:00:00.000Z', text: MESSAGE, quotedWaId: null, mediaType: null,
   });
   const src = new FakeSource();
@@ -76,12 +75,12 @@ describe('clientDetailHandler', () => {
   it('sends moods, the task\'s and the client\'s, only while sentiment is switched on', async () => {
     const { deps } = await setup();
     const db = deps.db;
-    rawOf(db).prepare("UPDATE tasks SET sentiment = 'frustrated' WHERE code = 'SHA-001'").run();
-    rawOf(db).prepare("UPDATE clients SET sentiment = 'negative', sentiment_at = '2026-10-19T08:00:00.000Z' WHERE code = 'SHA'").run();
+    await db.run("UPDATE tasks SET sentiment = 'frustrated' WHERE code = 'SHA-001'");
+    await db.run("UPDATE clients SET sentiment = 'negative', sentiment_at = '2026-10-19T08:00:00.000Z' WHERE code = 'SHA'");
     const detail = async () => ((await clientDetailHandler(deps, CTX, 'SHA')).body as { client: { sentiment: unknown; openTasks: { sentiment: unknown }[] } }).client;
     expect((await detail()).sentiment).toBeNull();
     expect((await detail()).openTasks[0]!.sentiment).toBeNull();
-    rawOf(db).prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', '2026-10-19T08:00:00.000Z', 'o')").run();
+    await db.run("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', '2026-10-19T08:00:00.000Z', 'o')");
     expect((await detail()).sentiment).toEqual({ mood: 'negative', at: '2026-10-19T08:00:00.000Z' });
     expect((await detail()).openTasks[0]!.sentiment).toBe('frustrated');
   });

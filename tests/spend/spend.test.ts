@@ -3,8 +3,7 @@ import { parseEnv } from '../../src/config/env.ts';
 import { FALLBACK_PRICES, costUsd, estimateCostUsd, pricesFromEnv, type Prices } from '../../src/spend/pricing.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { manualClock } from '../../src/util/clock.ts';
-import { seededDb } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { row, rows, seededDb } from '../helpers/db.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
 
@@ -207,7 +206,7 @@ describe('SpendGuard', () => {
     expect(await guard.settlePending('shutdown (estimated)')).toBe(2);
     await guard.flushed();
     expect(guard.spentToday()).toBeCloseTo(0.5);
-    expect(rawOf(db).prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all()).toEqual([
+    expect(await rows(db, 'SELECT kind, usd, detail FROM spend ORDER BY id')).toEqual([
       { kind: 'ai', usd: 0.2, detail: 'shutdown (estimated)' },
       { kind: 'ai', usd: 0.3, detail: 'shutdown (estimated)' },
     ]);
@@ -266,7 +265,7 @@ describe('SpendGuard', () => {
     expect(guard.reserve(0.3, 'ai')).not.toBeNull();
     expect(await guard.settlePending('shutdown (estimated)')).toBe(3);
     await guard.flushed();
-    expect(rawOf(db).prepare('SELECT kind, usd FROM spend ORDER BY id').all()).toEqual([
+    expect(await rows(db, 'SELECT kind, usd FROM spend ORDER BY id')).toEqual([
       { kind: 'ai', usd: 0.1 },
       { kind: 'stt', usd: 0.2 },
       { kind: 'ai', usd: 0.3 },
@@ -285,21 +284,22 @@ describe('SpendGuard', () => {
     expect(await guard.settlePending('shutdown (estimated)')).toBe(2);
     await guard.flushed();
     expect(told).toEqual(['a', 'b']);
-    expect((rawOf(db).prepare('SELECT COUNT(*) AS n FROM spend').get() as { n: number }).n).toBe(2);
+    expect((await row<{ n: number }>(db, 'SELECT COUNT(*) AS n FROM spend'))!.n).toBe(2);
   });
 
   it('settlePending writes the booking and the owner record in one transaction; a failing owner write is rolled back', async () => {
     const db = await seededDb();
     const guard = new SpendGuard({ db, clock: manualClock('2026-10-19T10:00:00Z'), capUsd: 1 });
-    guard.reserve(0.1, 'stt', () => rawOf(db).prepare("INSERT INTO kv (k, v) VALUES ('ok', 'x')").run());
-    guard.reserve(0.2, 'stt', () => {
-      rawOf(db).prepare("INSERT INTO kv (k, v) VALUES ('half', 'x')").run();
+    // Each owner writes through the handle it is given, as a real one does: its write is in the booking's transaction.
+    guard.reserve(0.1, 'stt', (q) => q.run("INSERT INTO kv (k, v) VALUES ('ok', 'x')"));
+    guard.reserve(0.2, 'stt', async (q) => {
+      await q.run("INSERT INTO kv (k, v) VALUES ('half', 'x')");
       throw new Error('owner write failed');
     });
     await guard.settlePending('shutdown (estimated)');
     await guard.flushed();
-    expect(rawOf(db).prepare("SELECT k FROM kv WHERE k IN ('ok', 'half') ORDER BY k").all()).toEqual([{ k: 'ok' }]); // the half-done owner write is gone
-    expect(rawOf(db).prepare('SELECT usd FROM spend ORDER BY id').all()).toEqual([{ usd: 0.1 }, { usd: 0.2 }]); // both still booked
+    expect(await rows(db, "SELECT k FROM kv WHERE k IN ('ok', 'half') ORDER BY k")).toEqual([{ k: 'ok' }]); // the half-done owner write is gone
+    expect(await rows(db, 'SELECT usd FROM spend ORDER BY id')).toEqual([{ usd: 0.1 }, { usd: 0.2 }]); // both still booked
   });
 
   it('records on settle with an unknown id and ignores unknown release', async () => {

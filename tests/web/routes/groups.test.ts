@@ -7,7 +7,7 @@ import { loadGroupsFile, type ClientConfig } from '../../../src/config/groups.ts
 import { fileGroupsStore } from '../../../src/config/groupsStore.ts';
 import { GroupDirectory, type GroupSource } from '../../../src/control/groups.ts';
 import { syncClients } from '../../../src/store/clients.ts';
-import { openDb, type Db } from '../../../src/store/db.ts';
+import type { Db } from '../../../src/store/db.ts';
 import { manualClock, type ManualClock } from '../../../src/util/clock.ts';
 import { createLogger } from '../../../src/util/logger.ts';
 import type { GatewayState } from '../../../src/wa/gateway.ts';
@@ -15,8 +15,7 @@ import type { AuditFn, OwnerContext } from '../../../src/web/routes/context.ts';
 import {
   codeCandidates, groupsApplyHandler, groupsBulkHandler, groupsListHandler, makeGroupKey, suggestCodeHandler, type GroupsDeps,
 } from '../../../src/web/routes/groups.ts';
-import { MEHTA as MEHTA_HELPER, SHARMA as SHARMA_HELPER } from '../../helpers/db.ts';
-import { rawOf } from '../../../src/store/engine/sqlite.ts';
+import { MEHTA as MEHTA_HELPER, rows as rowsOf, SHARMA as SHARMA_HELPER, testDb } from '../../helpers/db.ts';
 
 // These tests write a real allow-list file, which refuses the shared helpers' example group id: own ids here. The old
 // group id form (<phone>-<time>@g.us) is used for Patel, to prove no raw id reaches a response.
@@ -67,7 +66,7 @@ beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'wa-groups-routes-'));
   file = join(dir, 'allowed-groups.json');
   writeFileSync(file, `${JSON.stringify(FILE, null, 2)}\n`);
-  db = openDb(':memory:');
+  db = await testDb();
   await syncClients(db, loadGroupsFile(file));
   src = new FakeSource();
   audits = [];
@@ -84,8 +83,8 @@ beforeEach(async () => {
     clock,
   };
 });
-afterEach(() => {
-  rawOf(db).close();
+afterEach(async () => {
+  await db.close();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -336,10 +335,14 @@ describe('groupsApplyHandler', () => {
   });
 
   it('any other error is thrown, not turned into a response', async () => {
-    rawOf(db).close();
+    // A store whose every call fails, on either engine (closing a Postgres Db on a shared pool leaves it working).
+    const down = async (): Promise<never> => {
+      throw new Error('the database is gone');
+    };
+    const broken = { engine: db.engine, get: down, all: down, run: down, exec: down, tx: down, close: async () => {} } as unknown as Db;
+    deps = { ...deps, db: broken, store: fileGroupsStore(file, { db: broken }) };
     await expect(groupsApplyHandler(deps, CTX, approve())).rejects.toThrow();
     expect(audits).toEqual([]);
-    db = openDb(':memory:');
   });
 });
 
@@ -348,8 +351,9 @@ describe('groupsBulkHandler', () => {
   const EXPORTS = '120363888000000010@g.us';
   const bulk = (action: string, keys: string[]) => groupsBulkHandler(deps, CTX, { action, keys });
   const results = (r: { body: unknown }) => (r.body as { results: { key: string; ok: boolean; reason: string | null }[] }).results;
-  // The ignore rows only (the kv table also holds each client's history read).
-  const kvRows = () => rawOf(db).prepare("SELECT k, v FROM kv WHERE k GLOB 'group_ignored:*'").all() as { k: string; v: string }[];
+  // The ignore rows only (the kv table also holds each client's history read): an exact, case-sensitive prefix on both
+  // engines (LIKE is case-blind, and Postgres has no GLOB).
+  const kvRows = () => rowsOf<{ k: string; v: string }>(db, "SELECT k, v FROM kv WHERE substr(k, 1, 14) = 'group_ignored:'");
   beforeEach(async () => {
     src.groups.push({ id: HINDI, subject: 'शर्मा परिवार' }, { id: EXPORTS, subject: 'Desai Exports' });
     await deps.directory.list();
@@ -418,7 +422,7 @@ describe('groupsBulkHandler', () => {
     }
     expect(readFileSync(file, 'utf8')).toBe(before);
     expect(audits).toEqual([]);
-    expect(kvRows()).toEqual([]);
+    expect(await kvRows()).toEqual([]);
   });
 
   it('ignore sets untracked groups aside by key (no id, no name on disk); unignore brings them back', async () => {
@@ -430,8 +434,8 @@ describe('groupsBulkHandler', () => {
     ]);
     expect(body(r).counts).toEqual({ all: 6, approved: 2, notApproved: 2, ignored: 2 });
     expect(rows(r).find((x) => x.key === k(DESAI))).toMatchObject({ ignored: true });
-    expect(kvRows().map((x) => x.k).sort()).toEqual([`group_ignored:${k(DESAI)}`, `group_ignored:${k(PATEL)}`].sort());
-    expect(JSON.stringify(kvRows())).not.toMatch(/@g\.us|919812345678|Desai|Patel/);
+    expect((await kvRows()).map((x) => x.k).sort()).toEqual([`group_ignored:${k(DESAI)}`, `group_ignored:${k(PATEL)}`].sort());
+    expect(JSON.stringify(await kvRows())).not.toMatch(/@g\.us|919812345678|Desai|Patel/);
     expect(audits.map((a) => a.event)).toEqual(['Group ignored', 'Group ignored']);
     expect(rows(await groupsListHandler(deps, CTX, { filter: 'ignored' })).map((x) => x.key)).toEqual([k(DESAI), k(PATEL)]);
     expect(rows(await groupsListHandler(deps, CTX, { filter: 'not_approved' })).map((x) => x.key)).not.toContain(k(DESAI));
@@ -446,7 +450,7 @@ describe('groupsBulkHandler', () => {
     await bulk('ignore', [k(DESAI), k(PATEL)]);
     await bulk('approve', [k(DESAI)]);
     await groupsApplyHandler(deps, CTX, { approve: [{ key: k(PATEL), name: 'Patel Builders', code: 'PAT' }] });
-    expect(kvRows()).toEqual([]);
+    expect(await kvRows()).toEqual([]);
   });
 });
 

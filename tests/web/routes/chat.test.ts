@@ -14,8 +14,7 @@ import { Ingestor } from '../../../src/wa/ingest.ts';
 import { normalizeMessage } from '../../../src/wa/normalize.ts';
 import { chatReadHandler, chatSendHandler, SEND_HOURLY_MAX, type ChatDeps } from '../../../src/web/routes/chat.ts';
 import type { AuditFn, OwnerContext } from '../../../src/web/routes/context.ts';
-import { MEHTA, NOW, SHARMA, seededDb } from '../../helpers/db.ts';
-import { rawOf } from '../../../src/store/engine/sqlite.ts';
+import { MEHTA, NOW, row, rows, seeded, SHARMA } from '../../helpers/db.ts';
 
 // Open chat: a fake socket only. Nothing here can reach WhatsApp.
 
@@ -33,7 +32,7 @@ class FakeSocket implements GroupSendSocket {
   }
   async sendMessage(jid: string, content: { text: string }, options?: { quoted: QuotedMessage }) {
     this.calls.push({ jid, text: content.text, quoted: options?.quoted });
-    this.stateDuring.push((rawOf(this.db).prepare('SELECT state FROM outbox ORDER BY id DESC LIMIT 1').get() as { state: string } | undefined)?.state);
+    this.stateDuring.push((await row<{ state: string }>(this.db, 'SELECT state FROM outbox ORDER BY id DESC LIMIT 1'))?.state);
     if (this.mode === 'throw') throw new Error('socket closed while sending to 120363000000000001@g.us');
     if (this.mode === 'hang') return new Promise<never>(() => {});
     if (this.mode === 'no-id') return { key: {} };
@@ -42,6 +41,8 @@ class FakeSocket implements GroupSendSocket {
 }
 
 let db: Db;
+/** Sharma's and Mehta's real ids in the test running now (on Postgres ids are shared by every customer). */
+let ids: { sharma: number; mehta: number };
 let clock: ManualClock;
 let sock: FakeSocket;
 let on: boolean;
@@ -52,7 +53,7 @@ let logLines: string[];
 let deps: ChatDeps;
 
 beforeEach(async () => {
-  db = await seededDb();
+  ({ db, ids } = await seeded());
   clock = manualClock(NOW);
   sock = new FakeSocket(db);
   on = true;
@@ -78,14 +79,14 @@ beforeEach(async () => {
 const send = (body: Record<string, unknown>, code = 'SHA') => chatSendHandler(deps, CTX, code, { uuid: uuid(1), text: 'Hello team', confirm: true, ...body });
 const errorOf = (r: { body: unknown }) => (r.body as { error: { code: string; message: string } }).error;
 const sent = (r: { body: unknown }) => r.body as { message: { uuid: string; state: string; text: string; quote: unknown }; replayed: boolean };
-const outboxRows = () => rawOf(db).prepare('SELECT * FROM outbox').all() as { state: string; wa_id: string | null; error_code: string | null }[];
+const outboxRows = () => rows<{ state: string; wa_id: string | null; error_code: string | null }>(db, 'SELECT * FROM outbox');
 
 async function say(waId: string, o: { text?: string | null; fromMe?: boolean; ts?: string; jid?: string; media?: string } = {}): Promise<number> {
   await insertMessage(db, {
-    waId, clientId: 1, senderJid: o.jid ?? '919812345678@s.whatsapp.net', senderNumber: o.fromMe ? null : '919812345678', senderName: null,
+    waId, clientId: ids.sharma, senderJid: o.jid ?? '919812345678@s.whatsapp.net', senderNumber: o.fromMe ? null : '919812345678', senderName: null,
     fromMe: o.fromMe ?? false, ts: o.ts ?? '2026-10-19T07:00:00.000Z', text: o.text === undefined ? `text of ${waId}` : o.text, quotedWaId: null, mediaType: o.media ?? null,
   });
-  return (rawOf(db).prepare('SELECT id FROM messages WHERE wa_id = ?').get(waId) as { id: number }).id;
+  return (await row<{ id: number }>(db, 'SELECT id FROM messages WHERE wa_id = ?', [waId]))!.id;
 }
 
 describe('sending from the dashboard', () => {
@@ -95,7 +96,7 @@ describe('sending from the dashboard', () => {
     expect(sent(r)).toMatchObject({ message: { uuid: uuid(1), state: 'sent', text: 'Hello team' }, replayed: false });
     expect(sock.calls).toEqual([{ jid: SHARMA.groupId, text: 'Hello team', quoted: undefined }]);
     expect(sock.stateDuring).toEqual(['sending']);
-    expect(outboxRows()).toMatchObject([{ state: 'sent', wa_id: '3EB00000000000000001', error_code: null }]);
+    expect(await outboxRows()).toMatchObject([{ state: 'sent', wa_id: '3EB00000000000000001', error_code: null }]);
     const asking = logLines.findIndex((l) => l.includes('dashboard send: asking WhatsApp'));
     expect(asking).toBeGreaterThan(-1);
     expect(logLines.findIndex((l) => l.includes('dashboard send: done'))).toBeGreaterThan(asking);
@@ -110,7 +111,7 @@ describe('sending from the dashboard', () => {
     expect(r.status).toBe(409);
     expect(errorOf(r).code).toBe('sending_off');
     expect(sock.calls).toEqual([]);
-    expect(outboxRows()).toEqual([]);
+    expect(await outboxRows()).toEqual([]);
   });
 
   it('without the dialog’s confirm nothing is sent', async () => {
@@ -120,7 +121,7 @@ describe('sending from the dashboard', () => {
       expect(errorOf(r).code).toBe('not_confirmed');
     }
     expect(sock.calls).toEqual([]);
-    expect(outboxRows()).toEqual([]);
+    expect(await outboxRows()).toEqual([]);
   });
 
   it('a replayed uuid gives the first message back and never sends again; reused for another text it is refused', async () => {
@@ -150,7 +151,7 @@ describe('sending from the dashboard', () => {
     configs = [MEHTA]; // Sharma's group is no longer in the allow-list
     expect((await send({})).status).toBe(404);
     configs = [SHARMA, MEHTA];
-    rawOf(db).prepare("UPDATE clients SET active = 0 WHERE code = 'SHA'").run();
+    await db.run("UPDATE clients SET active = 0 WHERE code = 'SHA'");
     expect((await send({})).status).toBe(404);
     expect(sock.calls).toEqual([]);
   });
@@ -222,10 +223,10 @@ describe('sending from the dashboard', () => {
       message: { conversation: 'Can you send the quote?' },
     });
     await insertMessage(db, {
-      waId: 'MEHTA00000000001', clientId: 2, senderJid: 'x@s.whatsapp.net', senderNumber: null, senderName: null, fromMe: false,
+      waId: 'MEHTA00000000001', clientId: ids.mehta, senderJid: 'x@s.whatsapp.net', senderNumber: null, senderName: null, fromMe: false,
       ts: NOW, text: 'other client', quotedWaId: null, mediaType: null,
     });
-    const otherId = (rawOf(db).prepare("SELECT id FROM messages WHERE wa_id = 'MEHTA00000000001'").get() as { id: number }).id;
+    const otherId = (await row<{ id: number }>(db, "SELECT id FROM messages WHERE wa_id = 'MEHTA00000000001'"))!.id;
     clock.advance(5_000);
     const bad = await send({ uuid: uuid(2), replyTo: otherId });
     expect(bad.status).toBe(400);
@@ -234,7 +235,7 @@ describe('sending from the dashboard', () => {
 
   it('the founder’s own copy coming back (fromMe) is stored once and shown once', async () => {
     await send({});
-    const waId = outboxRows()[0]!.wa_id!;
+    const waId = (await outboxRows())[0]!.wa_id!;
     // Before it comes back the chat shows the dashboard's own row.
     const sha = (await getClientByCode(db, 'SHA'))!;
     expect((await chatPage(db, sha, clock.now())).outbox.map((o) => o.state)).toEqual(['sent']);
@@ -245,15 +246,15 @@ describe('sending from the dashboard', () => {
     expect(echo).not.toBeNull();
     await ingest.handle(echo!);
     await ingest.handle(echo!); // Baileys' own event, then the phone's copy of the same message
-    expect((rawOf(db).prepare('SELECT COUNT(*) AS n FROM messages WHERE wa_id = ?').get(waId) as { n: number }).n).toBe(1);
+    expect((await row<{ n: number }>(db, 'SELECT COUNT(*) AS n FROM messages WHERE wa_id = ?', [waId]))!.n).toBe(1);
     const page = await chatPage(db, sha, clock.now());
     expect(page.outbox).toEqual([]);
     expect(page.messages.filter((m) => m.text === 'Hello team')).toEqual([expect.objectContaining({ mine: true, sender: 'Founder' })]);
   });
 
   it('a stop mid-send: claimed becomes failed, sending becomes unknown; neither is sent again', async () => {
-    const a = await claimOutbox(db, { uuid: uuid(1), clientId: 1, text: 'a', replyTo: null, actor: CTX.actor, at: NOW });
-    const b = await claimOutbox(db, { uuid: uuid(2), clientId: 1, text: 'b', replyTo: null, actor: CTX.actor, at: NOW });
+    const a = await claimOutbox(db, { uuid: uuid(1), clientId: ids.sharma, text: 'a', replyTo: null, actor: CTX.actor, at: NOW });
+    const b = await claimOutbox(db, { uuid: uuid(2), clientId: ids.sharma, text: 'b', replyTo: null, actor: CTX.actor, at: NOW });
     await markSending(db, b.id, NOW);
     expect(await settleInterrupted(db, NOW)).toEqual({ failed: 1, unknown: 1 });
     expect(await outboxByUuid(db, a.uuid)).toMatchObject({ state: 'failed', errorCode: 'interrupted_before_send' });
@@ -265,11 +266,11 @@ describe('resending to a phone that could not read a message (getMessage)', () =
   it('answers only for a message sent from the dashboard, in its own group, with just its text; nothing for any other message', async () => {
     const getMessage = retryMessage((waId, groupId) => sentTextFor(db, waId, groupId));
     await send({});
-    const waId = outboxRows()[0]!.wa_id!;
+    const waId = (await outboxRows())[0]!.wa_id!;
     expect(await getMessage({ id: waId, remoteJid: SHARMA.groupId })).toEqual({ conversation: 'Hello team' });
     // A message the agent only read (stored, not in the outbox), the right id in another group, an unknown id, no id.
     const read = await say('READ000000000001', { text: 'a member wrote this' });
-    const readWaId = (rawOf(db).prepare('SELECT wa_id AS w FROM messages WHERE id = ?').get(read) as { w: string }).w;
+    const readWaId = (await row<{ w: string }>(db, 'SELECT wa_id AS w FROM messages WHERE id = ?', [read]))!.w;
     expect(await getMessage({ id: readWaId, remoteJid: SHARMA.groupId })).toBeUndefined();
     expect(await getMessage({ id: waId, remoteJid: MEHTA.groupId })).toBeUndefined();
     expect(await getMessage({ id: 'NOPE000000000000', remoteJid: SHARMA.groupId })).toBeUndefined();
@@ -278,7 +279,7 @@ describe('resending to a phone that could not read a message (getMessage)', () =
     sock.mode = 'throw';
     clock.advance(5_000);
     await send({ uuid: uuid(2) });
-    expect(outboxRows().filter((r) => r.state === 'unknown')).toHaveLength(1);
+    expect((await outboxRows()).filter((r) => r.state === 'unknown')).toHaveLength(1);
     // Without the outbox lookup (the CLI's link step), getMessage answers nothing at all.
     expect(await retryMessage()({ id: waId, remoteJid: SHARMA.groupId })).toBeUndefined();
   });
@@ -289,8 +290,8 @@ describe('reading the chat', () => {
   const view = (r: { body: unknown }) => r.body as { messages: { id: number; text: string; mine: boolean; sender: string; kind: string; deleted: boolean; transcript: string | null; quote: unknown }[]; hasOlder: boolean; client: { groupName: string }; sendingOn: boolean };
 
   it('pages newest first with no phone number, JID or WhatsApp id; text as stored, lines kept', async () => {
-    await upsertPerson(db, { clientId: 1, jid: '919812345678@s.whatsapp.net', number: '919812345678', name: 'Rahul +91 98123 45678', fromMe: false });
-    await upsertPerson(db, { clientId: 1, jid: '919800000001@s.whatsapp.net', number: '919800000001', name: 'Neha', fromMe: false });
+    await upsertPerson(db, { clientId: ids.sharma, jid: '919812345678@s.whatsapp.net', number: '919812345678', name: 'Rahul +91 98123 45678', fromMe: false });
+    await upsertPerson(db, { clientId: ids.sharma, jid: '919800000001@s.whatsapp.net', number: '919800000001', name: 'Neha', fromMe: false });
     for (let i = 0; i < 5; i++) await say(`MSG000000000000${i}`, { ts: `2026-10-19T07:0${i}:00.000Z`, text: `line one ${i}\nline two <b>x</b>`, jid: i % 2 ? '919800000001@s.whatsapp.net' : undefined });
     const first = await read({ limit: '2' });
     expect(first.status).toBe(200);
@@ -309,11 +310,11 @@ describe('reading the chat', () => {
 
   it('a deleted message has no text; a voice note shows its transcript; a reply shows its quote', async () => {
     const gone = await say('GONE000000000001', { text: 'secret' });
-    rawOf(db).prepare('UPDATE messages SET revoked = 1 WHERE id = ?').run(gone);
+    await db.run('UPDATE messages SET revoked = 1 WHERE id = ?', [gone]);
     const voice = await say('VOICE00000000001', { text: null, media: 'voice', ts: '2026-10-19T07:01:00.000Z' });
-    rawOf(db).prepare("INSERT INTO media (message_id, client_id, kind, status, seconds, text_kind, text, created_at, updated_at) VALUES (?, 1, 'voice', 'done', 42, 'extract', 'Please call me', '2026-10-19T07:01:00.000Z', '2026-10-19T07:01:00.000Z')").run(voice);
+    await db.run("INSERT INTO media (message_id, client_id, kind, status, seconds, text_kind, text, created_at, updated_at) VALUES (?, ?, 'voice', 'done', 42, 'extract', 'Please call me', '2026-10-19T07:01:00.000Z', '2026-10-19T07:01:00.000Z')", [voice, ids.sharma]);
     await say('QUOTER0000000001', { ts: '2026-10-19T07:02:00.000Z', text: 'yes' });
-    rawOf(db).prepare("UPDATE messages SET quoted_wa_id = 'VOICE00000000001' WHERE wa_id = 'QUOTER0000000001'").run();
+    await db.run("UPDATE messages SET quoted_wa_id = 'VOICE00000000001' WHERE wa_id = 'QUOTER0000000001'");
     const [reply, note, deleted] = view(await read()).messages;
     expect(deleted).toMatchObject({ deleted: true, text: '' });
     expect(note).toMatchObject({ kind: 'voice', transcript: 'Please call me' });

@@ -14,7 +14,7 @@ import { CALLBACK_PATH, GoogleConnectRoutes, type GoogleConnectDeps } from '../.
 import type { IdClaims, IdTokenVerifier } from '../../../src/web/oidc.ts';
 import { accountEmail } from '../../../src/output/googleAuth.ts';
 import { seededDb } from '../../helpers/db.ts';
-import { rawOf } from '../../../src/store/engine/sqlite.ts';
+import { setKv } from '../../../src/store/kv.ts';
 
 const FOUNDER = '00000000-0000-4000-8000-000000000001'; // the founder's fixed id (src/platform/store.ts)
 const owner: OwnerContext = { actor: 'owner@studio.in', sessionId: 'session-a', requestId: 'aaaaaaaaaaaa', role: 'founder', tenantId: FOUNDER };
@@ -306,7 +306,7 @@ describe('GoogleConnectRoutes: the account email (owner fix 3)', () => {
 
   it('a reconnect forgets the old email before storing the new one', async () => {
     const t = await withVerifier({ email_verified: false });
-    rawOf(t.db).prepare('INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)').run('google_account_email:main', 'old@studio.in');
+    await setKv(t.db, 'google_account_email:main', 'old@studio.in');
     const state = await t.begin(owner, 'main');
     await t.routes.callback(owner, { state, code: CODE });
     expect(await accountEmail(t.db, 'main')).toBeNull();
