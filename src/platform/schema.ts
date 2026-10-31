@@ -1,9 +1,10 @@
 import type { Sql } from '../store/engine/types.ts';
 
 // The platform tables (SaaS design section 4.2): customers (tenants), their users, who belongs where (memberships),
-// invites, and the platform's own audit log. Not per customer, so not in store/migrations.ts: until S2 they are created
-// here, idempotently, by ensurePlatformSchema; in S2 they become the Postgres platform schema, reached by wa_app only
-// through SECURITY DEFINER functions (see docs/superpowers/plans/2026-10-29-saas-invites-hookups.md).
+// invites, and the platform's own audit log. Not per customer, so not in store/migrations.ts. On SQLite they are created
+// here in tracker.db, idempotently, by ensurePlatformSchema (main.ts, only with PLATFORM_ENABLED). On Postgres the
+// migrations make them (src/store/pg/migrations.ts: tenants in P1, the rest in P3), and the agent reaches them only as wa_platform, on its own pool
+// (decision D1; src/store/open.ts openPlatformStore). wa_app has no grant on them.
 //
 // Ids are uuids as text. Emails are stored lower-cased (checked). Only an invite token's SHA-256 is stored, never the
 // token. Times are ISO strings (UTC).

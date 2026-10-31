@@ -143,9 +143,11 @@ export async function newLink(d: InviteDeps, actor: string, id: string, requestI
     if (!r) throw new PlatformError(404, 'not_found', 'There is no such invite.');
     if (r.status !== 'open') throw new PlatformError(409, 'not_open', r.status === 'accepted' ? 'This invite was already used.' : 'This invite was cancelled.');
     await checkDailyLimit(q, actor, now);
-    await q.run("UPDATE invites SET token_hash = ?, expires_at = ?, send_state = 'none', send_code = NULL WHERE id = ? AND status = 'open'", [
+    const changed = await q.run("UPDATE invites SET token_hash = ?, expires_at = ?, send_state = 'none', send_code = NULL WHERE id = ? AND status = 'open'", [
       hash, new Date(now.getTime() + INVITE_TTL_MS).toISOString(), id,
     ]);
+    // Used or cancelled since the read (Postgres, another connection): no new link, and no audit row for one.
+    if (changed.changes !== 1) throw new PlatformError(409, 'not_open', 'This invite is no longer open.');
     await platformAudit(q, { at, actor, event: 'invite.new_link', tenantId: r.tenant_id, detail: `${r.business} · ${maskAddress(r.email)}`, requestId: requestId ?? null });
   });
   return { invite: (await getInvite(d, id))!, token };
@@ -158,7 +160,8 @@ export async function cancelInvite(d: InviteDeps, actor: string, id: string, req
     const r = await q.get<RawInvite>(`${SELECT} WHERE i.id = ?`, [id]);
     if (!r) throw new PlatformError(404, 'not_found', 'There is no such invite.');
     if (r.status !== 'open') throw new PlatformError(409, 'not_open', r.status === 'accepted' ? 'This invite was already used.' : 'This invite was already cancelled.');
-    await q.run("UPDATE invites SET status = 'cancelled', cancelled_at = ? WHERE id = ? AND status = 'open'", [at, id]);
+    const changed = await q.run("UPDATE invites SET status = 'cancelled', cancelled_at = ? WHERE id = ? AND status = 'open'", [at, id]);
+    if (changed.changes !== 1) throw new PlatformError(409, 'not_open', 'This invite is no longer open.');
     await platformAudit(q, { at, actor, event: 'invite.cancelled', tenantId: r.tenant_id, detail: `${r.business} · ${maskAddress(r.email)}`, requestId: requestId ?? null });
   });
   return (await getInvite(d, id))!;
@@ -223,7 +226,8 @@ export async function redeemInvite(d: InviteDeps, o: { token: unknown; email: st
     // Every check that can refuse is above: only now is the invite claimed, before anything else is written. Two redeems
     // at once (Postgres, two connections): the second waits on this row until the first ends, then finds it used and gets
     // what a used link gets. Everything below is in this transaction, so a later step that fails gives the claim back.
-    const claimed = await q.run("UPDATE invites SET status = 'accepted', used_at = ? WHERE id = ? AND status = 'open'", [at, r.id]);
+    // The token too: a new link made meanwhile (Postgres, another connection) has already stopped this one working.
+    const claimed = await q.run("UPDATE invites SET status = 'accepted', used_at = ? WHERE id = ? AND status = 'open' AND token_hash = ?", [at, r.id, hash]);
     if (claimed.changes !== 1) return { ok: false, reason: 'invalid' };
     const user = await upsertUser(q, { email, name: o.name ?? null, at });
     await q.run('UPDATE invites SET used_by = ? WHERE id = ?', [user.id, r.id]);

@@ -280,3 +280,60 @@ describe('redeeming an invite at sign-up', () => {
     expect(audit).not.toContain('intruder.person');
   });
 });
+
+describe('an invite changed between the read and the write (review B)', () => {
+  /**
+   * Deps whose transaction runs `change` on its own handle just before the first statement matching `before`: what another
+   * connection's committed change looks like to it on Postgres, after its read. On either engine, with no trigger.
+   */
+  const meanwhile = (before: RegExp, change: string, params: Params): InviteDeps => {
+    let done = false;
+    const wrap = (q: Sql): Sql => new Proxy(q, {
+      get(t, p) {
+        if (p === 'run') {
+          return async (sql: string, ps?: Params) => {
+            if (!done && before.test(sql)) {
+              done = true;
+              await t.run(change, params);
+            }
+            return t.run(sql, ps);
+          };
+        }
+        const x = Reflect.get(t, p) as unknown;
+        return typeof x === 'function' ? (x as (...a: unknown[]) => unknown).bind(t) : x;
+      },
+    });
+    return { ...d, db: new Proxy(db, {
+      get(t, p) {
+        if (p === 'tx') return <T>(fn: (q: Sql) => Promise<T>) => t.tx((q) => fn(wrap(q)));
+        const x = Reflect.get(t, p) as unknown;
+        return typeof x === 'function' ? (x as (...a: unknown[]) => unknown).bind(t) : x;
+      },
+    }) };
+  };
+  const events = async () => (await db.all<{ event: string }>('SELECT event FROM platform_audit ORDER BY id')).map((r) => r.event);
+
+  it('a new link for an invite cancelled meanwhile is refused, with no audit row', async () => {
+    const { invite: v, token } = await invite();
+    const racing = meanwhile(/^UPDATE invites SET token_hash/, "UPDATE invites SET status = 'cancelled' WHERE id = ?", [v.id]);
+    expect(await refusal(newLink(racing, FOUNDER, v.id))).toMatchObject({ status: 409 });
+    expect(await events()).toEqual(['invite.created']);
+    expect(await inviteForSignup(d, token)).not.toBeNull(); // the whole attempt rolled back: the old link still works
+  });
+
+  it('cancelling an invite used meanwhile is refused, with no audit row', async () => {
+    const { invite: v } = await invite();
+    const racing = meanwhile(/^UPDATE invites SET status = 'cancelled'/, "UPDATE invites SET status = 'accepted' WHERE id = ?", [v.id]);
+    expect(await refusal(cancelInvite(racing, FOUNDER, v.id))).toMatchObject({ status: 409 });
+    expect(await events()).toEqual(['invite.created']);
+  });
+
+  it('a redeem whose link was replaced meanwhile gets "invalid", and the invite stays open', async () => {
+    const { invite: v, token } = await invite();
+    const racing = meanwhile(/^UPDATE invites SET status = 'accepted'/, 'UPDATE invites SET token_hash = ? WHERE id = ?', [newInviteToken().hash, v.id]);
+    expect(await redeemInvite(racing, { token, email: 'kapoor.studio@example.com' })).toEqual({ ok: false, reason: 'invalid' });
+    expect(await db.get('SELECT status, used_at AS usedAt FROM invites WHERE id = ?', [v.id])).toEqual({ status: 'open', usedAt: null });
+    expect(await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM users')).toEqual({ n: 0 });
+    expect(await events()).toEqual(['invite.created']);
+  });
+});

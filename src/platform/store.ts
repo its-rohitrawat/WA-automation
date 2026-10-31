@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Sql } from '../store/engine/types.ts';
 
 // The platform tables' queries (schema.ts), in the async Db style: every call takes a Sql, so it runs on the database or
-// inside a caller's transaction. Parameterised only. In S2 these become the SECURITY DEFINER functions' bodies.
+// inside a caller's transaction. Parameterised only. On Postgres they run as wa_platform (see schema.ts).
 
 export type TenantStatus = 'invited' | 'onboarding' | 'active' | 'paused';
 
