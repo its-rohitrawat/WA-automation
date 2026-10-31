@@ -773,7 +773,7 @@ export async function listMeetingsByStatus(db: Sql, statuses: readonly MeetingSt
   if (statuses.length === 0) return [];
   const rows = await db.all<Omit<MeetingListRow, 'foundInternal'> & { foundInternal: number }>(
     `SELECT id, started_at AS startedAt, client_id AS clientId, status, title, error_code AS errorCode,
-        COALESCE(note = '${FOUND_INTERNAL_NOTE}', 0) AS foundInternal FROM meetings
+        CASE WHEN note = '${FOUND_INTERNAL_NOTE}' THEN 1 ELSE 0 END AS foundInternal FROM meetings
       WHERE status IN (${statuses.map(() => '?').join(', ')}) ORDER BY started_at DESC, id DESC`,
     statuses,
   );
