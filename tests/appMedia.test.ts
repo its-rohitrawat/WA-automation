@@ -445,7 +445,7 @@ describe('app with shared files', () => {
     expect(fetcher).toHaveBeenCalledTimes(3);
     expect(app.mediaQueue!.active).toBe(3);
     g.release();
-    await vi.waitFor(async () => expect(await Promise.all([1, 2, 3, 4].map(async (id) => (await getMedia(db, id))?.status))).toEqual(['done', 'done', 'done', 'done']));
+    await vi.waitFor(async () => expect(await Promise.all([1, 2, 3, 4].map(async (n) => (await nthMedia(db, n))?.status))).toEqual(['done', 'done', 'done', 'done']));
     await stopApp(app);
   });
 
@@ -834,7 +834,7 @@ describe('app spend holds (Task 15 review round 3)', () => {
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('M1', 'please send the quote', { group: MEHTA.groupId })] });
     await settled();
     await advance(241_000);
-    const mehta = run.mock.calls.findIndex(([clientId]) => clientId === 2);
+    const mehta = run.mock.calls.findIndex(([clientId]) => clientId === MEH);
     expect(mehta).toBeGreaterThanOrEqual(0);
     await expect(run.mock.results[mehta]!.value).resolves.toEqual({ status: 'busy' });
     expect(ai.calls).toHaveLength(0);
