@@ -5,24 +5,27 @@ import { parseTaskEdit, runTaskAction } from '../../src/control/taskActions.ts';
 import type { Db } from '../../src/store/db.ts';
 import { getKv } from '../../src/store/kv.ts';
 import { createTask } from '../../src/store/tasks.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { NOW, rows, seeded } from '../helpers/db.ts';
 
 const now = new Date('2026-10-19T08:00:00Z');
 const OWNER = 'owner@example.com';
 
 async function withTask(): Promise<Db> {
-  const db = await seededDb();
-  await createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
+  const { db, ids } = await seeded();
+  await createTask(db, { clientId: ids.sharma, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
     deadline: null, latestProgress: null, sourceQuote: 'send the banner', sourceDate: '2026-10-10', sourceWaId: null, origin: 'whatsapp' }, NOW);
   return db;
 }
 
-/** Everything a correction changes: the task row, its events and the rebuild request. */
+/**
+ * Everything a correction changes: the task row, its events and the rebuild request. The ids and the customer are left
+ * out, since web and cli are two stores: on Postgres they are two customers, whose ids come from one shared sequence.
+ */
 async function state(db: Db) {
+  const strip = ({ id: _id, tenant_id: _tenant, client_id: _client, task_id: _task, ...rest }: Record<string, unknown>) => rest;
   return {
-    task: rawOf(db).prepare('SELECT * FROM tasks').all(),
-    events: rawOf(db).prepare('SELECT task_id, client_id, actor, op, detail, reason, source_ids, at FROM task_events ORDER BY id').all(),
+    task: (await rows(db, 'SELECT * FROM tasks')).map(strip),
+    events: (await rows(db, 'SELECT task_id, client_id, actor, op, detail, reason, source_ids, at FROM task_events ORDER BY id')).map(strip),
     rebuild: await getKv(db, 'rebuild_requested'),
   };
 }
