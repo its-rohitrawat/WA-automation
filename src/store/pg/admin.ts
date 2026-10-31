@@ -1,4 +1,5 @@
 import type { AdminConnection } from '../engine/pg.ts';
+import { COLLATION_REFUSED, COLLATION_SQL, isByteOrder } from './collation.ts';
 import { PG_MIGRATIONS } from './migrations.ts';
 
 // db-bootstrap and db-migrate (SaaS S2.3 and S2.4, plan 4.2 and 4.9). Plain SQL through an admin connection that
@@ -56,6 +57,9 @@ export async function bootstrap(d: BootstrapDeps): Promise<void> {
   const db = quoteIdent(d.dbName);
   const server = await d.connect('postgres');
   try {
+    // A database that is there already must be in byte order (C): checked before anything is changed.
+    const there = (await server.sql('SELECT datcollate AS "collate", datctype AS "ctype" FROM pg_database WHERE datname = $1', [d.dbName])).rows[0];
+    if (there && !isByteOrder(there)) throw new Error(COLLATION_REFUSED);
     for (const [role, attrs] of Object.entries(ROLES) as [RoleName, string][]) {
       const password = d.passwords[role];
       if (!password) throw new Error(`no password for ${role}`);
@@ -65,10 +69,10 @@ export async function bootstrap(d: BootstrapDeps): Promise<void> {
       await server.sql(String(built.rows[0]!.sql));
       d.out(`${exists ? 'Updated' : 'Created'} role ${role}`);
     }
-    const hasDb = (await server.sql('SELECT 1 FROM pg_database WHERE datname = $1', [d.dbName])).rows.length > 0;
-    if (hasDb) d.out(`Database ${d.dbName} is already there: kept`);
+    if (there) d.out(`Database ${d.dbName} is already there: kept`);
     else {
-      await server.sql(`CREATE DATABASE ${db} OWNER wa_owner ENCODING 'UTF8' TEMPLATE template0`);
+      // Byte-order text (collation and character type C), as SQLite compares text; template0 takes any locale.
+      await server.sql(`CREATE DATABASE ${db} OWNER wa_owner ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0`);
       d.out(`Created database ${d.dbName}, owned by wa_owner`);
     }
   } finally {
@@ -95,6 +99,7 @@ const VERSION_TABLE = `CREATE TABLE IF NOT EXISTS pg_schema_version (
  */
 export async function migrate(c: AdminConnection, o: { now: () => string; out: (line: string) => void; migrations?: readonly { version: number; sql: string }[] }): Promise<number[]> {
   const migrations = o.migrations ?? PG_MIGRATIONS;
+  if (!isByteOrder((await c.sql(COLLATION_SQL)).rows[0])) throw new Error(COLLATION_REFUSED);
   await c.sql(VERSION_TABLE);
   const recorded = new Set((await c.sql('SELECT version FROM pg_schema_version')).rows.map((r) => Number(r.version)));
   const current = Math.max(0, ...recorded);

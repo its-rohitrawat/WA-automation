@@ -26,6 +26,7 @@ export function runtimeDb(db: Db): Db {
     close: () => db.close(),
   };
 }
+import { COLLATION_REFUSED, COLLATION_SQL, isByteOrder } from './pg/collation.ts';
 import { PG_LATEST } from './pg/migrations.ts';
 
 // The engine switch (SaaS S2, plan 4.7): DB_ENGINE=sqlite (the default) keeps data/tracker.db as before;
@@ -48,6 +49,8 @@ export async function openStore(env: Pick<Env, 'DATA_DIR' | 'DB_ENGINE' | 'DATAB
   try {
     const v = (await db.get<{ v: number | null }>('SELECT wa_schema_version() AS v'))?.v ?? 0;
     if (v !== PG_LATEST) throw new Error(`Postgres is at P${v}, this version needs P${PG_LATEST}: run npm run cli -- db-migrate`);
+    // Byte-order text, as SQLite compares it: a database made any other way would order and match text differently.
+    if (!isByteOrder(await db.get(COLLATION_SQL))) throw new Error(COLLATION_REFUSED);
   } catch (e) {
     await pool.end().catch(() => undefined);
     throw e;

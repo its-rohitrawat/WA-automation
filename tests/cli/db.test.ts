@@ -25,6 +25,8 @@ function deps(answers: string[]) {
   const lines: string[] = [];
   const conn: AdminConnection = {
     async sql(text) {
+      // A database made by db-bootstrap: its text order is C.
+      if (text.includes('pg_database')) return { rows: [{ collate: 'C', ctype: 'C' }], rowCount: 1 };
       return { rows: text.startsWith('SELECT format(') ? [{ sql: 'SELECT 1' }] : [], rowCount: 0 };
     },
     async end() {},

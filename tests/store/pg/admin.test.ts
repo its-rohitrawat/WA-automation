@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AdminConnection } from '../../../src/store/engine/pg.ts';
 import { bootstrap, databaseGrants, migrate, roleOf, ROLES } from '../../../src/store/pg/admin.ts';
+import { COLLATION_REFUSED, COLLATION_SQL, isByteOrder } from '../../../src/store/pg/collation.ts';
 import { PG_MIGRATIONS } from '../../../src/store/pg/migrations.ts';
 
 // db-bootstrap and db-migrate with no server (S2.3, S2.4): a fake admin connection records what is sent. S2.7 runs them
@@ -10,7 +11,7 @@ const PASSWORDS = { wa_owner: 'owner-placeholder-1', wa_app: 'app-placeholder-22
 
 interface Sent { db: string; text: string; values: readonly unknown[] }
 
-function fakeServer(o: { roles?: string[]; databases?: string[]; versions?: number[]; failOn?: RegExp } = {}) {
+function fakeServer(o: { roles?: string[]; databases?: string[]; versions?: number[]; failOn?: RegExp; collation?: string } = {}) {
   const sent: Sent[] = [];
   const ended: string[] = [];
   const versions = [...(o.versions ?? [])];
@@ -19,7 +20,12 @@ function fakeServer(o: { roles?: string[]; databases?: string[]; versions?: numb
       sent.push({ db, text, values });
       if (o.failOn?.test(text)) throw new Error('boom');
       if (text.includes('FROM pg_roles')) return { rows: (o.roles ?? []).includes(String(values[0])) ? [{ '?column?': 1 }] : [], rowCount: 0 };
-      if (text.includes('FROM pg_database')) return { rows: (o.databases ?? []).includes(String(values[0])) ? [{ '?column?': 1 }] : [], rowCount: 0 };
+      if (text.includes('FROM pg_database')) {
+        // The database's collation (C unless a test says otherwise): the current one, or one named by bootstrap.
+        const c = { collate: o.collation ?? 'C', ctype: o.collation ?? 'C' };
+        if (text.includes('current_database()')) return { rows: [c], rowCount: 1 };
+        return { rows: (o.databases ?? []).includes(String(values[0])) ? [c] : [], rowCount: 0 };
+      }
       if (text.startsWith('SELECT format(')) {
         // As the server would: %I an identifier, %L a quoted literal.
         const built = text.slice("SELECT format('".length, text.indexOf("', $1")).replace('%I', String(values[0])).replace('%L', `'${String(values[1])}'`);
@@ -60,7 +66,7 @@ describe('bootstrap', () => {
     expect(roleSql.find((t) => t.startsWith('CREATE ROLE wa_backup '))).toMatch(/ BYPASSRLS /);
     for (const t of roleSql) expect(t).toMatch(/NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION/);
 
-    expect(s.sent.filter((x) => x.db === 'postgres').map((x) => x.text)).toContain(`CREATE DATABASE "wa_agent" OWNER wa_owner ENCODING 'UTF8' TEMPLATE template0`);
+    expect(s.sent.filter((x) => x.db === 'postgres').map((x) => x.text)).toContain(`CREATE DATABASE "wa_agent" OWNER wa_owner ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0`);
     expect(s.sent.filter((x) => x.db === 'wa_agent').map((x) => x.text)).toEqual(databaseGrants('wa_agent'));
     expect(s.ended).toEqual(['postgres', 'wa_agent']);
     expect(o.lines).toEqual([
@@ -79,6 +85,14 @@ describe('bootstrap', () => {
     expect(o.lines).toContain('Database wa_agent is already there: kept');
   });
 
+  it('refuses a database already there in another collation, before any role is touched (byte order, as SQLite)', async () => {
+    const s = fakeServer({ databases: ['wa_agent'], collation: 'en_US.utf8' });
+    const o = out();
+    await expect(bootstrap({ connect: async (db) => s.conn(db), passwords: PASSWORDS, dbName: 'wa_agent', out: o.out })).rejects.toThrow(COLLATION_REFUSED);
+    expect(s.sent.some((x) => /ROLE|CREATE|GRANT/.test(x.text))).toBe(false);
+    expect(o.lines).toEqual([]);
+  });
+
   it('the grants: no PUBLIC access, default privileges give wa_app rows and wa_backup SELECT only', () => {
     const g = databaseGrants('wa_agent');
     expect(g).toContain('REVOKE CONNECT, TEMPORARY ON DATABASE "wa_agent" FROM PUBLIC');
@@ -93,7 +107,8 @@ describe('bootstrap', () => {
   it('a missing password stops before any role is touched', async () => {
     const s = fakeServer();
     await expect(bootstrap({ connect: async (db) => s.conn(db), passwords: { ...PASSWORDS, wa_owner: '' }, dbName: 'wa_agent', out: () => {} })).rejects.toThrow('no password for wa_owner');
-    expect(s.sent).toEqual([]);
+    // Only the read of an existing database's collation went out: no role, no database.
+    expect(s.sent.map((x) => x.text)).toEqual([expect.stringMatching(/^SELECT datcollate .* FROM pg_database WHERE datname = \$1$/)]);
     expect(s.ended).toEqual(['postgres']);
   });
 });
@@ -101,12 +116,23 @@ describe('bootstrap', () => {
 describe('migrate', () => {
   const now = () => '2026-10-30T10:00:00.000Z';
 
+  it('refuses a database in another collation, applying nothing (byte order, as SQLite compares text)', async () => {
+    const s = fakeServer({ collation: 'en_US.utf8' });
+    const o = out();
+    await expect(migrate(s.conn('wa_agent'), { now, out: o.out })).rejects.toThrow(COLLATION_REFUSED);
+    expect(s.sent.some((x) => /CREATE|INSERT|BEGIN/.test(x.text))).toBe(false);
+    expect(o.lines).toEqual([]);
+    expect([isByteOrder({ collate: 'C', ctype: 'C' }), isByteOrder({ collate: 'POSIX', ctype: 'POSIX' })]).toEqual([true, true]);
+    expect([isByteOrder({ collate: 'C', ctype: 'en_US.utf8' }), isByteOrder({ collate: 'en_US.UTF-8', ctype: 'C' }), isByteOrder(undefined)]).toEqual([false, false, false]);
+  });
+
   it('a new database: every migration, each in its own transaction with its version row', async () => {
     const s = fakeServer();
     const o = out();
     expect(await migrate(s.conn('wa_agent'), { now, out: o.out })).toEqual(PG_MIGRATIONS.map((m) => m.version));
     const texts = s.sent.map((x) => x.text);
-    expect(texts[0]).toMatch(/^CREATE TABLE IF NOT EXISTS pg_schema_version/);
+    expect(texts[0]).toBe(COLLATION_SQL); // the database's text order is checked before anything else
+    expect(texts[1]).toMatch(/^CREATE TABLE IF NOT EXISTS pg_schema_version/);
     for (const m of PG_MIGRATIONS) {
       const at = texts.indexOf(m.sql);
       expect(texts.slice(at - 1, at + 3)).toEqual(['BEGIN', m.sql, 'INSERT INTO pg_schema_version (version, applied_at) VALUES ($1, $2)', 'COMMIT']);
