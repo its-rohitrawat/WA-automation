@@ -5,8 +5,8 @@ test:pg runs and a read-only sweep of tests/ at fb20231.
 
 The test suite used to run on SQLite only. `npm run test:pg` now runs it against a real Postgres 17 in Docker, using the
 same roles and migrations as the Mac. Converting the tests (real client ids, no raw SQLite handle, the platform tables
-on the platform role) found twelve real bugs in the agent's own SQL or code. Each one would have broken
-something on Postgres that SQLite let through.
+on the platform role) and running them found thirteen real bugs in the agent's own SQL or code. Each one would
+have broken something on Postgres that SQLite let through.
 
 ## The real bugs
 
@@ -27,6 +27,7 @@ back.
 | 10 | Two sign-ups from one invite at once: the loser hit the users table's unique email and got a 500, not "link already used". | 1400e0b (lane C) | tests/platform/invites.test.ts (the race, a refusal never uses the invite, a failed step gives the claim back) |
 | 11 | The CLI (connectAndIngest) and a relinked service closed the database before the messages already taken were stored: on Postgres the last ones were lost without a word, and the printed count was wrong. | 2ec726a | tests/cli/commands.test.ts ("stores and counts a message still being written when the wait ends, before the database closes"), tests/wa/switchableGateway.test.ts ("idle() waits for what the old gateway was storing…") |
 | 12 | A relink dropped events: those still queued on the gateway it detached, and the new gateway's events from before the swap. Now the old gateway's queue drains into the handlers, and a relink follows the new gateway from its start (and stops following it when the relink is undone). | a5d9ac0 (lane A), in src/wa/switchableGateway.ts and src/wa/linkSession.ts | tests/wa/switchableGateway.test.ts (the drain, the unfollow), tests/wa/linkSession.test.ts (messages between open and the hand-over are stored; a cancelled relink stores no doubles, and nothing from a group that is not allowed; the last in d876363). Mutation-checked: with the drain off 4 fail, without follow() 1 fails. |
+| 13 | A cancel that came while the founder's relink was backing up the session or reading its auth was lost: the abort listener was added after those awaits, with no check that the cancel had already come. The link hung, WhatsApp stayed disconnected, and every new link got 409 until a restart. Found by tests/web/customerLink's 409s in the final test:pg. Now the link checks for a cancel right before it adds the listener; a sweep found no other lost-abort site in src. | 3e3a9e4 (lane A), in src/wa/linkSession.ts | tests/wa/linkSession.test.ts ("a cancel while the session is being backed up still ends the link… (bug 13)"). Mutation-checked: without the fix it hangs ("never finished: still pending after 2000 ms"). |
 
 **The numbering** (confirmed by the coordinator, 31 Oct). The commits label bugs 1 and 4 to 10. Bugs 2 and 3 are the
 IS NULL and MAX/MIN fixes, in the order they were found. json_valid is counted with bug 1: its fix is in the same
@@ -83,3 +84,19 @@ In flight elsewhere, and left out of the sweep: tests/appMedia.test.ts and tests
 
 The test database container is reused between runs. Each run resets it inside the container, and nothing is written
 outside it.
+
+## Slow on Postgres: the test-side speed-ups
+
+Under full-suite load some tests ran slowly on Postgres, near or past their time limit, because each statement is a
+real round trip there. They were made faster in the tests only, with the same assertions:
+- **tests/app.test.ts, 12d**: each stage's real time capped by a labelled `work.until()` (ab93431).
+- **tests/appMedia.test.ts, the multi-hour sweeps**: a tick every 12 h, and the late transcript every 31 min, each stage capped by `until()` (8eceeb6).
+- **tests/app.test.ts, past midnight**: a tick every 240 s, so 95 minutes take 24 ticks, not 190 (cd01086).
+- **tests/cli/corrections.test.ts and tests/control/clientQueries.test.ts**: their fixture rows written in one transaction, with one id lookup (cd01086).
+- **tests/output/workbookRound2.test.ts**: the 200 tasks in one transaction; the tie test starts the codes at SHA-998 and asserts the whole order (446a75f).
+
+The rule they follow:
+- fewer ticks, through a longer `pollMs`;
+- fixtures in one transaction;
+- a labelled `until()` cap under the test's own timeout, so a slow or hung stage names itself;
+- never a raised `testTimeout`.
