@@ -91,7 +91,9 @@ describe('MeetingQueue', () => {
     expect(processor.calls).toEqual([]);
 
     queue.start();
-    await vi.waitFor(() => expect(processor.calls).toHaveLength(1), WAIT);
+    // What the fake saw is noted after its own reads (on Postgres a moment after the call): wait for that, not the call.
+    await vi.waitFor(() => expect(processor.seen).toHaveLength(1), WAIT);
+    expect(processor.calls).toHaveLength(1);
     expect(processor.seen).toEqual([{ parts: 'ceiling', spend: 1, forgotten: ['tr-9'] }]);
     expect(existsSync(join(tmp, `${done}.mp4.part`))).toBe(false);
     expect(existsSync(join(tmp, 'notes.txt'))).toBe(true);
