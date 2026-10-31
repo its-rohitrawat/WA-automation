@@ -103,7 +103,7 @@ describe.runIf(onPg)('migrate-to-postgres and export-to-sqlite on a real Postgre
       expect(await other.get('SELECT count(*) AS n FROM wa_auth')).toEqual({ n: 0 });
       await expect(copyToPostgres({ dataDir: f.data, tenantId: a, apply: true, backupDir: join(f.dir, 'b2') }, target)).rejects.toThrow(/already has data in clients/);
       // Another customer's copy into the same database: its ids would clash with A's, so it is refused, plainly.
-      await expect(copyToPostgres({ dataDir: f.data, tenantId: b, apply: true, backupDir: join(f.dir, 'b3') }, target)).rejects.toThrow(/already given out ids in w+.*fresh database, before any customer exists/);
+      await expect(copyToPostgres({ dataDir: f.data, tenantId: b, apply: true, backupDir: join(f.dir, 'b3') }, target)).rejects.toThrow(/already given out ids in \w+ .*fresh database, before any customer exists/);
       expect(await other.get('SELECT count(*) AS n FROM messages')).toEqual({ n: 0 });
     } finally {
       await other.close();
