@@ -78,6 +78,23 @@ export class DbWork {
     await vi.advanceTimersByTimeAsync(0);
     await this.quiet();
   }
+
+  /**
+   * Waits for `p` under fake time: advance(stepMs) while it is pending, up to fakeMs of fake time; then settle() (real
+   * waits, the clock held) up to realCapMs of real time. Still pending after that, it waits on something that never
+   * settles: the test fails loudly, naming `label` and the stage, never passes quietly. Returns (or throws) what p does.
+   */
+  async until<T>(p: Promise<T>, o: { fakeMs: number; stepMs: number; realCapMs: number; label: string }): Promise<T> {
+    let done = false;
+    p.then(() => void (done = true), () => void (done = true));
+    for (let spent = 0; spent < o.fakeMs && !done; spent += o.stepMs) await this.advance(o.stepMs);
+    const settleMs = 50;
+    for (let waited = 0; waited < o.realCapMs && !done; waited += settleMs) await this.settle(settleMs);
+    if (!done) {
+      throw new Error(`${o.label} never finished: still pending after ${o.fakeMs} ms of fake time and ${o.realCapMs} ms of real waits with the due timers fired`);
+    }
+    return p;
+  }
 }
 
 /**

@@ -192,16 +192,10 @@ const BUDGET_LINE = "⚠️ 1 shared file waiting for today's AI budget (read af
 
 /** stop() ends with a final upload whose workbook build runs on (fake) timers: advance until it resolves. */
 async function stopApp(app: { stop(): Promise<void> }): Promise<void> {
-  let done = false;
-  const p = app.stop();
-  p.then(() => void (done = true), () => void (done = true));
-  for (let i = 0; i < 30 && !done; i++) await advance(1_000);
-  // On Postgres the build can start after those 30 s of fake time (its database reads are real round trips) while it still
-  // runs on timers due at once and on real file I/O: those timers fire, with real waits, and the clock stays where it is.
-  // A stop() still running after 20 s of that waits on something that never settles: the test fails, never passes quietly.
-  for (let i = 0; i < 400 && !done; i++) await work.settle(50);
-  if (!done) throw new Error('stopApp: stop() never finished, after its 30 s of fake time and 20 s of real waits with the due timers fired');
-  await p;
+  // On Postgres the build can start after these 30 s of fake time (its database reads are real round trips), still on
+  // timers due at once and real file I/O: until() then fires those with real waits, the clock held, and fails loudly if
+  // stop() never finishes.
+  await work.until(app.stop(), { fakeMs: 30_000, stepMs: 1_000, realCapMs: 20_000, label: 'stop()' });
 }
 
 /** Claude overloaded (529): released, not billed, so the file waits without using an attempt (amendment 10d). */
