@@ -9,7 +9,7 @@ import {
   type MeetingStatus, type NewMeeting, type SttPartRow,
 } from '../../src/store/meetings.ts';
 import { MIGRATIONS } from '../../src/store/migrations.ts';
-import { LATER, NOW, onSqlite, row, seeded, seededDb } from '../helpers/db.ts';
+import { idOf, LATER, NOW, onSqlite, row, seeded, seededDb, SHARMA } from '../helpers/db.ts';
 
 const CONF = 'conferenceRecords/c1';
 const LATEST = '2026-10-19T10:00:00.000Z';
@@ -33,6 +33,9 @@ const meeting = (o: Partial<NewMeeting> = {}): NewMeeting => ({
   ...o,
 });
 
+/** meeting(), for Sharma by its real id in this database (on Postgres the client ids are not 1 and 2). */
+const meetingFor = async (db: Db, o: Partial<NewMeeting> = {}): Promise<NewMeeting> => meeting({ clientId: await idOf(db, SHARMA.code), ...o });
+
 /** Unassigned and internal meetings have no client; internal ones also keep no title, attendees or names. */
 const noClient = (status: 'unassigned' | 'internal' | 'skipped'): Partial<NewMeeting> =>
   status === 'internal'
@@ -55,7 +58,7 @@ const part = (index: number, o: Partial<SttPartRow> = {}): SttPartRow => ({
 
 async function withStatus(db: Db, status: MeetingStatus, o: Partial<NewMeeting> = {}): Promise<number> {
   const base = status === 'unassigned' || status === 'internal' || status === 'skipped' ? noClient(status) : { status };
-  return (await insertFound(db, meeting({ ...base, ...o })))!;
+  return (await insertFound(db, await meetingFor(db, { ...base, ...o })))!;
 }
 
 /** A queued meeting taken to stage doc and finished, as the processor would. */
@@ -68,15 +71,15 @@ async function doneMeeting(db: Db, o: Partial<NewMeeting> = {}, fields: Paramete
 
 describe('meetings store', () => {
   it('records a recording once; the second insert returns null', async () => {
-    const db = await seededDb();
-    const m = meeting();
+    const { db, ids } = await seeded();
+    const m = await meetingFor(db);
     const id = await insertFound(db, m);
     expect(id).toBeTypeOf('number');
     expect(await insertFound(db, { ...m, title: 'Other' })).toBeNull();
-    expect((rawOf(db).prepare('SELECT COUNT(*) AS n FROM meetings').get() as { n: number }).n).toBe(1);
+    expect((await row<{ n: number }>(db, 'SELECT COUNT(*) AS n FROM meetings'))!.n).toBe(1);
     expect(await getMeeting(db, id!)).toMatchObject({
       id, recording: m.recording, conference: CONF, driveFileId: m.driveFileId, meetingCode: 'abc-defg-hij', title: 'Sharma weekly',
-      startedAt: m.startedAt, endedAt: m.endedAt, attendees: m.attendees, participants: ['Mr. Sharma'], clientId: 1, matchKind: 'title',
+      startedAt: m.startedAt, endedAt: m.endedAt, attendees: m.attendees, participants: ['Mr. Sharma'], clientId: ids.sharma, matchKind: 'title',
       status: 'queued', stage: 'found', driveSeconds: 2700, audioPath: null, audioSeconds: null, sttParts: [], transcript: null, summary: null,
       docFileId: null, note: null, errorCode: null, attempts: 0, nextAttemptAt: null, createdAt: NOW, updatedAt: NOW,
     });
@@ -85,17 +88,17 @@ describe('meetings store', () => {
 
   it('stores an error code given at insert', async () => {
     const db = await seededDb();
-    const id = (await insertFound(db, meeting({ status: 'no_access', errorCode: 'http_404' })))!;
+    const id = (await insertFound(db, await meetingFor(db, { status: 'no_access', errorCode: 'http_404' })))!;
     expect(await getMeeting(db, id)).toMatchObject({ status: 'no_access', errorCode: 'http_404' });
   });
 
   it('lists the recordings known for a conference', async () => {
     const db = await seededDb();
-    const a = meeting();
-    const b = meeting();
+    const a = await meetingFor(db);
+    const b = await meetingFor(db);
     await insertFound(db, a);
     await insertFound(db, b);
-    await insertFound(db, meeting({ conference: 'conferenceRecords/c2', recording: 'conferenceRecords/c2/recordings/x' }));
+    await insertFound(db, await meetingFor(db, { conference: 'conferenceRecords/c2', recording: 'conferenceRecords/c2/recordings/x' }));
     expect(await knownRecordings(db, CONF)).toEqual(new Set([a.recording, b.recording]));
     expect(await knownRecordings(db, 'conferenceRecords/none')).toEqual(new Set());
   });
@@ -125,9 +128,9 @@ describe('meetings store', () => {
     expect(await getMeeting(db, utc)).toMatchObject({ startedAt: '2026-10-18T05:00:00.000Z', endedAt: null });
     expect((await getMeeting(db, nanos))!.startedAt).toBe('2026-10-18T03:00:00.123Z');
     expect(await dueMeetingIds(db, NOW, 10)).toEqual([whole, nanos, half, ist, utc]);
-    await expect(insertFound(db, meeting({ startedAt: 'yesterday' }))).rejects.toThrow(/startedAt is not a time/);
-    await expect(insertFound(db, meeting({ endedAt: '' }))).rejects.toThrow(/endedAt is not a time/);
-    await expect(insertFound(db, meeting({ createdAt: '2026-10-19T08:00:00Z' }))).rejects.toThrow(/createdAt is not a canonical ISO time/);
+    await expect(insertFound(db, await meetingFor(db, { startedAt: 'yesterday' }))).rejects.toThrow(/startedAt is not a time/);
+    await expect(insertFound(db, await meetingFor(db, { endedAt: '' }))).rejects.toThrow(/endedAt is not a time/);
+    await expect(insertFound(db, await meetingFor(db, { createdAt: '2026-10-19T08:00:00Z' }))).rejects.toThrow(/createdAt is not a canonical ISO time/);
   });
 
   it('refuses times that are not canonical where they are compared as text', async () => {
@@ -143,13 +146,13 @@ describe('meetings store', () => {
   });
 
   it('claims a due meeting once, counting the attempt and clearing the error code; never one not due or not queued', async () => {
-    const db = await seededDb();
+    const { db, ids } = await seeded();
     const id = await withStatus(db, 'queued');
     await deferMeeting(db, id, { errorCode: 'spend_cap', nextAttemptAt: NOW, at: NOW });
     expect(await claimMeeting(db, id, { nextAttemptAt: LATER, at: NOW })).toBe(true);
     expect(await claimMeeting(db, id, { nextAttemptAt: LATER, at: NOW })).toBe(false);
     expect(await getMeetingState(db, id)).toEqual({
-      id, status: 'queued', stage: 'found', attempts: 1, errorCode: null, nextAttemptAt: LATER, clientId: 1, updatedAt: NOW,
+      id, status: 'queued', stage: 'found', attempts: 1, errorCode: null, nextAttemptAt: LATER, clientId: ids.sharma, updatedAt: NOW,
     });
     expect(await dueMeetingIds(db, NOW, 10)).toEqual([]);
     expect(await claimMeeting(db, id, { nextAttemptAt: LATEST, at: LATER })).toBe(true);
@@ -192,7 +195,7 @@ describe('meetings store', () => {
 
   it('a failure can store the audio it keeps', async () => {
     const db = await seededDb();
-    const id = (await insertFound(db, meeting()))!;
+    const id = (await insertFound(db, await meetingFor(db, )))!;
     await failMeeting(db, id, { status: 'too_long', errorCode: 'too_long_measured', at: LATER, audioPath: 'meetings/SHA/2026-10/1.mp3', audioSeconds: 660 });
     expect(await getMeeting(db, id)).toMatchObject({ status: 'too_long', stage: 'found', audioPath: 'meetings/SHA/2026-10/1.mp3', audioSeconds: 660 });
   });
@@ -224,7 +227,7 @@ describe('meetings store', () => {
     const extra = { ...summary(1), mood: 'happy' } as unknown as MeetingSummary;
     await expect(advanceStage(db, id, 'summarised', { summary: extra }, NOW)).rejects.toThrow(/summary value does not have the stored shape/);
     expect(await getMeeting(db, id)).toMatchObject({ stage: 'found', summary: null });
-    rawOf(db).prepare('UPDATE meetings SET summary = ? WHERE id = ?').run(JSON.stringify(extra), id);
+    await db.run('UPDATE meetings SET summary = ? WHERE id = ?', [JSON.stringify(extra), id]);
     await expect(getMeeting(db, id)).rejects.toThrow(new RegExp(`meeting ${id}.*summary`));
   });
 
@@ -271,17 +274,17 @@ describe('meetings store', () => {
   });
 
   it('assigns only unassigned or internal meetings', async () => {
-    const db = await seededDb();
+    const { db, ids } = await seeded();
     const un = await withStatus(db, 'unassigned');
     const internal = await withStatus(db, 'internal');
     const done = await withStatus(db, 'done');
-    expect(await assignMeeting(db, un, 2, LATER)).toBe(true);
-    expect(await getMeeting(db, un)).toMatchObject({ status: 'queued', clientId: 2, matchKind: 'human', updatedAt: LATER });
-    expect(await assignMeeting(db, internal, 1, LATER)).toBe(true);
-    expect(await getMeeting(db, internal)).toMatchObject({ status: 'queued', clientId: 1, matchKind: 'human', title: '', attendees: [] });
-    expect(await assignMeeting(db, done, 2, LATER)).toBe(false);
-    expect(await assignMeeting(db, un, 1, LATER)).toBe(false); // now queued
-    expect(await getMeeting(db, done)).toMatchObject({ status: 'done', clientId: 1, matchKind: 'title' });
+    expect(await assignMeeting(db, un, ids.mehta, LATER)).toBe(true);
+    expect(await getMeeting(db, un)).toMatchObject({ status: 'queued', clientId: ids.mehta, matchKind: 'human', updatedAt: LATER });
+    expect(await assignMeeting(db, internal, ids.sharma, LATER)).toBe(true);
+    expect(await getMeeting(db, internal)).toMatchObject({ status: 'queued', clientId: ids.sharma, matchKind: 'human', title: '', attendees: [] });
+    expect(await assignMeeting(db, done, ids.mehta, LATER)).toBe(false);
+    expect(await assignMeeting(db, un, ids.sharma, LATER)).toBe(false); // now queued
+    expect(await getMeeting(db, done)).toMatchObject({ status: 'done', clientId: ids.sharma, matchKind: 'title' });
   });
 
   it('skips only unassigned meetings', async () => {
@@ -328,15 +331,15 @@ describe('meetings store', () => {
   });
 
   it('assigns a no-access meeting only when it has no client, clearing the found-internal note', async () => {
-    const db = await seededDb();
+    const { db, ids } = await seeded();
     const internal = await withStatus(db, 'no_access', {
       clientId: null, matchKind: null, title: '', attendees: [], participants: [], errorCode: 'http_404', foundInternal: true,
     });
     const withClient = await withStatus(db, 'no_access', { errorCode: 'http_404' });
-    expect(await assignMeeting(db, withClient, 2, LATER)).toBe(false);
-    expect(await assignMeeting(db, internal, 2, LATER)).toBe(true);
-    expect(await getMeeting(db, internal)).toMatchObject({ status: 'queued', clientId: 2, matchKind: 'human', errorCode: null, attempts: 0, note: null });
-    expect(await getMeeting(db, withClient)).toMatchObject({ status: 'no_access', clientId: 1 });
+    expect(await assignMeeting(db, withClient, ids.mehta, LATER)).toBe(false);
+    expect(await assignMeeting(db, internal, ids.mehta, LATER)).toBe(true);
+    expect(await getMeeting(db, internal)).toMatchObject({ status: 'queued', clientId: ids.mehta, matchKind: 'human', errorCode: null, attempts: 0, note: null });
+    expect(await getMeeting(db, withClient)).toMatchObject({ status: 'no_access', clientId: ids.sharma });
   });
 
   it('lists a no-access meeting found as internal with foundInternal', async () => {
@@ -355,7 +358,7 @@ describe('meetings store', () => {
     const old = await withStatus(db, 'unassigned', { startedAt: '2026-10-10T10:00:00.000Z', driveSeconds: 100 });
     const recent = await withStatus(db, 'unassigned', { startedAt: '2026-10-12T10:00:00.000Z', driveSeconds: null });
     await withStatus(db, 'internal');
-    rawOf(db).prepare('UPDATE meetings SET audio_seconds = 95.5 WHERE id = ?').run(old); // the audio's length wins over Drive's
+    await db.run('UPDATE meetings SET audio_seconds = 95.5 WHERE id = ?', [old]); // the audio's length wins over Drive's
     const rows = await listUnassigned(db, 10);
     expect(rows).toEqual([
       { id: recent, startedAt: '2026-10-12T10:00:00.000Z', seconds: null },
@@ -366,26 +369,26 @@ describe('meetings store', () => {
   });
 
   it('lists a client’s done meetings newest first with their action item counts', async () => {
-    const db = await seededDb();
+    const { db, ids } = await seeded();
     const a = await doneMeeting(db, { startedAt: '2026-10-10T10:00:00.000Z', title: 'First' }, { summary: summary(3), docFileId: 'docA' });
     const b = await doneMeeting(db, { startedAt: '2026-10-12T10:00:00.000Z', title: 'Second', driveSeconds: null }, { audioSeconds: 600 });
     await withStatus(db, 'queued', { startedAt: '2026-10-13T10:00:00.000Z' }); // not done
-    await withStatus(db, 'done', { clientId: 2, startedAt: '2026-10-14T10:00:00.000Z' }); // other client
-    expect(await listClientMeetings(db, 1, 10)).toEqual([
+    await withStatus(db, 'done', { clientId: ids.mehta, startedAt: '2026-10-14T10:00:00.000Z' }); // other client
+    expect(await listClientMeetings(db, ids.sharma, 10)).toEqual([
       { id: b, startedAt: '2026-10-12T10:00:00.000Z', title: 'Second', seconds: 600, docFileId: null, actionItemCount: 0 },
       { id: a, startedAt: '2026-10-10T10:00:00.000Z', title: 'First', seconds: 2700, docFileId: 'docA', actionItemCount: 3 },
     ]);
-    expect(await listClientMeetings(db, 1, 1)).toHaveLength(1);
+    expect(await listClientMeetings(db, ids.sharma, 1)).toHaveLength(1);
   });
 
   it('gives each client’s latest done meeting', async () => {
-    const db = await seededDb();
+    const { db, ids } = await seeded();
     await withStatus(db, 'done', { startedAt: '2026-10-10T10:00:00.000Z' });
     await withStatus(db, 'done', { startedAt: '2026-10-12T10:00:00.000Z' });
     await withStatus(db, 'queued', { startedAt: '2026-10-15T10:00:00.000Z' });
-    await withStatus(db, 'done', { clientId: 2, startedAt: '2026-10-11T10:00:00.000Z' });
+    await withStatus(db, 'done', { clientId: ids.mehta, startedAt: '2026-10-11T10:00:00.000Z' });
     await withStatus(db, 'skipped', { startedAt: '2026-10-16T10:00:00.000Z' });
-    expect(await lastMeetingByClient(db)).toEqual(new Map([[1, '2026-10-12T10:00:00.000Z'], [2, '2026-10-11T10:00:00.000Z']]));
+    expect(await lastMeetingByClient(db)).toEqual(new Map([[ids.sharma, '2026-10-12T10:00:00.000Z'], [ids.mehta, '2026-10-11T10:00:00.000Z']]));
   });
 
   it('noteMeetingProgress caps a queued meeting’s attempts at 1, never raises them, and leaves other meetings alone', async () => {
@@ -430,14 +433,14 @@ describe('meetings store', () => {
   });
 
   it('a bad JSON value fails only its own row, naming the meeting and column but not the content', async () => {
-    const db = await seededDb();
+    const { db, ids } = await seeded();
     const good = await doneMeeting(db, { startedAt: '2026-10-10T10:00:00.000Z' }, { summary: summary(1) });
     const bad = await doneMeeting(db, { startedAt: '2026-10-11T10:00:00.000Z' }, { summary: summary(1) });
     const badSummary = await doneMeeting(db, { startedAt: '2026-10-12T10:00:00.000Z' }, { summary: summary(1) });
     const noList = await doneMeeting(db, { startedAt: '2026-10-13T10:00:00.000Z' }, { summary: summary(1) });
-    rawOf(db).prepare("UPDATE meetings SET attendees = '[{\"email\": 42, \"secret\": \"Mr Sharma private\"}]' WHERE id = ?").run(bad);
-    rawOf(db).prepare("UPDATE meetings SET summary = '{not json: private words' WHERE id = ?").run(badSummary);
-    rawOf(db).prepare(`UPDATE meetings SET summary = '{"actionItems": "private"}' WHERE id = ?`).run(noList);
+    await db.run("UPDATE meetings SET attendees = '[{\"email\": 42, \"secret\": \"Mr Sharma private\"}]' WHERE id = ?", [bad]);
+    await db.run("UPDATE meetings SET summary = '{not json: private words' WHERE id = ?", [badSummary]);
+    await db.run(`UPDATE meetings SET summary = '{"actionItems": "private"}' WHERE id = ?`, [noList]);
     await expect(getMeeting(db, bad)).rejects.toThrow(new RegExp(`meeting ${bad}.*attendees`));
     await expect(getMeeting(db, bad)).rejects.not.toThrow(/private/);
     await expect(getMeeting(db, badSummary)).rejects.toThrow(new RegExp(`meeting ${badSummary}.*summary`));
@@ -447,10 +450,10 @@ describe('meetings store', () => {
     expect(await getMeetingState(db, badSummary)).toMatchObject({ id: badSummary, status: 'done', stage: 'tracked' });
     // The list reads only the summary's action items, so the bad attendees row is still listed; the bad summaries are
     // skipped, and the limit counts only listed rows.
-    expect((await listClientMeetings(db, 1, 10)).map((m) => m.id)).toEqual([bad, good]);
-    expect((await listClientMeetings(db, 1, 1)).map((m) => m.id)).toEqual([bad]);
+    expect((await listClientMeetings(db, ids.sharma, 10)).map((m) => m.id)).toEqual([bad, good]);
+    expect((await listClientMeetings(db, ids.sharma, 1)).map((m) => m.id)).toEqual([bad]);
     // The last meeting is the newest listed one, not the hidden ones of the 12th and 13th.
-    expect((await lastMeetingByClient(db)).get(1)).toBe('2026-10-11T10:00:00.000Z');
+    expect((await lastMeetingByClient(db)).get(ids.sharma)).toBe('2026-10-11T10:00:00.000Z');
   });
 });
 
