@@ -565,7 +565,8 @@ export async function releaseSttNoneWaits(db: Sql, at: string): Promise<number> 
  * the part's own write. The next attempt and the error code are left as they are.
  */
 export async function noteMeetingProgress(db: Sql, id: number): Promise<void> {
-  await db.run(`UPDATE meetings SET attempts = MIN(attempts, 1) WHERE id = ? AND status = 'queued'`, [id]);
+  // At most 1: a CASE, which both engines run (SQLite's two-argument MIN is not Postgres's, S2.5).
+  await db.run(`UPDATE meetings SET attempts = CASE WHEN attempts > 1 THEN 1 ELSE attempts END WHERE id = ? AND status = 'queued'`, [id]);
 }
 
 /**

@@ -5,11 +5,11 @@ import type { MeetingSummary } from '../../src/brain/meetingSchema.ts';
 import { migrate, type Db } from '../../src/store/db.ts';
 import {
   advanceStage, assignMeeting, claimMeeting, deferMeeting, dueMeetingIds, failMeeting, finishMeeting, FOUND_INTERNAL_NOTE, getMeeting, getMeetingState,
-  insertFound, knownRecordings, lastMeetingByClient, listClientMeetings, listMeetingsByStatus, listUnassigned, meetingStats, refreshMeetingFacts, retryMeeting, setSttParts, skipMeeting,
+  insertFound, knownRecordings, lastMeetingByClient, noteMeetingProgress, listClientMeetings, listMeetingsByStatus, listUnassigned, meetingStats, refreshMeetingFacts, retryMeeting, setSttParts, skipMeeting,
   type MeetingStatus, type NewMeeting, type SttPartRow,
 } from '../../src/store/meetings.ts';
 import { MIGRATIONS } from '../../src/store/migrations.ts';
-import { LATER, NOW, onSqlite, seededDb } from '../helpers/db.ts';
+import { LATER, NOW, onSqlite, row, seeded, seededDb } from '../helpers/db.ts';
 
 const CONF = 'conferenceRecords/c1';
 const LATEST = '2026-10-19T10:00:00.000Z';
@@ -386,6 +386,19 @@ describe('meetings store', () => {
     await withStatus(db, 'done', { clientId: 2, startedAt: '2026-10-11T10:00:00.000Z' });
     await withStatus(db, 'skipped', { startedAt: '2026-10-16T10:00:00.000Z' });
     expect(await lastMeetingByClient(db)).toEqual(new Map([[1, '2026-10-12T10:00:00.000Z'], [2, '2026-10-11T10:00:00.000Z']]));
+  });
+
+  it('noteMeetingProgress caps a queued meeting’s attempts at 1, never raises them, and leaves other meetings alone', async () => {
+    const { db, ids } = await seeded();
+    const attempts = async (id: number) => (await row<{ attempts: number }>(db, 'SELECT attempts FROM meetings WHERE id = ?', [id]))!.attempts;
+    const [many, none, failed] = [
+      await withStatus(db, 'queued', { clientId: ids.sharma }),
+      await withStatus(db, 'queued', { clientId: ids.sharma }),
+      await withStatus(db, 'failed', { clientId: ids.sharma }),
+    ];
+    for (const id of [many, failed]) await db.run('UPDATE meetings SET attempts = 3 WHERE id = ?', [id]);
+    for (const id of [many, none, failed]) await noteMeetingProgress(db, id);
+    expect([await attempts(many), await attempts(none), await attempts(failed)]).toEqual([1, 0, 3]);
   });
 
   it('counts meetings by status, and waiting deferrals by code, never a claimed one', async () => {

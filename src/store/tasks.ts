@@ -254,7 +254,9 @@ export async function setTaskStatus(db: Sql, id: number, status: Status, today: 
  * message was sent (amendment 12h), which can be before a reminder already logged from a later message.
  */
 export async function logReminder(db: Sql, id: number, onDate: string, now: string): Promise<void> {
-  await db.run(`UPDATE tasks SET reminder_count = reminder_count + 1, last_reminder_on = MAX(COALESCE(last_reminder_on, ''), @onDate),
+  // The later of the two dates: a CASE, which both engines run (SQLite's two-argument MAX is not Postgres's, S2.5).
+  await db.run(`UPDATE tasks SET reminder_count = reminder_count + 1,
+      last_reminder_on = CASE WHEN COALESCE(last_reminder_on, '') > @onDate THEN last_reminder_on ELSE @onDate END,
       updated_at = @now WHERE id = @id`, { onDate, now, id });
 }
 
