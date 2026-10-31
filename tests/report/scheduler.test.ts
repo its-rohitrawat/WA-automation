@@ -14,9 +14,8 @@ import {
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
 import { istDate } from '../../src/util/time.ts';
-import { MEHTA, seededDb, SHARMA } from '../helpers/db.ts';
+import { MEHTA, onSqlite, seededDb, SHARMA } from '../helpers/db.ts';
 import { FakeReportSender } from '../helpers/fakeReportSender.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const DAY = '2026-10-23';
 const IST = (hm: string) => `${DAY}T${hm}:00.000+05:30`;
@@ -142,11 +141,9 @@ describe('ReportScheduler', () => {
   it("a send whose outcome could not be recorded reads unknown after 10 minutes, and at the deadline becomes unknown, never skipped or sent again", async () => {
     const { db, clock, sender, s, at } = await setup();
     await at('05:00'); // recovered: nothing was cut off
-    const prepare = rawOf(db).prepare.bind(rawOf(db));
-    const spy = vi.spyOn(rawOf(db), 'prepare').mockImplementation(((sql: string) => {
-      if (/SET status = @status/.test(sql)) throw new Error('disk I/O error'); // finishReport fails
-      return prepare(sql);
-    }) as typeof prepare);
+    const run = db.run.bind(db);
+    const spy = vi.spyOn(db, 'run').mockImplementation((sql, p) =>
+      /SET status = @status/.test(sql) ? Promise.reject(new Error('disk I/O error')) : run(sql, p)); // finishReport fails
     try {
       await at('06:00');
     } finally {
@@ -200,11 +197,9 @@ describe('ReportScheduler', () => {
   it('counts as recovered only once the cut-off row is marked unknown: a recovery that failed runs again at the next tick', async () => {
     const { db, clock, sender, s, at } = await setup();
     await claimReport(db, DAY, iso('06:00')); // the previous run died while sending
-    const prepare = rawOf(db).prepare.bind(rawOf(db));
-    const spy = vi.spyOn(rawOf(db), 'prepare').mockImplementation(((sql: string) => {
-      if (/detail = 'interrupted'/.test(sql)) throw new Error('database is locked'); // markInterruptedReports fails
-      return prepare(sql);
-    }) as typeof prepare);
+    const run = db.run.bind(db);
+    const spy = vi.spyOn(db, 'run').mockImplementation((sql, p) =>
+      /detail = 'interrupted'/.test(sql) ? Promise.reject(new Error('database is locked')) : run(sql, p)); // markInterruptedReports fails
     clock.set(IST('06:20'));
     try {
       await expect(s.recover(clock.now())).rejects.toThrow('database is locked');
@@ -323,7 +318,8 @@ describe('ReportScheduler', () => {
     expect(await getKv(db, REPORT_REQUEST_KEY)).toBe('');
   });
 
-  it('clears a send-now request exactly once, as it takes it', async () => {
+  // SQLite only (S2.7): the key's writes are counted by SQLite TEMP triggers (a customer's Db cannot make one on Postgres).
+  it.runIf(onSqlite)('clears a send-now request exactly once, as it takes it', async () => {
     const { db, sender, at } = await setup();
     await request(db, '05:00');
     // Every write of the request key, whichever way it is made (a new row or an upsert's update).
@@ -677,21 +673,22 @@ describe('ReportScheduler', () => {
 
   it('never throws from tick, and the next tick still runs', async () => {
     const { db, sender, s, clock } = await setup();
-    const prepare = vi.spyOn(rawOf(db), 'prepare').mockImplementationOnce(() => {
-      throw new Error('database is locked');
-    });
+    // Every read and write fails during this tick, as when the database is locked.
+    const locked = () => Promise.reject(new Error('database is locked'));
+    const spies = [vi.spyOn(db, 'get').mockImplementation(locked), vi.spyOn(db, 'all').mockImplementation(locked), vi.spyOn(db, 'run').mockImplementation(locked)];
     clock.set(IST('06:00'));
     await expect(s.tick(clock.now())).resolves.toBeUndefined();
     expect(sender.calls).toHaveLength(0);
-    prepare.mockRestore();
+    for (const spy of spies) spy.mockRestore();
     await s.tick(clock.now());
     expect(sender.calls).toHaveLength(1);
     expect((await reportFor(db, DAY))!.status).toBe('sent');
   });
 
-  it('never throws from tick when the database is closed', async () => {
+  // SQLite only (S2.7): it closes the SQLite file itself; on Postgres the pool is the runtime's and outlives the scheduler.
+  it.runIf(onSqlite)('never throws from tick when the database is closed', async () => {
     const { db, s, clock } = await setup();
-    rawOf(db).close();
+    await db.close();
     clock.set(IST('06:00'));
     await expect(s.tick(clock.now())).resolves.toBeUndefined();
   });
