@@ -1,4 +1,4 @@
-import { expect, vi } from 'vitest';
+import { afterEach, expect, vi } from 'vitest';
 import type { Db, Sql } from '../../src/store/db.ts';
 import { onSqlite } from './db.ts';
 
@@ -10,6 +10,16 @@ import { onSqlite } from './db.ts';
 // Kept when this module loads, before any test fakes the timers: the waits below are on real I/O.
 const realImmediate = setImmediate;
 const realSetTimeout = setTimeout;
+
+// One more for every test that ends, timed out included. vitest leaves a timed-out test's body running: a loop below
+// started in it would go on firing fake timers into the next test's clock (pg's connect timeout among them). Each step
+// checks the count it started with, and a loop whose test is over throws instead.
+let generation = 0;
+afterEach(() => void generation++);
+
+function stillInItsTest(started: number, label: string): void {
+  if (generation !== started) throw new Error(`${label}: its test is over (timed out?), so it stopped: no fake timer of a later test is fired`);
+}
 
 export class DbWork {
   readonly #inFlight = new Set<Promise<unknown>>();
@@ -57,14 +67,16 @@ export class DbWork {
    * vi.advanceTimersByTimeAsync(ms) with the database work done between timers: moves timer by timer up to `ms` (a timer
    * of its own marks the end), waiting for quiet() after each. Timers must be faked.
    */
-  async advance(ms: number): Promise<void> {
+  async advance(ms: number, started = generation): Promise<void> {
     const end = Date.now() + ms;
     let reached = ms <= 0;
     if (!reached) setTimeout(() => void (reached = true), ms);
     while (!reached) {
+      stillInItsTest(started, 'advance()');
       await vi.advanceTimersToNextTimerAsync();
       await this.quiet();
     }
+    stillInItsTest(started, 'advance()');
     await vi.advanceTimersByTimeAsync(Math.max(0, end - Date.now()));
     await this.quiet();
   }
@@ -73,8 +85,9 @@ export class DbWork {
    * A real pause of `ms`, then the timers due now fire, without moving the clock. For work that mixes real I/O (files)
    * with fake timers due at once (setImmediate): it goes on, and nothing waiting on a later timer is let off early.
    */
-  async settle(ms = 50): Promise<void> {
+  async settle(ms = 50, started = generation): Promise<void> {
     await new Promise((r) => realSetTimeout(r, ms));
+    stillInItsTest(started, 'settle()');
     await vi.advanceTimersByTimeAsync(0);
     await this.quiet();
   }
@@ -85,11 +98,12 @@ export class DbWork {
    * settles: the test fails loudly, naming `label` and the stage, never passes quietly. Returns (or throws) what p does.
    */
   async until<T>(p: Promise<T>, o: { fakeMs: number; stepMs: number; realCapMs: number; label: string }): Promise<T> {
+    const started = generation;
     let done = false;
     p.then(() => void (done = true), () => void (done = true));
-    for (let spent = 0; spent < o.fakeMs && !done; spent += o.stepMs) await this.advance(o.stepMs);
+    for (let spent = 0; spent < o.fakeMs && !done; spent += o.stepMs) await this.advance(o.stepMs, started);
     const settleMs = 50;
-    for (let waited = 0; waited < o.realCapMs && !done; waited += settleMs) await this.settle(settleMs);
+    for (let waited = 0; waited < o.realCapMs && !done; waited += settleMs) await this.settle(settleMs, started);
     if (!done) {
       throw new Error(`${o.label} never finished: still pending after ${o.fakeMs} ms of fake time and ${o.realCapMs} ms of real waits with the due timers fired`);
     }
