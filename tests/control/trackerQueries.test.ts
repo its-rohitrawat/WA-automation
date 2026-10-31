@@ -5,21 +5,27 @@ import { syncClients } from '../../src/store/clients.ts';
 import type { Db } from '../../src/store/db.ts';
 import { setKv } from '../../src/store/kv.ts';
 import { createTask } from '../../src/store/tasks.ts';
-import { MEHTA, NOW, seededDb, SHARMA } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { idOf, MEHTA, NOW, seededDb, SHARMA } from '../helpers/db.ts';
 
 // 13:30 IST on Monday 19 Oct.
 const now = new Date(NOW);
 const ID = '1AbCdEfGhIjKlMnOp_qr-st';
 
+/** A client by its place (1 Sharma, 2 Mehta, 3 the second Sharma, SHB), as its real id: on Postgres they are not 1, 2, 3. */
+const seat = (db: Db, n: number) => {
+  const code = [SHARMA.code, MEHTA.code, 'SHB'][n - 1];
+  if (!code) throw new Error(`no client in place ${n}`);
+  return idOf(db, code);
+};
+
 async function task(db: Db, clientId: number, o: { status?: 'open' | 'maybe_done' | 'done'; deadline?: string; closedOn?: string } = {}) {
-  const t = await createTask(db, { clientId, side: 'us', title: 'x', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-01',
+  const t = await createTask(db, { clientId: await seat(db, clientId), side: 'us', title: 'x', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-01',
     deadline: o.deadline ?? null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp' }, NOW);
-  rawOf(db).prepare('UPDATE tasks SET status = ?, closed_on = ? WHERE id = ?').run(o.status ?? 'open', o.closedOn ?? null, t.id);
+  await db.run('UPDATE tasks SET status = ?, closed_on = ? WHERE id = ?', [o.status ?? 'open', o.closedOn ?? null, t.id]);
 }
 
 function audit(db: Db, at: string, event: string, detail: string) {
-  rawOf(db).prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, 'agent', ?, 'ops', ?)").run(at, event, detail);
+  return db.run("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, 'agent', ?, 'ops', ?)", [at, event, detail]);
 }
 
 describe('trackerSummary', () => {
@@ -88,9 +94,9 @@ describe('trackerSummary', () => {
   it('reports the last upload and the last failure with its plain reason, and the health line', async () => {
     const db = await seededDb();
     expect(await trackerSummary(db, now)).toMatchObject({ lastPublishedAt: null, lastFailure: null, failingSince: null, health: null });
-    audit(db, '2026-10-19T06:00:00.000Z', 'tracker.published', 'Tracker.xlsx uploaded to Drive');
-    audit(db, '2026-10-19T07:00:00.000Z', 'tracker.publish_failed', 'Tracker upload failed: Google sign-in expired');
-    audit(db, '2026-10-19T05:00:00.000Z', 'tracker.published', 'Tracker.xlsx uploaded to Drive');
+    await audit(db, '2026-10-19T06:00:00.000Z', 'tracker.published', 'Tracker.xlsx uploaded to Drive');
+    await audit(db, '2026-10-19T07:00:00.000Z', 'tracker.publish_failed', 'Tracker upload failed: Google sign-in expired');
+    await audit(db, '2026-10-19T05:00:00.000Z', 'tracker.published', 'Tracker.xlsx uploaded to Drive');
     expect(await trackerSummary(db, now, {
       line: { ok: false, text: '❌ Google sign-in expired' }, lastPublishedAt: null, publishFailingSince: '2026-10-19T07:00:00.000Z',
     })).toMatchObject({
@@ -103,7 +109,7 @@ describe('trackerSummary', () => {
 
   it('takes the later of the health snapshot and the audit log for the last upload', async () => {
     const db = await seededDb();
-    audit(db, '2026-10-19T06:00:00.000Z', 'tracker.published', 'x');
+    await audit(db, '2026-10-19T06:00:00.000Z', 'tracker.published', 'x');
     const health = { line: { ok: true, text: '✅' }, lastPublishedAt: '2026-10-19T07:30:00.000Z', publishFailingSince: null };
     expect((await trackerSummary(db, now, health)).lastPublishedAt).toBe('2026-10-19T07:30:00.000Z');
     expect((await trackerSummary(db, now, { ...health, lastPublishedAt: '2026-10-19T05:00:00.000Z' })).lastPublishedAt).toBe('2026-10-19T06:00:00.000Z');
@@ -119,12 +125,12 @@ describe('trackerSummary review fixes', () => {
 
   it('takes the newest failure, and ignores tracker rows not written by the agent', async () => {
     const db = await seededDb();
-    audit(db, '2026-10-19T05:00:00.000Z', 'tracker.publish_failed', 'Tracker upload failed: Drive did not accept the upload');
-    audit(db, '2026-10-19T07:00:00.000Z', 'tracker.publish_failed', 'Tracker upload failed: Google sign-in expired');
-    audit(db, '2026-10-19T06:00:00.000Z', 'tracker.publish_failed', 'Tracker upload failed: the workbook could not be built');
-    const owner = rawOf(db).prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, 'owner@example.com', ?, 'ops', 'x')");
-    owner.run('2026-10-19T09:00:00.000Z', 'tracker.published');
-    owner.run('2026-10-19T09:00:00.000Z', 'tracker.publish_failed');
+    await audit(db, '2026-10-19T05:00:00.000Z', 'tracker.publish_failed', 'Tracker upload failed: Drive did not accept the upload');
+    await audit(db, '2026-10-19T07:00:00.000Z', 'tracker.publish_failed', 'Tracker upload failed: Google sign-in expired');
+    await audit(db, '2026-10-19T06:00:00.000Z', 'tracker.publish_failed', 'Tracker upload failed: the workbook could not be built');
+    const owner = (at: string, event: string) => db.run("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, 'owner@example.com', ?, 'ops', 'x')", [at, event]);
+    await owner('2026-10-19T09:00:00.000Z', 'tracker.published');
+    await owner('2026-10-19T09:00:00.000Z', 'tracker.publish_failed');
     expect(await trackerSummary(db, now)).toMatchObject({ lastPublishedAt: null, lastFailure: { at: '2026-10-19T07:00:00.000Z', reason: 'Google sign-in expired' } });
   });
 });

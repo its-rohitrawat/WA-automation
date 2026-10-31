@@ -5,16 +5,18 @@ import { syncClients } from '../../src/store/clients.ts';
 import type { Db } from '../../src/store/db.ts';
 import { insertFound } from '../../src/store/meetings.ts';
 import { createTask, recordEvent } from '../../src/store/tasks.ts';
-import { MEHTA, NOW, seededDb, SHARMA } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { idOf, MEHTA, NOW, rows, seededDb, SHARMA } from '../helpers/db.ts';
 
 // 13:30 IST on Monday 19 Oct.
 const now = new Date(NOW);
 
+/** A seeded client by its place (1 Sharma, 2 Mehta), as its real id: on Postgres the ids are not 1 and 2. */
+const seat = (db: Db, n: number) => idOf(db, n === 1 ? SHARMA.code : MEHTA.code);
+
 async function task(db: Db, clientId: number, o: { status?: 'open' | 'maybe_done' | 'done'; deadline?: string; closedOn?: string } = {}) {
-  const t = await createTask(db, { clientId, side: 'us', title: 'Task', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-01',
+  const t = await createTask(db, { clientId: await seat(db, clientId), side: 'us', title: 'Task', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-01',
     deadline: o.deadline ?? null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp' }, NOW);
-  rawOf(db).prepare('UPDATE tasks SET status = ?, closed_on = ? WHERE id = ?').run(o.status ?? 'open', o.closedOn ?? null, t.id);
+  await db.run('UPDATE tasks SET status = ?, closed_on = ? WHERE id = ?', [o.status ?? 'open', o.closedOn ?? null, t.id]);
   return t;
 }
 
@@ -22,7 +24,7 @@ let n = 0;
 async function meeting(db: Db, startedAt: string, title = `Meeting ${++n}`): Promise<number> {
   return (await insertFound(db, {
     recording: `conferenceRecords/o${n}/recordings/r`, conference: `conferenceRecords/o${n}`, driveFileId: `d${n}`, meetingCode: null, title,
-    startedAt, endedAt: null, attendees: [], participants: [], clientId: 1, matchKind: 'title', status: 'queued', driveSeconds: 1800, createdAt: NOW,
+    startedAt, endedAt: null, attendees: [], participants: [], clientId: await seat(db, 1), matchKind: 'title', status: 'queued', driveSeconds: 1800, createdAt: NOW,
   }))!;
 }
 
@@ -84,21 +86,24 @@ describe('overview', () => {
     const db = await seededDb();
     const t = await task(db, 1);
     const at = (m: number) => `2026-10-19T05:0${m}:00.000Z`;
+    const sharma = await seat(db, 1);
+    const b: number[] = [];
     for (const i of [0, 2, 4]) {
-      const b = await startBatch(db, 1, i + 1, at(i));
-      await finishBatch(db, b, { status: 'ok', errorCode: null, accepted: 0, rejected: 0, at: at(i) });
+      b.push(await startBatch(db, sharma, i + 1, at(i)));
+      await finishBatch(db, b.at(-1)!, { status: 'ok', errorCode: null, accepted: 0, rejected: 0, at: at(i) });
     }
-    for (const i of [1, 3, 5]) await recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'update_task', detail: {}, reason: null, sourceIds: [], at: at(i) });
-    await meeting(db, at(6)); // never in the Overview's activity
-    rawOf(db).prepare("UPDATE meetings SET updated_at = ? WHERE id = 1").run(at(9));
-    rawOf(db).prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, 'agent', 'tracker.published', 'ops', 'x')").run(at(8));
+    for (const i of [1, 3, 5]) await recordEvent(db, { taskId: t.id, clientId: sharma, actor: 'ai', op: 'update_task', detail: {}, reason: null, sourceIds: [], at: at(i) });
+    const e = (await rows<{ id: number }>(db, 'SELECT id FROM task_events ORDER BY id')).map((r) => r.id);
+    const m = await meeting(db, at(6)); // never in the Overview's activity
+    await db.run('UPDATE meetings SET updated_at = ? WHERE id = ?', [at(9), m]);
+    await db.run("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, 'agent', 'tracker.published', 'ops', 'x')", [at(8)]);
     const a = (await overview(db, now)).activity;
-    expect(a.map((x) => x.id)).toEqual(['e:3', 'b:3', 'e:2', 'b:2', 'e:1']);
+    expect(a.map((x) => x.id)).toEqual([`e:${e[2]}`, `b:${b[2]}`, `e:${e[1]}`, `b:${b[1]}`, `e:${e[0]}`]);
   });
 
   it('gives the last upload and the health line for the tracker card', async () => {
     const db = await seededDb();
-    rawOf(db).prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES ('2026-10-19T07:00:00.000Z', 'agent', 'tracker.published', 'ops', 'x')").run();
+    await db.run("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES ('2026-10-19T07:00:00.000Z', 'agent', 'tracker.published', 'ops', 'x')");
     expect((await overview(db, now)).tracker).toEqual({ lastPublishedAt: '2026-10-19T07:00:00.000Z', health: null });
     const health = { line: { ok: true, text: '✅ Connected' }, lastPublishedAt: '2026-10-19T07:30:00.000Z', publishFailingSince: null };
     expect((await overview(db, now, health)).tracker).toEqual({ lastPublishedAt: '2026-10-19T07:30:00.000Z', health: { ok: true, text: '✅ Connected' } });
