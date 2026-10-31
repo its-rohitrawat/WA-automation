@@ -28,10 +28,11 @@ const msg = (groupId: string, waId: string, ts: Date): Extract<NormalizedEvent, 
  * promise callbacks, so a turn of the event loop that finds none in flight, twice in a row, finds the step finished.
  */
 function counted(db: Db): { db: Db; quiet: () => Promise<void> } {
-  let busy = 0;
+  const inFlight = new Set<Promise<unknown>>();
   const track = <T>(p: Promise<T>): Promise<T> => {
-    busy++;
-    return p.finally(() => void busy--);
+    const done = p.finally(() => void inFlight.delete(done));
+    inFlight.add(done);
+    return done;
   };
   const wrapped = new Proxy(db, {
     get(target, prop) {
@@ -42,12 +43,15 @@ function counted(db: Db): { db: Db; quiet: () => Promise<void> } {
     },
   });
   const turn = () => new Promise<void>((r) => setImmediate(r));
+  // Waits for the statements in flight (on Postgres a statement is a real round trip, longer than many idle turns), then
+  // looks again: a step's next statement starts as soon as the one before it ends.
   const quiet = async () => {
-    for (let i = 0; i < 500; i++) {
+    for (let i = 0; i < 100; i++) {
+      if (inFlight.size > 0) await Promise.allSettled([...inFlight]);
       await turn();
-      if (busy !== 0) continue;
+      if (inFlight.size !== 0) continue;
       await turn();
-      if (busy === 0) return;
+      if (inFlight.size === 0) return;
     }
     throw new Error('the backfill never went quiet');
   };
