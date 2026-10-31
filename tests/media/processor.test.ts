@@ -38,7 +38,7 @@ import { TS, waRaw } from '../helpers/wa.ts';
  * Lets a test make the next file write stop part way, as a full disk or a failing drive would, and see when a file is
  * synced to disk. The processor writes an original through a file handle from open().
  */
-const disk = vi.hoisted(() => ({ failNextWrite: false, onSync: undefined as (() => void) | undefined }));
+const disk = vi.hoisted(() => ({ failNextWrite: false, onSync: undefined as (() => void | Promise<void>) | undefined }));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs/promises')>();
   return {
@@ -59,7 +59,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
           }
           if (prop === 'sync') {
             return async () => {
-              disk.onSync?.();
+              await disk.onSync?.(); // the sync waits for what the test looks at (a database read is a round trip on Postgres)
               return target.sync();
             };
           }
@@ -225,7 +225,7 @@ describe('MediaProcessor', () => {
     const { db, dataDir, p, share } = await setup();
     const id = await share();
     const atSync: { hasRef: boolean; inPlace: boolean }[] = [];
-    disk.onSync = async () => atSync.push({ hasRef: (await getMediaRef(db, id)) !== null, inPlace: existsSync(saved(dataDir, rel(id))) });
+    disk.onSync = async () => void atSync.push({ hasRef: (await getMediaRef(db, id)) !== null, inPlace: existsSync(saved(dataDir, rel(id))) });
     expect((await p.process(id)).outcome).toBe('done');
     expect(atSync).toEqual([{ hasRef: true, inPlace: false }]);
     expect(await getMediaRef(db, id)).toBeNull();
