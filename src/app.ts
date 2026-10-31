@@ -256,7 +256,7 @@ export async function createApp(d: AppDeps): Promise<App> {
       publishedDay = buildingDay;
       // The first publish creates the Drive root the file uploads need. A publish also follows every role change
       // (the reconciler's, and the CLI's through its rebuild request), which can make a sender's files due.
-      void uploader?.run();
+      runUploads();
       health.markPublished();
       hook((h) => h.onPublished());
     },
@@ -363,6 +363,10 @@ export async function createApp(d: AppDeps): Promise<App> {
   const uploader = m
     ? new DriveFileUploader({ db: d.db, api: d.drive, dataDir: d.dataDir, clock: d.clock, log: d.log, onUploaded: () => publisher.schedule() })
     : undefined;
+  // Upload passes wait for start()'s reset of uploads that gave up: on Postgres a pass on another of the pool's
+  // connections could otherwise read before the reset commits (SQLite's one connection kept them in order).
+  let uploadsReady: Promise<unknown> = Promise.resolve();
+  const runUploads = (): void => void uploadsReady.then(() => uploader?.run());
   const mediaQueue = m
     ? new MediaQueue({
         db: d.db,
@@ -407,7 +411,7 @@ export async function createApp(d: AppDeps): Promise<App> {
           debouncer.notify(clientId);
           // a "waiting" warning about this file must not reach the workbook it settles
           void safelyAsync(refreshMedia).then(() => publisher.schedule());
-          void uploader?.run();
+          runUploads();
         },
       })
     : undefined;
@@ -587,7 +591,7 @@ export async function createApp(d: AppDeps): Promise<App> {
       // synchronous kicks below, so the tick's synchronous start is as before.
       const unprocessed = handled(clientIdsWithUnprocessed(d.db));
       mediaQueue?.kick(); // retries that are due, and files saved by cli link
-      void uploader?.run(); // retries that are due
+      runUploads(); // retries that are due
       meetings?.tick(); // discovery when due (MEETING_POLL_MINUTES), then the next due meeting
       backfill?.tick(); // a group waiting for WhatsApp, the spend cap or its first message
       for (const clientId of await unprocessed) debouncer.ensure(clientId);
@@ -666,9 +670,9 @@ export async function createApp(d: AppDeps): Promise<App> {
         }
       }
       if (uploader) {
-        // A restart gives uploads that gave up a fresh set of attempts. Not awaited (start is synchronous): the engine runs
-        // statements in order, so the reset lands before the first upload pass reads.
-        resetUploadFailures(d.db).catch((err: unknown) => d.log.error({ err }, 'upload reset failed'));
+        // A restart gives uploads that gave up a fresh set of attempts. Not awaited (start is synchronous); every upload
+        // pass waits for it (runUploads), so none reads before the reset is in. A failed reset still lets the passes run.
+        uploadsReady = resetUploadFailures(d.db).catch((err: unknown) => d.log.error({ err }, 'upload reset failed'));
       }
       if (m) {
         // Before the first tick, so no voice note being converted now can lose its folder.

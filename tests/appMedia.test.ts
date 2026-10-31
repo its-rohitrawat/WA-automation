@@ -617,7 +617,8 @@ describe('app media wiring (15g)', () => {
     const run = vi.spyOn(DriveFileUploader.prototype, 'run');
     const stop = vi.spyOn(DriveFileUploader.prototype, 'stop');
     const { drive, app } = await setup();
-    const afterStart = run.mock.calls.length; // the start tick
+    await vi.advanceTimersByTimeAsync(0); // the start tick's pass, which waits for the start's upload reset
+    const afterStart = run.mock.calls.length;
     expect(drive.uploads).toBe(0);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']);
@@ -721,6 +722,26 @@ describe('app media wiring (15g)', () => {
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(async () => expect((await getMedia(db, 1))?.driveFileId).toBeTruthy());
     expect(drive.created.map((f) => f.name)).toContain('brief.pdf');
+    await stopApp(app);
+  });
+
+  it('a start whose reset fails still uploads: the failure is logged and the passes go on (real bug 8)', async () => {
+    const lines: string[] = [];
+    const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
+    let id = 0;
+    const { db, drive, app } = await setup({
+      log,
+      prepare: async (db, dataDir) => {
+        id = await storedClientDoc(db, dataDir); // due for upload: it never gave up
+        // The start's reset of uploads that gave up fails, as a Postgres connection that drops would.
+        const run = db.run.bind(db);
+        vi.spyOn(db, 'run').mockImplementation((sql, p) => (/SET drive_failed = 0/.test(sql) ? Promise.reject(new Error('reset failed')) : run(sql, p)));
+      },
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(async () => expect((await getMedia(db, id))?.driveFileId).toBeTruthy());
+    expect(drive.created.map((f) => f.name)).toContain('brief.pdf');
+    expect(lines.some((l) => l.includes('upload reset failed'))).toBe(true);
     await stopApp(app);
   });
 });

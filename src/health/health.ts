@@ -107,6 +107,10 @@ export class Health {
   readonly #dataDir: string;
   readonly #freeBytes: (dir: string) => number | null;
   readonly #onError: (err: unknown) => void;
+  /** Every snapshot write so far, settled (persist() waits for them); and the numbers of the latest asked and landed. */
+  #writes: Promise<void> = Promise.resolve();
+  #asked = 0;
+  #landed = 0;
   #wa: GatewayStatus;
   #downSince: Date | null;
   #failed = new Map<number, string>();
@@ -378,13 +382,33 @@ export class Health {
     };
   }
 
-  /** A change's snapshot write, not awaited: the engine keeps the writes in order; a failure goes to onError. */
+  /** A change's snapshot write, not awaited; a failure goes to onError. */
   #persistSoon(): void {
     this.persist().catch((err: unknown) => this.#onError(err));
   }
 
-  async persist(): Promise<void> {
-    await setKv(this.#db, 'health', JSON.stringify(this.snapshot()));
+  /**
+   * Stores the snapshot. Each write starts at once (so on SQLite's one connection it is in order with what follows, as
+   * before) and is numbered. On Postgres two writes on the pool's connections can commit out of order: a write that
+   * lands after a newer one has landed stored an older snapshot, so the newest snapshot is written again at once.
+   * Resolves once this write (and any rewrite it made) and every write before it are in; the stored snapshot is then
+   * the newest. A failed write is reported to its caller only; the writes after it still run.
+   */
+  persist(): Promise<void> {
+    const write = this.#write();
+    const earlier = this.#writes;
+    this.#writes = Promise.all([earlier, write.catch(() => undefined)]).then(() => undefined);
+    return Promise.all([earlier, write]).then(() => undefined);
+  }
+
+  /** One write of the snapshot as it is now; one that lands after a newer one has writes the newest again. */
+  #write(): Promise<void> {
+    const n = ++this.#asked;
+    return setKv(this.#db, 'health', JSON.stringify(this.snapshot())).then(() => {
+      if (n < this.#landed) return this.#write(); // an older snapshot landed last: the newest goes in again
+      this.#landed = n;
+      return undefined;
+    });
   }
 }
 
