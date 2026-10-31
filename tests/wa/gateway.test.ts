@@ -421,10 +421,13 @@ describe('WhatsAppGateway per customer, guarded (S4.6)', () => {
 
   it('an insert that fails is one failed event: the next one is stored, and the chain does not stall', async () => {
     const db = await seededDb();
-    await db.exec(`CREATE TRIGGER refuse_a1 BEFORE INSERT ON messages WHEN NEW.wa_id = 'a1' BEGIN SELECT RAISE(ABORT, 'refused'); END`);
     const ingestor = new Ingestor({ db, onNewMessages: () => {} });
     const { gw, sock } = await customer({ tenantId: 'A', report: () => { throw new Error('not a crash'); } });
-    gw.onEvent((e) => ingestor.handle(e));
+    // a1's insert is refused by the database itself (NOT NULL), on either engine: no trigger, since a customer's Db runs no DDL.
+    gw.onEvent(async (e) => {
+      if (e.kind === 'message' && e.waId === 'a1') await db.run('INSERT INTO messages (wa_id) VALUES (?)', ['a1']);
+      return ingestor.handle(e);
+    });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('a1', 'one'), waText('a2', 'two')] });
     await gw.idle();
     expect(gw.failedCount()).toBe(1);

@@ -12,7 +12,7 @@ import type { Segment } from '../../src/stt/types.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { FakeAi } from '../helpers/ai.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
+import { NOW, seeded } from '../helpers/db.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
 const STARTED = '2026-10-19T06:00:00.000Z';
@@ -30,11 +30,11 @@ function summary(): MeetingSummary {
   };
 }
 
-async function meetingAt(db: Db): Promise<MeetingForTracker> {
+async function meetingAt(db: Db, clientId: number): Promise<MeetingForTracker> {
   const s = summary();
   const id = (await insertFound(db, {
     recording: `conferenceRecords/c/recordings/${STARTED}`, conference: 'conferenceRecords/c', driveFileId: 'file1', meetingCode: null,
-    title: 'Sharma weekly', startedAt: STARTED, endedAt: null, attendees: [], participants: [], clientId: 1, matchKind: 'title', status: 'queued',
+    title: 'Sharma weekly', startedAt: STARTED, endedAt: null, attendees: [], participants: [], clientId, matchKind: 'title', status: 'queued',
     driveSeconds: 600, createdAt: NOW,
   }))!;
   await advanceStage(db, id, 'doc', { summary: s, transcript: SEGMENTS, docFileId: 'doc1' }, NOW);
@@ -65,29 +65,29 @@ describe('meetingItemLines title', () => {
 
 describe('Reconciler.runMeeting spend logs', () => {
   async function setup(capUsd: number) {
-    const db = await seededDb();
+    const { db, ids } = await seeded();
     const clock = manualClock('2026-10-20T08:00:00Z');
     const spend = new SpendGuard({ db, clock, capUsd });
     const log = silentLogger();
     const info = vi.spyOn(log, 'info');
     const r = new Reconciler({ db, ai: new FakeAi([]), spend, prices: P, clock, log, onChanged: vi.fn() });
-    return { db, spend, info, r };
+    return { db, spend, info, r, sharma: ids.sharma };
   }
 
   it('a meeting kept out by the cap logs its meeting id, not a WhatsApp run pause', async () => {
-    const { db, info, r } = await setup(0.001);
-    const m = await meetingAt(db);
-    await expect(r.runMeeting(1, m)).rejects.toMatchObject({ code: 'spend_cap' });
-    expect(info).toHaveBeenCalledWith({ clientId: 1, meetingId: m.id }, 'spend cap: meeting deferred');
+    const { db, info, r, sharma } = await setup(0.001);
+    const m = await meetingAt(db, sharma);
+    await expect(r.runMeeting(sharma, m)).rejects.toMatchObject({ code: 'spend_cap' });
+    expect(info).toHaveBeenCalledWith({ clientId: sharma, meetingId: m.id }, 'spend cap: meeting deferred');
     expect(info).not.toHaveBeenCalledWith(expect.anything(), 'spend cap: run paused');
   });
 
   it('a meeting kept out by holds logs its meeting id, not a WhatsApp run deferral', async () => {
-    const { db, spend, info, r } = await setup(15);
+    const { db, spend, info, r, sharma } = await setup(15);
     expect(spend.reserve(15 - (MAX_OUTPUT_TOKENS * P.outputPerMTok) / 1_000_000 / 2)).not.toBeNull();
-    const m = await meetingAt(db);
-    await expect(r.runMeeting(1, m)).rejects.toMatchObject({ code: 'spend_busy' });
-    expect(info).toHaveBeenCalledWith({ clientId: 1, meetingId: m.id }, 'other paid calls in flight: meeting deferred');
+    const m = await meetingAt(db, sharma);
+    await expect(r.runMeeting(sharma, m)).rejects.toMatchObject({ code: 'spend_busy' });
+    expect(info).toHaveBeenCalledWith({ clientId: sharma, meetingId: m.id }, 'other paid calls in flight: meeting deferred');
     expect(info).not.toHaveBeenCalledWith(expect.anything(), 'other paid calls in flight: run deferred');
   });
 });

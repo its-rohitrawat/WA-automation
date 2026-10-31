@@ -14,10 +14,11 @@ async function setup(capUsd = 1) {
   const db = await seededDb();
   const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd });
   // A booking made without a transaction handle is written behind the call: wait for it (on Postgres's pool a read can
-  // otherwise run first).
+  // otherwise run first). Bookings run concurrently on that pool, so their ids need not follow the calls: the rows come
+  // in a fixed order of their own, not by id.
   const rows = async () => {
     await spend.flushed();
-    return db.all<{ usd: number; detail: string }>('SELECT usd, detail FROM spend ORDER BY id');
+    return db.all<{ usd: number; detail: string }>('SELECT usd, detail FROM spend ORDER BY detail, usd');
   };
   return { spend, rows };
 }
@@ -77,8 +78,8 @@ describe('withReservation', () => {
     await expect(withReservation(spend, 0.1, 'media 9', async () => { throw new Anthropic.APIConnectionTimeoutError(); }, MEDIA_ATTEMPTS)).rejects.toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
     await expect(withReservation(spend, 0.05, 'media 10', async () => { throw new Error('boom'); }, MEDIA_ATTEMPTS)).rejects.toThrow('boom');
     expect(await rows()).toEqual([
-      { usd: 0.1, detail: 'media 9 (connection lost, estimated)' },
       { usd: 0.05, detail: 'media 10 (unknown, estimated)' },
+      { usd: 0.1, detail: 'media 9 (connection lost, estimated)' },
     ]);
     expectNoReservation(spend);
   });
@@ -151,7 +152,7 @@ describe('withReservation', () => {
     await fail(new Anthropic.APIConnectionTimeoutError());
     await withReservation(spend, 0.1, 'meeting 2', ok(0.02), 1, (usd) => booked.push(usd));
     expect(booked).toEqual([0.004, 0.1, 0, 0, 0.1]);
-    expect((await rows()).map((r) => r.usd)).toEqual([0.004, 0.1, 0.1, 0.02]);
+    expect((await rows()).map((r) => r.usd).sort((a, b) => a - b)).toEqual([0.004, 0.02, 0.1, 0.1]); // the rows, in any order
   });
 });
 

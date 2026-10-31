@@ -397,7 +397,12 @@ describe('voiceTranscriber: OpenAI parts', () => {
     const setup = async () => {
       const db = await seededDb();
       const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 1 });
-      const rows = () => db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend ORDER BY id');
+      // Bookings without a transaction handle are written behind the call, concurrently on Postgres's pool: wait for them,
+      // and read them in a fixed order of their own, not by id.
+      const rows = async () => {
+        await spend.flushed();
+        return db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend ORDER BY kind, detail, usd');
+      };
       return { spend, rows };
     };
     /**

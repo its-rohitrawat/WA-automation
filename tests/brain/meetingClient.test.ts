@@ -155,10 +155,11 @@ async function setup(capUsd = 5) {
   const db = await seededDb();
   const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd });
   // A booking made without a transaction handle is written behind the call: wait for it (on Postgres's pool a read can
-  // otherwise run first).
+  // otherwise run first). Bookings run concurrently on that pool, so their ids need not follow the calls: the rows come
+  // in a fixed order of their own, not by id.
   const rows = async () => {
     await spend.flushed();
-    return db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend ORDER BY id');
+    return db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend ORDER BY kind, detail, usd');
   };
   return { spend, rows };
 }
@@ -206,7 +207,7 @@ describe('summarizeMeeting', () => {
     expect(ai.calls).toHaveLength(2);
     expect(r.summary.whatHappened).toBe('The client approved the logo.');
     expect(r.costUsd).toBeCloseTo(0.15, 9);
-    expect(await rows()).toEqual([{ kind: 'ai', usd: 0.05, detail: 'meeting 7 (failed)' }, { kind: 'ai', usd: 0.1, detail: 'meeting 7' }]);
+    expect(await rows()).toEqual([{ kind: 'ai', usd: 0.1, detail: 'meeting 7' }, { kind: 'ai', usd: 0.05, detail: 'meeting 7 (failed)' }]);
   });
 
   it('never returns a blank summary: two empty answers fail', async () => {
@@ -270,8 +271,8 @@ describe('summarizeMeeting', () => {
     expect(ai.calls).toHaveLength(2);
     expect(r.costUsd).toBeCloseTo(estimate + 0.1, 9);
     expect(await rows()).toEqual([
-      { kind: 'ai', usd: estimate, detail: 'meeting 7 (failed)' },
       { kind: 'ai', usd: 0.1, detail: 'meeting 7' },
+      { kind: 'ai', usd: estimate, detail: 'meeting 7 (failed)' },
     ]);
   });
 

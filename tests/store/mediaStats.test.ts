@@ -6,11 +6,10 @@ import {
 } from '../../src/store/media.ts';
 import { applyRevoke, insertMessage } from '../../src/store/messages.ts';
 import { setRole, upsertPerson } from '../../src/store/people.ts';
-import { MEHTA, NOW, SHARMA, seededDb } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { idOf, MEHTA, NOW, SHARMA, seeded, seededDb } from '../helpers/db.ts';
 
 async function add(db: Db, waId: string, o: { clientId?: number; createdAt?: string; errorCode?: string; senderJid?: string } = {}): Promise<number> {
-  const clientId = o.clientId ?? 1;
+  const clientId = o.clientId ?? (await idOf(db, SHARMA.code)); // Sharma's real id (not 1 on Postgres)
   await insertMessage(db, {
     waId, clientId, senderJid: o.senderJid ?? 'x', senderNumber: null, senderName: null, fromMe: false, ts: NOW, text: null, quotedWaId: null, mediaType: 'image',
   });
@@ -23,7 +22,8 @@ async function add(db: Db, waId: string, o: { clientId?: number; createdAt?: str
 const CLIENT_JID = '919800000001@s.whatsapp.net';
 
 /** A saved image from a client member of `clientId` whose Drive upload gave up: one the uploader tries again after a restart. */
-async function gaveUpUpload(db: Db, waId: string, clientId = 1): Promise<number> {
+async function gaveUpUpload(db: Db, waId: string, client?: number): Promise<number> {
+  const clientId = client ?? (await idOf(db, SHARMA.code));
   await upsertPerson(db, { clientId, jid: CLIENT_JID, number: null, name: null, fromMe: false });
   await setRole(db, clientId, CLIENT_JID, 'client', 'human');
   const id = await add(db, waId, { clientId, senderJid: CLIENT_JID });
@@ -48,11 +48,11 @@ describe('mediaStats', () => {
   });
 
   it('counts pending files waiting because the speech-to-text key was refused (sttRefused), of active clients only', async () => {
-    const db = await seededDb();
+    const { db, ids } = await seeded();
     const a = await add(db, 'A', { errorCode: 'stt_unavailable' });
     await add(db, 'B', { errorCode: 'stt_unavailable' });
     await add(db, 'C', { errorCode: 'ai_unavailable' });
-    await add(db, 'D', { clientId: 2, errorCode: 'stt_unavailable' });
+    await add(db, 'D', { clientId: ids.mehta, errorCode: 'stt_unavailable' });
     await failMedia(db, await add(db, 'E'), { status: 'failed', errorCode: 'stt_unavailable', at: NOW }); // given up: no longer waiting for the key (review G)
     expect(await mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 4, failedRecent: 1, sttRefused: 3 });
     await finishMedia(db, a, { textKind: 'extract', text: 'Payment done', pageCount: null, note: null, at: NOW });
@@ -71,7 +71,7 @@ describe('mediaStats', () => {
   it('never counts a queued backlog file as waiting too long: a long backlog run is not a fault (review round 2)', async () => {
     const db = await seededDb();
     const id = await add(db, 'A', { createdAt: '2026-10-19T06:00:00.000Z' });
-    rawOf(db).prepare('UPDATE media SET backlog = 1 WHERE id = ?').run(id);
+    await db.run('UPDATE media SET backlog = 1 WHERE id = ?', [id]);
     await add(db, 'B', { createdAt: '2026-10-19T06:00:00.000Z' });
     expect(await mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 2, stale: 1 });
   });
@@ -125,28 +125,28 @@ describe('mediaStats', () => {
   });
 
   it('does not count an upload that gave up once its message is deleted for everyone (D3)', async () => {
-    const db = await seededDb();
+    const { db, ids } = await seeded();
     await gaveUpUpload(db, 'A');
     await gaveUpUpload(db, 'B');
     expect((await mediaStats(db, new Date(NOW))).uploadFailed).toBe(2);
-    await applyRevoke(db, 1, 'A');
+    await applyRevoke(db, ids.sharma, 'A');
     expect((await mediaStats(db, new Date(NOW))).uploadFailed).toBe(1);
   });
 
   it('does not count an upload that gave up while its sender is not a client member', async () => {
-    const db = await seededDb();
+    const { db, ids } = await seeded();
     await gaveUpUpload(db, 'A');
-    await setRole(db, 1, CLIENT_JID, 'team', 'human');
+    await setRole(db, ids.sharma, CLIENT_JID, 'team', 'human');
     expect((await mediaStats(db, new Date(NOW))).uploadFailed).toBe(0);
-    await setRole(db, 1, CLIENT_JID, 'client', 'human');
+    await setRole(db, ids.sharma, CLIENT_JID, 'client', 'human');
     expect((await mediaStats(db, new Date(NOW))).uploadFailed).toBe(1);
   });
 
   it('counts exactly the uploads that gave up and that a restart tries again', async () => {
-    const db = await seededDb();
+    const { db, ids } = await seeded();
     await gaveUpUpload(db, 'A');
     await gaveUpUpload(db, 'B');
-    await applyRevoke(db, 1, 'B');
+    await applyRevoke(db, ids.sharma, 'B');
     const counted = (await mediaStats(db, new Date(NOW))).uploadFailed;
     await resetUploadFailures(db);
     expect(await uploadCandidates(db, NOW, 10)).toHaveLength(counted);
@@ -154,12 +154,12 @@ describe('mediaStats', () => {
   });
 
   it('leaves out the files of a client no longer on the allow-list, which wait untouched until it is back', async () => {
-    const db = await seededDb();
-    await add(db, 'A', { clientId: 1, createdAt: '2026-10-19T06:00:00.000Z' });
-    await add(db, 'B', { clientId: 1, createdAt: '2026-10-19T06:00:00.000Z', errorCode: 'spend_cap' });
-    await gaveUpUpload(db, 'C', 1);
-    await failMedia(db, await add(db, 'D', { clientId: 1 }), { status: 'failed', errorCode: 'not_pdf', at: NOW });
-    await add(db, 'M', { clientId: 2 });
+    const { db, ids } = await seeded();
+    await add(db, 'A', { clientId: ids.sharma, createdAt: '2026-10-19T06:00:00.000Z' });
+    await add(db, 'B', { clientId: ids.sharma, createdAt: '2026-10-19T06:00:00.000Z', errorCode: 'spend_cap' });
+    await gaveUpUpload(db, 'C', ids.sharma);
+    await failMedia(db, await add(db, 'D', { clientId: ids.sharma }), { status: 'failed', errorCode: 'not_pdf', at: NOW });
+    await add(db, 'M', { clientId: ids.mehta });
     await syncClients(db, [MEHTA]);
     expect(await mediaStats(db, new Date(NOW))).toEqual({ ...ZERO, pending: 1 });
   });

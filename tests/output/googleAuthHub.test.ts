@@ -10,8 +10,32 @@ import {
 import { GoogleAuthHub, GoogleNotConnectedError, type OAuthCredentials } from '../../src/output/googleAuthHub.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
 import { silentLogger } from '../../src/util/logger.ts';
+import type { Db, Sql } from '../../src/store/db.ts';
 import { seededDb } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+
+/**
+ * The same Db, whose transactions refuse one kv write (its key): the database's own failure mid-write, on either engine,
+ * with no trigger (a customer's Db on Postgres runs no DDL).
+ */
+function refusingKv(db: Db, key: string): Db {
+  const refuse = (q: Sql): Sql => new Proxy(q, {
+    get(t, p) {
+      if (p === 'run') {
+        return (sql: string, params?: unknown) =>
+          /INTO kv/.test(sql) && Array.isArray(params) && params[0] === key ? Promise.reject(new Error('disk full')) : t.run(sql, params as never);
+      }
+      const v = Reflect.get(t, p) as unknown;
+      return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+    },
+  });
+  return new Proxy(db, {
+    get(t, p) {
+      if (p === 'tx') return <T>(fn: (q: Sql) => Promise<T>) => t.tx((q) => fn(refuse(q)));
+      const v = Reflect.get(t, p) as unknown;
+      return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+    },
+  });
+}
 
 const DESKTOP: OAuthCredentials = { clientId: 'desktop-id', clientSecret: 'desktop-secret' };
 const WEB: OAuthCredentials = { clientId: 'web-id', clientSecret: 'web-secret' };
@@ -185,11 +209,11 @@ describe('GoogleAuthHub', () => {
     const db = await seededDb();
     const key = randomBytes(32);
     await new TokenStore(db, key).save('rt-old');
-    const hub = await GoogleAuthHub.open({ db, key, credentials: { desktop: DESKTOP, web: WEB }, newClient: fakeClients().newClient });
+    // The issuer's write is refused, after the token's in the same transaction.
+    const hub = await GoogleAuthHub.open({ db: refusingKv(db, 'google_client:main'), key, credentials: { desktop: DESKTOP, web: WEB }, newClient: fakeClients().newClient });
     const before = hub.client('main');
     let calls = 0;
     hub.onChange(() => calls++);
-    rawOf(db).exec("CREATE TRIGGER no_issuer BEFORE INSERT ON kv WHEN NEW.k = 'google_client:main' BEGIN SELECT RAISE(ABORT, 'disk full'); END");
     await expect(hub.setToken('main', 'rt-new', 'web', SCOPE)).rejects.toThrow('disk full');
     expect(hub.client('main')).toBe(before);
     expect(calls).toBe(0);
