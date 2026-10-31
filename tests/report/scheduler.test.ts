@@ -487,7 +487,9 @@ describe('ReportScheduler', () => {
     expect(await reportFor(db, DAY)).toBeUndefined();
   });
 
-  it('stop leaves no timer once the send in flight has finished', async () => {
+  // SQLite only (S2.7): it counts every timer in the process, and the Postgres pool keeps timers of its own; the
+  // scheduler's statements run on Postgres in the tests around it.
+  it.runIf(onSqlite)('stop leaves no timer once the send in flight has finished', async () => {
     const { clock, sender, s } = await setup();
     const g = gate();
     sender.gate = g.promise;
@@ -577,8 +579,8 @@ describe('ReportScheduler', () => {
     const { db, clock, sender, s } = await setup({ build });
     clock.set(IST('06:00'));
     const first = s.tick(clock.now());
-    await settle();
-    expect((await reportFor(db, DAY))!.status).toBe('sending');
+    // The day is claimed before the build starts: wait for that, not for a fixed moment (a Postgres write takes longer).
+    await vi.waitFor(async () => expect((await reportFor(db, DAY))?.status).toBe('sending'));
     const stopping = s.stop(5_000);
     await settle();
     g.release();
