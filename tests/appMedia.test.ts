@@ -1249,7 +1249,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
       return Buffer.from('bytes');
     });
     const voice = new FakeLocalVoiceTranscriber();
-    const { app, sock } = await setup({ media: { voice, fetcher, extract: undefined } });
+    const { db, app, sock } = await setup({ media: { voice, fetcher, extract: undefined } });
     for (const id of ['VN1', 'VN2', 'VN3']) shareVoice(sock, id);
     for (const id of ['IMG1', 'IMG2']) shareImage(sock, id);
     await three.promise; // three downloads have started
@@ -1258,7 +1258,13 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     expect(fetcher.mock.calls.map(([ref]) => ref.contentType).sort()).toEqual(['audioMessage', 'imageMessage', 'imageMessage']);
     expect(app.mediaQueue!.active).toBe(3);
     g.release();
-    await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0), SLOW_IO);
+    // Every file finished, not only none running: on Postgres the lane's refill for the next voice note is a real round
+    // trip, so the queue can show none running between two notes. Stopping then leaves notes pending, and stop()'s final
+    // publish waits out its 10 s bound on fake time.
+    await vi.waitFor(async () => {
+      expect(app.mediaQueue!.active).toBe(0);
+      expect(await row(db, "SELECT COUNT(*) AS n FROM media WHERE status = 'pending'")).toEqual({ n: 0 });
+    }, SLOW_IO);
     await stopApp(app);
   });
 
