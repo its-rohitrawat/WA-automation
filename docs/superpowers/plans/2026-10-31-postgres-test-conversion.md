@@ -71,7 +71,7 @@ commands, and a skip would lose coverage.
 
 In flight elsewhere, and left out of the sweep: tests/appMedia.test.ts and tests/cli/meetings.test.ts (lane B), tests/cli/commands.test.ts (lane A), and the app* Postgres timing.
 
-## The test:pg runs (as lane C saw them)
+## The test runs
 
 | When | What | Files | Tests | Time |
 |---|---|---|---|---|
@@ -81,6 +81,13 @@ In flight elsewhere, and left out of the sweep: tests/appMedia.test.ts and tests
 | The same, one database per file | batches 6 to 8, health, spend, platform, runtime, migrate, the 3 scans | 37 passed, 3 skipped (42), then the last 2 fixed | 551 passed, 26 skipped, 3 fixed after | 28 s |
 | Bug 12, at d876363 (lane A) | lane A's test:pg run for the fix | 17 passed | 118 passed | |
 | The full SQLite run, at d876363 | the whole suite under npm test | | 4,760 passed, 19 skipped, 0 failed | |
+| Full test:pg rehearsal, at ab93431 | the whole suite | 8 failed in 4 files, all fixed in the tests | | 292.9 s |
+| First final full test:pg, at 446a75f | the whole suite | 4 failed in 3 files: they found bug 13 and two test races | | 158.8 s |
+| **Final full test:pg, at 3e3a9e4** | the whole suite | 240 passed, 11 skipped (251) | 4,603 passed, 1 expected fail, 178 skipped, 0 failed (4,782) | 178.2 s |
+| **Final full SQLite run, at 3e3a9e4** | the whole suite under npm test | 250 passed, 1 skipped (251) | 4,762 passed, 1 expected fail, 19 skipped, 0 failed (4,782) | 78.5 s |
+
+The expected fail is tests/helpers/advance.test.ts's proof that a loop whose test timed out stops with its named
+error.
 
 The test database container is reused between runs. Each run resets it inside the container, and nothing is written
 outside it.
