@@ -3,7 +3,7 @@ import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import type { Db, Sql } from '../../src/store/db.ts';
 import type { Params, RunResult } from '../../src/store/engine/types.ts';
 import { manualClock } from '../../src/util/clock.ts';
-import { seededDb } from '../helpers/db.ts';
+import { onSqlite, seededDb, testDb } from '../helpers/db.ts';
 
 // Real bug 9 (the Postgres conversion): refresh() replaced today's total with the database's sum, so a booking whose
 // row was not yet visible dropped out of memory and spend was under-counted until the next refresh: a paid call
@@ -72,7 +72,7 @@ describe('refresh never counts less than this guard has booked (real bug 9)', ()
     expect(guard.canSpend(0.6)).toBe(false);
   });
 
-  it('a booking in a transaction still open while refresh runs stays counted, then the read has it', async () => {
+  it('a booking in a transaction still open while refresh runs stays counted, then the read has it (the open transaction played)', async () => {
     let open!: () => void;
     const commit = new Promise<void>((r) => (open = r));
     const raw = await base();
@@ -102,5 +102,32 @@ describe('refresh never counts less than this guard has booked (real bug 9)', ()
     expect(guard.spentToday()).toBeCloseTo(0.5);
     await guard.refresh(); // none since: the read is the truth
     expect(guard.spentToday()).toBeCloseTo(0.2);
+  });
+});
+
+// Postgres only (S2.7): a transaction really held open on one of the pool's connections while refresh reads on
+// another; SQLite has one connection, so a read there always waits for the transaction to end.
+describe.runIf(!onSqlite)('refresh during a real open transaction on Postgres (real bug 9)', () => {
+  it('the booking stays counted while its transaction is open on another connection, and after it commits', async () => {
+    const db = await testDb();
+    opened.push(db);
+    const guard = new SpendGuard({ db, clock: manualClock(NOW), capUsd: 1 });
+    let commit!: () => void;
+    const held = new Promise<void>((r) => (commit = r));
+    let bookedNow!: () => void;
+    const booked = new Promise<void>((r) => (bookedNow = r));
+    const change = db.tx(async (q) => {
+      await guard.record('ai', 0.4, 'in an open transaction', q);
+      bookedNow();
+      await held; // the transaction stays open: its row is not visible to another connection
+    });
+    await booked;
+    expect((await db.get<{ n: number }>("SELECT COUNT(*) AS n FROM spend WHERE detail = 'in an open transaction'"))!.n).toBe(0);
+    await guard.refresh();
+    expect(guard.spentToday()).toBeCloseTo(0.4);
+    commit();
+    await change;
+    await guard.refresh();
+    expect(guard.spentToday()).toBeCloseTo(0.4);
   });
 });
