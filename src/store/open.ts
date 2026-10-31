@@ -26,6 +26,7 @@ export function runtimeDb(db: Db): Db {
     close: () => db.close(),
   };
 }
+import { ACCESS_SQL, accessProblems, accessRefused, type CatalogRow } from './pg/accessRules.ts';
 import { COLLATION_REFUSED, COLLATION_SQL, isByteOrder } from './pg/collation.ts';
 import { PG_LATEST } from './pg/migrations.ts';
 
@@ -40,7 +41,10 @@ export interface StoreOptions {
   pool?: PgPool;
 }
 
-/** The customer's database. On Postgres, refused unless its schema is at the version this code needs. */
+/**
+ * The customer's database. On Postgres, refused unless its schema is at the version this code needs, in byte order, and
+ * its access rules hold on the live catalog (row security on every customer table, nothing of the platform open to wa_app).
+ */
 export async function openStore(env: Pick<Env, 'DATA_DIR' | 'DB_ENGINE' | 'DATABASE_URL' | 'TENANT_ID'>, o: StoreOptions = {}): Promise<Db> {
   // Only an explicit postgres leaves SQLite (an env built by hand in a test may not name the engine).
   if (env.DB_ENGINE !== 'postgres') return openDb(trackerDbPath(env.DATA_DIR));
@@ -51,6 +55,9 @@ export async function openStore(env: Pick<Env, 'DATA_DIR' | 'DB_ENGINE' | 'DATAB
     if (v !== PG_LATEST) throw new Error(`Postgres is at P${v}, this version needs P${PG_LATEST}: run npm run cli -- db-migrate`);
     // Byte-order text, as SQLite compares it: a database made any other way would order and match text differently.
     if (!isByteOrder(await db.get(COLLATION_SQL))) throw new Error(COLLATION_REFUSED);
+    // The access rules as they are on the server, not as the migrations wrote them (security review S1, S2).
+    const problems = accessProblems(await db.all<CatalogRow>(ACCESS_SQL));
+    if (problems.length > 0) throw new Error(accessRefused(problems));
   } catch (e) {
     await pool.end().catch(() => undefined);
     throw e;

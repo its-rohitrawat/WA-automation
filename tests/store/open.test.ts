@@ -9,14 +9,17 @@ import { PgPlatformDb, PgTenantDb, type PgClient, type PgPool } from '../../src/
 import { SqliteDb } from '../../src/store/engine/sqlite.ts';
 import { customerDbsOf, databaseLine, openPlatformStore, openStore, runtimeDb } from '../../src/store/open.ts';
 import { openDb } from '../../src/store/db.ts';
+import { accessRefused, type CatalogRow } from '../../src/store/pg/accessRules.ts';
 import { COLLATION_REFUSED } from '../../src/store/pg/collation.ts';
+import { healthyCatalog, isAccessQuery } from './pg/catalogFake.ts';
 import { PG_LATEST } from '../../src/store/pg/migrations.ts';
 
-// The engine switch (S2.6) with no server: Postgres is a fake pool answering wa_schema_version().
+// The engine switch (S2.6) with no server: Postgres is a fake pool answering wa_schema_version(), the collation and the
+// access check's catalog.
 const LOCAL = 'postgres://wa_app:placeholder@127.0.0.1:5432/wa_agent';
 const PLATFORM = 'postgres://wa_platform:placeholder@127.0.0.1:5432/wa_agent';
 
-function fakePool(version: number | null, collation = 'C'): PgPool & { ended: boolean; sql: string[] } {
+function fakePool(version: number | null, collation = 'C', catalog: CatalogRow[] = healthyCatalog()): PgPool & { ended: boolean; sql: string[] } {
   const pool = {
     ended: false,
     sql: [] as string[],
@@ -25,6 +28,7 @@ function fakePool(version: number | null, collation = 'C'): PgPool & { ended: bo
         query: async (text: string) => {
           pool.sql.push(text);
           if (/pg_database/.test(text)) return { rows: [{ collate: collation, ctype: collation }], rowCount: 1 };
+          if (isAccessQuery(text)) return { rows: catalog, rowCount: catalog.length };
           return { rows: /wa_schema_version/.test(text) ? [{ v: version }] : [], rowCount: 0 };
         },
         release: () => {},
@@ -94,6 +98,27 @@ describe('openStore: DB_ENGINE', () => {
       expect(pool.ended, collation).toBe(true);
     }
     expect(COLLATION_REFUSED).toBe('This database must be created by db-bootstrap (byte-order collation C). Nothing was changed.');
+  });
+
+  it('postgres whose live access rules are broken is refused, naming each problem, and its pool is closed (review S1, S2)', async () => {
+    const catalog = [
+      ...healthyCatalog().map((r) => (r.name === 'messages' ? { ...r, rls: false } : r.name === 'tenant_keys' ? { ...r, app: true } : r)),
+      { name: 'notes', kind: 'r', rls: false, forced: false, owner: 'wa_owner', app: true, policies: 0, tenant_policies: 0 },
+      { name: 'tasks_id_seq', kind: 'S', rls: false, forced: false, owner: 'wa_owner', app: true, policies: 0, tenant_policies: 0 },
+    ];
+    const pool = fakePool(PG_LATEST, 'C', catalog);
+    const env = parseEnv({ DB_ENGINE: 'postgres', DATABASE_URL: LOCAL, DATABASE_PLATFORM_URL: PLATFORM });
+    const problems = [
+      'table messages has row security off',
+      'wa_app can reach platform table tenant_keys',
+      'table notes has no row security and wa_app can reach it',
+      'wa_app can read sequence tasks_id_seq',
+    ];
+    await expect(openStore(env, { pool })).rejects.toThrow(accessRefused(problems));
+    expect(pool.ended).toBe(true);
+    expect(accessRefused(['table spend has row security not forced'])).toBe(
+      "This database's access rules are not as db-migrate sets them: table spend has row security not forced. The agent did not start, and nothing was changed: contact the developer.",
+    );
   });
 });
 

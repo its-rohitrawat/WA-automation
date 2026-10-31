@@ -482,12 +482,26 @@ export const P4_SQL = `
 ALTER TABLE web_sessions ALTER COLUMN tenant_id DROP DEFAULT;
 `;
 
+/**
+ * P5 (security review S2): wa_app keeps USAGE on the id sequences but loses SELECT, so it cannot read a sequence's
+ * last_value (every customer's ids come from one sequence per table: its rows across all customers). An identity
+ * column's insert needs no privilege on its sequence. The same for every sequence wa_owner makes later, and no function
+ * wa_owner makes later is open to PUBLIC by default: each grants EXECUTE itself (as P2's wa_schema_version does). The
+ * access check (accessRules.ts) refuses a database where wa_app can still read a sequence.
+ */
+export const P5_SQL = `
+REVOKE SELECT ON ALL SEQUENCES IN SCHEMA public FROM wa_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE wa_owner IN SCHEMA public REVOKE SELECT ON SEQUENCES FROM wa_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE wa_owner REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+`;
+
 /** In order; recorded in pg_schema_version by the runner (S2.4). Never edited once applied: a change is a new entry. */
 export const PG_MIGRATIONS: readonly { version: number; sql: string }[] = [
   { version: 1, sql: P1_SQL },
   { version: 2, sql: P2_SQL },
   { version: 3, sql: P3_SQL },
   { version: 4, sql: P4_SQL },
+  { version: 5, sql: P5_SQL },
 ];
 
 /** The version this code needs: openStore refuses a database at any other one (run db-migrate first). */

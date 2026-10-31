@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { AdminConnection } from '../../../src/store/engine/pg.ts';
 import { bootstrap, databaseGrants, migrate, roleOf, ROLES } from '../../../src/store/pg/admin.ts';
+import { accessRefusedAfterMigrate, type CatalogRow } from '../../../src/store/pg/accessRules.ts';
 import { COLLATION_REFUSED, COLLATION_SQL, isByteOrder } from '../../../src/store/pg/collation.ts';
+import { healthyCatalog, isAccessQuery } from './catalogFake.ts';
 import { PG_MIGRATIONS } from '../../../src/store/pg/migrations.ts';
 
 // db-bootstrap and db-migrate with no server (S2.3, S2.4): a fake admin connection records what is sent. S2.7 runs them
@@ -11,7 +13,7 @@ const PASSWORDS = { wa_owner: 'owner-placeholder-1', wa_app: 'app-placeholder-22
 
 interface Sent { db: string; text: string; values: readonly unknown[] }
 
-function fakeServer(o: { roles?: string[]; databases?: string[]; versions?: number[]; failOn?: RegExp; collation?: string } = {}) {
+function fakeServer(o: { roles?: string[]; databases?: string[]; versions?: number[]; failOn?: RegExp; collation?: string; catalog?: CatalogRow[] } = {}) {
   const sent: Sent[] = [];
   const ended: string[] = [];
   const versions = [...(o.versions ?? [])];
@@ -19,6 +21,11 @@ function fakeServer(o: { roles?: string[]; databases?: string[]; versions?: numb
     async sql(text, values = []) {
       sent.push({ db, text, values });
       if (o.failOn?.test(text)) throw new Error('boom');
+      // The access check's catalog: as db-migrate leaves it, unless a test says otherwise.
+      if (isAccessQuery(text)) {
+        const rows = o.catalog ?? healthyCatalog();
+        return { rows: rows as unknown as Record<string, unknown>[], rowCount: rows.length };
+      }
       if (text.includes('FROM pg_roles')) return { rows: (o.roles ?? []).includes(String(values[0])) ? [{ '?column?': 1 }] : [], rowCount: 0 };
       if (text.includes('FROM pg_database')) {
         // The database's collation (C unless a test says otherwise): the current one, or one named by bootstrap.
@@ -137,7 +144,8 @@ describe('migrate', () => {
       const at = texts.indexOf(m.sql);
       expect(texts.slice(at - 1, at + 3)).toEqual(['BEGIN', m.sql, 'INSERT INTO pg_schema_version (version, applied_at) VALUES ($1, $2)', 'COMMIT']);
     }
-    expect(o.lines).toEqual(PG_MIGRATIONS.map((m) => `Applied P${m.version}`));
+    expect(o.lines).toEqual([...PG_MIGRATIONS.map((m) => `Applied P${m.version}`), 'Access rules checked: row security on every customer table, nothing of the platform open to wa_app']);
+    expect(isAccessQuery(texts.at(-1)!)).toBe(true); // the live catalog is checked last
   });
 
   it('up to date: nothing; part way: only the newer ones', async () => {
@@ -145,11 +153,26 @@ describe('migrate', () => {
     const o = out();
     expect(await migrate(done.conn('wa_agent'), { now, out: o.out })).toEqual([]);
     expect(done.sent.some((x) => x.text === 'BEGIN')).toBe(false);
-    expect(o.lines).toEqual([`Already at P${PG_MIGRATIONS.at(-1)!.version}: nothing to apply`]);
+    expect(o.lines).toEqual([`Already at P${PG_MIGRATIONS.at(-1)!.version}: nothing to apply`, 'Access rules checked: row security on every customer table, nothing of the platform open to wa_app']);
 
     const part = fakeServer({ versions: [1] });
     expect(await migrate(part.conn('wa_agent'), { now, out: () => {} })).toEqual(PG_MIGRATIONS.slice(1).map((m) => m.version));
     expect(part.sent.some((x) => x.text === PG_MIGRATIONS[0]!.sql)).toBe(false);
+  });
+
+  it('ends refusing, naming what is wrong, when the live catalog breaks an access rule (security review S1)', async () => {
+    const catalog = healthyCatalog().map((r) => (r.name === 'spend' ? { ...r, forced: false } : r.name === 'invites' ? { ...r, app: true } : r));
+    const s = fakeServer({ versions: PG_MIGRATIONS.map((m) => m.version), catalog });
+    const o = out();
+    const problems = ['table spend has row security not forced', 'wa_app can reach platform table invites'];
+    await expect(migrate(s.conn('wa_agent'), { now, out: o.out })).rejects.toThrow(accessRefusedAfterMigrate(problems));
+    expect(o.lines).not.toContain('Access rules checked: row security on every customer table, nothing of the platform open to wa_app');
+  });
+
+  it("a test's own migration list is not checked against the access rules (it is not this code's schema)", async () => {
+    const s = fakeServer({ catalog: [] });
+    expect(await migrate(s.conn('wa_agent'), { now, out: () => {}, migrations: [{ version: 1, sql: 'CREATE TABLE a ()' }] })).toEqual([1]);
+    expect(s.sent.some((x) => isAccessQuery(x.text))).toBe(false);
   });
 
   it('a gap below the recorded version is refused, applying nothing', async () => {

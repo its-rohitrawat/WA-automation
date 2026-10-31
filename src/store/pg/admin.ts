@@ -1,4 +1,5 @@
 import type { AdminConnection } from '../engine/pg.ts';
+import { ACCESS_SQL, accessProblems, accessRefusedAfterMigrate, type CatalogRow } from './accessRules.ts';
 import { COLLATION_REFUSED, COLLATION_SQL, isByteOrder } from './collation.ts';
 import { PG_MIGRATIONS } from './migrations.ts';
 
@@ -95,7 +96,9 @@ const VERSION_TABLE = `CREATE TABLE IF NOT EXISTS pg_schema_version (
 /**
  * db-migrate, as wa_owner: applies the migrations above the highest recorded one, each with its version row in one
  * transaction. Never edits or re-runs an applied one. Refuses, applying nothing, when the code knows a migration below the
- * recorded maximum that the database never recorded (as SQLite's runner does). Returns the versions it applied.
+ * recorded maximum that the database never recorded (as SQLite's runner does). Then, with this code's own migrations
+ * (not a list a test passes), it checks the live catalog against the access rules (accessRules.ts) and throws naming
+ * what is wrong. Returns the versions it applied.
  */
 export async function migrate(c: AdminConnection, o: { now: () => string; out: (line: string) => void; migrations?: readonly { version: number; sql: string }[] }): Promise<number[]> {
   const migrations = o.migrations ?? PG_MIGRATIONS;
@@ -123,6 +126,11 @@ export async function migrate(c: AdminConnection, o: { now: () => string; out: (
     o.out(`Applied P${m.version}`);
   }
   if (applied.length === 0) o.out(`Already at P${current}: nothing to apply`);
+  if (!o.migrations) {
+    const problems = accessProblems((await c.sql(ACCESS_SQL)).rows as unknown as CatalogRow[]);
+    if (problems.length > 0) throw new Error(accessRefusedAfterMigrate(problems));
+    o.out('Access rules checked: row security on every customer table, nothing of the platform open to wa_app');
+  }
   return applied;
 }
 
