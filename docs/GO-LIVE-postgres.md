@@ -18,7 +18,7 @@ each kept apart. You run every step yourself, on the Mac, with the Mac assistant
 > has.
 > - `db-bootstrap`: asks for the `postgres` password, then the new `wa_backup` password twice, and shows nothing as you
 >   type. It never takes a password on the command line. `--superuser <name>` defaults to `postgres`.
-> - `db-migrate`, which applies the migrations P1 to P4.
+> - `db-migrate`, which applies the migrations P1 to P5, then checks the access rules.
 > - `migrate-to-postgres`, with `--apply`, `--backup-dir <new folder>` and `--data-dir <folder>`.
 > - `export-to-sqlite`, with `--out <new folder>` (required) and `--data-dir <folder>`.
 > - The `.env` names `DB_ENGINE`, `DATABASE_URL`, `DATABASE_OWNER_URL` and `DATABASE_PLATFORM_URL`. The backup password
@@ -163,8 +163,9 @@ The agent and its jobs connect with their own limited roles, never the superuser
    - from `db-bootstrap`: `Created role wa_owner`, then the same for `wa_app`, `wa_platform` and `wa_backup`
      (`Updated role …` if you run it again), `Created database wa_agent, owned by wa_owner`, a `Granted wa_agent: …`
      line and `Next: npm run cli -- db-migrate`;
-   - from `db-migrate`: `Applied P1`, `Applied P2`, `Applied P3` and `Applied P4` (`Already at P4: nothing to apply` the
-     next time).
+   - from `db-migrate`: `Applied P1`, `Applied P2`, `Applied P3`, `Applied P4` and `Applied P5`, then
+     `Access rules checked: row security on every customer table, nothing of the platform open to wa_app`. The next
+     time: `Already at P5: nothing to apply`, then the same `Access rules checked: …` line.
 
    No password is ever printed.
 
@@ -476,6 +477,19 @@ The database was not made by `db-bootstrap` (part 2, step 3), so its text settin
 change an existing database's settings (no `ALTER DATABASE`). It has to be made again, fresh, by `db-bootstrap`.
 Before the switch (part 4) nothing of yours is in it. If the agent already runs on it, use rollback A (part 6) first.
 Send Claude that one line for the steps.
+
+**If the agent does not start, and the last line of `logs/wa-agent.err.log` says
+`Postgres is at P…, this version needs P…: run npm run cli -- db-migrate`:** an update brought a change to the
+database. In the waagent window, run `npm run cli -- db-migrate`. You should see `Applied P…` for each new one, then
+`Access rules checked: …`. Then restart the agent (normal window): `sudo launchctl kickstart -k system/com.wa-agent`.
+
+**If the agent does not start, and that log says `This database's access rules are not as db-migrate sets them: …`,**
+or `db-migrate` ends with `db-migrate applied its migrations, but this database's access rules are not as it sets
+them: …`: the rules that keep each business's data apart are not as they should be. That comes from a change made by
+hand, a restore made with the wrong owner, or a broken migration. Nothing was changed, and the agent refuses to start
+on purpose. Don't try to fix it yourself, and don't run `db-migrate` again for it: it never runs a migration twice.
+Send Claude that one line. It names only tables, sequences and roles, never a password. If you need the agent running
+meanwhile, rollback A (part 6) runs it on SQLite and changes nothing in Postgres.
 
 Send Claude:
 - the report lines from the command (table names, counts, OK or MISMATCH);
