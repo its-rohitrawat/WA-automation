@@ -10,7 +10,11 @@ import {
 } from '../../src/wa/linkSession.ts';
 import { SwitchableGateway } from '../../src/wa/switchableGateway.ts';
 import { closeWith, FakeSocket } from '../helpers/fakeSocket.ts';
-import { testDb } from '../helpers/db.ts';
+import { OTHER_GROUP, SHARMA, testDb } from '../helpers/db.ts';
+import { waText } from '../helpers/wa.ts';
+import { syncClients } from '../../src/store/clients.ts';
+import { Ingestor } from '../../src/wa/ingest.ts';
+import type { NormalizedEvent } from '../../src/wa/normalize.ts';
 
 const QR1 = 'QR-SECRET-one-2@abc';
 const QR2 = 'QR-SECRET-two-2@def';
@@ -18,7 +22,7 @@ const QR2 = 'QR-SECRET-two-2@def';
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 /** A service with a linked founder session, its gateway on fake sockets, and the link sessions around it. */
-async function setup(o: { linked?: boolean; timeoutMs?: number } = {}) {
+async function setup(o: { linked?: boolean; timeoutMs?: number; allow?: string[] } = {}) {
   const key = randomBytes(32);
   // The session is a SQLite file by design on the SQLite home (its Postgres twin, wa_auth, is covered by authStatePg and
   // customerLink); the tracker's own database follows the engine under test.
@@ -36,7 +40,7 @@ async function setup(o: { linked?: boolean; timeoutMs?: number } = {}) {
   const buildGateway = (auth: EncryptedAuth, onQr?: (qr: string) => void) => {
     auths.push(auth);
     return new WhatsAppGateway({
-      allow: new AllowList([]),
+      allow: new AllowList(o.allow ?? []),
       factory: () => {
         const s = new FakeSocket();
         sockets.push(s);
@@ -407,5 +411,81 @@ describe('session backup helpers', () => {
     t.sessions.cancel(link.id);
     await t.sessions.settled(link.id);
     expect(await t.backupRows()).toBe(0);
+  });
+});
+
+// Bug 12: a relink never drops a message from the customer's allowed groups. What the old gateway had already taken
+// drains into the service's handlers, and the new gateway's messages are stored from its start, before the swap. The
+// store keeps each message once by its WhatsApp id, so one that also comes again is not doubled.
+describe('founder relink keeps every message already taken', () => {
+  /**
+   * The service's handler, as the app's: each event stored in the tracker database (the engine under test) by the
+   * Ingestor. While `hold` is set, each one first waits for it (a slow write).
+   */
+  async function service(t: Awaited<ReturnType<typeof setup>>) {
+    await syncClients(t.trackerDb, [SHARMA]);
+    const ingestor = new Ingestor({ db: t.trackerDb, onNewMessages: () => {} });
+    let hold: Promise<void> | undefined;
+    t.switchable.onEvent(async (e: NormalizedEvent) => {
+      if (hold) await hold;
+      await ingestor.handle(e);
+    });
+    const stored = async () => (await t.trackerDb.all<{ wa_id: string }>('SELECT wa_id FROM messages ORDER BY wa_id')).map((r) => r.wa_id);
+    return { stored, holdWrites: (p: Promise<void> | undefined) => void (hold = p) };
+  }
+  const upsert = (s: FakeSocket, ...ids: string[]) =>
+    s.emit('messages.upsert', { type: 'notify', messages: ids.map((id) => waText(id, `text ${id}`)) });
+
+  it('the old gateway’s queued messages are stored after the relink starts, not dropped', async () => {
+    const t = await setup({ allow: [SHARMA.groupId] });
+    cleanup.push(() => t.switchable.stop());
+    const svc = await service(t);
+    let release!: () => void;
+    svc.holdWrites(new Promise<void>((r) => (release = r)));
+    upsert(t.sockets[0]!, 'q1', 'q2', 'q3'); // q1 being stored, q2 and q3 waiting behind it
+    const link = t.sessions.start({ target: 'founder', actor: 'owner@studio.in' });
+    await tick();
+    expect(t.switchable.status().state).toBe('linking'); // the old gateway is swapped out
+    release();
+    await t.switchable.idle();
+    expect(await svc.stored()).toEqual(['q1', 'q2', 'q3']);
+    t.sessions.cancel(link.id);
+    await t.sessions.settled(link.id);
+  });
+
+  it('the new link’s messages between open and the hand-over are stored; another group’s are not', async () => {
+    const t = await setup({ allow: [SHARMA.groupId] });
+    cleanup.push(() => t.switchable.stop());
+    const svc = await service(t);
+    const link = t.sessions.start({ target: 'founder', actor: 'owner@studio.in' });
+    await tick();
+    const fresh = t.sockets[1]!;
+    fresh.emit('connection.update', { connection: 'open' });
+    upsert(fresh, 'n1'); // before the driver has handed the new gateway over
+    fresh.emit('messages.upsert', { type: 'notify', messages: [waText('x1', 'not ours', { group: OTHER_GROUP })] });
+    await t.sessions.settled(link.id);
+    upsert(fresh, 'n2'); // after the hand-over
+    await t.switchable.idle();
+    expect(t.sessions.info(link.id)).toMatchObject({ state: 'linked' });
+    expect(await svc.stored()).toEqual(['n1', 'n2']); // only the allowed group's
+  });
+
+  it('a cancelled relink: what the new link took is stored once, nothing after; the restored link carries on', async () => {
+    const t = await setup({ allow: [SHARMA.groupId] });
+    cleanup.push(() => t.switchable.stop());
+    const svc = await service(t);
+    const link = t.sessions.start({ target: 'founder', actor: 'owner@studio.in' });
+    await tick();
+    const fresh = t.sockets[1]!;
+    upsert(fresh, 'c1'); // taken by the linking gateway
+    t.sessions.cancel(link.id);
+    await t.sessions.settled(link.id);
+    upsert(fresh, 'c2'); // the undone gateway fires again: ignored
+    const restored = t.sockets[2]!;
+    restored.emit('connection.update', { connection: 'open' });
+    upsert(restored, 'r1', 'c1'); // WhatsApp sends c1 again: the store keeps it once by its id
+    await t.switchable.idle();
+    expect(await svc.stored()).toEqual(['c1', 'r1']); // c1 once; c2 never
+    expect(t.switchable.status().state).toBe('open');
   });
 });

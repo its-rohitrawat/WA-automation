@@ -5,7 +5,10 @@ import type { NormalizedEvent } from './normalize.ts';
 
 // Holds the founder's WhatsApp gateway so the dashboard can replace it in place (a relink) without restarting the
 // service (D3). The app registers its handlers here once; they keep working across swaps. Only the current inner
-// gateway's events and statuses get through: a stopped gateway that still fires is ignored.
+// gateway's statuses get through. Its events do too, and so do (bug 12) the events a gateway swapped out had already
+// taken (its queue drains into the handlers: real messages from the customer's allowed groups, which the store keeps
+// once by WhatsApp id), and those of a relink's new gateway from its start, before it is swapped in. Anything a stopped
+// gateway fires after its queue has drained is ignored.
 
 /** listGroups with no open WhatsApp connection. */
 export class NotConnectedError extends Error {
@@ -39,6 +42,12 @@ export class SwitchableGateway implements GatewayLike {
   #droppedBefore = 0;
   /** Earlier gateways' idle(), taken as each was swapped out: an event it was storing still finishes before shutdown. */
   #retired: Promise<unknown> = Promise.resolve();
+  /** Gateways swapped out whose queue is still draining: their events still reach the handlers until it has. */
+  readonly #draining = new Set<GatewayLike>();
+  /** A relink's new gateway, not yet swapped in, whose events already reach the handlers (follow). */
+  #following: GatewayLike | undefined;
+  /** Gateways whose events are forwarded already: wired once, so a followed gateway swapped in is not doubled. */
+  readonly #wired = new WeakSet<GatewayLike>();
 
   constructor(o: { inner?: GatewayLike; clock?: Clock; initialState?: HeldState; stopCapMs?: number } = {}) {
     this.#clock = o.clock ?? systemClock;
@@ -51,9 +60,30 @@ export class SwitchableGateway implements GatewayLike {
     this.#eventFns.push(fn);
   }
 
-  /** The current gateway's idle(), and every earlier one's as it was swapped out: their events taken before the swap. */
+  /**
+   * The current gateway's idle(), a followed one's, and every earlier one's as it was swapped out: their events taken
+   * before the swap.
+   */
   idle(): Promise<void> {
-    return Promise.all([this.#retired, this.#inner?.idle?.()]).then(() => undefined);
+    return Promise.all([this.#retired, this.#inner?.idle?.(), this.#following?.idle?.()]).then(() => undefined);
+  }
+
+  /**
+   * A relink's new gateway, before it is swapped in: its events reach the handlers from now on, so what the new link
+   * brings between 'open' and the swap is stored. Its statuses stay its driver's. Call before it starts.
+   */
+  follow(g: GatewayLike): void {
+    this.#following = g;
+    this.#wireEvents(g);
+  }
+
+  /** The relink was undone: g's events stop reaching the handlers, once those it has already taken are through. */
+  unfollow(g: GatewayLike): void {
+    if (this.#following !== g) return;
+    this.#following = undefined;
+    this.#failedBefore += g.failedCount();
+    this.#droppedBefore += g.droppedCount();
+    this.#drain(g);
   }
 
   onStatus(fn: (s: GatewayStatus) => void): void {
@@ -138,8 +168,9 @@ export class SwitchableGateway implements GatewayLike {
   }
 
   #install(inner: GatewayLike): void {
+    if (this.#following === inner) this.#following = undefined; // a followed relink gateway, swapped in: now the inner
     this.#inner = inner;
-    inner.onEvent((e) => (this.#inner === inner ? this.#emitEvent(e) : undefined));
+    this.#wireEvents(inner);
     inner.onStatus((s) => {
       if (this.#inner === inner) this.#emitStatus(s);
     });
@@ -149,16 +180,35 @@ export class SwitchableGateway implements GatewayLike {
     });
   }
 
-  /** From here on the old gateway's events and statuses are ignored; its counts are kept. */
+  /** Events reach the handlers while g is the inner, the followed one, or a swapped-out one still draining. */
+  #wireEvents(g: GatewayLike): void {
+    if (this.#wired.has(g)) return;
+    this.#wired.add(g);
+    g.onEvent((e) => (this.#inner === g || this.#following === g || this.#draining.has(g) ? this.#emitEvent(e) : undefined));
+  }
+
+  /** From here on the old gateway's statuses are ignored, and its events once its queue has drained; its counts are kept. */
   #detach(): GatewayLike | undefined {
     const old = this.#inner;
     if (old) {
       this.#failedBefore += old.failedCount();
       this.#droppedBefore += old.droppedCount();
-      this.#retired = Promise.all([this.#retired, old.idle?.()]);
+      this.#drain(old);
     }
     this.#inner = undefined;
     return old;
+  }
+
+  /**
+   * g's queue as it stands drains into the handlers, and shutdown waits for it. A gateway without idle() (it cannot say
+   * what it has taken) is ignored at once, as before.
+   */
+  #drain(g: GatewayLike): void {
+    const drained = g.idle?.();
+    if (!drained) return;
+    this.#draining.add(g);
+    const done = drained.then(() => void this.#draining.delete(g), () => void this.#draining.delete(g));
+    this.#retired = Promise.all([this.#retired, done]);
   }
 
   async #stopCapped(g: GatewayLike | undefined): Promise<void> {

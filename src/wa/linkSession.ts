@@ -356,6 +356,8 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
             qrSeen = true;
             hooks.qr(qr);
           });
+          // Its messages are stored from the start (bug 12): what the new link brings between 'open' and the swap.
+          d.switchable.follow(gw);
           gw.onStatus((s) => {
             if (s.state === 'open') resolve({ ok: true, device: TRACKER_DEVICE_NAME });
             else if (TERMINAL.has(s.state)) resolve({ ok: false, code: s.state });
@@ -368,6 +370,7 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
         if (onAbort) signal.removeEventListener('abort', onAbort);
         if (!outcome.ok || signal.aborted) {
           undone = true;
+          if (gw) d.switchable.unfollow(gw); // what it has taken still drains, then nothing more of it
           await stopCapped(gw);
           await restore(wasLinked);
           return outcome.ok ? { ok: false, code: 'aborted' } : outcome;
@@ -377,6 +380,7 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
       } catch (err) {
         if (!(err instanceof Aborted)) d.log.error({ err }, 'founder relink failed; restoring the saved session');
         undone = true;
+        if (gw) d.switchable.unfollow(gw);
         await stopCapped(gw);
         if (backedUp) await restore(wasLinked);
         else if (wasLinked && !d.switchable.hasGateway()) await reconnectAsBefore();

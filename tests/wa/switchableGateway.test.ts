@@ -130,6 +130,64 @@ describe('SwitchableGateway', () => {
     expect(idle).toBe(true);
   });
 
+  // Bug 12: the events a gateway had already taken when it was swapped out still reach the handlers (its queue drains);
+  // what it fires after that is ignored.
+  it('a swapped-out gateway’s queue drains into the handlers; once drained, its events are ignored', async () => {
+    const a = new FakeGateway('a');
+    const b = new FakeGateway('b');
+    let drained!: () => void;
+    a.storing = new Promise((r) => (drained = r));
+    const g = new SwitchableGateway({ inner: a, clock: manualClock(T0) });
+    const { events, statuses } = collect(g);
+    g.start();
+    await g.swap(b);
+    a.emit(event('queued')); // handed over by a's queue while it drains
+    a.setState('open'); // its statuses are ignored at once
+    drained();
+    await new Promise((r) => setImmediate(r));
+    a.emit(event('late'));
+    expect(events).toEqual([event('queued')]);
+    expect(statuses.map((s) => s.state)).toEqual(['stopped']); // b's, on the swap
+  });
+
+  it('a followed gateway’s events get through before its swap, and once each after it', async () => {
+    const a = new FakeGateway('a');
+    const b = new FakeGateway('b');
+    const g = new SwitchableGateway({ inner: a, clock: manualClock(T0) });
+    const { events } = collect(g);
+    g.start();
+    await g.clear('linking');
+    g.follow(b);
+    b.emit(event('early'));
+    b.setState('open'); // a followed gateway's statuses are its driver's
+    expect(g.status().state).toBe('linking');
+    await g.swap(b);
+    b.emit(event('after'));
+    expect(events).toEqual([event('early'), event('after')]);
+  });
+
+  it('an unfollowed gateway (a relink undone): its queue drains, then nothing more of it', async () => {
+    const b = new FakeGateway('b');
+    let drained!: () => void;
+    b.storing = new Promise((r) => (drained = r));
+    const g = new SwitchableGateway({ clock: manualClock(T0), initialState: 'linking' });
+    const { events } = collect(g);
+    g.follow(b);
+    b.failed = 2;
+    g.unfollow(b);
+    b.emit(event('queued'));
+    let idle = false;
+    void g.idle().then(() => (idle = true));
+    await new Promise((r) => setImmediate(r));
+    expect(idle).toBe(false); // shutdown waits for it
+    drained();
+    await new Promise((r) => setImmediate(r));
+    expect(idle).toBe(true);
+    b.emit(event('late'));
+    expect(events).toEqual([event('queued')]);
+    expect(g.failedCount()).toBe(2); // its failures still count
+  });
+
   it('keeps the failure and drop counts of earlier gateways', async () => {
     const a = new FakeGateway('a');
     const b = new FakeGateway('b');
