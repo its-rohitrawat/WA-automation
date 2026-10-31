@@ -21,8 +21,7 @@ import type { Db } from '../../src/store/db.ts';
 import { advanceStage, getMeeting, insertFound, setSttParts, type NewMeeting, type SttPartRow } from '../../src/store/meetings.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { NOW, row, seeded } from '../helpers/db.ts';
 
 /*
  * Meetings on the local engine (plan 2026-10-28-meetings-local-stt.md, Task 2), with a fake ffmpeg and a fake engine
@@ -34,10 +33,13 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
+/** Sharma's real id in the test running now (on Postgres ids are shared by every customer, so never assume 1). */
+let sharma = 0;
+
 let seq = 0;
 const newMeeting = (): NewMeeting => ({
   recording: `conferenceRecords/c1/recordings/l${++seq}`, conference: 'conferenceRecords/c1', driveFileId: 'fileAbc123', meetingCode: null,
-  title: 'Sharma weekly', startedAt: '2026-10-31T20:00:00.000Z', endedAt: null, attendees: [], participants: [], clientId: 1, matchKind: 'title',
+  title: 'Sharma weekly', startedAt: '2026-10-31T20:00:00.000Z', endedAt: null, attendees: [], participants: [], clientId: sharma, matchKind: 'title',
   status: 'queued', driveSeconds: null, createdAt: NOW,
 });
 
@@ -138,7 +140,11 @@ describe('the local meeting transcriber', () => {
   let spend: SpendGuard;
   let id: number;
   const clock = manualClock('2026-11-01T10:00:00.000Z');
-  const rows = () => db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend ORDER BY id');
+  /** The spend rows, once the guard's own writes are in (on Postgres a booking without a transaction handle lands a moment later). */
+  const rows = async () => {
+    await spend.flushed();
+    return db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend ORDER BY id');
+  };
   const parts = async () => (await getMeeting(db, id))!.sttParts;
   const partsDir = () => join(dataDir, 'meetings', 'tmp', `${id}-parts`);
   const work = () => join(dataDir, 'tmp', 'local');
@@ -176,7 +182,9 @@ describe('the local meeting transcriber', () => {
   beforeEach(async () => {
     dataDir = mkdtempSync(join(tmpdir(), 'meet-local-'));
     dirs.push(dataDir);
-    db = await seededDb();
+    const s = await seeded();
+    db = s.db;
+    sharma = s.ids.sharma;
     spend = new SpendGuard({ db, clock, capUsd: 5 });
   });
 
@@ -646,8 +654,8 @@ describe('the local meeting transcriber', () => {
   });
 
   describe('parts the engine cannot hear (review fixes 1 and 2)', () => {
-    const attemptsOf = () => (rawOf(db).prepare('SELECT attempts FROM meetings WHERE id = ?').get(id) as { attempts: number }).attempts;
-    const setAttempts = (n: number) => rawOf(db).prepare('UPDATE meetings SET attempts = ? WHERE id = ?').run(n, id);
+    const attemptsOf = async () => (await row<{ attempts: number }>(db, 'SELECT attempts FROM meetings WHERE id = ?', [id]))!.attempts;
+    const setAttempts = (n: number) => db.run('UPDATE meetings SET attempts = ? WHERE id = ?', [n, id]);
     /** One run of the stage over a fresh fake engine; what it threw, or its result. */
     const runWith = async (ff: ReturnType<typeof fakeFfmpeg>, steps: Step[], timeoutMs?: number) => {
       const { t } = timeoutMs === undefined ? fromEnv(ff, steps) : withTimeout(ff, steps, timeoutMs);
@@ -763,17 +771,17 @@ describe('the local meeting transcriber', () => {
     it('a finished part resets the meeting attempts to the run in hand, so failures spread over many parts never add up', async () => {
       await prepare(1500);
       const ff = fakeFfmpeg([500, 500, 500]);
-      setAttempts(3);
+      await setAttempts(3);
       await runWith(ff, ['shuru', '']);
-      expect(attemptsOf()).toBe(1);
-      setAttempts(3);
+      expect(await attemptsOf()).toBe(1);
+      await setAttempts(3);
       await runWith(ff, ['']); // part 2's 2nd try; no part finished: nothing reset
-      expect(attemptsOf()).toBe(3);
+      expect(await attemptsOf()).toBe(3);
       await runWith(ff, ['']); // its 3rd try
       expect((await parts())[1]).toMatchObject({ state: 'todo', tries: 3 });
       await runWith(ff, ['', { fail: 1 }]); // its last try gives it up (a finished part), then part 3 fails
       expect((await parts())[1]).toMatchObject({ state: 'done', unheard: true });
-      expect(attemptsOf()).toBe(1);
+      expect(await attemptsOf()).toBe(1);
     });
 
     it('a switch to a paid provider sends the parts left to do with their tries cleared', async () => {

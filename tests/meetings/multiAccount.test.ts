@@ -10,9 +10,8 @@ import {
 } from '../../src/output/googleAuth.ts';
 import { setKv } from '../../src/store/kv.ts';
 import { silentLogger } from '../../src/util/logger.ts';
-import { seededDb } from '../helpers/db.ts';
+import { row, seededDb } from '../helpers/db.ts';
 import { FakeMeetingsApi } from '../helpers/fakeMeetings.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const signal = new AbortController().signal;
 const log = silentLogger();
@@ -192,7 +191,7 @@ describe('storedMeetingAccounts', () => {
     const db2 = await seededDb();
     await new TokenStore(db2, key, 'company2').save('rt-2');
     // Move company2's ciphertext into company3's slot.
-    await setKv(db2, 'google_refresh_token:company3', String(rawOf(db2).prepare("SELECT v FROM kv WHERE k = 'google_refresh_token:company2'").pluck().get()));
+    await setKv(db2, 'google_refresh_token:company3', String((await row<{ v: string }>(db2, "SELECT v FROM kv WHERE k = 'google_refresh_token:company2'"))!.v));
     await expect(new TokenStore(db2, key, 'company3').load()).rejects.toThrow(/google-auth --account company3/);
   });
 });

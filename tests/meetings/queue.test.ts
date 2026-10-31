@@ -11,7 +11,7 @@ import type { Db } from '../../src/store/db.ts';
 import { addSttForget, deferMeeting, failMeeting, getMeeting, getMeetingState, insertFound, setSttParts } from '../../src/store/meetings.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
-import { seededDb } from '../helpers/db.ts';
+import { seeded } from '../helpers/db.ts';
 import { FakeSttProvider, queuedMeeting } from '../helpers/meetingPipeline.ts';
 
 const NOW = '2026-11-01T12:00:00.000Z';
@@ -44,11 +44,11 @@ class FakeProcessor {
 async function setup(o: { meetings?: number; transcriber?: MeetingTranscriber | null } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'meet-queue-'));
   dirs.push(dataDir);
-  const db = await seededDb();
+  const { db, ids: clients } = await seeded();
   const clock = manualClock(NOW);
   const spend = new SpendGuard({ db, clock, capUsd: 15 });
   const ids: number[] = [];
-  for (let i = 0; i < (o.meetings ?? 1); i++) ids.push((await insertFound(db, queuedMeeting({ startedAt: `2026-11-01T0${i + 1}:00:00.000Z` })))!);
+  for (let i = 0; i < (o.meetings ?? 1); i++) ids.push((await insertFound(db, queuedMeeting({ clientId: clients.sharma, startedAt: `2026-11-01T0${i + 1}:00:00.000Z` })))!);
   const processor = new FakeProcessor();
   const settled: MeetingProcessResult[] = [];
   const stt = new FakeSttProvider();
@@ -56,7 +56,7 @@ async function setup(o: { meetings?: number; transcriber?: MeetingTranscriber | 
     db, clock, log: silentLogger(), spend, dataDir, transcriber: o.transcriber === undefined ? meetingTranscriber(stt, 88) : o.transcriber, inrPerUsd: 88, processor,
     onSettled: (r) => settled.push(r),
   });
-  return { db, clock, spend, ids, processor, settled, queue, dataDir, stt };
+  return { db, clock, spend, ids, clients, processor, settled, queue, dataDir, stt };
 }
 
 const flush = () => new Promise<void>((r) => setTimeout(r, 0));
@@ -65,22 +65,26 @@ const ticks = async () => {
   for (let i = 0; i < 5; i++) await flush();
 };
 const WAIT = { timeout: 10_000 };
-const spendRows = (db: Db) => db.all('SELECT kind, detail FROM spend ORDER BY id');
+/** The spend rows, once the guard's own writes are in (on Postgres a booking without a transaction handle lands a moment later). */
+const spendRows = async (db: Db, spend: SpendGuard) => {
+  await spend.flushed();
+  return db.all('SELECT kind, detail FROM spend ORDER BY id');
+};
 
 describe('MeetingQueue', () => {
   it('at start books parts left in flight, deletes provider copies and cleans work files before any meeting runs', async () => {
-    const { db, ids, processor, queue, dataDir, stt } = await setup();
+    const { db, ids, clients, spend, processor, queue, dataDir, stt } = await setup();
     const id = ids[0]!;
     await setSttParts(db, id, [{ index: 0, provider: 'elevenlabs', file: null, offset: 0, seconds: 600, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
     await addSttForget(db, { meetingId: id, provider: 'elevenlabs', ref: 'tr-9', at: NOW });
     // A finished meeting's leftover video, and an unrelated file that must stay.
-    const done = (await insertFound(db, queuedMeeting()))!;
+    const done = (await insertFound(db, queuedMeeting({ clientId: clients.sharma })))!;
     await failMeeting(db, done, { status: 'failed', errorCode: 'x', at: NOW });
     const tmp = join(dataDir, 'meetings', 'tmp');
     mkdirSync(tmp, { recursive: true });
     writeFileSync(join(tmp, `${done}.mp4.part`), 'v');
     writeFileSync(join(tmp, 'notes.txt'), 'keep');
-    processor.onCall = async () => void processor.seen.push({ parts: (await getMeeting(db, id))!.sttParts[0]!.booked, spend: (await spendRows(db)).length, forgotten: [...stt.forgotten] });
+    processor.onCall = async () => void processor.seen.push({ parts: (await getMeeting(db, id))!.sttParts[0]!.booked, spend: (await spendRows(db, spend)).length, forgotten: [...stt.forgotten] });
 
     queue.kick(); // before start: nothing runs
     await ticks();

@@ -25,13 +25,12 @@ import { SttHttpError } from '../../src/stt/http.ts';
 import { manualClock, type ManualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
 import { FakeAi, op, type FakeResponse } from '../helpers/ai.ts';
-import { seededDb } from '../helpers/db.ts';
+import { seeded } from '../helpers/db.ts';
 import { FakeDrive } from '../helpers/fakeDrive.ts';
 import { FakeMeetingsApi } from '../helpers/fakeMeetings.ts';
 import {
   addRecordingFile, fakeFfmpeg, FakeMeetingAi, FakeSttProvider, gate, queuedMeeting, SAID, SUMMARY_WIRE, type FakeFfmpeg,
 } from '../helpers/meetingPipeline.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
 const NOW = '2026-11-01T12:00:00.000Z'; // 17:30 IST
@@ -65,20 +64,22 @@ interface World {
   access: boolean[];
   scopes: { ok: boolean };
   id: number;
+  /** Sharma's real id (on Postgres ids are shared by every customer, so never assume 1). */
+  sharma: number;
 }
 
 async function world(o: { capUsd?: number; meeting?: Partial<NewMeeting> } = {}): Promise<World> {
   const dataDir = mkdtempSync(join(tmpdir(), 'meet-proc-'));
   dirs.push(dataDir);
-  const db = await seededDb();
+  const { db, ids } = await seeded();
   await setKv(db, 'drive_root_id', 'root'); // the publisher has made the WA Agent folder
   const clock = manualClock(NOW);
   const api = new FakeMeetingsApi();
   addRecordingFile(api);
-  const id = (await insertFound(db, queuedMeeting(o.meeting)))!;
+  const id = (await insertFound(db, queuedMeeting({ clientId: ids.sharma, ...o.meeting })))!;
   return {
     dataDir, db, clock, spend: new SpendGuard({ db, clock, capUsd: o.capUsd ?? 15 }), api, drive: new FakeDrive(), ff: fakeFfmpeg(),
-    stt: new FakeSttProvider(), ai: new FakeMeetingAi(), trackerAi: new FakeAi([addTask(id)]), access: [], scopes: { ok: true }, id,
+    stt: new FakeSttProvider(), ai: new FakeMeetingAi(), trackerAi: new FakeAi([addTask(id)]), access: [], scopes: { ok: true }, id, sharma: ids.sharma,
   };
 }
 
@@ -95,7 +96,11 @@ function processor(w: World, o: Partial<MeetingProcessorDeps> & { exclusive?: Re
 }
 
 const row = async (w: World) => (await getMeeting(w.db, w.id))!;
-const spendRows = (w: World) => w.db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend ORDER BY id');
+/** The spend rows, once the guard's own writes are in (on Postgres a booking without a transaction handle lands a moment later). */
+const spendRows = async (w: World) => {
+  await w.spend.flushed();
+  return w.db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend ORDER BY id');
+};
 const later = (w: World, ms: number) => w.clock.advance(ms);
 const signal = () => new AbortController().signal;
 const audioRel = (id: number) => `meetings/SHA/2026-11/${id}.mp3`;
@@ -115,13 +120,13 @@ async function at(w: World, stage: MeetingStage): Promise<void> {
   }
 }
 
-const setAttempts = (w: World, n: number) => rawOf(w.db).prepare('UPDATE meetings SET attempts = ? WHERE id = ?').run(n, w.id);
+const setAttempts = (w: World, n: number) => w.db.run('UPDATE meetings SET attempts = ? WHERE id = ?', [n, w.id]);
 
 describe('MeetingProcessor: found to done', () => {
   it('takes one meeting through every stage with each result stored, one Doc, the tracker updated and the meeting done', async () => {
     const w = await world();
     const r = await processor(w).process(w.id, signal());
-    expect(r).toEqual({ outcome: 'done', clientId: 1 });
+    expect(r).toEqual({ outcome: 'done', clientId: w.sharma });
 
     const m = await row(w);
     expect(m).toMatchObject({ status: 'done', stage: 'tracked', audioPath: audioRel(w.id), audioSeconds: 2700, errorCode: null, nextAttemptAt: null });
@@ -143,9 +148,9 @@ describe('MeetingProcessor: found to done', () => {
     expect(w.trackerAi.calls).toHaveLength(1);
     expect(w.stt.forgotten).toEqual(['tr-1']);
 
-    expect((await listTasks(w.db, 1)).map((t) => ({ title: t.title, origin: t.origin }))).toEqual([{ title: 'Send the logo files', origin: 'meeting' }]);
-    expect(rawOf(w.db).prepare('SELECT meeting_id AS meetingId FROM tasks').all()).toEqual([{ meetingId: w.id }]);
-    expect(await listDecisions(w.db, 1, 10)).toEqual([]);
+    expect((await listTasks(w.db, w.sharma)).map((t) => ({ title: t.title, origin: t.origin }))).toEqual([{ title: 'Send the logo files', origin: 'meeting' }]);
+    expect(await w.db.all('SELECT meeting_id AS meetingId FROM tasks')).toEqual([{ meetingId: w.id }]);
+    expect(await listDecisions(w.db, w.sharma, 10)).toEqual([]);
 
     expect((await spendRows(w)).map((s) => [s.kind, s.detail])).toEqual([
       ['stt', `meeting ${w.id} part 1`],
@@ -271,7 +276,7 @@ describe('MeetingProcessor: resuming', () => {
     expect(w.drive.docs).toHaveLength(1);
     expect(w.trackerAi.calls).toHaveLength(1);
     expect((await spendRows(w)).map((s) => s.kind)).toEqual(['stt', 'ai', 'ai']);
-    expect(await listTasks(w.db, 1)).toHaveLength(1);
+    expect(await listTasks(w.db, w.sharma)).toHaveLength(1);
   });
 
   it('a stage cut off by a crash waits out its claim, with the attempt counted', async () => {
@@ -293,7 +298,7 @@ describe('MeetingProcessor: resuming', () => {
     const w = await world();
     await at(w, 'audio');
     await setSttParts(w.db, w.id, [{ index: 0, provider: 'elevenlabs', file: null, offset: 0, seconds: 2700, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
-    setAttempts(w, MEETING_MAX_ATTEMPTS);
+    await setAttempts(w, MEETING_MAX_ATTEMPTS);
     const r = await processor(w).process(w.id, signal());
     expect(r.outcome).toBe('failed');
     expect(await row(w)).toMatchObject({ status: 'failed', errorCode: 'crashed', stage: 'audio' });
@@ -306,7 +311,7 @@ describe('MeetingProcessor: resuming', () => {
     const w = await world();
     await at(w, 'audio');
     await setSttParts(w.db, w.id, [{ index: 0, provider: 'elevenlabs', file: null, offset: 0, seconds: 2700, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
-    setAttempts(w, MEETING_MAX_ATTEMPTS);
+    await setAttempts(w, MEETING_MAX_ATTEMPTS);
     vi.spyOn(w.spend, 'record').mockImplementation(() => {
       throw new Error('database is locked');
     });
@@ -319,7 +324,7 @@ describe('MeetingProcessor: deferrals', () => {
   const PRE_CLAIM = 2;
   /** Runs one deferral case: the meeting at `stage` with 2 attempts used, and what it waits for. */
   async function deferred(w: World, p: MeetingProcessor, code: string, waitMs: number | 'midnight') {
-    setAttempts(w, PRE_CLAIM);
+    await setAttempts(w, PRE_CLAIM);
     const r = await p.process(w.id, signal());
     expect(r.outcome).toBe('deferred');
     const due = waitMs === 'midnight' ? '2026-11-01T18:30:00.000Z' : new Date(Date.parse(NOW) + waitMs).toISOString();
@@ -491,7 +496,7 @@ describe('MeetingProcessor: failures', () => {
     expect(await row(w)).toMatchObject({ status: 'failed', errorCode: 'ai_invalid_output', stage: 'doc' });
     expect(w.trackerAi.calls).toHaveLength(2);
     expect((await spendRows(w)).map((r) => r.kind)).toEqual(['ai', 'ai']);
-    expect(await listTasks(w.db, 1)).toEqual([]);
+    expect(await listTasks(w.db, w.sharma)).toEqual([]);
   });
 
   it('a row missing what its stage needs is retried with a real code, and a plain Error is stored as unknown', async () => {
@@ -729,7 +734,7 @@ describe('MeetingProcessor: the local engine (STT_PROVIDER=local)', () => {
     const w = await world();
     await at(w, 'audio');
     await setSttParts(w.db, w.id, [{ index: 1, provider: 'local', file: null, offset: 0, seconds: 2700, state: 'inflight', jobId: null, booked: 'none', segments: null, billedSeconds: null }], NOW);
-    setAttempts(w, MEETING_MAX_ATTEMPTS);
+    await setAttempts(w, MEETING_MAX_ATTEMPTS);
     const e = engineOf(w, []);
     expect((await processor(w, { transcriber: e.transcriber, ffmpeg: e.ffmpeg }).process(w.id, signal())).outcome).toBe('failed');
     expect(await row(w)).toMatchObject({ status: 'failed', errorCode: 'crashed' });

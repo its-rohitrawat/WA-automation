@@ -12,7 +12,7 @@ import type { Db } from '../../src/store/db.ts';
 import { advanceStage, getMeeting, insertFound, type MeetingStatus, type NewMeeting } from '../../src/store/meetings.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger } from '../../src/util/logger.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
+import { NOW, seeded } from '../helpers/db.ts';
 import { FakeMeetingsApi } from '../helpers/fakeMeetings.ts';
 
 // Hooks into the fs calls src/meetings/audio.ts makes, so a test can make one fail (EPERM, EXDEV) as Windows can.
@@ -53,6 +53,14 @@ const FILE_ID = 'fileAbc123';
 const STARTED = '2026-10-31T20:00:00.000Z';
 const BANNER = (seconds: number) => `Input #0, mp3, from 'x':\n  Duration: 00:${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}.00, start: 0\n`;
 
+/** Sharma's real id in the test running now, set by seededDb() (on Postgres ids are shared by every customer). */
+let sharma = 0;
+async function seededDb(): Promise<Db> {
+  const s = await seeded();
+  sharma = s.ids.sharma;
+  return s.db;
+}
+
 let seq = 0;
 const newMeeting = (o: Partial<NewMeeting> = {}): NewMeeting => ({
   recording: `conferenceRecords/c1/recordings/r${++seq}`,
@@ -64,7 +72,7 @@ const newMeeting = (o: Partial<NewMeeting> = {}): NewMeeting => ({
   endedAt: null,
   attendees: [],
   participants: [],
-  clientId: 1,
+  clientId: sharma,
   matchKind: 'title',
   status: 'queued',
   driveSeconds: 2700,
