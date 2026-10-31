@@ -220,9 +220,13 @@ export async function redeemInvite(d: InviteDeps, o: { token: unknown; email: st
       await platformAudit(q, { at, actor: maskAddress(email), event: 'signup.wrong_account', tenantId: r.tenant_id, requestId: o.requestId ?? null });
       return { ok: false, reason: 'wrong_account' };
     }
+    // Every check that can refuse is above: only now is the invite claimed, before anything else is written. Two redeems
+    // at once (Postgres, two connections): the second waits on this row until the first ends, then finds it used and gets
+    // what a used link gets. Everything below is in this transaction, so a later step that fails gives the claim back.
+    const claimed = await q.run("UPDATE invites SET status = 'accepted', used_at = ? WHERE id = ? AND status = 'open'", [at, r.id]);
+    if (claimed.changes !== 1) return { ok: false, reason: 'invalid' };
     const user = await upsertUser(q, { email, name: o.name ?? null, at });
-    const used = await q.run("UPDATE invites SET status = 'accepted', used_at = ?, used_by = ? WHERE id = ? AND status = 'open'", [at, user.id, r.id]);
-    if (used.changes !== 1) return { ok: false, reason: 'invalid' };
+    await q.run('UPDATE invites SET used_by = ? WHERE id = ?', [user.id, r.id]);
     await addMembership(q, { tenantId: r.tenant_id, userId: user.id, role: 'owner', at });
     await setTenantStatus(q, r.tenant_id, ['invited'], 'onboarding', at);
     await q.run('UPDATE tenants SET signed_up_at = COALESCE(signed_up_at, ?), last_activity_at = ? WHERE id = ?', [at, at, r.tenant_id]);

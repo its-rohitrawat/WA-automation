@@ -9,6 +9,7 @@ import { ensurePlatformSchema } from '../../src/platform/schema.ts';
 import { ensureFounderTenant, FOUNDER_TENANT_ID, getTenant, listTenants, membershipsFor } from '../../src/platform/store.ts';
 import { INVITE_TTL_MS, inviteTokenHash, newInviteToken, normalizeEmail } from '../../src/platform/tokens.ts';
 import type { Db } from '../../src/store/db.ts';
+import type { Params, Sql } from '../../src/store/engine/types.ts';
 import { onSqlite } from '../helpers/db.ts';
 import { platformTestDb, type PlatformTestDb } from '../helpers/platformTestDb.ts';
 import { manualClock, type ManualClock } from '../../src/util/clock.ts';
@@ -214,11 +215,61 @@ describe('redeeming an invite at sign-up', () => {
     expect(await redeemInvite(d, { token, email: 'kapoor.studio@example.com' })).toEqual({ ok: false, reason: 'invalid' });
   });
 
-  it('two redeems at the same moment: exactly one wins', async () => {
+  it('two redeems at the same moment: exactly one wins; the others get what a used link gets, nothing more', async () => {
     const { token } = await invite();
     const results = await Promise.all([1, 2, 3].map(() => redeemInvite(d, { token, email: 'kapoor.studio@example.com' })));
     expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(results.filter((r) => !r.ok)).toEqual([{ ok: false, reason: 'invalid' }, { ok: false, reason: 'invalid' }]);
     expect((await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM memberships'))!.n).toBe(1);
+    expect((await db.get<{ n: number }>("SELECT COUNT(*) AS n FROM users WHERE email = 'kapoor.studio@example.com'"))!.n).toBe(1);
+  });
+
+  it('a refusal never uses the invite up: a wrong account or an expired link leaves it open', async () => {
+    const { invite: v, token } = await invite();
+    expect(await redeemInvite(d, { token, email: 'someone.else@example.com' })).toEqual({ ok: false, reason: 'wrong_account' });
+    clock.advance(INVITE_TTL_MS);
+    expect(await redeemInvite(d, { token, email: 'kapoor.studio@example.com' })).toEqual({ ok: false, reason: 'invalid' }); // expired
+    expect(await db.get('SELECT status, used_at AS usedAt, used_by AS usedBy FROM invites WHERE id = ?', [v.id])).toEqual({ status: 'open', usedAt: null, usedBy: null });
+    expect(await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM users'))!.toEqual({ n: 0 });
+    // Before it expires, the right account still wins after a wrong one.
+    const second = await invite('Kapoor Events', 'events@example.com');
+    expect(await redeemInvite(d, { token: second.token, email: 'not.events@example.com' })).toEqual({ ok: false, reason: 'wrong_account' });
+    expect(await redeemInvite(d, { token: second.token, email: 'events@example.com' })).toMatchObject({ ok: true, tenantId: second.invite.tenantId });
+  });
+
+  it('a redeem whose later step fails gives the claim back: nothing of it stays, and the next redeem wins', async () => {
+    const { invite: v, token } = await invite();
+    // The membership insert fails once, after the invite was claimed and the user made: the database's own failure, on
+    // either engine, with no trigger.
+    let failNext = true;
+    const failing = (q: Sql): Sql => new Proxy(q, {
+      get(t, p) {
+        if (p === 'run') {
+          return async (sql: string, params?: Params) => {
+            if (failNext && /^\s*INSERT INTO memberships/.test(sql)) {
+              failNext = false;
+              throw new Error('membership write failed');
+            }
+            return t.run(sql, params);
+          };
+        }
+        const x = Reflect.get(t, p) as unknown;
+        return typeof x === 'function' ? (x as (...a: unknown[]) => unknown).bind(t) : x;
+      },
+    });
+    const flaky = { ...d, db: new Proxy(db, {
+      get(t, p) {
+        if (p === 'tx') return <T>(fn: (q: Sql) => Promise<T>) => t.tx((q) => fn(failing(q)));
+        const x = Reflect.get(t, p) as unknown;
+        return typeof x === 'function' ? (x as (...a: unknown[]) => unknown).bind(t) : x;
+      },
+    }) };
+    await expect(redeemInvite(flaky, { token, email: 'kapoor.studio@example.com' })).rejects.toThrow('membership write failed');
+    expect(await db.get('SELECT status, used_at AS usedAt, used_by AS usedBy FROM invites WHERE id = ?', [v.id])).toEqual({ status: 'open', usedAt: null, usedBy: null });
+    expect(await db.get('SELECT COUNT(*) AS n FROM users')).toEqual({ n: 0 });
+    expect(await getTenant(db, v.tenantId)).toMatchObject({ status: 'invited' });
+    expect(await redeemInvite(flaky, { token, email: 'kapoor.studio@example.com' })).toMatchObject({ ok: true, tenantId: v.tenantId });
+    expect((await listInvites(d))[0]).toMatchObject({ status: 'accepted' });
   });
 
   it('a wrong account is audited without the address it used in full', async () => {

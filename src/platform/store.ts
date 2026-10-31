@@ -75,16 +75,18 @@ export interface UserRow {
   name: string | null;
 }
 
-/** The user with this (lower-cased) email, made when missing; the name and sign-in time are kept current. */
+/**
+ * The user with this (lower-cased) email, made when missing; the name and sign-in time are kept current. Safe when two
+ * sign-ins of one new email run at once (Postgres, two connections): the second insert does nothing, and both read the
+ * one row.
+ */
 export async function upsertUser(q: Sql, o: { email: string; name: string | null; at: string }): Promise<UserRow> {
-  const found = await q.get<UserRow>('SELECT id, email, name FROM users WHERE email = ?', [o.email]);
-  if (found) {
-    await q.run('UPDATE users SET name = COALESCE(?, name), last_sign_in_at = ? WHERE id = ?', [o.name, o.at, found.id]);
-    return { ...found, name: o.name ?? found.name };
-  }
-  const id = randomUUID();
-  await q.run('INSERT INTO users (id, email, name, created_at, last_sign_in_at) VALUES (?, ?, ?, ?, ?)', [id, o.email, o.name, o.at, o.at]);
-  return { id, email: o.email, name: o.name };
+  await q.run('INSERT INTO users (id, email, name, created_at, last_sign_in_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (email) DO NOTHING', [
+    randomUUID(), o.email, o.name, o.at, o.at,
+  ]);
+  const user = (await q.get<UserRow>('SELECT id, email, name FROM users WHERE email = ?', [o.email]))!;
+  await q.run('UPDATE users SET name = COALESCE(?, name), last_sign_in_at = ? WHERE id = ?', [o.name, o.at, user.id]);
+  return { ...user, name: o.name ?? user.name };
 }
 
 export async function addMembership(q: Sql, o: { tenantId: string; userId: string; role: 'owner' | 'member'; at: string }): Promise<void> {
