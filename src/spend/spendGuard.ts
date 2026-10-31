@@ -73,6 +73,8 @@ export class SpendGuard {
   #today: Today;
   /** Bumped by every record: a refresh that overlapped one keeps the larger total, never the smaller. */
   #recorded = 0;
+  /** #recorded when the previous refresh began: a booking since then may not be in a read yet (see refresh). */
+  #recordedAtLastRefresh = 0;
   /** Rows booked without a transaction handle that are still being written (see record, flushed). */
   readonly #writes = new Set<Promise<void>>();
   readonly #onError: (err: unknown) => void;
@@ -104,15 +106,22 @@ export class SpendGuard {
     p.global.join(p.tenantId, this);
   }
 
-  /** Reads today's totals again (another process may have booked spend). */
+  /**
+   * Reads today's totals again (another process may have booked spend), and never counts less than this guard has
+   * booked (real bug 9, on Postgres). Rows booked without a handle are written first (flushed). A booking since the
+   * previous refresh began may still not be in the read: its row is in a transaction not yet committed, or, on the
+   * pool, being written on another connection. So then the larger total is kept. A booking that was rolled back or
+   * failed stays counted until a refresh with no booking since the one before: an over-count, the safe side.
+   */
   async refresh(): Promise<void> {
+    await this.flushed();
     const day = istDate(this.#clock.now());
-    const seen = this.#recorded;
+    const since = this.#recordedAtLastRefresh;
+    this.#recordedAtLastRefresh = this.#recorded;
     const read = totals(day, await this.#db.all<{ kind: string; total: number }>(SUMS, [day]));
     const now = this.#now();
     if (now.day !== day) return; // the IST day changed during the read: today starts at zero
-    // A record during the read may or may not be in it: keep whichever total is larger.
-    if (this.#recorded !== seen) {
+    if (this.#recorded !== since) {
       read.ai = Math.max(read.ai, now.ai);
       read.stt = Math.max(read.stt, now.stt);
     }
