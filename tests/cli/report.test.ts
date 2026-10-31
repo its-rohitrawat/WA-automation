@@ -7,17 +7,18 @@ import {
   addReportCommands, ConfirmCancelled, linkSenderCommand, reportSendNowCommand, reportStatusCommand, type CliDeps,
 } from '../../src/cli/commands.ts';
 import { parseEnv } from '../../src/config/env.ts';
-import { senderSessionDbPath, sessionDbPath, trackerDbPath } from '../../src/config/paths.ts';
+import { senderSessionDbPath, sessionDbPath } from '../../src/config/paths.ts';
 import { StaticKeyProvider } from '../../src/crypto/keyProvider.ts';
 import type { HealthSnapshot } from '../../src/health/health.ts';
-import { openDb, type Db } from '../../src/store/db.ts';
+import type { Db } from '../../src/store/db.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
 import { claimReport, finishReport, REPORT_REQUEST_KEY, reportFor, reportRequest, retryReport, skipReport } from '../../src/store/reports.ts';
 import { acquireLock } from '../../src/util/lock.ts';
 import { openSessionDb, SenderSessionDecryptError, useEncryptedAuthState, useSenderAuthState } from '../../src/wa/authState.ts';
 import type { SenderSocketFactory } from '../../src/wa/senderGateway.ts';
+import { cliStore, type CliStore } from '../helpers/cliEnv.ts';
+import { onSqlite } from '../helpers/db.ts';
 import { closeWith, FakeSocket, SEND_METHODS } from '../helpers/fakeSocket.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 /** renameSync passes through, except that it fails for the one path in failRename (a file another program has locked). */
 const fsSeam = vi.hoisted(() => ({ failRename: undefined as string | undefined }));
@@ -50,10 +51,12 @@ let lines: string[];
 let sockets: FakeSocket[];
 let scripts: Script[];
 let confirm: ReturnType<typeof vi.fn<(q: string) => Promise<boolean>>>;
+/** The store the commands reach (tests/helpers/cliEnv.ts): the data folder on SQLite, the test's own customer on Postgres. */
+let store: CliStore;
 
 function deps(env: Record<string, string> = {}): CliDeps {
   return {
-    env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: join(dir, 'groups.json'), REPORT_ENABLED: 'true', REPORT_RECIPIENT: NUMBER, ...env }),
+    env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: join(dir, 'groups.json'), REPORT_ENABLED: 'true', REPORT_RECIPIENT: NUMBER, ...store.env, ...env }),
     keyProvider: new StaticKeyProvider(KEY),
     socketFactory: () => {
       throw new Error('the founder-number socket must not be used');
@@ -76,12 +79,13 @@ function deps(env: Record<string, string> = {}): CliDeps {
 
 const out = () => lines.join('\n');
 
+/** The tracker the commands reach (the data folder's tracker.db, or the test's own customer on Postgres). */
 async function withTracker<T>(fn: (db: Db) => T | Promise<T>): Promise<T> {
-  const db = openDb(trackerDbPath(dataDir));
+  const db = await store.open();
   try {
     return await fn(db);
   } finally {
-    rawOf(db).close();
+    await db.close();
   }
 }
 
@@ -108,7 +112,7 @@ async function seedSender(key: Buffer = KEY): Promise<void> {
   const auth = await useSenderAuthState(sdb, key);
   auth.state.creds.me = { id: '919800000099:2@s.whatsapp.net', name: 'Spare' };
   await auth.saveCreds();
-  rawOf(sdb).close();
+  await sdb.close();
 }
 
 /** The founder reader's own number (session.db), deliberately not REPORT_RECIPIENT. */
@@ -120,7 +124,7 @@ async function seedFounder(key: Buffer = KEY): Promise<void> {
   const auth = await useEncryptedAuthState(db, key);
   auth.state.creds.me = { id: `${FOUNDER}:7@s.whatsapp.net`, name: 'Founder' };
   await auth.saveCreds();
-  rawOf(db).close();
+  await db.close();
 }
 
 /** A spare-number socket factory whose QR code is scanned by the phone with this number. */
@@ -143,7 +147,7 @@ const senderLinked = async (): Promise<boolean> => {
   try {
     return (await useSenderAuthState(sdb, KEY)).hasSession;
   } finally {
-    rawOf(sdb).close();
+    await sdb.close();
   }
 };
 
@@ -152,10 +156,11 @@ const request = async () => await withTracker((db) => getKv(db, REPORT_REQUEST_K
 /** Files in the data folder whose names start with sender-session.db. */
 const senderFiles = () => readdirSync(dataDir).filter((f) => f.startsWith('sender-session.db')).sort();
 
-beforeEach(() => {
+beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'wa-report-'));
   dataDir = join(dir, 'data');
   mkdirSync(dataDir, { recursive: true });
+  store = await cliStore(dataDir);
   lines = [];
   sockets = [];
   scripts = [];
@@ -170,7 +175,9 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-describe('cli link-sender', () => {
+// SQLite only (S2.7): the spare phone's session file, data/sender-session.db, its backups and the founder's session.db
+// (Postgres keeps them as wa_auth rows: tests/wa/authStatePg.test.ts; a customer's spare link: tests/web/customerLink).
+describe.runIf(onSqlite)('cli link-sender', () => {
   it('links the spare number by QR into its own file, without touching the founder session or sending anything', async () => {
     scripts = [
       (s) => {
