@@ -208,7 +208,8 @@ describe('SpendGuard', () => {
     expect(await guard.settlePending('shutdown (estimated)')).toBe(2);
     await guard.flushed();
     expect(guard.spentToday()).toBeCloseTo(0.5);
-    expect(await rows(db, 'SELECT kind, usd, detail FROM spend ORDER BY id')).toEqual([
+    // Booked without a handle, the rows are written side by side (on Postgres on two connections): any order, so by amount.
+    expect(await rows(db, 'SELECT kind, usd, detail FROM spend ORDER BY usd')).toEqual([
       { kind: 'ai', usd: 0.2, detail: 'shutdown (estimated)' },
       { kind: 'ai', usd: 0.3, detail: 'shutdown (estimated)' },
     ]);
@@ -267,7 +268,8 @@ describe('SpendGuard', () => {
     expect(guard.reserve(0.3, 'ai')).not.toBeNull();
     expect(await guard.settlePending('shutdown (estimated)')).toBe(3);
     await guard.flushed();
-    expect(await rows(db, 'SELECT kind, usd FROM spend ORDER BY id')).toEqual([
+    // Booked without a handle, in any order (see above): by amount.
+    expect(await rows(db, 'SELECT kind, usd FROM spend ORDER BY usd')).toEqual([
       { kind: 'ai', usd: 0.1 },
       { kind: 'stt', usd: 0.2 },
       { kind: 'ai', usd: 0.3 },

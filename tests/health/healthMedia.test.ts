@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Health, readHealthSnapshot, type MediaHealth } from '../../src/health/health.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { setKv } from '../../src/store/kv.ts';
@@ -98,8 +98,9 @@ describe('Health and shared files', () => {
     h.setMedia(counts({ pending: 1, stale: 1 }));
     // A group with an AI error stays failed: waiting for a file is not a success that clears it.
     h.recordOutcome(1, { status: 'failed', errorCode: 'refusal' });
+    // Written behind the change, by itself: on Postgres it lands a moment later.
+    await vi.waitFor(async () => expect((await readHealthSnapshot(db))?.line.text).toBe('⚠️ 1 group waiting (AI error)'));
     const failed = (await readHealthSnapshot(db))!;
-    expect(failed.line.text).toBe('⚠️ 1 group waiting (AI error)');
     h.recordOutcome(1, { status: 'waiting' });
     expect(h.line().text).toBe('⚠️ 1 group waiting (AI error)');
     expect(h.snapshot().media).toEqual(counts({ pending: 1, stale: 1 }));

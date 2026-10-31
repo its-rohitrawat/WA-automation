@@ -1,10 +1,19 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { setKv } from '../../src/store/kv.ts';
 import { Health, readHealthSnapshot } from '../../src/health/health.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import type { GatewayStatus } from '../../src/wa/gateway.ts';
-import { seededDb } from '../helpers/db.ts';
+import type { Db } from '../../src/store/db.ts';
+import { seeded } from '../helpers/db.ts';
+
+/** Sharma's and Mehta's real ids in the test running now (on Postgres ids are shared by every customer). */
+let ids = { sharma: 0, mehta: 0 };
+async function seededDb(): Promise<Db> {
+  const s = await seeded();
+  ids = s.ids;
+  return s.db;
+}
 
 async function setup(freeBytes: () => number | null = () => 200e9) {
   const db = await seededDb();
@@ -20,7 +29,7 @@ describe('Health', () => {
     const { h } = await setup();
     h.setWhatsApp(status('open'));
     expect(h.line()).toEqual({ ok: true, text: '✅ Connected · waiting for new messages' });
-    h.recordOutcome(1, { status: 'ok', accepted: 1, rejected: 0 });
+    h.recordOutcome(ids.sharma, { status: 'ok', accepted: 1, rejected: 0 });
     expect(h.line().text).toBe('✅ Connected · last update 19 Oct 13:30');
   });
 
@@ -46,11 +55,11 @@ describe('Health', () => {
   it('reports the spend cap before failed groups', async () => {
     const { h, spend } = await setup();
     h.setWhatsApp(status('open'));
-    h.recordOutcome(1, { status: 'failed', errorCode: 'refusal' });
+    h.recordOutcome(ids.sharma, { status: 'failed', errorCode: 'refusal' });
     expect(h.line().text).toBe('⚠️ 1 group waiting (AI error)');
     spend.record('ai', 2, 'test');
     expect(h.line().text).toBe('⚠️ Daily spend cap reached. Paused until midnight IST');
-    h.recordOutcome(1, { status: 'ok', accepted: 0, rejected: 0 });
+    h.recordOutcome(ids.sharma, { status: 'ok', accepted: 0, rejected: 0 });
   });
 
   it('warns about low disk', async () => {
@@ -62,33 +71,34 @@ describe('Health', () => {
   it('persists a snapshot for cli status', async () => {
     const { db, h } = await setup();
     h.setWhatsApp(status('open'));
-    expect(await readHealthSnapshot(db)).toMatchObject({ whatsapp: { state: 'open' }, line: { ok: true }, capUsd: 1 });
+    // Written behind the change, by itself: on Postgres it lands a moment later.
+    await vi.waitFor(async () => expect(await readHealthSnapshot(db)).toMatchObject({ whatsapp: { state: 'open' }, line: { ok: true }, capUsd: 1 }));
   });
 
   it('shows the cap message while the reconciler is paused below the cap', async () => {
     const { h, spend } = await setup();
     h.setWhatsApp(status('open'));
-    h.recordOutcome(1, { status: 'paused' });
+    h.recordOutcome(ids.sharma, { status: 'paused' });
     expect(spend.spentToday()).toBeLessThan(spend.capUsd);
     expect(h.line().text).toBe('⚠️ Daily spend cap reached. Paused until midnight IST');
-    h.recordOutcome(1, { status: 'ok', accepted: 0, rejected: 0 });
+    h.recordOutcome(ids.sharma, { status: 'ok', accepted: 0, rejected: 0 });
     expect(h.line().ok).toBe(true);
   });
 
   it('ignores a waiting run: it is not an update, and failed or paused groups stay (12d)', async () => {
     const { db, h } = await setup();
     h.setWhatsApp(status('open'));
-    h.recordOutcome(1, { status: 'waiting' });
+    h.recordOutcome(ids.sharma, { status: 'waiting' });
     expect(h.line()).toEqual({ ok: true, text: '✅ Connected · waiting for new messages' });
-    h.recordOutcome(1, { status: 'failed', errorCode: 'refusal' });
-    h.recordOutcome(1, { status: 'waiting' });
+    h.recordOutcome(ids.sharma, { status: 'failed', errorCode: 'refusal' });
+    h.recordOutcome(ids.sharma, { status: 'waiting' });
     expect(h.line().text).toBe('⚠️ 1 group waiting (AI error)');
-    expect((await readHealthSnapshot(db))!.failed).toEqual([{ clientId: 1, errorCode: 'refusal' }]);
-    h.recordOutcome(2, { status: 'paused' });
-    h.recordOutcome(2, { status: 'waiting' });
+    await vi.waitFor(async () => expect((await readHealthSnapshot(db))?.failed).toEqual([{ clientId: ids.sharma, errorCode: 'refusal' }]));
+    h.recordOutcome(ids.mehta, { status: 'paused' });
+    h.recordOutcome(ids.mehta, { status: 'waiting' });
     expect(h.line().text).toBe('⚠️ Daily spend cap reached. Paused until midnight IST');
-    h.recordOutcome(2, { status: 'noop' });
-    h.recordOutcome(1, { status: 'noop' });
+    h.recordOutcome(ids.mehta, { status: 'noop' });
+    h.recordOutcome(ids.sharma, { status: 'noop' });
     expect(h.line()).toEqual({ ok: true, text: '✅ Connected · waiting for new messages' });
   });
 
@@ -130,11 +140,11 @@ describe('Health', () => {
   it('forget clears failed and paused clients', async () => {
     const { h } = await setup();
     h.setWhatsApp(status('open'));
-    h.recordOutcome(1, { status: 'failed', errorCode: 'timeout' });
-    h.forget(1);
+    h.recordOutcome(ids.sharma, { status: 'failed', errorCode: 'timeout' });
+    h.forget(ids.sharma);
     expect(h.line().ok).toBe(true);
-    h.recordOutcome(1, { status: 'paused' });
-    h.forget(1);
+    h.recordOutcome(ids.sharma, { status: 'paused' });
+    h.forget(ids.sharma);
     expect(h.line().ok).toBe(true);
   });
 
@@ -156,9 +166,9 @@ describe('Health', () => {
     h.setWhatsApp(status('open', clock.now().toISOString()));
     expect(h.line().text).toBe('⚠️ Tracker update failing since 19 Oct 13:30');
     h.markPublished();
-    h.recordOutcome(1, { status: 'failed', errorCode: 'refusal' });
+    h.recordOutcome(ids.sharma, { status: 'failed', errorCode: 'refusal' });
     expect(h.line().text).toContain('waiting (AI error)');
-    h.forget(1);
+    h.forget(ids.sharma);
     expect(h.line()).toEqual({ ok: false, text: '⚠️ 3 incoming messages could not be saved. See docs/SETUP.md.' });
     h.setIngestFailures(0);
     expect(h.line().ok).toBe(true);
@@ -196,7 +206,7 @@ describe('Health', () => {
     const spend = new SpendGuard({ db, clock, capUsd: 1 });
     const h = new Health({ db, clock, spend, freeBytes: () => 200e9 });
     h.setWhatsApp(status('open', clock.now().toISOString()));
-    h.recordOutcome(1, { status: 'paused' });
+    h.recordOutcome(ids.sharma, { status: 'paused' });
     expect(h.line().text).toBe('⚠️ Daily spend cap reached. Paused until midnight IST');
     clock.advance(11 * 60_000); // 00:01 IST
     expect(h.line().ok).toBe(true);
@@ -209,8 +219,8 @@ describe('Health', () => {
     const spend = new SpendGuard({ db, clock, capUsd: 1 });
     const h = new Health({ db, clock, spend, freeBytes: () => 200e9 });
     h.setWhatsApp(status('open', clock.now().toISOString()));
-    h.recordOutcome(1, { status: 'failed', errorCode: 'timeout' });
-    h.recordOutcome(1, { status: 'paused' });
+    h.recordOutcome(ids.sharma, { status: 'failed', errorCode: 'timeout' });
+    h.recordOutcome(ids.sharma, { status: 'paused' });
     clock.advance(11 * 60_000);
     expect(h.line().text).toBe('⚠️ 1 group waiting (AI error)');
   });
@@ -223,8 +233,8 @@ describe('Health', () => {
     expect(await readHealthSnapshot(db)).toBeUndefined();
     h.setWhatsApp(status('open'));
     h.markPublishFailed({ step: 'drive', auth: false });
+    await vi.waitFor(async () => expect((await readHealthSnapshot(db))?.publishFailingSince).toBe('2026-10-19T08:00:00.000Z'));
     const snap = await readHealthSnapshot(db);
-    expect(snap?.publishFailingSince).toBe('2026-10-19T08:00:00.000Z');
     expect(snap).toEqual(JSON.parse(JSON.stringify(h.snapshot())));
   });
 });
