@@ -86,6 +86,8 @@ interface SetupOptions {
   drainMs?: number;
   /** The workbook publish throttle. Default: the publisher's (60 s). */
   publishIntervalMs?: number;
+  /** The app's tick. Default 30 s. Each tick is database work (slow on Postgres): a test spanning hours takes a longer one. */
+  pollMs?: number;
   /** Runs on the database and the data folder before the app is made. */
   prepare?: (db: Db, dataDir: string) => unknown;
 }
@@ -169,7 +171,7 @@ async function setup(o: SetupOptions = {}) {
     o.media === null ? undefined : { sealer: new MediaRefSealer(randomBytes(32)), fetcher, ai: new FakeMediaAi(), extract, ...o.media };
   const app = await createApp({
     db, clock: systemClock, log: o.log ?? silentLogger(), gateway, allow, ai, drive, prices: P, spendCapUsd: 15,
-    quietMs: 240_000, maxWaitMs: 1_200_000, maxConcurrent: 3, dataDir, freeBytes: () => 500e9, pollMs: 30_000, media, startedAt: o.startedAt,
+    quietMs: 240_000, maxWaitMs: 1_200_000, maxConcurrent: 3, dataDir, freeBytes: () => 500e9, pollMs: o.pollMs ?? 30_000, media, startedAt: o.startedAt,
     drainMs: o.drainMs, publishIntervalMs: o.publishIntervalMs,
   });
   app.start();
@@ -197,6 +199,13 @@ async function stopApp(app: { stop(): Promise<void> }): Promise<void> {
   // stop() never finishes. Its real waits stay well under the 20 s test timeout, so that error is the one a hang shows.
   await work.until(app.stop(), { fakeMs: 30_000, stepMs: 1_000, realCapMs: 8_000, label: 'stop()' });
 }
+
+/**
+ * advance(ms), exactly ms of fake time, with a cap on the real time it may take: a stage still running after realCapMs
+ * fails naming `label`, not with the test's plain 20 s timeout.
+ */
+const advanceCapped = (ms: number, label: string, realCapMs: number) =>
+  work.until(advance(ms), { fakeMs: 0, stepMs: 1_000, realCapMs, label });
 
 /** Claude overloaded (529): released, not billed, so the file waits without using an attempt (amendment 10d). */
 const overloaded = () => Anthropic.APIError.generate(529, undefined, 'overloaded', new Headers());
@@ -1099,6 +1108,9 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
     return { log, out: () => lines.join('') };
   };
+  // A tick every 12 hours: none in these tests after the one at start, so their hours are not hundreds of ticks of
+  // database work (slow on Postgres). The sweep is its own hourly timer, and nothing they check comes from the tick.
+  const SWEEP_ONLY = { pollMs: 12 * HOUR };
   const NOT_SET_UP = '⚠️ Voice notes are not being transcribed: the local speech engine is not set up (STT_LOCAL_BIN)';
 
   beforeEach(() => {
@@ -1331,15 +1343,15 @@ describe('app voice notes (Phase 2b Task 10)', () => {
   });
 
   it('start() sweeps the voice copies once for all rows, then hourly; stop() ends the hourly sweep', async () => {
-    const { app } = await setup();
+    const { app } = await setup(SWEEP_ONLY);
     expect(sweeps()).toBe(1);
-    await advance(HOUR);
+    await advanceCapped(HOUR, 'sweeps: hour 1', 4_000);
     expect(sweeps()).toBe(2);
-    await advance(HOUR);
+    await advanceCapped(HOUR, 'sweeps: hour 2', 4_000);
     expect(sweeps()).toBe(3);
     await stopApp(app);
     expectNoTimers();
-    await advance(3 * HOUR);
+    await advanceCapped(3 * HOUR, 'sweeps: 3 hours after stop', 2_000);
     expect(sweeps()).toBe(3);
   });
 
@@ -1372,11 +1384,11 @@ describe('app voice notes (Phase 2b Task 10)', () => {
       if (++n === 1) throw boom(); // a sync throw at start
       return Promise.reject(boom());
     };
-    const { app } = await setup({ log });
+    const { app } = await setup({ log, ...SWEEP_ONLY });
     expect(sweeps()).toBe(1);
-    await advance(HOUR);
+    await advanceCapped(HOUR, 'failed sweeps: hour 1', 4_000);
     expect(sweeps()).toBe(2);
-    await advance(HOUR);
+    await advanceCapped(HOUR, 'failed sweeps: hour 2', 4_000);
     expect(sweeps()).toBe(3); // a failed sweep does not stop the next one
     await stopApp(app);
     expect(out().match(/voice copy sweep failed/g)?.length).toBe(3);
@@ -1391,19 +1403,19 @@ describe('app voice notes (Phase 2b Task 10)', () => {
       await g.promise;
       return 0;
     };
-    const { app } = await setup();
+    const { app } = await setup(SWEEP_ONLY);
     expect(sweeps()).toBe(1);
-    await advance(2 * HOUR);
+    await advanceCapped(2 * HOUR, 'skipped sweeps: 2 hours', 6_000);
     expect(sweeps()).toBe(1);
     g.release();
-    await advance(HOUR);
+    await advanceCapped(HOUR, 'skipped sweeps: hour 3', 4_000);
     expect(sweeps()).toBe(2);
     await stopApp(app);
   });
 
   it('without the media pipeline nothing is swept', async () => {
-    const { app } = await setup({ media: null });
-    await advance(HOUR);
+    const { app } = await setup({ media: null, ...SWEEP_ONLY });
+    await advanceCapped(HOUR, 'no media pipeline: hour 1', 4_000);
     expect(forgetHook.calls).toEqual([]);
     await stopApp(app);
   });
@@ -1614,6 +1626,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const { log, out } = capture();
     const { app } = await setup({
       log,
+      ...SWEEP_ONLY,
       media: { voice: new FakeLocalVoiceTranscriber() }, // switched to local: the elevenlabs copy cannot be deleted now
       prepare: async (db) => {
         await insertMessage(db, {
@@ -1627,7 +1640,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
         await db.run('INSERT INTO media_stt_forget (media_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, 0)', [mediaId, 'elevenlabs', 'tr-old', '2026-10-19T06:00:00.000Z']);
       },
     });
-    await advance(3 * HOUR);
+    await advanceCapped(3 * HOUR, 'warned sweeps: 3 hours', 8_000);
     expect(sweeps()).toBe(4);
     expect(out().match(/"code":"provider_unavailable"/g)?.length).toBe(1);
     await stopApp(app);
@@ -1703,12 +1716,15 @@ describe('app voice notes (Phase 2b Task 10)', () => {
 
   it('a late transcript (12h): a note still being transcribed when its message was processed re-queues the message as a re-check', async () => {
     const voice = new GatedLocalVoice({ results: [{ text: 'payment kal tak ho jayega' }] });
-    const { db, ai, app, sock } = await setup({ media: { voice, extract: undefined } });
+    // A tick every 31 minutes, not 30 s: the 36 minutes below take 1 tick, not 72 (each one database work, slow on
+    // Postgres). The note holds its client's update for its 30 minutes (checked as a run starts): the tick at 31 minutes
+    // asks for a run, which starts after the debouncer's 4 quiet minutes, so the update goes at 35 minutes.
+    const { db, ai, app, sock } = await setup({ media: { voice, extract: undefined }, pollMs: 31 * MINUTE });
     shareVoice(sock);
     await settled();
     await vi.waitFor(() => expect(voice.entered).toBe(1), SLOW_IO);
     // V1: the note blocks its client's update for 30 minutes, then the update goes on without it.
-    await advance(36 * MINUTE); // the wait, then the debouncer's quiet time
+    await advanceCapped(36 * MINUTE, 'late transcript: 36 minutes', 8_000); // the wait, then the debouncer's quiet time
     expect(ai.calls).toHaveLength(1);
     expect(ai.calls[0]!.user).toContain('{voice note, 0:14, being transcribed}');
     expect(ai.calls[0]!.user).not.toContain('(re-check: file now read)');
@@ -1716,7 +1732,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     voice.g.release();
     await vi.waitFor(async () => expect(await nthMedia(db, 1)).toMatchObject({ status: 'done', text: 'payment kal tak ho jayega' }), SLOW_IO);
     await vi.waitFor(async () => expect(await listUnprocessed(db, SHA)).toHaveLength(1));
-    await advance(241_000);
+    await advanceCapped(241_000, 'late transcript: the re-check', 4_000);
     expect(ai.calls).toHaveLength(2);
     expect(ai.calls[1]!.user).toContain('(re-check: file now read)');
     expect(ai.calls[1]!.user).toContain('{voice note, 0:14, transcript: payment kal tak ho jayega}');
