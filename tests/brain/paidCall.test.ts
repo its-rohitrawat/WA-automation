@@ -10,10 +10,16 @@ import { manualClock } from '../../src/util/clock.ts';
 import { FAKE_USAGE } from '../helpers/ai.ts';
 import { seededDb } from '../helpers/db.ts';
 
-function setup(capUsd = 1) {
-  const db = seededDb();
+async function setup(capUsd = 1) {
+  const db = await seededDb();
   const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd });
-  const rows = () => db.prepare('SELECT usd, detail FROM spend ORDER BY id').all() as { usd: number; detail: string }[];
+  // A booking made without a transaction handle is written behind the call: wait for it (on Postgres's pool a read can
+  // otherwise run first). Bookings run concurrently on that pool, so their ids need not follow the calls: the rows come
+  // in a fixed order of their own, not by id.
+  const rows = async () => {
+    await spend.flushed();
+    return db.all<{ usd: number; detail: string }>('SELECT usd, detail FROM spend ORDER BY detail, usd');
+  };
   return { spend, rows };
 }
 const ok = (costUsd: number, fallbackUsed = false) => async () => ({ costUsd, fallbackUsed, text: 'x' });
@@ -24,15 +30,15 @@ const lostConnection = (cause: Error) => new Anthropic.APIConnectionError({ mess
 
 describe('withReservation', () => {
   it('books the actual cost of a successful call and marks a fallback', async () => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     expect((await withReservation(spend, 0.1, 'media 7', ok(0.02), MEDIA_ATTEMPTS)).text).toBe('x');
     await withReservation(spend, 0.1, 'media 8', ok(0.03, true), MEDIA_ATTEMPTS);
-    expect(rows()).toEqual([{ usd: 0.02, detail: 'media 7' }, { usd: 0.03, detail: 'media 8 (fallback)' }]);
+    expect(await rows()).toEqual([{ usd: 0.02, detail: 'media 7' }, { usd: 0.03, detail: 'media 8 (fallback)' }]);
     expectNoReservation(spend);
   });
 
   it('does not make the call when the estimate does not fit under the cap', async () => {
-    const { spend } = setup(0.05);
+    const { spend } = await setup(0.05);
     const call = vi.fn(ok(0.01));
     await expect(withReservation(spend, 0.1, 'media 7', call, MEDIA_ATTEMPTS)).rejects.toBeInstanceOf(SpendCapReachedError);
     expect(call).not.toHaveBeenCalled();
@@ -40,7 +46,7 @@ describe('withReservation', () => {
 
   // Final review FR3c: the media processor defers such a file as spend_busy, not spend_cap.
   it('says whether only holds of calls in flight, not the cap itself, kept the call from its budget', async () => {
-    const { spend } = setup(1);
+    const { spend } = await setup(1);
     const call = vi.fn(ok(0.01));
     const hold = spend.reserve(0.5)!;
     const busy = (await withReservation(spend, 0.6, 'media 7', call, MEDIA_ATTEMPTS).catch((e: unknown) => e)) as SpendCapReachedError;
@@ -55,65 +61,65 @@ describe('withReservation', () => {
   });
 
   it('books what a refusal or an invalid output cost', async () => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     await expect(withReservation(spend, 0.1, 'media 7', async () => { throw new AiRefusalError('cyber', FAKE_USAGE, 0.004); }, MEDIA_ATTEMPTS)).rejects.toBeInstanceOf(AiRefusalError);
     await expect(withReservation(spend, 0.1, 'media 8', async () => { throw new AiInvalidOutputError('no text', FAKE_USAGE, null); }, MEDIA_ATTEMPTS)).rejects.toBeInstanceOf(AiInvalidOutputError);
-    expect(rows()).toEqual([{ usd: 0.004, detail: 'media 7 (failed)' }, { usd: 0.1, detail: 'media 8 (failed)' }]);
+    expect(await rows()).toEqual([{ usd: 0.004, detail: 'media 7 (failed)' }, { usd: 0.1, detail: 'media 8 (failed)' }]);
     expectNoReservation(spend);
   });
 
   it('books nothing for a server error or a request that never left; the estimate for a lost connection', async () => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     const server = new Anthropic.APIError(500, undefined, 'server error', new Headers());
     await expect(withReservation(spend, 0.1, 'media 7', async () => { throw server; }, MEDIA_ATTEMPTS)).rejects.toBe(server);
     const dns = lostConnection(new TypeError('fetch failed', { cause: { code: 'ENOTFOUND' } }));
     await expect(withReservation(spend, 0.1, 'media 8', async () => { throw dns; }, MEDIA_ATTEMPTS)).rejects.toBe(dns);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     await expect(withReservation(spend, 0.1, 'media 9', async () => { throw new Anthropic.APIConnectionTimeoutError(); }, MEDIA_ATTEMPTS)).rejects.toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
     await expect(withReservation(spend, 0.05, 'media 10', async () => { throw new Error('boom'); }, MEDIA_ATTEMPTS)).rejects.toThrow('boom');
-    expect(rows()).toEqual([
-      { usd: 0.1, detail: 'media 9 (connection lost, estimated)' },
+    expect(await rows()).toEqual([
       { usd: 0.05, detail: 'media 10 (unknown, estimated)' },
+      { usd: 0.1, detail: 'media 9 (connection lost, estimated)' },
     ]);
     expectNoReservation(spend);
   });
 
   it.each(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'UND_ERR_CONNECT_TIMEOUT'])('books nothing when the request never left (%s)', async (code) => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     const e = lostConnection(new TypeError('fetch failed', { cause: { code } }));
     await expect(withReservation(spend, 0.1, 'media 8', async () => { throw e; }, MEDIA_ATTEMPTS)).rejects.toBe(e);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     expectNoReservation(spend);
   });
 
   // The socket error may be wrapped more deeply. Booking a scanned PDF that never left would cost about $4.
   it('finds a never-sent socket code four causes down', async () => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     const e = lostConnection(new TypeError('fetch failed', { cause: new Error('connect', { cause: new Error('socket', { cause: { code: 'ECONNREFUSED' } }) }) }));
     await expect(withReservation(spend, 0.1, 'media 8', async () => { throw e; }, MEDIA_ATTEMPTS)).rejects.toBe(e);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     expectNoReservation(spend);
   });
 
   it('books a reset as a lost connection, since the request may have been billed', async () => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     const e = lostConnection(new TypeError('fetch failed', { cause: { code: 'ECONNRESET' } }));
     await expect(withReservation(spend, 0.1, 'media 13', async () => { throw e; }, MEDIA_ATTEMPTS)).rejects.toBe(e);
-    expect(rows()).toEqual([{ usd: 0.1, detail: 'media 13 (connection lost, estimated)' }]);
+    expect(await rows()).toEqual([{ usd: 0.1, detail: 'media 13 (connection lost, estimated)' }]);
     expectNoReservation(spend);
   });
 
   it('books a lost connection once per SDK attempt the caller says its client makes', async () => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     const timeout = new Anthropic.APIConnectionTimeoutError();
     await expect(withReservation(spend, 0.1, 'call 11', async () => { throw timeout; }, SDK_MAX_RETRIES + 1)).rejects.toBe(timeout);
-    expect(rows()).toEqual([{ usd: 0.1 * (SDK_MAX_RETRIES + 1), detail: 'call 11 (connection lost, estimated)' }]);
+    expect(await rows()).toEqual([{ usd: 0.1 * (SDK_MAX_RETRIES + 1), detail: 'call 11 (connection lost, estimated)' }]);
     expectNoReservation(spend);
   });
 
   // A default would book a one-attempt media call as several attempts (amendment 9h), so a missing count fails tsc.
-  it('needs the caller to say how many SDK attempts its client makes', () => {
-    const { spend } = setup();
+  it('needs the caller to say how many SDK attempts its client makes', async () => {
+    const { spend } = await setup();
     // @ts-expect-error `attempts` has no default
     const missing = () => withReservation(spend, 0.1, 'media 7', ok(0.02));
     // That check runs under `npm run typecheck`. At run time a default would stop Function.length counting at it.
@@ -123,7 +129,7 @@ describe('withReservation', () => {
 
   // A scanned PDF reserves a ceiling of about $4.2 (amendment 9g). One timed-out media call must not pause the day.
   it('keeps room for the reconciler after a timed-out scanned PDF at the ceiling', async () => {
-    const { spend } = setup(15);
+    const { spend } = await setup(15);
     await withReservation(spend, 3, 'batch 1', ok(3), MEDIA_ATTEMPTS);
     const ceiling = scannedPdfCeilingUsd(prices);
     expect(ceiling).toBeCloseTo(4.16, 1);
@@ -136,7 +142,7 @@ describe('withReservation', () => {
   });
 
   it('tells the caller what a failed call booked, and nothing on success', async () => {
-    const { spend, rows } = setup(5);
+    const { spend, rows } = await setup(5);
     const booked: number[] = [];
     const fail = (e: Error) => withReservation(spend, 0.1, 'meeting 1', async () => { throw e; }, 1, (usd) => booked.push(usd)).catch(() => null);
     await fail(new AiRefusalError('cyber', FAKE_USAGE, 0.004));
@@ -146,7 +152,7 @@ describe('withReservation', () => {
     await fail(new Anthropic.APIConnectionTimeoutError());
     await withReservation(spend, 0.1, 'meeting 2', ok(0.02), 1, (usd) => booked.push(usd));
     expect(booked).toEqual([0.004, 0.1, 0, 0, 0.1]);
-    expect(rows().map((r) => r.usd)).toEqual([0.004, 0.1, 0.1, 0.02]);
+    expect((await rows()).map((r) => r.usd).sort((a, b) => a - b)).toEqual([0.004, 0.02, 0.1, 0.1]); // the rows, in any order
   });
 });
 
@@ -167,7 +173,7 @@ describe('a connection that timed out before the request was sent', () => {
   });
 
   it('books nothing for the media client', async () => {
-    const { spend, rows } = setup(15);
+    const { spend, rows } = await setup(15);
     const fetch = vi.fn(async () => { throw connectTimeout(); });
     vi.stubGlobal('fetch', fetch);
     const media = new ClaudeMediaClient({ apiKey: 'test-only', model: 'claude-opus-5-5', prices });
@@ -176,12 +182,12 @@ describe('a connection that timed out before the request was sent', () => {
     expect(err).toBeInstanceOf(Anthropic.APIConnectionError);
     expect(err).not.toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
     expect(fetch).toHaveBeenCalledTimes(MEDIA_ATTEMPTS);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     expectNoReservation(spend);
   });
 
   it('books nothing for the reconciler client, after its SDK retries', async () => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     const fetch = vi.fn(async () => { throw connectTimeout(); });
     vi.stubGlobal('fetch', fetch);
     const ai = new ClaudeClient({ apiKey: 'test-only', model: 'claude-opus-5-5', prices });
@@ -190,19 +196,19 @@ describe('a connection that timed out before the request was sent', () => {
     expect(err).toBeInstanceOf(Anthropic.APIConnectionError);
     expect(err).not.toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
     expect(fetch).toHaveBeenCalledTimes(SDK_MAX_RETRIES + 1);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
     expectNoReservation(spend);
   });
 
   // A timeout after the request was sent (the SDK aborts it) may have been billed, so it still books the estimate.
   it('still books the estimate for a request that timed out after it was sent', async () => {
-    const { spend, rows } = setup(15);
+    const { spend, rows } = await setup(15);
     vi.stubGlobal('fetch', vi.fn(async () => { throw new DOMException('This operation was aborted', 'AbortError'); }));
     const media = new ClaudeMediaClient({ apiKey: 'test-only', model: 'claude-opus-5-5', prices });
     const err = await withReservation(spend, 4.2, 'media 13', () => media.readScannedPdf(Buffer.from('%PDF')), MEDIA_ATTEMPTS)
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
-    expect(rows()).toEqual([{ usd: 4.2, detail: 'media 13 (connection lost, estimated)' }]);
+    expect(await rows()).toEqual([{ usd: 4.2, detail: 'media 13 (connection lost, estimated)' }]);
     expectNoReservation(spend);
   });
 });

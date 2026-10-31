@@ -34,7 +34,7 @@ function deps(over: Partial<ActionDeps> = {}) {
     listModels: vi.fn(async () => ({ data: [{ id: 'claude-x' }] })),
     heartbeat: { beatNow: vi.fn(async () => ({ ok: true, status: 200 })) },
     limiter: new ActionRateLimiter(clock),
-    audit: (e) => audits.push(e),
+    audit: async (e) => { audits.push(e); },
     ...over,
   };
   return { d, clock, audits };

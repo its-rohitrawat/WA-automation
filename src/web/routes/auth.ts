@@ -3,8 +3,8 @@ import type { Clock } from '../../util/clock.ts';
 import type { Logger } from '../../util/logger.ts';
 import type { AuditLog } from '../audit.ts';
 import { clientAddress } from '../guard.ts';
-import type { Guard, RateLimiter } from '../guard.ts';
-import { parseCookies, sendJson, serializeCookie } from '../http.ts';
+import type { Guard, OwnerSession, RateLimiter } from '../guard.ts';
+import { HttpError, parseCookies, readJson, sendJson, serializeCookie } from '../http.ts';
 import type { RequestContext, Router } from '../router.ts';
 import {
   authorizeUrl,
@@ -20,11 +20,36 @@ import {
 } from '../oidc.ts';
 import type { CodeExchanger, IdTokenVerifier } from '../oidc.ts';
 import { clearSessionCookie, csrfFor, hashToken, secureFor, SESSION_COOKIE, sessionCookie } from '../sessions.ts';
+import type { Db, Sql } from '../../store/db.ts';
 import type { SessionStore } from '../sessions.ts';
+
+/** A session change and its audit row: `audit` runs first, then `session`, whose result is returned. */
+export type AuditedWrite = <T>(audit: (q: Sql) => Promise<void>, session: (q: Sql) => Promise<T>) => Promise<T>;
+
+/**
+ * The audit row on the customer's Db, the session on the platform's (plan A4, decision D1). One Db (SQLite): both in one
+ * transaction, as before. Two (Postgres): the audit row's transaction, then the session's, so a failed session write
+ * leaves an audit row for a change that did not happen (the safe side), never a session change with no audit row.
+ */
+export function auditedWrite(customer: Db, platform: Db): AuditedWrite {
+  return async (audit, session) => {
+    if (customer === platform) {
+      return customer.tx(async (q) => {
+        await audit(q);
+        return session(q);
+      });
+    }
+    await customer.tx(audit);
+    return platform.tx(session);
+  };
+}
 
 /** The sign-out route (POST only, CSRF-checked). */
 export const SIGN_OUT_PATH = '/dashboard/auth/logout';
 const CALLBACK_PATH = '/dashboard/auth/callback';
+/** Where a member of several workspaces picks one. */
+const WORKSPACES_SCREEN = '/dashboard/workspaces';
+const TENANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const NAMES_MAX = 100;
 const CODE_MAX = 2048;
 
@@ -43,8 +68,28 @@ export interface AuthRouteDeps {
   publicUrl?: string;
   /** The port the dashboard listens on (for the localhost origins). */
   port: () => number | undefined;
-  /** Runs `fn` in one database transaction (production: `tx(db, fn)`): session writes and their audit row together. */
-  tx: <T>(fn: () => T) => T;
+  /** Session writes with their audit row, the audit row first (production: `auditedWrite(db, platformDb)`). */
+  audited: AuditedWrite;
+  /**
+   * A customer's session: its own workspace's audit log and audited write, so its sign-out is written in its own Db, never
+   * the founder's (security review S3). undefined (or absent): `audit` and `audited`, the founder's.
+   */
+  auditFor?: (s: OwnerSession) => { audit: AuditLog; audited: AuditedWrite } | undefined;
+  /**
+   * A member of a customer's workspace signing in through the dashboard (F7; Postgres with the platform on): its own
+   * session in its workspace (the audit row first, in its Db), or null when the email is no member. Absent: owners only.
+   */
+  memberSignIn?: (ctx: RequestContext, who: { email: string }) => Promise<{ id: string; csrf: string; choose?: boolean } | null>;
+  /**
+   * A member's workspaces (customer sessions only): the live ones it is a member of, in the platform's order, and a
+   * switch to one of them (a new session there, the audit rows first, the browser's current session ended).
+   */
+  workspaces?: {
+    list: (email: string) => Promise<{ id: string; name: string }[]>;
+    open: (ctx: RequestContext, s: { email: string; tenantId: string; from: string }) => Promise<{ id: string; csrf: string } | null>;
+  };
+  /** Whether the platform screens are on (PLATFORM_ENABLED, and mounted): /dashboard/api/me says so to the shell. */
+  platform?: boolean;
   /** Code to ID token (production: `googleCodeExchanger`). */
   exchange: CodeExchanger;
   /** ID-token signature check (production: `googleIdVerifier`). */
@@ -158,17 +203,29 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
         throw new SignInError('id_token_invalid');
       }
       const who = checkClaims(claims, { clientId: d.clientId, nonce: p.nonce, now: d.clock.now().getTime() });
-      if (!owners.has(who.email)) throw new SignInRefused('not_owner', who.email);
+      if (!owners.has(who.email)) {
+        // Not an owner: a member of a customer's workspace gets its own session there; anyone else is refused, as before.
+        const member = d.memberSignIn ? await d.memberSignIn(ctx, { email: who.email }) : null;
+        if (!member) throw new SignInRefused('not_owner', who.email);
+        const before = cookies[SESSION_COOKIE];
+        if (before !== undefined) names.delete(hashToken(before));
+        remember(member.id, who.name);
+        res.setHeader('Set-Cookie', [clearSignin, sessionCookie(member.id, { secure })]);
+        // A member of several workspaces is signed in to the first, then picks one.
+        redirect(res, member.choose ? WORKSPACES_SCREEN : p.returnTo);
+        return;
+      }
 
-      // A browser signing in again leaves its earlier session behind: end it. One transaction with the new session and
-      // its audit row, so a failed audit write leaves no orphan session and keeps the earlier one.
+      // A browser signing in again leaves its earlier session behind: end it. The audit row is written first, so a
+      // failed audit write leaves no orphan session and keeps the earlier one.
       const earlier = cookies[SESSION_COOKIE];
-      const s = d.tx(() => {
-        if (earlier !== undefined) d.sessions.destroy(earlier);
-        const created = d.sessions.create(who.email, label);
-        d.audit.record({ actor: who.email, event: 'Signed in', kind: 'auth', detail: label, requestId: ctx.requestId });
-        return created;
-      });
+      const s = await d.audited(
+        (q) => d.audit.record({ actor: who.email, event: 'Signed in', kind: 'auth', detail: label, requestId: ctx.requestId }, q),
+        async (q) => {
+          if (earlier !== undefined) await d.sessions.destroy(earlier, q);
+          return d.sessions.create(who.email, label, q);
+        },
+      );
       if (earlier !== undefined) names.delete(hashToken(earlier));
       remember(s.id, who.name);
       res.setHeader('Set-Cookie', [clearSignin, sessionCookie(s.id, { secure })]);
@@ -179,7 +236,7 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
         const masked = maskEmail(err.email);
         const why = err.reason === 'unverified' ? 'email not verified' : 'not on the owner list';
         try {
-          d.audit.record({ actor: masked, event: 'Sign-in refused', kind: 'auth', detail: `${masked}, ${why}, ${label}`, requestId: ctx.requestId });
+          await d.audit.record({ actor: masked, event: 'Sign-in refused', kind: 'auth', detail: `${masked}, ${why}, ${label}`, requestId: ctx.requestId });
         } catch {
           // A refusal that cannot be audited still sends the browser to a page, never a bare JSON 500.
           failed(ctx, 'audit');
@@ -194,16 +251,20 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
     }
   });
 
-  d.router.post(SIGN_OUT_PATH, (ctx: RequestContext) => {
+  d.router.post(SIGN_OUT_PATH, async (ctx: RequestContext) => {
     const { req, res } = ctx;
     d.actionLimiter.hit(req, res);
-    const s = d.guard.requireOwner(req);
+    // Any member signs out (a customer too). The CSRF token is the session's own.
+    const s = await d.guard.requireSession(req);
     d.guard.requireCsrf(req, s);
     const label = browserLabel(typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : undefined);
-    d.tx(() => {
-      d.sessions.destroy(s.id);
-      d.audit.record({ actor: s.email, event: 'Signed out', kind: 'auth', detail: label, requestId: ctx.requestId });
-    });
+    // In the session's own workspace's log: a customer's sign-out never reaches the founder's (security review S3).
+    const own = d.auditFor?.(s);
+    const audit = own?.audit ?? d.audit;
+    await (own?.audited ?? d.audited)(
+      (q) => audit.record({ actor: s.email, event: 'Signed out', kind: 'auth', detail: label, requestId: ctx.requestId }, q),
+      (q) => d.sessions.destroy(s.id, q),
+    );
     names.delete(hashToken(s.id));
     res.statusCode = 204;
     res.setHeader('Set-Cookie', clearSessionCookie({ secure: secureFor(origin(req)) }));
@@ -211,14 +272,58 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
     res.end();
   });
 
-  d.router.get('/dashboard/api/me', (ctx: RequestContext) => {
-    const s = d.guard.requireOwner(ctx.req);
+  d.router.get('/dashboard/api/me', async (ctx: RequestContext) => {
+    // Any member: the shell reads who is signed in, and as what.
+    const s = await d.guard.requireSession(ctx.req);
     sendJson(ctx.res, 200, {
       email: s.email,
       name: names.get(hashToken(s.id)) ?? null,
       signedInAt: s.createdAt,
       expiresAt: s.expiresAt,
       csrf: csrfFor(s.id),
+      // founder or owner (a customer's): the shell's nav follows it (S4.8). Nothing about the customer goes with it.
+      role: s.role,
+      // The shell shows the platform nav (Invite, Customers) only when this is true: the founder's, with the platform on.
+      platform: d.platform === true && s.role === 'founder',
+      // A customer's member: how many workspaces it can switch between (a count, no names); the shell offers it from 2.
+      ...(s.role === 'owner' && d.workspaces ? { workspaces: (await d.workspaces.list(s.email)).length } : {}),
     });
+  });
+
+  // A member's workspaces: only those its own email is a member of, so no other customer's name ever shows here. The
+  // workspace is still only ever the session's: a switch makes a new session, it never reads a tenant from a request.
+  const workspaces = d.workspaces;
+  if (!workspaces) return;
+  const memberOnly = () => new HttpError(403, 'members_only', 'Only a member of a customer workspace can switch workspaces.');
+
+  d.router.get('/dashboard/api/workspaces', async (ctx: RequestContext) => {
+    const s = await d.guard.requireSession(ctx.req);
+    if (s.role !== 'owner') throw memberOnly();
+    const list = await workspaces.list(s.email);
+    sendJson(ctx.res, 200, { workspaces: list.map((w) => ({ id: w.id, name: w.name, current: w.id === s.tenantId })) });
+  });
+
+  d.router.post('/dashboard/api/workspaces/switch', async (ctx: RequestContext) => {
+    const { req, res } = ctx;
+    d.actionLimiter.hit(req, res);
+    const s = await d.guard.requireSession(req);
+    d.guard.requireCsrf(req, s);
+    if (s.role !== 'owner') throw memberOnly();
+    const body = await readJson(req, 1_024);
+    const tenantId = (body as { tenantId?: unknown } | null)?.tenantId;
+    if (typeof tenantId !== 'string' || !TENANT_ID.test(tenantId)) throw new HttpError(400, 'bad_request', 'Pick a workspace.');
+    // Not one of this member's: the same answer as one that does not exist.
+    if (!(await workspaces.list(s.email)).some((w) => w.id === tenantId)) throw new HttpError(404, 'not_found', 'Not found.');
+    if (tenantId === s.tenantId) {
+      sendJson(res, 200, { switched: false });
+      return;
+    }
+    const created = await workspaces.open(ctx, { email: s.email, tenantId, from: s.tenantId });
+    if (!created) throw new HttpError(404, 'not_found', 'Not found.');
+    const name = names.get(hashToken(s.id));
+    names.delete(hashToken(s.id));
+    remember(created.id, name);
+    res.setHeader('Set-Cookie', sessionCookie(created.id, { secure: secureFor(origin(req)) }));
+    sendJson(res, 200, { switched: true });
   });
 }

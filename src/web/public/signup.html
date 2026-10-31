@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>WA Agent · Sign up</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/dashboard/static/styles.css">
+<link rel="stylesheet" href="/dashboard/static/platform.css">
+<script type="module" src="/dashboard/static/views/signup.js"></script>
+</head>
+<body class="pf-signup-body">
+<section class="signin pf-signup" id="signup">
+  <div class="si-left pf-su-left">
+    <a class="si-brand" href="/"><span class="logo-mark" data-icon="bubble" data-size="15"></span>WA Agent</a>
+    <div class="si-copy">
+      <h1>Your client work, <span>in one calm place.</span></h1>
+      <p>WA Agent reads your client WhatsApp groups, finds the tasks and keeps a tracker up to date for you.</p>
+    </div>
+  </div>
+  <div class="si-right">
+    <div class="si-card glass" id="su-card">
+      <span class="logo-mark" data-icon="bubble" data-size="15"></span>
+      <h2 id="su-title">Opening your invite…</h2>
+      <p class="sub" id="su-sub">One moment.</p>
+      <a class="gbtn" id="gbtn" href="/signup" hidden>
+        <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#4285F4" d="M45 24.5c0-1.6-.1-2.8-.4-4.1H24v7.7h12c-.2 2-1.6 5-4.6 7l7.1 5.5C42.7 36.7 45 31.1 45 24.5z"/><path fill="#34A853" d="M24 46c6 0 11-2 14.6-5.4l-7.1-5.5c-1.9 1.3-4.4 2.2-7.5 2.2-5.8 0-10.6-3.8-12.4-9.1l-7.3 5.7C7.9 41.1 15.4 46 24 46z"/><path fill="#FBBC05" d="M11.6 28.2c-.5-1.3-.7-2.7-.7-4.2s.3-2.9.7-4.2l-7.3-5.7C2.8 17.1 2 20.4 2 24s.8 6.9 2.3 9.9l7.3-5.7z"/><path fill="#EA4335" d="M24 10.7c4.1 0 6.9 1.8 8.5 3.3l6.2-6.1C34.9 4.4 30 2 24 2 15.4 2 7.9 6.9 4.3 14.1l7.3 5.7c1.8-5.3 6.6-9.1 12.4-9.1z"/></svg>
+        <span>Continue with Google</span>
+      </a>
+      <div class="si-denied" id="su-wrong" role="alert" hidden>
+        <b><span data-icon="alert" data-size="16"></span>This invite is for a different Google account</b>
+        Sign out of Google, then continue with the account the invite was sent to.
+      </div>
+      <div class="si-denied" id="su-invalid" role="alert" hidden>
+        <b><span data-icon="alert" data-size="16"></span>This invite link does not work</b>
+        It may have been used, cancelled or have expired. Ask the person who invited you for a new one.
+      </div>
+      <div class="si-error" id="su-retry" role="alert" hidden>
+        <b><span data-icon="alert" data-size="16"></span>Sign-in did not finish</b>
+        Something went wrong with Google sign-in. Try again.
+      </div>
+      <div class="si-error" id="su-busy" role="alert" hidden>
+        <b><span data-icon="alert" data-size="16"></span>Too many tries</b>
+        Wait a few minutes, then open the invite link again.
+      </div>
+      <div class="si-error" id="su-unavailable" role="alert" hidden>
+        <b><span data-icon="alert" data-size="16"></span>Sign-up is not open yet</b>
+        Ask the person who invited you to try again later.
+      </div>
+      <div class="si-or">What this sign-in shares</div>
+      <ul class="si-list">
+        <li><span data-icon="user" data-size="17"></span>Only your name and email, to match this invite.</li>
+        <li><span data-icon="lock" data-size="17"></span>No access to your Gmail or Drive from this sign-in.</li>
+        <li><span data-icon="clock" data-size="17"></span><span id="su-expiry">The invite works once.</span></li>
+      </ul>
+    </div>
+    <div class="si-foot">Privacy · Terms · Not affiliated with WhatsApp or Meta</div>
+  </div>
+</section>
+</body>
+</html>

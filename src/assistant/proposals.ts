@@ -2,9 +2,9 @@ import { randomBytes } from 'node:crypto';
 import type { SettingsStore } from '../config/settingsStore.ts';
 import { SETTING_KEYS } from '../config/settingsStore.ts';
 import { ControlError, type Audit } from '../control/errors.ts';
-import { createTaskAction, parseNewTask, parseTaskEdit, runTaskAction } from '../control/taskActions.ts';
+import { applyTaskAction, createTaskAction, parseNewTask, parseTaskEdit } from '../control/taskActions.ts';
 import { taskDetail } from '../control/taskQueries.ts';
-import { tx, type Db } from '../store/db.ts';
+import type { Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import type { SessionEnd } from '../web/sessions.ts';
 import { INPUTS } from './tools.ts';
@@ -56,10 +56,10 @@ const show = (v: string | null | undefined) => (v === null || v === undefined ||
  * Checks a propose_ tool's input against the database as the confirm will, and words the card. Throws ControlError
  * (404 no such task or client, 409 nothing would change, 422 a bad value) or a zod error for a malformed input.
  */
-export function draftProposal(tool: 'propose_task_change' | 'propose_new_task' | 'propose_setting', raw: unknown, d: { db: Db; clock: Clock; settings: Pick<SettingsStore, 'view'> }): { action: ProposalAction; title: string; lines: string[] } {
+export async function draftProposal(tool: 'propose_task_change' | 'propose_new_task' | 'propose_setting', raw: unknown, d: { db: Db; clock: Clock; settings: Pick<SettingsStore, 'view'> }): Promise<{ action: ProposalAction; title: string; lines: string[] }> {
   if (tool === 'propose_task_change') {
     const i = INPUTS.propose_task_change.parse(raw);
-    const t = taskDetail(d.db, i.code, d.clock.now());
+    const t = await taskDetail(d.db, i.code, d.clock.now());
     if (!t) throw new ControlError(404, `No task called ${i.code}`);
     const edit: Record<string, string> = {};
     if (i.assignedTo !== undefined) edit.assignedTo = i.assignedTo;
@@ -83,7 +83,7 @@ export function draftProposal(tool: 'propose_task_change' | 'propose_new_task' |
   }
   if (tool === 'propose_new_task') {
     const i = INPUTS.propose_new_task.parse(raw);
-    const { clientCode, fields } = parseNewTask(d.db, i);
+    const { clientCode, fields } = await parseNewTask(d.db, i);
     return {
       action: { kind: 'task_create', input: i },
       title: `Add a task for ${clientCode}`,
@@ -102,7 +102,7 @@ export function draftProposal(tool: 'propose_task_change' | 'propose_new_task' |
     : i.key === 'reportTime' ? typeof i.value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(i.value) : true;
   if (!valid) throw new ControlError(422, `That is not a value ${i.key} can take`, 'value');
   const words: Record<string, string> = { reportEnabled: 'Morning briefing', reportDays: 'Briefing days', reportTime: 'Briefing time' };
-  const now = (d.settings.view() as unknown as Record<string, unknown>)[i.key === 'reportTime' ? 'sendAt' : i.key];
+  const now = ((await d.settings.view()) as unknown as Record<string, unknown>)[i.key === 'reportTime' ? 'sendAt' : i.key];
   const word = (v: unknown) => (v === true ? 'on' : v === false ? 'off' : String(v ?? 'not set'));
   if (now === i.value) throw new ControlError(409, `${words[i.key] ?? i.key} is already ${word(i.value)}`);
   return {
@@ -176,26 +176,26 @@ export interface RunDeps {
 }
 
 /** Runs a confirmed card through the screens' own code. Returns what changed in words. Throws ControlError as they do. */
-export function runProposal(action: ProposalAction, d: RunDeps): { message: string; task?: string } {
-  const audit: Audit = (e) => d.audit({ ...e, detail: `${e.detail} · via assistant` });
+export async function runProposal(action: ProposalAction, d: RunDeps): Promise<{ message: string; task?: string }> {
+  const audit: Audit = (q, e) => d.audit(q, { ...e, detail: `${e.detail} · via assistant` });
   const ctx = { actor: d.actor, now: d.clock.now(), audit };
   switch (action.kind) {
     case 'task_change': {
       // The edit and the status change are one transaction: both happen or neither.
-      tx(d.db, () => {
-        if (action.edit) runTaskAction(d.db, { code: action.code, action: 'edit', body: action.edit }, ctx);
-        if (action.status) runTaskAction(d.db, { code: action.code, action: action.status === 'done' ? 'done' : 'reopen' }, ctx);
+      await d.db.tx(async (q) => {
+        if (action.edit) await applyTaskAction(d.db, { code: action.code, action: 'edit', body: action.edit }, ctx, q);
+        if (action.status) await applyTaskAction(d.db, { code: action.code, action: action.status === 'done' ? 'done' : 'reopen' }, ctx, q);
       });
       return { message: `${action.code} updated.`, task: action.code };
     }
     case 'task_create': {
-      const t = createTaskAction(d.db, action.input, ctx);
+      const t = await createTaskAction(d.db, action.input, ctx);
       return { message: `${t.code} added.`, task: t.code };
     }
     case 'setting':
       // Checked again here, not only when the card was drafted: an owner-only setting is never changed through a card.
       if (!ASSISTANT_SETTINGS.includes(action.key)) throw new ControlError(422, 'Only you can change this setting, on its own screen.', 'key');
-      d.settings.set(action.key, action.value, d.actor, audit);
+      await d.settings.set(action.key, action.value, d.actor, audit);
       return { message: 'Setting saved.' };
   }
 }

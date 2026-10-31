@@ -14,9 +14,9 @@ import { FakeReportSender } from '../helpers/fakeReportSender.ts';
 const at = (date: string, hm: string) => `${date}T${hm}:00.000+05:30`;
 const ON: ReportSettings = { enabled: true, time: '06:00', deadline: '12:00', days: 'weekdays' };
 
-function setup(initial: ReportSettings) {
-  const db = seededDb();
-  setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
+async function setup(initial: ReportSettings) {
+  const db = await seededDb();
+  await setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
   const clock = manualClock(at('2026-10-24', '05:00'));
   const sender = new FakeReportSender();
   let current = initial;
@@ -28,7 +28,7 @@ function setup(initial: ReportSettings) {
       return current;
     },
   });
-  s.recover();
+  await s.recover();
   const tick = async (date: string, hm: string) => {
     clock.set(at(date, hm));
     await s.tick(clock.now());
@@ -38,23 +38,23 @@ function setup(initial: ReportSettings) {
 
 describe('ReportScheduler with a settings getter', () => {
   it('picks up a days change on the next tick', async () => {
-    const t = setup(ON);
+    const t = await setup(ON);
     await t.tick('2026-10-24', '06:30'); // Saturday, weekdays only: nothing
     expect(t.sender.calls).toHaveLength(0);
-    expect(reportFor(t.db, '2026-10-24')).toBeUndefined();
+    expect(await reportFor(t.db, '2026-10-24')).toBeUndefined();
     t.set({ ...ON, days: 'mon-sat' });
     await t.tick('2026-10-24', '06:31');
     expect(t.sender.calls).toHaveLength(1);
-    expect(reportFor(t.db, '2026-10-24')?.status).toBe('sent');
+    expect((await reportFor(t.db, '2026-10-24'))?.status).toBe('sent');
   });
 
   it('turning off skips the next scheduled send, and on again sends within the window', async () => {
-    const t = setup({ ...ON, enabled: false });
+    const t = await setup({ ...ON, enabled: false });
     await t.tick('2026-10-23', '06:30');
     expect(t.sender.calls).toHaveLength(0);
-    expect(t.s.health().text).toBe('Morning report: off');
+    expect((await t.s.health()).text).toBe('Morning report: off');
     t.set(ON);
-    expect(t.s.health().text).toBe('Morning report: due now');
+    expect((await t.s.health()).text).toBe('Morning report: due now');
     await t.tick('2026-10-23', '06:31');
     expect(t.sender.calls).toHaveLength(1);
     t.set({ ...ON, enabled: false });
@@ -65,7 +65,7 @@ describe('ReportScheduler with a settings getter', () => {
   });
 
   it('still sends at most once per IST date when the settings change mid-day', async () => {
-    const t = setup({ ...ON, days: 'daily' });
+    const t = await setup({ ...ON, days: 'daily' });
     await t.tick('2026-10-24', '06:30');
     t.set({ ...ON, enabled: false });
     await t.tick('2026-10-24', '06:31');
@@ -76,19 +76,19 @@ describe('ReportScheduler with a settings getter', () => {
   });
 
   it('reads the getter once per tick, so one tick never mixes two versions', async () => {
-    const t = setup(ON);
+    const t = await setup(ON);
     const before = t.reads();
     await t.tick('2026-10-23', '06:30');
     expect(t.reads() - before).toBe(1);
   });
 
   it('a settings object still works as before', async () => {
-    const db = seededDb();
-    setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
+    const db = await seededDb();
+    await setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
     const clock = manualClock(at('2026-10-23', '06:30'));
     const sender = new FakeReportSender();
     const s = new ReportScheduler({ db, clock, log: silentLogger(), sender, settings: ON, healthLine: () => ({ ok: true, text: '✅' }) });
-    s.recover();
+    await s.recover();
     await s.tick();
     expect(sender.calls).toHaveLength(1);
   });
@@ -96,8 +96,8 @@ describe('ReportScheduler with a settings getter', () => {
 
 describe('ReportScheduler with a getter that throws', () => {
   it('tick resolves, sends nothing and logs; health gives a plain line', async () => {
-    const db = seededDb();
-    setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
+    const db = await seededDb();
+    await setKv(db, TRACKER_ID_KEY, '1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123');
     const clock = manualClock(at('2026-10-23', '06:30'));
     const sender = new FakeReportSender();
     const errors: string[] = [];
@@ -108,10 +108,10 @@ describe('ReportScheduler with a getter that throws', () => {
         throw new Error('database is locked');
       },
     });
-    s.recover();
+    await s.recover();
     await expect(s.tick()).resolves.toBeUndefined();
     expect(sender.calls).toHaveLength(0);
     expect(errors).toContain('morning report tick failed');
-    expect(s.health()).toEqual({ text: 'Morning report: settings could not be read', warning: null, recipientMasked: '…1234' });
+    expect(await s.health()).toEqual({ text: 'Morning report: settings could not be read', warning: null, recipientMasked: '…1234' });
   });
 });

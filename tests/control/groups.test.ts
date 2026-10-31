@@ -5,7 +5,7 @@ import { syncClients } from '../../src/store/clients.ts';
 import { createTask } from '../../src/store/tasks.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import type { GatewayState } from '../../src/wa/gateway.ts';
-import { MEHTA, NOW, seededDb, SHARMA } from '../helpers/db.ts';
+import { MEHTA, NOW, seeded, seededDb, SHARMA } from '../helpers/db.ts';
 
 const T0 = '2026-10-27T08:00:00.000Z';
 
@@ -181,10 +181,10 @@ function live(n: number) {
 describe('groupsOverview', () => {
   const listing = (groups: { id: string; subject: string }[]) => ({ groups, stale: false, reason: null, fetchedAt: T0 });
 
-  it('merges 250 live groups with the allow-list and the clients table; approved first, then by name', () => {
-    const db = seededDb();
+  it('merges 250 live groups with the allow-list and the clients table; approved first, then by name', async () => {
+    const db = await seededDb();
     const groups = [...live(248), { id: SHARMA.groupId, subject: 'Sharma x Studio' }, { id: MEHTA.groupId, subject: 'Mehta – Studio' }];
-    const o = groupsOverview({ db, listing: listing(groups), configs: [SHARMA, MEHTA] });
+    const o = await groupsOverview({ db, listing: listing(groups), configs: [SHARMA, MEHTA] });
     expect(o.total).toBe(250);
     expect(o.counts).toEqual({ all: 250, approved: 2, notApproved: 248, ignored: 0 });
     expect(o.rows.slice(0, 2).map((r) => r.groupId)).toEqual([MEHTA.groupId, SHARMA.groupId]);
@@ -196,91 +196,91 @@ describe('groupsOverview', () => {
     expect(o.rows.at(-1)!.name).toBe('Group 247');
   });
 
-  it('filters approved / not approved and caps the rows at limit (counts stay whole)', () => {
-    const db = seededDb();
+  it('filters approved / not approved and caps the rows at limit (counts stay whole)', async () => {
+    const db = await seededDb();
     const groups = [...live(30), { id: SHARMA.groupId, subject: 'Sharma' }];
-    const approved = groupsOverview({ db, listing: listing(groups), configs: [SHARMA], filter: 'approved' });
+    const approved = await groupsOverview({ db, listing: listing(groups), configs: [SHARMA], filter: 'approved' });
     expect(approved.rows.map((r) => r.groupId)).toEqual([SHARMA.groupId]);
-    const not = groupsOverview({ db, listing: listing(groups), configs: [SHARMA], filter: 'not_approved', limit: 5 });
+    const not = await groupsOverview({ db, listing: listing(groups), configs: [SHARMA], filter: 'not_approved', limit: 5 });
     expect(not.rows).toHaveLength(5);
     expect(not.rows.every((r) => !r.approved)).toBe(true);
     expect(not.total).toBe(30);
     expect(not.counts).toEqual({ all: 31, approved: 1, notApproved: 30, ignored: 0 });
   });
 
-  it('ignored groups leave Not approved for their own filter; an approved group is never ignored', () => {
-    const db = seededDb();
+  it('ignored groups leave Not approved for their own filter; an approved group is never ignored', async () => {
+    const db = await seededDb();
     const groups = [...live(5), { id: SHARMA.groupId, subject: 'Sharma' }];
     const ignored = (id: string) => id === gid(10) || id === gid(11) || id === SHARMA.groupId;
     const at = (filter: 'all' | 'not_approved' | 'ignored' | 'approved') => groupsOverview({ db, listing: listing(groups), configs: [SHARMA], filter, ignored });
-    expect(at('all').counts).toEqual({ all: 6, approved: 1, notApproved: 3, ignored: 2 });
-    expect(at('all').rows).toHaveLength(6);
-    expect(at('ignored').rows.map((r) => r.groupId)).toEqual([gid(10), gid(11)]);
-    expect(at('not_approved').rows.map((r) => r.groupId)).toEqual([gid(12), gid(13), gid(14)]);
-    expect(at('approved').rows[0]).toMatchObject({ groupId: SHARMA.groupId, ignored: false });
+    expect((await at('all')).counts).toEqual({ all: 6, approved: 1, notApproved: 3, ignored: 2 });
+    expect((await at('all')).rows).toHaveLength(6);
+    expect((await at('ignored')).rows.map((r) => r.groupId)).toEqual([gid(10), gid(11)]);
+    expect((await at('not_approved')).rows.map((r) => r.groupId)).toEqual([gid(12), gid(13), gid(14)]);
+    expect((await at('approved')).rows[0]).toMatchObject({ groupId: SHARMA.groupId, ignored: false });
   });
 
-  it('two groups with the same name are ordered by id; a limit that is not a number means 500', () => {
-    const db = seededDb();
-    const o = groupsOverview({ db, listing: listing([{ id: gid(2), subject: 'Same' }, { id: gid(1), subject: 'same' }]), configs: [], limit: Number.NaN });
+  it('two groups with the same name are ordered by id; a limit that is not a number means 500', async () => {
+    const db = await seededDb();
+    const o = await groupsOverview({ db, listing: listing([{ id: gid(2), subject: 'Same' }, { id: gid(1), subject: 'same' }]), configs: [], limit: Number.NaN });
     expect(o.rows.map((r) => r.groupId)).toEqual([gid(1), gid(2)]);
-    expect(groupsOverview({ db, listing: listing(live(600)), configs: [], limit: Number.NaN }).rows).toHaveLength(500);
+    expect((await groupsOverview({ db, listing: listing(live(600)), configs: [], limit: Number.NaN })).rows).toHaveLength(500);
   });
 
-  it('searches group and client names, ignoring case and accents', () => {
-    const db = seededDb();
+  it('searches group and client names, ignoring case and accents', async () => {
+    const db = await seededDb();
     const groups = [
       { id: gid(1), subject: 'Café Désai Projects' },
       { id: gid(2), subject: 'CAFE desai accounts' },
       { id: gid(3), subject: 'Other' },
       { id: SHARMA.groupId, subject: 'Studio x Team' }, // matched by its client name
     ];
-    const cafe = groupsOverview({ db, listing: listing(groups), configs: [SHARMA], q: 'cafe DESAI' });
+    const cafe = await groupsOverview({ db, listing: listing(groups), configs: [SHARMA], q: 'cafe DESAI' });
     expect(cafe.rows.map((r) => r.groupId).sort()).toEqual([gid(1), gid(2)]);
-    expect(groupsOverview({ db, listing: listing(groups), configs: [SHARMA], q: 'shárma' }).rows.map((r) => r.groupId)).toEqual([SHARMA.groupId]);
-    expect(groupsOverview({ db, listing: listing(groups), configs: [SHARMA], q: '   ' }).rows).toHaveLength(4);
+    expect((await groupsOverview({ db, listing: listing(groups), configs: [SHARMA], q: 'shárma' })).rows.map((r) => r.groupId)).toEqual([SHARMA.groupId]);
+    expect((await groupsOverview({ db, listing: listing(groups), configs: [SHARMA], q: '   ' })).rows).toHaveLength(4);
   });
 
-  it('an approved group no longer in WhatsApp is listed with inWhatsApp false and its client name', () => {
-    const db = seededDb();
-    const o = groupsOverview({ db, listing: listing(live(3)), configs: [SHARMA] });
+  it('an approved group no longer in WhatsApp is listed with inWhatsApp false and its client name', async () => {
+    const db = await seededDb();
+    const o = await groupsOverview({ db, listing: listing(live(3)), configs: [SHARMA] });
     const row = o.rows.find((r) => r.groupId === SHARMA.groupId)!;
     expect(row).toMatchObject({ approved: true, inWhatsApp: false, name: 'Sharma Interiors' });
   });
 
-  it('a stale empty listing does not mark approved groups as gone', () => {
-    const db = seededDb();
-    const o = groupsOverview({ db, listing: { groups: [], stale: true, reason: 'whatsapp_not_connected', fetchedAt: null }, configs: [SHARMA] });
+  it('a stale empty listing does not mark approved groups as gone', async () => {
+    const db = await seededDb();
+    const o = await groupsOverview({ db, listing: { groups: [], stale: true, reason: 'whatsapp_not_connected', fetchedAt: null }, configs: [SHARMA] });
     expect(o.rows).toEqual([expect.objectContaining({ groupId: SHARMA.groupId, approved: true, inWhatsApp: true })]);
     expect(o).toMatchObject({ stale: true, reason: 'whatsapp_not_connected', fetchedAt: null });
   });
 
-  it('a client with tasks has hasTasks; a client row in the DB locks the code; a new approved client does not', () => {
-    const db = seededDb();
-    createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null,
+  it('a client with tasks has hasTasks; a client row in the DB locks the code; a new approved client does not', async () => {
+    const { db, ids } = await seeded();
+    await createTask(db, { clientId: ids.sharma, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null,
       raisedOn: '2026-10-10', deadline: null, latestProgress: null, sourceQuote: 'q', sourceDate: '2026-10-10', sourceWaId: 'W1', origin: 'whatsapp' }, NOW);
     const fresh: ClientConfig = { ...SHARMA, groupId: gid(99), name: 'Desai Foods', code: 'DES' };
-    const o = groupsOverview({ db, listing: listing([]), configs: [SHARMA, MEHTA, fresh] });
+    const o = await groupsOverview({ db, listing: listing([]), configs: [SHARMA, MEHTA, fresh] });
     const by = (id: string) => o.rows.find((r) => r.groupId === id)!.client!;
     expect(by(SHARMA.groupId)).toMatchObject({ hasTasks: true, codeLocked: true });
     expect(by(MEHTA.groupId)).toMatchObject({ hasTasks: false, codeLocked: true });
     expect(by(gid(99))).toMatchObject({ hasTasks: false, codeLocked: false, active: false });
   });
 
-  it('a group removed earlier, not approved now, shows its former client with the code locked', () => {
-    const db = seededDb();
-    syncClients(db, [MEHTA]); // Sharma removed from the allow-list: its row stays, inactive
-    const o = groupsOverview({ db, listing: listing([{ id: SHARMA.groupId, subject: 'Sharma x Studio' }, { id: gid(7), subject: 'New group' }]), configs: [MEHTA] });
+  it('a group removed earlier, not approved now, shows its former client with the code locked', async () => {
+    const db = await seededDb();
+    await syncClients(db, [MEHTA]); // Sharma removed from the allow-list: its row stays, inactive
+    const o = await groupsOverview({ db, listing: listing([{ id: SHARMA.groupId, subject: 'Sharma x Studio' }, { id: gid(7), subject: 'New group' }]), configs: [MEHTA] });
     const row = o.rows.find((r) => r.groupId === SHARMA.groupId)!;
     expect(row).toMatchObject({ approved: false, name: 'Sharma x Studio' });
     expect(row.client).toEqual({ name: SHARMA.name, code: 'SHA', active: false, hasTasks: false, codeLocked: true, emailDomains: [], meetingKeywords: [] });
     expect(o.rows.find((r) => r.groupId === gid(7))!.client).toBeNull();
   });
 
-  it('an inactive client row (removed earlier, approved again) still locks its code', () => {
-    const db = seededDb();
-    syncClients(db, [MEHTA]); // Sharma inactive
-    const o = groupsOverview({ db, listing: listing([]), configs: [SHARMA] });
+  it('an inactive client row (removed earlier, approved again) still locks its code', async () => {
+    const db = await seededDb();
+    await syncClients(db, [MEHTA]); // Sharma inactive
+    const o = await groupsOverview({ db, listing: listing([]), configs: [SHARMA] });
     expect(o.rows[0]!.client).toMatchObject({ code: 'SHA', active: false, codeLocked: true });
   });
 });

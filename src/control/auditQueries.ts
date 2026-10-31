@@ -57,7 +57,7 @@ export function maskEmail(email: string): string {
  * One page of the audit log, newest first. isOwner: whether an email is one of DASHBOARD_OWNER_EMAILS; only those are
  * shown in full (a refused sign-in names someone else, who is masked).
  */
-export function listAudit(db: Db, p: AuditParams, isOwner: (email: string) => boolean): { rows: AuditRow[]; next: string | null } {
+export async function listAudit(db: Db, p: AuditParams, isOwner: (email: string) => boolean): Promise<{ rows: AuditRow[]; next: string | null }> {
   const where: string[] = [];
   const params: Record<string, string | number> = { limit: p.limit };
   if (p.kind !== 'all') {
@@ -69,18 +69,19 @@ export function listAudit(db: Db, p: AuditParams, isOwner: (email: string) => bo
     params.at = p.before.at;
     params.id = p.before.id;
   }
-  const rows = db
-    .prepare(`SELECT id, at, actor, event, kind, detail FROM audit_log ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-      ORDER BY at DESC, id DESC LIMIT @limit`)
-    .all(params) as AuditRow[];
+  const rows = await db.all<AuditRow>(
+    `SELECT id, at, actor, event, kind, detail FROM audit_log ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+      ORDER BY at DESC, id DESC LIMIT @limit`,
+    params,
+  );
   const out = rows.map((r) => ({ ...r, actor: r.actor === 'agent' || isOwner(r.actor) ? r.actor : maskEmail(r.actor) }));
   const last = rows.at(-1);
   return { rows: out, next: rows.length === p.limit && last ? `${last.at}|${last.id}` : null };
 }
 
 /** The daily retention: removes rows older than `days` days before now. Returns how many went. */
-export function purgeAuditOlderThan(db: Db, days: number, now: Date): number {
+export async function purgeAuditOlderThan(db: Db, days: number, now: Date): Promise<number> {
   if (!Number.isInteger(days) || days < 1) throw new Error('the audit log keeps at least one day');
   const cutoff = new Date(now.getTime() - days * 86_400_000).toISOString();
-  return db.prepare('DELETE FROM audit_log WHERE at < ?').run(cutoff).changes;
+  return (await db.run('DELETE FROM audit_log WHERE at < ?', [cutoff])).changes;
 }

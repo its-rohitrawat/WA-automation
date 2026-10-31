@@ -53,13 +53,13 @@ function minusDays(date: string, n: number): string {
 const FAILURE_PREFIX = 'Tracker upload failed: ';
 
 /** The tracker file the agent writes, for the Tracker screen and the Connections Drive card. */
-export function trackerFile(db: Db): TrackerFile {
-  return { name: TRACKER_FILE_NAME, folder: DRIVE_ROOT_NAME, account: accountEmail(db, MAIN_ACCOUNT) };
+export async function trackerFile(db: Db): Promise<TrackerFile> {
+  return { name: TRACKER_FILE_NAME, folder: DRIVE_ROOT_NAME, account: await accountEmail(db, MAIN_ACCOUNT) };
 }
 
 /** The stored new-file time, when it is a valid time. */
-function newFileAt(db: Db): string | null {
-  const v = getKv(db, TRACKER_NEW_FILE_KEY);
+async function newFileAt(db: Db): Promise<string | null> {
+  const v = await getKv(db, TRACKER_NEW_FILE_KEY);
   return v && !Number.isNaN(Date.parse(v)) ? v : null;
 }
 
@@ -67,8 +67,8 @@ function newFileAt(db: Db): string | null {
  * The last tracker upload: the agent's own audit row (it survives a restart) or the live snapshot's time (which the
  * audit log may not have yet: it is written on changes only), whichever is later. Counts no tasks.
  */
-export function lastTrackerUpload(db: Db, snapshotLast: string | null | undefined): string | null {
-  const published = db.prepare("SELECT MAX(at) AS at FROM audit_log WHERE actor = 'agent' AND event = 'tracker.published'").get() as { at: string | null };
+export async function lastTrackerUpload(db: Db, snapshotLast: string | null | undefined): Promise<string | null> {
+  const published = (await db.get<{ at: string | null }>("SELECT MAX(at) AS at FROM audit_log WHERE actor = 'agent' AND event = 'tracker.published'"))!;
   return [published.at, snapshotLast ?? null].filter((t): t is string => t !== null).sort().at(-1) ?? null;
 }
 
@@ -76,29 +76,31 @@ export function lastTrackerUpload(db: Db, snapshotLast: string | null | undefine
  * The Tracker screen. health: the live (or last persisted) snapshot, when there is one. The upload times come from the
  * agent's own audit rows (src/control/activityQueries.ts publisherAuditHooks) and the snapshot, whichever is later.
  */
-export function trackerSummary(
+export async function trackerSummary(
   db: Db,
   now: Date,
   health?: Pick<HealthSnapshot, 'line' | 'lastPublishedAt' | 'publishFailingSince'>,
-): TrackerSummary {
+): Promise<TrackerSummary> {
   const today = istDate(now);
-  const url = trackerLink(db) ?? null;
-  const failure = db
-    .prepare("SELECT at, detail FROM audit_log WHERE actor = 'agent' AND event = 'tracker.publish_failed' ORDER BY at DESC, id DESC LIMIT 1")
-    .get() as { at: string; detail: string } | undefined;
+  const url = (await trackerLink(db)) ?? null;
+  const failure = await db.get<{ at: string; detail: string }>(
+    "SELECT at, detail FROM audit_log WHERE actor = 'agent' AND event = 'tracker.publish_failed' ORDER BY at DESC, id DESC LIMIT 1",
+  );
 
-  const clients = listClients(db, false);
+  const clients = await listClients(db, false);
   const byId = [...clients].sort((a, b) => a.id - b.id);
   const assigned = uniqueSheetNames(byId.map((c) => c.name));
   const sheetName = new Map(byId.map((c, i) => [c.id, assigned[i]!]));
   const counts = new Map(
-    (db.prepare(`SELECT client_id AS clientId,
-        COALESCE(SUM(status <> 'done' AND deadline IS NOT NULL AND deadline < @today), 0) AS overdue,
-        COALESCE(SUM(status = 'maybe_done' AND NOT (deadline IS NOT NULL AND deadline < @today)), 0) AS review,
-        COALESCE(SUM(status <> 'done'), 0) AS notDone,
-        COALESCE(SUM(status = 'done' AND closed_on BETWEEN @weekStart AND @today), 0) AS doneThisWeek
-      FROM tasks GROUP BY client_id`).all({ today, weekStart: minusDays(today, 6) }) as (Omit<TrackerSheet, 'name' | 'client'> & { clientId: number })[])
-      .map((r) => [r.clientId, r]),
+    (await db.all<Omit<TrackerSheet, 'name' | 'client'> & { clientId: number }>(
+      `SELECT client_id AS clientId,
+        COALESCE(SUM(CASE WHEN status <> 'done' AND deadline IS NOT NULL AND deadline < @today THEN 1 ELSE 0 END), 0) AS overdue,
+        COALESCE(SUM(CASE WHEN status = 'maybe_done' AND NOT (deadline IS NOT NULL AND deadline < @today) THEN 1 ELSE 0 END), 0) AS review,
+        COALESCE(SUM(CASE WHEN status <> 'done' THEN 1 ELSE 0 END), 0) AS notDone,
+        COALESCE(SUM(CASE WHEN status = 'done' AND closed_on BETWEEN @weekStart AND @today THEN 1 ELSE 0 END), 0) AS doneThisWeek
+      FROM tasks GROUP BY client_id`,
+      { today, weekStart: minusDays(today, 6) },
+    )).map((r) => [r.clientId, r]),
   );
   // Tabs are in name order, as in the workbook (src/output/view.ts loadTrackerView).
   const active = clients.filter((c) => c.active).sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.id - b.id);
@@ -114,9 +116,9 @@ export function trackerSummary(
   return {
     uploaded: url !== null,
     url,
-    file: trackerFile(db),
-    newFileAt: newFileAt(db),
-    lastPublishedAt: lastTrackerUpload(db, health?.lastPublishedAt),
+    file: await trackerFile(db),
+    newFileAt: await newFileAt(db),
+    lastPublishedAt: await lastTrackerUpload(db, health?.lastPublishedAt),
     lastFailure: failure
       ? { at: failure.at, reason: failure.detail.startsWith(FAILURE_PREFIX) ? failure.detail.slice(FAILURE_PREFIX.length) : failure.detail }
       : null,

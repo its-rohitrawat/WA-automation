@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
-import { join, relative, resolve, isAbsolute } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { isCustomerId } from '../config/customerId.ts';
 import type { Env } from '../config/env.ts';
 import { minimalEnv, type EnvChoice, type RunOptions } from './audio.ts';
 
@@ -141,6 +142,11 @@ export interface LocalEngineOptions {
   killGraceMs?: number;
   /** The temporary folder every note's work folder is inside; a work folder elsewhere is refused. */
   tmpDir: string;
+  /**
+   * The customers' data folders (DATA_DIR/tenants, Phase B). With it, a work folder inside <tenantsDir>/<customer id>/tmp
+   * is allowed as well, so one engine serves every customer's runtime; anything else is still refused.
+   */
+  tenantsDir?: string;
   /** The env the program runs with; by default minimalEnv(). */
   env?: EnvChoice;
 }
@@ -150,6 +156,25 @@ const OUTPUT_NAME = 'transcript.txt';
 
 /** Trimmed, with line breaks and runs of whitespace as single spaces. Devanagari, Latin and their marks are kept as they are. */
 const tidy = (text: string): string => text.replace(/\s+/g, ' ').trim();
+
+/** True when `dir` (absolute) is strictly inside `root`. */
+const strictlyInside = (root: string, dir: string): boolean => {
+  const rel = relative(resolve(root), dir);
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+};
+
+/**
+ * Whether a work folder may be used: strictly inside tmpDir, or (with tenantsDir) strictly inside one customer's
+ * <tenantsDir>/<customer id>/tmp. `../` and other spellings are resolved first, so they cannot leave these roots.
+ */
+export function workDirAllowed(workDir: string, roots: { tmpDir: string; tenantsDir?: string }): boolean {
+  const dir = resolve(workDir);
+  if (strictlyInside(roots.tmpDir, dir)) return true;
+  if (roots.tenantsDir === undefined || !strictlyInside(roots.tenantsDir, dir)) return false;
+  const [id, tmp, ...rest] = relative(resolve(roots.tenantsDir), dir).split(sep);
+  // A folder under tenantsDir is a customer's only when named by a customer id (the founder's never is: config/customerId.ts).
+  return id !== undefined && isCustomerId(id) && tmp === 'tmp' && rest.length > 0;
+}
 
 const removeQuietly = (path: string): void => {
   try {
@@ -178,8 +203,7 @@ export class LocalEngine {
   transcribe(wavPath: string, o: { workDir: string; signal?: AbortSignal }): Promise<{ text: string }> {
     if (!isAbsolute(wavPath)) return Promise.reject(new Error("The local engine's WAV path must be absolute"));
     const workDir = resolve(o.workDir);
-    const inside = relative(resolve(this.#o.tmpDir), workDir);
-    if (inside === '' || inside.startsWith('..') || isAbsolute(inside)) {
+    if (!workDirAllowed(workDir, this.#o)) {
       return Promise.reject(new Error("The local engine's work folder must be inside its temporary folder"));
     }
     const { signal } = o;
@@ -271,7 +295,7 @@ export function checkLocalEngineFiles(
  */
 export function createLocalEngine(
   env: Pick<Env, 'STT_LOCAL_ENGINE' | 'STT_LOCAL_BIN' | 'STT_LOCAL_MODEL' | 'STT_LOCAL_THREADS' | 'STT_LOCAL_TIMEOUT_SECONDS' | 'STT_LOCAL_LANGUAGE'>,
-  deps: { tmpDir: string; localRun?: LocalRunFile; setting: 'STT_PROVIDER' | 'VOICE_STT_PROVIDER' },
+  deps: { tmpDir: string; tenantsDir?: string; localRun?: LocalRunFile; setting: 'STT_PROVIDER' | 'VOICE_STT_PROVIDER' },
 ): LocalEngine {
   const bin = env.STT_LOCAL_BIN;
   const model = env.STT_LOCAL_MODEL;
@@ -286,6 +310,7 @@ export function createLocalEngine(
     language: env.STT_LOCAL_LANGUAGE,
     // Absolute (review round 1, fix 3), so a relative tmpDir cannot break the engine's absolute-path rule.
     tmpDir: resolve(deps.tmpDir),
+    ...(deps.tenantsDir !== undefined ? { tenantsDir: resolve(deps.tenantsDir) } : {}),
     ...(deps.localRun ? { run: deps.localRun } : {}),
   });
 }
@@ -295,6 +320,30 @@ export function createLocalEngine(
  * DATA_DIR/tmp/voice, meeting parts in DATA_DIR/tmp/meetings-local (localMeetingTmpDir).
  */
 export const localEngineTmpDir = (dataDir: string): string => resolve(join(dataDir, 'tmp'));
+
+/** The customers' data folders, DATA_DIR/tenants (absolute): customer X's is DATA_DIR/tenants/<X's id> (Phase B). */
+export const tenantsDataDir = (dataDir: string): string => resolve(join(dataDir, 'tenants'));
+
+/**
+ * The one LocalEngine for the whole process (Phase B), made once by main.ts and handed to every runtime, the founder's
+ * and each customer's, so only one speech model ever runs on the Mac's CPU: every run, whoever asked, waits in one
+ * line. A run's work folder must be inside the process's DATA_DIR/tmp (the founder) or one customer's
+ * DATA_DIR/tenants/<id>/tmp; anything else is refused. Undefined unless STT_PROVIDER or VOICE_STT_PROVIDER is local.
+ * Checks no file and runs nothing. deps.localRun replaces the runner in tests.
+ */
+export function processLocalEngine(
+  env: Pick<
+    Env,
+    'DATA_DIR' | 'STT_PROVIDER' | 'VOICE_STT_PROVIDER' | 'STT_LOCAL_ENGINE' | 'STT_LOCAL_BIN' | 'STT_LOCAL_MODEL' | 'STT_LOCAL_THREADS' | 'STT_LOCAL_TIMEOUT_SECONDS' | 'STT_LOCAL_LANGUAGE'
+  >,
+  deps: { localRun?: LocalRunFile } = {},
+): LocalEngine | undefined {
+  const setting = env.STT_PROVIDER === 'local' ? 'STT_PROVIDER' : env.VOICE_STT_PROVIDER === 'local' ? 'VOICE_STT_PROVIDER' : null;
+  if (setting === null) return undefined;
+  return createLocalEngine(env, {
+    tmpDir: localEngineTmpDir(env.DATA_DIR), tenantsDir: tenantsDataDir(env.DATA_DIR), setting, ...(deps.localRun ? { localRun: deps.localRun } : {}),
+  });
+}
 
 /**
  * The one LocalEngine the service builds when STT_PROVIDER or VOICE_STT_PROVIDER is local (plan

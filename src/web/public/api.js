@@ -14,6 +14,18 @@ export function setSignedOutHandler(fn) {
   onSignedOut = fn;
 }
 
+/** @type {() => void} */
+let onWorkspaceStarting = () => {};
+
+/**
+ * Called once by app.js: what to do when a customer's workspace is not running yet (503 workspace_starting: their
+ * runtime is still starting). The call still throws, as any error does.
+ * @param {() => void} fn
+ */
+export function setWorkspaceStartingHandler(fn) {
+  onWorkspaceStarting = fn;
+}
+
 export class ApiError extends Error {
   /**
    * @param {number} status @param {string} code @param {string} message
@@ -40,6 +52,7 @@ async function parse(res) {
   if (res.ok) return body;
   if (res.status === 401) onSignedOut();
   const err = /** @type {{ error?: { code?: string, message?: string } & Record<string, unknown> } | null} */ (body)?.error;
+  if (res.status === 503 && err?.code === 'workspace_starting') onWorkspaceStarting();
   const message = typeof err?.message === 'string' ? err.message : 'Something went wrong.';
   throw new ApiError(res.status, typeof err?.code === 'string' ? err.code : 'http_' + res.status, message, err ?? {});
 }
@@ -102,14 +115,22 @@ export async function postLines(path, body, onEvent) {
 
 /**
  * The signed-in owner, or null when there is no session (401). Keeps the CSRF token in memory.
- * @returns {Promise<{ email: string, name: string, signedInAt: string, expiresAt: string } | null>}
+ * `platform`: the platform screens are on (SaaS S5: the founder's platform routes are mounted). `role`: 'founder', or
+ * 'owner' for a customer's owner (S4.8); left out by a server before S4.8, which has only the founder. `workspaces`: how
+ * many workspaces a customer's member can switch between (1 when the server does not say).
+ * @returns {Promise<{ email: string, name: string, signedInAt: string, expiresAt: string, platform: boolean, role: string, workspaces: number } | null>}
  */
 export async function me() {
   const res = await fetch(BASE + '/me', { credentials: 'same-origin', headers: { Accept: 'application/json' } });
   if (res.status === 401) return null;
   const body = await parse(res);
   csrf = typeof body?.csrf === 'string' ? body.csrf : null;
-  return { email: String(body?.email ?? ''), name: String(body?.name ?? ''), signedInAt: String(body?.signedInAt ?? ''), expiresAt: String(body?.expiresAt ?? '') };
+  return {
+    email: String(body?.email ?? ''), name: String(body?.name ?? ''), signedInAt: String(body?.signedInAt ?? ''), expiresAt: String(body?.expiresAt ?? ''),
+    platform: body?.platform === true,
+    role: body?.role === 'owner' ? 'owner' : 'founder',
+    workspaces: Number.isInteger(body?.workspaces) && body.workspaces > 0 ? body.workspaces : 1,
+  };
 }
 
 /** Ends the session on the agent (CSRF-checked). */

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -16,14 +16,22 @@ import { insertMedia, mediaSttForgetsGivenUp, messageRowId } from '../../src/sto
 import { insertFound, sttForgetsGivenUp } from '../../src/store/meetings.ts';
 import { insertMessage } from '../../src/store/messages.ts';
 import { acquireLock } from '../../src/util/lock.ts';
-import { openSessionDb, useEncryptedAuthState } from '../../src/wa/authState.ts';
+import { useEncryptedAuthState, useSenderAuthState } from '../../src/wa/authState.ts';
+import { Ingestor } from '../../src/wa/ingest.ts';
 import type { GroupMetadata } from 'baileys';
-import { MEHTA, OTHER_GROUP } from '../helpers/db.ts';
+import { cliStore, type CliStore } from '../helpers/cliEnv.ts';
+import { idOf, MEHTA, onSqlite, OTHER_GROUP } from '../helpers/db.ts';
 import { closeWith, FakeSocket, SEND_METHODS } from '../helpers/fakeSocket.ts';
 import { waRaw, waText } from '../helpers/wa.ts';
 
 const KEY = Buffer.alloc(32, 7);
 const REFRESH_TOKEN = 'rt-very-secret-token';
+/**
+ * For a wait on the store's own I/O before the socket (slow on Postgres under load): longer than waitFor's 1 s. Under
+ * fake timers waitFor moves the clock by its interval at each check, so it stays under the pg pool's 10 s connect
+ * timeout (src/store/engine/pg.ts), which a slow connection would otherwise hit on the fake clock.
+ */
+const SLOW_IO = { timeout: 8_000 };
 
 let dir: string;
 let dataDir: string;
@@ -32,10 +40,12 @@ let sockets: FakeSocket[];
 let lines: string[];
 let confirm: ReturnType<typeof vi.fn<(q: string) => Promise<boolean>>>;
 let factory: ReturnType<typeof vi.fn>;
+/** The store the commands reach (tests/helpers/cliEnv.ts): the data folder on SQLite, the test's own customer on Postgres. */
+let store: CliStore;
 
 function deps(over: Partial<CliDeps> = {}): CliDeps {
   return {
-    env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, GOOGLE_OAUTH_CLIENT_ID: 'test-id', GOOGLE_OAUTH_CLIENT_SECRET: 'test-secret' }),
+    env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, ...store.env, GOOGLE_OAUTH_CLIENT_ID: 'test-id', GOOGLE_OAUTH_CLIENT_SECRET: 'test-secret' }),
     keyProvider: new StaticKeyProvider(KEY),
     socketFactory: factory as unknown as CliDeps['socketFactory'],
     out: (l) => void lines.push(l),
@@ -49,48 +59,45 @@ function deps(over: Partial<CliDeps> = {}): CliDeps {
 
 const out = () => lines.join('\n');
 
-function seedTracker(): void {
-  const db = openDb(trackerDbPath(dataDir));
-  syncClients(db, [MEHTA]);
-  insertMessage(db, { waId: 'seed1', clientId: 1, senderJid: 'a@s.whatsapp.net', senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T08:00:00.000Z', text: 'hi', quotedWaId: null, mediaType: null });
-  db.close();
+async function seedTracker(): Promise<void> {
+  const db = await store.open();
+  await syncClients(db, [MEHTA]);
+  await insertMessage(db, { waId: 'seed1', clientId: await idOf(db, MEHTA.code), senderJid: 'a@s.whatsapp.net', senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T08:00:00.000Z', text: 'hi', quotedWaId: null, mediaType: null });
+  await db.close();
 }
 
+/** The founder's linked session, where the commands keep it (the session file, or the customer's wa_auth rows). */
 async function seedSession(): Promise<void> {
-  const sdb = openSessionDb(sessionDbPath(dataDir));
-  const auth = useEncryptedAuthState(sdb, KEY);
+  const db = await store.open();
+  const sdb = await store.openSession(db, 'founder');
+  const auth = await useEncryptedAuthState(sdb, KEY);
   auth.state.creds.me = { id: '919800000000:1@s.whatsapp.net', name: 'Founder' };
   await auth.saveCreds();
-  sdb.close();
+  await sdb.close();
+  await db.close();
 }
 
-const rowCount = (file: string, sql: string): number => {
-  const db = openDb(file);
+/** The founder's live session rows, where the commands keep them. */
+const sessionRows = () => store.sessionRows('founder');
+const trackerMessages = async (): Promise<number> => {
+  const db = await store.open();
   try {
-    return (db.prepare(sql).get() as { n: number }).n;
+    return (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM messages'))!.n;
   } finally {
-    db.close();
+    await db.close();
   }
 };
-const sessionRows = () => {
-  const db = openSessionDb(sessionDbPath(dataDir));
-  try {
-    return (db.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n;
-  } finally {
-    db.close();
-  }
-};
-const trackerMessages = () => rowCount(trackerDbPath(dataDir), 'SELECT COUNT(*) AS n FROM messages');
 
 async function lockIsFree(): Promise<void> {
   const l = await acquireLock(dataDir);
   await l.release();
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'wa-cli-'));
   dataDir = join(dir, 'data');
   mkdirSync(join(dataDir, 'keys'), { recursive: true });
+  store = await cliStore(dataDir);
   writeFileSync(masterKeyPath(dataDir), 'dummy-protected-key');
   groupsFile = join(dir, 'groups.json');
   writeFileSync(groupsFile, JSON.stringify({ clients: [{ groupId: MEHTA.groupId, name: MEHTA.name, code: MEHTA.code }] }));
@@ -113,73 +120,73 @@ const sendCalls = () => sockets.flatMap((s) => SEND_METHODS.map((m) => s[m].mock
 
 describe('link --reset', () => {
   it('confirmed: deletes only the session rows and records session_reset_at', async () => {
-    seedTracker();
+    await seedTracker();
     await seedSession();
     const keyBefore = readFileSync(masterKeyPath(dataDir), 'utf8');
-    const msgsBefore = trackerMessages();
-    expect(sessionRows()).toBeGreaterThan(0);
+    const msgsBefore = (await trackerMessages());
+    expect((await sessionRows())).toBeGreaterThan(0);
 
     vi.useFakeTimers();
     // Counted when the socket is created, which is right after the reset and before anything new is saved.
-    let rowsAtConnect = -1;
+    let rowsAtConnect: Promise<number> = Promise.resolve(-1);
     factory.mockImplementation(() => {
       rowsAtConnect = sessionRows();
       const s = new FakeSocket();
       sockets.push(s);
       return s;
     });
-    const sessionBefore = sessionRows();
+    const sessionBefore = (await sessionRows());
     const p = linkCommand({ reset: true }, deps());
     const rejected = expect(p).rejects.toThrow();
-    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    await vi.waitFor(() => expect(sockets.length).toBe(1), SLOW_IO);
     expect(sessionBefore).toBe(2); // canary + creds
-    expect(rowsAtConnect).toBe(1); // creds gone; only the fresh canary row remains
+    expect(await rowsAtConnect).toBe(1); // creds gone; only the fresh canary row remains
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(confirm.mock.calls[0]![0]).toContain('Type yes to continue');
     closeWith(sockets[0]!, 401); // no point connecting further: end the run
     await rejected;
 
-    expect(trackerMessages()).toBe(msgsBefore);
+    expect((await trackerMessages())).toBe(msgsBefore);
     expect(readFileSync(masterKeyPath(dataDir), 'utf8')).toBe(keyBefore);
-    const db = openDb(trackerDbPath(dataDir));
-    expect(getKv(db, 'session_reset_at')).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    db.close();
+    const db = await store.open();
+    expect(await getKv(db, 'session_reset_at')).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    await db.close();
     expect(out()).toContain('tracker data were NOT touched');
     await lockIsFree();
   });
 
   it('Ctrl+C at the prompt cancels cleanly and releases the lock', async () => {
     await seedSession();
-    const before = sessionRows();
+    const before = (await sessionRows());
     confirm.mockRejectedValue(new ConfirmCancelled());
     await linkCommand({ reset: true }, deps());
     expect(out()).toContain('Cancelled. Nothing was changed.');
-    expect(sessionRows()).toBe(before);
+    expect((await sessionRows())).toBe(before);
     expect(factory).not.toHaveBeenCalled();
     await lockIsFree();
   });
 
   it('not confirmed: nothing is deleted', async () => {
-    seedTracker();
+    await seedTracker();
     await seedSession();
-    const before = sessionRows();
+    const before = (await sessionRows());
     confirm.mockResolvedValue(false);
     await linkCommand({ reset: true }, deps());
     expect(out()).toContain('Nothing was changed.');
-    expect(sessionRows()).toBe(before);
+    expect((await sessionRows())).toBe(before);
     expect(factory).not.toHaveBeenCalled();
-    const db = openDb(trackerDbPath(dataDir));
-    expect(getKv(db, 'session_reset_at')).toBeUndefined();
-    db.close();
+    const db = await store.open();
+    expect(await getKv(db, 'session_reset_at')).toBeUndefined();
+    await db.close();
     await lockIsFree();
   });
 
   it('invalid allowed-groups.json throws before anything is deleted', async () => {
     await seedSession();
-    const before = sessionRows();
+    const before = (await sessionRows());
     writeFileSync(groupsFile, '{ nope');
     await expect(linkCommand({ reset: true }, deps())).rejects.toThrow(/not valid JSON/);
-    expect(sessionRows()).toBe(before);
+    expect((await sessionRows())).toBe(before);
     expect(confirm).not.toHaveBeenCalled();
     await lockIsFree();
   });
@@ -188,7 +195,7 @@ describe('link --reset', () => {
     vi.useFakeTimers();
     const p = linkCommand({ reset: true }, deps());
     const rejected = expect(p).rejects.toThrow();
-    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    await vi.waitFor(() => expect(sockets.length).toBe(1), SLOW_IO);
     expect(confirm).not.toHaveBeenCalled();
     expect(out()).toContain('No saved WhatsApp link to reset.');
     closeWith(sockets[0]!, 401);
@@ -205,14 +212,14 @@ describe('link --reset', () => {
 
 describe('link with an existing session', () => {
   it('says already linked, never opens a socket, deletes nothing', async () => {
-    seedTracker();
+    await seedTracker();
     await seedSession();
-    const before = sessionRows();
+    const before = (await sessionRows());
     await linkCommand({ reset: false }, deps());
     expect(out()).toContain('already linked');
     expect(factory).not.toHaveBeenCalled();
-    expect(sessionRows()).toBe(before);
-    expect(trackerMessages()).toBe(1);
+    expect((await sessionRows())).toBe(before);
+    expect((await trackerMessages())).toBe(1);
     await lockIsFree();
   });
 });
@@ -221,7 +228,7 @@ describe('link connection flow', () => {
   async function start(over: Partial<CliDeps> = {}) {
     vi.useFakeTimers();
     const p = linkCommand({ reset: false }, deps(over));
-    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    await vi.waitFor(() => expect(sockets.length).toBe(1), SLOW_IO);
     return { p };
   }
   async function openViaQr(): Promise<FakeSocket> {
@@ -248,24 +255,54 @@ describe('link connection flow', () => {
     expect(sock.end).toHaveBeenCalled();
     expect(out()).toContain('Linked. 1 messages saved from the allowed groups.');
     expect(out()).not.toContain('secret');
-    expect(trackerMessages()).toBe(1);
+    expect((await trackerMessages())).toBe(1);
     expect(sendCalls().every((n) => n === 0)).toBe(true);
     await lockIsFree();
   });
 
   it('caps the wait under a continuous stream of allowed messages', async () => {
     const { p } = await start();
-    let done = false;
-    void p.then(() => (done = true));
     const sock = await openViaQr();
     for (let i = 0; i < 14; i++) {
       sock.emit('messages.upsert', { type: 'notify', messages: [waText(`s${i}`, `m${i}`, { group: MEHTA.groupId })] });
       await vi.advanceTimersByTimeAsync(1_000);
     }
-    expect(done).toBe(true);
-    expect(trackerMessages()).toBeGreaterThan(5);
+    // The wait ended at the cap, though messages kept coming: the socket is closed. The command then finishes storing
+    // what it took (on Postgres, real network writes that no fake clock speeds up).
+    expect(sock.end).toHaveBeenCalled();
     await p;
+    expect((await trackerMessages())).toBeGreaterThan(5);
     await lockIsFree();
+  });
+
+  // Bug 11: a message still being stored when the wait ends is stored, and counted, before the command closes the
+  // database. Its write is held here until after the wait has ended, as a slow Postgres write is.
+  it('stores and counts a message still being written when the wait ends, before the database closes', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    const handle = Ingestor.prototype.handle;
+    const spy = vi.spyOn(Ingestor.prototype, 'handle').mockImplementation(async function (this: Ingestor, e) {
+      await held;
+      return handle.call(this, e);
+    });
+    try {
+      const { p } = await start();
+      let done = false;
+      void p.then(() => (done = true), () => (done = true));
+      const sock = await openViaQr();
+      sock.emit('messages.upsert', { type: 'notify', messages: [waText('slow1', 'hello', { group: MEHTA.groupId })] });
+      await vi.advanceTimersByTimeAsync(20_000); // past the 10 s cap
+      expect(sock.end).toHaveBeenCalled(); // the wait is over
+      expect(done).toBe(false); // but the command waits for the write
+      expect(out()).not.toContain('Linked.');
+      release();
+      await p;
+      expect(out()).toContain('Linked. 1 messages saved from the allowed groups.');
+      expect(await trackerMessages()).toBe(1);
+      await lockIsFree();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('saves the download details of a shared image sealed, for the service to fetch later', async () => {
@@ -277,16 +314,16 @@ describe('link connection flow', () => {
     ] });
     await vi.advanceTimersByTimeAsync(9_000);
     await p;
-    const db = openDb(trackerDbPath(dataDir));
+    const db = await store.open();
     try {
-      const row = db.prepare('SELECT status, ref_enc, client_id FROM media').get() as { status: string; ref_enc: Buffer; client_id: number };
+      const row = (await db.get<{ status: string; ref_enc: Buffer; client_id: number }>('SELECT status, ref_enc, client_id FROM media'))!;
       expect(row.status).toBe('pending');
       expect(row.ref_enc.includes(mediaKey)).toBe(false);
       expect(row.ref_enc.toString('latin1')).not.toContain('mmg.whatsapp.net');
       // Sealed under the master key, so the service can open it.
       expect(new MediaRefSealer(KEY).open(row.ref_enc, mediaRefAad(row.client_id, 'img1'))).toMatchObject({ directPath: '/v/x', mediaKey: mediaKey.toString('base64') });
     } finally {
-      db.close();
+      await db.close();
     }
     await lockIsFree();
   });
@@ -333,11 +370,13 @@ describe('link connection flow', () => {
     await lockIsFree();
   });
 
-  it('says plainly when allowed messages could not be saved', async () => {
-    seedTracker();
+  // SQLite only (S2.7): a SQLite trigger blocks the command's own inserts (it opens its own connection, which a spy on
+  // the test's Db cannot reach); the message it prints does not depend on the engine.
+  it.runIf(onSqlite)('says plainly when allowed messages could not be saved', async () => {
+    await seedTracker();
     const tdb = openDb(trackerDbPath(dataDir));
-    tdb.exec("CREATE TRIGGER block_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'blocked'); END");
-    tdb.close();
+    await tdb.exec("CREATE TRIGGER block_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'blocked'); END");
+    await tdb.close();
     const { p } = await start();
     const sock = await openViaQr();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('f1', 'hello', { group: MEHTA.groupId })] });
@@ -375,7 +414,7 @@ describe('list-groups', () => {
     await seedSession();
     vi.useFakeTimers();
     const p = listGroupsCommand(deps());
-    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    await vi.waitFor(() => expect(sockets.length).toBe(1), SLOW_IO);
     const sock = sockets[0]!;
     sock.groupFetchAllParticipating.mockResolvedValue({
       [MEHTA.groupId]: { id: MEHTA.groupId, subject: 'Mehta Foods x Studio' } as GroupMetadata,
@@ -400,7 +439,7 @@ describe('list-groups', () => {
     await seedSession();
     vi.useFakeTimers();
     const p = listGroupsCommand(deps());
-    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    await vi.waitFor(() => expect(sockets.length).toBe(1), SLOW_IO);
     const sock = sockets[0]!;
     sock.emit('connection.update', { connection: 'open' });
     const mediaKey = Buffer.alloc(32, 9);
@@ -409,14 +448,14 @@ describe('list-groups', () => {
     ] });
     await vi.advanceTimersByTimeAsync(10_000);
     await p;
-    const db = openDb(trackerDbPath(dataDir));
+    const db = await store.open();
     try {
-      const row = db.prepare('SELECT status, ref_enc, client_id FROM media').get() as { status: string; ref_enc: Buffer; client_id: number };
+      const row = (await db.get<{ status: string; ref_enc: Buffer; client_id: number }>('SELECT status, ref_enc, client_id FROM media'))!;
       expect(row.status).toBe('pending');
       expect(row.ref_enc.includes(mediaKey)).toBe(false);
       expect(new MediaRefSealer(KEY).open(row.ref_enc, mediaRefAad(row.client_id, 'img1'))).toMatchObject({ directPath: '/v/x', mediaKey: mediaKey.toString('base64') });
     } finally {
-      db.close();
+      await db.close();
     }
     expect(sendCalls().every((n) => n === 0)).toBe(true);
     await lockIsFree();
@@ -427,7 +466,7 @@ describe('list-groups', () => {
     await seedSession();
     vi.useFakeTimers();
     const p = listGroupsCommand(deps());
-    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    await vi.waitFor(() => expect(sockets.length).toBe(1), SLOW_IO);
     sockets[0]!.emit('connection.update', { connection: 'open' });
     await vi.advanceTimersByTimeAsync(10_000);
     await p;
@@ -441,6 +480,7 @@ describe('google-auth', () => {
     parseEnv({
       DATA_DIR: dataDir,
       GROUPS_FILE: groupsFile,
+      ...store.env,
       GOOGLE_OAUTH_CLIENT_ID: 'test-id',
       GOOGLE_OAUTH_CLIENT_SECRET: 'test-secret',
       MEETINGS_ENABLED: 'true',
@@ -464,12 +504,12 @@ describe('google-auth', () => {
     await vi.waitFor(() => expect(lines.some((l) => l.startsWith('http://127.0.0.1'))).toBe(true));
     await fetch(lines.find((l) => l.startsWith('http://127.0.0.1'))!);
   };
-  const kv = (k: string) => {
-    const db = openDb(trackerDbPath(dataDir));
+  const kv = async (k: string) => {
+    const db = await store.open();
     try {
-      return getKv(db, k);
+      return await getKv(db, k);
     } finally {
-      db.close();
+      await db.close();
     }
   };
 
@@ -477,24 +517,24 @@ describe('google-auth', () => {
     const p = googleAuthCommand(deps({ createConsentClient: consentClient() }));
     await visit();
     await p;
-    const db = openDb(trackerDbPath(dataDir));
-    const raw = getKv(db, 'google_refresh_token')!;
+    const db = await store.open();
+    const raw = (await getKv(db, 'google_refresh_token'))!;
     expect(raw).toBeTruthy();
     expect(raw).not.toContain(REFRESH_TOKEN);
-    expect(new TokenStore(db, KEY).load()).toBe(REFRESH_TOKEN);
-    db.close();
+    expect(await new TokenStore(db, KEY).load()).toBe(REFRESH_TOKEN);
+    await db.close();
     expect(out()).not.toContain(REFRESH_TOKEN);
     expect(out()).toContain('Google Drive connected. If the WA Agent service is running, restart it so it uses the new sign-in: net stop wa-agent, then net start wa-agent');
   });
 
   it('records the desktop client as the issuer of the main token, replacing one left by a dashboard reconnect', async () => {
-    const pre = openDb(trackerDbPath(dataDir));
-    setKv(pre, 'google_client:main', 'web');
-    pre.close();
+    const pre = await store.open();
+    await setKv(pre, 'google_client:main', 'web');
+    await pre.close();
     const p = googleAuthCommand(deps({ createConsentClient: consentClient() }));
     await visit();
     await p;
-    expect(kv('google_client:main')).toBe('desktop');
+    expect(await kv('google_client:main')).toBe('desktop');
   });
 
   it('with meetings off asks for Drive only, says so before the link, and records the granted scope', async () => {
@@ -507,10 +547,10 @@ describe('google-auth', () => {
     expect(perm).toBeGreaterThanOrEqual(0);
     expect(perm).toBeLessThan(urlIndex());
     expect(out()).not.toContain('Calendar invites');
-    expect(kv('google_scopes')).toBe(DRIVE_SCOPES[0]);
-    const db = openDb(trackerDbPath(dataDir));
-    expect(hasMeetingScopes(db)).toBe(false);
-    db.close();
+    expect(await kv('google_scopes')).toBe(DRIVE_SCOPES[0]);
+    const db = await store.open();
+    expect(await hasMeetingScopes(db)).toBe(false);
+    await db.close();
   });
 
   it('with meetings on asks for the meeting permissions too, in plain words, and saves token and scopes', async () => {
@@ -526,11 +566,11 @@ describe('google-auth', () => {
       expect(i).toBeLessThan(urlIndex());
     }
     expect(out()).not.toContain('googleapis.com/auth');
-    expect(kv('google_scopes')).toBe(granted);
-    const db = openDb(trackerDbPath(dataDir));
-    expect(new TokenStore(db, KEY).load()).toBe(REFRESH_TOKEN);
-    expect(hasMeetingScopes(db)).toBe(true);
-    db.close();
+    expect(await kv('google_scopes')).toBe(granted);
+    const db = await store.open();
+    expect(await new TokenStore(db, KEY).load()).toBe(REFRESH_TOKEN);
+    expect(await hasMeetingScopes(db)).toBe(true);
+    await db.close();
     expect(out()).not.toContain(REFRESH_TOKEN);
     expect(out()).toContain('Google Drive, Meet and Calendar connected. If the WA Agent service is running, restart it so it uses the new sign-in: net stop wa-agent, then net start wa-agent');
   });
@@ -544,8 +584,8 @@ describe('google-auth', () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toContain('Meet files in Drive');
     expect(err.message).not.toContain(REFRESH_TOKEN);
-    expect(kv('google_refresh_token')).toBeUndefined();
-    expect(kv('google_scopes')).toBeUndefined();
+    expect(await kv('google_refresh_token')).toBeUndefined();
+    expect(await kv('google_scopes')).toBeUndefined();
     expect(out()).not.toContain(REFRESH_TOKEN);
     expect(out()).not.toContain('connected');
   });
@@ -554,13 +594,13 @@ describe('google-auth', () => {
     const first = googleAuthCommand(deps({ createConsentClient: consentClient() }));
     await visit();
     await first;
-    const before = { token: kv('google_refresh_token'), scopes: kv('google_scopes') };
+    const before = { token: await kv('google_refresh_token'), scopes: await kv('google_scopes') };
     lines = [];
     const p = googleAuthCommand(deps({ env: meetingsOn(), createConsentClient: consentClient({ scope: DRIVE_SCOPES[0] }) }));
     const caught = p.catch((e: Error) => e);
     await visit();
     expect(await caught).toBeInstanceOf(Error);
-    expect({ token: kv('google_refresh_token'), scopes: kv('google_scopes') }).toEqual(before);
+    expect({ token: await kv('google_refresh_token'), scopes: await kv('google_scopes') }).toEqual(before);
   });
 
   it('stores nothing when the code exchange fails', async () => {
@@ -570,60 +610,64 @@ describe('google-auth', () => {
     const err = await caught;
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).not.toContain(REFRESH_TOKEN);
-    const db = openDb(trackerDbPath(dataDir));
-    expect(getKv(db, 'google_refresh_token')).toBeUndefined();
-    db.close();
+    const db = await store.open();
+    expect(await getKv(db, 'google_refresh_token')).toBeUndefined();
+    await db.close();
     expect(out()).not.toContain(REFRESH_TOKEN);
   });
 });
 
 describe('status command', () => {
-  it('prints no report yet on a fresh database', () => {
-    statusCommand(deps());
+  it('prints no report yet on a fresh database', async () => {
+    await statusCommand(deps());
+    const first = out().split('\n')[0]!; // the engine first
+    if (onSqlite) expect(first).toBe(`Database: SQLite (${trackerDbPath(dataDir)})`);
+    else expect(first).toMatch(/^Database: Postgres /);
     expect(out()).toContain('no report yet');
     expect(out()).not.toContain('Speech copies');
   });
 
-  it('counts the speech copies given up: last try used, or a provider that is not set up now', () => {
-    const db = openDb(trackerDbPath(dataDir));
-    const id = insertFound(db, {
+  it('counts the speech copies given up: last try used, or a provider that is not set up now', async () => {
+    const db = await store.open();
+    const id = (await insertFound(db, {
       recording: 'conferenceRecords/c1/recordings/r1', conference: 'conferenceRecords/c1', driveFileId: 'file1', meetingCode: null, title: 'Weekly',
       startedAt: '2026-10-18T10:00:00.000Z', endedAt: null, attendees: [], participants: [], clientId: null, matchKind: null, status: 'unassigned',
       driveSeconds: null, createdAt: '2026-10-18T11:00:00.000Z',
-    })!;
+    }))!;
     const add = (provider: 'elevenlabs' | 'openai', ref: string, attempts: number) =>
-      db.prepare('INSERT INTO stt_forget (meeting_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, ?)').run(id, provider, ref, '2026-10-18T11:00:00.000Z', attempts);
-    add('elevenlabs', 'tr-1', MAX_FORGET_ATTEMPTS); // last try used
-    add('elevenlabs', 'tr-2', 1); // still being tried
-    add('openai', 'tr-3', 0); // not the provider set up now
-    expect(sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'elevenlabs' })).toBe(2);
-    expect(sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'none' })).toBe(3);
+      db.run('INSERT INTO stt_forget (meeting_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, ?)', [id, provider, ref, '2026-10-18T11:00:00.000Z', attempts]);
+    await add('elevenlabs', 'tr-1', MAX_FORGET_ATTEMPTS); // last try used
+    await add('elevenlabs', 'tr-2', 1); // still being tried
+    await add('openai', 'tr-3', 0); // not the provider set up now
+    expect(await sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'elevenlabs' })).toBe(2);
+    expect(await sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'none' })).toBe(3);
     // With meetings on the local engine, no paid copy will be deleted by the service: all are left.
-    expect(sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'local' })).toBe(3);
-    db.close();
-    statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
+    expect(await sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'local' })).toBe(3);
+    await db.close();
+    await statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, ...store.env, STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
     expect(out()).toContain('Speech copies: 2 speech-to-text copies could not be deleted from the provider; see SETUP (Meeting summaries)');
   });
 
-  it('counts the voice-note copies given up the same way, on a line of their own (Phase 2b)', () => {
-    statusCommand(deps());
+  it('counts the voice-note copies given up the same way, on a line of their own (Phase 2b)', async () => {
+    await statusCommand(deps());
     expect(out()).not.toContain('Voice copies');
     lines.length = 0;
-    const db = openDb(trackerDbPath(dataDir));
-    syncClients(db, [MEHTA]);
-    insertMessage(db, { waId: 'v1', clientId: 1, senderJid: 'a@s.whatsapp.net', senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T08:00:00.000Z', text: null, quotedWaId: null, mediaType: 'voice' });
-    const mediaId = insertMedia(db, {
-      messageId: messageRowId(db, 1, 'v1')!, clientId: 1, kind: 'voice', status: 'done', mimeType: 'audio/ogg; codecs=opus', fileName: null, fileSize: 9000, seconds: 12,
+    const db = await store.open();
+    await syncClients(db, [MEHTA]);
+    const mehta = await idOf(db, MEHTA.code);
+    await insertMessage(db, { waId: 'v1', clientId: mehta, senderJid: 'a@s.whatsapp.net', senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T08:00:00.000Z', text: null, quotedWaId: null, mediaType: 'voice' });
+    const mediaId = await insertMedia(db, {
+      messageId: (await messageRowId(db, mehta, 'v1'))!, clientId: mehta, kind: 'voice', status: 'done', mimeType: 'audio/ogg; codecs=opus', fileName: null, fileSize: 9000, seconds: 12,
       forwarded: false, refEnc: null, errorCode: null, createdAt: '2026-10-19T08:00:00.000Z',
     });
     const add = (provider: 'elevenlabs' | 'openai', ref: string, attempts: number) =>
-      db.prepare('INSERT INTO media_stt_forget (media_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, ?)').run(mediaId, provider, ref, '2026-10-19T08:00:00.000Z', attempts);
-    add('elevenlabs', 'tr-1', MAX_FORGET_ATTEMPTS); // last try used
-    add('elevenlabs', 'tr-2', 1); // still being tried
-    add('openai', 'tr-3', 0); // not the provider set up now
-    expect(mediaSttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'elevenlabs' })).toBe(2);
-    db.close();
-    statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', VOICE_STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
+      db.run('INSERT INTO media_stt_forget (media_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, ?)', [mediaId, provider, ref, '2026-10-19T08:00:00.000Z', attempts]);
+    await add('elevenlabs', 'tr-1', MAX_FORGET_ATTEMPTS); // last try used
+    await add('elevenlabs', 'tr-2', 1); // still being tried
+    await add('openai', 'tr-3', 0); // not the provider set up now
+    expect(await mediaSttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'elevenlabs' })).toBe(2);
+    await db.close();
+    await statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, ...store.env, STT_PROVIDER: 'elevenlabs', VOICE_STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
     expect(out()).toContain('Voice copies: 2 speech-to-text copies of voice notes could not be deleted from the provider; see SETUP (Voice notes)');
     expect(out()).not.toContain('Speech copies');
     // VOICE_STT_PROVIDER decides, not STT_PROVIDER (Task 10): with voice notes off, or on the local engine (which keeps no
@@ -631,11 +675,67 @@ describe('status command', () => {
     for (const voice of ['none', 'local'] as const) {
       lines.length = 0;
       const env = parseEnv({
-        DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', VOICE_STT_PROVIDER: voice, STT_API_KEY: 'test-key',
+        DATA_DIR: dataDir, GROUPS_FILE: groupsFile, ...store.env, STT_PROVIDER: 'elevenlabs', VOICE_STT_PROVIDER: voice, STT_API_KEY: 'test-key',
         ...(voice === 'local' ? { STT_LOCAL_BIN: join(dataDir, 'transcribe-cli'), STT_LOCAL_MODEL: join(dataDir, 'model.gguf') } : {}),
       });
-      statusCommand(deps({ env }));
+      await statusCommand(deps({ env }));
       expect(out()).toContain('Voice copies: 3 speech-to-text copies of voice notes could not be deleted from the provider; see SETUP (Voice notes)');
     }
+  });
+});
+
+// Postgres only (S2.7): what `cli link` and `link --reset` do on DB_ENGINE=postgres, as the founder may run them on the
+// Mac after go-live. The session lives in the customer's wa_auth rows: no session.db is ever written, and a reset clears
+// the founder's rows only. Real timers with short quiet times: nothing here waits on a fake clock.
+describe.runIf(!onSqlite)('link on Postgres keeps the session in wa_auth', () => {
+  const quick = (): Partial<CliDeps> => ({ quietMs: { link: 50, listGroups: 50 }, maxIngestMs: { link: 400, listGroups: 400 } });
+
+  it('link stores the founder session in the customer’s wa_auth, and writes no session.db', async () => {
+    factory.mockImplementation(() => {
+      const s = new FakeSocket();
+      sockets.push(s);
+      return s;
+    });
+    const p = linkCommand({ reset: false }, deps(quick()));
+    await vi.waitFor(() => expect(sockets.length).toBe(1), SLOW_IO);
+    sockets[0]!.emit('connection.update', { qr: 'QR-DATA' });
+    closeWith(sockets[0]!, 515);
+    await vi.waitFor(() => expect(sockets.length).toBe(2), SLOW_IO);
+    sockets[1]!.emit('connection.update', { connection: 'open' });
+    await p;
+    expect(out()).toContain('Linked.');
+    expect(await sessionRows()).toBeGreaterThan(0); // the canary at least, under the master key
+    expect(existsSync(sessionDbPath(dataDir))).toBe(false);
+    await lockIsFree();
+  });
+
+  it('link --reset clears the founder’s rows only: the spare phone’s survive, and session_reset_at is recorded', async () => {
+    await seedSession();
+    const db = await store.open();
+    const spare = await store.openSession(db, 'spare');
+    await (await useSenderAuthState(spare, KEY)).saveCreds();
+    await spare.close();
+    const spareBefore = await store.sessionRows('spare');
+    expect(spareBefore).toBeGreaterThan(0);
+    expect(await sessionRows()).toBe(2); // canary + creds
+    let rowsAtConnect: Promise<number> = Promise.resolve(-1);
+    factory.mockImplementation(() => {
+      rowsAtConnect = sessionRows(); // right after the reset, before anything new is saved
+      const s = new FakeSocket();
+      sockets.push(s);
+      return s;
+    });
+    const p = linkCommand({ reset: true }, deps(quick()));
+    const rejected = expect(p).rejects.toThrow();
+    await vi.waitFor(() => expect(sockets.length).toBe(1), SLOW_IO);
+    expect(await rowsAtConnect).toBe(1); // the creds are gone; a fresh canary only
+    closeWith(sockets[0]!, 401); // nothing more to connect: end the run
+    await rejected;
+    expect(await store.sessionRows('spare')).toBe(spareBefore);
+    expect(await getKv(db, 'session_reset_at')).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(existsSync(sessionDbPath(dataDir))).toBe(false);
+    expect(out()).toContain('tracker data were NOT touched');
+    await db.close();
+    await lockIsFree();
   });
 });

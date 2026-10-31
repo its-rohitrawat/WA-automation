@@ -5,7 +5,7 @@ import { createTask, getTaskByCode } from '../../src/store/tasks.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { AuditLog } from '../../src/web/audit.ts';
 import { registerWorkApi } from '../../src/web/routes/work.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
+import { NOW, row, rows, seeded } from '../helpers/db.ts';
 import { bootDashboard, OWNER } from '../helpers/web.ts';
 
 const closers: (() => Promise<void>)[] = [];
@@ -14,33 +14,33 @@ afterEach(async () => {
 });
 
 async function boot(o: { paused?: boolean; actionCapacity?: number } = {}) {
-  const db = seededDb();
+  const { db, ids } = await seeded();
   const clock = manualClock(NOW);
-  createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
+  await createTask(db, { clientId: ids.sharma, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
     deadline: null, latestProgress: null, sourceQuote: 'secret words from the chat', sourceDate: '2026-10-10', sourceWaId: null, origin: 'whatsapp' }, NOW);
-  insertFound(db, {
+  const m1 = (await insertFound(db, {
     recording: 'conferenceRecords/a/recordings/b', conference: 'conferenceRecords/a', driveFileId: 'd1', meetingCode: null, title: 'Weekly sync',
     startedAt: NOW, endedAt: null, attendees: [], participants: [], clientId: null, matchKind: null, status: 'unassigned', driveSeconds: 1800, createdAt: NOW,
-  });
-  insertFound(db, {
+  }))!;
+  const m2 = (await insertFound(db, {
     recording: 'conferenceRecords/c/recordings/d', conference: 'conferenceRecords/c', driveFileId: 'd2', meetingCode: null, title: 'Failed one',
-    startedAt: NOW, endedAt: null, attendees: [], participants: [], clientId: 1, matchKind: 'title', status: 'failed', driveSeconds: 1800, errorCode: 'x', createdAt: NOW,
-  });
+    startedAt: NOW, endedAt: null, attendees: [], participants: [], clientId: ids.sharma, matchKind: 'title', status: 'failed', driveSeconds: 1800, errorCode: 'x', createdAt: NOW,
+  }))!;
   const audit = new AuditLog(db, clock);
   const h = await bootDashboard({
     db, clock, actionCapacity: o.actionCapacity,
     mount: (router, x) => registerWorkApi(router, { ...x, db, clock, audit, spend: { isPaused: () => o.paused ?? false } }),
   });
   closers.push(() => h.close());
-  return { db, h };
+  return { db, h, m1, m2 };
 }
 
-const auditRows = (db: Db) => db.prepare('SELECT actor, event, kind, detail, request_id AS requestId FROM audit_log ORDER BY id').all() as Record<string, string>[];
+const auditRows = (db: Db) => rows<Record<string, string>>(db, 'SELECT actor, event, kind, detail, request_id AS requestId FROM audit_log ORDER BY id');
 
 describe('work API: reads', () => {
   it('needs a signed-in owner for every read', async () => {
-    const { h } = await boot();
-    for (const path of ['/dashboard/api/tasks', '/dashboard/api/tasks/SHA-001', '/dashboard/api/meetings', '/dashboard/api/meetings/1',
+    const { h, m1 } = await boot();
+    for (const path of ['/dashboard/api/tasks', '/dashboard/api/tasks/SHA-001', '/dashboard/api/meetings', `/dashboard/api/meetings/${m1}`,
       '/dashboard/api/activity', '/dashboard/api/tracker']) {
       expect((await h.get(path, { cookie: null })).status, path).toBe(401);
     }
@@ -56,9 +56,9 @@ describe('work API: reads', () => {
   });
 
   it('lists and details meetings, and serves activity and the tracker', async () => {
-    const { h } = await boot();
+    const { h, m1 } = await boot();
     expect(await h.get('/dashboard/api/meetings?view=attention')).toMatchObject({ status: 200, json: { total: 2 } });
-    expect(await h.get('/dashboard/api/meetings/1')).toMatchObject({ status: 200, json: { id: 1, status: 'unassigned' } });
+    expect(await h.get(`/dashboard/api/meetings/${m1}`)).toMatchObject({ status: 200, json: { id: m1, status: 'unassigned' } });
     expect((await h.get('/dashboard/api/meetings/99')).status).toBe(404);
     expect(await h.get('/dashboard/api/activity?kind=meet')).toMatchObject({ status: 200, json: { items: expect.any(Array) } });
     expect((await h.get('/dashboard/api/activity?kind=chat')).status).toBe(400);
@@ -73,18 +73,18 @@ describe('work API: changes', () => {
       const r = await h.post('/dashboard/api/tasks/SHA-001/done', x);
       expect(r.status, JSON.stringify(x)).toBe(x.cookie === null ? 401 : 403);
     }
-    expect(getTaskByCode(db, 'SHA-001')?.status).toBe('open');
-    expect(auditRows(db)).toEqual([]);
+    expect((await getTaskByCode(db, 'SHA-001'))?.status).toBe('open');
+    expect(await auditRows(db)).toEqual([]);
   });
 
   it('marks a task done, audited with the owner, the code and the request id, never the chat text', async () => {
     const { db, h } = await boot();
     const r = await h.post('/dashboard/api/tasks/SHA-001/done');
     expect(r).toMatchObject({ status: 200, json: { code: 'SHA-001', status: 'done' } });
-    expect(getTaskByCode(db, 'SHA-001')?.status).toBe('done');
-    const rows = auditRows(db);
-    expect(rows).toEqual([{ actor: OWNER, event: 'task.done', kind: 'task', detail: 'Task SHA-001 marked done', requestId: expect.stringMatching(/^[0-9a-f]{12}$/) }]);
-    expect(JSON.stringify(rows)).not.toContain('secret');
+    expect((await getTaskByCode(db, 'SHA-001'))?.status).toBe('done');
+    const audited = await auditRows(db);
+    expect(audited).toEqual([{ actor: OWNER, event: 'task.done', kind: 'task', detail: 'Task SHA-001 marked done', requestId: expect.stringMatching(/^[0-9a-f]{12}$/) }]);
+    expect(JSON.stringify(audited)).not.toContain('secret');
     expect((await h.post('/dashboard/api/tasks/SHA-001/done')).status).toBe(409);
   });
 
@@ -98,17 +98,17 @@ describe('work API: changes', () => {
     });
     expect((await h.post('/dashboard/api/tasks/SHA-001/edit')).status).toBe(400); // no JSON body
     expect((await h.post('/dashboard/api/tasks/SHA-001/delete')).status).toBe(400);
-    expect(getTaskByCode(db, 'SHA-001')?.deadline).toBe('2026-10-30');
+    expect((await getTaskByCode(db, 'SHA-001'))?.deadline).toBe('2026-10-30');
   });
 
   it('assigns a meeting with the cost warning, and refuses a retry at the spend cap', async () => {
-    const { h } = await boot({ paused: true });
-    expect(await h.post('/dashboard/api/meetings/1/assign', { body: { client: 'SHA' } })).toMatchObject({
+    const { h, m1, m2 } = await boot({ paused: true });
+    expect(await h.post(`/dashboard/api/meetings/${m1}/assign`, { body: { client: 'SHA' } })).toMatchObject({
       status: 200, json: { meeting: { status: 'queued' }, warning: 'Processing a meeting costs money' },
     });
-    expect(await h.post('/dashboard/api/meetings/2/retry')).toMatchObject({ status: 409, json: { error: { code: 'conflict' } } });
-    expect(await h.post('/dashboard/api/meetings/1/assign', { body: { client: 'SHA' } })).toMatchObject({ status: 409 }); // already queued
-    expect(await h.post('/dashboard/api/meetings/1/assign', { body: { client: 'XYZ' } })).toMatchObject({ status: 422, json: { error: { field: 'client' } } });
+    expect(await h.post(`/dashboard/api/meetings/${m2}/retry`)).toMatchObject({ status: 409, json: { error: { code: 'conflict' } } });
+    expect(await h.post(`/dashboard/api/meetings/${m1}/assign`, { body: { client: 'SHA' } })).toMatchObject({ status: 409 }); // already queued
+    expect(await h.post(`/dashboard/api/meetings/${m1}/assign`, { body: { client: 'XYZ' } })).toMatchObject({ status: 422, json: { error: { field: 'client' } } });
   });
 
   it('counts changes against the action rate limit', async () => {
@@ -122,18 +122,18 @@ describe('work API: changes', () => {
 
 describe('work API review fixes', () => {
   it('a meeting action needs the CSRF token and a matching Origin; nothing changes without them', async () => {
-    const { db, h } = await boot();
+    const { db, h, m1 } = await boot();
     for (const x of [{ csrf: null }, { origin: null }, { origin: 'https://evil.example' }, { cookie: null }]) {
-      const r = await h.post('/dashboard/api/meetings/1/skip', x);
+      const r = await h.post(`/dashboard/api/meetings/${m1}/skip`, x);
       expect(r.status, JSON.stringify(x)).toBe(x.cookie === null ? 401 : 403);
     }
-    expect(db.prepare('SELECT status FROM meetings WHERE id = 1').get()).toEqual({ status: 'unassigned' });
-    expect(auditRows(db)).toEqual([]);
+    expect(await row(db, 'SELECT status FROM meetings WHERE id = ?', [m1])).toEqual({ status: 'unassigned' });
+    expect(await auditRows(db)).toEqual([]);
   });
 
   it('a meeting action is audited with the owner and the request id', async () => {
-    const { db, h } = await boot();
-    await h.post('/dashboard/api/meetings/1/assign', { body: { client: 'SHA' } });
-    expect(auditRows(db)).toEqual([{ actor: OWNER, event: 'meeting.assign', kind: 'meeting', detail: 'Meeting 1 assigned to SHA', requestId: expect.stringMatching(/^[0-9a-f]{12}$/) }]);
+    const { db, h, m1 } = await boot();
+    await h.post(`/dashboard/api/meetings/${m1}/assign`, { body: { client: 'SHA' } });
+    expect(await auditRows(db)).toEqual([{ actor: OWNER, event: 'meeting.assign', kind: 'meeting', detail: `Meeting ${m1} assigned to SHA`, requestId: expect.stringMatching(/^[0-9a-f]{12}$/) }]);
   });
 });

@@ -151,17 +151,23 @@ const tokensOf = (t: string): number => {
 const estimateFor = (p: { system: string; user: string }) => estimateCostUsd(2 * (tokensOf(p.system) + tokensOf(p.user)), prices, 16_000);
 const estimate = estimateFor(prompt);
 
-function setup(capUsd = 5) {
-  const db = seededDb();
+async function setup(capUsd = 5) {
+  const db = await seededDb();
   const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd });
-  const rows = () => db.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
+  // A booking made without a transaction handle is written behind the call: wait for it (on Postgres's pool a read can
+  // otherwise run first). Bookings run concurrently on that pool, so their ids need not follow the calls: the rows come
+  // in a fixed order of their own, not by id.
+  const rows = async () => {
+    await spend.flushed();
+    return db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend ORDER BY kind, detail, usd');
+  };
   return { spend, rows };
 }
 const invalid = (cost: number | null) => new AiInvalidOutputError('Model output was not valid JSON', FAKE_USAGE, cost);
 
 describe('summarizeMeeting', () => {
   it('sends the meeting prompt, books the cost as ai and returns the validated summary', async () => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     const ai = new FakeMeetingAi([{
       costUsd: 0.12,
       output: wire({
@@ -180,45 +186,45 @@ describe('summarizeMeeting', () => {
     expect(r.model).toBe('fake');
     expect(r.fallbackUsed).toBe(false);
     expect(r.usage).toEqual(FAKE_USAGE);
-    expect(rows()).toEqual([{ kind: 'ai', usd: 0.12, detail: 'meeting 7' }]);
+    expect(await rows()).toEqual([{ kind: 'ai', usd: 0.12, detail: 'meeting 7' }]);
   });
 
   it('reports the model and a fallback of the call that gave the summary', async () => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     const usage = { inputTokens: 5, outputTokens: 6, cacheCreationInputTokens: 0, cacheReadInputTokens: 7 };
     const ai = new FakeMeetingAi([invalid(0.01), { costUsd: 0.1, fallbackUsed: true, model: 'claude-opus-5', usage }]);
     const r = await summarizeMeeting({ ai, spend, prices }, input);
     expect(r).toMatchObject({ model: 'claude-opus-5', fallbackUsed: true, usage, skipped: null });
     expect(r.costUsd).toBeCloseTo(0.11, 9);
-    expect(rows().map((x) => x.detail)).toEqual(['meeting 7 (failed)', 'meeting 7 (fallback)']);
+    expect((await rows()).map((x) => x.detail)).toEqual(['meeting 7 (failed)', 'meeting 7 (fallback)']);
   });
 
   // A blank summary would become an empty Doc and a meeting marked done with nothing in it.
   it('treats a summary that is empty after validation as invalid output and tries once more', async () => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     const ai = new FakeMeetingAi([{ costUsd: 0.05, output: wire({ whatHappened: '   ' }) }, { costUsd: 0.1 }]);
     const r = await summarizeMeeting({ ai, spend, prices }, input);
     expect(ai.calls).toHaveLength(2);
     expect(r.summary.whatHappened).toBe('The client approved the logo.');
     expect(r.costUsd).toBeCloseTo(0.15, 9);
-    expect(rows()).toEqual([{ kind: 'ai', usd: 0.05, detail: 'meeting 7 (failed)' }, { kind: 'ai', usd: 0.1, detail: 'meeting 7' }]);
+    expect(await rows()).toEqual([{ kind: 'ai', usd: 0.1, detail: 'meeting 7' }, { kind: 'ai', usd: 0.05, detail: 'meeting 7 (failed)' }]);
   });
 
   it('never returns a blank summary: two empty answers fail', async () => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     const ai = new FakeMeetingAi([{ costUsd: 0.05, output: wire({ whatHappened: '' }) }, { costUsd: 0.06, output: {} }, { costUsd: 0.1 }]);
     await expect(summarizeMeeting({ ai, spend, prices }, input)).rejects.toBeInstanceOf(AiInvalidOutputError);
     expect(ai.calls).toHaveLength(2);
-    expect(rows()).toEqual([{ kind: 'ai', usd: 0.05, detail: 'meeting 7 (failed)' }, { kind: 'ai', usd: 0.06, detail: 'meeting 7 (failed)' }]);
+    expect(await rows()).toEqual([{ kind: 'ai', usd: 0.05, detail: 'meeting 7 (failed)' }, { kind: 'ai', usd: 0.06, detail: 'meeting 7 (failed)' }]);
   });
 
   it('calls nothing when no transcript line can be sent', async () => {
     for (const segments of [[], [{ start: 0, end: 9, speaker: 'A', text: 'x'.repeat(400_000) }]]) {
-      const { spend, rows } = setup();
+      const { spend, rows } = await setup();
       const ai = new FakeMeetingAi([]);
       const r = await summarizeMeeting({ ai, spend, prices }, { ...input, segments });
       expect(ai.calls).toHaveLength(0);
-      expect(rows()).toEqual([]);
+      expect(await rows()).toEqual([]);
       expect(r).toEqual({
         summary: { whatHappened: '', discussion: [], decisions: [], actionItems: [], openQuestions: [], conclusion: '', speakers: [] },
         skipped: 'no_lines',
@@ -241,74 +247,74 @@ describe('summarizeMeeting', () => {
     expect(meetingEstimateUsd(p.system, p.user, prices)).toBeCloseTo(devanagariEstimate, 12);
     // Counting every character as half a token would reserve much less than the call can cost.
     expect(devanagariEstimate).toBeGreaterThan(estimateCostUsd(p.system.length + p.user.length, prices, 16_000) * 1.1);
-    const tight = setup(devanagariEstimate * 0.999);
+    const tight = await setup(devanagariEstimate * 0.999);
     await expect(summarizeMeeting({ ai: new FakeMeetingAi([]), spend: tight.spend, prices }, hindi)).rejects.toBeInstanceOf(SpendCapReachedError);
-    const fits = setup(devanagariEstimate);
+    const fits = await setup(devanagariEstimate);
     await expect(summarizeMeeting({ ai: new FakeMeetingAi([{ costUsd: 0 }]), spend: fits.spend, prices }, hindi)).resolves.toMatchObject({ skipped: null });
   });
 
   it('reserves the estimate for the prompt and a 16,000-token answer, and calls nothing past the cap', async () => {
-    const fits = setup(estimate);
+    const fits = await setup(estimate);
     await summarizeMeeting({ ai: new FakeMeetingAi([{ costUsd: 0 }]), spend: fits.spend, prices }, input);
 
-    const { spend, rows } = setup(estimate * 0.999);
+    const { spend, rows } = await setup(estimate * 0.999);
     const ai = new FakeMeetingAi([]);
     await expect(summarizeMeeting({ ai, spend, prices }, input)).rejects.toBeInstanceOf(SpendCapReachedError);
     expect(ai.calls).toHaveLength(0);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
   });
 
   it('tries once more after an invalid output, booking both calls', async () => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     const ai = new FakeMeetingAi([invalid(null), { costUsd: 0.1 }]);
     const r = await summarizeMeeting({ ai, spend, prices }, input);
     expect(ai.calls).toHaveLength(2);
     expect(r.costUsd).toBeCloseTo(estimate + 0.1, 9);
-    expect(rows()).toEqual([
-      { kind: 'ai', usd: estimate, detail: 'meeting 7 (failed)' },
+    expect(await rows()).toEqual([
       { kind: 'ai', usd: 0.1, detail: 'meeting 7' },
+      { kind: 'ai', usd: estimate, detail: 'meeting 7 (failed)' },
     ]);
   });
 
   it('fails after a second invalid output', async () => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     const second = invalid(0.04);
     const ai = new FakeMeetingAi([invalid(0.03), second, { costUsd: 0.1 }]);
     await expect(summarizeMeeting({ ai, spend, prices }, input)).rejects.toBe(second);
     expect(ai.calls).toHaveLength(2);
-    expect(rows()).toEqual([
+    expect(await rows()).toEqual([
       { kind: 'ai', usd: 0.03, detail: 'meeting 7 (failed)' },
       { kind: 'ai', usd: 0.04, detail: 'meeting 7 (failed)' },
     ]);
   });
 
   it('stops with SpendCapReachedError when the retry no longer fits under the cap', async () => {
-    const { spend, rows } = setup(estimate * 1.5);
+    const { spend, rows } = await setup(estimate * 1.5);
     const ai = new FakeMeetingAi([invalid(null), { costUsd: 0.1 }]);
     await expect(summarizeMeeting({ ai, spend, prices }, input)).rejects.toBeInstanceOf(SpendCapReachedError);
     expect(ai.calls).toHaveLength(1);
-    expect(rows()).toEqual([{ kind: 'ai', usd: estimate, detail: 'meeting 7 (failed)' }]);
+    expect(await rows()).toEqual([{ kind: 'ai', usd: estimate, detail: 'meeting 7 (failed)' }]);
   });
 
   it('books a refusal at its cost and does not try again', async () => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     const ai = new FakeMeetingAi([new AiRefusalError('cyber', FAKE_USAGE, 0.02), { costUsd: 0.1 }]);
     await expect(summarizeMeeting({ ai, spend, prices }, input)).rejects.toBeInstanceOf(AiRefusalError);
     expect(ai.calls).toHaveLength(1);
-    expect(rows()).toEqual([{ kind: 'ai', usd: 0.02, detail: 'meeting 7 (failed)' }]);
+    expect(await rows()).toEqual([{ kind: 'ai', usd: 0.02, detail: 'meeting 7 (failed)' }]);
   });
 
   // The client makes one SDK attempt, so a lost connection is booked at one estimate, not three.
   it('books a lost connection once at the estimate and does not try again', async () => {
-    const { spend, rows } = setup();
+    const { spend, rows } = await setup();
     const ai = new FakeMeetingAi([new Anthropic.APIConnectionTimeoutError(), { costUsd: 0.1 }]);
     await expect(summarizeMeeting({ ai, spend, prices }, input)).rejects.toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
     expect(ai.calls).toHaveLength(1);
-    expect(rows()).toEqual([{ kind: 'ai', usd: estimate, detail: 'meeting 7 (connection lost, estimated)' }]);
+    expect(await rows()).toEqual([{ kind: 'ai', usd: estimate, detail: 'meeting 7 (connection lost, estimated)' }]);
   });
 
   it('reports a cut transcript and accepts only the segment ids that were sent', async () => {
-    const { spend } = setup(10);
+    const { spend } = await setup(10);
     const long: SummarizeInput = {
       ...input,
       segments: [

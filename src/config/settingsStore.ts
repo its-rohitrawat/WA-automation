@@ -1,7 +1,7 @@
 import { ControlError, type Audit } from '../control/errors.ts';
 import { nextReport } from '../report/scheduler.ts';
 import type { ReportDays, ReportSettings } from '../report/types.ts';
-import { tx, type Db } from '../store/db.ts';
+import type { Db } from '../store/db.ts';
 import { reportFor } from '../store/reports.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
@@ -14,7 +14,24 @@ import { HHMM, INDIAN_MOBILE, maskNumber, type Env } from './env.ts';
 // on the owner's request (29 Oct 2026): any time of day (its deadline follows it, see deadlineFor), and a time set after it has passed today starts
 // tomorrow, as today keeps the time it had (TODAY_KEY), so a change never sends a day twice nor drops one.
 // dashboardSend (Open chat) has no .env value: it is off until the owner switches it on in Settings.
+// A customer's store has one more key, its daily Claude limit (DAILY_CAP_KEY, on its own key; S4.3). It applies when
+// that customer's runtime next starts.
 // The founder's number is never put in an error or an audit line in full: maskNumber shows its last 4 digits.
+
+/**
+ * A customer's daily Claude limit (S4.3, owner decision D3): on the customer's own Anthropic key, so the customer sets it.
+ * A customer store only: the founder's cap stays .env-only (DAILY_SPEND_CAP_USD), and the founder's store refuses this key.
+ */
+export const DAILY_CAP_KEY = 'dailySpendCapUsd';
+export const DAILY_CAP_LABEL = 'Daily Claude limit (your key)';
+export const CUSTOMER_DEFAULT_CAP_USD = 5;
+const DAILY_CAP_MIN = 1;
+const DAILY_CAP_MAX = 1000;
+
+/** A limit in US dollars, from 1 to 1000, to the cent; undefined when it is not one. */
+function checkCap(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) && v >= DAILY_CAP_MIN && v <= DAILY_CAP_MAX && Math.round(v * 100) === v * 100 ? v : undefined;
+}
 
 export const SETTING_KEYS = ['reportEnabled', 'reportDays', 'reportRecipient', 'reportTime', 'dashboardSend'] as const;
 export type SettingKey = (typeof SETTING_KEYS)[number];
@@ -48,6 +65,8 @@ export interface RuntimeSettings {
   reportTime: string;
   /** Open chat may send from the founder's WhatsApp. Off by default. */
   dashboardSend: boolean;
+  /** A customer store only: the customer's daily Claude limit, US$ (CUSTOMER_DEFAULT_CAP_USD until set). */
+  dailySpendCapUsd?: number;
   source: Record<SettingKey, SettingSource>;
 }
 
@@ -62,6 +81,8 @@ export interface SettingsView {
   /** When the next report goes out ("tomorrow 07:30", see nextReport), or null while the briefing is off. */
   nextReport: string | null;
   dashboardSend: boolean;
+  /** A customer store only. */
+  dailySpendCapUsd?: number;
   source: Record<SettingKey, SettingSource>;
 }
 
@@ -88,39 +109,69 @@ function typedNumber(v: unknown): string | undefined {
   return INDIAN_MOBILE.test(digits) ? digits : undefined;
 }
 
+const ROWS = 'SELECT k, v FROM settings';
+const PUT =
+  'INSERT INTO settings (k, v, updated_at, updated_by) VALUES (?, ?, ?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at, updated_by = excluded.updated_by';
+
+export interface SettingsStoreOptions {
+  db: Db;
+  env: Pick<Env, 'REPORT_ENABLED' | 'REPORT_DAYS' | 'REPORT_RECIPIENT' | 'REPORT_TIME' | 'REPORT_DEADLINE'>;
+  clock: Clock;
+  spareLinked?: () => boolean | Promise<boolean>;
+  log?: Logger;
+  /** A customer's store (not the founder's): it also has the customer's daily Claude limit (DAILY_CAP_KEY). */
+  customer?: boolean;
+}
+
 export class SettingsStore {
   readonly #db: Db;
   readonly #env: Pick<Env, 'REPORT_ENABLED' | 'REPORT_DAYS' | 'REPORT_RECIPIENT' | 'REPORT_TIME' | 'REPORT_DEADLINE'>;
   readonly #clock: Clock;
-  readonly #spareLinked: () => boolean;
+  readonly #spareLinked: () => boolean | Promise<boolean>;
   readonly #log: Logger | undefined;
+  readonly #customer: boolean;
   readonly #listeners = new Set<Listener>();
+  /** The settings rows (k to v), kept in memory: only set() writes them, and it updates this after its commit. */
+  readonly #rows = new Map<string, string>();
+  /** Saves run one at a time, so each one checks against the value the one before it saved. */
+  #saving: Promise<unknown> = Promise.resolve();
 
   /**
    * spareLinked: whether the spare phone is linked (the briefing's sender has a session). Not given: never, so the
-   * briefing cannot be switched on.
+   * briefing cannot be switched on. Starts with no rows: `SettingsStore.open` makes one and loads them.
    */
-  constructor(o: {
-    db: Db;
-    env: Pick<Env, 'REPORT_ENABLED' | 'REPORT_DAYS' | 'REPORT_RECIPIENT' | 'REPORT_TIME' | 'REPORT_DEADLINE'>;
-    clock: Clock;
-    spareLinked?: () => boolean;
-    log?: Logger;
-  }) {
+  constructor(o: SettingsStoreOptions) {
     this.#db = o.db;
     this.#env = o.env;
     this.#clock = o.clock;
     this.#spareLinked = o.spareLinked ?? (() => false);
     this.#log = o.log;
+    this.#customer = o.customer === true;
+  }
+
+  static async open(o: SettingsStoreOptions): Promise<SettingsStore> {
+    const store = new SettingsStore(o);
+    await store.load();
+    return store;
+  }
+
+  /** Reads the rows (open() does; a test that writes them directly calls it again). */
+  async load(): Promise<void> {
+    this.#fill(await this.#db.all<{ k: string; v: string }>(ROWS));
+  }
+
+  #fill(rows: { k: string; v: string }[]): void {
+    this.#rows.clear();
+    for (const r of rows) this.#rows.set(r.k, r.v);
   }
 
   /** The value stored from the dashboard, when there is a valid one. */
   #stored(key: SettingKey): { value: boolean | ReportDays | string } | undefined {
-    const r = this.#db.prepare('SELECT v FROM settings WHERE k = ?').get(key) as { v: string } | undefined;
-    if (!r) return undefined;
+    const v = this.#rows.get(key);
+    if (v === undefined) return undefined;
     let parsed: unknown;
     try {
-      parsed = JSON.parse(r.v);
+      parsed = JSON.parse(v);
     } catch {
       return undefined;
     }
@@ -142,6 +193,7 @@ export class SettingsStore {
       reportRecipient: recipient ? (recipient.value as string) : this.#env.REPORT_RECIPIENT,
       reportTime: timeOk ? (time.value as string) : this.#env.REPORT_TIME,
       dashboardSend: send ? (send.value as boolean) : false,
+      ...(this.#customer ? { dailySpendCapUsd: this.#storedCap() ?? CUSTOMER_DEFAULT_CAP_USD } : {}),
       source: {
         reportEnabled: enabled ? 'dashboard' : 'env', reportDays: days ? 'dashboard' : 'env', reportRecipient: recipient ? 'dashboard' : 'env',
         reportTime: timeOk ? 'dashboard' : 'env', dashboardSend: send ? 'dashboard' : 'env',
@@ -149,12 +201,23 @@ export class SettingsStore {
     };
   }
 
+  /** The customer's stored daily limit, when there is a valid one. */
+  #storedCap(): number | undefined {
+    const v = this.#rows.get(DAILY_CAP_KEY);
+    if (v === undefined) return undefined;
+    try {
+      return checkCap(JSON.parse(v));
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Today's send time when the time was changed after today's had passed (the old one, kept for today), else undefined. */
   #todayTime(date: string): string | undefined {
-    const r = this.#db.prepare('SELECT v FROM settings WHERE k = ?').get(TODAY_KEY) as { v: string } | undefined;
-    if (!r) return undefined;
+    const stored = this.#rows.get(TODAY_KEY);
+    if (stored === undefined) return undefined;
     try {
-      const v = JSON.parse(r.v) as unknown;
+      const v = JSON.parse(stored) as unknown;
       if (typeof v !== 'object' || v === null) return undefined;
       const { date: d, time } = v as Record<string, unknown>;
       return d === date && typeof time === 'string' && HHMM.test(time) ? time : undefined;
@@ -164,13 +227,14 @@ export class SettingsStore {
   }
 
   /** The settings as the browser may see them. */
-  view(): SettingsView {
+  async view(): Promise<SettingsView> {
     const s = this.get();
     const now = this.#clock.now();
     return {
       reportEnabled: s.reportEnabled, reportDays: s.reportDays, recipientMasked: s.reportRecipient ? maskNumber(s.reportRecipient) : null,
       sendAt: s.reportTime, deadline: deadlineFor(s.reportTime, this.#env.REPORT_DEADLINE),
-      nextReport: nextReport(reportFor(this.#db, istDate(now)), now, this.reportSettings(), s.reportTime), dashboardSend: s.dashboardSend,
+      nextReport: nextReport(await reportFor(this.#db, istDate(now)), now, this.reportSettings(), s.reportTime), dashboardSend: s.dashboardSend,
+      ...(s.dailySpendCapUsd !== undefined ? { dailySpendCapUsd: s.dailySpendCapUsd } : {}),
       source: s.source,
     };
   }
@@ -193,7 +257,33 @@ export class SettingsStore {
    * already in force changes nothing. Throws ControlError: 422 an unknown key or a bad value, 409 switching on without a
    * number or before the spare phone is linked.
    */
-  set(rawKey: string, raw: unknown, actor: string, audit: Audit): RuntimeSettings {
+  set(rawKey: string, raw: unknown, actor: string, audit: Audit): Promise<RuntimeSettings> {
+    const run = this.#saving.then(() => this.#set(rawKey, raw, actor, audit));
+    this.#saving = run.catch(() => undefined);
+    return run;
+  }
+
+  /**
+   * The customer's daily limit: checked, saved and audited in one transaction, then kept in memory. No listener is told:
+   * the customer's SpendGuard reads get() at every check (customerRuntime.ts), so the next call sees the new limit.
+   */
+  async #setCap(raw: unknown, actor: string, audit: Audit): Promise<RuntimeSettings> {
+    const value = checkCap(raw);
+    if (value === undefined) {
+      throw new ControlError(422, `The daily Claude limit must be from US$${DAILY_CAP_MIN} to US$${DAILY_CAP_MAX}, to the cent`, DAILY_CAP_KEY);
+    }
+    if (this.get().dailySpendCapUsd === value) return this.get();
+    const at = this.#clock.now().toISOString();
+    await this.#db.tx(async (q) => {
+      await q.run(PUT, [DAILY_CAP_KEY, JSON.stringify(value), at, actor]);
+      await audit(q, { actor, event: `settings.${DAILY_CAP_KEY}`, kind: 'config', detail: `${DAILY_CAP_LABEL} set to US$${value}` });
+    });
+    this.#rows.set(DAILY_CAP_KEY, JSON.stringify(value));
+    return this.get();
+  }
+
+  async #set(rawKey: string, raw: unknown, actor: string, audit: Audit): Promise<RuntimeSettings> {
+    if (rawKey === DAILY_CAP_KEY && this.#customer) return this.#setCap(raw, actor, audit);
     if (!(SETTING_KEYS as readonly string[]).includes(rawKey)) throw new ControlError(422, 'That setting cannot be changed here', 'key');
     const key = rawKey as SettingKey;
     const value = key === 'reportRecipient' ? typedNumber(raw) : check(key, raw);
@@ -210,7 +300,7 @@ export class SettingsStore {
     const current = this.get();
     if (key === 'reportEnabled' && value === true) {
       if (!current.reportRecipient) throw new ControlError(409, "Set the founder's number first", key);
-      if (!this.#spareLinked()) throw new ControlError(409, 'Link the spare phone first', key);
+      if (!(await this.#spareLinked())) throw new ControlError(409, 'Link the spare phone first', key);
     }
     if (current[key] === value) return current;
     const now = this.#clock.now();
@@ -223,15 +313,17 @@ export class SettingsStore {
       : key === 'reportDays' ? `Morning briefing days set to ${DAYS_WORDS[value as ReportDays]}`
       : key === 'reportTime' ? `Morning briefing time set to ${value as string} IST${keepToday ? ', from tomorrow' : ''}`
       : `Morning briefing number changed to ${maskNumber(value as string)}`;
-    tx(this.#db, () => {
-      const put = this.#db.prepare(
-        'INSERT INTO settings (k, v, updated_at, updated_by) VALUES (?, ?, ?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at, updated_by = excluded.updated_by',
-      );
-      put.run(key, JSON.stringify(value), now.toISOString(), actor);
-      if (keepToday) put.run(TODAY_KEY, JSON.stringify(keepToday), now.toISOString(), actor);
-      else if (key === 'reportTime') this.#db.prepare('DELETE FROM settings WHERE k = ?').run(TODAY_KEY);
-      audit({ actor, event: `settings.${key}`, kind: 'config', detail });
+    const at = now.toISOString();
+    await this.#db.tx(async (q) => {
+      await q.run(PUT, [key, JSON.stringify(value), at, actor]);
+      if (keepToday) await q.run(PUT, [TODAY_KEY, JSON.stringify(keepToday), at, actor]);
+      else if (key === 'reportTime') await q.run('DELETE FROM settings WHERE k = ?', [TODAY_KEY]);
+      await audit(q, { actor, event: `settings.${key}`, kind: 'config', detail }); // commits or rolls back with the row
     });
+    // Committed: memory follows.
+    this.#rows.set(key, JSON.stringify(value));
+    if (keepToday) this.#rows.set(TODAY_KEY, JSON.stringify(keepToday));
+    else if (key === 'reportTime') this.#rows.delete(TODAY_KEY);
     const next = this.get();
     for (const fn of this.#listeners) {
       try {

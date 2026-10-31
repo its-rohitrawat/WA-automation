@@ -5,7 +5,7 @@ import type { Db } from '../store/db.ts';
 import { setKv } from '../store/kv.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
-import { backupAndReset, dropBackup, restoreBackup, useEncryptedAuthState, type EncryptedAuth } from './authState.ts';
+import { backupAndReset, dropBackup, hasSessionRows, restoreBackup, useEncryptedAuthState, type EncryptedAuth } from './authState.ts';
 import { TRACKER_DEVICE_NAME, type GatewayLike } from './gateway.ts';
 import type { SwitchableGateway } from './switchableGateway.ts';
 
@@ -67,7 +67,7 @@ export class LinkBusyError extends Error {
   }
 }
 
-export type LinkAudit = (event: string, actor: string) => void;
+export type LinkAudit = (event: string, actor: string) => Promise<void>;
 
 const AUDIT: Record<LinkTarget, { linked: string; cancelled: string; timedOut: string; failed: (code: string) => string }> = {
   founder: {
@@ -218,10 +218,11 @@ export class LinkSessions {
   }
 
   #record(event: string, actor: string): void {
+    const failed = (err: unknown) => this.#log.error({ err }, 'audit line for a phone link could not be written');
     try {
-      this.#audit(event, actor);
+      void this.#audit(event, actor).catch(failed);
     } catch (err) {
-      this.#log.error({ err }, 'audit line for a phone link could not be written');
+      failed(err);
     }
   }
 
@@ -248,7 +249,7 @@ function safely(fn: (e: LinkEvent) => void, e: LinkEvent): void {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The session backup helpers live in authState.ts (openSessionDb restores an unfinished link's backup); re-exported here.
+// The session backup helpers live in authState.ts (openPhoneSession restores an unfinished link's backup); re-exported here.
 export { backupAndReset, dropBackup, recoverInterruptedLink, restoreBackup } from './authState.ts';
 
 /**
@@ -308,7 +309,7 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
   /** The rows exactly as they were, and the service reconnected with them (or holding none, if it had none). */
   const restore = async (wasLinked: boolean): Promise<void> => {
     try {
-      restoreBackup(d.sessionDb);
+      await restoreBackup(d.sessionDb);
     } catch (err) {
       // The backup stays in the database; the next start restores it (recoverInterruptedLink).
       d.log.error({ err }, 'founder session could not be restored now; it is restored at the next start');
@@ -320,7 +321,7 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
       return;
     }
     try {
-      await d.switchable.swap(d.buildGateway(useEncryptedAuthState(d.sessionDb, d.key)));
+      await d.switchable.swap(d.buildGateway(await useEncryptedAuthState(d.sessionDb, d.key)));
     } catch (err) {
       // The rows are back as they were; only the reconnect failed (it would fail the same way at the next start).
       d.log.error({ err }, 'founder session restored, but reconnecting with it failed');
@@ -332,8 +333,8 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
     async run(hooks, signal) {
       const wasLinked = d.switchable.hasGateway();
       // Read only when there are rows: on an empty table useEncryptedAuthState would write its canary row.
-      const hasRows = (d.sessionDb.prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n > 0;
-      const before = hasRows ? numberOf(() => useEncryptedAuthState(d.sessionDb, d.key)) : undefined;
+      const hasRows = await hasSessionRows(d.sessionDb);
+      const before = hasRows ? await numberOf(() => useEncryptedAuthState(d.sessionDb, d.key)) : undefined;
       let gw: GatewayLike | undefined;
       let onAbort: (() => void) | undefined;
       let backedUp = false;
@@ -342,11 +343,14 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
       try {
         await d.switchable.clear('linking');
         if (signal.aborted) throw new Aborted();
-        backupAndReset(d.sessionDb);
+        await backupAndReset(d.sessionDb);
         backedUp = true;
         // Its writes stop once the link is undone, so the closing socket never writes over the restored rows.
-        auth = guardAuth(useEncryptedAuthState(d.sessionDb, d.key), () => undone);
+        auth = guardAuth(await useEncryptedAuthState(d.sessionDb, d.key), () => undone);
         const linkAuth = auth;
+        // A cancel during the backup or the auth read (bug 13): the listener below would never fire for it, and the link
+        // would wait for a gateway that shows no QR. From here to the listener nothing waits, so none is missed.
+        if (signal.aborted) throw new Aborted();
         const outcome = await new Promise<LinkOutcome>((resolve) => {
           let qrSeen = false;
           onAbort = () => resolve({ ok: false, code: 'aborted' });
@@ -355,6 +359,8 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
             qrSeen = true;
             hooks.qr(qr);
           });
+          // Its messages are stored from the start (bug 12): what the new link brings between 'open' and the swap.
+          d.switchable.follow(gw);
           gw.onStatus((s) => {
             if (s.state === 'open') resolve({ ok: true, device: TRACKER_DEVICE_NAME });
             else if (TERMINAL.has(s.state)) resolve({ ok: false, code: s.state });
@@ -367,15 +373,17 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
         if (onAbort) signal.removeEventListener('abort', onAbort);
         if (!outcome.ok || signal.aborted) {
           undone = true;
+          if (gw) d.switchable.unfollow(gw); // what it has taken still drains, then nothing more of it
           await stopCapped(gw);
           await restore(wasLinked);
           return outcome.ok ? { ok: false, code: 'aborted' } : outcome;
         }
         // Committed from here: the new session is kept, whatever comes next.
-        dropBackup(d.sessionDb);
+        await dropBackup(d.sessionDb);
       } catch (err) {
         if (!(err instanceof Aborted)) d.log.error({ err }, 'founder relink failed; restoring the saved session');
         undone = true;
+        if (gw) d.switchable.unfollow(gw);
         await stopCapped(gw);
         if (backedUp) await restore(wasLinked);
         else if (wasLinked && !d.switchable.hasGateway()) await reconnectAsBefore();
@@ -388,11 +396,11 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
         d.log.error({ err }, 'the relinked gateway could not be handed over; it connects at the next start');
       }
       try {
-        setKv(d.trackerDb, 'session_reset_at', clock.now().toISOString());
+        await setKv(d.trackerDb, 'session_reset_at', clock.now().toISOString());
       } catch (err) {
         d.log.error({ err }, 'session_reset_at could not be recorded');
       }
-      const linked = auth ? numberOf(() => auth!) : undefined;
+      const linked = auth ? await numberOf(async () => auth!) : undefined;
       if (before && linked && before !== linked) {
         d.log.warn({ before: maskNumber(before), after: maskNumber(linked) }, "founder's WhatsApp was relinked from a different number");
       }
@@ -401,7 +409,7 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
       async function reconnectAsBefore(): Promise<void> {
         // Nothing was reset (the abort or error came before the backup): reconnect with the untouched session.
         try {
-          await d.switchable.swap(d.buildGateway(useEncryptedAuthState(d.sessionDb, d.key)));
+          await d.switchable.swap(d.buildGateway(await useEncryptedAuthState(d.sessionDb, d.key)));
         } catch (err) {
           d.log.error({ err }, 'reconnecting with the untouched founder session failed');
           await d.switchable.clear('not_linked');
@@ -414,9 +422,9 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
 class Aborted extends Error {}
 
 /** The phone number in a session's creds, or undefined (no link, or the session cannot be read). */
-function numberOf(load: () => EncryptedAuth): string | undefined {
+async function numberOf(load: () => Promise<EncryptedAuth>): Promise<string | undefined> {
   try {
-    const id = load().state.creds.me?.id;
+    const id = (await load()).state.creds.me?.id;
     return id ? id.split(/[:@]/)[0] : undefined;
   } catch {
     return undefined;

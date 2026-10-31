@@ -1,9 +1,7 @@
-import { existsSync } from 'node:fs';
-import { senderSessionDbPath } from '../config/paths.ts';
 import type { SettingsStore } from '../config/settingsStore.ts';
 import type { Db } from '../store/db.ts';
 import type { Logger } from '../util/logger.ts';
-import { openSenderSession } from '../wa/authState.ts';
+import { openSenderSession, sessionStored, type SessionHome } from '../wa/authState.ts';
 import type { LinkDriver } from '../wa/linkSession.ts';
 import { SenderGateway, type SenderSocketFactory } from '../wa/senderGateway.ts';
 import type { LiveReport, LiveReportSettings } from './liveReport.ts';
@@ -19,19 +17,26 @@ const LINKED: ReadonlySet<string> = new Set(['idle', 'connecting', 'open']);
  * Whether the spare phone is linked, for the switch on the Automations screen: the open briefing's sender when there is
  * one, else the saved session (opened and closed again; a missing file is never made). False while a link runs.
  */
-export function spareLinked(o: { dataDir: string; key: Buffer; briefing: Pick<LiveReport, 'sender'>; linking: () => boolean }): () => boolean {
-  return () => {
+export function spareLinked(o: {
+  dataDir: string;
+  key: Buffer;
+  briefing: Pick<LiveReport, 'sender'>;
+  linking: () => boolean;
+  /** Where the sessions live (sessionHomeOf); the data folder's files when not given. */
+  sessions?: SessionHome;
+}): () => Promise<boolean> {
+  const home: SessionHome = o.sessions ?? { engine: 'sqlite', dataDir: o.dataDir };
+  return async () => {
     if (o.linking()) return false;
     const open = o.briefing.sender();
     if (open) return LINKED.has(open.status().state);
-    const file = senderSessionDbPath(o.dataDir);
-    if (!existsSync(file)) return false;
-    const s = openSenderSession(file, o.key);
+    if (!(await sessionStored(home, 'spare'))) return false;
+    const s = await openSenderSession(home, o.key);
     if (!s.ok) return false;
     try {
       return s.auth.hasSession;
     } finally {
-      s.db.close();
+      await s.db.close();
     }
   };
 }
@@ -53,10 +58,11 @@ export function spareDriver(o: {
   /** Told when a link starts and ends (spareLinked answers false meanwhile). */
   linking: (on: boolean) => void;
   log: Logger;
+  sessions?: SessionHome;
 }): LinkDriver {
   const { briefing } = o;
   const inner = spareLinkDriver({
-    dataDir: o.dataDir, key: o.key, factory: o.factory, founderNumber: o.founderNumber,
+    dataDir: o.dataDir, key: o.key, factory: o.factory, founderNumber: o.founderNumber, ...(o.sessions ? { sessions: o.sessions } : {}),
     recipient: o.settingsNumber,
     reportDb: () => briefing.reportDb(),
     scheduler: () => briefing.scheduler(),

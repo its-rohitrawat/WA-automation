@@ -101,24 +101,24 @@ function byClosed(a: TaskRow, b: TaskRow): number {
 }
 
 /** Inactive clients stay in the workbook, marked "(inactive)". Tabs are in name order. */
-export function loadTrackerView(db: Db, now: Date, health: HealthLine): TrackerView {
+export async function loadTrackerView(db: Db, now: Date, health: HealthLine): Promise<TrackerView> {
   const today = istDate(now);
-  const clients = listClients(db, false);
+  const clients = await listClients(db, false);
   // Sheet names are assigned in id (creation) order so a new client never changes an existing suffix.
   const byId = [...clients].sort((a, b) => a.id - b.id);
   const assigned = uniqueSheetNames(byId.map((c) => c.name));
   const sheetNames = new Map(byId.map((c, i) => [c.id, assigned[i]!]));
-  const lastMeetings = lastMeetingByClient(db);
+  const lastMeetings = await lastMeetingByClient(db);
   const ordered = [...clients].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.id - b.id);
   return {
     generatedAt: now,
-    sentiment: readSentimentEnabled(db),
+    sentiment: await readSentimentEnabled(db),
     today,
     health,
-    unassigned: listUnassigned(db, UNASSIGNED_LIMIT).map((m) => ({ id: m.id, date: istDate(new Date(m.startedAt)), seconds: m.seconds })),
-    unassignedTotal: meetingStats(db, now.toISOString()).unassigned,
-    clients: ordered.map((client) => {
-      const all = listTasks(db, client.id);
+    unassigned: (await listUnassigned(db, UNASSIGNED_LIMIT)).map((m) => ({ id: m.id, date: istDate(new Date(m.startedAt)), seconds: m.seconds })),
+    unassignedTotal: (await meetingStats(db, now.toISOString())).unassigned,
+    clients: await Promise.all(ordered.map(async (client) => {
+      const all = await listTasks(db, client.id);
       const notDone = all.filter((t) => t.status !== 'done');
       const last = lastMeetings.get(client.id);
       const deadlines = notDone.map((t) => t.deadline).filter((d): d is string => d !== null).sort();
@@ -128,8 +128,8 @@ export function loadTrackerView(db: Db, now: Date, health: HealthLine): TrackerV
         usOpen: notDone.filter((t) => t.side === 'us').sort(byUrgency),
         clientOpen: notDone.filter((t) => t.side === 'client').sort(byUrgency),
         done: all.filter((t) => t.status === 'done').sort(byClosed),
-        decisions: listDecisions(db, client.id),
-        files: listClientFiles(db, client.id).map((f) => ({
+        decisions: await listDecisions(db, client.id),
+        files: (await listClientFiles(db, client.id)).map((f) => ({
           date: istDate(new Date(f.ts)),
           sentBy: f.sender ?? 'Unknown',
           name: displayName({ kind: f.kind, fileName: f.fileName, mimeType: f.mimeType, ts: f.ts, mediaId: f.id }),
@@ -137,7 +137,7 @@ export function loadTrackerView(db: Db, now: Date, health: HealthLine): TrackerV
           // Owner decision D3: a file deleted for everyone loses its Drive link as well as its description. The Drive copy is kept.
           driveFileId: f.revoked ? null : f.driveFileId,
         })),
-        meetings: listClientMeetings(db, client.id, CLIENT_MEETINGS_LIMIT).map((m) => ({
+        meetings: (await listClientMeetings(db, client.id, CLIENT_MEETINGS_LIMIT)).map((m) => ({
           id: m.id,
           date: istDate(new Date(m.startedAt)),
           title: m.title,
@@ -145,14 +145,14 @@ export function loadTrackerView(db: Db, now: Date, health: HealthLine): TrackerV
           docFileId: m.docFileId,
           actionItemCount: m.actionItemCount,
         })),
-        people: listPeople(db, client.id),
-        lastActivity: lastActivity(db, client.id),
+        people: await listPeople(db, client.id),
+        lastActivity: await lastActivity(db, client.id),
         lastMeeting: last === undefined ? null : istDate(new Date(last)),
         percentDone: all.length ? Math.floor((100 * (all.length - notDone.length)) / all.length) : null,
         overdue: notDone.filter((t) => isOverdue(t, today)).length,
         maybeDone: notDone.filter((t) => t.status === 'maybe_done').length,
         nextDeadline: deadlines[0] ?? null,
       };
-    }),
+    })),
   };
 }

@@ -8,8 +8,8 @@ import { seededDb } from '../helpers/db.ts';
 const SENT = { text: 'Morning report: sent at 06:00 IST', warning: null };
 const UNKNOWN = { text: 'Morning report: unknown, check WhatsApp', warning: '⚠️ Morning report: unknown, check WhatsApp. See docs/SETUP.md → "Morning report".' };
 
-function setup(freeBytes: () => number | null = () => 200e9) {
-  const db = seededDb();
+async function setup(freeBytes: () => number | null = () => 200e9) {
+  const db = await seededDb();
   const clock = manualClock('2026-10-23T02:00:00Z');
   const spend = new SpendGuard({ db, clock, capUsd: 1 });
   const h = new Health({ db, clock, spend, freeBytes });
@@ -18,8 +18,8 @@ function setup(freeBytes: () => number | null = () => 200e9) {
 }
 
 describe('Health and the morning report', () => {
-  it('warns only when the owner has to act', () => {
-    const { h } = setup();
+  it('warns only when the owner has to act', async () => {
+    const { h } = await setup();
     h.setReport(SENT);
     expect(h.line().ok).toBe(true);
     h.setReport(UNKNOWN);
@@ -29,42 +29,42 @@ describe('Health and the morning report', () => {
     expect(h.line().ok).toBe(true);
   });
 
-  it('shared-file warnings outrank it, and it outranks low disk', () => {
-    const { h } = setup(() => 5e9);
+  it('shared-file warnings outrank it, and it outranks low disk', async () => {
+    const { h } = await setup(() => 5e9);
     h.setReport(UNKNOWN);
     expect(h.line().text).toBe(UNKNOWN.warning);
     h.setMedia({ pending: 1, stale: 1, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0 });
     expect(h.line().text).toBe('⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.');
   });
 
-  it('records the report line in the snapshot; snapshots without one still parse, bad ones do not', () => {
-    const { db, h } = setup();
-    h.persist();
-    expect(readHealthSnapshot(db)!.report).toBeUndefined();
+  it('records the report line in the snapshot; snapshots without one still parse, bad ones do not', async () => {
+    const { db, h } = await setup();
+    await h.persist();
+    expect((await readHealthSnapshot(db))!.report).toBeUndefined();
     h.setReport(SENT);
-    h.persist();
-    expect(readHealthSnapshot(db)!.report).toEqual(SENT);
-    const stored = JSON.parse(getKv(db, 'health')!) as Record<string, unknown>;
-    setKv(db, 'health', JSON.stringify({ ...stored, report: { text: 5, warning: null } }));
-    expect(readHealthSnapshot(db)).toBeUndefined();
-    setKv(db, 'health', JSON.stringify({ ...stored, report: { text: 'ok', warning: 5 } }));
-    expect(readHealthSnapshot(db)).toBeUndefined();
-    setKv(db, 'health', JSON.stringify({ ...stored, report: { text: 'ok' } })); // warning missing
-    expect(readHealthSnapshot(db)).toBeUndefined();
+    await h.persist();
+    expect((await readHealthSnapshot(db))!.report).toEqual(SENT);
+    const stored = JSON.parse((await getKv(db, 'health'))!) as Record<string, unknown>;
+    await setKv(db, 'health', JSON.stringify({ ...stored, report: { text: 5, warning: null } }));
+    expect(await readHealthSnapshot(db)).toBeUndefined();
+    await setKv(db, 'health', JSON.stringify({ ...stored, report: { text: 'ok', warning: 5 } }));
+    expect(await readHealthSnapshot(db)).toBeUndefined();
+    await setKv(db, 'health', JSON.stringify({ ...stored, report: { text: 'ok' } })); // warning missing
+    expect(await readHealthSnapshot(db)).toBeUndefined();
   });
 
-  it("records the masked recipient the service sends to, and reads back only a last-4-digits mask", () => {
-    const { db, h } = setup();
+  it("records the masked recipient the service sends to, and reads back only a last-4-digits mask", async () => {
+    const { db, h } = await setup();
     h.setReport({ ...SENT, recipientMasked: '…5678' });
-    h.persist();
-    expect(readHealthSnapshot(db)!.report).toEqual({ ...SENT, recipientMasked: '…5678' });
-    const stored = JSON.parse(getKv(db, 'health')!) as Record<string, unknown>;
+    await h.persist();
+    expect((await readHealthSnapshot(db))!.report).toEqual({ ...SENT, recipientMasked: '…5678' });
+    const stored = JSON.parse((await getKv(db, 'health'))!) as Record<string, unknown>;
     for (const bad of ['919812345678', '5678', '…56789', '…56a8', 5678, null]) {
-      setKv(db, 'health', JSON.stringify({ ...stored, report: { ...SENT, recipientMasked: bad } }));
-      expect(readHealthSnapshot(db), String(bad)).toBeUndefined();
+      await setKv(db, 'health', JSON.stringify({ ...stored, report: { ...SENT, recipientMasked: bad } }));
+      expect(await readHealthSnapshot(db), String(bad)).toBeUndefined();
     }
     // A snapshot from a service started before the field existed still parses, without it.
-    setKv(db, 'health', JSON.stringify({ ...stored, report: SENT }));
-    expect(readHealthSnapshot(db)!.report).toEqual(SENT);
+    await setKv(db, 'health', JSON.stringify({ ...stored, report: SENT }));
+    expect((await readHealthSnapshot(db))!.report).toEqual(SENT);
   });
 });

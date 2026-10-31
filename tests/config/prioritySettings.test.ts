@@ -6,24 +6,24 @@ import { ControlError, type AuditEntry } from '../../src/control/errors.ts';
 import type { Db } from '../../src/store/db.ts';
 import { getKv } from '../../src/store/kv.ts';
 import { manualClock } from '../../src/util/clock.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
+import { NOW, rows as dbRows, seededDb } from '../helpers/db.ts';
 
 const OWNER = 'owner@example.com';
 const EMPTY = { critical: [], major: [], medium: [], low: [] };
 
-function setup() {
-  const db = seededDb();
+async function setup() {
+  const db = await seededDb();
   const clock = manualClock(NOW);
   const store = new PrioritySettings({ db, clock });
   const audits: AuditEntry[] = [];
-  return { db, clock, store, audits, audit: (e: AuditEntry) => audits.push(e) };
+  return { db, clock, store, audits, audit: async (_q: unknown, e: AuditEntry) => { audits.push(e); } };
 }
 
-const rows = (db: Db) => db.prepare('SELECT k, v, updated_by AS by FROM settings ORDER BY k').all();
+const rows = (db: Db) => dbRows(db, 'SELECT k, v, updated_by AS by FROM settings ORDER BY k');
 
-function refusal(fn: () => unknown): ControlError {
+async function refusal(fn: () => unknown): Promise<ControlError> {
   try {
-    fn();
+    await fn();
   } catch (e) {
     if (e instanceof ControlError) return e;
     throw e;
@@ -32,54 +32,54 @@ function refusal(fn: () => unknown): ControlError {
 }
 
 describe('PrioritySettings', () => {
-  it('starts with the starting lists and sentiment off, and says they are the defaults', () => {
-    const { db, store } = setup();
+  it('starts with the starting lists and sentiment off, and says they are the defaults', async () => {
+    const { db, store } = await setup();
     expect(store.get()).toEqual({ keywords: DEFAULT_KEYWORDS, sentimentEnabled: false });
-    expect(store.view()).toEqual({
+    expect(await store.view()).toEqual({
       keywords: DEFAULT_KEYWORDS, sentimentEnabled: false, source: { priorityKeywords: 'default', sentimentEnabled: 'default' },
       limits: { perLevel: KEYWORDS_PER_LEVEL, maxChars: KEYWORD_MAX_CHARS },
     });
-    expect(readSentimentEnabled(db)).toBe(false);
+    expect(await readSentimentEnabled(db)).toBe(false);
   });
 
-  it('saves the cleaned lists and audits counts only, in one transaction', () => {
-    const { db, store, audits, audit } = setup();
-    const view = store.set('priorityKeywords', { critical: ['  Site   down ', 'URGENT', 'urgent', ''], major: ['zaroori'], medium: [], low: ['no rush'] }, OWNER, audit);
+  it('saves the cleaned lists and audits counts only, in one transaction', async () => {
+    const { db, store, audits, audit } = await setup();
+    const view = await store.set('priorityKeywords', { critical: ['  Site   down ', 'URGENT', 'urgent', ''], major: ['zaroori'], medium: [], low: ['no rush'] }, OWNER, audit);
     expect(view.keywords).toEqual({ critical: ['Site down', 'URGENT'], major: ['zaroori'], medium: [], low: ['no rush'] });
     expect(view.source.priorityKeywords).toBe('dashboard');
     expect(audits).toEqual([{ actor: OWNER, event: 'settings.priorityKeywords', kind: 'config', detail: 'Priority keywords saved (Critical 2, Major 1, Medium 0, Low 1)' }]);
     expect(JSON.stringify(audits)).not.toContain('Site down');
-    expect(rows(db)).toEqual([{ k: 'priorityKeywords', v: JSON.stringify(view.keywords), by: OWNER }]);
+    expect(await rows(db)).toEqual([{ k: 'priorityKeywords', v: JSON.stringify(view.keywords), by: OWNER }]);
   });
 
-  it('lets the owner empty every list', () => {
-    const { store, audit } = setup();
-    expect(store.set('priorityKeywords', EMPTY, OWNER, audit).keywords).toEqual(EMPTY);
+  it('lets the owner empty every list', async () => {
+    const { store, audit } = await setup();
+    expect((await store.set('priorityKeywords', EMPTY, OWNER, audit)).keywords).toEqual(EMPTY);
     expect(store.get().keywords).toEqual(EMPTY);
   });
 
-  it('switches sentiment on and off, audits it and asks for a tracker rebuild', () => {
-    const { db, store, audits, audit } = setup();
-    expect(store.set('sentimentEnabled', true, OWNER, audit).sentimentEnabled).toBe(true);
-    expect(readSentimentEnabled(db)).toBe(true);
-    expect(getKv(db, 'rebuild_requested')).toBe(NOW);
-    store.set('sentimentEnabled', false, OWNER, audit);
-    expect(readSentimentEnabled(db)).toBe(false);
+  it('switches sentiment on and off, audits it and asks for a tracker rebuild', async () => {
+    const { db, store, audits, audit } = await setup();
+    expect((await store.set('sentimentEnabled', true, OWNER, audit)).sentimentEnabled).toBe(true);
+    expect(await readSentimentEnabled(db)).toBe(true);
+    expect(await getKv(db, 'rebuild_requested')).toBe(NOW);
+    await store.set('sentimentEnabled', false, OWNER, audit);
+    expect(await readSentimentEnabled(db)).toBe(false);
     expect(audits.map((a) => a.detail)).toEqual(['Sentiment analysis switched on', 'Sentiment analysis switched off']);
   });
 
-  it('changes nothing for a value already saved, and does save the default once it is chosen on purpose', () => {
-    const { store, audits, audit } = setup();
-    store.set('sentimentEnabled', false, OWNER, audit);
-    store.set('sentimentEnabled', false, OWNER, audit);
+  it('changes nothing for a value already saved, and does save the default once it is chosen on purpose', async () => {
+    const { store, audits, audit } = await setup();
+    await store.set('sentimentEnabled', false, OWNER, audit);
+    await store.set('sentimentEnabled', false, OWNER, audit);
     expect(audits).toHaveLength(1);
-    expect(store.view().source.sentimentEnabled).toBe('dashboard');
+    expect((await store.view()).source.sentimentEnabled).toBe('dashboard');
   });
 
-  it('refuses unknown keys and bad values, naming the level and place but never the keyword, and saves nothing', () => {
-    const { db, store, audit, audits } = setup();
-    expect(refusal(() => store.set('apiKey', 'x', OWNER, audit)).status).toBe(422);
-    expect(refusal(() => store.set('sentimentEnabled', 'yes', OWNER, audit)).message).toBe('sentimentEnabled must be true or false');
+  it('refuses unknown keys and bad values, naming the level and place but never the keyword, and saves nothing', async () => {
+    const { db, store, audit, audits } = await setup();
+    expect((await refusal(() => store.set('apiKey', 'x', OWNER, audit))).status).toBe(422);
+    expect((await refusal(() => store.set('sentimentEnabled', 'yes', OWNER, audit))).message).toBe('sentimentEnabled must be true or false');
     const long = 'x'.repeat(KEYWORD_MAX_CHARS + 1);
     const cases: [unknown, string][] = [
       [null, 'Send the keywords as four lists: critical, major, medium and low'],
@@ -95,12 +95,12 @@ describe('PrioritySettings', () => {
       [{ ...EMPTY, medium: Array.from({ length: KEYWORDS_PER_LEVEL + 1 }, (_, i) => `k${i}`) }, `Medium can have at most ${KEYWORDS_PER_LEVEL} keywords`],
     ];
     for (const [value, message] of cases) {
-      const e = refusal(() => store.set('priorityKeywords', value, OWNER, audit));
+      const e = await refusal(() => store.set('priorityKeywords', value, OWNER, audit));
       expect(e.status).toBe(422);
       expect(e.message).toBe(message);
     }
     expect(audits).toEqual([]);
-    expect(rows(db)).toEqual([]);
+    expect(await rows(db)).toEqual([]);
   });
 
   it('counts repeats once toward the limit', () => {
@@ -108,17 +108,18 @@ describe('PrioritySettings', () => {
       .toHaveLength(KEYWORDS_PER_LEVEL);
   });
 
-  it('falls back to the defaults when a stored row is damaged', () => {
-    const { db, store } = setup();
-    db.prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('priorityKeywords', '{\"critical\":5}', ?, 'x'), ('sentimentEnabled', 'nope', ?, 'x')").run(NOW, NOW);
+  it('falls back to the defaults when a stored row is damaged', async () => {
+    const { db, store } = await setup();
+    await db.run("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('priorityKeywords', '{\"critical\":5}', ?, 'x'), ('sentimentEnabled', 'nope', ?, 'x')", [NOW, NOW]);
+    await store.load(); // written behind the store's back: it reads them again
     expect(store.get()).toEqual({ keywords: DEFAULT_KEYWORDS, sentimentEnabled: false });
-    expect(store.view().source).toEqual({ priorityKeywords: 'default', sentimentEnabled: 'default' });
+    expect((await store.view()).source).toEqual({ priorityKeywords: 'default', sentimentEnabled: 'default' });
   });
 
-  it('writes nothing when the audit row cannot be written', () => {
-    const { db, store } = setup();
-    expect(() => store.set('sentimentEnabled', true, OWNER, () => { throw new Error('disk full'); })).toThrow('disk full');
-    expect(rows(db)).toEqual([]);
-    expect(readSentimentEnabled(db)).toBe(false);
+  it('writes nothing when the audit row cannot be written', async () => {
+    const { db, store } = await setup();
+    await expect(store.set('sentimentEnabled', true, OWNER, () => { throw new Error('disk full'); })).rejects.toThrow('disk full');
+    expect(await rows(db)).toEqual([]);
+    expect(await readSentimentEnabled(db)).toBe(false);
   });
 });

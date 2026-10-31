@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import makeWASocket, { DisconnectReason, makeCacheableSignalKeyStore, proto } from 'baileys';
 import type { AuthenticationState, BaileysEventMap, GroupMetadata } from 'baileys';
+import { guarded, type CrashReport } from '../runtime/context.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { AllowList } from './allowlist.ts';
 import { backoffMs } from './backoff.ts';
@@ -53,15 +54,18 @@ export const TRACKER_DEVICE_NAME = 'WA Agent - Tracker';
  * Only a message this agent sent from the dashboard (Open chat, src/wa/groupSend.ts), found by its id in that group
  * (sentText reads the outbox), and only as its text. Anything else: undefined, as before.
  */
-export function retryMessage(sentText?: (waId: string, groupId: string) => string | undefined): (key: { id?: string | null; remoteJid?: string | null }) => Promise<{ conversation: string } | undefined> {
+export function retryMessage(sentText?: SentText): (key: { id?: string | null; remoteJid?: string | null }) => Promise<{ conversation: string } | undefined> {
   return async (key) => {
-    const text = sentText && key.id && key.remoteJid ? sentText(key.id, key.remoteJid) : undefined;
+    const text = sentText && key.id && key.remoteJid ? await sentText(key.id, key.remoteJid) : undefined;
     return text === undefined ? undefined : { conversation: text };
   };
 }
 
+/** The outbox lookup for retryMessage: the text the agent sent as this message, if any. May read the database (a promise). */
+export type SentText = (waId: string, groupId: string) => string | undefined | Promise<string | undefined>;
+
 /** sentText: the outbox lookup for retryMessage (left out: getMessage answers nothing). */
-export function baileysSocketFactory(logger: BaileysLogger, sentText?: (waId: string, groupId: string) => string | undefined): SocketFactory {
+export function baileysSocketFactory(logger: BaileysLogger, sentText?: SentText): SocketFactory {
   return (auth, cachedGroupMetadata) =>
     makeWASocket({
       auth: { creds: auth.creds, keys: makeCacheableSignalKeyStore(auth.keys, logger) },
@@ -89,9 +93,18 @@ export interface GatewayStatus {
   credsSaveFailures: number;
 }
 
+/**
+ * An event handler. A promise it returns is awaited before the next event is handed over, so events are handled one
+ * after another, in the order they came (SaaS S1.10: the ingest awaits the database). A throw or a rejection counts the
+ * event as failed (failedCount).
+ */
+export type EventHandler = (e: NormalizedEvent) => unknown;
+
 /** What the app and the dashboard use of a founder gateway: WhatsAppGateway, or the SwitchableGateway holding one. */
 export interface GatewayLike {
-  onEvent(fn: (e: NormalizedEvent) => void): void;
+  onEvent(fn: EventHandler): void;
+  /** Resolves once the events handed over so far are handled (shutdown waits for it before the database closes). */
+  idle?(): Promise<void>;
   onStatus(fn: (s: GatewayStatus) => void): void;
   status(): GatewayStatus;
   start(): void;
@@ -131,7 +144,17 @@ export interface GatewayOptions {
   clock?: Clock;
   scheduler?: Scheduler;
   onQr?: (qr: string) => void;
+  /**
+   * The customer this gateway belongs to, and where a crash in it is reported (S4.6): every socket event handler and
+   * timer runs through guarded(tenantId, report), so a throw there restarts that customer's runtime and nothing else.
+   * Left out (the founder's gateway before S4.4), a throw goes where it went before.
+   */
+  tenantId?: string;
+  report?: CrashReport;
 }
+
+type Guard = <A extends unknown[], R>(fn: (...a: A) => R) => (...a: A) => R | undefined;
+const unguarded: Guard = (fn) => fn;
 
 export class WhatsAppGateway implements GatewayLike {
   readonly #opts: GatewayOptions;
@@ -140,6 +163,7 @@ export class WhatsAppGateway implements GatewayLike {
   readonly #groupCache = new Map<string, GroupMetadata>();
   readonly #clock: Clock;
   readonly #schedule: Scheduler;
+  readonly #guard: Guard;
   #sock: SocketLike | undefined;
   #attempt = 0;
   #restarts = 0;
@@ -148,6 +172,11 @@ export class WhatsAppGateway implements GatewayLike {
   #status: Omit<GatewayStatus, 'credsSaveFailures'>;
   #dropped = 0;
   #failed = 0;
+  readonly #eventFns: EventHandler[] = [];
+  /** Events waiting for the handler of an earlier one to finish. */
+  readonly #pending: NormalizedEvent[] = [];
+  #handing = false;
+  #handed: Promise<void> = Promise.resolve();
   #credsSaveFailures = 0;
   #stopped = false;
 
@@ -155,11 +184,16 @@ export class WhatsAppGateway implements GatewayLike {
     this.#opts = opts;
     this.#clock = opts.clock ?? systemClock;
     this.#schedule = opts.scheduler ?? defaultScheduler;
+    this.#guard = opts.tenantId !== undefined && opts.report ? guarded(opts.tenantId, opts.report) : unguarded;
     this.#status = { state: 'stopped', since: this.#clock.now().toISOString(), lastErrorCode: null };
   }
 
-  onEvent(fn: (e: NormalizedEvent) => void): void {
-    this.#emitter.on('event', fn);
+  onEvent(fn: EventHandler): void {
+    this.#eventFns.push(fn);
+  }
+
+  idle(): Promise<void> {
+    return this.#handed;
   }
 
   onStatus(fn: (s: GatewayStatus) => void): void {
@@ -242,7 +276,8 @@ export class WhatsAppGateway implements GatewayLike {
     if (this.#stopped || this.#sock) return; // stopped, or a re-entrant start() already connected
     const sock = this.#opts.factory(this.#opts.auth, async (jid) => this.#groupCache.get(jid));
     this.#sock = sock;
-    sock.ev.on('creds.update', () => {
+    const g = this.#guard;
+    sock.ev.on('creds.update', g(() => {
       void this.#opts.saveCreds().then(
         () => {
           if (this.#credsSaveFailures === 0) return;
@@ -254,36 +289,36 @@ export class WhatsAppGateway implements GatewayLike {
           this.#emitStatus();
         },
       );
-    });
-    sock.ev.on('connection.update', (u) => this.#onConnection(sock, u));
-    sock.ev.on('messages.upsert', ({ messages }) => {
+    }));
+    sock.ev.on('connection.update', g((u) => this.#onConnection(sock, u)));
+    sock.ev.on('messages.upsert', g(({ messages }) => {
       for (const m of messages) {
         if (!this.#allowed(m.key.remoteJid)) continue;
         this.#deliver(() => normalizeMessage(m));
       }
-    });
-    sock.ev.on('messaging-history.set', ({ messages, syncType }) => {
+    }));
+    sock.ev.on('messaging-history.set', g(({ messages, syncType }) => {
       if (syncType === proto.HistorySync.HistorySyncType.ON_DEMAND) return this.#onDemand(messages);
       for (const m of messages) {
         if (!this.#allowed(m.key.remoteJid)) continue;
         this.#deliver(() => normalizeMessage(m));
       }
-    });
-    sock.ev.on('messages.update', (updates) => {
+    }));
+    sock.ev.on('messages.update', g((updates) => {
       for (const u of updates) {
         if (!this.#allowed(u.key.remoteJid)) continue;
         this.#deliver(() => normalizeUpdate(u));
       }
-    });
-    sock.ev.on('messages.reaction', (reactions) => {
+    }));
+    sock.ev.on('messages.reaction', g((reactions) => {
       for (const r of reactions) {
         if (!this.#allowed(r.key.remoteJid)) continue;
         this.#deliver(() => normalizeReaction(r));
       }
-    });
-    sock.ev.on('groups.upsert', (groups) => {
-      for (const g of groups) if (this.#opts.allow.has(g.id)) this.#groupCache.set(g.id, g);
-    });
+    }));
+    sock.ev.on('groups.upsert', g((groups) => {
+      for (const group of groups) if (this.#opts.allow.has(group.id)) this.#groupCache.set(group.id, group);
+    }));
   }
 
   /** An answer to fetchHistory: the allowed groups' events, grouped, on the history channel only. */
@@ -317,14 +352,40 @@ export class WhatsAppGateway implements GatewayLike {
     return false;
   }
 
-  /** Normalise and emit one already-allowed item. A failure never escapes into Baileys. */
+  /** Normalise and hand over one already-allowed item. A failure never escapes into Baileys. */
   #deliver(build: () => NormalizedEvent | null): void {
     if (this.#stopped) return;
+    let e: NormalizedEvent | null;
     try {
-      const e = build();
-      if (e) this.#emitter.emit('event', e);
+      e = build();
     } catch {
       this.#failed++;
+      return;
+    }
+    if (!e) return;
+    this.#pending.push(e);
+    if (!this.#handing) this.#handed = this.#handOver();
+  }
+
+  /**
+   * Hands the waiting events to the handlers, one after another. With synchronous handlers it all runs before
+   * #deliver returns; a handler's promise makes the rest wait for it, and events that come meanwhile queue behind.
+   */
+  async #handOver(): Promise<void> {
+    this.#handing = true;
+    try {
+      for (let e = this.#pending.shift(); e !== undefined; e = this.#pending.shift()) {
+        try {
+          for (const fn of this.#eventFns) {
+            const r = fn(e);
+            if (r instanceof Promise) await r;
+          }
+        } catch {
+          this.#failed++;
+        }
+      }
+    } finally {
+      this.#handing = false;
     }
   }
 
@@ -335,11 +396,11 @@ export class WhatsAppGateway implements GatewayLike {
       this.#setStatus('open', null);
       if (this.#stopped) return;
       this.#stable?.cancel();
-      this.#stable = this.#schedule(() => {
+      this.#stable = this.#schedule(this.#guard(() => {
         this.#stable = undefined;
         this.#attempt = 0;
         this.#restarts = 0;
-      }, STABLE_OPEN_MS);
+      }), STABLE_OPEN_MS);
       return;
     }
     if (u.connection !== 'close') return;
@@ -360,10 +421,10 @@ export class WhatsAppGateway implements GatewayLike {
     this.#setStatus('closed', code);
     if (this.#stopped || this.#sock) return; // stopped, or a listener already started a new connection
     const delay = code === DisconnectReason.restartRequired && this.#restarts++ === 0 ? 0 : backoffMs(this.#attempt++);
-    this.#reconnect = this.#schedule(() => {
+    this.#reconnect = this.#schedule(this.#guard(() => {
       this.#reconnect = undefined;
       this.#connect();
-    }, delay);
+    }), delay);
   }
 
   #setStatus(state: GatewayState, code: number | null): void {

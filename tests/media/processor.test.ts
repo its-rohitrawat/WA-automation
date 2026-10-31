@@ -17,7 +17,7 @@ import { MEDIA_LIMITS } from '../../src/media/types.ts';
 import type { Prices } from '../../src/spend/pricing.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { syncClients } from '../../src/store/clients.ts';
-import type { Db } from '../../src/store/db.ts';
+import type { Db, Sql } from '../../src/store/db.ts';
 import { dueMediaIds, getMedia, getMediaRef } from '../../src/store/media.ts';
 import { applyRevoke } from '../../src/store/messages.ts';
 import { AudioError } from '../../src/stt/audio.ts';
@@ -29,7 +29,7 @@ import { manualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
 import { Ingestor } from '../../src/wa/ingest.ts';
 import { normalizeMessage } from '../../src/wa/normalize.ts';
-import { MEHTA, SHARMA, seededDb } from '../helpers/db.ts';
+import { idOf, MEHTA, onSqlite, row, rows, SHARMA, seededDb } from '../helpers/db.ts';
 import { FakeMediaAi } from '../helpers/mediaAi.ts';
 import { FakeLocalVoiceTranscriber, FakeVoiceTranscriber } from '../helpers/voice.ts';
 import { TS, waRaw } from '../helpers/wa.ts';
@@ -38,7 +38,7 @@ import { TS, waRaw } from '../helpers/wa.ts';
  * Lets a test make the next file write stop part way, as a full disk or a failing drive would, and see when a file is
  * synced to disk. The processor writes an original through a file handle from open().
  */
-const disk = vi.hoisted(() => ({ failNextWrite: false, onSync: undefined as (() => void) | undefined }));
+const disk = vi.hoisted(() => ({ failNextWrite: false, onSync: undefined as (() => void | Promise<void>) | undefined }));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs/promises')>();
   return {
@@ -59,7 +59,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
           }
           if (prop === 'sync') {
             return async () => {
-              disk.onSync?.();
+              await disk.onSync?.(); // the sync waits for what the test looks at (a database read is a round trip on Postgres)
               return target.sync();
             };
           }
@@ -79,6 +79,38 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
+/** A statement the processor's database refuses from now on, as on a full disk. */
+type Refusal = (sql: string, params: unknown) => boolean;
+const refusalsOf = new WeakMap<Db, Refusal[]>();
+
+/** The same Db, in its transactions too, refusing every statement one of `refusals` matches (with "disk full"). */
+function refusing(db: Db, refusals: Refusal[]): Db {
+  const wrap = <S extends Sql>(s: S): S => new Proxy(s, {
+    get(target, prop) {
+      if (prop === 'run' || prop === 'get' || prop === 'all') {
+        const fn = Reflect.get(target, prop) as (sql: string, params?: unknown) => Promise<unknown>;
+        return (sql: string, params?: unknown) =>
+          (refusals.some((r) => r(sql, params)) ? Promise.reject(new Error('disk full')) : fn.call(target, sql, params));
+      }
+      if (prop === 'tx') return <T>(fn: (q: Sql) => Promise<T>) => target.tx((q) => fn(wrap(q)));
+      const v = Reflect.get(target, prop) as unknown;
+      return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+    },
+  });
+  return wrap(db);
+}
+
+/** From now on the processor's database (setup's) refuses what `r` matches. The test's own reads and writes still work. */
+const refuse = (db: Db, r: Refusal): void => void refusalsOf.get(db)!.push(r);
+
+/** An UPDATE of media that sets its status to `status` (as SQLite's BEFORE UPDATE OF status ... WHEN NEW.status did). */
+const setsStatus = (status: string): Refusal => (sql, params) =>
+  /^\s*UPDATE\s+media\s+SET\b/i.test(sql) &&
+  (sql.includes(`status = '${status}'`) || (/\bstatus = @status\b/.test(sql) && (params as { status?: unknown } | undefined)?.status === status));
+
+/** Sharma's real id in the latest setup's database (on Postgres it is not 1). */
+let SHA = 0;
+
 type ImageExtras = { viewOnce?: boolean; contextInfo?: { isForwarded?: boolean; forwardingScore?: number } };
 type SetupOptions = {
   fetcher?: MediaFetcher;
@@ -93,10 +125,16 @@ type SetupOptions = {
   voicePaid?: boolean;
 };
 
-function setup(o: SetupOptions = {}) {
+async function setup(o: SetupOptions = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'wa-media-'));
   dirs.push(dataDir);
-  const db = seededDb();
+  const plain = await seededDb();
+  SHA = await idOf(plain, SHARMA.code);
+  // The app's side (ingestor, processor, an extractor's SpendGuard) works through `db`, which refuses what a test switches
+  // on with refuse(); the test reads and writes through `plain`, returned as its db.
+  const refusals: Refusal[] = [];
+  refusalsOf.set(plain, refusals);
+  const db = refusing(plain, refusals);
   const clock = manualClock('2026-10-19T08:00:00Z');
   const sealer = new MediaRefSealer(Buffer.alloc(32, 5));
   const ing = new Ingestor({ db, onNewMessages: () => {}, clock, media: { sealer } });
@@ -104,31 +142,28 @@ function setup(o: SetupOptions = {}) {
   const extract = vi.fn<Extractor>(o.extractFor?.(db) ?? o.extract ?? (async () => ({ textKind: 'description', text: 'A blue banner with the new logo', pageCount: null, note: null })));
   const more = { limits: o.limits, startedAt: o.startedAt, voice: o.voice, afterFinish: o.afterFinish, voicePaid: o.voicePaid };
   const p = new MediaProcessor({ db, dataDir, clock, log: o.log ?? silentLogger(), sealer, fetcher, extract, ...more });
-  const ingest = (waId: string, message: Parameters<typeof waRaw>[1]): number => {
-    ing.handle(normalizeMessage(waRaw(waId, message))!);
-    return (db.prepare('SELECT id FROM media ORDER BY id DESC LIMIT 1').get() as { id: number }).id;
+  const ingest = async (waId: string, message: Parameters<typeof waRaw>[1]): Promise<number> => {
+    await ing.handle(normalizeMessage(waRaw(waId, message))!);
+    return (await row<{ id: number }>(plain, 'SELECT id FROM media ORDER BY id DESC LIMIT 1'))!.id;
   };
-  const share = (waId = 'IMG1', extras: ImageExtras = {}): number =>
+  const share = (waId = 'IMG1', extras: ImageExtras = {}): Promise<number> =>
     ingest(waId, { imageMessage: { url: 'https://mmg.whatsapp.net/v/x', directPath: '/v/x', mediaKey: MEDIA_KEY, mimetype: 'image/jpeg', caption: 'new banner', ...extras } });
   /** A file shared as a document, such as a PDF. */
-  const shareFile = (waId: string, mimetype: string, fileName: string): number =>
+  const shareFile = (waId: string, mimetype: string, fileName: string): Promise<number> =>
     ingest(waId, { documentMessage: { url: 'https://mmg.whatsapp.net/v/x', directPath: '/v/x', mediaKey: MEDIA_KEY, mimetype, fileName } });
   /** A WhatsApp voice note (an audioMessage with ptt). */
-  const shareVoice = (waId = 'PTT1'): number =>
+  const shareVoice = (waId = 'PTT1'): Promise<number> =>
     ingest(waId, { audioMessage: { url: 'https://mmg.whatsapp.net/v/x', directPath: '/v/x', mediaKey: MEDIA_KEY, mimetype: 'audio/ogg; codecs=opus', ptt: true, seconds: 14 } });
   /** An audio file that is not a voice note (an audioMessage without ptt). */
-  const shareAudio = (waId = 'AUD1'): number =>
+  const shareAudio = (waId = 'AUD1'): Promise<number> =>
     ingest(waId, { audioMessage: { url: 'https://mmg.whatsapp.net/v/x', directPath: '/v/x', mediaKey: MEDIA_KEY, mimetype: 'audio/mpeg', ptt: false, seconds: 40 } });
   /** A fresh processor on the same database and folder, as after a restart of the service. */
   const restart = (log: Logger = silentLogger()): MediaProcessor => new MediaProcessor({ db, dataDir, clock, log, sealer, fetcher, extract, ...more });
-  return { db, dataDir, clock, p, fetcher, extract, share, shareFile, shareVoice, shareAudio, restart };
+  return { db: plain, dataDir, clock, p, fetcher, extract, share, shareFile, shareVoice, shareAudio, restart };
 }
 
 /** From now on the database refuses every update of a file and every spend booking, as on a full disk. Reads still work. */
-const refuseWrites = (db: Db): void => {
-  db.exec(`CREATE TRIGGER IF NOT EXISTS refuse_media BEFORE UPDATE ON media BEGIN SELECT RAISE(ABORT, 'disk full'); END;
-    CREATE TRIGGER IF NOT EXISTS refuse_spend BEFORE INSERT ON spend BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
-};
+const refuseWrites = (db: Db): void => refuse(db, (sql) => /^\s*(UPDATE\s+media\b|INSERT\s+INTO\s+spend\b)/i.test(sql));
 
 /** Where a shared file is saved, built only by mediaRelPath. waRaw's default timestamp is 10 Oct 2026, so client SHA's 2026-10 folder. */
 const rel = (mediaId: number, waId = 'IMG1', ext = 'jpg'): string => mediaRelPath({ clientCode: 'SHA', ts: new Date(TS * 1000).toISOString(), waId, mediaId, ext });
@@ -144,9 +179,9 @@ const at = (ms: number) => new Date(Date.parse('2026-10-19T08:00:00Z') + ms).toI
 
 describe('MediaProcessor', () => {
   it('downloads, saves the original under its message and row id, wipes the details and stores the description', async () => {
-    const { db, dataDir, p, fetcher, extract, share } = setup();
-    const id = share();
-    expect(await p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
+    const { db, dataDir, p, fetcher, extract, share } = await setup();
+    const id = await share();
+    expect(await p.process(id)).toEqual({ outcome: 'done', clientId: SHA });
     expect(fetcher).toHaveBeenCalledWith(
       { contentType: 'imageMessage', url: 'https://mmg.whatsapp.net/v/x', directPath: '/v/x', mediaKey: MEDIA_KEY.toString('base64') },
       { maxBytes: MEDIA_LIMITS.maxDownloadBytes, timeoutMs: MEDIA_LIMITS.downloadTimeoutMs },
@@ -156,30 +191,30 @@ describe('MediaProcessor', () => {
       mediaId: id, kind: 'image', mimeType: 'image/jpeg', fileName: null, forwarded: false, bytes: Buffer.from('jpeg-bytes'), path: saved(dataDir, rel(id)),
       revoked: expect.any(Function),
     });
-    expect(getMediaRef(db, id)).toBeNull();
-    expect(getMedia(db, id)).toMatchObject({ status: 'done', localPath: rel(id), fileSize: 10, textKind: 'description', text: 'A blue banner with the new logo' });
-    expect(getMedia(db, id)!.sha256).toMatch(/^[0-9a-f]{64}$/);
-    expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
+    expect(await getMediaRef(db, id)).toBeNull();
+    expect(await getMedia(db, id)).toMatchObject({ status: 'done', localPath: rel(id), fileSize: 10, textKind: 'description', text: 'A blue banner with the new logo' });
+    expect((await getMedia(db, id))!.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: SHA });
   });
 
   it('downloads within the limits it was given', async () => {
-    const { p, fetcher, share } = setup({ limits: { maxBytes: 1234, timeoutMs: 5678 } });
-    await p.process(share());
+    const { p, fetcher, share } = await setup({ limits: { maxBytes: 1234, timeoutMs: 5678 } });
+    await p.process(await share());
     expect(fetcher).toHaveBeenCalledWith(expect.anything(), { maxBytes: 1234, timeoutMs: 5678 });
   });
 
   it('a save that stops part way leaves nothing at the path, and the next attempt saves the whole file', async () => {
-    const { db, dataDir, clock, p, fetcher, share } = setup();
-    const id = share();
+    const { db, dataDir, clock, p, fetcher, share } = await setup();
+    const id = await share();
     const folder = dirname(saved(dataDir, rel(id)));
     disk.failNextWrite = true;
     expect((await p.process(id)).outcome).toBe('deferred');
     // A full disk may pass: the file waits without counting an attempt (final review FR2).
-    expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'disk_ENOSPC', nextAttemptAt: at(5 * MINUTE), localPath: null, hasRef: true });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'disk_ENOSPC', nextAttemptAt: at(5 * MINUTE), localPath: null, hasRef: true });
     expect(readdirSync(folder)).toEqual([]); // no partial original and no temp file left behind
     clock.advance(5 * MINUTE);
     expect((await p.process(id)).outcome).toBe('done');
-    expect(getMedia(db, id)).toMatchObject({ status: 'done', localPath: rel(id), fileSize: 10, errorCode: null });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'done', localPath: rel(id), fileSize: 10, errorCode: null });
     expect(readFileSync(saved(dataDir, rel(id)), 'utf8')).toBe('jpeg-bytes');
     expect(readdirSync(folder)).toEqual([basename(saved(dataDir, rel(id)))]);
     expect(fetcher).toHaveBeenCalledTimes(2);
@@ -187,43 +222,43 @@ describe('MediaProcessor', () => {
 
   // Final review FR3b: a power cut after markDownloaded must not leave a zero-filled original whose download details are gone.
   it('syncs the original to disk before it is put in place and its download details are wiped', async () => {
-    const { db, dataDir, p, share } = setup();
-    const id = share();
+    const { db, dataDir, p, share } = await setup();
+    const id = await share();
     const atSync: { hasRef: boolean; inPlace: boolean }[] = [];
-    disk.onSync = () => atSync.push({ hasRef: getMediaRef(db, id) !== null, inPlace: existsSync(saved(dataDir, rel(id))) });
+    disk.onSync = async () => void atSync.push({ hasRef: (await getMediaRef(db, id)) !== null, inPlace: existsSync(saved(dataDir, rel(id))) });
     expect((await p.process(id)).outcome).toBe('done');
     expect(atSync).toEqual([{ hasRef: true, inPlace: false }]);
-    expect(getMediaRef(db, id)).toBeNull();
+    expect(await getMediaRef(db, id)).toBeNull();
     expect(readFileSync(saved(dataDir, rel(id)), 'utf8')).toBe('jpeg-bytes');
   });
 
   it('saves under the row id when the message id is unsafe as a file name', async () => {
-    const { dataDir, p, share } = setup();
-    const id = share('AB:CD');
+    const { dataDir, p, share } = await setup();
+    const id = await share('AB:CD');
     await p.process(id);
     expect(rel(id, 'AB:CD')).toMatch(new RegExp(`/m${id}\\.jpg$`));
     expect(existsSync(saved(dataDir, rel(id, 'AB:CD')))).toBe(true);
   });
 
   it('marks an expired file unavailable and keeps nothing', async () => {
-    const { db, dataDir, p, share } = setup({ fetcher: async () => { throw new MediaUnavailableError('expired'); } });
-    const id = share();
-    expect(await p.process(id)).toEqual({ outcome: 'unavailable', clientId: 1 });
-    expect(getMedia(db, id)).toMatchObject({ status: 'unavailable', errorCode: 'expired', hasRef: false, localPath: null });
+    const { db, dataDir, p, share } = await setup({ fetcher: async () => { throw new MediaUnavailableError('expired'); } });
+    const id = await share();
+    expect(await p.process(id)).toEqual({ outcome: 'unavailable', clientId: SHA });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'unavailable', errorCode: 'expired', hasRef: false, localPath: null });
     expect(existsSync(join(dataDir, 'media'))).toBe(false);
   });
 
   it('retries a server error from WhatsApp\'s media host after 1 and 5 minutes, then gives up', async () => {
-    const { db, clock, p, fetcher, share } = setup({ fetcher: async () => { throw new MediaDownloadError('http_503'); } });
-    const id = share();
+    const { db, clock, p, fetcher, share } = await setup({ fetcher: async () => { throw new MediaDownloadError('http_503'); } });
+    const id = await share();
     expect((await p.process(id)).outcome).toBe('deferred');
-    expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'http_503', nextAttemptAt: '2026-10-19T08:01:00.000Z', hasRef: true });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'http_503', nextAttemptAt: '2026-10-19T08:01:00.000Z', hasRef: true });
     clock.advance(60_000);
     expect((await p.process(id)).outcome).toBe('deferred');
-    expect(getMedia(db, id)).toMatchObject({ attempts: 2, nextAttemptAt: '2026-10-19T08:06:00.000Z' });
+    expect(await getMedia(db, id)).toMatchObject({ attempts: 2, nextAttemptAt: '2026-10-19T08:06:00.000Z' });
     clock.advance(300_000);
     expect((await p.process(id)).outcome).toBe('failed');
-    expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'http_503', hasRef: false });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'http_503', hasRef: false });
     expect(fetcher).toHaveBeenCalledTimes(3);
   });
 
@@ -236,12 +271,12 @@ describe('MediaProcessor', () => {
       ['a download that times out', () => new MediaDownloadError('timeout'), 'timeout'],
       ['a file locked on disk', locked, 'disk_EBUSY'],
     ])('%s waits 5, 15, 30 and 60 minutes, then hourly, without counting an attempt, and keeps the download details', async (_name, error, code) => {
-      const { db, clock, p, fetcher, extract, share } = setup({ fetcher: async () => { throw error(); } });
-      const id = share();
+      const { db, clock, p, fetcher, extract, share } = await setup({ fetcher: async () => { throw error(); } });
+      const id = await share();
       let elapsed = 0;
       for (const wait of [5, 15, 30, 60, 60, 60]) {
-        expect(await p.process(id)).toEqual({ outcome: 'deferred', clientId: 1 });
-        expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: code, nextAttemptAt: at(elapsed + wait * MINUTE), hasRef: true, localPath: null });
+        expect(await p.process(id)).toEqual({ outcome: 'deferred', clientId: SHA });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: code, nextAttemptAt: at(elapsed + wait * MINUTE), hasRef: true, localPath: null });
         elapsed += wait * MINUTE;
         clock.advance(wait * MINUTE);
       }
@@ -250,90 +285,91 @@ describe('MediaProcessor', () => {
     });
 
     it('a file still failing to download 24 hours after it arrived fails then, and only then loses its download details', async () => {
-      const { db, clock, p, share } = setup({ fetcher: async () => { throw new MediaDownloadError('network'); } });
-      const id = share();
+      const { db, clock, p, share } = await setup({ fetcher: async () => { throw new MediaDownloadError('network'); } });
+      const id = await share();
       clock.advance(24 * 60 * MINUTE); // exactly 24 hours: still waits
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'network', attempts: 0, hasRef: true });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'network', attempts: 0, hasRef: true });
       clock.advance(5 * MINUTE);
-      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'network', nextAttemptAt: null, hasRef: false });
+      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: SHA });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'network', nextAttemptAt: null, hasRef: false });
     });
 
     it('counts the 24 hours from the service start for a file saved before it (10f)', async () => {
       const startedAt = new Date(Date.parse('2026-10-19T08:00:00Z') + 3 * 24 * 60 * MINUTE);
-      const { db, clock, p, share } = setup({ fetcher: async () => { throw new MediaDownloadError('timeout'); }, startedAt });
-      const id = share(); // created 3 days before the start
+      const { db, clock, p, share } = await setup({ fetcher: async () => { throw new MediaDownloadError('timeout'); }, startedAt });
+      const id = await share(); // created 3 days before the start
       clock.set(startedAt.toISOString());
-      expect(await p.process(id)).toEqual({ outcome: 'deferred', clientId: 1 });
+      expect(await p.process(id)).toEqual({ outcome: 'deferred', clientId: SHA });
       clock.advance(24 * 60 * MINUTE + 1);
-      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'timeout', hasRef: false });
+      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: SHA });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'timeout', hasRef: false });
     });
 
     it('a 7-minute outage during a backlog loses nothing: every file is read once the line is back', async () => {
       let down = false;
-      const { db, clock, p, fetcher, share } = setup({
+      const { db, clock, p, fetcher, share } = await setup({
         fetcher: async () => {
           if (down) throw new MediaDownloadError('network');
           return Buffer.from('jpeg-bytes');
         },
       });
-      const ids = ['F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8'].map((w) => share(w));
+      const ids: number[] = [];
+      for (const w of ['F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8']) ids.push(await share(w));
       // As the queue runs: on every 30-second tick, the two oldest due files. The line drops a minute in, for 7 minutes.
       for (let t = 0; t <= 2 * 60 * MINUTE; t += 30_000) {
         down = t >= MINUTE && t < 8 * MINUTE;
-        for (const id of dueMediaIds(db, clock.now().toISOString(), 2)) await p.process(id);
+        for (const id of await dueMediaIds(db, clock.now().toISOString(), 2)) await p.process(id);
         clock.advance(30_000);
       }
-      for (const id of ids) expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'A blue banner with the new logo', hasRef: false });
+      for (const id of ids) expect(await getMedia(db, id)).toMatchObject({ status: 'done', text: 'A blue banner with the new logo', hasRef: false });
       expect(fetcher.mock.calls.length).toBeLessThan(30);
     });
 
     it('a disk error while reading, after the file was saved, still counts an attempt: a read could have been paid for', async () => {
-      const { db, p, share } = setup({ extract: async () => { throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }); } });
-      const id = share();
+      const { db, p, share } = await setup({ extract: async () => { throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }); } });
+      const id = await share();
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'disk_EBUSY', nextAttemptAt: at(MINUTE) });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'disk_EBUSY', nextAttemptAt: at(MINUTE) });
     });
   });
 
   it('waits for the daily budget without counting an attempt, and does not download twice', async () => {
     let capped = true;
-    const { db, clock, p, fetcher, share } = setup({
+    const { db, clock, p, fetcher, share } = await setup({
       extract: async () => {
         if (capped) throw new SpendCapReachedError();
         return { textKind: 'description', text: 'A receipt', pageCount: null, note: null };
       },
     });
-    const id = share();
+    const id = await share();
     expect((await p.process(id)).outcome).toBe('deferred');
-    expect(getMedia(db, id)).toMatchObject({
+    expect(await getMedia(db, id)).toMatchObject({
       status: 'pending', attempts: 0, errorCode: 'spend_cap', nextAttemptAt: '2026-10-19T08:10:00.000Z', localPath: rel(id), hasRef: false,
     });
     capped = false;
     clock.advance(600_000);
     expect((await p.process(id)).outcome).toBe('done');
     expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'A receipt', errorCode: null });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'done', text: 'A receipt', errorCode: null });
   });
 
   // Final review FR3c: only holds of paid calls still in flight are in the way, not the cap itself.
   it('waits 10 minutes as spend_busy, without counting an attempt, when only paid calls in flight hold the budget', async () => {
     let busy = true;
-    const { db, clock, p, share } = setup({
+    const { db, clock, p, share } = await setup({
       extract: async () => {
         if (busy) throw new SpendCapReachedError({ busy: true });
         return { textKind: 'description', text: 'A receipt', pageCount: null, note: null };
       },
     });
-    const id = share();
+    const id = await share();
     expect((await p.process(id)).outcome).toBe('deferred');
-    expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'spend_busy', nextAttemptAt: at(10 * MINUTE), localPath: rel(id) });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'spend_busy', nextAttemptAt: at(10 * MINUTE), localPath: rel(id) });
     busy = false;
     clock.advance(10 * MINUTE);
     expect((await p.process(id)).outcome).toBe('done');
-    expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'A receipt', errorCode: null });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'done', text: 'A receipt', errorCode: null });
   });
 
   it('tells a scan in flight holding the budget (spend_busy) from the daily cap (spend_cap), with the real extractor', async () => {
@@ -341,7 +377,7 @@ describe('MediaProcessor', () => {
     const ai = new FakeMediaAi();
     let spend!: SpendGuard;
     const prepareImage = async (): Promise<PreparedImage> => ({ data: Buffer.from('small'), mediaType: 'image/jpeg', width: 10, height: 10 });
-    const { db, p, share } = setup({
+    const { db, p, share } = await setup({
       extractFor: (d) => {
         spend = new SpendGuard({ db: d, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 15 });
         return createExtractor({ ai, spend, prices: P, prepareImage });
@@ -350,41 +386,41 @@ describe('MediaProcessor', () => {
     spend.record('ai', 10.8, 'earlier calls');
     const hold = spend.reserve(scannedPdfCeilingUsd(P)); // a scan being read holds about $4.16
     expect(hold).not.toBeNull();
-    const a = share('IMG1');
+    const a = await share('IMG1');
     expect((await p.process(a)).outcome).toBe('deferred');
-    expect(getMedia(db, a)).toMatchObject({ errorCode: 'spend_busy', attempts: 0 });
+    expect(await getMedia(db, a)).toMatchObject({ errorCode: 'spend_busy', attempts: 0 });
     spend.settle(hold!, 'ai', 4.15, 'media 99'); // the scan cost about that after all: now the cap itself is in the way
-    const b = share('IMG2');
+    const b = await share('IMG2');
     expect((await p.process(b)).outcome).toBe('deferred');
-    expect(getMedia(db, b)).toMatchObject({ errorCode: 'spend_cap', attempts: 0 });
+    expect(await getMedia(db, b)).toMatchObject({ errorCode: 'spend_cap', attempts: 0 });
     expect(ai.calls).toEqual([]);
   });
 
   it('a file it cannot read fails for good but keeps the original', async () => {
-    const { db, dataDir, p, share } = setup({ extract: async () => { throw new ParseError('not_pdf'); } });
-    const id = share();
+    const { db, dataDir, p, share } = await setup({ extract: async () => { throw new ParseError('not_pdf'); } });
+    const id = await share();
     expect((await p.process(id)).outcome).toBe('failed');
-    expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'not_pdf', localPath: rel(id) });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'not_pdf', localPath: rel(id) });
     expect(existsSync(saved(dataDir, rel(id)))).toBe(true);
   });
 
   it('does not download a file whose message was deleted for everyone', async () => {
-    const { db, p, fetcher, share } = setup();
-    const id = share();
-    applyRevoke(db, 1, 'IMG1');
+    const { db, p, fetcher, share } = await setup();
+    const id = await share();
+    await applyRevoke(db, SHA, 'IMG1');
     expect((await p.process(id)).outcome).toBe('unavailable');
-    expect(getMedia(db, id)).toMatchObject({ errorCode: 'revoked', hasRef: false });
+    expect(await getMedia(db, id)).toMatchObject({ errorCode: 'revoked', hasRef: false });
     expect(fetcher).not.toHaveBeenCalled();
   });
 
   it('does not read a saved file whose message was deleted for everyone while it waited, but keeps the original', async () => {
-    const { db, dataDir, clock, p, fetcher, extract, share } = setup({ extract: async () => { throw new SpendCapReachedError(); } });
-    const id = share();
+    const { db, dataDir, clock, p, fetcher, extract, share } = await setup({ extract: async () => { throw new SpendCapReachedError(); } });
+    const id = await share();
     expect((await p.process(id)).outcome).toBe('deferred');
-    applyRevoke(db, 1, 'IMG1');
+    await applyRevoke(db, SHA, 'IMG1');
     clock.advance(10 * MINUTE);
-    expect(await p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
-    expect(getMedia(db, id)).toMatchObject({ status: 'done', note: 'revoked', text: null, textKind: null, localPath: rel(id) });
+    expect(await p.process(id)).toEqual({ outcome: 'done', clientId: SHA });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'done', note: 'revoked', text: null, textKind: null, localPath: rel(id) });
     expect(extract).toHaveBeenCalledTimes(1);
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(existsSync(saved(dataDir, rel(id)))).toBe(true);
@@ -396,16 +432,16 @@ describe('MediaProcessor', () => {
 
     it('is not read when the delete arrives during its download, but its original is kept', async () => {
       let db!: Db;
-      const s = setup({
+      const s = await setup({
         fetcher: async () => {
-          applyRevoke(db, 1, 'IMG1'); // the client deletes it for everyone while it downloads
+          await applyRevoke(db, SHA, 'IMG1'); // the client deletes it for everyone while it downloads
           return Buffer.from('jpeg-bytes');
         },
       });
       db = s.db;
-      const id = s.share();
-      expect(await s.p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'done', note: 'revoked', text: null, textKind: null, localPath: rel(id), hasRef: false });
+      const id = await s.share();
+      expect(await s.p.process(id)).toEqual({ outcome: 'done', clientId: SHA });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'done', note: 'revoked', text: null, textKind: null, localPath: rel(id), hasRef: false });
       expect(s.extract).not.toHaveBeenCalled();
       expect(existsSync(saved(s.dataDir, rel(id)))).toBe(true);
     });
@@ -416,17 +452,17 @@ describe('MediaProcessor', () => {
     ] as const)('%s, is never sent to Claude', async (_name, kind) => {
       const ai = new FakeMediaAi();
       let db!: Db;
-      const revoke = (waId: string) => applyRevoke(db, 1, waId);
+      const revoke = (waId: string) => applyRevoke(db, SHA, waId);
       const prepareImage = async (): Promise<PreparedImage> => {
-        revoke('IMG1');
+        await revoke('IMG1');
         return { data: Buffer.from('small'), mediaType: 'image/jpeg', width: 10, height: 10 };
       };
       const parse = async (): Promise<ParseResult> => {
-        revoke('DOC1');
+        await revoke('DOC1');
         return { text: '', pageCount: 2 };
       };
       let spend!: SpendGuard;
-      const s = setup({
+      const s = await setup({
         fetcher: async () => (kind === 'pdf' ? Buffer.from('%PDF-1.4 scanned pages') : Buffer.from('jpeg-bytes')),
         extractFor: (d) => {
           spend = new SpendGuard({ db: d, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 15 });
@@ -434,45 +470,45 @@ describe('MediaProcessor', () => {
         },
       });
       db = s.db;
-      const id = kind === 'pdf' ? s.shareFile('DOC1', 'application/pdf', 'scan.pdf') : s.share('IMG1');
-      expect(await s.p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'done', note: 'revoked', text: null, textKind: null, pageCount: null });
+      const id = kind === 'pdf' ? (await s.shareFile('DOC1', 'application/pdf', 'scan.pdf')) : (await s.share('IMG1'));
+      expect(await s.p.process(id)).toEqual({ outcome: 'done', clientId: SHA });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'done', note: 'revoked', text: null, textKind: null, pageCount: null });
       expect(ai.calls).toEqual([]);
       expect(spend.spentToday()).toBe(0);
     });
   });
 
   it.each([
-    ['cannot be opened', 'ref_unreadable', (db: Db, id: number) => {
-      const blob = getMediaRef(db, id)!;
+    ['cannot be opened', 'ref_unreadable', async (db: Db, id: number) => {
+      const blob = (await getMediaRef(db, id))!;
       blob.writeUInt8(blob.readUInt8(blob.length - 1) ^ 1, blob.length - 1); // one flipped bit: the seal no longer opens
-      db.prepare('UPDATE media SET ref_enc = ? WHERE id = ?').run(blob, id);
+      await db.run('UPDATE media SET ref_enc = ? WHERE id = ?', [blob, id]);
     }],
-    ['is missing', 'no_ref', (db: Db, id: number) => db.prepare('UPDATE media SET ref_enc = NULL WHERE id = ?').run(id)],
+    ['is missing', 'no_ref', (db: Db, id: number) => db.run('UPDATE media SET ref_enc = NULL WHERE id = ?', [id])],
   ])('marks a file unavailable when its download details %s', async (_name, code, spoil) => {
-    const { db, p, fetcher, share } = setup();
-    const id = share();
+    const { db, p, fetcher, share } = await setup();
+    const id = await share();
     spoil(db, id);
-    expect(await p.process(id)).toEqual({ outcome: 'unavailable', clientId: 1 });
-    expect(getMedia(db, id)).toMatchObject({ status: 'unavailable', errorCode: code, hasRef: false, localPath: null });
+    expect(await p.process(id)).toEqual({ outcome: 'unavailable', clientId: SHA });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'unavailable', errorCode: code, hasRef: false, localPath: null });
     expect(fetcher).not.toHaveBeenCalled();
   });
 
   it('never overwrites a different file at the same path, but reuses an identical one', async () => {
-    const a = setup();
-    const idA = a.share();
+    const a = await setup();
+    const idA = await a.share();
     mkdirSync(dirname(saved(a.dataDir, rel(idA))), { recursive: true });
     writeFileSync(saved(a.dataDir, rel(idA)), 'other-bytes');
     expect((await a.p.process(idA)).outcome).toBe('failed');
-    expect(getMedia(a.db, idA)).toMatchObject({ errorCode: 'path_conflict', localPath: null });
+    expect(await getMedia(a.db, idA)).toMatchObject({ errorCode: 'path_conflict', localPath: null });
     expect(readFileSync(saved(a.dataDir, rel(idA)), 'utf8')).toBe('other-bytes');
 
-    const b = setup();
-    const idB = b.share();
+    const b = await setup();
+    const idB = await b.share();
     mkdirSync(dirname(saved(b.dataDir, rel(idB))), { recursive: true });
     writeFileSync(saved(b.dataDir, rel(idB)), 'jpeg-bytes');
     expect((await b.p.process(idB)).outcome).toBe('done');
-    expect(getMedia(b.db, idB)).toMatchObject({ status: 'done', localPath: rel(idB) });
+    expect(await getMedia(b.db, idB)).toMatchObject({ status: 'done', localPath: rel(idB) });
   });
 
   describe('logs ids and codes only: no description, caption, address, key or error text', () => {
@@ -501,8 +537,8 @@ describe('MediaProcessor', () => {
       downloadFailed = false;
       const lines: string[] = [];
       const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
-      const { clock, p, share } = setup({ ...o, log });
-      const id = share();
+      const { clock, p, share } = await setup({ ...o, log });
+      const id = await share();
       let last = '';
       for (const wait of waits) {
         clock.advance(wait);
@@ -522,37 +558,38 @@ describe('MediaProcessor', () => {
 
   // Amendment 10a.
   it('leaves the file of an inactive client pending, untouched, until the client is active again', async () => {
-    const { db, p, fetcher, extract, share } = setup();
-    const id = share();
-    syncClients(db, [MEHTA]); // Sharma is no longer in the allow-list
-    expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
-    expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: null, nextAttemptAt: null, hasRef: true, localPath: null });
+    const { db, p, fetcher, extract, share } = await setup();
+    const id = await share();
+    await syncClients(db, [MEHTA]); // Sharma is no longer in the allow-list
+    expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: SHA });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: null, nextAttemptAt: null, hasRef: true, localPath: null });
     expect(fetcher).not.toHaveBeenCalled();
     expect(extract).not.toHaveBeenCalled();
 
-    syncClients(db, [SHARMA, MEHTA]);
-    expect(await p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
+    await syncClients(db, [SHARMA, MEHTA]);
+    expect(await p.process(id)).toEqual({ outcome: 'done', clientId: SHA });
   });
 
   // Amendment 10b.
-  it('fails a file whose message is missing instead of leaving it pending', async () => {
-    const { db, p, fetcher, share } = setup();
-    const id = share();
-    db.pragma('foreign_keys = OFF');
-    db.prepare("DELETE FROM messages WHERE wa_id = 'IMG1'").run();
-    db.pragma('foreign_keys = ON');
-    expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-    expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'no_job', hasRef: false, nextAttemptAt: null });
+  // SQLite only: a file whose message row is gone needs foreign keys switched off, which Postgres never allows.
+  it.runIf(onSqlite)('fails a file whose message is missing instead of leaving it pending', async () => {
+    const { db, p, fetcher, share } = await setup();
+    const id = await share();
+    await db.exec('PRAGMA foreign_keys = OFF');
+    await db.run("DELETE FROM messages WHERE wa_id = 'IMG1'");
+    await db.exec('PRAGMA foreign_keys = ON');
+    expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: SHA });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'no_job', hasRef: false, nextAttemptAt: null });
     expect(fetcher).not.toHaveBeenCalled();
-    expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
+    expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: SHA });
   });
 
   // Owner decision D1.
   it('never downloads view-once media', async () => {
-    const { db, dataDir, p, fetcher, extract, share } = setup();
-    const id = share('VO1', { viewOnce: true });
-    expect(getMedia(db, id)).toMatchObject({ status: 'metadata', errorCode: 'view_once', hasRef: false });
-    expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
+    const { db, dataDir, p, fetcher, extract, share } = await setup();
+    const id = await share('VO1', { viewOnce: true });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'metadata', errorCode: 'view_once', hasRef: false });
+    expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: SHA });
     expect(fetcher).not.toHaveBeenCalled();
     expect(extract).not.toHaveBeenCalled();
     expect(existsSync(join(dataDir, 'media'))).toBe(false);
@@ -560,22 +597,22 @@ describe('MediaProcessor', () => {
 
   // Owner decision D2.
   it.each([{ isForwarded: true }, { forwardingScore: 3 }])('tells the extractor a file was forwarded (%o)', async (contextInfo) => {
-    const { p, extract, share } = setup();
-    const id = share('FW1', { contextInfo });
+    const { p, extract, share } = await setup();
+    const id = await share('FW1', { contextInfo });
     await p.process(id);
     expect(extract).toHaveBeenCalledWith(expect.objectContaining({ mediaId: id, forwarded: true }));
   });
 
   it('saves a forwarded image but never sends it to Claude (with the real extractor)', async () => {
     const ai = new FakeMediaAi();
-    const db0 = seededDb();
+    const db0 = await seededDb();
     const spend = new SpendGuard({ db: db0, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 15 });
     const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
     const prepareImage = vi.fn(async (): Promise<PreparedImage> => ({ data: Buffer.from('small'), mediaType: 'image/jpeg', width: 10, height: 10 }));
-    const { db, dataDir, p, share } = setup({ extract: createExtractor({ ai, spend, prices: P, prepareImage }) });
-    const id = share('FW2', { contextInfo: { isForwarded: true } });
-    expect(await p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
-    expect(getMedia(db, id)).toMatchObject({ status: 'done', forwarded: true, note: 'forwarded_not_described', text: null, localPath: rel(id, 'FW2') });
+    const { db, dataDir, p, share } = await setup({ extract: createExtractor({ ai, spend, prices: P, prepareImage }) });
+    const id = await share('FW2', { contextInfo: { isForwarded: true } });
+    expect(await p.process(id)).toEqual({ outcome: 'done', clientId: SHA });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'done', forwarded: true, note: 'forwarded_not_described', text: null, localPath: rel(id, 'FW2') });
     expect(readFileSync(saved(dataDir, rel(id, 'FW2')), 'utf8')).toBe('jpeg-bytes');
     expect(ai.calls).toEqual([]);
     expect(prepareImage).not.toHaveBeenCalled();
@@ -593,12 +630,12 @@ describe('MediaProcessor', () => {
       ['403 permission denied', () => status(403)],
       ['connection refused before sending', () => connectionLost('ECONNREFUSED')],
     ])('a %s waits 5, 15, 30 and 60 minutes, then hourly, without counting an attempt', async (_name, error) => {
-      const { db, clock, p, fetcher, extract, share } = setup({ extract: async () => { throw error(); } });
-      const id = share();
+      const { db, clock, p, fetcher, extract, share } = await setup({ extract: async () => { throw error(); } });
+      const id = await share();
       let elapsed = 0;
       for (const wait of [5, 15, 30, 60, 60, 60]) {
-        expect(await p.process(id)).toEqual({ outcome: 'deferred', clientId: 1 });
-        expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'ai_unavailable', nextAttemptAt: at(elapsed + wait * MINUTE), localPath: rel(id) });
+        expect(await p.process(id)).toEqual({ outcome: 'deferred', clientId: SHA });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'ai_unavailable', nextAttemptAt: at(elapsed + wait * MINUTE), localPath: rel(id) });
         elapsed += wait * MINUTE;
         clock.advance(wait * MINUTE);
       }
@@ -607,75 +644,75 @@ describe('MediaProcessor', () => {
     });
 
     it('gives up once the file is more than 24 hours old, and keeps the original', async () => {
-      const { db, dataDir, clock, p, share } = setup({ extract: async () => { throw status(529); } });
-      const id = share();
+      const { db, dataDir, clock, p, share } = await setup({ extract: async () => { throw status(529); } });
+      const id = await share();
       clock.advance(24 * 60 * MINUTE); // exactly 24 hours: still waits
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0 });
       clock.advance(5 * MINUTE);
-      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'ai_unavailable', nextAttemptAt: null, localPath: rel(id) });
+      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: SHA });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'ai_unavailable', nextAttemptAt: null, localPath: rel(id) });
       expect(existsSync(saved(dataDir, rel(id)))).toBe(true);
     });
 
     // Amendment 10f: a file loaded before the service started (cli link) still gets 24 hours, counted from the start.
     it('counts the 24 hours from the service start for a file saved before it', async () => {
       const startedAt = new Date(Date.parse('2026-10-19T08:00:00Z') + 3 * 24 * 60 * MINUTE);
-      const { db, clock, p, share } = setup({ extract: async () => { throw status(529); }, startedAt });
-      const id = share(); // created 3 days before the start
+      const { db, clock, p, share } = await setup({ extract: async () => { throw status(529); }, startedAt });
+      const id = await share(); // created 3 days before the start
       clock.set(startedAt.toISOString());
-      expect(await p.process(id)).toEqual({ outcome: 'deferred', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0 });
+      expect(await p.process(id)).toEqual({ outcome: 'deferred', clientId: SHA });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0 });
       clock.advance(24 * 60 * MINUTE); // exactly 24 hours after the start: still waits
       expect((await p.process(id)).outcome).toBe('deferred');
       clock.advance(5 * MINUTE);
-      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'ai_unavailable', nextAttemptAt: null });
+      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: SHA });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'ai_unavailable', nextAttemptAt: null });
     });
 
     it('reads the file once Claude is back', async () => {
       let down = true;
-      const { db, clock, p, share } = setup({
+      const { db, clock, p, share } = await setup({
         extract: async () => {
           if (down) throw status(529);
           return { textKind: 'description', text: 'A receipt', pageCount: null, note: null };
         },
       });
-      const id = share();
+      const id = await share();
       expect((await p.process(id)).outcome).toBe('deferred');
       down = false;
       clock.advance(5 * MINUTE);
       expect((await p.process(id)).outcome).toBe('done');
       // The waits counted nothing; the run that read it counts one attempt.
-      expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'A receipt', errorCode: null, attempts: 1 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'done', text: 'A receipt', errorCode: null, attempts: 1 });
     });
 
     it('starts the waits again at 5 minutes after a different problem', async () => {
       const errors: Error[] = [status(529), status(529), new SpendCapReachedError(), status(529)];
-      const { db, clock, p, share } = setup({ extract: async () => { throw errors.shift()!; } });
-      const id = share();
+      const { db, clock, p, share } = await setup({ extract: async () => { throw errors.shift()!; } });
+      const id = await share();
       await p.process(id); // 5 minutes
       clock.advance(5 * MINUTE);
       await p.process(id); // 15 minutes
-      expect(getMedia(db, id)!.nextAttemptAt).toBe(at(20 * MINUTE));
+      expect((await getMedia(db, id))!.nextAttemptAt).toBe(at(20 * MINUTE));
       clock.advance(15 * MINUTE);
       await p.process(id); // spend cap: 10 minutes
-      expect(getMedia(db, id)).toMatchObject({ errorCode: 'spend_cap', nextAttemptAt: at(30 * MINUTE) });
+      expect(await getMedia(db, id)).toMatchObject({ errorCode: 'spend_cap', nextAttemptAt: at(30 * MINUTE) });
       clock.advance(10 * MINUTE);
       await p.process(id);
-      expect(getMedia(db, id)).toMatchObject({ errorCode: 'ai_unavailable', nextAttemptAt: at(35 * MINUTE), attempts: 0 });
+      expect(await getMedia(db, id)).toMatchObject({ errorCode: 'ai_unavailable', nextAttemptAt: at(35 * MINUTE), attempts: 0 });
     });
 
     it('books nothing for a 529 from the real extractor', async () => {
       const ai = new FakeMediaAi([status(529)]);
-      const db0 = seededDb();
+      const db0 = await seededDb();
       const spend = new SpendGuard({ db: db0, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 15 });
       const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
       const prepareImage = async (): Promise<PreparedImage> => ({ data: Buffer.from('small'), mediaType: 'image/jpeg', width: 10, height: 10 });
-      const { db, p, share } = setup({ extract: createExtractor({ ai, spend, prices: P, prepareImage }) });
-      const id = share();
+      const { db, p, share } = await setup({ extract: createExtractor({ ai, spend, prices: P, prepareImage }) });
+      const id = await share();
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ errorCode: 'ai_unavailable', attempts: 0 });
+      expect(await getMedia(db, id)).toMatchObject({ errorCode: 'ai_unavailable', attempts: 0 });
       expect(ai.calls).toHaveLength(1);
       expect(spend.spentToday()).toBe(0);
     });
@@ -691,10 +728,10 @@ describe('MediaProcessor', () => {
       ['connection reset after sending', () => connectionLost('ECONNRESET'), 'ai_network'],
       ['invalid output', () => new AiInvalidOutputError('bad json', null), 'ai_invalid_output'],
     ])('a %s is retried after 1 minute and counts an attempt', async (_name, error, code) => {
-      const { db, p, share } = setup({ extract: async () => { throw error(); } });
-      const id = share();
+      const { db, p, share } = await setup({ extract: async () => { throw error(); } });
+      const id = await share();
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
     });
   });
 
@@ -705,8 +742,8 @@ describe('MediaProcessor', () => {
     const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
     const PDF = Buffer.from('%PDF-1.4 scanned pages');
     /** The real extractor with a fake Claude; the parser finds no text layer, so every PDF is a scan. */
-    const realExtractor = (ai: FakeMediaAi) => {
-      const spend = new SpendGuard({ db: seededDb(), clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 15 });
+    const realExtractor = async (ai: FakeMediaAi) => {
+      const spend = new SpendGuard({ db: await seededDb(), clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 15 });
       const parse = async (): Promise<ParseResult> => ({ text: '', pageCount: 2 });
       const prepareImage = async (): Promise<PreparedImage> => ({ data: Buffer.from('small'), mediaType: 'image/jpeg', width: 10, height: 10 });
       return { spend, extract: createExtractor({ ai, spend, prices: P, parse, prepareImage }) };
@@ -721,24 +758,24 @@ describe('MediaProcessor', () => {
 
     it.each(failures)('a scanned PDF whose read ends in %s fails for good: read once and booked once', async (_name, error, code) => {
       const ai = new FakeMediaAi([error()]); // a second read would succeed
-      const { spend, extract } = realExtractor(ai);
+      const { spend, extract } = await realExtractor(ai);
       const lines: string[] = [];
       const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
-      const { db, dataDir, clock, p, shareFile } = setup({ fetcher: async () => PDF, extract, log });
-      const id = shareFile('DOC1', 'application/pdf', 'site-plan-scan.pdf');
-      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: 1, nextAttemptAt: null, localPath: rel(id, 'DOC1', 'pdf') });
+      const { db, dataDir, clock, p, shareFile } = await setup({ fetcher: async () => PDF, extract, log });
+      const id = await shareFile('DOC1', 'application/pdf', 'site-plan-scan.pdf');
+      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: SHA });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: 1, nextAttemptAt: null, localPath: rel(id, 'DOC1', 'pdf') });
       expect(existsSync(saved(dataDir, rel(id, 'DOC1', 'pdf')))).toBe(true);
       clock.advance(10 * MINUTE);
-      expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
+      expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: SHA });
       expect(ai.calls).toEqual([{ kind: 'pdf', bytes: PDF }]);
       expect(spend.spentToday()).toBeCloseTo(scannedPdfCeilingUsd(P), 9);
       // One warn line with ids and the code only: no file name, no error text.
-      expect(lines.map((l) => JSON.parse(l) as unknown)).toEqual([{ level: 40, time: expect.any(Number), msg: expect.any(String), mediaId: id, clientId: 1, errorCode: code }]);
+      expect(lines.map((l) => JSON.parse(l) as unknown)).toEqual([{ level: 40, time: expect.any(Number), msg: expect.any(String), mediaId: id, clientId: SHA, errorCode: code }]);
       expect(lines.join('')).not.toContain('site-plan-scan');
     });
 
-    const images: [string, (s: ReturnType<typeof setup>) => number][] = [
+    const images: [string, (s: Awaited<ReturnType<typeof setup>>) => Promise<number>][] = [
       ['an image', (s) => s.share()],
       ['an image shared as a document', (s) => s.shareFile('DOC2', 'image/jpeg', 'photo.jpg')],
     ];
@@ -746,18 +783,18 @@ describe('MediaProcessor', () => {
       '%s whose read ends in %s counts an attempt and is read again',
       async (_kind, _name, shareIt, error, code) => {
         const ai = new FakeMediaAi([error()]);
-        const s = setup({ extract: realExtractor(ai).extract });
-        const id = shareIt(s);
+        const s = await setup({ extract: (await realExtractor(ai)).extract });
+        const id = await shareIt(s);
         expect((await s.p.process(id)).outcome).toBe('deferred');
-        expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
+        expect(await getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
         s.clock.advance(MINUTE);
         expect((await s.p.process(id)).outcome).toBe('done');
-        expect(getMedia(s.db, id)).toMatchObject({ status: 'done', textKind: 'description', errorCode: null });
+        expect(await getMedia(s.db, id)).toMatchObject({ status: 'done', textKind: 'description', errorCode: null });
         expect(ai.calls.map((c) => c.kind)).toEqual(['image', 'image']);
       },
     );
 
-    const files: [string, (s: ReturnType<typeof setup>) => number, 'pdf' | 'image'][] = [
+    const files: [string, (s: Awaited<ReturnType<typeof setup>>) => Promise<number>, 'pdf' | 'image'][] = [
       ['a scanned PDF', (s) => s.shareFile('DOC1', 'application/pdf', 'scan.pdf'), 'pdf'],
       ['an image', (s) => s.share(), 'image'],
     ];
@@ -766,27 +803,27 @@ describe('MediaProcessor', () => {
       '%s still waits, unbilled, on %s, and is read once Claude accepts the call',
       async (_file, _name, shareIt, kind, code) => {
         const ai = new FakeMediaAi([status(code)]);
-        const { spend, extract } = realExtractor(ai);
-        const s = setup({ fetcher: async () => (kind === 'pdf' ? PDF : Buffer.from('jpeg-bytes')), extract });
-        const id = shareIt(s);
+        const { spend, extract } = await realExtractor(ai);
+        const s = await setup({ fetcher: async () => (kind === 'pdf' ? PDF : Buffer.from('jpeg-bytes')), extract });
+        const id = await shareIt(s);
         expect((await s.p.process(id)).outcome).toBe('deferred');
-        expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0, nextAttemptAt: at(5 * MINUTE) });
+        expect(await getMedia(s.db, id)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0, nextAttemptAt: at(5 * MINUTE) });
         expect(spend.spentToday()).toBe(0);
         s.clock.advance(5 * MINUTE);
         expect((await s.p.process(id)).outcome).toBe('done');
-        expect(getMedia(s.db, id)).toMatchObject({ status: 'done', errorCode: null, attempts: 1 }); // the wait counted nothing
+        expect(await getMedia(s.db, id)).toMatchObject({ status: 'done', errorCode: null, attempts: 1 }); // the wait counted nothing
         expect(ai.calls.map((c) => c.kind)).toEqual([kind, kind]);
       },
     );
 
     it('a scanned PDF still waits for the daily budget, without calling Claude', async () => {
       const ai = new FakeMediaAi();
-      const { spend, extract } = realExtractor(ai);
+      const { spend, extract } = await realExtractor(ai);
       spend.record('ai', 12, 'earlier calls'); // the scan ceiling (about $4) no longer fits under the $15 cap
-      const { db, p, shareFile } = setup({ fetcher: async () => PDF, extract });
-      const id = shareFile('DOC1', 'application/pdf', 'scan.pdf');
+      const { db, p, shareFile } = await setup({ fetcher: async () => PDF, extract });
+      const id = await shareFile('DOC1', 'application/pdf', 'scan.pdf');
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'spend_cap', attempts: 0 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'spend_cap', attempts: 0 });
       expect(ai.calls).toEqual([]);
     });
   });
@@ -806,10 +843,10 @@ describe('MediaProcessor', () => {
     it('when the claim cannot be written, nothing is downloaded, decoded or sent to Claude, and the error propagates', async () => {
       const ai = new FakeMediaAi([status(529)]);
       const x = paid(ai);
-      const s = setup({ extractFor: x.extractFor });
-      const saved = s.share('IMG1');
+      const s = await setup({ extractFor: x.extractFor });
+      const saved = await s.share('IMG1');
       expect((await s.p.process(saved)).outcome).toBe('deferred'); // downloaded, then Claude was busy
-      const fresh = s.share('IMG2');
+      const fresh = await s.share('IMG2');
       refuseWrites(s.db);
       s.clock.advance(5 * MINUTE);
       await expect(s.p.process(saved)).rejects.toThrow('disk full');
@@ -817,60 +854,60 @@ describe('MediaProcessor', () => {
       expect(ai.calls).toHaveLength(1); // the first, busy, call only
       expect(x.prepareImage).toHaveBeenCalledTimes(1);
       expect(s.fetcher).toHaveBeenCalledTimes(1); // IMG2 was never downloaded
-      expect(getMedia(s.db, saved)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'ai_unavailable', nextAttemptAt: at(5 * MINUTE) });
-      expect(getMedia(s.db, fresh)).toMatchObject({ status: 'pending', attempts: 0, hasRef: true, localPath: null });
+      expect(await getMedia(s.db, saved)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'ai_unavailable', nextAttemptAt: at(5 * MINUTE) });
+      expect(await getMedia(s.db, fresh)).toMatchObject({ status: 'pending', attempts: 0, hasRef: true, localPath: null });
     });
 
     it('a run that never ends is tried again 15 minutes later, after a restart too; after 3 such runs the file fails as crashed', async () => {
       const lines: string[] = [];
       const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
       // A decode or read that takes the whole process down never returns.
-      const s = setup({ extract: () => new Promise<Extraction>(() => {}) });
-      const id = s.share();
+      const s = await setup({ extract: () => new Promise<Extraction>(() => {}) });
+      const id = await s.share();
       for (let run = 1; run <= MEDIA_MAX_ATTEMPTS; run++) {
         // Each run is a fresh start of the service: nothing about the earlier runs is kept in memory.
         void s.restart().process(id);
         await vi.waitFor(() => expect(s.extract).toHaveBeenCalledTimes(run));
-        expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: run, nextAttemptAt: at(run * 15 * MINUTE), localPath: rel(id) });
+        expect(await getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: run, nextAttemptAt: at(run * 15 * MINUTE), localPath: rel(id) });
         s.clock.advance(15 * MINUTE);
       }
-      expect(await s.restart(log).process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(s.db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed', attempts: MEDIA_MAX_ATTEMPTS, nextAttemptAt: null, localPath: rel(id) });
+      expect(await s.restart(log).process(id)).toEqual({ outcome: 'failed', clientId: SHA });
+      expect(await getMedia(s.db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed', attempts: MEDIA_MAX_ATTEMPTS, nextAttemptAt: null, localPath: rel(id) });
       expect(s.extract).toHaveBeenCalledTimes(MEDIA_MAX_ATTEMPTS);
       expect(s.fetcher).toHaveBeenCalledTimes(1);
       expect(lines.map((l) => JSON.parse(l) as unknown)).toEqual([
-        { level: 40, time: expect.any(Number), msg: expect.any(String), mediaId: id, clientId: 1, errorCode: 'crashed', attempts: MEDIA_MAX_ATTEMPTS },
+        { level: 40, time: expect.any(Number), msg: expect.any(String), mediaId: id, clientId: SHA, errorCode: 'crashed', attempts: MEDIA_MAX_ATTEMPTS },
       ]);
     });
 
     it('waits that count nothing (Claude unavailable, the spend cap, paid calls in flight) leave the attempts exactly as they were before the claim', async () => {
       const invalid = () => new AiInvalidOutputError('bad json', null);
       const errors: Error[] = [invalid(), status(529), new SpendCapReachedError(), status(401), invalid(), new SpendCapReachedError({ busy: true }), invalid()];
-      const { db, clock, p, share } = setup({ extract: async () => { throw errors.shift()!; } });
-      const id = share();
+      const { db, clock, p, share } = await setup({ extract: async () => { throw errors.shift()!; } });
+      const id = await share();
       const seen: [string | null, number][] = [];
       while (errors.length > 0) {
         await p.process(id);
-        const row = getMedia(db, id)!;
+        const row = (await getMedia(db, id))!;
         seen.push([row.errorCode, row.attempts]);
         clock.advance(60 * MINUTE);
       }
       expect(seen).toEqual([
         ['ai_invalid_output', 1], ['ai_unavailable', 1], ['spend_cap', 1], ['ai_unavailable', 1], ['ai_invalid_output', 2], ['spend_busy', 2], ['ai_invalid_output', 3],
       ]);
-      expect(getMedia(db, id)!.status).toBe('failed'); // the third counted attempt, not the seventh run
+      expect((await getMedia(db, id))!.status).toBe('failed'); // the third counted attempt, not the seventh run
     });
   });
 
   it('a refusal from Claude fails for good and is not retried: it was billed', async () => {
     const usage = { inputTokens: 1200, outputTokens: 5, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
-    const { db, dataDir, clock, p, fetcher, extract, share } = setup({ extract: async () => { throw new AiRefusalError(null, usage); } });
-    const id = share();
-    expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-    expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'ai_refusal', attempts: 1, nextAttemptAt: null, localPath: rel(id) });
+    const { db, dataDir, clock, p, fetcher, extract, share } = await setup({ extract: async () => { throw new AiRefusalError(null, usage); } });
+    const id = await share();
+    expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: SHA });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'ai_refusal', attempts: 1, nextAttemptAt: null, localPath: rel(id) });
     expect(existsSync(saved(dataDir, rel(id)))).toBe(true);
     clock.advance(10 * MINUTE);
-    expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
+    expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: SHA });
     expect(extract).toHaveBeenCalledTimes(1);
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
@@ -883,30 +920,28 @@ describe('MediaProcessor: voice notes', () => {
   const throwing = (e: () => unknown): Extractor => async () => {
     throw e();
   };
-  const forgetRows = (db: Db) => db.prepare('SELECT media_id AS mediaId, provider, ref, attempts FROM media_stt_forget ORDER BY id').all();
+  const forgetRows = (db: Db) => rows(db, 'SELECT media_id AS mediaId, provider, ref, attempts FROM media_stt_forget ORDER BY id');
   const TRANSCRIPT: Extraction = { textKind: 'extract', text: 'payment bhej diya', pageCount: null, note: null, forget: { provider: 'elevenlabs', ref: 'tr_1' } };
   /** media_stt_forget refuses every new row from now on, so finishMedia with a forget throws; failMedia still works. */
-  const refuseCopies = (db: Db): void => {
-    db.exec(`CREATE TRIGGER refuse_forget BEFORE INSERT ON media_stt_forget BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
-  };
+  const refuseCopies = (db: Db): void => refuse(db, (sql) => /^\s*INSERT\s+INTO\s+media_stt_forget\b/i.test(sql));
   /** As src/stt/http.ts throws it with Phase 3's M7: an unreadable answer that still names its copy. */
   const unreadable = (ref: string): SttNoAnswerError => Object.assign(new SttNoAnswerError('unreadable_body'), { forgetRef: ref });
   const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
   /** The real extractor over a fake transcriber, booking on its own database. */
-  const realExtractor = (v: VoiceTranscriber) => {
-    const spend = new SpendGuard({ db: seededDb(), clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 15 });
+  const realExtractor = async (v: VoiceTranscriber) => {
+    const spend = new SpendGuard({ db: await seededDb(), clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 15 });
     return { spend, extract: createExtractor({ ai: new FakeMediaAi(), spend, prices: P, voice: v }) };
   };
 
   it('passes the saved path to the extractor, after the download and for a file already saved', async () => {
     const errors: unknown[] = [new SttNoAnswerError('timeout')];
-    const { dataDir, clock, p, extract, shareVoice } = setup({
+    const { dataDir, clock, p, extract, shareVoice } = await setup({
       extract: async () => {
         if (errors.length > 0) throw errors.shift();
         return { ...TRANSCRIPT, forget: null };
       },
     });
-    const id = shareVoice();
+    const id = await shareVoice();
     expect((await p.process(id)).outcome).toBe('deferred');
     clock.advance(MINUTE);
     expect((await p.process(id)).outcome).toBe('done');
@@ -920,17 +955,17 @@ describe('MediaProcessor: voice notes', () => {
   describe('a paid voice call left unbooked', () => {
     it('fails at once as stt_paid_unbooked, never retried: a retry would pay again', async () => {
       const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ billedSeconds: 12, forgetRef: 'tr_1' }] });
-      const { spend, extract } = realExtractor(v);
+      const { spend, extract } = await realExtractor(v);
       vi.spyOn(spend, 'settle').mockImplementation((rid) => {
         spend.release(rid);
         throw new Error('database is locked');
       });
-      const { db, clock, p, shareVoice } = setup({ extract });
-      const id = shareVoice();
-      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1, nextAttemptAt: null, localPath: VOICE_REL(id) });
+      const { db, clock, p, shareVoice } = await setup({ extract });
+      const id = await shareVoice();
+      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: SHA });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1, nextAttemptAt: null, localPath: VOICE_REL(id) });
       clock.advance(60 * MINUTE);
-      expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
+      expect(await p.process(id)).toEqual({ outcome: 'skipped', clientId: SHA });
       expect(v.transcribed).toBe(1);
       expect(v.forgotten).toEqual(['tr_1']); // the extractor already deleted the copy
     });
@@ -943,10 +978,10 @@ describe('MediaProcessor: voice notes', () => {
         }
       }
       const v = new PricingRefused({ provider: 'elevenlabs' });
-      const { db, p, shareVoice } = setup({ extract: realExtractor(v).extract });
-      const id = shareVoice();
+      const { db, p, shareVoice } = await setup({ extract: (await realExtractor(v)).extract });
+      const id = await shareVoice();
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1 });
       expect(v.transcribed).toBe(1);
     });
 
@@ -958,10 +993,10 @@ describe('MediaProcessor: voice notes', () => {
         }
       }
       const v = new PricingCapped({ provider: 'elevenlabs' });
-      const { db, p, shareVoice } = setup({ extract: realExtractor(v).extract });
-      const id = shareVoice();
+      const { db, p, shareVoice } = await setup({ extract: (await realExtractor(v)).extract });
+      const id = await shareVoice();
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1, nextAttemptAt: null });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1, nextAttemptAt: null });
       expect(v.transcribed).toBe(1);
     });
 
@@ -972,16 +1007,16 @@ describe('MediaProcessor: voice notes', () => {
       ['a later part failing', () => new SttPartialError(1, 2, new SttHttpError(500))],
     ])('a booking that failed after %s is booked late and fails at once', async (_name, error) => {
       const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [error(), error()] });
-      const { spend, extract } = realExtractor(v);
+      const { spend, extract } = await realExtractor(v);
       vi.spyOn(spend, 'settle').mockImplementationOnce((rid) => {
         spend.release(rid);
         throw new Error('database is locked');
       });
       const record = vi.spyOn(spend, 'record');
-      const { db, clock, p, shareVoice } = setup({ extract });
-      const id = shareVoice();
-      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1, nextAttemptAt: null });
+      const { db, clock, p, shareVoice } = await setup({ extract });
+      const id = await shareVoice();
+      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: SHA });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1, nextAttemptAt: null });
       expect(record).toHaveBeenCalledExactlyOnceWith('stt', v.ceilingUsd(50), `media ${id} (booked late)`);
       clock.advance(60 * MINUTE);
       expect((await p.process(id)).outcome).toBe('skipped');
@@ -990,15 +1025,15 @@ describe('MediaProcessor: voice notes', () => {
 
     it('a booking that failed after a refused key (401) is unchanged: never billed, it waits as stt_unavailable', async () => {
       const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [new SttHttpError(401)] });
-      const { spend, extract } = realExtractor(v);
+      const { spend, extract } = await realExtractor(v);
       vi.spyOn(spend, 'release').mockImplementationOnce(() => {
         throw new Error('database is locked');
       });
       const record = vi.spyOn(spend, 'record');
-      const { db, p, shareVoice } = setup({ extract });
-      const id = shareVoice();
+      const { db, p, shareVoice } = await setup({ extract });
+      const id = await shareVoice();
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_unavailable', attempts: 0 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_unavailable', attempts: 0 });
       expect(record).not.toHaveBeenCalled();
     });
   });
@@ -1006,35 +1041,33 @@ describe('MediaProcessor: voice notes', () => {
   // Review round 1, fix 2: when the final failure itself cannot be written, the row is still pending in the database,
   // but this processor never runs it again: every such run could pay the provider again.
   describe('a never-retry failure that cannot be written', () => {
-    const refuseFail = (db: Db): void => {
-      db.exec(`CREATE TRIGGER refuse_fail BEFORE UPDATE OF status ON media WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
-    };
+    const refuseFail = (db: Db): void => refuse(db, setsStatus('failed'));
 
     it('stt_paid_unbooked: the error propagates, and the next run of the file makes no extractor call', async () => {
       const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ billedSeconds: 12 }] });
-      const { spend, extract } = realExtractor(v);
+      const { spend, extract } = await realExtractor(v);
       vi.spyOn(spend, 'settle').mockImplementation((rid) => {
         spend.release(rid);
         throw new Error('database is locked');
       });
-      const s = setup({ extract });
-      const id = s.shareVoice();
+      const s = await setup({ extract });
+      const id = await s.shareVoice();
       refuseFail(s.db);
       await expect(s.p.process(id)).rejects.toThrow('disk full');
-      expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: 1 });
+      expect(await getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: 1 });
       s.clock.advance(60 * MINUTE);
-      expect(await s.p.process(id)).toEqual({ outcome: 'skipped', clientId: 1 });
+      expect(await s.p.process(id)).toEqual({ outcome: 'skipped', clientId: SHA });
       expect(s.extract).toHaveBeenCalledTimes(1);
       expect(v.transcribed).toBe(1);
-      expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: 1 }); // not claimed again
+      expect(await getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: 1 }); // not claimed again
     });
 
     it.each([
       ['stt_partial', () => new SttPartialError(1, 2, new SttHttpError(500))],
       ['stt_job_failed', () => new SttJobError('failed')],
     ])('%s: the next run makes no extractor call', async (_code, error) => {
-      const s = setup({ extract: throwing(error) });
-      const id = s.shareVoice();
+      const s = await setup({ extract: throwing(error) });
+      const id = await s.shareVoice();
       refuseFail(s.db);
       await expect(s.p.process(id)).rejects.toThrow('disk full');
       s.clock.advance(60 * MINUTE);
@@ -1043,8 +1076,8 @@ describe('MediaProcessor: voice notes', () => {
     });
 
     it('the final no-answer: the next run makes no extractor call', async () => {
-      const s = setup({ extract: throwing(() => new SttNoAnswerError('timeout')) });
-      const id = s.shareVoice();
+      const s = await setup({ extract: throwing(() => new SttNoAnswerError('timeout')) });
+      const id = await s.shareVoice();
       expect((await s.p.process(id)).outcome).toBe('deferred'); // the one retry
       refuseFail(s.db);
       s.clock.advance(MINUTE);
@@ -1055,8 +1088,8 @@ describe('MediaProcessor: voice notes', () => {
     });
 
     it('a failure that may be retried is not held back', async () => {
-      const s = setup({ extract: throwing(() => new SttHttpError(500)) });
-      const id = s.shareVoice();
+      const s = await setup({ extract: throwing(() => new SttHttpError(500)) });
+      const id = await s.shareVoice();
       refuseFail(s.db); // a deferral is not a status change, so it is still written
       expect((await s.p.process(id)).outcome).toBe('deferred');
       s.clock.advance(MINUTE);
@@ -1073,17 +1106,17 @@ describe('MediaProcessor: voice notes', () => {
     ['a voice note', 'voice'],
     ['an audio file', 'audio'],
   ] as const)('%s whose runs never end fails as crashed after 2 runs, not 3', async (_name, kind) => {
-    const s = setup({ extract: () => new Promise<Extraction>(() => {}) });
-    const id = kind === 'voice' ? s.shareVoice() : s.shareAudio();
-    expect(getMedia(s.db, id)!.kind).toBe(kind);
+    const s = await setup({ extract: () => new Promise<Extraction>(() => {}) });
+    const id = kind === 'voice' ? (await s.shareVoice()) : (await s.shareAudio());
+    expect((await getMedia(s.db, id))!.kind).toBe(kind);
     for (let run = 1; run <= STT_NO_ANSWER_MAX_ATTEMPTS; run++) {
       void s.restart().process(id);
       await vi.waitFor(() => expect(s.extract).toHaveBeenCalledTimes(run));
-      expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: run });
+      expect(await getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: run });
       s.clock.advance(15 * MINUTE);
     }
-    expect(await s.restart().process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-    expect(getMedia(s.db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed', attempts: STT_NO_ANSWER_MAX_ATTEMPTS });
+    expect(await s.restart().process(id)).toEqual({ outcome: 'failed', clientId: SHA });
+    expect(await getMedia(s.db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed', attempts: STT_NO_ANSWER_MAX_ATTEMPTS });
     expect(s.extract).toHaveBeenCalledTimes(STT_NO_ANSWER_MAX_ATTEMPTS);
   });
 
@@ -1091,12 +1124,12 @@ describe('MediaProcessor: voice notes', () => {
     it('deletes the copy at once, best effort, and fails the file as stt_paid_unbooked', async () => {
       const v = new FakeVoiceTranscriber({ provider: 'elevenlabs' });
       const afterFinish = vi.fn();
-      const { db, clock, p, extract, shareVoice } = setup({ extract: async () => TRANSCRIPT, voice: v, afterFinish });
-      const id = shareVoice();
+      const { db, clock, p, extract, shareVoice } = await setup({ extract: async () => TRANSCRIPT, voice: v, afterFinish });
+      const id = await shareVoice();
       refuseCopies(db);
-      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
+      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: SHA });
       expect(v.forgotten).toEqual(['tr_1']);
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1, text: null, nextAttemptAt: null });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1, text: null, nextAttemptAt: null });
       expect(afterFinish).not.toHaveBeenCalled();
       clock.advance(60 * MINUTE);
       expect((await p.process(id)).outcome).toBe('skipped');
@@ -1110,39 +1143,37 @@ describe('MediaProcessor: voice notes', () => {
       ['no transcriber is given', () => null, null],
     ])('fails the file the same when %s', async (_name, voice, forgotten) => {
       const v = voice();
-      const { db, p, shareVoice } = setup({ extract: async () => TRANSCRIPT, voice: v });
-      const id = shareVoice();
+      const { db, p, shareVoice } = await setup({ extract: async () => TRANSCRIPT, voice: v });
+      const id = await shareVoice();
       refuseCopies(db);
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
       expect(v?.forgotten ?? null).toEqual(forgotten);
     });
 
     // Review round 1, fix 5: noted first, then deleted, so a failed delete leaves a row for the sweep.
     describe('when the copy can still be noted', () => {
-      const refuseFinish = (db: Db): void => {
-        db.exec(`CREATE TRIGGER refuse_finish BEFORE UPDATE OF status ON media WHEN NEW.status = 'done' BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
-      };
+      const refuseFinish = (db: Db): void => refuse(db, setsStatus('done'));
 
       it('notes the copy, deletes it and removes its row', async () => {
         const v = new FakeVoiceTranscriber({ provider: 'elevenlabs' });
-        const { db, p, shareVoice } = setup({ extract: async () => TRANSCRIPT, voice: v });
-        const id = shareVoice();
+        const { db, p, shareVoice } = await setup({ extract: async () => TRANSCRIPT, voice: v });
+        const id = await shareVoice();
         refuseFinish(db);
         expect((await p.process(id)).outcome).toBe('failed');
-        expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
         expect(v.forgotten).toEqual(['tr_1']);
-        expect(forgetRows(db)).toEqual([]);
+        expect(await forgetRows(db)).toEqual([]);
       });
 
       it('a delete that fails leaves the row, counted, for the sweep', async () => {
         const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', forgetError: new SttHttpError(500) });
-        const { db, p, shareVoice } = setup({ extract: async () => TRANSCRIPT, voice: v });
-        const id = shareVoice();
+        const { db, p, shareVoice } = await setup({ extract: async () => TRANSCRIPT, voice: v });
+        const id = await shareVoice();
         refuseFinish(db);
         expect((await p.process(id)).outcome).toBe('failed');
         expect(v.forgotten).toEqual(['tr_1']);
-        expect(forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_1', attempts: 1 }]);
+        expect(await forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_1', attempts: 1 }]);
       });
 
       // Review round 1, 6b.
@@ -1150,34 +1181,34 @@ describe('MediaProcessor: voice notes', () => {
         const v = new FakeVoiceTranscriber({ provider: 'elevenlabs' });
         Object.defineProperty(v, 'canForget', { value: false });
         const forget = vi.spyOn(v, 'forget');
-        const { db, p, shareVoice } = setup({ extract: async () => TRANSCRIPT, voice: v });
-        const id = shareVoice();
+        const { db, p, shareVoice } = await setup({ extract: async () => TRANSCRIPT, voice: v });
+        const id = await shareVoice();
         refuseFinish(db);
         expect((await p.process(id)).outcome).toBe('failed');
-        expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
         expect(forget).not.toHaveBeenCalled();
-        expect(forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_1', attempts: 0 }]);
+        expect(await forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_1', attempts: 0 }]);
       });
 
       it('with copies refused too, a transcriber that keeps no copies is never asked', async () => {
         const v = new FakeVoiceTranscriber({ provider: 'elevenlabs' });
         Object.defineProperty(v, 'canForget', { value: false });
         const forget = vi.spyOn(v, 'forget');
-        const { db, p, shareVoice } = setup({ extract: async () => TRANSCRIPT, voice: v });
-        const id = shareVoice();
+        const { db, p, shareVoice } = await setup({ extract: async () => TRANSCRIPT, voice: v });
+        const id = await shareVoice();
         refuseCopies(db);
         expect((await p.process(id)).outcome).toBe('failed');
-        expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked' });
         expect(forget).not.toHaveBeenCalled();
       });
     });
 
     it('a finish without a copy that throws keeps the old rule (a counted retry)', async () => {
-      const { db, p, shareVoice } = setup({ extract: async () => ({ ...TRANSCRIPT, forget: null }) });
-      const id = shareVoice();
-      db.exec(`CREATE TRIGGER refuse_finish BEFORE UPDATE OF status ON media WHEN NEW.status = 'done' BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
+      const { db, p, shareVoice } = await setup({ extract: async () => ({ ...TRANSCRIPT, forget: null }) });
+      const id = await shareVoice();
+      refuse(db, setsStatus('done'));
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'unknown', attempts: 1 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'unknown', attempts: 1 });
     });
   });
 
@@ -1188,12 +1219,12 @@ describe('MediaProcessor: voice notes', () => {
       ['403', () => new SttHttpError(403)],
       ['a booking that failed after a 401', () => new SttBookingError(new Error('database is locked'), new SttHttpError(401))],
     ])('(%s) waits 5, 15, 30 and 60 minutes, then hourly, as stt_unavailable, without counting an attempt', async (_name, error) => {
-      const { db, clock, p, extract, shareVoice } = setup({ extract: throwing(error) });
-      const id = shareVoice();
+      const { db, clock, p, extract, shareVoice } = await setup({ extract: throwing(error) });
+      const id = await shareVoice();
       let elapsed = 0;
       for (const wait of [5, 15, 30, 60, 60, 60]) {
-        expect(await p.process(id)).toEqual({ outcome: 'deferred', clientId: 1 });
-        expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'stt_unavailable', nextAttemptAt: at(elapsed + wait * MINUTE) });
+        expect(await p.process(id)).toEqual({ outcome: 'deferred', clientId: SHA });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'stt_unavailable', nextAttemptAt: at(elapsed + wait * MINUTE) });
         elapsed += wait * MINUTE;
         clock.advance(wait * MINUTE);
       }
@@ -1201,41 +1232,41 @@ describe('MediaProcessor: voice notes', () => {
     });
 
     it('fails the file as stt_unavailable once it is more than 24 hours old', async () => {
-      const { db, clock, p, shareVoice } = setup({ extract: throwing(() => new SttHttpError(401)) });
-      const id = shareVoice();
+      const { db, clock, p, shareVoice } = await setup({ extract: throwing(() => new SttHttpError(401)) });
+      const id = await shareVoice();
       clock.advance(24 * 60 * MINUTE); // exactly 24 hours: still waits
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_unavailable', attempts: 0 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_unavailable', attempts: 0 });
       clock.advance(5 * MINUTE);
-      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_unavailable', nextAttemptAt: null, localPath: VOICE_REL(id) });
+      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: SHA });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_unavailable', nextAttemptAt: null, localPath: VOICE_REL(id) });
     });
 
     it('counts the 24 hours from the service start for a file saved before it', async () => {
       const startedAt = new Date(Date.parse('2026-10-19T08:00:00Z') + 3 * 24 * 60 * MINUTE);
-      const { db, clock, p, shareVoice } = setup({ extract: throwing(() => new SttHttpError(403)), startedAt });
-      const id = shareVoice();
+      const { db, clock, p, shareVoice } = await setup({ extract: throwing(() => new SttHttpError(403)), startedAt });
+      const id = await shareVoice();
       clock.set(startedAt.toISOString());
       expect((await p.process(id)).outcome).toBe('deferred');
       clock.advance(24 * 60 * MINUTE + 1);
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_unavailable' });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_unavailable' });
     });
 
     it('keeps its waits apart from ai_unavailable: a change of problem starts again at 5 minutes', async () => {
       const errors: unknown[] = [new SttHttpError(401), new SttHttpError(401), status(529), new SttHttpError(401)];
-      const { db, clock, p, shareVoice } = setup({ extract: async () => { throw errors.shift(); } });
-      const id = shareVoice();
+      const { db, clock, p, shareVoice } = await setup({ extract: async () => { throw errors.shift(); } });
+      const id = await shareVoice();
       await p.process(id);
       clock.advance(5 * MINUTE);
       await p.process(id);
-      expect(getMedia(db, id)).toMatchObject({ errorCode: 'stt_unavailable', nextAttemptAt: at(20 * MINUTE) });
+      expect(await getMedia(db, id)).toMatchObject({ errorCode: 'stt_unavailable', nextAttemptAt: at(20 * MINUTE) });
       clock.advance(15 * MINUTE);
       await p.process(id);
-      expect(getMedia(db, id)).toMatchObject({ errorCode: 'ai_unavailable', nextAttemptAt: at(25 * MINUTE) });
+      expect(await getMedia(db, id)).toMatchObject({ errorCode: 'ai_unavailable', nextAttemptAt: at(25 * MINUTE) });
       clock.advance(5 * MINUTE);
       await p.process(id);
-      expect(getMedia(db, id)).toMatchObject({ errorCode: 'stt_unavailable', nextAttemptAt: at(30 * MINUTE), attempts: 0 });
+      expect(await getMedia(db, id)).toMatchObject({ errorCode: 'stt_unavailable', nextAttemptAt: at(30 * MINUTE), attempts: 0 });
     });
   });
 
@@ -1249,10 +1280,10 @@ describe('MediaProcessor: voice notes', () => {
       ['a later part refused with 401', () => new SttPartialError(1, 2, new SttHttpError(401)), 'stt_partial'],
       ['a booking that failed after a later part failed', () => new SttBookingError(new Error('database is locked'), new SttPartialError(1, 2, new SttHttpError(401))), 'stt_partial'],
     ])('%s fails at once, with no retry', async (_name, error, code) => {
-      const { db, clock, p, extract, shareVoice } = setup({ extract: throwing(error) });
-      const id = shareVoice();
-      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: 1, nextAttemptAt: null, localPath: VOICE_REL(id) });
+      const { db, clock, p, extract, shareVoice } = await setup({ extract: throwing(error) });
+      const id = await shareVoice();
+      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: SHA });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: 1, nextAttemptAt: null, localPath: VOICE_REL(id) });
       clock.advance(60 * MINUTE);
       expect((await p.process(id)).outcome).toBe('skipped');
       expect(extract).toHaveBeenCalledTimes(1);
@@ -1264,97 +1295,112 @@ describe('MediaProcessor: voice notes', () => {
       ['a timeout', () => new SttNoAnswerError('timeout'), 'stt_no_answer_timeout'],
       ['a lost job', () => new SttJobLostError('http_404'), 'stt_no_answer_http_404'],
     ])('%s is tried once more after 1 minute, then fails', async (_name, error, code) => {
-      const { db, clock, p, extract, shareVoice } = setup({ extract: throwing(error) });
-      const id = shareVoice();
+      const { db, clock, p, extract, shareVoice } = await setup({ extract: throwing(error) });
+      const id = await shareVoice();
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
       clock.advance(MINUTE);
-      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: STT_NO_ANSWER_MAX_ATTEMPTS, nextAttemptAt: null });
+      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: SHA });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: STT_NO_ANSWER_MAX_ATTEMPTS, nextAttemptAt: null });
       expect(extract).toHaveBeenCalledTimes(2);
     });
 
     it('notes in media_stt_forget the copy an unreadable answer named, once, with the provider that made it', async () => {
       const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable('tr_9'), unreadable('tr_9')] });
-      const { db, clock, p, shareVoice } = setup({ extract: realExtractor(v).extract });
-      const id = shareVoice();
+      const { db, clock, p, shareVoice } = await setup({ extract: (await realExtractor(v)).extract });
+      const id = await shareVoice();
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_no_answer_unreadable_body', attempts: 1 });
-      expect(forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_9', attempts: 0 }]);
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_no_answer_unreadable_body', attempts: 1 });
+      expect(await forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_9', attempts: 0 }]);
       clock.advance(MINUTE);
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_no_answer_unreadable_body' });
-      expect(forgetRows(db)).toHaveLength(1);
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_no_answer_unreadable_body' });
+      expect(await forgetRows(db)).toHaveLength(1);
     });
 
     it('notes the copy of a booking that failed after an unreadable answer, and fails at once as stt_paid_unbooked', async () => {
       const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable('tr_9')] });
-      const { spend, extract } = realExtractor(v);
+      const { spend, extract } = await realExtractor(v);
       vi.spyOn(spend, 'settle').mockImplementationOnce((rid) => {
         spend.release(rid);
         throw new Error('database is locked');
       });
-      const { db, p, shareVoice } = setup({ extract });
-      const id = shareVoice();
+      const { db, p, shareVoice } = await setup({ extract });
+      const id = await shareVoice();
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1 });
-      expect(forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_9', attempts: 0 }]);
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1 });
+      expect(await forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_9', attempts: 0 }]);
     });
 
     // Review round 1, 6c: the id is found two causes deep, noted, and (fix 5) deleted at once through the transcriber.
     it('notes and deletes the copy of a booking that failed after a later part failed after an unreadable answer', async () => {
       const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [new SttPartialError(1, 2, unreadable('tr_9'))] });
-      const { spend, extract } = realExtractor(v);
+      const { spend, extract } = await realExtractor(v);
       vi.spyOn(spend, 'settle').mockImplementationOnce((rid) => {
         spend.release(rid);
         throw new Error('database is locked');
       });
-      const { db, p, shareVoice } = setup({ extract, voice: v });
-      const id = shareVoice();
+      const { db, p, shareVoice } = await setup({ extract, voice: v });
+      const id = await shareVoice();
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1 });
-      await vi.waitFor(() => expect(forgetRows(db)).toEqual([]));
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'stt_paid_unbooked', attempts: 1 });
+      await vi.waitFor(async () => expect(await forgetRows(db)).toEqual([]));
       expect(v.forgotten).toEqual(['tr_9']);
     });
 
     // Review round 1, fix 5: a noted copy is deleted promptly, not only by the sweep.
     it('deletes a noted copy at once when the transcriber is set up, without waiting for it', async () => {
       const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable('tr_9')] });
-      const { db, p, shareVoice } = setup({ extract: realExtractor(v).extract, voice: v });
-      const id = shareVoice();
+      const { db, p, shareVoice } = await setup({ extract: (await realExtractor(v)).extract, voice: v });
+      const id = await shareVoice();
       expect((await p.process(id)).outcome).toBe('deferred');
       await vi.waitFor(() => expect(v.forgotten).toEqual(['tr_9']));
-      await vi.waitFor(() => expect(forgetRows(db)).toEqual([]));
+      await vi.waitFor(async () => expect(await forgetRows(db)).toEqual([]));
+    });
+
+    // S1 review: the note is awaited before the deletion starts (on Postgres an un-awaited note could lose that race).
+    it('a copy that could not be noted for deletion is never sent for deletion, and the failure is logged', async () => {
+      const lines: string[] = [];
+      const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
+      const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable('tr_9')] });
+      const { db, p, shareVoice } = await setup({ extract: (await realExtractor(v)).extract, voice: v, log });
+      refuse(db, (sql) => /^\s*INSERT\s+INTO\s+media_stt_forget\b/i.test(sql)); // the processor's note is refused
+      const id = await shareVoice();
+      expect((await p.process(id)).outcome).toBe('deferred');
+      await new Promise((r) => setTimeout(r, 20)); // a deletion started without waiting would have run by now
+      expect(await forgetRows(db)).toEqual([]);
+      expect(v.forgotten).toEqual([]);
+      expect(lines.map((l) => (JSON.parse(l) as { errorCode?: string }).errorCode)).toContain('forget_not_noted');
     });
 
     it('a deletion that fails leaves the row, counted, for the sweep; the outcome is the same', async () => {
       const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable('tr_9')], forgetError: new SttHttpError(500) });
-      const { db, p, shareVoice } = setup({ extract: realExtractor(v).extract, voice: v });
-      const id = shareVoice();
+      const { db, p, shareVoice } = await setup({ extract: (await realExtractor(v)).extract, voice: v });
+      const id = await shareVoice();
       expect((await p.process(id)).outcome).toBe('deferred');
-      await vi.waitFor(() => expect(forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_9', attempts: 1 }]));
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_no_answer_unreadable_body', attempts: 1 });
+      await vi.waitFor(async () => expect(await forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_9', attempts: 1 }]));
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_no_answer_unreadable_body', attempts: 1 });
     });
 
     it('a transcriber that keeps no copies is not asked: the row waits for one that does', async () => {
       const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable('tr_9')] });
       Object.defineProperty(v, 'canForget', { value: false });
-      const { db, p, shareVoice } = setup({ extract: realExtractor(v).extract, voice: v });
-      const id = shareVoice();
+      const { db, p, shareVoice } = await setup({ extract: (await realExtractor(v)).extract, voice: v });
+      const id = await shareVoice();
       expect((await p.process(id)).outcome).toBe('deferred');
       await new Promise((r) => setTimeout(r, 20));
       expect(v.forgotten).toEqual([]);
-      expect(forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_9', attempts: 0 }]);
+      expect(await forgetRows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_9', attempts: 0 }]);
     });
 
     it('a copy that cannot be noted changes nothing else', async () => {
       const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable('tr_9')] });
-      const { db, p, shareVoice } = setup({ extract: realExtractor(v).extract });
-      const id = shareVoice();
+      const { db, p, shareVoice } = await setup({ extract: (await realExtractor(v)).extract });
+      const id = await shareVoice();
       refuseCopies(db);
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_no_answer_unreadable_body', attempts: 1 });
-      expect(forgetRows(db)).toEqual([]);
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'stt_no_answer_unreadable_body', attempts: 1 });
+      expect(await forgetRows(db)).toEqual([]);
     });
   });
 
@@ -1366,22 +1412,22 @@ describe('MediaProcessor: voice notes', () => {
       ['a booking that failed after no answer', () => new SttBookingError(new Error('database is locked'), new SttNoAnswerError('timeout')), 'stt_booking'],
       ['a booking that failed after a failed job', () => new SttBookingError(new Error('database is locked'), new SttJobError('failed')), 'stt_booking'],
     ])('%s is retried once after 1 minute, then fails: a voice note gets 2 runs in all (review round 1, fix 3)', async (_name, error, code) => {
-      const { db, clock, p, extract, shareVoice } = setup({ extract: throwing(error) });
-      const id = shareVoice();
+      const { db, clock, p, extract, shareVoice } = await setup({ extract: throwing(error) });
+      const id = await shareVoice();
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
       clock.advance(MINUTE);
-      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: STT_NO_ANSWER_MAX_ATTEMPTS });
+      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: SHA });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: STT_NO_ANSWER_MAX_ATTEMPTS });
       expect(extract).toHaveBeenCalledTimes(2);
     });
   });
 
   it('the spend cap still waits as before, counting nothing', async () => {
-    const { db, p, shareVoice } = setup({ extract: throwing(() => new SpendCapReachedError({ busy: true })) });
-    const id = shareVoice();
+    const { db, p, shareVoice } = await setup({ extract: throwing(() => new SpendCapReachedError({ busy: true })) });
+    const id = await shareVoice();
     expect((await p.process(id)).outcome).toBe('deferred');
-    expect(getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'spend_busy', attempts: 0, nextAttemptAt: at(10 * MINUTE) });
+    expect(await getMedia(db, id)).toMatchObject({ status: 'pending', errorCode: 'spend_busy', attempts: 0, nextAttemptAt: at(10 * MINUTE) });
   });
 
   // Phase 2b amendment L2: the local engine costs nothing, so its failures are retried freely, and a stop gives the try back.
@@ -1393,55 +1439,55 @@ describe('MediaProcessor: voice notes', () => {
       ['a program that did not start', 'exit_-1', 'local_exit_-1'],
       ['no transcript file', 'no_output', 'local_no_output'],
     ])('%s is a counted retry after 1, then 5 minutes, failed after 3 attempts when the voice transcriber is free', async (_name, engineCode, code) => {
-      const { db, clock, p, extract, shareVoice } = setup({ extract: throwing(() => new LocalEngineError(engineCode)), voicePaid: false });
-      const id = shareVoice();
+      const { db, clock, p, extract, shareVoice } = await setup({ extract: throwing(() => new LocalEngineError(engineCode)), voicePaid: false });
+      const id = await shareVoice();
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: code, nextAttemptAt: at(MINUTE) });
       clock.advance(MINUTE);
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 2, errorCode: code, nextAttemptAt: at(6 * MINUTE) });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 2, errorCode: code, nextAttemptAt: at(6 * MINUTE) });
       clock.advance(5 * MINUTE);
-      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: MEDIA_MAX_ATTEMPTS, nextAttemptAt: null });
+      expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: SHA });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: code, attempts: MEDIA_MAX_ATTEMPTS, nextAttemptAt: null });
       expect(extract).toHaveBeenCalledTimes(3);
     });
 
     it('an audio file gets the same 3 attempts', async () => {
-      const { db, clock, p, extract, shareAudio } = setup({ extract: throwing(() => new LocalEngineError('timeout')), voicePaid: false });
-      const id = shareAudio();
+      const { db, clock, p, extract, shareAudio } = await setup({ extract: throwing(() => new LocalEngineError('timeout')), voicePaid: false });
+      const id = await shareAudio();
       for (const wait of [MINUTE, 5 * MINUTE]) {
         expect((await p.process(id)).outcome).toBe('deferred');
         clock.advance(wait);
       }
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_timeout', attempts: 3 });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_timeout', attempts: 3 });
       expect(extract).toHaveBeenCalledTimes(3);
     });
 
     it('a retried note that the engine then transcribes is done, and nothing is booked', async () => {
       const v = new FakeLocalVoiceTranscriber({ results: [new LocalEngineError('empty_output'), new LocalEngineError('empty_output'), { text: 'kal milte hain' }] });
-      const spendDb = seededDb();
+      const spendDb = await seededDb();
       const spend = new SpendGuard({ db: spendDb, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 15 });
       const extract = createExtractor({ ai: new FakeMediaAi(), spend, prices: P, voice: v });
-      const { db, clock, p, shareVoice } = setup({ extract, voice: v, voicePaid: false });
-      const id = shareVoice();
+      const { db, clock, p, shareVoice } = await setup({ extract, voice: v, voicePaid: false });
+      const id = await shareVoice();
       expect((await p.process(id)).outcome).toBe('deferred');
       clock.advance(MINUTE);
       expect((await p.process(id)).outcome).toBe('deferred');
       clock.advance(5 * MINUTE);
       expect((await p.process(id)).outcome).toBe('done');
-      expect(getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'extract', text: 'kal milte hain', note: null });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'done', textKind: 'extract', text: 'kal milte hain', note: null });
       expect(v.transcribed).toBe(3);
-      expect(forgetRows(db)).toEqual([]);
-      expect(spendDb.prepare('SELECT COUNT(*) AS n FROM spend').get()).toEqual({ n: 0 });
+      expect(await forgetRows(db)).toEqual([]);
+      expect(await spendDb.get('SELECT COUNT(*) AS n FROM spend')).toEqual({ n: 0 });
     });
 
     it('an abort (the service stopping) gives the attempt back: it waits 1 minute and counts nothing, however often', async () => {
-      const { db, clock, p, extract, shareVoice } = setup({ extract: throwing(() => new LocalEngineError('aborted')), voicePaid: false });
-      const id = shareVoice();
+      const { db, clock, p, extract, shareVoice } = await setup({ extract: throwing(() => new LocalEngineError('aborted')), voicePaid: false });
+      const id = await shareVoice();
       for (let run = 1; run <= 5; run++) {
         expect((await p.process(id)).outcome).toBe('deferred');
-        expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'local_aborted', nextAttemptAt: at(run * MINUTE) });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'local_aborted', nextAttemptAt: at(run * MINUTE) });
         clock.advance(MINUTE);
       }
       expect(extract).toHaveBeenCalledTimes(5);
@@ -1449,50 +1495,50 @@ describe('MediaProcessor: voice notes', () => {
 
     it('an abort after a counted failure keeps its count', async () => {
       const errors = [new LocalEngineError('timeout'), new LocalEngineError('aborted')];
-      const { db, clock, p, shareVoice } = setup({
+      const { db, clock, p, shareVoice } = await setup({
         extract: async () => {
           throw errors.shift() ?? new LocalEngineError('timeout');
         },
         voicePaid: false,
       });
-      const id = shareVoice();
+      const id = await shareVoice();
       expect((await p.process(id)).outcome).toBe('deferred');
       clock.advance(MINUTE);
       expect((await p.process(id)).outcome).toBe('deferred');
-      expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'local_aborted' });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'local_aborted' });
     });
 
     it.each(['voice', 'audio'] as const)('with voicePaid false, a %s file whose runs never end fails as crashed after 3 runs, as images do', async (kind) => {
-      const s = setup({ extract: () => new Promise<Extraction>(() => {}), voicePaid: false });
-      const id = kind === 'voice' ? s.shareVoice() : s.shareAudio();
+      const s = await setup({ extract: () => new Promise<Extraction>(() => {}), voicePaid: false });
+      const id = kind === 'voice' ? (await s.shareVoice()) : (await s.shareAudio());
       for (let run = 1; run <= MEDIA_MAX_ATTEMPTS; run++) {
         void s.restart().process(id);
         await vi.waitFor(() => expect(s.extract).toHaveBeenCalledTimes(run));
-        expect(getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: run });
+        expect(await getMedia(s.db, id)).toMatchObject({ status: 'pending', attempts: run });
         s.clock.advance(15 * MINUTE);
       }
-      expect(await s.restart().process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-      expect(getMedia(s.db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed', attempts: MEDIA_MAX_ATTEMPTS });
+      expect(await s.restart().process(id)).toEqual({ outcome: 'failed', clientId: SHA });
+      expect(await getMedia(s.db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed', attempts: MEDIA_MAX_ATTEMPTS });
       expect(s.extract).toHaveBeenCalledTimes(MEDIA_MAX_ATTEMPTS);
     });
 
     it('by default (voicePaid true, the safe setting) a voice note keeps 2 runs: a LocalEngineError then fails after 2 attempts', async () => {
-      const { db, clock, p, extract, shareVoice } = setup({ extract: throwing(() => new LocalEngineError('timeout')) });
-      const id = shareVoice();
+      const { db, clock, p, extract, shareVoice } = await setup({ extract: throwing(() => new LocalEngineError('timeout')) });
+      const id = await shareVoice();
       expect((await p.process(id)).outcome).toBe('deferred');
       clock.advance(MINUTE);
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_timeout', attempts: STT_NO_ANSWER_MAX_ATTEMPTS });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_timeout', attempts: STT_NO_ANSWER_MAX_ATTEMPTS });
       expect(extract).toHaveBeenCalledTimes(2);
     });
 
     // Review round 1, fix 1: voicePaid unset is derived from the voice transcriber, paid-safe when none is known.
     describe('voicePaid unset is derived from the voice transcriber', () => {
       const runsUntilFailed = async (voice: VoiceTranscriber | null | undefined): Promise<number> => {
-        const { db, clock, p, extract, shareVoice } = setup({ extract: throwing(() => new LocalEngineError('timeout')), ...(voice !== undefined ? { voice } : {}) });
-        const id = shareVoice();
+        const { db, clock, p, extract, shareVoice } = await setup({ extract: throwing(() => new LocalEngineError('timeout')), ...(voice !== undefined ? { voice } : {}) });
+        const id = await shareVoice();
         for (let i = 0; i < 5 && (await p.process(id)).outcome === 'deferred'; i++) clock.advance(5 * MINUTE);
-        expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_timeout' });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_timeout' });
         return extract.mock.calls.length;
       };
 
@@ -1509,84 +1555,84 @@ describe('MediaProcessor: voice notes', () => {
       });
 
       it('an explicit voicePaid still wins over the transcriber', async () => {
-        const a = setup({ extract: throwing(() => new LocalEngineError('timeout')), voice: new FakeLocalVoiceTranscriber(), voicePaid: true });
-        const ida = a.shareVoice();
+        const a = await setup({ extract: throwing(() => new LocalEngineError('timeout')), voice: new FakeLocalVoiceTranscriber(), voicePaid: true });
+        const ida = await a.shareVoice();
         expect((await a.p.process(ida)).outcome).toBe('deferred');
         a.clock.advance(MINUTE);
         expect((await a.p.process(ida)).outcome).toBe('failed');
-        const b = setup({ extract: throwing(() => new LocalEngineError('timeout')), voice: new FakeVoiceTranscriber(), voicePaid: false });
-        const idb = b.shareVoice();
+        const b = await setup({ extract: throwing(() => new LocalEngineError('timeout')), voice: new FakeVoiceTranscriber(), voicePaid: false });
+        const idb = await b.shareVoice();
         expect((await b.p.process(idb)).outcome).toBe('deferred');
         b.clock.advance(MINUTE);
         expect((await b.p.process(idb)).outcome).toBe('deferred');
         b.clock.advance(5 * MINUTE);
         expect((await b.p.process(idb)).outcome).toBe('failed');
-        expect(getMedia(b.db, idb)).toMatchObject({ attempts: MEDIA_MAX_ATTEMPTS });
+        expect(await getMedia(b.db, idb)).toMatchObject({ attempts: MEDIA_MAX_ATTEMPTS });
       });
 
       it('a local voice transcriber with voicePaid unset: a voice note whose runs never end fails as crashed after 3 runs', async () => {
-        const s = setup({ extract: () => new Promise<Extraction>(() => {}), voice: new FakeLocalVoiceTranscriber() });
-        const id = s.shareVoice();
+        const s = await setup({ extract: () => new Promise<Extraction>(() => {}), voice: new FakeLocalVoiceTranscriber() });
+        const id = await s.shareVoice();
         for (let run = 1; run <= MEDIA_MAX_ATTEMPTS; run++) {
           void s.restart().process(id);
           await vi.waitFor(() => expect(s.extract).toHaveBeenCalledTimes(run));
           s.clock.advance(15 * MINUTE);
         }
-        expect(await s.restart().process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-        expect(getMedia(s.db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed', attempts: MEDIA_MAX_ATTEMPTS });
+        expect(await s.restart().process(id)).toEqual({ outcome: 'failed', clientId: SHA });
+        expect(await getMedia(s.db, id)).toMatchObject({ status: 'failed', errorCode: 'crashed', attempts: MEDIA_MAX_ATTEMPTS });
       });
     });
 
     // Review round 1, fix 2: local_aborted waits, but not forever (the 24-hour rule of the other free waits).
     describe('an abort has an age limit', () => {
       it('under 24 hours from arrival it still waits, counting nothing', async () => {
-        const { db, clock, p, extract, shareVoice } = setup({ extract: throwing(() => new LocalEngineError('aborted')), voicePaid: false });
-        const id = shareVoice();
+        const { db, clock, p, extract, shareVoice } = await setup({ extract: throwing(() => new LocalEngineError('aborted')), voicePaid: false });
+        const id = await shareVoice();
         clock.advance(24 * 60 * MINUTE); // exactly 24 hours: still waits
         expect((await p.process(id)).outcome).toBe('deferred');
-        expect(getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'local_aborted', nextAttemptAt: at(24 * 60 * MINUTE + MINUTE) });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'local_aborted', nextAttemptAt: at(24 * 60 * MINUTE + MINUTE) });
         expect(extract).toHaveBeenCalledTimes(1);
       });
 
       it('over 24 hours from arrival it fails as local_aborted', async () => {
-        const { db, clock, p, shareVoice } = setup({ extract: throwing(() => new LocalEngineError('aborted')), voicePaid: false });
-        const id = shareVoice();
+        const { db, clock, p, shareVoice } = await setup({ extract: throwing(() => new LocalEngineError('aborted')), voicePaid: false });
+        const id = await shareVoice();
         expect((await p.process(id)).outcome).toBe('deferred');
         clock.advance(24 * 60 * MINUTE + 1);
-        expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: 1 });
-        expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_aborted', nextAttemptAt: null });
+        expect(await p.process(id)).toEqual({ outcome: 'failed', clientId: SHA });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_aborted', nextAttemptAt: null });
       });
 
       it('counts the 24 hours from the service start for a file saved before it', async () => {
         const startedAt = new Date(Date.parse('2026-10-19T08:00:00Z') + 3 * 24 * 60 * MINUTE);
-        const { db, clock, p, shareVoice } = setup({ extract: throwing(() => new LocalEngineError('aborted')), voicePaid: false, startedAt });
-        const id = shareVoice();
+        const { db, clock, p, shareVoice } = await setup({ extract: throwing(() => new LocalEngineError('aborted')), voicePaid: false, startedAt });
+        const id = await shareVoice();
         clock.set(startedAt.toISOString());
         expect((await p.process(id)).outcome).toBe('deferred');
         clock.advance(24 * 60 * MINUTE + 1);
         expect((await p.process(id)).outcome).toBe('failed');
-        expect(getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_aborted' });
+        expect(await getMedia(db, id)).toMatchObject({ status: 'failed', errorCode: 'local_aborted' });
       });
     });
 
     it('voicePaid false leaves images at 3 attempts', async () => {
-      const { db, clock, p, share } = setup({ extract: throwing(() => new AiInvalidOutputError('not json', null)), voicePaid: false });
-      const id = share();
+      const { db, clock, p, share } = await setup({ extract: throwing(() => new AiInvalidOutputError('not json', null)), voicePaid: false });
+      const id = await share();
       for (const wait of [MINUTE, 5 * MINUTE]) {
         expect((await p.process(id)).outcome).toBe('deferred');
         clock.advance(wait);
       }
       expect((await p.process(id)).outcome).toBe('failed');
-      expect(getMedia(db, id)).toMatchObject({ errorCode: 'ai_invalid_output', attempts: MEDIA_MAX_ATTEMPTS });
+      expect(await getMedia(db, id)).toMatchObject({ errorCode: 'ai_invalid_output', attempts: MEDIA_MAX_ATTEMPTS });
     });
 
     it('logs ids and codes only', async () => {
       const lines: string[] = [];
       const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
-      const a = setup({ extract: throwing(() => new LocalEngineError('aborted')), voicePaid: false, log });
-      await a.p.process(a.shareVoice());
-      const b = setup({ extract: throwing(() => new LocalEngineError('empty_output')), voicePaid: false, log });
-      await b.p.process(b.shareVoice());
+      const a = await setup({ extract: throwing(() => new LocalEngineError('aborted')), voicePaid: false, log });
+      await a.p.process(await a.shareVoice());
+      const b = await setup({ extract: throwing(() => new LocalEngineError('empty_output')), voicePaid: false, log });
+      await b.p.process(await b.shareVoice());
       const logged = lines.map((l) => JSON.parse(l) as Record<string, unknown>);
       expect(logged.map((l) => l.errorCode)).toEqual(['local_aborted', 'local_empty_output']);
       for (const l of logged) {
@@ -1598,30 +1644,30 @@ describe('MediaProcessor: voice notes', () => {
   describe('afterFinish', () => {
     it('is told the file and its extraction once the transcript and its copy are stored', async () => {
       const seen: unknown[] = [];
-      const s = setup({ extract: async () => TRANSCRIPT, afterFinish: (mediaId, x) => void seen.push({ mediaId, x, status: getMedia(s.db, mediaId)?.status, copies: forgetRows(s.db).length }) });
-      const id = s.shareVoice();
+      const s = await setup({ extract: async () => TRANSCRIPT, afterFinish: async (mediaId, x) => void seen.push({ mediaId, x, status: (await getMedia(s.db, mediaId))?.status, copies: (await forgetRows(s.db)).length }) });
+      const id = await s.shareVoice();
       expect((await s.p.process(id)).outcome).toBe('done');
-      expect(seen).toEqual([{ mediaId: id, x: TRANSCRIPT, status: 'done', copies: 1 }]);
+      await vi.waitFor(() => expect(seen).toEqual([{ mediaId: id, x: TRANSCRIPT, status: 'done', copies: 1 }]));
     });
 
     it('is called for any file read, with or without a copy', async () => {
       const afterFinish = vi.fn();
-      const { p, share } = setup({ afterFinish });
-      const id = share();
+      const { p, share } = await setup({ afterFinish });
+      const id = await share();
       await p.process(id);
       expect(afterFinish).toHaveBeenCalledExactlyOnceWith(id, { textKind: 'description', text: 'A blue banner with the new logo', pageCount: null, note: null });
     });
 
     it('a failure in it never changes the outcome', async () => {
-      const { db, p, shareVoice } = setup({
+      const { db, p, shareVoice } = await setup({
         extract: async () => TRANSCRIPT,
         afterFinish: () => {
           throw new Error('forget run failed');
         },
       });
-      const id = shareVoice();
-      expect(await p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
-      expect(getMedia(db, id)).toMatchObject({ status: 'done', text: 'payment bhej diya', errorCode: null });
+      const id = await shareVoice();
+      expect(await p.process(id)).toEqual({ outcome: 'done', clientId: SHA });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'done', text: 'payment bhej diya', errorCode: null });
     });
 
     // Review round 1, fix 4: it may be async; neither a sync throw nor a rejection escapes, and both are logged.
@@ -1635,19 +1681,19 @@ describe('MediaProcessor: voice notes', () => {
     ] as const)('one that %s is logged with codes only and never changes the outcome', async (_name, afterFinish) => {
       const lines: string[] = [];
       const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
-      const { db, p, shareVoice } = setup({ extract: async () => TRANSCRIPT, afterFinish, log });
-      const id = shareVoice();
-      expect(await p.process(id)).toEqual({ outcome: 'done', clientId: 1 });
+      const { db, p, shareVoice } = await setup({ extract: async () => TRANSCRIPT, afterFinish, log });
+      const id = await shareVoice();
+      expect(await p.process(id)).toEqual({ outcome: 'done', clientId: SHA });
       await vi.waitFor(() => expect(lines.some((l) => l.includes('"errorCode":"after_finish"'))).toBe(true));
-      expect(getMedia(db, id)).toMatchObject({ status: 'done', errorCode: null });
+      expect(await getMedia(db, id)).toMatchObject({ status: 'done', errorCode: null });
       expect(lines.join('')).not.toContain('forget run failed');
     });
 
     it('is not waited for', async () => {
       let release: (() => void) | undefined;
       const afterFinish = vi.fn(() => new Promise<void>((r) => (release = r)));
-      const { p, shareVoice } = setup({ extract: async () => TRANSCRIPT, afterFinish });
-      expect((await p.process(shareVoice())).outcome).toBe('done');
+      const { p, shareVoice } = await setup({ extract: async () => TRANSCRIPT, afterFinish });
+      expect((await p.process(await shareVoice())).outcome).toBe('done');
       await vi.waitFor(() => expect(afterFinish).toHaveBeenCalledTimes(1));
       release?.();
     });
@@ -1666,8 +1712,8 @@ describe('MediaProcessor: voice notes', () => {
       const lines: string[] = [];
       const log = createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } }));
       const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [error()] });
-      const { p, shareVoice } = setup({ extract: realExtractor(v).extract, log });
-      await p.process(shareVoice());
+      const { p, shareVoice } = await setup({ extract: (await realExtractor(v)).extract, log });
+      await p.process(await shareVoice());
       const out = lines.join('');
       expect(out).toContain('"errorCode"');
       for (const secret of ['tr_secret_9', 'payment', 'namaste', 'invalid_api_key', 'mmg.whatsapp.net']) expect(out).not.toContain(secret);

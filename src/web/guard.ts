@@ -1,21 +1,32 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { isIP } from 'node:net';
+import { FOUNDER_TENANT_ID } from '../config/env.ts';
 import { systemClock } from '../util/clock.ts';
 import type { Clock } from '../util/clock.ts';
 import { HttpError, parseCookies } from './http.ts';
 import { hashToken, isToken, SESSION_COOKIE } from './sessions.ts';
 import type { Session, SessionStore } from './sessions.ts';
 
-/** A signed-in owner's session, with the raw id from the cookie (kept in memory only, for sign-out). */
+/** Who a session is (S4.8): the founder (on DASHBOARD_OWNER_EMAILS, in the founder's workspace), or a customer's owner. */
+export type SessionRole = 'founder' | 'owner';
+
+/** A signed-in session, with the raw id from the cookie (kept in memory only, for sign-out) and its role. */
 export interface OwnerSession extends Session {
   id: string;
+  role: SessionRole;
 }
 
 export interface GuardDeps {
   sessions: Pick<SessionStore, 'get' | 'destroy'>;
   /** DASHBOARD_OWNER_EMAILS (lower-cased). A session whose email has since been removed from the list is refused. */
   ownerEmails: readonly string[];
+  /**
+   * The customers an email belongs to (their tenant ids, from the platform Db): Postgres with the platform on only.
+   * Absent: no customer session is ever accepted (SQLite, where none can be made). A lookup that throws refuses the
+   * request with a 503: it never falls back to the founder, and never ends the session.
+   */
+  memberships?: (email: string) => Promise<readonly string[]>;
   /** DASHBOARD_PUBLIC_URL: a bare origin such as `https://dash.example.com`, or absent. */
   publicUrl?: string;
   /** The port the dashboard listens on, for the localhost origins (the bound port, which tests choose at random). */
@@ -23,8 +34,17 @@ export interface GuardDeps {
 }
 
 export interface Guard {
-  /** The signed-in owner's session, or a 401 (`HttpError`, which the server sends as JSON). */
-  requireOwner(req: IncomingMessage): OwnerSession;
+  /**
+   * Any valid session, with its role: the founder's, or a customer owner's whose membership still holds. A session that is
+   * neither (an email taken off the owner list, a membership removed) is ended: 401. Its customer comes from the session
+   * record only, never from the request.
+   */
+  requireSession(req: IncomingMessage): Promise<OwnerSession>;
+  /**
+   * The founder's session only (every route that is not yet per customer). A customer's valid session gets a 403 and is
+   * kept; no session, or an ended one, a 401.
+   */
+  requireOwner(req: IncomingMessage): Promise<OwnerSession>;
   /**
    * For every request but GET and HEAD: the `Origin` header must be the public origin or the localhost origin, and the
    * `X-CSRF-Token` header must hash to the session's CSRF hash. Otherwise a 403.
@@ -34,6 +54,8 @@ export interface Guard {
 
 const unauthorized = () => new HttpError(401, 'unauthorized', 'Sign in to continue.');
 const refused = () => new HttpError(403, 'csrf', 'This request could not be verified. Reload the page and try again.');
+const founderOnly = () => new HttpError(403, 'forbidden', 'This is for the account owner only.');
+const lookupDown = () => new HttpError(503, 'unavailable', 'Your account could not be checked just now. Try again in a minute.');
 
 function header(req: IncomingMessage, name: string): string | undefined {
   const v = req.headers[name];
@@ -61,17 +83,35 @@ export function createGuard(deps: GuardDeps): Guard {
     return out;
   }
 
-  return {
-    requireOwner(req) {
-      const id = parseCookies(header(req, 'cookie'))[SESSION_COOKIE];
-      if (!isToken(id)) throw unauthorized();
-      const session = deps.sessions.get(id);
-      if (session === undefined) throw unauthorized();
-      if (!owners.has(session.email)) {
-        deps.sessions.destroy(id);
-        throw unauthorized();
+  async function requireSession(req: IncomingMessage): Promise<OwnerSession> {
+    const id = parseCookies(header(req, 'cookie'))[SESSION_COOKIE];
+    if (!isToken(id)) throw unauthorized();
+    const session = await deps.sessions.get(id);
+    if (session === undefined) throw unauthorized();
+    // The founder: on the owner list, in the founder's own workspace. Nothing else is ever the founder.
+    if (session.tenantId === FOUNDER_TENANT_ID) {
+      if (owners.has(session.email)) return { ...session, id, role: 'founder' };
+    } else if (deps.memberships) {
+      // A customer owner: only for a customer workspace, and only while the membership holds.
+      let tenants: readonly string[];
+      try {
+        tenants = await deps.memberships(session.email);
+      } catch {
+        throw lookupDown();
       }
-      return { ...session, id };
+      if (tenants.includes(session.tenantId)) return { ...session, id, role: 'owner' };
+    }
+    await deps.sessions.destroy(id);
+    throw unauthorized();
+  }
+
+  return {
+    requireSession,
+
+    async requireOwner(req) {
+      const s = await requireSession(req);
+      if (s.role !== 'founder') throw founderOnly();
+      return s;
     },
 
     requireCsrf(req, session) {

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { SPARE_LINK_MESSAGES } from '../../report/senderLink.ts';
 import { LinkBusyError, type LinkEvent, type LinkSessions, type LinkState, type LinkTarget } from '../../wa/linkSession.ts';
+import { jsonText } from '../http.ts';
 import { renderQrSvg } from '../qrSvg.ts';
 import { fail, ok, type ApiError, type ApiResult, type OwnerContext } from './context.ts';
 
@@ -127,7 +128,7 @@ export class WhatsAppLinkRoutes {
         resolve();
       };
       const send = (event: string, data: unknown) => {
-        if (!closed) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        if (!closed) res.write(`event: ${event}\ndata: ${jsonText(data)}\n\n`);
       };
       // 'close' first: a browser that left before this point is noticed, not kept for the rest of the link.
       res.on('close', close);

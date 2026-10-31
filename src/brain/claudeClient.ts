@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { BetaUsage } from '@anthropic-ai/sdk/resources/beta/messages/messages';
 import { FALLBACK_PRICES, costUsd, type Prices, type TokenUsage } from '../spend/pricing.ts';
+import { isolatedClientOptions } from './anthropicIsolated.ts';
 import { AI_OUTPUT_JSON_SCHEMA, AI_OUTPUT_JSON_SCHEMA_WITH_SENTIMENT, AiOutputParseError, parseAiOutput, type AiOutput } from './schema.ts';
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
@@ -118,10 +119,14 @@ export class ClaudeClient implements AiClient {
   readonly #effort: Effort;
   readonly #prices: Prices;
 
-  constructor(opts: { apiKey: string; model: string; effort?: Effort; prices: Prices; client?: Anthropic }) {
+  /** `isolated`: a customer's client, which no founder environment setting reaches (anthropicIsolated.ts). */
+  constructor(opts: { apiKey: string; model: string; effort?: Effort; prices: Prices; client?: Anthropic; isolated?: boolean }) {
     this.#client =
       opts.client ??
-      new Anthropic({ apiKey: opts.apiKey, maxRetries: SDK_MAX_RETRIES, timeout: 600_000, fetch: keepConnectTimeoutCode });
+      new Anthropic({
+        apiKey: opts.apiKey, maxRetries: SDK_MAX_RETRIES, timeout: 600_000, fetch: keepConnectTimeoutCode,
+        ...(opts.isolated ? isolatedClientOptions(opts.apiKey, keepConnectTimeoutCode) : {}),
+      });
     this.#model = opts.model;
     this.#effort = opts.effort ?? 'medium';
     this.#prices = opts.prices;

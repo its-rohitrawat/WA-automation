@@ -197,14 +197,14 @@ describe('SarvamProvider', () => {
   it('reports the job id once the job has started', async () => {
     const { http, calls } = fakeSarvam();
     const seen: { id: string; callsSoFar: number }[] = [];
-    await provider(http).transcribe(audio, { diarize: true, onJobId: (id) => seen.push({ id, callsSoFar: calls.length }) });
+    await provider(http).transcribe(audio, { diarize: true, onJobId: (id) => void seen.push({ id, callsSoFar: calls.length }) });
     expect(seen).toEqual([{ id: 'job-1', callsSoFar: 4 }]);
   });
 
   it('waits on a saved job without uploading again', async () => {
     const { http, calls } = fakeSarvam();
     const seen: string[] = [];
-    const r = await provider(http).transcribe(audio, { diarize: true, resumeJobId: 'job-1', onJobId: (id) => seen.push(id) });
+    const r = await provider(http).transcribe(audio, { diarize: true, resumeJobId: 'job-1', onJobId: (id) => void seen.push(id) });
     expect(calls.some((c) => c.method === 'PUT' || c.url === JOBS)).toBe(false);
     expect(seen).toEqual([]);
     expect(r.segments).toHaveLength(2);

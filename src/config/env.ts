@@ -21,6 +21,21 @@ export const INDIAN_MOBILE = /^91[6-9]\d{9}$/;
  * https anywhere, or plain http only on this machine and with an explicit port (http://localhost:8787).
  * Never a user name or password: the value becomes links and redirects, so credentials in it would leak.
  */
+/** Customer #1, the founder's business: the fixed id S2's P1 seeds and src/platform/store.ts's FOUNDER_TENANT_ID. */
+export const FOUNDER_TENANT_ID = '00000000-0000-4000-8000-000000000001';
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/** A Postgres URL on this machine only (design 10): postgres:// or postgresql:// to 127.0.0.1, localhost or ::1. */
+function isLocalPgUrl(raw: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  return (u.protocol === 'postgres:' || u.protocol === 'postgresql:') && ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname);
+}
+
 function isDashboardUrl(raw: string): boolean {
   let u: URL;
   try {
@@ -42,6 +57,22 @@ const EnvSchema = z.object({
   AI_PRICE_CACHE_WRITE_PER_MTOK: z.coerce.number().positive().default(5),
   AI_PRICE_CACHE_READ_PER_MTOK: z.coerce.number().positive().default(0.2),
   DAILY_SPEND_CAP_USD: z.coerce.number().positive().default(15),
+  /**
+   * The platform-wide daily ceiling (S4.3, owner decision D3), over spend billed to the founder only: the founder's
+   * Claude calls and any later founder-paid service. Customers use their own Anthropic key under their own limit.
+   */
+  PLATFORM_DAILY_SPEND_CAP_USD: z.coerce.number().positive().default(100),
+  /**
+   * The platform (SaaS S5): the Invite and Customers screens and the public sign-up page (/signup). Off by default: none
+   * of it exists, and the platform tables are not made, until the owner switches it on.
+   */
+  PLATFORM_ENABLED: Flag.default(false),
+  /** The founder's name on invite emails and the sign-up page (SaaS S5). */
+  PLATFORM_FOUNDER_NAME: z.string().min(1).max(100).default('WA Agent'),
+  /** Full runtimes at most, the founder's included (S4.5): a customer beyond it waits as refused:limit. */
+  PLATFORM_MAX_ACTIVE: z.coerce.number().int().min(1).max(500).default(20),
+  /** No customer runtime starts while the process uses more memory than this, in MB (S4.5, D4). */
+  PLATFORM_MAX_RSS_MB: z.coerce.number().int().min(256).default(4096),
   GOOGLE_OAUTH_CLIENT_ID: z.string().min(1).optional(),
   GOOGLE_OAUTH_CLIENT_SECRET: z.string().min(1).optional(),
   QUIET_MINUTES: z.coerce.number().positive().default(4),
@@ -103,6 +134,11 @@ const EnvSchema = z.object({
   DASHBOARD_ENABLED: Flag.default(false),
   /** The dashboard's AI assistant (owner request, 29 Oct 2026): on with the dashboard unless set to false. Its answers are paid calls under DAILY_SPEND_CAP_USD. */
   DASHBOARD_ASSISTANT: Flag.default(true),
+  /**
+   * Invites sent from the founder's Gmail (SaaS S5H.3). Off: invites go by Copy link. On, the main Google connect also
+   * asks for gmail.send, which Google allows only for the app's test users until it reviews the app.
+   */
+  INVITES_GMAIL: Flag.default(false),
   DASHBOARD_PORT: z.coerce.number().int().min(1024).max(65535).default(8787),
   /**
    * The address owners open: https, or http on this machine (localhost or 127.0.0.1 with a port). Kept as its origin
@@ -126,7 +162,30 @@ const EnvSchema = z.object({
   DASHBOARD_GOOGLE_CLIENT_SECRET: z.string().min(1).optional(),
   /** UptimeRobot read-only API key, for the uptime history. Secret: never logged. */
   UPTIMEROBOT_READ_KEY: z.string().min(1).optional(),
+  // SaaS S2: where the agent's data lives. sqlite (the default): data/tracker.db, as before. postgres: the server on
+  // this machine, every customer's rows under row-level security.
+  DB_ENGINE: z.enum(['sqlite', 'postgres']).default('sqlite'),
+  /** wa_app's URL, the agent's only role for customer data. Secret: never logged. Required, and local only, with postgres. */
+  DATABASE_URL: z.string().min(1).optional(),
+  /** wa_platform's URL, for the platform tables (decision D1). Secret: never logged. Required with postgres. */
+  DATABASE_PLATFORM_URL: z.string().min(1).optional(),
+  /** wa_owner's URL, read only by db-migrate. Secret: never logged. */
+  DATABASE_OWNER_URL: z.string().min(1).optional(),
+  /** The customer this agent runs as on Postgres: customer #1 by default. */
+  TENANT_ID: z.string().regex(UUID).default(FOUNDER_TENANT_ID),
 }).superRefine((env, ctx) => {
+  // The URLs hold passwords: the messages name the setting, never its value.
+  for (const name of ['DATABASE_URL', 'DATABASE_PLATFORM_URL', 'DATABASE_OWNER_URL'] as const) {
+    const url = env[name];
+    if (url !== undefined && !isLocalPgUrl(url)) {
+      ctx.addIssue({ code: 'custom', path: [name], message: 'must be a postgres:// URL to 127.0.0.1 or localhost (the database stays on this machine)' });
+    }
+  }
+  if (env.DB_ENGINE === 'postgres') {
+    for (const name of ['DATABASE_URL', 'DATABASE_PLATFORM_URL'] as const) {
+      if (env[name] === undefined) ctx.addIssue({ code: 'custom', path: [name], message: 'is required when DB_ENGINE is postgres' });
+    }
+  }
   if (env.MEETINGS_ENABLED && env.TEAM_EMAIL_DOMAINS.length === 0) {
     ctx.addIssue({ code: 'custom', path: ['TEAM_EMAIL_DOMAINS'], message: 'is required when MEETINGS_ENABLED is true' });
   }

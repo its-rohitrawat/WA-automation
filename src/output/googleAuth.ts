@@ -3,7 +3,8 @@ import { createServer } from 'node:http';
 import { auth } from '@googleapis/drive';
 import type { Env } from '../config/env.ts';
 import { decrypt, encrypt } from '../crypto/envelope.ts';
-import { tx, type Db } from '../store/db.ts';
+import { GMAIL_SEND_SCOPE } from '../platform/gmailSender.ts';
+import type { Sql } from '../store/db.ts';
 import { deleteKv, getKv, setKv } from '../store/kv.ts';
 
 /** Only files this app creates. */
@@ -17,6 +18,7 @@ export const MEETING_SCOPES: readonly string[] = [
 ];
 
 const SCOPE_NAMES: Record<string, string> = {
+  [GMAIL_SEND_SCOPE]: 'Send email as you (invites only)',
   'https://www.googleapis.com/auth/drive.file': 'Google Drive (only the files WA Agent creates)',
   'https://www.googleapis.com/auth/meetings.space.readonly': 'Google Meet recordings list (read only)',
   'https://www.googleapis.com/auth/calendar.events.readonly': 'Calendar invites (read only)',
@@ -28,9 +30,12 @@ export function scopeName(scope: string): string {
   return SCOPE_NAMES[scope] ?? scope;
 }
 
-/** What google-auth asks for: Drive always, the meeting scopes only when meetings are on. */
-export function requestedScopes(env: Pick<Env, 'MEETINGS_ENABLED'>): string[] {
-  return env.MEETINGS_ENABLED ? [...DRIVE_SCOPES, ...MEETING_SCOPES] : [...DRIVE_SCOPES];
+/**
+ * What the main account's connect asks for: Drive always, the meeting scopes only when meetings are on, and Gmail's
+ * send permission only when invites go by email (S5H.4). INVITES_GMAIL left out counts as off.
+ */
+export function requestedScopes(env: Pick<Env, 'MEETINGS_ENABLED'> & Partial<Pick<Env, 'INVITES_GMAIL'>>): string[] {
+  return [...DRIVE_SCOPES, ...(env.MEETINGS_ENABLED ? MEETING_SCOPES : []), ...(env.INVITES_GMAIL ? [GMAIL_SEND_SCOPE] : [])];
 }
 
 /**
@@ -50,39 +55,41 @@ export function checkAccountLabel(label: string): string {
 }
 
 /** The extra meeting accounts, in the order they were added. */
-export function meetingAccounts(db: Db): string[] {
+export async function meetingAccounts(db: Sql): Promise<string[]> {
   try {
-    const v: unknown = JSON.parse(getKv(db, ACCOUNTS_KEY) ?? '[]');
+    const v: unknown = JSON.parse((await getKv(db, ACCOUNTS_KEY)) ?? '[]');
     return Array.isArray(v) ? v.filter((l): l is string => typeof l === 'string' && ACCOUNT_LABEL.test(l) && l !== MAIN_ACCOUNT) : [];
   } catch {
     return [];
   }
 }
 
-function setMeetingAccounts(db: Db, labels: string[]): void {
-  setKv(db, ACCOUNTS_KEY, JSON.stringify(labels));
+async function setMeetingAccounts(db: Sql, labels: string[]): Promise<void> {
+  await setKv(db, ACCOUNTS_KEY, JSON.stringify(labels));
 }
 
 // The scopes Google granted with the stored token, as Google wrote them. Not a secret.
 const SCOPES_KEY = 'google_scopes';
 const scopesKey = (account?: string): string => (account === undefined ? SCOPES_KEY : `${SCOPES_KEY}:${checkAccountLabel(account)}`);
 
-export function saveGrantedScopes(db: Db, scope: string, account?: string): void {
-  setKv(db, scopesKey(account), scope);
+export async function saveGrantedScopes(db: Sql, scope: string, account?: string): Promise<void> {
+  await setKv(db, scopesKey(account), scope);
 }
 
 /**
  * True only when the sign-in (the main one, or the extra account) recorded every meeting scope. A token from before
  * Phase 3 has none recorded: Drive only.
  */
-export function hasMeetingScopes(db: Db, account?: string): boolean {
-  const granted = new Set((getKv(db, scopesKey(account)) ?? '').split(' '));
+export async function hasMeetingScopes(db: Sql, account?: string): Promise<boolean> {
+  const granted = new Set(((await getKv(db, scopesKey(account))) ?? '').split(' '));
   return MEETING_SCOPES.every((s) => granted.has(s));
 }
 
 /** Meetings can run: the main sign-in or at least one extra account has every meeting scope. */
-export function meetingsReady(db: Db): boolean {
-  return hasMeetingScopes(db) || meetingAccounts(db).some((a) => hasMeetingScopes(db, a));
+export async function meetingsReady(db: Sql): Promise<boolean> {
+  if (await hasMeetingScopes(db)) return true;
+  for (const a of await meetingAccounts(db)) if (await hasMeetingScopes(db, a)) return true;
+  return false;
 }
 
 /**
@@ -95,8 +102,8 @@ export function tokenIssuerKey(label: string): string {
   return `google_client:${label === MAIN_ACCOUNT ? MAIN_ACCOUNT : checkAccountLabel(label)}`;
 }
 
-export function saveTokenIssuer(db: Db, label: string, issuer: TokenIssuer): void {
-  setKv(db, tokenIssuerKey(label), issuer);
+export async function saveTokenIssuer(db: Sql, label: string, issuer: TokenIssuer): Promise<void> {
+  await setKv(db, tokenIssuerKey(label), issuer);
 }
 
 /**
@@ -104,20 +111,22 @@ export function saveTokenIssuer(db: Db, label: string, issuer: TokenIssuer): voi
  * or nothing. The issuer defaults to desktop (google-auth); a stale 'web' from an earlier dashboard reconnect would
  * pair this token with the wrong client.
  */
-export function saveMeetingAccount(db: Db, key: Buffer, label: string, refreshToken: string, scope: string, issuer: TokenIssuer = 'desktop'): void {
+export async function saveMeetingAccount(
+  db: Sql, key: Buffer, label: string, refreshToken: string, scope: string, issuer: TokenIssuer = 'desktop',
+): Promise<void> {
   checkAccountLabel(label);
-  tx(db, () => {
-    new TokenStore(db, key, label).save(refreshToken);
-    saveGrantedScopes(db, scope, label);
-    saveTokenIssuer(db, label, issuer);
-    const labels = meetingAccounts(db);
-    if (!labels.includes(label)) setMeetingAccounts(db, [...labels, label]);
+  await db.tx(async (q) => {
+    await new TokenStore(q, key, label).save(refreshToken);
+    await saveGrantedScopes(q, scope, label);
+    await saveTokenIssuer(q, label, issuer);
+    const labels = await meetingAccounts(q);
+    if (!labels.includes(label)) await setMeetingAccounts(q, [...labels, label]);
   });
 }
 
 /** The scopes an account's sign-in recorded ('main' or an extra account's label); empty when none were recorded. */
-export function grantedScopes(db: Db, label: string): string[] {
-  return (getKv(db, scopesKey(label === MAIN_ACCOUNT ? undefined : label)) ?? '').split(' ').filter(Boolean);
+export async function grantedScopes(db: Sql, label: string): Promise<string[]> {
+  return ((await getKv(db, scopesKey(label === MAIN_ACCOUNT ? undefined : label))) ?? '').split(' ').filter(Boolean);
 }
 
 /**
@@ -129,30 +138,30 @@ export const accountEmailKey = (label: string): string => `google_account_email:
 const EMAIL = /^[^\s@]{1,64}@[^\s@.]+(?:\.[^\s@.]+)+$/;
 
 /** The account's email, or null when it is not known. */
-export function accountEmail(db: Db, label: string): string | null {
-  const v = getKv(db, accountEmailKey(label));
+export async function accountEmail(db: Sql, label: string): Promise<string | null> {
+  const v = await getKv(db, accountEmailKey(label));
   return v !== undefined && EMAIL.test(v) ? v : null;
 }
 
 /** Stores the account's email (lower-cased). Returns false, storing nothing, for anything that is not one address. */
-export function saveAccountEmail(db: Db, label: string, email: string): boolean {
+export async function saveAccountEmail(db: Sql, label: string, email: string): Promise<boolean> {
   const e = email.trim().toLowerCase();
   if (e.length > 254 || !EMAIL.test(e)) return false;
-  setKv(db, accountEmailKey(label), e);
+  await setKv(db, accountEmailKey(label), e);
   return true;
 }
 
 /** Forgets an extra account here (its token, scopes and list entry). Google keeps the grant until it is removed there. */
-export function removeMeetingAccount(db: Db, label: string): boolean {
+export async function removeMeetingAccount(db: Sql, label: string): Promise<boolean> {
   checkAccountLabel(label);
-  const labels = meetingAccounts(db);
+  const labels = await meetingAccounts(db);
   if (!labels.includes(label)) return false;
-  tx(db, () => {
-    deleteKv(db, tokenKey(label));
-    deleteKv(db, scopesKey(label));
-    deleteKv(db, tokenIssuerKey(label));
-    deleteKv(db, accountEmailKey(label));
-    setMeetingAccounts(db, labels.filter((l) => l !== label));
+  await db.tx(async (q) => {
+    await deleteKv(q, tokenKey(label));
+    await deleteKv(q, scopesKey(label));
+    await deleteKv(q, tokenIssuerKey(label));
+    await deleteKv(q, accountEmailKey(label));
+    await setMeetingAccounts(q, labels.filter((l) => l !== label));
   });
   return true;
 }
@@ -176,7 +185,7 @@ export class TokenDecryptError extends Error {
 }
 
 export class TokenStore {
-  readonly #db: Db;
+  readonly #db: Sql;
   readonly #key: Buffer;
   readonly #account: string | undefined;
   readonly #kvKey: string;
@@ -184,7 +193,7 @@ export class TokenStore {
   readonly #aad: Buffer;
 
   /** No account: the main sign-in. */
-  constructor(db: Db, key: Buffer, account?: string) {
+  constructor(db: Sql, key: Buffer, account?: string) {
     this.#db = db;
     // A purpose-specific key, so the master key itself never encrypts the token directly.
     this.#key = Buffer.from(hkdfSync('sha256', key, Buffer.alloc(0), 'google-refresh-token', 32));
@@ -194,13 +203,13 @@ export class TokenStore {
   }
 
   /** Stores a new sign-in. The account's known email is forgotten with the old token: the new one may be another account. */
-  save(refreshToken: string): void {
-    setKv(this.#db, this.#kvKey, encrypt(this.#key, Buffer.from(refreshToken, 'utf8'), this.#aad).toString('base64'));
-    deleteKv(this.#db, accountEmailKey(this.#account ?? MAIN_ACCOUNT));
+  async save(refreshToken: string): Promise<void> {
+    await setKv(this.#db, this.#kvKey, encrypt(this.#key, Buffer.from(refreshToken, 'utf8'), this.#aad).toString('base64'));
+    await deleteKv(this.#db, accountEmailKey(this.#account ?? MAIN_ACCOUNT));
   }
 
-  load(): string | undefined {
-    const v = getKv(this.#db, this.#kvKey);
+  async load(): Promise<string | undefined> {
+    const v = await getKv(this.#db, this.#kvKey);
     if (!v) return undefined;
     try {
       return decrypt(this.#key, Buffer.from(v, 'base64'), this.#aad).toString('utf8');
@@ -299,8 +308,9 @@ export async function runLoopbackConsent(o: {
           const scope = tokens.scope ?? '';
           const granted = new Set(scope.split(' '));
           if (o.requireDrive !== false && !granted.has(DRIVE_SCOPES[0]!)) throw new ConsentRefused(NO_DRIVE_SCOPE);
-          // Every requested scope, or no result at all (so the caller saves nothing).
-          const missing = o.scopes.filter((s) => !granted.has(s));
+          // Every requested scope, or no result at all (so the caller saves nothing). Except gmail.send: it is optional
+          // (decided 30 Oct), so a founder who unticks it is still connected and invites go by Copy link.
+          const missing = o.scopes.filter((s) => s !== GMAIL_SEND_SCOPE && !granted.has(s));
           if (missing.length > 0) throw new ConsentRefused(noMeetingScope(missing));
           finish(null, { refreshToken: tokens.refresh_token, scope });
         })

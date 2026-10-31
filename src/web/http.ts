@@ -71,8 +71,21 @@ export function readJson(req: IncomingMessage, limitBytes = 65_536): Promise<unk
   });
 }
 
+/**
+ * A response body as JSON. A Promise anywhere in it (a route that forgot an await) is refused with a TypeError naming
+ * its key, never sent as {}: JSON.stringify turns a pending Promise into {} without a word, which hid real bugs.
+ */
+export function jsonText(body: unknown): string {
+  return JSON.stringify(body, (key, value: unknown) => {
+    if (value !== null && typeof value === 'object' && typeof (value as { then?: unknown }).then === 'function') {
+      throw new TypeError(`response body is a Promise${key ? ` at "${key}"` : ''}: missing await`);
+    }
+    return value;
+  });
+}
+
 export function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  const text = JSON.stringify(body);
+  const text = jsonText(body);
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store');

@@ -31,22 +31,22 @@ const subfolderKey = (kind: ClientSubfolder, clientId: number): string =>
  */
 async function subfolder(db: Db, api: DriveApi, c: FolderClient, kind: ClientSubfolder): Promise<{ id: string; created: boolean }> {
   const key = subfolderKey(kind, c.clientId);
-  const cached = getKv(db, key);
+  const cached = await getKv(db, key);
   if (cached) return { id: cached, created: false };
-  const root = getKv(db, 'drive_root_id');
+  const root = await getKv(db, 'drive_root_id');
   if (!root) throw new DriveRootMissingError();
-  let clients = getKv(db, CLIENTS_KEY);
+  let clients = await getKv(db, CLIENTS_KEY);
   if (!clients) {
     clients = await api.createFolder('Clients', root);
-    setKv(db, CLIENTS_KEY, clients);
+    await setKv(db, CLIENTS_KEY, clients);
   }
-  let client = getKv(db, clientKey(c.clientId));
+  let client = await getKv(db, clientKey(c.clientId));
   if (!client) {
     client = await api.createFolder(sanitizeFileName(c.clientName) ?? `Client ${c.clientId}`, clients);
-    setKv(db, clientKey(c.clientId), client);
+    await setKv(db, clientKey(c.clientId), client);
   }
   const id = await api.createFolder(kind, client);
-  setKv(db, key, id);
+  await setKv(db, key, id);
   return { id, created: true };
 }
 
@@ -82,7 +82,7 @@ export async function withClientSubfolder<T>(
       return await put(f.id);
     } catch (e) {
       if (!(e instanceof DriveNotFoundError) || step === levels.length || fresh) throw e;
-      for (const key of levels.slice(0, step + 1)) setKv(db, key, '');
+      for (const key of levels.slice(0, step + 1)) await setKv(db, key, '');
     }
   }
 }

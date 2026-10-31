@@ -5,12 +5,20 @@ import { loadTrackerView } from '../../src/output/view.ts';
 import { buildWorkbook } from '../../src/output/workbook.ts';
 import { MAX_TITLE_CHARS } from '../../src/report/morningReport.ts';
 import { syncClients } from '../../src/store/clients.ts';
-import { openDb, type Db } from '../../src/store/db.ts';
+import type { Db } from '../../src/store/db.ts';
 import { createTask, setTaskStatus, type NewTask } from '../../src/store/tasks.ts';
-import { MEHTA, NOW, seededDb, SHARMA } from '../helpers/db.ts';
+import { MEHTA, NOW, seeded, SHARMA, testDb } from '../helpers/db.ts';
+
+/** The clients' real ids in the test running now, set by seededDb() (on Postgres ids are shared by every customer). */
+let ids = { sharma: 0, mehta: 0 };
+async function seededDb(): Promise<Db> {
+  const s = await seeded();
+  ids = s.ids;
+  return s.db;
+}
 
 const task = (o: Partial<NewTask> = {}): NewTask => ({
-  clientId: 1, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'medium', assignedTo: 'Rahul', askedBy: 'Mr. Sharma',
+  clientId: ids.sharma, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'medium', assignedTo: 'Rahul', askedBy: 'Mr. Sharma',
   raisedOn: '2026-10-10', deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp', ...o,
 });
 
@@ -20,7 +28,7 @@ const now = new Date('2026-10-19T08:00:00Z');
 
 async function build(db: Db): Promise<ExcelJS.Workbook> {
   const wb = new ExcelJS.Workbook();
-  await wb.xlsx.load((await buildWorkbook(loadTrackerView(db, now, healthy))) as unknown as ExcelJS.Buffer);
+  await wb.xlsx.load((await buildWorkbook(await loadTrackerView(db, now, healthy))) as unknown as ExcelJS.Buffer);
   return wb;
 }
 
@@ -40,17 +48,17 @@ function body(ws: ExcelJS.Worksheet): unknown[][] {
  * Sharma: five open tasks (one on the client side, one maybe done) and one done. Mehta: one open task.
  * Urgency for Sharma: SHA-002 (overdue), SHA-003 (due today), SHA-004 (high, raised 5 Oct), SHA-001 (high, raised 10 Oct), SHA-006.
  */
-function fixture(): Db {
-  const db = seededDb();
-  createTask(db, task({ title: 'Homepage copy', priority: 'major', deadline: '2026-10-25' }), NOW);
-  createTask(db, task({ side: 'client', title: 'Send logo files', priority: 'low', deadline: '2026-10-18' }), NOW);
-  createTask(db, task({ title: 'Inner pages', deadline: '2026-10-19' }), NOW);
-  createTask(db, task({ title: 'Domain setup', priority: 'major', raisedOn: '2026-10-05' }), NOW);
-  const done = createTask(db, task({ title: 'Moodboard', priority: 'major', deadline: '2026-10-01' }), NOW);
-  setTaskStatus(db, done.id, 'done', '2026-10-15', NOW, 'ai');
-  const maybe = createTask(db, task({ title: 'Contact form' }), NOW);
-  setTaskStatus(db, maybe.id, 'maybe_done', '2026-10-15', NOW, 'ai');
-  createTask(db, task({ clientId: 2, title: 'Menu photos', priority: 'low' }), NOW);
+async function fixture(): Promise<Db> {
+  const db = await seededDb();
+  await createTask(db, task({ title: 'Homepage copy', priority: 'major', deadline: '2026-10-25' }), NOW);
+  await createTask(db, task({ side: 'client', title: 'Send logo files', priority: 'low', deadline: '2026-10-18' }), NOW);
+  await createTask(db, task({ title: 'Inner pages', deadline: '2026-10-19' }), NOW);
+  await createTask(db, task({ title: 'Domain setup', priority: 'major', raisedOn: '2026-10-05' }), NOW);
+  const done = await createTask(db, task({ title: 'Moodboard', priority: 'major', deadline: '2026-10-01' }), NOW);
+  await setTaskStatus(db, done.id, 'done', '2026-10-15', NOW, 'ai');
+  const maybe = await createTask(db, task({ title: 'Contact form' }), NOW);
+  await setTaskStatus(db, maybe.id, 'maybe_done', '2026-10-15', NOW, 'ai');
+  await createTask(db, task({ clientId: ids.mehta, title: 'Menu photos', priority: 'low' }), NOW);
   return db;
 }
 
@@ -58,12 +66,12 @@ const date = (iso: string) => new Date(`${iso}T00:00:00Z`);
 
 describe('Today tab', () => {
   it('is the first sheet, before Overview', async () => {
-    const wb = await build(fixture());
+    const wb = await build(await fixture());
     expect(wb.worksheets.map((w) => w.name)).toEqual(['Today', 'Overview', 'Mehta Foods', 'Sharma Interiors']);
   });
 
   it('has the title, the header, counts per active client, the top 3 open tasks and a totals row', async () => {
-    const ws = await today(fixture());
+    const ws = await today(await fixture());
     expect(ws.getCell('A1').value).toBe('Today · 19 Oct · built 13:30 IST');
     expect(ws.getRow(2).values).toEqual([undefined, 'Client', 'Open', 'Overdue', 'Side', 'ID', 'Task', 'Deadline', 'Notes']);
     expect(body(ws)).toEqual([
@@ -78,7 +86,7 @@ describe('Today tab', () => {
   });
 
   it('formats deadlines as dates and follows the workbook style', async () => {
-    const ws = await today(fixture());
+    const ws = await today(await fixture());
     expect(ws.getCell('G6').numFmt).toBe('d mmm yyyy');
     expect((ws.getCell('A2').fill as ExcelJS.FillPattern).fgColor?.argb).toBe('FF0D0D0D');
     expect((ws.getCell('H2').fill as ExcelJS.FillPattern).fgColor?.argb).toBe('FF0D0D0D');
@@ -91,11 +99,11 @@ describe('Today tab', () => {
   });
 
   it('lists maybe done tasks and all four notes', async () => {
-    const db = seededDb();
-    const t = createTask(db, task({ title: 'Launch', priority: 'major', deadline: '2026-10-19' }), NOW);
-    setTaskStatus(db, t.id, 'maybe_done', '2026-10-19', NOW, 'ai');
-    createTask(db, task({ title: 'Old one', priority: 'major', deadline: '2026-10-02' }), NOW);
-    createTask(db, task({ title: 'Later', deadline: '2026-10-25' }), NOW);
+    const db = await seededDb();
+    const t = await createTask(db, task({ title: 'Launch', priority: 'major', deadline: '2026-10-19' }), NOW);
+    await setTaskStatus(db, t.id, 'maybe_done', '2026-10-19', NOW, 'ai');
+    await createTask(db, task({ title: 'Old one', priority: 'major', deadline: '2026-10-02' }), NOW);
+    await createTask(db, task({ title: 'Later', deadline: '2026-10-25' }), NOW);
     const rows = body(await today(db)).filter((r) => r[4] !== '');
     expect(rows.map((r) => [r[4], r[6], r[7]])).toEqual([
       ['SHA-002', date('2026-10-02'), 'overdue, major'],
@@ -105,8 +113,8 @@ describe('Today tab', () => {
   });
 
   it('leaves out inactive clients', async () => {
-    const db = fixture();
-    syncClients(db, [SHARMA]);
+    const db = await fixture();
+    await syncClients(db, [SHARMA]);
     const ws = await today(db);
     const names = body(ws).map((r) => r[0]).filter((v) => v !== '');
     expect(names).toEqual(['Sharma Interiors', 'Total']);
@@ -115,9 +123,9 @@ describe('Today tab', () => {
   });
 
   it('shows a client with no open tasks with zero counts and no task rows', async () => {
-    const db = seededDb();
-    const t = createTask(db, task({ clientId: 2 }), NOW);
-    setTaskStatus(db, t.id, 'done', '2026-10-15', NOW, 'ai');
+    const db = await seededDb();
+    const t = await createTask(db, task({ clientId: ids.mehta }), NOW);
+    await setTaskStatus(db, t.id, 'done', '2026-10-15', NOW, 'ai');
     expect(body(await today(db))).toEqual([
       ['Mehta Foods', 0, 0, '', '', '', '', ''],
       ['Sharma Interiors', 0, 0, '', '', '', '', ''],
@@ -126,7 +134,7 @@ describe('Today tab', () => {
   });
 
   it('shows (none) and zero totals when there is no active client', async () => {
-    const wb = await build(openDb(':memory:'));
+    const wb = await build(await testDb());
     expect(wb.worksheets.map((w) => w.name)).toEqual(['Today', 'Overview']);
     const ws = wb.getWorksheet('Today')!;
     expect(ws.getCell('A2').value).toBe('Client');
@@ -135,24 +143,24 @@ describe('Today tab', () => {
       ['Total', 0, 0, '', '', '', '', ''],
     ]);
 
-    const inactive = seededDb();
-    syncClients(inactive, []);
+    const inactive = await seededDb();
+    await syncClients(inactive, []);
     expect(body(await today(inactive))[0]![0]).toBe('(none)');
   });
 
   it('cuts long titles like the old message', async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const long = `${'word '.repeat(30)}end`;
-    createTask(db, task({ title: long }), NOW);
+    await createTask(db, task({ title: long }), NOW);
     const title = body(await today(db)).find((r) => r[4] === 'SHA-001')![5] as string;
     expect(Array.from(title).length).toBeLessThanOrEqual(MAX_TITLE_CHARS);
     expect(title.endsWith('…')).toBe(true);
   });
 
   it('keeps a title starting with = as text, never a formula', async () => {
-    const db = seededDb();
-    createTask(db, task({ title: '=HYPERLINK("http://x","y")' }), NOW);
-    createTask(db, task({ title: '+1', priority: 'low' }), NOW);
+    const db = await seededDb();
+    await createTask(db, task({ title: '=HYPERLINK("http://x","y")' }), NOW);
+    await createTask(db, task({ title: '+1', priority: 'low' }), NOW);
     const ws = await today(db);
     const first = ws.getCell('F5');
     expect(first.type).toBe(ExcelJS.ValueType.String);
@@ -163,16 +171,16 @@ describe('Today tab', () => {
   });
 
   it('removes characters XML does not allow from task titles', async () => {
-    const db = seededDb();
-    createTask(db, task({ title: 'Kick\x01off\uFFFE' }), NOW);
+    const db = await seededDb();
+    await createTask(db, task({ title: 'Kick\x01off\uFFFE' }), NOW);
     const ws = await today(db);
     expect(ws.getCell('F5').value).toBe('Kickoff');
   });
 
   it('a client named Today gets its own tab next to the Today tab', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     const named = (name: string, code: string): ClientConfig => ({ ...MEHTA, groupId: `${code}@g.us`, name, code });
-    syncClients(db, [named('Today', 'TOD')]);
+    await syncClients(db, [named('Today', 'TOD')]);
     const wb = await build(db);
     expect(wb.worksheets.map((w) => w.name)).toEqual(['Today', 'Overview', 'Today (2)']);
     expect(body(wb.getWorksheet('Today')!)[0]![0]).toBe('Today');

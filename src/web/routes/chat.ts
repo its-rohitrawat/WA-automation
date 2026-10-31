@@ -3,7 +3,7 @@ import { chatPage, outboxItem, type ChatOutboxItem, type ChatPage } from '../../
 import type { GroupDirectory } from '../../control/groups.ts';
 import type { ClientConfig } from '../../config/groups.ts';
 import { getClientByCode, type ClientRow } from '../../store/clients.ts';
-import { tx, type Db } from '../../store/db.ts';
+import type { Db } from '../../store/db.ts';
 import { claimedSince, claimOutbox, finishOutbox, lastClaimedAt, markSending, outboxByUuid, type OutboxRow } from '../../store/outbox.ts';
 import type { Clock } from '../../util/clock.ts';
 import type { Logger } from '../../util/logger.ts';
@@ -45,9 +45,9 @@ const CODE = /^[A-Z]{3,4}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 /** The approved, active client with this code, or null. */
-function approvedClient(deps: ChatDeps, code: string): ClientRow | null {
+async function approvedClient(deps: ChatDeps, code: string): Promise<ClientRow | null> {
   if (typeof code !== 'string' || !CODE.test(code)) return null;
-  const c = getClientByCode(deps.db, code);
+  const c = await getClientByCode(deps.db, code);
   if (!c || !c.active) return null;
   return deps.configs().some((x) => x.groupId === c.groupId && x.code === c.code) ? c : null;
 }
@@ -62,8 +62,8 @@ export type ChatView = ChatPage & {
 };
 
 /** GET /dashboard/api/clients/:code/chat?before=<message>&limit=<1..100> */
-export function chatReadHandler(deps: ChatDeps, _ctx: OwnerContext, code: string, search: { before?: string | null; limit?: string | null }): ApiResult<ChatView | ApiError> {
-  const c = approvedClient(deps, code);
+export async function chatReadHandler(deps: ChatDeps, _ctx: OwnerContext, code: string, search: { before?: string | null; limit?: string | null }): Promise<ApiResult<ChatView | ApiError>> {
+  const c = await approvedClient(deps, code);
   if (!c) return notFound();
   const whole = (v: string | null | undefined) => (v && /^\d{1,9}$/.test(v) ? Number(v) : undefined);
   if ((search.before && whole(search.before) === undefined) || (search.limit && whole(search.limit) === undefined)) {
@@ -71,7 +71,7 @@ export function chatReadHandler(deps: ChatDeps, _ctx: OwnerContext, code: string
   }
   const before = whole(search.before);
   const limit = whole(search.limit);
-  const page = chatPage(deps.db, c, deps.clock.now(), { ...(before !== undefined ? { before } : {}), ...(limit !== undefined ? { limit } : {}) });
+  const page = await chatPage(deps.db, c, deps.clock.now(), { ...(before !== undefined ? { before } : {}), ...(limit !== undefined ? { limit } : {}) });
   const groupName = (deps.directory.cachedGroups() ?? []).find((g) => g.id === c.groupId)?.subject || c.name;
   return ok({ client: { code: c.code, name: c.name, groupName }, sendingOn: deps.sendingOn(), connected: deps.connected(), ...page });
 }
@@ -112,57 +112,58 @@ export async function chatSendHandler(deps: ChatDeps, ctx: OwnerContext, code: s
     return confirmMissing ? fail(400, 'not_confirmed', 'Confirm the message before it is sent.') : fail(400, 'invalid', problem(parsed.error));
   }
   if (!deps.sendingOn()) return fail(409, 'sending_off', 'Sending from the dashboard is switched off. Switch it on in Settings first.');
-  const c = approvedClient(deps, code);
+  const c = await approvedClient(deps, code);
   if (!c) return notFound();
   const { uuid, text } = parsed.data;
   const replyTo = parsed.data.replyTo ?? null;
 
   // The same uuid again: the first request's message, never a second send.
-  const replay = (row: OutboxRow): ApiResult<SendView | ApiError> =>
+  const replay = async (row: OutboxRow): Promise<ApiResult<SendView | ApiError>> =>
     row.clientId === c.id && row.text === text && row.replyTo === replyTo
-      ? ok({ message: outboxItem(deps.db, row), replayed: true })
+      ? ok({ message: await outboxItem(deps.db, row), replayed: true })
       : fail(409, 'uuid_reused', 'This message id was already used for another message. Write the message again.');
-  const earlier = outboxByUuid(deps.db, uuid);
-  if (earlier) return replay(earlier);
+  const earlier = await outboxByUuid(deps.db, uuid);
+  if (earlier) return await replay(earlier);
 
   let quoted: QuotedMessage | null = null;
   if (replyTo !== null) {
-    const q = deps.db
-      .prepare('SELECT wa_id AS waId, sender_jid AS senderJid, from_me AS fromMe, text FROM messages WHERE id = ? AND client_id = ? AND revoked = 0')
-      .get(replyTo, c.id) as { waId: string; senderJid: string; fromMe: number; text: string | null } | undefined;
+    const q = await deps.db.get<{ waId: string; senderJid: string; fromMe: number; text: string | null }>(
+      'SELECT wa_id AS waId, sender_jid AS senderJid, from_me AS fromMe, text FROM messages WHERE id = ? AND client_id = ? AND revoked = 0',
+      [replyTo, c.id],
+    );
     if (!q) return fail(400, 'invalid', 'The message you are replying to is not in this chat.');
     quoted = { key: { remoteJid: c.groupId, id: q.waId, fromMe: q.fromMe === 1, participant: q.senderJid }, message: { conversation: q.text ?? '' } };
   }
 
   // The limits and the claim in one write transaction: two requests at once cannot both pass.
   const now = deps.clock.now();
-  const claim = tx(deps.db, (): { row: OutboxRow } | { limited: ApiResult<ApiError> } | { taken: OutboxRow } => {
-    const again = outboxByUuid(deps.db, uuid);
+  const claim = await deps.db.tx(async (tx): Promise<{ row: OutboxRow } | { limited: ApiResult<ApiError> } | { taken: OutboxRow }> => {
+    const again = await outboxByUuid(tx, uuid);
     if (again) return { taken: again };
-    const last = lastClaimedAt(deps.db, c.id);
+    const last = await lastClaimedAt(tx, c.id);
     const gap = last === null ? Infinity : now.getTime() - Date.parse(last);
     if (gap < SEND_GAP_MS) {
       return { limited: fail(429, 'rate_limited', 'Wait a few seconds between messages to the same group.', { retryAfterSec: Math.ceil((SEND_GAP_MS - gap) / 1000) }) };
     }
-    if (claimedSince(deps.db, new Date(now.getTime() - 3_600_000).toISOString()) >= SEND_HOURLY_MAX) {
+    if ((await claimedSince(tx, new Date(now.getTime() - 3_600_000).toISOString())) >= SEND_HOURLY_MAX) {
       return { limited: fail(429, 'rate_limited', `At most ${SEND_HOURLY_MAX} messages an hour can be sent from the dashboard. Try again later.`, { retryAfterSec: 600 }) };
     }
-    return { row: claimOutbox(deps.db, { uuid, clientId: c.id, text, replyTo, actor: ctx.actor, at: now.toISOString() }) };
+    return { row: await claimOutbox(tx, { uuid, clientId: c.id, text, replyTo, actor: ctx.actor, at: now.toISOString() }) };
   });
-  if ('taken' in claim) return replay(claim.taken);
+  if ('taken' in claim) return await replay(claim.taken);
   if ('limited' in claim) return claim.limited;
 
   // Logged before WhatsApp is asked: a crash mid-send leaves the row "sending" (unknown at the next start), and this line.
-  markSending(deps.db, claim.row.id, deps.clock.now().toISOString());
+  await markSending(deps.db, claim.row.id, deps.clock.now().toISOString());
   deps.log.info({ client: c.code, outbox: claim.row.id, chars: text.length, requestId: ctx.requestId }, 'dashboard send: asking WhatsApp');
   const outcome = await sendGroupText(deps.groupSocket, c.groupId, text, quoted, deps.sendTimeoutMs);
-  const done = finishOutbox(deps.db, claim.row.id, {
+  const done = await finishOutbox(deps.db, claim.row.id, {
     state: outcome.state, waId: outcome.state === 'sent' ? outcome.waId : null, errorCode: outcome.state === 'sent' ? null : outcome.code,
     at: deps.clock.now().toISOString(),
   });
   deps.log.info({ client: c.code, outbox: claim.row.id, outcome: outcome.state, code: outcome.state === 'sent' ? null : outcome.code, requestId: ctx.requestId }, 'dashboard send: done');
   try {
-    deps.audit({
+    await deps.audit({
       actor: ctx.actor, kind: 'ops', requestId: ctx.requestId,
       event: `Message ${OUTCOME_WORDS[outcome.state]} · ${c.name} (${c.code})`,
       detail: `${text.length} characters${replyTo !== null ? ', a reply' : ''}${outcome.state === 'sent' ? '' : ` · ${outcome.code}`}`,
@@ -170,5 +171,5 @@ export async function chatSendHandler(deps: ChatDeps, ctx: OwnerContext, code: s
   } catch (e) {
     deps.log.warn({ code: (e as Error | null)?.name ?? 'Error', requestId: ctx.requestId }, 'audit line for a dashboard send could not be written');
   }
-  return ok({ message: outboxItem(deps.db, done), replayed: false });
+  return ok({ message: await outboxItem(deps.db, done), replayed: false });
 }

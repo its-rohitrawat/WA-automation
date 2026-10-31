@@ -274,23 +274,23 @@ export class MediaProcessor {
 
   async process(mediaId: number): Promise<ProcessResult> {
     const { db } = this.#o;
-    const row = getMedia(db, mediaId);
+    const row = await getMedia(db, mediaId);
     // Before the claim: a file whose final failure could not be written is never claimed or paid for again (fix 2).
     if (this.#neverPayAgain.has(mediaId)) return { outcome: 'skipped', clientId: row?.clientId ?? null };
     if (!row || row.status !== 'pending') return { outcome: 'skipped', clientId: row?.clientId ?? null };
     // A client taken off the allow-list: its files wait, untouched, until it is active again (amendment 10a).
     // The queue does not pick them up meanwhile (dueMediaIds), so this cannot loop.
-    if (!getClient(db, row.clientId).active) return { outcome: 'skipped', clientId: row.clientId };
-    const job = mediaJob(db, mediaId);
+    if (!(await getClient(db, row.clientId)).active) return { outcome: 'skipped', clientId: row.clientId };
+    const job = await mediaJob(db, mediaId);
     if (!job) {
       // Its message is gone: the file can never be processed, so it must not stay pending (amendment 10b).
-      failMedia(db, row.id, { status: 'failed', errorCode: 'no_job', at: this.#now() });
+      await failMedia(db, row.id, { status: 'failed', errorCode: 'no_job', at: this.#now() });
       this.#o.log.warn({ mediaId: row.id, clientId: row.clientId, errorCode: 'no_job' }, 'shared file has no message');
       return { outcome: 'failed', clientId: row.clientId };
     }
     if (row.localPath === null && job.revoked) {
       // Deleted for everyone before we fetched it: do not fetch it now.
-      failMedia(db, row.id, { status: 'unavailable', errorCode: 'revoked', at: this.#now() });
+      await failMedia(db, row.id, { status: 'unavailable', errorCode: 'revoked', at: this.#now() });
       return { outcome: 'unavailable', clientId: row.clientId };
     }
     if (row.attempts >= this.#maxRuns(row.kind)) {
@@ -298,18 +298,18 @@ export class MediaProcessor {
       // So a pending file with this many was claimed by runs that never ended: each one stopped the process (FR1). A
       // voice note or audio file gets fewer when its transcriber is paid: such a run may have been billed (maxRuns,
       // review round 1 fix 3).
-      failMedia(db, row.id, { status: 'failed', errorCode: CRASHED, at: this.#now() });
+      await failMedia(db, row.id, { status: 'failed', errorCode: CRASHED, at: this.#now() });
       this.#o.log.warn({ mediaId: row.id, clientId: row.clientId, errorCode: CRASHED, attempts: row.attempts }, 'shared file failed: its runs never ended');
       return { outcome: 'failed', clientId: row.clientId };
     }
     // Final review FR1: claimed in a committed write before anything is downloaded, decoded or paid for. If the write
     // fails, the error propagates and nothing is tried. Outcomes that count nothing give the attempt back (#settle).
     const at = this.#now();
-    if (!claimMedia(db, row.id, { nextAttemptAt: new Date(Date.parse(at) + CLAIM_MS).toISOString(), at })) return { outcome: 'skipped', clientId: row.clientId };
+    if (!(await claimMedia(db, row.id, { nextAttemptAt: new Date(Date.parse(at) + CLAIM_MS).toISOString(), at }))) return { outcome: 'skipped', clientId: row.clientId };
     try {
       return { outcome: await this.#run(row, job), clientId: row.clientId };
     } catch (e) {
-      return { outcome: this.#settle(row, e), clientId: row.clientId };
+      return { outcome: await this.#settle(row, e), clientId: row.clientId };
     }
   }
 
@@ -357,9 +357,9 @@ export class MediaProcessor {
     }
     // Read again, not only from the job: the message may have been deleted for everyone during the download (FR3a).
     // A message that is gone counts as deleted.
-    const revoked = (): boolean => mediaJob(db, row.id)?.revoked ?? true;
-    if (job.revoked || revoked()) {
-      finishMedia(db, row.id, { textKind: null, text: null, pageCount: null, note: 'revoked', at: this.#now() });
+    const revoked = async (): Promise<boolean> => (await mediaJob(db, row.id))?.revoked ?? true;
+    if (job.revoked || (await revoked())) {
+      await finishMedia(db, row.id, { textKind: null, text: null, pageCount: null, note: 'revoked', at: this.#now() });
       return 'done';
     }
     // The original is saved and hashed already: a DOCX's bytes may be moved to the parser, so nothing reads them after this.
@@ -370,7 +370,7 @@ export class MediaProcessor {
       mediaId: row.id, kind: row.kind, mimeType: row.mimeType, fileName: row.fileName, forwarded: row.forwarded, bytes, path: this.#abs(rel), revoked,
     });
     try {
-      finishMedia(db, row.id, { ...x, at: this.#now() });
+      await finishMedia(db, row.id, { ...x, at: this.#now() });
     } catch (e) {
       if (!x.forget) throw e;
       // A paid, booked transcript whose provider copy finishMedia could not note in media_stt_forget: a retry would pay
@@ -398,7 +398,7 @@ export class MediaProcessor {
    */
   async #forgetNow(row: MediaRow, copy: { provider: ProviderId; ref: string }): Promise<void> {
     const { db, log, clock } = this.#o;
-    const noted = this.#noteCopy(row, copy, this.#now());
+    const noted = await this.#noteCopy(row, copy, this.#now());
     const voice = this.#o.voice ?? null;
     if (voice === null || voice.provider !== copy.provider || !voice.canForget) return;
     if (noted) {
@@ -415,9 +415,9 @@ export class MediaProcessor {
   }
 
   /** Notes a provider copy in media_stt_forget (N1), best effort: a failure is logged (codes only). Returns whether it was noted. */
-  #noteCopy(row: MediaRow, copy: { provider: ProviderId; ref: string }, at: string): boolean {
+  async #noteCopy(row: MediaRow, copy: { provider: ProviderId; ref: string }, at: string): Promise<boolean> {
     try {
-      noteMediaForget(this.#o.db, row.id, { ...copy, at });
+      await noteMediaForget(this.#o.db, row.id, { ...copy, at });
       return true;
     } catch (err) {
       this.#o.log.warn({ mediaId: row.id, clientId: row.clientId, provider: copy.provider, errorCode: 'forget_not_noted', err }, 'voice note speech copy could not be noted for deletion');
@@ -428,7 +428,7 @@ export class MediaProcessor {
   /** Downloads and saves the original; returns its bytes and its path relative to the data folder. */
   async #download(row: MediaRow, job: MediaJob): Promise<{ bytes: Buffer; rel: string }> {
     const { db, sealer, fetcher } = this.#o;
-    const blob = getMediaRef(db, row.id);
+    const blob = await getMediaRef(db, row.id);
     if (!blob) throw new MediaUnavailableError('no_ref');
     let ref: MediaRef;
     try {
@@ -443,7 +443,7 @@ export class MediaProcessor {
     const sha256 = sha256Hex(bytes);
     await mkdir(dirname(abs), { recursive: true });
     await saveOriginal(abs, bytes, sha256);
-    markDownloaded(db, row.id, { localPath: rel, sha256, fileSize: bytes.length, at: this.#now() });
+    await markDownloaded(db, row.id, { localPath: rel, sha256, fileSize: bytes.length, at: this.#now() });
     return { bytes, rel };
   }
 
@@ -471,15 +471,15 @@ export class MediaProcessor {
    * A copy the provider kept although its answer could not be read (voiceCopyOf) is noted first, best effort, and its
    * deletion started without waiting. The never-retry speech failures add the file to #neverPayAgain before failMedia.
    */
-  #settle(row: MediaRow, e: unknown): ProcessOutcome {
+  async #settle(row: MediaRow, e: unknown): Promise<ProcessOutcome> {
     const { db, log } = this.#o;
     const at = this.#now();
     const ids = { mediaId: row.id, clientId: row.clientId };
-    this.#noteUnansweredCopy(row, e, at);
+    await this.#noteUnansweredCopy(row, e, at);
     if (paidButUnstored(e)) {
       // The late booking and the copy deletion were already tried (by the extractor, or by #run).
       this.#neverPayAgain.add(row.id);
-      failMedia(db, row.id, { status: 'failed', errorCode: STT_PAID_UNBOOKED, at });
+      await failMedia(db, row.id, { status: 'failed', errorCode: STT_PAID_UNBOOKED, at });
       log.warn({ ...ids, errorCode: STT_PAID_UNBOOKED }, 'voice note paid but not booked: not retried');
       return 'failed';
     }
@@ -487,18 +487,18 @@ export class MediaProcessor {
       // Final review FR3c: when only paid calls in flight hold the budget (or the guard closed at shutdown), the file is
       // read within minutes, so it waits as spend_busy. mediaStats counts only spend_cap as waiting for midnight.
       const errorCode = e.busy ? SPEND_BUSY : 'spend_cap';
-      deferMedia(db, row.id, { errorCode, nextAttemptAt: new Date(Date.parse(at) + SPEND_RETRY_MS).toISOString(), attempts: row.attempts, at });
+      await deferMedia(db, row.id, { errorCode, nextAttemptAt: new Date(Date.parse(at) + SPEND_RETRY_MS).toISOString(), attempts: row.attempts, at });
       log.info(ids, e.busy ? 'paid calls in flight hold the budget: shared file waits' : 'spend cap: shared file waits');
       return 'deferred';
     }
     if (e instanceof MediaUnavailableError) {
-      failMedia(db, row.id, { status: 'unavailable', errorCode: e.code, at });
+      await failMedia(db, row.id, { status: 'unavailable', errorCode: e.code, at });
       log.info({ ...ids, errorCode: e.code }, 'shared file could not be downloaded');
       return 'unavailable';
     }
     if (e instanceof ParseError || e instanceof MediaFailedError || e instanceof AiRefusalError) {
       const errorCode = e instanceof AiRefusalError ? 'ai_refusal' : e.code;
-      failMedia(db, row.id, { status: 'failed', errorCode, at });
+      await failMedia(db, row.id, { status: 'failed', errorCode, at });
       log.warn({ ...ids, errorCode }, 'shared file could not be read');
       return 'failed';
     }
@@ -516,11 +516,11 @@ export class MediaProcessor {
       // The service is stopping: the free run is simply tried again after the restart, counting nothing. Not forever
       // (review round 1, fix 2): past the 24 hours of the other free waits (#waitedTooLong), the file fails.
       if (this.#waitedTooLong(row, at)) {
-        failMedia(db, row.id, { status: 'failed', errorCode: LOCAL_ABORTED, at });
+        await failMedia(db, row.id, { status: 'failed', errorCode: LOCAL_ABORTED, at });
         log.warn({ ...ids, errorCode: LOCAL_ABORTED }, 'voice note not transcribed: local speech engine stopped for 24 hours');
         return 'failed';
       }
-      deferMedia(db, row.id, { errorCode: LOCAL_ABORTED, nextAttemptAt: new Date(Date.parse(at) + LOCAL_ABORTED_RETRY_MS).toISOString(), attempts: row.attempts, at });
+      await deferMedia(db, row.id, { errorCode: LOCAL_ABORTED, nextAttemptAt: new Date(Date.parse(at) + LOCAL_ABORTED_RETRY_MS).toISOString(), attempts: row.attempts, at });
       log.info({ ...ids, errorCode: LOCAL_ABORTED }, 'local speech engine stopped: voice note waits');
       return 'deferred';
     }
@@ -552,9 +552,9 @@ export class MediaProcessor {
    * without waiting, when a transcriber that keeps copies is set up (the sweep deletes it otherwise). Its failure is
    * logged with codes only.
    */
-  #noteUnansweredCopy(row: MediaRow, e: unknown, at: string): void {
+  async #noteUnansweredCopy(row: MediaRow, e: unknown, at: string): Promise<void> {
     const copy = voiceCopyOf(e);
-    if (copy === null || !this.#noteCopy(row, copy, at)) return;
+    if (copy === null || !(await this.#noteCopy(row, copy, at))) return;
     const { db, log, clock } = this.#o;
     const voice = this.#o.voice ?? null;
     if (voice === null || !voice.canForget) return;
@@ -567,9 +567,9 @@ export class MediaProcessor {
    * Fails the file for good, keeping the attempt the claim counted. With neverPayAgain, the file is first added to
    * #neverPayAgain, so a failMedia that throws still never lets this processor run it again (fix 2).
    */
-  #failAtOnce(row: MediaRow, at: string, errorCode: string, message: string, o: { neverPayAgain?: boolean } = {}): ProcessOutcome {
+  async #failAtOnce(row: MediaRow, at: string, errorCode: string, message: string, o: { neverPayAgain?: boolean } = {}): Promise<ProcessOutcome> {
     if (o.neverPayAgain) this.#neverPayAgain.add(row.id);
-    failMedia(this.#o.db, row.id, { status: 'failed', errorCode, at });
+    await failMedia(this.#o.db, row.id, { status: 'failed', errorCode, at });
     this.#o.log.warn({ mediaId: row.id, clientId: row.clientId, errorCode }, message);
     return 'failed';
   }
@@ -580,16 +580,16 @@ export class MediaProcessor {
    * given up once the file has waited 24 hours (#waitedTooLong). `same` tells the same problem by the row's error code
    * (by default: the same code), so a different problem starts the waits again.
    */
-  #growingWait(row: MediaRow, at: string, e: unknown, o: { errorCode: string; same?: (code: string | null) => boolean; waits: string; gaveUp: string }): ProcessOutcome {
+  async #growingWait(row: MediaRow, at: string, e: unknown, o: { errorCode: string; same?: (code: string | null) => boolean; waits: string; gaveUp: string }): Promise<ProcessOutcome> {
     const { db, log } = this.#o;
     const ids = { mediaId: row.id, clientId: row.clientId };
     if (this.#waitedTooLong(row, at)) {
-      failMedia(db, row.id, { status: 'failed', errorCode: o.errorCode, at });
+      await failMedia(db, row.id, { status: 'failed', errorCode: o.errorCode, at });
       log.warn({ ...ids, errorCode: o.errorCode, err: e }, o.gaveUp);
       return 'failed';
     }
     const waitMs = nextGrowingWait(row, o.same ?? ((code) => code === o.errorCode));
-    deferMedia(db, row.id, { errorCode: o.errorCode, nextAttemptAt: new Date(Date.parse(at) + waitMs).toISOString(), attempts: row.attempts, at });
+    await deferMedia(db, row.id, { errorCode: o.errorCode, nextAttemptAt: new Date(Date.parse(at) + waitMs).toISOString(), attempts: row.attempts, at });
     log.info({ ...ids, errorCode: o.errorCode, waitMinutes: waitMs / 60_000, err: e }, o.waits);
     return 'deferred';
   }
@@ -598,19 +598,19 @@ export class MediaProcessor {
    * A counted retry after 1, then 5 minutes; failed once the attempts (the claim's included) reach maxAttempts. With
    * neverPayAgain, that final failure first adds the file to #neverPayAgain (fix 2).
    */
-  #countedRetry(row: MediaRow, at: string, e: unknown, maxAttempts: number, o: { neverPayAgain?: boolean } = {}): ProcessOutcome {
+  async #countedRetry(row: MediaRow, at: string, e: unknown, maxAttempts: number, o: { neverPayAgain?: boolean } = {}): Promise<ProcessOutcome> {
     const { db, log } = this.#o;
     const ids = { mediaId: row.id, clientId: row.clientId };
     const errorCode = retryCode(e);
     const attempts = row.attempts + 1; // the attempt the claim counted
     if (attempts >= maxAttempts) {
       if (o.neverPayAgain) this.#neverPayAgain.add(row.id);
-      failMedia(db, row.id, { status: 'failed', errorCode, at });
+      await failMedia(db, row.id, { status: 'failed', errorCode, at });
       log.warn({ ...ids, errorCode, attempts, err: e }, 'shared file failed after retries');
       return 'failed';
     }
     const delay = RETRY_DELAYS_MS[attempts - 1] ?? 5 * 60_000;
-    deferMedia(db, row.id, { errorCode, nextAttemptAt: new Date(Date.parse(at) + delay).toISOString(), attempts, at });
+    await deferMedia(db, row.id, { errorCode, nextAttemptAt: new Date(Date.parse(at) + delay).toISOString(), attempts, at });
     log.warn({ ...ids, errorCode, attempts, err: e }, 'shared file will be retried');
     return 'deferred';
   }

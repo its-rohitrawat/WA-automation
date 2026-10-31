@@ -1,4 +1,4 @@
-import type { Db } from './db.ts';
+import type { Sql } from './db.ts';
 
 export type Role = 'team' | 'client' | 'unknown';
 export type RoleSetBy = 'ai' | 'human' | 'system';
@@ -34,13 +34,13 @@ const toRow = (r: RawPerson): PersonRow => ({
 });
 
 /** The founder (fromMe) is always team and cannot be changed by the AI ('system'). */
-export function upsertPerson(db: Db, p: { clientId: number; jid: string; number: string | null; name: string | null; fromMe: boolean }): void {
-  db.prepare(`INSERT INTO people (client_id, jid, number, name, role, role_set_by) VALUES (@clientId, @jid, @number, @name, @role, @setBy)
+export async function upsertPerson(db: Sql, p: { clientId: number; jid: string; number: string | null; name: string | null; fromMe: boolean }): Promise<void> {
+  await db.run(`INSERT INTO people (client_id, jid, number, name, role, role_set_by) VALUES (@clientId, @jid, @number, @name, @role, @setBy)
     ON CONFLICT (client_id, jid) DO UPDATE SET
       number = COALESCE(excluded.number, people.number),
       name = COALESCE(excluded.name, people.name),
       role = CASE WHEN excluded.role_set_by = 'system' THEN 'team' ELSE people.role END,
-      role_set_by = CASE WHEN excluded.role_set_by = 'system' THEN 'system' ELSE people.role_set_by END`).run({
+      role_set_by = CASE WHEN excluded.role_set_by = 'system' THEN 'system' ELSE people.role_set_by END`, {
     clientId: p.clientId,
     jid: p.jid,
     number: p.number,
@@ -50,18 +50,18 @@ export function upsertPerson(db: Db, p: { clientId: number; jid: string; number:
   });
 }
 
-export function listPeople(db: Db, clientId: number): PersonRow[] {
-  return (db.prepare('SELECT * FROM people WHERE client_id = ? ORDER BY id').all(clientId) as RawPerson[]).map(toRow);
+export async function listPeople(db: Sql, clientId: number): Promise<PersonRow[]> {
+  return (await db.all<RawPerson>('SELECT * FROM people WHERE client_id = ? ORDER BY id', [clientId])).map(toRow);
 }
 
-export function setRole(db: Db, clientId: number, jid: string, role: Role, by: RoleSetBy): void {
-  db.prepare('UPDATE people SET role = ?, role_set_by = ? WHERE client_id = ? AND jid = ?').run(role, by, clientId, jid);
+export async function setRole(db: Sql, clientId: number, jid: string, role: Role, by: RoleSetBy): Promise<void> {
+  await db.run('UPDATE people SET role = ?, role_set_by = ? WHERE client_id = ? AND jid = ?', [role, by, clientId, jid]);
 }
 
-export function findPeopleByNumber(db: Db, number: string): PersonRow[] {
-  return (db.prepare('SELECT * FROM people WHERE number = ? ORDER BY client_id').all(number) as RawPerson[]).map(toRow);
+export async function findPeopleByNumber(db: Sql, number: string): Promise<PersonRow[]> {
+  return (await db.all<RawPerson>('SELECT * FROM people WHERE number = ? ORDER BY client_id', [number])).map(toRow);
 }
 
-export function findPeopleByJid(db: Db, jid: string): PersonRow[] {
-  return (db.prepare('SELECT * FROM people WHERE jid = ? ORDER BY client_id').all(jid) as RawPerson[]).map(toRow);
+export async function findPeopleByJid(db: Sql, jid: string): Promise<PersonRow[]> {
+  return (await db.all<RawPerson>('SELECT * FROM people WHERE jid = ? ORDER BY client_id', [jid])).map(toRow);
 }

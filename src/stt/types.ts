@@ -38,8 +38,8 @@ export interface TranscribeOptions {
   diarize: boolean;
   /** A provider job id saved by an earlier run whose answer never arrived: wait for that job instead of sending again. */
   resumeJobId?: string;
-  /** Called once the provider has accepted the work and given it an id, before waiting for the result. */
-  onJobId?: (id: string) => void;
+  /** Called once the provider has accepted the work and given it an id, and awaited before waiting for the result. */
+  onJobId?: (id: string) => void | Promise<void>;
 }
 
 export interface ProviderResult {

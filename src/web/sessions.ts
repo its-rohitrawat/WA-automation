@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
-import type { Db } from '../store/db.ts';
+import { FOUNDER_TENANT_ID } from '../config/env.ts';
+import type { Db, Sql } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import { serializeCookie } from './http.ts';
 
@@ -17,6 +18,11 @@ const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 
 export interface Session {
   email: string;
+  /**
+   * The customer this session belongs to (S4.8). Postgres: web_sessions.tenant_id, a platform column. SQLite: always the
+   * founder's (no column; customer sessions exist on Postgres only).
+   */
+  tenantId: string;
   /** SHA-256 (hex) of the session's CSRF token. */
   csrfHash: string;
   createdAt: string;
@@ -25,6 +31,8 @@ export interface Session {
 
 interface Row {
   email: string;
+  /** Postgres only. */
+  tenant_id?: string;
   csrf_hash: string;
   created_at: string;
   expires_at: string;
@@ -103,18 +111,27 @@ export class SessionStore {
     }
   }
 
-  /** Starts a session. The returned id goes only into the cookie and the CSRF token only to the signed-in page. */
-  create(email: string, agentLabel?: string): { id: string; csrf: string } {
+  /**
+   * Starts a session. The returned id goes only into the cookie and the CSRF token only to the signed-in page. `q` is
+   * a transaction handle when the session must commit with something else (sign-in's audit row). `tenantId`: whose
+   * session it is, the founder by default. On SQLite only the founder's can be made (customer sessions are Postgres-only).
+   */
+  async create(email: string, agentLabel?: string, q: Sql = this.#db, tenantId: string = FOUNDER_TENANT_ID): Promise<{ id: string; csrf: string }> {
+    const pg = this.#db.engine === 'postgres';
+    if (!pg && tenantId !== FOUNDER_TENANT_ID) throw new Error('customer sessions exist on Postgres only');
     const id = newToken();
     const csrf = csrfFor(id);
     const now = this.#clock.now();
     const at = now.toISOString();
-    this.#db
-      .prepare(
-        `INSERT INTO web_sessions (id_hash, email, csrf_hash, created_at, expires_at, last_seen_at, agent_label)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(hashToken(id), email.trim().toLowerCase(), hashToken(csrf), at, new Date(now.getTime() + SESSION_TTL_MS).toISOString(), at, cleanLabel(agentLabel));
+    const values = [hashToken(id), email.trim().toLowerCase(), hashToken(csrf), at, new Date(now.getTime() + SESSION_TTL_MS).toISOString(), at, cleanLabel(agentLabel)];
+    await q.run(
+      pg
+        ? `INSERT INTO web_sessions (id_hash, email, csrf_hash, created_at, expires_at, last_seen_at, agent_label, tenant_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        : `INSERT INTO web_sessions (id_hash, email, csrf_hash, created_at, expires_at, last_seen_at, agent_label)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      pg ? [...values, tenantId] : values,
+    );
     return { id, csrf };
   }
 
@@ -122,49 +139,77 @@ export class SessionStore {
    * The live session for this id, or undefined when it is unknown, malformed, past its 7 days or idle for more than
    * 24 hours (such a row is removed at once). Marks the session as used, at most once a minute.
    */
-  get(id: string): Session | undefined {
+  async get(id: string): Promise<Session | undefined> {
     if (!isToken(id)) return undefined;
     const idHash = hashToken(id);
-    const row = this.#db
-      .prepare('SELECT email, csrf_hash, created_at, expires_at, last_seen_at FROM web_sessions WHERE id_hash = ?')
-      .get(idHash) as Row | undefined;
+    const cols = this.#db.engine === 'postgres' ? ', tenant_id' : '';
+    const row = await this.#db.get<Row>(`SELECT email, csrf_hash, created_at, expires_at, last_seen_at${cols} FROM web_sessions WHERE id_hash = ?`, [idHash]);
     if (row === undefined) return undefined;
     const now = this.#clock.now().getTime();
     const expires = Date.parse(row.expires_at);
     const lastSeen = Date.parse(row.last_seen_at);
     // Fail closed: a row whose times cannot be read is treated as ended, never as live forever.
     if (!Number.isFinite(expires) || !Number.isFinite(lastSeen) || now >= expires || now - lastSeen > IDLE_TIMEOUT_MS) {
-      this.#db.prepare('DELETE FROM web_sessions WHERE id_hash = ?').run(idHash);
+      await this.#db.run('DELETE FROM web_sessions WHERE id_hash = ?', [idHash]);
       this.#tell({ idHash });
       return undefined;
     }
     if (now - lastSeen >= TOUCH_EVERY_MS) {
-      this.#db.prepare('UPDATE web_sessions SET last_seen_at = ? WHERE id_hash = ?').run(new Date(now).toISOString(), idHash);
+      await this.#db.run('UPDATE web_sessions SET last_seen_at = ? WHERE id_hash = ?', [new Date(now).toISOString(), idHash]);
     }
-    return { email: row.email, csrfHash: row.csrf_hash, createdAt: row.created_at, expiresAt: row.expires_at };
+    // SQLite keeps no customer (every session is the founder's). On Postgres a row without one is ended (fail closed): it
+    // is never taken for the founder's.
+    const pg = this.#db.engine === 'postgres';
+    if (pg && !row.tenant_id) {
+      await this.#db.run('DELETE FROM web_sessions WHERE id_hash = ?', [idHash]);
+      this.#tell({ idHash });
+      return undefined;
+    }
+    return { email: row.email, tenantId: pg ? row.tenant_id! : FOUNDER_TENANT_ID, csrfHash: row.csrf_hash, createdAt: row.created_at, expiresAt: row.expires_at };
   }
 
-  /** Ends one session (sign-out). An unknown id is a no-op. */
-  destroy(id: string): void {
+  /** Ends one session (sign-out). An unknown id is a no-op. `q`: as for `create`. */
+  async destroy(id: string, q: Sql = this.#db): Promise<void> {
     if (!isToken(id)) return;
-    this.#db.prepare('DELETE FROM web_sessions WHERE id_hash = ?').run(hashToken(id));
+    await q.run('DELETE FROM web_sessions WHERE id_hash = ?', [hashToken(id)]);
     this.#tell({ idHash: hashToken(id) });
   }
 
-  /** Ends every session of this owner. Returns how many ended. */
-  destroyAllFor(email: string): number {
-    const n = this.#db.prepare('DELETE FROM web_sessions WHERE email = ?').run(email.trim().toLowerCase()).changes;
+  /**
+   * Ends every session of this email in one customer's workspace (tenantId; the founder's by default). Returns how many
+   * ended. On Postgres web_sessions holds every customer's sessions (a platform table), so the customer always bounds
+   * the delete: a customer signing out everywhere never ends the founder's or another customer's sessions. On SQLite
+   * every session is the founder's. `q`: as for `create`.
+   */
+  async destroyAllFor(email: string, q: Sql = this.#db, tenantId: string = FOUNDER_TENANT_ID): Promise<number> {
+    const who = email.trim().toLowerCase();
+    const n = (this.#db.engine === 'postgres'
+      ? await q.run('DELETE FROM web_sessions WHERE email = ? AND tenant_id = ?', [who, tenantId])
+      : await q.run('DELETE FROM web_sessions WHERE email = ?', [who])).changes;
     this.#tell({ email: email.trim().toLowerCase() });
     return n;
   }
 
+  /** How many sessions destroyAllFor(email, …, tenantId) would end now (the same bound). */
+  async countFor(email: string, tenantId: string = FOUNDER_TENANT_ID): Promise<number> {
+    const who = email.trim().toLowerCase();
+    const row = this.#db.engine === 'postgres'
+      ? await this.#db.get<{ n: number }>('SELECT COUNT(*) AS n FROM web_sessions WHERE email = ? AND tenant_id = ?', [who, tenantId])
+      : await this.#db.get<{ n: number }>('SELECT COUNT(*) AS n FROM web_sessions WHERE email = ?', [who]);
+    return row?.n ?? 0;
+  }
+
+  /** The browser label sign-in saved for this session ("Safari on macOS"), or null. */
+  async agentLabel(id: string): Promise<string | null> {
+    if (!isToken(id)) return null;
+    return (await this.#db.get<{ agent_label: string | null }>('SELECT agent_label FROM web_sessions WHERE id_hash = ?', [hashToken(id)]))?.agent_label ?? null;
+  }
+
   /** Removes expired and idle sessions (the web server calls this hourly). Returns how many were removed. */
-  purgeExpired(): number {
+  async purgeExpired(): Promise<number> {
     const now = this.#clock.now().getTime();
     const idleCutoff = new Date(now - IDLE_TIMEOUT_MS).toISOString();
-    return this.#db
-      .prepare('DELETE FROM web_sessions WHERE expires_at <= ? OR last_seen_at < ?')
-      .run(new Date(now).toISOString(), idleCutoff).changes;
+    return (await this.#db.run('DELETE FROM web_sessions WHERE expires_at <= ? OR last_seen_at < ?', [new Date(now).toISOString(), idleCutoff])).changes;
   }
 }
 

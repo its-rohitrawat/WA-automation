@@ -212,7 +212,7 @@ function likePattern(s: string): string {
 }
 
 /** The Tasks screen's list: every filter, the sort and one page, with the total before paging. */
-export function listDashboardTasks(db: Db, f: TaskQuery, now: Date): { total: number; rows: DashboardTaskRow[] } {
+export async function listDashboardTasks(db: Db, f: TaskQuery, now: Date): Promise<{ total: number; rows: DashboardTaskRow[] }> {
   const today = istDate(now);
   // Active clients only, as the Overview counts, unless the removed clients' tasks are asked for too.
   const where: string[] = f.removed === '1' ? [] : ['c.active = 1'];
@@ -250,11 +250,9 @@ export function listDashboardTasks(db: Db, f: TaskQuery, now: Date): { total: nu
     params.closedFrom = addDays(today, -6);
   }
   const whereSql = where.length > 0 ? ` WHERE ${where.join(' AND ')}` : '';
-  const total = (db.prepare(`SELECT COUNT(*) AS n FROM tasks t JOIN clients c ON c.id = t.client_id${whereSql}`).get(params) as { n: number }).n;
-  const rows = db
-    .prepare(`${SELECT_SQL}${whereSql} ORDER BY ${orderBy(f.sort, f.dir)} LIMIT @limit OFFSET @offset`)
-    .all({ ...params, limit: f.limit, offset: f.offset }) as RawRow[];
-  const moods = readSentimentEnabled(db);
+  const total = (await db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM tasks t JOIN clients c ON c.id = t.client_id${whereSql}`, params))!.n;
+  const rows = await db.all<RawRow>(`${SELECT_SQL}${whereSql} ORDER BY ${orderBy(f.sort, f.dir)} LIMIT @limit OFFSET @offset`, { ...params, limit: f.limit, offset: f.offset });
+  const moods = await readSentimentEnabled(db);
   return { total, rows: rows.map((r) => toRow(r, moods)) };
 }
 
@@ -304,16 +302,17 @@ function historyWords(op: string, actor: 'agent' | 'owner', detail: string, sour
 }
 
 /** One task with its quote, progress, reminders and history; undefined when no task has that code. */
-export function taskDetail(db: Db, rawCode: string, now: Date): DashboardTaskDetail | undefined {
+export async function taskDetail(db: Db, rawCode: string, now: Date): Promise<DashboardTaskDetail | undefined> {
   const code = rawCode.trim().toUpperCase();
   if (!/^[A-Z]{3,4}-\d{1,9}$/.test(code)) return undefined;
-  const r = db.prepare(`${SELECT_SQL} WHERE t.code = @code`).get({ code, today: istDate(now) }) as RawRow | undefined;
+  const r = await db.get<RawRow>(`${SELECT_SQL} WHERE t.code = @code`, { code, today: istDate(now) });
   if (!r) return undefined;
-  const events = db
-    .prepare('SELECT at, actor, op, detail FROM task_events WHERE task_id = ? ORDER BY at, id')
-    .all(r.id) as { at: string; actor: 'ai' | 'human'; op: string; detail: string }[];
+  const events = await db.all<{ at: string; actor: 'ai' | 'human'; op: string; detail: string }>(
+    'SELECT at, actor, op, detail FROM task_events WHERE task_id = ? ORDER BY at, id',
+    [r.id],
+  );
   return {
-    ...toRow(r, readSentimentEnabled(db)),
+    ...toRow(r, await readSentimentEnabled(db)),
     priorityKeyword: r.priorityKeyword,
     sourceQuote: r.sourceQuote,
     sourceDate: r.sourceDate,
@@ -328,9 +327,7 @@ export function taskDetail(db: Db, rawCode: string, now: Date): DashboardTaskDet
 }
 
 /** A meeting's action items: the tasks made from it, by code. */
-export function tasksForMeeting(db: Db, meetingId: number, now: Date): Pick<DashboardTaskRow, 'code' | 'title' | 'owner' | 'deadline' | 'status'>[] {
-  const rows = db
-    .prepare(`${SELECT_SQL} WHERE t.meeting_id = @meetingId ORDER BY ${CODE_NUMBER_SQL}, t.id`)
-    .all({ meetingId, today: istDate(now) }) as RawRow[];
+export async function tasksForMeeting(db: Db, meetingId: number, now: Date): Promise<Pick<DashboardTaskRow, 'code' | 'title' | 'owner' | 'deadline' | 'status'>[]> {
+  const rows = await db.all<RawRow>(`${SELECT_SQL} WHERE t.meeting_id = @meetingId ORDER BY ${CODE_NUMBER_SQL}, t.id`, { meetingId, today: istDate(now) });
   return rows.map((r) => ({ code: r.code, title: r.title, owner: r.owner, deadline: r.deadline, status: r.status }));
 }

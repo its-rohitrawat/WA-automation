@@ -85,14 +85,16 @@ export function loadGroupsFile(path: string): ClientConfig[] {
 /** Polls the file (reliable on Windows). Returns a function that stops watching. */
 export function watchGroupsFile(
   path: string,
-  onChange: (clients: ClientConfig[]) => void,
+  onChange: (clients: ClientConfig[]) => void | Promise<void>,
   onError: (err: Error) => void,
   intervalMs = 2000,
 ): () => void {
   const listener = (curr: Stats, prev: Stats) => {
     if (curr.mtimeMs === prev.mtimeMs) return;
     try {
-      onChange(loadGroupsFile(path));
+      // An onChange that rejects (a code conflict found by the async reload) is reported the same way as one that throws.
+      const r = onChange(loadGroupsFile(path));
+      if (r instanceof Promise) r.catch((e: unknown) => onError(e as Error));
     } catch (e) {
       onError(e as Error);
     }

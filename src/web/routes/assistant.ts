@@ -5,7 +5,7 @@ import { ControlError } from '../../control/errors.ts';
 import type { Db } from '../../store/db.ts';
 import type { Clock } from '../../util/clock.ts';
 import type { AuditLog } from '../audit.ts';
-import { readJson, sendJson } from '../http.ts';
+import { jsonText, readJson, sendJson } from '../http.ts';
 import { RateLimiter, type RateLimit } from '../guard.ts';
 import type { Router } from '../router.ts';
 import { hashToken } from '../sessions.ts';
@@ -44,13 +44,13 @@ export function registerAssistantApi(router: Router, d: AssistantApiDeps): void 
   const asks = d.asks ?? new RateLimiter({ ...ASK_LIMIT, clock: d.clock });
   const ownerOf = (s: { id: string; email: string }) => ({ key: hashToken(s.id), email: s.email });
 
-  router.get('/dashboard/api/assistant', controlled((ctx) => {
-    d.guard.requireOwner(ctx.req);
+  router.get('/dashboard/api/assistant', controlled(async (ctx) => {
+    await d.guard.requireOwner(ctx.req);
     sendJson(ctx.res, 200, { suggestions: SUGGESTIONS, questionMax: QUESTION_MAX });
   }));
 
   router.post('/dashboard/api/assistant/ask', controlled(async (ctx) => {
-    const s = d.guard.requireOwner(ctx.req);
+    const s = await d.guard.requireOwner(ctx.req);
     d.guard.requireCsrf(ctx.req, s);
     asks.hit(ctx.req, ctx.res);
     const body = await readJson(ctx.req, 3 * QUESTION_MAX + 1_024);
@@ -72,33 +72,33 @@ export function registerAssistantApi(router: Router, d: AssistantApiDeps): void 
       if (!res.writableEnded) gone.abort();
     });
     const emit = (e: AssistantEvent) => {
-      if (!res.destroyed && !res.writableEnded) res.write(`${JSON.stringify(e)}\n`);
+      if (!res.destroyed && !res.writableEnded) res.write(`${jsonText(e)}\n`);
     };
     await d.assistant.ask(owner, question, emit, gone.signal);
     if (!res.writableEnded) res.end();
   }));
 
   router.post('/dashboard/api/assistant/confirm', controlled(async (ctx) => {
-    const s = actionSession(ctx, d);
+    const s = await actionSession(ctx, d);
     const body = await readBody(ctx);
     const id = typeof body === 'object' && body !== null ? (body as Record<string, unknown>).id : undefined;
     const p = d.pending.take(id, ownerOf(s).key);
-    const done = runProposal(p.action, {
+    const done = await runProposal(p.action, {
       db: d.db, clock: d.clock, settings: d.settings, actor: s.email,
-      audit: (e) => d.audit.record({ ...e, actor: s.email, requestId: ctx.requestId }),
+      audit: (q, e) => d.audit.record({ ...e, actor: s.email, requestId: ctx.requestId }, q),
     });
     sendJson(ctx.res, 200, { ok: true, ...done });
   }));
 
   router.post('/dashboard/api/assistant/cancel', controlled(async (ctx) => {
-    const s = actionSession(ctx, d);
+    const s = await actionSession(ctx, d);
     const body = await readBody(ctx);
     d.pending.drop(typeof body === 'object' && body !== null ? (body as Record<string, unknown>).id : undefined, ownerOf(s).key);
     sendJson(ctx.res, 200, { ok: true });
   }));
 
-  router.post('/dashboard/api/assistant/reset', controlled((ctx) => {
-    const s = actionSession(ctx, d);
+  router.post('/dashboard/api/assistant/reset', controlled(async (ctx) => {
+    const s = await actionSession(ctx, d);
     d.assistant.reset(ownerOf(s));
     sendJson(ctx.res, 200, { ok: true });
   }));

@@ -1,5 +1,5 @@
 import { nextTaskCode } from './clients.ts';
-import type { Db } from './db.ts';
+import type { Db, Sql } from './db.ts';
 
 export const SIDES = ['us', 'client'] as const;
 export const CATEGORIES = ['design', 'development', 'content', 'payment', 'approval', 'other'] as const;
@@ -176,35 +176,34 @@ function toRow(r: RawTask): TaskRow {
   };
 }
 
-export function getTaskById(db: Db, id: number): TaskRow {
-  const r = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as RawTask | undefined;
+export async function getTaskById(db: Sql, id: number): Promise<TaskRow> {
+  const r = await db.get<RawTask>('SELECT * FROM tasks WHERE id = ?', [id]);
   if (!r) throw new Error(`Unknown task id ${id}`);
   return toRow(r);
 }
 
-export function getTaskByCode(db: Db, code: string): TaskRow | undefined {
-  const r = db.prepare('SELECT * FROM tasks WHERE code = ?').get(code) as RawTask | undefined;
+export async function getTaskByCode(db: Sql, code: string): Promise<TaskRow | undefined> {
+  const r = await db.get<RawTask>('SELECT * FROM tasks WHERE code = ?', [code]);
   return r ? toRow(r) : undefined;
 }
 
-export function createTask(db: Db, t: NewTask, now: string): TaskRow {
-  const code = nextTaskCode(db, t.clientId);
-  const info = db
-    .prepare(`INSERT INTO tasks (code, client_id, side, title, category, priority, priority_level, priority_source, priority_keyword, sentiment,
+export async function createTask(db: Sql, t: NewTask, now: string): Promise<TaskRow> {
+  const code = await nextTaskCode(db, t.clientId);
+  const info = await db.get<{ id: number }>(`INSERT INTO tasks (code, client_id, side, title, category, priority, priority_level, priority_source, priority_keyword, sentiment,
         assigned_to, asked_by, raised_on, deadline, latest_progress, source_quote, source_date, source_wa_id, origin, meeting_id, created_at, updated_at)
       VALUES (@code, @clientId, @side, @title, @category, @legacy, @priority, @prioritySource, @priorityKeyword, @sentiment,
-        @assignedTo, @askedBy, @raisedOn, @deadline, @latestProgress, @sourceQuote, @sourceDate, @sourceWaId, @origin, @meetingId, @now, @now)`)
-    .run({
+        @assignedTo, @askedBy, @raisedOn, @deadline, @latestProgress, @sourceQuote, @sourceDate, @sourceWaId, @origin, @meetingId, @now, @now)
+      RETURNING id`, {
       ...t, legacy: legacyPriority(t.priority), prioritySource: t.prioritySource ?? 'ai', priorityKeyword: t.priorityKeyword ?? null,
       sentiment: t.sentiment ?? null, meetingId: t.meetingId ?? null, code, now,
     });
-  return getTaskById(db, Number(info.lastInsertRowid));
+  return getTaskById(db, info!.id);
 }
 
-export function listTasks(db: Db, clientId: number, statuses?: Status[]): TaskRow[] {
+export async function listTasks(db: Sql, clientId: number, statuses?: Status[]): Promise<TaskRow[]> {
   const rows = statuses
-    ? (db.prepare('SELECT * FROM tasks WHERE client_id = ? AND status IN (SELECT value FROM json_each(?)) ORDER BY id').all(clientId, JSON.stringify(statuses)) as RawTask[])
-    : (db.prepare('SELECT * FROM tasks WHERE client_id = ? ORDER BY id').all(clientId) as RawTask[]);
+    ? (await db.all<RawTask>('SELECT * FROM tasks WHERE client_id = ? AND status IN (SELECT value FROM json_each(?)) ORDER BY id', [clientId, JSON.stringify(statuses)]))
+    : (await db.all<RawTask>('SELECT * FROM tasks WHERE client_id = ? ORDER BY id', [clientId]));
   return rows.map(toRow);
 }
 
@@ -212,9 +211,9 @@ export function listTasks(db: Db, clientId: number, statuses?: Status[]): TaskRo
  * Column names come from the fixed COLUMN map, never from input. A priority also writes the old column in step and what
  * set it: a person, else the owner's keyword when keyword is given, else the AI.
  */
-export function updateTaskFields(
-  db: Db, id: number, fields: Partial<Record<TaskField, string | null>>, now: string, by: 'ai' | 'human', keyword?: string,
-): void {
+export async function updateTaskFields(
+  db: Sql, id: number, fields: Partial<Record<TaskField, string | null>>, now: string, by: 'ai' | 'human', keyword?: string,
+): Promise<void> {
   const keys = TASK_FIELDS.filter((k) => k in fields);
   if (keys.length === 0) return;
   const params: Record<string, string | number | null> = { id, now };
@@ -227,22 +226,22 @@ export function updateTaskFields(
     params.prioritySource = by === 'human' ? 'human' : keyword !== undefined ? 'keyword' : 'ai';
     params.priorityKeyword = by === 'human' ? null : (keyword ?? null);
   }
-  db.prepare(`UPDATE tasks SET ${sets.join(', ')}, updated_at = @now WHERE id = @id`).run(params);
+  await db.run(`UPDATE tasks SET ${sets.join(', ')}, updated_at = @now WHERE id = @id`, params);
   if (by === 'human') {
-    const locked = new Set([...getTaskById(db, id).lockedFields, ...keys]);
-    db.prepare('UPDATE tasks SET locked_fields = ? WHERE id = ?').run(JSON.stringify([...locked]), id);
+    const locked = new Set([...(await getTaskById(db, id)).lockedFields, ...keys]);
+    await db.run('UPDATE tasks SET locked_fields = ? WHERE id = ?', [JSON.stringify([...locked]), id]);
   }
 }
 
 /** The client's mood about a task, as the AI judged it (only while sentiment is switched on). */
-export function setTaskSentiment(db: Db, id: number, sentiment: Sentiment, now: string): void {
-  db.prepare('UPDATE tasks SET sentiment = ?, updated_at = ? WHERE id = ?').run(sentiment, now, id);
+export async function setTaskSentiment(db: Sql, id: number, sentiment: Sentiment, now: string): Promise<void> {
+  await db.run('UPDATE tasks SET sentiment = ?, updated_at = ? WHERE id = ?', [sentiment, now, id]);
 }
 
 /** A human status change is timestamped; the AI then needs newer evidence to change the status again. */
-export function setTaskStatus(db: Db, id: number, status: Status, today: string, now: string, by: 'ai' | 'human'): void {
+export async function setTaskStatus(db: Sql, id: number, status: Status, today: string, now: string, by: 'ai' | 'human'): Promise<void> {
   const humanLock = by === 'human' ? ', status_locked_at = @now' : '';
-  db.prepare(`UPDATE tasks SET status = @status, closed_on = @closedOn, updated_at = @now${humanLock} WHERE id = @id`).run({
+  await db.run(`UPDATE tasks SET status = @status, closed_on = @closedOn, updated_at = @now${humanLock} WHERE id = @id`, {
     id,
     status,
     closedOn: status === 'done' ? today : null,
@@ -254,54 +253,37 @@ export function setTaskStatus(db: Db, id: number, status: Status, today: string,
  * Counts a reminder. The last reminder date never moves back: a file-only re-check dates its reminder by the day its
  * message was sent (amendment 12h), which can be before a reminder already logged from a later message.
  */
-export function logReminder(db: Db, id: number, onDate: string, now: string): void {
-  db.prepare(`UPDATE tasks SET reminder_count = reminder_count + 1, last_reminder_on = MAX(COALESCE(last_reminder_on, ''), @onDate),
-      updated_at = @now WHERE id = @id`).run({ onDate, now, id });
+export async function logReminder(db: Sql, id: number, onDate: string, now: string): Promise<void> {
+  // The later of the two dates: a CASE, which both engines run (SQLite's two-argument MAX is not Postgres's, S2.5).
+  await db.run(`UPDATE tasks SET reminder_count = reminder_count + 1,
+      last_reminder_on = CASE WHEN COALESCE(last_reminder_on, '') > @onDate THEN last_reminder_on ELSE @onDate END,
+      updated_at = @now WHERE id = @id`, { onDate, now, id });
 }
 
-export function recordEvent(
-  db: Db,
+export async function recordEvent(
+  db: Sql,
   e: { taskId: number | null; clientId: number; actor: 'ai' | 'human'; op: string; detail: object; reason: string | null; sourceIds: string[]; at: string },
-): void {
-  db.prepare('INSERT INTO task_events (task_id, client_id, actor, op, detail, reason, source_ids, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
-    e.taskId,
-    e.clientId,
-    e.actor,
-    e.op,
-    JSON.stringify(e.detail),
-    e.reason,
-    JSON.stringify(e.sourceIds),
-    e.at,
-  );
+): Promise<void> {
+  await db.run('INSERT INTO task_events (task_id, client_id, actor, op, detail, reason, source_ids, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [e.taskId, e.clientId, e.actor, e.op, JSON.stringify(e.detail), e.reason, JSON.stringify(e.sourceIds), e.at]);
 }
 
-export function addDecision(
-  db: Db,
+export async function addDecision(
+  db: Sql,
   d: { clientId: number; text: string; decidedOn: string; source: DecisionRow['source']; sourceWaId: string | null; meetingId?: number | null },
   now: string,
-): void {
-  db.prepare('INSERT INTO decisions (client_id, text, decided_on, source, source_wa_id, meeting_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
-    d.clientId,
-    d.text,
-    d.decidedOn,
-    d.source,
-    d.sourceWaId,
-    d.meetingId ?? null,
-    now,
-  );
+): Promise<void> {
+  await db.run('INSERT INTO decisions (client_id, text, decided_on, source, source_wa_id, meeting_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [d.clientId, d.text, d.decidedOn, d.source, d.sourceWaId, d.meetingId ?? null, now]);
 }
 
-export function listDecisions(db: Db, clientId: number, limit = 1000): DecisionRow[] {
-  return db
-    .prepare(`SELECT d.id, d.client_id AS clientId, d.text, d.decided_on AS decidedOn, d.source, d.source_wa_id AS sourceWaId,
+export async function listDecisions(db: Sql, clientId: number, limit = 1000): Promise<DecisionRow[]> {
+  return db.all<DecisionRow>(`SELECT d.id, d.client_id AS clientId, d.text, d.decided_on AS decidedOn, d.source, d.source_wa_id AS sourceWaId,
         m.doc_file_id AS docFileId
-      FROM decisions d LEFT JOIN meetings m ON m.id = d.meeting_id WHERE d.client_id = ? ORDER BY d.decided_on DESC, d.id DESC LIMIT ?`)
-    .all(clientId, limit) as DecisionRow[];
+      FROM decisions d LEFT JOIN meetings m ON m.id = d.meeting_id WHERE d.client_id = ? ORDER BY d.decided_on DESC, d.id DESC LIMIT ?`, [clientId, limit]);
 }
 
 /** Every message cited by an applied event of this op (source_ids JSON), for this client. */
-function eventSourceIds(db: Db, clientId: number, op: string): string[] {
-  const rows = db.prepare('SELECT source_ids AS ids FROM task_events WHERE client_id = ? AND op = ?').all(clientId, op) as { ids: string }[];
+async function eventSourceIds(db: Sql, clientId: number, op: string): Promise<string[]> {
+  const rows = await db.all<{ ids: string }>('SELECT source_ids AS ids FROM task_events WHERE client_id = ? AND op = ?', [clientId, op]);
   return rows.flatMap((r) => JSON.parse(r.ids) as string[]);
 }
 
@@ -309,21 +291,19 @@ function eventSourceIds(db: Db, clientId: number, op: string): string[] {
  * Every message already used as evidence for a task of this client (any status): each task's source, every message its
  * add_task cited, and every message cited by any other event on a task (reminder, update, status change; AI or human).
  */
-export function taskSourceIds(db: Db, clientId: number): Set<string> {
-  const rows = db.prepare('SELECT source_wa_id AS id FROM tasks WHERE client_id = ? AND source_wa_id IS NOT NULL').all(clientId) as { id: string }[];
-  const onTasks = db.prepare('SELECT source_ids AS ids FROM task_events WHERE client_id = ? AND task_id IS NOT NULL').all(clientId) as { ids: string }[];
+export async function taskSourceIds(db: Sql, clientId: number): Promise<Set<string>> {
+  const rows = await db.all<{ id: string }>('SELECT source_wa_id AS id FROM tasks WHERE client_id = ? AND source_wa_id IS NOT NULL', [clientId]);
+  const onTasks = await db.all<{ ids: string }>('SELECT source_ids AS ids FROM task_events WHERE client_id = ? AND task_id IS NOT NULL', [clientId]);
   return new Set([
     ...rows.map((r) => r.id),
-    ...eventSourceIds(db, clientId, 'add_task'),
+    ...await eventSourceIds(db, clientId, 'add_task'),
     ...onTasks.flatMap((r) => JSON.parse(r.ids) as string[]),
   ]);
 }
 
 /** Task code to the message ids already cited by an applied log_reminder event. */
-export function reminderSourceIds(db: Db, clientId: number): Map<string, Set<string>> {
-  const rows = db
-    .prepare(`SELECT t.code AS code, e.source_ids AS ids FROM task_events e JOIN tasks t ON t.id = e.task_id WHERE e.client_id = ? AND e.op = 'log_reminder'`)
-    .all(clientId) as { code: string; ids: string }[];
+export async function reminderSourceIds(db: Sql, clientId: number): Promise<Map<string, Set<string>>> {
+  const rows = await db.all<{ code: string; ids: string }>(`SELECT t.code AS code, e.source_ids AS ids FROM task_events e JOIN tasks t ON t.id = e.task_id WHERE e.client_id = ? AND e.op = 'log_reminder'`, [clientId]);
   const out = new Map<string, Set<string>>();
   for (const r of rows) {
     const set = out.get(r.code) ?? new Set<string>();
@@ -333,12 +313,12 @@ export function reminderSourceIds(db: Db, clientId: number): Map<string, Set<str
   return out;
 }
 
-export function decisionSourceIds(db: Db, clientId: number): Set<string> {
-  const rows = db.prepare('SELECT source_wa_id AS id FROM decisions WHERE client_id = ? AND source_wa_id IS NOT NULL').all(clientId) as { id: string }[];
-  return new Set([...rows.map((r) => r.id), ...eventSourceIds(db, clientId, 'add_decision')]);
+export async function decisionSourceIds(db: Sql, clientId: number): Promise<Set<string>> {
+  const rows = await db.all<{ id: string }>('SELECT source_wa_id AS id FROM decisions WHERE client_id = ? AND source_wa_id IS NOT NULL', [clientId]);
+  return new Set([...rows.map((r) => r.id), ...await eventSourceIds(db, clientId, 'add_decision')]);
 }
 
 /** Hands the task back to the AI: clears the field locks and the status lock. */
-export function clearTaskLocks(db: Db, id: number, now: string): void {
-  db.prepare("UPDATE tasks SET locked_fields = '[]', status_locked_at = NULL, updated_at = ? WHERE id = ?").run(now, id);
+export async function clearTaskLocks(db: Sql, id: number, now: string): Promise<void> {
+  await db.run("UPDATE tasks SET locked_fields = '[]', status_locked_at = NULL, updated_at = ? WHERE id = ?", [now, id]);
 }

@@ -25,7 +25,7 @@ export interface LiveReportSettings {
 /** A sender for one recipient, and how to close what it opened (the spare number's session file). */
 export interface OpenedSender {
   sender: ReportSender;
-  close: () => void;
+  close: () => Promise<void>;
   /** The open session file, which a spare-phone link shares while the briefing runs. */
   db?: Db;
 }
@@ -37,7 +37,7 @@ export interface LiveReportOptions {
   /** Read at the start of every tick. */
   settings: () => LiveReportSettings;
   /** Makes the sender for a number (in the service: openMorningReport, through senderOpener). May throw. */
-  open: (recipient: string) => OpenedSender;
+  open: (recipient: string) => Promise<OpenedSender>;
   healthLine: () => HealthLine;
   /** Test seam, passed to the scheduler. */
   build?: (now: Date) => Promise<ReportPayload>;
@@ -107,7 +107,7 @@ export class LiveReport {
         if (!s.report.enabled || s.recipient === undefined) return;
         if (now.getTime() < this.#nextOpenAt) return;
         try {
-          this.#current = this.#start(s.recipient);
+          this.#current = await this.#start(s.recipient);
           this.#openFailures = 0;
           this.#nextOpenAt = 0;
         } catch (err) {
@@ -124,15 +124,15 @@ export class LiveReport {
   }
 
   /** Opens the sender and its scheduler; a send cut off under the previous one becomes unknown before anything is sent. */
-  #start(recipient: string): Current {
+  async #start(recipient: string): Promise<Current> {
     const { db, clock, log, healthLine, build } = this.#o;
-    const opened = this.#o.open(recipient);
+    const opened = await this.#o.open(recipient);
     const scheduler = new ReportScheduler({
       db, clock, log, sender: opened.sender, healthLine, ...(build ? { build } : {}),
       settings: () => this.#o.settings().report,
     });
     try {
-      scheduler.recover();
+      await scheduler.recover();
     } catch (err) {
       log.error({ err }, 'morning report recovery failed; the scheduler tries again before any send');
     }
@@ -142,7 +142,7 @@ export class LiveReport {
   async #close(c: Current, waitMs: number = STOP_WAIT_MS): Promise<void> {
     await c.scheduler.stop(waitMs);
     try {
-      c.opened.close();
+      await c.opened.close();
     } catch (err) {
       this.#o.log.error({ err }, 'closing the morning report sender failed');
     }
@@ -186,8 +186,8 @@ export class LiveReport {
   }
 
   /** Today's line for Health. Never throws: settings that cannot be read give a plain line. */
-  health(now: Date = this.#o.clock.now()): ReportHealth {
-    if (this.#current) return this.#current.scheduler.health(now);
+  async health(now: Date = this.#o.clock.now()): Promise<ReportHealth> {
+    if (this.#current) return await this.#current.scheduler.health(now);
     try {
       const s = this.#o.settings();
       if (!s.report.enabled) return { text: 'Morning report: off', warning: null };

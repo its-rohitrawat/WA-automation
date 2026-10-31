@@ -11,11 +11,13 @@ import { CONTENT_SECURITY_POLICY, HttpError, readJson, sendJson } from '../../sr
 import { createWebServer, PUBLIC_DIR, SESSION_PURGE_EVERY_MS, STOP_GRACE_MS } from '../../src/web/server.ts';
 import { startDashboard } from '../../src/web/start.ts';
 import { SessionStore } from '../../src/web/sessions.ts';
-import { openDb } from '../../src/store/db.ts';
 import type { Db } from '../../src/store/db.ts';
 import type { WebServer } from '../../src/web/server.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger } from '../../src/util/logger.ts';
+import type { Sql } from '../../src/store/engine/types.ts';
+import { onSqlite, testDb } from '../helpers/db.ts';
+import { platformTestDb } from '../helpers/platformTestDb.ts';
 
 const SECRET = 'OUTSIDE-SECRET-7f3a';
 const INDEX = '<!doctype html><title>test shell</title><p>shell</p>';
@@ -54,7 +56,7 @@ const roots: string[] = [];
 const dbs: Db[] = [];
 afterEach(async () => {
   for (const s of servers.splice(0)) await s.stop();
-  for (const d of dbs.splice(0)) d.close();
+  for (const d of dbs.splice(0)) await d.close();
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
 });
 
@@ -695,16 +697,25 @@ describe('web server: start and stop', () => {
 
 describe('main.ts dashboard wiring', () => {
   const src = readFileSync(join(import.meta.dirname, '../../src/main.ts'), 'utf8');
+  // The founder's runtime (S4.4): built by startFounderRuntime, started by main.ts with rt.start().
+  const runtime = readFileSync(join(import.meta.dirname, '../../src/runtime/customerRuntime.ts'), 'utf8');
+  const startBody = runtime.slice(runtime.indexOf('start: () => {'), runtime.indexOf('beginStop,', runtime.indexOf('start: () => {')));
 
-  it('starts the web server only when DASHBOARD_ENABLED is set, after app.start()', () => {
+  it('starts the web server only when DASHBOARD_ENABLED is set, after the runtime started (app.start())', () => {
     expect(src).toMatch(/const webReady = env\.DASHBOARD_ENABLED\s*\?\s*startDashboard\(/);
     expect(src).toMatch(/import \{ startDashboard \} from '\.\/web\/start\.ts';/);
     expect(src).not.toContain('createWebServer(');
-    expect(src.indexOf('app.start();')).toBeLessThan(src.indexOf('const webReady = env.DASHBOARD_ENABLED'));
+    expect(runtime).not.toContain('createWebServer(');
+    expect(src.indexOf('rt.start();')).toBeGreaterThan(0);
+    expect(src.indexOf('rt.start();')).toBeLessThan(src.indexOf('const webReady = env.DASHBOARD_ENABLED'));
+    expect(startBody).toMatch(/^start: \(\) => \{\s*app\.start\(\);/);
   });
 
   it('awaits nothing between app.start() and the SIGINT/SIGTERM handlers', () => {
-    const gap = src.slice(src.indexOf('app.start();'), src.indexOf("process.on('SIGTERM', shutdown);"));
+    // rt.start() is synchronous (app.start() first), and main.ts awaits nothing after it before the handlers.
+    expect(startBody.length).toBeGreaterThan(0);
+    expect(startBody).not.toMatch(/\bawait\b|\basync\b/);
+    const gap = src.slice(src.indexOf('rt.start();'), src.indexOf("process.on('SIGTERM', shutdown);"));
     expect(gap.length).toBeGreaterThan(0);
     expect(gap).not.toMatch(/\bawait\b/);
   });
@@ -712,8 +723,11 @@ describe('main.ts dashboard wiring', () => {
   it('stops the web server before app.stop() on shutdown', () => {
     const shutdown = src.slice(src.indexOf('const shutdown = () => {'), src.indexOf("process.on('SIGINT', shutdown);"));
     expect(shutdown).toMatch(/const webStopped = webReady\s*\.then\(\(w\) => w\?\.stop\(\)\)/);
-    expect(shutdown.indexOf('webReady')).toBeLessThan(shutdown.indexOf('app.stop()'));
-    expect(shutdown).toMatch(/webStopped\s*\.then\(\(\) => app\.stop\(\)\)/);
+    // rt.stop() is where app.stop() runs: only after the web server has stopped.
+    expect(shutdown).toMatch(/webStopped\s*\.then\(\(\) => rt\.stop\(\)\)/);
+    expect(shutdown).not.toMatch(/(?:=>|\bawait|\bvoid)\s*app\.stop\(\)/); // only rt.stop() calls it
+    const stopBody = runtime.slice(runtime.indexOf('stop: () => {'));
+    expect(stopBody).toMatch(/await app\.stop\(\);/);
   });
 });
 
@@ -730,15 +744,34 @@ describe('startDashboard', () => {
       DASHBOARD_GOOGLE_CLIENT_SECRET: 'client-secret',
     };
   }
-  function memDb() {
-    const db = openDb(':memory:');
-    dbs.push(db);
-    return db;
+  /**
+   * The dashboard's stores, as the app keeps them: on SQLite one store for the audit rows and the sessions (one
+   * transaction for both); on Postgres the customer's own Db for the audit rows and the platform Db for the sessions,
+   * this file's own, set back before each boot (the tests count the sessions). failAudit(): from now on the audit row
+   * cannot be written, on either engine (the app's roles cannot create a trigger on Postgres).
+   */
+  async function stores(): Promise<{ db: Db; platformDb: Db; failAudit: () => void }> {
+    const store = await testDb();
+    dbs.push(store);
+    const down = { on: false };
+    const check = (sql: string) => {
+      if (down.on && /^\s*INSERT INTO audit_log/i.test(sql)) throw new Error('audit down');
+    };
+    const wrap = (q: Sql): Sql => ({
+      get: async (sql, x) => (check(sql), q.get(sql, x)),
+      all: async (sql, x) => (check(sql), q.all(sql, x)),
+      run: async (sql, x) => (check(sql), q.run(sql, x)),
+      exec: (sql) => q.exec(sql),
+    }) as Sql;
+    const db = { ...wrap(store), engine: store.engine, tx: (fn) => store.tx((q) => fn(wrap(q))), close: () => store.close() } as Db;
+    const platformDb = onSqlite ? db : (await platformTestDb()).db;
+    return { db, platformDb, failAudit: () => void (down.on = true) };
   }
+  const sessionCount = async (db: Db) => (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM web_sessions'))!.n;
 
   it('logs the address and returns the running server', async () => {
     const c = capture();
-    const web = await startDashboard({ env: dashEnv(0), db: memDb(), log: c.log, control: {}, google: fakeGoogle });
+    const web = await startDashboard({ env: dashEnv(0), ...(await stores()), log: c.log, control: {}, google: fakeGoogle });
     expect(web).toBeDefined();
     servers.push(web!);
     const port = web!.address()!.port;
@@ -751,7 +784,7 @@ describe('startDashboard', () => {
     try {
       const port = (blocker.address() as AddressInfo).port;
       const c = capture();
-      const web = await startDashboard({ env: dashEnv(port), db: memDb(), log: c.log, control: {}, google: fakeGoogle });
+      const web = await startDashboard({ env: dashEnv(port), ...(await stores()), log: c.log, control: {}, google: fakeGoogle });
       expect(web).toBeUndefined();
       const errors = c.records().filter((l) => l.level === 50);
       expect(errors).toHaveLength(1);
@@ -765,15 +798,17 @@ describe('startDashboard', () => {
   });
 
   it('removes expired owner sessions once at start (and serves the sign-in routes)', async () => {
-    const db = memDb();
+    const { db, platformDb } = await stores();
     const clock = manualClock('2026-10-27T10:00:00Z');
-    const store = new SessionStore(db, clock);
-    store.create('owner@example.com');
+    const store = new SessionStore(platformDb, clock);
+    await store.create('owner@example.com');
     clock.advance(8 * 24 * 3_600_000);
     const c = capture();
-    const web = await startDashboard({ env: dashEnv(0), db, log: c.log, control: {}, clock, google: fakeGoogle });
+    const web = await startDashboard({ env: dashEnv(0), db, platformDb, log: c.log, control: {}, clock, google: fakeGoogle });
     servers.push(web!);
-    expect((db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
+    // The purge at start is not awaited (server.ts purgeSessions): on Postgres it is a real round trip, still running
+    // when startDashboard returns. An expired session is refused on lookup either way (sessions.ts get()).
+    await vi.waitFor(async () => expect(await sessionCount(platformDb)).toBe(0), { timeout: 2_000 });
     const port = web!.address()!.port;
     const r = await fetch(`http://127.0.0.1:${port}/dashboard/auth/login`, { redirect: 'manual' });
     expect(r.status).toBe(302);
@@ -802,13 +837,14 @@ describe('startDashboard', () => {
     });
     await new Promise<void>((r) => ep.listen(0, '127.0.0.1', r));
     endpoints.push(ep);
-    const db = memDb();
+    const st = await stores();
     let nonce: string | undefined;
     const c = capture();
     const env = { ...dashEnv(0), ...(o.publicUrl === undefined ? {} : { DASHBOARD_PUBLIC_URL: o.publicUrl }) };
     const web = await startDashboard({
       env,
-      db,
+      db: st.db,
+      platformDb: st.platformDb,
       log: c.log,
       control: {},
       google: {
@@ -832,7 +868,8 @@ describe('startDashboard', () => {
       return r;
     };
     const post = (path: string, headers: Record<string, string> = {}) => rawRequest('POST', port, path, headers);
-    return { db, port, forms, get, post, ...c };
+    // db: the sessions' store, which the tests count.
+    return { db: st.platformDb, failAudit: st.failAudit, port, forms, get, post, ...c };
   }
   const cookiesOf = (r: { headers: Record<string, string | string[] | undefined> }) => {
     const v = r.headers['set-cookie'];
@@ -867,7 +904,7 @@ describe('startDashboard', () => {
     expect(b.forms[0]!.get('client_id')).toBe('client-id');
     expect(b.forms[0]!.get('client_secret')).toBe('client-secret');
     expect(b.forms[0]!.get('redirect_uri')).toBe('https://dash.example.com/dashboard/auth/callback');
-    expect((b.db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(1);
+    expect(await sessionCount(b.db)).toBe(1);
     expect(b.out()).not.toContain('client-secret');
 
     // The guard startDashboard builds: the owner list lets this owner in, and the public origin passes the CSRF check.
@@ -880,25 +917,25 @@ describe('startDashboard', () => {
       b.post('/dashboard/auth/logout', { ...host, cookie: `wa_session=${sid}`, origin, 'x-csrf-token': me.csrf });
     const evil = await logout('https://evil.com');
     expect(evil.status).toBe(403);
-    expect((b.db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(1);
+    expect(await sessionCount(b.db)).toBe(1);
     const out = await logout('https://dash.example.com');
     expect(out.status).toBe(204);
     const cleared = cookiesOf(out).find((c) => c.startsWith('wa_session='));
     expect(cleared).toMatch(/^wa_session=;/);
     expect(cleared).toContain('Max-Age=0');
     expect(cleared).toMatch(/; Secure$/);
-    expect((b.db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
+    expect(await sessionCount(b.db)).toBe(0);
     expect((await b.get('/dashboard/api/me', { ...host, cookie: `wa_session=${sid}` })).status).toBe(401);
   });
 
   it('a sign-in whose audit row cannot be written leaves no session (one database transaction)', async () => {
     const b = await bootSignIn();
-    b.db.exec(`CREATE TRIGGER t_fail_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'audit down'); END`);
+    b.failAudit();
     const { cb } = await fullSignIn(b);
     expect(cb.status).toBe(302);
     expect(cb.headers.location).toBe('/dashboard?error=signin');
     expect(cookiesOf(cb).some((c) => c.startsWith('wa_session='))).toBe(false);
-    expect((b.db.prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
+    expect(await sessionCount(b.db)).toBe(0);
   });
 
   it('sign-in is limited to 10 a minute per client: the 11th goes to the sign-in error page', async () => {
@@ -917,7 +954,7 @@ describe('startDashboard', () => {
   ])('%s: the dashboard does not start (and says so without values)', async (_what, patch) => {
     const c = capture();
     const env = { ...dashEnv(0), ...patch };
-    const web = await startDashboard({ env, db: memDb(), log: c.log, control: {}, google: fakeGoogle });
+    const web = await startDashboard({ env, ...(await stores()), log: c.log, control: {}, google: fakeGoogle });
     if (web !== undefined) servers.push(web);
     expect(web).toBeUndefined();
     expect(c.out()).toContain('dashboard not started');
@@ -926,7 +963,7 @@ describe('startDashboard', () => {
 });
 
 describe('web server: session purge', () => {
-  async function bootWith(sessions: { purgeExpired(): number }, purgeEveryMs: number) {
+  async function bootWith(sessions: { purgeExpired(): Promise<number> }, purgeEveryMs: number) {
     const c = capture();
     const server = createWebServer({
       control: {},
@@ -943,7 +980,7 @@ describe('web server: session purge', () => {
 
   it('purges expired sessions at start and then on every interval, and stops with the server', async () => {
     let calls = 0;
-    const { server } = await bootWith({ purgeExpired: () => (calls++, 0) }, 20);
+    const { server } = await bootWith({ purgeExpired: async () => (calls++, 0) }, 20);
     expect(calls).toBe(1);
     await vi.waitFor(() => expect(calls).toBeGreaterThanOrEqual(3), { timeout: 2_000 });
     await server.stop();
@@ -954,7 +991,7 @@ describe('web server: session purge', () => {
 
   it('a purge that fails is logged by its code only and the server carries on', async () => {
     const { server, records, out } = await bootWith({
-      purgeExpired: () => {
+      purgeExpired: async () => {
         throw Object.assign(new Error('SQLITE_BUSY: wa_session=SECRETVALUE'), { code: 'SQLITE_BUSY' });
       },
     }, 60_000);

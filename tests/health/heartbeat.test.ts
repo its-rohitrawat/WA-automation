@@ -171,11 +171,11 @@ describe('Heartbeat.beatNow()', () => {
   });
 });
 
-describe('main.ts heartbeat wiring', () => {
+describe('heartbeat wiring in the founder runtime (moved from main.ts in S4.4)', () => {
   it('starts the heartbeat only with HEARTBEAT_URL, gates it on Health.isUp, stops it on shutdown, and never logs the link', async () => {
     const { readFileSync } = await import('node:fs');
     const { join } = await import('node:path');
-    const src = readFileSync(join(import.meta.dirname, '../../src/main.ts'), 'utf8');
+    const src = readFileSync(join(import.meta.dirname, '../../src/runtime/customerRuntime.ts'), 'utf8');
     expect(src).toMatch(/env\.HEARTBEAT_URL \? new Heartbeat\(\{ url: env\.HEARTBEAT_URL, isUp: \(\) => app\.health\.isUp\(\), log \}\) : undefined/);
     expect(src).toContain('heartbeat?.start();');
     expect(src).toContain('void heartbeat?.stop();');

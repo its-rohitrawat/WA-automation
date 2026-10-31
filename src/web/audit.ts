@@ -1,4 +1,4 @@
-import type { Db } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import { UNSAFE_TEXT } from './sessions.ts';
 
@@ -8,6 +8,7 @@ export type AuditKind = (typeof AUDIT_KINDS)[number];
 export const AUDIT_DETAIL_MAX = 300;
 const LIST_MAX = 500;
 const REQUEST_ID = /^[A-Za-z0-9_-]{1,32}$/;
+const INSERT = 'INSERT INTO audit_log (at, actor, event, kind, detail, request_id) VALUES (?, ?, ?, ?, ?, ?)';
 
 export interface AuditInput {
   /** The owner's email, or `agent`. */
@@ -46,8 +47,7 @@ function oneLine(text: string): string {
 
 /**
  * Who did what, in `audit_log` (migration v9), for the dashboard's Audit screen. Never tokens, cookies, QR codes or
- * message text. `record` is synchronous and uses the caller's database connection, so it can run inside an action's
- * transaction.
+ * message text. `record` takes the action's transaction handle, so the row commits or rolls back with the change.
  */
 export class AuditLog {
   readonly #db: Db;
@@ -58,7 +58,11 @@ export class AuditLog {
     this.#clock = clock;
   }
 
-  record(e: AuditInput): void {
+  async record(e: AuditInput, q: Sql = this.#db): Promise<void> {
+    await q.run(INSERT, this.#row(e));
+  }
+
+  #row(e: AuditInput): [string, string, string, AuditKind, string, string | null] {
     if (!(AUDIT_KINDS as readonly string[]).includes(e.kind)) throw new Error('audit: unknown kind');
     const actor = oneLine(e.actor).slice(0, 120);
     const event = oneLine(e.event).slice(0, 80);
@@ -66,9 +70,7 @@ export class AuditLog {
     if (event === '') throw new Error('audit: event is required');
     const detail = oneLine(e.detail).slice(0, AUDIT_DETAIL_MAX);
     const requestId = e.requestId !== undefined && REQUEST_ID.test(e.requestId) ? e.requestId : null;
-    this.#db
-      .prepare('INSERT INTO audit_log (at, actor, event, kind, detail, request_id) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(this.#clock.now().toISOString(), actor, event, e.kind, detail, requestId);
+    return [this.#clock.now().toISOString(), actor, event, e.kind, detail, requestId];
   }
 
   /**
@@ -76,7 +78,7 @@ export class AuditLog {
    * shown, for the next page. `limit` is 1-500, default 100. For tests and tools only: the dashboard's Audit screen
    * reads through src/control/auditQueries.ts (filters, masked emails), and no route serves this list.
    */
-  list(o: { kind?: AuditKind; before?: number; limit?: number } = {}): AuditEntry[] {
+  async list(o: { kind?: AuditKind; before?: number; limit?: number } = {}): Promise<AuditEntry[]> {
     const wanted = o.limit !== undefined && Number.isFinite(o.limit) ? Math.floor(o.limit) : 100;
     const limit = Math.min(LIST_MAX, Math.max(1, wanted));
     const where: string[] = [];
@@ -90,7 +92,7 @@ export class AuditLog {
       args.push(Math.floor(o.before));
     }
     const sql = `SELECT id, at, actor, event, kind, detail, request_id FROM audit_log${where.length > 0 ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY id DESC LIMIT ?`;
-    const rows = this.#db.prepare(sql).all(...args, limit) as Row[];
+    const rows = await this.#db.all<Row>(sql, [...args, limit]);
     return rows.map((r) => {
       const entry: AuditEntry = { id: r.id, at: r.at, actor: r.actor, event: r.event, kind: r.kind, detail: r.detail };
       if (r.request_id !== null) entry.requestId = r.request_id;
@@ -99,8 +101,8 @@ export class AuditLog {
   }
 
   /** Removes entries older than `days` days (default 90). Returns how many were removed. */
-  purgeOlderThan(days = 90): number {
+  async purgeOlderThan(days = 90): Promise<number> {
     const cutoff = new Date(this.#clock.now().getTime() - days * 86_400_000).toISOString();
-    return this.#db.prepare('DELETE FROM audit_log WHERE at < ?').run(cutoff).changes;
+    return (await this.#db.run('DELETE FROM audit_log WHERE at < ?', [cutoff])).changes;
   }
 }

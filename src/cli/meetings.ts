@@ -4,7 +4,6 @@ import { MEETING_SYSTEM_PROMPT, MEETING_TRANSCRIPT_MAX_CHARS } from '../brain/me
 import { MEETING_TRACKER_PROMPT } from '../brain/meetingTracker.ts';
 import { requireKey, type Env } from '../config/env.ts';
 import { loadGroupsFile, type ClientConfig } from '../config/groups.ts';
-import { trackerDbPath } from '../config/paths.ts';
 import type { KeyProvider } from '../crypto/keyProvider.ts';
 import type { MeetingsGoogleApi } from '../meetings/googleApi.ts';
 import { combineMeetingAccounts, MultiAccountMeetingsApi, storedMeetingAccounts } from '../meetings/multiAccount.ts';
@@ -12,7 +11,8 @@ import { MeetingWatcher, type FoundMeeting } from '../meetings/watcher.ts';
 import { createOAuthClient, MAIN_ACCOUNT, meetingsReady, TokenStore } from '../output/googleAuth.ts';
 import { estimateCostUsd, pricesFromEnv, type Prices } from '../spend/pricing.ts';
 import { getClientByCode, getClientByGroupId, listClients, syncClients } from '../store/clients.ts';
-import { openDb, tx, type Db } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
+import { openStore } from '../store/open.ts';
 import {
   assignMeeting, getMeetingState, listMeetingsByStatus, retryMeeting, skipMeeting, type MeetingStatus, type MeetingState,
 } from '../store/meetings.ts';
@@ -47,18 +47,18 @@ function parseId(raw: string): number {
   return Number(s);
 }
 
-function findMeeting(db: Db, raw: string): MeetingState {
+async function findMeeting(db: Db, raw: string): Promise<MeetingState> {
   const id = parseId(raw);
-  const m = getMeetingState(db, id);
+  const m = await getMeetingState(db, id);
   if (!m) throw new CorrectionError(`No meeting ${id}`);
   return m;
 }
 
 /** The lines of `meeting list`: id, IST date, client code (or unassigned / internal), status and the title. */
-export function meetingListLines(db: Db, all: boolean): string[] {
-  const rows = listMeetingsByStatus(db, all ? LIST_ALL : LIST_DEFAULT);
+export async function meetingListLines(db: Db, all: boolean): Promise<string[]> {
+  const rows = await listMeetingsByStatus(db, all ? LIST_ALL : LIST_DEFAULT);
   if (rows.length === 0) return [all ? 'No meetings yet.' : 'No meetings need you. (npm run cli -- meeting list --all shows every meeting.)'];
-  const codes = new Map(listClients(db, false).map((c) => [c.id, c.code]));
+  const codes = new Map((await listClients(db, false)).map((c) => [c.id, c.code]));
   return rows.map((r) => {
     // A no_access meeting matched as internal keeps no title either, and is labelled internal.
     const internal = r.status === 'internal' || (r.clientId === null && r.foundInternal);
@@ -69,12 +69,24 @@ export function meetingListLines(db: Db, all: boolean): string[] {
 }
 
 /**
+ * Runs inside the command's own transaction, after its change: the dashboard writes its audit line there, so the change
+ * and the line are kept or lost together.
+ */
+export type InTx<R> = (q: Sql, r: R) => void | Promise<void>;
+
+/**
  * `meeting assign`: an unassigned or internal meeting goes to a client and is queued (match kind human). So does a
  * no-access meeting without a client (found as unassigned or internal): its download is tried again for that client.
  */
-export function assignMeetingToClient(db: Db, rawId: string, clientCode: string, now: Date): { id: number; code: string } {
-  const m = findMeeting(db, rawId);
-  const c = getClientByCode(db, clientCode.trim().toUpperCase());
+export async function assignMeetingToClient(
+  db: Db,
+  rawId: string,
+  clientCode: string,
+  now: Date,
+  inTx?: InTx<{ id: number; code: string }>,
+): Promise<{ id: number; code: string }> {
+  const m = await findMeeting(db, rawId);
+  const c = await getClientByCode(db, clientCode.trim().toUpperCase());
   if (!c) throw new CorrectionError(`No client with code ${clientCode}`);
   if (!c.active) throw new CorrectionError(`Client ${c.code} is not in the allow-list`);
   const clientlessNoAccess = m.status === 'no_access' && m.clientId === null;
@@ -83,21 +95,24 @@ export function assignMeetingToClient(db: Db, rawId: string, clientCode: string,
       `Meeting ${m.id} is ${LABELS[m.status]}; only unassigned or internal meetings can be assigned (and no-access ones without a client)`,
     );
   }
-  tx(db, () => {
-    if (!assignMeeting(db, m.id, c.id, now.toISOString())) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
-    humanEvent(db, null, c.id, 'assign_meeting', { meetingId: m.id }, now);
-    requestRebuild(db, now);
+  const r = { id: m.id, code: c.code };
+  await db.tx(async (q) => {
+    if (!(await assignMeeting(q, m.id, c.id, now.toISOString()))) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
+    await humanEvent(q, null, c.id, 'assign_meeting', { meetingId: m.id }, now);
+    await requestRebuild(q, now);
+    await inTx?.(q, r);
   });
-  return { id: m.id, code: c.code };
+  return r;
 }
 
 /** `meeting skip`: an unassigned meeting is not processed. */
-export function skipMeetingById(db: Db, rawId: string, now: Date): number {
-  const m = findMeeting(db, rawId);
+export async function skipMeetingById(db: Db, rawId: string, now: Date, inTx?: InTx<number>): Promise<number> {
+  const m = await findMeeting(db, rawId);
   if (m.status !== 'unassigned') throw new CorrectionError(`Meeting ${m.id} is ${LABELS[m.status]}; only unassigned meetings can be skipped`);
-  tx(db, () => {
-    if (!skipMeeting(db, m.id, now.toISOString())) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
-    requestRebuild(db, now); // the workbook lists unassigned meetings
+  await db.tx(async (q) => {
+    if (!(await skipMeeting(q, m.id, now.toISOString()))) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
+    await requestRebuild(q, now); // the workbook lists unassigned meetings
+    await inTx?.(q, m.id);
   });
   return m.id;
 }
@@ -108,18 +123,24 @@ export function skipMeetingById(db: Db, rawId: string, now: Date): number {
  * One without a client (found as unassigned or internal) cannot be processed: it goes back to unassigned, which the
  * workbook lists (a rebuild is requested), and the person assigns it with `meeting assign`.
  */
-export function retryMeetingById(db: Db, rawId: string, now: Date): { id: number; status: 'queued' | 'unassigned' } {
-  const m = findMeeting(db, rawId);
+export async function retryMeetingById(
+  db: Db,
+  rawId: string,
+  now: Date,
+  inTx?: InTx<{ id: number; status: 'queued' | 'unassigned' }>,
+): Promise<{ id: number; status: 'queued' | 'unassigned' }> {
+  const m = await findMeeting(db, rawId);
   if (m.status !== 'failed' && m.status !== 'no_access') {
     throw new CorrectionError(`Meeting ${m.id} is ${LABELS[m.status]}; only failed or no-access meetings can be retried`);
   }
-  const status = tx(db, () => {
-    const s = retryMeeting(db, m.id, now.toISOString());
-    if (s === null) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
-    if (s === 'unassigned') requestRebuild(db, now);
-    return s;
+  return db.tx(async (q) => {
+    const status = await retryMeeting(q, m.id, now.toISOString());
+    if (status === null) throw new CorrectionError(`Meeting ${m.id} changed meanwhile; run meeting list again`);
+    if (status === 'unassigned') await requestRebuild(q, now);
+    const r = { id: m.id, status };
+    await inTx?.(q, r);
+    return r;
   });
-  return { id: m.id, status };
 }
 
 /** What `meeting retry` prints. */
@@ -137,7 +158,7 @@ export interface MeetingCliDeps {
   out: (line: string) => void;
   clock: Clock;
   /** Builds the Meet, Calendar and Drive client; tests pass a FakeMeetingsApi. */
-  googleApi: (db: Db, key: Buffer) => MeetingsGoogleApi;
+  googleApi: (db: Db, key: Buffer) => MeetingsGoogleApi | Promise<MeetingsGoogleApi>;
   /**
    * The speech list price of one meeting of this length; null when STT_PROVIDER is none. Not given: built from the
    * env's prices by backfill only (speechCeilingFromEnv), so no command needs STT_API_KEY.
@@ -164,15 +185,15 @@ export function speechCeilingFromEnv(env: Pick<Env, 'STT_PROVIDER' | 'INR_PER_US
 }
 
 /** The main sign-in and every extra meetings account, as the service builds them (one account: unchanged). */
-export function storedGoogleApi(env: Env): (db: Db, key: Buffer) => MeetingsGoogleApi {
-  return (db, key) => {
-    const token = new TokenStore(db, key).load();
+export function storedGoogleApi(env: Env): (db: Db, key: Buffer) => Promise<MeetingsGoogleApi> {
+  return async (db, key) => {
+    const token = await new TokenStore(db, key).load();
     if (!token) throw new CorrectionError('Google is not connected. Run: npm run cli -- google-auth');
     const newClient = () => createOAuthClient(requireKey(env, 'GOOGLE_OAUTH_CLIENT_ID'), requireKey(env, 'GOOGLE_OAUTH_CLIENT_SECRET'));
     const main = newClient();
     main.setCredentials({ refresh_token: token });
     const log = silentLogger();
-    return combineMeetingAccounts(storedMeetingAccounts({ db, key, main, newClient, log }), log).api;
+    return combineMeetingAccounts(await storedMeetingAccounts({ db, key, main, newClient, log }), log).api;
   };
 }
 
@@ -196,7 +217,7 @@ export function meetingAiCeilingUsd(seconds: number, prices: Prices): number {
   return summary + tracker;
 }
 
-function watcherFor(deps: MeetingCliDeps, db: Db, api: MeetingsGoogleApi, clients: ClientConfig[]): MeetingWatcher {
+function watcherFor(deps: MeetingCliDeps, db: Sql, api: MeetingsGoogleApi, clients: ClientConfig[]): MeetingWatcher {
   const { env } = deps;
   return new MeetingWatcher({
     db,
@@ -207,6 +228,9 @@ function watcherFor(deps: MeetingCliDeps, db: Db, api: MeetingsGoogleApi, client
     clients,
   });
 }
+
+/** Thrown to roll the backfill preview's transaction back: it stores nothing. */
+class DryRun extends Error {}
 
 const count = (found: readonly FoundMeeting[], s: MeetingStatus) => found.filter((f) => f.status === s).length;
 
@@ -251,27 +275,29 @@ export async function meetingBackfillCommand(opts: { since: string; yes: boolean
   try {
     const key = deps.keyProvider.getKey();
     const configs = loadGroupsFile(env.GROUPS_FILE);
-    db = openDb(trackerDbPath(env.DATA_DIR));
-    if (!meetingsReady(db)) throw new CorrectionError(NO_SCOPES);
-    const api = deps.googleApi(db, key);
-    const run = () => {
+    db = await openStore(env);
+    if (!(await meetingsReady(db))) throw new CorrectionError(NO_SCOPES);
+    const api = await deps.googleApi(db, key);
+    const run = async (sql: Sql) => {
       // The groups file's clients are synced first, so a newly added client matches in the preview as in the real run.
-      syncClients(db!, configs);
-      return watcherFor(deps, db!, api, configs).backfill(from.toISOString(), now.toISOString(), deps.signal ?? new AbortController().signal, {
+      await syncClients(sql, configs);
+      return watcherFor(deps, sql, api, configs).backfill(from.toISOString(), now.toISOString(), deps.signal ?? new AbortController().signal, {
         dryRun: !opts.yes,
       });
     };
-    let r: Awaited<ReturnType<typeof run>>;
+    let r!: Awaited<ReturnType<typeof run>>;
     if (opts.yes) {
-      r = await run();
+      r = await run(db);
     } else {
-      // The preview syncs inside a transaction that is always rolled back, so it stores nothing. The lock is held (the
-      // service is stopped), so no other writer waits on it.
-      db.exec('BEGIN');
+      // The preview syncs and reads inside a transaction that is always rolled back (DryRun), so it stores nothing. It
+      // spans the Google calls: the lock is held (the service is stopped), so nothing else waits on the database.
       try {
-        r = await run();
-      } finally {
-        db.exec('ROLLBACK');
+        await db.tx(async (q) => {
+          r = await run(q);
+          throw new DryRun();
+        });
+      } catch (e) {
+        if (!(e instanceof DryRun)) throw e;
       }
     }
     const f = r.found;
@@ -287,10 +313,10 @@ export async function meetingBackfillCommand(opts: { since: string; yes: boolean
       out(f.length > 0 ? 'Nothing was changed. Re-run with --yes to store them.' : 'Nothing was changed.');
       return;
     }
-    if (r.added > 0) requestRebuild(db, now);
+    if (r.added > 0) await requestRebuild(db, now);
     out('Next: start the service (net start wa-agent); it processes the queued meetings. See them with: npm run cli -- meeting list');
   } finally {
-    db?.close();
+    await db?.close();
     await lock.release();
   }
 }
@@ -307,18 +333,19 @@ export async function meetingCheckCommand(deps: MeetingCliDeps): Promise<void> {
   if (!env.MEETINGS_ENABLED) throw new CorrectionError(NOT_ENABLED);
   const key = deps.keyProvider.getKey();
   const configs = loadGroupsFile(env.GROUPS_FILE);
-  const db = openDb(trackerDbPath(env.DATA_DIR));
+  const db = await openStore(env);
   try {
-    if (!meetingsReady(db)) throw new CorrectionError(NO_SCOPES);
-    const api = deps.googleApi(db, key);
+    if (!(await meetingsReady(db))) throw new CorrectionError(NO_SCOPES);
+    const api = await deps.googleApi(db, key);
     const now = deps.clock.now();
     const from = new Date(now.getTime() - CHECK_DAYS * 86_400_000);
     const r = await watcherFor(deps, db, api, configs).backfill(from.toISOString(), now.toISOString(), deps.signal ?? new AbortController().signal, {
       dryRun: true,
     });
-    const codes = new Map(listClients(db, false).map((c) => [c.id, c.code]));
+    const codes = new Map((await listClients(db, false)).map((c) => [c.id, c.code]));
     // Read only, with the service possibly running: clients are matched as stored, not synced from the groups file.
-    const unsynced = configs.filter((c) => getClientByGroupId(db, c.groupId)?.active !== true).length;
+    let unsynced = 0;
+    for (const c of configs) if ((await getClientByGroupId(db, c.groupId))?.active !== true) unsynced++;
     if (unsynced > 0) {
       out(`${unsynced} client${unsynced === 1 ? '' : 's'} in the groups file ${unsynced === 1 ? 'is' : 'are'} not stored yet; their meetings show as unassigned until the service restarts.`);
     }
@@ -338,6 +365,6 @@ export async function meetingCheckCommand(deps: MeetingCliDeps): Promise<void> {
     }
     out('Nothing was downloaded or stored.');
   } finally {
-    db.close();
+    await db.close();
   }
 }

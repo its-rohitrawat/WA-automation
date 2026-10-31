@@ -8,7 +8,7 @@ import { runTaskAction } from '../../control/taskActions.ts';
 import { listDashboardTasks, parseTaskQuery, taskDetail } from '../../control/taskQueries.ts';
 import { trackerSummary } from '../../control/trackerQueries.ts';
 import type { HealthSnapshot } from '../../health/health.ts';
-import type { Db } from '../../store/db.ts';
+import type { Db, Sql } from '../../store/db.ts';
 import type { Clock } from '../../util/clock.ts';
 import type { AuditLog } from '../audit.ts';
 import { sendJson } from '../http.ts';
@@ -33,41 +33,41 @@ export interface WorkApiDeps extends ActionGuard {
 
 export function registerWorkApi(router: Router, d: WorkApiDeps): void {
   const read = (path: string, answer: (ctx: Parameters<Parameters<Router['get']>[1]>[0]) => unknown) =>
-    router.get(path, controlled((ctx) => {
-      d.guard.requireOwner(ctx.req);
-      sendJson(ctx.res, 200, answer(ctx));
+    router.get(path, controlled(async (ctx) => {
+      await d.guard.requireOwner(ctx.req);
+      sendJson(ctx.res, 200, await answer(ctx));
     }));
-  const auditFor = (actor: string, requestId: string) => (e: AuditEntry) => d.audit.record({ ...e, actor, requestId });
+  const auditFor = (actor: string, requestId: string) => (q: Sql, e: AuditEntry) => d.audit.record({ ...e, actor, requestId }, q);
 
-  read('/dashboard/api/tasks', ({ url }) => listDashboardTasks(d.db, parseTaskQuery(url.searchParams), d.clock.now()));
-  read('/dashboard/api/tasks/:code', ({ params }) => {
-    const t = taskDetail(d.db, params.code!, d.clock.now());
+  read('/dashboard/api/tasks', async ({ url }) => await listDashboardTasks(d.db, parseTaskQuery(url.searchParams), d.clock.now()));
+  read('/dashboard/api/tasks/:code', async ({ params }) => {
+    const t = await taskDetail(d.db, params.code!, d.clock.now());
     if (!t) throw new ControlError(404, 'No task with that code');
     return t;
   });
   router.post('/dashboard/api/tasks/:code/:action', controlled(async (ctx) => {
-    const s = actionSession(ctx, d);
+    const s = await actionSession(ctx, d);
     const body = ctx.params.action === 'edit' ? await readBody(ctx) : undefined;
-    const detail = runTaskAction(d.db, { code: ctx.params.code!, action: ctx.params.action!, body },
+    const detail = await runTaskAction(d.db, { code: ctx.params.code!, action: ctx.params.action!, body },
       { actor: s.email, now: d.clock.now(), audit: auditFor(s.email, ctx.requestId) });
     sendJson(ctx.res, 200, detail);
   }));
 
-  read('/dashboard/api/meetings', ({ url }) => listDashboardMeetings(d.db, parseMeetingList(url.searchParams), d.clock.now(), d.accountOf));
-  read('/dashboard/api/meetings/:id', ({ params }) => {
-    const m = meetingDetail(d.db, params.id!, d.clock.now(), d.accountOf);
+  read('/dashboard/api/meetings', async ({ url }) => await listDashboardMeetings(d.db, parseMeetingList(url.searchParams), d.clock.now(), d.accountOf));
+  read('/dashboard/api/meetings/:id', async ({ params }) => {
+    const m = await meetingDetail(d.db, params.id!, d.clock.now(), d.accountOf);
     if (!m) throw new ControlError(404, 'No meeting with that id');
     return m;
   });
   router.post('/dashboard/api/meetings/:id/:action', controlled(async (ctx) => {
-    const s = actionSession(ctx, d);
+    const s = await actionSession(ctx, d);
     const body = ctx.params.action === 'assign' ? await readBody(ctx) : undefined;
-    const result = runMeetingAction(d.db, { id: ctx.params.id!, action: ctx.params.action!, body }, {
+    const result = await runMeetingAction(d.db, { id: ctx.params.id!, action: ctx.params.action!, body }, {
       actor: s.email, now: d.clock.now(), audit: auditFor(s.email, ctx.requestId), spend: d.spend, ...(d.accountOf ? { accountOf: d.accountOf } : {}),
     });
     sendJson(ctx.res, 200, result);
   }));
 
-  read('/dashboard/api/activity', ({ url }) => listActivity(d.db, parseActivityParams(url.searchParams)));
-  read('/dashboard/api/tracker', () => trackerSummary(d.db, d.clock.now(), d.health?.()));
+  read('/dashboard/api/activity', async ({ url }) => await listActivity(d.db, parseActivityParams(url.searchParams)));
+  read('/dashboard/api/tracker', async () => await trackerSummary(d.db, d.clock.now(), d.health?.()));
 }

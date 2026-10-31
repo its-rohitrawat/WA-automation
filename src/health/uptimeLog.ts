@@ -1,4 +1,4 @@
-import { tx, type Db } from '../store/db.ts';
+import type { Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import { fromIstDate, istDate, istDayLabel, istTime, meetingLength } from '../util/time.ts';
 
@@ -135,38 +135,56 @@ export function uptimeRatio(intervals: readonly Interval[], knownSince: number |
   return Math.round(10_000 * (1 - down / (now - from))) / 100;
 }
 
+const LAST = 'SELECT up FROM uptime_log ORDER BY at DESC, id DESC LIMIT 1';
+
 export class UptimeLog {
   readonly #db: Db;
   readonly #clock: Clock;
   #last: boolean | undefined;
 
+  /** Knows no last state: `UptimeLog.open` makes one and reads the last row. */
   constructor(db: Db, clock: Clock) {
     this.#db = db;
     this.#clock = clock;
-    const r = db.prepare('SELECT up FROM uptime_log ORDER BY at DESC, id DESC LIMIT 1').get() as { up: number } | undefined;
-    this.#last = r === undefined ? undefined : r.up === 1;
   }
 
-  /** An up row never keeps a reason; a down row keeps one only when it is a known code. */
-  #write(up: boolean, reason: DownReason | null): void {
+  static async open(db: Db, clock: Clock): Promise<UptimeLog> {
+    const log = new UptimeLog(db, clock);
+    const r = await db.get<{ up: number }>(LAST);
+    log.#last = r === undefined ? undefined : r.up === 1;
+    return log;
+  }
+
+  /**
+   * An up row never keeps a reason; a down row keeps one only when it is a known code. The state is noted before the
+   * write (so a tick right after start() does not write the same row again) and put back if the write fails (so the next
+   * tick tries again).
+   */
+  async #write(up: boolean, reason: DownReason | null): Promise<void> {
     const r = !up && isReason(reason) ? reason : null;
-    this.#db.prepare('INSERT INTO uptime_log (at, up, reason) VALUES (?, ?, ?)').run(this.#clock.now().toISOString(), up ? 1 : 0, r);
+    const before = this.#last;
     this.#last = up;
+    try {
+      await this.#db.run('INSERT INTO uptime_log (at, up, reason) VALUES (?, ?, ?)', [this.#clock.now().toISOString(), up ? 1 : 0, r]);
+    } catch (e) {
+      if (this.#last === up) this.#last = before;
+      throw e;
+    }
   }
 
   /** At service start: always one row, so the time since a stop row ends the outage it began. */
-  start(up: boolean, reason: DownReason | null = null): void {
-    this.#write(up, reason);
+  async start(up: boolean, reason: DownReason | null = null): Promise<void> {
+    await this.#write(up, reason);
   }
 
   /** From the app tick: a row only when up changed. reason: Health.downReason(). */
-  tick(up: boolean, reason: DownReason | null = null): void {
-    if (up !== this.#last) this.#write(up, reason);
+  async tick(up: boolean, reason: DownReason | null = null): Promise<void> {
+    if (up !== this.#last) await this.#write(up, reason);
   }
 
   /** At a clean stop: the stopped time counts as down. */
-  stop(): void {
-    if (this.#last !== false) this.#write(false, 'stopped');
+  async stop(): Promise<void> {
+    if (this.#last !== false) await this.#write(false, 'stopped');
   }
 
   /**
@@ -174,55 +192,63 @@ export class UptimeLog {
    * one is down, the row where its outage began), so the state at the window's start and an outage's start stay known.
    * Returns how many went.
    */
-  purgeOlderThan(days: number): number {
+  async purgeOlderThan(days: number): Promise<number> {
     if (!Number.isInteger(days) || days < 1) throw new Error('the uptime log keeps at least one day');
     const cutoff = new Date(this.#clock.now().getTime() - days * DAY_MS).toISOString();
-    return tx(this.#db, () => {
-      const last = this.#db.prepare('SELECT id, up FROM uptime_log WHERE at < ? ORDER BY at DESC, id DESC LIMIT 1').get(cutoff) as
-        { id: number; up: number } | undefined;
+    return this.#db.tx(async (q) => {
+      const last = await q.get<{ id: number; up: number }>('SELECT id, up FROM uptime_log WHERE at < ? ORDER BY at DESC, id DESC LIMIT 1', [cutoff]);
       if (!last) return 0;
       const keep = [last.id];
       if (last.up === 0) {
-        const began = this.#db
-          .prepare(`SELECT id FROM uptime_log WHERE at < @cutoff AND up = 0
-            AND at > COALESCE((SELECT MAX(at) FROM uptime_log WHERE at < @cutoff AND up = 1), '') ORDER BY at, id LIMIT 1`)
-          .get({ cutoff }) as { id: number };
+        const began = (await q.get<{ id: number }>(
+          `SELECT id FROM uptime_log WHERE at < @cutoff AND up = 0
+            AND at > COALESCE((SELECT MAX(at) FROM uptime_log WHERE at < @cutoff AND up = 1), '') ORDER BY at, id LIMIT 1`,
+          { cutoff },
+        ))!;
         keep.push(began.id);
       }
-      return this.#db.prepare('DELETE FROM uptime_log WHERE at < ? AND id NOT IN (SELECT value FROM json_each(?))').run(cutoff, JSON.stringify(keep)).changes;
+      // The kept ids as integers: on Postgres json_each's values are text, which an id cannot be compared with.
+      return (await q.run('DELETE FROM uptime_log WHERE at < ? AND id NOT IN (SELECT CAST(value AS INTEGER) FROM json_each(?))', [cutoff, JSON.stringify(keep)])).changes;
     });
   }
 
-  /** The down stretches overlapping the last `days` days, and when the log began. */
-  #intervals(days: number): { intervals: Interval[]; knownSince: number | undefined } {
+  /**
+   * The down stretches overlapping the last `days` days, and when the log began. The reads are one transaction, so a
+   * row the tick writes meanwhile is in all of them or in none.
+   */
+  async #intervals(days: number): Promise<{ intervals: Interval[]; knownSince: number | undefined }> {
     const now = this.#clock.now().getTime();
     const from = new Date(now - days * DAY_MS).toISOString();
     // The last row before the window says whether the window starts inside an outage. If it does, the outage began at the
     // first down row after the last up row (a down tick, then a stop row, then a start(false) row are one outage).
     type Row = { at: string; up: number; reason: string | null };
-    const last = this.#db.prepare('SELECT at, up, reason FROM uptime_log WHERE at < ? ORDER BY at DESC, id DESC LIMIT 1').get(from) as Row | undefined;
-    let before: Row[] = last ? [last] : [];
-    if (last?.up === 0) {
-      const began = this.#db
-        .prepare(`SELECT at, up, reason FROM uptime_log WHERE at < @from AND up = 0
-          AND at > COALESCE((SELECT MAX(at) FROM uptime_log WHERE at < @from AND up = 1), '') ORDER BY at, id LIMIT 1`)
-        .get({ from }) as Row;
-      before = [began];
-    }
-    const inside = this.#db.prepare('SELECT at, up, reason FROM uptime_log WHERE at >= ? ORDER BY at, id').all(from) as Row[];
-    const first = this.#db.prepare('SELECT MIN(at) AS at FROM uptime_log').get() as { at: string | null };
+    const { before, inside, first } = await this.#db.tx(async (q) => {
+      const last = await q.get<Row>('SELECT at, up, reason FROM uptime_log WHERE at < ? ORDER BY at DESC, id DESC LIMIT 1', [from]);
+      let before: Row[] = last ? [last] : [];
+      if (last?.up === 0) {
+        const began = (await q.get<Row>(
+          `SELECT at, up, reason FROM uptime_log WHERE at < @from AND up = 0
+            AND at > COALESCE((SELECT MAX(at) FROM uptime_log WHERE at < @from AND up = 1), '') ORDER BY at, id LIMIT 1`,
+          { from },
+        ))!;
+        before = [began];
+      }
+      const inside = await q.all<Row>('SELECT at, up, reason FROM uptime_log WHERE at >= ? ORDER BY at, id', [from]);
+      const first = (await q.get<{ at: string | null }>('SELECT MIN(at) AS at FROM uptime_log'))!;
+      return { before, inside, first };
+    });
     const rows = [...before, ...inside].map((r) => ({ at: Date.parse(r.at), up: r.up === 1, reason: isReason(r.reason) ? r.reason : null }));
     return { intervals: downIntervals(rows), knownSince: first.at === null ? undefined : Date.parse(first.at) };
   }
 
-  daily(days = 30): DayDown[] {
-    return dailyDown(this.#intervals(days).intervals, this.#clock.now().getTime(), days);
+  async daily(days = 30): Promise<DayDown[]> {
+    return dailyDown((await this.#intervals(days)).intervals, this.#clock.now().getTime(), days);
   }
 
   /** Newest first. */
-  outages(days = 30): Outage[] {
+  async outages(days = 30): Promise<Outage[]> {
     const now = this.#clock.now().getTime();
-    return this.#intervals(days).intervals.reverse().map((iv) => ({
+    return (await this.#intervals(days)).intervals.reverse().map((iv) => ({
       start: new Date(iv.start).toISOString(),
       end: iv.end === null ? null : new Date(iv.end).toISOString(),
       minutes: minutes((iv.end ?? now) - iv.start),
@@ -231,14 +257,14 @@ export class UptimeLog {
   }
 
   /** The IST day of the log's first row, or null while it is empty: the days before it are not known. */
-  knownSinceDay(): string | null {
-    const r = this.#db.prepare('SELECT MIN(at) AS at FROM uptime_log').get() as { at: string | null };
+  async knownSinceDay(): Promise<string | null> {
+    const r = (await this.#db.get<{ at: string | null }>('SELECT MIN(at) AS at FROM uptime_log'))!;
     return r.at === null ? null : istDate(new Date(r.at));
   }
 
-  ratios(): UptimeRatios {
+  async ratios(): Promise<UptimeRatios> {
     const now = this.#clock.now().getTime();
-    const { intervals, knownSince } = this.#intervals(30);
+    const { intervals, knownSince } = await this.#intervals(30);
     return { d1: uptimeRatio(intervals, knownSince, now, 1), d7: uptimeRatio(intervals, knownSince, now, 7), d30: uptimeRatio(intervals, knownSince, now, 30) };
   }
 }

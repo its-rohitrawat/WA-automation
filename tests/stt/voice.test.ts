@@ -394,10 +394,15 @@ describe('voiceTranscriber: OpenAI parts', () => {
   });
 
   describe('inside withSttHold, with a real SpendGuard', () => {
-    const setup = () => {
-      const db = seededDb();
+    const setup = async () => {
+      const db = await seededDb();
       const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: 1 });
-      const rows = () => db.prepare('SELECT kind, usd, detail FROM spend ORDER BY id').all() as { kind: string; usd: number; detail: string }[];
+      // Bookings without a transaction handle are written behind the call, concurrently on Postgres's pool: wait for them,
+      // and read them in a fixed order of their own, not by id.
+      const rows = async () => {
+        await spend.flushed();
+        return db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend ORDER BY kind, detail, usd');
+      };
       return { spend, rows };
     };
     /**
@@ -413,12 +418,12 @@ describe('voiceTranscriber: OpenAI parts', () => {
       const out = await withSttHold(spend, ceiling, 'media 7', async () => {
         const r = await t.transcribe(prepared);
         return { result: r, costUsd: t.costUsd({ maxSeconds: bound, billedSeconds: r.billedSeconds, measuredSeconds: prepared.measuredSeconds }) };
-      }, { onBooked: (b) => booked.push(b) }).catch((x: unknown) => x);
+      }, { onBooked: (b) => void booked.push(b) }).catch((x: unknown) => x);
       return { out, ceiling, booked };
     };
 
     it('part 1 billed and part 2 failing with 503: exactly one stt row at the ceiling, and the error is an SttPartialError', async () => {
-      const { spend, rows } = setup();
+      const { spend, rows } = await setup();
       const p = new FakeProvider('openai');
       const err = new SttHttpError(503, 'down');
       p.script = [async () => result(said('a'), 210), async () => {
@@ -428,12 +433,12 @@ describe('voiceTranscriber: OpenAI parts', () => {
       expect(ceiling).toBe(voiceCeilingUsd('openai', 420, INR));
       expect(out).toBeInstanceOf(SttPartialError);
       expect((out as SttPartialError).cause).toBe(err);
-      expect(rows()).toEqual([{ kind: 'stt', usd: ceiling, detail: 'media 7 (unknown, estimated)' }]);
+      expect(await rows()).toEqual([{ kind: 'stt', usd: ceiling, detail: 'media 7 (unknown, estimated)' }]);
       expect(booked).toEqual([{ outcome: 'ceiling', usd: ceiling }]);
     });
 
     it('part 1 failing with 503 books nothing, as before', async () => {
-      const { spend, rows } = setup();
+      const { spend, rows } = await setup();
       const p = new FakeProvider('openai');
       const err = new SttHttpError(503, 'down');
       p.script = [async () => {
@@ -441,7 +446,7 @@ describe('voiceTranscriber: OpenAI parts', () => {
       }];
       const { out, booked } = await held(p, spend);
       expect(out).toBe(err);
-      expect(rows()).toEqual([]);
+      expect(await rows()).toEqual([]);
       expect(booked).toEqual([{ outcome: 'none', usd: 0 }]);
     });
   });
