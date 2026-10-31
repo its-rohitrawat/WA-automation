@@ -386,6 +386,7 @@ describe('Reconciler', () => {
     await store(db, 'm1', 'hello');
     expect(await r.run(sharma)).toEqual({ status: 'failed', errorCode: 'unknown' });
     expect(spend.spentToday()).toBeCloseTo(estimateOf(ai), 9);
+    await spend.flushed(); // booked at the estimate after the run (no transaction handle)
     const row = (await db.get<{ detail: string }>('SELECT detail FROM spend'))!;
     expect(row.detail).toMatch(/^batch \d+ \(unknown, estimated\)$/);
     expectNoReservation(spend);
