@@ -98,7 +98,7 @@ interface RawMedia {
 
 /** Every column except the sealed download details. textSql selects the text (all of it, or only its start). */
 function columns(textSql: string): string {
-  return `id, message_id, client_id, kind, status, mime_type, file_name, file_size, seconds, forwarded, page_count, ref_enc IS NOT NULL AS has_ref,
+  return `id, message_id, client_id, kind, status, mime_type, file_name, file_size, seconds, forwarded, page_count, CASE WHEN ref_enc IS NOT NULL THEN 1 ELSE 0 END AS has_ref,
   local_path, sha256, text_kind, ${textSql} AS text, length(text) AS text_chars, note, error_code, attempts, next_attempt_at, drive_file_id,
   requeued_for_text, backlog, created_at, updated_at`;
 }
@@ -384,7 +384,7 @@ const FAILED_LOCAL_VOICE_FROM = `FROM media m JOIN messages msg ON msg.id = m.me
  * its message is processed and not queued again for an edit or a reaction.
  */
 const REQUEUE_SET = `status = 'pending', attempts = 0, next_attempt_at = NULL, error_code = NULL, note = NULL, created_at = @at, updated_at = @at,
-        backlog = (SELECT msg.processed_at IS NOT NULL AND msg.requeue_reason IS NULL FROM messages msg WHERE msg.id = media.message_id)`;
+        backlog = (SELECT CASE WHEN msg.processed_at IS NOT NULL AND msg.requeue_reason IS NULL THEN 1 ELSE 0 END FROM messages msg WHERE msg.id = media.message_id)`;
 
 /**
  * An optional filter on one column: the clause and its value only when the value is given. Never `@x IS NULL OR …`:
