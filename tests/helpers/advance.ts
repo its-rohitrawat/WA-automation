@@ -25,8 +25,12 @@ export class DbWork {
       get(target, prop) {
         const v = Reflect.get(target, prop) as unknown;
         if (typeof v !== 'function') return v;
+        // Bound now, tx too: a spy put on the wrapper (vi.spyOn(wrapped, 'tx')) then calls this, not itself again.
         const fn = (v as (...a: unknown[]) => unknown).bind(target);
-        if (prop === 'tx') return <T>(f: (q: Sql) => Promise<T>) => track(target.tx(f));
+        if (prop === 'tx') {
+          const tx = fn as <T>(f: (q: Sql) => Promise<T>) => Promise<T>;
+          return <T>(f: (q: Sql) => Promise<T>) => track(tx(f));
+        }
         return ['run', 'get', 'all', 'exec'].includes(String(prop)) ? (...a: unknown[]) => track(fn(...a) as Promise<unknown>) : fn;
       },
     });
