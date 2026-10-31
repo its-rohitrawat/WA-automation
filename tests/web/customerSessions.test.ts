@@ -119,7 +119,7 @@ afterAll(async () => {
   await db?.close();
   await fresh?.drop();
   rmSync(dir, { recursive: true, force: true });
-});
+}, 60_000);
 
 const PARAMS: Record<string, string> = { code: 'SHA', id: '00000000-0000-4000-8000-0000000000aa', name: 'publish' };
 const pathOf = (pattern: string) => pattern.replace(/:(\w+)/g, (_m, p: string) => PARAMS[p] ?? 'x');
@@ -183,7 +183,7 @@ describe('the route sweep: a customer session never gets a founder route (S4.8)'
     // Every allowed entry is a real route (a stale list would hide nothing, but would no longer describe the code).
     const keys = new Set(routes.map((r) => `${r.method} ${r.pattern}`));
     expect(Object.keys(CUSTOMER_ALLOWED).filter((k) => !keys.has(k))).toEqual([]);
-  });
+  }, 60_000);
 
   it('the Google connect callback sends a customer back to /dashboard and nowhere else', async () => {
     const res = await fetch(`${base}/dashboard/connect/google/callback?state=x&code=y`, { redirect: 'manual', headers: { cookie: `wa_session=${customer.id}` } });

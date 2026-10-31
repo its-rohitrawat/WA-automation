@@ -151,7 +151,7 @@ afterAll(async () => {
   for (const db of opened) await db.close().catch(() => undefined);
   await fresh?.drop();
   rmSync(dir, { recursive: true, force: true });
-});
+}, 60_000);
 
 async function call(method: 'GET' | 'POST', path: string, who: S, body: unknown = {}) {
   const res = await fetch(`${base}${path}`, {

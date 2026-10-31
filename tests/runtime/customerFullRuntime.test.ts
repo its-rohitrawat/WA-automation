@@ -15,13 +15,13 @@ import type { Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { MEHTA, onSqlite, seededDb, SHARMA } from '../helpers/db.ts';
-import { freshPg, type FreshPg } from '../helpers/freshPg.ts';
+import { platformTestDb } from '../helpers/platformTestDb.ts';
 import { dbGroupsStore } from '../../src/config/groupsStore.ts';
 
 // A customer's FULL runtime (Phase B 2 and 3). The stores are laid out as on the Mac: on SQLite an in-memory store
 // stands in for the platform tables (and the founder's tracker) and one for each customer's own Db, with wa_auth as
-// Postgres has it; on Postgres they are the real ones, in a database of this test's own, since the Supervisor runs
-// every customer in tenants. The Supervisor is told it is on Postgres. Every key here is a placeholder.
+// Postgres has it; on Postgres they are the real ones, in this file's own database, set back to just the founder
+// before each test, since the Supervisor runs every customer in tenants. The Supervisor is told it is on Postgres. Every key here is a placeholder.
 
 const sdk = vi.hoisted(() => ({ keys: [] as string[] }));
 vi.mock('@anthropic-ai/sdk', () => ({
@@ -45,13 +45,10 @@ const WA_AUTH = `CREATE TABLE wa_auth (phone text NOT NULL, slot text NOT NULL D
 let dir: string | undefined;
 const opened: Db[] = [];
 let ps: PlatformSupervisor | undefined;
-let fresh: FreshPg | undefined;
 afterEach(async () => {
   await ps?.stop();
   ps = undefined;
   for (const db of opened.splice(0)) await db.close();
-  await fresh?.drop();
-  fresh = undefined;
   if (dir) rmSync(dir, { recursive: true, force: true });
   dir = undefined;
 });
@@ -68,13 +65,13 @@ async function stores(): Promise<{ platformDb: Db; founderDb: Db; customerDbOf: 
     };
     return { platformDb, founderDb: platformDb, customerDbOf };
   }
-  const f = (fresh = await freshPg());
+  const t = await platformTestDb(); // this file's database, set back to just the founder
   const customerDbOf = async (id: string) => {
-    const db = f.tenantDb(id);
+    const db = t.customerDb(id);
     await syncClients(db, [SHARMA, MEHTA]); // its own two groups
     return db;
   };
-  return { platformDb: f.platformDb(), founderDb: f.tenantDb(FOUNDER_TENANT_ID), customerDbOf };
+  return { platformDb: t.db, founderDb: t.customerDb(FOUNDER_TENANT_ID), customerDbOf };
 }
 
 async function setup(o: { keyFor: ('a' | 'b')[] }) {

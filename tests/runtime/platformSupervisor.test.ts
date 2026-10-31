@@ -12,13 +12,13 @@ import type { Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { MEHTA, onSqlite, seededDb, SHARMA } from '../helpers/db.ts';
-import { freshPg, type FreshPg } from '../helpers/freshPg.ts';
+import { platformTestDb } from '../helpers/platformTestDb.ts';
 import { dbGroupsStore } from '../../src/config/groupsStore.ts';
 
 // The Supervisor as main.ts runs it (S4.5 Phase A, S4.9). The stores are laid out as on the Mac: on SQLite one
 // in-memory store stands in for the platform tables and one for the customer's own Db; on Postgres they are the real
-// ones, in a database of this test's own, since the Supervisor runs every customer in tenants. The Supervisor is told
-// it is on Postgres so a customer starts. A customer gets only a setup
+// ones, in this file's own database, set back to just the founder before each test, since the Supervisor runs every
+// customer in tenants. The Supervisor is told it is on Postgres so a customer starts. A customer gets only a setup
 // shell: its facts from its own Db, no Claude client, no WhatsApp, no Google, and never the founder's key.
 
 const anthropic = vi.hoisted(() => ({ made: 0 }));
@@ -34,13 +34,10 @@ vi.mock('@anthropic-ai/sdk', () => ({
 const AT = '2026-10-30T10:00:00.000Z';
 const opened: Db[] = [];
 let ps: PlatformSupervisor | undefined;
-let fresh: FreshPg | undefined;
 afterEach(async () => {
   await ps?.stop();
   ps = undefined;
   for (const db of opened.splice(0)) await db.close();
-  await fresh?.drop();
-  fresh = undefined;
 });
 
 /** An env that records every setting read: a customer's shell must never reach the founder's key. */
@@ -58,11 +55,11 @@ async function stores(): Promise<{ platformDb: Db; customerDbOf: (id: string) =>
     await ensurePlatformSchema(platformDb);
     return { platformDb, customerDbOf: () => seededDb() };
   }
-  const f = (fresh = await freshPg());
+  const t = await platformTestDb(); // this file's database, set back to just the founder
   return {
-    platformDb: f.platformDb(),
+    platformDb: t.db,
     customerDbOf: async (id) => {
-      const db = f.tenantDb(id);
+      const db = t.customerDb(id);
       await syncClients(db, [SHARMA, MEHTA]);
       return db;
     },

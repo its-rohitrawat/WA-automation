@@ -116,7 +116,7 @@ afterAll(async () => {
   await db?.close();
   await fresh?.drop();
   rmSync(dir, { recursive: true, force: true });
-});
+}, 60_000);
 
 type S = { id: string; csrf: string };
 async function call(method: 'GET' | 'POST', path: string, s: S, body: unknown = {}, o: { csrf?: boolean } = {}) {

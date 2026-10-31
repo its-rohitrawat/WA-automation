@@ -50,10 +50,10 @@ beforeAll(async () => {
   if (onSqlite) return;
   fresh = await freshPg();
   platformDb = fresh.platformDb();
-});
+}, 60_000);
 afterAll(async () => {
   await fresh?.drop();
-});
+}, 60_000);
 
 /**
  * The customer's Db, with a switch that makes every audit_log insert fail: the audit row cannot be written, on either

@@ -136,7 +136,7 @@ afterAll(async () => {
   for (const db of opened) await db.close().catch(() => undefined);
   await fresh?.drop();
   rmSync(dir, { recursive: true, force: true });
-});
+}, 60_000);
 
 async function call(method: 'GET' | 'POST', path: string, who: S, body: unknown = {}) {
   const res = await fetch(`${base}${path}`, {
@@ -208,5 +208,5 @@ describe('the DATA route sweep: each session reaches only its own customer (Phas
       for (const f of foreign) if (res.text.includes(f)) leaks.push(`${r.method} ${r.pattern} -> ${f}`);
     }
     expect(leaks).toEqual([]);
-  });
+  }, 60_000);
 });

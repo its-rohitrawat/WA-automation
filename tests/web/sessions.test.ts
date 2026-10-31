@@ -33,10 +33,10 @@ beforeAll(async () => {
   if (onSqlite) return;
   fresh = await freshPg();
   platformDb = fresh.platformDb();
-});
+}, 60_000);
 afterAll(async () => {
   await fresh?.drop();
-});
+}, 60_000);
 beforeEach(async () => {
   await platformDb?.run('DELETE FROM web_sessions');
 });

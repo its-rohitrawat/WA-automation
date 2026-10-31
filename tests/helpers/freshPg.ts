@@ -15,7 +15,7 @@ import { testPg, type TestPg } from './pg.ts';
 export interface FreshPg {
   /** The same four roles' URLs, on this database. */
   urls: TestPg;
-  /** The platform tables as wa_platform, on this database's platform pool (drop ends it). */
+  /** The platform tables as wa_platform, on this database's platform pool: closing it leaves the pool to drop. */
   platformDb(): PgPlatformDb;
   /** A customer's own tables as wa_app, for a customer already in this database's tenants (drop ends the pool). */
   tenantDb(tenantId: string): PgTenantDb;
@@ -87,7 +87,10 @@ export async function freshPg(): Promise<FreshPg> {
   };
   return {
     urls,
-    platformDb: () => new PgPlatformDb((platform ??= pool(urls.platformUrl))),
+    platformDb: () => {
+      const p = (platform ??= pool(urls.platformUrl));
+      return new PgPlatformDb({ connect: () => p.connect(), end: async () => {} });
+    },
     tenantDb: (tenantId) => new PgTenantDb((app ??= pool(urls.appUrl)), tenantId, { ownsPool: false }),
     drop,
   };
