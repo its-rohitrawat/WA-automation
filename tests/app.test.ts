@@ -745,7 +745,9 @@ describe('app health and publishing', () => {
   it('republishes once after IST midnight with no other event, so the Today tab carries the new date (Task 3 review round 2)', async () => {
     const drive = new CapturingDrive();
     vi.setSystemTime(new Date('2026-10-19T18:00:00Z')); // 23:30 IST on 19 Oct
-    const { app } = await setup({ drive });
+    // A tick every 240 s, not 30 s: the 95 minutes below take 24 ticks, not 190 (each one database work, slow on
+    // Postgres). The tick sees the new date: one at 20 min (23:50, still 19 Oct), the first after midnight at 32 min.
+    const { app } = await setup({ drive, pollMs: 240_000 });
     await advance(1_000);
     expect(drive.uploads).toBe(1); // the start publish, built on 19 Oct
     const first = drive.last!;

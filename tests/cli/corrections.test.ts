@@ -4,7 +4,7 @@ import {
   unlockClientPhase, unlockTask,
 } from '../../src/cli/corrections.ts';
 import { getClient } from '../../src/store/clients.ts';
-import type { Db } from '../../src/store/db.ts';
+import type { Db, Sql } from '../../src/store/db.ts';
 import { getKv } from '../../src/store/kv.ts';
 import { insertMessage, listUnprocessed, markProcessed } from '../../src/store/messages.ts';
 import { listPeople, upsertPerson } from '../../src/store/people.ts';
@@ -33,8 +33,17 @@ async function events(db: Db): Promise<Ev[]> {
 
 const rebuilt = async (db: Db) => (await getKv(db, 'rebuild_requested')) === now.toISOString();
 
+const putMsg = (q: Sql, waId: string, clientId: number, ts: string) =>
+  insertMessage(q, { waId, clientId, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts, text: 'a', quotedWaId: null, mediaType: null });
 async function msg(db: Db, waId: string, ts: string, place = 1) {
-  await insertMessage(db, { waId, clientId: await seat(db, place), senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts, text: 'a', quotedWaId: null, mediaType: null });
+  await putMsg(db, waId, await seat(db, place), ts);
+}
+/** Many messages at once: one id lookup and one transaction, not one of each per message (slow on Postgres). */
+async function msgs(db: Db, waIds: string[], ts: string, place = 1) {
+  const clientId = await seat(db, place);
+  await db.tx(async (q) => {
+    for (const waId of waIds) await putMsg(q, waId, clientId, ts);
+  });
 }
 async function processAll(db: Db, place = 1) {
   await markProcessed(db, (await listUnprocessed(db, await seat(db, place), 100000)).map((m) => m.id), NOW);
@@ -206,7 +215,7 @@ describe('reprocess', () => {
   it('previews large jobs and changes nothing without --yes', async () => {
     const db = await withTask();
     const n = REPROCESS_CONFIRM_ABOVE + 1;
-    for (let i = 0; i < n; i++) await msg(db, `b${i}`, '2026-10-12T08:00:00.000Z');
+    await msgs(db, Array.from({ length: n }, (_, i) => `b${i}`), '2026-10-12T08:00:00.000Z');
     await processAll(db);
     expect(await reprocess(db, 'SHA', '2026-10-11', undefined, false, now)).toEqual({ count: n, queued: 0, needsConfirm: true, maxCostUsd: 1 });
     expect(await listUnprocessed(db, await seat(db, 1), 1000)).toHaveLength(0);

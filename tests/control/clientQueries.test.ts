@@ -5,7 +5,7 @@ import { insertMedia } from '../../src/store/media.ts';
 import { upsertPerson } from '../../src/store/people.ts';
 import { finishBatch, startBatch } from '../../src/store/batches.ts';
 import { setPhase, syncClients } from '../../src/store/clients.ts';
-import type { Db } from '../../src/store/db.ts';
+import type { Db, Sql } from '../../src/store/db.ts';
 import { insertFound } from '../../src/store/meetings.ts';
 import { insertMessage } from '../../src/store/messages.ts';
 import { createTask, recordEvent, setTaskStatus, type Status } from '../../src/store/tasks.ts';
@@ -33,13 +33,18 @@ async function task(db: Db, clientId: number, o: { title?: string; deadline?: st
   return t;
 }
 
-async function meeting(db: Db, n: number, clientId: number | null, title: string, startedAt: string): Promise<number> {
-  return (await insertFound(db, {
+/** A found meeting for a client's real id (null: unassigned). */
+async function putMeeting(q: Sql, n: number, clientId: number | null, title: string, startedAt: string): Promise<number> {
+  return (await insertFound(q, {
     recording: `conferenceRecords/c${n}/recordings/r${n}`, conference: `conferenceRecords/c${n}`, driveFileId: `drive${n}`, meetingCode: null, title,
     startedAt, endedAt: null, attendees: [{ email: 'a@client.com', name: 'Attendee Name', team: false }], participants: ['Participant Name'],
-    clientId: clientId === null ? null : await seat(db, clientId), matchKind: clientId === null ? null : 'title', status: clientId === null ? 'unassigned' : 'queued', driveSeconds: 600,
+    clientId, matchKind: clientId === null ? null : 'title', status: clientId === null ? 'unassigned' : 'queued', driveSeconds: 600,
     createdAt: startedAt,
   }))!;
+}
+
+async function meeting(db: Db, n: number, clientId: number | null, title: string, startedAt: string): Promise<number> {
+  return putMeeting(db, n, clientId === null ? null : await seat(db, clientId), title, startedAt);
 }
 
 async function message(db: Db, clientId: number, waId: string, ts: string) {
@@ -183,8 +188,13 @@ describe('clientDetail', () => {
   it(`lists at most MEETINGS_LIMIT (${MEETINGS_LIMIT}) meetings, the newest`, async () => {
     expect(MEETINGS_LIMIT).toBe(50);
     const db = await seededDb();
-    const ids: number[] = [];
-    for (let i = 0; i < 51; i++) ids.push(await meeting(db, i + 1, 1, `Call ${i}`, new Date(Date.parse('2026-09-01T06:00:00.000Z') + i * 86_400_000).toISOString()));
+    // One id lookup and one transaction for the 51, not one of each per meeting (slow on Postgres).
+    const sha = await seat(db, 1);
+    const ids = await db.tx(async (q) => {
+      const out: number[] = [];
+      for (let i = 0; i < 51; i++) out.push(await putMeeting(q, i + 1, sha, `Call ${i}`, new Date(Date.parse('2026-09-01T06:00:00.000Z') + i * 86_400_000).toISOString()));
+      return out;
+    });
     const d = (await clientDetail(db, 'SHA', NOW))!;
     expect(d.meetings).toHaveLength(50);
     expect(d.meetings[0]!.id).toBe(ids[50]);
