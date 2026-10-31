@@ -68,6 +68,16 @@ export class DbWork {
     await vi.advanceTimersByTimeAsync(Math.max(0, end - Date.now()));
     await this.quiet();
   }
+
+  /**
+   * A real pause of `ms`, then the timers due now fire, without moving the clock. For work that mixes real I/O (files)
+   * with fake timers due at once (setImmediate): it goes on, and nothing waiting on a later timer is let off early.
+   */
+  async settle(ms = 50): Promise<void> {
+    await new Promise((r) => realSetTimeout(r, ms));
+    await vi.advanceTimersByTimeAsync(0);
+    await this.quiet();
+  }
 }
 
 /**
