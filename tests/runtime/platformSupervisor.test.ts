@@ -148,4 +148,35 @@ describe('platformSupervisor (S4.5 Phase A)', () => {
     expect(ps.supervisor.state(customer)).toBe('stopped');
     expect(ps.hooks.aiKeys!(customer)).toBeNull();
   });
+
+  it('a key that will not open fails the start and leaves no setup-shell timer running (S5)', async () => {
+    // The shell's facts timer (60 s): each one made must be cleared once the start has failed.
+    const made = new Set<unknown>();
+    const cleared = new Set<unknown>();
+    const realSet = globalThis.setInterval;
+    const realClear = globalThis.clearInterval;
+    const set = vi.spyOn(globalThis, 'setInterval').mockImplementation(((fn: () => void, ms?: number) => {
+      const h = realSet(fn, ms);
+      if (ms === 60_000) made.add(h);
+      return h;
+    }) as typeof setInterval);
+    const clear = vi.spyOn(globalThis, 'clearInterval').mockImplementation(((h?: Parameters<typeof clearInterval>[0]) => {
+      cleared.add(h);
+      realClear(h);
+    }) as typeof clearInterval);
+    try {
+      const { ps, customer, customerDb } = await setup();
+      // A stored key its data key cannot open: wantsFull sees it configured, so the start loads it, and that throws.
+      await customerDb.run('INSERT INTO kv (k, v) VALUES (?, ?)', ['secret.anthropic', Buffer.from('not a sealed key').toString('base64')]);
+      await ps.start();
+      await ps.supervisor.settled();
+      expect(ps.supervisor.state(customer)).toBe('backoff');
+      expect(ps.hooks.aiKeys!(customer)).toBeNull();
+      expect(made.size).toBeGreaterThan(0);
+      expect([...made].filter((h) => !cleared.has(h))).toEqual([]);
+    } finally {
+      set.mockRestore();
+      clear.mockRestore();
+    }
+  });
 });

@@ -112,7 +112,16 @@ export function platformSupervisor(o: {
           tenantId: t.id, db, platform: o.platformDb, dataKey: () => tenantKeys.dataKey(t.id), keyTester, clock: o.clock, log,
         });
         keys.set(t.id, shell.aiKeys);
-        const aiKey = t.setupOnly ? null : await shell.aiKeys.load(); // the Supervisor asked wantsFull; a key that will not load stays a shell
+        let aiKey: string | null;
+        try {
+          aiKey = t.setupOnly ? null : await shell.aiKeys.load(); // the Supervisor asked wantsFull; a key that will not load stays a shell
+        } catch (e) {
+          // A key that will not open (or a Db error): the start fails and the Supervisor backs off. The shell's timer stops
+          // first, or every retry would leave one more running.
+          keys.delete(t.id);
+          await shell.stop();
+          throw e;
+        }
         if (!aiKey) {
           // Onboarding, or active without its own key yet: the setup shell only.
           return {
