@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ANTHROPIC_API_URL, isolatedClientOptions } from '../../src/brain/anthropicIsolated.ts';
+import { ANTHROPIC_API_URL, isolatedClientOptions, isolatedFetch } from '../../src/brain/anthropicIsolated.ts';
 
 // A customer's Anthropic client takes nothing from the founder's environment (review B). The real SDK, with a fake fetch:
 // nothing leaves this machine. Every key and value here is a placeholder.
@@ -62,6 +62,17 @@ describe('a customer’s Anthropic client (anthropicIsolated.ts)', () => {
     const client = new Anthropic({ ...isolatedClientOptions(CUSTOMER_KEY, net.fetch), maxRetries: 0 });
     await client.models.list({ limit: 1 }, { headers: { 'anthropic-beta': 'own-beta' } });
     expect(net.seen[0]!.headers.get('anthropic-beta')).toBe('own-beta');
+  });
+
+  it('its fetch alone (the second layer): drops any Authorization and puts the customer’s key last', async () => {
+    const net = network();
+    await isolatedFetch(CUSTOMER_KEY, net.fetch)('https://api.anthropic.com/v1/models', {
+      headers: { Authorization: 'Bearer founder-bearer-placeholder', 'X-Api-Key': 'sk-ant-founder-header-placeholder', 'X-Founder-Tag': 'founder-value' },
+    });
+    const { headers } = net.seen[0]!;
+    expect(headers.get('authorization')).toBeNull();
+    expect(headers.get('x-api-key')).toBe(CUSTOMER_KEY);
+    expect(headers.get('x-founder-tag')).toBeNull();
   });
 
   it('reads the environment at each request, not when the client is made', async () => {
