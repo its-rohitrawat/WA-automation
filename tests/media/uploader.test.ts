@@ -624,7 +624,8 @@ describe('DriveFileUploader', () => {
     let release!: () => void;
     drive.gate = new Promise<void>((r) => (release = r));
     const running = up.run();
-    await new Promise((r) => setTimeout(r, 20)); // the first upload reaches the gate (the candidates are read first)
+    // The first upload reaches the gate (the candidates are read first: on Postgres a round trip, of no fixed length).
+    await vi.waitFor(() => expect(drive.createFileCalls).toBe(1));
     let stopped = false;
     const stopping = up.stop(10_000).then(() => {
       stopped = true;
