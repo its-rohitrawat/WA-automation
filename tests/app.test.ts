@@ -149,11 +149,12 @@ function stopping(app: { stop(): Promise<void> }) {
   return { state, promise };
 }
 
-/** stop() ends with a final upload, and building the workbook runs on (fake) timers: advance until it resolves. */
+/**
+ * stop() ends with a final upload, and building the workbook runs on (fake) timers: advance until it resolves, then
+ * real waits (the database's own I/O) up to 8 s, under the test's 20 s timeout so a hang names itself.
+ */
 async function finish(stop: ReturnType<typeof stopping>): Promise<void> {
-  for (let i = 0; i < 30 && !stop.state.done; i++) await advance(1_000);
-  expect(stop.state.done).toBe(true);
-  await stop.promise;
+  await work.until(stop.promise, { fakeMs: 30_000, stepMs: 1_000, realCapMs: 8_000, label: 'app.stop()' });
 }
 
 const stopApp = (app: { stop(): Promise<void> }) => finish(stopping(app));
@@ -668,9 +669,8 @@ describe('app health and publishing', () => {
     expect(drive.created).toHaveLength(1);
 
     drive.failUpdateWith = Object.assign(new Error('Unauthorized'), { code: 401 });
-    const failed = app.publisher.publishNow();
-    await advance(1_000);
-    await failed;
+    // Fake time short of the 60 s backoff retry, so only this publish runs.
+    await work.until(app.publisher.publishNow(), { fakeMs: 10_000, stepMs: 1_000, realCapMs: 8_000, label: 'publishNow() with a 401' });
     expect(app.health.line()).toEqual({ ok: false, text: '❌ Google sign-in expired. Run: npm run cli -- google-auth, then restart the service' });
     expect((await readHealthSnapshot(db))!.publishFailingSince).not.toBeNull();
 
