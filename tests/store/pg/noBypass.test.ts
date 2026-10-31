@@ -40,6 +40,8 @@ const RULES: { name: string; re: RegExp }[] = [
   { name: 'opens a pg connection', re: /\.connect\(\s*\)|\b(?:pool|client|pg)\.connect\(/ },
   // Choosing the customer: only withTenant may set app.tenant_id.
   { name: 'calls set_config', re: /\bset_config\s*\(/i },
+  // The same by statement: SET [LOCAL | SESSION] app.tenant_id (its parts quoted too), or RESET app.tenant_id.
+  { name: 'sets app.tenant_id', re: /\b(?:SET(?:\s+LOCAL|\s+SESSION)?|RESET)\s+"?app"?\s*\.\s*"?tenant_id\b/i },
   // Changing role: a session as another role skips the grants (UPDATE people SET role = ? is not caught).
   { name: 'runs SET ROLE', re: /\bSET\s+(?:LOCAL\s+|SESSION\s+)?ROLE\b(?!\s*=)/i },
   // Turning row security off for a session.
@@ -68,6 +70,11 @@ describe('nothing reaches Postgres outside the engine (S2.8, static)', () => {
       'const c = await pool.connect();',
       'await c.connect();',
       "await db.run(\"SELECT set_config('app.tenant_id', $1, false)\");",
+      `await db.run("SET app.tenant_id = '00000000-0000-0000-0000-000000000000'");`,
+      `await db.run("SET LOCAL app.tenant_id TO '00000000-0000-0000-0000-000000000000'");`,
+      "await db.run(`SET SESSION app.tenant_id = '${other}'`);",
+      `await db.run('set "app"."tenant_id" = ?', [other]);`,
+      'await db.run("RESET app.tenant_id");',
       'await db.run("SET ROLE wa_owner");',
       'await db.run("SET LOCAL ROLE wa_owner");',
       'await db.run("SET row_security = off");',
@@ -75,6 +82,9 @@ describe('nothing reaches Postgres outside the engine (S2.8, static)', () => {
     for (const line of bad) expect(offences('somewhere/else.ts', line), line).not.toEqual([]);
     const fine = [
       "await db.run('UPDATE people SET role = ?, role_set_by = ? WHERE id = ?', []);",
+      // Reading the customer setting (the policies' current_setting) changes nothing.
+      "USING (tenant_id = current_setting('app.tenant_id', true)::uuid)",
+      "await db.run('UPDATE clients SET tenant_id_hint = ? WHERE id = ?', []);",
       'const client = net.connect(name);',
       "change('/dashboard/api/google/connect', (_ctx, o, body) => google.connect(o, body));",
       "// a comment may mention set_config, SET ROLE and .query( freely",
