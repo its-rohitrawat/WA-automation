@@ -48,6 +48,9 @@ export async function bootDashboard(o: {
   // A session change with its audit row, as the dashboard mounts it: the audit row in this Db, then the session's Db.
   o.mount(server.router, { guard, actions, sessions, audited: auditedWrite(o.db, sessionDb) });
   port = (await server.start()).port;
+  // Each test starts with only its own session, as with SQLite's fresh Db: on Postgres this file's earlier tests left
+  // theirs on the shared platform Db (this file's owner only: OWNER is unique per file there).
+  if (!onSqlite) await sessionDb.run('DELETE FROM web_sessions WHERE email = ?', [OWNER]);
   const { id, csrf } = await sessions.create(OWNER);
   const origin = `http://127.0.0.1:${port}`;
 
