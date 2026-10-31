@@ -6,12 +6,19 @@ import { buildWorkbook } from '../../src/output/workbook.ts';
 import type { Db } from '../../src/store/db.ts';
 import { advanceStage, finishMeeting, insertFound, type MeetingStatus } from '../../src/store/meetings.ts';
 import { addDecision } from '../../src/store/tasks.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { NOW, seeded } from '../helpers/db.ts';
 
 const now = new Date('2026-10-26T08:00:00Z');
 const healthy = { ok: true, text: '✅ Connected · waiting for new messages' };
 const HINT = 'On the office PC: npm run cli -- meeting list, then meeting assign <id> <CODE>';
+
+/** The clients' real ids in the test running now, set by seededDb() (on Postgres ids are shared by every customer). */
+let ids = { sharma: 0, mehta: 0 };
+async function seededDb(): Promise<Db> {
+  const s = await seeded();
+  ids = s.ids;
+  return s.db;
+}
 
 function summary(actionItems: number): MeetingSummary {
   return {
@@ -29,7 +36,7 @@ async function found(db: Db, o: { startedAt: string; status: MeetingStatus; titl
   return (await insertFound(db, {
     recording: `conferenceRecords/c/recordings/${o.startedAt}-${o.status}-${Math.random()}`, conference: 'conferenceRecords/c', driveFileId: 'file1',
     meetingCode: null, title: o.title ?? 'Sharma weekly', startedAt: o.startedAt, endedAt: null, attendees: [], participants: [],
-    clientId: o.clientId === undefined ? 1 : o.clientId, matchKind: o.clientId === null ? null : 'title', status: o.status,
+    clientId: o.clientId === undefined ? ids.sharma : o.clientId, matchKind: o.clientId === null ? null : 'title', status: o.status,
     driveSeconds: o.seconds === undefined ? 2820 : o.seconds, createdAt: NOW,
   }))!;
 }
@@ -71,7 +78,7 @@ describe('meetings in the view', () => {
     const a = await done(db, { startedAt: '2026-10-20T19:00:00.000Z', title: 'Kickoff', seconds: 3725, docFileId: 'docA', actionItems: 3 });
     const b = await done(db, { startedAt: '2026-10-22T06:00:00.000Z', title: 'Review', seconds: null, docFileId: 'docB', actionItems: 0 });
     await found(db, { startedAt: '2026-10-23T06:00:00.000Z', status: 'queued' });
-    await done(db, { startedAt: '2026-10-24T06:00:00.000Z', clientId: 2 });
+    await done(db, { startedAt: '2026-10-24T06:00:00.000Z', clientId: ids.mehta });
     expect((await sharma(db)).meetings).toEqual([
       { id: b, date: '2026-10-22', title: 'Review', seconds: null, docFileId: 'docB', actionItemCount: 0 },
       // 19:00 UTC on the 20th is 00:30 IST on the 21st.
@@ -92,7 +99,7 @@ describe('meetings in the view', () => {
     const db = await seededDb();
     await done(db, { startedAt: '2026-10-20T06:00:00.000Z' });
     const hidden = await done(db, { startedAt: '2026-10-22T06:00:00.000Z' });
-    rawOf(db).prepare("UPDATE meetings SET summary = '{not json' WHERE id = ?").run(hidden);
+    await db.run("UPDATE meetings SET summary = '{not json' WHERE id = ?", [hidden]);
     expect((await sharma(db)).meetings).toHaveLength(1);
     expect((await sharma(db)).lastMeeting).toBe('2026-10-20');
   });
@@ -235,7 +242,7 @@ describe('Meetings section on the client tab', () => {
   it('keeps the workbook readable when a meeting title holds characters XML does not allow', async () => {
     const db = await seededDb();
     const id = await done(db, { startedAt: '2026-10-22T06:00:00.000Z' });
-    rawOf(db).prepare('UPDATE meetings SET title = ? WHERE id = ?').run('Kick￾off\x01 call￿', id);
+    await db.run('UPDATE meetings SET title = ? WHERE id = ?', ['Kick￾off\x01 call￿', id]);
     const ws = (await book(db)).getWorksheet('Sharma Interiors')!;
     expect(ws.getRow(rowOf(ws, 'Meetings').number + 2).getCell(2).value).toBe('Kickoff call');
   });
@@ -246,9 +253,9 @@ describe('meeting decisions', () => {
     const db = await seededDb();
     const good = await done(db, { startedAt: '2026-10-22T06:00:00.000Z', docFileId: 'docGood' });
     const bad = await done(db, { startedAt: '2026-10-21T06:00:00.000Z', docFileId: 'bad id' });
-    await addDecision(db, { clientId: 1, text: 'Blue theme chosen', decidedOn: '2026-10-22', source: 'meeting', sourceWaId: null, meetingId: good }, NOW);
-    await addDecision(db, { clientId: 1, text: 'Launch on 1 Nov', decidedOn: '2026-10-21', source: 'meeting', sourceWaId: null, meetingId: bad }, NOW);
-    await addDecision(db, { clientId: 1, text: 'Logo approved', decidedOn: '2026-10-20', source: 'whatsapp', sourceWaId: 'm1' }, NOW);
+    await addDecision(db, { clientId: ids.sharma, text: 'Blue theme chosen', decidedOn: '2026-10-22', source: 'meeting', sourceWaId: null, meetingId: good }, NOW);
+    await addDecision(db, { clientId: ids.sharma, text: 'Launch on 1 Nov', decidedOn: '2026-10-21', source: 'meeting', sourceWaId: null, meetingId: bad }, NOW);
+    await addDecision(db, { clientId: ids.sharma, text: 'Logo approved', decidedOn: '2026-10-20', source: 'whatsapp', sourceWaId: 'm1' }, NOW);
     const ws = (await book(db)).getWorksheet('Sharma Interiors')!;
     const linked = rowWhere(ws, (r) => r.getCell(2).value === 'Blue theme chosen').getCell(3);
     expect(linked.value).toEqual({ text: 'Meeting', hyperlink: 'https://docs.google.com/document/d/docGood/edit' });
@@ -259,8 +266,8 @@ describe('meeting decisions', () => {
   it('puts the meeting’s Doc id on its decisions in the view', async () => {
     const db = await seededDb();
     const m = await done(db, { startedAt: '2026-10-22T06:00:00.000Z', docFileId: 'docGood' });
-    await addDecision(db, { clientId: 1, text: 'Blue theme chosen', decidedOn: '2026-10-22', source: 'meeting', sourceWaId: null, meetingId: m }, NOW);
-    await addDecision(db, { clientId: 1, text: 'Logo approved', decidedOn: '2026-10-20', source: 'whatsapp', sourceWaId: 'm1' }, NOW);
+    await addDecision(db, { clientId: ids.sharma, text: 'Blue theme chosen', decidedOn: '2026-10-22', source: 'meeting', sourceWaId: null, meetingId: m }, NOW);
+    await addDecision(db, { clientId: ids.sharma, text: 'Logo approved', decidedOn: '2026-10-20', source: 'whatsapp', sourceWaId: 'm1' }, NOW);
     expect((await sharma(db)).decisions.map((d) => [d.text, d.docFileId])).toEqual([['Blue theme chosen', 'docGood'], ['Logo approved', null]]);
   });
 });

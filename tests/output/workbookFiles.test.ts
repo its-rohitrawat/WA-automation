@@ -4,40 +4,49 @@ import { MAX_FILE_NAME_CHARS, sanitizeFileName } from '../../src/media/paths.ts'
 import { loadTrackerView } from '../../src/output/view.ts';
 import { buildWorkbook, fileRowHeight } from '../../src/output/workbook.ts';
 import type { Db } from '../../src/store/db.ts';
+import type { Sql } from '../../src/store/engine/types.ts';
 import { CLIENT_FILES_LIMIT, finishMedia, insertMedia, listClientFiles, markUploaded, messageRowId, type MediaKind, type MediaStatus } from '../../src/store/media.ts';
 import { applyRevoke, insertMessage } from '../../src/store/messages.ts';
 import { setRole, upsertPerson } from '../../src/store/people.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
+import { NOW, row, seeded } from '../helpers/db.ts';
 import { RAHUL_PN, SHARMA_PN } from '../helpers/wa.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const FOUNDER = '919800000099@s.whatsapp.net';
 
+/** The clients' real ids in the test running now, set by seed() (on Postgres ids are shared by every customer). */
+let ids = { sharma: 0, mehta: 0 };
+/** The seeded image's media id: its shown name ends in it (image-…-<id>.jpg). */
+let imgId = 0;
+const imgName = () => `image-2026-10-16-1130-${imgId}.jpg`;
+
 async function file(
-  db: Db,
+  db: Sql,
   o: {
     waId: string; jid: string; name: string; kind: MediaKind; fileName: string | null; mimeType: string; ts: string;
     status?: MediaStatus; errorCode?: string | null; forwarded?: boolean; fromMe?: boolean; seconds?: number | null;
   },
 ): Promise<number> {
-  await insertMessage(db, { waId: o.waId, clientId: 1, senderJid: o.jid, senderNumber: null, senderName: o.name, fromMe: o.fromMe ?? false, ts: o.ts, text: null, quotedWaId: null, mediaType: o.kind });
+  await insertMessage(db, { waId: o.waId, clientId: ids.sharma, senderJid: o.jid, senderNumber: null, senderName: o.name, fromMe: o.fromMe ?? false, ts: o.ts, text: null, quotedWaId: null, mediaType: o.kind });
   return insertMedia(db, {
-    messageId: (await messageRowId(db, 1, o.waId))!, clientId: 1, kind: o.kind, status: o.status ?? 'pending', mimeType: o.mimeType, fileName: o.fileName, fileSize: 24_576,
+    messageId: (await messageRowId(db, ids.sharma, o.waId))!, clientId: ids.sharma, kind: o.kind, status: o.status ?? 'pending', mimeType: o.mimeType, fileName: o.fileName, fileSize: 24_576,
     seconds: o.seconds ?? null, forwarded: o.forwarded ?? false, refEnc: null, errorCode: o.errorCode ?? null, createdAt: NOW,
   });
 }
 
 async function seed(): Promise<Db> {
-  const db = await seededDb();
-  await upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
-  await setRole(db, 1, SHARMA_PN, 'client', 'human');
-  await upsertPerson(db, { clientId: 1, jid: RAHUL_PN, number: '919800000002', name: 'Rahul', fromMe: false });
-  await setRole(db, 1, RAHUL_PN, 'team', 'human');
+  const s = await seeded();
+  const db = s.db;
+  ids = s.ids;
+  await upsertPerson(db, { clientId: ids.sharma, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
+  await setRole(db, ids.sharma, SHARMA_PN, 'client', 'human');
+  await upsertPerson(db, { clientId: ids.sharma, jid: RAHUL_PN, number: '919800000002', name: 'Rahul', fromMe: false });
+  await setRole(db, ids.sharma, RAHUL_PN, 'team', 'human');
   // The message carries the sender's own WhatsApp name; the workbook shows the name in People instead.
   const pdf = await file(db, { waId: 'D1', jid: SHARMA_PN, name: 'Sharma ji', kind: 'document', fileName: 'brief.pdf', mimeType: 'application/pdf', ts: '2026-10-15T06:00:00.000Z' });
   await finishMedia(db, pdf, { textKind: 'extract', text: 'Homepage brief\nHero banner with the new logo', pageCount: 3, note: null, at: NOW });
   await markUploaded(db, pdf, 'drivefile123');
   const img = await file(db, { waId: 'I1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'image', fileName: null, mimeType: 'image/jpeg', ts: '2026-10-16T06:00:00.000Z' });
+  imgId = img;
   await finishMedia(db, img, { textKind: 'description', text: 'A payment receipt. Visible text: Paid ₹42,000', pageCount: null, note: null, at: NOW });
   await file(db, { waId: 'T1', jid: RAHUL_PN, name: 'Rahul', kind: 'document', fileName: 'team-only.pdf', mimeType: 'application/pdf', ts: '2026-10-17T06:00:00.000Z' });
   await file(db, { waId: 'F1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: '=HYPERLINK("http://evil")', mimeType: 'application/pdf', ts: '2026-10-14T06:00:00.000Z' });
@@ -62,12 +71,12 @@ function rowWhere(ws: ExcelJS.Worksheet, pred: (r: ExcelJS.Row) => boolean): Exc
   return found;
 }
 
-const mediaIdOf = (db: Db, waId: string): number =>
-  (rawOf(db).prepare('SELECT m.id FROM media m JOIN messages msg ON msg.id = m.message_id WHERE msg.wa_id = ?').get(waId) as { id: number }).id;
+const mediaIdOf = async (db: Db, waId: string): Promise<number> =>
+  (await row<{ id: number }>(db, 'SELECT m.id FROM media m JOIN messages msg ON msg.id = m.message_id WHERE msg.wa_id = ?', [waId]))!.id;
 
 /** Gives a file that await seed() already finished another text. finishMedia finishes a file only once, so this writes the row directly. */
-const replaceText = (db: Db, waId: string, text: string): void => {
-  rawOf(db).prepare('UPDATE media SET text = ? WHERE id = ?').run(text, mediaIdOf(db, waId));
+const replaceText = async (db: Db, waId: string, text: string): Promise<void> => {
+  await db.run('UPDATE media SET text = ? WHERE id = ?', [text, await mediaIdOf(db, waId)]);
 };
 
 const sharmaFiles = async (db: Db) => (await loadTrackerView(db, now, healthy)).clients.find((c) => c.client.code === 'SHA')!.files;
@@ -75,7 +84,7 @@ const sharmaFiles = async (db: Db) => (await loadTrackerView(db, now, healthy)).
 describe('Files received', () => {
   it('lists files from client members only, newest first, with a description and Drive id', async () => {
     expect(await sharmaFiles(await seed())).toEqual([
-      { date: '2026-10-16', sentBy: 'Mr. Sharma', name: 'image-2026-10-16-1130-2.jpg', description: 'A payment receipt. Visible text: Paid ₹42,000', driveFileId: null },
+      { date: '2026-10-16', sentBy: 'Mr. Sharma', name: imgName(), description: 'A payment receipt. Visible text: Paid ₹42,000', driveFileId: null },
       { date: '2026-10-15', sentBy: 'Mr. Sharma', name: 'brief.pdf', description: 'PDF, 3 pages: Homepage brief Hero banner with the new logo', driveFileId: 'drivefile123' },
       { date: '2026-10-14', sentBy: 'Mr. Sharma', name: '=HYPERLINK(_http___evil_)', description: 'PDF, being read', driveFileId: null },
     ]);
@@ -114,11 +123,13 @@ describe('Files received', () => {
 
   it('sets each file row tall enough for its wrapped name and description, since merged cells do not auto-fit', async () => {
     const db = await seed();
-    replaceText(db, 'D1', 'word '.repeat(80));
+    await replaceText(db, 'D1', 'word '.repeat(80));
     const ws = await sheet(db, 'Sharma Interiors');
     const header = rowWhere(ws, (r) => r.getCell(1).value === 'Files received').number + 1;
-    // image-2026-10-16-1130-2.jpg and =HYPERLINK(_http___evil_) wrap to 3 lines in column C; the long description to 2 lines.
-    expect([1, 2, 3].map((i) => ws.getRow(header + i).height)).toEqual([45, 30, 45]);
+    // =HYPERLINK(_http___evil_) wraps to 3 lines in column C, and the long description to 2. The image's name ends in its
+    // id, so its height is worked out (3 lines on SQLite, where the id is 2).
+    const img = fileRowHeight({ sentBy: 'Mr. Sharma', name: imgName(), description: 'A payment receipt. Visible text: Paid ₹42,000' });
+    expect([1, 2, 3].map((i) => ws.getRow(header + i).height)).toEqual([img, 30, 45]);
   });
 
   describe('fileRowHeight (D4)', () => {
@@ -176,7 +187,7 @@ describe('Files received', () => {
 
   it('does not link a Drive id that is not a plain id', async () => {
     const db = await seed();
-    await markUploaded(db, mediaIdOf(db, 'F1'), 'abc/../evil?x=1');
+    await markUploaded(db, await mediaIdOf(db, 'F1'), 'abc/../evil?x=1');
     const ws = await sheet(db, 'Sharma Interiors');
     expect(rowWhere(ws, (r) => r.getCell(3).value === '=HYPERLINK(_http___evil_)').getCell(13).value).toBeNull();
   });
@@ -189,7 +200,7 @@ describe('Files received', () => {
 
   it('keeps a file deleted for everyone in the list, with (deleted by sender) and no Drive link (amendment 14b, D3)', async () => {
     const db = await seed();
-    await applyRevoke(db, 1, 'D1');
+    await applyRevoke(db, ids.sharma, 'D1');
     expect((await sharmaFiles(db)).find((f) => f.name === 'brief.pdf')).toEqual({
       date: '2026-10-15', sentBy: 'Mr. Sharma', name: 'brief.pdf', description: '(deleted by sender)', driveFileId: null,
     });
@@ -198,13 +209,13 @@ describe('Files received', () => {
 
   it('does not link or describe an uploaded file that was then deleted for everyone, but still links other uploaded files (D3)', async () => {
     const db = await seed();
-    await markUploaded(db, mediaIdOf(db, 'I1'), 'driveimage456');
-    await applyRevoke(db, 1, 'D1');
+    await markUploaded(db, await mediaIdOf(db, 'I1'), 'driveimage456');
+    await applyRevoke(db, ids.sharma, 'D1');
     const ws = await sheet(db, 'Sharma Interiors');
     const deleted = rowWhere(ws, (r) => r.getCell(3).value === 'brief.pdf');
     expect(deleted.getCell(4).value).toBe('(deleted by sender)');
     expect(deleted.getCell(13).value).toBeNull();
-    const kept = rowWhere(ws, (r) => r.getCell(3).value === 'image-2026-10-16-1130-2.jpg');
+    const kept = rowWhere(ws, (r) => r.getCell(3).value === imgName());
     expect(kept.getCell(13).value).toMatchObject({ text: 'Open', hyperlink: 'https://drive.google.com/file/d/driveimage456/view' });
     // Nothing in the tab points at the deleted file's Drive copy or shows what it said.
     const texts: string[] = [];
@@ -245,9 +256,9 @@ describe('Files received', () => {
 
   it('never lists view-once media, the founder’s own files, stickers, voice notes or audio, but lists videos', async () => {
     const db = await seed();
-    await upsertPerson(db, { clientId: 1, jid: FOUNDER, number: '919800000099', name: 'Founder', fromMe: true });
+    await upsertPerson(db, { clientId: ids.sharma, jid: FOUNDER, number: '919800000099', name: 'Founder', fromMe: true });
     // Even if the founder's own number is marked client, what the founder sent is never listed.
-    await setRole(db, 1, FOUNDER, 'client', 'human');
+    await setRole(db, ids.sharma, FOUNDER, 'client', 'human');
     await file(db, { waId: 'VO1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'image', fileName: null, mimeType: 'image/jpeg', ts: '2026-10-18T06:00:00.000Z', status: 'metadata', errorCode: 'view_once' });
     await file(db, { waId: 'ME1', jid: FOUNDER, name: 'Founder', kind: 'document', fileName: 'mine.pdf', mimeType: 'application/pdf', ts: '2026-10-18T06:00:00.000Z', fromMe: true });
     await file(db, { waId: 'ST1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'sticker', fileName: null, mimeType: 'image/webp', ts: '2026-10-18T06:00:00.000Z', status: 'metadata' });
@@ -255,20 +266,20 @@ describe('Files received', () => {
     await file(db, { waId: 'AU1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'audio', fileName: 'song.mp3', mimeType: 'audio/mpeg', ts: '2026-10-18T06:00:00.000Z' });
     const video = await file(db, { waId: 'VI1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'video', fileName: null, mimeType: 'video/mp4', ts: '2026-10-18T07:00:00.000Z', status: 'metadata', seconds: 42 });
     const files = await sharmaFiles(db);
-    expect(files.map((f) => f.name)).toEqual([`video-2026-10-18-1230-${video}.mp4`, 'image-2026-10-16-1130-2.jpg', 'brief.pdf', '=HYPERLINK(_http___evil_)']);
+    expect(files.map((f) => f.name)).toEqual([`video-2026-10-18-1230-${video}.mp4`, imgName(), 'brief.pdf', '=HYPERLINK(_http___evil_)']);
     expect(files[0]!.description).toBe('Video, 0:42 (not downloaded)');
   });
 
   it('uses a person’s role in the file’s own client only', async () => {
     const db = await seed();
     // Rahul is team in Sharma but a client in Mehta; Mr. Sharma is a client in both.
-    await upsertPerson(db, { clientId: 2, jid: RAHUL_PN, number: '919800000002', name: 'Rahul', fromMe: false });
-    await setRole(db, 2, RAHUL_PN, 'client', 'human');
-    await upsertPerson(db, { clientId: 2, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
-    await setRole(db, 2, SHARMA_PN, 'client', 'human');
+    await upsertPerson(db, { clientId: ids.mehta, jid: RAHUL_PN, number: '919800000002', name: 'Rahul', fromMe: false });
+    await setRole(db, ids.mehta, RAHUL_PN, 'client', 'human');
+    await upsertPerson(db, { clientId: ids.mehta, jid: SHARMA_PN, number: '919800000001', name: 'Mr. Sharma', fromMe: false });
+    await setRole(db, ids.mehta, SHARMA_PN, 'client', 'human');
     const files = await sharmaFiles(db);
     expect(files.some((f) => f.name === 'team-only.pdf')).toBe(false);
-    expect(files.map((f) => f.name)).toEqual(['image-2026-10-16-1130-2.jpg', 'brief.pdf', '=HYPERLINK(_http___evil_)']);
+    expect(files.map((f) => f.name)).toEqual([imgName(), 'brief.pdf', '=HYPERLINK(_http___evil_)']);
   });
 
   it('lists files sent at the same moment with the later one first', async () => {
@@ -282,10 +293,13 @@ describe('Files received', () => {
 
   it('shows at most the newest CLIENT_FILES_LIMIT files in the client tab', async () => {
     const db = await seed();
-    for (let i = 0; i < CLIENT_FILES_LIMIT - 2; i++) {
-      const ts = new Date(Date.UTC(2026, 9, 18, 0, 0, i)).toISOString();
-      await file(db, { waId: `N${i}`, jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: `n${i}.pdf`, mimeType: 'application/pdf', ts });
-    }
+    // One transaction: on Postgres each statement is a round trip, and these are hundreds.
+    await db.tx(async (q) => {
+      for (let i = 0; i < CLIENT_FILES_LIMIT - 2; i++) {
+        const ts = new Date(Date.UTC(2026, 9, 18, 0, 0, i)).toISOString();
+        await file(q, { waId: `N${i}`, jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: `n${i}.pdf`, mimeType: 'application/pdf', ts });
+      }
+    });
     const files = await sharmaFiles(db);
     expect(files).toHaveLength(CLIENT_FILES_LIMIT);
     expect(files.at(-1)!.name).toBe('brief.pdf');
@@ -294,25 +308,25 @@ describe('Files received', () => {
   it('includes earlier files of someone who becomes a client', async () => {
     const db = await seed();
     expect((await sharmaFiles(db)).some((f) => f.name === 'team-only.pdf')).toBe(false);
-    await setRole(db, 1, RAHUL_PN, 'client', 'human');
+    await setRole(db, ids.sharma, RAHUL_PN, 'client', 'human');
     expect((await sharmaFiles(db))[0]).toMatchObject({ name: 'team-only.pdf', sentBy: 'Rahul', description: 'PDF, being read' });
   });
 
   it('reads only the start of a long text from the store', async () => {
     const db = await seed();
-    replaceText(db, 'D1', 'z'.repeat(5_000));
-    const row = (await listClientFiles(db, 1)).find((f) => f.fileName === 'brief.pdf')!;
+    await replaceText(db, 'D1', 'z'.repeat(5_000));
+    const row = (await listClientFiles(db, ids.sharma)).find((f) => f.fileName === 'brief.pdf')!;
     expect(row.textStart).toBe('z'.repeat(400));
     expect(row.revoked).toBe(false);
   });
 
   it('limits the list to the newest files', async () => {
-    expect((await listClientFiles(await seed(), 1, 2)).map((f) => f.fileName)).toEqual([null, 'brief.pdf']);
+    expect((await listClientFiles(await seed(), ids.sharma, 2)).map((f) => f.fileName)).toEqual([null, 'brief.pdf']);
   });
 
   it('keeps the workbook readable when a file name, file text or sender name holds characters XML does not allow', async () => {
     const db = await seed();
-    await upsertPerson(db, { clientId: 1, jid: SHARMA_PN, number: null, name: 'Mr.\uFFFF Sharma', fromMe: false });
+    await upsertPerson(db, { clientId: ids.sharma, jid: SHARMA_PN, number: null, name: 'Mr.\uFFFF Sharma', fromMe: false });
     const id = await file(db, { waId: 'X1', jid: SHARMA_PN, name: 'Mr. Sharma', kind: 'document', fileName: 'a\uFFFF.pdf', mimeType: 'application/pdf', ts: '2026-10-18T06:00:00.000Z' });
     await finishMedia(db, id, { textKind: 'extract', text: 'Paid\uFFFE amount \u202E000,24', pageCount: 1, note: null, at: NOW });
     const wb = new ExcelJS.Workbook();

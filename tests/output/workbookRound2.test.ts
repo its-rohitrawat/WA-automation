@@ -4,14 +4,21 @@ import type { ClientConfig } from '../../src/config/groups.ts';
 import { loadTrackerView } from '../../src/output/view.ts';
 import { buildWorkbook } from '../../src/output/workbook.ts';
 import { setPhase, setStatus, syncClients } from '../../src/store/clients.ts';
-import { openDb } from '../../src/store/db.ts';
+import type { Db } from '../../src/store/db.ts';
 import { upsertPerson } from '../../src/store/people.ts';
 import { addDecision, createTask, logReminder, setTaskStatus, type NewTask } from '../../src/store/tasks.ts';
-import { NOW, seededDb, SHARMA } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { NOW, seeded, SHARMA, testDb } from '../helpers/db.ts';
+
+/** Sharma's real id in the test running now, set by seededDb() (on Postgres ids are shared by every customer). */
+let sharma = 0;
+async function seededDb(): Promise<Db> {
+  const s = await seeded();
+  sharma = s.ids.sharma;
+  return s.db;
+}
 
 const task = (o: Partial<NewTask> = {}): NewTask => ({
-  clientId: 1, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'major', assignedTo: 'Rahul', askedBy: 'Mr. Sharma',
+  clientId: sharma, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'major', assignedTo: 'Rahul', askedBy: 'Mr. Sharma',
   raisedOn: '2026-10-10', deadline: '2026-10-18', latestProgress: null, sourceQuote: 'banner thoda bright karo', sourceDate: '2026-10-10',
   sourceWaId: 'm1', origin: 'whatsapp', ...o,
 });
@@ -19,7 +26,7 @@ const task = (o: Partial<NewTask> = {}): NewTask => ({
 const healthy = { ok: true, text: 'ok' };
 const now = new Date('2026-10-19T08:00:00Z');
 
-async function build(db: Awaited<ReturnType<typeof seededDb>>): Promise<ExcelJS.Workbook> {
+async function build(db: Db): Promise<ExcelJS.Workbook> {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load((await buildWorkbook(await loadTrackerView(db, now, healthy))) as unknown as ExcelJS.Buffer);
   return wb;
@@ -84,13 +91,13 @@ describe('workbook round 2', () => {
   });
 
   it('orders clients by name case-insensitively', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     await syncClients(db, [cfg(1, 'zeta'), cfg(2, 'Alpha'), cfg(3, 'beta')]);
     expect((await loadTrackerView(db, now, healthy)).clients.map((c) => c.client.name)).toEqual(['Alpha', 'beta', 'zeta']);
   });
 
   it('keeps sheet-name suffixes stable by client id', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     await syncClients(db, [cfg(1, 'Acme'), cfg(2, 'acme')]);
     const names = async () => Object.fromEntries((await loadTrackerView(db, now, healthy)).clients.map((c) => [c.client.code, c.sheetName]));
     expect(await names()).toEqual({ C01: 'Acme', C02: 'acme (2)' });
@@ -99,7 +106,7 @@ describe('workbook round 2', () => {
   });
 
   it('builds with awkward client names', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     await syncClients(db, [cfg(1, 'History'), cfg(2, "Sharma & Sons Interior Design' Studio"), cfg(3, `${'a'.repeat(30)}😀`)]);
     const wb = await build(db);
     expect(wb.worksheets).toHaveLength(5);
@@ -107,7 +114,7 @@ describe('workbook round 2', () => {
   });
 
   it('builds with a backslash in a client name', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     await syncClients(db, [cfg(1, 'Sharma\\Mehta Designs')]);
     const wb = await build(db);
     expect(wb.worksheets.map((w) => w.name)).toEqual(['Today', 'Overview', 'Sharma Mehta Designs']);
@@ -115,7 +122,10 @@ describe('workbook round 2', () => {
 
   it('breaks ties by creation order, not by text of the code', async () => {
     const db = await seededDb();
-    for (let i = 0; i < 1000; i++) await createTask(db, task({ title: `t${i}`, deadline: null }), NOW);
+    // One transaction: on Postgres each statement is a round trip, and these are a thousand.
+    await db.tx(async (q) => {
+      for (let i = 0; i < 1000; i++) await createTask(q, task({ title: `t${i}`, deadline: null }), NOW);
+    });
     const codes = (await loadTrackerView(db, now, healthy)).clients.find((c) => c.client.code === 'SHA')!.usOpen.map((t) => t.code);
     expect(codes[998]).toBe('SHA-999');
     expect(codes[999]).toBe('SHA-1000');
@@ -125,7 +135,7 @@ describe('workbook round 2', () => {
     const db = await seededDb();
     const a = await createTask(db, task({ title: 'no quote', sourceQuote: null, sourceDate: null, sourceWaId: 'r1' }), NOW);
     const b = await createTask(db, task({ title: 'with quote', sourceWaId: 'r2' }), NOW);
-    rawOf(db).prepare('UPDATE tasks SET source_revoked = 1 WHERE id IN (?, ?)').run(a.id, b.id);
+    await db.run('UPDATE tasks SET source_revoked = 1 WHERE id IN (?, ?)', [a.id, b.id]);
     const ws = (await build(db)).getWorksheet('Sharma Interiors')!;
     expect(findByCell(ws, 1, 'SHA-001').getCell(13).value).toBe('source message deleted by sender');
     expect(findByCell(ws, 1, 'SHA-002').getCell(13).value).toBe('"banner thoda bright karo" (10 Oct) (source message deleted by sender)');
@@ -134,9 +144,9 @@ describe('workbook round 2', () => {
   it('renders milestones, decisions and people', async () => {
     const db = await seededDb();
     await logReminder(db, (await createTask(db, task(), NOW)).id, '2026-10-13', NOW);
-    await setPhase(db, 1, 'Design', 'human');
-    await addDecision(db, { clientId: 1, text: 'Use the blue theme', decidedOn: '2026-10-12', source: 'whatsapp', sourceWaId: null }, NOW);
-    await upsertPerson(db, { clientId: 1, jid: '9199@s.whatsapp.net', number: '9199', name: 'Mr. Sharma', fromMe: false });
+    await setPhase(db, sharma, 'Design', 'human');
+    await addDecision(db, { clientId: sharma, text: 'Use the blue theme', decidedOn: '2026-10-12', source: 'whatsapp', sourceWaId: null }, NOW);
+    await upsertPerson(db, { clientId: sharma, jid: '9199@s.whatsapp.net', number: '9199', name: 'Mr. Sharma', fromMe: false });
     const ws = (await build(db)).getWorksheet('Sharma Interiors')!;
     expect(findByCell(ws, 1, 'Discovery').getCell(2).value).toBe('✅ Done');
     expect(findByCell(ws, 1, 'Design').getCell(2).value).toBe('🔄 Current');
@@ -149,7 +159,7 @@ describe('workbook round 2', () => {
   });
 
   it('builds an Overview with only the header when there are no clients', async () => {
-    const wb = await build(openDb(':memory:'));
+    const wb = await build(await testDb());
     expect(wb.worksheets.map((w) => w.name)).toEqual(['Today', 'Overview']);
     expect(wb.getWorksheet('Overview')!.getCell('A3').value).toBe('Client');
     expect(wb.getWorksheet('Overview')!.getCell('A4').value).toBeNull();
@@ -157,9 +167,9 @@ describe('workbook round 2', () => {
 
   it('keeps decisions, status text and people as text, never formulas', async () => {
     const db = await seededDb();
-    await addDecision(db, { clientId: 1, text: '=1+1', decidedOn: '2026-10-12', source: 'whatsapp', sourceWaId: null }, NOW);
-    await setStatus(db, 1, '=SUM(1,2)', NOW);
-    await upsertPerson(db, { clientId: 1, jid: 'j1', number: null, name: '+cmd', fromMe: false });
+    await addDecision(db, { clientId: sharma, text: '=1+1', decidedOn: '2026-10-12', source: 'whatsapp', sourceWaId: null }, NOW);
+    await setStatus(db, sharma, '=SUM(1,2)', NOW);
+    await upsertPerson(db, { clientId: sharma, jid: 'j1', number: null, name: '+cmd', fromMe: false });
     const wb = await build(db);
     const ws = wb.getWorksheet('Sharma Interiors')!;
     for (const [col, v] of [[2, '=1+1'], [2, '=SUM(1,2)'], [1, '+cmd']] as const) {

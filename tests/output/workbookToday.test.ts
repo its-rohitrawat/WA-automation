@@ -5,12 +5,20 @@ import { loadTrackerView } from '../../src/output/view.ts';
 import { buildWorkbook } from '../../src/output/workbook.ts';
 import { MAX_TITLE_CHARS } from '../../src/report/morningReport.ts';
 import { syncClients } from '../../src/store/clients.ts';
-import { openDb, type Db } from '../../src/store/db.ts';
+import type { Db } from '../../src/store/db.ts';
 import { createTask, setTaskStatus, type NewTask } from '../../src/store/tasks.ts';
-import { MEHTA, NOW, seededDb, SHARMA } from '../helpers/db.ts';
+import { MEHTA, NOW, seeded, SHARMA, testDb } from '../helpers/db.ts';
+
+/** The clients' real ids in the test running now, set by seededDb() (on Postgres ids are shared by every customer). */
+let ids = { sharma: 0, mehta: 0 };
+async function seededDb(): Promise<Db> {
+  const s = await seeded();
+  ids = s.ids;
+  return s.db;
+}
 
 const task = (o: Partial<NewTask> = {}): NewTask => ({
-  clientId: 1, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'medium', assignedTo: 'Rahul', askedBy: 'Mr. Sharma',
+  clientId: ids.sharma, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'medium', assignedTo: 'Rahul', askedBy: 'Mr. Sharma',
   raisedOn: '2026-10-10', deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp', ...o,
 });
 
@@ -50,7 +58,7 @@ async function fixture(): Promise<Db> {
   await setTaskStatus(db, done.id, 'done', '2026-10-15', NOW, 'ai');
   const maybe = await createTask(db, task({ title: 'Contact form' }), NOW);
   await setTaskStatus(db, maybe.id, 'maybe_done', '2026-10-15', NOW, 'ai');
-  await createTask(db, task({ clientId: 2, title: 'Menu photos', priority: 'low' }), NOW);
+  await createTask(db, task({ clientId: ids.mehta, title: 'Menu photos', priority: 'low' }), NOW);
   return db;
 }
 
@@ -116,7 +124,7 @@ describe('Today tab', () => {
 
   it('shows a client with no open tasks with zero counts and no task rows', async () => {
     const db = await seededDb();
-    const t = await createTask(db, task({ clientId: 2 }), NOW);
+    const t = await createTask(db, task({ clientId: ids.mehta }), NOW);
     await setTaskStatus(db, t.id, 'done', '2026-10-15', NOW, 'ai');
     expect(body(await today(db))).toEqual([
       ['Mehta Foods', 0, 0, '', '', '', '', ''],
@@ -126,7 +134,7 @@ describe('Today tab', () => {
   });
 
   it('shows (none) and zero totals when there is no active client', async () => {
-    const wb = await build(openDb(':memory:'));
+    const wb = await build(await testDb());
     expect(wb.worksheets.map((w) => w.name)).toEqual(['Today', 'Overview']);
     const ws = wb.getWorksheet('Today')!;
     expect(ws.getCell('A2').value).toBe('Client');
@@ -170,7 +178,7 @@ describe('Today tab', () => {
   });
 
   it('a client named Today gets its own tab next to the Today tab', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     const named = (name: string, code: string): ClientConfig => ({ ...MEHTA, groupId: `${code}@g.us`, name, code });
     await syncClients(db, [named('Today', 'TOD')]);
     const wb = await build(db);

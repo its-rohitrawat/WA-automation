@@ -5,26 +5,24 @@ import { buildWorkbook } from '../../src/output/workbook.ts';
 import { syncClients, setStatus } from '../../src/store/clients.ts';
 import { upsertPerson } from '../../src/store/people.ts';
 import { addDecision, createTask, logReminder, setTaskStatus, type NewTask } from '../../src/store/tasks.ts';
-import { openDb } from '../../src/store/db.ts';
-import type { ClientConfig } from '../../src/config/groups.ts';
-import { MEHTA, NOW, seededDb, SHARMA } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { MEHTA, NOW, seeded, SHARMA } from '../helpers/db.ts';
 
-const task = (o: Partial<NewTask> = {}): NewTask => ({
-  clientId: 1, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'major', assignedTo: 'Rahul', askedBy: 'Mr. Sharma',
+/** A task for Sharma (her real id: on Postgres ids are shared by every customer, so never 1). */
+const task = (clientId: number, o: Partial<NewTask> = {}): NewTask => ({
+  clientId, side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'major', assignedTo: 'Rahul', askedBy: 'Mr. Sharma',
   raisedOn: '2026-10-10', deadline: '2026-10-18', latestProgress: 'v2 shared 15 Oct', sourceQuote: 'banner thoda bright karo', sourceDate: '2026-10-10',
   sourceWaId: 'm1', origin: 'whatsapp', ...o,
 });
 
 async function fixture() {
-  const db = await seededDb();
-  const a = await createTask(db, task(), NOW);
+  const { db, ids } = await seeded();
+  const a = await createTask(db, task(ids.sharma), NOW);
   await logReminder(db, a.id, '2026-10-13', NOW);
   await logReminder(db, a.id, '2026-10-17', NOW);
-  await createTask(db, task({ side: 'client', title: 'Send logo files', category: 'content', deadline: '2026-10-22' }), NOW);
-  const done = await createTask(db, task({ title: 'Share moodboard', deadline: null }), NOW);
+  await createTask(db, task(ids.sharma, { side: 'client', title: 'Send logo files', category: 'content', deadline: '2026-10-22' }), NOW);
+  const done = await createTask(db, task(ids.sharma, { title: 'Share moodboard', deadline: null }), NOW);
   await setTaskStatus(db, done.id, 'done', '2026-10-15', NOW, 'ai');
-  await setStatus(db, 1, 'Homepage approved, building inner pages', NOW);
+  await setStatus(db, ids.sharma, 'Homepage approved, building inner pages', NOW);
   return db;
 }
 
@@ -97,8 +95,8 @@ describe('buildWorkbook', () => {
 
   it('appends Priority level and Sentiment after every existing column, the old Priority kept in D', async () => {
     const db = await fixture();
-    rawOf(db).prepare("UPDATE tasks SET priority_level = 'critical', priority_source = 'keyword', sentiment = 'frustrated' WHERE code = 'SHA-001'").run();
-    rawOf(db).prepare("UPDATE tasks SET priority_level = NULL, sentiment = 'positive' WHERE code = 'SHA-002'").run();
+    await db.run("UPDATE tasks SET priority_level = 'critical', priority_source = 'keyword', sentiment = 'frustrated' WHERE code = 'SHA-001'");
+    await db.run("UPDATE tasks SET priority_level = NULL, sentiment = 'positive' WHERE code = 'SHA-002'");
     const sheet = async () => (await load(await buildWorkbook(await loadTrackerView(db, now, healthy)))).getWorksheet('Sharma Interiors')!;
     const headerAbove = (ws: ExcelJS.Worksheet, title: string) => (ws.getRow(findRow(ws, title).number + 1).values as unknown[]).slice(1);
     let ws = await sheet();
@@ -108,7 +106,7 @@ describe('buildWorkbook', () => {
     expect([4, 14, 15].map((c) => findRow(ws, 'SHA-001').getCell(c).value)).toEqual(['High', 'Critical', '']);
     expect([4, 14, 15].map((c) => findRow(ws, 'SHA-002').getCell(c).value)).toEqual(['High', '—', '']);
     expect([14, 15, 16].map((c) => findRow(ws, 'SHA-003').getCell(c).value)).toEqual([new Date(Date.UTC(2026, 9, 15)), 'Major', '']);
-    rawOf(db).prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', ?, 'o')").run(NOW);
+    await db.run("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', ?, 'o')", [NOW]);
     ws = await sheet();
     expect(findRow(ws, 'SHA-001').getCell(15).value).toBe('Frustrated');
     expect(findRow(ws, 'SHA-002').getCell(15).value).toBe('Positive');
@@ -123,8 +121,8 @@ describe('buildWorkbook', () => {
   });
 
   it('keeps chat-derived text as plain strings, never formulas', async () => {
-    const db = await seededDb();
-    await createTask(db, task({ title: '=1+1', latestProgress: '+cmd', sourceQuote: '=HYPERLINK("http://x")' }), NOW);
+    const { db, ids } = await seeded();
+    await createTask(db, task(ids.sharma, { title: '=1+1', latestProgress: '+cmd', sourceQuote: '=HYPERLINK("http://x")' }), NOW);
     const ws = (await load(await buildWorkbook(await loadTrackerView(db, now, healthy)))).getWorksheet('Sharma Interiors')!;
     const row = findRow(ws, 'SHA-001');
     const cell = row.getCell(2);

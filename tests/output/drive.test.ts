@@ -2,6 +2,7 @@ import { Writable } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DriveAuthError, DrivePublisher } from '../../src/output/drive.ts';
 import { TRACKER_ID_KEY, TRACKER_NEW_FILE_KEY } from '../../src/output/trackerKey.ts';
+import { openDb } from '../../src/store/db.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
 import { createLogger, silentLogger } from '../../src/util/logger.ts';
 import { seededDb } from '../helpers/db.ts';
@@ -13,8 +14,13 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function setup(build: () => Promise<Buffer> = vi.fn(async () => Buffer.from('xlsx-bytes')), log = silentLogger()) {
-  const db = await seededDb();
+/**
+ * timing: a test on fake timers. Those cannot wait for Postgres's real network round trips, so they get an in-memory
+ * SQLite store on both runs: what they check is the publisher's throttle, backoff and flush, and its SQL (two kv rows)
+ * is checked on Postgres by the tests on real timers.
+ */
+async function setup(build: () => Promise<Buffer> = vi.fn(async () => Buffer.from('xlsx-bytes')), log = silentLogger(), timing = false) {
+  const db = timing ? openDb(':memory:') : await seededDb();
   const drive = new FakeDrive();
   publisher = new DrivePublisher({ db, api: drive, build, log, minIntervalMs: 60_000 });
   return { db, drive, build, p: publisher };
@@ -52,7 +58,7 @@ describe('DrivePublisher', () => {
 
   it('publishes at most once a minute, with one trailing run', async () => {
     vi.useFakeTimers();
-    const { build, p } = await setup();
+    const { build, p } = await setup(undefined, undefined, true);
     p.schedule();
     await vi.advanceTimersByTimeAsync(0);
     expect(build).toHaveBeenCalledTimes(1);
@@ -67,7 +73,7 @@ describe('DrivePublisher', () => {
 
   it('backs off after a failure and then recovers', async () => {
     vi.useFakeTimers();
-    const { drive, p } = await setup();
+    const { drive, p } = await setup(undefined, undefined, true);
     drive.failNext = 1;
     p.schedule();
     await vi.advanceTimersByTimeAsync(0);
@@ -112,7 +118,7 @@ describe('DrivePublisher', () => {
       stamps.push(Date.now());
       throw new Error('x');
     });
-    const { p } = await setup(build);
+    const { p } = await setup(build, undefined, true);
     await p.publishNow();
     await vi.advanceTimersByTimeAsync(60_000 + 120_000 + 240_000 + 480_000 + 900_000 + 900_000);
     const gaps = stamps.slice(1).map((t, i) => t - stamps[i]!);
@@ -121,7 +127,7 @@ describe('DrivePublisher', () => {
 
   it('schedule() during a run gives exactly one follow-up run', async () => {
     vi.useFakeTimers();
-    const { drive, p } = await setup();
+    const { drive, p } = await setup(undefined, undefined, true);
     let release!: () => void;
     drive.gate = new Promise<void>((r) => (release = r));
     p.schedule();
@@ -217,7 +223,7 @@ describe('DrivePublisher', () => {
 
   it('stop() with a hung run resolves at its timeout and leaves no timers', async () => {
     vi.useFakeTimers();
-    const { drive, p } = await setup();
+    const { drive, p } = await setup(undefined, undefined, true);
     drive.gate = new Promise<void>(() => {});
     void p.publishNow();
     await vi.advanceTimersByTimeAsync(0);
@@ -233,7 +239,7 @@ describe('DrivePublisher', () => {
   describe('flush()', () => {
     it('waits for the upload in flight, then makes exactly one more for changes that arrived meanwhile', async () => {
       vi.useFakeTimers();
-      const { drive, build, p } = await setup();
+      const { drive, build, p } = await setup(undefined, undefined, true);
       let release!: () => void;
       drive.gate = new Promise<void>((r) => (release = r));
       p.schedule();
@@ -255,7 +261,7 @@ describe('DrivePublisher', () => {
 
     it('runs a scheduled publish at once instead of waiting for the throttle', async () => {
       vi.useFakeTimers();
-      const { drive, p } = await setup();
+      const { drive, p } = await setup(undefined, undefined, true);
       await p.publishNow();
       p.schedule(); // throttled: would wait 60 s
       expect(vi.getTimerCount()).toBe(1);
@@ -266,7 +272,7 @@ describe('DrivePublisher', () => {
 
     it('uploads nothing more when nothing is pending or scheduled', async () => {
       vi.useFakeTimers();
-      const { drive, p } = await setup();
+      const { drive, p } = await setup(undefined, undefined, true);
       await p.publishNow();
       await p.flush(10_000);
       expect(drive.uploads).toBe(1);
@@ -282,7 +288,7 @@ describe('DrivePublisher', () => {
         await held;
         throw new Error('x');
       });
-      const { drive, p } = await setup(build);
+      const { drive, p } = await setup(build, undefined, true);
       p.schedule();
       await vi.advanceTimersByTimeAsync(0); // the failing run is in flight
       let done = false;
@@ -297,7 +303,7 @@ describe('DrivePublisher', () => {
 
     it('resolves at its timeout when the upload hangs, and leaves no timers', async () => {
       vi.useFakeTimers();
-      const { drive, p } = await setup();
+      const { drive, p } = await setup(undefined, undefined, true);
       drive.gate = new Promise<void>(() => {});
       p.schedule();
       await vi.advanceTimersByTimeAsync(0);
@@ -313,7 +319,7 @@ describe('DrivePublisher', () => {
 
     it('blocks new runs afterwards, like stop()', async () => {
       vi.useFakeTimers();
-      const { build, p } = await setup();
+      const { build, p } = await setup(undefined, undefined, true);
       await p.flush(10_000);
       p.schedule();
       await p.publishNow();
