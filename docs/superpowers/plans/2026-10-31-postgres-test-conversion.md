@@ -5,10 +5,10 @@ test:pg runs and a read-only sweep of tests/ at fb20231.
 
 The test suite used to run on SQLite only. `npm run test:pg` now runs it against a real Postgres 17 in Docker, using the
 same roles and migrations as the Mac. Converting the tests (real client ids, no raw SQLite handle, the platform tables
-on the platform role) found ten real bugs in the agent's own SQL or code. Each one would have broken something on
-Postgres that SQLite let through.
+on the platform role) found real bugs in the agent's own SQL or code: twelve so far. Each one would have broken
+something on Postgres that SQLite let through.
 
-## The ten real bugs
+## The real bugs
 
 The fix commits are on feat/saas-s1. A "scan" is a test that reads every file in src/ and fails if the pattern comes
 back.
@@ -25,6 +25,8 @@ back.
 | 8 | Health snapshots were written behind each change, unordered: on a pool an older one could land last, and `cli status` showed stale health. | 1949523 | tests/health/persistOrder.test.ts |
 | 9 | The spend guard's refresh replaced its total with the database's, dropping bookings not yet written: spend under-counted, so the daily cap could be passed. | 7d79023 | tests/spend/neverUnder.test.ts (with a real open transaction) |
 | 10 | Two sign-ups from one invite at once: the loser hit the users table's unique email and got a 500, not "link already used". | 1400e0b (lane C) | tests/platform/invites.test.ts (the race, a refusal never uses the invite, a failed step gives the claim back) |
+| 11 | The CLI (connectAndIngest) and a relinked service closed the database before the messages already taken were stored: on Postgres the last ones were lost without a word, and the printed count was wrong. | 2ec726a | tests/cli/commands.test.ts ("stores and counts a message still being written when the wait ends, before the database closes"), tests/wa/switchableGateway.test.ts ("idle() waits for what the old gateway was storing…") |
+| 12 | A relink dropped events: those still queued on the gateway it detached, and the new gateway's events from before the swap. | in progress (lane A) | to follow |
 
 **The numbering** (confirmed by the coordinator, 31 Oct). The commits label bugs 1 and 4 to 10. Bugs 2 and 3 are the
 IS NULL and MAX/MIN fixes, in the order they were found. json_valid is counted with bug 1: its fix is in the same
