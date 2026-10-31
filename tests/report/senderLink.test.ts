@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AuthenticationState } from 'baileys';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { onSqlite } from '../helpers/db.ts';
 import { senderSessionDbPath } from '../../src/config/paths.ts';
 import { LinkingSender, spareLinkDriver, SPARE_LINK_MESSAGES, type SenderScheduler, type SpareLinkDeps } from '../../src/report/senderLink.ts';
 import type { ReportSender } from '../../src/report/types.ts';
@@ -103,7 +104,9 @@ function sessions(scripts: Script[], over: Partial<SpareLinkDeps> = {}, timeoutM
   return { s, sockets, audits, lines };
 }
 
-describe('spare phone link', () => {
+// SQLite only (S2.7): the spare phone's session file, data/sender-session.db (Postgres keeps it as wa_auth rows;
+// the customer's spare link on Postgres is tests/web/customerLink.test.ts).
+describe.runIf(onSqlite)('spare phone link', () => {
   it('links without a running report: the new session is saved and the file closed', async () => {
     await linkedBefore();
     const t = sessions(scan(NEW_SPARE));

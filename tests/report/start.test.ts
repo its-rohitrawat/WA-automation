@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DestinationStream } from 'pino';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { onSqlite } from '../helpers/db.ts';
 import { parseEnv, reportSettings } from '../../src/config/env.ts';
 import { senderSessionDbPath, sessionDbPath } from '../../src/config/paths.ts';
 import { openMorningReport, senderOpener } from '../../src/report/start.ts';
@@ -52,7 +53,9 @@ function expectNoNumber(out: string): void {
   for (let i = 0; i + 5 <= RECIPIENT.length; i++) expect(out).not.toContain(RECIPIENT.slice(i, i + 5));
 }
 
-describe('openMorningReport (service start, REPORT_ENABLED)', () => {
+// SQLite only (S2.7): the spare phone's session file, data/sender-session.db (Postgres keeps it as wa_auth rows:
+// tests/wa/authStatePg.test.ts). Its source checks run on SQLite too.
+describe.runIf(onSqlite)('openMorningReport (service start, REPORT_ENABLED)', () => {
   it('opens data/sender-session.db only, logs the last 4 digits of the recipient, and connects nothing yet', async () => {
     const dir = tempDir();
     const r = await start(dir, randomBytes(32));
@@ -213,7 +216,8 @@ describe('openMorningReport (service start, REPORT_ENABLED)', () => {
   });
 });
 
-describe('senderOpener (dashboard settings, D5 Task 1)', () => {
+// SQLite only (S2.7): it opens the spare phone's session file, as above.
+describe.runIf(onSqlite)('senderOpener (dashboard settings, D5 Task 1)', () => {
   it('opens a sender for the given number, not the .env one, and close() closes its session file', async () => {
     const dir = tempDir();
     const env = parseEnv({ DATA_DIR: dir, REPORT_RECIPIENT: RECIPIENT });
