@@ -95,7 +95,7 @@ const unwrapped = new WeakMap<Db, Db>();
  */
 let settled: () => Promise<void> = async () => {};
 
-async function setup(o: { ai?: FakeAi; drive?: FakeDrive; log?: Logger; drainMs?: number } = {}) {
+async function setup(o: { ai?: FakeAi; drive?: FakeDrive; log?: Logger; drainMs?: number; pollMs?: number } = {}) {
   const ai = o.ai ?? new FakeAi();
   const drive = o.drive ?? new FakeDrive();
   const plain = await seededDb();
@@ -120,7 +120,7 @@ async function setup(o: { ai?: FakeAi; drive?: FakeDrive; log?: Logger; drainMs?
   };
   const app = await createApp({
     db, clock: systemClock, log: o.log ?? silentLogger(), gateway, allow, ai, drive, prices: P, spendCapUsd: 15,
-    quietMs: 240_000, maxWaitMs: 1_200_000, maxConcurrent: 3, dataDir: '.', freeBytes: () => 500e9, pollMs: 30_000,
+    quietMs: 240_000, maxWaitMs: 1_200_000, maxConcurrent: 3, dataDir: '.', freeBytes: () => 500e9, pollMs: o.pollMs ?? 30_000,
     drainMs: o.drainMs,
   });
   app.start();
@@ -599,7 +599,10 @@ describe('app health and publishing', () => {
 
   it('a run that waits for a shared file calls no AI and publishes nothing, and goes ahead once the file stops blocking (12d)', async () => {
     const run = vi.spyOn(Reconciler.prototype, 'run');
-    const { db, ai, drive, app, sock } = await setup();
+    // A tick every 240 s, not 30 s: the 40 minutes below take 10 ticks, not 80 (each one database work, slow on
+    // Postgres). The points the test relies on are not the tick's: the run at 240 s is the quiet timer's, and the file's
+    // 30 minutes are its own; the first tick after them (1,920 s) re-runs the message, well inside the 40 minutes.
+    const { db, ai, drive, app, sock } = await setup({ pollMs: 240_000 });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'see this')] });
     await settled();
     // A file of this message is still being read (the media queue is wired in Task 15).
