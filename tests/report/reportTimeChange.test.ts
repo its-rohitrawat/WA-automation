@@ -9,9 +9,8 @@ import { setKv } from '../../src/store/kv.ts';
 import { reportFor } from '../../src/store/reports.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
-import { seededDb } from '../helpers/db.ts';
+import { rows, seededDb } from '../helpers/db.ts';
 import { FakeReportSender } from '../helpers/fakeReportSender.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 // The owner sets the briefing's send time from the dashboard (29 Oct 2026). The scheduler reads it through the settings
 // store on every tick, so it applies without a restart; a time that has already passed today starts tomorrow. The
@@ -123,7 +122,7 @@ describe('the briefing send time set from the dashboard', () => {
     expect(t.store().reportSettings().time).toBe('09:00');
     await t.setTime(THU, '08:10', '08:45'); // ahead again: today goes at 08:45, and the kept time is gone
     expect(t.store().reportSettings().time).toBe('08:45');
-    expect(rawOf(t.db).prepare("SELECT k FROM settings WHERE k = 'reportTimeToday'").all()).toEqual([]);
+    expect(await rows(t.db, "SELECT k FROM settings WHERE k = 'reportTimeToday'")).toEqual([]);
     await t.tick(THU, '08:45');
     await t.tick(THU, '09:00');
     expect(t.sender.calls).toHaveLength(1);
@@ -142,7 +141,7 @@ describe('the briefing send time set from the dashboard', () => {
       expect((e as ControlError).status).toBe(422);
       expect((e as ControlError).field).toBe('reportTime');
     }
-    expect(rawOf(t.db).prepare('SELECT k FROM settings').all()).toEqual([]);
+    expect(await rows(t.db, 'SELECT k FROM settings')).toEqual([]);
     expect(t.audits).toEqual([]);
   });
 
