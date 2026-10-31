@@ -5,9 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parseGroupsFile, type ClientConfig } from '../../src/config/groups.ts';
 import { applyGroupChanges, GroupChangeError, type FileOps } from '../../src/config/groupsWriter.ts';
 import { syncClients } from '../../src/store/clients.ts';
-import { openDb } from '../../src/store/db.ts';
-import { MEHTA as MEHTA_HELPER, SHARMA as SHARMA_HELPER } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { MEHTA as MEHTA_HELPER, SHARMA as SHARMA_HELPER, testDb } from '../helpers/db.ts';
 
 // The shared test helpers use the example group id for Sharma, which the parser refuses on purpose; these tests write
 // real files, so they use their own ids.
@@ -16,9 +14,9 @@ const MEHTA: ClientConfig = { ...MEHTA_HELPER, groupId: '120363777000000002@g.us
 const DESAI = '120363777000000003@g.us';
 const PATEL = '120363777000000004@g.us';
 
-/** In-memory DB with Sharma (id 1) and Mehta (id 2) under this file's ids. */
+/** A database on the engine under test with Sharma and Mehta under this file's ids. */
 async function seededDb() {
-  const db = openDb(':memory:');
+  const db = await testDb();
   await syncClients(db, [SHARMA, MEHTA]);
   return db;
 }
@@ -310,7 +308,7 @@ describe('applyGroupChanges', () => {
 
 async function openFreshDb() {
   const db = await seededDb();
-  rawOf(db).exec('DELETE FROM clients');
+  await db.run('DELETE FROM clients');
   return db;
 }
 

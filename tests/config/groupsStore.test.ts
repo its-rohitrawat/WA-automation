@@ -7,9 +7,10 @@ import { loadGroupsFile, type ClientConfig } from '../../src/config/groups.ts';
 import { dbGroupsStore, fileGroupsStore, GROUPS_KV_KEY } from '../../src/config/groupsStore.ts';
 import { applyGroupChanges, GroupChangeError } from '../../src/config/groupsWriter.ts';
 import { listClients, syncClients } from '../../src/store/clients.ts';
-import { openDb, type Db } from '../../src/store/db.ts';
+import type { Db } from '../../src/store/db.ts';
 import { getKv } from '../../src/store/kv.ts';
 import { createLogger } from '../../src/util/logger.ts';
+import { testDb } from '../helpers/db.ts';
 
 // A customer's allow-list in their own database (Phase B), under the founder file's own rules. Real-looking group ids:
 // the parser refuses the example one.
@@ -23,8 +24,8 @@ function capture() {
 }
 
 /** A customer: their own database, a store whose onChange reloads their clients as the runtime does (syncClients). */
-function customer(onChange?: (db: Db, c: ClientConfig[]) => unknown) {
-  const db = openDb(':memory:');
+async function customer(onChange?: (db: Db, c: ClientConfig[]) => unknown) {
+  const db = await testDb();
   const { lines, log } = capture();
   const reloads: ClientConfig[][] = [];
   const store = dbGroupsStore({
@@ -41,7 +42,7 @@ const activeCodes = async (db: Db) => (await listClients(db)).map((c) => `${c.co
 
 describe('dbGroupsStore: a customer’s allow-list in their own database', () => {
   it('keeps the list in the customer’s kv and touches no file: the store has no file access at all', async () => {
-    const { db, store } = customer();
+    const { db, store } = await customer();
     expect(await store.list()).toEqual([]);
     await store.apply(approve(SHARMA, 'Sharma Interiors', 'SHA'));
     expect(JSON.parse((await getKv(db, GROUPS_KV_KEY))!)).toEqual({ clients: [{ groupId: SHARMA, name: 'Sharma Interiors', code: 'SHA' }] });
@@ -51,8 +52,8 @@ describe('dbGroupsStore: a customer’s allow-list in their own database', () =>
   });
 
   it('two customers’ approvals stay apart: the same group and code in both, each only in its own list and clients', async () => {
-    const a = customer();
-    const b = customer();
+    const a = await customer();
+    const b = await customer();
     await a.store.apply(approve(SHARMA, 'Sharma Interiors', 'SHA'));
     expect(await b.store.list()).toEqual([]);
     expect(await activeCodes(b.db)).toEqual([]);
@@ -66,7 +67,7 @@ describe('dbGroupsStore: a customer’s allow-list in their own database', () =>
   });
 
   it('the founder file’s rules: a code is permanent, a code in use is refused, a name is required; nothing is saved', async () => {
-    const { db, store, reloads } = customer();
+    const { db, store, reloads } = await customer();
     await store.apply(approve(SHARMA, 'Sharma Interiors', 'SHA'));
     await store.apply({ unapprove: [SHARMA] }); // its clients row stays, with code SHA
     const before = await getKv(db, GROUPS_KV_KEY);
@@ -85,7 +86,7 @@ describe('dbGroupsStore: a customer’s allow-list in their own database', () =>
 
   it('onChange runs after the change has committed, with the new list; a change to nothing writes nothing and tells no one', async () => {
     const seen: (string | undefined)[] = [];
-    const { db, store, reloads } = customer(async (d, c) => {
+    const { db, store, reloads } = await customer(async (d, c) => {
       seen.push(await getKv(d, GROUPS_KV_KEY)); // the outer handle: inside the transaction this would throw
       await syncClients(d, c);
     });
@@ -99,7 +100,7 @@ describe('dbGroupsStore: a customer’s allow-list in their own database', () =>
   });
 
   it('a reload that fails keeps the change, logs only its type, warns, and the next start syncs the clients from the list', async () => {
-    const { db, store, lines } = customer(() => {
+    const { db, store, lines } = await customer(() => {
       throw new TypeError(`could not reload Sharma Interiors in ${SHARMA}`);
     });
     const r = await store.apply(approve(SHARMA, 'Sharma Interiors', 'SHA'));
@@ -118,7 +119,7 @@ describe('dbGroupsStore: a customer’s allow-list in their own database', () =>
   });
 
   it('changes run one at a time: of two at once, the second is checked against the first', async () => {
-    const { store } = customer();
+    const { store } = await customer();
     const [first, second] = await Promise.all([
       store.apply(approve(SHARMA, 'Sharma Interiors', 'SHA')),
       store.apply(approve(MEHTA, 'Mehta Foods', 'SHA')).catch((e: unknown) => e),
@@ -140,7 +141,7 @@ describe('fileGroupsStore: the founder’s file, as before', () => {
     const original = `${JSON.stringify({ clients: [{ groupId: MEHTA, name: 'Mehta Foods', code: 'MEH', emailDomains: ['mehtafoods.in'] }] }, null, 2)}\n`;
     const [viaStore, viaWriter] = [join(dir, 'a.json'), join(dir, 'b.json')];
     for (const f of [viaStore, viaWriter]) writeFileSync(f, original);
-    const [dbA, dbB] = [openDb(':memory:'), openDb(':memory:')];
+    const [dbA, dbB] = [await testDb(), await testDb()];
     const store = fileGroupsStore(viaStore, { db: dbA });
     const r1 = await store.apply(approve(SHARMA, 'Sharma Interiors', 'SHA'));
     const r2 = await applyGroupChanges(viaWriter, approve(SHARMA, 'Sharma Interiors', 'SHA'), { db: dbB });
