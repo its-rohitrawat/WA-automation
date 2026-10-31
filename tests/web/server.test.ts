@@ -806,7 +806,9 @@ describe('startDashboard', () => {
     const c = capture();
     const web = await startDashboard({ env: dashEnv(0), db, platformDb, log: c.log, control: {}, clock, google: fakeGoogle });
     servers.push(web!);
-    expect(await sessionCount(platformDb)).toBe(0);
+    // The purge at start is not awaited (server.ts purgeSessions): on Postgres it is a real round trip, still running
+    // when startDashboard returns. An expired session is refused on lookup either way (sessions.ts get()).
+    await vi.waitFor(async () => expect(await sessionCount(platformDb)).toBe(0), { timeout: 2_000 });
     const port = web!.address()!.port;
     const r = await fetch(`http://127.0.0.1:${port}/dashboard/auth/login`, { redirect: 'manual' });
     expect(r.status).toBe(302);
