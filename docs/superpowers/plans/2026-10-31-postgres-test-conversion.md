@@ -83,8 +83,13 @@ In flight elsewhere, and left out of the sweep: tests/appMedia.test.ts and tests
 | The full SQLite run, at d876363 | the whole suite under npm test | | 4,760 passed, 19 skipped, 0 failed | |
 | Full test:pg rehearsal, at ab93431 | the whole suite | 8 failed in 4 files, all fixed in the tests | | 292.9 s |
 | First final full test:pg, at 446a75f | the whole suite | 4 failed in 3 files: they found bug 13 and two test races | | 158.8 s |
-| **Final full test:pg, at 3e3a9e4** | the whole suite | 240 passed, 11 skipped (251) | 4,603 passed, 1 expected fail, 178 skipped, 0 failed (4,782) | 178.2 s |
-| **Final full SQLite run, at 3e3a9e4** | the whole suite under npm test | 250 passed, 1 skipped (251) | 4,762 passed, 1 expected fail, 19 skipped, 0 failed (4,782) | 78.5 s |
+| Full test:pg before the final review, at 3e3a9e4 | the whole suite | 240 passed, 11 skipped (251) | 4,603 passed, 1 expected fail, 178 skipped, 0 failed (4,782) | 178.2 s |
+| Full SQLite run before the final review, at 3e3a9e4 | the whole suite under npm test | 250 passed, 1 skipped (251) | 4,762 passed, 1 expected fail, 19 skipped, 0 failed (4,782) | 78.5 s |
+| Full test:pg, at e478e25 | the whole suite | 1 failed: tests/cli/db.test.ts's fake connection did not answer the new access-rules check, fixed in the test (d274850) | | |
+| Full SQLite run, at d274850 | the whole suite under npm test | (254) | 4,793 passed, 1 expected fail, 29 skipped, 0 failed (4,823) | 103.2 s |
+| Full test:pg, at d274850 | the whole suite | 1 failed: a timing race in tests/appMedia.test.ts, fixed in the test (911aecc) | | |
+| **Final full test:pg, at 911aecc** | the whole suite | (254) | 4,644 passed, 1 expected fail, 178 skipped, 0 failed (4,823) | 212.2 s |
+| **Final full SQLite run, at 911aecc** | the whole suite under npm test | 253 passed, 1 skipped (254) | 4,793 passed, 1 expected fail, 29 skipped, 0 failed (4,823) | 104.4 s |
 
 The expected fail is tests/helpers/advance.test.ts's proof that a loop whose test timed out stops with its named
 error.
@@ -107,3 +112,34 @@ The rule they follow:
 - fixtures in one transaction;
 - a labelled `until()` cap under the test's own timeout, so a slow or hung stage names itself;
 - never a raised `testTimeout`.
+
+## Final review (31 Oct evening)
+
+Three read-only reviews of feat/saas-s1 before the merge proposal. Every fix below is on feat/saas-s1.
+
+**Review A, merge safety while the Mac stays on SQLite: all clear.**
+- No SQLite migration runs: src/store/migrations.ts is unchanged.
+- Nothing reaches Postgres while DB_ENGINE is unset. The platform and sending stay off.
+- `npm ci` adds only pure-JavaScript packages (pg), with no install scripts.
+- A revert works without restoring the backup.
+
+Two owner checks just before the merge:
+- Stop the service and back up data/ (docs/GO-LIVE.md part 1).
+- Make sure none of DATABASE_URL, DATABASE_PLATFORM_URL or DATABASE_OWNER_URL is set on the Mac. The agent refuses to start with one that does not point at the Mac itself.
+
+**Review B, security: no blockers.** Its should-fix items, and two more found while fixing them:
+
+| Item | Fix | Commits |
+|---|---|---|
+| S1, S2 | openStore and db-migrate check the live access rules; P5 takes sequence SELECT from wa_app. | 0c294e6 |
+| S3 | A customer's sign-out is audited in its own workspace's log, never the founder's. | 5cd3372, fe9d517 |
+| S4 | A customer's lowered daily Claude limit applies to the next call, with no restart. | e1bcb7b |
+| S5 | A customer start whose key will not open leaves no timer running. | 32e81d2 |
+| S6 | An active customer can connect its own Google. Without the state key, no customer connect is signed: it is refused (fails closed). | 47abbe8 |
+| S7 | tests/store/pg/noBypass.test.ts also catches SET and RESET of app.tenant_id outside the engine. | 2108363 |
+| Also | A customer's Claude clients take nothing from the founder's ANTHROPIC_* settings (base URL, bearer token, custom headers). | 5dc0238, bd4081b |
+| Also | The invite claim also checks the token it was read with; a new link or a cancel is audited only when it changed a row. | 43ad0a6 |
+
+**Review C, the copy tool: sound.**
+- Go-live guide fixes: 251e9a6 and e478e25.
+- tests/migrate/copyPg.test.ts now carries the platform tables made on SQLite onto a fresh Postgres (93ca0bf).
