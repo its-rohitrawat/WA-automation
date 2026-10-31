@@ -373,6 +373,7 @@ describe('Reconciler', () => {
     const { db, r, spend } = await setup([{ output: { ops: [] }, costUsd: 0.05, fallbackUsed: true }]);
     await store(db, 'm1', 'hello');
     await r.run(sharma);
+    await spend.flushed(); // the booking's row is written after the run (settle without a transaction handle)
     const rows = await db.all<{ usd: number; detail: string }>('SELECT usd, detail FROM spend');
     expect(rows).toHaveLength(1);
     expect(rows[0]!.usd).toBeCloseTo(0.05, 9);
