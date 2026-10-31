@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { Writable } from 'node:stream';
 import { proto, WAMessageStubType, type WAMessageUpdate } from 'baileys';
 import ExcelJS from 'exceljs';
+import type { Db, Sql } from '../src/store/db.ts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.ts';
 import { MAX_OUTPUT_TOKENS } from '../src/brain/claudeClient.ts';
@@ -17,11 +18,10 @@ import { AllowList } from '../src/wa/allowlist.ts';
 import { openSessionDb, useEncryptedAuthState } from '../src/wa/authState.ts';
 import { WhatsAppGateway } from '../src/wa/gateway.ts';
 import { FakeAi, op } from './helpers/ai.ts';
-import { MEHTA, OTHER_GROUP, seededDb, SHARMA } from './helpers/db.ts';
+import { idOf, MEHTA, OTHER_GROUP, row, rows, seededDb, SHARMA } from './helpers/db.ts';
 import { FakeDrive } from './helpers/fakeDrive.ts';
 import { closeWith, FakeSocket, SEND_METHODS } from './helpers/fakeSocket.ts';
 import { waText } from './helpers/wa.ts';
-import { rawOf } from '../src/store/engine/sqlite.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
 
@@ -39,6 +39,23 @@ class CapturingDrive extends FakeDrive {
     await super.updateFile(id, mime, body);
     this.last = body;
   }
+}
+
+/**
+ * From now on a message cannot be stored: its INSERT fails through the Db, on either engine (a full disk, a lost
+ * connection). Ingest stores inside a transaction, so its handle fails the same way.
+ */
+function failStoring(db: Db, message: string): void {
+  const fails = (sql: string) => /INSERT INTO messages/.test(sql);
+  const failing = (q: Sql): Sql => ({
+    get: (s, p) => q.get(s, p), all: (s, p) => q.all(s, p), exec: (s) => q.exec(s),
+    run: (s, p) => (fails(s) ? Promise.reject(new Error(message)) : q.run(s, p)),
+    tx: (fn) => q.tx((inner) => fn(failing(inner))),
+  });
+  const run = db.run.bind(db);
+  const tx = db.tx.bind(db);
+  vi.spyOn(db, 'run').mockImplementation((s, p) => (fails(s) ? Promise.reject(new Error(message)) : run(s, p)));
+  vi.spyOn(db, 'tx').mockImplementation(((fn: (q: Sql) => Promise<unknown>) => tx((q) => fn(failing(q)))) as Db['tx']);
 }
 
 function capturingLogger() {
@@ -158,14 +175,14 @@ describe('app end to end', () => {
       waText('p1', 'personal chat', { group: '919811111111@s.whatsapp.net' }),
     ] });
     await settled();
-    expect(rawOf(db).prepare('SELECT wa_id FROM messages').all()).toEqual([{ wa_id: 'm1' }]);
+    expect(await rows(db, 'SELECT wa_id FROM messages')).toEqual([{ wa_id: 'm1' }]);
 
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls).toHaveLength(1);
     expect(ai.calls[0]!.user).toContain('banner thoda bright');
     expect(ai.calls[0]!.user).not.toContain('private family plans');
     expect(ai.calls[0]!.user).not.toContain('personal chat');
-    expect((await listTasks(db, 1)).map((t) => t.code)).toEqual(['SHA-001']);
+    expect((await listTasks(db, await idOf(db, 'SHA'))).map((t) => t.code)).toEqual(['SHA-001']);
 
     await vi.advanceTimersByTimeAsync(60_000);
     expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']);
@@ -184,7 +201,7 @@ describe('app end to end', () => {
     await app.reloadClients([SHARMA]);
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
     await settled();
-    expect(rawOf(db).prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 0 });
+    expect(await row(db, "SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'")).toEqual({ n: 0 });
     await stopApp(app);
   });
 
@@ -222,13 +239,13 @@ describe('app shutdown', () => {
     const stop = stopping(app);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(stop.state.done).toBe(false);
-    expect(await listTasks(db, 1)).toEqual([]);
+    expect(await listTasks(db, await idOf(db, 'SHA'))).toEqual([]);
     expect(sock.end).not.toHaveBeenCalled(); // WhatsApp stays connected during the drain
 
     release();
     await finish(stop);
-    expect((await listTasks(db, 1)).map((t) => t.code)).toEqual(['SHA-001']);
-    expect(rawOf(db).prepare('SELECT COUNT(*) AS n FROM messages WHERE processed_at IS NULL').get()).toEqual({ n: 0 });
+    expect((await listTasks(db, await idOf(db, 'SHA'))).map((t) => t.code)).toEqual(['SHA-001']);
+    expect(await row(db, 'SELECT COUNT(*) AS n FROM messages WHERE processed_at IS NULL')).toEqual({ n: 0 });
     expect(sock.end).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -279,7 +296,7 @@ describe('app shutdown', () => {
     const stop = stopping(app);
     aiCall.resolve();
     await vi.advanceTimersByTimeAsync(1_000); // the drain applies the paid result
-    expect((await listTasks(db, 1)).map((t) => t.code)).toEqual(['SHA-001']);
+    expect((await listTasks(db, await idOf(db, 'SHA'))).map((t) => t.code)).toEqual(['SHA-001']);
     expect(drive.uploads).toBe(1);
     drive.gate = undefined;
     upload.resolve();
@@ -413,7 +430,7 @@ describe('app allow-list changes', () => {
     const { db, ai, app, sock } = await setup();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
     await settled();
-    expect(rawOf(db).prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 1 });
+    expect(await row(db, "SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'")).toEqual({ n: 1 });
 
     await app.reloadClients([SHARMA]);
     await vi.advanceTimersByTimeAsync(1_300_000);
@@ -478,7 +495,7 @@ describe('app allow-list changes', () => {
     await expect(app.reloadClients([SHARMA, { ...MEHTA, code: 'MEX' }])).rejects.toThrow(/codes are permanent/);
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
     await settled();
-    expect(rawOf(db).prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 1 });
+    expect(await row(db, "SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'")).toEqual({ n: 1 });
     await stopApp(app);
   });
 
@@ -508,19 +525,19 @@ describe('app ingest failures', () => {
   it('logs a failed database write without the chat text and still counts it', async () => {
     const { lines, log } = capturingLogger();
     const { db, app, sock, gateway } = await setup({ log });
-    rawOf(db).exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store: banner thoda bright'); END");
+    failStoring(db, 'cannot store: banner thoda bright');
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
     await settled();
 
     expect(gateway.failedCount()).toBe(1);
-    expect(lines.find((l) => l.msg === 'ingest failed')).toMatchObject({ err: { type: 'SqliteError' } });
+    expect(lines.find((l) => l.msg === 'ingest failed')).toMatchObject({ err: { type: 'Error' } });
     expect(JSON.stringify(lines)).not.toContain('thoda bright');
     await stopApp(app);
   });
 
   it('records the count of unsaved messages on the next tick and warns in health', async () => {
     const { db, app, sock, gateway } = await setup();
-    rawOf(db).exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
+    failStoring(db, 'cannot store');
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
     await settled();
     expect(gateway.failedCount()).toBe(1);
@@ -562,7 +579,7 @@ describe('app health and publishing', () => {
     await settled();
     // A file of this message is still being read (the media queue is wired in Task 15).
     await insertMedia(db, {
-      messageId: (await messageRowId(db, 1, 'm1'))!, clientId: 1, kind: 'image', status: 'pending', mimeType: 'image/jpeg', fileName: null, fileSize: 1000,
+      messageId: (await messageRowId(db, await idOf(db, 'SHA'), 'm1'))!, clientId: await idOf(db, 'SHA'), kind: 'image', status: 'pending', mimeType: 'image/jpeg', fileName: null, fileSize: 1000,
       seconds: null, forwarded: false, refEnc: null, errorCode: null, createdAt: new Date().toISOString(),
     });
     await vi.advanceTimersByTimeAsync(239_000);
@@ -597,9 +614,9 @@ describe('app health and publishing', () => {
     await vi.advanceTimersByTimeAsync(2_000);
     await vi.advanceTimersByTimeAsync(30_000);
     const crash = lines.find((l) => l.msg === 'reconcile crashed');
-    expect(crash).toMatchObject({ clientId: 1, err: { type: 'Error' } });
+    expect(crash).toMatchObject({ clientId: await idOf(db, 'SHA'), err: { type: 'Error' } });
     expect(JSON.stringify(lines)).not.toContain('secret banner text');
-    expect((await readHealthSnapshot(db))!.failed).toEqual([{ clientId: 1, errorCode: 'crash' }]);
+    expect((await readHealthSnapshot(db))!.failed).toEqual([{ clientId: await idOf(db, 'SHA'), errorCode: 'crash' }]);
     expect(drive.uploads).toBe(2);
     await stopApp(app);
   });
@@ -659,7 +676,7 @@ describe('app health and publishing', () => {
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
     await settled();
     await vi.advanceTimersByTimeAsync(300_000); // reconciled at 240 s and uploaded
-    expect((await listTasks(db, 1)).map((t) => t.code)).toEqual(['SHA-001']);
+    expect((await listTasks(db, await idOf(db, 'SHA'))).map((t) => t.code)).toEqual(['SHA-001']);
     const before = drive.uploads;
 
     sock.emit('messages.update', [{ key: { remoteJid: SHARMA.groupId, id: 'm1' }, update: { messageStubType: WAMessageStubType.REVOKE } } as WAMessageUpdate]);
@@ -683,7 +700,7 @@ describe('app health and publishing', () => {
     expect(drive.uploads).toBe(1);
 
     // A message that cannot be saved changes only the health line: no reconcile, no file, no other publish.
-    rawOf(db).exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
+    failStoring(db, 'cannot store');
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
     await settled();
     await vi.advanceTimersByTimeAsync(31_000); // the next tick sees the new line
@@ -760,7 +777,7 @@ describe('app: a newly approved group\'s earlier messages (history backfill)', (
     // Older than 7 days: dropped, and the backfill ends.
     sock.emit('messaging-history.set', { chats: [], contacts: [], syncType: ON_DEMAND, messages: [waText('E0', 'TOO OLD', { ts: sec('2026-10-10T09:00:00Z') })] });
     await settled();
-    expect(rawOf(db).prepare("SELECT 1 FROM messages WHERE wa_id = 'E0'").get()).toBeUndefined();
+    expect(await row(db, "SELECT 1 FROM messages WHERE wa_id = 'E0'")).toBeUndefined();
     await vi.advanceTimersByTimeAsync(240_000);
     expect(ai.calls).toHaveLength(1);
     const user = ai.calls[0]!.user;
