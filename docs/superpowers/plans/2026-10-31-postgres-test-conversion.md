@@ -5,7 +5,7 @@ test:pg runs and a read-only sweep of tests/ at fb20231.
 
 The test suite used to run on SQLite only. `npm run test:pg` now runs it against a real Postgres 17 in Docker, using the
 same roles and migrations as the Mac. Converting the tests (real client ids, no raw SQLite handle, the platform tables
-on the platform role) found real bugs in the agent's own SQL or code: twelve so far. Each one would have broken
+on the platform role) found twelve real bugs in the agent's own SQL or code. Each one would have broken
 something on Postgres that SQLite let through.
 
 ## The real bugs
@@ -26,7 +26,7 @@ back.
 | 9 | The spend guard's refresh replaced its total with the database's, dropping bookings not yet written: spend under-counted, so the daily cap could be passed. | 7d79023 | tests/spend/neverUnder.test.ts (with a real open transaction) |
 | 10 | Two sign-ups from one invite at once: the loser hit the users table's unique email and got a 500, not "link already used". | 1400e0b (lane C) | tests/platform/invites.test.ts (the race, a refusal never uses the invite, a failed step gives the claim back) |
 | 11 | The CLI (connectAndIngest) and a relinked service closed the database before the messages already taken were stored: on Postgres the last ones were lost without a word, and the printed count was wrong. | 2ec726a | tests/cli/commands.test.ts ("stores and counts a message still being written when the wait ends, before the database closes"), tests/wa/switchableGateway.test.ts ("idle() waits for what the old gateway was storing…") |
-| 12 | A relink dropped events: those still queued on the gateway it detached, and the new gateway's events from before the swap. | in progress (lane A) | to follow |
+| 12 | A relink dropped events: those still queued on the gateway it detached, and the new gateway's events from before the swap. Now the old gateway's queue drains into the handlers, and a relink follows the new gateway from its start (and stops following it when the relink is undone). | a5d9ac0 (lane A), in src/wa/switchableGateway.ts and src/wa/linkSession.ts | tests/wa/switchableGateway.test.ts (the drain, the unfollow), tests/wa/linkSession.test.ts (messages between open and the hand-over are stored; a cancelled relink stores no doubles, and nothing from a group that is not allowed; the last in d876363). Mutation-checked: with the drain off 4 fail, without follow() 1 fails. |
 
 **The numbering** (confirmed by the coordinator, 31 Oct). The commits label bugs 1 and 4 to 10. Bugs 2 and 3 are the
 IS NULL and MAX/MIN fixes, in the order they were found. json_valid is counted with bug 1: its fix is in the same
@@ -78,6 +78,8 @@ In flight elsewhere, and left out of the sweep: tests/appMedia.test.ts and tests
 | Lane C batches 1 to 5 | output, meetings, brain/control, runtime/web, routes/spend | green after bugs 3 and 6 were fixed (5 files at a time) | 111 to 196 a batch | 3 to 27 s |
 | Lane C batches 6 to 8, first try | a fresh database per test | 9 failed (hook limits) | 425 passed | 95 s |
 | The same, one database per file | batches 6 to 8, health, spend, platform, runtime, migrate, the 3 scans | 37 passed, 3 skipped (42), then the last 2 fixed | 551 passed, 26 skipped, 3 fixed after | 28 s |
+| Bug 12, at d876363 (lane A) | lane A's test:pg run for the fix | 17 passed | 118 passed | |
+| The full SQLite run, at d876363 | the whole suite under npm test | | 4,760 passed, 19 skipped, 0 failed | |
 
 The test database container is reused between runs. Each run resets it inside the container, and nothing is written
 outside it.
