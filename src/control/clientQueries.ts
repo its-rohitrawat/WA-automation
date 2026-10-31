@@ -182,7 +182,7 @@ export async function clientActivity(db: Db, c: ClientRow, now: Date, quietMinut
     kind: string | null; seconds: number | null; mediaStatus: string | null; hasText: number | null;
   }>(
     `SELECT m.ts AS at, m.text, m.from_me AS fromMe, m.media_type AS mediaType, p.name AS name,
-        md.kind, md.seconds, md.status AS mediaStatus, md.text IS NOT NULL AS hasText
+        md.kind, md.seconds, md.status AS mediaStatus, CASE WHEN md.text IS NOT NULL THEN 1 ELSE 0 END AS hasText
       FROM messages m
       LEFT JOIN people p ON p.client_id = m.client_id AND p.jid = m.sender_jid
       LEFT JOIN media md ON md.message_id = m.id

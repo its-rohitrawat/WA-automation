@@ -10,18 +10,18 @@ import { createTask, recordEvent } from '../../src/store/tasks.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { FakeDrive } from '../helpers/fakeDrive.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { idOf, NOW, seededDb } from '../helpers/db.ts';
 
 const at = (hhmm: string) => `2026-10-19T${hhmm}:00.000Z`;
 
-async function batch(db: Db, o: { at: string; status: 'ok' | 'failed'; messages: number; accepted?: number; clientId?: number }) {
-  const id = await startBatch(db, o.clientId ?? 1, o.messages, o.at);
+async function batch(db: Db, o: { at: string; status: 'ok' | 'failed'; messages: number; accepted?: number; client?: 'SHA' | 'MEH' }): Promise<number> {
+  const id = await startBatch(db, await idOf(db, o.client ?? 'SHA'), o.messages, o.at);
   await finishBatch(db, id, { status: o.status, errorCode: o.status === 'failed' ? 'ai_error' : null, accepted: o.accepted ?? null, rejected: null, at: o.at });
+  return id;
 }
 
-function task(db: Db, title: string, clientId = 1) {
-  return createTask(db, { clientId, side: 'us', title, category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-19',
+async function task(db: Db, title: string) {
+  return createTask(db, { clientId: await idOf(db, 'SHA'), side: 'us', title, category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-19',
     deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp' }, NOW);
 }
 
@@ -31,14 +31,14 @@ async function meeting(db: Db, status: MeetingStatus, updatedAt: string, o: { ti
   const id = (await insertFound(db, {
     recording: `conferenceRecords/c${n}/recordings/r`, conference: `conferenceRecords/c${n}`, driveFileId: `d${n}`, meetingCode: null,
     title: status === 'internal' ? '' : (o.title ?? 'Weekly sync'), startedAt: NOW, endedAt: null, attendees: [], participants: [],
-    clientId: status === 'unassigned' || status === 'internal' ? null : 1, matchKind: null, status, driveSeconds: o.seconds ?? 1800, createdAt: NOW,
+    clientId: status === 'unassigned' || status === 'internal' ? null : await idOf(db, 'SHA'), matchKind: null, status, driveSeconds: o.seconds ?? 1800, createdAt: NOW,
   }))!;
-  rawOf(db).prepare("UPDATE meetings SET updated_at = ?, stage = CASE WHEN status = 'done' THEN 'tracked' ELSE stage END WHERE id = ?").run(updatedAt, id);
+  await db.run("UPDATE meetings SET updated_at = ?, stage = CASE WHEN status = 'done' THEN 'tracked' ELSE stage END WHERE id = ?", [updatedAt, id]);
   return id;
 }
 
-function audit(db: Db, a: { at: string; actor: string; event: string; kind: string; detail: string }) {
-  rawOf(db).prepare('INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, ?, ?, ?, ?)').run(a.at, a.actor, a.event, a.kind, a.detail);
+async function audit(db: Db, a: { at: string; actor: string; event: string; kind: string; detail: string }): Promise<number> {
+  return (await db.get<{ id: number }>('INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, ?, ?, ?, ?) RETURNING id', [a.at, a.actor, a.event, a.kind, a.detail]))!.id;
 }
 
 const params = (o: Record<string, string> = {}) => parseActivityParams(new URLSearchParams(o));
@@ -59,19 +59,19 @@ describe('parseActivityParams', () => {
 describe('listActivity', () => {
   it('merges every source, newest first, in plain words', async () => {
     const db = await seededDb();
-    await batch(db, { at: at('05:00'), status: 'ok', messages: 18, accepted: 2, clientId: 2 });
+    await batch(db, { at: at('05:00'), status: 'ok', messages: 18, accepted: 2, client: 'MEH' });
     const t = await task(db, 'Revise <b>landing</b> page');
-    await recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'add_task', detail: { title: 'chat words' }, reason: null, sourceIds: [], at: at('05:10') });
-    await recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'mark_maybe_done', detail: {}, reason: null, sourceIds: [], at: at('05:20') });
+    await recordEvent(db, { taskId: t.id, clientId: await idOf(db, 'SHA'), actor: 'ai', op: 'add_task', detail: { title: 'chat words' }, reason: null, sourceIds: [], at: at('05:10') });
+    await recordEvent(db, { taskId: t.id, clientId: await idOf(db, 'SHA'), actor: 'ai', op: 'mark_maybe_done', detail: {}, reason: null, sourceIds: [], at: at('05:20') });
     await closeTask(db, t.code, new Date(at('05:30')));
     await meeting(db, 'done', at('05:40'));
-    audit(db, { at: at('05:50'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'Tracker.xlsx uploaded to Drive' });
+    await audit(db, { at: at('05:50'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'Tracker.xlsx uploaded to Drive' });
     await meeting(db, 'too_long', at('06:00'), { title: 'Launch prep', seconds: 196 * 60 });
     await batch(db, { at: at('06:10'), status: 'failed', messages: 4 });
-    audit(db, { at: at('06:20'), actor: 'agent', event: 'tracker.publish_failed', kind: 'ops', detail: 'Tracker upload failed: Google sign-in expired' });
-    audit(db, { at: at('06:30'), actor: 'owner@example.com', event: 'whatsapp.relink', kind: 'connection', detail: "Founder's phone relinked" });
-    audit(db, { at: at('06:40'), actor: 'owner@example.com', event: 'settings.report', kind: 'config', detail: 'Morning briefing switched on' });
-    audit(db, { at: at('06:50'), actor: 'owner@example.com', event: 'auth.signin', kind: 'auth', detail: 'Signed in' }); // not activity
+    await audit(db, { at: at('06:20'), actor: 'agent', event: 'tracker.publish_failed', kind: 'ops', detail: 'Tracker upload failed: Google sign-in expired' });
+    await audit(db, { at: at('06:30'), actor: 'owner@example.com', event: 'whatsapp.relink', kind: 'connection', detail: "Founder's phone relinked" });
+    await audit(db, { at: at('06:40'), actor: 'owner@example.com', event: 'settings.report', kind: 'config', detail: 'Morning briefing switched on' });
+    await audit(db, { at: at('06:50'), actor: 'owner@example.com', event: 'auth.signin', kind: 'auth', detail: 'Signed in' }); // not activity
     await meeting(db, 'internal', at('07:00')); // never listed
     const r = await listActivity(db, params());
     expect(r.items.map(({ kind, title, detail, who }) => ({ kind, title, detail, who }))).toEqual([
@@ -112,11 +112,11 @@ describe('listActivity', () => {
     await batch(db, { at: at('05:00'), status: 'ok', messages: 3 });
     await batch(db, { at: at('05:01'), status: 'failed', messages: 3 });
     const t = await task(db, 'Logo');
-    await recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: at('05:02') });
+    await recordEvent(db, { taskId: t.id, clientId: await idOf(db, 'SHA'), actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: at('05:02') });
     await meeting(db, 'done', at('05:03'));
     await meeting(db, 'failed', at('05:04'));
-    audit(db, { at: at('05:05'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'Tracker.xlsx uploaded to Drive' });
-    audit(db, { at: at('05:06'), actor: 'agent', event: 'tracker.publish_failed', kind: 'ops', detail: 'Tracker upload failed' });
+    await audit(db, { at: at('05:05'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'Tracker.xlsx uploaded to Drive' });
+    await audit(db, { at: at('05:06'), actor: 'agent', event: 'tracker.publish_failed', kind: 'ops', detail: 'Tracker upload failed' });
     expect(titles(await listActivity(db, params({ kind: 'msg' })))).toEqual(['3 messages read']);
     expect(titles(await listActivity(db, params({ kind: 'task' })))).toEqual(['Task created']);
     expect(titles(await listActivity(db, params({ kind: 'meet' })))).toEqual(['Meeting summary ready']);
@@ -127,9 +127,10 @@ describe('listActivity', () => {
 
   it('pages with before, never losing items that share a time', async () => {
     const db = await seededDb();
-    for (let i = 0; i < 5; i++) await batch(db, { at: at('05:00'), status: 'ok', messages: i + 1 });
-    audit(db, { at: at('05:00'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'x' });
-    await batch(db, { at: at('04:00'), status: 'ok', messages: 9 });
+    const b: number[] = [];
+    for (let i = 0; i < 5; i++) b.push(await batch(db, { at: at('05:00'), status: 'ok', messages: i + 1 }));
+    const a = await audit(db, { at: at('05:00'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'x' });
+    const earlier = await batch(db, { at: at('04:00'), status: 'ok', messages: 9 });
     const seen: string[] = [];
     let before: string | undefined;
     for (let page = 0; page < 10; page++) {
@@ -138,22 +139,22 @@ describe('listActivity', () => {
       if (!r.next) break;
       before = r.next;
     }
-    expect(seen).toEqual(['b:5', 'b:4', 'b:3', 'b:2', 'b:1', 'a:1', 'b:6']);
+    expect(seen).toEqual([...[...b].reverse().map((id) => `b:${id}`), `a:${a}`, `b:${earlier}`]);
     // A plain time: everything strictly before it.
     expect(titles(await listActivity(db, params({ before: at('05:00') })))).toEqual(['9 messages read']);
   });
 
   it('gives next only when the page is full', async () => {
     const db = await seededDb();
-    await batch(db, { at: at('05:00'), status: 'ok', messages: 1 });
-    expect((await listActivity(db, params({ limit: '1' }))).next).toBe(`${at('05:00')}|b|1`);
+    const id = await batch(db, { at: at('05:00'), status: 'ok', messages: 1 });
+    expect((await listActivity(db, params({ limit: '1' }))).next).toBe(`${at('05:00')}|b|${id}`);
     expect((await listActivity(db, params({ limit: '2' }))).next).toBeNull();
   });
 
   it('skips running batches and events not about a task', async () => {
     const db = await seededDb();
-    await startBatch(db, 1, 5, at('05:00'));
-    await recordEvent(db, { taskId: null, clientId: 1, actor: 'ai', op: 'set_status', detail: { status: 'chat words' }, reason: null, sourceIds: [], at: at('05:01') });
+    await startBatch(db, await idOf(db, 'SHA'), 5, at('05:00'));
+    await recordEvent(db, { taskId: null, clientId: await idOf(db, 'SHA'), actor: 'ai', op: 'set_status', detail: { status: 'chat words' }, reason: null, sourceIds: [], at: at('05:01') });
     expect((await listActivity(db, params())).items).toEqual([]);
   });
 });
@@ -207,15 +208,16 @@ describe('publisherAuditHooks', () => {
 describe('activity review fixes', () => {
   it('says where a task came from: a voice note or a meeting', async () => {
     const db = await seededDb();
-    rawOf(db).prepare("INSERT INTO messages (wa_id, client_id, sender_jid, ts, media_type) VALUES ('V1', 1, 'x', ?, 'audio')").run(NOW);
-    rawOf(db).prepare("INSERT INTO media (message_id, client_id, kind, status, created_at, updated_at) VALUES (1, 1, 'voice', 'done', ?, ?)").run(NOW, NOW);
-    const voice = await createTask(db, { clientId: 1, side: 'us', title: 'From voice', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,
+    const sharma = await idOf(db, 'SHA');
+    const message = (await db.get<{ id: number }>("INSERT INTO messages (wa_id, client_id, sender_jid, ts, media_type) VALUES ('V1', ?, 'x', ?, 'audio') RETURNING id", [sharma, NOW]))!.id;
+    await db.run("INSERT INTO media (message_id, client_id, kind, status, created_at, updated_at) VALUES (?, ?, 'voice', 'done', ?, ?)", [message, sharma, NOW, NOW]);
+    const voice = await createTask(db, { clientId: sharma, side: 'us', title: 'From voice', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,
       raisedOn: '2026-10-19', deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: 'V1', origin: 'whatsapp' }, NOW);
     const mid = await meeting(db, 'done', at('04:00'));
-    const fromMeeting = await createTask(db, { clientId: 1, side: 'us', title: 'From meeting', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,
+    const fromMeeting = await createTask(db, { clientId: sharma, side: 'us', title: 'From meeting', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,
       raisedOn: '2026-10-19', deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'meeting', meetingId: mid }, NOW);
-    await recordEvent(db, { taskId: voice.id, clientId: 1, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: at('05:00') });
-    await recordEvent(db, { taskId: fromMeeting.id, clientId: 1, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: at('05:01') });
+    await recordEvent(db, { taskId: voice.id, clientId: sharma, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: at('05:00') });
+    await recordEvent(db, { taskId: fromMeeting.id, clientId: sharma, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: at('05:01') });
     expect((await listActivity(db, params({ kind: 'task' }))).items.map((i) => i.who)).toEqual(['from a meeting · Sharma Interiors', 'from a voice note · Sharma Interiors']);
   });
 
@@ -227,26 +229,27 @@ describe('activity review fixes', () => {
 
   it('ignores tracker rows not written by the agent', async () => {
     const db = await seededDb();
-    audit(db, { at: at('05:00'), actor: 'owner@example.com', event: 'tracker.published', kind: 'ops', detail: 'x' });
-    audit(db, { at: at('05:01'), actor: 'owner@example.com', event: 'tracker.publish_failed', kind: 'ops', detail: 'x' });
+    await audit(db, { at: at('05:00'), actor: 'owner@example.com', event: 'tracker.published', kind: 'ops', detail: 'x' });
+    await audit(db, { at: at('05:01'), actor: 'owner@example.com', event: 'tracker.publish_failed', kind: 'ops', detail: 'x' });
     expect((await listActivity(db, params())).items).toEqual([]);
   });
 
   it('leaves out a no-access meeting found as internal', async () => {
     const db = await seededDb();
     const id = await meeting(db, 'no_access', at('05:00'), { title: '' });
-    rawOf(db).prepare("UPDATE meetings SET note = 'found_internal', client_id = NULL WHERE id = ?").run(id);
+    await db.run("UPDATE meetings SET note = 'found_internal', client_id = NULL WHERE id = ?", [id]);
     expect((await listActivity(db, params())).items).toEqual([]);
   });
 
   it('pages correctly when one source has more rows than the page', async () => {
     const db = await seededDb();
-    for (let i = 0; i < 4; i++) await batch(db, { at: at(`05:0${i}`), status: 'ok', messages: i + 1 });
-    audit(db, { at: at('05:02'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'x' });
+    const b: number[] = [];
+    for (let i = 0; i < 4; i++) b.push(await batch(db, { at: at(`05:0${i}`), status: 'ok', messages: i + 1 }));
+    const a = await audit(db, { at: at('05:02'), actor: 'agent', event: 'tracker.published', kind: 'ops', detail: 'x' });
     const first = await listActivity(db, params({ limit: '2' }));
     const second = await listActivity(db, params({ limit: '2', before: first.next! }));
     const third = await listActivity(db, params({ limit: '2', before: second.next! }));
-    expect([...first.items, ...second.items, ...third.items].map((i) => i.id)).toEqual(['b:4', 'b:3', 'a:1', 'b:2', 'b:1']);
+    expect([...first.items, ...second.items, ...third.items].map((i) => i.id)).toEqual([`b:${b[3]}`, `b:${b[2]}`, `a:${a}`, `b:${b[1]}`, `b:${b[0]}`]);
   });
 });
 
@@ -277,7 +280,7 @@ describe('Activity: a newly approved group\'s earlier messages', () => {
     const db = await seededDb();
     const e = historyReadEntry(42, 'Sharma Interiors');
     expect(e).toEqual({ actor: 'agent', event: 'history.read', kind: 'ops', detail: '42 earlier messages read · Sharma Interiors' });
-    rawOf(db).prepare('INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, ?, ?, ?, ?)').run(NOW, e.actor, e.event, e.kind, e.detail);
+    await db.run('INSERT INTO audit_log (at, actor, event, kind, detail) VALUES (?, ?, ?, ?, ?)', [NOW, e.actor, e.event, e.kind, e.detail]);
     const row = { kind: 'msg', title: '42 earlier messages read', detail: 'Sharma Interiors', who: 'by the agent' };
     expect((await listActivity(db, params())).items).toEqual([expect.objectContaining(row)]);
     expect((await listActivity(db, params({ kind: 'msg' }))).items).toEqual([expect.objectContaining(row)]);

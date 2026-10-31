@@ -207,7 +207,8 @@ export class UptimeLog {
         ))!;
         keep.push(began.id);
       }
-      return (await q.run('DELETE FROM uptime_log WHERE at < ? AND id NOT IN (SELECT value FROM json_each(?))', [cutoff, JSON.stringify(keep)])).changes;
+      // The kept ids as integers: on Postgres json_each's values are text, which an id cannot be compared with.
+      return (await q.run('DELETE FROM uptime_log WHERE at < ? AND id NOT IN (SELECT CAST(value AS INTEGER) FROM json_each(?))', [cutoff, JSON.stringify(keep)])).changes;
     });
   }
 

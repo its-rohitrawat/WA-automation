@@ -9,19 +9,21 @@ import type { Db } from '../../src/store/db.ts';
 import { insertFound } from '../../src/store/meetings.ts';
 import { insertMessage } from '../../src/store/messages.ts';
 import { createTask, recordEvent, setTaskStatus, type Status } from '../../src/store/tasks.ts';
-import { MEHTA, seededDb, SHARMA } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { idOf, MEHTA, row, seededDb, SHARMA } from '../helpers/db.ts';
 
 // Wednesday 28 Oct 2026, 11:30 IST: today is 2026-10-28 and the week started on Monday 2026-10-26.
 const NOW = new Date('2026-10-28T06:00:00.000Z');
 const QUOTE = 'QUOTE-TEXT-never-sent';
 const MESSAGE = 'MESSAGE-TEXT-never-sent';
 
+/** A seeded client by its place (1 Sharma, 2 Mehta), as its real id: on Postgres the ids are not 1 and 2. */
+const seat = (db: Db, n: number) => idOf(db, n === 1 ? SHARMA.code : MEHTA.code);
+
 async function task(db: Db, clientId: number, o: { title?: string; deadline?: string | null; status?: Status; closedOn?: string; assignedTo?: string | null }) {
   const t = await createTask(
     db,
     {
-      clientId, side: 'us', title: o.title ?? 'A task', category: 'design', priority: 'medium', assignedTo: o.assignedTo ?? null, askedBy: null,
+      clientId: await seat(db, clientId), side: 'us', title: o.title ?? 'A task', category: 'design', priority: 'medium', assignedTo: o.assignedTo ?? null, askedBy: null,
       raisedOn: '2026-10-01', deadline: o.deadline ?? null, latestProgress: 'progress words', sourceQuote: QUOTE, sourceDate: '2026-10-01',
       sourceWaId: 'W1', origin: 'whatsapp',
     },
@@ -35,14 +37,14 @@ async function meeting(db: Db, n: number, clientId: number | null, title: string
   return (await insertFound(db, {
     recording: `conferenceRecords/c${n}/recordings/r${n}`, conference: `conferenceRecords/c${n}`, driveFileId: `drive${n}`, meetingCode: null, title,
     startedAt, endedAt: null, attendees: [{ email: 'a@client.com', name: 'Attendee Name', team: false }], participants: ['Participant Name'],
-    clientId, matchKind: clientId === null ? null : 'title', status: clientId === null ? 'unassigned' : 'queued', driveSeconds: 600,
+    clientId: clientId === null ? null : await seat(db, clientId), matchKind: clientId === null ? null : 'title', status: clientId === null ? 'unassigned' : 'queued', driveSeconds: 600,
     createdAt: startedAt,
   }))!;
 }
 
 async function message(db: Db, clientId: number, waId: string, ts: string) {
   await insertMessage(db, {
-    waId, clientId, senderJid: '919800000001@s.whatsapp.net', senderNumber: '919800000001', senderName: 'Sender', fromMe: false, ts, text: MESSAGE,
+    waId, clientId: await seat(db, clientId), senderJid: '919800000001@s.whatsapp.net', senderNumber: '919800000001', senderName: 'Sender', fromMe: false, ts, text: MESSAGE,
     quotedWaId: null, mediaType: null,
   });
 }
@@ -132,11 +134,11 @@ describe('clientDetail', () => {
     const m2 = await meeting(db, 2, 1, 'Sharma design review', '2026-10-27T06:00:00.000Z');
     await meeting(db, 3, 2, 'Mehta call', '2026-10-27T07:00:00.000Z');
     await meeting(db, 4, null, 'Unassigned call', '2026-10-27T08:00:00.000Z');
-    const b1 = await startBatch(db, 1, 3, '2026-10-27T09:00:00.000Z');
+    const b1 = await startBatch(db, await seat(db, 1), 3, '2026-10-27T09:00:00.000Z');
     await finishBatch(db, b1, { status: 'ok', errorCode: null, accepted: 1, rejected: 0, at: '2026-10-27T09:00:30.000Z' });
-    const b2 = await startBatch(db, 1, 2, '2026-10-28T05:00:00.000Z');
+    const b2 = await startBatch(db, await seat(db, 1), 2, '2026-10-28T05:00:00.000Z');
     await finishBatch(db, b2, { status: 'ok', errorCode: null, accepted: 1, rejected: 0, at: '2026-10-28T05:00:40.000Z' });
-    await startBatch(db, 2, 1, '2026-10-28T05:30:00.000Z');
+    await startBatch(db, await seat(db, 2), 1, '2026-10-28T05:30:00.000Z');
 
     const d = (await clientDetail(db, 'SHA', NOW))!;
     const card = (await clientCards(db, NOW)).find((c) => c.code === 'SHA')!;
@@ -168,12 +170,12 @@ describe('clientDetail', () => {
 
   it('the last sync time ignores failed batches', async () => {
     const db = await seededDb();
-    const ok = await startBatch(db, 1, 2, '2026-10-27T09:00:00.000Z');
+    const ok = await startBatch(db, await seat(db, 1), 2, '2026-10-27T09:00:00.000Z');
     await finishBatch(db, ok, { status: 'ok', errorCode: null, accepted: 1, rejected: 0, at: '2026-10-27T09:00:30.000Z' });
-    const bad = await startBatch(db, 1, 2, '2026-10-28T05:00:00.000Z');
+    const bad = await startBatch(db, await seat(db, 1), 2, '2026-10-28T05:00:00.000Z');
     await finishBatch(db, bad, { status: 'failed', errorCode: 'ai_error', accepted: null, rejected: null, at: '2026-10-28T05:00:10.000Z' });
     expect((await clientDetail(db, 'SHA', NOW))!.lastSyncAt).toBe('2026-10-27T09:00:30.000Z');
-    const onlyFailed = await startBatch(db, 2, 1, '2026-10-28T05:00:00.000Z');
+    const onlyFailed = await startBatch(db, await seat(db, 2), 1, '2026-10-28T05:00:00.000Z');
     await finishBatch(db, onlyFailed, { status: 'failed', errorCode: 'ai_error', accepted: null, rejected: null, at: '2026-10-28T05:00:10.000Z' });
     expect((await clientDetail(db, 'MEH', NOW))!.lastSyncAt).toBeNull();
   });
@@ -203,29 +205,29 @@ describe('the client drawer: what the agent has seen (owner decision, 28 Oct 202
   async function say(db: Db, n: number, ts: string, o: { text?: string | null; person?: number; fromMe?: boolean; media?: 'image' | 'voice' | 'document'; mediaType?: string } = {}) {
     const person = o.person ?? 1;
     await insertMessage(db, {
-      waId: `D${n}`, clientId: 1, senderJid: JID(person), senderNumber: `9198000000${String(person).padStart(2, '0')}`, senderName: 'Push Name',
+      waId: `D${n}`, clientId: await seat(db, 1), senderJid: JID(person), senderNumber: `9198000000${String(person).padStart(2, '0')}`, senderName: 'Push Name',
       fromMe: o.fromMe ?? false, ts, text: o.text === undefined ? `message ${n}` : o.text, quotedWaId: null, mediaType: o.media ?? o.mediaType ?? null,
     });
-    const id = (rawOf(db).prepare("SELECT id FROM messages WHERE wa_id = ?").get(`D${n}`) as { id: number }).id;
+    const id = (await row<{ id: number }>(db, 'SELECT id FROM messages WHERE wa_id = ?', [`D${n}`]))!.id;
     if (o.media) {
-      await insertMedia(db, { messageId: id, clientId: 1, kind: o.media, status: 'done', mimeType: null, fileName: 'secret-file-name.pdf', fileSize: 10,
+      await insertMedia(db, { messageId: id, clientId: await seat(db, 1), kind: o.media, status: 'done', mimeType: null, fileName: 'secret-file-name.pdf', fileSize: 10,
         seconds: o.media === 'voice' ? 42 : null, forwarded: false, refEnc: null, errorCode: null, createdAt: ts });
-      if (o.media === 'voice') rawOf(db).prepare("UPDATE media SET text = 'TRANSCRIPT-never-sent', text_kind = 'extract' WHERE message_id = ?").run(id);
+      if (o.media === 'voice') await db.run("UPDATE media SET text = 'TRANSCRIPT-never-sent', text_kind = 'extract' WHERE message_id = ?", [id]);
     }
     return id;
   }
 
   it('counts the last 7 days, names senders from the people table, and shows the last 3 messages as one line each', async () => {
     const db = await seededDb();
-    await upsertPerson(db, { clientId: 1, jid: JID(1), number: '919800000001', name: 'Rahul', fromMe: false });
-    await upsertPerson(db, { clientId: 1, jid: JID(2), number: '919800000002', name: '+91 98000 00002', fromMe: false });
+    await upsertPerson(db, { clientId: await seat(db, 1), jid: JID(1), number: '919800000001', name: 'Rahul', fromMe: false });
+    await upsertPerson(db, { clientId: await seat(db, 1), jid: JID(2), number: '919800000002', name: '+91 98000 00002', fromMe: false });
     await say(db, 1, '2026-10-19T06:00:00.000Z'); // older than 7 days: not counted
     await say(db, 2, '2026-10-27T06:00:00.000Z', { person: 1 });
     await say(db, 3, '2026-10-27T07:00:00.000Z', { person: 2, media: 'image', text: null });
     await say(db, 4, '2026-10-27T08:00:00.000Z', { person: 3, media: 'voice', text: null });
     await say(db, 5, '2026-10-28T05:00:00.000Z', { person: 1, text: `Line one\nline two ${'x'.repeat(300)}` });
     await say(db, 6, '2026-10-28T05:30:00.000Z', { fromMe: true, person: 9, text: 'from the founder' });
-    rawOf(db).prepare("UPDATE messages SET revoked = 1 WHERE wa_id = 'D6'").run();
+    await db.run("UPDATE messages SET revoked = 1 WHERE wa_id = 'D6'");
     const a = (await clientDetail(db, 'SHA', NOW))!.activity;
     expect(a.week).toEqual({ messages: 4, people: 3, files: 1, voice: 1 });
     expect(a.latest.map((m) => [m.sender, m.kind])).toEqual([['Rahul', 'text'], ['Someone', 'voice'], ['Someone', 'image']]);
@@ -241,14 +243,14 @@ describe('the client drawer: what the agent has seen (owner decision, 28 Oct 202
     const db = await seededDb();
     await say(db, 1, '2026-10-28T05:00:00.000Z');
     await say(db, 2, '2026-10-28T05:10:00.000Z');
-    rawOf(db).prepare("UPDATE messages SET processed_at = '2026-10-28T05:20:00.000Z' WHERE wa_id = 'D1'").run();
-    const b = await startBatch(db, 1, 6, '2026-10-28T05:19:00.000Z');
+    await db.run("UPDATE messages SET processed_at = '2026-10-28T05:20:00.000Z' WHERE wa_id = 'D1'");
+    const b = await startBatch(db, await seat(db, 1), 6, '2026-10-28T05:19:00.000Z');
     // Three accepted ops: two on tasks, one a decision (no task): two task changes.
     await finishBatch(db, b, { status: 'ok', errorCode: null, accepted: 3, rejected: 0, at: '2026-10-28T05:20:00.000Z' });
     const t = await task(db, 1, {});
-    for (const op of ['create_task', 'update_task']) await recordEvent(db, { taskId: t.id, clientId: 1, actor: 'ai', op, detail: {}, reason: null, sourceIds: [], at: '2026-10-28T05:20:00.000Z' });
-    await recordEvent(db, { taskId: null, clientId: 1, actor: 'ai', op: 'add_decision', detail: {}, reason: null, sourceIds: [], at: '2026-10-28T05:20:00.000Z' });
-    const failed = await startBatch(db, 1, 1, '2026-10-28T05:40:00.000Z');
+    for (const op of ['create_task', 'update_task']) await recordEvent(db, { taskId: t.id, clientId: await seat(db, 1), actor: 'ai', op, detail: {}, reason: null, sourceIds: [], at: '2026-10-28T05:20:00.000Z' });
+    await recordEvent(db, { taskId: null, clientId: await seat(db, 1), actor: 'ai', op: 'add_decision', detail: {}, reason: null, sourceIds: [], at: '2026-10-28T05:20:00.000Z' });
+    const failed = await startBatch(db, await seat(db, 1), 1, '2026-10-28T05:40:00.000Z');
     await finishBatch(db, failed, { status: 'failed', errorCode: 'x', accepted: null, rejected: null, at: '2026-10-28T05:41:00.000Z' });
     const a = (await clientDetail(db, 'SHA', NOW, undefined, 5))!.activity;
     expect(a.pending).toBe(1);
@@ -263,9 +265,9 @@ describe('the client drawer: what the agent has seen (owner decision, 28 Oct 202
 
   it('keeps emoji sequences and Indic conjuncts whole, cuts by grapheme, and never shows a number hidden in a name', async () => {
     const db = await seededDb();
-    await upsertPerson(db, { clientId: 1, jid: JID(1), number: null, name: '\u202A+91 98765 43210\u202C', fromMe: false });
-    await upsertPerson(db, { clientId: 1, jid: JID(2), number: null, name: 'Ramesh Plumber 9876543210', fromMe: false });
-    await upsertPerson(db, { clientId: 1, jid: JID(3), number: null, name: 'Kavya 👩‍💻', fromMe: false });
+    await upsertPerson(db, { clientId: await seat(db, 1), jid: JID(1), number: null, name: '\u202A+91 98765 43210\u202C', fromMe: false });
+    await upsertPerson(db, { clientId: await seat(db, 1), jid: JID(2), number: null, name: 'Ramesh Plumber 9876543210', fromMe: false });
+    await upsertPerson(db, { clientId: await seat(db, 1), jid: JID(3), number: null, name: 'Kavya 👩‍💻', fromMe: false });
     const family = '👨‍👩‍👧';
     await say(db, 1, '2026-10-28T05:00:00.000Z', { person: 1, text: `ok ${family} क्‍ष` });
     await say(db, 2, '2026-10-28T05:01:00.000Z', { person: 2, text: family.repeat(200) });

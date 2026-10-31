@@ -78,3 +78,115 @@ export function splitArguments(arg: string): string[] {
 
 /** 1-based line of an index in a text. */
 export const lineAt = (text: string, at: number): number => text.slice(0, at).split('\n').length;
+
+/**
+ * The string and template literals of a file's code, with where each starts: the SQL lives there, and TypeScript's own
+ * `as` never does. A template's ${…} becomes a placeholder. Comments are left out.
+ */
+export function literals(code: string): { text: string; at: number }[] {
+  const out: { text: string; at: number }[] = [];
+  for (let i = 0; i < code.length; i++) {
+    const ch = code[i]!;
+    if (ch === '/' && code[i + 1] === '/') {
+      i = code.indexOf('\n', i);
+      if (i < 0) break;
+    } else if (ch === '/' && code[i + 1] === '*') {
+      i = code.indexOf('*/', i + 2) + 1;
+      if (i <= 0) break;
+    } else if (ch === "'" || ch === '"' || ch === '`') {
+      let text = '';
+      let j = i + 1;
+      for (; j < code.length && code[j] !== ch; j++) {
+        if (code[j] === '\\') {
+          text += code[j + 1] ?? '';
+          j++;
+        } else if (ch === '`' && code[j] === '$' && code[j + 1] === '{') {
+          let depth = 1;
+          for (j += 2; j < code.length && depth > 0; j++) {
+            if (code[j] === '{') depth++;
+            else if (code[j] === '}') depth--;
+          }
+          j--;
+          text += ' _ ';
+        } else text += code[j];
+      }
+      out.push({ text, at: i });
+      i = j;
+    }
+  }
+  return out;
+}
+
+/** Top-level clause words a SELECT column never crosses going back: an AS after them names a table, not a value. */
+const CLAUSE = /^(?:FROM|JOIN|WHERE|ON|GROUP|ORDER|HAVING|LIMIT|UNION|USING|INTO|UPDATE|TABLE|VIEW|INDEX|WITH)$/i;
+const START = /^(?:SELECT|DISTINCT|RETURNING)$/i;
+
+/** Each SELECTed value named with AS (`<expression> AS name`), as its expression text. Table aliases are left out. */
+export function selectedValues(sql: string): string[] {
+  const out: string[] = [];
+  const s = sql.replace(/'(?:[^']|'')*'/g, "''");
+  for (const m of s.matchAll(/\bAS\s+"?[A-Za-z_]\w*"?/g)) {
+    let depth = 0;
+    let i = m.index! - 1;
+    let start = 0;
+    let isColumn = true;
+    for (; i >= 0; i--) {
+      const ch = s[i]!;
+      if (ch === ')') depth++;
+      else if (ch === '(') {
+        if (depth === 0) {
+          start = i + 1; // CAST(x AS text), or a sub-select's first column
+          break;
+        }
+        depth--;
+      } else if (depth === 0 && ch === ',') {
+        start = i + 1;
+        break;
+      } else if (depth === 0 && /[A-Za-z]/.test(ch) && (i === 0 || !/\w/.test(s[i - 1]!))) {
+        const word = /^[A-Za-z_]\w*/.exec(s.slice(i))![0];
+        if (START.test(word)) {
+          start = i + word.length;
+          break;
+        }
+        if (CLAUSE.test(word)) {
+          isColumn = false;
+          break;
+        }
+      }
+    }
+    if (isColumn && i >= 0) out.push(s.slice(start, m.index!));
+  }
+  return out;
+}
+
+/** Each value assigned in an UPDATE's SET (`col = <expression>`), as its expression text. */
+export function setValues(sql: string): string[] {
+  const out: string[] = [];
+  const s = sql.replace(/'(?:[^']|'')*'/g, "''");
+  for (const m of s.matchAll(/\bSET\s+/g)) {
+    let rest = s.slice(m.index! + m[0].length);
+    // The SET list ends at the first top-level WHERE, FROM or RETURNING.
+    const end = /\b(?:WHERE|FROM|RETURNING)\b/i;
+    let depth = 0;
+    let cut = rest.length;
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === '(') depth++;
+      else if (rest[i] === ')') {
+        if (depth === 0) {
+          cut = i;
+          break;
+        }
+        depth--;
+      } else if (depth === 0 && end.test(rest.slice(i, i + 9)) && (i === 0 || !/\w/.test(rest[i - 1]!)) && end.exec(rest.slice(i))!.index === 0) {
+        cut = i;
+        break;
+      }
+    }
+    rest = rest.slice(0, cut);
+    for (const a of splitArguments(rest)) {
+      const eq = /^\s*[A-Za-z_][\w.]*\s*=(?!=)/.exec(a);
+      if (eq) out.push(a.slice(eq[0].length));
+    }
+  }
+  return out;
+}

@@ -124,8 +124,8 @@ async function taskItem(db: Sql, id: number): Promise<Omit<ActivityItem, 'id' | 
     op: (typeof TASK_OPS)[number]; actor: 'ai' | 'human'; code: string; title: string; origin: string; meetingId: number | null; client: string; voice: number;
   }>(
     `SELECT e.op, e.actor, t.code, t.title, t.origin, t.meeting_id AS meetingId, c.name AS client,
-      EXISTS (SELECT 1 FROM messages m JOIN media md ON md.message_id = m.id
-        WHERE m.client_id = t.client_id AND m.wa_id = t.source_wa_id AND md.kind = 'voice') AS voice
+      CASE WHEN EXISTS (SELECT 1 FROM messages m JOIN media md ON md.message_id = m.id
+        WHERE m.client_id = t.client_id AND m.wa_id = t.source_wa_id AND md.kind = 'voice') THEN 1 ELSE 0 END AS voice
     FROM task_events e JOIN tasks t ON t.id = e.task_id JOIN clients c ON c.id = t.client_id WHERE e.id = ?`,
     [id],
   ))!;
