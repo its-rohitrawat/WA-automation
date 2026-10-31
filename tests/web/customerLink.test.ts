@@ -18,11 +18,16 @@ import { openSenderSession, PgSessionDb, SessionDecryptError, useEncryptedAuthSt
 import type { WebServer } from '../../src/web/server.ts';
 import { SessionStore } from '../../src/web/sessions.ts';
 import { startDashboard } from '../../src/web/start.ts';
+import { onSqlite } from '../helpers/db.ts';
 import { closeWith, FakeSocket } from '../helpers/fakeSocket.ts';
+import { freshPg, type FreshPg } from '../helpers/freshPg.ts';
 
 // A customer's own WhatsApp link from the dashboard (S4.6 A, c7's contract in the hookups doc, section 13), with fake
 // sockets: no test reaches WhatsApp. Each customer links its own phone, into its own session rows under its own data
-// key; another customer's link id is unknown (404); and the link's socket runs in that customer's context (F2).
+// key; another customer's link id is unknown (404); and the link's socket runs in that customer's context (F2). On
+// SQLite in-memory stores stand in for the Postgres ones (wa_auth as Postgres has it, a platform Db that says it is
+// Postgres); on Postgres every store is the real one, in a database of this file's own (the founder's id is fixed, and
+// the Supervisor runs every customer in tenants).
 
 vi.mock('@anthropic-ai/sdk', () => ({ default: class { models = { list: async () => ({}) }; messages = { create: async () => ({}) }; } }));
 
@@ -35,6 +40,7 @@ function asPostgres(db: Db): Db {
 }
 
 let dir: string;
+let fresh: FreshPg | undefined;
 const opened: Db[] = [];
 let ps: PlatformSupervisor;
 let founderRt: CustomerRuntime;
@@ -60,18 +66,33 @@ beforeAll(async () => {
     DASHBOARD_ENABLED: 'true', DASHBOARD_OWNER_EMAILS: OWNER, DASHBOARD_GOOGLE_CLIENT_ID: 'web-client-placeholder', DASHBOARD_GOOGLE_CLIENT_SECRET: 'web-secret-placeholder',
   });
   const master = randomBytes(32);
-  const founderDb = openDb(':memory:');
-  await founderDb.exec(WA_AUTH);
-  await ensurePlatformSchema(founderDb);
-  await ensureFounderTenant(founderDb, { name: 'Your business', at: AT });
-  await founderDb.exec('ALTER TABLE web_sessions ADD COLUMN tenant_id TEXT');
+  let founderDb: Db;
+  let platform: Db;
+  /** A customer's own Db, once it is in tenants. */
+  let customerDbOf: (id: string) => Promise<Db>;
+  if (onSqlite) {
+    founderDb = openDb(':memory:');
+    await founderDb.exec(WA_AUTH);
+    await ensurePlatformSchema(founderDb);
+    await founderDb.exec('ALTER TABLE web_sessions ADD COLUMN tenant_id TEXT');
+    platform = asPostgres(founderDb);
+    customerDbOf = async () => {
+      const db = openDb(':memory:');
+      await db.exec(WA_AUTH);
+      return db;
+    };
+  } else {
+    const f = (fresh = await freshPg());
+    founderDb = f.tenantDb(FOUNDER_TENANT_ID);
+    platform = f.platformDb();
+    customerDbOf = async (id) => f.tenantDb(id);
+  }
   opened.push(founderDb);
-  const platform = asPostgres(founderDb);
+  await ensureFounderTenant(platform, { name: 'Your business', at: AT });
   tenantKeys = new TenantKeys({ db: platform, master, clock: manualClock(AT) });
   for (const k of ['a', 'b'] as const) {
     ids[k] = (await createTenant(platform, { name: `Customer ${k}`, status: 'active', at: AT })).id;
-    const db = openDb(':memory:');
-    await db.exec(WA_AUTH);
+    const db = await customerDbOf(ids[k]);
     opened.push(db);
     dbs[ids[k]] = db;
     sockets[ids[k]] = [];
@@ -128,6 +149,7 @@ afterAll(async () => {
   await ps?.stop();
   await founderRt?.stop();
   for (const db of opened) await db.close().catch(() => undefined);
+  await fresh?.drop();
   rmSync(dir, { recursive: true, force: true });
 });
 

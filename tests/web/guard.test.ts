@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { describe, expect, it } from 'vitest';
 import { openDb } from '../../src/store/db.ts';
@@ -12,10 +13,13 @@ import {
 } from '../../src/web/guard.ts';
 import { SessionStore } from '../../src/web/sessions.ts';
 import { HttpError } from '../../src/web/http.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { onSqlite } from '../helpers/db.ts';
+import { openTestPlatformDb } from '../helpers/pg.ts';
 
 const T0 = '2026-10-27T10:00:00.000Z';
 const PUBLIC = 'https://dash.example.com';
+/** A former owner, this file's own on the shared Postgres platform Db (its sessions are counted). */
+const FORMER = onSqlite ? 'former@example.com' : `former-${randomUUID().slice(0, 8)}@example.com`;
 
 function fakeReq(o: { method?: string; headers?: Record<string, string>; remote?: string } = {}): IncomingMessage {
   return { method: o.method ?? 'GET', headers: o.headers ?? {}, socket: { remoteAddress: o.remote ?? '127.0.0.1' } } as unknown as IncomingMessage;
@@ -33,7 +37,8 @@ function fakeRes() {
 }
 
 function setup(o: { publicUrl?: string; port?: number; owners?: string[] } = {}) {
-  const db = openDb(':memory:');
+  // The sessions: in the tracker on SQLite, on the platform Db on Postgres.
+  const db = onSqlite ? openDb(':memory:') : openTestPlatformDb();
   const clock = manualClock(T0);
   const sessions = new SessionStore(db, clock);
   const guard = createGuard({
@@ -90,10 +95,10 @@ describe('requireOwner', () => {
 
   it('refuses and ends a session whose email is no longer an owner', async () => {
     const { sessions, db } = setup();
-    const { id } = await sessions.create('former@example.com');
+    const { id } = await sessions.create(FORMER);
     const guard = createGuard({ sessions, ownerEmails: ['owner@example.com'], publicUrl: PUBLIC, port: () => 8787 });
     expect((await rejected(guard.requireOwner(fakeReq({ headers: { cookie: `wa_session=${id}` } })))).status).toBe(401);
-    expect(rawOf(db).prepare('SELECT COUNT(*) AS n FROM web_sessions').get()).toEqual({ n: 0 });
+    expect(await db.get('SELECT COUNT(*) AS n FROM web_sessions WHERE email = ?', [FORMER])).toEqual({ n: 0 });
   });
 });
 

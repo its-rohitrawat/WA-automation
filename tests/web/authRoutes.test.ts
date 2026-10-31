@@ -2,9 +2,8 @@ import { createHash } from 'node:crypto';
 import { createServer, request } from 'node:http';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { DestinationStream } from 'pino';
-import { openDb } from '../../src/store/db.ts';
 import type { Db, Sql } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import type { ManualClock } from '../../src/util/clock.ts';
@@ -18,7 +17,8 @@ import { createWebServer } from '../../src/web/server.ts';
 import type { WebServer } from '../../src/web/server.ts';
 import { SessionStore } from '../../src/web/sessions.ts';
 import { badTokens, stubGoogleCerts } from '../helpers/googleJwt.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { onSqlite, testDb } from '../helpers/db.ts';
+import { freshPg, type FreshPg } from '../helpers/freshPg.ts';
 
 const T0 = '2026-10-27T10:00:00.000Z';
 const CLIENT_ID = 'client-123.apps.googleusercontent.com';
@@ -39,6 +39,37 @@ function capture() {
   const lines: string[] = [];
   const dest = { write: (s: string) => { lines.push(s); } } as unknown as DestinationStream;
   return { log: createLogger('info', dest), out: () => lines.join(''), records: () => lines.map((l) => JSON.parse(l) as Record<string, unknown>) };
+}
+
+// The stores, as the app keeps them: on SQLite one store holds the audit rows and the sessions (one transaction for
+// both); on Postgres the audit rows are on the customer's own Db and the sessions on the platform Db, here a database
+// of this file's own (the tests count the sessions), its web_sessions emptied at each boot.
+let fresh: FreshPg | undefined;
+let platformDb: Db | undefined;
+beforeAll(async () => {
+  if (onSqlite) return;
+  fresh = await freshPg();
+  platformDb = fresh.platformDb();
+});
+afterAll(async () => {
+  await fresh?.drop();
+});
+
+/**
+ * The customer's Db, with a switch that makes every audit_log insert fail: the audit row cannot be written, on either
+ * engine (the app's roles cannot create a trigger on Postgres).
+ */
+function withAuditSwitch(db: Db, down: { on: boolean }): Db {
+  const check = (sql: string) => {
+    if (down.on && /^\s*INSERT INTO audit_log/i.test(sql)) throw new Error('audit down');
+  };
+  const wrap = (q: Sql): Sql => ({
+    get: async (sql, p) => (check(sql), q.get(sql, p)),
+    all: async (sql, p) => (check(sql), q.all(sql, p)),
+    run: async (sql, p) => (check(sql), q.run(sql, p)),
+    exec: (sql) => q.exec(sql),
+  }) as Sql;
+  return { ...wrap(db), engine: db.engine, tx: (fn) => db.tx((q) => fn(wrap(q))), close: () => db.close() } as Db;
 }
 
 const cleanups: (() => Promise<void> | void)[] = [];
@@ -65,7 +96,10 @@ async function fakeTokenEndpoint(idToken: () => string = () => ID_TOKEN) {
 interface Boot {
   web: WebServer;
   port: number;
+  /** The sessions' Db. */
   db: Db;
+  /** From now on the audit row cannot be written. */
+  failAudit: () => void;
   clock: ManualClock;
   audit: AuditLog;
   forms: URLSearchParams[];
@@ -99,13 +133,15 @@ async function boot(
   } = {},
 ): Promise<Boot> {
   const c = capture();
-  const db = openDb(':memory:');
-  cleanups.push(() => {
-    rawOf(db).close();
-  });
+  const store = await testDb();
+  cleanups.push(() => store.close());
+  const auditDown = { on: false };
+  const customer = withAuditSwitch(store, auditDown);
+  const db = platformDb ?? customer;
+  if (platformDb) await platformDb.run('DELETE FROM web_sessions');
   const clock = manualClock(T0);
   const sessions = new SessionStore(db, clock);
-  const audit = new AuditLog(db, clock);
+  const audit = new AuditLog(customer, clock);
   const ep = await fakeTokenEndpoint(o.idToken);
   const web = createWebServer({ control: {}, env: { DASHBOARD_PORT: 0 }, log: c.log, clock, sessions });
   cleanups.push(() => web.stop());
@@ -130,7 +166,7 @@ async function boot(
     clientId: CLIENT_ID,
     ...(o.publicUrl === undefined ? {} : { publicUrl: o.publicUrl }),
     port,
-    audited: auditedWrite(db, db),
+    audited: auditedWrite(customer, db),
     ...(o.platform === undefined ? {} : { platform: o.platform }),
     ...(o.memberSignIn ? { memberSignIn: async (_ctx: unknown, who: { email: string }) => o.memberSignIn!(who.email) } : {}),
     exchange:
@@ -174,7 +210,7 @@ async function boot(
       r.on('error', reject);
       r.end();
     });
-  return { web, port: p, db, clock, audit, forms: ep.forms, ...b, lastNonce: () => nonce, out: c.out, records: c.records, req };
+  return { web, port: p, db, failAudit: () => void (auditDown.on = true), clock, audit, forms: ep.forms, ...b, lastNonce: () => nonce, out: c.out, records: c.records, req };
 }
 
 function setCookies(r: Reply): string[] {
@@ -243,7 +279,7 @@ describe('owner sign-in: happy path', () => {
     expect(form.get('redirect_uri')).toBe(q.get('redirect_uri'));
     expect(b.verified).toEqual([ID_TOKEN]);
 
-    const rows = rawOf(b.db).prepare('SELECT email, agent_label FROM web_sessions').all() as { email: string; agent_label: string }[];
+    const rows = await b.db.all<{ email: string; agent_label: string }>('SELECT email, agent_label FROM web_sessions');
     expect(rows).toEqual([{ email: OWNER, agent_label: 'Edge on Windows' }]);
     const audit = await b.audit.list({});
     expect(audit).toHaveLength(1);
@@ -273,7 +309,7 @@ describe('owner sign-in: happy path', () => {
     expect(me.name).toBe('The Owner');
     expect(me.signedInAt).toBe(T0);
     expect(me.expiresAt).toBe('2026-11-03T10:00:00.000Z');
-    const row = rawOf(b.db).prepare('SELECT csrf_hash FROM web_sessions').get() as { csrf_hash: string };
+    const row = (await b.db.get<{ csrf_hash: string }>('SELECT csrf_hash FROM web_sessions'))!;
     expect(sha256hex(me.csrf!)).toBe(row.csrf_hash);
     // The same token every time for the same session.
     const again = JSON.parse((await b.req('GET', '/dashboard/api/me', { cookie: `wa_session=${sid}` })).body) as Record<string, string>;
@@ -353,7 +389,7 @@ describe('owner sign-in: happy path', () => {
     const cb = await b.req('GET', `/dashboard/auth/callback?code=${CODE}&state=${l.state}`, { cookie: `wa_signin=${l.signin}; wa_session=${first}` });
     expect(cb.status).toBe(302);
     expect((await b.req('GET', '/dashboard/api/me', { cookie: `wa_session=${first}` })).status).toBe(401);
-    expect((rawOf(b.db).prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(1);
+    expect((await b.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM web_sessions'))!.n).toBe(1);
   });
 });
 
@@ -501,7 +537,7 @@ describe('owner sign-in with the production ID-token verifier (offline)', () => 
       expect(b.bodies.join(' ')).not.toContain(part);
     }
     expect(b.out()).not.toContain('evil@example.com');
-    expect((rawOf(b.db).prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
+    expect((await b.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM web_sessions'))!.n).toBe(0);
   });
 });
 
@@ -530,7 +566,7 @@ describe('owner sign-in: refusals', () => {
     expect(r.status).toBe(302);
     expect(r.headers.location).toBe('/dashboard?denied=1');
     expect(setCookies(r)).toContain('wa_signin=; HttpOnly; SameSite=Lax; Path=/dashboard/auth; Max-Age=0');
-    expect((rawOf(b.db).prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
+    expect((await b.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM web_sessions'))!.n).toBe(0);
     const a = await b.audit.list({});
     expect(a).toHaveLength(1);
     expect(a[0]).toMatchObject({ actor: 'st••••@gmail.com', event: 'Sign-in refused', kind: 'auth' });
@@ -598,26 +634,25 @@ describe('owner sign-in: the return path', () => {
 });
 
 describe('owner sign-in and sign-out: one transaction with the audit row', () => {
-  const failAudit = (db: Db) => rawOf(db).exec(`CREATE TRIGGER t_fail_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'audit down'); END`);
-  const count = (db: Db) => (rawOf(db).prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n;
+  const count = async (db: Db) => (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM web_sessions'))!.n;
 
   it('a sign-in whose audit row cannot be written creates no session and keeps the earlier one', async () => {
     const b = await boot();
     const first = await signIn(b);
-    failAudit(b.db);
+    b.failAudit();
     const l = await login(b);
     const cb = await b.req('GET', `/dashboard/auth/callback?code=${CODE}&state=${l.state}`, { cookie: `wa_signin=${l.signin}; wa_session=${first}` });
     expect(cb.status).toBe(302);
     expect(cb.headers.location).toBe('/dashboard?error=signin');
     expect(setCookies(cb).some((c) => c.startsWith('wa_session='))).toBe(false);
-    expect(count(b.db)).toBe(1);
+    expect(await count(b.db)).toBe(1);
     expect((await b.req('GET', '/dashboard/api/me', { cookie: `wa_session=${first}` })).status).toBe(200);
     expect(b.out()).not.toContain('audit down');
   });
 
   it('a refused sign-in whose audit row cannot be written still goes to the sign-in error page, with no session', async () => {
     const b = await boot();
-    failAudit(b.db);
+    b.failAudit();
     b.claims.email = 'Stranger@Gmail.com';
     const l = await login(b);
     const cb = await callback(b, l.state, l.signin);
@@ -625,7 +660,7 @@ describe('owner sign-in and sign-out: one transaction with the audit row', () =>
     expect(cb.headers.location).toBe('/dashboard?error=signin');
     expect(setCookies(cb).some((c) => c.startsWith('wa_session='))).toBe(false);
     expect(setCookies(cb)).toContain('wa_signin=; HttpOnly; SameSite=Lax; Path=/dashboard/auth; Max-Age=0');
-    expect(count(b.db)).toBe(0);
+    expect(await count(b.db)).toBe(0);
     expect(b.records().filter((x) => x.msg === 'dashboard sign-in failed').map((x) => x.code)).toEqual(['audit']);
     expect(b.out()).not.toContain('audit down');
     expect(b.out().toLowerCase()).not.toContain('stranger');
@@ -636,10 +671,10 @@ describe('owner sign-in and sign-out: one transaction with the audit row', () =>
     const b = await boot();
     const sid = await signIn(b);
     const me = JSON.parse((await b.req('GET', '/dashboard/api/me', { cookie: `wa_session=${sid}` })).body) as { csrf: string };
-    failAudit(b.db);
+    b.failAudit();
     const r = await b.req('POST', '/dashboard/auth/logout', { cookie: `wa_session=${sid}`, origin: `http://127.0.0.1:${b.port}`, 'x-csrf-token': me.csrf });
     expect(r.status).toBe(500);
-    expect(count(b.db)).toBe(1);
+    expect(await count(b.db)).toBe(1);
     expect((await b.req('GET', '/dashboard/api/me', { cookie: `wa_session=${sid}` })).status).toBe(200);
   });
 });
@@ -701,7 +736,7 @@ describe('owner sign-out', () => {
     expect(r.status).toBe(204);
     expect(r.body).toBe('');
     expect(setCookies(r)).toEqual(['wa_session=; HttpOnly; SameSite=Lax; Path=/dashboard; Max-Age=0']);
-    expect((rawOf(b.db).prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
+    expect((await b.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM web_sessions'))!.n).toBe(0);
     expect((await b.req('GET', '/dashboard/api/me', { cookie: `wa_session=${sid}` })).status).toBe(401);
     const events = (await b.audit.list({})).map((e) => [e.actor, e.event, e.kind]);
     expect(events).toContainEqual([OWNER, 'Signed out', 'auth']);

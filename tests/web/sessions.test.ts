@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FOUNDER_TENANT_ID } from '../../src/config/env.ts';
+import { createTenant } from '../../src/platform/store.ts';
 import { openDb } from '../../src/store/db.ts';
 import type { Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
@@ -16,20 +17,38 @@ import {
   secureFor,
   sessionCookie,
 } from '../../src/web/sessions.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { onSqlite } from '../helpers/db.ts';
+import { freshPg, type FreshPg } from '../helpers/freshPg.ts';
 
 const T0 = '2026-10-27T10:00:00.000Z';
 const HOUR = 3_600_000;
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 
+// The sessions are where the app keeps them: in the tracker on SQLite (a new in-memory store for each test), on the
+// platform Db on Postgres. There, a database of this file's own, its web_sessions emptied before each test, since the
+// tests count the rows.
+let fresh: FreshPg | undefined;
+let platformDb: Db | undefined;
+beforeAll(async () => {
+  if (onSqlite) return;
+  fresh = await freshPg();
+  platformDb = fresh.platformDb();
+});
+afterAll(async () => {
+  await fresh?.drop();
+});
+beforeEach(async () => {
+  await platformDb?.run('DELETE FROM web_sessions');
+});
+
 function setup() {
-  const db = openDb(':memory:');
+  const db = platformDb ?? openDb(':memory:');
   const clock = manualClock(T0);
   return { db, clock, store: new SessionStore(db, clock) };
 }
 
 function rows(db: Db) {
-  return rawOf(db).prepare('SELECT * FROM web_sessions').all() as Record<string, string | null>[];
+  return db.all<Record<string, string | null>>('SELECT * FROM web_sessions');
 }
 
 describe('SessionStore: create and get', () => {
@@ -41,7 +60,7 @@ describe('SessionStore: create and get', () => {
     expect(id).not.toBe(csrf);
     expect(await store.get(id)).toEqual({
       email: 'owner@example.com',
-      tenantId: FOUNDER_TENANT_ID, // SQLite: every session is the founder's
+      tenantId: FOUNDER_TENANT_ID, // no customer named: the founder's (on SQLite every session is)
       csrfHash: sha(csrf),
       createdAt: T0,
       expiresAt: '2026-11-03T10:00:00.000Z',
@@ -50,10 +69,26 @@ describe('SessionStore: create and get', () => {
     expect(IDLE_TIMEOUT_MS).toBe(24 * HOUR);
   });
 
-  it("on SQLite only the founder's session can be made: a customer's is refused, nothing written (S4.8)", async () => {
+  it.runIf(onSqlite)("on SQLite only the founder's session can be made: a customer's is refused, nothing written (S4.8)", async () => {
     const { store, db } = setup();
     await expect(store.create('owner@example.com', undefined, undefined, '00000000-0000-4000-8000-0000000000c2')).rejects.toThrow('customer sessions exist on Postgres only');
     expect(await db.get('SELECT COUNT(*) AS n FROM web_sessions')).toEqual({ n: 0 });
+  });
+
+  it.runIf(!onSqlite)("on Postgres a customer's session is kept with its customer, read back as that customer's only (S4.8)", async () => {
+    const { store, db } = setup();
+    const customer = (await createTenant(db, { name: 'Acme', status: 'active', at: T0 })).id;
+    const mine = await store.create('owner@acme.example', 'Test', undefined, customer);
+    const founder = await store.create('owner@example.com', 'Test');
+    expect((await store.get(mine.id))?.tenantId).toBe(customer);
+    expect((await store.get(founder.id))?.tenantId).toBe(FOUNDER_TENANT_ID);
+    expect(await db.all('SELECT email, tenant_id AS t FROM web_sessions ORDER BY email')).toEqual([
+      { email: 'owner@acme.example', t: customer },
+      { email: 'owner@example.com', t: FOUNDER_TENANT_ID },
+    ]);
+    // A customer that does not exist cannot be named: the database refuses it, nothing written.
+    await expect(store.create('x@example.com', undefined, undefined, '00000000-0000-4000-8000-0000000000ff')).rejects.toThrow();
+    expect(await db.get("SELECT COUNT(*) AS n FROM web_sessions WHERE email = 'x@example.com'")).toEqual({ n: 0 });
   });
 
   it('gives a fresh random id and token every time', async () => {
@@ -81,11 +116,11 @@ describe('SessionStore: create and get', () => {
   it('stores only SHA-256 hashes: no column holds the raw id or CSRF token', async () => {
     const { db, store } = setup();
     const { id, csrf } = await store.create('owner@example.com', 'Safari on Mac');
-    const [row] = rows(db);
+    const [row] = await rows(db);
     expect(row!.id_hash).toBe(sha(id));
     expect(row!.csrf_hash).toBe(sha(csrf));
     expect(row!.agent_label).toBe('Safari on Mac');
-    const all = JSON.stringify(rows(db));
+    const all = JSON.stringify(await rows(db));
     expect(all).not.toContain(id);
     expect(all).not.toContain(csrf);
     expect(hashToken(id)).toBe(sha(id));
@@ -94,7 +129,7 @@ describe('SessionStore: create and get', () => {
   it('keeps the browser label short and on one line', async () => {
     const { db, store } = setup();
     await store.create('owner@example.com', `  Chrome\non\tLinux ${'x'.repeat(200)}  `);
-    const label = rows(db)[0]!.agent_label!;
+    const label = (await rows(db))[0]!.agent_label!;
     expect(label.length).toBeLessThanOrEqual(60);
     expect(label).toMatch(/^Chrome on Linux x+$/);
   });
@@ -102,7 +137,7 @@ describe('SessionStore: create and get', () => {
   it('stores no label when none is given', async () => {
     const { db, store } = setup();
     await store.create('owner@example.com');
-    expect(rows(db)[0]!.agent_label).toBeNull();
+    expect((await rows(db))[0]!.agent_label).toBeNull();
   });
 
   it('an unknown, empty or malformed id gives undefined without throwing', async () => {
@@ -116,17 +151,17 @@ describe('SessionStore: create and get', () => {
   it('a malformed id is refused before any database work', async () => {
     const { db, store } = setup();
     await store.create('owner@example.com');
-    const prepare = vi.spyOn(rawOf(db), 'prepare');
+    const calls = (['get', 'all', 'run', 'tx'] as const).map((m) => vi.spyOn(db, m));
     expect(await store.get('A'.repeat(10_000))).toBeUndefined();
     await store.destroy('A'.repeat(10_000));
-    expect(prepare).not.toHaveBeenCalled();
-    prepare.mockRestore();
+    for (const c of calls) expect(c).not.toHaveBeenCalled();
+    for (const c of calls) c.mockRestore();
   });
 
   it('removes the Unicode line breaks and bidi controls from the label', async () => {
     const { db, store } = setup();
     await store.create('owner@example.com', 'Edge\u2028on\u0085Windows\u202e evil');
-    expect(rows(db)[0]!.agent_label).toBe('Edge on Windows evil');
+    expect((await rows(db))[0]!.agent_label).toBe('Edge on Windows evil');
   });
 });
 
@@ -184,16 +219,16 @@ describe('SessionStore: expiry and idle timeout', () => {
   it('writes last_seen_at at most once a minute', async () => {
     const { db, store, clock } = setup();
     const { id } = await store.create('owner@example.com');
-    const seen = () => rows(db)[0]!.last_seen_at;
+    const seen = async () => (await rows(db))[0]!.last_seen_at;
     clock.advance(30_000);
     await store.get(id);
-    expect(seen()).toBe(T0);
+    expect(await seen()).toBe(T0);
     clock.advance(29_999);
     await store.get(id);
-    expect(seen()).toBe(T0);
+    expect(await seen()).toBe(T0);
     clock.advance(1);
     await store.get(id);
-    expect(seen()).toBe('2026-10-27T10:01:00.000Z');
+    expect(await seen()).toBe('2026-10-27T10:01:00.000Z');
   });
 
   it('an expired or idle session row is removed when it is looked up', async () => {
@@ -201,16 +236,16 @@ describe('SessionStore: expiry and idle timeout', () => {
     const { id } = await store.create('owner@example.com');
     clock.advance(IDLE_TIMEOUT_MS + 1);
     expect(await store.get(id)).toBeUndefined();
-    expect(rows(db)).toHaveLength(0);
+    expect(await rows(db)).toHaveLength(0);
   });
 
   it('fails closed: a row whose times cannot be read is refused and removed', async () => {
     for (const column of ['expires_at', 'last_seen_at']) {
       const { db, store } = setup();
       const { id } = await store.create('owner@example.com');
-      rawOf(db).prepare(`UPDATE web_sessions SET ${column} = ?`).run('not a date');
+      await db.run(`UPDATE web_sessions SET ${column} = ?`, ['not a date']);
       expect(await store.get(id), column).toBeUndefined();
-      expect(rows(db), column).toHaveLength(0);
+      expect(await rows(db), column).toHaveLength(0);
     }
   });
 });
@@ -223,7 +258,7 @@ describe('SessionStore: destroy and purge', () => {
     await store.destroy(a.id);
     expect(await store.get(a.id)).toBeUndefined();
     expect(await store.get(b.id)).toBeDefined();
-    expect(rows(db)).toHaveLength(1);
+    expect(await rows(db)).toHaveLength(1);
     await expect(store.destroy('not-a-session')).resolves.toBeUndefined();
   });
 
@@ -245,7 +280,7 @@ describe('SessionStore: destroy and purge', () => {
     const live = await store.create('live@example.com');
     clock.advance(2 * HOUR);
     expect(await store.purgeExpired()).toBe(1);
-    expect(rows(db).map((r) => r.email)).toEqual(['live@example.com']);
+    expect((await rows(db)).map((r) => r.email)).toEqual(['live@example.com']);
     expect(await store.get(live.id)).toBeDefined();
     expect(await store.purgeExpired()).toBe(0);
   });
@@ -263,10 +298,10 @@ describe('SessionStore: destroy and purge', () => {
     at(SESSION_TTL_MS - 1);
     expect(await store.get(id)).toBeDefined();
     expect(await store.purgeExpired()).toBe(0);
-    expect(Date.parse(rows(db)[0]!.last_seen_at!)).toBeGreaterThan(Date.parse(T0) + SESSION_TTL_MS - IDLE_TIMEOUT_MS);
+    expect(Date.parse((await rows(db))[0]!.last_seen_at!)).toBeGreaterThan(Date.parse(T0) + SESSION_TTL_MS - IDLE_TIMEOUT_MS);
     at(SESSION_TTL_MS);
     expect(await store.purgeExpired()).toBe(1);
-    expect(rows(db)).toHaveLength(0);
+    expect(await rows(db)).toHaveLength(0);
   });
 });
 
@@ -311,7 +346,9 @@ describe('SessionStore: onEnd (the assistant forgets a chat that ended)', () => 
 });
 
 describe('a Postgres session without its customer (isolation review F4)', () => {
-  it('is ended at its next read, never taken for the founder’s', async () => {
+  // SQLite only: Postgres's web_sessions.tenant_id is NOT NULL (the next test), so this is the code's own defence, on a
+  // store that says it is Postgres.
+  it.runIf(onSqlite)('is ended at its next read, never taken for the founder’s', async () => {
     const raw = openDb(':memory:');
     await raw.exec('ALTER TABLE web_sessions ADD COLUMN tenant_id TEXT');
     const pgLike: Db = {
@@ -324,5 +361,12 @@ describe('a Postgres session without its customer (isolation review F4)', () => 
     expect(await store.get(id)).toBeUndefined();
     expect(await raw.get('SELECT COUNT(*) AS n FROM web_sessions')).toEqual({ n: 0 });
     await raw.close();
+  });
+
+  it.runIf(!onSqlite)('cannot exist on Postgres: the database refuses a session row without its customer', async () => {
+    const { db, store } = setup();
+    await store.create('owner@example.com', 'Test');
+    await expect(db.run('UPDATE web_sessions SET tenant_id = NULL')).rejects.toThrow(/null value|not-null/);
+    expect((await rows(db))[0]!.tenant_id).toBe(FOUNDER_TENANT_ID);
   });
 });
