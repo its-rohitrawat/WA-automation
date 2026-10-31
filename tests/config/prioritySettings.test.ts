@@ -6,8 +6,7 @@ import { ControlError, type AuditEntry } from '../../src/control/errors.ts';
 import type { Db } from '../../src/store/db.ts';
 import { getKv } from '../../src/store/kv.ts';
 import { manualClock } from '../../src/util/clock.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { NOW, rows as dbRows, seededDb } from '../helpers/db.ts';
 
 const OWNER = 'owner@example.com';
 const EMPTY = { critical: [], major: [], medium: [], low: [] };
@@ -20,7 +19,7 @@ async function setup() {
   return { db, clock, store, audits, audit: async (_q: unknown, e: AuditEntry) => { audits.push(e); } };
 }
 
-const rows = (db: Db) => rawOf(db).prepare('SELECT k, v, updated_by AS by FROM settings ORDER BY k').all();
+const rows = (db: Db) => dbRows(db, 'SELECT k, v, updated_by AS by FROM settings ORDER BY k');
 
 async function refusal(fn: () => unknown): Promise<ControlError> {
   try {
@@ -50,7 +49,7 @@ describe('PrioritySettings', () => {
     expect(view.source.priorityKeywords).toBe('dashboard');
     expect(audits).toEqual([{ actor: OWNER, event: 'settings.priorityKeywords', kind: 'config', detail: 'Priority keywords saved (Critical 2, Major 1, Medium 0, Low 1)' }]);
     expect(JSON.stringify(audits)).not.toContain('Site down');
-    expect(rows(db)).toEqual([{ k: 'priorityKeywords', v: JSON.stringify(view.keywords), by: OWNER }]);
+    expect(await rows(db)).toEqual([{ k: 'priorityKeywords', v: JSON.stringify(view.keywords), by: OWNER }]);
   });
 
   it('lets the owner empty every list', async () => {
@@ -101,7 +100,7 @@ describe('PrioritySettings', () => {
       expect(e.message).toBe(message);
     }
     expect(audits).toEqual([]);
-    expect(rows(db)).toEqual([]);
+    expect(await rows(db)).toEqual([]);
   });
 
   it('counts repeats once toward the limit', () => {
@@ -111,7 +110,7 @@ describe('PrioritySettings', () => {
 
   it('falls back to the defaults when a stored row is damaged', async () => {
     const { db, store } = await setup();
-    rawOf(db).prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('priorityKeywords', '{\"critical\":5}', ?, 'x'), ('sentimentEnabled', 'nope', ?, 'x')").run(NOW, NOW);
+    await db.run("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('priorityKeywords', '{\"critical\":5}', ?, 'x'), ('sentimentEnabled', 'nope', ?, 'x')", [NOW, NOW]);
     await store.load(); // written behind the store's back: it reads them again
     expect(store.get()).toEqual({ keywords: DEFAULT_KEYWORDS, sentimentEnabled: false });
     expect((await store.view()).source).toEqual({ priorityKeywords: 'default', sentimentEnabled: 'default' });
@@ -120,7 +119,7 @@ describe('PrioritySettings', () => {
   it('writes nothing when the audit row cannot be written', async () => {
     const { db, store } = await setup();
     await expect(store.set('sentimentEnabled', true, OWNER, () => { throw new Error('disk full'); })).rejects.toThrow('disk full');
-    expect(rows(db)).toEqual([]);
+    expect(await rows(db)).toEqual([]);
     expect(await readSentimentEnabled(db)).toBe(false);
   });
 });
