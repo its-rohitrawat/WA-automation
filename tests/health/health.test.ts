@@ -233,8 +233,12 @@ describe('Health', () => {
     expect(await readHealthSnapshot(db)).toBeUndefined();
     h.setWhatsApp(status('open'));
     h.markPublishFailed({ step: 'drive', auth: false });
-    await vi.waitFor(async () => expect((await readHealthSnapshot(db))?.publishFailingSince).toBe('2026-10-19T08:00:00.000Z'));
-    const snap = await readHealthSnapshot(db);
+    // One read, the one that shows the change: a write that lands late may show the one before it for a moment.
+    let snap: Awaited<ReturnType<typeof readHealthSnapshot>>;
+    await vi.waitFor(async () => {
+      snap = await readHealthSnapshot(db);
+      expect(snap?.publishFailingSince).toBe('2026-10-19T08:00:00.000Z');
+    });
     expect(snap).toEqual(JSON.parse(JSON.stringify(h.snapshot())));
   });
 });

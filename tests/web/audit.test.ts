@@ -20,9 +20,12 @@ describe('AuditLog.record', () => {
     await audit.record({ actor: 'owner@example.com', event: 'Signed in', kind: 'auth', detail: 'Edge on Windows', requestId: 'a1b2c3d4e5f6' });
     clock.advance(60_000);
     await audit.record({ actor: 'agent', event: 'Tracker published', kind: 'ops', detail: '3 clients' });
-    expect(await audit.list()).toEqual([
-      { id: 2, at: '2026-10-27T10:01:00.000Z', actor: 'agent', event: 'Tracker published', kind: 'ops', detail: '3 clients' },
-      { id: 1, at: T0, actor: 'owner@example.com', event: 'Signed in', kind: 'auth', detail: 'Edge on Windows', requestId: 'a1b2c3d4e5f6' },
+    const list = await audit.list();
+    // The ids are the database's (on Postgres one sequence for every customer): newest first, whatever their values.
+    expect(list[0]!.id).toBeGreaterThan(list[1]!.id);
+    expect(list.map(({ id: _id, ...rest }) => rest)).toEqual([
+      { at: '2026-10-27T10:01:00.000Z', actor: 'agent', event: 'Tracker published', kind: 'ops', detail: '3 clients' },
+      { at: T0, actor: 'owner@example.com', event: 'Signed in', kind: 'auth', detail: 'Edge on Windows', requestId: 'a1b2c3d4e5f6' },
     ]);
   });
 
@@ -98,13 +101,15 @@ describe('AuditLog.list', () => {
   });
 
   it('pages with before (an entry id) and limit', async () => {
-    const { audit } = await filled();
+    const { audit, db } = await filled();
     const first = await audit.list({ limit: 10 });
     expect(first.map((e) => e.event)).toEqual(['E129', 'E128', 'E127', 'E126', 'E125', 'E124', 'E123', 'E122', 'E121', 'E120']);
     const second = await audit.list({ limit: 10, before: first.at(-1)!.id });
     expect(second[0]!.event).toBe('E119');
     expect(second).toHaveLength(10);
-    const last = await audit.list({ limit: 100, before: 3 });
+    // Before E2's own id (on SQLite 3; on Postgres whatever the shared sequence gave it).
+    const e2 = (await db.get<{ id: number }>("SELECT id FROM audit_log WHERE event = 'E2'"))!.id;
+    const last = await audit.list({ limit: 100, before: e2 });
     expect(last.map((e) => e.event)).toEqual(['E1', 'E0']);
   });
 
