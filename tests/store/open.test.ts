@@ -28,7 +28,7 @@ function fakePool(version: number | null, collation = 'C', catalog: CatalogRow[]
         query: async (text: string) => {
           pool.sql.push(text);
           if (/pg_database/.test(text)) return { rows: [{ collate: collation, ctype: collation }], rowCount: 1 };
-          if (isAccessQuery(text)) return { rows: catalog, rowCount: catalog.length };
+          if (isAccessQuery(text)) return { rows: catalog as unknown as Record<string, unknown>[], rowCount: catalog.length };
           return { rows: /wa_schema_version/.test(text) ? [{ v: version }] : [], rowCount: 0 };
         },
         release: () => {},
