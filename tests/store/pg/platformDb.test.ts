@@ -84,6 +84,8 @@ const ALLOWED: Record<string, RegExp[]> = {
     /^const rows = await Promise\.all\(ids\.map\(\(id\) => getTenant\(platformDb, id\)\)\);$/,
     // Each mount's session writes with their audit row (sign-out everywhere): that runtime's Db, then this one.
     /^router, guard, sessions, audit: auditLog, actions, secureFor, port, audited: auditedWrite\(db, platformDb\),$/,
+    // A customer's sign-out (security review S3): the audit row on its own Db, then the session on this one.
+    /^return \{ audit: new AuditLog\(own, clock\), audited: auditedWrite\(own, platformDb\) \};$/,
   ],
 };
 
