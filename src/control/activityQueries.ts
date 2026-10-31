@@ -89,7 +89,9 @@ function sourcesFor(kind: ActivityFilter | 'work', cursor: (at: string, src: Sou
   const meetings = kind === 'all' ? [...MEET_STATUSES, ...ISSUE_STATUSES] : kind === 'meet' ? MEET_STATUSES : kind === 'issue' ? ISSUE_STATUSES : null;
   // A no-access meeting matched as internal keeps no title and needs nothing: it is left out, as internal ones are.
   if (meetings) {
-    out.push(branch('updated_at', 'm', 'meetings', `status IN (${list(meetings)}) AND NOT (status = 'no_access' AND COALESCE(note = '${FOUND_INTERNAL_NOTE}', 0))`));
+    // The note test as 0 or 1 (a NULL note is 0), as both engines run it: Postgres cannot COALESCE a comparison with 0.
+    out.push(branch('updated_at', 'm', 'meetings',
+      `status IN (${list(meetings)}) AND NOT (status = 'no_access' AND CASE WHEN note = '${FOUND_INTERNAL_NOTE}' THEN 1 ELSE 0 END = 1)`));
   }
   const audit = kind === 'all'
     ? `kind IN ('connection', 'config') OR (actor = 'agent' AND event IN ('${PUBLISHED}', '${PUBLISH_FAILED}', '${HISTORY_READ}'))`

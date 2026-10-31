@@ -113,7 +113,7 @@ function stageLabel(
 const SELECT_SQL = `SELECT m.id, m.title, m.started_at AS startedAt, COALESCE(m.audio_seconds, m.drive_seconds) AS seconds, m.conference,
     c.code AS clientCode, c.name AS clientName, m.status, m.stage, m.error_code AS errorCode, m.next_attempt_at AS nextAttemptAt,
     m.doc_file_id AS docFileId, (SELECT COUNT(*) FROM tasks t WHERE t.meeting_id = m.id) AS actionItems,
-    COALESCE(m.note = '${FOUND_INTERNAL_NOTE}', 0) AS foundInternal
+    CASE WHEN m.note = '${FOUND_INTERNAL_NOTE}' THEN 1 ELSE 0 END AS foundInternal
   FROM meetings m LEFT JOIN clients c ON c.id = m.client_id`;
 
 interface RawRow {

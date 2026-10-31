@@ -4,8 +4,7 @@ import { listDashboardMeetings, meetingDetail, meetingDocUrl, parseMeetingList }
 import type { Db } from '../../src/store/db.ts';
 import { insertFound, type MeetingStage, type MeetingStatus } from '../../src/store/meetings.ts';
 import { createTask } from '../../src/store/tasks.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { idOf, NOW, seededDb } from '../helpers/db.ts';
 
 const now = new Date(NOW);
 const DOC = 'abcdefghij_KLMNOP-123';
@@ -32,12 +31,12 @@ async function meeting(db: Db, o: Over = {}): Promise<number> {
   const id = (await insertFound(db, {
     recording: `conferenceRecords/c${n}/recordings/r${n}`, conference: `conferenceRecords/c${n}`, driveFileId: `drive${n}`, meetingCode: null,
     title: internal ? '' : (o.title ?? `Meeting ${n}`), startedAt: o.startedAt ?? `2026-10-1${n % 10}T05:00:00.000Z`, endedAt: null,
-    attendees: [], participants: [], clientId: o.clientId === undefined ? (status === 'unassigned' || internal ? null : 1) : o.clientId,
+    attendees: [], participants: [], clientId: o.clientId === undefined ? (status === 'unassigned' || internal ? null : await idOf(db, 'SHA')) : o.clientId,
     matchKind: 'title', status, driveSeconds: o.seconds === undefined ? 1800 : o.seconds, createdAt: NOW,
   }))!;
-  rawOf(db).prepare(`UPDATE meetings SET stage = COALESCE(?, stage), audio_seconds = ?, doc_file_id = ?, summary = ?, error_code = ?, next_attempt_at = ?
-    WHERE id = ?`).run(o.stage ?? (status === 'done' ? 'tracked' : null), o.audioSeconds ?? null, o.doc ?? null, o.summary ?? null, o.errorCode ?? null,
-    o.nextAttemptAt ?? null, id);
+  await db.run(`UPDATE meetings SET stage = COALESCE(?, stage), audio_seconds = ?, doc_file_id = ?, summary = ?, error_code = ?, next_attempt_at = ?
+    WHERE id = ?`, [o.stage ?? (status === 'done' ? 'tracked' : null), o.audioSeconds ?? null, o.doc ?? null, o.summary ?? null, o.errorCode ?? null,
+    o.nextAttemptAt ?? null, id]);
   return id;
 }
 
@@ -82,7 +81,7 @@ describe('listDashboardMeetings', () => {
   it('returns the row shape: minutes from the audio length when known, the client, the account label and the doc link', async () => {
     const db = await seededDb();
     const id = await meeting(db, { title: 'Weekly <b>sync</b>', seconds: 1800, audioSeconds: 1500, doc: DOC, summary: SUMMARY });
-    await createTask(db, { clientId: 1, side: 'us', title: 'Send logo', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-18',
+    await createTask(db, { clientId: await idOf(db, 'SHA'), side: 'us', title: 'Send logo', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-18',
       deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'meeting', meetingId: id }, NOW);
     expect((await list(db, {}, (c) => (c === `conferenceRecords/c${n}` ? 'company2' : null))).rows).toEqual([{
       id, title: 'Weekly <b>sync</b>', when: `2026-10-1${n % 10}T05:00:00.000Z`, minutes: 25, account: 'company2',
@@ -150,9 +149,9 @@ describe('meetingDetail', () => {
     const db = await seededDb();
     const id = await meeting(db, { summary: SUMMARY, doc: DOC });
     const other = await meeting(db);
-    await createTask(db, { clientId: 1, side: 'us', title: 'Send logo', category: 'design', priority: 'major', assignedTo: 'Rahul', askedBy: null, raisedOn: '2026-10-18',
+    await createTask(db, { clientId: await idOf(db, 'SHA'), side: 'us', title: 'Send logo', category: 'design', priority: 'major', assignedTo: 'Rahul', askedBy: null, raisedOn: '2026-10-18',
       deadline: '2026-10-01', latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'meeting', meetingId: id }, NOW);
-    await createTask(db, { clientId: 1, side: 'us', title: 'Other', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-18',
+    await createTask(db, { clientId: await idOf(db, 'SHA'), side: 'us', title: 'Other', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-18',
       deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'meeting', meetingId: other }, NOW);
     const d = (await meetingDetail(db, String(id), now))!;
     expect(d).toMatchObject({ id, status: 'done', docUrl: `https://docs.google.com/document/d/${DOC}/edit` });
@@ -182,7 +181,7 @@ describe('meeting review fixes', () => {
   it('labels a no-access meeting found as internal like the CLI does', async () => {
     const db = await seededDb();
     const id = await meeting(db, { status: 'no_access', clientId: null, title: '' });
-    rawOf(db).prepare("UPDATE meetings SET note = 'found_internal' WHERE id = ?").run(id);
+    await db.run("UPDATE meetings SET note = 'found_internal' WHERE id = ?", [id]);
     expect((await list(db)).rows[0]!.stageLabel).toBe('Internal, no access to the recording');
   });
 
