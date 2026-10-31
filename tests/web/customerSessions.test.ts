@@ -70,6 +70,9 @@ let web: WebServer;
 let base: string;
 let founder: { id: string; csrf: string };
 let customer: { id: string; csrf: string };
+/** The customer's own Db (on SQLite a store of its own, so its audit log is not the founder's). */
+let customerDb: (tenantId: string) => Db;
+let customerStore: Db | undefined;
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'wa-customer-'));
@@ -80,12 +83,12 @@ beforeAll(async () => {
     DASHBOARD_ENABLED: 'true', DASHBOARD_OWNER_EMAILS: OWNER,
     DASHBOARD_GOOGLE_CLIENT_ID: 'placeholder-client', DASHBOARD_GOOGLE_CLIENT_SECRET: 'placeholder-secret',
   });
-  let customerDb: (tenantId: string) => Db;
   if (onSqlite) {
     db = await seededDb();
     await ensurePlatformSchema(db);
     platformDb = withMembershipSwitch(asPostgres(db));
-    customerDb = () => db;
+    const own = (customerStore = await seededDb());
+    customerDb = () => own;
   } else {
     const f = (fresh = await freshPg());
     db = f.tenantDb(FOUNDER_TENANT_ID);
@@ -117,6 +120,7 @@ afterAll(async () => {
   await web?.stop();
   await rt?.stop();
   await db?.close();
+  await customerStore?.close();
   await fresh?.drop();
   rmSync(dir, { recursive: true, force: true });
 }, 60_000);
@@ -283,7 +287,16 @@ describe('the membership decides, at every request (S4.8)', () => {
   });
 
   it('a customer signs out like the founder: 204, and the session is gone', async () => {
+    const signedOut = async (d: Db) =>
+      (await d.get<{ n: number }>("SELECT CAST(COUNT(*) AS INTEGER) AS n FROM audit_log WHERE event = 'Signed out' AND actor = ?", [CUSTOMER_EMAIL]))!.n;
+    const [founderBefore, ownBefore] = [await signedOut(db), await signedOut(customerDb(CUSTOMER))];
     expect((await call('POST', '/dashboard/auth/logout', customer)).status).toBe(204);
     expect((await call('GET', '/dashboard/api/me', customer)).status).toBe(401);
+    // Written in the customer's own audit log, never the founder's (security review S3).
+    expect(await signedOut(customerDb(CUSTOMER))).toBe(ownBefore + 1);
+    expect(await signedOut(db)).toBe(founderBefore);
+    const shown = await call('GET', '/dashboard/api/audit', founder);
+    expect(shown.status).toBe(200);
+    expect(shown.text).not.toContain('Signed out');
   });
 });

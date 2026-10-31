@@ -139,6 +139,14 @@ export async function startDashboard(o: {
     ...publicUrl,
     port,
     audited: auditedWrite(o.db, platformDb),
+    // A customer's sign-out goes in its own audit log (its Db first, then the platform's), as a sign-in and a switch do.
+    ...(o.customerDb ? {
+      auditFor: (s: OwnerSession) => {
+        if (s.tenantId === FOUNDER_TENANT_ID) return undefined;
+        const own = o.customerDb!(s.tenantId);
+        return { audit: new AuditLog(own, clock), audited: auditedWrite(own, platformDb) };
+      },
+    } : {}),
     platform: o.platform === true,
     // A member signs in to its first live workspace, never the founder's; with several, it then picks one (the switch).
     ...(o.customerSessions && o.customerDb ? {

@@ -3,7 +3,7 @@ import type { Clock } from '../../util/clock.ts';
 import type { Logger } from '../../util/logger.ts';
 import type { AuditLog } from '../audit.ts';
 import { clientAddress } from '../guard.ts';
-import type { Guard, RateLimiter } from '../guard.ts';
+import type { Guard, OwnerSession, RateLimiter } from '../guard.ts';
 import { HttpError, parseCookies, readJson, sendJson, serializeCookie } from '../http.ts';
 import type { RequestContext, Router } from '../router.ts';
 import {
@@ -70,6 +70,11 @@ export interface AuthRouteDeps {
   port: () => number | undefined;
   /** Session writes with their audit row, the audit row first (production: `auditedWrite(db, platformDb)`). */
   audited: AuditedWrite;
+  /**
+   * A customer's session: its own workspace's audit log and audited write, so its sign-out is written in its own Db, never
+   * the founder's (security review S3). undefined (or absent): `audit` and `audited`, the founder's.
+   */
+  auditFor?: (s: OwnerSession) => { audit: AuditLog; audited: AuditedWrite } | undefined;
   /**
    * A member of a customer's workspace signing in through the dashboard (F7; Postgres with the platform on): its own
    * session in its workspace (the audit row first, in its Db), or null when the email is no member. Absent: owners only.
@@ -253,8 +258,11 @@ export function registerAuthRoutes(d: AuthRouteDeps): void {
     const s = await d.guard.requireSession(req);
     d.guard.requireCsrf(req, s);
     const label = browserLabel(typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : undefined);
-    await d.audited(
-      (q) => d.audit.record({ actor: s.email, event: 'Signed out', kind: 'auth', detail: label, requestId: ctx.requestId }, q),
+    // In the session's own workspace's log: a customer's sign-out never reaches the founder's (security review S3).
+    const own = d.auditFor?.(s);
+    const audit = own?.audit ?? d.audit;
+    await (own?.audited ?? d.audited)(
+      (q) => audit.record({ actor: s.email, event: 'Signed out', kind: 'auth', detail: label, requestId: ctx.requestId }, q),
       (q) => d.sessions.destroy(s.id, q),
     );
     names.delete(hashToken(s.id));
