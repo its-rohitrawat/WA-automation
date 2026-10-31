@@ -33,7 +33,7 @@ export interface ModelsLister {
 /**
  * The production tester: one models list call with the key, no retries, a 10 s limit. 401 and 403 mean the key is
  * refused; anything else (a 5xx, a timeout, no network) means Anthropic did not answer, and nothing is stored.
- * main.ts builds it as modelsListTester((k) => new Anthropic({ apiKey: k, fetch: keepConnectTimeoutCode })).
+ * platformSupervisor.ts builds it on a client no founder environment setting reaches (src/brain/anthropicIsolated.ts).
  */
 export function modelsListTester(make: (apiKey: string) => ModelsLister, timeoutMs = 10_000): KeyTester {
   return async (apiKey) => {

@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { createApp, type App, type AppMeetingsDeps, type AppReportDeps } from '../app.ts';
+import { isolatedClientOptions } from '../brain/anthropicIsolated.ts';
 import { ClaudeAssistantClient } from '../brain/assistantClient.ts';
 import { ClaudeClient, keepConnectTimeoutCode } from '../brain/claudeClient.ts';
 import { ClaudeMediaClient } from '../brain/mediaClient.ts';
@@ -103,7 +104,7 @@ export function sttEnvFor(env: Env, founder: boolean): Env {
  */
 async function meetingDeps(
   o: {
-    env: Env; db: Db; api: LiveMeetingsApi; apiKey: string; prices: Prices; configs: ClientConfig[]; log: Logger;
+    env: Env; db: Db; api: LiveMeetingsApi; apiKey: string; isolated: boolean; prices: Prices; configs: ClientConfig[]; log: Logger;
     /** The local engine shared with voice notes (sharedLocalEngine); undefined unless a setting is local. */
     localEngine: LocalEngine | undefined;
   },
@@ -126,7 +127,7 @@ async function meetingDeps(
     api,
     // Empty with one account, so that account's refusal still pauses meetings as before.
     lostAccounts: () => api.lostAccounts(),
-    ai: new ClaudeMeetingClient({ apiKey: o.apiKey, model: env.AI_MODEL, prices: o.prices }),
+    ai: new ClaudeMeetingClient({ apiKey: o.apiKey, model: env.AI_MODEL, prices: o.prices, isolated: o.isolated }),
     transcriber,
     sttProblem,
     ffmpeg,
@@ -334,6 +335,9 @@ export async function buildCustomerRuntime(
 
     const prices = pricesFromEnv(env);
     const apiKey = requireKey(env, 'ANTHROPIC_API_KEY');
+    // A customer's Claude clients take nothing from the founder's environment (src/brain/anthropicIsolated.ts): no base URL,
+    // bearer token or custom header. The founder's are as before.
+    const isolated = !t.founder;
     // A member's phone that could not read a message asks for it again: only messages sent from Open chat are answered.
     const outboxDb = db;
     const sentText = (waId: string, groupId: string) => sentTextFor(outboxDb, waId, groupId);
@@ -356,7 +360,7 @@ export async function buildCustomerRuntime(
     const ownSpeechLocal = env.STT_PROVIDER === 'local' || env.VOICE_STT_PROVIDER === 'local';
     // A runtime's work folders are inside its DATA_DIR/tmp (a customer's: DATA_DIR/tenants/<id>/tmp), which the engine allows.
     const localEngine = Object.hasOwn(d, 'localEngine') ? (ownSpeechLocal ? d.localEngine : undefined) : sharedLocalEngine(env);
-    const meetings = env.MEETINGS_ENABLED ? await meetingDeps({ env, db, api: google.meetings!, apiKey, prices, configs, log, localEngine }) : undefined;
+    const meetings = env.MEETINGS_ENABLED ? await meetingDeps({ env, db, api: google.meetings!, apiKey, isolated, prices, configs, log, localEngine }) : undefined;
     // Phase 2b: the voice transcriber VOICE_STT_PROVIDER names (src/voiceDeps.ts, tested). A local engine that is not set
     // up, or no ffmpeg, never stops the service: voice notes are then kept, not transcribed, and Health says why.
     const voiceDeps = await buildVoiceDeps(env, { findFfmpeg, log, ...(localEngine ? { localEngine } : {}) });
@@ -376,7 +380,7 @@ export async function buildCustomerRuntime(
       priority: () => prioritySettings.get(),
       gateway,
       allow,
-      ai: new ClaudeClient({ apiKey, model: env.AI_MODEL, effort: env.AI_EFFORT, prices }),
+      ai: new ClaudeClient({ apiKey, model: env.AI_MODEL, effort: env.AI_EFFORT, prices, isolated }),
       drive: google.drive,
       prices,
       // The founder: DAILY_SPEND_CAP_USD (.env only), under the platform ceiling when the platform is on (R2: off, that
@@ -391,7 +395,7 @@ export async function buildCustomerRuntime(
       startedAt,
       // Phase 2a: download, keep and read shared images and documents. Phase 2b: transcribe voice notes and audio files
       // with the transcriber VOICE_STT_PROVIDER names (the local engine on this machine by default; none keeps them as in 2a).
-      media: { sealer: new MediaRefSealer(key), fetcher: baileysFetcher(), ai: new ClaudeMediaClient({ apiKey, model: env.AI_MODEL, prices }), ...voiceDeps },
+      media: { sealer: new MediaRefSealer(key), fetcher: baileysFetcher(), ai: new ClaudeMediaClient({ apiKey, model: env.AI_MODEL, prices, isolated }), ...voiceDeps },
       ...(meetings ? { meetings } : {}),
       report,
       ...(live ? { liveReport: live } : {}),
@@ -571,7 +575,9 @@ export async function buildCustomerRuntime(
           actions: {
             publisher: app.publisher, clock: systemClock, limiter: new ActionRateLimiter(systemClock),
             // One models list, no tokens: its own client, so the test never shares the agent's retries.
-            listModels: claudeModelsCheck(new Anthropic({ apiKey, fetch: keepConnectTimeoutCode })),
+            listModels: claudeModelsCheck(new Anthropic({
+              apiKey, fetch: keepConnectTimeoutCode, ...(isolated ? isolatedClientOptions(apiKey, keepConnectTimeoutCode) : {}),
+            })),
             ...(heartbeat ? { heartbeat } : {}),
           },
           links: phoneLinks,
@@ -590,7 +596,7 @@ export async function buildCustomerRuntime(
             },
           } : {}),
           ...(env.DASHBOARD_ASSISTANT
-            ? { assistant: { ai: new ClaudeAssistantClient({ apiKey, model: env.AI_MODEL, effort: env.AI_EFFORT, prices }), paid: app.paidCalls, prices } }
+            ? { assistant: { ai: new ClaudeAssistantClient({ apiKey, model: env.AI_MODEL, effort: env.AI_EFFORT, prices, isolated }), paid: app.paidCalls, prices } }
             : {}),
         }),
       };

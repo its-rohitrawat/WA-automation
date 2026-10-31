@@ -10,6 +10,7 @@ import { ensurePlatformSchema } from '../../src/platform/schema.ts';
 import { createTenant, ensureFounderTenant } from '../../src/platform/store.ts';
 import { TenantKeys } from '../../src/platform/tenantKeys.ts';
 import { platformSupervisor, type PlatformSupervisor } from '../../src/runtime/platformSupervisor.ts';
+import { ANTHROPIC_API_URL } from '../../src/brain/anthropicIsolated.ts';
 import { syncClients } from '../../src/store/clients.ts';
 import type { Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
@@ -23,11 +24,12 @@ import { dbGroupsStore } from '../../src/config/groupsStore.ts';
 // Postgres has it; on Postgres they are the real ones, in this file's own database, set back to just the founder
 // before each test, since the Supervisor runs every customer in tenants. The Supervisor is told it is on Postgres. Every key here is a placeholder.
 
-const sdk = vi.hoisted(() => ({ keys: [] as string[] }));
+const sdk = vi.hoisted(() => ({ keys: [] as string[], made: [] as Record<string, unknown>[] }));
 vi.mock('@anthropic-ai/sdk', () => ({
   default: class {
     constructor(o: { apiKey?: string }) {
       sdk.keys.push(String(o?.apiKey));
+      sdk.made.push({ ...o });
     }
     models = { list: async () => ({}) };
     messages = { create: async () => ({}) };
@@ -109,6 +111,7 @@ async function setup(o: { keyFor: ('a' | 'b')[] }) {
   const before = readdirSync(dir).sort();
   read.length = 0;
   sdk.keys.length = 0;
+  sdk.made.length = 0;
   wa.sockets = 0;
   ps = platformSupervisor({
     env, log: silentLogger(), clock: manualClock(AT), platformDb, master, customerDb: (id) => dbs[id]!, keyTester: async () => 'ok', rssMb: () => 100, tickMs: 3_600_000,
@@ -186,5 +189,14 @@ describe('restart and the Google hooks (c7’s Supervisor.restart, a0’s S4.7 A
     expect(await ps.google.customer('00000000-0000-4000-8000-0000000000ff')).toBeNull(); // not running
     await ps.stop();
     expect(await ps.google.customer(ids.a)).toBeNull(); // stopped
+  });
+
+  it('every Claude client of a customer is isolated from the founder’s environment (review B)', async () => {
+    const { ps, ids } = await setup({ keyFor: ['a'] });
+    await ps.start();
+    expect(ps.supervisor.state(ids.a)).toBe('running');
+    const customers = sdk.made.filter((o) => o.apiKey === 'sk-ant-customer-a-placeholder');
+    expect(customers.length).toBeGreaterThan(0);
+    for (const o of customers) expect(o).toMatchObject({ authToken: null, baseURL: ANTHROPIC_API_URL });
   });
 });

@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { isolatedClientOptions } from '../brain/anthropicIsolated.ts';
 import type { Env } from '../config/env.ts';
 import { FOUNDER_TENANT_ID } from '../config/env.ts';
 import { dbGroupsStore } from '../config/groupsStore.ts';
@@ -76,8 +77,9 @@ export function platformSupervisor(o: {
   // Before any customer starts, so a customer's memory share counts only what the runtimes add (D4).
   const baselineMb = rssMb();
   const tenantKeys = new TenantKeys({ db: o.platformDb, master: o.master, clock: o.clock });
-  // The customer's own key, tested only when the customer adds it, never the founder's.
-  const keyTester = o.keyTester ?? modelsListTester((apiKey) => new Anthropic({ apiKey }));
+  // The customer's own key, tested only when the customer adds it, never the founder's, on a client no founder
+  // environment setting reaches (src/brain/anthropicIsolated.ts).
+  const keyTester = o.keyTester ?? modelsListTester((apiKey) => new Anthropic(isolatedClientOptions(apiKey, (input, init) => fetch(input, init))));
   /** Each started customer's AiKeys (its shell's), for the ai-key route; a full runtime keeps its shell's. */
   const keys = new Map<string, AiKeys>();
   const routes = new Map<string, TenantRouteEntry>();
