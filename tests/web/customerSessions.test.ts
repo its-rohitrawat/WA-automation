@@ -7,23 +7,46 @@ import { FOUNDER_TENANT_ID, parseEnv } from '../../src/config/env.ts';
 import { ensurePlatformSchema } from '../../src/platform/schema.ts';
 import { ensureFounderTenant } from '../../src/platform/store.ts';
 import { buildCustomerRuntime, type CustomerRuntime } from '../../src/runtime/customerRuntime.ts';
+import { syncClients } from '../../src/store/clients.ts';
 import type { Db } from '../../src/store/db.ts';
+import type { Sql } from '../../src/store/engine/types.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import type { WebServer } from '../../src/web/server.ts';
 import { csrfFor, SessionStore } from '../../src/web/sessions.ts';
 import { startDashboard } from '../../src/web/start.ts';
-import { seededDb } from '../helpers/db.ts';
+import { MEHTA, onSqlite, seededDb, SHARMA } from '../helpers/db.ts';
+import { freshPg, type FreshPg } from '../helpers/freshPg.ts';
 
-// Customer sessions against the real dashboard (S4.8), with no server: the founder's runtime with the platform on, and
-// a customer owner signed in. Sessions are kept as on Postgres (web_sessions.tenant_id, through a Db that says it is
-// Postgres), on the test SQLite file. Every key here is a placeholder.
+// Customer sessions against the real dashboard (S4.8): the founder's runtime with the platform on, and a customer owner
+// signed in. On SQLite the sessions are kept as on Postgres (web_sessions.tenant_id, through a Db that says it is
+// Postgres) on the test's in-memory store. On Postgres every store is the real one, in a database of this file's own:
+// the founder's tracker (its id is fixed, so no other file's rows may share it), the platform tables and the
+// customer's own Db. Every key here is a placeholder.
 
 const OWNER = 'owner@example.com';
 const CUSTOMER_EMAIL = 'customer@example.com';
 const CUSTOMER = '00000000-0000-4000-8000-0000000000c2';
 const AT = '2026-10-30T10:00:00.000Z';
 
-/** The test SQLite file as the Postgres platform Db: SessionStore then keeps each session's tenant_id. */
+/**
+ * The platform Db, with a switch that makes every membership read fail: the platform tables unreadable, on either
+ * engine (the app's roles cannot rename a table on Postgres).
+ */
+const membershipsDown = { on: false };
+function withMembershipSwitch(db: Db): Db {
+  const check = (sql: string) => {
+    if (membershipsDown.on && /\bmemberships\b/.test(sql)) throw new Error('memberships unreadable (test)');
+  };
+  const wrap = (q: Sql): Sql => ({
+    get: async (sql, p) => (check(sql), q.get(sql, p)),
+    all: async (sql, p) => (check(sql), q.all(sql, p)),
+    run: async (sql, p) => (check(sql), q.run(sql, p)),
+    exec: (sql) => q.exec(sql),
+  }) as Sql;
+  return { ...wrap(db), engine: db.engine, tx: (fn) => db.tx((q) => fn(wrap(q))), close: () => db.close() } as Db;
+}
+
+/** On SQLite: the test's store as the Postgres platform Db, so SessionStore keeps each session's tenant_id. */
 function asPostgres(db: Db): Db {
   return {
     engine: 'postgres',
@@ -37,7 +60,11 @@ function asPostgres(db: Db): Db {
 }
 
 let dir: string;
+let fresh: FreshPg | undefined;
+/** The founder's tracker. */
 let db: Db;
+/** The platform tables (the same store as db on SQLite), behind the membership switch. */
+let platformDb: Db;
 let rt: CustomerRuntime;
 let web: WebServer;
 let base: string;
@@ -53,21 +80,31 @@ beforeAll(async () => {
     DASHBOARD_ENABLED: 'true', DASHBOARD_OWNER_EMAILS: OWNER,
     DASHBOARD_GOOGLE_CLIENT_ID: 'placeholder-client', DASHBOARD_GOOGLE_CLIENT_SECRET: 'placeholder-secret',
   });
-  db = await seededDb();
-  await ensurePlatformSchema(db);
-  await ensureFounderTenant(db, { name: 'Your business', at: AT });
-  // A customer, its owner and the membership (as a redeemed invite leaves them), and Postgres's web_sessions.tenant_id.
-  await db.run("INSERT INTO tenants (id, kind, name, status, created_at, updated_at) VALUES (?, 'customer', 'Acme', 'active', ?, ?)", [CUSTOMER, AT, AT]);
-  await db.run('INSERT INTO users (id, email, name, created_at) VALUES (?, ?, ?, ?)', ['00000000-0000-4000-8000-0000000000u1'.replace('u1', 'd1'), CUSTOMER_EMAIL, 'Customer', AT]);
-  await db.run("INSERT INTO memberships (tenant_id, user_id, role, created_at) VALUES (?, ?, 'owner', ?)", [CUSTOMER, '00000000-0000-4000-8000-0000000000d1', AT]);
-  await db.exec('ALTER TABLE web_sessions ADD COLUMN tenant_id TEXT');
-  const platformDb = asPostgres(db);
+  let customerDb: (tenantId: string) => Db;
+  if (onSqlite) {
+    db = await seededDb();
+    await ensurePlatformSchema(db);
+    platformDb = withMembershipSwitch(asPostgres(db));
+    customerDb = () => db;
+  } else {
+    const f = (fresh = await freshPg());
+    db = f.tenantDb(FOUNDER_TENANT_ID);
+    await syncClients(db, [SHARMA, MEHTA]);
+    platformDb = withMembershipSwitch(f.platformDb());
+    customerDb = (id) => f.tenantDb(id);
+  }
+  await ensureFounderTenant(platformDb, { name: 'Your business', at: AT });
+  // A customer, its owner and the membership (as a redeemed invite leaves them).
+  await platformDb.run("INSERT INTO tenants (id, kind, name, status, created_at, updated_at) VALUES (?, 'customer', 'Acme', 'active', ?, ?)", [CUSTOMER, AT, AT]);
+  await platformDb.run('INSERT INTO users (id, email, name, created_at) VALUES (?, ?, ?, ?)', ['00000000-0000-4000-8000-0000000000d1', CUSTOMER_EMAIL, 'Customer', AT]);
+  await platformDb.run("INSERT INTO memberships (tenant_id, user_id, role, created_at) VALUES (?, ?, 'owner', ?)", [CUSTOMER, '00000000-0000-4000-8000-0000000000d1', AT]);
+  if (onSqlite) await db.exec('ALTER TABLE web_sessions ADD COLUMN tenant_id TEXT'); // Postgres's web_sessions.tenant_id
   rt = await buildCustomerRuntime({ id: FOUNDER_TENANT_ID, founder: true }, { env, log: silentLogger(), key: randomBytes(32), db, configs: [], platformDb });
   const fakeGoogle = { exchange: () => Promise.reject(new Error('no Google in tests')), verifier: () => Promise.reject(new Error('no Google in tests')) };
   web = (await startDashboard({
     env: { ...env, DASHBOARD_PORT: 0 }, db, platformDb, log: silentLogger(), control: rt.control, platform: rt.platform, customerSessions: true,
     // The customer's own Db, as main.ts gives it: the member sign-in and the workspace chooser are then mounted too.
-    customerDb: () => db,
+    customerDb,
     ...rt.agentRoutes, google: fakeGoogle,
   }))!;
   base = `http://127.0.0.1:${web.address()!.port}`;
@@ -80,6 +117,7 @@ afterAll(async () => {
   await web?.stop();
   await rt?.stop();
   await db?.close();
+  await fresh?.drop();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -224,23 +262,23 @@ describe('change routes: the CSRF token is the session’s, and the role still d
 
 describe('the membership decides, at every request (S4.8)', () => {
   it('a membership lookup that fails (the platform tables unreadable) is a 503, never the founder; the session is kept', async () => {
-    await db.exec('ALTER TABLE memberships RENAME TO memberships_away');
+    membershipsDown.on = true;
     try {
       expect((await call('GET', '/dashboard/api/me', customer)).status).toBe(503);
       expect((await call('GET', '/dashboard/api/status', customer)).status).toBe(503);
     } finally {
-      await db.exec('ALTER TABLE memberships_away RENAME TO memberships');
+      membershipsDown.on = false;
     }
     expect((await call('GET', '/dashboard/api/me', customer)).status).toBe(200);
   });
 
   it('a removed membership signs the customer out at the next request, for good', async () => {
-    const sessions = new SessionStore(asPostgres(db), { now: () => new Date() });
+    const sessions = new SessionStore(platformDb, { now: () => new Date() });
     const s = await sessions.create(CUSTOMER_EMAIL, 'Test', undefined, CUSTOMER);
     expect((await call('GET', '/dashboard/api/me', s)).status).toBe(200);
-    await db.run('DELETE FROM memberships WHERE tenant_id = ?', [CUSTOMER]);
+    await platformDb.run('DELETE FROM memberships WHERE tenant_id = ?', [CUSTOMER]);
     expect((await call('GET', '/dashboard/api/me', s)).status).toBe(401);
-    await db.run("INSERT INTO memberships (tenant_id, user_id, role, created_at) VALUES (?, ?, 'owner', ?)", [CUSTOMER, '00000000-0000-4000-8000-0000000000d1', AT]);
+    await platformDb.run("INSERT INTO memberships (tenant_id, user_id, role, created_at) VALUES (?, ?, 'owner', ?)", [CUSTOMER, '00000000-0000-4000-8000-0000000000d1', AT]);
     expect((await call('GET', '/dashboard/api/me', s)).status).toBe(401); // the session was ended, not just refused
   });
 

@@ -14,10 +14,11 @@ import { createGuard } from '../../src/web/guard.ts';
 import { registerReadApi } from '../../src/web/routes/api.ts';
 import { createWebServer, type WebServer } from '../../src/web/server.ts';
 import { SessionStore } from '../../src/web/sessions.ts';
-import { seededDb } from '../helpers/db.ts';
+import { onSqlite, seededDb } from '../helpers/db.ts';
+import { openTestPlatformDb } from '../helpers/pg.ts';
+import { OWNER } from '../helpers/web.ts';
 
 const NOW = '2026-10-19T08:00:00.000Z';
-const OWNER = 'owner@example.com';
 
 const servers: WebServer[] = [];
 const roots: string[] = [];
@@ -36,7 +37,8 @@ async function boot(o: { control?: Parameters<typeof registerReadApi>[1]['contro
   const gw = { state: 'open' as const, since: NOW, lastErrorCode: null, credsSaveFailures: 0 };
   health.setWhatsApp(gw);
   const control = o.control ?? new AgentControl({ app: { health, spend }, db, gateway: { status: () => gw }, env: parseEnv({}), clock });
-  const sessions = new SessionStore(db, clock);
+  // The sessions: in the tracker on SQLite, on the platform Db on Postgres (OWNER is this file's own there).
+  const sessions = new SessionStore(onSqlite ? db : openTestPlatformDb(), clock);
   const root = mkdtempSync(join(tmpdir(), 'wa-api-'));
   roots.push(root);
   writeFileSync(join(root, 'index.html'), '<!doctype html>');

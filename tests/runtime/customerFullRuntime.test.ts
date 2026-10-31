@@ -10,14 +10,18 @@ import { ensurePlatformSchema } from '../../src/platform/schema.ts';
 import { createTenant, ensureFounderTenant } from '../../src/platform/store.ts';
 import { TenantKeys } from '../../src/platform/tenantKeys.ts';
 import { platformSupervisor, type PlatformSupervisor } from '../../src/runtime/platformSupervisor.ts';
+import { syncClients } from '../../src/store/clients.ts';
 import type { Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
-import { seededDb } from '../helpers/db.ts';
+import { MEHTA, onSqlite, seededDb, SHARMA } from '../helpers/db.ts';
+import { freshPg, type FreshPg } from '../helpers/freshPg.ts';
 import { dbGroupsStore } from '../../src/config/groupsStore.ts';
 
-// A customer's FULL runtime (Phase B 2 and 3), on fakes: SQLite stands in for each customer's Postgres Db (with wa_auth
-// as Postgres has it), and the Supervisor is told it is on Postgres. Every key here is a placeholder.
+// A customer's FULL runtime (Phase B 2 and 3). The stores are laid out as on the Mac: on SQLite an in-memory store
+// stands in for the platform tables (and the founder's tracker) and one for each customer's own Db, with wa_auth as
+// Postgres has it; on Postgres they are the real ones, in a database of this test's own, since the Supervisor runs
+// every customer in tenants. The Supervisor is told it is on Postgres. Every key here is a placeholder.
 
 const sdk = vi.hoisted(() => ({ keys: [] as string[] }));
 vi.mock('@anthropic-ai/sdk', () => ({
@@ -41,13 +45,37 @@ const WA_AUTH = `CREATE TABLE wa_auth (phone text NOT NULL, slot text NOT NULL D
 let dir: string | undefined;
 const opened: Db[] = [];
 let ps: PlatformSupervisor | undefined;
+let fresh: FreshPg | undefined;
 afterEach(async () => {
   await ps?.stop();
   ps = undefined;
   for (const db of opened.splice(0)) await db.close();
+  await fresh?.drop();
+  fresh = undefined;
   if (dir) rmSync(dir, { recursive: true, force: true });
   dir = undefined;
 });
+
+/** The platform tables, the founder's tracker, and a customer's own Db once the customer exists (see the note at the top). */
+async function stores(): Promise<{ platformDb: Db; founderDb: Db; customerDbOf: (id: string) => Promise<Db> }> {
+  if (onSqlite) {
+    const platformDb = await seededDb(); // the founder's own tracker too: its Google token goes here
+    await ensurePlatformSchema(platformDb);
+    const customerDbOf = async () => {
+      const db = await seededDb(); // its own two groups
+      await db.exec(WA_AUTH);
+      return db;
+    };
+    return { platformDb, founderDb: platformDb, customerDbOf };
+  }
+  const f = (fresh = await freshPg());
+  const customerDbOf = async (id: string) => {
+    const db = f.tenantDb(id);
+    await syncClients(db, [SHARMA, MEHTA]); // its own two groups
+    return db;
+  };
+  return { platformDb: f.platformDb(), founderDb: f.tenantDb(FOUNDER_TENANT_ID), customerDbOf };
+}
 
 async function setup(o: { keyFor: ('a' | 'b')[] }) {
   dir = mkdtempSync(join(tmpdir(), 'wa-full-'));
@@ -62,17 +90,16 @@ async function setup(o: { keyFor: ('a' | 'b')[] }) {
   const read: string[] = [];
   const env = new Proxy(founderEnv, { get: (t, k: string) => (read.push(k), (t as Record<string, unknown>)[k]) }) as Env;
   const master = randomBytes(32);
-  const platformDb = await seededDb(); // the founder's own tracker too: its Google token goes here
+  const { platformDb, founderDb, customerDbOf } = await stores();
   opened.push(platformDb);
-  await ensurePlatformSchema(platformDb);
+  if (founderDb !== platformDb) opened.push(founderDb);
   await ensureFounderTenant(platformDb, { name: 'Your business', at: AT });
-  await new TokenStore(platformDb, master).save('founder-refresh-token-placeholder');
+  await new TokenStore(founderDb, master).save('founder-refresh-token-placeholder');
   const ids = { a: (await createTenant(platformDb, { name: 'Acme', status: 'active', at: AT })).id, b: (await createTenant(platformDb, { name: 'Blue', status: 'active', at: AT })).id };
   const dbs: Record<string, Db> = {};
   const tenantKeys = new TenantKeys({ db: platformDb, master, clock: manualClock(AT) });
   for (const k of ['a', 'b'] as const) {
-    const db = await seededDb(); // its own two groups
-    await db.exec(WA_AUTH);
+    const db = await customerDbOf(ids[k]);
     // Its own allow-list, approved through its own groups store (a0's dbGroupsStore): the source a runtime starts from.
     await dbGroupsStore({ db, onChange: () => undefined, log: silentLogger() }).apply({ approve: [{ groupId: '120363111111111111@g.us', name: 'Acme Ltd', code: 'ACM' }, { groupId: '120363222222222222@g.us', name: 'Blue Bay', code: 'BLU' }] });
     opened.push(db);

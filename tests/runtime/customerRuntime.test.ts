@@ -12,7 +12,8 @@ import { startDashboard } from '../../src/web/start.ts';
 import type { Db } from '../../src/store/db.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { istDate } from '../../src/util/time.ts';
-import { seededDb, SHARMA } from '../helpers/db.ts';
+import { onSqlite, seededDb, SHARMA } from '../helpers/db.ts';
+import { openTestPlatformDb } from '../helpers/pg.ts';
 
 // One customer's runtime (S4.4), with no network: the dashboard is on and nothing is linked (setup mode), so no
 // WhatsApp socket, Google call or Claude call is made. Every key and secret here is a placeholder.
@@ -136,13 +137,15 @@ describe('the platform on the founder’s dashboard (S5H.1, 2.2, 4.1; PLATFORM_E
   ): Promise<{ signup: number; invites: number; platform: boolean }> {
     const db = await seededDb();
     opened.push(db);
-    // As main.ts does at start with PLATFORM_ENABLED: the platform tables in tracker.db, then customer #1.
-    await ensurePlatformSchema(db);
-    await ensureFounderTenant(db, { name: 'Your business', at: new Date().toISOString() });
+    // As main.ts does at start with PLATFORM_ENABLED: the platform tables (in tracker.db on SQLite; on Postgres their
+    // own, which P3 made), then customer #1.
+    const platformDb = onSqlite ? db : openTestPlatformDb();
+    if (onSqlite) await ensurePlatformSchema(db);
+    await ensureFounderTenant(platformDb, { name: 'Your business', at: new Date().toISOString() });
     const shared = fakeShared(o.enabled ? { PLATFORM_ENABLED: 'true' } : {});
-    const rt = await buildCustomerRuntime(t, { ...shared, db, configs: [], ...(o.withPlatform ? { platformDb: db } : {}) });
+    const rt = await buildCustomerRuntime(t, { ...shared, db, configs: [], ...(o.withPlatform ? { platformDb } : {}) });
     const web = await startDashboard({
-      env: { ...shared.env, DASHBOARD_PORT: 0 }, db, platformDb: db, log: silentLogger(), control: rt.control, platform: rt.platform, ...rt.agentRoutes, google: fakeGoogle,
+      env: { ...shared.env, DASHBOARD_PORT: 0 }, db, platformDb, log: silentLogger(), control: rt.control, platform: rt.platform, ...rt.agentRoutes, google: fakeGoogle,
     });
     try {
       const base = `http://127.0.0.1:${web!.address()!.port}`;

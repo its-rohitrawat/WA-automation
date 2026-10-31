@@ -11,7 +11,7 @@ import { openAdminConnection, openPgPool, PgTenantDb } from '../../src/store/eng
 import { SqliteDb } from '../../src/store/engine/sqlite.ts';
 import { onPg } from '../helpers/pg.ts';
 import { fixture } from './fixture.ts';
-import { freshPg, type FreshPg } from './freshPg.ts';
+import { freshPg, type FreshPg } from '../helpers/freshPg.ts';
 
 // The copy and the export back on a real Postgres 17 (npm run test:pg; skipped otherwise). The copy keeps every id, so
 // it goes only into a fresh database (docs/GO-LIVE-postgres.md, part 4): each test gets a database of its own, made and

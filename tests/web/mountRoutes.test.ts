@@ -10,13 +10,15 @@ import { secureRequest } from '../../src/web/origin.ts';
 import type { WebServer } from '../../src/web/server.ts';
 import { SessionStore } from '../../src/web/sessions.ts';
 import { startDashboard } from '../../src/web/start.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
+import type { Db } from '../../src/store/db.ts';
+import { NOW, onSqlite, seededDb } from '../helpers/db.ts';
+import { openTestPlatformDb } from '../helpers/pg.ts';
+import { OWNER } from '../helpers/web.ts';
 
 // The combined dashboard (stage 2): the agent's routes and c7's handlers mounted through startDashboard, on the guard,
 // session store and action limiter it builds. A request is checked by that one guard whichever route it reaches.
 
 const PUBLIC = 'https://dash.example.com';
-const OWNER = 'owner@example.com';
 const servers: WebServer[] = [];
 afterEach(async () => {
   for (const s of servers.splice(0)) await s.stop();
@@ -33,9 +35,13 @@ function deps(db: Awaited<ReturnType<typeof seededDb>>, clock: ReturnType<typeof
   };
 }
 
-async function boot(extra: (db: Awaited<ReturnType<typeof seededDb>>, clock: ReturnType<typeof manualClock>) => Partial<AgentRoutesDeps> = () => ({})) {
+/** `extra` gets the platform Db: the platform and sign-up routes' own. */
+async function boot(extra: (platformDb: Db, clock: ReturnType<typeof manualClock>) => Partial<AgentRoutesDeps> = () => ({})) {
   const db = await seededDb();
-  await ensurePlatformSchema(db); // what main.ts does before the platform routes are mounted (S5H.1)
+  // The platform tables and the sessions: in tracker.db on SQLite (what main.ts does before the platform routes are
+  // mounted, S5H.1); on Postgres their own, which P3 made (OWNER is this file's own there).
+  const platformDb = onSqlite ? db : openTestPlatformDb();
+  if (onSqlite) await ensurePlatformSchema(db);
   const clock = manualClock(NOW);
   const started: string[] = [];
   const web = await startDashboard({
@@ -43,13 +49,13 @@ async function boot(extra: (db: Awaited<ReturnType<typeof seededDb>>, clock: Ret
       DASHBOARD_PORT: 0, DASHBOARD_PUBLIC_URL: PUBLIC, DASHBOARD_OWNER_EMAILS: [OWNER],
       DASHBOARD_GOOGLE_CLIENT_ID: 'client-id', DASHBOARD_GOOGLE_CLIENT_SECRET: 'client-secret',
     },
-    db, log: silentLogger(), control: {}, clock,
+    db, platformDb, log: silentLogger(), control: {}, clock,
     google: { exchange: () => Promise.reject(new Error('no Google')), verifier: () => Promise.reject(new Error('no Google')) },
-    mount: (m) => mountAgentRoutes(m, { ...deps(db, clock, started), ...extra(db, clock) }),
+    mount: (m) => mountAgentRoutes(m, { ...deps(db, clock, started), ...extra(platformDb, clock) }),
   });
   servers.push(web!);
   const port = web!.address()!.port;
-  const session = await new SessionStore(db, clock).create(OWNER);
+  const session = await new SessionStore(platformDb, clock).create(OWNER);
   const post = (path: string, h: Record<string, string>, body = '{}') =>
     new Promise<{ status: number; cookie: string }>((resolve, reject) => {
       const r = request({ host: '127.0.0.1', port, path, method: 'POST', headers: { cookie: `wa_session=${session.id}`, 'content-type': 'application/json', ...h } }, (res) => {
