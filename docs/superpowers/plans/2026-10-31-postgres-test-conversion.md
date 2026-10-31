@@ -89,7 +89,7 @@ outside it.
 
 Under full-suite load some tests ran slowly on Postgres, near or past their time limit, because each statement is a
 real round trip there. They were made faster in the tests only, with the same assertions:
-- **tests/app.test.ts, 12d**: each stage's real time capped by a labelled `work.until()` (ab93431).
+- **tests/app.test.ts, 12d**: a tick every 240 s, so its 40 minutes take 10 ticks, not about 80: from 17 s to about 1.5 s on Postgres (a0517b8). Each stage's real time is also capped by a labelled `work.until()` (ab93431).
 - **tests/appMedia.test.ts, the multi-hour sweeps**: a tick every 12 h, and the late transcript every 31 min, each stage capped by `until()` (8eceeb6).
 - **tests/app.test.ts, past midnight**: a tick every 240 s, so 95 minutes take 24 ticks, not 190 (cd01086).
 - **tests/cli/corrections.test.ts and tests/control/clientQueries.test.ts**: their fixture rows written in one transaction, with one id lookup (cd01086).
