@@ -19,9 +19,6 @@ function files(dir: string): string[] {
   return out.sort();
 }
 
-/** Lane B's sites, which lane B fixes: at most this many each until then. A ceiling. */
-const PENDING: Record<string, number> = { 'store/tasks.ts': 1, 'store/meetings.ts': 1 };
-
 /** Code that only ever talks to Postgres (the copy target, its schema, its engine): GREATEST and LEAST are fine there. */
 const POSTGRES_ONLY = (path: string) => path === 'migrate/target.ts' || path === 'store/engine/pg.ts' || path.startsWith('store/pg/');
 
@@ -66,13 +63,8 @@ function offences(path: string, text: string): string[] {
 }
 
 describe('no two-argument MAX or MIN in src, and GREATEST or LEAST only in Postgres-only code (S2.7)', () => {
-  it('none, beyond lane B’s pending sites', () => {
-    const wrong: string[] = [];
-    for (const f of files(SRC)) {
-      const found = offences(f, readFileSync(join(SRC, f), 'utf8'));
-      if (found.length > (PENDING[f] ?? 0)) wrong.push(...found);
-    }
-    expect(wrong).toEqual([]);
+  it('none anywhere in src', () => {
+    expect(files(SRC).flatMap((f) => offences(f, readFileSync(join(SRC, f), 'utf8')))).toEqual([]);
   });
 
   it('catches MAX(a, b), MIN(a, b), behind a call too, and GREATEST/LEAST; passes aggregates, JS and comments', () => {
