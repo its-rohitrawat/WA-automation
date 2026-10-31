@@ -475,10 +475,12 @@ export async function addSttForget(db: Sql, f: { meetingId: number; provider: Pr
 
 /** Copies due for a try at nowIso with fewer than maxAttempts tries, oldest first; optionally one meeting's only. */
 export async function pendingSttForgets(db: Sql, o: { nowIso: string; maxAttempts: number; meetingId?: number }): Promise<SttForgetRow[]> {
+  // The meeting filter only when one is given: Postgres cannot type a parameter that only meets IS NULL (S2.5).
+  const one = o.meetingId != null;
   return db.all<SttForgetRow>(
     `SELECT id, meeting_id AS meetingId, provider, ref, attempts FROM stt_forget
-      WHERE attempts < ? AND (next_try_at IS NULL OR next_try_at <= ?) AND (? IS NULL OR meeting_id = ?) ORDER BY id`,
-    [o.maxAttempts, canonical('pendingSttForgets', 'nowIso', o.nowIso), o.meetingId ?? null, o.meetingId ?? null],
+      WHERE attempts < ? AND (next_try_at IS NULL OR next_try_at <= ?)${one ? ' AND meeting_id = ?' : ''} ORDER BY id`,
+    [o.maxAttempts, canonical('pendingSttForgets', 'nowIso', o.nowIso), ...(one ? [o.meetingId!] : [])],
   );
 }
 

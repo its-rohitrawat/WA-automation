@@ -22,3 +22,16 @@ describe('addSttForget', () => {
     expect(await pendingSttForgets(db, { nowIso: NOW, maxAttempts: 5 })).toHaveLength(0);
   });
 });
+
+describe('pendingSttForgets', () => {
+  it('lists every meeting’s copies, or one meeting’s only (the filter is added only when given: S2.5)', async () => {
+    const db = await seededDb();
+    const a = (await insertFound(db, queuedMeeting({ driveFileId: 'file-a' })))!;
+    const b = (await insertFound(db, queuedMeeting({ driveFileId: 'file-b' })))!;
+    await addSttForget(db, { meetingId: a, provider: 'elevenlabs', ref: 'tr-a', at: NOW });
+    await addSttForget(db, { meetingId: b, provider: 'elevenlabs', ref: 'tr-b', at: NOW });
+    expect((await pendingSttForgets(db, { nowIso: NOW, maxAttempts: 5 })).map((f) => f.ref)).toEqual(['tr-a', 'tr-b']);
+    expect((await pendingSttForgets(db, { nowIso: NOW, maxAttempts: 5, meetingId: b })).map((f) => f.ref)).toEqual(['tr-b']);
+    expect(await pendingSttForgets(db, { nowIso: NOW, maxAttempts: 5, meetingId: b + 100 })).toEqual([]);
+  });
+});

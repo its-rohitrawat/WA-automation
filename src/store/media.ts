@@ -386,10 +386,18 @@ const FAILED_LOCAL_VOICE_FROM = `FROM media m JOIN messages msg ON msg.id = m.me
 const REQUEUE_SET = `status = 'pending', attempts = 0, next_attempt_at = NULL, error_code = NULL, note = NULL, created_at = @at, updated_at = @at,
         backlog = (SELECT msg.processed_at IS NOT NULL AND msg.requeue_reason IS NULL FROM messages msg WHERE msg.id = media.message_id)`;
 
+/**
+ * An optional filter on one column: the clause and its value only when the value is given. Never `@x IS NULL OR …`:
+ * Postgres cannot type a parameter that only meets IS NULL (S2.5).
+ */
+const optionalFilter = (column: string, name: string, value: number | undefined) =>
+  value == null ? { sql: '', params: {} } : { sql: ` AND ${column} = @${name}`, params: { [name]: value } };
+
 /** The 2a voice notes and audio files `cli transcribe-voice` can transcribe, oldest first; optionally one client's only. */
 export async function voiceBacklog(db: Sql, o: { clientId?: number } = {}): Promise<VoiceBacklogRow[]> {
-  return db.all<VoiceBacklogRow>(`SELECT m.id, m.client_id AS clientId, m.file_size AS fileSize, m.mime_type AS mimeType ${VOICE_BACKLOG_FROM}
-      AND (@clientId IS NULL OR m.client_id = @clientId) ORDER BY m.id`, { clientId: o.clientId ?? null });
+  const client = optionalFilter('m.client_id', 'clientId', o.clientId);
+  return db.all<VoiceBacklogRow>(`SELECT m.id, m.client_id AS clientId, m.file_size AS fileSize, m.mime_type AS mimeType ${VOICE_BACKLOG_FROM}${client.sql}
+      ORDER BY m.id`, client.params);
 }
 
 /**
@@ -414,8 +422,9 @@ export async function queueVoiceBacklog(db: Sql, ids: number[], at: string): Pro
  * `cli transcribe-voice --failed` can queue again; oldest first, optionally one client's only. Same shape as the backlog.
  */
 export async function failedLocalVoice(db: Sql, o: { clientId?: number } = {}): Promise<VoiceBacklogRow[]> {
-  return db.all<VoiceBacklogRow>(`SELECT m.id, m.client_id AS clientId, m.file_size AS fileSize, m.mime_type AS mimeType ${FAILED_LOCAL_VOICE_FROM}
-      AND (@clientId IS NULL OR m.client_id = @clientId) ORDER BY m.id`, { clientId: o.clientId ?? null });
+  const client = optionalFilter('m.client_id', 'clientId', o.clientId);
+  return db.all<VoiceBacklogRow>(`SELECT m.id, m.client_id AS clientId, m.file_size AS fileSize, m.mime_type AS mimeType ${FAILED_LOCAL_VOICE_FROM}${client.sql}
+      ORDER BY m.id`, client.params);
 }
 
 /**
@@ -441,8 +450,10 @@ export interface MediaForgetRow {
 
 /** Copies due for a try at nowIso with fewer than maxAttempts tries, oldest first; optionally one file's only. */
 export async function pendingMediaForgets(db: Sql, o: { nowIso: string; maxAttempts: number; mediaId?: number }): Promise<MediaForgetRow[]> {
+  const media = optionalFilter('media_id', 'mediaId', o.mediaId);
   return db.all<MediaForgetRow>(`SELECT id, media_id AS mediaId, provider, ref, attempts FROM media_stt_forget
-      WHERE attempts < @maxAttempts AND (next_try_at IS NULL OR next_try_at <= @nowIso) AND (@mediaId IS NULL OR media_id = @mediaId) ORDER BY id`, { maxAttempts: o.maxAttempts, nowIso: o.nowIso, mediaId: o.mediaId ?? null });
+      WHERE attempts < @maxAttempts AND (next_try_at IS NULL OR next_try_at <= @nowIso)${media.sql} ORDER BY id`,
+    { maxAttempts: o.maxAttempts, nowIso: o.nowIso, ...media.params });
 }
 
 /**
