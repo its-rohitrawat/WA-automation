@@ -7,24 +7,26 @@ import { syncClients } from '../../src/store/clients.ts';
 import type { Db } from '../../src/store/db.ts';
 import { setKv } from '../../src/store/kv.ts';
 import { createTask, setTaskStatus, type NewTask, type TaskRow } from '../../src/store/tasks.ts';
-import { seededDb, SHARMA } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { idOf, seededDb, SHARMA } from '../helpers/db.ts';
 
 const NOW = new Date('2026-10-23T00:30:00.000Z'); // 06:00 IST
 const TODAY = '2026-10-23';
 const OK = { ok: true, text: '✅ Connected · waiting for new messages' };
 const LINK = 'https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp_qRsTuV-wxyz0123/view';
 
-const task = (o: Partial<NewTask> = {}): NewTask => ({
-  clientId: 1, side: 'us', title: 'A task', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-01',
-  deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp', ...o,
-});
+const task = async (db: Db, o: Partial<Omit<NewTask, 'clientId'>> & { client?: 'SHA' | 'MEH' } = {}): Promise<NewTask> => {
+  const { client, ...rest } = o;
+  return {
+  clientId: await idOf(db, client ?? 'SHA'), side: 'us', title: 'A task', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-01',
+  deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp', ...rest,
+  };
+};
 
 const view = (db: Db): Promise<TrackerView> => loadTrackerView(db, NOW, OK);
 const text = async (db: Db) => buildShortMorningText(await view(db), TODAY, LINK);
-/** The open tasks of one client (1 = Sharma), most urgent first, as task codes. */
-const urgent = async (db: Db, clientId = 1): Promise<string[]> => {
-  const c = (await view(db)).clients.find((x) => x.client.id === clientId)!;
+/** The open tasks of one client (Sharma by default), most urgent first, as task codes. */
+const urgent = async (db: Db, code = 'SHA'): Promise<string[]> => {
+  const c = (await view(db)).clients.find((x) => x.client.code === code)!;
   return [...c.usOpen, ...c.clientOpen].sort(byMorningUrgency(TODAY)).map((t) => t.code);
 };
 const openTask = async (db: Db, code: string): Promise<TaskRow> => {
@@ -35,66 +37,66 @@ const openTask = async (db: Db, code: string): Promise<TaskRow> => {
 describe('buildShortMorningText', () => {
   it('gives the totals and the link in one line, many open and overdue tasks', async () => {
     const db = await seededDb();
-    await createTask(db, task({ title: 'Fix contact form', priority: 'major' }), NOW.toISOString());
-    await createTask(db, task({ side: 'client', title: 'Send logo files', deadline: '2026-10-20' }), NOW.toISOString());
-    await createTask(db, task({ title: 'Write about page', deadline: TODAY }), NOW.toISOString());
-    await createTask(db, task({ clientId: 2, side: 'client', title: 'Approve menu', deadline: '2026-10-21' }), NOW.toISOString());
-    await createTask(db, task({ clientId: 2, title: 'Print menu' }), NOW.toISOString());
+    await createTask(db, await task(db, { title: 'Fix contact form', priority: 'major' }), NOW.toISOString());
+    await createTask(db, await task(db, { side: 'client', title: 'Send logo files', deadline: '2026-10-20' }), NOW.toISOString());
+    await createTask(db, await task(db, { title: 'Write about page', deadline: TODAY }), NOW.toISOString());
+    await createTask(db, await task(db, { client: 'MEH', side: 'client', title: 'Approve menu', deadline: '2026-10-21' }), NOW.toISOString());
+    await createTask(db, await task(db, { client: 'MEH', title: 'Print menu' }), NOW.toISOString());
     expect(await text(db)).toBe(`Good morning. 5 open tasks, 2 overdue. Today's tracker: ${LINK}`);
   });
 
   it('leads with the critical count when there are critical open tasks, and leaves done ones out', async () => {
     const db = await seededDb();
-    await createTask(db, task({ title: 'Site down', priority: 'critical' }), NOW.toISOString());
-    await createTask(db, task({ clientId: 2, side: 'client', title: 'Payment', priority: 'critical' }), NOW.toISOString());
-    const done = await createTask(db, task({ title: 'Fixed', priority: 'critical' }), NOW.toISOString());
+    await createTask(db, await task(db, { title: 'Site down', priority: 'critical' }), NOW.toISOString());
+    await createTask(db, await task(db, { client: 'MEH', side: 'client', title: 'Payment', priority: 'critical' }), NOW.toISOString());
+    const done = await createTask(db, await task(db, { title: 'Fixed', priority: 'critical' }), NOW.toISOString());
     await setTaskStatus(db, done.id, 'done', TODAY, NOW.toISOString(), 'ai');
-    await createTask(db, task({ title: 'Plain' }), NOW.toISOString());
+    await createTask(db, await task(db, { title: 'Plain' }), NOW.toISOString());
     expect(await text(db)).toBe(`Good morning. 2 critical, 3 open tasks, 0 overdue. Today's tracker: ${LINK}`);
   });
 
   it('uses the singular for 1 open task and 1 overdue', async () => {
     const db = await seededDb();
-    await createTask(db, task({ side: 'client', title: 'Send logo files', deadline: '2026-10-20' }), NOW.toISOString());
+    await createTask(db, await task(db, { side: 'client', title: 'Send logo files', deadline: '2026-10-20' }), NOW.toISOString());
     expect(await text(db)).toBe(`Good morning. 1 open task, 1 overdue. Today's tracker: ${LINK}`);
   });
 
   it('says 0 open tasks, 0 overdue when the active clients have nothing open, and leaves done tasks out', async () => {
     const db = await seededDb();
-    const done = await createTask(db, task({ title: 'Share moodboard', deadline: '2026-10-01' }), NOW.toISOString());
+    const done = await createTask(db, await task(db, { title: 'Share moodboard', deadline: '2026-10-01' }), NOW.toISOString());
     await setTaskStatus(db, done.id, 'done', '2026-10-15', NOW.toISOString(), 'ai');
     expect(await text(db)).toBe(`Good morning. 0 open tasks, 0 overdue. Today's tracker: ${LINK}`);
   });
 
   it('counts maybe-done tasks as open, like the tracker does, on our side and on the client side', async () => {
     const db = await seededDb();
-    const maybe = await createTask(db, task({ title: 'Maybe finished', deadline: '2026-10-22' }), NOW.toISOString());
+    const maybe = await createTask(db, await task(db, { title: 'Maybe finished', deadline: '2026-10-22' }), NOW.toISOString());
     await setTaskStatus(db, maybe.id, 'maybe_done', TODAY, NOW.toISOString(), 'ai');
-    const clientMaybe = await createTask(db, task({ side: 'client', title: 'Client maybe', deadline: '2026-10-22' }), NOW.toISOString());
+    const clientMaybe = await createTask(db, await task(db, { side: 'client', title: 'Client maybe', deadline: '2026-10-22' }), NOW.toISOString());
     await setTaskStatus(db, clientMaybe.id, 'maybe_done', TODAY, NOW.toISOString(), 'ai');
-    await createTask(db, task({ title: 'Other' }), NOW.toISOString());
+    await createTask(db, await task(db, { title: 'Other' }), NOW.toISOString());
     expect(await text(db)).toBe(`Good morning. 3 open tasks, 2 overdue. Today's tracker: ${LINK}`);
   });
 
   it('leaves inactive clients out of the totals', async () => {
     const db = await seededDb();
-    await createTask(db, task({ clientId: 2, title: 'Mehta menu', deadline: '2026-10-01' }), NOW.toISOString());
-    await createTask(db, task({ title: 'Sharma task' }), NOW.toISOString());
+    await createTask(db, await task(db, { client: 'MEH', title: 'Mehta menu', deadline: '2026-10-01' }), NOW.toISOString());
+    await createTask(db, await task(db, { title: 'Sharma task' }), NOW.toISOString());
     await syncClients(db, [SHARMA]); // Mehta taken off the allow-list
     expect(await text(db)).toBe(`Good morning. 1 open task, 0 overdue. Today's tracker: ${LINK}`);
   });
 
   it('says no open tasks when there are no active clients', async () => {
     const db = await seededDb();
-    await createTask(db, task({ title: 'Left behind' }), NOW.toISOString());
+    await createTask(db, await task(db, { title: 'Left behind' }), NOW.toISOString());
     await syncClients(db, []);
     expect(await text(db)).toBe(`Good morning. No open tasks. Today's tracker: ${LINK}`);
   });
 
   it('carries no client name, task title or code, and leaves the view it is given unchanged', async () => {
     const db = await seededDb();
-    await createTask(db, task({ title: 'Secret banner work', priority: 'major' }), NOW.toISOString());
-    await createTask(db, task({ side: 'client', title: 'Client overdue', deadline: '2026-10-21' }), NOW.toISOString());
+    await createTask(db, await task(db, { title: 'Secret banner work', priority: 'major' }), NOW.toISOString());
+    await createTask(db, await task(db, { side: 'client', title: 'Client overdue', deadline: '2026-10-21' }), NOW.toISOString());
     const v = await view(db);
     const codes = () => v.clients.map((c) => [c.usOpen.map((t) => t.code), c.clientOpen.map((t) => t.code)]);
     const before = codes();
@@ -137,38 +139,38 @@ describe('trackerLink', () => {
 describe('byMorningUrgency', () => {
   it('orders overdue first, then due today, then priority, then oldest raised', async () => {
     const db = await seededDb();
-    await createTask(db, task({ title: 'Fix contact form', priority: 'major', raisedOn: '2026-10-01' }), NOW.toISOString()); // SHA-001
-    await createTask(db, task({ side: 'client', title: 'Send logo files', priority: 'low', deadline: '2026-10-20', raisedOn: '2026-10-15' }), NOW.toISOString()); // SHA-002
-    await createTask(db, task({ title: 'Write about page', deadline: TODAY, raisedOn: '2026-10-05' }), NOW.toISOString()); // SHA-003
-    await createTask(db, task({ title: 'Old low task', priority: 'low', raisedOn: '2026-09-01' }), NOW.toISOString()); // SHA-004
-    await createTask(db, task({ side: 'client', title: 'Approve sitemap', deadline: '2026-10-21', raisedOn: '2026-10-10' }), NOW.toISOString()); // SHA-005
+    await createTask(db, await task(db, { title: 'Fix contact form', priority: 'major', raisedOn: '2026-10-01' }), NOW.toISOString()); // SHA-001
+    await createTask(db, await task(db, { side: 'client', title: 'Send logo files', priority: 'low', deadline: '2026-10-20', raisedOn: '2026-10-15' }), NOW.toISOString()); // SHA-002
+    await createTask(db, await task(db, { title: 'Write about page', deadline: TODAY, raisedOn: '2026-10-05' }), NOW.toISOString()); // SHA-003
+    await createTask(db, await task(db, { title: 'Old low task', priority: 'low', raisedOn: '2026-09-01' }), NOW.toISOString()); // SHA-004
+    await createTask(db, await task(db, { side: 'client', title: 'Approve sitemap', deadline: '2026-10-21', raisedOn: '2026-10-10' }), NOW.toISOString()); // SHA-005
     expect(await urgent(db)).toEqual(['SHA-005', 'SHA-002', 'SHA-003', 'SHA-001', 'SHA-004']);
     expect(TOP_TASKS).toBe(3);
   });
 
   it('ranks high priority above older tasks', async () => {
     const db = await seededDb();
-    await createTask(db, task({ title: 'Oldest', raisedOn: '2026-09-01' }), NOW.toISOString()); // SHA-001
-    await createTask(db, task({ title: 'Urgent one', priority: 'major', raisedOn: '2026-10-20' }), NOW.toISOString()); // SHA-002
-    await createTask(db, task({ title: 'Later', raisedOn: '2026-10-02' }), NOW.toISOString()); // SHA-003
+    await createTask(db, await task(db, { title: 'Oldest', raisedOn: '2026-09-01' }), NOW.toISOString()); // SHA-001
+    await createTask(db, await task(db, { title: 'Urgent one', priority: 'major', raisedOn: '2026-10-20' }), NOW.toISOString()); // SHA-002
+    await createTask(db, await task(db, { title: 'Later', raisedOn: '2026-10-02' }), NOW.toISOString()); // SHA-003
     expect(await urgent(db)).toEqual(['SHA-002', 'SHA-001', 'SHA-003']);
   });
 
   it('puts critical tasks first, even before overdue ones, and ranks a task from before levels by its old priority', async () => {
     const db = await seededDb();
-    await createTask(db, task({ title: 'Overdue', deadline: '2026-10-20' }), NOW.toISOString()); // SHA-001
-    await createTask(db, task({ title: 'Critical', priority: 'critical', raisedOn: '2026-10-20' }), NOW.toISOString()); // SHA-002
-    await createTask(db, task({ title: 'Old high', priority: 'major', raisedOn: '2026-10-21' }), NOW.toISOString()); // SHA-003
-    rawOf(db).prepare("UPDATE tasks SET priority_level = NULL WHERE code = 'SHA-003'").run(); // old column stays 'high'
-    await createTask(db, task({ title: 'Medium', raisedOn: '2026-09-01' }), NOW.toISOString()); // SHA-004
+    await createTask(db, await task(db, { title: 'Overdue', deadline: '2026-10-20' }), NOW.toISOString()); // SHA-001
+    await createTask(db, await task(db, { title: 'Critical', priority: 'critical', raisedOn: '2026-10-20' }), NOW.toISOString()); // SHA-002
+    await createTask(db, await task(db, { title: 'Old high', priority: 'major', raisedOn: '2026-10-21' }), NOW.toISOString()); // SHA-003
+    await db.run("UPDATE tasks SET priority_level = NULL WHERE code = 'SHA-003'"); // old column stays 'high'
+    await createTask(db, await task(db, { title: 'Medium', raisedOn: '2026-09-01' }), NOW.toISOString()); // SHA-004
     expect(await urgent(db)).toEqual(['SHA-002', 'SHA-001', 'SHA-003', 'SHA-004']);
   });
 
   it('breaks a full tie by task id, whichever side each task is on', async () => {
     const db = await seededDb();
-    await createTask(db, task({ side: 'client', title: 'Client first' }), NOW.toISOString()); // SHA-001
-    await createTask(db, task({ title: 'Us second' }), NOW.toISOString()); // SHA-002
-    await createTask(db, task({ title: 'Us third' }), NOW.toISOString()); // SHA-003
+    await createTask(db, await task(db, { side: 'client', title: 'Client first' }), NOW.toISOString()); // SHA-001
+    await createTask(db, await task(db, { title: 'Us second' }), NOW.toISOString()); // SHA-002
+    await createTask(db, await task(db, { title: 'Us third' }), NOW.toISOString()); // SHA-003
     expect(await urgent(db)).toEqual(['SHA-001', 'SHA-002', 'SHA-003']);
   });
 });
@@ -176,20 +178,20 @@ describe('byMorningUrgency', () => {
 describe('taskNotes', () => {
   it('notes critical, and a task without a level (from before levels) gets no priority note', async () => {
     const db = await seededDb();
-    await createTask(db, task({ title: 'Down', priority: 'critical' }), NOW.toISOString()); // SHA-001
-    await createTask(db, task({ title: 'Old high', priority: 'major' }), NOW.toISOString()); // SHA-002
-    rawOf(db).prepare("UPDATE tasks SET priority_level = NULL WHERE code = 'SHA-002'").run();
+    await createTask(db, await task(db, { title: 'Down', priority: 'critical' }), NOW.toISOString()); // SHA-001
+    await createTask(db, await task(db, { title: 'Old high', priority: 'major' }), NOW.toISOString()); // SHA-002
+    await db.run("UPDATE tasks SET priority_level = NULL WHERE code = 'SHA-002'");
     expect(taskNotes(await openTask(db, 'SHA-001'), TODAY)).toEqual(['critical']);
     expect(taskNotes(await openTask(db, 'SHA-002'), TODAY)).toEqual([]);
   });
 
   it('notes due today, a later deadline, overdue, major and maybe done', async () => {
     const db = await seededDb();
-    await createTask(db, task({ title: 'Today', deadline: TODAY }), NOW.toISOString()); // SHA-001
-    await createTask(db, task({ title: 'Late', priority: 'major', deadline: '2026-10-21' }), NOW.toISOString()); // SHA-002
-    const maybe = await createTask(db, task({ title: 'Maybe', deadline: '2026-10-30' }), NOW.toISOString()); // SHA-003
+    await createTask(db, await task(db, { title: 'Today', deadline: TODAY }), NOW.toISOString()); // SHA-001
+    await createTask(db, await task(db, { title: 'Late', priority: 'major', deadline: '2026-10-21' }), NOW.toISOString()); // SHA-002
+    const maybe = await createTask(db, await task(db, { title: 'Maybe', deadline: '2026-10-30' }), NOW.toISOString()); // SHA-003
     await setTaskStatus(db, maybe.id, 'maybe_done', TODAY, NOW.toISOString(), 'ai');
-    await createTask(db, task({ title: 'Plain' }), NOW.toISOString()); // SHA-004
+    await createTask(db, await task(db, { title: 'Plain' }), NOW.toISOString()); // SHA-004
     expect(taskNotes(await openTask(db, 'SHA-001'), TODAY)).toEqual(['due today']);
     expect(taskNotes(await openTask(db, 'SHA-002'), TODAY)).toEqual(['due 21 Oct', 'overdue', 'major']);
     expect(taskNotes(await openTask(db, 'SHA-003'), TODAY)).toEqual(['due 30 Oct', 'maybe done']);
