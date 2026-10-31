@@ -8,9 +8,8 @@ import type { Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { AuditLog } from '../../src/web/audit.ts';
 import { registerControlApi } from '../../src/web/routes/controlScreens.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
+import { NOW, rows, seededDb } from '../helpers/db.ts';
 import { bootDashboard, OWNER } from '../helpers/web.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const closers: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -43,8 +42,8 @@ async function boot(o: { linked?: boolean; secureCookies?: boolean; actionCapaci
   return { db, h, audit: real, sessions };
 }
 
-const auditRows = (db: Db) => rawOf(db).prepare('SELECT actor, event, kind, detail FROM audit_log ORDER BY id').all();
-const requestIds = (db: Db) => (rawOf(db).prepare('SELECT request_id AS r FROM audit_log ORDER BY id').all() as { r: string | null }[]).map((x) => x.r);
+const auditRows = (db: Db) => rows(db, 'SELECT actor, event, kind, detail FROM audit_log ORDER BY id');
+const requestIds = async (db: Db) => (await rows<{ r: string | null }>(db, 'SELECT request_id AS r FROM audit_log ORDER BY id')).map((x) => x.r);
 
 describe('control API: reads', () => {
   it('needs a signed-in owner', async () => {
@@ -76,7 +75,7 @@ describe('control API: settings', () => {
     const { db, h } = await boot();
     expect((await h.post('/dashboard/api/settings', { body: { key: 'reportDays', value: 'daily' }, csrf: null })).status).toBe(403);
     expect(await h.post('/dashboard/api/settings', { body: { key: 'reportDays', value: 'daily' } })).toMatchObject({ status: 200, json: { reportDays: 'daily' } });
-    expect(auditRows(db)).toEqual([{ actor: OWNER, event: 'settings.reportDays', kind: 'config', detail: 'Morning briefing days set to every day' }]);
+    expect(await auditRows(db)).toEqual([{ actor: OWNER, event: 'settings.reportDays', kind: 'config', detail: 'Morning briefing days set to every day' }]);
   });
 
   it('sets the send time with CSRF, owner-only, checked on the server and audited', async () => {
@@ -87,10 +86,10 @@ describe('control API: settings', () => {
     for (const value of ['7:30', '07:30:00', '25:00', 730]) {
       expect(await h.post('/dashboard/api/settings', { body: { key: 'reportTime', value } }), String(value)).toMatchObject({ status: 422, json: { error: { field: 'reportTime' } } });
     }
-    expect(auditRows(db)).toEqual([]);
+    expect(await auditRows(db)).toEqual([]);
     // 13:30 IST: 07:30 has passed today, so it starts tomorrow. The briefing is off, so there is no next report.
     expect(await h.post('/dashboard/api/settings', { body: time })).toMatchObject({ status: 200, json: { sendAt: '07:30', nextReport: null, source: { reportTime: 'dashboard' } } });
-    expect(auditRows(db)).toEqual([{ actor: OWNER, event: 'settings.reportTime', kind: 'config', detail: 'Morning briefing time set to 07:30 IST, from tomorrow' }]);
+    expect(await auditRows(db)).toEqual([{ actor: OWNER, event: 'settings.reportTime', kind: 'config', detail: 'Morning briefing time set to 07:30 IST, from tomorrow' }]);
     expect(await h.get('/dashboard/api/settings')).toMatchObject({ json: { sendAt: '07:30' } });
   });
 
@@ -103,7 +102,7 @@ describe('control API: settings', () => {
     const ok = await h.post('/dashboard/api/settings', { body: { key: 'reportRecipient', value: other, confirm: '+91 70123 49999' } });
     expect(ok).toMatchObject({ status: 200, json: { recipientMasked: '…9999' } });
     expect(JSON.stringify(ok.json)).not.toContain('7012349999');
-    expect(JSON.stringify(auditRows(db))).not.toContain('7012349999');
+    expect(JSON.stringify(await auditRows(db))).not.toContain('7012349999');
   });
 
   it('refuses to switch on before the spare phone is linked, and bad keys or values', async () => {
@@ -124,7 +123,7 @@ describe('control API: sign out everywhere', () => {
     expect(String(r.headers['set-cookie'])).toMatch(/^wa_session=; HttpOnly; SameSite=Lax; Path=\/dashboard; Max-Age=0/);
     expect((await h.get('/dashboard/api/session')).status).toBe(401);
     expect((await h.get('/dashboard/api/session', { cookie: second })).status).toBe(401);
-    expect(auditRows(db)).toEqual([{ actor: OWNER, event: 'auth.signout_everywhere', kind: 'auth', detail: 'Signed out everywhere (2 sessions)' }]);
+    expect(await auditRows(db)).toEqual([{ actor: OWNER, event: 'auth.signout_everywhere', kind: 'auth', detail: 'Signed out everywhere (2 sessions)' }]);
   });
 
   it('needs CSRF', async () => {
@@ -151,14 +150,14 @@ describe('control API: priority and sentiment settings', () => {
     expect((await h.post(PATH, { cookie: null, body: { key: 'sentimentEnabled', value: true } })).status).toBe(401);
     expect((await h.post(PATH, { origin: 'https://evil.example', body: { key: 'sentimentEnabled', value: true } })).status).toBe(403);
     expect((await h.post(PATH, { csrf: null, body: { key: 'sentimentEnabled', value: true } })).status).toBe(403);
-    expect(auditRows(db)).toEqual([]);
+    expect(await auditRows(db)).toEqual([]);
     expect(await h.post(PATH, { body: { key: 'priorityKeywords', value: LISTS } })).toMatchObject({ status: 200, json: { keywords: LISTS, source: { priorityKeywords: 'dashboard' } } });
     expect(await h.post(PATH, { body: { key: 'sentimentEnabled', value: true } })).toMatchObject({ status: 200, json: { sentimentEnabled: true } });
-    expect(auditRows(db)).toEqual([
+    expect(await auditRows(db)).toEqual([
       { actor: OWNER, event: 'settings.priorityKeywords', kind: 'config', detail: 'Priority keywords saved (Critical 1, Major 0, Medium 0, Low 1)' },
       { actor: OWNER, event: 'settings.sentimentEnabled', kind: 'config', detail: 'Sentiment analysis switched on' },
     ]);
-    expect(requestIds(db).every((r) => typeof r === 'string' && r.length > 0)).toBe(true);
+    expect((await requestIds(db)).every((r) => typeof r === 'string' && r.length > 0)).toBe(true);
   });
 
   it('refuses bad keys and values with 422, naming the field', async () => {
@@ -169,7 +168,7 @@ describe('control API: priority and sentiment settings', () => {
       .toMatchObject({ status: 422, json: { error: { field: 'major', message: 'Major keyword 1 is already in Critical: keep each keyword in one list' } } });
     expect((await h.post(PATH, { body: [] })).status).toBe(422);
     expect((await h.post(PATH, { body: { value: true } })).status).toBe(422);
-    expect(auditRows(db)).toEqual([]);
+    expect(await auditRows(db)).toEqual([]);
   });
 });
 
@@ -184,7 +183,7 @@ describe('control API review fixes', () => {
       expect((await h.post(path, { origin: 'https://evil.example', body: { key: 'reportDays', value: 'daily' } })).status, path).toBe(403);
       expect((await h.post(path, { csrf: null, raw: 'not json' })).status, path).toBe(403); // not 400: CSRF comes first
     }
-    expect(auditRows(db)).toEqual([]);
+    expect(await auditRows(db)).toEqual([]);
     expect((await h.get('/dashboard/api/session')).status).toBe(200);
   });
 
@@ -205,7 +204,7 @@ describe('control API review fixes', () => {
     const { db, h } = await boot();
     await h.post('/dashboard/api/settings', { body: { key: 'reportDays', value: 'daily' } });
     await h.post('/dashboard/api/session/signout-everywhere');
-    expect(requestIds(db)).toEqual([expect.stringMatching(/^[0-9a-f]{12}$/), expect.stringMatching(/^[0-9a-f]{12}$/)]);
+    expect(await requestIds(db)).toEqual([expect.stringMatching(/^[0-9a-f]{12}$/), expect.stringMatching(/^[0-9a-f]{12}$/)]);
   });
 
   it('the session answer has exactly the email, the two times and the browser label', async () => {

@@ -12,9 +12,8 @@ import { silentLogger } from '../../src/util/logger.ts';
 import { AuditLog } from '../../src/web/audit.ts';
 import { RateLimiter } from '../../src/web/guard.ts';
 import { registerAssistantApi } from '../../src/web/routes/assistant.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
+import { NOW, rows, seeded } from '../helpers/db.ts';
 import { bootDashboard, OWNER } from '../helpers/web.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 // The assistant's routes on the real dashboard server, with a fake Claude (no real API call): the owner's guard, CSRF,
 // the question limit, the streamed answer, and Confirm running a card once.
@@ -41,10 +40,10 @@ class ProposingAi implements AssistantAi {
 }
 
 async function boot(o: { askCapacity?: number } = {}) {
-  const db = await seededDb();
+  const { db, ids } = await seeded();
   const clock = manualClock(NOW);
   await createTask(db, {
-    clientId: 1, side: 'us', title: 'Send the revised quote', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,
+    clientId: ids.sharma, side: 'us', title: 'Send the revised quote', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,
     raisedOn: '2026-10-18', deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp',
   }, NOW);
   const spend = new SpendGuard({ db, clock, capUsd: 10 });
@@ -70,7 +69,7 @@ async function boot(o: { askCapacity?: number } = {}) {
 
 /** The answer's events, one JSON object per line. */
 const lines = (raw: unknown) => String(raw).trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
-const auditRows = (db: Db) => rawOf(db).prepare('SELECT actor, event, detail, request_id AS requestId FROM audit_log ORDER BY id').all() as Record<string, string | null>[];
+const auditRows = (db: Db) => rows<Record<string, string | null>>(db, 'SELECT actor, event, detail, request_id AS requestId FROM audit_log ORDER BY id');
 
 describe('assistant API', () => {
   it('needs the signed-in owner, and CSRF for anything that asks or changes', async () => {
@@ -103,14 +102,14 @@ describe('assistant API', () => {
     expect(events.map((e) => e.type)).toEqual(['tool', 'proposal', 'text', 'done']);
     const card = events[1]!.card as { id: string };
     expect((await getTaskByCode(db, 'SHA-001'))?.status).toBe('open'); // nothing changes before Confirm
-    expect(auditRows(db)).toEqual([]);
+    expect(await auditRows(db)).toEqual([]);
 
     expect(await h.post('/dashboard/api/assistant/confirm', { body: { id: card.id } })).toMatchObject({ status: 200, json: { ok: true, message: 'SHA-001 updated.', task: 'SHA-001' } });
     expect((await getTaskByCode(db, 'SHA-001'))?.status).toBe('done');
-    expect(auditRows(db)).toEqual([{ actor: OWNER, event: 'task.done', detail: 'Task SHA-001 marked done · via assistant', requestId: expect.any(String) }]);
+    expect(await auditRows(db)).toEqual([{ actor: OWNER, event: 'task.done', detail: 'Task SHA-001 marked done · via assistant', requestId: expect.any(String) }]);
     // A replayed Confirm is refused and changes nothing more.
     expect(await h.post('/dashboard/api/assistant/confirm', { body: { id: card.id } })).toMatchObject({ status: 404, json: { error: { field: 'id' } } });
-    expect(auditRows(db)).toHaveLength(1);
+    expect(await auditRows(db)).toHaveLength(1);
     expect(pending.size()).toBe(0);
   });
 

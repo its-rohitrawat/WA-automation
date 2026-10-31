@@ -8,22 +8,24 @@ import { insertMedia, messageRowId } from '../../src/store/media.ts';
 import { insertFound } from '../../src/store/meetings.ts';
 import { insertMessage } from '../../src/store/messages.ts';
 import { createTask, recordEvent, type NewTask } from '../../src/store/tasks.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { idOf, NOW, row, seeded, seededDb } from '../helpers/db.ts';
 
 // 2026-10-19 08:00 UTC is 13:30 IST on Monday 19 Oct.
 const now = new Date(NOW);
 
-async function task(db: Db, over: Partial<NewTask> & { status?: 'open' | 'maybe_done' | 'done'; updatedAt?: string } = {}): Promise<string> {
-  const { status, updatedAt, ...rest } = over;
+async function task(db: Db, over: Partial<Omit<NewTask, 'clientId'>> & { client?: 'SHA' | 'MEH'; status?: 'open' | 'maybe_done' | 'done'; updatedAt?: string } = {}): Promise<string> {
+  const { status, updatedAt, client, ...rest } = over;
   const t = await createTask(db, {
-    clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
+    clientId: await idOf(db, client ?? 'SHA'), side: 'us', title: 'Banner', category: 'design', priority: 'medium', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
     deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp', ...rest,
   }, NOW);
-  if (status) rawOf(db).prepare('UPDATE tasks SET status = ? WHERE id = ?').run(status, t.id);
-  if (updatedAt) rawOf(db).prepare('UPDATE tasks SET updated_at = ? WHERE id = ?').run(updatedAt, t.id);
+  if (status) await db.run('UPDATE tasks SET status = ? WHERE id = ?', [status, t.id]);
+  if (updatedAt) await db.run('UPDATE tasks SET updated_at = ? WHERE id = ?', [updatedAt, t.id]);
   return t.code;
 }
+
+/** A task's row id, by its code (ids come from a sequence shared by every customer on Postgres). */
+const taskId = async (db: Db, code: string) => (await row<{ id: number }>(db, 'SELECT id FROM tasks WHERE code = ?', [code]))!.id;
 
 const codes = (r: { rows: { code: string }[] }) => r.rows.map((x) => x.code);
 const q = (o: Record<string, string>) => parseTaskQuery(new URLSearchParams(o));
@@ -112,7 +114,7 @@ describe('listDashboardTasks', () => {
   it('filters by client, owner (any case) and priority', async () => {
     const db = await seededDb();
     const a = await task(db, { assignedTo: 'Rahul', priority: 'major' });
-    const b = await task(db, { clientId: 2, assignedTo: 'rahul' });
+    const b = await task(db, { client: 'MEH', assignedTo: 'rahul' });
     await task(db, { assignedTo: 'Priya' });
     expect(codes(await listDashboardTasks(db, q({ client: 'MEH' }), now))).toEqual([b]);
     expect(codes(await listDashboardTasks(db, q({ owner: 'RAHUL', sort: 'code' }), now))).toEqual([b, a]);
@@ -123,7 +125,7 @@ describe('listDashboardTasks', () => {
   it('searches code, title, client name and owner, any case', async () => {
     const db = await seededDb();
     const a = await task(db, { title: 'New LOGO' });
-    const b = await task(db, { clientId: 2, title: 'Menu' });
+    const b = await task(db, { client: 'MEH', title: 'Menu' });
     const c = await task(db, { title: 'Brochure', assignedTo: 'Rahul' });
     expect(codes(await listDashboardTasks(db, q({ q: 'logo' }), now))).toEqual([a]);
     expect(codes(await listDashboardTasks(db, q({ q: 'mehta' }), now))).toEqual([b]);
@@ -141,13 +143,13 @@ describe('listDashboardTasks', () => {
     expect(codes(await listDashboardTasks(db, q({ q: '_' }), now))).toEqual([und]);
     expect(codes(await listDashboardTasks(db, q({ q: '\\' }), now))).toEqual([back]);
     expect(codes(await listDashboardTasks(db, q({ q: "'; DROP TABLE tasks; --" }), now))).toEqual([]);
-    expect(rawOf(db).prepare('SELECT COUNT(*) AS n FROM tasks').get()).toEqual({ n: 4 });
+    expect(await row(db, 'SELECT COUNT(*) AS n FROM tasks')).toEqual({ n: 4 });
   });
 
   it('sorts by deadline (none last), code, client, owner (none last) and status, either way', async () => {
     const db = await seededDb();
     const a = await task(db, { deadline: '2026-10-30', assignedTo: 'Zed' }); // SHA-001
-    const b = await task(db, { clientId: 2, deadline: '2026-10-21' }); // MEH-001
+    const b = await task(db, { client: 'MEH', deadline: '2026-10-21' }); // MEH-001
     const c = await task(db, { assignedTo: 'Amit', status: 'done' }); // SHA-002
     const d = await task(db, { deadline: '2026-10-01', assignedTo: 'Ben' }); // SHA-003, overdue
     const sort = async (s: string, dir = 'asc') => codes(await listDashboardTasks(db, q({ sort: s, dir }), now));
@@ -164,7 +166,7 @@ describe('listDashboardTasks', () => {
 
   it('sorts codes by their number, so SHA-1000 comes after SHA-999', async () => {
     const db = await seededDb();
-    rawOf(db).prepare('UPDATE clients SET next_task_seq = 999 WHERE id = 1').run();
+    await db.run("UPDATE clients SET next_task_seq = 999 WHERE code = 'SHA'");
     const a = await task(db);
     const b = await task(db);
     expect([a, b]).toEqual(['SHA-999', 'SHA-1000']);
@@ -180,21 +182,21 @@ describe('listDashboardTasks', () => {
   });
 
   it('names the source: a meeting, a voice note, or WhatsApp', async () => {
-    const db = await seededDb();
+    const { db, ids } = await seeded();
     const meetingId = (await insertFound(db, {
       recording: 'conferenceRecords/a/recordings/b', conference: 'conferenceRecords/a', driveFileId: 'd1', meetingCode: null, title: 'Sync',
-      startedAt: NOW, endedAt: null, attendees: [], participants: [], clientId: 1, matchKind: 'title', status: 'done', driveSeconds: 60, createdAt: NOW,
+      startedAt: NOW, endedAt: null, attendees: [], participants: [], clientId: ids.sharma, matchKind: 'title', status: 'done', driveSeconds: 60, createdAt: NOW,
     }))!;
     const fromMeeting = await task(db, { origin: 'meeting', meetingId });
-    await insertMessage(db, { waId: 'V1', clientId: 1, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts: NOW, text: null, quotedWaId: null, mediaType: 'audio' });
-    await insertMedia(db, { messageId: (await messageRowId(db, 1, 'V1'))!, clientId: 1, kind: 'voice', status: 'done', mimeType: 'audio/ogg', fileName: null, fileSize: 1, seconds: 4,
+    await insertMessage(db, { waId: 'V1', clientId: ids.sharma, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts: NOW, text: null, quotedWaId: null, mediaType: 'audio' });
+    await insertMedia(db, { messageId: (await messageRowId(db, ids.sharma, 'V1'))!, clientId: ids.sharma, kind: 'voice', status: 'done', mimeType: 'audio/ogg', fileName: null, fileSize: 1, seconds: 4,
       forwarded: false, refEnc: null, errorCode: null, createdAt: NOW });
     const fromVoice = await task(db, { sourceWaId: 'V1' });
-    await insertMessage(db, { waId: 'T1', clientId: 1, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts: NOW, text: 'hi', quotedWaId: null, mediaType: null });
+    await insertMessage(db, { waId: 'T1', clientId: ids.sharma, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts: NOW, text: 'hi', quotedWaId: null, mediaType: null });
     const fromText = await task(db, { sourceWaId: 'T1' });
     // The same message id in another client's group is not this task's source.
-    await insertMessage(db, { waId: 'V2', clientId: 2, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts: NOW, text: null, quotedWaId: null, mediaType: 'audio' });
-    await insertMedia(db, { messageId: (await messageRowId(db, 2, 'V2'))!, clientId: 2, kind: 'voice', status: 'done', mimeType: 'audio/ogg', fileName: null, fileSize: 1, seconds: 4,
+    await insertMessage(db, { waId: 'V2', clientId: ids.mehta, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts: NOW, text: null, quotedWaId: null, mediaType: 'audio' });
+    await insertMedia(db, { messageId: (await messageRowId(db, ids.mehta, 'V2'))!, clientId: ids.mehta, kind: 'voice', status: 'done', mimeType: 'audio/ogg', fileName: null, fileSize: 1, seconds: 4,
       forwarded: false, refEnc: null, errorCode: null, createdAt: NOW });
     const otherGroup = await task(db, { sourceWaId: 'V2' });
     const sources = Object.fromEntries((await listDashboardTasks(db, q({}), now)).rows.map((r) => [r.code, r.source]));
@@ -213,9 +215,10 @@ describe('taskDetail', () => {
   it('adds the source quote, progress, reminders and history in plain words', async () => {
     const db = await seededDb();
     const code = await task(db, { sourceQuote: 'Please send the <b>logo</b>', sourceDate: '2026-10-10', latestProgress: 'Draft sent' });
-    rawOf(db).prepare("UPDATE tasks SET reminder_count = 2, source_revoked = 1 WHERE code = ?").run(code);
+    await db.run('UPDATE tasks SET reminder_count = 2, source_revoked = 1 WHERE code = ?', [code]);
+    const [id, sharma] = [await taskId(db, code), await idOf(db, 'SHA')];
     const ai = (op: string, detail: object, at: string) =>
-      recordEvent(db, { taskId: 1, clientId: 1, actor: 'ai', op, detail, reason: 'x', sourceIds: ['W1'], at });
+      recordEvent(db, { taskId: id, clientId: sharma, actor: 'ai', op, detail, reason: 'x', sourceIds: ['W1'], at });
     await ai('add_task', { code, title: 'secret words from chat', side: 'us', status: 'open' }, '2026-10-10T05:00:00.000Z');
     await ai('log_reminder', {}, '2026-10-11T05:00:00.000Z');
     await ai('update_task', { latestProgress: 'secret words from chat' }, '2026-10-12T05:00:00.000Z');
@@ -250,9 +253,10 @@ describe('taskDetail', () => {
   it('says where a task was created from, and survives a bad stored detail', async () => {
     const db = await seededDb();
     const code = await task(db, { origin: 'meeting' });
-    await recordEvent(db, { taskId: 1, clientId: 1, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: NOW });
-    await recordEvent(db, { taskId: 1, clientId: 1, actor: 'ai', op: 'update_task', detail: {}, reason: null, sourceIds: [], at: NOW });
-    rawOf(db).prepare("INSERT INTO task_events (task_id, client_id, actor, op, detail, at) VALUES (1, 1, 'human', 'update_task', 'not json', ?)").run(NOW);
+    const [id, sharma] = [await taskId(db, code), await idOf(db, 'SHA')];
+    await recordEvent(db, { taskId: id, clientId: sharma, actor: 'ai', op: 'add_task', detail: {}, reason: null, sourceIds: [], at: NOW });
+    await recordEvent(db, { taskId: id, clientId: sharma, actor: 'ai', op: 'update_task', detail: {}, reason: null, sourceIds: [], at: NOW });
+    await db.run("INSERT INTO task_events (task_id, client_id, actor, op, detail, at) VALUES (?, ?, 'human', 'update_task', 'not json', ?)", [id, sharma, NOW]);
     expect((await taskDetail(db, code, now))!.history.map((h) => h.what)).toEqual(['Created from a meeting', 'Updated', 'Edited by the owner']);
   });
 });
@@ -270,9 +274,9 @@ describe('listDashboardTasks review fixes', () => {
 
   it('sorts client names without regard to case', async () => {
     const db = await seededDb();
-    rawOf(db).prepare("UPDATE clients SET name = 'mehta foods' WHERE id = 2").run();
+    await db.run("UPDATE clients SET name = 'mehta foods' WHERE code = 'MEH'");
     const sharma = await task(db);
-    const mehta = await task(db, { clientId: 2 });
+    const mehta = await task(db, { client: 'MEH' });
     expect(codes(await listDashboardTasks(db, q({ sort: 'client' }), now))).toEqual([mehta, sharma]);
   });
 
@@ -286,8 +290,8 @@ describe('listDashboardTasks review fixes', () => {
   it('lists active clients only by default, as the Overview counts; removed=1 adds the removed clients\' tasks', async () => {
     const db = await seededDb();
     const sharma = await task(db, { deadline: '2026-10-18' });
-    const mehta = await task(db, { clientId: 2, deadline: '2026-10-18' });
-    rawOf(db).prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
+    const mehta = await task(db, { client: 'MEH', deadline: '2026-10-18' });
+    await db.run("UPDATE clients SET active = 0 WHERE code = 'MEH'");
     expect(codes(await listDashboardTasks(db, q({}), now))).toEqual([sharma]);
     expect(codes(await listDashboardTasks(db, q({ removed: '1' }), now)).sort()).toEqual([sharma, mehta].sort());
     expect(() => q({ removed: 'yes' })).toThrowError(ControlError);
@@ -295,14 +299,14 @@ describe('listDashboardTasks review fixes', () => {
 
   it('every Overview count equals the Tasks list its tile opens, with a removed client holding tasks in every bucket', async () => {
     const db = await seededDb();
-    for (const clientId of [1, 2]) {
-      await task(db, { clientId, deadline: '2026-10-18' }); // overdue
-      await task(db, { clientId }); // open
-      await task(db, { clientId, status: 'maybe_done' }); // review
-      const done = await task(db, { clientId });
-      rawOf(db).prepare("UPDATE tasks SET status = 'done', closed_on = '2026-10-17' WHERE code = ?").run(done);
+    for (const client of ['SHA', 'MEH'] as const) {
+      await task(db, { client, deadline: '2026-10-18' }); // overdue
+      await task(db, { client }); // open
+      await task(db, { client, status: 'maybe_done' }); // review
+      const done = await task(db, { client });
+      await db.run("UPDATE tasks SET status = 'done', closed_on = '2026-10-17' WHERE code = ?", [done]);
     }
-    rawOf(db).prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
+    await db.run("UPDATE clients SET active = 0 WHERE code = 'MEH'");
     const t = (await overview(db, now)).tasks;
     const total = async (o: Record<string, string>) => (await listDashboardTasks(db, q(o), now)).total;
     expect(await total({ status: 'overdue' })).toBe(t.overdue);
@@ -314,17 +318,17 @@ describe('listDashboardTasks review fixes', () => {
 
   it('closed=7d lists the done tasks closed today and the six days before (IST): the Overview\'s Done count, task for task', async () => {
     const db = await seededDb();
-    const closedOn = (code: string, day: string) => rawOf(db).prepare("UPDATE tasks SET status = 'done', closed_on = ? WHERE code = ?").run(day, code);
+    const closedOn = (code: string, day: string) => db.run("UPDATE tasks SET status = 'done', closed_on = ? WHERE code = ?", [day, code]);
     const today = await task(db);
     const sixth = await task(db);
     const older = await task(db);
     const reopened = await task(db); // closed in the week, then reopened: not done, so not counted
     await task(db); // open
-    closedOn(today, '2026-10-19');
-    closedOn(sixth, '2026-10-13');
-    closedOn(older, '2026-10-12');
-    closedOn(reopened, '2026-10-15');
-    rawOf(db).prepare("UPDATE tasks SET status = 'open' WHERE code = ?").run(reopened);
+    await closedOn(today, '2026-10-19');
+    await closedOn(sixth, '2026-10-13');
+    await closedOn(older, '2026-10-12');
+    await closedOn(reopened, '2026-10-15');
+    await db.run("UPDATE tasks SET status = 'open' WHERE code = ?", [reopened]);
     const r = await listDashboardTasks(db, q({ status: 'done', closed: '7d' }), now);
     expect(codes(r).sort()).toEqual([today, sixth].sort());
     expect(r.total).toBe((await overview(db, now)).tasks.doneThisWeek);
@@ -334,14 +338,14 @@ describe('listDashboardTasks review fixes', () => {
 });
 
 describe('listDashboardTasks: priority levels and sentiment', () => {
-  const sentimentOn = (db: Db) => rawOf(db).prepare("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', ?, 'o')").run(NOW);
+  const sentimentOn = (db: Db) => db.run("INSERT INTO settings (k, v, updated_at, updated_by) VALUES ('sentimentEnabled', 'true', ?, 'o')", [NOW]);
 
   it('filters and sorts by the four levels, a task without one last', async () => {
     const db = await seededDb();
     const low = await task(db, { priority: 'low' });
     const critical = await task(db, { priority: 'critical' });
     const old = await task(db, { priority: 'major' });
-    rawOf(db).prepare('UPDATE tasks SET priority_level = NULL, priority_source = NULL WHERE code = ?').run(old);
+    await db.run('UPDATE tasks SET priority_level = NULL, priority_source = NULL WHERE code = ?', [old]);
     const major = await task(db, { priority: 'major' });
     expect(codes(await listDashboardTasks(db, q({ sort: 'priority' }), now))).toEqual([critical, major, low, old]);
     expect(codes(await listDashboardTasks(db, q({ sort: 'priority', dir: 'desc' }), now))).toEqual([old, low, major, critical]);
@@ -355,7 +359,7 @@ describe('listDashboardTasks: priority levels and sentiment', () => {
     const code = await task(db, { priority: 'critical', prioritySource: 'keyword', priorityKeyword: 'urgent', sentiment: 'frustrated' });
     expect((await listDashboardTasks(db, q({}), now)).rows[0]).toMatchObject({ priority: 'critical', prioritySource: 'keyword', sentiment: null });
     expect(await taskDetail(db, code, now)).toMatchObject({ priorityKeyword: 'urgent', sentiment: null });
-    sentimentOn(db);
+    await sentimentOn(db);
     expect((await listDashboardTasks(db, q({}), now)).rows[0]).toMatchObject({ sentiment: 'frustrated' });
     expect(await taskDetail(db, code, now)).toMatchObject({ sentiment: 'frustrated' });
   });

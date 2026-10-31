@@ -10,6 +10,7 @@ import { createGuard, RateLimiter } from '../../src/web/guard.ts';
 import type { Router } from '../../src/web/router.ts';
 import { createWebServer, type WebServer } from '../../src/web/server.ts';
 import { SessionStore } from '../../src/web/sessions.ts';
+import { onSqlite } from './db.ts';
 
 export const OWNER = 'owner@example.com';
 
@@ -31,7 +32,10 @@ export async function bootDashboard(o: {
   const root = mkdtempSync(join(tmpdir(), 'wa-dash-'));
   writeFileSync(join(root, 'index.html'), '<!doctype html>');
   let port = 0;
-  const sessions = new SessionStore(o.db, o.clock);
+  // The dashboard's sessions live with the platform tables (decision D1): the tracker itself on SQLite, the platform Db
+  // (wa_platform) on Postgres, where a customer's Db cannot reach web_sessions.
+  const sessionDb = onSqlite ? o.db : (await import('./pg.ts')).openTestPlatformDb();
+  const sessions = new SessionStore(sessionDb, o.clock);
   const guard = createGuard({ sessions, ownerEmails: [OWNER], port: () => port });
   const actions = new RateLimiter({ capacity: o.actionCapacity ?? 1000, refillPerSec: 1, clock: o.clock });
   const server: WebServer = createWebServer({ control: {}, env: { DASHBOARD_PORT: 0 }, log, clock: o.clock, publicDir: root });
