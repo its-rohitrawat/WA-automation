@@ -6,9 +6,6 @@ import { argument, codeOf, isBoolean, lineAt, splitArguments, srcFiles } from '.
 // A flag is written CASE WHEN … THEN 1 ELSE 0 END, which both engines run (a NULL gives 0, as COALESCE did). This scan
 // fails on a COALESCE( in src with any argument that is, at its top level, a comparison or a boolean.
 
-/** Lane B's site, which lane B fixes: at most this many until then. A ceiling. */
-const PENDING: Record<string, number> = { 'store/meetings.ts': 1 };
-
 /** Each COALESCE( with a boolean argument in a file, as `path:line: COALESCE(…)`. Whole-line comments are left out. */
 function offences(path: string, text: string): string[] {
   const out: string[] = [];
@@ -22,13 +19,8 @@ function offences(path: string, text: string): string[] {
 }
 
 describe('no COALESCE over a comparison or a boolean in src (S2.7, the Postgres conversion)', () => {
-  it('none, beyond lane B’s pending site', () => {
-    const wrong: string[] = [];
-    for (const f of srcFiles()) {
-      const found = offences(f, codeOf(f));
-      if (found.length > (PENDING[f] ?? 0)) wrong.push(...found);
-    }
-    expect(wrong).toEqual([]);
+  it('none anywhere in src', () => {
+    expect(srcFiles().flatMap((f) => offences(f, codeOf(f)))).toEqual([]);
   });
 
   it('catches a comparison in any argument; passes values, nested calls, CASE and comments', () => {
