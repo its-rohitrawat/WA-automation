@@ -19,9 +19,6 @@ function files(dir: string): string[] {
   return out.sort();
 }
 
-/** Lane B's sites, which lane B fixes (the run's one real bug): at most this many each until then. A ceiling. */
-const PENDING: Record<string, number> = { 'store/media.ts': 3, 'store/meetings.ts': 1 };
-
 const BARE = /(?:@[A-Za-z_]\w*|\?|\$\d+)\s+IS\s+(?:NOT\s+)?NULL\b/gi;
 
 /** Each bare-parameter IS NULL in a file, as `path:line: …`. Whole-line comments are left out. */
@@ -35,13 +32,8 @@ function offences(path: string, text: string): string[] {
 }
 
 describe('no bare parameter in IS NULL in src (S2.7, the second test:pg run)', () => {
-  it('none, beyond lane B’s pending sites', () => {
-    const wrong: string[] = [];
-    for (const f of files(SRC)) {
-      const found = offences(f, readFileSync(join(SRC, f), 'utf8'));
-      if (found.length > (PENDING[f] ?? 0)) wrong.push(...found);
-    }
-    expect(wrong).toEqual([]);
+  it('none anywhere in src', () => {
+    expect(files(SRC).flatMap((f) => offences(f, readFileSync(join(SRC, f), 'utf8')))).toEqual([]);
   });
 
   it('catches @name, ? and $n with IS NULL or IS NOT NULL; passes a column, a cast and a comment', () => {
