@@ -9,31 +9,35 @@ import { getKv } from '../../src/store/kv.ts';
 import { insertMessage, listUnprocessed, markProcessed } from '../../src/store/messages.ts';
 import { listPeople, upsertPerson } from '../../src/store/people.ts';
 import { createTask, getTaskByCode } from '../../src/store/tasks.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { idOf, MEHTA, NOW, rows, seededDb, SHARMA } from '../helpers/db.ts';
 
 const now = new Date('2026-10-19T08:00:00Z');
 
+/** A seeded client by its place (1 Sharma, 2 Mehta), as its real id: on Postgres the ids are not 1 and 2. */
+const seat = (db: Db, n: number) => idOf(db, n === 1 ? SHARMA.code : MEHTA.code);
+
 async function withTask() {
   const db = await seededDb();
-  await createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
+  await createTask(db, { clientId: await seat(db, 1), side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
     deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp' }, NOW);
   return db;
 }
 
-interface Ev { op: string; actor: string; detail: unknown; task_id: number | null; client_id: number }
-function events(db: Db): Ev[] {
-  const rows = rawOf(db).prepare("SELECT op, actor, detail, task_id, client_id FROM task_events WHERE actor = 'human' ORDER BY id").all() as (Omit<Ev, 'detail'> & { detail: string })[];
-  return rows.map((e) => ({ ...e, detail: JSON.parse(e.detail) as unknown }));
+interface Ev { op: string; actor: string; detail: unknown; task: string | null; client: string }
+/** The owner's events, each with its task's and client's code. */
+async function events(db: Db): Promise<Ev[]> {
+  const found = await rows<Omit<Ev, 'detail'> & { detail: string }>(db, `SELECT e.op, e.actor, e.detail, t.code AS task, c.code AS client FROM task_events e
+    LEFT JOIN tasks t ON t.id = e.task_id JOIN clients c ON c.id = e.client_id WHERE e.actor = 'human' ORDER BY e.id`);
+  return found.map((e) => ({ ...e, detail: JSON.parse(e.detail) as unknown }));
 }
 
 const rebuilt = async (db: Db) => (await getKv(db, 'rebuild_requested')) === now.toISOString();
 
-async function msg(db: Db, waId: string, ts: string, clientId = 1) {
-  await insertMessage(db, { waId, clientId, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts, text: 'a', quotedWaId: null, mediaType: null });
+async function msg(db: Db, waId: string, ts: string, place = 1) {
+  await insertMessage(db, { waId, clientId: await seat(db, place), senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts, text: 'a', quotedWaId: null, mediaType: null });
 }
-async function processAll(db: Db, clientId = 1) {
-  await markProcessed(db, (await listUnprocessed(db, clientId, 100000)).map((m) => m.id), NOW);
+async function processAll(db: Db, place = 1) {
+  await markProcessed(db, (await listUnprocessed(db, await seat(db, place), 100000)).map((m) => m.id), NOW);
 }
 
 describe('task close / reopen', () => {
@@ -42,9 +46,9 @@ describe('task close / reopen', () => {
     expect(await closeTask(db, 'sha-001', now)).toMatchObject({ status: 'done', closedOn: '2026-10-19', statusLockedAt: now.toISOString() });
     expect(await rebuilt(db)).toBe(true);
     expect(await reopenTask(db, 'SHA-001', now)).toMatchObject({ status: 'open', closedOn: null, statusLockedAt: now.toISOString() });
-    expect(events(db)).toMatchObject([
-      { op: 'close_task', task_id: 1, client_id: 1, detail: { status: 'done' } },
-      { op: 'reopen_task', task_id: 1, client_id: 1, detail: { status: 'open' } },
+    expect(await events(db)).toMatchObject([
+      { op: 'close_task', task: 'SHA-001', client: 'SHA', detail: { status: 'done' } },
+      { op: 'reopen_task', task: 'SHA-001', client: 'SHA', detail: { status: 'open' } },
     ]);
     await expect(closeTask(db, 'SHA-999', now)).rejects.toThrowError(CorrectionError);
   });
@@ -52,11 +56,11 @@ describe('task close / reopen', () => {
   it('refuses to repeat a status, changing nothing', async () => {
     const db = await withTask();
     await expect(reopenTask(db, 'SHA-001', now)).rejects.toThrowError('Task SHA-001 is already open');
-    expect(events(db)).toHaveLength(0);
+    expect(await events(db)).toHaveLength(0);
     expect(await getKv(db, 'rebuild_requested')).toBeUndefined();
     await closeTask(db, 'SHA-001', now);
     await expect(closeTask(db, 'SHA-001', now)).rejects.toThrowError('Task SHA-001 is already done');
-    expect(events(db)).toHaveLength(1);
+    expect(await events(db)).toHaveLength(1);
   });
 });
 
@@ -65,7 +69,7 @@ describe('task edit', () => {
     const db = await withTask();
     expect(await editTask(db, 'SHA-001', { deadline: '2026-10-25', assignedTo: 'Rahul' }, now)).toMatchObject({ deadline: '2026-10-25', assignedTo: 'Rahul' });
     expect([...((await getTaskByCode(db, 'SHA-001'))?.lockedFields ?? [])].sort()).toEqual(['assignedTo', 'deadline']);
-    expect(events(db)[0]).toMatchObject({ op: 'update_task', detail: { deadline: '2026-10-25', assignedTo: 'Rahul' } });
+    expect((await events(db))[0]).toMatchObject({ op: 'update_task', detail: { deadline: '2026-10-25', assignedTo: 'Rahul' } });
     expect(await rebuilt(db)).toBe(true);
   });
 
@@ -90,7 +94,7 @@ describe('task edit', () => {
     await expect(editTask(db, 'SHA-001', { title: 'none' }, now)).rejects.toThrowError(/title/);
     await expect(editTask(db, 'SHA-001', { title: '' }, now)).rejects.toThrowError(/title/);
     await expect(editTask(db, 'SHA-001', { priority: 'secret client words' }, now)).rejects.toThrowError(/^(?!.*secret client words)/);
-    expect(events(db)).toHaveLength(0);
+    expect(await events(db)).toHaveLength(0);
     expect(await getKv(db, 'rebuild_requested')).toBeUndefined();
   });
 });
@@ -101,7 +105,7 @@ describe('task unlock', () => {
     await editTask(db, 'SHA-001', { deadline: '2026-10-25' }, now);
     await closeTask(db, 'SHA-001', now);
     expect(await unlockTask(db, 'sha-001', now)).toMatchObject({ lockedFields: [], statusLockedAt: null, status: 'done' });
-    expect(events(db).at(-1)).toMatchObject({ op: 'unlock', task_id: 1, client_id: 1, detail: { lockedFields: ['deadline'], statusLocked: true } });
+    expect((await events(db)).at(-1)).toMatchObject({ op: 'unlock', task: 'SHA-001', client: 'SHA', detail: { lockedFields: ['deadline'], statusLocked: true } });
     expect(await rebuilt(db)).toBe(true);
     await expect(unlockTask(db, 'SHA-999', now)).rejects.toThrowError(CorrectionError);
   });
@@ -110,32 +114,32 @@ describe('task unlock', () => {
 describe('person set', () => {
   async function people() {
     const db = await withTask();
-    await upsertPerson(db, { clientId: 1, jid: '919800000002@s.whatsapp.net', number: '919800000002', name: 'Rahul', fromMe: false });
-    await upsertPerson(db, { clientId: 2, jid: '919800000002@s.whatsapp.net', number: '919800000002', name: 'Rahul', fromMe: false });
+    await upsertPerson(db, { clientId: await seat(db, 1), jid: '919800000002@s.whatsapp.net', number: '919800000002', name: 'Rahul', fromMe: false });
+    await upsertPerson(db, { clientId: await seat(db, 2), jid: '919800000002@s.whatsapp.net', number: '919800000002', name: 'Rahul', fromMe: false });
     return db;
   }
 
   it('sets a role by phone number in every client group', async () => {
     const db = await people();
     expect(await setPersonRole(db, '+91 98000-00002', 'Team', undefined, now)).toBe(2);
-    expect((await listPeople(db, 1))[0]).toMatchObject({ role: 'team', roleSetBy: 'human' });
-    expect((await listPeople(db, 2))[0]).toMatchObject({ role: 'team', roleSetBy: 'human' });
-    expect(events(db)).toMatchObject([{ op: 'set_person_role', client_id: 1, detail: { number: '919800000002', role: 'team' } }, { op: 'set_person_role', client_id: 2, detail: { number: '919800000002', role: 'team' } }]);
+    expect((await listPeople(db, await seat(db, 1)))[0]).toMatchObject({ role: 'team', roleSetBy: 'human' });
+    expect((await listPeople(db, await seat(db, 2)))[0]).toMatchObject({ role: 'team', roleSetBy: 'human' });
+    expect(await events(db)).toMatchObject([{ op: 'set_person_role', client: 'SHA', detail: { number: '919800000002', role: 'team' } }, { op: 'set_person_role', client: 'MEH', detail: { number: '919800000002', role: 'team' } }]);
     expect(await rebuilt(db)).toBe(true);
   });
 
   it('scopes to one client with --client', async () => {
     const db = await people();
     expect(await setPersonRole(db, '919800000002', 'client', 'meh', now)).toBe(1);
-    expect((await listPeople(db, 1))[0]).toMatchObject({ role: 'unknown' });
-    expect((await listPeople(db, 2))[0]).toMatchObject({ role: 'client', roleSetBy: 'human' });
+    expect((await listPeople(db, await seat(db, 1)))[0]).toMatchObject({ role: 'unknown' });
+    expect((await listPeople(db, await seat(db, 2)))[0]).toMatchObject({ role: 'client', roleSetBy: 'human' });
   });
 
   it('accepts a WhatsApp id', async () => {
     const db = await people();
     expect(await setPersonRole(db, '919800000002@s.whatsapp.net', 'team', 'SHA', now)).toBe(1);
-    expect((await listPeople(db, 1))[0]).toMatchObject({ role: 'team' });
-    expect(events(db)[0]).toMatchObject({ detail: { jid: '919800000002@s.whatsapp.net', role: 'team' } });
+    expect((await listPeople(db, await seat(db, 1)))[0]).toMatchObject({ role: 'team' });
+    expect((await events(db))[0]).toMatchObject({ detail: { jid: '919800000002@s.whatsapp.net', role: 'team' } });
     await expect(setPersonRole(db, 'nobody@lid', 'team', undefined, now)).rejects.toThrowError('No one with that WhatsApp id has posted in an allowed group yet');
   });
 
@@ -145,7 +149,7 @@ describe('person set', () => {
     await expect(setPersonRole(db, '+91 1', 'team', undefined, now)).rejects.toThrowError('No one with that number has posted in an allowed group yet');
     await expect(setPersonRole(db, '919800000002', 'boss', undefined, now)).rejects.toThrowError(/team or client/);
     const db2 = await withTask();
-    await upsertPerson(db2, { clientId: 2, jid: '919800000003@s.whatsapp.net', number: '919800000003', name: 'X', fromMe: false });
+    await upsertPerson(db2, { clientId: await seat(db2, 2), jid: '919800000003@s.whatsapp.net', number: '919800000003', name: 'X', fromMe: false });
     await expect(setPersonRole(db2, '919800000003', 'team', 'SHA', now)).rejects.toThrowError('That number has posted, but not in client SHA');
     await expect(setPersonRole(db2, '919800000003', 'team', 'ZZZ', now)).rejects.toThrowError(/No client with code/);
   });
@@ -155,8 +159,8 @@ describe('phase set / unlock', () => {
   it('sets a phase case-insensitively, locked, with an event', async () => {
     const db = await withTask();
     await setClientPhase(db, 'sha', 'development', now);
-    expect(await getClient(db, 1)).toMatchObject({ currentPhase: 'Development', phaseLocked: true });
-    expect(events(db)[0]).toMatchObject({ op: 'set_phase', task_id: null, client_id: 1, detail: { phase: 'Development' } });
+    expect(await getClient(db, await seat(db, 1))).toMatchObject({ currentPhase: 'Development', phaseLocked: true });
+    expect((await events(db))[0]).toMatchObject({ op: 'set_phase', task: null, client: 'SHA', detail: { phase: 'Development' } });
     expect(await rebuilt(db)).toBe(true);
     await expect(setClientPhase(db, 'SHA', 'Party', now)).rejects.toThrowError(/must be one of/);
   });
@@ -165,8 +169,8 @@ describe('phase set / unlock', () => {
     const db = await withTask();
     await setClientPhase(db, 'SHA', 'Design', now);
     await unlockClientPhase(db, 'sha', now);
-    expect(await getClient(db, 1)).toMatchObject({ currentPhase: 'Design', phaseLocked: false });
-    expect(events(db).at(-1)).toMatchObject({ op: 'unlock_phase', client_id: 1, detail: { phase: 'Design' } });
+    expect(await getClient(db, await seat(db, 1))).toMatchObject({ currentPhase: 'Design', phaseLocked: false });
+    expect((await events(db)).at(-1)).toMatchObject({ op: 'unlock_phase', client: 'SHA', detail: { phase: 'Design' } });
     expect(await rebuilt(db)).toBe(true);
   });
 });
@@ -183,8 +187,8 @@ describe('reprocess', () => {
     expect(await countReprocess(db, 'SHA', '2026-10-11', '2026-10-15')).toBe(2);
     expect(await getKv(db, 'rebuild_requested')).toBeUndefined(); // counting changes nothing
     expect(await requestReprocess(db, 'SHA', '2026-10-11', now, '2026-10-15')).toBe(2);
-    expect((await listUnprocessed(db, 1)).map((m) => m.waId).sort()).toEqual(['fresh', 'm1', 'm2']);
-    expect(events(db)[0]).toMatchObject({ op: 'reprocess', client_id: 1, detail: { since: '2026-10-11', until: '2026-10-15', messages: 2 } });
+    expect((await listUnprocessed(db, await seat(db, 1))).map((m) => m.waId).sort()).toEqual(['fresh', 'm1', 'm2']);
+    expect((await events(db))[0]).toMatchObject({ op: 'reprocess', client: 'SHA', detail: { since: '2026-10-11', until: '2026-10-15', messages: 2 } });
     expect(await rebuilt(db)).toBe(true);
   });
 
@@ -194,7 +198,7 @@ describe('reprocess', () => {
     await expect(requestReprocess(db, 'SHA', '2026-10-11', now, 'soon')).rejects.toThrowError(/YYYY-MM-DD/);
     await expect(requestReprocess(db, 'SHA', '2026-10-11', now, '2026-10-10')).rejects.toThrowError(/on or after/);
     await expect(requestReprocess(db, 'ZZZ', '2026-10-11', now)).rejects.toThrowError(/No client/);
-    rawOf(db).prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
+    await db.run("UPDATE clients SET active = 0 WHERE code = 'SHA'");
     await expect(requestReprocess(db, 'SHA', '2026-10-11', now)).rejects.toThrowError('Client SHA is not in the allow-list; nothing to reprocess');
     await expect(countReprocess(db, 'SHA', '2026-10-11')).rejects.toThrowError(/not in the allow-list/);
   });
@@ -205,11 +209,11 @@ describe('reprocess', () => {
     for (let i = 0; i < n; i++) await msg(db, `b${i}`, '2026-10-12T08:00:00.000Z');
     await processAll(db);
     expect(await reprocess(db, 'SHA', '2026-10-11', undefined, false, now)).toEqual({ count: n, queued: 0, needsConfirm: true, maxCostUsd: 1 });
-    expect(await listUnprocessed(db, 1, 1000)).toHaveLength(0);
-    expect(events(db)).toHaveLength(0);
+    expect(await listUnprocessed(db, await seat(db, 1), 1000)).toHaveLength(0);
+    expect(await events(db)).toHaveLength(0);
     expect(await getKv(db, 'rebuild_requested')).toBeUndefined();
     expect(await reprocess(db, 'SHA', '2026-10-11', undefined, true, now)).toMatchObject({ queued: n, needsConfirm: false });
-    expect(await listUnprocessed(db, 1, 1000)).toHaveLength(n);
+    expect(await listUnprocessed(db, await seat(db, 1), 1000)).toHaveLength(n);
   });
 
   it('re-queues small jobs without --yes and reports zero', async () => {
