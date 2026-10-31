@@ -14,6 +14,8 @@ class FakeGateway implements GatewayLike {
   starts = 0;
   stops = 0;
   hangStop = false;
+  /** What idle() returns: the events this gateway is still storing. */
+  storing: Promise<void> = Promise.resolve();
   failed = 0;
   dropped = 0;
   groups = [{ id: '120363777000000001@g.us', subject: 'A' }];
@@ -29,6 +31,9 @@ class FakeGateway implements GatewayLike {
   }
   status(): GatewayStatus {
     return { state: this.state, since: T0, lastErrorCode: null, credsSaveFailures: 0 };
+  }
+  idle() {
+    return this.storing;
   }
   start() {
     this.starts++;
@@ -104,6 +109,25 @@ describe('SwitchableGateway', () => {
     expect(events).toEqual([event('new')]);
     expect(statuses.map((s) => s.state)).toEqual(['open', 'stopped', 'open']); // a open, b's status on swap, b open
     expect(g.status().state).toBe('open');
+  });
+
+  // Bug 11: the service waits for idle() before its database closes. After a relink that must include the old
+  // gateway's event still being stored (on Postgres a network write), not only the new gateway's.
+  it('idle() waits for what the old gateway was storing when it was swapped out, as well as the current one', async () => {
+    const a = new FakeGateway('a');
+    const b = new FakeGateway('b');
+    let stored!: () => void;
+    a.storing = new Promise((r) => (stored = r));
+    const g = new SwitchableGateway({ inner: a, clock: manualClock(T0) });
+    g.start();
+    await g.swap(b);
+    let idle = false;
+    void g.idle().then(() => (idle = true));
+    await new Promise((r) => setImmediate(r));
+    expect(idle).toBe(false);
+    stored();
+    await new Promise((r) => setImmediate(r));
+    expect(idle).toBe(true);
   });
 
   it('keeps the failure and drop counts of earlier gateways', async () => {

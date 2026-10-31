@@ -37,6 +37,8 @@ export class SwitchableGateway implements GatewayLike {
   /** Failure and drop counts of earlier gateways, so the counters run on across swaps. */
   #failedBefore = 0;
   #droppedBefore = 0;
+  /** Earlier gateways' idle(), taken as each was swapped out: an event it was storing still finishes before shutdown. */
+  #retired: Promise<unknown> = Promise.resolve();
 
   constructor(o: { inner?: GatewayLike; clock?: Clock; initialState?: HeldState; stopCapMs?: number } = {}) {
     this.#clock = o.clock ?? systemClock;
@@ -49,9 +51,9 @@ export class SwitchableGateway implements GatewayLike {
     this.#eventFns.push(fn);
   }
 
-  /** The current gateway's idle(); resolved without one. */
+  /** The current gateway's idle(), and every earlier one's as it was swapped out: their events taken before the swap. */
   idle(): Promise<void> {
-    return this.#inner?.idle?.() ?? Promise.resolve();
+    return Promise.all([this.#retired, this.#inner?.idle?.()]).then(() => undefined);
   }
 
   onStatus(fn: (s: GatewayStatus) => void): void {
@@ -153,6 +155,7 @@ export class SwitchableGateway implements GatewayLike {
     if (old) {
       this.#failedBefore += old.failedCount();
       this.#droppedBefore += old.droppedCount();
+      this.#retired = Promise.all([this.#retired, old.idle?.()]);
     }
     this.#inner = undefined;
     return old;

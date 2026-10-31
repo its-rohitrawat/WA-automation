@@ -170,12 +170,17 @@ async function connectAndIngest(o: {
         }
       }, POLL_MS);
     });
+    // The state as the wait ended; then the messages already handed over are stored before anything is counted (on
+    // Postgres each one is a network write), as the service waits for them before its database closes (src/app.ts).
+    const state = gateway.status().state;
+    await gateway.stop();
+    await gateway.idle();
     const failed = gateway.failedCount();
     if (failed > 0) deps.out(`${failed} messages could not be saved. They are lost from the tracker; check the log, and add anything important by hand.`);
-    const state = gateway.status().state;
     if (state !== 'open') throw new Error(terminalAdvice(state) ?? o.droppedMessage ?? ADVICE_DROPPED);
   } finally {
     await gateway.stop();
+    await gateway.idle(); // the caller closes the database next
   }
 }
 

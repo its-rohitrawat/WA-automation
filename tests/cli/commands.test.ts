@@ -17,6 +17,7 @@ import { insertFound, sttForgetsGivenUp } from '../../src/store/meetings.ts';
 import { insertMessage } from '../../src/store/messages.ts';
 import { acquireLock } from '../../src/util/lock.ts';
 import { useEncryptedAuthState, useSenderAuthState } from '../../src/wa/authState.ts';
+import { Ingestor } from '../../src/wa/ingest.ts';
 import type { GroupMetadata } from 'baileys';
 import { cliStore, type CliStore } from '../helpers/cliEnv.ts';
 import { idOf, MEHTA, onSqlite, OTHER_GROUP } from '../helpers/db.ts';
@@ -255,17 +256,47 @@ describe('link connection flow', () => {
 
   it('caps the wait under a continuous stream of allowed messages', async () => {
     const { p } = await start();
-    let done = false;
-    void p.then(() => (done = true));
     const sock = await openViaQr();
     for (let i = 0; i < 14; i++) {
       sock.emit('messages.upsert', { type: 'notify', messages: [waText(`s${i}`, `m${i}`, { group: MEHTA.groupId })] });
       await vi.advanceTimersByTimeAsync(1_000);
     }
-    expect(done).toBe(true);
-    expect((await trackerMessages())).toBeGreaterThan(5);
+    // The wait ended at the cap, though messages kept coming: the socket is closed. The command then finishes storing
+    // what it took (on Postgres, real network writes that no fake clock speeds up).
+    expect(sock.end).toHaveBeenCalled();
     await p;
+    expect((await trackerMessages())).toBeGreaterThan(5);
     await lockIsFree();
+  });
+
+  // Bug 11: a message still being stored when the wait ends is stored, and counted, before the command closes the
+  // database. Its write is held here until after the wait has ended, as a slow Postgres write is.
+  it('stores and counts a message still being written when the wait ends, before the database closes', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    const handle = Ingestor.prototype.handle;
+    const spy = vi.spyOn(Ingestor.prototype, 'handle').mockImplementation(async function (this: Ingestor, e) {
+      await held;
+      return handle.call(this, e);
+    });
+    try {
+      const { p } = await start();
+      let done = false;
+      void p.then(() => (done = true), () => (done = true));
+      const sock = await openViaQr();
+      sock.emit('messages.upsert', { type: 'notify', messages: [waText('slow1', 'hello', { group: MEHTA.groupId })] });
+      await vi.advanceTimersByTimeAsync(20_000); // past the 10 s cap
+      expect(sock.end).toHaveBeenCalled(); // the wait is over
+      expect(done).toBe(false); // but the command waits for the write
+      expect(out()).not.toContain('Linked.');
+      release();
+      await p;
+      expect(out()).toContain('Linked. 1 messages saved from the allowed groups.');
+      expect(await trackerMessages()).toBe(1);
+      await lockIsFree();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('saves the download details of a shared image sealed, for the service to fetch later', async () => {
@@ -443,6 +474,7 @@ describe('google-auth', () => {
     parseEnv({
       DATA_DIR: dataDir,
       GROUPS_FILE: groupsFile,
+      ...store.env,
       GOOGLE_OAUTH_CLIENT_ID: 'test-id',
       GOOGLE_OAUTH_CLIENT_SECRET: 'test-secret',
       MEETINGS_ENABLED: 'true',
@@ -474,7 +506,6 @@ describe('google-auth', () => {
       await db.close();
     }
   };
-      ...store.env,
 
   it('stores the token encrypted, never prints it, and says to restart the service', async () => {
     const p = googleAuthCommand(deps({ createConsentClient: consentClient() }));
