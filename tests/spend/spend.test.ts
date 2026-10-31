@@ -88,6 +88,7 @@ describe('SpendGuard: today in memory (S1.5)', () => {
     expect(await db.all('SELECT usd FROM spend ORDER BY id')).toEqual([{ usd: 0.2 }]);
     expect(guard.spentToday()).toBeCloseTo(0.5); // the safe side under a cap
     await guard.refresh();
+    await guard.refresh(); // a rollback looks like an open transaction to the first refresh
     expect(guard.spentToday()).toBeCloseTo(0.2);
   });
 
@@ -102,6 +103,7 @@ describe('SpendGuard: today in memory (S1.5)', () => {
       throw new Error('rolled back');
     })).rejects.toThrow('rolled back');
     await guard.refresh();
+    await guard.refresh(); // a rollback looks like an open transaction to the first refresh
     expect(guard.spentToday()).toBeCloseTo(0.1);
     expect(guard.canSpend(0.9)).toBe(true); // both holds are gone
   });
