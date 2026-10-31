@@ -355,7 +355,8 @@ describe('app shutdown', () => {
     const stop = stopping(app);
     aiCall.resolve();
     await finish(stop);
-    expect(await db.all('SELECT detail FROM spend')).toEqual([{ detail: 'batch 1' }]);
+    const batch = (await row<{ id: number }>(db, 'SELECT id FROM batches'))!.id; // the database's id (Postgres: shared)
+    expect(await db.all('SELECT detail FROM spend')).toEqual([{ detail: `batch ${batch}` }]);
   });
 
   it('starting twice leaves no extra timer behind', async () => {
