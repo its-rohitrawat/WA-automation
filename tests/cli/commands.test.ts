@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -16,12 +16,12 @@ import { insertMedia, mediaSttForgetsGivenUp, messageRowId } from '../../src/sto
 import { insertFound, sttForgetsGivenUp } from '../../src/store/meetings.ts';
 import { insertMessage } from '../../src/store/messages.ts';
 import { acquireLock } from '../../src/util/lock.ts';
-import { openSessionDb, useEncryptedAuthState } from '../../src/wa/authState.ts';
+import { useEncryptedAuthState, useSenderAuthState } from '../../src/wa/authState.ts';
 import type { GroupMetadata } from 'baileys';
-import { MEHTA, OTHER_GROUP } from '../helpers/db.ts';
+import { cliStore, type CliStore } from '../helpers/cliEnv.ts';
+import { idOf, MEHTA, onSqlite, OTHER_GROUP } from '../helpers/db.ts';
 import { closeWith, FakeSocket, SEND_METHODS } from '../helpers/fakeSocket.ts';
 import { waRaw, waText } from '../helpers/wa.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const KEY = Buffer.alloc(32, 7);
 const REFRESH_TOKEN = 'rt-very-secret-token';
@@ -33,10 +33,12 @@ let sockets: FakeSocket[];
 let lines: string[];
 let confirm: ReturnType<typeof vi.fn<(q: string) => Promise<boolean>>>;
 let factory: ReturnType<typeof vi.fn>;
+/** The store the commands reach (tests/helpers/cliEnv.ts): the data folder on SQLite, the test's own customer on Postgres. */
+let store: CliStore;
 
 function deps(over: Partial<CliDeps> = {}): CliDeps {
   return {
-    env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, GOOGLE_OAUTH_CLIENT_ID: 'test-id', GOOGLE_OAUTH_CLIENT_SECRET: 'test-secret' }),
+    env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, ...store.env, GOOGLE_OAUTH_CLIENT_ID: 'test-id', GOOGLE_OAUTH_CLIENT_SECRET: 'test-secret' }),
     keyProvider: new StaticKeyProvider(KEY),
     socketFactory: factory as unknown as CliDeps['socketFactory'],
     out: (l) => void lines.push(l),
@@ -51,47 +53,44 @@ function deps(over: Partial<CliDeps> = {}): CliDeps {
 const out = () => lines.join('\n');
 
 async function seedTracker(): Promise<void> {
-  const db = openDb(trackerDbPath(dataDir));
+  const db = await store.open();
   await syncClients(db, [MEHTA]);
-  await insertMessage(db, { waId: 'seed1', clientId: 1, senderJid: 'a@s.whatsapp.net', senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T08:00:00.000Z', text: 'hi', quotedWaId: null, mediaType: null });
-  rawOf(db).close();
+  await insertMessage(db, { waId: 'seed1', clientId: await idOf(db, MEHTA.code), senderJid: 'a@s.whatsapp.net', senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T08:00:00.000Z', text: 'hi', quotedWaId: null, mediaType: null });
+  await db.close();
 }
 
+/** The founder's linked session, where the commands keep it (the session file, or the customer's wa_auth rows). */
 async function seedSession(): Promise<void> {
-  const sdb = openSessionDb(sessionDbPath(dataDir));
+  const db = await store.open();
+  const sdb = await store.openSession(db, 'founder');
   const auth = await useEncryptedAuthState(sdb, KEY);
   auth.state.creds.me = { id: '919800000000:1@s.whatsapp.net', name: 'Founder' };
   await auth.saveCreds();
-  rawOf(sdb).close();
+  await sdb.close();
+  await db.close();
 }
 
-const rowCount = (file: string, sql: string): number => {
-  const db = openDb(file);
+/** The founder's live session rows, where the commands keep them. */
+const sessionRows = () => store.sessionRows('founder');
+const trackerMessages = async (): Promise<number> => {
+  const db = await store.open();
   try {
-    return (rawOf(db).prepare(sql).get() as { n: number }).n;
+    return (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM messages'))!.n;
   } finally {
-    rawOf(db).close();
+    await db.close();
   }
 };
-const sessionRows = () => {
-  const db = openSessionDb(sessionDbPath(dataDir));
-  try {
-    return (rawOf(db).prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n;
-  } finally {
-    rawOf(db).close();
-  }
-};
-const trackerMessages = () => rowCount(trackerDbPath(dataDir), 'SELECT COUNT(*) AS n FROM messages');
 
 async function lockIsFree(): Promise<void> {
   const l = await acquireLock(dataDir);
   await l.release();
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'wa-cli-'));
   dataDir = join(dir, 'data');
   mkdirSync(join(dataDir, 'keys'), { recursive: true });
+  store = await cliStore(dataDir);
   writeFileSync(masterKeyPath(dataDir), 'dummy-protected-key');
   groupsFile = join(dir, 'groups.json');
   writeFileSync(groupsFile, JSON.stringify({ clients: [{ groupId: MEHTA.groupId, name: MEHTA.name, code: MEHTA.code }] }));
@@ -117,45 +116,45 @@ describe('link --reset', () => {
     await seedTracker();
     await seedSession();
     const keyBefore = readFileSync(masterKeyPath(dataDir), 'utf8');
-    const msgsBefore = trackerMessages();
-    expect(sessionRows()).toBeGreaterThan(0);
+    const msgsBefore = (await trackerMessages());
+    expect((await sessionRows())).toBeGreaterThan(0);
 
     vi.useFakeTimers();
     // Counted when the socket is created, which is right after the reset and before anything new is saved.
-    let rowsAtConnect = -1;
+    let rowsAtConnect: Promise<number> = Promise.resolve(-1);
     factory.mockImplementation(() => {
       rowsAtConnect = sessionRows();
       const s = new FakeSocket();
       sockets.push(s);
       return s;
     });
-    const sessionBefore = sessionRows();
+    const sessionBefore = (await sessionRows());
     const p = linkCommand({ reset: true }, deps());
     const rejected = expect(p).rejects.toThrow();
     await vi.waitFor(() => expect(sockets.length).toBe(1));
     expect(sessionBefore).toBe(2); // canary + creds
-    expect(rowsAtConnect).toBe(1); // creds gone; only the fresh canary row remains
+    expect(await rowsAtConnect).toBe(1); // creds gone; only the fresh canary row remains
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(confirm.mock.calls[0]![0]).toContain('Type yes to continue');
     closeWith(sockets[0]!, 401); // no point connecting further: end the run
     await rejected;
 
-    expect(trackerMessages()).toBe(msgsBefore);
+    expect((await trackerMessages())).toBe(msgsBefore);
     expect(readFileSync(masterKeyPath(dataDir), 'utf8')).toBe(keyBefore);
-    const db = openDb(trackerDbPath(dataDir));
+    const db = await store.open();
     expect(await getKv(db, 'session_reset_at')).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    rawOf(db).close();
+    await db.close();
     expect(out()).toContain('tracker data were NOT touched');
     await lockIsFree();
   });
 
   it('Ctrl+C at the prompt cancels cleanly and releases the lock', async () => {
     await seedSession();
-    const before = sessionRows();
+    const before = (await sessionRows());
     confirm.mockRejectedValue(new ConfirmCancelled());
     await linkCommand({ reset: true }, deps());
     expect(out()).toContain('Cancelled. Nothing was changed.');
-    expect(sessionRows()).toBe(before);
+    expect((await sessionRows())).toBe(before);
     expect(factory).not.toHaveBeenCalled();
     await lockIsFree();
   });
@@ -163,24 +162,24 @@ describe('link --reset', () => {
   it('not confirmed: nothing is deleted', async () => {
     await seedTracker();
     await seedSession();
-    const before = sessionRows();
+    const before = (await sessionRows());
     confirm.mockResolvedValue(false);
     await linkCommand({ reset: true }, deps());
     expect(out()).toContain('Nothing was changed.');
-    expect(sessionRows()).toBe(before);
+    expect((await sessionRows())).toBe(before);
     expect(factory).not.toHaveBeenCalled();
-    const db = openDb(trackerDbPath(dataDir));
+    const db = await store.open();
     expect(await getKv(db, 'session_reset_at')).toBeUndefined();
-    rawOf(db).close();
+    await db.close();
     await lockIsFree();
   });
 
   it('invalid allowed-groups.json throws before anything is deleted', async () => {
     await seedSession();
-    const before = sessionRows();
+    const before = (await sessionRows());
     writeFileSync(groupsFile, '{ nope');
     await expect(linkCommand({ reset: true }, deps())).rejects.toThrow(/not valid JSON/);
-    expect(sessionRows()).toBe(before);
+    expect((await sessionRows())).toBe(before);
     expect(confirm).not.toHaveBeenCalled();
     await lockIsFree();
   });
@@ -208,12 +207,12 @@ describe('link with an existing session', () => {
   it('says already linked, never opens a socket, deletes nothing', async () => {
     await seedTracker();
     await seedSession();
-    const before = sessionRows();
+    const before = (await sessionRows());
     await linkCommand({ reset: false }, deps());
     expect(out()).toContain('already linked');
     expect(factory).not.toHaveBeenCalled();
-    expect(sessionRows()).toBe(before);
-    expect(trackerMessages()).toBe(1);
+    expect((await sessionRows())).toBe(before);
+    expect((await trackerMessages())).toBe(1);
     await lockIsFree();
   });
 });
@@ -249,7 +248,7 @@ describe('link connection flow', () => {
     expect(sock.end).toHaveBeenCalled();
     expect(out()).toContain('Linked. 1 messages saved from the allowed groups.');
     expect(out()).not.toContain('secret');
-    expect(trackerMessages()).toBe(1);
+    expect((await trackerMessages())).toBe(1);
     expect(sendCalls().every((n) => n === 0)).toBe(true);
     await lockIsFree();
   });
@@ -264,7 +263,7 @@ describe('link connection flow', () => {
       await vi.advanceTimersByTimeAsync(1_000);
     }
     expect(done).toBe(true);
-    expect(trackerMessages()).toBeGreaterThan(5);
+    expect((await trackerMessages())).toBeGreaterThan(5);
     await p;
     await lockIsFree();
   });
@@ -278,16 +277,16 @@ describe('link connection flow', () => {
     ] });
     await vi.advanceTimersByTimeAsync(9_000);
     await p;
-    const db = openDb(trackerDbPath(dataDir));
+    const db = await store.open();
     try {
-      const row = rawOf(db).prepare('SELECT status, ref_enc, client_id FROM media').get() as { status: string; ref_enc: Buffer; client_id: number };
+      const row = (await db.get<{ status: string; ref_enc: Buffer; client_id: number }>('SELECT status, ref_enc, client_id FROM media'))!;
       expect(row.status).toBe('pending');
       expect(row.ref_enc.includes(mediaKey)).toBe(false);
       expect(row.ref_enc.toString('latin1')).not.toContain('mmg.whatsapp.net');
       // Sealed under the master key, so the service can open it.
       expect(new MediaRefSealer(KEY).open(row.ref_enc, mediaRefAad(row.client_id, 'img1'))).toMatchObject({ directPath: '/v/x', mediaKey: mediaKey.toString('base64') });
     } finally {
-      rawOf(db).close();
+      await db.close();
     }
     await lockIsFree();
   });
@@ -334,11 +333,13 @@ describe('link connection flow', () => {
     await lockIsFree();
   });
 
-  it('says plainly when allowed messages could not be saved', async () => {
+  // SQLite only (S2.7): a SQLite trigger blocks the command's own inserts (it opens its own connection, which a spy on
+  // the test's Db cannot reach); the message it prints does not depend on the engine.
+  it.runIf(onSqlite)('says plainly when allowed messages could not be saved', async () => {
     await seedTracker();
     const tdb = openDb(trackerDbPath(dataDir));
-    rawOf(tdb).exec("CREATE TRIGGER block_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'blocked'); END");
-    rawOf(tdb).close();
+    await tdb.exec("CREATE TRIGGER block_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'blocked'); END");
+    await tdb.close();
     const { p } = await start();
     const sock = await openViaQr();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('f1', 'hello', { group: MEHTA.groupId })] });
@@ -410,14 +411,14 @@ describe('list-groups', () => {
     ] });
     await vi.advanceTimersByTimeAsync(10_000);
     await p;
-    const db = openDb(trackerDbPath(dataDir));
+    const db = await store.open();
     try {
-      const row = rawOf(db).prepare('SELECT status, ref_enc, client_id FROM media').get() as { status: string; ref_enc: Buffer; client_id: number };
+      const row = (await db.get<{ status: string; ref_enc: Buffer; client_id: number }>('SELECT status, ref_enc, client_id FROM media'))!;
       expect(row.status).toBe('pending');
       expect(row.ref_enc.includes(mediaKey)).toBe(false);
       expect(new MediaRefSealer(KEY).open(row.ref_enc, mediaRefAad(row.client_id, 'img1'))).toMatchObject({ directPath: '/v/x', mediaKey: mediaKey.toString('base64') });
     } finally {
-      rawOf(db).close();
+      await db.close();
     }
     expect(sendCalls().every((n) => n === 0)).toBe(true);
     await lockIsFree();
@@ -466,11 +467,11 @@ describe('google-auth', () => {
     await fetch(lines.find((l) => l.startsWith('http://127.0.0.1'))!);
   };
   const kv = async (k: string) => {
-    const db = openDb(trackerDbPath(dataDir));
+    const db = await store.open();
     try {
       return await getKv(db, k);
     } finally {
-      rawOf(db).close();
+      await db.close();
     }
   };
 
@@ -478,20 +479,20 @@ describe('google-auth', () => {
     const p = googleAuthCommand(deps({ createConsentClient: consentClient() }));
     await visit();
     await p;
-    const db = openDb(trackerDbPath(dataDir));
+    const db = await store.open();
     const raw = (await getKv(db, 'google_refresh_token'))!;
     expect(raw).toBeTruthy();
     expect(raw).not.toContain(REFRESH_TOKEN);
     expect(await new TokenStore(db, KEY).load()).toBe(REFRESH_TOKEN);
-    rawOf(db).close();
+    await db.close();
     expect(out()).not.toContain(REFRESH_TOKEN);
     expect(out()).toContain('Google Drive connected. If the WA Agent service is running, restart it so it uses the new sign-in: net stop wa-agent, then net start wa-agent');
   });
 
   it('records the desktop client as the issuer of the main token, replacing one left by a dashboard reconnect', async () => {
-    const pre = openDb(trackerDbPath(dataDir));
+    const pre = await store.open();
     await setKv(pre, 'google_client:main', 'web');
-    rawOf(pre).close();
+    await pre.close();
     const p = googleAuthCommand(deps({ createConsentClient: consentClient() }));
     await visit();
     await p;
@@ -509,9 +510,9 @@ describe('google-auth', () => {
     expect(perm).toBeLessThan(urlIndex());
     expect(out()).not.toContain('Calendar invites');
     expect(await kv('google_scopes')).toBe(DRIVE_SCOPES[0]);
-    const db = openDb(trackerDbPath(dataDir));
+    const db = await store.open();
     expect(await hasMeetingScopes(db)).toBe(false);
-    rawOf(db).close();
+    await db.close();
   });
 
   it('with meetings on asks for the meeting permissions too, in plain words, and saves token and scopes', async () => {
@@ -528,10 +529,10 @@ describe('google-auth', () => {
     }
     expect(out()).not.toContain('googleapis.com/auth');
     expect(await kv('google_scopes')).toBe(granted);
-    const db = openDb(trackerDbPath(dataDir));
+    const db = await store.open();
     expect(await new TokenStore(db, KEY).load()).toBe(REFRESH_TOKEN);
     expect(await hasMeetingScopes(db)).toBe(true);
-    rawOf(db).close();
+    await db.close();
     expect(out()).not.toContain(REFRESH_TOKEN);
     expect(out()).toContain('Google Drive, Meet and Calendar connected. If the WA Agent service is running, restart it so it uses the new sign-in: net stop wa-agent, then net start wa-agent');
   });
@@ -571,9 +572,9 @@ describe('google-auth', () => {
     const err = await caught;
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).not.toContain(REFRESH_TOKEN);
-    const db = openDb(trackerDbPath(dataDir));
+    const db = await store.open();
     expect(await getKv(db, 'google_refresh_token')).toBeUndefined();
-    rawOf(db).close();
+    await db.close();
     expect(out()).not.toContain(REFRESH_TOKEN);
   });
 });
@@ -581,29 +582,31 @@ describe('google-auth', () => {
 describe('status command', () => {
   it('prints no report yet on a fresh database', async () => {
     await statusCommand(deps());
-    expect(out().split('\n')[0]).toBe(`Database: SQLite (${trackerDbPath(dataDir)})`); // the engine first
+    const first = out().split('\n')[0]!; // the engine first
+    if (onSqlite) expect(first).toBe(`Database: SQLite (${trackerDbPath(dataDir)})`);
+    else expect(first).toMatch(/^Database: Postgres /);
     expect(out()).toContain('no report yet');
     expect(out()).not.toContain('Speech copies');
   });
 
   it('counts the speech copies given up: last try used, or a provider that is not set up now', async () => {
-    const db = openDb(trackerDbPath(dataDir));
+    const db = await store.open();
     const id = (await insertFound(db, {
       recording: 'conferenceRecords/c1/recordings/r1', conference: 'conferenceRecords/c1', driveFileId: 'file1', meetingCode: null, title: 'Weekly',
       startedAt: '2026-10-18T10:00:00.000Z', endedAt: null, attendees: [], participants: [], clientId: null, matchKind: null, status: 'unassigned',
       driveSeconds: null, createdAt: '2026-10-18T11:00:00.000Z',
     }))!;
     const add = (provider: 'elevenlabs' | 'openai', ref: string, attempts: number) =>
-      rawOf(db).prepare('INSERT INTO stt_forget (meeting_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, ?)').run(id, provider, ref, '2026-10-18T11:00:00.000Z', attempts);
-    add('elevenlabs', 'tr-1', MAX_FORGET_ATTEMPTS); // last try used
-    add('elevenlabs', 'tr-2', 1); // still being tried
-    add('openai', 'tr-3', 0); // not the provider set up now
+      db.run('INSERT INTO stt_forget (meeting_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, ?)', [id, provider, ref, '2026-10-18T11:00:00.000Z', attempts]);
+    await add('elevenlabs', 'tr-1', MAX_FORGET_ATTEMPTS); // last try used
+    await add('elevenlabs', 'tr-2', 1); // still being tried
+    await add('openai', 'tr-3', 0); // not the provider set up now
     expect(await sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'elevenlabs' })).toBe(2);
     expect(await sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'none' })).toBe(3);
     // With meetings on the local engine, no paid copy will be deleted by the service: all are left.
     expect(await sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'local' })).toBe(3);
-    rawOf(db).close();
-    await statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
+    await db.close();
+    await statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, ...store.env, STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
     expect(out()).toContain('Speech copies: 2 speech-to-text copies could not be deleted from the provider; see SETUP (Meeting summaries)');
   });
 
@@ -611,21 +614,22 @@ describe('status command', () => {
     await statusCommand(deps());
     expect(out()).not.toContain('Voice copies');
     lines.length = 0;
-    const db = openDb(trackerDbPath(dataDir));
+    const db = await store.open();
     await syncClients(db, [MEHTA]);
-    await insertMessage(db, { waId: 'v1', clientId: 1, senderJid: 'a@s.whatsapp.net', senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T08:00:00.000Z', text: null, quotedWaId: null, mediaType: 'voice' });
+    const mehta = await idOf(db, MEHTA.code);
+    await insertMessage(db, { waId: 'v1', clientId: mehta, senderJid: 'a@s.whatsapp.net', senderNumber: '1', senderName: 'A', fromMe: false, ts: '2026-10-19T08:00:00.000Z', text: null, quotedWaId: null, mediaType: 'voice' });
     const mediaId = await insertMedia(db, {
-      messageId: (await messageRowId(db, 1, 'v1'))!, clientId: 1, kind: 'voice', status: 'done', mimeType: 'audio/ogg; codecs=opus', fileName: null, fileSize: 9000, seconds: 12,
+      messageId: (await messageRowId(db, mehta, 'v1'))!, clientId: mehta, kind: 'voice', status: 'done', mimeType: 'audio/ogg; codecs=opus', fileName: null, fileSize: 9000, seconds: 12,
       forwarded: false, refEnc: null, errorCode: null, createdAt: '2026-10-19T08:00:00.000Z',
     });
     const add = (provider: 'elevenlabs' | 'openai', ref: string, attempts: number) =>
-      rawOf(db).prepare('INSERT INTO media_stt_forget (media_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, ?)').run(mediaId, provider, ref, '2026-10-19T08:00:00.000Z', attempts);
-    add('elevenlabs', 'tr-1', MAX_FORGET_ATTEMPTS); // last try used
-    add('elevenlabs', 'tr-2', 1); // still being tried
-    add('openai', 'tr-3', 0); // not the provider set up now
+      db.run('INSERT INTO media_stt_forget (media_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, ?)', [mediaId, provider, ref, '2026-10-19T08:00:00.000Z', attempts]);
+    await add('elevenlabs', 'tr-1', MAX_FORGET_ATTEMPTS); // last try used
+    await add('elevenlabs', 'tr-2', 1); // still being tried
+    await add('openai', 'tr-3', 0); // not the provider set up now
     expect(await mediaSttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: 'elevenlabs' })).toBe(2);
-    rawOf(db).close();
-    await statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', VOICE_STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
+    await db.close();
+    await statusCommand(deps({ env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, ...store.env, STT_PROVIDER: 'elevenlabs', VOICE_STT_PROVIDER: 'elevenlabs', STT_API_KEY: 'test-key' }) }));
     expect(out()).toContain('Voice copies: 2 speech-to-text copies of voice notes could not be deleted from the provider; see SETUP (Voice notes)');
     expect(out()).not.toContain('Speech copies');
     // VOICE_STT_PROVIDER decides, not STT_PROVIDER (Task 10): with voice notes off, or on the local engine (which keeps no
@@ -639,5 +643,54 @@ describe('status command', () => {
       await statusCommand(deps({ env }));
       expect(out()).toContain('Voice copies: 3 speech-to-text copies of voice notes could not be deleted from the provider; see SETUP (Voice notes)');
     }
+  });
+});
+
+// Postgres only (S2.7): what `cli link` and `link --reset` do on DB_ENGINE=postgres, as the founder may run them on the
+// Mac after go-live. The session lives in the customer's wa_auth rows: no session.db is ever written, and a reset clears
+// the founder's rows only. Real timers with short quiet times: nothing here waits on a fake clock.
+describe.runIf(!onSqlite)('link on Postgres keeps the session in wa_auth', () => {
+  const quick = (): Partial<CliDeps> => ({ quietMs: { link: 50, listGroups: 50 }, maxIngestMs: { link: 400, listGroups: 400 } });
+
+  it('link stores the founder session in the customer’s wa_auth, and writes no session.db', async () => {
+    factory.mockImplementation(() => {
+      const s = new FakeSocket();
+      sockets.push(s);
+      return s;
+    });
+    const p = linkCommand({ reset: false }, deps(quick()));
+    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    sockets[0]!.emit('connection.update', { qr: 'QR-DATA' });
+    closeWith(sockets[0]!, 515);
+    await vi.waitFor(() => expect(sockets.length).toBe(2));
+    sockets[1]!.emit('connection.update', { connection: 'open' });
+    await p;
+    expect(out()).toContain('Linked.');
+    expect(await sessionRows()).toBeGreaterThan(0); // the canary at least, under the master key
+    expect(existsSync(sessionDbPath(dataDir))).toBe(false);
+    await lockIsFree();
+  });
+
+  it('link --reset clears the founder’s rows only: the spare phone’s survive, and session_reset_at is recorded', async () => {
+    await seedSession();
+    const db = await store.open();
+    const spare = await store.openSession(db, 'spare');
+    await (await useSenderAuthState(spare, KEY)).saveCreds();
+    await spare.close();
+    const spareBefore = await store.sessionRows('spare');
+    expect(spareBefore).toBeGreaterThan(0);
+    expect(await sessionRows()).toBe(2); // canary + creds
+    const p = linkCommand({ reset: true }, deps(quick()));
+    const rejected = expect(p).rejects.toThrow();
+    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    expect(await sessionRows()).toBe(1); // the creds are gone; a fresh canary only
+    closeWith(sockets[0]!, 401); // nothing more to connect: end the run
+    await rejected;
+    expect(await store.sessionRows('spare')).toBe(spareBefore);
+    expect(await getKv(db, 'session_reset_at')).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(existsSync(sessionDbPath(dataDir))).toBe(false);
+    expect(out()).toContain('tracker data were NOT touched');
+    await db.close();
+    await lockIsFree();
   });
 });
