@@ -474,6 +474,7 @@ describe('google-auth', () => {
       await db.close();
     }
   };
+      ...store.env,
 
   it('stores the token encrypted, never prints it, and says to restart the service', async () => {
     const p = googleAuthCommand(deps({ createConsentClient: consentClient() }));
@@ -637,7 +638,7 @@ describe('status command', () => {
     for (const voice of ['none', 'local'] as const) {
       lines.length = 0;
       const env = parseEnv({
-        DATA_DIR: dataDir, GROUPS_FILE: groupsFile, STT_PROVIDER: 'elevenlabs', VOICE_STT_PROVIDER: voice, STT_API_KEY: 'test-key',
+        DATA_DIR: dataDir, GROUPS_FILE: groupsFile, ...store.env, STT_PROVIDER: 'elevenlabs', VOICE_STT_PROVIDER: voice, STT_API_KEY: 'test-key',
         ...(voice === 'local' ? { STT_LOCAL_BIN: join(dataDir, 'transcribe-cli'), STT_LOCAL_MODEL: join(dataDir, 'model.gguf') } : {}),
       });
       await statusCommand(deps({ env }));
