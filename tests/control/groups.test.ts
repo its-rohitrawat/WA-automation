@@ -5,7 +5,7 @@ import { syncClients } from '../../src/store/clients.ts';
 import { createTask } from '../../src/store/tasks.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import type { GatewayState } from '../../src/wa/gateway.ts';
-import { MEHTA, NOW, seededDb, SHARMA } from '../helpers/db.ts';
+import { MEHTA, NOW, seeded, seededDb, SHARMA } from '../helpers/db.ts';
 
 const T0 = '2026-10-27T08:00:00.000Z';
 
@@ -256,8 +256,8 @@ describe('groupsOverview', () => {
   });
 
   it('a client with tasks has hasTasks; a client row in the DB locks the code; a new approved client does not', async () => {
-    const db = await seededDb();
-    await createTask(db, { clientId: 1, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null,
+    const { db, ids } = await seeded();
+    await createTask(db, { clientId: ids.sharma, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null,
       raisedOn: '2026-10-10', deadline: null, latestProgress: null, sourceQuote: 'q', sourceDate: '2026-10-10', sourceWaId: 'W1', origin: 'whatsapp' }, NOW);
     const fresh: ClientConfig = { ...SHARMA, groupId: gid(99), name: 'Desai Foods', code: 'DES' };
     const o = await groupsOverview({ db, listing: listing([]), configs: [SHARMA, MEHTA, fresh] });

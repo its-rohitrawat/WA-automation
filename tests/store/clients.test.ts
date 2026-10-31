@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { getClient, getClientByCode, getClientByGroupId, listClients, nextTaskCode, setPhase, setStatus, syncClients } from '../../src/store/clients.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
-import { MEHTA, NOW, SHARMA, seededDb } from '../helpers/db.ts';
+import { MEHTA, NOW, SHARMA, seeded, seededDb } from '../helpers/db.ts';
 
 describe('clients repository', () => {
   it('syncs clients from config', async () => {
-    const db = await seededDb();
+    const { db, ids } = await seeded();
     expect((await listClients(db)).map((c) => c.code)).toEqual(['MEH', 'SHA']);
     expect(await getClientByGroupId(db, SHARMA.groupId)).toMatchObject({
-      id: 1, code: 'SHA', name: 'Sharma Interiors', phases: SHARMA.phases, currentPhase: null, phaseLocked: false, active: true,
+      id: ids.sharma, code: 'SHA', name: 'Sharma Interiors', phases: SHARMA.phases, currentPhase: null, phaseLocked: false, active: true,
     });
   });
 
@@ -21,15 +21,15 @@ describe('clients repository', () => {
   });
 
   it('updates a renamed client in place', async () => {
-    const db = await seededDb();
+    const { db, ids } = await seeded();
     await syncClients(db, [{ ...SHARMA, name: 'Sharma Interiors Pvt Ltd' }]);
-    expect((await getClient(db, 1)).name).toBe('Sharma Interiors Pvt Ltd');
+    expect((await getClient(db, ids.sharma)).name).toBe('Sharma Interiors Pvt Ltd');
   });
 
   it('refuses to change a client code and writes nothing', async () => {
-    const db = await seededDb();
+    const { db, ids } = await seeded();
     await expect(syncClients(db, [{ ...SHARMA, code: 'SHX' }])).rejects.toThrow(/permanent/);
-    expect((await getClient(db, 1)).code).toBe('SHA');
+    expect((await getClient(db, ids.sharma)).code).toBe('SHA');
     expect((await getClientByCode(db, 'MEH'))?.active).toBe(true);
   });
 
@@ -48,20 +48,20 @@ describe('clients repository', () => {
   });
 
   it('issues task codes per client', async () => {
-    const db = await seededDb();
-    expect(await nextTaskCode(db, 1)).toBe('SHA-001');
-    expect(await nextTaskCode(db, 1)).toBe('SHA-002');
-    expect(await nextTaskCode(db, 2)).toBe('MEH-001');
+    const { db, ids } = await seeded();
+    expect(await nextTaskCode(db, ids.sharma)).toBe('SHA-001');
+    expect(await nextTaskCode(db, ids.sharma)).toBe('SHA-002');
+    expect(await nextTaskCode(db, ids.mehta)).toBe('MEH-001');
   });
 
   it('sets phase and status', async () => {
-    const db = await seededDb();
-    await setPhase(db, 1, 'Design', 'human');
-    expect(await getClient(db, 1)).toMatchObject({ currentPhase: 'Design', phaseLocked: true });
-    await setPhase(db, 1, 'Development', 'ai');
-    expect((await getClient(db, 1)).phaseLocked).toBe(false);
-    await setStatus(db, 1, 'Homepage approved', NOW);
-    expect(await getClient(db, 1)).toMatchObject({ statusText: 'Homepage approved', statusUpdatedAt: NOW });
+    const { db, ids } = await seeded();
+    await setPhase(db, ids.sharma, 'Design', 'human');
+    expect(await getClient(db, ids.sharma)).toMatchObject({ currentPhase: 'Design', phaseLocked: true });
+    await setPhase(db, ids.sharma, 'Development', 'ai');
+    expect((await getClient(db, ids.sharma)).phaseLocked).toBe(false);
+    await setStatus(db, ids.sharma, 'Homepage approved', NOW);
+    expect(await getClient(db, ids.sharma)).toMatchObject({ statusText: 'Homepage approved', statusUpdatedAt: NOW });
   });
 
   it('stores key/value pairs', async () => {
