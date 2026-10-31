@@ -1,21 +1,26 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { FOUNDER_TENANT_ID } from '../../src/config/env.ts';
 import { trackerDbPath } from '../../src/config/paths.ts';
-import { tableChecksum } from '../../src/migrate/canonical.ts';
+import { tableChecksum, type TableSum } from '../../src/migrate/canonical.ts';
 import { copyToPostgres } from '../../src/migrate/copy.ts';
 import { exportToSqlite } from '../../src/migrate/exportBack.ts';
 import { copyPlan } from '../../src/migrate/plan.ts';
 import { postgresTarget } from '../../src/migrate/target.ts';
+import { TenantKeys } from '../../src/platform/tenantKeys.ts';
+import { openDb } from '../../src/store/db.ts';
 import { openAdminConnection, openPgPool, PgTenantDb } from '../../src/store/engine/pg.ts';
 import { SqliteDb } from '../../src/store/engine/sqlite.ts';
+import { manualClock } from '../../src/util/clock.ts';
 import { onPg } from '../helpers/pg.ts';
 import { fixture } from './fixture.ts';
 import { freshPg, type FreshPg } from '../helpers/freshPg.ts';
 
 // The copy and the export back on a real Postgres 17 (npm run test:pg; skipped otherwise). The copy keeps every id, so
 // it goes only into a fresh database (docs/GO-LIVE-postgres.md, part 4): each test gets a database of its own, made and
-// migrated as the real one is, and dropped after it. The fixture has no platform rows.
+// migrated as the real one is, and dropped after it. The first two fixtures have no platform rows; the last one has
+// them, as the founder's tracker.db does after invites made on SQLite (guide part 4).
 
 async function newTenant(ownerUrl: string): Promise<string> {
   const id = randomUUID();
@@ -107,6 +112,49 @@ describe.runIf(onPg)('migrate-to-postgres and export-to-sqlite on a real Postgre
       expect(await other.get('SELECT count(*) AS n FROM messages')).toEqual({ n: 0 });
     } finally {
       await other.close();
+      await target.close();
+    }
+  });
+
+  it('carries the platform tables made on SQLite: the founder updated in place, a customer, its user, membership, invites and wrapped key, which still unwraps', async () => {
+    const f = await fixture({ platform: true });
+    const master = randomBytes(32);
+    const clock = manualClock('2026-10-30T07:00:00.000Z');
+    // The customer who signed up gets its data key, wrapped with the master key, as the Supervisor makes it on SQLite.
+    const lite = openDb(trackerDbPath(f.data));
+    let customer: string;
+    let keyOnSqlite: Buffer;
+    const platformTables: { table: string; columns: string[]; sum: TableSum }[] = [];
+    try {
+      customer = (await lite.get<{ id: string }>("SELECT id FROM tenants WHERE name = 'Kapoor Design Studio'"))!.id;
+      keyOnSqlite = await new TenantKeys({ db: lite, master, clock }).dataKey(customer);
+      for (const p of (await copyPlan(lite)).filter((x) => x.platform)) {
+        platformTables.push({ table: p.table, columns: p.columns, sum: tableChecksum(p.columns, await lite.all(`SELECT ${p.columns.join(', ')} FROM ${p.table}`)) });
+      }
+    } finally {
+      await lite.close();
+    }
+    // The founder and two invited businesses (one signed up), its user and membership, two invites, one wrapped key.
+    const rows = (table: string) => platformTables.find((x) => x.table === table)?.sum.rows;
+    expect(['tenants', 'users', 'memberships', 'invites', 'tenant_keys'].map(rows)).toEqual([3, 1, 1, 2, 1]);
+
+    const target = postgresTarget(pg.urls.ownerUrl);
+    const platform = pg.platformDb();
+    try {
+      const r = await copyToPostgres({ dataDir: f.data, tenantId: FOUNDER_TENANT_ID, apply: true, backupDir: join(f.dir, 'backup') }, target);
+      expect(r).toMatchObject({ ok: true, applied: true });
+      for (const { table } of platformTables) expect(r.tables.find((x) => x.table === `tracker:${table}`)?.match, table).toBe(true);
+      // The seeded founder row, updated in place: one founder, with the SQLite name.
+      expect(await platform.all("SELECT id, name FROM tenants WHERE kind = 'founder'")).toEqual([{ id: FOUNDER_TENANT_ID, name: 'Your studio' }]);
+      // Read again as wa_platform (not the copy's own owner check): each platform table holds exactly the SQLite rows.
+      for (const { table, columns, sum } of platformTables) {
+        expect(tableChecksum(columns, await platform.all(`SELECT ${columns.join(', ')} FROM ${table}`)), table).toEqual(sum);
+      }
+      // The wrapped key unwraps on Postgres with the same master key, to the same data key; with another, it does not.
+      expect(await new TenantKeys({ db: platform, master, clock }).dataKey(customer)).toEqual(keyOnSqlite);
+      await expect(new TenantKeys({ db: platform, master: randomBytes(32), clock }).dataKey(customer)).rejects.toThrow();
+    } finally {
+      await platform.close();
       await target.close();
     }
   });
