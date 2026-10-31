@@ -18,7 +18,7 @@ each kept apart. You run every step yourself, on the Mac, with the Mac assistant
 > has.
 > - `db-bootstrap`: asks for the `postgres` password, then the new `wa_backup` password twice, and shows nothing as you
 >   type. It never takes a password on the command line. `--superuser <name>` defaults to `postgres`.
-> - `db-migrate`, which applies the migrations P1 to P3.
+> - `db-migrate`, which applies the migrations P1 to P4.
 > - `migrate-to-postgres`, with `--apply`, `--backup-dir <new folder>` and `--data-dir <folder>`.
 > - `export-to-sqlite`, with `--out <new folder>` (required) and `--data-dir <folder>`.
 > - The `.env` names `DB_ENGINE`, `DATABASE_URL`, `DATABASE_OWNER_URL` and `DATABASE_PLATFORM_URL`. The backup password
@@ -208,8 +208,8 @@ agent keeps running, and nothing in Postgres or in `data/` changes. Do it a day 
 
 **Your copy goes into a fresh database, before any customer exists.** The copy keeps every id your data already has
 (client 1 stays client 1), and Postgres shares its ids across every business on it. So use the empty database from
-part 2, with no customer invited yet (part 7 comes after this) and no earlier copy in it. The tool checks this and
-refuses otherwise, writing nothing.
+part 2, with no customer in Postgres yet and no earlier copy in it. Invites made before the switch (part 7) are in
+`tracker.db`, and they are copied with the rest. The tool checks this and refuses otherwise, writing nothing.
 
 **4.1 Before you stop.** Open the dashboard and write down:
 - the number of clients and of open tasks on the Overview;
@@ -229,14 +229,15 @@ The last command should print nothing, or say it could not find the service. The
 running.
 
 **4.3 Back up `data/`, twice.**
-- A zip of the whole folder (normal window; the date goes in the name):
+- A zip of the whole folder (normal window; the date goes in the name, and `Z` holds that name for the check):
 
   ```sh
-  sudo ditto -c -k --sequesterRsrc --keepParent /opt/wa-agent/data ~/wa-backup-$(date +%Y%m%d-%H%M).zip
-  unzip -l ~/wa-backup-*.zip | tail -3
+  Z=~/wa-backup-$(date +%Y%m%d-%H%M).zip
+  sudo ditto -c -k --sequesterRsrc --keepParent /opt/wa-agent/data "$Z"
+  unzip -l "$Z" | tail -1
   ```
 
-  The last line shows the number of files: more than zero.
+  It shows the number of files in the zip just made: more than zero.
 - A checked copy of each database (waagent window):
 
   ```sh
@@ -272,7 +273,8 @@ the report to Claude.
 
 **If it says `Postgres has already given out ids in …` or `Postgres already has data in …`, nothing was written.** This
 database is not fresh: a customer or an earlier copy is in it. Start the agent again as it was, still on SQLite (4.7),
-and send that one line to Claude.
+and send that one line to Claude. The same lines come after a run that lost its connection to Postgres while it was
+committing: going on then needs a fresh database, which Claude helps you make (part 6, "Switching to Postgres again").
 
 **4.6 Switch the engine** (waagent window): `nano .env`, change `DB_ENGINE=sqlite` to `DB_ENGINE=postgres`, and save.
 
@@ -376,7 +378,13 @@ The dumps hold every business's data: keep them on this Mac only. FileVault prot
 
 ## Part 6. Going back (rollback)
 
-Neither way deletes anything in Postgres, and you can switch to Postgres again later.
+Neither way deletes anything in Postgres.
+
+**Switching to Postgres again** after a rollback is not a second run of part 4. The copy goes only into a fresh
+database, and this one already holds your data, so part 4 stops at 4.4 with `Postgres already has data in …` and
+changes nothing. Don't just set `DB_ENGINE=postgres` again either: what the agent saved while it ran on SQLite is in
+the SQLite files, not in Postgres. A second switch needs a fresh database. Ask Claude, who gives you those steps for
+your case.
 
 ### A. Flip back to SQLite (one minute)
 
