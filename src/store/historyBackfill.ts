@@ -80,8 +80,9 @@ export async function saveBackfill(db: Sql, b: Backfill): Promise<void> {
 
 /** Every backfill entry, finished ones too. */
 export async function listBackfills(db: Sql): Promise<Backfill[]> {
-  // A range, not LIKE: "_" in the prefix would be a wildcard there.
-  const rows = await db.all<{ k: string; v: string }>('SELECT k, v FROM kv WHERE k >= ? AND k < ? ORDER BY k', [PREFIX, `${PREFIX.slice(0, -1)};`]);
+  // An exact prefix match. Not LIKE ("_" in the prefix would be a wildcard there), and not a text range: Postgres orders
+  // text by the database's collation, not byte by byte, so a range can miss every entry.
+  const rows = await db.all<{ k: string; v: string }>(`SELECT k, v FROM kv WHERE substr(k, 1, ${PREFIX.length}) = ? ORDER BY k`, [PREFIX]);
   return rows.flatMap((r) => parse(r.k.slice(PREFIX.length), r.v) ?? []);
 }
 
