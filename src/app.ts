@@ -116,7 +116,8 @@ export interface AppDeps {
   ai: AiClient;
   drive: DriveApi;
   prices: Prices;
-  spendCapUsd: number;
+  /** The daily cap: a fixed number, or read at every check (SpendGuardOptions.capUsd). */
+  spendCapUsd: number | (() => number);
   /**
    * The platform-wide ceiling this runtime's spend joins (S4.3): the founder's only, as only the founder's spend is billed
    * to the founder. A customer runtime, on its own key, has its own cap and no ceiling.

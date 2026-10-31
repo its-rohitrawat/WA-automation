@@ -35,7 +35,11 @@ const SUMS = 'SELECT kind, COALESCE(SUM(usd), 0) AS total FROM spend WHERE day =
 export interface SpendGuardOptions {
   db: Db;
   clock: Clock;
-  capUsd: number;
+  /**
+   * The daily cap: a fixed number (the founder's DAILY_SPEND_CAP_USD), or read at every check (a customer's own limit
+   * from its settings, so a lowered limit applies to the next call, without a restart).
+   */
+  capUsd: number | (() => number);
   onError?: (err: unknown) => void;
   /**
    * This guard's place under the platform-wide ceiling (S4.3), for spend billed to the founder only (the founder's
@@ -63,7 +67,7 @@ function totals(day: string, rows: { kind: string; total: number }[]): Today {
 export class SpendGuard {
   readonly #db: Db;
   readonly #clock: Clock;
-  readonly #cap: number;
+  readonly #capOf: () => number;
   readonly #pending = new Map<number, Hold>();
   /** Reservations already booked at their estimate by settlePending(); a late settle() must not book them again. */
   readonly #bookedAtEstimate = new Set<number>();
@@ -87,7 +91,8 @@ export class SpendGuard {
   constructor(opts: SpendGuardOptions) {
     this.#db = opts.db;
     this.#clock = opts.clock;
-    this.#cap = opts.capUsd;
+    const cap = opts.capUsd;
+    this.#capOf = typeof cap === 'function' ? cap : () => cap;
     this.#today = { day: istDate(this.#clock.now()), ai: 0, stt: 0 };
     this.#onError = opts.onError ?? ((err) => console.error('spend row not written', err));
     if (opts.platform) this.#join(opts.platform);
@@ -137,6 +142,12 @@ export class SpendGuard {
 
   get capUsd(): number {
     return this.#cap;
+  }
+
+  /** The cap now. One that cannot be read as an amount is 0 (fail closed: spending pauses, never runs without a cap). */
+  get #cap(): number {
+    const cap = this.#capOf();
+    return Number.isFinite(cap) && cap >= 0 ? cap : 0;
   }
 
   spentToday(): number {

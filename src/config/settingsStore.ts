@@ -263,7 +263,10 @@ export class SettingsStore {
     return run;
   }
 
-  /** The customer's daily limit: checked, saved and audited in one transaction, then the listeners are told. */
+  /**
+   * The customer's daily limit: checked, saved and audited in one transaction, then kept in memory. No listener is told:
+   * the customer's SpendGuard reads get() at every check (customerRuntime.ts), so the next call sees the new limit.
+   */
   async #setCap(raw: unknown, actor: string, audit: Audit): Promise<RuntimeSettings> {
     const value = checkCap(raw);
     if (value === undefined) {

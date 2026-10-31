@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { parseEnv } from '../../src/config/env.ts';
 import { CUSTOMER_DEFAULT_CAP_USD, DAILY_CAP_KEY, SettingsStore } from '../../src/config/settingsStore.ts';
 import { ControlError, type AuditEntry } from '../../src/control/errors.ts';
+import { SpendGuard } from '../../src/spend/spendGuard.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { NOW, seededDb } from '../helpers/db.ts';
 
@@ -62,5 +63,32 @@ describe('the customer daily Claude limit', () => {
     expect(audits).toEqual([]);
     for (const ok of [1, 1000, 7.25]) await store.set(DAILY_CAP_KEY, ok, 'owner@example.com', audit);
     expect(store.get().dailySpendCapUsd).toBe(7.25);
+  });
+
+  it('a lowered limit applies to the next call, with no restart (review B S4)', async () => {
+    const { db, store, audit } = await setup(true);
+    // As customerRuntime.ts builds it for a customer: the guard reads the store's limit at every check.
+    const spend = await SpendGuard.open({ db, clock: manualClock(NOW), capUsd: () => store.get().dailySpendCapUsd ?? CUSTOMER_DEFAULT_CAP_USD });
+    const held = spend.reserve(1.5);
+    expect(held).not.toBeNull(); // under US$5
+    spend.release(held!);
+    await store.set(DAILY_CAP_KEY, 1, 'owner@example.com', audit);
+    expect(spend.capUsd).toBe(1);
+    expect(spend.canSpend(1.5)).toBe(false);
+    expect(spend.reserve(1.5)).toBeNull();
+    expect(spend.reserve(0.5)).not.toBeNull(); // still under the new limit
+    // Raised again: the next call fits again, the same guard.
+    await store.set(DAILY_CAP_KEY, 5, 'owner@example.com', audit);
+    expect(spend.reserve(1.5)).not.toBeNull();
+  });
+
+  it('a limit that cannot be read as an amount pauses spending (fail closed)', async () => {
+    const { db } = await setup(true);
+    for (const bad of [Number.NaN, -1, Number.POSITIVE_INFINITY]) {
+      const spend = await SpendGuard.open({ db, clock: manualClock(NOW), capUsd: () => bad });
+      expect(spend.capUsd, String(bad)).toBe(0);
+      expect(spend.isPaused(), String(bad)).toBe(true);
+      expect(spend.reserve(0.01), String(bad)).toBeNull();
+    }
   });
 });
