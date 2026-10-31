@@ -89,7 +89,10 @@ const advance = (ms: number) => work.advance(ms);
 /** setup's wrapped database, to the one it wraps. */
 const unwrapped = new WeakMap<Db, Db>();
 
-/** Waits until the events the last setup's gateway was handed are stored (the gateway hands them over in order). */
+/**
+ * Waits until the events the last setup's gateway was handed are stored (the gateway hands them over in order), and
+ * the database work they start is done: a history answer is stored on its own channel, then sets its next timer.
+ */
 let settled: () => Promise<void> = async () => {};
 
 async function setup(o: { ai?: FakeAi; drive?: FakeDrive; log?: Logger; drainMs?: number } = {}) {
@@ -111,7 +114,10 @@ async function setup(o: { ai?: FakeAi; drive?: FakeDrive; log?: Logger; drainMs?
     auth: auth.state,
     saveCreds: auth.saveCreds,
   });
-  settled = () => gateway.idle();
+  settled = async () => {
+    await gateway.idle();
+    await work.quiet();
+  };
   const app = await createApp({
     db, clock: systemClock, log: o.log ?? silentLogger(), gateway, allow, ai, drive, prices: P, spendCapUsd: 15,
     quietMs: 240_000, maxWaitMs: 1_200_000, maxConcurrent: 3, dataDir: '.', freeBytes: () => 500e9, pollMs: 30_000,
