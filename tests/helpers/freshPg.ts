@@ -44,7 +44,8 @@ export async function freshPg(): Promise<FreshPg> {
   const name = `wa_test_fresh_${randomBytes(6).toString('hex')}`;
   const server = await openAdminConnection(on(serverUrl(), 'postgres'));
   try {
-    await server.sql(`CREATE DATABASE ${name} OWNER wa_owner ENCODING 'UTF8' TEMPLATE template0`);
+    // As db-bootstrap creates the real one: byte-order collation C, so text sorts and compares as on SQLite.
+    await server.sql(`CREATE DATABASE ${name} OWNER wa_owner ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0`);
   } finally {
     await server.end();
   }
