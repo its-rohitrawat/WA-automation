@@ -348,6 +348,9 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
         // Its writes stop once the link is undone, so the closing socket never writes over the restored rows.
         auth = guardAuth(await useEncryptedAuthState(d.sessionDb, d.key), () => undone);
         const linkAuth = auth;
+        // A cancel during the backup or the auth read (bug 13): the listener below would never fire for it, and the link
+        // would wait for a gateway that shows no QR. From here to the listener nothing waits, so none is missed.
+        if (signal.aborted) throw new Aborted();
         const outcome = await new Promise<LinkOutcome>((resolve) => {
           let qrSeen = false;
           onAbort = () => resolve({ ok: false, code: 'aborted' });

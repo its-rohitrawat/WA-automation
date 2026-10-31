@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getKv } from '../../src/store/kv.ts';
 import { createLogger } from '../../src/util/logger.ts';
 import { AllowList } from '../../src/wa/allowlist.ts';
@@ -20,6 +20,22 @@ const QR1 = 'QR-SECRET-one-2@abc';
 const QR2 = 'QR-SECRET-two-2@def';
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+
+/**
+ * p, or a failure naming `label` after ms of real time: a link that never ends fails here, not with the test's plain
+ * timeout. (DbWork.until is for fake timers; this file runs on real ones.)
+ */
+async function within<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const cap = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} never finished: still pending after ${ms} ms`)), ms);
+  });
+  try {
+    return await Promise.race([p, cap]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** A service with a linked founder session, its gateway on fake sockets, and the link sessions around it. */
 async function setup(o: { linked?: boolean; timeoutMs?: number; allow?: string[] } = {}) {
@@ -137,6 +153,48 @@ describe('founder relink', () => {
     expect(t.sessions.info(link.id)).toMatchObject({ state: 'cancelled', errorCode: 'cancelled' });
     expect(t.audits.map((a) => a.event)).toEqual(['WhatsApp relink cancelled']);
     expect(await getKv(t.trackerDb, 'session_reset_at')).toBeUndefined();
+  });
+
+  it('a cancel while the session is being backed up still ends the link: the rows come back, it reconnects, a new link can start (bug 13)', async () => {
+    const t = await setup();
+    cleanup.push(() => t.switchable.stop());
+    const before = await t.rows();
+    // Holds the backup's transaction at its first statement: the cancel lands after the driver's first abort check and
+    // before the listener it adds once the backup and the auth read are done (on Postgres those are round trips).
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    let backingUp!: () => void;
+    const inBackup = new Promise<void>((r) => (backingUp = r));
+    let held = false;
+    const realTx = t.sessionDb.tx.bind(t.sessionDb);
+    vi.spyOn(t.sessionDb, 'tx').mockImplementation((fn) =>
+      realTx((q) => fn({
+        get: (s, p) => q.get(s, p), all: (s, p) => q.all(s, p), exec: (s) => q.exec(s), tx: (f) => q.tx(f),
+        run: async (s, p) => {
+          if (!held && s === 'DELETE FROM auth_backup') {
+            held = true;
+            backingUp();
+            await released;
+          }
+          return q.run(s, p);
+        },
+      })),
+    );
+    const link = t.sessions.start({ target: 'founder', actor: 'owner@studio.in' });
+    await inBackup;
+    expect(t.sessions.cancel(link.id)).toBe(true);
+    release();
+    await within(t.sessions.settled(link.id), 2_000, 'the link cancelled during its backup');
+    expect(t.sessions.info(link.id)).toMatchObject({ state: 'cancelled', errorCode: 'cancelled' });
+    expect(await t.rows()).toEqual(before);
+    expect(t.sockets).toHaveLength(2); // no linking gateway was made; the restored session reconnected
+    expect(t.switchable.status().state).toBe('connecting');
+    expect(t.audits.map((a) => a.event)).toEqual(['WhatsApp relink cancelled']);
+    // The one-at-a-time slot is free again.
+    const again = t.sessions.start({ target: 'founder', actor: 'owner@studio.in' });
+    expect(t.sessions.cancel(again.id)).toBe(true);
+    await within(t.sessions.settled(again.id), 2_000, 'the next link, cancelled');
+    expect(t.sessions.info(again.id)).toMatchObject({ state: 'cancelled' });
   });
 
   it('the 5-minute timeout restores the session', async () => {
