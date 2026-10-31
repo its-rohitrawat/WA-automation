@@ -22,9 +22,13 @@ async function withMeeting(status: MeetingStatus, client: 'SHA' | null = null): 
 }
 
 async function state(db: Db) {
+  const meetings = await rows<{ id: number } & Record<string, unknown>>(db, 'SELECT m.*, c.code AS client_code FROM meetings m LEFT JOIN clients c ON c.id = m.client_id');
+  // The meeting's own id, in an event's detail too, is this customer's: another customer's copy has another one.
+  const own = (detail: unknown) => meetings.reduce((d, m) => d.split(`"meetingId":${m.id}`).join('"meetingId":"<own>"'), String(detail));
   return {
-    meetings: (await rows(db, 'SELECT m.*, c.code AS client_code FROM meetings m LEFT JOIN clients c ON c.id = m.client_id')).map(({ id: _id, tenant_id: _t, client_id: _c, ...r }) => r),
-    events: await rows(db, 'SELECT e.task_id, c.code AS client_code, e.actor, e.op, e.detail, e.reason, e.at FROM task_events e LEFT JOIN clients c ON c.id = e.client_id ORDER BY e.id'),
+    meetings: meetings.map(({ id: _id, tenant_id: _t, client_id: _c, ...r }) => r),
+    events: (await rows<{ detail: unknown }>(db, 'SELECT e.task_id, c.code AS client_code, e.actor, e.op, e.detail, e.reason, e.at FROM task_events e LEFT JOIN clients c ON c.id = e.client_id ORDER BY e.id'))
+      .map((e) => ({ ...e, detail: own(e.detail) })),
     rebuild: await getKv(db, 'rebuild_requested'),
   };
 }

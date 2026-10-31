@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -13,7 +14,11 @@ import { auditedWrite, type AuditedWrite } from '../../src/web/routes/auth.ts';
 import { SessionStore } from '../../src/web/sessions.ts';
 import { onSqlite } from './db.ts';
 
-export const OWNER = 'owner@example.com';
+/**
+ * The signed-in owner. On Postgres every test file shares one platform Db, so each file gets an owner of its own: one
+ * file's "sign out everywhere" then never counts or ends another file's sessions.
+ */
+export const OWNER = onSqlite ? 'owner@example.com' : `owner-${randomUUID().slice(0, 8)}@example.com`;
 
 export interface Reply {
   status: number;
