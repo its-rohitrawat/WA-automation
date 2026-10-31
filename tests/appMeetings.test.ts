@@ -21,7 +21,7 @@ import { AllowList } from '../src/wa/allowlist.ts';
 import { openSessionDb, useEncryptedAuthState } from '../src/wa/authState.ts';
 import { WhatsAppGateway } from '../src/wa/gateway.ts';
 import { FakeAi, op } from './helpers/ai.ts';
-import { MEHTA, seededDb, SHARMA } from './helpers/db.ts';
+import { idOf, MEHTA, seededDb, SHARMA } from './helpers/db.ts';
 import { FakeDrive } from './helpers/fakeDrive.ts';
 import { FakeMeetingsApi } from './helpers/fakeMeetings.ts';
 import { FakeSocket } from './helpers/fakeSocket.ts';
@@ -153,7 +153,7 @@ describe('app with meetings', () => {
   });
 
   it('without the meeting scopes: paused google_scopes, and no Google meeting call even for a queued meeting', async () => {
-    const { app, api, health, db } = await setup({ scopes: false, prepare: (d) => insertFound(d, queuedMeeting()) });
+    const { app, api, health, db } = await setup({ scopes: false, prepare: async (d) => insertFound(d, queuedMeeting({ clientId: await idOf(d, 'SHA') })) });
     await vi.waitFor(async () => expect((await getMeeting(db, 1))?.errorCode).toBe('google_scopes'), SLOW_IO);
     await vi.advanceTimersByTimeAsync(20 * MINUTE);
     expect(api.calls).toEqual([]);
@@ -313,7 +313,7 @@ describe('app with meetings', () => {
       );
     /** The recording discovery finds, already stored and waiting for speech-to-text for another hour (STT_PROVIDER was none). */
     const waitingForStt = async (db: Db) => {
-      const id = (await insertFound(db, queuedMeeting({ recording: 'conferenceRecords/c1/recordings/r1', title: 'Sharma Interiors weekly' })))!;
+      const id = (await insertFound(db, queuedMeeting({ clientId: await idOf(db, 'SHA'), recording: 'conferenceRecords/c1/recordings/r1', title: 'Sharma Interiors weekly' })))!;
       await deferMeeting(db, id, { errorCode: 'stt_none', nextAttemptAt: '2026-11-01T13:00:00.000Z', at: '2026-11-01T12:00:00.000Z', attempts: 0 });
     };
 

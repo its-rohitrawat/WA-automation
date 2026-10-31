@@ -392,7 +392,9 @@ export class Health {
    * before) and is numbered. On Postgres two writes on the pool's connections can commit out of order: a write that
    * lands after a newer one has landed stored an older snapshot, so the newest snapshot is written again at once.
    * Resolves once this write (and any rewrite it made) and every write before it are in; the stored snapshot is then
-   * the newest. A failed write is reported to its caller only; the writes after it still run.
+   * the newest. A failed write is reported to its caller only; the writes after it still run. Between a late write
+   * landing and its rewrite, a reader can briefly see the previous snapshot: a test waits for the value it expects
+   * (or for persist()), never just for some write.
    */
   persist(): Promise<void> {
     const write = this.#write();
