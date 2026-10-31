@@ -159,6 +159,13 @@ async function finish(stop: ReturnType<typeof stopping>): Promise<void> {
 
 const stopApp = (app: { stop(): Promise<void> }) => finish(stopping(app));
 
+/**
+ * advance(ms), exactly ms of fake time, with a cap on the real time it may take: a stage still running after
+ * realCapMs fails naming `label`, not with the test's plain 20 s timeout.
+ */
+const advanceCapped = (ms: number, label: string, realCapMs: number) =>
+  work.until(advance(ms), { fakeMs: 0, stepMs: 1_000, realCapMs, label });
+
 /** Every row of the Sharma tab as cell texts. Call with real timers. */
 async function sharmaRows(buf: Buffer): Promise<string[][]> {
   const wb = new ExcelJS.Workbook();
@@ -600,11 +607,12 @@ describe('app health and publishing', () => {
       messageId: (await messageRowId(db, await idOf(db, 'SHA'), 'm1'))!, clientId: await idOf(db, 'SHA'), kind: 'image', status: 'pending', mimeType: 'image/jpeg', fileName: null, fileSize: 1000,
       seconds: null, forwarded: false, refEnc: null, errorCode: null, createdAt: new Date().toISOString(),
     });
-    await advance(239_000);
+    // Real caps per stage 4 + 2 + 2 + 8 s, all under the 20 s timeout: a slow or hung stage names itself.
+    await advanceCapped(239_000, '12d: to 239 s', 4_000);
     expect(drive.uploads).toBe(1);
 
-    await advance(2_000); // the run at 240 s waits for the file
-    await advance(60_000);
+    await advanceCapped(2_000, '12d: the run at 240 s', 2_000); // the run at 240 s waits for the file
+    await advanceCapped(60_000, '12d: 60 s more', 2_000);
     expect(run).toHaveBeenCalled();
     await expect(run.mock.results[0]!.value).resolves.toEqual({ status: 'waiting' });
     expect(ai.calls).toHaveLength(0);
@@ -613,7 +621,7 @@ describe('app health and publishing', () => {
 
     // 30 minutes after the file arrived it no longer holds up its message: a later run goes ahead and publishes. The
     // file, still pending, now counts as waiting too long, and that change to the health line publishes too (final review).
-    await advance(40 * 60_000);
+    await advanceCapped(40 * 60_000, '12d: 40 min more', 8_000);
     expect(ai.calls).toHaveLength(1);
     expect(ai.calls[0]!.user).toContain(': see this {image, still being read}');
     expect(drive.uploads).toBe(3);
