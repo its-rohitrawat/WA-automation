@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DestinationStream } from 'pino';
 import { syncClients } from '../../src/store/clients.ts';
-import { openDb } from '../../src/store/db.ts';
+import type { Db } from '../../src/store/db.ts';
 import { backfillStatus, getBackfill, listBackfills, saveBackfill } from '../../src/store/historyBackfill.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger } from '../../src/util/logger.ts';
@@ -9,8 +9,10 @@ import type { GatewayState, HistoryAnchor, HistoryAnswer } from '../../src/wa/ga
 import { ANSWER_TIMEOUT_MS, FAILURES_TO_FINISH, HistoryBackfill, HOLD_MAX_MS, MAX_REQUESTS, REQUEST_GAP_MS, TIMEOUT_GAP_MS, TIMEOUTS_TO_FINISH } from '../../src/wa/historyBackfill.ts';
 import { Ingestor } from '../../src/wa/ingest.ts';
 import type { NormalizedEvent } from '../../src/wa/normalize.ts';
-import { MEHTA, SHARMA } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { idOf, MEHTA, row, SHARMA, testDb } from '../helpers/db.ts';
+
+/** Sharma's real id in the latest setup's database (on Postgres it is not 1). */
+let SHA = 0;
 
 const APPROVED = '2026-10-28T06:00:00.000Z';
 const at = (daysBefore: number, minutes = 0) => new Date(Date.parse(APPROVED) - daysBefore * 86_400_000 - minutes * 60_000);
@@ -21,8 +23,39 @@ const msg = (groupId: string, waId: string, ts: Date): Extract<NormalizedEvent, 
   fromMe: false, ts, text: SECRET, quotedWaId: null, mediaType: null,
 });
 
-/** A manual scheduler: run() fires every timer due by `now` (advance moves now on). */
-function scheduler() {
+/**
+ * The same Db, counting the statements and transactions in flight. Between two statements of a step there are only
+ * promise callbacks, so a turn of the event loop that finds none in flight, twice in a row, finds the step finished.
+ */
+function counted(db: Db): { db: Db; quiet: () => Promise<void> } {
+  let busy = 0;
+  const track = <T>(p: Promise<T>): Promise<T> => {
+    busy++;
+    return p.finally(() => void busy--);
+  };
+  const wrapped = new Proxy(db, {
+    get(target, prop) {
+      const v = Reflect.get(target, prop) as unknown;
+      if (typeof v !== 'function') return v;
+      const fn = (v as (...a: unknown[]) => unknown).bind(target);
+      return ['run', 'get', 'all', 'tx', 'exec'].includes(String(prop)) ? (...a: unknown[]) => track(fn(...a) as Promise<unknown>) : fn;
+    },
+  });
+  const turn = () => new Promise<void>((r) => setImmediate(r));
+  const quiet = async () => {
+    for (let i = 0; i < 500; i++) {
+      await turn();
+      if (busy !== 0) continue;
+      await turn();
+      if (busy === 0) return;
+    }
+    throw new Error('the backfill never went quiet');
+  };
+  return { db: wrapped, quiet };
+}
+
+/** A manual scheduler: run() fires every timer due by `now` (advance moves now on); `settle` waits for what a timer started. */
+function scheduler(settle: () => Promise<void>) {
   let now = 0;
   let timers: { at: number; fn: () => void; live: boolean }[] = [];
   return {
@@ -39,7 +72,7 @@ function scheduler() {
         now = due.at; // timers set while it runs count from its own time
         due.live = false;
         due.fn();
-        await new Promise((r) => setImmediate(r));
+        await settle();
       }
       now = end;
       timers = timers.filter((t) => t.live);
@@ -48,9 +81,10 @@ function scheduler() {
 }
 
 async function setup(o: { configs?: typeof SHARMA[]; state?: GatewayState; paused?: boolean; beforeIngest?: (e: NormalizedEvent) => Promise<void> } = {}) {
-  const db = openDb(':memory:');
+  const { db, quiet } = counted(await testDb());
   const clock = manualClock(APPROVED);
   await syncClients(db, o.configs ?? [SHARMA], clock.now());
+  SHA = await idOf(db, SHARMA.code);
   const lines: string[] = [];
   const log = createLogger('info', { write: (s: string) => void lines.push(s) } as unknown as DestinationStream);
   const listeners: ((a: HistoryAnswer) => void)[] = [];
@@ -67,7 +101,7 @@ async function setup(o: { configs?: typeof SHARMA[]; state?: GatewayState; pause
   const ingestor = new Ingestor({ db, onNewMessages: () => {}, clock });
   const spend = { paused: o.paused ?? false };
   const finished: { clientId: number; found: number; stopped: boolean }[] = [];
-  const s = scheduler();
+  const s = scheduler(quiet);
   const make = () => new HistoryBackfill({
     db, clock, log, gateway: g, ingest: async (e) => { await o.beforeIngest?.(e); return ingestor.handle(e); }, spendPaused: () => spend.paused,
     onFinished: (f) => finished.push(f), scheduler: s.schedule,
@@ -75,21 +109,22 @@ async function setup(o: { configs?: typeof SHARMA[]; state?: GatewayState; pause
   const bf = make();
   const answer = async (a: HistoryAnswer) => {
     for (const fn of listeners) fn(a);
-    await new Promise((r) => setImmediate(r));
+    await bf.idle();
+    await quiet();
   };
   const live = (groupId: string, waId: string, ts: Date) => ingestor.handle(msg(groupId, waId, ts));
-  const count = (clientId = 1) => (rawOf(db).prepare('SELECT COUNT(*) AS n FROM messages WHERE client_id = ?').get(clientId) as { n: number }).n;
+  const count = async (clientId = SHA) => (await row<{ n: number }>(db, 'SELECT COUNT(*) AS n FROM messages WHERE client_id = ?', [clientId]))!.n;
   const step = async () => {
     bf.tick();
-    await new Promise((r) => setImmediate(r));
+    await quiet();
   };
-  return { db, clock, g, asked, bf, make, answer, live, count, step, finished, spend, s, lines, ingestor };
+  return { db, quiet, clock, g, asked, bf, make, answer, live, count, step, finished, spend, s, lines, ingestor };
 }
 
 describe('history backfill: queued on approve', () => {
   it('a newly approved group is queued for the 7 days before its approval; one already approved is not queued again', async () => {
     const { db, clock } = await setup();
-    expect(await getBackfill(db, SHARMA.groupId)).toMatchObject({ clientId: 1, state: 'waiting', since: at(7).toISOString(), until: APPROVED, requests: 0 });
+    expect(await getBackfill(db, SHARMA.groupId)).toMatchObject({ clientId: SHA, state: 'waiting', since: at(7).toISOString(), until: APPROVED, requests: 0 });
     clock.set('2026-10-29T06:00:00.000Z');
     expect(await syncClients(db, [SHARMA, MEHTA], clock.now())).toEqual([MEHTA.groupId]);
     expect((await getBackfill(db, SHARMA.groupId))?.until).toBe(APPROVED);
@@ -112,12 +147,12 @@ describe('history backfill: the anchor', () => {
     bf.start();
     await step();
     expect(asked).toEqual([]);
-    expect(await backfillStatus(db, 1, at(0))).toEqual({ state: 'waiting', found: 0 });
+    expect(await backfillStatus(db, SHA, at(0))).toEqual({ state: 'waiting', found: 0 });
     await live(SHARMA.groupId, 'FIRST', at(-0.01));
     await step();
     expect(asked).toEqual([{ groupId: SHARMA.groupId, anchor: { waId: 'FIRST', fromMe: false, ts: at(-0.01) }, count: 50 }]);
     expect(await getBackfill(db, SHARMA.groupId)).toMatchObject({ state: 'fetching', requests: 1 });
-    expect(await backfillStatus(db, 1, at(0))).toEqual({ state: 'reading', found: 0 });
+    expect(await backfillStatus(db, SHA, at(0))).toEqual({ state: 'reading', found: 0 });
   });
 
   it('uses the oldest message since the approval, not one kept from an earlier approval', async () => {
@@ -138,17 +173,17 @@ describe('history backfill: paging', () => {
     bf.start();
     await step();
     await answer({ groups: [{ groupId: SHARMA.groupId, events: [msg(SHARMA.groupId, 'B', at(3)), msg(SHARMA.groupId, 'C', at(2))] }] });
-    expect(count()).toBe(3);
+    expect((await count())).toBe(3);
     await s.advance(REQUEST_GAP_MS);
     expect(asked[1]!.anchor.waId).toBe('B');
     // Older than 7 days: dropped, and the backfill ends.
     await answer({ groups: [{ groupId: SHARMA.groupId, events: [msg(SHARMA.groupId, 'D', at(6)), msg(SHARMA.groupId, 'OLDER', at(8))] }] });
-    expect(count()).toBe(4);
-    expect(rawOf(db).prepare("SELECT 1 FROM messages WHERE wa_id = 'OLDER'").get()).toBeUndefined();
+    expect((await count())).toBe(4);
+    expect(await row(db, "SELECT 1 FROM messages WHERE wa_id = 'OLDER'")).toBeUndefined();
     expect((await getBackfill(db, SHARMA.groupId))?.state).toBe('done');
     // Found: what the backfill stored itself (B, C, D), not the new message it started from.
-    expect(finished).toEqual([{ clientId: 1, found: 3, stopped: false }]);
-    expect(await backfillStatus(db, 1, at(0))).toEqual({ state: 'done', found: 3 });
+    expect(finished).toEqual([{ clientId: SHA, found: 3, stopped: false }]);
+    expect(await backfillStatus(db, SHA, at(0))).toEqual({ state: 'done', found: 3 });
     await s.advance(REQUEST_GAP_MS * 3);
     expect(asked).toHaveLength(2);
   });
@@ -161,7 +196,7 @@ describe('history backfill: paging', () => {
     t.bf.start();
     await t.step();
     await t.answer({ groups: [{ groupId: SHARMA.groupId, events: [msg(SHARMA.groupId, 'B', at(3)), msg(SHARMA.groupId, 'C', at(2))] }] });
-    expect(t.count()).toBe(4); // A, LIVE, B and C are all stored
+    expect((await t.count())).toBe(4); // A, LIVE, B and C are all stored
     expect((await getBackfill(t.db, SHARMA.groupId))?.found).toBe(2); // only B and C came from the answer
   });
 
@@ -171,7 +206,7 @@ describe('history backfill: paging', () => {
     bf.start();
     await step();
     await answer({ groups: [{ groupId: SHARMA.groupId, events: [msg(SHARMA.groupId, 'A', at(0, -10))] }] }); // a duplicate
-    expect(count()).toBe(1);
+    expect((await count())).toBe(1);
     expect((await getBackfill(db, SHARMA.groupId))?.empties).toBe(1);
     await s.advance(REQUEST_GAP_MS);
     expect(asked).toHaveLength(2);
@@ -260,10 +295,10 @@ describe('history backfill: the privacy rules', () => {
     await step();
     expect(asked).toEqual([]);
     expect((await getBackfill(db, SHARMA.groupId))?.state).toBe('stopped');
-    expect(finished).toEqual([{ clientId: 1, found: 0, stopped: true }]);
+    expect(finished).toEqual([{ clientId: SHA, found: 0, stopped: true }]);
     // A late answer for it is not stored.
     await answer({ groups: [{ groupId: SHARMA.groupId, events: [msg(SHARMA.groupId, 'B', at(2))] }] });
-    expect(count()).toBe(1);
+    expect((await count())).toBe(1);
   });
 
   it('stores nothing from an answer for a group with no backfill under way', async () => {
@@ -273,7 +308,7 @@ describe('history backfill: the privacy rules', () => {
     bf.start();
     await step();
     await answer({ groups: [{ groupId: MEHTA.groupId, events: [msg(MEHTA.groupId, 'X', at(1))] }] });
-    expect(rawOf(db).prepare("SELECT 1 FROM messages WHERE wa_id = 'X'").get()).toBeUndefined();
+    expect(await row(db, "SELECT 1 FROM messages WHERE wa_id = 'X'")).toBeUndefined();
   });
 
   it('asks nothing while WhatsApp is not open, nor at the spend cap; carries on after', async () => {
@@ -304,7 +339,7 @@ describe('history backfill: the privacy rules', () => {
 
 describe('history backfill: restart and the hold', () => {
   it('a restart carries on where it stopped', async () => {
-    const { db, bf, make, asked, live, step } = await setup();
+    const { db, bf, make, asked, live, step, quiet } = await setup();
     await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
@@ -312,7 +347,7 @@ describe('history backfill: restart and the hold', () => {
     const again = make();
     again.start();
     again.tick();
-    await new Promise((r) => setImmediate(r));
+    await quiet();
     expect(asked).toHaveLength(2);
     expect((await getBackfill(db, SHARMA.groupId))?.requests).toBe(2);
     expect(await listBackfills(db)).toHaveLength(1);
@@ -320,19 +355,19 @@ describe('history backfill: restart and the hold', () => {
 
   it('holds the client while fetching and WhatsApp is open, never longer than the cap', async () => {
     const { clock, bf, g, live, step } = await setup();
-    expect(bf.held(1)).toBe(false);
+    expect(bf.held(SHA)).toBe(false);
     await live(SHARMA.groupId, 'A', at(0, -10));
     bf.start();
     await step();
-    expect(bf.held(1)).toBe(true);
-    expect(bf.held(2)).toBe(false);
+    expect(bf.held(SHA)).toBe(true);
+    expect(bf.held(SHA + 1)).toBe(false);
     g.state = 'closed';
-    expect(bf.held(1)).toBe(false);
+    expect(bf.held(SHA)).toBe(false);
     g.state = 'open';
     clock.set(new Date(Date.parse(APPROVED) + HOLD_MAX_MS).toISOString());
-    expect(bf.held(1)).toBe(false);
+    expect(bf.held(SHA)).toBe(false);
     bf.stop();
-    expect(bf.held(1)).toBe(false);
+    expect(bf.held(SHA)).toBe(false);
   });
 });
 
@@ -341,16 +376,16 @@ describe('history backfill: the hold ends when the backfill cannot go on, and a 
     const { bf, live, answer, s, step } = await setup();
     bf.start();
     await step();
-    expect(bf.held(1)).toBe(false); // waiting for the first message
+    expect(bf.held(SHA)).toBe(false); // waiting for the first message
     await live(SHARMA.groupId, 'A', at(0, -10));
     await step();
-    expect(bf.held(1)).toBe(true); // asked
+    expect(bf.held(SHA)).toBe(true); // asked
     await answer({ groups: [{ groupId: SHARMA.groupId, events: [msg(SHARMA.groupId, 'B', at(2))] }] });
-    expect(bf.held(1)).toBe(true); // the next page follows in a moment
+    expect(bf.held(SHA)).toBe(true); // the next page follows in a moment
     await s.advance(REQUEST_GAP_MS);
-    expect(bf.held(1)).toBe(true);
+    expect(bf.held(SHA)).toBe(true);
     await s.advance(ANSWER_TIMEOUT_MS); // the phone stopped answering
-    expect(bf.held(1)).toBe(false);
+    expect(bf.held(SHA)).toBe(false);
   });
 
   it('a group approved again pages back from its new messages and counts only what it stored itself', async () => {
@@ -372,6 +407,6 @@ describe('history backfill: the hold ends when the backfill cannot go on, and a 
     await s.advance(REQUEST_GAP_MS);
     expect(asked[1]!.anchor.waId).toBe('KEPT2');
     await answer({ groups: [{ groupId: SHARMA.groupId, events: [msg(SHARMA.groupId, 'OLD', at(9))] }] });
-    expect(finished.at(-1)).toEqual({ clientId: 1, found: 2, stopped: false });
+    expect(finished.at(-1)).toEqual({ clientId: SHA, found: 2, stopped: false });
   });
 });
