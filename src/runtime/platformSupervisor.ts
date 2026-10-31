@@ -27,6 +27,13 @@ import { Supervisor, type RuntimeHandle } from './supervisor.ts';
 //   its allow-list from its own database (dbGroupsStore). Its dashboard routes come with scope (Phase B 4). On SQLite the Supervisor
 //   itself refuses every customer (refused:postgres), so only the founder "runs".
 
+/** The Google connect routes' customer hooks (GoogleConnectDeps): the state key, the resolver, the token callback. */
+export interface GoogleHooks {
+  stateKey: Buffer;
+  customer: (tenantId: string) => Promise<{ db: Db; key: Buffer } | null>;
+  onCustomerToken: (tenantId: string) => void;
+}
+
 export interface PlatformSupervisor {
   readonly supervisor: Supervisor;
   /** What the founder runtime's platform and sign-up routes take (RuntimeDeps.platformHooks). */
@@ -34,8 +41,9 @@ export interface PlatformSupervisor {
   /**
    * What every runtime's Google connect routes take for a customer (a0's S4.7 A1): the signed-state key, a running
    * customer's own Db and data key (null when its runtime is not running: 503), and a restart once its token is in.
+   * Absent without oauthStateKey: customers' connects are then refused (fail closed).
    */
-  readonly google: { stateKey: Buffer; customer: (tenantId: string) => Promise<{ db: Db; key: Buffer } | null>; onCustomerToken: (tenantId: string) => void };
+  readonly google?: GoogleHooks;
   /** Each running full customer runtime's dashboard routes (Phase B 4): what the dashboard sends that customer's requests to. */
   readonly tenants: TenantRoutes;
   /** The first reconcile, then one every 60 s. */
@@ -90,6 +98,19 @@ export function platformSupervisor(o: {
       ? new AiKeys({ db: o.customerDb(tenantId), platform: o.platformDb, tenantId, dataKey: () => tenantKeys.dataKey(tenantId), tester: keyTester, clock: o.clock })
       : null);
   const founder: RuntimeHandle = { stop: async () => {} }; // adopted: main.ts owns its start and its stop
+  /**
+   * The Google connect hooks for a customer (see PlatformSupervisor.google). Only with the state key: without it there are
+   * none, so a customer's connect is refused (403) on every runtime's routes, never signed with an empty key.
+   */
+  const google: GoogleHooks | undefined = o.oauthStateKey === undefined || o.oauthStateKey.length === 0 ? undefined : {
+    stateKey: o.oauthStateKey,
+    customer: async (tenantId) => {
+      if (!o.customerDb || !keys.has(tenantId)) return null; // not running: 503
+      return { db: o.customerDb(tenantId), key: await tenantKeys.dataKey(tenantId) };
+    },
+    // Its hub reads its tokens when it opens: the runtime starts again with the new one.
+    onCustomerToken: (tenantId) => void supervisor.restart(tenantId),
+  };
 
   const supervisor = new Supervisor({
     db: o.platformDb, clock: o.clock, log: o.log, engine: o.env.DB_ENGINE,
@@ -142,6 +163,9 @@ export function platformSupervisor(o: {
             {
               env: customerProfile(o.env, { tenantId: t.id, aiKey }), log, db, key: await tenantKeys.dataKey(t.id),
               ...(o.googleWeb ? { googleWeb: o.googleWeb } : {}),
+              // Its own dashboard's Google connect (review B S6): the same hooks, the resolver pinned to this customer, so
+              // its routes can never reach another customer's Db or key.
+              ...(google ? { googleHooks: { ...google, customer: async (id: string) => (id === t.id ? google.customer(id) : null) } } : {}),
               // Its allow-list as stored in its own database: what its start syncs in (a0's reload_failed recovery).
               configs: await dbGroupsStore({ db, onChange: () => undefined, log: o.log }).list(), localEngine: o.localEngine,
             },
@@ -178,15 +202,7 @@ export function platformSupervisor(o: {
       restart: (tenantId) => void supervisor.restart(tenantId),
     },
     tenants: { get: (tenantId) => routes.get(tenantId) },
-    google: {
-      stateKey: o.oauthStateKey ?? Buffer.alloc(0),
-      customer: async (tenantId) => {
-        if (!o.customerDb || !keys.has(tenantId)) return null; // not running: 503
-        return { db: o.customerDb(tenantId), key: await tenantKeys.dataKey(tenantId) };
-      },
-      // Its hub reads its tokens when it opens: the runtime starts again with the new one.
-      onCustomerToken: (tenantId) => void supervisor.restart(tenantId),
-    },
+    ...(google ? { google } : {}),
     start: async () => {
       await supervisor.reconcile();
       tick = setInterval(() => supervisor.poke(), o.tickMs ?? 60_000);
