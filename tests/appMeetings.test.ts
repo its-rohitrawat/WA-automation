@@ -21,18 +21,23 @@ import { AllowList } from '../src/wa/allowlist.ts';
 import { openSessionDb, useEncryptedAuthState } from '../src/wa/authState.ts';
 import { WhatsAppGateway } from '../src/wa/gateway.ts';
 import { FakeAi, op } from './helpers/ai.ts';
-import { idOf, MEHTA, seededDb, SHARMA } from './helpers/db.ts';
+import { idOf, MEHTA, row, seededDb, SHARMA } from './helpers/db.ts';
 import { FakeDrive } from './helpers/fakeDrive.ts';
 import { FakeMeetingsApi } from './helpers/fakeMeetings.ts';
 import { FakeSocket } from './helpers/fakeSocket.ts';
 import { addRecordingFile, fakeFfmpeg, FakeMeetingAi, FakeSttProvider, FILE_ID, queuedMeeting, STARTED } from './helpers/meetingPipeline.ts';
-import { rawOf } from '../src/store/engine/sqlite.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
 const MINUTE = 60_000;
 /** For a wait on real work (file I/O, building the workbook): the default 1 s is tight while the whole suite runs. */
 const SLOW_IO = { timeout: 10_000 };
 const dirs: string[] = [];
+
+/** The test's one meeting, by its own id (on Postgres the ids do not start at 1); undefined before discovery stores it. */
+async function theMeeting(db: Db) {
+  const first = await row<{ id: number }>(db, 'SELECT id FROM meetings ORDER BY id LIMIT 1');
+  return first ? getMeeting(db, first.id) : undefined;
+}
 
 interface SetupOptions {
   /** false: MEETINGS_ENABLED off, no meeting dependency at all. */
@@ -123,7 +128,7 @@ function watchSchedules(app: Awaited<ReturnType<typeof setup>>['app'], db: Db): 
   const seen: (string | undefined)[] = [];
   const schedule = app.publisher.schedule.bind(app.publisher);
   vi.spyOn(app.publisher, 'schedule').mockImplementation(async () => {
-    seen.push((await getMeeting(db, 1))?.status);
+    seen.push((await theMeeting(db))?.status);
     schedule();
   });
   return seen;
@@ -154,7 +159,7 @@ describe('app with meetings', () => {
 
   it('without the meeting scopes: paused google_scopes, and no Google meeting call even for a queued meeting', async () => {
     const { app, api, health, db } = await setup({ scopes: false, prepare: async (d) => insertFound(d, queuedMeeting({ clientId: await idOf(d, 'SHA') })) });
-    await vi.waitFor(async () => expect((await getMeeting(db, 1))?.errorCode).toBe('google_scopes'), SLOW_IO);
+    await vi.waitFor(async () => expect((await theMeeting(db))?.errorCode).toBe('google_scopes'), SLOW_IO);
     await vi.advanceTimersByTimeAsync(20 * MINUTE);
     expect(api.calls).toEqual([]);
     expect(health.at(-1)).toMatchObject({ paused: 'google_scopes', sttProvider: 'elevenlabs', stats: { waiting: 1 } });
@@ -172,18 +177,18 @@ describe('app with meetings', () => {
     const { app, api, db, drive, stt, meetingAi, ai, health } = await setup();
     const statusAtSchedule = watchSchedules(app, db);
     // The first Doc may wait for the publisher's first upload to make the WA Agent folder (drive_root, 5 minutes).
-    await vi.waitFor(async () => expect(['summarised', 'tracked']).toContain((await getMeeting(db, 1))?.stage), SLOW_IO);
+    await vi.waitFor(async () => expect(['summarised', 'tracked']).toContain((await theMeeting(db))?.stage), SLOW_IO);
     await vi.advanceTimersByTimeAsync(6 * MINUTE); // past the wait and the next tick
-    await vi.waitFor(async () => expect((await getMeeting(db, 1))?.status).toBe('done'), SLOW_IO);
-    const m = (await getMeeting(db, 1))!;
-    expect(m).toMatchObject({ clientId: 1, matchKind: 'title', stage: 'tracked', title: 'Sharma Interiors weekly' });
+    await vi.waitFor(async () => expect((await theMeeting(db))?.status).toBe('done'), SLOW_IO);
+    const m = (await theMeeting(db))!;
+    expect(m).toMatchObject({ clientId: await idOf(db, 'SHA'), matchKind: 'title', stage: 'tracked', title: 'Sharma Interiors weekly' });
     expect(api.callsOf('download')).toHaveLength(1);
     expect(stt.calls).toHaveLength(1);
     expect(meetingAi.calls).toHaveLength(1);
     expect(drive.docs).toHaveLength(1);
     expect(m.docFileId).toBe(drive.docs[0]!.id);
     expect(ai.calls).toHaveLength(1); // the tracker step
-    expect((await listTasks(db, 1)).map((t) => [t.title, t.origin])).toEqual([['Send the logo files', 'meeting']]);
+    expect((await listTasks(db, await idOf(db, 'SHA'))).map((t) => [t.title, t.origin])).toEqual([['Send the logo files', 'meeting']]);
     expect((await spendRows(db)).map((s) => s.kind)).toEqual(['stt', 'ai', 'ai']);
 
     // The finished meeting asks for a rebuild.
@@ -193,7 +198,7 @@ describe('app with meetings', () => {
     // A later discovery pass stores nothing twice.
     await vi.advanceTimersByTimeAsync(10 * MINUTE);
     expect(api.callsOf('listConferences').length).toBeGreaterThan(1);
-    expect(rawOf(db).prepare('SELECT COUNT(*) AS n FROM meetings').get()).toEqual({ n: 1 });
+    expect(await row(db, 'SELECT COUNT(*) AS n FROM meetings')).toEqual({ n: 1 });
     await stopApp(app);
   });
 
@@ -208,12 +213,12 @@ describe('app with meetings', () => {
     const seen: { status: string | undefined; done: number | undefined }[] = [];
     const schedule = app.publisher.schedule.bind(app.publisher);
     vi.spyOn(app.publisher, 'schedule').mockImplementation(async () => {
-      seen.push({ status: (await getMeeting(db, 1))?.status, done: app.health.snapshot().meetings?.stats.done });
+      seen.push({ status: (await theMeeting(db))?.status, done: app.health.snapshot().meetings?.stats.done });
       schedule();
     });
-    await vi.waitFor(async () => expect(['summarised', 'tracked']).toContain((await getMeeting(db, 1))?.stage), SLOW_IO);
+    await vi.waitFor(async () => expect(['summarised', 'tracked']).toContain((await theMeeting(db))?.stage), SLOW_IO);
     await vi.advanceTimersByTimeAsync(6 * MINUTE);
-    await vi.waitFor(async () => expect((await getMeeting(db, 1))?.status).toBe('done'), SLOW_IO);
+    await vi.waitFor(async () => expect((await theMeeting(db))?.status).toBe('done'), SLOW_IO);
     // Every request after the finish (the tracker step's, the service's) comes before any tick could refresh the counts.
     const afterDone = seen.filter((x) => x.status === 'done');
     expect(afterDone.length).toBeGreaterThanOrEqual(1);
@@ -226,9 +231,9 @@ describe('app with meetings', () => {
     stt.transcribe = async () => ({ model: 'scribe', segments: [], billedSeconds: null, raw: {} });
     const { app, db, ai, meetingAi, drive } = await setup({ stt });
     const statusAtSchedule = watchSchedules(app, db);
-    await vi.waitFor(async () => expect(['summarised', 'tracked']).toContain((await getMeeting(db, 1))?.stage), SLOW_IO);
+    await vi.waitFor(async () => expect(['summarised', 'tracked']).toContain((await theMeeting(db))?.stage), SLOW_IO);
     await vi.advanceTimersByTimeAsync(6 * MINUTE);
-    await vi.waitFor(async () => expect(await getMeeting(db, 1)).toMatchObject({ status: 'done', note: 'no_speech' }), SLOW_IO);
+    await vi.waitFor(async () => expect(await theMeeting(db)).toMatchObject({ status: 'done', note: 'no_speech' }), SLOW_IO);
     expect(ai.calls).toEqual([]);
     expect(meetingAi.calls).toEqual([]);
     expect(drive.docs).toHaveLength(1);
@@ -264,7 +269,7 @@ describe('app with meetings', () => {
     for (let i = 0; i < 60 && !done; i++) await vi.advanceTimersByTimeAsync(1_000);
     expect(done).toBe(true);
     await stop;
-    expect(await getMeeting(db, 1)).toMatchObject({ status: 'queued', stage: 'found', errorCode: 'stopped', attempts: 0 });
+    expect(await theMeeting(db)).toMatchObject({ status: 'queued', stage: 'found', errorCode: 'stopped', attempts: 0 });
     expect(await spendRows(db)).toEqual([]);
   });
 
@@ -283,7 +288,7 @@ describe('app with meetings', () => {
     release();
     for (let i = 0; i < 200 && !done; i++) await vi.advanceTimersByTimeAsync(1_000);
     await stop;
-    expect((await getMeeting(db, 1))?.stage).toBe('transcribed');
+    expect((await theMeeting(db))?.stage).toBe('transcribed');
     expect((await spendRows(db)).map((s) => s.kind)).toEqual(['stt']);
     expect(meetingAi.calls).toEqual([]);
   });
@@ -295,7 +300,7 @@ describe('app with meetings', () => {
     await vi.waitFor(() => expect(stt.calls).toHaveLength(1), SLOW_IO);
     await stopApp(app);
     expect(await spendRows(db)).toEqual([expect.objectContaining({ kind: 'stt' })]);
-    expect((await getMeeting(db, 1))?.sttParts[0]).toMatchObject({ booked: 'ceiling' });
+    expect((await theMeeting(db))?.sttParts[0]).toMatchObject({ booked: 'ceiling' });
   });
 
   describe('STT_PROVIDER=local (plan 2026-10-28-meetings-local-stt.md, Task 3)', () => {
@@ -320,14 +325,14 @@ describe('app with meetings', () => {
     it('a meeting waiting with stt_none is processed after the restart, not an hour later: free, speaker-less lines to Claude and the Doc', async () => {
       const said = { n: 0 };
       const { app, db, meetingAi, drive, health } = await setup({ prepare: waitingForStt, transcriber: local(said) });
-      await vi.waitFor(async () => expect(['summarised', 'tracked']).toContain((await getMeeting(db, 1))?.stage), SLOW_IO);
+      await vi.waitFor(async () => expect(['summarised', 'tracked']).toContain((await theMeeting(db))?.stage), SLOW_IO);
       await vi.advanceTimersByTimeAsync(6 * MINUTE); // past the Doc's wait for the WA Agent folder
-      await vi.waitFor(async () => expect((await getMeeting(db, 1))?.status).toBe('done'), SLOW_IO);
+      await vi.waitFor(async () => expect((await theMeeting(db))?.status).toBe('done'), SLOW_IO);
       expect(Date.now()).toBeLessThan(Date.parse('2026-11-01T13:00:00.000Z'));
-      expect(rawOf(db).prepare('SELECT COUNT(*) AS n FROM meetings').get()).toEqual({ n: 1 });
+      expect(await row(db, 'SELECT COUNT(*) AS n FROM meetings')).toEqual({ n: 1 });
 
       // 45 minutes in five ten-minute-or-less parts, no speech spend: only the summary and the tracker step are booked.
-      const m = (await getMeeting(db, 1))!;
+      const m = (await theMeeting(db))!;
       expect(said.n).toBe(5);
       expect(m.sttParts.map((p) => [p.provider, p.booked])).toEqual(Array.from({ length: 5 }, () => ['local', 'none']));
       expect(m.transcript!.map((x) => [x.start, x.speaker])).toEqual([[0, null], [540, null], [1080, null], [1620, null], [2160, null]]);
@@ -356,7 +361,7 @@ describe('app with meetings', () => {
 
     it('the local engine not set up: meetings wait (stt_none), and Health says the local speech engine is not set up', async () => {
       const { app, db, health } = await setup({ transcriber: () => null, sttProblem: 'local_not_set_up_model' });
-      await vi.waitFor(async () => expect(await getMeeting(db, 1)).toMatchObject({ status: 'queued', errorCode: 'stt_none' }), SLOW_IO);
+      await vi.waitFor(async () => expect(await theMeeting(db)).toMatchObject({ status: 'queued', errorCode: 'stt_none' }), SLOW_IO);
       await vi.waitFor(() => expect(health.at(-1)).toMatchObject({ sttProvider: 'local', sttProblem: 'local_not_set_up_model' }), SLOW_IO);
       expect(app.health.line()).toEqual({ ok: false, text: MEETING_STT_PROBLEM_LINES.local_not_set_up_model });
       expect(await spendRows(db)).toEqual([]);
