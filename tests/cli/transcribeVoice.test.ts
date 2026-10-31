@@ -8,8 +8,7 @@ import { claimMedia, failMedia, finishMedia, getMedia, insertMedia, markDownload
 import { insertMessage, listUnprocessed, markProcessed } from '../../src/store/messages.ts';
 import { VOICE_LENGTH_TOLERANCE_S, voiceCeilingUsd } from '../../src/stt/voice.ts';
 import { manualClock } from '../../src/util/clock.ts';
-import { LATER, NOW, SHARMA, seededDb } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { idOf, LATER, NOW, row, rows, SHARMA, seededDb } from '../helpers/db.ts';
 
 // `cli transcribe-voice` (Phase 2b Task 8, V6, N2, N4) against a seeded database: no service, no network, no real ffmpeg.
 
@@ -57,8 +56,8 @@ const run = (opts: { client?: string; yes?: boolean; failed?: boolean } = {}, ov
 
 let seq = 0;
 /** A 2a voice note: saved on disk, finished without a transcript, its message processed. */
-async function backlogVoice(o: { clientId?: number; kind?: MediaKind; fileSize?: number; mimeType?: string | null; note?: string | null; text?: string } = {}): Promise<number> {
-  const clientId = o.clientId ?? 1;
+async function backlogVoice(o: { client?: 'SHA' | 'MEH'; kind?: MediaKind; fileSize?: number; mimeType?: string | null; note?: string | null; text?: string } = {}): Promise<number> {
+  const clientId = await idOf(db, o.client ?? 'SHA');
   const kind = o.kind ?? 'voice';
   const waId = `W${++seq}`;
   await insertMessage(db, {
@@ -81,8 +80,8 @@ async function backlogVoice(o: { clientId?: number; kind?: MediaKind; fileSize?:
 }
 
 /** A saved voice note that failed with errorCode after its tries (its message processed: the tracker went ahead). */
-async function failedVoice(errorCode: string, o: { clientId?: number; kind?: MediaKind; fileSize?: number } = {}): Promise<number> {
-  const clientId = o.clientId ?? 1;
+async function failedVoice(errorCode: string, o: { client?: 'SHA' | 'MEH'; kind?: MediaKind; fileSize?: number } = {}): Promise<number> {
+  const clientId = await idOf(db, o.client ?? 'SHA');
   const kind = o.kind ?? 'voice';
   const waId = `F${++seq}`;
   await insertMessage(db, {
@@ -105,7 +104,7 @@ const statusOf = async (id: number) => {
   const m = (await getMedia(db, id))!;
   return { status: m.status, backlog: m.backlog, note: m.note, text: m.text, attempts: m.attempts, createdAt: m.createdAt };
 };
-const allMedia = () => rawOf(db).prepare('SELECT * FROM media ORDER BY id').all();
+const allMedia = () => rows(db, 'SELECT * FROM media ORDER BY id');
 const output = () => lines.join('\n');
 const NEEDS_FFMPEG = 'ffmpeg, skipped (install ffmpeg, or set FFMPEG_PATH; after installing ffmpeg, restart the service, then run this again).';
 /** The cost line, in the command's words. */
@@ -117,10 +116,10 @@ describe('transcribe-voice: speech-to-text off', () => {
 
   it('says so and changes nothing', async () => {
     const id = await backlogVoice();
-    const before = allMedia();
+    const before = (await allMedia());
     await run({}, { env: parseEnv({}) });
     expect(lines).toEqual([OFF]);
-    expect(allMedia()).toEqual(before);
+    expect((await allMedia())).toEqual(before);
     await run({ yes: true }, { env: parseEnv({}) });
     expect((await statusOf(id)).status).toBe('done');
     expect(ffmpegAsked).toEqual([]);
@@ -142,8 +141,8 @@ describe('transcribe-voice: the local engine', () => {
 
   it('the dry run counts the files and the minutes, and says the cost is $0, with no key and no paid provider', async () => {
     await backlogVoice({ fileSize: 900_000 });
-    await backlogVoice({ fileSize: 450_000, clientId: 2 });
-    const before = allMedia();
+    await backlogVoice({ fileSize: 450_000, client: 'MEH' });
+    const before = (await allMedia());
     await run({}, { env: localEnv() });
     expect(lines).toEqual([
       'To transcribe: 2 voice notes or audio files saved before Phase 2b, about 15 minutes.',
@@ -153,7 +152,7 @@ describe('transcribe-voice: the local engine', () => {
     ]);
     expect(output()).not.toContain('list price');
     expect(output()).not.toContain('spend cap ($');
-    expect(allMedia()).toEqual(before);
+    expect((await allMedia())).toEqual(before);
   });
 
   it('--yes queues them, saying the cost is $0', async () => {
@@ -196,8 +195,8 @@ describe('transcribe-voice: the dry run', () => {
     // 1,500 s, about 25 minutes.
     await backlogVoice({ fileSize: 900_000 });
     await backlogVoice({ fileSize: 900_000, kind: 'audio', mimeType: 'audio/mpeg' });
-    await backlogVoice({ fileSize: 450_000, clientId: 2 });
-    const before = allMedia();
+    await backlogVoice({ fileSize: 450_000, client: 'MEH' });
+    const before = (await allMedia());
     await run();
     const about = 2 * voiceCeilingUsd('sarvam', 600, 88) + voiceCeilingUsd('sarvam', 300, 88); // about $0.142
     expect(about).toBeCloseTo(0.142, 3);
@@ -208,7 +207,7 @@ describe('transcribe-voice: the dry run', () => {
       'With --yes the running service transcribes them, for the record. This costs money and counts toward the daily spend cap ($15.00).',
       'Nothing was changed. Re-run with --yes to queue them.',
     ]);
-    expect(allMedia()).toEqual(before);
+    expect((await allMedia())).toEqual(before);
   });
 
   it('counts the minutes up to a whole minute and the cost up to a whole cent', async () => {
@@ -224,7 +223,7 @@ describe('transcribe-voice: the dry run', () => {
     // STT_MAX_SECONDS 900. Bounds 10 s, 100 s, 900 s (the cap) and 3,334 s (5 MB, a high bitrate), the last estimated at
     // the 905 s limit: 10 + 100 + 900 + 905 = 1,915 s, about 32 minutes.
     await backlogVoice({ fileSize: 15_000 });
-    await backlogVoice({ fileSize: 150_000, clientId: 2 });
+    await backlogVoice({ fileSize: 150_000, client: 'MEH' });
     await backlogVoice({ fileSize: 1_350_000, kind: 'audio', mimeType: 'audio/mpeg' });
     await backlogVoice({ fileSize: 5_000_000 });
     await run({}, { env: env({ STT_MAX_SECONDS: '900' }) });
@@ -243,7 +242,7 @@ describe('transcribe-voice: the dry run', () => {
 
   it('a file with no size is estimated at STT_MAX_SECONDS plus the tolerance, and queued', async () => {
     const id = await backlogVoice();
-    rawOf(db).prepare('UPDATE media SET file_size = NULL WHERE id = ?').run(id);
+    await db.run('UPDATE media SET file_size = NULL WHERE id = ?', [id]);
     await run({ yes: true });
     expect(lines).toEqual([
       'To transcribe: 1 voice note or audio file saved before Phase 2b, about 11 minutes.',
@@ -348,21 +347,21 @@ describe('transcribe-voice --client', () => {
   it('limits the count to that client, by code in any case', async () => {
     await backlogVoice({ fileSize: 90_000 });
     await backlogVoice({ fileSize: 90_000 });
-    const mehta = await backlogVoice({ fileSize: 90_000, clientId: 2 });
+    const mehta = await backlogVoice({ fileSize: 90_000, client: 'MEH' });
     await run({ client: 'meh' });
     expect(lines[0]).toBe('To transcribe: 1 voice note or audio file saved before Phase 2b, about 1 minute.');
     await run({ client: 'MEH', yes: true });
-    expect(rawOf(db).prepare("SELECT id FROM media WHERE status = 'pending'").all()).toEqual([{ id: mehta }]);
+    expect(await rows(db, "SELECT id FROM media WHERE status = 'pending'")).toEqual([{ id: mehta }]);
   });
 
   it('a code with spaces around it works', async () => {
     const a = await backlogVoice({ fileSize: 90_000 });
     const b = await backlogVoice({ fileSize: 90_000 });
-    await backlogVoice({ fileSize: 90_000, clientId: 2 });
+    await backlogVoice({ fileSize: 90_000, client: 'MEH' });
     await run({ client: ' sha ' });
     expect(lines[0]).toBe('To transcribe: 2 voice notes or audio files saved before Phase 2b, about 2 minutes.');
     await run({ client: ' sha ', yes: true });
-    expect(rawOf(db).prepare("SELECT id FROM media WHERE status = 'pending' ORDER BY id").all()).toEqual([{ id: a }, { id: b }]);
+    expect(await rows(db, "SELECT id FROM media WHERE status = 'pending' ORDER BY id")).toEqual([{ id: a }, { id: b }]);
   });
 
   it('refuses an unknown code by name, and a client no longer on the allow-list', async () => {
@@ -377,7 +376,7 @@ describe('transcribe-voice --client', () => {
 describe('transcribe-voice --yes', () => {
   it('queues exactly the sendable files, a large one too, as backlog; their transcripts never queue a message again (V6)', async () => {
     const a = await backlogVoice({ fileSize: 90_000 });
-    const b = await backlogVoice({ fileSize: 90_000, clientId: 2, kind: 'audio', mimeType: 'audio/mpeg' });
+    const b = await backlogVoice({ fileSize: 90_000, client: 'MEH', kind: 'audio', mimeType: 'audio/mpeg' });
     const large = await backlogVoice({ fileSize: 900_001 }); // a bound of 601 s: not refused by its size
     const amr = await backlogVoice({ mimeType: 'audio/amr' }); // converted like the others, ffmpeg being there
     await run({ yes: true });
@@ -394,10 +393,10 @@ describe('transcribe-voice --yes', () => {
 
     // A fake extractor finishes them: the transcripts are stored and no message is queued or flagged again.
     for (const id of [a, b, large, amr]) await finishMedia(db, id, { textKind: 'extract', text: TRANSCRIPT, pageCount: null, note: null, at: LATER });
-    expect(await listUnprocessed(db, 1)).toEqual([]);
-    expect(await listUnprocessed(db, 2)).toEqual([]);
-    expect(rawOf(db).prepare('SELECT COUNT(*) AS n FROM messages WHERE processed_at IS NULL').get()).toEqual({ n: 0 });
-    expect(rawOf(db).prepare('SELECT COUNT(*) AS n FROM media WHERE requeued_for_text = 1').get()).toEqual({ n: 0 });
+    expect(await listUnprocessed(db, await idOf(db, 'SHA'))).toEqual([]);
+    expect(await listUnprocessed(db, await idOf(db, 'MEH'))).toEqual([]);
+    expect(await row(db, 'SELECT COUNT(*) AS n FROM messages WHERE processed_at IS NULL')).toEqual({ n: 0 });
+    expect(await row(db, 'SELECT COUNT(*) AS n FROM media WHERE requeued_for_text = 1')).toEqual({ n: 0 });
     // Once transcribed, nothing is left to queue.
     lines = [];
     await run({ yes: true });
@@ -405,16 +404,16 @@ describe('transcribe-voice --yes', () => {
   });
 
   it.each([
-    ['gets a note', (id: number) => void rawOf(db).prepare("UPDATE media SET note = 'too_long' WHERE id = ?").run(id)],
+    ['gets a note', (id: number) => db.run("UPDATE media SET note = 'too_long' WHERE id = ?", [id])],
     ['has its message deleted for everyone', (id: number) =>
-      void rawOf(db).prepare('UPDATE messages SET revoked = 1 WHERE id = (SELECT message_id FROM media WHERE id = ?)').run(id)],
+      db.run('UPDATE messages SET revoked = 1 WHERE id = (SELECT message_id FROM media WHERE id = ?)', [id])],
   ])('a counted file that %s before it is queued is left alone and said so', async (_what, change) => {
     const a = await backlogVoice({ fileSize: 90_000 });
     const b = await backlogVoice({ fileSize: 90_000 });
     const aac = await backlogVoice({ fileSize: 90_000, mimeType: 'audio/aac' }); // every file needs ffmpeg, so the finder is asked
     // The finder runs after the files are listed and counted, before they are queued.
     const findFfmpeg = async (): Promise<string | null> => {
-      change(b);
+      await change(b);
       return 'ffmpeg';
     };
     await run({ yes: true }, { findFfmpeg });
@@ -433,10 +432,11 @@ describe('transcribe-voice --yes', () => {
     const tooLong = await backlogVoice({ note: 'too_long' });
     const forwarded = await backlogVoice({ note: 'forwarded_not_transcribed' });
     const transcribed = await backlogVoice({ text: TRANSCRIPT });
-    const before = [tooLong, forwarded, transcribed].map((id) => rawOf(db).prepare('SELECT * FROM media WHERE id = ?').get(id));
+    const one = (id: number) => row(db, 'SELECT * FROM media WHERE id = ?', [id]);
+    const before = await Promise.all([tooLong, forwarded, transcribed].map(one));
     const fresh = await backlogVoice();
     await run({ yes: true });
-    expect([tooLong, forwarded, transcribed].map((id) => rawOf(db).prepare('SELECT * FROM media WHERE id = ?').get(id))).toEqual(before);
+    expect(await Promise.all([tooLong, forwarded, transcribed].map(one))).toEqual(before);
     expect((await statusOf(fresh)).status).toBe('pending');
   });
 
@@ -462,12 +462,12 @@ describe('transcribe-voice: the local engine not set up', () => {
   it.each([['STT_LOCAL_BIN'], ['STT_LOCAL_MODEL']] as const)('refuses the dry run and --yes when %s is not a file, naming the setting only', async (name) => {
     const id = await backlogVoice();
     const failed = await failedVoice('local_timeout');
-    const before = allMedia();
+    const before = (await allMedia());
     for (const opts of [{}, { yes: true }, { failed: true }, { failed: true, yes: true }]) {
       await run(opts, { env: localEnv(), checkLocalEngine: () => name });
     }
     expect(lines).toEqual([notSetUp(name), notSetUp(name), notSetUp(name), notSetUp(name)]);
-    expect(allMedia()).toEqual(before);
+    expect((await allMedia())).toEqual(before);
     expect((await statusOf(id)).status).toBe('done');
     expect((await statusOf(failed)).status).toBe('failed');
     expect(ffmpegAsked).toEqual([]);
@@ -532,10 +532,10 @@ describe('transcribe-voice --failed', () => {
 
   it('the dry run counts the failed notes and the minutes, says the cost is $0, and changes nothing', async () => {
     await failedVoice('local_empty_output', { fileSize: 900_000 });
-    await failedVoice('audio_convert_failed', { fileSize: 450_000, clientId: 2, kind: 'audio' });
+    await failedVoice('audio_convert_failed', { fileSize: 450_000, client: 'MEH', kind: 'audio' });
     await failedVoice('stt_partial'); // failed at a paid provider: never counted
     await backlogVoice(); // the backlog is another listing
-    const before = allMedia();
+    const before = (await allMedia());
     await run({ failed: true }, { env: localEnv() });
     expect(lines).toEqual([
       'To try again: 2 voice notes or audio files the local engine could not transcribe, about 15 minutes.',
@@ -543,14 +543,14 @@ describe('transcribe-voice --failed', () => {
       `With --yes the running service tries them again (3 tries each). ${FREE}`,
       'Nothing was changed. Re-run with --yes to queue them again.',
     ]);
-    expect(allMedia()).toEqual(before);
+    expect((await allMedia())).toEqual(before);
   });
 
   it('--yes queues them again: pending, attempts 0, no error, no note, created now, backlog by the same rule as the backlog', async () => {
     const a = await failedVoice('local_timeout');
     const b = await failedVoice('audio_no_duration', { kind: 'audio' });
     const unprocessed = await failedVoice('local_exit_1');
-    rawOf(db).prepare('UPDATE messages SET processed_at = NULL WHERE id = ?').run((await getMedia(db, unprocessed))!.messageId);
+    await db.run('UPDATE messages SET processed_at = NULL WHERE id = ?', [(await getMedia(db, unprocessed))!.messageId]);
     const paid = await failedVoice('stt_paid_unbooked');
     const backlog = await backlogVoice();
     await run({ failed: true, yes: true }, { env: localEnv() });
@@ -573,10 +573,10 @@ describe('transcribe-voice --failed', () => {
 
   it.each(['sarvam', 'elevenlabs', 'openai'])('is refused with VOICE_STT_PROVIDER=%s: those failures may have been paid', async (provider) => {
     const id = await failedVoice('local_timeout');
-    const before = allMedia();
+    const before = (await allMedia());
     await run({ failed: true, yes: true }, { env: env({ STT_PROVIDER: provider, VOICE_STT_PROVIDER: provider }) });
     expect(lines).toEqual([NEEDS_LOCAL]);
-    expect(allMedia()).toEqual(before);
+    expect((await allMedia())).toEqual(before);
     expect((await statusOf(id)).status).toBe('failed');
     expect(ffmpegAsked).toEqual([]);
   });
@@ -607,17 +607,17 @@ describe('transcribe-voice --failed', () => {
 
   it('--client limits it to that client', async () => {
     await failedVoice('local_timeout');
-    const mehta = await failedVoice('local_timeout', { clientId: 2 });
+    const mehta = await failedVoice('local_timeout', { client: 'MEH' });
     await run({ failed: true, yes: true, client: 'meh' }, { env: localEnv() });
     expect(lines[0]).toBe('To try again: 1 voice note or audio file the local engine could not transcribe, about 1 minute.');
-    expect(rawOf(db).prepare("SELECT id FROM media WHERE status = 'pending'").all()).toEqual([{ id: mehta }]);
+    expect(await rows(db, "SELECT id FROM media WHERE status = 'pending'")).toEqual([{ id: mehta }]);
   });
 
   it('a note that changed since it was counted is left alone and said so', async () => {
     const a = await failedVoice('local_timeout');
     const b = await failedVoice('local_timeout');
     const findFfmpeg = async (): Promise<string | null> => {
-      rawOf(db).prepare('UPDATE messages SET revoked = 1 WHERE id = (SELECT message_id FROM media WHERE id = ?)').run(b);
+      await db.run('UPDATE messages SET revoked = 1 WHERE id = (SELECT message_id FROM media WHERE id = ?)', [b]);
       return 'ffmpeg';
     };
     await run({ failed: true, yes: true }, { env: localEnv(), findFfmpeg });
