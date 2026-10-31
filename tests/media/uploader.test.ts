@@ -5,35 +5,75 @@ import { Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DriveFileUploader, FILE_UPLOAD_TIMEOUT_MS, retryMs, UPLOAD_MAX_ATTEMPTS } from '../../src/media/uploader.ts';
-import type { Db } from '../../src/store/db.ts';
+import type { Db, Sql } from '../../src/store/db.ts';
 import { setKv } from '../../src/store/kv.ts';
 import { finishMedia, getMedia, insertMedia, markDownloaded, messageRowId, resetUploadFailures, type MediaKind } from '../../src/store/media.ts';
 import { applyRevoke, insertMessage } from '../../src/store/messages.ts';
 import { setRole, upsertPerson, type Role } from '../../src/store/people.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger, type Logger } from '../../src/util/logger.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
+import { idOf, MEHTA, NOW, row, seededDb, SHARMA } from '../helpers/db.ts';
 import { FakeDrive } from '../helpers/fakeDrive.ts';
 import { RAHUL_PN, SHARMA_PN } from '../helpers/wa.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 const dirs: string[] = [];
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
+/** What a test makes the uploader's database refuse: writes to these media columns, or every call (down). */
+interface Faults {
+  columns: Set<string>;
+  down: boolean;
+  /** Calls refused while down. */
+  refused: number;
+}
+const faultsOf = new WeakMap<Db, Faults>();
+
+/** The same Db, refusing what `f` says: every call while down, and any UPDATE of media that sets one of f.columns. */
+function faulty(db: Db, f: Faults): Db {
+  const check = (sql: string) => {
+    if (f.down) {
+      f.refused++;
+      return new Error('database unavailable');
+    }
+    for (const c of f.columns) if (new RegExp(`UPDATE media SET[\\s\\S]*\\b${c}\\s*=`).test(sql)) return new Error('database cannot write');
+    return undefined;
+  };
+  const wrap = <S extends Sql>(s: S): S => new Proxy(s, {
+    get(target, prop) {
+      if (prop === 'run' || prop === 'get' || prop === 'all') {
+        const fn = Reflect.get(target, prop) as (sql: string, params?: unknown) => Promise<unknown>;
+        return (sql: string, params?: unknown) => {
+          const e = check(sql);
+          return e ? Promise.reject(e) : fn.call(target, sql, params);
+        };
+      }
+      if (prop === 'tx') return <T>(fn: (q: Sql) => Promise<T>) => (f.down ? Promise.reject(new Error('database unavailable')) : target.tx((q) => fn(wrap(q))));
+      const v = Reflect.get(target, prop) as unknown;
+      return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+    },
+  });
+  return wrap(db);
+}
+
+/** Sharma's real id (on Postgres it is not 1). */
+const sha = (db: Db) => idOf(db, SHARMA.code);
+
 async function setup(o: { root?: boolean; batchSize?: number; log?: Logger } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'wa-up-'));
   dirs.push(dataDir);
   const db = await seededDb();
+  const faults: Faults = { columns: new Set(), down: false, refused: 0 };
+  faultsOf.set(db, faults);
   const drive = new FakeDrive();
   const clock = manualClock('2026-10-19T08:00:00Z');
   const onUploaded = vi.fn();
   const up = new DriveFileUploader({
-    db, api: drive, dataDir, clock, log: o.log ?? silentLogger(), onUploaded, ...(o.batchSize === undefined ? {} : { batchSize: o.batchSize }),
+    db: faulty(db, faults), api: drive, dataDir, clock, log: o.log ?? silentLogger(), onUploaded, ...(o.batchSize === undefined ? {} : { batchSize: o.batchSize }),
   });
   if (o.root !== false) await setKv(db, 'drive_root_id', 'root-1');
-  return { db, dataDir, drive, clock, onUploaded, up };
+  return { db, dataDir, drive, clock, onUploaded, up, faults };
 }
 
 function capturingLogger() {
@@ -47,10 +87,14 @@ function capturingLogger() {
   return { lines, log: createLogger('info', sink) };
 }
 
-/** Makes every write to the given media column fail, as when the database cannot write (disk full, a lock held too long). */
+/**
+ * Makes every write to the given media column fail, as when the database cannot write (disk full, a lock held too long):
+ * through setup's faulty Db, which the uploader uses. Returns the function that ends it.
+ */
 function failWritesTo(db: Db, column: 'drive_file_id' | 'drive_attempts'): () => void {
-  rawOf(db).exec(`CREATE TRIGGER fail_${column} BEFORE UPDATE OF ${column} ON media BEGIN SELECT RAISE(ABORT, 'database cannot write'); END`);
-  return () => rawOf(db).exec(`DROP TRIGGER fail_${column}`);
+  const f = faultsOf.get(db)!;
+  f.columns.add(column);
+  return () => void f.columns.delete(column);
 }
 
 /** 30 s ticks, as the service runs the uploader, for the given number of minutes. */
@@ -62,7 +106,7 @@ async function ticks(clock: ReturnType<typeof manualClock>, up: DriveFileUploade
 }
 
 /**
- * A file that a person shared in a client group (Sharma, id 1, unless clientId says otherwise), saved on disk and read.
+ * A file that a person shared in a client group (Sharma, unless clientId says otherwise), saved on disk and read.
  * saved: false leaves it pending download, with no local_path.
  */
 async function savedFile(
@@ -73,7 +117,7 @@ async function savedFile(
     forwarded?: boolean;
   },
 ): Promise<number> {
-  const clientId = o.clientId ?? 1;
+  const clientId = o.clientId ?? (await sha(db));
   const jid = o.jid ?? SHARMA_PN;
   const kind = o.kind ?? 'document';
   const fromMe = o.fromMe ?? false;
@@ -91,7 +135,7 @@ async function savedFile(
 
 /** The download finished: the original is on disk and the file has been read. */
 async function saveOriginal(db: Db, dataDir: string, id: number, clientId: number, waId: string): Promise<void> {
-  const code = clientId === 1 ? 'SHA' : 'MEH';
+  const code = clientId === (await sha(db)) ? 'SHA' : 'MEH';
   const rel = `media/${code}/2026-10/${waId}.bin`;
   mkdirSync(join(dataDir, 'media', code, '2026-10'), { recursive: true });
   writeFileSync(join(dataDir, ...rel.split('/')), 'pdf-bytes');
@@ -100,7 +144,7 @@ async function saveOriginal(db: Db, dataDir: string, id: number, clientId: numbe
 }
 
 const driveState = (db: Db, id: number) =>
-  rawOf(db).prepare('SELECT drive_file_id AS fileId, drive_attempts AS attempts, drive_failed AS failed, drive_next_at AS nextAt FROM media WHERE id = ?').get(id);
+  row(db, 'SELECT drive_file_id AS fileId, drive_attempts AS attempts, drive_failed AS failed, drive_next_at AS nextAt FROM media WHERE id = ?', [id]);
 
 describe('DriveFileUploader', () => {
   it('uploads client files into WA Agent/Clients/<Client>/Files, creating the folders once', async () => {
@@ -136,7 +180,7 @@ describe('DriveFileUploader', () => {
     const u = await savedFile(db, dataDir, { waId: 'U', jid: '919811111111@s.whatsapp.net' });
     await up.run();
     expect(drive.created).toHaveLength(0);
-    await setRole(db, 1, '919811111111@s.whatsapp.net', 'client', 'ai');
+    await setRole(db, await sha(db), '919811111111@s.whatsapp.net', 'client', 'ai');
     await up.run();
     expect(drive.created).toHaveLength(1);
     expect((await getMedia(db, u))!.driveFileId).not.toBeNull();
@@ -147,7 +191,7 @@ describe('DriveFileUploader', () => {
     const both = '919811111111@s.whatsapp.net'; // team in Sharma's group, client in Mehta's
     const s = await savedFile(db, dataDir, { waId: 'S', role: 'client' });
     const t = await savedFile(db, dataDir, { waId: 'T', jid: both, role: 'team' });
-    const m = await savedFile(db, dataDir, { waId: 'M', clientId: 2, jid: both, role: 'client' });
+    const m = await savedFile(db, dataDir, { waId: 'M', clientId: await idOf(db, MEHTA.code), jid: both, role: 'client' });
     await up.run();
     await up.run();
     expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Files', 'Mehta Foods', 'Files']);
@@ -158,7 +202,7 @@ describe('DriveFileUploader', () => {
     ]);
     expect((await getMedia(db, s))!.driveFileId).toBe('file-4');
     expect((await getMedia(db, m))!.driveFileId).toBe('file-7');
-    expect(driveState(db, t)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null });
+    expect(await driveState(db, t)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null });
   });
 
   it('leaves out files whose original is not saved yet, and uploads them once saved', async () => {
@@ -167,7 +211,7 @@ describe('DriveFileUploader', () => {
     await up.run();
     expect(drive.createFileCalls).toBe(0);
     expect(drive.folders).toEqual([]);
-    expect(driveState(db, a)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null });
+    expect(await driveState(db, a)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null });
     await saveOriginal(db, dataDir, a, 1, 'A');
     await up.run();
     expect(drive.created).toHaveLength(1);
@@ -179,10 +223,10 @@ describe('DriveFileUploader', () => {
     await savedFile(db, dataDir, { waId: 'ME', jid: '919899999999@s.whatsapp.net', role: 'client', fromMe: true });
     await savedFile(db, dataDir, { waId: 'V', role: 'client', kind: 'voice', fileName: null, mimeType: 'audio/ogg' });
     const a = await savedFile(db, dataDir, { waId: 'A', role: 'client' });
-    rawOf(db).prepare('UPDATE clients SET active = 0 WHERE id = 1').run();
+    await db.run("UPDATE clients SET active = 0 WHERE code = 'SHA'");
     await up.run();
     expect(drive.created).toHaveLength(0);
-    rawOf(db).prepare('UPDATE clients SET active = 1 WHERE id = 1').run();
+    await db.run("UPDATE clients SET active = 1 WHERE code = 'SHA'");
     await up.run();
     expect(drive.created).toHaveLength(1);
     expect((await getMedia(db, a))!.driveFileId).toBe(drive.created[0]!.id);
@@ -202,16 +246,16 @@ describe('DriveFileUploader', () => {
   it('skips files whose message was deleted for everyone', async () => {
     const { db, dataDir, drive, up } = await setup();
     await savedFile(db, dataDir, { waId: 'R', role: 'client' });
-    await applyRevoke(db, 1, 'R');
+    await applyRevoke(db, await sha(db), 'R');
     await up.run();
     expect(drive.created).toHaveLength(0);
   });
 
   const OTHER = '919811111111@s.whatsapp.net';
   it.each([
-    ['its message is deleted for everyone', (db: Db) => applyRevoke(db, 1, 'B')],
-    ['its sender is no longer marked client', (db: Db) => setRole(db, 1, OTHER, 'team', 'human')],
-    ['its client is made inactive', (db: Db) => rawOf(db).prepare('UPDATE clients SET active = 0 WHERE id = 1').run()],
+    ['its message is deleted for everyone', async (db: Db) => applyRevoke(db, await sha(db), 'B')],
+    ['its sender is no longer marked client', async (db: Db) => setRole(db, await sha(db), OTHER, 'team', 'human')],
+    ['its client is made inactive', (db: Db) => db.run("UPDATE clients SET active = 0 WHERE code = 'SHA'")],
   ])('checks each file again just before uploading it: skips a file when %s during the pass, counting no attempt', async (_, change) => {
     const { db, dataDir, drive, up } = await setup();
     const a = await savedFile(db, dataDir, { waId: 'A', role: 'client' });
@@ -225,7 +269,7 @@ describe('DriveFileUploader', () => {
     await running;
     expect(drive.created).toHaveLength(1);
     expect((await getMedia(db, a))!.driveFileId).toBe(drive.created[0]!.id);
-    expect(driveState(db, b)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null });
+    expect(await driveState(db, b)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null });
   });
 
   it('waits until the publisher has created the root folder', async () => {
@@ -253,28 +297,28 @@ describe('DriveFileUploader', () => {
     const a = await savedFile(db, dataDir, { waId: 'A', role: 'client' });
     drive.failNext = 100;
     await up.run();
-    expect(driveState(db, a)).toEqual({ fileId: null, attempts: 1, failed: 0, nextAt: '2026-10-19T08:02:00.000Z' });
+    expect(await driveState(db, a)).toEqual({ fileId: null, attempts: 1, failed: 0, nextAt: '2026-10-19T08:02:00.000Z' });
     await up.run(); // not due yet
-    expect(driveState(db, a)).toMatchObject({ attempts: 1 });
+    expect(await driveState(db, a)).toMatchObject({ attempts: 1 });
     for (let i = 2; i <= UPLOAD_MAX_ATTEMPTS; i++) {
       clock.advance(7 * 3_600_000);
       await up.run();
       // After try i fails, the next one waits 2^i minutes; the last try gives up instead.
       const nextAt = i < UPLOAD_MAX_ATTEMPTS ? new Date(clock.now().getTime() + 2 ** i * 60_000).toISOString() : null;
-      expect(driveState(db, a)).toMatchObject({ attempts: i, failed: i < UPLOAD_MAX_ATTEMPTS ? 0 : 1, nextAt });
+      expect(await driveState(db, a)).toMatchObject({ attempts: i, failed: i < UPLOAD_MAX_ATTEMPTS ? 0 : 1, nextAt });
     }
     // A file that gave up is not tried again in later passes, however much time goes by.
     clock.advance(7 * 3_600_000);
     await up.run();
-    expect(driveState(db, a)).toEqual({ fileId: null, attempts: UPLOAD_MAX_ATTEMPTS, failed: 1, nextAt: null });
+    expect(await driveState(db, a)).toEqual({ fileId: null, attempts: UPLOAD_MAX_ATTEMPTS, failed: 1, nextAt: null });
     // A second file is still retrying: the reset leaves its count and next-try time alone (T13-20).
     const b = await savedFile(db, dataDir, { waId: 'B', role: 'client' });
     await up.run();
     const retrying = { fileId: null, attempts: 1, failed: 0, nextAt: new Date(clock.now().getTime() + 2 * 60_000).toISOString() };
-    expect(driveState(db, b)).toEqual(retrying);
+    expect(await driveState(db, b)).toEqual(retrying);
     expect(await resetUploadFailures(db)).toBe(1);
-    expect(driveState(db, a)).toMatchObject({ attempts: 0, failed: 0 });
-    expect(driveState(db, b)).toEqual(retrying);
+    expect(await driveState(db, a)).toMatchObject({ attempts: 0, failed: 0 });
+    expect(await driveState(db, b)).toEqual(retrying);
     drive.failNext = 0;
     await up.run();
     expect(drive.created).toHaveLength(1);
@@ -286,10 +330,10 @@ describe('DriveFileUploader', () => {
     const a = await savedFile(db, dataDir, { waId: 'A', role: 'client' });
     drive.failNext = 1;
     await up.run();
-    expect(driveState(db, a)).toEqual({ fileId: null, attempts: 1, failed: 0, nextAt: '2026-10-19T08:02:00.000Z' });
+    expect(await driveState(db, a)).toEqual({ fileId: null, attempts: 1, failed: 0, nextAt: '2026-10-19T08:02:00.000Z' });
     clock.advance(3 * 60_000);
     await up.run();
-    expect(driveState(db, a)).toMatchObject({ fileId: 'file-4', failed: 0, nextAt: null });
+    expect(await driveState(db, a)).toMatchObject({ fileId: 'file-4', failed: 0, nextAt: null });
   });
 
   it('pauses all uploads for 15 minutes when a failed try cannot be saved, instead of uploading the file again every tick', async () => {
@@ -303,7 +347,7 @@ describe('DriveFileUploader', () => {
     drive.failNext = 1;
     await up.run();
     expect(drive.createFileCalls).toBe(2); // B was tried and failed; the pass stopped before C
-    expect(driveState(db, b)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null }); // nothing could be saved
+    expect(await driveState(db, b)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null }); // nothing could be saved
     await ticks(clock, up, 14.5);
     expect(drive.createFileCalls).toBe(2);
     restore();
@@ -311,7 +355,7 @@ describe('DriveFileUploader', () => {
     expect(drive.createFileCalls).toBe(4);
     expect((await getMedia(db, b))!.driveFileId).not.toBeNull();
     expect((await getMedia(db, c))!.driveFileId).not.toBeNull();
-    expect(lines.find((l) => l.msg === 'file upload result could not be saved')).toMatchObject({ level: 40, mediaId: b, clientId: 1, step: 'save_failure' });
+    expect(lines.find((l) => l.msg === 'file upload result could not be saved')).toMatchObject({ level: 40, mediaId: b, clientId: await sha(db), step: 'save_failure' });
     expect(lines.find((l) => l.msg === 'file uploads to Drive paused')).toMatchObject({ level: 40, reason: 'ledger', until: '2026-10-19T08:15:00.000Z' });
     expect(JSON.stringify(lines)).not.toMatch(/brief|Sharma/);
   });
@@ -324,7 +368,7 @@ describe('DriveFileUploader', () => {
     let restore = failWritesTo(db, 'drive_file_id');
     await up.run();
     expect(drive.created.map((f) => f.id)).toEqual(['file-4']); // A reached Drive; the pass stopped before B
-    expect(driveState(db, a)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null }); // not counted as a failed try
+    expect(await driveState(db, a)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null }); // not counted as a failed try
     expect(onUploaded).not.toHaveBeenCalled();
     restore();
     await ticks(clock, up, 14.5);
@@ -341,8 +385,8 @@ describe('DriveFileUploader', () => {
     expect((await getMedia(db, b))!.driveFileId).toBe('file-5');
     expect(onUploaded).toHaveBeenCalledTimes(1);
     expect(lines.filter((l) => l.msg === 'file upload result could not be saved')).toMatchObject([
-      { level: 40, mediaId: a, clientId: 1, step: 'save_id' },
-      { level: 40, mediaId: a, clientId: 1, step: 'save_id' },
+      { level: 40, mediaId: a, clientId: await sha(db), step: 'save_id' },
+      { level: 40, mediaId: a, clientId: await sha(db), step: 'save_id' },
     ]);
     expect(lines.filter((l) => l.msg === 'file uploads to Drive paused').map((l) => l.reason)).toEqual(['ledger', 'ledger']);
   });
@@ -399,8 +443,8 @@ describe('DriveFileUploader', () => {
     drive.failNextWith = Object.assign(new Error('unauthorized'), { code: 401 });
     await up.run();
     // The whole uploader pauses instead (next test), so the file's row is left as it was.
-    expect(driveState(db, a)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null });
-    expect(driveState(db, b)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null });
+    expect(await driveState(db, a)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null });
+    expect(await driveState(db, b)).toEqual({ fileId: null, attempts: 0, failed: 0, nextAt: null });
     expect(drive.created).toHaveLength(0);
   });
 
@@ -473,7 +517,7 @@ describe('DriveFileUploader', () => {
     drive.missing.add('root-1');
     await up.run();
     expect(drive.folders).toEqual([]);
-    expect(driveState(db, a)).toEqual({ fileId: null, attempts: 1, failed: 0, nextAt: '2026-10-19T08:02:00.000Z' });
+    expect(await driveState(db, a)).toEqual({ fileId: null, attempts: 1, failed: 0, nextAt: '2026-10-19T08:02:00.000Z' });
   });
 
   it('moves up a folder level only when creating a folder fails: a missing-folder answer for the file in a fresh Files folder fails the try', async () => {
@@ -488,7 +532,7 @@ describe('DriveFileUploader', () => {
     expect(drive.createFileCalls - before).toBe(2);
     expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Files', 'Files']);
     expect(drive.folderParents).toEqual(['root-1', 'folder-1', 'folder-2', 'folder-2']);
-    expect(driveState(db, b)).toMatchObject({ fileId: null, attempts: 1, failed: 0 });
+    expect(await driveState(db, b)).toMatchObject({ fileId: null, attempts: 1, failed: 0 });
   });
 
   it('fails the try without rebuilding anything when the file is refused right after its folders were first made', async () => {
@@ -498,7 +542,7 @@ describe('DriveFileUploader', () => {
     await up.run();
     expect(drive.createFileCalls).toBe(1);
     expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Files']);
-    expect(driveState(db, a)).toMatchObject({ fileId: null, attempts: 1, failed: 0 });
+    expect(await driveState(db, a)).toMatchObject({ fileId: null, attempts: 1, failed: 0 });
   });
 
   it('sends Drive a clean MIME type: lower case, no parameters, and octet-stream for anything malformed', async () => {
@@ -513,13 +557,13 @@ describe('DriveFileUploader', () => {
 
   it('cleans the client folder name, and falls back to "Client <id>" when nothing is left', async () => {
     const first = await setup();
-    rawOf(first.db).prepare('UPDATE clients SET name = ? WHERE id = 1').run('A/B:\u202EC');
+    await first.db.run("UPDATE clients SET name = ? WHERE code = 'SHA'", ['A/B:\u202EC']);
     await savedFile(first.db, first.dataDir, { waId: 'A', role: 'client' });
     await first.up.run();
     expect(first.drive.folders).toEqual(['Clients', 'A_B_C', 'Files']);
 
     const second = await setup();
-    rawOf(second.db).prepare('UPDATE clients SET name = ? WHERE id = 1').run('\u0001\u200B\u202E');
+    await second.db.run("UPDATE clients SET name = ? WHERE code = 'SHA'", ['\u0001\u200B\u202E']);
     await savedFile(second.db, second.dataDir, { waId: 'A', role: 'client' });
     await second.up.run();
     expect(second.drive.folders).toEqual(['Clients', 'Client 1', 'Files']);
@@ -540,14 +584,12 @@ describe('DriveFileUploader', () => {
   });
 
   it('run() resolves even when the pass itself fails, and the next run() starts a new pass', async () => {
-    const { db, dataDir, drive, up } = await setup();
+    const { db, dataDir, drive, up, faults } = await setup();
     await savedFile(db, dataDir, { waId: 'A', role: 'client' });
-    const prepare = vi.spyOn(rawOf(db), 'prepare').mockImplementation(() => {
-      throw new Error('database unavailable');
-    });
+    faults.down = true; // every call of the uploader's database refused
     await expect(up.run()).resolves.toBeUndefined();
-    expect(prepare).toHaveBeenCalled();
-    prepare.mockRestore();
+    expect(faults.refused).toBeGreaterThan(0);
+    faults.down = false;
     await up.run();
     expect(drive.created).toHaveLength(1);
   });
@@ -564,7 +606,7 @@ describe('DriveFileUploader', () => {
     const a = await savedFile(db, dataDir, { waId: 'A', role: 'client' });
     unlinkSync(join(dataDir, 'media', 'SHA', '2026-10', 'A.bin'));
     await up.run();
-    expect(driveState(db, a)).toMatchObject({ failed: 1 });
+    expect(await driveState(db, a)).toMatchObject({ failed: 1 });
   });
 
   it('starts nothing after stop()', async () => {
