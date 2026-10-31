@@ -11,6 +11,7 @@ import { SqliteDb } from '../../src/store/engine/sqlite.ts';
 import { acquireLock } from '../../src/util/lock.ts';
 import { FakeTarget } from './fakeTarget.ts';
 import { fixture, type Fixture } from './fixture.ts';
+import { onSqlite } from '../helpers/db.ts';
 
 // export-to-sqlite against the SQLite stand-in for Postgres: a round trip SQLite -> "Postgres" -> new SQLite files gives
 // the same tables back, plus what was added on the Postgres side. The real-server version is copyPg.test.ts.
@@ -42,7 +43,9 @@ async function sums(file: string): Promise<Record<string, string>> {
   }
 }
 
-describe('export-to-sqlite', () => {
+// SQLite only (the describe): new SQLite files from a SQLite stand-in, so a test:pg run would only repeat it; the real
+// server is copyPg.test.ts.
+describe.runIf(onSqlite)('export-to-sqlite', () => {
   it('writes new files in a new folder that hold exactly what the original files held', async () => {
     const out = join(f.dir, 'from-postgres');
     const before = f.hashes();

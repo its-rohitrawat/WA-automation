@@ -1,21 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { openDb } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { AUDIT_DETAIL_MAX, AuditLog } from '../../src/web/audit.ts';
 import type { AuditKind } from '../../src/web/audit.ts';
+import { testDb } from '../helpers/db.ts';
 
 const T0 = '2026-10-27T10:00:00.000Z';
 const DAY = 86_400_000;
 
-function setup() {
-  const db = openDb(':memory:');
+/** The audit log on the test engine's store (a customer's own table on Postgres). */
+async function setup() {
+  const db = await testDb();
   const clock = manualClock(T0);
   return { db, clock, audit: new AuditLog(db, clock) };
 }
 
 describe('AuditLog.record', () => {
   it('stores one row with the clock time and gives it back newest first', async () => {
-    const { audit, clock } = setup();
+    const { audit, clock } = await setup();
     await audit.record({ actor: 'owner@example.com', event: 'Signed in', kind: 'auth', detail: 'Edge on Windows', requestId: 'a1b2c3d4e5f6' });
     clock.advance(60_000);
     await audit.record({ actor: 'agent', event: 'Tracker published', kind: 'ops', detail: '3 clients' });
@@ -26,7 +27,7 @@ describe('AuditLog.record', () => {
   });
 
   it('writes through a transaction handle, so the row rolls back with the change', async () => {
-    const { audit, db } = setup();
+    const { audit, db } = await setup();
     await expect(db.tx(async (q) => {
       await audit.record({ actor: 'agent', event: 'Kept?', kind: 'ops', detail: '' }, q);
       throw new Error('the change failed');
@@ -37,7 +38,7 @@ describe('AuditLog.record', () => {
   });
 
   it('keeps detail to one line of at most 300 characters', async () => {
-    const { audit } = setup();
+    const { audit } = await setup();
     await audit.record({ actor: 'agent', event: 'Note', kind: 'ops', detail: `line one\r\nline\ttwo ${'y'.repeat(400)}` });
     const [e] = await audit.list();
     expect(AUDIT_DETAIL_MAX).toBe(300);
@@ -47,7 +48,7 @@ describe('AuditLog.record', () => {
   });
 
   it('removes Unicode line breaks and bidi controls from actor, event and detail', async () => {
-    const { audit } = setup();
+    const { audit } = await setup();
     await audit.record({ actor: 'agent\u2028x', event: 'Group\u2029renamed', kind: 'config', detail: 'Acme\u2028Ltd\u0085next\u202egnp.exe \u2066a\u2069 \u200fb' });
     const [e] = await audit.list();
     expect(e!.actor).toBe('agent x');
@@ -57,13 +58,13 @@ describe('AuditLog.record', () => {
   });
 
   it('an empty detail is stored as an empty string', async () => {
-    const { audit } = setup();
+    const { audit } = await setup();
     await audit.record({ actor: 'agent', event: 'Restarted', kind: 'ops', detail: '' });
     expect((await audit.list())[0]!.detail).toBe('');
   });
 
   it('refuses an unknown kind, an empty actor or an empty event', async () => {
-    const { audit } = setup();
+    const { audit } = await setup();
     await expect(audit.record({ actor: 'agent', event: 'X', kind: 'nope' as AuditKind, detail: '' })).rejects.toThrow(/kind/);
     await expect(audit.record({ actor: ' ', event: 'X', kind: 'ops', detail: '' })).rejects.toThrow(/actor/);
     await expect(audit.record({ actor: 'agent', event: '', kind: 'ops', detail: '' })).rejects.toThrow(/event/);
@@ -71,7 +72,7 @@ describe('AuditLog.record', () => {
   });
 
   it('drops a request id that is not a plain short id', async () => {
-    const { audit } = setup();
+    const { audit } = await setup();
     await audit.record({ actor: 'agent', event: 'X', kind: 'ops', detail: '', requestId: 'Bearer abc.def ghi' });
     expect((await audit.list())[0]).not.toHaveProperty('requestId');
   });
@@ -79,7 +80,7 @@ describe('AuditLog.record', () => {
 
 describe('AuditLog.list', () => {
   async function filled() {
-    const s = setup();
+    const s = await setup();
     const kinds: AuditKind[] = ['auth', 'config', 'connection', 'task', 'meeting', 'ops'];
     for (let i = 0; i < 130; i++) {
       await s.audit.record({ actor: 'agent', event: `E${i}`, kind: kinds[i % kinds.length]!, detail: '' });
@@ -128,7 +129,7 @@ describe('AuditLog.list', () => {
 
 describe('AuditLog.purgeOlderThan', () => {
   it('removes entries older than 90 days by default and keeps the rest', async () => {
-    const { audit, clock } = setup();
+    const { audit, clock } = await setup();
     await audit.record({ actor: 'agent', event: 'old', kind: 'ops', detail: '' });
     clock.advance(DAY);
     await audit.record({ actor: 'agent', event: 'edge', kind: 'ops', detail: '' });
@@ -140,7 +141,7 @@ describe('AuditLog.purgeOlderThan', () => {
   });
 
   it('takes another number of days', async () => {
-    const { audit, clock } = setup();
+    const { audit, clock } = await setup();
     await audit.record({ actor: 'agent', event: 'a', kind: 'ops', detail: '' });
     clock.advance(8 * DAY);
     await audit.record({ actor: 'agent', event: 'b', kind: 'ops', detail: '' });

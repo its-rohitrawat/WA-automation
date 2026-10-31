@@ -3,6 +3,7 @@ import { copyPlan, SESSION_PLANS, SKIPPED } from '../../src/migrate/plan.ts';
 import { ensurePlatformSchema } from '../../src/platform/schema.ts';
 import { openDb, type Db } from '../../src/store/db.ts';
 import { SqliteDb } from '../../src/store/engine/sqlite.ts';
+import { onSqlite } from '../helpers/db.ts';
 
 let db: Db;
 beforeEach(async () => {
@@ -16,7 +17,8 @@ afterEach(async () => {
 const trackerTables = async (q: Db) =>
   (await q.all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")).map((t) => t.name);
 
-describe('the copy plan', () => {
+// SQLite only (each describe): the plan is read from the founder's SQLite files, so a test:pg run would only repeat it.
+describe.runIf(onSqlite)('the copy plan', () => {
   it('covers every table in a migrated tracker.db: copied, or skipped with a reason', async () => {
     const plan = await copyPlan(db);
     const planned = plan.map((p) => p.table);
@@ -66,7 +68,7 @@ describe('the copy plan', () => {
   });
 });
 
-describe('the WhatsApp session files', () => {
+describe.runIf(onSqlite)('the WhatsApp session files', () => {
   it('go to wa_auth: each phone, live and backup, keys and values only', () => {
     expect(SESSION_PLANS.map((p) => [p.source, p.table, p.fixed.phone, p.fixed.slot])).toEqual([
       ['session', 'auth', 'founder', 'live'],

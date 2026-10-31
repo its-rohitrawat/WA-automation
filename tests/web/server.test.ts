@@ -11,12 +11,13 @@ import { CONTENT_SECURITY_POLICY, HttpError, readJson, sendJson } from '../../sr
 import { createWebServer, PUBLIC_DIR, SESSION_PURGE_EVERY_MS, STOP_GRACE_MS } from '../../src/web/server.ts';
 import { startDashboard } from '../../src/web/start.ts';
 import { SessionStore } from '../../src/web/sessions.ts';
-import { openDb } from '../../src/store/db.ts';
 import type { Db } from '../../src/store/db.ts';
 import type { WebServer } from '../../src/web/server.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger } from '../../src/util/logger.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import type { Sql } from '../../src/store/engine/types.ts';
+import { onSqlite, testDb } from '../helpers/db.ts';
+import { platformTestDb } from '../helpers/platformTestDb.ts';
 
 const SECRET = 'OUTSIDE-SECRET-7f3a';
 const INDEX = '<!doctype html><title>test shell</title><p>shell</p>';
@@ -55,7 +56,7 @@ const roots: string[] = [];
 const dbs: Db[] = [];
 afterEach(async () => {
   for (const s of servers.splice(0)) await s.stop();
-  for (const d of dbs.splice(0)) rawOf(d).close();
+  for (const d of dbs.splice(0)) await d.close();
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
 });
 
@@ -743,15 +744,34 @@ describe('startDashboard', () => {
       DASHBOARD_GOOGLE_CLIENT_SECRET: 'client-secret',
     };
   }
-  function memDb() {
-    const db = openDb(':memory:');
-    dbs.push(db);
-    return db;
+  /**
+   * The dashboard's stores, as the app keeps them: on SQLite one store for the audit rows and the sessions (one
+   * transaction for both); on Postgres the customer's own Db for the audit rows and the platform Db for the sessions,
+   * this file's own, set back before each boot (the tests count the sessions). failAudit(): from now on the audit row
+   * cannot be written, on either engine (the app's roles cannot create a trigger on Postgres).
+   */
+  async function stores(): Promise<{ db: Db; platformDb: Db; failAudit: () => void }> {
+    const store = await testDb();
+    dbs.push(store);
+    const down = { on: false };
+    const check = (sql: string) => {
+      if (down.on && /^\s*INSERT INTO audit_log/i.test(sql)) throw new Error('audit down');
+    };
+    const wrap = (q: Sql): Sql => ({
+      get: async (sql, x) => (check(sql), q.get(sql, x)),
+      all: async (sql, x) => (check(sql), q.all(sql, x)),
+      run: async (sql, x) => (check(sql), q.run(sql, x)),
+      exec: (sql) => q.exec(sql),
+    }) as Sql;
+    const db = { ...wrap(store), engine: store.engine, tx: (fn) => store.tx((q) => fn(wrap(q))), close: () => store.close() } as Db;
+    const platformDb = onSqlite ? db : (await platformTestDb()).db;
+    return { db, platformDb, failAudit: () => void (down.on = true) };
   }
+  const sessionCount = async (db: Db) => (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM web_sessions'))!.n;
 
   it('logs the address and returns the running server', async () => {
     const c = capture();
-    const web = await startDashboard({ env: dashEnv(0), db: memDb(), log: c.log, control: {}, google: fakeGoogle });
+    const web = await startDashboard({ env: dashEnv(0), ...(await stores()), log: c.log, control: {}, google: fakeGoogle });
     expect(web).toBeDefined();
     servers.push(web!);
     const port = web!.address()!.port;
@@ -764,7 +784,7 @@ describe('startDashboard', () => {
     try {
       const port = (blocker.address() as AddressInfo).port;
       const c = capture();
-      const web = await startDashboard({ env: dashEnv(port), db: memDb(), log: c.log, control: {}, google: fakeGoogle });
+      const web = await startDashboard({ env: dashEnv(port), ...(await stores()), log: c.log, control: {}, google: fakeGoogle });
       expect(web).toBeUndefined();
       const errors = c.records().filter((l) => l.level === 50);
       expect(errors).toHaveLength(1);
@@ -778,15 +798,15 @@ describe('startDashboard', () => {
   });
 
   it('removes expired owner sessions once at start (and serves the sign-in routes)', async () => {
-    const db = memDb();
+    const { db, platformDb } = await stores();
     const clock = manualClock('2026-10-27T10:00:00Z');
-    const store = new SessionStore(db, clock);
+    const store = new SessionStore(platformDb, clock);
     await store.create('owner@example.com');
     clock.advance(8 * 24 * 3_600_000);
     const c = capture();
-    const web = await startDashboard({ env: dashEnv(0), db, log: c.log, control: {}, clock, google: fakeGoogle });
+    const web = await startDashboard({ env: dashEnv(0), db, platformDb, log: c.log, control: {}, clock, google: fakeGoogle });
     servers.push(web!);
-    expect((rawOf(db).prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
+    expect(await sessionCount(platformDb)).toBe(0);
     const port = web!.address()!.port;
     const r = await fetch(`http://127.0.0.1:${port}/dashboard/auth/login`, { redirect: 'manual' });
     expect(r.status).toBe(302);
@@ -815,13 +835,14 @@ describe('startDashboard', () => {
     });
     await new Promise<void>((r) => ep.listen(0, '127.0.0.1', r));
     endpoints.push(ep);
-    const db = memDb();
+    const st = await stores();
     let nonce: string | undefined;
     const c = capture();
     const env = { ...dashEnv(0), ...(o.publicUrl === undefined ? {} : { DASHBOARD_PUBLIC_URL: o.publicUrl }) };
     const web = await startDashboard({
       env,
-      db,
+      db: st.db,
+      platformDb: st.platformDb,
       log: c.log,
       control: {},
       google: {
@@ -845,7 +866,8 @@ describe('startDashboard', () => {
       return r;
     };
     const post = (path: string, headers: Record<string, string> = {}) => rawRequest('POST', port, path, headers);
-    return { db, port, forms, get, post, ...c };
+    // db: the sessions' store, which the tests count.
+    return { db: st.platformDb, failAudit: st.failAudit, port, forms, get, post, ...c };
   }
   const cookiesOf = (r: { headers: Record<string, string | string[] | undefined> }) => {
     const v = r.headers['set-cookie'];
@@ -880,7 +902,7 @@ describe('startDashboard', () => {
     expect(b.forms[0]!.get('client_id')).toBe('client-id');
     expect(b.forms[0]!.get('client_secret')).toBe('client-secret');
     expect(b.forms[0]!.get('redirect_uri')).toBe('https://dash.example.com/dashboard/auth/callback');
-    expect((rawOf(b.db).prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(1);
+    expect(await sessionCount(b.db)).toBe(1);
     expect(b.out()).not.toContain('client-secret');
 
     // The guard startDashboard builds: the owner list lets this owner in, and the public origin passes the CSRF check.
@@ -893,25 +915,25 @@ describe('startDashboard', () => {
       b.post('/dashboard/auth/logout', { ...host, cookie: `wa_session=${sid}`, origin, 'x-csrf-token': me.csrf });
     const evil = await logout('https://evil.com');
     expect(evil.status).toBe(403);
-    expect((rawOf(b.db).prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(1);
+    expect(await sessionCount(b.db)).toBe(1);
     const out = await logout('https://dash.example.com');
     expect(out.status).toBe(204);
     const cleared = cookiesOf(out).find((c) => c.startsWith('wa_session='));
     expect(cleared).toMatch(/^wa_session=;/);
     expect(cleared).toContain('Max-Age=0');
     expect(cleared).toMatch(/; Secure$/);
-    expect((rawOf(b.db).prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
+    expect(await sessionCount(b.db)).toBe(0);
     expect((await b.get('/dashboard/api/me', { ...host, cookie: `wa_session=${sid}` })).status).toBe(401);
   });
 
   it('a sign-in whose audit row cannot be written leaves no session (one database transaction)', async () => {
     const b = await bootSignIn();
-    rawOf(b.db).exec(`CREATE TRIGGER t_fail_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'audit down'); END`);
+    b.failAudit();
     const { cb } = await fullSignIn(b);
     expect(cb.status).toBe(302);
     expect(cb.headers.location).toBe('/dashboard?error=signin');
     expect(cookiesOf(cb).some((c) => c.startsWith('wa_session='))).toBe(false);
-    expect((rawOf(b.db).prepare('SELECT COUNT(*) AS n FROM web_sessions').get() as { n: number }).n).toBe(0);
+    expect(await sessionCount(b.db)).toBe(0);
   });
 
   it('sign-in is limited to 10 a minute per client: the 11th goes to the sign-in error page', async () => {
@@ -930,7 +952,7 @@ describe('startDashboard', () => {
   ])('%s: the dashboard does not start (and says so without values)', async (_what, patch) => {
     const c = capture();
     const env = { ...dashEnv(0), ...patch };
-    const web = await startDashboard({ env, db: memDb(), log: c.log, control: {}, google: fakeGoogle });
+    const web = await startDashboard({ env, ...(await stores()), log: c.log, control: {}, google: fakeGoogle });
     if (web !== undefined) servers.push(web);
     expect(web).toBeUndefined();
     expect(c.out()).toContain('dashboard not started');

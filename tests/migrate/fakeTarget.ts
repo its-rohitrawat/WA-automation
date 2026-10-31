@@ -4,6 +4,7 @@ import { ensureFounderTenant } from '../../src/platform/store.ts';
 import { openDb, type Db } from '../../src/store/db.ts';
 import type { Sql } from '../../src/store/engine/types.ts';
 
+// SQLite by design: the stand-in for Postgres the flow tests copy into (the real server is copyPg.test.ts).
 // A stand-in for Postgres, so the copy's whole flow (dry run, apply, a mismatch, the refusals) is tested with no
 // server: an in-memory SQLite with the same tables (the tracker schema, the platform tables, and wa_auth as Postgres has
 // it), the founder's row seeded as Postgres's P1 seeds it, and a transaction that rolls back on a throw. It keeps no

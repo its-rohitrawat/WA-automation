@@ -8,6 +8,7 @@ import { SqliteDb } from '../../src/store/engine/sqlite.ts';
 import { acquireLock } from '../../src/util/lock.ts';
 import { FakeTarget } from './fakeTarget.ts';
 import { fixture, type Fixture } from './fixture.ts';
+import { onSqlite } from '../helpers/db.ts';
 
 // The copy's whole flow against a SQLite stand-in for Postgres (fakeTarget.ts): no server needed. The same flow on a
 // real Postgres is tests/migrate/copyPg.test.ts, under npm run test:pg.
@@ -27,7 +28,9 @@ const run = (o: Partial<Parameters<typeof copyToPostgres>[0]> = {}) => copyToPos
 const refusal = (p: Promise<unknown>) => p.then(() => { throw new Error('expected a refusal'); }, (e: unknown) => e as Error);
 const table = (r: CopyReport, name: string) => r.tables.find((t) => t.table === name)!;
 
-describe('migrate-to-postgres: the dry run (the default)', () => {
+// SQLite only (each describe): the copy's source is the founder's SQLite files and its target here a SQLite stand-in, so a
+// test:pg run would only repeat it; the real server is copyPg.test.ts.
+describe.runIf(onSqlite)('migrate-to-postgres: the dry run (the default)', () => {
   it('copies and checks every table inside one transaction, then rolls it all back', async () => {
     const before = f.hashes();
     const r = await run();
@@ -57,7 +60,7 @@ describe('migrate-to-postgres: the dry run (the default)', () => {
   });
 });
 
-describe('migrate-to-postgres --apply', () => {
+describe.runIf(onSqlite)('migrate-to-postgres --apply', () => {
   it('makes a checked backup first, copies from it, keeps every id, moves the sequences on, and commits', async () => {
     const before = f.hashes();
     const backupDir = join(f.dir, 'backup');
@@ -110,7 +113,7 @@ describe('migrate-to-postgres --apply', () => {
   });
 });
 
-describe('what stops the copy before it writes anything', () => {
+describe.runIf(onSqlite)('what stops the copy before it writes anything', () => {
   it('the agent is running (its instance lock is held)', async () => {
     const lock = await acquireLock(f.data);
     try {
@@ -138,7 +141,7 @@ describe('what stops the copy before it writes anything', () => {
   });
 });
 
-describe('a mismatch', () => {
+describe.runIf(onSqlite)('a mismatch', () => {
   it('rolls the whole copy back, even with --apply, names the table, and writes nothing', async () => {
     target.beforeVerify = async (q) => {
       await q.run("UPDATE messages SET text = 'changed in transit' WHERE wa_id = 'WA2'");

@@ -15,6 +15,7 @@ import { insertMessage } from '../../src/store/messages.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { MEHTA, SHARMA } from '../helpers/db.ts';
 
+// SQLite by design: the founder's SQLite data folder the copy reads from (on both runs).
 // A data folder as the agent leaves it, for the copy tool's tests: tracker.db (migrated, with clients, messages, a file
 // row with a blob, kv, the platform tables with the founder, a customer and an invite), session.db (live and backup
 // keys) and, when asked, sender-session.db. Every value is made up.

@@ -2,9 +2,9 @@ import { Writable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import { UptimeLog } from '../../src/health/uptimeLog.ts';
 import { uptimeReport, UptimeRobotClient, type FetchLike } from '../../src/health/uptimeRobot.ts';
-import { openDb } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger } from '../../src/util/logger.ts';
+import { testDb } from '../helpers/db.ts';
 
 // A made-up key: the tests check it never leaves except in the request body to UptimeRobot.
 const KEY = 'ur-test-key-0000-do-not-use';
@@ -130,7 +130,7 @@ describe('UptimeRobotClient', () => {
 
 describe('uptimeReport', () => {
   async function agentLog() {
-    const db = openDb(':memory:');
+    const db = await testDb();
     const clock = manualClock('2026-10-20T00:00:00.000+05:30');
     const log = new UptimeLog(db, clock);
     await log.start(true);
@@ -230,7 +230,7 @@ describe('UptimeRobotClient review fixes', () => {
 
 describe('uptimeReport review fixes', () => {
   it('joins overlapping UptimeRobot outages and leaves out those before the window', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     const clock = manualClock(NOW);
     const log = new UptimeLog(db, clock);
     const hour = at('2026-10-20T03:00:00.000Z');

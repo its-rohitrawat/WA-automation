@@ -1,21 +1,22 @@
 import { describe, expect, it, vi } from 'vitest';
 import { dailyDown, dayOutages, downIntervals, outageText, uptimeRatio, UptimeLog } from '../../src/health/uptimeLog.ts';
-import { openDb, type Db } from '../../src/store/db.ts';
+import type { Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { testDb } from '../helpers/db.ts';
 
-const rows = (db: Db) => rawOf(db).prepare('SELECT at, up FROM uptime_log ORDER BY id').all();
+const rows = (db: Db) => db.all('SELECT at, up FROM uptime_log ORDER BY id');
 const ist = (date: string, hm: string) => new Date(`${date}T${hm}:00.000+05:30`).getTime();
 
-function setup(start = '2026-10-19T00:00:00.000Z') {
-  const db = openDb(':memory:');
+/** The uptime log on the test engine's store (a customer's own table on Postgres). */
+async function setup(start = '2026-10-19T00:00:00.000Z') {
+  const db = await testDb();
   const clock = manualClock(start);
   return { db, clock, log: new UptimeLog(db, clock) };
 }
 
 describe('UptimeLog recording', () => {
   it('writes one row at start, then only when up changes, and a down row at a clean stop', async () => {
-    const t = setup();
+    const t = await setup();
     await t.log.start(true);
     t.clock.advance(30_000);
     await t.log.tick(true);
@@ -28,7 +29,7 @@ describe('UptimeLog recording', () => {
     t.clock.advance(30_000);
     await t.log.stop();
     await t.log.stop();
-    expect(rows(t.db)).toEqual([
+    expect(await rows(t.db)).toEqual([
       { at: '2026-10-19T00:00:00.000Z', up: 1 },
       { at: '2026-10-19T00:01:00.000Z', up: 0 },
       { at: '2026-10-19T00:01:30.000Z', up: 1 },
@@ -37,47 +38,47 @@ describe('UptimeLog recording', () => {
   });
 
   it('writes the start row even when the state matches the last one before the restart', async () => {
-    const t = setup();
+    const t = await setup();
     await t.log.start(true);
     const again = new UptimeLog(t.db, t.clock);
     t.clock.advance(60_000);
     await again.start(true);
     await again.tick(true);
-    expect(rows(t.db)).toHaveLength(2);
+    expect(await rows(t.db)).toHaveLength(2);
   });
 
   it('a tick before start counts as a change from nothing', async () => {
-    const t = setup();
+    const t = await setup();
     await t.log.tick(false);
-    expect(rows(t.db)).toEqual([{ at: '2026-10-19T00:00:00.000Z', up: 0 }]);
+    expect(await rows(t.db)).toEqual([{ at: '2026-10-19T00:00:00.000Z', up: 0 }]);
   });
 });
 
 describe('UptimeLog writes (S1.5)', () => {
   it('a tick that runs while the start row is still being written adds no second row', async () => {
-    const { db, log } = setup();
+    const { db, log } = await setup();
     const started = log.start(true);
     const ticked = log.tick(true); // not waiting for start(), as main.ts may not
     await Promise.all([started, ticked]);
-    expect(rows(db)).toHaveLength(1);
+    expect(await rows(db)).toHaveLength(1);
   });
 
   it('a write that fails is tried again at the next tick', async () => {
-    const { db, log } = setup();
+    const { db, log } = await setup();
     await log.start(true);
     const spy = vi.spyOn(db, 'run').mockRejectedValueOnce(new Error('database is locked'));
     await expect(log.tick(false)).rejects.toThrow('database is locked');
     spy.mockRestore();
     await log.tick(false);
-    expect(rows(db).map((r) => (r as { up: number }).up)).toEqual([1, 0]);
+    expect((await rows(db)).map((r) => (r as { up: number }).up)).toEqual([1, 0]);
   });
 
   it('open() reads the last row, so a still-down tick adds nothing', async () => {
-    const { db, clock, log } = setup();
+    const { db, clock, log } = await setup();
     await log.start(false);
     const again = await UptimeLog.open(db, clock);
     await again.tick(false); // still down: nothing new
-    expect(rows(db)).toHaveLength(1);
+    expect(await rows(db)).toHaveLength(1);
   });
 });
 
@@ -131,7 +132,7 @@ describe('uptimeRatio', () => {
 
 describe('UptimeLog reading', () => {
   it('gives daily minutes, outages newest first and ratios from what it recorded', async () => {
-    const t = setup('2026-10-19T00:00:00.000+05:30');
+    const t = await setup('2026-10-19T00:00:00.000+05:30');
     await t.log.start(true);
     t.clock.set('2026-10-19T10:00:00.000+05:30');
     await t.log.tick(false);
@@ -157,7 +158,7 @@ describe('UptimeLog reading', () => {
   });
 
   it('reads the state from before a window to know an outage that began earlier', async () => {
-    const t = setup('2026-09-01T00:00:00.000Z');
+    const t = await setup('2026-09-01T00:00:00.000Z');
     await t.log.start(false); // down since 1 Sep
     t.clock.set('2026-10-20T00:00:00.000Z');
     expect(await t.log.outages(30)).toEqual([{ start: '2026-09-01T00:00:00.000Z', end: null, minutes: 70_560, reason: null }]);
@@ -165,7 +166,7 @@ describe('UptimeLog reading', () => {
   });
 
   it('has null ratios and no outages before anything was recorded', async () => {
-    const t = setup();
+    const t = await setup();
     expect(await t.log.ratios()).toEqual({ d1: null, d7: null, d30: null });
     expect(await t.log.outages(30)).toEqual([]);
     expect(await t.log.daily(1)).toEqual([{ day: '2026-10-19', downMinutes: 0, longestMinutes: 0 }]);
@@ -174,7 +175,7 @@ describe('UptimeLog reading', () => {
 
 describe('UptimeLog review fixes', () => {
   it('an outage that began before the window starts at its first down row, across a stop and a down start', async () => {
-    const t = setup('2026-09-01T00:00:00.000Z');
+    const t = await setup('2026-09-01T00:00:00.000Z');
     await t.log.start(true);
     t.clock.set('2026-09-02T00:00:00.000Z');
     await t.log.tick(false);
@@ -195,16 +196,16 @@ describe('UptimeLog review fixes', () => {
   });
 
   it('purges old rows but keeps what says the state at the cutoff and where its outage began', async () => {
-    const t = setup('2026-07-01T00:00:00.000Z');
+    const t = await setup('2026-07-01T00:00:00.000Z');
     await t.log.start(true);
     t.clock.set('2026-07-02T00:00:00.000Z');
     await t.log.tick(false);
     t.clock.set('2026-07-03T00:00:00.000Z');
-    new UptimeLog(t.db, t.clock).start(false);
+    await new UptimeLog(t.db, t.clock).start(false);
     t.clock.set('2026-10-19T00:00:00.000Z');
     await t.log.tick(true);
     expect(await t.log.purgeOlderThan(30)).toBe(1); // the first up row
-    expect(rows(t.db)).toEqual([
+    expect(await rows(t.db)).toEqual([
       { at: '2026-07-02T00:00:00.000Z', up: 0 },
       { at: '2026-07-03T00:00:00.000Z', up: 0 },
       { at: '2026-10-19T00:00:00.000Z', up: 1 },
@@ -217,7 +218,7 @@ describe('UptimeLog review fixes', () => {
 
 describe('UptimeLog reasons (migration v10)', () => {
   it('stores the code on the down row only, and shows it in plain words', async () => {
-    const t = setup();
+    const t = await setup();
     await t.log.start(true);
     t.clock.advance(60_000);
     await t.log.tick(false, 'whatsapp_logged_out');
@@ -229,7 +230,7 @@ describe('UptimeLog reasons (migration v10)', () => {
     await t.log.tick(true);
     t.clock.advance(60_000);
     await t.log.stop();
-    expect(rawOf(t.db).prepare('SELECT up, reason FROM uptime_log ORDER BY id').all()).toEqual([
+    expect(await t.db.all('SELECT up, reason FROM uptime_log ORDER BY id')).toEqual([
       { up: 1, reason: null }, { up: 0, reason: 'whatsapp_logged_out' }, { up: 1, reason: null }, { up: 0, reason: null }, { up: 1, reason: null },
       { up: 0, reason: 'stopped' },
     ]);
@@ -237,38 +238,38 @@ describe('UptimeLog reasons (migration v10)', () => {
   });
 
   it('an outage spanning a stop keeps the reason of its first down row', async () => {
-    const t = setup();
+    const t = await setup();
     await t.log.start(true);
     t.clock.advance(60_000);
     await t.log.tick(false, 'tracker_failing');
     await t.log.stop(); // already down: no row
     t.clock.advance(60_000);
-    new UptimeLog(t.db, t.clock).start(false, 'google_signin');
+    await new UptimeLog(t.db, t.clock).start(false, 'google_signin');
     expect(await t.log.outages(1)).toMatchObject([{ reason: 'Tracker updates kept failing', end: null }]);
   });
 
   it('a row from before v10, with no reason, reads as none', async () => {
-    const t = setup();
-    rawOf(t.db).prepare("INSERT INTO uptime_log (at, up) VALUES ('2026-10-18T23:00:00.000Z', 0)").run();
+    const t = await setup();
+    await t.db.run("INSERT INTO uptime_log (at, up) VALUES ('2026-10-18T23:00:00.000Z', 0)");
     expect((await t.log.outages(1))[0]!.reason).toBeNull();
   });
 });
 
 describe('UptimeLog reasons, review round 1', () => {
   it('an outage that began before the window keeps the reason of its first down row', async () => {
-    const t = setup('2026-09-01T00:00:00.000Z');
+    const t = await setup('2026-09-01T00:00:00.000Z');
     await t.log.start(true);
     t.clock.set('2026-09-02T00:00:00.000Z');
     await t.log.tick(false, 'whatsapp_forbidden');
     t.clock.set('2026-09-03T00:00:00.000Z');
-    new UptimeLog(t.db, t.clock).start(false, 'google_signin');
+    await new UptimeLog(t.db, t.clock).start(false, 'google_signin');
     t.clock.set('2026-10-20T00:00:00.000Z');
     expect(await t.log.outages(30)).toMatchObject([{ start: '2026-09-02T00:00:00.000Z', reason: "WhatsApp refused the founder's number" }]);
   });
 
   it('a stored code this version does not know reads as none', async () => {
-    const t = setup();
-    rawOf(t.db).prepare("INSERT INTO uptime_log (at, up, reason) VALUES ('2026-10-18T23:00:00.000Z', 0, 'some_future_code')").run();
+    const t = await setup();
+    await t.db.run("INSERT INTO uptime_log (at, up, reason) VALUES ('2026-10-18T23:00:00.000Z', 0, 'some_future_code')");
     expect((await t.log.outages(1))[0]!.reason).toBeNull();
   });
 });
@@ -308,7 +309,7 @@ describe('outageText: the exact times of an outage, IST (owner request, 29 Oct 2
   });
 
   it("the agent's log gives the same times from its stored rows (no new column needed)", async () => {
-    const { db, clock, log } = setup(new Date(ist('2026-10-29', '02:00')).toISOString());
+    const { db, clock, log } = await setup(new Date(ist('2026-10-29', '02:00')).toISOString());
     await log.start(true);
     clock.set(new Date(ist('2026-10-29', '02:14')).toISOString());
     await log.tick(false, 'whatsapp_disconnected');
@@ -319,6 +320,6 @@ describe('outageText: the exact times of an outage, IST (owner request, 29 Oct 2
     clock.set(new Date(now).toISOString());
     const texts = (await log.outages(1)).map((o) => outageText(Date.parse(o.start), o.end === null ? null : Date.parse(o.end), now));
     expect(texts).toEqual(['Still off since 09:12 (2 h 48 min)', 'Off from 02:14 to 06:33 (4 h 19 min)']);
-    expect(rows(db)).toHaveLength(4);
+    expect(await rows(db)).toHaveLength(4);
   });
 });
