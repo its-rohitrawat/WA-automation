@@ -447,10 +447,12 @@ describe('MediaQueue never retries a file in a loop', () => {
     const onSettled = vi.fn();
     const queue = new MediaQueue({ db, clock: manualClock('2026-10-19T08:00:00Z'), log: silentLogger(), processor, concurrency: 2, onSettled });
     queue.kick();
+    await queue.drain(5_000); // D's write is a real round trip on Postgres: wait for the files in flight, not only the fills
     await settle(queue);
     expect(calls).toEqual([a, b, c, d]); // more stuck files than slots ahead of D still do not keep D waiting
     expect(queue.active).toBe(0);
     queue.kick(); // the next tick
+    await queue.drain(5_000);
     await settle(queue);
     expect(calls).toEqual([a, b, c, d, a, b, c]);
     expect(queue.active).toBe(0);

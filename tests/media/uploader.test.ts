@@ -264,7 +264,7 @@ describe('DriveFileUploader', () => {
     drive.gate = new Promise<void>((r) => (release = r));
     const running = up.run();
     await vi.waitFor(() => expect(drive.createFileCalls).toBe(1)); // A is uploading; B was read as a candidate
-    change(db);
+    await change(db); // done before A's upload ends, so the check before B's upload sees it
     release();
     await running;
     expect(drive.created).toHaveLength(1);
@@ -566,7 +566,7 @@ describe('DriveFileUploader', () => {
     await second.db.run("UPDATE clients SET name = ? WHERE code = 'SHA'", ['\u0001\u200B\u202E']);
     await savedFile(second.db, second.dataDir, { waId: 'A', role: 'client' });
     await second.up.run();
-    expect(second.drive.folders).toEqual(['Clients', 'Client 1', 'Files']);
+    expect(second.drive.folders).toEqual(['Clients', `Client ${await sha(second.db)}`, 'Files']);
   });
 
   it('uploads at most batchSize files per pass (5 by default)', async () => {
