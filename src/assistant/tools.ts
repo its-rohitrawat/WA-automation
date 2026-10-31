@@ -249,13 +249,15 @@ const HAS_NUMBER = /(?:\d[\s().+-]*){7,}/;
 async function searchMessages(db: Db, i: z.infer<typeof INPUTS.search_messages>, now: Date): Promise<unknown> {
   const since = new Date(now.getTime() - (i.days ?? 30) * 86_400_000).toISOString();
   const like = `%${i.text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+  // The client filter only when one is asked for: Postgres cannot type a bare parameter in `@client IS NULL`.
+  const client = i.client === undefined ? '' : ' AND c.code = @client';
   const rows = await db.all<{ at: string; text: string; fromMe: number; name: string | null; client: string }>(
     `SELECT m.ts AS at, m.text, m.from_me AS fromMe, p.name AS name, c.code AS client
       FROM messages m JOIN clients c ON c.id = m.client_id
       LEFT JOIN people p ON p.client_id = m.client_id AND p.jid = m.sender_jid
-      WHERE c.active = 1 AND m.revoked = 0 AND m.ts >= @since AND m.text LIKE @like ESCAPE '\\' AND (@client IS NULL OR c.code = @client)
+      WHERE c.active = 1 AND m.revoked = 0 AND m.ts >= @since AND m.text LIKE @like ESCAPE '\\'${client}
       ORDER BY m.ts DESC, m.id DESC LIMIT @limit`,
-    { since, like, client: i.client ?? null, limit: i.limit ?? 10 },
+    { since, like, limit: i.limit ?? 10, ...(i.client === undefined ? {} : { client: i.client }) },
   );
   return {
     found: rows.length,

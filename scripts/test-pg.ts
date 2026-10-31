@@ -2,7 +2,10 @@
 // set up by db-bootstrap's and db-migrate's own code, then vitest pointed at it through TEST_ variables
 // (tests/helpers/pg.ts). The passwords are made here at run time and travel only in environment variables: never on a
 // command line, in a file or in a log. The image is never downloaded here (docker pull postgres:17 is its own step), and
-// the container is stopped at the end but never deleted: removing it is the owner's call (docker rm wa-test-pg).
+// the container is stopped at the end but never deleted. The next run reuses it (only one with this script's label):
+// it is started, and inside it every database and role from the last run is dropped and the superuser gets a new
+// password, through psql on stdin with the container's local trust. Nothing is written outside the container, and no
+// run ever removes it: that stays the owner's call (docker rm wa-test-pg).
 import { spawnSync, type SpawnSyncOptions } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -36,30 +39,64 @@ function fail(message: string): never {
   process.exit(2);
 }
 
-if (!docker(['info', '--format', '{{.ServerVersion}}']).ok) fail('the Docker engine is not running: start Docker Desktop, then run this again');
-if (docker(['container', 'inspect', NAME]).ok) {
-  fail(`a container named ${NAME} is already there (an earlier run). Nothing was changed. Once you are sure it is not needed: docker rm -f ${NAME}`);
+/** SQL run inside the container as its superuser (local trust), sent on stdin: never on a command line or in a file. */
+function psql(sql: string): { ok: boolean; out: string } {
+  return docker(['exec', '-i', NAME, 'psql', '-U', 'postgres', '-d', 'postgres', '-X', '-q', '-tA', '-v', 'ON_ERROR_STOP=1'], {
+    input: sql, stdio: ['pipe', 'pipe', 'pipe'],
+  });
 }
-if (!docker(['image', 'inspect', IMAGE]).ok) fail(`${IMAGE} is not downloaded. Download it first (about 650 MB on disk): docker pull ${IMAGE}`);
 
-// -e POSTGRES_PASSWORD with no value: docker reads it from its own environment, so it is not on the command line.
-// 200 connections: each test file keeps a few (tests/helpers/pg.ts), times the parallel workers, plus the tests that
-// open their own pools on purpose; the server's default 100 ran out in the first run.
-const started = docker(
-  ['run', '-d', '--name', NAME, '--label', 'wa-agent=test-pg', '-p', `127.0.0.1:${PORT}:5432`, '-e', 'POSTGRES_PASSWORD', IMAGE, '-c', 'max_connections=200'],
-  { env: { ...process.env, POSTGRES_PASSWORD: pw.postgres } },
-);
-if (!started.ok) fail(`${NAME} did not start (is port ${PORT} free? set TEST_PG_PORT to use another)`);
+/** The real server answers on TCP (the image first starts a temporary one for its own setup). */
+async function waitReady(): Promise<void> {
+  for (let i = 0; i < 120; i++) {
+    if (docker(['exec', NAME, 'pg_isready', '-q', '-h', '127.0.0.1', '-U', 'postgres']).ok) return;
+    await sleep(500);
+  }
+  throw new Error(`${NAME} did not become ready within a minute`);
+}
+
+/** The server's connections: each test file keeps a few (tests/helpers/pg.ts), times the parallel workers; 100 ran out. */
+const MAX_CONNECTIONS = 200;
+
+if (!docker(['info', '--format', '{{.ServerVersion}}']).ok) fail('the Docker engine is not running: start Docker Desktop, then run this again');
+const existing = docker(['container', 'inspect', NAME, '--format', '{{index .Config.Labels "wa-agent"}} {{.State.Running}} {{(index (index .HostConfig.PortBindings "5432/tcp") 0).HostIp}}:{{(index (index .HostConfig.PortBindings "5432/tcp") 0).HostPort}}']);
+let reused = false;
+if (existing.ok) {
+  const [label, running, binding] = existing.out.split(' ');
+  // Only this script's own container is reused: anything else of that name is left alone.
+  if (label !== 'test-pg') fail(`a container named ${NAME} is there, but it was not made by this script (no wa-agent=test-pg label). Nothing was changed.`);
+  if (binding !== `127.0.0.1:${PORT}`) fail(`${NAME} listens on ${binding ?? 'another address'}, not 127.0.0.1:${PORT}. Nothing was changed.`);
+  if (running !== 'true' && !docker(['start', NAME]).ok) fail(`${NAME} is there but did not start. Nothing was changed.`);
+  reused = true;
+} else {
+  if (!docker(['image', 'inspect', IMAGE]).ok) fail(`${IMAGE} is not downloaded. Download it first (about 650 MB on disk): docker pull ${IMAGE}`);
+  // -e POSTGRES_PASSWORD with no value: docker reads it from its own environment, so it is not on the command line.
+  const started = docker(
+    ['run', '-d', '--name', NAME, '--label', 'wa-agent=test-pg', '-p', `127.0.0.1:${PORT}:5432`, '-e', 'POSTGRES_PASSWORD', IMAGE, '-c', `max_connections=${MAX_CONNECTIONS}`],
+    { env: { ...process.env, POSTGRES_PASSWORD: pw.postgres } },
+  );
+  if (!started.ok) fail(`${NAME} did not start (is port ${PORT} free? set TEST_PG_PORT to use another)`);
+}
 
 let code = 1;
 try {
-  // The image starts a temporary server for its own setup first: wait for the real one, on TCP.
-  let ready = false;
-  for (let i = 0; i < 120 && !ready; i++) {
-    ready = docker(['exec', NAME, 'pg_isready', '-q', '-h', '127.0.0.1', '-U', 'postgres']).ok;
-    if (!ready) await sleep(500);
+  await waitReady();
+  if (reused) {
+    // Back to a fresh server: every database and role from the last run goes, and the superuser gets this run's password.
+    // A container made before the 200-connection setting gets it here (it takes effect on a restart).
+    const reset = psql(`
+SELECT format('DROP DATABASE %I WITH (FORCE)', datname) FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres' \\gexec
+SELECT format('DROP ROLE %I', rolname) FROM pg_roles WHERE rolname <> 'postgres' AND rolname NOT LIKE 'pg\\_%' \\gexec
+ALTER ROLE postgres PASSWORD '${pw.postgres}';
+`);
+    if (!reset.ok) throw new Error(`${NAME} could not be reset for this run`);
+    const max = Number(psql('SHOW max_connections;').out);
+    if (!(max >= MAX_CONNECTIONS)) {
+      if (!psql(`ALTER SYSTEM SET max_connections = ${MAX_CONNECTIONS};`).ok || !docker(['restart', NAME]).ok) throw new Error(`${NAME} could not be given ${MAX_CONNECTIONS} connections`);
+      await waitReady();
+    }
+    console.log(`test:pg: reusing ${NAME}, reset for this run`);
   }
-  if (!ready) throw new Error(`${NAME} did not become ready within a minute`);
 
   const out = (line: string) => console.log(`test:pg: ${line}`);
   await bootstrap({ connect: (database) => connectRetrying(url('postgres', database)), passwords: pw, dbName: DB, out });
@@ -87,7 +124,7 @@ try {
 } finally {
   const stopped = docker(['stop', NAME]).ok;
   console.log(stopped
-    ? `test:pg: ${NAME} is stopped and kept (not deleted). Remove it once you are sure: docker rm ${NAME}`
+    ? `test:pg: ${NAME} is stopped and kept (not deleted); the next npm run test:pg reuses it. Removing it is the owner's call: docker rm ${NAME}`
     : `test:pg: ${NAME} could not be stopped: check docker ps`);
 }
 process.exit(code);

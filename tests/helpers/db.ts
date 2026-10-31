@@ -1,6 +1,7 @@
 import type { ClientConfig } from '../../src/config/groups.ts';
-import { syncClients } from '../../src/store/clients.ts';
+import { getClientByCode, syncClients } from '../../src/store/clients.ts';
 import { openDb, type Db } from '../../src/store/db.ts';
+import type { Params } from '../../src/store/engine/types.ts';
 
 const PHASES = ['Discovery', 'Design', 'Development', 'Review', 'Launch'];
 
@@ -34,4 +35,27 @@ export async function seededDb(): Promise<Db> {
   const db = await testDb();
   await syncClients(db, [SHARMA, MEHTA]);
   return db;
+}
+
+/** A client's real id, by its code: never assume 1 or 2 (on Postgres the ids are shared by every customer). */
+export async function idOf(db: Db, code: string): Promise<number> {
+  const c = await getClientByCode(db, code);
+  if (!c) throw new Error(`no client with code ${code}`);
+  return c.id;
+}
+
+/** seededDb, with Sharma's and Mehta's real ids (1 and 2 on SQLite, anything on Postgres). */
+export async function seeded(): Promise<{ db: Db; ids: { sharma: number; mehta: number } }> {
+  const db = await seededDb();
+  return { db, ids: { sharma: await idOf(db, SHARMA.code), mehta: await idOf(db, MEHTA.code) } };
+}
+
+/** A test's read of the rows, through the Db on either engine (in place of rawOf(db).prepare(sql).all()). */
+export function rows<T = Record<string, unknown>>(db: Db, sql: string, params?: Params): Promise<T[]> {
+  return db.all<T>(sql, params);
+}
+
+/** A test's read of one row, through the Db on either engine (in place of rawOf(db).prepare(sql).get()). */
+export function row<T = Record<string, unknown>>(db: Db, sql: string, params?: Params): Promise<T | undefined> {
+  return db.get<T>(sql, params);
 }
