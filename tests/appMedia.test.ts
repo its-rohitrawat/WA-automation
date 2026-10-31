@@ -28,7 +28,7 @@ import { AllowList } from '../src/wa/allowlist.ts';
 import { openSessionDb, useEncryptedAuthState } from '../src/wa/authState.ts';
 import { WhatsAppGateway } from '../src/wa/gateway.ts';
 import { FakeAi } from './helpers/ai.ts';
-import { idOf, MEHTA, row, seededDb, SHARMA } from './helpers/db.ts';
+import { idOf, MEHTA, onSqlite, row, seededDb, SHARMA } from './helpers/db.ts';
 import { FakeDrive } from './helpers/fakeDrive.ts';
 import { tinyPdf } from './helpers/files.ts';
 import { FakeMediaAi } from './helpers/mediaAi.ts';
@@ -103,6 +103,61 @@ async function nthMedia(db: Db, n: number) {
   return id === undefined ? undefined : getMedia(db, id);
 }
 
+// Kept before any test fakes the timers: advance() waits on real I/O with these.
+const realImmediate = setImmediate;
+const realSetTimeout = setTimeout;
+
+/** The app's statements and transactions in flight (setup's Db counts them). */
+const inFlight = new Set<Promise<unknown>>();
+const track = <T>(p: Promise<T>): Promise<T> => {
+  const done = p.finally(() => void inFlight.delete(done));
+  inFlight.add(done);
+  return done;
+};
+
+/**
+ * Resolves once the app's database has nothing in flight: two real turns of the event loop in a row with no statement
+ * running (a statement's continuation starts the next one within the same turn). Waits at most 5 s for a statement.
+ */
+async function dbQuiet(): Promise<void> {
+  const turn = () => new Promise<void>((r) => realImmediate(r));
+  for (let i = 0; i < 200; i++) {
+    await turn();
+    if (inFlight.size > 0) {
+      await Promise.race([Promise.allSettled([...inFlight]), new Promise((r) => realSetTimeout(r, 5_000))]);
+      continue;
+    }
+    await turn();
+    if (inFlight.size === 0) return;
+  }
+}
+
+/**
+ * vi.advanceTimersByTimeAsync with the app's database work done between timers. Fake time does not wait for I/O: on
+ * Postgres a statement is a real round trip, so a timer's work (and the timers that work sets) would otherwise land
+ * after the time it was due. Moves timer by timer up to `ms` (a timer of its own marks the end), waiting for the
+ * database after each.
+ */
+async function advance(ms: number): Promise<void> {
+  const end = Date.now() + ms;
+  let reached = ms <= 0;
+  if (!reached) setTimeout(() => void (reached = true), ms);
+  while (!reached) {
+    await vi.advanceTimersToNextTimerAsync();
+    await dbQuiet();
+  }
+  await vi.advanceTimersByTimeAsync(Math.max(0, end - Date.now()));
+  await dbQuiet();
+}
+
+/**
+ * No timer left behind. On Postgres the driver's pool keeps idle timers of its own (fake ones here), so the count is the
+ * app's alone only on SQLite.
+ */
+const expectNoTimers = () => {
+  if (onSqlite) expect(vi.getTimerCount()).toBe(0);
+};
+
 /** A statement the app's database refuses from now on, as a full or locked database would. */
 type Refusal = (sql: string, params: unknown) => boolean;
 const refusalsOf = new WeakMap<Db, Refusal[]>();
@@ -114,9 +169,9 @@ function refusing(db: Db, refusals: Refusal[]): Db {
       if (prop === 'run' || prop === 'get' || prop === 'all') {
         const fn = Reflect.get(target, prop) as (sql: string, params?: unknown) => Promise<unknown>;
         return (sql: string, params?: unknown) =>
-          (refusals.some((r) => r(sql, params)) ? Promise.reject(new Error('database refused')) : fn.call(target, sql, params));
+          track(refusals.some((r) => r(sql, params)) ? Promise.reject(new Error('database refused')) : fn.call(target, sql, params));
       }
-      if (prop === 'tx') return <T>(fn: (q: Sql) => Promise<T>) => target.tx((q) => fn(wrap(q)));
+      if (prop === 'tx') return <T>(fn: (q: Sql) => Promise<T>) => track(target.tx((q) => fn(wrap(q))));
       const v = Reflect.get(target, prop) as unknown;
       return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
     },
@@ -190,7 +245,7 @@ async function stopApp(app: { stop(): Promise<void> }): Promise<void> {
   const p = app.stop().then(() => {
     done = true;
   });
-  for (let i = 0; i < 30 && !done; i++) await vi.advanceTimersByTimeAsync(1_000);
+  for (let i = 0; i < 30 && !done; i++) await advance(1_000);
   await p;
 }
 
@@ -273,12 +328,12 @@ describe('app with shared files', () => {
     // Amendment 15d: saved as <message id>-<media id>.<ext>.
     expect(existsSync(join(dataDir, 'media', 'SHA', '2026-10', `IMG1-${await mediaIdAt(db)}.jpg`))).toBe(true);
     expect((await nthMedia(db, 1))?.localPath).toBe(`media/SHA/2026-10/IMG1-${await mediaIdAt(db)}.jpg`);
-    await vi.advanceTimersByTimeAsync(240_000);
+    await advance(240_000);
     expect(ai.calls).toHaveLength(1);
     expect(ai.calls[0]!.user).toContain(': new banner {image: A blue homepage banner. Visible text: SALE 50%}');
     for (const name of SEND_METHODS) expect(sock[name]).not.toHaveBeenCalled();
     await stopApp(app);
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('uploads a client member’s file into Clients/<Client>/Files', async () => {
@@ -288,7 +343,7 @@ describe('app with shared files', () => {
     await app.mediaQueue!.drain(60_000); // the file's run has ended
     expect((await nthMedia(db, 1))?.status).toBe('done');
     await setRole(db, SHA, SHARMA_PN, 'client', 'human');
-    await vi.advanceTimersByTimeAsync(61_000);
+    await advance(61_000);
     await vi.waitFor(async () => expect((await nthMedia(db, 1))?.driveFileId).toBeTruthy());
     expect(drive.folders).toEqual(['WA Agent', 'Clients', 'Sharma Interiors', 'Files']);
     expect(drive.created.map((f) => f.name)).toContain(`image-2026-10-10-1330-${await mediaIdAt(db)}.jpg`);
@@ -300,7 +355,7 @@ describe('app with shared files', () => {
     shareImage(sock);
     await settled();
     expect(await nthMedia(db, 1)).toMatchObject({ status: 'unavailable', errorCode: 'not_downloaded' });
-    await vi.advanceTimersByTimeAsync(240_000);
+    await advance(240_000);
     expect(ai.calls[0]!.user).toContain(': new banner {image, could not be downloaded}');
     expect(app.mediaQueue).toBeUndefined();
     await stopApp(app);
@@ -355,13 +410,13 @@ describe('app with shared files', () => {
     const p = app.stop().then(() => {
       stopped = true;
     });
-    await vi.advanceTimersByTimeAsync(5_000);
+    await advance(5_000);
     expect(stopped).toBe(false);
     g.release();
-    for (let i = 0; i < 30 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 30 && !stopped; i++) await advance(1_000);
     await p;
     expect((await nthMedia(db, 1))?.status).toBe('done');
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('stop() gives up on a file read that never finishes once drainMs is over', async () => {
@@ -380,10 +435,10 @@ describe('app with shared files', () => {
     const p = app.stop().then(() => {
       stopped = true;
     });
-    await vi.advanceTimersByTimeAsync(4_000);
+    await advance(4_000);
     expect(stopped).toBe(false);
     // drainMs, then at most 10 s for the last publish and 5 s for WhatsApp: well inside WinSW's stoptimeout.
-    for (let i = 0; i < 12 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 12 && !stopped; i++) await advance(1_000);
     expect(stopped).toBe(true);
     await p;
     expect((await nthMedia(db, 1))?.status).toBe('pending');
@@ -417,7 +472,7 @@ describe('app with shared files', () => {
     // Saving the download is real file I/O: wait for it, not for fake time.
     await vi.waitFor(async () => expect((await nthMedia(db, 1))?.status).toBe('done'));
     await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0));
-    for (let i = 0; i < 30 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 30 && !stopped; i++) await advance(1_000);
     await p;
     // The second file is downloaded after the next start, not during the shutdown.
     expect(fetcher).toHaveBeenCalledTimes(1);
@@ -435,7 +490,7 @@ describe('app with shared files', () => {
     const { db, app, sock } = await setup({ media: { fetcher } });
     for (const id of ['IMG1', 'IMG2', 'IMG3', 'IMG4']) shareImage(sock, id);
     await three.promise; // three downloads have started
-    await vi.advanceTimersByTimeAsync(1_000);
+    await advance(1_000);
     expect(fetcher).toHaveBeenCalledTimes(3);
     expect(app.mediaQueue!.active).toBe(3);
     g.release();
@@ -452,7 +507,7 @@ describe('app with shared files', () => {
       return NOTHING_READ;
     });
     const { db, drive, app, sock } = await setup({ media: { extract } });
-    await vi.advanceTimersByTimeAsync(1_000); // the first publish creates the Drive root folder
+    await advance(1_000); // the first publish creates the Drive root folder
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('T1', 'hello')] });
     await settled();
     await setRole(db, SHA, SHARMA_PN, 'client', 'human');
@@ -464,7 +519,7 @@ describe('app with shared files', () => {
       stopped = true;
     });
     g.release();
-    for (let i = 0; i < 30 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 30 && !stopped; i++) await advance(1_000);
     await p;
     expect(await nthMedia(db, 1)).toMatchObject({ status: 'done', driveFileId: null });
     expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']);
@@ -501,7 +556,7 @@ describe('app media spend (review round 1)', () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(ai.calls).toHaveLength(0);
     expect(await ledger(db)).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(30_000);
+    await advance(30_000);
     // The tick's media refresh and its snapshot write run on after the timer fires: wait for the snapshot they write.
     await vi.waitFor(async () => {
       const snapshot = (await readHealthSnapshot(db))!;
@@ -531,9 +586,9 @@ describe('app media spend (review round 1)', () => {
     const p = app.stop().then(() => {
       stopped = true;
     });
-    await vi.advanceTimersByTimeAsync(4_000);
+    await advance(4_000);
     expect(stopped).toBe(false);
-    for (let i = 0; i < 12 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 12 && !stopped; i++) await advance(1_000);
     expect(stopped).toBe(true);
     await p;
     const booked = await ledger(db);
@@ -565,9 +620,9 @@ describe('app media wiring (15g)', () => {
     await settled();
     await vi.waitFor(async () => expect(await nthMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'http_503' }));
     // Retried a minute later, on the first tick after that.
-    await vi.advanceTimersByTimeAsync(55_000);
+    await advance(55_000);
     expect(fetcher).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(40_000);
+    await advance(40_000);
     await vi.waitFor(async () => expect((await nthMedia(db, 1))?.status).toBe('done'));
     expect(fetcher).toHaveBeenCalledTimes(2);
     await stopApp(app);
@@ -582,16 +637,16 @@ describe('app media wiring (15g)', () => {
     shareImage(sock);
     await settled();
     await vi.waitFor(async () => expect(await nthMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable', attempts: 0 }));
-    await vi.advanceTimersByTimeAsync(241_000);
+    await advance(241_000);
     await expect(run.mock.results[0]!.value).resolves.toEqual({ status: 'waiting' });
     expect(ai.calls).toHaveLength(0);
     // A deferred file never settles, so nothing else wakes the client: the tick does, once the 30-minute wait is over.
-    await vi.advanceTimersByTimeAsync(36 * MINUTE);
+    await advance(36 * MINUTE);
     expect(ai.calls).toHaveLength(1);
     expect(ai.calls[0]!.user).toContain(': new banner {image, still being read}');
     await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0));
     expect(await nthMedia(db, 1)).toMatchObject({ status: 'pending', errorCode: 'ai_unavailable' });
-    await vi.advanceTimersByTimeAsync(30_000);
+    await advance(30_000);
     expect((await readHealthSnapshot(db))!.media).toEqual({ pending: 1, stale: 1, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0 });
     expect((await readHealthSnapshot(db))!.line).toEqual({ ok: false, text: '⚠️ 1 shared file waiting over 30 minutes to be read. See docs/SETUP.md.' });
     await vi.waitFor(() => expect(app.mediaQueue!.active).toBe(0));
@@ -604,7 +659,7 @@ describe('app media wiring (15g)', () => {
     await settled();
     const notify = vi.spyOn(app.debouncer, 'notify');
     await vi.waitFor(async () => expect((await nthMedia(db, 1))?.status).toBe('done'));
-    expect(notify).toHaveBeenCalledWith(1);
+    expect(notify).toHaveBeenCalledWith(SHA);
     await stopApp(app);
   });
 
@@ -625,12 +680,12 @@ describe('app media wiring (15g)', () => {
         await markProcessed(db, [(await messageRowId(db, SHA, 'IMG0'))!], '2026-10-19T06:56:00.000Z');
       },
     });
-    await vi.advanceTimersByTimeAsync(1_000); // the first publish
+    await advance(1_000); // the first publish
     await vi.waitFor(() => expect(extract).toHaveBeenCalled(), SLOW_IO);
-    await vi.advanceTimersByTimeAsync(3_000); // any publish the start scheduled is done
+    await advance(3_000); // any publish the start scheduled is done
     expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']);
     const published = drive.updated.length;
-    await vi.advanceTimersByTimeAsync(3_000);
+    await advance(3_000);
     expect(drive.updated).toHaveLength(published); // nothing else is publishing
     g.release();
     await vi.waitFor(() => expect(drive.updated).toHaveLength(published + 1), SLOW_IO);
@@ -644,7 +699,7 @@ describe('app media wiring (15g)', () => {
 
   it('a finished file from a client member is uploaded straight away, without waiting for a tick', async () => {
     const { db, drive, app, sock } = await setup();
-    await vi.advanceTimersByTimeAsync(1_000); // the first publish creates the Drive root folder
+    await advance(1_000); // the first publish creates the Drive root folder
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('T1', 'hello')] });
     await settled();
     await setRole(db, SHA, SHARMA_PN, 'client', 'human');
@@ -660,10 +715,10 @@ describe('app media wiring (15g)', () => {
     const run = vi.spyOn(DriveFileUploader.prototype, 'run');
     const stop = vi.spyOn(DriveFileUploader.prototype, 'stop');
     const { drive, app } = await setup();
-    await vi.advanceTimersByTimeAsync(0); // the start tick's pass, which waits for the start's upload reset
+    await advance(0); // the start tick's pass, which waits for the start's upload reset
     const afterStart = run.mock.calls.length;
     expect(drive.uploads).toBe(0);
-    await vi.advanceTimersByTimeAsync(1_000);
+    await advance(1_000);
     expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']);
     expect(run.mock.calls.length).toBe(afterStart + 1);
     expect(stop).not.toHaveBeenCalled();
@@ -698,15 +753,15 @@ describe('app media wiring (15g)', () => {
       stopped = true;
       idWhenStopped = (await getMedia(db, id))?.driveFileId;
     });
-    await vi.advanceTimersByTimeAsync(8_000);
+    await advance(8_000);
     expect(stopped).toBe(false);
     upload.release();
-    for (let i = 0; i < 30 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 30 && !stopped; i++) await advance(1_000);
     await p;
     // Without the wait, the file would reach Drive with no saved id and be uploaded again after the restart.
     expect(idWhenStopped).toBeTruthy();
     expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx', 'brief.pdf']);
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('stop() gives up on a file upload that never finishes after 10 s', async () => {
@@ -718,13 +773,13 @@ describe('app media wiring (15g)', () => {
     const p = app.stop().then(() => {
       stopped = true;
     });
-    await vi.advanceTimersByTimeAsync(9_000);
+    await advance(9_000);
     expect(stopped).toBe(false);
-    await vi.advanceTimersByTimeAsync(2_000);
+    await advance(2_000);
     expect(stopped).toBe(true);
     await p;
     expect((await getMedia(db, id))?.driveFileId).toBeNull();
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
     upload.release(); // the late answer still saves its id (the database is open in this test)
     await vi.waitFor(async () => expect((await getMedia(db, id))?.driveFileId).toBeTruthy(), SLOW_IO);
   });
@@ -745,11 +800,11 @@ describe('app media wiring (15g)', () => {
     expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']);
     // Due again 2 minutes later. Nothing else happens meanwhile: no message, no file, no publish.
     const { nextAt } = (await row<{ nextAt: string }>(db, 'SELECT drive_next_at AS nextAt FROM media'))!;
-    await vi.advanceTimersByTimeAsync(Date.parse(nextAt) - Date.now() - 1_000);
+    await advance(Date.parse(nextAt) - Date.now() - 1_000);
     expect((await nthMedia(db, 1))?.driveFileId).toBeNull();
     expect(drive.uploads).toBe(1);
     // The first tick after that retries it.
-    await vi.advanceTimersByTimeAsync(31_000);
+    await advance(31_000);
     await vi.waitFor(async () => expect((await nthMedia(db, 1))?.driveFileId).toBeTruthy());
     expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx', 'brief.pdf']);
     // onUploaded schedules a publish, so Files received gets the Drive link without waiting for another change.
@@ -762,7 +817,7 @@ describe('app media wiring (15g)', () => {
       prepare: async (db, dataDir) => markUploadFailed(db, await storedClientDoc(db, dataDir), { failed: true, nextAt: null }),
     });
     expect(await row(db, 'SELECT drive_failed, drive_attempts FROM media')).toEqual({ drive_failed: 0, drive_attempts: 0 });
-    await vi.advanceTimersByTimeAsync(1_000);
+    await advance(1_000);
     await vi.waitFor(async () => expect((await nthMedia(db, 1))?.driveFileId).toBeTruthy());
     expect(drive.created.map((f) => f.name)).toContain('brief.pdf');
     await stopApp(app);
@@ -781,7 +836,7 @@ describe('app media wiring (15g)', () => {
         vi.spyOn(db, 'run').mockImplementation((sql, p) => (/SET drive_failed = 0/.test(sql) ? Promise.reject(new Error('reset failed')) : run(sql, p)));
       },
     });
-    await vi.advanceTimersByTimeAsync(1_000);
+    await advance(1_000);
     await vi.waitFor(async () => expect((await getMedia(db, id))?.driveFileId).toBeTruthy());
     expect(drive.created.map((f) => f.name)).toContain('brief.pdf');
     expect(lines.some((l) => l.includes('upload reset failed'))).toBe(true);
@@ -827,19 +882,19 @@ describe('app spend holds (Task 15 review round 3)', () => {
     // Another client writes. Its run is due four minutes later, while the scan is still being read.
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('M1', 'please send the quote', { group: MEHTA.groupId })] });
     await settled();
-    await vi.advanceTimersByTimeAsync(241_000);
+    await advance(241_000);
     const mehta = run.mock.calls.findIndex(([clientId]) => clientId === 2);
     expect(mehta).toBeGreaterThanOrEqual(0);
     await expect(run.mock.results[mehta]!.value).resolves.toEqual({ status: 'busy' });
     expect(ai.calls).toHaveLength(0);
     expect(app.health.line()).toEqual({ ok: true, text: '✅ Connected · waiting for new messages' });
-    await vi.advanceTimersByTimeAsync(30_000); // a tick saves the health report
+    await advance(30_000); // a tick saves the health report
     expect((await readHealthSnapshot(db))!.line.text).not.toBe(SPEND_LINE);
     // The read finishes and frees its hold.
     g.release();
     await vi.waitFor(async () => expect((await nthMedia(db, 1))?.status).toBe('done'));
     expect(app.health.line().text).not.toBe(SPEND_LINE);
-    await vi.advanceTimersByTimeAsync(10 * MINUTE);
+    await advance(10 * MINUTE);
     expect(ai.calls.filter((c) => c.user.includes('please send the quote'))).toHaveLength(1);
     expect(await listUnprocessed(db, MEH)).toEqual([]);
     expect(app.health.line().text).not.toBe(SPEND_LINE);
@@ -873,7 +928,7 @@ describe('app start time (15a, 15f)', () => {
     const { db, ai, app } = await setup({ startedAt, media: { sealer, fetcher }, prepare: (db) => storedImage(db, sealer, minutesBefore(120).toISOString()) });
     await fetching.promise; // the download has started
     expect((await readHealthSnapshot(db))!.media).toEqual({ pending: 1, stale: expected.stale, spendCap: 0, failedRecent: 0, uploadFailed: 0, sttRefused: 0, voiceFailed: 0 });
-    await vi.advanceTimersByTimeAsync(241_000);
+    await advance(241_000);
     if (expected.blocks) expect(ai.calls).toHaveLength(0);
     else expect(ai.calls[0]!.user).toContain(': old banner {image, still being read}');
     g.release();
@@ -958,9 +1013,9 @@ describe('app health line with fresh file counts (final review)', () => {
       },
     });
     const bodies = workbookUploads(drive);
-    await vi.advanceTimersByTimeAsync(1_000); // the first publish
+    await advance(1_000); // the first publish
     await vi.waitFor(() => expect(extract).toHaveBeenCalled(), SLOW_IO);
-    await vi.advanceTimersByTimeAsync(3_000); // any publish the start scheduled is done
+    await advance(3_000); // any publish the start scheduled is done
     expect(bodies.length).toBeGreaterThan(0);
     const published = bodies.length;
     g.release();
@@ -992,7 +1047,7 @@ describe('app health line with fresh file counts (final review)', () => {
     expect(app.health.workbookLine().text).toBe(STALE_LINE);
 
     await app.reloadClients([MEHTA]); // Sharma, whose file it is, is removed
-    await vi.advanceTimersByTimeAsync(0); // the file counts are read again before the publish is asked for
+    await advance(0); // the file counts are read again before the publish is asked for
     expect(app.health.workbookLine()).toEqual({ ok: true, text: '✅ Connected · waiting for new messages' });
     expect((await readHealthSnapshot(db))!.media).toMatchObject({ pending: 0, stale: 0 });
     await stopApp(app);
@@ -1017,10 +1072,10 @@ describe('app health line with fresh file counts (final review)', () => {
     const { drive, app } = await setup();
     const first = holdFirstWorkbook(drive, { fail: false });
     await vi.waitFor(() => expect(first.tries.n).toBe(1)); // the start's publish is in flight
-    await vi.advanceTimersByTimeAsync(30_000); // a tick: the line is the one being published
+    await advance(30_000); // a tick: the line is the one being published
     first.release();
     await vi.waitFor(() => expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']));
-    await vi.advanceTimersByTimeAsync(5 * MINUTE); // more ticks, nothing changed
+    await advance(5 * MINUTE); // more ticks, nothing changed
     expect(drive.uploads).toBe(1);
     await stopApp(app);
   });
@@ -1029,11 +1084,11 @@ describe('app health line with fresh file counts (final review)', () => {
     const { drive, app } = await setup();
     const first = holdFirstWorkbook(drive, { fail: true });
     await vi.waitFor(() => expect(first.tries.n).toBe(1));
-    await vi.advanceTimersByTimeAsync(30_000); // a tick during the publish asks for nothing more
+    await advance(30_000); // a tick during the publish asks for nothing more
     first.release(); // the upload fails
-    await vi.advanceTimersByTimeAsync(0);
+    await advance(0);
     expect(drive.created).toEqual([]);
-    await vi.advanceTimersByTimeAsync(MINUTE); // the publisher's own retry, after its first backoff
+    await advance(MINUTE); // the publisher's own retry, after its first backoff
     await vi.waitFor(() => expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']));
     expect(first.tries.n).toBe(2);
     await stopApp(app);
@@ -1122,7 +1177,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     expect(voice.signals[0]!.aborted).toBe(false);
     expect(voice.priced).toBe(0);
     expect(await ledger(db)).toEqual([]); // free: no spend row
-    await vi.advanceTimersByTimeAsync(240_000);
+    await advance(240_000);
     expect(ai.calls).toHaveLength(1);
     expect(ai.calls[0]!.user).toContain('{voice note, 0:14, transcript: payment bhej diya}');
     expect((await ledger(db)).map((r) => r.kind)).toEqual(['ai']); // only the reconcile
@@ -1145,7 +1200,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     shareVoice(sock);
     await settled();
     await vi.waitFor(async () => expect(await nthMedia(db, 1)).toMatchObject({ status: 'done', text: null, note: null }), SLOW_IO);
-    await vi.advanceTimersByTimeAsync(240_000);
+    await advance(240_000);
     expect(ai.calls[0]!.user).toContain('{voice note, 0:14, not transcribed}');
     await stopApp(app);
   });
@@ -1168,7 +1223,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     it('with no transcriber (VOICE_STT_PROVIDER none), it holds up nothing, as in 2a', async () => {
       const { db, ai, app, fetcher, release } = await stuckVoice(null);
       await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce(), SLOW_IO);
-      await vi.advanceTimersByTimeAsync(240_000);
+      await advance(240_000);
       expect(await nthMedia(db, 1)).toMatchObject({ status: 'pending' });
       expect(ai.calls).toHaveLength(1);
       expect(ai.calls[0]!.user).toContain('{voice note, 0:14, being transcribed}');
@@ -1180,12 +1235,12 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     it('with the local engine, it holds up its message for 30 minutes', async () => {
       const { db, ai, app, fetcher, release } = await stuckVoice(new FakeLocalVoiceTranscriber());
       await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce(), SLOW_IO);
-      await vi.advanceTimersByTimeAsync(240_000);
+      await advance(240_000);
       expect(ai.calls).toHaveLength(0);
-      await vi.advanceTimersByTimeAsync(20 * MINUTE);
+      await advance(20 * MINUTE);
       expect(await nthMedia(db, 1)).toMatchObject({ status: 'pending' });
       expect(ai.calls).toHaveLength(0);
-      await vi.advanceTimersByTimeAsync(12 * MINUTE); // past 30 minutes, the next tick and the quiet time
+      await advance(12 * MINUTE); // past 30 minutes, the next tick and the quiet time
       expect(ai.calls).toHaveLength(1);
       expect(ai.calls[0]!.user).toContain('{voice note, 0:14, being transcribed}');
       release();
@@ -1213,9 +1268,9 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     shareVoice(sock);
     await settled();
     await vi.waitFor(() => deferredAfter(db, () => voice.transcribed, 1, MINUTE, 'local_timeout'), SLOW_IO);
-    await vi.advanceTimersByTimeAsync(2 * MINUTE);
+    await advance(2 * MINUTE);
     await vi.waitFor(() => deferredAfter(db, () => voice.transcribed, 2, 5 * MINUTE, 'local_timeout'), SLOW_IO);
-    await vi.advanceTimersByTimeAsync(6 * MINUTE);
+    await advance(6 * MINUTE);
     await vi.waitFor(async () => expect(await nthMedia(db, 1)).toMatchObject({ status: 'failed', attempts: 3, errorCode: 'local_timeout' }), SLOW_IO);
     expect(voice.transcribed).toBe(3);
     await stopApp(app);
@@ -1229,7 +1284,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     shareVoice(sock);
     await settled();
     await vi.waitFor(() => deferredAfter(db, () => voice.transcribed, 1, MINUTE, 'local_exit_1'), SLOW_IO);
-    await vi.advanceTimersByTimeAsync(2 * MINUTE);
+    await advance(2 * MINUTE);
     await vi.waitFor(async () => expect(await nthMedia(db, 1)).toMatchObject({ status: 'failed', attempts: 2 }), SLOW_IO);
     expect(voice.transcribed).toBe(2);
     await stopApp(app);
@@ -1249,7 +1304,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     for (const id of ['VN1', 'VN2', 'VN3']) shareVoice(sock, id);
     for (const id of ['IMG1', 'IMG2']) shareImage(sock, id);
     await three.promise; // three downloads have started
-    await vi.advanceTimersByTimeAsync(1_000);
+    await advance(1_000);
     expect(fetcher).toHaveBeenCalledTimes(3);
     expect(fetcher.mock.calls.map(([ref]) => ref.contentType).sort()).toEqual(['audioMessage', 'imageMessage', 'imageMessage']);
     expect(app.mediaQueue!.active).toBe(3);
@@ -1291,11 +1346,11 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     });
     expect(voice.signals[0]!.aborted).toBe(true);
     // Not the 60 s drain: the run ends at once; then the last publish and WhatsApp's close.
-    for (let i = 0; i < 20 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 20 && !stopped; i++) await advance(1_000);
     expect(stopped).toBe(true);
     await p;
     expect(await nthMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'local_aborted' });
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   // Phase 2b final review: a stop during the conversion stops ffmpeg too, and gives the attempt back like a stopped run.
@@ -1312,24 +1367,24 @@ describe('app voice notes (Phase 2b Task 10)', () => {
       stopped = true;
     });
     expect(voice.prepareSignals[0]!.aborted).toBe(true);
-    for (let i = 0; i < 20 && !stopped; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 20 && !stopped; i++) await advance(1_000);
     expect(stopped).toBe(true);
     await p;
     expect(voice.transcribed).toBe(0);
     expect(await nthMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 0, errorCode: 'local_aborted' });
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('start() sweeps the voice copies once for all rows, then hourly; stop() ends the hourly sweep', async () => {
     const { app } = await setup();
     expect(sweeps()).toBe(1);
-    await vi.advanceTimersByTimeAsync(HOUR);
+    await advance(HOUR);
     expect(sweeps()).toBe(2);
-    await vi.advanceTimersByTimeAsync(HOUR);
+    await advance(HOUR);
     expect(sweeps()).toBe(3);
     await stopApp(app);
-    expect(vi.getTimerCount()).toBe(0);
-    await vi.advanceTimersByTimeAsync(3 * HOUR);
+    expectNoTimers();
+    await advance(3 * HOUR);
     expect(sweeps()).toBe(3);
   });
 
@@ -1364,9 +1419,9 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     };
     const { app } = await setup({ log });
     expect(sweeps()).toBe(1);
-    await vi.advanceTimersByTimeAsync(HOUR);
+    await advance(HOUR);
     expect(sweeps()).toBe(2);
-    await vi.advanceTimersByTimeAsync(HOUR);
+    await advance(HOUR);
     expect(sweeps()).toBe(3); // a failed sweep does not stop the next one
     await stopApp(app);
     expect(out().match(/voice copy sweep failed/g)?.length).toBe(3);
@@ -1383,17 +1438,17 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     };
     const { app } = await setup();
     expect(sweeps()).toBe(1);
-    await vi.advanceTimersByTimeAsync(2 * HOUR);
+    await advance(2 * HOUR);
     expect(sweeps()).toBe(1);
     g.release();
-    await vi.advanceTimersByTimeAsync(HOUR);
+    await advance(HOUR);
     expect(sweeps()).toBe(2);
     await stopApp(app);
   });
 
   it('without the media pipeline nothing is swept', async () => {
     const { app } = await setup({ media: null });
-    await vi.advanceTimersByTimeAsync(HOUR);
+    await advance(HOUR);
     expect(forgetHook.calls).toEqual([]);
     await stopApp(app);
   });
@@ -1417,7 +1472,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     shareVoice(sock);
     await settled();
     await vi.waitFor(async () => expect((await nthMedia(db, 1))?.status).toBe('done'), SLOW_IO);
-    await vi.advanceTimersByTimeAsync(1_000);
+    await advance(1_000);
     expect(forgetHook.calls.some((o) => o?.mediaId !== undefined)).toBe(false);
     await stopApp(app);
   });
@@ -1592,9 +1647,9 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     shareVoice(sock);
     await settled();
     await vi.waitFor(async () => expect(await nthMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 1, errorCode: 'http_503' }), SLOW_IO);
-    await vi.advanceTimersByTimeAsync(2 * MINUTE);
+    await advance(2 * MINUTE);
     await vi.waitFor(async () => expect(await nthMedia(db, 1)).toMatchObject({ status: 'pending', attempts: 2 }), SLOW_IO);
-    await vi.advanceTimersByTimeAsync(6 * MINUTE);
+    await advance(6 * MINUTE);
     await vi.waitFor(async () => expect(await nthMedia(db, 1)).toMatchObject({ status: 'failed', attempts: 3, errorCode: 'http_503' }), SLOW_IO);
     expect(fetcher).toHaveBeenCalledTimes(3);
     await stopApp(app);
@@ -1617,7 +1672,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
         await db.run('INSERT INTO media_stt_forget (media_id, provider, ref, created_at, attempts) VALUES (?, ?, ?, ?, 0)', [mediaId, 'elevenlabs', 'tr-old', '2026-10-19T06:00:00.000Z']);
       },
     });
-    await vi.advanceTimersByTimeAsync(3 * HOUR);
+    await advance(3 * HOUR);
     expect(sweeps()).toBe(4);
     expect(out().match(/"code":"provider_unavailable"/g)?.length).toBe(1);
     await stopApp(app);
@@ -1642,13 +1697,13 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     };
     const { app } = await setup();
     const s = stopping(app);
-    await vi.advanceTimersByTimeAsync(3_000);
+    await advance(3_000);
     expect(s.done).toBe(false);
     g.release();
-    for (let i = 0; i < 30 && !s.done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 30 && !s.done; i++) await advance(1_000);
     await s.p;
     expect(sweepDone).toBe(true);
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('stop() waits for an afterFinish delete in flight', async () => {
@@ -1668,13 +1723,13 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const first = await mediaIdAt(db);
     await vi.waitFor(() => expect(forgetHook.calls.some((o) => o?.mediaId === first)).toBe(true));
     const s = stopping(app);
-    await vi.advanceTimersByTimeAsync(3_000);
+    await advance(3_000);
     expect(s.done).toBe(false);
     g.release();
-    for (let i = 0; i < 30 && !s.done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 30 && !s.done; i++) await advance(1_000);
     await s.p;
     expect(deleteDone).toBe(true);
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('stop() waits for a copy deletion at most 5 s, then logs a code and goes on', async () => {
@@ -1682,13 +1737,13 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     forgetHook.impl = () => new Promise<number>(() => {}); // never ends
     const { app } = await setup({ log });
     const s = stopping(app);
-    await vi.advanceTimersByTimeAsync(4_000);
+    await advance(4_000);
     expect(s.done).toBe(false);
-    for (let i = 0; i < 30 && !s.done; i++) await vi.advanceTimersByTimeAsync(1_000);
+    for (let i = 0; i < 30 && !s.done; i++) await advance(1_000);
     await s.p;
     expect(s.done).toBe(true);
     expect(out()).toContain('"code":"forget_in_flight"');
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('a late transcript (12h): a note still being transcribed when its message was processed re-queues the message as a re-check', async () => {
@@ -1698,7 +1753,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     await settled();
     await vi.waitFor(() => expect(voice.entered).toBe(1), SLOW_IO);
     // V1: the note blocks its client's update for 30 minutes, then the update goes on without it.
-    await vi.advanceTimersByTimeAsync(36 * MINUTE); // the wait, then the debouncer's quiet time
+    await advance(36 * MINUTE); // the wait, then the debouncer's quiet time
     expect(ai.calls).toHaveLength(1);
     expect(ai.calls[0]!.user).toContain('{voice note, 0:14, being transcribed}');
     expect(ai.calls[0]!.user).not.toContain('(re-check: file now read)');
@@ -1706,7 +1761,7 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     voice.g.release();
     await vi.waitFor(async () => expect(await nthMedia(db, 1)).toMatchObject({ status: 'done', text: 'payment kal tak ho jayega' }), SLOW_IO);
     await vi.waitFor(async () => expect(await listUnprocessed(db, SHA)).toHaveLength(1));
-    await vi.advanceTimersByTimeAsync(241_000);
+    await advance(241_000);
     expect(ai.calls).toHaveLength(2);
     expect(ai.calls[1]!.user).toContain('(re-check: file now read)');
     expect(ai.calls[1]!.user).toContain('{voice note, 0:14, transcript: payment kal tak ho jayega}');

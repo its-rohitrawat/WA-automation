@@ -101,7 +101,9 @@ function conference(id: string, o: { start: string; attendees?: string[] | null;
 async function dump(d: Db): Promise<string> {
   const list = d.engine === 'sqlite'
     ? "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
-    : "SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema() AND table_type = 'BASE TABLE' AND has_table_privilege(table_name, 'SELECT') ORDER BY table_name";
+    // Each name qualified: Postgres may check the privilege on every row of information_schema.tables before the schema
+    // filter, and a bare name of another schema's view does not resolve.
+    : "SELECT table_name AS name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' AND has_table_privilege(format('%I.%I', table_schema, table_name), 'SELECT') ORDER BY table_name";
   const tables = (await d.all<{ name: string }>(list)).map((x) => x.name);
   const out: [string, unknown[]][] = [];
   for (const name of tables) out.push([name, await d.all(`SELECT * FROM "${name}" ORDER BY 1`)]);
@@ -332,7 +334,7 @@ describe('meeting backfill', () => {
 
   it('with --yes stores the rows and requests a rebuild', async () => {
     await meetingBackfillCommand({ since: '2026-10-01', yes: true }, deps());
-    expect((await rows()).map((r) => [r.status, r.clientId])).toEqual([['queued', 1], ['internal', null], ['unassigned', null], ['queued', 2]]);
+    expect((await rows()).map((r) => [r.status, r.clientId])).toEqual([['queued', SHA], ['internal', null], ['unassigned', null], ['queued', MEH]]);
     expect(await getKv(db, 'rebuild_requested')).toBe(NOW);
     expect(api.callsOf('download')).toEqual([]);
     expect(lines[0]).toBe('Stored 4 recordings from 2026-10-01 (IST) not stored before.');
