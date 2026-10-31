@@ -1372,7 +1372,8 @@ describe('app voice notes (Phase 2b Task 10)', () => {
       },
     });
     await vi.waitFor(() => expect(voice.forgotten).toEqual(['tr-old']));
-    expect(await row(db, 'SELECT COUNT(*) AS n FROM media_stt_forget')).toEqual({ n: 0 });
+    // The row goes after the provider's delete returns (a database round trip of its own): waited for, not read once.
+    await vi.waitFor(async () => expect(await row(db, 'SELECT COUNT(*) AS n FROM media_stt_forget')).toEqual({ n: 0 }), SLOW_IO);
     await stopApp(app);
   });
 
@@ -1429,7 +1430,8 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     await vi.waitFor(() => expect(voice.forgotten).toEqual(['tr-1']));
     const first = await mediaIdAt(db);
     expect(forgetHook.calls.some((o) => o?.mediaId === first)).toBe(true);
-    expect(await row(db, 'SELECT COUNT(*) AS n FROM media_stt_forget')).toEqual({ n: 0 });
+    // The row goes after the provider's delete returns (a database round trip of its own): waited for, not read once.
+    await vi.waitFor(async () => expect(await row(db, 'SELECT COUNT(*) AS n FROM media_stt_forget')).toEqual({ n: 0 }), SLOW_IO);
     await stopApp(app);
   });
 
@@ -1547,7 +1549,8 @@ describe('app voice notes (Phase 2b Task 10)', () => {
     const first = await mediaIdAt(db);
     expect(forgetHook.calls.some((o) => o?.mediaId === first)).toBe(true);
     expect(sweeps()).toBe(1); // only the start's, before the note: no hourly sweep did it
-    expect(await row(db, 'SELECT COUNT(*) AS n FROM media_stt_forget')).toEqual({ n: 0 });
+    // The row goes after the provider's delete returns (a database round trip of its own): waited for, not read once.
+    await vi.waitFor(async () => expect(await row(db, 'SELECT COUNT(*) AS n FROM media_stt_forget')).toEqual({ n: 0 }), SLOW_IO);
     await stopApp(app);
   });
 
