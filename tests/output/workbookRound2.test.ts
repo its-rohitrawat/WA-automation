@@ -48,10 +48,13 @@ const cfg = (n: number, name: string): ClientConfig => ({
 describe('workbook round 2', () => {
   it('floors % done so 199 of 200 is 99%', async () => {
     const db = await seededDb();
-    for (let i = 0; i < 200; i++) {
-      const t = await createTask(db, task({ title: `t${i}` }), NOW);
-      if (i < 199) await setTaskStatus(db, t.id, 'done', '2026-10-15', NOW, 'ai');
-    }
+    // One transaction: on Postgres each statement is a round trip, and these are 800.
+    await db.tx(async (q) => {
+      for (let i = 0; i < 200; i++) {
+        const t = await createTask(q, task({ title: `t${i}` }), NOW);
+        if (i < 199) await setTaskStatus(q, t.id, 'done', '2026-10-15', NOW, 'ai');
+      }
+    });
     const ov = (await build(db)).getWorksheet('Overview')!;
     expect(ov.getCell('C5').value).toBe(0.99);
   });
@@ -122,13 +125,12 @@ describe('workbook round 2', () => {
 
   it('breaks ties by creation order, not by text of the code', async () => {
     const db = await seededDb();
-    // One transaction: on Postgres each statement is a round trip, and these are a thousand.
-    await db.tx(async (q) => {
-      for (let i = 0; i < 1000; i++) await createTask(q, task({ title: `t${i}`, deadline: null }), NOW);
-    });
+    // Codes from SHA-998, so the third is the first four-digit one (as tests/control/taskQueries.test.ts does): by the
+    // text of the code SHA-1000 would come first. A thousand tasks to get there were 3,000 round trips on Postgres.
+    await db.run('UPDATE clients SET next_task_seq = 998 WHERE id = ?', [sharma]);
+    for (let i = 0; i < 3; i++) await createTask(db, task({ title: `t${i}`, deadline: null }), NOW);
     const codes = (await loadTrackerView(db, now, healthy)).clients.find((c) => c.client.code === 'SHA')!.usOpen.map((t) => t.code);
-    expect(codes[998]).toBe('SHA-999');
-    expect(codes[999]).toBe('SHA-1000');
+    expect(codes).toEqual(['SHA-998', 'SHA-999', 'SHA-1000']);
   });
 
   it('shows the revoked note with or without a quote', async () => {
