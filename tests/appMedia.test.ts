@@ -194,8 +194,8 @@ const BUDGET_LINE = "⚠️ 1 shared file waiting for today's AI budget (read af
 async function stopApp(app: { stop(): Promise<void> }): Promise<void> {
   // On Postgres the build can start after these 30 s of fake time (its database reads are real round trips), still on
   // timers due at once and real file I/O: until() then fires those with real waits, the clock held, and fails loudly if
-  // stop() never finishes.
-  await work.until(app.stop(), { fakeMs: 30_000, stepMs: 1_000, realCapMs: 20_000, label: 'stop()' });
+  // stop() never finishes. Its real waits stay well under the 20 s test timeout, so that error is the one a hang shows.
+  await work.until(app.stop(), { fakeMs: 30_000, stepMs: 1_000, realCapMs: 8_000, label: 'stop()' });
 }
 
 /** Claude overloaded (529): released, not billed, so the file waits without using an attempt (amendment 10d). */
