@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
-import { onSqlite } from '../helpers/db.ts';
+import { onSqlite, testDb } from '../helpers/db.ts';
 import { migrate, openDb } from '../../src/store/db.ts';
 import { MIGRATIONS } from '../../src/store/migrations.ts';
 import {
@@ -50,9 +50,10 @@ describe.runIf(onSqlite)('migration v6', () => {
   });
 });
 
+// On the test engine's store: a customer's own reports table on Postgres.
 describe('reports store', () => {
   it('claims a date once, before anything is sent', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     expect(await reportFor(db, DAY)).toBeUndefined();
     expect(await claimReport(db, DAY, T0)).toBe(true);
     expect(await claimReport(db, DAY, T1)).toBe(false);
@@ -62,7 +63,7 @@ describe('reports store', () => {
   });
 
   it('takes a retry row again only once its wait is over', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     await claimReport(db, DAY, T0);
     expect(await retryReport(db, DAY, 'connect_timeout', T1, T0)).toBe(true);
     expect(await reportFor(db, DAY)).toMatchObject({ status: 'retry', detail: 'connect_timeout', nextAttemptAt: T1 });
@@ -72,7 +73,7 @@ describe('reports store', () => {
   });
 
   it('finishes only a row that is sending, and a sent row is never claimed again, even forced', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     expect(await finishReport(db, DAY, 'sent', 'msg-1', T0)).toBe(false);
     await claimReport(db, DAY, T0);
     expect(await finishReport(db, DAY, 'sent', 'msg-1,msg-2', T1)).toBe(true);
@@ -84,7 +85,7 @@ describe('reports store', () => {
   });
 
   it('a normal claim never takes an unknown, skipped or sent row, at any later time', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     await claimReport(db, '2026-10-20', T0);
     await finishReport(db, '2026-10-20', 'unknown', 'timeout', T0);
     await skipReport(db, '2026-10-21', 'not_running', T0);
@@ -101,7 +102,7 @@ describe('reports store', () => {
   });
 
   it('a forced claim takes unknown, skipped and waiting retry rows, but never a row that is sending', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     await claimReport(db, '2026-10-20', T0);
     await finishReport(db, '2026-10-20', 'unknown', 'timeout', T0);
     await skipReport(db, '2026-10-21', 'not_running', T0);
@@ -116,7 +117,7 @@ describe('reports store', () => {
   });
 
   it('sets forced on a fresh forced claim, and a later normal claim clears it', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     expect(await claimReport(db, DAY, T0, { force: true })).toBe(true);
     expect(await reportFor(db, DAY)).toEqual({
       date: DAY, status: 'sending', detail: null, attempts: 1, nextAttemptAt: null, forced: true, createdAt: T0, updatedAt: T0,
@@ -127,7 +128,7 @@ describe('reports store', () => {
   });
 
   it('retryReport changes only a row that is sending: never unknown, skipped, retry or a missing date', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     await claimReport(db, '2026-10-19', T0);
     await finishReport(db, '2026-10-19', 'unknown', 'timeout', T0);
     await claimReport(db, '2026-10-20', T0);
@@ -152,7 +153,7 @@ describe('reports store', () => {
   });
 
   it('finishReport changes only a row that is sending: never unknown, interrupted, retry or skipped', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     await claimReport(db, '2026-10-19', T0);
     await finishReport(db, '2026-10-19', 'unknown', 'timeout', T0);
     await claimReport(db, '2026-10-20', T0);
@@ -171,7 +172,7 @@ describe('reports store', () => {
   });
 
   it('never skips a sent row or a row that is still sending', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     await claimReport(db, '2026-10-21', T0);
     await finishReport(db, '2026-10-21', 'sent', 'msg-1', T0);
     await claimReport(db, '2026-10-22', T0);
@@ -187,7 +188,7 @@ describe('reports store', () => {
   });
 
   it('skips a day with no row or a retry row, and leaves unknown and skipped rows alone', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     expect(await skipReport(db, '2026-10-20', 'not_running', T0)).toBe(true);
     expect(await reportFor(db, '2026-10-20')).toMatchObject({ status: 'skipped', detail: 'not_running', attempts: 0 });
     await claimReport(db, '2026-10-21', T0);
@@ -203,7 +204,7 @@ describe('reports store', () => {
   });
 
   it('turns rows left sending into unknown at start, and leaves every other status alone', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     await claimReport(db, '2026-10-22', T0);
     await claimReport(db, DAY, T0);
     await finishReport(db, DAY, 'sent', 'msg-1', T0);
@@ -223,7 +224,7 @@ describe('reports store', () => {
   });
 
   it('closes retry rows of earlier dates and keeps their reason, and leaves other earlier rows alone', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     for (const date of ['2026-10-22', DAY]) {
       await claimReport(db, date, T0);
       await retryReport(db, date, 'connect_timeout', T1, T0);
@@ -244,7 +245,7 @@ describe('reports store', () => {
   });
 
   it('lists recent reports newest first', async () => {
-    const db = openDb(':memory:');
+    const db = await testDb();
     for (const date of ['2026-10-21', DAY, '2026-10-22']) await skipReport(db, date, 'not_running', T0);
     expect((await recentReports(db, 2)).map((r) => r.date)).toEqual([DAY, '2026-10-22']);
   });
