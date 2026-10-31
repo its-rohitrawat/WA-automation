@@ -61,7 +61,7 @@ async function world(): Promise<Db> {
   await message(db, 1, 'M1', '2026-10-27T10:00:00.000Z');
   await message(db, 1, 'M2', '2026-10-28T04:00:00.000Z');
   await message(db, 2, 'M3', '2026-10-20T04:00:00.000Z');
-  await setPhase(db, 1, 'Design', 'ai');
+  await setPhase(db, await seat(db, 1), 'Design', 'ai');
   return db;
 }
 

@@ -26,6 +26,12 @@ import { waRaw, waText } from '../helpers/wa.ts';
 
 const KEY = Buffer.alloc(32, 7);
 const REFRESH_TOKEN = 'rt-very-secret-token';
+/**
+ * For a wait on the store's own I/O before the socket (slow on Postgres under load): longer than waitFor's 1 s. Under
+ * fake timers waitFor moves the clock by its interval at each check, so it stays under the pg pool's 10 s connect
+ * timeout (src/store/engine/pg.ts), which a slow connection would otherwise hit on the fake clock.
+ */
+const SLOW_IO = { timeout: 8_000 };
 
 let dir: string;
 let dataDir: string;
@@ -132,7 +138,7 @@ describe('link --reset', () => {
     const sessionBefore = (await sessionRows());
     const p = linkCommand({ reset: true }, deps());
     const rejected = expect(p).rejects.toThrow();
-    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    await vi.waitFor(() => expect(sockets.length).toBe(1), SLOW_IO);
     expect(sessionBefore).toBe(2); // canary + creds
     expect(await rowsAtConnect).toBe(1); // creds gone; only the fresh canary row remains
     expect(confirm).toHaveBeenCalledTimes(1);
@@ -189,7 +195,7 @@ describe('link --reset', () => {
     vi.useFakeTimers();
     const p = linkCommand({ reset: true }, deps());
     const rejected = expect(p).rejects.toThrow();
-    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    await vi.waitFor(() => expect(sockets.length).toBe(1), SLOW_IO);
     expect(confirm).not.toHaveBeenCalled();
     expect(out()).toContain('No saved WhatsApp link to reset.');
     closeWith(sockets[0]!, 401);
@@ -222,7 +228,7 @@ describe('link connection flow', () => {
   async function start(over: Partial<CliDeps> = {}) {
     vi.useFakeTimers();
     const p = linkCommand({ reset: false }, deps(over));
-    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    await vi.waitFor(() => expect(sockets.length).toBe(1), SLOW_IO);
     return { p };
   }
   async function openViaQr(): Promise<FakeSocket> {
@@ -408,7 +414,7 @@ describe('list-groups', () => {
     await seedSession();
     vi.useFakeTimers();
     const p = listGroupsCommand(deps());
-    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    await vi.waitFor(() => expect(sockets.length).toBe(1), SLOW_IO);
     const sock = sockets[0]!;
     sock.groupFetchAllParticipating.mockResolvedValue({
       [MEHTA.groupId]: { id: MEHTA.groupId, subject: 'Mehta Foods x Studio' } as GroupMetadata,
@@ -433,7 +439,7 @@ describe('list-groups', () => {
     await seedSession();
     vi.useFakeTimers();
     const p = listGroupsCommand(deps());
-    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    await vi.waitFor(() => expect(sockets.length).toBe(1), SLOW_IO);
     const sock = sockets[0]!;
     sock.emit('connection.update', { connection: 'open' });
     const mediaKey = Buffer.alloc(32, 9);
@@ -460,7 +466,7 @@ describe('list-groups', () => {
     await seedSession();
     vi.useFakeTimers();
     const p = listGroupsCommand(deps());
-    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    await vi.waitFor(() => expect(sockets.length).toBe(1), SLOW_IO);
     sockets[0]!.emit('connection.update', { connection: 'open' });
     await vi.advanceTimersByTimeAsync(10_000);
     await p;
@@ -691,10 +697,10 @@ describe.runIf(!onSqlite)('link on Postgres keeps the session in wa_auth', () =>
       return s;
     });
     const p = linkCommand({ reset: false }, deps(quick()));
-    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    await vi.waitFor(() => expect(sockets.length).toBe(1), SLOW_IO);
     sockets[0]!.emit('connection.update', { qr: 'QR-DATA' });
     closeWith(sockets[0]!, 515);
-    await vi.waitFor(() => expect(sockets.length).toBe(2));
+    await vi.waitFor(() => expect(sockets.length).toBe(2), SLOW_IO);
     sockets[1]!.emit('connection.update', { connection: 'open' });
     await p;
     expect(out()).toContain('Linked.');
@@ -721,7 +727,7 @@ describe.runIf(!onSqlite)('link on Postgres keeps the session in wa_auth', () =>
     });
     const p = linkCommand({ reset: true }, deps(quick()));
     const rejected = expect(p).rejects.toThrow();
-    await vi.waitFor(() => expect(sockets.length).toBe(1));
+    await vi.waitFor(() => expect(sockets.length).toBe(1), SLOW_IO);
     expect(await rowsAtConnect).toBe(1); // the creds are gone; a fresh canary only
     closeWith(sockets[0]!, 401); // nothing more to connect: end the run
     await rejected;
