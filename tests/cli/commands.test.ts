@@ -680,10 +680,17 @@ describe.runIf(!onSqlite)('link on Postgres keeps the session in wa_auth', () =>
     const spareBefore = await store.sessionRows('spare');
     expect(spareBefore).toBeGreaterThan(0);
     expect(await sessionRows()).toBe(2); // canary + creds
+    let rowsAtConnect: Promise<number> = Promise.resolve(-1);
+    factory.mockImplementation(() => {
+      rowsAtConnect = sessionRows(); // right after the reset, before anything new is saved
+      const s = new FakeSocket();
+      sockets.push(s);
+      return s;
+    });
     const p = linkCommand({ reset: true }, deps(quick()));
     const rejected = expect(p).rejects.toThrow();
     await vi.waitFor(() => expect(sockets.length).toBe(1));
-    expect(await sessionRows()).toBe(1); // the creds are gone; a fresh canary only
+    expect(await rowsAtConnect).toBe(1); // the creds are gone; a fresh canary only
     closeWith(sockets[0]!, 401); // nothing more to connect: end the run
     await rejected;
     expect(await store.sessionRows('spare')).toBe(spareBefore);
