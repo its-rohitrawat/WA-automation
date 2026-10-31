@@ -2,35 +2,40 @@ import { randomBytes } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AI_KEY_TRIES_PER_HOUR, AiKeys, modelsListTester, type KeyCheck, type KeyTester } from '../../src/platform/aiKey.ts';
 import { PlatformError } from '../../src/platform/errors.ts';
-import { ensurePlatformSchema } from '../../src/platform/schema.ts';
 import { createTenant } from '../../src/platform/store.ts';
-import { openDb, type Db } from '../../src/store/db.ts';
+import type { Db } from '../../src/store/db.ts';
 import { manualClock, type ManualClock } from '../../src/util/clock.ts';
+import { platformTestDb, type PlatformTestDb } from '../helpers/platformTestDb.ts';
 
 // Only obvious fakes: no real key appears anywhere in this file, and the tester is a fake (nothing calls Anthropic).
 const FAKE = 'sk-ant-test-0000';
 const OTHER = 'sk-ant-test-1111';
 
+let store: PlatformTestDb;
+/** The platform tables (platform_audit, tenants). */
 let db: Db;
+/** The customer's own tables (kv): the same store on SQLite, its own Db on Postgres. */
+let mine: Db;
 let clock: ManualClock;
 let tenantId: string;
 let dataKey: Buffer;
 
 beforeEach(async () => {
-  db = openDb(':memory:'); // the customer's tables (kv) and the platform tables, in one test database
-  await ensurePlatformSchema(db);
+  store = await platformTestDb({ tracker: true });
+  db = store.db;
   clock = manualClock('2026-10-30T06:00:00.000Z');
   tenantId = (await createTenant(db, { name: 'Kapoor Design Studio', status: 'onboarding', at: clock.now().toISOString() })).id;
+  mine = store.customerDb(tenantId);
   dataKey = randomBytes(32);
 });
 afterEach(async () => {
-  await db.close();
+  await store.close();
 });
 
-const keys = (tester: KeyTester = async () => 'ok', key = dataKey) => new AiKeys({ db, platform: db, tenantId, dataKey: async () => key, tester, clock });
+const keys = (tester: KeyTester = async () => 'ok', key = dataKey) => new AiKeys({ db: mine, platform: db, tenantId, dataKey: async () => key, tester, clock });
 const answer = (c: KeyCheck): KeyTester => async () => c;
 const refusal = (p: Promise<unknown>) => p.then(() => { throw new Error('expected a refusal'); }, (e: unknown) => e as PlatformError);
-const everything = async () => JSON.stringify([await db.all('SELECT * FROM kv'), await db.all('SELECT * FROM platform_audit')]);
+const everything = async () => JSON.stringify([await mine.all('SELECT * FROM kv'), await db.all('SELECT * FROM platform_audit')]);
 
 describe("the customer's Anthropic key", () => {
   it('is tested before it is stored, stored only encrypted, and reported only as configured', async () => {

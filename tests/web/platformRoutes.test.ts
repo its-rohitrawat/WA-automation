@@ -2,9 +2,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { AiKeys } from '../../src/platform/aiKey.ts';
 import { inviteForSignup, redeemInvite } from '../../src/platform/invites.ts';
 import type { InviteEmail, InviteMailer, MailOutcome } from '../../src/platform/mailer.ts';
-import { ensurePlatformSchema } from '../../src/platform/schema.ts';
 import { membershipsFor } from '../../src/platform/store.ts';
-import { SqliteDb } from '../../src/store/engine/sqlite.ts';
+import type { Db } from '../../src/store/db.ts';
+import { onSqlite } from '../helpers/db.ts';
+import { platformTestDb, type PlatformTestDb } from '../helpers/platformTestDb.ts';
 import { manualClock, type ManualClock } from '../../src/util/clock.ts';
 import { createLogger } from '../../src/util/logger.ts';
 import type { ApiResult, OwnerContext } from '../../src/web/routes/context.ts';
@@ -26,8 +27,8 @@ class FakeMailer implements InviteMailer {
   sent: InviteEmail[] = [];
   mode: 'ok' | 'throw' | 'failed' | 'unknown' = 'ok';
   stateDuring: string[] = [];
-  readonly db: SqliteDb;
-  constructor(db: SqliteDb) {
+  readonly db: Db;
+  constructor(db: Db) {
     this.db = db;
   }
   async send(m: InviteEmail): Promise<MailOutcome> {
@@ -40,7 +41,9 @@ class FakeMailer implements InviteMailer {
   }
 }
 
-let db: SqliteDb;
+let store: PlatformTestDb;
+/** The platform tables (on SQLite, a customer's kv lives in the same store). */
+let db: Db;
 let clock: ManualClock;
 let mailer: FakeMailer;
 let logLines: string[];
@@ -59,15 +62,15 @@ function mount(o: Partial<PlatformRouteDeps> = {}) {
 }
 
 beforeEach(async () => {
-  db = SqliteDb.open(':memory:');
-  await ensurePlatformSchema(db);
+  store = await platformTestDb();
+  db = store.db;
   clock = manualClock('2026-10-29T06:00:00.000Z');
   mailer = new FakeMailer(db);
   logLines = [];
   mount();
 });
 afterEach(async () => {
-  await db.close();
+  await store.close();
 });
 
 const call = async (method: 'GET' | 'POST', path: string, o: OwnerContext = FOUNDER, body: unknown = {}, params: Record<string, string> = {}) => {
@@ -192,21 +195,22 @@ describe('the platform routes', () => {
     const made = body(await invite(false));
     await redeemInvite({ db, clock }, { token: tokenOf(made.link), email: 'kapoor.studio@example.com' });
     const list = body(await call('GET', '/dashboard/api/platform/customers'));
-    expect(list.customers).toHaveLength(1);
-    const id = list.customers[0].id;
+    const customers = (l: Record<string, unknown>) => (l.customers as { id: string; founder: boolean; status: string }[]).filter((c) => !c.founder);
+    expect(customers(list)).toHaveLength(1); // on Postgres the founder's own business is listed too (P1 seeds it)
+    const id = customers(list)[0]!.id;
     expect((await call('POST', `/dashboard/api/platform/customers/${id}/pause`, CUSTOMER)).status).toBe(403);
     expect(pokes).toBe(0);
-    expect(body(await call('POST', `/dashboard/api/platform/customers/${id}/pause`)).customers[0].status).toBe('paused');
+    expect(customers(body(await call('POST', `/dashboard/api/platform/customers/${id}/pause`)))[0]!.status).toBe('paused');
     expect(pokes).toBe(1);
     expect((await call('POST', `/dashboard/api/platform/customers/${id}/pause`)).status).toBe(409); // refused: no poke
     expect(pokes).toBe(1);
-    expect(body(await call('POST', `/dashboard/api/platform/customers/${id}/resume`)).customers[0].status).toBe('onboarding');
+    expect(customers(body(await call('POST', `/dashboard/api/platform/customers/${id}/resume`)))[0]!.status).toBe('onboarding');
     expect(pokes).toBe(2);
     expect((await call('POST', '/dashboard/api/platform/customers/00000000-0000-4000-8000-000000000000/pause')).status).toBe(404);
   });
 
   it("one person in two workspaces only ever gets the session's own, and none it is not a member of", async () => {
-    await db.exec('CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)');
+    if (onSqlite) await db.exec('CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)'); // the customer's own table (theirs on Postgres)
     // One open invite per address at a time: the first is used before the second is made.
     const a = body(await invite(false, 'kapoor.studio@example.com'));
     await redeemInvite({ db, clock }, { token: tokenOf(a.link), email: 'kapoor.studio@example.com' });
@@ -215,7 +219,7 @@ describe('the platform routes', () => {
     await redeemInvite({ db, clock }, { token: tokenOf(b.link), email: 'kapoor.studio@example.com' });
     expect((await membershipsFor(db, CUSTOMER.actor)).map((x) => x.tenantId).sort()).toEqual([a.invite.tenantId, b.invite.tenantId].sort());
     const asked: string[] = [];
-    mount({ aiKeys: (id) => (asked.push(id), new AiKeys({ db, platform: db, tenantId: id, dataKey: async () => Buffer.alloc(32, 7), tester: async () => 'ok', clock })) });
+    mount({ aiKeys: (id) => (asked.push(id), new AiKeys({ db: store.customerDb(id), platform: db, tenantId: id, dataKey: async () => Buffer.alloc(32, 7), tester: async () => 'ok', clock })) });
 
     // Each session gets its own workspace, whatever order the memberships come in.
     expect(body(await call('GET', '/dashboard/api/platform/onboarding', customerIn(b.invite.tenantId))).business).toBe('Kapoor Events');
@@ -234,7 +238,7 @@ describe('the platform routes', () => {
 
   it("the customer's AI key: set and removed for their own workspace only, never echoed or logged", async () => {
     const FAKE = 'sk-ant-test-0000'; // an obvious fake; the tester below is a fake too (nothing calls Anthropic)
-    await db.exec('CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)'); // the customer's own table (theirs on Postgres)
+    if (onSqlite) await db.exec('CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)'); // the customer's own table (theirs on Postgres)
     const made = body(await invite(false));
     // Not signed up yet: no workspace. Signed up, but before S4 wires the runtimes in: no key store yet.
     expect(body(await call('POST', '/dashboard/api/platform/ai-key', CUSTOMER, { key: FAKE })).error.code).toBe('no_workspace');
@@ -244,7 +248,7 @@ describe('the platform routes', () => {
     expect(body(await call('POST', '/dashboard/api/platform/ai-key', mine, { key: FAKE })).error.code).toBe('not_ready');
     const asked: string[] = [];
     const restarts: string[] = [];
-    mount({ restart: (id) => void restarts.push(id), aiKeys: (id) => (asked.push(id), new AiKeys({ db, platform: db, tenantId: id, dataKey: async () => Buffer.alloc(32, 7), tester: async () => 'ok', clock })) });
+    mount({ restart: (id) => void restarts.push(id), aiKeys: (id) => (asked.push(id), new AiKeys({ db: store.customerDb(id), platform: db, tenantId: id, dataKey: async () => Buffer.alloc(32, 7), tester: async () => 'ok', clock })) });
 
     const nobody: OwnerContext = { actor: 'nobody@example.com', sessionId: 's-3', requestId: 'r3' };
     expect((await call('POST', '/dashboard/api/platform/ai-key', nobody, { key: FAKE })).status).toBe(404);

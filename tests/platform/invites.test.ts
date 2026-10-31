@@ -8,24 +8,27 @@ import {
 import { ensurePlatformSchema } from '../../src/platform/schema.ts';
 import { ensureFounderTenant, FOUNDER_TENANT_ID, getTenant, listTenants, membershipsFor } from '../../src/platform/store.ts';
 import { INVITE_TTL_MS, inviteTokenHash, newInviteToken, normalizeEmail } from '../../src/platform/tokens.ts';
-import { SqliteDb } from '../../src/store/engine/sqlite.ts';
+import type { Db } from '../../src/store/db.ts';
+import { onSqlite } from '../helpers/db.ts';
+import { platformTestDb, type PlatformTestDb } from '../helpers/platformTestDb.ts';
 import { manualClock, type ManualClock } from '../../src/util/clock.ts';
 
 const FOUNDER = 'founder@example.com';
 const T0 = '2026-10-29T06:00:00.000Z';
 
-let db: SqliteDb;
+let store: PlatformTestDb;
+let db: Db;
 let clock: ManualClock;
 let d: InviteDeps;
 
 beforeEach(async () => {
-  db = SqliteDb.open(':memory:');
-  await ensurePlatformSchema(db);
+  store = await platformTestDb();
+  db = store.db;
   clock = manualClock(T0);
   d = { db, clock };
 });
 afterEach(async () => {
-  await db.close();
+  await store.close();
 });
 
 const refusal = async (p: Promise<unknown>): Promise<PlatformError> => {
@@ -61,7 +64,8 @@ describe('invite tokens', () => {
 });
 
 describe('the platform tables', () => {
-  it('are made once and can be ensured again without change; the founder is customer #1, made once', async () => {
+  // SQLite only: ensurePlatformSchema is SQLite's; on Postgres P1 and P3 made the tables (the next test).
+  it.runIf(onSqlite)('are made once and can be ensured again without change; the founder is customer #1, made once', async () => {
     await ensurePlatformSchema(db);
     const a = await ensureFounderTenant(db, { name: 'Your studio', at: T0 });
     const b = await ensureFounderTenant(db, { name: 'Another name', at: T0 });
@@ -71,6 +75,14 @@ describe('the platform tables', () => {
     expect(FOUNDER_TENANT_ID).toBe(a.id);
     expect(a).toMatchObject({ kind: 'founder', status: 'active', name: 'Your studio' });
     await expect(db.run("INSERT INTO tenants (id, kind, name, status, created_at, updated_at) VALUES ('00000000-0000-4000-8000-000000000009', 'founder', 'x', 'active', ?, ?)", [T0, T0])).rejects.toThrow(/UNIQUE/);
+  });
+
+  it.runIf(!onSqlite)('on Postgres P1 seeded the founder as customer #1: ensureFounderTenant finds it, and a second founder is refused', async () => {
+    const a = await ensureFounderTenant(db, { name: 'Your studio', at: T0 });
+    expect(a.id).toBe(FOUNDER_TENANT_ID);
+    expect(a).toMatchObject({ kind: 'founder', status: 'active' });
+    expect((await ensureFounderTenant(db, { name: 'Another name', at: T0 })).id).toBe(a.id);
+    await expect(db.run("INSERT INTO tenants (id, kind, name, status, created_at, updated_at) VALUES ('00000000-0000-4000-8000-000000000009', 'founder', 'x', 'active', ?, ?)", [T0, T0])).rejects.toThrow(/unique/i);
   });
 });
 
@@ -95,7 +107,7 @@ describe('creating an invite', () => {
     expect(await refusal(invite('Kapoor', 'not-an-email'))).toMatchObject({ status: 400 });
     await invite();
     expect(await refusal(invite('Kapoor again', 'KAPOOR.studio@example.com'))).toMatchObject({ status: 409, code: 'already_open' });
-    expect(await listTenants(db)).toHaveLength(1);
+    expect((await listTenants(db)).filter((t) => t.kind === 'customer')).toHaveLength(1); // Postgres also lists the founder
   });
 
   it('a name is one line of plain text: control and direction characters become spaces', async () => {

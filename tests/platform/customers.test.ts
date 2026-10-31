@@ -3,12 +3,13 @@ import { listCustomers, pauseCustomer, resumeCustomer, type CustomersDeps } from
 import { PlatformError } from '../../src/platform/errors.ts';
 import { createInvite, redeemInvite } from '../../src/platform/invites.ts';
 import type { OnboardingProbes, ProbeState, StepId } from '../../src/platform/onboarding.ts';
-import { ensurePlatformSchema } from '../../src/platform/schema.ts';
 import { ensureFounderTenant, getTenant } from '../../src/platform/store.ts';
-import { SqliteDb } from '../../src/store/engine/sqlite.ts';
+import type { Db } from '../../src/store/db.ts';
+import { platformTestDb, type PlatformTestDb } from '../helpers/platformTestDb.ts';
 import { manualClock, type ManualClock } from '../../src/util/clock.ts';
 
-let db: SqliteDb;
+let store: PlatformTestDb;
+let db: Db;
 let clock: ManualClock;
 let steps: Record<string, Partial<Record<StepId, ProbeState>>>;
 let d: CustomersDeps;
@@ -16,15 +17,15 @@ let d: CustomersDeps;
 const probes: OnboardingProbes = { state: async (tenantId, step) => steps[tenantId]?.[step] ?? 'coming' };
 
 beforeEach(async () => {
-  db = SqliteDb.open(':memory:');
-  await ensurePlatformSchema(db);
+  store = await platformTestDb();
+  db = store.db;
   clock = manualClock('2026-10-29T06:00:00.000Z');
   steps = {};
   d = { db, clock, probes };
   await ensureFounderTenant(db, { name: 'Your studio', at: '2026-09-01T00:00:00.000Z' });
 });
 afterEach(async () => {
-  await db.close();
+  await store.close();
 });
 
 /** A customer that signed up (onboarding), or only invited. */

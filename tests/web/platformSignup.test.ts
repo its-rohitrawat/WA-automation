@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createInvite, listInvites } from '../../src/platform/invites.ts';
-import { ensurePlatformSchema } from '../../src/platform/schema.ts';
 import { getTenant, membershipsFor } from '../../src/platform/store.ts';
-import { SqliteDb } from '../../src/store/engine/sqlite.ts';
+import type { Db } from '../../src/store/db.ts';
+import { platformTestDb, type PlatformTestDb } from '../helpers/platformTestDb.ts';
 import { manualClock, type ManualClock } from '../../src/util/clock.ts';
 import { createLogger } from '../../src/util/logger.ts';
 import type { IdClaims } from '../../src/web/oidc.ts';
@@ -15,7 +15,8 @@ import { createWebServer, type WebServer } from '../../src/web/server.ts';
 const CLIENT_ID = 'client-123.apps.googleusercontent.com';
 const SITE = 'https://agent.example.com';
 
-let db: SqliteDb;
+let store: PlatformTestDb;
+let db: Db;
 let clock: ManualClock;
 let web: WebServer;
 let base: string;
@@ -47,8 +48,8 @@ async function start(o: Partial<SignupDeps> = {}) {
 }
 
 beforeEach(async () => {
-  db = SqliteDb.open(':memory:');
-  await ensurePlatformSchema(db);
+  store = await platformTestDb();
+  db = store.db;
   clock = manualClock('2026-10-29T06:00:00.000Z');
   logLines = [];
   sessions = [];
@@ -57,7 +58,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await web.stop();
-  await db.close();
+  await store.close();
 });
 
 const invite = async (email = 'kapoor.studio@example.com') => (await createInvite({ db, clock }, 'founder@example.com', { business: 'Kapoor Design Studio', email })).token;

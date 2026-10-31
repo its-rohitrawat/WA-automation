@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createInvite, redeemInvite } from '../../src/platform/invites.ts';
 import { COMING_PROBES, onboardingFor, STEPS, type OnboardingProbes, type ProbeState, type StepId } from '../../src/platform/onboarding.ts';
-import { ensurePlatformSchema } from '../../src/platform/schema.ts';
 import { getTenant } from '../../src/platform/store.ts';
-import { SqliteDb } from '../../src/store/engine/sqlite.ts';
+import type { Db } from '../../src/store/db.ts';
+import { platformTestDb, type PlatformTestDb } from '../helpers/platformTestDb.ts';
 import { manualClock, type ManualClock } from '../../src/util/clock.ts';
 
-let db: SqliteDb;
+let store: PlatformTestDb;
+let db: Db;
 let clock: ManualClock;
 let tenantId: string;
 
@@ -14,15 +15,15 @@ let tenantId: string;
 const probes = (states: Partial<Record<StepId, ProbeState>>): OnboardingProbes => ({ state: async (_t, step) => states[step] ?? 'todo' });
 
 beforeEach(async () => {
-  db = SqliteDb.open(':memory:');
-  await ensurePlatformSchema(db);
+  store = await platformTestDb();
+  db = store.db;
   clock = manualClock('2026-10-29T06:00:00.000Z');
   const { token, invite } = await createInvite({ db, clock }, 'founder@example.com', { business: 'Kapoor Design Studio', email: 'kapoor@example.com' });
   await redeemInvite({ db, clock }, { token, email: 'kapoor@example.com' });
   tenantId = invite.tenantId;
 });
 afterEach(async () => {
-  await db.close();
+  await store.close();
 });
 
 describe('the onboarding checklist', () => {

@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { PLATFORM_PG_SQL, PLATFORM_TABLES, S2_TENANT_COLUMNS } from '../../src/platform/pgSchema.ts';
 import { ensurePlatformSchema } from '../../src/platform/schema.ts';
 import { SqliteDb } from '../../src/store/engine/sqlite.ts';
+import { onSqlite } from '../helpers/db.ts';
+import { openTestPlatformDb } from '../helpers/pg.ts';
 
-// Until S2's test server exists (S2.7), this checks the Postgres platform SQL against the SQLite platform tables by
-// reading it: every SQLite column has its Postgres column, and nothing extra. The test that runs the SQL on a real
-// Postgres comes with S2.7 (plan 2026-10-29-saas-s3-s6.md, task A3).
+// The Postgres platform SQL against the SQLite platform tables, by reading it: every SQLite column has its Postgres
+// column, and nothing extra (on an in-memory SQLite store, on both runs). Under npm run test:pg, the last test also
+// reads the tables P3 really made on the test server (S2.7).
 
 let db: SqliteDb;
 beforeEach(async () => {
@@ -47,5 +49,16 @@ describe('the Postgres platform schema (P3)', () => {
     expect(PLATFORM_PG_SQL).not.toMatch(/\bINTEGER PRIMARY KEY\b|\bBLOB\b|\bTEXT PRIMARY KEY\b/);
     expect(PLATFORM_PG_SQL).toMatch(/platform_audit \(\n {2}id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY/);
     expect(PLATFORM_PG_SQL).toMatch(/wrapped bytea NOT NULL/);
+  });
+});
+
+describe.runIf(!onSqlite)('the platform tables as migrated on a real Postgres (P3)', () => {
+  // web_sessions is lane A's, made by its own migration: checked there.
+  it('each has exactly the columns the Postgres SQL gives it', async () => {
+    const pg = openTestPlatformDb();
+    for (const t of PLATFORM_TABLES.filter((x) => x !== 'web_sessions')) {
+      const cols = (await pg.all<{ c: string }>("SELECT column_name AS c FROM information_schema.columns WHERE table_schema = 'public' AND table_name = ?", [t])).map((r) => r.c).sort();
+      expect(cols, t).toEqual(pgColumns(t).sort());
+    }
   });
 });

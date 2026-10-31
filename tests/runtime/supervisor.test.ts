@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ensurePlatformSchema } from '../../src/platform/schema.ts';
 import { createTenant, ensureFounderTenant, FOUNDER_TENANT_ID, type TenantStatus } from '../../src/platform/store.ts';
 import { guarded } from '../../src/runtime/context.ts';
 import { Supervisor, type RuntimeFactory, type RuntimeFacts, type RuntimeHandle, type RuntimeStart, type SupervisorDeps } from '../../src/runtime/supervisor.ts';
-import { SqliteDb } from '../../src/store/engine/sqlite.ts';
+import type { Db } from '../../src/store/db.ts';
 import { manualClock, type ManualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
+import { platformTestDb, type PlatformTestDb } from '../helpers/platformTestDb.ts';
 
 /** Runtimes that only record what happened; one can be told to fail its start. */
 class FakeFactory implements RuntimeFactory {
@@ -44,21 +44,23 @@ class Timers {
   }
 }
 
-let db: SqliteDb;
+/** The platform tables: in-memory SQLite, or a database of the test's own on Postgres (the Supervisor runs every customer in tenants). */
+let store: PlatformTestDb;
+let db: Db;
 let clock: ManualClock;
 let factory: FakeFactory;
 let timers: Timers;
 
 beforeEach(async () => {
-  db = SqliteDb.open(':memory:');
-  await ensurePlatformSchema(db);
+  store = await platformTestDb();
+  db = store.db;
   clock = manualClock('2026-10-30T06:00:00.000Z');
   factory = new FakeFactory();
   timers = new Timers();
   await ensureFounderTenant(db, { name: 'Your studio', at: clock.now().toISOString() });
 });
 afterEach(async () => {
-  await db.close();
+  await store.close();
 });
 
 async function tenant(name: string, status: TenantStatus): Promise<string> {

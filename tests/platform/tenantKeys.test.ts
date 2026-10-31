@@ -1,25 +1,26 @@
 import { randomBytes } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ensurePlatformSchema } from '../../src/platform/schema.ts';
 import { createTenant, ensureFounderTenant, FOUNDER_TENANT_ID } from '../../src/platform/store.ts';
 import { TenantKeys } from '../../src/platform/tenantKeys.ts';
-import { SqliteDb } from '../../src/store/engine/sqlite.ts';
+import type { Db } from '../../src/store/db.ts';
+import { platformTestDb, type PlatformTestDb } from '../helpers/platformTestDb.ts';
 import { manualClock } from '../../src/util/clock.ts';
 
 const clock = manualClock('2026-10-30T06:00:00.000Z');
-let db: SqliteDb;
+let store: PlatformTestDb;
+let db: Db;
 let A: string;
 let B: string;
 
 beforeEach(async () => {
-  db = SqliteDb.open(':memory:');
-  await ensurePlatformSchema(db);
+  store = await platformTestDb();
+  db = store.db;
   await ensureFounderTenant(db, { name: 'Your studio', at: clock.now().toISOString() });
   A = (await createTenant(db, { name: 'Alpha One', status: 'onboarding', at: clock.now().toISOString() })).id;
   B = (await createTenant(db, { name: 'Beta Two', status: 'onboarding', at: clock.now().toISOString() })).id;
 });
 afterEach(async () => {
-  await db.close();
+  await store.close();
 });
 
 describe('customer data keys', () => {
