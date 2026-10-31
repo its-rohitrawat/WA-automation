@@ -94,7 +94,7 @@ describe('messages repository', () => {
     const db = await store();
     await insertMessage(db, msg({ waId: 'a', ts: '2026-10-01T08:00:00.000Z' }));
     await insertMessage(db, msg({ waId: 'b', ts: '2026-10-10T08:00:00.000Z' }));
-    expect(await clientIdsWithUnprocessed(db)).toEqual([1]);
+    expect(await clientIdsWithUnprocessed(db)).toEqual([SHA]);
     await markProcessed(db, (await listUnprocessed(db, SHA)).map((m) => m.id), NOW);
     expect(await clientIdsWithUnprocessed(db)).toEqual([]);
     expect(await resetProcessedSince(db, SHA, '2026-10-05T00:00:00.000Z')).toBe(1);
@@ -504,6 +504,6 @@ describe('unprocessedCounts', () => {
     await insertMessage(db, msg({ waId: 'd', clientId: MEH }));
     await markProcessed(db, [(await listUnprocessed(db, SHA))[0]!.id], NOW);
     await applyRevoke(db, SHA, 'b');
-    expect(await unprocessedCounts(db)).toEqual(new Map([[1, 1], [2, 1]]));
+    expect(await unprocessedCounts(db)).toEqual(new Map([[SHA, 1], [MEH, 1]]));
   });
 });
