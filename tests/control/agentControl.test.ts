@@ -11,8 +11,7 @@ import { setKv } from '../../src/store/kv.ts';
 import { insertMessage } from '../../src/store/messages.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import type { GatewayState, GatewayStatus } from '../../src/wa/gateway.ts';
-import { seededDb } from '../helpers/db.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { idOf, seededDb } from '../helpers/db.ts';
 
 const NOW = '2026-10-19T08:00:00.000Z';
 const KEY = Buffer.alloc(32, 7);
@@ -57,7 +56,7 @@ function meetings(over: Partial<MeetingsHealth> = {}): MeetingsHealth {
 describe('AgentControl.status', () => {
   it('gives the line, up, every part, the last message time and the spend', async () => {
     const t = await setup();
-    await insertMessage(t.db, { waId: 'w1', clientId: 1, senderJid: 'x', senderNumber: '919812345678', senderName: null, fromMe: false, ts: '2026-10-19T07:00:00.000Z',
+    await insertMessage(t.db, { waId: 'w1', clientId: await idOf(t.db, 'SHA'), senderJid: 'x', senderNumber: '919812345678', senderName: null, fromMe: false, ts: '2026-10-19T07:00:00.000Z',
       text: 'hello', quotedWaId: null, mediaType: null });
     t.spend.record('ai', 1.25, 'batch 1');
     const s = (await t.control.status());
@@ -173,12 +172,12 @@ describe('AgentControl.connections', () => {
     const t = await setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com' }, sender: 'idle', heartbeat: new Date('2026-10-19T07:55:00.000Z') });
     await saveMeetingAccount(t.db, KEY, 'company2', 'refresh-token-not-real', 'https://www.googleapis.com/auth/meetings.space.readonly');
     t.health.setMeetings(meetings({ lostAccounts: ['company2'] }));
-    await insertMessage(t.db, { waId: 'w1', clientId: 1, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts: '2026-10-19T07:00:00.000Z',
+    await insertMessage(t.db, { waId: 'w1', clientId: await idOf(t.db, 'SHA'), senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts: '2026-10-19T07:00:00.000Z',
       text: 'hi', quotedWaId: null, mediaType: null });
     t.spend.record('ai', 0.5, 'batch 1');
     t.spend.record('ai', 0.25, 'batch 2');
     t.spend.record('stt', 0.25, 'meeting 1 part 0');
-    db_publish(t.db);
+    await db_publish(t.db);
     expect((await t.control.connections())).toEqual({
       founder: { state: 'ok', label: 'Connected', groups: 2, lastActivityAt: '2026-10-19T07:00:00.000Z', device: 'WA Agent - Tracker' },
       spare: { state: 'ok', label: 'Linked', device: 'WA Agent - Morning report', recipientMasked: '…5678' },
@@ -248,7 +247,7 @@ describe('AgentControl.connections', () => {
 });
 
 function db_publish(db: Awaited<ReturnType<typeof seededDb>>) {
-  rawOf(db).prepare("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES ('2026-10-19T06:00:00.000Z', 'agent', 'tracker.published', 'ops', 'x')").run();
+  return db.run("INSERT INTO audit_log (at, actor, event, kind, detail) VALUES ('2026-10-19T06:00:00.000Z', 'agent', 'tracker.published', 'ops', 'x')");
 }
 
 describe('AgentControl answers carry no secrets', () => {
@@ -256,7 +255,7 @@ describe('AgentControl answers carry no secrets', () => {
     const t = await setup({ env: { MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'example.com', HEARTBEAT_URL: 'https://heartbeat.uptimerobot.com/secret-hb-token' },
       sender: 'open', heartbeat: new Date(NOW) });
     await saveMeetingAccount(t.db, KEY, 'company2', 'refresh-token-not-real', 'scope');
-    await insertMessage(t.db, { waId: 'w1', clientId: 1, senderJid: '919812345678@s.whatsapp.net', senderNumber: '919812345678', senderName: 'Ravi', fromMe: false,
+    await insertMessage(t.db, { waId: 'w1', clientId: await idOf(t.db, 'SHA'), senderJid: '919812345678@s.whatsapp.net', senderNumber: '919812345678', senderName: 'Ravi', fromMe: false,
       ts: '2026-10-19T07:00:00.000Z', text: 'secret chat words', quotedWaId: null, mediaType: null });
     t.health.setReport({ text: 'Morning report: sent at 06:00 IST', warning: null, recipientMasked: '…5678' });
     const json = JSON.stringify([(await t.control.status()), (await t.control.overview()), (await t.control.connections())]);
@@ -290,7 +289,7 @@ describe('AgentControl review fixes', () => {
   it('labels the tracker from the last recorded upload, which survives a restart', async () => {
     const t = await setup();
     expect(await part(t, 'tracker')).toMatchObject({ state: 'ok', label: 'Waiting for the first upload' });
-    db_publish(t.db);
+    await db_publish(t.db);
     expect(await part(t, 'tracker')).toMatchObject({ state: 'ok', label: 'Updated' });
   });
 
@@ -306,7 +305,7 @@ describe('AgentControl review fixes', () => {
 
   it('counts approved groups only, and main is used for the tracker only while meetings are off', async () => {
     const t = await setup();
-    rawOf(t.db).prepare("UPDATE clients SET active = 0 WHERE code = 'MEH'").run();
+    await t.db.run("UPDATE clients SET active = 0 WHERE code = 'MEH'");
     expect((await t.control.connections()).founder.groups).toBe(1);
     expect((await t.control.connections()).google).toEqual([{ label: 'main', email: null, usedFor: ['Tracker on Drive'], state: 'ok', stateLabel: 'Connected' }]);
   });
@@ -314,7 +313,7 @@ describe('AgentControl review fixes', () => {
   it('the last message is the newest one stored', async () => {
     const t = await setup();
     for (const [waId, ts] of [['a', '2026-10-19T06:00:00.000Z'], ['b', '2026-10-19T07:30:00.000Z']] as const) {
-      await insertMessage(t.db, { waId, clientId: 1, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts, text: 'x', quotedWaId: null, mediaType: null });
+      await insertMessage(t.db, { waId, clientId: await idOf(t.db, 'SHA'), senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts, text: 'x', quotedWaId: null, mediaType: null });
     }
     expect((await t.control.status()).lastMessageAt).toBe('2026-10-19T07:30:00.000Z');
   });
@@ -324,7 +323,7 @@ describe('AgentControl review round 2', () => {
   it('the last message is the newest one even when older messages are stored after it (catch-up after a reconnect)', async () => {
     const t = await setup();
     for (const [waId, ts] of [['new', '2026-10-19T07:30:00.000Z'], ['old', '2026-10-18T22:00:00.000Z']] as const) {
-      await insertMessage(t.db, { waId, clientId: 1, senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts, text: 'x', quotedWaId: null, mediaType: null });
+      await insertMessage(t.db, { waId, clientId: await idOf(t.db, 'SHA'), senderJid: 'x', senderNumber: null, senderName: null, fromMe: false, ts, text: 'x', quotedWaId: null, mediaType: null });
     }
     expect((await t.control.status()).lastMessageAt).toBe('2026-10-19T07:30:00.000Z');
     expect((await t.control.connections()).founder.lastActivityAt).toBe('2026-10-19T07:30:00.000Z');
