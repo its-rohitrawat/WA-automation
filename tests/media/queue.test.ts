@@ -93,6 +93,18 @@ async function settle(queue: MediaQueue): Promise<void> {
   }
 }
 
+/**
+ * Waits until no file is in flight either. drain() alone can return while a refill that a finished file asked for is
+ * still reading (the app stops the queue before it drains, so there that refill starts nothing): drain and settle again
+ * until nothing runs, a bounded number of times.
+ */
+async function atRest(queue: MediaQueue): Promise<void> {
+  for (let i = 0; i < 10 && (i === 0 || queue.active > 0); i++) {
+    await queue.drain(5_000);
+    await settle(queue);
+  }
+}
+
 function logLines(): { log: Logger; lines: string[] } {
   const lines: string[] = [];
   return { lines, log: createLogger('info', new Writable({ write(c, _e, cb) { lines.push(String(c)); cb(); } })) };
@@ -447,13 +459,11 @@ describe('MediaQueue never retries a file in a loop', () => {
     const onSettled = vi.fn();
     const queue = new MediaQueue({ db, clock: manualClock('2026-10-19T08:00:00Z'), log: silentLogger(), processor, concurrency: 2, onSettled });
     queue.kick();
-    await queue.drain(5_000); // D's write is a real round trip on Postgres: wait for the files in flight, not only the fills
-    await settle(queue);
+    await atRest(queue); // D's write is a real round trip on Postgres: wait for the files in flight, not only the fills
     expect(calls).toEqual([a, b, c, d]); // more stuck files than slots ahead of D still do not keep D waiting
     expect(queue.active).toBe(0);
     queue.kick(); // the next tick
-    await queue.drain(5_000);
-    await settle(queue);
+    await atRest(queue);
     expect(calls).toEqual([a, b, c, d, a, b, c]);
     expect(queue.active).toBe(0);
     // Only D reached a final state: a skipped file (an inactive client's, say) never wakes the reconciler.
