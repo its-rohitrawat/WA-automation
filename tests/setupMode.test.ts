@@ -22,7 +22,6 @@ import { NotConnectedError } from '../src/wa/switchableGateway.ts';
 import { FakeAi } from './helpers/ai.ts';
 import { seededDb, SHARMA } from './helpers/db.ts';
 import { FakeDrive } from './helpers/fakeDrive.ts';
-import { rawOf } from '../src/store/engine/sqlite.ts';
 
 const log = silentLogger();
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
@@ -220,6 +219,8 @@ describe('the app in setup mode', () => {
   });
 });
 
+// The session file is SQLite by design on the SQLite home; its Postgres twin (wa_auth, restored on open) is covered by
+// tests/wa/authStatePg.test.ts.
 describe('openSessionDb recovers a link that never finished', () => {
   let dir: string;
   beforeEach(() => {
@@ -234,12 +235,12 @@ describe('openSessionDb recovers a link that never finished', () => {
     const auth = await useEncryptedAuthState(first, key);
     auth.state.creds.me = { id: '919800000001:3@s.whatsapp.net', name: 'Founder' };
     await auth.saveCreds();
-    const before = rawOf(first).prepare('SELECT k, v FROM auth ORDER BY k').all();
+    const before = await first.all('SELECT k, v FROM auth ORDER BY k');
     await backupAndReset(first);
-    rawOf(first).close(); // the process stops mid-link
+    await first.close(); // the process stops mid-link
     const again = openSessionDb(file);
-    expect(rawOf(again).prepare('SELECT k, v FROM auth ORDER BY k').all()).toEqual(before);
+    expect(await again.all('SELECT k, v FROM auth ORDER BY k')).toEqual(before);
     expect((await useEncryptedAuthState(again, key)).hasSession).toBe(true);
-    rawOf(again).close();
+    await again.close();
   });
 });

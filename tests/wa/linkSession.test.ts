@@ -1,6 +1,5 @@
 import { randomBytes } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
-import { openDb } from '../../src/store/db.ts';
 import { getKv } from '../../src/store/kv.ts';
 import { createLogger } from '../../src/util/logger.ts';
 import { AllowList } from '../../src/wa/allowlist.ts';
@@ -11,7 +10,7 @@ import {
 } from '../../src/wa/linkSession.ts';
 import { SwitchableGateway } from '../../src/wa/switchableGateway.ts';
 import { closeWith, FakeSocket } from '../helpers/fakeSocket.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
+import { testDb } from '../helpers/db.ts';
 
 const QR1 = 'QR-SECRET-one-2@abc';
 const QR2 = 'QR-SECRET-two-2@def';
@@ -21,8 +20,10 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 /** A service with a linked founder session, its gateway on fake sockets, and the link sessions around it. */
 async function setup(o: { linked?: boolean; timeoutMs?: number } = {}) {
   const key = randomBytes(32);
+  // The session is a SQLite file by design on the SQLite home (its Postgres twin, wa_auth, is covered by authStatePg and
+  // customerLink); the tracker's own database follows the engine under test.
   const sessionDb = openSessionDb(':memory:');
-  const trackerDb = openDb(':memory:');
+  const trackerDb = await testDb();
   if (o.linked !== false) {
     const first = await useEncryptedAuthState(sessionDb, key);
     first.state.creds.me = { id: '919800000001:3@s.whatsapp.net', name: 'Founder' };
@@ -60,10 +61,10 @@ async function setup(o: { linked?: boolean; timeoutMs?: number } = {}) {
     audit: async (event, actor) => { audits.push({ event, actor }); },
     ...(o.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : {}),
   });
-  const rows = () => rawOf(sessionDb).prepare('SELECT k, v FROM auth ORDER BY k').all() as { k: string; v: Buffer }[];
-  const backupRows = () => {
-    rawOf(sessionDb).exec('CREATE TABLE IF NOT EXISTS auth_backup (k TEXT PRIMARY KEY, v BLOB NOT NULL)');
-    return (rawOf(sessionDb).prepare('SELECT COUNT(*) AS n FROM auth_backup').get() as { n: number }).n;
+  const rows = () => sessionDb.all<{ k: string; v: Buffer }>('SELECT k, v FROM auth ORDER BY k');
+  const backupRows = async () => {
+    await sessionDb.exec('CREATE TABLE IF NOT EXISTS auth_backup (k TEXT PRIMARY KEY, v BLOB NOT NULL)');
+    return (await sessionDb.get<{ n: number }>('SELECT COUNT(*) AS n FROM auth_backup'))!.n;
   };
   return { key, sessionDb, trackerDb, sockets, auths, lines, switchable, statuses, audits, sessions, rows, backupRows };
 }
@@ -84,13 +85,13 @@ describe('founder relink', () => {
   it('happy path: QR codes in order, open hands the new gateway to the service, the old one was stopped', async () => {
     const t = await setup();
     cleanup.push(() => t.switchable.stop());
-    const before = t.rows();
+    const before = await t.rows();
     const link = t.sessions.start({ target: 'founder', actor: 'owner@studio.in' });
     const events = record(t.sessions, link.id);
     await tick();
     expect(t.sockets[0]!.end).toHaveBeenCalled(); // the old gateway stopped
     expect(t.switchable.status().state).toBe('linking');
-    expect(t.rows()).not.toEqual(before); // reset
+    expect(await t.rows()).not.toEqual(before); // reset
     const fresh = t.sockets[1]!;
     fresh.emit('connection.update', { qr: QR1 });
     fresh.emit('connection.update', { qr: QR2 });
@@ -119,13 +120,13 @@ describe('founder relink', () => {
   it('cancel restores the session rows byte for byte and reconnects', async () => {
     const t = await setup();
     cleanup.push(() => t.switchable.stop());
-    const before = t.rows();
+    const before = await t.rows();
     const link = t.sessions.start({ target: 'founder', actor: 'owner@studio.in' });
     await tick();
     t.sockets[1]!.emit('connection.update', { qr: QR1 });
     expect(t.sessions.cancel(link.id)).toBe(true);
     await t.sessions.settled(link.id);
-    expect(t.rows()).toEqual(before);
+    expect(await t.rows()).toEqual(before);
     expect(t.sockets[1]!.end).toHaveBeenCalled(); // the linking gateway stopped
     expect(t.sockets).toHaveLength(3); // reconnected with the restored session
     expect(t.switchable.status().state).toBe('connecting');
@@ -137,10 +138,10 @@ describe('founder relink', () => {
   it('the 5-minute timeout restores the session', async () => {
     const t = await setup({ timeoutMs: 30 });
     cleanup.push(() => t.switchable.stop());
-    const before = t.rows();
+    const before = await t.rows();
     const link = t.sessions.start({ target: 'founder', actor: 'a@b.in' });
     await t.sessions.settled(link.id);
-    expect(t.rows()).toEqual(before);
+    expect(await t.rows()).toEqual(before);
     expect(t.sessions.info(link.id)).toMatchObject({ state: 'timed_out' });
     expect(t.audits.map((a) => a.event)).toEqual(['WhatsApp relink timed out']);
   });
@@ -148,12 +149,12 @@ describe('founder relink', () => {
   it('logged_out during the link restores the session and reports the code', async () => {
     const t = await setup();
     cleanup.push(() => t.switchable.stop());
-    const before = t.rows();
+    const before = await t.rows();
     const link = t.sessions.start({ target: 'founder', actor: 'a@b.in' });
     await tick();
     closeWith(t.sockets[1]!, 401);
     await t.sessions.settled(link.id);
-    expect(t.rows()).toEqual(before);
+    expect(await t.rows()).toEqual(before);
     expect(t.sessions.info(link.id)).toMatchObject({ state: 'failed', errorCode: 'logged_out' });
     expect(t.audits.map((a) => a.event)).toEqual(['WhatsApp relink failed (logged_out)']);
   });
@@ -213,12 +214,12 @@ describe('founder relink', () => {
   it('setup mode (never linked): a cancel leaves no session and no gateway', async () => {
     const t = await setup({ linked: false });
     cleanup.push(() => t.switchable.stop());
-    expect(t.rows()).toEqual([]);
+    expect(await t.rows()).toEqual([]);
     const link = t.sessions.start({ target: 'founder', actor: 'a@b.in' });
     await tick();
     t.sessions.cancel(link.id);
     await t.sessions.settled(link.id);
-    expect(t.rows()).toEqual([]);
+    expect(await t.rows()).toEqual([]);
     expect(t.switchable.status().state).toBe('not_linked');
     expect(t.switchable.hasGateway()).toBe(false);
   });
@@ -235,11 +236,11 @@ describe('founder relink', () => {
 
   it('stop() on shutdown undoes a running link and waits for it', async () => {
     const t = await setup();
-    const before = t.rows();
+    const before = await t.rows();
     const link = t.sessions.start({ target: 'founder', actor: 'a@b.in' });
     await tick();
     await t.sessions.stop();
-    expect(t.rows()).toEqual(before);
+    expect(await t.rows()).toEqual(before);
     expect(t.sessions.info(link.id)).toMatchObject({ state: 'failed', errorCode: 'stopped' });
     await t.switchable.stop();
   });
@@ -257,19 +258,19 @@ describe('founder relink', () => {
   it('the backup is in the database: a crash mid-link is undone at the next start', async () => {
     const t = await setup();
     cleanup.push(() => t.switchable.stop());
-    const before = t.rows();
+    const before = await t.rows();
     const link = t.sessions.start({ target: 'founder', actor: 'a@b.in' });
     await tick();
-    expect(t.rows()).not.toEqual(before);
-    expect(t.backupRows()).toBeGreaterThan(0);
+    expect(await t.rows()).not.toEqual(before);
+    expect(await t.backupRows()).toBeGreaterThan(0);
     // What the next start does, before it reads the session:
     expect(await recoverInterruptedLink(t.sessionDb)).toBe(true);
-    expect(t.rows()).toEqual(before);
-    expect(t.backupRows()).toBe(0);
+    expect(await t.rows()).toEqual(before);
+    expect(await t.backupRows()).toBe(0);
     expect(await recoverInterruptedLink(t.sessionDb)).toBe(false);
     t.sessions.cancel(link.id);
     await t.sessions.settled(link.id);
-    expect(t.rows()).toEqual(before);
+    expect(await t.rows()).toEqual(before);
   });
 
   it('a finished link leaves no backup, so the next start keeps the new session', async () => {
@@ -279,22 +280,22 @@ describe('founder relink', () => {
     await tick();
     t.sockets[1]!.emit('connection.update', { connection: 'open' });
     await t.sessions.settled(link.id);
-    const after = t.rows();
-    expect(t.backupRows()).toBe(0);
+    const after = await t.rows();
+    expect(await t.backupRows()).toBe(0);
     expect(await recoverInterruptedLink(t.sessionDb)).toBe(false);
-    expect(t.rows()).toEqual(after);
+    expect(await t.rows()).toEqual(after);
   });
 
   it('a cancel before the reset touches nothing: the session and the gateway stay as they were', async () => {
     const t = await setup();
     cleanup.push(() => t.switchable.stop());
-    const before = t.rows();
+    const before = await t.rows();
     const link = t.sessions.start({ target: 'founder', actor: 'a@b.in' });
     t.sessions.cancel(link.id); // while the old gateway is still stopping
     await t.sessions.settled(link.id);
-    expect(t.rows()).toEqual(before);
+    expect(await t.rows()).toEqual(before);
     expect(t.switchable.hasGateway()).toBe(true);
-    expect(t.backupRows()).toBe(0);
+    expect(await t.backupRows()).toBe(0);
     expect(t.sessions.info(link.id)).toMatchObject({ state: 'cancelled' });
   });
 
@@ -316,12 +317,12 @@ describe('founder relink', () => {
   ])('WhatsApp closing with %i during the link restores the session (%s)', async (code, name) => {
     const t = await setup();
     cleanup.push(() => t.switchable.stop());
-    const before = t.rows();
+    const before = await t.rows();
     const link = t.sessions.start({ target: 'founder', actor: 'a@b.in' });
     await tick();
     closeWith(t.sockets[1]!, code);
     await t.sessions.settled(link.id);
-    expect(t.rows()).toEqual(before);
+    expect(await t.rows()).toEqual(before);
     expect(t.sessions.info(link.id)).toMatchObject({ state: 'failed', errorCode: name });
   });
 
@@ -379,14 +380,14 @@ describe('session backup helpers', () => {
     const auth = await useEncryptedAuthState(db, key);
     let stopped = false;
     const guarded = guardAuth(auth, () => stopped);
-    const count = () => (rawOf(db).prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n;
-    const start = count();
+    const count = async () => (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM auth'))!.n;
+    const start = await count();
     await guarded.state.keys.set({ 'pre-key': { '1': { public: Buffer.alloc(32), private: Buffer.alloc(32) } } });
-    expect(count()).toBe(start + 1);
+    expect(await count()).toBe(start + 1);
     stopped = true;
     await guarded.state.keys.set({ 'pre-key': { '2': { public: Buffer.alloc(32), private: Buffer.alloc(32) } } });
     await guarded.saveCreds();
-    expect(count()).toBe(start + 1);
+    expect(await count()).toBe(start + 1);
   });
 
   it("resetSession (the CLI's --reset) also drops a backup left by an unfinished dashboard link", async () => {
@@ -395,7 +396,7 @@ describe('session backup helpers', () => {
     await backupAndReset(db);
     await resetSession(db);
     expect(await recoverInterruptedLink(db)).toBe(false);
-    expect((rawOf(db).prepare('SELECT COUNT(*) AS n FROM auth').get() as { n: number }).n).toBe(0);
+    expect((await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM auth'))!.n).toBe(0);
   });
 
   it('a cancelled founder link leaves no backup behind', async () => {
@@ -405,6 +406,6 @@ describe('session backup helpers', () => {
     await tick();
     t.sessions.cancel(link.id);
     await t.sessions.settled(link.id);
-    expect(t.backupRows()).toBe(0);
+    expect(await t.backupRows()).toBe(0);
   });
 });
