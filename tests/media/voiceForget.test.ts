@@ -9,18 +9,18 @@ import { SttHttpError, SttNoAnswerError } from '../../src/stt/http.ts';
 import type { ProviderId } from '../../src/stt/types.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { createLogger, silentLogger } from '../../src/util/logger.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
+import { idOf, NOW, seededDb, SHARMA } from '../helpers/db.ts';
 import { FakeVoiceTranscriber } from '../helpers/voice.ts';
-import { rawOf } from '../../src/store/engine/sqlite.ts';
 
 /** A transcribed voice note whose provider kept a copy named `ref`, noted by finishMedia (N1). Returns the media id. */
 async function copied(db: Db, waId: string, ref: string, provider: ProviderId = 'elevenlabs'): Promise<number> {
+  const clientId = await idOf(db, SHARMA.code); // Sharma's real id (not 1 on Postgres)
   await insertMessage(db, {
-    waId, clientId: 1, senderJid: '919800000001@s.whatsapp.net', senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false,
+    waId, clientId, senderJid: '919800000001@s.whatsapp.net', senderNumber: '919800000001', senderName: 'Mr. Sharma', fromMe: false,
     ts: '2026-10-10T08:00:00.000Z', text: null, quotedWaId: null, mediaType: 'voice',
   });
   const id = await insertMedia(db, {
-    messageId: (await messageRowId(db, 1, waId))!, clientId: 1, kind: 'voice', status: 'pending', mimeType: 'audio/ogg; codecs=opus', fileName: null, fileSize: 9000,
+    messageId: (await messageRowId(db, clientId, waId))!, clientId, kind: 'voice', status: 'pending', mimeType: 'audio/ogg; codecs=opus', fileName: null, fileSize: 9000,
     seconds: 14, forwarded: false, refEnc: Buffer.from('sealed'), errorCode: null, createdAt: NOW,
   });
   await markDownloaded(db, id, { localPath: `media/SHA/2026-10/${waId}-${id}.ogg`, sha256: 'x', fileSize: 9000, at: NOW });
@@ -29,9 +29,9 @@ async function copied(db: Db, waId: string, ref: string, provider: ProviderId = 
 }
 
 const rows = (db: Db) =>
-  rawOf(db).prepare('SELECT media_id AS mediaId, provider, ref, attempts, next_try_at AS nextTryAt FROM media_stt_forget ORDER BY id').all() as {
-    mediaId: number; provider: string; ref: string; attempts: number; nextTryAt: string | null;
-  }[];
+  db.all<{ mediaId: number; provider: string; ref: string; attempts: number; nextTryAt: string | null }>(
+    'SELECT media_id AS mediaId, provider, ref, attempts, next_try_at AS nextTryAt FROM media_stt_forget ORDER BY id',
+  );
 
 const later = (ms: number): string => new Date(Date.parse(NOW) + ms).toISOString();
 
@@ -47,10 +47,10 @@ describe('forgetVoiceCopies (N1)', () => {
     const a = await copied(db, 'A', 'tr_1');
     await copied(db, 'B', 'tr_2');
     const v = new FakeVoiceTranscriber({ provider: 'elevenlabs' });
-    expect(rows(db).map((r) => r.mediaId)).toContain(a);
+    expect((await rows(db)).map((r) => r.mediaId)).toContain(a);
     expect(await forgetVoiceCopies(db, v, silentLogger(), { clock: manualClock(NOW) })).toBe(2);
     expect(v.forgotten).toEqual(['tr_1', 'tr_2']);
-    expect(rows(db)).toEqual([]);
+    expect((await rows(db))).toEqual([]);
   });
 
   it('with a media id, deletes only that file\'s copies', async () => {
@@ -60,7 +60,7 @@ describe('forgetVoiceCopies (N1)', () => {
     const v = new FakeVoiceTranscriber({ provider: 'elevenlabs' });
     expect(await forgetVoiceCopies(db, v, silentLogger(), { mediaId: b, clock: manualClock(NOW) })).toBe(1);
     expect(v.forgotten).toEqual(['tr_2']);
-    expect(rows(db).map((r) => r.ref)).toEqual(['tr_1']);
+    expect((await rows(db)).map((r) => r.ref)).toEqual(['tr_1']);
   });
 
   it('a 404 means the copy is already gone: the row is removed', async () => {
@@ -69,7 +69,7 @@ describe('forgetVoiceCopies (N1)', () => {
     const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', forgetError: new SttHttpError(404) });
     expect(await forgetVoiceCopies(db, v, silentLogger(), { clock: manualClock(NOW) })).toBe(1);
     expect(v.forgotten).toEqual(['tr_1']);
-    expect(rows(db)).toEqual([]);
+    expect((await rows(db))).toEqual([]);
   });
 
   it('counts each try, with the time of the next one, before the provider is asked', async () => {
@@ -78,7 +78,7 @@ describe('forgetVoiceCopies (N1)', () => {
     const seen: { attempts: number; nextTryAt: string | null }[] = [];
     class Watching extends FakeVoiceTranscriber {
       override async forget(ref: string): Promise<void> {
-        const r = rows(db)[0]!;
+        const r = (await rows(db))[0]!;
         seen.push({ attempts: r.attempts, nextTryAt: r.nextTryAt });
         await super.forget(ref);
       }
@@ -86,7 +86,7 @@ describe('forgetVoiceCopies (N1)', () => {
     const v = new Watching({ provider: 'elevenlabs', forgetError: new SttNoAnswerError('timeout') });
     expect(await forgetVoiceCopies(db, v, silentLogger(), { clock: manualClock(NOW) })).toBe(0);
     expect(seen).toEqual([{ attempts: 1, nextTryAt: later(FORGET_WAITS_MS[0]) }]);
-    expect(rows(db)).toEqual([expect.objectContaining({ ref: 'tr_1', attempts: 1, nextTryAt: later(15 * 60_000) })]);
+    expect((await rows(db))).toEqual([expect.objectContaining({ ref: 'tr_1', attempts: 1, nextTryAt: later(15 * 60_000) })]);
   });
 
   it('waits 15 minutes, 1 hour, 6 hours, then daily between tries, and stops after the last', async () => {
@@ -98,7 +98,7 @@ describe('forgetVoiceCopies (N1)', () => {
     let elapsed = 0;
     for (const wait of [15 * 60_000, 60 * 60_000, 6 * 3_600_000, 24 * 3_600_000, 24 * 3_600_000]) {
       await forgetVoiceCopies(db, v, log, { clock });
-      expect(rows(db)[0]).toMatchObject({ nextTryAt: later(elapsed + wait) });
+      expect((await rows(db))[0]).toMatchObject({ nextTryAt: later(elapsed + wait) });
       // Not before its next try is due.
       clock.advance(wait - 1);
       await forgetVoiceCopies(db, v, log, { clock });
@@ -106,12 +106,12 @@ describe('forgetVoiceCopies (N1)', () => {
       elapsed += wait;
     }
     expect(v.forgotten).toHaveLength(MAX_FORGET_ATTEMPTS);
-    expect(rows(db)[0]).toMatchObject({ attempts: MAX_FORGET_ATTEMPTS });
+    expect((await rows(db))[0]).toMatchObject({ attempts: MAX_FORGET_ATTEMPTS });
     // The cap: the row is left alone, for a person to look at, however long it waits.
     clock.advance(30 * 24 * 3_600_000);
     expect(await forgetVoiceCopies(db, v, log, { clock })).toBe(0);
     expect(v.forgotten).toHaveLength(MAX_FORGET_ATTEMPTS);
-    expect(rows(db)).toHaveLength(1);
+    expect((await rows(db))).toHaveLength(1);
     expect(lines.filter((l) => l.includes('tried again later'))).toHaveLength(MAX_FORGET_ATTEMPTS - 1);
     expect(lines.filter((l) => l.includes('no more tries'))).toHaveLength(1);
   });
@@ -128,7 +128,7 @@ describe('forgetVoiceCopies (N1)', () => {
     }
     const v = new FailsFirst({ provider: 'elevenlabs' });
     expect(await forgetVoiceCopies(db, v, silentLogger(), { clock: manualClock(NOW) })).toBe(1);
-    expect(rows(db)).toEqual([expect.objectContaining({ ref: 'tr_1', attempts: 1 })]);
+    expect((await rows(db))).toEqual([expect.objectContaining({ ref: 'tr_1', attempts: 1 })]);
   });
 
   it('skips, without counting a try, copies whose provider is not the one set up now, or when there is none', async () => {
@@ -143,7 +143,7 @@ describe('forgetVoiceCopies (N1)', () => {
     expect(await forgetVoiceCopies(db, noCopies, log, { clock: manualClock(NOW) })).toBe(0);
     expect(openai.forgotten).toEqual([]);
     expect(noCopies.forgotten).toEqual([]);
-    expect(rows(db)).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_1', attempts: 0, nextTryAt: null }]);
+    expect((await rows(db))).toEqual([{ mediaId: id, provider: 'elevenlabs', ref: 'tr_1', attempts: 0, nextTryAt: null }]);
     expect(lines.filter((l) => l.includes('"code":"provider_unavailable"') && l.includes(`"mediaId":${id}`))).toHaveLength(3);
     // Set up again: deleted.
     const el = new FakeVoiceTranscriber({ provider: 'elevenlabs' });
@@ -168,7 +168,7 @@ describe('forgetVoiceCopies (N1)', () => {
     expect(await forgetVoiceCopies(db, openai, log, { clock, warned })).toBe(0);
     expect(unavailable(a)).toHaveLength(1);
     expect(unavailable(b)).toHaveLength(1);
-    expect(rows(db).map((r) => r.attempts)).toEqual([0, 0]); // never counted
+    expect((await rows(db)).map((r) => r.attempts)).toEqual([0, 0]); // never counted
     expect(openai.forgotten).toEqual([]);
     // Set up again: both are deleted.
     expect(await forgetVoiceCopies(db, new FakeVoiceTranscriber({ provider: 'elevenlabs' }), log, { clock, warned })).toBe(2);
