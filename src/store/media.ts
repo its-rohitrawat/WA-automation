@@ -333,7 +333,7 @@ export async function deferMedia(
  */
 export async function mediaForMessages(db: Sql, messageIds: number[], maxChars: number): Promise<Map<number, MediaRow>> {
   if (messageIds.length === 0) return new Map();
-  const rows = await db.all<RawMedia>(`SELECT ${columns('substr(text, 1, @maxChars)')} FROM media WHERE message_id IN (SELECT value FROM json_each(@ids))`, { maxChars, ids: JSON.stringify(messageIds) });
+  const rows = await db.all<RawMedia>(`SELECT ${columns('substr(text, 1, @maxChars)')} FROM media WHERE message_id IN (SELECT CAST(value AS INTEGER) FROM json_each(@ids))`, { maxChars, ids: JSON.stringify(messageIds) });
   return new Map(rows.map((r) => [r.message_id, toRow(r)]));
 }
 
@@ -414,7 +414,7 @@ export async function voiceBacklog(db: Sql, o: { clientId?: number } = {}): Prom
 export async function queueVoiceBacklog(db: Sql, ids: number[], at: string): Promise<number> {
   if (ids.length === 0) return 0;
   return (await db.run(`UPDATE media SET ${REQUEUE_SET}
-      WHERE id IN (SELECT value FROM json_each(@ids)) AND id IN (SELECT m.id ${VOICE_BACKLOG_FROM})`, { ids: JSON.stringify(ids), at })).changes;
+      WHERE id IN (SELECT CAST(value AS INTEGER) FROM json_each(@ids)) AND id IN (SELECT m.id ${VOICE_BACKLOG_FROM})`, { ids: JSON.stringify(ids), at })).changes;
 }
 
 /**
@@ -436,7 +436,7 @@ export async function failedLocalVoice(db: Sql, o: { clientId?: number } = {}): 
 export async function queueFailedLocalVoice(db: Sql, ids: number[], at: string): Promise<number> {
   if (ids.length === 0) return 0;
   return (await db.run(`UPDATE media SET ${REQUEUE_SET}
-      WHERE id IN (SELECT value FROM json_each(@ids)) AND id IN (SELECT m.id ${FAILED_LOCAL_VOICE_FROM})`, { ids: JSON.stringify(ids), at })).changes;
+      WHERE id IN (SELECT CAST(value AS INTEGER) FROM json_each(@ids)) AND id IN (SELECT m.id ${FAILED_LOCAL_VOICE_FROM})`, { ids: JSON.stringify(ids), at })).changes;
 }
 
 /** A speech provider's stored copy of a voice transcript still to delete (N1). ref is the provider's id for the copy, never content. */
