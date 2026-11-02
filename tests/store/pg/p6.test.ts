@@ -8,9 +8,9 @@ import { onPg, testPg } from '../../helpers/pg.ts';
 
 // db-migrate's two paths to P6 (November release, lane A) on a real Postgres, each in a database of its own made as
 // db-bootstrap makes the real one: an empty database straight to P6, and a P5 database holding data (the office Mac's
-// path) to P6 only. Both end with the live access-rules check passing.
+// path) to P6 only. They stop at P6 (P7 is tests/store/pg/p7.test.ts), so db-migrate's access-rules check, which runs
+// only at the latest version, is p7.test's: it covers the tables P6 made.
 
-const CHECKED = 'Access rules checked: row security on every customer table, nothing of the platform open to wa_app';
 const NAME = /^wa_test_p6_[0-9a-f]{12}$/;
 
 const on = (url: string, database: string) => {
@@ -56,7 +56,7 @@ async function emptyDatabase(): Promise<{ name: string; owner: () => Promise<Adm
 const now = () => new Date().toISOString();
 
 describe.runIf(onPg)('db-migrate to P6 (the assistant chats) on a real Postgres', () => {
-  it('an empty database: P1 to P6, then the access check passes', async () => {
+  it('an empty database: P1 to P6', async () => {
     const db = await emptyDatabase();
     try {
       const owner = await db.owner();
@@ -64,7 +64,7 @@ describe.runIf(onPg)('db-migrate to P6 (the assistant chats) on a real Postgres'
         const lines: string[] = [];
         // Up to P6 only: P7 and later have their own tests (tests/store/pg/p7.test.ts).
         expect(await migrate(owner, { now, out: (l) => lines.push(l), migrations: PG_MIGRATIONS.slice(0, 6) })).toEqual([1, 2, 3, 4, 5, 6]);
-        expect(lines).toEqual(['Applied P1', 'Applied P2', 'Applied P3', 'Applied P4', 'Applied P5', 'Applied P6', CHECKED]);
+        expect(lines).toEqual(['Applied P1', 'Applied P2', 'Applied P3', 'Applied P4', 'Applied P5', 'Applied P6']);
       } finally {
         await owner.end();
       }
@@ -94,7 +94,7 @@ describe.runIf(onPg)('db-migrate to P6 (the assistant chats) on a real Postgres'
 
         const lines: string[] = [];
         expect(await migrate(owner, { now, out: (l) => lines.push(l), migrations: PG_MIGRATIONS.slice(0, 6) })).toEqual([6]);
-        expect(lines).toEqual(['Applied P6', CHECKED]);
+        expect(lines).toEqual(['Applied P6']);
       } finally {
         await owner.end();
       }
