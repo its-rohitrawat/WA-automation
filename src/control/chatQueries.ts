@@ -1,7 +1,7 @@
 import type { ClientRow } from '../store/clients.ts';
 import type { Db } from '../store/db.ts';
 import { outboxToShow, type OutboxRow, type OutboxState } from '../store/outbox.ts';
-import { tagOf, type GroupMember } from '../wa/groupMembers.ts';
+import { mentionTags, tagOf, type GroupMember } from '../wa/groupMembers.ts';
 import { messageKind, oneLine, senderLabel, type ClientMessage } from './clientQueries.ts';
 
 // Open chat (owner request, 29 Oct 2026): a client's group as stored, a page at a time, newest first. Least data: a
@@ -49,6 +49,11 @@ export interface ChatPage {
   /** There are older messages than this page. */
   hasOlder: boolean;
   outbox: ChatOutboxItem[];
+  /**
+   * The agent's name for each tag ("@<digits>") the page's texts hold, when it knows one (November release). The digits
+   * are the text's own; no number is added.
+   */
+  names: Record<string, string>;
 }
 
 // Line breaks stay (a chat message keeps its lines); other control and direction characters go.
@@ -139,7 +144,26 @@ export async function chatPage(db: Db, c: ClientRow, now: Date, o: { before?: nu
   const since = new Date(now.getTime() - OUTBOX_DAYS * 86_400_000).toISOString();
   const outbox: ChatOutboxItem[] = [];
   if (o.before === undefined) for (const row of await outboxToShow(db, c.id, since)) outbox.push(await outboxItem(db, row));
-  return { messages: rows.slice(0, limit).map(toMessage), hasOlder: rows.length > limit, outbox };
+  const messages = rows.slice(0, limit).map(toMessage);
+  const texts = [...messages, ...outbox].flatMap((x) => [x.text, x.quote?.text ?? '']);
+  return { messages, hasOlder: rows.length > limit, outbox, names: await tagNames(db, c, texts) };
+}
+
+/**
+ * The names of the tags in some texts: for each "@<digits>", this client's person whose id or number has those digits,
+ * named as the chat would name it. Only names the agent knows. Parameterised reads only, and only this client's rows.
+ */
+async function tagNames(db: Db, c: ClientRow, texts: readonly string[]): Promise<Record<string, string>> {
+  const tags = new Set(texts.flatMap((t) => [...mentionTags(t)]));
+  const names: Record<string, string> = {};
+  if (tags.size === 0) return names;
+  const people = await db.all<{ jid: string; number: string | null; name: string | null }>('SELECT jid, number, name FROM people WHERE client_id = ?', [c.id]);
+  for (const p of people) {
+    const name = memberName(p.name);
+    if (!name) continue;
+    for (const key of [tagOf(p.jid), p.number]) if (key && tags.has(key) && !Object.hasOwn(names, key)) names[key] = name;
+  }
+  return names;
 }
 
 /** A dashboard message as the chat shows it. */

@@ -702,6 +702,18 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
 .ch-mem-text small { font-size: 12.5px; color: var(--ch-meta); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ch-admin { flex: none; font-size: 11.5px; padding: 2px 8px; border-radius: 6px; color: var(--green); background: color-mix(in srgb, var(--green) 14%, transparent); }
 :root[data-theme="light"] .ch-admin { color: #008069; }
+/* Tagging (November release): "@Name" in a message, the member picker above the box, members tappable in Group info */
+.ch-at { color: #53BDEB; font-weight: 500; }
+:root[data-theme="light"] .ch-at { color: #027EB5; }
+.ch-mem-btn { box-sizing: border-box; width: 100%; margin: 0; border: 0; border-bottom: 1px solid var(--line); background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.ch-mem-btn:hover { background: color-mix(in srgb, var(--ch-ink) 6%, transparent); }
+.ch-mem-btn:focus-visible { outline: 2px solid var(--link); outline-offset: -2px; }
+.ch-pick { max-height: 232px; overflow-y: auto; margin: 0 0 6px; border-radius: 10px; background: var(--ch-in); border: 1px solid var(--line); box-shadow: 0 8px 24px -12px rgba(0,0,0,.5); }
+.ch-pick[hidden] { display: none; }
+.ch-pick-item { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 10px; cursor: pointer; }
+.ch-pick-item .ch-mem-av { width: 32px; height: 32px; }
+.ch-pick-item.on, .ch-pick-item:hover { background: color-mix(in srgb, var(--ch-ink) 8%, transparent); }
+.ch-pick-note { margin: 0; padding: 10px 12px; font-size: 13px; color: var(--ch-meta); }
 @media (max-width: 600px) { .chat-sheet { inset: 0; width: 100vw; height: 100dvh; border-radius: 0; border: 0; } }
 @media (prefers-reduced-motion: reduce) { .ch-reply { transition: none; } }
 

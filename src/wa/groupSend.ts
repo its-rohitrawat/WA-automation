@@ -3,10 +3,15 @@
 // and claimed the outbox row. Here: one text message, to one group the founder gateway calls approved and open, once.
 // Nothing here retries. tests/wa/sendScan.test.ts keeps every other module from naming a send method.
 
-/** The part of a Baileys socket this module uses: one text message to a group, optionally quoting one. */
+/** The part of a Baileys socket this module uses: one text message to a group, optionally quoting one, tagging some. */
 export interface GroupSendSocket {
-  sendMessage(jid: string, content: { text: string }, options?: { quoted: QuotedMessage }): Promise<{ key?: { id?: string | null } | null } | undefined>;
+  sendMessage(jid: string, content: { text: string; mentions?: string[] }, options?: { quoted: QuotedMessage }): Promise<{ key?: { id?: string | null } | null } | undefined>;
 }
+
+/** A tagged member's id: a phone-number or hidden-number id, as the group uses it (src/wa/groupMembers.ts). */
+const MENTION_ID = /^\d{5,20}@(s\.whatsapp\.net|lid)$/;
+/** At most this many members tagged in one message. */
+export const MENTIONS_MAX = 50;
 
 /** A quoted message as WhatsApp needs it: the original's key and its text. */
 export interface QuotedMessage {
@@ -37,7 +42,9 @@ export function asGroupSendSocket(sock: object): GroupSendSocket | null {
 
 /**
  * Sends one text to one group. `source` is the founder gateway's check: it gives a socket only for an approved group while
- * open. Failed means nothing was sent; unknown means WhatsApp was asked and did not clearly answer.
+ * open. `mentions` are the members the text tags (the dashboard's route checked them against the group's members): each
+ * a person's id, once, at most 50; none, and the content is the text alone. Failed means nothing was sent; unknown means
+ * WhatsApp was asked and did not clearly answer.
  */
 export async function sendGroupText(
   source: GroupSocketSource,
@@ -45,16 +52,19 @@ export async function sendGroupText(
   text: string,
   quoted: QuotedMessage | null,
   timeoutMs = SEND_TIMEOUT_MS,
+  mentions: readonly string[] = [],
 ): Promise<SendOutcome> {
   if (!GROUP_JID.test(groupId)) return { state: 'failed', code: 'not_a_group' };
   const sock = source(groupId);
   if (!sock) return { state: 'failed', code: 'whatsapp_not_connected' };
+  const tagged = [...new Set(mentions)].filter((id) => MENTION_ID.test(id)).slice(0, MENTIONS_MAX);
+  const content = tagged.length > 0 ? { text, mentions: tagged } : { text };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<'timeout'>((resolve) => {
     timer = setTimeout(() => resolve('timeout'), timeoutMs);
   });
   try {
-    const sent = await Promise.race([sock.sendMessage(groupId, { text }, quoted ? { quoted } : undefined), timeout]);
+    const sent = await Promise.race([sock.sendMessage(groupId, content, quoted ? { quoted } : undefined), timeout]);
     if (sent === 'timeout') return { state: 'unknown', code: 'timeout' };
     const id = sent?.key?.id;
     return typeof id === 'string' && id !== '' ? { state: 'sent', waId: id } : { state: 'unknown', code: 'no_message_id' };

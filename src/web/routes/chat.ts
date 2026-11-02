@@ -7,7 +7,7 @@ import type { Db } from '../../store/db.ts';
 import { claimedSince, claimOutbox, finishOutbox, lastClaimedAt, markSending, outboxByUuid, type OutboxRow } from '../../store/outbox.ts';
 import type { Clock } from '../../util/clock.ts';
 import type { Logger } from '../../util/logger.ts';
-import type { GroupMembersSource } from '../../wa/groupMembers.ts';
+import { mentionTags, tagOf, type GroupMembersSource } from '../../wa/groupMembers.ts';
 import { sendGroupText, type GroupSocketSource, type QuotedMessage, type SendOutcome } from '../../wa/groupSend.ts';
 import { fail, ok, type ApiError, type ApiResult, type AuditFn, type OwnerContext } from './context.ts';
 
@@ -159,6 +159,18 @@ export async function chatSendHandler(deps: ChatDeps, ctx: OwnerContext, code: s
     quoted = { key: { remoteJid: c.groupId, id: q.waId, fromMe: q.fromMe === 1, participant: q.senderJid }, message: { conversation: q.text ?? '' } };
   }
 
+  // Tags (November release): "@<digits>" in the confirmed text names a member, and the message tags exactly the group's
+  // members named so. The members can't be read: refused here, before anything is claimed, so nothing goes untagged.
+  let mentions: string[] = [];
+  const tags = mentionTags(text);
+  if (tags.size > 0) {
+    const members = deps.connected() && deps.groupMembers ? await deps.groupMembers(c.groupId) : null;
+    if (!members) {
+      return fail(409, 'mentions_unavailable', "The group's members can't be read from WhatsApp right now, so the tags can't be checked. Nothing was sent. Try again in a minute.");
+    }
+    mentions = members.filter((m) => tags.has(tagOf(m.id))).map((m) => m.id);
+  }
+
   // The limits and the claim in one write transaction: two requests at once cannot both pass.
   const now = deps.clock.now();
   const claim = await deps.db.tx(async (tx): Promise<{ row: OutboxRow } | { limited: ApiResult<ApiError> } | { taken: OutboxRow }> => {
@@ -179,8 +191,8 @@ export async function chatSendHandler(deps: ChatDeps, ctx: OwnerContext, code: s
 
   // Logged before WhatsApp is asked: a crash mid-send leaves the row "sending" (unknown at the next start), and this line.
   await markSending(deps.db, claim.row.id, deps.clock.now().toISOString());
-  deps.log.info({ client: c.code, outbox: claim.row.id, chars: text.length, requestId: ctx.requestId }, 'dashboard send: asking WhatsApp');
-  const outcome = await sendGroupText(deps.groupSocket, c.groupId, text, quoted, deps.sendTimeoutMs);
+  deps.log.info({ client: c.code, outbox: claim.row.id, chars: text.length, tagged: mentions.length, requestId: ctx.requestId }, 'dashboard send: asking WhatsApp');
+  const outcome = await sendGroupText(deps.groupSocket, c.groupId, text, quoted, deps.sendTimeoutMs, mentions);
   const done = await finishOutbox(deps.db, claim.row.id, {
     state: outcome.state, waId: outcome.state === 'sent' ? outcome.waId : null, errorCode: outcome.state === 'sent' ? null : outcome.code,
     at: deps.clock.now().toISOString(),
@@ -190,7 +202,7 @@ export async function chatSendHandler(deps: ChatDeps, ctx: OwnerContext, code: s
     await deps.audit({
       actor: ctx.actor, kind: 'ops', requestId: ctx.requestId,
       event: `Message ${OUTCOME_WORDS[outcome.state]} · ${c.name} (${c.code})`,
-      detail: `${text.length} characters${replyTo !== null ? ', a reply' : ''}${outcome.state === 'sent' ? '' : ` · ${outcome.code}`}`,
+      detail: `${text.length} characters${replyTo !== null ? ', a reply' : ''}${mentions.length > 0 ? `, ${mentions.length} tagged` : ''}${outcome.state === 'sent' ? '' : ` · ${outcome.code}`}`,
     });
   } catch (e) {
     deps.log.warn({ code: (e as Error | null)?.name ?? 'Error', requestId: ctx.requestId }, 'audit line for a dashboard send could not be written');

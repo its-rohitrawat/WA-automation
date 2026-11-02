@@ -2,7 +2,22 @@ import { describe, expect, it } from 'vitest';
 // The browser's own module, checked by tsconfig.web.json, which this project's tsconfig does not include: the import is
 // untyped here, as in tests/web/public.test.ts.
 // @ts-expect-error -- browser module (see above)
-import { readMembers } from '../../src/web/public/contract.js';
+import { readChat, readMembers } from '../../src/web/public/contract.js';
+
+describe('readChat: the names of the tags on the page (tagging)', () => {
+  it('keeps a name for each tag the agent knows; anything else is dropped', () => {
+    const r = readChat({ names: { '919800000001': 'Rahul', '203333333333333': 'Sana', 'abc': 'Bad key', '919800000002': '', '919800000003': 42, '1234': 'Too short' } });
+    expect(r.names).toEqual({ '919800000001': 'Rahul', '203333333333333': 'Sana' });
+    expect(readChat({}).names).toEqual({});
+    expect(readChat({ names: ['Rahul'] }).names).toEqual({});
+  });
+
+  it('a name is cut to 80 characters, and a key like __proto__ is never taken', () => {
+    const r = readChat({ names: JSON.parse('{"__proto__": "x", "919800000001": "' + 'N'.repeat(200) + '"}') });
+    expect(Object.keys(r.names)).toEqual(['919800000001']);
+    expect(r.names['919800000001'].length).toBe(80);
+  });
+});
 
 // The browser's reading of the group info panel's answer (November release, change 2): coerced defensively, so a
 // missing or odd field becomes an empty value and the panel never breaks or shows a WhatsApp id.

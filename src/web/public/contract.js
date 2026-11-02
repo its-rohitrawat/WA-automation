@@ -349,7 +349,23 @@ export function readChat(raw) {
       })
       .filter((m) => m.id > 0 && m.at !== null),
     outbox: arr(r.outbox).map(outboxOf).filter((o) => o.uuid && o.at !== null),
+    names: tagNames(r.names),
   };
+}
+
+/**
+ * The names of the tags on a chat page: digits (a tag) to the agent's name for that member. Anything else is dropped.
+ * @param {unknown} v @returns {Record<string, string>}
+ */
+function tagNames(v) {
+  /** @type {Record<string, string>} */
+  const out = {};
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return out;
+  for (const [k, n] of Object.entries(v)) {
+    const name = typeof n === 'string' ? cut(n, 80) : '';
+    if (/^\d{5,20}$/.test(k) && name) out[k] = name;
+  }
+  return out;
 }
 
 /** The answer to POST /clients/:code/chat/send. @param {unknown} raw */

@@ -21,13 +21,24 @@ const desk = matchMedia('(hover: hover) and (pointer: fine)');
 
 /** @typedef {ReturnType<typeof readChat>} ChatData */
 /** @typedef {ChatData['messages'][number]} Msg */
-/** @typedef {ChatData['outbox'][number] & { local?: 'inflight' | 'lost', reason?: string }} Out */
+/**
+ * A dashboard message. Sent from here: `shown` is the text as typed ("@Name") and `picks` its tags, to put back in the box
+ * when the agent refuses it.
+ * @typedef {ChatData['outbox'][number] & { local?: 'inflight' | 'lost', reason?: string, shown?: string, picks?: [string, string][] }} Out
+ */
+
+/** @typedef {ReturnType<typeof readMembers>['members'][number]} Member */
 
 /**
- * The open chat, or null.
+ * The open chat, or null. Tagging (November release): `names` are the agent's names for the tags on the pages shown;
+ * `members` the group's members (read when the picker or the group info first needs them) and `labels` the name each
+ * shows as in the composer ("@Label"); `picks` the members tagged in the draft, by label.
  * @type {{ code: string, el: HTMLElement, messages: Map<number, Msg>, outbox: Map<string, Out>, hasOlder: boolean,
  *   loadingOlder: boolean, sendingOn: boolean, connected: boolean, groupName: string, clientName: string, replyTo: Msg | null,
- *   draft: string, armed: boolean, onBack: () => void } | null}
+ *   draft: string, armed: boolean, onBack: () => void, names: Record<string, string>, members: Member[] | null,
+ *   reading: Promise<{ name: string, members: Member[] } | { name: string, note: string }> | null,
+ *   failed: { note: string, at: number } | null, labels: Map<string, string>, picks: Map<string, string>,
+ *   picker: { start: number, query: string, active: number } | null } | null}
  */
 let chat = null;
 
@@ -74,6 +85,26 @@ function quoteBlock(q) {
   return `<div class="ch-quote"><b class="${tone(q.sender)}">${esc(q.sender)}</b><span>${esc(text)}</span></div>`;
 }
 
+/** A tag in a message's text, as the agent finds it (src/wa/groupMembers.ts mentionTags). */
+const TAG = /(?<![\p{L}\p{N}_])@(\d{5,20})(?!\d)/gu;
+
+/**
+ * A message's text, its tags ("@<digits>") highlighted: as "@Name" when the agent knows the member, else as the text has
+ * it (the bubble adds no number). Every piece goes through esc(). @param {string} text
+ */
+function richText(text) {
+  const names = chat?.names ?? {};
+  let out = '';
+  let last = 0;
+  for (const m of text.matchAll(TAG)) {
+    const at = m.index ?? 0;
+    const tag = m[1] ?? '';
+    out += `${esc(text.slice(last, at))}<span class="ch-at">@${esc(Object.hasOwn(names, tag) ? names[tag] : tag)}</span>`;
+    last = at + m[0].length;
+  }
+  return out + esc(text.slice(last));
+}
+
 /** A stored message. `showName`: the first of a run by one sender (in a group, names show on others' messages only). @param {Msg} m @param {boolean} showName */
 function bubble(m, showName) {
   if (m.deleted) {
@@ -81,7 +112,7 @@ function bubble(m, showName) {
   }
   const name = !m.mine && showName ? `<b class="ch-name ${tone(m.sender)}">${esc(m.sender)}</b>` : '';
   const transcript = m.transcript ? `<p class="ch-tr">${esc(m.transcript)}</p>` : '';
-  const text = m.text ? `<p>${esc(m.text)}</p>` : '';
+  const text = m.text ? `<p>${richText(m.text)}</p>` : '';
   const replyBtn = chat?.sendingOn ? `<button class="ch-reply" type="button" data-reply="${m.id}" aria-label="Reply to ${esc(m.sender)}">${icon('undo', 14)}</button>` : '';
   return `<div class="ch-row ${m.mine ? 'out' : 'in'}" data-msg="${m.id}"><div class="ch-bub">${name}${quoteBlock(m.quote)}${kindTag(m.kind, m.seconds)}${transcript}${text}
     <span class="ch-meta">${m.edited ? 'edited · ' : ''}${esc(clock(m.at))}</span></div>${replyBtn}</div>`;
@@ -98,7 +129,7 @@ function outState(o) {
 /** A message sent (or being sent) from here that the chat shows on its own. @param {Out} o */
 function outBubble(o) {
   const s = outState(o);
-  return `<div class="ch-row out ch-own ${s.cls}" data-out="${esc(o.uuid)}"><div class="ch-bub">${quoteBlock(o.quote)}<p>${esc(o.text)}</p>
+  return `<div class="ch-row out ch-own ${s.cls}" data-out="${esc(o.uuid)}"><div class="ch-bub">${quoteBlock(o.quote)}<p>${richText(o.text)}</p>
     <span class="ch-meta">${esc(clock(o.at))} <span class="ch-state">${icon(s.ic, 13)}${esc(s.words)}</span></span></div></div>`;
 }
 
@@ -143,8 +174,9 @@ function footHtml() {
     ? `<div class="ch-replying"><div class="grow-1">${quoteBlock({ sender: r.sender, text: r.text, kind: r.kind })}</div>
         <button class="icon-btn" type="button" data-reply-cancel aria-label="Cancel the reply">${icon('close', 15)}</button></div>`
     : '';
-  return `${reply}<form class="ch-compose" data-compose><label class="sr-only" for="ch-text">Message to ${esc(chat.groupName)}</label>
-    <textarea id="ch-text" rows="1" maxlength="${TEXT_MAX}" placeholder="Message" autocomplete="off">${esc(chat.draft)}</textarea>
+  return `${reply}<div class="ch-pick" id="ch-pick" role="listbox" aria-label="Tag a member" hidden></div>
+    <form class="ch-compose" data-compose><label class="sr-only" for="ch-text">Message to ${esc(chat.groupName)}. Type @ to tag a member.</label>
+    <textarea id="ch-text" rows="1" maxlength="${TEXT_MAX}" placeholder="Message" autocomplete="off" aria-autocomplete="list" aria-controls="ch-pick">${esc(chat.draft)}</textarea>
     <button class="ch-send" type="submit" aria-label="Send">${icon('arrowR', 20)}</button></form>
     <p class="ch-note">Sent from the founder's WhatsApp to everyone in the group, after you confirm.</p>`;
 }
@@ -160,6 +192,7 @@ function draw(o = {}) {
   // The foot first: its height changes the list's, and the list's place is set after.
   if (o.foot) {
     const typing = document.activeElement?.id === 'ch-text';
+    chat.picker = null; // a new box: no picker open in it
     $('.ch-foot', chat.el).innerHTML = footHtml();
     grow();
     if (typing) /** @type {HTMLElement | null} */ (chat.el.querySelector('#ch-text'))?.focus({ preventScroll: true });
@@ -180,6 +213,7 @@ function grow() {
 function take(d, newest) {
   if (!chat) return;
   for (const m of d.messages) chat.messages.set(m.id, m);
+  Object.assign(chat.names, d.names);
   if (!newest) {
     chat.hasOlder = d.hasOlder;
     return;
@@ -241,24 +275,31 @@ async function send() {
   const c = chat;
   if (!c) return;
   const box = /** @type {HTMLTextAreaElement | null} */ (c.el.querySelector('#ch-text'));
-  const text = box?.value ?? '';
-  if (!text.trim()) return;
+  const shown = box?.value ?? '';
+  if (!shown.trim()) return;
+  hidePicker(c);
+  // The confirm shows the message as the members read it ("@Name"); WhatsApp gets its own form ("@<digits>").
+  const { text, tagged } = toWhatsApp(shown, c.picks);
   if (text.length > TEXT_MAX) return toast(`A message can be at most ${TEXT_MAX} characters.`, false);
   const yes = await confirmDialog({
     eyebrow: 'Send from WhatsApp',
     title: `Send this from your WhatsApp to ${c.groupName}?`,
-    text: 'Everyone in the group sees it, from the founder’s number. It cannot be taken back from here.',
-    quote: text,
+    text: `Everyone in the group sees it, from the founder’s number.${tagged.length ? ` It tags ${tagged.join(', ')} on their phones.` : ''} It cannot be taken back from here.`,
+    quote: shown,
     yes: 'Send',
   });
   if (!yes || chat !== c) return;
   const uuid = crypto.randomUUID();
   const r = c.replyTo;
   /** @type {Out} */
-  const out = { uuid, at: new Date().toISOString(), text, state: 'sending', quote: r ? { sender: r.sender, text: r.text, kind: r.kind } : null, local: 'inflight' };
+  const out = {
+    uuid, at: new Date().toISOString(), text, state: 'sending', quote: r ? { sender: r.sender, text: r.text, kind: r.kind } : null, local: 'inflight',
+    shown, picks: [...c.picks],
+  };
   c.outbox.set(uuid, out);
   c.replyTo = null;
   c.draft = '';
+  c.picks = new Map();
   draw({ foot: true, toEnd: true });
   await deliver(c, out, r ? r.id : null, 0);
 }
@@ -279,7 +320,11 @@ async function deliver(c, out, replyTo, tries) {
     if (chat !== c) return;
     if (e instanceof ApiError) {
       c.outbox.delete(out.uuid);
-      if (!c.draft) c.draft = out.text;
+      // Back in the box as it was typed, with its tags.
+      if (!c.draft) {
+        c.draft = out.shown ?? out.text;
+        c.picks = new Map(out.picks ?? []);
+      }
       toast(e.message, false);
       draw({ foot: true });
       return;
@@ -298,49 +343,207 @@ function forget() {
   chat = null;
 }
 
+/** Tagging is possible: sending is on and WhatsApp is connected (the composer is shown). */
+const canTag = () => Boolean(chat?.sendingOn && chat.connected);
+
 /**
  * The group info panel's body: the group, then a note (loading, or why the members can't be shown) or the members. A
- * member is its name, else the number WhatsApp shows, else "Number hidden"; names are untrusted (esc).
- * @param {string} groupName @param {{ note: string } | { members: ReturnType<typeof readMembers>['members'] }} s
+ * member is its name, else the number WhatsApp shows, else "Number hidden"; names are untrusted (esc). While sending is
+ * possible, tapping a member puts "@Name" in the message.
+ * @param {string} groupName @param {{ note: string } | { members: Member[] }} s
  */
 function infoBody(groupName, s) {
   const top = `<div class="ch-info-top"><span class="ch-info-av" aria-hidden="true">${icon('users', 34)}</span><h3>${esc(groupName)}</h3>`;
   if ('note' in s) return `${top}<p class="ch-info-count">${esc(s.note)}</p></div>`;
   const n = s.members.length;
+  const tag = canTag();
   const rows = s.members
     .map((m) => {
       const title = m.name ?? m.number ?? 'Number hidden';
       const sub = m.name ? m.number ?? 'Number hidden' : m.number ? '' : 'WhatsApp hides this member’s number';
-      return `<li class="ch-mem"><span class="ch-mem-av" aria-hidden="true">${icon('user', 18)}</span><span class="grow-1 ch-mem-text"><b>${esc(title)}</b>${sub ? `<small>${esc(sub)}</small>` : ''}</span>${m.admin ? '<span class="ch-admin">Group admin</span>' : ''}</li>`;
+      const inner = `<span class="ch-mem-av" aria-hidden="true">${icon('user', 18)}</span><span class="grow-1 ch-mem-text"><b>${esc(title)}</b>${sub ? `<small>${esc(sub)}</small>` : ''}</span>${m.admin ? '<span class="ch-admin">Group admin</span>' : ''}`;
+      return tag
+        ? `<li><button class="ch-mem ch-mem-btn" type="button" data-tag="${esc(m.tag)}" aria-label="Tag ${esc(title)} in your message">${inner}</button></li>`
+        : `<li class="ch-mem">${inner}</li>`;
     })
     .join('');
-  return `${top}<p class="ch-info-count">Group · ${n} member${n === 1 ? '' : 's'}</p></div><ul class="ch-mems" aria-label="Members">${rows}</ul>`;
+  const hint = tag && n ? ' · Tap a member to tag them' : '';
+  return `${top}<p class="ch-info-count">Group · ${n} member${n === 1 ? '' : 's'}${hint}</p></div><ul class="ch-mems" aria-label="Members">${rows}</ul>`;
 }
 
-/** Opens the group info panel over the chat and reads the members (kept 5 minutes by the agent). */
+/** How long a failed read of the members is remembered before the picker asks again (the agent asks WhatsApp each time). */
+const RETRY_MS = 30_000;
+
+/**
+ * Reads the group's members (the agent keeps them 5 minutes); read, they are kept for this chat's tagging. One read at a
+ * time: a second ask waits for it.
+ * @param {NonNullable<typeof chat>} c @returns {Promise<{ name: string, members: Member[] } | { name: string, note: string }>}
+ */
+function fetchMembers(c) {
+  c.reading ??= (async () => {
+    /** @type {{ name: string, members: Member[] } | { name: string, note: string }} */
+    let r;
+    try {
+      const d = readMembers(await get(`/clients/${encodeURIComponent(c.code)}/chat/members`));
+      const name = d.groupName || c.groupName;
+      r = d.known
+        ? { name, members: d.members }
+        : { name, note: d.reason === 'whatsapp_not_connected' ? 'WhatsApp is not connected, so the members can’t be shown now.' : 'The members could not be read from WhatsApp just now. Try again in a minute.' };
+    } catch (e) {
+      r = { name: c.groupName, note: e instanceof ApiError ? e.message : 'The members could not be loaded.' };
+    }
+    c.reading = null;
+    if ('members' in r) {
+      setMembers(c, r.members);
+      c.failed = null;
+    } else c.failed = { note: r.note, at: Date.now() };
+    return r;
+  })();
+  return c.reading;
+}
+
+/**
+ * Keeps the members, each with the label it shows as in the composer: its name, else its number, else "Member" and the
+ * last 4 digits of its tag. A label two members share gets those 4 digits too, so a tag is never ambiguous.
+ * @param {NonNullable<typeof chat>} c @param {Member[]} members
+ */
+function setMembers(c, members) {
+  const base = (/** @type {Member} */ m) => m.name ?? m.number ?? `Member ${m.tag.slice(-4)}`;
+  /** @type {Map<string, number>} */
+  const count = new Map();
+  for (const m of members) count.set(base(m), (count.get(base(m)) ?? 0) + 1);
+  c.members = members;
+  c.labels = new Map(members.map((m) => [m.tag, (count.get(base(m)) ?? 0) > 1 ? `${base(m)} ${m.tag.slice(-4)}` : base(m)]));
+}
+
+/** Opens the group info panel over the chat and reads the members. */
 async function openInfo() {
   const c = chat;
   if (!c) return;
+  hidePicker(c);
   const panel = /** @type {HTMLElement} */ ($('.ch-info', c.el));
   panel.innerHTML = `<div class="ch-info-head"><button class="icon-btn" type="button" data-info-back aria-label="Back to the chat">${icon('arrowL', 18)}</button><b>Group info</b></div>
     <div class="ch-info-body">${infoBody(c.groupName, { note: 'Loading the members…' })}</div>`;
   panel.hidden = false;
   /** @type {HTMLElement | null} */ (panel.querySelector('[data-info-back]'))?.focus();
-  /** @type {{ note: string } | { members: ReturnType<typeof readMembers>['members'] }} */
-  let s;
-  let name = c.groupName;
-  try {
-    const d = readMembers(await get(`/clients/${encodeURIComponent(c.code)}/chat/members`));
-    name = d.groupName || name;
-    s = d.known
-      ? { members: d.members }
-      : { note: d.reason === 'whatsapp_not_connected' ? 'WhatsApp is not connected, so the members can’t be shown now.' : 'The members could not be read from WhatsApp just now. Try again in a minute.' };
-  } catch (e) {
-    s = { note: e instanceof ApiError ? e.message : 'The members could not be loaded.' };
-  }
+  const r = await fetchMembers(c);
   if (chat !== c || panel.hidden) return;
   const body = panel.querySelector('.ch-info-body');
-  if (body) body.innerHTML = infoBody(name, s);
+  if (body) body.innerHTML = infoBody(r.name, 'note' in r ? { note: r.note } : { members: r.members });
+}
+
+/** The "@word" being typed right before the caret, or null. @param {HTMLTextAreaElement} t */
+function typedTag(t) {
+  const caret = t.selectionStart ?? t.value.length;
+  const m = /(?:^|\s)@([^\s@]{0,30})$/u.exec(t.value.slice(0, caret));
+  if (!m) return null;
+  const query = m[1] ?? '';
+  return { start: caret - query.length - 1, query };
+}
+
+/** The members the picker offers for what was typed after "@": by name or number, at most 8. @param {NonNullable<typeof chat>} c @param {string} q */
+function matching(c, q) {
+  const s = q.toLowerCase();
+  const digits = q.replace(/\D/g, '');
+  return (c.members ?? [])
+    .filter((m) => !s || (c.labels.get(m.tag) ?? '').toLowerCase().includes(s) || (digits !== '' && (m.number ?? '').replace(/\D/g, '').includes(digits)))
+    .slice(0, 8);
+}
+
+/** Hides the member picker. @param {NonNullable<typeof chat>} c */
+function hidePicker(c) {
+  c.picker = null;
+  const box = c.el.querySelector('#ch-pick');
+  if (box instanceof HTMLElement) {
+    box.hidden = true;
+    box.innerHTML = '';
+  }
+  c.el.querySelector('#ch-text')?.removeAttribute('aria-activedescendant');
+}
+
+/** Shows the member picker for the "@word" being typed, as in WhatsApp; hides it otherwise. */
+async function updatePicker() {
+  const c = chat;
+  if (!c) return;
+  const t = c.el.querySelector('#ch-text');
+  const box = c.el.querySelector('#ch-pick');
+  if (!(t instanceof HTMLTextAreaElement) || !(box instanceof HTMLElement)) return;
+  const typed = typedTag(t);
+  if (!typed) return hidePicker(c);
+  c.picker = { start: typed.start, query: typed.query, active: c.picker && c.picker.query === typed.query ? c.picker.active : 0 };
+  if (!c.members) {
+    box.hidden = false;
+    // A read that failed a moment ago is not asked again yet.
+    if (c.failed && Date.now() - c.failed.at < RETRY_MS) {
+      box.innerHTML = `<p class="ch-pick-note">${esc(c.failed.note)}</p>`;
+      return;
+    }
+    box.innerHTML = '<p class="ch-pick-note">Loading the members…</p>';
+    const r = await fetchMembers(c);
+    if (chat !== c || !c.picker) return;
+    if (!c.members) {
+      box.innerHTML = `<p class="ch-pick-note">${esc('note' in r ? r.note : '')}</p>`;
+      return;
+    }
+    return updatePicker();
+  }
+  const list = matching(c, typed.query);
+  if (list.length === 0) return hidePicker(c);
+  const p = c.picker;
+  p.active = Math.min(p.active, list.length - 1);
+  box.hidden = false;
+  box.innerHTML = list
+    .map((m, i) => {
+      const sub = m.name ? m.number ?? 'Number hidden' : '';
+      return `<button type="button" class="ch-pick-item${i === p.active ? ' on' : ''}" role="option" id="ch-pick-${i}" aria-selected="${i === p.active}" data-pick="${esc(m.tag)}" tabindex="-1"><span class="ch-mem-av" aria-hidden="true">${icon('user', 16)}</span><span class="ch-mem-text"><b>${esc(c.labels.get(m.tag) ?? '')}</b>${sub ? `<small>${esc(sub)}</small>` : ''}</span></button>`;
+    })
+    .join('');
+  t.setAttribute('aria-activedescendant', `ch-pick-${p.active}`);
+}
+
+/**
+ * Puts "@Label " in the message: in place of the "@word" being typed, or at the end (from the group info panel). The tag
+ * is kept by its label until the message is sent.
+ * @param {NonNullable<typeof chat>} c @param {string} tag
+ */
+function insertTag(c, tag) {
+  const t = c.el.querySelector('#ch-text');
+  const label = c.labels.get(tag);
+  const m = c.members?.find((x) => x.tag === tag);
+  if (!(t instanceof HTMLTextAreaElement) || !label || !m) return;
+  const caret = c.picker ? t.selectionStart ?? t.value.length : t.value.length;
+  const start = c.picker ? c.picker.start : caret;
+  const before = t.value.slice(0, start);
+  const lead = before === '' || /\s$/.test(before) ? '' : ' ';
+  const token = `${lead}@${label} `;
+  t.value = before + token + t.value.slice(caret);
+  const at = (before + token).length;
+  t.setSelectionRange(at, at);
+  c.draft = t.value;
+  c.picks.set(label, tag);
+  // The bubble shows "@Name" for a named member only: never a number (the text keeps its own digits).
+  if (m.name) c.names[tag] = m.name;
+  hidePicker(c);
+  grow();
+  t.focus();
+}
+
+/**
+ * The text as WhatsApp gets it: each tagged "@Label" as "@<digits>" (longest labels first, so one never eats another);
+ * and who it tags, by label. A label the owner edited away is no tag.
+ * @param {string} shown @param {Map<string, string>} picks
+ */
+function toWhatsApp(shown, picks) {
+  let text = shown;
+  /** @type {string[]} */
+  const tagged = [];
+  for (const [label, tag] of [...picks].sort((a, b) => b[0].length - a[0].length)) {
+    const re = new RegExp(`@${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'gu');
+    const next = text.replace(re, `@${tag}`);
+    if (next !== text) tagged.push(label);
+    text = next;
+  }
+  return { text, tagged };
 }
 
 /** Back to the chat from the group info panel. */
@@ -369,6 +572,7 @@ export function openChat(code, onBack) {
   chat = {
     code, el, messages: new Map(), outbox: new Map(), hasOlder: false, loadingOlder: false, sendingOn: false, connected: false,
     groupName: code, clientName: '', replyTo: null, draft: '', armed: false, onBack,
+    names: {}, members: null, reading: null, failed: null, labels: new Map(), picks: new Map(), picker: null,
   };
   const body = /** @type {HTMLElement} */ ($('.ch-body', el));
   // Scrolling up near the top loads the page before; the button does the same for keyboards. Checked on scroll, and
@@ -387,6 +591,16 @@ export function openChat(code, onBack) {
       back();
       return;
     }
+    // Tagging: a member picked under the box, or tapped in the group info (the panel closes and the tag goes in).
+    const pick = /** @type {HTMLElement | null} */ (t.closest('[data-pick]'));
+    if (pick) return insertTag(chat, pick.dataset.pick ?? '');
+    const member = /** @type {HTMLElement | null} */ (t.closest('[data-tag]'));
+    if (member) {
+      const tag = member.dataset.tag ?? '';
+      closeInfo();
+      return insertTag(chat, tag);
+    }
+    if (t.id === 'ch-text') return void updatePicker(); // the caret moved
     if (t.closest('[data-chat-info]')) return void openInfo();
     if (t.closest('[data-info-back]')) return closeInfo();
     if (t.closest('.ch-older')) return void loadOlder();
@@ -418,11 +632,33 @@ export function openChat(code, onBack) {
     if (t.id !== 'ch-text' || !chat) return;
     chat.draft = t.value;
     grow();
+    void updatePicker();
+  });
+  // A member picked with the mouse keeps the box's focus and caret.
+  el.addEventListener('mousedown', (e) => {
+    if (/** @type {Element} */ (e.target).closest('[data-pick]')) e.preventDefault();
+  });
+  el.addEventListener('keyup', (e) => {
+    const t = /** @type {HTMLElement} */ (e.target);
+    if (t.id === 'ch-text' && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) void updatePicker();
   });
   el.addEventListener('keydown', (e) => {
+    const t = /** @type {HTMLElement} */ (e.target);
+    // The member picker, while it lists members: arrows move, Enter or Tab picks, Escape closes it (not the chat).
+    const p = chat?.picker;
+    const items = el.querySelectorAll('#ch-pick [data-pick]');
+    if (chat && p && t.id === 'ch-text' && items.length > 0 && ['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key) && !e.isComposing) {
+      e.preventDefault();
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        return hidePicker(chat);
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') return insertTag(chat, /** @type {HTMLElement} */ (items[p.active] ?? items[0]).dataset.pick ?? '');
+      p.active = (p.active + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length;
+      return void updatePicker();
+    }
     // With a keyboard and mouse, Enter sends (after the confirm) and Shift+Enter is a new line; on a phone, Enter is a
     // new line and the Send button sends, as in WhatsApp.
-    const t = /** @type {HTMLElement} */ (e.target);
     if (t.id === 'ch-text' && e.key === 'Enter' && !e.shiftKey && !e.isComposing && desk.matches) {
       e.preventDefault();
       void send();

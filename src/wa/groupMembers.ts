@@ -59,3 +59,11 @@ export function membersOf(meta: Pick<GroupMetadata, 'participants'> | undefined)
 export function tagOf(id: string): string {
   return id.split('@')[0]!.split(':')[0]!;
 }
+
+/** A tag in a message's text: "@" (not inside a word), then 5 to 20 digits, and no digit after. */
+const TAG = /(?<![\p{L}\p{N}_])@(\d{5,20})(?!\d)/gu;
+
+/** The tags a message's text holds, once each, in order: what WhatsApp reads as "@<member>". */
+export function mentionTags(text: string): Set<string> {
+  return new Set([...text.matchAll(TAG)].map((m) => m[1]!));
+}
