@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import type { ClientConfig } from '../../src/config/groups.ts';
 import { AllowList } from '../../src/wa/allowlist.ts';
 import type { GatewayLike, GatewayState, GatewayStatus, HistoryAnswer } from '../../src/wa/gateway.ts';
+import type { ChatDeleteSocket } from '../../src/wa/chatDelete.ts';
+import type { GroupMember } from '../../src/wa/groupMembers.ts';
 import type { GroupSendSocket } from '../../src/wa/groupSend.ts';
 import type { NormalizedEvent } from '../../src/wa/normalize.ts';
 import { PhoneSet } from '../../src/wa/phoneSet.ts';
@@ -82,6 +84,14 @@ class FakeGateway implements GatewayLike {
   }
   droppedCount(): number {
     return this.dropped;
+  }
+  async groupMembers(groupId: string) {
+    if (this.state !== 'open' || !this.allow.has(groupId)) return null;
+    return [{ jid: `member-of-${groupId}` }] as unknown as GroupMember[];
+  }
+  chatDeleteSocket(groupId: string): ChatDeleteSocket | null {
+    if (this.state !== 'open' || !this.allow.has(groupId)) return null;
+    return { name: `delete socket of ${groupId}` } as unknown as ChatDeleteSocket;
   }
   async fetchHistory(groupId: string): Promise<boolean> {
     if (this.state !== 'open' || !this.allow.has(groupId)) return false;
@@ -171,6 +181,20 @@ describe('PhoneSet', () => {
     expect(set.groupSocket(G2)).toBeNull(); // phone 1 is open, but G2 is phone 2's
     expect(await set.fetchHistory(G2, { waId: 'x', fromMe: false, ts: new Date(AT) }, 10)).toBe(false);
     expect(set.groupSocket('120363000000000009@g.us')).toBeNull(); // approved nowhere
+  });
+
+  it('Open chat’s members and Delete chat’s socket go to the group’s own phone only (lane B’s methods, routed)', async () => {
+    const { set, add } = setup();
+    add(1);
+    const two = add(2);
+    set.setConfigs([cfg(G1, 'AAA'), cfg(G2, 'BBB', 2)]);
+    set.start();
+    expect(await set.groupMembers(G2)).toEqual([{ jid: `member-of-${G2}` }]);
+    expect(set.chatDeleteSocket(G2)).toEqual({ name: `delete socket of ${G2}` });
+    two.set('closed');
+    expect(await set.groupMembers(G2)).toBeNull(); // phone 1 is open, but G2 is phone 2's
+    expect(set.chatDeleteSocket(G2)).toBeNull();
+    expect(set.chatDeleteSocket('120363000000000009@g.us')).toBeNull(); // approved nowhere
   });
 
   it('status: open only when every phone is; otherwise the worst, naming that phone; phones() gives each', () => {

@@ -2,7 +2,9 @@ import type { ClientConfig } from '../config/groups.ts';
 import type { Clock } from '../util/clock.ts';
 import type { AllowList } from './allowlist.ts';
 import type { PhoneId } from './authState.ts';
+import type { ChatDeleteSocket } from './chatDelete.ts';
 import type { EventHandler, GatewayLike, GatewayState, GatewayStatus, HistoryAnchor, HistoryAnswer } from './gateway.ts';
+import type { GroupMember } from './groupMembers.ts';
 import type { GroupSendSocket } from './groupSend.ts';
 import { NotConnectedError } from './switchableGateway.ts';
 
@@ -189,6 +191,17 @@ export class PhoneSet implements GatewayLike {
   /** The group's own phone's socket; null when that phone is not in the set or not open (never another phone's). */
   groupSocket(groupId: string): GroupSendSocket | null {
     return this.#memberFor(groupId)?.gateway.groupSocket?.(groupId) ?? null;
+  }
+
+  /** The group's members, read through its own phone; null when that phone is not in the set or cannot ask. */
+  async groupMembers(groupId: string): Promise<GroupMember[] | null> {
+    const m = this.#memberFor(groupId);
+    return m?.gateway.groupMembers ? m.gateway.groupMembers(groupId) : null;
+  }
+
+  /** Delete chat's socket: the group's own phone's only, null otherwise (never another phone's). */
+  chatDeleteSocket(groupId: string): ChatDeleteSocket | null {
+    return this.#memberFor(groupId)?.gateway.chatDeleteSocket?.(groupId) ?? null;
   }
 
   #memberFor(groupId: string): Member | undefined {
