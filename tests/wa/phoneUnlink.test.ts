@@ -120,7 +120,7 @@ describe('unlinking a phone', () => {
     expect(w.set.phones().map((p) => p.id)).toEqual([1]);
     expect(w.list.get(2)).toMatchObject({ state: 'unlinked', label: 'Front desk' });
     expect(w.audits).toEqual([expect.objectContaining({ event: 'phone.unlinked', kind: 'connection', actor: OWNER })]);
-    expect(w.audits[0]!.detail).toMatch(/^Phone 2 unlinked: Front desk \(.*0002\)$/);
+    expect(w.audits[0]!.detail).toMatch(/^Phone 2 unlinked: Front desk \(.*0002\)\. WhatsApp confirmed it\.$/);
     expect(w.audits[0]!.detail).not.toContain('919800000002');
     expect(await hasSessionRows(w.sessionTwo)).toBe(false);
     expect(await hasSessionRows(w.sessionOne)).toBe(true);
@@ -132,6 +132,22 @@ describe('unlinking a phone', () => {
     expect(r.loggedOut).toBe(false);
     expect(w.list.get(2)?.state).toBe('unlinked');
     expect(await hasSessionRows(w.sessionTwo)).toBe(false);
+    expect(w.audits[0]!.detail).toMatch(/\. WhatsApp did not answer\.$/);
+  });
+
+  it('logs that it is asking WhatsApp before it asks, so a crash while waiting leaves a trace (no number in it)', async () => {
+    let lines: string[] = [];
+    let seenBefore: string[] = [];
+    const w = await workspace({
+      endLink: async () => {
+        seenBefore = [...lines];
+        return true;
+      },
+    });
+    lines = w.lines;
+    await w.unlink();
+    expect(seenBefore.some((l) => l.includes('asking WhatsApp to unlink a reading phone'))).toBe(true);
+    expect(w.lines.join('\n')).not.toContain('919800000002');
   });
 
   it('a session that cannot be cleared leaves the phone unlinked (never started again), logged without the number', async () => {

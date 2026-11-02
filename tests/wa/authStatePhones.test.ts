@@ -7,7 +7,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { Db } from '../../src/store/db.ts';
 import {
   backupAndReset, hasSessionRows, openPhoneSession, openSessionDb, PgSessionDb, phoneIdOf, phoneName, phoneNumberIn, phoneSessionKey,
-  resetSession, restoreBackup, SessionDecryptError, sessionStored, useEncryptedAuthState, type Phone, type SessionHome,
+  resetSession, restoreBackup, SessionDecryptError, sessionStored, spareNumberIn, useEncryptedAuthState, useSenderAuthState,
+  type Phone, type SessionHome,
 } from '../../src/wa/authState.ts';
 
 // Reading phones 2 to 5 (lane C, change 7): each has its own session (a file on SQLite, its own wa_auth rows on
@@ -119,6 +120,26 @@ describe('reading phones 1 to 5', () => {
       for (const db of [one, two, spare]) expect(await hasSessionRows(db)).toBe(true);
       expect(await phoneNumberIn(h, key, 'founder')).toBe('919800000001');
       expect(await phoneNumberIn(h, key, 'phone2')).toBe('919800000002');
+    });
+  }
+});
+
+describe('the spare’s number, for the reading phones to refuse (security review N7)', () => {
+  for (const engine of ['sqlite', 'postgres'] as const) {
+    it(`${engine}: read as the spare's session is sealed (its own subkey), writing nothing; none when not linked`, async () => {
+      const h = engine === 'sqlite' ? sqliteHome() : await pgHome();
+      expect(await spareNumberIn(h, key)).toBeUndefined();
+      if (h.engine === 'sqlite') expect(existsSync(join(h.dataDir, 'sender-session.db'))).toBe(false); // nothing made
+      const spare = await open(h, 'spare');
+      expect(await hasSessionRows(spare)).toBe(false);
+      const auth = await useSenderAuthState(spare, key);
+      (auth.state.creds as ReturnType<typeof initAuthCreds>).me = { id: '919800000009:4@s.whatsapp.net', name: 'x' };
+      await auth.saveCreds();
+      expect(await spareNumberIn(h, key)).toBe('919800000009');
+      expect(await spareNumberIn(h, randomBytes(32))).toBeUndefined(); // another key: not readable, not a number
+      // A reading phone's rows are not the spare's.
+      await link(await open(h, 'phone2'), 'phone2', '919800000002');
+      expect(await spareNumberIn(h, key)).toBe('919800000009');
     });
   }
 });

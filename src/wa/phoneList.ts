@@ -24,10 +24,16 @@ export interface PhoneEntry {
 
 const DEFAULT: readonly PhoneEntry[] = [{ id: 1, label: 'Phone 1', state: 'active', addedAt: null }];
 
-/** One line of plain text, 1 to 40 characters: control, line-break and direction characters become spaces. */
+/** A name with this many digits reads as a phone number, which the audit would show unmasked: refused. */
+const DIGITS_MAX = 6;
+
+/**
+ * One line of plain text, 1 to 40 characters: control, line-break and direction characters become spaces; other
+ * invisible format characters (zero-width, soft hyphen) are dropped, so a look-alike is the same name.
+ */
 function cleanLabel(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
-  const one = raw.replace(/[\p{Cc}\p{Zl}\p{Zp}\p{Bidi_Control}]+/gu, ' ').replace(/\s+/g, ' ').trim();
+  const one = raw.replace(/[\p{Cc}\p{Zl}\p{Zp}\p{Bidi_Control}]+/gu, ' ').replace(/\p{Cf}+/gu, '').replace(/\s+/g, ' ').trim();
   return one.length >= 1 && one.length <= LABEL_MAX ? one : null;
 }
 
@@ -105,15 +111,17 @@ export class PhoneList {
   }
 
   /**
-   * Marks a phone unlinked (the caller has logged it out and cleared its session), audited with its label and, when
-   * known, its number already masked. Already unlinked: nothing new.
+   * Marks a phone unlinked (the caller has logged it out and cleared its session), audited with its label, its number
+   * already masked when known, and whether WhatsApp confirmed the unlink when the caller asked it. Already unlinked:
+   * nothing new.
    */
-  unlink(id: number, actor: string, audit: Audit, maskedNumber?: string): Promise<PhoneEntry> {
+  unlink(id: number, actor: string, audit: Audit, maskedNumber?: string, confirmed?: boolean): Promise<PhoneEntry> {
     return this.#change(async (phones, at) => {
       const p = this.#find(phones, id);
       if (p.state === 'unlinked') return { phones, result: p };
       const next: PhoneEntry = { ...p, state: 'unlinked', unlinkedAt: at };
-      const detail = `Phone ${id} unlinked: ${p.label}${maskedNumber ? ` (${maskedNumber})` : ''}`;
+      const told = confirmed === undefined ? '' : confirmed ? '. WhatsApp confirmed it.' : '. WhatsApp did not answer.';
+      const detail = `Phone ${id} unlinked: ${p.label}${maskedNumber ? ` (${maskedNumber})` : ''}${told}`;
       return { phones: phones.map((x) => (x.id === id ? next : x)), result: next, entry: { actor, event: 'phone.unlinked', kind: 'connection', detail } };
     }, audit);
   }
@@ -149,6 +157,7 @@ export class PhoneList {
   #label(raw: unknown, others: PhoneEntry[]): string {
     const label = cleanLabel(raw);
     if (label === null) throw new ControlError(422, `A phone's name is one line of 1 to ${LABEL_MAX} characters.`, 'label');
+    if (label.replace(/\D/g, '').length > DIGITS_MAX) throw new ControlError(422, 'A phone\'s name can\'t be a phone number. Use a name, for example "Office phone".', 'label');
     if (others.some((p) => p.label.toLowerCase() === label.toLowerCase())) throw new ControlError(422, 'Another phone already has that name.', 'label');
     return label;
   }

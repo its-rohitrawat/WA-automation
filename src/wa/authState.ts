@@ -383,7 +383,18 @@ export async function founderNumberIn(home: SessionHome, key: Buffer): Promise<s
  * workspace key). Writes nothing; undefined for no link or a row this key cannot open.
  */
 export async function phoneNumberIn(home: SessionHome, workspaceKey: Buffer, phone: ReadingPhone): Promise<string | undefined> {
-  const key = phoneSessionKey(workspaceKey, phone);
+  return numberIn(home, phone, phoneSessionKey(workspaceKey, phone));
+}
+
+/**
+ * The number the spare's saved link belongs to, on either engine, sealed as the spare is (its subkey of the workspace
+ * key): the reading phones refuse it. Writes nothing; undefined for no link or a row this key cannot open.
+ */
+export async function spareNumberIn(home: SessionHome, workspaceKey: Buffer): Promise<string | undefined> {
+  return numberIn(home, 'spare', deriveSubkey(workspaceKey, SENDER_SESSION_INFO));
+}
+
+async function numberIn(home: SessionHome, phone: Phone, key: Buffer): Promise<string | undefined> {
   if (home.engine === 'sqlite') return readFounderNumber(sessionFileOf(home.dataDir, phone), key);
   try {
     const { rowId, open } = sessionCodec(key);

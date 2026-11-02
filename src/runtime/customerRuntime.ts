@@ -48,7 +48,7 @@ import { silentLogger } from '../util/logger.ts';
 import { istDate } from '../util/time.ts';
 import { buildVoiceDeps } from '../voiceDeps.ts';
 import { AllowList } from '../wa/allowlist.ts';
-import { FounderNumberWatch, openPhoneSession, readFounderNumber, sessionHomeOf, useEncryptedAuthState } from '../wa/authState.ts';
+import { FounderNumberWatch, openPhoneSession, readFounderNumber, sessionHomeOf, spareNumberIn, useEncryptedAuthState } from '../wa/authState.ts';
 import { baileysSocketFactory, WhatsAppGateway, type SocketFactory } from '../wa/gateway.ts';
 import { LinkSessions } from '../wa/linkSession.ts';
 import { customerSpare } from './customerSpare.ts';
@@ -365,6 +365,8 @@ export async function buildCustomerRuntime(
       audit: async (q, e) => {
         if (auditLog) await auditLog.record(e, q);
       },
+      // The spare's number, read from its own saved link when a reading phone's link is checked (security review N7).
+      spareNumber: () => spareNumberIn(sessions, key),
     });
     const gateway = phones.set;
     // One start time for every wait that counts from the service start: the reconciler's wait for a file, the

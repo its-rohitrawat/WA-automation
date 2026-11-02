@@ -7,7 +7,7 @@ import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { AllowList } from '../wa/allowlist.ts';
 import {
-  openPhoneSession, phoneIdOf, phoneName, phoneNumberIn, phoneSessionKey, SessionDecryptError, useEncryptedAuthState,
+  openPhoneSession, phoneIdOf, phoneName, phoneNumberIn, phoneSessionKey, resetSession, SessionDecryptError, useEncryptedAuthState,
   type EncryptedAuth, type PhoneId, type ReadingPhone, type SessionHome,
 } from '../wa/authState.ts';
 import type { GatewayLike } from '../wa/gateway.ts';
@@ -51,6 +51,8 @@ export interface WorkspacePhonesDeps {
   buildGateway: (allow: AllowList, auth: EncryptedAuth, onQr?: (qr: string) => void) => GatewayLike;
   /** Writes one audit row inside the change's transaction (the dashboard's audit log); a no-op without one. */
   audit: Audit;
+  /** The spare's linked number, if any: a reading phone's link to it is refused, as one to another reading phone is. */
+  spareNumber?: () => Promise<string | undefined>;
 }
 
 export interface WorkspacePhones {
@@ -93,13 +95,19 @@ export async function workspacePhones(d: WorkspacePhonesDeps): Promise<Workspace
   const set = new PhoneSet({ clock: d.clock });
   set.setConfigs(configs);
   const slots = new Map<PhoneId, Slot>();
+  /**
+   * What is being done to a phone right now (security review S5): a link, an unlink and a removal of the same phone never
+   * overlap. Each is checked and marked before its first wait, so two cannot both pass the check.
+   */
+  const busy = new Map<PhoneId, 'linking' | 'unlinking' | 'removing'>();
 
   /**
    * A phone's slot: phone 1 from the runtime's own session; 2 to 5 opened here. A session this key cannot open is not
    * linked. An unlinked phone (`active` false) builds no gateway, even with rows left from a clear that failed: it holds
-   * none until a new link.
+   * none until a new link. A phone just added (`fresh`) has any rows left under its number cleared first, and starts
+   * unlinked even if they cannot be (security review S1): only its own QR links it.
    */
-  async function open(id: PhoneId, active = true): Promise<Slot> {
+  async function open(id: PhoneId, active = true, fresh = false): Promise<Slot> {
     const allow = new AllowList([]);
     if (id === 1) {
       const p = d.phone1;
@@ -111,6 +119,13 @@ export async function workspacePhones(d: WorkspacePhonesDeps): Promise<Workspace
     }
     const name = phoneName(id);
     const sessionDb = await openPhoneSession(d.sessions, name);
+    if (fresh) {
+      try {
+        await resetSession(sessionDb);
+      } catch (err) {
+        d.log.error({ err, phone: id }, 'rows left under a new phone’s number could not be cleared; it starts unlinked anyway');
+      }
+    }
     let auth: EncryptedAuth | undefined;
     try {
       auth = await useEncryptedAuthState(sessionDb, phoneSessionKey(d.key, name));
@@ -118,7 +133,7 @@ export async function workspacePhones(d: WorkspacePhonesDeps): Promise<Workspace
       if (!(err instanceof SessionDecryptError)) throw err;
       d.log.error({ phone: id }, 'a reading phone’s session cannot be opened with this key; it waits for a new link');
     }
-    const linked = active && auth?.hasSession === true;
+    const linked = active && !fresh && auth?.hasSession === true;
     return {
       id, name, sessionDb, ownsDb: true, allow, number: linked ? digitsOf(auth) : undefined,
       switchable: founderGateway({ linked, build: () => d.buildGateway(allow, auth!) }),
@@ -133,30 +148,50 @@ export async function workspacePhones(d: WorkspacePhonesDeps): Promise<Workspace
     if (p.state === 'active') join(s, p.label);
   }
 
-  /** A link on this phone: today's QR flow on its own session, key and switchable; a number in use is refused. */
+  /**
+   * A link on this phone: today's QR flow on its own session, key and switchable. A number that is already another
+   * reading phone, or the spare, is refused. Refused at once while the phone is being unlinked or removed.
+   */
   function linkDriver(s: Slot): LinkDriver {
     const inner = founderLinkDriver({
       sessionDb: s.sessionDb, trackerDb: d.db, key: phoneSessionKey(d.key, s.name), switchable: s.switchable, log: d.log,
       buildGateway: (auth, onQr) => d.buildGateway(s.allow, auth, onQr),
       resetKey: s.id === 1 ? 'session_reset_at' : `session_reset_at:${s.name}`,
-      refuse: (n) => ([...slots.values()].some((o) => o.id !== s.id && o.number === n) ? 'number_in_use' : undefined),
+      refuse: async (n) => {
+        if ([...slots.values()].some((o) => o.id !== s.id && o.number === n)) return 'number_in_use';
+        return (await d.spareNumber?.().catch(() => undefined)) === n ? 'number_in_use' : undefined;
+      },
     });
     return {
       run: async (hooks, signal) => {
-        const entry = list.get(s.id);
-        // An unlinked phone is out of the set: it joins for the link, and leaves again if the link is not kept.
-        const rejoined = entry?.state === 'unlinked' && !set.phones().some((p) => p.id === s.id);
-        if (rejoined) join(s, entry!.label);
-        const outcome = await inner.run(hooks, signal);
-        if (outcome.ok) {
-          await list.activate(s.id);
-          s.number = (await phoneNumberIn(d.sessions, d.key, s.name).catch(() => undefined)) ?? s.number;
-        } else if (rejoined) {
-          await set.remove(s.id);
+        if (busy.has(s.id)) return { ok: false, code: 'phone_busy' };
+        busy.set(s.id, 'linking');
+        try {
+          const entry = list.get(s.id);
+          // An unlinked phone is out of the set: it joins for the link, and leaves again if the link is not kept.
+          const rejoined = entry?.state === 'unlinked' && !set.phones().some((p) => p.id === s.id);
+          if (rejoined) join(s, entry!.label);
+          const outcome = await inner.run(hooks, signal);
+          if (outcome.ok) {
+            await list.activate(s.id);
+            s.number = (await phoneNumberIn(d.sessions, d.key, s.name).catch(() => undefined)) ?? s.number;
+          } else if (rejoined) {
+            await set.remove(s.id);
+          }
+          return outcome;
+        } finally {
+          busy.delete(s.id);
         }
-        return outcome;
       },
     };
+  }
+
+  /** Marks a phone busy for an unlink or a removal; refused while anything else is being done to it. */
+  function claim(id: PhoneId, what: 'unlinking' | 'removing'): void {
+    const now = busy.get(id);
+    if (now === undefined) return void busy.set(id, what);
+    const label = list.get(id)?.label ?? `Phone ${id}`;
+    throw new ControlError(409, now === 'linking' ? `${label} is being linked. Finish or cancel that link first.` : `${label} is already being changed. Try again in a moment.`);
   }
 
   const routes: PhoneRoutesDeps = {
@@ -172,7 +207,7 @@ export async function workspacePhones(d: WorkspacePhonesDeps): Promise<Workspace
     },
     add: async (label, actor) => {
       const entry = await list.add(label, actor, d.audit);
-      const s = await open(entry.id);
+      const s = await open(entry.id, true, true);
       slots.set(entry.id, s);
       join(s, entry.label);
       return entry;
@@ -184,18 +219,40 @@ export async function workspacePhones(d: WorkspacePhonesDeps): Promise<Workspace
     },
     unlink: async (id, actor): Promise<UnlinkResult> => {
       const s = slots.get(id);
-      if (!s || list.get(id) === undefined) return Promise.reject(notFound());
-      const r = await unlinkPhone({ id, actor, audit: d.audit, list, set, gateway: s.switchable, sessionDb: s.sessionDb, number: s.number, log: d.log });
-      s.number = undefined;
-      return r;
+      if (!s || list.get(id) === undefined) throw notFound();
+      claim(id, 'unlinking');
+      try {
+        const r = await unlinkPhone({ id, actor, audit: d.audit, list, set, gateway: s.switchable, sessionDb: s.sessionDb, number: s.number, log: d.log });
+        s.number = undefined;
+        return r;
+      } finally {
+        busy.delete(id);
+      }
     },
+    /**
+     * Frees a phone's number (security review S1): never phone 1, never a linked phone (unlink it first), never one with
+     * approved groups. Its session rows are cleared before the number is freed; if they cannot be, it is not removed, so
+     * a later Add never finds them.
+     */
     remove: async (id, actor): Promise<PhoneEntry> => {
-      const entry = await list.remove(id, actor, d.audit);
+      const entry = list.get(id);
       const s = slots.get(id);
-      slots.delete(id);
-      await set.remove(id);
-      if (s?.ownsDb) await s.sessionDb.close().catch(() => undefined);
-      return entry;
+      if (!entry || !s) throw notFound();
+      if (id === 1) throw new ControlError(409, 'Phone 1 cannot be removed. Unlink it instead.');
+      claim(id, 'removing');
+      try {
+        if (entry.state === 'active' && s.switchable.hasGateway()) throw new ControlError(409, `${entry.label} is linked. Unlink it first.`);
+        const groups = groupsOn(id);
+        if (groups > 0) throw new ControlError(409, `Phone ${id} still has ${groups} approved group${groups === 1 ? '' : 's'}. Move them to another phone first.`);
+        await resetSession(s.sessionDb);
+        const removed = await list.remove(id, actor, d.audit);
+        slots.delete(id);
+        await set.remove(id);
+        if (s.ownsDb) await s.sessionDb.close().catch(() => undefined);
+        return removed;
+      } finally {
+        busy.delete(id);
+      }
     },
   };
 

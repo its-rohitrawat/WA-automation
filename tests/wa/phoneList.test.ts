@@ -63,6 +63,23 @@ describe('the phone list', () => {
     expect(audits).toHaveLength(1);
   });
 
+  it('a label is not a phone number (it goes unmasked into the audit), and invisible format characters are dropped', async () => {
+    const { audits, audit, list } = await setup();
+    for (const number of ['919812345678', '+91 98123 45678', '98-123-456', 'Rahul 9812345']) {
+      const e = await refusal(list.add(number, OWNER, audit));
+      expect([e.status, e.field], number).toEqual([422, 'label']);
+      expect(e.message).toBe("A phone's name can't be a phone number. Use a name, for example \"Office phone\".");
+    }
+    await list.add('Office', OWNER, audit);
+    await expect(refusal(list.rename(2, '9812345678', OWNER, audit))).resolves.toMatchObject({ status: 422 });
+    // A zero-width or soft-hyphen look-alike is the same name: refused as a duplicate, and never stored with them.
+    for (const lookAlike of ['Off​ice', 'Of­fice', '﻿Office', 'Off⁠ice']) {
+      expect((await refusal(list.add(lookAlike, OWNER, audit))).message, JSON.stringify(lookAlike)).toBe('Another phone already has that name.');
+    }
+    expect((await list.add('Site‍ 2', OWNER, audit)).label).toBe('Site 2');
+    expect(audits.map((a) => a.detail)).toEqual(['Phone 2 added: Office', 'Phone 3 added: Site 2']);
+  });
+
   it('rename, unlink and activate change only that phone; an unknown phone is a 404', async () => {
     const { clock, audits, audit, list } = await setup();
     await list.add('Second', OWNER, audit);

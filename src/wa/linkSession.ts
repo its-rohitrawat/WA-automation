@@ -318,7 +318,7 @@ export interface FounderLinkDeps {
    * Checked once the new link is open, before it is kept: a refusal code (for example 'number_in_use', when the number
    * is already another reading phone or the spare) undoes the link exactly as a cancel does. Never given the number to log.
    */
-  refuse?: (number: string) => string | undefined;
+  refuse?: (number: string) => string | undefined | Promise<string | undefined>;
 }
 
 const TERMINAL = new Set(['logged_out', 'forbidden', 'replaced']);
@@ -414,7 +414,7 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
         }
         // A number that is already another of the workspace's phones: undone before it is kept, as a cancel would be.
         const number = await numberOf(async () => linkAuth);
-        const refused = number === undefined ? undefined : d.refuse?.(number);
+        const refused = number === undefined ? undefined : await d.refuse?.(number);
         if (refused !== undefined) {
           undone = true;
           if (gw) d.switchable.unfollow(gw);

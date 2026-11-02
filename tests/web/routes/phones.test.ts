@@ -54,6 +54,19 @@ describe('the phone routes', () => {
     expect(d.unlink).toHaveBeenCalledWith(2, owner.actor);
   });
 
+  it('a phone in the address is one digit from 1 to 5, as written: no hex, exponent, sign, padding or leading zero', async () => {
+    const { d, routes } = setup();
+    for (const id of ['0x2', '2e0', '02', ' 2', '2 ', '+2', '2.0', '', 2]) {
+      expect(await routes.unlink(owner, id, { confirm: true }), JSON.stringify(id)).toMatchObject({ status: 400 });
+      expect(await routes.remove(owner, id, { confirm: true }), JSON.stringify(id)).toMatchObject({ status: 400 });
+      expect(await routes.rename(owner, id, { label: 'Office' }), JSON.stringify(id)).toMatchObject({ status: 400 });
+    }
+    expect(d.unlink).not.toHaveBeenCalled();
+    expect(d.remove).not.toHaveBeenCalled();
+    expect(d.rename).not.toHaveBeenCalled();
+    for (const id of ['1', '5']) expect(await routes.rename(owner, id, { label: 'Office' }), id).toMatchObject({ status: 200 });
+  });
+
   it('remove of phone 1, or of an unknown phone, is refused as the list says; other errors go on to the server', async () => {
     const refused = setup({
       remove: async (id) => {

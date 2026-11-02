@@ -11,7 +11,8 @@ import type { PhoneSet } from './phoneSet.ts';
 // order, each step safe if a later one fails:
 //   1. log the linked device out at WhatsApp, so it leaves the phone's Linked devices (it may not answer);
 //   2. stop its gateway and take it out of the set: its groups are read by no phone from now on;
-//   3. mark it unlinked in the phone list, audited with its label and masked number: a restart does not start it again;
+//   3. mark it unlinked in the phone list, audited with its label, its masked number and whether WhatsApp confirmed
+//      step 1: a restart does not start it again;
 //   4. clear its session rows (live and backup): what it was linked with is gone. If this fails, the phone is already
 //      unlinked and never started, and the next link of that phone resets its rows anyway.
 // Messages, tasks and approvals are not touched: its groups stay approved and show as "phone unlinked".
@@ -38,6 +39,8 @@ export interface UnlinkResult {
 }
 
 export async function unlinkPhone(d: UnlinkDeps): Promise<UnlinkResult> {
+  // Before WhatsApp is asked (it may take up to 10 s): a crash while waiting still leaves a trace. No number in it.
+  d.log.info({ phone: d.id }, 'asking WhatsApp to unlink a reading phone');
   let loggedOut = false;
   try {
     loggedOut = (await d.gateway.endLink?.()) ?? false;
@@ -45,7 +48,7 @@ export async function unlinkPhone(d: UnlinkDeps): Promise<UnlinkResult> {
     loggedOut = false;
   }
   await d.set.remove(d.id);
-  const phone = await d.list.unlink(d.id, d.actor, d.audit, d.number ? maskNumber(d.number) : undefined);
+  const phone = await d.list.unlink(d.id, d.actor, d.audit, d.number ? maskNumber(d.number) : undefined, loggedOut);
   try {
     await resetSession(d.sessionDb);
   } catch (err) {

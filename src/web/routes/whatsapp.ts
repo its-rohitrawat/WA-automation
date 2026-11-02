@@ -39,6 +39,7 @@ const FOUNDER_MESSAGES: Record<string, string> = {
   replaced: "Another session took over during the link. The founder's phone is linked as before. Close it, then try again.",
   error: "Something went wrong while linking. The founder's phone is linked as before. Try again.",
   number_in_use: "This number is already linked as another of your phones. The founder's phone is linked as before. Scan with a different phone.",
+  phone_busy: "The founder's phone is being unlinked right now. Try again in a moment.",
 };
 
 /** Phones 2 to 5 (lane C): the founder's messages, about that phone. */
@@ -52,6 +53,7 @@ function phoneMessage(n: number, code: string): string {
     forbidden: `WhatsApp refused this number (403). ${as} Check the phone for a WhatsApp warning.`,
     replaced: `Another session took over during the link. ${as} Close it, then try again.`,
     number_in_use: `This number is already linked as another of your phones. ${as} Scan with a different phone.`,
+    phone_busy: `Phone ${n} is being unlinked or removed right now. Try again in a moment.`,
   };
   return m[code] ?? `Something went wrong while linking. ${as} Try again.`;
 }
@@ -217,7 +219,8 @@ export interface PhoneRoutesDeps {
 
 const LabelBody = z.object({ label: z.unknown() }).strict();
 const ConfirmBody = z.object({ confirm: z.literal(true) }).strict();
-const PhoneParam = z.coerce.number().int().min(1).max(5);
+/** One digit from 1 to 5, exactly as written (security review N6: no "0x2", "2e0", "02" or " 2"). */
+const PhoneParam = z.string().regex(/^[1-5]$/).transform(Number);
 
 export class PhoneRoutes {
   readonly #d: PhoneRoutesDeps;
