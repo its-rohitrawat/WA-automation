@@ -37,8 +37,16 @@ const SEND_NAMES_BUT_QUERY = new RegExp(`\\b(sendMessage|${OUTBOUND_NAMES.filter
 const CHAT_DELETE = 'wa/chatDelete.ts';
 const SEND_NAMES_BUT_CHAT_MODIFY = new RegExp(`\\b(sendMessage|${OUTBOUND_NAMES.filter((n) => n !== 'chatModify').join('|')})\\b`);
 
+/**
+ * Unlink a phone (November release, lane C, change 7): src/wa/deviceUnlink.ts is excused from the one word logout, and
+ * from nothing else. It unlinks one reading phone's own device at WhatsApp, once, after the owner confirmed (checked below).
+ */
+const DEVICE_UNLINK = 'wa/deviceUnlink.ts';
+const SEND_NAMES_BUT_LOGOUT = new RegExp(`\\b(sendMessage|${OUTBOUND_NAMES.filter((n) => n !== 'logout').join('|')})\\b`);
+
 /** The pattern a file is held to: every send name, less the one word its exception allows. */
-const heldTo = (file: string) => (PG_ENGINE.includes(file) ? SEND_NAMES_BUT_QUERY : file === CHAT_DELETE ? SEND_NAMES_BUT_CHAT_MODIFY : SEND_NAMES);
+const heldTo = (file: string) =>
+  PG_ENGINE.includes(file) ? SEND_NAMES_BUT_QUERY : file === CHAT_DELETE ? SEND_NAMES_BUT_CHAT_MODIFY : file === DEVICE_UNLINK ? SEND_NAMES_BUT_LOGOUT : SEND_NAMES;
 
 /**
  * The dashboard's sign-out route is a URL path (spec section 8), not a Baileys call: that one exact string literal is
@@ -63,11 +71,27 @@ describe('who may send on WhatsApp', () => {
     expect(files).toEqual(expect.arrayContaining(['wa/gateway.ts', 'wa/senderGateway.ts', 'app.ts']));
   });
 
-  it('no module except src/wa/senderGateway.ts and src/wa/groupSend.ts names a Baileys send method (src/wa/chatDelete.ts: chatModify alone)', () => {
+  it('no module except src/wa/senderGateway.ts and src/wa/groupSend.ts names a Baileys send method (src/wa/chatDelete.ts: chatModify alone; src/wa/deviceUnlink.ts: logout alone)', () => {
     const offenders = sources()
       .filter((s) => s.file !== 'wa/senderGateway.ts' && s.file !== 'wa/groupSend.ts' && heldTo(s.file).test(s.text))
       .map((s) => s.file);
     expect(offenders).toEqual([]);
+  });
+
+  it('only deviceUnlink.ts names logout, called in one place; only the gateway’s endLink uses it, and only while open (lane C)', () => {
+    expect(sources().filter((s) => /\blogout\b/.test(s.text)).map((s) => s.file)).toEqual([DEVICE_UNLINK]);
+    const unlink = readFileSync(join(SRC, 'wa', 'deviceUnlink.ts'), 'utf8');
+    expect(unlink.match(/\.logout\(/g)).toHaveLength(1);
+    expect(unlink).not.toMatch(SEND_NAMES_BUT_LOGOUT);
+    // Who reaches it: the reading gateway's endLink alone (it is imported by no other module).
+    expect(sources().filter((s) => /\b(unlinkDevice|asDeviceUnlinkSocket)\(/.test(s.text)).map((s) => s.file).sort()).toEqual([DEVICE_UNLINK, 'wa/gateway.ts']);
+    const gateway = readFileSync(join(SRC, 'wa', 'gateway.ts'), 'utf8');
+    const ask = gateway.indexOf('return unlinkDevice(unlinkable, this.#opts.unlinkTimeoutMs);');
+    expect(ask).toBeGreaterThan(-1);
+    expect(gateway.match(/\bunlinkDevice\(/g)).toHaveLength(1);
+    const guard = gateway.lastIndexOf("if (this.#stopped || !sock || this.#status.state !== 'open') return false;", ask);
+    expect(guard).toBeGreaterThan(-1);
+    expect(ask - guard).toBeLessThan(250);
   });
 
   it('the Postgres engine, excused from the word query only, never imports Baileys and names no other send method', () => {
