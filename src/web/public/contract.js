@@ -255,10 +255,42 @@ function activity(v) {
 const strings = (v) => arr(v).map(str).filter(Boolean);
 
 /**
- * One row of Manage groups. `key` is the agent's opaque key for the group (never its WhatsApp id).
+ * One row of Manage groups. `key` is the agent's opaque key for the group (never its WhatsApp id). `where` (more phones,
+ * November release): its phone, the phones that see it, and whether its phone is unlinked; absent from an older agent.
  * @typedef {{ key: string, name: string, approved: boolean, inWhatsApp: boolean, ignored: boolean,
- *   client: { name: string, code: string, active: boolean, hasTasks: boolean, codeLocked: boolean, emailDomains: string[], meetingKeywords: string[] } | null }} GroupRow
+ *   client: { name: string, code: string, active: boolean, hasTasks: boolean, codeLocked: boolean, emailDomains: string[], meetingKeywords: string[] } | null,
+ *   where?: { phone: number | null, seenBy: number[], unlinked: boolean, readThrough: number | null } }} GroupRow
  */
+
+/** A reading phone's number, 1 to 5, or null. @param {unknown} v */
+const phoneId = (v) => (typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 5 ? v : null);
+
+/**
+ * A group's phone, the phones that see it, and, on an unlinked phone, the phone to read it through instead.
+ * @param {Record<string, unknown>} o
+ * @returns {{ phone: number | null, seenBy: number[], unlinked: boolean, readThrough: number | null }}
+ */
+function phoneWhere(o) {
+  const seenBy = /** @type {number[]} */ ([...new Set(arr(o.seenBy).map(phoneId).filter((p) => p !== null))].sort((a, b) => /** @type {number} */ (a) - /** @type {number} */ (b)));
+  const unlinked = o.phoneState === 'unlinked';
+  return { phone: phoneId(o.phone), seenBy, unlinked, readThrough: unlinked ? phoneId(o.readThrough) : null };
+}
+
+/**
+ * The workspace's reading phones on the Groups screen: id, label (owner text, shown with esc()), linked or not.
+ * @param {unknown} v @returns {{ id: number, label: string, unlinked: boolean }[]}
+ */
+function readPhones(v) {
+  /** @type {{ id: number, label: string, unlinked: boolean }[]} */
+  const out = [];
+  for (const p of arr(v)) {
+    const o = obj(p);
+    const id = phoneId(o.id);
+    if (id === null || out.some((x) => x.id === id)) continue;
+    out.push({ id, label: cut(str(o.label), 40) || `Phone ${id}`, unlinked: o.state === 'unlinked' });
+  }
+  return out.sort((a, b) => a.id - b.id);
+}
 
 /** GET /dashboard/api/groups (and the answer to /groups/apply). @param {unknown} raw */
 export function readGroups(raw) {
@@ -280,9 +312,12 @@ export function readGroups(raw) {
           client: cl
             ? { name: str(cl.name), code: str(cl.code), active: cl.active === true, hasTasks: cl.hasTasks === true, codeLocked: cl.codeLocked === true, emailDomains: strings(cl.emailDomains), meetingKeywords: strings(cl.meetingKeywords) }
             : null,
+          // More phones (November release): only when the agent says (an older one does not).
+          ...(Array.isArray(o.seenBy) ? { where: phoneWhere(o) } : {}),
         };
       })
       .filter((row) => row.key),
+    phones: readPhones(r.phones),
     total: num(r.total),
     counts: { all: num(c.all), approved: num(c.approved), notApproved: num(c.notApproved), ignored: num(c.ignored) },
     stale: r.stale === true,

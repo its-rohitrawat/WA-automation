@@ -8,15 +8,35 @@ import type { GatewayState } from '../wa/gateway.ts';
 // name reaches disk only when the owner approves the group (groupsWriter.ts). Names are untrusted text; the web layer
 // renders them as text, never as HTML.
 
-/** What the directory needs from the gateway (the real WhatsAppGateway, or the SwitchableGateway around it). */
+/**
+ * What the directory needs from the gateway (the PhoneSet, a SwitchableGateway, or a WhatsAppGateway). The PhoneSet says
+ * which of its open phones are in each group (more phones, lane C); a single gateway says nothing, which is phone 1.
+ */
 export interface GroupSource {
   status(): { state: GatewayState };
-  listGroups(): Promise<{ id: string; subject: string }[]>;
+  listGroups(): Promise<{ id: string; subject: string; phones?: readonly number[] }[]>;
 }
 
 export interface LiveGroup {
   id: string;
   subject: string;
+  /** The open phones in the group, lowest first: [1] from a single gateway. Left out (a hand-made list): phone 1. */
+  phones?: number[];
+}
+
+/** A workspace's reading phone as the Groups screen names it (src/wa/phoneList.ts PhoneEntry). */
+export interface PhoneInfo {
+  id: number;
+  label: string;
+  state: 'active' | 'unlinked';
+}
+
+/** With no phone list (one phone, as before the November release): phone 1, active. */
+export const ONE_PHONE: readonly PhoneInfo[] = [{ id: 1, label: 'Phone 1', state: 'active' }];
+
+/** The phones a source names for a group: whole numbers 1 to 5, once each, lowest first. */
+function phonesOf(given: readonly number[]): number[] {
+  return [...new Set(given.filter((p) => Number.isInteger(p) && p >= 1 && p <= 5))].sort((a, b) => a - b);
 }
 
 export type ListingReason = 'whatsapp_not_connected' | 'list_failed';
@@ -76,7 +96,8 @@ export class GroupDirectory {
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error('timeout')), this.#fetchTimeoutMs);
       });
-      groups = (await Promise.race([this.#gateway.listGroups(), timeout])).map((g) => ({ id: g.id, subject: g.subject ?? '' }));
+      // A single gateway names no phones: its groups stay as they were (read as phone 1).
+      groups = (await Promise.race([this.#gateway.listGroups(), timeout])).map((g) => ({ id: g.id, subject: g.subject ?? '', ...(g.phones ? { phones: phonesOf(g.phones) } : {}) }));
     } catch {
       // The connection may have closed while listing. No error text is kept: it could carry group details.
       return this.#fromCache(true, this.#gateway.status().state === 'open' ? 'list_failed' : 'whatsapp_not_connected');
@@ -89,7 +110,7 @@ export class GroupDirectory {
 
   /** The groups of the last list, as copies, without asking WhatsApp; null before the first list. */
   cachedGroups(): LiveGroup[] | null {
-    return this.#cache ? this.#cache.groups.map((g) => ({ ...g })) : null;
+    return this.#cache ? this.#cache.groups.map(copyGroup) : null;
   }
 
   /**
@@ -115,8 +136,13 @@ export class GroupDirectory {
 }
 
 function copy(l: GroupListing): GroupListing {
-  return { ...l, groups: l.groups.map((g) => ({ ...g })) };
+  return { ...l, groups: l.groups.map(copyGroup) };
 }
+
+const copyGroup = (g: LiveGroup): LiveGroup => ({ ...g, ...(g.phones ? { phones: [...g.phones] } : {}) });
+
+/** The phones a live group is seen by: its own list, or phone 1 for a single gateway's. */
+export const seenByOf = (g: LiveGroup): number[] => (g.phones ? [...g.phones] : [1]);
 
 /** Lower case, accents removed, runs of white space as one space: what search compares. */
 export function searchKey(s: string): string {
@@ -147,9 +173,19 @@ export interface GroupRow {
   /** The owner set this untracked group aside (Ignore): it leaves the Not approved list. Never true for an approved group. */
   ignored: boolean;
   client: GroupClientInfo | null;
+  /** More phones (November release): the phone an approved group is read through (1 when its entry names none); null when not approved. */
+  phone: number | null;
+  /** The open phones in the group, lowest first ([] for an approved group missing from the list). */
+  seenBy: number[];
+  /** 'unlinked': an approved group whose phone is unlinked or gone, so it is not read. */
+  phoneState: 'ok' | 'unlinked';
+  /** For an unlinked one: the lowest linked phone in the group, to read it through instead (one click, audited); else null. */
+  readThrough: number | null;
 }
 
 export interface GroupsOverview {
+  /** The workspace's reading phones (one phone: phone 1 alone, and the screen shows no phones). */
+  phones: PhoneInfo[];
   rows: GroupRow[];
   /** Rows matching the search and filter, before the limit. */
   total: number;
@@ -175,9 +211,20 @@ export async function groupsOverview(o: {
   filter?: GroupFilter;
   limit?: number;
   ignored?: (groupId: string) => boolean;
+  /** The reading phones (src/wa/phoneList.ts); left out: phone 1 alone, as before. */
+  phones?: readonly PhoneInfo[];
 }): Promise<GroupsOverview> {
   const { db, listing } = o;
   const isIgnored = o.ignored ?? (() => false);
+  const phones = [...(o.phones ?? ONE_PHONE)].map((p) => ({ ...p }));
+  const linked = new Set(phones.filter((p) => p.state === 'active').map((p) => p.id));
+  /** A row's phone fields: an approved group's own phone, and another linked phone in it when its own is unlinked. */
+  const phoneFields = (c: ClientConfig | undefined, seenBy: number[]): Pick<GroupRow, 'phone' | 'seenBy' | 'phoneState' | 'readThrough'> => {
+    if (!c) return { phone: null, seenBy, phoneState: 'ok', readThrough: null };
+    const phone = c.phone ?? 1;
+    if (linked.has(phone)) return { phone, seenBy, phoneState: 'ok', readThrough: null };
+    return { phone, seenBy, phoneState: 'unlinked', readThrough: seenBy.find((p) => p !== phone && linked.has(p)) ?? null };
+  };
   const byGroup = new Map((await listClients(db, false)).map((c) => [c.groupId, c]));
   const withTasks = new Set((await db.all<{ id: number }>('SELECT DISTINCT client_id AS id FROM tasks')).map((r) => r.id));
   const approved = new Map(o.configs.map((c) => [c.groupId, c]));
@@ -201,13 +248,14 @@ export async function groupsOverview(o: {
     const c = approved.get(g.id);
     return {
       groupId: g.id, name: g.subject, approved: c !== undefined, inWhatsApp: true, ignored: c === undefined && isIgnored(g.id),
-      client: c ? clientInfo(c) : formerClient(g.id),
+      client: c ? clientInfo(c) : formerClient(g.id), ...phoneFields(c, seenByOf(g)),
     };
   });
   for (const c of o.configs) {
     if (liveIds.has(c.groupId)) continue;
-    // A stale list says nothing about whether the group still exists.
-    rows.push({ groupId: c.groupId, name: c.name, approved: true, inWhatsApp: listing.stale, ignored: false, client: clientInfo(c) });
+    // A stale list says nothing about whether the group still exists; nor does a list without its phone (unlinked).
+    const fields = phoneFields(c, []);
+    rows.push({ groupId: c.groupId, name: c.name, approved: true, inWhatsApp: listing.stale || fields.phoneState === 'unlinked', ignored: false, client: clientInfo(c), ...fields });
   }
   rows.sort((a, b) => Number(b.approved) - Number(a.approved) || collator.compare(a.name, b.name) || a.groupId.localeCompare(b.groupId));
 
@@ -222,6 +270,7 @@ export async function groupsOverview(o: {
   );
   const limit = Number.isFinite(o.limit) ? Math.max(0, Math.floor(o.limit!)) : DEFAULT_LIMIT;
   return {
+    phones,
     rows: matching.slice(0, limit),
     total: matching.length,
     counts: { all: rows.length, approved: approvedCount, notApproved: rows.length - approvedCount - ignoredCount, ignored: ignoredCount },

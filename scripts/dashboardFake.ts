@@ -94,6 +94,8 @@ export interface FakeState {
   org2Ok?: boolean;
   /** Quick actions answer 429, as the agent does past 5 tries a minute. */
   rateLimited?: boolean;
+  /** Reading phones on Manage groups (set before the fake starts): 1, as before, or 3 with one unlinked. */
+  phones?: 1 | 3;
 }
 
 /** A fake phone link: two codes, a scan, then linked (and the fake flags updated). */
@@ -138,7 +140,18 @@ interface FakeGroup {
   approved: boolean;
   ignored?: boolean;
   client: FakeClient | null;
+  /** More phones: the phone a tracked group is read through (1 when left out), and the open phones in the group. */
+  phone?: number;
+  seenBy?: number[];
 }
+
+/** The reading phones, as the agent sends them on the Groups answer: one (as before), or three with one unlinked. */
+const ONE_PHONE = [{ id: 1, label: 'Phone 1', state: 'active' }];
+const THREE_PHONES = [
+  { id: 1, label: 'Office', state: 'active' },
+  { id: 2, label: 'Rahul <b>phone', state: 'active' },
+  { id: 3, label: 'Old phone', state: 'unlinked' },
+];
 
 const WORDS = ['Desai', 'Iyer', 'Kapoor', 'Mehta', 'Rao', 'Shah', 'Verma', 'Nair', 'Joshi', 'Patel', 'Gupta', 'Reddy', 'Bose', 'Malhotra', 'Sethi'];
 const KINDS = ['Foods', 'Dental', 'Builders', 'Textiles', 'Studio', 'Exports', 'Clinic', 'Realty', 'Motors', 'Logistics', 'Pharma', 'Cafe', 'Family', 'Society', 'Alumni'];
@@ -168,9 +181,9 @@ function makeGroups(): FakeGroup[] {
 const fold = (s: string) => s.toLowerCase();
 
 type ApplyBody = {
-  approve?: { key: string; name: string; code: string; emailDomains?: string[]; meetingKeywords?: string[] }[];
+  approve?: { key: string; name: string; code: string; emailDomains?: string[]; meetingKeywords?: string[]; phone?: number }[];
   unapprove?: string[];
-  edit?: { key: string; name?: string; emailDomains?: string[]; meetingKeywords?: string[] }[];
+  edit?: { key: string; name?: string; emailDomains?: string[]; meetingKeywords?: string[]; phone?: number }[];
 };
 
 /** The client drawer's "what the agent has seen" block (the agent's ClientActivity shape), made up per client. */
@@ -197,7 +210,34 @@ function activityFor(c: { code: string; lastActivity: string | null; history: { 
 /** The fake directory and clients: what Manage groups and Clients read and change. */
 function fakeGroupsApi(state: FakeState) {
   const groups = makeGroups();
-  let fetchedAt = at(2);
+  // More phones: Acme on Office (also in Rahul's phone); Blue Harbour on the unlinked phone, which Rahul's phone can read;
+  // Cedar on the unlinked phone with no linked phone in it; the untracked ones spread over the two linked phones.
+  const phones = state.phones === 3 ? THREE_PHONES : ONE_PHONE;
+  if (state.phones === 3) {
+    groups.forEach((g, i) => {
+      g.seenBy = i === 0 ? [1, 2] : i === 1 ? [2] : i === 2 ? [] : [[1], [2], [1, 2]][i % 3]!;
+      if (i === 1 || i === 2) g.phone = 3;
+    });
+  }
+  const linked = new Set(phones.filter((p) => p.state === 'active').map((p) => p.id));
+  const seenByOf = (g: FakeGroup) => g.seenBy ?? [1];
+  /** As the agent's rows: a tracked group's phone, the phones in it, and on an unlinked phone the one to read it through. */
+  const phoneFields = (g: FakeGroup) => {
+    const seenBy = seenByOf(g);
+    if (!g.approved) return { phone: null, seenBy, phoneState: 'ok', readThrough: null };
+    const phone = g.phone ?? 1;
+    const off = !linked.has(phone);
+    return { phone, seenBy, phoneState: off ? 'unlinked' : 'ok', readThrough: off ? seenBy.find((p) => p !== phone && linked.has(p)) ?? null : null };
+  };
+  /** The agent's check of a phone asked for a group: linked, and in the group. */
+  const phoneProblem = (g: FakeGroup, phone: number) => {
+    const label = phones.find((p) => p.id === phone)?.label ?? `Phone ${phone}`;
+    if (!linked.has(phone)) return `${label} is not linked, so it can't read this group. Choose a linked phone.`;
+    if (!seenByOf(g).includes(phone)) return `${label} is not in this group, so it can't read it. Choose a phone that is.`;
+    return null;
+  };
+  /** The agent's default: the lowest linked phone in the group, else phone 1. */
+  const defaultPhone = (g: FakeGroup) => seenByOf(g).find((p) => linked.has(p)) ?? 1;
   const used = () => new Set(groups.flatMap((g) => (g.client ? [g.client.code] : [])));
   const overview = (q: string) => {
     const rows = groups
@@ -206,11 +246,12 @@ function fakeGroupsApi(state: FakeState) {
       .map((g) => ({
         key: g.key, name: g.name, approved: g.approved, inWhatsApp: true, ignored: !g.approved && Boolean(g.ignored),
         client: g.client && { ...g.client, codeLocked: true, ...(g.approved ? {} : { emailDomains: [], meetingKeywords: [] }) },
+        ...phoneFields(g),
       }));
     const approved = groups.filter((g) => g.approved).length;
     const ignored = groups.filter((g) => !g.approved && g.ignored).length;
     return {
-      rows, total: rows.length, counts: { all: groups.length, approved, notApproved: groups.length - approved - ignored, ignored },
+      phones, rows, total: rows.length, counts: { all: groups.length, approved, notApproved: groups.length - approved - ignored, ignored },
       stale: Boolean(state.whatsappDown), reason: state.whatsappDown ? 'whatsapp_not_connected' : null, fetchedAt,
     };
   };
@@ -228,10 +269,18 @@ function fakeGroupsApi(state: FakeState) {
       if (g && !g.client && taken.has(a.code)) return { message: `The code ${a.code} is already used by another client. Choose another.`, key: a.key, field: 'code' };
       // The browser cannot know every code (a client whose group left WhatsApp is not listed): ZZZ stands for one.
       if (a.code === 'ZZZ') return { message: 'The code ZZZ is already used by a client whose group is no longer in WhatsApp. Choose another.', key: a.key, field: 'code' };
+      const problem = g && a.phone !== undefined ? phoneProblem(g, a.phone) : null;
+      if (problem) return { message: problem, key: a.key, field: 'phone' };
+    }
+    for (const e of b.edit ?? []) {
+      const g = groups.find((x) => x.key === e.key);
+      const problem = g && e.phone !== undefined ? phoneProblem(g, e.phone) : null;
+      if (problem) return { message: problem, key: e.key, field: 'phone' };
     }
     for (const a of b.approve ?? []) {
       const g = groups.find((x) => x.key === a.key);
       if (!g) continue;
+      g.phone = a.phone ?? defaultPhone(g);
       g.approved = true;
       g.client = g.client
         ? { ...g.client, name: a.name, active: true }
@@ -245,7 +294,10 @@ function fakeGroupsApi(state: FakeState) {
       }
     }
     for (const e of b.edit ?? []) {
-      const c = groups.find((x) => x.key === e.key)?.client;
+      const g = groups.find((x) => x.key === e.key);
+      // Read through another phone: the group moves to it (the agent audits it).
+      if (g && e.phone !== undefined) g.phone = e.phone;
+      const c = g?.client;
       if (c) Object.assign(c, { name: e.name ?? c.name, emailDomains: e.emailDomains ?? c.emailDomains, meetingKeywords: e.meetingKeywords ?? c.meetingKeywords });
     }
     return null;
@@ -264,6 +316,7 @@ function fakeGroupsApi(state: FakeState) {
       const name = g.client?.name ?? (g.name.split(/\s+[x×–-]\s+/i)[0]?.trim() || g.name.trim()).slice(0, 80);
       const code = g.client?.code ?? suggest(name);
       if (!code) return { key, ok: false, reason: 'No code could be made from its name. Approve it on its own to choose one.' };
+      g.phone = defaultPhone(g);
       g.approved = true;
       g.ignored = false;
       g.client = g.client ? { ...g.client, active: true } : { name, code, active: false, hasTasks: false, emailDomains: [], meetingKeywords: [] };

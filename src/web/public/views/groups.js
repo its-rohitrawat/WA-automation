@@ -21,7 +21,7 @@ const CODE = /^[A-Z]{3,4}$/;
 
 /**
  * @typedef {import('../contract.js').GroupRow} GroupRow
- * @typedef {{ kind: 'approve', name: string, code: string, emailDomains: string[], meetingKeywords: string[] }
+ * @typedef {{ kind: 'approve', name: string, code: string, emailDomains: string[], meetingKeywords: string[], phone?: number }
  *   | { kind: 'unapprove' }
  *   | { kind: 'edit', name: string, emailDomains: string[], meetingKeywords: string[] }} Change
  */
@@ -108,6 +108,10 @@ export function mountGroups(ctx, toolbar) {
   const { view } = ctx;
   let q = '';
   let filter = /** @type {'all'|'approved'|'not_approved'|'ignored'} */ ('all');
+  /** More phones (November release): only this phone's groups; 0 for all. */
+  let phoneFilter = 0;
+  /** The group being moved to another phone (Read through) while that is sent. @type {string | null} */
+  let moving = null;
   /** @type {ReturnType<typeof readGroups> | null} */
   let data = null;
   /** @type {unknown} */
@@ -131,6 +135,7 @@ export function mountGroups(ctx, toolbar) {
     <div class="toolbar">
       <label class="field grow-1 g-search"><span class="sr-only">Search groups</span>${icon('search', 16)}<input id="g-q" type="search" placeholder="Search groups or clients" autocomplete="off" maxlength="200"></label>
       <div class="seg" role="group" aria-label="Show" id="g-filter"></div>
+      <span id="g-phonef"></span>
       <button class="btn btn-ghost btn-sm" type="button" id="g-refresh" data-tip="Ask WhatsApp for the group list again">${icon('refresh', 15)}Refresh</button>
     </div>
     <p class="muted-note" id="g-hint"></p>
@@ -144,13 +149,16 @@ export function mountGroups(ctx, toolbar) {
   q = (params.get('q') ?? '').slice(0, 200);
   const f = params.get('filter');
   if (f === 'approved' || f === 'not_approved' || f === 'ignored') filter = f;
+  const pf = params.get('phone');
+  if (pf && /^[1-5]$/.test(pf)) phoneFilter = Number(pf);
   input.value = q;
 
-  /** Keeps the search and filter in the address, so a reload or a shared link shows the same list. */
+  /** Keeps the search and filters in the address, so a reload or a shared link shows the same list. */
   const keepInAddress = () => {
     const p = new URLSearchParams();
     if (q) p.set('q', q);
     if (filter !== 'all') p.set('filter', filter);
+    if (phoneFilter) p.set('phone', String(phoneFilter));
     const s = p.toString();
     history.replaceState(null, '', location.pathname + (s ? `?${s}` : ''));
   };
@@ -207,7 +215,65 @@ export function mountGroups(ctx, toolbar) {
       <button class="btn btn-primary btn-sm" type="button" data-go="connections">Open Connections</button></div>`;
   }
 
+  // ---------- more phones (November release) ----------
+  /** More than one reading phone: rows show their phone, and a phone filter appears. One phone: the screen as before. */
+  const multi = () => (data?.phones.length ?? 0) > 1;
+  /** A phone's label (owner text: always through esc()). @param {number} id */
+  const labelOf = (id) => data?.phones.find((p) => p.id === id)?.label ?? `Phone ${id}`;
+  /** The linked phones' ids. */
+  const linkedIds = () => new Set((data?.phones ?? []).filter((p) => !p.unlinked).map((p) => p.id));
+  /** The linked phones in a group, lowest first: where an approval may read it. @param {GroupRow} row */
+  const phoneChoices = (row) => (row.where?.seenBy ?? []).filter((p) => linkedIds().has(p));
+  /** The phone a tracked (or being approved) group is read through; null for an untracked one. @param {GroupRow} row */
+  const phoneOfRow = (row) => {
+    const c = pending.get(row.key);
+    if (c?.kind === 'approve') return c.phone ?? phoneChoices(row)[0] ?? 1;
+    return isApproved(row) ? row.where?.phone ?? 1 : null;
+  };
+
+  /**
+   * The row's phone as a small tag (with more than one phone): a tracked group's own phone, an untracked one's phones. A
+   * group on an unlinked phone says so, and offers the lowest linked phone in it: one click, saved at once and audited.
+   * @param {GroupRow} row
+   */
+  function phoneTag(row) {
+    if (!multi() || !row.where) return '';
+    const own = phoneOfRow(row);
+    if (own === null) {
+      const seen = row.where.seenBy;
+      return seen.length ? `<div class="g-phones"><span class="pill p-muted">${icon('phone', 12)}${esc(seen.map(labelOf).join(' · '))}</span></div>` : '';
+    }
+    if (!row.where.unlinked || pending.get(row.key)?.kind === 'approve') return `<div class="g-phones"><span class="pill p-muted">${icon('phone', 12)}${esc(labelOf(own))}</span></div>`;
+    const via = row.where.readThrough;
+    const button = via
+      ? `<button class="btn btn-ghost btn-sm" type="button" data-read-through="${esc(row.key)}" data-phone="${via}"${moving ? ' disabled' : ''}>Read through ${esc(labelOf(via))}</button>`
+      : '';
+    return `<div class="g-phones"><span class="pill p-warn">${icon('phone', 12)}${esc(labelOf(own))} · phone unlinked</span> ${button}</div>`;
+  }
+
+  /** Read through another phone: one edit, saved at once (the agent audits it). @param {string} key @param {number} to */
+  async function readThrough(key, to) {
+    if (moving) return;
+    moving = key;
+    drawLists();
+    try {
+      await post('/groups/apply', { edit: [{ key, phone: to }] });
+      toast(`Now read through ${labelOf(to)}.`);
+    } catch (e) {
+      if (ctx.live()) toast(e instanceof ApiError ? e.message : 'That did not work. Try again.');
+    } finally {
+      moving = null;
+    }
+    if (ctx.live()) await load();
+  }
+
   function drawFilter() {
+    const pf = $('#g-phonef', view);
+    if (!multi()) pf.innerHTML = '';
+    else {
+      const opts = (data?.phones ?? []).map((p) => `<option value="${p.id}"${phoneFilter === p.id ? ' selected' : ''}>${esc(p.label)}${p.unlinked ? ' (unlinked)' : ''}</option>`).join('');
+      pf.innerHTML = `<select class="sel" id="g-phone" aria-label="Show the groups of one phone"><option value="0">All phones</option>${opts}</select>`;
+    }
     const c = counts();
     const chip = (/** @type {string} */ id, /** @type {string} */ label, /** @type {number | undefined} */ n) =>
       `<button type="button" data-filter="${id}" class="${filter === id ? 'on' : ''}" aria-pressed="${filter === id}">${esc(label)}${n === undefined ? '' : ` <span class="mono">${n}</span>`}</button>`;
@@ -223,7 +289,13 @@ export function mountGroups(ctx, toolbar) {
   /** The rows to draw: the agent's answer for this search, with the filter applied to the unsaved state. */
   function rows() {
     if (!data) return [];
-    const r = data.rows.map((row) => known.get(row.key) ?? row);
+    // A tracked group by its phone, an untracked one by the phones in it (only with more than one phone).
+    const onPhone = (/** @type {GroupRow} */ row) => {
+      if (!phoneFilter || !multi()) return true;
+      const own = phoneOfRow(row);
+      return own === null ? (row.where?.seenBy ?? []).includes(phoneFilter) : own === phoneFilter;
+    };
+    const r = data.rows.map((row) => known.get(row.key) ?? row).filter(onPhone);
     if (filter === 'ignored') return r.filter((row) => row.ignored);
     const shown = r.filter((row) => !row.ignored);
     if (filter === 'approved') return shown.filter(isApproved);
@@ -265,7 +337,7 @@ export function mountGroups(ctx, toolbar) {
     const box = tick(row);
     return `<div class="grow g-row${box ? ' has-check' : ''}${selected.has(row.key) ? ' selected' : ''}${pending.has(row.key) ? ' changed' : ''}" draggable="true" data-key="${esc(row.key)}">
       ${box}<span class="g-handle" aria-hidden="true">${icon('drag', 16)}</span>
-      <div class="g-name">${on ? `<button type="button" class="link-btn t" data-edit="${esc(row.key)}" data-tip="Edit the client">${esc(shownName(row))}</button>` : `<div class="t">${esc(row.name)}</div>`}${subline(row)}</div>
+      <div class="g-name">${on ? `<button type="button" class="link-btn t" data-edit="${esc(row.key)}" data-tip="Edit the client">${esc(shownName(row))}</button>` : `<div class="t">${esc(row.name)}</div>`}${subline(row)}${phoneTag(row)}</div>
       <div class="g-act">${on && code ? `<span class="code">${esc(code)}</span>` : ''}${on
         ? `<button class="btn btn-ghost btn-sm" type="button" data-remove="${esc(row.key)}" aria-label="Stop tracking ${esc(shownName(row))}">Remove</button>`
         : `<button class="btn btn-ghost btn-sm" type="button" data-approve="${esc(row.key)}" aria-label="Approve ${esc(row.name)}">Approve</button>`}</div></div>`;
@@ -277,7 +349,7 @@ export function mountGroups(ctx, toolbar) {
     const code = shownCode(row);
     const box = tick(row);
     return `<div class="li g-row${selected.has(row.key) ? ' selected' : ''}${pending.has(row.key) ? ' changed' : ''}" data-key="${esc(row.key)}">${box ? `<div class="ic g-ic">${box}</div>` : `<div class="ic">${icon('bubble', 16)}</div>`}
-      <div class="g-name">${on ? `<button type="button" class="link-btn" data-edit="${esc(row.key)}"><b>${esc(shownName(row))}</b></button>` : `<b>${esc(row.name)}</b>`}${on && code ? `<small>${esc(code)} · tracked</small>` : ''}${subline(row)}</div>
+      <div class="g-name">${on ? `<button type="button" class="link-btn" data-edit="${esc(row.key)}"><b>${esc(shownName(row))}</b></button>` : `<b>${esc(row.name)}</b>`}${on && code ? `<small>${esc(code)} · tracked</small>` : ''}${subline(row)}${phoneTag(row)}</div>
       <button class="switch" type="button" role="switch" aria-checked="${on}" aria-label="Track ${esc(on ? shownName(row) : row.name)}" data-toggle="${esc(row.key)}"></button></div>`;
   }
 
@@ -518,6 +590,14 @@ export function mountGroups(ctx, toolbar) {
     /** The keywords being edited (the chips): saved into the change with Add client or Keep changes. */
     const words = [...startWords];
     const startDomains = change && change.kind !== 'unapprove' ? change.emailDomains : client?.emailDomains ?? [];
+    // More phones: a group being approved is read through one of the linked phones in it (the lowest, unless chosen).
+    const choices = !editing && multi() ? phoneChoices(row) : [];
+    const startPhone = change?.kind === 'approve' && change.phone && choices.includes(change.phone) ? change.phone : choices[0];
+    const phonePart = choices.length > 1
+      ? `<label class="h4 g-label" for="g-phone-pick">Read through</label>
+        <div class="field"><select class="sel grow-1" id="g-phone-pick">${choices.map((p) => `<option value="${p}"${p === startPhone ? ' selected' : ''}>${esc(labelOf(p))}</option>`).join('')}</select></div>
+        <p class="muted-note">The phone the agent reads this group through. Only linked phones in the group are listed.</p>`
+      : choices.length === 1 ? `<p class="muted-note">Read through ${esc(labelOf(choices[0] ?? 1))}.</p>` : '';
     const d = openDrawer(`<div class="dr-head"><div><span class="eyebrow">${editing ? 'Edit client' : 'Track this group'}</span><h2>${esc(row.name)}</h2></div>
         <button class="icon-btn" type="button" data-close aria-label="Close">${icon('close', 18)}</button></div>
       <form class="dr-body" id="g-form" novalidate>
@@ -529,6 +609,7 @@ export function mountGroups(ctx, toolbar) {
         <p class="muted-note" id="g-code-note">${locked || editing
           ? `${editing ? 'This client' : 'This group was a client before, so it'} keeps its code: every task number starts with it, like <b class="mono">${esc(startCode)}-001</b>.`
           : `3–4 capital letters. Every task number for this client starts with it, like <b class="mono" id="g-eg">${esc(startCode || 'SHA')}-001</b>. It can't be changed once the client has tasks.`}</p>
+        ${phonePart}
         <details${startWords.length || startDomains.length ? ' open' : ''}><summary class="g-more-toggle">More: meeting matching</summary>
           <label class="h4 g-label" for="g-words">Meeting keywords</label>
           ${keywordAdder({ input: 'id="g-words"', button: 'data-word-add', value: '', maxlength: 400, buttonLabel: 'Add meeting keyword', placeholder: 'dental website' })}
@@ -631,7 +712,9 @@ export function mountGroups(ctx, toolbar) {
         if (!CODE.test(c)) return showError('The code is 3 or 4 capital letters, like SHA.');
         const clash = locked ? undefined : codeOwner(c, row.key);
         if (clash) return showError(`${c} is already ${clash}. Choose another code.`);
-        pending.set(row.key, { kind: 'approve', name: n, code: c, emailDomains: domains, meetingKeywords: [...words] });
+        const pick = /** @type {HTMLSelectElement | null} */ (d.querySelector('#g-phone-pick'));
+        const phoneChoice = pick ? Number(pick.value) : startPhone;
+        pending.set(row.key, { kind: 'approve', name: n, code: c, emailDomains: domains, meetingKeywords: [...words], ...(phoneChoice ? { phone: phoneChoice } : {}) });
       }
       closeDrawer();
       draw();
@@ -655,7 +738,7 @@ export function mountGroups(ctx, toolbar) {
     /** @type {{ approve: object[], unapprove: string[], edit: object[] }} */
     const body = { approve: [], unapprove: [], edit: [] };
     for (const [key, c] of sent) {
-      if (c.kind === 'approve') body.approve.push({ key, name: c.name, code: c.code, emailDomains: c.emailDomains, meetingKeywords: c.meetingKeywords });
+      if (c.kind === 'approve') body.approve.push({ key, name: c.name, code: c.code, emailDomains: c.emailDomains, meetingKeywords: c.meetingKeywords, ...(c.phone ? { phone: c.phone } : {}) });
       else if (c.kind === 'unapprove') body.unapprove.push(key);
       else body.edit.push({ key, name: c.name, emailDomains: c.emailDomains, meetingKeywords: c.meetingKeywords });
     }
@@ -758,6 +841,23 @@ export function mountGroups(ctx, toolbar) {
     } else if (el.id === 'g-retry') void load();
   };
   view.addEventListener('click', onClick);
+  // More phones: Read through (one click, saved at once), and the phone filter.
+  /** @param {Event} e */
+  const onPhoneClick = (e) => {
+    const b = /** @type {HTMLElement | null} */ (/** @type {Element} */ (e.target).closest('[data-read-through]'));
+    if (b && view.contains(b) && !moving) void readThrough(b.dataset.readThrough ?? '', Number(b.dataset.phone));
+  };
+  /** @param {Event} e */
+  const onPhoneFilter = (e) => {
+    const s = /** @type {HTMLElement} */ (e.target);
+    if (s.id !== 'g-phone') return;
+    const v = Number(/** @type {HTMLSelectElement} */ (s).value);
+    phoneFilter = Number.isInteger(v) && v >= 1 && v <= 5 ? v : 0;
+    keepInAddress();
+    drawLists();
+  };
+  view.addEventListener('click', onPhoneClick);
+  view.addEventListener('change', onPhoneFilter);
 
   // Drag and drop between the boards (desktop). The buttons do the same for keyboards and screen readers. Dragging a
   // ticked group carries every ticked group: dropped on the right, they are approved together.
@@ -827,6 +927,8 @@ export function mountGroups(ctx, toolbar) {
     clearTimeout(searchTimer);
     for (const o of observers) o.disconnect();
     view.removeEventListener('click', onClick);
+    view.removeEventListener('click', onPhoneClick);
+    view.removeEventListener('change', onPhoneFilter);
     view.removeEventListener('dragstart', onDragStart);
     view.removeEventListener('dragend', onDragEnd);
     view.removeEventListener('dragover', onDragOver);
