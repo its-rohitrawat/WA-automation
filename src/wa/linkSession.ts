@@ -5,7 +5,7 @@ import type { Db } from '../store/db.ts';
 import { setKv } from '../store/kv.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
-import { backupAndReset, dropBackup, hasSessionRows, restoreBackup, useEncryptedAuthState, type EncryptedAuth } from './authState.ts';
+import { backupAndReset, dropBackup, hasSessionRows, phoneIdOf, restoreBackup, useEncryptedAuthState, type EncryptedAuth, type Phone } from './authState.ts';
 import { TRACKER_DEVICE_NAME, type GatewayLike } from './gateway.ts';
 import type { SwitchableGateway } from './switchableGateway.ts';
 
@@ -14,7 +14,8 @@ import type { SwitchableGateway } from './switchableGateway.ts';
 // audited or stored. A link that is cancelled, times out (5 minutes) or fails is undone by its driver: for the founder's
 // phone, the saved session comes back exactly as it was and WhatsApp reconnects as before.
 
-export type LinkTarget = 'founder' | 'spare';
+/** A reading phone (founder = phone 1, phone2 to phone5: lane C, change 7) or the spare phone. */
+export type LinkTarget = Phone;
 
 /** 'confirming' is the dashboard's own step before start(); the server goes from 'waiting_qr' on. */
 export type LinkState = 'idle' | 'confirming' | 'waiting_qr' | 'qr' | 'opening' | 'linked' | 'cancelled' | 'timed_out' | 'failed';
@@ -69,7 +70,9 @@ export class LinkBusyError extends Error {
 
 export type LinkAudit = (event: string, actor: string) => Promise<void>;
 
-const AUDIT: Record<LinkTarget, { linked: string; cancelled: string; timedOut: string; failed: (code: string) => string }> = {
+type AuditTexts = { linked: string; cancelled: string; timedOut: string; failed: (code: string) => string };
+
+const AUDIT: Record<'founder' | 'spare', AuditTexts> = {
   founder: {
     linked: "WhatsApp relinked · founder's phone",
     cancelled: 'WhatsApp relink cancelled',
@@ -84,6 +87,18 @@ const AUDIT: Record<LinkTarget, { linked: string; cancelled: string; timedOut: s
   },
 };
 
+/** The audit texts of a link: phone 1 (founder) and the spare as before; phones 2 to 5 by their number. */
+function auditTexts(target: LinkTarget): AuditTexts {
+  if (target === 'founder' || target === 'spare') return AUDIT[target];
+  const phone = `Phone ${phoneIdOf(target)}`;
+  return {
+    linked: `WhatsApp linked · ${phone}`,
+    cancelled: `WhatsApp link cancelled · ${phone}`,
+    timedOut: `WhatsApp link timed out · ${phone}`,
+    failed: (code) => `WhatsApp link failed · ${phone} (${code})`,
+  };
+}
+
 const TIMEOUT_MS = 5 * 60_000;
 const ENDED: ReadonlySet<LinkState> = new Set(['linked', 'cancelled', 'timed_out', 'failed']);
 
@@ -95,27 +110,39 @@ interface Running {
   done: Promise<void>;
 }
 
-/** The dashboard's phone links: at most one at a time, across both phones. */
+/**
+ * The dashboard's phone links: at most one at a time, across all the workspace's phones. The drivers are a fixed record,
+ * or a lookup when phones come and go while the service runs (lane C: phones 2 to 5).
+ */
 export class LinkSessions {
-  readonly #drivers: Partial<Record<LinkTarget, LinkDriver>>;
+  readonly #drivers: (target: LinkTarget) => LinkDriver | undefined;
   readonly #clock: Clock;
   readonly #log: Logger;
   readonly #audit: LinkAudit;
   readonly #timeoutMs: number;
   #current: Running | undefined;
 
-  constructor(o: { drivers: Partial<Record<LinkTarget, LinkDriver>>; log: Logger; audit: LinkAudit; clock?: Clock; timeoutMs?: number }) {
-    this.#drivers = o.drivers;
+  constructor(o: {
+    drivers: Partial<Record<LinkTarget, LinkDriver>> | ((target: LinkTarget) => LinkDriver | undefined);
+    log: Logger; audit: LinkAudit; clock?: Clock; timeoutMs?: number;
+  }) {
+    const drivers = o.drivers;
+    this.#drivers = typeof drivers === 'function' ? drivers : (t) => drivers[t];
     this.#log = o.log;
     this.#audit = o.audit;
     this.#clock = o.clock ?? systemClock;
     this.#timeoutMs = o.timeoutMs ?? TIMEOUT_MS;
   }
 
+  /** Whether this phone can be linked here (phones 2 to 5: only once added). */
+  has(target: LinkTarget): boolean {
+    return this.#drivers(target) !== undefined;
+  }
+
   /** Starts a link. Throws LinkBusyError while another one runs. */
   start(o: { target: LinkTarget; actor: string }): LinkInfo {
     if (this.#current && !ENDED.has(this.#current.info.state)) throw new LinkBusyError();
-    const driver = this.#drivers[o.target];
+    const driver = this.#drivers(o.target);
     if (!driver) throw new Error(`No ${o.target} link is available`);
     const info: LinkInfo = {
       id: randomBytes(16).toString('hex'), target: o.target, actor: o.actor, state: 'waiting_qr',
@@ -197,7 +224,7 @@ export class LinkSessions {
   #finish(run: Running, outcome: LinkOutcome): void {
     const { info } = run;
     const reason = run.abort.signal.aborted ? String(run.abort.signal.reason) : null;
-    const texts = AUDIT[info.target];
+    const texts = auditTexts(info.target);
     run.qr = null;
     info.endedAt = this.#now();
     if (outcome.ok) {
@@ -285,6 +312,13 @@ export interface FounderLinkDeps {
   clock?: Clock;
   /** How long to wait for the new gateway to stop when undoing. Default 5 s. */
   stopCapMs?: number;
+  /** The kv key recording when this phone's session was last reset: session_reset_at (phone 1), session_reset_at:phone<n>. */
+  resetKey?: string;
+  /**
+   * Checked once the new link is open, before it is kept: a refusal code (for example 'number_in_use', when the number
+   * is already another reading phone or the spare) undoes the link exactly as a cancel does. Never given the number to log.
+   */
+  refuse?: (number: string) => string | undefined;
 }
 
 const TERMINAL = new Set(['logged_out', 'forbidden', 'replaced']);
@@ -378,6 +412,16 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
           await restore(wasLinked);
           return outcome.ok ? { ok: false, code: 'aborted' } : outcome;
         }
+        // A number that is already another of the workspace's phones: undone before it is kept, as a cancel would be.
+        const number = await numberOf(async () => linkAuth);
+        const refused = number === undefined ? undefined : d.refuse?.(number);
+        if (refused !== undefined) {
+          undone = true;
+          if (gw) d.switchable.unfollow(gw);
+          await stopCapped(gw);
+          await restore(wasLinked);
+          return { ok: false, code: refused };
+        }
         // Committed from here: the new session is kept, whatever comes next.
         await dropBackup(d.sessionDb);
       } catch (err) {
@@ -396,7 +440,7 @@ export function founderLinkDriver(d: FounderLinkDeps): LinkDriver {
         d.log.error({ err }, 'the relinked gateway could not be handed over; it connects at the next start');
       }
       try {
-        await setKv(d.trackerDb, 'session_reset_at', clock.now().toISOString());
+        await setKv(d.trackerDb, d.resetKey ?? 'session_reset_at', clock.now().toISOString());
       } catch (err) {
         d.log.error({ err }, 'session_reset_at could not be recorded');
       }
